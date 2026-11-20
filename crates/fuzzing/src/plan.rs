@@ -98,18 +98,51 @@ fn check_chain(inventory: &Inventory, target: RestoreTarget, chain: &ContiguousC
             violation("a plan uses a file that is absent or ineligible for the target");
         }
     }
-    let furthest = inventory
-        .files()
-        .iter()
-        .filter(|info| eligible(info, target))
-        .map(|info| info.key.range().max())
-        .max();
+    let eligible_files = || {
+        inventory
+            .files()
+            .iter()
+            .filter(|info| eligible(info, target))
+    };
     let wanted = match target {
         RestoreTarget::Txid(wanted) => Some(wanted),
-        RestoreTarget::Latest | RestoreTarget::AsOf(_) => furthest,
+        RestoreTarget::Latest => eligible_files().map(|info| info.key.range().max()).max(),
+        // Ruling A1: an as-of plan ends where the eligible chain can reach, and an
+        // eligible file that does not connect is not a reason to stop earlier.
+        RestoreTarget::AsOf(_) => furthest_reach(eligible_files().map(|info| info.key)),
     };
     if Some(reach) != wanted {
         violation("a plan does not end exactly where the target says");
+    }
+}
+
+/// The furthest transaction a chain over `files` can end at: bases start at
+/// transaction 1 and each later file below level 9 must touch the end so far.
+fn furthest_reach(files: impl Iterator<Item = FileKey>) -> Option<Txid> {
+    let files: Vec<FileKey> = files.collect();
+    let mut reach = files
+        .iter()
+        .filter(|key| key.range().min().get() == 1)
+        .map(|key| key.range().max())
+        .max()?;
+    loop {
+        let Some(next) = files
+            .iter()
+            .filter(|key| key.level().get() < 9)
+            .filter(|key| {
+                reach
+                    .next()
+                    .is_none_or(|one_past| key.range().min() <= one_past)
+            })
+            .map(|key| key.range().max())
+            .max()
+        else {
+            return Some(reach);
+        };
+        if next <= reach {
+            return Some(reach);
+        }
+        reach = next;
     }
 }
 
