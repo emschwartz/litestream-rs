@@ -8,6 +8,7 @@ use proptest::prelude::*;
 
 use super::*;
 use crate::layout::{FileKey, Level};
+use crate::store::StoreOp;
 use lsr_ltx::{Txid, TxidRange};
 
 fn ps() -> PageSize {
@@ -186,11 +187,11 @@ fn every_fault_has_a_named_policy_test() {
 }
 
 fn store_fault(err: &StoreError) -> Fault {
-    Fault::from_store(StoreOp::Read, err)
+    Fault::from_remote(err)
 }
 
 #[test]
-fn from_store_transient() {
+fn from_remote_transient() {
     let err = StoreError::Transient {
         op: StoreOp::Read,
         kind: ErrorKind::TimedOut,
@@ -199,7 +200,7 @@ fn from_store_transient() {
 }
 
 #[test]
-fn from_store_throttled_keeps_a_named_wait() {
+fn from_remote_throttled_keeps_a_named_wait() {
     let err = StoreError::Throttled {
         op: StoreOp::List,
         retry_after: Some(Duration::from_secs(3)),
@@ -213,7 +214,7 @@ fn from_store_throttled_keeps_a_named_wait() {
 }
 
 #[test]
-fn from_store_throttled_without_or_with_a_zero_wait_names_none() {
+fn from_remote_throttled_without_or_with_a_zero_wait_names_none() {
     for retry_after in [None, Some(Duration::ZERO)] {
         let err = StoreError::Throttled {
             op: StoreOp::List,
@@ -227,7 +228,7 @@ fn from_store_throttled_without_or_with_a_zero_wait_names_none() {
 }
 
 #[test]
-fn from_store_auth() {
+fn from_remote_auth() {
     assert_eq!(
         store_fault(&StoreError::Auth {
             op: StoreOp::Upload
@@ -237,20 +238,80 @@ fn from_store_auth() {
 }
 
 #[test]
-fn from_store_not_found_on_any_op_is_missing() {
-    for op in [
-        StoreOp::List,
-        StoreOp::Read,
-        StoreOp::Upload,
-        StoreOp::Delete,
-    ] {
-        let err = StoreError::NotFound { key: key() };
-        assert_eq!(Fault::from_store(op, &err), Fault::RemoteObjectMissing);
+fn from_remote_not_found_is_missing() {
+    let err = StoreError::NotFound { key: key() };
+    assert_eq!(store_fault(&err), Fault::RemoteObjectMissing);
+}
+
+#[test]
+fn from_staging_names_the_local_fault_for_every_store_error() {
+    let corrupt = |cause| StoreError::Corrupt {
+        key: Some(key()),
+        cause,
+    };
+    let mismatch = |removed| CorruptCause::CommitSizeMismatch {
+        wrote: 10,
+        stored: 9,
+        removed,
+    };
+    let cases = [
+        (
+            StoreError::Transient {
+                op: StoreOp::Upload,
+                kind: ErrorKind::TimedOut,
+            },
+            Fault::LocalIo,
+        ),
+        (
+            StoreError::Throttled {
+                op: StoreOp::List,
+                retry_after: Some(Duration::from_secs(3)),
+            },
+            Fault::LocalIo,
+        ),
+        (StoreError::Auth { op: StoreOp::Read }, Fault::LocalIo),
+        (StoreError::NotFound { key: key() }, Fault::StagedLost),
+        (
+            StoreError::ScratchExhausted { key: key() },
+            Fault::LocalDiskFull,
+        ),
+        (corrupt(mismatch(true)), Fault::LocalFsyncFailed),
+        (corrupt(mismatch(false)), Fault::LocalFsyncFailed),
+        (corrupt(CorruptCause::NotARegularFile), Fault::StagedCorrupt),
+        (
+            corrupt(CorruptCause::TimestampOutOfRange),
+            Fault::StagedCorrupt,
+        ),
+    ];
+    for (err, want) in cases {
+        assert_eq!(Fault::from_staging(&err), want, "{err}");
     }
 }
 
 #[test]
-fn from_store_scratch_exhausted_is_local_disk_full() {
+fn no_staging_error_is_blamed_on_the_replica() {
+    let remote_only = [
+        Fault::StoreTransient,
+        Fault::StoreAuth,
+        Fault::RemoteObjectMissing,
+        Fault::UploadAmbiguous,
+        Fault::RemoteCorrupt,
+    ];
+    let errs = [
+        StoreError::Auth { op: StoreOp::Read },
+        StoreError::NotFound { key: key() },
+        StoreError::Corrupt {
+            key: None,
+            cause: CorruptCause::NotARegularFile,
+        },
+    ];
+    for err in errs {
+        assert!(!remote_only.contains(&Fault::from_staging(&err)), "{err}");
+    }
+}
+
+#[test]
+fn from_remote_scratch_exhausted_is_local_disk_full() {
     assert_eq!(
         store_fault(&StoreError::ScratchExhausted { key: key() }),
         Fault::LocalDiskFull
@@ -258,7 +319,7 @@ fn from_store_scratch_exhausted_is_local_disk_full() {
 }
 
 #[test]
-fn from_store_commit_size_mismatch_is_upload_ambiguous() {
+fn from_remote_commit_size_mismatch_is_upload_ambiguous() {
     for removed in [true, false] {
         let err = StoreError::Corrupt {
             key: Some(key()),
@@ -273,7 +334,7 @@ fn from_store_commit_size_mismatch_is_upload_ambiguous() {
 }
 
 #[test]
-fn from_store_any_other_corrupt_is_remote_corrupt() {
+fn from_remote_any_other_corrupt_is_remote_corrupt() {
     for cause in [
         CorruptCause::NotARegularFile,
         CorruptCause::TimestampOutOfRange,

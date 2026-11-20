@@ -20,9 +20,8 @@ use std::time::Duration;
 use lsr_ltx::{Timestamp, Txid};
 use lsr_wal::{PageMapError, ReadPageError, ResumeError, WalError, WalOffset};
 
-use crate::retry::{Class, classify};
 use crate::source::SourceError;
-use crate::store::{CorruptCause, StoreError, StoreOp};
+use crate::store::{CorruptCause, StoreError};
 
 /// The longest a retry waits (Go `DefaultSyncBackoffMax`).
 pub const MAX_BACKOFF: Duration = Duration::from_secs(5 * 60);
@@ -215,31 +214,49 @@ pub fn retry_wait(attempt: NonZeroU32, interval: Duration) -> Duration {
 }
 
 impl Fault {
-    /// A store error met during `op`, sorted by [`classify`].
+    /// An error from the replica's store.
     ///
-    /// `NotFound` is `RemoteObjectMissing` for every operation: the answer is
-    /// the same (list again, trust the listing).
+    /// `NotFound` is `RemoteObjectMissing` whatever was being done: the answer
+    /// is the same (list again, trust the listing).
     #[must_use]
-    pub fn from_store(_op: StoreOp, err: &StoreError) -> Self {
-        match (classify(err), err) {
-            (Class::Retry, StoreError::Throttled { .. }) => {
-                Self::StoreThrottled { retry_after: None }
-            }
-            (Class::RetryAfter(wait), _) => Self::StoreThrottled {
-                retry_after: Some(wait),
+    pub fn from_remote(err: &StoreError) -> Self {
+        match err {
+            StoreError::Transient { .. } => Self::StoreTransient,
+            StoreError::Throttled { retry_after, .. } => Self::StoreThrottled {
+                retry_after: retry_after.filter(|wait| !wait.is_zero()),
             },
-            (Class::Retry, _) => Self::StoreTransient,
-            (Class::Missing, _) => Self::RemoteObjectMissing,
-            (Class::Permanent, StoreError::Auth { .. }) => Self::StoreAuth,
-            (Class::Permanent, StoreError::ScratchExhausted { .. }) => Self::LocalDiskFull,
-            (
-                Class::Permanent,
-                StoreError::Corrupt {
-                    cause: CorruptCause::CommitSizeMismatch { .. },
-                    ..
-                },
-            ) => Self::UploadAmbiguous,
-            (Class::Permanent, _) => Self::RemoteCorrupt,
+            StoreError::Auth { .. } => Self::StoreAuth,
+            StoreError::NotFound { .. } => Self::RemoteObjectMissing,
+            StoreError::ScratchExhausted { .. } => Self::LocalDiskFull,
+            StoreError::Corrupt { cause, .. } => match cause {
+                CorruptCause::CommitSizeMismatch { .. } => Self::UploadAmbiguous,
+                CorruptCause::NotARegularFile | CorruptCause::TimestampOutOfRange => {
+                    Self::RemoteCorrupt
+                }
+            },
+        }
+    }
+
+    /// An error from the staging store, a local directory nothing else writes.
+    ///
+    /// The same error means something else here. A missing staged file is a
+    /// halt, not a relist. A write whose stored size differs is the torn write
+    /// to encode again. A permission error retries, so an operator can fix the
+    /// directory without a restart.
+    #[must_use]
+    pub const fn from_staging(err: &StoreError) -> Self {
+        match err {
+            StoreError::Transient { .. }
+            | StoreError::Throttled { .. }
+            | StoreError::Auth { .. } => Self::LocalIo,
+            StoreError::NotFound { .. } => Self::StagedLost,
+            StoreError::ScratchExhausted { .. } => Self::LocalDiskFull,
+            StoreError::Corrupt { cause, .. } => match cause {
+                CorruptCause::CommitSizeMismatch { .. } => Self::LocalFsyncFailed,
+                CorruptCause::NotARegularFile | CorruptCause::TimestampOutOfRange => {
+                    Self::StagedCorrupt
+                }
+            },
         }
     }
 
