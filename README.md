@@ -8,4 +8,3 @@ The contract is the replica, not Litestream's behaviour: this library reads what
 
 - Plan, design goals and phases: `docs/PLAN.md`
 - Rules for working in this repository: `AGENTS.md`
-- Research notes the plan rests on: `docs/research/`
