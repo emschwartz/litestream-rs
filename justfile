@@ -150,3 +150,10 @@ tigris-restore:
 # Pinned upstream sources, read-only reference for the port and input to the compat harness.
 upstream:
     ./scripts/fetch-upstream.sh
+
+# Regenerate the upstream-test ledger's inputs in docs/ledger/: the upstream test names from
+# the pinned clones (`just upstream` first) and every Rust test nextest lists, ignored ones
+# included. The ledger test in `check` reads these files, never the clone or the build.
+ledger:
+    ./scripts/upstream-tests.sh > docs/ledger/upstream-tests.txt
+    cargo nextest list --workspace --all-features --locked --run-ignored all --message-format oneline > docs/ledger/rust-tests.txt
