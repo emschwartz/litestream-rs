@@ -26,6 +26,8 @@ struct State {
     objects: BTreeMap<FileKey, Object>,
     foreign: BTreeMap<Level, BTreeSet<String>>,
     faults: VecDeque<(StoreOp, StoreError)>,
+    /// Errors for commits that publish first and then fail.
+    late_commit_faults: VecDeque<StoreError>,
 }
 
 impl State {
@@ -72,6 +74,12 @@ impl MemStore {
     /// Makes the next call of `op` fail with `err`.
     pub fn inject_failure(&self, op: StoreOp, err: StoreError) {
         self.lock().faults.push_back((op, err));
+    }
+
+    /// Makes the next commit publish its object and then return `err`, as a
+    /// backend does when the acknowledgement is lost after the write landed.
+    pub fn inject_failure_after_publish(&self, err: StoreError) {
+        self.lock().late_commit_faults.push_back(err);
     }
 
     fn list_now(
@@ -185,7 +193,7 @@ impl Upload for MemUpload {
 
     fn commit(self) -> impl Future<Output = Result<FileInfo, StoreError>> + Send {
         let mut state = self.store.lock();
-        let result = state.take_fault(StoreOp::Upload).map(|()| {
+        let published = state.take_fault(StoreOp::Upload).map(|()| {
             let size = u64::try_from(self.buf.len()).unwrap_or(u64::MAX);
             state.objects.insert(
                 self.key,
@@ -200,6 +208,10 @@ impl Upload for MemUpload {
                 created_at: self.created_at,
             }
         });
+        let result = match (published, state.late_commit_faults.pop_front()) {
+            (Ok(_), Some(err)) => Err(err),
+            (outcome, _) => outcome,
+        };
         std::future::ready(result)
     }
 
@@ -238,6 +250,28 @@ mod tests {
         assert_eq!(second.map(|l| l.files.len()), Ok(0));
         let read = conformance::block_on(store.read(&key(), 0, ReadLen::new(1).unwrap()));
         assert_eq!(read, Err(StoreError::Auth { op: StoreOp::Read }));
+    }
+
+    #[test]
+    fn a_commit_that_fails_late_has_already_published() {
+        let store = MemStore::new();
+        store.inject_failure_after_publish(StoreError::Transient {
+            op: StoreOp::Upload,
+            kind: std::io::ErrorKind::TimedOut,
+        });
+        conformance::block_on(async {
+            let mut up = store
+                .begin_upload(&key(), Timestamp::from_unix_millis(1))
+                .await
+                .unwrap();
+            up.write(b"x").await.unwrap();
+            up.commit().await.unwrap_err();
+            let page = store
+                .list(Level::ZERO, None, PageLimit::new(5).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(page.files.len(), 1);
+        });
     }
 
     #[test]

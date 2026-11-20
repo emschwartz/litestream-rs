@@ -10,7 +10,8 @@
 //! Go's own parser accepts a zero transaction id and a reversed range; this
 //! one does not, because [`Txid`] cannot hold zero and [`TxidRange`] cannot be
 //! reversed. A name Go would list but this cannot represent is a foreign name
-//! to the stores: skipped and counted, never half-understood.
+//! to the stores: skipped and counted, never half-understood. A store's own
+//! scratch file ([`is_scratch_name`]) is neither an object nor foreign.
 
 use std::cmp::Ordering;
 use std::fmt;
@@ -161,6 +162,24 @@ pub fn parse_file_name(name: &str) -> Result<TxidRange, ParseKeyError> {
     TxidRange::new(min, max).ok_or(ParseKeyError::Reversed)
 }
 
+/// The length of every file name: two sixteen-digit ids, a dash and `.ltx`.
+const FILE_NAME_LEN: usize = 37;
+
+/// Whether a name is a store's scratch file for an upload: a key's file name
+/// followed by nothing (Go writes `<name>.ltx.tmp`) or by a dot and anything
+/// (`<name>.ltx.<unique>.tmp`), then `.tmp`. A scratch file is a store's own
+/// bookkeeping, not a foreign name, and never an object.
+#[must_use]
+pub fn is_scratch_name(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".tmp") else {
+        return false;
+    };
+    let (Some(key), Some(rest)) = (stem.get(..FILE_NAME_LEN), stem.get(FILE_NAME_LEN..)) else {
+        return false;
+    };
+    parse_file_name(key).is_ok() && (rest.is_empty() || rest.starts_with('.'))
+}
+
 /// The file name for a range: `<min>-<max>.ltx`.
 #[must_use]
 pub fn file_name(range: TxidRange) -> String {
@@ -273,6 +292,30 @@ mod tests {
 
     fn range(min: u64, max: u64) -> TxidRange {
         TxidRange::new(Txid::new(min).unwrap(), Txid::new(max).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn scratch_names_are_a_key_name_plus_tmp() {
+        let name = file_name(range(3, 9));
+        assert_eq!(name.len(), FILE_NAME_LEN);
+        for scratch in [
+            format!("{name}.tmp"),
+            format!("{name}.1-0.tmp"),
+            format!("{name}.4242-17.tmp"),
+        ] {
+            assert!(is_scratch_name(&scratch), "{scratch}");
+            assert!(parse_file_name(&scratch).is_err(), "{scratch}");
+        }
+        for other in [
+            name.clone(),
+            format!("{name}.bak"),
+            format!("{name}x.tmp"),
+            ".tmp".to_owned(),
+            "README.tmp".to_owned(),
+            "0000000000000002-0000000000000001.ltx.tmp".to_owned(),
+        ] {
+            assert!(!is_scratch_name(&other), "{other}");
+        }
     }
 
     #[test]

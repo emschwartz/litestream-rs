@@ -9,9 +9,13 @@
 //!   is an error, never a shorter listing.
 //! - A read returns at most the bytes asked for and is short only at the end of
 //!   the object.
-//! - An upload is invisible until `commit` returns and whole afterwards.
+//! - An upload is invisible until `commit` is called and whole afterwards.
 //!   Dropping an [`Upload`] does no I/O and publishes nothing; the store may be
 //!   left holding scratch data that no listing or read can see.
+//! - When `commit` returns an error the object may or may not be visible: a
+//!   response can be lost after the write landed, on S3 as on a disk whose
+//!   directory sync failed after the rename. The caller's only safe move is to
+//!   list again and trust the listing.
 //! - Retrying is the caller's decision, made from the [`StoreError`] variant.
 
 use std::fmt;
@@ -23,7 +27,7 @@ use std::time::Duration;
 use lsr_ltx::{Timestamp, TxidRange};
 use thiserror::Error;
 
-use crate::layout::{FileInfo, FileKey, Level, cmp_range, file_name};
+use crate::layout::{FileInfo, FileKey, Level, cmp_range, file_name, is_scratch_name};
 
 /// How many entries one listing page may hold: 1 to 1000, S3's own cap, so
 /// every backend can return exactly the page asked for.
@@ -106,7 +110,8 @@ impl Listing {
 /// Stores that can enumerate a whole level (a directory, a map) call this so
 /// the paging and foreign-name rules live in one place. Foreign names are
 /// ordered against key names byte-wise, which is key order because the
-/// transaction ids are fixed-width.
+/// transaction ids are fixed-width. A scratch name ([`is_scratch_name`]) in
+/// `foreign` is dropped: it is not foreign.
 #[must_use]
 pub fn build_listing(
     mut files: Vec<FileInfo>,
@@ -127,6 +132,7 @@ pub fn build_listing(
     let upper = next.map(file_name);
     let skipped = foreign
         .iter()
+        .filter(|name| !is_scratch_name(name))
         .filter(|name| {
             let above = lower
                 .as_ref()
@@ -211,6 +217,14 @@ pub enum StoreError {
         /// The key that was asked for.
         key: FileKey,
     },
+    /// Every scratch name for this key is taken, so an upload cannot start.
+    /// Leftovers of crashed uploads fill them; nothing removes them
+    /// automatically, so an operator clears the key's scratch files.
+    #[error("no free scratch name for object {key}")]
+    ScratchExhausted {
+        /// The key being uploaded.
+        key: FileKey,
+    },
     /// The object exists but its stored form is unusable.
     #[error("object is corrupt: {cause}")]
     Corrupt {
@@ -277,7 +291,8 @@ pub trait Upload: Send {
     fn write(&mut self, chunk: &[u8]) -> impl Future<Output = Result<(), StoreError>> + Send;
 
     /// Publishes the object, replacing any object under the key. The object is
-    /// whole and durable once this returns.
+    /// whole and durable once this returns `Ok`. After an `Err` the object may
+    /// or may not be visible (see the module docs): list again.
     fn commit(self) -> impl Future<Output = Result<FileInfo, StoreError>> + Send;
 
     /// Discards the written bytes; a prior object under the key is untouched.
@@ -354,8 +369,20 @@ mod tests {
     }
 
     #[test]
+    fn scratch_names_are_not_counted_as_foreign() {
+        let foreign: Vec<String> = [
+            "0000000000000003-0000000000000003.ltx.tmp",
+            "0000000000000003-0000000000000003.ltx.1-0.tmp",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        let listing = build_listing(vec![info(1, 1)], &foreign, None, PageLimit::MAX);
+        assert_eq!(listing.skipped, 0);
+    }
+
+    #[test]
     fn foreign_names_are_counted_in_the_span_they_sort_into() {
-        let foreign: Vec<String> = ["0", "0000000000000003-0000000000000003.ltx.tmp", "zz"]
+        let foreign: Vec<String> = ["0", "0000000000000003-0000000000000003.ltx.bak", "zz"]
             .map(str::to_owned)
             .to_vec();
         let files = vec![info(1, 1), info(5, 5)];

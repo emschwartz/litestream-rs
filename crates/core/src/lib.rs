@@ -16,7 +16,8 @@ mod store;
 
 pub use inventory::{Inventory, InventoryError, is_snapshot_start};
 pub use layout::{
-    FileInfo, FileKey, Level, ParseKeyError, RangeSide, cmp_range, file_name, parse_file_name,
+    FileInfo, FileKey, Level, ParseKeyError, RangeSide, cmp_range, file_name, is_scratch_name,
+    parse_file_name,
 };
 pub use mem::{MemStore, MemUpload};
 pub use plan::{ContiguousChain, PlanOutcome, RestoreTarget, plan};

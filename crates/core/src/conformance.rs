@@ -17,7 +17,7 @@ use std::thread::{self, Thread};
 use lsr_ltx::{Timestamp, Txid, TxidRange};
 
 use crate::layout::{FileInfo, FileKey, Level};
-use crate::store::{ObjectStore, PageLimit, ReadLen, StoreError, Upload};
+use crate::store::{ObjectStore, PageLimit, ReadLen, StoreError, StoreOp, Upload};
 
 /// Why a conformance case failed.
 #[derive(Debug)]
@@ -90,6 +90,14 @@ pub trait Harness {
     /// # Errors
     /// Whatever stops the backend from planting it.
     fn plant_foreign(&self, level: Level, name: &str) -> Check;
+
+    /// Arranges for the next commit to publish its object and then fail with a
+    /// transient error, as a lost acknowledgement does. Returns `false` when
+    /// the backend cannot be made to; the case that needs it then passes
+    /// without checking anything.
+    fn fail_next_commit_after_publish(&self) -> bool {
+        false
+    }
 }
 
 /// The harness for [`MemStore`](crate::MemStore).
@@ -106,6 +114,14 @@ impl Harness for MemHarness {
     fn plant_foreign(&self, level: Level, name: &str) -> Check {
         self.0.plant_foreign(level, name);
         Ok(())
+    }
+
+    fn fail_next_commit_after_publish(&self) -> bool {
+        self.0.inject_failure_after_publish(StoreError::Transient {
+            op: StoreOp::Upload,
+            kind: std::io::ErrorKind::TimedOut,
+        });
+        true
     }
 }
 
@@ -305,7 +321,7 @@ pub async fn foreign_names_are_skipped_and_counted<H: Harness>(h: &H) -> Check {
         "README",
         "0000000000000002-0000000000000001.ltx",
         "000000000000000A-000000000000000A.ltx",
-        "0000000000000003-0000000000000003.ltx.tmp",
+        "0000000000000003-0000000000000003.ltx.bak",
         "zzzz",
     ];
     for name in foreign {
@@ -323,6 +339,57 @@ pub async fn foreign_names_are_skipped_and_counted<H: Harness>(h: &H) -> Check {
             format!("skipped at limit {page}")
         );
     }
+    Ok(())
+}
+
+/// A store's scratch files (Go's `<name>.ltx.tmp` and any
+/// `<name>.ltx.<unique>.tmp`) are not foreign names, whether they are planted
+/// or left by a dropped upload.
+///
+/// # Errors
+/// A [`Failure`] naming the rule that broke.
+pub async fn scratch_names_are_not_foreign<H: Harness>(h: &H) -> Check {
+    let store = h.store();
+    let target = key(0, 1, 1)?;
+    let name = format!("{}.tmp", target.file_name());
+    h.plant_foreign(target.level(), &name)?;
+    let mut upload = store.begin_upload(&target, at(STAMP)).await?;
+    upload.write(b"half").await?;
+    drop(upload);
+    let got = page_through(store, target.level(), 10, None).await?;
+    ensure_eq!(got.keys.len(), 0, "files listed beside scratch");
+    ensure_eq!(got.skipped, 0, "scratch counted as foreign");
+    Ok(())
+}
+
+/// After a commit error the listing is the truth: an object that was published
+/// before the error is listed and readable, and the two agree.
+///
+/// # Errors
+/// A [`Failure`] naming the rule that broke.
+pub async fn commit_error_may_leave_the_object_visible<H: Harness>(h: &H) -> Check {
+    if !h.fail_next_commit_after_publish() {
+        return Ok(());
+    }
+    let store = h.store();
+    let target = key(0, 1, 1)?;
+    let mut upload = store.begin_upload(&target, at(STAMP)).await?;
+    upload.write(b"landed").await?;
+    ensure!(
+        upload.commit().await.is_err(),
+        "the injected commit failure"
+    );
+    let listed = store.list(target.level(), None, limit(10)?).await?.files;
+    ensure_eq!(
+        listed.iter().map(|f| f.key).collect::<Vec<_>>(),
+        [target],
+        "listing after a commit that failed late"
+    );
+    ensure_eq!(
+        read_all(store, &target).await?,
+        b"landed".to_vec(),
+        "read agrees with the listing"
+    );
     Ok(())
 }
 
@@ -414,7 +481,7 @@ pub async fn read_spans_the_end<H: Harness>(h: &H) -> Check {
     let store = h.store();
     let target = key(0, 1, 1)?;
     put(store, target, b"0123456789").await?;
-    let cases: [(u64, u32, &[u8]); 7] = [
+    let cases: [(u64, u32, &[u8]); 9] = [
         (0, 10, b"0123456789"),
         (0, 11, b"0123456789"),
         (3, 4, b"3456"),
@@ -422,6 +489,8 @@ pub async fn read_spans_the_end<H: Harness>(h: &H) -> Check {
         (9, 1, b"9"),
         (10, 5, b""),
         (1000, 5, b""),
+        (1 << 63, 5, b""),
+        (u64::MAX, 5, b""),
     ];
     for (offset, len, want) in cases {
         let got = store.read(&target, offset, read_len(len)?).await?;
@@ -549,6 +618,8 @@ macro_rules! conformance_suite {
             cursor_is_exclusive,
             levels_are_separate,
             foreign_names_are_skipped_and_counted,
+            scratch_names_are_not_foreign,
+            commit_error_may_leave_the_object_visible,
             abort_publishes_nothing,
             pending_and_dropped_uploads_are_invisible,
             read_spans_the_end,
