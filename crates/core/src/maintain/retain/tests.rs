@@ -868,6 +868,10 @@ fn build(data: &[u8], weird: bool) -> Listing {
     };
     if weird {
         roughen(&mut b, &mut listing, n, &stamp);
+        // A store lists a key once; a roughened stamp on one copy of a key
+        // pushed twice is not a listing.
+        let mut seen = BTreeSet::new();
+        listing.files.retain(|f| seen.insert(f.key));
     }
     listing
 }
