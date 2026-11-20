@@ -43,6 +43,24 @@ fuzz-cmin target:
 fuzz-seed:
     cargo nextest run -p lsr-fuzzing --test seed --run-ignored only --locked
 
+# A throwaway MinIO in Docker for the S3 conformance suite (skips when Docker is down).
+minio-up:
+    ./scripts/minio.sh up
+
+minio-down:
+    ./scripts/minio.sh down
+
+# The S3 store against a real server; not part of check, which never needs Docker.
+test-s3: minio-up
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ./scripts/minio.sh running; then
+        LSR_MINIO_ENDPOINT="http://127.0.0.1:${LSR_MINIO_PORT:-9000}" \
+            cargo nextest run -p lsr-store-s3 --test minio --locked --no-fail-fast
+    else
+        echo "test-s3: MinIO is not running; S3 tests skipped"
+    fi
+
 # Pinned upstream sources, read-only reference for the port and input to the compat harness.
 upstream:
     ./scripts/fetch-upstream.sh
