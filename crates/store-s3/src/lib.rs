@@ -6,6 +6,10 @@
 mod classify;
 mod config;
 mod credentials;
+#[cfg(feature = "testing")]
+mod fake;
+#[cfg(feature = "testing")]
+mod fault;
 mod request;
 mod response;
 #[cfg(test)]
@@ -18,6 +22,10 @@ pub use config::{
     S3Config, UrlStyle,
 };
 pub use credentials::{S3Credentials, SecretString};
+#[cfg(feature = "testing")]
+pub use fake::FakeS3;
+#[cfg(feature = "testing")]
+pub use fault::{Fault, FaultTransport, RequestShape, Shape};
 pub use request::{
     HttpRequest, MAX_DELETE_KEYS, Method, RequestBuilder, RequestError, UploadId, level_prefix,
     object_key, range_header, start_after,

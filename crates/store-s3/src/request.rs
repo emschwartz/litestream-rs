@@ -28,6 +28,9 @@ use url::Url;
 use crate::config::{ConfigError, Prefix, Provider, S3Config};
 use crate::credentials::S3Credentials;
 
+#[cfg(feature = "testing")]
+mod tamper;
+
 /// How long a presigned URL stays valid.
 const EXPIRES_IN: Duration = Duration::from_secs(300);
 

@@ -7,6 +7,10 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# The in-memory S3 (FakeS3), the recorded-fault layer and test-only request edits.
+testing = []
+
 [dependencies]
 lsr-core = { path = "../core" }
 lsr-ltx = { path = "../ltx" }
@@ -21,6 +25,8 @@ zeroize = "1"
 
 [dev-dependencies]
 lsr-core = { path = "../core", features = ["testing"] }
+# Integration tests need FakeS3 and the fault layer, which sit behind the feature.
+lsr-store-s3 = { path = ".", features = ["testing"] }
 proptest = "1"
 
 [lints]

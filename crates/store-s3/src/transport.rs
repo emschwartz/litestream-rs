@@ -15,9 +15,10 @@ use crate::request::HttpRequest;
 #[derive(Clone, PartialEq, Eq)]
 pub struct HttpResponse {
     status: u16,
-    headers: Vec<(String, String)>,
-    body: Vec<u8>,
-    body_complete: bool,
+    // The fault layer rewrites a response it forwarded.
+    pub(crate) headers: Vec<(String, String)>,
+    pub(crate) body: Vec<u8>,
+    pub(crate) body_complete: bool,
 }
 
 impl HttpResponse {

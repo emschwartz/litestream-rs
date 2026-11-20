@@ -610,6 +610,7 @@ dependencies = [
  "jiff",
  "lsr-core",
  "lsr-ltx",
+ "lsr-store-s3",
  "md-5",
  "percent-encoding",
  "proptest",
