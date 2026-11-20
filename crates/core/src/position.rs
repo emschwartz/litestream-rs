@@ -171,13 +171,6 @@ pub struct Position {
 
 impl Position {
     /// Only the sync step, `recover` and the checkpoint protocol build positions.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "first caller is task 4b's recover; remove this then"
-        )
-    )]
     pub(crate) const fn new(
         txid: Txid,
         cursor: FrameCursor,
@@ -198,13 +191,6 @@ impl Position {
 
     /// The same position with its continuity replaced.
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "first caller is task 4b's sync step; remove this then"
-        )
-    )]
     pub(crate) const fn with_continuity(self, continuity: Continuity) -> Self {
         Self { continuity, ..self }
     }
@@ -268,13 +254,6 @@ pub struct SyncedThrough(Position);
 
 impl SyncedThrough {
     /// Only the sync step proves it.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "first caller is task 4b's sync step; remove this then"
-        )
-    )]
     pub(crate) const fn new(position: Position) -> Self {
         Self(position)
     }

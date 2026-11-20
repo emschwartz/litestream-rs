@@ -17,11 +17,13 @@ mod maintain;
 mod mem;
 mod plan;
 mod position;
+mod recover;
 mod restore;
 mod retry;
 mod source;
 mod store;
 mod upload;
+mod sync;
 mod verify;
 
 pub use compact::{
@@ -49,6 +51,10 @@ pub use plan::{ContiguousChain, PlanOutcome, RestoreTarget, plan};
 pub use position::{
     Continuity, LastPage, Position, ReadEpoch, SyncedOffset, SyncedThrough, WalFileLen,
 };
+pub use recover::{
+    FrameCheck, LastPageCheck, Miss, Probes, RecoverEvent, Recovered, Tip, TipView, Verdict,
+    WalView, recover, recover_traced,
+};
 #[cfg(any(test, feature = "testing"))]
 pub use restore::{Database, MemSink};
 pub use restore::{
@@ -70,6 +76,10 @@ pub use store::{
 pub use upload::{
     Did, Ticked, UploadConfig, UploadFailed, UploadPlan, UploadState, Uploaded, plan_upload,
     upload_next, upload_tick,
+};
+pub use sync::{
+    PageFrom, Step, StepEnd, StepFailed, SyncConfig, Synced, clamp, header_fields, plan_pages,
+    sync_step,
 };
 pub use verify::{
     Depth, Finding, LevelSummary, MAX_FINDINGS, Report, Severity, VerifyError, verify,

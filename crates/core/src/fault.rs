@@ -95,7 +95,7 @@ pub enum Fault {
 /// Why a snapshot is taken instead of continuing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SnapshotCause {
-    /// There is no local position and the replica is empty.
+    /// There is no local position.
     FirstSync,
     /// At boot the replica is ahead of the local position; `local` is ours.
     BehindRemote {

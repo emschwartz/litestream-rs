@@ -543,6 +543,7 @@ dependencies = [
  "lsr-local",
  "lsr-ltx",
  "lsr-store-fs",
+ "lsr-wal",
  "rusqlite",
  "serde",
  "serde_json",
@@ -558,6 +559,8 @@ dependencies = [
  "lsr-ltx",
  "lsr-wal",
  "proptest",
+ "rusqlite",
+ "tempfile",
  "thiserror",
 ]
 

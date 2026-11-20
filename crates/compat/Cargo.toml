@@ -25,3 +25,4 @@ thiserror = "2"
 [dev-dependencies]
 lsr-core = { path = "../core", features = ["testing"] }
 lsr-store-fs = { path = "../store-fs" }
+lsr-wal = { path = "../wal" }
