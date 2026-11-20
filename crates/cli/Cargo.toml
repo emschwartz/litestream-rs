@@ -1,0 +1,28 @@
+[package]
+name = "lsr-cli"
+version = "0.0.0"
+description = "The `lsr` command: restore, verify and list a Litestream file replica."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "lsr"
+path = "src/main.rs"
+
+[dependencies]
+lsr-core = { path = "../core" }
+lsr-local = { path = "../local" }
+lsr-ltx = { path = "../ltx" }
+lsr-store-fs = { path = "../store-fs" }
+thiserror = "2"
+
+[dev-dependencies]
+lsr-compat = { path = "../compat" }
+lsr-core = { path = "../core", features = ["testing"] }
+serde_json = "1"
+tempfile = "3"
+
+[lints]
+workspace = true
