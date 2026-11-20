@@ -18,6 +18,9 @@ use crate::frame::{FrameParser, MIN_FRAME_LEN, Progress, max_frame_len};
 use crate::order::PageSequence;
 use crate::{DecodeError, HEADER_LEN, Header, OrderError, PageNo, Section, TRAILER_LEN};
 
+/// The largest file offset Go's `int64` offsets can name.
+const I64_MAX: u64 = i64::MAX.unsigned_abs();
+
 /// Bytes at the end of a file that locate the index: its size field and the trailer.
 pub const INDEX_TAIL_LEN: usize = 8 + TRAILER_LEN;
 
@@ -144,19 +147,25 @@ impl PageIndex {
             };
             let pgno = seq.push(pgno)?;
             let (offset, size) = (next()?, next()?);
-            if offset < end {
-                return Err(IndexError::Offset {
-                    pgno: pgno.get(),
-                    offset,
-                });
-            }
             if size < u64_from(MIN_FRAME_LEN) || size > max {
                 return Err(IndexError::FrameSize {
                     pgno: pgno.get(),
                     size,
                 });
             }
-            end = offset.saturating_add(size);
+            let offset_error = IndexError::Offset {
+                pgno: pgno.get(),
+                offset,
+            };
+            if offset < end {
+                return Err(offset_error);
+            }
+            // Go's `pageIndexValidator` rejects `offset > MaxInt64 - size`: past
+            // that an offset names no byte of any file a reader can seek to.
+            end = offset
+                .checked_add(size)
+                .filter(|end| *end <= I64_MAX)
+                .ok_or(offset_error)?;
             entries.push(IndexEntry { pgno, offset, size });
         }
         if bytes.next().is_some() {
@@ -226,18 +235,34 @@ pub(crate) fn put_uvarint(out: &mut Vec<u8>, mut value: u64) {
 
 /// Decodes one frame, as an index entry locates it, into `out`.
 ///
-/// `frame` must be exactly the entry's bytes. The page number is checked
-/// against the header but not against the entry; the caller compares the two.
+/// `frame` must be exactly `entry`'s bytes. The frame's page number must be
+/// the entry's and fit the header. On any error `out` is zeroed, so a
+/// rejected page cannot be read back from it.
 ///
 /// # Errors
 ///
-/// [`DecodeError::Frame`] for a malformed frame (including the end-of-pages
+/// [`DecodeError::EntryMismatch`] when the frame holds another page than
+/// `entry`, [`DecodeError::Frame`] for a malformed frame (including the end-of-pages
 /// marker), [`DecodeError::Order`] for a page the header rules out,
 /// [`DecodeError::Truncated`] when `frame` ends early and
 /// [`DecodeError::TrailingBytes`] when it runs long.
 pub fn decode_frame(
     frame: &[u8],
     header: &Header,
+    entry: &IndexEntry,
+    out: &mut Vec<u8>,
+) -> Result<PageNo, DecodeError> {
+    let result = decode_frame_into(frame, header, entry, out);
+    if result.is_err() {
+        out.fill(0);
+    }
+    result
+}
+
+fn decode_frame_into(
+    frame: &[u8],
+    header: &Header,
+    entry: &IndexEntry,
     out: &mut Vec<u8>,
 ) -> Result<PageNo, DecodeError> {
     let mut parser = FrameParser::new(header.page_size());
@@ -253,18 +278,33 @@ pub fn decode_frame(
             Progress::More => {}
             Progress::EndMarker => return Err(crate::FrameError::EndMarker.into()),
             Progress::PageStart(pgno) => {
-                check_page(pgno, header)?;
+                check_entry(pgno, header, entry)?;
             }
             Progress::Page(pgno) => {
+                let page_no = check_entry(pgno, header, entry)?;
                 if !rest.is_empty() {
                     return Err(DecodeError::TrailingBytes);
                 }
                 out.clear();
                 out.extend_from_slice(parser.page());
-                return Ok(check_page(pgno, header)?);
+                return Ok(page_no);
             }
         }
     }
+}
+
+fn check_entry(
+    pgno: NonZeroU32,
+    header: &Header,
+    entry: &IndexEntry,
+) -> Result<PageNo, DecodeError> {
+    if pgno != entry.pgno.nonzero() {
+        return Err(DecodeError::EntryMismatch {
+            expected: entry.pgno.get(),
+            found: pgno.get(),
+        });
+    }
+    Ok(check_page(pgno, header)?)
 }
 
 fn check_page(pgno: NonZeroU32, header: &Header) -> Result<PageNo, OrderError> {

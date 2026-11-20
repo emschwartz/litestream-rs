@@ -4,8 +4,8 @@ use std::io::{self, Read, Write};
 
 use lsr_ltx::{
     Checksum, DecodeError, Decoder, EncodeError, Encoder, FrameError, Header, HeaderError,
-    HeaderFields, IndexError, OrderError, PageIndex, PageNo, PageSize, ReadDecoder, Section,
-    Timestamp, Trailer, TrailerError, Txid, TxidRange, decode_frame, lock_page,
+    HeaderFields, IndexEntry, IndexError, OrderError, PageIndex, PageNo, PageSize, ReadDecoder,
+    Section, Timestamp, Trailer, TrailerError, Txid, TxidRange, decode_frame, lock_page,
 };
 
 use crate::common::{
@@ -44,6 +44,16 @@ fn frame_err(frame: &Frame) -> FrameError {
 
 fn parsed(header: &RawHeader) -> Header {
     Header::decode(&header.bytes()).unwrap()
+}
+
+/// The index entry for page `pgno` of the two-page snapshot.
+fn entry(pgno: u32) -> IndexEntry {
+    let mut region = index_for(&snapshot_frames());
+    region.extend_from_slice(&u64::try_from(region.len()).unwrap().to_be_bytes());
+    let index = PageIndex::decode(&region, &parsed(&RawHeader::untracked(PS, 2, 1))).unwrap();
+    *index
+        .get(PageNo::new(pgno, PageSize::new(PS).unwrap()).unwrap())
+        .unwrap()
 }
 
 #[test]
@@ -91,7 +101,7 @@ fn frame_zero_page_number() {
 fn frame_end_marker_where_a_frame_belongs() {
     let header = parsed(&RawHeader::untracked(PS, 1, 1));
     assert!(matches!(
-        decode_frame(&[0; 6], &header, &mut Vec::new()),
+        decode_frame(&[0; 6], &header, &entry(1), &mut Vec::new()),
         Err(DecodeError::Frame(FrameError::EndMarker))
     ));
 }
@@ -337,7 +347,7 @@ fn lock_page_is_rejected_at_each_page_size() {
         );
         let header = parsed(&raw);
         assert!(
-            matches!(decode_frame(&frame.bytes, &header, &mut Vec::new()), Err(DecodeError::Order(got)) if got == want)
+            matches!(decode_frame(&frame.bytes, &header, &entry(1), &mut Vec::new()), Err(DecodeError::EntryMismatch { found, .. }) if found == lock)
         );
         let mut region = index_for(&[frame]);
         region.extend_from_slice(&u64::try_from(region.len()).unwrap().to_be_bytes());
@@ -531,7 +541,12 @@ fn truncated_in_every_section() {
     let header = parsed(&RawHeader::untracked(PS, 2, 1));
     let frame = &snapshot_frames()[0].bytes;
     assert!(matches!(
-        decode_frame(&frame[..frame.len() - 1], &header, &mut Vec::new()),
+        decode_frame(
+            &frame[..frame.len() - 1],
+            &header,
+            &entry(1),
+            &mut Vec::new()
+        ),
         Err(DecodeError::Truncated {
             section: Section::Page
         })
@@ -547,7 +562,7 @@ fn trailing_bytes() {
     let mut frame = snapshot_frames()[0].bytes.clone();
     frame.push(0);
     assert!(matches!(
-        decode_frame(&frame, &header, &mut Vec::new()),
+        decode_frame(&frame, &header, &entry(1), &mut Vec::new()),
         Err(DecodeError::TrailingBytes)
     ));
 }
@@ -667,19 +682,52 @@ fn encode_trailer() {
     let some = Some(Checksum::EMPTY);
     let finish = |header: Header, post| Encoder::new(Vec::new(), header).unwrap().finish(post);
     assert!(matches!(
-        finish(header(false, 0, 5), some),
+        finish(header(false, 1, 5), some),
         Err(EncodeError::Trailer(TrailerError::PostApply { .. }))
     ));
     assert!(matches!(
-        finish(header(true, 0, 5), None),
+        finish(header(true, 1, 5), None),
         Err(EncodeError::Trailer(TrailerError::PostApply { raw: 0 }))
     ));
-    let not_empty = Checksum::from_raw((1 << 63) | 1);
-    assert!(matches!(
-        finish(header(true, 0, 5), not_empty),
-        Err(EncodeError::Trailer(TrailerError::PostApply { .. }))
-    ));
-    finish(header(true, 0, 5), some).unwrap();
+    finish(header(true, 1, 5), some).unwrap();
+}
+
+/// SQLite never commits a zero-page database in WAL mode; Go writes one only
+/// tracked. The encoder is the strict side, the decoder still reads one.
+#[test]
+fn encode_refuses_commit_zero() {
+    for tracked in [false, true] {
+        let got = Encoder::new(Vec::new(), header(tracked, 0, 5));
+        assert!(matches!(got, Err(EncodeError::ZeroCommit)), "{tracked}");
+    }
+}
+
+/// A frame for another page than its entry, even one the header allows, is
+/// refused and leaves nothing of it in the caller's buffer.
+#[test]
+fn decode_frame_checks_the_entry_and_clears_out_on_error() {
+    let header = parsed(&RawHeader::untracked(PS, 2, 1));
+    let frames = snapshot_frames();
+    let mut out = Vec::new();
+    decode_frame(&frames[0].bytes, &header, &entry(1), &mut out).unwrap();
+    assert_eq!(out, page(PS, 1));
+    let got = decode_frame(&frames[1].bytes, &header, &entry(1), &mut out);
+    assert!(
+        matches!(
+            got,
+            Err(DecodeError::EntryMismatch {
+                expected: 1,
+                found: 2
+            })
+        ),
+        "{got:?}"
+    );
+    assert!(out.iter().all(|byte| *byte == 0), "page 1 left in out");
+    let mut long = frames[0].bytes.clone();
+    long.push(0);
+    out.extend_from_slice(&page(PS, 9));
+    decode_frame(&long, &header, &entry(1), &mut out).unwrap_err();
+    assert!(out.iter().all(|byte| *byte == 0));
 }
 
 #[test]
@@ -824,4 +872,19 @@ fn page_index_bad_varints() {
         PageIndex::decode(&big, &inc),
         Err(IndexError::PageNumber { value: 1 << 32 })
     );
+}
+
+/// Go's `pageIndexValidator` rejects `offset > MaxInt64 - size`; an entry whose
+/// end passes `i64::MAX` (or wraps `u64`) names no byte of any real file.
+#[test]
+fn page_index_rejects_offset_past_i64_max() {
+    let snap = parsed(&RawHeader::untracked(PS, 1, 1));
+    let past = u64::try_from(i64::MAX).unwrap() - 10;
+    for offset in [past, u64::MAX - 5] {
+        let got = PageIndex::decode(&region(&[(1, offset, 20)], &[]), &snap);
+        assert!(
+            matches!(got, Err(IndexError::Offset { .. })),
+            "offset {offset} + 20 accepted: {got:?}"
+        );
+    }
 }

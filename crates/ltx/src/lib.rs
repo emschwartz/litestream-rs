@@ -27,6 +27,11 @@ mod trailer;
 pub use checksum::Checksum;
 pub use decoder::{Decoder, Event, ReadDecoder, Verified};
 pub use encoder::Encoder;
+/// Test support for crates that read LTX files; not part of the format.
+#[cfg(feature = "testing")]
+pub mod testing {
+    pub use crate::encoder::encode_commit_zero;
+}
 pub use error::{DecodeError, EncodeError, Section};
 pub use frame::FrameError;
 pub use header::{HEADER_LEN, Header, HeaderError, HeaderFields, WalOrigin};

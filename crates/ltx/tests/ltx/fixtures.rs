@@ -142,7 +142,7 @@ fn page_index_reads_every_page_out_of_order() {
             let start = usize::try_from(entry.offset()).unwrap();
             let end = start + usize::try_from(entry.size()).unwrap();
             assert_eq!(
-                decode_frame(&bytes[start..end], &whole.header, &mut out).unwrap(),
+                decode_frame(&bytes[start..end], &whole.header, entry, &mut out).unwrap(),
                 entry.pgno()
             );
             assert_eq!((entry.pgno().get(), &out), (*pgno, data));

@@ -86,6 +86,10 @@ impl Spec {
             node_id: 0,
         })
         .unwrap();
+        if self.commit == 0 {
+            // The strict encoder refuses commit 0; the decoder accepts it.
+            return lsr_ltx::testing::encode_commit_zero(header, self.post).unwrap();
+        }
         let mut encoder = Encoder::new(Vec::new(), header).unwrap();
         for (pgno, seed) in &self.pages {
             let pgno = PageNo::new(*pgno, self.ps).unwrap();

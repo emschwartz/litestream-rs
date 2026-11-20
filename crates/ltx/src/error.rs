@@ -40,6 +40,14 @@ pub enum DecodeError {
     /// The trailer is invalid.
     #[error("trailer: {0}")]
     Trailer(#[from] TrailerError),
+    /// A frame holds another page than the index entry that located it.
+    #[error("frame holds page {found}, the index entry is for page {expected}")]
+    EntryMismatch {
+        /// The entry's page number.
+        expected: u32,
+        /// The frame's page number.
+        found: u32,
+    },
     /// The file's contents do not match its file checksum.
     #[error("file checksum mismatch: computed {computed}, stored {stored}")]
     FileChecksum {
@@ -84,6 +92,10 @@ pub enum EncodeError {
         /// The header's page size.
         expected: usize,
     },
+    /// The header has commit 0: SQLite never commits an empty database in WAL
+    /// mode, so no file of one is worth writing.
+    #[error("header commit is 0, a database of no pages")]
+    ZeroCommit,
     /// A page number is out of place, or a snapshot is incomplete.
     #[error("page order: {0}")]
     Order(#[from] OrderError),

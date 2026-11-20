@@ -10,6 +10,11 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# `testing::encode_commit_zero`, for tests in other crates that need a file the
+# strict encoder refuses.
+testing = []
+
 [dependencies]
 crc = "3.4.0"
 lz4_flex = { version = "0.14.2", default-features = false, features = ["std", "safe-decode", "safe-encode"] }

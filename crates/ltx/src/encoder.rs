@@ -3,7 +3,9 @@
 //! Pages are written in the block encoding (see [`crate::FrameError`]'s
 //! module) and the encoder refuses anything Go's encoder refuses: a page of the
 //! wrong length, a page out of order or above the commit size, the lock page,
-//! an incomplete snapshot, a post-apply checksum that does not fit the header,
+//! an incomplete snapshot, a header with commit 0 (Go writes one only tracked
+//! and SQLite never commits an empty WAL-mode database; the decoder still
+//! accepts it), a post-apply checksum that does not fit the header,
 //! and a tracked snapshot whose post-apply checksum is not its pages'. The
 //! index is kept in memory as varint bytes, at most 30 bytes a page.
 
@@ -38,8 +40,16 @@ impl<W: Write> Encoder<W> {
     ///
     /// # Errors
     ///
-    /// [`EncodeError::Io`] if the write fails.
-    pub fn new(mut writer: W, header: Header) -> Result<Self, EncodeError> {
+    /// [`EncodeError::ZeroCommit`] for a header with commit 0, before anything
+    /// is written; [`EncodeError::Io`] if the write fails.
+    pub fn new(writer: W, header: Header) -> Result<Self, EncodeError> {
+        if header.commit() == 0 {
+            return Err(EncodeError::ZeroCommit);
+        }
+        Self::start(writer, header)
+    }
+
+    fn start(mut writer: W, header: Header) -> Result<Self, EncodeError> {
         let bytes = header.encode();
         writer.write_all(&bytes)?;
         let mut file = Crc64::new();
@@ -137,4 +147,20 @@ impl<W: Write> Encoder<W> {
             EncodeError::Io(err)
         })
     }
+}
+
+/// A file with commit 0 and no pages, which the decoder accepts and
+/// [`Encoder::new`] refuses. For tests of readers that must handle one.
+///
+/// # Errors
+///
+/// [`EncodeError::Trailer`] when `post_apply` does not fit the header (a
+/// tracked file needs `Checksum::EMPTY`, an untracked one none), and
+/// [`EncodeError::Order`] when the header is a snapshot with commit above 0.
+#[cfg(feature = "testing")]
+pub fn encode_commit_zero(
+    header: Header,
+    post_apply: Option<Checksum>,
+) -> Result<Vec<u8>, EncodeError> {
+    Ok(Encoder::start(Vec::new(), header)?.finish(post_apply)?.0)
 }

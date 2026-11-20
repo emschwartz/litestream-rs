@@ -16,10 +16,9 @@
 //!   independent block per page; this parser also takes several, and dependent
 //!   ones, within the length budget below.
 //!
-//! The frame's xxHash32 header and content checksums are skipped, not checked:
-//! the LTX file checksum covers every decompressed page, so a corrupt frame
-//! still fails the file, and checking them would add a dependency for no new
-//! guarantee.
+//! The frame's xxHash32 header and content checksums are not compared. Go's
+//! lz4 reader rejects a mismatch; this reader, the tolerant side, accepts it.
+//! The LTX file checksum covers every decompressed page.
 //!
 //! Every length is bounded before a byte of it is buffered: a block cannot
 //! exceed the LZ4 bound of a page, a stored block the bytes the page still
