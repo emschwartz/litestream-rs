@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+mod compact;
 #[cfg(any(test, feature = "testing"))]
 pub mod conformance;
 mod env;
@@ -18,6 +19,9 @@ mod retry;
 mod store;
 mod verify;
 
+pub use compact::{
+    CompactError, Compacted, CompactionInputs, InputFault, InputsError, MAX_INPUTS, compact,
+};
 pub use env::{Clock, Entropy, Sleeper};
 #[cfg(any(test, feature = "testing"))]
 pub use env::{FakeClock, RecordingSleeper, SeededEntropy};
