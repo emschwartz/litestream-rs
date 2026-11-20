@@ -313,6 +313,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lsr-local"
+version = "0.0.0"
+dependencies = [
+ "lsr-core",
+ "lsr-ltx",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "lsr-ltx"
 version = "0.0.0"
 dependencies = [

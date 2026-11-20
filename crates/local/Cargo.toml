@@ -1,0 +1,20 @@
+[package]
+name = "lsr-local"
+version = "0.0.0"
+description = "The local filesystem side of Litestream: the restore sink today, the meta directory and WAL reading in phase 2."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lsr-core = { path = "../core" }
+lsr-ltx = { path = "../ltx" }
+thiserror = "2"
+
+[dev-dependencies]
+lsr-core = { path = "../core", features = ["testing"] }
+tempfile = "3"
+
+[lints]
+workspace = true
