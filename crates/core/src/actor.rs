@@ -14,7 +14,9 @@
 //!    checkpoint the decision calls for, consuming that sync's proof (F1: no
 //!    checkpoint without one, and a proof never outlives its tick).
 //! 2. Upload while staged files are not on the replica.
-//! 3. Maintenance, only once uploads are idle, so a snapshot's last
+//! 3. Prune staged level-0 files the replica's level 1 covers, keeping the
+//!    tip.
+//! 4. Maintenance, only once uploads are idle, so a snapshot's last
 //!    transaction is at most what was published.
 //!
 //! Every failure becomes a [`Fault`] and goes through [`policy`] once, in
@@ -42,15 +44,15 @@ use crate::fault::{
     Backoff, Clamped, Fault, HaltCause, Next, Policy, SnapshotCause, policy, retry_wait,
 };
 use crate::inventory::Inventory;
-use crate::layout::FileInfo;
+use crate::layout::{FileInfo, FileKey, Level};
 use crate::maintain::{
-    Due, Hold, Job, MaintainError, Maintenance, Outcome, due, run_compact, run_delete,
+    Due, Hold, Job, MAX_DELETE, MaintainError, Maintenance, Outcome, due, run_compact, run_delete,
 };
 use crate::position::{Continuity, Position, SyncedThrough};
 use crate::recover::{FrameCheck, Miss, Probes, Recovered, Tip, TipView, WalView, recover};
 use crate::snapshot::{SnapshotFailed, write_snapshot};
 use crate::source::{CheckpointMode, Checkpointer, CommittedRead, PageSource, WalSource};
-use crate::store::ObjectStore;
+use crate::store::{ObjectStore, PageLimit};
 use crate::sync::{Step, StepEnd, SyncConfig, Synced, sync_step};
 use crate::upload::{
     Did, UploadConfig, UploadPlan, UploadState, inventory_fault, plan_upload, upload_next,
@@ -198,6 +200,8 @@ pub struct Actor {
     upload: UploadState,
     lanes: Lanes,
     maintain: Maintain,
+    /// Staged level-0 files through this transaction were pruned (W3).
+    pruned: Option<Txid>,
     last: Option<Timestamp>,
     clamp_reported: bool,
 }
@@ -294,6 +298,7 @@ impl Actor {
             upload: UploadState::Unknown,
             lanes: Lanes::default(),
             maintain: Maintain::default(),
+            pruned: None,
             last: None,
             clamp_reported: false,
         }
@@ -469,6 +474,9 @@ impl Actor {
             return tick;
         }
         if let Some(tick) = self.upload_unit(env, now).await {
+            return tick;
+        }
+        if let Some(tick) = self.prune_unit(env, now).await {
             return tick;
         }
         if let Some(tick) = self.maintain_unit(env, now).await {
@@ -810,6 +818,70 @@ impl Actor {
         Some(self.ran(Event::Uploaded(last), now))
     }
 
+    /// Deletes staged level-0 files the replica no longer needs from staging,
+    /// oldest first, at most `MAX_DELETE` (W3). A failure waits on its own
+    /// lane and holds nothing else.
+    async fn prune_unit<
+        W: WalSource,
+        P: PageSource,
+        C: Checkpointer,
+        L: ObjectStore,
+        R: ObjectStore,
+    >(
+        &mut self,
+        env: &mut Env<'_, W, P, C, L, R>,
+        now: Timestamp,
+    ) -> Option<Tick> {
+        let bound = self
+            .prune_bound()
+            .filter(|_| self.running() && self.lanes.ready(Lane::Prune, now))?;
+        let listing = match env.staging.list(Level::ZERO, None, PageLimit::MAX).await {
+            Ok(listing) => listing,
+            Err(err) => return Some(self.fault(Lane::Prune, Fault::from_staging(&err), now)),
+        };
+        let keys: Vec<FileKey> = listing
+            .files
+            .iter()
+            .map(|info| info.key)
+            .take_while(|key| key.range().max() <= bound)
+            .take(MAX_DELETE)
+            .collect();
+        // A full page of candidates may have more behind it: continue from
+        // the last one next tick rather than skip them.
+        let more = keys.len() == listing.files.len() && listing.next.is_some();
+        let through = keys
+            .last()
+            .filter(|_| more)
+            .map_or(bound, |key| key.range().max());
+        if !keys.is_empty()
+            && let Err(err) = env.staging.delete(&keys).await
+        {
+            return Some(self.fault(Lane::Prune, Fault::from_staging(&err), now));
+        }
+        self.lanes.get_mut(Lane::Prune).succeed();
+        self.pruned = Some(through);
+        if keys.is_empty() {
+            return None;
+        }
+        let event = Event::Maintained(MaintainedEvent::Deleted(keys.len()));
+        Some(self.ran(event, now))
+    }
+
+    /// The newest staged transaction a prune may delete through, when it is
+    /// past what was pruned: confirmed at the replica, compacted into its
+    /// level 1 (compaction reads staged inputs first, R3), and below the tip
+    /// (boot's rule 9 and V3 compare it with the WAL). `None` before the
+    /// first maintenance listing.
+    fn prune_bound(&self) -> Option<Txid> {
+        let below_tip = self.staged?.prev()?;
+        let bound = self
+            .upload
+            .confirmed()?
+            .min(self.maintain.level_one?)
+            .min(below_tip);
+        Some(bound).filter(|bound| self.pruned < Some(*bound))
+    }
+
     /// Lists the replica and runs what maintenance says is due (S4: only once
     /// every staged file is published).
     async fn maintain_unit<
@@ -835,6 +907,9 @@ impl Actor {
             Err(err) => return Some(self.fault(Lane::Maintain, inventory_fault(&err), now)),
         };
         self.maintain.stale = false;
+        self.maintain.level_one = Level::new(1)
+            .and_then(|level| inventory.level(level).last())
+            .map(|info| info.key.range().max());
         let published = self.upload.confirmed();
         let cfg = &self.cfg.maintenance;
         match due(&inventory, now, cfg, published, &mut self.maintain.state) {
@@ -948,11 +1023,12 @@ impl Actor {
                 || self.more_wal
                 || (running && self.checkpoint_decision(now).is_some()));
         let upload = self.lanes.ready(Lane::Upload, now) && !self.uploads_idle();
+        let prune = running && self.lanes.ready(Lane::Prune, now) && self.prune_bound().is_some();
         let maintain = running
             && self.lanes.ready(Lane::Maintain, now)
             && self.uploads_idle()
             && self.maintain.wants_listing(now);
-        sync || upload || maintain
+        sync || upload || prune || maintain
     }
 
     /// Every deadline a lane holds: retry waits, the checkpoint gate, the
@@ -967,6 +1043,7 @@ impl Actor {
         };
         let only_running = [
             lane(Lane::Checkpoint),
+            lane(Lane::Prune),
             lane(Lane::Maintain),
             self.gate.until(),
             self.maintain.until,

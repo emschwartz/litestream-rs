@@ -7,7 +7,7 @@
 
 use std::num::NonZeroU32;
 
-use lsr_ltx::Timestamp;
+use lsr_ltx::{Timestamp, Txid};
 
 use crate::fault::{HaltCause, Next};
 use crate::maintain::MaintainState;
@@ -56,6 +56,8 @@ pub(super) enum Lane {
     Checkpoint,
     /// Staged files to the replica.
     Upload,
+    /// Deleting staged level-0 files the replica's level 1 covers.
+    Prune,
     /// Listing the replica for maintenance, and a failed job whose level
     /// keeps no wait of its own (a retention delete). A job whose level does
     /// keep one waits there (R3), not here.
@@ -110,6 +112,7 @@ pub(super) struct Lanes {
     sync: Retry,
     checkpoint: Retry,
     upload: Retry,
+    prune: Retry,
     maintain: Retry,
 }
 
@@ -119,6 +122,7 @@ impl Lanes {
             Lane::Sync => &self.sync,
             Lane::Checkpoint => &self.checkpoint,
             Lane::Upload => &self.upload,
+            Lane::Prune => &self.prune,
             Lane::Maintain => &self.maintain,
         }
     }
@@ -128,6 +132,7 @@ impl Lanes {
             Lane::Sync => &mut self.sync,
             Lane::Checkpoint => &mut self.checkpoint,
             Lane::Upload => &mut self.upload,
+            Lane::Prune => &mut self.prune,
             Lane::Maintain => &mut self.maintain,
         }
     }
@@ -138,7 +143,13 @@ impl Lanes {
 
     /// Lets every passed wait go (W1: a passed deadline is work, not a wait).
     pub(super) fn expire(&mut self, now: Timestamp) {
-        for lane in [Lane::Sync, Lane::Checkpoint, Lane::Upload, Lane::Maintain] {
+        for lane in [
+            Lane::Sync,
+            Lane::Checkpoint,
+            Lane::Upload,
+            Lane::Prune,
+            Lane::Maintain,
+        ] {
             self.get_mut(lane).expire(now);
         }
     }
@@ -199,6 +210,9 @@ pub(super) struct Maintain {
     pub(super) stale: bool,
     /// The last `Due::Wait.until`.
     pub(super) until: Option<Timestamp>,
+    /// The last transaction of the replica's level 1 in the last listing;
+    /// `None` before the first. A staged file at or below it was compacted.
+    pub(super) level_one: Option<Txid>,
 }
 
 impl Default for Maintain {
@@ -207,6 +221,7 @@ impl Default for Maintain {
             state: MaintainState::default(),
             stale: true,
             until: None,
+            level_one: None,
         }
     }
 }

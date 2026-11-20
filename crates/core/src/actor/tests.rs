@@ -329,7 +329,12 @@ fn retry_backs_off_per_lane() {
     assert!(
         matches!(event(&first), Some(Event::Retrying { until, .. }) if *until == ts(T0 + 1_010))
     );
-    assert_eq!(next_of(&first), Some(Next::At(ts(T0 + 1_010))));
+    // The prune of staged file 1 is not the upload lane's to hold.
+    let pruned = rig.settle(&mut actor, T0 + 10);
+    assert_eq!(
+        pruned.last().and_then(next_of),
+        Some(Next::At(ts(T0 + 1_010)))
+    );
     // The sync lane does not wait on the upload lane.
     rig.commit(3);
     assert_eq!(
@@ -359,11 +364,13 @@ fn throttle_retry_after_honored() {
     rig.commit(2);
     rig.tick(&mut actor, T0 + 10);
     let tick = rig.tick(&mut actor, T0 + 10);
+    let until = ts(T0 + 7_010);
     assert!(
-        matches!(event(&tick), Some(Event::Retrying { .. })),
+        matches!(event(&tick), Some(Event::Retrying { until: u, .. }) if *u == until),
         "{tick:?}"
     );
-    assert_eq!(next_of(&tick), Some(Next::At(ts(T0 + 7_010))));
+    let pruned = rig.settle(&mut actor, T0 + 10);
+    assert_eq!(pruned.last().and_then(next_of), Some(Next::At(until)));
 }
 
 #[test]
@@ -609,6 +616,26 @@ fn checkpoint_call_is_recorded() {
     );
 }
 
+/// The last transaction of every staged level-0 file, oldest first.
+fn staged(rig: &Rig) -> Vec<u64> {
+    Rig::files(&rig.staging, Level::ZERO)
+        .iter()
+        .map(|f| f.key.range().max().get())
+        .collect()
+}
+
+fn level_one_max(rig: &Rig) -> Option<u64> {
+    Rig::files(&rig.remote, Level::new(1)?)
+        .last()
+        .map(|f| f.key.range().max().get())
+}
+
+/// Commits `n` and runs the actor until it has staged and uploaded it.
+fn commit_and_settle(rig: &mut Rig, actor: &mut Actor, n: u8, now: i64) {
+    rig.commit(n);
+    rig.settle(actor, now);
+}
+
 #[test]
 fn job_retry_reports_the_levels_wait() {
     let (mut rig, mut actor) = caught_up();
@@ -643,7 +670,13 @@ fn job_retry_reports_the_levels_wait() {
     );
 }
 
-const LANES: [Lane; 4] = [Lane::Sync, Lane::Checkpoint, Lane::Upload, Lane::Maintain];
+const LANES: [Lane; 5] = [
+    Lane::Sync,
+    Lane::Checkpoint,
+    Lane::Upload,
+    Lane::Prune,
+    Lane::Maintain,
+];
 
 /// Every deadline the actor holds, read from where each is kept.
 fn held(actor: &Actor) -> Vec<Timestamp> {
@@ -668,7 +701,7 @@ fn held(actor: &Actor) -> Vec<Timestamp> {
 proptest::proptest! {
     #[test]
     fn next_is_never_after_a_held_deadline(
-        waits in proptest::collection::vec(proptest::option::of(-3_000i64..3_000), 4),
+        waits in proptest::collection::vec(proptest::option::of(-3_000i64..3_000), 5),
         gate in 0u8..3,
         gate_at in -3_000i64..3_000,
         maintain in proptest::option::of(-3_000i64..3_000),
@@ -706,4 +739,108 @@ proptest::proptest! {
             proptest::prop_assert!(!passed || next == Next::Now, "{tick:?}");
         }
     }
+}
+
+#[test]
+fn prune_keeps_exactly_the_uncompacted_and_the_tip() {
+    let (mut rig, mut actor) = caught_up();
+    assert_eq!(level_one_max(&rig), Some(1));
+    for n in 2..=4 {
+        commit_and_settle(&mut rig, &mut actor, n, T0 + 1);
+    }
+    // Confirmed through 4, level 1 through 1, tip 4: only 1 goes.
+    assert_eq!(staged(&rig), vec![2, 3, 4]);
+    // A new level-1 window compacts 2..=4; the tip stays although compacted.
+    let later = T0 + 60_000;
+    rig.settle(&mut actor, later);
+    assert_eq!(level_one_max(&rig), Some(4));
+    rig.settle(&mut actor, later);
+    assert_eq!(staged(&rig), vec![4]);
+}
+
+#[test]
+fn the_tip_stays_even_when_compacted() {
+    let (rig, _actor) = caught_up();
+    assert_eq!(level_one_max(&rig), Some(1));
+    assert_eq!(staged(&rig), vec![1]);
+}
+
+#[test]
+fn nothing_is_pruned_before_the_first_listing() {
+    let (mut rig, mut actor) = caught_up();
+    for n in 2..=4 {
+        commit_and_settle(&mut rig, &mut actor, n, T0 + 1);
+    }
+    // The old actor compacts 2..=4 but its prune fails.
+    rig.staging
+        .inner
+        .inject_failure(StoreOp::Delete, transient(StoreOp::Delete));
+    rig.settle(&mut actor, T0 + 60_000);
+    assert_eq!(level_one_max(&rig), Some(4));
+    let before = staged(&rig);
+    assert_eq!(before, vec![2, 3, 4]);
+    // A restart: the new actor knows nothing of level 1 until it lists.
+    let mut actor = Actor::new(cfg());
+    let mut now = T0 + 60_002;
+    loop {
+        let tick = rig.tick(&mut actor, now);
+        if matches!(event(&tick), Some(Event::Maintained(_))) {
+            break;
+        }
+        assert_eq!(staged(&rig), before, "pruned before listing: {tick:?}");
+        now += 1;
+    }
+    rig.settle(&mut actor, now);
+    assert_eq!(staged(&rig), vec![4]);
+}
+
+#[test]
+fn a_crash_between_prunes_boots_clean() {
+    let (mut rig, mut actor) = caught_up();
+    for n in 2..=6 {
+        commit_and_settle(&mut rig, &mut actor, n, T0 + 1);
+    }
+    let later = T0 + 60_000;
+    // Compact 2..=6, then stop before the actor prunes: delete only the
+    // oldest by hand, as a prune that died after its first call would.
+    rig.staging
+        .inner
+        .inject_failure(StoreOp::Delete, transient(StoreOp::Delete));
+    rig.settle(&mut actor, later);
+    assert_eq!(level_one_max(&rig), Some(6));
+    let oldest = Rig::files(&rig.staging, Level::ZERO)[0].key;
+    block_on(rig.staging.inner.delete(&[oldest])).unwrap();
+    let mut actor = Actor::new(cfg());
+    let boot = rig.tick(&mut actor, later + 1);
+    assert_eq!(event(&boot), Some(&Event::Booted { cause: None }));
+    let seen = rig.settle(&mut actor, later + 1);
+    assert!(
+        seen.iter().all(|t| !matches!(t, Tick::Halted(_))),
+        "{seen:?}"
+    );
+    assert_eq!(staged(&rig), vec![6]);
+}
+
+#[test]
+fn a_failed_prune_blocks_nothing_else() {
+    let (mut rig, mut actor) = caught_up();
+    rig.staging
+        .inner
+        .inject_failure(StoreOp::Delete, transient(StoreOp::Delete));
+    rig.commit(2);
+    let mut seen = rig.settle(&mut actor, T0 + 1);
+    rig.commit(3);
+    seen.extend(rig.settle(&mut actor, T0 + 2));
+    assert!(
+        seen.iter()
+            .any(|t| matches!(event(t), Some(Event::Retrying { .. }))),
+        "the prune failed: {seen:?}"
+    );
+    let remote: Vec<u64> = Rig::files(&rig.remote, Level::ZERO)
+        .iter()
+        .map(|f| f.key.range().max().get())
+        .collect();
+    assert_eq!(remote.last(), Some(&3), "uploads ran while the prune waits");
+    rig.settle(&mut actor, T0 + 2_000);
+    assert_eq!(staged(&rig), vec![2, 3]);
 }
