@@ -130,6 +130,22 @@ impl MaintainState {
             .filter(|until| *until > now)
     }
 
+    /// When a failed `job` may be planned again, if its level keeps a wait:
+    /// a compaction's destination, the snapshot's slot, or the level of a
+    /// distrusted key the delete names. A retention delete keeps none.
+    pub(crate) fn retry_at(&self, job: &Job, now: Timestamp) -> Option<Timestamp> {
+        match job {
+            Job::Compact(job) => self.backing_off_until(job.level(), now),
+            Job::Snapshot(_) => self.backing_off_until(Level::SNAPSHOT, now),
+            Job::Delete(job) => job
+                .keys()
+                .iter()
+                .filter(|key| self.distrusted_at(key.level()) == Some(**key))
+                .filter_map(|key| self.backing_off_until(key.level(), now))
+                .min(),
+        }
+    }
+
     /// The level's distrusted output.
     pub(super) fn distrusted_at(&self, level: Level) -> Option<FileKey> {
         self.distrusted.get(&level).copied()
