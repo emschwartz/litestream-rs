@@ -219,7 +219,8 @@ fn fail(state: UploadState, fault: Fault) -> UploadFailed {
     UploadFailed { state, fault }
 }
 
-fn inventory_fault(err: &InventoryError) -> Fault {
+/// A listing failure as the fault the uploader and the actor route.
+pub(crate) fn inventory_fault(err: &InventoryError) -> Fault {
     match err {
         InventoryError::Store(err) => Fault::from_remote(err),
         InventoryError::ConflictingDuplicate { .. } | InventoryError::ListingStalled { .. } => {
