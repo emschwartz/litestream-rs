@@ -1,0 +1,705 @@
+//! Upload sequencing tests: the pure plan, each ordering and verification rule
+//! against the in-memory store, and a property over random fault scripts.
+
+use std::collections::VecDeque;
+use std::future::Future;
+use std::io::ErrorKind;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+
+use lsr_ltx::{Encoder, Header, HeaderFields, PageNo, PageSize, Timestamp};
+use proptest::prelude::*;
+
+use super::*;
+use crate::conformance::block_on;
+use crate::fault::{HaltCause, Policy, policy};
+use crate::mem::{MemStore, MemUpload};
+use crate::store::{CorruptCause, Listing, StoreError, StoreOp};
+
+fn txid(n: u64) -> Txid {
+    Txid::new(n).unwrap()
+}
+
+fn key(n: u64) -> FileKey {
+    staged_key(txid(n))
+}
+
+fn ps() -> PageSize {
+    PageSize::new(4096).unwrap()
+}
+
+fn stamp(n: u64) -> Timestamp {
+    Timestamp::from_unix_millis(i64::try_from(n).unwrap().saturating_mul(1000))
+}
+
+/// A level-0 file for one transaction. Bytes differ per transaction.
+fn encode(n: u64) -> Vec<u8> {
+    let header = Header::new(HeaderFields {
+        tracked: false,
+        page_size: ps(),
+        commit: 2,
+        txids: TxidRange::single(txid(n)),
+        timestamp: stamp(n),
+        pre_apply: None,
+        wal: None,
+        node_id: 0,
+    })
+    .unwrap();
+    let mut encoder = Encoder::new(Vec::new(), header).unwrap();
+    let seed = u8::try_from(n % 251).unwrap();
+    for pgno in 1..=2_u32 {
+        encoder
+            .write_page(PageNo::new(pgno, ps()).unwrap(), &vec![seed; ps().bytes()])
+            .unwrap();
+    }
+    encoder.finish(None).unwrap().0
+}
+
+fn put_bytes(store: &MemStore, at: FileKey, bytes: &[u8]) -> FileInfo {
+    block_on(async {
+        let mut up = store.begin_upload(&at, stamp(1)).await.unwrap();
+        up.write(bytes).await.unwrap();
+        up.commit().await.unwrap()
+    })
+}
+
+fn stage(staging: &MemStore, n: u64) -> Vec<u8> {
+    let bytes = encode(n);
+    put_bytes(staging, key(n), &bytes);
+    bytes
+}
+
+fn read_all(store: &MemStore, at: &FileKey) -> Vec<u8> {
+    block_on(store.read(at, 0, ReadLen::new(ReadLen::MAX_RAW).unwrap())).unwrap()
+}
+
+fn files(store: &MemStore) -> Vec<FileInfo> {
+    (0..=9)
+        .flat_map(|l| {
+            block_on(store.list(Level::new(l).unwrap(), None, PageLimit::MAX))
+                .unwrap()
+                .files
+        })
+        .collect()
+}
+
+fn transient() -> StoreError {
+    StoreError::Transient {
+        op: StoreOp::Upload,
+        kind: ErrorKind::TimedOut,
+    }
+}
+
+/// What a test wants the wrapped replica to do, and what it saw.
+#[derive(Default)]
+struct Log {
+    lists: u32,
+    begins: Vec<FileKey>,
+    aborts: u32,
+    commit_before: VecDeque<StoreError>,
+    write_fail: VecDeque<StoreError>,
+    lie_about_size: bool,
+}
+
+/// A [MemStore] that counts calls and can fail a commit before it publishes
+/// or answer with a wrong size.
+#[derive(Clone, Default)]
+struct Probe {
+    inner: MemStore,
+    log: Arc<Mutex<Log>>,
+}
+
+impl Probe {
+    fn log(&self) -> MutexGuard<'_, Log> {
+        self.log.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+struct ProbeUpload {
+    inner: MemUpload,
+    log: Arc<Mutex<Log>>,
+}
+
+impl ObjectStore for Probe {
+    type Upload = ProbeUpload;
+
+    fn list(
+        &self,
+        level: Level,
+        after: Option<TxidRange>,
+        limit: PageLimit,
+    ) -> impl Future<Output = Result<Listing, StoreError>> + Send {
+        {
+            let mut log = self.log();
+            log.lists = log.lists.saturating_add(1);
+        }
+        self.inner.list(level, after, limit)
+    }
+
+    fn read(
+        &self,
+        key: &FileKey,
+        offset: u64,
+        len: ReadLen,
+    ) -> impl Future<Output = Result<Vec<u8>, StoreError>> + Send {
+        self.inner.read(key, offset, len)
+    }
+
+    fn begin_upload(
+        &self,
+        key: &FileKey,
+        created_at: Timestamp,
+    ) -> impl Future<Output = Result<ProbeUpload, StoreError>> + Send {
+        self.log().begins.push(*key);
+        let log = Arc::clone(&self.log);
+        let begun = self.inner.begin_upload(key, created_at);
+        async move {
+            Ok(ProbeUpload {
+                inner: begun.await?,
+                log,
+            })
+        }
+    }
+
+    fn delete(&self, keys: &[FileKey]) -> impl Future<Output = Result<(), StoreError>> + Send {
+        self.inner.delete(keys)
+    }
+}
+
+impl Upload for ProbeUpload {
+    fn write(&mut self, chunk: &[u8]) -> impl Future<Output = Result<(), StoreError>> + Send {
+        let early = self
+            .log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .write_fail
+            .pop_front();
+        let wrote = early.map_or_else(|| Ok(self.inner.write(chunk)), Err);
+        async move {
+            match wrote {
+                Ok(inner) => inner.await,
+                Err(err) => Err(err),
+            }
+        }
+    }
+
+    fn commit(self) -> impl Future<Output = Result<FileInfo, StoreError>> + Send {
+        let (early, lie) = {
+            let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+            (log.commit_before.pop_front(), log.lie_about_size)
+        };
+        async move {
+            if let Some(err) = early {
+                self.inner.abort().await?;
+                return Err(err);
+            }
+            let mut info = self.inner.commit().await?;
+            if lie {
+                info.size = info.size.saturating_add(1);
+            }
+            Ok(info)
+        }
+    }
+
+    fn abort(self) -> impl Future<Output = Result<(), StoreError>> + Send {
+        {
+            let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+            log.aborts = log.aborts.saturating_add(1);
+        }
+        self.inner.abort()
+    }
+}
+
+fn next<L: ObjectStore, S: ObjectStore>(
+    state: UploadState,
+    staging: &L,
+    remote: &S,
+    tip: u64,
+) -> Result<Uploaded, UploadFailed> {
+    block_on(upload_next(state, staging, remote, Txid::new(tip)))
+}
+
+fn failure(result: Result<Uploaded, UploadFailed>) -> UploadFailed {
+    result.expect_err("the step should fail")
+}
+
+#[test]
+fn plan_lists_before_anything_when_the_replica_is_not_known() {
+    let tip = Some(txid(5));
+    assert_eq!(plan_upload(&UploadState::Unknown, tip), UploadPlan::List);
+    let after_error = UploadState::ListFirst {
+        confirmed: Some(txid(2)),
+    };
+    assert_eq!(plan_upload(&after_error, tip), UploadPlan::List);
+}
+
+#[test]
+fn plan_uploads_the_next_transaction_until_the_tip() {
+    let at = |c| UploadState::At(c);
+    assert_eq!(
+        plan_upload(&at(None), Some(txid(3))),
+        UploadPlan::Upload(key(1))
+    );
+    assert_eq!(
+        plan_upload(&at(Some(txid(2))), Some(txid(3))),
+        UploadPlan::Upload(key(3))
+    );
+    assert_eq!(
+        plan_upload(&at(Some(txid(3))), Some(txid(3))),
+        UploadPlan::Idle
+    );
+    assert_eq!(
+        plan_upload(&at(Some(txid(4))), Some(txid(3))),
+        UploadPlan::Idle
+    );
+    assert_eq!(plan_upload(&at(None), None), UploadPlan::Idle);
+    assert_eq!(
+        plan_upload(&at(Some(Txid::MAX)), Some(Txid::MAX)),
+        UploadPlan::Idle
+    );
+}
+
+#[test]
+fn a_listing_of_an_empty_replica_then_uploads_from_one() {
+    let (staging, remote) = (MemStore::new(), MemStore::new());
+    let bytes = stage(&staging, 1);
+    let listed = next(UploadState::Unknown, &staging, &remote, 1).unwrap();
+    assert_eq!(listed.state, UploadState::At(None));
+    assert_eq!(listed.did, Did::Listed { newest: None });
+    let put = next(listed.state, &staging, &remote, 1).unwrap();
+    assert_eq!(put.state, UploadState::At(Some(txid(1))));
+    let Did::Put(info) = put.did else {
+        panic!("expected a put")
+    };
+    assert_eq!(info.key, key(1));
+    assert_eq!(info.size, u64::try_from(bytes.len()).unwrap());
+    assert_eq!(read_all(&remote, &key(1)), bytes);
+    assert_eq!(info.created_at, stamp(1));
+}
+
+#[test]
+fn steady_state_makes_no_list_call_in_a_thousand_ticks() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    let mut state = next(UploadState::Unknown, &staging, &remote, 0)
+        .unwrap()
+        .state;
+    assert_eq!(
+        usize::try_from(remote.log().lists).unwrap(),
+        Level::ALL.len()
+    );
+    let booted = remote.log().lists;
+    for n in 1..=1000 {
+        stage(&staging, n);
+        let ticked = block_on(upload_tick(
+            state,
+            UploadConfig::default(),
+            &staging,
+            &remote,
+            Txid::new(n),
+        ))
+        .unwrap();
+        assert_eq!((ticked.put, ticked.next), (1, Next::OnWalChange));
+        state = ticked.state;
+    }
+    assert_eq!(remote.log().lists, booted);
+    assert_eq!(state, UploadState::At(Some(txid(1000))));
+    assert_eq!(files(&remote.inner).len(), 1000);
+}
+
+#[test]
+fn a_commit_that_failed_after_publishing_is_found_by_one_listing_and_not_uploaded_twice() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    stage(&staging, 1);
+    remote.inner.inject_failure_after_publish(transient());
+    let failed = failure(next(UploadState::At(None), &staging, &remote, 1));
+    assert_eq!(failed.fault, Fault::StoreTransient);
+    assert_eq!(failed.state, UploadState::ListFirst { confirmed: None });
+    let listed = next(failed.state, &staging, &remote, 1).unwrap();
+    assert_eq!(listed.state, UploadState::At(Some(txid(1))));
+    assert_eq!(remote.log().begins.len(), 1);
+    let idle = next(listed.state, &staging, &remote, 1).unwrap();
+    assert_eq!(idle.did, Did::Nothing);
+    assert_eq!(remote.log().begins.len(), 1);
+}
+
+#[test]
+fn a_commit_that_failed_before_publishing_is_listed_once_then_uploaded_again() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    let bytes = stage(&staging, 1);
+    remote.log().commit_before.push_back(transient());
+    let failed = failure(next(UploadState::At(None), &staging, &remote, 1));
+    assert_eq!(failed.state, UploadState::ListFirst { confirmed: None });
+    assert!(files(&remote.inner).is_empty());
+    let listed = next(failed.state, &staging, &remote, 1).unwrap();
+    assert_eq!(listed.state, UploadState::At(None));
+    let put = next(listed.state, &staging, &remote, 1).unwrap();
+    assert_eq!(put.state, UploadState::At(Some(txid(1))));
+    assert_eq!(remote.log().begins.len(), 2);
+    assert_eq!(read_all(&remote.inner, &key(1)), bytes);
+}
+
+#[test]
+fn a_listed_key_of_another_size_is_uploaded_again_over_the_same_key() {
+    let (staging, remote) = (MemStore::new(), MemStore::new());
+    let bytes = stage(&staging, 1);
+    for removed in [false, true] {
+        block_on(remote.delete(&[key(1)])).unwrap();
+        if !removed {
+            put_bytes(&remote, key(1), &bytes[..bytes.len() - 1]);
+        }
+        let mismatch = StoreError::Corrupt {
+            key: Some(key(1)),
+            cause: CorruptCause::CommitSizeMismatch {
+                wrote: u64::try_from(bytes.len()).unwrap(),
+                stored: u64::try_from(bytes.len() - 1).unwrap(),
+                removed,
+            },
+        };
+        let listing_first = UploadState::ListFirst { confirmed: None };
+        assert_eq!(
+            policy(&Fault::from_remote(&mismatch)),
+            Policy::Retry(crate::fault::Backoff::Doubling)
+        );
+        let listed = next(listing_first, &staging, &remote, 1).unwrap();
+        assert_eq!(listed.state, UploadState::At(None), "removed: {removed}");
+        let put = next(listed.state, &staging, &remote, 1).unwrap();
+        assert_eq!(put.state, UploadState::At(Some(txid(1))));
+        assert_eq!(read_all(&remote, &key(1)), bytes);
+    }
+}
+
+#[test]
+fn a_boot_listing_does_not_confirm_a_newest_file_of_the_wrong_size() {
+    let (staging, remote) = (MemStore::new(), MemStore::new());
+    let bytes = stage(&staging, 1);
+    stage(&staging, 2);
+    put_bytes(&remote, key(1), &bytes);
+    put_bytes(&remote, key(2), b"short");
+    let listed = next(UploadState::Unknown, &staging, &remote, 2).unwrap();
+    assert_eq!(listed.state, UploadState::At(Some(txid(1))));
+    let put = next(listed.state, &staging, &remote, 2).unwrap();
+    assert_eq!(put.state, UploadState::At(Some(txid(2))));
+    assert_eq!(read_all(&remote, &key(2)), encode(2));
+}
+
+#[test]
+fn a_listing_never_moves_confirmed_backwards_through_a_size_check() {
+    let (staging, remote) = (MemStore::new(), MemStore::new());
+    stage(&staging, 1);
+    put_bytes(&remote, key(1), b"not the staged bytes");
+    let state = UploadState::ListFirst {
+        confirmed: Some(txid(1)),
+    };
+    let listed = next(state, &staging, &remote, 1).unwrap();
+    assert_eq!(listed.state, UploadState::At(Some(txid(1))));
+}
+
+#[test]
+fn a_commit_that_answers_with_a_wrong_size_is_ambiguous_not_confirmed() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    stage(&staging, 1);
+    remote.log().lie_about_size = true;
+    let failed = failure(next(UploadState::At(None), &staging, &remote, 1));
+    assert_eq!(failed.fault, Fault::UploadAmbiguous);
+    assert_eq!(failed.state, UploadState::ListFirst { confirmed: None });
+}
+
+#[test]
+fn errors_before_the_commit_leave_the_state_and_cost_no_listing() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    stage(&staging, 1);
+    let state = UploadState::At(None);
+    remote.inner.inject_failure(StoreOp::Upload, transient());
+    let failed = failure(next(state, &staging, &remote, 1));
+    assert_eq!((failed.state, failed.fault), (state, Fault::StoreTransient));
+    remote.log().write_fail.push_back(transient());
+    let failed = failure(next(state, &staging, &remote, 1));
+    assert_eq!(failed.state, state);
+    staging.inject_failure(StoreOp::Read, transient());
+    let failed = failure(next(state, &staging, &remote, 1));
+    assert_eq!((failed.state, failed.fault), (state, Fault::LocalIo));
+    assert_eq!(remote.log().lists, 0);
+    assert!(files(&remote.inner).is_empty());
+    next(state, &staging, &remote, 1).unwrap();
+}
+
+#[test]
+fn a_write_error_aborts_the_upload() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    stage(&staging, 1);
+    remote.log().write_fail.push_back(transient());
+    let failed = failure(next(UploadState::At(None), &staging, &remote, 1));
+    assert_eq!(failed.state, UploadState::At(None));
+    assert_eq!(remote.log().aborts, 1);
+    assert!(files(&remote.inner).is_empty());
+}
+
+#[test]
+fn every_single_byte_flip_of_a_staged_file_is_refused_and_leaves_nothing_visible() {
+    let good = encode(1);
+    for at in 0..good.len() {
+        let mut bad = good.clone();
+        bad[at] ^= 0xFF;
+        let (staging, remote) = (MemStore::new(), Probe::default());
+        put_bytes(&staging, key(1), &bad);
+        let failed = failure(next(UploadState::At(None), &staging, &remote, 1));
+        assert_eq!(failed.fault, Fault::StagedCorrupt, "flip at byte {at}");
+        assert_eq!(failed.state, UploadState::At(None));
+        assert!(files(&remote.inner).is_empty(), "flip at byte {at}");
+    }
+}
+
+#[test]
+fn a_truncated_or_overlong_staged_file_is_refused() {
+    let good = encode(1);
+    let mut long = good.clone();
+    long.push(0);
+    for bad in [&good[..good.len() - 1], &good[..0], &good[..40], &long[..]] {
+        let (staging, remote) = (MemStore::new(), Probe::default());
+        put_bytes(&staging, key(1), bad);
+        let failed = failure(next(UploadState::At(None), &staging, &remote, 1));
+        assert_eq!(failed.fault, Fault::StagedCorrupt, "{} bytes", bad.len());
+        assert!(files(&remote.inner).is_empty());
+    }
+}
+
+#[test]
+fn a_staged_file_that_names_another_transaction_is_refused() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    put_bytes(&staging, key(1), &encode(2));
+    let failed = failure(next(UploadState::At(None), &staging, &remote, 1));
+    assert_eq!(failed.fault, Fault::StagedCorrupt);
+    assert!(remote.log().begins.is_empty());
+    assert!(files(&remote.inner).is_empty());
+}
+
+#[test]
+fn a_staged_file_larger_than_one_chunk_is_streamed_whole() {
+    let (staging, remote) = (MemStore::new(), MemStore::new());
+    // Incompressible pages make the file span several chunks.
+    let header = Header::new(HeaderFields {
+        tracked: false,
+        page_size: ps(),
+        commit: 200,
+        txids: TxidRange::single(txid(1)),
+        timestamp: stamp(1),
+        pre_apply: None,
+        wal: None,
+        node_id: 0,
+    })
+    .unwrap();
+    let mut encoder = Encoder::new(Vec::new(), header).unwrap();
+    let mut x = 0x9E37_79B9_7F4A_7C15_u64;
+    for pgno in 1..=200_u32 {
+        let page: Vec<u8> = (0..ps().bytes())
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x.to_be_bytes()[0]
+            })
+            .collect();
+        encoder
+            .write_page(PageNo::new(pgno, ps()).unwrap(), &page)
+            .unwrap();
+    }
+    let bytes = encoder.finish(None).unwrap().0;
+    assert!(bytes.len() > usize::try_from(CHUNK).unwrap() * 2);
+    put_bytes(&staging, key(1), &bytes);
+    let put = next(UploadState::At(None), &staging, &remote, 1).unwrap();
+    assert!(matches!(put.did, Did::Put(_)));
+    assert_eq!(read_all(&remote, &key(1)), bytes);
+}
+
+#[test]
+fn a_missing_staged_file_is_lost_not_skipped() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    stage(&staging, 2);
+    let failed = failure(next(UploadState::At(None), &staging, &remote, 2));
+    assert_eq!(failed.fault, Fault::StagedLost);
+    assert_eq!(policy(&failed.fault), Policy::Halt(HaltCause::StagedLost));
+    assert!(remote.log().begins.is_empty());
+    // The gap is never filled by the file after it.
+    assert!(files(&remote.inner).is_empty());
+}
+
+#[test]
+fn a_remote_ahead_of_local_halts() {
+    let (staging, remote) = (MemStore::new(), MemStore::new());
+    put_bytes(&remote, key(3), &encode(3));
+    let failed = failure(next(UploadState::Unknown, &staging, &remote, 2));
+    assert_eq!(failed.fault, Fault::RemoteAheadOfLocal);
+    assert_eq!(
+        policy(&failed.fault),
+        Policy::Halt(HaltCause::ForeignWriter)
+    );
+    assert_eq!(failed.state, UploadState::Unknown);
+    let failed = failure(next(UploadState::Unknown, &staging, &remote, 0));
+    assert_eq!(failed.fault, Fault::RemoteAheadOfLocal);
+}
+
+#[test]
+fn a_remote_that_went_backwards_halts() {
+    let (staging, remote) = (MemStore::new(), MemStore::new());
+    put_bytes(&remote, key(1), &encode(1));
+    let state = UploadState::ListFirst {
+        confirmed: Some(txid(2)),
+    };
+    let failed = failure(next(state, &staging, &remote, 3));
+    assert_eq!(failed.fault, Fault::RemoteRegressed);
+    assert_eq!(
+        policy(&failed.fault),
+        Policy::Halt(HaltCause::RemoteRegressed)
+    );
+    assert_eq!(failed.state, state);
+    let empty = MemStore::new();
+    let failed = failure(next(state, &staging, &empty, 3));
+    assert_eq!(failed.fault, Fault::RemoteRegressed);
+}
+
+#[test]
+fn a_failed_listing_changes_nothing() {
+    let (staging, remote) = (MemStore::new(), MemStore::new());
+    remote.inject_failure(StoreOp::List, transient());
+    let failed = failure(next(UploadState::Unknown, &staging, &remote, 1));
+    assert_eq!(
+        (failed.fault, failed.state),
+        (Fault::StoreTransient, UploadState::Unknown)
+    );
+}
+
+#[test]
+fn files_per_tick_is_honoured_and_asks_to_step_again() {
+    let (staging, remote) = (MemStore::new(), MemStore::new());
+    for n in 1..=5 {
+        stage(&staging, n);
+    }
+    let config = UploadConfig {
+        files_per_tick: NonZeroU32::new(2),
+    };
+    let mut state = UploadState::Unknown;
+    let mut seen = Vec::new();
+    loop {
+        let ticked = block_on(upload_tick(state, config, &staging, &remote, Txid::new(5))).unwrap();
+        state = ticked.state;
+        seen.push((ticked.put, ticked.next));
+        if ticked.next != Next::Now {
+            break;
+        }
+    }
+    assert_eq!(
+        seen,
+        vec![(2, Next::Now), (2, Next::Now), (1, Next::OnWalChange)]
+    );
+    assert_eq!(files(&remote).len(), 5);
+}
+
+#[test]
+fn a_tick_that_fails_keeps_what_it_confirmed() {
+    let (staging, remote) = (MemStore::new(), MemStore::new());
+    stage(&staging, 1);
+    let failed = failure_of_tick(UploadState::At(None), &staging, &remote, 2);
+    assert_eq!(failed.fault, Fault::StagedLost);
+    assert_eq!(failed.state, UploadState::At(Some(txid(1))));
+}
+
+fn failure_of_tick(
+    state: UploadState,
+    staging: &MemStore,
+    remote: &MemStore,
+    tip: u64,
+) -> UploadFailed {
+    block_on(upload_tick(
+        state,
+        UploadConfig::default(),
+        staging,
+        remote,
+        Txid::new(tip),
+    ))
+    .expect_err("the tick should fail")
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Hiccup {
+    None,
+    BeginOrWrite,
+    CommitBefore,
+    CommitAfter,
+    List,
+}
+
+fn hiccup() -> impl Strategy<Value = Hiccup> {
+    prop_oneof![
+        4 => Just(Hiccup::None),
+        1 => Just(Hiccup::BeginOrWrite),
+        1 => Just(Hiccup::CommitBefore),
+        1 => Just(Hiccup::CommitAfter),
+        1 => Just(Hiccup::List),
+    ]
+}
+
+proptest! {
+    #[test]
+    fn random_fault_scripts_keep_uploads_ordered_bounded_and_monotonic(
+        script in proptest::collection::vec((0_u64..3, hiccup()), 1..60),
+    ) {
+        let (staging, remote) = (MemStore::new(), Probe::default());
+        let mut state = UploadState::Unknown;
+        let (mut tip, mut staged) = (0_u64, 0_u64);
+        let mut confirmed_before = None;
+        let spent = script.len();
+        for (grow, hiccup) in script {
+            tip = tip.saturating_add(grow);
+            while staged < tip {
+                staged = staged.saturating_add(1);
+                stage(&staging, staged);
+            }
+            let must_list = matches!(state, UploadState::Unknown | UploadState::ListFirst { .. });
+            match hiccup {
+                Hiccup::None => {}
+                Hiccup::BeginOrWrite => remote.inner.inject_failure(StoreOp::Upload, transient()),
+                Hiccup::CommitBefore => remote.log().commit_before.push_back(transient()),
+                Hiccup::CommitAfter => remote.inner.inject_failure_after_publish(transient()),
+                // Only when the step will list, so the fault is spent inside it.
+                Hiccup::List if must_list => {
+                    remote.inner.inject_failure(StoreOp::List, transient());
+                }
+                Hiccup::List => {}
+            }
+            let begins_before = remote.log().begins.len();
+            let result = next(state, &staging, &remote, tip);
+            let after = match &result {
+                Ok(done) => done.state,
+                Err(failed) => failed.state,
+            };
+            let begun: Vec<FileKey> = remote.log().begins[begins_before..].to_vec();
+            // Nothing is written while the replica is unknown.
+            prop_assert!(!must_list || begun.is_empty());
+            for at in &begun {
+                // Always the next transaction after what is confirmed, never above the tip.
+                prop_assert_eq!(Some(at.range().max()), state.confirmed().map_or(Some(Txid::MIN), Txid::next));
+                prop_assert!(at.range().max().get() <= tip);
+            }
+            // The position never decreases.
+            prop_assert!(after.confirmed() >= confirmed_before);
+            confirmed_before = after.confirmed();
+            // Whatever is visible is a contiguous prefix of the staged files, byte for byte.
+            for (index, info) in files(&remote.inner).iter().enumerate() {
+                let want = u64::try_from(index).unwrap().saturating_add(1);
+                prop_assert_eq!(info.key, key(want));
+                prop_assert_eq!(read_all(&remote.inner, &info.key), encode(want));
+            }
+            state = after;
+        }
+        // With the faults gone, everything staged arrives.
+        remote.inner.inject_failure(StoreOp::Upload, transient());
+        drop(next(state, &staging, &remote, tip));
+        // Faults still queued each cost one more step.
+        for _ in 0..tip.saturating_add(u64::try_from(spent).unwrap().saturating_mul(3)).saturating_add(4) {
+            match next(state, &staging, &remote, tip) {
+                Ok(done) => state = done.state,
+                Err(failed) => state = failed.state,
+            }
+        }
+        prop_assert_eq!(u64::try_from(files(&remote.inner).len()).unwrap(), tip);
+    }
+}
