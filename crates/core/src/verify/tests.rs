@@ -120,6 +120,17 @@ fn l0(store: &MemStore, txid: u64) {
     );
 }
 
+/// The level-0 file for transaction 1, which is a snapshot and holds both pages.
+fn first_l0(store: &MemStore) {
+    put(
+        store,
+        0,
+        1,
+        1,
+        &Spec::plain(512, 1, 1, &[(1, 1), (2, 2), (3, 3), (4, 4)]).encode(),
+    );
+}
+
 /// A snapshot and two transactions: nothing wrong.
 fn clean() -> MemStore {
     let store = MemStore::new();
@@ -236,6 +247,26 @@ fn an_empty_replica_has_no_finding_but_is_not_restorable() {
     assert!(report.findings().is_empty());
     assert!(matches!(report.latest(), PlanOutcome::EmptyReplica));
     assert_eq!(report.worst(), Some(Severity::Unrestorable));
+}
+
+#[test]
+fn a_young_replica_of_level_zero_files_from_one_has_no_findings() {
+    let store = MemStore::new();
+    first_l0(&store);
+    l0(&store, 2);
+    assert!(names(&store).findings().is_empty());
+}
+
+#[test]
+fn a_hole_in_a_young_replica_is_named_against_its_level_zero_base() {
+    let store = MemStore::new();
+    first_l0(&store);
+    l0(&store, 3);
+    let report = names(&store);
+    assert!(matches!(
+        only(&report),
+        Finding::Gap { snapshot, at_tip: true, .. } if *snapshot == key(0, 1, 1)
+    ));
 }
 
 #[test]
@@ -562,7 +593,8 @@ fn a_failing_listing_is_an_error_at_either_depth() {
 fn findings_are_capped_and_the_last_says_how_many_were_dropped() {
     let store = MemStore::new();
     let extra = 5;
-    for n in 1..=u64::try_from(MAX_FINDINGS + extra).unwrap() {
+    // From 2: a file that begins at transaction 1 would be a base.
+    for n in 2..=u64::try_from(MAX_FINDINGS + extra + 1).unwrap() {
         put(&store, 0, n, n, b"x");
     }
     let report = contents(&store);

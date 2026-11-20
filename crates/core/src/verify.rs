@@ -3,7 +3,8 @@
 //! [verify] loads one [Inventory] and reports everything wrong with it as
 //! [Finding]s, each with a [Severity]. [Depth::Names] makes list calls only:
 //! foreign names, level-9 files that cannot start a chain, and holes in the
-//! history. For every valid snapshot in turn the planner is asked for the next
+//! history. A chain may start at any file that begins at transaction 1, so
+//! [Finding::NoSnapshot] means no such file exists. For every valid level-9 snapshot in turn the planner is asked for the next
 //! snapshot's last transaction (with the newer snapshots hidden, so the older
 //! one is the base), and for the newest snapshot it is asked for the latest
 //! state; each [PlanOutcome::Gap] is one finding, so a hole in older history
@@ -374,12 +375,21 @@ fn name_findings(inventory: &Inventory, findings: &mut Findings) -> PlanOutcome 
     for key in inventory.malformed_snapshots() {
         findings.push(Finding::MalformedSnapshot { key });
     }
+    // Every level-9 file that starts a chain is a restore point of its own, so
+    // each gets a window. A lower-level file from transaction 1 can also be the
+    // base, but it is no restore point: a stray one beside a newer snapshot
+    // would only report history nobody needs.
     let snapshots: Vec<FileInfo> = inventory
         .files()
         .iter()
-        .filter(|info| is_snapshot_start(info))
+        .filter(|info| info.key.level().is_snapshot() && is_snapshot_start(info))
         .copied()
         .collect();
+    let newest_start = inventory
+        .files()
+        .iter()
+        .filter(|info| is_snapshot_start(info))
+        .max_by_key(|info| (info.key.range().max(), info.key.level()));
     for pair in snapshots.windows(2) {
         if let [base, next] = pair {
             older_history(inventory, base, next, findings);
@@ -392,7 +402,7 @@ fn name_findings(inventory: &Inventory, findings: &mut Findings) -> PlanOutcome 
             have_through,
             next_starts,
         } => {
-            if let Some(newest) = snapshots.last() {
+            if let Some(newest) = newest_start {
                 findings.push(Finding::Gap {
                     snapshot: newest.key,
                     have_through: *have_through,

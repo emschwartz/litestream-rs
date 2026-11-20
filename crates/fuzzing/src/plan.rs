@@ -78,8 +78,8 @@ fn check_chain(inventory: &Inventory, target: RestoreTarget, chain: &ContiguousC
     let Some((first, later)) = chain.files().split_first() else {
         violation("a plan holds no file");
     };
-    if !first.key.level().is_snapshot() || first.key.range().min() != Txid::MIN {
-        violation("a plan does not start with a snapshot at transaction 1");
+    if first.key.range().min() != Txid::MIN {
+        violation("a plan does not start with a file at transaction 1");
     }
     let mut reach = first.key.range().max();
     for info in later {
