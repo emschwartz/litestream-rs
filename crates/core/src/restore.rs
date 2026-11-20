@@ -328,14 +328,32 @@ fn chunk_len() -> ReadLen {
 pub async fn restore<S: ObjectStore, K: DatabaseSink>(
     store: &S,
     target: RestoreTarget,
+    sink: K,
+) -> Result<Restored, RestoreError> {
+    restore_from(store, None, target, sink).await
+}
+
+/// [restore], whose first attempt plans over `listed` when given instead of
+/// listing again. A retry after a vanished file always lists afresh.
+pub(crate) async fn restore_from<S: ObjectStore, K: DatabaseSink>(
+    store: &S,
+    mut listed: Option<Inventory>,
+    target: RestoreTarget,
     mut sink: K,
 ) -> Result<Restored, RestoreError> {
     let mut attempt = 1_u8;
     let mut bytes_read = 0_u64;
     let mut stamps_read = 0_u64;
     loop {
-        let applied =
-            attempt_once(store, target, &mut sink, &mut bytes_read, &mut stamps_read).await;
+        let applied = attempt_once(
+            store,
+            listed.take(),
+            target,
+            &mut sink,
+            &mut bytes_read,
+            &mut stamps_read,
+        )
+        .await;
         match applied {
             Ok((chain, last)) => {
                 verify_end_state(&mut sink, &last)?;
@@ -369,14 +387,18 @@ pub async fn restore<S: ObjectStore, K: DatabaseSink>(
 /// One listing, one plan and the chain applied, or why not.
 async fn attempt_once<S: ObjectStore, K: DatabaseSink>(
     store: &S,
+    listed: Option<Inventory>,
     target: RestoreTarget,
     sink: &mut K,
     bytes_read: &mut u64,
     stamps_read: &mut u64,
 ) -> Result<(ContiguousChain, Verified), Abort> {
-    let inventory = Inventory::load(store)
-        .await
-        .map_err(RestoreError::Inventory)?;
+    let inventory = match listed {
+        Some(inventory) => inventory,
+        None => Inventory::load(store)
+            .await
+            .map_err(RestoreError::Inventory)?,
+    };
     let chain = match plan_target(store, &inventory, target, stamps_read).await? {
         PlanOutcome::Plan(chain) => chain,
         other @ (PlanOutcome::EmptyReplica
@@ -477,13 +499,15 @@ async fn apply_file<S: ObjectStore, K: DatabaseSink>(
             Err(err) => return Err(RestoreError::Store(err).into()),
         };
         // The listed size is advisory: only the decoder knows where a file ends.
-        if chunk.is_empty() {
-            break;
-        }
         let len = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
         offset = offset.saturating_add(len);
         *bytes_read = bytes_read.saturating_add(len);
         feed_chunk(&mut decoder, &chunk, key, previous, sink)?;
+        // A short chunk is the end of the object (the read contract), so no
+        // empty read follows to learn it.
+        if len < chunk_len().get() {
+            break;
+        }
     }
     let verified = decoder.finish().map_err(|err| RestoreError::File {
         key,

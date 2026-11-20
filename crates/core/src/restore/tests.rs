@@ -765,8 +765,8 @@ fn a_file_larger_than_one_chunk_is_read_in_several_reads() {
     let store = Wrapped::new(store);
     let (result, sink) = run(&store, RestoreTarget::Latest);
     let restored = result.unwrap();
-    // Two full chunks, then the read that returns nothing.
-    assert_eq!(store.reads.load(Ordering::Relaxed), 3);
+    // One full chunk, then the short rest: no empty read follows.
+    assert_eq!(store.reads.load(Ordering::Relaxed), 2);
     assert_eq!(restored.bytes_read(), u64::try_from(bytes.len()).unwrap());
     let db = sink.published().unwrap();
     for (index, page) in want.iter().enumerate() {

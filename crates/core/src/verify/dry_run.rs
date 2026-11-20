@@ -8,10 +8,11 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use lsr_ltx::{Checksum, PageNo, PageSize, Timestamp, TxidRange};
 
 use super::VerifyError;
+use crate::inventory::Inventory;
 use crate::layout::{FileInfo, StoredStamp};
 use crate::layout::{FileKey, Level};
 use crate::plan::RestoreTarget;
-use crate::restore::{DatabaseSink, RestoreError, restore};
+use crate::restore::{DatabaseSink, RestoreError, restore_from};
 use crate::store::{Listing, ObjectStore, PageLimit, ReadLen, StoreError};
 
 /// A [DatabaseSink] that keeps each page's checksum and nothing else: 8 bytes
@@ -132,6 +133,7 @@ pub(super) struct DryRun {
 /// mismatch of the whole database is blamed on.
 pub(super) async fn latest_restore<S: ObjectStore>(
     store: &S,
+    listed: Inventory,
     last: FileKey,
 ) -> Result<DryRun, VerifyError> {
     let counting = Counting {
@@ -139,7 +141,13 @@ pub(super) async fn latest_restore<S: ObjectStore>(
         files: AtomicUsize::new(0),
         bytes: AtomicU64::new(0),
     };
-    let result = restore(&counting, RestoreTarget::Latest, DigestSink::default()).await;
+    let result = restore_from(
+        &counting,
+        Some(listed),
+        RestoreTarget::Latest,
+        DigestSink::default(),
+    )
+    .await;
     let fault = match result {
         Ok(_) => None,
         Err(RestoreError::Inventory(err)) => return Err(VerifyError::Inventory(err)),

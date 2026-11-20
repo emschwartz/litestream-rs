@@ -30,8 +30,11 @@
 //! The files of the latest plan are read twice, once by the walk and once by
 //! the dry run; skipping the second read would need a second code path that
 //! feeds restore from the walk's decoder, which is the drift this design
-//! removes. [Report::files_read] and [Report::bytes_read] count both. Memory is
-//! one decoder and one chunk, plus 8 bytes a page for the dry run's sink.
+//! removes. The dry run plans over the walk's listing, not a second one: a file
+//! that went missing meanwhile makes restore list afresh, as it always does.
+//! A file is one read when it fits one chunk, since a short chunk is the end of
+//! the object; a longer one takes one read per chunk. [Report::files_read] and
+//! [Report::bytes_read] count both walks. Memory is one decoder and one chunk, plus 8 bytes a page for the dry run's sink.
 //!
 //! Only what stops the walk is an error ([VerifyError]): a failed listing or a
 //! failed read. A damaged file is a finding, never an error, and a file that
@@ -485,7 +488,7 @@ async fn contents_pass<S: ObjectStore>(
     walk.finish(findings);
     let (mut files_read, mut bytes_read) = (walk.files_read, walk.bytes_read);
     if let Some(last) = plan.last() {
-        let dry = latest_restore(store, last.key).await?;
+        let dry = latest_restore(store, inventory.clone(), last.key).await?;
         files_read = files_read.saturating_add(dry.files_read);
         bytes_read = bytes_read.saturating_add(dry.bytes_read);
         if let Some((key, error)) = dry.fault
@@ -744,14 +747,16 @@ impl<'a> Walk<'a> {
                 opened = true;
                 self.files_read = self.files_read.saturating_add(1);
             }
-            // The listed size is advisory: only the decoder knows where a file ends.
-            if chunk.is_empty() {
-                break;
-            }
+            // The listed size is advisory: only the decoder knows where a file
+            // ends, and a short chunk is the end of the object (the read
+            // contract), so no empty read follows to learn it.
             let len = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
             offset = offset.saturating_add(len);
             self.bytes_read = self.bytes_read.saturating_add(len);
             failure = feed_all(&mut decoder, &chunk).err();
+            if len < chunk_len().get() {
+                break;
+            }
         }
         let header = decoder.header().copied();
         let decoded = match failure {

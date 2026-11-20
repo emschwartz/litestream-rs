@@ -357,16 +357,22 @@ mod cases {
     }
 
     fn verify_row(rig: &Rig, depth: Depth) -> Row {
+        verify_counted(rig, depth).0
+    }
+
+    /// The row and the number of files verify says it opened.
+    fn verify_counted(rig: &Rig, depth: Depth) -> (Row, usize) {
         let store = rig.store();
         let (report, counts) = rig.counted(|| block_on(verify(&store, depth)));
         let report = report.unwrap();
         assert!(report.findings().is_empty(), "{:?}", report.findings());
-        Row {
+        let row = Row {
             what: format!("verify {depth:?}"),
             counts,
             f1_heads: FILES,
             note: format!("{} files read", report.files_read()),
-        }
+        };
+        (row, report.files_read())
     }
 
     fn boot_row(rig: &Rig) -> Row {
@@ -621,6 +627,26 @@ mod cases {
             assert_eq!(row.counts.head, 0, "{}", row.what);
         }
         assert_eq!(names.counts.get, 0, "Names reads no object");
+    }
+
+    /// Task 8g6: every file is one GET (a short chunk is the end of the
+    /// object, no empty read follows), and one listing serves the walk and the
+    /// dry run. The latest plan's files are opened twice by design (the walk,
+    /// then the dry run), so GETs equal the files verify reports opening.
+    #[test]
+    fn verify_reads_each_file_once() {
+        let rig = Rig::build();
+        let names = verify_row(&rig, Depth::Names);
+        let (contents, opened) = verify_counted(&rig, Depth::Contents);
+        contents.print();
+        let plan_files = opened - FILES;
+        assert_eq!(contents.counts.get, opened, "one GET per file opened");
+        assert_eq!(
+            contents.counts.get,
+            FILES + plan_files,
+            "every listed file once, the latest plan's files once more"
+        );
+        assert_eq!(contents.counts.list, names.counts.list, "one listing");
     }
 
     #[test]

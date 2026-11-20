@@ -564,15 +564,15 @@ fn a_file_that_vanishes_mid_walk_is_a_note() {
     let store = Wrapped::new(clean());
     store.vanish.lock().unwrap().insert(key(0, 2, 2));
     let report = contents(&store);
-    // The file is really gone when the dry run lists again, so the replica
-    // has a gap and the latest state does not restore.
+    // The dry run plans over the walk's listing, trips on the missing file,
+    // lists afresh and finds a gap, so the latest state does not restore.
     assert!(matches!(
         report.findings(),
         [Finding::Vanished { key: k }, Finding::LatestRestoreFails { key: None, .. }] if *k == key(0, 2, 2)
     ));
     assert_eq!(report.findings()[0].severity(), Severity::Note);
     assert_eq!(report.worst(), Some(Severity::Unrestorable));
-    assert_eq!(report.files_read(), 2);
+    assert_eq!(report.files_read(), 3);
 }
 
 #[test]
