@@ -29,7 +29,7 @@ mod state;
 use std::num::NonZeroU32;
 use std::time::Duration;
 
-use lsr_ltx::{Timestamp, Txid};
+use lsr_ltx::{PageSize, Timestamp, Txid};
 use lsr_wal::{OpenError, WalReader};
 
 pub use state::Phase;
@@ -47,7 +47,9 @@ use crate::maintain::{
     Due, Hold, Job, MAX_DELETE, MaintainError, Maintenance, Outcome, due, run_compact, run_delete,
 };
 use crate::position::{Continuity, Position, SyncedThrough};
-use crate::recover::{FrameCheck, Miss, Probes, Recovered, Tip, TipView, WalView, recover};
+use crate::recover::{
+    FrameCheck, Miss, Probes, Recovered, Tip, TipView, WalView, read_header, recover,
+};
 use crate::snapshot::{SnapshotFailed, write_snapshot};
 use crate::source::{CheckpointMode, Checkpointer, CommittedRead, PageSource, WalSource};
 use crate::stamps::{ResolveError, Stamps, resolve};
@@ -198,6 +200,9 @@ pub struct Actor {
     staged: Option<Txid>,
     /// Set when the next sync is a snapshot.
     pending: Option<SnapshotCause>,
+    /// The replica's page size, one per prefix; `None` while the replica and
+    /// staging are both empty.
+    page_size: Option<PageSize>,
     /// The last sync stopped at the cap: more is committed.
     more_wal: bool,
     checkpoint: CheckpointState,
@@ -303,6 +308,7 @@ impl Actor {
             position: None,
             staged: None,
             pending: None,
+            page_size: None,
             more_wal: false,
             // Replaced at boot, when the time is known.
             checkpoint: CheckpointState::boot(Timestamp::from_unix_millis(0)),
@@ -405,10 +411,6 @@ impl Actor {
                 };
                 self.ran(Event::Retrying { fault, until }, now)
             }
-            Policy::Resnapshot(cause) => {
-                self.pending = Some(cause);
-                self.ran(Event::Resnapshot(cause), now)
-            }
             Policy::Halt(cause) => self.halt(cause),
         }
     }
@@ -450,10 +452,16 @@ impl Actor {
             Ok(listed) => listed.state,
             Err(failed) => return self.fault(Lane::Sync, failed.fault, now),
         };
-        let (tip, recovered) = match boot_recover(env.wal, env.staging, upload.confirmed()).await {
+        let booted = boot_recover(env.wal, env.staging, env.remote, upload.confirmed()).await;
+        let Booted {
+            tip,
+            recovered,
+            page_size,
+        } = match booted {
             Ok(found) => found,
             Err(fault) => return self.fault(Lane::Sync, fault, now),
         };
+        self.page_size = page_size;
         let cause = match recovered {
             Recovered::Continue(position) | Recovered::WalRestarted(position) => {
                 self.position = Some(position);
@@ -636,6 +644,11 @@ impl Actor {
         let Some(mut reader) = open_reader(env.wal)? else {
             return self.without_wal(env.wal, committed);
         };
+        let size = reader.header().page_size();
+        if let Some(was) = self.page_size.filter(|was| *was != size) {
+            return Err(Fault::PageSizeChanged { was, now: size });
+        }
+        self.page_size = Some(size);
         let step = match self.plan_step(env.wal, &mut reader, committed)? {
             Ok(step) => step,
             Err(verdict) => return Ok(verdict),
@@ -1105,18 +1118,64 @@ impl Actor {
     }
 }
 
-/// The newest staged file and what recovery makes of it.
-async fn boot_recover<W: WalSource, L: ObjectStore>(
+/// What a boot found.
+struct Booted {
+    /// The newest staged file.
+    tip: Option<TipView>,
+    /// What recovery makes of it.
+    recovered: Recovered,
+    /// The replica's page size, as far as boot could tell.
+    page_size: Option<PageSize>,
+}
+
+/// The newest staged file, the replica's page size, and what recovery makes
+/// of them. A WAL whose page size is not the replica's halts here, before
+/// anything is staged.
+async fn boot_recover<W: WalSource, L: ObjectStore, R: ObjectStore>(
     wal: &mut W,
     staging: &L,
-    remote: Option<Txid>,
-) -> Result<(Option<TipView>, Recovered), Fault> {
+    remote: &R,
+    confirmed: Option<Txid>,
+) -> Result<Booted, Fault> {
     let committed = wal.committed().map_err(Fault::from_source)?;
     let mut reader = open_reader(wal)?;
     let tip = TipView::load(staging, reader.as_mut()).await?;
     let view = wal_view(wal, reader.as_ref(), committed)?;
-    let recovered = recover(tip.as_ref().map(Tip::Boot), &view, remote);
-    Ok((tip, recovered))
+    let page_size = match tip {
+        Some(TipView::Readable { page_size, .. }) => Some(page_size),
+        Some(TipView::Unreadable { .. }) | None if confirmed.is_some() => {
+            replica_page_size(remote).await?
+        }
+        Some(TipView::Unreadable { .. }) | None => None,
+    };
+    let now = view.header.map(|header| header.page_size());
+    let recovered = match page_size.zip(now).filter(|(was, now)| was != now) {
+        Some((was, now)) => Recovered::Halt(HaltCause::PageSizeChanged { was, now }),
+        None => recover(tip.as_ref().map(Tip::Boot), &view, confirmed),
+    };
+    Ok(Booted {
+        tip,
+        recovered,
+        page_size,
+    })
+}
+
+/// The page size in the header of the replica's newest file; `None` when the
+/// replica is empty or that header does not decode. Every file of a prefix
+/// has one page size, so one header answers for all of them.
+async fn replica_page_size<R: ObjectStore>(remote: &R) -> Result<Option<PageSize>, Fault> {
+    let inventory = Inventory::load(remote)
+        .await
+        .map_err(|err| inventory_fault(&err))?;
+    let newest = inventory
+        .files()
+        .iter()
+        .max_by_key(|file| file.key.range().max());
+    let Some(newest) = newest else {
+        return Ok(None);
+    };
+    let header = read_header(remote, &newest.key, Fault::from_remote).await?;
+    Ok(header.map(|header| header.page_size()))
 }
 
 /// A recovery verdict as the step to run, or as what ends the tick.

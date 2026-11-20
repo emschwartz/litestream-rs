@@ -224,7 +224,7 @@ fn rule_4_a_torn_header_is_wal_missing() {
 
 // Rule 5.
 #[test]
-fn rule_5_a_new_page_size_snapshots() {
+fn rule_5_a_new_page_size_halts() {
     let wal = fresh();
     let pos = position(&wal, 2, Continuity::Unpinned);
     let other = FakeWal::new(PageSize::new(1024).unwrap(), salts(10));
@@ -234,7 +234,10 @@ fn rule_5_a_new_page_size_snapshots() {
             &view(&other),
             None
         ),
-        snapshot(Some(2), SnapshotCause::PageSizeChanged)
+        Recovered::Halt(HaltCause::PageSizeChanged {
+            was: PageSize::MIN,
+            now: PageSize::new(1024).unwrap(),
+        })
     );
 }
 
@@ -761,6 +764,7 @@ fn shape(recovered: &Recovered) -> String {
     match recovered {
         Recovered::Continue(_) => "Continue".into(),
         Recovered::WalRestarted(_) => "WalRestarted".into(),
+        Recovered::Halt(HaltCause::PageSizeChanged { .. }) => "Halt(PageSizeChanged)".into(),
         Recovered::Halt(cause) => format!("Halt({cause:?})"),
         Recovered::Snapshot { cause, .. } => match cause {
             SnapshotCause::BehindRemote { .. } => "BehindRemote".into(),
@@ -768,7 +772,6 @@ fn shape(recovered: &Recovered) -> String {
             SnapshotCause::FirstSync
             | SnapshotCause::LocalTipUnreadable
             | SnapshotCause::WalMissing
-            | SnapshotCause::PageSizeChanged
             | SnapshotCause::GenerationChanged
             | SnapshotCause::PrevFrameMismatch
             | SnapshotCause::LastPageMismatch
@@ -896,7 +899,7 @@ fn generated_triples_cover_every_outcome_recover_can_produce() {
         "BehindRemote",
         "LocalTipUnreadable",
         "WalMissing",
-        "PageSizeChanged",
+        "Halt(PageSizeChanged)",
         "GenerationChanged",
         "PrevFrameMismatch",
         "LastPageMismatch",

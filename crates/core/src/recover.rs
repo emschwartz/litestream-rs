@@ -19,6 +19,10 @@
 //! connection's own count (ruling V4). At boot, rule 9 compares the whole tip with
 //! the WAL range it covers (page bytes and commit size), not only the last page,
 //! so a tail dropped by power loss and regrown differently is a rewind (ruling V3).
+//!
+//! Rule 5 is a halt, not a snapshot: a replica prefix holds one page size. At
+//! boot the actor also halts when the tip is not readable but the replica's
+//! newest file names another size than the WAL, before `recover` runs.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Seek};
@@ -36,7 +40,7 @@ use crate::fault::{Fault, HaltCause, SnapshotCause};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::position::{Continuity, LastPage, Position, ReadEpoch, WalFileLen};
 use crate::source::CommittedRead;
-use crate::store::{ObjectStore, PageLimit, ReadLen};
+use crate::store::{ObjectStore, PageLimit, ReadLen, StoreError};
 
 /// How much of the tip one store read asks for while it is verified.
 const TIP_READ: u32 = 1 << 20;
@@ -153,8 +157,8 @@ impl TipView {
             return Ok(None);
         };
         let txid = newest.key.range().max();
-        let single = newest.key.range().min() == txid;
-        let Some(header) = read_header(staging, &newest.key).await?.filter(|_| single) else {
+        let header = read_header(staging, &newest.key, Fault::from_staging).await?;
+        let Some(header) = header.filter(|_| newest.key.range().min() == txid) else {
             return Ok(Some(Self::Unreadable { txid }));
         };
         let fields = header.fields();
@@ -369,16 +373,18 @@ async fn newest_level_zero<L: ObjectStore>(staging: &L) -> Result<Option<FileInf
     }
 }
 
-/// The tip's header; `None` when it is short or malformed.
-async fn read_header<L: ObjectStore>(staging: &L, key: &FileKey) -> Result<Option<Header>, Fault> {
+/// A file's header; `None` when it is short or malformed. `fault` names a
+/// store error as staging's or the replica's.
+pub(crate) async fn read_header<S: ObjectStore>(
+    store: &S,
+    key: &FileKey,
+    fault: fn(&StoreError) -> Fault,
+) -> Result<Option<Header>, Fault> {
     let len = u32::try_from(HEADER_LEN).ok().and_then(ReadLen::new);
     let Some(len) = len else {
         return Err(Fault::Bug);
     };
-    let bytes = staging
-        .read(key, 0, len)
-        .await
-        .map_err(|err| Fault::from_staging(&err))?;
+    let bytes = store.read(key, 0, len).await.map_err(|err| fault(&err))?;
     Ok(<[u8; HEADER_LEN]>::try_from(bytes)
         .ok()
         .and_then(|raw| Header::decode(&raw).ok()))
@@ -570,7 +576,10 @@ pub fn recover_traced(tip: Option<Tip<'_>>, wal: &WalView, remote: Option<Txid>)
         });
     };
     if seen.page_size != header.page_size() {
-        return snapshot(SnapshotCause::PageSizeChanged);
+        return plain(Recovered::Halt(HaltCause::PageSizeChanged {
+            was: seen.page_size,
+            now: header.page_size(),
+        }));
     }
     if seen.salts != header.salts() {
         return restarted(&tip, &seen, &header, wal, after);

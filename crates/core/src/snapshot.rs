@@ -92,7 +92,10 @@ async fn run<W: WalSource, P: PageSource, S: ObjectStore>(
         return Err(Fault::ReadTxLost);
     }
     if reader.header().page_size() != page_size {
-        return Err(Fault::PageSizeChanged);
+        return Err(Fault::PageSizeChanged {
+            was: page_size,
+            now: reader.header().page_size(),
+        });
     }
     if committed.end().salts() != salts || position.cursor().salts() != salts {
         return Err(Fault::WalMoved);

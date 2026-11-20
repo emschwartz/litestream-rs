@@ -137,9 +137,15 @@ policy_is!(
 );
 policy_is!(read_tx_lost_retries, Fault::ReadTxLost, doubling());
 policy_is!(
-    page_size_changed_resnapshots,
-    Fault::PageSizeChanged,
-    Policy::Resnapshot(SnapshotCause::PageSizeChanged)
+    page_size_changed_halts_naming_both_sizes,
+    Fault::PageSizeChanged {
+        was: PageSize::MIN,
+        now: ps()
+    },
+    halt(HaltCause::PageSizeChanged {
+        was: PageSize::MIN,
+        now: ps()
+    })
 );
 policy_is!(
     wal_corrupt_below_committed_halts,
@@ -188,7 +194,7 @@ fn every_fault_has_a_named_policy_test() {
         | Fault::WalChangedUnderRead
         | Fault::NothingToSnapshot
         | Fault::ReadTxLost
-        | Fault::PageSizeChanged
+        | Fault::PageSizeChanged { .. }
         | Fault::WalCorruptBelowCommitted
         | Fault::WalTruncatedBelowCommitted
         | Fault::WalUnlinked
@@ -437,7 +443,10 @@ fn from_wal_maps_every_variant() {
                 expected: ps(),
                 found: PageSize::MIN,
             },
-            Fault::PageSizeChanged,
+            Fault::PageSizeChanged {
+                was: PageSize::MIN,
+                now: ps(),
+            },
         ),
         (
             WalError::EndNotAtCommit { end: at() },
@@ -461,7 +470,10 @@ fn from_resume_maps_every_variant() {
                 expected: ps(),
                 found: PageSize::MIN,
             },
-            Fault::PageSizeChanged,
+            Fault::PageSizeChanged {
+                was: PageSize::MIN,
+                now: ps(),
+            },
         ),
         (ResumeError::Truncated { at: at() }, Fault::WalMoved),
         (

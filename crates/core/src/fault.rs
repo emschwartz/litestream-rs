@@ -17,7 +17,7 @@
 use std::num::NonZeroU32;
 use std::time::Duration;
 
-use lsr_ltx::{Timestamp, Txid};
+use lsr_ltx::{PageSize, Timestamp, Txid};
 use lsr_wal::{PageMapError, ReadPageError, ResumeError, WalError, WalOffset};
 
 use crate::source::SourceError;
@@ -78,8 +78,13 @@ pub enum Fault {
     NothingToSnapshot,
     /// The read transaction could not be retaken.
     ReadTxLost,
-    /// The database page size changed.
-    PageSizeChanged,
+    /// The database's page size is not the one its replica holds.
+    PageSizeChanged {
+        /// The replica's page size.
+        was: PageSize,
+        /// The database's page size now.
+        now: PageSize,
+    },
     /// A committed WAL frame fails its checksum or salt.
     WalCorruptBelowCommitted,
     /// The WAL file ends inside the committed region.
@@ -106,8 +111,6 @@ pub enum SnapshotCause {
     LocalTipUnreadable,
     /// The WAL file is missing or its header is torn.
     WalMissing,
-    /// The database page size changed.
-    PageSizeChanged,
     /// The WAL restarted and continuity does not prove nothing was lost.
     GenerationChanged,
     /// The frame before the position does not verify, or the position is mid-transaction.
@@ -151,6 +154,17 @@ pub enum HaltCause {
     WalTruncated,
     /// The WAL file is gone.
     WalUnlinked,
+    /// The database's page size is not the one its replica holds. A replica
+    /// prefix holds one page size, as Go's does (it reads the size once,
+    /// `db.go:1191`, and its compactor refuses mixed sizes,
+    /// `ltx/compactor.go:122`); the way out is a new prefix, and the old one
+    /// keeps every state up to the change.
+    PageSizeChanged {
+        /// The replica's page size.
+        was: PageSize,
+        /// The database's page size now.
+        now: PageSize,
+    },
     /// The shutdown deadline arrived.
     Shutdown,
     /// A bug in this program.
@@ -172,8 +186,6 @@ pub enum Backoff {
 pub enum Policy {
     /// Try again after a wait.
     Retry(Backoff),
-    /// Take a snapshot.
-    Resnapshot(SnapshotCause),
     /// Stop.
     Halt(HaltCause),
 }
@@ -199,7 +211,10 @@ pub const fn policy(fault: &Fault) -> Policy {
         | Fault::WalChangedUnderRead
         | Fault::NothingToSnapshot
         | Fault::ReadTxLost => Policy::Retry(Backoff::Doubling),
-        Fault::PageSizeChanged => Policy::Resnapshot(SnapshotCause::PageSizeChanged),
+        Fault::PageSizeChanged { was, now } => Policy::Halt(HaltCause::PageSizeChanged {
+            was: *was,
+            now: *now,
+        }),
         Fault::StoreAuth => Policy::Halt(HaltCause::Credentials),
         Fault::StoreRefused => Policy::Halt(HaltCause::StoreRefused),
         Fault::RemoteCorrupt => Policy::Halt(HaltCause::RemoteCorrupt),
@@ -299,7 +314,10 @@ impl Fault {
             WalError::CorruptBelowCommitted { .. } => Self::WalCorruptBelowCommitted,
             WalError::TruncatedBelowCommitted { .. } => Self::WalTruncatedBelowCommitted,
             WalError::Restarted { .. } | WalError::CursorPastEnd { .. } => Self::WalMoved,
-            WalError::PageSizeMismatch { .. } => Self::PageSizeChanged,
+            WalError::PageSizeMismatch { expected, found } => Self::PageSizeChanged {
+                was: found,
+                now: expected,
+            },
             WalError::EndNotAtCommit { .. } => Self::WalIndexInconsistent,
             WalError::TooManyFrames | WalError::Io(_) => Self::LocalIo,
         }
@@ -312,7 +330,10 @@ impl Fault {
     pub fn from_resume(err: ResumeError) -> Self {
         match err {
             ResumeError::Io(_) => Self::LocalIo,
-            ResumeError::PageSizeMismatch { .. } => Self::PageSizeChanged,
+            ResumeError::PageSizeMismatch { expected, found } => Self::PageSizeChanged {
+                was: found,
+                now: expected,
+            },
             ResumeError::Truncated { .. } | ResumeError::Restarted { .. } => Self::WalMoved,
             ResumeError::PrevFrame { .. } | ResumeError::NotAtCommit { .. } => Self::Bug,
         }

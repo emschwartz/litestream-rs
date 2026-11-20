@@ -421,21 +421,95 @@ fn halt_is_terminal() {
     assert_eq!(actor.phase(), Phase::Halted(HaltCause::Credentials));
 }
 
+fn big() -> PageSize {
+    PageSize::new(1024).unwrap()
+}
+
+/// The application vacuums to `size` while the engine is down: a new WAL and
+/// database file at that size, with one commit.
+fn resize(rig: &mut Rig, size: PageSize) {
+    let page = |n| PageNo::new(n, size).unwrap();
+    rig.wal = FakeWal::new(
+        size,
+        Salts {
+            salt1: 30,
+            salt2: 40,
+        },
+    );
+    rig.db = FakeDb::new(size);
+    rig.db.set_page_count(3);
+    for n in 1..=3 {
+        rig.db.write_page(page(n), &vec![9; size.bytes()]);
+    }
+    rig.ck = FakeCheckpointer::new(rig.wal.clone());
+    rig.wal
+        .append_tx(&[(page(1), vec![9; size.bytes()])], nz(3));
+}
+
+fn page_size_changed() -> Tick {
+    Tick::Halted(HaltCause::PageSizeChanged {
+        was: PS,
+        now: big(),
+    })
+}
+
+/// Every key at every level of both stores.
+fn everything(rig: &Rig) -> (Vec<FileInfo>, Vec<FileInfo>) {
+    let all = |store: &Counting| {
+        block_on(Inventory::load(&store.inner))
+            .unwrap()
+            .files()
+            .to_vec()
+    };
+    (all(&rig.staging), all(&rig.remote))
+}
+
 #[test]
-fn resnapshot_policy_forces_snapshot_step() {
-    let (mut rig, mut actor) = caught_up();
-    let staged = Rig::files(&rig.staging, Level::ZERO).len();
-    let tick = actor.fault(Lane::Sync, Fault::PageSizeChanged, ts(T0 + 10));
-    assert_eq!(
-        event(&tick),
-        Some(&Event::Resnapshot(SnapshotCause::PageSizeChanged))
+fn a_page_size_change_halts_at_boot_before_anything_is_staged() {
+    let (mut rig, _) = caught_up();
+    let before = everything(&rig);
+    resize(&mut rig, big());
+    let mut actor = Actor::new(cfg());
+    assert_eq!(rig.tick(&mut actor, T0 + 10), page_size_changed());
+    assert_eq!(everything(&rig), before);
+}
+
+#[test]
+fn with_staging_gone_the_replica_names_the_page_size() {
+    let (mut rig, _) = caught_up();
+    rig.staging = Counting::default();
+    let before = everything(&rig);
+    resize(&mut rig, big());
+    let mut actor = Actor::new(cfg());
+    assert_eq!(rig.tick(&mut actor, T0 + 10), page_size_changed());
+    assert_eq!(everything(&rig), before);
+}
+
+#[test]
+fn an_empty_replica_takes_any_page_size() {
+    let mut rig = Rig::new();
+    resize(&mut rig, big());
+    let mut actor = Actor::new(cfg());
+    let ticks = rig.settle(&mut actor, T0);
+    assert!(
+        ticks.iter().all(|tick| !matches!(tick, Tick::Halted(_))),
+        "{ticks:?}"
     );
-    assert_eq!(next_of(&tick), Some(Next::Now));
-    assert_eq!(
-        event(&rig.tick(&mut actor, T0 + 10)),
-        Some(&Event::Synced { files: 1 })
-    );
-    assert_eq!(Rig::files(&rig.staging, Level::ZERO).len(), staged + 1);
+    let (_, remote) = everything(&rig);
+    assert!(!remote.is_empty());
+}
+
+#[test]
+fn a_wal_that_returns_at_another_page_size_halts_before_staging() {
+    let (mut rig, _) = caught_up();
+    rig.wal.remove_file();
+    let mut actor = Actor::new(cfg());
+    rig.follow(&mut actor, T0 + 10, 50);
+    let before = everything(&rig);
+    resize(&mut rig, big());
+    let ticks = rig.follow(&mut actor, T0 + 20, 50);
+    assert_eq!(ticks.last(), Some(&page_size_changed()), "{ticks:?}");
+    assert_eq!(everything(&rig), before);
 }
 
 #[test]
