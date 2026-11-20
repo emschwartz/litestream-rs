@@ -152,7 +152,16 @@ mod review {
             let out = plan(&inv, target);
             let ends = reachable_ends(&kept, g);
             let want = want_end(&kept, g);
-            let exists = want.is_some_and(|w| ends.contains(&w));
+            // An instant before a hole: files of any stamp lie past the end and
+            // none of them starts at or before one past it.
+            let before_a_hole = |w: u64| {
+                matches!(g, G::AsOf(_))
+                    && kept.iter().any(|f| f.max > w)
+                    && !kept.iter().any(|f| {
+                        (f.level < 9 || f.min == 1) && f.min <= w.saturating_add(1) && f.max > w
+                    })
+            };
+            let exists = want.is_some_and(|w| ends.contains(&w) && !before_a_hole(w));
             let straddlers: Vec<F> = match (exists, want, g) {
                 (true, Some(w), G::AsOf(_)) => straddlers(&kept, g, w),
                 _ => Vec::new(),

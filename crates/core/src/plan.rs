@@ -26,6 +26,12 @@
 //! - A plan must end exactly at the target: at the requested transaction, or
 //!   for the other targets at the largest last transaction of any eligible
 //!   file. Anything short of that is explained, not returned.
+//! - An instant can also fall before a hole: files past the chain's end exist,
+//!   but none of them starts at or before one past it, whatever its stamp. The
+//!   missing transactions may have committed before the instant, so the
+//!   answer is the [`PlanOutcome::Gap`] (or malformed-snapshot refusal) that
+//!   [`RestoreTarget::Latest`] reports for the same listing. A later file
+//!   that does link keeps the outcomes below.
 //! - An instant can fall inside a file. Go stamps a compacted file with its
 //!   newest input's time, so once the finer files are gone, the transactions
 //!   after the chain's end up to the instant cannot be told from the rest of
@@ -219,12 +225,39 @@ pub fn plan(inventory: &Inventory, target: RestoreTarget) -> PlanOutcome {
         }
     };
     if want == Some(chain.reaches()) {
+        if bridges_nothing_past(inventory, target, chain.reaches()) {
+            return explain_shortfall(
+                inventory,
+                inventory.files(),
+                RestoreTarget::Latest,
+                chain.reaches(),
+            );
+        }
         return match straddling_file(inventory, target, chain.reaches()) {
             Some(file) => PlanOutcome::AsOfInsideFile { chain, file },
             None => PlanOutcome::Plan(chain),
         };
     }
     explain_shortfall(inventory, &pool, target, chain.reaches())
+}
+
+/// Whether an `AsOf` chain stops at a hole: the listing holds files past
+/// the chain's end, but none of them, whatever its stamp, starts at or before
+/// one past it (a refused level-9 file cannot link: it cannot be applied). The files the instant cut away are all that could have said
+/// what the missing transactions were stamped, so the instant cannot be
+/// certified. A file that links but is stamped at or after the instant is not
+/// a hole: [`straddling_file`] decides that case.
+fn bridges_nothing_past(inventory: &Inventory, target: RestoreTarget, reach: Txid) -> bool {
+    let RestoreTarget::AsOf(_) = target else {
+        return false;
+    };
+    let files = inventory.files();
+    let links = |info: &FileInfo| {
+        is_usable_beyond(info)
+            && touches(info.key.range().min(), reach)
+            && info.key.range().max() > reach
+    };
+    files.iter().any(|info| info.key.range().max() > reach) && !files.iter().any(links)
 }
 
 /// The file that makes an `AsOf` chain ambiguous, if any: usable, created at
@@ -422,6 +455,63 @@ mod tests {
     }
 
     #[test]
+    fn as_of_before_a_hole_reports_the_gap() {
+        let files = [file(0, 1, 2, 100), file(0, 5, 6, 200)];
+        let outcome = plan(
+            &inv(&files),
+            RestoreTarget::AsOf(Timestamp::from_unix_millis(101)),
+        );
+        assert_eq!(
+            outcome,
+            PlanOutcome::Gap {
+                have_through: txid(2),
+                next_starts: txid(5)
+            }
+        );
+        assert_eq!(
+            outcome,
+            plan(&inv(&files), RestoreTarget::Latest),
+            "the Latest planner reports the same hole"
+        );
+    }
+
+    #[test]
+    fn as_of_before_a_hole_that_a_later_snapshot_covers_is_not_a_gap() {
+        let files = [file(0, 1, 2, 100), file(0, 5, 6, 200), file(9, 1, 6, 300)];
+        let outcome = plan(
+            &inv(&files),
+            RestoreTarget::AsOf(Timestamp::from_unix_millis(101)),
+        );
+        assert!(
+            matches!(outcome, PlanOutcome::AsOfInsideFile { ref file, .. } if file.level().get() == 9),
+            "{outcome:?}"
+        );
+    }
+
+    #[test]
+    fn as_of_with_a_linking_file_stamped_after_the_instant_keeps_its_outcome() {
+        let files = [file(0, 1, 2, 100), file(0, 3, 6, 200)];
+        let outcome = plan(
+            &inv(&files),
+            RestoreTarget::AsOf(Timestamp::from_unix_millis(101)),
+        );
+        assert!(
+            matches!(outcome, PlanOutcome::AsOfInsideFile { .. }),
+            "{outcome:?}"
+        );
+    }
+
+    #[test]
+    fn as_of_with_nothing_past_the_reach_plans() {
+        let files = [file(0, 1, 2, 100)];
+        let outcome = plan(
+            &inv(&files),
+            RestoreTarget::AsOf(Timestamp::from_unix_millis(101)),
+        );
+        assert_eq!(keys(&outcome), vec![key(0, 1, 2)]);
+    }
+
+    #[test]
     fn a_gap_at_level_zero_is_a_gap_for_every_target() {
         // Transaction 6 is gone from L0 and nothing covers it.
         let files = [
@@ -457,7 +547,8 @@ mod tests {
             &inv(&files),
             RestoreTarget::AsOf(Timestamp::from_unix_millis(600)),
         );
-        assert_eq!(keys(&as_of).last(), Some(&key(0, 5, 5)));
+        // Transaction 6 is absent and may have committed before the instant.
+        assert_eq!(as_of, gap(5, 7));
     }
 
     #[test]
@@ -781,7 +872,15 @@ mod tests {
             &inv(&files),
             RestoreTarget::AsOf(Timestamp::from_unix_millis(950)),
         );
-        assert_eq!(keys(&outcome), vec![key(9, 1, 3)]);
+        // Not AsOfInsideFile; the history past the chain is unusable, which is
+        // what Latest reports for the same listing.
+        assert_eq!(
+            outcome,
+            PlanOutcome::MalformedSnapshot {
+                have_through: txid(3),
+                file: key(9, 2, 10)
+            }
+        );
     }
 
     #[test]
@@ -899,6 +998,19 @@ mod tests {
             .iter()
             .filter(|s| s.min == 1)
             .any(|s| some_chain_ends_at(&admitted, s.max, end))
+            && !model_hole(files, goal, end)
+    }
+
+    /// An instant before a hole: some file, of any stamp, lies past the end,
+    /// and none of them starts at or before one past it.
+    fn model_hole(files: &[Spec], goal: Goal, end: u64) -> bool {
+        let Goal::AsOf(_) = goal else {
+            return false;
+        };
+        files.iter().any(|s| s.max > end)
+            && !files.iter().any(|s| {
+                (s.level < 9 || s.min == 1) && s.min <= end.saturating_add(1) && s.max > end
+            })
     }
 
     /// Whether an instant cuts through a file: some usable file later than the
@@ -1032,6 +1144,33 @@ mod tests {
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(2000))]
+        #[test]
+        fn as_of_never_plans_across_a_hole_latest_reports(history in history(), t in -50i64..=2600) {
+            let infos: Vec<FileInfo> = history.files.iter().map(|s| s.info()).collect();
+            let inventory = Inventory::from_files(infos).unwrap();
+            let reach = match plan(&inventory, RestoreTarget::AsOf(Timestamp::from_unix_millis(t))) {
+                PlanOutcome::Plan(chain) | PlanOutcome::AsOfInsideFile { chain, .. } => chain.reaches(),
+                PlanOutcome::EmptyReplica
+                | PlanOutcome::NoSnapshot { .. }
+                | PlanOutcome::BeyondNewest { .. }
+                | PlanOutcome::Gap { .. }
+                | PlanOutcome::InsideFile { .. }
+                | PlanOutcome::MalformedSnapshot { .. } => return Ok(()),
+            };
+            match plan(&inventory, RestoreTarget::Latest) {
+                PlanOutcome::Gap { have_through, .. }
+                | PlanOutcome::MalformedSnapshot { have_through, .. } => {
+                    prop_assert!(have_through > reach, "planned at {reach}, Latest stops at {have_through}");
+                }
+                PlanOutcome::Plan(_)
+                | PlanOutcome::EmptyReplica
+                | PlanOutcome::NoSnapshot { .. }
+                | PlanOutcome::BeyondNewest { .. }
+                | PlanOutcome::AsOfInsideFile { .. }
+                | PlanOutcome::InsideFile { .. } => {}
+            }
+        }
+
         #[test]
         fn plan_agrees_with_the_exhaustive_model(
             (history, goal) in case(),
