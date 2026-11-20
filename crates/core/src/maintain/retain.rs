@@ -222,9 +222,9 @@ fn gate(inventory: &Inventory, published: Option<Txid>, state: &MaintainState) -
         .or_else(|| latest_unplannable(inventory))
 }
 
-/// A compaction output the store rejected that is still listed.
+/// A compaction output or a snapshot the store rejected that is still listed.
 fn distrusted(inventory: &Inventory, state: &MaintainState) -> Option<Hold> {
-    Level::ALL.iter().skip(1).take(8).find_map(|level| {
+    Level::ALL.iter().skip(1).find_map(|level| {
         let key = state.distrusted_at(*level)?;
         inventory
             .level(*level)

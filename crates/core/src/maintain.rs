@@ -20,7 +20,9 @@
 //! Order: compaction of level 1, then 2, up to the top level, then the
 //! snapshot. Lower levels first so a higher level compacts what the one below
 //! just produced. A level holding a distrusted output (one the store rejected
-//! and that could not be removed) plans that key's delete before anything else.
+//! and that could not be removed) plans that key's delete before anything else;
+//! so does the snapshot, whose rejected file would otherwise stay listed as
+//! the base of every restore between it and the next one.
 //!
 //! A level compacts when its destination's newest file was not created inside
 //! the current window (`go_truncate(now, interval)`), and then only the source
@@ -391,9 +393,12 @@ fn decide(
             return Ok(Due::Run(job));
         }
     }
-    let step = match state.backing_off_until(Level::SNAPSHOT, now) {
-        Some(retry) => Step::Wait(retry),
-        None => plan_snapshot(inventory, now, config, published, stamps)?,
+    let waits = state.backing_off_until(Level::SNAPSHOT, now);
+    let step = match (waits, state.distrusted_at(Level::SNAPSHOT)) {
+        (Some(retry), _) => Step::Wait(retry),
+        // A rejected snapshot goes before the next one is written.
+        (None, Some(bad)) => delete_first(bad),
+        (None, None) => plan_snapshot(inventory, now, config, published, stamps)?,
     };
     if let Some(job) = absorb(step, &mut until) {
         return Ok(Due::Run(job));
@@ -456,7 +461,7 @@ fn plan_level(
         return Ok(Step::Idle);
     }
     if let Some(bad) = state.distrusted_at(dst) {
-        return Ok(DeleteJob::new(vec![bad]).map_or(Step::Idle, |job| Step::Run(Job::Delete(job))));
+        return Ok(delete_first(bad));
     }
     let dst_files = inventory.level(dst);
     let dst_last = dst_files.last();
@@ -486,6 +491,11 @@ fn plan_level(
             None => Step::Idle,
         },
     )
+}
+
+/// The delete of a distrusted output, alone.
+fn delete_first(bad: FileKey) -> Step {
+    DeleteJob::new(vec![bad]).map_or(Step::Idle, |job| Step::Run(Job::Delete(job)))
 }
 
 /// The longest strictly contiguous prefix, at most [`MAX_INPUTS`] files.

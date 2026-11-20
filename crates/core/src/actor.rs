@@ -287,6 +287,15 @@ fn compact_fault(err: &CompactError) -> Fault {
     }
 }
 
+/// Whether a failed snapshot may have left an object under its key: the store
+/// answered the commit with a size or a checksum that is not the one sent.
+const fn leaves_bad_snapshot(fault: Fault) -> bool {
+    matches!(
+        fault,
+        Fault::UploadAmbiguous | Fault::UploadChecksumMismatch
+    )
+}
+
 fn stamp_fault(err: &ResolveError) -> Fault {
     match err {
         ResolveError::Store(err) => Fault::from_remote(err),
@@ -1128,7 +1137,13 @@ impl Actor {
                 let event = MaintainedEvent::Snapshot(info);
                 self.ran(Event::Maintained { event, stamps_read }, now)
             }
-            Err(SnapshotFailed { fault, .. }) => {
+            Err(SnapshotFailed { fault, key }) => {
+                // The store took the commit and then said the object is not
+                // what was sent: it is listed, so it goes, as a rejected
+                // compaction output does (R2).
+                if leaves_bad_snapshot(fault) && env.remote.delete(&[key]).await.is_err() {
+                    self.maintain.state.distrust_snapshot(key);
+                }
                 let waiter = self.job_waiter(job, now);
                 self.fault(waiter, fault, now)
             }
