@@ -163,7 +163,7 @@ impl<W: Write> Encoder<W> {
 /// [`EncodeError::Trailer`] when `post_apply` does not fit the header (a
 /// tracked file needs `Checksum::EMPTY`, an untracked one none), and
 /// [`EncodeError::Order`] when the header is a snapshot with commit above 0.
-#[cfg(feature = "testing")]
+#[cfg(any(test, feature = "testing"))]
 pub fn encode_commit_zero(
     header: Header,
     post_apply: Option<Checksum>,
@@ -174,7 +174,37 @@ pub fn encode_commit_zero(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Decoder, HeaderFields, PageSize, Timestamp, Txid, TxidRange};
+    use crate::{Decoder, Event, HeaderFields, PageSize, Timestamp, Txid, TxidRange};
+
+    #[test]
+    fn commit_zero_file_decodes_to_a_verified_empty_file() {
+        let header = Header::new(HeaderFields {
+            tracked: true,
+            page_size: PageSize::new(512).unwrap(),
+            commit: 0,
+            txids: TxidRange::single(Txid::MIN),
+            timestamp: Timestamp::from_unix_millis(7),
+            pre_apply: None,
+            wal: None,
+            node_id: 0,
+        })
+        .unwrap();
+        let bytes = encode_commit_zero(header, Some(Checksum::EMPTY)).unwrap();
+        let mut decoder = Decoder::new();
+        let mut rest = bytes.as_slice();
+        while !rest.is_empty() {
+            let (used, event) = decoder.feed(rest).unwrap();
+            assert!(!matches!(event, Some(Event::Page { .. })), "no pages");
+            rest = &rest[used..];
+        }
+        let verified = decoder.finish().unwrap();
+        assert_eq!(verified.page_count(), 0);
+        assert_eq!(verified.header(), &header);
+        assert!(matches!(
+            Encoder::new(Vec::new(), header),
+            Err(EncodeError::ZeroCommit)
+        ));
+    }
 
     #[test]
     fn bytes_drained_between_pages_reassemble_into_the_same_verified_file() {

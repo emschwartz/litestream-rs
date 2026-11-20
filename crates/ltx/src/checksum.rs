@@ -135,6 +135,24 @@ mod tests {
     }
 
     #[test]
+    fn page_checksum_always_carries_the_flag() {
+        // A raw CRC has bit 63 set about half the time; the flag must be forced
+        // on either way (OR), not toggled (XOR), or half the pages lose it.
+        for n in 1..=64_u32 {
+            let sum = Checksum::of_page(pgno(n), &n.to_le_bytes());
+            assert_eq!(sum.get() & FLAG, FLAG, "page {n}");
+        }
+    }
+
+    #[test]
+    fn checksums_print_as_sixteen_hex_digits() {
+        let sum = Checksum::from_raw(FLAG | 0xab).unwrap();
+        assert_eq!(sum.to_string(), "80000000000000ab");
+        assert_eq!(format!("{sum:?}"), "Checksum(80000000000000ab)");
+        assert_eq!(format!("{:?}", Crc64::new()), "Crc64");
+    }
+
+    #[test]
     fn database_checksum_is_incremental() {
         let a = Checksum::of_page(pgno(1), b"one");
         let b = Checksum::of_page(pgno(2), b"two");

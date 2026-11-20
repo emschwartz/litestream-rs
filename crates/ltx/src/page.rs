@@ -95,6 +95,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn page_numbers_print_as_decimal() {
+        let page = PageNo::new(4242, PageSize::new(4096).unwrap()).unwrap();
+        assert_eq!(page.to_string(), "4242");
+    }
+
+    #[test]
     fn page_size_accepts_only_sqlite_sizes() {
         let valid: Vec<u32> = (0..=17)
             .map(|shift| 1 << shift)

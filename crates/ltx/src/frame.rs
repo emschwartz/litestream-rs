@@ -380,3 +380,56 @@ fn lz4(err: lz4_flex::block::DecompressError) -> FrameError {
         reason: err.to_string(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PS: u32 = 512;
+
+    fn feed(parser: &mut FrameParser, unit: &[u8]) -> Result<Progress, FrameError> {
+        let need = parser.need();
+        let result = parser.consume(unit);
+        if need != unit.len() {
+            return Err(FrameError::BlockLen { len: 0, max: 0 });
+        }
+        result
+    }
+
+    /// A frame of one-byte-or-larger stored blocks that is cut off the moment
+    /// it reaches `max` bytes. The parser must refuse it as soon as the next
+    /// unit would pass the limit (so memory stays bounded), and not before the
+    /// unit that lands exactly on it.
+    #[test]
+    fn frame_limit_is_enforced_mid_frame_and_exactly_at_the_limit() {
+        let size = PageSize::new(PS).unwrap();
+        let max = max_frame_len(size);
+        let mut parser = FrameParser::new(size);
+        let mut page_header = 1_u32.to_be_bytes().to_vec();
+        page_header.extend_from_slice(&[0, 0]);
+        feed(&mut parser, &page_header).unwrap();
+        let mut descriptor = LZ4_MAGIC.to_vec();
+        descriptor.extend_from_slice(&[0x64, 0x40]);
+        feed(&mut parser, &descriptor).unwrap();
+        feed(&mut parser, &[0]).unwrap();
+        assert_eq!(parser.frame_len(), 13);
+
+        // Forty blocks that bring the frame to max - 4 bytes: the next
+        // four-byte size field then lands exactly on max, which is allowed.
+        let blocks = 40;
+        let total = max - 4 - parser.frame_len();
+        let last = total - 4 * blocks - (blocks - 1);
+        for at in 0..blocks {
+            let len = if at + 1 == blocks { last } else { 1 };
+            let tag = STORED | u32::try_from(len).unwrap();
+            feed(&mut parser, &tag.to_le_bytes()).unwrap();
+            feed(&mut parser, &vec![7; len]).unwrap();
+        }
+        assert_eq!(parser.frame_len(), max - 4);
+        let tag = STORED | 1;
+        assert_eq!(
+            feed(&mut parser, &tag.to_le_bytes()),
+            Err(FrameError::FrameTooLong { max })
+        );
+    }
+}

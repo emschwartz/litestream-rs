@@ -28,7 +28,9 @@ pub use checksum::Checksum;
 pub use decoder::{Decoder, Event, ReadDecoder, Verified};
 pub use encoder::Encoder;
 /// Test support for crates that read LTX files; not part of the format.
-#[cfg(feature = "testing")]
+// Compiled for this crate's own tests too, so `just mutants ltx` (which does not
+// enable the feature) exercises it.
+#[cfg(any(test, feature = "testing"))]
 pub mod testing {
     pub use crate::encoder::encode_commit_zero;
 }

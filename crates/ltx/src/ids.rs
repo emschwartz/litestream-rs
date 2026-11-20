@@ -539,6 +539,41 @@ mod tests {
     }
 
     #[test]
+    fn century_and_cycle_boundaries_format_correctly() {
+        // The century terms of the day-of-era formula only matter from the
+        // first day of a century (March 1st) and on the last day of a cycle
+        // (2000-02-29, where `doe / 146_096` is 1).
+        for text in [
+            "1900-03-01T00:00:00.000Z",
+            "2100-02-28T00:00:00.000Z",
+            "2100-03-01T00:00:00.000Z",
+            "2200-03-01T00:00:00.000Z",
+            "1600-02-29T00:00:00.000Z",
+            "2000-02-29T12:34:56.789Z",
+            "2400-02-29T23:59:59.999Z",
+        ] {
+            let parsed = Timestamp::parse_rfc3339(text).unwrap();
+            assert_eq!(parsed.to_string(), text);
+        }
+    }
+
+    #[test]
+    fn error_messages_say_what_is_wrong() {
+        assert_eq!(
+            "abc".parse::<Txid>().unwrap_err().to_string(),
+            "transaction id is 3 bytes, want 16"
+        );
+        assert_eq!(
+            Timestamp::parse_rfc3339("").unwrap_err().to_string(),
+            "timestamp ends early at byte 0"
+        );
+        assert_eq!(
+            format!("{:?}", TxidRange::single(txid(3))),
+            "TxidRange(0000000000000003-0000000000000003)"
+        );
+    }
+
+    #[test]
     fn zero_is_not_a_txid() {
         assert_eq!(Txid::new(0), None);
         assert_eq!(
