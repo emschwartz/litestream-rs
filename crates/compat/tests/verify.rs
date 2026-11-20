@@ -8,7 +8,9 @@
 
 use lsr_compat::{Manifest, Outcome, Target, all_fixtures};
 use lsr_core::conformance::block_on;
-use lsr_core::{Depth, Finding, PlanOutcome, Report, Severity, verify};
+use lsr_core::{
+    Depth, Finding, MemSink, PlanOutcome, Report, RestoreTarget, Severity, restore, verify,
+};
 use lsr_store_fs::FsStore;
 
 fn run(fixture: &std::path::Path, depth: Depth) -> Report {
@@ -27,6 +29,77 @@ fn unrestorable(report: &Report) -> Vec<&Finding> {
         .collect()
 }
 
+/// The walk reads every file whole; the latest restore then reads its plan
+/// again, and there is no plan for a gap.
+fn assert_reads(fixture: &std::path::Path, contents: &Report, files: usize, bytes: u64) {
+    let reads = (contents.files_read(), contents.bytes_read());
+    if matches!(contents.latest(), PlanOutcome::Plan(_)) {
+        assert!(
+            reads.0 > files && reads.1 > bytes,
+            "{}: {reads:?}",
+            fixture.display()
+        );
+    } else {
+        assert_eq!(reads, (files, bytes), "{}", fixture.display());
+    }
+}
+
+/// Unrestorable exactly when the real latest restore fails.
+fn assert_agrees_with_restore(fixture: &std::path::Path, contents: &Report) {
+    let restored = block_on(restore(
+        &FsStore::new(Manifest::replica_dir(fixture)),
+        RestoreTarget::Latest,
+        MemSink::new(),
+    ));
+    assert_eq!(
+        contents.worst() == Some(Severity::Unrestorable),
+        restored.is_err(),
+        "{}: restore {restored:?}, verify {:?}",
+        fixture.display(),
+        contents.findings()
+    );
+}
+
+/// What a report must say about the manifest's recorded latest outcome;
+/// true for a gap.
+fn assert_latest(fixture: &std::path::Path, manifest: &Manifest, report: &Report) -> bool {
+    let latest = manifest
+        .targets
+        .iter()
+        .find(|entry| entry.target == Target::Latest)
+        .expect("latest target");
+    match &latest.outcome {
+        Outcome::Gap {
+            have_through,
+            next_starts,
+            ..
+        } => {
+            assert!(
+                matches!(
+                    unrestorable(report).as_slice(),
+                    [Finding::Gap { have_through: through, next_starts: starts, at_tip: true, .. }]
+                        if (through.get(), starts.get()) == (*have_through, *next_starts)
+                ),
+                "{}: {:?}",
+                fixture.display(),
+                report.findings()
+            );
+            assert!(matches!(report.latest(), PlanOutcome::Gap { .. }));
+            true
+        }
+        Outcome::Restored { .. } => {
+            assert!(
+                unrestorable(report).is_empty(),
+                "{}: {:?}",
+                fixture.display(),
+                report.findings()
+            );
+            assert!(matches!(report.latest(), PlanOutcome::Plan(_)));
+            false
+        }
+    }
+}
+
 #[test]
 fn every_fixture_verifies_at_both_depths_except_the_recorded_gap() {
     let fixtures = all_fixtures().expect("list");
@@ -40,55 +113,25 @@ fn every_fixture_verifies_at_both_depths_except_the_recorded_gap() {
         let names = run(&fixture, Depth::Names);
         let contents = run(&fixture, Depth::Contents);
         assert_eq!((names.files_read(), names.bytes_read()), (0, 0));
-        assert_eq!(
-            (contents.files_read(), contents.bytes_read()),
-            (files, bytes),
-            "{}: every file is read, whole",
-            fixture.display()
-        );
+        assert_reads(&fixture, &contents, files, bytes);
+        assert_agrees_with_restore(&fixture, &contents);
         let total: usize = contents.levels().iter().map(|level| level.files()).sum();
         assert_eq!(total, files, "{}", fixture.display());
+        let restored = block_on(restore(
+            &FsStore::new(Manifest::replica_dir(&fixture)),
+            RestoreTarget::Latest,
+            MemSink::new(),
+        ));
+        assert_eq!(
+            contents.worst() == Some(Severity::Unrestorable),
+            restored.is_err(),
+            "{}: restore {restored:?}, verify {:?}",
+            fixture.display(),
+            contents.findings()
+        );
         for report in [&names, &contents] {
-            let latest = manifest
-                .targets
-                .iter()
-                .find(|entry| entry.target == Target::Latest)
-                .expect("latest target");
-            match &latest.outcome {
-                Outcome::Gap {
-                    have_through,
-                    next_starts,
-                    ..
-                } => {
-                    gaps += 1;
-                    let [
-                        Finding::Gap {
-                            have_through: through,
-                            next_starts: starts,
-                            at_tip: true,
-                            ..
-                        },
-                    ] = unrestorable(report).as_slice()
-                    else {
-                        panic!("{}: {:?}", fixture.display(), report.findings());
-                    };
-                    assert_eq!(
-                        (through.get(), starts.get()),
-                        (*have_through, *next_starts),
-                        "{}",
-                        fixture.display()
-                    );
-                    assert!(matches!(report.latest(), PlanOutcome::Gap { .. }));
-                }
-                Outcome::Restored { .. } => {
-                    assert!(
-                        unrestorable(report).is_empty(),
-                        "{}: {:?}",
-                        fixture.display(),
-                        report.findings()
-                    );
-                    assert!(matches!(report.latest(), PlanOutcome::Plan(_)));
-                }
+            if assert_latest(&fixture, &manifest, report) {
+                gaps += 1;
             }
         }
         checked += 1;

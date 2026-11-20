@@ -243,15 +243,15 @@ fn finding_parts(finding: &Finding) -> (&'static str, String) {
             "foreign_names",
             format!("{count} names in level {level} are not LTX files"),
         ),
-        Finding::Unreadable { key, error } => (
+        Finding::Unreadable { key, error, .. } => (
             "unreadable",
             format!("{} does not decode: {error}", key_path(key)),
         ),
-        Finding::RangeMismatch { key, header } => (
+        Finding::RangeMismatch { key, header, .. } => (
             "range_mismatch",
             format!("{} has a header covering {header}", key_path(key)),
         ),
-        Finding::NotASnapshot { key } => (
+        Finding::NotASnapshot { key, .. } => (
             "not_a_snapshot",
             format!(
                 "{} is at level 9 but its header is not a snapshot",
@@ -262,6 +262,7 @@ fn finding_parts(finding: &Finding) -> (&'static str, String) {
             key,
             expected,
             found,
+            ..
         } => (
             "page_size_differs",
             format!(
@@ -278,21 +279,23 @@ fn finding_parts(finding: &Finding) -> (&'static str, String) {
                 key_path(key)
             ),
         ),
-        Finding::TimestampDiffers {
-            key,
-            header,
-            stored,
+        Finding::TimestampsDiffer {
+            files,
+            first,
+            largest,
         } => (
-            "timestamp_differs",
+            "timestamps_differ",
             format!(
-                "{} says {header} inside and {stored} in the store",
-                key_path(key)
+                "{files} files have header times that differ from the store's (first {}, by up to {} ms); restores to a point in time follow the store's times, the latest state is unaffected",
+                key_path(first),
+                largest.as_millis()
             ),
         ),
         Finding::ChecksumChain {
             key,
             expected,
             found,
+            ..
         } => (
             "checksum_chain",
             format!(
@@ -306,6 +309,16 @@ fn finding_parts(finding: &Finding) -> (&'static str, String) {
                 "{} was listed and then gone (compaction or retention)",
                 key_path(key)
             ),
+        ),
+        Finding::LatestRestoreFails { key, error } => (
+            "latest_restore_fails",
+            match key {
+                Some(key) => format!(
+                    "restoring the latest state fails at {}: {error}",
+                    key_path(key)
+                ),
+                None => format!("restoring the latest state fails: {error}"),
+            },
         ),
         Finding::Truncated { more } => ("truncated", format!("{more} more findings were not kept")),
     }

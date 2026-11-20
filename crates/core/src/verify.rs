@@ -10,10 +10,28 @@
 //! state; each [PlanOutcome::Gap] is one finding, so a hole in older history
 //! is reported, not only the one at the tip.
 //!
-//! [Depth::Contents] also reads every file through one [Decoder], so a file's
+//! [Depth::Names] never reads contents, so a clean report there cannot vouch
+//! that a restore would succeed; only [Depth::Contents] can.
+//!
+//! [Depth::Contents] reads every file through one [Decoder], so a file's
 //! checksums, index and framing are checked, and compares what the header says
-//! with what the name and the listing say. Memory is one decoder and one chunk
-//! whatever the replica's size.
+//! with what the name and the listing say. It then runs the real
+//! [restore] of the latest state into a sink that keeps one checksum per page
+//! and publishes nothing. Whether the latest state restores is that run's
+//! answer, never a re-derivation: every cross-file, cross-level, end-state and
+//! empty-database rule is restore's own, and a failure it reports is one
+//! [Finding::LatestRestoreFails]. So the report's worst severity is
+//! [Severity::Unrestorable] if and only if `restore(Latest)` fails (or there is
+//! no plan to restore).
+//!
+//! The per-file findings are graded by use: a damaged file the latest plan
+//! reads is [Severity::Unrestorable] (and restore fails on it, so it is not
+//! reported a second time), any other is [Severity::Degraded], older history.
+//! The files of the latest plan are read twice, once by the walk and once by
+//! the dry run; skipping the second read would need a second code path that
+//! feeds restore from the walk's decoder, which is the drift this design
+//! removes. [Report::files_read] and [Report::bytes_read] count both. Memory is
+//! one decoder and one chunk, plus 8 bytes a page for the dry run's sink.
 //!
 //! Only what stops the walk is an error ([VerifyError]): a failed listing or a
 //! failed read. A damaged file is a finding, never an error, and a file that
@@ -21,13 +39,19 @@
 //! a note. Findings are capped at [MAX_FINDINGS]; the last one then says how
 //! many were dropped, and [Report::worst] still counts them.
 
-use lsr_ltx::{Checksum, DecodeError, Decoder, Header, PageSize, Timestamp, Txid, TxidRange};
+use std::time::Duration;
+
+use lsr_ltx::{Checksum, DecodeError, Decoder, Header, PageSize, Txid, TxidRange};
 use thiserror::Error;
 
+use self::dry_run::latest_restore;
 use crate::inventory::{Inventory, InventoryError, is_snapshot_start};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::plan::{PlanOutcome, RestoreTarget, plan};
+use crate::restore::RestoreError;
 use crate::store::{ObjectStore, ReadLen, StoreError};
+
+mod dry_run;
 
 #[cfg(test)]
 #[expect(
@@ -48,7 +72,8 @@ const CHUNK_BYTES: u32 = 4 * 1024 * 1024;
 pub enum Depth {
     /// List calls only: no object is read.
     Names,
-    /// Read and decode every file.
+    /// Read and decode every file, then dry-run the restore of the latest
+    /// state.
     Contents,
 }
 
@@ -100,6 +125,9 @@ pub enum Finding {
         key: FileKey,
         /// Why.
         error: DecodeError,
+        /// Whether the latest restore reads this file; if so this is
+        /// [Severity::Unrestorable], otherwise [Severity::Degraded].
+        in_latest_plan: bool,
     },
     /// The header covers other transactions than the name says.
     RangeMismatch {
@@ -107,20 +135,27 @@ pub enum Finding {
         key: FileKey,
         /// What the header covers.
         header: TxidRange,
+        /// Whether the latest restore reads this file.
+        in_latest_plan: bool,
     },
     /// A level-9 file whose header is not a whole-database snapshot.
     NotASnapshot {
         /// The file.
         key: FileKey,
+        /// Whether the latest restore reads this file.
+        in_latest_plan: bool,
     },
-    /// The page size differs from the first file read.
+    /// The page size differs from the one the latest plan's snapshot has (or,
+    /// with no plan, from the first file read).
     PageSizeDiffers {
         /// The file.
         key: FileKey,
-        /// The first file's page size.
+        /// The reference page size.
         expected: PageSize,
         /// This file's.
         found: PageSize,
+        /// Whether the latest restore reads this file.
+        in_latest_plan: bool,
     },
     /// The listed size differs from the bytes the file really has.
     SizeDiffers {
@@ -131,15 +166,17 @@ pub enum Finding {
         /// The bytes read.
         read: u64,
     },
-    /// The header's timestamp differs from the store's; as-of restores go by
-    /// the stored one.
-    TimestampDiffers {
-        /// The file.
-        key: FileKey,
-        /// The header's.
-        header: Timestamp,
-        /// The store's.
-        stored: Timestamp,
+    /// Some files' header timestamps differ from the store's, as they do on
+    /// a copied file replica (whose modification times are new). One fact
+    /// about the replica, not one per file: restores to a point in time follow
+    /// the store's times, the latest state is unaffected.
+    TimestampsDiffer {
+        /// How many files differ.
+        files: u32,
+        /// The first, in walk order.
+        first: FileKey,
+        /// The largest gap between a header's time and the store's.
+        largest: Duration,
     },
     /// A file does not start from the state the previous file in its level
     /// ended in.
@@ -150,6 +187,16 @@ pub enum Finding {
         expected: Checksum,
         /// The later file's pre-apply checksum.
         found: Checksum,
+        /// Whether the latest restore applies these two files in a row.
+        in_latest_plan: bool,
+    },
+    /// The dry run of `restore(Latest)` failed. Not reported when a per-file
+    /// finding on the same file already says why.
+    LatestRestoreFails {
+        /// The file the error names, when it names one.
+        key: Option<FileKey>,
+        /// What restore said.
+        error: RestoreError,
     },
     /// The file was listed and then gone, as compaction or retention does.
     Vanished {
@@ -169,19 +216,60 @@ impl Finding {
     pub const fn severity(&self) -> Severity {
         match self {
             Self::NoSnapshot
+            | Self::LatestRestoreFails { .. }
+            | Self::Gap { at_tip: true, .. }
+            | Self::Unreadable {
+                in_latest_plan: true,
+                ..
+            }
+            | Self::RangeMismatch {
+                in_latest_plan: true,
+                ..
+            }
+            | Self::NotASnapshot {
+                in_latest_plan: true,
+                ..
+            }
+            | Self::PageSizeDiffers {
+                in_latest_plan: true,
+                ..
+            }
+            | Self::ChecksumChain {
+                in_latest_plan: true,
+                ..
+            } => Severity::Unrestorable,
+            Self::Gap { at_tip: false, .. }
+            | Self::MalformedSnapshot { .. }
+            | Self::SizeDiffers { .. }
             | Self::Unreadable { .. }
             | Self::RangeMismatch { .. }
             | Self::NotASnapshot { .. }
             | Self::PageSizeDiffers { .. }
-            | Self::ChecksumChain { .. }
-            | Self::Gap { at_tip: true, .. } => Severity::Unrestorable,
-            Self::Gap { at_tip: false, .. }
+            | Self::ChecksumChain { .. } => Severity::Degraded,
+            Self::ForeignNames { .. }
+            | Self::TimestampsDiffer { .. }
+            | Self::Vanished { .. }
+            | Self::Truncated { .. } => Severity::Note,
+        }
+    }
+
+    /// The one file a finding is about, when it is about one.
+    const fn file(&self) -> Option<FileKey> {
+        match self {
+            Self::Unreadable { key, .. }
+            | Self::RangeMismatch { key, .. }
+            | Self::NotASnapshot { key, .. }
+            | Self::PageSizeDiffers { key, .. }
+            | Self::ChecksumChain { key, .. } => Some(*key),
+            Self::LatestRestoreFails { key, .. } => *key,
+            Self::NoSnapshot
+            | Self::Gap { .. }
             | Self::MalformedSnapshot { .. }
+            | Self::ForeignNames { .. }
             | Self::SizeDiffers { .. }
-            | Self::TimestampDiffers { .. } => Severity::Degraded,
-            Self::ForeignNames { .. } | Self::Vanished { .. } | Self::Truncated { .. } => {
-                Severity::Note
-            }
+            | Self::TimestampsDiffer { .. }
+            | Self::Vanished { .. }
+            | Self::Truncated { .. } => None,
         }
     }
 }
@@ -311,11 +399,19 @@ struct Findings {
     kept: Vec<Finding>,
     dropped: usize,
     worst: Option<Severity>,
+    /// Files with an [Severity::Unrestorable] finding of their own, kept past
+    /// the cap so the dry run's duplicate check never depends on it.
+    blamed: Vec<FileKey>,
 }
 
 impl Findings {
     fn push(&mut self, finding: Finding) {
         self.worst = self.worst.max(Some(finding.severity()));
+        if finding.severity() == Severity::Unrestorable
+            && let Some(key) = finding.file()
+        {
+            self.blamed.push(key);
+        }
         if self.kept.len() < MAX_FINDINGS {
             self.kept.push(finding);
         } else {
@@ -341,17 +437,20 @@ pub async fn verify<S: ObjectStore>(store: &S, depth: Depth) -> Result<Report, V
         .map_err(VerifyError::Inventory)?;
     let mut findings = Findings::default();
     let latest = name_findings(&inventory, &mut findings);
-    let mut walk = Walk::default();
+    let (mut files_read, mut bytes_read) = (0, 0);
     if depth == Depth::Contents {
-        // Snapshots first, so the page size every other file is held to is
-        // the one a restore starts from.
-        let (snapshots, rest): (Vec<_>, Vec<_>) = inventory
-            .files()
-            .iter()
-            .partition(|info| info.key.level().is_snapshot());
-        for info in snapshots.into_iter().chain(rest) {
-            walk.file(store, info, &mut findings).await?;
-        }
+        let plan = match &latest {
+            PlanOutcome::Plan(chain) => chain.files(),
+            PlanOutcome::EmptyReplica
+            | PlanOutcome::NoSnapshot { .. }
+            | PlanOutcome::BeyondNewest { .. }
+            | PlanOutcome::AsOfInsideFile { .. }
+            | PlanOutcome::Gap { .. }
+            | PlanOutcome::InsideFile { .. }
+            | PlanOutcome::MalformedSnapshot { .. } => &[],
+        };
+        let reads = contents_pass(store, &inventory, plan, &mut findings).await?;
+        (files_read, bytes_read) = reads;
     }
     let (findings, worst) = findings.finish();
     Ok(Report {
@@ -359,9 +458,43 @@ pub async fn verify<S: ObjectStore>(store: &S, depth: Depth) -> Result<Report, V
         findings,
         worst,
         latest,
-        files_read: walk.files_read,
-        bytes_read: walk.bytes_read,
+        files_read,
+        bytes_read,
     })
+}
+
+/// Reads every file, then dry-runs the latest restore when there is a plan
+/// (without one the report is already unrestorable). Returns the files and
+/// bytes really read.
+async fn contents_pass<S: ObjectStore>(
+    store: &S,
+    inventory: &Inventory,
+    plan: &[FileInfo],
+    findings: &mut Findings,
+) -> Result<(usize, u64), VerifyError> {
+    let mut walk = Walk::new(plan);
+    // Snapshots first, so the page size every other file is held to is the one
+    // a restore starts from.
+    let (snapshots, rest): (Vec<_>, Vec<_>) = inventory
+        .files()
+        .iter()
+        .partition(|info| info.key.level().is_snapshot());
+    for info in snapshots.into_iter().chain(rest) {
+        walk.file(store, info, findings).await?;
+    }
+    walk.finish(findings);
+    let (mut files_read, mut bytes_read) = (walk.files_read, walk.bytes_read);
+    if let Some(last) = plan.last() {
+        let dry = latest_restore(store, last.key).await?;
+        files_read = files_read.saturating_add(dry.files_read);
+        bytes_read = bytes_read.saturating_add(dry.bytes_read);
+        if let Some((key, error)) = dry.fault
+            && !key.is_some_and(|key| findings.blamed.contains(&key))
+        {
+            findings.push(Finding::LatestRestoreFails { key, error });
+        }
+    }
+    Ok((files_read, bytes_read))
 }
 
 /// Everything the listing alone shows. Returns the plan for the latest state.
@@ -454,15 +587,26 @@ fn older_history(inventory: &Inventory, base: &FileInfo, next: &FileInfo, findin
 /// The neighbour a file in the same level is compared with.
 #[derive(Clone, Copy)]
 struct Before {
+    key: FileKey,
     level: Level,
     through: Txid,
     post_apply: Option<Checksum>,
 }
 
-/// State carried from one file to the next, and the read totals.
+/// How the headers' timestamps differ from the store's.
 #[derive(Default)]
-struct Walk {
-    page_size: Option<PageSize>,
+struct Skew {
+    files: u32,
+    first: Option<FileKey>,
+    largest_millis: u64,
+}
+
+/// State carried from one file to the next, and the read totals.
+struct Walk<'a> {
+    /// The files the latest restore reads, oldest first; empty without a plan.
+    plan: &'a [FileInfo],
+    page_sizes: Vec<(FileKey, PageSize)>,
+    skew: Skew,
     before: Option<Before>,
     files_read: usize,
     bytes_read: u64,
@@ -475,7 +619,57 @@ struct Read {
     bytes: u64,
 }
 
-impl Walk {
+impl<'a> Walk<'a> {
+    fn new(plan: &'a [FileInfo]) -> Self {
+        Self {
+            plan,
+            page_sizes: Vec::new(),
+            skew: Skew::default(),
+            before: None,
+            files_read: 0,
+            bytes_read: 0,
+        }
+    }
+
+    fn in_plan(&self, key: FileKey) -> bool {
+        self.plan.iter().any(|info| info.key == key)
+    }
+
+    /// The file the latest restore applies right before `key`.
+    fn plan_previous(&self, key: FileKey) -> Option<FileKey> {
+        let at = self.plan.iter().position(|info| info.key == key)?;
+        self.plan.get(at.checked_sub(1)?).map(|info| info.key)
+    }
+
+    /// What only the whole walk can say: page sizes against the plan's
+    /// snapshot, and the one timestamp note.
+    fn finish(&self, findings: &mut Findings) {
+        let base = self.plan.first().map(|info| info.key);
+        let reference = self
+            .page_sizes
+            .iter()
+            .find(|(key, _)| Some(*key) == base)
+            .or_else(|| self.page_sizes.first())
+            .map(|(_, size)| *size);
+        for (key, found) in &self.page_sizes {
+            if let Some(expected) = reference.filter(|expected| expected != found) {
+                findings.push(Finding::PageSizeDiffers {
+                    key: *key,
+                    expected,
+                    found: *found,
+                    in_latest_plan: self.in_plan(*key),
+                });
+            }
+        }
+        if let Some(first) = self.skew.first {
+            findings.push(Finding::TimestampsDiffer {
+                files: self.skew.files,
+                first,
+                largest: Duration::from_millis(self.skew.largest_millis),
+            });
+        }
+    }
+
     async fn file<S: ObjectStore>(
         &mut self,
         store: &S,
@@ -491,6 +685,7 @@ impl Walk {
         if let Some(header) = &read.header {
             self.check_header(info, header, findings);
         }
+        let in_latest_plan = self.in_plan(key);
         match &read.decoded {
             Ok(verified) => {
                 if read.bytes != info.size {
@@ -505,7 +700,11 @@ impl Walk {
             Err(_) => self.before = None,
         }
         if let Err(error) = read.decoded {
-            findings.push(Finding::Unreadable { key, error });
+            findings.push(Finding::Unreadable {
+                key,
+                error,
+                in_latest_plan,
+            });
         }
         Ok(())
     }
@@ -553,30 +752,27 @@ impl Walk {
 
     fn check_header(&mut self, info: &FileInfo, header: &Header, findings: &mut Findings) {
         let key = info.key;
+        let in_latest_plan = self.in_plan(key);
         if key.level().is_snapshot() && !header.is_snapshot() {
-            findings.push(Finding::NotASnapshot { key });
+            findings.push(Finding::NotASnapshot {
+                key,
+                in_latest_plan,
+            });
         }
         if header.txids() != key.range() {
             findings.push(Finding::RangeMismatch {
                 key,
                 header: header.txids(),
+                in_latest_plan,
             });
         }
-        let expected = *self.page_size.get_or_insert(header.page_size());
-        if expected != header.page_size() {
-            findings.push(Finding::PageSizeDiffers {
-                key,
-                expected,
-                found: header.page_size(),
-            });
-        }
-        let stamped = header.fields().timestamp;
-        if stamped != info.created_at {
-            findings.push(Finding::TimestampDiffers {
-                key,
-                header: stamped,
-                stored: info.created_at,
-            });
+        self.page_sizes.push((key, header.page_size()));
+        let stamped = header.fields().timestamp.unix_millis();
+        let stored = info.created_at.unix_millis();
+        if stamped != stored {
+            self.skew.files = self.skew.files.saturating_add(1);
+            self.skew.first.get_or_insert(key);
+            self.skew.largest_millis = self.skew.largest_millis.max(stamped.abs_diff(stored));
         }
     }
 
@@ -603,9 +799,11 @@ impl Walk {
                 key: *key,
                 expected,
                 found,
+                in_latest_plan: self.plan_previous(*key) == Some(before.key),
             });
         }
         self.before = Some(Before {
+            key: *key,
             level,
             through: header.txids().max(),
             post_apply: verified.trailer().post_apply(),

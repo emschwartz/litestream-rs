@@ -296,9 +296,8 @@ mod cli {
                     );
                     gaps += 1;
                 } else {
-                    // Older Go versions stamp a header time that differs from the store's, so
-                    // a restorable replica is clean (0) or degraded (1), never unrestorable.
-                    assert!(matches!(run.code, 0 | 1), "{label}:\n{}", run.stdout);
+                    // Skewed header times are a note, so a restorable replica exits 0.
+                    assert_eq!(run.code, 0, "{label}:\n{}", run.stdout);
                     assert!(
                         run.stdout.contains("restorable through"),
                         "{label}:\n{}",

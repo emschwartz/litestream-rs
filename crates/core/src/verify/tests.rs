@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use lsr_ltx::{Checksum, Encoder, Header, HeaderFields, PageNo, Section, Timestamp, TxidRange};
 
@@ -224,8 +225,9 @@ fn a_clean_replica_has_no_findings_at_either_depth() {
         assert_eq!(report.worst(), None);
         assert!(matches!(report.latest(), PlanOutcome::Plan(chain) if chain.reaches() == txid(3)));
     }
+    // The walk reads each file once and the latest restore reads its plan again.
     let report = contents(&store);
-    assert_eq!(report.files_read(), 3);
+    assert_eq!(report.files_read(), 6);
     assert!(report.bytes_read() > 0);
 }
 
@@ -379,7 +381,7 @@ fn a_truncated_file_is_unreadable_and_names_where() {
     let report = contents(&store);
     let finding = only(&report);
     assert!(
-        matches!(finding, Finding::Unreadable { key: k, error: DecodeError::Truncated { section: Section::Trailer } }
+        matches!(finding, Finding::Unreadable { key: k, error: DecodeError::Truncated { section: Section::Trailer }, in_latest_plan: true }
             if *k == key(0, 2, 2)),
         "{finding:?}"
     );
@@ -424,7 +426,7 @@ fn a_header_covering_other_transactions_than_its_name_is_a_range_mismatch() {
     let report = contents(&store);
     let finding = only(&report);
     assert!(
-        matches!(finding, Finding::RangeMismatch { key: k, header }
+        matches!(finding, Finding::RangeMismatch { key: k, header, .. }
             if *k == key(0, 3, 3) && *header == range(2, 3)),
         "{finding:?}"
     );
@@ -438,9 +440,10 @@ fn a_level_nine_file_with_a_delta_header_is_not_a_snapshot() {
     let report = contents(&store);
     assert!(matches!(
         report.findings(),
-        [Finding::MalformedSnapshot { .. }, Finding::NotASnapshot { key: k }] if *k == key(9, 2, 2)
+        [Finding::MalformedSnapshot { .. }, Finding::NotASnapshot { key: k, .. }] if *k == key(9, 2, 2)
     ));
-    assert_eq!(report.worst(), Some(Severity::Unrestorable));
+    // The latest plan never reads this file, so it is older history.
+    assert_eq!(report.worst(), Some(Severity::Degraded));
 }
 
 #[test]
@@ -456,7 +459,7 @@ fn a_page_size_that_differs_from_the_snapshots_is_reported_on_the_odd_file() {
     let report = contents(&store);
     let finding = only(&report);
     assert!(
-        matches!(finding, Finding::PageSizeDiffers { key: k, expected, found }
+        matches!(finding, Finding::PageSizeDiffers { key: k, expected, found, .. }
             if *k == key(0, 4, 4) && *expected == size(512) && *found == size(1024)),
         "{finding:?}"
     );
@@ -496,13 +499,12 @@ fn a_stored_time_that_differs_from_the_header_is_reported_with_both() {
     let report = contents(&store);
     let finding = only(&report);
     assert!(
-        matches!(finding, Finding::TimestampDiffers { key: k, header, stored }
-            if *k == key(0, 2, 2)
-                && header.unix_millis() == 2000
-                && stored.unix_millis() == 5),
+        matches!(finding, Finding::TimestampsDiffer { files: 1, first, largest }
+            if *first == key(0, 2, 2) && *largest == Duration::from_millis(1995)),
         "{finding:?}"
     );
-    assert_eq!(finding.severity(), Severity::Degraded);
+    assert_eq!(finding.severity(), Severity::Note);
+    assert_eq!(report.worst(), Some(Severity::Note));
 }
 
 #[test]
@@ -532,7 +534,7 @@ fn a_file_that_does_not_start_where_its_neighbour_ended_breaks_the_checksum_chai
     let report = contents(&store);
     let finding = only(&report);
     assert!(
-        matches!(finding, Finding::ChecksumChain { key: k, expected, found }
+        matches!(finding, Finding::ChecksumChain { key: k, expected, found, .. }
             if *k == key(0, 3, 3) && *expected == checksum(ps, &second) && *found == wrong),
         "{finding:?}"
     );
@@ -544,8 +546,14 @@ fn a_file_that_vanishes_mid_walk_is_a_note() {
     let store = Wrapped::new(clean());
     store.vanish.lock().unwrap().insert(key(0, 2, 2));
     let report = contents(&store);
-    assert!(matches!(only(&report), Finding::Vanished { key: k } if *k == key(0, 2, 2)));
-    assert_eq!(only(&report).severity(), Severity::Note);
+    // The file is really gone when the dry run lists again, so the replica
+    // has a gap and the latest state does not restore.
+    assert!(matches!(
+        report.findings(),
+        [Finding::Vanished { key: k }, Finding::LatestRestoreFails { key: None, .. }] if *k == key(0, 2, 2)
+    ));
+    assert_eq!(report.findings()[0].severity(), Severity::Note);
+    assert_eq!(report.worst(), Some(Severity::Unrestorable));
     assert_eq!(report.files_read(), 2);
 }
 
@@ -556,8 +564,8 @@ fn names_depth_reads_no_object() {
     assert_eq!(store.reads.load(Ordering::Relaxed), 0);
     assert_eq!((report.files_read(), report.bytes_read()), (0, 0));
     let report = block_on(verify(&store, Depth::Contents)).unwrap();
-    assert_eq!(report.files_read(), 3);
-    assert!(store.reads.load(Ordering::Relaxed) >= 3);
+    assert_eq!(report.files_read(), 6);
+    assert!(store.reads.load(Ordering::Relaxed) >= 6);
 }
 
 #[test]
@@ -629,7 +637,6 @@ fn a_dropped_finding_still_counts_towards_worst() {
     assert_eq!(worst, Some(Severity::Unrestorable));
 }
 
-
 // Review (review-core2): failing tests that demonstrate defects. Each pins
 // "worst is Unrestorable" to "restore(Latest) fails".
 
@@ -655,7 +662,7 @@ fn tracked_snapshot(store: &MemStore) -> Checksum {
 }
 
 #[test]
-fn review_a_broken_checksum_link_across_levels_is_unrestorable() {
+fn a_broken_checksum_link_across_levels_is_unrestorable() {
     // Snapshot at level 9, next file at level 0: the restore compares them,
     // verify only compares neighbours in one level.
     let ps = size(512);
@@ -679,7 +686,7 @@ fn review_a_broken_checksum_link_across_levels_is_unrestorable() {
 }
 
 #[test]
-fn review_pages_that_do_not_reach_the_post_apply_checksum_are_unrestorable() {
+fn pages_that_do_not_reach_the_post_apply_checksum_are_unrestorable() {
     let ps = size(512);
     let store = MemStore::new();
     let first = tracked_snapshot(&store);
@@ -701,7 +708,7 @@ fn review_pages_that_do_not_reach_the_post_apply_checksum_are_unrestorable() {
 }
 
 #[test]
-fn review_a_chain_ending_in_a_commit_zero_file_is_unrestorable() {
+fn a_chain_ending_in_a_commit_zero_file_is_unrestorable() {
     let store = MemStore::new();
     snapshot(&store, 1);
     let header = Header::new(HeaderFields {
@@ -729,7 +736,7 @@ fn review_a_chain_ending_in_a_commit_zero_file_is_unrestorable() {
 }
 
 #[test]
-fn review_a_corrupt_file_the_latest_plan_skips_is_not_unrestorable() {
+fn a_corrupt_file_the_latest_plan_skips_is_not_unrestorable() {
     // Level 1 covers 2..3, so the latest plan never reads the corrupt level-0
     // file; only Txid(2) does. That is older history: Degraded.
     let store = clean();
@@ -747,4 +754,149 @@ fn review_a_corrupt_file_the_latest_plan_skips_is_not_unrestorable() {
         "restore(Latest) succeeds but verify says {:?}",
         report.findings()
     );
+}
+
+#[test]
+fn a_restore_failure_is_one_finding_naming_its_file() {
+    let ps = size(512);
+    let store = MemStore::new();
+    tracked_snapshot(&store);
+    let mut next = Spec::plain(512, 2, 2, &[(1, 3)]);
+    next.commit = 1;
+    next.tracked = true;
+    next.pre = Some(checksum(ps, &BTreeMap::from([(1, 2_u8)])));
+    next.post = Some(checksum(ps, &BTreeMap::from([(1, 3_u8)])));
+    put(&store, 0, 2, 2, &next.encode());
+    let report = contents(&store);
+    let [finding] = report.findings() else {
+        panic!("expected one finding, got {:?}", report.findings());
+    };
+    assert!(
+        matches!(finding, Finding::LatestRestoreFails { key: Some(_), .. }),
+        "{finding:?}"
+    );
+    assert_eq!(finding.severity(), Severity::Unrestorable);
+}
+
+#[test]
+fn names_depth_cannot_vouch_for_a_restore() {
+    let store = MemStore::new();
+    tracked_snapshot(&store);
+    let mut next = Spec::plain(512, 2, 2, &[(1, 3)]);
+    next.commit = 1;
+    next.tracked = true;
+    next.pre = Some(checksum(size(512), &BTreeMap::from([(1, 2_u8)])));
+    next.post = Some(checksum(size(512), &BTreeMap::from([(1, 3_u8)])));
+    put(&store, 0, 2, 2, &next.encode());
+    restore_outcome(&store).unwrap_err();
+    assert_eq!(names(&store).worst(), None);
+}
+
+#[test]
+fn timestamps_that_differ_are_one_note_with_the_count_and_the_largest_gap() {
+    let store = clean();
+    // Both created long after their headers' times (2000 and 3000).
+    put_at(
+        &store,
+        key(0, 2, 2),
+        2500,
+        &Spec::plain(512, 2, 2, &[(2, 9)]).encode(),
+    );
+    put_at(
+        &store,
+        key(0, 3, 3),
+        9000,
+        &Spec::plain(512, 3, 3, &[(2, 9)]).encode(),
+    );
+    let report = contents(&store);
+    let finding = only(&report);
+    assert!(
+        matches!(finding, Finding::TimestampsDiffer { files: 2, first, largest }
+            if *first == key(0, 2, 2) && *largest == Duration::from_millis(6000)),
+        "{finding:?}"
+    );
+    assert_eq!(report.worst(), Some(Severity::Note));
+}
+
+/// One file of a fixture: level, first and last transaction, bytes.
+type Fixture = Vec<(u8, u64, u64, Vec<u8>)>;
+
+fn replica(files: &Fixture) -> MemStore {
+    let store = MemStore::new();
+    for (level, min, max, bytes) in files {
+        put(&store, *level, *min, *max, bytes);
+    }
+    store
+}
+
+/// Verify at contents depth says unrestorable exactly when the latest restore
+/// fails.
+fn assert_verify_agrees_with_restore(files: &Fixture, what: &str) {
+    let store = replica(files);
+    let restored = restore_outcome(&store);
+    let report = contents(&store);
+    let unrestorable = report.worst() == Some(Severity::Unrestorable);
+    assert_eq!(
+        unrestorable,
+        restored.is_err(),
+        "{what}: restore {restored:?}, verify {:?}",
+        report.findings()
+    );
+}
+
+fn fixtures() -> Vec<Fixture> {
+    let ps = size(512);
+    let state = |n: u8| checksum(ps, &BTreeMap::from([(1, n)]));
+    let mut snap = Spec::plain(512, 1, 1, &[(1, 1)]);
+    snap.commit = 1;
+    snap.tracked = true;
+    snap.post = Some(state(1));
+    let mut next = Spec::plain(512, 2, 2, &[(1, 3)]);
+    next.commit = 1;
+    next.tracked = true;
+    next.pre = Some(state(1));
+    next.post = Some(state(3));
+    let plain = |level, min, max| {
+        (
+            level,
+            min,
+            max,
+            Spec::plain(512, min, max, &[(2, 9)]).encode(),
+        )
+    };
+    let snapshot_bytes = Spec::plain(512, 1, 1, &[(1, 1), (2, 2), (3, 3), (4, 4)]).encode();
+    vec![
+        vec![
+            (9, 1, 1, snapshot_bytes.clone()),
+            plain(0, 2, 2),
+            plain(0, 3, 3),
+        ],
+        vec![
+            (9, 1, 1, snapshot_bytes),
+            plain(0, 2, 2),
+            plain(0, 3, 3),
+            plain(1, 2, 3),
+        ],
+        vec![(9, 1, 1, snap.encode()), (0, 2, 2, next.encode())],
+    ]
+}
+
+#[test]
+fn verify_is_unrestorable_exactly_when_the_latest_restore_fails() {
+    for (n, base) in fixtures().iter().enumerate() {
+        assert_verify_agrees_with_restore(base, &format!("fixture {n}"));
+        for (at, file) in base.iter().enumerate() {
+            let mut gone = base.clone();
+            gone.remove(at);
+            assert_verify_agrees_with_restore(&gone, &format!("fixture {n} without file {at}"));
+            for byte in 0..file.3.len() {
+                let mut flipped = base.clone();
+                flipped[at].3[byte] ^= 0x40;
+                assert_verify_agrees_with_restore(
+                    &flipped,
+                    &format!("fixture {n} file {at} byte {byte}"),
+                );
+            }
+        }
+    }
 }
