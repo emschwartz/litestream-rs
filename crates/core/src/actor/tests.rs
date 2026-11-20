@@ -464,6 +464,22 @@ fn everything(rig: &Rig) -> (Vec<FileInfo>, Vec<FileInfo>) {
     (all(&rig.staging), all(&rig.remote))
 }
 
+/// Before the boot only the boot runs, and it waits on the sync lane: a boot
+/// that failed asks to run at the end of its wait, not at once.
+#[test]
+fn a_failed_boot_waits_without_spinning() {
+    let (mut rig, _) = caught_up();
+    rig.staging
+        .inner
+        .inject_failure(StoreOp::List, transient(StoreOp::List));
+    let mut actor = Actor::new(cfg());
+    let tick = rig.tick(&mut actor, T0 + 10);
+    let Some(Event::Retrying { until, .. }) = event(&tick) else {
+        panic!("{tick:?}");
+    };
+    assert_eq!(next_of(&tick), Some(Next::At(*until)), "{tick:?}");
+}
+
 #[test]
 fn a_page_size_change_halts_at_boot_before_anything_is_staged() {
     let (mut rig, _) = caught_up();

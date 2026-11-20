@@ -1063,6 +1063,10 @@ impl Actor {
     /// Whether some lane could run now on work it already knows of. A WAL
     /// change it does not know of is the caller's to wake on.
     fn ready_work(&self, now: Timestamp) -> bool {
+        // Before the boot only the boot runs, on the sync lane.
+        if !self.booted {
+            return self.lanes.ready(Lane::Sync, now);
+        }
         let running = self.running();
         let sync = self.lanes.ready(Lane::Sync, now)
             && (!self.booted
