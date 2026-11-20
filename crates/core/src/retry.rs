@@ -16,7 +16,9 @@
 //!   as it came.
 //! - The upload checks the bytes it wrote against the size the commit reports.
 //!   A store that acknowledges a different size than was sent has stored
-//!   something else, and a restore would read it as a short file.
+//!   something else, and a restore would read it as a short file. The wrapper
+//!   deletes that object (through the retry policy) before it reports the
+//!   error, so a listing never shows a file the wrapper called corrupt.
 
 use std::future::Future;
 use std::num::NonZeroU8;
@@ -133,14 +135,21 @@ impl Counters {
     }
 }
 
-/// An [`ObjectStore`] that retries the inner store's transient failures.
+/// The store, its policy and its counters, shared by a [`Retrying`] and the
+/// uploads it hands out (a mismatched commit deletes through it).
 #[derive(Debug)]
-pub struct Retrying<S, P, E> {
+struct Core<S, P, E> {
     inner: S,
     sleeper: P,
     entropy: E,
     policy: RetryPolicy,
-    counters: Arc<Counters>,
+    counters: Counters,
+}
+
+/// An [`ObjectStore`] that retries the inner store's transient failures.
+#[derive(Debug)]
+pub struct Retrying<S, P, E> {
+    core: Arc<Core<S, P, E>>,
 }
 
 impl<S, P, E> Retrying<S, P, E> {
@@ -148,34 +157,37 @@ impl<S, P, E> Retrying<S, P, E> {
     #[must_use]
     pub fn new(inner: S, sleeper: P, entropy: E, policy: RetryPolicy) -> Self {
         Self {
-            inner,
-            sleeper,
-            entropy,
-            policy,
-            counters: Arc::new(Counters::default()),
+            core: Arc::new(Core {
+                inner,
+                sleeper,
+                entropy,
+                policy,
+                counters: Counters::default(),
+            }),
         }
     }
 
     /// The wrapped store.
     #[must_use]
     pub fn inner(&self) -> &S {
-        &self.inner
+        &self.core.inner
     }
 
     /// What this store has done so far.
     #[must_use]
     pub fn stats(&self) -> RetryStats {
         let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
+        let counters = &self.core.counters;
         RetryStats {
-            calls: load(&self.counters.calls),
-            retries: load(&self.counters.retries),
-            gave_up: load(&self.counters.gave_up),
-            waited: Duration::from_nanos(load(&self.counters.waited_nanos)),
+            calls: load(&counters.calls),
+            retries: load(&counters.retries),
+            gave_up: load(&counters.gave_up),
+            waited: Duration::from_nanos(load(&counters.waited_nanos)),
         }
     }
 }
 
-impl<S, P: Sleeper, E: Entropy> Retrying<S, P, E> {
+impl<S, P: Sleeper, E: Entropy> Core<S, P, E> {
     /// Full jitter: uniform in `1..=bound` nanoseconds, never zero.
     fn jitter(&self, failures: u32) -> Duration {
         let bound = u64::try_from(self.policy.bound(failures).as_nanos())
@@ -225,7 +237,7 @@ impl<S, P: Sleeper, E: Entropy> Retrying<S, P, E> {
 }
 
 impl<S: ObjectStore, P: Sleeper, E: Entropy> ObjectStore for Retrying<S, P, E> {
-    type Upload = RetryingUpload<S::Upload>;
+    type Upload = RetryingUpload<S, P, E>;
 
     async fn list(
         &self,
@@ -233,11 +245,13 @@ impl<S: ObjectStore, P: Sleeper, E: Entropy> ObjectStore for Retrying<S, P, E> {
         after: Option<TxidRange>,
         limit: PageLimit,
     ) -> Result<Listing, StoreError> {
-        self.run(|| self.inner.list(level, after, limit)).await
+        let core = &*self.core;
+        core.run(|| core.inner.list(level, after, limit)).await
     }
 
     async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
-        self.run(|| self.inner.read(key, offset, len)).await
+        let core = &*self.core;
+        core.run(|| core.inner.read(key, offset, len)).await
     }
 
     async fn begin_upload(
@@ -245,35 +259,41 @@ impl<S: ObjectStore, P: Sleeper, E: Entropy> ObjectStore for Retrying<S, P, E> {
         key: &FileKey,
         created_at: Timestamp,
     ) -> Result<Self::Upload, StoreError> {
-        let inner = self
-            .run(|| self.inner.begin_upload(key, created_at))
+        let core = &*self.core;
+        let inner = core
+            .run(|| core.inner.begin_upload(key, created_at))
             .await?;
         Ok(RetryingUpload {
             inner,
             key: *key,
             written: 0,
-            counters: Arc::clone(&self.counters),
+            core: Arc::clone(&self.core),
         })
     }
 
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
-        self.run(|| self.inner.delete(keys)).await
+        let core = &*self.core;
+        core.run(|| core.inner.delete(keys)).await
     }
 }
 
 /// An upload through a [`Retrying`] store: passes writes and the commit
 /// through once, and checks the committed size.
+///
+/// A commit whose stored size differs deletes the object before it reports
+/// the error, so a mismatch never leaves a listable file; see
+/// [`CorruptCause::CommitSizeMismatch`] for what the caller may conclude.
 #[derive(Debug)]
-pub struct RetryingUpload<U> {
-    inner: U,
+pub struct RetryingUpload<S: ObjectStore, P, E> {
+    inner: S::Upload,
     key: FileKey,
     written: u64,
-    counters: Arc<Counters>,
+    core: Arc<Core<S, P, E>>,
 }
 
-impl<U: Upload> Upload for RetryingUpload<U> {
+impl<S: ObjectStore, P: Sleeper, E: Entropy> Upload for RetryingUpload<S, P, E> {
     async fn write(&mut self, chunk: &[u8]) -> Result<(), StoreError> {
-        Counters::bump(&self.counters.calls);
+        Counters::bump(&self.core.counters.calls);
         self.inner.write(chunk).await?;
         let len = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
         self.written = self.written.saturating_add(len);
@@ -281,22 +301,28 @@ impl<U: Upload> Upload for RetryingUpload<U> {
     }
 
     async fn commit(self) -> Result<FileInfo, StoreError> {
-        Counters::bump(&self.counters.calls);
+        Counters::bump(&self.core.counters.calls);
         let info = self.inner.commit().await?;
-        if info.size != self.written {
-            return Err(StoreError::Corrupt {
-                key: Some(self.key),
-                cause: CorruptCause::CommitSizeMismatch {
-                    wrote: self.written,
-                    stored: info.size,
-                },
-            });
+        if info.size == self.written {
+            return Ok(info);
         }
-        Ok(info)
+        // Safe to delete: the caller still holds what it uploaded until a
+        // later verified listing, so the cost of a wrong delete is a re-upload.
+        let core = &*self.core;
+        let keys = [self.key];
+        let removed = core.run(|| core.inner.delete(&keys)).await.is_ok();
+        Err(StoreError::Corrupt {
+            key: Some(self.key),
+            cause: CorruptCause::CommitSizeMismatch {
+                wrote: self.written,
+                stored: info.size,
+                removed,
+            },
+        })
     }
 
     async fn abort(self) -> Result<(), StoreError> {
-        Counters::bump(&self.counters.calls);
+        Counters::bump(&self.core.counters.calls);
         self.inner.abort().await
     }
 }

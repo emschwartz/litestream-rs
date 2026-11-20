@@ -394,7 +394,8 @@ fn a_commit_reporting_another_size_is_corrupt() {
             key: Some(key()),
             cause: CorruptCause::CommitSizeMismatch {
                 wrote: 4,
-                stored: 3
+                stored: 3,
+                removed: true
             },
         })
     );
@@ -511,11 +512,8 @@ mod conformance_over_retrying {
     crate::conformance_suite!(RetryingHarness::default);
 }
 
-
-// Review (review-core2): failing tests that demonstrate defects.
-
 #[test]
-fn review_a_commit_size_mismatch_leaves_no_object_visible() {
+fn a_commit_size_mismatch_leaves_no_object_visible() {
     // The wrapper knows the stored object is not what was sent, reports it as
     // Corrupt, and leaves it published: a caller that lists after a failed
     // commit (as the compactor's contract asks) finds the key and trusts it.
@@ -539,4 +537,91 @@ fn review_a_commit_size_mismatch_leaves_no_object_visible() {
         listed.is_empty(),
         "an object the wrapper called corrupt is still visible: {listed:?}"
     );
+}
+
+/// A store whose deletes are refused.
+#[derive(Debug)]
+struct DeleteRefuser(SizeLiar);
+
+impl ObjectStore for DeleteRefuser {
+    type Upload = LyingUpload;
+
+    async fn list(
+        &self,
+        level: Level,
+        after: Option<TxidRange>,
+        limit: PageLimit,
+    ) -> Result<Listing, StoreError> {
+        self.0.list(level, after, limit).await
+    }
+
+    async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
+        self.0.read(key, offset, len).await
+    }
+
+    async fn begin_upload(
+        &self,
+        key: &FileKey,
+        created_at: Timestamp,
+    ) -> Result<LyingUpload, StoreError> {
+        self.0.begin_upload(key, created_at).await
+    }
+
+    async fn delete(&self, _keys: &[FileKey]) -> Result<(), StoreError> {
+        Err(StoreError::Auth {
+            op: StoreOp::Delete,
+        })
+    }
+}
+
+#[test]
+fn a_mismatch_whose_delete_fails_says_the_object_was_not_removed() {
+    let store = Retrying::new(
+        DeleteRefuser(SizeLiar(MemStore::new())),
+        RecordingSleeper::new(),
+        SeededEntropy::new(1),
+        RetryPolicy::DEFAULT,
+    );
+    let got = conformance::block_on(async {
+        let mut up = store.begin_upload(&key(), stamp()).await.unwrap();
+        up.write(b"abcd").await.unwrap();
+        up.commit().await
+    });
+    assert_eq!(
+        got,
+        Err(StoreError::Corrupt {
+            key: Some(key()),
+            cause: CorruptCause::CommitSizeMismatch {
+                wrote: 4,
+                stored: 3,
+                removed: false
+            },
+        })
+    );
+}
+
+#[test]
+fn a_mismatch_on_an_object_already_gone_counts_as_removed() {
+    // MemStore deletes a missing key as Ok, so the object vanishing between
+    // commit and delete cannot turn into removed: false.
+    let mem = MemStore::new();
+    let store = Retrying::new(
+        SizeLiar(mem.clone()),
+        RecordingSleeper::new(),
+        SeededEntropy::new(1),
+        RetryPolicy::DEFAULT,
+    );
+    let got = conformance::block_on(async {
+        let mut up = store.begin_upload(&key(), stamp()).await.unwrap();
+        up.write(b"abcd").await.unwrap();
+        conformance::block_on(mem.delete(&[key()])).unwrap();
+        up.commit().await
+    });
+    assert!(matches!(
+        got,
+        Err(StoreError::Corrupt {
+            cause: CorruptCause::CommitSizeMismatch { removed: true, .. },
+            ..
+        })
+    ));
 }

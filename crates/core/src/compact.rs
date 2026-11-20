@@ -25,7 +25,11 @@
 //! checked before the upload begins. On any error the upload is aborted; a
 //! failed abort never replaces the original error. A commit that fails after
 //! the object became visible is reported as [CompactError::Dest]: the caller
-//! lists before it trusts the destination.
+//! lists before it trusts the destination. Exception: a `Dest` error holding
+//! `Corrupt { cause: CommitSizeMismatch { removed: true, .. } }` from a
+//! [crate::Retrying] destination means the object was deleted, so the
+//! destination holds nothing new; with `removed: false` the caller must not
+//! trust a listing of the output key.
 //!
 //! A page whose newest copy sits in an input that a later input shrank below
 //! was not written by SQLite, which writes every page it grows into. Go's

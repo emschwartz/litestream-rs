@@ -186,12 +186,16 @@ pub enum CorruptCause {
     #[error("timestamp out of range")]
     TimestampOutOfRange,
     /// The store acknowledged a commit of a different size than was written.
-    #[error("committed {stored} bytes after {wrote} were written")]
+    #[error("committed {stored} bytes after {wrote} were written ({})", if *removed { "object removed" } else { "object NOT removed" })]
     CommitSizeMismatch {
         /// Bytes the caller wrote.
         wrote: u64,
         /// Bytes the store reports holding.
         stored: u64,
+        /// Whether the wrapper deleted the object it had just committed.
+        /// `false` only when that delete itself failed; the caller must then
+        /// not trust a listing of this key.
+        removed: bool,
     },
 }
 
