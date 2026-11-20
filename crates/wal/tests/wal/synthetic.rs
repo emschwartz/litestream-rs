@@ -574,6 +574,47 @@ fn frame_before_the_start_or_inside_a_transaction_is_not_a_commit() {
 }
 
 #[test]
+fn a_cursor_at_a_header_is_the_readers_start() {
+    let reader = open(&two_txs().bytes);
+    assert_eq!(
+        lsr_wal::FrameCursor::at_start(reader.header()),
+        reader.cursor_at_start()
+    );
+}
+
+#[test]
+fn frame_follows_sees_a_frame_the_chain_continues_into() {
+    let wal = two_txs();
+    let full = scan(&wal.bytes, ScanLimit::FirstInvalidFrame);
+    let mut reader = open(&wal.bytes);
+    let first = *full.txs[0].end();
+    assert!(reader.frame_follows(&first).unwrap());
+    let last = *full.txs[1].end();
+    assert!(
+        !reader.frame_follows(&last).unwrap(),
+        "nothing after the end"
+    );
+}
+
+#[test]
+fn frame_follows_refuses_a_frame_that_does_not_chain() {
+    let mut wal = two_txs();
+    let full = scan(&wal.bytes, ScanLimit::FirstInvalidFrame);
+    let end = *full.txs[1].end();
+    wal.frame_with(1, 1, (9, 9), &page(PS, 1));
+    let mut reader = open(&wal.bytes);
+    assert!(
+        !reader.frame_follows(&end).unwrap(),
+        "another generation's salts"
+    );
+    let mut broken = wal.bytes.clone();
+    let at = usize::try_from(end.next().get()).unwrap() + 30;
+    broken[at] ^= 1;
+    let mut reader = open(&broken);
+    assert!(!reader.frame_follows(&end).unwrap(), "a flipped page byte");
+}
+
+#[test]
 fn resume_page_size_mismatch() {
     let mut reader = open(&two_txs().bytes);
     let err = reader

@@ -25,6 +25,16 @@ pub struct FrameCursor {
 }
 
 impl FrameCursor {
+    /// The cursor before the first frame of the generation `header` names.
+    #[must_use]
+    pub const fn at_start(header: &WalHeader) -> Self {
+        Self {
+            next: WalOffset::start(header.page_size()),
+            checksum: header.checksum(),
+            salts: header.salts(),
+        }
+    }
+
     /// Where the next frame starts.
     #[must_use]
     pub const fn next(&self) -> WalOffset {
@@ -170,11 +180,7 @@ impl<R: Read + Seek> WalReader<R> {
     /// The cursor before the first frame.
     #[must_use]
     pub const fn cursor_at_start(&self) -> FrameCursor {
-        FrameCursor {
-            next: WalOffset::start(self.header.page_size()),
-            checksum: self.header.checksum(),
-            salts: self.header.salts(),
-        }
+        FrameCursor::at_start(&self.header)
     }
 
     /// A cursor at `at`, the position and generation (`expected`) a caller
@@ -201,6 +207,32 @@ impl<R: Read + Seek> WalReader<R> {
                 salts: expected,
             },
         })
+    }
+
+    /// Whether the frame at `cursor` verifies as the next of its chain: the cursor's
+    /// salts and checksum, whatever generation this WAL's header names.
+    ///
+    /// A restarted WAL overwrites its old frames in place, so frames of the old
+    /// generation can outlive the restart past the new one's end. A caller that
+    /// remembers a cursor asks this to learn whether any did. A file that ends
+    /// before the frame answers `false`.
+    ///
+    /// # Errors
+    /// An I/O failure reading the frame.
+    pub fn frame_follows(&mut self, cursor: &FrameCursor) -> io::Result<bool> {
+        let page_size = cursor.next().page_size();
+        let mut buf = frame_buf(page_size);
+        if read_at(&mut self.reader, cursor.next().get(), &mut buf)? < buf.len() {
+            return Ok(false);
+        }
+        Ok(verify_frame(
+            &buf,
+            self.header.byte_order(),
+            page_size,
+            cursor.salts(),
+            cursor.checksum(),
+        )
+        .is_ok())
     }
 
     /// The commit frame right before `at`, verified exactly as [`Self::resume`] does.
