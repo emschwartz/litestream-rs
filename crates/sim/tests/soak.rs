@@ -35,12 +35,7 @@ mod soak {
             println!("{}", replay_line(seed, Some(STEPS)));
             if let Err(failure) = run(seed, STEPS, &Weights::default()) {
                 println!("{failure}");
-                // Finding 2 (`review_torn_staged_file`, Task 6i) fails about 3% of
-                // seeds; it would drown every other finding until it is fixed.
-                let known = failure.violation.to_string().contains("StagedCorrupt");
-                if !known {
-                    failed.push(n);
-                }
+                failed.push(n);
             }
             ran += 1;
         }

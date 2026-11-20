@@ -16,7 +16,7 @@ use lsr_core::{
     Actor, ActorConfig, CheckpointConfig, Clock, Entropy, Env, Event, HaltCause, Maintenance, Next,
     SeededEntropy, SyncConfig, Tick, UploadConfig,
 };
-use lsr_ltx::{PageNo, PageSize, Timestamp};
+use lsr_ltx::{PageNo, PageSize, Timestamp, Txid};
 use lsr_wal::{Salts, WalOffset};
 
 use crate::generate::{EnvFault, MetaOp, Op, Target, WalOp, Weights, history};
@@ -95,8 +95,8 @@ pub enum Seen {
     Event(Event),
     /// A tick that halted the engine.
     Halt(HaltCause),
-    /// A snapshot file was staged (no WAL origin to resume from).
-    Snapshot,
+    /// A snapshot file was staged, taking this transaction.
+    Snapshot(Txid),
     /// The oracle judged the replica and found nothing wrong.
     Oracle,
 }
@@ -298,7 +298,7 @@ impl Runner {
                     .model
                     .note_snapshot(key.range().max(), commit, rewound, at);
                 if self.record {
-                    self.report.seen.push(Seen::Snapshot);
+                    self.report.seen.push(Seen::Snapshot(key.range().max()));
                 }
             } else if self.record
                 && let crate::TapEvent::Put {
@@ -309,7 +309,7 @@ impl Runner {
                 && key.level().get() == 0
                 && self.w.staged_is_full_image(key)
             {
-                self.report.seen.push(Seen::Snapshot);
+                self.report.seen.push(Seen::Snapshot(key.range().max()));
             }
         }
         self.staging_seen = events.len();

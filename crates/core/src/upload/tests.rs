@@ -11,7 +11,7 @@ use proptest::prelude::*;
 
 use super::*;
 use crate::conformance::block_on;
-use crate::fault::{HaltCause, Policy, policy};
+use crate::fault::{Backoff, HaltCause, Policy, policy};
 use crate::layout::StoredStamp;
 use crate::mem::{MemStore, MemUpload};
 use crate::store::{CorruptCause, Listing, StoreError, StoreOp};
@@ -511,7 +511,7 @@ fn every_single_byte_flip_of_a_staged_file_is_refused_and_leaves_nothing_visible
         let (staging, remote) = (MemStore::new(), Probe::default());
         put_bytes(&staging, key(1), &bad);
         let failed = failure(next(UploadState::At(None), &staging, &remote, 1));
-        assert_eq!(failed.fault, Fault::StagedCorrupt, "flip at byte {at}");
+        assert_eq!(failed.fault, Fault::StagedLost, "flip at byte {at}");
         assert_eq!(failed.state, UploadState::At(None));
         assert!(files(&remote.inner).is_empty(), "flip at byte {at}");
     }
@@ -526,7 +526,7 @@ fn a_truncated_or_overlong_staged_file_is_refused() {
         let (staging, remote) = (MemStore::new(), Probe::default());
         put_bytes(&staging, key(1), bad);
         let failed = failure(next(UploadState::At(None), &staging, &remote, 1));
-        assert_eq!(failed.fault, Fault::StagedCorrupt, "{} bytes", bad.len());
+        assert_eq!(failed.fault, Fault::StagedLost, "{} bytes", bad.len());
         assert!(files(&remote.inner).is_empty());
     }
 }
@@ -536,7 +536,7 @@ fn a_staged_file_that_names_another_transaction_is_refused() {
     let (staging, remote) = (MemStore::new(), Probe::default());
     put_bytes(&staging, key(1), &encode(2));
     let failed = failure(next(UploadState::At(None), &staging, &remote, 1));
-    assert_eq!(failed.fault, Fault::StagedCorrupt);
+    assert_eq!(failed.fault, Fault::StagedLost);
     assert!(remote.log().begins.is_empty());
     assert!(files(&remote.inner).is_empty());
 }
@@ -585,7 +585,7 @@ fn a_missing_staged_file_is_lost_not_skipped() {
     stage(&staging, 2);
     let failed = failure(next(UploadState::At(None), &staging, &remote, 2));
     assert_eq!(failed.fault, Fault::StagedLost);
-    assert_eq!(policy(&failed.fault), Policy::Halt(HaltCause::StagedLost));
+    assert_eq!(policy(&failed.fault), Policy::Retry(Backoff::Doubling));
     assert!(remote.log().begins.is_empty());
     // The gap is never filled by the file after it.
     assert!(files(&remote.inner).is_empty());

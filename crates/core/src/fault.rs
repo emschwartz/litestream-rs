@@ -56,9 +56,19 @@ pub enum Fault {
     RemoteAheadOfLocal,
     /// The replica's newest transaction went backwards mid-run.
     RemoteRegressed,
-    /// A staged file fails verification before upload.
-    StagedCorrupt,
-    /// The staging directory or a staged file vanished.
+    /// A staged level-0 file is missing or fails verification. Staged files
+    /// are derived state: the engine deletes that file and every staged file
+    /// after it, and the next file is a snapshot taking the first transaction
+    /// the replica lacks, so the chain has no hole (`upload::sweep_staged` at
+    /// boot, the upload lane mid-run; elsewhere the lane retries and the next
+    /// boot sweeps).
+    ///
+    /// A file that tears this way was never acknowledged as staged: its
+    /// commit had not returned. The filesystem store syncs a file before its
+    /// rename and the directory after, so it cannot tear one at all. The
+    /// simulator's power loss tears unsynced keys anyway, harsher than a real
+    /// filesystem; the handling is right either way, since nothing the
+    /// replica promised depends on the lost file.
     StagedLost,
     /// The local disk is full.
     LocalDiskFull,
@@ -144,10 +154,6 @@ pub enum HaltCause {
     ForeignWriter,
     /// The replica went backwards.
     RemoteRegressed,
-    /// A staged file is corrupt.
-    StagedCorrupt,
-    /// The staging area is gone.
-    StagedLost,
     /// A committed WAL frame is corrupt.
     WalCorrupt,
     /// The WAL is truncated below its committed end.
@@ -210,6 +216,7 @@ pub const fn policy(fault: &Fault) -> Policy {
         | Fault::WalIndexInconsistent
         | Fault::WalChangedUnderRead
         | Fault::NothingToSnapshot
+        | Fault::StagedLost
         | Fault::ReadTxLost => Policy::Retry(Backoff::Doubling),
         Fault::PageSizeChanged { was, now } => Policy::Halt(HaltCause::PageSizeChanged {
             was: *was,
@@ -220,8 +227,6 @@ pub const fn policy(fault: &Fault) -> Policy {
         Fault::RemoteCorrupt => Policy::Halt(HaltCause::RemoteCorrupt),
         Fault::RemoteAheadOfLocal => Policy::Halt(HaltCause::ForeignWriter),
         Fault::RemoteRegressed => Policy::Halt(HaltCause::RemoteRegressed),
-        Fault::StagedCorrupt => Policy::Halt(HaltCause::StagedCorrupt),
-        Fault::StagedLost => Policy::Halt(HaltCause::StagedLost),
         Fault::WalCorruptBelowCommitted => Policy::Halt(HaltCause::WalCorrupt),
         Fault::WalTruncatedBelowCommitted => Policy::Halt(HaltCause::WalTruncated),
         Fault::WalUnlinked => Policy::Halt(HaltCause::WalUnlinked),
@@ -281,10 +286,10 @@ impl Fault {
 
     /// An error from the staging store, a local directory nothing else writes.
     ///
-    /// The same error means something else here. A missing staged file is a
-    /// halt, not a relist. A write whose stored size differs is the torn write
-    /// to encode again. A permission error retries, so an operator can fix the
-    /// directory without a restart.
+    /// The same error means something else here. A missing or unusable staged
+    /// file is lost, not a relist. A write whose stored size differs is the
+    /// torn write to encode again. A permission error retries, so an operator
+    /// can fix the directory without a restart.
     #[must_use]
     pub const fn from_staging(err: &StoreError) -> Self {
         match err {
@@ -300,7 +305,7 @@ impl Fault {
                 }
                 CorruptCause::NotARegularFile
                 | CorruptCause::TimestampOutOfRange
-                | CorruptCause::BadStamp => Self::StagedCorrupt,
+                | CorruptCause::BadStamp => Self::StagedLost,
             },
         }
     }

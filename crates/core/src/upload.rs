@@ -24,7 +24,10 @@
 //! bytes are written to an upload that no listing can see, and the upload is
 //! committed only after the decoder verified the whole file and its header names
 //! exactly the key. Otherwise the upload is aborted and the staged file is
-//! reported as corrupt: a bad staged file never becomes visible.
+//! reported lost (`Fault::StagedLost`): a bad staged file never becomes
+//! visible. The actor then deletes it and everything staged after it
+//! ([`drop_staged_from`]) and snapshots in its place; at boot,
+//! [`sweep_staged`] does the same before anything is uploaded.
 //!
 //! A failure before the commit leaves the state alone (nothing could have been
 //! published). A failure of the commit itself gives [`UploadState::ListFirst`],
@@ -40,7 +43,7 @@ use lsr_ltx::{Decoder, Header, Txid, TxidRange};
 use crate::fault::{Fault, Next};
 use crate::inventory::{Inventory, InventoryError};
 use crate::layout::{FileInfo, FileKey, Level};
-use crate::store::{ObjectStore, PageLimit, ReadLen, Upload};
+use crate::store::{ObjectStore, PageLimit, ReadLen, StoreError, Upload};
 
 /// How much of a staged file is read at once.
 const CHUNK: u32 = 256 * 1024;
@@ -292,10 +295,12 @@ async fn tail_is_sound<L: ObjectStore, S: ObjectStore>(
         .map_err(|err| Fault::from_staging(&err))?;
     match page.files.first() {
         Some(staged) if staged.key == key => {
-            if staged.size != listed.size {
-                return Ok(false);
+            let same = staged.size == listed.size && same_bytes(staging, remote, &key).await?;
+            if same || staged_verifies(staging, &key).await? {
+                return Ok(same);
             }
-            same_bytes(staging, remote, &key).await
+            // A torn staged copy says nothing about the replica's object.
+            remote_decodes(remote, &key).await.map(|()| true)
         }
         _ => remote_decodes(remote, &key).await.map(|()| true),
     }
@@ -332,29 +337,111 @@ async fn same_bytes<L: ObjectStore, S: ObjectStore>(
 /// Reads the replica's object through the LTX decoder. It must verify whole and
 /// name exactly `key`; anything else is a corrupt replica.
 async fn remote_decodes<S: ObjectStore>(remote: &S, key: &FileKey) -> Result<(), Fault> {
+    decodes(remote, key, Fault::from_remote, Fault::RemoteCorrupt).await
+}
+
+/// Whether the staged file `key` verifies whole and names exactly `key`.
+/// A missing or unusable one does not; any other store error is the fault.
+async fn staged_verifies<L: ObjectStore>(staging: &L, key: &FileKey) -> Result<bool, Fault> {
+    match decodes(staging, key, Fault::from_staging, Fault::StagedLost).await {
+        Ok(()) => Ok(true),
+        Err(Fault::StagedLost) => Ok(false),
+        Err(fault) => Err(fault),
+    }
+}
+
+/// Streams `key` through the LTX decoder: `store_fault` names a store error,
+/// `corrupt` is what bytes that do not verify, or name another key, are.
+async fn decodes<S: ObjectStore>(
+    store: &S,
+    key: &FileKey,
+    store_fault: fn(&StoreError) -> Fault,
+    corrupt: Fault,
+) -> Result<(), Fault> {
     let len = ReadLen::new(CHUNK).ok_or(Fault::Bug)?;
     let mut decoder = Decoder::new();
     let mut offset = 0_u64;
     loop {
-        let chunk = remote
+        let chunk = store
             .read(key, offset, len)
             .await
-            .map_err(|err| Fault::from_remote(&err))?;
-        feed_all(&mut decoder, &chunk, Fault::RemoteCorrupt)?;
+            .map_err(|err| store_fault(&err))?;
+        feed_all(&mut decoder, &chunk, corrupt)?;
         let read = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
         offset = offset.saturating_add(read);
         if read < len.get() {
             break;
         }
     }
-    let verified = decoder
-        .finish()
-        .map_err(|_undecodable| Fault::RemoteCorrupt)?;
+    let verified = decoder.finish().map_err(|_undecodable| corrupt)?;
     if verified.header().txids() == key.range() {
         Ok(())
     } else {
-        Err(Fault::RemoteCorrupt)
+        Err(corrupt)
     }
+}
+
+/// The staged level-0 files whose last transaction is at least `from`
+/// (every one when `None`), oldest first.
+async fn staged_from<L: ObjectStore>(
+    staging: &L,
+    from: Option<Txid>,
+) -> Result<Vec<FileInfo>, Fault> {
+    let mut files = Vec::new();
+    let mut after = None;
+    loop {
+        let page = staging
+            .list(Level::ZERO, after, PageLimit::MAX)
+            .await
+            .map_err(|err| Fault::from_staging(&err))?;
+        files.extend(
+            page.files
+                .iter()
+                .filter(|info| from.is_none_or(|from| info.key.range().max() >= from)),
+        );
+        match page.next {
+            Some(next) => after = Some(next),
+            None => return Ok(files),
+        }
+    }
+}
+
+/// Deletes every staged level-0 file whose last transaction is at least
+/// `from`, newest first and one at a time, so a crash part way leaves the
+/// oldest of them in place and the next boot finds it again.
+///
+/// # Errors
+/// The staging store's fault when it cannot list or delete.
+pub(crate) async fn drop_staged_from<L: ObjectStore>(staging: &L, from: Txid) -> Result<(), Fault> {
+    for info in staged_from(staging, Some(from)).await?.iter().rev() {
+        staging
+            .delete(&[info.key])
+            .await
+            .map_err(|err| Fault::from_staging(&err))?;
+    }
+    Ok(())
+}
+
+/// Verifies every staged level-0 file the replica may still need: from
+/// `confirmed`, the replica's newest transaction, on (everything when the
+/// replica is empty). The first that does not verify, and every one after it,
+/// is deleted ([`drop_staged_from`]). Returns the first transaction deleted,
+/// when anything was.
+///
+/// # Errors
+/// The staging store's fault when it cannot list, read or delete.
+pub(crate) async fn sweep_staged<L: ObjectStore>(
+    staging: &L,
+    confirmed: Option<Txid>,
+) -> Result<Option<Txid>, Fault> {
+    for info in staged_from(staging, confirmed).await? {
+        if !staged_verifies(staging, &info.key).await? {
+            let from = info.key.range().min();
+            drop_staged_from(staging, from).await?;
+            return Ok(Some(from));
+        }
+    }
+    Ok(None)
 }
 
 /// Why a copy did not commit, and so what the state becomes.
@@ -446,7 +533,7 @@ fn names_key(header: &Header, key: &FileKey) -> Result<(), PutError> {
     if header.txids() == key.range() {
         Ok(())
     } else {
-        Err(PutError::Before(Fault::StagedCorrupt))
+        Err(PutError::Before(Fault::StagedLost))
     }
 }
 
@@ -468,7 +555,7 @@ async fn copy_verified<L: ObjectStore, S: ObjectStore>(
             .read(key, offset, len)
             .await
             .map_err(|err| PutError::Before(Fault::from_staging(&err)))?;
-        feed_all(&mut decoder, &chunk, Fault::StagedCorrupt).map_err(PutError::Before)?;
+        feed_all(&mut decoder, &chunk, Fault::StagedLost).map_err(PutError::Before)?;
         let read = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
         offset = offset.saturating_add(read);
         let header = decoder.header().copied();
@@ -490,7 +577,7 @@ async fn copy_verified<L: ObjectStore, S: ObjectStore>(
     }
     let verified = decoder
         .finish()
-        .map_err(|_undecodable| PutError::Before(Fault::StagedCorrupt))?;
+        .map_err(|_undecodable| PutError::Before(Fault::StagedLost))?;
     names_key(verified.header(), key)?;
     Ok(offset)
 }

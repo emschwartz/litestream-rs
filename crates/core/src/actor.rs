@@ -56,7 +56,8 @@ use crate::stamps::{ResolveError, Stamps, resolve};
 use crate::store::{ObjectStore, PageLimit};
 use crate::sync::{Step, StepEnd, SyncConfig, Synced, sync_step};
 use crate::upload::{
-    Did, UploadConfig, UploadPlan, UploadState, inventory_fault, plan_upload, upload_next,
+    Did, UploadConfig, UploadPlan, UploadState, drop_staged_from, inventory_fault, plan_upload,
+    sweep_staged, upload_next,
 };
 
 /// What one tick may touch, lent for that tick only.
@@ -452,6 +453,10 @@ impl Actor {
             Ok(listed) => listed.state,
             Err(failed) => return self.fault(Lane::Sync, failed.fault, now),
         };
+        let lost = match sweep_staged(env.staging, upload.confirmed()).await {
+            Ok(lost) => lost,
+            Err(fault) => return self.fault(Lane::Sync, fault, now),
+        };
         let booted = boot_recover(env.wal, env.staging, env.remote, upload.confirmed()).await;
         let Booted {
             tip,
@@ -470,6 +475,9 @@ impl Actor {
             Recovered::Snapshot { cause, .. } => Some(cause),
             Recovered::Halt(cause) => return self.halt(cause),
         };
+        // A staged file that did not verify was deleted with all after it:
+        // the next file is a snapshot even when the WAL could continue.
+        let cause = lost.map(|_| SnapshotCause::LocalTipUnreadable).or(cause);
         if let Some(cause) = cause {
             self.pending.get_or_insert(cause);
         }
@@ -822,6 +830,7 @@ impl Actor {
             .map_or(u32::MAX, NonZeroU32::get);
         let mut last = Did::Nothing;
         for _ in 0..limit {
+            let plan = plan_upload(&self.upload, self.staged);
             match upload_next(self.upload, env.staging, env.remote, self.staged).await {
                 Ok(uploaded) => {
                     self.upload = uploaded.state;
@@ -829,6 +838,9 @@ impl Actor {
                 }
                 Err(failed) => {
                     self.upload = failed.state;
+                    if let (Fault::StagedLost, UploadPlan::Upload(key)) = (failed.fault, plan) {
+                        return Some(self.lose_staged(env, key.range().min(), now).await);
+                    }
                     return Some(self.fault(Lane::Upload, failed.fault, now));
                 }
             }
@@ -842,6 +854,34 @@ impl Actor {
         }
         self.lanes.get_mut(Lane::Upload).succeed();
         Some(self.ran(Event::Uploaded(last), now))
+    }
+
+    /// The staged file `from` is missing or does not verify. It and every
+    /// staged file after it are deleted, and the next sync is a snapshot at
+    /// `from`: the replica holds everything before it (the upload lane only
+    /// uploads the confirmed transaction plus one), so the chain has no hole.
+    async fn lose_staged<
+        W: WalSource,
+        P: PageSource,
+        C: Checkpointer,
+        L: ObjectStore,
+        R: ObjectStore,
+    >(
+        &mut self,
+        env: &mut Env<'_, W, P, C, L, R>,
+        from: Txid,
+        now: Timestamp,
+    ) -> Tick {
+        if let Err(fault) = drop_staged_from(env.staging, from).await {
+            return self.fault(Lane::Upload, fault, now);
+        }
+        self.staged = from.prev();
+        // The position is past `from`; a snapshot after it would leave a hole.
+        self.position = None;
+        let cause = SnapshotCause::LocalTipUnreadable;
+        self.pending = Some(cause);
+        self.lanes.get_mut(Lane::Upload).succeed();
+        self.ran(Event::Resnapshot(cause), now)
     }
 
     /// Deletes staged level-0 files the replica no longer needs from staging,

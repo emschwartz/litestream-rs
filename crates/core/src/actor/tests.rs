@@ -3,7 +3,7 @@ use std::io::ErrorKind;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use lsr_ltx::{PageNo, PageSize, TxidRange};
+use lsr_ltx::{PageNo, PageSize, ReadDecoder, TxidRange};
 use lsr_wal::Salts;
 
 use super::*;
@@ -11,8 +11,10 @@ use crate::conformance::block_on;
 use crate::layout::StoredStamp;
 use crate::layout::{FileKey, Level};
 use crate::mem::MemStore;
+use crate::plan::RestoreTarget;
+use crate::restore::{MemSink, restore};
 use crate::source::{CheckpointCall, FakeCheckpointer, FakeDb, FakeWal, SourceError, SourceOp};
-use crate::store::{Listing, PageLimit, ReadLen, StoreError, StoreOp};
+use crate::store::{Listing, PageLimit, ReadLen, StoreError, StoreOp, Upload};
 
 const PS: PageSize = PageSize::MIN;
 const T0: i64 = 1_000_000;
@@ -1133,4 +1135,191 @@ fn the_maintenance_event_counts_the_stamps_it_read() {
     let (lazy, lazy_calls) = run(Rig::lazy());
     assert!(lazy.iter().any(|read| *read > 0), "{lazy:?}");
     assert!(lazy_calls > 0);
+}
+
+/// The level-0 files of `store` as (first, last) transactions.
+fn ranges(store: &Counting) -> Vec<(u64, u64)> {
+    Rig::files(store, Level::ZERO)
+        .iter()
+        .map(|f| (f.key.range().min().get(), f.key.range().max().get()))
+        .collect()
+}
+
+/// Rewrites staged `n` through `torn`, as a power loss leaves a file whose
+/// commit never returned.
+fn tear(rig: &Rig, n: u64, torn: fn(Vec<u8>) -> Vec<u8>) {
+    let store = &rig.staging.inner;
+    let info = Rig::files(&rig.staging, Level::ZERO)
+        .into_iter()
+        .find(|f| f.key.range().max().get() == n)
+        .unwrap();
+    let all = ReadLen::new(ReadLen::MAX_RAW).unwrap();
+    let bytes = block_on(store.read(&info.key, 0, all)).unwrap();
+    block_on(store.delete(&[info.key])).unwrap();
+    let bad = torn(bytes);
+    block_on(async {
+        let mut up = store.begin_upload(&info.key, ts(T0)).await.unwrap();
+        up.write(&bad).await.unwrap();
+        up.commit().await.unwrap();
+    });
+}
+
+fn truncated(mut bytes: Vec<u8>) -> Vec<u8> {
+    bytes.truncate(bytes.len() / 2);
+    bytes
+}
+
+fn flipped(mut bytes: Vec<u8>) -> Vec<u8> {
+    let at = bytes.len() / 2;
+    bytes[at] ^= 0xFF;
+    bytes
+}
+
+/// Page 1 of the latest state the replica restores to.
+fn restored(rig: &Rig) -> u8 {
+    let sink = MemSink::new();
+    block_on(restore(
+        &rig.remote.inner,
+        RestoreTarget::Latest,
+        sink.clone(),
+    ))
+    .unwrap();
+    sink.published().unwrap().page(1).unwrap()[0]
+}
+
+/// The last transaction of each snapshot at the replica's level 0: a file
+/// holding every page of the database.
+fn snapshots(rig: &Rig) -> Vec<u64> {
+    let all = ReadLen::new(ReadLen::MAX_RAW).unwrap();
+    Rig::files(&rig.remote, Level::ZERO)
+        .iter()
+        .filter(|f| {
+            let bytes = block_on(rig.remote.inner.read(&f.key, 0, all)).unwrap();
+            let mut decoder = ReadDecoder::new(&bytes[..]);
+            while decoder.next_event().unwrap().is_some() {}
+            let done = decoder.finish().unwrap();
+            done.page_count() == u64::from(done.header().commit())
+        })
+        .map(|f| f.key.range().max().get())
+        .collect()
+}
+
+fn no_halt(seen: &[Tick]) {
+    assert!(
+        seen.iter().all(|t| !matches!(t, Tick::Halted(_))),
+        "{seen:?}"
+    );
+}
+
+/// Stages one transaction per commit in `commits` while the replica's next
+/// upload fails, so none of them reaches it before the retry.
+fn stage_held(rig: &mut Rig, actor: &mut Actor, commits: &[u8], now: i64) {
+    rig.remote
+        .inner
+        .inject_failure(StoreOp::Upload, transient(StoreOp::Upload));
+    for &n in commits {
+        rig.commit(n);
+        rig.settle(actor, now);
+    }
+}
+
+#[test]
+fn a_torn_staged_file_the_replica_lacks_is_dropped_with_all_after_it() {
+    for torn in [truncated, flipped] {
+        let (mut rig, mut actor) = caught_up();
+        stage_held(&mut rig, &mut actor, &[2, 3, 4], T0 + 1);
+        assert_eq!(
+            (staged(&rig), ranges(&rig.remote)),
+            (vec![2, 3, 4], vec![(1, 1)])
+        );
+        tear(&rig, 3, torn);
+        let mut actor = Actor::new(cfg());
+        let boot = rig.tick(&mut actor, T0 + 2);
+        assert_eq!(
+            event(&boot),
+            Some(&Event::Booted {
+                cause: Some(SnapshotCause::LocalTipUnreadable)
+            })
+        );
+        assert_eq!(staged(&rig), vec![2]);
+        let seen = rig.settle(&mut actor, T0 + 2);
+        no_halt(&seen);
+        assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2), (3, 3)]);
+        assert_eq!(snapshots(&rig), vec![1, 3]);
+        assert_eq!(restored(&rig), 4);
+    }
+}
+
+#[test]
+fn a_torn_staged_file_the_replica_holds_is_dropped_and_the_snapshot_takes_the_next() {
+    for torn in [truncated, flipped] {
+        let (mut rig, mut actor) = caught_up();
+        commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
+        commit_and_settle(&mut rig, &mut actor, 3, T0 + 1);
+        stage_held(&mut rig, &mut actor, &[4], T0 + 1);
+        assert_eq!(
+            (staged(&rig), ranges(&rig.remote)),
+            (vec![2, 3, 4], vec![(1, 1), (2, 2), (3, 3)])
+        );
+        tear(&rig, 3, torn);
+        let mut actor = Actor::new(cfg());
+        let boot = rig.tick(&mut actor, T0 + 2);
+        assert_eq!(
+            event(&boot),
+            Some(&Event::Booted {
+                cause: Some(SnapshotCause::LocalTipUnreadable)
+            })
+        );
+        assert_eq!(staged(&rig), vec![2]);
+        let seen = rig.settle(&mut actor, T0 + 2);
+        no_halt(&seen);
+        assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2), (3, 3), (4, 4)]);
+        assert_eq!(snapshots(&rig), vec![1, 4]);
+        assert_eq!(restored(&rig), 4);
+    }
+}
+
+#[test]
+fn the_upload_lane_drops_a_staged_file_that_turned_unreadable_and_snapshots() {
+    for torn in [truncated, flipped] {
+        let (mut rig, mut actor) = caught_up();
+        rig.commit(2);
+        assert!(matches!(
+            event(&rig.tick(&mut actor, T0 + 1)),
+            Some(Event::Synced { .. })
+        ));
+        tear(&rig, 2, torn);
+        let lost = rig.tick(&mut actor, T0 + 1);
+        assert_eq!(
+            event(&lost),
+            Some(&Event::Resnapshot(SnapshotCause::LocalTipUnreadable))
+        );
+        assert_eq!(staged(&rig), vec![1]);
+        let seen = rig.settle(&mut actor, T0 + 1);
+        no_halt(&seen);
+        assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2)]);
+        assert_eq!(snapshots(&rig), vec![1, 2]);
+        assert_eq!(restored(&rig), 2);
+    }
+}
+
+#[test]
+fn a_crash_between_the_drop_and_the_snapshot_boots_clean() {
+    let (mut rig, mut actor) = caught_up();
+    rig.commit(2);
+    rig.tick(&mut actor, T0 + 1);
+    tear(&rig, 2, truncated);
+    let lost = rig.tick(&mut actor, T0 + 1);
+    assert_eq!(
+        event(&lost),
+        Some(&Event::Resnapshot(SnapshotCause::LocalTipUnreadable))
+    );
+    let mut actor = Actor::new(cfg());
+    let boot = rig.tick(&mut actor, T0 + 2);
+    // Nothing staged was lost this time: the WAL carries on from staged 1.
+    assert_eq!(event(&boot), Some(&Event::Booted { cause: None }));
+    let seen = rig.settle(&mut actor, T0 + 2);
+    no_halt(&seen);
+    assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2)]);
+    assert_eq!(restored(&rig), 2);
 }

@@ -101,16 +101,7 @@ policy_is!(
     Fault::RemoteRegressed,
     halt(HaltCause::RemoteRegressed)
 );
-policy_is!(
-    staged_corrupt_halts,
-    Fault::StagedCorrupt,
-    halt(HaltCause::StagedCorrupt)
-);
-policy_is!(
-    staged_lost_halts,
-    Fault::StagedLost,
-    halt(HaltCause::StagedLost)
-);
+policy_is!(staged_lost_retries, Fault::StagedLost, doubling());
 policy_is!(local_disk_full_retries, Fault::LocalDiskFull, doubling());
 policy_is!(local_io_retries, Fault::LocalIo, doubling());
 policy_is!(
@@ -183,7 +174,6 @@ fn every_fault_has_a_named_policy_test() {
         | Fault::RemoteCorrupt
         | Fault::RemoteAheadOfLocal
         | Fault::RemoteRegressed
-        | Fault::StagedCorrupt
         | Fault::StagedLost
         | Fault::LocalDiskFull
         | Fault::LocalIo
@@ -295,10 +285,10 @@ fn from_staging_names_the_local_fault_for_every_store_error() {
         ),
         (corrupt(mismatch(true)), Fault::LocalFsyncFailed),
         (corrupt(mismatch(false)), Fault::LocalFsyncFailed),
-        (corrupt(CorruptCause::NotARegularFile), Fault::StagedCorrupt),
+        (corrupt(CorruptCause::NotARegularFile), Fault::StagedLost),
         (
             corrupt(CorruptCause::TimestampOutOfRange),
-            Fault::StagedCorrupt,
+            Fault::StagedLost,
         ),
     ];
     for (err, want) in cases {
@@ -391,7 +381,7 @@ fn from_staging_refused_is_local_io_and_checksum_is_fsync() {
         key: None,
         cause: CorruptCause::BadStamp,
     };
-    assert_eq!(Fault::from_staging(&stamp), Fault::StagedCorrupt);
+    assert_eq!(Fault::from_staging(&stamp), Fault::StagedLost);
 }
 
 #[test]

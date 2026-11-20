@@ -69,6 +69,8 @@ pub enum EventMatch {
     /// without an event of their own (an operator's request, the checkpoint
     /// boundary) show only here.
     Snapshotted,
+    /// A snapshot file was staged taking exactly this transaction.
+    SnapshotAt(u64),
     /// A checkpoint of this mode ran.
     Checkpointed(CheckpointMode),
 }
@@ -94,7 +96,8 @@ impl Expect {
             (Self::Event(EventMatch::Resnapshot(want)), Seen::Event(Event::Resnapshot(cause))) => {
                 CauseKind::from(cause) == *want
             }
-            (Self::Event(EventMatch::Snapshotted), Seen::Snapshot) => true,
+            (Self::Event(EventMatch::Snapshotted), Seen::Snapshot(_)) => true,
+            (Self::Event(EventMatch::SnapshotAt(want)), Seen::Snapshot(got)) => got.get() == *want,
             (
                 Self::Event(EventMatch::Checkpointed(want)),
                 Seen::Event(Event::Checkpointed { mode, .. }),
@@ -117,9 +120,6 @@ pub struct Scenario {
     pub ops: Vec<Op>,
     /// What must be seen, in this order, with anything else allowed between.
     pub expect: Vec<Expect>,
-    /// The engine may halt after the expectations are met. Only for a scenario
-    /// whose end state is a known finding, named where it is set.
-    pub allow_halt: bool,
 }
 
 /// Runs a scenario and matches its expectations.
@@ -130,8 +130,7 @@ pub struct Scenario {
 pub fn run_scenario(scenario: &Scenario) -> Result<RunReport, String> {
     let opts = Opts {
         record: true,
-        allow_halt: scenario.allow_halt
-            || scenario.expect.iter().any(|e| matches!(e, Expect::Halt(_))),
+        allow_halt: scenario.expect.iter().any(|e| matches!(e, Expect::Halt(_))),
         ..Opts::default()
     };
     let report = run_ops(scenario.seed, &scenario.ops, &opts)
@@ -199,17 +198,7 @@ fn build(name: &'static str, ops: Vec<Vec<Op>>, expect: Vec<Expect>) -> Scenario
         seed: Seed::new(SEED),
         ops: ops.into_iter().flatten().collect(),
         expect,
-        allow_halt: false,
     }
-}
-
-/// A scenario whose damaged staged file is also found corrupt by a later
-/// read, which halts the engine with `StagedCorrupt`: the boot verdict is
-/// what the scenario pins, and the halt is finding 2 (staged file failing
-/// verification), which Task 6i turns into a lost file.
-fn halts_after(mut scenario: Scenario) -> Scenario {
-    scenario.allow_halt = true;
-    scenario
 }
 
 fn snapshot_after_boot(cause: CauseKind) -> Vec<Expect> {
@@ -287,27 +276,34 @@ pub fn restored_old_meta() -> Scenario {
     )
 }
 
-/// One byte of the tip changed on disk.
+/// One byte of the tip changed on disk. The replica already holds the tip, so
+/// the torn copy is deleted and the snapshot takes the transaction after it.
 #[must_use]
 pub fn tip_byte_flip() -> Scenario {
     let flip = vec![Op::Meta(MetaOp::FlipNewestByte)];
-    halts_after(after_restart(
-        "tip_byte_flip",
-        flip,
-        CauseKind::LocalTipUnreadable,
-    ))
+    torn_tip("tip_byte_flip", flip)
 }
 
-/// The tip file ends early. It is cut directly: a power loss only tears a file
-/// that was never uploaded, and that is a corrupt staged file, which halts.
+/// The tip file ends early, cut directly; otherwise as [`tip_byte_flip`].
 #[must_use]
 pub fn tip_truncated() -> Scenario {
     let cut = vec![Op::Meta(MetaOp::TruncateNewest)];
-    halts_after(after_restart(
-        "tip_truncated",
-        cut,
-        CauseKind::LocalTipUnreadable,
-    ))
+    torn_tip("tip_truncated", cut)
+}
+
+/// The tip of [`synced`] is damaged while the engine is down. [`synced`]
+/// stages and uploads transactions 1 and 2, so the torn tip is 2, which the
+/// replica holds: the snapshot must take 3.
+fn torn_tip(name: &'static str, damage: Vec<Op>) -> Scenario {
+    build(
+        name,
+        vec![synced(), damage, ticks(SETTLE), vec![Op::Restore]],
+        vec![
+            Expect::Event(EventMatch::Booted(Some(CauseKind::LocalTipUnreadable))),
+            Expect::Event(EventMatch::SnapshotAt(3)),
+            Expect::Oracle,
+        ],
+    )
 }
 
 /// The tip's header names no WAL range, so there is no position to resume from.
