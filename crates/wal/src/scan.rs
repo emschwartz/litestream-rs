@@ -6,7 +6,8 @@ use crate::checksum::WalChecksum;
 use crate::conv::{Fields, usize_from};
 use crate::error::{OpenError, ReadPageError, ResumeError, WalError};
 use crate::frame::{
-    CommittedEnd, FRAME_HEADER_LEN, FrameFault, FrameRef, WalOffset, frame_len, verify_frame,
+    CommittedEnd, FRAME_HEADER_LEN, FrameFault, FrameRef, VerifiedFrame, WalOffset, frame_len,
+    verify_frame,
 };
 use crate::header::{HEADER_LEN, Salts, WalHeader};
 use lsr_ltx::{Checksum, PageSize};
@@ -192,6 +193,45 @@ impl<R: Read + Seek> WalReader<R> {
     /// [`ResumeError`]: a wrong page size, a WAL too short, a restarted WAL,
     /// a frame before `at` that does not verify, or an `at` inside a transaction.
     pub fn resume(&mut self, at: WalOffset, expected: Salts) -> Result<FrameCursor, ResumeError> {
+        Ok(match self.verified_before(at, expected)? {
+            None => self.cursor_at_start(),
+            Some((_, frame)) => FrameCursor {
+                next: at,
+                checksum: frame.checksum,
+                salts: expected,
+            },
+        })
+    }
+
+    /// The commit frame right before `at`, verified exactly as [`Self::resume`] does.
+    ///
+    /// It carries the page number and digest the frame was scanned with, for a
+    /// caller that remembers the last page it covered. `at` at the start has no
+    /// frame before it and answers [`ResumeError::NotAtCommit`].
+    ///
+    /// # Errors
+    /// [`ResumeError`], as for `resume`.
+    pub fn frame_before(
+        &mut self,
+        at: WalOffset,
+        expected: Salts,
+    ) -> Result<FrameRef, ResumeError> {
+        match self.verified_before(at, expected)? {
+            Some((offset, frame)) => Ok(FrameRef {
+                pgno: frame.pgno,
+                offset,
+                digest: frame.digest,
+            }),
+            None => Err(ResumeError::NotAtCommit { at }),
+        }
+    }
+
+    /// The verified commit frame before `at` and where it starts; `None` at the start.
+    fn verified_before(
+        &mut self,
+        at: WalOffset,
+        expected: Salts,
+    ) -> Result<Option<(WalOffset, VerifiedFrame)>, ResumeError> {
         let page_size = self.header.page_size();
         if at.page_size() != page_size {
             return Err(ResumeError::PageSizeMismatch {
@@ -204,7 +244,7 @@ impl<R: Read + Seek> WalReader<R> {
             return Err(ResumeError::Restarted { expected, found });
         }
         let Some(prev) = at.prev_frame() else {
-            return Ok(self.cursor_at_start());
+            return Ok(None);
         };
         let running = self.checksum_before(prev, at)?;
         let mut buf = frame_buf(page_size);
@@ -216,11 +256,7 @@ impl<R: Read + Seek> WalReader<R> {
         if frame.commit == 0 {
             return Err(ResumeError::NotAtCommit { at });
         }
-        Ok(FrameCursor {
-            next: at,
-            checksum: frame.checksum,
-            salts: expected,
-        })
+        Ok(Some((prev, frame)))
     }
 
     /// The stored checksum of the frame before `frame`, or the header's for frame 0.

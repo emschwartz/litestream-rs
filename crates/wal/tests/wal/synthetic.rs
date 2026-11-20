@@ -531,6 +531,49 @@ fn resume_truncated() {
 }
 
 #[test]
+fn frame_before_is_the_commit_frame_the_scan_saw() {
+    let wal = two_txs();
+    let full = scan(&wal.bytes, ScanLimit::FirstInvalidFrame);
+    let mut reader = open(&wal.bytes);
+    for tx in &full.txs {
+        let frame = reader.frame_before(tx.end().next(), salts(SALTS)).unwrap();
+        let last = tx.frames().last().unwrap();
+        assert_eq!(frame, *last);
+        assert_eq!(frame.offset(), last.offset());
+    }
+}
+
+#[test]
+fn frame_before_refuses_what_resume_refuses() {
+    let mut wal = two_txs();
+    wal.frame_with(1, 1, (9, 9), &page(PS, 1));
+    let mut reader = open(&wal.bytes);
+    let at = |index| WalOffset::from_frame_index(index, size(PS));
+    let err = reader.frame_before(at(5), salts(SALTS)).unwrap_err();
+    assert!(matches!(err, ResumeError::PrevFrame { .. }), "{err}");
+    let err = reader.frame_before(at(9), salts(SALTS)).unwrap_err();
+    assert!(matches!(err, ResumeError::Truncated { .. }), "{err}");
+    let err = reader.frame_before(at(1), salts((1, 2))).unwrap_err();
+    assert!(matches!(err, ResumeError::Restarted { .. }), "{err}");
+    let err = reader
+        .frame_before(WalOffset::from_frame_index(1, size(1024)), salts(SALTS))
+        .unwrap_err();
+    assert!(matches!(err, ResumeError::PageSizeMismatch { .. }), "{err}");
+}
+
+#[test]
+fn frame_before_the_start_or_inside_a_transaction_is_not_a_commit() {
+    let mut reader = open(&two_txs().bytes);
+    for at in [
+        WalOffset::start(size(PS)),
+        WalOffset::from_frame_index(1, size(PS)),
+    ] {
+        let err = reader.frame_before(at, salts(SALTS)).unwrap_err();
+        assert!(matches!(err, ResumeError::NotAtCommit { .. }), "{err}");
+    }
+}
+
+#[test]
 fn resume_page_size_mismatch() {
     let mut reader = open(&two_txs().bytes);
     let err = reader
