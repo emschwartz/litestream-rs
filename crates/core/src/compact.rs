@@ -34,13 +34,19 @@
 //! A page whose newest copy sits in an input that a later input shrank below
 //! was not written by SQLite, which writes every page it grows into. Go's
 //! merge and an in-order apply disagree on such a chain, so it is refused
-//! ([InputFault::PageSurvivesShrink]) and the inputs are left alone.
+//! ([InputFault::PageSurvivesShrink]) and the inputs are left alone. The same
+//! goes for a regrow that skips a page above an earlier shrink and is held by
+//! no later input ([InputFault::PageNotRewritten]): a merge would show the
+//! base's copy where an in-order apply shows zeros.
+//!
+//! The output level must be above every input's level
+//! ([InputsError::LevelNotAbove]), checked before any store call.
 
 use std::mem;
 
 use lsr_ltx::{
     Checksum, DecodeError, Decoder, EncodeError, Encoder, Event, Header, HeaderFields, PageNo,
-    PageSize, Trailer, TxidRange, Verified,
+    PageSize, Trailer, TxidRange, Verified, lock_page,
 };
 use thiserror::Error;
 
@@ -80,6 +86,16 @@ pub enum InputsError {
         after: FileKey,
         /// The file that does not follow it.
         next: FileKey,
+    },
+    /// The output level is not above an input's level, so the output could
+    /// take the input's own key and "delete the inputs" would delete it. The
+    /// rule is about levels, not about whether source and destination differ.
+    #[error("output level {output} is not above the level of {input}")]
+    LevelNotAbove {
+        /// The requested output level.
+        output: Level,
+        /// An input at or above it.
+        input: FileKey,
     },
 }
 
@@ -135,6 +151,14 @@ impl CompactionInputs {
         self.range
     }
 
+    /// An input whose level is not below `output`, if any.
+    fn level_not_below(&self, output: Level) -> Option<FileKey> {
+        self.files
+            .iter()
+            .map(|info| info.key)
+            .find(|key| key.level() >= output)
+    }
+
     /// The inputs, oldest first.
     #[must_use]
     pub fn files(&self) -> &[FileInfo] {
@@ -179,6 +203,15 @@ pub enum InputFault {
         /// The page.
         pgno: PageNo,
     },
+    /// This input shrank the database below the page, a later input grew it
+    /// back over the page, and no input after the shrink holds the page. An
+    /// in-order apply leaves it zero while a merge would leave whatever the
+    /// base held, and a zero page is never invented here.
+    #[error("page {} is regrown over without being rewritten", pgno.get())]
+    PageNotRewritten {
+        /// The first such page.
+        pgno: PageNo,
+    },
 }
 
 /// Why a compaction failed. The destination holds no new file unless the
@@ -196,6 +229,9 @@ pub enum CompactError {
     /// Reading an input failed in some other way.
     #[error("reading an input: {0}")]
     Source(#[source] StoreError),
+    /// The inputs and the output level do not go together.
+    #[error("{0}")]
+    Inputs(#[from] InputsError),
     /// Writing the output failed.
     #[error("writing the output: {0}")]
     Dest(#[source] StoreError),
@@ -585,6 +621,23 @@ impl<'a, S: ObjectStore> Merge<'a, S> {
         }
     }
 
+    /// Pages `lo..hi` (hi excluded, at most the output commit) were held by no
+    /// input. If some input's commit is below one of them, the database
+    /// shrank past it and grew back without rewriting it.
+    fn check_unheld(&self, lo: u32, hi: u32) -> Result<(), CompactError> {
+        let Some(shortest) = self.all().min_by_key(|input| input.header.commit()) else {
+            return Ok(());
+        };
+        let lock = lock_page(self.first.header.page_size());
+        let Some(pgno) = first_unrewritten(lo, hi, shortest.header.commit(), lock) else {
+            return Ok(());
+        };
+        match PageNo::new(pgno, self.first.header.page_size()) {
+            Some(pgno) => Err(shortest.reader.fault(InputFault::PageNotRewritten { pgno })),
+            None => Ok(()),
+        }
+    }
+
     /// Every neighbouring pair of tracked inputs must chain, checked once all
     /// are verified; returns the last input's verified summary.
     fn verified_chain(&self) -> Result<Verified, CompactError> {
@@ -608,6 +661,16 @@ impl<'a, S: ObjectStore> Merge<'a, S> {
     }
 }
 
+/// The first page in `lo..hi` above `shortest` (the smallest commit among the
+/// inputs) that is not the lock page.
+fn first_unrewritten(lo: u32, hi: u32, shortest: u32, lock: u32) -> Option<u32> {
+    let mut pgno = lo.max(shortest.saturating_add(1));
+    if pgno == lock {
+        pgno = pgno.saturating_add(1);
+    }
+    (pgno < hi).then_some(pgno)
+}
+
 /// The header's range must be the one in the file's name.
 fn check_range(input: &Input) -> Result<(), CompactError> {
     if input.header.txids() == input.key().range() {
@@ -628,11 +691,14 @@ async fn write_output<S: ObjectStore, U: Upload>(
 ) -> Result<(Trailer, u32), CompactError> {
     let flush = merge.budget.flush;
     let mut pages = 0_u32;
+    let mut unchecked_from = 1_u32;
     // The header sits in the encoder's buffer; it goes out with the first flush.
     while let Some((pgno, winner)) = merge.next_page(encoder.writer_mut().len()).await? {
         if pgno.get() > header.commit() {
             continue;
         }
+        merge.check_unheld(unchecked_from, pgno.get())?;
+        unchecked_from = pgno.get().saturating_add(1);
         merge.check_survives_shrink(pgno, winner)?;
         encoder
             .write_page(pgno, merge.page(winner))
@@ -644,6 +710,7 @@ async fn write_output<S: ObjectStore, U: Upload>(
             upload.write(&out).await.map_err(CompactError::Dest)?;
         }
     }
+    merge.check_unheld(unchecked_from, header.commit().saturating_add(1))?;
     let last = merge.verified_chain()?;
     let post_apply = last.trailer().post_apply().filter(|_| header.tracked());
     let (tail, trailer) = encoder.finish(post_apply).map_err(CompactError::Encode)?;
@@ -673,6 +740,13 @@ async fn compact_with<S: ObjectStore, D: ObjectStore>(
     level: Level,
     budget: Budget,
 ) -> Result<Compacted, CompactError> {
+    if let Some(input) = inputs.level_not_below(level) {
+        return Err(InputsError::LevelNotAbove {
+            output: level,
+            input,
+        }
+        .into());
+    }
     let mut merge = Merge::open(source, inputs, budget).await?;
     let header = merge.output_header(level, inputs.range())?;
     let encoder = Encoder::new(Vec::new(), header).map_err(CompactError::Encode)?;

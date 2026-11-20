@@ -208,7 +208,8 @@ fn input_fault(err: CompactError) -> (FileKey, InputFault) {
         | CompactError::Source(_)
         | CompactError::Dest(_)
         | CompactError::Encode(_)
-        | CompactError::SnapshotLevel { .. } => panic!("expected an input fault, got {err:?}"),
+        | CompactError::SnapshotLevel { .. }
+        | CompactError::Inputs(_) => panic!("expected an input fault, got {err:?}"),
     }
 }
 
@@ -477,7 +478,7 @@ fn a_snapshot_start_makes_a_snapshot_that_holds_every_page() {
 }
 
 #[test]
-fn a_snapshot_with_a_page_the_merge_left_out_is_an_encode_error_and_never_published() {
+fn a_growth_that_skips_a_page_is_refused_and_never_published() {
     let source = MemStore::new();
     let specs = [
         Spec::plain(512, 3, 1, 1, &[(1, 1), (2, 2), (3, 3)]),
@@ -486,8 +487,8 @@ fn a_snapshot_with_a_page_the_merge_left_out_is_an_encode_error_and_never_publis
     ];
     let infos = put_all(&source, 0, &specs);
     let dest = Spy::default();
-    let err = error_of(compact_infos(&source, &dest, &infos, 1));
-    assert!(matches!(err, CompactError::Encode(EncodeError::Order(_))));
+    let (_, fault) = input_fault(error_of(compact_infos(&source, &dest, &infos, 1)));
+    assert!(matches!(fault, InputFault::PageNotRewritten { pgno } if pgno.get() == 4));
     assert!(nothing_published(&dest));
     assert_eq!(dest.open_uploads(), 0);
 }
@@ -1098,28 +1099,29 @@ proptest! {
     }
 }
 
-
-// Review (review-core2): failing tests that demonstrate defects.
-
 #[test]
-fn review_a_single_input_compacted_into_its_own_level_does_not_overwrite_itself() {
-    // Source and destination are one replica for levels 1 and up. One L1
-    // input compacted into level 1 is written under the input's own key, so
-    // "delete the inputs" afterwards deletes the output.
+fn a_level_not_above_every_input_is_refused_before_any_store_call() {
+    // Source and destination are one replica for levels 1 and up: an output
+    // at an input's level would take the input's own key.
     let store = MemStore::new();
     let info = put(&store, 1, &Spec::plain(512, 2, 2, 3, &[(1, 5), (2, 6)]));
-    let result = compact_infos(&store, &store, &[info], 1);
-    if let Ok(done) = &result {
-        assert_ne!(
-            done.info().key,
-            info.key,
-            "the output replaced its own input"
-        );
-    }
+    let refused = |source: &MemStore, dest: &MemStore, l: u8| {
+        matches!(
+            compact_infos(source, dest, &[info], l),
+            Err(CompactError::Inputs(InputsError::LevelNotAbove { .. }))
+        )
+    };
+    assert!(refused(&store, &store, 1), "equal level");
+    assert!(refused(&store, &store, 0), "lower level");
+    let other = MemStore::new();
+    assert!(refused(&store, &other, 1), "source differs from dest");
+    assert!(nothing_published(&other), "a refusal stores nothing");
+    let ok = compact_infos(&store, &other, &[info], 2).unwrap();
+    assert_ne!(ok.info().key, info.key);
 }
 
 #[test]
-fn review_a_base_page_that_survives_a_shrink_restores_the_same_before_and_after() {
+fn a_regrow_that_skips_a_page_above_the_shrink_is_refused() {
     // The base holds page 4; transaction 2 shrinks to 2 pages; transaction 3
     // regrows to 4 but writes only page 3. In-order restore leaves page 4
     // zero; the compacted file hides the shrink, so the base's page 4 comes
@@ -1136,13 +1138,39 @@ fn review_a_base_page_that_survives_a_shrink_restores_the_same_before_and_after(
     let compacted = MemStore::new();
     put(&compacted, 9, &base);
     let result = compact_infos(&original, &compacted, &infos, 1);
-    if result.is_ok() {
-        let before = restore_latest(&original);
-        let after = restore_latest(&compacted);
-        assert_eq!(
-            before.page(4),
-            after.page(4),
-            "compaction changed what page 4 restores to"
-        );
+    let Err(CompactError::Input { fault, .. }) = result else {
+        panic!("a regrow that leaves page 4 unwritten compacted");
+    };
+    assert!(
+        matches!(fault, InputFault::PageNotRewritten { pgno } if pgno.get() == 4),
+        "{fault:?}"
+    );
+}
+
+#[test]
+fn a_regrow_that_rewrites_every_page_above_the_shrink_compacts_and_restores_equal() {
+    let base = Spec::plain(512, 4, 1, 1, &[(1, 1), (2, 2), (3, 3), (4, 4)]);
+    let chain = [
+        Spec::plain(512, 2, 2, 2, &[(1, 5)]),
+        Spec::plain(512, 4, 3, 3, &[(3, 7), (4, 8)]),
+    ];
+    let original = MemStore::new();
+    put(&original, 9, &base);
+    let infos = put_all(&original, 0, &chain);
+    let compacted = MemStore::new();
+    put(&compacted, 9, &base);
+    compact_infos(&original, &compacted, &infos, 1).unwrap();
+    let (before, after) = (restore_latest(&original), restore_latest(&compacted));
+    for pgno in 1..=4 {
+        assert_eq!(before.page(pgno), after.page(pgno), "page {pgno}");
     }
+}
+
+#[test]
+fn the_first_unrewritten_page_skips_the_lock_page_and_stops_at_the_bound() {
+    assert_eq!(first_unrewritten(1, 9, 3, 100), Some(4));
+    assert_eq!(first_unrewritten(6, 9, 3, 100), Some(6));
+    assert_eq!(first_unrewritten(1, 4, 3, 100), None);
+    assert_eq!(first_unrewritten(1, 9, 3, 4), Some(5));
+    assert_eq!(first_unrewritten(1, 5, 3, 4), None);
 }
