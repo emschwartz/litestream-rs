@@ -150,9 +150,12 @@ lsr-core actor::tests::halt_is_terminal
 lsr-core actor::tests::idle_tick_does_no_io
 lsr-core actor::tests::job_match_is_exhaustive
 lsr-core actor::tests::job_retry_reports_the_levels_wait
+lsr-core actor::tests::lanes::a_busy_truncate_waits_for_the_next_write
+lsr-core actor::tests::lanes::a_busy_truncate_waits_one_interval
 lsr-core actor::tests::lanes::a_checkpoint_reports_busy_exactly_when_it_was
 lsr-core actor::tests::lanes::a_failed_checkpoint_waits_out_its_backoff
 lsr-core actor::tests::lanes::a_failed_prune_waits_out_its_backoff
+lsr-core actor::tests::lanes::a_passed_wait_with_no_work_left_is_not_a_deadline
 lsr-core actor::tests::lanes::a_pending_snapshot_asks_for_the_next_tick_at_once
 lsr-core actor::tests::lanes::a_prune_continues_past_a_full_page
 lsr-core actor::tests::lanes::a_restarted_wal_with_nothing_new_is_not_reported_as_a_sync
@@ -320,6 +323,7 @@ lsr-core maintain::retain::tests::a_hole_after_the_newest_snapshot_holds
 lsr-core maintain::retain::tests::a_hole_behind_the_newest_snapshot_does_not_hold
 lsr-core maintain::retain::tests::a_latest_that_does_not_plan_holds
 lsr-core maintain::retain::tests::a_level_one_file_at_the_floor_is_kept_below_it_goes
+lsr-core maintain::retain::tests::a_level_zero_file_ending_at_the_floor_is_not_below_it
 lsr-core maintain::retain::tests::a_listing_behind_what_was_published_holds
 lsr-core maintain::retain::tests::a_lower_anchor_can_delete_a_level_zero_file_a_higher_one_keeps
 lsr-core maintain::retain::tests::a_malformed_snapshot_holds
@@ -327,6 +331,7 @@ lsr-core maintain::retain::tests::a_ready_snapshot_goes_before_any_delete
 lsr-core maintain::retain::tests::a_rule_that_breaks_the_newest_restore_is_caught_by_the_self_check
 lsr-core maintain::retain::tests::an_empty_replica_has_nothing_to_delete_and_no_hold
 lsr-core maintain::retain::tests::an_unstamped_file_behind_a_young_one_is_a_hold_at_the_wake_not_a_spin
+lsr-core maintain::retain::tests::an_unstamped_last_file_holds_only_at_level_zero_or_nine
 lsr-core maintain::retain::tests::an_unstamped_snapshot_or_level_zero_file_holds_and_other_levels_do_not
 lsr-core maintain::retain::tests::due_hands_out_the_delete_job_and_then_waits_with_nothing_left
 lsr-core maintain::retain::tests::equal_snapshot_stamps_are_not_backwards
@@ -359,7 +364,9 @@ lsr-core maintain::tests::a_compact_job_publishes_its_output_key_and_is_not_plan
 lsr-core maintain::tests::a_corrupt_local_input_falls_back_to_the_replica_copy
 lsr-core maintain::tests::a_delete_job_needs_one_to_a_thousand_ascending_keys
 lsr-core maintain::tests::a_destination_written_this_window_waits_for_the_next_one
+lsr-core maintain::tests::a_distrusted_output_gone_from_the_listing_is_forgotten
 lsr-core maintain::tests::a_distrusted_output_holds_retention_until_deleted
+lsr-core maintain::tests::a_failed_delete_of_a_distrusted_output_backs_its_level_off
 lsr-core maintain::tests::a_failing_level_backs_off_and_others_run
 lsr-core maintain::tests::a_first_snapshot_is_due_at_once
 lsr-core maintain::tests::a_go_shaped_inventory_plans_what_go_plans_at_three_instants
@@ -706,6 +713,8 @@ lsr-core upload::tests::a_commit_that_answers_with_a_wrong_size_is_ambiguous_not
 lsr-core upload::tests::a_commit_that_failed_after_publishing_is_found_by_one_listing_and_not_uploaded_twice
 lsr-core upload::tests::a_commit_that_failed_before_publishing_is_listed_once_then_uploaded_again
 lsr-core upload::tests::a_failed_listing_changes_nothing
+lsr-core upload::tests::a_large_replica_tail_without_a_staged_copy_verifies_whole
+lsr-core upload::tests::a_listed_copy_that_differs_past_the_first_chunk_is_uploaded_again
 lsr-core upload::tests::a_listed_key_of_another_size_is_uploaded_again_over_the_same_key
 lsr-core upload::tests::a_listed_key_with_no_staged_file_must_decode
 lsr-core upload::tests::a_listing_confirms_a_listed_key_equal_to_the_staged_file
@@ -736,9 +745,11 @@ lsr-core verify::tests::a_broken_checksum_link_across_levels_is_unrestorable
 lsr-core verify::tests::a_chain_ending_in_a_commit_zero_file_is_unrestorable
 lsr-core verify::tests::a_clean_replica_has_no_findings_at_either_depth
 lsr-core verify::tests::a_corrupt_file_the_latest_plan_skips_is_not_unrestorable
+lsr-core verify::tests::a_database_that_shrinks_then_grows_verifies_clean
 lsr-core verify::tests::a_dropped_finding_still_counts_towards_worst
 lsr-core verify::tests::a_failing_listing_is_an_error_at_either_depth
 lsr-core verify::tests::a_failing_read_is_an_error_not_a_finding
+lsr-core verify::tests::a_file_longer_than_one_chunk_is_read_whole_in_four_mebibyte_reads
 lsr-core verify::tests::a_file_that_does_not_start_where_its_neighbour_ended_breaks_the_checksum_chain
 lsr-core verify::tests::a_file_that_vanishes_mid_walk_is_a_note
 lsr-core verify::tests::a_flipped_byte_in_a_page_is_unreadable
@@ -752,6 +763,7 @@ lsr-core verify::tests::a_listed_size_that_is_not_the_real_size_is_reported_with
 lsr-core verify::tests::a_page_size_that_differs_from_the_snapshots_is_reported_on_the_odd_file
 lsr-core verify::tests::a_restore_failure_is_one_finding_naming_its_file
 lsr-core verify::tests::a_stored_time_that_differs_from_the_header_is_reported_with_both
+lsr-core verify::tests::a_stray_level_zero_base_beside_a_newer_snapshot_reports_nothing
 lsr-core verify::tests::a_truncated_file_is_unreadable_and_names_where
 lsr-core verify::tests::a_young_replica_of_level_zero_files_from_one_has_no_findings
 lsr-core verify::tests::an_empty_replica_has_no_finding_but_is_not_restorable
@@ -761,9 +773,11 @@ lsr-core verify::tests::findings_are_capped_and_the_last_says_how_many_were_drop
 lsr-core verify::tests::foreign_names_are_a_note_per_level
 lsr-core verify::tests::holes_in_front_of_and_behind_a_snapshot_are_both_reported
 lsr-core verify::tests::level_summaries_count_files_bytes_and_range
+lsr-core verify::tests::level_summaries_count_foreign_names
 lsr-core verify::tests::names_depth_cannot_vouch_for_a_restore
 lsr-core verify::tests::names_depth_reads_no_object
 lsr-core verify::tests::pages_that_do_not_reach_the_post_apply_checksum_are_unrestorable
+lsr-core verify::tests::the_page_size_reference_is_the_base_even_when_the_odd_file_is_read_first
 lsr-core verify::tests::timestamps_that_differ_are_one_note_with_the_count_and_the_largest_gap
 lsr-core verify::tests::verify_is_unrestorable_exactly_when_the_latest_restore_fails
 lsr-core::plan_adversarial review::a_key_given_twice_is_refused_whatever_the_order

@@ -38,10 +38,11 @@ test, not a survivor, but it is reported separately and slower than a catch.
 
 ## core
 
-**Status: not finished.** The first run was stopped at 899 of 1463 mutants (about eight hours on four shared
-cores). A second run over both test packages is in progress; every survivor in the batch of it triaged below is
-killed or explained (see "Second run"), but later batches are not triaged yet, so the exit bar (zero
-unexplained survivors) is not yet met.
+**Status: met.** The first run was stopped at 899 of 1463 mutants (about eight hours on four shared
+cores). The second run, over both test packages, finished, and every one of its survivors is killed by a
+test, equivalent, explained, or in a test double (see the two "Second run" sections). The exit bar, zero
+unexplained survivors, is met for `core`; whether test doubles should be mutated at all is open in
+issue #22.
 
 The recipe needed one change before it could run at all: `core` has a guard test that lists the tracked files
 with git, cargo-mutants copies the tree without `.git` by default, and so the unmutated baseline failed and no
@@ -153,8 +154,9 @@ its timeout table names the loop each one spins; `retry.rs:205:9` is caught outr
 
 The second run is `cargo mutants -p lsr-core --test-package lsr-core --test-package lsr-sim --iterate`, so
 the simulator's scenarios count as well as core's own tests, and mutants an earlier run caught are skipped.
-Line numbers in this section are those of commit `ec5bc07`. It is in progress; this section covers the
-survivors it had reported when the batch below was taken (the files `actor.rs` to `upload.rs` in its order).
+Line numbers in this section are those of commit `ec5bc07`. This section covers the survivors it had
+reported when the first batch was taken (the files `actor.rs` to `upload.rs` in its order); the next
+section covers the rest.
 Survivors of the first run that are not listed here were caught in the second run: the simulator's tests or
 tests added since then kill them.
 
@@ -267,10 +269,110 @@ survivor. For the actor and maintenance mutants other tests also fail outright; 
 | `store.rs:80:9` | replace ReadLen::get with 0 | Every read returns nothing, and the uploader's read loops (`same_bytes` and the staged copy) end only on a chunk shorter than `ReadLen::get`, now 0. |
 | `upload.rs:198:17` | replace && with \|\| in upload_tick | A tick with work returns at once with nothing put and `Next::Now`, so `files_per_tick_is_honoured_and_asks_to_step_again`'s loop ticks forever. Also fails `a_tick_that_fails_keeps_what_it_confirmed`. |
 
+### Second run, the rest: survivors resolved
+
+The second run finished: 586 mutants in 78 minutes, 349 caught, 131 unviable, 85 missed, 21 timeouts. The
+first batch above is 45 of the missed and 13 of the timeouts; this section is the other 40 missed and 8
+timeouts. Line numbers are those of commit `ec5bc07`, as above.
+
+| File | Killed | Equivalent | Test double | Timeout |
+| --- | --- | --- | --- | --- |
+| `verify.rs` | 8 | | | 1 |
+| `verify/dry_run.rs` | 1 | 2 | | |
+| `maintain/retain.rs` | 3 | 3 | | 1 |
+| `maintain/state.rs` | 3 | | | |
+| `actor/state.rs` | 5 | | | |
+| `upload.rs` | 2 | | | 6 |
+| `source/fake.rs` | | | 11 | |
+| `restore/mem_sink.rs` | | | 2 | |
+| Total | 22 | 5 | 13 | 8 |
+
+No survivor revealed a bug.
+
+Tally of the whole second run, both batches: of 85 missed, 50 are caught by new tests, 14 are equivalent,
+1 is explained but not killed, and 20 are in test doubles (the seven conformance-harness survivors and the
+thirteen below). All 21 timeouts are explained. No survivor in `core` is unexplained.
+
+#### Caught by new tests (22)
+
+Each was run again with the targeted command (both test packages, `--file` and `--re` on its line and
+column) and is caught.
+
+| Where | Mutation | Test |
+| --- | --- | --- |
+| `verify.rs:71:28` | replace * with + (`CHUNK_BYTES`) | `a_file_longer_than_one_chunk_is_read_whole_in_four_mebibyte_reads` (`verify/tests.rs`, as are the next eight) |
+| `verify.rs:71:35` | replace * with + (`CHUNK_BYTES`) | same |
+| `verify.rs:71:35` | replace * with / (`CHUNK_BYTES`) | same |
+| `verify.rs:757:20` | replace < with <= in Walk::read | same: a full chunk is not the end of the object |
+| `verify.rs:310:9` | replace LevelSummary::bytes -> u64 with 1 | `level_summaries_count_files_bytes_and_range` now checks the sum |
+| `verify.rs:322:9` | replace LevelSummary::skipped -> usize with 0 | `level_summaries_count_foreign_names` |
+| `verify.rs:521:55` | replace && with \|\| in name_findings | `a_stray_level_zero_base_beside_a_newer_snapshot_reports_nothing` |
+| `verify.rs:656:41` | replace == with != in Walk::finish | `the_page_size_reference_is_the_base_even_when_the_odd_file_is_read_first` |
+| `verify/dry_run.rs:32:9` | replace DigestSink::truncate with Ok(()) | `a_database_that_shrinks_then_grows_verifies_clean` |
+| `maintain/retain.rs:321:5` | replace aged -> bool with true | `an_unstamped_last_file_holds_only_at_level_zero_or_nine` (`maintain/retain/tests.rs`) |
+| `maintain/retain.rs:321:22` | replace == with != in aged | same |
+| `maintain/retain.rs:470:57` | replace < with <= in level_zero | `a_level_zero_file_ending_at_the_floor_is_not_below_it` |
+| `maintain/state.rs:136:9` | replace MaintainState::record_delete with () | `a_failed_delete_of_a_distrusted_output_backs_its_level_off` (`maintain/tests.rs`) |
+| `maintain/state.rs:194:63` | replace == with != in MaintainState::retry_at | same |
+| `maintain/state.rs:207:9` | replace MaintainState::forget_unlisted with () | `a_distrusted_output_gone_from_the_listing_is_forgotten` |
+| `actor/state.rs:88:9` | replace Retry::expire with () | `a_passed_wait_with_no_work_left_is_not_a_deadline` (`actor/tests/lanes.rs`, as are the rest) |
+| `actor/state.rs:88:55` | replace > with >= in Retry::expire | same |
+| `actor/state.rs:197:32` | replace match guard at <= now with false in Gate::expire | same |
+| `actor/state.rs:180:9` | replace Gate::open -> bool with true | `a_busy_truncate_waits_for_the_next_write` |
+| `actor/state.rs:182:36` | replace >= with < in Gate::open | `a_busy_truncate_waits_one_interval` |
+| `upload.rs:331:17` | replace < with <= in same_bytes | `a_listed_copy_that_differs_past_the_first_chunk_is_uploaded_again` (`upload/tests.rs`) |
+| `upload.rs:389:17` | replace < with <= in decodes | `a_large_replica_tail_without_a_staged_copy_verifies_whole` |
+
+#### Equivalent (5)
+
+| Where | Mutation | Why |
+| --- | --- | --- |
+| `verify/dry_run.rs:37:9` | `DigestSink::reset` becomes `Ok(())` | Restore resets the sink only to apply a whole chain again from transaction 1, and that chain writes every page any earlier attempt wrote (at its newest version) or truncates it away, so nothing a reset would have cleared reaches the checksum. |
+| `verify/dry_run.rs:118:9` | the dry run's `Counting::delete` becomes `Ok(())` | `restore_from` never deletes: restore, the planner, the inventory and the stamp ledger only list and read. |
+| `maintain/retain.rs:273:82` | `hole`: `max() > snapshot` becomes `>=` | A file that ends at the newest snapshot's end starts at or below it, so it never starts past `reach + 1`, and `reach.max(..)` leaves `reach`, which is already at least the snapshot's end, unchanged. |
+| `maintain/retain.rs:287:12` | `hole`: `reach < newest` becomes `>` | `reach` only takes file ends, so it never passes `newest` and `>` is never true; and `<` is true only when the newest file is a level-9 file that does not start at 1, which `gate` holds as a malformed snapshot before it calls `hole`. |
+| `maintain/retain.rs:537:37` | `self_check`: guard `Some(chain.reaches()) == inventory.newest()` becomes `true` | No rule deletes the last file of a level, so the newest file survives every job, and a `Latest` plan of the rest is either no plan or one that reaches the rest's newest, which is the listing's. |
+
+#### Test doubles (20)
+
+These files are fakes the tests and the simulator drive the engine with, not engine code: a mutant there
+changes what a test asks of the engine, not what the engine does, and the engine passes the weaker test too.
+No tests are written for them. Whether test doubles are mutated at all is open in issue #22.
+
+| Where | Mutation | Why it survives |
+| --- | --- | --- |
+| `conformance.rs` (7) | see "In the store conformance harness" above | The suite asks less of a store; every store here is correct. |
+| `source/fake.rs:93:20` | `write_at`: `<` becomes `<=` | Resizing to the length the buffer already has changes nothing. |
+| `source/fake.rs:301:9` | `FakeWal::try_restart` returns false | No test in the run needed the fake to restart on request. |
+| `source/fake.rs:328:9` | `FakeWal::unpin_reader` does nothing | Same: only a restart on request needs the reader gone. |
+| `source/fake.rs:334:9` | `FakeWal::read_mark` returns `Some(0)` | No test reads the mark. |
+| `source/fake.rs:370:19` | `corrupt_byte`: `^=` becomes `\|=` | Setting every bit still corrupts the bytes the tests pick. |
+| `source/fake.rs:389:9` | `FakeWal::checkpoint_seq` returns 1 | No test depends on the sequence this accessor reports. |
+| `source/fake.rs:401:9` | `FakeWal::backfilled` returns 0 | No test depends on the backfill count this accessor reports. |
+| `source/fake.rs:428:61` | `checkpoint_run`: `Truncate && !busy` becomes `\|\|` | No test scripts a busy checkpoint with the natural effect. |
+| `source/fake.rs:578:9` | `FakeCheckpointer::fresh_id` returns 0 | Nothing compares two barrier or lock ids. |
+| `source/fake.rs:578:9` | `FakeCheckpointer::fresh_id` returns 1 | Same. |
+| `source/fake.rs:663:43` | `FakeDb::set_page_count`: `<=` becomes `>` | Tests set the count before writing pages, so there is nothing to drop. |
+| `restore/mem_sink.rs:79:27` | `set_page_size`: guard `have != size` becomes false | Restore refuses mixed page sizes before it writes, so the sink never sees a change. |
+| `restore/mem_sink.rs:140:30` | `write_page`: `!=` becomes `==` | A zero page is then stored instead of left implicit; `Database::page` reads the same, and no test compares two databases that differ only in that. |
+
+`try_restart` and `unpin_reader` are now used by `a_restarted_wal_with_nothing_new_is_not_reported_as_a_sync`
+(from the first batch, added after the run copied the tree), which asserts the restart, so a later run
+should catch both.
+
+#### Timeouts (8): the loop that spins
+
+| Where | Mutation | Loop that spins |
+| --- | --- | --- |
+| `upload.rs:331:17` | replace < with == in same_bytes | The comparison ends only on a chunk of exactly the read length; past the end both reads are empty and equal, forever (every actor test that boots against a replica tail). |
+| `upload.rs:331:17` | replace < with > in same_bytes | It never ends on a short chunk: the same. |
+| `upload.rs:389:17` | replace < with == in decodes | The decode loop reads empty chunks past the end forever. |
+| `upload.rs:389:17` | replace < with > in decodes | Same. |
+| `upload.rs:592:17` | replace < with == in copy_verified | The staged copy reads empty chunks past the end forever. |
+| `upload.rs:592:17` | replace < with > in copy_verified | Same. |
+| `verify.rs:757:20` | replace < with > in Walk::read | The walk's read loop never ends on a short chunk and reads empty chunks forever (every `Depth::Contents` test). |
+| `maintain/retain.rs:362:15` | replace <= with > in Found::wake_at | Retention only names wake instants past the newest stamp, which the anchor never reaches, so `retention_failure`'s tick loop (actor tests) follows `Next::At` forever. Also fails `a_covered_level_zero_file_wakes_when_it_is_old_enough`. |
+
 ### Not yet run
 
-The first run stopped before `actor/state.rs`, `maintain/config.rs`, `maintain/retain.rs`, `maintain/state.rs`,
-`restore/mem_sink.rs`, `source/fake.rs`, `sync.rs`, `upload.rs`, `verify.rs` and `verify/dry_run.rs` (and
-one mutant of `store.rs`). The second run covers every file; its later batches (from `maintain/retain.rs`
-on) are not triaged here yet. `source/fake.rs` and `mem.rs` are test doubles like the conformance harness;
-decide once whether such files are mutated at all, and say so here.
+Nothing: the second run covered every file of `lsr-core`.
