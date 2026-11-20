@@ -141,6 +141,12 @@ impl<W: Write> Encoder<W> {
         Ok((self.writer, trailer))
     }
 
+    /// The writer, so a caller that buffers in memory can hand finished bytes
+    /// onward between pages instead of holding the whole file.
+    pub fn writer_mut(&mut self) -> &mut W {
+        &mut self.writer
+    }
+
     fn write(&mut self, bytes: &[u8]) -> Result<(), EncodeError> {
         self.writer.write_all(bytes).map_err(|err| {
             self.failed = true;
@@ -163,4 +169,56 @@ pub fn encode_commit_zero(
     post_apply: Option<Checksum>,
 ) -> Result<Vec<u8>, EncodeError> {
     Ok(Encoder::start(Vec::new(), header)?.finish(post_apply)?.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Decoder, HeaderFields, PageSize, Timestamp, Txid, TxidRange};
+
+    #[test]
+    fn bytes_drained_between_pages_reassemble_into_the_same_verified_file() {
+        let size = PageSize::new(512).unwrap();
+        let header = Header::new(HeaderFields {
+            tracked: false,
+            page_size: size,
+            commit: 3,
+            txids: TxidRange::single(Txid::MIN),
+            timestamp: Timestamp::from_unix_millis(1),
+            pre_apply: None,
+            wal: None,
+            node_id: 0,
+        })
+        .unwrap();
+        let mut encoder = Encoder::new(Vec::new(), header).unwrap();
+        let mut drained = Vec::new();
+        for pgno in 1..=3_u32 {
+            let page = vec![u8::try_from(pgno).unwrap(); 512];
+            encoder
+                .write_page(PageNo::new(pgno, size).unwrap(), &page)
+                .unwrap();
+            drained.append(encoder.writer_mut());
+            assert!(encoder.writer_mut().is_empty());
+        }
+        let (tail, _) = encoder.finish(None).unwrap();
+        drained.extend_from_slice(&tail);
+
+        let mut whole = Encoder::new(Vec::new(), header).unwrap();
+        for pgno in 1..=3_u32 {
+            let page = vec![u8::try_from(pgno).unwrap(); 512];
+            whole
+                .write_page(PageNo::new(pgno, size).unwrap(), &page)
+                .unwrap();
+        }
+        let (expected, _) = whole.finish(None).unwrap();
+        assert_eq!(drained, expected);
+
+        let mut decoder = Decoder::new();
+        let mut rest = drained.as_slice();
+        while !rest.is_empty() {
+            let (used, _) = decoder.feed(rest).unwrap();
+            rest = &rest[used..];
+        }
+        assert_eq!(decoder.finish().unwrap().page_count(), 3);
+    }
 }
