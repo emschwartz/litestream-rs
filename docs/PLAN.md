@@ -194,4 +194,5 @@ Out of scope for this repository. A host that adopts the library provides:
 | D3 | Adopt the existing prefixes or start new ones | **Decided: adopt**, so tooling, the VFS and the retention window carry over |
 | D4 | Local staging layout | **Decided: Go's meta-directory layout.** Requirement: switching between Go and Rust in either direction, at any moment, is a restart (phase 3 alternation test) |
 | D5 | Function length limit | **Decided: start at 70 lines** (TigerStyle), with an `#[expect(…, reason)]` escape, and a checkpoint at phase 1 exit |
+| D6 | How far v1 departs from Go | **Decided (owner, 2026-11-20): v1 copies Go's behaviour unless a better behaviour is obvious, and adds no file, header, metadata or object Go does not speak.** Correctness checks that read more (verify before use, gap errors, the whole-tip compare, the boot read-back) stay, since they change nothing Go sees. Improvements that need new state are parked in `docs/proposals/beyond-go.md` and its issues |
 

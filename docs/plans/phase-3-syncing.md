@@ -4,7 +4,7 @@
 
 **Spec:** `docs/PLAN.md` (phase 3; section 3 types; section 6 host integration). Rules: `AGENTS.md`. Research: `docs/notes/pure-rust-pin.md` (the pin and the checkpoint against C SQLite). Upstream (read-only): `.upstream/litestream` (`db.go`, `wal_reader.go`, `replica.go`, `store.go`), and SQLite 3.54.1's `sqlite3.c` from the bundled `libsqlite3-sys` (line numbers below are from that file, as in the research note).
 
-Status: draft. Folds in the parts of the parallel draft (#8) that this one lacked: what phase 2 hands over, the shared suite's cases, and the position file (O3). Phase 2's exit items (handoff issue #1: the level 1 crash window, the level 9 scenario, the nightly seeds, `core` mutants) land first. Section "Open decisions" is the owner's; no task that depends on one starts before it is ruled. Decisions already ruled are listed under "Rulings".
+Status: draft. Folds in the parts of the parallel draft (#8) that this one lacked: what phase 2 hands over, the shared suite's cases, and the position file (O3, since ruled out for v1). Phase 2's exit items (handoff issue #1: the level 1 crash window, the level 9 scenario, the nightly seeds, `core` mutants) land first. Section "Open decisions" is the owner's; no task that depends on one starts before it is ruled. Decisions already ruled are listed under "Rulings".
 
 ## What phase 2 hands over
 
@@ -38,7 +38,7 @@ The constraints of the phase 1 and phase 2 plans apply unchanged. In addition:
 
 ## Open decisions (the owner's)
 
-- **O3, the local position file (phase 2's Task 4e).** V3's whole-tip compare cannot see a rewind that drops two or more transactions and regrows a byte-identical tip. Phase 2's recommended design (a position file in the staging directory holding the cumulative WAL checksum pair at the tip; a missing file falls back to V3) was deferred until the actor landed. Local state only, never part of the replica. Recommendation: build it in task 5, where boot recovery is reworked anyway.
+None open. O1 to O3 are ruled below (P0, P5, P6). v1 copies Go unless a better behaviour is obvious and adds no file or format Go does not speak (`docs/PLAN.md` D6).
 
 ## Rulings
 
@@ -47,6 +47,7 @@ The constraints of the phase 1 and phase 2 plans apply unchanged. In addition:
 - **P2, an unexplained WAL rewind: F2 stands.** Same salts with the committed end below the synced end is `Snapshot { cause: LocalRewound }` plus the event, as phase 2 ruled. A different-salts rewind is F1's case. No new outcome.
 - **P3, TRUNCATE needs the host's word.** `decide()` takes `Readers { Idle, Pinned, Unknown }` from the host's signal (task 6); TRUNCATE runs only on `Idle`. `Unknown` (no signal given) behaves as `Pinned`, so a host that says nothing never sees a TRUNCATE. PASSIVE is unchanged.
 - **P5 (O2, ruled by the owner 2026-11-20): trust on first use, seeded from the staged level 0 files**, the option closest to Go (which checks no database page at all, `db.go:1562`). After a boot that continues (`Continue` or `WalRestarted`), the pages of the staged files are recorded newest-wins; boot already verifies those files and computes each page's checksum, so the seed costs no GET and works the same on Go-written files after a handover. Any other page is recorded on its first read and checked on every read after. The table is cleared mid-run on every snapshot cause except `CheckpointBoundary` and `OperatorRequested`, and on a page-size change (after `LocalRewound` it holds digests of frames a power loss removed). With P1 this ships what Go ships, plus an alert when a recorded page changes. Not chosen, tracked in #10: seeding from the replica (a verify at boot), and persisting the table in the meta directory. Reading every page at boot is wrong, not just slow: after a mid-WAL `Continue` it records the old database copy of a page whose newer copy is still in the WAL, and the next checkpoint's boundary snapshot then mismatches.
+- **P6 (O3, ruled by the owner 2026-11-20): no local position file in v1.** It would be a file Go does not speak (D6). Boot keeps phase 2's whole-tip compare (V3), which already checks more than Go; the residue it misses (a rewind of two or more transactions that regrows a byte-identical tip) is gap G1 of `docs/proposals/beyond-go.md`, whose single local state file would close it.
 - **Halts.** Phase 2 halts on eleven causes, and any halt stops every lane. A review against the owner's rule (keep backing up unless continuing would damage existing backups; when degraded, alert and pin retention) proposes degraded states for most of them and a halt only for a second writer on the prefix. It changes phase 2 behaviour, PLAN.md goal 1 and an AGENTS.md rule, so it is its own proposal, not part of this plan.
 - **P4, polling is the change detector.** One `committed()` read per second when idle (PLAN phase 3). The wal hook is a later optimisation and needs its own measurement.
 
@@ -123,9 +124,7 @@ The suite is the contract for any backend: it holds every case of `crates/compat
 
 **Semantics:** when the staging directory has no level 0 file, boot reads the header of the replica's newest level 0 file (WAL origin: offset, size, salts; commit; last page through the file's index) and builds the same `Tip` a staged file would give. `recover` then decides as today: a WAL that still matches continues with no snapshot. The read is one ranged GET of the header and index; the PR states its byte count. A replica whose newest file is above level 0 (the level 0 files were retained away) gives no tip, as today: `FirstSync`.
 
-**If O3 is accepted:** the position file is written atomically after each staged file, and at boot a matching cumulative checksum at its offset proves every earlier frame. A missing or unreadable file (also what a directory inherited from Go has) falls back to V3.
-
-**Tests:** the V3 residue case (two transactions dropped, byte-identical tip regrown) as a failing test first, if O3 is accepted; `meta_wiped_remote_kept` expects `Booted { cause: None }` and the oracle holds; the same with a WAL that moved on while down expects the snapshot cause phase 2 gives a staged tip; a remote tip whose header does not match its key halts as `RemoteCorrupt`; the GET count asserted.
+**Tests:** the V3 residue case (two transactions dropped, byte-identical tip regrown) as an ignored `review_` test that names gap G1, so the gap stays visible; `meta_wiped_remote_kept` expects `Booted { cause: None }` and the oracle holds; the same with a WAL that moved on while down expects the snapshot cause phase 2 gives a staged tip; a remote tip whose header does not match its key halts as `RemoteCorrupt`; the GET count asserted.
 
 ### Task 6: the actor thread and the public API (branch `replica-api`)
 
