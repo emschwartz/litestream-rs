@@ -19,7 +19,9 @@ use lsr_ltx::{
     Checksum, Encoder, Header, HeaderFields, PageNo, PageSize, Timestamp, Txid, TxidRange,
     WalOrigin,
 };
-use lsr_wal::{FrameCursor, FrameRef, PageMap, ScanLimit, TxOutcome, WalReader};
+use lsr_wal::{
+    FrameCursor, FrameRef, PageMap, ReadPageError, ScanLimit, TxOutcome, WalError, WalReader,
+};
 use std::io::{Read, Seek};
 
 use crate::fault::{Clamped, Fault, HaltCause, SnapshotCause};
@@ -306,6 +308,53 @@ pub(crate) fn scan_whole<R: Read + Seek>(
     scan(wal, &start, upto, None).map(|scanned| scanned.map)
 }
 
+/// The fault for a failed WAL read, `halt` when the failure means damage below
+/// the committed end (ruling V1).
+///
+/// A read on mark 0 holds no lock against an application TRUNCATE checkpoint or
+/// a restart in place, so a short or non-verifying frame can be the WAL moving
+/// under the read. The header is read again, after the failed read: other salts,
+/// a short file or no header is `WalMoved` (`recover` classifies what happened),
+/// and the halt stands only when the header still names the scanned generation.
+/// Every read below the committed end (the scan, the page fill, a snapshot's
+/// whole scan, each step of the checkpoint protocol) goes through here.
+fn below_committed<R: Read + Seek>(wal: &mut WalReader<R>, halt: Fault) -> Fault {
+    match wal.generation_unchanged() {
+        Ok(true) => halt,
+        Ok(false) => Fault::WalMoved,
+        Err(_err) => Fault::LocalIo,
+    }
+}
+
+/// [`Fault::from_wal`], with damage below the committed end sorted by [`below_committed`].
+fn scan_fault<R: Read + Seek>(wal: &mut WalReader<R>, err: WalError) -> Fault {
+    match err {
+        WalError::CorruptBelowCommitted { .. } => {
+            below_committed(wal, Fault::WalCorruptBelowCommitted)
+        }
+        WalError::TruncatedBelowCommitted { .. } => {
+            below_committed(wal, Fault::WalTruncatedBelowCommitted)
+        }
+        WalError::Io(_)
+        | WalError::PageSizeMismatch { .. }
+        | WalError::Restarted { .. }
+        | WalError::CursorPastEnd { .. }
+        | WalError::EndNotAtCommit { .. }
+        | WalError::TooManyFrames => Fault::from_wal(err),
+    }
+}
+
+/// [`Fault::from_read_page`], with a truncated read sorted by [`below_committed`].
+fn page_fault<R: Read + Seek>(wal: &mut WalReader<R>, err: ReadPageError) -> Fault {
+    match err {
+        ReadPageError::Truncated { .. } => below_committed(wal, Fault::WalTruncatedBelowCommitted),
+        ReadPageError::Io(_)
+        | ReadPageError::BufferSize { .. }
+        | ReadPageError::PageSizeMismatch { .. }
+        | ReadPageError::ChangedSinceScan { .. } => Fault::from_read_page(err),
+    }
+}
+
 /// What a scan found.
 struct Scanned {
     map: PageMap,
@@ -329,7 +378,7 @@ fn scan<R: Read + Seek>(
     loop {
         match wal
             .next_tx(&cursor, ScanLimit::Committed(committed.end()))
-            .map_err(Fault::from_wal)?
+            .map_err(|err| scan_fault(wal, err))?
         {
             TxOutcome::End { .. } => break,
             TxOutcome::Tx(tx) => {
@@ -370,7 +419,7 @@ async fn fill<R: Read + Seek, P: PageSource, U: Upload>(
         match page {
             PageFrom::Wal(frame) => wal
                 .read_page(frame, &mut buf)
-                .map_err(Fault::from_read_page)?,
+                .map_err(|err| page_fault(wal, err))?,
             PageFrom::Db(pgno) => db.read_page(*pgno, &mut buf).map_err(Fault::from_source)?,
         }
         encoder

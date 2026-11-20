@@ -913,3 +913,255 @@ proptest! {
         let _ = evaluate(&t);
     }
 }
+
+// The tripwire needs a whole committed transaction of the old generation (ruling V2).
+#[test]
+fn f1_the_tripwire_ignores_a_rolled_back_spill_past_the_pin() {
+    let wal = fresh();
+    // An application transaction spills a frame past the committed end, then rolls back.
+    wal.append_uncommitted(&[(pg(3), vec![9; PS.bytes()])]);
+    wal.backfill(u32::MAX);
+    // We re-pin at the committed end (an idle step): the WAL is fully backfilled, so mark 0.
+    wal.set_epoch(wal.epoch().next());
+    wal.pin_reader();
+    assert_eq!(wal.read_mark(), Some(0));
+    let pos = position(&wal, 2, Continuity::Pinned(wal.epoch()));
+    // The next application write restarts the WAL once, as SQLite allows under mark 0.
+    wal.force_restart();
+    commit(&wal, &[1], 3);
+    let verdict = run_running(&wal, &pos, None);
+    assert_eq!(
+        verdict.event, None,
+        "nothing committed was lost: {verdict:?}"
+    );
+    assert!(
+        matches!(verdict.recovered, Recovered::WalRestarted(_)),
+        "{verdict:?}"
+    );
+}
+
+#[test]
+fn f1_the_tripwire_still_fires_when_a_spill_follows_a_committed_transaction() {
+    let wal = fresh();
+    let pos = position(&wal, 2, Continuity::Pinned(wal.epoch()));
+    commit(&wal, &[1], 3);
+    wal.append_uncommitted(&[(pg(2), vec![9; PS.bytes()])]);
+    wal.force_restart();
+    let verdict = run_running(&wal, &pos, None);
+    assert_eq!(
+        verdict.event,
+        Some(RecoverEvent::PinViolated {
+            synced: pos.synced().offset()
+        })
+    );
+}
+
+// Ruling V4: rule 6 does not look at checkpoint_seq.
+#[test]
+fn rule_6_a_restart_with_an_unrelated_checkpoint_seq_is_still_one_restart() {
+    let wal = fresh();
+    let pos = position(&wal, 2, Continuity::Pinned(wal.epoch()));
+    let old = *reader(wal.file_bytes()).header();
+    let next = Salts {
+        salt1: old.salts().salt1.wrapping_add(1),
+        salt2: 5,
+    };
+    // Another connection's own count: here the same as before, not old + 1.
+    let bytes = FakeWal::new(PS, next).file_bytes();
+    let header = *reader(bytes.clone()).header();
+    assert_eq!(header.checkpoint_seq(), old.checkpoint_seq());
+    let view = WalView {
+        header: Some(header),
+        len: Some(WalFileLen::new(u64::try_from(bytes.len()).unwrap())),
+        committed: None,
+        epoch: wal.epoch(),
+    };
+    let probes = Probes {
+        prev: FrameCheck::Miss(Miss::NotACommit),
+        stale_next: false,
+    };
+    assert!(matches!(
+        recover(Some(Tip::Running(&pos, probes)), &view, None),
+        Recovered::WalRestarted(_)
+    ));
+}
+
+// Ruling V3: boot compares the whole tip with the WAL range it covers.
+/// Loads the tip staged from `staged` (pages `tip_pages`, database size `commit_size`)
+/// against the WAL as it is now.
+fn load_against(
+    staged: &FakeWal,
+    now: &FakeWal,
+    tip_pages: &[(u32, u8)],
+    commit_size: u32,
+) -> Recovered {
+    let store = crate::MemStore::new();
+    let bytes = encode_tip(staged, 2, tip_pages, commit_size);
+    let tip = crate::conformance::block_on(async {
+        put(&store, 2, &bytes).await;
+        let mut r = reader(now.file_bytes());
+        TipView::load(&store, Some(&mut r)).await.unwrap().unwrap()
+    });
+    recover(Some(Tip::Boot(&tip)), &view(now), None)
+}
+
+/// A WAL whose second transaction was dropped by power loss and regrown with the
+/// same last page and a page 2 of other bytes.
+fn regrown() -> FakeWal {
+    let wal = FakeWal::new(PS, salts(10));
+    commit(&wal, &[1, 2], 2);
+    wal.append_tx(
+        &[
+            (pg(2), vec![0xEE; PS.bytes()]),
+            (pg(3), vec![3; PS.bytes()]),
+        ],
+        nz(3),
+    );
+    wal
+}
+
+fn is_rewound(recovered: Recovered) -> bool {
+    matches!(
+        recovered,
+        Recovered::Snapshot {
+            cause: SnapshotCause::LocalRewound { .. },
+            ..
+        }
+    )
+}
+
+#[test]
+fn a_rewound_tail_rewritten_with_the_same_last_page_is_not_continued() {
+    let recovered = load_against(&fresh(), &regrown(), &[(1, 1), (2, 2), (3, 3)], 3);
+    assert!(is_rewound(recovered), "{recovered:?}");
+}
+
+#[test]
+fn a_range_regrown_with_another_commit_size_is_a_rewind() {
+    let wal = FakeWal::new(PS, salts(10));
+    commit(&wal, &[1, 2], 2);
+    commit(&wal, &[2, 3], 5);
+    let recovered = load_against(&fresh(), &wal, &[(1, 1), (2, 2), (3, 3)], 3);
+    assert!(is_rewound(recovered), "{recovered:?}");
+}
+
+#[test]
+fn a_tip_lacking_a_page_the_range_holds_is_a_rewind() {
+    let wal = fresh();
+    let recovered = load_against(&wal, &wal, &[(2, 2), (3, 3)], 3);
+    assert!(is_rewound(recovered), "{recovered:?}");
+}
+
+#[test]
+fn a_tip_with_a_page_from_the_database_file_still_continues() {
+    // The walgrowth or snapshot step supplies page 1 from the database file.
+    let wal = FakeWal::new(PS, salts(10));
+    commit(&wal, &[2, 3], 3);
+    let recovered = load_against(&wal, &wal, &[(1, 1), (2, 2), (3, 3)], 3);
+    assert!(matches!(recovered, Recovered::Continue(_)), "{recovered:?}");
+}
+
+/// The original WAL (txs at frames 1-2 and 3-4) with its first two frames overwritten
+/// by a shorter regrown transaction of the same generation: frames 3 and 4 stay as
+/// residue past the new end, as after a power loss with synchronous=NORMAL.
+fn residue_after_a_shorter_regrown_chain() -> (Vec<u8>, FakeWal) {
+    let original = fresh();
+    let regrown = FakeWal::new(PS, salts(10));
+    regrown.append_tx(
+        &[
+            (pg(1), vec![1; PS.bytes()]),
+            (pg(2), vec![0xEE; PS.bytes()]),
+        ],
+        nz(2),
+    );
+    let mut bytes = original.file_bytes();
+    let new = regrown.file_bytes();
+    bytes[..new.len()].copy_from_slice(&new);
+    (bytes, regrown)
+}
+
+fn load_over_bytes(
+    staged: &FakeWal,
+    bytes: Vec<u8>,
+    committed: Option<CommittedRead>,
+) -> Recovered {
+    let store = crate::MemStore::new();
+    let tip_bytes = encode_tip(staged, 2, &[(1, 1), (2, 2), (3, 3)], 3);
+    let tip = crate::conformance::block_on(async {
+        put(&store, 2, &tip_bytes).await;
+        let mut r = reader(bytes.clone());
+        TipView::load(&store, Some(&mut r)).await.unwrap().unwrap()
+    });
+    let seen = WalView {
+        header: Some(*reader(bytes.clone()).header()),
+        len: Some(WalFileLen::new(u64::try_from(bytes.len()).unwrap())),
+        committed,
+        epoch: staged.epoch(),
+    };
+    recover(Some(Tip::Boot(&tip)), &seen, None)
+}
+
+#[test]
+fn a_shorter_chain_regrown_in_front_of_residue_is_a_rewind_without_the_wal_index() {
+    let (bytes, _) = residue_after_a_shorter_regrown_chain();
+    let recovered = load_over_bytes(&fresh(), bytes, None);
+    assert!(is_rewound(recovered), "{recovered:?}");
+}
+
+#[test]
+fn the_same_schedule_with_the_wal_index_is_caught_by_rule_7() {
+    let (bytes, regrown) = residue_after_a_shorter_regrown_chain();
+    let committed = CommittedRead::new(regrown.committed_end(), regrown.backfilled());
+    let recovered = load_over_bytes(&fresh(), bytes, committed);
+    assert!(is_rewound(recovered), "{recovered:?}");
+}
+
+#[test]
+fn a_tip_ending_at_frame_zero_continues_over_a_wal_that_has_since_grown() {
+    // The range is empty (origin at the start of the WAL, size 0): nothing to compare.
+    let wal = fresh();
+    let head = *reader(wal.file_bytes()).header();
+    let origin = WalOrigin::new(32, 0, head.salts().salt1, head.salts().salt2).unwrap();
+    let fields = crate::sync::header_fields(txid(2), nz(1), PS, origin, ts(7), 0);
+    let mut enc = lsr_ltx::Encoder::new(Vec::new(), lsr_ltx::Header::new(fields).unwrap()).unwrap();
+    enc.write_page(pg(1), &vec![0x42; PS.bytes()]).unwrap();
+    let bytes = enc.finish(None).unwrap().0;
+    let store = crate::MemStore::new();
+    let tip = crate::conformance::block_on(async {
+        put(&store, 2, &bytes).await;
+        let mut r = reader(wal.file_bytes());
+        TipView::load(&store, Some(&mut r)).await.unwrap().unwrap()
+    });
+    assert!(
+        matches!(
+            recover(Some(Tip::Boot(&tip)), &view(&wal), None),
+            Recovered::Continue(_)
+        ),
+        "{tip:?}"
+    );
+}
+
+#[test]
+fn a_range_missing_from_this_wal_does_not_veto() {
+    let wal = fresh();
+    let store = crate::MemStore::new();
+    let bytes = encode_tip(&wal, 2, &[(1, 1), (2, 2), (3, 3)], 3);
+    let other = FakeWal::new(PS, salts(10));
+    commit(&other, &[1, 2], 2);
+    let tip = crate::conformance::block_on(async {
+        put(&store, 2, &bytes).await;
+        let mut r = reader(other.file_bytes());
+        TipView::load(&store, Some(&mut r)).await.unwrap().unwrap()
+    });
+    // The WAL ends before the tip's end: rule 7 or the frame check speaks, not the range.
+    assert!(
+        !matches!(
+            tip,
+            TipView::Readable {
+                last_page: LastPageCheck::Rewritten,
+                ..
+            }
+        ),
+        "{tip:?}"
+    );
+}

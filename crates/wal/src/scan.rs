@@ -177,6 +177,24 @@ impl<R: Read + Seek> WalReader<R> {
         &self.header
     }
 
+    /// Whether the file's header, read again now, still names the generation this
+    /// reader was opened on.
+    ///
+    /// A short file, an unreadable header or other salts answer `false`: the WAL
+    /// was truncated or restarted since `open`. SQLite writes a restart's header
+    /// before any new frame, so after a failed read below the committed end a
+    /// header that still matches means the bytes are wrong inside one generation.
+    ///
+    /// # Errors
+    /// An I/O failure reading the header.
+    pub fn generation_unchanged(&mut self) -> io::Result<bool> {
+        let mut bytes = [0; HEADER_LEN];
+        if read_at(&mut self.reader, 0, &mut bytes)? < HEADER_LEN {
+            return Ok(false);
+        }
+        Ok(WalHeader::decode(&bytes).is_ok_and(|now| now.salts() == self.header.salts()))
+    }
+
     /// The cursor before the first frame.
     #[must_use]
     pub const fn cursor_at_start(&self) -> FrameCursor {
@@ -209,30 +227,43 @@ impl<R: Read + Seek> WalReader<R> {
         })
     }
 
-    /// Whether the frame at `cursor` verifies as the next of its chain: the cursor's
-    /// salts and checksum, whatever generation this WAL's header names.
+    /// Whether a whole committed transaction chains on from `cursor`: frames that
+    /// verify with the cursor's salts and checksum, whatever generation this WAL's
+    /// header names, up to a commit frame.
     ///
     /// A restarted WAL overwrites its old frames in place, so frames of the old
     /// generation can outlive the restart past the new one's end. A caller that
-    /// remembers a cursor asks this to learn whether any did. A file that ends
-    /// before the frame answers `false`.
+    /// remembers a cursor asks this to learn whether a commit did. Frames with no
+    /// commit after them are a rolled-back spill, never part of the database. A
+    /// file that ends first, or a frame that does not verify, answers `false`.
     ///
     /// # Errors
-    /// An I/O failure reading the frame.
-    pub fn frame_follows(&mut self, cursor: &FrameCursor) -> io::Result<bool> {
+    /// An I/O failure reading a frame.
+    pub fn commit_follows(&mut self, cursor: &FrameCursor) -> io::Result<bool> {
         let page_size = cursor.next().page_size();
         let mut buf = frame_buf(page_size);
-        if read_at(&mut self.reader, cursor.next().get(), &mut buf)? < buf.len() {
-            return Ok(false);
+        let (mut at, mut checksum) = (cursor.next(), cursor.checksum());
+        loop {
+            if read_at(&mut self.reader, at.get(), &mut buf)? < buf.len() {
+                return Ok(false);
+            }
+            let Ok(frame) = verify_frame(
+                &buf,
+                self.header.byte_order(),
+                page_size,
+                cursor.salts(),
+                checksum,
+            ) else {
+                return Ok(false);
+            };
+            if frame.commit != 0 {
+                return Ok(true);
+            }
+            let Some(next) = at.next_frame() else {
+                return Ok(false);
+            };
+            (at, checksum) = (next, frame.checksum);
         }
-        Ok(verify_frame(
-            &buf,
-            self.header.byte_order(),
-            page_size,
-            cursor.salts(),
-            cursor.checksum(),
-        )
-        .is_ok())
     }
 
     /// The commit frame right before `at`, verified exactly as [`Self::resume`] does.

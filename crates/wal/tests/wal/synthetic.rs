@@ -583,35 +583,102 @@ fn a_cursor_at_a_header_is_the_readers_start() {
 }
 
 #[test]
-fn frame_follows_sees_a_frame_the_chain_continues_into() {
+fn commit_follows_sees_a_transaction_the_chain_continues_into() {
     let wal = two_txs();
     let full = scan(&wal.bytes, ScanLimit::FirstInvalidFrame);
     let mut reader = open(&wal.bytes);
     let first = *full.txs[0].end();
-    assert!(reader.frame_follows(&first).unwrap());
+    assert!(reader.commit_follows(&first).unwrap());
+    let start = reader.cursor_at_start();
+    assert!(
+        reader.commit_follows(&start).unwrap(),
+        "a multi-frame transaction"
+    );
     let last = *full.txs[1].end();
     assert!(
-        !reader.frame_follows(&last).unwrap(),
+        !reader.commit_follows(&last).unwrap(),
         "nothing after the end"
     );
 }
 
 #[test]
-fn frame_follows_refuses_a_frame_that_does_not_chain() {
+fn commit_follows_ignores_frames_with_no_commit_after_them() {
+    let mut wal = two_txs();
+    let full = scan(&wal.bytes, ScanLimit::FirstInvalidFrame);
+    let end = *full.txs[1].end();
+    wal.frame(4, 0, 50);
+    wal.frame(5, 0, 51);
+    let mut reader = open(&wal.bytes);
+    assert!(
+        !reader.commit_follows(&end).unwrap(),
+        "a rolled-back spill: verifying frames, no commit"
+    );
+    wal.frame(6, 6, 52);
+    let mut reader = open(&wal.bytes);
+    assert!(reader.commit_follows(&end).unwrap(), "the spill committed");
+}
+
+#[test]
+fn generation_unchanged_reads_the_header_again() {
+    let wal = two_txs();
+    let shared = Rc::new(std::cell::RefCell::new(wal.bytes.clone()));
+    let mut reader = WalReader::open(Shared(Rc::clone(&shared), 0)).unwrap();
+    assert!(reader.generation_unchanged().unwrap());
+    let mut moved = Wal::new(PS, false, (SALTS.0 + 1, SALTS.1));
+    moved.tx(&[1], 1, 1);
+    *shared.borrow_mut() = moved.bytes.clone();
+    assert!(!reader.generation_unchanged().unwrap(), "other salts");
+    *shared.borrow_mut() = wal.bytes[..HEADER_LEN - 1].to_vec();
+    assert!(!reader.generation_unchanged().unwrap(), "a short header");
+    shared.borrow_mut().clear();
+    assert!(!reader.generation_unchanged().unwrap(), "an empty file");
+    *shared.borrow_mut() = wal.bytes.clone();
+    assert!(reader.generation_unchanged().unwrap());
+}
+
+/// A WAL file the test can replace after the reader opened it.
+struct Shared(Rc<std::cell::RefCell<Vec<u8>>>, u64);
+
+impl Read for Shared {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let bytes = self.0.borrow();
+        let at = usize::try_from(self.1).unwrap_or(usize::MAX);
+        let rest = bytes.get(at..).unwrap_or_default();
+        let n = buf.len().min(rest.len());
+        if let (Some(dst), Some(src)) = (buf.get_mut(..n), rest.get(..n)) {
+            dst.copy_from_slice(src);
+        }
+        self.1 = self.1.saturating_add(u64::try_from(n).unwrap_or(0));
+        Ok(n)
+    }
+}
+
+impl Seek for Shared {
+    fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
+        let SeekFrom::Start(at) = to else {
+            return Err(io::ErrorKind::Unsupported.into());
+        };
+        self.1 = at;
+        Ok(at)
+    }
+}
+
+#[test]
+fn commit_follows_refuses_a_frame_that_does_not_chain() {
     let mut wal = two_txs();
     let full = scan(&wal.bytes, ScanLimit::FirstInvalidFrame);
     let end = *full.txs[1].end();
     wal.frame_with(1, 1, (9, 9), &page(PS, 1));
     let mut reader = open(&wal.bytes);
     assert!(
-        !reader.frame_follows(&end).unwrap(),
+        !reader.commit_follows(&end).unwrap(),
         "another generation's salts"
     );
     let mut broken = wal.bytes.clone();
     let at = usize::try_from(end.next().get()).unwrap() + 30;
     broken[at] ^= 1;
     let mut reader = open(&broken);
-    assert!(!reader.frame_follows(&end).unwrap(), "a flipped page byte");
+    assert!(!reader.commit_follows(&end).unwrap(), "a flipped page byte");
 }
 
 #[test]

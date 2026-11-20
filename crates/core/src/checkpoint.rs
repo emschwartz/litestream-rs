@@ -245,10 +245,7 @@ pub enum CheckpointOutcome {
     /// SQLite could not finish and the WAL is the same generation.
     Busy,
     /// The checkpoint finished or stopped short without a restart.
-    NotRestarted {
-        /// Every frame is in the database file.
-        fully_backfilled: bool,
-    },
+    NotRestarted,
     /// A PASSIVE that moved the WAL to a new generation.
     Restarted,
     /// A TRUNCATE; the boundary snapshot covers the new generation.
@@ -284,14 +281,14 @@ pub fn after_checkpoint(
         (Decision::Nothing, _) => state,
         (
             Decision::Passive(Why::TruncateThreshold),
-            CheckpointOutcome::Busy | CheckpointOutcome::NotRestarted { .. },
+            CheckpointOutcome::Busy | CheckpointOutcome::NotRestarted,
         ) => {
             return (
                 CheckpointState::PassiveFailedAtTruncate { last: now },
                 Next::Now,
             );
         }
-        (Decision::Truncate, CheckpointOutcome::Busy | CheckpointOutcome::NotRestarted { .. }) => {
+        (Decision::Truncate, CheckpointOutcome::Busy | CheckpointOutcome::NotRestarted) => {
             let wake = cfg
                 .interval
                 .map_or(Next::OnWalChange, |interval| Next::At(after(now, interval)));
@@ -305,7 +302,7 @@ pub fn after_checkpoint(
             Decision::Passive(_) | Decision::Truncate,
             CheckpointOutcome::Restarted | CheckpointOutcome::Truncated,
         ) => idle(false),
-        (Decision::Passive(_), CheckpointOutcome::NotRestarted { .. }) => idle(true),
+        (Decision::Passive(_), CheckpointOutcome::NotRestarted) => idle(true),
     };
     let wake = next_wake(&next, cfg).map_or(Next::OnWalChange, Next::At);
     (next, wake)
@@ -452,9 +449,7 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_, 
             return Ok(if run.busy {
                 CheckpointOutcome::Busy
             } else {
-                CheckpointOutcome::NotRestarted {
-                    fully_backfilled: run.checkpointed == run.log,
-                }
+                CheckpointOutcome::NotRestarted
             });
         }
         self.step(Step::NewGeneration(self.good)).await?;
@@ -487,9 +482,7 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_, 
             return Ok(if run.busy {
                 CheckpointOutcome::Busy
             } else {
-                CheckpointOutcome::NotRestarted {
-                    fully_backfilled: run.checkpointed == run.log,
-                }
+                CheckpointOutcome::NotRestarted
             });
         }
         self.boundary_snapshot().await?;

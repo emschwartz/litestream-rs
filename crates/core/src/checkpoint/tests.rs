@@ -178,9 +178,7 @@ fn the_passive_before_a_truncate_hands_back_now() {
     let (state, next) = after_checkpoint(
         CheckpointState::Pending { last: ts(0) },
         Decision::Passive(Why::TruncateThreshold),
-        &CheckpointOutcome::NotRestarted {
-            fully_backfilled: false,
-        },
+        &CheckpointOutcome::NotRestarted,
         &o,
         &c,
     );
@@ -267,9 +265,7 @@ fn tick_passives(
     *state = after_sync(*state, wrote, &o, c);
     let decision = decide(state, &o, c);
     if let Decision::Passive(_) = decision {
-        let outcome = CheckpointOutcome::NotRestarted {
-            fully_backfilled: true,
-        };
+        let outcome = CheckpointOutcome::NotRestarted;
         (*state, _) = after_checkpoint(*state, decision, &outcome, &o, c);
         return true;
     }
@@ -446,18 +442,13 @@ fn a_passive_with_nothing_in_the_way_seals_then_follows_the_writer_restart() {
 }
 
 #[test]
-fn a_passive_held_back_by_a_reader_is_not_fully_backfilled() {
+fn a_passive_held_back_by_a_reader_is_not_restarted() {
     let mut rig = Rig::new();
     let proof = rig.proof();
     rig.commit(&[3]);
     rig.ck.script(script(false, CheckpointEffect::Backfill(1)));
     let done = rig.run(proof, CheckpointMode::Passive).unwrap();
-    assert_eq!(
-        done.outcome,
-        CheckpointOutcome::NotRestarted {
-            fully_backfilled: false
-        }
-    );
+    assert_eq!(done.outcome, CheckpointOutcome::NotRestarted);
 }
 
 #[test]

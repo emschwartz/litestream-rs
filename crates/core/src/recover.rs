@@ -13,14 +13,24 @@
 //! 4 no WAL header, 5 page size changed, 6 salts changed, 7 same salts but the
 //! WAL is shorter than the tip's end, 8 the frame before the end is not a
 //! commit frame, 9 the last page differs, 10 continue.
+//!
+//! Rule 6 proves one restart with the read-transaction pin and `salt1 + 1`; it
+//! does not check `checkpoint_seq`, which real SQLite takes from the restarting
+//! connection's own count (ruling V4). At boot, rule 9 compares the whole tip with
+//! the WAL range it covers (page bytes and commit size), not only the last page,
+//! so a tail dropped by power loss and regrown differently is a rewind (ruling V3).
 
+use std::collections::BTreeMap;
 use std::io::{Read, Seek};
 use std::num::NonZeroU32;
 
 use lsr_ltx::{
     Checksum, Decoder, Event, HEADER_LEN, Header, PageNo, PageSize, Timestamp, Txid, WalOrigin,
 };
-use lsr_wal::{FrameCursor, FrameRef, ResumeError, Salts, WalHeader, WalOffset, WalReader};
+use lsr_wal::{
+    FrameCursor, FrameRef, PageMap, ResumeError, Salts, ScanLimit, TxOutcome, WalError, WalHeader,
+    WalOffset, WalReader,
+};
 
 use crate::fault::{Fault, HaltCause, SnapshotCause};
 use crate::layout::{FileInfo, FileKey, Level};
@@ -87,6 +97,10 @@ pub enum LastPageCheck {
     NotInTip,
     /// There is no such frame.
     NoFrame(Miss),
+    /// The WAL holds a last page like the tip's, but what it holds in the tip's range
+    /// is not what the tip staged: another page set, other bytes or another commit
+    /// size (a rewound tail regrown with a different transaction).
+    Rewritten,
 }
 
 /// The newest staged file, as a boot reads it.
@@ -164,20 +178,35 @@ impl TipView {
                 } else {
                     FrameCheck::Miss(Miss::NotACommit)
                 };
-                Some((wal, check))
+                let range = tip_range(wal, &origin, end, salts)?;
+                Some((wal, check, range))
             }
             None => None,
         };
         let wanted = match frame {
-            Some((_, FrameCheck::Frame(frame))) => Some(frame.pgno()),
-            Some((_, FrameCheck::Miss(_))) | None => None,
+            Some((_, FrameCheck::Frame(frame), _)) => Some(frame.pgno()),
+            Some((_, FrameCheck::Miss(_), _)) | None => None,
         };
-        let Some(pages) = scan_pages(staging, &newest, wanted).await? else {
+        let none = BTreeMap::new();
+        let expected = match &frame {
+            Some((_, _, Range::Pages { pages, .. })) => pages,
+            Some((_, _, Range::Rewritten | Range::NotInThisWal)) | None => &none,
+        };
+        let Some(pages) = scan_pages(staging, &newest, wanted, expected).await? else {
             return Ok(Some(Self::Unreadable { txid }));
         };
         let last_page = match frame {
             None => LastPageCheck::NoFrame(Miss::Truncated),
-            Some((wal, check)) => match_last_page(wal, check, end, salts, &pages)?,
+            Some((wal, check, range)) => {
+                let checked = match_last_page(wal, check, end, salts, &pages)?;
+                if matches!(checked, LastPageCheck::Match { .. })
+                    && !range.agrees(&pages, fields.commit)
+                {
+                    LastPageCheck::Rewritten
+                } else {
+                    checked
+                }
+            }
         };
         Ok(Some(Self::Readable {
             txid,
@@ -194,6 +223,110 @@ impl TipView {
 struct TipPages {
     wanted: Option<Checksum>,
     last: Option<LastPage>,
+    /// Every page the WAL holds in the tip's range is in the tip with the same bytes.
+    /// The tip may hold more: pages the database file supplied (walgrowth, a snapshot's).
+    holds_wal_pages: bool,
+}
+
+/// What the WAL holds in the tip's range of frames (ruling V3).
+enum Range {
+    /// The newest version of each page, and the commit size of the range's last
+    /// transaction (0 for an empty range).
+    Pages {
+        pages: BTreeMap<PageNo, Checksum>,
+        commit: u32,
+    },
+    /// The range does not start or end on a transaction boundary of this WAL.
+    Rewritten,
+    /// The range is not in this WAL (a tip from an earlier generation): nothing to
+    /// compare, so nothing to veto.
+    NotInThisWal,
+}
+
+impl Range {
+    fn agrees(&self, tip: &TipPages, tip_commit: u32) -> bool {
+        match self {
+            Self::Pages { commit, .. } => {
+                tip.holds_wal_pages && (*commit == 0 || *commit == tip_commit)
+            }
+            Self::Rewritten => false,
+            Self::NotInThisWal => true,
+        }
+    }
+}
+
+/// Re-derives the tip from the WAL frames in `[origin.offset, end)`.
+///
+/// Rule 9's last-page match cannot see an earlier page of the tip that differs: a
+/// power loss with `synchronous=NORMAL` drops the tail, and the application commits
+/// another transaction over the same frames. Comparing the newest version of every
+/// page the range holds, and the commit size, closes that. It reads the range once,
+/// at boot, in the bounded memory of one file's page map.
+fn tip_range<R: Read + Seek>(
+    wal: &mut WalReader<R>,
+    origin: &WalOrigin,
+    end: WalOffset,
+    salts: Salts,
+) -> Result<Range, Fault> {
+    let page_size = end.page_size();
+    let Some(start) = WalOffset::new(origin.offset(), page_size) else {
+        return Ok(Range::Rewritten);
+    };
+    let mut cursor = match wal.resume(start, salts) {
+        Ok(cursor) => cursor,
+        Err(ResumeError::PrevFrame { .. } | ResumeError::NotAtCommit { .. }) => {
+            return Ok(Range::Rewritten);
+        }
+        Err(ResumeError::Io(_)) => return Err(Fault::LocalIo),
+        Err(
+            ResumeError::Truncated { .. }
+            | ResumeError::Restarted { .. }
+            | ResumeError::PageSizeMismatch { .. },
+        ) => return Ok(Range::NotInThisWal),
+    };
+    let mut map = PageMap::new(page_size);
+    while cursor.next().get() < end.get() {
+        match wal.next_tx(&cursor, ScanLimit::FirstInvalidFrame) {
+            Ok(TxOutcome::Tx(tx)) => {
+                map.apply(&tx).map_err(Fault::from_page_map)?;
+                cursor = *tx.end();
+            }
+            Err(WalError::Io(_)) => return Err(Fault::LocalIo),
+            // The scan started at the origin and did not reach the end on one verified
+            // chain: frames past it may be residue of a dropped tail.
+            Ok(TxOutcome::End { .. })
+            | Err(
+                WalError::PageSizeMismatch { .. }
+                | WalError::Restarted { .. }
+                | WalError::CursorPastEnd { .. }
+                | WalError::CorruptBelowCommitted { .. }
+                | WalError::TruncatedBelowCommitted { .. }
+                | WalError::EndNotAtCommit { .. }
+                | WalError::TooManyFrames,
+            ) => return unreached(wal),
+        }
+    }
+    if cursor.next() != end {
+        return Ok(Range::Rewritten);
+    }
+    Ok(Range::Pages {
+        pages: map
+            .pages()
+            .map(|frame| (frame.pgno(), frame.digest()))
+            .collect(),
+        commit: map.commit(),
+    })
+}
+
+/// The scan from the origin stopped short of the tip's end. If the header still names
+/// the scanned generation the range was rewritten; if not, the WAL moved under the
+/// read and the caller retries (ruling V1's helper, `generation_unchanged`).
+fn unreached<R: Read + Seek>(wal: &mut WalReader<R>) -> Result<Range, Fault> {
+    match wal.generation_unchanged() {
+        Ok(true) => Ok(Range::Rewritten),
+        Ok(false) => Err(Fault::WalMoved),
+        Err(_err) => Err(Fault::LocalIo),
+    }
 }
 
 fn match_last_page<R: Read + Seek>(
@@ -256,6 +389,7 @@ async fn scan_pages<L: ObjectStore>(
     staging: &L,
     file: &FileInfo,
     wanted: Option<PageNo>,
+    expected: &BTreeMap<PageNo, Checksum>,
 ) -> Result<Option<TipPages>, Fault> {
     let Some(chunk) = ReadLen::new(TIP_READ) else {
         return Err(Fault::Bug);
@@ -263,7 +397,9 @@ async fn scan_pages<L: ObjectStore>(
     let mut seen = TipPages {
         wanted: None,
         last: None,
+        holds_wal_pages: false,
     };
+    let (mut matching, mut differing) = (0_usize, false);
     let mut decoder = Decoder::new();
     let mut offset = 0u64;
     loop {
@@ -286,10 +422,16 @@ async fn scan_pages<L: ObjectStore>(
                 if wanted == Some(pgno) {
                     seen.wanted = Some(digest);
                 }
+                match expected.get(&pgno) {
+                    Some(held) if *held == digest => matching = matching.saturating_add(1),
+                    Some(_) => differing = true,
+                    None => {}
+                }
             }
             input = input.get(used..).unwrap_or_default();
         }
     }
+    seen.holds_wal_pages = !differing && matching == expected.len();
     Ok(decoder.finish().ok().map(|_| seen))
 }
 
@@ -312,8 +454,9 @@ pub struct WalView {
 pub struct Probes {
     /// The commit frame before the position's end.
     pub prev: FrameCheck,
-    /// Whether a frame of the position's own generation still follows its end,
-    /// asked only when the WAL's header names another generation.
+    /// Whether a whole committed transaction of the position's own generation still
+    /// chains from its end, asked only when the WAL's header names another generation.
+    /// Frames with no commit after them are a rolled-back spill and do not count (ruling V2).
     pub stale_next: bool,
 }
 
@@ -330,7 +473,7 @@ impl Probes {
             FrameCheck::of(wal.frame_before(cursor.next(), cursor.salts()))?
         };
         let stale_next = wal.header().salts() != cursor.salts()
-            && wal.frame_follows(&cursor).map_err(|_err| Fault::LocalIo)?;
+            && wal.commit_follows(&cursor).map_err(|_err| Fault::LocalIo)?;
         Ok(Self { prev, stale_next })
     }
 }
@@ -554,7 +697,10 @@ fn same_generation(
     let frame = frame_state(tip, seen);
     if committed.is_some_and(|end| end.get() < seen.end.get())
         || short_file
-        || matches!(frame, FrameState::Miss(Miss::Truncated))
+        || matches!(
+            frame,
+            FrameState::Miss(Miss::Truncated) | FrameState::Rewritten
+        )
     {
         let committed = committed.unwrap_or(WalOffset::start(seen.page_size));
         return Err(Refusal {
@@ -572,7 +718,7 @@ fn same_generation(
         FrameState::Miss(Miss::NotACommit) => Err(refuse(SnapshotCause::PrevFrameMismatch)),
         FrameState::Miss(Miss::Moved) => Err(refuse(SnapshotCause::GenerationChanged)),
         FrameState::Mismatch => Err(refuse(SnapshotCause::LastPageMismatch)),
-        FrameState::Miss(Miss::Truncated) | FrameState::Fresh => {
+        FrameState::Miss(Miss::Truncated) | FrameState::Rewritten | FrameState::Fresh => {
             let cursor_at_end = committed.is_some_and(|end| end.get() == seen.end.get());
             continued(tip, wal, cursor_at_end)
         }
@@ -588,6 +734,8 @@ enum FrameState {
     Mismatch,
     /// No frame to compare.
     Miss(Miss),
+    /// The last page matches but the range before it is not what the tip staged.
+    Rewritten,
 }
 
 fn frame_state(tip: &Tip<'_>, seen: &Seen) -> FrameState {
@@ -598,6 +746,7 @@ fn frame_state(tip: &Tip<'_>, seen: &Seen) -> FrameState {
             LastPageCheck::Mismatch | LastPageCheck::NotInTip => FrameState::Mismatch,
             LastPageCheck::NoFrame(_) if at_start => FrameState::Fresh,
             LastPageCheck::NoFrame(miss) => FrameState::Miss(*miss),
+            LastPageCheck::Rewritten => FrameState::Rewritten,
         },
         Tip::Boot(TipView::Unreadable { .. }) => FrameState::Fresh,
         Tip::Running(_, _) if at_start => FrameState::Fresh,

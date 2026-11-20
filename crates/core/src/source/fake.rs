@@ -11,9 +11,11 @@
 //!    pin is never backfilled, so it is never restarted either.
 //!
 //! The model is SQLite's own rule: a writer restarts only when it sees a fully
-//! backfilled WAL (it reads on mark 0), the previous write is complete, and no
-//! reader holds a mark above 0. A reader on mark 0 holds back the checkpoint's
-//! safe frame at 0, which is why nothing is backfilled under it.
+//! backfilled WAL (it reads on mark 0) and no reader holds a mark above 0. Frames
+//! written past the last commit (a spill) are not in `mxFrame`, so a rolled-back
+//! spill does not stop the restart and its bytes stay in the file past the new end.
+//! A reader on mark 0 holds back the checkpoint's safe frame at 0, which is why
+//! nothing is backfilled under it.
 //!
 //! A restart rewrites the header in place and leaves the old frames' bytes in
 //! the file, as SQLite does; a truncating checkpoint empties the file.
@@ -171,7 +173,6 @@ impl WalState {
     fn restart_is_due(&self) -> bool {
         self.mx_frame > 0
             && self.backfilled == self.mx_frame
-            && self.written == self.mx_frame
             && self.read_mark.is_none_or(|mark| mark == 0)
     }
 
