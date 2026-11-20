@@ -125,14 +125,11 @@ fn interval_is_none_outside_the_configured_levels() {
 
 #[test]
 fn interval_refuses_zero_and_sub_millisecond_remainders() {
-    let zero = ConfigError::ZeroInterval {
-        what: Setting::Standalone,
-    };
-    assert_eq!(Interval::new(Duration::ZERO), Err(zero));
-    let sub = ConfigError::SubMillisecond {
-        what: Setting::Standalone,
-    };
-    assert_eq!(Interval::new(Duration::from_micros(1500)), Err(sub));
+    assert_eq!(Interval::new(Duration::ZERO), Err(IntervalError::Zero));
+    assert_eq!(
+        Interval::new(Duration::from_micros(1500)),
+        Err(IntervalError::SubMillisecond)
+    );
     let one = Interval::new(Duration::from_millis(1)).unwrap();
     assert_eq!(
         (one.millis(), one.as_duration()),

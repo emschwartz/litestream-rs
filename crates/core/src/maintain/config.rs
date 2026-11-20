@@ -35,8 +35,6 @@ pub enum Setting {
     SnapshotRetention,
     /// How long level 0 is kept after it is covered.
     L0Retention,
-    /// An [`Interval`] built on its own, tied to no setting yet.
-    Standalone,
 }
 
 /// Why a maintenance schedule is refused.
@@ -99,6 +97,27 @@ pub enum ConfigError {
     },
 }
 
+/// Why a duration is not an [`Interval`]. It names no setting;
+/// [`Maintenance::new`] maps it to a [`ConfigError`] with the real one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Error)]
+pub enum IntervalError {
+    /// The duration is zero.
+    #[error("zero")]
+    Zero,
+    /// The duration has a part below one millisecond.
+    #[error("not a whole number of milliseconds")]
+    SubMillisecond,
+}
+
+impl IntervalError {
+    const fn at(self, what: Setting) -> ConfigError {
+        match self {
+            Self::Zero => ConfigError::ZeroInterval { what },
+            Self::SubMillisecond => ConfigError::SubMillisecond { what },
+        }
+    }
+}
+
 /// A nonzero whole number of milliseconds.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Interval(u64);
@@ -107,19 +126,14 @@ impl Interval {
     /// Checks one duration.
     ///
     /// # Errors
-    /// Zero, or a remainder below one millisecond, reported against
-    /// [`Setting::Standalone`]; the schedule's own constructor names the real
-    /// setting.
-    pub fn new(d: Duration) -> Result<Self, ConfigError> {
-        Self::for_setting(d, Setting::Standalone)
-    }
-
-    fn for_setting(d: Duration, what: Setting) -> Result<Self, ConfigError> {
+    /// [`IntervalError::Zero`], or [`IntervalError::SubMillisecond`] for a
+    /// remainder below one millisecond.
+    pub fn new(d: Duration) -> Result<Self, IntervalError> {
         if d.is_zero() {
-            return Err(ConfigError::ZeroInterval { what });
+            return Err(IntervalError::Zero);
         }
         if !d.subsec_nanos().is_multiple_of(1_000_000) {
-            return Err(ConfigError::SubMillisecond { what });
+            return Err(IntervalError::SubMillisecond);
         }
         // A whole-millisecond duration over u64::MAX ms is 584 million years.
         let millis = u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
@@ -187,12 +201,13 @@ impl Maintenance {
             .ok_or(too_many)?;
         let mut intervals = Vec::with_capacity(levels.len());
         for (level, d) in Level::ALL.iter().skip(1).zip(&levels) {
-            intervals.push(Interval::for_setting(*d, Setting::Level(*level))?);
+            intervals.push(Interval::new(*d).map_err(|e| e.at(Setting::Level(*level)))?);
         }
-        let snapshot = Interval::for_setting(snapshot_interval, Setting::SnapshotInterval)?;
-        Interval::for_setting(snapshot_retention, Setting::SnapshotRetention)?;
+        let snapshot =
+            Interval::new(snapshot_interval).map_err(|e| e.at(Setting::SnapshotInterval))?;
+        Interval::new(snapshot_retention).map_err(|e| e.at(Setting::SnapshotRetention))?;
         if let L0Retention::After(d) = l0 {
-            Interval::for_setting(d, Setting::L0Retention)?;
+            Interval::new(d).map_err(|e| e.at(Setting::L0Retention))?;
         }
         Self::check_order(&intervals, snapshot, snapshot_retention)?;
         Ok(Self {

@@ -37,7 +37,7 @@ use crate::inventory::{Inventory, is_snapshot_start};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::store::{ObjectStore, StoreError};
 
-pub use config::{ConfigError, Interval, L0Retention, Maintenance, Setting};
+pub use config::{ConfigError, Interval, IntervalError, L0Retention, Maintenance, Setting};
 
 #[cfg(test)]
 #[expect(

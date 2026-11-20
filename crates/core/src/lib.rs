@@ -40,9 +40,9 @@ pub use layout::{
     parse_file_name,
 };
 pub use maintain::{
-    CompactJob, ConfigError, DeleteJob, Due, Interval, Job, JobError, L0Retention, MAX_DELETE,
-    MaintainError, Maintenance, Outcome, Setting, SnapshotJob, due, go_truncate, run_compact,
-    run_delete,
+    CompactJob, ConfigError, DeleteJob, Due, Interval, IntervalError, Job, JobError, L0Retention,
+    MAX_DELETE, MaintainError, Maintenance, Outcome, Setting, SnapshotJob, due, go_truncate,
+    run_compact, run_delete,
 };
 pub use mem::{MemStore, MemUpload};
 pub use plan::{ContiguousChain, PlanOutcome, RestoreTarget, plan};
