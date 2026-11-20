@@ -194,7 +194,9 @@ fn eligible(info: &FileInfo, target: RestoreTarget) -> bool {
     match target {
         RestoreTarget::Latest => true,
         RestoreTarget::Txid(wanted) => info.key.range().max() <= wanted,
-        RestoreTarget::AsOf(instant) => info.created_at < instant,
+        RestoreTarget::AsOf(instant) => {
+            info.exact_stamp().is_some_and(|stamp| stamp.at() < instant)
+        }
     }
 }
 
@@ -411,6 +413,7 @@ fn is_usable_beyond(info: &FileInfo) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::{ListedStamp, StoredStamp};
     use lsr_ltx::TxidRange;
     use proptest::prelude::*;
     use std::collections::HashSet;
@@ -429,7 +432,7 @@ mod tests {
         FileInfo {
             key: key(level, min, max),
             size: 1,
-            created_at: Timestamp::from_unix_millis(created),
+            listed: ListedStamp::Stored(StoredStamp::mtime(Timestamp::from_unix_millis(created))),
         }
     }
 
@@ -1260,7 +1263,7 @@ mod tests {
                 return Ok(());
             };
             for info in chain.files() {
-                prop_assert!(info.created_at < Timestamp::from_unix_millis(t), "{info:?} is not older than {t}");
+                prop_assert!(info.exact_stamp().expect("an exact stamp").at() < Timestamp::from_unix_millis(t), "{info:?} is not older than {t}");
             }
             if let PlanOutcome::Plan(latest) = plan(&inventory, RestoreTarget::Latest) {
                 prop_assert!(chain.reaches() <= latest.reaches());
@@ -1294,7 +1297,7 @@ mod tests {
             let kept: Vec<FileInfo> = infos
                 .into_iter()
                 .filter(|i| {
-                    let stray = i.created_at < instant
+                    let stray = i.exact_stamp().expect("an exact stamp").at() < instant
                         && !touches(i.key.range().min(), reach)
                         && i.key.range().max() > reach;
                     !stray

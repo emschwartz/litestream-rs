@@ -280,9 +280,92 @@ pub struct FileInfo {
     pub key: FileKey,
     /// Its length in bytes.
     pub size: u64,
-    /// When the file was created, as the writer stamped it. Timestamp restores
-    /// compare against this, so a store must return what it was given.
-    pub created_at: Timestamp,
+    /// What the listing says about when the file was created: exact, or only
+    /// the backend's own modification time. Readers that decide by time take
+    /// [`FileInfo::exact_stamp`] or ask the store for [`StoredStamp`].
+    pub listed: ListedStamp,
+}
+
+impl FileInfo {
+    /// The exact stored stamp the listing carried, when it did.
+    #[must_use]
+    pub const fn exact_stamp(&self) -> Option<StoredStamp> {
+        match self.listed {
+            ListedStamp::Stored(stamp) => Some(stamp),
+            ListedStamp::LastModified(_) => None,
+        }
+    }
+}
+
+/// The time a listing attaches to a file.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ListedStamp {
+    /// Exact: what the writer stamped, read with the listing at no extra
+    /// request.
+    Stored(StoredStamp),
+    /// The backend's last-modified time. It is not a stamp: it can differ from
+    /// the stored one by any writer clock lead, so no reader decides by it.
+    LastModified(Timestamp),
+}
+
+/// A file's stored creation stamp, with where it came from. Only stores make
+/// one, so a reader cannot pass a `LastModified` off as exact.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct StoredStamp {
+    at: Timestamp,
+    origin: StampOrigin,
+}
+
+impl StoredStamp {
+    /// A stamp read from the object's metadata.
+    #[must_use]
+    pub const fn metadata(at: Timestamp) -> Self {
+        Self {
+            at,
+            origin: StampOrigin::Metadata,
+        }
+    }
+
+    /// A stamp that is the file's modification time, as a file store keeps it.
+    #[must_use]
+    pub const fn mtime(at: Timestamp) -> Self {
+        Self {
+            at,
+            origin: StampOrigin::Mtime,
+        }
+    }
+
+    /// The listed last-modified time standing in for metadata that is absent.
+    #[must_use]
+    pub const fn fallback(last_modified: Timestamp) -> Self {
+        Self {
+            at: last_modified,
+            origin: StampOrigin::Fallback,
+        }
+    }
+
+    /// The instant.
+    #[must_use]
+    pub const fn at(self) -> Timestamp {
+        self.at
+    }
+
+    /// Where it was read from.
+    #[must_use]
+    pub const fn origin(self) -> StampOrigin {
+        self.origin
+    }
+}
+
+/// Where a [`StoredStamp`] came from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StampOrigin {
+    /// The object's stored metadata.
+    Metadata,
+    /// The file's modification time.
+    Mtime,
+    /// The last-modified time, because no metadata was stored.
+    Fallback,
 }
 
 #[cfg(test)]

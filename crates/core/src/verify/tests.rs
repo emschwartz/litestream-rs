@@ -166,6 +166,15 @@ struct Wrapped {
 }
 
 impl Wrapped {
+    async fn before_read(&self, key: &FileKey) -> Result<(), StoreError> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        let doomed = self.vanish.lock().unwrap().remove(key);
+        if doomed {
+            self.inner.delete(&[*key]).await?;
+        }
+        Ok(())
+    }
+
     fn new(inner: MemStore) -> Self {
         Self {
             inner,
@@ -195,12 +204,21 @@ impl ObjectStore for Wrapped {
     }
 
     async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
-        self.reads.fetch_add(1, Ordering::Relaxed);
-        let doomed = self.vanish.lock().unwrap().remove(key);
-        if doomed {
-            self.inner.delete(&[*key]).await?;
-        }
+        self.before_read(key).await?;
         self.inner.read(key, offset, len).await
+    }
+
+    async fn stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
+        self.inner.stamp(file).await
+    }
+
+    async fn read_with_stamp(
+        &self,
+        file: &FileInfo,
+        len: ReadLen,
+    ) -> Result<(Vec<u8>, StoredStamp), StoreError> {
+        self.before_read(&file.key).await?;
+        self.inner.read_with_stamp(file, len).await
     }
 
     async fn begin_upload(

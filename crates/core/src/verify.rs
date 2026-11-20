@@ -46,7 +46,7 @@ use thiserror::Error;
 
 use self::dry_run::latest_restore;
 use crate::inventory::{Inventory, InventoryError, is_snapshot_start};
-use crate::layout::{FileInfo, FileKey, Level};
+use crate::layout::{FileInfo, FileKey, Level, StoredStamp};
 use crate::plan::{PlanOutcome, RestoreTarget, plan};
 use crate::restore::RestoreError;
 use crate::store::{ObjectStore, ReadLen, StoreError};
@@ -615,6 +615,8 @@ struct Walk<'a> {
 /// What reading one file produced.
 struct Read {
     header: Option<Header>,
+    /// The stored stamp, from the same request as the first chunk.
+    stamp: Option<StoredStamp>,
     decoded: Result<lsr_ltx::Verified, DecodeError>,
     bytes: u64,
 }
@@ -677,13 +679,13 @@ impl<'a> Walk<'a> {
         findings: &mut Findings,
     ) -> Result<(), VerifyError> {
         let key = info.key;
-        let Some(read) = self.read(store, &key).await? else {
+        let Some(read) = self.read(store, info).await? else {
             findings.push(Finding::Vanished { key });
             self.before = None;
             return Ok(());
         };
-        if let Some(header) = &read.header {
-            self.check_header(info, header, findings);
+        if let (Some(header), Some(stored)) = (&read.header, read.stamp) {
+            self.check_header(key, stored, header, findings);
         }
         let in_latest_plan = self.in_plan(key);
         match &read.decoded {
@@ -713,14 +715,27 @@ impl<'a> Walk<'a> {
     async fn read<S: ObjectStore>(
         &mut self,
         store: &S,
-        key: &FileKey,
+        info: &FileInfo,
     ) -> Result<Option<Read>, VerifyError> {
+        let key = &info.key;
+        let mut stamp = None;
         let mut decoder = Decoder::new();
         let mut offset = 0_u64;
         let mut opened = false;
         let mut failure = None;
         while failure.is_none() {
-            let chunk = match store.read(key, offset, chunk_len()).await {
+            let got = if offset == 0 {
+                store
+                    .read_with_stamp(info, chunk_len())
+                    .await
+                    .map(|(chunk, stored)| {
+                        stamp = Some(stored);
+                        chunk
+                    })
+            } else {
+                store.read(key, offset, chunk_len()).await
+            };
+            let chunk = match got {
                 Ok(chunk) => chunk,
                 Err(StoreError::NotFound { .. }) => return Ok(None),
                 Err(err) => return Err(VerifyError::Store(err)),
@@ -745,13 +760,19 @@ impl<'a> Walk<'a> {
         };
         Ok(Some(Read {
             header,
+            stamp,
             decoded,
             bytes: offset,
         }))
     }
 
-    fn check_header(&mut self, info: &FileInfo, header: &Header, findings: &mut Findings) {
-        let key = info.key;
+    fn check_header(
+        &mut self,
+        key: FileKey,
+        stored: StoredStamp,
+        header: &Header,
+        findings: &mut Findings,
+    ) {
         let in_latest_plan = self.in_plan(key);
         if key.level().is_snapshot() && !header.is_snapshot() {
             findings.push(Finding::NotASnapshot {
@@ -768,7 +789,7 @@ impl<'a> Walk<'a> {
         }
         self.page_sizes.push((key, header.page_size()));
         let stamped = header.fields().timestamp.unix_millis();
-        let stored = info.created_at.unix_millis();
+        let stored = stored.at().unix_millis();
         if stamped != stored {
             self.skew.files = self.skew.files.saturating_add(1);
             self.skew.first.get_or_insert(key);

@@ -428,12 +428,12 @@ mod cli {
                 assert_eq!(got["size"], json!(want.size), "{label}");
                 assert_eq!(
                     got["created_at_ms"],
-                    json!(want.created_at.unix_millis()),
+                    json!(want.exact_stamp().unwrap().at().unix_millis()),
                     "{label}"
                 );
                 assert_eq!(
                     got["created_at"],
-                    json!(want.created_at.to_string()),
+                    json!(want.exact_stamp().unwrap().at().to_string()),
                     "{label}"
                 );
             }
@@ -447,7 +447,7 @@ mod cli {
                     first.key.level(),
                     first.key.file_name(),
                     first.size,
-                    first.created_at
+                    first.exact_stamp().unwrap().at()
                 )),
                 "{label}:\n{}",
                 text.stdout

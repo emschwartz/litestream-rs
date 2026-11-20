@@ -29,7 +29,7 @@ use std::time::Duration;
 use lsr_ltx::{Timestamp, TxidRange};
 use thiserror::Error;
 
-use crate::layout::{FileInfo, FileKey, Level, cmp_range, file_name, is_scratch_name};
+use crate::layout::{FileInfo, FileKey, Level, StoredStamp, cmp_range, file_name, is_scratch_name};
 
 /// How many entries one listing page may hold: 1 to 1000, S3's own cap, so
 /// every backend can return exactly the page asked for.
@@ -330,6 +330,23 @@ pub trait ObjectStore: Send + Sync {
         len: ReadLen,
     ) -> impl Future<Output = Result<Vec<u8>, StoreError>> + Send;
 
+    /// The stored stamp of a listed file. `NotFound` when it is gone;
+    /// `Transient { InvalidData }` when its size is no longer `file.size`
+    /// (another writer replaced it). With no stored stamp the answer is
+    /// [`StoredStamp::fallback`] of the listed last-modified time.
+    fn stamp(
+        &self,
+        file: &FileInfo,
+    ) -> impl Future<Output = Result<StoredStamp, StoreError>> + Send;
+
+    /// `read(key, 0, len)` plus the stored stamp, in one request where the
+    /// backend allows. Both come from the same object version.
+    fn read_with_stamp(
+        &self,
+        file: &FileInfo,
+        len: ReadLen,
+    ) -> impl Future<Output = Result<(Vec<u8>, StoredStamp), StoreError>> + Send;
+
     /// Starts writing `key`, stamped `created_at`. Nothing is visible yet.
     fn begin_upload(
         &self,
@@ -359,6 +376,7 @@ pub trait Upload: Send {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::ListedStamp;
     use lsr_ltx::Txid;
     use proptest::prelude::*;
 
@@ -375,7 +393,7 @@ mod tests {
         FileInfo {
             key: FileKey::new(Level::ZERO, range(min, max)),
             size: 1,
-            created_at: Timestamp::from_unix_millis(0),
+            listed: ListedStamp::Stored(StoredStamp::mtime(Timestamp::from_unix_millis(0))),
         }
     }
 

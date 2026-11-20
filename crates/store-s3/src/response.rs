@@ -148,11 +148,22 @@ pub fn parse_head(r: &HttpResponse) -> Result<Head, ResponseError> {
         .header("content-length")
         .and_then(|text| text.trim().parse().ok())
         .ok_or(ResponseError::Malformed)?;
-    let stamp = match r.header(STAMP_HEADER) {
-        None => None,
-        Some(text) => Some(Timestamp::parse_rfc3339(text).map_err(|_bad| ResponseError::BadStamp)?),
-    };
+    let stamp = parse_stamp_header(r)?;
     Ok(Head { size, stamp })
+}
+
+/// The stored stamp on any response that carries the object's metadata (a
+/// HEAD or a GET), `None` when the object has none.
+///
+/// # Errors
+/// [`ResponseError::BadStamp`] when the stamp is present and does not parse.
+pub fn parse_stamp_header(r: &HttpResponse) -> Result<Option<Timestamp>, ResponseError> {
+    match r.header(STAMP_HEADER) {
+        None => Ok(None),
+        Some(text) => Timestamp::parse_rfc3339(text)
+            .map(Some)
+            .map_err(|_bad| ResponseError::BadStamp),
+    }
 }
 
 /// Parses a CreateMultipartUpload response.

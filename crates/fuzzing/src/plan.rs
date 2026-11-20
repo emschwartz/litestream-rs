@@ -7,6 +7,7 @@ use lsr_core::{
 use lsr_ltx::{Timestamp, Txid, TxidRange};
 
 use crate::bytes::{Reader, violation};
+use lsr_core::{ListedStamp, StoredStamp};
 
 /// Bytes of one file record in the input.
 pub const PLAN_RECORD_LEN: usize = 4;
@@ -56,7 +57,9 @@ pub fn plan_input(data: &[u8]) -> Option<(Inventory, RestoreTarget)> {
         files.push(FileInfo {
             key: FileKey::new(level, range),
             size: 0,
-            created_at: Timestamp::from_unix_millis(i64::from(created)),
+            listed: ListedStamp::Stored(StoredStamp::mtime(Timestamp::from_unix_millis(
+                i64::from(created),
+            ))),
         });
     }
     // A key listed twice with different details is not an inventory (see
@@ -70,7 +73,9 @@ fn eligible(info: &FileInfo, target: RestoreTarget) -> bool {
     match target {
         RestoreTarget::Latest => true,
         RestoreTarget::Txid(wanted) => info.key.range().max() <= wanted,
-        RestoreTarget::AsOf(instant) => info.created_at < instant,
+        RestoreTarget::AsOf(instant) => {
+            info.exact_stamp().is_some_and(|stamp| stamp.at() < instant)
+        }
     }
 }
 
@@ -169,7 +174,11 @@ fn check_inside_file(
     let past = reach
         .next()
         .is_some_and(|one_past| file.range().max() > one_past);
-    if info.created_at < instant || !links || !past || chain.files().iter().any(|f| f.key == file) {
+    if info.exact_stamp().is_none_or(|stamp| stamp.at() < instant)
+        || !links
+        || !past
+        || chain.files().iter().any(|f| f.key == file)
+    {
         violation("AsOfInsideFile's file does not straddle the instant past the chain");
     }
 }

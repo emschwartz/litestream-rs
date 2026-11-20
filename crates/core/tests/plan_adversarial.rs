@@ -6,6 +6,7 @@ mod review {
     use lsr_core::{
         FileInfo, FileKey, Inventory, InventoryError, Level, PlanOutcome, RestoreTarget, plan,
     };
+    use lsr_core::{ListedStamp, StoredStamp};
     use lsr_ltx::{Timestamp, Txid, TxidRange};
     use proptest::prelude::*;
 
@@ -22,7 +23,7 @@ mod review {
         FileInfo {
             key: FileKey::new(Level::new(f.level).unwrap(), r),
             size: 1,
-            created_at: Timestamp::from_unix_millis(f.created),
+            listed: ListedStamp::Stored(StoredStamp::mtime(Timestamp::from_unix_millis(f.created))),
         }
     }
 

@@ -436,7 +436,14 @@ impl<S: WalSource, P: PageSource, C: Checkpointer> Engine<S, P, C> {
                         ReadLen::new(ReadLen::MAX_RAW).expect("a read length"),
                     ))
                     .expect("read");
-                    out.push((format!("{:?} {:?}", info.key, info.created_at), bytes));
+                    out.push((
+                        format!(
+                            "{:?} {:?}",
+                            info.key,
+                            info.exact_stamp().expect("an exact stamp").at()
+                        ),
+                        bytes,
+                    ));
                 }
                 after = page.next;
                 if after.is_none() {

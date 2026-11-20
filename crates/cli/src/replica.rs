@@ -24,6 +24,7 @@ use lsr_store_s3::{
 };
 
 use crate::run::CliError;
+use lsr_core::{FileInfo, StoredStamp};
 
 /// Sleeps by blocking the thread; the futures it returns never yield.
 #[derive(Debug)]
@@ -90,6 +91,18 @@ impl<T: Transport> ObjectStore for Counted<T> {
 
     async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
         self.store.read(key, offset, len).await
+    }
+
+    async fn stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
+        self.store.stamp(file).await
+    }
+
+    async fn read_with_stamp(
+        &self,
+        file: &FileInfo,
+        len: ReadLen,
+    ) -> Result<(Vec<u8>, StoredStamp), StoreError> {
+        self.store.read_with_stamp(file, len).await
     }
 
     async fn begin_upload(

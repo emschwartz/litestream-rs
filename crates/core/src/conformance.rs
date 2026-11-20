@@ -16,7 +16,7 @@ use std::thread::{self, Thread};
 
 use lsr_ltx::{Timestamp, Txid, TxidRange};
 
-use crate::layout::{FileInfo, FileKey, Level};
+use crate::layout::{FileInfo, FileKey, Level, ListedStamp, StampOrigin};
 use crate::store::{ObjectStore, PageLimit, ReadLen, StoreError, StoreOp, Upload};
 
 /// Why a conformance case failed.
@@ -103,6 +103,14 @@ pub trait Harness {
 /// The harness for [`MemStore`](crate::MemStore).
 #[derive(Debug, Default)]
 pub struct MemHarness(crate::MemStore);
+
+impl MemHarness {
+    /// A harness whose store lists `LastModified`, as S3 does after 8g4.
+    #[must_use]
+    pub fn listing_last_modified() -> Self {
+        Self(crate::MemStore::with_listed_last_modified())
+    }
+}
 
 impl Harness for MemHarness {
     type Store = crate::MemStore;
@@ -571,9 +579,18 @@ pub async fn two_uploads_to_one_key<H: Harness>(h: &H) -> Check {
     let listing = store.list(target.level(), None, limit(10)?).await?;
     ensure_eq!(listing.files.len(), 1, "one object under one key");
     ensure_eq!(
-        listing.files.first().map(|f| (f.size, f.created_at)),
-        Some((8, at(1_000))),
+        listing.files.first().map(|f| f.size),
+        Some(8),
         "the surviving object"
+    );
+    let survivor = listing
+        .files
+        .first()
+        .ok_or_else(|| Failure("no surviving object listed".to_owned()))?;
+    ensure_eq!(
+        store.stamp(survivor).await?.at(),
+        at(1_000),
+        "the surviving object's stamp"
     );
     Ok(())
 }
@@ -591,18 +608,156 @@ pub async fn chunks_concatenate_and_stamp_survives<H: Harness>(h: &H) -> Check {
         upload.write(chunk).await?;
     }
     let info = upload.commit().await?;
-    ensure_eq!(
-        info,
-        FileInfo {
-            key: target,
-            size: 5,
-            created_at: at(STAMP)
-        },
-        "commit info"
+    ensure_eq!((info.key, info.size), (target, 5), "commit info");
+    ensure!(
+        exact_or_marked(&info, at(STAMP)),
+        "the commit reports a stamp other than the one given"
     );
     let listing = store.list(target.level(), None, limit(10)?).await?;
     ensure_eq!(listing.files, vec![info], "listed info");
     ensure_eq!(read_all(store, &target).await?, b"abcde".to_vec(), "bytes");
+    Ok(())
+}
+
+/// A listed file is either exact and equal to `expected`, or marked as only a
+/// last-modified time.
+fn exact_or_marked(info: &FileInfo, expected: Timestamp) -> bool {
+    match info.listed {
+        ListedStamp::Stored(stamp) => stamp.at() == expected,
+        ListedStamp::LastModified(_) => true,
+    }
+}
+
+fn instant(text: &str) -> Result<Timestamp, Failure> {
+    Timestamp::parse_rfc3339(text).map_err(|_bad| Failure(format!("bad instant {text} in a case")))
+}
+
+async fn put_stamped<S: ObjectStore>(
+    store: &S,
+    key: FileKey,
+    bytes: &[u8],
+    stamp: Timestamp,
+) -> Result<FileInfo, Failure> {
+    let mut upload = store.begin_upload(&key, stamp).await?;
+    upload.write(bytes).await?;
+    Ok(upload.commit().await?)
+}
+
+async fn listed_one<S: ObjectStore>(store: &S, key: FileKey) -> Result<FileInfo, Failure> {
+    let listing = store.list(key.level(), None, limit(10)?).await?;
+    listing
+        .files
+        .into_iter()
+        .find(|f| f.key == key)
+        .ok_or_else(|| Failure(format!("{key} missing from its listing")))
+}
+
+/// `stamp` returns the stamp the writer gave, never a stand-in, across the
+/// edge instants.
+///
+/// # Errors
+/// A [`Failure`] naming the rule that broke.
+pub async fn stamp_returns_the_committed_stamp<H: Harness>(h: &H) -> Check {
+    let store = h.store();
+    let stamps = [
+        at(0),
+        at(1),
+        instant("2024-02-29T12:34:56.789Z")?,
+        instant("2200-01-01T00:00:00.001Z")?,
+    ];
+    for (n, stamp) in (1_u64..).zip(stamps) {
+        let target = key(1, n, n)?;
+        put_stamped(store, target, b"abc", stamp).await?;
+        let file = listed_one(store, target).await?;
+        let got = store.stamp(&file).await?;
+        ensure_eq!(got.at(), stamp, format!("stamp of {target}"));
+        ensure!(
+            got.origin() != StampOrigin::Fallback,
+            "stamp of {target} came from the fallback"
+        );
+    }
+    Ok(())
+}
+
+/// A listed file is `Stored` and equal to the committed stamp, or it is marked
+/// `LastModified`; nothing in between.
+///
+/// # Errors
+/// A [`Failure`] naming the rule that broke.
+pub async fn listed_stamp_is_exact_or_marked<H: Harness>(h: &H) -> Check {
+    let store = h.store();
+    let target = key(2, 1, 1)?;
+    put_stamped(store, target, b"abc", at(STAMP)).await?;
+    let file = listed_one(store, target).await?;
+    ensure!(
+        exact_or_marked(&file, at(STAMP)),
+        "{target} listed with {:?}",
+        file.listed
+    );
+    Ok(())
+}
+
+/// A file that was deleted after it was listed has no stamp: `NotFound`.
+///
+/// # Errors
+/// A [`Failure`] naming the rule that broke.
+pub async fn stamp_of_a_vanished_file_is_not_found<H: Harness>(h: &H) -> Check {
+    let store = h.store();
+    let target = key(3, 1, 1)?;
+    put_stamped(store, target, b"abc", at(STAMP)).await?;
+    let file = listed_one(store, target).await?;
+    store.delete(&[target]).await?;
+    ensure_eq!(
+        store.stamp(&file).await,
+        Err(StoreError::NotFound { key: target }),
+        "stamp of a deleted file"
+    );
+    Ok(())
+}
+
+/// A file re-committed with another size after it was listed is refused, not
+/// stamped as if it were the listed one.
+///
+/// # Errors
+/// A [`Failure`] naming the rule that broke.
+pub async fn stamp_of_an_overwritten_file_is_refused<H: Harness>(h: &H) -> Check {
+    let store = h.store();
+    let target = key(4, 1, 1)?;
+    put_stamped(store, target, b"abc", at(STAMP)).await?;
+    let file = listed_one(store, target).await?;
+    put_stamped(store, target, b"abcdef", at(STAMP)).await?;
+    ensure_eq!(
+        store.stamp(&file).await,
+        Err(StoreError::Transient {
+            op: StoreOp::Read,
+            kind: std::io::ErrorKind::InvalidData
+        }),
+        "stamp after an overwrite with another size"
+    );
+    Ok(())
+}
+
+/// `read_with_stamp` returns what `read` and `stamp` return separately.
+///
+/// # Errors
+/// A [`Failure`] naming the rule that broke.
+pub async fn read_with_stamp_agrees_with_read_and_stamp<H: Harness>(h: &H) -> Check {
+    let store = h.store();
+    let target = key(5, 2, 2)?;
+    put_stamped(store, target, b"abcde", at(STAMP)).await?;
+    let file = listed_one(store, target).await?;
+    let (bytes, stamp) = store.read_with_stamp(&file, read_len(3)?).await?;
+    ensure_eq!(
+        bytes,
+        store.read(&target, 0, read_len(3)?).await?,
+        "bytes of read_with_stamp"
+    );
+    ensure_eq!(
+        Ok(stamp),
+        store.stamp(&file).await,
+        "stamp of read_with_stamp"
+    );
+    ensure_eq!(stamp.at(), at(STAMP), "the committed stamp");
     Ok(())
 }
 
@@ -627,6 +782,11 @@ macro_rules! conformance_suite {
             delete_is_idempotent,
             two_uploads_to_one_key,
             chunks_concatenate_and_stamp_survives,
+            stamp_returns_the_committed_stamp,
+            listed_stamp_is_exact_or_marked,
+            stamp_of_a_vanished_file_is_not_found,
+            stamp_of_an_overwritten_file_is_refused,
+            read_with_stamp_agrees_with_read_and_stamp,
         );
     };
     (@each $make:expr; $($case:ident,)+) => {

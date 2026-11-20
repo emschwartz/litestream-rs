@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use lsr_ltx::{Timestamp, TxidRange};
 
-use crate::layout::{FileInfo, FileKey, Level};
+use crate::layout::{FileInfo, FileKey, Level, ListedStamp, StoredStamp};
 use crate::store::{
     Listing, ObjectStore, PageLimit, ReadLen, StoreError, StoreOp, Upload, build_listing,
 };
@@ -19,10 +19,28 @@ use crate::store::{
 struct Object {
     bytes: Vec<u8>,
     created_at: Timestamp,
+    /// What a lazy-mode listing reports: the store's clock at commit unless a
+    /// test moved it.
+    last_modified: Timestamp,
+}
+
+impl Object {
+    fn listed(&self, lazy: bool) -> ListedStamp {
+        if lazy {
+            ListedStamp::LastModified(self.last_modified)
+        } else {
+            ListedStamp::Stored(StoredStamp::mtime(self.created_at))
+        }
+    }
 }
 
 #[derive(Debug, Default)]
 struct State {
+    /// List `LastModified` instead of `Stored`.
+    lazy: bool,
+    /// Logical milliseconds, advanced by one at each commit.
+    clock: i64,
+    stamp_calls: u64,
     objects: BTreeMap<FileKey, Object>,
     foreign: BTreeMap<Level, BTreeSet<String>>,
     faults: VecDeque<(StoreOp, StoreError)>,
@@ -61,6 +79,30 @@ impl MemStore {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// A store whose listings carry `LastModified`, as S3's do, so a reader
+    /// must ask for the exact stamp. The last-modified time is the store's
+    /// clock (one logical millisecond per commit), which is not the stamp.
+    #[must_use]
+    pub fn with_listed_last_modified() -> Self {
+        let store = Self::default();
+        store.lock().lazy = true;
+        store
+    }
+
+    /// Moves what a lazy-mode listing reports for `key`. Does nothing for a
+    /// key that is not stored.
+    pub fn set_last_modified(&self, key: &FileKey, at: Timestamp) {
+        if let Some(object) = self.lock().objects.get_mut(key) {
+            object.last_modified = at;
+        }
+    }
+
+    /// How many times [`ObjectStore::stamp`] was called.
+    #[must_use]
+    pub fn stamp_calls(&self) -> u64 {
+        self.lock().stamp_calls
+    }
+
     /// Puts a name that is not an LTX key into a level, as a stray file would
     /// be in a directory.
     pub fn plant_foreign(&self, level: Level, name: &str) {
@@ -90,6 +132,7 @@ impl MemStore {
     ) -> Result<Listing, StoreError> {
         let mut state = self.lock();
         state.take_fault(StoreOp::List)?;
+        let lazy = state.lazy;
         let files = state
             .objects
             .iter()
@@ -97,7 +140,7 @@ impl MemStore {
             .map(|(key, object)| FileInfo {
                 key: *key,
                 size: u64::try_from(object.bytes.len()).unwrap_or(u64::MAX),
-                created_at: object.created_at,
+                listed: object.listed(lazy),
             })
             .collect();
         let foreign: Vec<String> = state
@@ -128,6 +171,40 @@ impl MemStore {
     }
 }
 
+impl MemStore {
+    fn stamp_now(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
+        let mut state = self.lock();
+        state.stamp_calls = state.stamp_calls.saturating_add(1);
+        state.take_fault(StoreOp::Read)?;
+        let object = state
+            .objects
+            .get(&file.key)
+            .ok_or(StoreError::NotFound { key: file.key })?;
+        if u64::try_from(object.bytes.len()).ok() != Some(file.size) {
+            return Err(StoreError::Transient {
+                op: StoreOp::Read,
+                kind: std::io::ErrorKind::InvalidData,
+            });
+        }
+        Ok(StoredStamp::mtime(object.created_at))
+    }
+
+    fn read_with_stamp_now(
+        &self,
+        file: &FileInfo,
+        len: ReadLen,
+    ) -> Result<(Vec<u8>, StoredStamp), StoreError> {
+        let bytes = self.read_now(&file.key, 0, len)?;
+        let stamp = self
+            .lock()
+            .objects
+            .get(&file.key)
+            .map(|object| StoredStamp::mtime(object.created_at))
+            .ok_or(StoreError::NotFound { key: file.key })?;
+        Ok((bytes, stamp))
+    }
+}
+
 impl ObjectStore for MemStore {
     type Upload = MemUpload;
 
@@ -147,6 +224,21 @@ impl ObjectStore for MemStore {
         len: ReadLen,
     ) -> impl Future<Output = Result<Vec<u8>, StoreError>> + Send {
         std::future::ready(self.read_now(key, offset, len))
+    }
+
+    fn stamp(
+        &self,
+        file: &FileInfo,
+    ) -> impl Future<Output = Result<StoredStamp, StoreError>> + Send {
+        std::future::ready(self.stamp_now(file))
+    }
+
+    fn read_with_stamp(
+        &self,
+        file: &FileInfo,
+        len: ReadLen,
+    ) -> impl Future<Output = Result<(Vec<u8>, StoredStamp), StoreError>> + Send {
+        std::future::ready(self.read_with_stamp_now(file, len))
     }
 
     fn begin_upload(
@@ -195,17 +287,18 @@ impl Upload for MemUpload {
         let mut state = self.store.lock();
         let published = state.take_fault(StoreOp::Upload).map(|()| {
             let size = u64::try_from(self.buf.len()).unwrap_or(u64::MAX);
-            state.objects.insert(
-                self.key,
-                Object {
-                    bytes: self.buf,
-                    created_at: self.created_at,
-                },
-            );
+            state.clock = state.clock.saturating_add(1);
+            let object = Object {
+                bytes: self.buf,
+                created_at: self.created_at,
+                last_modified: Timestamp::from_unix_millis(state.clock),
+            };
+            let listed = object.listed(state.lazy);
+            state.objects.insert(self.key, object);
             FileInfo {
                 key: self.key,
                 size,
-                created_at: self.created_at,
+                listed,
             }
         });
         let result = match (published, state.late_commit_faults.pop_front()) {
@@ -228,6 +321,41 @@ mod tests {
     use std::time::Duration;
 
     crate::conformance_suite!(conformance::MemHarness::default);
+
+    mod lazy_listing {
+        use super::*;
+
+        crate::conformance_suite!(conformance::MemHarness::listing_last_modified);
+    }
+
+    #[test]
+    fn lazy_mode_lists_last_modified() {
+        let store = MemStore::with_listed_last_modified();
+        let limit = PageLimit::new(10).unwrap();
+        let committed = Timestamp::from_unix_millis(5_000);
+        conformance::block_on(async {
+            let mut up = store.begin_upload(&key(), committed).await.unwrap();
+            up.write(b"x").await.unwrap();
+            let info = up.commit().await.unwrap();
+            let listed = store.list(Level::ZERO, None, limit).await.unwrap().files;
+            assert_eq!(listed, vec![info]);
+            let ListedStamp::LastModified(clock) = info.listed else {
+                panic!("lazy mode listed {:?}", info.listed);
+            };
+            assert_ne!(clock, committed);
+            assert_eq!(info.exact_stamp(), None);
+            let moved = Timestamp::from_unix_millis(77);
+            store.set_last_modified(&key(), moved);
+            let listed = store.list(Level::ZERO, None, limit).await.unwrap().files;
+            assert_eq!(
+                listed.first().map(|f| f.listed),
+                Some(ListedStamp::LastModified(moved))
+            );
+            let stamp = store.stamp(&info).await.unwrap();
+            assert_eq!(stamp.at(), committed);
+        });
+        assert_eq!(store.stamp_calls(), 1);
+    }
 
     fn key() -> FileKey {
         let id = Txid::new(1).unwrap();

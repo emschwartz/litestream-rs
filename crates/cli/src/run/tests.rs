@@ -55,7 +55,7 @@ fn bucket_of(staged: &Staged, stamped: bool) -> (FakeS3, Vec<FileInfo>) {
             .join("ltx")
             .join(info.key.level().to_string())
             .join(info.key.file_name());
-        let stamp = info.created_at.to_string();
+        let stamp = info.exact_stamp().unwrap().at().to_string();
         let meta: &[(&str, &str)] = if stamped {
             &[("x-amz-meta-litestream-timestamp", stamp.as_str())]
         } else {
@@ -68,6 +68,14 @@ fn bucket_of(staged: &Staged, stamped: bool) -> (FakeS3, Vec<FileInfo>) {
         );
     }
     (fake, infos)
+}
+
+/// The files by key, size and time: the origin of a stamp differs by store.
+fn by_time(files: &[FileInfo]) -> Vec<(lsr_core::FileKey, u64, Option<Timestamp>)> {
+    files
+        .iter()
+        .map(|f| (f.key, f.size, f.exact_stamp().map(|s| s.at())))
+        .collect()
 }
 
 fn s3_store<T: Transport>(transport: T) -> Remote<T> {
@@ -86,7 +94,7 @@ fn files_over_s3_list_what_the_directory_lists() {
         else {
             panic!("not files");
         };
-        assert_eq!(inventory.files(), infos.as_slice());
+        assert_eq!(by_time(inventory.files()), by_time(&infos));
         assert_eq!(stamp_fallbacks, Some(0));
     }
 }
@@ -179,5 +187,5 @@ fn a_throttled_listing_is_retried() {
     else {
         panic!("not files");
     };
-    assert_eq!(inventory.files(), infos.as_slice());
+    assert_eq!(by_time(inventory.files()), by_time(&infos));
 }

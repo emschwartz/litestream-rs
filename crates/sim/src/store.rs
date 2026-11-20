@@ -21,6 +21,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
 
+use lsr_core::StoredStamp;
 use lsr_core::{
     Entropy, FileInfo, FileKey, Level, Listing, ObjectStore, PageLimit, ReadLen, SeededEntropy,
     StoreError, StoreOp, Upload,
@@ -310,6 +311,29 @@ impl<S: ObjectStore> ObjectStore for Faults<S> {
         Ok(bytes)
     }
 
+    async fn stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
+        if let Verdict::Fail(err) = self.verdict(Call::Read) {
+            return Err(err);
+        }
+        self.inner.stamp(file).await
+    }
+
+    async fn read_with_stamp(
+        &self,
+        file: &FileInfo,
+        len: ReadLen,
+    ) -> Result<(Vec<u8>, StoredStamp), StoreError> {
+        let verdict = self.verdict(Call::Read);
+        if let Verdict::Fail(err) = &verdict {
+            return Err(err.clone());
+        }
+        let (mut bytes, stamp) = self.inner.read_with_stamp(file, len).await?;
+        if let Verdict::Flip(at) = verdict {
+            flip(&mut bytes, 0, at);
+        }
+        Ok((bytes, stamp))
+    }
+
     async fn begin_upload(
         &self,
         key: &FileKey,
@@ -434,6 +458,20 @@ impl<S: ObjectStore> ObjectStore for Yield<S> {
     async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
         YieldNow(false).await;
         self.inner.read(key, offset, len).await
+    }
+
+    async fn stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
+        YieldNow(false).await;
+        self.inner.stamp(file).await
+    }
+
+    async fn read_with_stamp(
+        &self,
+        file: &FileInfo,
+        len: ReadLen,
+    ) -> Result<(Vec<u8>, StoredStamp), StoreError> {
+        YieldNow(false).await;
+        self.inner.read_with_stamp(file, len).await
     }
 
     async fn begin_upload(
@@ -602,6 +640,19 @@ impl<S: ObjectStore> ObjectStore for Tap<S> {
     async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
         self.log.with(|s| bump(&mut s.counts.reads));
         self.inner.read(key, offset, len).await
+    }
+
+    async fn stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
+        self.inner.stamp(file).await
+    }
+
+    async fn read_with_stamp(
+        &self,
+        file: &FileInfo,
+        len: ReadLen,
+    ) -> Result<(Vec<u8>, StoredStamp), StoreError> {
+        self.log.with(|s| bump(&mut s.counts.reads));
+        self.inner.read_with_stamp(file, len).await
     }
 
     async fn begin_upload(
@@ -849,6 +900,18 @@ impl<S: ObjectStore> ObjectStore for Stage<S> {
 
     async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
         self.inner.read(key, offset, len).await
+    }
+
+    async fn stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
+        self.inner.stamp(file).await
+    }
+
+    async fn read_with_stamp(
+        &self,
+        file: &FileInfo,
+        len: ReadLen,
+    ) -> Result<(Vec<u8>, StoredStamp), StoreError> {
+        self.inner.read_with_stamp(file, len).await
     }
 
     async fn begin_upload(

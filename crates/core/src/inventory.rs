@@ -176,6 +176,8 @@ impl Inventory {
 mod tests {
     use super::*;
     use crate::conformance::block_on;
+    use crate::layout::ListedStamp;
+    use crate::layout::StoredStamp;
     use crate::mem::{MemStore, MemUpload};
     use crate::store::{Listing, ReadLen, StoreOp, Upload};
     use lsr_ltx::Timestamp;
@@ -190,7 +192,7 @@ mod tests {
         FileInfo {
             key: key(level, min, max),
             size: 1,
-            created_at: Timestamp::from_unix_millis(0),
+            listed: ListedStamp::Stored(StoredStamp::mtime(Timestamp::from_unix_millis(0))),
         }
     }
 
@@ -214,7 +216,7 @@ mod tests {
     fn a_key_given_twice_with_different_details_is_an_error_in_any_order() {
         let early = info(0, 4, 4);
         let late = FileInfo {
-            created_at: Timestamp::from_unix_millis(900),
+            listed: ListedStamp::Stored(StoredStamp::mtime(Timestamp::from_unix_millis(900))),
             ..early
         };
         let bigger = FileInfo { size: 9, ..early };
@@ -334,6 +336,21 @@ mod tests {
             _len: ReadLen,
         ) -> impl Future<Output = Result<Vec<u8>, StoreError>> + Send {
             ready(Err(StoreError::NotFound { key: *key }))
+        }
+
+        fn stamp(
+            &self,
+            file: &FileInfo,
+        ) -> impl Future<Output = Result<StoredStamp, StoreError>> + Send {
+            ready(Err(StoreError::NotFound { key: file.key }))
+        }
+
+        fn read_with_stamp(
+            &self,
+            file: &FileInfo,
+            _len: ReadLen,
+        ) -> impl Future<Output = Result<(Vec<u8>, StoredStamp), StoreError>> + Send {
+            ready(Err(StoreError::NotFound { key: file.key }))
         }
 
         fn begin_upload(

@@ -16,7 +16,7 @@
 //! lost, the rules never widen it, and holding on it would pin every delete
 //! after one Go-era loss.
 //!
-//! Time base. Ages come from `FileInfo::created_at`, the header stamp, and are
+//! Time base. Ages come from `FileInfo::exact_stamp`, the header stamp, and are
 //! measured from the anchor, `min(now, newest stamp in the listing)`, computed
 //! afresh on every call. A clock that jumps ahead deletes nothing the
 //! replica's own newest stamp would not, and a clock behind only makes files
@@ -81,6 +81,7 @@ use lsr_ltx::{Timestamp, Txid};
 
 use super::{DeleteJob, Hold, L0Retention, MAX_DELETE, MaintainState, Maintenance};
 use crate::inventory::{Inventory, is_snapshot_start};
+use crate::layout::StoredStamp;
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::plan::{PlanOutcome, RestoreTarget, plan};
 
@@ -121,7 +122,7 @@ pub(super) fn retention(
     if let Some(hold) = gate(inventory, published, state) {
         return Retention::Held(hold);
     }
-    let Some(newest_stamp) = inventory.files().iter().map(|f| f.created_at).max() else {
+    let Some(newest_stamp) = inventory.files().iter().map(stamp_of).max() else {
         return Retention::Wait { until: None };
     };
     let anchor = now.unix_millis().min(newest_stamp.unix_millis());
@@ -248,20 +249,28 @@ fn latest_unplannable(inventory: &Inventory) -> Option<Hold> {
     }
 }
 
+/// The file's exact stamp, or the epoch when the listing has none. The
+/// `unstamped` gate holds retention before any caller sees that epoch.
+fn stamp_of(info: &FileInfo) -> Timestamp {
+    info.exact_stamp()
+        .map_or(Timestamp::from_unix_millis(0), StoredStamp::at)
+}
+
 fn unstamped(inventory: &Inventory) -> Option<Hold> {
     inventory
         .files()
         .iter()
         .find(|info| {
             let aged = info.key.level() == Level::ZERO || info.key.level().is_snapshot();
-            aged && info.created_at.unix_millis() <= 0
+            let exact = info.exact_stamp().is_some();
+            !exact || (aged && stamp_of(info).unix_millis() <= 0)
         })
         .map(|info| Hold::Unstamped { key: info.key })
 }
 
 fn stamps_backwards(inventory: &Inventory) -> Option<Hold> {
     snapshots(inventory).windows(2).find_map(|pair| match pair {
-        [earlier, later] if earlier.created_at > later.created_at => {
+        [earlier, later] if stamp_of(earlier) > stamp_of(later) => {
             Some(Hold::SnapshotStampsBackwards {
                 earlier: earlier.key,
                 later: later.key,
@@ -308,11 +317,10 @@ fn candidates(
     let cutoff = anchor.saturating_sub(retention);
     let first = snaps
         .iter()
-        .position(|info| info.created_at.unix_millis() >= cutoff)
+        .position(|info| stamp_of(info).unix_millis() >= cutoff)
         .unwrap_or(last);
     if let Some(retained) = snaps.get(first).filter(|_| first < last) {
-        let aged_out = retained
-            .created_at
+        let aged_out = stamp_of(retained)
             .unix_millis()
             .saturating_add(retention)
             .saturating_add(1);
@@ -378,7 +386,7 @@ fn level_zero(
         if !below && !covered(&cover, info) {
             continue;
         }
-        let created = info.created_at.unix_millis();
+        let created = stamp_of(info).unix_millis();
         if created > cutoff {
             found.wake_at(created.saturating_add(millis(age)), newest_stamp);
             return;

@@ -417,7 +417,7 @@ fn plan_level(
         return Step::Idle;
     }
     let (start, next) = next_window(now, interval);
-    if dst_last.is_some_and(|info| info.created_at > start) {
+    if dst_last.is_some_and(|info| stamped_after(info, start)) {
         return Step::Wait(next);
     }
     let run = contiguous_run(above);
@@ -473,13 +473,19 @@ fn plan_snapshot(
         return Step::Idle;
     }
     let (start, next) = next_window(now, config.snapshot_interval());
-    if snap.created_at > start {
+    if stamped_after(snap, start) {
         return Step::Wait(next);
     }
     Step::Run(Job::Snapshot(SnapshotJob {
         after: Some(after),
         through: pos,
     }))
+}
+
+/// Whether the file was stamped after `start`. A file with no exact stamp
+/// counts as stamped after, so the caller waits instead of guessing.
+fn stamped_after(info: &FileInfo, start: Timestamp) -> bool {
+    info.exact_stamp().is_none_or(|stamp| stamp.at() > start)
 }
 
 /// Why a job did not finish.

@@ -10,12 +10,17 @@ use proptest::prelude::*;
 
 use super::*;
 use crate::inventory::Inventory;
+use crate::layout::ListedStamp;
 use crate::maintain::tests::{
     Model, T0, at, defaults, due, file, inv, key, level, secs, small, txid,
 };
 use crate::maintain::{Due, Job};
 
 /// `retention` from a fresh state.
+fn restamp(file: &mut FileInfo, at: Timestamp) {
+    file.listed = ListedStamp::Stored(StoredStamp::mtime(at));
+}
+
 fn retention(
     inventory: &Inventory,
     now: Timestamp,
@@ -53,7 +58,7 @@ fn ladder() -> Vec<FileInfo> {
 fn newest_stamp(files: &[FileInfo]) -> i64 {
     files
         .iter()
-        .map(|f| f.created_at.unix_millis())
+        .map(|f| f.exact_stamp().unwrap().at().unix_millis())
         .max()
         .unwrap()
 }
@@ -655,13 +660,17 @@ fn retained_from(before: &Inventory, now: Timestamp, cfg: &Maintenance) -> Optio
         .iter()
         .filter(|f| is_snapshot_start(f))
         .collect();
-    let newest = before.files().iter().map(|f| f.created_at).max()?;
+    let newest = before
+        .files()
+        .iter()
+        .map(|f| f.exact_stamp().unwrap().at())
+        .max()?;
     let anchor = now.min(newest).unix_millis();
     let cutoff =
         anchor.saturating_sub(i64::try_from(cfg.snapshot_retention().as_millis()).unwrap());
     let first = snaps
         .iter()
-        .position(|s| s.created_at.unix_millis() >= cutoff)
+        .position(|s| s.exact_stamp().unwrap().at().unix_millis() >= cutoff)
         .unwrap_or(snaps.len().checked_sub(1)?);
     let floor = first
         .checked_sub(1)
@@ -754,11 +763,16 @@ fn check_instants(before: &Inventory, after: &Inventory, lo: Txid) {
         .level(Level::SNAPSHOT)
         .iter()
         .find(|s| s.key.range().max() == lo && is_snapshot_start(s))
-        .map(|s| s.created_at.unix_millis());
+        .map(|s| s.exact_stamp().unwrap().at().unix_millis());
     for f in after.files() {
-        let instant = at(f.created_at.unix_millis().saturating_add(1));
+        let instant = at(f
+            .exact_stamp()
+            .unwrap()
+            .at()
+            .unix_millis()
+            .saturating_add(1));
         let Some(base) = base_stamp else { continue };
-        if f.created_at.unix_millis() < base {
+        if f.exact_stamp().unwrap().at().unix_millis() < base {
             continue;
         }
         let target = RestoreTarget::AsOf(instant);
@@ -893,11 +907,11 @@ fn roughen(b: &mut Bytes, listing: &mut Listing, n: u64, stamp: &dyn Fn(u64) -> 
             2 if !listing.files.is_empty() => {
                 let at = b.index(listing.files.len());
                 let f = &mut listing.files[at];
-                f.created_at = at_stamp(stamp(1 + b.below(n)));
+                restamp(f, at_stamp(stamp(1 + b.below(n))));
             }
             3 if !listing.files.is_empty() => {
                 let at = b.index(listing.files.len());
-                listing.files[at].created_at = Timestamp::from_unix_millis(0);
+                restamp(&mut listing.files[at], Timestamp::from_unix_millis(0));
             }
             4 => {
                 let lo = 2 + b.below(n - 1);
@@ -939,7 +953,14 @@ fn pick_now(b: &mut Bytes, files: &[FileInfo]) -> i64 {
         1 => newest + DAY,
         2 => i64::MAX,
         3 => newest - i64::try_from(b.below(120)).unwrap() * HOUR,
-        _ => files[b.index(files.len())].created_at.unix_millis() + 1,
+        _ => {
+            files[b.index(files.len())]
+                .exact_stamp()
+                .unwrap()
+                .at()
+                .unix_millis()
+                + 1
+        }
     }
 }
 
@@ -959,7 +980,12 @@ fn check_listing(
         retention(inventory, now, cfg, published),
         "not deterministic"
     );
-    let Some(newest) = inventory.files().iter().map(|f| f.created_at).max() else {
+    let Some(newest) = inventory
+        .files()
+        .iter()
+        .map(|f| f.exact_stamp().unwrap().at())
+        .max()
+    else {
         return;
     };
     // 6
@@ -1059,12 +1085,22 @@ fn later_stamps(
     noise: &mut Bytes,
 ) {
     let files = inventory.files();
-    let floor = files[noise.index(files.len())].created_at.unix_millis();
+    let floor = files[noise.index(files.len())]
+        .exact_stamp()
+        .unwrap()
+        .at()
+        .unix_millis();
     let shift = i64::try_from(noise.below(40)).unwrap() * HOUR;
     let moved: Vec<FileInfo> = files
         .iter()
         .map(|f| FileInfo {
-            created_at: at(f.created_at.unix_millis().max(floor) + shift),
+            listed: ListedStamp::Stored(StoredStamp::mtime(at(f
+                .exact_stamp()
+                .unwrap()
+                .at()
+                .unix_millis()
+                .max(floor)
+                + shift))),
             ..*f
         })
         .collect();
@@ -1259,7 +1295,7 @@ fn gen_listing(x: &mut Xs, shape: Shape) -> Vec<FileInfo> {
         for _ in 0..=x.below(3) {
             let i = x.index(files.len());
             let j = 1 + x.below(n);
-            files[i].created_at = at(st(j));
+            restamp(&mut files[i], at(st(j)));
         }
     }
     let mut seen = BTreeSet::new();
@@ -1288,7 +1324,7 @@ fn anchors(files: &[FileInfo], cfg: &Maintenance) -> Vec<i64> {
         L0Retention::Keep => 0,
     };
     for f in files {
-        let s = f.created_at.unix_millis();
+        let s = f.exact_stamp().unwrap().at().unix_millis();
         for base in [s, s + snap, s + l0] {
             out.extend([base - 1, base, base + 1]);
         }
@@ -1396,7 +1432,7 @@ fn a_wobbling_clock_with_partial_deletes_loses_nothing_retained() {
                         start
                             .files()
                             .iter()
-                            .map(|f| (f.key, f.created_at.unix_millis() - T0))
+                            .map(|f| (f.key, f.exact_stamp().unwrap().at().unix_millis() - T0))
                             .collect::<Vec<_>>()
                     );
                 }

@@ -14,6 +14,7 @@ use lsr_ltx::{Timestamp, Txid, TxidRange};
 
 use crate::args::{CommandName, FLAGS};
 use crate::run::{CliError, Done, Exit};
+use lsr_core::ListedStamp;
 
 /// Appends formatted text to a `String`, which cannot fail.
 macro_rules! put {
@@ -515,13 +516,9 @@ fn verify_json(report: &Report, depth: Depth) -> String {
 fn files_text(inventory: &Inventory, stamp_fallbacks: Option<u64>) -> String {
     let mut out = String::new();
     for info in inventory.files() {
-        putln!(
-            out,
-            "{} {} {}",
-            key_path(&info.key),
-            info.size,
-            info.created_at
-        );
+        let (time, exact) = listed_time(info);
+        let note = if exact { "" } else { " (listed)" };
+        putln!(out, "{} {} {time}{note}", key_path(&info.key), info.size);
     }
     if inventory.skipped_total() > 0 {
         putln!(out, "foreign names skipped: {}", inventory.skipped_total());
@@ -532,9 +529,18 @@ fn files_text(inventory: &Inventory, stamp_fallbacks: Option<u64>) -> String {
     out
 }
 
+/// The time a listing gave for a file, and whether it is the exact stamp or
+/// only the bucket's `LastModified`.
+fn listed_time(info: &FileInfo) -> (Timestamp, bool) {
+    match info.listed {
+        ListedStamp::Stored(stamp) => (stamp.at(), true),
+        ListedStamp::LastModified(at) => (at, false),
+    }
+}
+
 fn file_json(info: &FileInfo) -> String {
     let range = info.key.range();
-    let created: Timestamp = info.created_at;
+    let (created, exact) = listed_time(info);
     object(&[
         ("level", info.key.level().get().to_string()),
         ("key", quote(&key_path(&info.key))),
@@ -543,6 +549,7 @@ fn file_json(info: &FileInfo) -> String {
         ("size", info.size.to_string()),
         ("created_at", quote(&created.to_string())),
         ("created_at_ms", created.unix_millis().to_string()),
+        ("stamp_exact", exact.to_string()),
     ])
 }
 

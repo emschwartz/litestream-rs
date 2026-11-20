@@ -10,6 +10,7 @@ use proptest::prelude::*;
 
 use super::*;
 use crate::conformance::block_on;
+use crate::layout::{ListedStamp, StoredStamp};
 use crate::mem::MemStore;
 use crate::plan::{PlanOutcome, RestoreTarget, plan};
 use crate::store::{PageLimit, StoreOp, Upload};
@@ -41,7 +42,7 @@ pub(super) fn file(l: u8, min: u64, max: u64, created: i64) -> FileInfo {
     FileInfo {
         key: key(l, min, max),
         size: 1,
-        created_at: at(created),
+        listed: ListedStamp::Stored(StoredStamp::mtime(at(created))),
     }
 }
 
@@ -715,7 +716,9 @@ impl Model {
                 self.files.push(FileInfo {
                     key: c.output_key(),
                     size: 1,
-                    created_at: last.created_at,
+                    listed: ListedStamp::Stored(StoredStamp::mtime(
+                        last.exact_stamp().unwrap().at(),
+                    )),
                 });
             }
             Job::Snapshot(s) => self.files.push(file(9, 1, s.through.get(), now)),
@@ -762,7 +765,7 @@ impl Checker {
                 c.level()
             );
         }
-        let stamp = files.last().unwrap().created_at;
+        let stamp = files.last().unwrap().exact_stamp().unwrap().at();
         self.last.insert(c.level(), (start, stamp));
     }
 
@@ -794,7 +797,7 @@ impl Checker {
             if pending {
                 let start = go_truncate(now, cfg.interval(dst).unwrap());
                 assert!(
-                    last.is_some_and(|f| f.created_at > start),
+                    last.is_some_and(|f| f.exact_stamp().unwrap().at() > start),
                     "level {l} idle with work"
                 );
             }
@@ -1115,7 +1118,7 @@ fn truncate_to_half(replica: &MemStore, out: &FileKey) {
             )
             .await
             .unwrap();
-        let created = load(replica).level(level(1))[0].created_at;
+        let created = load(replica).level(level(1))[0].exact_stamp().unwrap().at();
         let mut up = replica.begin_upload(out, created).await.unwrap();
         up.write(&whole[..whole.len() / 2]).await.unwrap();
         up.commit().await.unwrap();

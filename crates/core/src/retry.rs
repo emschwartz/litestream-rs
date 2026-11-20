@@ -29,6 +29,7 @@ use std::time::Duration;
 use lsr_ltx::{Timestamp, TxidRange};
 
 use crate::env::{Entropy, Sleeper};
+use crate::layout::StoredStamp;
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::store::{CorruptCause, Listing, ObjectStore, PageLimit, ReadLen, StoreError, Upload};
 
@@ -253,6 +254,20 @@ impl<S: ObjectStore, P: Sleeper, E: Entropy> ObjectStore for Retrying<S, P, E> {
     async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
         let core = &*self.core;
         core.run(|| core.inner.read(key, offset, len)).await
+    }
+
+    async fn stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
+        let core = &*self.core;
+        core.run(|| core.inner.stamp(file)).await
+    }
+
+    async fn read_with_stamp(
+        &self,
+        file: &FileInfo,
+        len: ReadLen,
+    ) -> Result<(Vec<u8>, StoredStamp), StoreError> {
+        let core = &*self.core;
+        core.run(|| core.inner.read_with_stamp(file, len)).await
     }
 
     async fn begin_upload(

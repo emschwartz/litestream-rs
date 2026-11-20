@@ -95,6 +95,49 @@ mod cases {
     }
 
     #[test]
+    fn stamp_is_one_head_and_a_stamped_read_is_one_get() {
+        let h = FakeHarness::new();
+        let k = key(0, 1, 1);
+        put_through(&h.store, &k, b"abc").unwrap();
+        let listed = list_all(&h.store).unwrap();
+        let file = listed.files[0];
+        let heads = count(&h.wire, Shape::Head);
+
+        let stamp = block_on(h.store.stamp(&file)).unwrap();
+        assert_eq!(count(&h.wire, Shape::Head), heads + 1);
+
+        let gets = count(&h.wire, Shape::Get);
+        let (bytes, read_stamp) =
+            block_on(h.store.read_with_stamp(&file, ReadLen::new(8).unwrap())).unwrap();
+        assert_eq!(bytes, b"abc");
+        assert_eq!(read_stamp.at(), stamp.at());
+        assert_eq!(count(&h.wire, Shape::Get), gets + 1);
+        assert_eq!(
+            count(&h.wire, Shape::Head),
+            heads + 1,
+            "the GET carried the stamp"
+        );
+    }
+
+    #[test]
+    fn a_stamped_read_of_an_unstamped_object_falls_back_to_a_head() {
+        let h = FakeHarness::new();
+        let k = key(0, 1, 1);
+        put_through(&h.store, &k, b"abc").unwrap();
+        let file = list_all(&h.store).unwrap().files[0];
+        h.wire.inner().put_raw(
+            &lsr_store_s3::object_key(config().prefix(), &k),
+            b"abc".to_vec(),
+            &[],
+        );
+        let heads = count(&h.wire, Shape::Head);
+        let (_, stamp) =
+            block_on(h.store.read_with_stamp(&file, ReadLen::new(8).unwrap())).unwrap();
+        assert_eq!(stamp.origin(), lsr_core::StampOrigin::Fallback);
+        assert_eq!(count(&h.wire, Shape::Head), heads + 1);
+    }
+
+    #[test]
     fn wrong_etag_on_put_is_corrupt() {
         let (wire, sleeper, store) = retried(FakeHarness::new());
         let k = key(0, 1, 1);
@@ -133,7 +176,10 @@ mod cases {
             panic!("one visible file expected: {listed:?}");
         };
         assert_eq!((file.key, file.size), (k, 3));
-        assert_eq!(file.created_at, Timestamp::from_unix_millis(5));
+        assert_eq!(
+            file.exact_stamp().unwrap().at(),
+            Timestamp::from_unix_millis(5)
+        );
         let read = block_on(h.store.read(&k, 0, ReadLen::new(16).unwrap())).unwrap();
         assert_eq!(read, b"abc");
     }
@@ -218,7 +264,10 @@ mod cases {
             panic!("one file expected: {listed:?}");
         };
         assert_eq!(file.size, u64::try_from(len).unwrap());
-        assert_eq!(file.created_at, Timestamp::from_unix_millis(5));
+        assert_eq!(
+            file.exact_stamp().unwrap().at(),
+            Timestamp::from_unix_millis(5)
+        );
         assert_eq!(h.wire.inner().open_uploads(), 0);
         assert_eq!(h.store.pending_orphans(), 0);
     }
@@ -312,7 +361,10 @@ mod cases {
         let [file] = listed.files.as_slice() else {
             panic!("one visible file expected: {listed:?}");
         };
-        assert_eq!(file.created_at, Timestamp::from_unix_millis(5));
+        assert_eq!(
+            file.exact_stamp().unwrap().at(),
+            Timestamp::from_unix_millis(5)
+        );
         assert!(read_back(&h.store, &k, PART) == bytes);
         // The upload id is spent; its abort answers NoSuchUpload, which is success.
         assert_eq!(h.store.abort_orphans().unwrap(), 1);

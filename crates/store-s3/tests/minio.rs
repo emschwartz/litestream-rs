@@ -217,6 +217,11 @@ mod minio {
         delete_is_idempotent,
         two_uploads_to_one_key,
         chunks_concatenate_and_stamp_survives,
+        stamp_returns_the_committed_stamp,
+        listed_stamp_is_exact_or_marked,
+        stamp_of_a_vanished_file_is_not_found,
+        stamp_of_an_overwritten_file_is_refused,
+        read_with_stamp_agrees_with_read_and_stamp,
     );
 
     /// A case added to core's suite and missing from the list above would silently
@@ -261,7 +266,11 @@ mod minio {
             h.put(&h.key(0, n, n), *stamp, b"x");
         }
         let listing = h.list_all(0, 10);
-        let got: Vec<Timestamp> = listing.files.iter().map(|f| f.created_at).collect();
+        let got: Vec<Timestamp> = listing
+            .files
+            .iter()
+            .map(|f| f.exact_stamp().unwrap().at())
+            .collect();
         assert_eq!(got, stamps);
     }
 
@@ -277,7 +286,11 @@ mod minio {
             &[(STAMP_HEADER, "2025-01-02T03:04:05.123456789Z")],
         );
         let listing = h.list_all(0, 10);
-        let stamps: Vec<Timestamp> = listing.files.iter().map(|f| f.created_at).collect();
+        let stamps: Vec<Timestamp> = listing
+            .files
+            .iter()
+            .map(|f| f.exact_stamp().unwrap().at())
+            .collect();
         assert_eq!(stamps, [at("2025-01-02T03:04:05.123Z")]);
         assert_eq!(h.store.last_list_stats().stamped, 1);
     }
@@ -294,7 +307,7 @@ mod minio {
             panic!("one file expected, got {listing:?}");
         };
         let now = WallClock.now().unix_millis();
-        assert!((now - file.created_at.unix_millis()).abs() < 600_000);
+        assert!((now - file.exact_stamp().unwrap().at().unix_millis()).abs() < 600_000);
         let stats = h.store.last_list_stats();
         assert_eq!((stats.stamped, stats.fell_back), (0, 1));
     }
@@ -442,7 +455,10 @@ mod minio {
             panic!("one file expected: {listed:?}");
         };
         assert_eq!(file.size, u64::try_from(len).unwrap());
-        assert_eq!(file.created_at, at("2024-05-01T12:00:00.123Z"));
+        assert_eq!(
+            file.exact_stamp().unwrap().at(),
+            at("2024-05-01T12:00:00.123Z")
+        );
         assert_eq!(h.open_uploads(), 0);
         assert_eq!(h.store.pending_orphans(), 0);
     }

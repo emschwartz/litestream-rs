@@ -588,6 +588,10 @@ impl Actor {
 
     /// A step's result as what was staged, or as the tick a fault or a
     /// recovery verdict ends.
+    #[expect(
+        clippy::result_large_err,
+        reason = "Tick is the early-exit value of a private step and is returned at once; FileInfo's stamp pushed it past the threshold"
+    )]
     fn stepped(
         &mut self,
         stepped: Result<Stepped, Fault>,

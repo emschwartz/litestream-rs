@@ -24,6 +24,7 @@ mod restore;
 mod retry;
 mod snapshot;
 mod source;
+mod stamps;
 mod store;
 mod sync;
 mod upload;
@@ -46,8 +47,8 @@ pub use fault::{
 };
 pub use inventory::{Inventory, InventoryError, is_snapshot_start};
 pub use layout::{
-    FileInfo, FileKey, Level, ParseKeyError, RangeSide, cmp_range, file_name, is_scratch_name,
-    parse_file_name,
+    FileInfo, FileKey, Level, ListedStamp, ParseKeyError, RangeSide, StampOrigin, StoredStamp,
+    cmp_range, file_name, is_scratch_name, parse_file_name,
 };
 pub use maintain::{
     CompactJob, ConfigError, DeleteJob, Due, Hold, Interval, IntervalError, Job, JobError,
@@ -78,6 +79,7 @@ pub use source::{
 pub use source::{
     CheckpointCall, CheckpointEffect, CheckpointScript, FakeCheckpointer, FakeDb, FakeWal, SourceOp,
 };
+pub use stamps::{Resolve, ResolveError, Resolved, Stamps, Step as StampStep, resolve};
 pub use store::{
     CorruptCause, Listing, ObjectStore, PageLimit, PartNumber, ReadLen, StoreError, StoreOp,
     Upload, build_listing,

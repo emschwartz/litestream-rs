@@ -6,6 +6,7 @@ use proptest::prelude::*;
 use super::*;
 use crate::conformance::{self, Harness};
 use crate::env::{RecordingSleeper, SeededEntropy};
+use crate::layout::StoredStamp;
 use crate::mem::MemStore;
 use crate::store::{PartNumber, StoreOp};
 
@@ -363,6 +364,18 @@ impl ObjectStore for SizeLiar {
         self.0.read(key, offset, len).await
     }
 
+    async fn stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
+        self.0.stamp(file).await
+    }
+
+    async fn read_with_stamp(
+        &self,
+        file: &FileInfo,
+        len: ReadLen,
+    ) -> Result<(Vec<u8>, StoredStamp), StoreError> {
+        self.0.read_with_stamp(file, len).await
+    }
+
     async fn begin_upload(
         &self,
         key: &FileKey,
@@ -575,6 +588,18 @@ impl ObjectStore for DeleteRefuser {
 
     async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
         self.0.read(key, offset, len).await
+    }
+
+    async fn stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
+        self.0.stamp(file).await
+    }
+
+    async fn read_with_stamp(
+        &self,
+        file: &FileInfo,
+        len: ReadLen,
+    ) -> Result<(Vec<u8>, StoredStamp), StoreError> {
+        self.0.read_with_stamp(file, len).await
     }
 
     async fn begin_upload(

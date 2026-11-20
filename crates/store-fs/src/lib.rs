@@ -7,7 +7,7 @@
 //!
 //! A commit writes a scratch file next to the target (`<name>.<pid>-<n>.tmp`,
 //! created exclusively, so two uploads to one key never share bytes), stamps
-//! its mtime with `created_at` as Go does (`created_at` is the file's mtime),
+//! its mtime with the creation stamp as Go does (the stamp is the file's mtime),
 //! fsyncs it, renames it into place and fsyncs the directory. Go stamps the
 //! mtime after the rename; stamping first means no reader ever sees the file
 //! with the wrong time.
@@ -52,8 +52,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lsr_core::{
-    CorruptCause, FileInfo, FileKey, Level, Listing, ObjectStore, PageLimit, ReadLen, StoreError,
-    StoreOp, Upload, build_listing, parse_file_name,
+    CorruptCause, FileInfo, FileKey, Level, ListedStamp, Listing, ObjectStore, PageLimit, ReadLen,
+    StoreError, StoreOp, StoredStamp, Upload, build_listing, parse_file_name,
 };
 use lsr_ltx::{Timestamp, TxidRange};
 
@@ -155,6 +155,16 @@ impl FsStore {
     }
 
     fn read_now(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
+        self.read_open(key, offset, len).map(|(bytes, _meta)| bytes)
+    }
+
+    /// The bytes, and the metadata of the very file they came from.
+    fn read_open(
+        &self,
+        key: &FileKey,
+        offset: u64,
+        len: ReadLen,
+    ) -> Result<(Vec<u8>, fs::Metadata), StoreError> {
         let fail = |err: io::Error| StoreError::from_io(StoreOp::Read, Some(*key), &err);
         let not_a_file = || StoreError::Corrupt {
             key: Some(*key),
@@ -172,12 +182,40 @@ impl FsStore {
         }
         // Past the end is empty at every offset; seeking beyond i64::MAX fails.
         if offset >= meta.len() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), meta));
         }
         file.seek(SeekFrom::Start(offset)).map_err(fail)?;
         let mut bytes = Vec::new();
         file.take(len.get()).read_to_end(&mut bytes).map_err(fail)?;
-        Ok(bytes)
+        Ok((bytes, meta))
+    }
+
+    fn stamp_now(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
+        let key = file.key;
+        let meta = fs::metadata(self.file_path(&key))
+            .map_err(|err| StoreError::from_io(StoreOp::Read, Some(key), &err))?;
+        if !meta.is_file() {
+            return Err(StoreError::Corrupt {
+                key: Some(key),
+                cause: CorruptCause::NotARegularFile,
+            });
+        }
+        if meta.len() != file.size {
+            return Err(StoreError::Transient {
+                op: StoreOp::Read,
+                kind: io::ErrorKind::InvalidData,
+            });
+        }
+        mtime_stamp(&meta, key, StoreOp::Read)
+    }
+
+    fn read_with_stamp_now(
+        &self,
+        file: &FileInfo,
+        len: ReadLen,
+    ) -> Result<(Vec<u8>, StoredStamp), StoreError> {
+        let (bytes, meta) = self.read_open(&file.key, 0, len)?;
+        Ok((bytes, mtime_stamp(&meta, file.key, StoreOp::Read)?))
     }
 
     fn begin_now(&self, key: &FileKey, created_at: Timestamp) -> Result<FsUpload, StoreError> {
@@ -268,18 +306,25 @@ fn classify(level: Level, entry: &DirEntry, name: &str) -> Result<Entry, StoreEr
     if !meta.is_file() {
         return Err(not_a_file);
     }
-    let modified = meta
-        .modified()
-        .map_err(|err| StoreError::from_io(StoreOp::List, Some(key), &err))?;
-    let created_at = from_system_time(modified).ok_or(StoreError::Corrupt {
-        key: Some(key),
-        cause: CorruptCause::TimestampOutOfRange,
-    })?;
+    let stamp = mtime_stamp(&meta, key, StoreOp::List)?;
     Ok(Entry::File(FileInfo {
         key,
         size: meta.len(),
-        created_at,
+        listed: ListedStamp::Stored(stamp),
     }))
+}
+
+/// The file's mtime as its stamp: this store keeps the writer's stamp there.
+fn mtime_stamp(meta: &fs::Metadata, key: FileKey, op: StoreOp) -> Result<StoredStamp, StoreError> {
+    let modified = meta
+        .modified()
+        .map_err(|err| StoreError::from_io(op, Some(key), &err))?;
+    from_system_time(modified)
+        .map(StoredStamp::mtime)
+        .ok_or(StoreError::Corrupt {
+            key: Some(key),
+            cause: CorruptCause::TimestampOutOfRange,
+        })
 }
 
 fn to_system_time(ts: Timestamp) -> Option<SystemTime> {
@@ -336,6 +381,21 @@ impl ObjectStore for FsStore {
         len: ReadLen,
     ) -> impl Future<Output = Result<Vec<u8>, StoreError>> + Send {
         ready(self.read_now(key, offset, len))
+    }
+
+    fn stamp(
+        &self,
+        file: &FileInfo,
+    ) -> impl Future<Output = Result<StoredStamp, StoreError>> + Send {
+        ready(self.stamp_now(file))
+    }
+
+    fn read_with_stamp(
+        &self,
+        file: &FileInfo,
+        len: ReadLen,
+    ) -> impl Future<Output = Result<(Vec<u8>, StoredStamp), StoreError>> + Send {
+        ready(self.read_with_stamp_now(file, len))
     }
 
     fn begin_upload(
@@ -395,7 +455,7 @@ impl FsUpload {
             Ok(Ok(size)) => Ok(FileInfo {
                 key: self.key,
                 size,
-                created_at: self.created_at,
+                listed: ListedStamp::Stored(StoredStamp::mtime(self.created_at)),
             }),
             Err(err) => {
                 // Best effort: a scratch file that survives is invisible anyway.
@@ -507,7 +567,9 @@ mod tests {
             vec![FileInfo {
                 key: key(0, 1, 2),
                 size: 9,
-                created_at: Timestamp::from_unix_millis(1_700_000_000_456),
+                listed: ListedStamp::Stored(StoredStamp::mtime(Timestamp::from_unix_millis(
+                    1_700_000_000_456
+                ))),
             }]
         );
         let bytes = block_on(store.read(&key(0, 1, 2), 4, ReadLen::new(100).unwrap())).unwrap();

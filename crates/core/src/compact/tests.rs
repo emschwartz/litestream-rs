@@ -12,6 +12,8 @@ use proptest::prelude::*;
 
 use super::*;
 use crate::conformance::block_on;
+use crate::layout::ListedStamp;
+use crate::layout::StoredStamp;
 use crate::mem::{MemStore, MemUpload};
 use crate::plan::RestoreTarget;
 use crate::restore::{Database, MemSink, restore};
@@ -290,6 +292,21 @@ impl ObjectStore for Spy {
         std::future::ready(result)
     }
 
+    fn stamp(
+        &self,
+        file: &FileInfo,
+    ) -> impl Future<Output = Result<StoredStamp, StoreError>> + Send {
+        self.inner.stamp(file)
+    }
+
+    fn read_with_stamp(
+        &self,
+        file: &FileInfo,
+        len: ReadLen,
+    ) -> impl Future<Output = Result<(Vec<u8>, StoredStamp), StoreError>> + Send {
+        self.inner.read_with_stamp(file, len)
+    }
+
     fn begin_upload(
         &self,
         at: &FileKey,
@@ -372,7 +389,7 @@ fn info(l: u8, min: u64, max: u64) -> FileInfo {
     FileInfo {
         key: key(l, min, max),
         size: 1,
-        created_at: Timestamp::from_unix_millis(0),
+        listed: ListedStamp::Stored(StoredStamp::mtime(Timestamp::from_unix_millis(0))),
     }
 }
 
@@ -430,7 +447,7 @@ fn one_input_keeps_its_pages_and_header_fields_minus_node_id_and_wal_origin() {
     assert_eq!(done.header().fields(), want);
     assert_eq!(done.info().key, key(1, 5, 5));
     assert_eq!(done.pages(), 2);
-    assert_eq!(done.info().created_at, spec.timestamp());
+    assert_eq!(done.info().exact_stamp().unwrap().at(), spec.timestamp());
     let (verified, pages) = decode_all(&read_all(&dest, &done.info().key)).unwrap();
     assert_eq!(verified.header(), done.header());
     assert_eq!(verified.trailer(), done.trailer());
@@ -643,7 +660,7 @@ fn a_tracked_chain_carries_its_checksums_and_restores_through_its_chain_check() 
     let tail = put_bytes(
         &store,
         done.info().key,
-        done.info().created_at,
+        done.info().exact_stamp().unwrap().at(),
         &read_all(&dest, &done.info().key),
     );
     assert_eq!(tail.key, key(1, 2, 3));
@@ -711,7 +728,12 @@ fn with_bytes(source: &MemStore, infos: &[FileInfo], at: usize, edit: impl Fn(&m
     let target = infos[at];
     let mut bytes = read_all(source, &target.key);
     edit(&mut bytes);
-    put_bytes(source, target.key, target.created_at, &bytes);
+    put_bytes(
+        source,
+        target.key,
+        target.exact_stamp().unwrap().at(),
+        &bytes,
+    );
 }
 
 fn assert_clean_failure(dest: &Spy) {
@@ -1062,7 +1084,7 @@ proptest! {
             let rest = compact_infos(&source, &source, &infos[1..], 1).unwrap();
             let store = MemStore::new();
             put(&store, 9, &specs[0]);
-            put_bytes(&store, rest.info().key, rest.info().created_at,
+            put_bytes(&store, rest.info().key, rest.info().exact_stamp().unwrap().at(),
                 &read_all(&source, &rest.info().key));
             let h = rest.header().fields();
             prop_assert_eq!(h.pre_apply, specs[1].pre);

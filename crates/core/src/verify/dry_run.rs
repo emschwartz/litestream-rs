@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use lsr_ltx::{Checksum, PageNo, PageSize, Timestamp, TxidRange};
 
 use super::VerifyError;
+use crate::layout::{FileInfo, StoredStamp};
 use crate::layout::{FileKey, Level};
 use crate::plan::RestoreTarget;
 use crate::restore::{DatabaseSink, RestoreError, restore};
@@ -86,6 +87,22 @@ impl<S: ObjectStore> ObjectStore for Counting<'_, S> {
         let got = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
         self.bytes.fetch_add(got, Ordering::Relaxed);
         Ok(chunk)
+    }
+
+    async fn stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
+        self.inner.stamp(file).await
+    }
+
+    async fn read_with_stamp(
+        &self,
+        file: &FileInfo,
+        len: ReadLen,
+    ) -> Result<(Vec<u8>, StoredStamp), StoreError> {
+        let (chunk, stamp) = self.inner.read_with_stamp(file, len).await?;
+        self.files.fetch_add(1, Ordering::Relaxed);
+        let got = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
+        self.bytes.fetch_add(got, Ordering::Relaxed);
+        Ok((chunk, stamp))
     }
 
     async fn begin_upload(

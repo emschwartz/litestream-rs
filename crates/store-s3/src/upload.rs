@@ -22,7 +22,10 @@
 use std::io;
 use std::sync::Arc;
 
-use lsr_core::{CorruptCause, FileInfo, FileKey, PartNumber, StoreError, StoreOp, Upload};
+use lsr_core::{
+    CorruptCause, FileInfo, FileKey, ListedStamp, PartNumber, StoreError, StoreOp, StoredStamp,
+    Upload,
+};
 use lsr_ltx::Timestamp;
 
 use crate::multipart::completed_etag_fits;
@@ -148,7 +151,7 @@ impl<T: Transport> Inner<T> {
             EtagCheck::Matches | EtagCheck::NotMd5 => Ok(FileInfo {
                 key: *key,
                 size: wrote,
-                created_at: stamp,
+                listed: ListedStamp::Stored(StoredStamp::metadata(stamp)),
             }),
             EtagCheck::Missing => Err(StoreError::Transient {
                 op,
@@ -277,7 +280,7 @@ impl<T: Transport> S3Upload<T> {
         Ok(FileInfo {
             key: self.key,
             size: self.written,
-            created_at: self.stamp,
+            listed: ListedStamp::Stored(StoredStamp::metadata(self.stamp)),
         })
     }
 }

@@ -100,7 +100,10 @@ mod review {
             .set_modified(stamp)
             .unwrap();
         let listing = block_on(store.list(Level::ZERO, None, PageLimit::MAX)).unwrap();
-        let created = listing.files.first().map(|f| f.created_at.unix_millis());
+        let created = listing
+            .files
+            .first()
+            .map(|f| f.exact_stamp().unwrap().at().unix_millis());
         assert_eq!(created, Some(-2));
     }
 

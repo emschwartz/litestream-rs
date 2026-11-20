@@ -8,6 +8,7 @@ use lsr_wal::Salts;
 
 use super::*;
 use crate::conformance::block_on;
+use crate::layout::StoredStamp;
 use crate::layout::{FileKey, Level};
 use crate::mem::MemStore;
 use crate::source::{CheckpointCall, FakeCheckpointer, FakeDb, FakeWal, SourceError, SourceOp};
@@ -66,6 +67,23 @@ impl ObjectStore for Counting {
     ) -> impl Future<Output = Result<Vec<u8>, StoreError>> + Send {
         self.count();
         self.inner.read(key, offset, len)
+    }
+
+    fn stamp(
+        &self,
+        file: &FileInfo,
+    ) -> impl Future<Output = Result<StoredStamp, StoreError>> + Send {
+        self.count();
+        self.inner.stamp(file)
+    }
+
+    fn read_with_stamp(
+        &self,
+        file: &FileInfo,
+        len: ReadLen,
+    ) -> impl Future<Output = Result<(Vec<u8>, StoredStamp), StoreError>> + Send {
+        self.count();
+        self.inner.read_with_stamp(file, len)
     }
 
     fn begin_upload(

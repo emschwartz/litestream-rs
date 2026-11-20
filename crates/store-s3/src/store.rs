@@ -14,16 +14,18 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lsr_core::{
-    Clock, FileKey, Level, Listing, ObjectStore, PageLimit, ReadLen, StoreError, StoreOp,
+    Clock, FileInfo, FileKey, Level, ListedStamp, Listing, ObjectStore, PageLimit, ReadLen,
+    StoreError, StoreOp, StoredStamp,
 };
 use lsr_ltx::{Timestamp, TxidRange};
 
 use crate::classify::{classify, classify_transport, is_range_past_end};
 use crate::config::{ConfigError, PartSize, Prefix, S3Config};
 use crate::credentials::S3Credentials;
+use crate::list::stamp_from_head;
 use crate::orphans::Orphans;
 use crate::request::{HttpRequest, MAX_DELETE_KEYS, RequestBuilder, RequestError};
-use crate::response::parse_delete_failures;
+use crate::response::{parse_delete_failures, parse_head, parse_stamp_header};
 use crate::transport::{HttpResponse, Transport};
 use crate::upload::S3Upload;
 use crate::ureq_transport::UreqTransport;
@@ -159,6 +161,18 @@ impl<T: Transport> ObjectStore for S3Store<T> {
         self.inner.read(key, offset, len)
     }
 
+    async fn stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
+        self.inner.stamp(file)
+    }
+
+    async fn read_with_stamp(
+        &self,
+        file: &FileInfo,
+        len: ReadLen,
+    ) -> Result<(Vec<u8>, StoredStamp), StoreError> {
+        self.inner.read_with_stamp(file, len)
+    }
+
     async fn begin_upload(
         &self,
         key: &FileKey,
@@ -259,10 +273,59 @@ impl<T: Transport> Inner<T> {
         let op = StoreOp::Read;
         let request = self.request(op, |b, now| b.get_range(now, key, offset, len))?;
         let response = self.send(op, request)?;
-        if is_range_past_end(&response) {
+        Self::range_body(key, offset, len, &response)
+    }
+
+    /// One HEAD: the stamp the object carries, else the one the listing gave
+    /// for it (ruling F1), checked against the size the caller saw.
+    fn stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
+        let op = StoreOp::Read;
+        let key = file.key;
+        let request = self.request(op, |b, now| b.head(now, &key))?;
+        let response = self.exec(op, Some(&key), request)?;
+        let head = parse_head(&response).map_err(|err| err.into_store(op, Some(key)))?;
+        let listed = match file.listed {
+            ListedStamp::Stored(stamp) => stamp.at(),
+            ListedStamp::LastModified(at) => at,
+        };
+        stamp_from_head(op, &head, file.size, Some(listed))
+    }
+
+    /// The first bytes and the stamp from one ranged GET, which carries the
+    /// object's metadata; a response without it costs one HEAD more.
+    fn read_with_stamp(
+        &self,
+        file: &FileInfo,
+        len: ReadLen,
+    ) -> Result<(Vec<u8>, StoredStamp), StoreError> {
+        let op = StoreOp::Read;
+        let key = file.key;
+        let request = self.request(op, |b, now| b.get_range(now, &key, 0, len))?;
+        let response = self.send(op, request)?;
+        let bytes = Self::range_body(&key, 0, len, &response)?;
+        let carried = match response.status() {
+            200 | 206 => {
+                parse_stamp_header(&response).map_err(|err| err.into_store(op, Some(key)))?
+            }
+            _ => None,
+        };
+        match carried {
+            Some(at) => Ok((bytes, StoredStamp::metadata(at))),
+            None => Ok((bytes, self.stamp(file)?)),
+        }
+    }
+
+    fn range_body(
+        key: &FileKey,
+        offset: u64,
+        len: ReadLen,
+        response: &HttpResponse,
+    ) -> Result<Vec<u8>, StoreError> {
+        let op = StoreOp::Read;
+        if is_range_past_end(response) {
             return Ok(Vec::new());
         }
-        classify(op, Some(key), None, &response)?;
+        classify(op, Some(key), None, response)?;
         let body = response.body();
         let body = if response.status() == 206 {
             // A 206 for another range would hand back the wrong bytes under the right key.

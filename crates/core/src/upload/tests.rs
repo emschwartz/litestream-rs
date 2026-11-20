@@ -12,6 +12,7 @@ use proptest::prelude::*;
 use super::*;
 use crate::conformance::block_on;
 use crate::fault::{HaltCause, Policy, policy};
+use crate::layout::StoredStamp;
 use crate::mem::{MemStore, MemUpload};
 use crate::store::{CorruptCause, Listing, StoreError, StoreOp};
 
@@ -150,6 +151,25 @@ impl ObjectStore for Probe {
             log.reads = log.reads.saturating_add(1);
         }
         self.inner.read(key, offset, len)
+    }
+
+    fn stamp(
+        &self,
+        file: &FileInfo,
+    ) -> impl Future<Output = Result<StoredStamp, StoreError>> + Send {
+        self.inner.stamp(file)
+    }
+
+    fn read_with_stamp(
+        &self,
+        file: &FileInfo,
+        len: ReadLen,
+    ) -> impl Future<Output = Result<(Vec<u8>, StoredStamp), StoreError>> + Send {
+        {
+            let mut log = self.log();
+            log.reads = log.reads.saturating_add(1);
+        }
+        self.inner.read_with_stamp(file, len)
     }
 
     fn begin_upload(
@@ -299,7 +319,7 @@ fn a_listing_of_an_empty_replica_then_uploads_from_one() {
     assert_eq!(info.key, key(1));
     assert_eq!(info.size, u64::try_from(bytes.len()).unwrap());
     assert_eq!(read_all(&remote, &key(1)), bytes);
-    assert_eq!(info.created_at, stamp(1));
+    assert_eq!(info.exact_stamp().unwrap().at(), stamp(1));
 }
 
 #[test]

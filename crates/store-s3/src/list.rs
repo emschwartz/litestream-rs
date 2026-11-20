@@ -16,11 +16,12 @@ use std::collections::VecDeque;
 use std::io;
 
 use lsr_core::{
-    FileInfo, Level, Listing, PageLimit, StoreError, StoreOp, build_listing, file_name,
+    FileInfo, Level, ListedStamp, Listing, PageLimit, StampOrigin, StoreError, StoreOp,
+    StoredStamp, build_listing, file_name,
 };
 use lsr_ltx::{Timestamp, TxidRange};
 
-use crate::response::{ListPage, ListedFile, parse_head, parse_list};
+use crate::response::{Head, ListPage, ListedFile, parse_head, parse_list};
 use crate::store::{Inner, ListStats};
 use crate::transport::Transport;
 
@@ -30,6 +31,31 @@ fn invalid_data() -> StoreError {
     StoreError::Transient {
         op: OP,
         kind: io::ErrorKind::InvalidData,
+    }
+}
+
+/// The stamp a HEAD settles: the object's metadata when it has one, else the
+/// bucket's `LastModified` marked as the fallback. The size must be the one the
+/// caller saw, or the object was overwritten since and a retry reads the new one.
+pub(crate) fn stamp_from_head(
+    op: StoreOp,
+    head: &Head,
+    size: u64,
+    last_modified: Option<Timestamp>,
+) -> Result<StoredStamp, StoreError> {
+    if head.size != size {
+        return Err(StoreError::Transient {
+            op,
+            kind: io::ErrorKind::InvalidData,
+        });
+    }
+    match (head.stamp, last_modified) {
+        (Some(stamp), _) => Ok(StoredStamp::metadata(stamp)),
+        (None, Some(modified)) => Ok(StoredStamp::fallback(modified)),
+        (None, None) => Err(StoreError::Transient {
+            op,
+            kind: io::ErrorKind::InvalidData,
+        }),
     }
 }
 
@@ -120,25 +146,19 @@ impl<T: Transport> Run<'_, T> {
             Err(err) => return Err(err),
         };
         let head = parse_head(&response).map_err(|err| err.into_store(OP, Some(key)))?;
-        if head.size != file.size {
-            // Overwritten between the listing and the HEAD; a retry reads the new one.
-            return Err(invalid_data());
-        }
-        let created_at = match (head.stamp, file.last_modified) {
-            (Some(stamp), _) => {
-                self.stats.stamped = self.stats.stamped.saturating_add(1);
-                stamp
-            }
-            (None, Some(modified)) => {
+        let stamp = stamp_from_head(OP, &head, file.size, file.last_modified)?;
+        match stamp.origin() {
+            StampOrigin::Fallback => {
                 self.stats.fell_back = self.stats.fell_back.saturating_add(1);
-                modified
             }
-            (None, None) => return Err(invalid_data()),
-        };
+            StampOrigin::Metadata | StampOrigin::Mtime => {
+                self.stats.stamped = self.stats.stamped.saturating_add(1);
+            }
+        }
         Ok(Some(FileInfo {
             key,
             size: file.size,
-            created_at,
+            listed: ListedStamp::Stored(stamp),
         }))
     }
 
@@ -155,9 +175,11 @@ impl<T: Transport> Run<'_, T> {
             files.push(FileInfo {
                 key: extra.key,
                 size: extra.size,
-                created_at: extra
-                    .last_modified
-                    .unwrap_or(Timestamp::from_unix_millis(0)),
+                listed: ListedStamp::LastModified(
+                    extra
+                        .last_modified
+                        .unwrap_or(Timestamp::from_unix_millis(0)),
+                ),
             });
         }
         Ok(files)
