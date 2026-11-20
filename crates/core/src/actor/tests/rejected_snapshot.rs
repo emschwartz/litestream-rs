@@ -56,6 +56,29 @@ fn a_rejected_snapshot_is_deleted_at_once() {
     );
 }
 
+/// A snapshot that fails before its commit published nothing, so nothing is
+/// deleted: the key may hold an earlier good object.
+#[test]
+fn a_snapshot_that_fails_before_its_commit_deletes_nothing() {
+    let (mut rig, mut actor) = before_first_snapshot();
+    let before = rig.remote.deleted();
+    rig.remote
+        .inner
+        .inject_failure(StoreOp::Upload, transient(StoreOp::Upload));
+    let tick = rig.tick(&mut actor, T0);
+    assert!(
+        matches!(
+            event(&tick),
+            Some(Event::Retrying {
+                fault: Fault::StoreTransient,
+                ..
+            })
+        ),
+        "{tick:?}"
+    );
+    assert_eq!(rig.remote.deleted(), before);
+}
+
 #[test]
 fn a_rejected_snapshot_that_cannot_be_deleted_goes_first_and_holds_retention() {
     let (mut rig, mut actor) = before_first_snapshot();

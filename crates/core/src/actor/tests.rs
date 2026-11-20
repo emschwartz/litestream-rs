@@ -39,6 +39,13 @@ struct Counting {
     inner: MemStore,
     calls: Arc<AtomicU32>,
     reads: Arc<std::sync::Mutex<Vec<FileKey>>>,
+    deletes: Arc<std::sync::Mutex<Vec<FileKey>>>,
+    /// When non-zero, the most keys one listing page returns: a store may
+    /// return fewer than the limit.
+    page_cap: Arc<AtomicU32>,
+    /// A WAL whose read epoch the next upload begun moves, as a checkpoint
+    /// by another connection would mid-step.
+    moves_epoch: Arc<std::sync::Mutex<Option<FakeWal>>>,
 }
 
 impl Counting {
@@ -55,6 +62,11 @@ impl Counting {
         let reads = self.reads.lock().unwrap();
         reads.iter().filter(|read| *read == key).count()
     }
+
+    /// Every key a delete was asked for, in order.
+    fn deleted(&self) -> Vec<FileKey> {
+        self.deletes.lock().unwrap().clone()
+    }
 }
 
 impl ObjectStore for Counting {
@@ -67,6 +79,12 @@ impl ObjectStore for Counting {
         limit: PageLimit,
     ) -> impl Future<Output = Result<Listing, StoreError>> + Send {
         self.count();
+        let cap = self.page_cap.load(Ordering::SeqCst);
+        let limit = u16::try_from(cap)
+            .ok()
+            .and_then(PageLimit::new)
+            .filter(|cap| cap.get() < limit.get())
+            .unwrap_or(limit);
         self.inner.list(level, after, limit)
     }
 
@@ -107,11 +125,15 @@ impl ObjectStore for Counting {
         created_at: Timestamp,
     ) -> impl Future<Output = Result<Self::Upload, StoreError>> + Send {
         self.count();
+        if let Some(wal) = self.moves_epoch.lock().unwrap().take() {
+            wal.set_epoch(wal.epoch().next());
+        }
         self.inner.begin_upload(key, created_at)
     }
 
     fn delete(&self, keys: &[FileKey]) -> impl Future<Output = Result<(), StoreError>> + Send {
         self.count();
+        self.deletes.lock().unwrap().extend_from_slice(keys);
         self.inner.delete(keys)
     }
 }
@@ -1366,4 +1388,5 @@ fn a_crash_between_the_drop_and_the_snapshot_boots_clean() {
     assert_eq!(restored(&rig), 2);
 }
 
+mod lanes;
 mod rejected_snapshot;
