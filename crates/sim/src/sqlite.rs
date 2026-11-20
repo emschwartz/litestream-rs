@@ -175,14 +175,19 @@ impl Index {
 struct Overwrite {
     frame: u32,
     reads: u32,
+    // The page is inverted until the next read puts it back.
+    flipped: bool,
 }
 
 #[derive(Debug, Default)]
 struct Faults {
     injections: Vec<(SourceOp, SourceError)>,
     shm_busy: bool,
-    shm_forced: Option<CommittedRead>,
+    // The forced read and how many reads still see it: the loop's own check
+    // of the WAL comes before the step that scans it.
+    shm_forced: Option<(CommittedRead, u8)>,
     overwrite: Option<Overwrite>,
+    empty_db: bool,
 }
 
 impl Faults {
@@ -667,16 +672,27 @@ impl State {
             .frame_at(armed.frame.saturating_sub(1))
             .saturating_add(FRAME_HEADER_LEN);
         let page_end = page.saturating_add(self.page_size.bytes());
+        if armed.flipped {
+            // The other writer's change was never durable: the page reads true
+            // again, so only the one read saw it.
+            self.invert(page, page_end);
+            self.faults.overwrite = None;
+            return;
+        }
         if start >= page_end || end <= page {
             return;
         }
         armed.reads = armed.reads.saturating_add(1);
-        self.faults.overwrite = Some(armed);
         if armed.reads >= 2 {
-            self.faults.overwrite = None;
-            if let Some(bytes) = self.wal.get_mut(page..page_end) {
-                bytes.iter_mut().for_each(|byte| *byte ^= 0xff);
-            }
+            armed.flipped = true;
+            self.invert(page, page_end);
+        }
+        self.faults.overwrite = Some(armed);
+    }
+
+    fn invert(&mut self, from: usize, to: usize) {
+        if let Some(bytes) = self.wal.get_mut(from..to) {
+            bytes.iter_mut().for_each(|byte| *byte ^= 0xff);
         }
     }
 }
@@ -1009,7 +1025,8 @@ impl SimSqlite {
                 return false;
             };
             let end = CommittedEnd::new(frames, index.salts, state.page_size);
-            state.faults.shm_forced = CommittedRead::new(end, index.backfilled.min(frames));
+            state.faults.shm_forced =
+                CommittedRead::new(end, index.backfilled.min(frames)).map(|read| (read, 2));
             state.faults.shm_forced.is_some()
         })
     }
@@ -1022,7 +1039,11 @@ impl SimSqlite {
             if frame == 0 || frame > state.index.written {
                 return false;
             }
-            state.faults.overwrite = Some(Overwrite { frame, reads: 0 });
+            state.faults.overwrite = Some(Overwrite {
+                frame,
+                reads: 0,
+                flipped: false,
+            });
             true
         })
     }
@@ -1037,6 +1058,14 @@ impl SimSqlite {
             state.unlinked = true;
             true
         })
+    }
+
+    /// The wal-index reports no committed frame until the next page count,
+    /// which reads zero: a database created and not yet written.
+    pub fn empty_database_once(&self) {
+        self.with(|state| {
+            state.faults.empty_db = true;
+        });
     }
 
     /// The next call of `op` fails with `err`.
@@ -1173,10 +1202,17 @@ impl WalSource for SimSource {
         if mem::take(&mut state.faults.shm_busy) {
             return Err(SourceError::Busy);
         }
-        if let Some(read) = state.faults.shm_forced.take() {
+        if let Some((read, left)) = state.faults.shm_forced.take() {
+            if let Some(left) = left.checked_sub(1).filter(|left| *left > 0) {
+                state.faults.shm_forced = Some((read, left));
+            }
             return Ok(read);
         }
         let index = &state.index;
+        if state.faults.empty_db {
+            let end = CommittedEnd::new(0, index.salts, state.page_size);
+            return CommittedRead::new(end, 0).ok_or(SourceError::Busy);
+        }
         let end = CommittedEnd::new(index.mx_frame, index.salts, state.page_size);
         CommittedRead::new(end, index.backfilled).ok_or(SourceError::Busy)
     }
@@ -1238,6 +1274,9 @@ impl PageSource for SimPages {
     fn page_count(&mut self) -> Result<u32, SourceError> {
         let mut state = lock(&self.state);
         state.faults.take(SourceOp::PageCount)?;
+        if std::mem::take(&mut state.faults.empty_db) {
+            return Ok(0);
+        }
         Ok(state.db_pages())
     }
 

@@ -101,7 +101,10 @@ fn a_fault_shape_only_pairs_with_the_operation_it_means() {
                     assert_eq!(op, StoreOp::Upload);
                 }
                 FaultShape::Error(_) => {}
-                FaultShape::FlipByteOnRead { .. } | FaultShape::Rate { .. } => {
+                FaultShape::FlipByteOnRead { .. }
+                | FaultShape::Rate { .. }
+                | FaultShape::ChecksumMismatch
+                | FaultShape::CorruptPublish => {
                     panic!("the generator never draws {shape:?}");
                 }
             }

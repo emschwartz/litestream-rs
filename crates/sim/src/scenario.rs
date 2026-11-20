@@ -73,7 +73,14 @@ pub enum EventMatch {
     SnapshotAt(u64),
     /// A checkpoint of this mode ran.
     Checkpointed(CheckpointMode),
+    /// A step failed with a fault whose policy is to retry it.
+    Retrying(FaultKind),
+    /// The clock read earlier than the last time used and was clamped.
+    Clamped,
 }
+
+/// A judgment of a whole run that the expectations cannot make.
+pub type Check = fn(&RunReport) -> Result<(), String>;
 
 /// One expectation of a scenario.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,6 +109,11 @@ impl Expect {
                 Self::Event(EventMatch::Checkpointed(want)),
                 Seen::Event(Event::Checkpointed { mode, .. }),
             ) => want == mode,
+            (
+                Self::Event(EventMatch::Retrying(want)),
+                Seen::Event(Event::Retrying { fault, .. }),
+            ) => FaultKind::from(fault) == *want,
+            (Self::Event(EventMatch::Clamped), Seen::Event(Event::Clamped(_))) => true,
             (Self::Halt(want), Seen::Halt(got)) => want == got,
             (Self::Oracle, Seen::Oracle) => true,
             (Self::Event(_) | Self::Halt(_) | Self::Oracle, _) => false,
@@ -120,6 +132,9 @@ pub struct Scenario {
     pub ops: Vec<Op>,
     /// What must be seen, in this order, with anything else allowed between.
     pub expect: Vec<Expect>,
+    /// A judgment of the whole run, for what no single event shows: a call
+    /// that must not happen, an order of calls.
+    pub check: Option<Check>,
 }
 
 /// Runs a scenario and matches its expectations.
@@ -143,6 +158,10 @@ pub fn run_scenario(scenario: &Scenario) -> Result<RunReport, String> {
                 scenario.name, report.seen
             ));
         }
+    }
+    if let Some(check) = scenario.check {
+        check(&report)
+            .map_err(|why| format!("{}: {why}; seen {:?}", scenario.name, report.seen))?;
     }
     Ok(report)
 }
@@ -198,6 +217,7 @@ fn build(name: &'static str, ops: Vec<Vec<Op>>, expect: Vec<Expect>) -> Scenario
         seed: Seed::new(SEED),
         ops: ops.into_iter().flatten().collect(),
         expect,
+        check: None,
     }
 }
 
@@ -513,3 +533,6 @@ pub fn power_loss_wal_rewind() -> Scenario {
         snapshot_after_boot(CauseKind::LocalRewound),
     )
 }
+
+mod faults;
+pub use faults::*;

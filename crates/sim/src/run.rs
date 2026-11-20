@@ -19,7 +19,7 @@ use lsr_core::{
 use lsr_ltx::{PageNo, PageSize, Timestamp, Txid};
 use lsr_wal::{Salts, WalOffset};
 
-use crate::generate::{EnvFault, MetaOp, Op, Target, WalOp, Weights, history};
+use crate::generate::{EnvFault, MetaOp, Op, RemoteOp, Target, WalOp, Weights, history};
 use crate::oracle::{Bound, Violation, bug_fault, within};
 use crate::resources::{
     CheckpointTally, CountingCheckpointer, IdleWindow, Limits, TickStats, delta, memory, per_tick,
@@ -99,6 +99,16 @@ pub enum Seen {
     Snapshot(Txid),
     /// The oracle judged the replica and found nothing wrong.
     Oracle,
+    /// A tick ran: the clock when it began, and the calls it made to the
+    /// replica. Recorded before the tick's own event.
+    Tick {
+        /// The clock when the tick began.
+        at: Timestamp,
+        /// List, read, begin, commit and delete calls to the replica.
+        remote_calls: u64,
+        /// How many of them were listings.
+        remote_lists: u64,
+    },
 }
 
 /// What a passing run did.
@@ -126,6 +136,12 @@ pub struct RunReport {
     /// Each event, halt and oracle verdict in order, when the run was asked to
     /// record them.
     pub seen: Vec<Seen>,
+    /// Every commit and delete the replica accepted, when the run was asked to
+    /// record.
+    pub remote_events: Vec<crate::store::TapEvent>,
+    /// Every commit and delete staging accepted, when the run was asked to
+    /// record.
+    pub staging_events: Vec<crate::store::TapEvent>,
 }
 
 /// What a run may be told besides its seed.
@@ -337,6 +353,23 @@ impl Runner {
         }
     }
 
+    fn note_tick(&mut self, began: Timestamp, remote0: crate::store::TapCounts) {
+        if !self.record {
+            return;
+        }
+        let spent = |c: crate::store::TapCounts| {
+            [c.lists, c.reads, c.begins, c.commits, c.deletes]
+                .into_iter()
+                .fold(0_u64, u64::saturating_add)
+        };
+        let now = self.w.remote_tap.counts();
+        self.report.seen.push(Seen::Tick {
+            at: began,
+            remote_calls: spent(now).saturating_sub(spent(remote0)),
+            remote_lists: now.lists.saturating_sub(remote0.lists),
+        });
+    }
+
     fn step(&mut self, plan: Option<CrashPlan>) -> Result<(Step, TickStats), Violation> {
         let at = self.w.remote_tap.len();
         let tip = self.w.model.tip();
@@ -344,9 +377,11 @@ impl Runner {
         let staging0 = self.w.staging_tap.counts();
         let passive0 = self.tally.count(lsr_core::CheckpointMode::Passive);
         let total0 = self.tally.total();
+        let began = self.now();
         let ended = self.run_one(plan);
         self.report.ticks = self.report.ticks.saturating_add(1);
         self.note_snapshots(tip, at);
+        self.note_tick(began, remote0);
         if self.trace {
             self.report.trace.push(format!("    tick: {ended:?}"));
         }
@@ -607,7 +642,28 @@ impl Runner {
         faults.push_in(op, u32::from(ahead), shape);
     }
 
-    fn env_fault(&mut self, fault: EnvFault) {
+    fn scenario_bool(&self, what: &str, done: bool) -> Result<(), Violation> {
+        Self::scenario_step(what, Ok(done))
+    }
+
+    fn remote(&mut self, op: RemoteOp) -> Result<(), Violation> {
+        let w = &self.w;
+        let done = match op {
+            RemoteOp::PutForeign => w.remote_put_foreign(),
+            RemoteOp::RemoveForeign => w.remote_level_zero().and_then(|files| {
+                files.last().map_or(Ok(false), |newest| {
+                    w.remote_delete(&[newest.key]).map(|()| true)
+                })
+            }),
+            RemoteOp::RollBack => w.remote_roll_back(),
+        };
+        if matches!(op, RemoteOp::RollBack) {
+            self.w.acked.note_rewound();
+        }
+        Self::scenario_step(&format!("{op:?}"), done.map_err(StagedEditError::from))
+    }
+
+    fn env_fault(&mut self, fault: EnvFault) -> Result<(), Violation> {
         match fault {
             EnvFault::DeleteWal => {
                 if self.w.sqlite.delete_wal() {
@@ -621,7 +677,21 @@ impl Runner {
                 }
             }
             EnvFault::Source(op, err) => self.w.sqlite.inject(op, err),
+            EnvFault::ShmMidUpdate => {
+                self.scenario_bool("ShmMidUpdate", self.w.sqlite.shm_mid_update())?;
+            }
+            EnvFault::ShmEndInsideTx => {
+                self.scenario_bool("ShmEndInsideTx", self.w.sqlite.shm_end_inside_tx())?;
+            }
+            EnvFault::OverwriteLastFrame => {
+                let frame = self.w.sqlite.mx_frame();
+                let done = self.w.sqlite.overwrite_frame_between_scan_and_read(frame);
+                self.scenario_bool("OverwriteLastFrame", done)?;
+            }
+            EnvFault::UnlinkWal => self.scenario_bool("UnlinkWal", self.w.sqlite.unlink_wal())?,
+            EnvFault::EmptyDatabase => self.w.sqlite.empty_database_once(),
         }
+        Ok(())
     }
 
     fn clock_jump(&self, millis: i64) {
@@ -676,6 +746,10 @@ impl Runner {
                 }
             }),
             MetaOp::StripNewestOrigin => w.strip_newest_origin(),
+            MetaOp::DeleteAll => w
+                .wipe_staging()
+                .map(|()| true)
+                .map_err(StagedEditError::from),
             MetaOp::TruncateNewest => w.edit_newest_staged(|bytes| {
                 let half = bytes.len() / 2;
                 bytes.truncate(half);
@@ -693,6 +767,14 @@ impl Runner {
             WalOp::RewriteSameLength(seed) => sqlite.rewrite_same_length(seed),
             WalOp::RegrowSameSalts(seed) => sqlite.regrow_same_salts(seed),
             WalOp::RegrowWithoutCommitMarks(seed) => sqlite.regrow_without_commit_marks(seed),
+            WalOp::FlipLastFrameBit => {
+                // Ten bytes into the page, past the 24-byte frame header.
+                let start = WalOffset::from_frame_index(
+                    sqlite.mx_frame().saturating_sub(1),
+                    sqlite.page_size(),
+                );
+                sqlite.flip_bit(start.get().saturating_add(34).saturating_mul(8))
+            }
         };
         Self::scenario_step(&format!("{op:?}"), Ok(applied))?;
         self.w.adopt_local_state();
@@ -720,7 +802,7 @@ impl Runner {
                 ahead,
                 shape,
             } => self.store_fault(*target, *op, *ahead, shape.clone()),
-            Op::EnvFault(fault) => self.env_fault(*fault),
+            Op::EnvFault(fault) => self.env_fault(*fault)?,
             Op::ClockJump(millis) => self.clock_jump(*millis),
             Op::Tick => self.tick()?,
             Op::Shutdown => {
@@ -734,6 +816,7 @@ impl Runner {
             Op::PowerLoss => self.restart(CrashKind::Power),
             Op::Meta(op) => self.meta(*op)?,
             Op::Wal(op) => self.wal_damage(*op)?,
+            Op::Remote(op) => self.remote(*op)?,
             Op::OurReader { begin } => {
                 let done = if *begin {
                     self.w.sqlite.our_reader_begin()
@@ -894,6 +977,10 @@ pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure
         violation,
         trace: std::mem::take(&mut runner.report.trace),
     })?;
+    if opts.record {
+        runner.report.remote_events = runner.w.remote_tap.events();
+        runner.report.staging_events = runner.w.staging_tap.events();
+    }
     Ok(runner.report)
 }
 

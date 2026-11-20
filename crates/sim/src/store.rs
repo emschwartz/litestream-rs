@@ -23,8 +23,8 @@ use std::task::{Context, Poll};
 
 use lsr_core::StoredStamp;
 use lsr_core::{
-    Entropy, FileInfo, FileKey, Level, Listing, ObjectStore, PageLimit, ReadLen, SeededEntropy,
-    StoreError, StoreOp, Upload,
+    CorruptCause, Entropy, FileInfo, FileKey, Level, Listing, MemStore, ObjectStore, PageLimit,
+    ReadLen, SeededEntropy, StoreError, StoreOp, Upload,
 };
 use lsr_ltx::{HEADER_LEN, Header, Timestamp, TxidRange, WalOrigin};
 
@@ -52,6 +52,16 @@ pub enum FaultShape {
     /// The commit publishes the object and reports a size one byte too large.
     /// Counted over commits, `StoreOp::Upload` only.
     SizeMismatch,
+    /// The commit publishes the object and then reports that the store holds
+    /// other bytes than were sent (an ETag that does not match). The object
+    /// stays as it is. Counted over commits, `StoreOp::Upload` only.
+    ChecksumMismatch,
+    /// As [`FaultShape::ChecksumMismatch`], and the published object has one
+    /// byte changed, so its size is right and its content is wrong: a
+    /// single-request upload a store acknowledged and damaged. Needs
+    /// [`Faults::corrupting_through`]. Counted over commits, `StoreOp::Upload`
+    /// only.
+    CorruptPublish,
     /// The read returns its bytes with the lowest bit of the byte at object
     /// offset `at` flipped when the range covers it; the stored bytes are
     /// untouched. `StoreOp::Read` only.
@@ -95,6 +105,8 @@ enum Verdict {
     Fail(StoreError),
     AfterPublish(StoreError),
     SizeMismatch,
+    Checksum,
+    Corrupt,
     Flip(u64),
 }
 
@@ -151,6 +163,12 @@ impl FaultState {
                 FaultShape::SizeMismatch => {
                     (commit_seen == Some(entry.nth)).then_some(Verdict::SizeMismatch)
                 }
+                FaultShape::ChecksumMismatch => {
+                    (commit_seen == Some(entry.nth)).then_some(Verdict::Checksum)
+                }
+                FaultShape::CorruptPublish => {
+                    (commit_seen == Some(entry.nth)).then_some(Verdict::Corrupt)
+                }
                 FaultShape::FlipByteOnRead { at } => {
                     (call == Call::Read && seen == entry.nth).then_some(Verdict::Flip(*at))
                 }
@@ -189,7 +207,10 @@ impl FaultHandle {
     pub fn push_in(&self, op: StoreOp, ahead: u32, shape: FaultShape) {
         let mut state = lock(&self.state);
         let base = match shape {
-            FaultShape::ErrorAfterPublish(_) | FaultShape::SizeMismatch => state.commits,
+            FaultShape::ErrorAfterPublish(_)
+            | FaultShape::SizeMismatch
+            | FaultShape::ChecksumMismatch
+            | FaultShape::CorruptPublish => state.commits,
             FaultShape::Error(_) | FaultShape::FlipByteOnRead { .. } | FaultShape::Rate { .. } => {
                 *state.count(op)
             }
@@ -225,6 +246,7 @@ pub struct Faults<S> {
     inner: S,
     state: Arc<Mutex<FaultState>>,
     stage: Option<StageHandle>,
+    raw: Option<MemStore>,
 }
 
 impl<S> Faults<S> {
@@ -253,7 +275,16 @@ impl<S> Faults<S> {
             inner,
             state: Arc::new(Mutex::new(state)),
             stage: None,
+            raw: None,
         }
+    }
+
+    /// Lets [`FaultShape::CorruptPublish`] change the bytes of an object it
+    /// published, through a handle to the store under the wrappers.
+    #[must_use]
+    pub fn corrupting_through(mut self, raw: MemStore) -> Self {
+        self.raw = Some(raw);
+        self
     }
 
     /// Marks a key volatile in `stage` whenever a commit publishes and then
@@ -349,6 +380,7 @@ impl<S: ObjectStore> ObjectStore for Faults<S> {
             wrote: 0,
             state: Arc::clone(&self.state),
             stage: self.stage.clone(),
+            raw: self.raw.clone(),
         })
     }
 
@@ -368,6 +400,31 @@ pub struct FaultsUpload<U> {
     wrote: u64,
     state: Arc<Mutex<FaultState>>,
     stage: Option<StageHandle>,
+    raw: Option<MemStore>,
+}
+
+fn checksum_mismatch(key: FileKey) -> StoreError {
+    StoreError::Corrupt {
+        key: Some(key),
+        cause: CorruptCause::ChecksumMismatch { part: None },
+    }
+}
+
+/// Changes one byte in the middle of the published object, keeping its size
+/// and its stamp.
+async fn damage(raw: &MemStore, info: &FileInfo) -> Result<(), StoreError> {
+    let mut bytes = read_all(raw, &info.key).await?;
+    let middle = bytes.len() / 2;
+    if let Some(byte) = bytes.get_mut(middle) {
+        *byte ^= 0xff;
+    }
+    let at = info
+        .exact_stamp()
+        .map_or(Timestamp::from_unix_millis(0), |stamp| stamp.at());
+    let mut up = raw.begin_upload(&info.key, at).await?;
+    up.write(&bytes).await?;
+    up.commit().await?;
+    Ok(())
 }
 
 impl<U: Upload> Upload for FaultsUpload<U> {
@@ -400,6 +457,17 @@ impl<U: Upload> Upload for FaultsUpload<U> {
                 let mut info = self.inner.commit().await?;
                 info.size = info.size.saturating_add(1);
                 Ok(info)
+            }
+            Verdict::Checksum => {
+                self.inner.commit().await?;
+                Err(checksum_mismatch(self.key))
+            }
+            Verdict::Corrupt => {
+                let info = self.inner.commit().await?;
+                if let Some(raw) = &self.raw {
+                    damage(raw, &info).await?;
+                }
+                Err(checksum_mismatch(self.key))
             }
             Verdict::Pass | Verdict::Flip(_) => self.inner.commit().await,
         }

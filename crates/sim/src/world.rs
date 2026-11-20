@@ -70,6 +70,11 @@ fn is_full_image(bytes: &[u8]) -> bool {
 
 /// The same file with no WAL origin in its header.
 fn without_origin(bytes: &[u8]) -> Option<Vec<u8>> {
+    rewritten(bytes, |fields| fields.wal = None)
+}
+
+/// The same pages under a header `edit` changed.
+fn rewritten(bytes: &[u8], edit: impl FnOnce(&mut lsr_ltx::HeaderFields)) -> Option<Vec<u8>> {
     use lsr_ltx::{Decoder, Encoder, Event, Header};
     let mut decoder = Decoder::new();
     let mut pages = Vec::new();
@@ -89,13 +94,31 @@ fn without_origin(bytes: &[u8]) -> Option<Vec<u8>> {
     }
     let verified = decoder.finish().ok()?;
     let mut fields = header?.fields();
-    fields.wal = None;
+    edit(&mut fields);
     let mut encoder = Encoder::new(Vec::new(), Header::new(fields).ok()?).ok()?;
     for (pgno, data) in &pages {
         encoder.write_page(*pgno, data).ok()?;
     }
     let (out, _) = encoder.finish(verified.trailer().post_apply()).ok()?;
     Some(out)
+}
+
+/// Every byte of `key`.
+fn read_all(store: &MemStore, key: &FileKey) -> Result<Vec<u8>, StoreError> {
+    use lsr_core::{ObjectStore, ReadLen};
+    let Some(chunk) = ReadLen::new(1 << 20) else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    loop {
+        let offset = u64::try_from(out.len()).unwrap_or(u64::MAX);
+        let part = block_on(store.read(key, offset, chunk))?;
+        let done = u64::try_from(part.len()).unwrap_or(0) < chunk.get();
+        out.extend_from_slice(&part);
+        if done {
+            return Ok(out);
+        }
+    }
 }
 
 /// A copy of the staging directory.
@@ -199,7 +222,8 @@ impl World {
             .volatile_on_late_error(stage_handle.clone());
         let remote_tap = Tap::new(remote_raw.clone());
         let remote_tap_log = remote_tap.log();
-        let remote = Faults::new(Yield::new(remote_tap), Vec::new(), seed.stream(3));
+        let remote = Faults::new(Yield::new(remote_tap), Vec::new(), seed.stream(3))
+            .corrupting_through(remote_raw.clone());
         let initial = PageImage::from_bytes(page_size, &sqlite.image());
         Self {
             seed,
@@ -449,6 +473,78 @@ impl World {
         Ok(listing.files.last().copied())
     }
 
+    /// Every level-0 file on the replica, oldest first, read around the
+    /// wrappers.
+    ///
+    /// # Errors
+    /// The store's error when it cannot list.
+    pub fn remote_level_zero(&self) -> Result<Vec<FileInfo>, StoreError> {
+        use lsr_core::{Level, ObjectStore, PageLimit};
+        let listing = block_on(self.remote_raw.list(Level::ZERO, None, PageLimit::MAX))?;
+        Ok(listing.files)
+    }
+
+    /// Deletes every replica file, at every level, that ends at the newest
+    /// transaction; false when the replica is empty.
+    ///
+    /// # Errors
+    /// The store's error when it cannot list or delete.
+    pub fn remote_roll_back(&self) -> Result<bool, StoreError> {
+        use lsr_core::{Level, ObjectStore, PageLimit};
+        let mut files = Vec::new();
+        for level in Level::ALL {
+            files.extend(block_on(self.remote_raw.list(level, None, PageLimit::MAX))?.files);
+        }
+        let Some(newest) = files.iter().map(|f| f.key.range().max()).max() else {
+            return Ok(false);
+        };
+        let keys: Vec<FileKey> = files
+            .iter()
+            .map(|f| f.key)
+            .filter(|key| key.range().max() == newest)
+            .collect();
+        self.remote_delete(&keys)?;
+        Ok(true)
+    }
+
+    /// Deletes these replica keys around the wrappers.
+    ///
+    /// # Errors
+    /// The store's error when it cannot delete.
+    pub fn remote_delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
+        use lsr_core::ObjectStore;
+        block_on(self.remote_raw.delete(keys))
+    }
+
+    /// Puts a level-0 file named one transaction past the replica's newest,
+    /// holding that file's pages.
+    ///
+    /// # Errors
+    /// The store's error when it cannot list or write.
+    pub fn remote_put_foreign(&self) -> Result<bool, StoreError> {
+        use lsr_core::{Level, ObjectStore};
+        use lsr_ltx::TxidRange;
+        let Some(newest) = self.remote_level_zero()?.last().map(|f| f.key) else {
+            return Ok(false);
+        };
+        let Some(next) = newest.range().max().next() else {
+            return Ok(false);
+        };
+        let key = FileKey::new(Level::ZERO, TxidRange::single(next));
+        // Another writer's file is a sound one: the same pages under the next
+        // transaction.
+        let Some(bytes) = rewritten(&read_all(&self.remote_raw, &newest)?, |fields| {
+            fields.txids = TxidRange::single(next);
+        }) else {
+            return Ok(false);
+        };
+        let at = lsr_core::Clock::now(&self.clock);
+        let mut up = block_on(self.remote_raw.begin_upload(&key, at))?;
+        block_on(lsr_core::Upload::write(&mut up, &bytes))?;
+        block_on(lsr_core::Upload::commit(up))?;
+        Ok(true)
+    }
+
     /// Deletes the newest level-0 file; false when there is none.
     ///
     /// # Errors
@@ -545,20 +641,7 @@ impl World {
     }
 
     fn read_staged(&self, key: &FileKey) -> Result<Vec<u8>, StoreError> {
-        use lsr_core::{ObjectStore, ReadLen};
-        let Some(chunk) = ReadLen::new(1 << 20) else {
-            return Ok(Vec::new());
-        };
-        let mut out = Vec::new();
-        loop {
-            let offset = u64::try_from(out.len()).unwrap_or(u64::MAX);
-            let part = block_on(self.staging_raw.read(key, offset, chunk))?;
-            let done = u64::try_from(part.len()).unwrap_or(0) < chunk.get();
-            out.extend_from_slice(&part);
-            if done {
-                return Ok(out);
-            }
-        }
+        read_all(&self.staging_raw, key)
     }
 
     fn write_staged(&self, info: &FileInfo, bytes: &[u8]) -> Result<(), StagedEditError> {

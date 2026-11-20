@@ -214,6 +214,7 @@ fn wal_index_faults() {
     assert_eq!(source.committed(), Err(SourceError::Busy));
     assert!(db.shm_end_inside_tx());
     assert_eq!(source.committed().unwrap().end().frame_count(), 1);
+    assert_eq!(source.committed().unwrap().end().frame_count(), 1);
     assert_eq!(source.committed().unwrap().end().frame_count(), 2);
 }
 

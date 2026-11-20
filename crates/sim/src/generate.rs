@@ -35,6 +35,20 @@ pub enum EnvFault {
     WipeStaging,
     /// The next call of an operation on our SQLite handles fails.
     Source(SourceOp, SourceError),
+    /// The next wal-index read finds its two header copies unequal, as when a
+    /// writer is mid-update. Scenarios only.
+    ShmMidUpdate,
+    /// The next wal-index read reports an end inside a transaction. Scenarios
+    /// only.
+    ShmEndInsideTx,
+    /// The last committed frame is overwritten between the scan that verified
+    /// it and the read of its page. Scenarios only.
+    OverwriteLastFrame,
+    /// The WAL file is unlinked while SQLite keeps writing it. Scenarios only.
+    UnlinkWal,
+    /// The next page count of the database reads zero: the file exists and
+    /// holds no page yet. Scenarios only.
+    EmptyDatabase,
 }
 
 /// One step of a history.
@@ -104,6 +118,8 @@ pub enum Op {
         /// Begin (otherwise end).
         begin: bool,
     },
+    /// A step on the replica from outside the engine. Scenarios only.
+    Remote(RemoteOp),
 }
 
 /// What a scenario does to the staging directory, the engine's own memory of
@@ -122,6 +138,24 @@ pub enum MetaOp {
     TruncateNewest,
     /// Rewrites the newest level-0 file with no WAL origin in its header.
     StripNewestOrigin,
+    /// Deletes every staged file while the engine runs: the staging directory
+    /// removed under it, with no restart.
+    DeleteAll,
+}
+
+/// A step on the replica from outside the engine. Scenarios only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RemoteOp {
+    /// Another writer puts a level-0 file one transaction past the newest:
+    /// the newest file's pages under the next transaction.
+    PutForeign,
+    /// The operator removes the newest level-0 file, which is what
+    /// [`RemoteOp::PutForeign`] put when it ran last.
+    RemoveForeign,
+    /// The bucket rolls back to an earlier version: every file, at every level,
+    /// that ends at the newest transaction is gone, and the replica
+    /// legitimately loses what the engine had acknowledged.
+    RollBack,
 }
 
 /// Damage to the WAL. Each one leaves the database as SQLite's rules now read
@@ -138,6 +172,8 @@ pub enum WalOp {
     RegrowSameSalts(u64),
     /// As [`WalOp::RegrowSameSalts`], with no commit mark left on the old frames.
     RegrowWithoutCommitMarks(u64),
+    /// Flips one bit in the page of the last committed frame.
+    FlipLastFrameBit,
 }
 
 /// How often each kind of operation is drawn, in relative weights.
