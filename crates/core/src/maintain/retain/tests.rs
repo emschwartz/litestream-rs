@@ -1042,8 +1042,21 @@ fn wake(
     match until {
         Some(wake) => {
             let at_wake = retention(inv, wake, cfg, published);
+            // The level-0 scan stops at the first young file, so a level-0
+            // file with no stamp behind it is not read until that file
+            // ages out. The wake is honest, and the hold it meets then
+            // carries no wake time, so the lane sleeps instead of spinning.
+            let unstamped_behind = matches!(
+                &at_wake,
+                Retention::Held(Hold::Unstamped { key })
+                    if key.level() == Level::ZERO
+                        && inv
+                            .files()
+                            .iter()
+                            .any(|f| f.key == *key && f.exact_stamp().unwrap().at().unix_millis() <= 0)
+            );
             assert!(
-                matches!(at_wake, Retention::Delete(_)),
+                matches!(at_wake, Retention::Delete(_)) || unstamped_behind,
                 "nothing at the wake time: {at_wake:?}"
             );
             if wake > now {
@@ -1633,4 +1646,59 @@ fn retention_never_deletes_on_last_modified() {
     }
     let (got, _) = lazy.run(now, &defaults());
     assert!(!matches!(got, Retention::Delete(_)), "{got:?}");
+}
+
+/// A young level-0 file ahead of an unstamped one: the unstamped file is
+/// behind the scan's stop, so the wake time is promised, and at it the hold
+/// has no wake time of its own (the lane sleeps, it does not spin).
+#[test]
+fn an_unstamped_file_behind_a_young_one_is_a_hold_at_the_wake_not_a_spin() {
+    let mut files = ladder();
+    files.retain(|f| f.key != key(1, 1, 10) && f.key != key(9, 1, 10) && f.key != key(9, 1, 20));
+    for f in &mut files {
+        if f.key.level() == Level::ZERO {
+            restamp(f, at(stamp_of(30) - 4 * HOUR));
+        }
+    }
+    let now = newest_stamp(&files) - HOUR;
+    for f in &mut files {
+        match (f.key.level() == Level::ZERO).then(|| f.key.range().max().get()) {
+            Some(25) => restamp(f, at(now - 1_000)),
+            Some(26) => restamp(f, at(0)),
+            _ => {}
+        }
+    }
+    let cfg = one_level();
+    let now = at(now);
+    let Retention::Wait { until: Some(wake) } = retention(&inv(files.clone()), now, &cfg, None)
+    else {
+        panic!(
+            "expected a wake time: {:?}",
+            retention(&inv(files.clone()), now, &cfg, None)
+        );
+    };
+    let at_wake = retention(&inv(files.clone()), wake, &cfg, None);
+    assert_eq!(
+        at_wake,
+        Retention::Held(Hold::Unstamped {
+            key: key(0, 26, 26)
+        })
+    );
+    let due = crate::maintain::tests::due_state(
+        &inv(files),
+        wake,
+        &cfg,
+        None,
+        &mut MaintainState::default(),
+    );
+    assert!(
+        matches!(
+            due,
+            Due::Wait {
+                until: None,
+                held: Some(_)
+            }
+        ),
+        "{due:?}"
+    );
 }
