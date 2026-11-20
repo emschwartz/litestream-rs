@@ -207,7 +207,14 @@ fn corrupt_l2_publish_then_power_loss() {
     run(scenario::corrupt_l2_publish_then_power_loss);
 }
 
+// The damaged snapshot is listed after the power loss; the read-back after a
+// boot (issue 1, item 1) deletes it, so restores no longer refuse on it.
 #[test]
 fn corrupt_l9_publish_then_power_loss() {
     run(scenario::corrupt_l9_publish_then_power_loss);
+}
+
+#[test]
+fn corrupt_l0_publish_then_power_loss() {
+    run(scenario::corrupt_l0_publish_then_power_loss);
 }

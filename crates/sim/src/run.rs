@@ -142,6 +142,9 @@ pub struct RunReport {
     /// Every commit and delete staging accepted, when the run was asked to
     /// record.
     pub staging_events: Vec<crate::store::TapEvent>,
+    /// The replica's objects a corrupt publish changed, when the run was
+    /// asked to record.
+    pub remote_damaged: Vec<lsr_core::FileKey>,
 }
 
 /// What a run may be told besides its seed.
@@ -980,6 +983,7 @@ pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure
     if opts.record {
         runner.report.remote_events = runner.w.remote_tap.events();
         runner.report.staging_events = runner.w.staging_tap.events();
+        runner.report.remote_damaged = runner.w.remote_faults.damaged();
     }
     Ok(runner.report)
 }
