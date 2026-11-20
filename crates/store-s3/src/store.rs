@@ -27,6 +27,7 @@ use crate::request::{HttpRequest, MAX_DELETE_KEYS, RequestBuilder, RequestError}
 use crate::response::{Head, parse_delete_failures, parse_head, parse_stamp_header};
 use crate::transport::{HttpResponse, Transport};
 use crate::upload::S3Upload;
+#[cfg(feature = "ureq")]
 use crate::ureq_transport::UreqTransport;
 
 /// What the stamps read so far found, for the event layer (this crate emits no
@@ -43,7 +44,14 @@ pub struct ListStats {
 }
 
 /// A replica on an S3-compatible bucket.
+#[cfg(feature = "ureq")]
 pub struct S3Store<T: Transport = UreqTransport> {
+    inner: Arc<Inner<T>>,
+}
+
+/// A replica on an S3-compatible bucket.
+#[cfg(not(feature = "ureq"))]
+pub struct S3Store<T: Transport> {
     inner: Arc<Inner<T>>,
 }
 
@@ -80,6 +88,7 @@ impl Clock for SystemClock {
     }
 }
 
+#[cfg(feature = "ureq")]
 impl S3Store<UreqTransport> {
     /// A store that talks to the configured endpoint over HTTP(S), signing
     /// with the wall clock.
@@ -88,11 +97,25 @@ impl S3Store<UreqTransport> {
     /// [`ConfigError`] when the endpoint cannot address the bucket.
     pub fn new(config: S3Config, credentials: S3Credentials) -> Result<Self, ConfigError> {
         let transport = UreqTransport::new(config.deadline());
-        Self::with_transport(config, credentials, transport, SystemClock)
+        Self::over(config, credentials, transport)
     }
 }
 
 impl<T: Transport> S3Store<T> {
+    /// A store over `transport` (for example a
+    /// [`ReqwestTransport`](crate::ReqwestTransport) under the `reqwest`
+    /// feature), signing with the wall clock.
+    ///
+    /// # Errors
+    /// [`ConfigError`] when the endpoint cannot address the bucket.
+    pub fn over(
+        config: S3Config,
+        credentials: S3Credentials,
+        transport: T,
+    ) -> Result<Self, ConfigError> {
+        Self::with_transport(config, credentials, transport, SystemClock)
+    }
+
     /// A store over any transport and clock.
     ///
     /// # Errors

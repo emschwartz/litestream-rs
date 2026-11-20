@@ -2,7 +2,7 @@
 default: check
 
 # The land gate: format, lints, tests. A branch lands only when this is green.
-check: fmt-check clippy test doctest
+check: fmt-check clippy test doctest features
 
 fmt-check:
     cargo fmt --all -- --check
@@ -12,6 +12,14 @@ clippy:
 
 test:
     cargo nextest run --workspace --locked --no-tests=warn
+
+# The S3 store's HTTP clients (docs/plans/phase-1-reading.md, ruling F2 as amended):
+# each builds alone, all build together, and reqwest's own tests run (ureq's run in `test`).
+features:
+    cargo clippy -p lsr-store-s3 --no-default-features --lib --locked -- -D warnings
+    cargo clippy -p lsr-store-s3 --no-default-features --features reqwest --lib --locked -- -D warnings
+    cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+    cargo nextest run -p lsr-store-s3 --features reqwest --lib --locked
 
 # nextest does not run doctests, and the compile-fail proofs (a proof token is not Clone) live there.
 doctest:
@@ -94,6 +102,8 @@ test-s3: minio-up
     if ./scripts/minio.sh running; then
         LSR_MINIO_ENDPOINT="http://127.0.0.1:${LSR_MINIO_PORT:-9000}" \
             cargo nextest run -p lsr-store-s3 --test minio --locked --no-fail-fast
+        LSR_MINIO_ENDPOINT="http://127.0.0.1:${LSR_MINIO_PORT:-9000}" LSR_S3_TRANSPORT=reqwest \
+            cargo nextest run -p lsr-store-s3 --features reqwest --test minio --locked --no-fail-fast
         LSR_MINIO_ENDPOINT="http://127.0.0.1:${LSR_MINIO_PORT:-9000}" \
             cargo nextest run -p lsr-cli --test s3 --locked --no-fail-fast
     else
@@ -122,7 +132,8 @@ test-tigris:
     export LSR_TIGRIS_PREFIX="8t/$(date -u +%F)-$(openssl rand -hex 4)"
     echo "test-tigris: bucket $LSR_TIGRIS_BUCKET prefix $LSR_TIGRIS_PREFIX" >&2
     status=0
-    cargo nextest run -p lsr-store-s3 --test tigris --run-ignored only --no-capture --locked --no-fail-fast || status=$?
+    # LSR_S3_TRANSPORT=reqwest runs the same tests over the reqwest client.
+    cargo nextest run -p lsr-store-s3 --features reqwest --test tigris --run-ignored only --no-capture --locked --no-fail-fast || status=$?
     echo "test-tigris: delete $LSR_TIGRIS_BUCKET/$LSR_TIGRIS_PREFIX/ with the aws CLI when done (see docs/spikes.md)" >&2
     exit $status
 

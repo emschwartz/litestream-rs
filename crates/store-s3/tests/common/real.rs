@@ -127,13 +127,24 @@ pub struct Counts {
 }
 
 pub struct Counting {
-    inner: UreqTransport,
+    inner: Box<dyn Transport>,
     counts: Arc<Counts>,
 }
 
 impl Counting {
-    pub fn new(inner: UreqTransport, counts: Arc<Counts>) -> Self {
+    pub fn new(inner: Box<dyn Transport>, counts: Arc<Counts>) -> Self {
         Self { inner, counts }
+    }
+}
+
+/// The store's client: ureq, or reqwest when `LSR_S3_TRANSPORT=reqwest` (needs
+/// the `reqwest` feature), so the same suite runs over both.
+fn store_transport(deadline: std::time::Duration) -> Box<dyn Transport> {
+    match std::env::var("LSR_S3_TRANSPORT").as_deref() {
+        #[cfg(feature = "reqwest")]
+        Ok("reqwest") => Box::new(lsr_store_s3::ReqwestTransport::new(deadline).unwrap()),
+        Ok("ureq") | Err(_) => Box::new(UreqTransport::new(deadline)),
+        Ok(other) => panic!("LSR_S3_TRANSPORT={other}: ureq, or reqwest with the feature"),
     }
 }
 
@@ -218,7 +229,12 @@ impl RealHarness {
         )
         .with_region(Region::new(&server.region).unwrap());
         let counts = Arc::new(Counts::default());
-        let transport = Counting::new(UreqTransport::new(config.deadline()), Arc::clone(&counts));
+        eprintln!(
+            "{}-transport: {}",
+            server.name,
+            std::env::var("LSR_S3_TRANSPORT").unwrap_or_else(|_| "ureq".into())
+        );
+        let transport = Counting::new(store_transport(config.deadline()), Arc::clone(&counts));
         let store = S3Store::with_transport(
             config.clone(),
             self_credentials(server),
@@ -251,7 +267,7 @@ impl RealHarness {
     /// A request built by the store's builder, sent through a plain client, counted.
     pub fn send(&self, request: HttpRequest) -> HttpResponse {
         let transport = Counting::new(
-            UreqTransport::new(self.config.deadline()),
+            store_transport(self.config.deadline()),
             Arc::clone(&self.counts),
         );
         transport.send(request).unwrap()

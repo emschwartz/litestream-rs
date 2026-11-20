@@ -14,12 +14,15 @@ mod list;
 mod multipart;
 mod orphans;
 mod request;
+#[cfg(feature = "reqwest")]
+mod reqwest_transport;
 mod response;
 #[cfg(test)]
 mod secrets;
 mod store;
 mod transport;
 mod upload;
+#[cfg(feature = "ureq")]
 mod ureq_transport;
 
 pub use classify::{S3Code, classify, classify_transport, is_range_past_end};
@@ -36,6 +39,8 @@ pub use request::{
     HttpRequest, MAX_DELETE_KEYS, Method, RequestBuilder, RequestError, UploadId, level_prefix,
     object_key, range_header, start_after,
 };
+#[cfg(feature = "reqwest")]
+pub use reqwest_transport::{ReqwestSetupError, ReqwestTransport};
 pub use response::{
     EtagCheck, Head, ListPage, ListedFile, ResponseError, check_etag, hex, parse_complete,
     parse_create, parse_delete_failures, parse_head, parse_list, quoted_md5,
@@ -43,4 +48,5 @@ pub use response::{
 pub use store::{ListStats, S3Store};
 pub use transport::{HttpResponse, Transport, TransportError};
 pub use upload::S3Upload;
+#[cfg(feature = "ureq")]
 pub use ureq_transport::UreqTransport;

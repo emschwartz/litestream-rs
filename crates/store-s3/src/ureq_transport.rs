@@ -7,7 +7,7 @@
 //! retried, and [`timeout_global`] bounds each request end to end. TLS is
 //! rustls with Mozilla's roots (ruling F4); ureq speaks HTTP/1.1 only.
 //!
-//! Response bodies are read whole but bounded: a body over [`MAX_BODY`] is an
+//! Response bodies are read whole but bounded: a body over `MAX_BODY` is an
 //! error, so a server that ignores a Range header cannot make a read allocate
 //! an object's size.
 
@@ -17,11 +17,7 @@ use std::time::Duration;
 use ureq::http;
 
 use crate::request::{HttpRequest, Method};
-use crate::transport::{HttpResponse, Transport, TransportError};
-
-/// The largest response body read: twice the largest ranged read (a test pins
-/// the relation), which is room for a listing page or a delete result and no more.
-const MAX_BODY: u64 = 33_554_432;
+use crate::transport::{HttpResponse, MAX_BODY, Transport, TransportError, map_io};
 
 /// A [`Transport`] over one shared connection pool.
 #[derive(Clone)]
@@ -132,59 +128,13 @@ fn map_error(err: &ureq::Error) -> TransportError {
     }
 }
 
-fn map_io(kind: io::ErrorKind) -> TransportError {
-    if matches!(kind, io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock) {
-        TransportError::Timeout
-    } else if matches!(
-        kind,
-        io::ErrorKind::ConnectionReset
-            | io::ErrorKind::ConnectionAborted
-            | io::ErrorKind::BrokenPipe
-            | io::ErrorKind::UnexpectedEof
-    ) {
-        TransportError::ConnectionReset
-    } else if matches!(
-        kind,
-        io::ErrorKind::ConnectionRefused
-            | io::ErrorKind::NotConnected
-            | io::ErrorKind::AddrNotAvailable
-    ) {
-        TransportError::Connect
-    } else {
-        TransportError::Io(kind)
-    }
-}
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
 
-    use lsr_core::ReadLen;
-
     use super::*;
-
-    #[test]
-    fn body_cap_is_twice_the_largest_read() {
-        assert_eq!(MAX_BODY, 2 * u64::from(ReadLen::MAX_RAW));
-    }
-
-    #[test]
-    fn io_kinds_map_to_transport_kinds() {
-        assert_eq!(map_io(io::ErrorKind::TimedOut), TransportError::Timeout);
-        assert_eq!(
-            map_io(io::ErrorKind::BrokenPipe),
-            TransportError::ConnectionReset
-        );
-        assert_eq!(
-            map_io(io::ErrorKind::ConnectionRefused),
-            TransportError::Connect
-        );
-        assert_eq!(
-            map_io(io::ErrorKind::PermissionDenied),
-            TransportError::Io(io::ErrorKind::PermissionDenied)
-        );
-    }
 
     fn serve_once(reply: &'static [u8]) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");

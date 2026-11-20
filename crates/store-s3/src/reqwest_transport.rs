@@ -1,0 +1,455 @@
+//! The [`Transport`] over `reqwest`, for hosts that already build it (feature `reqwest`).
+//!
+//! Three constructors, by how much of the host's stack to share:
+//! - [`ReqwestTransport::new`]: the store's own client and its own
+//!   single-threaded Tokio runtime. Nothing is shared.
+//! - [`ReqwestTransport::with_client`]: the host's `reqwest::Client` (its pool,
+//!   proxy and TLS roots), driven on the store's own runtime.
+//! - [`ReqwestTransport::with_client_on`]: the host's client on the host's
+//!   runtime, through a `tokio::runtime::Handle`.
+//!
+//! The store is blocking (it runs on its replicator thread), so each request
+//! is driven to completion with `block_on`. Called from inside a Tokio runtime,
+//! where `block_on` panics, the request runs on a scoped thread instead: slower,
+//! never a panic.
+//!
+//! The policy matches [`UreqTransport`](crate::UreqTransport): a non-2xx status
+//! is a response, nothing is retried, each request is bounded by the deadline
+//! end to end (reqwest's per-request timeout, which covers the body), and a
+//! body over `MAX_BODY` is an error. The own
+//! client follows no redirects. A host client keeps its own redirect policy;
+//! reqwest's default follows up to ten, and a presigned URL redirected to
+//! another host fails its signature there, so the store sees a 403 instead of
+//! the redirect. Build the client with `redirect(Policy::none())` to see the
+//! redirect itself.
+//!
+//! TLS is reqwest's: with this crate's feature set, rustls with the platform's
+//! certificate verifier, so system and corporate roots are trusted where
+//! ureq's Mozilla roots (ruling F4) are not.
+
+use std::io;
+use std::time::Duration;
+
+use tokio::runtime::{Builder, Handle, Runtime};
+
+use crate::request::{HttpRequest, Method};
+use crate::transport::{HttpResponse, Transport, TransportError};
+use crate::transport::{MAX_BODY, map_io};
+
+/// Why a [`ReqwestTransport`] could not be built.
+#[derive(Debug, thiserror::Error)]
+pub enum ReqwestSetupError {
+    /// The client could not be built (TLS backend initialisation).
+    #[error("http client could not be built")]
+    Client,
+    /// The store's own runtime could not be started.
+    #[error("tokio runtime could not be started ({0})")]
+    Runtime(io::ErrorKind),
+}
+
+/// Where requests are driven.
+enum Driver {
+    /// A single-threaded runtime the transport owns.
+    Own(Runtime),
+    /// The host's runtime.
+    Host(Handle),
+}
+
+impl Driver {
+    fn own() -> Result<Self, ReqwestSetupError> {
+        Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map(Self::Own)
+            .map_err(|err| ReqwestSetupError::Runtime(err.kind()))
+    }
+
+    /// Drives `future` to completion. A single-threaded runtime's I/O and timers
+    /// run only under `Runtime::block_on`, never `Handle::block_on`, so the own
+    /// runtime is driven through itself.
+    fn block_on<F: std::future::Future>(&self, future: F) -> F::Output {
+        match self {
+            Self::Own(runtime) => runtime.block_on(future),
+            Self::Host(handle) => handle.block_on(future),
+        }
+    }
+}
+
+/// A [`Transport`] over a `reqwest::Client`.
+pub struct ReqwestTransport {
+    client: reqwest::Client,
+    driver: Driver,
+    deadline: Duration,
+}
+
+impl std::fmt::Debug for ReqwestTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let driver = match self.driver {
+            Driver::Own(_) => "own runtime",
+            Driver::Host(_) => "host runtime",
+        };
+        f.debug_struct("ReqwestTransport")
+            .field("driver", &driver)
+            .field("deadline", &self.deadline)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ReqwestTransport {
+    /// The store's own client and runtime; every request ends within `deadline`.
+    ///
+    /// # Errors
+    /// [`ReqwestSetupError`] when the client or the runtime cannot be built.
+    pub fn new(deadline: Duration) -> Result<Self, ReqwestSetupError> {
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|_build| ReqwestSetupError::Client)?;
+        Ok(Self {
+            client,
+            driver: Driver::own()?,
+            deadline,
+        })
+    }
+
+    /// The host's client, on the store's own runtime.
+    ///
+    /// # Errors
+    /// [`ReqwestSetupError::Runtime`] when the runtime cannot be started.
+    pub fn with_client(
+        client: reqwest::Client,
+        deadline: Duration,
+    ) -> Result<Self, ReqwestSetupError> {
+        Ok(Self {
+            client,
+            driver: Driver::own()?,
+            deadline,
+        })
+    }
+
+    /// The host's client on the host's runtime.
+    #[must_use]
+    pub fn with_client_on(client: reqwest::Client, runtime: Handle, deadline: Duration) -> Self {
+        Self {
+            client,
+            driver: Driver::Host(runtime),
+            deadline,
+        }
+    }
+
+    fn build(&self, request: &HttpRequest) -> reqwest::RequestBuilder {
+        let mut builder = self
+            .client
+            .request(method(request.method()), request.url().as_str())
+            .timeout(self.deadline)
+            .body(request.body().to_vec());
+        // Every header is sent as signed, `content-length` included: hyper keeps a
+        // given length (it equals the body's), and without it an empty PUT goes
+        // out with no length at all, which Tigris refuses with 411.
+        for (name, value) in request.headers() {
+            builder = builder.header(*name, value.as_str());
+        }
+        builder
+    }
+}
+
+fn method(method: Method) -> reqwest::Method {
+    match method {
+        Method::Get => reqwest::Method::GET,
+        Method::Head => reqwest::Method::HEAD,
+        Method::Put => reqwest::Method::PUT,
+        Method::Post => reqwest::Method::POST,
+        Method::Delete => reqwest::Method::DELETE,
+    }
+}
+
+impl Transport for ReqwestTransport {
+    fn send(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
+        let head_only = request.method() == Method::Head;
+        let exchange = exchange(self.build(&request), head_only);
+        if Handle::try_current().is_ok() {
+            // `block_on` inside a runtime panics; a fresh thread is outside every runtime.
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| self.driver.block_on(exchange))
+                    .join()
+                    .unwrap_or(Err(TransportError::Io(io::ErrorKind::Other)))
+            })
+        } else {
+            self.driver.block_on(exchange)
+        }
+    }
+}
+
+async fn exchange(
+    builder: reqwest::RequestBuilder,
+    head_only: bool,
+) -> Result<HttpResponse, TransportError> {
+    let mut response = builder.send().await.map_err(|err| map_error(&err))?;
+    let status = response.status().as_u16();
+    let headers: Vec<(String, String)> = response
+        .headers()
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_owned(),
+                String::from_utf8_lossy(value.as_bytes()).into_owned(),
+            )
+        })
+        .collect();
+    let declared = response.content_length();
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|err| map_error(&err))? {
+        body.extend_from_slice(&chunk);
+        if u64::try_from(body.len()).map_or(true, |len| len > MAX_BODY) {
+            return Err(TransportError::Io(io::ErrorKind::InvalidData));
+        }
+    }
+    let complete = head_only || declared.is_none_or(|n| u64::try_from(body.len()) == Ok(n));
+    Ok(HttpResponse::new(status, headers, body, complete))
+}
+
+/// Maps a reqwest failure to a kind; the error's own text carries the URL.
+fn map_error(err: &reqwest::Error) -> TransportError {
+    if err.is_timeout() {
+        return TransportError::Timeout;
+    }
+    if is_tls(err) {
+        return TransportError::Tls;
+    }
+    if err.is_connect() {
+        return TransportError::Connect;
+    }
+    io_kind(err).map_or(TransportError::Io(io::ErrorKind::Other), map_io)
+}
+
+/// The next error down: an `io::Error`'s wrapped error itself (its `source`
+/// skips past it), else the error's `source`.
+fn below<'a>(
+    err: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a (dyn std::error::Error + 'static)> {
+    match err.downcast_ref::<io::Error>().and_then(io::Error::get_ref) {
+        Some(inner) => Some(inner),
+        None => err.source(),
+    }
+}
+
+/// Whether a rustls error is anywhere in the chain (hyper-rustls nests it in two
+/// `io::Error`s), so a certificate failure is `Tls` here as it is under ureq.
+fn is_tls(err: &reqwest::Error) -> bool {
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(here) = current {
+        if here.downcast_ref::<rustls::Error>().is_some() {
+            return true;
+        }
+        current = below(here);
+    }
+    false
+}
+
+/// The kind of the innermost `io::Error` in the chain.
+fn io_kind(err: &reqwest::Error) -> Option<io::ErrorKind> {
+    let mut kind = None;
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(here) = current {
+        if let Some(io_err) = here.downcast_ref::<io::Error>() {
+            kind = Some(io_err.kind());
+        }
+        current = below(here);
+    }
+    kind
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    use url::Url;
+
+    use super::*;
+
+    /// Serves one connection: reads the request head, writes `reply`, closes.
+    fn serve_once(reply: &'static [u8]) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buf = [0_u8; 4096];
+            let _read = stream.read(&mut buf);
+            let _wrote = stream.write_all(reply);
+        });
+        format!("http://{addr}/key")
+    }
+
+    /// Accepts one connection and holds it open without answering.
+    fn serve_silence() -> (String, std::sync::mpsc::Sender<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let (done, wait) = std::sync::mpsc::channel::<()>();
+        thread::spawn(move || {
+            let (_stream, _) = listener.accept().expect("accept");
+            let _released = wait.recv();
+        });
+        (format!("http://{addr}/key"), done)
+    }
+
+    fn request(method: Method, url: &str) -> HttpRequest {
+        HttpRequest::for_test(
+            method,
+            Url::parse(url).expect("url"),
+            vec![
+                ("x-test", "1".to_owned()),
+                ("content-length", "0".to_owned()),
+            ],
+        )
+    }
+
+    fn own() -> ReqwestTransport {
+        ReqwestTransport::new(Duration::from_secs(5)).expect("transport")
+    }
+
+    const OK: &[u8] =
+        b"HTTP/1.1 200 OK\r\netag: \"abc\"\r\ncontent-length: 5\r\nconnection: close\r\n\r\nhello";
+
+    #[test]
+    fn a_response_comes_back_whole() {
+        let response = own()
+            .send(request(Method::Get, &serve_once(OK)))
+            .expect("send");
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.header("ETag"), Some("\"abc\""));
+        assert_eq!(response.body(), b"hello");
+        assert!(response.body_complete());
+    }
+
+    #[test]
+    fn an_error_status_is_a_response() {
+        let url = serve_once(
+            b"HTTP/1.1 503 Slow Down\r\nretry-after: 2\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+        );
+        let response = own().send(request(Method::Get, &url)).expect("send");
+        assert_eq!(response.status(), 503);
+        assert_eq!(response.header("retry-after"), Some("2"));
+    }
+
+    #[test]
+    fn a_redirect_is_a_response_not_followed() {
+        let url = serve_once(
+            b"HTTP/1.1 307 Temporary Redirect\r\nlocation: http://127.0.0.1:1/\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+        );
+        let response = own().send(request(Method::Get, &url)).expect("send");
+        assert_eq!(response.status(), 307);
+    }
+
+    #[test]
+    fn a_head_is_complete_without_a_body() {
+        let url =
+            serve_once(b"HTTP/1.1 200 OK\r\ncontent-length: 1234\r\nconnection: close\r\n\r\n");
+        let response = own().send(request(Method::Head, &url)).expect("send");
+        assert!(response.body_complete());
+        assert!(response.body().is_empty());
+    }
+
+    #[test]
+    fn an_empty_put_sends_its_length() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let (head, seen) = std::sync::mpsc::channel::<String>();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buf = [0_u8; 4096];
+            let read = stream.read(&mut buf).unwrap_or(0);
+            let _sent = head.send(String::from_utf8_lossy(&buf[..read]).to_ascii_lowercase());
+            let _wrote = stream.write_all(OK);
+        });
+        let response = own()
+            .send(request(Method::Put, &format!("http://{addr}/key")))
+            .expect("send");
+        assert_eq!(response.status(), 200);
+        let head = seen.recv().expect("request head");
+        assert_eq!(head.matches("content-length: 0\r\n").count(), 1, "{head}");
+    }
+
+    #[test]
+    fn a_connection_closed_early_is_an_error() {
+        let _closed = own()
+            .send(request(Method::Get, &serve_once(b"")))
+            .unwrap_err();
+    }
+
+    #[test]
+    fn a_truncated_body_is_never_a_whole_response() {
+        let url =
+            serve_once(b"HTTP/1.1 200 OK\r\ncontent-length: 10\r\nconnection: close\r\n\r\nabc");
+        match own().send(request(Method::Get, &url)) {
+            Ok(response) => assert!(!response.body_complete()),
+            Err(err) => assert!(
+                matches!(err, TransportError::ConnectionReset | TransportError::Io(_)),
+                "{err:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn the_deadline_bounds_a_silent_server() {
+        let (url, release) = serve_silence();
+        let transport = ReqwestTransport::new(Duration::from_millis(200)).expect("transport");
+        assert_eq!(
+            transport.send(request(Method::Get, &url)).err(),
+            Some(TransportError::Timeout)
+        );
+        let _released = release.send(());
+    }
+
+    #[test]
+    fn a_tls_handshake_with_a_plain_server_is_tls() {
+        let url = serve_once(OK).replacen("http://", "https://", 1);
+        assert_eq!(
+            own().send(request(Method::Get, &url)).err(),
+            Some(TransportError::Tls)
+        );
+    }
+
+    #[test]
+    fn a_host_client_on_its_own_runtime() {
+        let client = reqwest::Client::new();
+        let transport =
+            ReqwestTransport::with_client(client, Duration::from_secs(5)).expect("transport");
+        let response = transport
+            .send(request(Method::Get, &serve_once(OK)))
+            .expect("send");
+        assert_eq!(response.body(), b"hello");
+    }
+
+    #[test]
+    fn a_host_client_on_the_host_runtime() {
+        let runtime = Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let transport = ReqwestTransport::with_client_on(
+            reqwest::Client::new(),
+            runtime.handle().clone(),
+            Duration::from_secs(5),
+        );
+        let response = transport
+            .send(request(Method::Get, &serve_once(OK)))
+            .expect("send");
+        assert_eq!(response.body(), b"hello");
+    }
+
+    #[test]
+    fn a_call_from_inside_a_runtime_does_not_panic() {
+        let runtime = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let transport = own();
+        let url = serve_once(OK);
+        let response = runtime.block_on(async { transport.send(request(Method::Get, &url)) });
+        assert_eq!(response.expect("send").body(), b"hello");
+    }
+}

@@ -68,6 +68,18 @@ pub struct HttpRequest {
 }
 
 impl HttpRequest {
+    /// A request to `url` with these headers and no body, for transport tests.
+    #[cfg(all(test, feature = "reqwest"))]
+    pub(crate) fn for_test(method: Method, url: Url, headers: Vec<(&'static str, String)>) -> Self {
+        Self {
+            method,
+            url,
+            headers,
+            body: Vec::new(),
+            md5: None,
+        }
+    }
+
     /// The method.
     #[must_use]
     pub fn method(&self) -> Method {

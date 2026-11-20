@@ -8,8 +8,14 @@ license.workspace = true
 publish.workspace = true
 
 [features]
+default = ["ureq"]
 # The in-memory S3 (FakeS3), the recorded-fault layer and test-only request edits.
 testing = []
+# HTTP clients, any combination: `UreqTransport` (blocking, no runtime; the
+# default and what `S3Store::new` uses) and `ReqwestTransport` (for hosts that
+# already build reqwest and Tokio).
+ureq = ["dep:ureq"]
+reqwest = ["dep:reqwest", "dep:rustls", "dep:tokio"]
 
 [dependencies]
 lsr-core.workspace = true
@@ -20,11 +26,17 @@ md-5.workspace = true
 percent-encoding.workspace = true
 rusty-s3.workspace = true
 thiserror.workspace = true
-ureq.workspace = true
+ureq = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+# Only to recognise a TLS failure inside reqwest's error chain.
+rustls = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
 url.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+# A host runtime with worker threads, for the reqwest transport's tests.
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 lsr-core = { workspace = true, features = ["testing"] }
 # Integration tests need FakeS3 and the fault layer, which sit behind the feature.
 lsr-store-s3 = { workspace = true, features = ["testing"] }
