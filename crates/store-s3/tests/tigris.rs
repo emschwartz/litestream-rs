@@ -570,4 +570,174 @@ mod tigris {
         let statuses = h.counts.statuses.lock().unwrap().clone();
         eprintln!("OBS item11 statuses seen {statuses:?}; response header names {names:?}");
     }
+
+    /// The object's bytes by a raw GET, `None` when it is absent.
+    fn raw_body(h: &RealHarness, object: &str) -> Option<Vec<u8>> {
+        let got = h.raw("GET", Some(object), &[], &[], b"");
+        match got.status {
+            200 => Some(got.body),
+            404 => None,
+            other => panic!("GET {other}: {}", h.dump(&got)),
+        }
+    }
+
+    /// A raw CompleteMultipartUpload of one part, with `headers` signed.
+    fn raw_complete(
+        h: &RealHarness,
+        object: &str,
+        upload: &UploadId,
+        etag: &str,
+        headers: &[(&str, &str)],
+    ) -> real::Raw {
+        let xml = format!(
+            "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber>\
+             <ETag>{etag}</ETag></Part></CompleteMultipartUpload>"
+        );
+        h.raw(
+            "POST",
+            Some(object),
+            &[("uploadId", upload.as_str())],
+            headers,
+            xml.as_bytes(),
+        )
+    }
+
+    // G4 (docs/proposals/beyond-go.md): what a conditional write does on Tigris.
+    // Measured only; the store sends no conditional header (D6).
+
+    #[test]
+    #[ignore = "needs a Tigris bucket (just test-tigris)"]
+    fn g4_if_none_match_on_put() {
+        let h = h();
+        let object = h.object(&h.key(0, 1, 1));
+        let star = [("if-none-match", "*")];
+        let first = h.raw("PUT", Some(&object), &[], &star, b"first");
+        obs(&h, "G4 PUT If-None-Match:* to a new key", &first);
+        let second = h.raw("PUT", Some(&object), &[], &star, b"second");
+        obs(&h, "G4 PUT If-None-Match:* to an existing key", &second);
+        let after = raw_body(&h, &object);
+        eprintln!(
+            "OBS G4 object after both: {:?}",
+            after.as_deref().map(String::from_utf8_lossy)
+        );
+        assert_eq!(first.status, 200, "G4: a new key is written");
+        assert_eq!(second.status, 412, "G4: an existing key refuses");
+        assert_eq!(second.tag("Code").as_deref(), Some("PreconditionFailed"));
+        assert_eq!(after.as_deref(), Some(&b"first"[..]), "G4: unchanged");
+    }
+
+    #[test]
+    #[ignore = "needs a Tigris bucket (just test-tigris)"]
+    fn g4_if_none_match_on_complete_multipart() {
+        let h = h();
+        let key = h.key(0, 1, 1);
+        let object = h.object(&key);
+        let star = [("if-none-match", "*")];
+        let a = start_multipart(&h, &key, Timestamp::from_unix_millis(1));
+        let ea = put_part(&h, &key, &a, 1, b"AAAA".to_vec());
+        let b = start_multipart(&h, &key, Timestamp::from_unix_millis(2));
+        let eb = put_part(&h, &key, &b, 1, b"BBBB".to_vec());
+        let first = raw_complete(&h, &object, &a, &ea, &star);
+        obs(&h, "G4 Complete If-None-Match:* to a new key", &first);
+        let second = raw_complete(&h, &object, &b, &eb, &star);
+        obs(
+            &h,
+            "G4 Complete If-None-Match:* to an existing key",
+            &second,
+        );
+        let after = raw_body(&h, &object);
+        eprintln!(
+            "OBS G4 object after both: {:?}",
+            after.as_deref().map(String::from_utf8_lossy)
+        );
+        let open = h.open_uploads();
+        eprintln!("OBS G4 open uploads after the refused complete: {open}");
+        let abort = h.send(
+            h.builder()
+                .abort_multipart(WallClock.now(), &key, &b)
+                .unwrap(),
+        );
+        obs_response("G4 abort of the refused upload", &abort);
+        let put = h.raw("PUT", Some(&h.object(&h.key(0, 2, 2))), &[], &[], b"x");
+        let c = start_multipart(&h, &h.key(0, 2, 2), Timestamp::from_unix_millis(3));
+        let ec = put_part(&h, &h.key(0, 2, 2), &c, 1, b"CCCC".to_vec());
+        let over_put = raw_complete(&h, &h.object(&h.key(0, 2, 2)), &c, &ec, &star);
+        obs(
+            &h,
+            "G4 Complete If-None-Match:* over a single PUT",
+            &over_put,
+        );
+        let _ = h.send(
+            h.builder()
+                .abort_multipart(WallClock.now(), &h.key(0, 2, 2), &c)
+                .unwrap(),
+        );
+        assert_eq!(put.status, 200);
+        assert_eq!(first.status, 200, "G4: a new key completes");
+        assert!(
+            first.tag("Code").is_none(),
+            "G4: no error document in the 200"
+        );
+        assert_eq!(
+            second.status, 412,
+            "G4: an existing key refuses the complete"
+        );
+        assert_eq!(second.tag("Code").as_deref(), Some("PreconditionFailed"));
+        assert_eq!(after.as_deref(), Some(&b"AAAA"[..]), "G4: unchanged");
+        assert_eq!(
+            over_put.status, 412,
+            "G4: a PUT's object counts as existing"
+        );
+    }
+
+    #[test]
+    #[ignore = "needs a Tigris bucket (just test-tigris)"]
+    fn g4_if_match_on_put() {
+        let h = h();
+        let object = h.object(&h.key(0, 1, 1));
+        let v1 = h.raw("PUT", Some(&object), &[], &[], b"v1");
+        let e1 = v1.header("etag").unwrap().to_owned();
+        let right = h.raw(
+            "PUT",
+            Some(&object),
+            &[],
+            &[("if-match", e1.as_str())],
+            b"v2",
+        );
+        obs(&h, "G4 PUT If-Match with the current ETag", &right);
+        let after_right = raw_body(&h, &object);
+        let wrong = h.raw(
+            "PUT",
+            Some(&object),
+            &[],
+            &[("if-match", e1.as_str())],
+            b"v3",
+        );
+        obs(&h, "G4 PUT If-Match with a stale ETag", &wrong);
+        let after_wrong = raw_body(&h, &object);
+        let missing = h.object(&h.key(0, 2, 2));
+        let absent = h.raw(
+            "PUT",
+            Some(&missing),
+            &[],
+            &[("if-match", e1.as_str())],
+            b"v4",
+        );
+        obs(&h, "G4 PUT If-Match to an absent key", &absent);
+        let after_absent = raw_body(&h, &missing);
+        eprintln!(
+            "OBS G4 after right {:?}, after wrong {:?}, absent key {:?}",
+            after_right.as_deref().map(String::from_utf8_lossy),
+            after_wrong.as_deref().map(String::from_utf8_lossy),
+            after_absent.as_deref().map(String::from_utf8_lossy),
+        );
+        assert_eq!(right.status, 200, "G4: the current ETag writes");
+        assert_eq!(after_right.as_deref(), Some(&b"v2"[..]));
+        assert_eq!(wrong.status, 412, "G4: a stale ETag refuses");
+        assert_eq!(wrong.tag("Code").as_deref(), Some("PreconditionFailed"));
+        assert_eq!(after_wrong.as_deref(), Some(&b"v2"[..]), "G4: unchanged");
+        assert_eq!(absent.status, 404, "G4: If-Match on an absent key");
+        assert_eq!(absent.tag("Code").as_deref(), Some("NoSuchKey"));
+        assert_eq!(after_absent, None, "G4: nothing written");
+    }
 }

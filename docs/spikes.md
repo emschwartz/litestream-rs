@@ -69,6 +69,7 @@ Left: item 8 (the key still cannot set bucket lifecycle) and 11 (no 429, 503 or 
 |---|---|---|
 | S1, the wal-index through SQLite's own mapping | answered | Yes. `SQLITE_FCNTL_FILE_POINTER` then `xShmMap(file, 0, 32768, 0, &p)` on the library's reader, guarded to a WAL connection in normal locking mode with a read transaction open, returns the region every connection in the process shares, opens and closes no descriptor, and reads the same header and `nBackfill` as `LiveSqlite`'s file read at every step. Task 1 uses it; the fallback descriptor is not needed. |
 | S5, Go and an extra meta-directory file | open | Needed only if O2 is ruled "persist". |
+| G4, conditional PUTs on Tigris | answered | Yes, all three as AWS S3 documents them. `If-None-Match: *` on PUT and on CompleteMultipartUpload: 200 for a new key, 412 `PreconditionFailed` for an existing one, object unchanged; `If-Match` with the current ETag writes, with a stale one 412 and unchanged. See below. |
 
 ## S1: the wal-index through SQLite's own mapping
 
@@ -94,3 +95,20 @@ Answers:
 Side finding for ruling P0: readers that began on an empty WAL hold read mark 0, and an outside PASSIVE then backfilled nothing (`(0,3,0)`), because a mark-0 reader reads the database file, which backfill would overwrite. Mark 0 blocks backfill but not a restart, as P0 says.
 
 For task 1: `lsr-sqlite`'s `shm.rs` is this probe's `check_reader`, `file_pointer`, `shm_map_of`, `map` and `read_header`, with `NotReady` mapped to `SourceError::Busy`, the refusals to `OpenError`, and the map taken once at open (after the first read transaction) and kept for the reader's life. The region is only valid while the reader's WAL is open, so the reader connection must never change its journal mode or close while the region is borrowed; owning the connection inside `Sqlite` gives that by construction.
+
+## G4: conditional PUTs on Tigris
+
+Run on 2026-11-20 from a cloud session, bucket `litestream-rs-test`, a fresh run prefix, deleted afterwards. The probes are the three `g4_*` tests in `crates/store-s3/tests/tigris.rs` (ignored; run with the Tigris suite). They send raw signed requests through the test harness, so the conditional header is signed; the store itself sends none, because v1 adds nothing Go does not send (`docs/PLAN.md`, decision D6). The gap this answers is G4 of `docs/proposals/beyond-go.md`: whether a second writer's PUT to an existing level-0 key can fail instead of overwriting.
+
+| Request | Status | Code | Object afterwards |
+|---|---|---|---|
+| PUT `If-None-Match: *`, new key | 200 | none | written (`first`) |
+| PUT `If-None-Match: *`, same key again | 412 | `PreconditionFailed` | unchanged (`first`) |
+| CompleteMultipartUpload `If-None-Match: *`, new key (upload A) | 200 | none, no error document in the body | written (`AAAA`) |
+| CompleteMultipartUpload `If-None-Match: *`, same key (upload B, opened before A completed) | 412 | `PreconditionFailed` | unchanged (`AAAA`); upload B stays open (ListMultipartUploads shows it) and its abort is 204 |
+| CompleteMultipartUpload `If-None-Match: *` over an object written by a plain PUT | 412 | `PreconditionFailed` | unchanged |
+| PUT `If-Match: <current ETag>` | 200 | none | replaced (`v2`) |
+| PUT `If-Match: <stale ETag>` | 412 | `PreconditionFailed` | unchanged (`v2`) |
+| PUT `If-Match: <ETag>` to an absent key | 404 | `NoSuchKey` | still absent |
+
+The 412 bodies are S3 XML (`<Code>PreconditionFailed</Code>`, "At least one of the pre-conditions you specified did not hold"). The condition is checked at completion, not at initiation: both uploads were created before either completed, and only the second complete failed. A refused complete leaves the upload open, so a writer that adopts this must abort it (or rely on the orphan sweep). The whole Tigris suite with these probes, 2026-11-20, on rusty-s3 0.11.0: 44 of 44 pass over ureq (217 s) and 44 of 44 over reqwest (`LSR_S3_TRANSPORT=reqwest`, 227 s), each under its own prefix; every prefix was deleted afterwards and listed no objects and no incomplete uploads. Not measured: concurrent racing completes (both in flight at once), and whether `classify` would treat the 412 as a refusal; the store sends no conditional header, so neither matters for v1.
