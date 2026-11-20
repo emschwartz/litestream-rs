@@ -1,6 +1,9 @@
 /target
 /.upstream
 /.worktrees
+/fuzz/target
+/fuzz/artifacts
+/fuzz/coverage
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm

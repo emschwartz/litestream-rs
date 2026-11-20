@@ -317,6 +317,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lsr-fuzzing"
+version = "0.0.0"
+dependencies = [
+ "lsr-core",
+ "lsr-ltx",
+]
+
+[[package]]
 name = "lsr-local"
 version = "0.0.0"
 dependencies = [

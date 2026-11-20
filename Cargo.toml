@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# cargo-fuzz crate: nightly only, its own lockfile.
+exclude = ["fuzz"]
 
 [workspace.package]
 edition = "2024"

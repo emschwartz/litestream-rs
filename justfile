@@ -27,6 +27,18 @@ compat-regen *args:
     ./scripts/build-go-litestream.sh
     cargo run --locked -p lsr-compat --bin compat-regen -- {{args}}
 
+# Run one fuzz target (decode, index, plan, key) for N seconds; new inputs join fuzz/corpus.
+fuzz target seconds:
+    cargo +nightly fuzz run {{target}} --fuzz-dir fuzz -- -max_total_time={{seconds}} -max_len=32768 -rss_limit_mb=2048 -print_final_stats=1
+
+# Minimise one target's corpus (keeps what reaches distinct coverage).
+fuzz-cmin target:
+    cargo +nightly fuzz cmin {{target}} --fuzz-dir fuzz
+
+# Rebuild the seed corpus from the Go-written fixtures.
+fuzz-seed:
+    cargo nextest run -p lsr-fuzzing --test seed --run-ignored only --locked
+
 # Pinned upstream sources, read-only reference for the port and input to the compat harness.
 upstream:
     ./scripts/fetch-upstream.sh

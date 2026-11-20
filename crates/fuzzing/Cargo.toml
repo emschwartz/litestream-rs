@@ -1,0 +1,15 @@
+[package]
+name = "lsr-fuzzing"
+version = "0.0.0"
+description = "Fuzz targets as plain functions over bytes, replayed over a committed corpus in the test suite."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lsr-core = { path = "../core" }
+lsr-ltx = { path = "../ltx" }
+
+[lints]
+workspace = true
