@@ -1097,3 +1097,52 @@ proptest! {
         prop_assert_eq!(a, b);
     }
 }
+
+
+// Review (review-core2): failing tests that demonstrate defects.
+
+#[test]
+fn review_a_single_input_compacted_into_its_own_level_does_not_overwrite_itself() {
+    // Source and destination are one replica for levels 1 and up. One L1
+    // input compacted into level 1 is written under the input's own key, so
+    // "delete the inputs" afterwards deletes the output.
+    let store = MemStore::new();
+    let info = put(&store, 1, &Spec::plain(512, 2, 2, 3, &[(1, 5), (2, 6)]));
+    let result = compact_infos(&store, &store, &[info], 1);
+    if let Ok(done) = &result {
+        assert_ne!(
+            done.info().key,
+            info.key,
+            "the output replaced its own input"
+        );
+    }
+}
+
+#[test]
+fn review_a_base_page_that_survives_a_shrink_restores_the_same_before_and_after() {
+    // The base holds page 4; transaction 2 shrinks to 2 pages; transaction 3
+    // regrows to 4 but writes only page 3. In-order restore leaves page 4
+    // zero; the compacted file hides the shrink, so the base's page 4 comes
+    // back. The input-held version of this chain is PageSurvivesShrink; this
+    // one is published.
+    let base = Spec::plain(512, 4, 1, 1, &[(1, 1), (2, 2), (3, 3), (4, 4)]);
+    let chain = [
+        Spec::plain(512, 2, 2, 2, &[(1, 5)]),
+        Spec::plain(512, 4, 3, 3, &[(3, 7)]),
+    ];
+    let original = MemStore::new();
+    put(&original, 9, &base);
+    let infos = put_all(&original, 0, &chain);
+    let compacted = MemStore::new();
+    put(&compacted, 9, &base);
+    let result = compact_infos(&original, &compacted, &infos, 1);
+    if result.is_ok() {
+        let before = restore_latest(&original);
+        let after = restore_latest(&compacted);
+        assert_eq!(
+            before.page(4),
+            after.page(4),
+            "compaction changed what page 4 restores to"
+        );
+    }
+}

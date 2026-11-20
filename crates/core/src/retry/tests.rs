@@ -510,3 +510,33 @@ mod conformance_over_retrying {
 
     crate::conformance_suite!(RetryingHarness::default);
 }
+
+
+// Review (review-core2): failing tests that demonstrate defects.
+
+#[test]
+fn review_a_commit_size_mismatch_leaves_no_object_visible() {
+    // The wrapper knows the stored object is not what was sent, reports it as
+    // Corrupt, and leaves it published: a caller that lists after a failed
+    // commit (as the compactor's contract asks) finds the key and trusts it.
+    let inner = MemStore::new();
+    let store = Retrying::new(
+        SizeLiar(inner.clone()),
+        RecordingSleeper::new(),
+        SeededEntropy::new(1),
+        RetryPolicy::DEFAULT,
+    );
+    let got = conformance::block_on(async {
+        let mut up = store.begin_upload(&key(), stamp()).await.unwrap();
+        up.write(b"abcd").await.unwrap();
+        up.commit().await
+    });
+    assert!(matches!(got, Err(StoreError::Corrupt { .. })));
+    let listed = conformance::block_on(store.list(Level::ZERO, None, limit()))
+        .unwrap()
+        .files;
+    assert!(
+        listed.is_empty(),
+        "an object the wrapper called corrupt is still visible: {listed:?}"
+    );
+}

@@ -628,3 +628,123 @@ fn a_dropped_finding_still_counts_towards_worst() {
     );
     assert_eq!(worst, Some(Severity::Unrestorable));
 }
+
+
+// Review (review-core2): failing tests that demonstrate defects. Each pins
+// "worst is Unrestorable" to "restore(Latest) fails".
+
+fn restore_outcome(
+    store: &MemStore,
+) -> Result<crate::restore::Restored, crate::restore::RestoreError> {
+    block_on(crate::restore::restore(
+        store,
+        crate::plan::RestoreTarget::Latest,
+        crate::restore::MemSink::new(),
+    ))
+}
+
+fn tracked_snapshot(store: &MemStore) -> Checksum {
+    let ps = size(512);
+    let state = BTreeMap::from([(1, 1_u8)]);
+    let mut snap = Spec::plain(512, 1, 1, &[(1, 1)]);
+    snap.commit = 1;
+    snap.tracked = true;
+    snap.post = Some(checksum(ps, &state));
+    put(store, 9, 1, 1, &snap.encode());
+    checksum(ps, &state)
+}
+
+#[test]
+fn review_a_broken_checksum_link_across_levels_is_unrestorable() {
+    // Snapshot at level 9, next file at level 0: the restore compares them,
+    // verify only compares neighbours in one level.
+    let ps = size(512);
+    let store = MemStore::new();
+    tracked_snapshot(&store);
+    let mut next = Spec::plain(512, 2, 2, &[(1, 3)]);
+    next.commit = 1;
+    next.tracked = true;
+    next.pre = Some(checksum(ps, &BTreeMap::from([(1, 2_u8)])));
+    next.post = Some(checksum(ps, &BTreeMap::from([(1, 3_u8)])));
+    put(&store, 0, 2, 2, &next.encode());
+    let restored = restore_outcome(&store);
+    assert!(restored.is_err(), "restore succeeded: {restored:?}");
+    let report = contents(&store);
+    assert_eq!(
+        report.worst(),
+        Some(Severity::Unrestorable),
+        "restore fails with {restored:?} but verify found {:?}",
+        report.findings()
+    );
+}
+
+#[test]
+fn review_pages_that_do_not_reach_the_post_apply_checksum_are_unrestorable() {
+    let ps = size(512);
+    let store = MemStore::new();
+    let first = tracked_snapshot(&store);
+    let mut next = Spec::plain(512, 2, 2, &[(1, 3)]);
+    next.commit = 1;
+    next.tracked = true;
+    next.pre = Some(first);
+    next.post = Some(checksum(ps, &BTreeMap::from([(1, 9_u8)])));
+    put(&store, 0, 2, 2, &next.encode());
+    let restored = restore_outcome(&store);
+    assert!(restored.is_err(), "restore succeeded: {restored:?}");
+    let report = contents(&store);
+    assert_eq!(
+        report.worst(),
+        Some(Severity::Unrestorable),
+        "restore fails with {restored:?} but verify found {:?}",
+        report.findings()
+    );
+}
+
+#[test]
+fn review_a_chain_ending_in_a_commit_zero_file_is_unrestorable() {
+    let store = MemStore::new();
+    snapshot(&store, 1);
+    let header = Header::new(HeaderFields {
+        tracked: false,
+        page_size: size(512),
+        commit: 0,
+        txids: range(2, 2),
+        timestamp: Timestamp::from_unix_millis(2000),
+        pre_apply: None,
+        wal: None,
+        node_id: 0,
+    })
+    .unwrap();
+    let bytes = lsr_ltx::testing::encode_commit_zero(header, None).unwrap();
+    put(&store, 0, 2, 2, &bytes);
+    let restored = restore_outcome(&store);
+    assert!(restored.is_err(), "restore succeeded: {restored:?}");
+    let report = contents(&store);
+    assert_eq!(
+        report.worst(),
+        Some(Severity::Unrestorable),
+        "restore fails with {restored:?} but verify found {:?}",
+        report.findings()
+    );
+}
+
+#[test]
+fn review_a_corrupt_file_the_latest_plan_skips_is_not_unrestorable() {
+    // Level 1 covers 2..3, so the latest plan never reads the corrupt level-0
+    // file; only Txid(2) does. That is older history: Degraded.
+    let store = clean();
+    let mut bytes = Spec::plain(512, 2, 2, &[(2, 9)]).encode();
+    let middle = bytes.len() / 2;
+    bytes[middle] ^= 0x40;
+    put(&store, 0, 2, 2, &bytes);
+    put(&store, 1, 2, 3, &Spec::plain(512, 2, 3, &[(2, 9)]).encode());
+    let restored = restore_outcome(&store);
+    assert!(restored.is_ok(), "restore failed: {restored:?}");
+    let report = contents(&store);
+    assert_ne!(
+        report.worst(),
+        Some(Severity::Unrestorable),
+        "restore(Latest) succeeds but verify says {:?}",
+        report.findings()
+    );
+}
