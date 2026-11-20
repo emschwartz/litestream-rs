@@ -158,8 +158,16 @@ pub fn run_scenario(scenario: &Scenario) -> Result<RunReport, String> {
         allow_halt: scenario.expect.iter().any(|e| matches!(e, Expect::Halt(_))),
         ..Opts::default()
     };
-    let report = run_ops(scenario.seed, &scenario.ops, &opts)
-        .map_err(|failure| format!("{}: {failure}", scenario.name))?;
+    // The failure's own replay line names the seed's random history, which
+    // is not this scenario: its operations are fixed, so the test replays it.
+    let report = run_ops(scenario.seed, &scenario.ops, &opts).map_err(|failure| {
+        format!(
+            "{name}: failed at step {}: {}\nreplay: cargo nextest run -p lsr-sim --run-ignored all {name}",
+            failure.step,
+            failure.violation,
+            name = scenario.name
+        )
+    })?;
     let mut seen = report.seen.iter();
     for (index, want) in scenario.expect.iter().enumerate() {
         if !seen.any(|got| want.matches(got)) {

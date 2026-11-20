@@ -1,6 +1,7 @@
 //! One scenario per fault: each drives the engine into that fault and checks
 //! what was seen, with the oracle judging the replica.
 
+use lsr_sim::Op;
 use lsr_sim::scenario::{
     self, FaultKind, Scenario, clock_scenarios, fault_reason, fault_scenarios, names_fault,
     run_scenario, window_scenarios,
@@ -9,6 +10,25 @@ use lsr_sim::scenario::{
 fn run(make: fn() -> Scenario) {
     let result = run_scenario(&make());
     assert!(result.is_ok(), "{}", result.err().unwrap_or_default());
+}
+
+/// A scenario's operations are fixed, so the seed's random history is not
+/// its replay: a failure must name the test, not `just sim-replay`.
+#[test]
+fn a_failing_scenario_names_its_own_replay() {
+    let mut broken = scenario::clock_steps_back_10s();
+    broken.name = "a_broken_scenario";
+    broken
+        .ops
+        .insert(0, Op::Meta(lsr_sim::generate::MetaOp::Restore));
+    let message = run_scenario(&broken).unwrap_err();
+    assert!(message.contains("a_broken_scenario"), "{message}");
+    assert!(message.contains("failed at step 0"), "{message}");
+    assert!(!message.contains("sim-replay"), "{message}");
+    assert!(
+        message.contains("cargo nextest run -p lsr-sim --run-ignored all a_broken_scenario"),
+        "{message}"
+    );
 }
 
 #[test]
