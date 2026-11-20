@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+mod checkpoint;
 mod compact;
 #[cfg(any(test, feature = "testing"))]
 pub mod conformance;
@@ -27,6 +28,10 @@ mod sync;
 mod upload;
 mod verify;
 
+pub use checkpoint::{
+    CheckpointConfig, CheckpointFailed, CheckpointOutcome, CheckpointState, Checkpointed, Decision,
+    Observed, Why, after_checkpoint, after_sync, checkpoint, decide, next_wake,
+};
 pub use compact::{
     CompactError, Compacted, CompactionInputs, InputFault, InputsError, MAX_INPUTS, compact,
 };
