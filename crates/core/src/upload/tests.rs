@@ -562,10 +562,9 @@ fn a_staged_file_that_names_another_transaction_is_refused() {
     assert!(files(&remote.inner).is_empty());
 }
 
-#[test]
-fn a_staged_file_larger_than_one_chunk_is_streamed_whole() {
-    let (staging, remote) = (MemStore::new(), MemStore::new());
-    // Incompressible pages make the file span several chunks.
+/// The level-0 file for transaction 1, of incompressible pages, so it spans
+/// several read chunks.
+fn big_file() -> Vec<u8> {
     let header = Header::new(HeaderFields {
         tracked: false,
         page_size: ps(),
@@ -592,7 +591,13 @@ fn a_staged_file_larger_than_one_chunk_is_streamed_whole() {
             .write_page(PageNo::new(pgno, ps()).unwrap(), &page)
             .unwrap();
     }
-    let bytes = encoder.finish(None).unwrap().0;
+    encoder.finish(None).unwrap().0
+}
+
+#[test]
+fn a_staged_file_larger_than_one_chunk_is_streamed_whole() {
+    let (staging, remote) = (MemStore::new(), MemStore::new());
+    let bytes = big_file();
     let quarter_mib = 256 * 1024;
     assert!(bytes.len() > quarter_mib * 2);
     put_bytes(&staging, key(1), &bytes);
@@ -610,6 +615,31 @@ fn a_staged_file_larger_than_one_chunk_is_streamed_whole() {
         bytes.len().div_ceil(quarter_mib),
         "{reads} reads"
     );
+}
+
+/// A listed copy that differs from the staged file only past the first read
+/// chunk is not the staged file: the comparison reads both to the end.
+#[test]
+fn a_listed_copy_that_differs_past_the_first_chunk_is_uploaded_again() {
+    let (staging, remote) = (MemStore::new(), MemStore::new());
+    let bytes = big_file();
+    put_bytes(&staging, key(1), &bytes);
+    let mut other = bytes.clone();
+    let last = other.len() - 1;
+    other[last] ^= 0x40;
+    put_bytes(&remote, key(1), &other);
+    let listed = next(UploadState::Unknown, &staging, &remote, 1).unwrap();
+    assert_eq!(listed.state, UploadState::At(None));
+}
+
+/// A replica tail with no staged copy is decoded to its end, however many
+/// chunks that takes, before the listing trusts it.
+#[test]
+fn a_large_replica_tail_without_a_staged_copy_verifies_whole() {
+    let (staging, remote) = (MemStore::new(), MemStore::new());
+    put_bytes(&remote, key(1), &big_file());
+    let listed = next(UploadState::Unknown, &staging, &remote, 1).unwrap();
+    assert_eq!(listed.state, UploadState::At(Some(txid(1))));
 }
 
 #[test]

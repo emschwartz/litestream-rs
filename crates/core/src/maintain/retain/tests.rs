@@ -405,6 +405,39 @@ fn an_unstamped_snapshot_or_level_zero_file_holds_and_other_levels_do_not() {
     assert!(matches!(run(l1), Retention::Delete(_)));
 }
 
+/// A level-0 file that ends at the floor is not wholly below it: with no kept
+/// level-1 file covering it, it stays.
+#[test]
+fn a_level_zero_file_ending_at_the_floor_is_not_below_it() {
+    let mut files = ladder();
+    files.retain(|f| f.key != key(1, 11, 20));
+    files.push(file(1, 11, 19, stamp_of(19)));
+    files.push(file(0, 20, 20, stamp_of(20)));
+    let deleted = keys(&run(files));
+    assert!(deleted.contains(&key(1, 11, 19)), "{deleted:?}");
+    assert!(!deleted.contains(&key(0, 20, 20)), "{deleted:?}");
+}
+
+/// The same rule for the files that set the anchor: the last file of each
+/// level. An unstamped last level-0 file holds; an unstamped last level-1
+/// file does not.
+#[test]
+fn an_unstamped_last_file_holds_only_at_level_zero_or_nine() {
+    let mut l0 = ladder();
+    l0.retain(|f| f.key != key(0, 30, 30));
+    l0.push(file(0, 30, 30, 0));
+    assert_eq!(
+        held(l0),
+        Hold::Unstamped {
+            key: key(0, 30, 30)
+        }
+    );
+    let mut l1 = ladder();
+    l1.retain(|f| f.key != key(1, 21, 30));
+    l1.push(file(1, 21, 30, 0));
+    assert!(matches!(run(l1), Retention::Delete(_)));
+}
+
 #[test]
 fn snapshots_whose_stamps_run_backwards_hold_with_a_text_about_stored_times() {
     let mut files = ladder();

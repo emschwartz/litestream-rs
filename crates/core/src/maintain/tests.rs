@@ -1501,6 +1501,49 @@ fn a_distrusted_output_holds_retention_until_deleted() {
     );
 }
 
+/// A level holding a distrusted output, after the delete that should remove it.
+fn distrusted_setup() -> (MemStore, MaintainState, DeleteJob, Timestamp) {
+    let (local, replica, mut state, job) = rejected_setup();
+    replica.inject_failure_after_publish(corrupt_output_error(false));
+    replica.inject_failure(StoreOp::Delete, delete_fails());
+    let ran = block_on(run_compact(&job, &local, &replica));
+    state.record(at(T0 + 3_600_000), &Job::Compact(job), &ran);
+    let later = at(T0 + 3_700_000);
+    let Due::Run(Job::Delete(delete)) =
+        due_state(&load(&replica), later, &defaults(), None, &mut state)
+    else {
+        panic!("expected the output's delete")
+    };
+    (replica, state, delete, later)
+}
+
+/// A failed delete of a distrusted output backs its level off, as a failed
+/// compaction does: the second failure at the level waits twenty seconds.
+#[test]
+fn a_failed_delete_of_a_distrusted_output_backs_its_level_off() {
+    let (_replica, mut state, delete, later) = distrusted_setup();
+    let job = Job::Delete(delete);
+    let failed = Outcome::Failed(MaintainError::Delete(delete_fails()));
+    state.record(later, &job, &failed);
+    assert_eq!(
+        state.retry_at(&job, later),
+        Some(at(T0 + 3_700_000 + 20_000))
+    );
+}
+
+/// A distrusted output that is gone from the listing, however it went, is
+/// forgotten: its delete is not planned again.
+#[test]
+fn a_distrusted_output_gone_from_the_listing_is_forgotten() {
+    let (replica, mut state, delete, later) = distrusted_setup();
+    block_on(replica.delete(delete.keys())).unwrap();
+    let after = due_state(&load(&replica), later, &defaults(), None, &mut state);
+    assert!(
+        !matches!(&after, Due::Run(Job::Delete(job)) if job.keys() == delete.keys()),
+        "{after:?}"
+    );
+}
+
 #[test]
 fn a_failing_level_backs_off_and_others_run() {
     let (_local, replica, mut state, job) = rejected_setup();

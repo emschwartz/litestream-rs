@@ -255,10 +255,146 @@ fn level_summaries_count_files_bytes_and_range() {
     let zero = &report.levels()[0];
     assert_eq!(zero.files(), 2);
     assert_eq!(zero.range(), Some(range(2, 3)));
-    assert!(zero.bytes() > 0);
+    let listed =
+        |min: u64| u64::try_from(Spec::plain(512, min, min, &[(2, 9)]).encode().len()).unwrap();
+    assert_eq!(zero.bytes(), listed(2) + listed(3));
+    assert_eq!(zero.skipped(), 0);
     assert_eq!(report.levels()[9].range(), Some(range(1, 1)));
     assert_eq!(report.levels()[4].files(), 0);
     assert_eq!(report.levels()[4].range(), None);
+}
+
+#[test]
+fn level_summaries_count_foreign_names() {
+    let store = clean();
+    store.plant_foreign(Level::ZERO, "lock.json");
+    store.plant_foreign(Level::ZERO, "x.tmp");
+    let report = names(&store);
+    assert_eq!(report.levels()[0].skipped(), 2);
+    assert_eq!(report.levels()[9].skipped(), 0);
+}
+
+/// A snapshot several mebibytes long, of pages that do not compress.
+fn big_snapshot() -> Vec<u8> {
+    let ps = size(65_536);
+    let pages = 80_u32;
+    let header = Header::new(HeaderFields {
+        tracked: false,
+        page_size: ps,
+        commit: pages,
+        txids: range(1, 1),
+        timestamp: Timestamp::from_unix_millis(1000),
+        pre_apply: None,
+        wal: None,
+        node_id: 0,
+    })
+    .unwrap();
+    let mut encoder = Encoder::new(Vec::new(), header).unwrap();
+    let mut x = 0x9E37_79B9_7F4A_7C15_u64;
+    for pgno in 1..=pages {
+        let page: Vec<u8> = (0..ps.bytes())
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x.to_be_bytes()[0]
+            })
+            .collect();
+        encoder
+            .write_page(PageNo::new(pgno, ps).unwrap(), &page)
+            .unwrap();
+    }
+    encoder.finish(None).unwrap().0
+}
+
+/// A file longer than one read is read whole, four mebibytes at a time: a
+/// full chunk is not the end of the object.
+#[test]
+fn a_file_longer_than_one_chunk_is_read_whole_in_four_mebibyte_reads() {
+    let bytes = big_snapshot();
+    let chunk = 4 * 1024 * 1024;
+    assert!(
+        bytes.len() > chunk && bytes.len() < 2 * chunk,
+        "{}",
+        bytes.len()
+    );
+    let inner = MemStore::new();
+    put(&inner, 9, 1, 1, &bytes);
+    let store = Wrapped::new(inner);
+    let report = contents(&store);
+    assert!(report.findings().is_empty(), "{:?}", report.findings());
+    assert_eq!(report.files_read(), 2);
+    let read = u64::try_from(bytes.len()).unwrap();
+    assert_eq!(report.bytes_read(), 2 * read);
+    // Two reads in the walk and two in the dry run.
+    assert_eq!(store.reads.load(Ordering::Relaxed), 4);
+}
+
+/// A level-0 file from transaction 1 can be a base but is no restore point:
+/// the history between it and a newer snapshot is nobody's, so a hole there
+/// is not reported.
+#[test]
+fn a_stray_level_zero_base_beside_a_newer_snapshot_reports_nothing() {
+    let store = MemStore::new();
+    first_l0(&store);
+    snapshot(&store, 5);
+    l0(&store, 6);
+    let report = names(&store);
+    assert!(report.findings().is_empty(), "{:?}", report.findings());
+}
+
+/// The page size every file is held to is the latest plan's base, even when
+/// the odd file is the first one the walk reads.
+#[test]
+fn the_page_size_reference_is_the_base_even_when_the_odd_file_is_read_first() {
+    let store = MemStore::new();
+    snapshot(&store, 1);
+    put(
+        &store,
+        0,
+        2,
+        2,
+        &Spec::plain(1024, 2, 2, &[(2, 9)]).encode(),
+    );
+    l0(&store, 3);
+    let report = contents(&store);
+    let finding = only(&report);
+    assert!(
+        matches!(finding, Finding::PageSizeDiffers { key: k, expected, found, .. }
+            if *k == key(0, 2, 2) && *expected == size(512) && *found == size(1024)),
+        "{finding:?}"
+    );
+}
+
+/// A database that shrinks and grows again reads as zeros where it did not
+/// write: the dry run's sink drops the truncated pages as a file would.
+#[test]
+fn a_database_that_shrinks_then_grows_verifies_clean() {
+    let ps = size(512);
+    let zero = Checksum::of_page(PageNo::new(3, ps).unwrap(), &[0; 512]);
+    let mut snap = Spec::plain(512, 1, 1, &[(1, 1), (2, 2), (3, 3), (4, 4)]);
+    snap.tracked = true;
+    let four = checksum(ps, &BTreeMap::from([(1, 1), (2, 2), (3, 3), (4, 4)]));
+    snap.post = Some(four);
+    let mut shrink = Spec::plain(512, 2, 2, &[(1, 5)]);
+    shrink.tracked = true;
+    shrink.commit = 2;
+    shrink.pre = Some(four);
+    let two = checksum(ps, &BTreeMap::from([(1, 5), (2, 2)]));
+    shrink.post = Some(two);
+    let mut grow = Spec::plain(512, 3, 3, &[(4, 7)]);
+    grow.tracked = true;
+    grow.pre = Some(two);
+    grow.post = Some(checksum(ps, &BTreeMap::from([(1, 5), (2, 2), (4, 7)])).toggle(zero));
+    let files: Fixture = vec![
+        (9, 1, 1, snap.encode()),
+        (0, 2, 2, shrink.encode()),
+        (0, 3, 3, grow.encode()),
+    ];
+    let store = replica(&files);
+    restore_outcome(&store).unwrap();
+    let report = contents(&store);
+    assert!(report.findings().is_empty(), "{:?}", report.findings());
 }
 
 #[test]
