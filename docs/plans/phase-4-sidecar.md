@@ -4,7 +4,7 @@
 
 **Spec:** `docs/PLAN.md` (section 1 "Not in v1"; section 3; section 6 host integration; phase 4; D4, D6, D7). Rules: `AGENTS.md`. Research: `docs/notes/pure-rust-pin.md` section 4B (deployment B, a separate process). Parked work: `docs/proposals/beyond-go.md`. Go behaviour below is cited from a recent upstream checkout at `/home/user/litestream`, **not the pinned 041a8c3**; each citation is rechecked against `.upstream/litestream` in the task that relies on it, and a line that moved is corrected in the PR.
 
-Status: draft. Starts after phase 3's public API (task 6, `lsr-replica`) lands; tasks 8 and 9 also need phase 3 tasks 4 and 7. Section "Open decisions" is the owner's; no task that depends on one starts before it is ruled.
+Status: draft. Starts after phase 3's public API (task 6, `lsr-replica`) lands; tasks 8 and 9 also need phase 3 tasks 4 and 7. Its decisions are ruled (see "Rulings").
 
 ## What Go's sidecar does (recent checkout)
 
@@ -79,64 +79,19 @@ The constraints of the phase 1 to 3 plans apply unchanged. In addition:
 
 ## Open decisions (the owner's)
 
-### O1: the config file: Go's `litestream.yml` as is, or a stricter subset
-
-Whatever is chosen, the file format, location, env expansion and defaults are Go's. The question is what happens to keys v1 does not implement, and to keys Go does not define.
-
-Keys fall into four classes:
-- (a) **Go knows it, v1 implements it**: `dbs[].path`, `meta-path`, `replica.url`/`type`/`path`/`bucket`/`region`/`endpoint`/`force-path-style`/`access-key-id`/`secret-access-key`/`part-size`, `sync-interval`, `monitor-interval`, `checkpoint-interval`, `min-checkpoint-page-count`, `truncate-page-n` (subject to O4), `snapshot.interval`/`retention`, `levels`, `l0-retention`, `l0-retention-check-interval`, `shutdown-sync-timeout`, `addr`, `exec`, `logging`, `restore-if-db-not-exists`.
-- (b) **Go knows it, v1 does not do it**: the out-of-scope list above (non-S3 types and their keys, `socket`, `heartbeat-*`, `auto-recover`, `mcp-addr`, `validation`, `verify-compaction`, `age`, `dir` with `watch` under O5).
-- (c) **Go knows it, a tuning knob with no counterpart in Rust**: `busy-timeout` (both connections run with busy timeout zero, phase 3 task 1), `shutdown-sync-interval` (the actor's own retry policy), `concurrency` (uploads are sequential), `sign-payload`, `require-content-md5` (Content-MD5 is always sent, phase 2), `sse-*`, `skip-verify`.
-- (d) **Go does not know it**: typos (`sync_interval`), keys from other versions, anything else. Go ignores these silently (`main.go:529`).
-
-**Option A, Go's file as is (lenient).** Every file Go starts with, Rust starts with. Class (d) is ignored, as Go does. Class (b) cannot be ignored without being silently wrong: a `type: gs` replica ignored is a database with no backup, `heartbeat-url` ignored is a dead-man switch that fires, `socket.enabled` ignored breaks the operator's `litestream stop`. So even A must refuse (b) when it asks for behaviour; "as is" is not available in its pure form. What A really means is: refuse (b) when active, accept (c) and (d) silently.
-- For: the widest drop-in; a Go user's file never fails on Rust over a key that did nothing on Go.
-- Against: a typo still does nothing, now on both; PLAN section 3 ("unknown keys rejected") is broken for the sidecar; (c) knobs the operator set on purpose silently change meaning.
-
-**Option B, a strict subset (refuse every unknown key).** Read with Rust's own key set; anything not in (a) fails.
-- For: PLAN section 3's rule as written; nothing in the file is without effect.
-- Against: "unknown" here means "unknown to v1", which includes Go's own (b) and (c) keys even when inert. A Go config with `socket: {enabled: false}`, `auto-recover: false`, `busy-timeout: 5s` or `shutdown-sync-interval: 1s`, all harmless, fails to start. Many Go configs carry such lines, so the drop-in goal fails for the common case, and the error teaches nothing the operator can act on except deleting lines Go needs if they ever roll back.
-
-**Option C (recommended): Go's format, strict on meaning.** (a) honoured. (b) accepted only at its inert value (`enabled: false`, `false`, empty, `type: s3` or `file`), else an error naming the key path and "not in v1". (c) accepted, with one warning line per key at start saying it has no effect and why. (d) refused with the key path, and the nearest Go key when one is within edit distance 2 (`sync_interval`: did you mean `sync-interval`?).
-- For: every file Go starts with either starts on Rust with the same meaning or fails at load naming the line; nothing is silently dropped that changes what is backed up; (d) refused is PLAN section 3's rule and costs only lines that never did anything on Go.
-- Against: a Go file with a typo or a stale key does not start on Rust until the line is removed. That is a loud failure at deploy time, before any database is touched, and removing the line leaves the file valid for Go. `lsr config check <file>` (task 1) shows all of it before the switch.
-
-### O2: how health is exposed
-
-- **Option A (recommended): the `addr` listener Go already has.** `/metrics` serves Go's series names and labels where v1 has the value (task 5 lists which), so dashboards and alerts carry over, plus new series under a distinct prefix (working name `lsr_`) for D7's states. `/healthz` returns JSON per database (D7 below). No `addr`, no listener, as in Go. For: no new file; one port Go users already open; Prometheus alerting works on day one. Against: a new HTTP path and new series names are surface Go does not have (a Go binary swapped back simply lacks them; nothing breaks); an HTTP server to write.
-- **Option B: a status file** (for example `<meta>/health.json`, rewritten each tick). For: no listener. Against: a file Go does not speak (D6), in the meta directory Go reads; a write per tick per database; readers race the rename.
-- **Option C: logs only.** For: nothing new. Against: D7 asks for health output; a log line is not a probe.
-- For A, the server: hand-written over `std::net::TcpListener` (GET only, one request per connection, bounded request size and connection count, ~200 lines, no dependency) is recommended over `tiny_http` (MIT or Apache-2.0); the PR measures nothing it does not need to.
-
-### O3: where Rust-only settings live (D7 responses, O4's claim)
-
-D7 makes each cause's response configurable; the sidecar needs somewhere to say it.
-- **Option A (recommended): one top-level key in `litestream.yml`** (working name `litestream-rs:`), holding `responses:` (one entry per `Responses` field, `keep-trying` or `stop`) and O4's claim. Go ignores unknown keys (`main.go:529`), so the same file still starts Go: rollback is a binary swap. Absent, every default is `Responses::GO_LIKE`. For: one file, reviewed with the rest of the config, valid for both. Against: a key Go does not define, in a file Go reads; harmless to Go today, and a future Go that reads strictly would reject it (checked by task 9 against Head).
-- **Option B: command-line flags.** Go's flag set errors on an unknown flag (`replicate.go:62-72`), so rollback means changing the unit file as well as the binary.
-- **Option C: environment variables.** Invisible in config review; per process, not per database.
-
-### O4: TRUNCATE in the sidecar
-
-Go runs TRUNCATE at `truncate-page-n` (121359 pages by default, `db.go:35`, `:916`). Ruling P3 runs TRUNCATE only on the host's word (`Readers::Idle`), and in the sidecar the host cannot give it at run time. Each TRUNCATE takes the boundary snapshot under the write lock (phase 3), so an attempt that comes back BUSY because the host has a reader costs a snapshot for nothing.
-- **Option A (recommended): never by default, opt in by a static claim.** `Readers` is `Unknown`; the WAL stays bounded by SQLite's own restart after a full PASSIVE backfill. Under O3's key, `host-readers: none` is the operator's statement that the host holds no long readers; with it, `truncate-page-n` behaves as in Go. Without it, an explicit `truncate-page-n` other than 0 is refused (O1 class b), and the default divergence from Go is logged once at start. For: P3 holds; no wasted snapshots. Against: a WAL that grows under a host with a long reader is not truncated unless the operator opts in (Go would try).
-- **Option B: copy Go.** Treat the sidecar as `Idle`. For: identical WAL size behaviour. Against: breaks P3; snapshots wasted on every BUSY.
-- **Option C: probe.** Try TRUNCATE; on BUSY, act as `Pinned` for a backoff. Against: the probe is the expensive part.
-
-### O5: directory entries (`dir`, `pattern`, `recursive`, `watch`)
-
-- **Option A: refuse `dir`.** Against: D6; directory configs are a Go feature with real users.
-- **Option B (recommended): a static scan at start, `watch: true` refused in v1.** Paths derived exactly as Go (`main.go:716-850`: replica path or URL plus the relative path, meta path `.<file>-litestream` under `meta-path`). The header check (`IsSQLiteDatabase`, `main.go:891`) runs before any actor opens the file (global constraint). For: Go's layout for every database found; no runtime add or remove. Against: a database created after start is not replicated until restart (Go with `watch` would pick it up); the refusal says so.
-- **Option C: all of it, `watch` included.** Needs actors started and stopped at run time and a rescan that never opens a file an actor holds (an fsnotify equivalent, `inotify` with no `unsafe`, means another dependency). Better as a follow-up issue.
-
-### O6: signals and reload
-
-PLAN's phase 4 text says "signals for reload and shutdown". Go has no reload (`main_notwindows.go:22-25`).
-- **Option A (recommended): Go's signals, restart as reload.** SIGINT and SIGTERM as Go (task 3). SIGHUP handled as SIGTERM, with a final sync: Go's runtime default ends the process with no drain, and a drain is obviously better. A config change is a restart; phase 3 makes a restart continue with no snapshot when the WAL is intact (D4), so reload buys little. For: Go's behaviour; no partial-reconfigure states. Against: a restart re-reads every database's tip (one ranged GET each).
-- **Option B: SIGHUP reloads.** Re-read the file, diff the database set, start new actors, `final_sync` and stop removed ones, restart changed ones. For: no restart. Against: new behaviour Go does not have; a reload that half applies needs its own states and tests.
+None open. O1 to O6 were ruled by the owner on 2026-11-20, each as recommended; the options considered are kept under "Decisions and their options" at the end of this plan.
 
 ## Rulings
 
-None yet.
+All ruled by the owner on 2026-11-20, as recommended.
+
+- **R1 (O1): Go's config format, strict on meaning.** Keys v1 implements are honoured; Go keys for features v1 lacks are accepted only at their off value, else an error naming the key path; Go tuning knobs with no Rust counterpart are accepted with one warning; keys Go does not know are refused with a "did you mean". `lsr config check` shows the result before a switch.
+- **R2 (O2): health on Go's `addr` listener.** Go's `/metrics` series where v1 has the value, new series under their own prefix, and `/healthz` (200 when running or degraded, 503 when stopped), on a hand-written server with no new dependency.
+- **R3 (O3): Rust-only settings under one top-level key in `litestream.yml`,** which Go ignores, so rolling back is a binary swap.
+- **R4 (O4): no TRUNCATE by default;** the operator opts in by stating that the host holds no long readers.
+- **R5 (O5): directory entries scanned once at start, as Go derives their paths; `watch: true` refused in v1.**
+- **R6 (O6): Go's signals, with SIGHUP as a clean stop with a final sync, and a restart as the reload.**
+- **R7: three departures from Go, confirmed.** One shutdown deadline shared by all databases (Go drains them one after another, `store.go:204-220`); a database that fails to start leaves the others running (Go exits); a child process killed by a signal the sidecar forwarded counts as a clean exit, as in Go (`main.go:150`).
 
 ---
 
@@ -242,6 +197,67 @@ Kept free for O6 option B (reload) if ruled; otherwise unused, so task numbers s
 **Files:** `docs/ledger.toml`.
 
 **Semantics:** every `cmd/litestream` test with a `reason` entry from phase 3 is revisited: a counterpart in tasks 1 to 9, or a reason naming the out-of-scope line it falls under. The PR states the counts before and after.
+
+## Decisions and their options
+
+Kept for the record; the rulings above are what stands.
+
+
+#### O1: the config file: Go's `litestream.yml` as is, or a stricter subset
+
+Whatever is chosen, the file format, location, env expansion and defaults are Go's. The question is what happens to keys v1 does not implement, and to keys Go does not define.
+
+Keys fall into four classes:
+- (a) **Go knows it, v1 implements it**: `dbs[].path`, `meta-path`, `replica.url`/`type`/`path`/`bucket`/`region`/`endpoint`/`force-path-style`/`access-key-id`/`secret-access-key`/`part-size`, `sync-interval`, `monitor-interval`, `checkpoint-interval`, `min-checkpoint-page-count`, `truncate-page-n` (subject to O4), `snapshot.interval`/`retention`, `levels`, `l0-retention`, `l0-retention-check-interval`, `shutdown-sync-timeout`, `addr`, `exec`, `logging`, `restore-if-db-not-exists`.
+- (b) **Go knows it, v1 does not do it**: the out-of-scope list above (non-S3 types and their keys, `socket`, `heartbeat-*`, `auto-recover`, `mcp-addr`, `validation`, `verify-compaction`, `age`, `dir` with `watch` under O5).
+- (c) **Go knows it, a tuning knob with no counterpart in Rust**: `busy-timeout` (both connections run with busy timeout zero, phase 3 task 1), `shutdown-sync-interval` (the actor's own retry policy), `concurrency` (uploads are sequential), `sign-payload`, `require-content-md5` (Content-MD5 is always sent, phase 2), `sse-*`, `skip-verify`.
+- (d) **Go does not know it**: typos (`sync_interval`), keys from other versions, anything else. Go ignores these silently (`main.go:529`).
+
+**Option A, Go's file as is (lenient).** Every file Go starts with, Rust starts with. Class (d) is ignored, as Go does. Class (b) cannot be ignored without being silently wrong: a `type: gs` replica ignored is a database with no backup, `heartbeat-url` ignored is a dead-man switch that fires, `socket.enabled` ignored breaks the operator's `litestream stop`. So even A must refuse (b) when it asks for behaviour; "as is" is not available in its pure form. What A really means is: refuse (b) when active, accept (c) and (d) silently.
+- For: the widest drop-in; a Go user's file never fails on Rust over a key that did nothing on Go.
+- Against: a typo still does nothing, now on both; PLAN section 3 ("unknown keys rejected") is broken for the sidecar; (c) knobs the operator set on purpose silently change meaning.
+
+**Option B, a strict subset (refuse every unknown key).** Read with Rust's own key set; anything not in (a) fails.
+- For: PLAN section 3's rule as written; nothing in the file is without effect.
+- Against: "unknown" here means "unknown to v1", which includes Go's own (b) and (c) keys even when inert. A Go config with `socket: {enabled: false}`, `auto-recover: false`, `busy-timeout: 5s` or `shutdown-sync-interval: 1s`, all harmless, fails to start. Many Go configs carry such lines, so the drop-in goal fails for the common case, and the error teaches nothing the operator can act on except deleting lines Go needs if they ever roll back.
+
+**Option C (recommended): Go's format, strict on meaning.** (a) honoured. (b) accepted only at its inert value (`enabled: false`, `false`, empty, `type: s3` or `file`), else an error naming the key path and "not in v1". (c) accepted, with one warning line per key at start saying it has no effect and why. (d) refused with the key path, and the nearest Go key when one is within edit distance 2 (`sync_interval`: did you mean `sync-interval`?).
+- For: every file Go starts with either starts on Rust with the same meaning or fails at load naming the line; nothing is silently dropped that changes what is backed up; (d) refused is PLAN section 3's rule and costs only lines that never did anything on Go.
+- Against: a Go file with a typo or a stale key does not start on Rust until the line is removed. That is a loud failure at deploy time, before any database is touched, and removing the line leaves the file valid for Go. `lsr config check <file>` (task 1) shows all of it before the switch.
+
+#### O2: how health is exposed
+
+- **Option A (recommended): the `addr` listener Go already has.** `/metrics` serves Go's series names and labels where v1 has the value (task 5 lists which), so dashboards and alerts carry over, plus new series under a distinct prefix (working name `lsr_`) for D7's states. `/healthz` returns JSON per database (D7 below). No `addr`, no listener, as in Go. For: no new file; one port Go users already open; Prometheus alerting works on day one. Against: a new HTTP path and new series names are surface Go does not have (a Go binary swapped back simply lacks them; nothing breaks); an HTTP server to write.
+- **Option B: a status file** (for example `<meta>/health.json`, rewritten each tick). For: no listener. Against: a file Go does not speak (D6), in the meta directory Go reads; a write per tick per database; readers race the rename.
+- **Option C: logs only.** For: nothing new. Against: D7 asks for health output; a log line is not a probe.
+- For A, the server: hand-written over `std::net::TcpListener` (GET only, one request per connection, bounded request size and connection count, ~200 lines, no dependency) is recommended over `tiny_http` (MIT or Apache-2.0); the PR measures nothing it does not need to.
+
+#### O3: where Rust-only settings live (D7 responses, O4's claim)
+
+D7 makes each cause's response configurable; the sidecar needs somewhere to say it.
+- **Option A (recommended): one top-level key in `litestream.yml`** (working name `litestream-rs:`), holding `responses:` (one entry per `Responses` field, `keep-trying` or `stop`) and O4's claim. Go ignores unknown keys (`main.go:529`), so the same file still starts Go: rollback is a binary swap. Absent, every default is `Responses::GO_LIKE`. For: one file, reviewed with the rest of the config, valid for both. Against: a key Go does not define, in a file Go reads; harmless to Go today, and a future Go that reads strictly would reject it (checked by task 9 against Head).
+- **Option B: command-line flags.** Go's flag set errors on an unknown flag (`replicate.go:62-72`), so rollback means changing the unit file as well as the binary.
+- **Option C: environment variables.** Invisible in config review; per process, not per database.
+
+#### O4: TRUNCATE in the sidecar
+
+Go runs TRUNCATE at `truncate-page-n` (121359 pages by default, `db.go:35`, `:916`). Ruling P3 runs TRUNCATE only on the host's word (`Readers::Idle`), and in the sidecar the host cannot give it at run time. Each TRUNCATE takes the boundary snapshot under the write lock (phase 3), so an attempt that comes back BUSY because the host has a reader costs a snapshot for nothing.
+- **Option A (recommended): never by default, opt in by a static claim.** `Readers` is `Unknown`; the WAL stays bounded by SQLite's own restart after a full PASSIVE backfill. Under O3's key, `host-readers: none` is the operator's statement that the host holds no long readers; with it, `truncate-page-n` behaves as in Go. Without it, an explicit `truncate-page-n` other than 0 is refused (O1 class b), and the default divergence from Go is logged once at start. For: P3 holds; no wasted snapshots. Against: a WAL that grows under a host with a long reader is not truncated unless the operator opts in (Go would try).
+- **Option B: copy Go.** Treat the sidecar as `Idle`. For: identical WAL size behaviour. Against: breaks P3; snapshots wasted on every BUSY.
+- **Option C: probe.** Try TRUNCATE; on BUSY, act as `Pinned` for a backoff. Against: the probe is the expensive part.
+
+#### O5: directory entries (`dir`, `pattern`, `recursive`, `watch`)
+
+- **Option A: refuse `dir`.** Against: D6; directory configs are a Go feature with real users.
+- **Option B (recommended): a static scan at start, `watch: true` refused in v1.** Paths derived exactly as Go (`main.go:716-850`: replica path or URL plus the relative path, meta path `.<file>-litestream` under `meta-path`). The header check (`IsSQLiteDatabase`, `main.go:891`) runs before any actor opens the file (global constraint). For: Go's layout for every database found; no runtime add or remove. Against: a database created after start is not replicated until restart (Go with `watch` would pick it up); the refusal says so.
+- **Option C: all of it, `watch` included.** Needs actors started and stopped at run time and a rescan that never opens a file an actor holds (an fsnotify equivalent, `inotify` with no `unsafe`, means another dependency). Better as a follow-up issue.
+
+#### O6: signals and reload
+
+PLAN's phase 4 text says "signals for reload and shutdown". Go has no reload (`main_notwindows.go:22-25`).
+- **Option A (recommended): Go's signals, restart as reload.** SIGINT and SIGTERM as Go (task 3). SIGHUP handled as SIGTERM, with a final sync: Go's runtime default ends the process with no drain, and a drain is obviously better. A config change is a restart; phase 3 makes a restart continue with no snapshot when the WAL is intact (D4), so reload buys little. For: Go's behaviour; no partial-reconfigure states. Against: a restart re-reads every database's tip (one ranged GET each).
+- **Option B: SIGHUP reloads.** Re-read the file, diff the database set, start new actors, `final_sync` and stop removed ones, restart changed ones. For: no restart. Against: new behaviour Go does not have; a reload that half applies needs its own states and tests.
+
 
 ---
 
