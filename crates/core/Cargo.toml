@@ -13,6 +13,7 @@ testing = []
 
 [dependencies]
 lsr-ltx = { path = "../ltx" }
+lsr-wal = { path = "../wal" }
 thiserror = "2"
 
 [dev-dependencies]
