@@ -58,6 +58,10 @@ pub use source::{
     Barrier, CheckpointMode, CheckpointRun, Checkpointer, CommittedRead, PageSource, SourceError,
     WalSource, WriteLock,
 };
+#[cfg(any(test, feature = "testing"))]
+pub use source::{
+    CheckpointCall, CheckpointEffect, CheckpointScript, FakeCheckpointer, FakeDb, FakeWal, SourceOp,
+};
 pub use store::{
     CorruptCause, Listing, ObjectStore, PageLimit, ReadLen, StoreError, StoreOp, Upload,
     build_listing,

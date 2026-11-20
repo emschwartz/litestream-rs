@@ -18,6 +18,13 @@ use thiserror::Error;
 
 use crate::position::{ReadEpoch, WalFileLen};
 
+#[cfg(any(test, feature = "testing"))]
+mod fake;
+#[cfg(any(test, feature = "testing"))]
+pub use fake::{
+    CheckpointCall, CheckpointEffect, CheckpointScript, FakeCheckpointer, FakeDb, FakeWal, SourceOp,
+};
+
 /// What went wrong reaching SQLite or a local file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 pub enum SourceError {
