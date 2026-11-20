@@ -19,7 +19,7 @@ thiserror.workspace = true
 [dev-dependencies]
 proptest = { workspace = true, features = ["default"] }
 # The differential sync test runs real SQLite: bundled so no system library is needed.
-rusqlite.workspace = true
+rusqlite = { workspace = true, features = ["cache"] }
 tempfile.workspace = true
 lsr-ltx = { workspace = true, features = ["testing"] }
 # The integration tests drive stores with `conformance::block_on`.
