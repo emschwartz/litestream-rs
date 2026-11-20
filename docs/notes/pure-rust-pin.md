@@ -175,6 +175,6 @@ Open (not verified). See the Open list.
 ## Open
 - Other implementations speaking live -shm against C SQLite: LiteFS (FUSE, sees all lock calls), mvsqlite, rqlite (uses C SQLite), libSQL (a C fork), sqlite-wasm OPFS (no shm), modernc (transpiled C, so the same code). Unverified; no breakage reports searched.
 - Exact release dates for TRUNCATE (3.8.8) and SNAPSHOT (3.10): not checked; the changes.html fetch was truncated.
-- Linux OFD vs same-process POSIX conflict: not run on Linux, only documented behaviour.
-- Whether libsqlite3-sys builds with SQLITE_ENABLE_SETLK_TIMEOUT (its F_SETLKW against our OFD lock would block, not BUSY): not checked.
+- Linux OFD vs same-process POSIX conflict: answered 2026-11-20, it conflicts as on macOS (`docs/spikes.md`, "#9 OFD"). That run also found the pin needs the DMS byte as well as a read mark, or the host's last close deletes `-wal`.
+- Whether libsqlite3-sys builds with SQLITE_ENABLE_SETLK_TIMEOUT: answered 2026-11-20, it does not, and SQLite 3.54.1 never blocks on `-shm` locks even with it (`docs/spikes.md`, "#9 SETLK").
 - Whether nix or rustix expose F_OFD_SETLK on macOS: not checked.

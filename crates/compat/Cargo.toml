@@ -25,6 +25,7 @@ tempfile.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+libc.workspace = true
 lsr-sim.workspace = true
 proptest.workspace = true
 toml.workspace = true
