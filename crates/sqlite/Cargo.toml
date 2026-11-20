@@ -1,0 +1,25 @@
+[package]
+name = "lsr-sqlite"
+version = "0.0.0"
+description = "The sync engine's doors on a live SQLite database: the read transaction that pins the WAL, the wal-index and pages through SQLite's own file handle, and the checkpoint."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+lsr-core.workspace = true
+lsr-ltx.workspace = true
+lsr-wal.workspace = true
+rusqlite.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# The descriptor test drives a full sync and checkpoint cycle through core's in-memory store.
+lsr-core = { workspace = true, features = ["testing"] }
+# `set_limit`, so a setup pragma can be made to fail in its error's test.
+rusqlite = { workspace = true, features = ["limits"] }
+tempfile.workspace = true

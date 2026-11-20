@@ -18,6 +18,7 @@ lsr-core = { path = "crates/core" }
 lsr-local = { path = "crates/local" }
 lsr-ltx = { path = "crates/ltx" }
 lsr-sim = { path = "crates/sim" }
+lsr-sqlite = { path = "crates/sqlite" }
 lsr-store-fs = { path = "crates/store-fs" }
 lsr-store-s3 = { path = "crates/store-s3" }
 lsr-wal = { path = "crates/wal" }

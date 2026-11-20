@@ -849,6 +849,7 @@ dependencies = [
  "lsr-local",
  "lsr-ltx",
  "lsr-sim",
+ "lsr-sqlite",
  "lsr-store-fs",
  "lsr-wal",
  "proptest",
@@ -911,6 +912,18 @@ dependencies = [
  "lsr-ltx",
  "lsr-wal",
  "proptest",
+ "rusqlite",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "lsr-sqlite"
+version = "0.0.0"
+dependencies = [
+ "lsr-core",
+ "lsr-ltx",
+ "lsr-wal",
  "rusqlite",
  "tempfile",
  "thiserror",
