@@ -1152,3 +1152,257 @@ fn drive_checked(model: &mut Model, now: i64, cfg: &Maintenance, noise: &mut Byt
     }
     panic!("due never settled");
 }
+
+struct Xs(u64);
+
+impl Xs {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+    fn below(&mut self, n: u64) -> u64 {
+        self.next() % n.max(1)
+    }
+    fn index(&mut self, len: usize) -> usize {
+        usize::try_from(self.below(u64::try_from(len).unwrap())).unwrap()
+    }
+    fn pick<T: Copy>(&mut self, xs: &[T]) -> T {
+        xs[self.index(xs.len())]
+    }
+}
+
+/// Stamp shapes for the generated listings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Shape {
+    /// One writer: L0 in single transactions, L1 and L2 compacted from whole
+    /// L0 files, stamps of the last transaction, snapshots at an L0 end.
+    Writer,
+    /// As Writer, but L0 files hold several transactions and L1 boundaries
+    /// are drawn independently (a handoff or a Go-era replica): an L0 file can
+    /// straddle a snapshot's end or an L1 boundary. Stamps still follow
+    /// transactions.
+    Misaligned,
+    /// Misaligned plus overlapping L0 files (same stamp rule: the last
+    /// transaction's).
+    Overlapping,
+    /// Misaligned with some stamps moved earlier or later (a clock that
+    /// stepped across a handoff).
+    Backwards,
+}
+
+fn gen_listing(x: &mut Xs, shape: Shape) -> Vec<FileInfo> {
+    let n = 6 + x.below(24);
+    let gaps = [1_000, 60_000, HOUR, 4 * HOUR, DAY];
+    let mut f = vec![T0];
+    for _ in 0..=n {
+        let last = *f.last().unwrap();
+        f.push(last + x.pick(&gaps));
+    }
+    let st = |i: u64| f[usize::try_from(i).unwrap()];
+    let mut files = Vec::new();
+    let span = if shape == Shape::Writer { 1 } else { 3 };
+    let l0 = chunks_x(x, 1, n, span);
+    let snaps: BTreeSet<u64> = (0..=x.below(4))
+        .map(|_| {
+            if shape == Shape::Writer {
+                l0[x.index(l0.len())].1
+            } else {
+                1 + x.below(n)
+            }
+        })
+        .collect();
+    let last_snap = snaps.last().copied().unwrap_or(0);
+    for &(a, z) in &l0 {
+        if z > last_snap || x.below(100) < 70 {
+            files.push(file(0, a, z, st(z)));
+        }
+    }
+    if shape == Shape::Overlapping {
+        for _ in 0..=x.below(3) {
+            let a = 1 + x.below(n);
+            let z = a + x.below((n - a + 1).min(5));
+            files.push(file(0, a, z, st(z)));
+        }
+    }
+    for &m in &snaps {
+        // A snapshot is stamped when taken: after its last transaction, before
+        // the next one.
+        let lag = if x.below(2) == 0 {
+            0
+        } else {
+            (st(m + 1) - st(m)) / 2
+        };
+        files.push(file(9, 1, m, st(m) + lag));
+    }
+    let covered_to = if x.below(100) < 15 { 0 } else { 1 + x.below(n) };
+    let l1: Vec<(u64, u64)> = if shape == Shape::Writer {
+        // Whole L0 files.
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < l0.len() && l0[i].1 <= covered_to {
+            let j = (i + usize::try_from(x.below(4)).unwrap()).min(l0.len() - 1);
+            out.push((l0[i].0, l0[j].1));
+            i = j + 1;
+        }
+        out
+    } else {
+        chunks_x(x, 1, covered_to, 6)
+    };
+    files.extend(l1.iter().map(|(a, z)| file(1, *a, *z, st(*z))));
+    if !l1.is_empty() && x.below(2) == 0 {
+        let end = x.index(l1.len());
+        files.push(file(2, l1[0].0, l1[end].1, st(l1[end].1)));
+    }
+    if shape == Shape::Backwards {
+        for _ in 0..=x.below(3) {
+            let i = x.index(files.len());
+            let j = 1 + x.below(n);
+            files[i].created_at = at(st(j));
+        }
+    }
+    let mut seen = BTreeSet::new();
+    files.retain(|f| seen.insert(f.key));
+    files
+}
+
+fn chunks_x(x: &mut Xs, from: u64, to: u64, most: u64) -> Vec<(u64, u64)> {
+    let mut out = Vec::new();
+    let mut a = from;
+    while a <= to {
+        let z = (a + x.below(most)).min(to);
+        out.push((a, z));
+        a = z + 1;
+    }
+    out
+}
+
+/// The instants at which some rule changes: every stamp plus each retention,
+/// and one millisecond either side.
+fn anchors(files: &[FileInfo], cfg: &Maintenance) -> Vec<i64> {
+    let mut out = BTreeSet::new();
+    let snap = millis(cfg.snapshot_retention());
+    let l0 = match cfg.l0_retention() {
+        L0Retention::After(age) => millis(age),
+        L0Retention::Keep => 0,
+    };
+    for f in files {
+        let s = f.created_at.unix_millis();
+        for base in [s, s + snap, s + l0] {
+            out.extend([base - 1, base, base + 1]);
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// The rule is not monotone in the anchor: a lower anchor can delete a file
+/// a higher one keeps. Floor 20 at the high anchor removes L1 15-19 and leaves
+/// L0 18-21 (straddling the floor, uncovered). At the low anchor the floor is
+/// 10, L1 15-19 stays and covers L0 18-21, which goes. Both jobs are
+/// restore-safe for the range their anchor promises (the wobbling-clock test
+/// checks that); this pins what the rules do.
+#[test]
+fn a_lower_anchor_can_delete_a_level_zero_file_a_higher_one_keeps() {
+    let files = vec![
+        file(9, 1, 10, T0),
+        file(9, 1, 20, T0 + 2 * DAY),
+        file(9, 1, 30, T0 + 4 * DAY),
+        file(1, 11, 14, T0 + DAY),
+        file(1, 15, 19, T0 + 2 * DAY - HOUR),
+        file(1, 20, 30, T0 + 4 * DAY),
+        file(0, 18, 21, T0 + 2 * DAY + HOUR),
+        file(0, 31, 31, T0 + 4 * DAY + HOUR),
+    ];
+    let inventory = inv(files);
+    let cfg = Maintenance::new(
+        vec![secs(30)],
+        secs(24 * 3600),
+        secs(24 * 3600),
+        L0Retention::After(secs(300)),
+    )
+    .unwrap();
+    let del = |now: i64| match retention(&inventory, at(now), &cfg, None) {
+        Retention::Delete(job) => job.keys().to_vec(),
+        Retention::Wait { .. } | Retention::Held(_) => Vec::new(),
+    };
+    let high = del(T0 + 4 * DAY + HOUR);
+    let low = del(T0 + 2 * DAY + 12 * HOUR);
+    let l0 = key(0, 18, 21);
+    assert!(!high.contains(&l0), "high anchor: {high:?}");
+    assert!(high.contains(&key(1, 15, 19)), "high anchor: {high:?}");
+    assert!(low.contains(&l0), "low anchor: {low:?}");
+    assert!(!low.contains(&key(1, 15, 19)), "low anchor: {low:?}");
+}
+
+/// The property the module doc states: ticks against the current listing with
+/// a clock that steps back and forth, each job applied only in part (a batch
+/// delete that fails partway, a crash). After every tick the newest state
+/// restores, and every transaction at or above the highest first-retained
+/// snapshot seen so far that restored at the start still restores, or is
+/// inside a kept file whose end restores. Instants are checked per tick
+/// (`check_instants`) on sane stamps.
+#[test]
+fn a_wobbling_clock_with_partial_deletes_loses_nothing_retained() {
+    let mut x = Xs(0x7a11_c10c);
+    let mut deleted_total = 0usize;
+    for case in 0..1500u64 {
+        let shape = [
+            Shape::Writer,
+            Shape::Misaligned,
+            Shape::Overlapping,
+            Shape::Backwards,
+        ][usize::try_from(case % 4).unwrap()];
+        let files = gen_listing(&mut x, shape);
+        let cfg = &configs()[usize::try_from(case / 4 % 4).unwrap()];
+        let start = inv(files.clone());
+        let Some(newest) = start.newest() else {
+            continue;
+        };
+        let newest_ms = newest_stamp(&files);
+        let mut lo_max = Txid::MIN;
+        let mut current = start.clone();
+        let nows = anchors(&files, cfg);
+        for _tick in 0..12 {
+            let now = x.pick(&nows).min(newest_ms + DAY);
+            let Retention::Delete(job) = retention(&current, at(now), cfg, None) else {
+                continue;
+            };
+            let (lo, _) = retained_from(&current, at(now), cfg).unwrap();
+            lo_max = lo_max.max(lo);
+            let part: Vec<FileKey> = job
+                .keys()
+                .iter()
+                .copied()
+                .filter(|_| x.below(3) != 0)
+                .collect();
+            deleted_total += part.len();
+            let after = without(&current, &part);
+            assert!(
+                restores(&plan(&after, RestoreTarget::Latest), newest),
+                "latest lost: case {case}"
+            );
+            if shape != Shape::Backwards && shape != Shape::Overlapping {
+                check_instants(&current, &after, lo);
+            }
+            current = after;
+            for raw in lo_max.get()..=newest.get() {
+                let t = Txid::new(raw).unwrap();
+                if restores(&plan(&start, RestoreTarget::Txid(t)), t) {
+                    let p = plan(&current, RestoreTarget::Txid(t));
+                    assert!(
+                        restores(&p, t) || inside_a_kept_file(&current, t),
+                        "case {case} {shape:?}: {t} (>= {lo_max}) lost: {p:?}; start {:?}",
+                        start
+                            .files()
+                            .iter()
+                            .map(|f| (f.key, f.created_at.unix_millis() - T0))
+                            .collect::<Vec<_>>()
+                    );
+                }
+            }
+        }
+    }
+    println!("deleted {deleted_total} keys");
+    assert!(deleted_total > 1000);
+}

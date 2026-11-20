@@ -20,12 +20,27 @@
 //! measured from the anchor, `min(now, newest stamp in the listing)`, computed
 //! afresh on every call. A clock that jumps ahead deletes nothing the
 //! replica's own newest stamp would not, and a clock behind only makes files
-//! look young. The anchor is deliberately not remembered: a lower anchor only
-//! ever deletes less, while a remembered high one would keep deleting on the
-//! strength of one bad clock reading. The cost of a clock that steps back is
-//! a snapshot kept after an earlier job cut the level-0 chain behind it;
-//! a restore goes through the newer snapshot and loses nothing. Go on S3 uses the upload
-//! time (`LastModified`), never earlier than the header stamp, so Go keeps
+//! look young. The anchor is deliberately not remembered: a remembered high one
+//! would keep deleting on the strength of one bad clock reading. What holds
+//! instead:
+//! - Every job is computed against the listing it was given and is
+//!   restore-safe for the range its anchor promises: from the first retained
+//!   snapshot up.
+//! - Any subset of a job is as safe as the whole job, so a partial
+//!   `DeleteObjects` or a crash between deletes loses nothing retained.
+//! - The promised range only shrinks as the anchor rises, so a clock that
+//!   steps back promises a wider range than the last job did and never
+//!   weakens what an earlier job kept.
+//! - The rules are not monotone in the anchor: a lower anchor can delete a
+//!   file a higher one keeps. A level-0 file straddling the high anchor's
+//!   floor stays (not under it, not covered), but at a lower anchor the level
+//!   1 file below that floor is kept, covers it, and the level-0 file goes.
+//!   The test `a_lower_anchor_can_delete_a_level_zero_file_a_higher_one_keeps`
+//!   pins the example.
+//!
+//! The cost of a clock that steps back is a snapshot kept after an earlier job
+//! cut the level-0 chain behind it; a restore goes through the newer snapshot
+//! and loses nothing. Go on S3 uses the upload time (`LastModified`), never earlier than the header stamp, so Go keeps
 //! these files at least as long as this code does.
 //!
 //! Rules, in the order they are computed:
