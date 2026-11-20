@@ -1,0 +1,2 @@
+# Branches each add a `mod` and a `pub use` line here; keep both sides and let the gate judge the result.
+crates/core/src/lib.rs merge=union
