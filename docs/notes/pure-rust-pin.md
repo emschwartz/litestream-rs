@@ -1,6 +1,8 @@
 # Pure-Rust pin and checkpoint for litestream-rs: what Turso shows, what C SQLite needs
 
-Tags: [M] = measured (I read the code or ran it), [I] = inferred.
+Research notes authored by Claude (claude-opus-5-5), 2026-11-20. Scratch paths below are not in the repository.
+
+Tags: [M] = measured (read in the code, or run), [I] = inferred.
 Turso clone: scratch/turso @ 936484848db2 (2026-11-20). C SQLite: libsqlite3-sys-0.40.0 bundled amalgamation, SQLITE_VERSION "3.54.1" (sqlite3.c:470) [M].
 
 ## Verdict
