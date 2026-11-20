@@ -4,14 +4,14 @@
 
 **Spec:** `docs/PLAN.md` (phase 3; section 3 types; section 6 host integration). Rules: `AGENTS.md`. Research: `docs/notes/pure-rust-pin.md` (the pin and the checkpoint against C SQLite). Upstream (read-only): `.upstream/litestream` (`db.go`, `wal_reader.go`, `replica.go`, `store.go`), and SQLite 3.54.1's `sqlite3.c` from the bundled `libsqlite3-sys` (line numbers below are from that file, as in the research note).
 
-Status: draft. Phase 2's exit items (handoff issue #1: the level 1 crash window, the level 9 scenario, the nightly seeds, `core` mutants) land first. Section "Open decisions" is the owner's; no task that depends on one starts before it is ruled.
+Status: draft. Phase 2's exit items (handoff issue #1: the level 1 crash window, the level 9 scenario, the nightly seeds, `core` mutants) land first. Section "Open decisions" is the owner's; no task that depends on one starts before it is ruled. Decisions already ruled are listed under "Rulings".
 
 ## Global constraints
 The constraints of the phase 1 and phase 2 plans apply unchanged. In addition:
 - **No descriptor on the database file or its `-shm` is ever opened and closed by this library.** Closing any descriptor on a file drops every POSIX lock the process holds on it, the host's SQLite locks included (howtocorrupt §2.2). Database pages and the wal-index are read through SQLite's own file handle (`SQLITE_FCNTL_FILE_POINTER`, then the handle's `xRead` and `xShmMap`), or through descriptors opened once and never closed until the process ends. The `-wal` file may be opened with `std::fs`: SQLite takes no POSIX lock on it. `crates/sqlite/clippy.toml` disallows `std::fs::File::open`, `std::fs::OpenOptions::open` and `std::fs::read` in that crate; the WAL open is the one `#[expect(clippy::disallowed_methods, reason = …)]`.
 - `unsafe` stays inside `lsr-sqlite`, one reasoned `#[expect(unsafe_code)]` per site, each with a test that reaches it.
 - The checkpoint stays with SQLite (`sqlite3_wal_checkpoint_v2`), whatever backend holds the pin. The research note sizes a pure-Rust checkpoint at 1,200 to 1,800 lines against a protocol SQLite fixed a corruption race in during 2026; it is out of scope.
-- Every real-SQLite test that can run against both pin backends does (task 4's harness is generic over the backend).
+- Task 4's harness stays generic over the backend that holds the pin, so a later pure-Rust pin (#9) runs the same suite unchanged.
 - No async runtime enters the workspace. The actor thread drives `Actor::tick` with the same small executor the CLI uses.
 
 ## Review focus
@@ -22,14 +22,10 @@ The constraints of the phase 1 and phase 2 plans apply unchanged. In addition:
 5. A handover (Go to Rust or Rust to Go) that snapshots when the WAL was intact, or continues when it was not.
 
 ## Task order
-0 (spikes) first; its answers can change tasks 1 and 2. Then 1 (the SQLite backend) and 3 (the page checksum table, pure core) in parallel. 2 (the pure-Rust pin) only if the owner rules for it, after 1. 4 (the real-SQLite fault suite) after 1. 5 (recovery from the bucket) after 3. 6 (actor thread and public API) after 1 and 5. 7 (compat in all four directions, the alternation test) after 6. 8 (the upstream-test ledger) can start any time and closes last. 9 (the 72-hour Tigris soak) runs on the machine with the credentials, after 7.
+0 (spikes) first; its answers can change task 1. Then 1 (the SQLite backend) and 3 (the page checksum table, pure core) in parallel. 4 (the real-SQLite fault suite) after 1. 5 (recovery from the bucket) after 3. 6 (actor thread and public API) after 1 and 5. 7 (compat in all four directions, the alternation test) after 6. 8 (the upstream-test ledger) can start any time and closes last. 9 (the 72-hour Tigris soak) runs on the machine with the credentials, after 7.
 
 ## Open decisions (the owner's)
 
-- **O1, which backend holds the pin.** Both sit behind `WalSource` and `Checkpointer`, so this is a choice of implementation, not of API.
-  - **A, a SQLite read transaction** on the library's own connection (what `LiveSqlite` does today, and Go). SQLite manages its own locks, so there is no protocol to copy. The cost: a reader on a fully backfilled WAL takes read mark 0, and mark 0 does not block a WAL restart (walformat.html), so ruling F1's continuity proof and its tripwire carry the correctness.
-  - **B, a pure-Rust pin**: open `-shm` once, take an OFD shared lock on DMS, choose or claim a read-mark slot of 1 or more, hold its shared lock (research note, sections 4A and 5; about 300 to 450 lines plus tests). A slot of 1 or more blocks every restart and every RESTART or TRUNCATE checkpoint, so the mark-0 case disappears. The costs: OFD locks only (Linux; macOS measured, Linux not yet), raw `fcntl` in `unsafe`, read marks written into a file SQLite owns, and the host's TRUNCATE returns busy while pinned, so pins must be short.
-  - Recommendation: build A first (task 1 needs it for the checkpoint anyway), keep B as task 2 behind the same traits, and decide after spike S2 and task 4's suite have run against A. Choose B only if the suite or the simulator finds a mark-0 case F1 does not cover.
 - **O2, where the page checksum table lives across a restart.** In memory it is lost at every boot (task 3).
   - **Rebuild at boot** by reading every database page once. Simple; costs one full read of the database per boot (task 3 measures it); a page corrupted while the process was down is trusted from then on.
   - **Persist** it in the meta directory (a new file beside Go's layout, with its own checksum), updated at each staged commit. Boot is cheap, and corruption while down is caught. Costs: one more file to keep consistent with the staging directory, and spike S5 must show Go ignores the file.
@@ -37,6 +33,7 @@ The constraints of the phase 1 and phase 2 plans apply unchanged. In addition:
 
 ## Rulings
 
+- **P0 (O1, ruled by the owner 2026-11-20): a SQLite read transaction holds the pin**, on the library's own connection, as Go and `LiveSqlite` do. SQLite manages its own locks, so there is no lock protocol to copy, and the checkpoint needs that connection anyway. The known cost: a reader on a fully backfilled WAL takes read mark 0, which does not block a WAL restart (walformat.html), so ruling F1's continuity proof and its tripwire carry correctness in that case. The alternative, a pure-Rust pin on a read-mark slot of 1 or more (`docs/notes/pure-rust-pin.md`, sections 4A and 5), is deferred to #9, to be built if task 4 or the simulator finds a mark-0 case F1 does not cover.
 - **P1, a database page that does not match the table: halt.** `Fault::DatabasePageMismatch { pgno }`, policy `Halt(HaltCause::DatabaseCorrupt { pgno })`. A resnapshot would read the same page, and uploading it would put corruption into every later restore. The event names the page; nothing is uploaded from the read that found it.
 - **P2, an unexplained WAL rewind: F2 stands.** Same salts with the committed end below the synced end is `Snapshot { cause: LocalRewound }` plus the event, as phase 2 ruled. A different-salts rewind is F1's case. No new outcome.
 - **P3, TRUNCATE needs the host's word.** `decide()` takes `Readers { Idle, Pinned, Unknown }` from the host's signal (task 6); TRUNCATE runs only on `Idle`. `Unknown` (no signal given) behaves as `Pinned`, so a host that says nothing never sees a TRUNCATE. PASSIVE is unchanged.
@@ -50,10 +47,8 @@ The constraints of the phase 1 and phase 2 plans apply unchanged. In addition:
 
 Each spike answers one question with a measurement on Linux at SQLite 3.54.1, the way the phase 0 spikes did:
 - **S1, the wal-index through SQLite's own mapping.** `SQLITE_FCNTL_FILE_POINTER` on the reader connection, then `pMethods->xShmMap(file, 0, 32768, 0, &p)`: does it return the region the host's connections use, without a new descriptor, and can both header copies plus `nBackfill` be read from it under the read lock with the same results as `LiveSqlite`'s file reads? If not, the fallback is one `-shm` descriptor opened at start and never closed.
-- **S2, OFD against same-process SQLite on Linux.** The research note measured macOS only. Repeat its test (an OFD shared lock on a read-mark byte, then a same-process `F_SETLK F_WRLCK` from SQLite's side must fail) on Linux, and confirm `close()` of another descriptor leaves the OFD lock.
-- **S3, `SQLITE_ENABLE_SETLK_TIMEOUT`.** Is the bundled `libsqlite3-sys` built with it? If so, SQLite's `F_SETLKW` would block against an OFD lock instead of returning busy, which changes B's busy story.
 - **S4, `PRAGMA wal_checkpoint(NOOP)`.** Does it return mxFrame and nBackfill from one header read, and can the salts be had from the same read? If not, S1's mapping is the committed-end source.
-- **S5, Go and an extra meta-directory file.** Does Go v0.5.16, v0.5.18 and Head start, sync and restart with an unknown file in `<meta>/`? Needed only if O2 is ruled "persist".
+- **S5, Go and an extra meta-directory file.** Does Go v0.5.16, v0.5.18 and Head start, sync and restart with an unknown file in `<meta>/`? Needed only if O2 is ruled "persist". (The pure-Rust pin's spikes, OFD on Linux and `SETLK_TIMEOUT`, are listed in #9.)
 
 ### Task 1: `lsr-sqlite`, the rusqlite backend (branch `sqlite-backend`)
 
@@ -74,15 +69,9 @@ Each spike answers one question with a measurement on Linux at SQLite 3.54.1, th
 
 **Tests:** `crates/compat/tests/live_source.rs` unchanged (the outside-checkpoint cases, the pin cases, `live_sync_chain_restores`); one test per error variant; the descriptor test of semantics 1; the host-connection helpers on a pooled connection (four connections, each checked).
 
-### Task 2: the pure-Rust pin (branch `rust-pin`; only if O1 is ruled B)
+### Task 2: deferred
 
-**Files:** `crates/sqlite/src/pin/{mod,ofd,shm}.rs`. Touch nothing outside `crates/sqlite` except the generic harness of task 4, which gains this backend.
-
-**Produces:** `RustPin`, a `WalSource` that pins with an OFD lock on a read-mark slot of 1 or more, paired with task 1's connection for `Checkpointer` (the checkpoint stays with SQLite). The research note's steps, section 4A: open `-shm` once and never close it; shared OFD lock on DMS; read both header copies, compare, verify the checksum, `isInit`, `iVersion == 3007000` (any other version refuses, as SQLite does); read `nBackfill` and the marks; choose a slot of 1 or more whose mark is at most mxFrame, or claim one (exclusive lock, write the mark at `100 + 4n`, downgrade); take its shared lock; read the header again and confirm it is unchanged, else retry within a bound.
-
-**Semantics:** an invalid header (no connection yet, or a crash) is `SourceError::Busy` and the host's connection runs recovery; this library never runs recovery and never truncates `-shm`. Every `fcntl` call is behind one function with `#[expect(unsafe_code)]`.
-
-**Tests:** task 4's suite over this backend; a pin held while the host's connection runs `wal_checkpoint(RESTART)` and `TRUNCATE` (both busy, salts unchanged), and the same with the WAL fully backfilled (where a mark-0 SQLite reader would not block); a stale mark left by a killed process is reclaimed.
+The pure-Rust pin is not part of phase 3 (ruling P0); it is tracked in #9. The number is kept so the task references below stay stable.
 
 ### Task 3: the page checksum table (branch `page-table`)
 
@@ -103,7 +92,7 @@ Each spike answers one question with a measurement on Linux at SQLite 3.54.1, th
 
 **Produces:**
 - `FaultVfs`: a VFS registered under its own name that delegates to `unix` and injects, on a schedule: an error on read, write, sync, truncate or lock; a short write; and "power loss", which drops every write since the last `xSync` of that file. `SQLITE_TESTCTRL_PRNG_SEED` pins WAL salts so runs replay.
-- A harness generic over the backend (task 1, and task 2 if built): the actor over the backend, an `FsStore` replica, the simulator's oracle (`lsr_sim::oracle::check` over restored page hashes at every acknowledged txid).
+- A harness generic over the backend (task 1's today; #9's if it is built): the actor over the backend, an `FsStore` replica, the simulator's oracle (`lsr_sim::oracle::check` over restored page hashes at every acknowledged txid).
 
 **Tests** (each case names the upstream fix or SQLite belief it checks, where there is one):
 - Each injected fault at each step of a sync, a PASSIVE and a TRUNCATE cycle: the outcome is the fault's policy, and the oracle holds afterwards.
@@ -164,7 +153,7 @@ A synthetic writer (the compat workload at a steady rate, with VACUUMs and outsi
 
 | PLAN phase 3 exit item | Task |
 | --- | --- |
-| The fault suite is green | 4 (over both backends if 2 is built) |
+| The fault suite is green | 4 |
 | The upstream-test ledger is green | 8 |
 | Handover both ways without a snapshot when the WAL is intact | 5, 7 |
 | The alternation test with SIGKILL at a random point in each handover | 7 |
