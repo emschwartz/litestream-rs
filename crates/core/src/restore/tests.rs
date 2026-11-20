@@ -1077,3 +1077,23 @@ proptest! {
         assert_matches_model(&model, model.states.len(), &sink.published().unwrap());
     }
 }
+
+/// A sink error names the operation that failed; the words are what an
+/// operator reads.
+#[test]
+fn a_sink_operation_prints_what_it_was_doing() {
+    let printed: Vec<String> = [
+        SinkOp::WritePage,
+        SinkOp::Truncate,
+        SinkOp::Reset,
+        SinkOp::Checksum,
+        SinkOp::Publish,
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    assert_eq!(
+        printed,
+        ["write a page", "truncate", "reset", "checksum", "publish"]
+    );
+}
