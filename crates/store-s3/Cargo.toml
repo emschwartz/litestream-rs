@@ -12,25 +12,25 @@ publish.workspace = true
 testing = []
 
 [dependencies]
-lsr-core = { path = "../core" }
-lsr-ltx = { path = "../ltx" }
-base64 = { version = "0.23", default-features = false, features = ["alloc"] }
-jiff = { version = "0.2", default-features = false, features = ["std"] }
-md-5 = { version = "0.11", default-features = false }
-percent-encoding = "2"
-rusty-s3 = { version = "0.11", default-features = false, features = ["rustcrypto", "full"] }
-thiserror = "2"
-ureq = { version = "3", default-features = false, features = ["rustls"] }
-url = "2"
-zeroize = "1"
+lsr-core.workspace = true
+lsr-ltx.workspace = true
+base64.workspace = true
+jiff.workspace = true
+md-5.workspace = true
+percent-encoding.workspace = true
+rusty-s3.workspace = true
+thiserror.workspace = true
+ureq.workspace = true
+url.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
-lsr-core = { path = "../core", features = ["testing"] }
+lsr-core = { workspace = true, features = ["testing"] }
 # Integration tests need FakeS3 and the fault layer, which sit behind the feature.
-lsr-store-s3 = { path = ".", features = ["testing"] }
-proptest = "1"
+lsr-store-s3 = { workspace = true, features = ["testing"] }
+proptest = { workspace = true, features = ["default"] }
 # The recover count names the WAL reader type its None argument needs.
-lsr-wal = { path = "../wal" }
+lsr-wal.workspace = true
 
 [lints]
 workspace = true

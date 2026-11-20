@@ -16,10 +16,10 @@ workspace = true
 testing = []
 
 [dependencies]
-crc = "3.4.0"
-lz4_flex = { version = "0.14.2", default-features = false, features = ["std", "safe-decode", "safe-encode"] }
-thiserror = "2.0.21"
+crc.workspace = true
+lz4_flex.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
-proptest = { version = "1.12.0", default-features = false, features = ["std"] }
-sha2 = "0.11.1"
+proptest.workspace = true
+sha2.workspace = true

@@ -12,20 +12,20 @@ name = "lsr"
 path = "src/main.rs"
 
 [dependencies]
-lsr-core = { path = "../core" }
-lsr-local = { path = "../local" }
-lsr-ltx = { path = "../ltx" }
-lsr-store-fs = { path = "../store-fs" }
-lsr-store-s3 = { path = "../store-s3" }
-thiserror = "2"
+lsr-core.workspace = true
+lsr-local.workspace = true
+lsr-ltx.workspace = true
+lsr-store-fs.workspace = true
+lsr-store-s3.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
-lsr-compat = { path = "../compat" }
-lsr-core = { path = "../core", features = ["testing"] }
+lsr-compat.workspace = true
+lsr-core = { workspace = true, features = ["testing"] }
 # FakeS3 drives the S3 path in-process; it sits behind the feature.
-lsr-store-s3 = { path = "../store-s3", features = ["testing"] }
-serde_json = "1"
-tempfile = "3"
+lsr-store-s3 = { workspace = true, features = ["testing"] }
+serde_json.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

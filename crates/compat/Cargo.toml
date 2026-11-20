@@ -11,18 +11,18 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-lsr-core = { path = "../core", features = ["testing"] }
-lsr-local = { path = "../local" }
-lsr-ltx = { path = "../ltx" }
-lsr-store-fs = { path = "../store-fs" }
-lsr-wal = { path = "../wal" }
-rusqlite = { version = "0.43", features = ["bundled"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha2 = "0.11"
-tempfile = "3"
-thiserror = "2"
+lsr-core = { workspace = true, features = ["testing"] }
+lsr-local.workspace = true
+lsr-ltx.workspace = true
+lsr-store-fs.workspace = true
+lsr-wal.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
-lsr-sim = { path = "../sim" }
-proptest = { version = "1.12.0", default-features = false, features = ["std"] }
+lsr-sim.workspace = true
+proptest.workspace = true

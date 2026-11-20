@@ -35,7 +35,7 @@
 - `just check` is the land gate: format, clippy, tests. Scope while iterating: `cargo clippy -p <crate> --all-targets -- -D warnings`, `cargo nextest run -p <crate> <test name>`.
 - `just upstream` clones the pinned upstream sources into `.upstream/` (read-only reference: `litestream` at 041a8c3, `ltx` at v0.5.3).
 - Crates live in `crates/<name>` and are named `lsr-<name>` (working prefix).
-- New dependencies: prefer none. Each one is named in the report with why and its license.
+- New dependencies: prefer none. Each one is named in the report with why and its license. Every dependency, external or `lsr-*`, is declared once in the root `[workspace.dependencies]` and referenced as `name.workspace = true`; a crate may add features, never a version or path. (The `fuzz/` crate is outside the workspace and keeps its own.)
 
 ## Branches and landing
 - `main` stays green. Work happens on a branch in a worktree under `.worktrees/<name>` (`just spawn <name>`, from the main checkout), with its own `CARGO_TARGET_DIR` left at the default inside the worktree.

@@ -8,13 +8,13 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-lsr-core = { path = "../core" }
-lsr-ltx = { path = "../ltx" }
-thiserror = "2"
+lsr-core.workspace = true
+lsr-ltx.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
-lsr-core = { path = "../core", features = ["testing"] }
-tempfile = "3"
+lsr-core = { workspace = true, features = ["testing"] }
+tempfile.workspace = true
 
 [lints]
 workspace = true

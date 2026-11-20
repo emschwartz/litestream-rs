@@ -10,6 +10,35 @@ rust-version = "1.100"
 license = "Apache-2.0"
 publish = false
 
+# Every dependency is declared here once and referenced with `workspace = true`;
+# a crate adds features on top, never a version.
+[workspace.dependencies]
+lsr-compat = { path = "crates/compat" }
+lsr-core = { path = "crates/core" }
+lsr-local = { path = "crates/local" }
+lsr-ltx = { path = "crates/ltx" }
+lsr-sim = { path = "crates/sim" }
+lsr-store-fs = { path = "crates/store-fs" }
+lsr-store-s3 = { path = "crates/store-s3" }
+lsr-wal = { path = "crates/wal" }
+base64 = { version = "0.23", default-features = false, features = ["alloc"] }
+crc = "3.4.0"
+jiff = { version = "0.2", default-features = false, features = ["std"] }
+lz4_flex = { version = "0.14.2", default-features = false, features = ["std", "safe-decode", "safe-encode"] }
+md-5 = { version = "0.11", default-features = false }
+percent-encoding = "2"
+proptest = { version = "1.12.0", default-features = false, features = ["std"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
+rusty-s3 = { version = "0.11", default-features = false, features = ["rustcrypto", "full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11.1"
+tempfile = "3"
+thiserror = "2.0.21"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+url = "2"
+zeroize = "1"
+
 # The lint set is strict by design, plus the four marked "port" below. Gates run with
 # `-D warnings`, so every "warn" here fails a land.
 [workspace.lints.clippy]
