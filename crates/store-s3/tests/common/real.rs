@@ -35,16 +35,8 @@ pub fn part(h: &RealHarness) -> usize {
     }
 }
 
-pub struct WallClock;
-
-impl Clock for WallClock {
-    fn now(&self) -> Timestamp {
-        let millis = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(0));
-        Timestamp::from_unix_millis(millis)
-    }
-}
+/// The store's own wall clock: these suites sign against a real server's clock.
+pub use lsr_store_s3::SystemClock as WallClock;
 
 /// One server and its throwaway credentials. No Debug: the secret must not print.
 #[derive(Clone)]
@@ -189,6 +181,10 @@ pub struct RealHarness {
     agent: ureq::Agent,
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a run prefix unique across runs against a real bucket"
+)]
 fn unique_prefix(server: &Server) -> Prefix {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
@@ -322,6 +318,10 @@ impl RealHarness {
     }
 
     /// The presigned URL and the headers that were signed with it.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "signs raw requests against a real server's clock"
+    )]
     fn sign<'a>(
         &self,
         method: &str,

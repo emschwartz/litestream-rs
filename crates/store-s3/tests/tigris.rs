@@ -379,6 +379,7 @@ mod tigris {
 
     #[test]
     #[ignore = "needs a Tigris bucket (just test-tigris)"]
+    #[expect(clippy::disallowed_methods, reason = "measures real request latency")]
     fn item9_head_latency_from_this_machine() {
         let h = h();
         let keys: Vec<_> = (1..=20).map(|n| h.key(0, n, n)).collect();

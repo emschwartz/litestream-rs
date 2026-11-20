@@ -6,3 +6,14 @@ allow-dbg-in-tests = true
 
 # TigerStyle's limit (decision D5). Reviewed at phase 1 exit: see docs/PLAN.md.
 too-many-lines-threshold = 70
+
+# Time and sleep come in through `Clock`, `Sleeper` and the tick's `now`, so the
+# simulator and tests can stub them (PLAN.md section 2, goal 5). The few sites
+# that are the real clock, or a test waiting on a real process, carry a reasoned
+# `#[expect(clippy::disallowed_methods)]`.
+disallowed-methods = [
+    { path = "std::time::SystemTime::now", reason = "take a `Clock` (lsr_core::Clock) or the tick's `now`" },
+    { path = "std::time::Instant::now", reason = "take a `Clock`, or a deadline from the caller" },
+    { path = "std::thread::sleep", reason = "take a `Sleeper` (lsr_core::Sleeper)" },
+    { path = "jiff::Timestamp::now", reason = "take a `Clock` (lsr_core::Clock)" },
+]

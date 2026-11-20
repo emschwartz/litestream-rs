@@ -73,11 +73,17 @@ pub(crate) struct Inner<T> {
     pub(crate) orphans: Orphans,
 }
 
-/// The wall clock, for the store that talks to a real bucket (signatures
-/// expire against the server's clock).
-struct SystemClock;
+/// The wall clock, for a store that talks to a real bucket (signatures expire
+/// against the server's clock). [`S3Store::new`] and [`S3Store::over`] use it;
+/// [`S3Store::with_transport`] takes it, or a fake, explicitly.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SystemClock;
 
 impl Clock for SystemClock {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "this is the real clock every other component takes as a `Clock`"
+    )]
     fn now(&self) -> Timestamp {
         let millis = SystemTime::now()
             .duration_since(UNIX_EPOCH)

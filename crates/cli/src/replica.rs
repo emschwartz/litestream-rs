@@ -31,6 +31,10 @@ use lsr_core::{FileInfo, StoredStamp};
 pub struct ThreadSleeper;
 
 impl Sleeper for ThreadSleeper {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "this is the real sleeper the retry layer takes as a `Sleeper`"
+    )]
     async fn sleep(&self, wait: Duration) {
         thread::sleep(wait);
     }

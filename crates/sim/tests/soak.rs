@@ -31,6 +31,10 @@ mod soak {
 
     #[test]
     #[ignore = "runs for LSR_SIM_SECONDS; use `just sim-soak` or `just sim-nightly`"]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the soak runs for a wall-clock budget; each run uses simulated time"
+    )]
     fn rotating_seeds() {
         let base = base();
         let seconds: u64 = std::env::var("LSR_SIM_SECONDS")

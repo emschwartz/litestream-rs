@@ -333,6 +333,10 @@ fn go_compacts_and_prunes_a_rust_replica() {
     }
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "measures a real Go process's uptime against its own intervals"
+)]
 fn compacts_and_prunes(build: &GoBuild) {
     let written = write_chain(COMMITS, 4096, 11);
     let bin = build.binary().expect("the build under test is present");

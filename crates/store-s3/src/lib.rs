@@ -45,7 +45,7 @@ pub use response::{
     EtagCheck, Head, ListPage, ListedFile, ResponseError, check_etag, hex, parse_complete,
     parse_create, parse_delete_failures, parse_head, parse_list, quoted_md5,
 };
-pub use store::{ListStats, S3Store};
+pub use store::{ListStats, S3Store, SystemClock};
 pub use transport::{HttpResponse, Transport, TransportError};
 pub use upload::S3Upload;
 #[cfg(feature = "ureq")]

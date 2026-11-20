@@ -10,6 +10,10 @@ mod fixed {
     const STEPS: u32 = 300;
     const BUDGET: Duration = Duration::from_secs(10);
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "reports how long a batch of seeds takes; the runs themselves use simulated time"
+    )]
     fn batch(first: u64) {
         let started = Instant::now();
         for n in (first..).take(8) {

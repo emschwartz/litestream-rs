@@ -493,6 +493,10 @@ mod live_go {
 
     /// Waits until Go has staged a file past `above` and then nothing newer for a while. The
     /// WAL file's length cannot say where the log ends: SQLite reuses the file after a restart.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "waits on a real Go process, which keeps real time"
+    )]
     fn wait_quiet(
         go: &mut Replicator,
         meta: &Path,
@@ -665,6 +669,10 @@ mod live_go {
 
     /// Go writes 40 commits and stops. Returns the site, the txid Go stopped at and the pages
     /// the database held then.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "paces the app's commits for a real Go process polling the WAL; a known exception to the no-sleeps rule (AGENTS.md), to be replaced by a condition"
+    )]
     fn go_writes_and_stops(build: &GoBuild, config: &Path) -> (Site, u64, Vec<String>) {
         let bin = build.binary().expect("the build under test is present");
         let mut site = Site::create(4096, 33).expect("site");

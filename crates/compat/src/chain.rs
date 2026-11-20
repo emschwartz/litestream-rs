@@ -267,6 +267,10 @@ pub struct Chain {
 ///
 /// # Errors
 /// [`CompatError::Fixture`] when the system clock predates 1970.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the real time a Go process will see, to place a virtual clock before it"
+)]
 pub fn real_now_ms() -> Result<i64, CompatError> {
     let since = SystemTime::now()
         .duration_since(UNIX_EPOCH)

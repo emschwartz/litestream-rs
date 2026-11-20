@@ -13,6 +13,10 @@ const POLL: Duration = Duration::from_millis(20);
 ///
 /// # Errors
 /// [`CompatError::Timeout`] naming `what`, or whatever `cond` returned.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "waits on a real Go process, which keeps real time"
+)]
 pub fn wait_until(
     what: &str,
     timeout: Duration,

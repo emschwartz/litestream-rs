@@ -199,6 +199,10 @@ mod s3 {
         server.finish();
     }
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a run prefix unique across runs against a real bucket"
+    )]
     fn unique_prefix() -> String {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
