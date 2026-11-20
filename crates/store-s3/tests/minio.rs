@@ -22,9 +22,9 @@ mod minio {
     };
     use lsr_ltx::{Timestamp, Txid, TxidRange};
     use lsr_store_s3::{
-        BucketName, Endpoint, HttpRequest, HttpResponse, Prefix, RequestBuilder, S3Config,
-        S3Credentials, S3Store, SecretString, Transport, TransportError, UreqTransport, classify,
-        level_prefix, object_key,
+        BucketName, Endpoint, HttpRequest, HttpResponse, Prefix, RequestBuilder, S3Code, S3Config,
+        S3Credentials, S3Store, SecretString, Transport, TransportError, UploadId, UreqTransport,
+        classify, level_prefix, object_key,
     };
     use rusty_s3::S3Action;
 
@@ -371,5 +371,162 @@ mod minio {
         // Nothing was stored under the key.
         let read = block_on(h.store.read(&key, 0, ReadLen::new(16).unwrap()));
         assert_eq!(read, Err(StoreError::NotFound { key }));
+    }
+    const PART: usize = 5 * 1024 * 1024;
+
+    fn body(len: usize) -> Vec<u8> {
+        (0..=250).cycle().take(len).collect()
+    }
+
+    impl MinioHarness {
+        fn write_all(&self, key: &FileKey, stamp: Timestamp, bytes: &[u8], chunk: usize) {
+            block_on(async {
+                let mut upload = self.store.begin_upload(key, stamp).await.unwrap();
+                for piece in bytes.chunks(chunk) {
+                    upload.write(piece).await.unwrap();
+                }
+                upload.commit().await.unwrap();
+            });
+        }
+
+        fn read_back(&self, key: &FileKey, len: usize) -> Vec<u8> {
+            let want = u32::try_from(len).unwrap();
+            block_on(self.store.read(key, 0, ReadLen::new(want).unwrap())).unwrap()
+        }
+
+        /// ListMultipartUploads under this test's prefix, which no store call makes.
+        fn open_uploads(&self) -> usize {
+            // rusty-s3 has no ListMultipartUploads action, so the query is signed by hand.
+            // MinIO ignores `prefix` here, so the listing is bucket-wide and the
+            // count keeps only this test's keys.
+            let base = url::Url::parse(&format!("{}/{BUCKET}/", self.endpoint)).unwrap();
+            let mine = format!("<Key>{}/", self.prefix.as_str());
+            let query = [("uploads", "")];
+            let url = rusty_s3::signing::sign(
+                &jiff::Timestamp::now(),
+                rusty_s3::Method::Get,
+                base,
+                &self.access,
+                &self.secret,
+                None,
+                "us-east-1",
+                60,
+                query.into_iter(),
+                std::iter::empty(),
+            );
+            let mut response = ureq::get(url.as_str())
+                .config()
+                .http_status_as_error(false)
+                .build()
+                .call()
+                .unwrap();
+            let status = response.status().as_u16();
+            let text = response.body_mut().read_to_string().unwrap();
+            assert_eq!(status, 200, "{text}");
+            text.matches(mine.as_str()).count()
+        }
+    }
+
+    #[test]
+    fn multipart_round_trip_on_minio() {
+        let Some(h) = MinioHarness::connect() else {
+            return;
+        };
+        let key = h.key(0, 1, 1);
+        let len = PART * 5 / 2;
+        let bytes = body(len);
+        h.write_all(&key, at("2024-05-01T12:00:00.123Z"), &bytes, 1_500_003);
+        assert!(h.read_back(&key, len) == bytes);
+        let listed = h.list_all(0, 10);
+        let [file] = listed.files.as_slice() else {
+            panic!("one file expected: {listed:?}");
+        };
+        assert_eq!(file.size, u64::try_from(len).unwrap());
+        assert_eq!(file.created_at, at("2024-05-01T12:00:00.123Z"));
+        assert_eq!(h.open_uploads(), 0);
+        assert_eq!(h.store.pending_orphans(), 0);
+    }
+
+    #[test]
+    fn part_size_boundary_on_minio() {
+        let Some(h) = MinioHarness::connect() else {
+            return;
+        };
+        for (n, len) in [(1, PART), (2, PART - 1), (3, PART + 1), (4, PART * 2)] {
+            let key = h.key(0, n, n);
+            let bytes = body(len);
+            h.write_all(&key, Timestamp::from_unix_millis(9), &bytes, PART);
+            assert!(h.read_back(&key, len) == bytes, "length {len}");
+        }
+        assert_eq!(h.open_uploads(), 0);
+    }
+
+    #[test]
+    fn dropped_multipart_is_invisible_then_aborted_on_minio() {
+        let Some(h) = MinioHarness::connect() else {
+            return;
+        };
+        block_on(async {
+            let mut upload = h
+                .store
+                .begin_upload(&h.key(0, 1, 1), Timestamp::from_unix_millis(9))
+                .await
+                .unwrap();
+            upload.write(&body(PART)).await.unwrap();
+        });
+        assert!(h.list_all(0, 10).files.is_empty());
+        assert_eq!(h.open_uploads(), 1);
+        assert_eq!(h.store.pending_orphans(), 1);
+        assert_eq!(h.store.abort_orphans().unwrap(), 1);
+        assert_eq!(h.open_uploads(), 0);
+    }
+
+    #[test]
+    fn abort_on_minio_leaves_nothing() {
+        let Some(h) = MinioHarness::connect() else {
+            return;
+        };
+        block_on(async {
+            let mut upload = h
+                .store
+                .begin_upload(&h.key(0, 1, 1), Timestamp::from_unix_millis(9))
+                .await
+                .unwrap();
+            upload.write(&body(PART)).await.unwrap();
+            upload.abort().await.unwrap();
+        });
+        assert_eq!(h.open_uploads(), 0);
+        assert!(h.list_all(0, 10).files.is_empty());
+    }
+
+    #[test]
+    fn abort_of_an_unknown_upload_is_not_a_failure_on_minio() {
+        let Some(h) = MinioHarness::connect() else {
+            return;
+        };
+        let key = h.key(0, 1, 1);
+        let config = S3Config::new(
+            Endpoint::new(&h.endpoint).unwrap(),
+            BucketName::new(BUCKET).unwrap(),
+            h.prefix.clone(),
+        );
+        let credentials = S3Credentials::new(h.access.clone(), SecretString::new(h.secret.clone()));
+        let builder = RequestBuilder::new(&config, &credentials).unwrap();
+        let request = builder
+            .abort_multipart(
+                WallClock.now(),
+                &key,
+                &UploadId::new("no-such-id".to_owned()),
+            )
+            .unwrap();
+        let response = UreqTransport::new(config.deadline()).send(request).unwrap();
+        // MinIO answers 204 where S3 answers 404 NoSuchUpload; the store treats both as aborted.
+        let no_such = response.status() == 404
+            && S3Code::from_body(response.body()) == Some(S3Code::NoSuchUpload);
+        assert!(response.status() == 204 || no_such, "{}", response.status());
+        assert_eq!(
+            classify(StoreOp::Upload, Some(&key), None, &response),
+            Ok(())
+        );
     }
 }

@@ -16,6 +16,8 @@ use crate::transport::{HttpResponse, TransportError};
 pub enum S3Code {
     /// `NoSuchKey`.
     NoSuchKey,
+    /// `NoSuchUpload`: the multipart upload id is unknown (finished or aborted).
+    NoSuchUpload,
     /// `NoSuchBucket`.
     NoSuchBucket,
     /// `SlowDown`.
@@ -46,6 +48,7 @@ impl S3Code {
     pub fn from_name(name: &str) -> Self {
         match name {
             "NoSuchKey" => Self::NoSuchKey,
+            "NoSuchUpload" => Self::NoSuchUpload,
             "NoSuchBucket" => Self::NoSuchBucket,
             "SlowDown" => Self::SlowDown,
             "AccessDenied" => Self::AccessDenied,

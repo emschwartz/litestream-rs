@@ -21,6 +21,7 @@ use lsr_ltx::{Timestamp, TxidRange};
 use crate::classify::{classify, classify_transport, is_range_past_end};
 use crate::config::{ConfigError, PartSize, Prefix, S3Config};
 use crate::credentials::S3Credentials;
+use crate::orphans::Orphans;
 use crate::request::{HttpRequest, MAX_DELETE_KEYS, RequestBuilder, RequestError};
 use crate::response::parse_delete_failures;
 use crate::transport::{HttpResponse, Transport};
@@ -59,6 +60,7 @@ pub(crate) struct Inner<T> {
     prefix: Prefix,
     deadline: Duration,
     stats: Mutex<ListStats>,
+    pub(crate) orphans: Orphans,
 }
 
 /// The wall clock, for the store that talks to a real bucket (signatures
@@ -109,8 +111,25 @@ impl<T: Transport> S3Store<T> {
                 prefix: config.prefix().clone(),
                 deadline: config.deadline(),
                 stats: Mutex::new(ListStats::default()),
+                orphans: Orphans::default(),
             }),
         })
+    }
+
+    /// Aborts the multipart uploads that were dropped or failed, oldest first
+    /// (ruling F3), and returns how many are settled. The first failure stops
+    /// the pass and keeps that upload and the rest listed.
+    ///
+    /// # Errors
+    /// The error of the first abort that failed.
+    pub fn abort_orphans(&self) -> Result<usize, StoreError> {
+        self.inner.abort_orphans()
+    }
+
+    /// How many abandoned multipart uploads await an abort (at most 64).
+    #[must_use]
+    pub fn pending_orphans(&self) -> usize {
+        self.inner.orphans.len()
     }
 
     /// The counts from the most recent `list` call, finished or failed.
@@ -145,6 +164,10 @@ impl<T: Transport> ObjectStore for S3Store<T> {
         key: &FileKey,
         created_at: Timestamp,
     ) -> Result<S3Upload<T>, StoreError> {
+        // Best effort: a failed abort keeps its id listed for the next try.
+        match self.inner.abort_orphans() {
+            Ok(_) | Err(_) => {}
+        }
         Ok(S3Upload::new(Arc::clone(&self.inner), *key, created_at))
     }
 

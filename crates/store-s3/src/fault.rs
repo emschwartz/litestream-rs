@@ -6,7 +6,8 @@
 //! Each variant models one provider behaviour: a throttle (503 SlowDown,
 //! 429 with Retry-After), Tigris shedding load with 408 (Go rc.go:596-626), a
 //! 500 that arrives after the object was published, a body that ends before
-//! its `Content-Length`, and Tigris accepting a Content-MD5 or checksum it did
+//! its `Content-Length`, an error document inside a 200, `Pass` to aim a fault at a
+//! later request of the same shape, and Tigris accepting a Content-MD5 or checksum it did
 //! not verify, so the ETag it returns belongs to other bytes. Nothing here
 //! prints a URL, a header value or a body.
 
@@ -98,6 +99,21 @@ pub enum Fault {
         /// The request shape it applies to.
         on: Shape,
     },
+    /// Answer 200 with an S3 error document instead of forwarding: S3 can fail
+    /// a CompleteMultipartUpload after it sent the 200 status line, so the
+    /// error arrives in the body. The request never reaches the bucket.
+    ErrorInOkBody {
+        /// The request shape it applies to.
+        on: Shape,
+        /// The S3 error code in the body.
+        code: &'static str,
+    },
+    /// Forward untouched. Consumes one request of the shape, so a script can
+    /// aim the next fault at the second request of that shape.
+    Pass {
+        /// The request shape it applies to.
+        on: Shape,
+    },
     /// No response at all.
     Transport {
         /// The request shape it applies to.
@@ -116,6 +132,8 @@ impl Fault {
             | Self::AfterPublish { on, .. }
             | Self::TruncateBody { on, .. }
             | Self::WrongEtag { on }
+            | Self::ErrorInOkBody { on, .. }
+            | Self::Pass { on }
             | Self::Transport { on, .. } => *on,
         }
     }
@@ -212,6 +230,8 @@ impl<T: Transport> Transport for FaultTransport<T> {
                 ..
             } => Ok(error_response(status, code, retry_after)),
             Fault::Transport { err, .. } => Err(err),
+            Fault::Pass { .. } => self.inner.send(request),
+            Fault::ErrorInOkBody { code, .. } => Ok(error_response(200, Some(code), None)),
             Fault::AfterPublish { status, .. } => {
                 self.inner.send(request)?;
                 Ok(error_response(status, None, None))

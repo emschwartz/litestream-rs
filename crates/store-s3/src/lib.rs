@@ -11,6 +11,8 @@ mod fake;
 #[cfg(feature = "testing")]
 mod fault;
 mod list;
+mod multipart;
+mod orphans;
 mod request;
 mod response;
 #[cfg(test)]
