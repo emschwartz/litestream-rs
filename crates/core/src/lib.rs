@@ -12,6 +12,7 @@ mod inventory;
 mod layout;
 mod mem;
 mod plan;
+mod restore;
 mod store;
 
 pub use inventory::{Inventory, InventoryError, is_snapshot_start};
@@ -21,6 +22,9 @@ pub use layout::{
 };
 pub use mem::{MemStore, MemUpload};
 pub use plan::{ContiguousChain, PlanOutcome, RestoreTarget, plan};
+#[cfg(any(test, feature = "testing"))]
+pub use restore::{Database, MemSink};
+pub use restore::{DatabaseSink, FileFault, MAX_ATTEMPTS, RestoreError, Restored, SinkOp, restore};
 pub use store::{
     CorruptCause, Listing, ObjectStore, PageLimit, ReadLen, StoreError, StoreOp, Upload,
     build_listing,

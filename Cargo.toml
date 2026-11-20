@@ -78,6 +78,10 @@ unused_dependencies = "deny"
 [profile.dev.package."*"]
 opt-level = 3
 
+# The codec decodes a million-page database in the lock-page restore test.
+[profile.dev.package.lsr-ltx]
+opt-level = 3
+
 [profile.dev]
 debug = 0
 strip = "none"

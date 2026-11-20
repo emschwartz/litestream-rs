@@ -17,6 +17,8 @@
 //!   directory sync failed after the rename. The caller's only safe move is to
 //!   list again and trust the listing.
 //! - Retrying is the caller's decision, made from the [`StoreError`] variant.
+//! - Every method returns within a deadline the implementation enforces, failing as
+//!   `Transient`; core holds no timer.
 
 use std::fmt;
 use std::future::Future;
