@@ -413,7 +413,12 @@ impl Runner {
             return Ok(());
         }
         // The tick ended first: the machine fails right after it instead.
-        self.w.crash(kind);
+        let lost = self.w.crash(kind);
+        if self.trace {
+            self.report
+                .trace
+                .push(format!("    then crashed: {kind:?}, lost: {lost:?}"));
+        }
         self.crashed(kind);
         Ok(())
     }
