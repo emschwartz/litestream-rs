@@ -8,12 +8,17 @@
 //! the next upload is always the confirmed transaction plus one.
 //!
 //! A file is confirmed in exactly two ways: its commit returned the key with
-//! the size that was written, or a listing found the key at the size of the
-//! staged file. A listed size that differs (a store that acknowledged a short
-//! object, a leftover of a crashed run) confirms nothing; the key is uploaded
-//! again over the same name, which replaces it. A listing is also never trusted
-//! to move the position backwards or past the local tip: either is a halt, not
-//! a guess.
+//! the size that was written, or a listing found the key and the listed object,
+//! read back, is the staged file byte for byte. A size alone confirms nothing:
+//! a store that acknowledged wrong bytes of the right size would pass it. Any
+//! difference (a short object, other bytes, a leftover of a crashed run)
+//! confirms nothing and the key is uploaded again over the same name, which
+//! replaces it. A key with no staged counterpart (staging is dropped once a
+//! file is confirmed) must decode and verify as LTX naming that key, else the
+//! replica is corrupt. The read-back runs at boot and after an ambiguous commit
+//! only, so steady state makes no list and no read call. A listing is also
+//! never trusted to move the position backwards or past the local tip: either
+//! is a halt, not a guess.
 //!
 //! Each staged file is streamed through the LTX decoder while it is copied. The
 //! bytes are written to an upload that no listing can see, and the upload is
@@ -23,8 +28,9 @@
 //!
 //! A failure before the commit leaves the state alone (nothing could have been
 //! published). A failure of the commit itself gives [`UploadState::ListFirst`],
-//! except a checksum mismatch: the store holds wrong bytes that a listing would
-//! confirm by size, so the state stays and the same key is written again.
+//! except a checksum mismatch: the store may hold wrong bytes under the key, so
+//! the state stays, the key is deleted (best effort, so readers do not see the
+//! bad tip while the retry is pending) and the same key is written again.
 //! Core runs no timer: [`upload_tick`] tells the actor whether to step again.
 
 use std::num::NonZeroU32;
@@ -241,7 +247,7 @@ async fn list_step<L: ObjectStore, S: ObjectStore>(
     }
     let known = match newest {
         Some(tail) if newest > confirmed => {
-            let sound = tail_matches_staged(&inventory, staging, tail)
+            let sound = tail_is_sound(&inventory, staging, remote, tail)
                 .await
                 .map_err(|fault| fail(state, fault))?;
             if sound {
@@ -258,12 +264,15 @@ async fn list_step<L: ObjectStore, S: ObjectStore>(
     })
 }
 
-/// Whether the replica's newest level-0 file has the size of the staged file
-/// under the same key. A key with no staged counterpart cannot be compared and
-/// is trusted: the listing is all there is.
-async fn tail_matches_staged<L: ObjectStore>(
+/// Whether the replica's newest level-0 file is sound: equal to the staged file
+/// under the same key, or, with no staged file, a verified LTX file naming it.
+/// Only the newest key is read back: an older one was confirmed by its own
+/// commit in an earlier run, and reading every key at boot would be a whole
+/// replica scan.
+async fn tail_is_sound<L: ObjectStore, S: ObjectStore>(
     inventory: &Inventory,
     staging: &L,
+    remote: &S,
     tail: Txid,
 ) -> Result<bool, Fault> {
     let key = staged_key(tail);
@@ -280,10 +289,71 @@ async fn tail_matches_staged<L: ObjectStore>(
         .list(Level::ZERO, after, limit)
         .await
         .map_err(|err| Fault::from_staging(&err))?;
-    Ok(page
-        .files
-        .first()
-        .is_none_or(|staged| staged.key != key || staged.size == listed.size))
+    match page.files.first() {
+        Some(staged) if staged.key == key => {
+            if staged.size != listed.size {
+                return Ok(false);
+            }
+            same_bytes(staging, remote, &key).await
+        }
+        _ => remote_decodes(remote, &key).await.map(|()| true),
+    }
+}
+
+/// Streams both copies and compares them chunk by chunk.
+async fn same_bytes<L: ObjectStore, S: ObjectStore>(
+    staging: &L,
+    remote: &S,
+    key: &FileKey,
+) -> Result<bool, Fault> {
+    let len = ReadLen::new(CHUNK).ok_or(Fault::Bug)?;
+    let mut offset = 0_u64;
+    loop {
+        let ours = staging
+            .read(key, offset, len)
+            .await
+            .map_err(|err| Fault::from_staging(&err))?;
+        let theirs = remote
+            .read(key, offset, len)
+            .await
+            .map_err(|err| Fault::from_remote(&err))?;
+        if ours != theirs {
+            return Ok(false);
+        }
+        let read = u64::try_from(ours.len()).unwrap_or(u64::MAX);
+        offset = offset.saturating_add(read);
+        if read < len.get() {
+            return Ok(true);
+        }
+    }
+}
+
+/// Reads the replica's object through the LTX decoder. It must verify whole and
+/// name exactly `key`; anything else is a corrupt replica.
+async fn remote_decodes<S: ObjectStore>(remote: &S, key: &FileKey) -> Result<(), Fault> {
+    let len = ReadLen::new(CHUNK).ok_or(Fault::Bug)?;
+    let mut decoder = Decoder::new();
+    let mut offset = 0_u64;
+    loop {
+        let chunk = remote
+            .read(key, offset, len)
+            .await
+            .map_err(|err| Fault::from_remote(&err))?;
+        feed_all(&mut decoder, &chunk, Fault::RemoteCorrupt)?;
+        let read = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
+        offset = offset.saturating_add(read);
+        if read < len.get() {
+            break;
+        }
+    }
+    let verified = decoder
+        .finish()
+        .map_err(|_undecodable| Fault::RemoteCorrupt)?;
+    if verified.header().txids() == key.range() {
+        Ok(())
+    } else {
+        Err(Fault::RemoteCorrupt)
+    }
 }
 
 /// Why a copy did not commit, and so what the state becomes.
@@ -292,9 +362,8 @@ enum PutError {
     Before(Fault),
     /// The commit failed or its answer cannot be believed.
     Commit(Fault),
-    /// The store says the bytes it took are not the bytes sent. A listing
-    /// cannot tell a wrong object of the right size from a right one, so the
-    /// key is written again without asking.
+    /// The store says the bytes it took are not the bytes sent: the key is
+    /// deleted and written again without asking.
     Rejected(Fault),
 }
 
@@ -309,7 +378,13 @@ async fn put_step<L: ObjectStore, S: ObjectStore>(
             state: UploadState::At(Some(key.range().max())),
             did: Did::Put(info),
         }),
-        Err(PutError::Before(fault) | PutError::Rejected(fault)) => Err(fail(state, fault)),
+        Err(PutError::Before(fault)) => Err(fail(state, fault)),
+        Err(PutError::Rejected(fault)) => {
+            // Best effort: the retry replaces the key either way, and a boot
+            // listing reads it back, so a failed delete costs only visibility.
+            drop(remote.delete(&[key]).await);
+            Err(fail(state, fault))
+        }
         Err(PutError::Commit(fault)) => Err(fail(
             UploadState::ListFirst {
                 confirmed: state.confirmed(),
@@ -353,14 +428,13 @@ fn commit_failed(fault: Fault) -> PutError {
     }
 }
 
-fn feed_all(decoder: &mut Decoder, chunk: &[u8]) -> Result<(), PutError> {
+/// Feeds a chunk to the decoder; bytes it refuses are `corrupt`.
+fn feed_all(decoder: &mut Decoder, chunk: &[u8], corrupt: Fault) -> Result<(), Fault> {
     let mut rest = chunk;
     while !rest.is_empty() {
-        let (used, _) = decoder
-            .feed(rest)
-            .map_err(|_undecodable| PutError::Before(Fault::StagedCorrupt))?;
+        let (used, _) = decoder.feed(rest).map_err(|_undecodable| corrupt)?;
         if used == 0 {
-            return Err(PutError::Before(Fault::Bug));
+            return Err(Fault::Bug);
         }
         rest = rest.get(used..).unwrap_or_default();
     }
@@ -393,7 +467,7 @@ async fn copy_verified<L: ObjectStore, S: ObjectStore>(
             .read(key, offset, len)
             .await
             .map_err(|err| PutError::Before(Fault::from_staging(&err)))?;
-        feed_all(&mut decoder, &chunk)?;
+        feed_all(&mut decoder, &chunk, Fault::StagedCorrupt).map_err(PutError::Before)?;
         let read = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
         offset = offset.saturating_add(read);
         let header = decoder.header().copied();

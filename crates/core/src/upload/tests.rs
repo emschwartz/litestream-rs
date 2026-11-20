@@ -93,6 +93,9 @@ fn transient() -> StoreError {
 #[derive(Default)]
 struct Log {
     lists: u32,
+    reads: u32,
+    deletes: Vec<FileKey>,
+    fail_delete: bool,
     begins: Vec<FileKey>,
     aborts: u32,
     commit_before: VecDeque<StoreError>,
@@ -142,6 +145,10 @@ impl ObjectStore for Probe {
         offset: u64,
         len: ReadLen,
     ) -> impl Future<Output = Result<Vec<u8>, StoreError>> + Send {
+        {
+            let mut log = self.log();
+            log.reads = log.reads.saturating_add(1);
+        }
         self.inner.read(key, offset, len)
     }
 
@@ -162,7 +169,18 @@ impl ObjectStore for Probe {
     }
 
     fn delete(&self, keys: &[FileKey]) -> impl Future<Output = Result<(), StoreError>> + Send {
-        self.inner.delete(keys)
+        let refused = {
+            let mut log = self.log();
+            log.deletes.extend_from_slice(keys);
+            log.fail_delete
+        };
+        let done = self.inner.delete(keys);
+        async move {
+            if refused {
+                return Err(transient());
+            }
+            done.await
+        }
     }
 }
 
@@ -792,4 +810,88 @@ fn review_a_failed_retry_after_a_checksum_mismatch_does_not_confirm_the_rejected
         bytes,
         "transaction 1 is confirmed over the bytes the store rejected"
     );
+}
+
+#[test]
+fn a_listing_confirms_by_content_not_size() {
+    let (staging, remote) = (MemStore::new(), MemStore::new());
+    let bytes = stage(&staging, 1);
+    let mut wrong = bytes.clone();
+    if let Some(b) = wrong.last_mut() {
+        *b ^= 0xFF;
+    }
+    put_bytes(&remote, key(1), &wrong);
+    let listed = next(UploadState::Unknown, &staging, &remote, 1).unwrap();
+    assert_eq!(listed.state, UploadState::At(None));
+    next(listed.state, &staging, &remote, 1).unwrap();
+    assert_eq!(read_all(&remote, &key(1)), bytes);
+}
+
+#[test]
+fn a_listing_confirms_a_listed_key_equal_to_the_staged_file() {
+    let (staging, remote) = (MemStore::new(), MemStore::new());
+    let bytes = stage(&staging, 1);
+    put_bytes(&remote, key(1), &bytes);
+    let listed = next(UploadState::Unknown, &staging, &remote, 1).unwrap();
+    assert_eq!(listed.state, UploadState::At(Some(txid(1))));
+}
+
+#[test]
+fn a_listed_key_with_no_staged_file_must_decode() {
+    let (staging, remote) = (MemStore::new(), MemStore::new());
+    put_bytes(&remote, key(1), &encode(1));
+    let listed = next(UploadState::Unknown, &staging, &remote, 1).unwrap();
+    assert_eq!(listed.state, UploadState::At(Some(txid(1))));
+    // Garbage, and a valid file naming another transaction, are both corrupt.
+    for bad in [b"not ltx".to_vec(), encode(2)] {
+        let (staging, remote) = (MemStore::new(), MemStore::new());
+        put_bytes(&remote, key(1), &bad);
+        let failed = failure(next(UploadState::Unknown, &staging, &remote, 1));
+        assert_eq!(failed.fault, Fault::RemoteCorrupt);
+        assert_eq!(failed.state, UploadState::Unknown);
+    }
+}
+
+#[test]
+fn steady_state_makes_no_read_call() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    let mut state = next(UploadState::Unknown, &staging, &remote, 0)
+        .unwrap()
+        .state;
+    for n in 1..=20 {
+        stage(&staging, n);
+        state = block_on(upload_tick(
+            state,
+            UploadConfig::default(),
+            &staging,
+            &remote,
+            Txid::new(n),
+        ))
+        .unwrap()
+        .state;
+    }
+    assert_eq!(remote.log().reads, 0);
+}
+
+#[test]
+fn a_rejected_commit_deletes_the_key() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    stage(&staging, 1);
+    remote.log().commit_after.push_back(StoreError::Corrupt {
+        key: Some(key(1)),
+        cause: CorruptCause::ChecksumMismatch { part: None },
+    });
+    let failed = failure(next(UploadState::At(None), &staging, &remote, 1));
+    assert_eq!(failed.fault, Fault::UploadChecksumMismatch);
+    assert_eq!(remote.log().deletes, vec![key(1)]);
+    assert!(files(&remote.inner).is_empty());
+    // A failing delete changes nothing else: the same key is still due.
+    let remote = Probe::default();
+    remote.log().fail_delete = true;
+    remote.log().commit_after.push_back(StoreError::Corrupt {
+        key: Some(key(1)),
+        cause: CorruptCause::ChecksumMismatch { part: None },
+    });
+    let failed = failure(next(UploadState::At(None), &staging, &remote, 1));
+    assert_eq!(failed.state, UploadState::At(None));
 }

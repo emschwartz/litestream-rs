@@ -44,8 +44,8 @@ pub enum Fault {
     /// An upload's commit failed after the object may have become visible.
     UploadAmbiguous,
     /// The store acknowledged an upload whose digest is not the one sent. The
-    /// object may be visible with wrong bytes, so the uploader must put the
-    /// same key again and must not accept a listing as confirmation.
+    /// object may be visible with wrong bytes, so the uploader deletes the key
+    /// and puts it again, and a later listing confirms it only by content.
     UploadChecksumMismatch,
     /// The store refused a request that retrying cannot fix and that is not an
     /// authorization failure.
