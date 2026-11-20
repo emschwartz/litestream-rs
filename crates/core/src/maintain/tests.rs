@@ -1082,3 +1082,127 @@ fn run_delete_counts_tolerates_gone_keys_and_maps_a_store_error() {
         "{failed:?}"
     );
 }
+
+// Review: failing tests (blind adversarial review of the executor and its
+// interplay with retention).
+
+const REVIEW_DAY: i64 = 86_400_000;
+
+/// A Retrying destination whose post-commit delete failed leaves a short
+/// object listed under the output key ("removed: false": compact.rs says the
+/// caller must not trust a listing of it). The next plan trusts it anyway:
+/// level 1 counts as done and retention deletes the inputs it "covers", so the
+/// only copy of transactions 2 to 4 is an object that does not decode.
+#[test]
+fn review_a_short_compaction_output_left_by_a_failed_commit_does_not_license_deleting_its_inputs() {
+    let (local, replica) = (MemStore::new(), MemStore::new());
+    // A snapshot this window, so no snapshot job is due today.
+    put(&replica, 9, 1, T0 + 1);
+    for n in 2..=5u64 {
+        let created = T0 + i64::try_from(n).unwrap() * 600_000;
+        put(&local, 0, n, created);
+        put(&replica, 0, n, created);
+    }
+    let cfg = Maintenance::new(
+        vec![secs(30)],
+        secs(24 * 3600),
+        secs(24 * 3600),
+        L0Retention::After(secs(300)),
+    )
+    .unwrap();
+    let now = at(T0 + 2 * 3_600_000);
+    let job = match due(&load(&replica), now, &cfg, None) {
+        Due::Run(Job::Compact(job)) => job,
+        other => panic!("expected the level-1 job, got {other:?}"),
+    };
+    let out = job.output_key();
+    replica.inject_failure_after_publish(StoreError::Corrupt {
+        key: Some(out),
+        cause: crate::store::CorruptCause::CommitSizeMismatch {
+            wrote: 1,
+            stored: 0,
+            removed: false,
+        },
+    });
+    let ran = block_on(run_compact(&job, &local, &replica));
+    assert!(matches!(ran, Outcome::Failed(_)), "{ran:?}");
+    // What the store holds after a size mismatch it could not remove.
+    block_on(async {
+        let whole = replica
+            .read(
+                &out,
+                0,
+                crate::store::ReadLen::new(crate::store::ReadLen::MAX_RAW).unwrap(),
+            )
+            .await
+            .unwrap();
+        let created = load(&replica).level(level(1))[0].created_at;
+        let mut up = replica.begin_upload(&out, created).await.unwrap();
+        up.write(&whole[..whole.len() / 2]).await.unwrap();
+        up.commit().await.unwrap();
+    });
+    let inputs: Vec<FileKey> = job.inputs().files().iter().map(|f| f.key).collect();
+    for _ in 0..10 {
+        match due(&load(&replica), now, &cfg, None) {
+            Due::Run(Job::Delete(d)) => {
+                let doomed: Vec<&FileKey> =
+                    d.keys().iter().filter(|k| inputs.contains(k)).collect();
+                assert!(
+                    doomed.is_empty(),
+                    "deletes {doomed:?}, covered only by {out}, which the store holds short"
+                );
+                block_on(run_delete(&d, &replica));
+            }
+            Due::Run(Job::Compact(c)) => {
+                block_on(run_compact(&c, &local, &replica));
+            }
+            Due::Run(Job::Snapshot(_)) | Due::Wait { .. } => break,
+        }
+    }
+}
+
+/// Go runs each level and the snapshot on their own tickers, so one failing
+/// level never stops a snapshot. Here `due` returns the first ready job, and a
+/// level-1 job whose local input does not decode is ready again on every
+/// fresh listing: the snapshot that has been due for days is never planned,
+/// and neither is any delete.
+#[test]
+fn review_a_level_one_job_that_always_fails_does_not_starve_the_snapshot_forever() {
+    let (local, replica) = (MemStore::new(), MemStore::new());
+    put(&replica, 9, 1, T0 - 2 * REVIEW_DAY);
+    for n in 2..=3u64 {
+        let created = T0 - 100_000 + i64::try_from(n).unwrap();
+        put(&replica, 0, n, created);
+        put(&local, 0, n, created);
+    }
+    // The local copy of transaction 2 rots; the replica's copy is fine.
+    block_on(async {
+        let k = key(0, 2, 2);
+        let mut up = local.begin_upload(&k, at(T0 - 100_000)).await.unwrap();
+        up.write(&[0xAB; 200]).await.unwrap();
+        up.commit().await.unwrap();
+    });
+    let mut snapshot_planned = false;
+    for day in 0..3 {
+        match due(
+            &load(&replica),
+            at(T0 + day * REVIEW_DAY),
+            &defaults(),
+            None,
+        ) {
+            Due::Run(Job::Compact(job)) => {
+                let out = block_on(run_compact(&job, &local, &replica));
+                assert!(matches!(out, Outcome::Failed(_)), "{out:?}");
+            }
+            Due::Run(Job::Snapshot(_)) => {
+                snapshot_planned = true;
+                break;
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    assert!(
+        snapshot_planned,
+        "a level-1 compaction failing on every attempt kept the due snapshot from being planned for three days"
+    );
+}

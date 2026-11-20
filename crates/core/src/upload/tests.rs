@@ -734,3 +734,62 @@ proptest! {
         prop_assert_eq!(u64::try_from(files(&remote.inner).len()).unwrap(), tip);
     }
 }
+
+// Review: failing tests (blind adversarial review of upload sequencing).
+
+/// What a store holds after it answers a commit with a checksum mismatch: the
+/// key is published, at the staged size, with other bytes.
+fn review_rejected_commit(staging: &MemStore, remote: &Probe) -> (Vec<u8>, UploadState) {
+    let bytes = stage(staging, 1);
+    remote.log().commit_after.push_back(StoreError::Corrupt {
+        key: Some(key(1)),
+        cause: CorruptCause::ChecksumMismatch { part: None },
+    });
+    let failed = failure(next(UploadState::At(None), staging, remote, 1));
+    assert_eq!(failed.fault, Fault::UploadChecksumMismatch);
+    let mut wrong = bytes.clone();
+    if let Some(b) = wrong.last_mut() {
+        *b ^= 0xFF;
+    }
+    put_bytes(&remote.inner, key(1), &wrong);
+    (bytes, failed.state)
+}
+
+/// A restart after a rejected commit lists, finds the key at the staged size
+/// and confirms it, though the store said those bytes were wrong.
+#[test]
+fn review_a_restart_after_a_checksum_mismatch_does_not_confirm_the_rejected_bytes() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    let (bytes, _) = review_rejected_commit(&staging, &remote);
+    let mut state = UploadState::Unknown;
+    for _ in 0..3 {
+        state = next(state, &staging, &remote, 1).unwrap().state;
+    }
+    assert_eq!(state, UploadState::At(Some(txid(1))));
+    assert_eq!(
+        read_all(&remote.inner, &key(1)),
+        bytes,
+        "transaction 1 is confirmed over the bytes the store rejected"
+    );
+}
+
+/// The retry after a rejected commit fails before publishing, a transient
+/// error that sends the uploader to a listing. The listing finds the
+/// rejected object at the staged size and confirms it.
+#[test]
+fn review_a_failed_retry_after_a_checksum_mismatch_does_not_confirm_the_rejected_bytes() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    let (bytes, state) = review_rejected_commit(&staging, &remote);
+    remote.log().commit_before.push_back(transient());
+    let retry = failure(next(state, &staging, &remote, 1));
+    let mut state = retry.state;
+    for _ in 0..3 {
+        state = next(state, &staging, &remote, 1).unwrap().state;
+    }
+    assert_eq!(state, UploadState::At(Some(txid(1))));
+    assert_eq!(
+        read_all(&remote.inner, &key(1)),
+        bytes,
+        "transaction 1 is confirmed over the bytes the store rejected"
+    );
+}
