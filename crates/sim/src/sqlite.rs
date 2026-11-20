@@ -208,6 +208,8 @@ struct State {
     app_checkpoints: u32,
     pool_checkpoints: u32,
     rng: u64,
+    // When set, the values SQLite would draw at random are these instead.
+    forced: Option<Salts>,
     epoch: ReadEpoch,
     next_reader: u32,
     next_token: u64,
@@ -244,6 +246,16 @@ fn splitmix(state: &mut u64) -> u32 {
 }
 
 impl State {
+    /// One of the two salts SQLite draws from `sqlite3_randomness`: the forced value when a
+    /// test has named one, else the next of the seeded stream.
+    fn random_salt(&mut self, second: bool) -> u32 {
+        match self.forced {
+            Some(salts) if second => salts.salt2,
+            Some(salts) => salts.salt1,
+            None => splitmix(&mut self.rng),
+        }
+    }
+
     fn frame_at(&self, index: u32) -> usize {
         byte_pos(WalOffset::from_frame_index(index, self.page_size).get())
     }
@@ -308,7 +320,7 @@ impl State {
         if let Some(count) = self.checkpoints(by) {
             *count = count.wrapping_add(1);
         }
-        let salt2 = splitmix(&mut self.rng);
+        let salt2 = self.random_salt(true);
         let salts = Salts {
             salt1: self.index.salts.salt1.wrapping_add(1),
             salt2,
@@ -321,8 +333,8 @@ impl State {
         let seq = self.checkpoints(by).map_or(0, |count| *count);
         if seq == 0 {
             self.index.salts = Salts {
-                salt1: splitmix(&mut self.rng),
-                salt2: splitmix(&mut self.rng),
+                salt1: self.random_salt(false),
+                salt2: self.random_salt(true),
             };
         }
         let salts = self.index.salts;
@@ -688,6 +700,7 @@ impl SimSqlite {
             app_checkpoints: 0,
             pool_checkpoints: 0,
             rng: seed,
+            forced: None,
             epoch: ReadEpoch::new(1),
             next_reader: 0,
             next_token: 0,
@@ -726,6 +739,14 @@ impl SimSqlite {
         SimCheckpointer {
             state: Arc::clone(&self.state),
         }
+    }
+
+    /// Names the values the model uses wherever SQLite draws a salt at random (a header written by
+    /// a connection whose checkpoint count is 0, and `salt2` of every restart), or `None` to go
+    /// back to the seeded stream. A test that compares the model with real SQLite feeds it the
+    /// salts SQLite chose; `salt1 + 1` on a restart stays the model's rule.
+    pub fn force_random_salts(&self, salts: Option<Salts>) {
+        self.with(|state| state.forced = salts);
     }
 
     /// Begins our read transaction under R3; false if it is held.

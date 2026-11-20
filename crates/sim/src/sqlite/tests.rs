@@ -336,3 +336,28 @@ fn process_crash_drops_our_connections_only() {
         "a stranger survives our crash"
     );
 }
+#[test]
+fn forced_salts_replace_every_random_draw_but_not_the_increment() {
+    let db = sim();
+    let named = Salts {
+        salt1: 0xaaaa_0001,
+        salt2: 0xbbbb_0002,
+    };
+    db.force_random_salts(Some(named));
+    db.commit(&tx(&[1], 1), 4).unwrap();
+    assert_eq!(db.salts(), named, "a header written at count 0 takes both");
+    db.force_random_salts(Some(Salts {
+        salt1: 0,
+        salt2: 0xcccc_0003,
+    }));
+    assert!(!db.stranger_checkpoint(StrangerMode::Truncate).unwrap().busy);
+    db.commit(&tx(&[1], 2), 4).unwrap();
+    assert_eq!(
+        db.salts(),
+        Salts {
+            salt1: named.salt1.wrapping_add(1),
+            salt2: 0xcccc_0003
+        },
+        "a restart keeps salt1 + 1 and takes salt2"
+    );
+}
