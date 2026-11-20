@@ -7,6 +7,10 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# `testing::WalBuilder`, a hand-built WAL writer for tests in other crates.
+testing = []
+
 [lints]
 workspace = true
 
@@ -15,6 +19,7 @@ lsr-ltx = { path = "../ltx" }
 thiserror = "2.0.21"
 
 [dev-dependencies]
+lsr-wal = { path = ".", features = ["testing"] }
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 rusqlite = { version = "0.43", features = ["bundled"] }
 tempfile = "3"

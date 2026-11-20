@@ -730,3 +730,39 @@ fn checksums_cross_check_with_the_crate() {
         assert_eq!((ours.s0(), ours.s1()), sum(big, (0, 0), &bytes));
     }
 }
+
+#[test]
+fn builder_matches_sqlite_header_checksum() {
+    use lsr_wal::testing::WalBuilder;
+    for (big, order) in [(false, ByteOrder::Little), (true, ByteOrder::Big)] {
+        let built = WalBuilder::new(size(4096), big, salts(SALTS));
+        let header = WalHeader::decode(built.bytes().try_into().unwrap()).unwrap();
+        assert_eq!(header.byte_order(), order);
+        assert_eq!(header.page_size(), size(4096));
+        assert_eq!(header.salts(), salts(SALTS));
+        assert_eq!(
+            Some(header.checksum()),
+            WalChecksum::ZERO.extend(order, &built.bytes()[..24])
+        );
+    }
+}
+
+#[test]
+fn builder_transactions_scan_as_committed() {
+    use lsr_ltx::PageNo;
+    use lsr_wal::testing::{WalBuilder, page};
+    let ps = size(PS);
+    let pg = |n| PageNo::new(n, ps).unwrap();
+    let mut built = WalBuilder::new(ps, false, salts(SALTS));
+    built.tx(&[pg(1), pg(2)], 2, 7);
+    built.tx(&[pg(2)], 2, 8);
+    assert_eq!(built.bytes().len(), 32 + 3 * built.frame_len());
+    let bytes = built.into_bytes();
+    let scanned = scan(&bytes, ScanLimit::FirstInvalidFrame);
+    assert_eq!(scanned.txs.len(), 2);
+    assert_ne!(page(7, pg(1), ps), page(7, pg(2), ps));
+    assert_ne!(page(7, pg(1), ps), page(8, pg(1), ps));
+    assert_eq!(page(7, pg(1), ps), page(7, pg(1), ps));
+    let frame_start = 32 + 24;
+    assert_eq!(&bytes[frame_start..frame_start + PSU], page(7, pg(1), ps));
+}

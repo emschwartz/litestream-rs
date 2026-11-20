@@ -374,6 +374,7 @@ name = "lsr-wal"
 version = "0.0.0"
 dependencies = [
  "lsr-ltx",
+ "lsr-wal",
  "proptest",
  "rusqlite",
  "tempfile",

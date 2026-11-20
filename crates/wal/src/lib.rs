@@ -35,6 +35,8 @@ mod frame;
 mod header;
 mod pagemap;
 mod scan;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 
 pub use checksum::{ByteOrder, WalChecksum};
 pub use error::{OpenError, PageMapError, ReadPageError, ResumeError, WalError};

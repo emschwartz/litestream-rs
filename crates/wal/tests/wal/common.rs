@@ -1,4 +1,4 @@
-//! Helpers shared by the tests: a hand-built WAL writer and scan drivers.
+//! Helpers shared by the tests: the hand-built WAL writer (`lsr_wal::testing`) and scan drivers.
 //!
 //! The writer carries its own checksum so the crate is checked against an
 //! independent implementation, not against itself.
@@ -8,7 +8,8 @@ use std::io::{self, Cursor, Read, Seek, SeekFrom};
 use std::rc::Rc;
 
 use lsr_ltx::PageSize;
-use lsr_wal::{CommittedTx, FrameCursor, ScanLimit, Tail, TxOutcome, WalError, WalReader};
+use lsr_wal::testing::WalBuilder;
+use lsr_wal::{CommittedTx, FrameCursor, Salts, ScanLimit, Tail, TxOutcome, WalError, WalReader};
 
 pub type Mem = Cursor<Vec<u8>>;
 
@@ -51,40 +52,37 @@ pub fn header_bytes(magic: u32, version: u32, ps: u32, salts: (u32, u32), big: b
     bytes
 }
 
+/// The old test API over [`WalBuilder`]: u32 arguments, a public byte vector, and the
+/// legacy page filler, so the suite's expectations stay byte for byte as they were.
 pub struct Wal {
     pub bytes: Vec<u8>,
     pub ps: u32,
     pub salts: (u32, u32),
-    big: bool,
-    running: (u32, u32),
+    inner: WalBuilder,
+}
+
+fn salt_pair(pair: (u32, u32)) -> Salts {
+    Salts {
+        salt1: pair.0,
+        salt2: pair.1,
+    }
 }
 
 impl Wal {
     pub fn new(ps: u32, big: bool, salts: (u32, u32)) -> Self {
-        let magic = if big { 0x377f_0683 } else { 0x377f_0682 };
-        let bytes = header_bytes(magic, 3_007_000, ps, salts, big);
-        let running = sum(big, (0, 0), &bytes[..24]);
+        let inner = WalBuilder::new(size(ps), big, salt_pair(salts));
         Self {
-            bytes,
+            bytes: inner.bytes().to_vec(),
             ps,
             salts,
-            big,
-            running,
+            inner,
         }
     }
 
     /// Appends a frame with explicit salts; the checksum chain continues regardless.
     pub fn frame_with(&mut self, pgno: u32, commit: u32, salts: (u32, u32), data: &[u8]) {
-        let mut head = Vec::new();
-        for field in [pgno, commit, salts.0, salts.1] {
-            head.extend(field.to_be_bytes());
-        }
-        self.running = sum(self.big, self.running, &head[..8]);
-        self.running = sum(self.big, self.running, data);
-        head.extend(self.running.0.to_be_bytes());
-        head.extend(self.running.1.to_be_bytes());
-        self.bytes.extend(head);
-        self.bytes.extend(data);
+        self.inner.frame_raw(pgno, commit, salt_pair(salts), data);
+        self.bytes = self.inner.bytes().to_vec();
     }
 
     pub fn frame(&mut self, pgno: u32, commit: u32, seed: u32) {
@@ -101,7 +99,7 @@ impl Wal {
     }
 
     pub fn frame_len(&self) -> usize {
-        usize::try_from(self.ps).unwrap() + 24
+        self.inner.frame_len()
     }
 }
 
