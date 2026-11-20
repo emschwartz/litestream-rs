@@ -20,6 +20,14 @@ pub enum InventoryError {
     /// A page of a listing failed; the inventory would have been short.
     #[error(transparent)]
     Store(#[from] StoreError),
+    /// One key appeared twice with different sizes or timestamps. A real
+    /// listing cannot do that, and which copy is right would decide an `AsOf`
+    /// plan, so there is no inventory rather than a guess.
+    #[error("key {key} listed twice with different size or timestamp")]
+    ConflictingDuplicate {
+        /// The key that appeared twice.
+        key: FileKey,
+    },
     /// A store returned a cursor that does not move forward, which would page
     /// forever. A store that does this is broken, not busy.
     #[error("listing of level {level} returned cursor {cursor:?} that does not advance")]
@@ -71,12 +79,17 @@ impl Inventory {
                 after = Some(cursor);
             }
         }
-        Ok(Self::from_parts(files, skipped))
+        Self::from_parts(files, skipped)
     }
 
     /// An inventory of exactly these files, for tests and callers that
-    /// already hold a listing. A key given twice keeps one entry.
-    pub fn from_files(files: impl IntoIterator<Item = FileInfo>) -> Self {
+    /// already hold a listing. The order of the input never matters. A key
+    /// given twice with the same size and timestamp keeps one entry.
+    ///
+    /// # Errors
+    /// [`InventoryError::ConflictingDuplicate`] when a key is given twice with
+    /// a different size or timestamp.
+    pub fn from_files(files: impl IntoIterator<Item = FileInfo>) -> Result<Self, InventoryError> {
         Self::from_parts(files.into_iter().collect(), BTreeMap::new())
     }
 
@@ -87,10 +100,21 @@ impl Inventory {
         self
     }
 
-    fn from_parts(mut files: Vec<FileInfo>, skipped: BTreeMap<Level, usize>) -> Self {
+    fn from_parts(
+        mut files: Vec<FileInfo>,
+        skipped: BTreeMap<Level, usize>,
+    ) -> Result<Self, InventoryError> {
         files.sort_by_key(|info| info.key);
+        // Equal keys are adjacent, and any set of copies that is not all
+        // identical has an adjacent pair that differs.
+        if let Some(pair) = files.windows(2).find(|pair| {
+            pair.first().map(|a| a.key) == pair.get(1).map(|b| b.key) && pair.first() != pair.get(1)
+        }) && let Some(first) = pair.first()
+        {
+            return Err(InventoryError::ConflictingDuplicate { key: first.key });
+        }
         files.dedup_by_key(|info| info.key);
-        Self { files, skipped }
+        Ok(Self { files, skipped })
     }
 
     /// Every file, ascending by key.
@@ -168,7 +192,7 @@ mod tests {
 
     #[test]
     fn from_files_sorts_and_dedups() {
-        let inv = Inventory::from_files([info(1, 5, 6), info(0, 2, 2), info(0, 2, 2)]);
+        let inv = Inventory::from_files([info(1, 5, 6), info(0, 2, 2), info(0, 2, 2)]).unwrap();
         let keys: Vec<FileKey> = inv.files().iter().map(|f| f.key).collect();
         assert_eq!(keys, vec![key(0, 2, 2), key(1, 5, 6)]);
         assert_eq!(inv.newest(), Txid::new(6));
@@ -176,8 +200,43 @@ mod tests {
     }
 
     #[test]
+    fn a_key_given_twice_with_different_details_is_an_error_in_any_order() {
+        let early = info(0, 4, 4);
+        let late = FileInfo {
+            created_at: Timestamp::from_unix_millis(900),
+            ..early
+        };
+        let bigger = FileInfo { size: 9, ..early };
+        let other = info(1, 5, 6);
+        let conflict = Err(InventoryError::ConflictingDuplicate { key: early.key });
+        for order in [
+            [early, late, other],
+            [late, early, other],
+            [other, early, late],
+            [early, other, late],
+            [early, bigger, early],
+        ] {
+            assert_eq!(Inventory::from_files(order), conflict, "{order:?}");
+        }
+    }
+
+    #[test]
+    fn input_order_never_changes_the_inventory() {
+        let files = [info(9, 1, 3), info(0, 4, 4), info(1, 4, 9), info(0, 5, 5)];
+        let want = Inventory::from_files(files).unwrap();
+        let mut rotated = files;
+        for _ in 0..files.len() {
+            rotated.rotate_left(1);
+            assert_eq!(Inventory::from_files(rotated).unwrap(), want);
+            let mut reversed = rotated;
+            reversed.reverse();
+            assert_eq!(Inventory::from_files(reversed).unwrap(), want);
+        }
+    }
+
+    #[test]
     fn malformed_snapshots_are_level_nine_not_starting_at_one() {
-        let inv = Inventory::from_files([info(9, 1, 4), info(9, 2, 6), info(1, 2, 6)]);
+        let inv = Inventory::from_files([info(9, 1, 4), info(9, 2, 6), info(1, 2, 6)]).unwrap();
         assert_eq!(inv.malformed_snapshots(), vec![key(9, 2, 6)]);
     }
 

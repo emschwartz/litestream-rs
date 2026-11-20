@@ -23,6 +23,15 @@
 //! - A plan must end exactly at the target: at the requested transaction, or
 //!   for the other targets at the largest last transaction of any eligible
 //!   file. Anything short of that is explained, not returned.
+//! - An instant can fall inside a file. Go stamps a compacted file with its
+//!   newest input's time, so once the finer files are gone, the transactions
+//!   after the chain's end up to the instant cannot be told from the rest of
+//!   the file. That is [`PlanOutcome::AsOfInsideFile`], never a plain
+//!   [`PlanOutcome::Plan`]: the chain is the newest state restorable at or
+//!   before the instant, and the caller must choose to accept it. A file that
+//!   ends right after the chain does not count: its newest transaction is
+//!   stamped at or after the instant, so that transaction is placed, and so is
+//!   everything after it.
 
 use std::cmp::Reverse;
 
@@ -39,7 +48,8 @@ pub enum RestoreTarget {
     /// The state right after this transaction.
     Txid(Txid),
     /// The newest state whose files were all created strictly before this
-    /// instant. An instant later than every file is [`Latest`].
+    /// instant. An instant later than every file is [`Latest`]. An instant
+    /// inside a compacted file is [`PlanOutcome::AsOfInsideFile`].
     AsOf(Timestamp),
 }
 
@@ -121,6 +131,20 @@ pub enum PlanOutcome {
         /// The last transaction any file covers.
         newest: Txid,
     },
+    /// An instant falls inside a file that is later than it. `chain` is the
+    /// newest state restorable at or before the instant; `file` links to the
+    /// chain and holds at least two transactions past it, but was created at or
+    /// after the instant, so the transactions in it up to the instant cannot be
+    /// separated from the rest. Only `AsOf` produces it, and only when the
+    /// chain otherwise ends where the eligible history ends: a [`Self::Gap`]
+    /// wins. Accepting it can leave out transactions that did commit before
+    /// the instant.
+    AsOfInsideFile {
+        /// The newest state restorable at or before the instant.
+        chain: ContiguousChain,
+        /// The nearest-ending file that straddles the instant.
+        file: FileKey,
+    },
     /// The chain stops short and the next eligible file starts after a hole.
     Gap {
         /// The last transaction the chain reaches.
@@ -192,9 +216,39 @@ pub fn plan(inventory: &Inventory, target: RestoreTarget) -> PlanOutcome {
         }
     };
     if want == Some(chain.reaches()) {
-        return PlanOutcome::Plan(chain);
+        return match straddling_file(inventory, target, chain.reaches()) {
+            Some(file) => PlanOutcome::AsOfInsideFile { chain, file },
+            None => PlanOutcome::Plan(chain),
+        };
     }
     explain_shortfall(inventory, &pool, target, chain.reaches())
+}
+
+/// The file that makes an `AsOf` chain ambiguous, if any: usable, created at
+/// or after the instant, linking to the chain and holding at least two
+/// transactions past it. When some file ends exactly one past the chain, that
+/// transaction is stamped at or after the instant (otherwise the chain would
+/// have taken the file), so nothing is ambiguous.
+fn straddling_file(inventory: &Inventory, target: RestoreTarget, reach: Txid) -> Option<FileKey> {
+    let RestoreTarget::AsOf(_) = target else {
+        return None;
+    };
+    let one_past = reach.next()?;
+    let files = inventory.files();
+    if files.iter().any(|info| info.key.range().max() == one_past) {
+        return None;
+    }
+    files
+        .iter()
+        .filter(|info| {
+            let range = info.key.range();
+            !eligible(info, target)
+                && is_usable_beyond(info)
+                && range.min() <= one_past
+                && range.max() > one_past
+        })
+        .min_by_key(|info| (info.key.range().max(), Reverse(info.key.level()), info.key))
+        .map(|info| info.key)
 }
 
 fn no_snapshot(inventory: &Inventory) -> PlanOutcome {
@@ -336,7 +390,7 @@ mod tests {
     }
 
     fn inv(files: &[FileInfo]) -> Inventory {
-        Inventory::from_files(files.iter().copied())
+        Inventory::from_files(files.iter().copied()).unwrap()
     }
 
     fn keys(outcome: &PlanOutcome) -> Vec<FileKey> {
@@ -608,6 +662,93 @@ mod tests {
         assert_eq!(plan(&files, RestoreTarget::Txid(txid(25))), gap(3, 20));
     }
 
+    #[test]
+    fn an_instant_inside_a_compacted_file_is_its_own_outcome() {
+        // L1 4-10 is stamped with its newest input's time; the L0 files are gone.
+        let files = [file(9, 1, 3, 300), file(1, 4, 10, 1000)];
+        let outcome = plan(
+            &inv(&files),
+            RestoreTarget::AsOf(Timestamp::from_unix_millis(950)),
+        );
+        let PlanOutcome::AsOfInsideFile { chain, file } = outcome else {
+            panic!("expected the inside-file outcome, got {outcome:?}");
+        };
+        assert_eq!(chain.reaches(), txid(3));
+        assert_eq!(file, key(1, 4, 10));
+        // At or after the file's stamp the file is eligible and it is a plan.
+        let after = plan(
+            &inv(&files),
+            RestoreTarget::AsOf(Timestamp::from_unix_millis(1001)),
+        );
+        assert_eq!(keys(&after), vec![key(9, 1, 3), key(1, 4, 10)]);
+    }
+
+    #[test]
+    fn a_snapshot_can_straddle_the_instant_too() {
+        let files = [file(9, 1, 3, 300), file(9, 1, 10, 1000)];
+        let outcome = plan(
+            &inv(&files),
+            RestoreTarget::AsOf(Timestamp::from_unix_millis(950)),
+        );
+        let PlanOutcome::AsOfInsideFile { file, .. } = outcome else {
+            panic!("expected the inside-file outcome, got {outcome:?}");
+        };
+        assert_eq!(file, key(9, 1, 10));
+    }
+
+    #[test]
+    fn a_refused_snapshot_is_not_a_straddler() {
+        let files = [file(9, 1, 3, 300), file(9, 2, 10, 1000)];
+        let outcome = plan(
+            &inv(&files),
+            RestoreTarget::AsOf(Timestamp::from_unix_millis(950)),
+        );
+        assert_eq!(keys(&outcome), vec![key(9, 1, 3)]);
+    }
+
+    #[test]
+    fn a_file_that_pins_the_next_transaction_removes_the_doubt() {
+        // L0 5 is stamped 500, after the instant, so transaction 5 happened
+        // after it and so did everything the big L1 file adds.
+        let files = [
+            file(9, 1, 3, 300),
+            file(0, 4, 4, 400),
+            file(0, 5, 5, 500),
+            file(1, 4, 9, 900),
+        ];
+        let outcome = plan(
+            &inv(&files),
+            RestoreTarget::AsOf(Timestamp::from_unix_millis(450)),
+        );
+        assert_eq!(keys(&outcome), vec![key(9, 1, 3), key(0, 4, 4)]);
+    }
+
+    #[test]
+    fn a_gap_beats_the_inside_file_outcome() {
+        // Eligible history at 20 lies beyond a hole, and L1 4-9 straddles.
+        let files = [
+            file(9, 1, 3, 300),
+            file(1, 4, 9, 1000),
+            file(0, 20, 20, 500),
+        ];
+        let outcome = plan(
+            &inv(&files),
+            RestoreTarget::AsOf(Timestamp::from_unix_millis(950)),
+        );
+        assert_eq!(outcome, gap(3, 20));
+    }
+
+    #[test]
+    fn the_other_targets_never_say_inside_file_for_a_timestamp() {
+        let files = [file(9, 1, 3, 300), file(1, 4, 10, 1000)];
+        for target in [RestoreTarget::Latest, RestoreTarget::Txid(txid(10))] {
+            assert_eq!(
+                keys(&plan(&inv(&files), target)),
+                vec![key(9, 1, 3), key(1, 4, 10)]
+            );
+        }
+    }
+
     // The oracle. It shares no code with the planner: its own file model, its
     // own eligibility, and a search over every chain instead of a greedy sweep.
 
@@ -682,29 +823,60 @@ mod tests {
             .any(|s| some_chain_ends_at(&admitted, s.max, end))
     }
 
+    /// Whether an instant cuts through a file: some usable file later than the
+    /// instant links to the end and holds two or more transactions past it, and
+    /// no file ends right after the end (which would date that transaction).
+    fn model_straddlers(files: &[Spec], goal: Goal, end: u64) -> Vec<Spec> {
+        let Goal::AsOf(_) = goal else {
+            return Vec::new();
+        };
+        let Some(one_past) = end.checked_add(1) else {
+            return Vec::new();
+        };
+        if files.iter().any(|s| s.max == one_past) {
+            return Vec::new();
+        }
+        files
+            .iter()
+            .filter(|s| {
+                !goal.admits(s)
+                    && (s.level < 9 || s.min == 1)
+                    && s.min <= one_past
+                    && s.max > one_past
+            })
+            .copied()
+            .collect()
+    }
+
     /// One generated replica: [`n`] transactions, compactions, snapshots, then a
-    /// random subset of files deleted.
+    /// random subset of files deleted. Ids start at [`base`] plus one, so some
+    /// histories sit against `Txid::MAX`.
     #[derive(Clone, Debug)]
     struct History {
         files: Vec<Spec>,
+        base: u64,
     }
 
     fn history() -> impl Strategy<Value = History> {
-        let compaction = (1u8..=8, 1u64..=10, 1u64..=10, 0i64..40);
-        let snapshot = (1u64..=10, prop::bool::weighted(0.15), 1u64..=10, 0i64..40);
+        // A compacted file is stamped long after its range, so an instant can
+        // land inside it: the jitter reaches past the next transactions.
+        let compaction = (1u8..=8, 1u64..=10, 1u64..=10, 0i64..1500);
+        let snapshot = (1u64..=10, prop::bool::weighted(0.15), 1u64..=10, 0i64..1500);
         (
+            prop_oneof![Just(0u64), Just(u64::MAX - 10)],
             1u64..=10,
             prop::collection::vec(compaction, 0..8),
             prop::collection::vec(snapshot, 0..4),
             prop::collection::vec(prop::bool::weighted(0.3), 40),
         )
-            .prop_map(|(n, compactions, snapshots, deletions)| {
+            .prop_map(|(base, n, compactions, snapshots, deletions)| {
+                let id = |idx: u64| base.saturating_add(idx);
                 let mut files = Vec::new();
                 for txn in 1..=n {
                     files.push(Spec {
                         level: 0,
-                        min: txn,
-                        max: txn,
+                        min: id(txn),
+                        max: id(txn),
                         created: ms(txn),
                     });
                 }
@@ -712,18 +884,18 @@ mod tests {
                     let (min, max) = (a.min(b).min(n), a.max(b).min(n));
                     files.push(Spec {
                         level,
-                        min,
-                        max,
+                        min: id(min),
+                        max: id(max),
                         created: ms(max).saturating_add(jitter),
                     });
                 }
                 for (end, malformed, start, jitter) in snapshots {
                     let max = end.min(n);
-                    let min = if malformed { start.min(max) } else { 1 };
+                    let min = if malformed { id(start.min(max)) } else { 1 };
                     files.push(Spec {
                         level: 9,
                         min,
-                        max,
+                        max: id(max),
                         created: ms(max).saturating_add(jitter),
                     });
                 }
@@ -731,16 +903,23 @@ mod tests {
                 files.retain(|s| seen.insert((s.level, s.min, s.max)));
                 let mut flags = deletions.into_iter();
                 files.retain(|_| !flags.next().unwrap_or(false));
-                History { files }
+                History { files, base }
             })
     }
 
-    fn goal() -> impl Strategy<Value = Goal> {
+    fn goal(base: u64) -> impl Strategy<Value = Goal> {
         prop_oneof![
             Just(Goal::Latest),
-            (1u64..=12).prop_map(Goal::Txid),
-            (-50i64..=1200).prop_map(Goal::AsOf),
+            (1u64..=10).prop_map(move |d| Goal::Txid(base.saturating_add(d))),
+            (-50i64..=2600).prop_map(Goal::AsOf),
         ]
+    }
+
+    fn case() -> impl Strategy<Value = (History, Goal)> {
+        history().prop_flat_map(|history| {
+            let base = history.base;
+            (Just(history), goal(base))
+        })
     }
 
     fn assert_chain_is_valid(chain: &ContiguousChain, files: &[Spec], goal: Goal) {
@@ -757,7 +936,7 @@ mod tests {
             if i == 0 {
                 assert!(
                     level == 9 && min == 1,
-                    "first file must be a snapshot from 1"
+                    "first file must be a snapshot from the first transaction"
                 );
             } else {
                 assert!(
@@ -777,29 +956,74 @@ mod tests {
     }
 
     proptest! {
+        #![proptest_config(ProptestConfig::with_cases(2000))]
         #[test]
         fn plan_agrees_with_the_exhaustive_model(
-            history in history(),
-            goal in goal(),
-            shuffle in any::<prop::sample::Index>(),
+            (history, goal) in case(),
+            order in prop::collection::vec(any::<u32>(), 40),
         ) {
             let infos: Vec<FileInfo> = history.files.iter().map(|s| s.info()).collect();
-            let outcome = plan(&Inventory::from_files(infos.clone()), goal.target());
-            let model = model_has_plan(&history.files, goal);
-            prop_assert_eq!(matches!(outcome, PlanOutcome::Plan(_)), model, "{:?}", outcome);
-            if let PlanOutcome::Plan(chain) = &outcome {
-                assert_chain_is_valid(chain, &history.files, goal);
+            let inventory = Inventory::from_files(infos.clone()).unwrap();
+            let outcome = plan(&inventory, goal.target());
+            let has_plan = model_has_plan(&history.files, goal);
+            let straddlers = match model_end(&history.files, goal) {
+                Some(end) if has_plan => model_straddlers(&history.files, goal, end),
+                Some(_) | None => Vec::new(),
+            };
+            let inside = !straddlers.is_empty();
+            prop_assert_eq!(
+                matches!(outcome, PlanOutcome::Plan(_)),
+                has_plan && !inside,
+                "{:?}",
+                outcome
+            );
+            prop_assert_eq!(
+                matches!(outcome, PlanOutcome::AsOfInsideFile { .. }),
+                inside,
+                "{:?}",
+                outcome
+            );
+            match &outcome {
+                PlanOutcome::Plan(chain) => assert_chain_is_valid(chain, &history.files, goal),
+                PlanOutcome::AsOfInsideFile { chain, file } => {
+                    assert_chain_is_valid(chain, &history.files, goal);
+                    let named = straddlers.iter().find(|s| {
+                        (s.level, s.min, s.max)
+                            == (file.level().get(), file.range().min().get(), file.range().max().get())
+                    });
+                    prop_assert!(named.is_some(), "{:?} is not a straddler", file);
+                }
+                PlanOutcome::Gap { have_through, next_starts } => {
+                    prop_assert!(next_starts.get() > have_through.get().saturating_add(1));
+                }
+                PlanOutcome::BeyondNewest { requested, newest } => {
+                    let top = history.files.iter().map(|s| s.max).max();
+                    prop_assert_eq!(Some(newest.get()), top);
+                    prop_assert!(requested > newest);
+                }
+                PlanOutcome::InsideFile { requested, file } => {
+                    prop_assert!(file.range().max() > *requested);
+                    let listed = history.files.iter().any(|s| {
+                        (s.level, s.min, s.max)
+                            == (file.level().get(), file.range().min().get(), file.range().max().get())
+                    });
+                    prop_assert!(listed);
+                }
+                PlanOutcome::EmptyReplica => prop_assert!(history.files.is_empty()),
+                PlanOutcome::NoSnapshot { .. } | PlanOutcome::MalformedSnapshot { .. } => {}
             }
-            if let PlanOutcome::Gap { have_through, next_starts } = &outcome {
-                prop_assert!(next_starts.get() > have_through.get().saturating_add(1));
-            }
-            // Input order never matters: rotate and reverse.
-            let mut shuffled = infos;
-            let len = shuffled.len().max(1);
-            shuffled.rotate_left(shuffle.index(len));
-            shuffled.reverse();
-            let again = plan(&Inventory::from_files(shuffled), goal.target());
-            prop_assert_eq!(outcome, again);
+            // A real permutation of the input (keys are random sort keys): the
+            // inventory is the same value and so is the plan.
+            let mut shuffled: Vec<(u32, FileInfo)> = order
+                .iter()
+                .copied()
+                .cycle()
+                .zip(infos)
+                .collect();
+            shuffled.sort_by_key(|(rank, _)| *rank);
+            let shuffled = Inventory::from_files(shuffled.into_iter().map(|(_, info)| info)).unwrap();
+            prop_assert_eq!(&shuffled, &inventory);
+            prop_assert_eq!(plan(&shuffled, goal.target()), outcome);
         }
     }
 }
