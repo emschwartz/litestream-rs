@@ -356,11 +356,12 @@ fn retry_backs_off_per_lane() {
 #[test]
 fn throttle_retry_after_honored() {
     let (mut rig, mut actor) = caught_up();
-    let throttled = StoreError::Throttled {
-        op: StoreOp::Upload,
-        retry_after: Some(Duration::from_secs(7)),
-    };
-    rig.remote.inner.inject_failure(StoreOp::Upload, throttled);
+    // A hint longer than the 1 s backoff, then one shorter than the 2 s.
+    for millis in [7_000, 500] {
+        rig.remote
+            .inner
+            .inject_failure(StoreOp::Upload, throttled(StoreOp::Upload, millis));
+    }
     rig.commit(2);
     rig.tick(&mut actor, T0 + 10);
     let tick = rig.tick(&mut actor, T0 + 10);
@@ -371,6 +372,8 @@ fn throttle_retry_after_honored() {
     );
     let pruned = rig.settle(&mut actor, T0 + 10);
     assert_eq!(pruned.last().and_then(next_of), Some(Next::At(until)));
+    let second = next_retry(&mut rig, &mut actor, T0 + 7_010);
+    assert_eq!(second, Some(ts(T0 + 9_010)), "the backoff, not the hint");
 }
 
 #[test]
@@ -845,31 +848,57 @@ fn a_failed_prune_blocks_nothing_else() {
     assert_eq!(staged(&rig), vec![2, 3]);
 }
 
-#[test]
-fn a_failing_retention_delete_waits_and_doubles() {
-    let (mut rig, mut actor) = caught_up();
+/// Stages 2..=4 and follows the actor to the day's snapshot, whose
+/// retention deletes then fail with `errors`, in order. Returns when the
+/// first failure was and when its retry is due.
+fn retention_failure(
+    rig: &mut Rig,
+    actor: &mut Actor,
+    errors: [StoreError; 2],
+) -> (i64, Timestamp) {
     for n in 2..=4 {
         rig.commit(n);
-        rig.settle(&mut actor, T0 + 1);
+        rig.settle(actor, T0 + 1);
     }
-    // The snapshot a day in makes everything below it a retention delete.
-    for _ in 0..2 {
-        rig.remote
-            .inner
-            .inject_failure(StoreOp::Delete, transient(StoreOp::Delete));
+    for err in errors {
+        rig.remote.inner.inject_failure(StoreOp::Delete, err);
     }
     let mut now = T0 + 60_000;
-    let (failed_at, until) = loop {
-        let tick = rig.tick(&mut actor, now);
+    loop {
+        let tick = rig.tick(actor, now);
         if let Some(Event::Retrying { until, .. }) = event(&tick) {
-            break (now, *until);
+            return (now, *until);
         }
         match next_of(&tick) {
             Some(Next::Now) => {}
             Some(Next::At(at)) => now = at.unix_millis(),
             next => panic!("no retention delete ran: {tick:?} {next:?}"),
         }
-    };
+    }
+}
+
+/// Settles at `now` and returns the first retry's due instant.
+fn next_retry(rig: &mut Rig, actor: &mut Actor, now: i64) -> Option<Timestamp> {
+    rig.settle(actor, now)
+        .iter()
+        .find_map(|tick| match event(tick) {
+            Some(Event::Retrying { until, .. }) => Some(*until),
+            Some(_) | None => None,
+        })
+}
+
+const fn throttled(op: StoreOp, millis: u64) -> StoreError {
+    StoreError::Throttled {
+        op,
+        retry_after: Some(Duration::from_millis(millis)),
+    }
+}
+
+#[test]
+fn a_failing_retention_delete_waits_and_doubles() {
+    let (mut rig, mut actor) = caught_up();
+    let errors = [transient(StoreOp::Delete), transient(StoreOp::Delete)];
+    let (failed_at, until) = retention_failure(&mut rig, &mut actor, errors);
     assert_eq!(until, ts(failed_at + 1_000));
     // Before its wait the actor neither relists nor retries.
     let io = rig.io();
@@ -880,10 +909,20 @@ fn a_failing_retention_delete_waits_and_doubles() {
     }
     assert_eq!(rig.io(), io, "relisted or retried before the wait");
     // At the wait it relists, fails again, and the wait doubles.
-    let again = rig.settle(&mut actor, until.unix_millis());
-    let second = again.iter().find_map(|tick| match event(tick) {
-        Some(Event::Retrying { until, .. }) => Some(*until),
-        Some(_) | None => None,
-    });
-    assert_eq!(second, Some(ts(until.unix_millis() + 2_000)), "{again:?}");
+    let second = next_retry(&mut rig, &mut actor, until.unix_millis());
+    assert_eq!(second, Some(ts(until.unix_millis() + 2_000)));
+}
+
+#[test]
+fn a_throttled_retention_delete_waits_the_later_of_both() {
+    let (mut rig, mut actor) = caught_up();
+    // A hint longer than the 1 s backoff, then one shorter than the 2 s.
+    let errors = [
+        throttled(StoreOp::Delete, 30_000),
+        throttled(StoreOp::Delete, 500),
+    ];
+    let (failed_at, until) = retention_failure(&mut rig, &mut actor, errors);
+    assert_eq!(until, ts(failed_at + 30_000));
+    let second = next_retry(&mut rig, &mut actor, until.unix_millis());
+    assert_eq!(second, Some(ts(until.unix_millis() + 2_000)));
 }

@@ -4,9 +4,10 @@
 //! cannot carry live here, each bounded by the eight compaction levels:
 //!
 //! - Backoff. A job that failed is not planned again at its level until a
-//!   doubling wait has passed ([`retry_wait`], at most [`MAX_BACKOFF`]), so one
-//!   failing level cannot starve the snapshot and the deletes behind it. A
-//!   success at the level clears it. Go runs each level on its own ticker; this
+//!   doubling wait has passed ([`backoff_wait`]: at most [`MAX_BACKOFF`],
+//!   unless a throttled store asks for longer), so one failing level cannot
+//!   starve the snapshot and the deletes behind it. A success at the level
+//!   clears it. Go runs each level on its own ticker; this
 //!   is the same independence without a thread.
 //! - Distrusted outputs. A compaction output the store rejected (size or
 //!   checksum mismatch) is deleted at once; when that delete fails the key is
@@ -31,7 +32,7 @@ use lsr_ltx::Timestamp;
 
 use super::{CompactJob, DeleteJob, Job, MaintainError, Outcome};
 use crate::compact::CompactError;
-use crate::fault::{Fault, retry_wait};
+use crate::fault::{Backoff, Fault, backoff_wait};
 use crate::layout::{FileKey, Level};
 use crate::store::StoreError;
 
@@ -153,7 +154,11 @@ impl MaintainState {
             .retries
             .get(&level)
             .map_or(NonZeroU32::MIN, |retry| retry.failures.saturating_add(1));
-        let wait = retry_wait(failures, RETRY_BASE).max(retry_after.unwrap_or_default());
+        let wait = backoff_wait(
+            retry_after.map_or(Backoff::Doubling, Backoff::After),
+            failures,
+            RETRY_BASE,
+        );
         let until = Timestamp::from_unix_millis(
             now.unix_millis()
                 .saturating_add(i64::try_from(wait.as_millis()).unwrap_or(i64::MAX)),

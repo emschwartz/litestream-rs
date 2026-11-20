@@ -6,7 +6,7 @@
 //! breaks the build here before it can be mishandled anywhere.
 //!
 //! Core runs no timer. A [`Policy::Retry`] says how long to wait ([`Backoff`],
-//! [`retry_wait`]); the actor that owns the clock does the waiting and the
+//! [`backoff_wait`]); the actor that owns the clock does the waiting and the
 //! state machine hands it a [`Next`].
 //!
 //! Two things are deliberately not faults. A clock that steps backwards is
@@ -162,7 +162,8 @@ pub enum HaltCause {
 pub enum Backoff {
     /// [`retry_wait`] from the attempt count.
     Doubling,
-    /// A wait the store named.
+    /// A wait the store named: the retry waits at least this long, and at
+    /// least the doubling one ([`backoff_wait`]).
     After(Duration),
 }
 
@@ -222,6 +223,19 @@ pub fn retry_wait(attempt: NonZeroU32, interval: Duration) -> Duration {
     1u32.checked_shl(doublings)
         .and_then(|factor| interval.checked_mul(factor))
         .map_or(MAX_BACKOFF, |wait| wait.min(MAX_BACKOFF))
+}
+
+/// The wait before retry `attempt`: the later of the doubling
+/// [`retry_wait`] and the store's named wait, never shorter than either. The
+/// one throttle rule: every actor lane and every `MaintainState` level waits
+/// this long. The count, not the last wait, drives the doubling.
+#[must_use]
+pub fn backoff_wait(backoff: Backoff, attempt: NonZeroU32, interval: Duration) -> Duration {
+    let doubling = retry_wait(attempt, interval);
+    match backoff {
+        Backoff::Doubling => doubling,
+        Backoff::After(named) => doubling.max(named),
+    }
 }
 
 impl Fault {

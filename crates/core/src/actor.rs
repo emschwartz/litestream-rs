@@ -40,9 +40,7 @@ use crate::checkpoint::{
     after_checkpoint, after_sync, checkpoint, decide, next_wake,
 };
 use crate::compact::CompactError;
-use crate::fault::{
-    Backoff, Clamped, Fault, HaltCause, Next, Policy, SnapshotCause, policy, retry_wait,
-};
+use crate::fault::{Clamped, Fault, HaltCause, Next, Policy, SnapshotCause, backoff_wait, policy};
 use crate::inventory::Inventory;
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::maintain::{
@@ -386,10 +384,7 @@ impl Actor {
                     Waiter::Lane(lane) => {
                         let interval = self.cfg.retry_interval;
                         self.lanes.get_mut(lane).fail(|attempt| {
-                            let wait = match backoff {
-                                Backoff::Doubling => retry_wait(attempt, interval),
-                                Backoff::After(wait) => wait,
-                            };
+                            let wait = backoff_wait(backoff, attempt, interval);
                             later(now, wait)
                         })
                     }

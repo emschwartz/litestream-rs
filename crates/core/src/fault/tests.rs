@@ -567,6 +567,22 @@ fn from_source_maps_every_variant() {
 }
 
 #[test]
+fn backoff_wait_is_the_later_of_doubling_and_the_named_wait() {
+    let interval = Duration::from_secs(1);
+    let third = NonZeroU32::new(3).unwrap();
+    let wait = |backoff| backoff_wait(backoff, third, interval);
+    assert_eq!(wait(Backoff::Doubling), Duration::from_secs(4));
+    assert_eq!(
+        wait(Backoff::After(Duration::from_secs(1))),
+        Duration::from_secs(4)
+    );
+    assert_eq!(
+        wait(Backoff::After(Duration::from_secs(600))),
+        Duration::from_secs(600)
+    );
+}
+
+#[test]
 fn retry_wait_doubles_from_the_interval() {
     let interval = Duration::from_secs(1);
     let wait = |n: u32| retry_wait(NonZeroU32::new(n).unwrap(), interval);
