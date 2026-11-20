@@ -12,7 +12,7 @@ use super::*;
 use crate::conformance::block_on;
 use crate::layout::{ListedStamp, StoredStamp};
 use crate::mem::MemStore;
-use crate::plan::{PlanOutcome, RestoreTarget, plan};
+use crate::plan::{KeyTarget, PlanOutcome, plan};
 use crate::stamps::{Resolve, Stamps};
 use crate::store::{PageLimit, StoreOp, Upload};
 
@@ -786,7 +786,7 @@ impl Checker {
 
     fn after(&self, model: &Model) {
         let Some(newest) = self.newest_l0 else { return };
-        match plan(&model.inv(), RestoreTarget::Latest) {
+        match plan(&model.inv(), KeyTarget::Latest) {
             PlanOutcome::Plan(chain) => assert_eq!(chain.reaches(), newest),
             other @ (PlanOutcome::EmptyReplica
             | PlanOutcome::NoSnapshot { .. }

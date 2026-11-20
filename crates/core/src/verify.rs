@@ -47,7 +47,7 @@ use thiserror::Error;
 use self::dry_run::latest_restore;
 use crate::inventory::{Inventory, InventoryError, is_snapshot_start};
 use crate::layout::{FileInfo, FileKey, Level, StoredStamp};
-use crate::plan::{PlanOutcome, RestoreTarget, plan};
+use crate::plan::{KeyTarget, PlanOutcome, plan};
 use crate::restore::RestoreError;
 use crate::store::{ObjectStore, ReadLen, StoreError};
 
@@ -528,7 +528,7 @@ fn name_findings(inventory: &Inventory, findings: &mut Findings) -> PlanOutcome 
             older_history(inventory, base, next, findings);
         }
     }
-    let latest = plan(inventory, RestoreTarget::Latest);
+    let latest = plan(inventory, KeyTarget::Latest);
     match &latest {
         PlanOutcome::NoSnapshot { .. } => findings.push(Finding::NoSnapshot),
         PlanOutcome::Gap {
@@ -569,7 +569,7 @@ fn older_history(inventory: &Inventory, base: &FileInfo, next: &FileInfo, findin
     let Ok(hidden) = Inventory::from_files(only_base) else {
         return;
     };
-    let target = RestoreTarget::Txid(next.key.range().max());
+    let target = KeyTarget::Txid(next.key.range().max());
     if let PlanOutcome::Gap {
         have_through,
         next_starts,

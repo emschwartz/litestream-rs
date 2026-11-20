@@ -10,7 +10,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use lsr_core::{FileKey, Inventory, Level, PlanOutcome, RestoreTarget, plan};
+use lsr_core::{FileKey, Inventory, Level, PlanOutcome, RestoreTarget, plan_reference};
 
 use crate::binaries::{GoVersion, go_binary};
 use crate::error::CompatError;
@@ -126,7 +126,7 @@ fn last_txid(key: &FileKey) -> u64 {
 fn gap_of(files: &[ReplicaFile], target: RestoreTarget) -> Result<Option<(u64, u64)>, CompatError> {
     let inventory = Inventory::from_files(files.iter().map(info_of))
         .map_err(|e| CompatError::Fixture(format!("inventory: {e}")))?;
-    Ok(match plan(&inventory, target) {
+    Ok(match plan_reference(&inventory, target) {
         PlanOutcome::Gap {
             have_through,
             next_starts,

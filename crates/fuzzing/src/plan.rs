@@ -2,7 +2,7 @@
 
 use lsr_core::{
     AsOfPlanner, ContiguousChain, FileInfo, FileKey, Inventory, Level, PlanOutcome, Resolve,
-    RestoreTarget, StampStep, Stamps, plan as plan_restore,
+    RestoreTarget, StampStep, Stamps, plan_reference as plan_restore,
 };
 use lsr_ltx::{Timestamp, Txid, TxidRange};
 

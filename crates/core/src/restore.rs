@@ -32,7 +32,7 @@ use thiserror::Error;
 
 use crate::inventory::{Inventory, InventoryError};
 use crate::layout::{FileInfo, FileKey};
-use crate::plan::{AsOfPlanner, ContiguousChain, PlanOutcome, RestoreTarget, plan};
+use crate::plan::{AsOfPlanner, ContiguousChain, KeyTarget, PlanOutcome, RestoreTarget, plan};
 use crate::stamps::{Resolve, ResolveError, Stamps, Step, resolve};
 use crate::store::{ObjectStore, ReadLen, StoreError};
 
@@ -401,8 +401,10 @@ async fn plan_target<S: ObjectStore>(
     target: RestoreTarget,
     stamps_read: &mut u64,
 ) -> Result<PlanOutcome, Abort> {
-    let RestoreTarget::AsOf(instant) = target else {
-        return Ok(plan(inventory, target));
+    let instant = match target {
+        RestoreTarget::Latest => return Ok(plan(inventory, KeyTarget::Latest)),
+        RestoreTarget::Txid(txid) => return Ok(plan(inventory, KeyTarget::Txid(txid))),
+        RestoreTarget::AsOf(instant) => instant,
     };
     let mut planner = AsOfPlanner::new(inventory, instant);
     let mut counted = |stamps: &Stamps| {

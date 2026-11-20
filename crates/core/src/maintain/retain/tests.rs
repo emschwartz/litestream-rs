@@ -16,6 +16,7 @@ use crate::maintain::tests::{
 };
 use crate::maintain::{Due, Job};
 use crate::mem::MemStore;
+use crate::plan::RestoreTarget;
 use crate::stamps::{Resolve, Stamps, resolve};
 use crate::store::{ObjectStore, Upload};
 
@@ -707,7 +708,7 @@ fn inside_a_kept_file(after: &Inventory, t: Txid) -> bool {
         (1..=8).contains(&g.key.level().get())
             && range.min() <= t
             && t < range.max()
-            && restores(&plan(after, RestoreTarget::Txid(range.max())), range.max())
+            && restores(&plan(after, KeyTarget::Txid(range.max())), range.max())
     })
 }
 
@@ -724,15 +725,15 @@ fn check_delete(
     let after = without(before, job.keys());
     // 1
     assert!(
-        restores(&plan(&after, RestoreTarget::Latest), newest),
+        restores(&plan(&after, KeyTarget::Latest), newest),
         "latest after {job:?}"
     );
     // 2
     let (lo, floor_snapshot) = retained_from(before, now, cfg).unwrap();
     for raw in lo.get()..=newest.get() {
         let t = Txid::new(raw).unwrap();
-        if restores(&plan(before, RestoreTarget::Txid(t)), t) {
-            let now_plan = plan(&after, RestoreTarget::Txid(t));
+        if restores(&plan(before, KeyTarget::Txid(t)), t) {
+            let now_plan = plan(&after, KeyTarget::Txid(t));
             assert!(
                 restores(&now_plan, t) || inside_a_kept_file(&after, t),
                 "{t} no longer restores after {job:?}: {now_plan:?}"
@@ -793,9 +794,9 @@ fn check_instants(before: &Inventory, after: &Inventory, lo: Txid) {
             continue;
         }
         let target = RestoreTarget::AsOf(instant);
-        if let PlanOutcome::Plan(was) = plan(before, target) {
+        if let PlanOutcome::Plan(was) = crate::plan::plan_reference(before, target) {
             let wanted = was.reaches();
-            let now = plan(after, target);
+            let now = crate::plan::plan_reference(after, target);
             assert!(
                 restores(&now, wanted)
                     || matches!(now, PlanOutcome::AsOfInsideFile { .. })
@@ -1432,7 +1433,7 @@ fn retention_r_prime_jobs_are_restore_safe() {
             deleted_total += part.len();
             let after = without(&current, &part);
             assert!(
-                restores(&plan(&after, RestoreTarget::Latest), newest),
+                restores(&plan(&after, KeyTarget::Latest), newest),
                 "latest lost: case {case}"
             );
             if shape != Shape::Backwards && shape != Shape::Overlapping {
@@ -1441,8 +1442,8 @@ fn retention_r_prime_jobs_are_restore_safe() {
             current = after;
             for raw in lo_max.get()..=newest.get() {
                 let t = Txid::new(raw).unwrap();
-                if restores(&plan(&start, RestoreTarget::Txid(t)), t) {
-                    let p = plan(&current, RestoreTarget::Txid(t));
+                if restores(&plan(&start, KeyTarget::Txid(t)), t) {
+                    let p = plan(&current, KeyTarget::Txid(t));
                     assert!(
                         restores(&p, t) || inside_a_kept_file(&current, t),
                         "case {case} {shape:?}: {t} (>= {lo_max}) lost: {p:?}; start {:?}",

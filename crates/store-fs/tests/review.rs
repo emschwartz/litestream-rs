@@ -8,8 +8,8 @@ mod review {
 
     use lsr_core::conformance::block_on;
     use lsr_core::{
-        FileKey, Inventory, Level, ObjectStore, PageLimit, PlanOutcome, ReadLen, RestoreTarget,
-        Upload, plan,
+        FileKey, Inventory, KeyTarget, Level, ObjectStore, PageLimit, PlanOutcome, ReadLen, Upload,
+        plan,
     };
     use lsr_ltx::{Timestamp, Txid, TxidRange};
     use lsr_store_fs::FsStore;
@@ -125,7 +125,7 @@ mod review {
         let read = block_on(store.read(&key(0, 2, 2), 0, ReadLen::new(8).unwrap()));
         assert_eq!(read, Ok(b"l0".to_vec()), "read follows the link");
         let inv = block_on(Inventory::load(&store)).unwrap();
-        let out = plan(&inv, RestoreTarget::Latest);
+        let out = plan(&inv, KeyTarget::Latest);
         let reaches = if let PlanOutcome::Plan(chain) = &out {
             Some(chain.reaches().get())
         } else {

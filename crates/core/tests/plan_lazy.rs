@@ -1,5 +1,5 @@
 //! The as-of planner in query form: [`AsOfPlanner`] over a listing that carries
-//! only last-modified times, driven by [`resolve`], against [`plan`] over the same
+//! only last-modified times, driven by [`resolve`], against [`plan_reference`] over the same
 //! files with every stamp exact.
 
 #[cfg(test)]
@@ -14,7 +14,8 @@ mod lazy {
     use lsr_core::conformance::block_on;
     use lsr_core::{
         AsOfPlanner, FileInfo, FileKey, Inventory, Level, ListedStamp, MemStore, ObjectStore,
-        PlanOutcome, Resolve, RestoreTarget, StampStep, Stamps, StoredStamp, Upload, plan, resolve,
+        PlanOutcome, Resolve, RestoreTarget, StampStep, Stamps, StoredStamp, Upload,
+        plan_reference, resolve,
     };
     use lsr_ltx::{Timestamp, Txid, TxidRange};
     use proptest::prelude::*;
@@ -79,7 +80,7 @@ mod lazy {
 
     fn reference(files: &[F], t: i64) -> O {
         let inv = Inventory::from_files(files.iter().map(stored)).unwrap();
-        reduce(&plan(&inv, RestoreTarget::AsOf(at(t))))
+        reduce(&plan_reference(&inv, RestoreTarget::AsOf(at(t))))
     }
 
     /// A store holding the files, listed lazily or exactly.
@@ -367,7 +368,10 @@ mod lazy {
         let inv = Inventory::from_files(files.iter().map(stored)).unwrap();
         let mut planner = AsOfPlanner::new(&inv, at(250));
         let got = planner.advance(&Stamps::default());
-        assert_eq!(got, Resolve::Done(plan(&inv, RestoreTarget::AsOf(at(250)))));
+        assert_eq!(
+            got,
+            Resolve::Done(plan_reference(&inv, RestoreTarget::AsOf(at(250))))
+        );
         assert_eq!(planner.advance(&Stamps::default()), got);
     }
 

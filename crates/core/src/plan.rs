@@ -56,9 +56,10 @@
 //! order, until the first eligible one. What lies past the end is judged by
 //! keys, and the straddle rule looks only at files the last step already
 //! read. Each phase makes the decision [`plan`] makes with every stamp known,
-//! so the order of the reads never changes the answer. [`plan`] stays the
-//! planner for `Latest` and `Txid`, which read no stamp, and the exact
-//! reference for `AsOf` over a listing whose stamps are all exact.
+//! so the order of the reads never changes the answer. [`plan`] is the planner
+//! for [`KeyTarget`] (`Latest` and `Txid`), which read no stamp; `plan_reference`
+//! is the exact `AsOf` planner over a listing whose stamps are all exact, kept
+//! as the test oracle.
 
 use std::cmp::{Ordering, Reverse};
 use std::collections::BinaryHeap;
@@ -213,15 +214,50 @@ fn eligible(info: &FileInfo, target: RestoreTarget) -> bool {
     }
 }
 
-/// Plans a restore of [`target`] from [`inventory`].
+/// The targets that need no stamp: the only ones [`plan`] accepts.
 ///
-/// For [`RestoreTarget::AsOf`] this reads each file's listed stamp, so it is
-/// exact only over a listing whose stamps are all exact: a file listed with
-/// only a last-modified time counts as ineligible. A restore plans `AsOf`
-/// through [`AsOfPlanner`], which asks for the stamps it needs and returns
-/// what this function returns with every stamp known.
+/// An `AsOf` plan on a listing whose stamps are not all exact would quietly
+/// answer with a shorter history, so the type keeps it off [`plan`]; it goes
+/// through [`AsOfPlanner`], which asks for the stamps it needs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum KeyTarget {
+    /// The newest state the replica holds.
+    Latest,
+    /// The state right after this transaction.
+    Txid(Txid),
+}
+
+impl From<KeyTarget> for RestoreTarget {
+    fn from(target: KeyTarget) -> Self {
+        match target {
+            KeyTarget::Latest => Self::Latest,
+            KeyTarget::Txid(txid) => Self::Txid(txid),
+        }
+    }
+}
+
+/// Plans a restore of [`target`] from [`inventory`], by keys alone.
 #[must_use]
-pub fn plan(inventory: &Inventory, target: RestoreTarget) -> PlanOutcome {
+pub fn plan(inventory: &Inventory, target: KeyTarget) -> PlanOutcome {
+    plan_exact(inventory, target.into())
+}
+
+/// The exact planner for any [`RestoreTarget`], the oracle for [`AsOfPlanner`]
+/// in tests and the fuzz checker.
+///
+/// For `AsOf` it reads each file's listed stamp, so it is exact only over a
+/// listing whose stamps are all exact: a file listed with only a last-modified
+/// time counts as ineligible. That is why it exists only under the `testing`
+/// feature and production code cannot call it (a source guard checks the
+/// callers too).
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+#[must_use]
+pub fn plan_reference(inventory: &Inventory, target: RestoreTarget) -> PlanOutcome {
+    plan_exact(inventory, target)
+}
+
+fn plan_exact(inventory: &Inventory, target: RestoreTarget) -> PlanOutcome {
     let Some(newest) = inventory.newest() else {
         return PlanOutcome::EmptyReplica;
     };
@@ -785,7 +821,7 @@ mod tests {
     #[test]
     fn a_stray_file_before_the_instant_is_not_a_gap_and_the_straddler_still_shows() {
         let files = retention_replica();
-        let as_of = plan(
+        let as_of = plan_reference(
             &inv(&files),
             RestoreTarget::AsOf(Timestamp::from_unix_millis(360_900)),
         );
@@ -794,7 +830,7 @@ mod tests {
         };
         assert_eq!(chain.reaches(), txid(0x124));
         assert_eq!(file, key(1, 0x125, 0x12f));
-        let latest = plan(&inv(&files), RestoreTarget::Latest);
+        let latest = plan_reference(&inv(&files), RestoreTarget::Latest);
         let PlanOutcome::Plan(chain) = latest else {
             panic!("expected a plan, got {latest:?}");
         };
@@ -804,7 +840,7 @@ mod tests {
     #[test]
     fn as_of_before_a_hole_reports_the_gap() {
         let files = [file(0, 1, 2, 100), file(0, 5, 6, 200)];
-        let outcome = plan(
+        let outcome = plan_reference(
             &inv(&files),
             RestoreTarget::AsOf(Timestamp::from_unix_millis(101)),
         );
@@ -817,7 +853,7 @@ mod tests {
         );
         assert_eq!(
             outcome,
-            plan(&inv(&files), RestoreTarget::Latest),
+            plan_reference(&inv(&files), RestoreTarget::Latest),
             "the Latest planner reports the same hole"
         );
     }
@@ -825,7 +861,7 @@ mod tests {
     #[test]
     fn as_of_before_a_hole_that_a_later_snapshot_covers_is_not_a_gap() {
         let files = [file(0, 1, 2, 100), file(0, 5, 6, 200), file(9, 1, 6, 300)];
-        let outcome = plan(
+        let outcome = plan_reference(
             &inv(&files),
             RestoreTarget::AsOf(Timestamp::from_unix_millis(101)),
         );
@@ -838,7 +874,7 @@ mod tests {
     #[test]
     fn as_of_with_a_linking_file_stamped_after_the_instant_keeps_its_outcome() {
         let files = [file(0, 1, 2, 100), file(0, 3, 6, 200)];
-        let outcome = plan(
+        let outcome = plan_reference(
             &inv(&files),
             RestoreTarget::AsOf(Timestamp::from_unix_millis(101)),
         );
@@ -851,7 +887,7 @@ mod tests {
     #[test]
     fn as_of_with_nothing_past_the_reach_plans() {
         let files = [file(0, 1, 2, 100)];
-        let outcome = plan(
+        let outcome = plan_reference(
             &inv(&files),
             RestoreTarget::AsOf(Timestamp::from_unix_millis(101)),
         );
@@ -869,7 +905,11 @@ mod tests {
             at(0, 8, 8),
         ];
         for target in targets_through(8) {
-            assert_eq!(plan(&inv(&files), target), gap(5, 7), "{target:?}");
+            assert_eq!(
+                plan_reference(&inv(&files), target),
+                gap(5, 7),
+                "{target:?}"
+            );
         }
     }
 
@@ -878,19 +918,23 @@ mod tests {
         // L1 4-6 is gone; L0 4 to 6 were compacted away long ago.
         let files = [at(9, 1, 3), at(1, 7, 9), at(0, 10, 10)];
         for target in targets_through(10) {
-            assert_eq!(plan(&inv(&files), target), gap(3, 7), "{target:?}");
+            assert_eq!(
+                plan_reference(&inv(&files), target),
+                gap(3, 7),
+                "{target:?}"
+            );
         }
     }
 
     #[test]
     fn a_target_before_the_hole_still_plans() {
         let files = [at(9, 1, 3), at(0, 4, 4), at(0, 5, 5), at(0, 7, 7)];
-        let outcome = plan(&inv(&files), RestoreTarget::Txid(txid(5)));
+        let outcome = plan_reference(&inv(&files), RestoreTarget::Txid(txid(5)));
         assert_eq!(
             keys(&outcome),
             vec![key(9, 1, 3), key(0, 4, 4), key(0, 5, 5)]
         );
-        let as_of = plan(
+        let as_of = plan_reference(
             &inv(&files),
             RestoreTarget::AsOf(Timestamp::from_unix_millis(600)),
         );
@@ -904,14 +948,14 @@ mod tests {
         // before the instant. Go restores 1-4 and exits 0.
         let files = [at(9, 1, 3), at(0, 4, 4), at(0, 6, 6), at(0, 7, 7)];
         let target = RestoreTarget::AsOf(Timestamp::from_unix_millis(750));
-        assert_eq!(plan(&inv(&files), target), gap(4, 6));
+        assert_eq!(plan_reference(&inv(&files), target), gap(4, 6));
     }
 
     #[test]
     fn a_higher_level_file_spanning_the_hole_heals_it() {
         let files = [at(9, 1, 3), at(0, 4, 4), at(0, 6, 6), at(1, 5, 7)];
         for target in targets_through(7) {
-            let outcome = plan(&inv(&files), target);
+            let outcome = plan_reference(&inv(&files), target);
             assert_eq!(
                 keys(&outcome),
                 vec![key(9, 1, 3), key(0, 4, 4), key(1, 5, 7)],
@@ -923,7 +967,7 @@ mod tests {
     #[test]
     fn an_overlapping_higher_file_replaces_the_small_ones() {
         let files = [at(9, 1, 3), at(0, 4, 4), at(0, 5, 5), at(2, 3, 8)];
-        let outcome = plan(&inv(&files), RestoreTarget::Latest);
+        let outcome = plan_reference(&inv(&files), RestoreTarget::Latest);
         assert_eq!(keys(&outcome), vec![key(9, 1, 3), key(2, 3, 8)]);
     }
 
@@ -936,7 +980,7 @@ mod tests {
             at(2, 3, 6),
             at(1, 4, 6),
         ];
-        let outcome = plan(&inv(&files), RestoreTarget::Latest);
+        let outcome = plan_reference(&inv(&files), RestoreTarget::Latest);
         assert_eq!(keys(&outcome), vec![key(9, 1, 3), key(2, 3, 6)]);
     }
 
@@ -944,14 +988,14 @@ mod tests {
     fn a_target_inside_a_compacted_file_names_the_file() {
         let files = [at(9, 1, 3), at(1, 4, 9)];
         assert_eq!(
-            plan(&inv(&files), RestoreTarget::Txid(txid(6))),
+            plan_reference(&inv(&files), RestoreTarget::Txid(txid(6))),
             PlanOutcome::InsideFile {
                 requested: txid(6),
                 file: key(1, 4, 9),
             }
         );
         // At the file's end it is a plan.
-        let at_end = plan(&inv(&files), RestoreTarget::Txid(txid(9)));
+        let at_end = plan_reference(&inv(&files), RestoreTarget::Txid(txid(9)));
         assert_eq!(keys(&at_end), vec![key(9, 1, 3), key(1, 4, 9)]);
     }
 
@@ -959,7 +1003,7 @@ mod tests {
     fn a_target_inside_a_snapshot_names_it() {
         let files = [at(9, 1, 3), at(9, 1, 9), at(0, 10, 10)];
         assert_eq!(
-            plan(&inv(&files), RestoreTarget::Txid(txid(6))),
+            plan_reference(&inv(&files), RestoreTarget::Txid(txid(6))),
             PlanOutcome::InsideFile {
                 requested: txid(6),
                 file: key(9, 1, 9),
@@ -976,7 +1020,7 @@ mod tests {
             at(0, 5, 5),
             at(0, 6, 6),
         ];
-        let outcome = plan(&inv(&files), RestoreTarget::Txid(txid(6)));
+        let outcome = plan_reference(&inv(&files), RestoreTarget::Txid(txid(6)));
         assert_eq!(
             keys(&outcome),
             vec![key(9, 1, 3), key(0, 4, 4), key(0, 5, 5), key(0, 6, 6)]
@@ -999,16 +1043,16 @@ mod tests {
             at(0, 7, 7),
         ];
         let inventory = inv(&files);
-        let latest = plan(&inventory, RestoreTarget::Latest);
+        let latest = plan_reference(&inventory, RestoreTarget::Latest);
         assert_eq!(keys(&latest), vec![key(9, 1, 6), key(0, 7, 7)]);
-        let earlier = plan(&inventory, RestoreTarget::Txid(txid(5)));
+        let earlier = plan_reference(&inventory, RestoreTarget::Txid(txid(5)));
         assert_eq!(
             keys(&earlier),
             vec![key(9, 1, 3), key(0, 4, 4), key(0, 5, 5)]
         );
         let instant = RestoreTarget::AsOf(Timestamp::from_unix_millis(450));
         assert_eq!(
-            keys(&plan(&inventory, instant)),
+            keys(&plan_reference(&inventory, instant)),
             vec![key(9, 1, 3), key(0, 4, 4)]
         );
     }
@@ -1017,9 +1061,12 @@ mod tests {
     fn as_of_is_strictly_before_the_file_creation_time() {
         let files = [at(9, 1, 3), at(0, 4, 4)];
         let exactly = RestoreTarget::AsOf(Timestamp::from_unix_millis(400));
-        assert_eq!(keys(&plan(&inv(&files), exactly)), vec![key(9, 1, 3)]);
+        assert_eq!(
+            keys(&plan_reference(&inv(&files), exactly)),
+            vec![key(9, 1, 3)]
+        );
         let after = RestoreTarget::AsOf(Timestamp::from_unix_millis(401));
-        assert_eq!(keys(&plan(&inv(&files), after)).len(), 2);
+        assert_eq!(keys(&plan_reference(&inv(&files), after)).len(), 2);
     }
 
     #[test]
@@ -1027,8 +1074,8 @@ mod tests {
         let files = [at(9, 1, 3), at(0, 4, 4), at(0, 5, 5)];
         let late = RestoreTarget::AsOf(Timestamp::from_unix_millis(i64::MAX));
         assert_eq!(
-            plan(&inv(&files), late),
-            plan(&inv(&files), RestoreTarget::Latest)
+            plan_reference(&inv(&files), late),
+            plan_reference(&inv(&files), RestoreTarget::Latest)
         );
     }
 
@@ -1036,7 +1083,7 @@ mod tests {
     fn an_empty_replica_is_its_own_outcome() {
         for target in ALL_TARGETS {
             assert_eq!(
-                plan(&Inventory::default(), target),
+                plan_reference(&Inventory::default(), target),
                 PlanOutcome::EmptyReplica
             );
         }
@@ -1049,22 +1096,22 @@ mod tests {
             oldest_snapshot: None,
             malformed_snapshots: Vec::new(),
         };
-        assert_eq!(plan(&starts_late, RestoreTarget::Latest), none);
+        assert_eq!(plan_reference(&starts_late, RestoreTarget::Latest), none);
 
         let files = inv(&[at(9, 1, 5), at(0, 6, 6)]);
         let older = PlanOutcome::NoSnapshot {
             oldest_snapshot: Some(txid(5)),
             malformed_snapshots: Vec::new(),
         };
-        assert_eq!(plan(&files, RestoreTarget::Txid(txid(4))), older);
+        assert_eq!(plan_reference(&files, RestoreTarget::Txid(txid(4))), older);
         let before_all = RestoreTarget::AsOf(Timestamp::from_unix_millis(10));
-        assert_eq!(plan(&files, before_all), older);
+        assert_eq!(plan_reference(&files, before_all), older);
     }
 
     #[test]
     fn a_replica_with_only_level_zero_files_from_transaction_one_plans_latest() {
         let files = inv(&[at(0, 1, 1), at(0, 2, 2), at(0, 3, 3)]);
-        let outcome = plan(&files, RestoreTarget::Latest);
+        let outcome = plan_reference(&files, RestoreTarget::Latest);
         assert_eq!(
             keys(&outcome),
             vec![key(0, 1, 1), key(0, 2, 2), key(0, 3, 3)]
@@ -1074,7 +1121,7 @@ mod tests {
     #[test]
     fn a_level_one_file_from_transaction_one_is_a_base() {
         let files = inv(&[at(1, 1, 30), at(0, 31, 31), at(0, 32, 32)]);
-        let outcome = plan(&files, RestoreTarget::Latest);
+        let outcome = plan_reference(&files, RestoreTarget::Latest);
         assert_eq!(
             keys(&outcome),
             vec![key(1, 1, 30), key(0, 31, 31), key(0, 32, 32)]
@@ -1095,18 +1142,18 @@ mod tests {
             at(9, 1, 4),
         ]);
         let instant = RestoreTarget::AsOf(Timestamp::from_unix_millis(ms(1) + 1));
-        assert_eq!(keys(&plan(&files, instant)), vec![key(0, 1, 1)]);
+        assert_eq!(keys(&plan_reference(&files, instant)), vec![key(0, 1, 1)]);
     }
 
     #[test]
     fn the_further_reaching_base_wins_and_a_tie_goes_to_the_higher_level() {
         let files = inv(&[at(9, 1, 5), at(2, 1, 8), at(0, 9, 9)]);
-        let outcome = plan(&files, RestoreTarget::Latest);
+        let outcome = plan_reference(&files, RestoreTarget::Latest);
         assert_eq!(keys(&outcome), vec![key(2, 1, 8), key(0, 9, 9)]);
 
         let tied = inv(&[at(9, 1, 5), at(2, 1, 5)]);
         assert_eq!(
-            keys(&plan(&tied, RestoreTarget::Latest)),
+            keys(&plan_reference(&tied, RestoreTarget::Latest)),
             vec![key(9, 1, 5)]
         );
     }
@@ -1115,7 +1162,7 @@ mod tests {
     fn a_replica_whose_lowest_file_begins_at_two_has_no_snapshot() {
         let files = inv(&[at(0, 2, 2), at(1, 2, 4)]);
         assert_eq!(
-            plan(&files, RestoreTarget::Latest),
+            plan_reference(&files, RestoreTarget::Latest),
             PlanOutcome::NoSnapshot {
                 oldest_snapshot: None,
                 malformed_snapshots: Vec::new(),
@@ -1128,7 +1175,7 @@ mod tests {
         let files = inv(&[at(0, 1, 1), at(9, 1, 5), at(0, 2, 2)]);
         let before_all = RestoreTarget::AsOf(Timestamp::from_unix_millis(10));
         assert_eq!(
-            plan(&files, before_all),
+            plan_reference(&files, before_all),
             PlanOutcome::NoSnapshot {
                 oldest_snapshot: Some(txid(1)),
                 malformed_snapshots: Vec::new(),
@@ -1140,7 +1187,7 @@ mod tests {
     fn a_level_nine_file_not_starting_at_one_is_never_a_snapshot() {
         let files = inv(&[at(9, 2, 5), at(0, 2, 2)]);
         assert_eq!(
-            plan(&files, RestoreTarget::Latest),
+            plan_reference(&files, RestoreTarget::Latest),
             PlanOutcome::NoSnapshot {
                 oldest_snapshot: None,
                 malformed_snapshots: vec![key(9, 2, 5)],
@@ -1152,7 +1199,7 @@ mod tests {
     fn history_only_in_a_refused_snapshot_is_reported_not_dropped() {
         let files = inv(&[at(9, 1, 3), at(0, 4, 4), at(9, 2, 9)]);
         assert_eq!(
-            plan(&files, RestoreTarget::Latest),
+            plan_reference(&files, RestoreTarget::Latest),
             PlanOutcome::MalformedSnapshot {
                 have_through: txid(4),
                 file: key(9, 2, 9),
@@ -1164,7 +1211,7 @@ mod tests {
     fn a_transaction_beyond_the_newest_is_its_own_outcome() {
         let files = inv(&[at(9, 1, 3), at(0, 4, 4)]);
         assert_eq!(
-            plan(&files, RestoreTarget::Txid(txid(5))),
+            plan_reference(&files, RestoreTarget::Txid(txid(5))),
             PlanOutcome::BeyondNewest {
                 requested: txid(5),
                 newest: txid(4),
@@ -1175,14 +1222,17 @@ mod tests {
     #[test]
     fn a_transaction_past_the_hole_is_a_gap_not_beyond() {
         let files = inv(&[at(9, 1, 3), at(0, 20, 30)]);
-        assert_eq!(plan(&files, RestoreTarget::Txid(txid(25))), gap(3, 20));
+        assert_eq!(
+            plan_reference(&files, RestoreTarget::Txid(txid(25))),
+            gap(3, 20)
+        );
     }
 
     #[test]
     fn an_instant_inside_a_compacted_file_is_its_own_outcome() {
         // L1 4-10 is stamped with its newest input's time; the L0 files are gone.
         let files = [file(9, 1, 3, 300), file(1, 4, 10, 1000)];
-        let outcome = plan(
+        let outcome = plan_reference(
             &inv(&files),
             RestoreTarget::AsOf(Timestamp::from_unix_millis(950)),
         );
@@ -1192,7 +1242,7 @@ mod tests {
         assert_eq!(chain.reaches(), txid(3));
         assert_eq!(file, key(1, 4, 10));
         // At or after the file's stamp the file is eligible and it is a plan.
-        let after = plan(
+        let after = plan_reference(
             &inv(&files),
             RestoreTarget::AsOf(Timestamp::from_unix_millis(1001)),
         );
@@ -1202,7 +1252,7 @@ mod tests {
     #[test]
     fn a_snapshot_can_straddle_the_instant_too() {
         let files = [file(9, 1, 3, 300), file(9, 1, 10, 1000)];
-        let outcome = plan(
+        let outcome = plan_reference(
             &inv(&files),
             RestoreTarget::AsOf(Timestamp::from_unix_millis(950)),
         );
@@ -1215,7 +1265,7 @@ mod tests {
     #[test]
     fn a_refused_snapshot_is_not_a_straddler() {
         let files = [file(9, 1, 3, 300), file(9, 2, 10, 1000)];
-        let outcome = plan(
+        let outcome = plan_reference(
             &inv(&files),
             RestoreTarget::AsOf(Timestamp::from_unix_millis(950)),
         );
@@ -1240,7 +1290,7 @@ mod tests {
             file(0, 5, 5, 500),
             file(1, 4, 9, 900),
         ];
-        let outcome = plan(
+        let outcome = plan_reference(
             &inv(&files),
             RestoreTarget::AsOf(Timestamp::from_unix_millis(450)),
         );
@@ -1257,7 +1307,7 @@ mod tests {
             file(1, 4, 9, 1000),
             file(0, 20, 20, 500),
         ];
-        let outcome = plan(
+        let outcome = plan_reference(
             &inv(&files),
             RestoreTarget::AsOf(Timestamp::from_unix_millis(950)),
         );
@@ -1273,7 +1323,7 @@ mod tests {
         let files = [file(9, 1, 3, 300), file(1, 4, 10, 1000)];
         for target in [RestoreTarget::Latest, RestoreTarget::Txid(txid(10))] {
             assert_eq!(
-                keys(&plan(&inv(&files), target)),
+                keys(&plan_reference(&inv(&files), target)),
                 vec![key(9, 1, 3), key(1, 4, 10)]
             );
         }
@@ -1514,7 +1564,7 @@ mod tests {
         fn as_of_never_plans_across_a_hole_latest_reports(history in history(), t in -50i64..=2600) {
             let infos: Vec<FileInfo> = history.files.iter().map(|s| s.info()).collect();
             let inventory = Inventory::from_files(infos).unwrap();
-            let reach = match plan(&inventory, RestoreTarget::AsOf(Timestamp::from_unix_millis(t))) {
+            let reach = match plan_reference(&inventory, RestoreTarget::AsOf(Timestamp::from_unix_millis(t))) {
                 PlanOutcome::Plan(chain) | PlanOutcome::AsOfInsideFile { chain, .. } => chain.reaches(),
                 PlanOutcome::EmptyReplica
                 | PlanOutcome::NoSnapshot { .. }
@@ -1523,7 +1573,7 @@ mod tests {
                 | PlanOutcome::InsideFile { .. }
                 | PlanOutcome::MalformedSnapshot { .. } => return Ok(()),
             };
-            match plan(&inventory, RestoreTarget::Latest) {
+            match plan_reference(&inventory, RestoreTarget::Latest) {
                 PlanOutcome::Gap { have_through, .. }
                 | PlanOutcome::MalformedSnapshot { have_through, .. } => {
                     prop_assert!(have_through > reach, "planned at {reach}, Latest stops at {have_through}");
@@ -1545,14 +1595,14 @@ mod tests {
             let infos: Vec<FileInfo> = history.files.iter().map(|s| s.info()).collect();
             let inventory = Inventory::from_files(infos).unwrap();
             let (PlanOutcome::Plan(chain) | PlanOutcome::AsOfInsideFile { chain, .. }) =
-                plan(&inventory, RestoreTarget::AsOf(Timestamp::from_unix_millis(t)))
+                plan_reference(&inventory, RestoreTarget::AsOf(Timestamp::from_unix_millis(t)))
             else {
                 return Ok(());
             };
             for info in chain.files() {
                 prop_assert!(info.exact_stamp().expect("an exact stamp").at() < Timestamp::from_unix_millis(t), "{info:?} is not older than {t}");
             }
-            if let PlanOutcome::Plan(latest) = plan(&inventory, RestoreTarget::Latest) {
+            if let PlanOutcome::Plan(latest) = plan_reference(&inventory, RestoreTarget::Latest) {
                 prop_assert!(chain.reaches() <= latest.reaches());
             }
         }
@@ -1569,7 +1619,7 @@ mod tests {
             let infos: Vec<FileInfo> = history.files.iter().map(|s| s.info()).collect();
             let inventory = Inventory::from_files(infos.clone()).unwrap();
             let target = RestoreTarget::AsOf(Timestamp::from_unix_millis(t));
-            let outcome = plan(&inventory, target);
+            let outcome = plan_reference(&inventory, target);
             let (PlanOutcome::Plan(chain) | PlanOutcome::AsOfInsideFile { chain, .. }) = &outcome else {
                 return Ok(());
             };
@@ -1590,7 +1640,7 @@ mod tests {
                     !stray
                 })
                 .collect();
-            let without = plan(&Inventory::from_files(kept).unwrap(), target);
+            let without = plan_reference(&Inventory::from_files(kept).unwrap(), target);
             prop_assert_eq!(without, outcome);
         }
 
@@ -1601,7 +1651,7 @@ mod tests {
         ) {
             let infos: Vec<FileInfo> = history.files.iter().map(|s| s.info()).collect();
             let inventory = Inventory::from_files(infos.clone()).unwrap();
-            let outcome = plan(&inventory, goal.target());
+            let outcome = plan_reference(&inventory, goal.target());
             let has_plan = model_has_plan(&history.files, goal);
             let straddlers = match model_end(&history.files, goal) {
                 Some(end) if has_plan => model_straddlers(&history.files, goal, end),
@@ -1660,7 +1710,7 @@ mod tests {
             shuffled.sort_by_key(|(rank, _)| *rank);
             let shuffled = Inventory::from_files(shuffled.into_iter().map(|(_, info)| info)).unwrap();
             prop_assert_eq!(&shuffled, &inventory);
-            prop_assert_eq!(plan(&shuffled, goal.target()), outcome);
+            prop_assert_eq!(plan_reference(&shuffled, goal.target()), outcome);
         }
     }
 }

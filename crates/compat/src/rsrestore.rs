@@ -11,7 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use lsr_core::{
-    FileKey, Inventory, PlanOutcome, RestoreError, RestoreTarget, Restored, plan, restore,
+    FileKey, Inventory, PlanOutcome, RestoreError, RestoreTarget, Restored, plan_reference, restore,
 };
 use lsr_local::FileSink;
 use lsr_ltx::{Encoder, Event, ReadDecoder};
@@ -123,7 +123,7 @@ pub fn chain_files(replica: &Path, target: RestoreTarget) -> Result<Vec<FileKey>
     let store = FsStore::new(replica);
     let inventory = lsr_core::conformance::block_on(Inventory::load(&store))
         .map_err(|e| CompatError::Fixture(format!("inventory: {e}")))?;
-    let outcome = plan(&inventory, target);
+    let outcome = plan_reference(&inventory, target);
     let PlanOutcome::Plan(chain) = outcome else {
         return Err(CompatError::Fixture(format!(
             "no plan for {target:?}: {outcome:?}"

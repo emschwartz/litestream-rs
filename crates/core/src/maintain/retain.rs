@@ -93,7 +93,7 @@ use super::{DeleteJob, Hold, L0Retention, MAX_DELETE, MaintainState, Maintenance
 use crate::inventory::{Inventory, is_snapshot_start};
 use crate::layout::StoredStamp;
 use crate::layout::{FileInfo, FileKey, Level};
-use crate::plan::{PlanOutcome, RestoreTarget, plan};
+use crate::plan::{KeyTarget, PlanOutcome, plan};
 use crate::stamps::{Resolve, Stamps};
 
 #[cfg(test)]
@@ -292,7 +292,7 @@ fn hole(inventory: &Inventory) -> Option<Hold> {
 
 fn latest_unplannable(inventory: &Inventory) -> Option<Hold> {
     let newest = inventory.newest()?;
-    match plan(inventory, RestoreTarget::Latest) {
+    match plan(inventory, KeyTarget::Latest) {
         PlanOutcome::Plan(chain) if chain.reaches() == newest => None,
         // A plan that stops short is a missing tail; the planner never
         // returns one, and the hold must not claim a plan.
@@ -533,7 +533,7 @@ fn self_check(inventory: &Inventory, job: &DeleteJob) -> Option<Hold> {
             outcome: PlanOutcome::EmptyReplica,
         });
     };
-    match plan(&rest, RestoreTarget::Latest) {
+    match plan(&rest, KeyTarget::Latest) {
         PlanOutcome::Plan(chain) if Some(chain.reaches()) == inventory.newest() => None,
         // A plan that stops short of the newest transaction.
         PlanOutcome::Plan(chain) => Some(Hold::SelfCheck {

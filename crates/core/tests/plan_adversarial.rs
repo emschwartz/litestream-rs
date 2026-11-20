@@ -5,7 +5,7 @@ mod review {
 
     use lsr_core::{
         AsOfPlanner, FileInfo, FileKey, Inventory, InventoryError, Level, PlanOutcome, Resolve,
-        RestoreTarget, StampStep, Stamps, plan,
+        RestoreTarget, StampStep, Stamps, plan_reference,
     };
     use lsr_core::{ListedStamp, StoredStamp};
     use lsr_ltx::{Timestamp, Txid, TxidRange};
@@ -151,7 +151,7 @@ mod review {
                 G::Txid(n) => RestoreTarget::Txid(Txid::new(n).unwrap()),
                 G::AsOf(t) => RestoreTarget::AsOf(Timestamp::from_unix_millis(t)),
             };
-            let out = plan(&inv, target);
+            let out = plan_reference(&inv, target);
             if let RestoreTarget::AsOf(instant) = target {
                 let lazy = AsOfPlanner::new(&inv, instant).advance(&Stamps::default());
                 prop_assert_eq!(lazy, Resolve::Done(out.clone()));
@@ -237,7 +237,7 @@ mod review {
     #[test]
     fn as_of_inside_a_compacted_file_is_not_a_plan_to_the_older_state() {
         let inv = Inventory::from_files([at(9, 1, 3, 300), at(1, 4, 10, 1000)]).unwrap();
-        let out = plan(&inv, RestoreTarget::AsOf(Timestamp::from_unix_millis(950)));
+        let out = plan_reference(&inv, RestoreTarget::AsOf(Timestamp::from_unix_millis(950)));
         assert!(
             matches!(out, PlanOutcome::AsOfInsideFile { .. }),
             "AsOf(950) planned to {out:?} although L1 4-10 proves later history the planner cannot place"

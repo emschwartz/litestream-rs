@@ -101,3 +101,21 @@ fn last_modified_matched_only_in_allowed_sites() {
         "LastModified read outside its sites: {found:?}"
     );
 }
+/// The exact planner takes an `AsOf` only over a listing whose stamps are all
+/// exact; production code asks `AsOfPlanner` through `resolve` instead.
+#[test]
+fn plan_reference_only_in_oracles() {
+    let found = offenders(
+        &["plan_reference"],
+        &[
+            "crates/core/src/plan.rs",
+            "crates/core/src/lib.rs",
+            "crates/compat/",
+            "crates/fuzzing/",
+        ],
+    );
+    assert!(
+        found.is_empty(),
+        "the exact as-of planner called from production code: {found:?}"
+    );
+}
