@@ -197,6 +197,7 @@ impl FsStore {
             file,
             stamp,
             created_at,
+            written: 0,
         })
     }
 
@@ -360,6 +361,7 @@ pub struct FsUpload {
     file: File,
     stamp: SystemTime,
     created_at: Timestamp,
+    written: u64,
 }
 
 impl FsUpload {
@@ -369,13 +371,28 @@ impl FsUpload {
             self.file.set_modified(self.stamp)?;
             self.file.sync_all()?;
             let size = self.file.metadata()?.len();
+            if size != self.written {
+                return Ok(Err(size));
+            }
             fs::rename(&self.scratch, &self.target)?;
             // The rename is not durable until its directory entry is.
             File::open(&self.dir)?.sync_all()?;
-            Ok(size)
+            Ok(Ok(size))
         })();
         match result {
-            Ok(size) => Ok(FileInfo {
+            // Caught before the rename, so nothing wrong was ever published.
+            Ok(Err(stored)) => {
+                let removed = fs::remove_file(&self.scratch).is_ok();
+                Err(StoreError::Corrupt {
+                    key: Some(self.key),
+                    cause: CorruptCause::CommitSizeMismatch {
+                        wrote: self.written,
+                        stored,
+                        removed,
+                    },
+                })
+            }
+            Ok(Ok(size)) => Ok(FileInfo {
                 key: self.key,
                 size,
                 created_at: self.created_at,
@@ -391,11 +408,15 @@ impl FsUpload {
 
 impl Upload for FsUpload {
     fn write(&mut self, chunk: &[u8]) -> impl Future<Output = Result<(), StoreError>> + Send {
-        ready(
-            self.file
-                .write_all(chunk)
-                .map_err(|err| StoreError::from_io(StoreOp::Upload, None, &err)),
-        )
+        ready(match self.file.write_all(chunk) {
+            Ok(()) => {
+                self.written = self
+                    .written
+                    .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+                Ok(())
+            }
+            Err(err) => Err(StoreError::from_io(StoreOp::Upload, None, &err)),
+        })
     }
 
     fn commit(self) -> impl Future<Output = Result<FileInfo, StoreError>> + Send {
@@ -520,6 +541,38 @@ mod tests {
         );
         let leftovers: Vec<_> = fs::read_dir(path.parent().unwrap()).unwrap().collect();
         assert_eq!(leftovers.len(), 1, "scratch file removed by the rename");
+    }
+
+    #[test]
+    fn fs_commit_size_mismatch_is_caught_before_rename() {
+        let h = FsHarness::new();
+        let target = key(9, 1, 7);
+        let err = block_on(async {
+            let mut up = h
+                .store
+                .begin_upload(&target, Timestamp::from_unix_millis(5_000))
+                .await
+                .unwrap();
+            up.write(b"data").await.unwrap();
+            up.file.set_len(2).unwrap();
+            up.commit().await.unwrap_err()
+        });
+        assert!(
+            matches!(
+                err,
+                StoreError::Corrupt {
+                    cause: CorruptCause::CommitSizeMismatch {
+                        wrote: 4,
+                        stored: 2,
+                        removed: true
+                    },
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        let dir = h.dir.path().join("replica/ltx/9");
+        assert_eq!(fs::read_dir(dir).unwrap().count(), 0, "nothing published");
     }
 
     #[test]
