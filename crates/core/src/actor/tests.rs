@@ -1323,3 +1323,5 @@ fn a_crash_between_the_drop_and_the_snapshot_boots_clean() {
     assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2)]);
     assert_eq!(restored(&rig), 2);
 }
+
+mod rejected_snapshot;

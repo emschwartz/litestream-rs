@@ -9,8 +9,8 @@
 //!   starve the snapshot and the deletes behind it. A success at the level
 //!   clears it. Go runs each level on its own ticker; this
 //!   is the same independence without a thread.
-//! - Distrusted outputs. A compaction output the store rejected (size or
-//!   checksum mismatch) is deleted at once; when that delete fails the key is
+//! - Distrusted outputs. A compaction output or a snapshot the store rejected
+//!   (size or checksum mismatch) is deleted at once; when that delete fails the key is
 //!   remembered here, [`super::due`] plans its delete before anything else at the
 //!   level, and retention holds until it is gone. A listing cannot tell such an
 //!   object from a good one, and the inputs it "covers" would be deleted.
@@ -73,7 +73,7 @@ struct Retry {
 pub struct MaintainState {
     /// By destination level; [`Level::SNAPSHOT`] is the snapshot's slot.
     retries: BTreeMap<Level, Retry>,
-    /// At most one per compaction level: a level's delete runs first.
+    /// At most one per level above 0: a level's delete runs first.
     distrusted: BTreeMap<Level, FileKey>,
 }
 
@@ -104,6 +104,13 @@ impl MaintainState {
                 self.fail(Level::SNAPSHOT, now, hint);
             }
         }
+    }
+
+    /// Remembers a snapshot the store rejected and that could not be deleted:
+    /// its delete is planned before the next snapshot, and retention holds
+    /// until it is gone.
+    pub fn distrust_snapshot(&mut self, key: FileKey) {
+        self.distrusted.insert(Level::SNAPSHOT, key);
     }
 
     fn record_compact(&mut self, now: Timestamp, job: &CompactJob, outcome: &Outcome) {

@@ -32,7 +32,9 @@ use crate::source::{CommittedRead, PageSource, WalSource};
 use crate::store::ObjectStore;
 use crate::sync::{clamp, plan_pages, scan_whole, stage};
 
-/// A snapshot that was not written. Nothing is visible under `key`.
+/// A snapshot that was not written. Nothing is visible under `key`, unless
+/// the fault says the store rejected its own commit (`UploadAmbiguous`,
+/// `UploadChecksumMismatch`): the caller deletes the key then.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 #[error("snapshot {key} failed: {fault:?}")]
 pub struct SnapshotFailed {
@@ -49,7 +51,7 @@ pub struct SnapshotFailed {
 ///
 /// # Errors
 /// [`SnapshotFailed`]. Retrying the same call is safe: the key is the same and
-/// the object only becomes visible on a successful commit.
+/// a commit replaces whatever an earlier, rejected one left under it.
 pub async fn write_snapshot<W: WalSource, P: PageSource, S: ObjectStore>(
     proof: &SyncedThrough,
     wal: &mut W,
