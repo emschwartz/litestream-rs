@@ -12,6 +12,7 @@ pub mod conformance;
 mod env;
 mod inventory;
 mod layout;
+mod maintain;
 mod mem;
 mod plan;
 mod restore;
@@ -29,6 +30,11 @@ pub use inventory::{Inventory, InventoryError, is_snapshot_start};
 pub use layout::{
     FileInfo, FileKey, Level, ParseKeyError, RangeSide, cmp_range, file_name, is_scratch_name,
     parse_file_name,
+};
+pub use maintain::{
+    CompactJob, ConfigError, DeleteJob, Due, Interval, Job, JobError, L0Retention, MAX_DELETE,
+    MaintainError, Maintenance, Outcome, Setting, SnapshotJob, due, go_truncate, run_compact,
+    run_delete,
 };
 pub use mem::{MemStore, MemUpload};
 pub use plan::{ContiguousChain, PlanOutcome, RestoreTarget, plan};
