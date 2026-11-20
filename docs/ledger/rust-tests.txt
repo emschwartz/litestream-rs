@@ -112,6 +112,13 @@ lsr-compat::matrix matrix::every_file_decodes_verified_under_its_key
 lsr-compat::matrix matrix::every_target_agrees_with_go
 lsr-compat::matrix matrix::reencoding_keeps_every_header_and_page
 lsr-compat::matrix matrix::txid_zero_is_not_a_target
+lsr-compat::ofd_pin a_blocking_posix_lock_waits_behind_an_ofd_lock_in_the_same_process
+lsr-compat::ofd_pin a_posix_lock_from_our_own_descriptor_pins_nothing
+lsr-compat::ofd_pin an_ofd_pin_on_a_read_mark_makes_restart_and_truncate_busy
+lsr-compat::ofd_pin the_bundled_sqlite_is_built_without_setlk_timeout
+lsr-compat::ofd_pin the_hosts_last_close_ignores_a_read_mark_pin_but_not_a_pin_on_the_dms_byte
+lsr-compat::ofd_pin the_ofd_pin_survives_another_descriptor_closing_and_the_posix_locks_do_not
+lsr-compat::ofd_pin with_a_busy_timeout_the_checkpoint_still_reports_busy
 lsr-compat::releases every_release_tag_is_known
 lsr-compat::releases quirks_name_known_releases
 lsr-compat::rust_chains go_compacts_and_prunes_a_rust_replica
