@@ -96,6 +96,7 @@ struct Log {
     begins: Vec<FileKey>,
     aborts: u32,
     commit_before: VecDeque<StoreError>,
+    commit_after: VecDeque<StoreError>,
     write_fail: VecDeque<StoreError>,
     lie_about_size: bool,
 }
@@ -183,9 +184,13 @@ impl Upload for ProbeUpload {
     }
 
     fn commit(self) -> impl Future<Output = Result<FileInfo, StoreError>> + Send {
-        let (early, lie) = {
+        let (early, late, lie) = {
             let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
-            (log.commit_before.pop_front(), log.lie_about_size)
+            (
+                log.commit_before.pop_front(),
+                log.commit_after.pop_front(),
+                log.lie_about_size,
+            )
         };
         async move {
             if let Some(err) = early {
@@ -193,6 +198,9 @@ impl Upload for ProbeUpload {
                 return Err(err);
             }
             let mut info = self.inner.commit().await?;
+            if let Some(err) = late {
+                return Err(err);
+            }
             if lie {
                 info.size = info.size.saturating_add(1);
             }
@@ -365,6 +373,29 @@ fn a_listed_key_of_another_size_is_uploaded_again_over_the_same_key() {
         assert_eq!(put.state, UploadState::At(Some(txid(1))));
         assert_eq!(read_all(&remote, &key(1)), bytes);
     }
+}
+
+#[test]
+fn a_checksum_mismatch_writes_the_key_again_without_trusting_a_listing() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    let bytes = stage(&staging, 1);
+    // The object is visible at the right size, which a listing would confirm.
+    remote.log().commit_after.push_back(StoreError::Corrupt {
+        key: Some(key(1)),
+        cause: CorruptCause::ChecksumMismatch { part: None },
+    });
+    let failed = failure(next(UploadState::At(None), &staging, &remote, 1));
+    assert_eq!(failed.fault, Fault::UploadChecksumMismatch);
+    assert_eq!(failed.state, UploadState::At(None));
+    assert_eq!(
+        plan_upload(&failed.state, Txid::new(1)),
+        UploadPlan::Upload(key(1))
+    );
+    let put = next(failed.state, &staging, &remote, 1).unwrap();
+    assert_eq!(put.state, UploadState::At(Some(txid(1))));
+    assert_eq!(remote.log().lists, 0);
+    assert_eq!(remote.log().begins, vec![key(1), key(1)]);
+    assert_eq!(read_all(&remote.inner, &key(1)), bytes);
 }
 
 #[test]

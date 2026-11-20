@@ -22,7 +22,9 @@
 //! reported as corrupt: a bad staged file never becomes visible.
 //!
 //! A failure before the commit leaves the state alone (nothing could have been
-//! published). A failure of the commit itself gives [`UploadState::ListFirst`].
+//! published). A failure of the commit itself gives [`UploadState::ListFirst`],
+//! except a checksum mismatch: the store holds wrong bytes that a listing would
+//! confirm by size, so the state stays and the same key is written again.
 //! Core runs no timer: [`upload_tick`] tells the actor whether to step again.
 
 use std::num::NonZeroU32;
@@ -290,6 +292,10 @@ enum PutError {
     Before(Fault),
     /// The commit failed or its answer cannot be believed.
     Commit(Fault),
+    /// The store says the bytes it took are not the bytes sent. A listing
+    /// cannot tell a wrong object of the right size from a right one, so the
+    /// key is written again without asking.
+    Rejected(Fault),
 }
 
 async fn put_step<L: ObjectStore, S: ObjectStore>(
@@ -303,7 +309,7 @@ async fn put_step<L: ObjectStore, S: ObjectStore>(
             state: UploadState::At(Some(key.range().max())),
             did: Did::Put(info),
         }),
-        Err(PutError::Before(fault)) => Err(fail(state, fault)),
+        Err(PutError::Before(fault) | PutError::Rejected(fault)) => Err(fail(state, fault)),
         Err(PutError::Commit(fault)) => Err(fail(
             UploadState::ListFirst {
                 confirmed: state.confirmed(),
@@ -335,7 +341,15 @@ async fn put_staged<L: ObjectStore, S: ObjectStore>(
     match open.commit().await {
         Ok(info) if info.key == *key && info.size == wrote => Ok(info),
         Ok(_) => Err(PutError::Commit(Fault::UploadAmbiguous)),
-        Err(err) => Err(PutError::Commit(Fault::from_remote(&err))),
+        Err(err) => Err(commit_failed(Fault::from_remote(&err))),
+    }
+}
+
+fn commit_failed(fault: Fault) -> PutError {
+    if fault == Fault::UploadChecksumMismatch {
+        PutError::Rejected(fault)
+    } else {
+        PutError::Commit(fault)
     }
 }
 
