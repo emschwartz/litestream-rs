@@ -1,25 +1,38 @@
 //! The rotating seed set: runs seeds from a base until the time is up.
 //!
 //! `just sim-soak <seconds>` sets `LSR_SIM_BASE_SEED` (default: `date +%s`)
-//! and `LSR_SIM_SECONDS`. Every seed's replay line is printed before the run,
-//! so a hang or a crash of the process still names its seed. A failing seed
-//! belongs in the fixed set once the bug is fixed.
+//! and `LSR_SIM_SECONDS`. `just sim-nightly` sets `LSR_SIM_DAY` instead: the
+//! nightly workflow's seeds follow from the UTC date ([`lsr_sim::nightly_base`]),
+//! so each night runs seeds no other night does and any night is rerun from
+//! its date. Every seed's replay line is printed before the run, so a hang or
+//! a crash of the process still names its seed, and every failure is printed
+//! again at the end with its replay line. A failing seed belongs in the fixed
+//! set once the bug is fixed.
 
 #[cfg(test)]
 mod soak {
     use std::time::{Duration, Instant};
 
-    use lsr_sim::{Seed, Weights, replay_line, run};
+    use lsr_sim::{Seed, Weights, nightly_base, replay_line, run};
 
     const STEPS: u32 = 300;
 
+    /// The base seed: `LSR_SIM_DAY` (a UTC date, `YYYYMMDD`) names a night's
+    /// range, else `LSR_SIM_BASE_SEED` is the seed itself.
+    fn base() -> u64 {
+        match std::env::var("LSR_SIM_DAY") {
+            Ok(day) => nightly_base(&day).expect("LSR_SIM_DAY is a date, YYYYMMDD"),
+            Err(_) => std::env::var("LSR_SIM_BASE_SEED")
+                .expect("LSR_SIM_BASE_SEED or LSR_SIM_DAY")
+                .parse()
+                .expect("LSR_SIM_BASE_SEED is a number"),
+        }
+    }
+
     #[test]
-    #[ignore = "runs for LSR_SIM_SECONDS; use `just sim-soak`"]
+    #[ignore = "runs for LSR_SIM_SECONDS; use `just sim-soak` or `just sim-nightly`"]
     fn rotating_seeds() {
-        let base: u64 = std::env::var("LSR_SIM_BASE_SEED")
-            .expect("LSR_SIM_BASE_SEED")
-            .parse()
-            .expect("LSR_SIM_BASE_SEED is a number");
+        let base = base();
         let seconds: u64 = std::env::var("LSR_SIM_SECONDS")
             .expect("LSR_SIM_SECONDS")
             .parse()
@@ -35,11 +48,19 @@ mod soak {
             println!("{}", replay_line(seed, Some(STEPS)));
             if let Err(failure) = run(seed, STEPS, &Weights::default()) {
                 println!("{failure}");
-                failed.push(n);
+                failed.push(failure);
             }
             ran += 1;
         }
         println!("ran {ran} seeds from {base}, {} failed", failed.len());
-        assert!(failed.is_empty(), "failing seeds: {failed:?}");
+        // Last, so the failures are the end of a log that named every seed.
+        for failure in &failed {
+            println!("FAILED {failure}");
+        }
+        let lines: Vec<String> = failed
+            .iter()
+            .map(|failure| replay_line(failure.seed, Some(failure.steps)))
+            .collect();
+        assert!(failed.is_empty(), "failing seeds:\n{}", lines.join("\n"));
     }
 }

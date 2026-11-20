@@ -69,5 +69,34 @@ pub fn replay_line(seed: Seed, steps: Option<u32>) -> String {
     }
 }
 
+/// How many seeds one night of the rotating set owns.
+pub const SEEDS_PER_NIGHT: u64 = 1_000_000;
+
+/// Text that is not a UTC date written `YYYYMMDD`.
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+#[error("not a date: expected YYYYMMDD, got {0:?}")]
+pub struct ParseDayError(String);
+
+/// The first seed of the nightly rotating set for a UTC date written
+/// `YYYYMMDD`: the date as a number times [`SEEDS_PER_NIGHT`]. No two nights
+/// share a seed, and a night is run again from its date alone.
+///
+/// # Errors
+/// [`ParseDayError`] unless `day` is eight digits with a month of 1 to 12 and
+/// a day of 1 to 31 (the calendar is not checked further: the date only names
+/// a range).
+pub fn nightly_base(day: &str) -> Result<u64, ParseDayError> {
+    let bad = || ParseDayError(day.to_owned());
+    if day.len() != 8 || !day.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(bad());
+    }
+    let number: u64 = day.parse().map_err(|_err| bad())?;
+    let (year, month, date) = (number / 10_000, number / 100 % 100, number % 100);
+    if year == 0 || !(1..=12).contains(&month) || !(1..=31).contains(&date) {
+        return Err(bad());
+    }
+    number.checked_mul(SEEDS_PER_NIGHT).ok_or_else(bad)
+}
+
 #[cfg(test)]
 mod tests;

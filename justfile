@@ -25,6 +25,13 @@ sim-replay seed steps="300":
 sim-soak seconds base=`date +%s`:
     LSR_SIM_BASE_SEED={{base}} LSR_SIM_SECONDS={{seconds}} cargo nextest run -p lsr-sim --test soak --run-ignored only --no-capture --locked
 
+# The nightly rotating seed set: seeds follow from the UTC date (YYYYMMDD), a million per night,
+# so no two nights share one and a night is rerun with `just sim-nightly <seconds> <YYYYMMDD>`.
+# A failing seed is printed last as its replay line. The arguments reach the test as environment
+# variables only, never as shell text.
+sim-nightly $LSR_SIM_SECONDS="900" $LSR_SIM_DAY=`date -u +%Y%m%d`:
+    env -u LSR_SIM_BASE_SEED cargo nextest run -p lsr-sim --test soak --run-ignored only --no-capture --locked
+
 # Mutation testing for one crate (just mutants ltx); results in target/mutants/mutants.out.
 # Survivors are killed by a test or recorded in docs/mutants.md. Not part of check.
 mutants crate *args:

@@ -40,3 +40,38 @@ fn streams_differ_per_purpose_and_per_seed() {
     assert_ne!(a.stream(0), Seed::new(2).stream(0));
     assert_eq!(a.stream(5), a.stream(5));
 }
+
+#[test]
+fn a_night_owns_a_million_seeds_of_its_own() {
+    assert_eq!(nightly_base("20261120"), Ok(20_261_120_000_000));
+    let tonight = nightly_base("20261231").unwrap();
+    let tomorrow = nightly_base("20270101").unwrap();
+    assert!(tomorrow - tonight >= SEEDS_PER_NIGHT);
+    assert_eq!(
+        nightly_base("20261121").unwrap() - nightly_base("20261120").unwrap(),
+        SEEDS_PER_NIGHT
+    );
+}
+
+#[test]
+fn text_that_is_not_a_date_is_no_base() {
+    for text in [
+        "",
+        "2026112",
+        "202611200",
+        "2026-11-20",
+        "20261320",
+        "20261100",
+        "20261132",
+        "00001120",
+        "2026112x",
+        "+0261120",
+        " 20261120",
+    ] {
+        assert_eq!(
+            nightly_base(text),
+            Err(ParseDayError(text.to_owned())),
+            "{text:?}"
+        );
+    }
+}
