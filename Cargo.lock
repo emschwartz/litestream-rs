@@ -296,7 +296,9 @@ name = "lsr-compat"
 version = "0.0.0"
 dependencies = [
  "lsr-core",
+ "lsr-local",
  "lsr-ltx",
+ "lsr-store-fs",
  "rusqlite",
  "serde",
  "serde_json",

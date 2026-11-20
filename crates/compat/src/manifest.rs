@@ -128,6 +128,25 @@ pub struct Manifest {
     pub targets: Vec<TargetEntry>,
 }
 
+impl Manifest {
+    /// An instant halfway between every two consecutive distinct file times that are at least
+    /// two milliseconds apart: instants the manifests do not record, to probe as-of restores.
+    pub fn midpoints(&self) -> Vec<i64> {
+        let mut times: Vec<i64> = self.files.iter().map(|f| f.created_at_ms).collect();
+        times.sort_unstable();
+        times.dedup();
+        times
+            .windows(2)
+            .filter_map(|w| match w {
+                [a, b] if b.saturating_sub(*a) >= 2 => {
+                    Some(a.saturating_add(b.saturating_sub(*a).saturating_div(2)))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+}
+
 /// `crates/compat/fixtures`.
 pub fn fixtures_root() -> PathBuf {
     workspace_root()

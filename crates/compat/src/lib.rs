@@ -23,6 +23,7 @@ mod golive;
 mod manifest;
 mod pages;
 mod replica;
+mod rsrestore;
 mod scenario;
 mod workload;
 
@@ -36,4 +37,5 @@ pub use manifest::{
 };
 pub use pages::{PageDigest, hash_pages, integrity_check};
 pub use replica::{parse_rel, rel_of};
+pub use rsrestore::{Staged, chain_files, copy_tree, restore_replica, stage};
 pub use scenario::Scenario;
