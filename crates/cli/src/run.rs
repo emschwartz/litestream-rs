@@ -7,18 +7,20 @@
 //! still reports what was removed.
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use lsr_core::{
-    Depth, Inventory, InventoryError, PlanOutcome, Report, RestoreError, Restored, Severity,
-    VerifyError, restore, verify,
+    Depth, Inventory, InventoryError, ObjectStore, PlanOutcome, Report, RestoreError,
+    RestoreTarget, Restored, Severity, VerifyError, restore, verify,
 };
 use lsr_local::{ClearError, CreateError, FileSink, clear_sidecars};
 use lsr_store_fs::FsStore;
+use lsr_store_s3::ConfigError;
 use thiserror::Error;
 
-use crate::args::{Command, FilesArgs, RestoreArgs, UsageError, VerifyArgs};
+use crate::args::{Command, FilesArgs, Replica, RestoreArgs, UsageError, VerifyArgs};
 use crate::render;
+use crate::replica::{self, Remote};
 
 /// How the process ends. One closed enum, mapped from results in
 /// [`exit_for_done`] and [`exit_for_error`] only.
@@ -96,6 +98,9 @@ pub enum Done {
     Files {
         /// Every file.
         inventory: Inventory,
+        /// For an S3 replica, how many files had no stored stamp and show the
+        /// object's `LastModified` instead (replicas from Go v0.5.0 have no stamps).
+        stamp_fallbacks: Option<u64>,
         /// Whether to print JSON.
         json: bool,
     },
@@ -117,6 +122,17 @@ pub enum CliError {
         /// The path given.
         path: PathBuf,
     },
+    /// An S3 replica needs credentials and the environment has none.
+    #[error(
+        "S3 credentials missing: {var} is not set (credentials come from AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and optionally AWS_SESSION_TOKEN)"
+    )]
+    MissingCredentials {
+        /// The variable that is unset or empty.
+        var: &'static str,
+    },
+    /// The S3 endpoint cannot address the bucket.
+    #[error("S3 replica: {0}")]
+    S3Config(ConfigError),
     /// The replica could not be listed completely.
     #[error("listing the replica: {0}")]
     Inventory(#[from] InventoryError),
@@ -210,6 +226,8 @@ pub fn exit_for_error(error: &CliError) -> Exit {
         },
         CliError::AfterClearing { source, .. } => exit_for_error(source),
         CliError::NoReplica { .. }
+        | CliError::MissingCredentials { .. }
+        | CliError::S3Config(_)
         | CliError::Inventory(_)
         | CliError::Verify(_)
         | CliError::Sidecar { .. }
@@ -233,32 +251,53 @@ pub async fn run(command: Command) -> Result<Done, CliError> {
     }
 }
 
-fn require_replica(path: &Path) -> Result<FsStore, CliError> {
-    if path.join("ltx").is_dir() {
-        Ok(FsStore::new(path))
-    } else {
-        Err(CliError::NoReplica {
-            path: path.to_path_buf(),
-        })
+/// The store behind a replica.
+enum Opened {
+    Dir(FsStore),
+    S3(Remote),
+}
+
+fn open(replica: &Replica) -> Result<Opened, CliError> {
+    match replica {
+        Replica::Dir(path) if path.join("ltx").is_dir() => Ok(Opened::Dir(FsStore::new(path))),
+        Replica::Dir(path) => Err(CliError::NoReplica { path: path.clone() }),
+        Replica::S3(config) => replica::open_s3((**config).clone()).map(Opened::S3),
     }
 }
 
 async fn restore_command(args: RestoreArgs) -> Result<Done, CliError> {
-    let store = require_replica(&args.replica)?;
-    let cleared = if args.clear_sidecars {
-        clear_sidecars(&args.output)?
+    let RestoreArgs {
+        replica,
+        output,
+        target,
+        clear_sidecars,
+    } = args;
+    match open(&replica)? {
+        Opened::Dir(store) => restore_on(&store, output, target, clear_sidecars).await,
+        Opened::S3(store) => restore_on(&store, output, target, clear_sidecars).await,
+    }
+}
+
+async fn restore_on<S: ObjectStore>(
+    store: &S,
+    output: PathBuf,
+    target: RestoreTarget,
+    clear_sidecars_first: bool,
+) -> Result<Done, CliError> {
+    let cleared = if clear_sidecars_first {
+        clear_sidecars(&output)?
     } else {
         Vec::new()
     };
     let attempt = async {
-        let sink = FileSink::create(&args.output)?;
-        let restored = restore(&store, args.target, sink).await?;
+        let sink = FileSink::create(&output)?;
+        let restored = restore(store, target, sink).await?;
         Ok::<_, CliError>(restored)
     }
     .await;
     match attempt {
         Ok(restored) => Ok(Done::Restored {
-            output: args.output,
+            output,
             restored,
             cleared,
         }),
@@ -271,8 +310,10 @@ async fn restore_command(args: RestoreArgs) -> Result<Done, CliError> {
 }
 
 async fn verify_command(args: VerifyArgs) -> Result<Done, CliError> {
-    let store = require_replica(&args.replica)?;
-    let report = verify(&store, args.depth).await?;
+    let report = match open(&args.replica)? {
+        Opened::Dir(store) => verify(&store, args.depth).await?,
+        Opened::S3(store) => verify(&store, args.depth).await?,
+    };
     Ok(Done::Verified {
         depth: args.depth,
         report: Box::new(report),
@@ -281,10 +322,27 @@ async fn verify_command(args: VerifyArgs) -> Result<Done, CliError> {
 }
 
 async fn files_command(args: FilesArgs) -> Result<Done, CliError> {
-    let store = require_replica(&args.replica)?;
-    let inventory = Inventory::load(&store).await?;
+    match open(&args.replica)? {
+        Opened::Dir(store) => Ok(Done::Files {
+            inventory: Inventory::load(&store).await?,
+            stamp_fallbacks: None,
+            json: args.json,
+        }),
+        Opened::S3(store) => files_on_s3(&store, args.json).await,
+    }
+}
+
+async fn files_on_s3<T: lsr_store_s3::Transport>(
+    store: &Remote<T>,
+    json: bool,
+) -> Result<Done, CliError> {
+    let inventory = Inventory::load(store).await?;
     Ok(Done::Files {
         inventory,
-        json: args.json,
+        stamp_fallbacks: Some(store.inner().fell_back()),
+        json,
     })
 }
+
+#[cfg(test)]
+mod tests;

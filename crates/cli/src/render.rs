@@ -50,12 +50,14 @@ pub fn done(done: &Done) -> String {
         } => verify_json(report, *depth),
         Done::Files {
             inventory,
+            stamp_fallbacks,
             json: false,
-        } => files_text(inventory),
+        } => files_text(inventory, *stamp_fallbacks),
         Done::Files {
             inventory,
+            stamp_fallbacks,
             json: true,
-        } => files_json(inventory),
+        } => files_json(inventory, *stamp_fallbacks),
         Done::Help => help(),
         Done::Version => format!("lsr {}\n", env!("CARGO_PKG_VERSION")),
     }
@@ -90,7 +92,7 @@ pub fn help() -> String {
         }
         putln!(out, "{usage}\n  {}", command.summary());
         for spec in FLAGS.iter().filter(|s| s.commands.contains(&command)) {
-            putln!(out, "  {:<18}{}", spec.name, spec.help);
+            putln!(out, "  {:<20}{}", spec.name, spec.help);
         }
     }
     out.push_str(
@@ -510,7 +512,7 @@ fn verify_json(report: &Report, depth: Depth) -> String {
     out
 }
 
-fn files_text(inventory: &Inventory) -> String {
+fn files_text(inventory: &Inventory, stamp_fallbacks: Option<u64>) -> String {
     let mut out = String::new();
     for info in inventory.files() {
         putln!(
@@ -523,6 +525,9 @@ fn files_text(inventory: &Inventory) -> String {
     }
     if inventory.skipped_total() > 0 {
         putln!(out, "foreign names skipped: {}", inventory.skipped_total());
+    }
+    if let Some(count) = stamp_fallbacks {
+        putln!(out, "stored times taken from LastModified: {count}");
     }
     out
 }
@@ -541,12 +546,16 @@ fn file_json(info: &FileInfo) -> String {
     ])
 }
 
-fn files_json(inventory: &Inventory) -> String {
+fn files_json(inventory: &Inventory, stamp_fallbacks: Option<u64>) -> String {
     let files: Vec<String> = inventory.files().iter().map(file_json).collect();
-    let mut out = object(&[
+    let mut fields = vec![
         ("files", array(&files)),
         ("foreign_names", inventory.skipped_total().to_string()),
-    ]);
+    ];
+    if let Some(count) = stamp_fallbacks {
+        fields.push(("stamps_from_last_modified", count.to_string()));
+    }
+    let mut out = object(&fields);
     out.push('\n');
     out
 }

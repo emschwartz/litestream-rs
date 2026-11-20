@@ -557,6 +557,7 @@ dependencies = [
  "lsr-local",
  "lsr-ltx",
  "lsr-store-fs",
+ "lsr-store-s3",
  "serde_json",
  "tempfile",
  "thiserror",

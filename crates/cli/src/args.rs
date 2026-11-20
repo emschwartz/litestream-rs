@@ -6,11 +6,19 @@
 //! accept or document a flag the other does not know. A flag takes its value
 //! as the next argument (`--replica dir`); a value that starts with `--` is
 //! read as a missing value, so a path like that is written `./--name`.
+//!
+//! `--replica` is a directory or an `s3://<bucket>/<prefix>` URL. The S3 flags
+//! (`--endpoint`, `--region`, `--force-path-style`) are folded into the URL's
+//! own query and parsed once by `S3Config::from_url`, so a flag overrides the
+//! query and the provider defaults follow the final endpoint. Credentials are
+//! not parsed here (this module reads no environment); `replica.rs` takes them
+//! from `AWS_*` variables.
 
 use std::path::PathBuf;
 
 use lsr_core::{Depth, RestoreTarget};
 use lsr_ltx::{ParseTxidError, Timestamp, TimestampParseError, Txid};
+use lsr_store_s3::{ConfigError, Endpoint, Region, S3Config};
 use thiserror::Error;
 
 /// The three subcommands.
@@ -73,7 +81,40 @@ pub const FLAGS: &[FlagSpec] = &[
             CommandName::Verify,
             CommandName::Files,
         ],
-        help: "the file replica: the directory that holds ltx/",
+        help: "the replica: a directory that holds ltx/, or s3://<bucket>/<prefix>",
+    },
+    FlagSpec {
+        name: "--endpoint",
+        value: Some("<url>"),
+        required: false,
+        commands: &[
+            CommandName::Restore,
+            CommandName::Verify,
+            CommandName::Files,
+        ],
+        help: "s3 only: the service endpoint (http or https), for anything but AWS",
+    },
+    FlagSpec {
+        name: "--region",
+        value: Some("<name>"),
+        required: false,
+        commands: &[
+            CommandName::Restore,
+            CommandName::Verify,
+            CommandName::Files,
+        ],
+        help: "s3 only: the signing region (default us-east-1)",
+    },
+    FlagSpec {
+        name: "--force-path-style",
+        value: None,
+        required: false,
+        commands: &[
+            CommandName::Restore,
+            CommandName::Verify,
+            CommandName::Files,
+        ],
+        help: "s3 only: address the bucket as endpoint/bucket instead of bucket.endpoint",
     },
     FlagSpec {
         name: "--output",
@@ -119,6 +160,18 @@ pub const FLAGS: &[FlagSpec] = &[
     },
 ];
 
+/// Where the replica lives.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Replica {
+    /// A directory that holds `ltx/`.
+    Dir(PathBuf),
+    /// A bucket prefix; credentials come from the environment at run time.
+    S3(Box<S3Config>),
+}
+
+/// The flags that only mean something for an S3 replica.
+const S3_ONLY_FLAGS: [&str; 3] = ["--endpoint", "--region", "--force-path-style"];
+
 /// A parsed command line.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
@@ -137,8 +190,8 @@ pub enum Command {
 /// `lsr restore`.
 #[derive(Debug, PartialEq, Eq)]
 pub struct RestoreArgs {
-    /// The replica directory.
-    pub replica: PathBuf,
+    /// The replica.
+    pub replica: Replica,
     /// The database to create.
     pub output: PathBuf,
     /// The state to rebuild.
@@ -150,8 +203,8 @@ pub struct RestoreArgs {
 /// `lsr verify`.
 #[derive(Debug, PartialEq, Eq)]
 pub struct VerifyArgs {
-    /// The replica directory.
-    pub replica: PathBuf,
+    /// The replica.
+    pub replica: Replica,
     /// How much to read.
     pub depth: Depth,
     /// JSON instead of text.
@@ -161,8 +214,8 @@ pub struct VerifyArgs {
 /// `lsr files`.
 #[derive(Debug, PartialEq, Eq)]
 pub struct FilesArgs {
-    /// The replica directory.
-    pub replica: PathBuf,
+    /// The replica.
+    pub replica: Replica,
     /// JSON instead of text.
     pub json: bool,
 }
@@ -238,18 +291,72 @@ pub enum UsageError {
         /// What was typed.
         value: String,
     },
-    /// `--replica` is a URL; only directories work yet.
-    #[error("--replica {scheme}:// replicas are not supported yet; give a directory")]
+    /// `--replica` is a URL whose scheme is not `s3`.
+    #[error("--replica {scheme}:// replicas are not supported; give a directory or an s3:// URL")]
     UnsupportedReplica {
         /// The scheme, never the rest of the URL (it may hold credentials).
         scheme: String,
     },
+    /// `--replica s3://...` is not a usable bucket and prefix. The reason names
+    /// the shape that is wrong, never any part of the URL.
+    #[error("--replica: {reason}")]
+    BadReplicaUrl {
+        /// What is wrong.
+        reason: ConfigError,
+    },
+    /// `--endpoint` or `--region` is not usable.
+    #[error("{flag}: {reason}")]
+    BadS3Flag {
+        /// The flag.
+        flag: &'static str,
+        /// What is wrong.
+        reason: ConfigError,
+    },
+    /// An S3 flag next to a directory replica.
+    #[error("{flag} applies to s3:// replicas only")]
+    S3FlagForDirectory {
+        /// The flag.
+        flag: &'static str,
+    },
+    /// The URL's host is a provider endpoint (or a `host:port`), which Go splits
+    /// into bucket and endpoint; here the host is the bucket, verbatim.
+    #[error(
+        "--replica host names a provider endpoint, not a bucket; write s3://<bucket>/<prefix> and pass the endpoint with --endpoint"
+    )]
+    EndpointInReplicaHost,
     /// An argument that is not UTF-8, which a flag value cannot be.
     #[error("argument {position} is not valid UTF-8")]
     NotUtf8 {
         /// 1-based position after `lsr`.
         position: usize,
     },
+}
+
+/// Percent-encodes everything but the unreserved characters.
+fn query_escape(raw: &str) -> String {
+    raw.bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+                char::from(byte).to_string()
+            } else {
+                format!("%{byte:02X}")
+            }
+        })
+        .collect()
+}
+
+/// Hosts Go's `ParseHost` takes apart into bucket, region and endpoint
+/// (rc.go:1820-1871); here the host is the bucket, so these would name the wrong one.
+fn names_a_provider_endpoint(host: &str) -> bool {
+    const SUFFIXES: [&str; 6] = [
+        ".amazonaws.com",
+        ".digitaloceanspaces.com",
+        ".backblazeb2.com",
+        "filebase.com",
+        ".scw.cloud",
+        ".neon.tech",
+    ];
+    SUFFIXES.iter().any(|suffix| host.ends_with(suffix))
 }
 
 /// What the scan of one subcommand's arguments found.
@@ -323,14 +430,55 @@ impl Flags {
         })
     }
 
-    fn replica(&self) -> Result<PathBuf, UsageError> {
+    fn replica(&self) -> Result<Replica, UsageError> {
         let value = self.require("--replica")?;
-        if let Some((scheme, _)) = value.split_once("://") {
-            return Err(UsageError::UnsupportedReplica {
+        match value.split_once("://") {
+            None => {
+                if let Some(flag) = S3_ONLY_FLAGS.iter().find(|flag| self.has(flag)) {
+                    return Err(UsageError::S3FlagForDirectory { flag });
+                }
+                Ok(Replica::Dir(PathBuf::from(value)))
+            }
+            Some((scheme, _)) if scheme.eq_ignore_ascii_case("s3") => self.s3(value),
+            Some((scheme, _)) => Err(UsageError::UnsupportedReplica {
                 scheme: scheme.to_owned(),
-            });
+            }),
         }
-        Ok(PathBuf::from(value))
+    }
+
+    /// The URL with the S3 flags appended to its query (the last value of a key
+    /// wins in `from_url`), so the flags override the query.
+    fn s3(&self, url: &str) -> Result<Replica, UsageError> {
+        let mut extra = Vec::new();
+        if let Some(endpoint) = self.value("--endpoint") {
+            Endpoint::new(endpoint).map_err(|reason| UsageError::BadS3Flag {
+                flag: "--endpoint",
+                reason,
+            })?;
+            extra.push(format!("endpoint={}", query_escape(endpoint)));
+        }
+        if let Some(region) = self.value("--region") {
+            Region::new(region).map_err(|reason| UsageError::BadS3Flag {
+                flag: "--region",
+                reason,
+            })?;
+            extra.push(format!("region={}", query_escape(region)));
+        }
+        if self.has("--force-path-style") {
+            extra.push("forcePathStyle=true".to_owned());
+        }
+        let base = url.split_once('#').map_or(url, |(base, _fragment)| base);
+        let joined = match (extra.is_empty(), base.contains('?')) {
+            (true, _) => base.to_owned(),
+            (false, true) => format!("{base}&{}", extra.join("&")),
+            (false, false) => format!("{base}?{}", extra.join("&")),
+        };
+        let config =
+            S3Config::from_url(&joined).map_err(|reason| UsageError::BadReplicaUrl { reason })?;
+        if names_a_provider_endpoint(config.bucket().as_str()) {
+            return Err(UsageError::EndpointInReplicaHost);
+        }
+        Ok(Replica::S3(Box::new(config)))
     }
 
     fn target(&self) -> Result<RestoreTarget, UsageError> {

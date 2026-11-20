@@ -7,6 +7,7 @@
 
 mod args;
 mod render;
+mod replica;
 mod run;
 
 use std::future::Future;

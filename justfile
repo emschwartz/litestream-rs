@@ -57,6 +57,8 @@ test-s3: minio-up
     if ./scripts/minio.sh running; then
         LSR_MINIO_ENDPOINT="http://127.0.0.1:${LSR_MINIO_PORT:-9000}" \
             cargo nextest run -p lsr-store-s3 --test minio --locked --no-fail-fast
+        LSR_MINIO_ENDPOINT="http://127.0.0.1:${LSR_MINIO_PORT:-9000}" \
+            cargo nextest run -p lsr-cli --test s3 --locked --no-fail-fast
     else
         echo "test-s3: MinIO is not running; S3 tests skipped"
     fi

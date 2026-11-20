@@ -462,7 +462,7 @@ mod cli {
             &["frobnicate"],
             &["restore", "--replica", "r"],
             &["verify", "--replica", "r", "--replica", "s"],
-            &["verify", "--replica", "s3://bucket/path"],
+            &["verify", "--replica", "https://bucket/path"],
             &[
                 "restore",
                 "--replica",
@@ -480,8 +480,8 @@ mod cli {
             assert_eq!((run.code, run.stdout.as_str()), (64, ""), "{args:?}");
             assert_eq!(run.stderr.lines().count(), 1, "{args:?}: {}", run.stderr);
         }
-        let url = lsr(&["verify", "--replica", "s3://bucket/path"]);
-        assert!(url.stderr.contains("not supported yet"), "{}", url.stderr);
+        let url = lsr(&["verify", "--replica", "https://bucket/path"]);
+        assert!(url.stderr.contains("not supported"), "{}", url.stderr);
     }
 
     #[test]

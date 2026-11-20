@@ -1,3 +1,5 @@
+use lsr_store_s3::{Provider, UrlStyle};
+
 use super::*;
 
 fn words(line: &str) -> Vec<String> {
@@ -21,7 +23,7 @@ fn restore_latest_is_the_default_target() {
     assert_eq!(
         parsed("restore --replica r --output o"),
         Ok(Command::Restore(RestoreArgs {
-            replica: "r".into(),
+            replica: Replica::Dir("r".into()),
             output: "o".into(),
             target: RestoreTarget::Latest,
             clear_sidecars: false,
@@ -52,7 +54,7 @@ fn verify_defaults_to_contents_and_takes_depth_and_json() {
     assert_eq!(
         parsed("verify --replica r"),
         Ok(Command::Verify(VerifyArgs {
-            replica: "r".into(),
+            replica: Replica::Dir("r".into()),
             depth: Depth::Contents,
             json: false,
         }))
@@ -60,7 +62,7 @@ fn verify_defaults_to_contents_and_takes_depth_and_json() {
     assert_eq!(
         parsed("verify --json --depth names --replica r"),
         Ok(Command::Verify(VerifyArgs {
-            replica: "r".into(),
+            replica: Replica::Dir("r".into()),
             depth: Depth::Names,
             json: true,
         }))
@@ -72,7 +74,7 @@ fn files_takes_replica_and_json() {
     assert_eq!(
         parsed("files --replica r --json"),
         Ok(Command::Files(FilesArgs {
-            replica: "r".into(),
+            replica: Replica::Dir("r".into()),
             json: true,
         }))
     );
@@ -253,29 +255,206 @@ fn bad_depth() {
 
 #[test]
 fn a_url_replica_is_refused_by_scheme_only() {
+    let https = usage("files --replica https://x/y");
     assert_eq!(
-        usage("verify --replica s3://key:secret@bucket/path"),
+        https,
         UsageError::UnsupportedReplica {
-            scheme: "s3".into()
+            scheme: "https".into()
         }
     );
-    assert!(
-        !usage("files --replica https://x/y")
-            .to_string()
-            .contains("x/y")
+    assert!(!https.to_string().contains("x/y"));
+}
+
+fn s3(line: &str) -> S3Config {
+    match parsed(line) {
+        Ok(Command::Files(FilesArgs {
+            replica: Replica::S3(config),
+            ..
+        })) => *config,
+        other => panic!("not an s3 files command: {other:?}"),
+    }
+}
+
+/// The table of Go's `TestParseURL` (s3/replica_client_test.go:3448), each row
+/// read through `--replica`.
+#[test]
+fn parse_s3_forms() {
+    let config = s3("files --replica s3://bucket/path");
+    assert_eq!(config.bucket().as_str(), "bucket");
+    assert_eq!(config.prefix().as_str(), "path");
+    assert_eq!(config.region().as_str(), "us-east-1");
+    assert_eq!(
+        config.endpoint().url().as_str(),
+        "https://s3.us-east-1.amazonaws.com/"
     );
+    assert_eq!(config.style(), UrlStyle::VirtualHost);
+    assert_eq!(config.provider(), Provider::Aws);
+    assert_eq!(
+        s3("files --replica s3://bucket/a/b/c").prefix().as_str(),
+        "a/b/c"
+    );
+    // Departure: Go accepts a bucket with no path and builds keys with a leading
+    // slash; an empty prefix is refused (ruling F10).
+    assert_eq!(
+        usage("files --replica s3://bucket"),
+        UsageError::BadReplicaUrl {
+            reason: ConfigError::EmptyPrefix
+        }
+    );
+    assert_eq!(
+        usage("files --replica s3://%"),
+        UsageError::BadReplicaUrl {
+            reason: ConfigError::BadBucket
+        }
+    );
+    // Departure: Go reads s3://filebase.com/bucket/path as bucket "bucket", key
+    // "path"; here the host is the bucket, so the form is refused, not misread.
+    assert_eq!(
+        usage("files --replica s3://filebase.com/bucket/path"),
+        UsageError::EndpointInReplicaHost
+    );
+}
+
+#[test]
+fn hosts_go_would_split_are_refused_not_misread() {
+    for host in [
+        "bucket.s3.amazonaws.com",
+        "bucket.s3.us-west-2.amazonaws.com",
+        "bucket.nyc3.digitaloceanspaces.com",
+        "bucket.s3.us-west-000.backblazeb2.com",
+        "bucket.s3.fr-par.scw.cloud",
+    ] {
+        assert_eq!(
+            usage(&format!("files --replica s3://{host}/p")),
+            UsageError::EndpointInReplicaHost,
+            "{host}"
+        );
+    }
+    // Go's MinIO form bucket.host:port: a port is refused by the URL parser.
+    assert_eq!(
+        usage("files --replica s3://bucket.localhost:9000/p"),
+        UsageError::BadReplicaUrl {
+            reason: ConfigError::BadUrl
+        }
+    );
+}
+
+#[test]
+fn s3_flags_set_endpoint_region_and_style() {
+    let config = s3(
+        "files --replica s3://b/p --endpoint http://127.0.0.1:9000 --region eu-west-1 --force-path-style",
+    );
+    assert_eq!(config.endpoint().url().as_str(), "http://127.0.0.1:9000/");
+    assert_eq!(config.region().as_str(), "eu-west-1");
+    assert_eq!(config.style(), UrlStyle::Path);
+    assert_eq!(config.provider(), Provider::Minio);
+    // The provider decides the style when no flag does.
+    let tigris = s3("files --replica s3://b/p --endpoint https://fly.storage.tigris.dev");
+    assert_eq!(tigris.provider(), Provider::Tigris);
+    assert_eq!(tigris.style(), UrlStyle::VirtualHost);
+}
+
+#[test]
+fn a_flag_overrides_the_url_query() {
+    let config = s3(
+        "files --replica s3://b/p?region=us-west-2&forcePathStyle=false&endpoint=http://a:1 --region eu-west-1 --force-path-style --endpoint http://b:2",
+    );
+    assert_eq!(config.region().as_str(), "eu-west-1");
+    assert_eq!(config.style(), UrlStyle::Path);
+    assert_eq!(config.endpoint().url().as_str(), "http://b:2/");
+    // The query alone still works, and an endpoint with a query of its own survives.
+    let alone = s3("files --replica s3://b/p?endpoint=http%3A%2F%2Fa%3A1");
+    assert_eq!(alone.endpoint().url().as_str(), "http://a:1/");
+}
+
+#[test]
+fn bad_s3_flags_name_the_flag_and_not_the_value() {
+    for (line, flag, reason) in [
+        (
+            "files --replica s3://b/p --endpoint ftp://h",
+            "--endpoint",
+            ConfigError::UnsupportedScheme,
+        ),
+        (
+            "files --replica s3://b/p --endpoint http://user:hunter2@h",
+            "--endpoint",
+            ConfigError::BadUrl,
+        ),
+        (
+            "files --replica s3://b/p --region No_Good",
+            "--region",
+            ConfigError::BadRegion,
+        ),
+    ] {
+        let err = usage(line);
+        assert_eq!(err, UsageError::BadS3Flag { flag, reason }, "{line}");
+        assert!(!err.to_string().contains("hunter2"));
+    }
+}
+
+#[test]
+fn a_url_with_userinfo_or_a_secret_query_never_prints() {
+    let err = usage("files --replica s3://AK:hunter2@b/p");
+    assert_eq!(
+        err,
+        UsageError::BadReplicaUrl {
+            reason: ConfigError::BadUrl
+        }
+    );
+    let err = usage("files --replica s3://b/p?secret=hunter2");
+    assert_eq!(
+        err,
+        UsageError::BadReplicaUrl {
+            reason: ConfigError::UnknownParameter
+        }
+    );
+    assert!(!err.to_string().contains("hunter2"));
+}
+
+#[test]
+fn s3_flags_with_a_directory_replica_are_refused() {
+    for flag in [
+        "--endpoint http://h",
+        "--region eu-west-1",
+        "--force-path-style",
+    ] {
+        let name = flag.split(' ').next().unwrap();
+        let err = usage(&format!("files --replica dir {flag}"));
+        assert!(
+            matches!(&err, UsageError::S3FlagForDirectory { flag } if *flag == name),
+            "{err:?}"
+        );
+    }
+}
+
+#[test]
+fn s3_flags_are_taken_by_every_command() {
+    for line in [
+        "restore --replica s3://b/p --output o --region eu-west-1",
+        "verify --replica s3://b/p --endpoint http://h:9 --force-path-style",
+        "files --replica s3://b/p --region eu-west-1",
+    ] {
+        assert!(parsed(line).is_ok(), "{line}");
+    }
 }
 
 #[test]
 fn every_flag_in_the_table_is_accepted_by_its_commands() {
     for spec in FLAGS {
         for command in spec.commands {
+            let replica = if S3_ONLY_FLAGS.contains(&spec.name) {
+                "s3://b/p"
+            } else {
+                "r"
+            };
             let base = match command {
-                CommandName::Restore => "restore --replica r --output o",
-                CommandName::Verify => "verify --replica r",
-                CommandName::Files => "files --replica r",
+                CommandName::Restore => format!("restore --replica {replica} --output o"),
+                CommandName::Verify => format!("verify --replica {replica}"),
+                CommandName::Files => format!("files --replica {replica}"),
             };
             let value = match spec.name {
+                "--endpoint" => "http://h",
+                "--region" => "eu-west-1",
                 "--txid" => "0000000000000001",
                 "--timestamp" => "2026-01-01T00:00:00Z",
                 "--depth" => "names",
@@ -283,7 +462,7 @@ fn every_flag_in_the_table_is_accepted_by_its_commands() {
             };
             let extra = spec.value.map_or(String::new(), |_| format!(" {value}"));
             let line = if spec.required {
-                base.to_owned()
+                base
             } else {
                 format!("{base} {}{extra}", spec.name)
             };
@@ -293,7 +472,11 @@ fn every_flag_in_the_table_is_accepted_by_its_commands() {
                 .filter(|c| !spec.commands.contains(c))
                 .collect();
             for command in other {
-                let line = format!("{} --replica r {}{extra}", command.word(), spec.name);
+                let line = format!(
+                    "{} --replica {replica} {}{extra}",
+                    command.word(),
+                    spec.name
+                );
                 assert!(
                     matches!(usage(&line), UsageError::UnknownFlag { .. }),
                     "{line}"

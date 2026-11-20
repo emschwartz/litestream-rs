@@ -16,11 +16,14 @@ lsr-core = { path = "../core" }
 lsr-local = { path = "../local" }
 lsr-ltx = { path = "../ltx" }
 lsr-store-fs = { path = "../store-fs" }
+lsr-store-s3 = { path = "../store-s3" }
 thiserror = "2"
 
 [dev-dependencies]
 lsr-compat = { path = "../compat" }
 lsr-core = { path = "../core", features = ["testing"] }
+# FakeS3 drives the S3 path in-process; it sits behind the feature.
+lsr-store-s3 = { path = "../store-s3", features = ["testing"] }
 serde_json = "1"
 tempfile = "3"
 
