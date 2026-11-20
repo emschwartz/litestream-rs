@@ -257,6 +257,7 @@ pub fn window_scenarios() -> &'static [fn() -> Scenario] {
     &[
         corrupt_l1_publish_then_power_loss,
         corrupt_l9_publish_then_power_loss,
+        corrupt_l0_publish_then_power_loss,
     ]
 }
 
@@ -1068,5 +1069,78 @@ pub fn corrupt_l1_publish_then_power_loss() -> Scenario {
 /// The level 9 compaction's output rots in the window.
 #[must_use]
 pub fn corrupt_l9_publish_then_power_loss() -> Scenario {
-    corrupt_publish_then_power_loss("corrupt_l9_publish_then_power_loss", Some(93_600_000))
+    snapshot_window("corrupt_l9_publish_then_power_loss")
+}
+
+/// The first snapshot rots in the window. Six ticks boot, sync, upload and
+/// compact levels 1 to 3, so the next upload to the replica is level 9's.
+/// The snapshot job deletes what the store rejected; that delete fails, and
+/// power is lost before the retry.
+fn snapshot_window(name: &'static str) -> Scenario {
+    let mut s = build(
+        name,
+        vec![
+            vec![commit(3, false)],
+            ticks(6),
+            vec![
+                remote_fault(StoreOp::Upload, 0, FaultShape::CorruptPublish),
+                remote_fault(
+                    StoreOp::Delete,
+                    0,
+                    FaultShape::Error(transient(StoreOp::Delete)),
+                ),
+                Op::Tick,
+                Op::PowerLoss,
+            ],
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        vec![retries(FaultKind::UploadChecksumMismatch), Expect::Oracle],
+    );
+    s.check = Some(damaged_a_snapshot);
+    s
+}
+
+/// The one object the corrupt publish changed, when it is at `level`.
+fn damaged_at(report: &RunReport, level: u8) -> Result<lsr_core::FileKey, String> {
+    match report.remote_damaged.as_slice() {
+        [key] if key.level().get() == level => Ok(*key),
+        other => Err(format!(
+            "the corrupt publish changed {other:?}, want one object at level {level}"
+        )),
+    }
+}
+
+fn damaged_a_snapshot(report: &RunReport) -> Result<(), String> {
+    damaged_at(report, 9).map(drop)
+}
+
+/// The level 0 upload's object rots in the window: after a day's clock jump
+/// the passive checkpoint stages one more file, and its upload is the next
+/// to the replica. The uploader's delete fails and power is lost. The next
+/// boot reads the replica's newest level 0 file back against the staged one
+/// (R1) and uploads it again over the same key.
+#[must_use]
+pub fn corrupt_l0_publish_then_power_loss() -> Scenario {
+    let mut s =
+        corrupt_publish_then_power_loss("corrupt_l0_publish_then_power_loss", Some(93_600_000));
+    s.expect = vec![retries(FaultKind::UploadChecksumMismatch), Expect::Oracle];
+    s.check = Some(uploaded_again);
+    s
+}
+
+/// The damaged object is a level 0 file and the replica accepted that key
+/// twice: the damaged upload, and the one after the read-back.
+fn uploaded_again(report: &RunReport) -> Result<(), String> {
+    let key = damaged_at(report, 0)?;
+    let puts = report
+        .remote_events
+        .iter()
+        .filter(|event| matches!(event, TapEvent::Put { key: put, .. } if *put == key))
+        .count();
+    if puts == 2 {
+        Ok(())
+    } else {
+        Err(format!("{key} was uploaded {puts} times, want 2"))
+    }
 }

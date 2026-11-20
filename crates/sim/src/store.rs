@@ -127,6 +127,7 @@ struct FaultState {
     commits: u32,
     schedule: Vec<Entry>,
     rng: SeededEntropy,
+    damaged: Vec<FileKey>,
 }
 
 impl FaultState {
@@ -229,6 +230,13 @@ impl FaultHandle {
         *lock(&self.state).count(op)
     }
 
+    /// The objects a [`FaultShape::CorruptPublish`] changed, in order: where
+    /// the damage really landed, whatever the scenario meant to hit.
+    #[must_use]
+    pub fn damaged(&self) -> Vec<FileKey> {
+        lock(&self.state).damaged.clone()
+    }
+
     /// One-shot faults that have not fired yet.
     #[must_use]
     pub fn pending(&self) -> usize {
@@ -270,6 +278,7 @@ impl<S> Faults<S> {
             commits: 0,
             schedule,
             rng: SeededEntropy::new(seed),
+            damaged: Vec::new(),
         };
         Self {
             inner,
@@ -466,6 +475,7 @@ impl<U: Upload> Upload for FaultsUpload<U> {
                 let info = self.inner.commit().await?;
                 if let Some(raw) = &self.raw {
                     damage(raw, &info).await?;
+                    lock(&self.state).damaged.push(info.key);
                 }
                 Err(checksum_mismatch(self.key))
             }

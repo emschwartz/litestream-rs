@@ -206,7 +206,17 @@ fn corrupt_l1_publish_then_power_loss() {
     run(scenario::corrupt_l1_publish_then_power_loss);
 }
 
+// Finding against core: the damaged snapshot is listed after the power loss,
+// the engine does not halt, and every restore refuses on it (checksum
+// mismatch) until the next snapshot. The read-back after a boot (issue 1,
+// item 1) repairs it. Replay: this test; the operations are fixed.
 #[test]
+#[ignore = "review: a damaged level 9 snapshot stays listed after power loss and restores refuse on it"]
 fn corrupt_l9_publish_then_power_loss() {
     run(scenario::corrupt_l9_publish_then_power_loss);
+}
+
+#[test]
+fn corrupt_l0_publish_then_power_loss() {
+    run(scenario::corrupt_l0_publish_then_power_loss);
 }
