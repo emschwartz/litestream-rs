@@ -402,6 +402,17 @@ mod tests {
     }
 
     #[test]
+    fn debug_and_the_range_side_print_what_a_log_line_needs() {
+        let key = FileKey::new(Level::SNAPSHOT, range(1, 0xab));
+        assert_eq!(
+            format!("{key:?}"),
+            "FileKey(0009/0000000000000001-00000000000000ab.ltx)"
+        );
+        assert_eq!(RangeSide::Min.to_string(), "first");
+        assert_eq!(RangeSide::Max.to_string(), "last");
+    }
+
+    #[test]
     fn display_is_the_s3_key() {
         let key = FileKey::new(Level::SNAPSHOT, range(1, 0xab));
         assert_eq!(

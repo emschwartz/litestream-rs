@@ -27,9 +27,11 @@ sim-soak seconds base=`date +%s`:
 
 # Mutation testing for one crate (just mutants ltx); results in target/mutants/mutants.out.
 # Survivors are killed by a test or recorded in docs/mutants.md. Not part of check.
+# The tree is copied with its .git: a guard test in core lists the tracked files, and
+# without it the unmutated baseline fails and nothing is tested.
 mutants crate *args:
     mkdir -p target/mutants
-    cargo mutants -p lsr-{{crate}} --test-tool nextest --jobs 4 --output target/mutants {{args}}
+    cargo mutants -p lsr-{{crate}} --test-tool nextest --jobs 4 --copy-vcs true --output target/mutants {{args}}
 
 # A branch in its own worktree under the main checkout's .worktrees/, off main's tip.
 spawn name:

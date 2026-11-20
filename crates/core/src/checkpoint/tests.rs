@@ -19,6 +19,8 @@ use crate::store::{ObjectStore, PageLimit, ReadLen};
 
 const PS: PageSize = PageSize::MIN;
 
+use std::num::NonZeroU64;
+
 fn pg(n: u32) -> PageNo {
     PageNo::new(n, PS).unwrap()
 }
@@ -219,6 +221,14 @@ fn the_failed_state_relaxes_below_the_threshold() {
 }
 
 #[test]
+fn the_failed_state_stays_at_the_threshold() {
+    let c = cfg(Some(10), 0, 100);
+    let failed = CheckpointState::PassiveFailedAtTruncate { last: ts(3) };
+    assert_eq!(after_sync(failed, 2, &obs(5, 100, true), &c), failed);
+    assert_eq!(after_sync(failed, 2, &obs(5, 250, true), &c), failed);
+}
+
+#[test]
 fn our_own_bump_frame_does_not_arm_the_time_trigger() {
     let c = cfg(Some(10), 0, 0);
     let idle = CheckpointState::Idle {
@@ -371,6 +381,15 @@ impl Rig {
         proof: SyncedThrough,
         mode: CheckpointMode,
     ) -> Result<Checkpointed, CheckpointFailed> {
+        self.run_with(proof, mode, &SyncConfig::default())
+    }
+
+    fn run_with(
+        &mut self,
+        proof: SyncedThrough,
+        mode: CheckpointMode,
+        cfg: &SyncConfig,
+    ) -> Result<Checkpointed, CheckpointFailed> {
         block_on(checkpoint(
             proof,
             mode,
@@ -378,7 +397,7 @@ impl Rig {
             &mut self.db,
             &mut self.ck,
             &self.store,
-            &SyncConfig::default(),
+            cfg,
             ts(5000),
         ))
     }
@@ -449,6 +468,12 @@ fn a_passive_held_back_by_a_reader_is_not_restarted() {
     rig.ck.script(script(false, CheckpointEffect::Backfill(1)));
     let done = rig.run(proof, CheckpointMode::Passive).unwrap();
     assert_eq!(done.outcome, CheckpointOutcome::NotRestarted);
+    // The barrier kept writers out until the read transaction was retaken,
+    // so the position is pinned again, at the epoch the checkpoint retook.
+    assert_eq!(
+        done.through.position().continuity(),
+        Continuity::Pinned(rig.wal.epoch())
+    );
 }
 
 #[test]
@@ -565,6 +590,45 @@ fn every_passive_step_failure_releases_the_barrier_and_reports_the_fault() {
             );
         }
     }
+}
+
+#[test]
+fn a_position_after_a_checkpoint_is_pinned_at_the_epoch_it_retook() {
+    let mut rig = Rig::new();
+    let proof = rig.proof();
+    let before = rig.wal.epoch();
+    rig.commit(&[3]);
+    let done = rig.run(proof, CheckpointMode::Passive).unwrap();
+    let after = rig.wal.epoch();
+    assert_ne!(
+        before, after,
+        "the checkpoint released the read transaction"
+    );
+    assert_eq!(
+        done.through.position().continuity(),
+        Continuity::Pinned(after)
+    );
+}
+
+/// The protocol's own steps ignore the sync cap: a seal that stopped at the
+/// cap would checkpoint frames it has not staged.
+#[test]
+fn the_seal_takes_every_committed_transaction_whatever_the_cap() {
+    let run = |cfg: &SyncConfig| {
+        let mut rig = Rig::new();
+        let proof = rig.proof();
+        rig.commit(&[3]);
+        rig.commit(&[2]);
+        rig.commit(&[1, 3]);
+        let done = rig.run_with(proof, CheckpointMode::Passive, cfg).unwrap();
+        let files: Vec<_> = done.files.iter().map(|f| f.key).collect();
+        (files, done.through.position().txid(), done.outcome)
+    };
+    let capped = SyncConfig {
+        cap: NonZeroU64::new(1),
+        ..SyncConfig::default()
+    };
+    assert_eq!(run(&capped), run(&SyncConfig::default()));
 }
 
 #[test]

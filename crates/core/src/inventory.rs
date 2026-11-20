@@ -309,6 +309,30 @@ mod tests {
     }
 
     #[test]
+    fn stamped_keeps_every_file_and_gives_each_its_stored_stamp() {
+        let store = MemStore::with_listed_last_modified();
+        block_on(async {
+            for n in 1..=3u64 {
+                put(&store, key(0, n, n)).await;
+            }
+            put(&store, key(9, 1, 3)).await;
+        });
+        let listed = block_on(Inventory::load(&store)).unwrap();
+        assert!(listed.files().iter().all(|f| f.exact_stamp().is_none()));
+        let keys: Vec<FileKey> = listed.files().iter().map(|f| f.key).collect();
+        let stamped = block_on(listed.stamped(&store)).unwrap();
+        assert_eq!(
+            stamped.files().iter().map(|f| f.key).collect::<Vec<_>>(),
+            keys
+        );
+        for file in stamped.files() {
+            let stamp = file.exact_stamp().unwrap();
+            assert_eq!(stamp.at(), Timestamp::from_unix_millis(7), "{}", file.key);
+        }
+        assert_eq!(store.stamp_calls(), 4);
+    }
+
+    #[test]
     fn a_failed_page_is_an_error_not_a_short_inventory() {
         let store = MemStore::new();
         block_on(put(&store, key(0, 1, 1)));

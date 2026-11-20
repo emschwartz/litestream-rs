@@ -186,6 +186,26 @@ mod fakes {
             assert_eq!(a.below(0), 0);
         }
 
+        /// The generator is splitmix64: its first outputs for seed 0 are
+        /// published, so any change to a shift, a mask or the step shows.
+        #[test]
+        fn entropy_is_splitmix64() {
+            let rng = SeededEntropy::new(0);
+            assert_eq!(rng.next_u64(), 0xe220_a839_7b1d_cdaf);
+            assert_eq!(rng.next_u64(), 0x6e78_9e6a_a1b9_65f4);
+            assert_eq!(rng.next_u64(), 0x06c4_5d18_8009_454f);
+        }
+
+        /// `below` is the high half of the 128-bit product: for a bound of
+        /// 2^32 that is the output's top 32 bits.
+        #[test]
+        fn below_scales_the_whole_output() {
+            let rng = SeededEntropy::new(0);
+            assert_eq!(rng.below(1 << 32), 0xe220_a839);
+            assert_eq!(rng.below(1 << 32), 0x6e78_9e6a);
+            assert_eq!(rng.below(1 << 8), 0x06);
+        }
+
         #[test]
         fn sleeper_records_in_order() {
             let sleeper = RecordingSleeper::new();
