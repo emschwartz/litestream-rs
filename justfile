@@ -2,7 +2,7 @@
 default: check
 
 # The land gate: format, lints, tests. A branch lands only when this is green.
-check: fmt-check clippy test
+check: fmt-check clippy test doctest
 
 fmt-check:
     cargo fmt --all -- --check
@@ -12,6 +12,10 @@ clippy:
 
 test:
     cargo nextest run --workspace --locked --no-tests=warn
+
+# nextest does not run doctests, and the compile-fail proofs (a proof token is not Clone) live there.
+doctest:
+    cargo test --doc --workspace --all-features --locked
 
 # A branch in its own worktree under the main checkout's .worktrees/, off main's tip.
 spawn name:
