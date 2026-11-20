@@ -150,6 +150,15 @@ lsr-core actor::tests::halt_is_terminal
 lsr-core actor::tests::idle_tick_does_no_io
 lsr-core actor::tests::job_match_is_exhaustive
 lsr-core actor::tests::job_retry_reports_the_levels_wait
+lsr-core actor::tests::lanes::a_checkpoint_reports_busy_exactly_when_it_was
+lsr-core actor::tests::lanes::a_failed_checkpoint_waits_out_its_backoff
+lsr-core actor::tests::lanes::a_failed_prune_waits_out_its_backoff
+lsr-core actor::tests::lanes::a_pending_snapshot_asks_for_the_next_tick_at_once
+lsr-core actor::tests::lanes::a_prune_continues_past_a_full_page
+lsr-core actor::tests::lanes::a_restarted_wal_with_nothing_new_is_not_reported_as_a_sync
+lsr-core actor::tests::lanes::a_sync_whose_epoch_moved_does_not_checkpoint_and_asks_for_the_next_tick
+lsr-core actor::tests::lanes::an_idle_tick_does_not_open_the_wal
+lsr-core actor::tests::lanes::an_interval_due_with_nothing_to_checkpoint_does_not_spin
 lsr-core actor::tests::maintenance_waits_for_idle_uploads
 lsr-core actor::tests::next_is_never_after_a_held_deadline
 lsr-core actor::tests::nothing_is_pruned_before_the_first_listing
@@ -157,6 +166,7 @@ lsr-core actor::tests::policy_called_once_per_fault
 lsr-core actor::tests::prune_keeps_exactly_the_uncompacted_and_the_tip
 lsr-core actor::tests::rejected_snapshot::a_rejected_snapshot_is_deleted_at_once
 lsr-core actor::tests::rejected_snapshot::a_rejected_snapshot_that_cannot_be_deleted_goes_first_and_holds_retention
+lsr-core actor::tests::rejected_snapshot::a_snapshot_that_fails_before_its_commit_deletes_nothing
 lsr-core actor::tests::retry_backs_off_per_lane
 lsr-core actor::tests::snapshot_job_writes_level_9
 lsr-core actor::tests::stamp_failure_is_a_maintain_fault
@@ -445,6 +455,7 @@ lsr-core plan::tests::a_higher_level_file_spanning_the_hole_heals_it
 lsr-core plan::tests::a_level_nine_file_not_starting_at_one_is_never_a_snapshot
 lsr-core plan::tests::a_level_one_file_from_transaction_one_is_a_base
 lsr-core plan::tests::a_refused_snapshot_is_not_a_straddler
+lsr-core plan::tests::a_refused_snapshot_past_a_hole_is_reported_as_refused
 lsr-core plan::tests::a_replica_whose_lowest_file_begins_at_two_has_no_snapshot
 lsr-core plan::tests::a_replica_with_only_level_zero_files_from_transaction_one_plans_latest
 lsr-core plan::tests::a_snapshot_can_straddle_the_instant_too
@@ -527,6 +538,7 @@ lsr-core recover::tests::rule_7_a_file_cut_by_a_frame_is_a_rewind_for_a_running_
 lsr-core recover::tests::rule_8_a_frame_before_the_end_that_does_not_verify_is_prev_frame_mismatch
 lsr-core recover::tests::rule_9_a_last_page_that_differs_snapshots
 lsr-core recover::tests::rule_9_at_boot_a_mismatch_or_a_page_the_tip_lacks_snapshots
+lsr-core recover::tests::rule_9_at_boot_a_tip_ending_at_the_wal_start_has_no_frame_to_miss
 lsr-core recover::tests::the_loader_calls_a_page_with_other_bytes_a_mismatch_and_a_missing_one_not_in_tip
 lsr-core recover::tests::the_loader_calls_garbage_unreadable_and_an_empty_directory_none
 lsr-core recover::tests::the_loader_reads_the_newest_file_and_matches_the_last_page
@@ -646,6 +658,7 @@ lsr-core source::fake::tests::the_reader_accepts_what_the_fake_writes
 lsr-core stamps::tests::resolve_asks_each_key_once
 lsr-core stamps::tests::resolve_counts_stamps_read
 lsr-core stamps::tests::stored_listing_resolves_with_no_calls
+lsr-core stamps::tests::the_ledger_counts_each_stamp_resolved_through_the_store
 lsr-core store::tests::bounded_types_reject_zero_and_overflow
 lsr-core store::tests::foreign_names_are_counted_in_the_span_they_sort_into
 lsr-core store::tests::io_errors_classify_without_inventing_not_found
@@ -668,6 +681,7 @@ lsr-core sync::tests::a_position_pinned_to_another_epoch_is_read_tx_lost
 lsr-core sync::tests::a_scan_over_a_restarted_wal_is_wal_moved
 lsr-core sync::tests::a_scan_over_a_truncated_wal_is_wal_moved
 lsr-core sync::tests::a_short_file_under_an_unchanged_header_still_halts
+lsr-core sync::tests::a_small_file_reaches_the_upload_in_one_write
 lsr-core sync::tests::a_snapshot_of_an_empty_wal_takes_its_size_from_the_database
 lsr-core sync::tests::a_snapshot_takes_the_wal_pages_and_fills_the_rest_from_the_database
 lsr-core sync::tests::a_snapshots_whole_scan_follows_the_same_rule
@@ -675,6 +689,7 @@ lsr-core sync::tests::a_staging_commit_error_returns_the_same_step_and_the_retry
 lsr-core sync::tests::an_app_truncate_checkpoint_during_a_snapshot_scan_is_not_a_halt
 lsr-core sync::tests::an_app_write_that_restarts_the_wal_during_a_snapshot_scan_is_not_a_halt
 lsr-core sync::tests::an_empty_wal_and_an_empty_database_have_nothing_to_snapshot
+lsr-core sync::tests::an_equal_clock_is_not_a_clamp
 lsr-core sync::tests::an_idle_step_returns_the_committed_end_pinned
 lsr-core sync::tests::clamp_never_goes_back_and_reports_exactly_when_it_clamped
 lsr-core sync::tests::every_kind_of_change_stages_what_sqlite_checkpoints_and_a_spill_is_never_staged
@@ -682,6 +697,7 @@ lsr-core sync::tests::header_fields_build_a_valid_untracked_header
 lsr-core sync::tests::one_oversized_transaction_makes_one_file
 lsr-core sync::tests::plan_pages_lists_what_the_file_must_hold
 lsr-core sync::tests::staged_chain_equals_sqlites_checkpoint_at_any_cap
+lsr-core sync::tests::the_default_cap_is_go_s_64_mib
 lsr-core sync::tests::the_lock_page_is_never_planned_even_when_the_database_crosses_it
 lsr-core sync::tests::walgrowth_pages_come_from_the_database_file
 lsr-core upload::tests::a_boot_listing_does_not_confirm_a_newest_file_of_the_wrong_size
@@ -694,6 +710,7 @@ lsr-core upload::tests::a_listed_key_of_another_size_is_uploaded_again_over_the_
 lsr-core upload::tests::a_listed_key_with_no_staged_file_must_decode
 lsr-core upload::tests::a_listing_confirms_a_listed_key_equal_to_the_staged_file
 lsr-core upload::tests::a_listing_confirms_by_content_not_size
+lsr-core upload::tests::a_listing_does_not_read_back_a_tail_already_confirmed
 lsr-core upload::tests::a_listing_never_moves_confirmed_backwards_through_a_size_check
 lsr-core upload::tests::a_listing_of_an_empty_replica_then_uploads_from_one
 lsr-core upload::tests::a_missing_staged_file_is_lost_not_skipped
@@ -759,6 +776,7 @@ lsr-core::plan_lazy lazy::an_instant_inside_a_file_before_a_later_snapshot
 lsr-core::plan_lazy lazy::an_older_snapshot_with_a_later_one_beyond_plans
 lsr-core::plan_lazy lazy::as_of_before_a_hole_reports_the_gap
 lsr-core::plan_lazy lazy::as_of_on_a_stored_listing_reads_nothing
+lsr-core::plan_lazy lazy::comparisons_count_both_sorts_and_every_heap_step
 lsr-core::plan_lazy lazy::plan_as_of_equals_the_exact_planner
 lsr-core::plan_lazy lazy::plan_as_of_ignores_last_modified
 lsr-core::plan_lazy lazy::plan_as_of_is_linear
