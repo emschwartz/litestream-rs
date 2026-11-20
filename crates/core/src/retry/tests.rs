@@ -7,7 +7,7 @@ use super::*;
 use crate::conformance::{self, Harness};
 use crate::env::{RecordingSleeper, SeededEntropy};
 use crate::mem::MemStore;
-use crate::store::StoreOp;
+use crate::store::{PartNumber, StoreOp};
 
 fn key() -> FileKey {
     let id = Txid::new(1).unwrap();
@@ -136,6 +136,24 @@ fn corrupt_is_permanent() {
         cause: CorruptCause::NotARegularFile,
     };
     assert_eq!(classify(&err), Class::Permanent);
+}
+
+#[test]
+fn new_errors_are_permanent() {
+    let corrupt = |cause| StoreError::Corrupt { key: None, cause };
+    for err in [
+        corrupt(CorruptCause::ChecksumMismatch { part: None }),
+        corrupt(CorruptCause::ChecksumMismatch {
+            part: PartNumber::new(3),
+        }),
+        corrupt(CorruptCause::BadStamp),
+        StoreError::Refused {
+            op: StoreOp::Upload,
+            status: 501,
+        },
+    ] {
+        assert_eq!(classify(&err), Class::Permanent, "{err}");
+    }
 }
 
 // the wrapper

@@ -197,6 +197,39 @@ pub enum CorruptCause {
         /// not trust a listing of this key.
         removed: bool,
     },
+    /// The store acknowledged bytes whose digest is not the one sent. `None`
+    /// is a single PUT.
+    #[error("{} stored with a different checksum than was sent", match part { Some(n) => format!("part {}", n.get()), None => "object".to_owned() })]
+    ChecksumMismatch {
+        /// The part, for a multipart upload.
+        part: Option<PartNumber>,
+    },
+    /// The `litestream-timestamp` metadata is present but does not parse.
+    #[error("unparseable timestamp metadata")]
+    BadStamp,
+}
+
+/// A multipart part number: 1 to 10000, S3's part cap.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PartNumber(NonZeroU16);
+
+impl PartNumber {
+    /// The largest part number.
+    pub const MAX_RAW: u16 = 10_000;
+
+    /// Returns `None` for zero or above [`Self::MAX_RAW`].
+    #[must_use]
+    pub fn new(raw: u16) -> Option<Self> {
+        NonZeroU16::new(raw)
+            .filter(|n| n.get() <= Self::MAX_RAW)
+            .map(Self)
+    }
+
+    /// The part number as sent on the wire.
+    #[must_use]
+    pub fn get(self) -> u16 {
+        self.0.get()
+    }
 }
 
 /// Everything a store can do wrong, in the classes that need different
@@ -246,6 +279,16 @@ pub enum StoreError {
         key: Option<FileKey>,
         /// What is wrong.
         cause: CorruptCause,
+    },
+    /// The backend refused a request that retrying cannot fix and that is not
+    /// an authorization failure: a 4xx outside the mapped codes, 501, or an
+    /// object too large for the store's mode.
+    #[error("{op} refused by the backend (status {status})")]
+    Refused {
+        /// What was being done.
+        op: StoreOp,
+        /// The HTTP status, or the nearest equivalent for a non-HTTP store.
+        status: u16,
     },
 }
 
@@ -334,6 +377,39 @@ mod tests {
             size: 1,
             created_at: Timestamp::from_unix_millis(0),
         }
+    }
+
+    #[test]
+    fn part_number_bounds() {
+        assert_eq!(PartNumber::new(0), None);
+        assert_eq!(PartNumber::new(10_001), None);
+        assert_eq!(PartNumber::new(1).map(PartNumber::get), Some(1));
+        assert_eq!(PartNumber::new(10_000).map(PartNumber::get), Some(10_000));
+    }
+
+    #[test]
+    fn new_error_displays_carry_no_header_values() {
+        let part = PartNumber::new(7);
+        assert_eq!(
+            CorruptCause::ChecksumMismatch { part }.to_string(),
+            "part 7 stored with a different checksum than was sent"
+        );
+        assert_eq!(
+            CorruptCause::ChecksumMismatch { part: None }.to_string(),
+            "object stored with a different checksum than was sent"
+        );
+        assert_eq!(
+            CorruptCause::BadStamp.to_string(),
+            "unparseable timestamp metadata"
+        );
+        let refused = StoreError::Refused {
+            op: StoreOp::Upload,
+            status: 501,
+        };
+        assert_eq!(
+            refused.to_string(),
+            "upload refused by the backend (status 501)"
+        );
     }
 
     #[test]

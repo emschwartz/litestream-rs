@@ -63,8 +63,8 @@ pub use source::{
     CheckpointCall, CheckpointEffect, CheckpointScript, FakeCheckpointer, FakeDb, FakeWal, SourceOp,
 };
 pub use store::{
-    CorruptCause, Listing, ObjectStore, PageLimit, ReadLen, StoreError, StoreOp, Upload,
-    build_listing,
+    CorruptCause, Listing, ObjectStore, PageLimit, PartNumber, ReadLen, StoreError, StoreOp,
+    Upload, build_listing,
 };
 pub use verify::{
     Depth, Finding, LevelSummary, MAX_FINDINGS, Report, Severity, VerifyError, verify,

@@ -77,6 +77,16 @@ policy_is!(
 );
 policy_is!(upload_ambiguous_retries, Fault::UploadAmbiguous, doubling());
 policy_is!(
+    upload_checksum_mismatch_retries,
+    Fault::UploadChecksumMismatch,
+    doubling()
+);
+policy_is!(
+    store_refused_halts,
+    Fault::StoreRefused,
+    halt(HaltCause::StoreRefused)
+);
+policy_is!(
     remote_corrupt_halts,
     Fault::RemoteCorrupt,
     halt(HaltCause::RemoteCorrupt)
@@ -162,6 +172,8 @@ fn every_fault_has_a_named_policy_test() {
         | Fault::StoreAuth
         | Fault::RemoteObjectMissing
         | Fault::UploadAmbiguous
+        | Fault::UploadChecksumMismatch
+        | Fault::StoreRefused
         | Fault::RemoteCorrupt
         | Fault::RemoteAheadOfLocal
         | Fault::RemoteRegressed
@@ -295,14 +307,24 @@ fn no_staging_error_is_blamed_on_the_replica() {
         Fault::StoreAuth,
         Fault::RemoteObjectMissing,
         Fault::UploadAmbiguous,
+        Fault::UploadChecksumMismatch,
+        Fault::StoreRefused,
         Fault::RemoteCorrupt,
     ];
     let errs = [
         StoreError::Auth { op: StoreOp::Read },
+        StoreError::Refused {
+            op: StoreOp::Read,
+            status: 501,
+        },
         StoreError::NotFound { key: key() },
         StoreError::Corrupt {
             key: None,
             cause: CorruptCause::NotARegularFile,
+        },
+        StoreError::Corrupt {
+            key: None,
+            cause: CorruptCause::ChecksumMismatch { part: None },
         },
     ];
     for err in errs {
@@ -334,10 +356,44 @@ fn from_remote_commit_size_mismatch_is_upload_ambiguous() {
 }
 
 #[test]
+fn from_remote_checksum_mismatch_and_refusal_have_their_own_faults() {
+    let mismatch = StoreError::Corrupt {
+        key: Some(key()),
+        cause: CorruptCause::ChecksumMismatch { part: None },
+    };
+    assert_eq!(store_fault(&mismatch), Fault::UploadChecksumMismatch);
+    let refused = StoreError::Refused {
+        op: StoreOp::Upload,
+        status: 501,
+    };
+    assert_eq!(store_fault(&refused), Fault::StoreRefused);
+}
+
+#[test]
+fn from_staging_refused_is_local_io_and_checksum_is_fsync() {
+    let refused = StoreError::Refused {
+        op: StoreOp::Upload,
+        status: 501,
+    };
+    assert_eq!(Fault::from_staging(&refused), Fault::LocalIo);
+    let mismatch = StoreError::Corrupt {
+        key: None,
+        cause: CorruptCause::ChecksumMismatch { part: None },
+    };
+    assert_eq!(Fault::from_staging(&mismatch), Fault::LocalFsyncFailed);
+    let stamp = StoreError::Corrupt {
+        key: None,
+        cause: CorruptCause::BadStamp,
+    };
+    assert_eq!(Fault::from_staging(&stamp), Fault::StagedCorrupt);
+}
+
+#[test]
 fn from_remote_any_other_corrupt_is_remote_corrupt() {
     for cause in [
         CorruptCause::NotARegularFile,
         CorruptCause::TimestampOutOfRange,
+        CorruptCause::BadStamp,
     ] {
         let err = StoreError::Corrupt { key: None, cause };
         assert_eq!(store_fault(&err), Fault::RemoteCorrupt);

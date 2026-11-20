@@ -43,6 +43,13 @@ pub enum Fault {
     RemoteObjectMissing,
     /// An upload's commit failed after the object may have become visible.
     UploadAmbiguous,
+    /// The store acknowledged an upload whose digest is not the one sent. The
+    /// object may be visible with wrong bytes, so the uploader must put the
+    /// same key again and must not accept a listing as confirmation.
+    UploadChecksumMismatch,
+    /// The store refused a request that retrying cannot fix and that is not an
+    /// authorization failure.
+    StoreRefused,
     /// A replica object is unusable as stored.
     RemoteCorrupt,
     /// The replica is ahead of this database mid-run: another writer.
@@ -126,6 +133,8 @@ pub enum SnapshotCause {
 pub enum HaltCause {
     /// Credentials or permissions refuse the store.
     Credentials,
+    /// The store refuses a request outright (not credentials).
+    StoreRefused,
     /// A replica object is corrupt.
     RemoteCorrupt,
     /// Another writer replicates into this replica.
@@ -179,6 +188,7 @@ pub const fn policy(fault: &Fault) -> Policy {
         | Fault::StoreTransient
         | Fault::RemoteObjectMissing
         | Fault::UploadAmbiguous
+        | Fault::UploadChecksumMismatch
         | Fault::LocalDiskFull
         | Fault::LocalIo
         | Fault::LocalFsyncFailed
@@ -190,6 +200,7 @@ pub const fn policy(fault: &Fault) -> Policy {
         | Fault::ReadTxLost => Policy::Retry(Backoff::Doubling),
         Fault::PageSizeChanged => Policy::Resnapshot(SnapshotCause::PageSizeChanged),
         Fault::StoreAuth => Policy::Halt(HaltCause::Credentials),
+        Fault::StoreRefused => Policy::Halt(HaltCause::StoreRefused),
         Fault::RemoteCorrupt => Policy::Halt(HaltCause::RemoteCorrupt),
         Fault::RemoteAheadOfLocal => Policy::Halt(HaltCause::ForeignWriter),
         Fault::RemoteRegressed => Policy::Halt(HaltCause::RemoteRegressed),
@@ -226,13 +237,15 @@ impl Fault {
                 retry_after: retry_after.filter(|wait| !wait.is_zero()),
             },
             StoreError::Auth { .. } => Self::StoreAuth,
+            StoreError::Refused { .. } => Self::StoreRefused,
             StoreError::NotFound { .. } => Self::RemoteObjectMissing,
             StoreError::ScratchExhausted { .. } => Self::LocalDiskFull,
             StoreError::Corrupt { cause, .. } => match cause {
                 CorruptCause::CommitSizeMismatch { .. } => Self::UploadAmbiguous,
-                CorruptCause::NotARegularFile | CorruptCause::TimestampOutOfRange => {
-                    Self::RemoteCorrupt
-                }
+                CorruptCause::ChecksumMismatch { .. } => Self::UploadChecksumMismatch,
+                CorruptCause::NotARegularFile
+                | CorruptCause::TimestampOutOfRange
+                | CorruptCause::BadStamp => Self::RemoteCorrupt,
             },
         }
     }
@@ -248,14 +261,17 @@ impl Fault {
         match err {
             StoreError::Transient { .. }
             | StoreError::Throttled { .. }
-            | StoreError::Auth { .. } => Self::LocalIo,
+            | StoreError::Auth { .. }
+            | StoreError::Refused { .. } => Self::LocalIo,
             StoreError::NotFound { .. } => Self::StagedLost,
             StoreError::ScratchExhausted { .. } => Self::LocalDiskFull,
             StoreError::Corrupt { cause, .. } => match cause {
-                CorruptCause::CommitSizeMismatch { .. } => Self::LocalFsyncFailed,
-                CorruptCause::NotARegularFile | CorruptCause::TimestampOutOfRange => {
-                    Self::StagedCorrupt
+                CorruptCause::CommitSizeMismatch { .. } | CorruptCause::ChecksumMismatch { .. } => {
+                    Self::LocalFsyncFailed
                 }
+                CorruptCause::NotARegularFile
+                | CorruptCause::TimestampOutOfRange
+                | CorruptCause::BadStamp => Self::StagedCorrupt,
             },
         }
     }
