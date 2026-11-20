@@ -128,6 +128,8 @@ The suite is the contract for any backend: it holds every case of `crates/compat
 
 ### Task 6: the actor thread and the public API (branch `replica-api`)
 
+**Signatures:** `docs/plans/phase-3-api.md`, which supersedes this block wherever they differ (counted reader guards instead of `set_readers`, a type-erased store, `stop` with a per-call deadline, `Runtime` with an interruptible park, and the engine changes listed there).
+
 **Files:** create `crates/replica/` (package `lsr-replica`; `src/{lib,thread,health,config,error}.rs`, `tests/`). `crates/cli` gains `lsr replicate <db> <replica-url>` over it (for task 7's process tests and the alternation test).
 
 **Produces:**

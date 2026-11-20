@@ -1,215 +1,273 @@
 # Phase 3: the public API, draft
 
-Status: draft for review, 2026-11-20. It refines task 6 of `docs/plans/phase-3-syncing.md` into signatures; nothing here is built. Rulings it follows: P0 (a SQLite read transaction holds the pin), P3 (TRUNCATE only on the host's word), P4 (1-second polling), D6 (copy Go; no new files or formats), D7 (keep trying; stop only for a second writer; configurable responses).
+Status: draft, revised 2026-11-20 after an independent review. It refines task 6 of `docs/plans/phase-3-syncing.md` into signatures; nothing here is built. Rulings it follows: P0 (a SQLite read transaction holds the pin), P3 (TRUNCATE only on the host's word), P4 (1-second polling), D6 (copy Go; no new files or formats), D7 (keep trying; stop only for a second writer; configurable responses). "Engine change" marks what the core must gain for this API.
 
 ## Shape in one paragraph
 
-A host links `lsr-replica`, builds a store (any `ObjectStore`: `S3Store` over ureq or reqwest, or `FsStore`), and calls `Replicator::start` once per database before its connection pool opens. The replicator owns one OS thread and two SQLite connections, and returns a handle. The host calls `app_connection` on each connection it opens, tells the replicator when long readers start and stop, reads `health()` whenever it likes, and calls `stop` at shutdown after its writers close. Nothing runs on the host's threads, no async runtime is required, and time, randomness and sleep come in through traits so tests can stub them.
+A host links `lsr-replica`, builds a store (`S3Store` over ureq or reqwest, `FsStore`, or a test store), wraps it once in an `Arc`, and calls `Replicator::start` once per database before its connection pool opens. The replicator owns one OS thread and two SQLite connections, and returns a handle. Each connection the host opens goes through `replicator.app_connection`; each long read the host starts holds a `ReaderGuard`; `health()` can be read at any time; `stop` runs at shutdown after the host's writers close. Nothing runs on the host's threads, no async runtime is required, and time, waiting and chance come in through `Runtime` so tests can drive all of them.
 
-## The crate: `lsr-replica`
+## Lifecycle
 
 ```rust
 /// One replicated database. Cheap to clone: every clone is the same thread.
+/// The last handle is found by a dedicated token, not `Arc::strong_count`.
 #[derive(Clone)]
-pub struct Replicator { /* Arc<Shared>, command sender */ }
+pub struct Replicator { /* Arc<Shared>, command sender, last-handle token */ }
 
 impl Replicator {
-    /// Opens the database's replication connections, takes the read transaction
-    /// that pins the WAL, starts the thread, and returns. The first boot (listing
-    /// the replica, recovering the position) runs on the thread afterwards; its
-    /// result shows in `health()`.
+    /// Opens the replication connections, takes the read transaction that pins
+    /// the WAL, starts the thread, and returns. The first boot (listing the
+    /// replica, recovering the position) runs on the thread afterwards and shows
+    /// in `health()`. No store call happens on the caller's thread.
     ///
-    /// Blocks the caller for the open only: no store call happens here.
-    pub fn start<S>(database: &Path, store: S, config: Config) -> Result<Self, StartError>
-    where
-        S: ObjectStore + Send + Sync + 'static;
+    /// If a replicator for the same file (device and inode, not path) is still
+    /// draining in this process, waits for it, up to its shutdown grace.
+    pub fn start(database: &Path, store: Arc<dyn DynStore>, config: Config) -> Result<Self, StartError>;
 
-    /// `start` with every source of time and chance supplied: what the tests
-    /// and the simulator use.
-    pub fn start_with<S, C, P, E>(
-        database: &Path,
-        store: S,
-        config: Config,
-        env: Env<C, P, E>,
-    ) -> Result<Self, StartError>
-    where
-        S: ObjectStore + Send + Sync + 'static,
-        C: Clock + 'static,
-        P: Sleeper + 'static,
-        E: Entropy + 'static;
+    /// `start` with every source of time, waiting and chance supplied.
+    pub fn start_with(database: &Path, store: Arc<dyn DynStore>, config: Config, runtime: Runtime)
+        -> Result<Self, StartError>;
 
-    /// A snapshot of the replicator's state, copied out of one `Arc`; never blocks.
-    pub fn health(&self) -> Health;
+    /// Blocks until the first boot has finished or `within` passes.
+    pub fn wait_booted(&self, within: Duration) -> Booted;
 
-    /// The host's word on long readers (ruling P3). Until it is first called the
-    /// replicator assumes `Readers::Unknown`, which never allows TRUNCATE.
-    pub fn set_readers(&self, readers: Readers);
-
-    /// Asks for a level 9 snapshot at the next opportunity (an operator's
-    /// request, `SnapshotCause::OperatorRequested`).
-    pub fn request_snapshot(&self);
-
-    /// Stops after syncing and uploading everything committed, within `within`
-    /// as measured by the replicator's `Clock`. The future needs no runtime:
-    /// `.await` it from any executor, or call `FinalSync::wait` to block.
+    /// Stops after syncing and uploading everything committed. The deadline is
+    /// the earlier of this call's and any earlier `stop`'s (a second SIGTERM
+    /// with `within = 0` shortens it). The future needs no runtime; `.await` it
+    /// or call `wait()`. It resolves at the deadline on the caller's side even
+    /// if the thread is still inside a request (one request can take up to its
+    /// own deadline, 60 s by default); the thread then finishes in the background.
     pub fn stop(&self, within: Duration) -> FinalSync;
+
+    pub fn health(&self) -> Health;
+    pub fn request_snapshot(&self);
 }
 
-/// Dropping the last handle sends a stop with `Config::shutdown_grace` and
-/// returns at once: no I/O on the caller's thread. The thread drains, then ends.
+/// Dropping the last handle is a best-effort `stop(config.shutdown_grace)` with
+/// no I/O and no wait on the caller's thread. A host whose `main` returns right
+/// after drop gets no drain: call `stop(..).wait()` instead.
 impl Drop for Replicator { /* ... */ }
 
-/// The outcome of `stop`.
-pub struct FinalSync { /* a future over a one-shot set by the thread */ }
-impl Future for FinalSync { type Output = Stopped; /* ... */ }
+pub struct FinalSync { /* one-shot set by the thread, plus a caller-side deadline */ }
+impl Future for FinalSync { type Output = Stopped; }
 impl FinalSync { pub fn wait(self) -> Stopped; }
 
 pub enum Stopped {
-    /// Everything committed before the call is on the replica.
-    Drained { txid: Txid },
-    /// Time ran out with work left: what was synced and what was committed.
-    DeadlineReached { synced: Option<Txid>, committed: Txid },
-    /// Already stopped by a cause (D7: a second writer, or a configured stop).
+    /// Everything committed before the stop is on the replica (engine change:
+    /// the drain reports its last txid).
+    Drained { txid: Option<Txid> },
+    /// Time ran out with work left. The wal-index gives a frame offset, not a
+    /// txid, so what is left is measured in bytes and files.
+    DeadlineReached { unsynced_wal_bytes: u64, staged_not_uploaded: u32 },
+    /// Already stopped by a cause (a second writer, or a configured stop).
     Stopped(StopCause),
+    /// The thread died (a panic that was not caught, under `panic = "abort"`
+    /// nothing is caught at all), or this process is a fork of the one that
+    /// started the replicator (the thread does not exist here).
+    Gone(Gone),
 }
-
-/// Time, sleep and chance, injected (the clippy ban on clocks applies here too).
-pub struct Env<C, P, E> { pub clock: C, pub sleeper: P, pub entropy: E }
-impl Env<SystemClock, ThreadSleeper, OsEntropy> { pub fn system() -> Self; }
+pub enum Gone { ThreadDied, Forked }
+pub enum Booted { Booted, Degraded(DegradedCause), TimedOut, Stopped(StopCause) }
 ```
 
-### Configuration
+### Time, waiting and chance
 
 ```rust
-/// Every field has Go's default; `Config::default()` is Go's behaviour (D6).
+/// Everything the thread waits on. The thread parks until the tick's next wake,
+/// the next poll, or a command (which unparks it), so a test with a fake clock
+/// drives the poll interval, the backoff and the stop deadline without sleeping.
+pub trait Park: Send + Sync {
+    fn park(&self, until: Option<Timestamp>);
+    fn unpark(&self);
+}
+
+pub struct Runtime {
+    pub clock: Arc<dyn Clock>,
+    pub park: Arc<dyn Park>,
+    pub entropy: Arc<dyn Entropy>,
+}
+impl Runtime {
+    /// The wall clock, a condvar park and the OS's randomness.
+    pub fn system() -> Self;
+    /// A fake clock and a park that advances it: the deterministic test setup.
+    #[cfg(feature = "testing")] pub fn fake(start: Timestamp, seed: u64) -> (Self, FakeClockHandle);
+}
+```
+
+Not covered by `Runtime`, and said so in the crate docs: the `S3Store` signs with its own clock (`S3Store::with_transport` takes it), and HTTP request deadlines run on real time inside the HTTP client.
+
+### The store, type-erased
+
+```rust
+/// `ObjectStore` returns `impl Future`, so it cannot be a trait object. This
+/// adapter boxes each call's future (one allocation per HTTP call) so the
+/// engine is compiled once inside this crate, not once per host store type.
+pub trait DynStore: Send + Sync { /* boxed-future versions of the ObjectStore methods */ }
+impl<S: ObjectStore + Send + Sync> DynStore for S { /* ... */ }
+```
+
+The host keeps its own `Arc` clone, so it can call `restore` or `verify` on the same store while replicating.
+
+## The host's connections and readers
+
+```rust
+impl Replicator {
+    /// Sets `SQLITE_FCNTL_PERSIST_WAL` on and `wal_autocheckpoint = 0` on one of
+    /// the host's connections, after checking it opens this replicator's database
+    /// (device and inode). A method, so a pool cannot be configured before the
+    /// replicator exists. Feature `rusqlite`, since the type pins the host to
+    /// this crate's rusqlite version.
+    #[cfg(feature = "rusqlite")]
+    pub fn app_connection(&self, conn: &rusqlite::Connection) -> Result<(), SetupError>;
+
+    /// The same for a host on sqlx, diesel or raw FFI.
+    ///
+    /// # Safety
+    /// `db` is an open connection on this replicator's database, used by no
+    /// other thread during the call, and opened by the same SQLite library this
+    /// crate links (a second copy of SQLite in the process breaks the lock
+    /// sharing between connections, the hazard of PLAN.md section 6). Note that
+    /// `wal_autocheckpoint` replaces any `sqlite3_wal_hook` the host set.
+    pub unsafe fn app_connection_raw(&self, db: *mut ffi::sqlite3) -> Result<(), SetupError>;
+
+    /// Held for the length of a long read. While any guard lives, the replicator
+    /// does not TRUNCATE (ruling P3). Counted, so overlapping readers are safe.
+    pub fn long_reader(&self) -> ReaderGuard;
+}
+pub struct ReaderGuard { /* decrements on drop */ }
+```
+
+`Config::readers` is `ReaderTracking::Untracked` by default, under which TRUNCATE never runs, as ruling P3 says for a host that gives no signal. `Tracked` means the host promises to hold a guard for every long read.
+
+The library also detects a broken obligation it cannot prevent: a backfill it did not run is a host checkpoint, counted in `Health::foreign_checkpoints` and sent as an event.
+
+## Configuration
+
+```rust
+/// Go's behaviour by default (D6). `Clone + Debug + PartialEq`; the event sink is
+/// not part of it.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     /// Go's meta directory, `<dir>/.<name>-litestream` unless set (D4).
     pub meta_dir: Option<PathBuf>,
-    /// How often the WAL is polled for new commits (P4; Go: 1 s).
-    pub poll_interval: Duration,
-    /// When to checkpoint (Go: PASSIVE at 1,000 pages or every minute, TRUNCATE
-    /// at 121,359 pages; `db.go:32-35`).
+    /// How often the WAL is polled (P4; Go: 1 s). Never zero.
+    pub poll_interval: NonZeroDuration,
+    /// First retry wait, doubling to 5 minutes (Go's `sync-interval` and backoff cap).
+    pub retry_interval: NonZeroDuration,
+    /// Go: PASSIVE at 1,000 pages or every minute, TRUNCATE at 121,359 pages (`db.go:32-35`).
     pub checkpoint: CheckpointConfig,
-    /// Compaction levels, snapshot interval, retention (Go's `store.go` defaults).
+    /// Compaction levels, snapshot interval and retention, level 0 retention,
+    /// and whether compaction outputs are read back (Go's `verify-compaction`).
     pub maintenance: Maintenance,
+    /// Bytes and files one sync step may stage.
+    pub sync_limits: SyncLimits,
     /// What each persistent failure does (D7). Default `Responses::GO_LIKE`.
     pub responses: Responses,
-    /// How long a drop may take to drain (Go's shutdown sync timeout: 30 s, `db.go:36`).
+    pub readers: ReaderTracking,
+    /// How long a drop may drain (Go's shutdown sync timeout, 30 s, `db.go:36`).
     pub shutdown_grace: Duration,
-    /// Where events go. Default: nowhere (health still reports the state).
-    pub events: Option<Box<dyn EventSink>>,
 }
 
-/// D7: one field per persistent cause, so a new cause breaks the build.
+/// One field per persistent cause, so a new cause breaks the build. Public
+/// fields make each new cause a semver-major change; intended.
 pub struct Responses {
     pub credentials: Response, pub store_refused: Response,
     pub remote_corrupt: Response, pub remote_regressed: Response,
     pub wal_corrupt: Response, pub wal_truncated: Response, pub wal_unlinked: Response,
     pub page_size_changed: Response, pub database_page_mismatch: Response,
-    pub bug: Response, pub foreign_writer: Response,
+    /// `KeepTrying` rebuilds the engine and boots again, at most once per
+    /// interval; it never resumes state a panic unwound through.
+    pub bug: Response,
+    /// Its own type: continuing past a second writer damages the history.
+    pub foreign_writer: ForeignWriter,
 }
-impl Responses { pub const GO_LIKE: Self; pub const STRICT: Self; }
 pub enum Response { KeepTrying, Stop }
-
-/// The host's signal for ruling P3.
-pub enum Readers { Idle, Pinned, Unknown }
+pub enum ForeignWriter { Stop, ContinueAndInterleaveHistories }
+impl Responses { pub const GO_LIKE: Self; pub const STRICT: Self; }
 ```
 
-### Health and events
+Not configurable: the SQLite busy timeout (zero, so the engine's own policy decides what waits).
+
+## Health and events
 
 ```rust
 #[derive(Clone, Debug)]
 pub struct Health {
-    pub state: State,
-    /// The newest transaction staged locally, and when.
-    pub synced: Option<(Txid, Timestamp)>,
-    /// The newest transaction confirmed on the replica, and when.
-    pub replicated: Option<(Txid, Timestamp)>,
-    /// The newest committed transaction the last poll saw.
-    pub committed: Option<Txid>,
-    /// Why the current or next sync is a snapshot, if it is one.
+    /// When the thread last wrote this; a stale value means the thread is stuck
+    /// inside a blocking call.
+    pub observed_at: Timestamp,
+    pub phase: Phase,                         // Booting, Running, Draining, Stopped(StopCause), Gone(Gone)
+    pub degraded: [Option<Degraded>; 5],      // per lane: sync, checkpoint, upload, prune, maintenance
+    pub synced: Option<(Txid, Timestamp)>,    // newest staged locally
+    pub replicated: Option<(Txid, Timestamp)>,// newest confirmed on the replica
+    /// When the oldest commit not yet on the replica was first seen; `None` when
+    /// caught up. This is the lag to alert on (the age of `replicated` fires
+    /// falsely on an idle database).
+    pub unreplicated_since: Option<Timestamp>,
+    /// WAL and database size: a WAL held by the pin while uploads are degraded
+    /// fills the host's disk.
+    pub wal_bytes: u64,
+    pub db_bytes: u64,
     pub resnapshot: Option<SnapshotCause>,
-    /// Lifetime counters for the resource properties: LIST, GET, PUT, DELETE
-    /// calls, bytes uploaded, checkpoints by mode, retries.
+    pub foreign_checkpoints: u64,
+    /// Go's metrics: per-operation counts, errors and durations for sync,
+    /// checkpoint and each store call; bytes uploaded; retries; events dropped.
     pub counters: Counters,
 }
+pub struct Degraded { pub cause: DegradedCause, pub since: Timestamp, pub retries: u32 }
 
-pub enum State {
-    /// Started; the first boot has not finished.
-    Booting,
-    Running,
-    /// Some lanes are retrying a persistent failure (D7); the rest run.
-    Degraded { lanes: Vec<Degraded> },
-    Draining,
-    Stopped(StopCause),
-}
-pub struct Degraded { pub lane: Lane, pub cause: DegradedCause, pub since: Timestamp, pub retries: u32 }
-pub enum Lane { Sync, Checkpoint, Upload, Prune, Maintenance }
-
-/// Receives every event the actor emits: booted (with its snapshot cause),
-/// synced, checkpointed, uploaded, maintained, degraded, recovered, clamped
-/// clock, stopped. Called on the replicator's thread; must not block.
+/// Called on the replicator's thread for every event except `Idle`; must not
+/// block. A panic in it is caught and counted, never fatal.
 pub trait EventSink: Send { fn event(&mut self, event: &Event); }
+/// A bounded channel that drops the oldest event when full and counts drops.
+pub struct ChannelSink { /* ... */ }
+impl Replicator { pub fn set_events(&self, sink: Box<dyn EventSink>); }
 ```
 
-### The host's connections
+## Restore and verify
+
+Implemented in `lsr-core`, re-exported here as free functions over the same shared store, never as methods on `Replicator`: restoring over a live database must not look easy.
 
 ```rust
-/// Sets `SQLITE_FCNTL_PERSIST_WAL` and `wal_autocheckpoint = 0` on one of the
-/// host's connections (PLAN section 6). Call it on every connection the host
-/// opens, before its first statement.
-pub fn app_connection(conn: &rusqlite::Connection) -> Result<(), SetupError>;
-/// Reads both settings back.
-pub fn check_app_connection(conn: &rusqlite::Connection) -> Result<(), SetupError>;
-/// The same for a host that does not use rusqlite (sqlx, diesel, raw FFI),
-/// given its `sqlite3*`.
-///
-/// # Safety
-/// `db` is an open connection, used by no other thread during the call.
-pub unsafe fn app_connection_raw(db: *mut ffi::sqlite3) -> Result<(), SetupError>;
+pub fn restore(store: &dyn DynStore, target: RestoreTarget, to: &Path) -> Result<Restored, RestoreError>;
+pub fn verify(store: &dyn DynStore, depth: Depth) -> Result<Report, VerifyError>;
+/// Go's `restore -if-db-not-exists`: restore Latest only when `to` is absent.
+pub fn restore_if_missing(store: &dyn DynStore, to: &Path) -> Result<Option<Restored>, RestoreError>;
 ```
 
-### Restore and verify
-
-Blocking wrappers over the phase 1 functions, on the caller's thread with the
-crate's small executor, over the same store type the host replicates to:
-
-```rust
-pub fn restore<S: ObjectStore>(store: &S, target: RestoreTarget, to: &Path) -> Result<Restored, RestoreError>;
-pub fn verify<S: ObjectStore>(store: &S, depth: Depth) -> Result<Report, VerifyError>;
-```
-
-### Errors
+## Errors
 
 ```rust
 pub enum StartError {
-    /// The path is not a SQLite database, or cannot be opened.
     Open { kind: io::ErrorKind },
-    /// The database is not in WAL mode.
     NotWal { journal_mode: String },
-    /// Another replicator in this process already holds this database.
+    /// A replicator for this file (device and inode) is running in this process.
     AlreadyReplicated,
-    /// The meta directory cannot be created or read.
     MetaDir { kind: io::ErrorKind },
-    /// SQLite refused the read transaction or a setup statement.
     Sqlite { code: i32 },
-    /// The thread could not be spawned.
     Thread { kind: io::ErrorKind },
 }
 ```
 
-## Choices made, and the alternatives
+## Engine changes this API needs
 
-1. **The store is passed in built, not described in `Config`.** The host picks the HTTP client, credentials and transport (ureq, or reqwest on its own runtime) when it builds the `S3Store`, and tests pass `MemStore`. The alternative is a `ReplicaUrl` in the config, as Go's `litestream.yml` has; it belongs to the phase 4 sidecar, which can parse a URL into a store.
-2. **`start` returns before the first boot.** Booting lists the replica, which can be slow or fail. Returning after the pin only means a host never waits on the network to open its pool; the cost is that early `health()` says `Booting`. The alternative is a `start` that returns after boot, with a timeout.
-3. **`stop(within: Duration)`, measured by the injected clock,** rather than an `Instant` deadline, so a test's fake clock drives it.
-4. **Events by callback, health by snapshot.** The callback runs on the replicator's thread and must not block; a host that wants a channel wraps one. The alternative is a bounded channel the library owns, which then has to decide what to drop when it is full.
-5. **One replicator per database, one thread each,** as PLAN section 3. A host with many databases pays a thread each; a shared thread pool is a later optimisation, with a measurement.
-6. **`app_connection_raw` for non-rusqlite hosts,** since PLAN's phase 0 asked whether the sqlx fork exposes the raw handle. It is `unsafe` because it takes a pointer.
+- The actor's wait becomes `Park`: it parks until the next wake, poll or command.
+- `begin_shutdown(deadline)` takes the deadline per call, and a second call keeps the earlier one.
+- The drain reports its last txid; a missed deadline reports unsynced WAL bytes and staged files.
+- `Bug` under `KeepTrying` rebuilds the `Actor`.
+- Host checkpoints are counted.
 
-## Open questions for review
+## Decided, with the alternatives
 
-- Should `start` refuse when the meta directory is held by a running Go process? Go takes no lock there, so detecting it means reading Go's state, and D6 forbids adding a lock file.
-- Is `Readers` enough for P3, or does the host need to say "pinned until" a time?
-- Does `Health` need the WAL size and the oldest unreplicated commit's age (Go exposes metrics like these through Prometheus)?
-- Should `restore` and `verify` live here or stay only in `lsr-core` and `lsr-cli`?
+1. **The store is passed in built, type-erased.** The host chooses the HTTP client and credentials. The engine is compiled once. A `ReplicaUrl` in the config, as Go's `litestream.yml` has, belongs to the phase 4 sidecar.
+2. **`start` returns before the first boot,** with `wait_booted` for hosts that want to wait.
+3. **Deadlines are durations measured by the injected clock,** not `Instant`s.
+4. **Events by callback** (the right primitive), with a ready-made bounded `ChannelSink`.
+5. **One replicator and one thread per database,** as PLAN section 3.
+
+## The review's answers to the open questions
+
+- **Refuse to start when a Go process uses the same meta directory?** No. `start` makes no store call, and Go leaves no reliable local sign. A second writer is caught when the replica shows files above the local tip (the default stop). Document it.
+- **`Readers`, or "pinned until a time"?** Neither: counted guards. A time is a guess, and with busy timeouts at zero a wrong answer costs a busy result, not a stall.
+- **WAL size and the age of the oldest unreplicated commit in `Health`?** Yes, both.
+- **Where do `restore` and `verify` live?** In `lsr-core`, re-exported here as free functions.
