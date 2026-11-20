@@ -1,0 +1,415 @@
+//! The judge: what the replica must be able to restore, against what the
+//! database really was.
+//!
+//! Ground truth comes from two places, never from the code under test: the
+//! [`TapLog`](crate::store::TapLog), which records every file the store really
+//! took with its WAL origin, and the [`Model`], which holds every commit's page
+//! image. A file's WAL origin names the commit that ended it, so the oracle maps
+//! a transaction id to a commit without reading a single page of a file.
+//!
+//! Two properties are checked, over the unfaulted store handle:
+//!
+//! - every transaction from the oldest snapshot to the newest restores to the
+//!   image of the commit it covers, or is refused because it lies strictly
+//!   inside a kept compacted file (a refusal the planner documents);
+//! - `Latest` restores to the image of its commit, and is not older than the
+//!   newest transaction the engine acknowledged, except across a rewind.
+
+use std::collections::BTreeMap;
+use std::fmt;
+
+use lsr_core::conformance::block_on;
+use lsr_core::{
+    Did, FileInfo, Inventory, MemSink, MemStore, PlanOutcome, RestoreError, RestoreTarget,
+    is_snapshot_start, restore,
+};
+use lsr_ltx::{Txid, TxidRange};
+use lsr_wal::Salts;
+use thiserror::Error;
+
+use crate::model::{CommitId, Model, PageImage};
+use crate::store::{TapEvent, TapLog, TapResult};
+
+/// A resource the engine must keep bounded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Bound {
+    /// Files kept on disk while nothing happens.
+    IdleFiles,
+    /// Checkpoints run while nothing happens.
+    IdleCheckpoints,
+    /// Listings made while nothing happens.
+    IdleLists,
+    /// Passive checkpoints in one tick.
+    PassivePerTick,
+    /// Bytes staged in one tick.
+    StagedBytesPerTick,
+    /// The WAL's length in frames.
+    WalLength,
+    /// Listing calls in one tick.
+    ListCalls,
+    /// The most bytes one upload buffered.
+    UploadBuffer,
+    /// Ticks the engine took to drain its queue.
+    DrainTicks,
+}
+
+impl fmt::Display for Bound {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            Self::IdleFiles => "idle files",
+            Self::IdleCheckpoints => "idle checkpoints",
+            Self::IdleLists => "idle listings",
+            Self::PassivePerTick => "passive checkpoints per tick",
+            Self::StagedBytesPerTick => "staged bytes per tick",
+            Self::WalLength => "WAL length",
+            Self::ListCalls => "listing calls",
+            Self::UploadBuffer => "upload buffer",
+            Self::DrainTicks => "ticks to drain",
+        };
+        f.write_str(name)
+    }
+}
+
+/// A property the run broke.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum Violation {
+    /// A level-0 file's WAL range does not end on a commit.
+    #[error("{key} covers part of a transaction")]
+    CoversMidTx {
+        /// The file.
+        key: String,
+    },
+    /// One transaction id covers two different commits.
+    #[error("transaction {txid} covers {first} and then {second}")]
+    TxidReused {
+        /// The id.
+        txid: u64,
+        /// The commit it covered first.
+        first: CommitId,
+        /// The commit it covered later.
+        second: CommitId,
+    },
+    /// A later transaction id covers an earlier commit.
+    #[error("transaction {lower} covers {low_commit} but {higher} covers {high_commit}")]
+    CoversNotIncreasing {
+        /// The smaller id.
+        lower: u64,
+        /// The commit it covers.
+        low_commit: CommitId,
+        /// The larger id.
+        higher: u64,
+        /// The commit it covers.
+        high_commit: CommitId,
+    },
+    /// A restore built a different database.
+    #[error("restoring {target:?} differs from {commit} first at page {first_diff}")]
+    RestoreMismatch {
+        /// What was restored.
+        target: RestoreTarget,
+        /// The commit it should equal.
+        commit: CommitId,
+        /// The first page that differs, or one past the shorter database.
+        first_diff: u32,
+    },
+    /// A restore the replica should answer was refused.
+    #[error("restoring {target:?} was refused: {outcome:?}")]
+    RestoreRefused {
+        /// What was asked.
+        target: RestoreTarget,
+        /// The planner's reason.
+        outcome: PlanOutcome,
+    },
+    /// `Latest` is older than something the engine acknowledged.
+    #[error("latest is {latest:?} but {acked} was acknowledged")]
+    LatestLostAck {
+        /// The newest acknowledged transaction.
+        acked: u64,
+        /// What `Latest` reached, if anything.
+        latest: Option<u64>,
+    },
+    /// A resource grew past its limit.
+    #[error("{what}: {seen} is over the limit {limit}")]
+    ResourceBound {
+        /// The resource.
+        what: Bound,
+        /// What was seen.
+        seen: u64,
+        /// The most allowed.
+        limit: u64,
+    },
+    /// The engine reported its own bug, or the oracle could not decide.
+    #[error("bug fault: {context}")]
+    BugFault {
+        /// Where.
+        context: String,
+    },
+}
+
+/// `Err(ResourceBound)` when `seen` is over `limit`.
+///
+/// # Errors
+/// [`Violation::ResourceBound`].
+pub fn within(what: Bound, seen: u64, limit: u64) -> Result<(), Violation> {
+    if seen > limit {
+        return Err(Violation::ResourceBound { what, seen, limit });
+    }
+    Ok(())
+}
+
+/// A `BugFault` naming `context`.
+#[must_use]
+pub fn bug_fault(context: impl Into<String>) -> Violation {
+    Violation::BugFault {
+        context: context.into(),
+    }
+}
+
+/// The newest transaction the engine has told us is safe on the replica.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Acked {
+    highest: Option<Txid>,
+}
+
+impl Acked {
+    /// Nothing acknowledged.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { highest: None }
+    }
+
+    /// The newest acknowledged transaction.
+    #[must_use]
+    pub const fn highest(&self) -> Option<Txid> {
+        self.highest
+    }
+
+    /// Notes an acknowledgement.
+    pub fn record(&mut self, txid: Txid) {
+        self.highest = self.highest.max(Some(txid));
+    }
+
+    /// The local database was rewound: what was acknowledged before may
+    /// legitimately be gone from `Latest`.
+    pub fn note_rewound(&mut self) {
+        self.highest = None;
+    }
+
+    /// Reads an acknowledgement off one step's result: a commit or a listing
+    /// that confirms a transaction.
+    pub fn on_did(&mut self, did: &Did) {
+        match did {
+            Did::Put(info) => self.record(info.key.range().max()),
+            Did::Listed {
+                newest: Some(newest),
+            } => self.record(*newest),
+            Did::Listed { newest: None } | Did::Nothing => {}
+        }
+    }
+}
+
+/// What a passing check looked at.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Checked {
+    /// Transactions restored and compared.
+    pub restored: u32,
+    /// Transactions refused for lying inside a compacted file.
+    pub inside_file: u32,
+    /// What `Latest` reached.
+    pub latest: Option<Txid>,
+}
+
+fn range_str(range: TxidRange) -> String {
+    format!("{}-{}", range.min().get(), range.max().get())
+}
+
+/// Which commit each transaction id covers, from the tap and the model.
+fn covers(model: &Model, tap: &TapLog) -> Result<BTreeMap<Txid, CommitId>, Violation> {
+    let rewound = model.snapshot_notes().iter().any(|n| n.rewound) || model.rewound();
+    let mut cover: BTreeMap<Txid, CommitId> = BTreeMap::new();
+    for (at, event) in tap.events().iter().enumerate() {
+        let TapEvent::Put {
+            key,
+            header: Some(header),
+            origin,
+            result: TapResult::Ok | TapResult::ErrAfterPublish,
+        } = event
+        else {
+            continue;
+        };
+        let max = key.range().max();
+        let commit = match origin {
+            Some(origin) => {
+                let (salt1, salt2) = origin.salts();
+                let end = origin.offset().saturating_add(origin.size());
+                let found = model.find(Salts { salt1, salt2 }, end, at);
+                Some(found.ok_or_else(|| Violation::CoversMidTx {
+                    key: format!("{} {}", key.level().get(), range_str(key.range())),
+                })?)
+            }
+            None => cover.get(&max).copied().or_else(|| {
+                let _ = header;
+                model
+                    .snapshot_notes()
+                    .iter()
+                    .find(|n| n.txid == max && n.at <= at)
+                    .map(|n| n.commit)
+            }),
+        };
+        let Some(commit) = commit else { continue };
+        match cover.get(&max) {
+            Some(first) if *first != commit && !rewound => {
+                return Err(Violation::TxidReused {
+                    txid: max.get(),
+                    first: *first,
+                    second: commit,
+                });
+            }
+            Some(_) | None => {
+                cover.insert(max, commit);
+            }
+        }
+    }
+    if !rewound {
+        let mut previous: Option<(Txid, CommitId)> = None;
+        for (txid, commit) in &cover {
+            if let Some((lower, low_commit)) = previous.filter(|(_, c)| c >= commit) {
+                return Err(Violation::CoversNotIncreasing {
+                    lower: lower.get(),
+                    low_commit,
+                    higher: txid.get(),
+                    high_commit: *commit,
+                });
+            }
+            previous = Some((*txid, *commit));
+        }
+    }
+    Ok(cover)
+}
+
+/// The first page where the restored database differs from `image`.
+fn first_diff(image: &PageImage, got: &lsr_core::Database) -> Option<u32> {
+    let want = image.db_size();
+    let have = got.page_count();
+    if want != have {
+        return Some(want.min(have).saturating_add(1));
+    }
+    (1..=want).find(|pgno| {
+        let expected = image.page(*pgno);
+        let actual = got.page(*pgno);
+        match (expected, actual) {
+            (Some(e), Some(a)) => e.as_slice() != a.as_slice(),
+            (None, None) => false,
+            (Some(_), None) | (None, Some(_)) => true,
+        }
+    })
+}
+
+enum Restored {
+    Same(Txid),
+    Inside,
+}
+
+fn restore_and_compare(
+    remote: &MemStore,
+    target: RestoreTarget,
+    files: &[FileInfo],
+    model: &Model,
+    cover: &BTreeMap<Txid, CommitId>,
+) -> Result<Restored, Violation> {
+    let sink = MemSink::new();
+    match block_on(restore(remote, target, sink.clone())) {
+        Ok(done) => {
+            let reached = done.reached();
+            let commit = cover
+                .get(&reached)
+                .and_then(|id| model.rec(*id))
+                .ok_or_else(|| {
+                    bug_fault(format!("no commit known for transaction {}", reached.get()))
+                })?;
+            let db = sink
+                .published()
+                .ok_or_else(|| bug_fault("restore returned without publishing"))?;
+            if let Some(page) = first_diff(&commit.image, &db) {
+                return Err(Violation::RestoreMismatch {
+                    target,
+                    commit: commit.id,
+                    first_diff: page,
+                });
+            }
+            Ok(Restored::Same(reached))
+        }
+        Err(RestoreError::NoPlan(no)) => match (target, no.outcome()) {
+            (RestoreTarget::Txid(t), PlanOutcome::InsideFile { file, .. })
+                if files.iter().any(|f| {
+                    f.key == *file && f.key.range().min() <= t && t < f.key.range().max()
+                }) =>
+            {
+                Ok(Restored::Inside)
+            }
+            (_, outcome) => Err(Violation::RestoreRefused {
+                target,
+                outcome: outcome.clone(),
+            }),
+        },
+        Err(other) => Err(bug_fault(format!("restore {target:?}: {other}"))),
+    }
+}
+
+/// Judges the replica. `remote` is the raw store handle: no fault or yield
+/// stands between the oracle and the bytes.
+///
+/// # Errors
+/// The first [`Violation`] found.
+pub fn check(
+    model: &Model,
+    tap: &TapLog,
+    remote: &MemStore,
+    acked: &Acked,
+) -> Result<Checked, Violation> {
+    let cover = covers(model, tap)?;
+    let inventory = block_on(Inventory::load(remote))
+        .map_err(|err| bug_fault(format!("listing the replica: {err}")))?;
+    let files = inventory.files();
+    let mut out = Checked::default();
+    let oldest = files
+        .iter()
+        .filter(|f| is_snapshot_start(f) || f.key.range().min() == Txid::MIN)
+        .map(|f| f.key.range().max())
+        .min();
+    if let (Some(from), Some(newest)) = (oldest, inventory.newest()) {
+        let mut raw = from.get();
+        while raw <= newest.get() {
+            let Some(txid) = Txid::new(raw) else { break };
+            match restore_and_compare(remote, RestoreTarget::Txid(txid), files, model, &cover)? {
+                Restored::Same(_) => out.restored = out.restored.saturating_add(1),
+                Restored::Inside => out.inside_file = out.inside_file.saturating_add(1),
+            }
+            raw = raw.saturating_add(1);
+        }
+    }
+    if files.is_empty() {
+        return match acked.highest() {
+            Some(acked) => Err(Violation::LatestLostAck {
+                acked: acked.get(),
+                latest: None,
+            }),
+            None => Ok(out),
+        };
+    }
+    let Restored::Same(latest) =
+        restore_and_compare(remote, RestoreTarget::Latest, files, model, &cover)?
+    else {
+        return Err(bug_fault("latest reported a refusal inside a file"));
+    };
+    if let Some(acked) = acked.highest().filter(|a| *a > latest) {
+        return Err(Violation::LatestLostAck {
+            acked: acked.get(),
+            latest: Some(latest.get()),
+        });
+    }
+    out.latest = Some(latest);
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests;

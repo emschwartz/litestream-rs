@@ -11,6 +11,7 @@ publish = false
 lsr-core = { path = "../core", features = ["testing"] }
 lsr-ltx = { path = "../ltx" }
 lsr-wal = { path = "../wal", features = ["testing"] }
+thiserror = "2"
 
 [dev-dependencies]
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
