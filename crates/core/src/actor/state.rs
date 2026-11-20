@@ -213,6 +213,9 @@ pub(super) struct Maintain {
     /// The last transaction of the replica's level 1 in the last listing;
     /// `None` before the first. A staged file at or below it was compacted.
     pub(super) level_one: Option<Txid>,
+    /// The read-back of the newest file per level is still owed: set at
+    /// every boot, cleared by the first listing that finds them all sound.
+    pub(super) read_back_owed: bool,
 }
 
 impl Default for Maintain {
@@ -222,6 +225,7 @@ impl Default for Maintain {
             stale: true,
             until: None,
             level_one: None,
+            read_back_owed: true,
         }
     }
 }
