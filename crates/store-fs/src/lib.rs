@@ -10,8 +10,33 @@
 //! its mtime with `created_at` as Go does (`created_at` is the file's mtime),
 //! fsyncs it, renames it into place and fsyncs the directory. Go stamps the
 //! mtime after the rename; stamping first means no reader ever sees the file
-//! with the wrong time. A scratch file left by a crash or a dropped upload ends
-//! in `.tmp`, is not an LTX name, and is counted as a foreign name by `list`.
+//! with the wrong time.
+//!
+//! Scratch names: the counter restarts with every store and the pid repeats
+//! across restarts (it is 1 in a container), so a name can already be taken by
+//! a crashed upload's leftover. `begin_upload` then tries the next counter
+//! value, a bounded number of times, and gives up with
+//! [`StoreError::ScratchExhausted`]. A scratch file (this store's, or Go's
+//! `<name>.tmp`) is neither an object nor a foreign name: `list` neither
+//! returns nor counts it. Nothing removes one automatically, because a scratch
+//! file may belong to an upload still running in another process; an operator
+//! clears them.
+//!
+//! Directories are made durable too: a level directory the store creates, and
+//! each directory above it that it creates, has its parent fsynced before the
+//! upload that needed it can commit. A crash window remains only for a
+//! directory an earlier, crashed process made and never synced.
+//!
+//! Types: a name that parses as a key is the file it names, and a symlink to a
+//! regular file is that file, in `list` and `read` alike (Go's reads follow
+//! links). A key-named entry that is anything else (a directory, a FIFO, a
+//! dangling link) makes `list` fail with [`CorruptCause::NotARegularFile`]: a
+//! name that claims to be history and cannot be read is never skipped.
+//! `read` checks the type before it opens, so a FIFO cannot block it.
+//!
+//! A commit that returns an error may still have published the object (the
+//! rename can land before a directory fsync fails): see the `ObjectStore`
+//! contract; list again.
 //!
 //! Blocking: every future here does its file I/O inside `poll` and is ready at
 //! once. That suits tests, the compat harness and a restore into a local
@@ -34,6 +59,40 @@ use lsr_ltx::{Timestamp, TxidRange};
 
 /// Where Go's file replica keeps LTX files, under the replica path.
 const LTX_DIR: &str = "ltx";
+
+/// How many scratch names an upload tries before giving up.
+const SCRATCH_TRIES: u32 = 64;
+
+/// Creates `dir` and any missing ancestors, top down, calling `sync` on the
+/// parent of each directory it made so the new entry is durable. A directory
+/// that turns out to exist (another creator won the race) gets the same sync.
+fn create_dirs_durably(
+    dir: &Path,
+    sync: &mut impl FnMut(&Path) -> io::Result<()>,
+) -> io::Result<()> {
+    let mut missing = Vec::new();
+    let mut at = dir;
+    while !at.try_exists()? {
+        missing.push(at);
+        match at.parent() {
+            Some(parent) => at = parent,
+            None => break,
+        }
+    }
+    for path in missing.into_iter().rev() {
+        match fs::create_dir(path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(err) => return Err(err),
+        }
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        sync(parent)?;
+    }
+    Ok(())
+}
 
 /// A replica kept in a directory.
 #[derive(Debug)]
@@ -97,12 +156,23 @@ impl FsStore {
 
     fn read_now(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
         let fail = |err: io::Error| StoreError::from_io(StoreOp::Read, Some(*key), &err);
-        let mut file = File::open(self.file_path(key)).map_err(fail)?;
-        if !file.metadata().map_err(fail)?.is_file() {
-            return Err(StoreError::Corrupt {
-                key: Some(*key),
-                cause: CorruptCause::NotARegularFile,
-            });
+        let not_a_file = || StoreError::Corrupt {
+            key: Some(*key),
+            cause: CorruptCause::NotARegularFile,
+        };
+        let path = self.file_path(key);
+        // Before the open: opening a FIFO blocks until a writer appears.
+        if !fs::metadata(&path).map_err(fail)?.is_file() {
+            return Err(not_a_file());
+        }
+        let mut file = File::open(&path).map_err(fail)?;
+        let meta = file.metadata().map_err(fail)?;
+        if !meta.is_file() {
+            return Err(not_a_file());
+        }
+        // Past the end is empty at every offset; seeking beyond i64::MAX fails.
+        if offset >= meta.len() {
+            return Ok(Vec::new());
         }
         file.seek(SeekFrom::Start(offset)).map_err(fail)?;
         let mut bytes = Vec::new();
@@ -117,18 +187,8 @@ impl FsStore {
             cause: CorruptCause::TimestampOutOfRange,
         })?;
         let dir = self.level_dir(key.level());
-        fs::create_dir_all(&dir).map_err(fail)?;
-        let serial = self.scratch_counter.fetch_add(1, Ordering::Relaxed);
-        let scratch = dir.join(format!(
-            "{}.{}-{serial}.tmp",
-            key.file_name(),
-            std::process::id()
-        ));
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&scratch)
-            .map_err(fail)?;
+        create_dirs_durably(&dir, &mut |path| File::open(path)?.sync_all()).map_err(fail)?;
+        let (scratch, file) = self.open_scratch(&dir, key)?;
         Ok(FsUpload {
             key: *key,
             dir,
@@ -138,6 +198,28 @@ impl FsStore {
             stamp,
             created_at,
         })
+    }
+
+    /// Creates the key's scratch file under the first free name.
+    fn open_scratch(&self, dir: &Path, key: &FileKey) -> Result<(PathBuf, File), StoreError> {
+        for _ in 0..SCRATCH_TRIES {
+            let serial = self.scratch_counter.fetch_add(1, Ordering::Relaxed);
+            let scratch = dir.join(format!(
+                "{}.{}-{serial}.tmp",
+                key.file_name(),
+                std::process::id()
+            ));
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&scratch)
+            {
+                Ok(file) => return Ok((scratch, file)),
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(err) => return Err(StoreError::from_io(StoreOp::Upload, None, &err)),
+            }
+        }
+        Err(StoreError::ScratchExhausted { key: *key })
     }
 
     fn delete_now(&self, keys: &[FileKey]) -> Result<(), StoreError> {
@@ -165,13 +247,25 @@ fn classify(level: Level, entry: &DirEntry, name: &str) -> Result<Entry, StoreEr
         return Ok(Entry::Foreign);
     };
     let key = FileKey::new(level, range);
-    let meta = match entry.metadata() {
+    let not_a_file = StoreError::Corrupt {
+        key: Some(key),
+        cause: CorruptCause::NotARegularFile,
+    };
+    // Follows symlinks, as the open in `read` does.
+    let meta = match fs::metadata(entry.path()) {
         Ok(meta) => meta,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Entry::Gone),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            let dangling = entry.file_type().is_ok_and(|kind| kind.is_symlink());
+            return if dangling {
+                Err(not_a_file)
+            } else {
+                Ok(Entry::Gone)
+            };
+        }
         Err(err) => return Err(StoreError::from_io(StoreOp::List, Some(key), &err)),
     };
     if !meta.is_file() {
-        return Ok(Entry::Foreign);
+        return Err(not_a_file);
     }
     let modified = meta
         .modified()
@@ -205,13 +299,21 @@ fn from_system_time(time: SystemTime) -> Option<Timestamp> {
     signed_millis(negative, offset).map(Timestamp::from_unix_millis)
 }
 
+/// Whole milliseconds, floored: a time before the epoch rounds away from zero,
+/// as Go's `UnixMilli` does, so `created < t` keeps its answer for every whole
+/// millisecond `t`.
 fn signed_millis(negative: bool, offset: Duration) -> Option<i64> {
     let millis = i64::try_from(offset.as_millis()).ok()?;
-    if negative {
-        millis.checked_neg()
-    } else {
-        Some(millis)
+    if !negative {
+        return Some(millis);
     }
+    let partial = !offset.subsec_nanos().is_multiple_of(1_000_000);
+    let rounded_up = if partial {
+        millis.checked_add(1)?
+    } else {
+        millis
+    };
+    rounded_up.checked_neg()
 }
 
 impl ObjectStore for FsStore {
@@ -442,10 +544,7 @@ mod tests {
 
         let listing = all(&h.store, 0);
         assert!(listing.files.is_empty());
-        assert_eq!(
-            listing.skipped, 2,
-            "both scratch files are counted, not listed"
-        );
+        assert_eq!(listing.skipped, 0, "scratch files are not foreign names");
         assert_eq!(
             block_on(h.store.read(&target, 0, ReadLen::new(8).unwrap())),
             Err(StoreError::NotFound { key: target })
@@ -463,12 +562,19 @@ mod tests {
     }
 
     #[test]
-    fn a_directory_named_like_a_key_is_foreign_and_unreadable() {
+    fn a_directory_named_like_a_key_fails_the_listing_and_the_read() {
         let h = FsHarness::new();
         let target = key(0, 1, 1);
         fs::create_dir_all(h.store.file_path(&target)).unwrap();
-        let listing = all(&h.store, 0);
-        assert_eq!((listing.files.len(), listing.skipped), (0, 1));
+        let corrupt = StoreError::Corrupt {
+            key: Some(target),
+            cause: CorruptCause::NotARegularFile,
+        };
+        let level = Level::ZERO;
+        assert_eq!(
+            block_on(h.store.list(level, None, PageLimit::new(10).unwrap())),
+            Err(corrupt)
+        );
         assert_eq!(
             block_on(h.store.read(&target, 0, ReadLen::new(1).unwrap())),
             Err(StoreError::Corrupt {
@@ -476,6 +582,135 @@ mod tests {
                 cause: CorruptCause::NotARegularFile
             })
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_to_a_regular_file_is_that_file() {
+        let h = FsHarness::new();
+        let real = key(0, 1, 1);
+        let linked = key(0, 2, 2);
+        block_on(async {
+            let mut up = h
+                .store
+                .begin_upload(&real, Timestamp::from_unix_millis(7))
+                .await
+                .unwrap();
+            up.write(b"bytes").await.unwrap();
+            up.commit().await.unwrap();
+        });
+        std::os::unix::fs::symlink(h.store.file_path(&real), h.store.file_path(&linked)).unwrap();
+        let listing = all(&h.store, 0);
+        let keys: Vec<_> = listing.files.iter().map(|f| f.key).collect();
+        assert_eq!(keys, [real, linked]);
+        assert_eq!(listing.files[1].size, 5);
+        assert_eq!(
+            block_on(h.store.read(&linked, 0, ReadLen::new(9).unwrap())),
+            Ok(b"bytes".to_vec())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_symlink_named_like_a_key_fails_the_listing() {
+        let h = FsHarness::new();
+        let target = key(0, 1, 1);
+        fs::create_dir_all(h.store.level_dir(Level::ZERO)).unwrap();
+        std::os::unix::fs::symlink("/nonexistent/lsr", h.store.file_path(&target)).unwrap();
+        assert_eq!(
+            block_on(h.store.list(Level::ZERO, None, PageLimit::new(10).unwrap())),
+            Err(StoreError::Corrupt {
+                key: Some(target),
+                cause: CorruptCause::NotARegularFile
+            })
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reading_a_fifo_named_like_a_key_is_refused_not_hung() {
+        let h = FsHarness::new();
+        let target = key(0, 1, 1);
+        fs::create_dir_all(h.store.level_dir(Level::ZERO)).unwrap();
+        let made = std::process::Command::new("mkfifo")
+            .arg(h.store.file_path(&target))
+            .status()
+            .unwrap();
+        assert!(made.success());
+        assert_eq!(
+            block_on(h.store.read(&target, 0, ReadLen::new(1).unwrap())),
+            Err(StoreError::Corrupt {
+                key: Some(target),
+                cause: CorruptCause::NotARegularFile
+            })
+        );
+    }
+
+    #[test]
+    fn an_upload_skips_scratch_names_a_crash_left_and_gives_up_when_all_are_taken() {
+        let h = FsHarness::new();
+        let target = key(0, 1, 1);
+        let dir = h.store.level_dir(Level::ZERO);
+        fs::create_dir_all(&dir).unwrap();
+        let name = |serial: u64| {
+            dir.join(format!(
+                "{}.{}-{serial}.tmp",
+                target.file_name(),
+                std::process::id()
+            ))
+        };
+        fs::write(name(0), b"left by a crash").unwrap();
+        block_on(
+            h.store
+                .begin_upload(&target, Timestamp::from_unix_millis(1)),
+        )
+        .unwrap();
+        for serial in 0..200 {
+            fs::write(name(serial), b"x").unwrap();
+        }
+        let err = block_on(
+            h.store
+                .begin_upload(&target, Timestamp::from_unix_millis(1)),
+        );
+        assert_eq!(
+            err.err(),
+            Some(StoreError::ScratchExhausted { key: target })
+        );
+    }
+
+    #[test]
+    fn missing_directories_are_synced_into_their_parents_top_down() {
+        let dir = tempfile::tempdir().unwrap();
+        let leaf = dir.path().join("a").join("b").join("c");
+        let mut synced = Vec::new();
+        create_dirs_durably(&leaf, &mut |path| {
+            synced.push(path.to_path_buf());
+            Ok(())
+        })
+        .unwrap();
+        assert!(leaf.is_dir());
+        let expected = [
+            dir.path().to_path_buf(),
+            dir.path().join("a"),
+            dir.path().join("a").join("b"),
+        ];
+        assert_eq!(synced, expected);
+        synced.clear();
+        create_dirs_durably(&leaf, &mut |path| {
+            synced.push(path.to_path_buf());
+            Ok(())
+        })
+        .unwrap();
+        assert!(synced.is_empty(), "nothing to make, nothing to sync");
+    }
+
+    #[test]
+    fn a_failed_directory_sync_fails_the_upload_before_it_can_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = create_dirs_durably(&dir.path().join("x"), &mut |_| {
+            Err(io::Error::other("disk"))
+        });
+        assert!(err.is_err());
     }
 
     #[test]
@@ -487,6 +722,7 @@ mod tests {
         assert_eq!(signed_millis(false, Duration::MAX), None);
         assert_eq!(signed_millis(true, Duration::MAX), None);
         assert_eq!(signed_millis(true, Duration::from_millis(5)), Some(-5));
+        assert_eq!(signed_millis(true, Duration::from_micros(1500)), Some(-2));
     }
 
     #[test]
