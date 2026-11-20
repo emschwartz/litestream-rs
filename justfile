@@ -13,6 +13,25 @@ clippy:
 test:
     cargo nextest run --workspace --locked --no-tests=warn
 
+# Commit subjects on this branch since `base` follow Conventional Commits (AGENTS.md).
+commit-check base="origin/main":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pattern='^(feat|fix|perf|refactor|test|docs|build|ci|chore|revert)(\([a-z0-9-]+\))?!?: [^A-Z].{0,70}[^.]$'
+    bad=0
+    while IFS= read -r line; do
+        subject="${line#* }"
+        case "$subject" in Merge\ *) continue ;; esac
+        if ! printf '%s' "$subject" | grep -Eq "$pattern"; then
+            echo "commit-check: ${line%% *}: $subject" >&2
+            bad=1
+        fi
+    done < <(git log --format='%h %s' "{{base}}..HEAD")
+    if [ "$bad" -ne 0 ]; then
+        echo "commit-check: subjects must be 'type(scope): summary' (see AGENTS.md)" >&2
+        exit 1
+    fi
+
 # The S3 store's HTTP clients (docs/plans/phase-1-reading.md, ruling F2 as amended):
 # each builds alone, all build together, and reqwest's own tests run (ureq's run in `test`).
 features:

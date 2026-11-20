@@ -41,8 +41,13 @@
 - `main` stays green. Work happens on a branch in a worktree under `.worktrees/<name>` (`just spawn <name>`, from the main checkout), with its own `CARGO_TARGET_DIR` left at the default inside the worktree.
 - A branch is squashed to a few logical commits and handed over with `ready to land: <branch> @<sha>`. The parent session runs `just check` and fast-forwards `main`. Never merge commits.
 - No remote is configured yet. Never add one or push.
-- Commit messages: imperative subject, a body that says why, and any `Call: <what> (why; cost if wrong)` lines for decisions made mid-task.
-- Write every commit message for an outsider who has not read the plans: say what the change does to the code or the behaviour, in plain words. No plan shorthand in the subject or body (task numbers like "task 8t" or "item 10", ruling and decision codes like P5, D7 or F1, spike or gap ids like S1 or G4, "phase 2 exit"). When the plan's reasoning matters, explain it in a sentence and point at the document by path, for example "see docs/plans/phase-3-syncing.md".
+- Commit messages follow Conventional Commits (commitizen's default format): a subject `type(scope): summary`, imperative, lower-case after the colon, at most 72 characters, no trailing period; a blank line; a body that says why; optional footers.
+  - Types: `feat` (new behaviour), `fix` (a bug), `perf`, `refactor` (no behaviour change), `test`, `docs`, `build` (dependencies, Cargo, the justfile), `ci`, `chore`, `revert`.
+  - Scope: the crate without its `lsr-` prefix (`ltx`, `wal`, `core`, `store-s3`, `store-fs`, `local`, `sqlite`, `replica`, `sim`, `compat`, `cli`, `fuzzing`), or `plan` for `docs/PLAN.md` and `docs/plans/`, or `deps`, `ci`, `lint`. Omit it only when a change spans the whole workspace.
+  - A change that breaks a public API or the replica format takes `!` after the scope and a `BREAKING CHANGE:` footer saying what breaks.
+  - Decisions made mid-task are `Call: <what> (why; cost if wrong)` footers.
+  - `just commit-check` checks the subjects of the commits on the branch.
+- Write every commit message for an outsider who has not read the plans: say what the change does to the code or the behaviour, in plain words. No plan shorthand in the subject or body (task numbers like "task 8t" or "item 10", ruling and decision codes like P5, D7 or F1, spike or gap ids like S1 or G4, "phase 2 exit"). When the plan's reasoning matters, explain it in a sentence and point at the document by path, for example "see docs/plans/phase-3-syncing.md". Example: `fix(store-s3): send the signed content length on empty uploads`.
 
 ## Done
 A task ends at a verified commit: `just check` green on the branch, tests named in the task present and passing, docs updated where behaviour is described.

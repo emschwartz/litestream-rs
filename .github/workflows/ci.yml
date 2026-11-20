@@ -18,6 +18,20 @@ jobs:
           tool: cargo-nextest,just
       - run: just check
 
+  # Commit subjects follow Conventional Commits (AGENTS.md); pull requests only,
+  # since main's history before the rule is not rewritten.
+  commit-check:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: just commit-check origin/${{ github.base_ref }}
+
   # The S3 store against a real server: MinIO in Docker, with the throwaway local credentials
   # already in scripts/minio.sh. Nothing else is configured or reachable.
   test-s3:
