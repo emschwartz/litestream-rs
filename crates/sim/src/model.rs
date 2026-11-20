@@ -172,6 +172,23 @@ pub struct SnapshotNote {
     pub at: usize,
 }
 
+/// A staged level-0 file's commit, noted when the engine staged it: a power
+/// loss lets a later commit sit at the same WAL position, so the position alone
+/// does not say which one the file holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StageNote {
+    /// The file's transaction id.
+    pub txid: Txid,
+    /// The WAL generation its range ends in.
+    pub salts: Salts,
+    /// Where its range ends.
+    pub end: u64,
+    /// The commit it holds.
+    pub commit: CommitId,
+    /// Replica tap events at the time.
+    pub at: usize,
+}
+
 /// Every commit, the local branch they sit on, and the snapshot notes.
 #[derive(Debug)]
 pub struct Model {
@@ -180,18 +197,32 @@ pub struct Model {
     lineage: Vec<CommitId>,
     branch: u32,
     notes: Vec<SnapshotNote>,
+    stages: Vec<StageNote>,
 }
 
 impl Model {
     /// A model whose database starts as `initial`, before any commit.
     #[must_use]
     pub fn new(initial: PageImage) -> Self {
+        let initial = Rc::new(initial);
+        // Commit 0 is the database before the app wrote anything: after a power
+        // loss that kept nothing, a snapshot still holds it.
+        let genesis = CommitRec {
+            id: CommitId(0),
+            image: Rc::clone(&initial),
+            salts: Salts { salt1: 0, salt2: 0 },
+            end: WalOffset::start(initial.page_size()),
+            durable: true,
+            branch: 0,
+            at: 0,
+        };
         Self {
-            initial: Rc::new(initial),
-            commits: Vec::new(),
-            lineage: Vec::new(),
+            initial,
+            commits: vec![genesis],
+            lineage: vec![CommitId(0)],
             branch: 0,
             notes: Vec::new(),
+            stages: Vec::new(),
         }
     }
 
@@ -299,6 +330,30 @@ impl Model {
     #[must_use]
     pub fn commits(&self) -> &[CommitRec] {
         &self.commits
+    }
+
+    /// Notes that the file for `txid`, whose WAL range ends at `end` in `salts`,
+    /// was staged from whichever commit sits there now.
+    pub fn note_stage(&mut self, txid: Txid, salts: Salts, end: u64, at: usize) {
+        if let Some(commit) = self.find(salts, end, usize::MAX) {
+            self.stages.push(StageNote {
+                txid,
+                salts,
+                end,
+                commit,
+                at,
+            });
+        }
+    }
+
+    /// The commit the file for `txid` held, when it was staged by `at` or before.
+    #[must_use]
+    pub fn staged_from(&self, txid: Txid, salts: Salts, end: u64, at: usize) -> Option<CommitId> {
+        self.stages
+            .iter()
+            .rev()
+            .find(|n| n.txid == txid && n.salts == salts && n.end == end && n.at <= at)
+            .map(|n| n.commit)
     }
 
     /// Notes that a snapshot ending at `txid` was built from `commit`.

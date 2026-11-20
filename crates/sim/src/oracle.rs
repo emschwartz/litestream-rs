@@ -89,7 +89,8 @@ pub enum Violation {
         /// The commit it covered later.
         second: CommitId,
     },
-    /// A later transaction id covers an earlier commit.
+    /// A later transaction id covers an earlier commit. The same commit is
+    /// allowed: a snapshot on request is a new id with nothing new in the WAL.
     #[error("transaction {lower} covers {low_commit} but {higher} covers {high_commit}")]
     CoversNotIncreasing {
         /// The smaller id.
@@ -236,11 +237,15 @@ fn covers(model: &Model, tap: &TapLog) -> Result<BTreeMap<Txid, CommitId>, Viola
             continue;
         };
         let max = key.range().max();
-        let commit = match origin {
+        // A snapshot taken against an empty WAL names the header and no frames.
+        let commit = match origin.filter(|origin| origin.size() > 0) {
             Some(origin) => {
                 let (salt1, salt2) = origin.salts();
                 let end = origin.offset().saturating_add(origin.size());
-                let found = model.find(Salts { salt1, salt2 }, end, at);
+                let salts = Salts { salt1, salt2 };
+                let found = model
+                    .staged_from(max, salts, end, at)
+                    .or_else(|| model.find(salts, end, at));
                 Some(found.ok_or_else(|| Violation::CoversMidTx {
                     key: format!("{} {}", key.level().get(), range_str(key.range())),
                 })?)
@@ -271,7 +276,7 @@ fn covers(model: &Model, tap: &TapLog) -> Result<BTreeMap<Txid, CommitId>, Viola
     if !rewound {
         let mut previous: Option<(Txid, CommitId)> = None;
         for (txid, commit) in &cover {
-            if let Some((lower, low_commit)) = previous.filter(|(_, c)| c >= commit) {
+            if let Some((lower, low_commit)) = previous.filter(|(_, c)| c > commit) {
                 return Err(Violation::CoversNotIncreasing {
                     lower: lower.get(),
                     low_commit,

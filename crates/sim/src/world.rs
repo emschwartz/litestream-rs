@@ -15,7 +15,7 @@ use lsr_core::{
     Entropy, FakeClock, FileKey, MemStore, RecordingSleeper, SeededEntropy, StoreError,
 };
 use lsr_ltx::{PageNo, PageSize, Timestamp};
-use lsr_wal::WalOffset;
+use lsr_wal::{Salts, WalOffset};
 
 use crate::exec::{Polls, RunEnd, run_until};
 use crate::model::{CommitId, Model, PageImage};
@@ -158,6 +158,7 @@ impl World {
     pub fn app_commit(&mut self, pages: &[(PageNo, Vec<u8>)], db_size: u32) -> Option<CommitId> {
         let before = self.model.tip_image().db_size();
         let app = self.sqlite.commit(pages, db_size)?;
+        self.retire_generation(app.salts);
         let mut written = pages.to_vec();
         if db_size > before {
             written.extend(self.re_added(pages, before, db_size));
@@ -166,6 +167,19 @@ impl World {
             self.model
                 .commit(&written, db_size, app, self.remote_tap.len()),
         )
+    }
+
+    /// A commit under new salts means the WAL restarted, which needs a finished
+    /// backfill: every commit before it is in the database file, synced.
+    fn retire_generation(&mut self, salts: Salts) {
+        let old = self
+            .model
+            .tip()
+            .and_then(|id| self.model.rec(id))
+            .map(|rec| rec.salts);
+        if old.is_some_and(|old| old != salts) {
+            self.model.on_checkpoint();
+        }
     }
 
     /// The pages in `after_old..=db_size` that `pages` leaves unwritten, as
@@ -192,6 +206,7 @@ impl World {
     /// takes page 1 from the rules' own image rather than guessing its bytes.
     pub fn app_shrink(&mut self, db_size: u32) -> Option<CommitId> {
         let app = self.sqlite.shrink(db_size)?;
+        self.retire_generation(app.salts);
         let size = self.sqlite.page_size();
         let image = self.sqlite.image();
         let first = image.get(..size.bytes()).unwrap_or_default().to_vec();
@@ -229,16 +244,7 @@ impl World {
     pub fn sync_model_at(&mut self, at: usize) {
         let frames = self.sqlite.mx_frame();
         let salts = self.sqlite.salts();
-        let tip_salts = self
-            .model
-            .tip()
-            .and_then(|id| self.model.rec(id))
-            .map(|rec| rec.salts);
-        // A restart needs a finished backfill, which syncs: every commit of the
-        // generation it retired is durable.
-        if tip_salts.is_some_and(|old| old != salts) {
-            self.model.on_checkpoint();
-        }
+        self.retire_generation(salts);
         if frames == 0 {
             return;
         }
@@ -254,11 +260,20 @@ impl World {
         }
     }
 
-    /// A checkpoint from outside the engine; a successful one syncs the WAL, so
-    /// every commit so far survives a power loss.
+    /// The driver starts: see `SimSqlite::start_driver`. The bump frame it may
+    /// write is a commit the app never made, which the model takes up now.
+    pub fn start_driver(&mut self) {
+        let at = self.remote_tap.len();
+        self.sqlite.start_driver();
+        self.sync_model_at(at);
+    }
+
+    /// A checkpoint from outside the engine. One that copied frames fsynced the
+    /// WAL first, so every commit so far survives a power loss; one held off by
+    /// a reader copied nothing and did not.
     pub fn stranger_checkpoint(&mut self, mode: StrangerMode) -> bool {
         let ran = self.sqlite.stranger_checkpoint(mode).is_some();
-        if ran {
+        if ran && self.sqlite.wal_synced() {
             self.model.on_checkpoint();
         }
         ran

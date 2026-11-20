@@ -516,6 +516,8 @@ pub struct TapCounts {
     /// The largest single chunk handed to `write`: what a streaming writer
     /// holds at once, whatever the object's size.
     pub max_write_bytes: u64,
+    /// Every byte handed to `write`.
+    pub written_bytes: u64,
 }
 
 #[derive(Debug, Default)]
@@ -662,6 +664,7 @@ impl<S: ObjectStore> Upload for TapUpload<S> {
             bump(&mut s.counts.writes);
             s.counts.max_upload_bytes = s.counts.max_upload_bytes.max(wrote);
             s.counts.max_write_bytes = s.counts.max_write_bytes.max(chunk_len);
+            s.counts.written_bytes = s.counts.written_bytes.saturating_add(chunk_len);
         });
         Ok(())
     }

@@ -122,6 +122,10 @@ pub struct Weights {
     pub request_snapshot: u32,
     /// [`Op::Restore`].
     pub restore: u32,
+    /// Whether a vacuum may change the page size. Off by default: maintenance
+    /// halts on a chain that spans a page-size change (`review_vacuum_resize`
+    /// in `tests/fixed_seeds.rs`).
+    pub vacuum_resizes: bool,
 }
 
 impl Default for Weights {
@@ -143,6 +147,7 @@ impl Default for Weights {
             shutdown: 1,
             request_snapshot: 1,
             restore: 2,
+            vacuum_resizes: false,
         }
     }
 }
@@ -241,7 +246,12 @@ fn store_fault(entropy: &SeededEntropy) -> Op {
     };
     let op = choose(
         entropy,
-        &[StoreOp::List, StoreOp::Read, StoreOp::Upload, StoreOp::Upload],
+        &[
+            StoreOp::List,
+            StoreOp::Read,
+            StoreOp::Upload,
+            StoreOp::Upload,
+        ],
     )
     .unwrap_or(StoreOp::Upload);
     let error = store_error(entropy, op);
@@ -293,17 +303,19 @@ fn env_fault(entropy: &SeededEntropy) -> Op {
 
 fn clock_jump(entropy: &SeededEntropy) -> Op {
     let millis = match below(entropy, 10) {
-        0 => -i64::try_from(1 + below(entropy, 60_000)).unwrap_or(-1),
+        0 => 0_i64
+            .saturating_sub(i64::try_from(below(entropy, 60_000).saturating_add(1)).unwrap_or(1)),
         1 => 93_600_000,
-        _ => i64::try_from(1 + below(entropy, 120_000)).unwrap_or(1),
+        _ => i64::try_from(below(entropy, 120_000).saturating_add(1)).unwrap_or(1),
     };
     Op::ClockJump(millis)
 }
 
-fn vacuum(entropy: &SeededEntropy) -> Op {
+fn vacuum(entropy: &SeededEntropy, resizes: bool) -> Op {
+    // The draw happens either way so a history keeps its shape across the flag.
     let page_size = match below(entropy, 3) {
-        0 => PageSize::new(1024),
-        1 => PageSize::new(2048),
+        0 if resizes => PageSize::new(1024),
+        1 if resizes => PageSize::new(2048),
         _ => None,
     };
     Op::Vacuum { page_size }
@@ -318,7 +330,7 @@ fn draw(weights: &Weights, entropy: &SeededEntropy) -> Op {
         },
         Kind::Spill => Op::Spill,
         Kind::Rollback => Op::Rollback,
-        Kind::Vacuum => vacuum(entropy),
+        Kind::Vacuum => vacuum(entropy, weights.vacuum_resizes),
         Kind::StrangerReader => Op::StrangerReader {
             begin: below(entropy, 2) == 0,
         },

@@ -19,8 +19,14 @@ fn history_is_prefix_stable() {
 #[test]
 fn histories_differ_by_seed_and_repeat_by_seed() {
     let weights = Weights::default();
-    assert_eq!(history(seed(1), 100, &weights), history(seed(1), 100, &weights));
-    assert_ne!(history(seed(1), 100, &weights), history(seed(2), 100, &weights));
+    assert_eq!(
+        history(seed(1), 100, &weights),
+        history(seed(1), 100, &weights)
+    );
+    assert_ne!(
+        history(seed(1), 100, &weights),
+        history(seed(2), 100, &weights)
+    );
 }
 
 #[test]
@@ -35,20 +41,48 @@ fn the_default_weights_favour_ticks_and_commits_over_faults() {
 }
 
 #[test]
+fn a_vacuum_changes_the_page_size_only_when_asked() {
+    let weights = Weights {
+        vacuum_resizes: true,
+        ..Weights::default()
+    };
+    let ops = history(seed(3), 20_000, &weights);
+    assert!(
+        ops.iter()
+            .any(|op| matches!(op, Op::Vacuum { page_size: Some(_) }))
+    );
+}
+
+#[test]
 fn every_kind_of_operation_appears() {
     let ops = history(seed(3), 20_000, &Weights::default());
     let has = |f: fn(&Op) -> bool| ops.iter().any(f);
     assert!(has(|op| matches!(op, Op::Spill)));
     assert!(has(|op| matches!(op, Op::Rollback)));
-    assert!(has(|op| matches!(op, Op::Vacuum { page_size: Some(_) })));
     assert!(has(|op| matches!(op, Op::Vacuum { page_size: None })));
+    assert!(!has(|op| matches!(op, Op::Vacuum { page_size: Some(_) })));
     assert!(has(|op| matches!(op, Op::StrangerReader { begin: true })));
     assert!(has(|op| matches!(op, Op::StrangerReader { begin: false })));
-    assert!(has(|op| matches!(op, Op::StrangerCheckpoint(StrangerMode::Restart))));
+    assert!(has(|op| matches!(
+        op,
+        Op::StrangerCheckpoint(StrangerMode::Restart)
+    )));
     assert!(has(|op| matches!(op, Op::Crash(CrashKind::Power))));
     assert!(has(|op| matches!(op, Op::Crash(CrashKind::Process))));
-    assert!(has(|op| matches!(op, Op::StoreFault { shape: FaultShape::ErrorAfterPublish(_), .. })));
-    assert!(has(|op| matches!(op, Op::StoreFault { shape: FaultShape::SizeMismatch, .. })));
+    assert!(has(|op| matches!(
+        op,
+        Op::StoreFault {
+            shape: FaultShape::ErrorAfterPublish(_),
+            ..
+        }
+    )));
+    assert!(has(|op| matches!(
+        op,
+        Op::StoreFault {
+            shape: FaultShape::SizeMismatch,
+            ..
+        }
+    )));
     assert!(has(|op| matches!(op, Op::EnvFault(EnvFault::DeleteWal))));
     assert!(has(|op| matches!(op, Op::EnvFault(EnvFault::WipeStaging))));
     assert!(has(|op| matches!(op, Op::EnvFault(EnvFault::Source(..)))));

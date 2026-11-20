@@ -758,6 +758,23 @@ impl SimSqlite {
         self.with(|state| state.forced = salts);
     }
 
+    /// What the driver does at process start (`db.go:1673`): a WAL under a header
+    /// gets one frame so the pin lands above mark 0, then the read transaction
+    /// that holds the WAL in place begins. Any earlier pin ended with its process.
+    pub fn start_driver(&self) {
+        self.with(|state| {
+            state.end(Conn::Ours);
+            if state.wal.len() < 32
+                && let Some(first) = PageNo::new(1, state.page_size)
+            {
+                let data = state.image_page(1);
+                let size = state.index.db_size.max(1);
+                state.write(Conn::Pool, &[(first, data)], Some(size));
+            }
+            state.begin(Conn::Ours);
+        });
+    }
+
     /// Begins our read transaction under R3; false if it is held.
     pub fn our_reader_begin(&self) -> bool {
         self.with(|state| state.begin(Conn::Ours))
@@ -1051,6 +1068,13 @@ impl SimSqlite {
     #[must_use]
     pub fn page_size(&self) -> PageSize {
         self.with(|state| state.page_size)
+    }
+
+    /// Whether a power loss now would keep the whole WAL: the last fsync came
+    /// after the last frame. A checkpoint that copied nothing does not fsync.
+    #[must_use]
+    pub fn wal_synced(&self) -> bool {
+        self.with(|state| state.durable == state.wal)
     }
 
     /// `mxFrame`.

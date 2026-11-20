@@ -29,7 +29,7 @@ fn an_image_reads_through_its_parents_and_survives_flattening() {
     assert_eq!(byte(&tip, 1), Some(99));
     assert_eq!(byte(&tip, 2), Some(5));
     assert_eq!(byte(&tip, 3), None);
-    let first = model.rec(CommitId(0)).unwrap();
+    let first = model.rec(CommitId(1)).unwrap();
     assert_eq!(byte(&first.image, 1), Some(1));
 }
 
@@ -70,8 +70,15 @@ fn a_power_loss_drops_commits_of_an_older_generation_that_were_never_synced() {
         salt2: 3,
     };
     model.on_power_loss(other, 10);
-    assert_eq!(model.tip(), None);
+    assert_eq!(model.tip(), Some(CommitId(0)));
     assert!(model.rec(c0).is_some());
+}
+
+#[test]
+fn the_database_before_any_commit_is_commit_zero() {
+    let model = Model::new(PageImage::from_bytes(ps(), &[]));
+    assert_eq!(model.tip(), Some(CommitId(0)));
+    assert_eq!(model.find(SALTS, wal_end(0).get(), usize::MAX), None);
 }
 
 #[test]
