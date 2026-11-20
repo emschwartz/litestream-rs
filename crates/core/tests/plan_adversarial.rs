@@ -151,7 +151,10 @@ mod review {
             };
             let out = plan(&inv, target);
             let ends = reachable_ends(&kept, g);
-            let want = want_end(&kept, g);
+            let want = match g {
+                G::AsOf(_) => ends.iter().max().copied(),
+                G::Latest | G::Txid(_) => want_end(&kept, g),
+            };
             // An instant before a hole: files of any stamp lie past the end and
             // none of them starts at or before one past it.
             let before_a_hole = |w: u64| {

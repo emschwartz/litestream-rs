@@ -327,20 +327,6 @@ fn go_restores_rust_chain_as_of() {
             }
             (Err(RestoreError::NoPlan(no)), GoRestore::Refused { .. })
                 if matches!(no.outcome(), PlanOutcome::NoSnapshot { .. }) => {}
-            // Retention removed the level-0 files an as-of plan would need, so Rust refuses
-            // with a gap (safe) where Go restores an older state: that state must still be
-            // one the source really had.
-            (Err(RestoreError::NoPlan(no)), GoRestore::Restored)
-                if matches!(no.outcome(), PlanOutcome::Gap { .. }) =>
-            {
-                assert!(
-                    written
-                        .points
-                        .iter()
-                        .any(|p| p.page_hashes == restored_pages(&go_out)),
-                    "{label}: Go restored a state the source never had"
-                );
-            }
             other => panic!("{label}: Rust and Go disagree: {other:?}"),
         }
     }
