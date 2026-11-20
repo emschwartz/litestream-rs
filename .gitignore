@@ -1,6 +1,7 @@
 /target
 /.upstream
 /.worktrees
+/.claude/worktrees
 /fuzz/target
 /fuzz/artifacts
 /fuzz/coverage
