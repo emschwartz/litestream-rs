@@ -20,6 +20,7 @@ md-5 = { version = "0.11", default-features = false }
 percent-encoding = "2"
 rusty-s3 = { version = "0.11", default-features = false, features = ["rustcrypto", "full"] }
 thiserror = "2"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 url = "2"
 zeroize = "1"
 

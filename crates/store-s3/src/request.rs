@@ -300,6 +300,27 @@ impl RequestBuilder {
         Ok(Self::finish(Method::Get, signed, Vec::new(), None))
     }
 
+    /// The next page of a listing: `token` is the previous page's
+    /// `NextContinuationToken`. It carries no `start-after`: the token already
+    /// holds the position.
+    ///
+    /// # Errors
+    /// [`RequestError::ClockOutOfRange`].
+    pub fn list_continue(
+        &self,
+        now: Timestamp,
+        level: Level,
+        token: &str,
+        max_keys: PageLimit,
+    ) -> Result<HttpRequest, RequestError> {
+        let mut action = self.bucket.list_objects_v2(Some(&self.credentials));
+        action.with_prefix(level_prefix(&self.prefix, level));
+        action.with_max_keys(max_keys.get());
+        action.with_continuation_token(token);
+        let signed = self.sign(&mut action, now, Vec::new())?;
+        Ok(Self::finish(Method::Get, signed, Vec::new(), None))
+    }
+
     /// HEAD of one object: its size and stored stamp.
     ///
     /// # Errors

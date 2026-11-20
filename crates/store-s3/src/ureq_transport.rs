@@ -1,0 +1,226 @@
+//! The blocking HTTP client behind [`Transport`]: one [`ureq::Agent`].
+//!
+//! Policy lives in the agent's configuration, not in calls: a non-2xx status
+//! is a response (classification belongs to [`classify`](crate::classify)),
+//! redirects are not followed (a redirect from a presigned URL is a
+//! misconfigured endpoint, and the retry layers decide what to do), nothing is
+//! retried, and [`timeout_global`] bounds each request end to end. TLS is
+//! rustls with Mozilla's roots (ruling F4); ureq speaks HTTP/1.1 only.
+//!
+//! Response bodies are read whole but bounded: a body over [`MAX_BODY`] is an
+//! error, so a server that ignores a Range header cannot make a read allocate
+//! an object's size.
+
+use std::io;
+use std::time::Duration;
+
+use ureq::http;
+
+use crate::request::{HttpRequest, Method};
+use crate::transport::{HttpResponse, Transport, TransportError};
+
+/// The largest response body read: twice the largest ranged read (a test pins
+/// the relation), which is room for a listing page or a delete result and no more.
+const MAX_BODY: u64 = 33_554_432;
+
+/// A [`Transport`] over one shared connection pool.
+#[derive(Clone)]
+pub struct UreqTransport {
+    agent: ureq::Agent,
+}
+
+impl std::fmt::Debug for UreqTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UreqTransport").finish_non_exhaustive()
+    }
+}
+
+impl UreqTransport {
+    /// A client whose every request fails as [`TransportError::Timeout`] after
+    /// `deadline`.
+    #[must_use]
+    pub fn new(deadline: Duration) -> Self {
+        let config = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .max_redirects(0)
+            .max_redirects_will_error(false)
+            .timeout_global(Some(deadline))
+            .build();
+        Self {
+            agent: ureq::Agent::new_with_config(config),
+        }
+    }
+
+    fn build(request: &HttpRequest) -> Result<http::Request<Vec<u8>>, TransportError> {
+        let mut builder = http::Request::builder()
+            .method(method_name(request.method()))
+            .uri(request.url().as_str());
+        for (name, value) in request.headers() {
+            // ureq frames the body from its length, which is the value that was signed.
+            if *name != "content-length" {
+                builder = builder.header(*name, value.as_str());
+            }
+        }
+        builder
+            .body(request.body().to_vec())
+            .map_err(|_malformed| TransportError::Io(io::ErrorKind::InvalidInput))
+    }
+}
+
+fn method_name(method: Method) -> &'static str {
+    match method {
+        Method::Get => "GET",
+        Method::Head => "HEAD",
+        Method::Put => "PUT",
+        Method::Post => "POST",
+        Method::Delete => "DELETE",
+    }
+}
+
+impl Transport for UreqTransport {
+    fn send(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
+        let head_only = request.method() == Method::Head;
+        let mut response = self
+            .agent
+            .run(Self::build(&request)?)
+            .map_err(|err| map_error(&err))?;
+        let status = response.status().as_u16();
+        let headers: Vec<(String, String)> = response
+            .headers()
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.as_str().to_owned(),
+                    String::from_utf8_lossy(value.as_bytes()).into_owned(),
+                )
+            })
+            .collect();
+        let body = response
+            .body_mut()
+            .with_config()
+            .limit(MAX_BODY)
+            .read_to_vec()
+            .map_err(|err| map_error(&err))?;
+        let declared = headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, value)| value.trim().parse::<u64>().ok());
+        let complete = head_only || declared.is_none_or(|n| u64::try_from(body.len()) == Ok(n));
+        Ok(HttpResponse::new(status, headers, body, complete))
+    }
+}
+
+/// Maps a ureq failure to a kind; the error's own text can carry the URL.
+/// `ureq::Error` is non-exhaustive, so this tests variants instead of matching
+/// them: anything unrecognised is an opaque I/O failure.
+fn map_error(err: &ureq::Error) -> TransportError {
+    if matches!(err, ureq::Error::Timeout(_)) {
+        TransportError::Timeout
+    } else if matches!(
+        err,
+        ureq::Error::HostNotFound | ureq::Error::ConnectionFailed
+    ) {
+        TransportError::Connect
+    } else if matches!(err, ureq::Error::Tls(_) | ureq::Error::Rustls(_)) {
+        TransportError::Tls
+    } else if let ureq::Error::Io(io_err) = err {
+        map_io(io_err.kind())
+    } else if matches!(err, ureq::Error::BodyExceedsLimit(_)) {
+        TransportError::Io(io::ErrorKind::InvalidData)
+    } else {
+        TransportError::Io(io::ErrorKind::Other)
+    }
+}
+
+fn map_io(kind: io::ErrorKind) -> TransportError {
+    if matches!(kind, io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock) {
+        TransportError::Timeout
+    } else if matches!(
+        kind,
+        io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::BrokenPipe
+            | io::ErrorKind::UnexpectedEof
+    ) {
+        TransportError::ConnectionReset
+    } else if matches!(
+        kind,
+        io::ErrorKind::ConnectionRefused
+            | io::ErrorKind::NotConnected
+            | io::ErrorKind::AddrNotAvailable
+    ) {
+        TransportError::Connect
+    } else {
+        TransportError::Io(kind)
+    }
+}
+#[cfg(test)]
+mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    use lsr_core::ReadLen;
+
+    use super::*;
+
+    #[test]
+    fn body_cap_is_twice_the_largest_read() {
+        assert_eq!(MAX_BODY, 2 * u64::from(ReadLen::MAX_RAW));
+    }
+
+    #[test]
+    fn io_kinds_map_to_transport_kinds() {
+        assert_eq!(map_io(io::ErrorKind::TimedOut), TransportError::Timeout);
+        assert_eq!(
+            map_io(io::ErrorKind::BrokenPipe),
+            TransportError::ConnectionReset
+        );
+        assert_eq!(
+            map_io(io::ErrorKind::ConnectionRefused),
+            TransportError::Connect
+        );
+        assert_eq!(
+            map_io(io::ErrorKind::PermissionDenied),
+            TransportError::Io(io::ErrorKind::PermissionDenied)
+        );
+    }
+
+    fn serve_once(reply: &'static [u8]) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buf = [0_u8; 2048];
+            let _read = stream.read(&mut buf);
+            let _wrote = stream.write_all(reply);
+        });
+        format!("http://{addr}/")
+    }
+
+    fn status_of(url: &str) -> Result<u16, TransportError> {
+        let transport = UreqTransport::new(Duration::from_secs(5));
+        let request = http::Request::builder()
+            .uri(url)
+            .body(Vec::new())
+            .map_err(|_bad| TransportError::Io(io::ErrorKind::InvalidInput))?;
+        let response = transport
+            .agent
+            .run(request)
+            .map_err(|err| map_error(&err))?;
+        Ok(response.status().as_u16())
+    }
+
+    #[test]
+    fn a_redirect_is_a_response_not_followed() {
+        let url = serve_once(
+            b"HTTP/1.1 302 Found\r\nlocation: http://127.0.0.1:1/\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+        );
+        assert_eq!(status_of(&url), Ok(302));
+    }
+
+    #[test]
+    fn a_connection_closed_early_is_an_error() {
+        assert_ne!(status_of(&serve_once(b"")), Ok(200));
+    }
+}
