@@ -1,0 +1,19 @@
+[package]
+name = "lsr-store-fs"
+version = "0.0.0"
+description = "ObjectStore on a directory laid out as Litestream's file replica."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lsr-core = { path = "../core" }
+lsr-ltx = { path = "../ltx" }
+
+[dev-dependencies]
+lsr-core = { path = "../core", features = ["testing"] }
+tempfile = "3"
+
+[lints]
+workspace = true
