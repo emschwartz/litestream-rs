@@ -3,7 +3,7 @@
 //! Every test needs `LSR_MINIO_ENDPOINT` (`http://127.0.0.1:9000`, set by the
 //! recipe) and skips with a message when it is unset, so `just check` never
 //! needs Docker. The server, its pinned image and its throwaway credentials
-//! live in `scripts/minio.sh`; the credential defaults in `common/real.rs` repeat that script
+//! live in `scripts/minio.sh`; the credential defaults in `server()` repeat that script
 //! and can be overridden with `LSR_MINIO_ACCESS_KEY` and `LSR_MINIO_SECRET_KEY`.
 //! Each test works under its own prefix in the shared bucket, so tests run in
 //! parallel and a rerun never sees an earlier run's objects. The cases every
@@ -24,8 +24,23 @@ mod minio {
 
     use crate::real::{RealHarness, Server, WallClock};
 
+    /// The local MinIO of scripts/minio.sh, or None when no endpoint is set.
+    fn server() -> Option<Server> {
+        let endpoint = std::env::var("LSR_MINIO_ENDPOINT").ok()?;
+        Some(Server {
+            name: "minio",
+            endpoint,
+            bucket: "lsr-test".into(),
+            region: "us-east-1".into(),
+            access: std::env::var("LSR_MINIO_ACCESS_KEY").unwrap_or_else(|_| "lsrtestroot".into()),
+            secret: std::env::var("LSR_MINIO_SECRET_KEY")
+                .unwrap_or_else(|_| "lsrtest-throwaway-0000".into()),
+            root: None,
+        })
+    }
+
     fn connect() -> Option<RealHarness> {
-        let Some(server) = Server::minio() else {
+        let Some(server) = server() else {
             eprintln!("skipped: set LSR_MINIO_ENDPOINT (just minio-up)");
             return None;
         };
