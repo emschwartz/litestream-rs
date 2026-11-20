@@ -197,13 +197,14 @@ fn clock_steps_back_10s() {
     run(scenario::clock_steps_back_10s);
 }
 
-// Finding against core: after the lost delete and the power loss, the next boot
-// halts with RemoteCorrupt instead of repairing level 1.
-// Replay: just sim-replay 0x0000000000000006 17
 #[test]
-#[ignore = "review: boot halts RemoteCorrupt on a wrong-bytes right-size level 1 object"]
 fn corrupt_l1_publish_then_power_loss() {
     run(scenario::corrupt_l1_publish_then_power_loss);
+}
+
+#[test]
+fn corrupt_l2_publish_then_power_loss() {
+    run(scenario::corrupt_l2_publish_then_power_loss);
 }
 
 #[test]

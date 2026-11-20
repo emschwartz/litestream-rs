@@ -17,7 +17,8 @@
 //! 3. Prune staged level-0 files the replica's level 1 covers, keeping the
 //!    tip.
 //! 4. Maintenance, only once uploads are idle, so a snapshot's last
-//!    transaction is at most what was published.
+//!    transaction is at most what was published. Its first listing after a
+//!    boot is read back first: the newest file of each level must verify.
 //!
 //! Every failure becomes a [`Fault`] and goes through [`policy`] once, in
 //! [`Actor::fault`]. A retry waits on its own lane; the others keep running.
@@ -44,7 +45,8 @@ use crate::fault::{Clamped, Fault, HaltCause, Next, Policy, SnapshotCause, backo
 use crate::inventory::Inventory;
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::maintain::{
-    Due, Hold, Job, MAX_DELETE, MaintainError, Maintenance, Outcome, due, run_compact, run_delete,
+    Due, Hold, Job, MAX_DELETE, MaintainError, Maintenance, Outcome, ReadBack, due, read_back,
+    run_compact, run_delete,
 };
 use crate::position::{Continuity, Position, SyncedThrough};
 use crate::recover::{
@@ -104,6 +106,9 @@ pub enum MaintainedEvent {
     Deleted(usize),
     /// An input vanished: the next tick lists and plans again.
     Replan,
+    /// The read-back after a boot found this file does not verify and deleted
+    /// it: the replica's other files still restore its last transaction.
+    Repaired(FileKey),
     /// Nothing is due.
     Waiting {
         /// Why deletions are refused, if they are.
@@ -975,6 +980,11 @@ impl Actor {
             Ok(inventory) => inventory,
             Err(err) => return Some(self.fault(Lane::Maintain, inventory_fault(&err), now)),
         };
+        if self.maintain.read_back_owed
+            && let Some(tick) = self.read_back_unit(env.remote, &inventory, now).await
+        {
+            return Some(tick);
+        }
         let published = self.upload.confirmed();
         let decided = {
             let (cfg, state) = (&self.cfg.maintenance, &mut self.maintain.state);
@@ -1007,6 +1017,38 @@ impl Actor {
                 Some(self.run_job(env, &job, now, stamps_read).await)
             }
         }
+    }
+
+    /// The read-back a boot owes (see `maintain::audit`). `None` when every
+    /// newest file is sound: the same listing then plans the next job.
+    async fn read_back_unit<R: ObjectStore>(
+        &mut self,
+        remote: &R,
+        inventory: &Inventory,
+        now: Timestamp,
+    ) -> Option<Tick> {
+        let key = match read_back(remote, inventory).await {
+            Ok(ReadBack::Sound) => {
+                self.maintain.read_back_owed = false;
+                return None;
+            }
+            Ok(ReadBack::Rotten { key, covered: true }) => key,
+            Ok(ReadBack::Rotten { covered: false, .. }) => {
+                return Some(self.fault(Lane::Maintain, Fault::RemoteCorrupt, now));
+            }
+            Err(fault) => return Some(self.fault(Lane::Maintain, fault, now)),
+        };
+        if let Err(err) = remote.delete(&[key]).await {
+            return Some(self.fault(Lane::Maintain, Fault::from_remote(&err), now));
+        }
+        // The listing no longer holds: the next tick lists and reads back again.
+        self.maintain.stale = true;
+        self.lanes.get_mut(Lane::Maintain).succeed();
+        let event = Event::Maintained {
+            event: MaintainedEvent::Repaired(key),
+            stamps_read: 0,
+        };
+        Some(self.ran(event, now))
     }
 
     async fn run_job<

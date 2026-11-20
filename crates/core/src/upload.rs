@@ -337,27 +337,42 @@ async fn same_bytes<L: ObjectStore, S: ObjectStore>(
 /// Reads the replica's object through the LTX decoder. It must verify whole and
 /// name exactly `key`; anything else is a corrupt replica.
 async fn remote_decodes<S: ObjectStore>(remote: &S, key: &FileKey) -> Result<(), Fault> {
-    decodes(remote, key, Fault::from_remote, Fault::RemoteCorrupt).await
+    if remote_verifies(remote, key).await? {
+        Ok(())
+    } else {
+        Err(Fault::RemoteCorrupt)
+    }
+}
+
+/// Whether the replica's object `key` verifies whole and names exactly `key`.
+///
+/// # Errors
+/// The replica's fault when a read fails: that says nothing about the bytes.
+pub(crate) async fn remote_verifies<S: ObjectStore>(
+    remote: &S,
+    key: &FileKey,
+) -> Result<bool, Fault> {
+    decodes(remote, key, Fault::from_remote).await
 }
 
 /// Whether the staged file `key` verifies whole and names exactly `key`.
 /// A missing or unusable one does not; any other store error is the fault.
 async fn staged_verifies<L: ObjectStore>(staging: &L, key: &FileKey) -> Result<bool, Fault> {
-    match decodes(staging, key, Fault::from_staging, Fault::StagedLost).await {
-        Ok(()) => Ok(true),
+    match decodes(staging, key, Fault::from_staging).await {
+        Ok(verifies) => Ok(verifies),
         Err(Fault::StagedLost) => Ok(false),
         Err(fault) => Err(fault),
     }
 }
 
-/// Streams `key` through the LTX decoder: `store_fault` names a store error,
-/// `corrupt` is what bytes that do not verify, or name another key, are.
+/// Streams `key` through the LTX decoder and says whether it verifies whole
+/// and names exactly `key`. `store_fault` names a store error, which is never
+/// a verdict on the bytes.
 async fn decodes<S: ObjectStore>(
     store: &S,
     key: &FileKey,
     store_fault: fn(&StoreError) -> Fault,
-    corrupt: Fault,
-) -> Result<(), Fault> {
+) -> Result<bool, Fault> {
     let len = ReadLen::new(CHUNK).ok_or(Fault::Bug)?;
     let mut decoder = Decoder::new();
     let mut offset = 0_u64;
@@ -366,19 +381,18 @@ async fn decodes<S: ObjectStore>(
             .read(key, offset, len)
             .await
             .map_err(|err| store_fault(&err))?;
-        feed_all(&mut decoder, &chunk, corrupt)?;
+        if !feed_all(&mut decoder, &chunk)? {
+            return Ok(false);
+        }
         let read = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
         offset = offset.saturating_add(read);
         if read < len.get() {
             break;
         }
     }
-    let verified = decoder.finish().map_err(|_undecodable| corrupt)?;
-    if verified.header().txids() == key.range() {
-        Ok(())
-    } else {
-        Err(corrupt)
-    }
+    Ok(decoder
+        .finish()
+        .is_ok_and(|verified| verified.header().txids() == key.range()))
 }
 
 /// The staged level-0 files whose last transaction is at least `from`
@@ -516,17 +530,19 @@ fn commit_failed(fault: Fault) -> PutError {
     }
 }
 
-/// Feeds a chunk to the decoder; bytes it refuses are `corrupt`.
-fn feed_all(decoder: &mut Decoder, chunk: &[u8], corrupt: Fault) -> Result<(), Fault> {
+/// Feeds a chunk to the decoder; `false` when it refuses the bytes.
+fn feed_all(decoder: &mut Decoder, chunk: &[u8]) -> Result<bool, Fault> {
     let mut rest = chunk;
     while !rest.is_empty() {
-        let (used, _) = decoder.feed(rest).map_err(|_undecodable| corrupt)?;
+        let Ok((used, _)) = decoder.feed(rest) else {
+            return Ok(false);
+        };
         if used == 0 {
             return Err(Fault::Bug);
         }
         rest = rest.get(used..).unwrap_or_default();
     }
-    Ok(())
+    Ok(true)
 }
 
 fn names_key(header: &Header, key: &FileKey) -> Result<(), PutError> {
@@ -555,7 +571,9 @@ async fn copy_verified<L: ObjectStore, S: ObjectStore>(
             .read(key, offset, len)
             .await
             .map_err(|err| PutError::Before(Fault::from_staging(&err)))?;
-        feed_all(&mut decoder, &chunk, Fault::StagedLost).map_err(PutError::Before)?;
+        if !feed_all(&mut decoder, &chunk).map_err(PutError::Before)? {
+            return Err(PutError::Before(Fault::StagedLost));
+        }
         let read = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
         offset = offset.saturating_add(read);
         let header = decoder.header().copied();

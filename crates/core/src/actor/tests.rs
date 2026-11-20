@@ -16,6 +16,8 @@ use crate::restore::{MemSink, restore};
 use crate::source::{CheckpointCall, FakeCheckpointer, FakeDb, FakeWal, SourceError, SourceOp};
 use crate::store::{Listing, PageLimit, ReadLen, StoreError, StoreOp, Upload};
 
+mod audit;
+
 const PS: PageSize = PageSize::MIN;
 const T0: i64 = 1_000_000;
 
@@ -36,6 +38,7 @@ fn ts(n: i64) -> Timestamp {
 struct Counting {
     inner: MemStore,
     calls: Arc<AtomicU32>,
+    reads: Arc<std::sync::Mutex<Vec<FileKey>>>,
 }
 
 impl Counting {
@@ -45,6 +48,12 @@ impl Counting {
 
     fn count(&self) {
         self.calls.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// How often `key`'s bytes were read from their start.
+    fn reads_of(&self, key: &FileKey) -> usize {
+        let reads = self.reads.lock().unwrap();
+        reads.iter().filter(|read| *read == key).count()
     }
 }
 
@@ -68,6 +77,9 @@ impl ObjectStore for Counting {
         len: ReadLen,
     ) -> impl Future<Output = Result<Vec<u8>, StoreError>> + Send {
         self.count();
+        if offset == 0 {
+            self.reads.lock().unwrap().push(*key);
+        }
         self.inner.read(key, offset, len)
     }
 
@@ -85,6 +97,7 @@ impl ObjectStore for Counting {
         len: ReadLen,
     ) -> impl Future<Output = Result<(Vec<u8>, StoredStamp), StoreError>> + Send {
         self.count();
+        self.reads.lock().unwrap().push(file.key);
         self.inner.read_with_stamp(file, len)
     }
 
@@ -1044,7 +1057,7 @@ impl Rig {
         let mut rig = Self::new();
         rig.remote = Counting {
             inner: MemStore::with_listed_last_modified(),
-            calls: Arc::default(),
+            ..Counting::default()
         };
         rig
     }

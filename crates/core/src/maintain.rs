@@ -34,6 +34,11 @@
 //! When the source has nothing above the destination the level is idle: no
 //! write, no job, no wake time.
 //!
+//! The first listing after a boot is read back before anything is planned
+//! from it (`audit`): the newest file of each level above 0 must verify, so
+//! an output that a crashed process published with wrong bytes is neither an
+//! input nor cover.
+//!
 //! Deletes come last: when no compaction or snapshot is ready, `retain` plans
 //! one delete job against a listing that already holds the newest coverage, or
 //! says why it refuses (`Due::Wait { held }`).
@@ -44,6 +49,7 @@
 //! there and the output is either visible or absent. Deletion is a separate
 //! [`DeleteJob`], built by retention.
 
+mod audit;
 mod config;
 mod retain;
 mod state;
@@ -61,6 +67,10 @@ use retain::{Retention, retention};
 
 pub use config::{ConfigError, Interval, IntervalError, L0Retention, Maintenance, Setting};
 pub use state::MaintainState;
+
+#[cfg(test)]
+pub(crate) use audit::restores_without;
+pub(crate) use audit::{ReadBack, read_back};
 
 #[cfg(test)]
 #[expect(

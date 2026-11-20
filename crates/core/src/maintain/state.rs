@@ -20,9 +20,9 @@
 //! for that reason; see `retain`.)
 //!
 //! None of it survives a restart. That is safe for backoff (one extra
-//! attempt). For a distrusted
-//! key it is the open case recorded in the plan: a crash between a corrupt
-//! publish and its delete forgets the key.
+//! attempt). A distrusted key forgotten by a crash between the corrupt publish
+//! and its delete is found again by the read-back the next boot owes
+//! (`audit`), before anything is planned from the listing.
 
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;

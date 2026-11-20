@@ -7,7 +7,7 @@
 //! arm per [`SnapshotCause`] and no wildcard: a new cause does not compile
 //! until it names its scenarios.
 
-use lsr_core::{CheckpointMode, HaltCause, SnapshotCause};
+use lsr_core::{CheckpointMode, HaltCause, Level, MaintainedEvent, SnapshotCause};
 use lsr_ltx::PageSize;
 
 use crate::generate::{EnvFault, MetaOp, Op, WalOp};
@@ -77,6 +77,9 @@ pub enum EventMatch {
     Retrying(FaultKind),
     /// The clock read earlier than the last time used and was clamped.
     Clamped,
+    /// The read-back after a boot deleted a file of this level that did not
+    /// verify.
+    Repaired(Level),
 }
 
 /// A judgment of a whole run that the expectations cannot make.
@@ -114,6 +117,13 @@ impl Expect {
                 Seen::Event(Event::Retrying { fault, .. }),
             ) => FaultKind::from(fault) == *want,
             (Self::Event(EventMatch::Clamped), Seen::Event(Event::Clamped(_))) => true,
+            (
+                Self::Event(EventMatch::Repaired(want)),
+                Seen::Event(Event::Maintained {
+                    event: MaintainedEvent::Repaired(key),
+                    ..
+                }),
+            ) => key.level() == *want,
             (Self::Halt(want), Seen::Halt(got)) => want == got,
             (Self::Oracle, Seen::Oracle) => true,
             (Self::Event(_) | Self::Halt(_) | Self::Oracle, _) => false,
