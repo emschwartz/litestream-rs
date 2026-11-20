@@ -3,36 +3,45 @@
 //! Today that is [FileSink], where a restore builds its database. Phase 2 adds
 //! the meta directory and WAL reading here.
 //!
-//! A restore writes a scratch file next to the target, never the target. Only
+//! A restore writes a scratch file `<target>.restore` next to the target,
+//! never the target. [FileSink::create] opens it without truncating, takes an
+//! exclusive advisory lock, then truncates: two restores of one target cannot
+//! interleave, and a scratch left by a crashed restore (the lock died with its
+//! process) is reclaimed instead of lingering at up to the database's size.
+//!
+//! Sidecars: SQLite replays a stale `<target>-wal` and treats a stale
+//! `<target>-journal` as a hot journal, either of which corrupts the restored
+//! pages on first open. A restore never deletes a file it does not own, so
+//! [FileSink::create] refuses while any of the three sidecars exists, and the
+//! caller clears them first with [clear_sidecars] (the normal path: a database
+//! deleted under SQLITE_FCNTL_PERSIST_WAL leaves its `-wal` behind).
+//!
 //! [FileSink::publish] makes the database visible, in this order: fsync the
-//! scratch file; check the target is still absent; remove a stale
-//! `<target>-wal` and `<target>-shm` (SQLite would replay a stale WAL over
-//! the restored pages); hard-link the scratch to the target, which fails when
-//! the target exists, so a database created meanwhile is never overwritten;
-//! unlink the scratch; fsync the directory. A step that fails after the link
-//! unlinks the target again, so an error always means "not published". An
-//! fsync is never retried: after a failed fsync the kernel may have dropped the
-//! dirty pages, and a second one would report success over lost data.
+//! scratch; check the target and all three sidecars are still absent (else
+//! `AlreadyExists` naming the path, nothing touched); hard-link the scratch to
+//! the target, which fails when the target exists, so a database a rival
+//! created meanwhile is never overwritten; fsync the directory; unlink the
+//! scratch; fsync the directory. Nothing but the sink's own scratch is ever
+//! removed. A step that fails after the link leaves the target in place with
+//! its data already fsynced; the error says durability of the name is unknown.
+//! An fsync is never retried: after a failed fsync the kernel may have dropped
+//! the dirty pages, and a second one would report success over lost data.
 //!
 //! The hard link needs a filesystem that supports them (every Unix one a
 //! database lives on does).
 
 use std::ffi::OsString;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::process;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use lsr_core::DatabaseSink;
 use lsr_ltx::{Checksum, PageNo, PageSize};
 use thiserror::Error;
 
-/// Scratch names tried before giving up: a name can only collide with a file a
-/// crashed process of the same pid left behind.
-const SCRATCH_TRIES: u32 = 8;
-
-static SCRATCH_COUNTER: AtomicU64 = AtomicU64::new(0);
+/// The files SQLite keeps beside a database that must not outlive it.
+const SIDECAR_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
 
 /// Why a [FileSink] could not be created.
 #[derive(Debug, Error)]
@@ -40,10 +49,21 @@ pub enum CreateError {
     /// The target path exists. A restore never overwrites a database.
     #[error("{} already exists; a restore never overwrites a database", .0.display())]
     TargetExists(PathBuf),
-    /// The target path could not be inspected.
+    /// A `-wal`, `-shm` or `-journal` file exists beside the absent target;
+    /// SQLite would replay it over the restored database. Call
+    /// [clear_sidecars] first if it is known stale.
+    #[error("{} exists beside the restore target; clear it with clear_sidecars first", path.display())]
+    Sidecar {
+        /// The sidecar.
+        path: PathBuf,
+    },
+    /// Another restore of this target holds the scratch file.
+    #[error("another restore of this target is running ({})", .0.display())]
+    RestoreInProgress(PathBuf),
+    /// A path could not be inspected.
     #[error("inspecting {}: {source}", path.display())]
     Inspect {
-        /// The target.
+        /// The path.
         path: PathBuf,
         /// The I/O error.
         source: io::Error,
@@ -52,6 +72,22 @@ pub enum CreateError {
     #[error("creating scratch file {}: {source}", path.display())]
     Scratch {
         /// The scratch path.
+        path: PathBuf,
+        /// The I/O error.
+        source: io::Error,
+    },
+}
+
+/// Why [clear_sidecars] failed.
+#[derive(Debug, Error)]
+pub enum ClearError {
+    /// The target exists: its sidecars belong to a live database.
+    #[error("{} exists; its sidecars are not stale", .0.display())]
+    TargetExists(PathBuf),
+    /// A path could not be inspected or removed.
+    #[error("{}: {source}", path.display())]
+    Io {
+        /// The path.
         path: PathBuf,
         /// The I/O error.
         source: io::Error,
@@ -73,6 +109,10 @@ fn suffixed(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
+fn sidecars(target: &Path) -> [PathBuf; 3] {
+    SIDECAR_SUFFIXES.map(|suffix| suffixed(target, suffix))
+}
+
 fn exists(path: &Path) -> io::Result<bool> {
     match path.symlink_metadata() {
         Ok(_) => Ok(true),
@@ -81,58 +121,96 @@ fn exists(path: &Path) -> io::Result<bool> {
     }
 }
 
-fn remove_if_present(path: &Path) -> io::Result<()> {
-    match fs::remove_file(path) {
-        Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err),
-        Ok(()) | Err(_) => Ok(()),
+/// Removes the stale `-wal`, `-shm` and `-journal` files beside an absent
+/// target, fsyncs the directory, and returns what it removed. The caller
+/// decides to call this before a restore starts; publish never deletes.
+///
+/// # Errors
+/// [ClearError::TargetExists] when the target exists; otherwise the failing
+/// removal or fsync.
+pub fn clear_sidecars(target: &Path) -> Result<Vec<PathBuf>, ClearError> {
+    let io_at = |path: &Path| {
+        let path = path.to_path_buf();
+        move |source| ClearError::Io { path, source }
+    };
+    if exists(target).map_err(io_at(target))? {
+        return Err(ClearError::TargetExists(target.to_path_buf()));
     }
+    let mut removed = Vec::new();
+    for path in sidecars(target) {
+        match fs::remove_file(&path) {
+            Ok(()) => removed.push(path),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(io_at(&path)(err)),
+        }
+    }
+    sync_dir(target).map_err(io_at(target))?;
+    Ok(removed)
+}
+
+/// The first of the target and its sidecars that exists.
+fn first_present(target: &Path) -> io::Result<Option<PathBuf>> {
+    for path in std::iter::once(target.to_path_buf()).chain(sidecars(target)) {
+        if exists(&path)? {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
 }
 
 impl FileSink {
-    /// Starts a restore of [target]: creates the scratch file
-    /// `<target>.<pid>-<n>.restore` exclusively. Nothing exists at [target] yet.
+    /// Starts a restore of [target]: opens and locks the scratch file
+    /// `<target>.restore`, empty. Nothing exists at [target] or its sidecars.
     ///
     /// # Errors
-    /// [CreateError::TargetExists] when anything is at [target].
+    /// [CreateError::TargetExists], [CreateError::Sidecar],
+    /// [CreateError::RestoreInProgress], or the I/O failure.
     pub fn create(target: &Path) -> Result<Self, CreateError> {
-        let inspect = |source| CreateError::Inspect {
-            path: target.to_path_buf(),
-            source,
+        let inspect = |path: &Path| {
+            let path = path.to_path_buf();
+            move |source| CreateError::Inspect { path, source }
         };
-        if exists(target).map_err(inspect)? {
+        if exists(target).map_err(inspect(target))? {
             return Err(CreateError::TargetExists(target.to_path_buf()));
         }
-        let mut tries = 1_u32;
-        loop {
-            let n = SCRATCH_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let scratch = suffixed(target, &format!(".{}-{n}.restore", process::id()));
-            let opened = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create_new(true)
-                .open(&scratch);
-            match opened {
-                Ok(file) => {
-                    return Ok(Self {
-                        file,
-                        scratch,
-                        target: target.to_path_buf(),
-                        published: false,
-                    });
-                }
-                Err(source)
-                    if source.kind() == io::ErrorKind::AlreadyExists && tries < SCRATCH_TRIES =>
-                {
-                    tries = tries.saturating_add(1);
-                }
-                Err(source) => {
-                    return Err(CreateError::Scratch {
-                        path: scratch,
-                        source,
-                    });
-                }
+        for path in sidecars(target) {
+            if exists(&path).map_err(inspect(&path))? {
+                return Err(CreateError::Sidecar { path });
             }
         }
+        let scratch = suffixed(target, ".restore");
+        let scratch_fault = |source| CreateError::Scratch {
+            path: scratch.clone(),
+            source,
+        };
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&scratch)
+            .map_err(scratch_fault)?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => return Err(CreateError::RestoreInProgress(scratch)),
+            Err(TryLockError::Error(source)) => return Err(scratch_fault(source)),
+        }
+        // The lock holder before us may have removed the name while we waited
+        // to open it; a file that is no longer the scratch is not ours to use.
+        let same = fs::metadata(&scratch).is_ok_and(|named| {
+            file.metadata()
+                .is_ok_and(|held| named.dev() == held.dev() && named.ino() == held.ino())
+        });
+        if !same {
+            return Err(CreateError::RestoreInProgress(scratch));
+        }
+        file.set_len(0).map_err(scratch_fault)?;
+        Ok(Self {
+            file,
+            scratch,
+            target: target.to_path_buf(),
+            published: false,
+        })
     }
 
     /// The scratch file's path, for diagnostics.
@@ -143,12 +221,9 @@ impl FileSink {
 
     fn link_and_sync(&self) -> io::Result<()> {
         fs::hard_link(&self.scratch, &self.target)?;
-        let finished = fs::remove_file(&self.scratch).and_then(|()| sync_dir(&self.target));
-        if finished.is_err() {
-            // The target is ours: the link succeeded only because it was absent.
-            drop(fs::remove_file(&self.target));
-        }
-        finished
+        sync_dir(&self.target)?;
+        fs::remove_file(&self.scratch)?;
+        sync_dir(&self.target)
     }
 }
 
@@ -200,14 +275,12 @@ impl DatabaseSink for FileSink {
 
     fn publish(mut self) -> io::Result<()> {
         self.file.sync_all()?;
-        if exists(&self.target)? {
+        if let Some(path) = first_present(&self.target)? {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
-                "the target appeared during the restore",
+                format!("{} appeared during the restore", path.display()),
             ));
         }
-        remove_if_present(&suffixed(&self.target, "-wal"))?;
-        remove_if_present(&suffixed(&self.target, "-shm"))?;
         self.link_and_sync()?;
         self.published = true;
         Ok(())
@@ -272,23 +345,42 @@ mod tests {
     }
 
     #[test]
-    fn the_scratch_is_named_for_the_target_and_unique_per_sink() {
+    fn the_scratch_is_the_target_name_plus_restore() {
         let dir = TempDir::new().unwrap();
         let target = dir.path().join("db");
-        let (first, second) = (
-            FileSink::create(&target).unwrap(),
-            FileSink::create(&target).unwrap(),
-        );
-        assert_ne!(first.scratch_path(), second.scratch_path());
-        for sink in [&first, &second] {
-            let name = sink.scratch_path().file_name().unwrap().to_str().unwrap();
-            assert!(
-                name.starts_with(&format!("db.{}-", process::id())),
-                "{name}"
-            );
-            assert!(name.ends_with(".restore"), "{name}");
-        }
+        let sink = FileSink::create(&target).unwrap();
+        assert_eq!(sink.scratch_path(), dir.path().join("db.restore"));
         assert!(!target.exists());
+    }
+
+    #[test]
+    fn a_second_restore_of_one_target_is_refused_while_the_first_lives() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("db");
+        let mut first = FileSink::create(&target).unwrap();
+        first.write_page(pgno(1), &[1; 512]).unwrap();
+        assert!(matches!(
+            FileSink::create(&target),
+            Err(CreateError::RestoreInProgress(path)) if path == dir.path().join("db.restore")
+        ));
+        // The refused attempt did not disturb the first restore's scratch.
+        assert_eq!(fs::read(first.scratch_path()).unwrap(), vec![1; 512]);
+        drop(first);
+        assert!(names(&dir).is_empty());
+        drop(FileSink::create(&target).unwrap());
+    }
+
+    #[test]
+    fn a_scratch_left_by_a_crashed_restore_is_reclaimed() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("db");
+        fs::write(dir.path().join("db.restore"), vec![9; 4096]).unwrap();
+        let mut sink = FileSink::create(&target).unwrap();
+        assert_eq!(fs::metadata(sink.scratch_path()).unwrap().len(), 0);
+        sink.write_page(pgno(1), &[1; 512]).unwrap();
+        sink.publish().unwrap();
+        assert_eq!(fs::read(&target).unwrap(), vec![1; 512]);
+        assert_eq!(names(&dir), BTreeSet::from(["db".to_owned()]));
     }
 
     #[test]
@@ -356,15 +448,91 @@ mod tests {
     }
 
     #[test]
-    fn publish_removes_a_stale_wal_and_shm() {
+    fn create_refuses_each_sidecar_and_removes_nothing() {
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let dir = TempDir::new().unwrap();
+            let target = dir.path().join("db");
+            let sidecar = dir.path().join(format!("db{suffix}"));
+            fs::write(&sidecar, b"stale").unwrap();
+            assert!(matches!(
+                FileSink::create(&target),
+                Err(CreateError::Sidecar { path }) if path == sidecar
+            ));
+            assert_eq!(fs::read(&sidecar).unwrap(), b"stale");
+            assert_eq!(names(&dir).len(), 1, "{suffix}: no scratch left behind");
+        }
+    }
+
+    #[test]
+    fn clear_sidecars_removes_the_three_and_reports_them() {
         let dir = TempDir::new().unwrap();
         let target = dir.path().join("db");
-        fs::write(dir.path().join("db-wal"), b"stale").unwrap();
-        fs::write(dir.path().join("db-shm"), b"stale").unwrap();
+        for suffix in ["-wal", "-shm", "-journal"] {
+            fs::write(dir.path().join(format!("db{suffix}")), b"stale").unwrap();
+        }
+        fs::write(dir.path().join("db-other"), b"not ours").unwrap();
+        let mut removed = clear_sidecars(&target).unwrap();
+        removed.sort();
+        assert_eq!(
+            removed,
+            ["db-journal", "db-shm", "db-wal"].map(|n| dir.path().join(n))
+        );
+        assert_eq!(names(&dir), BTreeSet::from(["db-other".to_owned()]));
+        assert!(clear_sidecars(&target).unwrap().is_empty());
+    }
+
+    #[test]
+    fn clear_sidecars_refuses_a_target_that_exists() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("db");
+        fs::write(&target, b"live").unwrap();
+        fs::write(dir.path().join("db-wal"), b"its wal").unwrap();
+        assert!(matches!(
+            clear_sidecars(&target),
+            Err(ClearError::TargetExists(path)) if path == target
+        ));
+        assert_eq!(fs::read(dir.path().join("db-wal")).unwrap(), b"its wal");
+    }
+
+    /// Review: a stale rollback journal beside the target is a hot journal to
+    /// SQLite, which rolls its old pages back over the restored database on
+    /// the first open ("database disk image is malformed", reproduced with
+    /// sqlite3). Create refuses; after clear_sidecars the restore publishes
+    /// exactly the database and nothing else.
+    #[test]
+    fn a_stale_journal_blocks_the_restore_until_cleared() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("db");
+        fs::write(dir.path().join("db-journal"), b"stale hot journal").unwrap();
+        assert!(matches!(
+            FileSink::create(&target),
+            Err(CreateError::Sidecar { .. })
+        ));
+        clear_sidecars(&target).unwrap();
         let mut sink = FileSink::create(&target).unwrap();
         sink.write_page(pgno(1), &[1; 512]).unwrap();
         sink.publish().unwrap();
+        assert_eq!(fs::read(&target).unwrap(), vec![1; 512]);
         assert_eq!(names(&dir), BTreeSet::from(["db".to_owned()]));
+    }
+
+    /// A sidecar that appears after create is a rival's (or a stale file's);
+    /// publish refuses and leaves it, and the target, alone.
+    #[test]
+    fn a_sidecar_appearing_after_create_makes_publish_refuse() {
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let dir = TempDir::new().unwrap();
+            let target = dir.path().join("db");
+            let mut sink = FileSink::create(&target).unwrap();
+            sink.write_page(pgno(1), &[1; 512]).unwrap();
+            let sidecar = dir.path().join(format!("db{suffix}"));
+            fs::write(&sidecar, b"theirs").unwrap();
+            let err = sink.publish().unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+            assert!(err.to_string().contains(&format!("db{suffix}")), "{err}");
+            assert_eq!(fs::read(&sidecar).unwrap(), b"theirs");
+            assert_eq!(names(&dir), BTreeSet::from([format!("db{suffix}")]));
+        }
     }
 
     #[test]
@@ -427,7 +595,6 @@ mod tests {
     fn a_restore_publishes_the_database_and_nothing_else() {
         let dir = TempDir::new().unwrap();
         let target = dir.path().join("db");
-        fs::write(dir.path().join("db-wal"), b"stale").unwrap();
         let store = replica(&snapshot_bytes(3, 7));
         let sink = FileSink::create(&target).unwrap();
         let restored = block_on(restore(&store, RestoreTarget::Latest, sink)).unwrap();
