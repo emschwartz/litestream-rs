@@ -27,9 +27,11 @@ sim-soak seconds base=`date +%s`:
 
 # Mutation testing for one crate (just mutants ltx); results in target/mutants/mutants.out.
 # Survivors are killed by a test or recorded in docs/mutants.md. Not part of check.
+# The credential guard runs `git ls-files`, and cargo-mutants tests a copy of the tree
+# without `.git`, so the guard is left out of mutant runs (it tests no crate code).
 mutants crate *args:
     mkdir -p target/mutants
-    cargo mutants -p lsr-{{crate}} --test-tool nextest --jobs 4 --output target/mutants {{args}}
+    cargo mutants -p lsr-{{crate}} --test-tool nextest --jobs 4 --output target/mutants {{args}} -- -E 'not test(=no_tracked_file_holds_a_credential)'
 
 # A branch in its own worktree under the main checkout's .worktrees/, off main's tip.
 spawn name:
