@@ -17,6 +17,14 @@ test:
 doctest:
     cargo test --doc --workspace --all-features --locked
 
+# Replays one simulator run, printing every operation: just sim-replay 0x2a [steps].
+sim-replay seed steps="300":
+    LSR_SIM_SEED={{seed}} LSR_SIM_STEPS={{steps}} cargo nextest run -p lsr-sim --test replay --no-capture --locked
+
+# Runs rotating simulator seeds for the given seconds from a base seed (default: now).
+sim-soak seconds base=`date +%s`:
+    LSR_SIM_BASE_SEED={{base}} LSR_SIM_SECONDS={{seconds}} cargo nextest run -p lsr-sim --test soak --run-ignored only --no-capture --locked
+
 # A branch in its own worktree under the main checkout's .worktrees/, off main's tip.
 spawn name:
     git -C "{{justfile_directory()}}" worktree add ".worktrees/{{name}}" -b "{{name}}" main
