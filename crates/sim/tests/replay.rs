@@ -23,6 +23,7 @@ mod replay {
         let opts = Opts {
             plant: None,
             trace: true,
+            ..Opts::default()
         };
         match run_with(seed, steps, &Weights::default(), &opts) {
             Ok(report) => {

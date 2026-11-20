@@ -17,16 +17,16 @@ use lsr_core::{
     SeededEntropy, SyncConfig, Tick, UploadConfig,
 };
 use lsr_ltx::{PageNo, PageSize, Timestamp};
-use lsr_wal::Salts;
+use lsr_wal::{Salts, WalOffset};
 
-use crate::generate::{EnvFault, Op, Target, Weights, history};
+use crate::generate::{EnvFault, MetaOp, Op, Target, WalOp, Weights, history};
 use crate::oracle::{Bound, Violation, bug_fault, within};
 use crate::resources::{
     CheckpointTally, CountingCheckpointer, IdleWindow, Limits, TickStats, delta, memory, per_tick,
 };
 use crate::seed::{Seed, replay_line};
 use crate::sqlite::{CrashKind, ReaderId};
-use crate::world::{CrashPlan, TickEnd, World};
+use crate::world::{CrashPlan, StagedCopy, TickEnd, World};
 
 /// Ticks a drain may take before it counts as stuck.
 const DRAIN_TICKS: u32 = 10_000;
@@ -88,6 +88,19 @@ impl fmt::Display for Failure {
     }
 }
 
+/// What the engine or the oracle did that a scenario can expect.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Seen {
+    /// A tick's event.
+    Event(Event),
+    /// A tick that halted the engine.
+    Halt(HaltCause),
+    /// A snapshot file was staged (no WAL origin to resume from).
+    Snapshot,
+    /// The oracle judged the replica and found nothing wrong.
+    Oracle,
+}
+
 /// What a passing run did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RunReport {
@@ -110,6 +123,9 @@ pub struct RunReport {
     pub spins: u32,
     /// Each operation, when the run was asked to trace.
     pub trace: Vec<String>,
+    /// Each event, halt and oracle verdict in order, when the run was asked to
+    /// record them.
+    pub seen: Vec<Seen>,
 }
 
 /// What a run may be told besides its seed.
@@ -119,6 +135,10 @@ pub struct Opts {
     pub plant: Option<(u32, Violation)>,
     /// Record each operation in [`RunReport::trace`].
     pub trace: bool,
+    /// Record what the engine and the oracle did in [`RunReport::seen`].
+    pub record: bool,
+    /// A halt is expected: it ends the run's ticks without being a bug.
+    pub allow_halt: bool,
 }
 
 /// The configuration every run gives the actor.
@@ -166,6 +186,9 @@ struct Runner {
     trace: bool,
     /// The last tick waits on a WAL change alone: no timer is pending.
     quiet: bool,
+    record: bool,
+    allow_halt: bool,
+    saved: Option<StagedCopy>,
 }
 
 fn below(rng: &SeededEntropy, upper: u64) -> u64 {
@@ -195,6 +218,9 @@ impl Runner {
             report: RunReport::default(),
             trace: false,
             quiet: false,
+            record: false,
+            allow_halt: false,
+            saved: None,
         }
     }
 
@@ -271,6 +297,19 @@ impl Runner {
                 self.w
                     .model
                     .note_snapshot(key.range().max(), commit, rewound, at);
+                if self.record {
+                    self.report.seen.push(Seen::Snapshot);
+                }
+            } else if self.record
+                && let crate::TapEvent::Put {
+                    key,
+                    header: Some(_),
+                    ..
+                } = event
+                && key.level().get() == 0
+                && self.w.staged_is_full_image(key)
+            {
+                self.report.seen.push(Seen::Snapshot);
             }
         }
         self.staging_seen = events.len();
@@ -313,6 +352,9 @@ impl Runner {
         }
         let (step, event) = match ended {
             TickEnd::Done(Tick::Ran { event, next }) => {
+                if self.record {
+                    self.report.seen.push(Seen::Event(event.clone()));
+                }
                 if let Event::Uploaded(did) = &event {
                     self.w.acked.on_did(did);
                 }
@@ -328,7 +370,12 @@ impl Runner {
                 }
                 (Step::Ran, Some(event))
             }
-            TickEnd::Done(Tick::Halted(cause)) => (Step::Halted(cause), None),
+            TickEnd::Done(Tick::Halted(cause)) => {
+                if self.record {
+                    self.report.seen.push(Seen::Halt(cause));
+                }
+                (Step::Halted(cause), None)
+            }
             TickEnd::Done(Tick::Drained) => (Step::Drained, None),
             TickEnd::Crashed { polls, kind, .. } => {
                 self.last_polls = polls.max(1);
@@ -353,6 +400,7 @@ impl Runner {
 
     fn tick(&mut self) -> Result<(), Violation> {
         match self.step(None)?.0 {
+            Step::Halted(_) if self.allow_halt => Ok(()),
             Step::Halted(cause) => Err(bug_fault(format!("the engine halted: {cause:?}"))),
             Step::Ran | Step::Drained | Step::Crashed => Ok(()),
         }
@@ -380,6 +428,7 @@ impl Runner {
                     self.reboot();
                     self.actor.begin_shutdown(self.now());
                 }
+                Step::Halted(_) if self.allow_halt => return Ok(()),
                 Step::Halted(cause) => {
                     return Err(bug_fault(format!(
                         "the engine halted in a drain: {cause:?}"
@@ -539,7 +588,71 @@ impl Runner {
 
     fn restore_all(&mut self) -> Result<(), Violation> {
         self.report.checks = self.report.checks.saturating_add(1);
-        self.w.check().map(|_| ())
+        self.w.check()?;
+        if self.record {
+            self.report.seen.push(Seen::Oracle);
+        }
+        Ok(())
+    }
+
+    fn restart(&mut self, kind: CrashKind) {
+        self.w.crash(kind);
+        self.crashed(kind);
+    }
+
+    fn scenario_step(
+        what: &str,
+        done: Result<bool, lsr_core::StoreError>,
+    ) -> Result<(), Violation> {
+        match done {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(bug_fault(format!(
+                "the scenario step {what} had nothing to act on"
+            ))),
+            Err(err) => Err(bug_fault(format!("the scenario step {what} failed: {err}"))),
+        }
+    }
+
+    fn meta(&mut self, op: MetaOp) -> Result<(), Violation> {
+        let w = &self.w;
+        let done = match op {
+            MetaOp::Save => w.copy_staging().map(|copy| {
+                self.saved = Some(copy);
+                true
+            }),
+            MetaOp::Restore => match &self.saved {
+                Some(copy) => w.replace_staging(copy).map(|()| true),
+                None => Ok(false),
+            },
+            MetaOp::DeleteNewest => w.delete_newest_staged(),
+            MetaOp::FlipNewestByte => w.edit_newest_staged(|bytes| {
+                let middle = bytes.len() / 2;
+                if let Some(byte) = bytes.get_mut(middle) {
+                    *byte ^= 0xff;
+                }
+            }),
+            MetaOp::StripNewestOrigin => w.strip_newest_origin(),
+            MetaOp::TruncateNewest => w.edit_newest_staged(|bytes| {
+                let half = bytes.len() / 2;
+                bytes.truncate(half);
+            }),
+        };
+        Self::scenario_step(&format!("{op:?}"), done)
+    }
+
+    fn wal_damage(&mut self, op: WalOp) -> Result<(), Violation> {
+        let sqlite = &self.w.sqlite;
+        let applied = match op {
+            WalOp::TearHeader => sqlite.tear_wal_header(),
+            WalOp::TruncateAtFrame(frames) => sqlite
+                .truncate_wal_at(WalOffset::from_frame_index(frames, sqlite.page_size()).get()),
+            WalOp::RewriteSameLength(seed) => sqlite.rewrite_same_length(seed),
+            WalOp::RegrowSameSalts(seed) => sqlite.regrow_same_salts(seed),
+            WalOp::RegrowWithoutCommitMarks(seed) => sqlite.regrow_without_commit_marks(seed),
+        };
+        Self::scenario_step(&format!("{op:?}"), Ok(applied))?;
+        self.w.adopt_local_state();
+        Ok(())
     }
 
     fn apply(&mut self, op: &Op) -> Result<(), Violation> {
@@ -573,6 +686,18 @@ impl Runner {
             }
             Op::RequestSnapshot => self.actor.request_snapshot(),
             Op::Restore => self.restore_all()?,
+            Op::Restart => self.restart(CrashKind::Process),
+            Op::PowerLoss => self.restart(CrashKind::Power),
+            Op::Meta(op) => self.meta(*op)?,
+            Op::Wal(op) => self.wal_damage(*op)?,
+            Op::OurReader { begin } => {
+                let done = if *begin {
+                    self.w.sqlite.our_reader_begin()
+                } else {
+                    self.w.sqlite.our_reader_end()
+                };
+                Self::scenario_step(&format!("{op:?}"), Ok(done))?;
+            }
         }
         Ok(())
     }
@@ -604,6 +729,9 @@ impl Runner {
             let spins = self.report.spins;
             let (step, stats) = self.step(None)?;
             if let Step::Halted(cause) = step {
+                if self.allow_halt {
+                    return Ok(());
+                }
                 return Err(bug_fault(format!(
                     "the engine halted while idle: {cause:?}"
                 )));
@@ -625,6 +753,9 @@ impl Runner {
         for _ in 0..IDLE_TICKS {
             let (step, stats) = self.step(None)?;
             if let Step::Halted(cause) = step {
+                if self.allow_halt {
+                    return Ok(());
+                }
                 return Err(bug_fault(format!(
                     "the engine halted while idle: {cause:?}"
                 )));
@@ -669,9 +800,24 @@ pub fn run_with(
     weights: &Weights,
     opts: &Opts,
 ) -> Result<RunReport, Failure> {
+    run_ops(seed, &history(seed, steps, weights), opts)
+}
+
+/// Runs the given operations, then the final drain and judgment.
+///
+/// # Errors
+/// The first [`Failure`].
+#[expect(
+    clippy::result_large_err,
+    reason = "a failure is reported once, at the end of a run"
+)]
+pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure> {
+    let steps = u32::try_from(ops.len()).unwrap_or(u32::MAX);
     let mut runner = Runner::new(seed);
     runner.trace = opts.trace;
-    for (index, op) in history(seed, steps, weights).iter().enumerate() {
+    runner.record = opts.record;
+    runner.allow_halt = opts.allow_halt;
+    for (index, op) in ops.iter().enumerate() {
         let step = u32::try_from(index).unwrap_or(u32::MAX);
         let fail = |violation| Failure {
             seed,

@@ -12,7 +12,7 @@
 
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    Entropy, FakeClock, FileKey, MemStore, RecordingSleeper, SeededEntropy, StoreError,
+    Entropy, FakeClock, FileInfo, FileKey, MemStore, RecordingSleeper, SeededEntropy, StoreError,
 };
 use lsr_ltx::{PageNo, PageSize, Timestamp};
 use lsr_wal::{Salts, WalOffset};
@@ -28,6 +28,65 @@ use crate::store::{FaultHandle, Faults, Lost, Stage, StageHandle, Tap, TapLog, Y
 pub type StagingStore = Faults<Yield<Tap<Stage<MemStore>>>>;
 /// The replica store the actor sees.
 pub type RemoteStore = Faults<Yield<Tap<MemStore>>>;
+
+/// The exact stamp the listing carried (the sim's stores always give one), so
+/// a rewrite keeps the file's creation time.
+fn listed_at(info: &FileInfo) -> Timestamp {
+    info.exact_stamp()
+        .map_or(Timestamp::from_unix_millis(0), |stamp| stamp.at())
+}
+
+fn is_full_image(bytes: &[u8]) -> bool {
+    use lsr_ltx::Decoder;
+    let mut decoder = Decoder::new();
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        let Ok((used, _)) = decoder.feed(rest) else {
+            return false;
+        };
+        let Some(next) = rest.get(used..).filter(|_| used > 0) else {
+            return false;
+        };
+        rest = next;
+    }
+    decoder
+        .finish()
+        .is_ok_and(|done| done.page_count() == u64::from(done.header().commit()))
+}
+
+/// The same file with no WAL origin in its header.
+fn without_origin(bytes: &[u8]) -> Option<Vec<u8>> {
+    use lsr_ltx::{Decoder, Encoder, Event, Header};
+    let mut decoder = Decoder::new();
+    let mut pages = Vec::new();
+    let mut header = None;
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        let (used, event) = decoder.feed(rest).ok()?;
+        match event {
+            Some(Event::Header(found)) => header = Some(found),
+            Some(Event::Page { pgno, data }) => pages.push((pgno, data.to_vec())),
+            None => {}
+        }
+        if used == 0 {
+            return None;
+        }
+        rest = rest.get(used..)?;
+    }
+    let verified = decoder.finish().ok()?;
+    let mut fields = header?.fields();
+    fields.wal = None;
+    let mut encoder = Encoder::new(Vec::new(), Header::new(fields).ok()?).ok()?;
+    for (pgno, data) in &pages {
+        encoder.write_page(*pgno, data).ok()?;
+    }
+    let (out, _) = encoder.finish(verified.trailer().post_apply()).ok()?;
+    Some(out)
+}
+
+/// A copy of the staging directory.
+#[derive(Clone, Debug, Default)]
+pub struct StagedCopy(Vec<(FileInfo, Vec<u8>)>);
 
 /// Where a tick is cut short, and how.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -339,6 +398,145 @@ impl World {
             }
         }
         Ok(())
+    }
+
+    /// Every staged file, copied aside.
+    ///
+    /// # Errors
+    /// The store's error when it cannot list or read.
+    pub fn copy_staging(&self) -> Result<StagedCopy, StoreError> {
+        let mut files = Vec::new();
+        for info in self.staged_files()? {
+            files.push((info, self.read_staged(&info.key)?));
+        }
+        Ok(StagedCopy(files))
+    }
+
+    /// Replaces the staging directory with `copy`, as a restored backup would.
+    ///
+    /// # Errors
+    /// The store's error when it cannot delete or write.
+    pub fn replace_staging(&self, copy: &StagedCopy) -> Result<(), StoreError> {
+        self.wipe_staging()?;
+        for (info, bytes) in &copy.0 {
+            self.write_staged(info, bytes)?;
+        }
+        Ok(())
+    }
+
+    /// The newest level-0 file in staging.
+    ///
+    /// # Errors
+    /// The store's error when it cannot list.
+    pub fn newest_staged(&self) -> Result<Option<FileInfo>, StoreError> {
+        use lsr_core::{Level, ObjectStore, PageLimit};
+        let listing = block_on(self.staging_raw.list(Level::ZERO, None, PageLimit::MAX))?;
+        Ok(listing.files.last().copied())
+    }
+
+    /// Deletes the newest level-0 file; false when there is none.
+    ///
+    /// # Errors
+    /// The store's error when it cannot list or delete.
+    pub fn delete_newest_staged(&self) -> Result<bool, StoreError> {
+        use lsr_core::ObjectStore;
+        let Some(info) = self.newest_staged()? else {
+            return Ok(false);
+        };
+        block_on(self.staging_raw.delete(&[info.key]))?;
+        Ok(true)
+    }
+
+    /// Rewrites the newest level-0 file's bytes through `edit`; false when
+    /// there is none.
+    ///
+    /// # Errors
+    /// The store's error when it cannot list, read or write.
+    pub fn edit_newest_staged(&self, edit: impl FnOnce(&mut Vec<u8>)) -> Result<bool, StoreError> {
+        let Some(info) = self.newest_staged()? else {
+            return Ok(false);
+        };
+        let mut bytes = self.read_staged(&info.key)?;
+        edit(&mut bytes);
+        self.write_staged(&info, &bytes)?;
+        Ok(true)
+    }
+
+    /// Whether the staged file `key` holds every page of its database, which
+    /// is what a snapshot looks like: the engine writes one as a level-0 file
+    /// whose header still names the WAL range it was cut from. False when the
+    /// file is gone or does not decode.
+    #[must_use]
+    pub fn staged_is_full_image(&self, key: &FileKey) -> bool {
+        self.read_staged(key)
+            .is_ok_and(|bytes| is_full_image(&bytes))
+    }
+
+    /// Rewrites the newest level-0 file without its WAL origin, as a file
+    /// from a writer that does not record one reads; false when there is none
+    /// or it cannot be re-encoded.
+    ///
+    /// # Errors
+    /// The store's error when it cannot list, read or write.
+    pub fn strip_newest_origin(&self) -> Result<bool, StoreError> {
+        let mut done = false;
+        let found = self.edit_newest_staged(|bytes| {
+            if let Some(stripped) = without_origin(bytes) {
+                *bytes = stripped;
+                done = true;
+            }
+        })?;
+        Ok(found && done)
+    }
+
+    fn staged_files(&self) -> Result<Vec<FileInfo>, StoreError> {
+        use lsr_core::{Level, ObjectStore, PageLimit};
+        let mut files = Vec::new();
+        for level in Level::ALL {
+            files.extend(block_on(self.staging_raw.list(level, None, PageLimit::MAX))?.files);
+        }
+        Ok(files)
+    }
+
+    fn read_staged(&self, key: &FileKey) -> Result<Vec<u8>, StoreError> {
+        use lsr_core::{ObjectStore, ReadLen};
+        let Some(chunk) = ReadLen::new(1 << 20) else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        loop {
+            let offset = u64::try_from(out.len()).unwrap_or(u64::MAX);
+            let part = block_on(self.staging_raw.read(key, offset, chunk))?;
+            let done = u64::try_from(part.len()).unwrap_or(0) < chunk.get();
+            out.extend_from_slice(&part);
+            if done {
+                return Ok(out);
+            }
+        }
+    }
+
+    fn write_staged(&self, info: &FileInfo, bytes: &[u8]) -> Result<(), StoreError> {
+        use lsr_core::{ObjectStore, Upload};
+        let mut up = block_on(self.staging_raw.begin_upload(&info.key, listed_at(info)))?;
+        block_on(up.write(bytes))?;
+        block_on(up.commit())?;
+        Ok(())
+    }
+
+    /// Takes the database as the rules now read it as the model's newest
+    /// commit, when damage to the WAL changed it: the damage is the database's
+    /// new truth, and the replica is judged against that.
+    pub fn adopt_local_state(&mut self) {
+        if self.model_matches_sqlite() {
+            return;
+        }
+        let page_size = self.sqlite.page_size();
+        let image = PageImage::from_bytes(page_size, &self.sqlite.image());
+        let app = AppCommit {
+            salts: self.sqlite.salts(),
+            end: WalOffset::from_frame_index(self.sqlite.mx_frame(), page_size),
+        };
+        self.model.vacuum(image, app, self.remote_tap.len());
     }
 
     /// Whether the model's newest image is the database the rules hold: a check

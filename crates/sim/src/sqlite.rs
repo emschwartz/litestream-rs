@@ -952,6 +952,16 @@ impl SimSqlite {
     /// `seed` (same page numbers, commit fields and salts, a valid chain) and
     /// commits one more frame of page 1, as a writer that kept the salts would.
     pub fn regrow_same_salts(&self, seed: u64) -> bool {
+        self.regrow_with(seed, true)
+    }
+
+    /// [`Self::regrow_same_salts`] with every old frame's commit field
+    /// cleared, so the frame before the old end is valid but not a commit.
+    pub fn regrow_without_commit_marks(&self, seed: u64) -> bool {
+        self.regrow_with(seed, false)
+    }
+
+    fn regrow_with(&self, seed: u64, marks: bool) -> bool {
         self.with(|state| {
             let header = state
                 .wal
@@ -966,7 +976,7 @@ impl SimSqlite {
             {
                 return false;
             }
-            regrow(state, header.checksum(), seed);
+            regrow(state, header.checksum(), seed, marks);
             true
         })
     }
@@ -1102,7 +1112,7 @@ impl SimSqlite {
     }
 }
 
-fn regrow(state: &mut State, header: WalChecksum, seed: u64) {
+fn regrow(state: &mut State, header: WalChecksum, seed: u64, marks: bool) {
     let frames = state.index.mx_frame;
     let ends = state.index.tx_ends.clone();
     let pgnos = state.index.pgnos.clone();
@@ -1111,7 +1121,7 @@ fn regrow(state: &mut State, header: WalChecksum, seed: u64) {
     state.index.pgnos.clear();
     let size = state.index.db_size;
     for (at, pgno) in (1..=frames).zip(pgnos) {
-        let commit = if ends.contains(&at) { size } else { 0 };
+        let commit = if marks && ends.contains(&at) { size } else { 0 };
         let data = PageNo::new(pgno, state.page_size)
             .map(|named| page(seed, named, state.page_size))
             .unwrap_or_default();

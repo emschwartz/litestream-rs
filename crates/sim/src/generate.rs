@@ -89,6 +89,55 @@ pub enum Op {
     RequestSnapshot,
     /// The oracle restores every transaction and `Latest` and judges them.
     Restore,
+    /// The process dies between ticks and a new one starts. Scenarios only: a
+    /// history never draws this.
+    Restart,
+    /// The machine loses power between ticks. Scenarios only.
+    PowerLoss,
+    /// A step on the staging directory while the engine is down. Scenarios only.
+    Meta(MetaOp),
+    /// Damage to the WAL file that SQLite would not do itself. Scenarios only.
+    Wal(WalOp),
+    /// Our own read transaction ends or begins, as at a checkpoint's lapse.
+    /// Scenarios only.
+    OurReader {
+        /// Begin (otherwise end).
+        begin: bool,
+    },
+}
+
+/// What a scenario does to the staging directory, the engine's own memory of
+/// where it stopped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MetaOp {
+    /// Copies every staged file aside.
+    Save,
+    /// Replaces the staging directory with the last copy: a backup restored.
+    Restore,
+    /// Deletes the newest level-0 file.
+    DeleteNewest,
+    /// Flips one byte in the middle of the newest level-0 file.
+    FlipNewestByte,
+    /// Cuts the newest level-0 file to half its length.
+    TruncateNewest,
+    /// Rewrites the newest level-0 file with no WAL origin in its header.
+    StripNewestOrigin,
+}
+
+/// Damage to the WAL. Each one leaves the database as SQLite's rules now read
+/// it, which the harness takes as the database's new truth.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WalOp {
+    /// Zeroes the header's page size, salts and checksum.
+    TearHeader,
+    /// Cuts the file just after this many frames.
+    TruncateAtFrame(u32),
+    /// A valid WAL of the same length in another generation.
+    RewriteSameLength(u64),
+    /// The same generation's frames with other bytes, and one more commit.
+    RegrowSameSalts(u64),
+    /// As [`WalOp::RegrowSameSalts`], with no commit mark left on the old frames.
+    RegrowWithoutCommitMarks(u64),
 }
 
 /// How often each kind of operation is drawn, in relative weights.

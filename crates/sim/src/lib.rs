@@ -20,6 +20,7 @@ pub mod model;
 pub mod oracle;
 pub mod resources;
 pub mod run;
+pub mod scenario;
 pub mod seed;
 pub mod sqlite;
 pub mod store;

@@ -31,6 +31,7 @@ fn history_is_prefix_stable() {
     let opts = Opts {
         plant: None,
         trace: true,
+        ..Opts::default()
     };
     let short =
         run_with(Seed::new(5), 60, &Weights::default(), &opts).unwrap_or_else(|f| panic!("{f}"));
@@ -45,6 +46,7 @@ fn planted(step: u32) -> Opts {
     Opts {
         plant: Some((step, bug_fault("planted"))),
         trace: false,
+        ..Opts::default()
     }
 }
 
