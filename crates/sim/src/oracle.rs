@@ -28,7 +28,7 @@ use lsr_wal::Salts;
 use thiserror::Error;
 
 use crate::model::{CommitId, Model, PageImage};
-use crate::store::{TapEvent, TapLog, TapResult};
+use crate::store::{TapEvent, TapLog};
 
 /// A resource the engine must keep bounded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -231,7 +231,6 @@ fn covers(model: &Model, tap: &TapLog) -> Result<BTreeMap<Txid, CommitId>, Viola
             key,
             header: Some(header),
             origin,
-            result: TapResult::Ok | TapResult::ErrAfterPublish,
         } = event
         else {
             continue;

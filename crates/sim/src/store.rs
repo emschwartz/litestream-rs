@@ -477,17 +477,6 @@ impl<U: Upload> Upload for YieldUpload<U> {
 
 // ------------------------------------------------------------------- Tap
 
-/// What a commit did to the store.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TapResult {
-    /// The object is published and the commit reported success.
-    Ok,
-    /// The store failed the commit but the object is visible.
-    ErrAfterPublish,
-    /// The commit failed and nothing is visible.
-    Err,
-}
-
 /// One thing the store really did.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TapEvent {
@@ -499,8 +488,6 @@ pub enum TapEvent {
         header: Option<Header>,
         /// The WAL range its pages came from, from the header.
         origin: Option<WalOrigin>,
-        /// What the store did.
-        result: TapResult,
     },
     /// A delete the store accepted.
     Delete {
@@ -526,6 +513,9 @@ pub struct TapCounts {
     pub deletes: u64,
     /// The most bytes one upload held before it ended.
     pub max_upload_bytes: u64,
+    /// The largest single chunk handed to `write`: what a streaming writer
+    /// holds at once, whatever the object's size.
+    pub max_write_bytes: u64,
 }
 
 #[derive(Debug, Default)]
@@ -594,7 +584,7 @@ impl<S> Tap<S> {
     }
 }
 
-impl<S: ObjectStore + Clone> ObjectStore for Tap<S> {
+impl<S: ObjectStore> ObjectStore for Tap<S> {
     type Upload = TapUpload<S>;
 
     async fn list(
@@ -622,7 +612,6 @@ impl<S: ObjectStore + Clone> ObjectStore for Tap<S> {
         let inner = self.inner.begin_upload(key, created_at).await?;
         Ok(TapUpload {
             inner,
-            store: self.inner.clone(),
             key: *key,
             head: Vec::new(),
             wrote: 0,
@@ -647,7 +636,6 @@ impl<S: ObjectStore + Clone> ObjectStore for Tap<S> {
 #[derive(Debug)]
 pub struct TapUpload<S: ObjectStore> {
     inner: S::Upload,
-    store: S,
     key: FileKey,
     head: Vec<u8>,
     wrote: u64,
@@ -657,13 +645,6 @@ pub struct TapUpload<S: ObjectStore> {
 fn parse_header(head: &[u8]) -> Option<Header> {
     let bytes: &[u8; HEADER_LEN] = head.try_into().ok()?;
     Header::decode(bytes).ok()
-}
-
-async fn is_visible<S: ObjectStore>(store: &S, key: &FileKey) -> bool {
-    match ReadLen::new(1) {
-        Some(one) => store.read(key, 0, one).await.is_ok(),
-        None => false,
-    }
 }
 
 impl<S: ObjectStore> Upload for TapUpload<S> {
@@ -676,9 +657,11 @@ impl<S: ObjectStore> Upload for TapUpload<S> {
             .wrote
             .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
         let wrote = self.wrote;
+        let chunk_len = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
         self.log.with(|s| {
             bump(&mut s.counts.writes);
             s.counts.max_upload_bytes = s.counts.max_upload_bytes.max(wrote);
+            s.counts.max_write_bytes = s.counts.max_write_bytes.max(chunk_len);
         });
         Ok(())
     }
@@ -686,7 +669,6 @@ impl<S: ObjectStore> Upload for TapUpload<S> {
     async fn commit(self) -> Result<FileInfo, StoreError> {
         let Self {
             inner,
-            store,
             key,
             head,
             log,
@@ -694,21 +676,17 @@ impl<S: ObjectStore> Upload for TapUpload<S> {
         } = self;
         let header = parse_header(&head);
         let outcome = inner.commit().await;
-        let result = match &outcome {
-            Ok(_) => TapResult::Ok,
-            // The store reported a failure; what matters here is whether the
-            // object is nonetheless listed, so ask it.
-            Err(_) if is_visible(&store, &key).await => TapResult::ErrAfterPublish,
-            Err(_) => TapResult::Err,
-        };
         log.with(|s| {
             bump(&mut s.counts.commits);
-            s.events.push(TapEvent::Put {
-                key,
-                header,
-                origin: header.and_then(|h| h.fields().wal),
-                result,
-            });
+            // Only an object the store accepted is recorded: the tap sits below
+            // `Faults`, so a commit it sees fail never published.
+            if outcome.is_ok() {
+                s.events.push(TapEvent::Put {
+                    key,
+                    header,
+                    origin: header.and_then(|h| h.fields().wal),
+                });
+            }
         });
         outcome
     }

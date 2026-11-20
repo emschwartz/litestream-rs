@@ -124,17 +124,13 @@ fn tap_records_err_after_publish() {
     let events = log.events();
     assert_eq!(events.len(), 1);
     let TapEvent::Put {
-        key,
-        origin: got,
-        result,
-        ..
+        key, origin: got, ..
     } = &events[0]
     else {
         panic!("expected a put, got {events:?}");
     };
     assert_eq!(*key, fkey(0, 1, 1));
     assert_eq!(*got, wal);
-    assert_eq!(*result, TapResult::Ok);
 }
 
 #[test]
