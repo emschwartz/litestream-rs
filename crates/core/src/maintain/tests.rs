@@ -61,6 +61,22 @@ pub(super) fn defaults() -> Maintenance {
     Maintenance::go_default()
 }
 
+/// `due` from a fresh state: the listing alone decides.
+pub(super) fn due(
+    inventory: &Inventory,
+    now: Timestamp,
+    config: &Maintenance,
+    published: Option<Txid>,
+) -> Due {
+    super::due(
+        inventory,
+        now,
+        config,
+        published,
+        &mut MaintainState::default(),
+    )
+}
+
 fn due_at(i: &Inventory, now: i64) -> Due {
     due(i, at(now), &defaults(), None)
 }
@@ -1088,6 +1104,24 @@ fn run_delete_counts_tolerates_gone_keys_and_maps_a_store_error() {
 
 const REVIEW_DAY: i64 = 86_400_000;
 
+/// Rewrites `out` at half its length, as a store that acknowledged a short commit holds it.
+fn truncate_to_half(replica: &MemStore, out: &FileKey) {
+    block_on(async {
+        let whole = replica
+            .read(
+                out,
+                0,
+                crate::store::ReadLen::new(crate::store::ReadLen::MAX_RAW).unwrap(),
+            )
+            .await
+            .unwrap();
+        let created = load(replica).level(level(1))[0].created_at;
+        let mut up = replica.begin_upload(out, created).await.unwrap();
+        up.write(&whole[..whole.len() / 2]).await.unwrap();
+        up.commit().await.unwrap();
+    });
+}
+
 /// A Retrying destination whose post-commit delete failed leaves a short
 /// object listed under the output key ("removed: false": compact.rs says the
 /// caller must not trust a listing of it). The next plan trusts it anyway:
@@ -1111,9 +1145,10 @@ fn review_a_short_compaction_output_left_by_a_failed_commit_does_not_license_del
     )
     .unwrap();
     let now = at(T0 + 2 * 3_600_000);
-    let job = match due(&load(&replica), now, &cfg, None) {
-        Due::Run(Job::Compact(job)) => job,
-        other => panic!("expected the level-1 job, got {other:?}"),
+    let mut state = MaintainState::default();
+    let due = super::due(&load(&replica), now, &cfg, None, &mut state);
+    let Due::Run(Job::Compact(job)) = due else {
+        panic!("expected the level-1 job, got {due:?}")
     };
     let out = job.output_key();
     replica.inject_failure_after_publish(StoreError::Corrupt {
@@ -1124,26 +1159,22 @@ fn review_a_short_compaction_output_left_by_a_failed_commit_does_not_license_del
             removed: false,
         },
     });
+    // The executor's delete of the rejected output fails too.
+    replica.inject_failure(
+        StoreOp::Delete,
+        StoreError::Transient {
+            op: StoreOp::Delete,
+            kind: std::io::ErrorKind::TimedOut,
+        },
+    );
     let ran = block_on(run_compact(&job, &local, &replica));
     assert!(matches!(ran, Outcome::Failed(_)), "{ran:?}");
+    state.record(now, &Job::Compact(job.clone()), &ran);
     // What the store holds after a size mismatch it could not remove.
-    block_on(async {
-        let whole = replica
-            .read(
-                &out,
-                0,
-                crate::store::ReadLen::new(crate::store::ReadLen::MAX_RAW).unwrap(),
-            )
-            .await
-            .unwrap();
-        let created = load(&replica).level(level(1))[0].created_at;
-        let mut up = replica.begin_upload(&out, created).await.unwrap();
-        up.write(&whole[..whole.len() / 2]).await.unwrap();
-        up.commit().await.unwrap();
-    });
+    truncate_to_half(&replica, &out);
     let inputs: Vec<FileKey> = job.inputs().files().iter().map(|f| f.key).collect();
     for _ in 0..10 {
-        match due(&load(&replica), now, &cfg, None) {
+        match super::due(&load(&replica), now, &cfg, None, &mut state) {
             Due::Run(Job::Delete(d)) => {
                 let doomed: Vec<&FileKey> =
                     d.keys().iter().filter(|k| inputs.contains(k)).collect();
@@ -1175,34 +1206,207 @@ fn review_a_level_one_job_that_always_fails_does_not_starve_the_snapshot_forever
         put(&replica, 0, n, created);
         put(&local, 0, n, created);
     }
-    // The local copy of transaction 2 rots; the replica's copy is fine.
-    block_on(async {
-        let k = key(0, 2, 2);
-        let mut up = local.begin_upload(&k, at(T0 - 100_000)).await.unwrap();
-        up.write(&[0xAB; 200]).await.unwrap();
-        up.commit().await.unwrap();
-    });
+    // Transaction 2 rots in both places (a rotten local copy alone now falls
+    // back to the replica's, which is the next test), so the job always fails.
+    for store in [&local, &replica] {
+        block_on(async {
+            let k = key(0, 2, 2);
+            let mut up = store.begin_upload(&k, at(T0 - 100_000)).await.unwrap();
+            up.write(&[0xAB; 200]).await.unwrap();
+            up.commit().await.unwrap();
+        });
+    }
+    let mut state = MaintainState::default();
     let mut snapshot_planned = false;
     for day in 0..3 {
-        match due(
-            &load(&replica),
-            at(T0 + day * REVIEW_DAY),
-            &defaults(),
-            None,
-        ) {
-            Due::Run(Job::Compact(job)) => {
-                let out = block_on(run_compact(&job, &local, &replica));
-                assert!(matches!(out, Outcome::Failed(_)), "{out:?}");
+        let now = at(T0 + day * REVIEW_DAY);
+        // The loop lists and asks again at the same instant after each failure.
+        for _ in 0..3 {
+            match super::due(&load(&replica), now, &defaults(), None, &mut state) {
+                Due::Run(Job::Compact(job)) => {
+                    let out = block_on(run_compact(&job, &local, &replica));
+                    assert!(matches!(out, Outcome::Failed(_)), "{out:?}");
+                    state.record(now, &Job::Compact(job), &out);
+                }
+                Due::Run(Job::Snapshot(_)) => {
+                    snapshot_planned = true;
+                    break;
+                }
+                other @ (Due::Run(_) | Due::Wait { .. }) => panic!("unexpected {other:?}"),
             }
-            Due::Run(Job::Snapshot(_)) => {
-                snapshot_planned = true;
-                break;
-            }
-            other => panic!("unexpected {other:?}"),
+        }
+        if snapshot_planned {
+            break;
         }
     }
     assert!(
         snapshot_planned,
         "a level-1 compaction failing on every attempt kept the due snapshot from being planned for three days"
     );
+}
+
+fn corrupt_output_error(removed: bool) -> StoreError {
+    StoreError::Corrupt {
+        key: None,
+        cause: crate::store::CorruptCause::CommitSizeMismatch {
+            wrote: 1,
+            stored: 0,
+            removed,
+        },
+    }
+}
+
+fn delete_fails() -> StoreError {
+    StoreError::Transient {
+        op: StoreOp::Delete,
+        kind: std::io::ErrorKind::TimedOut,
+    }
+}
+
+/// Two L0 files and a snapshot this window: level 1 is the only job due.
+fn rejected_setup() -> (MemStore, MemStore, MaintainState, CompactJob) {
+    let (local, replica) = (MemStore::new(), MemStore::new());
+    put(&replica, 9, 1, T0 + 1);
+    for n in 2..=3u64 {
+        let created = T0 + i64::try_from(n).unwrap() * 600_000;
+        put(&local, 0, n, created);
+        put(&replica, 0, n, created);
+    }
+    let mut state = MaintainState::default();
+    let Due::Run(Job::Compact(job)) = super::due(
+        &load(&replica),
+        at(T0 + 3_600_000),
+        &defaults(),
+        None,
+        &mut state,
+    ) else {
+        panic!("expected the level-1 job")
+    };
+    (local, replica, state, job)
+}
+
+#[test]
+fn a_rejected_compaction_output_is_deleted_by_the_executor() {
+    for mismatch in [
+        corrupt_output_error(false),
+        StoreError::Corrupt {
+            key: None,
+            cause: crate::store::CorruptCause::ChecksumMismatch { part: None },
+        },
+    ] {
+        let (local, replica, _, job) = rejected_setup();
+        replica.inject_failure_after_publish(mismatch);
+        let ran = block_on(run_compact(&job, &local, &replica));
+        assert!(
+            matches!(ran, Outcome::Failed(MaintainError::Compact(_))),
+            "{ran:?}"
+        );
+        assert!(load(&replica).level(level(1)).is_empty());
+    }
+}
+
+#[test]
+fn a_distrusted_output_holds_retention_until_deleted() {
+    let (local, replica, mut state, job) = rejected_setup();
+    replica.inject_failure_after_publish(corrupt_output_error(false));
+    replica.inject_failure(StoreOp::Delete, delete_fails());
+    let ran = block_on(run_compact(&job, &local, &replica));
+    assert!(
+        matches!(ran, Outcome::Failed(MaintainError::OutputDistrusted { .. })),
+        "{ran:?}"
+    );
+    let now = at(T0 + 3_600_000);
+    state.record(now, &Job::Compact(job.clone()), &ran);
+    let out = job.output_key();
+    // The level's delete is the next job once its backoff has passed.
+    let later = at(T0 + 3_700_000);
+    let Due::Run(Job::Delete(delete)) =
+        super::due(&load(&replica), later, &defaults(), None, &mut state)
+    else {
+        panic!("expected the output's delete")
+    };
+    assert_eq!(delete.keys(), [out]);
+    // While it is listed, retention holds (level 1 is backing off, so it is reached).
+    let held = super::due(
+        &load(&replica),
+        at(T0 + 3_605_000),
+        &defaults(),
+        None,
+        &mut state,
+    );
+    assert!(
+        matches!(&held, Due::Wait { held: Some(Hold::OutputDistrusted { key }), .. } if *key == out),
+        "{held:?}"
+    );
+    let done = block_on(run_delete(&delete, &replica));
+    state.record(later, &Job::Delete(delete), &done);
+    let after = super::due(&load(&replica), later, &defaults(), None, &mut state);
+    assert!(
+        !matches!(
+            after,
+            Due::Wait {
+                held: Some(Hold::OutputDistrusted { .. }),
+                ..
+            }
+        ),
+        "{after:?}"
+    );
+}
+
+#[test]
+fn a_failing_level_backs_off_and_others_run() {
+    let (_local, replica, mut state, job) = rejected_setup();
+    let now = at(T0 + 3_600_000);
+    let failed = Outcome::Failed(MaintainError::Compact(CompactError::Source(
+        StoreError::Transient {
+            op: StoreOp::Read,
+            kind: std::io::ErrorKind::TimedOut,
+        },
+    )));
+    let ask = |state: &mut MaintainState, now: Timestamp| {
+        super::due(&load(&replica), now, &defaults(), None, state)
+    };
+    state.record(now, &Job::Compact(job.clone()), &failed);
+    // Level 1 waits ten seconds; nothing else is ready, so the wake time is its retry.
+    let Due::Wait { until, .. } = ask(&mut state, at(T0 + 3_605_000)) else {
+        panic!("level 1 should be backing off")
+    };
+    assert_eq!(until, Some(at(T0 + 3_610_000)));
+    assert!(matches!(
+        ask(&mut state, at(T0 + 3_610_000)),
+        Due::Run(Job::Compact(_))
+    ));
+    // Doubling, capped at MAX_BACKOFF.
+    for _ in 0..12 {
+        state.record(now, &Job::Compact(job.clone()), &failed);
+    }
+    let Due::Wait { until, .. } = ask(&mut state, now) else {
+        panic!("backing off")
+    };
+    let cap = i64::try_from(crate::fault::MAX_BACKOFF.as_millis()).unwrap();
+    assert_eq!(until, Some(at(T0 + 3_600_000 + cap)));
+    // A success clears it.
+    let ok = Outcome::Compacted {
+        info: file(1, 2, 3, T0),
+        bytes_read: 0,
+    };
+    state.record(now, &Job::Compact(job), &ok);
+    assert!(matches!(ask(&mut state, now), Due::Run(Job::Compact(_))));
+}
+
+#[test]
+fn a_corrupt_local_input_falls_back_to_the_replica_copy() {
+    let (local, replica) = (MemStore::new(), MemStore::new());
+    put(&replica, 0, 2, T0);
+    put(&replica, 0, 3, T0);
+    put(&local, 0, 2, T0);
+    block_on(async {
+        let mut up = local.begin_upload(&key(0, 3, 3), at(T0)).await.unwrap();
+        up.write(&[0xAB; 200]).await.unwrap();
+        up.commit().await.unwrap();
+    });
+    let inputs = CompactionInputs::new(vec![file(0, 2, 2, T0), file(0, 3, 3, T0)]).unwrap();
+    let job = CompactJob::new(inputs, level(1)).unwrap();
+    let ran = block_on(run_compact(&job, &local, &replica));
+    assert!(matches!(ran, Outcome::Compacted { .. }), "{ran:?}");
 }

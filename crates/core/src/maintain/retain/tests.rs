@@ -10,8 +10,26 @@ use proptest::prelude::*;
 
 use super::*;
 use crate::inventory::Inventory;
-use crate::maintain::tests::{Model, T0, at, defaults, file, inv, key, level, secs, small, txid};
-use crate::maintain::{Due, Job, due};
+use crate::maintain::tests::{
+    Model, T0, at, defaults, due, file, inv, key, level, secs, small, txid,
+};
+use crate::maintain::{Due, Job};
+
+/// `retention` from a fresh state.
+fn retention(
+    inventory: &Inventory,
+    now: Timestamp,
+    config: &Maintenance,
+    published: Option<Txid>,
+) -> Retention {
+    super::retention(
+        inventory,
+        now,
+        config,
+        published,
+        &mut MaintainState::default(),
+    )
+}
 
 const HOUR: i64 = 3_600_000;
 const DAY: i64 = 24 * HOUR;
@@ -140,15 +158,48 @@ fn level_zero_files_the_levels_do_not_cover_stay() {
 }
 
 #[test]
-fn level_zero_stops_at_the_first_file_that_fails() {
-    // 27 is uncovered, so 28 and 29 stay although L1 covers them.
+fn level_zero_skips_an_uncovered_file_and_deletes_the_covered_ones_above_it() {
+    // 27 is uncovered and stays; 28 and 29 are covered and go (review R5; the
+    // scan used to stop at 27 and keep them).
     let mut files = ladder();
     files.retain(|f| f.key != key(1, 21, 30));
     files.push(file(1, 21, 26, stamp_of(26)));
     files.push(file(1, 28, 30, stamp_of(30)));
     let got = keys(&run(files));
     assert!(got.contains(&key(0, 26, 26)));
-    assert!(!got.contains(&key(0, 27, 27)) && !got.contains(&key(0, 28, 28)));
+    assert!(!got.contains(&key(0, 27, 27)));
+    assert!(got.contains(&key(0, 28, 28)) && got.contains(&key(0, 29, 29)));
+    assert!(!got.contains(&key(0, 30, 30)), "never the last file");
+}
+
+#[test]
+fn a_clock_that_steps_back_does_not_make_a_deleted_chain_young_again() {
+    // Two snapshots a day apart, retention a day. At the newest stamp the first
+    // is old (floor at its end); a second call far in the past would have
+    // retained it, so the anchor must not move back.
+    let files = vec![
+        file(9, 1, 10, T0),
+        file(9, 1, 20, T0 + DAY + HOUR),
+        file(1, 1, 10, T0),
+        file(1, 11, 20, T0 + DAY + HOUR),
+    ];
+    let cfg = Maintenance::new(
+        vec![secs(30)],
+        secs(24 * 3600),
+        secs(24 * 3600),
+        L0Retention::Keep,
+    )
+    .unwrap();
+    let inventory = inv(files);
+    let mut state = MaintainState::default();
+    let newest = at(T0 + DAY + HOUR);
+    let first = super::retention(&inventory, newest, &cfg, None, &mut state);
+    assert!(keys(&first).contains(&key(9, 1, 10)), "{first:?}");
+    let back = super::retention(&inventory, at(T0), &cfg, None, &mut state);
+    assert_eq!(first, back, "the anchor moved back with the clock");
+    // A fresh state would have planned differently.
+    let fresh = retention(&inventory, at(T0), &cfg, None);
+    assert_ne!(first, fresh);
 }
 
 #[test]
@@ -691,7 +742,11 @@ fn check_delete(
         let is = after.level(l);
         assert_eq!(is.is_empty(), was.is_empty(), "{l} emptied");
         let gone = was.len() - is.len();
-        assert_eq!(&was[gone..], is, "{l} did not lose a prefix");
+        // Level 0 is judged file by file (review R5): the covered, aged files
+        // go and an uncovered one in between stays, so only 1 to 8 are prefixes.
+        if l != Level::ZERO {
+            assert_eq!(&was[gone..], is, "{l} did not lose a prefix");
+        }
     }
 }
 

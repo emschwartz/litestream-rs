@@ -17,9 +17,10 @@
 //! after one Go-era loss.
 //!
 //! Time base. Ages come from `FileInfo::created_at`, the header stamp, and are
-//! measured from the anchor, `min(now, newest stamp in the listing)`. A clock
-//! that jumps ahead deletes nothing the replica's own newest stamp would not,
-//! and a clock behind only makes files look young. Go on S3 uses the upload
+//! measured from the anchor, `min(now, newest stamp in the listing)`, never
+//! lower than an anchor this state already used. A clock that jumps ahead
+//! deletes nothing the replica's own newest stamp would not, and a clock behind
+//! only makes files look young; it never makes a deleted one young again. Go on S3 uses the upload
 //! time (`LastModified`), never earlier than the header stamp, so Go keeps
 //! these files at least as long as this code does.
 //!
@@ -32,15 +33,17 @@
 //! 2. Levels 1 to 8: a prefix of each level, the files whose max is below the
 //!    floor, never the level's last file.
 //! 3. Level 0, only with `L0Retention::After`, and only when a snapshot
-//!    exists: a prefix of the level, the files created at or before
-//!    `anchor - l0_retention` whose whole range lies inside the union of the
-//!    level 1 to 8 files rule 2 keeps, or wholly below the floor. Never the
-//!    last file. Go compares only L1's max; a file that L1 does not cover
-//!    stays here. The floor clause is the one place this deletes more than
-//!    coverage alone: rule 2 removes the level 1 file that covered such a
-//!    file, so without it the file would stay forever and, as the prefix stops
-//!    at it, block every level-0 delete above it. Nothing under the floor is
-//!    needed by a retained snapshot or by a restore planned on the floor's.
+//!    exists: the files created at or before `anchor - l0_retention` whose
+//!    whole range lies inside the union of the level 1 to 8 files rule 2
+//!    keeps, or wholly below the floor. Never the last file. Go compares only
+//!    L1's max; a file that L1 does not cover stays here, and the files above
+//!    it that are covered still go (each is judged alone). The floor clause is
+//!    the one place this deletes more than coverage alone: rule 2 removes the
+//!    level 1 file that covered such a file, so without it the file would
+//!    stay forever. Nothing under the floor is needed by a retained snapshot
+//!    or by a restore planned on the floor's. The age test still stops the
+//!    scan: stamps follow transactions, so the files after a young one are
+//!    young.
 //!
 //! The candidates are sorted by key and cut to [`MAX_DELETE`]. Key order puts
 //! levels 0 to 8 before the snapshots, so the floor's snapshot is still listed
@@ -57,7 +60,7 @@ use std::time::Duration;
 
 use lsr_ltx::{Timestamp, Txid};
 
-use super::{DeleteJob, Hold, L0Retention, MAX_DELETE, Maintenance};
+use super::{DeleteJob, Hold, L0Retention, MAX_DELETE, MaintainState, Maintenance};
 use crate::inventory::{Inventory, is_snapshot_start};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::plan::{PlanOutcome, RestoreTarget, plan};
@@ -94,14 +97,15 @@ pub(super) fn retention(
     now: Timestamp,
     config: &Maintenance,
     published: Option<Txid>,
+    state: &mut MaintainState,
 ) -> Retention {
-    if let Some(hold) = gate(inventory, published) {
+    if let Some(hold) = gate(inventory, published, state) {
         return Retention::Held(hold);
     }
     let Some(newest_stamp) = inventory.files().iter().map(|f| f.created_at).max() else {
         return Retention::Wait { until: None };
     };
-    let anchor = now.unix_millis().min(newest_stamp.unix_millis());
+    let anchor = state.raise_anchor(now.unix_millis().min(newest_stamp.unix_millis()));
     let found = candidates(inventory, anchor, newest_stamp.unix_millis(), config);
     let until = found.wake.map(Timestamp::from_unix_millis);
     if found.keys.is_empty() {
@@ -121,8 +125,9 @@ pub(super) fn retention(
     }
 }
 
-fn gate(inventory: &Inventory, published: Option<Txid>) -> Option<Hold> {
-    foreign_names(inventory)
+fn gate(inventory: &Inventory, published: Option<Txid>, state: &MaintainState) -> Option<Hold> {
+    distrusted(inventory, state)
+        .or_else(|| foreign_names(inventory))
         .or_else(|| {
             inventory
                 .malformed_snapshots()
@@ -134,6 +139,18 @@ fn gate(inventory: &Inventory, published: Option<Txid>) -> Option<Hold> {
         .or_else(|| latest_unplannable(inventory))
         .or_else(|| unstamped(inventory))
         .or_else(|| stamps_backwards(inventory))
+}
+
+/// A compaction output the store rejected that is still listed.
+fn distrusted(inventory: &Inventory, state: &MaintainState) -> Option<Hold> {
+    Level::ALL.iter().skip(1).take(8).find_map(|level| {
+        let key = state.distrusted_at(*level)?;
+        inventory
+            .level(*level)
+            .iter()
+            .any(|info| info.key == key)
+            .then_some(Hold::OutputDistrusted { key })
+    })
 }
 
 fn foreign_names(inventory: &Inventory) -> Option<Hold> {
@@ -340,7 +357,7 @@ fn level_zero(
     for info in files.iter().take(files.len().saturating_sub(1)) {
         let below = floor.is_some_and(|floor| info.key.range().max() < floor);
         if !below && !covered(&cover, info) {
-            return;
+            continue;
         }
         let created = info.created_at.unix_millis();
         if created > cutoff {

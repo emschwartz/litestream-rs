@@ -1,13 +1,19 @@
 //! The maintenance planner and its executor.
 //!
-//! [`due`] is a pure function of a listing, an instant and a schedule: it
-//! reads nothing else and keeps nothing between calls, so a restarted process
-//! or a second process reading the same listing plans the same job. It returns
-//! one job; the caller runs it, lists again and asks again.
+//! [`due`] is a function of a listing, an instant, a schedule and a small
+//! [`MaintainState`] (backoff, distrusted outputs, the retention anchor's
+//! high-water mark; see `state`). A fresh state plans from the listing alone,
+//! so a restarted process reading the same listing plans the same job. It
+//! returns one job; the caller runs it, records the outcome, lists again and
+//! asks again.
+//!
+//! A level whose last job failed is skipped until its retry time, so one
+//! failing level never keeps the snapshot or the deletes from being planned.
 //!
 //! Order: compaction of level 1, then 2, up to the top level, then the
 //! snapshot. Lower levels first so a higher level compacts what the one below
-//! just produced.
+//! just produced. A level holding a distrusted output (one the store rejected
+//! and that could not be removed) plans that key's delete before anything else.
 //!
 //! A level compacts when its destination's newest file was not created inside
 //! the current window (`go_truncate(now, interval)`), and then only the source
@@ -33,6 +39,7 @@
 
 mod config;
 mod retain;
+mod state;
 
 use lsr_ltx::{Timestamp, Txid};
 use thiserror::Error;
@@ -41,10 +48,11 @@ use crate::compact::{CompactError, CompactionInputs, MAX_INPUTS, compact};
 use crate::inventory::{Inventory, is_snapshot_start};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::plan::PlanOutcome;
-use crate::store::{ObjectStore, StoreError};
+use crate::store::{CorruptCause, ObjectStore, StoreError};
 use retain::{Retention, retention};
 
 pub use config::{ConfigError, Interval, IntervalError, L0Retention, Maintenance, Setting};
+pub use state::MaintainState;
 
 #[cfg(test)]
 #[expect(
@@ -247,6 +255,13 @@ pub enum Hold {
         /// Why; never a plan.
         outcome: PlanOutcome,
     },
+    /// A compaction output the store rejected and that could not be deleted:
+    /// until it is gone the listing holds a file that may not decode.
+    #[error("{key} was rejected by the store and is still listed")]
+    OutputDistrusted {
+        /// The output.
+        key: FileKey,
+    },
     /// A snapshot or level-0 file with no usable stamp.
     #[error("{key} has no creation time")]
     Unstamped {
@@ -317,21 +332,28 @@ enum Step {
 }
 
 /// The next job, or when to ask again. See the module docs for the rules.
+/// Writes only the state's anchor mark and the forgetting of distrusted keys
+/// the listing no longer holds.
 #[must_use]
 pub fn due(
     inventory: &Inventory,
     now: Timestamp,
     config: &Maintenance,
     published: Option<Txid>,
+    state: &mut MaintainState,
 ) -> Due {
+    state.forget_unlisted(|key| inventory.level(key.level()).iter().any(|f| f.key == *key));
     let mut until: Option<Timestamp> = None;
     let steps = Level::ALL
         .iter()
         .skip(1)
         .take(usize::from(config.top().get()))
-        .map(|level| plan_level(inventory, now, config, *level))
+        .map(|level| plan_level(inventory, now, config, *level, state))
         .chain(std::iter::once_with(|| {
-            plan_snapshot(inventory, now, config, published)
+            match state.backing_off_until(Level::SNAPSHOT, now) {
+                Some(retry) => Step::Wait(retry),
+                None => plan_snapshot(inventory, now, config, published),
+            }
         }));
     for step in steps {
         match step {
@@ -340,7 +362,7 @@ pub fn due(
             Step::Idle => {}
         }
     }
-    match retention(inventory, now, config, published) {
+    match retention(inventory, now, config, published, state) {
         Retention::Delete(job) => Due::Run(Job::Delete(job)),
         Retention::Wait { until: wake } => Due::Wait {
             until: soonest(until, wake),
@@ -360,13 +382,29 @@ fn soonest(a: Option<Timestamp>, b: Option<Timestamp>) -> Option<Timestamp> {
     }
 }
 
-fn plan_level(inventory: &Inventory, now: Timestamp, config: &Maintenance, dst: Level) -> Step {
+fn plan_level(
+    inventory: &Inventory,
+    now: Timestamp,
+    config: &Maintenance,
+    dst: Level,
+    state: &MaintainState,
+) -> Step {
     let (Some(src_level), Some(interval)) = (
         Level::new(dst.get().saturating_sub(1)),
         config.interval(dst),
     ) else {
         return Step::Idle;
     };
+    if let Some(retry) = state.backing_off_until(dst, now) {
+        return Step::Wait(retry);
+    }
+    // A rejected output is never an input: its own level deletes it first.
+    if state.distrusted_at(src_level).is_some() {
+        return Step::Idle;
+    }
+    if let Some(bad) = state.distrusted_at(dst) {
+        return DeleteJob::new(vec![bad]).map_or(Step::Idle, |job| Step::Run(Job::Delete(job)));
+    }
     let dst_files = inventory.level(dst);
     let dst_last = dst_files.last();
     let dst_max = dst_last.map(|info| info.key.range().max());
@@ -451,6 +489,17 @@ pub enum MaintainError {
     /// visible; the next [`due`] on a fresh listing settles it.
     #[error("compaction: {0}")]
     Compact(#[source] CompactError),
+    /// The store rejected the output (size or checksum mismatch) and deleting
+    /// it failed too: it may be listed and undecodable. [`MaintainState`]
+    /// remembers the key.
+    #[error("compaction output {key} is corrupt and could not be removed: {source}")]
+    OutputDistrusted {
+        /// The output key.
+        key: FileKey,
+        /// The commit error.
+        #[source]
+        source: CompactError,
+    },
     /// The delete call failed.
     #[error("delete: {0}")]
     Delete(#[source] StoreError),
@@ -481,9 +530,12 @@ pub enum Outcome {
 }
 
 /// Runs one compaction. Level-1 jobs read `local` first and the replica once
-/// when an input is missing there (the local copy may be gone after a
-/// restart); every other level reads the replica. The output always goes to
-/// the replica. Inputs are never deleted.
+/// when an input is missing or does not decode there (the local copy may be
+/// gone after a restart, or rotten); every other level reads the replica. The
+/// output always goes to the replica. Inputs are never deleted.
+///
+/// When the store rejected the output's commit, the output key is deleted
+/// before returning: a listing would otherwise show it as coverage.
 pub async fn run_compact<L: ObjectStore, R: ObjectStore>(
     job: &CompactJob,
     local: &L,
@@ -491,7 +543,7 @@ pub async fn run_compact<L: ObjectStore, R: ObjectStore>(
 ) -> Outcome {
     let result = if job.level().get() == 1 {
         match compact(local, replica, job.inputs(), job.level()).await {
-            Err(CompactError::InputVanished { .. }) => {
+            Err(CompactError::InputVanished { .. } | CompactError::Input { .. }) => {
                 compact(replica, replica, job.inputs(), job.level()).await
             }
             other => other,
@@ -505,6 +557,9 @@ pub async fn run_compact<L: ObjectStore, R: ObjectStore>(
             bytes_read: done.bytes_read(),
         },
         Err(CompactError::InputVanished { key }) => Outcome::Replan { key },
+        Err(CompactError::Dest(err)) if leaves_bad_output(&err) => {
+            remove_rejected(replica, job.output_key(), err).await
+        }
         Err(
             err @ (CompactError::Source(_)
             | CompactError::Dest(_)
@@ -513,6 +568,36 @@ pub async fn run_compact<L: ObjectStore, R: ObjectStore>(
             | CompactError::SnapshotLevel { .. }
             | CompactError::Inputs(_)),
         ) => Outcome::Failed(MaintainError::Compact(err)),
+    }
+}
+
+/// Whether a failed destination commit may have left an object under the output
+/// key that a listing would show and that does not decode.
+const fn leaves_bad_output(err: &StoreError) -> bool {
+    match err {
+        StoreError::Corrupt { cause, .. } => match cause {
+            CorruptCause::CommitSizeMismatch { removed, .. } => !*removed,
+            CorruptCause::ChecksumMismatch { .. } => true,
+            CorruptCause::NotARegularFile
+            | CorruptCause::TimestampOutOfRange
+            | CorruptCause::BadStamp => false,
+        },
+        StoreError::Transient { .. }
+        | StoreError::Throttled { .. }
+        | StoreError::Auth { .. }
+        | StoreError::NotFound { .. }
+        | StoreError::ScratchExhausted { .. }
+        | StoreError::Refused { .. } => false,
+    }
+}
+
+async fn remove_rejected<R: ObjectStore>(replica: &R, key: FileKey, err: StoreError) -> Outcome {
+    match replica.delete(&[key]).await {
+        Ok(()) => Outcome::Failed(MaintainError::Compact(CompactError::Dest(err))),
+        Err(_unremoved) => Outcome::Failed(MaintainError::OutputDistrusted {
+            key,
+            source: CompactError::Dest(err),
+        }),
     }
 }
 
