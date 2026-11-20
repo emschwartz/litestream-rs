@@ -315,24 +315,61 @@ fn level_range(summary: &LevelSummary) -> Option<TxidRange> {
     summary.range()
 }
 
+const LEVEL_HEADERS: [&str; 6] = [
+    "level",
+    "files",
+    "bytes",
+    "first transaction",
+    "last transaction",
+    "foreign",
+];
+
+/// Columns padded to the widest of header and values, two spaces apart; the
+/// numeric columns (all but the two transaction ids) are right-aligned.
+fn levels_table(rows: &[[String; 6]]) -> String {
+    let mut widths = LEVEL_HEADERS.map(str::len);
+    for row in rows {
+        for (width, cell) in widths.iter_mut().zip(row) {
+            *width = (*width).max(cell.len());
+        }
+    }
+    let mut out = String::new();
+    let header = LEVEL_HEADERS.map(str::to_owned);
+    for row in std::iter::once(&header).chain(rows) {
+        let cells: Vec<String> = row
+            .iter()
+            .zip(widths)
+            .enumerate()
+            .map(|(column, (cell, width))| {
+                if matches!(column, 3 | 4) {
+                    format!("{cell:<width$}")
+                } else {
+                    format!("{cell:>width$}")
+                }
+            })
+            .collect();
+        putln!(out, "{}", cells.join("  ").trim_end());
+    }
+    out
+}
+
 fn verify_text(report: &Report, depth: Depth) -> String {
-    let mut out =
-        String::from("level  files  bytes  first transaction  last transaction  foreign\n");
+    let mut rows = Vec::new();
     for (level, summary) in Level::ALL.iter().zip(report.levels()) {
-        let range = level_range(summary);
         if summary.files() == 0 && summary.skipped() == 0 {
             continue;
         }
-        let first = range.map_or("-".to_owned(), |r| r.min().to_string());
-        let last = range.map_or("-".to_owned(), |r| r.max().to_string());
-        putln!(
-            out,
-            "{level:<7}{:<7}{:<7}{first:<19}{last:<18}{}",
-            summary.files(),
-            summary.bytes(),
-            summary.skipped()
-        );
+        let range = level_range(summary);
+        rows.push([
+            level.to_string(),
+            summary.files().to_string(),
+            summary.bytes().to_string(),
+            range.map_or("-".to_owned(), |r| r.min().to_string()),
+            range.map_or("-".to_owned(), |r| r.max().to_string()),
+            summary.skipped().to_string(),
+        ]);
     }
+    let mut out = levels_table(&rows);
     putln!(out, "latest: {}", plan_outcome(report.latest()));
     match depth {
         Depth::Names => out.push_str("depth: names (no file was read)\n"),
@@ -499,4 +536,49 @@ fn files_json(inventory: &Inventory) -> String {
     ]);
     out.push('\n');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LEVEL_HEADERS, levels_table};
+
+    fn row(cells: [&str; 6]) -> [String; 6] {
+        cells.map(str::to_owned)
+    }
+
+    /// A 1-digit level, 3-digit file count and 12-digit byte count once ran the columns together.
+    #[test]
+    fn level_table_cells_survive_splitting_on_two_spaces() {
+        let tx = "000000000000000f";
+        let rows = [
+            row(["0", "624", "123456789012", tx, tx, "0"]),
+            row(["9", "1", "7", "-", "-", "12"]),
+        ];
+        let table = levels_table(&rows);
+        let lines: Vec<&str> = table.lines().collect();
+        assert_eq!(lines.len(), 3);
+        for (line, want) in lines.iter().zip(
+            std::iter::once(row([
+                "level",
+                "files",
+                "bytes",
+                "first transaction",
+                "last transaction",
+                "foreign",
+            ]))
+            .chain(rows),
+        ) {
+            let cells: Vec<&str> = line
+                .split("  ")
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+                .collect();
+            assert_eq!(cells.len(), LEVEL_HEADERS.len(), "{line:?}");
+            assert_eq!(
+                cells,
+                want.iter().map(String::as_str).collect::<Vec<_>>(),
+                "{line:?}"
+            );
+        }
+    }
 }
