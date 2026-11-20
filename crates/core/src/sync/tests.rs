@@ -502,6 +502,71 @@ fn a_clock_stepping_backwards_gets_an_equal_timestamp_and_one_clamped() {
 }
 
 // The pure helpers.
+#[test]
+fn an_equal_clock_is_not_a_clamp() {
+    assert_eq!(clamp(Some(ts(5)), ts(5)), (ts(5), None));
+}
+
+#[test]
+fn the_default_cap_is_go_s_64_mib() {
+    assert_eq!(SyncConfig::default().cap, NonZeroU64::new(64 * 1024 * 1024));
+}
+
+/// An upload that keeps each chunk it is given and publishes nothing.
+#[derive(Default)]
+struct Chunks(Vec<Vec<u8>>);
+
+impl Upload for Chunks {
+    fn write(&mut self, chunk: &[u8]) -> impl Future<Output = Result<(), StoreError>> + Send {
+        self.0.push(chunk.to_vec());
+        std::future::ready(Ok(()))
+    }
+
+    fn commit(self) -> impl Future<Output = Result<FileInfo, StoreError>> + Send {
+        std::future::ready(Err(StoreError::Transient {
+            op: StoreOp::Upload,
+            kind: io::ErrorKind::Other,
+        }))
+    }
+
+    fn abort(self) -> impl Future<Output = Result<(), StoreError>> + Send {
+        std::future::ready(Ok(()))
+    }
+}
+
+/// The encoder's output is held until a mebibyte is ready, so a file smaller
+/// than that reaches the store in one write, not one per page.
+#[test]
+fn a_small_file_reaches_the_upload_in_one_write() {
+    let wal = FakeWal::new(PS, Salts { salt1: 1, salt2: 2 });
+    commit(&wal, &[1], 1);
+    let mut db = FakeDb::new(PS);
+    for n in 1..=4 {
+        db.write_page(pg(n), &[db_fill(n); 512]);
+    }
+    db.set_page_count(4);
+    let plan: Vec<PageFrom> = (1..=4).map(|n| PageFrom::Db(pg(n))).collect();
+    let origin = WalOrigin::new(32, 0, 1, 2).unwrap();
+    let header = Header::new(header_fields(Txid::MIN, nz(4), PS, origin, ts(1), 0)).unwrap();
+    let mut chunks = Chunks::default();
+    let mut wal = reader(wal.file_bytes());
+    block_on(fill(
+        &mut chunks,
+        header,
+        &plan,
+        &mut wal,
+        &mut db,
+        Fault::from_staging,
+    ))
+    .unwrap();
+    assert_eq!(chunks.0.len(), 1);
+    let (_, pages) = decode(&chunks.0[0]);
+    assert_eq!(
+        fills(&pages),
+        (1..=4).map(|n| (n, db_fill(n))).collect::<Vec<_>>()
+    );
+}
+
 fn txs() -> impl Strategy<Value = Vec<(Vec<u32>, u32)>> {
     prop::collection::vec((prop::collection::vec(1_u32..8, 1..4), 1_u32..10), 1..5)
 }

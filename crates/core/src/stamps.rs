@@ -188,6 +188,22 @@ mod tests {
     }
 
     #[test]
+    fn the_ledger_counts_each_stamp_resolved_through_the_store() {
+        let store = MemStore::with_listed_last_modified();
+        let files = filled(&store, 2);
+        let mut seen = Vec::new();
+        let mut step = |stamps: &Stamps| {
+            seen.push((stamps.len(), stamps.is_empty()));
+            match files.iter().find(|f| stamps.exact(f).is_none()) {
+                Some(next) => Resolve::Need(*next),
+                None => Resolve::Done(()),
+            }
+        };
+        block_on(resolve(&store, &mut step)).unwrap();
+        assert_eq!(seen, vec![(0, true), (1, false), (2, false)]);
+    }
+
+    #[test]
     fn stored_listing_resolves_with_no_calls() {
         let store = MemStore::new();
         let files = filled(&store, 2);

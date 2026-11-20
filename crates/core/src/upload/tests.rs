@@ -462,6 +462,27 @@ fn a_listing_never_moves_confirmed_backwards_through_a_size_check() {
     assert_eq!(listed.state, UploadState::At(Some(txid(1))));
 }
 
+/// A tail that equals what is already confirmed was confirmed by its own
+/// commit, so the listing does not read it back: a read that would fail
+/// changes nothing.
+#[test]
+fn a_listing_does_not_read_back_a_tail_already_confirmed() {
+    let (staging, remote) = (MemStore::new(), MemStore::new());
+    put_bytes(&remote, key(1), &encode(1));
+    remote.inject_failure(
+        StoreOp::Read,
+        StoreError::Transient {
+            op: StoreOp::Read,
+            kind: ErrorKind::TimedOut,
+        },
+    );
+    let state = UploadState::ListFirst {
+        confirmed: Some(txid(1)),
+    };
+    let listed = next(state, &staging, &remote, 1).unwrap();
+    assert_eq!(listed.state, UploadState::At(Some(txid(1))));
+}
+
 #[test]
 fn a_commit_that_answers_with_a_wrong_size_is_ambiguous_not_confirmed() {
     let (staging, remote) = (MemStore::new(), Probe::default());
@@ -572,11 +593,23 @@ fn a_staged_file_larger_than_one_chunk_is_streamed_whole() {
             .unwrap();
     }
     let bytes = encoder.finish(None).unwrap().0;
-    assert!(bytes.len() > usize::try_from(CHUNK).unwrap() * 2);
+    let quarter_mib = 256 * 1024;
+    assert!(bytes.len() > quarter_mib * 2);
     put_bytes(&staging, key(1), &bytes);
+    let staging = Probe {
+        inner: staging,
+        log: Arc::default(),
+    };
     let put = next(UploadState::At(None), &staging, &remote, 1).unwrap();
     assert!(matches!(put.did, Did::Put(_)));
     assert_eq!(read_all(&remote, &key(1)), bytes);
+    // Read a quarter mebibyte at a time: few round trips, bounded memory.
+    let reads = staging.log().reads;
+    assert_eq!(
+        usize::try_from(reads).unwrap(),
+        bytes.len().div_ceil(quarter_mib),
+        "{reads} reads"
+    );
 }
 
 #[test]

@@ -480,6 +480,42 @@ fn rule_9_at_boot_a_mismatch_or_a_page_the_tip_lacks_snapshots() {
     }
 }
 
+/// With the tip's end at the WAL's start there is no frame before it, so the
+/// miss a boot read reports names nothing rules 7 and 8 could judge: a boot tip
+/// that did not match is rule 9 whatever the miss.
+#[test]
+fn rule_9_at_boot_a_tip_ending_at_the_wal_start_has_no_frame_to_miss() {
+    let wal = fresh();
+    let TipView::Readable {
+        txid,
+        origin,
+        commit,
+        page_size,
+        timestamp,
+        ..
+    } = boot(&wal, 2)
+    else {
+        panic!("readable");
+    };
+    let (salt1, salt2) = origin.salts();
+    let origin = WalOrigin::new(32, 0, salt1, salt2).unwrap();
+    for miss in [Miss::Truncated, Miss::NotACommit, Miss::Moved] {
+        let tip = TipView::Readable {
+            txid,
+            origin,
+            commit,
+            page_size,
+            timestamp,
+            last_page: LastPageCheck::NoFrame(miss),
+        };
+        assert_eq!(
+            recover(Some(Tip::Boot(&tip)), &view(&wal), None),
+            snapshot(Some(2), SnapshotCause::LastPageMismatch),
+            "{miss:?}"
+        );
+    }
+}
+
 // Rule 10.
 #[test]
 fn rule_10_a_running_position_continues_as_it_is() {

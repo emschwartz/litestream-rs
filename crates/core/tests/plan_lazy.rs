@@ -478,6 +478,38 @@ mod lazy {
         );
     }
 
+    /// The count is a measurement, not a placeholder: sorting k files takes at
+    /// least k - 1 comparisons, and every file that enters the heap adds more.
+    #[test]
+    fn comparisons_count_both_sorts_and_every_heap_step() {
+        let mut files = vec![f(9, 1, 4, 45)];
+        files.extend((1..=8u64).map(|n| f(0, n, n, i64::try_from(n).unwrap() * 10)));
+        let store = store(&files, false);
+        let inv = block_on(Inventory::load(&store)).unwrap();
+        let mut planner = AsOfPlanner::new(&inv, at(1_000));
+        let sorted = planner.comparisons();
+        // Two transaction-1 files (one comparison at least) and eight
+        // level-0 files (seven at least).
+        let least = 1 + 7;
+        assert!(sorted >= least, "{sorted} comparisons for two sorts");
+        let mut step = |stamps: &Stamps| planner.advance(stamps);
+        let got = block_on(resolve(&store, &mut step)).unwrap();
+        assert_eq!(
+            reduce(&got.value),
+            O::Plan(vec![
+                key(&files[0]),
+                key(&f(0, 5, 5, 0)),
+                key(&f(0, 6, 6, 0)),
+                key(&f(0, 7, 7, 0)),
+                key(&f(0, 8, 8, 0))
+            ])
+        );
+        assert!(
+            planner.comparisons() > sorted,
+            "the heap steps added nothing to {sorted}"
+        );
+    }
+
     /// The step contract seen from outside: an exact listing is decided on the
     /// first advance whichever way the planner is driven.
     #[test]

@@ -450,6 +450,8 @@ fn abort_passes_through() {
         let mut up = store.begin_upload(&key(), stamp()).await.unwrap();
         up.write(b"abcd").await.unwrap();
         up.abort().await.unwrap();
+        // Begin, write and abort are one call each, like a commit.
+        assert_eq!(store.stats().calls, 3);
         let listing = store.list(Level::ZERO, None, limit()).await.unwrap();
         assert!(listing.files.is_empty());
     });

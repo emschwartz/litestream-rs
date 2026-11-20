@@ -1207,6 +1207,19 @@ mod tests {
         );
     }
 
+    /// A refused snapshot past a hole is still the refused file, not a gap:
+    /// only a usable file marks where history resumes.
+    #[test]
+    fn a_refused_snapshot_past_a_hole_is_reported_as_refused() {
+        let files = inv(&[at(9, 1, 3), at(9, 5, 9)]);
+        let refused = PlanOutcome::MalformedSnapshot {
+            have_through: txid(3),
+            file: key(9, 5, 9),
+        };
+        assert_eq!(plan(&files, KeyTarget::Latest), refused);
+        assert_eq!(plan_reference(&files, RestoreTarget::Latest), refused);
+    }
+
     #[test]
     fn a_transaction_beyond_the_newest_is_its_own_outcome() {
         let files = inv(&[at(9, 1, 3), at(0, 4, 4)]);
