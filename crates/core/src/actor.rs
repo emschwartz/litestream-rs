@@ -993,7 +993,9 @@ impl Actor {
             Err(tick) => return tick,
         };
         let written = write_snapshot(&proof, &mut *env.wal, &mut *env.db, env.remote, now).await;
-        self.maintain.state.record_snapshot(now, written.is_ok());
+        self.maintain
+            .state
+            .record_snapshot(now, written.as_ref().err().map(|failed| &failed.fault));
         match written {
             Ok(info) => {
                 self.lanes.get_mut(Lane::Maintain).succeed();

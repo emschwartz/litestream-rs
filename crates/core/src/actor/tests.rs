@@ -844,3 +844,46 @@ fn a_failed_prune_blocks_nothing_else() {
     rig.settle(&mut actor, T0 + 2_000);
     assert_eq!(staged(&rig), vec![2, 3]);
 }
+
+#[test]
+fn a_failing_retention_delete_waits_and_doubles() {
+    let (mut rig, mut actor) = caught_up();
+    for n in 2..=4 {
+        rig.commit(n);
+        rig.settle(&mut actor, T0 + 1);
+    }
+    // The snapshot a day in makes everything below it a retention delete.
+    for _ in 0..2 {
+        rig.remote
+            .inner
+            .inject_failure(StoreOp::Delete, transient(StoreOp::Delete));
+    }
+    let mut now = T0 + 60_000;
+    let (failed_at, until) = loop {
+        let tick = rig.tick(&mut actor, now);
+        if let Some(Event::Retrying { until, .. }) = event(&tick) {
+            break (now, *until);
+        }
+        match next_of(&tick) {
+            Some(Next::Now) => {}
+            Some(Next::At(at)) => now = at.unix_millis(),
+            next => panic!("no retention delete ran: {tick:?} {next:?}"),
+        }
+    };
+    assert_eq!(until, ts(failed_at + 1_000));
+    // Before its wait the actor neither relists nor retries.
+    let io = rig.io();
+    for at in [failed_at, failed_at + 999] {
+        let tick = rig.tick(&mut actor, at);
+        assert_eq!(event(&tick), Some(&Event::Idle), "{tick:?}");
+        assert_eq!(next_of(&tick), Some(Next::At(until)));
+    }
+    assert_eq!(rig.io(), io, "relisted or retried before the wait");
+    // At the wait it relists, fails again, and the wait doubles.
+    let again = rig.settle(&mut actor, until.unix_millis());
+    let second = again.iter().find_map(|tick| match event(tick) {
+        Some(Event::Retrying { until, .. }) => Some(*until),
+        Some(_) | None => None,
+    });
+    assert_eq!(second, Some(ts(until.unix_millis() + 2_000)), "{again:?}");
+}

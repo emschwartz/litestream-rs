@@ -1395,6 +1395,28 @@ fn a_failing_level_backs_off_and_others_run() {
 }
 
 #[test]
+fn a_throttled_job_waits_the_later_of_backoff_and_retry_after() {
+    let (_local, _replica, mut state, job) = rejected_setup();
+    let now = at(T0 + 3_600_000);
+    let throttled = |secs: u64| {
+        Outcome::Failed(MaintainError::Compact(CompactError::Dest(
+            StoreError::Throttled {
+                op: StoreOp::Upload,
+                retry_after: Some(Duration::from_secs(secs)),
+            },
+        )))
+    };
+    let job = Job::Compact(job);
+    // Longer than the ten-second backoff: the store's ask wins.
+    state.record(now, &job, &throttled(30));
+    assert_eq!(state.retry_at(&job, now), Some(at(T0 + 3_630_000)));
+    // Shorter than the doubled backoff (twenty seconds): the backoff wins,
+    // and it doubled on its own schedule although the last wait was longer.
+    state.record(now, &job, &throttled(3));
+    assert_eq!(state.retry_at(&job, now), Some(at(T0 + 3_620_000)));
+}
+
+#[test]
 fn a_corrupt_local_input_falls_back_to_the_replica_copy() {
     let (local, replica) = (MemStore::new(), MemStore::new());
     put(&replica, 0, 2, T0);

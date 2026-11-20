@@ -30,8 +30,32 @@ use std::time::Duration;
 use lsr_ltx::Timestamp;
 
 use super::{CompactJob, DeleteJob, Job, MaintainError, Outcome};
-use crate::fault::retry_wait;
+use crate::compact::CompactError;
+use crate::fault::{Fault, retry_wait};
 use crate::layout::{FileKey, Level};
+use crate::store::StoreError;
+
+/// The wait a throttled store asked for, if the job failed on one.
+const fn retry_after(err: &MaintainError) -> Option<Duration> {
+    let store = match err {
+        MaintainError::Compact(err) | MaintainError::OutputDistrusted { source: err, .. } => {
+            match err {
+                CompactError::Source(err) | CompactError::Dest(err) => err,
+                CompactError::InputVanished { .. }
+                | CompactError::Input { .. }
+                | CompactError::Encode(_)
+                | CompactError::Inputs(_)
+                | CompactError::SnapshotLevel { .. } => return None,
+            }
+        }
+        MaintainError::Delete(err) => err,
+    };
+    if let StoreError::Throttled { retry_after, .. } = store {
+        *retry_after
+    } else {
+        None
+    }
+}
 
 /// The first wait after a failure; each further failure doubles it.
 const RETRY_BASE: Duration = Duration::from_secs(10);
@@ -63,12 +87,21 @@ impl MaintainState {
         }
     }
 
-    /// Notes how a snapshot job ended at `now`.
-    pub fn record_snapshot(&mut self, now: Timestamp, succeeded: bool) {
-        if succeeded {
-            self.retries.remove(&Level::SNAPSHOT);
-        } else {
-            self.fail(Level::SNAPSHOT, now);
+    /// Notes how a snapshot job ended at `now`: `None` for a success, else
+    /// the fault it failed with.
+    pub fn record_snapshot(&mut self, now: Timestamp, failed: Option<&Fault>) {
+        match failed {
+            None => {
+                self.retries.remove(&Level::SNAPSHOT);
+            }
+            Some(fault) => {
+                let hint = if let Fault::StoreThrottled { retry_after } = fault {
+                    *retry_after
+                } else {
+                    None
+                };
+                self.fail(Level::SNAPSHOT, now, hint);
+            }
         }
     }
 
@@ -80,12 +113,14 @@ impl MaintainState {
             }
             // The listing changed under the job; asking again is the answer.
             Outcome::Replan { .. } => {}
-            Outcome::Failed(MaintainError::OutputDistrusted { key, .. }) => {
+            Outcome::Failed(err @ MaintainError::OutputDistrusted { key, .. }) => {
                 self.distrusted.insert(level, *key);
-                self.fail(level, now);
+                self.fail(level, now, retry_after(err));
             }
-            Outcome::Failed(MaintainError::Compact(_) | MaintainError::Delete(_))
-            | Outcome::Deleted { .. } => self.fail(level, now),
+            Outcome::Failed(err @ (MaintainError::Compact(_) | MaintainError::Delete(_))) => {
+                self.fail(level, now, retry_after(err));
+            }
+            Outcome::Deleted { .. } => self.fail(level, now, None),
         }
     }
 
@@ -102,19 +137,23 @@ impl MaintainState {
                     self.distrusted.remove(&level);
                     self.retries.remove(&level);
                 }
-                Outcome::Failed(_) | Outcome::Compacted { .. } | Outcome::Replan { .. } => {
-                    self.fail(level, now);
+                Outcome::Failed(err) => self.fail(level, now, retry_after(err)),
+                Outcome::Compacted { .. } | Outcome::Replan { .. } => {
+                    self.fail(level, now, None);
                 }
             }
         }
     }
 
-    fn fail(&mut self, level: Level, now: Timestamp) {
+    /// Counts a failure at `level` and waits the later of its doubling
+    /// backoff and the store's `retry_after`: never shorter than either. The
+    /// count, not the last wait, drives the doubling.
+    fn fail(&mut self, level: Level, now: Timestamp, retry_after: Option<Duration>) {
         let failures = self
             .retries
             .get(&level)
             .map_or(NonZeroU32::MIN, |retry| retry.failures.saturating_add(1));
-        let wait = retry_wait(failures, RETRY_BASE);
+        let wait = retry_wait(failures, RETRY_BASE).max(retry_after.unwrap_or_default());
         let until = Timestamp::from_unix_millis(
             now.unix_millis()
                 .saturating_add(i64::try_from(wait.as_millis()).unwrap_or(i64::MAX)),
