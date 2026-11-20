@@ -1,0 +1,194 @@
+{
+  "format": 1,
+  "go_version": "v0.5.0",
+  "scenario": "mid-chain-gap",
+  "seed": 1705,
+  "page_size": 4096,
+  "max_page_count": 22,
+  "final_page_count": 15,
+  "files": [
+    {
+      "key": "ltx/0/000000000000002e-000000000000002e.ltx",
+      "size": 208,
+      "created_at_ms": 1795182545918
+    },
+    {
+      "key": "ltx/0/000000000000002f-000000000000002f.ltx",
+      "size": 208,
+      "created_at_ms": 1795182546020
+    },
+    {
+      "key": "ltx/0/0000000000000031-0000000000000031.ltx",
+      "size": 208,
+      "created_at_ms": 1795182546214
+    },
+    {
+      "key": "ltx/0/0000000000000032-0000000000000032.ltx",
+      "size": 208,
+      "created_at_ms": 1795182546314
+    },
+    {
+      "key": "ltx/0/0000000000000033-0000000000000033.ltx",
+      "size": 208,
+      "created_at_ms": 1795182546414
+    },
+    {
+      "key": "ltx/0/0000000000000034-0000000000000034.ltx",
+      "size": 208,
+      "created_at_ms": 1795182546517
+    },
+    {
+      "key": "ltx/0/0000000000000035-0000000000000035.ltx",
+      "size": 208,
+      "created_at_ms": 1795182546614
+    },
+    {
+      "key": "ltx/0/0000000000000036-0000000000000036.ltx",
+      "size": 208,
+      "created_at_ms": 1795182546714
+    },
+    {
+      "key": "ltx/1/000000000000000e-000000000000000e.ltx",
+      "size": 208,
+      "created_at_ms": 1795182540013
+    },
+    {
+      "key": "ltx/1/000000000000000f-000000000000000f.ltx",
+      "size": 208,
+      "created_at_ms": 1795182541001
+    },
+    {
+      "key": "ltx/1/0000000000000010-0000000000000010.ltx",
+      "size": 208,
+      "created_at_ms": 1795182542001
+    },
+    {
+      "key": "ltx/1/0000000000000011-0000000000000011.ltx",
+      "size": 208,
+      "created_at_ms": 1795182543001
+    },
+    {
+      "key": "ltx/1/0000000000000012-000000000000001a.ltx",
+      "size": 208,
+      "created_at_ms": 1795182544007
+    },
+    {
+      "key": "ltx/1/000000000000001b-0000000000000024.ltx",
+      "size": 208,
+      "created_at_ms": 1795182545003
+    },
+    {
+      "key": "ltx/1/0000000000000025-000000000000002e.ltx",
+      "size": 208,
+      "created_at_ms": 1795182546009
+    },
+    {
+      "key": "ltx/2/000000000000000e-000000000000000f.ltx",
+      "size": 208,
+      "created_at_ms": 1795182542001
+    },
+    {
+      "key": "ltx/2/0000000000000010-0000000000000011.ltx",
+      "size": 208,
+      "created_at_ms": 1795182544002
+    },
+    {
+      "key": "ltx/2/0000000000000012-0000000000000024.ltx",
+      "size": 208,
+      "created_at_ms": 1795182546002
+    },
+    {
+      "key": "ltx/3/000000000000000e-000000000000000f.ltx",
+      "size": 208,
+      "created_at_ms": 1795182544001
+    },
+    {
+      "key": "ltx/9/0000000000000001-000000000000000e.ltx",
+      "size": 9586,
+      "created_at_ms": 1795182540014
+    },
+    {
+      "key": "ltx/9/0000000000000001-0000000000000011.ltx",
+      "size": 9586,
+      "created_at_ms": 1795182543002
+    },
+    {
+      "key": "ltx/9/0000000000000001-000000000000002e.ltx",
+      "size": 9586,
+      "created_at_ms": 1795182546019
+    }
+  ],
+  "targets": [
+    {
+      "target": {
+        "kind": "latest"
+      },
+      "outcome": {
+        "kind": "gap",
+        "have_through": 47,
+        "next_starts": 49,
+        "go_refused": true
+      }
+    },
+    {
+      "target": {
+        "kind": "txid",
+        "txid": 49
+      },
+      "outcome": {
+        "kind": "gap",
+        "have_through": 47,
+        "next_starts": 49,
+        "go_refused": true
+      }
+    },
+    {
+      "target": {
+        "kind": "txid",
+        "txid": 51
+      },
+      "outcome": {
+        "kind": "gap",
+        "have_through": 47,
+        "next_starts": 49,
+        "go_refused": true
+      }
+    },
+    {
+      "target": {
+        "kind": "txid",
+        "txid": 54
+      },
+      "outcome": {
+        "kind": "gap",
+        "have_through": 47,
+        "next_starts": 49,
+        "go_refused": true
+      }
+    },
+    {
+      "target": {
+        "kind": "as_of",
+        "unix_ms": 1795182547714
+      },
+      "outcome": {
+        "kind": "gap",
+        "have_through": 47,
+        "next_starts": 49,
+        "go_refused": true
+      }
+    },
+    {
+      "target": {
+        "kind": "as_of",
+        "unix_ms": 1795186146714
+      },
+      "outcome": {
+        "kind": "gap",
+        "have_through": 47,
+        "next_starts": 49,
+        "go_refused": true
+      }
+    }
+  ]
+}
