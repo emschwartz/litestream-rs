@@ -72,10 +72,9 @@ mod matrix {
                 assert_pages_equal(&staged, "rs.db", want, &label);
                 Class::Same
             }
-            (
-                want @ Outcome::Restored { .. },
-                Err(RestoreError::NoPlan(PlanOutcome::AsOfInsideFile { chain, .. })),
-            ) => {
+            (want @ Outcome::Restored { .. }, Err(RestoreError::NoPlan(ref no)))
+                if let PlanOutcome::AsOfInsideFile { chain, .. } = no.outcome() =>
+            {
                 assert!(
                     matches!(entry.target, Target::AsOf { .. }),
                     "{label}: only as-of is inside a file"
@@ -102,11 +101,12 @@ mod matrix {
                     next_starts,
                     ..
                 },
-                Err(RestoreError::NoPlan(PlanOutcome::Gap {
-                    have_through: rs_have,
-                    next_starts: rs_next,
-                })),
-            ) => {
+                Err(RestoreError::NoPlan(ref no)),
+            ) if let PlanOutcome::Gap {
+                have_through: rs_have,
+                next_starts: rs_next,
+            } = no.outcome() =>
+            {
                 assert_eq!(
                     (rs_have.get(), rs_next.get()),
                     (*have_through, *next_starts),
@@ -286,10 +286,14 @@ mod matrix {
                         fs::remove_file(&out).expect("published");
                         restored = restored.saturating_add(1);
                     }
-                    Err(RestoreError::NoPlan(PlanOutcome::NoSnapshot { .. })) => {
+                    Err(RestoreError::NoPlan(ref no))
+                        if matches!(no.outcome(), PlanOutcome::NoSnapshot { .. }) =>
+                    {
                         no_snapshot = no_snapshot.saturating_add(1)
                     }
-                    Err(RestoreError::NoPlan(PlanOutcome::AsOfInsideFile { chain, .. })) => {
+                    Err(RestoreError::NoPlan(ref no))
+                        if let PlanOutcome::AsOfInsideFile { chain, .. } = no.outcome() =>
+                    {
                         let end = RestoreTarget::Txid(chain.reaches());
                         restore_replica(&staged.replica(), end, &out)
                             .expect("sink")

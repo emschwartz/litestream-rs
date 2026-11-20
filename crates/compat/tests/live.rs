@@ -210,10 +210,9 @@ fn go_and_rust_agree_on_instants_between_files() {
             let rs = restore_replica(&staged.replica(), target, &rs_out).expect("sink");
             let (compare, want) = match (&rs, &go) {
                 (Ok(_), GoRestore::Restored) => (true, rs_out),
-                (
-                    Err(RestoreError::NoPlan(PlanOutcome::AsOfInsideFile { chain, .. })),
-                    GoRestore::Restored,
-                ) => {
+                (Err(RestoreError::NoPlan(no)), GoRestore::Restored)
+                    if let PlanOutcome::AsOfInsideFile { chain, .. } = no.outcome() =>
+                {
                     let end = staged.output(&format!("rs-chain-{i}.db"));
                     restore_replica(
                         &staged.replica(),
@@ -224,17 +223,17 @@ fn go_and_rust_agree_on_instants_between_files() {
                     .expect("the chain's own end restores");
                     (true, end)
                 }
-                (
-                    Err(RestoreError::NoPlan(PlanOutcome::NoSnapshot { .. })),
-                    GoRestore::Refused { .. },
-                ) => (false, rs_out),
+                (Err(RestoreError::NoPlan(no)), GoRestore::Refused { .. })
+                    if matches!(no.outcome(), PlanOutcome::NoSnapshot { .. }) =>
+                {
+                    (false, rs_out)
+                }
                 // Deliberately stricter: with no snapshot old enough Go starts a chain at an L0
                 // file that begins at transaction 1; the planner requires a level-9 base
                 // (plan.rs, `only_l0`). Go's result must still be a sound database.
-                (
-                    Err(RestoreError::NoPlan(PlanOutcome::NoSnapshot { .. })),
-                    GoRestore::Restored,
-                ) => {
+                (Err(RestoreError::NoPlan(no)), GoRestore::Restored)
+                    if matches!(no.outcome(), PlanOutcome::NoSnapshot { .. }) =>
+                {
                     integrity_check(&go_out).expect("Go's snapshot-less restore is sound");
                     (false, rs_out)
                 }
