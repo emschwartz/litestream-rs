@@ -343,6 +343,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "lsr-wal"
+version = "0.0.0"
+dependencies = [
+ "lsr-ltx",
+ "proptest",
+ "rusqlite",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "lz4_flex"
 version = "0.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
