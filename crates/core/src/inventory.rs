@@ -1,0 +1,270 @@
+//! One complete picture of a replica: every level's files, listed once.
+//!
+//! The planner works on an [`Inventory`], never on the store, so a plan is a
+//! pure function of what one paging saw. A part-way listing failure is an
+//! error here; an inventory with a missing level or a short level cannot be
+//! built, which keeps "the history looks shorter than it is" out of every
+//! later decision.
+
+use std::collections::BTreeMap;
+
+use lsr_ltx::{Txid, TxidRange};
+use thiserror::Error;
+
+use crate::layout::{FileInfo, FileKey, Level, cmp_range};
+use crate::store::{ObjectStore, PageLimit, StoreError};
+
+/// Why an inventory could not be built.
+#[derive(Clone, PartialEq, Eq, Debug, Error)]
+pub enum InventoryError {
+    /// A page of a listing failed; the inventory would have been short.
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    /// A store returned a cursor that does not move forward, which would page
+    /// forever. A store that does this is broken, not busy.
+    #[error("listing of level {level} returned cursor {cursor:?} that does not advance")]
+    ListingStalled {
+        /// The level being listed.
+        level: Level,
+        /// The cursor that did not advance.
+        cursor: TxidRange,
+    },
+}
+
+/// Whether a file can be the start of a restore chain: a level-9 file whose
+/// range begins at transaction 1. Go also uses any level-9 file as a base;
+/// this port does not, because a base that skips transactions cannot be
+/// proven to hold every page.
+#[must_use]
+pub fn is_snapshot_start(info: &FileInfo) -> bool {
+    info.key.level().is_snapshot() && info.key.range().min() == Txid::MIN
+}
+
+/// Every file of a replica, ascending by key, plus the count of foreign names
+/// each level held.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct Inventory {
+    files: Vec<FileInfo>,
+    skipped: BTreeMap<Level, usize>,
+}
+
+impl Inventory {
+    /// Lists every level to the end. The only async code in the planner.
+    ///
+    /// # Errors
+    /// The first failed page, or a cursor that does not advance. Never a
+    /// partial inventory.
+    pub async fn load<S: ObjectStore>(store: &S) -> Result<Self, InventoryError> {
+        let mut files = Vec::new();
+        let mut skipped = BTreeMap::new();
+        for level in Level::ALL {
+            let mut after: Option<TxidRange> = None;
+            loop {
+                let page = store.list(level, after, PageLimit::MAX).await?;
+                let seen: &mut usize = skipped.entry(level).or_default();
+                *seen = seen.saturating_add(page.skipped);
+                files.extend(page.files);
+                let Some(cursor) = page.next else { break };
+                if after.is_some_and(|prev| cmp_range(cursor, prev).is_le()) {
+                    return Err(InventoryError::ListingStalled { level, cursor });
+                }
+                after = Some(cursor);
+            }
+        }
+        Ok(Self::from_parts(files, skipped))
+    }
+
+    /// An inventory of exactly these files, for tests and callers that
+    /// already hold a listing. A key given twice keeps one entry.
+    pub fn from_files(files: impl IntoIterator<Item = FileInfo>) -> Self {
+        Self::from_parts(files.into_iter().collect(), BTreeMap::new())
+    }
+
+    /// Records the foreign names a level held, as a store's listings counted them.
+    #[must_use]
+    pub fn with_skipped(mut self, level: Level, count: usize) -> Self {
+        self.skipped.insert(level, count);
+        self
+    }
+
+    fn from_parts(mut files: Vec<FileInfo>, skipped: BTreeMap<Level, usize>) -> Self {
+        files.sort_by_key(|info| info.key);
+        files.dedup_by_key(|info| info.key);
+        Self { files, skipped }
+    }
+
+    /// Every file, ascending by key.
+    #[must_use]
+    pub fn files(&self) -> &[FileInfo] {
+        &self.files
+    }
+
+    /// Whether the replica holds no LTX file at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+
+    /// The last transaction any file covers.
+    #[must_use]
+    pub fn newest(&self) -> Option<Txid> {
+        self.files.iter().map(|info| info.key.range().max()).max()
+    }
+
+    /// Foreign names seen in one level.
+    #[must_use]
+    pub fn skipped(&self, level: Level) -> usize {
+        self.skipped.get(&level).copied().unwrap_or(0)
+    }
+
+    /// Foreign names seen in every level together.
+    #[must_use]
+    pub fn skipped_total(&self) -> usize {
+        self.skipped
+            .values()
+            .fold(0, |sum, n| sum.saturating_add(*n))
+    }
+
+    /// Level-9 files that do not start at transaction 1: never used as a
+    /// snapshot, always worth telling an operator about.
+    #[must_use]
+    pub fn malformed_snapshots(&self) -> Vec<FileKey> {
+        self.files
+            .iter()
+            .filter(|info| info.key.level().is_snapshot() && !is_snapshot_start(info))
+            .map(|info| info.key)
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::conformance::block_on;
+    use crate::mem::{MemStore, MemUpload};
+    use crate::store::{Listing, ReadLen, StoreOp, Upload};
+    use lsr_ltx::Timestamp;
+    use std::future::{Future, ready};
+
+    fn key(level: u8, min: u64, max: u64) -> FileKey {
+        let range = TxidRange::new(Txid::new(min).unwrap(), Txid::new(max).unwrap()).unwrap();
+        FileKey::new(Level::new(level).unwrap(), range)
+    }
+
+    fn info(level: u8, min: u64, max: u64) -> FileInfo {
+        FileInfo {
+            key: key(level, min, max),
+            size: 1,
+            created_at: Timestamp::from_unix_millis(0),
+        }
+    }
+
+    async fn put(store: &MemStore, k: FileKey) {
+        let at = Timestamp::from_unix_millis(7);
+        let mut up = store.begin_upload(&k, at).await.unwrap();
+        up.write(b"x").await.unwrap();
+        up.commit().await.unwrap();
+    }
+
+    #[test]
+    fn from_files_sorts_and_dedups() {
+        let inv = Inventory::from_files([info(1, 5, 6), info(0, 2, 2), info(0, 2, 2)]);
+        let keys: Vec<FileKey> = inv.files().iter().map(|f| f.key).collect();
+        assert_eq!(keys, vec![key(0, 2, 2), key(1, 5, 6)]);
+        assert_eq!(inv.newest(), Txid::new(6));
+        assert!(!inv.is_empty() && Inventory::default().is_empty());
+    }
+
+    #[test]
+    fn malformed_snapshots_are_level_nine_not_starting_at_one() {
+        let inv = Inventory::from_files([info(9, 1, 4), info(9, 2, 6), info(1, 2, 6)]);
+        assert_eq!(inv.malformed_snapshots(), vec![key(9, 2, 6)]);
+    }
+
+    #[test]
+    fn load_reads_every_level_across_pages_and_counts_foreign_names() {
+        let store = MemStore::new();
+        block_on(async {
+            for n in 1..=1005u64 {
+                put(&store, key(0, n, n)).await;
+            }
+            put(&store, key(9, 1, 3)).await;
+            put(&store, key(4, 1, 8)).await;
+        });
+        store.plant_foreign(Level::ZERO, "zzz.tmp");
+        store.plant_foreign(Level::SNAPSHOT, "lock.json");
+        let inv = block_on(Inventory::load(&store)).unwrap();
+        assert_eq!(inv.files().len(), 1007);
+        assert_eq!(inv.skipped(Level::ZERO), 1);
+        assert_eq!(inv.skipped(Level::SNAPSHOT), 1);
+        assert_eq!(inv.skipped_total(), 2);
+        assert_eq!(inv.newest(), Txid::new(1005));
+    }
+
+    #[test]
+    fn a_failed_page_is_an_error_not_a_short_inventory() {
+        let store = MemStore::new();
+        block_on(put(&store, key(0, 1, 1)));
+        let fault = StoreError::Transient {
+            op: StoreOp::List,
+            kind: std::io::ErrorKind::TimedOut,
+        };
+        store.inject_failure(StoreOp::List, fault.clone());
+        let got = block_on(Inventory::load(&store));
+        assert_eq!(got, Err(InventoryError::Store(fault)));
+    }
+
+    /// A store whose cursor never moves.
+    #[derive(Debug)]
+    struct Stuck;
+
+    impl ObjectStore for Stuck {
+        type Upload = MemUpload;
+
+        fn list(
+            &self,
+            _level: Level,
+            _after: Option<TxidRange>,
+            _limit: PageLimit,
+        ) -> impl Future<Output = Result<Listing, StoreError>> + Send {
+            ready(Ok(Listing {
+                files: vec![info(0, 1, 1)],
+                next: Some(key(0, 1, 1).range()),
+                skipped: 0,
+            }))
+        }
+
+        fn read(
+            &self,
+            key: &FileKey,
+            _offset: u64,
+            _len: ReadLen,
+        ) -> impl Future<Output = Result<Vec<u8>, StoreError>> + Send {
+            ready(Err(StoreError::NotFound { key: *key }))
+        }
+
+        fn begin_upload(
+            &self,
+            key: &FileKey,
+            _created_at: Timestamp,
+        ) -> impl Future<Output = Result<MemUpload, StoreError>> + Send {
+            ready(Err(StoreError::NotFound { key: *key }))
+        }
+
+        fn delete(&self, _keys: &[FileKey]) -> impl Future<Output = Result<(), StoreError>> + Send {
+            ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn a_cursor_that_does_not_advance_is_a_typed_give_up() {
+        let got = block_on(Inventory::load(&Stuck));
+        assert_eq!(
+            got,
+            Err(InventoryError::ListingStalled {
+                level: Level::ZERO,
+                cursor: key(0, 1, 1).range(),
+            })
+        );
+    }
+}

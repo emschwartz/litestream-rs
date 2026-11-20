@@ -8,14 +8,18 @@
 
 #[cfg(any(test, feature = "testing"))]
 pub mod conformance;
+mod inventory;
 mod layout;
 mod mem;
+mod plan;
 mod store;
 
+pub use inventory::{Inventory, InventoryError, is_snapshot_start};
 pub use layout::{
     FileInfo, FileKey, Level, ParseKeyError, RangeSide, cmp_range, file_name, parse_file_name,
 };
 pub use mem::{MemStore, MemUpload};
+pub use plan::{ContiguousChain, PlanOutcome, RestoreTarget, plan};
 pub use store::{
     CorruptCause, Listing, ObjectStore, PageLimit, ReadLen, StoreError, StoreOp, Upload,
     build_listing,

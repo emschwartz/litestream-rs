@@ -33,6 +33,8 @@ pub struct PageLimit(NonZeroU16);
 impl PageLimit {
     /// The largest page.
     pub const MAX_RAW: u16 = 1000;
+    /// The largest page as a limit; equals [`Self::MAX_RAW`] (pinned by a test).
+    pub const MAX: Self = Self(NonZeroU16::MIN.saturating_add(999));
 
     /// Returns `None` for zero or above [`Self::MAX_RAW`].
     #[must_use]
@@ -287,6 +289,11 @@ mod tests {
     use super::*;
     use lsr_ltx::Txid;
     use proptest::prelude::*;
+
+    #[test]
+    fn page_limit_max_matches_its_raw_form() {
+        assert_eq!(PageLimit::new(PageLimit::MAX_RAW), Some(PageLimit::MAX));
+    }
 
     fn range(min: u64, max: u64) -> TxidRange {
         TxidRange::new(Txid::new(min).unwrap(), Txid::new(max).unwrap()).unwrap()
