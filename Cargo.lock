@@ -655,6 +655,7 @@ dependencies = [
  "lsr-core",
  "lsr-ltx",
  "lsr-store-s3",
+ "lsr-wal",
  "md-5",
  "percent-encoding",
  "proptest",

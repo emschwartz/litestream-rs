@@ -29,6 +29,8 @@ lsr-core = { path = "../core", features = ["testing"] }
 # Integration tests need FakeS3 and the fault layer, which sit behind the feature.
 lsr-store-s3 = { path = ".", features = ["testing"] }
 proptest = "1"
+# The recover count names the WAL reader type its None argument needs.
+lsr-wal = { path = "../wal" }
 
 [lints]
 workspace = true
