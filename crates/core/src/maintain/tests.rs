@@ -13,6 +13,7 @@ use crate::conformance::block_on;
 use crate::layout::{ListedStamp, StoredStamp};
 use crate::mem::MemStore;
 use crate::plan::{PlanOutcome, RestoreTarget, plan};
+use crate::stamps::{Resolve, Stamps};
 use crate::store::{PageLimit, StoreOp, Upload};
 
 /// A day-aligned instant (2023-11-15), so every default window starts on it.
@@ -69,13 +70,27 @@ pub(super) fn due(
     config: &Maintenance,
     published: Option<Txid>,
 ) -> Due {
-    super::due(
+    due_state(
         inventory,
         now,
         config,
         published,
         &mut MaintainState::default(),
     )
+}
+
+/// `super::due` on a listing that carries every stamp, so nothing is asked.
+pub(super) fn due_state(
+    inventory: &Inventory,
+    now: Timestamp,
+    config: &Maintenance,
+    published: Option<Txid>,
+    state: &mut MaintainState,
+) -> Due {
+    match super::due(inventory, now, config, published, state, &Stamps::default()) {
+        Resolve::Done(due) => due,
+        Resolve::Need(file) => panic!("a stored listing asked for a stamp: {file:?}"),
+    }
 }
 
 fn due_at(i: &Inventory, now: i64) -> Due {
@@ -879,6 +894,136 @@ proptest! {
     }
 }
 
+// The schedule on a listing that carries only last-modified times.
+
+/// A lazy store holding `files` (one byte each, stamped as listed).
+fn lazy_store(files: &[FileInfo]) -> MemStore {
+    let store = MemStore::with_listed_last_modified();
+    block_on(async {
+        for f in files {
+            let stamp = f.exact_stamp().unwrap().at();
+            let mut up = store.begin_upload(&f.key, stamp).await.unwrap();
+            up.write(b"x").await.unwrap();
+            up.commit().await.unwrap();
+        }
+    });
+    store
+}
+
+/// `due` over a lazy listing of `files`: the decision and the keys whose
+/// stamps it asked for.
+fn lazy_due(
+    files: &[FileInfo],
+    now: i64,
+    cfg: &Maintenance,
+    published: Option<Txid>,
+) -> (Due, Vec<FileKey>) {
+    let store = lazy_store(files);
+    let listing = load(&store);
+    let mut state = MaintainState::default();
+    let mut asked = Vec::new();
+    let mut step = |stamps: &Stamps| {
+        let got = super::due(&listing, at(now), cfg, published, &mut state, stamps);
+        if let Resolve::Need(file) = &got {
+            asked.push(file.key);
+        }
+        got
+    };
+    let done = block_on(crate::stamps::resolve(&store, &mut step)).unwrap();
+    assert_eq!(done.stamps_read, store.stamp_calls());
+    assert_eq!(done.stamps_read, u64::try_from(asked.len()).unwrap());
+    (done.value, asked)
+}
+
+#[test]
+fn schedule_reads_only_lasts_with_work() {
+    // L1 has files above its last, so its last file's stamp is needed and
+    // no other: L2 is empty, L0 and the snapshot decide without a stamp.
+    let mut files = l0_run(1, 5, T0 - 100_000);
+    files.push(file(1, 1, 3, T0 - 1));
+    let (got, asked) = lazy_due(&files, T0 + 1, &defaults(), None);
+    assert_eq!(compact_job(&run_job(got)).level(), level(1));
+    assert_eq!(asked, vec![key(1, 1, 3)]);
+
+    // Every level caught up and no snapshot yet: the snapshot is due
+    // without any stamp.
+    let mut files = l0_run(1, 3, T0 - 100_000);
+    files.extend([
+        file(1, 1, 3, T0 - 1),
+        file(2, 1, 3, T0 - 1),
+        file(3, 1, 3, T0 - 1),
+    ]);
+    let (got, asked) = lazy_due(&files, T0 + 1, &defaults(), None);
+    assert!(matches!(got, Due::Run(Job::Snapshot(_))), "{got:?}");
+    assert!(asked.is_empty(), "{asked:?}");
+
+    // Only an otherwise-due snapshot asks for the newest snapshot's stamp.
+    let due_files = converged(T0 - 1000, 3, 4).files().to_vec();
+    let (got, asked) = lazy_due(&due_files, T0 + 5000, &defaults(), None);
+    assert!(matches!(got, Due::Run(Job::Snapshot(_))), "{got:?}");
+    assert_eq!(asked, vec![key(9, 1, 3)]);
+    // Idle, nothing is due: the schedule asks for no snapshot stamp, so every
+    // stamp read is retention's (lasts, snapshot starts, scanned level 0).
+    let idle_files = converged(T0 - 5 * 86_400_000, 4, 4).files().to_vec();
+    let (got, asked) = lazy_due(&idle_files, T0, &defaults(), None);
+    assert_eq!(
+        got,
+        Due::Wait {
+            until: None,
+            held: None
+        }
+    );
+    assert!(
+        asked.contains(&key(9, 1, 4)),
+        "retention reads snapshot starts"
+    );
+}
+
+/// Two decisions agree: a compaction is the same when it reads the same
+/// keys, whatever stamp kind its inputs were listed with.
+fn same_decision(a: &Due, b: &Due) -> bool {
+    match (a, b) {
+        (Due::Run(Job::Compact(x)), Due::Run(Job::Compact(y))) => {
+            x.output_key() == y.output_key() && input_keys(x) == input_keys(y)
+        }
+        _ => a == b,
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(24))]
+
+    /// A lazy listing decides what the stored one does at every tick of a
+    /// write history, and never asks for a stamp it could do without.
+    #[test]
+    fn due_matches_main_on_stored_listings((which, events) in history()) {
+        let cfg = if which == 0 { defaults() } else { small() };
+        let mut model = Model::default();
+        let (mut now, mut next) = (T0, 1u64);
+        for (kind, gap) in events {
+            now += i64::from(gap);
+            if kind < 7 {
+                model.files.push(file(0, next, next, now));
+                next += 1;
+                continue;
+            }
+            for _ in 0..5000 {
+                let want = due(&model.inv(), at(now), &cfg, None);
+                let (got, asked) = lazy_due(&model.files, now, &cfg, None);
+                prop_assert!(same_decision(&got, &want), "{got:?} vs {want:?}");
+                let mut sorted = asked.clone();
+                sorted.sort();
+                sorted.dedup();
+                prop_assert_eq!(sorted.len(), asked.len());
+                match want {
+                    Due::Run(job) => model.apply(&job, now),
+                    Due::Wait { .. } => break,
+                }
+            }
+        }
+    }
+}
+
 // The executor.
 
 const PAGE: u32 = 4096;
@@ -1149,7 +1294,7 @@ fn review_a_short_compaction_output_left_by_a_failed_commit_does_not_license_del
     .unwrap();
     let now = at(T0 + 2 * 3_600_000);
     let mut state = MaintainState::default();
-    let due = super::due(&load(&replica), now, &cfg, None, &mut state);
+    let due = due_state(&load(&replica), now, &cfg, None, &mut state);
     let Due::Run(Job::Compact(job)) = due else {
         panic!("expected the level-1 job, got {due:?}")
     };
@@ -1177,7 +1322,7 @@ fn review_a_short_compaction_output_left_by_a_failed_commit_does_not_license_del
     truncate_to_half(&replica, &out);
     let inputs: Vec<FileKey> = job.inputs().files().iter().map(|f| f.key).collect();
     for _ in 0..10 {
-        match super::due(&load(&replica), now, &cfg, None, &mut state) {
+        match due_state(&load(&replica), now, &cfg, None, &mut state) {
             Due::Run(Job::Delete(d)) => {
                 let doomed: Vec<&FileKey> =
                     d.keys().iter().filter(|k| inputs.contains(k)).collect();
@@ -1225,7 +1370,7 @@ fn review_a_level_one_job_that_always_fails_does_not_starve_the_snapshot_forever
         let now = at(T0 + day * REVIEW_DAY);
         // The loop lists and asks again at the same instant after each failure.
         for _ in 0..3 {
-            match super::due(&load(&replica), now, &defaults(), None, &mut state) {
+            match due_state(&load(&replica), now, &defaults(), None, &mut state) {
                 Due::Run(Job::Compact(job)) => {
                     let out = block_on(run_compact(&job, &local, &replica));
                     assert!(matches!(out, Outcome::Failed(_)), "{out:?}");
@@ -1276,7 +1421,7 @@ fn rejected_setup() -> (MemStore, MemStore, MaintainState, CompactJob) {
         put(&replica, 0, n, created);
     }
     let mut state = MaintainState::default();
-    let Due::Run(Job::Compact(job)) = super::due(
+    let Due::Run(Job::Compact(job)) = due_state(
         &load(&replica),
         at(T0 + 3_600_000),
         &defaults(),
@@ -1324,13 +1469,13 @@ fn a_distrusted_output_holds_retention_until_deleted() {
     // The level's delete is the next job once its backoff has passed.
     let later = at(T0 + 3_700_000);
     let Due::Run(Job::Delete(delete)) =
-        super::due(&load(&replica), later, &defaults(), None, &mut state)
+        due_state(&load(&replica), later, &defaults(), None, &mut state)
     else {
         panic!("expected the output's delete")
     };
     assert_eq!(delete.keys(), [out]);
     // While it is listed, retention holds (level 1 is backing off, so it is reached).
-    let held = super::due(
+    let held = due_state(
         &load(&replica),
         at(T0 + 3_605_000),
         &defaults(),
@@ -1343,7 +1488,7 @@ fn a_distrusted_output_holds_retention_until_deleted() {
     );
     let done = block_on(run_delete(&delete, &replica));
     state.record(later, &Job::Delete(delete), &done);
-    let after = super::due(&load(&replica), later, &defaults(), None, &mut state);
+    let after = due_state(&load(&replica), later, &defaults(), None, &mut state);
     assert!(
         !matches!(
             after,
@@ -1367,7 +1512,7 @@ fn a_failing_level_backs_off_and_others_run() {
         },
     )));
     let ask = |state: &mut MaintainState, now: Timestamp| {
-        super::due(&load(&replica), now, &defaults(), None, state)
+        due_state(&load(&replica), now, &defaults(), None, state)
     };
     state.record(now, &Job::Compact(job.clone()), &failed);
     // Level 1 waits ten seconds; nothing else is ready, so the wake time is its retry.

@@ -7,6 +7,13 @@
 //! returns one job; the caller runs it, records the outcome, lists again and
 //! asks again.
 //!
+//! Stamps are read lazily. The schedule asks for the destination level's last
+//! file only when the source has files above it, and for the newest snapshot
+//! only when one is otherwise due; retention's reads are listed in its module
+//! doc. Each ask is a [`Resolve::Need`], so a listing that carries no exact
+//! stamps costs a request per ask and the job sequence is the one a fully
+//! stamped listing gives.
+//!
 //! A level whose last job failed is skipped until its retry time, so one
 //! failing level never keeps the snapshot or the deletes from being planned.
 //!
@@ -48,6 +55,7 @@ use crate::compact::{CompactError, CompactionInputs, MAX_INPUTS, compact};
 use crate::inventory::{Inventory, is_snapshot_start};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::plan::PlanOutcome;
+use crate::stamps::{Resolve, Stamps};
 use crate::store::{CorruptCause, ObjectStore, StoreError};
 use retain::{Retention, retention};
 
@@ -331,9 +339,13 @@ enum Step {
     Idle,
 }
 
-/// The next job, or when to ask again. See the module docs for the rules.
-/// Writes to the state only to forget distrusted keys the listing no longer
-/// holds.
+/// The next job, or when to ask again, or the one stamp needed first. See the
+/// module docs for the rules.
+///
+/// A stamp the listing does not carry is asked for through [`Resolve::Need`];
+/// the caller resolves it and calls again from the start, so everything here is
+/// restartable. Writes to the state only to forget distrusted keys the listing
+/// no longer holds, which is idempotent.
 #[must_use]
 pub fn due(
     inventory: &Inventory,
@@ -341,28 +353,46 @@ pub fn due(
     config: &Maintenance,
     published: Option<Txid>,
     state: &mut MaintainState,
-) -> Due {
+    stamps: &Stamps,
+) -> Resolve<Due> {
+    match decide(inventory, now, config, published, state, stamps) {
+        Ok(due) => Resolve::Done(due),
+        Err(file) => Resolve::Need(file),
+    }
+}
+
+fn decide(
+    inventory: &Inventory,
+    now: Timestamp,
+    config: &Maintenance,
+    published: Option<Txid>,
+    state: &mut MaintainState,
+    stamps: &Stamps,
+) -> Result<Due, FileInfo> {
     state.forget_unlisted(|key| inventory.level(key.level()).iter().any(|f| f.key == *key));
     let mut until: Option<Timestamp> = None;
-    let steps = Level::ALL
+    let levels = Level::ALL
         .iter()
         .skip(1)
-        .take(usize::from(config.top().get()))
-        .map(|level| plan_level(inventory, now, config, *level, state))
-        .chain(std::iter::once_with(|| {
-            match state.backing_off_until(Level::SNAPSHOT, now) {
-                Some(retry) => Step::Wait(retry),
-                None => plan_snapshot(inventory, now, config, published),
-            }
-        }));
-    for step in steps {
-        match step {
-            Step::Run(job) => return Due::Run(job),
-            Step::Wait(at) => until = Some(until.map_or(at, |soonest| soonest.min(at))),
-            Step::Idle => {}
+        .take(usize::from(config.top().get()));
+    for level in levels {
+        let step = plan_level(inventory, now, config, *level, state, stamps)?;
+        if let Some(job) = absorb(step, &mut until) {
+            return Ok(Due::Run(job));
         }
     }
-    match retention(inventory, now, config, published, state) {
+    let step = match state.backing_off_until(Level::SNAPSHOT, now) {
+        Some(retry) => Step::Wait(retry),
+        None => plan_snapshot(inventory, now, config, published, stamps)?,
+    };
+    if let Some(job) = absorb(step, &mut until) {
+        return Ok(Due::Run(job));
+    }
+    let retained = match retention(inventory, now, config, published, state, stamps) {
+        Resolve::Done(retained) => retained,
+        Resolve::Need(file) => return Err(file),
+    };
+    Ok(match retained {
         Retention::Delete(job) => Due::Run(Job::Delete(job)),
         Retention::Wait { until: wake } => Due::Wait {
             until: soonest(until, wake),
@@ -372,6 +402,18 @@ pub fn due(
             until,
             held: Some(hold),
         },
+    })
+}
+
+/// The job a step wants, or folds its wake time into `until`.
+fn absorb(step: Step, until: &mut Option<Timestamp>) -> Option<Job> {
+    match step {
+        Step::Run(job) => Some(job),
+        Step::Wait(at) => {
+            *until = Some(until.map_or(at, |soonest| soonest.min(at)));
+            None
+        }
+        Step::Idle => None,
     }
 }
 
@@ -388,22 +430,23 @@ fn plan_level(
     config: &Maintenance,
     dst: Level,
     state: &MaintainState,
-) -> Step {
+    stamps: &Stamps,
+) -> Result<Step, FileInfo> {
     let (Some(src_level), Some(interval)) = (
         Level::new(dst.get().saturating_sub(1)),
         config.interval(dst),
     ) else {
-        return Step::Idle;
+        return Ok(Step::Idle);
     };
     if let Some(retry) = state.backing_off_until(dst, now) {
-        return Step::Wait(retry);
+        return Ok(Step::Wait(retry));
     }
     // A rejected output is never an input: its own level deletes it first.
     if state.distrusted_at(src_level).is_some() {
-        return Step::Idle;
+        return Ok(Step::Idle);
     }
     if let Some(bad) = state.distrusted_at(dst) {
-        return DeleteJob::new(vec![bad]).map_or(Step::Idle, |job| Step::Run(Job::Delete(job)));
+        return Ok(DeleteJob::new(vec![bad]).map_or(Step::Idle, |job| Step::Run(Job::Delete(job))));
     }
     let dst_files = inventory.level(dst);
     let dst_last = dst_files.last();
@@ -414,21 +457,25 @@ fn plan_level(
         .filter(|info| dst_max.is_none_or(|max| info.key.range().min() > max))
         .peekable();
     if above.peek().is_none() {
-        return Step::Idle;
+        return Ok(Step::Idle);
     }
     let (start, next) = next_window(now, interval);
-    if dst_last.is_some_and(|info| stamped_after(info, start)) {
-        return Step::Wait(next);
+    if let Some(info) = dst_last
+        && stamped_after(stamps, info, start)?
+    {
+        return Ok(Step::Wait(next));
     }
     let run = contiguous_run(above);
-    match CompactionInputs::new(run)
-        .ok()
-        .and_then(|inputs| CompactJob::new(inputs, dst).ok())
-    {
-        Some(job) => Step::Run(Job::Compact(job)),
-        // Unreachable for a run built above; a property test pins it.
-        None => Step::Idle,
-    }
+    Ok(
+        match CompactionInputs::new(run)
+            .ok()
+            .and_then(|inputs| CompactJob::new(inputs, dst).ok())
+        {
+            Some(job) => Step::Run(Job::Compact(job)),
+            // Unreachable for a run built above; a property test pins it.
+            None => Step::Idle,
+        },
+    )
 }
 
 /// The longest strictly contiguous prefix, at most [`MAX_INPUTS`] files.
@@ -453,9 +500,10 @@ fn plan_snapshot(
     now: Timestamp,
     config: &Maintenance,
     published: Option<Txid>,
-) -> Step {
+    stamps: &Stamps,
+) -> Result<Step, FileInfo> {
     let Some(pos) = inventory.newest().max(published) else {
-        return Step::Idle;
+        return Ok(Step::Idle);
     };
     let Some(snap) = inventory
         .level(Level::SNAPSHOT)
@@ -463,29 +511,31 @@ fn plan_snapshot(
         .rev()
         .find(|info| is_snapshot_start(info))
     else {
-        return Step::Run(Job::Snapshot(SnapshotJob {
+        return Ok(Step::Run(Job::Snapshot(SnapshotJob {
             after: None,
             through: pos,
-        }));
+        })));
     };
     let after = snap.key.range().max();
     if pos <= after {
-        return Step::Idle;
+        return Ok(Step::Idle);
     }
     let (start, next) = next_window(now, config.snapshot_interval());
-    if stamped_after(snap, start) {
-        return Step::Wait(next);
+    if stamped_after(stamps, snap, start)? {
+        return Ok(Step::Wait(next));
     }
-    Step::Run(Job::Snapshot(SnapshotJob {
+    Ok(Step::Run(Job::Snapshot(SnapshotJob {
         after: Some(after),
         through: pos,
-    }))
+    })))
 }
 
-/// Whether the file was stamped after `start`. A file with no exact stamp
-/// counts as stamped after, so the caller waits instead of guessing.
-fn stamped_after(info: &FileInfo, start: Timestamp) -> bool {
-    info.exact_stamp().is_none_or(|stamp| stamp.at() > start)
+/// Whether the file was stamped after `start`, or the request for its stamp.
+fn stamped_after(stamps: &Stamps, info: &FileInfo, start: Timestamp) -> Result<bool, FileInfo> {
+    stamps
+        .exact(info)
+        .map(|stamp| stamp.at() > start)
+        .ok_or(*info)
 }
 
 /// Why a job did not finish.

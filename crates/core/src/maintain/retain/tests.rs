@@ -15,6 +15,9 @@ use crate::maintain::tests::{
     Model, T0, at, defaults, due, file, inv, key, level, secs, small, txid,
 };
 use crate::maintain::{Due, Job};
+use crate::mem::MemStore;
+use crate::stamps::{Resolve, Stamps, resolve};
+use crate::store::{ObjectStore, Upload};
 
 /// `retention` from a fresh state.
 fn restamp(file: &mut FileInfo, at: Timestamp) {
@@ -27,7 +30,21 @@ fn retention(
     config: &Maintenance,
     published: Option<Txid>,
 ) -> Retention {
-    super::retention(inventory, now, config, published, &MaintainState::default())
+    retention_state(inventory, now, config, published, &MaintainState::default())
+}
+
+/// `super::retention` on a listing that carries every stamp.
+fn retention_state(
+    inventory: &Inventory,
+    now: Timestamp,
+    config: &Maintenance,
+    published: Option<Txid>,
+    state: &MaintainState,
+) -> Retention {
+    match super::retention(inventory, now, config, published, state, &Stamps::default()) {
+        Resolve::Done(retention) => retention,
+        Resolve::Need(file) => panic!("a stored listing asked for a stamp: {file:?}"),
+    }
 }
 
 const HOUR: i64 = 3_600_000;
@@ -192,14 +209,14 @@ fn a_clock_that_steps_back_deletes_less_and_one_that_returns_deletes_the_same() 
     let inventory = inv(files);
     let state = MaintainState::default();
     let newest = at(T0 + DAY + HOUR);
-    let first = super::retention(&inventory, newest, &cfg, None, &state);
+    let first = retention_state(&inventory, newest, &cfg, None, &state);
     assert!(keys(&first).contains(&key(9, 1, 10)), "{first:?}");
-    let back = super::retention(&inventory, at(T0), &cfg, None, &state);
+    let back = retention_state(&inventory, at(T0), &cfg, None, &state);
     assert!(matches!(back, Retention::Wait { .. }), "{back:?}");
     // A clock that jumped ahead and came back leaves no mark either.
-    let ahead = super::retention(&inventory, at(T0 + 400 * DAY), &cfg, None, &state);
+    let ahead = retention_state(&inventory, at(T0 + 400 * DAY), &cfg, None, &state);
     assert_eq!(first, ahead, "the newest stamp caps a clock that is ahead");
-    let again = super::retention(&inventory, newest, &cfg, None, &state);
+    let again = retention_state(&inventory, newest, &cfg, None, &state);
     assert_eq!(first, again);
 }
 
@@ -1379,7 +1396,7 @@ fn a_lower_anchor_can_delete_a_level_zero_file_a_higher_one_keeps() {
 /// inside a kept file whose end restores. Instants are checked per tick
 /// (`check_instants`) on sane stamps.
 #[test]
-fn a_wobbling_clock_with_partial_deletes_loses_nothing_retained() {
+fn retention_r_prime_jobs_are_restore_safe() {
     let mut x = Xs(0x7a11_c10c);
     let mut deleted_total = 0usize;
     for case in 0..1500u64 {
@@ -1441,4 +1458,178 @@ fn a_wobbling_clock_with_partial_deletes_loses_nothing_retained() {
     }
     println!("deleted {deleted_total} keys");
     assert!(deleted_total > 1000);
+}
+
+// The clock from stamps read on demand (R').
+
+/// A lazy store holding `files` (each stamped as listed, one byte each) and
+/// the retention run over its listing.
+struct Lazy {
+    store: MemStore,
+}
+
+impl Lazy {
+    fn new(files: &[FileInfo]) -> Self {
+        let store = MemStore::with_listed_last_modified();
+        crate::conformance::block_on(async {
+            for f in files {
+                let stamp = f.exact_stamp().unwrap().at();
+                let mut up = store.begin_upload(&f.key, stamp).await.unwrap();
+                up.write(b"x").await.unwrap();
+                up.commit().await.unwrap();
+            }
+        });
+        Self { store }
+    }
+
+    /// The decision and the keys whose stamps it asked for, in order.
+    fn run(&self, now: i64, cfg: &Maintenance) -> (Retention, Vec<FileKey>) {
+        let inventory = crate::conformance::block_on(Inventory::load(&self.store)).unwrap();
+        let mut asked = Vec::new();
+        let mut step = |stamps: &Stamps| {
+            let got = super::retention(
+                &inventory,
+                at(now),
+                cfg,
+                None,
+                &MaintainState::default(),
+                stamps,
+            );
+            if let Resolve::Need(file) = &got {
+                asked.push(file.key);
+            }
+            got
+        };
+        let done = crate::conformance::block_on(resolve(&self.store, &mut step)).unwrap();
+        assert_eq!(done.stamps_read, u64::try_from(asked.len()).unwrap());
+        (done.value, asked)
+    }
+}
+
+fn key_set(keys: &[FileKey]) -> BTreeSet<FileKey> {
+    keys.iter().copied().collect()
+}
+
+/// On one writer's listing the newest stamp is on a last file or a snapshot
+/// start, so the clock from them is main's, and so is every decision.
+#[test]
+fn retention_equals_exact_on_writer_listings() {
+    let mut x = Xs(0x51ab_1e55);
+    let mut deletes = 0;
+    for case in 0..80u64 {
+        let files = gen_listing(&mut x, Shape::Writer);
+        let cfg = &configs()[usize::try_from(case % 4).unwrap()];
+        let lazy = Lazy::new(&files);
+        for now in anchors(&files, cfg) {
+            let now = now.min(newest_stamp(&files) + DAY);
+            let (got, _) = lazy.run(now, cfg);
+            ANCHOR_FROM_EVERY_FILE.set(true);
+            let want = retention(&inv(files.clone()), at(now), cfg, None);
+            ANCHOR_FROM_EVERY_FILE.set(false);
+            assert_eq!(got, want, "case {case} now {now}");
+            deletes += usize::from(matches!(got, Retention::Delete(_)));
+        }
+    }
+    assert!(deletes > 20, "only {deletes} delete decisions exercised");
+}
+
+/// The clock from the lasts and snapshot starts is never ahead of the clock
+/// from every file, whatever the stamps do.
+#[test]
+fn retention_r_prime_anchor_is_at_most_the_exact_anchor() {
+    let mut x = Xs(0xa4c4_0123);
+    for case in 0..600u64 {
+        let shape = [
+            Shape::Writer,
+            Shape::Misaligned,
+            Shape::Overlapping,
+            Shape::Backwards,
+        ][usize::try_from(case % 4).unwrap()];
+        let files = gen_listing(&mut x, shape);
+        let inventory = inv(files.clone());
+        let newest_of = |files: &[FileInfo]| {
+            files
+                .iter()
+                .map(|f| f.exact_stamp().unwrap().at().unix_millis())
+                .max()
+        };
+        let r_prime = newest_of(&anchor_files(&inventory));
+        assert!(r_prime <= newest_of(&files), "case {case} {shape:?}");
+        if shape == Shape::Writer {
+            assert_eq!(r_prime, newest_of(&files), "case {case}");
+        }
+    }
+}
+
+#[test]
+fn retention_reads_only_lasts_snaps_and_scanned_level_zero() {
+    let files = ladder();
+    let now = newest_stamp(&files);
+    let (got, asked) = Lazy::new(&files).run(now, &defaults());
+    assert_eq!(keys(&got), expected_ladder_deletes());
+    let mut want = vec![key(0, 30, 30), key(1, 21, 30)];
+    want.extend([key(9, 1, 10), key(9, 1, 20), key(9, 1, 30)]);
+    want.extend((25..=29).map(|n| key(0, n, n)));
+    assert_eq!(key_set(&asked), key_set(&want), "{asked:?}");
+    assert_eq!(
+        asked.len(),
+        want.len(),
+        "a stamp was asked twice: {asked:?}"
+    );
+}
+
+/// The level-0 scan ends at the first young file: later ones are not read.
+#[test]
+fn level_zero_reading_stops_at_the_first_young_file() {
+    let mut files = ladder();
+    let now = newest_stamp(&files);
+    for f in &mut files {
+        if (27..=29).contains(&f.key.range().max().get()) && f.key.level() == Level::ZERO {
+            restamp(f, at(now - 1_000));
+        }
+    }
+    let (got, asked) = Lazy::new(&files).run(now, &defaults());
+    assert!(
+        matches!(got, Retention::Delete(_) | Retention::Wait { .. }),
+        "{got:?}"
+    );
+    let level_zero: BTreeSet<u64> = asked
+        .iter()
+        .filter(|k| k.level() == Level::ZERO)
+        .map(|k| k.range().max().get())
+        .collect();
+    assert_eq!(level_zero, BTreeSet::from([25, 26, 27, 30]), "{asked:?}");
+}
+
+/// What a lazy listing calls last-modified is the store's clock, so moving it
+/// changes neither the decision nor what is read.
+#[test]
+fn retention_ignores_last_modified() {
+    let files = ladder();
+    let now = newest_stamp(&files);
+    let lazy = Lazy::new(&files);
+    let base = lazy.run(now, &defaults());
+    for moved in [0, i64::MAX / 2] {
+        for f in &files {
+            lazy.store.set_last_modified(&f.key, at(moved));
+        }
+        assert_eq!(lazy.run(now, &defaults()), base, "last-modified {moved}");
+    }
+}
+
+/// Stored stamps all young while last-modified says everything is ancient:
+/// nothing may be deleted.
+#[test]
+fn retention_never_deletes_on_last_modified() {
+    let mut files = ladder();
+    let now = newest_stamp(&files);
+    for f in &mut files {
+        restamp(f, at(now));
+    }
+    let lazy = Lazy::new(&files);
+    for f in &files {
+        lazy.store.set_last_modified(&f.key, at(0));
+    }
+    let (got, _) = lazy.run(now, &defaults());
+    assert!(!matches!(got, Retention::Delete(_)), "{got:?}");
 }

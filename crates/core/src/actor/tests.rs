@@ -316,7 +316,7 @@ fn maintenance_waits_for_idle_uploads() {
         .unwrap();
     let first_maintain = seen
         .iter()
-        .position(|t| matches!(event(t), Some(Event::Maintained(_))))
+        .position(|t| matches!(event(t), Some(Event::Maintained { .. })))
         .unwrap();
     assert!(last_upload < first_maintain, "{seen:?}");
 }
@@ -468,7 +468,7 @@ fn drain_finishes_uploads() {
     assert!(
         !seen
             .iter()
-            .any(|t| matches!(event(t), Some(Event::Maintained(_))))
+            .any(|t| matches!(event(t), Some(Event::Maintained { .. })))
     );
     let newest = Rig::files(&rig.remote, Level::ZERO)
         .iter()
@@ -805,7 +805,7 @@ fn nothing_is_pruned_before_the_first_listing() {
     let mut now = T0 + 60_002;
     loop {
         let tick = rig.tick(&mut actor, now);
-        if matches!(event(&tick), Some(Event::Maintained(_))) {
+        if matches!(event(&tick), Some(Event::Maintained { .. })) {
             break;
         }
         assert_eq!(staged(&rig), before, "pruned before listing: {tick:?}");
@@ -943,4 +943,104 @@ fn a_throttled_retention_delete_waits_the_later_of_both() {
     assert_eq!(until, ts(failed_at + 30_000));
     let second = next_retry(&mut rig, &mut actor, until.unix_millis());
     assert_eq!(second, Some(ts(until.unix_millis() + 2_000)));
+}
+
+impl Rig {
+    /// A rig whose replica lists last-modified times, so every stamp a
+    /// decision needs is a request.
+    fn lazy() -> Self {
+        let mut rig = Self::new();
+        rig.remote = Counting {
+            inner: MemStore::with_listed_last_modified(),
+            calls: Arc::default(),
+        };
+        rig
+    }
+}
+
+/// Commits `n`, syncs and uploads it, and stops before the tick that would
+/// list the replica for maintenance.
+fn stage_and_upload(rig: &mut Rig, actor: &mut Actor, n: u8, now: i64) {
+    rig.commit(n);
+    assert_eq!(
+        event(&rig.tick(actor, now)),
+        Some(&Event::Synced { files: 1 })
+    );
+    assert!(matches!(
+        event(&rig.tick(actor, now)),
+        Some(Event::Uploaded(_))
+    ));
+    // The staged copy is pruned before maintenance lists.
+    assert!(matches!(
+        event(&rig.tick(actor, now)),
+        Some(Event::Maintained {
+            event: MaintainedEvent::Deleted(1),
+            ..
+        })
+    ));
+}
+
+#[test]
+fn stamp_failure_is_a_maintain_fault() {
+    let mut rig = Rig::lazy();
+    let mut actor = Actor::new(cfg());
+    rig.settle(&mut actor, T0);
+    stage_and_upload(&mut rig, &mut actor, 2, T0 + 10);
+    let before = Rig::files(&rig.remote, Level::ZERO);
+    // A throttle hint longer than the 1 s backoff, then one shorter than the 2 s.
+    for millis in [30_000, 500] {
+        rig.remote
+            .inner
+            .inject_failure(StoreOp::Read, throttled(StoreOp::Read, millis));
+    }
+    let tick = rig.tick(&mut actor, T0 + 10);
+    let until = ts(T0 + 30_010);
+    assert!(
+        matches!(event(&tick), Some(Event::Retrying { until: u, .. }) if *u == until),
+        "{tick:?}"
+    );
+    assert_eq!(Rig::files(&rig.remote, Level::ZERO), before, "a job ran");
+    // Before its wait the lane neither relists nor reads a stamp.
+    let io = rig.io();
+    let idle = rig.tick(&mut actor, T0 + 29_000);
+    assert_eq!(event(&idle), Some(&Event::Idle), "{idle:?}");
+    assert_eq!(rig.io(), io);
+    // At the wait it lists again and the next failure doubles the wait.
+    let second = rig.tick(&mut actor, until.unix_millis());
+    assert!(
+        matches!(event(&second), Some(Event::Retrying { until: u, .. }) if *u == ts(until.unix_millis() + 2_000)),
+        "{second:?}"
+    );
+    // Faults spent, the same tick succeeds: the listing was still owed.
+    let again = rig.tick(&mut actor, until.unix_millis() + 2_000);
+    assert!(
+        matches!(event(&again), Some(Event::Maintained { stamps_read, .. }) if *stamps_read > 0),
+        "{again:?}"
+    );
+}
+
+#[test]
+fn the_maintenance_event_counts_the_stamps_it_read() {
+    let run = |mut rig: Rig| {
+        let mut actor = Actor::new(cfg());
+        let mut ticks = rig.settle(&mut actor, T0);
+        for n in 2..=4 {
+            rig.commit(n);
+            ticks.extend(rig.settle(&mut actor, T0 + i64::from(n) * 10));
+        }
+        let waits: Vec<u64> = ticks
+            .iter()
+            .filter_map(|tick| match event(tick) {
+                Some(Event::Maintained { stamps_read, .. }) => Some(*stamps_read),
+                Some(_) | None => None,
+            })
+            .collect();
+        (waits, rig.remote.inner.stamp_calls())
+    };
+    let (stored, stored_calls) = run(Rig::new());
+    assert!(stored.iter().all(|read| *read == 0), "{stored:?}");
+    assert_eq!(stored_calls, 0);
+    let (lazy, lazy_calls) = run(Rig::lazy());
+    assert!(lazy.iter().any(|read| *read > 0), "{lazy:?}");
+    assert!(lazy_calls > 0);
 }

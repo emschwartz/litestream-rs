@@ -178,10 +178,15 @@ fn rust_chain_covers_every_shape() {
         .windows(2)
         .any(|w| w[1].page_hashes.len() < w[0].page_hashes.len());
     assert!(shrank, "the database never shrank: {counts:?}");
-    let compacted = written
-        .events
-        .iter()
-        .any(|e| matches!(e, Event::Maintained(MaintainedEvent::Compacted { .. })));
+    let compacted = written.events.iter().any(|e| {
+        matches!(
+            e,
+            Event::Maintained {
+                event: MaintainedEvent::Compacted { .. },
+                ..
+            }
+        )
+    });
     assert!(compacted, "no compaction event");
 }
 

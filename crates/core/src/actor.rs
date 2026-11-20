@@ -50,6 +50,7 @@ use crate::position::{Continuity, Position, SyncedThrough};
 use crate::recover::{FrameCheck, Miss, Probes, Recovered, Tip, TipView, WalView, recover};
 use crate::snapshot::{SnapshotFailed, write_snapshot};
 use crate::source::{CheckpointMode, Checkpointer, CommittedRead, PageSource, WalSource};
+use crate::stamps::{ResolveError, Stamps, resolve};
 use crate::store::{ObjectStore, PageLimit};
 use crate::sync::{Step, StepEnd, SyncConfig, Synced, sync_step};
 use crate::upload::{
@@ -131,7 +132,13 @@ pub enum Event {
     /// Uploads ran; this is what the last one did.
     Uploaded(Did),
     /// A maintenance step ran.
-    Maintained(MaintainedEvent),
+    Maintained {
+        /// What it did.
+        event: MaintainedEvent,
+        /// How many stamps the decision read from the replica (zero when the
+        /// listing carried them, or when the step did not consult the planner).
+        stamps_read: u64,
+    },
     /// Nothing was ready.
     Idle,
     /// A fault whose policy is to retry; its lane waits.
@@ -266,6 +273,13 @@ fn compact_fault(err: &CompactError) -> Fault {
         CompactError::Source(err) | CompactError::Dest(err) => Fault::from_remote(err),
         CompactError::Input { .. } | CompactError::Encode(_) => Fault::RemoteCorrupt,
         CompactError::Inputs(_) | CompactError::SnapshotLevel { .. } => Fault::Bug,
+    }
+}
+
+fn stamp_fault(err: &ResolveError) -> Fault {
+    match err {
+        ResolveError::Store(err) => Fault::from_remote(err),
+        ResolveError::Repeated { .. } => Fault::Bug,
     }
 }
 
@@ -862,7 +876,10 @@ impl Actor {
         if keys.is_empty() {
             return None;
         }
-        let event = Event::Maintained(MaintainedEvent::Deleted(keys.len()));
+        let event = Event::Maintained {
+            event: MaintainedEvent::Deleted(keys.len()),
+            stamps_read: 0,
+        };
         Some(self.ran(event, now))
     }
 
@@ -905,23 +922,36 @@ impl Actor {
             Ok(inventory) => inventory,
             Err(err) => return Some(self.fault(Lane::Maintain, inventory_fault(&err), now)),
         };
+        let published = self.upload.confirmed();
+        let decided = {
+            let (cfg, state) = (&self.cfg.maintenance, &mut self.maintain.state);
+            let mut step = |stamps: &Stamps| due(&inventory, now, cfg, published, state, stamps);
+            resolve(env.remote, &mut step).await
+        };
+        // A failed stamp read leaves the listing owed: the next tick lists again.
+        let decided = match decided {
+            Ok(decided) => decided,
+            Err(err) => return Some(self.fault(Lane::Maintain, stamp_fault(&err), now)),
+        };
         self.maintain.stale = false;
         self.maintain.level_one = Level::new(1)
             .and_then(|level| inventory.level(level).last())
             .map(|info| info.key.range().max());
-        let published = self.upload.confirmed();
-        let cfg = &self.cfg.maintenance;
-        match due(&inventory, now, cfg, published, &mut self.maintain.state) {
+        let stamps_read = decided.stamps_read;
+        match decided.value {
             Due::Wait { until, held } => {
                 self.lanes.get_mut(Lane::Maintain).succeed();
                 self.maintain.until = until;
-                let event = Event::Maintained(MaintainedEvent::Waiting { held });
+                let event = Event::Maintained {
+                    event: MaintainedEvent::Waiting { held },
+                    stamps_read,
+                };
                 Some(self.ran(event, now))
             }
             Due::Run(job) => {
                 // Whatever the job does, the next listing is what to plan from.
                 self.maintain.stale = true;
-                Some(self.run_job(env, &job, now).await)
+                Some(self.run_job(env, &job, now, stamps_read).await)
             }
         }
     }
@@ -937,11 +967,12 @@ impl Actor {
         env: &mut Env<'_, W, P, C, L, R>,
         job: &Job,
         now: Timestamp,
+        stamps_read: u64,
     ) -> Tick {
         let outcome = match job {
             Job::Compact(compact) => run_compact(compact, env.staging, env.remote).await,
             Job::Delete(delete) => run_delete(delete, env.remote).await,
-            Job::Snapshot(_) => return self.snapshot_job(env, job, now).await,
+            Job::Snapshot(_) => return self.snapshot_job(env, job, now, stamps_read).await,
         };
         self.maintain.state.record(now, job, &outcome);
         let event = match outcome {
@@ -954,7 +985,7 @@ impl Actor {
             }
         };
         self.lanes.get_mut(Lane::Maintain).succeed();
-        self.ran(Event::Maintained(event), now)
+        self.ran(Event::Maintained { event, stamps_read }, now)
     }
 
     /// Where a failed job waits: its level's backoff when `MaintainState`
@@ -984,6 +1015,7 @@ impl Actor {
         env: &mut Env<'_, W, P, C, L, R>,
         job: &Job,
         now: Timestamp,
+        stamps_read: u64,
     ) -> Tick {
         let stepped = self.step(env, now).await;
         let proof = match self.stepped(stepped, now) {
@@ -998,7 +1030,8 @@ impl Actor {
         match written {
             Ok(info) => {
                 self.lanes.get_mut(Lane::Maintain).succeed();
-                self.ran(Event::Maintained(MaintainedEvent::Snapshot(info)), now)
+                let event = MaintainedEvent::Snapshot(info);
+                self.ran(Event::Maintained { event, stamps_read }, now)
             }
             Err(SnapshotFailed { fault, .. }) => {
                 let waiter = self.job_waiter(job, now);

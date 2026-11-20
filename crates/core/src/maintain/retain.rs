@@ -11,14 +11,24 @@
 //! parse, a malformed snapshot, a listing missing a file this process knows it
 //! wrote, a hole after the newest snapshot, a history that does not plan, a
 //! snapshot or level-0 file without a real stamp, and snapshots whose stamps
-//! run backwards all mean the listing cannot be read as a history. A hole
+//! run backwards all mean the listing cannot be read as a history. The first
+//! group is judged on names alone; the stamp holds look only at the files whose
+//! stamps were read (see "Time base"). A hole
 //! further back than the newest snapshot does not hold: it is history already
 //! lost, the rules never widen it, and holding on it would pin every delete
 //! after one Go-era loss.
 //!
-//! Time base. Ages come from `FileInfo::exact_stamp`, the header stamp, and are
-//! measured from the anchor, `min(now, newest stamp in the listing)`, computed
-//! afresh on every call. A clock that jumps ahead deletes nothing the
+//! Time base. Ages come from exact stamps (the header stamp, never a listed
+//! last-modified time, which can precede it by any writer clock lead), and are
+//! measured from the anchor, computed afresh on every call. The anchor is
+//! `min(now, newest stamp among the last file of each non-empty level and
+//! every snapshot start)`: a listing that carries no exact stamps costs a
+//! request per file asked for, so only those files are read, plus the level 0
+//! files a rule would delete, in key order up to and including the first young
+//! one (at most [`MAX_DELETE`], past which the job is full anyway). On a
+//! writer's listing a file's stamp rises with its range, so the anchor equals
+//! the newest stamp anywhere; on any listing it is never above it, and a lower
+//! anchor only keeps more. A clock that jumps ahead deletes nothing the
 //! replica's own newest stamp would not, and a clock behind only makes files
 //! look young. The anchor is deliberately not remembered: a remembered high one
 //! would keep deleting on the strength of one bad clock reading. What holds
@@ -84,6 +94,7 @@ use crate::inventory::{Inventory, is_snapshot_start};
 use crate::layout::StoredStamp;
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::plan::{PlanOutcome, RestoreTarget, plan};
+use crate::stamps::{Resolve, Stamps};
 
 #[cfg(test)]
 #[expect(
@@ -97,6 +108,9 @@ thread_local! {
     /// Test hook: level 0 deletes ignore coverage, so the self-check has
     /// something to catch.
     static BREAK_L0_COVERAGE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test hook: every file anchors the clock, as main's exact stamp over
+    /// the whole listing did, so R' can be compared with it.
+    static ANCHOR_FROM_EVERY_FILE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// What retention wants.
@@ -111,25 +125,57 @@ pub(super) enum Retention {
     Held(Hold),
 }
 
-/// The next delete job, or why there is none. See the module docs.
+/// A decision step that may need one more stamp: `Err` names the file.
+type Needs<T> = Result<T, FileInfo>;
+
+/// The next delete job, or why there is none, or the one stamp needed before
+/// either is known. See the module docs.
 pub(super) fn retention(
     inventory: &Inventory,
     now: Timestamp,
     config: &Maintenance,
     published: Option<Txid>,
     state: &MaintainState,
-) -> Retention {
-    if let Some(hold) = gate(inventory, published, state) {
-        return Retention::Held(hold);
+    stamps: &Stamps,
+) -> Resolve<Retention> {
+    match decide(inventory, now, config, published, state, stamps) {
+        Ok(retention) => Resolve::Done(retention),
+        Err(file) => Resolve::Need(file),
     }
-    let Some(newest_stamp) = inventory.files().iter().map(stamp_of).max() else {
-        return Retention::Wait { until: None };
+}
+
+fn decide(
+    inventory: &Inventory,
+    now: Timestamp,
+    config: &Maintenance,
+    published: Option<Txid>,
+    state: &MaintainState,
+    stamps: &Stamps,
+) -> Needs<Retention> {
+    if let Some(hold) = gate(inventory, published, state) {
+        return Ok(Retention::Held(hold));
+    }
+    let anchors = anchor_files(inventory);
+    let mut newest_stamp: Option<i64> = None;
+    for info in &anchors {
+        let at = stamp_of(stamps, info)?.unix_millis();
+        newest_stamp = Some(newest_stamp.map_or(at, |newest| newest.max(at)));
+    }
+    let Some(newest_stamp) = newest_stamp else {
+        return Ok(Retention::Wait { until: None });
     };
-    let anchor = now.unix_millis().min(newest_stamp.unix_millis());
-    let found = candidates(inventory, anchor, newest_stamp.unix_millis(), config);
+    if let Some(hold) = unstamped(anchors.iter(), stamps)?.or(stamps_backwards(inventory, stamps)?)
+    {
+        return Ok(Retention::Held(hold));
+    }
+    let anchor = now.unix_millis().min(newest_stamp);
+    let found = match candidates(inventory, anchor, newest_stamp, config, stamps)? {
+        Ok(found) => found,
+        Err(hold) => return Ok(Retention::Held(hold)),
+    };
     let until = found.wake.map(Timestamp::from_unix_millis);
     if found.keys.is_empty() {
-        return Retention::Wait { until };
+        return Ok(Retention::Wait { until });
     }
     let mut keys = found.keys;
     keys.sort();
@@ -137,12 +183,29 @@ pub(super) fn retention(
     let Ok(job) = DeleteJob::new(keys) else {
         // Sorted, distinct, 1 to MAX_DELETE keys: unreachable, and a hold of
         // nothing is the fail-closed answer if it ever is not.
-        return Retention::Wait { until };
+        return Ok(Retention::Wait { until });
     };
-    match self_check(inventory, &job) {
+    Ok(match self_check(inventory, &job) {
         Some(hold) => Retention::Held(hold),
         None => Retention::Delete(job),
+    })
+}
+
+/// The files whose stamps set the anchor and the snapshot rule: the last file
+/// of each non-empty level and every snapshot start, in key order.
+fn anchor_files(inventory: &Inventory) -> Vec<FileInfo> {
+    #[cfg(test)]
+    if ANCHOR_FROM_EVERY_FILE.get() {
+        return inventory.files().to_vec();
     }
+    let mut files: Vec<FileInfo> = Level::ALL
+        .iter()
+        .filter_map(|level| inventory.level(*level).last().copied())
+        .collect();
+    files.extend(snapshots(inventory).into_iter().copied());
+    files.sort_by_key(|info| info.key);
+    files.dedup_by_key(|info| info.key);
+    files
 }
 
 fn gate(inventory: &Inventory, published: Option<Txid>, state: &MaintainState) -> Option<Hold> {
@@ -157,8 +220,6 @@ fn gate(inventory: &Inventory, published: Option<Txid>, state: &MaintainState) -
         .or_else(|| listing_behind(inventory, published))
         .or_else(|| hole(inventory))
         .or_else(|| latest_unplannable(inventory))
-        .or_else(|| unstamped(inventory))
-        .or_else(|| stamps_backwards(inventory))
 }
 
 /// A compaction output the store rejected that is still listed.
@@ -249,35 +310,41 @@ fn latest_unplannable(inventory: &Inventory) -> Option<Hold> {
     }
 }
 
-/// The file's exact stamp, or the epoch when the listing has none. The
-/// `unstamped` gate holds retention before any caller sees that epoch.
-fn stamp_of(info: &FileInfo) -> Timestamp {
-    info.exact_stamp()
-        .map_or(Timestamp::from_unix_millis(0), StoredStamp::at)
+/// The file's exact stamp, or the request for it.
+fn stamp_of(stamps: &Stamps, info: &FileInfo) -> Needs<Timestamp> {
+    stamps.exact(info).map(StoredStamp::at).ok_or(*info)
 }
 
-fn unstamped(inventory: &Inventory) -> Option<Hold> {
-    inventory
-        .files()
-        .iter()
-        .find(|info| {
-            let aged = info.key.level() == Level::ZERO || info.key.level().is_snapshot();
-            let exact = info.exact_stamp().is_some();
-            !exact || (aged && stamp_of(info).unix_millis() <= 0)
-        })
-        .map(|info| Hold::Unstamped { key: info.key })
+/// Whether a stamp at or before the epoch is no stamp at all for this file:
+/// it ages a level 0 file or a snapshot.
+fn aged(info: &FileInfo) -> bool {
+    info.key.level() == Level::ZERO || info.key.level().is_snapshot()
 }
 
-fn stamps_backwards(inventory: &Inventory) -> Option<Hold> {
-    snapshots(inventory).windows(2).find_map(|pair| match pair {
-        [earlier, later] if stamp_of(earlier) > stamp_of(later) => {
-            Some(Hold::SnapshotStampsBackwards {
+fn unstamped<'a>(
+    files: impl Iterator<Item = &'a FileInfo>,
+    stamps: &Stamps,
+) -> Needs<Option<Hold>> {
+    for info in files.filter(|info| aged(info)) {
+        if stamp_of(stamps, info)?.unix_millis() <= 0 {
+            return Ok(Some(Hold::Unstamped { key: info.key }));
+        }
+    }
+    Ok(None)
+}
+
+fn stamps_backwards(inventory: &Inventory, stamps: &Stamps) -> Needs<Option<Hold>> {
+    for pair in snapshots(inventory).windows(2) {
+        if let [earlier, later] = pair
+            && stamp_of(stamps, earlier)? > stamp_of(stamps, later)?
+        {
+            return Ok(Some(Hold::SnapshotStampsBackwards {
                 earlier: earlier.key,
                 later: later.key,
-            })
+            }));
         }
-        _ => None,
-    })
+    }
+    Ok(None)
 }
 
 /// What the rules chose, before the cut and the self-check.
@@ -302,25 +369,30 @@ fn millis(d: Duration) -> i64 {
     i64::try_from(d.as_millis()).unwrap_or(i64::MAX)
 }
 
+/// What the rules chose, or the hold a level 0 file's stamp calls for.
 fn candidates(
     inventory: &Inventory,
     anchor: i64,
     newest_stamp: i64,
     config: &Maintenance,
-) -> Found {
+    stamps: &Stamps,
+) -> Needs<Result<Found, Hold>> {
     let mut found = Found::default();
     let snaps = snapshots(inventory);
     let Some(last) = snaps.len().checked_sub(1) else {
-        return found;
+        return Ok(Ok(found));
     };
     let retention = millis(config.snapshot_retention());
     let cutoff = anchor.saturating_sub(retention);
-    let first = snaps
-        .iter()
-        .position(|info| stamp_of(info).unix_millis() >= cutoff)
-        .unwrap_or(last);
+    let mut first = last;
+    for (position, info) in snaps.iter().enumerate() {
+        if stamp_of(stamps, info)?.unix_millis() >= cutoff {
+            first = position;
+            break;
+        }
+    }
     if let Some(retained) = snaps.get(first).filter(|_| first < last) {
-        let aged_out = stamp_of(retained)
+        let aged_out = stamp_of(stamps, retained)?
             .unix_millis()
             .saturating_add(retention)
             .saturating_add(1);
@@ -332,19 +404,20 @@ fn candidates(
         .map(|info| info.key.range().max());
     let kept = levels_one_to_eight(inventory, floor, &mut found.keys);
     if let L0Retention::After(age) = config.l0_retention() {
-        level_zero(
-            inventory,
+        let scan = LevelZero {
             floor,
-            (anchor, newest_stamp),
+            anchor,
+            newest_stamp,
             age,
-            &kept,
-            &mut found,
-        );
+        };
+        if let Some(hold) = level_zero(inventory, &scan, &kept, stamps, &mut found)? {
+            return Ok(Err(hold));
+        }
     }
     found
         .keys
         .extend(snaps.iter().take(first).map(|info| info.key));
-    found
+    Ok(Ok(found))
 }
 
 /// Queues each level's deletable prefix; returns the files that stay.
@@ -369,30 +442,50 @@ fn levels_one_to_eight(
     kept
 }
 
-/// Level 0: a prefix, covered and aged, never the last file.
+/// What the level 0 rule measures against.
+struct LevelZero {
+    floor: Option<Txid>,
+    anchor: i64,
+    newest_stamp: i64,
+    age: Duration,
+}
+
+/// Level 0: a prefix, covered and aged, never the last file. Reads the stamp
+/// of each file only once keys alone would delete it, and stops at the first
+/// young one or when the job is full. A file with no usable stamp is a hold.
 fn level_zero(
     inventory: &Inventory,
-    floor: Option<Txid>,
-    (anchor, newest_stamp): (i64, i64),
-    age: Duration,
+    scan: &LevelZero,
     kept: &[FileInfo],
+    stamps: &Stamps,
     found: &mut Found,
-) {
+) -> Needs<Option<Hold>> {
     let cover = merged_ranges(kept);
-    let cutoff = anchor.saturating_sub(millis(age));
+    let cutoff = scan.anchor.saturating_sub(millis(scan.age));
     let files = inventory.level(Level::ZERO);
+    let mut chosen = 0_usize;
     for info in files.iter().take(files.len().saturating_sub(1)) {
-        let below = floor.is_some_and(|floor| info.key.range().max() < floor);
+        let below = scan
+            .floor
+            .is_some_and(|floor| info.key.range().max() < floor);
         if !below && !covered(&cover, info) {
             continue;
         }
-        let created = stamp_of(info).unix_millis();
+        if chosen == MAX_DELETE {
+            return Ok(None);
+        }
+        let created = stamp_of(stamps, info)?.unix_millis();
+        if created <= 0 {
+            return Ok(Some(Hold::Unstamped { key: info.key }));
+        }
         if created > cutoff {
-            found.wake_at(created.saturating_add(millis(age)), newest_stamp);
-            return;
+            found.wake_at(created.saturating_add(millis(scan.age)), scan.newest_stamp);
+            return Ok(None);
         }
         found.keys.push(info.key);
+        chosen = chosen.saturating_add(1);
     }
+    Ok(None)
 }
 
 /// The union of the files' ranges as sorted, disjoint, non-adjacent spans.
