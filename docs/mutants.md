@@ -39,8 +39,9 @@ test, not a survivor, but it is reported separately and slower than a catch.
 ## core
 
 **Status: not finished.** The first run was stopped at 899 of 1463 mutants (about eight hours on four shared
-cores), and the survivors of the files it finished are only partly triaged. The exit bar (zero unexplained
-survivors) is not met; what is open is listed below so the next run starts from it instead of from nothing.
+cores). A second run over both test packages is in progress; every survivor in the batch of it triaged below is
+killed or explained (see "Second run"), but later batches are not triaged yet, so the exit bar (zero
+unexplained survivors) is not yet met.
 
 The recipe needed one change before it could run at all: `core` has a guard test that lists the tracked files
 with git, cargo-mutants copies the tree without `.git` by default, and so the unmutated baseline failed and no
@@ -48,13 +49,13 @@ mutant was tested. `just mutants` now passes `--copy-vcs true`.
 
 Tally of the first run so far: 491 caught, 88 missed, 13 timeouts, 307 unviable. Of the 88 missed,
 31 are now caught by new tests (each run again and confirmed caught), 1 is equivalent, 7 are in the store
-conformance harness, and 49 are open.
+conformance harness, and 49 were left open; the second run caught or explained every one of those it
+has reached.
 
 This run executes `lsr-core`'s own tests only. The actor's widest tests are the simulator's scenarios in
 `lsr-sim`, which a `-p lsr-core` run does not execute. A trial with `--test-package lsr-core --test-package lsr-sim`
 reached two of the actor's survivors before it was stopped for time: it caught `Actor::request_snapshot` (since
-also caught by a core test) and missed `actor.rs:573:13`. The open actor survivors below should be run that way
-before a test is written for each.
+also caught by a core test) and missed `actor.rs:573:13`. The second run executes both packages.
 
 ### Caught by new tests (31)
 
@@ -129,8 +130,8 @@ kill these, and it is not written.
 ### Reported as TIMEOUT (13)
 
 cargo-mutants reports a timeout when the tests stop finishing, which for these is a loop that no longer ends.
-That is a failing test, not a survivor, but the loop each one spins has not been written down one by one as the
-`ltx` section does; until it is, treat them as unconfirmed.
+That is a failing test, not a survivor. The second run reports twelve of them again, at new line numbers, and
+its timeout table names the loop each one spins; `retry.rs:205:9` is caught outright there.
 
 | Where | Mutation |
 | --- | --- |
@@ -148,78 +149,128 @@ That is a failing test, not a survivor, but the loop each one spins has not been
 | `retry.rs:205:9` | replace Core<S, P, E>::wait_after -> Option<Duration> with Some(Default::default()) |
 | `store.rs:80:9` | replace ReadLen::get -> u64 with 0 |
 
-### Open: survivors not yet killed or explained (49)
+### Second run: both test packages, survivors resolved
 
-| Where | Mutation |
-| --- | --- |
-| `actor.rs:573:13` | replace && with \|\| in Actor::checkpoint_decision |
-| `actor.rs:572:13` | replace && with \|\| in Actor::checkpoint_decision |
-| `actor.rs:602:42` | replace && with \|\| in Actor::wal_unit |
-| `actor.rs:603:77` | delete ! in Actor::wal_unit |
-| `actor.rs:604:21` | delete ! in Actor::wal_unit |
-| `actor.rs:616:16` | replace > with >= in Actor::wal_unit |
-| `actor.rs:743:42` | replace match guard !epoch_moved with true in Actor::absorb |
-| `actor.rs:753:53` | delete ! in Actor::absorb |
-| `actor.rs:807:33` | replace == with != in Actor::checkpoint_unit |
-| `actor.rs:903:40` | replace && with \|\| in Actor::prune_unit |
-| `actor.rs:917:31` | replace == with != in Actor::prune_unit |
-| `actor.rs:917:54` | replace && with \|\| in Actor::prune_unit |
-| `actor.rs:1115:17` | replace \|\| with && in Actor::ready_work |
-| `actor.rs:1114:17` | replace \|\| with && in Actor::ready_work |
-| `actor.rs:1113:17` | replace \|\| with && in Actor::ready_work |
-| `actor.rs:1156:41` | replace && with \|\| in Actor::next |
-| `actor.rs:1156:48` | replace > with == in Actor::next |
-| `actor.rs:1156:48` | replace > with < in Actor::next |
-| `actor.rs:1156:48` | replace > with >= in Actor::next |
-| `plan.rs:111:13` | replace && with \|\| in ContiguousChain::push |
-| `plan.rs:110:13` | replace && with \|\| in ContiguousChain::push |
-| `plan.rs:111:28` | replace > with >= in ContiguousChain::push |
-| `plan.rs:363:70` | replace > with >= in straddles |
-| `plan.rs:396:66` | replace > with >= in extend |
-| `plan.rs:397:39` | replace > with >= in extend |
-| `plan.rs:441:41` | replace && with \|\| in explain_shortfall |
-| `plan.rs:432:45` | replace > with >= in explain_shortfall |
-| `plan.rs:563:9` | replace AsOfPlanner<'a>::comparisons -> u64 with 1 |
-| `plan.rs:563:9` | replace AsOfPlanner<'a>::comparisons -> u64 with 0 |
-| `plan.rs:712:65` | replace < with <= in lazy_straddler |
-| `plan.rs:733:5` | replace depth -> u64 with 0 |
-| `plan.rs:733:5` | replace depth -> u64 with 1 |
-| `recover.rs:180:50` | replace > with >= in TipView::load |
-| `recover.rs:349:61` | replace match guard end.frame_index() == 0 with true in match_last_page |
-| `recover.rs:661:22` | replace < with <= in restarted |
-| `recover.rs:761:31` | replace match guard at_start with false in frame_state |
-| `recover.rs:756:42` | replace match guard at_start with true in frame_state |
-| `recover.rs:756:42` | replace match guard at_start with false in frame_state |
-| `restore.rs:75:9` | replace <impl std::fmt::Display for SinkOp>::fmt -> std::fmt::Result with Ok(Default::default()) |
-| `retry.rs:341:9` | replace <impl Upload for RetryingUpload<S, P, E>>::abort -> Result<(), StoreError> with Ok(()) |
-| `source.rs:188:9` | replace Barrier::id -> u64 with 0 |
-| `source.rs:188:9` | replace Barrier::id -> u64 with 1 |
-| `source.rs:206:9` | replace WriteLock::id -> u64 with 0 |
-| `source.rs:206:9` | replace WriteLock::id -> u64 with 1 |
-| `stamps.rs:41:9` | replace Stamps::len -> usize with 0 |
-| `stamps.rs:41:9` | replace Stamps::len -> usize with 1 |
-| `stamps.rs:47:9` | replace Stamps::is_empty -> bool with true |
-| `stamps.rs:47:9` | replace Stamps::is_empty -> bool with false |
-| `store.rs:141:49` | replace > with >= in build_listing |
+The second run is `cargo mutants -p lsr-core --test-package lsr-core --test-package lsr-sim --iterate`, so
+the simulator's scenarios count as well as core's own tests, and mutants an earlier run caught are skipped.
+Line numbers in this section are those of commit `ec5bc07`. It is in progress; this section covers the
+survivors it had reported when the batch below was taken (the files `actor.rs` to `upload.rs` in its order).
+Survivors of the first run that are not listed here were caught in the second run: the simulator's tests or
+tests added since then kill them.
+
+Tally of this batch: 45 missed and 13 timeouts. Of the 45 missed, 28 are caught by new tests, 9 are
+equivalent, 1 is explained but not killed (it costs one listing), and 7 are the harness survivors already
+explained above. The 13 timeouts are all explained below.
+No survivor revealed a bug.
+
+| File | Killed | Equivalent | Explained | Harness | Timeout |
+| --- | --- | --- | --- | --- | --- |
+| `plan.rs` | 4 | 6 | | | |
+| `recover.rs` | 1 | | | | |
+| `sync.rs` | 3 | | | | |
+| `store.rs` | | 1 | | | 1 |
+| `layout.rs` | | 1 | | | |
+| `retry.rs` | 1 | | | | |
+| `upload.rs` | 2 | | | | 1 |
+| `stamps.rs` | 3 | | | | |
+| `actor.rs` | 14 | 1 | 1 | | 3 |
+| `conformance.rs` | | | | 7 | |
+| `compact.rs` | | | | | 3 |
+| `maintain.rs` | | | | | 3 |
+| `restore.rs` | | | | | 2 |
+| Total | 28 | 9 | 1 | 7 | 13 |
+
+#### Caught by new tests (28)
+
+Each was run again with `--file <file> --re '<file>:<line>:<col>'` and both test packages, and is caught.
+
+| Where | Mutation | Test |
+| --- | --- | --- |
+| `plan.rs:441:41` | replace && with \|\| in explain_shortfall | `a_refused_snapshot_past_a_hole_is_reported_as_refused` (`plan.rs`) |
+| `plan.rs:563:9` | replace AsOfPlanner::comparisons -> u64 with 0 | `comparisons_count_both_sorts_and_every_heap_step` (`tests/plan_lazy.rs`) |
+| `plan.rs:563:9` | replace AsOfPlanner::comparisons -> u64 with 1 | same |
+| `plan.rs:733:5` | replace depth -> u64 with 0 | same |
+| `recover.rs:756:42` | replace match guard at_start with false in frame_state | `rule_9_at_boot_a_tip_ending_at_the_wal_start_has_no_frame_to_miss` (`recover/tests.rs`) |
+| `sync.rs:35:29` | replace << with >> (`DEFAULT_CAP`) | `the_default_cap_is_go_s_64_mib` (`sync/tests.rs`) |
+| `sync.rs:38:27` | replace << with >> (`FLUSH_AT`) | `a_small_file_reaches_the_upload_in_one_write` (`sync/tests.rs`) |
+| `sync.rs:231:28` | replace > with >= in clamp | `an_equal_clock_is_not_a_clamp` (`sync/tests.rs`); the existing proptest draws equal stamps about once in a thousand cases |
+| `retry.rs:341:9` | replace RetryingUpload::abort with Ok(()) | the call count in `abort_passes_through` (`retry/tests.rs`) |
+| `upload.rs:49:24` | replace * with + (`CHUNK`) | the read count in `a_staged_file_larger_than_one_chunk_is_streamed_whole` (`upload/tests.rs`) |
+| `upload.rs:253:23` | replace match guard newest > confirmed with true in list_step | `a_listing_does_not_read_back_a_tail_already_confirmed` (`upload/tests.rs`) |
+| `stamps.rs:41:9` | replace Stamps::len -> usize with 0 | `the_ledger_counts_each_stamp_resolved_through_the_store` (`stamps.rs`) |
+| `stamps.rs:41:9` | replace Stamps::len -> usize with 1 | same |
+| `stamps.rs:47:9` | replace Stamps::is_empty -> bool with false | same |
+| `actor.rs:293:5` | replace leaves_bad_snapshot -> bool with true | `a_snapshot_that_fails_before_its_commit_deletes_nothing` (`actor/tests/rejected_snapshot.rs`) |
+| `actor.rs:586:13` | replace && with \|\| in Actor::checkpoint_decision | `a_failed_checkpoint_waits_out_its_backoff` (`actor/tests/lanes.rs`, as are the rest) |
+| `actor.rs:587:13` | replace && with \|\| in Actor::checkpoint_decision | same |
+| `actor.rs:616:42` | replace && with \|\| in Actor::wal_unit | `an_idle_tick_does_not_open_the_wal` |
+| `actor.rs:617:77` | delete ! in Actor::wal_unit | same |
+| `actor.rs:630:16` | replace > with >= in Actor::wal_unit | `a_restarted_wal_with_nothing_new_is_not_reported_as_a_sync` |
+| `actor.rs:757:42` | replace match guard !epoch_moved with true in Actor::absorb | `a_sync_whose_epoch_moved_does_not_checkpoint_and_asks_for_the_next_tick` |
+| `actor.rs:821:33` | replace == with != in Actor::checkpoint_unit | `a_checkpoint_reports_busy_exactly_when_it_was` |
+| `actor.rs:917:40` | replace && with \|\| in Actor::prune_unit | `a_failed_prune_waits_out_its_backoff` |
+| `actor.rs:931:31` | replace == with != in Actor::prune_unit | `a_prune_continues_past_a_full_page` |
+| `actor.rs:1170:17` | replace \|\| with && in Actor::ready_work | `a_pending_snapshot_asks_for_the_next_tick_at_once` |
+| `actor.rs:1171:17` | replace \|\| with && in Actor::ready_work | same |
+| `actor.rs:1172:17` | replace \|\| with && in Actor::ready_work | `a_sync_whose_epoch_moved_does_not_checkpoint_and_asks_for_the_next_tick` |
+| `actor.rs:1213:48` | replace > with >= in Actor::next | `an_interval_due_with_nothing_to_checkpoint_does_not_spin` |
+
+Two test doubles grew a knob for these: the actor tests' `Counting` store can cap a listing page (a store may
+return fewer keys than the limit) and can move the WAL's read epoch when the next upload begins, as another
+connection's checkpoint would in the middle of a sync step; it also logs the keys it is asked to delete.
+
+#### Equivalent (9)
+
+| Where | Mutation | Why |
+| --- | --- | --- |
+| `plan.rs:110:13` | `ContiguousChain::push`: `!snapshot && touches` becomes `\|\|` | Both callers push only a file that passes all three conjuncts: `extend` takes its `best` from the level 0-8 sweep, through `next_if(touches(.., chain.reaches()))`, and only `if info.key.range().max() > chain.reaches()`; `AsOfPlanner::extend` pushes the heap top of the same sweep, entered when it touched a reach no later than this one, after `if info.key.range().max() <= reach { break; }`. |
+| `plan.rs:111:13` | same, `touches && max > reaches` becomes `\|\|` | Same callers. |
+| `plan.rs:111:28` | same, `max > reaches` becomes `>=` | Same callers. |
+| `plan.rs:363:70` | `straddles`: `max > one_past` becomes `>=` | Both callers (`straddling_file`, `lazy_straddler`) return first `if files.iter().any(\|info\| info.key.range().max() == one_past)`, so no file they pass in ends at `one_past`. |
+| `plan.rs:396:66` | `extend`: `preference(&info) > preference(&held)` becomes `>=` | The preference (last transaction, level, first transaction) is the whole key, and an inventory holds each key once, so two different files never tie. |
+| `plan.rs:432:45` | `explain_shortfall`: `max > requested` becomes `>=` | A usable file that touches the reach and ends at the requested transaction is eligible for that target, so the base or the sweep would have taken the chain to the target and there is no shortfall to explain. |
+| `store.rs:141:49` | `build_listing`: `name > low` becomes `>=` | `low` is the cursor's canonical key name, and every store (`MemStore`, `store-fs`'s `classify`, `store-s3`'s list response) puts a name in `foreign` only when `parse_file_name` fails on it, which a canonical name never does. (`MemStore::plant_foreign` is documented as taking a name that is not a key.) |
+| `layout.rs:266:30` | `FileKey::from_str`: `(raw << 4) \| digit` becomes `^` | The first run's entry in the table above: the operands never overlap. |
+| `actor.rs:767:53` | `Actor::absorb`: `Observed::of(.., !self.more_wal)` loses the `!` | The `Observed` built there goes only to `after_sync`, which reads `synced_frames` (through `over_truncate`) and the count of transactions written, never `through`. |
+
+#### Explained, not killed (1)
+
+| Where | Mutation | Why |
+| --- | --- | --- |
+| `actor.rs:931:54` | `Actor::prune_unit`: `keys.len() == listing.files.len() && listing.next.is_some()` becomes `\|\|` | The two differ only when the page holds a key past the bound and another page follows. `through` is then the last prunable key's end instead of the bound, which costs one more staging listing on the next tick (it finds nothing left at or below the bound and records the bound); no file is deleted or kept differently. They cannot differ at all while each prune bound is the end of a staged level-0 file (the confirmed transaction, the level-1 end compacted from those files) or one below the tip (the tip is then the page's last key and no page follows). A bound that is not a staged end needs staging and the replica to disagree on key boundaries, a state no test builds; the cost if wrong is one listing. |
+
+#### Harness (7)
+
+The seven `conformance.rs` survivors are the ones the first run left, at the same lines, and the table
+above explains them. A self-test (the suite run against a store that is wrong on purpose, one wrong store per
+check) would kill them; it is not cheap, since each survivor needs its own deliberately broken store, and it
+tests the harness rather than any shipped code.
+
+#### Timeouts (13): the loop that spins
+
+Each makes a loop stop ending; the tests that reach it hang and are killed, which is a failing test, not a
+survivor. For the actor and maintenance mutants other tests also fail outright; the ones that hang are named.
+
+| Where | Mutation | Loop that spins |
+| --- | --- | --- |
+| `actor.rs:397:27` | replace match guard now < prev with true in Actor::clock | After one reported clamp the clock answers the first instant forever, so the actor never sees time pass and `retention_failure`'s tick loop (actor tests) follows `Next::At` forever. Also fails `a_failed_prune_blocks_nothing_else`. |
+| `actor.rs:397:31` | replace < with > in Actor::clock | Every forward step reads as a step back, the same frozen clock and the same loop. Also fails `a_failed_prune_blocks_nothing_else`. |
+| `actor.rs:1173:61` | delete ! in Actor::ready_work | The upload lane counts as ready when it is idle, so `next` is always `Now` and `retention_failure`'s loop follows it forever; `settle` panics as never settled in three other tests. |
+| `compact.rs:371:9` | replace Reader::refill with Ok(true) | The end of an input is never reported, so `Reader::step` refills from an empty read forever. |
+| `compact.rs:382:16` | replace > with >= in Reader::refill | An empty read counts as more input: the same loop. |
+| `compact.rs:396:25` | replace >= with < in Reader::step | A consumed chunk is never refilled, so `Reader::step` loops on an empty remainder. |
+| `maintain.rs:472:72` | replace > with == in plan_level | A source file that begins at the destination's last transaction counts as above it, so the level always has a window to compact again and `retention_failure`'s loop never reaches the retention delete. Also fails `a_crash_between_prunes_boots_clean`. |
+| `maintain.rs:472:72` | replace > with >= in plan_level | Same. |
+| `maintain.rs:555:5` | replace stamped_after with Ok(true) | The day's snapshot always counts as taken, so retention, which follows it, never runs and `retention_failure`'s loop follows each window's `Next::At` forever. Also fails `a_crash_between_prunes_boots_clean`. |
+| `restore.rs:508:16` | replace < with == in apply_file | The read loop ends only on a chunk of exactly the read length; past the end every read is empty, forever (every actor test that restores). |
+| `restore.rs:508:16` | replace < with > in apply_file | The loop never ends on a short chunk: the same. |
+| `store.rs:80:9` | replace ReadLen::get with 0 | Every read returns nothing, and the uploader's read loops (`same_bytes` and the staged copy) end only on a chunk shorter than `ReadLen::get`, now 0. |
+| `upload.rs:198:17` | replace && with \|\| in upload_tick | A tick with work returns at once with nothing put and `Next::Now`, so `files_per_tick_is_honoured_and_asks_to_step_again`'s loop ticks forever. Also fails `a_tick_that_fails_keeps_what_it_confirmed`. |
 
 ### Not yet run
 
-The run goes file by file. These files had mutants left when it was stopped:
-
-| File | Mutants not yet tested |
-| --- | --- |
-| `actor/state.rs` | 34 |
-| `maintain/config.rs` | 19 |
-| `maintain/retain.rs` | 126 |
-| `maintain/state.rs` | 18 |
-| `restore/mem_sink.rs` | 34 |
-| `source/fake.rs` | 102 |
-| `store.rs` | 1 |
-| `sync.rs` | 41 |
-| `upload.rs` | 79 |
-| `verify.rs` | 92 |
-| `verify/dry_run.rs` | 18 |
-
-To continue: `just mutants core --file <path>` for each file above (`--file` may be given more than once), then
-triage as above. `source/fake.rs` and `mem.rs` are test doubles like the conformance harness; decide once whether
-such files are mutated at all, and say so here.
+The first run stopped before `actor/state.rs`, `maintain/config.rs`, `maintain/retain.rs`, `maintain/state.rs`,
+`restore/mem_sink.rs`, `source/fake.rs`, `sync.rs`, `upload.rs`, `verify.rs` and `verify/dry_run.rs` (and
+one mutant of `store.rs`). The second run covers every file; its later batches (from `maintain/retain.rs`
+on) are not triaged here yet. `source/fake.rs` and `mem.rs` are test doubles like the conformance harness;
+decide once whether such files are mutated at all, and say so here.
