@@ -1,0 +1,21 @@
+[package]
+name = "lsr-sim"
+version = "0.0.0"
+description = "The deterministic simulator's pieces: a rule-based model of SQLite's WAL, checked against SQLite."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+lsr-core = { path = "../core", features = ["testing"] }
+lsr-ltx = { path = "../ltx" }
+lsr-wal = { path = "../wal", features = ["testing"] }
+
+[dev-dependencies]
+proptest = { version = "1.12.0", default-features = false, features = ["std"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
+tempfile = "3"
+
+[lints]
+workspace = true
