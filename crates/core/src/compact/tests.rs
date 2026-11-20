@@ -961,6 +961,13 @@ fn thirty_two_inputs_of_two_thousand_pages_stay_under_the_stated_bound() {
     .unwrap();
     let bound = MAX_INPUTS * (16 * 1024 + page) + 16 * 1024 + 2 * page;
     assert!(done.peak_buffered() <= bound, "{}", done.peak_buffered());
+    // The peak is measured, not assumed: every input holds a chunk at once,
+    // so it is far above what the output buffer alone could reach.
+    assert!(
+        done.peak_buffered() >= MAX_INPUTS * 16 * 1024 / 2,
+        "{}",
+        done.peak_buffered()
+    );
     assert!(u64::try_from(bound).unwrap() * 50 < total);
     let (verified, pages) = decode_all(&read_all(&dest, &done.info().key)).unwrap();
     assert_eq!(verified.page_count(), 2000);
@@ -1195,4 +1202,21 @@ fn the_first_unrewritten_page_skips_the_lock_page_and_stops_at_the_bound() {
     assert_eq!(first_unrewritten(1, 4, 3, 100), None);
     assert_eq!(first_unrewritten(1, 9, 3, 4), Some(5));
     assert_eq!(first_unrewritten(1, 5, 3, 4), None);
+}
+
+#[test]
+fn the_chunk_is_one_mebibyte() {
+    assert_eq!(CHUNK_BYTES, 1 << 20);
+}
+
+/// Output is handed to the upload when the buffer reaches the flush size, not
+/// page by page: a small file is one write.
+#[test]
+fn a_small_output_is_written_to_the_upload_once() {
+    let source = MemStore::new();
+    let infos = four(&source);
+    let dest = Spy::default();
+    let done = compact_infos(&source, &dest, &infos, 1).unwrap();
+    assert!(done.pages() > 1, "{}", done.pages());
+    assert_eq!(dest.script().writes, 1);
 }

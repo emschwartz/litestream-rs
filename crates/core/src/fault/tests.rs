@@ -627,3 +627,10 @@ fn fault_rs_has_no_wildcard_arm() {
         .collect();
     assert!(hits.is_empty(), "wildcard arms at lines {hits:?}");
 }
+
+/// Go's `DefaultSyncBackoffMax`: the ceiling is a named number, not whatever
+/// the arithmetic that spells it gives.
+#[test]
+fn the_longest_backoff_is_five_minutes() {
+    assert_eq!(MAX_BACKOFF, Duration::from_secs(300));
+}

@@ -291,6 +291,35 @@ fn boot_lists_then_recovers_then_uploads() {
     assert_eq!(Rig::files(&rig.remote, Level::ZERO).len(), 1);
 }
 
+/// An empty replica names no page size, so boot asks it nothing more: one
+/// listing per level and no second pass.
+#[test]
+fn a_first_boot_lists_each_level_once() {
+    let mut rig = Rig::new();
+    let mut actor = Actor::new(cfg());
+    rig.tick(&mut actor, T0);
+    assert_eq!(rig.remote.calls(), u32::try_from(Level::ALL.len()).unwrap());
+}
+
+/// An operator's request makes the next sync a snapshot although the WAL
+/// has not moved.
+#[test]
+fn a_requested_snapshot_is_staged_on_a_quiet_wal() {
+    let (mut rig, mut actor) = caught_up();
+    let before = staged(&rig);
+    assert_eq!(event(&rig.tick(&mut actor, T0 + 1)), Some(&Event::Idle));
+    actor.request_snapshot();
+    assert_eq!(
+        event(&rig.tick(&mut actor, T0 + 1)),
+        Some(&Event::Synced { files: 1 })
+    );
+    let after = staged(&rig);
+    assert_eq!(after.len(), before.len() + 1, "{after:?}");
+    // The request is spent: the next tick uploads, and nothing snapshots again.
+    rig.settle(&mut actor, T0 + 1);
+    assert_eq!(staged(&rig).last(), after.last());
+}
+
 #[test]
 fn sync_precedes_checkpoint_same_tick() {
     let mut rig = Rig::new();
