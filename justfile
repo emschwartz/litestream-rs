@@ -25,6 +25,12 @@ sim-replay seed steps="300":
 sim-soak seconds base=`date +%s`:
     LSR_SIM_BASE_SEED={{base}} LSR_SIM_SECONDS={{seconds}} cargo nextest run -p lsr-sim --test soak --run-ignored only --no-capture --locked
 
+# Mutation testing for one crate (just mutants ltx); results in target/mutants/mutants.out.
+# Survivors are killed by a test or recorded in docs/mutants.md. Not part of check.
+mutants crate *args:
+    mkdir -p target/mutants
+    cargo mutants -p lsr-{{crate}} --test-tool nextest --jobs 4 --output target/mutants {{args}}
+
 # A branch in its own worktree under the main checkout's .worktrees/, off main's tip.
 spawn name:
     git -C "{{justfile_directory()}}" worktree add ".worktrees/{{name}}" -b "{{name}}" main
