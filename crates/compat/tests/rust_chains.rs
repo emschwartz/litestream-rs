@@ -15,7 +15,7 @@
 )]
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lsr_compat::{
     Chain, Era, GoBuild, GoRestore, Replicator, Site, Target, Written, build_verify_helper,
@@ -26,6 +26,10 @@ use lsr_core::{Event, Level, MaintainedEvent, PlanOutcome, RestoreError, Restore
 use lsr_ltx::{Timestamp, Txid};
 
 const COMMITS: u32 = 300;
+/// The line every Go build logs at its default level once its store is running.
+const GO_IS_UP: &str = "replicating to";
+/// Longer than the longest monitor interval in the Go config (4s).
+const MONITORS_RAN: Duration = Duration::from_secs(6);
 
 /// Removes a database and the sidecars SQLite left beside it, so the path can be restored to again.
 fn clear(path: &Path) {
@@ -354,18 +358,24 @@ fn compacts_and_prunes(build: &GoBuild) {
     println!("Rust's newest L9 {rust_l9:?}, tip {tip:?}: Go snapshots {go_snapshots}");
     let go_log = written.site.dir().join("go.log");
     let mut go = Replicator::start(&bin, &config, &go_log).expect("start");
-    // Either Go takes its own snapshot of the unchanged database, or it has caught up with
-    // the Rust snapshot at the tip and declines; both are Go syncing the replica.
+    // Either Go takes its own snapshot of the unchanged database, or the Rust snapshot is
+    // already at the tip and Go declines. A declining Go logs nothing at its default level
+    // and may write nothing, so that branch waits for Go to say it is up and then keeps it
+    // running past its longest monitor interval (4s in the config), so every monitor has run.
+    let mut up_since: Option<Instant> = None;
     wait_until(
-        if go_snapshots { "a Go snapshot over the Rust one" } else { "Go's first replica sync" },
+        if go_snapshots { "a Go snapshot over the Rust one" } else { "Go's monitors to run once" },
         Duration::from_secs(40),
         || {
             go.ensure_running()?;
             if go_snapshots {
-                Ok(newest_l9(&written.site.replica)? > rust_l9)
-            } else {
-                Ok(std::fs::read_to_string(&go_log).is_ok_and(|log| log.contains("replica sync")))
+                return Ok(newest_l9(&written.site.replica)? > rust_l9);
             }
+            let up = std::fs::read_to_string(&go_log).is_ok_and(|log| log.contains(GO_IS_UP));
+            if up && up_since.is_none() {
+                up_since = Some(Instant::now());
+            }
+            Ok(up_since.is_some_and(|since| since.elapsed() >= MONITORS_RAN))
         },
     )
     .map_err(|e| {
