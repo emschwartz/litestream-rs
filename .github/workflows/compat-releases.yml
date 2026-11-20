@@ -1,0 +1,60 @@
+name: compat-releases
+# Every upstream release tag v0.5.N and upstream main, against the Rust port. Nightly and on
+# demand, never on push: a failure here is upstream moving (or a Go version the port does not
+# yet read), and must not block a push to this repository.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      names: ${{ steps.names.outputs.names }}
+    steps:
+      - id: names
+        run: |
+          set -eu
+          tags=$(git ls-remote --tags --refs https://github.com/benbjohnson/litestream \
+            | sed 's|.*refs/tags/||' | grep -E '^v0\.5\.[0-9]+$' | sort -V)
+          names=$(printf '%s\nmain\n' "$tags" | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "names=$names" >> "$GITHUB_OUTPUT"
+
+  compat:
+    needs: resolve
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        name: ${{ fromJSON(needs.resolve.outputs.names) }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,just
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+      - run: just upstream
+      - run: just compat-live "$NAME"
+        env:
+          NAME: ${{ matrix.name }}
+
+  # A tag the compat table does not list needs an era decision there; it was still run by
+  # name above, so this only names it.
+  tags:
+    needs: compat
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,just
+      - run: just compat-tags

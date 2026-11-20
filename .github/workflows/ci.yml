@@ -17,3 +17,23 @@ jobs:
         with:
           tool: cargo-nextest,just
       - run: just check
+
+  # The pinned Go versions: committed fixtures plus the live tests. The other releases and
+  # upstream main run nightly in compat-releases.yml, never here.
+  compat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,just
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+      - run: just upstream
+      - uses: actions/cache@v4
+        with:
+          path: .upstream/bin
+          key: go-bin-${{ runner.os }}-${{ hashFiles('scripts/build-go-litestream.sh') }}-v0.5.0-v0.5.15-v0.5.16-v0.5.18-041a8c3
+      - run: just compat
