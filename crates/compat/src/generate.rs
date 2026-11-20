@@ -184,6 +184,7 @@ fn with_log(err: CompatError, rep: &Replicator) -> CompatError {
         }
         other @ (CompatError::Io { .. }
         | CompatError::Sqlite(_)
+        | CompatError::Open(_)
         | CompatError::Json { .. }
         | CompatError::BadKey(_)
         | CompatError::MissingBinary { .. }

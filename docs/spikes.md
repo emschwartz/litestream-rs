@@ -125,3 +125,5 @@ What 0.12.0 changes, from its crate (downloaded for reading only, SHA-256 `7c091
 - Otherwise only metadata: the author's email and the licence's copyright years, the README badge, and one upstream test (`tests/delete_objects.rs`) no longer ignored for versitygw.
 
 So the bump buys nothing for this crate except `jiff` 1.0. Features stay `rustcrypto` and `full` (`full` is what gates DeleteObjects).
+
+**Since built:** the probe is gone; its code is `crates/sqlite/src/shm.rs` and its answers are tests in `crates/sqlite/src/shm/tests.rs` and `crates/sqlite/tests/{wal_index,descriptors}.rs` (the comparison with `LiveSqlite`'s file read became one with the `-shm` bytes read through a descriptor held until every connection closes; the fallback-descriptor case was dropped).

@@ -1,8 +1,8 @@
 //! A chain the Rust actor writes from a live SQLite database, for the Go compatibility checks.
 //!
-//! Test support, like [`crate::LiveSqlite`] it builds on. A [`Site`] is the application's side
+//! Test support, over the production backend [`Sqlite`]. A [`Site`] is the application's side
 //! (the database, an open application connection, the meta directory Go would use and the
-//! replica directory); a [`Chain`] is the actor over a [`LiveSqlite`] of that site, staging L0 files
+//! replica directory); a [`Chain`] is the actor over a [`Sqlite`] of that site, staging L0 files
 //! in `<meta>/ltx/0` (Go's own layout, `db.go:600`) and publishing to the replica.
 //!
 //! The clock is virtual and ends near the real time (`clock_ending_now`): the maintenance
@@ -26,12 +26,12 @@ use lsr_core::{
     Maintenance, SyncConfig, Tick, UploadConfig,
 };
 use lsr_ltx::{Timestamp, Txid};
+use lsr_sqlite::Sqlite;
 use lsr_store_fs::FsStore;
 use rusqlite::Connection;
 use tempfile::TempDir;
 
 use crate::error::CompatError;
-use crate::live_source::LiveSqlite;
 use crate::pages::hash_pages;
 use crate::replica;
 use crate::workload::SplitMix;
@@ -252,7 +252,7 @@ pub struct Written {
 pub struct Chain {
     /// The application's side.
     pub site: Site,
-    live: LiveSqlite,
+    live: Sqlite,
     staging: FsStore,
     remote: FsStore,
     actor: Actor,
@@ -325,7 +325,7 @@ impl Chain {
     /// # Errors
     /// [`CompatError`] when SQLite or the schedule refuses.
     pub fn start(site: Site, clock_ms: i64) -> Result<Self, CompatError> {
-        let live = LiveSqlite::open(&site.db)?;
+        let live = Sqlite::open(&site.db)?;
         Ok(Self {
             staging: FsStore::new(&site.meta),
             remote: FsStore::new(&site.replica),

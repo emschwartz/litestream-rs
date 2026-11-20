@@ -80,6 +80,15 @@ Each spike answers one question with a measurement on Linux at SQLite 3.54.1, th
 
 **Tests:** `crates/compat/tests/live_source.rs` unchanged (the outside-checkpoint cases, the pin cases, `live_sync_chain_restores`); one test per error variant; the descriptor test of semantics 1; the host-connection helpers on a pooled connection (four connections, each checked).
 
+**As built** (branch `worktree-agent-a5d06097b698174aa`), where it departs from the above:
+- `Sqlite::open(path)` takes no config, so `tests/live_source.rs` keeps its one-argument call unchanged (its only edit is the import, `use lsr_sqlite::Sqlite as LiveSqlite`); `Sqlite::open_with(path, &SqliteConfig)` takes the config, whose one field is the VFS name (`None` is SQLite's default), for task 4's fault VFS. Open does not create a missing database (no `SQLITE_OPEN_CREATE`), as Go waits for the file rather than making one.
+- No direct `libsqlite3-sys` dependency: `rusqlite::ffi` re-exports it. rusqlite's safe `file_control` (PERSIST_WAL) and `transaction_state` are used where they exist; raw FFI only for `SQLITE_FCNTL_FILE_POINTER`, the io-method calls and `sqlite3_wal_checkpoint_v2` (rusqlite's wrapper drops the frame counts on `SQLITE_BUSY`).
+- Checkpoint results: `SQLITE_BUSY` with both counts set is a run with `busy` (readers blocked it); `SQLITE_BUSY` with counts of -1 (another connection held the checkpoint lock, so it never ran) is `SourceError::Busy`. The pragma reported both as `busy = 1`, and `LiveSqlite` then failed the second on the -1.
+- After `ReadTxLost` the next `committed`, `page_count` or `read_page` retakes the read transaction first (a new epoch) or returns `ReadTxLost` again, so the actor's retry policy recovers without a new handle. `page_count` is `xFileSize` on the reader's handle, not a `stat`.
+- `Sqlite` is `Send` and `Sync` (an `Arc<Mutex<_>>`, as `LiveSqlite`): the raw file handle and wal-index region move between threads only together with the reader connection that owns them, behind one reasoned `unsafe impl Send`. Every read still happens on whichever thread holds the mutex, never concurrently.
+- The spike's probe (`crates/compat/tests/shm_mapping.rs`) is replaced: the guard, refusal, header-check, same-region, unguarded-map and racing-writer cases are unit tests in `crates/sqlite/src/shm/tests.rs`; the agreement with the `-shm` bytes, "no WAL yet" and the lock-drop hazard are in `crates/sqlite/tests/{wal_index,descriptors}.rs`. The fallback-descriptor case is dropped (not used).
+- Errors this backend never returns: `SourceError::FsyncFailed` (it syncs nothing) and `SourceError::Unlinked` (a WAL deleted under the pin is not detected yet; task 4's `WalUnlinked` case needs it). Refusals and `OpenError::PageSize` are reached only by unit tests: a real SQLite never produces them through `open`.
+
 ### Task 2: deferred
 
 The pure-Rust pin is not part of phase 3 (ruling P0); it is tracked in #9. The number is kept so the task references below stay stable.

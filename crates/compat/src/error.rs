@@ -17,6 +17,9 @@ pub enum CompatError {
     /// SQLite refused a statement.
     #[error("sqlite: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    /// The replication backend could not open the database.
+    #[error("opening the replication backend: {0}")]
+    Open(#[from] lsr_sqlite::OpenError),
     /// A manifest did not parse or serialize.
     #[error("manifest {path}: {source}")]
     Json {

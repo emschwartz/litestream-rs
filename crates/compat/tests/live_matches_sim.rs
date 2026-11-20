@@ -38,7 +38,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use lsr_compat::LiveSqlite;
 use lsr_core::conformance::block_on;
 use lsr_core::{
     Barrier, CheckpointMode, CheckpointRun, Checkpointer, CommittedRead, Level, MemStore,
@@ -48,6 +47,7 @@ use lsr_core::{
 };
 use lsr_ltx::{PageNo, PageSize, Timestamp};
 use lsr_sim::{ReaderId, SimCheckpointer, SimPages, SimSource, SimSqlite, StrangerMode};
+use lsr_sqlite::Sqlite as LiveSqlite;
 use lsr_wal::{Salts, WalReader};
 use proptest::prelude::*;
 use rusqlite::Connection;

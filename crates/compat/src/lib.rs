@@ -31,7 +31,6 @@ mod chain;
 mod error;
 mod generate;
 mod golive;
-mod live_source;
 mod manifest;
 mod pages;
 mod replica;
@@ -53,7 +52,6 @@ pub use golive::{
     GoRestore, build_verify_helper, go_verify, restore_with_go, rfc3339_millis, write_config,
     write_config_snapshotting,
 };
-pub use live_source::LiveSqlite;
 pub use manifest::{
     FIXTURE_FORMAT, FileEntry, MANIFEST_FILE, Manifest, Outcome, Target, TargetEntry, all_fixtures,
     fixture_dir, fixtures_root,

@@ -14,7 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use lsr_compat::{LiveSqlite, hash_pages, integrity_check};
+use lsr_compat::{hash_pages, integrity_check};
 use lsr_core::conformance::block_on;
 use lsr_core::{
     CheckpointMode, Checkpointer, CommittedRead, FileInfo, MemSink, MemStore, PageSource, Probes,
@@ -23,6 +23,7 @@ use lsr_core::{
     recover_traced, restore, sync_step,
 };
 use lsr_ltx::{PageNo, PageSize, Timestamp, Txid};
+use lsr_sqlite::Sqlite as LiveSqlite;
 use lsr_wal::{Salts, WalReader};
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
