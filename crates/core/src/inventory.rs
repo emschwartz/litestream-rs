@@ -126,6 +126,14 @@ impl Inventory {
         &self.files
     }
 
+    /// The files of one level, ascending by key.
+    #[must_use]
+    pub fn level(&self, level: Level) -> &[FileInfo] {
+        let start = self.files.partition_point(|info| info.key.level() < level);
+        let end = self.files.partition_point(|info| info.key.level() <= level);
+        self.files.get(start..end).unwrap_or_default()
+    }
+
     /// Whether the replica holds no LTX file at all.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -235,6 +243,29 @@ mod tests {
             reversed.reverse();
             assert_eq!(Inventory::from_files(reversed).unwrap(), want);
         }
+    }
+
+    #[test]
+    fn level_is_the_slice_of_that_level_in_key_order() {
+        let inv = Inventory::from_files([
+            info(9, 1, 3),
+            info(1, 4, 9),
+            info(0, 5, 5),
+            info(0, 4, 4),
+            info(1, 1, 3),
+        ])
+        .unwrap();
+        let keys = |l: u8| -> Vec<FileKey> {
+            inv.level(Level::new(l).unwrap())
+                .iter()
+                .map(|f| f.key)
+                .collect()
+        };
+        assert_eq!(keys(0), vec![key(0, 4, 4), key(0, 5, 5)]);
+        assert_eq!(keys(1), vec![key(1, 1, 3), key(1, 4, 9)]);
+        assert_eq!(keys(9), vec![key(9, 1, 3)]);
+        assert!(keys(2).is_empty() && keys(5).is_empty());
+        assert!(Inventory::default().level(Level::ZERO).is_empty());
     }
 
     #[test]
