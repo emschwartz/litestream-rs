@@ -19,6 +19,7 @@
 //! `ltx.Decoder.Verify` it (`go/verify`).
 
 mod binaries;
+mod chain;
 mod error;
 mod generate;
 mod golive;
@@ -26,15 +27,20 @@ mod live_source;
 mod manifest;
 mod pages;
 mod replica;
+mod replicator;
 mod rsrestore;
 mod scenario;
 mod workload;
 
 pub use binaries::{GoVersion, go_binary, workspace_root};
+pub use chain::{
+    Chain, Outside, Point, STEP_MS, Shape, Site, Written, clock_ending_now, real_now_ms,
+};
 pub use error::CompatError;
 pub use generate::generate;
 pub use golive::{
     GoRestore, build_verify_helper, go_verify, restore_with_go, rfc3339_millis, write_config,
+    write_config_snapshotting,
 };
 pub use live_source::LiveSqlite;
 pub use manifest::{
@@ -42,6 +48,7 @@ pub use manifest::{
     fixture_dir, fixtures_root,
 };
 pub use pages::{PageDigest, hash_pages, integrity_check};
-pub use replica::{parse_rel, rel_of};
+pub use replica::{Listing, ReplicaFile, list, newest_l0, parse_rel, rel_of};
+pub use replicator::{Replicator, wait_until};
 pub use rsrestore::{Staged, chain_files, copy_tree, restore_replica, stage};
 pub use scenario::Scenario;

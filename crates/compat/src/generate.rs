@@ -8,8 +8,7 @@
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use lsr_core::{FileKey, Inventory, Level, PlanOutcome, RestoreTarget, plan};
 
@@ -19,109 +18,15 @@ use crate::golive::{GoRestore, restore_with_go, write_config};
 use crate::manifest::{FIXTURE_FORMAT, FileEntry, Manifest, Outcome, Target, TargetEntry};
 use crate::pages::{hash_pages, integrity_check};
 use crate::replica::{self, Listing, ReplicaFile, info_of};
+use crate::replicator::{Replicator, wait_until};
 use crate::scenario::Scenario;
 use crate::workload::Workload;
 
-const POLL: Duration = Duration::from_millis(20);
 const CATCH_UP: Duration = Duration::from_secs(30);
 const SHAPE_CHANGE: Duration = Duration::from_secs(20);
 const MAX_TAIL: u32 = 400;
 const ATTEMPTS: u32 = 4;
 const GAP_TOUCHES: u32 = 6;
-
-/// Polls `cond` until it holds or `timeout` passes.
-fn wait_until(
-    what: &str,
-    timeout: Duration,
-    mut cond: impl FnMut() -> Result<bool, CompatError>,
-) -> Result<(), CompatError> {
-    let deadline = Instant::now().checked_add(timeout);
-    loop {
-        if cond()? {
-            return Ok(());
-        }
-        if deadline.is_some_and(|d| Instant::now() >= d) {
-            return Err(CompatError::Timeout(what.to_owned()));
-        }
-        std::thread::sleep(POLL);
-    }
-}
-
-/// A running `litestream replicate`, killed if dropped.
-#[derive(Debug)]
-struct Replicator {
-    child: Child,
-    log: PathBuf,
-}
-
-impl Replicator {
-    fn start(binary: &Path, config: &Path, log: &Path) -> Result<Self, CompatError> {
-        let out = fs::File::create(log).map_err(CompatError::io(log))?;
-        let err = out.try_clone().map_err(CompatError::io(log))?;
-        let child = Command::new(binary)
-            .arg("replicate")
-            .arg("-config")
-            .arg(config)
-            .stdout(Stdio::from(out))
-            .stderr(Stdio::from(err))
-            .spawn()
-            .map_err(CompatError::io(binary))?;
-        Ok(Self {
-            child,
-            log: log.to_path_buf(),
-        })
-    }
-
-    fn log_tail(&self) -> String {
-        let text = fs::read_to_string(&self.log).unwrap_or_default();
-        let lines: Vec<&str> = text.lines().rev().take(8).collect();
-        lines.into_iter().rev().collect::<Vec<_>>().join(" | ")
-    }
-
-    fn ensure_running(&mut self) -> Result<(), CompatError> {
-        match self.child.try_wait().map_err(CompatError::io(&self.log))? {
-            None => Ok(()),
-            Some(status) => Err(CompatError::Process {
-                command: "litestream replicate".to_owned(),
-                detail: format!("exited early with {status}: {}", self.log_tail()),
-            }),
-        }
-    }
-
-    /// SIGINT, the way an operator stops it, then wait for a clean exit.
-    fn stop(mut self) -> Result<(), CompatError> {
-        let pid = self.child.id().to_string();
-        let sent = Command::new("kill")
-            .args(["-INT", &pid])
-            .status()
-            .map_err(CompatError::io("kill"))?;
-        let mut exited = false;
-        let result = wait_until("replicate to exit", Duration::from_secs(30), || {
-            exited = self
-                .child
-                .try_wait()
-                .map_err(CompatError::io(&self.log))?
-                .is_some();
-            Ok(exited)
-        });
-        if !sent.success() || result.is_err() {
-            return Err(CompatError::Process {
-                command: "litestream replicate".to_owned(),
-                detail: format!("did not stop on SIGINT: {}", self.log_tail()),
-            });
-        }
-        Ok(())
-    }
-}
-
-impl Drop for Replicator {
-    fn drop(&mut self) {
-        if matches!(self.child.try_wait(), Ok(None)) {
-            drop(self.child.kill());
-            drop(self.child.wait());
-        }
-    }
-}
 
 /// The two salts of a WAL file header.
 fn wal_salts(wal: &Path) -> Option<(u32, u32)> {

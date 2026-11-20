@@ -14,13 +14,24 @@ use crate::manifest::Target;
 /// every level and several snapshots within seconds. The keys exist, with the same meaning,
 /// from v0.5.0 to 041a8c3 (read in each tag's `cmd/litestream/main.go`).
 pub fn write_config(path: &Path, db: &Path, replica: &Path) -> Result<(), CompatError> {
+    write_config_snapshotting(path, db, replica, "3s")
+}
+
+/// [`write_config`] with a chosen snapshot interval (Go's duration syntax), for a run that
+/// must not take a snapshot of its own while a check looks at what the replica holds.
+pub fn write_config_snapshotting(
+    path: &Path,
+    db: &Path,
+    replica: &Path,
+    snapshot_interval: &str,
+) -> Result<(), CompatError> {
     let text = format!(
         "levels:
   - interval: 1s
   - interval: 2s
   - interval: 4s
 snapshot:
-  interval: 3s
+  interval: {snapshot_interval}
   retention: 1h
 dbs:
   - path: {db}
@@ -32,7 +43,8 @@ dbs:
       sync-interval: 100ms
 ",
         db = db.display(),
-        replica = replica.display()
+        replica = replica.display(),
+        snapshot_interval = snapshot_interval
     );
     fs::write(path, text).map_err(CompatError::io(path))
 }
