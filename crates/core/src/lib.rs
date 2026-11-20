@@ -22,8 +22,8 @@ mod restore;
 mod retry;
 mod source;
 mod store;
-mod upload;
 mod sync;
+mod upload;
 mod verify;
 
 pub use compact::{
@@ -73,13 +73,13 @@ pub use store::{
     CorruptCause, Listing, ObjectStore, PageLimit, PartNumber, ReadLen, StoreError, StoreOp,
     Upload, build_listing,
 };
-pub use upload::{
-    Did, Ticked, UploadConfig, UploadFailed, UploadPlan, UploadState, Uploaded, plan_upload,
-    upload_next, upload_tick,
-};
 pub use sync::{
     PageFrom, Step, StepEnd, StepFailed, SyncConfig, Synced, clamp, header_fields, plan_pages,
     sync_step,
+};
+pub use upload::{
+    Did, Ticked, UploadConfig, UploadFailed, UploadPlan, UploadState, Uploaded, plan_upload,
+    upload_next, upload_tick,
 };
 pub use verify::{
     Depth, Finding, LevelSummary, MAX_FINDINGS, Report, Severity, VerifyError, verify,
