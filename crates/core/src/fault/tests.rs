@@ -259,14 +259,17 @@ fn from_store_scratch_exhausted_is_local_disk_full() {
 
 #[test]
 fn from_store_commit_size_mismatch_is_upload_ambiguous() {
-    let err = StoreError::Corrupt {
-        key: Some(key()),
-        cause: CorruptCause::CommitSizeMismatch {
-            wrote: 10,
-            stored: 9,
-        },
-    };
-    assert_eq!(store_fault(&err), Fault::UploadAmbiguous);
+    for removed in [true, false] {
+        let err = StoreError::Corrupt {
+            key: Some(key()),
+            cause: CorruptCause::CommitSizeMismatch {
+                wrote: 10,
+                stored: 9,
+                removed,
+            },
+        };
+        assert_eq!(store_fault(&err), Fault::UploadAmbiguous);
+    }
 }
 
 #[test]
