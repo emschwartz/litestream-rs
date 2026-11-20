@@ -5,8 +5,8 @@ use std::path::Path;
 use std::time::UNIX_EPOCH;
 
 use crate::error::CompatError;
-use crate::ltxhdr::{HEADER_LEN, LtxHeader};
-use crate::ltxkey::{KeyLayout, LocalKey};
+use lsr_core::{FileInfo, FileKey, Level, parse_file_name};
+use lsr_ltx::{HEADER_LEN, Header, Timestamp};
 
 /// One LTX file of a replica.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,7 +14,7 @@ pub struct ReplicaFile {
     /// Path relative to the replica root, `ltx/<level>/<min>-<max>.ltx`.
     pub rel: String,
     /// The parsed key.
-    pub key: LocalKey,
+    pub key: FileKey,
     /// Size in bytes.
     pub size: u64,
     /// Modification time, Unix milliseconds.
@@ -28,6 +28,29 @@ pub struct Listing {
     pub files: Vec<ReplicaFile>,
     /// Relative names that are not LTX keys (temp files of an upload in flight, for one).
     pub foreign: Vec<String>,
+}
+
+/// The key of a path relative to a file replica, `ltx/<level>/<min>-<max>.ltx` with the level as
+/// one decimal digit, exactly as Go's file replica writes it; `None` for any other name.
+pub fn parse_rel(rel: &str) -> Option<FileKey> {
+    let (level, name) = rel.strip_prefix("ltx/")?.split_once('/')?;
+    let one_digit = level.len() == 1 && level.bytes().all(|b| b.is_ascii_digit());
+    let level = Level::new(level.parse().ok().filter(|_| one_digit)?)?;
+    Some(FileKey::new(level, parse_file_name(name).ok()?))
+}
+
+/// The path of a key relative to a file replica; the inverse of [`parse_rel`].
+pub fn rel_of(key: &FileKey) -> String {
+    format!("ltx/{}/{}", key.level(), key.file_name())
+}
+
+/// The planner's view of a listed file: its key, size and creation time.
+pub fn info_of(file: &ReplicaFile) -> FileInfo {
+    FileInfo {
+        key: file.key,
+        size: file.size,
+        created_at: Timestamp::from_unix_millis(file.mtime_ms),
+    }
 }
 
 fn mtime_ms(meta: &fs::Metadata, path: &Path) -> Result<i64, CompatError> {
@@ -66,7 +89,7 @@ pub fn list(replica: &Path) -> Result<Listing, CompatError> {
                 .unwrap_or("?")
                 .to_owned();
             let rel = format!("ltx/{level_name}/{name}");
-            let Ok(key) = LocalKey::parse(&rel, KeyLayout::File) else {
+            let Some(key) = parse_rel(&rel) else {
                 out.foreign.push(rel);
                 continue;
             };
@@ -91,13 +114,13 @@ pub fn list(replica: &Path) -> Result<Listing, CompatError> {
 
 /// The newest level-0 file and its header; `None` when there is none yet or it vanished
 /// between listing and reading (compaction deletes level-0 files).
-pub fn newest_l0(replica: &Path) -> Result<Option<LtxHeader>, CompatError> {
+pub fn newest_l0(replica: &Path) -> Result<Option<Header>, CompatError> {
     let listing = list(replica)?;
     let Some(file) = listing
         .files
         .iter()
-        .filter(|f| f.key.level == 0)
-        .max_by_key(|f| f.key.max)
+        .filter(|f| f.key.level() == Level::ZERO)
+        .max_by_key(|f| f.key.range().max())
     else {
         return Ok(None);
     };
@@ -105,5 +128,37 @@ pub fn newest_l0(replica: &Path) -> Result<Option<LtxHeader>, CompatError> {
     let Ok(bytes) = fs::read(&path) else {
         return Ok(None);
     };
-    Ok(bytes.get(..HEADER_LEN).and_then(LtxHeader::parse))
+    let head: Option<&[u8; HEADER_LEN]> = bytes.get(..HEADER_LEN).and_then(|b| b.try_into().ok());
+    Ok(head.and_then(|h| Header::decode(h).ok()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NAME: &str = "0000000000000001-0000000000000a0b.ltx";
+
+    #[test]
+    fn go_file_keys_round_trip() {
+        let rel = format!("ltx/9/{NAME}");
+        let key = parse_rel(&rel).expect("a key");
+        assert_eq!(key.level(), Level::SNAPSHOT);
+        assert_eq!(rel_of(&key), rel);
+    }
+
+    #[test]
+    fn names_go_would_not_write_are_foreign() {
+        for rel in [
+            format!("ltx/10/{NAME}"),
+            format!("ltx/00/{NAME}"),
+            format!("ltx/x/{NAME}"),
+            format!("0009/{NAME}"),
+            format!("0/{NAME}"),
+            "ltx/0/0000000000000001-0000000000000002.tmp".to_owned(),
+            "ltx/0/0000000000000003-0000000000000002.ltx".to_owned(),
+            "ltx/0/0000000000000000-0000000000000002.ltx".to_owned(),
+        ] {
+            assert!(parse_rel(&rel).is_none(), "{rel}");
+        }
+    }
 }

@@ -2,9 +2,9 @@
 //! and internally coherent. Needs no Go binary, so it runs in `just check`.
 
 use lsr_compat::{
-    GoVersion, KeyLayout, LocalKey, Manifest, Outcome, SNAPSHOT_LEVEL, Scenario, Target,
-    all_fixtures, fixture_dir,
+    GoVersion, Manifest, Outcome, Scenario, Target, all_fixtures, fixture_dir, parse_rel,
 };
+use lsr_core::{FileKey, Level};
 
 const FIXTURE_BUDGET: u64 = 1024 * 1024;
 const TOTAL_BUDGET: u64 = 12 * 1024 * 1024;
@@ -44,20 +44,24 @@ fn manifests_match_their_replicas() {
 fn replicas_hold_every_level_and_two_snapshots() {
     for dir in all_fixtures().expect("list") {
         let m = Manifest::load(&dir).expect("load");
-        let keys: Vec<LocalKey> = m
+        let keys: Vec<FileKey> = m
             .files
             .iter()
-            .map(|f| LocalKey::parse(&f.key, KeyLayout::File).expect("key"))
+            .map(|f| parse_rel(&f.key).expect("key"))
             .collect();
-        let at = |pred: fn(&LocalKey) -> bool| keys.iter().filter(|k| pred(k)).count();
-        assert!(at(|k| k.level == 0) >= 1, "{}: no L0", dir.display());
+        let at = |pred: fn(&FileKey) -> bool| keys.iter().filter(|k| pred(k)).count();
         assert!(
-            at(|k| k.level > 0 && k.level < SNAPSHOT_LEVEL) >= 1,
+            at(|k| k.level() == Level::ZERO) >= 1,
+            "{}: no L0",
+            dir.display()
+        );
+        assert!(
+            at(|k| k.level() > Level::ZERO && !k.level().is_snapshot()) >= 1,
             "{}: no compacted level",
             dir.display()
         );
         assert!(
-            at(|k| k.is_snapshot()) >= 2,
+            at(|k| k.level().is_snapshot()) >= 2,
             "{}: fewer than two snapshots",
             dir.display()
         );

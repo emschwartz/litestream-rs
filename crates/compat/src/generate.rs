@@ -11,14 +11,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use lsr_core::{FileKey, Inventory, Level, PlanOutcome, RestoreTarget, plan};
+
 use crate::binaries::{GoVersion, go_binary};
 use crate::error::CompatError;
 use crate::golive::{GoRestore, restore_with_go, write_config};
-use crate::ltxkey::LocalKey;
 use crate::manifest::{FIXTURE_FORMAT, FileEntry, Manifest, Outcome, Target, TargetEntry};
-use crate::model::{self, Chain};
 use crate::pages::{hash_pages, integrity_check};
-use crate::replica::{self, Listing, ReplicaFile};
+use crate::replica::{self, Listing, ReplicaFile, info_of};
 use crate::scenario::Scenario;
 use crate::workload::Workload;
 
@@ -146,9 +146,10 @@ fn caught_up(wl: &Workload, db: &Path, replica: &Path) -> Result<bool, CompatErr
         .wal_frames()?
         .saturating_mul(frame_len)
         .saturating_add(32);
-    let start = u64::try_from(header.wal_offset).unwrap_or(u64::MAX);
-    let size = u64::try_from(header.wal_size).unwrap_or(u64::MAX);
-    Ok((header.wal_salt1, header.wal_salt2) == salts && start.saturating_add(size) == end)
+    let Some(wal) = header.fields().wal else {
+        return Ok(false);
+    };
+    Ok(wal.salts() == salts && wal.offset().saturating_add(wal.size()) == end)
 }
 
 /// Everything one run needs while it is in flight.
@@ -175,13 +176,8 @@ impl Run {
         .map_err(|e| with_log(e, rep))
     }
 
-    fn higher_keys(&self) -> Result<Vec<LocalKey>, CompatError> {
-        Ok(replica::list(&self.replica)?
-            .files
-            .into_iter()
-            .map(|f| f.key)
-            .filter(|k| k.level > 0)
-            .collect())
+    fn higher_keys(&self) -> Result<Vec<FileKey>, CompatError> {
+        self_keys(&self.replica)
     }
 
     /// Writes and waits until the replica shows more than level-0 files: snapshots at two
@@ -206,13 +202,74 @@ impl Run {
     }
 }
 
-fn self_keys(replica: &Path) -> Result<Vec<LocalKey>, CompatError> {
+/// The keys above level 0.
+fn self_keys(replica: &Path) -> Result<Vec<FileKey>, CompatError> {
     Ok(replica::list(replica)?
         .files
         .into_iter()
         .map(|f| f.key)
-        .filter(|k| k.level > 0)
+        .filter(|k| k.level() > Level::ZERO)
         .collect())
+}
+
+fn last_txid(key: &FileKey) -> u64 {
+    key.range().max().get()
+}
+
+/// The planner's verdict for a replica given as files, as a hole when it names one:
+/// `(have_through, next_starts)`.
+fn gap_of(files: &[ReplicaFile], target: RestoreTarget) -> Result<Option<(u64, u64)>, CompatError> {
+    let inventory = Inventory::from_files(files.iter().map(info_of))
+        .map_err(|e| CompatError::Fixture(format!("inventory: {e}")))?;
+    Ok(match plan(&inventory, target) {
+        PlanOutcome::Gap {
+            have_through,
+            next_starts,
+        } => Some((have_through.get(), next_starts.get())),
+        PlanOutcome::Plan(_)
+        | PlanOutcome::EmptyReplica
+        | PlanOutcome::NoSnapshot { .. }
+        | PlanOutcome::BeyondNewest { .. }
+        | PlanOutcome::AsOfInsideFile { .. }
+        | PlanOutcome::InsideFile { .. }
+        | PlanOutcome::MalformedSnapshot { .. } => None,
+    })
+}
+
+/// A TXID whose covering files can be deleted to leave a hole strictly inside the chain of the
+/// newest snapshot: some progress before the hole, at least two TXIDs of history after it.
+fn find_hole(files: &[ReplicaFile]) -> Result<Option<u64>, CompatError> {
+    let newest = files
+        .iter()
+        .filter(|f| f.key.level().is_snapshot())
+        .map(|f| last_txid(&f.key))
+        .max();
+    let head = files.iter().map(|f| last_txid(&f.key)).max();
+    let (Some(newest), Some(head)) = (newest, head) else {
+        return Ok(None);
+    };
+    for hole in newest.saturating_add(2)..head {
+        let remaining = without(files, hole);
+        if let Some((have, next)) = gap_of(&remaining, RestoreTarget::Latest)?
+            && have > newest
+            && head.saturating_sub(next) >= 2
+        {
+            return Ok(Some(hole));
+        }
+    }
+    Ok(None)
+}
+
+/// The files with every non-snapshot file covering `txid` removed.
+fn without(files: &[ReplicaFile], txid: u64) -> Vec<ReplicaFile> {
+    files
+        .iter()
+        .filter(|f| {
+            let range = f.key.range();
+            f.key.level().is_snapshot() || !(range.min().get() <= txid && txid <= range.max().get())
+        })
+        .cloned()
+        .collect()
 }
 
 fn with_log(err: CompatError, rep: &Replicator) -> CompatError {
@@ -233,9 +290,9 @@ fn with_log(err: CompatError, rep: &Replicator) -> CompatError {
 }
 
 /// Two snapshots at distinct TXIDs, files on levels 1 and 2.
-fn shape_ok(higher: &[LocalKey]) -> bool {
-    let snapshots = higher.iter().filter(|k| k.is_snapshot()).count();
-    let at = |level: u8| higher.iter().any(|k| k.level == level);
+fn shape_ok(higher: &[FileKey]) -> bool {
+    let snapshots = higher.iter().filter(|k| k.level().is_snapshot()).count();
+    let at = |level: u8| higher.iter().any(|k| k.level().get() == level);
     snapshots >= 2 && at(1) && at(2)
 }
 
@@ -338,8 +395,8 @@ fn wait_for_new_snapshot(run: &mut Run) -> Result<(), CompatError> {
         Ok(replica::list(replica)?
             .files
             .iter()
-            .filter(|f| f.key.is_snapshot())
-            .map(|f| f.key.max)
+            .filter(|f| f.key.level().is_snapshot())
+            .map(|f| last_txid(&f.key))
             .max()
             .map_or(0, |m| usize::try_from(m).unwrap_or(usize::MAX)))
     };
@@ -384,12 +441,15 @@ fn publish_replica(
             .map_err(CompatError::io(&to))?;
     }
     if scenario.has_gap() {
-        let keys: Vec<LocalKey> = listing.files.iter().map(|f| f.key).collect();
-        let Some(hole) = model::find_hole(&keys) else {
+        let Some(hole) = find_hole(&listing.files)? else {
             return Ok(None);
         };
-        let kept = model::without(&keys, hole);
-        for file in listing.files.iter().filter(|f| !kept.contains(&f.key)) {
+        let kept = without(&listing.files, hole);
+        for file in listing
+            .files
+            .iter()
+            .filter(|f| !kept.iter().any(|k| k.key == f.key))
+        {
             let path = dst.join(&file.rel);
             fs::remove_file(&path).map_err(CompatError::io(&path))?;
         }
@@ -418,12 +478,11 @@ fn record_targets(
         work,
         counter: std::cell::Cell::new(0),
     };
-    let keys: Vec<LocalKey> = files.iter().map(|f| f.key).collect();
     let label = format!("{} {}", version.name(), scenario.name());
     if scenario.has_gap() {
-        gap_targets(&ctx, files, &keys, &label)
+        gap_targets(&ctx, files, &label)
     } else {
-        restorable_targets(&ctx, files, &keys, &label)
+        restorable_targets(&ctx, files, &label)
     }
 }
 
@@ -470,21 +529,20 @@ fn spread_order(len: usize) -> Vec<usize> {
 fn restorable_targets(
     ctx: &RestoreCtx<'_>,
     files: &[ReplicaFile],
-    keys: &[LocalKey],
     label: &str,
 ) -> Result<Vec<TargetEntry>, CompatError> {
     let oldest_snapshot = files
         .iter()
-        .filter(|f| f.key.is_snapshot())
-        .min_by_key(|f| f.key.max);
+        .filter(|f| f.key.level().is_snapshot())
+        .min_by_key(|f| last_txid(&f.key));
     let Some(oldest) = oldest_snapshot else {
         return Err(CompatError::Fixture(format!("{label}: no snapshot")));
     };
-    let head = keys.iter().map(|k| k.max).max().unwrap_or(0);
-    let mut txids: Vec<u64> = keys
+    let head = files.iter().map(|f| last_txid(&f.key)).max().unwrap_or(0);
+    let mut txids: Vec<u64> = files
         .iter()
-        .map(|k| k.max)
-        .filter(|&m| m >= oldest.key.max && m < head)
+        .map(|f| last_txid(&f.key))
+        .filter(|&m| m >= last_txid(&oldest.key) && m < head)
         .collect();
     txids.sort_unstable();
     txids.dedup();
@@ -570,19 +628,14 @@ fn collect_first(
 fn gap_targets(
     ctx: &RestoreCtx<'_>,
     files: &[ReplicaFile],
-    keys: &[LocalKey],
     label: &str,
 ) -> Result<Vec<TargetEntry>, CompatError> {
-    let Chain::Gap {
-        have_through,
-        next_starts,
-    } = model::chain(keys, None)
-    else {
+    let Some((have_through, next_starts)) = gap_of(files, RestoreTarget::Latest)? else {
         return Err(CompatError::Fixture(format!(
-            "{label}: the model sees no gap"
+            "{label}: the planner sees no gap"
         )));
     };
-    let head = keys.iter().map(|k| k.max).max().unwrap_or(0);
+    let head = files.iter().map(|f| last_txid(&f.key)).max().unwrap_or(0);
     let mid = next_starts.saturating_add(head.saturating_sub(next_starts).saturating_div(2));
     let mut txids = vec![next_starts, mid, head];
     txids.dedup();
@@ -597,15 +650,12 @@ fn gap_targets(
     });
     let mut out = Vec::new();
     for target in targets {
-        if let Target::Txid { txid } = target
-            && model::chain(keys, Some(txid))
-                != (Chain::Gap {
-                    have_through,
-                    next_starts,
-                })
+        if let Some(wanted) = target.restore_target()
+            && matches!(target, Target::Txid { .. })
+            && gap_of(files, wanted)? != Some((have_through, next_starts))
         {
             return Err(CompatError::Fixture(format!(
-                "{label}: txid {txid} is not a gap in the model"
+                "{label}: {target:?} is not the same gap in the planner"
             )));
         }
         let (result, _) = ctx.run(target)?;

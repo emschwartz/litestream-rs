@@ -11,6 +11,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+lsr-core = { path = "../core" }
+lsr-ltx = { path = "../ltx" }
 rusqlite = { version = "0.43", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::binaries::workspace_root;
 use crate::error::CompatError;
-use crate::ltxkey::{KeyLayout, LocalKey};
 use crate::pages::PageDigest;
 
 /// The manifest file name inside a fixture directory.
@@ -17,7 +16,7 @@ pub const MANIFEST_FILE: &str = "manifest.json";
 /// The version of the manifest layout.
 pub const FIXTURE_FORMAT: u32 = 1;
 
-/// A restore target. TEMPORARY shape: `lsr-core`'s `RestoreTarget` replaces it (task 4).
+/// A restore target as a manifest records it; [`Target::restore_target`] converts it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Target {
@@ -33,6 +32,21 @@ pub enum Target {
         /// Unix milliseconds.
         unix_ms: i64,
     },
+}
+
+impl Target {
+    /// The planner's target; `None` for a TXID of zero or a TXID the manifest cannot hold.
+    pub fn restore_target(self) -> Option<lsr_core::RestoreTarget> {
+        use lsr_core::RestoreTarget;
+        use lsr_ltx::{Timestamp, Txid};
+        match self {
+            Self::Latest => Some(RestoreTarget::Latest),
+            Self::Txid { txid } => Txid::new(txid).map(RestoreTarget::Txid),
+            Self::AsOf { unix_ms } => {
+                Some(RestoreTarget::AsOf(Timestamp::from_unix_millis(unix_ms)))
+            }
+        }
+    }
 }
 
 /// What a restore produced.
@@ -224,7 +238,9 @@ impl Manifest {
     ) -> Result<BTreeSet<String>, CompatError> {
         let mut listed = BTreeSet::new();
         for entry in &self.files {
-            LocalKey::parse(&entry.key, KeyLayout::File)?;
+            if crate::replica::parse_rel(&entry.key).is_none() {
+                return Err(CompatError::BadKey(entry.key.clone()));
+            }
             let path = Self::replica_dir(fixture).join(&entry.key);
             let size = fs::metadata(&path).map_err(CompatError::io(&path))?.len();
             if size != entry.size {
