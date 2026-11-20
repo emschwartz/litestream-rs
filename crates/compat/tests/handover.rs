@@ -430,3 +430,246 @@ fn the_go_transcription_says_no_when_the_wal_does_not_match() {
         "last page differs"
     );
 }
+
+/// A live Go process taking over a chain the Rust actor wrote, and the reverse.
+mod live_go {
+    use std::collections::BTreeSet;
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant};
+
+    use lsr_compat::{
+        Chain, GoRestore, GoVersion, Replicator, Shape, Site, Target, Written, clock_ending_now,
+        go_binary, hash_pages, integrity_check, list, newest_l0, real_now_ms, restore_replica,
+        restore_with_go, wait_until, write_config, write_config_snapshotting,
+    };
+    use lsr_core::{Level, RestoreTarget};
+    use lsr_ltx::Header;
+
+    use super::{decode, fs};
+
+    const READERS: [GoVersion; 3] = [GoVersion::V0_5_16, GoVersion::V0_5_18, GoVersion::Head];
+
+    fn pages_of(path: &Path) -> Vec<String> {
+        integrity_check(path).expect("integrity_check");
+        hash_pages(path).expect("hash").page_hashes
+    }
+
+    fn binary(version: GoVersion) -> Option<PathBuf> {
+        match go_binary(version) {
+            Ok(path) => Some(path),
+            Err(err) => {
+                println!("skipped: {version:?} is not built ({err})");
+                None
+            }
+        }
+    }
+
+    fn l9(replica: &Path) -> BTreeSet<String> {
+        list(replica)
+            .expect("list")
+            .files
+            .into_iter()
+            .filter(|f| f.key.level() == Level::SNAPSHOT)
+            .map(|f| f.rel)
+            .collect()
+    }
+
+    /// The headers of the L0 files in `meta` newer than `after`, oldest first.
+    fn l0_after(meta: &Path, after: u64) -> Vec<Header> {
+        let mut files: Vec<_> = list(meta)
+            .expect("list")
+            .files
+            .into_iter()
+            .filter(|f| f.key.level() == Level::ZERO && f.key.range().max().get() > after)
+            .collect();
+        files.sort_by_key(|f| f.key);
+        files
+            .iter()
+            .map(|f| decode(&fs::read(meta.join(&f.rel)).expect("read")).0)
+            .collect()
+    }
+
+    /// Waits until Go has staged a file past `above` and then nothing newer for a while. The
+    /// WAL file's length cannot say where the log ends: SQLite reuses the file after a restart.
+    fn wait_quiet(
+        go: &mut Replicator,
+        meta: &Path,
+        above: u64,
+    ) -> Result<(), lsr_compat::CompatError> {
+        let mut last = None;
+        let mut since = Instant::now();
+        wait_until(
+            "Go to stage the commits and go quiet",
+            Duration::from_secs(30),
+            || {
+                go.ensure_running()?;
+                let tip = newest_l0(meta)?.map(|h| h.fields().txids.max().get());
+                if tip != last {
+                    last = tip;
+                    since = Instant::now();
+                }
+                Ok(tip.is_some_and(|t| t > above) && since.elapsed() >= Duration::from_millis(700))
+            },
+        )
+    }
+
+    fn restore_go(
+        binary: &Path,
+        config: &Path,
+        site: &Site,
+        name: &str,
+        target: Target,
+    ) -> PathBuf {
+        let out = site.dir().join(name);
+        for suffix in ["", "-wal", "-shm"] {
+            drop(fs::remove_file(format!("{}{suffix}", out.display())));
+        }
+        let result = restore_with_go(binary, config, &site.db, &out, target).expect("go runs");
+        assert_eq!(result, GoRestore::Restored, "go restore {name}");
+        out
+    }
+
+    /// A Rust run of `commits` commits, optionally ended by a TRUNCATE checkpoint.
+    fn rust_run(commits: u32, truncate: bool) -> Written {
+        let site = Site::create(4096, 21).expect("site");
+        let mut chain =
+            Chain::start(site, clock_ending_now(commits + 20).expect("clock")).expect("start");
+        chain.run(commits).expect("run");
+        if truncate {
+            chain.grow_until_truncate().expect("truncate");
+        }
+        chain.finish().expect("finish")
+    }
+
+    /// Go replicates over the Rust run's meta and replica; the app commits three more
+    /// transactions; Go's first new file is the next transaction, read from the same WAL
+    /// generation past its first frame, and no snapshot is taken.
+    fn resumes(version: GoVersion, truncate: bool) {
+        let Some(bin) = binary(version) else { return };
+        let mut written = rust_run(60, truncate);
+        let tip = written.points.last().expect("points").txid;
+        let tip_head = newest_l0(&written.site.meta)
+            .expect("l0")
+            .expect("a staged file");
+        let tip_salts = tip_head.fields().wal.expect("origin").salts();
+        let snapshots = l9(&written.site.replica);
+        let config = written.site.dir().join("go.yml");
+        write_config_snapshotting(&config, &written.site.db, &written.site.replica, "1h")
+            .expect("config");
+        let mut go =
+            Replicator::start(&bin, &config, &written.site.dir().join("go.log")).expect("start");
+        for _ in 0..3 {
+            written
+                .site
+                .commit(Shape::Insert { bytes: 300 })
+                .expect("commit");
+        }
+        wait_quiet(&mut go, &written.site.meta, tip.get()).expect("Go resumes");
+        go.stop().expect("stop");
+        let new = l0_after(&written.site.meta, tip.get());
+        let first = new.first().expect("a new file").fields();
+        assert_eq!(
+            first.txids.min().get(),
+            tip.get() + 1,
+            "{version:?}: Go's next file"
+        );
+        let origin = first.wal.expect("origin");
+        assert!(
+            origin.offset() > 32,
+            "{version:?}: Go restarted the WAL read at {}",
+            origin.offset()
+        );
+        assert_eq!(
+            origin.salts(),
+            tip_salts,
+            "{version:?}: Go read another WAL generation"
+        );
+        assert!(
+            !first.txids.min().get().eq(&1),
+            "{version:?}: Go wrote a snapshot"
+        );
+        assert_eq!(
+            l9(&written.site.replica),
+            snapshots,
+            "{version:?}: a new snapshot appeared"
+        );
+        let want = written.site.hash_now().expect("hash");
+        let out = restore_go(&bin, &config, &written.site, "after-go.db", Target::Latest);
+        assert_eq!(pages_of(&out), want, "{version:?}");
+        let rs = written.site.dir().join("rs-after-go.db");
+        restore_replica(&written.site.replica, RestoreTarget::Latest, &rs)
+            .expect("sink")
+            .expect("Rust restores the handed-over chain");
+        assert_eq!(
+            pages_of(&rs),
+            want,
+            "{version:?}: Rust on the combined chain"
+        );
+    }
+
+    #[test]
+    #[ignore = "runs the pinned Go binary; just compat"]
+    fn go_resumes_from_rust_meta() {
+        for version in READERS {
+            resumes(version, false);
+        }
+    }
+
+    #[test]
+    #[ignore = "runs the pinned Go binary; just compat"]
+    fn go_resumes_after_rust_checkpoint() {
+        for version in READERS {
+            resumes(version, true);
+        }
+    }
+
+    /// Go writes, stops; the Rust actor boots from Go's meta and replica and goes on. One
+    /// chain: Go restores the end and the point where Go stopped.
+    #[test]
+    #[ignore = "runs the pinned Go binary; just compat"]
+    fn rust_resumes_from_go_meta() {
+        let Some(bin) = binary(GoVersion::V0_5_18) else {
+            return;
+        };
+        let mut site = Site::create(4096, 33).expect("site");
+        let config = site.dir().join("go.yml");
+        write_config(&config, &site.db, &site.replica).expect("config");
+        let mut go = Replicator::start(&bin, &config, &site.dir().join("go.log")).expect("start");
+        for i in 0..40 {
+            site.commit(if i % 7 == 6 {
+                Shape::Tiny
+            } else {
+                Shape::Insert { bytes: 900 }
+            })
+            .expect("commit");
+            std::thread::sleep(Duration::from_millis(30));
+            go.ensure_running().expect("Go runs");
+        }
+        wait_quiet(&mut go, &site.meta, 0).expect("Go catches up");
+        go.stop().expect("stop");
+        let go_tip = newest_l0(&site.meta)
+            .expect("l0")
+            .expect("file")
+            .fields()
+            .txids
+            .max();
+        let at_stop = site.hash_now().expect("hash");
+        let mut chain = Chain::start(site, real_now_ms().expect("clock")).expect("start");
+        for _ in 0..5 {
+            chain.commit(Shape::Insert { bytes: 700 }).expect("commit");
+        }
+        let written = chain.finish().expect("finish");
+        println!("Rust boot: {:?}", written.events.first());
+        let want = &written.points.last().expect("points").page_hashes;
+        let latest = restore_go(&bin, &config, &written.site, "latest.db", Target::Latest);
+        assert_eq!(&pages_of(&latest), want, "Go on the combined chain");
+        let mid = restore_go(
+            &bin,
+            &config,
+            &written.site,
+            "mid.db",
+            Target::Txid { txid: go_tip.get() },
+        );
+        assert_eq!(pages_of(&mid), at_stop, "Go at the txid where Go stopped");
+    }
+}

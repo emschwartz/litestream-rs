@@ -22,8 +22,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    Actor, ActorConfig, CheckpointConfig, Env, Event, L0Retention, Level, Maintenance, SyncConfig,
-    Tick, UploadConfig,
+    Actor, ActorConfig, CheckpointConfig, CheckpointMode, Env, Event, L0Retention, Level,
+    Maintenance, SyncConfig, Tick, UploadConfig,
 };
 use lsr_ltx::{Timestamp, Txid};
 use lsr_store_fs::FsStore;
@@ -116,7 +116,7 @@ impl Site {
         let meta = dir.path().join(".app.db-litestream");
         let replica = dir.path().join("replica");
         let app = Connection::open(&db)?;
-        app.busy_timeout(Duration::ZERO)?;
+        app.busy_timeout(Duration::from_secs(2))?;
         app.pragma_update(None, "page_size", page_size)?;
         app.query_row("PRAGMA journal_mode = wal", [], |_row| Ok(()))?;
         app.pragma_update(None, "wal_autocheckpoint", 0)?;
@@ -443,6 +443,41 @@ impl Chain {
             });
         }
         Ok(())
+    }
+
+    /// Commits big inserts until the actor has run a TRUNCATE checkpoint and synced what it
+    /// wrote, so the run ends on a WAL restart. The actor only truncates after a PASSIVE
+    /// checkpoint failed at the truncate threshold, so an application reader holds the log
+    /// until a checkpoint reports busy and then lets go.
+    ///
+    /// # Errors
+    /// [`CompatError`] when SQLite refuses or no truncate happened within the bound.
+    pub fn grow_until_truncate(&mut self) -> Result<(), CompatError> {
+        let from = self.events.len();
+        let bytes = self.site.page_size().saturating_mul(8);
+        let reader = Connection::open(&self.site.db)?;
+        reader.execute_batch("BEGIN; SELECT count(*) FROM t;")?;
+        let mut reader = Some(reader);
+        for _ in 0..80 {
+            self.commit(Shape::Insert { bytes })?;
+            let ran = |mode, busy| {
+                self.events
+                    .iter()
+                    .skip(from)
+                    .any(|e| *e == Event::Checkpointed { mode, busy })
+            };
+            if ran(CheckpointMode::Truncate, false) {
+                return Ok(());
+            }
+            if ran(CheckpointMode::Passive, true) || ran(CheckpointMode::Truncate, true) {
+                reader = None;
+            }
+        }
+        drop(reader);
+        let seen: Vec<&Event> = self.events.iter().skip(from).collect();
+        Err(CompatError::Fixture(format!(
+            "no truncate checkpoint ran: {seen:?}"
+        )))
     }
 
     /// A seeded run of `commits` commits that grows the database, frees most of it, vacuums it
