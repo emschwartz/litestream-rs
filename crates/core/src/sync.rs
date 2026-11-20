@@ -127,6 +127,10 @@ pub enum Synced {
         end: StepEnd,
         /// Set when the clock read before the last timestamp used.
         clamped: Option<Clamped>,
+        /// How many WAL transactions the file covers (0 for a snapshot of a
+        /// database the WAL holds nothing of): what the checkpoint policy's
+        /// "was that only our own bump frame" question needs.
+        txs: u32,
     },
 }
 
@@ -308,6 +312,7 @@ struct Scanned {
     cursor: FrameCursor,
     last_frame: Option<FrameRef>,
     limited: bool,
+    txs: u32,
 }
 
 fn scan<R: Read + Seek>(
@@ -320,6 +325,7 @@ fn scan<R: Read + Seek>(
     let mut cursor = start.cursor;
     let mut last_frame = None;
     let mut limited = false;
+    let mut txs = 0_u32;
     loop {
         match wal
             .next_tx(&cursor, ScanLimit::Committed(committed.end()))
@@ -329,6 +335,7 @@ fn scan<R: Read + Seek>(
             TxOutcome::Tx(tx) => {
                 map.apply(&tx).map_err(Fault::from_page_map)?;
                 cursor = *tx.end();
+                txs = txs.saturating_add(1);
                 last_frame = tx.frames().last().copied();
                 let bytes = cursor.next().get().saturating_sub(start.begin);
                 if !start.snapshot && cap.is_some_and(|cap| bytes >= cap.get()) {
@@ -343,6 +350,7 @@ fn scan<R: Read + Seek>(
         cursor,
         last_frame,
         limited,
+        txs,
     })
 }
 
@@ -513,7 +521,12 @@ async fn run<R: Read + Seek, P: PageSource, L: ObjectStore>(
     } else {
         StepEnd::Through(SyncedThrough::new(position))
     };
-    Ok(Synced::Wrote { file, end, clamped })
+    Ok(Synced::Wrote {
+        file,
+        end,
+        clamped,
+        txs: scanned.txs,
+    })
 }
 
 /// The header of the file a scan calls for, with its clamped timestamp.
