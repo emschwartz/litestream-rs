@@ -27,7 +27,7 @@ use crate::layout::{FileInfo, FileKey, Level};
 use crate::position::{Continuity, LastPage, Position, ReadEpoch, SyncedThrough};
 use crate::recover::Recovered;
 use crate::source::{CommittedRead, PageSource};
-use crate::store::{ObjectStore, Upload};
+use crate::store::{ObjectStore, StoreError, Upload};
 
 /// Go's default cap on the WAL bytes one file covers (`db.go:33-40`).
 const DEFAULT_CAP: u64 = 64 << 20;
@@ -281,6 +281,27 @@ impl Start {
     }
 }
 
+/// The page map of every committed transaction of the current generation up to `upto`.
+///
+/// A snapshot's scan: from the start of the WAL, no cap. `upto` need not be the
+/// wal-index's committed end; the snapshot writer passes the synced end.
+pub(crate) fn scan_whole<R: Read + Seek>(
+    wal: &mut WalReader<R>,
+    upto: CommittedRead,
+) -> Result<PageMap, Fault> {
+    let cursor = wal.cursor_at_start();
+    let start = Start {
+        cursor,
+        begin: cursor.next().get(),
+        txid: Txid::MIN,
+        prev_commit: None,
+        prev_timestamp: None,
+        held: None,
+        snapshot: true,
+    };
+    scan(wal, &start, upto, None).map(|scanned| scanned.map)
+}
+
 /// What a scan found.
 struct Scanned {
     map: PageMap,
@@ -332,6 +353,7 @@ async fn fill<R: Read + Seek, P: PageSource, U: Upload>(
     plan: &[PageFrom],
     wal: &mut WalReader<R>,
     db: &mut P,
+    map_store: fn(&StoreError) -> Fault,
 ) -> Result<Option<LastPage>, Fault> {
     let mut encoder = Encoder::new(Vec::new(), header).map_err(|_err| Fault::Bug)?;
     let mut buf = vec![0_u8; header.page_size().bytes()];
@@ -354,39 +376,34 @@ async fn fill<R: Read + Seek, P: PageSource, U: Upload>(
         }
         if encoder.writer_mut().len() >= FLUSH_AT {
             let chunk = std::mem::take(encoder.writer_mut());
-            upload
-                .write(&chunk)
-                .await
-                .map_err(|err| Fault::from_staging(&err))?;
+            upload.write(&chunk).await.map_err(|err| map_store(&err))?;
         }
     }
     let (rest, _trailer) = encoder.finish(None).map_err(|_err| Fault::Bug)?;
-    upload
-        .write(&rest)
-        .await
-        .map_err(|err| Fault::from_staging(&err))?;
+    upload.write(&rest).await.map_err(|err| map_store(&err))?;
     Ok(last)
 }
 
-/// Stages one file; the upload is aborted when anything before the commit fails.
-async fn stage<R: Read + Seek, P: PageSource, L: ObjectStore>(
-    staging: &L,
+/// Writes one file into `store`; the upload is aborted when anything before the
+/// commit fails. `map_store` says which store it is: the staging directory and
+/// the replica read the same error differently (`Fault::from_staging`,
+/// `Fault::from_remote`).
+pub(crate) async fn stage<R: Read + Seek, P: PageSource, L: ObjectStore>(
+    store: &L,
     key: &FileKey,
     header: Header,
     plan: &[PageFrom],
     wal: &mut WalReader<R>,
     db: &mut P,
+    map_store: fn(&StoreError) -> Fault,
 ) -> Result<(FileInfo, Option<LastPage>), Fault> {
-    let mut upload = staging
+    let mut upload = store
         .begin_upload(key, header.fields().timestamp)
         .await
-        .map_err(|err| Fault::from_staging(&err))?;
-    match fill(&mut upload, header, plan, wal, db).await {
+        .map_err(|err| map_store(&err))?;
+    match fill(&mut upload, header, plan, wal, db, map_store).await {
         Ok(last) => {
-            let file = upload
-                .commit()
-                .await
-                .map_err(|err| Fault::from_staging(&err))?;
+            let file = upload.commit().await.map_err(|err| map_store(&err))?;
             Ok((file, last))
         }
         Err(fault) => {
@@ -470,7 +487,8 @@ async fn run<R: Read + Seek, P: PageSource, L: ObjectStore>(
     let plan = plan_pages(&scanned.map, start.prev_commit, commit, page_size);
     let (header, clamped) = stamp(&start, &scanned, wal, commit, cfg.node_id, now)?;
     let key = FileKey::new(Level::ZERO, TxidRange::single(start.txid));
-    let (file, last_written) = stage(staging, &key, header, &plan, wal, db).await?;
+    let (file, last_written) =
+        stage(staging, &key, header, &plan, wal, db, Fault::from_staging).await?;
     let last_page = match (scanned.last_frame, last_written) {
         (Some(frame), _) => LastPage::of_frame(&frame),
         (None, Some(page)) => page,

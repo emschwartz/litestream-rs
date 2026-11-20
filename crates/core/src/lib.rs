@@ -20,6 +20,7 @@ mod position;
 mod recover;
 mod restore;
 mod retry;
+mod snapshot;
 mod source;
 mod store;
 mod sync;
@@ -61,6 +62,7 @@ pub use restore::{
     DatabaseSink, FileFault, MAX_ATTEMPTS, NoPlan, RestoreError, Restored, SinkOp, restore,
 };
 pub use retry::{Class, RetryPolicy, RetryStats, Retrying, RetryingUpload, classify};
+pub use snapshot::{SnapshotFailed, write_snapshot};
 pub use source::{
     Barrier, CheckpointMode, CheckpointRun, Checkpointer, CommittedRead, PageSource, SourceError,
     WalSource, WriteLock,
