@@ -12,9 +12,12 @@
 //!   created strictly before the instant. Go skips a file when
 //!   [`!info.CreatedAt.Before(timestamp)`] in both the snapshot loop and
 //!   [`restoreLevelCursor.refresh`] (replica.go), the same comparison.
-//! - The base is the newest eligible snapshot (level 9, first transaction 1).
-//!   A newer snapshot can reach everything an older one can: any file that
-//!   bridges from the older base also touches the newer one's end.
+//! - The base is the eligible file that begins at transaction 1 (any level;
+//!   LTX calls such a file a snapshot) and reaches furthest. Ties go to the
+//!   higher level, then the lower key. A base that reaches further can reach
+//!   everything a nearer one can: any file that bridges from the nearer base
+//!   also touches the further one's end. A level-9 file that begins later is
+//!   never a base.
 //! - Each step takes the eligible file, from levels 0 to 8, that touches the
 //!   chain's end (first transaction at most one past it) and reaches furthest.
 //!   Ties go to the higher level, then the lower first transaction: fewer,
@@ -55,8 +58,8 @@ pub enum RestoreTarget {
 
 /// Files that rebuild one state, in the order to apply them.
 ///
-/// Only the planner builds one. The first file is a snapshot starting at
-/// transaction 1; every later file starts no later than one past the previous
+/// Only the planner builds one. The first file starts at transaction 1, at any
+/// level; every later file starts no later than one past the previous
 /// end and ends beyond it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ContiguousChain {
@@ -87,14 +90,13 @@ impl ContiguousChain {
         fits
     }
 
-    /// The files to apply, oldest state first: the snapshot, then each
-    /// extension.
+    /// The files to apply, oldest state first: the base, then each extension.
     #[must_use]
     pub fn files(&self) -> &[FileInfo] {
         &self.files
     }
 
-    /// The snapshot the chain starts from.
+    /// The file the chain starts from: it begins at transaction 1.
     #[must_use]
     pub const fn snapshot(&self) -> &FileInfo {
         &self.snapshot
@@ -115,11 +117,12 @@ pub enum PlanOutcome {
     Plan(ContiguousChain),
     /// The replica holds no LTX file.
     EmptyReplica,
-    /// No snapshot is eligible for the target: none exists, none is at or
+    /// No eligible file begins at transaction 1: none exists, none is at or
     /// below a requested transaction, none is old enough for a requested
     /// instant, or the only level-9 files do not start at transaction 1.
     NoSnapshot {
-        /// The oldest valid snapshot's last transaction, whatever the target.
+        /// The smallest last transaction among all files that begin at
+        /// transaction 1, whatever the target.
         oldest_snapshot: Option<Txid>,
         /// Level-9 files that do not start at transaction 1 and were refused.
         malformed_snapshots: Vec<FileKey>,
@@ -203,7 +206,7 @@ pub fn plan(inventory: &Inventory, target: RestoreTarget) -> PlanOutcome {
     let base = pool
         .iter()
         .filter(|info| is_snapshot_start(info))
-        .max_by_key(|info| info.key.range().max())
+        .max_by_key(|info| (info.key.range().max(), info.key.level(), Reverse(info.key)))
         .and_then(|info| ContiguousChain::start(*info));
     let Some(mut chain) = base else {
         return no_snapshot(inventory);
@@ -603,12 +606,12 @@ mod tests {
 
     #[test]
     fn without_an_eligible_snapshot_the_outcome_says_so() {
-        let only_l0 = inv(&[at(0, 1, 1), at(0, 2, 2)]);
+        let starts_late = inv(&[at(0, 2, 2), at(0, 3, 3)]);
         let none = PlanOutcome::NoSnapshot {
             oldest_snapshot: None,
             malformed_snapshots: Vec::new(),
         };
-        assert_eq!(plan(&only_l0, RestoreTarget::Latest), none);
+        assert_eq!(plan(&starts_late, RestoreTarget::Latest), none);
 
         let files = inv(&[at(9, 1, 5), at(0, 6, 6)]);
         let older = PlanOutcome::NoSnapshot {
@@ -621,8 +624,83 @@ mod tests {
     }
 
     #[test]
+    fn a_replica_with_only_level_zero_files_from_transaction_one_plans_latest() {
+        let files = inv(&[at(0, 1, 1), at(0, 2, 2), at(0, 3, 3)]);
+        let outcome = plan(&files, RestoreTarget::Latest);
+        assert_eq!(
+            keys(&outcome),
+            vec![key(0, 1, 1), key(0, 2, 2), key(0, 3, 3)]
+        );
+    }
+
+    #[test]
+    fn a_level_one_file_from_transaction_one_is_a_base() {
+        let files = inv(&[at(1, 1, 30), at(0, 31, 31), at(0, 32, 32)]);
+        let outcome = plan(&files, RestoreTarget::Latest);
+        assert_eq!(
+            keys(&outcome),
+            vec![key(1, 1, 30), key(0, 31, 31), key(0, 32, 32)]
+        );
+        let PlanOutcome::Plan(chain) = outcome else {
+            panic!("expected a plan");
+        };
+        assert_eq!(chain.snapshot().key, key(1, 1, 30));
+    }
+
+    #[test]
+    fn an_instant_older_than_the_first_level_nine_file_plans_from_level_zero() {
+        let files = inv(&[
+            at(0, 1, 1),
+            at(0, 2, 2),
+            at(0, 3, 3),
+            at(0, 4, 4),
+            at(9, 1, 4),
+        ]);
+        let instant = RestoreTarget::AsOf(Timestamp::from_unix_millis(ms(1) + 1));
+        assert_eq!(keys(&plan(&files, instant)), vec![key(0, 1, 1)]);
+    }
+
+    #[test]
+    fn the_further_reaching_base_wins_and_a_tie_goes_to_the_higher_level() {
+        let files = inv(&[at(9, 1, 5), at(2, 1, 8), at(0, 9, 9)]);
+        let outcome = plan(&files, RestoreTarget::Latest);
+        assert_eq!(keys(&outcome), vec![key(2, 1, 8), key(0, 9, 9)]);
+
+        let tied = inv(&[at(9, 1, 5), at(2, 1, 5)]);
+        assert_eq!(
+            keys(&plan(&tied, RestoreTarget::Latest)),
+            vec![key(9, 1, 5)]
+        );
+    }
+
+    #[test]
+    fn a_replica_whose_lowest_file_begins_at_two_has_no_snapshot() {
+        let files = inv(&[at(0, 2, 2), at(1, 2, 4)]);
+        assert_eq!(
+            plan(&files, RestoreTarget::Latest),
+            PlanOutcome::NoSnapshot {
+                oldest_snapshot: None,
+                malformed_snapshots: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn the_oldest_snapshot_counts_files_of_every_level_that_begin_at_one() {
+        let files = inv(&[at(0, 1, 1), at(9, 1, 5), at(0, 2, 2)]);
+        let before_all = RestoreTarget::AsOf(Timestamp::from_unix_millis(10));
+        assert_eq!(
+            plan(&files, before_all),
+            PlanOutcome::NoSnapshot {
+                oldest_snapshot: Some(txid(1)),
+                malformed_snapshots: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
     fn a_level_nine_file_not_starting_at_one_is_never_a_snapshot() {
-        let files = inv(&[at(9, 2, 5), at(0, 1, 1), at(0, 2, 2)]);
+        let files = inv(&[at(9, 2, 5), at(0, 2, 2)]);
         assert_eq!(
             plan(&files, RestoreTarget::Latest),
             PlanOutcome::NoSnapshot {
@@ -819,7 +897,7 @@ mod tests {
         let admitted: Vec<&Spec> = files.iter().filter(|s| goal.admits(s)).collect();
         admitted
             .iter()
-            .filter(|s| s.level == 9 && s.min == 1)
+            .filter(|s| s.min == 1)
             .any(|s| some_chain_ends_at(&admitted, s.max, end))
     }
 
@@ -934,10 +1012,7 @@ mod tests {
             );
             assert!(listed.contains(&(level, min, max)), "not in the inventory");
             if i == 0 {
-                assert!(
-                    level == 9 && min == 1,
-                    "first file must be a snapshot from the first transaction"
-                );
+                assert!(min == 1, "first file must begin at the first transaction");
             } else {
                 assert!(
                     level < 9 && min <= reach.saturating_add(1) && max > reach,

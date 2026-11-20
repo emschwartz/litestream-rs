@@ -39,13 +39,16 @@ pub enum InventoryError {
     },
 }
 
-/// Whether a file can be the start of a restore chain: a level-9 file whose
-/// range begins at transaction 1. Go also uses any level-9 file as a base;
-/// this port does not, because a base that skips transactions cannot be
+/// Whether a file can be the start of a restore chain: its range begins at
+/// transaction 1, at any level. LTX defines a snapshot as a file that starts
+/// at transaction 1, and the decoder proves such a file holds every page, so a
+/// young replica's level-0 file from transaction 1 is as good a base as a
+/// level-9 one (Go's `CalcRestorePlan` does the same). A level-9 file that
+/// begins later is still never a base: it skips transactions, so it cannot be
 /// proven to hold every page.
 #[must_use]
 pub fn is_snapshot_start(info: &FileInfo) -> bool {
-    info.key.level().is_snapshot() && info.key.range().min() == Txid::MIN
+    info.key.range().min() == Txid::MIN
 }
 
 /// Every file of a replica, ascending by key, plus the count of foreign names

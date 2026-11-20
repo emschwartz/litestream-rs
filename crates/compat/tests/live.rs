@@ -180,7 +180,7 @@ fn go_verifies_every_file_rust_encoded() {
 /// Instants the manifests do not record, between every two file times: where Rust restores,
 /// Go (the version that wrote the fixture) restores the same pages; where Rust reports the
 /// instant inside a compacted file, Go's answer equals Rust's restore of the chain's end;
-/// where nothing is old enough, Go refuses.
+/// where no file that begins at transaction 1 is old enough, Go refuses too.
 #[test]
 #[ignore = "runs the pinned Go binaries; just compat"]
 fn go_and_rust_agree_on_instants_between_files() {
@@ -226,15 +226,6 @@ fn go_and_rust_agree_on_instants_between_files() {
                 (Err(RestoreError::NoPlan(no)), GoRestore::Refused { .. })
                     if matches!(no.outcome(), PlanOutcome::NoSnapshot { .. }) =>
                 {
-                    (false, rs_out)
-                }
-                // Deliberately stricter: with no snapshot old enough Go starts a chain at an L0
-                // file that begins at transaction 1; the planner requires a level-9 base
-                // (plan.rs, `only_l0`). Go's result must still be a sound database.
-                (Err(RestoreError::NoPlan(no)), GoRestore::Restored)
-                    if matches!(no.outcome(), PlanOutcome::NoSnapshot { .. }) =>
-                {
-                    integrity_check(&go_out).expect("Go's snapshot-less restore is sound");
                     (false, rs_out)
                 }
                 other => panic!("{label}: Rust and Go disagree: {other:?}"),

@@ -265,7 +265,8 @@ mod matrix {
     }
 
     /// An as-of instant between every two consecutive file times, which the manifests do not
-    /// record: Rust either restores, refuses with `NoSnapshot` (nothing old enough), or reports
+    /// record: Rust either restores, refuses with `NoSnapshot` (no file that begins at transaction 1 is old
+    /// enough, which is also where Go refuses), or reports
     /// the instant inside a compacted file, and then the chain's own end restores. The counts are
     /// pinned so a planner change that turns every instant one way fails. Go's answer for the same
     /// instants is compared in `live.rs`.
@@ -308,6 +309,6 @@ mod matrix {
                 }
             }
         }
-        assert_eq!((restored, inside, no_snapshot), (101, 1, 122));
+        assert_eq!((restored, inside, no_snapshot), (221, 1, 2));
     }
 }

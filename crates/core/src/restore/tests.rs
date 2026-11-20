@@ -411,6 +411,43 @@ fn a_level_nine_file_that_is_not_a_snapshot_is_rejected() {
 }
 
 #[test]
+fn a_chain_with_no_level_nine_file_restores_to_the_model() {
+    let store = MemStore::new();
+    put_spec(
+        &store,
+        0,
+        &Spec::plain(512, 3, 1, 1, &[(1, 1), (2, 2), (3, 3)]),
+    );
+    put_spec(&store, 0, &Spec::plain(512, 3, 2, 2, &[(2, 9)]));
+    put_spec(&store, 1, &Spec::plain(512, 4, 3, 4, &[(1, 5), (4, 7)]));
+    let (result, sink) = run(&store, RestoreTarget::Latest);
+    let restored = result.unwrap();
+    assert_eq!(seeds(&sink.published().unwrap()), [5, 9, 3, 7]);
+    assert_eq!(restored.reached(), txid(4));
+    assert_eq!(restored.files(), 3);
+
+    let (result, sink) = run(&store, RestoreTarget::Txid(txid(2)));
+    result.unwrap();
+    assert_eq!(seeds(&sink.published().unwrap()), [1, 9, 3]);
+}
+
+#[test]
+fn a_level_zero_file_named_from_one_whose_header_is_not_a_snapshot_is_rejected() {
+    let store = MemStore::new();
+    put(
+        &store,
+        0,
+        1,
+        3,
+        &Spec::plain(512, 1, 2, 3, &[(1, 1)]).encode(),
+    );
+    let (result, _) = run(&store, RestoreTarget::Latest);
+    let (at, fault) = file_fault(result);
+    assert_eq!(at, key(0, 1, 3));
+    assert!(matches!(fault, FileFault::NotASnapshot));
+}
+
+#[test]
 fn a_page_size_change_mid_chain_is_rejected_before_any_of_its_pages() {
     let store = MemStore::new();
     put_spec(&store, 9, &Spec::plain(512, 1, 1, 1, &[(1, 1)]));

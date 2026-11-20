@@ -44,11 +44,8 @@ mod review {
     /// Reachable-set fixpoint: every transaction a chain can end at.
     fn reachable_ends(files: &[F], g: G) -> std::collections::BTreeSet<u64> {
         let ok: Vec<F> = files.iter().copied().filter(|f| admits(g, f)).collect();
-        let mut ends: std::collections::BTreeSet<u64> = ok
-            .iter()
-            .filter(|f| f.level == 9 && f.min == 1)
-            .map(|f| f.max)
-            .collect();
+        let mut ends: std::collections::BTreeSet<u64> =
+            ok.iter().filter(|f| f.min == 1).map(|f| f.max).collect();
         loop {
             let mut grew = false;
             for f in ok.iter().filter(|f| f.level < 9) {
@@ -193,7 +190,7 @@ mod review {
                     prop_assert!(inv.files().contains(f));
                     let k = kept.iter().find(|k| k.level == f.key.level().get() && k.min == f.key.range().min().get() && k.max == f.key.range().max().get()).unwrap();
                     prop_assert!(admits(g, k));
-                    if i == 0 { prop_assert!(k.level == 9 && k.min == 1); } else {
+                    if i == 0 { prop_assert!(k.min == 1); } else {
                         prop_assert!(k.level < 9 && k.min <= reach.saturating_add(1) && k.max > reach);
                     }
                     reach = k.max;
