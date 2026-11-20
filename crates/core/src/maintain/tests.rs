@@ -15,29 +15,29 @@ use crate::plan::{PlanOutcome, RestoreTarget, plan};
 use crate::store::{PageLimit, StoreOp, Upload};
 
 /// A day-aligned instant (2023-11-15), so every default window starts on it.
-const T0: i64 = 1_700_006_400_000;
+pub(super) const T0: i64 = 1_700_006_400_000;
 
-fn txid(n: u64) -> Txid {
+pub(super) fn txid(n: u64) -> Txid {
     Txid::new(n).unwrap()
 }
 
-fn range(min: u64, max: u64) -> TxidRange {
+pub(super) fn range(min: u64, max: u64) -> TxidRange {
     TxidRange::new(txid(min), txid(max)).unwrap()
 }
 
-fn level(n: u8) -> Level {
+pub(super) fn level(n: u8) -> Level {
     Level::new(n).unwrap()
 }
 
-fn key(l: u8, min: u64, max: u64) -> FileKey {
+pub(super) fn key(l: u8, min: u64, max: u64) -> FileKey {
     FileKey::new(level(l), range(min, max))
 }
 
-fn at(ms: i64) -> Timestamp {
+pub(super) fn at(ms: i64) -> Timestamp {
     Timestamp::from_unix_millis(ms)
 }
 
-fn file(l: u8, min: u64, max: u64, created: i64) -> FileInfo {
+pub(super) fn file(l: u8, min: u64, max: u64, created: i64) -> FileInfo {
     FileInfo {
         key: key(l, min, max),
         size: 1,
@@ -45,11 +45,11 @@ fn file(l: u8, min: u64, max: u64, created: i64) -> FileInfo {
     }
 }
 
-fn inv(files: impl IntoIterator<Item = FileInfo>) -> Inventory {
+pub(super) fn inv(files: impl IntoIterator<Item = FileInfo>) -> Inventory {
     Inventory::from_files(files).unwrap()
 }
 
-fn secs(n: u64) -> Duration {
+pub(super) fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
 }
 
@@ -57,7 +57,7 @@ fn iv(n: u64) -> Interval {
     Interval::new(secs(n)).unwrap()
 }
 
-fn defaults() -> Maintenance {
+pub(super) fn defaults() -> Maintenance {
     Maintenance::go_default()
 }
 
@@ -75,7 +75,7 @@ fn compact_job(job: &Job) -> &CompactJob {
 fn run_job(due: Due) -> Job {
     match due {
         Due::Run(job) => job,
-        Due::Wait { until } => panic!("expected a job, got Wait until {until:?}"),
+        Due::Wait { until, .. } => panic!("expected a job, got Wait until {until:?}"),
     }
 }
 
@@ -350,17 +350,23 @@ fn go_truncate_saturates_at_the_extremes() {
 // The planner, rule by rule.
 
 /// L0 files 1..=n, one transaction each, all created at `created`.
-fn l0_run(first: u64, last: u64, created: i64) -> Vec<FileInfo> {
+pub(super) fn l0_run(first: u64, last: u64, created: i64) -> Vec<FileInfo> {
     (first..=last).map(|n| file(0, n, n, created)).collect()
 }
 
-fn snap(max: u64, created: i64) -> FileInfo {
+pub(super) fn snap(max: u64, created: i64) -> FileInfo {
     file(9, 1, max, created)
 }
 
 #[test]
 fn an_empty_replica_with_nothing_published_has_nothing_to_do() {
-    assert_eq!(due_at(&Inventory::default(), T0), Due::Wait { until: None });
+    assert_eq!(
+        due_at(&Inventory::default(), T0),
+        Due::Wait {
+            until: None,
+            held: None
+        }
+    );
 }
 
 #[test]
@@ -400,7 +406,13 @@ fn a_level_with_nothing_above_its_destination_is_idle_with_no_wake_time() {
     let mut files = l0_run(1, 3, T0 - 100_000);
     files.extend([file(1, 1, 3, T0 - 90_000), file(2, 1, 3, T0 - 90_000)]);
     files.extend([file(3, 1, 3, T0 - 90_000), snap(3, T0 - 90_000)]);
-    assert_eq!(due_at(&inv(files), T0), Due::Wait { until: None });
+    assert_eq!(
+        due_at(&inv(files), T0),
+        Due::Wait {
+            until: None,
+            held: None
+        }
+    );
 }
 
 #[test]
@@ -418,7 +430,8 @@ fn a_destination_written_this_window_waits_for_the_next_one() {
     assert_eq!(
         waiting,
         Due::Wait {
-            until: Some(at(T0 + 30_000))
+            until: Some(at(T0 + 30_000)),
+            held: None
         }
     );
     let later = run_job(due_at(&inv(files), T0 + 30_000));
@@ -455,7 +468,7 @@ fn a_backlog_of_a_hundred_drains_as_four_jobs_in_one_window() {
                 model.apply(&Job::Compact(job), now);
             }
             Due::Run(job) => model.apply(&job, now),
-            Due::Wait { until } => {
+            Due::Wait { until, .. } => {
                 assert_eq!(until, None);
                 break;
             }
@@ -569,7 +582,13 @@ fn converged(snapshot_created: i64, snapshot_max: u64, pos: u64) -> Inventory {
 #[test]
 fn an_idle_database_writes_no_snapshot_however_old_the_last_one() {
     let i = converged(T0 - 5 * 86_400_000, 4, 4);
-    assert_eq!(due_at(&i, T0), Due::Wait { until: None });
+    assert_eq!(
+        due_at(&i, T0),
+        Due::Wait {
+            until: None,
+            held: None
+        }
+    );
 }
 
 #[test]
@@ -578,7 +597,8 @@ fn a_snapshot_this_window_waits_for_the_next_day() {
     assert_eq!(
         due_at(&i, T0 + 5000),
         Due::Wait {
-            until: Some(at(T0 + 86_400_000))
+            until: Some(at(T0 + 86_400_000)),
+            held: None
         }
     );
 }
@@ -645,7 +665,8 @@ fn a_go_shaped_snapshot_waits_inside_its_window_and_runs_after() {
     assert_eq!(
         due_at(&i, T0 + 9000),
         Due::Wait {
-            until: Some(at(T0 + day))
+            until: Some(at(T0 + day)),
+            held: None
         }
     );
     let got = due_at(&i, T0 + day);
@@ -662,16 +683,16 @@ fn a_go_shaped_snapshot_waits_inside_its_window_and_runs_after() {
 
 /// An inventory the model executor edits; no bytes.
 #[derive(Default, Clone)]
-struct Model {
-    files: Vec<FileInfo>,
+pub(super) struct Model {
+    pub(super) files: Vec<FileInfo>,
 }
 
 impl Model {
-    fn inv(&self) -> Inventory {
+    pub(super) fn inv(&self) -> Inventory {
         inv(self.files.clone())
     }
 
-    fn apply(&mut self, job: &Job, now: i64) {
+    pub(super) fn apply(&mut self, job: &Job, now: i64) {
         match job {
             Job::Compact(c) => {
                 let last = c.inputs().files().last().unwrap();
@@ -777,7 +798,7 @@ fn drive(model: &mut Model, check: &mut Checker, now: i64, cfg: &Maintenance) ->
                 model.apply(&job, now);
                 check.after(model);
             }
-            Due::Wait { until } => {
+            Due::Wait { until, .. } => {
                 Checker::waiting(&before, at(now), cfg);
                 return until;
             }
@@ -786,7 +807,7 @@ fn drive(model: &mut Model, check: &mut Checker, now: i64, cfg: &Maintenance) ->
     panic!("due never settled");
 }
 
-fn small() -> Maintenance {
+pub(super) fn small() -> Maintenance {
     Maintenance::new(
         vec![secs(10), secs(60), secs(600)],
         secs(3600),
@@ -796,7 +817,7 @@ fn small() -> Maintenance {
     .unwrap()
 }
 
-fn history() -> impl Strategy<Value = (usize, Vec<(u8, u32)>)> {
+pub(super) fn history() -> impl Strategy<Value = (usize, Vec<(u8, u32)>)> {
     (
         0..2usize,
         prop::collection::vec((0u8..10, 0u32..200_000), 0..250),
@@ -833,7 +854,7 @@ proptest! {
         for later in [1, 86_400_000, 1000 * 86_400_000] {
             prop_assert_eq!(
                 due(&settled, at(now + later), &cfg, None),
-                Due::Wait { until: None }
+                Due::Wait { until: None, held: None }
             );
         }
     }

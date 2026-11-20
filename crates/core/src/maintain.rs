@@ -21,6 +21,10 @@
 //! When the source has nothing above the destination the level is idle: no
 //! write, no job, no wake time.
 //!
+//! Deletes come last: when no compaction or snapshot is ready, `retain` plans
+//! one delete job against a listing that already holds the newest coverage, or
+//! says why it refuses (`Due::Wait { held }`).
+//!
 //! The snapshot is written by task 4's loop, which owns the database position;
 //! [`SnapshotJob`] only says when. Compaction never deletes its inputs, so a
 //! crash at any point leaves a replica that restores: the inputs are still
@@ -28,6 +32,7 @@
 //! [`DeleteJob`], built by retention.
 
 mod config;
+mod retain;
 
 use lsr_ltx::{Timestamp, Txid};
 use thiserror::Error;
@@ -35,7 +40,9 @@ use thiserror::Error;
 use crate::compact::{CompactError, CompactionInputs, MAX_INPUTS, compact};
 use crate::inventory::{Inventory, is_snapshot_start};
 use crate::layout::{FileInfo, FileKey, Level};
+use crate::plan::PlanOutcome;
 use crate::store::{ObjectStore, StoreError};
+use retain::{Retention, retention};
 
 pub use config::{ConfigError, Interval, IntervalError, L0Retention, Maintenance, Setting};
 
@@ -198,6 +205,73 @@ pub enum Job {
     Delete(DeleteJob),
 }
 
+/// Why deletions are refused right now. Compaction and snapshots still run.
+/// Every variant is a listing that cannot safely be read as a history; the
+/// rules and the gate's order are in the `retain` module docs.
+#[derive(Clone, PartialEq, Eq, Debug, Error)]
+pub enum Hold {
+    /// A name in the listing could not be parsed; it may be a file that
+    /// covers something.
+    #[error("{count} unparsable names at {level}")]
+    ForeignNames {
+        /// The level.
+        level: Level,
+        /// How many.
+        count: usize,
+    },
+    /// A level-9 file that does not start at transaction 1.
+    #[error("{key} is a snapshot that does not start at transaction 1")]
+    MalformedSnapshot {
+        /// The file.
+        key: FileKey,
+    },
+    /// The listing misses a file this process knows it wrote: stale or partial.
+    #[error("listing ends at {listed:?} but {published} was published")]
+    ListingBehind {
+        /// The newest transaction listed.
+        listed: Option<Txid>,
+        /// The newest transaction this process committed.
+        published: Txid,
+    },
+    /// A transaction after the newest snapshot that no file covers.
+    #[error("no file covers the transactions after {after}, up to {next:?}")]
+    Hole {
+        /// The last covered transaction before the hole.
+        after: Txid,
+        /// The first covered transaction after it; `None` when the tail is missing.
+        next: Option<Txid>,
+    },
+    /// The newest state cannot be planned.
+    #[error("the newest state does not plan: {outcome:?}")]
+    LatestUnplannable {
+        /// Why; never a plan.
+        outcome: PlanOutcome,
+    },
+    /// A snapshot or level-0 file with no usable stamp.
+    #[error("{key} has no creation time")]
+    Unstamped {
+        /// The file.
+        key: FileKey,
+    },
+    /// Snapshots whose stamps run backwards, so age means nothing. A copied
+    /// replica whose stored times were reset lands here: the stored times no
+    /// longer follow the headers.
+    #[error("{later} is stamped before {earlier}: the stored times no longer follow the headers")]
+    SnapshotStampsBackwards {
+        /// The snapshot with the lower transactions.
+        earlier: FileKey,
+        /// The snapshot with the higher transactions and the older stamp.
+        later: FileKey,
+    },
+    /// The planned delete would have broken the newest restore. A bug in the
+    /// rules, caught before any key was named.
+    #[error("the planned delete would break the newest restore: {outcome:?}")]
+    SelfCheck {
+        /// What the planner said without the keys; never a plan.
+        outcome: PlanOutcome,
+    },
+}
+
 /// What to do now.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Due {
@@ -208,6 +282,8 @@ pub enum Due {
         /// The earliest instant something becomes due; `None` when nothing
         /// does without a new write.
         until: Option<Timestamp>,
+        /// Why deletions are refused right now, if they are.
+        held: Option<Hold>,
     },
 }
 
@@ -264,7 +340,24 @@ pub fn due(
             Step::Idle => {}
         }
     }
-    Due::Wait { until }
+    match retention(inventory, now, config, published) {
+        Retention::Delete(job) => Due::Run(Job::Delete(job)),
+        Retention::Wait { until: wake } => Due::Wait {
+            until: soonest(until, wake),
+            held: None,
+        },
+        Retention::Held(hold) => Due::Wait {
+            until,
+            held: Some(hold),
+        },
+    }
+}
+
+fn soonest(a: Option<Timestamp>, b: Option<Timestamp>) -> Option<Timestamp> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
 }
 
 fn plan_level(inventory: &Inventory, now: Timestamp, config: &Maintenance, dst: Level) -> Step {
