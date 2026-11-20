@@ -16,6 +16,7 @@ mod plan;
 mod restore;
 mod retry;
 mod store;
+mod verify;
 
 pub use env::{Clock, Entropy, Sleeper};
 #[cfg(any(test, feature = "testing"))]
@@ -34,4 +35,7 @@ pub use retry::{Class, RetryPolicy, RetryStats, Retrying, RetryingUpload, classi
 pub use store::{
     CorruptCause, Listing, ObjectStore, PageLimit, ReadLen, StoreError, StoreOp, Upload,
     build_listing,
+};
+pub use verify::{
+    Depth, Finding, LevelSummary, MAX_FINDINGS, Report, Severity, VerifyError, verify,
 };
