@@ -1,0 +1,8 @@
+allow-indexing-slicing-in-tests = true
+allow-panic-in-tests = true
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-dbg-in-tests = true
+
+# TigerStyle's limit (decision D5). Reviewed at phase 1 exit: see docs/PLAN.md.
+too-many-lines-threshold = 70

@@ -1,0 +1,6 @@
+litestream-rs (working name)
+
+This project is a clean Rust implementation of the replica format and protocol of
+Litestream (https://github.com/benbjohnson/litestream, Apache-2.0) and of the LTX
+file format (https://github.com/superfly/ltx, Apache-2.0). It was written by reading
+those projects' source code and tests. It is not affiliated with or endorsed by them.

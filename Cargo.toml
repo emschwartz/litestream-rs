@@ -1,0 +1,83 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.100"
+license = "Apache-2.0"
+publish = false
+
+# The lint set is strict by design, plus the four marked "port" below. Gates run with
+# `-D warnings`, so every "warn" here fails a land.
+[workspace.lints.clippy]
+too_many_lines = "deny"
+indexing_slicing = "warn"
+unreachable = "warn"
+todo = "warn"
+unimplemented = "warn"
+dbg_macro = "warn"
+await_holding_lock = "warn"
+await_holding_refcell_ref = "warn"
+await_holding_invalid_type = "warn"
+let_underscore_future = "warn"
+let_underscore_must_use = "warn"
+mem_forget = "warn"
+rc_mutex = "warn"
+large_futures = "warn"
+panic = "warn"
+float_cmp = "warn"
+string_slice = "warn"
+unwrap_used = "warn"
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+overly_complex_bool_expr = "warn"
+lossy_float_literal = "warn"
+float_cmp_const = "warn"
+if_let_mutex = "warn"
+debug_assert_with_mut_call = "warn"
+multiple_unsafe_ops_per_block = "warn"
+invalid_upcast_comparisons = "warn"
+iter_not_returning_iterator = "warn"
+expl_impl_clone_on_copy = "warn"
+unchecked_time_subtraction = "warn"
+missing_asserts_for_indexing = "warn"
+unwrap_in_result = "warn"
+undocumented_unsafe_blocks = "warn"
+get_unwrap = "warn"
+unused_result_ok = "warn"
+map_err_ignore = "warn"
+assertions_on_result_states = "warn"
+infallible_try_from = "warn"
+panic_in_result_fn = "warn"
+unnecessary_safety_doc = "warn"
+unnecessary_safety_comment = "warn"
+cast_sign_loss = "warn"
+cast_possible_wrap = "warn"
+cast_precision_loss = "warn"
+cast_possible_truncation = "warn"
+arithmetic_side_effects = "warn"
+manual_bit_width = "warn"
+# port: a state or fault enum that grows must break every match on it.
+wildcard_enum_match_arm = "warn"
+match_wildcard_for_single_variants = "warn"
+# port: no `as`; conversions are `From`, `TryFrom` or a named helper.
+as_conversions = "warn"
+# port: `expect` is an assert in disguise; a reasoned `#[expect(clippy::expect_used)]` names the invariant.
+expect_used = "warn"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+
+[workspace.lints.cargo]
+unused_dependencies = "deny"
+
+# Dependencies at opt 3 even in dev: LZ4, CRC and SQLite are paid on every test.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev]
+debug = 0
+strip = "none"

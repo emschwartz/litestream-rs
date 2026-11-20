@@ -1,0 +1,7 @@
+# No array-valued keys here: cargo joins arrays across ancestor directories, and
+# worktrees nest inside the repo root.
+
+# Dependency cooldown: the resolver refuses crates.io versions published less
+# than 3 days ago. Versions already in Cargo.lock are exempt.
+[registry]
+global-min-publish-age = "3 days"
