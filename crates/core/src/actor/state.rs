@@ -56,12 +56,10 @@ pub(super) enum Lane {
     Checkpoint,
     /// Staged files to the replica.
     Upload,
-    /// Listing the replica for maintenance.
+    /// Listing the replica for maintenance, and a failed job whose level
+    /// keeps no wait of its own (a retention delete). A job whose level does
+    /// keep one waits there (R3), not here.
     Maintain,
-    /// A maintenance job. Its failure waits on the job's level
-    /// (`MaintainState`), not on the lane, so one failing level never starves
-    /// the others (R3); the count is kept for the event.
-    Job,
 }
 
 /// One lane's retry memory: how many failures in a row, and until when it waits.
@@ -77,20 +75,27 @@ impl Retry {
         self.until.is_none_or(|until| now >= until)
     }
 
-    /// When the lane may run again, if that is after `now`.
-    pub(super) fn wake(&self, now: Timestamp) -> Option<Timestamp> {
-        self.until.filter(|until| *until > now)
+    /// When the lane may run again, until a tick at or after it lets it go.
+    pub(super) const fn until(&self) -> Option<Timestamp> {
+        self.until
+    }
+
+    /// Lets a passed wait go: the lane is ready, and its deadline is no
+    /// longer one the actor holds. The failure count stays for the doubling.
+    pub(super) fn expire(&mut self, now: Timestamp) {
+        self.until = self.until.filter(|until| *until > now);
     }
 
     /// Counts one more failure (saturating: a retried fault never gives up)
-    /// and waits until `until`.
-    pub(super) fn fail(&mut self, wait: impl FnOnce(NonZeroU32) -> Timestamp) -> NonZeroU32 {
+    /// and waits until what `wait` makes of the count; returns that instant.
+    pub(super) fn fail(&mut self, wait: impl FnOnce(NonZeroU32) -> Timestamp) -> Timestamp {
         let attempt = self
             .attempts
             .map_or(NonZeroU32::MIN, |attempts| attempts.saturating_add(1));
         self.attempts = Some(attempt);
-        self.until = Some(wait(attempt));
-        attempt
+        let until = wait(attempt);
+        self.until = Some(until);
+        until
     }
 
     /// A success: the next failure starts from the first attempt.
@@ -106,7 +111,6 @@ pub(super) struct Lanes {
     checkpoint: Retry,
     upload: Retry,
     maintain: Retry,
-    job: Retry,
 }
 
 impl Lanes {
@@ -116,7 +120,6 @@ impl Lanes {
             Lane::Checkpoint => &self.checkpoint,
             Lane::Upload => &self.upload,
             Lane::Maintain => &self.maintain,
-            Lane::Job => &self.job,
         }
     }
 
@@ -126,12 +129,18 @@ impl Lanes {
             Lane::Checkpoint => &mut self.checkpoint,
             Lane::Upload => &mut self.upload,
             Lane::Maintain => &mut self.maintain,
-            Lane::Job => &mut self.job,
         }
     }
 
     pub(super) fn ready(&self, lane: Lane, now: Timestamp) -> bool {
         self.get(lane).ready(now)
+    }
+
+    /// Lets every passed wait go (W1: a passed deadline is work, not a wait).
+    pub(super) fn expire(&mut self, now: Timestamp) {
+        for lane in [Lane::Sync, Lane::Checkpoint, Lane::Upload, Lane::Maintain] {
+            self.get_mut(lane).expire(now);
+        }
     }
 }
 
@@ -164,10 +173,18 @@ impl Gate {
         }
     }
 
-    pub(super) fn wake(self, now: Timestamp) -> Option<Timestamp> {
+    pub(super) const fn until(self) -> Option<Timestamp> {
         match self {
-            Self::Until(at) => Some(at).filter(|at| *at > now),
+            Self::Until(at) => Some(at),
             Self::Open | Self::NextWrite => None,
+        }
+    }
+
+    /// A passed `Until` is open: the decision is asked on this tick.
+    pub(super) fn expire(self, now: Timestamp) -> Self {
+        match self {
+            Self::Until(at) if at <= now => Self::Open,
+            Self::Until(_) | Self::Open | Self::NextWrite => self,
         }
     }
 }
@@ -195,6 +212,15 @@ impl Default for Maintain {
 }
 
 impl Maintain {
+    /// A passed wait becomes a listing still owed, so it is no longer a
+    /// deadline the actor holds while uploads keep maintenance back.
+    pub(super) fn expire(&mut self, now: Timestamp) {
+        if self.until.is_some_and(|until| until <= now) {
+            self.until = None;
+            self.stale = true;
+        }
+    }
+
     /// Whether `due` could answer differently than it last did.
     pub(super) fn wants_listing(&self, now: Timestamp) -> bool {
         self.stale || self.until.is_some_and(|until| now >= until)

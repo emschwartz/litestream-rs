@@ -326,7 +326,9 @@ fn retry_backs_off_per_lane() {
         Some(&Event::Synced { files: 1 })
     );
     let first = rig.tick(&mut actor, T0 + 10);
-    assert!(matches!(event(&first), Some(Event::Retrying { attempt, .. }) if attempt.get() == 1));
+    assert!(
+        matches!(event(&first), Some(Event::Retrying { until, .. }) if *until == ts(T0 + 1_010))
+    );
     assert_eq!(next_of(&first), Some(Next::At(ts(T0 + 1_010))));
     // The sync lane does not wait on the upload lane.
     rig.commit(3);
@@ -335,7 +337,9 @@ fn retry_backs_off_per_lane() {
         Some(&Event::Synced { files: 1 })
     );
     let second = rig.tick(&mut actor, T0 + 1_010);
-    assert!(matches!(event(&second), Some(Event::Retrying { attempt, .. }) if attempt.get() == 2));
+    assert!(
+        matches!(event(&second), Some(Event::Retrying { until, .. }) if *until == ts(T0 + 3_010))
+    );
     assert_eq!(next_of(&second), Some(Next::At(ts(T0 + 3_010))));
     let third = rig.tick(&mut actor, T0 + 3_010);
     assert!(
@@ -603,4 +607,103 @@ fn checkpoint_call_is_recorded() {
             .iter()
             .any(|c| matches!(c, CheckpointCall::Checkpoint(CheckpointMode::Passive)))
     );
+}
+
+#[test]
+fn job_retry_reports_the_levels_wait() {
+    let (mut rig, mut actor) = caught_up();
+    let at = T0 + 60_000;
+    rig.commit(2);
+    assert_eq!(
+        event(&rig.tick(&mut actor, at)),
+        Some(&Event::Synced { files: 1 })
+    );
+    assert!(matches!(
+        event(&rig.tick(&mut actor, at)),
+        Some(Event::Uploaded(_))
+    ));
+    // The level-1 compaction's output write fails; the wait is the level's.
+    rig.remote
+        .inner
+        .inject_failure(StoreOp::Upload, transient(StoreOp::Upload));
+    let failed = (0..5)
+        .map(|_| rig.tick(&mut actor, at))
+        .find(|t| matches!(event(t), Some(Event::Retrying { .. })))
+        .unwrap();
+    let until = ts(at + 10_000);
+    assert!(
+        matches!(event(&failed), Some(Event::Retrying { until: u, .. }) if *u == until),
+        "{failed:?}"
+    );
+    let seen = rig.settle(&mut actor, at);
+    let next = seen.last().and_then(next_of);
+    assert!(
+        matches!(next, Some(Next::At(t)) if t <= until),
+        "the next wake is no later than the level's: {seen:?}"
+    );
+}
+
+const LANES: [Lane; 4] = [Lane::Sync, Lane::Checkpoint, Lane::Upload, Lane::Maintain];
+
+/// Every deadline the actor holds, read from where each is kept.
+fn held(actor: &Actor) -> Vec<Timestamp> {
+    let running = actor.phase() == Phase::Running;
+    let mut held: Vec<Timestamp> = LANES
+        .iter()
+        .filter(|lane| running || matches!(lane, Lane::Sync | Lane::Upload))
+        .filter_map(|lane| actor.lanes.get(*lane).until())
+        .collect();
+    if running {
+        if let Gate::Until(at) = actor.gate {
+            held.push(at);
+        }
+        held.extend(actor.maintain.until);
+    }
+    if let Phase::Draining { deadline } = actor.phase() {
+        held.push(deadline);
+    }
+    held
+}
+
+proptest::proptest! {
+    #[test]
+    fn next_is_never_after_a_held_deadline(
+        waits in proptest::collection::vec(proptest::option::of(-3_000i64..3_000), 4),
+        gate in 0u8..3,
+        gate_at in -3_000i64..3_000,
+        maintain in proptest::option::of(-3_000i64..3_000),
+        draining in proptest::bool::ANY,
+    ) {
+        let (mut rig, mut actor) = caught_up();
+        let now = T0.saturating_add(10_000);
+        let at = |offset: i64| ts(now.saturating_add(offset));
+        for (lane, wait) in LANES.iter().zip(waits) {
+            if let Some(wait) = wait {
+                actor.lanes.get_mut(*lane).fail(|_| at(wait));
+            }
+        }
+        actor.gate = match gate {
+            0 => Gate::Open,
+            1 => Gate::Until(at(gate_at)),
+            _ => Gate::NextWrite,
+        };
+        actor.maintain.until = maintain.map(at);
+        if draining {
+            actor.begin_shutdown(ts(now));
+        }
+        let soonest = held(&actor).into_iter().min();
+        match actor.next(ts(now)) {
+            Next::Now => {}
+            Next::At(t) => {
+                proptest::prop_assert!(soonest.is_some_and(|s| t <= s && s > ts(now)), "{t:?} {soonest:?}");
+            }
+            Next::OnWalChange => proptest::prop_assert_eq!(soonest, None),
+        }
+        // A tick with a passed deadline runs that lane or lets the deadline go.
+        let tick = rig.tick(&mut actor, now);
+        if let Tick::Ran { next, .. } = tick {
+            let passed = held(&actor).into_iter().any(|t| t <= ts(now));
+            proptest::prop_assert!(!passed || next == Next::Now, "{tick:?}");
+        }
+    }
 }

@@ -138,8 +138,9 @@ pub enum Event {
     Retrying {
         /// What went wrong.
         fault: Fault,
-        /// How many failures in a row on this lane.
-        attempt: NonZeroU32,
+        /// When the retry is due, read from where the wait is kept: the
+        /// level's backoff for a maintenance job, the lane's for the rest.
+        until: Timestamp,
     },
     /// The next sync is a snapshot.
     Resnapshot(SnapshotCause),
@@ -206,8 +207,19 @@ fn later(at: Timestamp, wait: Duration) -> Timestamp {
     Timestamp::from_unix_millis(at.unix_millis().saturating_add(millis))
 }
 
-fn earliest(wakes: impl IntoIterator<Item = Option<Timestamp>>) -> Option<Timestamp> {
-    wakes.into_iter().flatten().min()
+/// Where a retry's wait is kept.
+#[derive(Clone, Copy, Debug)]
+enum Waiter {
+    /// The lane counts the failures and keeps the wait.
+    Lane(Lane),
+    /// Kept elsewhere (a maintenance level's backoff); this is when it ends.
+    Kept(Timestamp),
+}
+
+impl From<Lane> for Waiter {
+    fn from(lane: Lane) -> Self {
+        Self::Lane(lane)
+    }
 }
 
 const fn mode_of(decision: Decision) -> Option<CheckpointMode> {
@@ -329,6 +341,7 @@ impl Actor {
                 };
             }
         };
+        self.expire(now);
         if !self.booted {
             return self.boot(&mut env, now).await;
         }
@@ -360,18 +373,23 @@ impl Actor {
     }
 
     /// Routes a fault by its policy. The only place `policy` is called.
-    fn fault(&mut self, lane: Lane, fault: Fault, now: Timestamp) -> Tick {
+    fn fault(&mut self, waiter: impl Into<Waiter>, fault: Fault, now: Timestamp) -> Tick {
         match policy(&fault) {
             Policy::Retry(backoff) => {
-                let interval = self.cfg.retry_interval;
-                let attempt = self.lanes.get_mut(lane).fail(|attempt| {
-                    let wait = match backoff {
-                        Backoff::Doubling => retry_wait(attempt, interval),
-                        Backoff::After(wait) => wait,
-                    };
-                    later(now, wait)
-                });
-                self.ran(Event::Retrying { fault, attempt }, now)
+                let until = match waiter.into() {
+                    Waiter::Kept(until) => until,
+                    Waiter::Lane(lane) => {
+                        let interval = self.cfg.retry_interval;
+                        self.lanes.get_mut(lane).fail(|attempt| {
+                            let wait = match backoff {
+                                Backoff::Doubling => retry_wait(attempt, interval),
+                                Backoff::After(wait) => wait,
+                            };
+                            later(now, wait)
+                        })
+                    }
+                };
+                self.ran(Event::Retrying { fault, until }, now)
             }
             Policy::Resnapshot(cause) => {
                 self.pending = Some(cause);
@@ -379,6 +397,14 @@ impl Actor {
             }
             Policy::Halt(cause) => self.halt(cause),
         }
+    }
+
+    /// Lets every passed deadline go, so the tick runs its lane and `next`
+    /// never names a time already past (W1).
+    fn expire(&mut self, now: Timestamp) {
+        self.lanes.expire(now);
+        self.gate = self.gate.expire(now);
+        self.maintain.expire(now);
     }
 
     const fn halt(&mut self, cause: HaltCause) -> Tick {
@@ -808,12 +834,12 @@ impl Actor {
             Ok(inventory) => inventory,
             Err(err) => return Some(self.fault(Lane::Maintain, inventory_fault(&err), now)),
         };
-        self.lanes.get_mut(Lane::Maintain).succeed();
         self.maintain.stale = false;
         let published = self.upload.confirmed();
         let cfg = &self.cfg.maintenance;
         match due(&inventory, now, cfg, published, &mut self.maintain.state) {
             Due::Wait { until, held } => {
+                self.lanes.get_mut(Lane::Maintain).succeed();
                 self.maintain.until = until;
                 let event = Event::Maintained(MaintainedEvent::Waiting { held });
                 Some(self.ran(event, now))
@@ -841,16 +867,34 @@ impl Actor {
         let outcome = match job {
             Job::Compact(compact) => run_compact(compact, env.staging, env.remote).await,
             Job::Delete(delete) => run_delete(delete, env.remote).await,
-            Job::Snapshot(_) => return self.snapshot_job(env, now).await,
+            Job::Snapshot(_) => return self.snapshot_job(env, job, now).await,
         };
         self.maintain.state.record(now, job, &outcome);
         let event = match outcome {
             Outcome::Compacted { info, .. } => MaintainedEvent::Compacted(info),
             Outcome::Deleted { count } => MaintainedEvent::Deleted(count),
             Outcome::Replan { .. } => MaintainedEvent::Replan,
-            Outcome::Failed(err) => return self.fault(Lane::Job, maintain_fault(&err), now),
+            Outcome::Failed(err) => {
+                let waiter = self.job_waiter(job, now);
+                return self.fault(waiter, maintain_fault(&err), now);
+            }
         };
+        self.lanes.get_mut(Lane::Maintain).succeed();
         self.ran(Event::Maintained(event), now)
+    }
+
+    /// Where a failed job waits: its level's backoff when `MaintainState`
+    /// keeps one (R3: the other levels keep running), else the maintenance
+    /// lane, so a failing retention delete backs off instead of relisting
+    /// at once. A level's wait is not the lane's failure, so the lane resets.
+    fn job_waiter(&mut self, job: &Job, now: Timestamp) -> Waiter {
+        match self.maintain.state.retry_at(job, now) {
+            Some(until) => {
+                self.lanes.get_mut(Lane::Maintain).succeed();
+                Waiter::Kept(until)
+            }
+            None => Waiter::Lane(Lane::Maintain),
+        }
     }
 
     /// A level-9 snapshot of a fresh proof. A sync that staged a file first
@@ -864,6 +908,7 @@ impl Actor {
     >(
         &mut self,
         env: &mut Env<'_, W, P, C, L, R>,
+        job: &Job,
         now: Timestamp,
     ) -> Tick {
         let stepped = self.step(env, now).await;
@@ -875,8 +920,14 @@ impl Actor {
         let written = write_snapshot(&proof, &mut *env.wal, &mut *env.db, env.remote, now).await;
         self.maintain.state.record_snapshot(now, written.is_ok());
         match written {
-            Ok(info) => self.ran(Event::Maintained(MaintainedEvent::Snapshot(info)), now),
-            Err(SnapshotFailed { fault, .. }) => self.fault(Lane::Job, fault, now),
+            Ok(info) => {
+                self.lanes.get_mut(Lane::Maintain).succeed();
+                self.ran(Event::Maintained(MaintainedEvent::Snapshot(info)), now)
+            }
+            Err(SnapshotFailed { fault, .. }) => {
+                let waiter = self.job_waiter(job, now);
+                self.fault(waiter, fault, now)
+            }
         }
     }
 
@@ -904,31 +955,42 @@ impl Actor {
         sync || upload || maintain
     }
 
-    /// When to tick next.
-    fn next(&self, now: Timestamp) -> Next {
+    /// Every deadline a lane holds: retry waits, the checkpoint gate, the
+    /// maintenance schedule (whose `Due::Wait` includes each level's backoff)
+    /// and the drain's end. Lanes a draining actor does not run hold none.
+    fn deadlines(&self) -> impl Iterator<Item = Timestamp> {
+        let running = self.running();
+        let lane = |lane: Lane| self.lanes.get(lane).until();
         let deadline = match self.phase {
             Phase::Draining { deadline } => Some(deadline),
             Phase::Boot | Phase::Running | Phase::Halted(_) => None,
         };
-        if self.ready_work(now) || deadline.is_some_and(|deadline| now >= deadline) {
+        let only_running = [
+            lane(Lane::Checkpoint),
+            lane(Lane::Maintain),
+            self.gate.until(),
+            self.maintain.until,
+        ];
+        [lane(Lane::Sync), lane(Lane::Upload), deadline]
+            .into_iter()
+            .chain(only_running.into_iter().filter(move |_| running))
+            .flatten()
+    }
+
+    /// When to tick next: never later than the earliest held deadline, and
+    /// at once when one has passed (W1). The checkpoint schedule is not a
+    /// held deadline: `decide` reads it, so only its future wake counts.
+    fn next(&self, now: Timestamp) -> Next {
+        if self.ready_work(now) {
             return Next::Now;
         }
-        let running = self.running();
-        let checkpoint = next_wake(&self.checkpoint, &self.cfg.checkpoint).filter(|_| running);
-        let wakes = [
-            self.lanes.get(Lane::Sync).wake(now),
-            self.lanes.get(Lane::Upload).wake(now),
-            self.lanes.get(Lane::Maintain).wake(now),
-            self.lanes
-                .get(Lane::Checkpoint)
-                .wake(now)
-                .filter(|_| running),
-            checkpoint.filter(|at| *at > now),
-            self.gate.wake(now).filter(|_| running),
-            self.maintain.until.filter(|at| running && *at > now),
-            deadline,
-        ];
-        earliest(wakes).map_or(Next::OnWalChange, Next::At)
+        let schedule = next_wake(&self.checkpoint, &self.cfg.checkpoint)
+            .filter(|at| self.running() && *at > now);
+        match self.deadlines().chain(schedule).min() {
+            Some(at) if at <= now => Next::Now,
+            Some(at) => Next::At(at),
+            None => Next::OnWalChange,
+        }
     }
 }
 
