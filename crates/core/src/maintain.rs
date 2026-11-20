@@ -417,7 +417,8 @@ pub async fn run_compact<L: ObjectStore, R: ObjectStore>(
             | CompactError::Dest(_)
             | CompactError::Input { .. }
             | CompactError::Encode(_)
-            | CompactError::SnapshotLevel { .. }),
+            | CompactError::SnapshotLevel { .. }
+            | CompactError::Inputs(_)),
         ) => Outcome::Failed(MaintainError::Compact(err)),
     }
 }
