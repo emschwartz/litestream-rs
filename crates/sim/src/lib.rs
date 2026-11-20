@@ -33,7 +33,7 @@ pub use generate::{EnvFault, Op, Target, Weights, history};
 pub use model::{CommitId, CommitRec, Model, PageImage};
 pub use oracle::{Acked, Bound, Checked, Violation, bug_fault, check, within};
 pub use run::{Failure, Opts, RunReport, run, run_with, shrink};
-pub use seed::{ParseSeedError, Seed, replay_line};
+pub use seed::{ParseDayError, ParseSeedError, SEEDS_PER_NIGHT, Seed, nightly_base, replay_line};
 pub use sqlite::{
     AppCommit, CheckpointNumbers, CrashKind, ReaderId, SimCheckpointer, SimPages, SimSource,
     SimSqlite, SimWal, StrangerMode,

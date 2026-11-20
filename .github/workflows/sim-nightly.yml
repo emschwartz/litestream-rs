@@ -1,0 +1,35 @@
+name: sim-nightly
+# The simulator's rotating seed set. The fixed set runs on every push in ci.yml; this runs new
+# seeds every night, derived from the UTC date, so the histories covered keep growing. Nightly
+# and on demand, never on push: a failing seed is a finding to file, not a reason to block an
+# unrelated change. The failing seed is the end of the log, as the line that replays it.
+on:
+  schedule:
+    - cron: "43 2 * * *"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: How long to run seeds for
+        default: "900"
+      day:
+        description: The UTC date whose seeds to run, YYYYMMDD (empty for today)
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  soak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,just
+      # Inputs go through the environment and the test parses them; neither is shell text.
+      - run: just sim-nightly "${SECONDS_INPUT:-900}" "${DAY_INPUT:-$(date -u +%Y%m%d)}"
+        env:
+          SECONDS_INPUT: ${{ inputs.seconds }}
+          DAY_INPUT: ${{ inputs.day }}
