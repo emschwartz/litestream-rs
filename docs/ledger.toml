@@ -544,7 +544,7 @@
 "TestDB_Sync_UpdatesMetrics" = { reason = "Go-only: Prometheus collectors. The library reports through EventSink events and the health() handle (docs/PLAN.md phase 3, public API); a host exports its own metrics." }
 "TestDB_Verify_WALOffsetAtHeader" = { counterpart = "lsr-core::recover::tests::go_parity_an_end_at_offset_32_continues" }
 "TestDB_Verify_WALOffsetAtHeader_SaltMismatch" = { counterpart = "lsr-core::recover::tests::go_parity_an_unknown_salt_snapshots" }
-"TestDB_WALIndexMaxFrame" = { counterpart = ["lsr-compat::shm_mapping::the_mapping_agrees_with_the_file_read_across_checkpoints_and_a_restart", "lsr-compat::live_source::committed_read_matches_the_wal_file"] }
+"TestDB_WALIndexMaxFrame" = { counterpart = ["lsr-sqlite::wal_index::the_committed_read_agrees_with_the_file_across_checkpoints_and_a_restart", "lsr-compat::live_source::committed_read_matches_the_wal_file"] }
 "TestDB_WALPageCoverage_AllNewPagesPresent" = { counterpart = "lsr-wal::wal::sqlite::every_operation_at_every_page_size_matches_sqlite" }
 "TestDB_WriteLTXFromWALHonorsCanceledContext" = { reason = "Go-only: context.Context cancellation. The Rust core is sans-IO and advances one tick at a time (docs/PLAN.md section 2, goal 5); there is no context to cancel, and shutdown is final_sync with a deadline." }
 "TestDB_WriteLTXFromWAL_FillsMissingGrowthPagesFromDB" = { counterpart = "lsr-core::sync::tests::walgrowth_pages_come_from_the_database_file" }
@@ -565,9 +565,9 @@
 "TestWALReaderPageMapLimitStopsAtCommittedFrame" = { counterpart = "lsr-wal::wal::synthetic::committed_limit_stops_at_the_end_and_never_reads_past_it" }
 
 ["litestream/db_killed_writer_test.go"]
-"TestDB_ClosePreservesWALLocks" = { counterpart = ["lsr-compat::shm_mapping::mapping_and_reading_opens_and_closes_no_descriptor", "lsr-compat::shm_mapping::live_sqlite_file_read_drops_the_process_shm_locks"] }
+"TestDB_ClosePreservesWALLocks" = { counterpart = ["lsr-sqlite::descriptors::a_sync_and_checkpoint_cycle_opens_and_closes_no_descriptor_on_the_database_or_shm", "lsr-sqlite::descriptors::closing_a_descriptor_on_shm_drops_the_locks_sqlite_holds"] }
 "TestDB_WriterKilledBeforeWALIndexUpdate" = { missing = "A writer process SIGKILLed after writing and syncing a commit's WAL frames but before updating the wal-index: its transaction never appears in any LTX file, and the next writer's frames over the same slots replicate correctly (the real-SQLite fault suite, not built yet)." }
-"TestDB_WriterKilledBeforeWALIndexUpdate_UnusableHeader" = { counterpart = "lsr-compat::shm_mapping::header_checks_refuse_what_sqlite_refuses" }
+"TestDB_WriterKilledBeforeWALIndexUpdate_UnusableHeader" = { counterpart = "lsr-sqlite::shm::tests::header_checks_refuse_what_sqlite_refuses" }
 
 ["litestream/db_shutdown_test.go"]
 "TestDB_Close_SyncRetry" = { counterpart = "lsr-core::actor::tests::drain_finishes_uploads" }
