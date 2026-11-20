@@ -363,11 +363,11 @@ impl Chain {
                     event: Event::Idle, ..
                 } => return Ok(()),
                 Tick::Ran {
-                    event: Event::Retrying { fault, attempt },
+                    event: Event::Retrying { fault, until },
                     ..
                 } => {
                     return Err(CompatError::Fixture(format!(
-                        "the actor is retrying {fault:?} (attempt {attempt})"
+                        "the actor is retrying {fault:?} until {until:?}"
                     )));
                 }
                 Tick::Ran { event, .. } => self.events.push(event),

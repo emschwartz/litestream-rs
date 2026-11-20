@@ -22,7 +22,7 @@ use lsr_compat::{
     restore_with_go, wait_until, write_config,
 };
 use lsr_core::{Event, Level, MaintainedEvent, PlanOutcome, RestoreError, RestoreTarget};
-use lsr_ltx::Timestamp;
+use lsr_ltx::{Timestamp, Txid};
 
 const COMMITS: u32 = 300;
 
@@ -219,20 +219,31 @@ fn go_restores_rust_chain_latest() {
     }
 }
 
-/// Every transaction Rust can restore, Go restores to the same pages.
+/// Every transaction Rust can restore, Go restores to the same pages: the recorded points
+/// (their hashes are the source's) and the last transaction of every file the replica holds
+/// at the end (retention has removed most older points, so these are what is left to restore).
 #[test]
 #[ignore = "runs the pinned Go binary many times; just compat"]
 fn go_restores_rust_chain_each_txid() {
     let written = write_chain(COMMITS, 4096, 11);
     let config = go_config(&written);
-    let stride = (written.points.len() / 40).max(1);
+    let mut targets: Vec<Txid> = written.points.iter().map(|p| p.txid).collect();
+    targets.extend(
+        list(&written.site.replica)
+            .expect("list")
+            .files
+            .iter()
+            .map(|f| f.key.range().max()),
+    );
+    targets.sort();
+    targets.dedup();
     for version in [GoVersion::V0_5_18, GoVersion::Head] {
         let mut checked = 0;
-        for point in written.points.iter().step_by(stride) {
+        for txid in &targets {
             let rs = written.site.dir().join("rs.db");
             clear(&rs);
-            let target = RestoreTarget::Txid(point.txid);
-            let Some(rust) = rust_restore(&written.site.replica, target, &rs) else {
+            let Some(rust) = rust_restore(&written.site.replica, RestoreTarget::Txid(*txid), &rs)
+            else {
                 continue;
             };
             let Some((go, out)) = go_restore(
@@ -240,33 +251,31 @@ fn go_restores_rust_chain_each_txid() {
                 &written,
                 &config,
                 "go.db",
-                Target::Txid {
-                    txid: point.txid.get(),
-                },
+                Target::Txid { txid: txid.get() },
             ) else {
                 break;
             };
             match rust {
                 Ok(()) => {
-                    assert_eq!(go, GoRestore::Restored, "{version:?} txid {}", point.txid);
-                    assert_eq!(
-                        restored_pages(&out),
-                        point.page_hashes,
-                        "{version:?} txid {}",
-                        point.txid
-                    );
+                    assert_eq!(go, GoRestore::Restored, "{version:?} txid {txid}");
+                    let want = written
+                        .points
+                        .iter()
+                        .find(|p| p.txid == *txid)
+                        .map_or_else(|| restored_pages(&rs), |p| p.page_hashes.clone());
+                    assert_eq!(restored_pages(&out), want, "{version:?} txid {txid}");
                     checked += 1;
                 }
                 Err(_) => assert!(
                     matches!(go, GoRestore::Refused { .. }),
-                    "{version:?} restored txid {} that Rust has no chain for",
-                    point.txid
+                    "{version:?} restored txid {txid} that Rust has no chain for"
                 ),
             }
         }
         assert!(
             checked > 3 || binary(version).is_none(),
-            "{version:?} checked {checked}"
+            "{version:?} checked {checked} of {}",
+            targets.len()
         );
     }
 }
@@ -318,6 +327,20 @@ fn go_restores_rust_chain_as_of() {
             }
             (Err(RestoreError::NoPlan(no)), GoRestore::Refused { .. })
                 if matches!(no.outcome(), PlanOutcome::NoSnapshot { .. }) => {}
+            // Retention removed the level-0 files an as-of plan would need, so Rust refuses
+            // with a gap (safe) where Go restores an older state: that state must still be
+            // one the source really had.
+            (Err(RestoreError::NoPlan(no)), GoRestore::Restored)
+                if matches!(no.outcome(), PlanOutcome::Gap { .. }) =>
+            {
+                assert!(
+                    written
+                        .points
+                        .iter()
+                        .any(|p| p.page_hashes == restored_pages(&go_out)),
+                    "{label}: Go restored a state the source never had"
+                );
+            }
             other => panic!("{label}: Rust and Go disagree: {other:?}"),
         }
     }
