@@ -101,20 +101,23 @@ test-s3: minio-up
     fi
 
 # The store, the conformance suite and the compat restore against the real
-# Tigris bucket of task 8t. Never part of check or CI: it needs the credentials
-# file outside the repo and spends real requests (docs/spikes.md, Task 8t).
+# Tigris bucket of task 8t. Never part of check or CI: it needs credentials (a
+# file outside the repo, or AWS_* variables) and spends real requests (docs/spikes.md, Task 8t).
 # Everything it writes sits under one run prefix, which the last step deletes.
 test-tigris:
     #!/usr/bin/env bash
     set -euo pipefail
+    # Credentials: the file when it exists, else the AWS_* variables already set
+    # (a cloud session's environment carries them that way).
     env_file="${LSR_TIGRIS_ENV:-$HOME/.config/litestream-rs/tigris.env}"
-    if [ ! -f "$env_file" ]; then
-        echo "test-tigris: $env_file is missing; no Tigris credentials, nothing run" >&2
+    if [ -f "$env_file" ]; then
+        set -a
+        . "$env_file"
+        set +a
+    elif [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ] || [ -z "${AWS_ENDPOINT_URL_S3:-}" ]; then
+        echo "test-tigris: no $env_file and no AWS_* credentials set; nothing run" >&2
         exit 1
     fi
-    set -a
-    . "$env_file"
-    set +a
     export LSR_TIGRIS_BUCKET="${LSR_TIGRIS_BUCKET:-litestream-rs-test}"
     export LSR_TIGRIS_PREFIX="8t/$(date -u +%F)-$(openssl rand -hex 4)"
     echo "test-tigris: bucket $LSR_TIGRIS_BUCKET prefix $LSR_TIGRIS_PREFIX" >&2

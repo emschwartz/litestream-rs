@@ -33,7 +33,7 @@ Run on 2026-11-20 from one laptop, bucket `litestream-rs-test`, one run prefix, 
 | 1 presigned UNSIGNED-PAYLOAD with signed meta and `x-tigris-consistent` | pass | PUT 200; a signed meta header that is not sent gives 403 `SignatureDoesNotMatch`; an extra header sent but not signed is accepted (200) |
 | 2 Content-MD5 checked | pass (differs from the worry in the plan) | wrong digest on PUT and on UploadPart: 400 `BadDigest`, object absent afterwards (404) |
 | 3 ETag is the hex MD5 | pass | single PUT `etag="5d41402a..."` equals MD5("hello"); a part's ETag the same; Complete returns `"<hex>-1"` |
-| 4 listing | partial | 1,100 objects: a page of 1000 sets a continuation and costs 2 list requests, 0 HEADs (`listing_makes_no_head_requests`); paging, cursor and foreign-name cases pass. `encoding-type=url` with special-character keys is open: the raw listing probe got 403 `SignatureDoesNotMatch` from our test signer on a `prefix` query (the store's own listing signs fine), so keys with `+`, `&`, spaces were not exercised |
+| 4 listing | pass (2026-11-20, second run) | 1,100 objects: a page of 1000 sets a continuation and costs 2 list requests, 0 HEADs (`listing_makes_no_head_requests`); paging, cursor and foreign-name cases pass. `encoding-type=url`: keys `a b+c&d=e` and `café` come back percent-encoded and decode exactly; the store's 29 shared cases also pass under a root of `<run>/odd path+x`. The first run's 403 was the raw test signer: `rusty_s3::signing::sign` merges the caller's query with its own pairs assuming both are sorted, and the helper passed them unsorted (fixed in `tests/common/real.rs`) |
 | 5 range past the end | pass | 416 `InvalidRange` for offset 10 and 100 of a 10-byte object and for offset 0 of an empty one; `is_range_past_end` is true; offset 9 is 206 `Content-Range: bytes 9-9/10` |
 | 6 DeleteObjects | pass | quiet mode with Content-MD5: 200; one missing key of four is not reported as an error |
 | 7 two uploads to one key | pass | the last completed wins, not the last initiated: complete A then B leaves B, complete B then A leaves A |
@@ -47,7 +47,7 @@ Provider questions:
 - Q1 (what the plan left to the credentialed run for presigning): answered by item 1.
 - Q2, metadata on a 206: yes. A ranged GET answers 206 with `x-amz-meta-litestream-timestamp` (and the ETag), so `read_with_stamp` needs no HEAD.
 - Q3, multipart LastModified: the completion time, not the initiation. Initiated at server clock T, completed at T+3 s: the listing says T+3 s.
-- Q4, metadata in the listing: open (see item 4; the probe was not valid).
+- Q4, metadata in the listing: no. `ListObjectsV2` with `metadata=true` returns key, ETag, size, owner, storage class and LastModified only, so a stamp still needs `stamp` or `read_with_stamp` (ruling G1 as built).
 - Q5, CopyObject: a copy keeps the user metadata under the default directive; `x-amz-metadata-directive: REPLACE` without metadata drops it.
 
 Other findings, each pinned by a test:
@@ -57,4 +57,6 @@ Other findings, each pinned by a test:
 3. Aborting an unknown upload is 404 `NoSuchUpload` (MinIO says 204). `classify(StoreOp::Upload, ..)` on that response is `Refused { status: 404 }`, not `Ok`; the store's abort path handles the 404 itself. Pinned by `abort_of_an_unknown_upload_is_not_a_failure`, which accepts 204 or 404.
 4. Error bodies are S3 XML (`<Code>`); responses carry `server: nginx` and `x-amz-request-id`.
 
-Left for the next run: items 4 (encoding), 8, 10, 11 and Q4; the raw listing helper in `real.rs` needs query-value encoding fixed before they are meaningful.
+Second run, 2026-11-20, from a cloud session on the `litestream-rs-test` bucket: all 41 tests pass (353 s); items 4 and Q4 answered above; ListMultipartUploads with a `prefix` now answers 200 and lists only that prefix. Everything written was deleted afterwards. The credentials are the session's `AWS_*` environment variables, and the bucket's virtual-host name (`litestream-rs-test.t3.storage.dev`) must be on the environment's allowed hosts.
+
+Left: item 8 (the key still cannot set bucket lifecycle), 10 (the production-shaped restore against Go) and 11 (no 429, 503 or `Retry-After` seen in either run).

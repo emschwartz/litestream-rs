@@ -339,6 +339,12 @@ impl RealHarness {
             "DELETE" => rusty_s3::Method::Delete,
             other => panic!("method {other}"),
         };
+        // `sign` merges this with its own sorted `X-Amz-*` pairs and assumes both
+        // are sorted; an unsorted query signs a canonical request the server
+        // does not rebuild (SignatureDoesNotMatch). rusty-s3's actions keep a
+        // sorted map, so only this raw path needs it.
+        let mut query = query.to_vec();
+        query.sort_unstable();
         let url = rusty_s3::signing::sign(
             &jiff::Timestamp::now(),
             verb,
