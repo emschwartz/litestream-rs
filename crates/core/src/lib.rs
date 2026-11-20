@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+mod actor;
 mod checkpoint;
 mod compact;
 #[cfg(any(test, feature = "testing"))]
@@ -28,6 +29,7 @@ mod sync;
 mod upload;
 mod verify;
 
+pub use actor::{Actor, ActorConfig, Env, Event, MaintainedEvent, Phase, Tick};
 pub use checkpoint::{
     CheckpointConfig, CheckpointFailed, CheckpointOutcome, CheckpointState, Checkpointed, Decision,
     Observed, Why, after_checkpoint, after_sync, checkpoint, decide, next_wake,
