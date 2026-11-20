@@ -6,7 +6,7 @@ Evidence base: upstream read at benbjohnson/litestream 041a8c3 (v0.5.18-21) and 
 
 ## Status (2026-11-20)
 
-Scope for now is the library itself, phases 0 to 3, built to the quality bar in sections 2 and 4. Integration into a host application (a shadow run, then a cutover) is out of scope for this repository; section 6 lists what a host must provide. Decisions D1 to D5 are taken; see section 8.
+Scope for now is the library itself, phases 0 to 3, then a sidecar (phase 4), built to the quality bar in sections 2 and 4. Integration into a host application (a shadow run, then a cutover) is out of scope for this repository; section 6 lists what a host must provide. Decisions D1 to D5 are taken; see section 8.
 
 ## 1. Goal and contract
 
@@ -21,7 +21,7 @@ Build an in-process Rust library that replicates a WAL-mode SQLite database to S
 - Reader floor for Rust-written files: Go v0.5.16 (older builds reject block-encoded pages; measured).
 - Equality is defined on restored database pages (page hashes plus rolling checksum), never on LTX bytes: `lz4_flex` matched Go's compressor on 14 of 40 frames.
 
-**Not in v1:** the v0.3 `generations/` layout, backends other than S3 and a local directory, a VFS read replica (the Go VFS stays in use), control socket, heartbeat, runtime auto-recover (suspected lineage-fork bug upstream; do not copy), multi-writer leases, a separate-process mode (v2).
+**Not in v1:** the v0.3 `generations/` layout, backends other than S3 and a local directory, a VFS read replica (the Go VFS stays in use), control socket, heartbeat, runtime auto-recover (suspected lineage-fork bug upstream; do not copy), multi-writer leases. A separate-process mode (a sidecar, as Go runs) is phase 4, after the library.
 
 ## 2. Design goals, in priority order
 
@@ -155,6 +155,15 @@ Workspace, lint set, CI, pinned Go binaries. Settle what the research left unver
 - Page checksum table: page number to CRC, fed by verified WAL frames and seeded by the first snapshot. A database-file page that does not match is never uploaded. The policy for a mismatch and for an unexplained WAL rewind (halt or resnapshot) is fixed in the phase 3 task plan.
 - Real-SQLite fault suite and all four compat directions, including Go, Rust, Go handover on one prefix with no forced snapshot.
 **Exit:** the fault suite and the upstream-test ledger are green; handover in both directions happens without a snapshot when the WAL is intact; an alternation test switches Go and Rust on one prefix repeatedly, with a SIGKILL at a random point in each handover (mid-upload, mid-compaction, with local files not yet uploaded), and every switch is a plain restart with no forced snapshot and no restore mismatch; a 72-hour soak against real Tigris with a synthetic writer shows zero oracle failures and the resource properties holding.
+
+### Phase 4: the sidecar (a separate process, as Go runs)
+Added 2026-11-20 at the owner's request. A `litestream`-style daemon over the same library, so a host that cannot embed Rust (or runs Go's sidecar today) can switch by replacing a binary.
+- `lsr replicate` grown into a daemon: one process, many databases, each its own actor thread; signals for reload and shutdown (`final_sync` on SIGTERM within a deadline); `health()` exposed for the host (a status file or a local HTTP endpoint, decided in the phase 4 task plan).
+- Configuration: whether to read Go's `litestream.yml` as is (drop-in) or a stricter subset that refuses unknown keys (design goal: "disabled" is not zero), decided in the phase 4 task plan.
+- The pin across processes: a SQLite read transaction in the sidecar works as in phase 3 (ruling P0); POSIX locks conflict across processes, so the in-process descriptor hazard of section 6 is gone, and the pure-Rust pin of #9 is simpler here (`docs/notes/pure-rust-pin.md`, deployment B).
+- Checkpoints from outside the host: the host must still run with `wal_autocheckpoint = 0` and `PERSIST_WAL`, which a sidecar cannot set for it; the phase 4 plan says how that is checked and what happens when the host checkpoints anyway (phase 3's outside-checkpoint cases already cover the replication side).
+- Compatibility: the phase 3 alternation test, run as Go sidecar to Rust sidecar and back on one prefix.
+**Exit:** the alternation test and the phase 3 fault suite pass with the library in a separate process; a Go user's config and meta directory start the Rust sidecar with no snapshot when the WAL is intact.
 
 ### Later versions
 From the storage-fault review against TigerBeetle's fault model (2026-11-20). Repair from peers, quorum and direct I/O do not transfer to a single node with an asynchronous replica; these do: a low-rate scrubber of the live database against the page checksum table; rolling-checksum tracking (D2), which the table makes cheap; a second bucket as a repair source for restore; a parent-file checksum linking each file to its predecessor; a restore planner that routes around a corrupt file through the lower-level files that cover the same transactions (today a corrupt compacted file fails the restore even when its inputs survive).

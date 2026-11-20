@@ -4,7 +4,19 @@
 
 **Spec:** `docs/PLAN.md` (phase 3; section 3 types; section 6 host integration). Rules: `AGENTS.md`. Research: `docs/notes/pure-rust-pin.md` (the pin and the checkpoint against C SQLite). Upstream (read-only): `.upstream/litestream` (`db.go`, `wal_reader.go`, `replica.go`, `store.go`), and SQLite 3.54.1's `sqlite3.c` from the bundled `libsqlite3-sys` (line numbers below are from that file, as in the research note).
 
-Status: draft. Phase 2's exit items (handoff issue #1: the level 1 crash window, the level 9 scenario, the nightly seeds, `core` mutants) land first. Section "Open decisions" is the owner's; no task that depends on one starts before it is ruled. Decisions already ruled are listed under "Rulings".
+Status: draft. Folds in the parts of the parallel draft (#8) that this one lacked: what phase 2 hands over, the shared suite's cases, and the position file (O3). Phase 2's exit items (handoff issue #1: the level 1 crash window, the level 9 scenario, the nightly seeds, `core` mutants) land first. Section "Open decisions" is the owner's; no task that depends on one starts before it is ruled. Decisions already ruled are listed under "Rulings".
+
+## What phase 2 hands over
+
+- The engine: `lsr_core::Actor`, sans-IO, one `tick` at a time over an `Env` of `WalSource`, `PageSource`, `Checkpointer` and two `ObjectStore`s. It already decides recovery, sync, checkpoints, uploads and maintenance; phase 3 gives it real doors and a thread.
+- The doors (`crates/core/src/source.rs`): `WalSource` (`open`, `len`, `committed`, `epoch`), `PageSource` (`page_count`, `read_page`), `Checkpointer` (`begin_barrier`, `end_barrier`, `checkpoint`, `bump_seq`, `begin_write_lock`, `end_write_lock`).
+- `LiveSqlite` (`crates/compat/src/live_source.rs`), test support over two rusqlite connections. Its tests, `crates/compat/tests/live_source.rs` and `live_matches_sim.rs`, are the contract the production backend must pass.
+- The simulator's model of SQLite (`crates/sim/src/sqlite.rs`), pinned against real SQLite by `crates/sim/tests/sqlite_rules.rs`.
+- Go handover in process: `crates/compat/tests/handover.rs`.
+
+Two places where `docs/PLAN.md`'s phase 3 text and phase 2 as built differ. The built behaviour stands; this plan follows it:
+- The committed end comes from one read of the wal-index header (frame count, salts and `nBackfill` together), not from `PRAGMA wal_checkpoint(NOOP)` followed by a second read. `WalSource::committed` is that one read.
+- A page-size change is a halt at boot (`HaltCause::PageSizeChanged`), not a snapshot.
 
 ## Global constraints
 The constraints of the phase 1 and phase 2 plans apply unchanged. In addition:
@@ -26,17 +38,22 @@ The constraints of the phase 1 and phase 2 plans apply unchanged. In addition:
 
 ## Open decisions (the owner's)
 
-- **O2, where the page checksum table lives across a restart.** In memory it is lost at every boot (task 3).
-  - **Rebuild at boot** by reading every database page once. Simple; costs one full read of the database per boot (task 3 measures it); a page corrupted while the process was down is trusted from then on.
-  - **Persist** it in the meta directory (a new file beside Go's layout, with its own checksum), updated at each staged commit. Boot is cheap, and corruption while down is caught. Costs: one more file to keep consistent with the staging directory, and spike S5 must show Go ignores the file.
-  - Recommendation: rebuild at boot for v1. PLAN section 7 already makes scheduled verify-restores a v1 requirement, and they catch what a rebuild trusts.
+- **O2, where the page checksum table lives across a restart.** In memory it is lost at every boot (task 3). Whatever is chosen, the table is also cleared mid-run on every snapshot cause except `CheckpointBoundary` and `OperatorRequested`, and on a page-size change: after `LocalRewound`, for example, it holds digests of frames a power loss removed, so the database legitimately holds older pages. Every option therefore needs the record-on-first-read path.
+  - **Trust on first use, seeded from the staged level 0 files.** After a boot that continues (`Continue` or `WalRestarted`), record the pages of the staged files newest-wins; boot already verifies them and computes each page's checksum (`recover.rs`, `upload.rs`), so the seed costs no GET and no new file, and works the same on Go-written files after a handover. Any other page is recorded on first read. A page corrupted while the process was down and not in a staged file is trusted.
+  - **Persist** it in the meta directory, updated with each staged commit. Catches corruption while down, but is void after a Go run and after every clearing cause above (power loss included, the main "corrupted while down" case), needs a crash-consistency protocol and spike S5.
+  - **Seed from the replica at boot.** The strongest check, at a full restore's GETs and bytes per boot; that is the scheduled verify-restore PLAN section 7 already requires, so it belongs there, not on the boot path.
+  - Not an option: reading every database page at boot. After `Continue` the cursor is mid-WAL and frames below it are not rescanned, so an eager read records the old database copy of a page whose newer copy is in the WAL; the next checkpoint's boundary snapshot then mismatches. A raw read also lacks the snapshot writer's torn-page argument.
+  - Recommendation: trust on first use with the staged seed.
+
+- **O3, the local position file (phase 2's Task 4e).** V3's whole-tip compare cannot see a rewind that drops two or more transactions and regrows a byte-identical tip. Phase 2's recommended design (a position file in the staging directory holding the cumulative WAL checksum pair at the tip; a missing file falls back to V3) was deferred until the actor landed. Local state only, never part of the replica. Recommendation: build it in task 5, where boot recovery is reworked anyway.
 
 ## Rulings
 
 - **P0 (O1, ruled by the owner 2026-11-20): a SQLite read transaction holds the pin**, on the library's own connection, as Go and `LiveSqlite` do. SQLite manages its own locks, so there is no lock protocol to copy, and the checkpoint needs that connection anyway. The known cost: a reader on a fully backfilled WAL takes read mark 0, which does not block a WAL restart (walformat.html), so ruling F1's continuity proof and its tripwire carry correctness in that case. The alternative, a pure-Rust pin on a read-mark slot of 1 or more (`docs/notes/pure-rust-pin.md`, sections 4A and 5), is deferred to #9, to be built if task 4 or the simulator finds a mark-0 case F1 does not cover.
-- **P1, a database page that does not match the table: halt.** `Fault::DatabasePageMismatch { pgno }`, policy `Halt(HaltCause::DatabaseCorrupt { pgno })`. A resnapshot would read the same page, and uploading it would put corruption into every later restore. The event names the page; nothing is uploaded from the read that found it.
+- **P1, a database page that does not match the table: keep backing up, loudly** (ruled by the owner 2026-11-20: a backup system should not stop backing up). `Fault::DatabasePageMismatch { pgno }` puts the engine in a degraded state: an event names the page, `health()` reports it, and retention keeps the last restore point from before the mismatch and its chain (it pins, it does not freeze: files after that point are retained normally). WAL-only steps never read the database file and continue unchanged. A step that needs the page ships what is on disk, since that is the database the host serves. Halting would leave every later write unprotected and protect nothing. The degraded state clears when a later verified WAL frame rewrites the page, or by an operator. Which other halts become degraded states is a separate proposal (see "Halts" below).
 - **P2, an unexplained WAL rewind: F2 stands.** Same salts with the committed end below the synced end is `Snapshot { cause: LocalRewound }` plus the event, as phase 2 ruled. A different-salts rewind is F1's case. No new outcome.
 - **P3, TRUNCATE needs the host's word.** `decide()` takes `Readers { Idle, Pinned, Unknown }` from the host's signal (task 6); TRUNCATE runs only on `Idle`. `Unknown` (no signal given) behaves as `Pinned`, so a host that says nothing never sees a TRUNCATE. PASSIVE is unchanged.
+- **Halts.** Phase 2 halts on eleven causes, and any halt stops every lane. A review against the owner's rule (keep backing up unless continuing would damage existing backups; when degraded, alert and pin retention) proposes degraded states for most of them and a halt only for a second writer on the prefix. It changes phase 2 behaviour, PLAN.md goal 1 and an AGENTS.md rule, so it is its own proposal, not part of this plan.
 - **P4, polling is the change detector.** One `committed()` read per second when idle (PLAN phase 3). The wal hook is a later optimisation and needs its own measurement.
 
 ---
@@ -47,7 +64,6 @@ The constraints of the phase 1 and phase 2 plans apply unchanged. In addition:
 
 Each spike answers one question with a measurement on Linux at SQLite 3.54.1, the way the phase 0 spikes did:
 - **S1, the wal-index through SQLite's own mapping.** `SQLITE_FCNTL_FILE_POINTER` on the reader connection, then `pMethods->xShmMap(file, 0, 32768, 0, &p)`: does it return the region the host's connections use, without a new descriptor, and can both header copies plus `nBackfill` be read from it under the read lock with the same results as `LiveSqlite`'s file reads? If not, the fallback is one `-shm` descriptor opened at start and never closed.
-- **S4, `PRAGMA wal_checkpoint(NOOP)`.** Does it return mxFrame and nBackfill from one header read, and can the salts be had from the same read? If not, S1's mapping is the committed-end source.
 - **S5, Go and an extra meta-directory file.** Does Go v0.5.16, v0.5.18 and Head start, sync and restart with an unknown file in `<meta>/`? Needed only if O2 is ruled "persist". (The pure-Rust pin's spikes, OFD on Linux and `SETLK_TIMEOUT`, are listed in #9.)
 
 ### Task 1: `lsr-sqlite`, the rusqlite backend (branch `sqlite-backend`)
@@ -56,7 +72,7 @@ Each spike answers one question with a measurement on Linux at SQLite 3.54.1, th
 
 **Produces:**
 - `Sqlite`: a handle over two connections (the reader that holds the pin, the writer for the barrier, the write lock and the sequence bump), implementing `WalSource`, `PageSource` and `Checkpointer`. `Sqlite::open(path, SqliteConfig) -> Result<Self, OpenError>` returns once the read transaction is held, so nothing can checkpoint past it.
-- The committed end from S1's mapping (or S4's pragma), both header copies compared, `CommittedRead::new(end, backfilled)` from one read.
+- The committed end from one wal-index header read through S1's mapping, both header copies compared, `CommittedRead::new(end, backfilled)` from one read.
 - Pages through the reader's own file handle (`SQLITE_FCNTL_FILE_POINTER` then `xRead`), checked arithmetic on the offset.
 - `checkpoint(mode)` through `sqlite3_wal_checkpoint_v2` for typed busy results, ending and retaking the read transaction around it (that is what moves `ReadEpoch`).
 - `app_connection(conn: &rusqlite::Connection) -> Result<(), SetupError>`: `SQLITE_FCNTL_PERSIST_WAL` on and `wal_autocheckpoint = 0`, for every host connection. `check_app_connection` reads both back.
@@ -79,12 +95,13 @@ The pure-Rust pin is not part of phase 3 (ruling P0); it is tracked in #9. The n
 
 **Produces:**
 - `PageTable`: page number to `Checksum` (the CRC-64 of the page, as `Checksum::of_page`), bounded by the database's page count. `record(pgno, digest)` from verified WAL frames (`FrameRef::digest`, already computed on the checked read); `check(pgno, page) -> Result<(), Mismatch>` before any database-file page is used; `truncate(commit)` when the database shrinks.
-- Seeding: the first snapshot records every page it reads; until a page is recorded, a read of it records instead of checking (the rebuild of O2's recommendation). The boot path rebuilds by reading every page once, timed in the PR (that number goes back into O2).
-- `Fault::DatabasePageMismatch { pgno }` and `HaltCause::DatabaseCorrupt { pgno }` (ruling P1), in every exhaustive match.
+- Seeding as O2 is ruled. Until a page is recorded, a read of it records instead of checking. `clear()` on every snapshot cause O2 lists.
+- What the table cannot check, stated in the module doc: a database page above the previous commit that no scanned frame holds (`plan_pages` in `sync.rs` reads it from the file), and `page_count()`. Review focus 3 is met only for pages a frame has shown.
+- `Fault::DatabasePageMismatch { pgno }` and its degraded state (ruling P1), in every exhaustive match.
 
 **Semantics:** a page read from the database file reaches an LTX file only after `check` passed on the same bytes. A page the WAL holds newer than the database never needs the database copy (unchanged from phase 2). Memory: 8 bytes per page plus the map's overhead, stated in the module doc for 1 GiB at 4 KiB pages.
 
-**Tests:** a property over the simulator's SQLite model (every walgrowth and snapshot read is checked, never only recorded, once seeded); a flipped byte in a database page between two syncs halts with the page number and stages nothing; VACUUM and a shrink keep the table consistent; the new fault's simulator scenario (`db_page_flipped_under_sync`), so `every_fault_has_a_scenario_or_a_reason` stays green.
+**Tests:** a property over the simulator's SQLite model (every walgrowth and snapshot read is checked, never only recorded, once seeded); a flipped byte in a database page between two syncs enters the degraded state with the page number, WAL syncs continue, and retention keeps the restore point before it; a `LocalRewound` clears the table and raises no mismatch; VACUUM and a shrink keep the table consistent; the new fault's simulator scenario (`db_page_flipped_under_sync`), so `every_fault_has_a_scenario_or_a_reason` stays green.
 
 ### Task 4: the real-SQLite fault suite (branch `sqlite-faults`)
 
@@ -94,7 +111,11 @@ The pure-Rust pin is not part of phase 3 (ruling P0); it is tracked in #9. The n
 - `FaultVfs`: a VFS registered under its own name that delegates to `unix` and injects, on a schedule: an error on read, write, sync, truncate or lock; a short write; and "power loss", which drops every write since the last `xSync` of that file. `SQLITE_TESTCTRL_PRNG_SEED` pins WAL salts so runs replay.
 - A harness generic over the backend (task 1's today; #9's if it is built): the actor over the backend, an `FsStore` replica, the simulator's oracle (`lsr_sim::oracle::check` over restored page hashes at every acknowledged txid).
 
+The suite is the contract for any backend: it holds every case of `crates/compat/tests/live_source.rs`, written once and run per backend. A case whose expected answer differs by backend (the mark-0 restart is the known one) states both answers in one table in the suite, never in a skip.
+
 **Tests** (each case names the upstream fix or SQLite belief it checks, where there is one):
+- `no_synced_frame_is_overwritten_while_pinned`: a second connection commits, checkpoints in every mode and commits again; every frame at or below the engine's position still verifies.
+- `a_stranger_truncate_reports_busy_and_the_wal_keeps_its_length`; `the_pin_survives_the_hosts_last_connection_closing`; `a_wal_index_with_an_unknown_version_is_refused`; `an_invalid_wal_index_is_not_ready_never_recovered_by_us`.
 - Each injected fault at each step of a sync, a PASSIVE and a TRUNCATE cycle: the outcome is the fault's policy, and the oracle holds afterwards.
 - Power loss at each `xSync` of the WAL under `synchronous=NORMAL`: the next boot snapshots (`LocalRewound`) or continues, never loses an acknowledged txid that reached the replica.
 - A writer process SIGKILLed mid-transaction (a child process, not a thread): its pages never appear in any file.
@@ -108,7 +129,9 @@ The pure-Rust pin is not part of phase 3 (ruling P0); it is tracked in #9. The n
 
 **Semantics:** when the staging directory has no level 0 file, boot reads the header of the replica's newest level 0 file (WAL origin: offset, size, salts; commit; last page through the file's index) and builds the same `Tip` a staged file would give. `recover` then decides as today: a WAL that still matches continues with no snapshot. The read is one ranged GET of the header and index; the PR states its byte count. A replica whose newest file is above level 0 (the level 0 files were retained away) gives no tip, as today: `FirstSync`.
 
-**Tests:** `meta_wiped_remote_kept` expects `Booted { cause: None }` and the oracle holds; the same with a WAL that moved on while down expects the snapshot cause phase 2 gives a staged tip; a remote tip whose header does not match its key halts as `RemoteCorrupt`; the GET count asserted.
+**If O3 is accepted:** the position file is written atomically after each staged file, and at boot a matching cumulative checksum at its offset proves every earlier frame. A missing or unreadable file (also what a directory inherited from Go has) falls back to V3.
+
+**Tests:** the V3 residue case (two transactions dropped, byte-identical tip regrown) as a failing test first, if O3 is accepted; `meta_wiped_remote_kept` expects `Booted { cause: None }` and the oracle holds; the same with a WAL that moved on while down expects the snapshot cause phase 2 gives a staged tip; a remote tip whose header does not match its key halts as `RemoteCorrupt`; the GET count asserted.
 
 ### Task 6: the actor thread and the public API (branch `replica-api`)
 
