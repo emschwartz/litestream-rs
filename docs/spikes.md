@@ -70,6 +70,7 @@ Left: item 8 (the key still cannot set bucket lifecycle) and 11 (no 429, 503 or 
 | S1, the wal-index through SQLite's own mapping | answered | Yes. `SQLITE_FCNTL_FILE_POINTER` then `xShmMap(file, 0, 32768, 0, &p)` on the library's reader, guarded to a WAL connection in normal locking mode with a read transaction open, returns the region every connection in the process shares, opens and closes no descriptor, and reads the same header and `nBackfill` as `LiveSqlite`'s file read at every step. Task 1 uses it; the fallback descriptor is not needed. |
 | S5, Go and an extra meta-directory file | open | Needed only if O2 is ruled "persist". |
 | G4, conditional PUTs on Tigris | answered | Yes, all three as AWS S3 documents them. `If-None-Match: *` on PUT and on CompleteMultipartUpload: 200 for a new key, 412 `PreconditionFailed` for an existing one, object unchanged; `If-Match` with the current ETag writes, with a stale one 412 and unchanged. See below. |
+| rusty-s3 0.12 | deferred | Not bumped: 0.12.0 was published 2026-11-18T17:07Z and the repo's 3-day publish-age cooldown refuses it until 2026-11-21T17:07Z. Its `src/` is byte-identical to 0.11.0; the only change is `jiff` 0.2 to 1.0 in its public signing API. See below. |
 
 ## S1: the wal-index through SQLite's own mapping
 
@@ -112,3 +113,15 @@ Run on 2026-11-20 from a cloud session, bucket `litestream-rs-test`, a fresh run
 | PUT `If-Match: <ETag>` to an absent key | 404 | `NoSuchKey` | still absent |
 
 The 412 bodies are S3 XML (`<Code>PreconditionFailed</Code>`, "At least one of the pre-conditions you specified did not hold"). The condition is checked at completion, not at initiation: both uploads were created before either completed, and only the second complete failed. A refused complete leaves the upload open, so a writer that adopts this must abort it (or rely on the orphan sweep). The whole Tigris suite with these probes, 2026-11-20, on rusty-s3 0.11.0: 44 of 44 pass over ureq (217 s) and 44 of 44 over reqwest (`LSR_S3_TRANSPORT=reqwest`, 227 s), each under its own prefix; every prefix was deleted afterwards and listed no objects and no incomplete uploads. Not measured: concurrent racing completes (both in flight at once), and whether `classify` would treat the 412 as a refusal; the store sends no conditional header, so neither matters for v1.
+
+## rusty-s3 0.12
+
+Not bumped (2026-11-20). `cargo update -p rusty-s3` with `version = "0.12"` fails: "version 0.12.0 is too new (published 2 days ago, minimum age 3 days)", from `global-min-publish-age = "3 days"` in `.cargo/config.toml`. Bypassing the cooldown would defeat its purpose (a fresh release is exactly what it guards against), so the workspace stays on 0.11.0 until the cooldown passes on 2026-11-21T17:07Z.
+
+What 0.12.0 changes, from its crate (downloaded for reading only, SHA-256 `7c091b4c...71f8c`, matching the crates.io index) diffed against 0.11.0 in the cargo registry:
+
+- `src/` is byte-identical. Signing, the `X-Amz-*` query merge in `signing::sign` (it still assumes the caller's query is sorted, so `tests/common/real.rs` keeps sorting), `ListObjectsV2` parsing and its `encoding-type=url` decoding, CreateMultipartUpload, CompleteMultipartUpload, UploadPart, DeleteObjects and their response parsers are unchanged.
+- `Cargo.toml`: `jiff` goes from 0.2 to 1.0. That is why it is a breaking release: `S3Action::sign_with_time` takes a `&jiff::Timestamp`, and `signing::sign` too. Bumping means moving the workspace's `jiff` to 1.0 in the same change (`request.rs` builds the timestamp it signs with; `tests/tigris.rs` parses dates with `jiff`). jiff 1.0.0 was published 2026-11-15 and is already outside the cooldown; 1.0.1 (2026-11-18) is not.
+- Otherwise only metadata: the author's email and the licence's copyright years, the README badge, and one upstream test (`tests/delete_objects.rs`) no longer ignored for versitygw.
+
+So the bump buys nothing for this crate except `jiff` 1.0. Features stay `rustcrypto` and `full` (`full` is what gates DeleteObjects).
