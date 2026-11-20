@@ -35,7 +35,7 @@ pub mod testing {
 pub use error::{DecodeError, EncodeError, Section};
 pub use frame::FrameError;
 pub use header::{HEADER_LEN, Header, HeaderError, HeaderFields, WalOrigin};
-pub use ids::{ParseTxidError, Timestamp, Txid, TxidRange};
+pub use ids::{ParseTxidError, TimeField, Timestamp, TimestampParseError, Txid, TxidRange};
 pub use index::{INDEX_TAIL_LEN, IndexEntry, IndexError, PageIndex, decode_frame};
 pub use order::OrderError;
 pub use page::{PageNo, PageSize, lock_page};
