@@ -15,12 +15,13 @@ use lsr_core::{
     Entropy, FakeClock, FileKey, MemStore, RecordingSleeper, SeededEntropy, StoreError,
 };
 use lsr_ltx::{PageNo, PageSize, Timestamp};
+use lsr_wal::WalOffset;
 
 use crate::exec::{Polls, RunEnd, run_until};
 use crate::model::{CommitId, Model, PageImage};
 use crate::oracle::{Acked, Checked, Violation, check};
 use crate::seed::Seed;
-use crate::sqlite::{CrashKind, SimSqlite, StrangerMode};
+use crate::sqlite::{AppCommit, CrashKind, SimSqlite, StrangerMode};
 use crate::store::{FaultHandle, Faults, Lost, Stage, StageHandle, Tap, TapLog, Yield};
 
 /// The staging store the actor sees.
@@ -150,12 +151,41 @@ impl World {
 
     /// The app commits `pages`, leaving `db_size` pages; `None` when SQLite's
     /// rules refuse (the write lock is held, or `db_size` is zero).
+    ///
+    /// A page that comes back after a shrink and that the commit does not write
+    /// holds whatever the rules' file still has, so the model takes it from
+    /// their image instead of assuming the app wrote it.
     pub fn app_commit(&mut self, pages: &[(PageNo, Vec<u8>)], db_size: u32) -> Option<CommitId> {
+        let before = self.model.tip_image().db_size();
         let app = self.sqlite.commit(pages, db_size)?;
+        let mut written = pages.to_vec();
+        if db_size > before {
+            written.extend(self.re_added(pages, before, db_size));
+        }
         Some(
             self.model
-                .commit(pages, db_size, app, self.remote_tap.len()),
+                .commit(&written, db_size, app, self.remote_tap.len()),
         )
+    }
+
+    /// The pages in `after_old..=db_size` that `pages` leaves unwritten, as
+    /// the rules hold them now.
+    fn re_added(
+        &self,
+        pages: &[(PageNo, Vec<u8>)],
+        old_size: u32,
+        db_size: u32,
+    ) -> Vec<(PageNo, Vec<u8>)> {
+        let size = self.sqlite.page_size();
+        let image = self.sqlite.image();
+        (old_size.saturating_add(1)..=db_size)
+            .filter(|pgno| !pages.iter().any(|(page, _)| page.get() == *pgno))
+            .filter_map(|pgno| {
+                let at = usize::try_from(pgno.checked_sub(1)?).ok()?;
+                let bytes = image.chunks_exact(size.bytes()).nth(at)?;
+                Some((PageNo::new(pgno, size)?, bytes.to_vec()))
+            })
+            .collect()
     }
 
     /// The app shrinks the database. SQLite rewrites page 1 for it, so the model
@@ -173,6 +203,55 @@ impl World {
             self.model
                 .commit(&pages, db_size, app, self.remote_tap.len()),
         )
+    }
+
+    /// VACUUM into pages of `new` with every connection closed: the whole
+    /// database is rewritten and the WAL starts empty. `None` when the rules
+    /// refuse (the page size is unchanged, or a connection holds a transaction).
+    pub fn app_vacuum(&mut self, new: PageSize) -> Option<CommitId> {
+        if !self.sqlite.rewrite_page_size(new) {
+            return None;
+        }
+        let image = PageImage::from_bytes(new, &self.sqlite.image());
+        let app = AppCommit {
+            salts: self.sqlite.salts(),
+            end: WalOffset::from_frame_index(0, new),
+        };
+        Some(self.model.vacuum(image, app, self.remote_tap.len()))
+    }
+
+    /// Records a commit the engine made itself: a checkpoint's bump of page 1
+    /// (`db.go:1668`) puts a one-page commit into the WAL that the app never
+    /// made, and a file of the sync that follows ends on it. Its pages are the
+    /// tip's, so the model keeps the tip's image under the new end. `at` is the
+    /// replica tap's length when the tick started, so no earlier put can be
+    /// taken to cover it.
+    pub fn sync_model_at(&mut self, at: usize) {
+        let frames = self.sqlite.mx_frame();
+        let salts = self.sqlite.salts();
+        let tip_salts = self
+            .model
+            .tip()
+            .and_then(|id| self.model.rec(id))
+            .map(|rec| rec.salts);
+        // A restart needs a finished backfill, which syncs: every commit of the
+        // generation it retired is durable.
+        if tip_salts.is_some_and(|old| old != salts) {
+            self.model.on_checkpoint();
+        }
+        if frames == 0 {
+            return;
+        }
+        let end = WalOffset::from_frame_index(frames, self.sqlite.page_size());
+        let known = self
+            .model
+            .tip()
+            .and_then(|id| self.model.rec(id))
+            .is_some_and(|rec| rec.salts == salts && rec.end.get() == end.get());
+        if !known {
+            self.model
+                .commit(&[], self.sqlite.db_size(), AppCommit { salts, end }, at);
+        }
     }
 
     /// A checkpoint from outside the engine; a successful one syncs the WAL, so
@@ -196,7 +275,12 @@ impl World {
     /// and tells the model which commits went with them.
     pub fn run_tick<F: Future>(&mut self, fut: F, plan: Option<CrashPlan>) -> TickEnd<F::Output> {
         let budget = plan.map_or(Polls::UNBOUNDED, |p| p.at_poll);
-        match run_until(fut, budget) {
+        let at = self.remote_tap.len();
+        let ran = run_until(fut, budget);
+        // Before the crash takes anything: a power loss decides which of the
+        // engine's own commits survive, so the model must know them first.
+        self.sync_model_at(at);
+        match ran {
             RunEnd::Done(out) => TickEnd::Done(out),
             RunEnd::Crashed { polls } => {
                 let kind = plan.map_or(CrashKind::Process, |p| p.kind);

@@ -13,6 +13,7 @@
 //! tick's future to [`World::run_tick`]. Nothing here owns loop logic.
 
 pub mod exec;
+pub mod generate;
 pub mod model;
 pub mod oracle;
 pub mod seed;
@@ -22,6 +23,7 @@ pub mod store;
 mod testkit;
 pub mod world;
 
+pub use generate::{EnvFault, Op, Target, Weights, history};
 pub use exec::{Polls, RunEnd, count_polls, run_until};
 pub use model::{CommitId, CommitRec, Model, PageImage};
 pub use oracle::{Acked, Bound, Checked, Violation, bug_fault, check, within};

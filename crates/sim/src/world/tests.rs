@@ -34,6 +34,44 @@ fn the_model_tracks_what_the_rules_hold() {
 }
 
 #[test]
+fn a_page_that_comes_back_unwritten_is_what_the_rules_hold() {
+    let mut w = world();
+    commit(&mut w, 1);
+    assert!(w.app_shrink(2).is_some());
+    // Growing back without writing pages 3 and 4: the model asks the rules.
+    let page_one: Vec<(PageNo, Vec<u8>)> = vec![(pgno(1), page(9))];
+    assert!(w.app_commit(&page_one, 4).is_some());
+    assert!(w.model_matches_sqlite());
+}
+
+#[test]
+fn the_engines_own_bump_commit_joins_the_model() {
+    let mut w = world();
+    commit(&mut w, 1);
+    let before = w.model.commits().len();
+    // What a checkpoint's bump does: a one-page commit by the pool connection.
+    let mut ck = w.sqlite.checkpointer();
+    lsr_core::Checkpointer::bump_seq(&mut ck).unwrap();
+    assert_eq!(w.model.commits().len(), before);
+    w.sync_model_at(0);
+    assert_eq!(w.model.commits().len(), before + 1);
+    w.sync_model_at(0);
+    assert_eq!(w.model.commits().len(), before + 1, "once only");
+    assert!(w.model_matches_sqlite());
+}
+
+#[test]
+fn a_vacuum_to_a_new_page_size_restarts_the_model_on_the_new_image() {
+    let mut w = world();
+    commit(&mut w, 1);
+    assert!(w.app_vacuum(ps()).is_none(), "the same size is no vacuum");
+    let big = lsr_ltx::PageSize::new(1024).unwrap();
+    assert!(w.app_vacuum(big).is_some());
+    assert!(w.model_matches_sqlite());
+    assert_eq!(w.model.tip_image().page_size(), big);
+}
+
+#[test]
 fn a_power_loss_leaves_the_model_where_the_rules_are() {
     let mut w = world();
     commit(&mut w, 1);
