@@ -89,6 +89,7 @@ name = "lsr-core"
 version = "0.0.0"
 dependencies = [
  "lsr-ltx",
+ "lsr-wal",
  "thiserror",
 ]
 
@@ -114,6 +115,14 @@ version = "0.0.0"
 dependencies = [
  "crc",
  "lz4_flex",
+ "thiserror",
+]
+
+[[package]]
+name = "lsr-wal"
+version = "0.0.0"
+dependencies = [
+ "lsr-ltx",
  "thiserror",
 ]
 
