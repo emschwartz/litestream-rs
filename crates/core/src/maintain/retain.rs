@@ -17,10 +17,14 @@
 //! after one Go-era loss.
 //!
 //! Time base. Ages come from `FileInfo::created_at`, the header stamp, and are
-//! measured from the anchor, `min(now, newest stamp in the listing)`, never
-//! lower than an anchor this state already used. A clock that jumps ahead
-//! deletes nothing the replica's own newest stamp would not, and a clock behind
-//! only makes files look young; it never makes a deleted one young again. Go on S3 uses the upload
+//! measured from the anchor, `min(now, newest stamp in the listing)`, computed
+//! afresh on every call. A clock that jumps ahead deletes nothing the
+//! replica's own newest stamp would not, and a clock behind only makes files
+//! look young. The anchor is deliberately not remembered: a lower anchor only
+//! ever deletes less, while a remembered high one would keep deleting on the
+//! strength of one bad clock reading. The cost of a clock that steps back is
+//! a snapshot kept after an earlier job cut the level-0 chain behind it;
+//! a restore goes through the newer snapshot and loses nothing. Go on S3 uses the upload
 //! time (`LastModified`), never earlier than the header stamp, so Go keeps
 //! these files at least as long as this code does.
 //!
@@ -97,7 +101,7 @@ pub(super) fn retention(
     now: Timestamp,
     config: &Maintenance,
     published: Option<Txid>,
-    state: &mut MaintainState,
+    state: &MaintainState,
 ) -> Retention {
     if let Some(hold) = gate(inventory, published, state) {
         return Retention::Held(hold);
@@ -105,7 +109,7 @@ pub(super) fn retention(
     let Some(newest_stamp) = inventory.files().iter().map(|f| f.created_at).max() else {
         return Retention::Wait { until: None };
     };
-    let anchor = state.raise_anchor(now.unix_millis().min(newest_stamp.unix_millis()));
+    let anchor = now.unix_millis().min(newest_stamp.unix_millis());
     let found = candidates(inventory, anchor, newest_stamp.unix_millis(), config);
     let until = found.wake.map(Timestamp::from_unix_millis);
     if found.keys.is_empty() {

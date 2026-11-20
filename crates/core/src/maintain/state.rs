@@ -1,6 +1,6 @@
 //! What the maintenance loop remembers between calls to [`super::due`].
 //!
-//! The planner reads a listing, not history, so three facts that a listing
+//! The planner reads a listing, not history, so two facts that a listing
 //! cannot carry live here, each bounded by the eight compaction levels:
 //!
 //! - Backoff. A job that failed is not planned again at its level until a
@@ -13,11 +13,13 @@
 //!   remembered here, [`super::due`] plans its delete before anything else at the
 //!   level, and retention holds until it is gone. A listing cannot tell such an
 //!   object from a good one, and the inputs it "covers" would be deleted.
-//! - The retention anchor's high-water mark, so a clock that steps backwards
-//!   cannot make a snapshot retention already passed look young again.
 //!
-//! None of it survives a restart. That is safe for backoff (one extra attempt)
-//! and for the anchor (the listing's own stamps rebuild it). For a distrusted
+//! Nothing here can make retention delete more than a fresh state would: a
+//! remembered fact only holds or delays. (The retention anchor is not kept
+//! for that reason; see `retain`.)
+//!
+//! None of it survives a restart. That is safe for backoff (one extra
+//! attempt). For a distrusted
 //! key it is the open case recorded in the plan: a crash between a corrupt
 //! publish and its delete forgets the key.
 
@@ -44,7 +46,6 @@ struct Retry {
 /// [`Self::record`] (and [`Self::record_snapshot`] for the snapshot).
 #[derive(Clone, Debug, Default)]
 pub struct MaintainState {
-    anchor: Option<i64>,
     /// By destination level; [`Level::SNAPSHOT`] is the snapshot's slot.
     retries: BTreeMap<Level, Retry>,
     /// At most one per compaction level: a level's delete runs first.
@@ -137,12 +138,5 @@ impl MaintainState {
     /// Forgets distrusted keys that `listed` no longer holds.
     pub(super) fn forget_unlisted(&mut self, listed: impl Fn(&FileKey) -> bool) {
         self.distrusted.retain(|_, key| listed(key));
-    }
-
-    /// The raised anchor: never lower than any earlier one.
-    pub(super) fn raise_anchor(&mut self, candidate: i64) -> i64 {
-        let raised = self.anchor.map_or(candidate, |seen| seen.max(candidate));
-        self.anchor = Some(raised);
-        raised
     }
 }

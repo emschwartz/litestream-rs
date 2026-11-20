@@ -1,8 +1,8 @@
 //! The maintenance planner and its executor.
 //!
 //! [`due`] is a function of a listing, an instant, a schedule and a small
-//! [`MaintainState`] (backoff, distrusted outputs, the retention anchor's
-//! high-water mark; see `state`). A fresh state plans from the listing alone,
+//! [`MaintainState`] (backoff and distrusted outputs; see `state`). A fresh
+//! state plans from the listing alone,
 //! so a restarted process reading the same listing plans the same job. It
 //! returns one job; the caller runs it, records the outcome, lists again and
 //! asks again.
@@ -332,8 +332,8 @@ enum Step {
 }
 
 /// The next job, or when to ask again. See the module docs for the rules.
-/// Writes only the state's anchor mark and the forgetting of distrusted keys
-/// the listing no longer holds.
+/// Writes to the state only to forget distrusted keys the listing no longer
+/// holds.
 #[must_use]
 pub fn due(
     inventory: &Inventory,

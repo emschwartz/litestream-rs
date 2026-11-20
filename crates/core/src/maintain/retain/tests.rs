@@ -22,13 +22,7 @@ fn retention(
     config: &Maintenance,
     published: Option<Txid>,
 ) -> Retention {
-    super::retention(
-        inventory,
-        now,
-        config,
-        published,
-        &mut MaintainState::default(),
-    )
+    super::retention(inventory, now, config, published, &MaintainState::default())
 }
 
 const HOUR: i64 = 3_600_000;
@@ -173,10 +167,10 @@ fn level_zero_skips_an_uncovered_file_and_deletes_the_covered_ones_above_it() {
 }
 
 #[test]
-fn a_clock_that_steps_back_does_not_make_a_deleted_chain_young_again() {
+fn a_clock_that_steps_back_deletes_less_and_one_that_returns_deletes_the_same() {
     // Two snapshots a day apart, retention a day. At the newest stamp the first
-    // is old (floor at its end); a second call far in the past would have
-    // retained it, so the anchor must not move back.
+    // is old. A clock far in the past keeps it (less is deleted, never more),
+    // and nothing is remembered: the clock's return plans the first job again.
     let files = vec![
         file(9, 1, 10, T0),
         file(9, 1, 20, T0 + DAY + HOUR),
@@ -191,15 +185,17 @@ fn a_clock_that_steps_back_does_not_make_a_deleted_chain_young_again() {
     )
     .unwrap();
     let inventory = inv(files);
-    let mut state = MaintainState::default();
+    let state = MaintainState::default();
     let newest = at(T0 + DAY + HOUR);
-    let first = super::retention(&inventory, newest, &cfg, None, &mut state);
+    let first = super::retention(&inventory, newest, &cfg, None, &state);
     assert!(keys(&first).contains(&key(9, 1, 10)), "{first:?}");
-    let back = super::retention(&inventory, at(T0), &cfg, None, &mut state);
-    assert_eq!(first, back, "the anchor moved back with the clock");
-    // A fresh state would have planned differently.
-    let fresh = retention(&inventory, at(T0), &cfg, None);
-    assert_ne!(first, fresh);
+    let back = super::retention(&inventory, at(T0), &cfg, None, &state);
+    assert!(matches!(back, Retention::Wait { .. }), "{back:?}");
+    // A clock that jumped ahead and came back leaves no mark either.
+    let ahead = super::retention(&inventory, at(T0 + 400 * DAY), &cfg, None, &state);
+    assert_eq!(first, ahead, "the newest stamp caps a clock that is ahead");
+    let again = super::retention(&inventory, newest, &cfg, None, &state);
+    assert_eq!(first, again);
 }
 
 #[test]
