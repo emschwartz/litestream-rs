@@ -51,6 +51,8 @@ struct Object {
 
 struct Pending {
     key: String,
+    /// When CreateMultipartUpload ran: S3's `LastModified` for the finished object (ruling Q3).
+    initiated: Timestamp,
     meta: Vec<(String, String)>,
     parts: BTreeMap<u16, Vec<u8>>,
 }
@@ -113,6 +115,14 @@ impl FakeS3 {
         self.state().objects.insert(key.to_owned(), object);
     }
 
+    /// Sets what LIST and HEAD report as an object's last-modified time, which
+    /// is not the stored stamp and may be anything.
+    pub fn set_last_modified(&self, key: &str, at: Timestamp) {
+        if let Some(object) = self.state().objects.get_mut(key) {
+            object.modified = at;
+        }
+    }
+
     /// An object's bytes, `None` when absent.
     #[must_use]
     pub fn body_of(&self, key: &str) -> Option<Vec<u8>> {
@@ -155,7 +165,9 @@ impl FakeS3 {
             Shape::Head => head(&state, &key),
             Shape::Get => get(&state, request, &key),
             Shape::Put => self.put(&mut state, request, key),
-            Shape::CreateMultipart => create(&mut state, request, &self.bucket, key),
+            Shape::CreateMultipart => {
+                create(&mut state, request, &self.bucket, key, self.clock.now())
+            }
             Shape::UploadPart => upload_part(&mut state, request, &key),
             Shape::Complete => self.complete(&mut state, request, &key),
             Shape::Abort => abort(&mut state, request),
@@ -207,7 +219,7 @@ impl FakeS3 {
             etag: joined.etag.clone(),
             body: joined.body,
             meta: upload.meta.clone(),
-            modified: self.clock.now(),
+            modified: upload.initiated,
         };
         state.objects.insert(key.to_owned(), object);
         state.uploads.remove(&id);
@@ -254,7 +266,7 @@ impl FakeS3 {
             xml.push_str(&format!(
                 "<Contents><Key>{}</Key><LastModified>{}</LastModified><ETag>{}</ETag><Size>{}</Size><StorageClass>STANDARD</StorageClass></Contents>",
                 url_encode(key),
-                object.modified,
+                whole_seconds(object.modified),
                 object.etag.replace('"', "&#34;"),
                 object.body.len(),
             ));
@@ -338,11 +350,43 @@ fn check_md5(request: &HttpRequest, optional: bool) -> Result<(), HttpResponse> 
     }
 }
 
+/// S3 lists `LastModified` to the second, so it never equals a millisecond stamp.
+fn whole_seconds(at: Timestamp) -> Timestamp {
+    Timestamp::from_unix_millis(at.unix_millis().div_euclid(1000).saturating_mul(1000))
+}
+
+/// A HEAD's `Last-Modified` is an HTTP-date (`Fri, 20 Nov 2026 13:49:45 GMT`).
+fn http_date(at: Timestamp) -> String {
+    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let iso = whole_seconds(at).to_string();
+    let field = |from: usize, to: usize| iso.get(from..to).unwrap_or("00");
+    // 1970-01-01 was a Thursday.
+    let days = at.unix_millis().div_euclid(86_400_000);
+    let weekday = usize::try_from(days.saturating_add(4).rem_euclid(7))
+        .ok()
+        .and_then(|day| DAYS.get(day));
+    let month = field(5, 7)
+        .parse::<usize>()
+        .ok()
+        .and_then(|month| MONTHS.get(month.saturating_sub(1)));
+    format!(
+        "{}, {} {} {} {} GMT",
+        weekday.unwrap_or(&"Thu"),
+        field(8, 10),
+        month.unwrap_or(&"Jan"),
+        field(0, 4),
+        field(11, 19),
+    )
+}
+
 fn object_headers(object: &Object, length: usize) -> Vec<(&str, String)> {
     let mut headers = vec![
         ("etag", object.etag.clone()),
         ("content-length", length.to_string()),
-        ("last-modified", object.modified.to_string()),
+        ("last-modified", http_date(object.modified)),
     ];
     headers.extend(
         object
@@ -405,7 +449,13 @@ fn parse_range(text: &str) -> Option<(u64, Option<u64>)> {
     Some((start.parse().ok()?, end))
 }
 
-fn create(state: &mut State, request: &HttpRequest, bucket: &str, key: String) -> HttpResponse {
+fn create(
+    state: &mut State,
+    request: &HttpRequest,
+    bucket: &str,
+    key: String,
+    initiated: Timestamp,
+) -> HttpResponse {
     state.next_upload = state.next_upload.saturating_add(1);
     let id = format!("upload-{}", state.next_upload);
     let xml = format!(
@@ -417,6 +467,7 @@ fn create(state: &mut State, request: &HttpRequest, bucket: &str, key: String) -
         id,
         Pending {
             key,
+            initiated,
             meta: metadata(request),
             parts: BTreeMap::new(),
         },

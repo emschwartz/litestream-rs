@@ -19,11 +19,12 @@ mod cases {
     use super::rig::*;
     use lsr_core::conformance::{Harness, block_on};
     use lsr_core::{
-        CorruptCause, FileKey, Level, ObjectStore, PartNumber, ReadLen, RecordingSleeper,
-        RetryPolicy, Retrying, SeededEntropy, StoreError, StoreOp, Upload,
+        CorruptCause, FileKey, Level, ListedStamp, ObjectStore, PartNumber, ReadLen,
+        RecordingSleeper, RetryPolicy, Retrying, SeededEntropy, StampOrigin, StoreError, StoreOp,
+        Upload,
     };
     use lsr_ltx::Timestamp;
-    use lsr_store_s3::{FakeS3, Fault, FaultTransport, S3Store, Shape};
+    use lsr_store_s3::{FakeS3, Fault, FaultTransport, ListStats, S3Store, Shape, object_key};
 
     lsr_core::conformance_suite!(FakeHarness::new);
 
@@ -77,21 +78,121 @@ mod cases {
     }
 
     #[test]
-    fn head_404_between_list_and_head() {
+    fn listing_makes_no_head_requests() {
         let h = FakeHarness::new();
-        for n in 1..=3 {
+        for n in 1..=5 {
             put_through(&h.store, &key(0, n, n), b"x").unwrap();
         }
+        let before = count(&h.wire, Shape::Head);
+        let page = block_on(h.store.list(Level::ZERO, None, limit(3))).unwrap();
+        assert_eq!(page.files.len(), 3);
+        assert_eq!(count(&h.wire, Shape::Head), before);
+        assert!(page.files.iter().all(|f| f.exact_stamp().is_none()));
+        assert_eq!(h.store.stamp_stats(), ListStats::default());
+    }
+
+    #[test]
+    fn head_404_between_list_and_stamp() {
+        let h = FakeHarness::new();
+        let k = key(0, 1, 1);
+        put_through(&h.store, &k, b"x").unwrap();
+        let file = list_all(&h.store).unwrap().files[0];
         h.wire.push(Fault::Status {
             on: Shape::Head,
             status: 404,
             code: None,
             retry_after: None,
         });
-        let page = block_on(h.store.list(Level::ZERO, None, limit(2))).unwrap();
-        let got: Vec<FileKey> = page.files.iter().map(|f| f.key).collect();
-        assert_eq!(got, [key(0, 2, 2), key(0, 3, 3)]);
-        assert_eq!(h.store.last_list_stats().vanished, 1);
+        assert_eq!(
+            block_on(h.store.stamp(&file)),
+            Err(StoreError::NotFound { key: k })
+        );
+        assert_eq!(h.store.stamp_stats().vanished, 1);
+    }
+
+    #[test]
+    fn metadata_less_object_falls_back_on_stamp() {
+        let h = FakeHarness::new();
+        let k = key(0, 1, 1);
+        h.wire
+            .inner()
+            .put_raw(&object_key(config().prefix(), &k), b"abc".to_vec(), &[]);
+        let file = list_all(&h.store).unwrap().files[0];
+        let stamp = block_on(h.store.stamp(&file)).unwrap();
+        assert_eq!(stamp.origin(), StampOrigin::Fallback);
+        let ListedStamp::LastModified(listed) = file.listed else {
+            panic!("a listed file carries LastModified: {file:?}");
+        };
+        assert_eq!(stamp.at(), listed);
+        assert_eq!(h.store.stamp_stats().fell_back, 1);
+    }
+
+    #[test]
+    fn bad_stamp_fails_the_reader_not_the_listing() {
+        let h = FakeHarness::new();
+        let k = key(0, 1, 1);
+        h.wire.inner().put_raw(
+            &object_key(config().prefix(), &k),
+            b"abc".to_vec(),
+            &[("x-amz-meta-litestream-timestamp", "yesterday")],
+        );
+        let listed = list_all(&h.store).unwrap();
+        let [file] = listed.files.as_slice() else {
+            panic!("the listing keeps the file: {listed:?}");
+        };
+        let bad = StoreError::Corrupt {
+            key: Some(k),
+            cause: CorruptCause::BadStamp,
+        };
+        assert_eq!(block_on(h.store.stamp(file)), Err(bad.clone()));
+        let read = block_on(h.store.read_with_stamp(file, ReadLen::new(8).unwrap()));
+        assert_eq!(read, Err(bad));
+    }
+
+    #[test]
+    fn read_with_stamp_is_one_get() {
+        let h = FakeHarness::new();
+        let k = key(0, 1, 1);
+        put_through(&h.store, &k, b"abc").unwrap();
+        let file = list_all(&h.store).unwrap().files[0];
+        let before = shapes(&h.wire).len();
+        let (bytes, stamp) =
+            block_on(h.store.read_with_stamp(&file, ReadLen::new(8).unwrap())).unwrap();
+        assert_eq!(bytes, b"abc");
+        assert_eq!(stamp.at(), Timestamp::from_unix_millis(5));
+        let sent = shapes(&h.wire).split_off(before);
+        assert_eq!(sent, [Some(Shape::Get)]);
+    }
+
+    #[test]
+    fn multipart_stamp_is_the_commit_stamp() {
+        let h = FakeHarness::new();
+        let k = key(0, 1, 1);
+        write_all(&h.store, &k, &body(PART * 2), PART).unwrap();
+        let file = list_all(&h.store).unwrap().files[0];
+        let stamp = block_on(h.store.stamp(&file)).unwrap();
+        assert_eq!(stamp.at(), Timestamp::from_unix_millis(5));
+        assert_eq!(stamp.origin(), StampOrigin::Metadata);
+    }
+
+    #[test]
+    fn last_modified_never_moves_an_answer() {
+        let h = FakeHarness::new();
+        let k = key(0, 1, 1);
+        put_through(&h.store, &k, b"abc").unwrap();
+        let object = object_key(config().prefix(), &k);
+        h.wire
+            .inner()
+            .set_last_modified(&object, Timestamp::from_unix_millis(86_400_000));
+        let file = list_all(&h.store).unwrap().files[0];
+        assert_eq!(
+            file.listed,
+            ListedStamp::LastModified(Timestamp::from_unix_millis(86_400_000))
+        );
+        let stamp = block_on(h.store.stamp(&file)).unwrap();
+        assert_eq!(stamp.at(), Timestamp::from_unix_millis(5));
+        let (_, read) = block_on(h.store.read_with_stamp(&file, ReadLen::new(8).unwrap())).unwrap();
+        assert_eq!(read.at(), stamp.at());
     }
 
     #[test]
@@ -177,7 +278,7 @@ mod cases {
         };
         assert_eq!((file.key, file.size), (k, 3));
         assert_eq!(
-            file.exact_stamp().unwrap().at(),
+            block_on(h.store.stamp(file)).unwrap().at(),
             Timestamp::from_unix_millis(5)
         );
         let read = block_on(h.store.read(&k, 0, ReadLen::new(16).unwrap())).unwrap();
@@ -265,7 +366,7 @@ mod cases {
         };
         assert_eq!(file.size, u64::try_from(len).unwrap());
         assert_eq!(
-            file.exact_stamp().unwrap().at(),
+            block_on(h.store.stamp(file)).unwrap().at(),
             Timestamp::from_unix_millis(5)
         );
         assert_eq!(h.wire.inner().open_uploads(), 0);
@@ -362,7 +463,7 @@ mod cases {
             panic!("one visible file expected: {listed:?}");
         };
         assert_eq!(
-            file.exact_stamp().unwrap().at(),
+            block_on(h.store.stamp(file)).unwrap().at(),
             Timestamp::from_unix_millis(5)
         );
         assert!(read_back(&h.store, &k, PART) == bytes);

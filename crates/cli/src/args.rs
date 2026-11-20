@@ -152,6 +152,13 @@ pub const FLAGS: &[FlagSpec] = &[
         help: "names lists only; contents (the default) reads and decodes every file",
     },
     FlagSpec {
+        name: "--stamps",
+        value: None,
+        required: false,
+        commands: &[CommandName::Files],
+        help: "s3 only: read each file's stored time with one HEAD per file (default: the listed times, no HEADs)",
+    },
+    FlagSpec {
         name: "--json",
         value: None,
         required: false,
@@ -218,6 +225,8 @@ pub struct FilesArgs {
     pub replica: Replica,
     /// JSON instead of text.
     pub json: bool,
+    /// Read every file's stored time instead of printing the listed one.
+    pub stamps: bool,
 }
 
 /// Why the command line is not a command.
@@ -554,6 +563,7 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
         CommandName::Files => Command::Files(FilesArgs {
             replica: flags.replica()?,
             json: flags.has("--json"),
+            stamps: flags.has("--stamps"),
         }),
     })
 }

@@ -76,6 +76,15 @@ fn files_takes_replica_and_json() {
         Ok(Command::Files(FilesArgs {
             replica: Replica::Dir("r".into()),
             json: true,
+            stamps: false,
+        }))
+    );
+    assert_eq!(
+        parsed("files --replica r --stamps"),
+        Ok(Command::Files(FilesArgs {
+            replica: Replica::Dir("r".into()),
+            json: false,
+            stamps: true,
         }))
     );
 }

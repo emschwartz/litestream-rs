@@ -233,7 +233,7 @@ mod cases {
         assert!(
             seek.files
                 .iter()
-                .all(|f| f.size == 1 && f.last_modified.is_some())
+                .all(|f| f.size == 1 && f.last_modified.unix_millis() > 0)
         );
     }
 

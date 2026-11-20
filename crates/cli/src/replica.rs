@@ -60,17 +60,17 @@ impl Entropy for OsEntropy {
     }
 }
 
-/// An S3 store that adds up the stamps listings had to take from `LastModified`.
+/// An S3 store that reports how many stamp reads had to take the object's
+/// `LastModified` because it carried no stored stamp.
 #[derive(Debug)]
 pub struct Counted<T: Transport> {
     store: S3Store<T>,
-    fell_back: AtomicU64,
 }
 
 impl<T: Transport> Counted<T> {
-    /// Files listed so far whose object carried no stored stamp.
+    /// Stamps read so far from objects that carried none.
     pub fn fell_back(&self) -> u64 {
-        self.fell_back.load(Ordering::Relaxed)
+        self.store.stamp_stats().fell_back
     }
 }
 
@@ -83,10 +83,7 @@ impl<T: Transport> ObjectStore for Counted<T> {
         after: Option<TxidRange>,
         limit: PageLimit,
     ) -> Result<Listing, StoreError> {
-        let listing = self.store.list(level, after, limit).await?;
-        self.fell_back
-            .fetch_add(self.store.last_list_stats().fell_back, Ordering::Relaxed);
-        Ok(listing)
+        self.store.list(level, after, limit).await
     }
 
     async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
@@ -124,10 +121,7 @@ pub type Remote<T = UreqTransport> = Retrying<Counted<T>, ThreadSleeper, OsEntro
 /// Wraps a store in the counter and the retry layer.
 pub fn remote<T: Transport>(store: S3Store<T>) -> Remote<T> {
     Retrying::new(
-        Counted {
-            store,
-            fell_back: AtomicU64::new(0),
-        },
+        Counted { store },
         ThreadSleeper,
         OsEntropy::new(),
         RetryPolicy::DEFAULT,

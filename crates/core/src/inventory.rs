@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use lsr_ltx::{Txid, TxidRange};
 use thiserror::Error;
 
-use crate::layout::{FileInfo, FileKey, Level, cmp_range};
+use crate::layout::{FileInfo, FileKey, Level, ListedStamp, cmp_range};
 use crate::store::{ObjectStore, PageLimit, StoreError};
 
 /// Why an inventory could not be built.
@@ -101,6 +101,18 @@ impl Inventory {
     pub fn with_skipped(mut self, level: Level, count: usize) -> Self {
         self.skipped.insert(level, count);
         self
+    }
+
+    /// The same inventory with every file's stamp read from the store, one
+    /// `stamp` call (a HEAD on S3) per file, so each is `Stored` afterwards.
+    ///
+    /// # Errors
+    /// The first failed read; never a partly stamped inventory.
+    pub async fn stamped<S: ObjectStore>(mut self, store: &S) -> Result<Self, StoreError> {
+        for info in &mut self.files {
+            info.listed = ListedStamp::Stored(store.stamp(info).await?);
+        }
+        Ok(self)
     }
 
     fn from_parts(

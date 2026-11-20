@@ -269,7 +269,7 @@ mod minio {
         let got: Vec<Timestamp> = listing
             .files
             .iter()
-            .map(|f| f.exact_stamp().unwrap().at())
+            .map(|f| block_on(h.store.stamp(f)).unwrap().at())
             .collect();
         assert_eq!(got, stamps);
     }
@@ -289,10 +289,10 @@ mod minio {
         let stamps: Vec<Timestamp> = listing
             .files
             .iter()
-            .map(|f| f.exact_stamp().unwrap().at())
+            .map(|f| block_on(h.store.stamp(f)).unwrap().at())
             .collect();
         assert_eq!(stamps, [at("2025-01-02T03:04:05.123Z")]);
-        assert_eq!(h.store.last_list_stats().stamped, 1);
+        assert_eq!(h.store.stamp_stats().stamped, 1);
     }
 
     #[test]
@@ -307,13 +307,13 @@ mod minio {
             panic!("one file expected, got {listing:?}");
         };
         let now = WallClock.now().unix_millis();
-        assert!((now - file.exact_stamp().unwrap().at().unix_millis()).abs() < 600_000);
-        let stats = h.store.last_list_stats();
+        assert!((now - block_on(h.store.stamp(file)).unwrap().at().unix_millis()).abs() < 600_000);
+        let stats = h.store.stamp_stats();
         assert_eq!((stats.stamped, stats.fell_back), (0, 1));
     }
 
     #[test]
-    fn unparseable_stamp_is_corrupt() {
+    fn unparseable_stamp_fails_the_reader_not_the_listing() {
         let Some(h) = MinioHarness::connect() else {
             return;
         };
@@ -323,9 +323,12 @@ mod minio {
             b"bad",
             &[(STAMP_HEADER, "yesterday")],
         );
-        let result = block_on(h.store.list(Level::ZERO, None, PageLimit::MAX));
+        let listing = h.list_all(0, 10);
+        let [file] = listing.files.as_slice() else {
+            panic!("the listing keeps the file: {listing:?}");
+        };
         assert_eq!(
-            result,
+            block_on(h.store.stamp(file)),
             Err(StoreError::Corrupt {
                 key: Some(key),
                 cause: CorruptCause::BadStamp
@@ -334,7 +337,7 @@ mod minio {
     }
 
     #[test]
-    fn listing_requests_are_bounded() {
+    fn listing_makes_no_head_requests() {
         let Some(h) = MinioHarness::connect() else {
             return;
         };
@@ -347,7 +350,7 @@ mod minio {
         assert_eq!(page.files.len(), 1000);
         assert!(page.next.is_some());
         assert!(h.counts.lists.load(Ordering::Relaxed) <= 2);
-        assert!(h.counts.heads.load(Ordering::Relaxed) <= 1000);
+        assert_eq!(h.counts.heads.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -456,7 +459,7 @@ mod minio {
         };
         assert_eq!(file.size, u64::try_from(len).unwrap());
         assert_eq!(
-            file.exact_stamp().unwrap().at(),
+            block_on(h.store.stamp(file)).unwrap().at(),
             at("2024-05-01T12:00:00.123Z")
         );
         assert_eq!(h.open_uploads(), 0);

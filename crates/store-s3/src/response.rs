@@ -68,8 +68,8 @@ pub struct ListedFile {
     pub key: FileKey,
     /// Its size from the listing.
     pub size: u64,
-    /// `LastModified`, for files stored without a stamp (Go does the same).
-    pub last_modified: Option<Timestamp>,
+    /// `LastModified`: what a listing lists for a file. It is never a stamp.
+    pub last_modified: Timestamp,
 }
 
 /// One page of a level, split into LTX files and foreign names.
@@ -121,7 +121,8 @@ pub fn parse_list(
                 last_modified: entry
                     .last_modified
                     .as_deref()
-                    .and_then(|text| Timestamp::parse_rfc3339(text).ok()),
+                    .and_then(|text| Timestamp::parse_rfc3339(text).ok())
+                    .ok_or(ResponseError::Malformed)?,
             }),
             Err(_foreign) => page.foreign.push(name.to_owned()),
         }
@@ -311,8 +312,7 @@ mod tests {
         assert_eq!(
             page.files
                 .first()
-                .and_then(|f| f.last_modified)
-                .map(|t| t.to_string())
+                .map(|f| f.last_modified.to_string())
                 .as_deref(),
             Some("2026-11-20T13:49:45.000Z")
         );

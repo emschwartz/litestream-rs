@@ -614,7 +614,16 @@ pub async fn chunks_concatenate_and_stamp_survives<H: Harness>(h: &H) -> Check {
         "the commit reports a stamp other than the one given"
     );
     let listing = store.list(target.level(), None, limit(10)?).await?;
-    ensure_eq!(listing.files, vec![info], "listed info");
+    let listed: Vec<_> = listing.files.iter().map(|f| (f.key, f.size)).collect();
+    ensure_eq!(listed, vec![(info.key, info.size)], "listed info");
+    let [file] = listing.files.as_slice() else {
+        return Err(Failure("one file expected in the listing".to_owned()));
+    };
+    ensure_eq!(
+        store.stamp(file).await?.at(),
+        at(STAMP),
+        "stamp after listing"
+    );
     ensure_eq!(read_all(store, &target).await?, b"abcde".to_vec(), "bytes");
     Ok(())
 }

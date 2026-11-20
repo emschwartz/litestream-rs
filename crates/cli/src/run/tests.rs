@@ -3,6 +3,7 @@
 //! directory replica.
 
 use std::fs;
+use std::sync::Arc;
 
 use lsr_compat::{Manifest, Staged, all_fixtures, stage};
 use lsr_core::conformance::block_on;
@@ -78,6 +79,18 @@ fn by_time(files: &[FileInfo]) -> Vec<(lsr_core::FileKey, u64, Option<Timestamp>
         .collect()
 }
 
+/// The fault layer shared between the store and the test that counts its requests.
+struct Shared(Arc<FaultTransport<FakeS3>>);
+
+impl Transport for Shared {
+    fn send(
+        &self,
+        request: lsr_store_s3::HttpRequest,
+    ) -> Result<lsr_store_s3::HttpResponse, lsr_store_s3::TransportError> {
+        self.0.send(request)
+    }
+}
+
 fn s3_store<T: Transport>(transport: T) -> Remote<T> {
     remote(S3Store::with_transport(config(), creds(), transport, clock()).unwrap())
 }
@@ -90,7 +103,7 @@ fn files_over_s3_list_what_the_directory_lists() {
             inventory,
             stamp_fallbacks,
             ..
-        } = block_on(files_on_s3(&s3_store(fake), false)).unwrap()
+        } = block_on(files_on_s3(&s3_store(fake), false, true)).unwrap()
         else {
             panic!("not files");
         };
@@ -105,11 +118,59 @@ fn files_over_s3_count_every_stamp_taken_from_last_modified() {
     let (fake, infos) = bucket_of(&staged, false);
     let Done::Files {
         stamp_fallbacks, ..
-    } = block_on(files_on_s3(&s3_store(fake), false)).unwrap()
+    } = block_on(files_on_s3(&s3_store(fake), false, true)).unwrap()
     else {
         panic!("not files");
     };
     assert_eq!(stamp_fallbacks, Some(u64::try_from(infos.len()).unwrap()));
+}
+
+#[test]
+fn files_prints_listed_stamps_without_heads() {
+    let staged = staged_fixtures().remove(0);
+    let (fake, infos) = bucket_of(&staged, true);
+    let wire = Arc::new(FaultTransport::new(fake));
+    let done = block_on(files_on_s3(
+        &s3_store(Shared(Arc::clone(&wire))),
+        false,
+        false,
+    ))
+    .unwrap();
+    let heads = wire
+        .requests()
+        .iter()
+        .filter(|r| r.shape == Some(Shape::Head))
+        .count();
+    assert_eq!(heads, 0);
+    let Done::Files {
+        stamp_fallbacks, ..
+    } = &done
+    else {
+        panic!("not files");
+    };
+    assert_eq!(*stamp_fallbacks, None);
+    let text = crate::render::done(&done);
+    assert_eq!(text.matches("(listed)").count(), infos.len(), "{text}");
+    assert!(!text.contains("LastModified"), "{text}");
+}
+
+#[test]
+fn files_with_stamps_sends_one_head_per_file() {
+    let staged = staged_fixtures().remove(0);
+    let (fake, infos) = bucket_of(&staged, true);
+    let wire = Arc::new(FaultTransport::new(fake));
+    block_on(files_on_s3(
+        &s3_store(Shared(Arc::clone(&wire))),
+        false,
+        true,
+    ))
+    .unwrap();
+    let heads = wire
+        .requests()
+        .iter()
+        .filter(|r| r.shape == Some(Shape::Head))
+        .count();
+    assert_eq!(heads, infos.len());
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -162,7 +223,7 @@ fn a_403_is_an_environment_error_that_names_no_secret() {
         code: Some("AccessDenied"),
         retry_after: None,
     });
-    let err = block_on(files_on_s3(&s3_store(faults), false)).unwrap_err();
+    let err = block_on(files_on_s3(&s3_store(faults), false, false)).unwrap_err();
     assert!(matches!(&err, CliError::Inventory(_)), "{err:?}");
     assert_eq!(exit_for_error(&err), Exit::Environment);
     let line = crate::render::error_line(&err);
@@ -183,7 +244,8 @@ fn a_throttled_listing_is_retried() {
         code: Some("SlowDown"),
         retry_after: None,
     });
-    let Done::Files { inventory, .. } = block_on(files_on_s3(&s3_store(faults), false)).unwrap()
+    let Done::Files { inventory, .. } =
+        block_on(files_on_s3(&s3_store(faults), false, true)).unwrap()
     else {
         panic!("not files");
     };

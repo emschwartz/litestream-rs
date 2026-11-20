@@ -15,30 +15,30 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lsr_core::{
     Clock, FileInfo, FileKey, Level, ListedStamp, Listing, ObjectStore, PageLimit, ReadLen,
-    StoreError, StoreOp, StoredStamp,
+    StampOrigin, StoreError, StoreOp, StoredStamp,
 };
 use lsr_ltx::{Timestamp, TxidRange};
 
 use crate::classify::{classify, classify_transport, is_range_past_end};
 use crate::config::{ConfigError, PartSize, Prefix, S3Config};
 use crate::credentials::S3Credentials;
-use crate::list::stamp_from_head;
 use crate::orphans::Orphans;
 use crate::request::{HttpRequest, MAX_DELETE_KEYS, RequestBuilder, RequestError};
-use crate::response::{parse_delete_failures, parse_head, parse_stamp_header};
+use crate::response::{Head, parse_delete_failures, parse_head, parse_stamp_header};
 use crate::transport::{HttpResponse, Transport};
 use crate::upload::S3Upload;
 use crate::ureq_transport::UreqTransport;
 
-/// What the last listing cost and found, for the event layer (this crate emits
-/// no events).
+/// What the stamps read so far found, for the event layer (this crate emits no
+/// events). A listing reads none; each [`ObjectStore::stamp`] and
+/// [`ObjectStore::read_with_stamp`] that settles adds one.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct ListStats {
-    /// Files whose stamp came from the object's metadata.
+    /// Stamps that came from the object's metadata.
     pub stamped: u64,
-    /// Files with no stamp metadata, listed with their `LastModified`.
+    /// Objects with no stamp metadata, stamped with their `LastModified`.
     pub fell_back: u64,
-    /// Files listed and gone by the time they were stamped.
+    /// Files listed and gone by the time they were stamped or read.
     pub vanished: u64,
 }
 
@@ -134,9 +134,9 @@ impl<T: Transport> S3Store<T> {
         self.inner.orphans.len()
     }
 
-    /// The counts from the most recent `list` call, finished or failed.
+    /// The stamp counts since the store was made (a listing reads none).
     #[must_use]
-    pub fn last_list_stats(&self) -> ListStats {
+    pub fn stamp_stats(&self) -> ListStats {
         *self
             .inner
             .stats
@@ -188,6 +188,27 @@ impl<T: Transport> ObjectStore for S3Store<T> {
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
         self.inner.delete(keys)
     }
+}
+
+/// The stamp a HEAD settles: the object's metadata when it has one, else the
+/// listed `LastModified` marked as the fallback. The size must be the one the
+/// caller saw, or the object was overwritten since and a retry reads the new one.
+fn stamp_from_head(
+    op: StoreOp,
+    head: &Head,
+    size: u64,
+    last_modified: Timestamp,
+) -> Result<StoredStamp, StoreError> {
+    if head.size != size {
+        return Err(StoreError::Transient {
+            op,
+            kind: io::ErrorKind::InvalidData,
+        });
+    }
+    Ok(match head.stamp {
+        Some(stamp) => StoredStamp::metadata(stamp),
+        None => StoredStamp::fallback(last_modified),
+    })
 }
 
 /// A request that cannot be built is the caller's fault and cannot succeed on
@@ -265,8 +286,24 @@ impl<T: Transport> Inner<T> {
         Ok(())
     }
 
-    pub(crate) fn record(&self, stats: ListStats) {
-        *self.stats.lock().unwrap_or_else(PoisonError::into_inner) = stats;
+    fn tally(&self, add: impl FnOnce(&mut ListStats)) {
+        add(&mut self.stats.lock().unwrap_or_else(PoisonError::into_inner));
+    }
+
+    /// Counts how one stamp read ended: found by metadata or by fallback, or the file was gone.
+    fn tally_stamp(&self, result: &Result<StoredStamp, StoreError>) {
+        self.tally(|stats| match result {
+            Ok(stamp) => match stamp.origin() {
+                StampOrigin::Fallback => stats.fell_back = stats.fell_back.saturating_add(1),
+                StampOrigin::Metadata | StampOrigin::Mtime => {
+                    stats.stamped = stats.stamped.saturating_add(1);
+                }
+            },
+            Err(StoreError::NotFound { .. }) => {
+                stats.vanished = stats.vanished.saturating_add(1);
+            }
+            Err(_) => {}
+        });
     }
 
     fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
@@ -276,9 +313,16 @@ impl<T: Transport> Inner<T> {
         Self::range_body(key, offset, len, &response)
     }
 
-    /// One HEAD: the stamp the object carries, else the one the listing gave
-    /// for it (ruling F1), checked against the size the caller saw.
+    /// One HEAD: the stamp the object carries, else the `LastModified` the
+    /// listing gave for it (F9), checked against the size the caller saw. An
+    /// unparseable stamp is `Corrupt { BadStamp }` here, not at listing time (G6).
     fn stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
+        let result = self.head_stamp(file);
+        self.tally_stamp(&result);
+        result
+    }
+
+    fn head_stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
         let op = StoreOp::Read;
         let key = file.key;
         let request = self.request(op, |b, now| b.head(now, &key))?;
@@ -288,7 +332,7 @@ impl<T: Transport> Inner<T> {
             ListedStamp::Stored(stamp) => stamp.at(),
             ListedStamp::LastModified(at) => at,
         };
-        stamp_from_head(op, &head, file.size, Some(listed))
+        stamp_from_head(op, &head, file.size, listed)
     }
 
     /// The first bytes and the stamp from one ranged GET, which carries the
@@ -302,7 +346,11 @@ impl<T: Transport> Inner<T> {
         let key = file.key;
         let request = self.request(op, |b, now| b.get_range(now, &key, 0, len))?;
         let response = self.send(op, request)?;
-        let bytes = Self::range_body(&key, 0, len, &response)?;
+        let bytes = Self::range_body(&key, 0, len, &response).inspect_err(|err| {
+            if let StoreError::NotFound { .. } = err {
+                self.tally_stamp(&Err(err.clone()));
+            }
+        })?;
         let carried = match response.status() {
             200 | 206 => {
                 parse_stamp_header(&response).map_err(|err| err.into_store(op, Some(key)))?
@@ -310,7 +358,11 @@ impl<T: Transport> Inner<T> {
             _ => None,
         };
         match carried {
-            Some(at) => Ok((bytes, StoredStamp::metadata(at))),
+            Some(at) => {
+                let stamp = StoredStamp::metadata(at);
+                self.tally_stamp(&Ok(stamp));
+                Ok((bytes, stamp))
+            }
             None => Ok((bytes, self.stamp(file)?)),
         }
     }

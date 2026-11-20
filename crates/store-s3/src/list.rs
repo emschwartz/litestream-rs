@@ -1,28 +1,29 @@
-//! Listing a level: pages, then one HEAD per file for its stored stamp.
+//! Listing a level: LIST pages only, never a HEAD (ruling G1).
 //!
 //! The cursor is sent as `start-after`, later pages as `continuation-token`.
-//! Pages are gathered until `limit` files have a stamp and one more key proves
-//! the listing goes on; the paging and foreign-name rules then belong to
-//! [`build_listing`](lsr_core::build_listing), which this module feeds and does not
-//! second-guess. Every fault is an error: a page that does not parse, a
-//! truncated page without a token, keys out of order or outside the prefix, a
-//! repeated token, or a stamp that is not a stamp. Never a shorter listing.
+//! Pages are gathered until `limit` files and one more key, which proves the
+//! listing goes on, are in hand; the paging and foreign-name rules then belong
+//! to [`build_listing`](lsr_core::build_listing), which this module feeds and
+//! does not second-guess. Every fault is an error: a page that does not parse,
+//! a truncated page without a token, keys out of order or outside the prefix,
+//! a repeated token, or an entry with no readable `LastModified`. Never a
+//! shorter listing.
 //!
-//! The extra key that proves a next page is not stamped, so a page costs at
-//! most `limit` HEADs. Its placeholder stamp never leaves this module:
-//! `build_listing` cuts it off.
+//! A listed file carries its `LastModified`, which is not a stamp. The stored
+//! stamp comes from [`Inner::stamp`](crate::store), one HEAD for the file a
+//! reader's decision turns on, and the HEAD's rules (size check, fallback,
+//! `BadStamp`) live there with it.
 
 use std::collections::VecDeque;
 use std::io;
 
 use lsr_core::{
-    FileInfo, Level, ListedStamp, Listing, PageLimit, StampOrigin, StoreError, StoreOp,
-    StoredStamp, build_listing, file_name,
+    FileInfo, Level, ListedStamp, Listing, PageLimit, StoreError, StoreOp, build_listing, file_name,
 };
 use lsr_ltx::{Timestamp, TxidRange};
 
-use crate::response::{Head, ListPage, ListedFile, parse_head, parse_list};
-use crate::store::{Inner, ListStats};
+use crate::response::{ListPage, ListedFile, parse_list};
+use crate::store::Inner;
 use crate::transport::Transport;
 
 const OP: StoreOp = StoreOp::List;
@@ -31,31 +32,6 @@ fn invalid_data() -> StoreError {
     StoreError::Transient {
         op: OP,
         kind: io::ErrorKind::InvalidData,
-    }
-}
-
-/// The stamp a HEAD settles: the object's metadata when it has one, else the
-/// bucket's `LastModified` marked as the fallback. The size must be the one the
-/// caller saw, or the object was overwritten since and a retry reads the new one.
-pub(crate) fn stamp_from_head(
-    op: StoreOp,
-    head: &Head,
-    size: u64,
-    last_modified: Option<Timestamp>,
-) -> Result<StoredStamp, StoreError> {
-    if head.size != size {
-        return Err(StoreError::Transient {
-            op,
-            kind: io::ErrorKind::InvalidData,
-        });
-    }
-    match (head.stamp, last_modified) {
-        (Some(stamp), _) => Ok(StoredStamp::metadata(stamp)),
-        (None, Some(modified)) => Ok(StoredStamp::fallback(modified)),
-        (None, None) => Err(StoreError::Transient {
-            op,
-            kind: io::ErrorKind::InvalidData,
-        }),
     }
 }
 
@@ -85,7 +61,6 @@ struct Run<'a, T> {
     first_page_done: bool,
     exhausted: bool,
     last_name: Option<String>,
-    stats: ListStats,
 }
 
 impl<T: Transport> Run<'_, T> {
@@ -132,54 +107,17 @@ impl<T: Transport> Run<'_, T> {
         }
     }
 
-    /// The file with its stored stamp, or `None` when it vanished.
-    fn stamp(&mut self, file: ListedFile) -> Result<Option<FileInfo>, StoreError> {
-        let key = file.key;
-        self.inner.within_budget(OP, self.start)?;
-        let request = self.inner.request(OP, |b, now| b.head(now, &key))?;
-        let response = match self.inner.exec(OP, Some(&key), request) {
-            Ok(response) => response,
-            Err(StoreError::NotFound { .. }) => {
-                self.stats.vanished = self.stats.vanished.saturating_add(1);
-                return Ok(None);
-            }
-            Err(err) => return Err(err),
-        };
-        let head = parse_head(&response).map_err(|err| err.into_store(OP, Some(key)))?;
-        let stamp = stamp_from_head(OP, &head, file.size, file.last_modified)?;
-        match stamp.origin() {
-            StampOrigin::Fallback => {
-                self.stats.fell_back = self.stats.fell_back.saturating_add(1);
-            }
-            StampOrigin::Metadata | StampOrigin::Mtime => {
-                self.stats.stamped = self.stats.stamped.saturating_add(1);
-            }
-        }
-        Ok(Some(FileInfo {
-            key,
-            size: file.size,
-            listed: ListedStamp::Stored(stamp),
-        }))
-    }
-
-    /// `want` stamped files, plus an unstamped one after them when the listing goes on.
+    /// `want` files, plus one after them when the listing goes on.
     fn collect(&mut self, want: usize) -> Result<Vec<FileInfo>, StoreError> {
         let mut files = Vec::new();
-        while files.len() < want {
+        while files.len() <= want {
             let Some(listed) = self.next_listed()? else {
-                return Ok(files);
+                break;
             };
-            files.extend(self.stamp(listed)?);
-        }
-        if let Some(extra) = self.next_listed()? {
             files.push(FileInfo {
-                key: extra.key,
-                size: extra.size,
-                listed: ListedStamp::LastModified(
-                    extra
-                        .last_modified
-                        .unwrap_or(Timestamp::from_unix_millis(0)),
-                ),
+                key: listed.key,
+                size: listed.size,
+                listed: ListedStamp::LastModified(listed.last_modified),
             });
         }
         Ok(files)
@@ -211,10 +149,8 @@ impl<T: Transport> Inner<T> {
             first_page_done: false,
             exhausted: false,
             last_name: None,
-            stats: ListStats::default(),
         };
-        let collected = run.collect(want);
-        self.record(run.stats);
-        Ok(build_listing(collected?, &run.foreign, after, limit))
+        let collected = run.collect(want)?;
+        Ok(build_listing(collected, &run.foreign, after, limit))
     }
 }

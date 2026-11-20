@@ -98,8 +98,9 @@ pub enum Done {
     Files {
         /// Every file.
         inventory: Inventory,
-        /// For an S3 replica, how many files had no stored stamp and show the
-        /// object's `LastModified` instead (replicas from Go v0.5.0 have no stamps).
+        /// For an S3 replica listed with `--stamps`, how many files had no stored
+        /// stamp and show the object's `LastModified` instead (replicas from Go
+        /// v0.5.0 have no stamps).
         stamp_fallbacks: Option<u64>,
         /// Whether to print JSON.
         json: bool,
@@ -330,15 +331,27 @@ async fn files_command(args: FilesArgs) -> Result<Done, CliError> {
             stamp_fallbacks: None,
             json: args.json,
         }),
-        Opened::S3(store) => files_on_s3(&store, args.json).await,
+        Opened::S3(store) => files_on_s3(&store, args.json, args.stamps).await,
     }
 }
 
 async fn files_on_s3<T: lsr_store_s3::Transport>(
     store: &Remote<T>,
     json: bool,
+    stamps: bool,
 ) -> Result<Done, CliError> {
     let inventory = Inventory::load(store).await?;
+    if !stamps {
+        return Ok(Done::Files {
+            inventory,
+            stamp_fallbacks: None,
+            json,
+        });
+    }
+    let inventory = inventory
+        .stamped(store)
+        .await
+        .map_err(InventoryError::Store)?;
     Ok(Done::Files {
         inventory,
         stamp_fallbacks: Some(store.inner().fell_back()),
