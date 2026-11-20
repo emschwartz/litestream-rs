@@ -39,7 +39,7 @@ Run on 2026-11-20 from one laptop, bucket `litestream-rs-test`, one run prefix, 
 | 7 two uploads to one key | pass | the last completed wins, not the last initiated: complete A then B leaves B, complete B then A leaves A |
 | 8 lifecycle abort-incomplete | blocked | the key gets 403 `AccessDenied` on both GetBucketLifecycleConfiguration and PutBucketLifecycleConfiguration; no rule written, no upload left for a later check |
 | 9 HEAD latency from this laptop | measured | 1,000 sequential HEADs through our client: p50 84.7 ms, p95 175.8 ms, total 119.0 s. One home connection to `t3.storage.dev`, not a production vantage point |
-| 10 production-shaped restore | open | not run (time); needs a generated Go v0.5.18 replica of a few hundred files, levels 0 to 3 and 9, copied up and restored by Rust and Go |
+| 10 production-shaped restore | pass (2026-11-20, third run) | Go v0.5.18 replicated the compat workload straight to Tigris (s3 replica, virtual-host style, nothing copied): 453 commits, levels 1 s/4 s/16 s, snapshots every 30 s, L0 retention 30 s, checkpoints every 15 s; 306 files, 91.7 MB, per level L0 89, L1 161, L2 40, L3 10, L9 6; head TXID 0x1d8, live database 2382 pages of 4096 (9.8 MB). `lsr verify` (contents): exit 0, no findings, reaches 0x1d8, 314 files and 98.2 MB read in 29.9 s (in process: 10 LIST, 316 GET, 0 HEAD). 13 targets, each restored in process, by `lsr` and by Go, compared on page hashes with `integrity_check` ok on every output: Latest, and TXID 0x1d8 (head = verify's reach), 0x1d7, 0x18f (newest snapshot), 0x3 (oldest snapshot), 0xf3 (median L3 end; the median L2 end was the same TXID), 0xeb (median L1 end) all equal pages; Latest also equals the live database. As-of: after the last commit (0x1d8) and three quarters in (0x16f) equal pages; a quarter in and halfway are `AsOfInsideFile` in Rust (by design), and `lsr --txid` at the chain end (0xa2, 0x109) equals Go's `-timestamp` restore; before Go started both refuse (Rust `NoSnapshot`, Go "no matching backup files available"). No mismatch. Rust restore (release, in process / `lsr`): Latest 1.63 s / 1.64 s, 8 files, 6.4 MB, 10 LIST + 8 GET + 0 HEAD (Go 2.96 s); a TXID target 0.7 to 1.7 s with 10 LIST + 1 to 8 GET; as-of 1.0 to 1.9 s with 8 to 11 HEAD for stamps (Go 4.8 to 5.7 s). Whole test 310 s. Reproduce: `just tigris-restore` (`crates/cli/tests/tigris.rs`, ignored). The run prefix `8t/2026-11-20-b2744058/` was deleted by the test (306 objects) and listed empty afterwards with the aws CLI, no multipart uploads |
 | 11 load shedding | open | not provoked. Statuses seen across the run: 200, 206, 400, 403, 404, 416; no 429, 503 or `Retry-After`. Docs not checked |
 
 Provider questions:
@@ -59,7 +59,9 @@ Other findings, each pinned by a test:
 
 Second run, 2026-11-20, from a cloud session on the `litestream-rs-test` bucket: all 41 tests pass (353 s); items 4 and Q4 answered above; ListMultipartUploads with a `prefix` now answers 200 and lists only that prefix. Everything written was deleted afterwards. The credentials are the session's `AWS_*` environment variables, and the bucket's virtual-host name (`litestream-rs-test.t3.storage.dev`) must be on the environment's allowed hosts.
 
-Left: item 8 (the key still cannot set bucket lifecycle), 10 (the production-shaped restore against Go) and 11 (no 429, 503 or `Retry-After` seen in either run).
+Third run, 2026-11-20, same cloud session setup: item 10 (above). Two environment facts: Go's AWS SDK refuses `AWS_CA_BUNDLE` when litestream passes its own HTTP client ("unable to add custom RootCAs HTTPClient"), so the recipe unsets it and Go takes the same roots from `SSL_CERT_FILE`; and Go's S3 layout is `<path>/<level as 4 hex digits>/<file>` with `litestream-timestamp` metadata, which our store reads unchanged.
+
+Left: item 8 (the key still cannot set bucket lifecycle) and 11 (no 429, 503 or `Retry-After` seen in any run).
 
 # Phase 3 spikes
 
