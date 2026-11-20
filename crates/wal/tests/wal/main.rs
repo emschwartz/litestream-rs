@@ -14,6 +14,10 @@ mod corruption;
 #[cfg(test)]
 mod pagemap;
 #[cfg(test)]
+mod properties;
+#[cfg(test)]
+mod review;
+#[cfg(test)]
 mod sqlite;
 #[cfg(test)]
 mod synthetic;

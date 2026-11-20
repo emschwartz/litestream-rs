@@ -154,7 +154,7 @@ fn check(copy: &Copy, ps: u32) -> Option<Tail> {
             "restored pages differ from SQLite's"
         );
     }
-    let limit = ScanLimit::Committed(CommittedEnd::from_frame_count(log, size(ps)));
+    let limit = ScanLimit::Committed(CommittedEnd::new(log, reader.header().salts(), size(ps)));
     let bounded = scan_from(&mut reader, None, limit).unwrap();
     assert_eq!(
         bounded.txs, scanned.txs,
@@ -301,13 +301,18 @@ fn a_restarted_wal_ends_at_the_first_stale_frame() {
         scanned.tail,
         Tail::InvalidFrame(lsr_wal::FrameFault::SaltMismatch { found: old_salts })
     );
-    // An offset from the old generation lies in stale frames.
-    let stale = WalOffset::from_frame_index(40, size(512));
-    let err = reader.resume(stale).unwrap_err();
-    assert!(
-        matches!(err, lsr_wal::ResumeError::PrevFrameMismatch { found, .. } if found == old_salts),
-        "{err}"
-    );
+    // A position remembered from the old generation is refused, at a stale frame and at the start.
+    for at in [
+        WalOffset::from_frame_index(40, size(512)),
+        WalOffset::start(size(512)),
+    ] {
+        let err = reader.resume(at, old_salts).unwrap_err();
+        assert!(
+            matches!(err, lsr_wal::ResumeError::Restarted { expected, found }
+                if expected == old_salts && found == reader.header().salts()),
+            "{err}"
+        );
+    }
     check(&new, 512);
     // A cursor taken in the old generation is refused outright.
     let old_reader = WalReader::open(Cursor::new(old.wal)).unwrap();

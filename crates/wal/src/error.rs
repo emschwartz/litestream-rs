@@ -46,15 +46,28 @@ pub enum ResumeError {
         /// The offset asked for.
         at: WalOffset,
     },
-    /// The frame preceding the offset belongs to another generation: the WAL was restarted behind the caller.
-    #[error("frame before {at} has salts {found:?}, the WAL header's are {expected:?}")]
-    PrevFrameMismatch {
+    /// The WAL header's generation is not the one the caller remembered: the WAL was restarted behind it.
+    #[error("WAL is in generation {found:?}, the caller remembered {expected:?}")]
+    Restarted {
+        /// The salts the caller remembered.
+        expected: Salts,
+        /// The salts of the WAL header.
+        found: Salts,
+    },
+    /// The frame preceding the offset does not verify: salts or checksum are not what the
+    /// caller synced, so the WAL below its position is not the one it saw (not an I/O error).
+    #[error("frame before {at} does not verify: {fault:?}")]
+    PrevFrame {
         /// The offset asked for.
         at: WalOffset,
-        /// The salts the preceding frame carries.
-        found: Salts,
-        /// The salts of the WAL header.
-        expected: Salts,
+        /// What is wrong with the preceding frame.
+        fault: FrameFault,
+    },
+    /// The frame preceding the offset is not a commit frame: the offset lies inside a transaction.
+    #[error("offset {at} is not right after a commit frame")]
+    NotAtCommit {
+        /// The offset asked for.
+        at: WalOffset,
     },
 }
 
@@ -72,10 +85,10 @@ pub enum WalError {
         /// The offending value's page size.
         found: PageSize,
     },
-    /// The cursor's generation is not the WAL's: the WAL was restarted behind the caller.
-    #[error("cursor is in generation {cursor:?}, the WAL header's is {header:?}")]
+    /// The cursor's or the committed end's generation is not the WAL's: the WAL was restarted behind the caller.
+    #[error("cursor or end is in generation {cursor:?}, the WAL header's is {header:?}")]
     Restarted {
-        /// The salts the cursor carries.
+        /// The salts the cursor or the committed end carries.
         cursor: Salts,
         /// The salts of the WAL header.
         header: Salts,
@@ -171,5 +184,21 @@ pub enum PageMapError {
         end: WalOffset,
         /// Where the offered transaction starts.
         found: WalOffset,
+    },
+    /// The transaction starts after the end of the ones applied: transactions between were skipped.
+    #[error("transaction starts at {found}, after the map's end {expected}")]
+    Gap {
+        /// The end of the applied transactions, where the next must start.
+        expected: WalOffset,
+        /// Where the offered transaction starts.
+        found: WalOffset,
+    },
+    /// The transaction belongs to another generation than the ones applied.
+    #[error("transaction is in generation {found:?}, the map's is {expected:?}")]
+    Generation {
+        /// The generation of the applied transactions.
+        expected: Salts,
+        /// The generation of the offered transaction.
+        found: Salts,
     },
 }

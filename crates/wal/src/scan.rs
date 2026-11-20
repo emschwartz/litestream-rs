@@ -9,13 +9,13 @@ use crate::frame::{
     CommittedEnd, FRAME_HEADER_LEN, FrameFault, FrameRef, WalOffset, frame_len, verify_frame,
 };
 use crate::header::{HEADER_LEN, Salts, WalHeader};
-use lsr_ltx::Checksum;
+use lsr_ltx::{Checksum, PageSize};
 
 /// Where the next frame starts and the checksum it continues from.
 ///
 /// A cursor taken from `cursor_at_start` or from a scan's result is verified
-/// all the way back to the header. One from [`WalReader::resume`] trusts the
-/// previous frame's stored checksum, which the next frame then checks.
+/// all the way back to the header. One from [`WalReader::resume`] is verified
+/// at the frame before it only, which is enough to continue the chain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FrameCursor {
     next: WalOffset,
@@ -123,6 +123,11 @@ pub struct WalReader<R> {
     header: WalHeader,
 }
 
+/// A buffer for one whole frame.
+fn frame_buf(page_size: PageSize) -> Vec<u8> {
+    vec![0; usize_from(u32::try_from(frame_len(page_size)).unwrap_or(0))]
+}
+
 /// Reads up to `buf.len()` bytes at `at`, fewer only at the end of the file.
 fn read_at<R: Read + Seek>(reader: &mut R, at: u64, buf: &mut [u8]) -> io::Result<usize> {
     reader.seek(SeekFrom::Start(at))?;
@@ -171,15 +176,22 @@ impl<R: Read + Seek> WalReader<R> {
         }
     }
 
-    /// A cursor at `at`, continuing from the stored checksum of the frame before it.
+    /// A cursor at `at`, the position and generation (`expected`) a caller
+    /// remembered from an earlier sync.
     ///
-    /// That frame's salts must be the header's: another generation's frame
-    /// there means the WAL restarted behind the caller. Its checksum is taken
-    /// as stored, so a wrong one shows up as the next frame failing verification.
+    /// The WAL header's salts must be `expected`, also when `at` is the start:
+    /// a restarted WAL may have regrown past `at`, and only the remembered
+    /// generation can tell. Unless `at` is the start, the frame before it is
+    /// read whole and verified (salts, checksum chained from the frame before
+    /// that, and a non-zero commit field), so `at` is a transaction boundary
+    /// of this generation and not a byte position that merely looks like one.
+    /// The cost is two frame-header reads and one page read per call.
+    /// `cursor_at_start` is for a caller with no position (first sync, snapshot).
     ///
     /// # Errors
-    /// [`ResumeError`]: a wrong page size, a WAL too short, or a previous frame of another generation.
-    pub fn resume(&mut self, at: WalOffset) -> Result<FrameCursor, ResumeError> {
+    /// [`ResumeError`]: a wrong page size, a WAL too short, a restarted WAL,
+    /// a frame before `at` that does not verify, or an `at` inside a transaction.
+    pub fn resume(&mut self, at: WalOffset, expected: Salts) -> Result<FrameCursor, ResumeError> {
         let page_size = self.header.page_size();
         if at.page_size() != page_size {
             return Err(ResumeError::PageSizeMismatch {
@@ -187,32 +199,48 @@ impl<R: Read + Seek> WalReader<R> {
                 found: at.page_size(),
             });
         }
+        let found = self.header.salts();
+        if found != expected {
+            return Err(ResumeError::Restarted { expected, found });
+        }
         let Some(prev) = at.prev_frame() else {
             return Ok(self.cursor_at_start());
         };
-        let mut bytes = [0; FRAME_HEADER_LEN];
-        if read_at(&mut self.reader, prev.get(), &mut bytes)? < FRAME_HEADER_LEN {
+        let running = self.checksum_before(prev, at)?;
+        let mut buf = frame_buf(page_size);
+        if read_at(&mut self.reader, prev.get(), &mut buf)? < buf.len() {
             return Err(ResumeError::Truncated { at });
         }
-        let mut fields = Fields::new(&bytes);
-        let (_pgno, _commit) = (fields.u32(), fields.u32());
-        let found = Salts {
-            salt1: fields.u32(),
-            salt2: fields.u32(),
-        };
-        let expected = self.header.salts();
-        if found != expected {
-            return Err(ResumeError::PrevFrameMismatch {
-                at,
-                found,
-                expected,
-            });
+        let frame = verify_frame(&buf, self.header.byte_order(), page_size, expected, running)
+            .map_err(|fault| ResumeError::PrevFrame { at, fault })?;
+        if frame.commit == 0 {
+            return Err(ResumeError::NotAtCommit { at });
         }
         Ok(FrameCursor {
             next: at,
-            checksum: WalChecksum::new(fields.u32(), fields.u32()),
+            checksum: frame.checksum,
             salts: expected,
         })
+    }
+
+    /// The stored checksum of the frame before `frame`, or the header's for frame 0.
+    /// It is not trusted on its own: the frame after it must chain from it.
+    fn checksum_before(
+        &mut self,
+        frame: WalOffset,
+        at: WalOffset,
+    ) -> Result<WalChecksum, ResumeError> {
+        let Some(before) = frame.prev_frame() else {
+            return Ok(self.header.checksum());
+        };
+        let mut bytes = [0; FRAME_HEADER_LEN];
+        if read_at(&mut self.reader, before.get(), &mut bytes)? < FRAME_HEADER_LEN {
+            return Err(ResumeError::Truncated { at });
+        }
+        let mut fields = Fields::new(&bytes);
+        let (_pgno, _commit, _salt1, _salt2) =
+            (fields.u32(), fields.u32(), fields.u32(), fields.u32());
+        Ok(WalChecksum::new(fields.u32(), fields.u32()))
     }
 
     /// Scans forward from `cursor` to the end of the next committed transaction.
@@ -227,7 +255,7 @@ impl<R: Read + Seek> WalReader<R> {
     ) -> Result<TxOutcome, WalError> {
         self.check_cursor(cursor, limit)?;
         let page_size = self.header.page_size();
-        let mut buf = vec![0; usize_from(u32::try_from(frame_len(page_size)).unwrap_or(0))];
+        let mut buf = frame_buf(page_size);
         let mut at = *cursor;
         let mut frames = Vec::new();
         loop {
@@ -289,6 +317,14 @@ impl<R: Read + Seek> WalReader<R> {
         if cursor.salts != self.header.salts() {
             return Err(WalError::Restarted {
                 cursor: cursor.salts,
+                header: self.header.salts(),
+            });
+        }
+        if let ScanLimit::Committed(end) = limit
+            && end.salts() != self.header.salts()
+        {
+            return Err(WalError::Restarted {
+                cursor: end.salts(),
                 header: self.header.salts(),
             });
         }

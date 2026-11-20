@@ -19,7 +19,12 @@
 //! invalid frame is the end of the WAL ([`Tail`]), as in SQLite's own recovery.
 //! Go's reader treats both as end of file; this one must not.
 //!
-//! [`PageMap`] folds transactions into the newest frame of each page.
+//! A position is only resumed in the generation it was taken in:
+//! [`WalReader::resume`] takes the remembered salts and verifies the frame
+//! before the position, so a WAL restarted and regrown past it is an error and
+//! never a torn or skipped transaction.
+//!
+//! [`PageMap`] folds one contiguous run of one generation into the newest frame of each page.
 
 #![forbid(unsafe_code)]
 

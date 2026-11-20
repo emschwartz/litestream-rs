@@ -1,17 +1,22 @@
 //! The newest committed version of every page across a run of transactions.
 
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use lsr_ltx::{PageNo, PageSize};
 
 use crate::error::PageMapError;
 use crate::frame::{FrameRef, WalOffset};
+use crate::header::Salts;
 use crate::scan::CommittedTx;
 
 /// Which WAL frame holds each page's newest committed version, and the
 /// database size after the last transaction applied.
 ///
-/// Transactions must be applied in WAL order. A transaction that shrinks the
+/// A map holds one contiguous run of one generation: the first transaction
+/// fixes where it starts and which salts it has, and every later one must start
+/// exactly where the map ends and carry the same salts, so `range` never
+/// spans a transaction the map did not see. A transaction that shrinks the
 /// database drops every page above its new size, those of earlier transactions
 /// included, so a page that returns later comes only from a later frame.
 #[derive(Clone, Debug)]
@@ -21,6 +26,7 @@ pub struct PageMap {
     commit: u32,
     start: Option<WalOffset>,
     end: WalOffset,
+    salts: Option<Salts>,
 }
 
 impl PageMap {
@@ -33,13 +39,15 @@ impl PageMap {
             commit: 0,
             start: None,
             end: WalOffset::start(page_size),
+            salts: None,
         }
     }
 
     /// Applies the next transaction.
     ///
     /// # Errors
-    /// [`PageMapError`] when the transaction is for another page size or starts before the end of those applied.
+    /// [`PageMapError`] when the transaction is for another page size or generation, or
+    /// does not start exactly where those applied end.
     pub fn apply(&mut self, tx: &CommittedTx) -> Result<(), PageMapError> {
         if tx.end().next().page_size() != self.page_size {
             return Err(PageMapError::PageSizeMismatch {
@@ -47,12 +55,27 @@ impl PageMap {
                 found: tx.end().next().page_size(),
             });
         }
+        let found = tx.end().salts();
+        if let Some(expected) = self.salts.filter(|expected| *expected != found) {
+            return Err(PageMapError::Generation { expected, found });
+        }
         let first = tx.frames().first().map(FrameRef::offset);
-        if let Some(found) = first.filter(|f| f.frame_index() < self.end.frame_index()) {
-            return Err(PageMapError::NotAfterEnd {
-                end: self.end,
-                found,
-            });
+        if let (Some(_), Some(found)) = (self.start, first) {
+            match found.frame_index().cmp(&self.end.frame_index()) {
+                Ordering::Less => {
+                    return Err(PageMapError::NotAfterEnd {
+                        end: self.end,
+                        found,
+                    });
+                }
+                Ordering::Greater => {
+                    return Err(PageMapError::Gap {
+                        expected: self.end,
+                        found,
+                    });
+                }
+                Ordering::Equal => {}
+            }
         }
         for frame in tx.frames() {
             self.pages.insert(frame.pgno(), *frame);
@@ -65,6 +88,7 @@ impl PageMap {
             top.remove();
         }
         self.start = self.start.or(first);
+        self.salts = Some(found);
         self.end = tx.end().next();
         Ok(())
     }
@@ -94,6 +118,12 @@ impl PageMap {
             self.start.unwrap_or(WalOffset::start(self.page_size)),
             self.end,
         )
+    }
+
+    /// The generation of the applied transactions; `None` before any.
+    #[must_use]
+    pub const fn salts(&self) -> Option<Salts> {
+        self.salts
     }
 
     /// The page size of the WAL this map describes.

@@ -102,29 +102,48 @@ impl fmt::Display for WalOffset {
 /// The end of the committed WAL: where SQLite's wal-index says the last
 /// commit ends.
 ///
-/// Only construct it from the wal-index `mxFrame` read under the read lock.
-/// Frames below it are guaranteed committed, so a bad one there is corruption
-/// and never the end of the WAL.
+/// Only construct it from the wal-index header read under the read lock, and
+/// take `mxFrame` and the salts (`aSalt`) from that one read: the number means
+/// nothing without the generation it counts frames of. Frames below it are
+/// guaranteed committed, so a bad one there is corruption and never the end of
+/// the WAL.
+///
+/// A connection holding read mark 0 (a fully backfilled WAL) does not stop
+/// SQLite restarting the log under it, so its `mxFrame` may belong to a
+/// generation the file no longer holds. Such a reader has no committed end to
+/// give; do not build one from the stale number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct CommittedEnd(WalOffset);
+pub struct CommittedEnd {
+    offset: WalOffset,
+    salts: Salts,
+}
 
 impl CommittedEnd {
-    /// The end after `mx_frame` frames; zero means an empty WAL.
+    /// The end after `mx_frame` frames of the generation `salts`; zero frames means an empty WAL.
     #[must_use]
-    pub const fn from_frame_count(mx_frame: u32, page_size: PageSize) -> Self {
-        Self(WalOffset::from_frame_index(mx_frame, page_size))
+    pub const fn new(mx_frame: u32, salts: Salts, page_size: PageSize) -> Self {
+        Self {
+            offset: WalOffset::from_frame_index(mx_frame, page_size),
+            salts,
+        }
     }
 
     /// The offset of the end.
     #[must_use]
     pub const fn offset(self) -> WalOffset {
-        self.0
+        self.offset
     }
 
     /// The `mxFrame` this was built from.
     #[must_use]
     pub const fn frame_count(self) -> u32 {
-        self.0.frame_index()
+        self.offset.frame_index()
+    }
+
+    /// The generation the frame count belongs to.
+    #[must_use]
+    pub const fn salts(self) -> Salts {
+        self.salts
     }
 }
 
@@ -272,8 +291,9 @@ mod tests {
 
     #[test]
     fn committed_end_counts_frames() {
-        let end = CommittedEnd::from_frame_count(4, size(4096));
+        let end = CommittedEnd::new(4, Salts { salt1: 7, salt2: 8 }, size(4096));
         assert_eq!(end.frame_count(), 4);
+        assert_eq!(end.salts(), Salts { salt1: 7, salt2: 8 });
         assert_eq!(end.offset().get(), 32 + 4 * 4120);
     }
 }

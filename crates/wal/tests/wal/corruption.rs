@@ -5,7 +5,7 @@ use std::io::Cursor;
 use lsr_wal::{CommittedEnd, ScanLimit, TxOutcome, WalError, WalReader};
 use proptest::prelude::*;
 
-use crate::common::{Wal, scan, scan_from, size};
+use crate::common::{Wal, open, scan, scan_from, size};
 
 const PS: u32 = 512;
 
@@ -19,7 +19,11 @@ fn baseline() -> Wal {
 
 fn committed_end(wal: &Wal) -> CommittedEnd {
     let frames = (wal.bytes.len() - 32) / wal.frame_len();
-    CommittedEnd::from_frame_count(u32::try_from(frames).unwrap(), size(PS))
+    CommittedEnd::new(
+        u32::try_from(frames).unwrap(),
+        open(&wal.bytes).header().salts(),
+        size(PS),
+    )
 }
 
 /// The scan result under a limit, flattened: `None` when the WAL does not even open.
@@ -102,7 +106,7 @@ proptest! {
         let mut bytes = Wal::new(ps, false, (5, 6)).bytes;
         bytes.extend(tail);
         let mut reader = WalReader::open(Cursor::new(bytes)).unwrap();
-        let end = ScanLimit::Committed(CommittedEnd::from_frame_count(frames, size(ps)));
+        let end = ScanLimit::Committed(CommittedEnd::new(frames, reader.header().salts(), size(ps)));
         for limit in [ScanLimit::FirstInvalidFrame, end] {
             let cursor = reader.cursor_at_start();
             match reader.next_tx(&cursor, limit) {
