@@ -1,4 +1,5 @@
-//! Writes the seed corpus from the Go-written fixtures. Ignored: it changes
+//! Writes the seed corpus from the Go-written fixtures, and the `wal` seeds
+//! from hand-built and SQLite-written WALs. Ignored: it changes
 //! the tree. Run it with `just fuzz-seed`; `cargo fuzz cmin` then minimises.
 
 #![expect(
@@ -179,5 +180,129 @@ fn plan_seeds(files: &[(String, u8, u64, u64)]) {
             input.extend(&records);
             put("plan", &format!("seed-{n:03}-{kind}-{value}"), &input);
         }
+    }
+}
+
+/// The `wal` target's parameter bytes: mode, a cut near the end, a committed
+/// end, a boundary pick, a resume point and a page byte to flip.
+#[cfg(test)]
+fn wal_params(mode: u8, variant: u8) -> [u8; lsr_fuzzing::WAL_PREFIX_LEN] {
+    let v = variant;
+    [
+        mode,
+        0xff,
+        0xf0_u8.wrapping_sub(v),
+        0,
+        v.wrapping_mul(3),
+        v,
+        0,
+        v.wrapping_add(1),
+        v,
+        0,
+        v.wrapping_mul(17),
+        0x80 >> (v % 8),
+    ]
+}
+
+#[cfg(test)]
+fn put_wal(name: &str, file: &[u8]) {
+    for (variant, mode) in [(0_u8, 0_u8), (1, lsr_fuzzing::WAL_RECHAIN)] {
+        let mut input = wal_params(mode, variant).to_vec();
+        input.extend(file);
+        lsr_fuzzing::wal(&input);
+        put("wal", &format!("{name}-{variant}"), &input);
+    }
+}
+
+/// Hand-built WALs: several transactions, a shrink, an uncommitted tail, a
+/// restarted generation with the old one's frames behind it, both byte orders.
+#[cfg(test)]
+fn built_wals() -> Vec<(&'static str, Vec<u8>)> {
+    use lsr_ltx::{PageNo, PageSize};
+    use lsr_wal::Salts;
+    use lsr_wal::testing::WalBuilder;
+
+    let salts = Salts {
+        salt1: 3,
+        salt2: 0x5eed_0001,
+    };
+    let pgnos = |raw: &[u32], ps: PageSize| -> Vec<PageNo> {
+        raw.iter().map(|n| PageNo::new(*n, ps).unwrap()).collect()
+    };
+    let mut out = Vec::new();
+    for (name, bytes, big) in [
+        ("built-512", 512, false),
+        ("built-1024-be", 1024, true),
+        ("built-4096", 4096, false),
+    ] {
+        let ps = PageSize::new(bytes).unwrap();
+        let mut wal = WalBuilder::new(ps, big, salts);
+        wal.tx(&pgnos(&[1, 2, 3], ps), 3, 1);
+        wal.tx(&pgnos(&[2, 4], ps), 4, 2);
+        wal.tx(&pgnos(&[1], ps), 2, 3);
+        wal.frame(PageNo::new(5, ps).unwrap(), 0, 4);
+        out.push((name, wal.into_bytes()));
+    }
+    let ps = PageSize::new(512).unwrap();
+    out.push((
+        "built-empty",
+        WalBuilder::new(ps, false, salts).into_bytes(),
+    ));
+    let old = Salts {
+        salt1: 2,
+        salt2: 0x01d0_0001,
+    };
+    let mut stale = WalBuilder::new(ps, false, old);
+    stale.tx(&pgnos(&[1, 2, 3, 4], ps), 4, 9);
+    let mut fresh = WalBuilder::new(ps, false, salts);
+    fresh.tx(&pgnos(&[2], ps), 4, 5);
+    let frame_len = fresh.frame_len();
+    let mut restarted = fresh.into_bytes();
+    restarted.extend(&stale.into_bytes()[32 + frame_len..]);
+    out.push(("built-restarted", restarted));
+    out
+}
+
+/// WALs written by SQLite: small workloads at small page sizes, so each stays
+/// a few dozen frames. Blob contents are fixed, so the seeds are reproducible.
+#[cfg(test)]
+fn sqlite_wals() -> Vec<(String, Vec<u8>)> {
+    let mut out = Vec::new();
+    for ps in [512_u32, 1024] {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("seed.db");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(&format!(
+            "PRAGMA page_size = {ps}; PRAGMA auto_vacuum = INCREMENTAL;
+             PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;
+             CREATE TABLE t (id INTEGER PRIMARY KEY, v BLOB);
+             INSERT INTO t (v) VALUES (zeroblob(300)), (x'0102030405060708');
+             UPDATE t SET v = x'ffee' WHERE id = 1;
+             BEGIN; INSERT INTO t (v) VALUES (zeroblob(900)); COMMIT;
+             DELETE FROM t WHERE id = 3;
+             PRAGMA incremental_vacuum;"
+        ))
+        .unwrap();
+        let wal = fs::read(dir.path().join("seed.db-wal")).unwrap();
+        assert!(
+            wal.len() <= 24 * 1024,
+            "the {ps} WAL is {} bytes",
+            wal.len()
+        );
+        out.push((format!("sqlite-{ps}"), wal));
+        drop(conn);
+    }
+    out
+}
+
+#[test]
+#[ignore = "writes fuzz/corpus; run through just fuzz-seed"]
+#[cfg(test)]
+fn write_wal_seeds() {
+    for (name, file) in built_wals() {
+        put_wal(name, &file);
+    }
+    for (name, file) in sqlite_wals() {
+        put_wal(&name, &file);
     }
 }

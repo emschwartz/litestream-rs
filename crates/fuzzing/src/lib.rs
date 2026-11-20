@@ -19,9 +19,11 @@ mod decode;
 mod index;
 mod key;
 mod plan;
+mod wal;
 
 pub use bytes::violation;
 pub use decode::decode;
 pub use index::{HEADER_SPEC_LEN, header_spec, index};
 pub use key::key;
 pub use plan::{PLAN_RECORD_LEN, plan, plan_input};
+pub use wal::{WAL_BIG_ENDIAN, WAL_PREFIX_LEN, WAL_RECHAIN, WAL_REWRITE_HEADER, wal};

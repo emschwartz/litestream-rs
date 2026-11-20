@@ -56,3 +56,9 @@ fn plan_corpus_replays() {
 fn key_corpus_replays() {
     replay("key", lsr_fuzzing::key);
 }
+
+#[test]
+#[cfg(test)]
+fn wal_corpus_replays() {
+    replay("wal", lsr_fuzzing::wal);
+}

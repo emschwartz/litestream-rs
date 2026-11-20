@@ -6,7 +6,9 @@ counts as passing. It has not been run yet: a cloud session is too short for it.
 ## Targets
 
 Each target is a one-line `fuzz/fuzz_targets/<target>.rs` calling into `crates/fuzzing`, and
-`crates/fuzzing/tests/corpus.rs` replays the committed corpus in `just check`.
+`crates/fuzzing/tests/corpus.rs` replays the committed corpus in `just check`. `just fuzz-seed`
+writes the seeds: the LTX targets' from the Go-written fixtures, the `wal` target's from WALs built
+with `lsr_wal::testing::WalBuilder` and a few written by SQLite.
 
 | Target | What must hold |
 | --- | --- |
@@ -14,8 +16,7 @@ Each target is a one-line `fuzz/fuzz_targets/<target>.rs` calling into `crates/f
 | `index` | `PageIndex::decode` and `decode_frame` on fuzz bytes: no panic, no allocation beyond one page and one frame |
 | `plan` | an inventory and a target from fuzz bytes: a plan starts at TXID 1, is contiguous and ends exactly at the target; the lazy planner agrees |
 | `key` | `FileKey` and `Txid` parsing: accepted input prints back byte for byte |
-
-PLAN.md section 4 also names the WAL parser (`lsr-wal`), which has no target yet.
+| `wal` | the SQLite WAL reader (`lsr-wal`) on any bytes, at a page size and byte order the input may pick, with frame checksums optionally re-chained so mutated fields get past them: `WalHeader::decode` and `WalReader::open` agree; no panic, no scan step without progress, no byte read twice by one scan; a truncated copy under `FirstInvalidFrame` gives exactly the whole scan's transactions that end before the cut; a committed end gives exactly those before it, reads nothing at or past it, ends clean at a boundary and fails anywhere else; an end or a resume of another generation is `Restarted`; `resume` at every boundary returns the scan's own cursor and scans on to the same rest; `PageMap` equals a plain model and never holds a page above the last commit; every scanned page reads back to its digest, and after one page byte flips that page is `ChangedSinceScan`, a new scan stops right before its transaction and a committed end past it is `CorruptBelowCommitted` at its frame |
 
 ## Setup
 
@@ -33,11 +34,11 @@ lockfile should be committed.
 
 ## The 24-hour run
 
-One process per target, each on its own core (`just fuzz` caps each at 2 GiB RSS, so four need
-about 8 GiB free). Run it from the main checkout on a machine that stays up:
+Five processes, one per target, each on its own core (`just fuzz` caps each at 2 GiB RSS, so five need
+about 10 GiB free). Run it from the main checkout on a machine that stays up:
 
 ```bash
-mkdir -p target/fuzz-logs && for t in decode index plan key; do nohup just fuzz "$t" 86400 > "target/fuzz-logs/$t.log" 2>&1 & done
+mkdir -p target/fuzz-logs && for t in decode index plan key wal; do nohup just fuzz "$t" 86400 > "target/fuzz-logs/$t.log" 2>&1 & done
 ```
 
 A target passes when its log ends with `Done <n> runs in 86400 second(s)` and the `stat::` lines,
@@ -50,6 +51,8 @@ target's commit, run count and `stat::new_units_added` in the pull request that 
   A crash in `crates/ltx` is fixed at the root, with the input as a named regression test in its own
   commit (phase 1 task 7). A crash anywhere else is reported with its reproducer first.
 - The run writes new inputs into `fuzz/corpus/<target>/`. Minimise each target with
-  `just fuzz-cmin <target>` before committing any of them. The committed corpus is about 0.8 MiB
-  today and stays under 2 MiB in total (phase 1 task 7); drop the new inputs rather than go over.
+  `just fuzz-cmin <target>` before committing any of them; minimise `wal` with
+  `just fuzz-cmin wal -max_len=16384`, which keeps every coverage edge at about half the bytes (its
+  inputs are whole WALs). The committed corpus is about 1.3 MiB today (0.5 MiB of it `wal`) and
+  stays under 2 MiB in total (phase 1 task 7); drop the new inputs rather than go over.
 - Run `just check` afterwards: the corpus replay test reads every committed input.

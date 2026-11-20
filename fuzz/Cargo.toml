@@ -42,3 +42,10 @@ path = "fuzz_targets/key.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "wal"
+path = "fuzz_targets/wal.rs"
+test = false
+doc = false
+bench = false
