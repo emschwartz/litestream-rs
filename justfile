@@ -2,7 +2,7 @@
 default: check
 
 # The land gate: format, lints, tests. A branch lands only when this is green.
-check: fmt-check clippy test doctest features
+check: fmt-check clippy test doctest features ledger-fresh
 
 fmt-check:
     cargo fmt --all -- --check
@@ -150,6 +150,19 @@ tigris-restore:
 # Pinned upstream sources, read-only reference for the port and input to the compat harness.
 upstream:
     ./scripts/fetch-upstream.sh
+
+# The committed list of Rust tests the ledger checks against matches the workspace, so a
+# renamed or deleted counterpart fails the gate instead of passing on a stale list. The list is
+# generated on Linux (some tests are Linux-only), so on another OS this step reports a difference.
+ledger-fresh:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    fresh="$(cargo nextest list --workspace --all-features --locked --run-ignored all --message-format oneline)"
+    if ! diff -q <(printf '%s\n' "$fresh") docs/ledger/rust-tests.txt >/dev/null; then
+        diff <(printf '%s\n' "$fresh") docs/ledger/rust-tests.txt | head -20 >&2 || true
+        echo "ledger-fresh: docs/ledger/rust-tests.txt is stale; run 'just ledger' (or regenerate it with the nextest list line there) and check docs/ledger.toml" >&2
+        exit 1
+    fi
 
 # Regenerate the upstream-test ledger's inputs in docs/ledger/: the upstream test names from
 # the pinned clones (`just upstream` first) and every Rust test nextest lists, ignored ones
