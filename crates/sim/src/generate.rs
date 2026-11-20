@@ -122,9 +122,8 @@ pub struct Weights {
     pub request_snapshot: u32,
     /// [`Op::Restore`].
     pub restore: u32,
-    /// Whether a vacuum may change the page size. Off by default: maintenance
-    /// halts on a chain that spans a page-size change (`review_vacuum_resize`
-    /// in `tests/fixed_seeds.rs`).
+    /// Whether a vacuum may change the page size. Maintenance once halted on a
+    /// chain that spans a page-size change; the recover fixes on main cured it.
     pub vacuum_resizes: bool,
 }
 
@@ -147,7 +146,7 @@ impl Default for Weights {
             shutdown: 1,
             request_snapshot: 1,
             restore: 2,
-            vacuum_resizes: false,
+            vacuum_resizes: true,
         }
     }
 }

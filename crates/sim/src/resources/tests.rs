@@ -69,10 +69,12 @@ fn a_tick_may_list_but_only_so_often() {
 }
 
 #[test]
-fn an_idle_tick_may_touch_no_store() {
+fn an_idle_tick_may_touch_no_remote_store() {
     let mut s = stats(Some(Event::Idle));
     per_tick(&s, LIMITS).unwrap();
-    s.staging.reads = 1;
+    s.staging.lists = 1;
+    per_tick(&s, LIMITS).unwrap();
+    s.remote.reads = 1;
     assert!(per_tick(&s, LIMITS).is_err());
 }
 

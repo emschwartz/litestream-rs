@@ -34,7 +34,7 @@ const DRAIN_TICKS: u32 = 10_000;
 const SETTLE_TICKS: u32 = 200;
 /// What a tick that reports Idle but asks for another at once costs in virtual
 /// time: the driver's loop is not free, and the retry waits it spins through
-/// last seconds (gap 4: `Idle` with `Next::Now` during a backoff).
+/// last seconds (a retry wait answers `Idle` with `Next::Now`).
 const SPIN_STEP: Duration = Duration::from_millis(50);
 /// Idle ticks the idle property watches.
 const IDLE_TICKS: u32 = 100;
@@ -57,6 +57,9 @@ pub struct Failure {
     /// The operation being applied; the history's length for a failure in the
     /// final drain or check.
     pub step: u32,
+    /// The history length that reproduces the failure: one past the failing
+    /// step, or the whole history for a failure in the final drain or check.
+    pub steps: u32,
     /// What broke.
     pub violation: Violation,
     /// The operations and ticks up to the failure, when the run was asked to
@@ -81,7 +84,7 @@ impl Failure {
 
 impl fmt::Display for Failure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.message(self.step.saturating_add(1)))
+        f.write_str(&self.message(self.steps))
     }
 }
 
@@ -161,6 +164,8 @@ struct Runner {
     max_tx_pages: u64,
     report: RunReport,
     trace: bool,
+    /// The last tick waits on a WAL change alone: no timer is pending.
+    quiet: bool,
 }
 
 fn below(rng: &SeededEntropy, upper: u64) -> u64 {
@@ -189,6 +194,7 @@ impl Runner {
             max_tx_pages: 1,
             report: RunReport::default(),
             trace: false,
+            quiet: false,
         }
     }
 
@@ -314,6 +320,7 @@ impl Runner {
                     self.report.spins = self.report.spins.saturating_add(1);
                     self.w.clock.advance(SPIN_STEP);
                 }
+                self.quiet = matches!(next, Next::OnWalChange);
                 if self.unwatched && !matches!(next, Next::Now) {
                     self.unwatched = false;
                 } else {
@@ -601,7 +608,8 @@ impl Runner {
                     "the engine halted while idle: {cause:?}"
                 )));
             }
-            if matches!(stats.event, Some(Event::Idle)) && self.report.spins == spins {
+            if matches!(stats.event, Some(Event::Idle)) && self.report.spins == spins && self.quiet
+            {
                 settled = true;
                 break;
             }
@@ -668,6 +676,7 @@ pub fn run_with(
         let fail = |violation| Failure {
             seed,
             step,
+            steps: step.saturating_add(1),
             violation,
             trace: Vec::new(),
         };
@@ -690,6 +699,7 @@ pub fn run_with(
     runner.finish().map_err(|violation| Failure {
         seed,
         step: steps,
+        steps,
         violation,
         trace: std::mem::take(&mut runner.report.trace),
     })?;

@@ -9,7 +9,7 @@
 mod soak {
     use std::time::{Duration, Instant};
 
-    use lsr_sim::{Bound, Seed, Violation, Weights, replay_line, run};
+    use lsr_sim::{Seed, Weights, replay_line, run};
 
     const STEPS: u32 = 300;
 
@@ -35,17 +35,10 @@ mod soak {
             println!("{}", replay_line(seed, Some(STEPS)));
             if let Err(failure) = run(seed, STEPS, &Weights::default()) {
                 println!("{failure}");
-                // Gap 4 (staged L0 files never pruned, fixed on branch
-                // `actor-followup`) fails about a quarter of all seeds; it would
-                // drown every other finding until it lands.
-                let gap_4 = matches!(
-                    failure.violation,
-                    Violation::ResourceBound {
-                        what: Bound::IdleFiles,
-                        ..
-                    }
-                );
-                if !gap_4 {
+                // Finding 2 (`review_torn_staged_file`, Task 6i) fails about 3% of
+                // seeds; it would drown every other finding until it is fixed.
+                let known = failure.violation.to_string().contains("StagedCorrupt");
+                if !known {
                     failed.push(n);
                 }
             }

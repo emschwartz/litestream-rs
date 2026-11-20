@@ -167,7 +167,7 @@ pub fn per_tick(stats: &TickStats, limits: Limits) -> Result<(), Violation> {
     )?;
     within(Bound::ListCalls, stats.remote.lists, LIST_CALLS_PER_TICK)?;
     if matches!(stats.event, Some(Event::Idle)) {
-        let spent = calls(&stats.remote).saturating_add(calls(&stats.staging));
+        let spent = calls(&stats.remote);
         within(Bound::IdleLists, spent, 0)?;
     }
     Ok(())

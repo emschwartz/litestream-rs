@@ -35,7 +35,7 @@ mod replay {
                 for line in &failure.trace {
                     println!("{line}");
                 }
-                panic!("{}", failure.message(failure.step.saturating_add(1)));
+                panic!("{}", failure.message(failure.steps));
             }
         }
     }
