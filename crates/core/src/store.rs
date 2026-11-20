@@ -185,6 +185,14 @@ pub enum CorruptCause {
     /// The object's timestamp is outside what a header can hold.
     #[error("timestamp out of range")]
     TimestampOutOfRange,
+    /// The store acknowledged a commit of a different size than was written.
+    #[error("committed {stored} bytes after {wrote} were written")]
+    CommitSizeMismatch {
+        /// Bytes the caller wrote.
+        wrote: u64,
+        /// Bytes the store reports holding.
+        stored: u64,
+    },
 }
 
 /// Everything a store can do wrong, in the classes that need different
