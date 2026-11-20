@@ -62,4 +62,5 @@ pub use pages::{PageDigest, hash_pages, integrity_check};
 pub use replica::{Listing, ReplicaFile, list, newest_l0, parse_rel, rel_of};
 pub use replicator::{Replicator, wait_until};
 pub use rsrestore::{Staged, chain_files, copy_tree, restore_replica, stage};
-pub use scenario::Scenario;
+pub use scenario::{Scenario, Step};
+pub use workload::Workload;

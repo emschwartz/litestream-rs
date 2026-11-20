@@ -110,32 +110,23 @@ test-s3: minio-up
         echo "test-s3: MinIO is not running; S3 tests skipped"
     fi
 
-# The store, the conformance suite and the compat restore against the real
-# Tigris bucket of task 8t. Never part of check or CI: it needs credentials (a
-# file outside the repo, or AWS_* variables) and spends real requests (docs/spikes.md, Task 8t).
-# Everything it writes sits under one run prefix, which the last step deletes.
+# The store and the conformance suite against the real Tigris bucket of task 8t.
+# Never part of check or CI: it needs credentials (a file outside the repo, or
+# AWS_* variables) and spends real requests (docs/spikes.md, Task 8t).
+# Everything it writes sits under one run prefix, deleted afterwards with the aws CLI.
 test-tigris:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    # Credentials: the file when it exists, else the AWS_* variables already set
-    # (a cloud session's environment carries them that way).
-    env_file="${LSR_TIGRIS_ENV:-$HOME/.config/litestream-rs/tigris.env}"
-    if [ -f "$env_file" ]; then
-        set -a
-        . "$env_file"
-        set +a
-    elif [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ] || [ -z "${AWS_ENDPOINT_URL_S3:-}" ]; then
-        echo "test-tigris: no $env_file and no AWS_* credentials set; nothing run" >&2
-        exit 1
-    fi
-    export LSR_TIGRIS_BUCKET="${LSR_TIGRIS_BUCKET:-litestream-rs-test}"
-    export LSR_TIGRIS_PREFIX="8t/$(date -u +%F)-$(openssl rand -hex 4)"
-    echo "test-tigris: bucket $LSR_TIGRIS_BUCKET prefix $LSR_TIGRIS_PREFIX" >&2
-    status=0
     # LSR_S3_TRANSPORT=reqwest runs the same tests over the reqwest client.
-    cargo nextest run -p lsr-store-s3 --features reqwest --test tigris --run-ignored only --no-capture --locked --no-fail-fast || status=$?
-    echo "test-tigris: delete $LSR_TIGRIS_BUCKET/$LSR_TIGRIS_PREFIX/ with the aws CLI when done (see docs/spikes.md)" >&2
-    exit $status
+    ./scripts/tigris.sh cargo nextest run -p lsr-store-s3 --features reqwest --test tigris --run-ignored only --no-capture --locked --no-fail-fast
+
+# Task 8t item 10: Go v0.5.18 replicates the compat workload straight to Tigris
+# (a few hundred files, levels 0 to 3 and 9), then `lsr verify`, and `lsr restore`
+# and Go's restore at the same targets compared on pages. A few minutes and a few
+# thousand requests; the test deletes its run prefix, failed or not. Go's AWS SDK
+# refuses AWS_CA_BUNDLE with litestream's own HTTP client, so it is unset; Go reads
+# SSL_CERT_FILE for the same roots. Release build, so the elapsed times mean something.
+tigris-restore:
+    ./scripts/build-go-litestream.sh v0.5.18
+    env -u AWS_CA_BUNDLE ./scripts/tigris.sh cargo nextest run --release -p lsr-cli --test tigris --run-ignored only --no-capture --locked
 
 # Pinned upstream sources, read-only reference for the port and input to the compat harness.
 upstream:

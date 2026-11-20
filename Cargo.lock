@@ -835,6 +835,7 @@ dependencies = [
  "lsr-ltx",
  "lsr-store-fs",
  "lsr-store-s3",
+ "rusqlite",
  "serde_json",
  "tempfile",
  "thiserror",

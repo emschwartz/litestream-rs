@@ -24,6 +24,8 @@ lsr-compat.workspace = true
 lsr-core = { workspace = true, features = ["testing"] }
 # FakeS3 drives the S3 path in-process; it sits behind the feature.
 lsr-store-s3 = { workspace = true, features = ["testing"] }
+# The Tigris run (tests/tigris.rs) checkpoints the live database Go replicated.
+rusqlite.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 
