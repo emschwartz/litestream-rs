@@ -34,7 +34,7 @@ The constraints of the phase 1 and phase 2 plans apply unchanged. In addition:
 5. A handover (Go to Rust or Rust to Go) that snapshots when the WAL was intact, or continues when it was not.
 
 ## Task order
-0 (spikes) first; its answers can change task 1. Then 1 (the SQLite backend) and 3 (the page checksum table, pure core) in parallel. 4 (the real-SQLite fault suite) after 1. 5 (recovery from the bucket) after 3. 6 (actor thread and public API) after 1 and 5. 7 (compat in all four directions, the alternation test) after 6. 8 (the upstream-test ledger) can start any time and closes last. 9 (the 72-hour Tigris soak) runs on the machine with the credentials, after 7.
+0 (spikes) first; its answers can change task 1. Then 1 (the SQLite backend), 3 (the page checksum table, pure core) and 10 (degraded states, pure core, after `core`'s mutation triage closes) in parallel. 4 (the real-SQLite fault suite) after 1. 5 (recovery from the bucket) after 3. 6 (actor thread and public API) after 1, 5 and 10. 7 (compat in all four directions, the alternation test) after 6. 8 (the upstream-test ledger) can start any time and closes last. 9 (the 72-hour Tigris soak) runs on the machine with the credentials, after 7.
 
 ## Open decisions (the owner's)
 
@@ -48,7 +48,7 @@ None open. O1 to O3 are ruled below (P0, P5, P6). v1 copies Go unless a better b
 - **P3, TRUNCATE needs the host's word.** `decide()` takes `Readers { Idle, Pinned, Unknown }` from the host's signal (task 6); TRUNCATE runs only on `Idle`. `Unknown` (no signal given) behaves as `Pinned`, so a host that says nothing never sees a TRUNCATE. PASSIVE is unchanged.
 - **P5 (O2, ruled by the owner 2026-11-20): trust on first use, seeded from the staged level 0 files**, the option closest to Go (which checks no database page at all, `db.go:1562`). After a boot that continues (`Continue` or `WalRestarted`), the pages of the staged files are recorded newest-wins; boot already verifies those files and computes each page's checksum, so the seed costs no GET and works the same on Go-written files after a handover. Any other page is recorded on its first read and checked on every read after. The table is cleared mid-run on every snapshot cause except `CheckpointBoundary` and `OperatorRequested`, and on a page-size change (after `LocalRewound` it holds digests of frames a power loss removed). With P1 this ships what Go ships, plus an alert when a recorded page changes. Not chosen, tracked in #10: seeding from the replica (a verify at boot), and persisting the table in the meta directory. Reading every page at boot is wrong, not just slow: after a mid-WAL `Continue` it records the old database copy of a page whose newer copy is still in the WAL, and the next checkpoint's boundary snapshot then mismatches.
 - **P6 (O3, ruled by the owner 2026-11-20): no local position file in v1.** It would be a file Go does not speak (D6). Boot keeps phase 2's whole-tip compare (V3), which already checks more than Go; the residue it misses (a rewind of two or more transactions that regrows a byte-identical tip) is gap G1 of `docs/proposals/beyond-go.md`, whose single local state file would close it.
-- **Halts.** Phase 2 halts on eleven causes, and any halt stops every lane. A review against the owner's rule (keep backing up unless continuing would damage existing backups; when degraded, alert and pin retention) proposes degraded states for most of them and a halt only for a second writer on the prefix. It changes phase 2 behaviour, PLAN.md goal 1 and an AGENTS.md rule, so it is its own proposal, not part of this plan.
+- **P7 (ruled by the owner 2026-11-20, D7): keep trying; stop only for a second writer; every response configurable.** Phase 2 stops every lane on eleven causes. They become degraded states that retry with Go's capped backoff (5 minutes), scoped to the lane that failed, except a second writer on the prefix (`ForeignWriter`), which stops uploads and maintenance by default. The responses are config (task 10). P1's degraded state keeps its retention pin. A second review (Fable, recorded with the ruling) found two things the default must not do: write into a fresh prefix (restore and the Go VFS read the configured one, so Latest there would be stale) and snapshot from the database file alone after WAL corruption (a state that never existed). Both are refused in task 10.
 - **P4, polling is the change detector.** One `committed()` read per second when idle (PLAN phase 3). The wal hook is a later optimisation and needs its own measurement.
 
 ---
@@ -162,6 +162,19 @@ The suite is the contract for any backend: it holds every case of `crates/compat
 ### Task 9: the 72-hour Tigris soak (run, not a branch; needs the credentials machine)
 
 A synthetic writer (the compat workload at a steady rate, with VACUUMs and outside checkpoints) through `lsr replicate` against the task 8t bucket under a run prefix, for 72 hours. Every hour, a restore at a random acknowledged txid and at Latest is compared with the recorded page hashes. The resource properties (PLAN section 4) are read from `health` and the store's counters. A `just soak-tigris <hours>` recipe; results go into `docs/spikes.md` under task 8t's section, with the open items listed there (`encoding-type=url` listings, the incomplete-upload lifecycle rule, load shedding).
+
+### Task 10: degraded states and configurable responses (branch `degraded`; before task 6)
+
+**Files:** `crates/core/src/fault.rs` (`HaltCause` becomes the stop cause; a `Degraded` cause beside it), `crates/core/src/actor.rs` and `actor/state.rs` (lanes), `crates/core/src/retry.rs` (the cap), the simulator's fault scenarios and resource properties, `crates/core/src/maintain/retain.rs` (the pin).
+
+**Produces:**
+- `Responses`, a config struct with one named field per persistent cause (never a map, so a new cause breaks the build): `credentials`, `store_refused`, `remote_corrupt`, `remote_regressed`, `wal_corrupt`, `wal_truncated`, `wal_unlinked`, `page_size_changed`, `database_page_mismatch`, `bug`, `foreign_writer`. Each is `Response { KeepTrying, Stop }`. `Responses::GO_LIKE` is the default: every field `KeepTrying` except `foreign_writer: Stop`. `Responses::STRICT` stops on all of them (phase 2's behaviour).
+- Lanes: a persistent failure in one lane (sync, upload, prune, maintenance) degrades that lane only. A failed retention delete no longer stops syncing. `Tick` reports `Degraded { cause, lane, since }`, and the actor keeps ticking.
+- Backoff for a degraded lane: doubling up to `MAX_BACKOFF`, 5 minutes as Go's `DefaultSyncBackoffMax`, never less than the store's `Retry-After`.
+- Retention while any lane is degraded: pinned at the last restore point before the degradation and its chain; files after it are retained normally.
+- What `KeepTrying` never does, whatever the config: write to a different prefix; ship a frame that failed its checksum; snapshot from the database file while the WAL is corrupt below the committed end.
+
+**Tests:** the simulator's `every_fault_has_a_scenario_or_a_reason` gains each response: under `GO_LIKE` every scenario ends with the oracle holding and the lane degraded, then recovered once the fault clears; under `STRICT` it ends stopped with the cause. A failed delete leaves sync and upload running. `foreign_writer` under `GO_LIKE` stops uploads and maintenance and keeps the health cause. The backoff never exceeds the cap. Retention never deletes the pinned restore point while degraded.
 
 ---
 
