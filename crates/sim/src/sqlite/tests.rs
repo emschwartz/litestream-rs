@@ -361,3 +361,25 @@ fn forced_salts_replace_every_random_draw_but_not_the_increment() {
         "a restart keeps salt1 + 1 and takes salt2"
     );
 }
+
+#[test]
+fn a_page_rewritten_above_the_safe_frame_is_not_copied() {
+    let db = sim();
+    db.commit(&tx(&[1, 2], 1), 4).unwrap();
+    assert!(db.our_reader_begin());
+    db.commit(&tx(&[2], 2), 4).unwrap();
+    let before = db.db_file();
+    let numbers = db.stranger_checkpoint(StrangerMode::Passive).unwrap();
+    assert_eq!(numbers.checkpointed, 2, "backfilled up to our mark");
+    let after = db.db_file();
+    assert_eq!(
+        after[..512],
+        vec![1; 512][..],
+        "page 1's newest frame is below the mark"
+    );
+    assert_eq!(
+        after[512..1024],
+        before[512..1024],
+        "page 2's newest frame is above it, so SQLite leaves the page alone"
+    );
+}

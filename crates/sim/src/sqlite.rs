@@ -7,8 +7,9 @@
 //! `walCheckpoint`, `sqlite3WalCheckpoint`, `walRestartLog`, `walFrames`) and are
 //! checked against it by `tests/sqlite_rules.rs`:
 //!
-//! - **R1, backfill:** a checkpoint copies frames up to the smallest mark above 0
-//!   held by any reader, and nothing while a reader holds mark 0 with
+//! - **R1, backfill:** a checkpoint copies each page's newest frame when that frame is at
+//!   or below the smallest mark above 0 held by any reader (a page rewritten above
+//!   it is not copied at all), and nothing while a reader holds mark 0 with
 //!   `nBackfill < mxFrame`. RESTART and TRUNCATE are busy unless everything is
 //!   backfilled and no reader holds a mark above 0; they need the write lock and
 //!   degrade to PASSIVE, busy, when another connection holds it.
@@ -471,11 +472,19 @@ impl State {
         newest
     }
 
-    /// Copies frames `(backfilled, upto]` into the database file.
+    /// Copies into the database file the pages whose newest frame is in `(backfilled, upto]`.
     fn copy_frames(&mut self, upto: u32) {
         self.durable.clone_from(&self.wal);
-        for (pgno, index) in self.newest(self.index.backfilled, upto) {
-            if pgno == 0 || pgno > self.index.db_size {
+        // SQLite walks every page's newest frame in the whole WAL and skips the ones past the
+        // safe frame, so a page rewritten above it is not copied at all (its older version stays
+        // out of the database file).
+        for (pgno, index) in self.newest(0, self.index.mx_frame) {
+            let frame = index.saturating_add(1);
+            if frame <= self.index.backfilled
+                || frame > upto
+                || pgno == 0
+                || pgno > self.index.db_size
+            {
                 continue;
             }
             let data = self.frame_page(index);
