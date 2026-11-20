@@ -14,7 +14,9 @@
 //!
 //! The Rust side of the matrix is [`rsrestore`]: it restores a fixture replica with
 //! `lsr-core`'s executor over `FsStore` and `FileSink`, so tests compare Rust's pages with
-//! the pages Go wrote into the manifest.
+//! the pages Go wrote into the manifest. The live half (`just compat`) re-encodes every
+//! fixture file with `lsr_ltx::Encoder` and has the pinned Go versions restore and
+//! `ltx.Decoder.Verify` it (`go/verify`).
 
 mod binaries;
 mod error;
@@ -30,7 +32,9 @@ mod workload;
 pub use binaries::{GoVersion, go_binary, workspace_root};
 pub use error::CompatError;
 pub use generate::generate;
-pub use golive::{GoRestore, restore_with_go, rfc3339_millis, write_config};
+pub use golive::{
+    GoRestore, build_verify_helper, go_verify, restore_with_go, rfc3339_millis, write_config,
+};
 pub use manifest::{
     FIXTURE_FORMAT, FileEntry, MANIFEST_FILE, Manifest, Outcome, Target, TargetEntry, all_fixtures,
     fixture_dir, fixtures_root,

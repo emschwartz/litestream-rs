@@ -225,6 +225,39 @@ mod matrix {
         assert!(flipped > 0);
     }
 
+    /// The re-encoded replica holds the same files with the same headers and pages: what the
+    /// live half hands to Go differs from Go's own bytes only in encoding.
+    #[test]
+    fn reencoding_keeps_every_header_and_page() {
+        let read = |path: &std::path::Path| {
+            let mut decoder = ReadDecoder::new(fs::File::open(path).expect("open"));
+            let mut pages = Vec::new();
+            while let Some(event) = decoder.next_event().expect("decode") {
+                if let lsr_ltx::Event::Page { pgno, data } = event {
+                    pages.push((pgno, data.to_vec()));
+                }
+            }
+            (decoder.finish().expect("verified"), pages)
+        };
+        for fixture in all_fixtures().expect("list") {
+            let manifest = Manifest::load(&fixture).expect("load");
+            let staged = stage(&fixture, &manifest).expect("stage");
+            staged.reencode(&manifest).expect("re-encode");
+            for entry in &manifest.files {
+                let (old, old_pages) = read(&Manifest::replica_dir(&fixture).join(&entry.key));
+                let (new, new_pages) = read(&staged.replica().join(&entry.key));
+                assert_eq!(old.header(), new.header(), "{}", entry.key);
+                assert_eq!(
+                    old.trailer().post_apply(),
+                    new.trailer().post_apply(),
+                    "{}",
+                    entry.key
+                );
+                assert_eq!(old_pages, new_pages, "{}", entry.key);
+            }
+        }
+    }
+
     #[test]
     fn txid_zero_is_not_a_target() {
         assert!(Txid::new(0).is_none());

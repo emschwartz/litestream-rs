@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
 
 use rusqlite::Connection;
@@ -81,6 +82,53 @@ pub fn restore_with_go(
     let tail: Vec<&str> = text.lines().rev().take(3).collect();
     Ok(GoRestore::Refused {
         detail: format!("{}: {}", output.status, tail.join(" | ")),
+    })
+}
+
+/// Builds the Go helper `go/verify` (the pinned ltx library's `Decoder.Verify`) into `into`.
+/// Needs the Go toolchain and the ltx module in Go's module cache or network access.
+pub fn build_verify_helper(into: &Path) -> Result<PathBuf, CompatError> {
+    let source = crate::workspace_root()
+        .join("crates")
+        .join("compat")
+        .join("go")
+        .join("verify");
+    let binary = into.join("ltx-verify");
+    let output = Command::new("go")
+        .args(["build", "-trimpath", "-o"])
+        .arg(&binary)
+        .arg(".")
+        .current_dir(&source)
+        .output()
+        .map_err(CompatError::io("go"))?;
+    if output.status.success() {
+        Ok(binary)
+    } else {
+        Err(CompatError::Process {
+            command: format!("go build in {}", source.display()),
+            detail: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
+    }
+}
+
+/// Runs the verify helper over `files`; `Ok(())` when Go's decoder accepted every one,
+/// otherwise the helper's report of which failed and why.
+pub fn go_verify(helper: &Path, files: &[PathBuf]) -> Result<(), CompatError> {
+    let output = Command::new(helper)
+        .args(files)
+        .output()
+        .map_err(CompatError::io(helper))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(CompatError::Process {
+        command: format!("{} ({} files)", helper.display(), files.len()),
+        detail: String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|l| l.starts_with("FAIL"))
+            .take(5)
+            .collect::<Vec<_>>()
+            .join(" | "),
     })
 }
 

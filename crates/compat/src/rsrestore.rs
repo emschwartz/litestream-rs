@@ -14,6 +14,7 @@ use lsr_core::{
     FileKey, Inventory, PlanOutcome, RestoreError, RestoreTarget, Restored, plan, restore,
 };
 use lsr_local::FileSink;
+use lsr_ltx::{Encoder, Event, ReadDecoder};
 use lsr_store_fs::FsStore;
 
 use crate::error::CompatError;
@@ -36,6 +37,20 @@ impl Staged {
         self.dir.path().join(name)
     }
 
+    /// Rewrites every replica file with `lsr_ltx::Encoder`: same header, same pages, the
+    /// block encoding, then restores each file's recorded mtime. What Go then reads is Rust's
+    /// output, not Go's.
+    pub fn reencode(&self, manifest: &Manifest) -> Result<(), CompatError> {
+        for entry in &manifest.files {
+            let path = self.replica().join(&entry.key);
+            let old = fs::read(&path).map_err(CompatError::io(&path))?;
+            let new = reencode_file(&old)
+                .map_err(|why| CompatError::Fixture(format!("{}: {why}", entry.key)))?;
+            fs::write(&path, new).map_err(CompatError::io(&path))?;
+        }
+        manifest.apply_mtimes(self.dir.path())
+    }
+
     /// Everything in the staging directory outside the replica and the manifest, by name.
     /// A restore that published nothing and cleaned up leaves this empty.
     pub fn leftovers(&self) -> Result<Vec<String>, CompatError> {
@@ -53,6 +68,31 @@ impl Staged {
         out.sort();
         Ok(out)
     }
+}
+
+/// One LTX file decoded and written again by the strict encoder.
+fn reencode_file(old: &[u8]) -> Result<Vec<u8>, String> {
+    let mut decoder = ReadDecoder::new(old);
+    let mut encoder: Option<Encoder<Vec<u8>>> = None;
+    while let Some(event) = decoder.next_event().map_err(|e| format!("decode: {e}"))? {
+        match event {
+            Event::Header(header) => {
+                encoder =
+                    Some(Encoder::new(Vec::new(), header).map_err(|e| format!("encode: {e}"))?);
+            }
+            Event::Page { pgno, data } => {
+                let enc = encoder.as_mut().ok_or("a page before the header")?;
+                enc.write_page(pgno, data)
+                    .map_err(|e| format!("encode: {e}"))?;
+            }
+        }
+    }
+    let verified = decoder.finish().map_err(|e| format!("verify: {e}"))?;
+    let (bytes, _trailer) = encoder
+        .ok_or("no header")?
+        .finish(verified.trailer().post_apply())
+        .map_err(|e| format!("encode: {e}"))?;
+    Ok(bytes)
 }
 
 /// Copies a directory tree (files and directories only).
