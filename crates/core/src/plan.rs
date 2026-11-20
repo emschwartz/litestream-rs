@@ -47,14 +47,27 @@
 //!   ends right after the chain does not count: its newest transaction is
 //!   stamped at or after the instant, so that transaction is placed, and so is
 //!   everything after it.
+//!
+//! An `AsOf` restore learns eligibility lazily. A listing may carry only a
+//! last-modified time, so [`AsOfPlanner`] is a [`Step`] that asks for one exact
+//! stamp at a time, and only for the files a decision turns on: the
+//! transaction-1 files in base order until the first eligible one, then at
+//! each step the files that touch and pass the chain's end, in preference
+//! order, until the first eligible one. What lies past the end is judged by
+//! keys, and the straddle rule looks only at files the last step already
+//! read. Each phase makes the decision [`plan`] makes with every stamp known,
+//! so the order of the reads never changes the answer. [`plan`] stays the
+//! planner for `Latest` and `Txid`, which read no stamp, and the exact
+//! reference for `AsOf` over a listing whose stamps are all exact.
 
-use std::cmp::Reverse;
+use std::cmp::{Ordering, Reverse};
+use std::collections::BinaryHeap;
 
 use lsr_ltx::{Timestamp, Txid};
 
 use crate::inventory::{Inventory, is_snapshot_start};
 use crate::layout::{FileInfo, FileKey, Level};
-
+use crate::stamps::{Resolve, Stamps, Step};
 /// The state of the database to rebuild.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RestoreTarget {
@@ -201,6 +214,12 @@ fn eligible(info: &FileInfo, target: RestoreTarget) -> bool {
 }
 
 /// Plans a restore of [`target`] from [`inventory`].
+///
+/// For [`RestoreTarget::AsOf`] this reads each file's listed stamp, so it is
+/// exact only over a listing whose stamps are all exact: a file listed with
+/// only a last-modified time counts as ineligible. A restore plans `AsOf`
+/// through [`AsOfPlanner`], which asks for the stamps it needs and returns
+/// what this function returns with every stamp known.
 #[must_use]
 pub fn plan(inventory: &Inventory, target: RestoreTarget) -> PlanOutcome {
     let Some(newest) = inventory.newest() else {
@@ -220,7 +239,7 @@ pub fn plan(inventory: &Inventory, target: RestoreTarget) -> PlanOutcome {
     let base = pool
         .iter()
         .filter(|info| is_snapshot_start(info))
-        .max_by_key(|info| (info.key.range().max(), info.key.level(), Reverse(info.key)))
+        .max_by_key(|info| base_order(info))
         .and_then(|info| ContiguousChain::start(*info));
     let Some(mut chain) = base else {
         return no_snapshot(inventory);
@@ -296,15 +315,21 @@ fn straddling_file(inventory: &Inventory, target: RestoreTarget, reach: Txid) ->
     }
     files
         .iter()
-        .filter(|info| {
-            let range = info.key.range();
-            !eligible(info, target)
-                && is_usable_beyond(info)
-                && range.min() <= one_past
-                && range.max() > one_past
-        })
-        .min_by_key(|info| (info.key.range().max(), Reverse(info.key.level()), info.key))
+        .filter(|info| !eligible(info, target) && straddles(info, one_past))
+        .min_by_key(|info| straddler_order(info))
         .map(|info| info.key)
+}
+
+/// Whether a usable file links to a chain whose next transaction is
+/// [`one_past`] and holds at least two transactions past the chain.
+fn straddles(info: &FileInfo, one_past: Txid) -> bool {
+    let range = info.key.range();
+    is_usable_beyond(info) && range.min() <= one_past && range.max() > one_past
+}
+
+/// Smaller is named first: the nearest end, then the higher level, then the key.
+fn straddler_order(info: &FileInfo) -> (Txid, Reverse<Level>, FileKey) {
+    (info.key.range().max(), Reverse(info.key.level()), info.key)
 }
 
 fn no_snapshot(inventory: &Inventory) -> PlanOutcome {
@@ -327,7 +352,7 @@ fn extend(chain: &mut ContiguousChain, pool: &[FileInfo]) {
         .filter(|info| !info.key.level().is_snapshot())
         .copied()
         .collect();
-    sweep.sort_by_key(|info| (info.key.range().min(), info.key));
+    sweep.sort_by_key(sweep_order);
     let mut sweep = sweep.into_iter().peekable();
     loop {
         let mut best: Option<FileInfo> = None;
@@ -408,6 +433,268 @@ fn explain_shortfall(
 /// snapshot.
 fn is_usable_beyond(info: &FileInfo) -> bool {
     !info.key.level().is_snapshot() || is_snapshot_start(info)
+}
+
+/// The preference of a level 0-8 file at an extension step; larger is better.
+type Preference = (Txid, Level, Reverse<Txid>);
+
+/// Where an [`AsOfPlanner`] is.
+#[derive(Clone, Debug)]
+enum Phase {
+    /// Walking the transaction-1 files for the first eligible one.
+    Base,
+    /// Extending the chain one eligible file at a time.
+    Extend,
+    /// Judging what lies past the reach.
+    Past,
+    /// Decided.
+    Done(PlanOutcome),
+}
+
+/// An [`RestoreTarget::AsOf`] plan that learns eligibility one stamp at a time.
+///
+/// Driven by [`crate::resolve`], it returns exactly what [`plan`] returns for
+/// the same instant with every stamp known, and asks only for the stamps of
+/// transaction-1 files and of files that touch and pass the chain's end at
+/// some step. Each key is asked for at most once. It sorts the inventory once
+/// and resumes from its cursor on every advance.
+#[derive(Clone, Debug)]
+pub struct AsOfPlanner<'a> {
+    inventory: &'a Inventory,
+    instant: Timestamp,
+    /// Transaction-1 files, most preferred base first.
+    starts: Vec<FileInfo>,
+    next_start: usize,
+    /// Level 0-8 files by first transaction, then key.
+    sweep: Vec<FileInfo>,
+    /// How many of `sweep` have touched the chain's end so far.
+    entered: usize,
+    /// Indexes into `sweep` that touched the end and were not yet settled.
+    touching: BinaryHeap<(Preference, usize)>,
+    chain: Option<ContiguousChain>,
+    phase: Phase,
+    comparisons: u64,
+}
+
+impl<'a> AsOfPlanner<'a> {
+    /// A planner for the newest state whose files were all created strictly
+    /// before [`instant`].
+    #[must_use]
+    pub fn new(inventory: &'a Inventory, instant: Timestamp) -> Self {
+        let mut comparisons = 0_u64;
+        let mut counted = |order: Ordering| {
+            comparisons = comparisons.saturating_add(1);
+            order
+        };
+        let mut starts: Vec<FileInfo> = inventory
+            .files()
+            .iter()
+            .filter(|info| is_snapshot_start(info))
+            .copied()
+            .collect();
+        starts.sort_by(|a, b| counted(base_order(b).cmp(&base_order(a))));
+        let mut sweep: Vec<FileInfo> = inventory
+            .files()
+            .iter()
+            .filter(|info| !info.key.level().is_snapshot())
+            .copied()
+            .collect();
+        sweep.sort_by(|a, b| counted(sweep_order(a).cmp(&sweep_order(b))));
+        let phase = if inventory.is_empty() {
+            Phase::Done(PlanOutcome::EmptyReplica)
+        } else {
+            Phase::Base
+        };
+        Self {
+            inventory,
+            instant,
+            starts,
+            next_start: 0,
+            sweep,
+            entered: 0,
+            touching: BinaryHeap::new(),
+            chain: None,
+            phase,
+            comparisons,
+        }
+    }
+
+    /// Key comparisons made so far: the two sorts exactly, each heap operation
+    /// counted at the heap's depth (twice for a pop). Reported so a test can
+    /// hold the planner to O(N log N).
+    #[must_use]
+    pub const fn comparisons(&self) -> u64 {
+        self.comparisons
+    }
+
+    /// Phase 1: the first eligible transaction-1 file in base order is the
+    /// base, which is the one [`plan`] picks.
+    fn find_base(&mut self, stamps: &Stamps) -> Resolve<()> {
+        while let Some(info) = self.starts.get(self.next_start).copied() {
+            match eligible_at(&info, self.instant, stamps) {
+                None => return Resolve::Need(info),
+                Some(true) => {
+                    self.chain = ContiguousChain::start(info);
+                    self.phase = match self.chain {
+                        Some(_) => Phase::Extend,
+                        None => Phase::Done(no_snapshot(self.inventory)),
+                    };
+                    return Resolve::Done(());
+                }
+                Some(false) => self.next_start = self.next_start.saturating_add(1),
+            }
+        }
+        self.phase = Phase::Done(no_snapshot(self.inventory));
+        Resolve::Done(())
+    }
+
+    /// Phase 2: at each step the most preferred eligible file that touches
+    /// and passes the end, which is the file [`plan`]'s sweep pushes (a file
+    /// it passes over ends at or before the one chosen, so it never passes a
+    /// later end). A settled file leaves the heap for good: an ineligible one
+    /// stays ineligible, and a file at or below the end stays there.
+    fn extend(&mut self, stamps: &Stamps) -> Resolve<()> {
+        let Some(chain) = self.chain.as_mut() else {
+            self.phase = Phase::Done(no_snapshot(self.inventory));
+            return Resolve::Done(());
+        };
+        loop {
+            let reach = chain.reaches();
+            while let Some(info) = self
+                .sweep
+                .get(self.entered)
+                .filter(|info| touches(info.key.range().min(), reach))
+            {
+                self.touching.push((preference(info), self.entered));
+                self.comparisons = self.comparisons.saturating_add(depth(self.touching.len()));
+                self.entered = self.entered.saturating_add(1);
+            }
+            // The heap's top reaches furthest, so a top at or below the end
+            // means nothing left passes it.
+            let Some(info) = self
+                .touching
+                .peek()
+                .and_then(|(_, at)| self.sweep.get(*at))
+                .copied()
+            else {
+                break;
+            };
+            if info.key.range().max() <= reach {
+                break;
+            }
+            let Some(admitted) = eligible_at(&info, self.instant, stamps) else {
+                return Resolve::Need(info);
+            };
+            let pop = depth(self.touching.len()).saturating_mul(2);
+            self.comparisons = self.comparisons.saturating_add(pop);
+            self.touching.pop();
+            // The top touches and passes the end, so the push cannot fail;
+            // stopping mirrors [`extend`] if it ever did.
+            if admitted && !chain.push(info) {
+                break;
+            }
+        }
+        self.phase = Phase::Past;
+        Resolve::Done(())
+    }
+
+    /// Phase 3: what lies past the reach, by keys ([`bridges_nothing_past`]),
+    /// then the straddle rule, whose candidates all touch and pass the reach
+    /// and so were read by the last step.
+    fn judge_past(&mut self, stamps: &Stamps) -> Resolve<()> {
+        let Some(chain) = self.chain.as_ref() else {
+            self.phase = Phase::Done(no_snapshot(self.inventory));
+            return Resolve::Done(());
+        };
+        let reach = chain.reaches();
+        let outcome = if bridges_nothing_past(self.inventory, reach) {
+            explain_shortfall(
+                self.inventory,
+                self.inventory.files(),
+                RestoreTarget::Latest,
+                reach,
+            )
+        } else {
+            match lazy_straddler(self.inventory, self.instant, reach, stamps) {
+                Resolve::Need(info) => return Resolve::Need(info),
+                Resolve::Done(Some(file)) => PlanOutcome::AsOfInsideFile {
+                    chain: chain.clone(),
+                    file,
+                },
+                Resolve::Done(None) => PlanOutcome::Plan(chain.clone()),
+            }
+        };
+        self.phase = Phase::Done(outcome);
+        Resolve::Done(())
+    }
+}
+
+impl Step for AsOfPlanner<'_> {
+    type Output = PlanOutcome;
+
+    fn advance(&mut self, stamps: &Stamps) -> Resolve<PlanOutcome> {
+        loop {
+            let step = match &self.phase {
+                Phase::Done(outcome) => return Resolve::Done(outcome.clone()),
+                Phase::Base => self.find_base(stamps),
+                Phase::Extend => self.extend(stamps),
+                Phase::Past => self.judge_past(stamps),
+            };
+            if let Resolve::Need(info) = step {
+                return Resolve::Need(info);
+            }
+        }
+    }
+}
+
+/// Whether a file is created strictly before [`instant`], once its exact
+/// stamp is known.
+fn eligible_at(info: &FileInfo, instant: Timestamp, stamps: &Stamps) -> Option<bool> {
+    stamps.exact(info).map(|stamp| stamp.at() < instant)
+}
+
+/// [`straddling_file`] with stamps asked for as needed.
+fn lazy_straddler(
+    inventory: &Inventory,
+    instant: Timestamp,
+    reach: Txid,
+    stamps: &Stamps,
+) -> Resolve<Option<FileKey>> {
+    let Some(one_past) = reach.next() else {
+        return Resolve::Done(None);
+    };
+    let files = inventory.files();
+    if files.iter().any(|info| info.key.range().max() == one_past) {
+        return Resolve::Done(None);
+    }
+    let mut best: Option<&FileInfo> = None;
+    for info in files.iter().filter(|info| straddles(info, one_past)) {
+        match eligible_at(info, instant, stamps) {
+            None => return Resolve::Need(*info),
+            Some(true) => {}
+            Some(false) => {
+                if best.is_none_or(|held| straddler_order(info) < straddler_order(held)) {
+                    best = Some(info);
+                }
+            }
+        }
+    }
+    Resolve::Done(best.map(|info| info.key))
+}
+
+/// Larger is the better base: furthest reach, then higher level, then the
+/// lower key.
+fn base_order(info: &FileInfo) -> (Txid, Level, Reverse<FileKey>) {
+    (info.key.range().max(), info.key.level(), Reverse(info.key))
+}
+
+fn sweep_order(info: &FileInfo) -> (Txid, FileKey) {
+    (info.key.range().min(), info.key)
+}
+
+/// The comparisons one sift through a heap of [`len`] entries can take.
+fn depth(len: usize) -> u64 {
+    u64::from(usize::BITS.saturating_sub(len.leading_zeros()))
 }
 
 #[cfg(test)]

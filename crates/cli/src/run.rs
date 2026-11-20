@@ -179,6 +179,7 @@ impl From<RestoreError> for CliError {
             | RestoreError::File { .. }
             | RestoreError::Unstable { .. }
             | RestoreError::DatabaseChecksum { .. }
+            | RestoreError::StampRepeated { .. }
             | RestoreError::Sink { .. }) => Self::Restore(other),
         }
     }
@@ -222,6 +223,7 @@ pub fn exit_for_error(error: &CliError) -> Exit {
             RestoreError::Inventory(_)
             | RestoreError::Store(_)
             | RestoreError::Unstable { .. }
+            | RestoreError::StampRepeated { .. }
             | RestoreError::Sink { .. } => Exit::Environment,
         },
         CliError::AfterClearing { source, .. } => exit_for_error(source),

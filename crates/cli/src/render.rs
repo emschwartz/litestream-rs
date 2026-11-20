@@ -189,6 +189,11 @@ fn restored_text(output: &Path, restored: &Restored, cleared: &[PathBuf]) -> Str
         restored.files(),
         restored.bytes_read(),
     );
+    // Only an as-of restore over a lazily listed store reads stamps; the line
+    // for every other restore stays as it was.
+    if restored.stamps_read() > 0 {
+        putln!(out, "{} exact stamps read to plan", restored.stamps_read());
+    }
     out
 }
 

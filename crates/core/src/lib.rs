@@ -56,7 +56,7 @@ pub use maintain::{
     go_truncate, run_compact, run_delete,
 };
 pub use mem::{MemStore, MemUpload};
-pub use plan::{ContiguousChain, PlanOutcome, RestoreTarget, plan};
+pub use plan::{AsOfPlanner, ContiguousChain, PlanOutcome, RestoreTarget, plan};
 pub use position::{
     Continuity, LastPage, Position, ReadEpoch, SyncedOffset, SyncedThrough, WalFileLen,
 };

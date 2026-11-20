@@ -586,6 +586,7 @@ dependencies = [
 name = "lsr-core"
 version = "0.0.0"
 dependencies = [
+ "lsr-core",
  "lsr-ltx",
  "lsr-wal",
  "proptest",

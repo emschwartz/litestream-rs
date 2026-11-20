@@ -4,7 +4,8 @@
 mod review {
 
     use lsr_core::{
-        FileInfo, FileKey, Inventory, InventoryError, Level, PlanOutcome, RestoreTarget, plan,
+        AsOfPlanner, FileInfo, FileKey, Inventory, InventoryError, Level, PlanOutcome, Resolve,
+        RestoreTarget, StampStep, Stamps, plan,
     };
     use lsr_core::{ListedStamp, StoredStamp};
     use lsr_ltx::{Timestamp, Txid, TxidRange};
@@ -151,6 +152,10 @@ mod review {
                 G::AsOf(t) => RestoreTarget::AsOf(Timestamp::from_unix_millis(t)),
             };
             let out = plan(&inv, target);
+            if let RestoreTarget::AsOf(instant) = target {
+                let lazy = AsOfPlanner::new(&inv, instant).advance(&Stamps::default());
+                prop_assert_eq!(lazy, Resolve::Done(out.clone()));
+            }
             let ends = reachable_ends(&kept, g);
             let want = match g {
                 G::AsOf(_) => ends.iter().max().copied(),

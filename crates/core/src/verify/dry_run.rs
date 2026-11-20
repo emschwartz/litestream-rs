@@ -158,6 +158,7 @@ fn named_file(error: &RestoreError, last: FileKey) -> Option<FileKey> {
         RestoreError::File { key, .. } => Some(*key),
         RestoreError::Unstable { missing, .. } => Some(*missing),
         RestoreError::DatabaseChecksum { .. } => Some(last),
+        RestoreError::StampRepeated { key } => Some(*key),
         RestoreError::Inventory(_)
         | RestoreError::NoPlan(_)
         | RestoreError::Store(_)

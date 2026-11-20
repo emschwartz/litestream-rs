@@ -138,7 +138,10 @@ fn file_fault(result: Result<Restored, RestoreError>) -> (FileKey, FileFault) {
 
 /// A snapshot and three incrementals that shrink and regrow the database.
 fn four_file_replica() -> MemStore {
-    let store = MemStore::new();
+    fill_four(MemStore::new())
+}
+
+fn fill_four(store: MemStore) -> MemStore {
     put_spec(
         &store,
         9,
@@ -589,6 +592,10 @@ impl ObjectStore for Wrapped {
     }
 
     async fn stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
+        let doomed = self.vanish.lock().unwrap().remove(&file.key);
+        if doomed {
+            self.inner.delete(&[file.key]).await?;
+        }
         self.inner.stamp(file).await
     }
 
@@ -626,6 +633,61 @@ fn a_file_deleted_between_plan_and_read_is_replanned_once() {
     assert_eq!(restored.files(), 3);
     assert_eq!(sink.calls(SinkOp::Reset), 1);
     assert_eq!(seeds(&sink.published().unwrap()), [5, 9]);
+}
+
+#[test]
+fn restore_reports_stamps_read() {
+    let store = fill_four(MemStore::with_listed_last_modified());
+    // Stamped at max * 1000: the snapshot, transactions 2 and 3, then 4 refused.
+    let (result, sink) = run(
+        &store,
+        RestoreTarget::AsOf(Timestamp::from_unix_millis(3500)),
+    );
+    let restored = result.unwrap();
+    assert_eq!((restored.reached(), restored.files()), (txid(3), 3));
+    assert_eq!(restored.stamps_read(), 4);
+    assert_eq!(store.stamp_calls(), 4);
+    assert_eq!(seeds(&sink.published().unwrap()), [5, 9]);
+    let (latest, _) = run(&store, RestoreTarget::Latest);
+    assert_eq!(latest.unwrap().stamps_read(), 0);
+    assert_eq!(store.stamp_calls(), 4);
+}
+
+#[test]
+fn a_file_gone_before_its_stamp_is_read_is_replanned() {
+    let inner = fill_four(MemStore::with_listed_last_modified());
+    put_spec(&inner, 1, &Spec::plain(512, 2, 2, 3, &[(1, 5), (2, 9)]));
+    let store = Wrapped::vanishing(inner, &[key(1, 2, 3)]);
+    let (result, sink) = run(
+        &store,
+        RestoreTarget::AsOf(Timestamp::from_unix_millis(3500)),
+    );
+    let restored = result.unwrap();
+    assert_eq!((restored.attempts(), restored.files()), (2, 3));
+    // The snapshot and the vanished file, then the snapshot and three L0 files.
+    assert_eq!(restored.stamps_read(), 6);
+    assert_eq!(sink.calls(SinkOp::Reset), 1);
+    assert_eq!(seeds(&sink.published().unwrap()), [5, 9]);
+}
+
+#[test]
+fn a_stamp_error_other_than_not_found_ends_the_restore() {
+    let store = fill_four(MemStore::with_listed_last_modified());
+    // A stamp is a read; planning reads before any file is applied.
+    let fault = StoreError::Transient {
+        op: StoreOp::Read,
+        kind: io::ErrorKind::TimedOut,
+    };
+    store.inject_failure(StoreOp::Read, fault.clone());
+    let (result, sink) = run(
+        &store,
+        RestoreTarget::AsOf(Timestamp::from_unix_millis(3500)),
+    );
+    assert!(
+        matches!(result, Err(RestoreError::Store(ref e)) if *e == fault),
+        "{result:?}"
+    );
+    assert_eq!((store.stamp_calls(), sink.published()), (1, None));
 }
 
 fn three_snapshots() -> MemStore {

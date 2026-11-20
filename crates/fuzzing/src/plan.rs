@@ -1,8 +1,8 @@
 //! The `plan` target: the planner's answer must be a valid chain or a reason.
 
 use lsr_core::{
-    ContiguousChain, FileInfo, FileKey, Inventory, Level, PlanOutcome, RestoreTarget,
-    plan as plan_restore,
+    AsOfPlanner, ContiguousChain, FileInfo, FileKey, Inventory, Level, PlanOutcome, Resolve,
+    RestoreTarget, StampStep, Stamps, plan as plan_restore,
 };
 use lsr_ltx::{Timestamp, Txid, TxidRange};
 
@@ -238,6 +238,20 @@ pub fn plan(data: &[u8]) {
         check_chain(&inventory, target, chain);
     }
     check_reason(&inventory, target, &outcome);
+    check_lazy(&inventory, target, &outcome);
+}
+
+/// Every stamp here is exact, so the as-of planner in query form decides on
+/// its first advance, and decides what the exact planner did.
+fn check_lazy(inventory: &Inventory, target: RestoreTarget, outcome: &PlanOutcome) {
+    let RestoreTarget::AsOf(instant) = target else {
+        return;
+    };
+    match AsOfPlanner::new(inventory, instant).advance(&Stamps::default()) {
+        Resolve::Done(lazy) if lazy == *outcome => {}
+        Resolve::Done(_) => violation("the as-of planner disagrees with plan"),
+        Resolve::Need(_) => violation("the as-of planner asked for an exact stamp"),
+    }
 }
 
 #[cfg(test)]
