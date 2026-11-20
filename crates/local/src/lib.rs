@@ -19,13 +19,13 @@
 
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use lsr_core::DatabaseSink;
-use lsr_ltx::{PageNo, PageSize};
+use lsr_ltx::{Checksum, PageNo, PageSize};
 use thiserror::Error;
 
 /// Scratch names tried before giving up: a name can only collide with a file a
@@ -183,6 +183,21 @@ impl DatabaseSink for FileSink {
         self.file.set_len(0)
     }
 
+    fn checksum(&mut self, pages: u32, page_size: PageSize) -> io::Result<Checksum> {
+        self.file.seek(SeekFrom::Start(0))?;
+        let mut page = vec![0_u8; page_size.bytes()];
+        let mut total = Checksum::EMPTY;
+        for n in 1..=pages {
+            self.file.read_exact(&mut page)?;
+            // The lock page is the one number PageNo refuses; its bytes are
+            // read past and not counted.
+            if let Some(pgno) = PageNo::new(n, page_size) {
+                total = total.toggle(Checksum::of_page(pgno, &page));
+            }
+        }
+        Ok(total)
+    }
+
     fn publish(mut self) -> io::Result<()> {
         self.file.sync_all()?;
         if exists(&self.target)? {
@@ -313,6 +328,19 @@ mod tests {
         sink.truncate(2, ps(512)).unwrap();
         sink.publish().unwrap();
         assert_eq!(fs::read(&target).unwrap(), vec![0; 1024]);
+    }
+
+    #[test]
+    fn checksum_reads_back_what_the_file_holds() {
+        let dir = TempDir::new().unwrap();
+        let mut sink = FileSink::create(&dir.path().join("db")).unwrap();
+        sink.write_page(pgno(3), &[3; 512]).unwrap();
+        sink.truncate(4, ps(512)).unwrap();
+        let mut want = Checksum::EMPTY;
+        for (n, seed) in [(1, 0_u8), (2, 0), (3, 3), (4, 0)] {
+            want = want.toggle(Checksum::of_page(pgno(n), &[seed; 512]));
+        }
+        assert_eq!(sink.checksum(4, ps(512)).unwrap(), want);
     }
 
     #[test]

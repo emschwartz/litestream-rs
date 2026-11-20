@@ -30,7 +30,9 @@ pub use mem::{MemStore, MemUpload};
 pub use plan::{ContiguousChain, PlanOutcome, RestoreTarget, plan};
 #[cfg(any(test, feature = "testing"))]
 pub use restore::{Database, MemSink};
-pub use restore::{DatabaseSink, FileFault, MAX_ATTEMPTS, RestoreError, Restored, SinkOp, restore};
+pub use restore::{
+    DatabaseSink, FileFault, MAX_ATTEMPTS, NoPlan, RestoreError, Restored, SinkOp, restore,
+};
 pub use retry::{Class, RetryPolicy, RetryStats, Retrying, RetryingUpload, classify};
 pub use store::{
     CorruptCause, Listing, ObjectStore, PageLimit, ReadLen, StoreError, StoreOp, Upload,

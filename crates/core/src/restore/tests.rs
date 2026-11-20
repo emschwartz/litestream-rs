@@ -229,6 +229,106 @@ fn a_checksum_chain_break_is_reported_and_publishes_nothing() {
     assert_eq!(sink.published(), None);
 }
 
+/// Review: an overlapping file's pre-apply checksum cannot be compared, so only
+/// the database's own checksum after the last file can catch a tracked chain
+/// whose pages do not add up. Go's restore checks it (the merged snapshot's
+/// post-apply, ltx decoder.go Close) and PLAN.md says the rolling checksum is
+/// verified before the rename; here the restore publishes a database whose
+/// checksum is not the one Restored::post_apply reports.
+#[test]
+fn an_overlapping_file_whose_pages_miss_its_post_apply_is_rejected() {
+    let ps = size(512);
+    let first = BTreeMap::from([(1, 1_u8), (2, 2)]);
+    let claimed = BTreeMap::from([(1, 5_u8), (2, 9)]);
+    let store = MemStore::new();
+    let mut snap = Spec::plain(512, 2, 1, 2, &[(1, 1), (2, 2)]);
+    snap.tracked = true;
+    snap.post = Some(checksum(ps, &first));
+    put_spec(&store, 9, &snap);
+    // Covers transactions 2 and 3, so it overlaps the snapshot by one and its
+    // pre-apply (the state before 2) is never compared.
+    let mut merged = Spec::plain(512, 2, 2, 3, &[(1, 5)]);
+    merged.tracked = true;
+    merged.pre = Some(checksum(ps, &BTreeMap::from([(1, 1_u8)])));
+    merged.post = Some(checksum(ps, &claimed));
+    put_spec(&store, 1, &merged);
+    let (result, sink) = run(&store, RestoreTarget::Latest);
+    if let Ok(restored) = &result {
+        let db = sink.published().unwrap();
+        let actual: BTreeMap<u32, u8> = (1..=db.page_count())
+            .map(|p| (p, db.page(p).unwrap()[0]))
+            .collect();
+        panic!(
+            "published {:?} with checksum {:?}, reported post_apply {:?}",
+            seeds(&db),
+            checksum(ps, &actual),
+            restored.post_apply()
+        );
+    }
+    assert!(matches!(
+        result,
+        Err(RestoreError::DatabaseChecksum { expected, .. }) if expected == checksum(ps, &claimed)
+    ));
+    assert_eq!(sink.published(), None);
+}
+
+#[test]
+fn a_sink_failing_its_checksum_read_never_publishes() {
+    let ps = size(512);
+    let state = BTreeMap::from([(1, 1_u8)]);
+    let store = MemStore::new();
+    let mut snap = Spec::plain(512, 1, 1, 1, &[(1, 1)]);
+    snap.tracked = true;
+    snap.post = Some(checksum(ps, &state));
+    put_spec(&store, 9, &snap);
+    let sink = MemSink::new();
+    sink.fail_at(SinkOp::Checksum, 0);
+    let result = block_on(restore(&store, RestoreTarget::Latest, sink.clone()));
+    assert!(matches!(
+        &result,
+        Err(RestoreError::Sink {
+            op: SinkOp::Checksum,
+            ..
+        })
+    ));
+    assert_eq!(sink.published(), None);
+}
+
+#[test]
+fn an_untracked_chain_is_not_checksummed() {
+    let (result, sink) = run(&four_file_replica(), RestoreTarget::Latest);
+    result.unwrap();
+    assert_eq!(sink.calls(SinkOp::Checksum), 0);
+}
+
+#[test]
+fn a_tracked_chain_is_checksummed_once_before_publish() {
+    let ps = size(512);
+    let state = BTreeMap::from([(1, 1_u8)]);
+    let store = MemStore::new();
+    let mut snap = Spec::plain(512, 1, 1, 1, &[(1, 1)]);
+    snap.tracked = true;
+    snap.post = Some(checksum(ps, &state));
+    put_spec(&store, 9, &snap);
+    let (result, sink) = run(&store, RestoreTarget::Latest);
+    result.unwrap();
+    assert_eq!(sink.calls(SinkOp::Checksum), 1);
+}
+
+/// A page nobody wrote counts as zeros, as Go's ChecksumPages does over a
+/// database file. (The lock page is skipped because PageNo cannot name it; the
+/// restore test over the lock page is too slow to repeat here.)
+#[test]
+fn the_sink_checksum_counts_unwritten_pages_as_zeros() {
+    let ps = size(512);
+    let mut sink = MemSink::new();
+    sink.write_page(PageNo::new(3, ps).unwrap(), &page_of(ps, 3))
+        .unwrap();
+    sink.truncate(4, ps).unwrap();
+    let state = BTreeMap::from([(1, 0_u8), (2, 0), (3, 3), (4, 0)]);
+    assert_eq!(sink.checksum(4, ps).unwrap(), checksum(ps, &state));
+}
+
 #[test]
 fn nothing_is_published_unless_every_file_verified() {
     let store = four_file_replica();
@@ -343,7 +443,7 @@ fn a_replica_with_no_files_has_no_plan() {
     let (result, sink) = run(&MemStore::new(), RestoreTarget::Latest);
     assert!(matches!(
         result,
-        Err(RestoreError::NoPlan(PlanOutcome::EmptyReplica))
+        Err(RestoreError::NoPlan(ref no)) if *no.outcome() == PlanOutcome::EmptyReplica
     ));
     assert_eq!(sink.published(), None);
 }
@@ -356,8 +456,8 @@ fn a_gap_is_an_error_never_the_pre_gap_state() {
     let (result, sink) = run(&store, RestoreTarget::Latest);
     assert!(matches!(
         result,
-        Err(RestoreError::NoPlan(PlanOutcome::Gap { have_through, next_starts }))
-            if have_through == txid(1) && next_starts == txid(3)
+        Err(RestoreError::NoPlan(ref no))
+            if *no.outcome() == (PlanOutcome::Gap { have_through: txid(1), next_starts: txid(3) })
     ));
     assert_eq!(sink.published(), None);
 }
@@ -774,8 +874,68 @@ fn drafts() -> impl Strategy<Value = Vec<TxDraft>> {
     )
 }
 
+/// The store of [compact], with one page of one file rewritten to other bytes
+/// while the file keeps its own valid file checksum and its claimed pre and
+/// post-apply checksums.
+fn corrupt_one_page(
+    model: &Model,
+    merges: &[(usize, usize, u8)],
+    snaps: &[usize],
+    pick: usize,
+) -> Option<MemStore> {
+    let n = model.states.len();
+    let mut files: Vec<(u8, Spec)> = (1..=n).map(|tx| (0, model.spec(tx, tx, true))).collect();
+    let mut seen = BTreeSet::new();
+    for (x, y, level) in merges {
+        let (a, b) = ((x % n) + 1, (y % n) + 1);
+        let (a, b) = (a.min(b), a.max(b));
+        if seen.insert((*level, a, b)) {
+            files.push((*level, model.spec(a, b, true)));
+        }
+    }
+    for tx in std::iter::once(&0).chain(snaps) {
+        files.push((9, model.spec(1, (tx % n) + 1, true)));
+    }
+    // A file that starts at transaction 1 is a snapshot, and the encoder
+    // itself refuses a snapshot whose post-apply is not its own pages'.
+    let victims: Vec<usize> = (0..files.len())
+        .filter(|i| files[*i].1.pre.is_some() && !files[*i].1.pages.is_empty())
+        .collect();
+    let victim = *victims.get(pick % victims.len().max(1))?;
+    let store = MemStore::new();
+    for (index, (level, spec)) in files.iter_mut().enumerate() {
+        if index == victim {
+            let slot = pick % spec.pages.len();
+            let seed = &mut spec.pages[slot].1;
+            *seed = seed.wrapping_add(1);
+        }
+        put_spec(&store, *level, spec);
+    }
+    Some(store)
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn a_swapped_page_in_any_tracked_file_never_publishes_a_wrong_database(
+        drafts in drafts(),
+        ps_pick in 0_usize..3,
+        merges in prop::collection::vec((0_usize..10, 0_usize..10, 1_u8..=8), 0..6),
+        snaps in prop::collection::vec(0_usize..10, 0..3),
+        pick in 0_usize..64,
+    ) {
+        let ps = size([512, 1024, 4096][ps_pick]);
+        let model = model_from(ps, &drafts);
+        let Some(store) = corrupt_one_page(&model, &merges, &snaps, pick) else {
+            return Err(TestCaseError::reject("every file is a snapshot"));
+        };
+        let (result, sink) = run(&store, RestoreTarget::Latest);
+        match result {
+            Ok(_) => assert_matches_model(&model, model.states.len(), &sink.published().unwrap()),
+            Err(_) => prop_assert_eq!(sink.published(), None),
+        }
+    }
 
     #[test]
     fn restore_equals_the_model_at_every_transaction(

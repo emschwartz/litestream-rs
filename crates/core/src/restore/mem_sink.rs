@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use lsr_ltx::{PageNo, PageSize};
+use lsr_ltx::{Checksum, PageNo, PageSize};
 
 use super::{DatabaseSink, SinkOp};
 
@@ -164,6 +164,22 @@ impl DatabaseSink for MemSink {
         state.page_count = 0;
         state.pages.clear();
         Ok(())
+    }
+
+    fn checksum(&mut self, pages: u32, page_size: PageSize) -> io::Result<Checksum> {
+        let mut state = self.lock();
+        state.enter(SinkOp::Checksum)?;
+        let zero_page = vec![0; page_size.bytes()];
+        let mut total = Checksum::EMPTY;
+        for n in 1..=pages {
+            // The lock page is the one number PageNo refuses.
+            let Some(pgno) = PageNo::new(n, page_size) else {
+                continue;
+            };
+            let data = state.pages.get(&n).unwrap_or(&zero_page);
+            total = total.toggle(Checksum::of_page(pgno, data));
+        }
+        Ok(total)
     }
 
     fn publish(self) -> io::Result<()> {

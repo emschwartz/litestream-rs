@@ -58,6 +58,8 @@ pub enum SinkOp {
     Truncate,
     /// [DatabaseSink::reset].
     Reset,
+    /// [DatabaseSink::checksum].
+    Checksum,
     /// [DatabaseSink::publish].
     Publish,
 }
@@ -68,6 +70,7 @@ impl std::fmt::Display for SinkOp {
             Self::WritePage => "write a page",
             Self::Truncate => "truncate",
             Self::Reset => "reset",
+            Self::Checksum => "checksum",
             Self::Publish => "publish",
         })
     }
@@ -94,6 +97,17 @@ pub trait DatabaseSink {
     /// # Errors
     /// Whatever the underlying resize reports.
     fn reset(&mut self) -> io::Result<()>;
+
+    /// The LTX rolling checksum of the database as the sink holds it now:
+    /// the XOR of every page's checksum for pages 1 to [pages] except the lock
+    /// page (which reads as zeros and is never counted, as in Go), flag bit
+    /// set. The pages are read back from what was written, never taken from a
+    /// running total, so a write that did not land is caught. A page the sink
+    /// never wrote is a zero page. One page of memory at most.
+    ///
+    /// # Errors
+    /// Whatever the underlying read reports.
+    fn checksum(&mut self, pages: u32, page_size: PageSize) -> io::Result<Checksum>;
 
     /// Makes the database durable and visible, or fails and leaves it not
     /// visible. A failed durability step is never retried.
@@ -147,8 +161,8 @@ pub enum RestoreError {
     #[error("listing the replica: {0}")]
     Inventory(#[source] InventoryError),
     /// The replica has no exact answer for the target.
-    #[error("no exact restore plan: {0:?}")]
-    NoPlan(PlanOutcome),
+    #[error("no exact restore plan: {:?}", .0.outcome())]
+    NoPlan(NoPlan),
     /// A read failed in a way a restore does not retry.
     #[error("reading the replica: {0}")]
     Store(#[source] StoreError),
@@ -168,6 +182,16 @@ pub enum RestoreError {
         /// The file missing on the last attempt.
         missing: FileKey,
     },
+    /// Every file verified, but the database they built is not the one the
+    /// last file's trailer says it is: the chain does not add up (overlapping
+    /// files from diverged writers, or a compactor bug).
+    #[error("the restored database has checksum {found}, the last file says {expected}")]
+    DatabaseChecksum {
+        /// The last file's post-apply checksum.
+        expected: Checksum,
+        /// What the sink holds.
+        found: Checksum,
+    },
     /// The destination failed.
     #[error("sink failed to {op}: {source}")]
     Sink {
@@ -176,6 +200,19 @@ pub enum RestoreError {
         /// The I/O error.
         source: io::Error,
     },
+}
+
+/// A [PlanOutcome] that is not a plan: why the replica has no exact answer.
+/// Only [restore] builds one, so "no plan: here is a plan" cannot exist.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct NoPlan(PlanOutcome);
+
+impl NoPlan {
+    /// The reason; never [PlanOutcome::Plan].
+    #[must_use]
+    pub const fn outcome(&self) -> &PlanOutcome {
+        &self.0
+    }
 }
 
 /// What a successful restore did.
@@ -278,12 +315,22 @@ pub async fn restore<S: ObjectStore, K: DatabaseSink>(
             .await
             .map_err(RestoreError::Inventory)?;
         let outcome = plan(&inventory, target);
-        let PlanOutcome::Plan(chain) = outcome else {
-            return Err(RestoreError::NoPlan(outcome));
+        let chain = match outcome {
+            PlanOutcome::Plan(chain) => chain,
+            other @ (PlanOutcome::EmptyReplica
+            | PlanOutcome::NoSnapshot { .. }
+            | PlanOutcome::BeyondNewest { .. }
+            | PlanOutcome::AsOfInsideFile { .. }
+            | PlanOutcome::Gap { .. }
+            | PlanOutcome::InsideFile { .. }
+            | PlanOutcome::MalformedSnapshot { .. }) => {
+                return Err(RestoreError::NoPlan(NoPlan(other)));
+            }
         };
         let applied = apply_chain(store, &chain, &mut sink, &mut bytes_read).await;
         match applied {
             Ok(last) => {
+                verify_end_state(&mut sink, &last)?;
                 sink.publish().map_err(sink_fault(SinkOp::Publish))?;
                 return Ok(Restored {
                     reached: chain.reaches(),
@@ -307,6 +354,23 @@ pub async fn restore<S: ObjectStore, K: DatabaseSink>(
                 attempt = attempt.saturating_add(1);
             }
         }
+    }
+}
+
+/// Per-file checks cannot see an overlapping file, or a pair with an untracked
+/// side, whose pages do not reach its own post-apply checksum; the database
+/// itself can. Untracked chains have nothing to compare.
+fn verify_end_state<K: DatabaseSink>(sink: &mut K, last: &Verified) -> Result<(), RestoreError> {
+    let Some(expected) = last.trailer().post_apply() else {
+        return Ok(());
+    };
+    let found = sink
+        .checksum(last.header().commit(), last.header().page_size())
+        .map_err(sink_fault(SinkOp::Checksum))?;
+    if found == expected {
+        Ok(())
+    } else {
+        Err(RestoreError::DatabaseChecksum { expected, found })
     }
 }
 
