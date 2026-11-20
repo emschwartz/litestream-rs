@@ -343,15 +343,29 @@ fn compacts_and_prunes(build: &GoBuild) {
             .max())
     };
     let rust_l9 = newest_l9(&written.site.replica).expect("l9");
-    let mut go =
-        Replicator::start(&bin, &config, &written.site.dir().join("go.log")).expect("start");
-    // Go takes its own snapshot of the unchanged database and compacts every level.
+    let tip = newest_l0(&written.site.meta)
+        .expect("l0")
+        .map(|h| h.fields().txids.max());
+    // Go's store snapshots only when its position (the newest L0, which it reads from the
+    // meta dir) is past the newest snapshot. Whether the Rust run's last snapshot reached the
+    // tip depends on the run's timing, so the test decides what to wait for from what the
+    // replica holds before Go starts, never from how long Go takes.
+    let go_snapshots = tip.is_some_and(|t| rust_l9.is_none_or(|l9| t.get() > l9));
+    println!("Rust's newest L9 {rust_l9:?}, tip {tip:?}: Go snapshots {go_snapshots}");
+    let go_log = written.site.dir().join("go.log");
+    let mut go = Replicator::start(&bin, &config, &go_log).expect("start");
+    // Either Go takes its own snapshot of the unchanged database, or it has caught up with
+    // the Rust snapshot at the tip and declines; both are Go syncing the replica.
     wait_until(
-        "a Go snapshot over the Rust one",
+        if go_snapshots { "a Go snapshot over the Rust one" } else { "Go's first replica sync" },
         Duration::from_secs(40),
         || {
             go.ensure_running()?;
-            Ok(newest_l9(&written.site.replica)? > rust_l9)
+            if go_snapshots {
+                Ok(newest_l9(&written.site.replica)? > rust_l9)
+            } else {
+                Ok(std::fs::read_to_string(&go_log).is_ok_and(|log| log.contains("replica sync")))
+            }
         },
     )
     .map_err(|e| {
