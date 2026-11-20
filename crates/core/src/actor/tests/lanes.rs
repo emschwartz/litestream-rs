@@ -197,3 +197,77 @@ fn an_interval_due_with_nothing_to_checkpoint_does_not_spin() {
     assert_eq!(event(&tick), Some(&Event::Idle));
     assert_ne!(next_of(&tick), Some(Next::Now));
 }
+
+/// Checkpoints at the truncate threshold of one frame, every one busy (a
+/// reader SQLite cannot move past), with the interval given.
+fn busy_at_the_truncate_threshold(interval: Option<Duration>) -> (Rig, Actor) {
+    let mut config = cfg();
+    config.checkpoint.truncate_pages = Some(nz(1));
+    config.checkpoint.interval = interval;
+    let mut rig = Rig::new();
+    for _ in 0..4 {
+        rig.ck.script(CheckpointScript {
+            busy: true,
+            effect: CheckpointEffect::Nothing,
+        });
+    }
+    let actor = Actor::new(config);
+    (rig, actor)
+}
+
+fn truncates(rig: &Rig) -> usize {
+    rig.ck
+        .calls()
+        .iter()
+        .filter(|call| matches!(call, CheckpointCall::Checkpoint(CheckpointMode::Truncate)))
+        .count()
+}
+
+/// A TRUNCATE that found the WAL unchanged is not tried again until the WAL
+/// changes, when no interval is set.
+#[test]
+fn a_busy_truncate_waits_for_the_next_write() {
+    let (mut rig, mut actor) = busy_at_the_truncate_threshold(None);
+    rig.settle(&mut actor, T0);
+    assert_eq!(truncates(&rig), 1, "{:?}", rig.ck.calls());
+    rig.settle(&mut actor, T0 + 60_000);
+    assert_eq!(truncates(&rig), 1, "{:?}", rig.ck.calls());
+}
+
+/// With an interval, the busy TRUNCATE waits one interval: not before it, and
+/// once it has passed.
+#[test]
+fn a_busy_truncate_waits_one_interval() {
+    let (mut rig, mut actor) = busy_at_the_truncate_threshold(Some(Duration::from_secs(10)));
+    rig.settle(&mut actor, T0);
+    assert_eq!(truncates(&rig), 1, "{:?}", rig.ck.calls());
+    rig.settle(&mut actor, T0 + 5_000);
+    assert_eq!(truncates(&rig), 1, "{:?}", rig.ck.calls());
+    rig.settle(&mut actor, T0 + 10_000);
+    assert_eq!(truncates(&rig), 2, "{:?}", rig.ck.calls());
+}
+
+/// A wait that has passed is let go even when its lane finds no work: the
+/// WAL restarted under SQLite, so there is nothing left to checkpoint, and
+/// the actor settles instead of asking for a tick at once forever.
+#[test]
+fn a_passed_wait_with_no_work_left_is_not_a_deadline() {
+    for gate in [false, true] {
+        let (mut rig, mut actor) = busy_at_the_truncate_threshold(Some(Duration::from_secs(10)));
+        if !gate {
+            rig.ck
+                .inject(SourceOp::Checkpoint, SourceError::Io(ErrorKind::Other));
+        }
+        rig.settle(&mut actor, T0);
+        let waiting = if gate {
+            actor.gate.until()
+        } else {
+            actor.lanes.get(Lane::Checkpoint).until()
+        };
+        let until = waiting.unwrap_or_else(|| panic!("no wait is held: {:?}", rig.ck.calls()));
+        rig.wal.force_restart();
+        rig.settle(&mut actor, T0 + 1);
+        let seen = rig.settle(&mut actor, until.unix_millis());
+        assert_ne!(seen.last().and_then(next_of), Some(Next::Now), "{seen:?}");
+    }
+}
