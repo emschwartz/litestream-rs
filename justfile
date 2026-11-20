@@ -34,6 +34,20 @@ compat:
     ./scripts/build-go-litestream.sh
     cargo nextest run -p lsr-compat --run-ignored all --locked
 
+# Build the named Go versions (tags, commits, `releases` for every v0.5.N tag, `main` for
+# upstream's tip) and run the live tests over exactly those: just compat-live v0.5.3 main.
+compat-live +names:
+    ./scripts/build-go-litestream.sh {{names}}
+    LSR_COMPAT_VERSIONS="{{names}}" cargo nextest run -p lsr-compat --run-ignored all --locked --no-fail-fast -E 'test(go_restores_rust_chain_) | test(go_compacts_and_prunes) | test(go_resumes_) | test(rust_resumes_from_go_meta) | test(rust_restores_what_go_wrote) | test(go_restores_what_rust_encoded)'
+
+# Every release tag v0.5.N: Go writes and Rust restores, Rust writes and Go restores, handover both ways.
+compat-releases: (compat-live "releases")
+
+# Every upstream release tag is in the compat table (fetches the clone's tags first).
+compat-tags:
+    ./scripts/fetch-upstream.sh
+    cargo nextest run -p lsr-compat --run-ignored all --locked -E 'test(every_release_tag_is_known)'
+
 # Regenerate the Go compat fixtures (all, or one: just compat-regen --version v0.5.18 --scenario small-4096).
 compat-regen *args:
     ./scripts/build-go-litestream.sh

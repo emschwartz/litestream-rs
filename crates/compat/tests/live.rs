@@ -4,9 +4,9 @@
 use std::path::Path;
 
 use lsr_compat::{
-    CompatError, GoRestore, GoVersion, Manifest, Outcome, Scenario, Target, all_fixtures,
-    build_verify_helper, copy_tree, generate, go_binary, go_verify, hash_pages, integrity_check,
-    restore_replica, restore_with_go, stage, write_config,
+    CompatError, Era, GoBuild, GoRestore, GoVersion, Manifest, Outcome, Scenario, Target,
+    all_fixtures, build_verify_helper, builds_in, copy_tree, generate, go_binary, go_verify,
+    hash_pages, integrity_check, restore_replica, restore_with_go, stage, write_config,
 };
 use lsr_core::{PlanOutcome, RestoreError, RestoreTarget};
 use lsr_ltx::Timestamp;
@@ -91,13 +91,8 @@ fn go_still_answers_what_the_manifests_say() {
     }
 }
 
-/// The Go versions whose restore reads the block page encoding Rust writes.
-const READS_BLOCKS: [GoVersion; 3] = [GoVersion::V0_5_16, GoVersion::V0_5_18, GoVersion::Head];
-/// The versions that read only LZ4 frames: the one-directional break the matrix records.
-const READS_FRAMES: [GoVersion; 2] = [GoVersion::V0_5_0, GoVersion::V0_5_15];
-
 /// Every replica file of every fixture, rewritten by `lsr_ltx::Encoder`, restores under each
-/// Go version from v0.5.16 up to the pages the manifest records; v0.5.0 and v0.5.15 refuse.
+/// block-era Go build under test to the pages the manifest records; the frame era refuses.
 #[test]
 #[ignore = "runs the pinned Go binaries; just compat"]
 fn go_restores_what_rust_encoded() {
@@ -108,10 +103,10 @@ fn go_restores_what_rust_encoded() {
         let (config, db_path) = (staged.output("restore.yml"), staged.output("from.db"));
         write_config(&config, &db_path, &staged.replica()).expect("config");
         let mut n = 0_u32;
-        let mut run = |version: GoVersion, target: Target| {
+        let mut run = |build: &GoBuild, target: Target| {
             n = n.saturating_add(1);
             let out = staged.output(&format!("go-{n}.db"));
-            let binary = go_binary(version).expect("binary");
+            let binary = build.binary().expect("the build under test is present");
             let got = restore_with_go(&binary, &config, &db_path, &out, target).expect("restore");
             (got, out)
         };
@@ -119,15 +114,15 @@ fn go_restores_what_rust_encoded() {
             let Outcome::Restored { page_hashes, .. } = &entry.outcome else {
                 continue;
             };
-            for version in READS_BLOCKS {
+            for build in builds_in(Era::Blocks) {
                 let label = format!(
                     "{} reading {} {} {:?}",
-                    version.name(),
+                    build.name(),
                     manifest.go_version,
                     manifest.scenario,
                     entry.target
                 );
-                let (got, out) = run(version, entry.target);
+                let (got, out) = run(&build, entry.target);
                 assert_eq!(got, GoRestore::Restored, "{label}");
                 integrity_check(&out).expect("integrity");
                 assert_eq!(
@@ -142,12 +137,12 @@ fn go_restores_what_rust_encoded() {
             .iter()
             .any(|t| matches!(t.outcome, Outcome::Restored { .. }))
         {
-            for version in READS_FRAMES {
-                let (got, _) = run(version, Target::Latest);
+            for build in builds_in(Era::Frames) {
+                let (got, _) = run(&build, Target::Latest);
                 assert!(
                     matches!(got, GoRestore::Refused { .. }),
                     "{} unexpectedly read a block-encoded replica of {} {}",
-                    version.name(),
+                    build.name(),
                     manifest.go_version,
                     manifest.scenario
                 );

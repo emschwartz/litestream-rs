@@ -438,29 +438,31 @@ mod live_go {
     use std::time::{Duration, Instant};
 
     use lsr_compat::{
-        Chain, GoRestore, GoVersion, Replicator, Shape, Site, Target, Written, clock_ending_now,
-        go_binary, hash_pages, integrity_check, list, newest_l0, real_now_ms, restore_replica,
-        restore_with_go, wait_until, write_config, write_config_snapshotting,
+        Chain, Era, GoBuild, GoRestore, Replicator, Shape, Site, Target, Written, builds_in,
+        builds_under_test, clock_ending_now, hash_pages, integrity_check, list, newest_l0,
+        real_now_ms, restore_replica, restore_with_go, wait_until, write_config,
+        write_config_snapshotting,
     };
-    use lsr_core::{Level, RestoreTarget};
-    use lsr_ltx::Header;
+    use lsr_core::{Event, Level, RestoreTarget};
+    use lsr_ltx::{Header, Txid};
 
     use super::{decode, fs};
-
-    const READERS: [GoVersion; 3] = [GoVersion::V0_5_16, GoVersion::V0_5_18, GoVersion::Head];
 
     fn pages_of(path: &Path) -> Vec<String> {
         integrity_check(path).expect("integrity_check");
         hash_pages(path).expect("hash").page_hashes
     }
 
-    fn binary(version: GoVersion) -> Option<PathBuf> {
-        match go_binary(version) {
-            Ok(path) => Some(path),
-            Err(err) => {
-                println!("skipped: {version:?} is not built ({err})");
-                None
-            }
+    /// Runs `each` over the block-era builds under test, and says so when the run names none:
+    /// the Rust-to-Go direction has nothing to run then, because frame-era builds refuse
+    /// Rust's files (Go-to-Rust handover runs over every era).
+    fn for_blocks(mut each: impl FnMut(&GoBuild)) {
+        let builds = builds_in(Era::Blocks);
+        if builds.is_empty() {
+            println!("no block-era build under test: nothing to hand over");
+        }
+        for build in &builds {
+            each(build);
         }
     }
 
@@ -544,8 +546,9 @@ mod live_go {
     /// Go replicates over the Rust run's meta and replica; the app commits three more
     /// transactions; Go's first new file is the next transaction, read from the same WAL
     /// generation past its first frame, and no snapshot is taken.
-    fn resumes(version: GoVersion, truncate: bool) {
-        let Some(bin) = binary(version) else { return };
+    fn resumes(build: &GoBuild, truncate: bool) {
+        let version = build.name();
+        let bin = build.binary().expect("the build under test is present");
         let mut written = rust_run(60, truncate);
         let tip = written.points.last().expect("points").txid;
         let tip_head = newest_l0(&written.site.meta)
@@ -571,55 +574,82 @@ mod live_go {
         assert_eq!(
             first.txids.min().get(),
             tip.get() + 1,
-            "{version:?}: Go's next file"
+            "{version}: Go's next file"
         );
         let origin = first.wal.expect("origin");
         assert!(
             origin.offset() > 32,
-            "{version:?}: Go restarted the WAL read at {}",
+            "{version}: Go restarted the WAL read at {}",
             origin.offset()
         );
         assert_eq!(
             origin.salts(),
             tip_salts,
-            "{version:?}: Go read another WAL generation"
+            "{version}: Go read another WAL generation"
         );
         assert!(
             !first.txids.min().get().eq(&1),
-            "{version:?}: Go wrote a snapshot"
+            "{version}: Go wrote a snapshot"
         );
         assert_eq!(
             l9(&written.site.replica),
             snapshots,
-            "{version:?}: a new snapshot appeared"
+            "{version}: a new snapshot appeared"
         );
         let want = written.site.hash_now().expect("hash");
         let out = restore_go(&bin, &config, &written.site, "after-go.db", Target::Latest);
-        assert_eq!(pages_of(&out), want, "{version:?}");
+        assert_eq!(pages_of(&out), want, "{version}");
         let rs = written.site.dir().join("rs-after-go.db");
         restore_replica(&written.site.replica, RestoreTarget::Latest, &rs)
             .expect("sink")
             .expect("Rust restores the handed-over chain");
-        assert_eq!(
-            pages_of(&rs),
-            want,
-            "{version:?}: Rust on the combined chain"
-        );
+        assert_eq!(pages_of(&rs), want, "{version}: Rust on the combined chain");
     }
 
     #[test]
     #[ignore = "runs the pinned Go binary; just compat"]
     fn go_resumes_from_rust_meta() {
-        for version in READERS {
-            resumes(version, false);
-        }
+        for_blocks(|build| resumes(build, false));
     }
 
     #[test]
     #[ignore = "runs the pinned Go binary; just compat"]
     fn go_resumes_after_rust_checkpoint() {
-        for version in READERS {
-            resumes(version, true);
+        for_blocks(|build| resumes(build, true));
+    }
+
+    /// Every build under test, frame era included, writes a replica from a live database that
+    /// Rust restores to the pages the database held, the same pages Go's own restore returns.
+    #[test]
+    #[ignore = "runs the Go binaries; just compat"]
+    fn rust_restores_what_go_wrote() {
+        for build in builds_under_test() {
+            let name = build.name();
+            let bin = build.binary().expect("the build under test is present");
+            let mut site = Site::create(4096, 41).expect("site");
+            let config = site.dir().join("go.yml");
+            write_config(&config, &site.db, &site.replica).expect("config");
+            let mut go =
+                Replicator::start(&bin, &config, &site.dir().join("go.log")).expect("start");
+            for i in 0..40 {
+                site.commit(if i % 7 == 6 {
+                    Shape::Tiny
+                } else {
+                    Shape::Insert { bytes: 900 }
+                })
+                .expect("commit");
+                go.ensure_running().expect("Go runs");
+            }
+            wait_quiet(&mut go, &site.meta, 0).expect("Go catches up");
+            go.stop().expect("stop");
+            let want = site.hash_now().expect("hash");
+            let rs = site.dir().join("rs.db");
+            restore_replica(&site.replica, RestoreTarget::Latest, &rs)
+                .expect("sink")
+                .unwrap_or_else(|e| panic!("{name}: Rust cannot restore Go's replica: {e:?}"));
+            assert_eq!(pages_of(&rs), want, "{name}: Rust on Go's replica");
+            let go_out = restore_go(&bin, &config, &site, "go.db", Target::Latest);
+            assert_eq!(pages_of(&go_out), want, "{name}: Go on its own replica");
         }
     }
 
@@ -628,13 +658,18 @@ mod live_go {
     #[test]
     #[ignore = "runs the pinned Go binary; just compat"]
     fn rust_resumes_from_go_meta() {
-        let Some(bin) = binary(GoVersion::V0_5_18) else {
-            return;
-        };
+        for build in builds_under_test() {
+            rust_resumes(&build);
+        }
+    }
+
+    /// Go writes 40 commits and stops. Returns the site, the txid Go stopped at and the pages
+    /// the database held then.
+    fn go_writes_and_stops(build: &GoBuild, config: &Path) -> (Site, u64, Vec<String>) {
+        let bin = build.binary().expect("the build under test is present");
         let mut site = Site::create(4096, 33).expect("site");
-        let config = site.dir().join("go.yml");
-        write_config(&config, &site.db, &site.replica).expect("config");
-        let mut go = Replicator::start(&bin, &config, &site.dir().join("go.log")).expect("start");
+        write_config(config, &site.db, &site.replica).expect("config");
+        let mut go = Replicator::start(&bin, config, &site.dir().join("go.log")).expect("start");
         for i in 0..40 {
             site.commit(if i % 7 == 6 {
                 Shape::Tiny
@@ -652,24 +687,113 @@ mod live_go {
             .expect("file")
             .fields()
             .txids
-            .max();
+            .max()
+            .get();
         let at_stop = site.hash_now().expect("hash");
+        (site, go_tip, at_stop)
+    }
+
+    /// Rust restores `target` from the combined chain and the pages equal `want`.
+    fn rust_restores_combined(
+        written: &Written,
+        target: RestoreTarget,
+        want: &[String],
+        label: &str,
+    ) {
+        let out = written.site.dir().join(format!("rs-{label}.db"));
+        restore_replica(&written.site.replica, target, &out)
+            .expect("sink")
+            .map_err(|e| format!("{label}: Rust cannot restore the combined chain: {e:?}"))
+            .expect("Rust restores a Go-then-Rust chain");
+        assert_eq!(pages_of(&out), want, "{label}: Rust on the combined chain");
+    }
+
+    /// Go writes, stops; the Rust actor boots from Go's meta and replica and goes on. Rust
+    /// restores the combined chain at the end and at the txid where Go stopped. A block-era Go
+    /// restores it too; a frame-era Go refuses it (it reads only frames), and the newest
+    /// block-era build under test, when there is one, reads the frames-then-blocks chain.
+    fn rust_resumes(build: &GoBuild) {
+        let name = build.name();
+        let bin = build.binary().expect("the build under test is present");
+        let config = std::env::temp_dir().join(format!("lsr-go-{name}-{}.yml", std::process::id()));
+        let (site, go_tip, at_stop) = go_writes_and_stops(build, &config);
+        let site_config = site.dir().join("go-restore.yml");
+        write_config(&site_config, &site.db, &site.replica).expect("config");
+        drop(fs::remove_file(&config));
         let mut chain = Chain::start(site, real_now_ms().expect("clock")).expect("start");
         for _ in 0..5 {
             chain.commit(Shape::Insert { bytes: 700 }).expect("commit");
         }
         let written = chain.finish().expect("finish");
-        println!("Rust boot: {:?}", written.events.first());
+        let boot = written
+            .events
+            .iter()
+            .find(|e| matches!(e, Event::Booted { .. }))
+            .ok_or_else(|| format!("{name}: Rust never booted: {:?}", written.events))
+            .expect("a Booted event");
+        println!("{name} ({:?}): Rust boot {boot:?}", build.era());
         let want = &written.points.last().expect("points").page_hashes;
-        let latest = restore_go(&bin, &config, &written.site, "latest.db", Target::Latest);
-        assert_eq!(&pages_of(&latest), want, "Go on the combined chain");
+        rust_restores_combined(&written, RestoreTarget::Latest, want, "latest");
+        rust_restores_combined(
+            &written,
+            RestoreTarget::Txid(Txid::new(go_tip).expect("txid")),
+            &at_stop,
+            "mid",
+        );
+        match build.era() {
+            Era::Blocks => go_reads_combined(&bin, &site_config, &written, go_tip, &at_stop, "Go"),
+            Era::Frames => {
+                let out = written.site.dir().join("refused.db");
+                let result =
+                    restore_with_go(&bin, &site_config, &written.site.db, &out, Target::Latest)
+                        .expect("go runs");
+                assert!(
+                    matches!(result, GoRestore::Refused { .. }),
+                    "{name} read the combined chain: {result:?}"
+                );
+                match builds_in(Era::Blocks).pop() {
+                    Some(newest) => {
+                        let newest_bin = newest.binary().expect("the build under test is present");
+                        go_reads_combined(
+                            &newest_bin,
+                            &site_config,
+                            &written,
+                            go_tip,
+                            &at_stop,
+                            newest.name(),
+                        );
+                    }
+                    None => println!(
+                        "{name}: no block-era build under test; Rust's restore is the assertion"
+                    ),
+                }
+            }
+        }
+    }
+
+    /// `bin` restores the combined chain at Latest and at the txid where Go stopped.
+    fn go_reads_combined(
+        bin: &Path,
+        config: &Path,
+        written: &Written,
+        go_tip: u64,
+        at_stop: &[String],
+        who: &str,
+    ) {
+        let want = &written.points.last().expect("points").page_hashes;
+        let latest = restore_go(bin, config, &written.site, "latest.db", Target::Latest);
+        assert_eq!(&pages_of(&latest), want, "{who} on the combined chain");
         let mid = restore_go(
-            &bin,
-            &config,
+            bin,
+            config,
             &written.site,
             "mid.db",
-            Target::Txid { txid: go_tip.get() },
+            Target::Txid { txid: go_tip },
         );
-        assert_eq!(pages_of(&mid), at_stop, "Go at the txid where Go stopped");
+        assert_eq!(
+            pages_of(&mid),
+            at_stop,
+            "{who} at the txid where Go stopped"
+        );
     }
 }

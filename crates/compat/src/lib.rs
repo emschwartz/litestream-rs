@@ -12,6 +12,14 @@
 //! The fixtures are the contract between Go and Rust: later tasks restore them with Rust and
 //! compare per-page hashes with the manifest. Equality is on pages, never on LTX bytes.
 //!
+//! Three sets of Go builds. Pinned: [`GoVersion`]'s five, with committed fixtures and live
+//! tests, on every push (`just compat`). Releases: every upstream tag `v0.5.N` without a
+//! pre-release suffix ([`KNOWN_RELEASES`]), live tests only (`just compat-releases`). Floating:
+//! upstream `main` and any tag newer than the table (`just compat-live main`), nightly. The
+//! live tests take a [`GoBuild`] and an [`Era`]; a release that differs from its era is one
+//! row in [`QUIRKS`], and tests assert the quirk instead of skipping. Out of scope: Litestream
+//! 0.3.x and 0.4.x, a different replica format; the port reads and writes the 0.5 LTX layout only.
+//!
 //! The Rust side of the matrix is [`rsrestore`]: it restores a fixture replica with
 //! `lsr-core`'s executor over `FsStore` and `FileSink`, so tests compare Rust's pages with
 //! the pages Go wrote into the manifest. The live half (`just compat`) re-encodes every
@@ -32,7 +40,10 @@ mod rsrestore;
 mod scenario;
 mod workload;
 
-pub use binaries::{GoVersion, go_binary, workspace_root};
+pub use binaries::{
+    Era, GoBuild, GoVersion, KNOWN_RELEASES, QUIRKS, Quirk, QuirkEntry, VERSIONS_ENV, builds_in,
+    builds_under_test, go_binary, workspace_root,
+};
 pub use chain::{
     Chain, Outside, Point, STEP_MS, Shape, Site, Written, clock_ending_now, real_now_ms,
 };

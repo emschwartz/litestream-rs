@@ -1,4 +1,9 @@
-//! Locating the pinned Go binaries and the workspace.
+//! Locating the Go binaries and the workspace, and the table of which Go builds the live
+//! tests run against.
+//!
+//! [`GoVersion`] is the closed pinned set (committed fixtures need static names). The live
+//! tests take a [`GoBuild`] instead: any release tag, a commit or `main`, with the
+//! [`Era`] its name implies. [`builds_under_test`] is the one place that chooses the set.
 
 use std::path::{Path, PathBuf};
 
@@ -54,6 +59,141 @@ impl GoVersion {
     }
 }
 
+/// Which page encoding a Go build writes and reads, the one fact every live expectation
+/// depends on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Era {
+    /// LZ4 frame pages (`v0.5.N`, N up to 15): reads only frame-encoded files, so it refuses
+    /// a replica Rust wrote.
+    Frames,
+    /// LZ4 block pages (v0.5.16 and later, any commit, `main`).
+    Blocks,
+}
+
+/// The last release tag on the frame encoding.
+const LAST_FRAMES_PATCH: u32 = 15;
+
+/// A Go build the live tests run: its binary name (a tag, a short commit or `main`) and
+/// the era derived from it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GoBuild {
+    name: String,
+    era: Era,
+}
+
+impl GoBuild {
+    /// The build named `name`. A release tag `v0.5.N` with N up to 15 is [`Era::Frames`];
+    /// anything else (a later tag, a commit, `main`) is [`Era::Blocks`].
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            era: era_of(name),
+        }
+    }
+
+    /// The name used in the binary path.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The page encoding this build writes and reads.
+    pub const fn era(&self) -> Era {
+        self.era
+    }
+
+    /// The release quirk recorded for this build, if any.
+    pub fn quirk(&self) -> Option<&'static QuirkEntry> {
+        QUIRKS.iter().find(|q| q.name == self.name)
+    }
+
+    /// Where the built binary lives; an error naming the build script when absent.
+    pub fn binary(&self) -> Result<PathBuf, CompatError> {
+        binary_named(&self.name)
+    }
+}
+
+impl From<GoVersion> for GoBuild {
+    fn from(version: GoVersion) -> Self {
+        Self::new(version.name())
+    }
+}
+
+fn era_of(name: &str) -> Era {
+    let patch = name
+        .strip_prefix("v0.5.")
+        .filter(|n| !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()))
+        .and_then(|n| n.parse::<u32>().ok());
+    match patch {
+        Some(n) if n <= LAST_FRAMES_PATCH => Era::Frames,
+        Some(_) | None => Era::Blocks,
+    }
+}
+
+/// How a release differs from its era in a way a test sees. Tests assert the behaviour, they
+/// never skip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Quirk {
+    /// The current Go toolchain cannot build the tag (default `GOTOOLCHAIN`, no source patch).
+    Unbuildable,
+}
+
+/// One row of [`QUIRKS`].
+#[derive(Debug, Clone, Copy)]
+pub struct QuirkEntry {
+    /// The release tag.
+    pub name: &'static str,
+    /// What differs.
+    pub quirk: Quirk,
+    /// Why, read from upstream's source or history (or the build error line), with the
+    /// commit or issue when found.
+    pub reason: &'static str,
+}
+
+/// Every release that differs from its era, or cannot be built. Empty means every release
+/// behaves as its era says.
+pub const QUIRKS: &[QuirkEntry] = &[];
+
+/// Every upstream release tag `v0.5.N` (no pre-release suffix) the table knows. A tag in the
+/// clone that is not here fails `every_release_tag_is_known`, so a new upstream release
+/// needs an era decision here, never a silent drop.
+pub const KNOWN_RELEASES: [&str; 19] = [
+    "v0.5.0", "v0.5.1", "v0.5.2", "v0.5.3", "v0.5.4", "v0.5.5", "v0.5.6", "v0.5.7", "v0.5.8",
+    "v0.5.9", "v0.5.10", "v0.5.11", "v0.5.12", "v0.5.13", "v0.5.14", "v0.5.15", "v0.5.16",
+    "v0.5.17", "v0.5.18",
+];
+
+/// The environment variable naming the builds to test, space separated.
+pub const VERSIONS_ENV: &str = "LSR_COMPAT_VERSIONS";
+
+/// The builds the live tests run against: the names in `LSR_COMPAT_VERSIONS` when set
+/// (`releases` stands for [`KNOWN_RELEASES`]; minus any the quirk table lists as unbuildable),
+/// else the pinned five.
+pub fn builds_under_test() -> Vec<GoBuild> {
+    match std::env::var(VERSIONS_ENV) {
+        Ok(names) if !names.trim().is_empty() => names
+            .split_whitespace()
+            .flat_map(|n| {
+                if n == "releases" {
+                    KNOWN_RELEASES.to_vec()
+                } else {
+                    vec![n]
+                }
+            })
+            .map(GoBuild::new)
+            .filter(|b| b.quirk().is_none_or(|q| q.quirk != Quirk::Unbuildable))
+            .collect(),
+        Ok(_) | Err(_) => GoVersion::ALL.into_iter().map(GoBuild::from).collect(),
+    }
+}
+
+/// The builds of `builds_under_test` in `era`.
+pub fn builds_in(era: Era) -> Vec<GoBuild> {
+    builds_under_test()
+        .into_iter()
+        .filter(|b| b.era() == era)
+        .collect()
+}
+
 /// The workspace root (the worktree this crate was built in).
 pub fn workspace_root() -> PathBuf {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -77,7 +217,11 @@ fn upstream_bin_dir() -> Option<PathBuf> {
 
 /// Where the built binary of `version` lives; an error naming the build script when absent.
 pub fn go_binary(version: GoVersion) -> Result<PathBuf, CompatError> {
-    let file = format!("litestream-{}", version.name());
+    binary_named(version.name())
+}
+
+fn binary_named(name: &str) -> Result<PathBuf, CompatError> {
+    let file = format!("litestream-{name}");
     let path = upstream_bin_dir().map_or_else(|| PathBuf::from(&file), |d| d.join(&file));
     if path.is_file() {
         Ok(path)
@@ -96,6 +240,37 @@ mod tests {
             assert_eq!(GoVersion::parse(v.name()), Some(v));
         }
         assert_eq!(GoVersion::parse("v9"), None);
+    }
+
+    #[test]
+    fn era_follows_the_name() {
+        for (name, era) in [
+            ("v0.5.0", Era::Frames),
+            ("v0.5.9", Era::Frames),
+            ("v0.5.15", Era::Frames),
+            ("v0.5.16", Era::Blocks),
+            ("v0.5.100", Era::Blocks),
+            ("041a8c3", Era::Blocks),
+            ("main", Era::Blocks),
+            ("v0.5.3-beta3", Era::Blocks),
+        ] {
+            assert_eq!(GoBuild::new(name).era(), era, "{name}");
+        }
+    }
+
+    #[test]
+    fn pinned_versions_agree_with_their_era() {
+        for v in GoVersion::ALL {
+            let frames = GoBuild::from(v).era() == Era::Frames;
+            assert_eq!(frames, v.writes_lz4_frames(), "{}", v.name());
+        }
+    }
+
+    #[test]
+    fn the_known_table_is_ordered_and_complete() {
+        for (patch, name) in KNOWN_RELEASES.iter().enumerate() {
+            assert_eq!(*name, format!("v0.5.{patch}"));
+        }
     }
 
     #[test]
