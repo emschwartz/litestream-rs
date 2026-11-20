@@ -42,4 +42,6 @@ pub use store::{
     FaultHandle, FaultShape, Faults, Lost, Stage, StageHandle, Tap, TapCounts, TapEvent, TapLog,
     Yield,
 };
-pub use world::{CrashPlan, RemoteStore, StagingStore, TickEnd, World, pick_crash};
+pub use world::{
+    CrashPlan, RemoteStore, StagedEditError, StagingStore, TickEnd, World, pick_crash,
+};

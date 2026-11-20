@@ -11,13 +11,12 @@ fn local() -> Txid {
 }
 
 /// Every cause, pinned by an exhaustive match: a new cause fails to compile here.
-fn all() -> [SnapshotCause; 11] {
+fn all() -> [SnapshotCause; 10] {
     let causes = [
         SnapshotCause::FirstSync,
         SnapshotCause::BehindRemote { local: local() },
         SnapshotCause::LocalTipUnreadable,
         SnapshotCause::WalMissing,
-        SnapshotCause::PageSizeChanged,
         SnapshotCause::GenerationChanged,
         SnapshotCause::PrevFrameMismatch,
         SnapshotCause::LastPageMismatch,
@@ -34,7 +33,6 @@ fn all() -> [SnapshotCause; 11] {
             | SnapshotCause::BehindRemote { .. }
             | SnapshotCause::LocalTipUnreadable
             | SnapshotCause::WalMissing
-            | SnapshotCause::PageSizeChanged
             | SnapshotCause::GenerationChanged
             | SnapshotCause::PrevFrameMismatch
             | SnapshotCause::LastPageMismatch
@@ -45,10 +43,6 @@ fn all() -> [SnapshotCause; 11] {
     }
     causes
 }
-
-/// Scenarios that fail on a known engine defect, run by the ignored `review_`
-/// tests below instead of the green sweep.
-const KNOWN_DEFECT: [&str; 1] = ["vacuum_page_size_change"];
 
 fn run(make: fn() -> Scenario) {
     let result = run_scenario(&make());
@@ -67,24 +61,17 @@ fn every_scenario_runs() {
     let mut failures = Vec::new();
     for cause in all() {
         for make in scenario_of(cause) {
-            let scenario = make();
-            if KNOWN_DEFECT.contains(&scenario.name) {
-                continue;
-            }
-            if let Err(message) = run_scenario(&scenario) {
+            if let Err(message) = run_scenario(&make()) {
                 failures.push(message);
             }
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
-/// Finding 1: after a page-size change the replica holds level-0 files of two
-/// page sizes; compaction halts `RemoteCorrupt` and a restore fails with
-/// "page size 2048 where the chain began with 512". The engine should start a
-/// new generation (or refuse) when the page size changes.
-/// Replay: `just sim-replay 0x0000000000000006 17`.
+
+/// A page-size change is no snapshot cause: a replica prefix holds one page
+/// size, so the engine halts at boot and the old states still restore.
 #[test]
-#[ignore = "finding 1: page size change leaves mixed page sizes in level 0"]
-fn review_vacuum_page_size_change_restores() {
+fn a_page_size_change_halts_and_the_old_states_restore() {
     run(vacuum_page_size_change);
 }

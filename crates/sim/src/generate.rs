@@ -171,8 +171,10 @@ pub struct Weights {
     pub request_snapshot: u32,
     /// [`Op::Restore`].
     pub restore: u32,
-    /// Whether a vacuum may change the page size. Maintenance once halted on a
-    /// chain that spans a page-size change; the recover fixes on main cured it.
+    /// Whether a vacuum may change the page size. A replica prefix holds one
+    /// page size, so after a resize the engine halts at its next boot
+    /// (`HaltCause::PageSizeChanged`) and the states acknowledged before it
+    /// still restore; the runner expects that halt.
     pub vacuum_resizes: bool,
 }
 

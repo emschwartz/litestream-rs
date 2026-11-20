@@ -26,7 +26,7 @@ use crate::resources::{
 };
 use crate::seed::{Seed, replay_line};
 use crate::sqlite::{CrashKind, ReaderId};
-use crate::world::{CrashPlan, StagedCopy, TickEnd, World};
+use crate::world::{CrashPlan, StagedCopy, StagedEditError, TickEnd, World};
 
 /// Ticks a drain may take before it counts as stuck.
 const DRAIN_TICKS: u32 = 10_000;
@@ -400,7 +400,7 @@ impl Runner {
 
     fn tick(&mut self) -> Result<(), Violation> {
         match self.step(None)?.0 {
-            Step::Halted(_) if self.allow_halt => Ok(()),
+            Step::Halted(cause) if self.halt_expected(cause) => Ok(()),
             Step::Halted(cause) => Err(bug_fault(format!("the engine halted: {cause:?}"))),
             Step::Ran | Step::Drained | Step::Crashed => Ok(()),
         }
@@ -433,7 +433,7 @@ impl Runner {
                     self.reboot();
                     self.actor.begin_shutdown(self.now());
                 }
-                Step::Halted(_) if self.allow_halt => return Ok(()),
+                Step::Halted(cause) if self.halt_expected(cause) => return Ok(()),
                 Step::Halted(cause) => {
                     return Err(bug_fault(format!(
                         "the engine halted in a drain: {cause:?}"
@@ -516,13 +516,51 @@ impl Runner {
         self.app_commit(pages, new_size);
     }
 
+    /// SQLite leaves WAL mode, which a page-size change needs, only with
+    /// every connection closed, the engine's read pin among them
+    /// (`sqlite_rules::our_reader_blocks_leaving_wal_mode`). So the operator stops
+    /// the engine, the app ends its readers and vacuums, and the engine starts
+    /// again; a write transaction the app holds refuses the vacuum.
+    fn resize(&mut self, new: PageSize) {
+        self.w.crash(CrashKind::Process);
+        for id in std::mem::take(&mut self.readers) {
+            self.w.sqlite.stranger_reader_end(id);
+        }
+        if self.w.app_vacuum(new).is_some() {
+            self.spilled.clear();
+        }
+        self.crashed(CrashKind::Process);
+    }
+
+    /// The one page size of every file staged or published: a replica prefix
+    /// holds one, so a change the replica did not follow halts the engine
+    /// before it stages anything. `None` while there is no file.
+    fn replica_page_size(&self) -> Result<Option<PageSize>, Violation> {
+        let sizes = self.w.page_sizes().map_err(bug_fault)?;
+        let Some((_, first)) = sizes.first() else {
+            return Ok(None);
+        };
+        if let Some((key, other)) = sizes.iter().find(|(_, size)| size != first) {
+            return Err(bug_fault(format!(
+                "{key} has page size {other:?} where the replica has {first:?}"
+            )));
+        }
+        Ok(Some(*first))
+    }
+
+    /// Whether a halt is one the run expects: a scenario's, or a page-size
+    /// change between the files staged or published and the database.
+    fn halt_expected(&self, cause: HaltCause) -> bool {
+        if let HaltCause::PageSizeChanged { was, now } = cause {
+            return now == self.w.sqlite.page_size()
+                && self.replica_page_size().ok().flatten() == Some(was);
+        }
+        self.allow_halt
+    }
+
     fn vacuum(&mut self, to: Option<PageSize>) {
         match to {
-            Some(new) => {
-                if self.w.app_vacuum(new).is_some() {
-                    self.spilled.clear();
-                }
-            }
+            Some(new) => self.resize(new),
             None if self.spilled.is_empty() => {
                 let size = self.w.sqlite.db_size();
                 let smaller = size > 1 && below(&self.rng, 3) == 0;
@@ -594,6 +632,7 @@ impl Runner {
     fn restore_all(&mut self) -> Result<(), Violation> {
         self.report.checks = self.report.checks.saturating_add(1);
         self.w.check()?;
+        self.replica_page_size()?;
         if self.record {
             self.report.seen.push(Seen::Oracle);
         }
@@ -605,10 +644,7 @@ impl Runner {
         self.crashed(kind);
     }
 
-    fn scenario_step(
-        what: &str,
-        done: Result<bool, lsr_core::StoreError>,
-    ) -> Result<(), Violation> {
+    fn scenario_step(what: &str, done: Result<bool, StagedEditError>) -> Result<(), Violation> {
         match done {
             Ok(true) => Ok(()),
             Ok(false) => Err(bug_fault(format!(
@@ -621,15 +657,18 @@ impl Runner {
     fn meta(&mut self, op: MetaOp) -> Result<(), Violation> {
         let w = &self.w;
         let done = match op {
-            MetaOp::Save => w.copy_staging().map(|copy| {
-                self.saved = Some(copy);
-                true
-            }),
+            MetaOp::Save => w
+                .copy_staging()
+                .map(|copy| {
+                    self.saved = Some(copy);
+                    true
+                })
+                .map_err(StagedEditError::from),
             MetaOp::Restore => match &self.saved {
                 Some(copy) => w.replace_staging(copy).map(|()| true),
                 None => Ok(false),
             },
-            MetaOp::DeleteNewest => w.delete_newest_staged(),
+            MetaOp::DeleteNewest => w.delete_newest_staged().map_err(StagedEditError::from),
             MetaOp::FlipNewestByte => w.edit_newest_staged(|bytes| {
                 let middle = bytes.len() / 2;
                 if let Some(byte) = bytes.get_mut(middle) {
@@ -734,7 +773,7 @@ impl Runner {
             let spins = self.report.spins;
             let (step, stats) = self.step(None)?;
             if let Step::Halted(cause) = step {
-                if self.allow_halt {
+                if self.halt_expected(cause) {
                     return Ok(());
                 }
                 return Err(bug_fault(format!(
@@ -758,7 +797,7 @@ impl Runner {
         for _ in 0..IDLE_TICKS {
             let (step, stats) = self.step(None)?;
             if let Step::Halted(cause) = step {
-                if self.allow_halt {
+                if self.halt_expected(cause) {
                     return Ok(());
                 }
                 return Err(bug_fault(format!(
@@ -775,7 +814,8 @@ impl Runner {
         self.drain()?;
         self.restore_all()?;
         memory(self.w.remote_tap.counts(), self.w.staging_tap.counts())?;
-        self.idle()
+        self.idle()?;
+        self.replica_page_size().map(drop)
     }
 }
 

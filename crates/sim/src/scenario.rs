@@ -26,8 +26,6 @@ pub enum CauseKind {
     LocalTipUnreadable,
     /// [`SnapshotCause::WalMissing`].
     WalMissing,
-    /// [`SnapshotCause::PageSizeChanged`].
-    PageSizeChanged,
     /// [`SnapshotCause::GenerationChanged`].
     GenerationChanged,
     /// [`SnapshotCause::PrevFrameMismatch`].
@@ -49,7 +47,6 @@ impl From<&SnapshotCause> for CauseKind {
             SnapshotCause::BehindRemote { .. } => Self::BehindRemote,
             SnapshotCause::LocalTipUnreadable => Self::LocalTipUnreadable,
             SnapshotCause::WalMissing => Self::WalMissing,
-            SnapshotCause::PageSizeChanged => Self::PageSizeChanged,
             SnapshotCause::GenerationChanged => Self::GenerationChanged,
             SnapshotCause::PrevFrameMismatch => Self::PrevFrameMismatch,
             SnapshotCause::LastPageMismatch => Self::LastPageMismatch,
@@ -159,7 +156,6 @@ pub fn scenario_of(cause: SnapshotCause) -> &'static [fn() -> Scenario] {
         SnapshotCause::BehindRemote { .. } => &[newest_staged_file_lost, restored_old_meta],
         SnapshotCause::LocalTipUnreadable => &[tip_byte_flip, tip_truncated, tip_no_wal_origin],
         SnapshotCause::WalMissing => &[wal_deleted_while_down, wal_header_torn],
-        SnapshotCause::PageSizeChanged => &[vacuum_page_size_change],
         SnapshotCause::GenerationChanged => &[
             app_checkpoint_while_down,
             restart_during_read_lock_lapse,
@@ -348,23 +344,30 @@ pub fn wal_header_torn() -> Scenario {
     after_restart_then("wal_header_torn", torn, heal, CauseKind::WalMissing)
 }
 
-/// A VACUUM into another page size while the engine is down. The boot names
-/// the cause, but the replica then holds level-0 files of two page sizes:
-/// compaction halts with `RemoteCorrupt` and a restore fails (finding 1, an
-/// engine defect), so the green run leaves this scenario out.
+/// A VACUUM into another page size while the engine is down. A replica
+/// prefix holds one page size, so the boot halts before it stages anything;
+/// the run then checks that nothing of the new size was staged or published
+/// and that every state from before the change still restores.
 #[must_use]
 pub fn vacuum_page_size_change() -> Scenario {
-    let vacuum = vec![
-        Op::OurReader { begin: false },
-        Op::Vacuum {
-            page_size: PageSize::new(2048),
-        },
-        commit(1, false),
-    ];
-    after_restart(
+    let changed = HaltCause::PageSizeChanged {
+        was: PageSize::MIN,
+        now: PageSize::new(2048).unwrap_or(PageSize::MIN),
+    };
+    build(
         "vacuum_page_size_change",
-        vacuum,
-        CauseKind::PageSizeChanged,
+        vec![
+            synced(),
+            vec![
+                Op::Vacuum {
+                    page_size: PageSize::new(2048),
+                },
+                commit(1, false),
+            ],
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        vec![Expect::Halt(changed), Expect::Oracle],
     )
 }
 

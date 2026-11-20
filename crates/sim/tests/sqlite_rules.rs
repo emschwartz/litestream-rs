@@ -348,6 +348,44 @@ mod rules {
         }
     }
 
+    /// A page-size change needs the database out of WAL mode, and SQLite
+    /// leaves WAL mode only when no other connection holds it: while the
+    /// engine's read transaction is open the change fails, in SQLite and in
+    /// the model. With the engine's connection closed both allow it.
+    #[test]
+    fn our_reader_blocks_leaving_wal_mode() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.db");
+        let app = open(&path);
+        app.execute_batch(&format!(
+            "PRAGMA page_size = {PAGE_SIZE}; PRAGMA journal_mode = WAL;
+             CREATE TABLE t0 (v BLOB); INSERT INTO t0 VALUES (randomblob(8));"
+        ))
+        .unwrap();
+        let ours = open(&path);
+        begin_read(&ours);
+        let leave = |conn: &Connection| {
+            conn.query_row("PRAGMA journal_mode = DELETE", [], |row| {
+                row.get::<_, String>(0)
+            })
+        };
+        let held = leave(&app);
+        assert!(
+            held.as_ref()
+                .is_err_and(|err| err.to_string().contains("locked")),
+            "{held:?}"
+        );
+        drop(ours);
+        assert_eq!(leave(&app).unwrap(), "delete");
+
+        let bigger = PageSize::new(1024).unwrap();
+        let sim = SimSqlite::new(page_size(), 6, 1);
+        assert!(sim.our_reader_begin());
+        assert!(!sim.rewrite_page_size(bigger));
+        assert!(sim.our_reader_end());
+        assert!(sim.rewrite_page_size(bigger));
+    }
+
     #[test]
     fn pinned_above_zero_blocks_all_modes() {
         let mut pair = Pair::new(1);

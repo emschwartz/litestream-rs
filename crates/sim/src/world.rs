@@ -29,11 +29,25 @@ pub type StagingStore = Faults<Yield<Tap<Stage<MemStore>>>>;
 /// The replica store the actor sees.
 pub type RemoteStore = Faults<Yield<Tap<MemStore>>>;
 
-/// The exact stamp the listing carried (the sim's stores always give one), so
-/// a rewrite keeps the file's creation time.
-fn listed_at(info: &FileInfo) -> Timestamp {
+/// Why the harness could not rewrite a staged file.
+#[derive(Debug, thiserror::Error)]
+pub enum StagedEditError {
+    /// The store refused.
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    /// The listing gave no exact stamp, so a rewrite would lose the file's
+    /// creation time. The sim's stores always give one: this is the harness
+    /// broken, not a fault to tolerate.
+    #[error("{0} was listed without an exact stamp")]
+    NoStamp(FileKey),
+}
+
+/// The exact stamp the listing carried, so a rewrite keeps the file's
+/// creation time.
+fn listed_at(info: &FileInfo) -> Result<Timestamp, StagedEditError> {
     info.exact_stamp()
-        .map_or(Timestamp::from_unix_millis(0), |stamp| stamp.at())
+        .map(|stamp| stamp.at())
+        .ok_or(StagedEditError::NoStamp(info.key))
 }
 
 fn is_full_image(bytes: &[u8]) -> bool {
@@ -415,8 +429,9 @@ impl World {
     /// Replaces the staging directory with `copy`, as a restored backup would.
     ///
     /// # Errors
-    /// The store's error when it cannot delete or write.
-    pub fn replace_staging(&self, copy: &StagedCopy) -> Result<(), StoreError> {
+    /// The store's error when it cannot delete or write; [`StagedEditError::NoStamp`]
+    /// when a saved file has no exact stamp.
+    pub fn replace_staging(&self, copy: &StagedCopy) -> Result<(), StagedEditError> {
         self.wipe_staging()?;
         for (info, bytes) in &copy.0 {
             self.write_staged(info, bytes)?;
@@ -451,8 +466,12 @@ impl World {
     /// there is none.
     ///
     /// # Errors
-    /// The store's error when it cannot list, read or write.
-    pub fn edit_newest_staged(&self, edit: impl FnOnce(&mut Vec<u8>)) -> Result<bool, StoreError> {
+    /// The store's error when it cannot list, read or write;
+    /// [`StagedEditError::NoStamp`] when the file has no exact stamp.
+    pub fn edit_newest_staged(
+        &self,
+        edit: impl FnOnce(&mut Vec<u8>),
+    ) -> Result<bool, StagedEditError> {
         let Some(info) = self.newest_staged()? else {
             return Ok(false);
         };
@@ -477,8 +496,8 @@ impl World {
     /// or it cannot be re-encoded.
     ///
     /// # Errors
-    /// The store's error when it cannot list, read or write.
-    pub fn strip_newest_origin(&self) -> Result<bool, StoreError> {
+    /// As [`Self::edit_newest_staged`].
+    pub fn strip_newest_origin(&self) -> Result<bool, StagedEditError> {
         let mut done = false;
         let found = self.edit_newest_staged(|bytes| {
             if let Some(stripped) = without_origin(bytes) {
@@ -498,6 +517,33 @@ impl World {
         Ok(files)
     }
 
+    /// The page size each staged and replica file's header names, a file
+    /// whose header does not decode left out.
+    ///
+    /// # Errors
+    /// What the store said when it could not list or read.
+    pub fn page_sizes(&self) -> Result<Vec<(FileKey, PageSize)>, String> {
+        use lsr_core::{Inventory, ObjectStore, ReadLen};
+        use lsr_ltx::{HEADER_LEN, Header};
+        let len = u32::try_from(HEADER_LEN).ok().and_then(ReadLen::new);
+        let mut out = Vec::new();
+        for store in [&self.staging_raw, &self.remote_raw] {
+            let inventory = block_on(Inventory::load(store)).map_err(|err| err.to_string())?;
+            for info in inventory.files() {
+                let Some(len) = len else { break };
+                let bytes =
+                    block_on(store.read(&info.key, 0, len)).map_err(|err| err.to_string())?;
+                let header = <[u8; HEADER_LEN]>::try_from(bytes)
+                    .ok()
+                    .and_then(|raw| Header::decode(&raw).ok());
+                if let Some(header) = header {
+                    out.push((info.key, header.page_size()));
+                }
+            }
+        }
+        Ok(out)
+    }
+
     fn read_staged(&self, key: &FileKey) -> Result<Vec<u8>, StoreError> {
         use lsr_core::{ObjectStore, ReadLen};
         let Some(chunk) = ReadLen::new(1 << 20) else {
@@ -515,9 +561,9 @@ impl World {
         }
     }
 
-    fn write_staged(&self, info: &FileInfo, bytes: &[u8]) -> Result<(), StoreError> {
+    fn write_staged(&self, info: &FileInfo, bytes: &[u8]) -> Result<(), StagedEditError> {
         use lsr_core::{ObjectStore, Upload};
-        let mut up = block_on(self.staging_raw.begin_upload(&info.key, listed_at(info)))?;
+        let mut up = block_on(self.staging_raw.begin_upload(&info.key, listed_at(info)?))?;
         block_on(up.write(bytes))?;
         block_on(up.commit())?;
         Ok(())
