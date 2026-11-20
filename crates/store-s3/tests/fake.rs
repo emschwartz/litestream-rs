@@ -2,11 +2,15 @@
 
 #[cfg(test)]
 mod common;
+#[cfg(test)]
+#[path = "common/wire.rs"]
+mod wire;
 
 // The helpers are test code only by cfg, which is what clippy.toml's allow-*-in-tests reads.
 #[cfg(test)]
 mod cases {
     use super::common::*;
+    use super::wire::*;
     use lsr_core::{CorruptCause, FileKey, Level, PartNumber, ReadLen, StoreError, StoreOp};
     use lsr_store_s3::{
         EtagCheck, RequestBuilder, Transport, UploadId, check_etag, classify, object_key,
