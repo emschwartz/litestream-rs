@@ -73,7 +73,7 @@ pub enum Stopped {
         /// Staged files the replica was not confirmed to hold.
         staged_not_uploaded: u32,
     },
-    /// Already stopped by a cause (a second writer, or a configured stop) before the drain.
+    /// Already stopped by a cause (another writer, or a configured stop) before the drain.
     Stopped(HaltCause),
     /// The thread is not there.
     Gone(Gone),
@@ -161,7 +161,7 @@ pub struct Health {
     /// Why the next sync is a snapshot, when it is one.
     pub resnapshot: Option<SnapshotCause>,
     /// Checkpoints someone else ran: the application promised not to (PLAN section 6).
-    pub foreign_checkpoints: u64,
+    pub app_checkpoints_ran: u64,
     /// What the application's checkpoints did, those that cannot run included; read it as text
     /// through [`Health::app_notice`].
     pub app_checkpoints: AppCheckpoints,
@@ -264,7 +264,7 @@ impl Health {
             wal_bytes: 0,
             db_bytes: 0,
             resnapshot: None,
-            foreign_checkpoints: 0,
+            app_checkpoints_ran: 0,
             app_checkpoints: AppCheckpoints::NONE,
             counters: Counters {
                 ticks: 0,

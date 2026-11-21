@@ -120,7 +120,7 @@ pub struct Listing {
     pub next: Option<TxidRange>,
     /// Names in the level that are not LTX keys and sort within this page's
     /// span (after the cursor, up to the page's last name; to the end on the
-    /// final page). Summed over a full paging, every foreign name counts once.
+    /// final page). Summed over a full paging, every unrecognized name counts once.
     pub skipped: usize,
 }
 
@@ -139,14 +139,14 @@ impl Listing {
 /// Cuts one page out of everything a level holds.
 ///
 /// Stores that can enumerate a whole level (a directory, a map) call this so
-/// the paging and foreign-name rules live in one place. Foreign names are
+/// the paging and unrecognized-name rules live in one place. Unrecognized names are
 /// ordered against key names byte-wise, which is key order because the
 /// transaction ids are fixed-width. A scratch name ([`is_scratch_name`]) in
-/// `foreign` is dropped: it is not foreign.
+/// `unrecognized` is dropped: it is not unrecognized.
 #[must_use]
 pub fn build_listing(
     mut files: Vec<FileInfo>,
-    foreign: &[String],
+    unrecognized: &[String],
     after: Option<TxidRange>,
     limit: PageLimit,
 ) -> Listing {
@@ -161,7 +161,7 @@ pub fn build_listing(
         .flatten();
     let lower = after.map(file_name);
     let upper = next.map(file_name);
-    let skipped = foreign
+    let skipped = unrecognized
         .iter()
         .filter(|name| !is_scratch_name(name))
         .filter(|name| {
@@ -595,27 +595,27 @@ mod tests {
     }
 
     #[test]
-    fn scratch_names_are_not_counted_as_foreign() {
-        let foreign: Vec<String> = [
+    fn scratch_names_are_not_counted_as_unrecognized() {
+        let unrecognized: Vec<String> = [
             "0000000000000003-0000000000000003.ltx.tmp",
             "0000000000000003-0000000000000003.ltx.1-0.tmp",
         ]
         .map(str::to_owned)
         .to_vec();
-        let listing = build_listing(vec![info(1, 1)], &foreign, None, PageLimit::MAX);
+        let listing = build_listing(vec![info(1, 1)], &unrecognized, None, PageLimit::MAX);
         assert_eq!(listing.skipped, 0);
     }
 
     #[test]
-    fn foreign_names_are_counted_in_the_span_they_sort_into() {
-        let foreign: Vec<String> = ["0", "0000000000000003-0000000000000003.ltx.bak", "zz"]
+    fn unrecognized_names_are_counted_in_the_span_they_sort_into() {
+        let unrecognized: Vec<String> = ["0", "0000000000000003-0000000000000003.ltx.bak", "zz"]
             .map(str::to_owned)
             .to_vec();
         let files = vec![info(1, 1), info(5, 5)];
         let limit = PageLimit::new(1).unwrap();
-        let first = build_listing(files.clone(), &foreign, None, limit);
+        let first = build_listing(files.clone(), &unrecognized, None, limit);
         assert_eq!((first.files.len(), first.skipped), (1, 1));
-        let second = build_listing(files, &foreign, first.next, limit);
+        let second = build_listing(files, &unrecognized, first.next, limit);
         assert_eq!(
             (second.files.len(), second.skipped, second.next),
             (1, 2, None)

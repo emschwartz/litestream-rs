@@ -52,9 +52,9 @@ mod review {
     }
 
     /// The store's own scratch from a dropped upload is reported as a stray
-    /// foreign name, and nothing ever removes it.
+    /// unrecognized name, and nothing ever removes it.
     #[test]
-    fn a_dropped_upload_leaves_no_foreign_name() {
+    fn a_dropped_upload_leaves_no_unrecognized_name() {
         let dir = tempfile::tempdir().unwrap();
         let store = FsStore::new(dir.path());
         let target = key(0, 1, 1);
@@ -66,7 +66,10 @@ mod review {
             up.write(b"half").await.unwrap();
         });
         let listing = block_on(store.list(Level::ZERO, None, PageLimit::MAX)).unwrap();
-        assert_eq!(listing.skipped, 0, "own scratch counted as a foreign name");
+        assert_eq!(
+            listing.skipped, 0,
+            "own scratch counted as an unrecognized name"
+        );
     }
 
     /// The contract: a read at or past the end returns no bytes. An offset above
@@ -109,7 +112,7 @@ mod review {
 
     /// Go's file client lists a symlink named like a key (Readdir plus
     /// ParseFilename, no type check) and reads through it. This store calls it
-    /// foreign, so Latest plans to an earlier state and says Plan: shorter than
+    /// unrecognized, so Latest plans to an earlier state and says Plan: shorter than
     /// Go's restore of the same directory, and read() disagrees with list().
     #[cfg(unix)]
     #[test]

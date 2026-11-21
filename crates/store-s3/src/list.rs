@@ -4,7 +4,7 @@
 //!
 //! The cursor is sent as `start-after`, later pages as `continuation-token`.
 //! Pages are gathered until `limit` files and one more key, which proves the
-//! listing goes on, are in hand; the paging and foreign-name rules then belong
+//! listing goes on, are in hand; the paging and unrecognized-name rules then belong
 //! to [`build_listing`](lsr_core::build_listing), which this module feeds and
 //! does not second-guess. Every fault is an error: a page that does not parse,
 //! a truncated page without a token, keys out of order or outside the prefix,
@@ -41,13 +41,13 @@ fn invalid_data() -> StoreError {
     }
 }
 
-/// The lowest and highest name a page holds, files and foreign names together.
+/// The lowest and highest name a page holds, files and unrecognized names together.
 fn name_bounds(page: &ListPage) -> Option<(String, String)> {
     let names: Vec<String> = page
         .files
         .iter()
         .map(|file| file_name(file.key.range()))
-        .chain(page.foreign.iter().cloned())
+        .chain(page.unrecognized.iter().cloned())
         .collect();
     let low = names.iter().min()?.clone();
     let high = names.iter().max()?.clone();
@@ -62,7 +62,7 @@ struct Run<'a, T> {
     want: usize,
     page_size: PageLimit,
     pending: VecDeque<ListedFile>,
-    foreign: Vec<String>,
+    unrecognized: Vec<String>,
     token: Option<String>,
     first_page_done: bool,
     exhausted: bool,
@@ -83,7 +83,7 @@ impl<'a, T: Transport> Run<'a, T> {
             want,
             page_size,
             pending: VecDeque::new(),
-            foreign: Vec::new(),
+            unrecognized: Vec::new(),
             token: None,
             first_page_done: false,
             exhausted: false,
@@ -126,7 +126,7 @@ impl<'a, T: Transport> Run<'a, T> {
         self.exhausted = page.next_token.is_none();
         self.token = page.next_token;
         self.pending.extend(page.files);
-        self.foreign.extend(page.foreign);
+        self.unrecognized.extend(page.unrecognized);
         Ok(())
     }
 
@@ -142,7 +142,7 @@ impl<'a, T: Transport> Run<'a, T> {
                 listed: ListedTime::LastModified(listed.last_modified),
             })
             .collect();
-        build_listing(files, &self.foreign, after, limit)
+        build_listing(files, &self.unrecognized, after, limit)
     }
 }
 

@@ -653,7 +653,7 @@ pub fn recover_traced(tip: Option<Tip<'_>>, wal: &WalView, remote: Option<Txid>)
                 after: Some(ahead),
                 cause: SnapshotCause::BehindRemote { local: txid },
             },
-            Tip::Running(..) => Recovered::Halt(HaltCause::ForeignWriter),
+            Tip::Running(..) => Recovered::Halt(HaltCause::OtherWriter),
         });
     }
     let after = Some(remote.map_or(txid, |remote| remote.max(txid)));

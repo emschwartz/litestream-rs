@@ -3,7 +3,7 @@
 //! A history is a pure function of its seed: it draws from one sequential
 //! stream and looks at no state, so the first `k` operations of a history of
 //! `n` are the history of `k` (what [`crate::shrink`] relies on). Whatever
-//! needs the world's state (which pages a commit touches, which stranger ends)
+//! needs the world's state (which pages a commit touches, which other process ends)
 //! is decided when the runner applies the operation, from the step number.
 
 use std::io::ErrorKind;
@@ -13,7 +13,7 @@ use lsr_core::{Entropy, SeededEntropy, SourceError, SourceOp, StoreError, StoreO
 use lsr_ltx::PageSize;
 
 use crate::seed::Seed;
-use crate::sqlite::{CrashKind, StrangerMode};
+use crate::sqlite::{CrashKind, OtherProcessMode};
 use crate::store::FaultShape;
 
 /// Which store a fault is scheduled on.
@@ -89,13 +89,13 @@ pub enum Op {
         /// The new page size.
         page_size: Option<PageSize>,
     },
-    /// A stranger begins a read transaction, or the oldest one ends.
-    StrangerReader {
+    /// Another process begins a read transaction, or the oldest one ends.
+    OtherProcessReader {
         /// Begin (otherwise end).
         begin: bool,
     },
     /// A checkpoint from outside the engine.
-    StrangerCheckpoint(StrangerMode),
+    OtherProcessCheckpoint(OtherProcessMode),
     /// The next tick is cut short, or the machine fails right after it.
     Crash(CrashKind),
     /// A store call fails `ahead` calls from now.
@@ -169,10 +169,10 @@ pub enum MetaOp {
 pub enum RemoteOp {
     /// Another writer puts a level-0 file one transaction past the newest:
     /// the newest file's pages under the next transaction.
-    PutForeign,
+    PutUnrecognized,
     /// The operator removes the newest level-0 file, which is what
-    /// [`RemoteOp::PutForeign`] put when it ran last.
-    RemoveForeign,
+    /// [`RemoteOp::PutUnrecognized`] put when it ran last.
+    RemoveUnrecognized,
     /// The bucket rolls back to an earlier version: every file, at every level,
     /// that ends at the newest transaction is gone, and the replica
     /// legitimately loses what the engine had acknowledged.
@@ -212,10 +212,10 @@ pub struct Weights {
     pub rollback: u32,
     /// [`Op::Vacuum`].
     pub vacuum: u32,
-    /// [`Op::StrangerReader`].
-    pub stranger_reader: u32,
-    /// [`Op::StrangerCheckpoint`].
-    pub stranger_checkpoint: u32,
+    /// [`Op::OtherProcessReader`].
+    pub other_process_reader: u32,
+    /// [`Op::OtherProcessCheckpoint`].
+    pub other_process_checkpoint: u32,
     /// [`Op::Crash`].
     pub crash: u32,
     /// [`Op::StoreFault`].
@@ -248,8 +248,8 @@ impl Default for Weights {
             spill: 3,
             rollback: 2,
             vacuum: 1,
-            stranger_reader: 4,
-            stranger_checkpoint: 3,
+            other_process_reader: 4,
+            other_process_checkpoint: 3,
             crash: 4,
             store_fault: 3,
             env_fault: 1,
@@ -270,8 +270,8 @@ enum Kind {
     Spill,
     Rollback,
     Vacuum,
-    StrangerReader,
-    StrangerCheckpoint,
+    OtherProcessReader,
+    OtherProcessCheckpoint,
     Crash,
     StoreFault,
     EnvFault,
@@ -290,8 +290,8 @@ impl Weights {
             (Kind::Spill, self.spill),
             (Kind::Rollback, self.rollback),
             (Kind::Vacuum, self.vacuum),
-            (Kind::StrangerReader, self.stranger_reader),
-            (Kind::StrangerCheckpoint, self.stranger_checkpoint),
+            (Kind::OtherProcessReader, self.other_process_reader),
+            (Kind::OtherProcessCheckpoint, self.other_process_checkpoint),
             (Kind::Crash, self.crash),
             (Kind::StoreFault, self.store_fault),
             (Kind::EnvFault, self.env_fault),
@@ -446,19 +446,19 @@ fn draw(weights: &Weights, entropy: &SeededEntropy) -> Op {
         Kind::Spill => Op::Spill,
         Kind::Rollback => Op::Rollback,
         Kind::Vacuum => vacuum(entropy, weights.vacuum_resizes),
-        Kind::StrangerReader => Op::StrangerReader {
+        Kind::OtherProcessReader => Op::OtherProcessReader {
             begin: below(entropy, 2) == 0,
         },
-        Kind::StrangerCheckpoint => Op::StrangerCheckpoint(
+        Kind::OtherProcessCheckpoint => Op::OtherProcessCheckpoint(
             choose(
                 entropy,
                 &[
-                    StrangerMode::Passive,
-                    StrangerMode::Restart,
-                    StrangerMode::Truncate,
+                    OtherProcessMode::Passive,
+                    OtherProcessMode::Restart,
+                    OtherProcessMode::Truncate,
                 ],
             )
-            .unwrap_or(StrangerMode::Passive),
+            .unwrap_or(OtherProcessMode::Passive),
         ),
         Kind::Crash => Op::Crash(if below(entropy, 4) == 0 {
             CrashKind::Power

@@ -420,7 +420,7 @@ impl Harness for RealHarness {
         &self.store
     }
 
-    fn plant_foreign(&self, level: Level, name: &str) -> Result<(), Failure> {
+    fn plant_unrecognized(&self, level: Level, name: &str) -> Result<(), Failure> {
         let object = format!("{}{name}", level_prefix(&self.prefix, level));
         self.raw_put(&object, b"stray", &[]);
         Ok(())
@@ -669,8 +669,8 @@ macro_rules! shared_cases {
                 paging_at_every_limit,
                 cursor_is_exclusive,
                 levels_are_separate,
-                foreign_names_are_skipped_and_counted,
-                scratch_names_are_not_foreign,
+                unrecognized_names_are_skipped_and_counted,
+                scratch_names_are_not_unrecognized,
                 commit_error_may_leave_the_object_visible,
                 abort_publishes_nothing,
                 pending_and_dropped_uploads_are_invisible,

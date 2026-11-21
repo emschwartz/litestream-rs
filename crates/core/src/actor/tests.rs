@@ -276,7 +276,7 @@ fn cfg() -> ActorConfig {
     }
 }
 
-/// [`cfg`] with the default responses: keep trying, stop on a second writer.
+/// [`cfg`] with the default responses: keep trying, stop on another writer.
 fn go_like() -> ActorConfig {
     ActorConfig {
         responses: Responses::GO_LIKE,
@@ -742,21 +742,21 @@ fn a_app_checkpoint_is_counted_and_its_own_is_not() {
     let (mut rig, mut actor) = caught_up();
     rig.commit(2);
     rig.settle(&mut actor, T0 + 10);
-    assert_eq!(actor.foreign_checkpoints(), 0);
+    assert_eq!(actor.app_checkpoints_ran(), 0);
     let frames = rig.wal.committed_end().frame_count();
     assert!(rig.wal.backfill(frames) > 0);
     rig.commit(3);
     rig.settle(&mut actor, T0 + 20);
-    assert_eq!(actor.foreign_checkpoints(), 1);
+    assert_eq!(actor.app_checkpoints_ran(), 1);
     // A restart nobody here asked for is a second one.
     rig.wal.force_restart();
     rig.commit(4);
     rig.settle(&mut actor, T0 + 30);
-    assert_eq!(actor.foreign_checkpoints(), 2);
+    assert_eq!(actor.app_checkpoints_ran(), 2);
 }
 
 #[test]
-fn the_actor_s_own_checkpoint_is_not_foreign() {
+fn the_actor_s_own_checkpoint_is_not_an_app_checkpoint() {
     let mut rig = Rig::new();
     let cfg = ActorConfig {
         checkpoint: CheckpointConfig {
@@ -777,7 +777,7 @@ fn the_actor_s_own_checkpoint_is_not_foreign() {
             .any(|t| matches!(event(t), Some(Event::Checkpointed { .. }))),
         "{seen:?}"
     );
-    assert_eq!(actor.foreign_checkpoints(), 0, "{seen:?}");
+    assert_eq!(actor.app_checkpoints_ran(), 0, "{seen:?}");
 }
 
 /// A drain whose upload fails a few times retries inside the deadline and

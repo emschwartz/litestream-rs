@@ -249,7 +249,7 @@ connection's checkpoint would in the middle of a sync step; it also logs the key
 | `plan.rs:363:70` | `straddles`: `max > one_past` becomes `>=` | Both callers (`straddling_file`, `lazy_straddler`) return first `if files.iter().any(\|info\| info.key.range().max() == one_past)`, so no file they pass in ends at `one_past`. |
 | `plan.rs:396:66` | `extend`: `preference(&info) > preference(&held)` becomes `>=` | The preference (last transaction, level, first transaction) is the whole key, and an inventory holds each key once, so two different files never tie. |
 | `plan.rs:432:45` | `explain_shortfall`: `max > requested` becomes `>=` | A usable file that touches the reach and ends at the requested transaction is eligible for that target, so the base or the sweep would have taken the chain to the target and there is no shortfall to explain. |
-| `store.rs:141:49` | `build_listing`: `name > low` becomes `>=` | `low` is the cursor's canonical key name, and every store (`MemStore`, `store-fs`'s `classify`, `store-s3`'s list response) puts a name in `foreign` only when `parse_file_name` fails on it, which a canonical name never does. (`MemStore::plant_foreign` is documented as taking a name that is not a key.) |
+| `store.rs:141:49` | `build_listing`: `name > low` becomes `>=` | `low` is the cursor's canonical key name, and every store (`MemStore`, `store-fs`'s `classify`, `store-s3`'s list response) puts a name in `unrecognized` only when `parse_file_name` fails on it, which a canonical name never does. (`MemStore::plant_unrecognized` is documented as taking a name that is not a key.) |
 | `layout.rs:266:30` | `FileKey::from_str`: `(raw << 4) \| digit` becomes `^` | The first run's entry in the table above: the operands never overlap. |
 | `actor.rs:767:53` | `Actor::absorb`: `Observed::of(.., !self.more_wal)` loses the `!` | The `Observed` built there goes only to `after_sync`, which reads `synced_frames` (through `over_truncate`) and the count of transactions written, never `through`. |
 
@@ -320,7 +320,7 @@ column) and is caught.
 | `verify.rs:71:35` | replace * with / (`CHUNK_BYTES`) | same |
 | `verify.rs:757:20` | replace < with <= in Walk::read | same: a full chunk is not the end of the object |
 | `verify.rs:310:9` | replace LevelSummary::bytes -> u64 with 1 | `level_summaries_count_files_bytes_and_range` now checks the sum |
-| `verify.rs:322:9` | replace LevelSummary::skipped -> usize with 0 | `level_summaries_count_foreign_names` |
+| `verify.rs:322:9` | replace LevelSummary::skipped -> usize with 0 | `level_summaries_count_unrecognized_names` |
 | `verify.rs:521:55` | replace && with \|\| in name_findings | `a_stray_level_zero_base_beside_a_newer_snapshot_reports_nothing` |
 | `verify.rs:656:41` | replace == with != in Walk::finish | `the_page_size_reference_is_the_base_even_when_the_odd_file_is_read_first` |
 | `verify/dry_run.rs:32:9` | replace DigestSink::truncate with Ok(()) | `a_database_that_shrinks_then_grows_verifies_clean` |

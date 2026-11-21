@@ -166,7 +166,7 @@ pub const fn cause_name(cause: DegradedCause) -> &'static str {
         DegradedCause::Credentials => "credentials",
         DegradedCause::StoreRefused => "store_refused",
         DegradedCause::RemoteCorrupt => "remote_corrupt",
-        DegradedCause::ForeignWriter => "foreign_writer",
+        DegradedCause::OtherWriter => "other_writer",
         DegradedCause::RemoteRegressed => "remote_regressed",
         DegradedCause::WalCorrupt => "wal_corrupt",
         DegradedCause::WalTruncated => "wal_truncated",

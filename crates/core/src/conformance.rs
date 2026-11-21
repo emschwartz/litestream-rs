@@ -93,7 +93,7 @@ pub trait Harness {
     ///
     /// # Errors
     /// Whatever stops the backend from planting it.
-    fn plant_foreign(&self, level: Level, name: &str) -> Check;
+    fn plant_unrecognized(&self, level: Level, name: &str) -> Check;
 
     /// Arranges for the next commit to publish its object and then fail with a
     /// transient error, as a lost acknowledgement does. Returns `false` when
@@ -123,8 +123,8 @@ impl Harness for MemHarness {
         &self.0
     }
 
-    fn plant_foreign(&self, level: Level, name: &str) -> Check {
-        self.0.plant_foreign(level, name);
+    fn plant_unrecognized(&self, level: Level, name: &str) -> Check {
+        self.0.plant_unrecognized(level, name);
         Ok(())
     }
 
@@ -326,9 +326,9 @@ pub async fn levels_are_separate<H: Harness>(h: &H) -> Check {
 ///
 /// # Errors
 /// A [`Failure`] naming the rule that broke.
-pub async fn foreign_names_are_skipped_and_counted<H: Harness>(h: &H) -> Check {
+pub async fn unrecognized_names_are_skipped_and_counted<H: Harness>(h: &H) -> Check {
     let level = Level::new(3).ok_or_else(|| Failure("level".to_owned()))?;
-    let foreign = [
+    let unrecognized = [
         "0",
         "README",
         "0000000000000002-0000000000000001.ltx",
@@ -336,8 +336,8 @@ pub async fn foreign_names_are_skipped_and_counted<H: Harness>(h: &H) -> Check {
         "0000000000000003-0000000000000003.ltx.bak",
         "zzzz",
     ];
-    for name in foreign {
-        h.plant_foreign(level, name)?;
+    for name in unrecognized {
+        h.plant_unrecognized(level, name)?;
     }
     for (min, max) in [(1, 1), (4, 4), (5, 8)] {
         put(h.store(), key(3, min, max)?, b"x").await?;
@@ -347,7 +347,7 @@ pub async fn foreign_names_are_skipped_and_counted<H: Harness>(h: &H) -> Check {
         ensure_eq!(got.keys.len(), 3, format!("files at limit {page}"));
         ensure_eq!(
             got.skipped,
-            foreign.len(),
+            unrecognized.len(),
             format!("skipped at limit {page}")
         );
     }
@@ -355,22 +355,22 @@ pub async fn foreign_names_are_skipped_and_counted<H: Harness>(h: &H) -> Check {
 }
 
 /// A store's scratch files (Go's `<name>.ltx.tmp` and any
-/// `<name>.ltx.<unique>.tmp`) are not foreign names, whether they are planted
+/// `<name>.ltx.<unique>.tmp`) are not unrecognized names, whether they are planted
 /// or left by a dropped upload.
 ///
 /// # Errors
 /// A [`Failure`] naming the rule that broke.
-pub async fn scratch_names_are_not_foreign<H: Harness>(h: &H) -> Check {
+pub async fn scratch_names_are_not_unrecognized<H: Harness>(h: &H) -> Check {
     let store = h.store();
     let target = key(0, 1, 1)?;
     let name = format!("{}.tmp", target.file_name());
-    h.plant_foreign(target.level(), &name)?;
+    h.plant_unrecognized(target.level(), &name)?;
     let mut upload = store.begin_upload(&target, at(CREATED_AT)).await?;
     upload.write(b"half").await?;
     drop(upload);
     let got = page_through(store, target.level(), 10, None).await?;
     ensure_eq!(got.keys.len(), 0, "files listed beside scratch");
-    ensure_eq!(got.skipped, 0, "scratch counted as foreign");
+    ensure_eq!(got.skipped, 0, "scratch counted as unrecognized");
     Ok(())
 }
 
@@ -919,8 +919,8 @@ macro_rules! conformance_suite {
             paging_at_every_limit,
             cursor_is_exclusive,
             levels_are_separate,
-            foreign_names_are_skipped_and_counted,
-            scratch_names_are_not_foreign,
+            unrecognized_names_are_skipped_and_counted,
+            scratch_names_are_not_unrecognized,
             commit_error_may_leave_the_object_visible,
             abort_publishes_nothing,
             pending_and_dropped_uploads_are_invisible,

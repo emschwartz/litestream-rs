@@ -124,8 +124,8 @@ impl Harness for FlawedHarness {
         &self.store
     }
 
-    fn plant_foreign(&self, level: Level, name: &str) -> Check {
-        self.mem.plant_foreign(level, name)
+    fn plant_unrecognized(&self, level: Level, name: &str) -> Check {
+        self.mem.plant_unrecognized(level, name)
     }
 
     fn fail_next_commit_after_publish(&self) -> bool {
@@ -145,8 +145,8 @@ impl Harness for NoInjection {
         self.0.store()
     }
 
-    fn plant_foreign(&self, level: Level, name: &str) -> Check {
-        self.0.plant_foreign(level, name)
+    fn plant_unrecognized(&self, level: Level, name: &str) -> Check {
+        self.0.plant_unrecognized(level, name)
     }
 }
 

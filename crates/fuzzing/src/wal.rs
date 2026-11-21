@@ -405,9 +405,9 @@ fn check_committed(wal: &Wal, reader: &mut WalReader<Probe>, whole: &Scan, param
         salt1: wal.salts().salt1 ^ 1,
         salt2: wal.salts().salt2,
     };
-    let foreign = ScanLimit::Committed(CommittedEnd::new(anywhere, other, wal.page_size()));
+    let other_limit = ScanLimit::Committed(CommittedEnd::new(anywhere, other, wal.page_size()));
     wal.shared.reset();
-    let result = reader.next_tx(&wal.start(), foreign);
+    let result = reader.next_tx(&wal.start(), other_limit);
     if !matches!(result, Err(WalError::Restarted { .. })) || wal.shared.stats().delivered != 0 {
         violation(&format!("an end of another generation gave {result:?}"));
     }

@@ -553,8 +553,8 @@ mod tests {
             &self.erased
         }
 
-        fn plant_foreign(&self, level: Level, name: &str) -> Result<(), Failure> {
-            self.mem.plant_foreign(level, name);
+        fn plant_unrecognized(&self, level: Level, name: &str) -> Result<(), Failure> {
+            self.mem.plant_unrecognized(level, name);
             Ok(())
         }
     }

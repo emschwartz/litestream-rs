@@ -62,11 +62,17 @@ fn every_kind_of_operation_appears() {
     assert!(has(|op| matches!(op, Op::Rollback)));
     assert!(has(|op| matches!(op, Op::Vacuum { page_size: None })));
     assert!(has(|op| matches!(op, Op::Vacuum { page_size: Some(_) })));
-    assert!(has(|op| matches!(op, Op::StrangerReader { begin: true })));
-    assert!(has(|op| matches!(op, Op::StrangerReader { begin: false })));
     assert!(has(|op| matches!(
         op,
-        Op::StrangerCheckpoint(StrangerMode::Restart)
+        Op::OtherProcessReader { begin: true }
+    )));
+    assert!(has(|op| matches!(
+        op,
+        Op::OtherProcessReader { begin: false }
+    )));
+    assert!(has(|op| matches!(
+        op,
+        Op::OtherProcessCheckpoint(OtherProcessMode::Restart)
     )));
     assert!(has(|op| matches!(op, Op::Crash(CrashKind::Power))));
     assert!(has(|op| matches!(op, Op::Crash(CrashKind::Process))));

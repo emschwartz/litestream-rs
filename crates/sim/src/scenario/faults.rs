@@ -21,7 +21,7 @@ use super::{
 use crate::generate::{EnvFault, MetaOp, Op, RemoteOp, Target, WalOp};
 use crate::run::{RunReport, Seen};
 use crate::seed::Seed;
-use crate::sqlite::StrangerMode;
+use crate::sqlite::OtherProcessMode;
 use crate::store::{FaultShape, TapEvent};
 
 /// A [`Fault`] without its payload: one variant per fault, so a new fault
@@ -169,7 +169,7 @@ pub fn halt_of(kind: FaultKind) -> Option<HaltCause> {
         FaultKind::StoreAuth => Some(HaltCause::Credentials),
         FaultKind::StoreRefused => Some(HaltCause::StoreRefused),
         FaultKind::RemoteCorrupt => Some(HaltCause::RemoteCorrupt),
-        FaultKind::RemoteAheadOfLocal => Some(HaltCause::ForeignWriter),
+        FaultKind::RemoteAheadOfLocal => Some(HaltCause::OtherWriter),
         FaultKind::RemoteRegressed => Some(HaltCause::RemoteRegressed),
         FaultKind::PageSizeChanged => Some(HaltCause::PageSizeChanged {
             was: page,
@@ -738,13 +738,13 @@ pub fn second_writer_mid_run() -> Scenario {
                     FaultShape::ErrorAfterPublish(transient(StoreOp::Upload)),
                 ),
                 commit(2, false),
-                Op::Remote(RemoteOp::PutForeign),
-                Op::Remote(RemoteOp::PutForeign),
+                Op::Remote(RemoteOp::PutUnrecognized),
+                Op::Remote(RemoteOp::PutUnrecognized),
             ],
             ticks(SETTLE),
-            vec![Op::Remote(RemoteOp::RemoveForeign), Op::Restore],
+            vec![Op::Remote(RemoteOp::RemoveUnrecognized), Op::Restore],
         ],
-        vec![Expect::Stopped(HaltCause::ForeignWriter), Expect::Oracle],
+        vec![Expect::Stopped(HaltCause::OtherWriter), Expect::Oracle],
     );
     s.check = Some(quiet_after_halt);
     s
@@ -973,7 +973,7 @@ pub fn restart_between_steps() -> Scenario {
             live(),
             vec![
                 Op::OurReader { begin: false },
-                Op::StrangerCheckpoint(StrangerMode::Truncate),
+                Op::OtherProcessCheckpoint(OtherProcessMode::Truncate),
             ],
             ticks(SETTLE),
             vec![Op::Restore],
@@ -1000,7 +1000,7 @@ pub fn wal_header_torn_while_running() -> Scenario {
             ticks(SETTLE),
             vec![
                 Op::OurReader { begin: false },
-                Op::StrangerCheckpoint(StrangerMode::Truncate),
+                Op::OtherProcessCheckpoint(OtherProcessMode::Truncate),
                 commit(1, false),
             ],
             ticks(SETTLE),
@@ -1488,7 +1488,7 @@ const APP_THRESHOLD: u32 = 4;
 /// The app runs SQLite's automatic checkpoint (at [`APP_THRESHOLD`] frames) and the engine is
 /// told so. With the pin above read mark 0 (the driver's first frame), the app's first checkpoint
 /// past the threshold copies the frames below the pin and its next attempts copy nothing; a
-/// stranger's read stops the engine's own checkpoint short, so the pin is retaken above read mark 0
+/// another process's read stops the engine's own checkpoint short, so the pin is retaken above read mark 0
 /// and the app backfills once more; after the engine's full checkpoints the pin is on read mark 0
 /// and every attempt copies nothing. The engine counts each backfill the app made and none of
 /// its own, infers the attempts that copied nothing on both marks, and the replica restores
@@ -1506,10 +1506,10 @@ pub fn app_autocheckpoints() -> Scenario {
             step(1),
             step(1),
             step(1),
-            vec![Op::StrangerReader { begin: true }],
+            vec![Op::OtherProcessReader { begin: true }],
             step(4),
             ticks(2),
-            vec![Op::StrangerReader { begin: false }],
+            vec![Op::OtherProcessReader { begin: false }],
             ones(6),
             ticks(SETTLE),
             ones(8),

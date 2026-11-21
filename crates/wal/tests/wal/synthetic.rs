@@ -365,9 +365,9 @@ fn page_size_mismatch_in_cursor_and_end() {
     let mut big = Wal::new(1024, false, SALTS);
     big.tx(&[1], 1, 1);
     let mut reader = open(&big.bytes);
-    let foreign = open(&small.bytes).cursor_at_start();
+    let other_cursor = open(&small.bytes).cursor_at_start();
     let err = reader
-        .next_tx(&foreign, ScanLimit::FirstInvalidFrame)
+        .next_tx(&other_cursor, ScanLimit::FirstInvalidFrame)
         .unwrap_err();
     assert!(
         matches!(err, WalError::PageSizeMismatch { expected, found }

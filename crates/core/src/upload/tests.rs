@@ -714,7 +714,7 @@ fn a_remote_ahead_of_local_is_a_second_writer() {
     assert_eq!(failed.fault, Fault::RemoteAheadOfLocal);
     assert_eq!(
         policy(&failed.fault),
-        Policy::Persistent(PersistentCause::ForeignWriter)
+        Policy::Persistent(PersistentCause::OtherWriter)
     );
     assert_eq!(failed.state, UploadState::Unknown);
     let failed = failure(next(UploadState::Unknown, &staging, &remote, 0));

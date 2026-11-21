@@ -285,7 +285,7 @@ fn retention_enabled_is_honoured() {
 #[test]
 fn rust_settings_live_under_one_key() {
     let config = config(
-        "litestream-rs:\n  app-readers: none\n  responses:\n    credentials: stop\n    foreign-writer: continue-and-interleave-histories\n",
+        "litestream-rs:\n  app-readers: none\n  responses:\n    credentials: stop\n    other-writer: continue-and-interleave-histories\n",
     );
     let rust = config.rust();
     assert_eq!(rust.app_readers(), lsr_config::AppReaders::None);
@@ -295,8 +295,8 @@ fn rust_settings_live_under_one_key() {
     );
     assert_eq!(rust.responses().wal_corrupt, None);
     assert_eq!(
-        rust.responses().foreign_writer,
-        Some(lsr_config::ForeignWriterSetting::ContinueAndInterleaveHistories)
+        rust.responses().other_writer,
+        Some(lsr_config::OtherWriterSetting::ContinueAndInterleaveHistories)
     );
     let problems = refused("litestream-rs:\n  app-reader: none\n  responses:\n    bug: maybe\n");
     assert_eq!(

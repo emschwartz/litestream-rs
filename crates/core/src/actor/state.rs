@@ -81,7 +81,7 @@ const fn is_page_mismatch(cause: PersistentCause) -> bool {
         PersistentCause::Credentials
         | PersistentCause::StoreRefused
         | PersistentCause::RemoteCorrupt
-        | PersistentCause::ForeignWriter
+        | PersistentCause::OtherWriter
         | PersistentCause::RemoteRegressed
         | PersistentCause::WalCorrupt
         | PersistentCause::WalTruncated

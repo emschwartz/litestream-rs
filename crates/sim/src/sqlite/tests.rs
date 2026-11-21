@@ -42,7 +42,7 @@ enum Step {
     Rollback,
     Reader(bool),
     Ours(bool),
-    Checkpoint(StrangerMode),
+    Checkpoint(OtherProcessMode),
 }
 
 fn step() -> impl Strategy<Value = Step> {
@@ -52,9 +52,9 @@ fn step() -> impl Strategy<Value = Step> {
         1 => Just(Step::Rollback),
         1 => any::<bool>().prop_map(Step::Reader),
         1 => any::<bool>().prop_map(Step::Ours),
-        1 => Just(Step::Checkpoint(StrangerMode::Passive)),
-        1 => Just(Step::Checkpoint(StrangerMode::Restart)),
-        1 => Just(Step::Checkpoint(StrangerMode::Truncate)),
+        1 => Just(Step::Checkpoint(OtherProcessMode::Passive)),
+        1 => Just(Step::Checkpoint(OtherProcessMode::Restart)),
+        1 => Just(Step::Checkpoint(OtherProcessMode::Truncate)),
     ]
 }
 
@@ -86,9 +86,9 @@ fn history(db: &SimSqlite, steps: Vec<Step>) -> (Vec<Vec<u8>>, usize) {
             Step::Rollback => {
                 db.rollback();
             }
-            Step::Reader(true) => reader = reader.or_else(|| Some(db.stranger_reader_begin())),
+            Step::Reader(true) => reader = reader.or_else(|| Some(db.other_process_reader_begin())),
             Step::Reader(false) => {
-                reader.take().map(|id| db.stranger_reader_end(id));
+                reader.take().map(|id| db.other_process_reader_end(id));
             }
             Step::Ours(true) => {
                 db.our_reader_begin();
@@ -98,7 +98,7 @@ fn history(db: &SimSqlite, steps: Vec<Step>) -> (Vec<Vec<u8>>, usize) {
             }
             Step::Checkpoint(mode) => {
                 let before = (db.backfilled(), db.mx_frame());
-                if let Some(run) = db.stranger_checkpoint(mode)
+                if let Some(run) = db.other_process_checkpoint(mode)
                     && (run.checkpointed > before.0 || (run.log == 0 && before.1 > 0))
                 {
                     floor = images.len().saturating_sub(1);
@@ -196,7 +196,7 @@ fn spill_rollback_and_total_methods() {
     assert_eq!(db.commit(&[], 4), None);
     assert!(db.spill(&tx(&[2], 1)));
     assert_eq!(
-        db.stranger_checkpoint(StrangerMode::Passive),
+        db.other_process_checkpoint(OtherProcessMode::Passive),
         None,
         "the app is in a transaction"
     );
@@ -207,7 +207,8 @@ fn spill_rollback_and_total_methods() {
     assert_eq!(scan_committed(&mut db.source()), 1);
     assert_eq!(db.shrink(4), None);
     db.shrink(2).unwrap();
-    db.stranger_checkpoint(StrangerMode::Passive).unwrap();
+    db.other_process_checkpoint(OtherProcessMode::Passive)
+        .unwrap();
     assert_eq!(db.pages().page_count(), Ok(lsr_ltx::DbPages::new(2)));
 }
 
@@ -333,14 +334,14 @@ fn process_crash_drops_our_connections_only() {
     let mut ck = db.checkpointer();
     let _barrier = ck.begin_barrier().unwrap();
     db.our_reader_begin();
-    let stranger = db.stranger_reader_begin();
+    let other_process = db.other_process_reader_begin();
     let epoch = db.source().epoch();
     db.crash(CrashKind::Process);
     assert_eq!(db.source().epoch(), epoch.next());
     assert!(db.commit(&tx(&[2], 1), 4).is_some(), "the barrier is gone");
     assert!(
-        db.stranger_reader_end(stranger),
-        "a stranger survives our crash"
+        db.other_process_reader_end(other_process),
+        "another process survives our crash"
     );
 }
 #[test]
@@ -357,7 +358,11 @@ fn forced_salts_replace_every_random_draw_but_not_the_increment() {
         salt1: 0,
         salt2: 0xcccc_0003,
     }));
-    assert!(!db.stranger_checkpoint(StrangerMode::Truncate).unwrap().busy);
+    assert!(
+        !db.other_process_checkpoint(OtherProcessMode::Truncate)
+            .unwrap()
+            .busy
+    );
     db.commit(&tx(&[1], 2), 4).unwrap();
     assert_eq!(
         db.salts(),
@@ -376,7 +381,9 @@ fn a_page_rewritten_above_the_safe_frame_is_not_copied() {
     assert!(db.our_reader_begin());
     db.commit(&tx(&[2], 2), 4).unwrap();
     let before = db.db_file();
-    let numbers = db.stranger_checkpoint(StrangerMode::Passive).unwrap();
+    let numbers = db
+        .other_process_checkpoint(OtherProcessMode::Passive)
+        .unwrap();
     assert_eq!(numbers.checkpointed, 2, "backfilled up to our mark");
     let after = db.db_file();
     assert_eq!(

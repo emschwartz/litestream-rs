@@ -42,7 +42,7 @@
 //! Then the whole set is checked: two entries naming one database, two databases
 //! on one replica (bucket and prefix, or directory), or two on one meta directory
 //! are refused. Go keeps the first of a duplicate database and lets the rest share
-//! a replica, which is a second writer on one history.
+//! a replica, which is another writer on one history.
 
 mod dir;
 mod replica;
@@ -54,15 +54,14 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use lsr_core::{
-    CheckpointConfig, ConfigError as MaintenanceError, ForeignWriter, Interval, L0Retention,
-    Maintenance, Response, Responses, RetentionMode,
+    CheckpointConfig, ConfigError as MaintenanceError, Interval, L0Retention, Maintenance,
+    OtherWriter, Response, Responses, RetentionMode,
 };
 use lsr_replica::{Config, NonZeroDuration, ReaderTracking, SyncLimits};
 use lsr_store_s3::{S3Config, S3Credentials};
 
 use crate::config::{
-    AppReaders, DbConfig, DbSource, ForeignWriterSetting, GoConfig, ResponseSetting,
-    ResponseSettings,
+    AppReaders, DbConfig, DbSource, GoConfig, OtherWriterSetting, ResponseSetting, ResponseSettings,
 };
 use crate::duration::GoDuration;
 use crate::error::KeyPath;
@@ -292,7 +291,7 @@ pub enum MapProblemKind {
         /// The entry that named it first.
         first: KeyPath,
     },
-    /// Two databases on one replica: a second writer on one history.
+    /// Two databases on one replica: another writer on one history.
     #[error("{} replicates to the same place as {first}: {replica}", .path.display())]
     SharedReplica {
         /// The second database.
@@ -625,11 +624,11 @@ fn responses(settings: ResponseSettings) -> Responses {
         page_size_changed: one(settings.page_size_changed, base.page_size_changed),
         database_page_mismatch: base.database_page_mismatch,
         bug: one(settings.bug, base.bug),
-        foreign_writer: match settings.foreign_writer {
-            None => base.foreign_writer,
-            Some(ForeignWriterSetting::Stop) => ForeignWriter::Stop,
-            Some(ForeignWriterSetting::ContinueAndInterleaveHistories) => {
-                ForeignWriter::ContinueAndInterleaveHistories
+        other_writer: match settings.other_writer {
+            None => base.other_writer,
+            Some(OtherWriterSetting::Stop) => OtherWriter::Stop,
+            Some(OtherWriterSetting::ContinueAndInterleaveHistories) => {
+                OtherWriter::ContinueAndInterleaveHistories
             }
         },
     }

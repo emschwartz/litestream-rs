@@ -4,4 +4,4 @@
 #
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
-cc aa31788a97d534efc99710505e75fca134a06f32937af042f54f10452fa57892 # shrinks to seed = 0, ops = [BumpSeq, StrangerBegin(0), AppCheckpoint(Passive), Commit(1)]
+cc aa31788a97d534efc99710505e75fca134a06f32937af042f54f10452fa57892 # shrinks to seed = 0, ops = [BumpSeq, OtherProcessBegin(0), AppCheckpoint(Passive), Commit(1)]

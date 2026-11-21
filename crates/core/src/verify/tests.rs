@@ -267,10 +267,10 @@ fn level_summaries_count_files_bytes_and_range() {
 }
 
 #[test]
-fn level_summaries_count_foreign_names() {
+fn level_summaries_count_unrecognized_names() {
     let store = clean();
-    store.plant_foreign(Level::ZERO, "lock.json");
-    store.plant_foreign(Level::ZERO, "x.tmp");
+    store.plant_unrecognized(Level::ZERO, "lock.json");
+    store.plant_unrecognized(Level::ZERO, "x.tmp");
     let report = names(&store);
     assert_eq!(report.levels()[0].skipped(), 2);
     assert_eq!(report.levels()[9].skipped(), 0);
@@ -516,14 +516,14 @@ fn a_level_nine_file_not_starting_at_one_is_malformed() {
 }
 
 #[test]
-fn foreign_names_are_a_note_per_level() {
+fn unrecognized_names_are_a_note_per_level() {
     let store = clean();
-    store.plant_foreign(Level::ZERO, "lock.json");
-    store.plant_foreign(Level::ZERO, "x.tmp");
+    store.plant_unrecognized(Level::ZERO, "lock.json");
+    store.plant_unrecognized(Level::ZERO, "x.tmp");
     let report = names(&store);
     assert!(matches!(
         only(&report),
-        Finding::ForeignNames { level, count: 2 } if *level == Level::ZERO
+        Finding::UnrecognizedNames { level, count: 2 } if *level == Level::ZERO
     ));
     assert_eq!(only(&report).severity(), Severity::Note);
     assert_eq!(report.worst(), Some(Severity::Note));

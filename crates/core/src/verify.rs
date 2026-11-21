@@ -2,7 +2,7 @@
 //!
 //! [verify] loads one [Inventory] and reports everything wrong with it as
 //! [Finding]s, each with a [Severity]. [Depth::Names] makes list calls only:
-//! foreign names, level-9 files that cannot start a chain, and holes in the
+//! unrecognized names, level-9 files that cannot start a chain, and holes in the
 //! history. A chain may start at any file that begins at transaction 1, so
 //! [Finding::NoSnapshot] means no such file exists. For every valid level-9 snapshot in turn the planner is asked for the next
 //! snapshot's last transaction (with the newer snapshots hidden, so the older
@@ -120,7 +120,7 @@ pub enum Finding {
         key: FileKey,
     },
     /// Names in a level that are not LTX files.
-    ForeignNames {
+    UnrecognizedNames {
         /// The level.
         level: Level,
         /// How many names.
@@ -253,7 +253,7 @@ impl Finding {
             | Self::NotASnapshot { .. }
             | Self::PageSizeDiffers { .. }
             | Self::ChecksumChain { .. } => Severity::Degraded,
-            Self::ForeignNames { .. }
+            Self::UnrecognizedNames { .. }
             | Self::TimestampsDiffer { .. }
             | Self::Vanished { .. }
             | Self::Truncated { .. } => Severity::Note,
@@ -272,7 +272,7 @@ impl Finding {
             Self::NoSnapshot
             | Self::Gap { .. }
             | Self::MalformedSnapshot { .. }
-            | Self::ForeignNames { .. }
+            | Self::UnrecognizedNames { .. }
             | Self::SizeDiffers { .. }
             | Self::TimestampsDiffer { .. }
             | Self::Vanished { .. }
@@ -320,7 +320,7 @@ impl LevelSummary {
         self.range
     }
 
-    /// Foreign names.
+    /// Unrecognized names.
     #[must_use]
     pub const fn skipped(&self) -> usize {
         self.skipped
@@ -533,7 +533,7 @@ fn name_findings(inventory: &Inventory, findings: &mut Findings) -> PlanOutcome 
     for level in Level::ALL {
         let count = inventory.skipped(level);
         if count > 0 {
-            findings.push(Finding::ForeignNames { level, count });
+            findings.push(Finding::UnrecognizedNames { level, count });
         }
     }
     for key in inventory.malformed_snapshots() {

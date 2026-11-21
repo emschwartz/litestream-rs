@@ -9,9 +9,9 @@
 //!
 //! Go's own parser accepts a zero transaction id and a reversed range; this
 //! one does not, because [`Txid`] cannot hold zero and [`TxidRange`] cannot be
-//! reversed. A name Go would list but this cannot represent is a foreign name
+//! reversed. A name Go would list but this cannot represent is an unrecognized name
 //! to the stores: skipped and counted, never half-understood. A store's own
-//! scratch file ([`is_scratch_name`]) is neither an object nor foreign.
+//! scratch file ([`is_scratch_name`]) is neither an object nor unrecognized.
 
 use std::cmp::Ordering;
 use std::fmt;
@@ -168,7 +168,7 @@ const FILE_NAME_LEN: usize = 37;
 /// Whether a name is a store's scratch file for an upload: a key's file name
 /// followed by nothing (Go writes `<name>.ltx.tmp`) or by a dot and anything
 /// (`<name>.ltx.<unique>.tmp`), then `.tmp`. A scratch file is a store's own
-/// bookkeeping, not a foreign name, and never an object.
+/// bookkeeping, not an unrecognized name, and never an object.
 #[must_use]
 pub fn is_scratch_name(name: &str) -> bool {
     let Some(stem) = name.strip_suffix(".tmp") else {

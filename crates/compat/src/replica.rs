@@ -28,7 +28,7 @@ pub struct Listing {
     /// The LTX files, sorted by key.
     pub files: Vec<ReplicaFile>,
     /// Relative names that are not LTX keys (temp files of an upload in flight, for one).
-    pub foreign: Vec<String>,
+    pub unrecognized: Vec<String>,
 }
 
 /// The key of a path relative to a file replica, `ltx/<level>/<min>-<max>.ltx` with the level as
@@ -79,7 +79,7 @@ pub fn list(replica: &Path) -> Result<Listing, CompatError> {
             .unwrap_or("?")
             .to_owned();
         if !level_path.is_dir() {
-            out.foreign.push(format!("ltx/{level_name}"));
+            out.unrecognized.push(format!("ltx/{level_name}"));
             continue;
         }
         for entry in fs::read_dir(&level_path).map_err(CompatError::io(&level_path))? {
@@ -91,7 +91,7 @@ pub fn list(replica: &Path) -> Result<Listing, CompatError> {
                 .to_owned();
             let rel = format!("ltx/{level_name}/{name}");
             let Some(key) = parse_rel(&rel) else {
-                out.foreign.push(rel);
+                out.unrecognized.push(rel);
                 continue;
             };
             // Compaction deletes level-0 files while a live replica is listed.
@@ -109,7 +109,7 @@ pub fn list(replica: &Path) -> Result<Listing, CompatError> {
         }
     }
     out.files.sort_by_key(|f| f.key);
-    out.foreign.sort();
+    out.unrecognized.sort();
     Ok(out)
 }
 
@@ -236,7 +236,7 @@ mod tests {
     }
 
     #[test]
-    fn names_go_would_not_write_are_foreign() {
+    fn names_go_would_not_write_are_unrecognized() {
         for rel in [
             format!("ltx/10/{NAME}"),
             format!("ltx/00/{NAME}"),

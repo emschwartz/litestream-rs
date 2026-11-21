@@ -349,7 +349,7 @@ fn assert_levels_agree(levels: &[Value], report: &Report, label: &str) {
         assert_eq!(got["level"], json!(index), "{label}");
         assert_eq!(got["files"], json!(want.files()), "{label} level {index}");
         assert_eq!(got["bytes"], json!(want.bytes()), "{label} level {index}");
-        assert_eq!(got["foreign_names"], json!(want.skipped()), "{label}");
+        assert_eq!(got["unrecognized_names"], json!(want.skipped()), "{label}");
         assert_eq!(
             got["first"],
             json!(want.range().map(|r| r.min().to_string())),
