@@ -77,7 +77,8 @@ spawn name:
 sqlite-big:
     cargo nextest run -p lsr-sqlite --test big --run-ignored only --no-capture --locked
 
-# Build the pinned Go binaries, then run the live checks against them (not part of check).
+# Build the pinned Go binaries and their VFS extensions, then run the live checks against them
+# (not part of check; the VFS test also needs a C compiler and the SQLite headers).
 compat:
     ./scripts/build-go-litestream.sh
     cargo nextest run -p lsr-compat --run-ignored all --locked
@@ -86,7 +87,7 @@ compat:
 # upstream's tip) and run the live tests over exactly those: just compat-live v0.5.3 main.
 compat-live +names:
     ./scripts/build-go-litestream.sh {{names}}
-    LSR_COMPAT_VERSIONS="{{names}}" cargo nextest run -p lsr-compat --run-ignored all --locked --no-fail-fast -E 'test(go_restores_rust_chain_) | test(go_compacts_and_prunes) | test(go_resumes_) | test(rust_resumes_from_go_meta) | test(rust_restores_what_go_wrote) | test(go_restores_what_rust_encoded)'
+    LSR_COMPAT_VERSIONS="{{names}}" cargo nextest run -p lsr-compat --run-ignored all --locked --no-fail-fast -E 'test(go_restores_rust_chain_) | test(go_compacts_and_prunes) | test(go_resumes_) | test(rust_resumes_from_go_meta) | test(rust_restores_what_go_wrote) | test(go_restores_what_rust_encoded) | test(go_vfs_reads_rust_replica)'
 
 # Every release tag v0.5.N: Go writes and Rust restores, Rust writes and Go restores, handover both ways.
 compat-releases: (compat-live "releases")
