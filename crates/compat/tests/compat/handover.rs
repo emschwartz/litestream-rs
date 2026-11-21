@@ -462,19 +462,14 @@ mod live {
 
         use lsr_compat::{
             AppFixture, Chain, GoBuild, GoRestore, PageEncoding, Replicator, Shape, Target,
-            Written, builds_in, builds_under_test, clock_ending_now, hash_pages, integrity_check,
-            list, newest_l0, position, real_now_ms, restore_replica, restore_with_go,
-            wait_staged_past, wait_until, write_config, write_config_snapshotting,
+            Written, builds_in, builds_under_test, clock_ending_now, list, newest_l0, pages_of,
+            position, real_now_ms, restore_replica, restore_with_go, wait_staged_past, wait_until,
+            write_config, write_config_snapshotting,
         };
         use lsr_core::{Event, Level, RestoreTarget};
         use lsr_ltx::{Header, Txid};
 
         use super::super::{decode, fs};
-
-        fn pages_of(path: &Path) -> Vec<String> {
-            integrity_check(path).expect("integrity_check");
-            hash_pages(path).expect("hash").page_hashes
-        }
 
         /// Runs `each` over the block-encoding builds under test, and says so when the run names none:
         /// the Rust-to-Go direction has nothing to run then, because frame-encoding builds refuse
@@ -858,58 +853,20 @@ mod live {
     /// database, meta directory and replica, each process stopped the way an operator stops it.
     mod process {
         use std::collections::BTreeSet;
-        use std::path::{Path, PathBuf};
+        use std::path::Path;
         use std::time::Duration;
 
         use lsr_compat::{
-            AppFixture, GoBuild, GoRestore, Kind, PageEncoding, Replicator, Shape, Summary, Target,
-            builds_under_test, hash_pages, integrity_check, lsr_binary, position, restore_replica,
-            restore_with_go, snapshots, wait_boot_file, wait_staged_past, wait_until,
-            wait_uploaded, write_config, write_config_daily_snapshots,
+            AppFixture, GoBuild, Kind, PageEncoding, Replicator, Shape, Summary, Target,
+            builds_under_test, go_restore, lsr_binary, position, rust_restore, snapshots,
+            wait_boot_file, wait_staged_past, wait_until, wait_uploaded, write_config,
+            write_config_daily_snapshots,
         };
         use lsr_core::RestoreTarget;
         use lsr_ltx::Txid;
 
-        use super::super::fs;
-
         const UP: Duration = Duration::from_secs(30);
         const COMMITS: u32 = 8;
-
-        fn pages_of(path: &Path) -> Vec<String> {
-            integrity_check(path).expect("integrity_check");
-            hash_pages(path).expect("hash").page_hashes
-        }
-
-        fn fresh(fixture: &AppFixture, name: &str) -> PathBuf {
-            let out = fixture.dir().join(name);
-            for suffix in ["", "-wal", "-shm"] {
-                drop(fs::remove_file(format!("{}{suffix}", out.display())));
-            }
-            out
-        }
-
-        fn rust_restore(fixture: &AppFixture, target: RestoreTarget, name: &str) -> Vec<String> {
-            let out = fresh(fixture, name);
-            let restored = restore_replica(&fixture.replica, target, &out).expect("sink");
-            assert!(
-                restored.is_ok(),
-                "{name}: Rust cannot restore: {restored:?}"
-            );
-            pages_of(&out)
-        }
-
-        fn go_restore(
-            bin: &Path,
-            config: &Path,
-            fixture: &AppFixture,
-            target: Target,
-            name: &str,
-        ) -> Vec<String> {
-            let out = fresh(fixture, name);
-            let result = restore_with_go(bin, config, &fixture.db, &out, target).expect("go runs");
-            assert_eq!(result, GoRestore::Restored, "{name}: Go restore");
-            pages_of(&out)
-        }
 
         /// One process's turn: it comes up on what the previous one left, the application commits
         /// [`COMMITS`] transactions, each staged before the next, and the process stops with

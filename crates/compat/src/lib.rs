@@ -41,6 +41,7 @@
 
 mod binaries;
 mod chain;
+mod checks;
 mod error;
 mod generate;
 mod golive;
@@ -64,6 +65,7 @@ pub use binaries::{
 pub use chain::{
     AppFixture, Chain, Outside, Point, STEP_MS, Shape, Written, clock_ending_now, real_now_ms,
 };
+pub use checks::{fresh, go_restore, pages_of, rust_restore};
 pub use error::CompatError;
 pub use generate::generate;
 pub use golive::{

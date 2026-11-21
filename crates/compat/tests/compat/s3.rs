@@ -23,9 +23,9 @@ use std::time::Duration;
 
 use lsr_compat::{
     AppFixture, ENDPOINT_VAR, GoBuild, GoRestore, Kind, MinioEnv, PageEncoding, Remote, Replicator,
-    S3Replica, Schedule, Shape, Summary, Target, builds_in, builds_under_test, hash_pages,
-    integrity_check, lsr_binary, position, real_now_ms, restore_with_go, uploaded, wait_boot_file,
-    wait_staged_past, wait_until, wait_uploaded, write_config_for,
+    S3Replica, Schedule, Shape, Summary, Target, builds_in, builds_under_test, fresh, go_restore,
+    lsr_binary, pages_of, position, real_now_ms, restore_with_go, rust_restore, uploaded,
+    wait_boot_file, wait_staged_past, wait_until, wait_uploaded, write_config_for,
 };
 use lsr_core::RestoreTarget;
 use lsr_ltx::{Timestamp, Txid};
@@ -66,19 +66,6 @@ fn s3_of(fixture: &AppFixture) -> &S3Replica {
 
 fn snapshots(fixture: &AppFixture) -> BTreeSet<String> {
     fixture.remote().snapshots().expect("list the snapshots")
-}
-
-fn pages_of(path: &Path) -> Vec<String> {
-    integrity_check(path).expect("integrity_check");
-    hash_pages(path).expect("hash").page_hashes
-}
-
-fn fresh(fixture: &AppFixture, name: &str) -> PathBuf {
-    let out = fixture.dir().join(name);
-    for suffix in ["", "-wal", "-shm"] {
-        drop(std::fs::remove_file(format!("{}{suffix}", out.display())));
-    }
-    out
 }
 
 fn config(fixture: &AppFixture, name: &str, schedule: Schedule<'_>) -> PathBuf {
@@ -301,29 +288,6 @@ fn assert_continued(name: &str, kind: Kind, boot: Option<&Summary>, prev: Txid) 
         boot.pages,
         fields.commit
     );
-}
-
-fn rust_restore(fixture: &AppFixture, target: RestoreTarget, name: &str) -> Vec<String> {
-    let out = fresh(fixture, name);
-    let restored = fixture.remote().restore(target, &out).expect("sink");
-    assert!(
-        restored.is_ok(),
-        "{name}: Rust cannot restore: {restored:?}"
-    );
-    pages_of(&out)
-}
-
-fn go_restore(
-    bin: &Path,
-    config: &Path,
-    fixture: &AppFixture,
-    target: Target,
-    name: &str,
-) -> Vec<String> {
-    let out = fresh(fixture, name);
-    let result = restore_with_go(bin, config, &fixture.db, &out, target).expect("go runs");
-    assert_eq!(result, GoRestore::Restored, "{name}: Go restore");
-    pages_of(&out)
 }
 
 /// Go replicates to a MinIO prefix and stops; `lsr replicate -config` starts on the same
