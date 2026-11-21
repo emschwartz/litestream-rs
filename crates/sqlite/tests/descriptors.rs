@@ -10,7 +10,7 @@
     reason = "clippy.toml exempts only #[test] bodies; these are the test file's own helpers, where a failure is the test failing"
 )]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -45,8 +45,41 @@ fn descriptors_on(file: &Path) -> BTreeMap<String, PathBuf> {
         .collect()
 }
 
+/// How many listings in a row must add nothing before [`posix_locks_on`] answers.
+const QUIET_READS: usize = 32;
+
+/// The most listings [`posix_locks_on`] reads before it gives up.
+const MAX_READS: usize = 10_000;
+
 /// This process's POSIX record locks on `path`'s inode, from `/proc/locks` (no descriptor on it).
+///
+/// `/proc/locks` lists every lock on the machine, one kernel page per `read`, and other
+/// processes' locks come and go between those reads, so a listing longer than a page can show
+/// a line twice or skip one. Under parallel tests both were seen: this process's read-mark lock
+/// on `-shm` listed twice, and the lock every open connection holds on it (byte 128) missing.
+/// A torn listing never shows a lock that was not held, and this process changes none of its
+/// own while it reads, so the answer is the union of its lines over listings, once
+/// [`QUIET_READS`] listings in a row add nothing.
 fn posix_locks_on(path: &Path) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut quiet = 0;
+    for _ in 0..MAX_READS {
+        let before = seen.len();
+        seen.extend(posix_locks_once(path));
+        quiet = if seen.len() == before {
+            usize::saturating_add(quiet, 1)
+        } else {
+            0
+        };
+        if quiet == QUIET_READS {
+            return seen.into_iter().collect();
+        }
+    }
+    panic!("/proc/locks never settled in {MAX_READS} reads: {seen:?}");
+}
+
+/// One read of [`posix_locks_on`]'s listing, which may be torn.
+fn posix_locks_once(path: &Path) -> Vec<String> {
     let inode = format!(":{}", fs::metadata(path).unwrap().ino());
     let pid = std::process::id().to_string();
     let mut locks: Vec<String> = fs::read_to_string("/proc/locks")
