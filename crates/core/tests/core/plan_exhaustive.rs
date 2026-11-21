@@ -21,6 +21,7 @@
     reason = "the enumeration and oracle do arithmetic on tiny bounded transaction ids and indexes"
 )]
 mod exhaustive {
+    use std::cmp::Reverse;
     use std::collections::BTreeMap;
 
     use lsr_core::conformance::block_on;
@@ -246,15 +247,33 @@ mod exhaustive {
             "{case}"
         );
         if !has_base {
-            assert_no_snapshot(&out, files, &case);
-            if let T::Txid(n) = t
-                && files.iter().any(|f| f.usable() && f.min <= n && n < f.max)
-            {
-                note(tally, "no eligible base, a file covers the target: [NoSnapshot, InsideFile] -> NoSnapshot".into());
-            }
+            verify_no_base(&out, files, goal, tally, &case);
             return;
         }
         verify_refusal(&out, files, t, furthest(&ends).unwrap(), tally, &case);
+    }
+
+    /// No eligible base. A transaction-1 file that covers the target is
+    /// InsideFile (the chain is empty, reach 0); otherwise no file begins at 1.
+    fn verify_no_base(out: &PlanOutcome, files: &[R], goal: u64, tally: &mut Tally, case: &str) {
+        let covers = |f: &&R| f.min == 1 && f.max > goal;
+        let nearest = files
+            .iter()
+            .filter(covers)
+            .min_by_key(|f| (f.max, Reverse(f.level), f.key()));
+        if let Some(nearest) = nearest {
+            let want = PlanOutcome::InsideFile {
+                requested: Txid::new(goal).unwrap(),
+                file: nearest.key(),
+            };
+            assert_eq!(out, &want, "{case}");
+            note(
+                tally,
+                "no eligible base, a transaction-1 file covers the target: InsideFile".into(),
+            );
+        } else {
+            assert_no_snapshot(out, files, case);
+        }
     }
 
     fn assert_no_snapshot(out: &PlanOutcome, files: &[R], case: &str) {

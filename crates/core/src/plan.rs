@@ -189,9 +189,11 @@ pub enum PlanOutcome {
     Plan(ContiguousChain),
     /// The replica holds no LTX file.
     EmptyReplica,
-    /// No eligible file begins at transaction 1: none exists, none is at or
-    /// below a requested transaction, none is old enough for a requested
-    /// instant, or the only level-9 files do not start at transaction 1.
+    /// No eligible file begins at transaction 1: none exists, none is old
+    /// enough for a requested instant, or the only level-9 files do not start
+    /// at transaction 1. For `Latest` and `Txid` it means no file at all begins
+    /// there; a transaction-1 file that covers a requested transaction is
+    /// [`Self::InsideFile`].
     NoSnapshot {
         /// The smallest last transaction among all files that begin at
         /// transaction 1, whatever the target.
@@ -326,7 +328,7 @@ fn plan_exact(inventory: &Inventory, target: RestoreTarget) -> PlanOutcome {
         .max_by_key(|info| base_order(info))
         .and_then(|info| ContiguousChain::start(*info));
     let Some(mut chain) = base else {
-        return no_snapshot(inventory);
+        return inside_the_base(inventory, target).unwrap_or_else(|| no_snapshot(inventory));
     };
     extend(&mut chain, &pool);
     if let RestoreTarget::AsOf(_) = target {
@@ -428,6 +430,40 @@ fn straddler_order(info: &FileInfo) -> (Txid, Reverse<Level>, FileKey) {
     (info.key.range().max(), Reverse(info.key.level()), info.key)
 }
 
+/// A `Txid` target with no eligible base: the chain is empty, so its reach is
+/// 0 and a file links when it begins at transaction 1. Such a file ends past
+/// the target (else it would be the base), so the transaction exists only
+/// inside it: the same cause as with an older base, and the same answer.
+fn inside_the_base(inventory: &Inventory, target: RestoreTarget) -> Option<PlanOutcome> {
+    let RestoreTarget::Txid(requested) = target else {
+        return None;
+    };
+    inside_file(
+        inventory
+            .files()
+            .iter()
+            .filter(|i| i.key.range().min().get() == 1),
+        requested,
+    )
+}
+
+/// The nearest-ending usable file among [`linking`] ones that ends past
+/// [`requested`]: the file the target falls inside. The caller supplies the
+/// files that link to the chain, because the file must link: otherwise a hole
+/// lies between, and finer files would not help.
+fn inside_file<'a>(
+    linking: impl Iterator<Item = &'a FileInfo>,
+    requested: Txid,
+) -> Option<PlanOutcome> {
+    linking
+        .filter(|i| is_usable_beyond(i) && i.key.range().max() > requested)
+        .min_by_key(|i| (i.key.range().max(), Reverse(i.key.level()), i.key))
+        .map(|file| PlanOutcome::InsideFile {
+            requested,
+            file: file.key,
+        })
+}
+
 fn no_snapshot(inventory: &Inventory) -> PlanOutcome {
     PlanOutcome::NoSnapshot {
         oldest_snapshot: inventory
@@ -487,15 +523,12 @@ fn explain_shortfall(
     };
     let ahead = || candidates.iter().filter(|i| i.key.range().max() > reach);
     if let RestoreTarget::Txid(requested) = target
-        && let Some(file) = ahead()
-            .filter(|i| is_usable_beyond(i) && touches(i.key.range().min(), reach))
-            .filter(|i| i.key.range().max() > requested)
-            .min_by_key(|i| (i.key.range().max(), Reverse(i.key.level()), i.key))
-    {
-        return PlanOutcome::InsideFile {
+        && let Some(outcome) = inside_file(
+            ahead().filter(|i| touches(i.key.range().min(), reach)),
             requested,
-            file: file.key,
-        };
+        )
+    {
+        return outcome;
     }
     let next = ahead()
         .filter(|i| is_usable_beyond(i) && !touches(i.key.range().min(), reach))
@@ -1163,9 +1196,43 @@ mod tests {
             oldest_snapshot: Some(txid(5)),
             malformed_snapshots: Vec::new(),
         };
-        assert_eq!(plan_reference(&files, RestoreTarget::Txid(txid(4))), older);
         let before_all = RestoreTarget::AsOf(Timestamp::from_unix_millis(10));
         assert_eq!(plan_reference(&files, before_all), older);
+    }
+
+    /// With no older base, a transaction that exists only inside the sole
+    /// transaction-1 file is the same cause as one inside a later file: the
+    /// finer files are gone. It must not read as a replica that cannot start a
+    /// restore, since `Latest` restores from it.
+    #[test]
+    fn a_target_inside_the_only_transaction_one_file_names_it() {
+        let files = inv(&[at(9, 1, 5), at(0, 6, 6)]);
+        assert_eq!(
+            plan_reference(&files, RestoreTarget::Txid(txid(4))),
+            PlanOutcome::InsideFile {
+                requested: txid(4),
+                file: key(9, 1, 5),
+            }
+        );
+        // The nearest-ending of several transaction-1 files is named.
+        let several = inv(&[at(9, 1, 9), at(2, 1, 6), at(0, 7, 7)]);
+        assert_eq!(
+            plan_reference(&several, RestoreTarget::Txid(txid(3))),
+            PlanOutcome::InsideFile {
+                requested: txid(3),
+                file: key(2, 1, 6),
+            }
+        );
+        // A covering file that does not begin at transaction 1 does not link to
+        // an empty chain, and a refused snapshot is no file at all: no snapshot.
+        let no_start = inv(&[at(1, 2, 8), at(9, 2, 9)]);
+        assert_eq!(
+            plan_reference(&no_start, RestoreTarget::Txid(txid(4))),
+            PlanOutcome::NoSnapshot {
+                oldest_snapshot: None,
+                malformed_snapshots: vec![key(9, 2, 9)],
+            }
+        );
     }
 
     #[test]
