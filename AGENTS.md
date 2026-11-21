@@ -35,7 +35,7 @@
 ## Build and commands
 - Development runs on Linux and macOS; CI runs on Linux. `just check` passes on both (on macOS it skips `upstream-test-map-fresh`, since the test map names Linux-only tests).
 - `just check` is the land gate: format, clippy, tests. Scope while iterating: `cargo clippy -p <crate> --all-targets -- -D warnings`, `cargo nextest run -p <crate> <test name>`. The README lists which tests need nothing, Docker, Go or Tigris.
-- `just upstream` clones the pinned upstream sources into `.upstream/` (read-only reference: `litestream` at 041a8c3, `ltx` at v0.5.3).
+- `just upstream` clones the pinned upstream sources into `.upstream/` (read-only reference: `litestream` at 041a8c3, `ltx` at v0.5.3). [docs/go-terms.md](docs/go-terms.md) maps our terms to Go's, LTX's and SQLite's for the same things.
 - Crates live in `crates/<name>` and are named `lsr-<name>` (working prefix).
 - New dependencies: prefer none. Each one is named in the report with why and its license. Every dependency, external or `lsr-*`, is declared once in the root `[workspace.dependencies]` and referenced as `name.workspace = true`; a crate may add features, never a version or path. (The `fuzz/` crate is outside the workspace and keeps its own.)
 
