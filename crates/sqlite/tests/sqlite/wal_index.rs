@@ -1,5 +1,5 @@
 //! The committed read through SQLite's mapping, against the bytes of `-shm` read through one
-//! descriptor the test opens after the pin and closes only after every connection (so its close
+//! descriptor the test opens after the read lock and closes only after every connection (so its close
 //! drops no lock anyone still needs): the same `mxFrame`, salts and `nBackfill` at every step of
 //! commits, outside checkpoints in every mode while pinned, and a WAL restart once not.
 
@@ -85,7 +85,7 @@ fn agree(step: &str, live: &mut Sqlite, shm: &mut File) -> CommittedRead {
 fn the_committed_read_agrees_with_the_file_across_checkpoints_and_a_restart() {
     let (_dir, path) = fresh_db();
     let app = connect(&path);
-    // A first frame, so the pin takes a read mark above 0.
+    // A first frame, so the read lock takes a read mark above 0.
     commit(&app, -1);
     let mut live = Sqlite::open(&path).unwrap();
     #[expect(
@@ -132,7 +132,7 @@ fn the_committed_read_agrees_with_the_file_across_checkpoints_and_a_restart() {
     drop(shm);
 }
 
-/// A WAL database whose last connection closed (SQLite removed `-wal` and `-shm`): the pin's
+/// A WAL database whose last connection closed (SQLite removed `-wal` and `-shm`): the read lock's
 /// first read runs recovery, and the header maps initialised with zero frames.
 #[test]
 fn a_database_with_no_wal_yet_reads_an_empty_committed_end() {

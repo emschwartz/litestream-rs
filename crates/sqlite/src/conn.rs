@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use lsr_core::{CommittedRead, ReadEpoch, SourceError, WalFileLen, WalSource};
+use lsr_core::{CommittedRead, ReadLockHold, SourceError, WalFileLen, WalSource};
 use lsr_ltx::PageSize;
 use lsr_wal::{CommittedEnd, Salts};
 use rusqlite::{Connection, FileControl, OpenFlags};
@@ -93,12 +93,12 @@ pub(crate) struct Inner {
     wal_path: PathBuf,
     /// The file the WAL path named once the first read transaction was held. SQLite keeps that
     /// file open for the reader's whole life, so any other file at the path, or none, means it
-    /// was deleted under the pin; `None` when it could not be told.
+    /// was deleted under the read lock; `None` when it could not be told.
     wal_id: Option<FileId>,
     page_size: PageSize,
     /// The current hold of the read transaction: a holder of this open's own, and how many
     /// times it has been taken.
-    pub(crate) epoch: ReadEpoch,
+    pub(crate) epoch: ReadLockHold,
     /// The id of the last barrier or write lock handed out, and of the last one handed back:
     /// a lock is outstanding while they differ. Whether the reader is pinned and whether the
     /// writer is in its transaction are not stored: they are whether SQLite has the
@@ -247,7 +247,7 @@ impl Sqlite {
             wal_path,
             wal_id,
             page_size,
-            epoch: ReadEpoch::first(),
+            epoch: ReadLockHold::first(),
             issued: 0,
             returned: 0,
         };
@@ -339,7 +339,7 @@ impl Inner {
     }
 
     /// Whether the reader holds its read transaction now.
-    pub(crate) fn pinned(&self) -> bool {
+    pub(crate) fn read_lock_held(&self) -> bool {
         !self.reader.is_autocommit()
     }
 
@@ -357,7 +357,7 @@ impl Inner {
 
     /// Ends the read transaction, if one is held.
     pub(crate) fn end_read(&mut self) -> Result<(), SourceError> {
-        if self.pinned() {
+        if self.read_lock_held() {
             self.reader
                 .execute_batch("ROLLBACK")
                 .map_err(|e| crate::error::source_error(&e))?;
@@ -365,10 +365,10 @@ impl Inner {
         Ok(())
     }
 
-    /// After a retake failed, the next read takes the pin again first: its new epoch tells the
+    /// After a retake failed, the next read takes the read lock again first: its new epoch tells the
     /// engine the old one lapsed. Every answer is under a read transaction or an error.
-    pub(crate) fn ensure_pinned(&mut self) -> Result<(), SourceError> {
-        if self.pinned() {
+    pub(crate) fn ensure_read_lock_held(&mut self) -> Result<(), SourceError> {
+        if self.read_lock_held() {
             return Ok(());
         }
         self.begin_read().map_err(|_lost| SourceError::ReadTxLost)
@@ -456,7 +456,7 @@ impl WalSource for Sqlite {
 
     fn committed(&mut self) -> Result<CommittedRead, SourceError> {
         let mut inner = self.lock();
-        inner.ensure_pinned()?;
+        inner.ensure_read_lock_held()?;
         // The wal-index still counts the frames SQLite writes to a deleted WAL: refuse to name
         // an end the WAL path cannot show.
         inner.wal_meta()?;
@@ -472,7 +472,7 @@ impl WalSource for Sqlite {
         CommittedRead::new(end, header.backfilled, inner.epoch).ok_or(SourceError::Busy)
     }
 
-    fn epoch(&self) -> ReadEpoch {
+    fn epoch(&self) -> ReadLockHold {
         self.lock().epoch
     }
 }
@@ -666,7 +666,7 @@ mod tests {
         assert_eq!(sqlite.database_file(), Err(SplitOpen { reader, writer }));
     }
 
-    /// SQLite can end a read transaction itself (an I/O error rolls it back). The pin is
+    /// SQLite can end a read transaction itself (an I/O error rolls it back). The read lock is
     /// whatever SQLite says, so the next read takes it again, in a new epoch, instead of
     /// answering outside any read transaction.
     #[test]
@@ -674,14 +674,14 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let sqlite = opened(dir.path());
         let mut inner = sqlite.lock();
-        assert!(inner.pinned());
+        assert!(inner.read_lock_held());
         let epoch = inner.epoch;
         inner.reader.execute_batch("ROLLBACK").unwrap();
-        inner.ensure_pinned().unwrap();
-        assert!(inner.pinned());
+        inner.ensure_read_lock_held().unwrap();
+        assert!(inner.read_lock_held());
         assert_eq!(inner.epoch, epoch.next());
         inner.end_read().unwrap();
-        assert!(!inner.pinned());
+        assert!(!inner.read_lock_held());
         inner.end_read().unwrap();
     }
 

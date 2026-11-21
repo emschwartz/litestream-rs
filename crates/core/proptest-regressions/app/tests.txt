@@ -4,4 +4,4 @@
 #
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
-cc 5fc2a3b8da1172d5eca773df112556a660aa6de45e2aa6219307e5a81a318c9e # shrinks to steps = [AppCommit(39), AppCommit(64), AppCommit(75), AppCommit(45), AppCommit(71), AppCommit(65), AppCommit(62), AppCommit(13), AppCommit(60), AppCommit(75), AppCommit(8), AppCommit(49), AppCommit(43), AppCommit(56), AppCommit(31), AppCommit(52), AppCommit(49), AppCommit(67), AppCommit(59), AppCommit(15), Ours { full: false }, AppCommit(1), Poll], threshold = None, pin_at_start = 2, told = false
+cc 5fc2a3b8da1172d5eca773df112556a660aa6de45e2aa6219307e5a81a318c9e # shrinks to steps = [AppCommit(39), AppCommit(64), AppCommit(75), AppCommit(45), AppCommit(71), AppCommit(65), AppCommit(62), AppCommit(13), AppCommit(60), AppCommit(75), AppCommit(8), AppCommit(49), AppCommit(43), AppCommit(56), AppCommit(31), AppCommit(52), AppCommit(49), AppCommit(67), AppCommit(59), AppCommit(15), Ours { full: false }, AppCommit(1), Poll], threshold = None, read_lock_at_start = 2, told = false

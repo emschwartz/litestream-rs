@@ -8,7 +8,7 @@
 //! can prove that every frame between the newest staged file and the restart reached a file, so both engines'
 //! rules take a snapshot:
 //! - Rust, `crates/core/src/recover.rs`: rule 6, salts changed, with a newest staged file read at boot (no
-//!   read-transaction pin to prove the restart) is `GenerationChanged`; rule 4, no WAL header
+//!   read lock to prove the restart) is `GenerationChanged`; rule 4, no WAL header
 //!   at all (a TRUNCATE left the file empty), is `WalMissing`.
 //! - Go, `verifyWithExecutor` (`db.go:1782-1925`): a WAL shorter than the newest staged file's end is "wal
 //!   truncated by another process" (the in-memory `syncedToWALEnd` that excuses it is gone

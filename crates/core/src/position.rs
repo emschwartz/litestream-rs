@@ -79,29 +79,29 @@ impl WalFileLen {
 /// times that holder has taken it, counting from the first.
 ///
 /// The checkpoint protocol releases and retakes the transaction, so a position
-/// pinned to an epoch is pinned to one unbroken hold. The holder is drawn from
+/// that is `Held` was proven under one unbroken hold. The holder is drawn from
 /// a process-wide counter when a source opens, so the first hold of a reopened
-/// source is never equal to the first hold of the source it replaces: a pin
-/// taken under one open cannot pass for a pin under the next.
+/// source is never equal to the first hold of the source it replaces: a read lock
+/// taken under one open cannot pass for a read lock under the next.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ReadEpoch {
+pub struct ReadLockHold {
     holder: u64,
     count: u64,
 }
 
-impl fmt::Debug for ReadEpoch {
+impl fmt::Debug for ReadLockHold {
     /// The count only. The holder is whatever the process counter had reached,
     /// so printing it would make one scenario print differently from run to
     /// run (simulator traces, the live-against-model comparisons).
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("ReadEpoch").field(&self.count).finish()
+        f.debug_tuple("ReadLockHold").field(&self.count).finish()
     }
 }
 
 /// The holders handed out so far in this process.
 static HOLDERS: AtomicU64 = AtomicU64::new(0);
 
-impl ReadEpoch {
+impl ReadLockHold {
     /// The first hold of a new holder, equal to no epoch minted before it.
     /// Only a `WalSource` (or a test standing in for one) mints one, once per open.
     #[must_use]
@@ -130,8 +130,8 @@ impl ReadEpoch {
 
 /// Whether a WAL restart can have lost frames this position never saw.
 ///
-/// `Pinned(e)` means: during read epoch `e`, this position's synced end
-/// equalled the committed end. While the epoch holds, a read mark above 0 blocks
+/// `Held(h)` means: during read-lock hold `h`, this position's synced end
+/// equalled the committed end. While the hold lasts, a read mark above 0 blocks
 /// every restart, and under read mark 0 a restart can happen once and cannot be
 /// followed by another, so nothing past the position can be discarded.
 ///
@@ -142,14 +142,14 @@ impl ReadEpoch {
 ///    scan and after the staging commit.
 /// 3. Step 6 of the checkpoint protocol.
 ///
-/// Everything else is `Unpinned`: a `Continue` whose cursor is below the committed
+/// Everything else is `Broken`: a `Continue` whose cursor is below the committed
 /// end, and any step ending `Limited`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Continuity {
-    /// Proven complete during this read epoch.
-    Pinned(ReadEpoch),
+    /// Proven complete during this read-lock hold.
+    Held(ReadLockHold),
     /// Not proven; a salt change must be treated as possible loss.
-    Unpinned,
+    Broken,
 }
 
 /// The page of the last frame a position covers, to notice a WAL rewritten with the same salts.
@@ -282,21 +282,21 @@ impl Position {
 }
 
 /// A position a sync step found at the committed end of the wal-index read it
-/// ran under, during one read epoch: half of the proof. The other half is that
+/// ran under, during one read-lock hold: half of the proof. The other half is that
 /// the epoch still held once the step's file was staged, and only
 /// [`Self::confirm`], which reads the epoch again, turns this into a
 /// [`SyncedThrough`].
 #[derive(Debug, PartialEq, Eq)]
 pub struct ReachedEnd {
     position: Position,
-    epoch: ReadEpoch,
+    epoch: ReadLockHold,
 }
 
 impl ReachedEnd {
     /// Only the sync step finds one.
-    pub(crate) const fn new(position: Position, epoch: ReadEpoch) -> Self {
+    pub(crate) const fn new(position: Position, epoch: ReadLockHold) -> Self {
         Self {
-            position: position.with_continuity(Continuity::Unpinned),
+            position: position.with_continuity(Continuity::Broken),
             epoch,
         }
     }
@@ -307,9 +307,9 @@ impl ReachedEnd {
         &self.position
     }
 
-    /// The read epoch the step ran under.
+    /// The read-lock hold the step ran under.
     #[must_use]
-    pub const fn epoch(&self) -> ReadEpoch {
+    pub const fn epoch(&self) -> ReadLockHold {
         self.epoch
     }
 
@@ -327,8 +327,8 @@ impl ReachedEnd {
     /// frames the step never saw.
     pub fn confirm<W: WalSource>(self, wal: &W) -> Result<SyncedThrough, Position> {
         if wal.epoch() == self.epoch {
-            let pinned = Continuity::Pinned(self.epoch);
-            Ok(SyncedThrough(self.position.with_continuity(pinned)))
+            let held = Continuity::Held(self.epoch);
+            Ok(SyncedThrough(self.position.with_continuity(held)))
         } else {
             Err(self.position)
         }

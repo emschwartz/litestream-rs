@@ -3,7 +3,7 @@
 //!
 //! A snapshot is a copy: reading it takes one lock for as long as a clone, never across I/O.
 //!
-//! The application's own checkpoints are a notice ([`AppNotice`]), never a degraded state: the pin
+//! The application's own checkpoints are a notice ([`AppNotice`]), never a degraded state: the read lock
 //! keeps them from costing the replica anything, and what they cost the application is said in the
 //! notice's text.
 
@@ -154,7 +154,7 @@ pub struct Health {
     /// When the oldest commit not yet on the replica was first seen; `None` when caught up.
     /// This is the lag to alert on: the age of `replicated` grows on an idle database too.
     pub unreplicated_since: Option<Timestamp>,
-    /// The WAL file's size: a WAL the pin holds while uploads are degraded fills the disk.
+    /// The WAL file's size: a WAL the read lock holds while uploads are degraded fills the disk.
     pub wal_bytes: u64,
     /// The database file's size.
     pub db_bytes: u64,
@@ -184,7 +184,7 @@ pub struct Verification {
     pub failing: Option<VerifyFailure>,
     /// The restore point retention keeps while `failing` stands: the last good transaction,
     /// or the failing one when no run passed before it.
-    pub pinned: Option<Txid>,
+    pub kept_restore_point: Option<Txid>,
     /// The most severe finding of the last run's listing check, if it found any.
     pub worst_finding: Option<Severity>,
     /// Runs, by how they ended.
@@ -291,7 +291,7 @@ impl Health {
                 last_run: None,
                 last_good: None,
                 failing: None,
-                pinned: None,
+                kept_restore_point: None,
                 worst_finding: None,
                 runs: VerifyRuns {
                     passed: 0,
@@ -335,7 +335,7 @@ impl Health {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppNotice {
     /// The application ran checkpoints the replicator did not, `ran` of them so far. They copy only
-    /// frames below the replicator's pin into the database file and never restart the WAL
+    /// frames below the replicator's read lock into the database file and never restart the WAL
     /// under it.
     Checkpointing {
         /// Application checkpoints that changed the wal-index.

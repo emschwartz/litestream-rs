@@ -4,7 +4,7 @@
 //! rusqlite connections, the way Go's `db.go` uses its pool. The reader holds one long read
 //! transaction (`BEGIN; SELECT COUNT(1) FROM _litestream_seq`, `db.go:1288`), so SQLite cannot
 //! checkpoint past what has been replicated; it ends only inside `Checkpointer::checkpoint`,
-//! which is what moves the `ReadEpoch`. The writer takes the write barrier, the write lock and
+//! which is what moves the `ReadLockHold`. The writer takes the write barrier, the write lock and
 //! the sequence bump. Both connections have a zero busy timeout: a contended lock is
 //! `SourceError::Busy` at once, and the caller's policy decides what waits.
 //!

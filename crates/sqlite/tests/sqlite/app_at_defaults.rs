@@ -1,10 +1,10 @@
-//! What an application at SQLite's defaults does to a pin held in another process, with the actor
+//! What an application at SQLite's defaults does to a read lock held in another process, with the actor
 //! replicating and the oracle judging: the cases an application beside a sidecar has that an application set
 //! up by `lsr_sqlite::app_connection` never does (docs/plans/phase-4-sidecar.md, "The application's
 //! connection settings").
 //!
 //! The application runs in a child process (`Placement::SeparateProcess`): automatic checkpoints
-//! every 1000 frames, no `PERSIST_WAL`, busy timeout zero. The pin, the actor, the stores and
+//! every 1000 frames, no `PERSIST_WAL`, busy timeout zero. The read lock, the actor, the stores and
 //! the oracle are in this process, as a sidecar's are. A case whose answer differs from an application
 //! set up as replication asks runs in both placements and states both answers.
 //!
@@ -88,12 +88,12 @@ const NO_CHECKPOINTS: CheckpointConfig = CheckpointConfig {
 };
 
 /// SQLite belief: past 1000 frames every commit of an application at the defaults runs a PASSIVE
-/// checkpoint, which backfills up to the pin's read mark and stops there; the WAL never
-/// restarts under the pin. With the actor running none of its own, the pin stays above mark
+/// checkpoint, which backfills up to the read lock's read mark and stops there; the WAL never
+/// restarts under the read lock. With the actor running none of its own, the read lock stays above mark
 /// 0, so the application's backfill is the only one: the actor counts it, takes no snapshot, and the
 /// oracle restores every transaction.
 #[test]
-fn the_apps_automatic_checkpoints_against_a_pin_above_read_mark_0_lose_nothing() {
+fn the_apps_automatic_checkpoints_against_a_read_lock_above_read_mark_0_lose_nothing() {
     let dir = TempDir::new().unwrap();
     let mut rig = separate(&dir, NO_CHECKPOINTS);
     let from = rig.ticks().len();
@@ -102,10 +102,10 @@ fn the_apps_automatic_checkpoints_against_a_pin_above_read_mark_0_lose_nothing()
     let (log, backfilled) = app_wal(&mut rig);
     assert!(
         backfilled > 0 && backfilled < log,
-        "the application's own checkpoints backfilled up to the pin: {log} {backfilled}"
+        "the application's own checkpoints backfilled up to the read lock: {log} {backfilled}"
     );
     let now = rig.backend().unwrap().committed().unwrap().end().salts();
-    assert_eq!(now, salts, "no restart under the pin");
+    assert_eq!(now, salts, "no restart under the read lock");
     assert_eq!(boots_and_snapshots(&rig, from), vec![], "no snapshot");
     let app = rig.actor().app_checkpoints();
     assert!(
@@ -116,10 +116,10 @@ fn the_apps_automatic_checkpoints_against_a_pin_above_read_mark_0_lose_nothing()
     assert_eq!(checked.latest, rig.acked(), "{checked:?}");
 }
 
-/// SQLite belief: once the replicator's own PASSIVE backfills the whole log, its pin is
+/// SQLite belief: once the replicator's own PASSIVE backfills the whole log, its read lock is
 /// retaken on read mark 0, which does not stop a restart, so the application's next write restarts
-/// the WAL (`salt1 + 1`, in the same read epoch). The replicator starts its checkpoints over
-/// a WAL the application's automatic checkpoints already backfilled up to the old pin, and then
+/// the WAL (`salt1 + 1`, in the same read-lock hold). The replicator starts its checkpoints over
+/// a WAL the application's automatic checkpoints already backfilled up to the old read lock, and then
 /// follows each restart with no snapshot; the oracle restores every transaction.
 #[test]
 fn the_apps_restarts_after_the_replicators_checkpoints_are_followed_without_a_snapshot() {
@@ -223,9 +223,9 @@ fn close_while_down(placement: Placement, app_first: bool) {
     rig.check().unwrap();
 }
 
-/// SQLite belief: the application's last connection closing while the pin is open neither
+/// SQLite belief: the application's last connection closing while the read lock is open neither
 /// checkpoints nor deletes the WAL, with or without `PERSIST_WAL` (`sqlite3WalClose` needs
-/// the exclusive lock the pin's connection stops), so the actor continues where it was.
+/// the exclusive lock the read lock's connection stops), so the actor continues where it was.
 #[test]
 fn the_apps_last_close_while_pinned_keeps_the_wal_and_replication_continues() {
     for placement in Placement::ALL {
@@ -252,10 +252,10 @@ fn the_apps_last_close_while_pinned_keeps_the_wal_and_replication_continues() {
 }
 
 /// POSIX locks belong to a process: the application's process opening and closing the database and
-/// `-shm` with `std::fs` drops only its own locks, so the pin in this process still blocks
+/// `-shm` with `std::fs` drops only its own locks, so the read lock in this process still blocks
 /// the application's RESTART (busy, the WAL's generation unchanged) and the next sync is incremental.
 #[test]
-fn the_app_process_opening_and_closing_the_database_files_leaves_the_pin_held() {
+fn the_app_process_opening_and_closing_the_database_files_leaves_the_read_lock_held() {
     let dir = TempDir::new().unwrap();
     let mut s = Stepper::<Sqlite>::placed(dir.path(), 4096, Placement::SeparateProcess).unwrap();
     s.sync().unwrap();
@@ -264,7 +264,7 @@ fn the_app_process_opening_and_closing_the_database_files_leaves_the_pin_held() 
     let salts = s.salts().unwrap();
     s.app_touches_the_files().unwrap();
     let (busy, _, _) = s.app_checkpoint("RESTART").unwrap();
-    assert_eq!(busy, 1, "the pin still blocks a restart");
+    assert_eq!(busy, 1, "the read lock still blocks a restart");
     s.write(300).unwrap();
     assert_eq!(s.salts().unwrap(), salts, "same generation");
     let verdict = s.verdict().unwrap();

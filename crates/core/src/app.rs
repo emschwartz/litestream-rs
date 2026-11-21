@@ -3,40 +3,40 @@
 //! An application that cannot be told to keep `wal_autocheckpoint = 0` (a sidecar's application, or an
 //! in-process application that did not use `app_connection`) runs SQLite's automatic PASSIVE
 //! checkpoint after every commit that leaves the WAL at or past its threshold, 1000 frames
-//! by default. None of it costs the replica anything (the pin stops it), but it costs the
+//! by default. None of it costs the replica anything (the read lock stops it), but it costs the
 //! application, and the replicator should say so. The observer reads only what each poll already
 //! reads (the wal-index's frame count, backfill count and salts) and the replicator's own
 //! checkpoints, and reports three things:
 //!
 //! - [`AppCheckpoint::Backfilled`]: the backfill count rose within one generation with no
 //!   checkpoint of ours since the last read. SQLite caps a checkpoint at the mark of the
-//!   pin, so this shows only while the pin is on a read mark above 0.
+//!   read lock, so this shows only while the read lock is on a read mark above 0.
 //! - [`AppCheckpoint::Restarted`]: the generation changed although the last read was not
 //!   fully backfilled and no checkpoint of ours came between, so someone else finished the
 //!   backfill and restarted the log. A restart after a read that was fully backfilled is
 //!   just the next writer starting a new generation (`walRestartLog`), not a checkpoint.
-//! - [`AppCheckpoint::Stalled`]: the half the backfill count cannot show. With the pin on
+//! - [`AppCheckpoint::Stalled`]: the half the backfill count cannot show. With the read lock on
 //!   read mark 0 a checkpoint needs that mark exclusively, fails, and reports OK to a
 //!   PASSIVE caller, so it leaves no trace in the wal-index (`docs/spikes.md`, the application's
-//!   automatic checkpoints against a pin in another process). The observer infers it: the
+//!   automatic checkpoints against a read lock in another process). The observer infers it: the
 //!   WAL was already at or past the application's threshold at the last read, it grew since (a
 //!   application commit, so an application checkpoint attempt), nothing new was backfilled, and the
-//!   backfill already stands where the pin stops any checkpoint (the *ceiling*). Every such
+//!   backfill already stands where the read lock stops any checkpoint (the *ceiling*). Every such
 //!   attempt does nothing until the replicator checkpoints, and the WAL grows until then.
 //!   Reported once per episode: an episode ends at a checkpoint of ours, a backfill or a
 //!   new generation.
 //!
-//! The ceiling is where the pin stops a checkpoint. After our own checkpoint it comes from
-//! what SQLite's checkpoint call reported as the pin was retaken: 0 when the call left the
-//! WAL fully backfilled (the pin is then on read mark 0, where nothing can be copied), else the
-//! frame count (the pin's mark; the PASSIVE's write barrier keeps commits out until the
+//! The ceiling is where the read lock stops a checkpoint. After our own checkpoint it comes from
+//! what SQLite's checkpoint call reported as the read lock was retaken: 0 when the call left the
+//! WAL fully backfilled (the read lock is then on read mark 0, where nothing can be copied), else the
+//! frame count (the read lock's mark; the PASSIVE's write barrier keeps commits out until the
 //! retake). Without that report it is the frame count at the read after, or at the first
 //! read: an estimate from above, so that a wrong one can only miss a stall, never invent
-//! one. A new generation sets it to 0 (SQLite restarts the log under a held pin only when the
-//! pin is on read mark 0), and an application checkpoint that stopped short sets it to where it stopped.
+//! one. A new generation sets it to 0 (SQLite restarts the log under a held read lock only when the
+//! read lock is on read mark 0), and an application checkpoint that stopped short sets it to where it stopped.
 //!
 //! The wal-index cannot tell an application at `wal_autocheckpoint = 0` from an application whose attempts
-//! fail on read mark 0: both leave the WAL growing with nothing backfilled. Where the pin is above
+//! fail on read mark 0: both leave the WAL growing with nothing backfilled. Where the read lock is above
 //! read mark 0 the two differ (an attempt would have backfilled to the ceiling), and no stall is
 //! inferred. On read mark 0 only the threshold the observer is given tells them apart, so an application
 //! known to run at 0 should be stated as `None`.
@@ -142,7 +142,7 @@ pub struct Watch {
 
 impl Watch {
     /// The baseline a read sets when nothing came before it, or after a checkpoint of ours:
-    /// the pin was taken at or before it, so its frame count bounds the pin's mark.
+    /// the read lock was taken at or before it, so its frame count bounds the read lock's mark.
     #[must_use]
     pub const fn baseline(read: CommittedRead) -> Self {
         Self {
@@ -153,7 +153,7 @@ impl Watch {
     }
 
     /// The baseline after a checkpoint of ours: `read` is the read after it, `run` what
-    /// SQLite's checkpoint call reported as the pin was retaken, if the call returned.
+    /// SQLite's checkpoint call reported as the read lock was retaken, if the call returned.
     #[must_use]
     pub const fn after_ours(read: CommittedRead, run: Option<CheckpointRun>) -> Self {
         let ceiling = match run {

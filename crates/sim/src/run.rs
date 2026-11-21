@@ -732,7 +732,7 @@ impl Runner {
     }
 
     /// SQLite leaves WAL mode, which a page-size change needs, only with
-    /// every connection closed, the engine's read pin among them
+    /// every connection closed, the engine's read lock among them
     /// (`sqlite_rules::our_reader_blocks_leaving_wal_mode`). So the operator stops
     /// the engine, the app ends its readers and vacuums, and the engine starts
     /// again; a write transaction the app holds refuses the vacuum.

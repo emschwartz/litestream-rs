@@ -22,7 +22,7 @@
 //!    An upload does not make a listing due at once: the next one waits for
 //!    the next compaction window or the level-0 retention check interval,
 //!    whichever comes first ([`crate::listing_after_upload`]), as Go's
-//!    monitors wait for their tickers. A job, a boot, a released pin or a
+//!    monitors wait for their tickers. A job, a boot, a released kept restore point or a
 //!    switched retention still lists on the next tick, and every job is
 //!    planned from a listing made in its own tick, so a delete never acts on
 //!    an older one.
@@ -40,7 +40,7 @@
 //! clears it. A failed retention delete degrades maintenance; sync and upload
 //! go on. While any task is degraded, retention pins the newest transaction
 //! the replica held when the first one began (`maintain::retain`), and the
-//! pin goes once every task has recovered. A bug, and another writer whose
+//! kept restore point goes once every task has recovered. A bug, and another writer whose
 //! response is to continue, rebuild the actor and boot again after the wait;
 //! a replica that went backwards is listed again. Under `Stop` the actor
 //! halts, as every persistent fault did before.
@@ -71,7 +71,7 @@ use std::time::Duration;
 use lsr_ltx::{PageSize, Timestamp, Txid};
 use lsr_wal::{CommittedEnd, OpenError, WalReader};
 
-use parts::{Course, Engine, Kept, LanePin, Stop, Tail};
+use parts::{Course, Engine, Kept, Stop, Tail, TaskRestorePoint};
 pub use state::{Degraded, Phase, Task};
 use state::{Gate, Live};
 
@@ -261,7 +261,7 @@ pub struct Unfinished {
 /// What a sync step left.
 enum Stepped {
     /// The step ran; the proof is set when it reached the committed end at an
-    /// unchanged read epoch.
+    /// unchanged read-lock hold.
     Synced {
         files: u32,
         proof: Option<SyncedThrough>,
@@ -407,8 +407,8 @@ impl Actor {
     /// trusted (a panic unwound through a tick): a fresh engine that boots
     /// from the replica and the WAL again, beside everything that is not the
     /// engine's to forget. Kept: the configuration, a drain's deadline or a
-    /// halt, each task's wait and degraded state and the retention pin they
-    /// hold, a scheduled verify's pin and its request for live pages (pages
+    /// halt, each task's wait and degraded state and the kept restore point they
+    /// hold, a scheduled verify's kept restore point and its request for live pages (pages
     /// read and not yet taken are read again), an operator's snapshot request
     /// not yet staged, the clock's last reading and the application-checkpoint
     /// counts (not the wal-index read they were counted from: the caller
@@ -442,7 +442,7 @@ impl Actor {
 
     /// An operator accepts the database file as it is: every page the page
     /// checksum table reported as mismatched is trusted with the bytes it now
-    /// holds, and the degraded state and retention pin it held go.
+    /// holds, and the degraded state and kept restore point it held go.
     pub fn accept_database_pages(&mut self) {
         self.engine.pages.accept();
     }
@@ -542,10 +542,10 @@ impl Actor {
 
     /// Keeps the restore chain of `txid` from retention, for a scheduled verify
     /// that found a later restore wrong (`None` lets it go). A degraded task's
-    /// pin, if older, still wins.
-    pub fn pin_for_verify(&mut self, txid: Option<Txid>) {
-        let released = self.kept.verify_pin.is_some() && txid.is_none();
-        self.kept.verify_pin = txid;
+    /// kept restore point, if older, still wins.
+    pub fn keep_restore_point_for_verify(&mut self, txid: Option<Txid>) {
+        let released = self.kept.verify_restore_point.is_some() && txid.is_none();
+        self.kept.verify_restore_point = txid;
         if released {
             self.engine.maintain.stale = true;
         }
@@ -553,8 +553,8 @@ impl Actor {
 
     /// The restore point retention keeps, if one is pinned.
     #[must_use]
-    pub fn retention_pin(&self) -> Option<Txid> {
-        self.kept.retention_pin()
+    pub fn kept_restore_point(&self) -> Option<Txid> {
+        self.kept.kept_restore_point()
     }
 
     /// Makes the next sync a snapshot (an operator asked). A cause already
@@ -609,7 +609,7 @@ impl Actor {
         if self.engine.pages.mismatch().is_none() {
             self.kept.tasks.page_matches_again();
         }
-        self.release_pin();
+        self.release_restore_point();
         // A boot that keeps failing must not outlast a drain's deadline.
         if let (false, Stop::Draining { deadline }) = (self.booted(), self.kept.stop)
             && now >= deadline
@@ -689,7 +689,7 @@ impl Actor {
         if action == Action::Stop {
             return self.halt(HaltCause::from(cause));
         }
-        self.pin_retention();
+        self.keep_restore_point();
         let waiter = match action {
             Action::Stop | Action::Retry => waiter,
             Action::Relist => {
@@ -720,17 +720,18 @@ impl Actor {
 
     /// Pins the newest transaction the replica holds for retention, unless a
     /// degradation already pinned one.
-    fn pin_retention(&mut self) {
-        if self.kept.lane_pin == LanePin::Free {
-            self.kept.lane_pin = LanePin::Held(self.engine.upload.confirmed());
+    fn keep_restore_point(&mut self) {
+        if self.kept.task_restore_point == TaskRestorePoint::Free {
+            self.kept.task_restore_point = TaskRestorePoint::Held(self.engine.upload.confirmed());
         }
     }
 
-    /// Lets the pin go once no task is degraded; the next listing may then
+    /// Lets the kept restore point go once no task is degraded; the next listing may then
     /// delete what it kept.
-    fn release_pin(&mut self) {
-        if self.kept.lane_pin != LanePin::Free && !self.kept.tasks.any_degraded() {
-            self.kept.lane_pin = LanePin::Free;
+    fn release_restore_point(&mut self) {
+        if self.kept.task_restore_point != TaskRestorePoint::Free && !self.kept.tasks.any_degraded()
+        {
+            self.kept.task_restore_point = TaskRestorePoint::Free;
             self.engine.maintain.stale = true;
         }
     }
@@ -1157,7 +1158,7 @@ impl Actor {
         }
     }
 
-    /// The WAL a step reads, with the wal-index read and the read epoch it
+    /// The WAL a step reads, with the wal-index read and the read-lock hold it
     /// runs under, or what recovery makes of a WAL with no header.
     ///
     /// A pending snapshot that finds no header writes one first, through one
@@ -1506,12 +1507,12 @@ impl Actor {
             return Some(tick);
         }
         let published = self.engine.upload.confirmed();
-        // The planner reads the pin from its state: handed over here, where
+        // The planner reads the kept restore point from its state: handed over here, where
         // it is read, and stored nowhere else.
         self.engine
             .maintain
             .state
-            .set_pin(self.kept.retention_pin());
+            .set_kept_restore_point(self.kept.kept_restore_point());
         let decided = {
             let (cfg, state) = (&self.kept.cfg.maintenance, &mut self.engine.maintain.state);
             let mut step = |resolved: &ResolvedCreatedAt| {

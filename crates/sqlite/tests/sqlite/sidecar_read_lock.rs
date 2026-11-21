@@ -1,26 +1,26 @@
-//! The application's automatic checkpoints against a pin held in another process, measured.
+//! The application's automatic checkpoints against a read lock held in another process, measured.
 //!
 //! A replicator that runs beside the application (a sidecar) cannot set `wal_autocheckpoint`
 //! on the application's connections, so they keep SQLite's default: after any commit that
 //! leaves 1000 or more frames in the WAL, a PASSIVE checkpoint on the committing connection
 //! (`sqlite3WalDefaultHook`). Here the application is a child process at those defaults (no
 //! `PERSIST_WAL` either; only `synchronous = NORMAL`, which does not touch checkpoints, so the
-//! run is quick), and the pin is [`Sqlite`]'s read transaction in the test process.
+//! run is quick), and the read lock is [`Sqlite`]'s read transaction in the test process.
 //!
 //! What SQLite 3.54.1 does (`walCheckpoint`, `walRestartLog` in the bundled `sqlite3.c`):
-//! - With the pin on a read mark above 0, the checkpoint backfills exactly up to the pin's
+//! - With the read lock on a read mark above 0, the checkpoint backfills exactly up to the read lock's
 //!   mark and stops there; the WAL never restarts, since a restart needs the whole log
 //!   backfilled.
-//! - With the pin on read mark 0 (taken when the WAL was fully backfilled), the application's next
+//! - With the read lock on read mark 0 (taken when the WAL was fully backfilled), the application's next
 //!   write restarts the WAL once, and every checkpoint after it backfills nothing: a
 //!   checkpoint needs read lock 0 exclusively before it writes a page.
 //!
-//! Which read mark the pin holds is read from the kernel's list of this process's locks on
+//! Which read mark the read lock holds is read from the kernel's list of this process's locks on
 //! `-shm` in `/proc/self/fdinfo` (read lock `i` is byte `123 + i` of `-shm`), so the file is
 //! Linux only; nothing here opens the database or `-shm`.
 //!
 //! The last two tests run core's application-checkpoint observer over the same reads, in both
-//! placements of the pin, with the application at SQLite's defaults and at `wal_autocheckpoint = 0`.
+//! placements of the read lock, with the application at SQLite's defaults and at `wal_autocheckpoint = 0`.
 
 #![cfg(target_os = "linux")]
 #![expect(
@@ -53,8 +53,8 @@ use crate::common;
 
 /// SQLite's default `wal_autocheckpoint`, in frames.
 const AUTOCHECKPOINT: u32 = 1000;
-const LINE: &str = "lsr-pin ";
-const DONE: &str = "lsr-pin done";
+const LINE: &str = "lsr-read lock ";
+const DONE: &str = "lsr-read lock done";
 /// `-shm` byte of read lock 0 (`WALINDEX_LOCK_OFFSET` 120 plus `WAL_READ_LOCK(0)` 3).
 const READ_LOCK_0: u64 = 123;
 
@@ -125,7 +125,7 @@ fn application(db: &Path, commits: u32, row: u32, automatic: bool) {
     }
     writeln!(out, "{DONE}").unwrap();
     out.flush().unwrap();
-    // Its close is the last close of an application connection: with the pin's process
+    // Its close is the last close of an application connection: with the read lock's process
     // holding the database open, SQLite keeps the WAL.
     conn.close().unwrap();
 }
@@ -245,19 +245,19 @@ fn assert_one_generation(seen: &[Seen], salts: Salts) {
     );
 }
 
-/// SQLite belief: with the pin on a read mark above 0, the application's automatic PASSIVE
-/// checkpoints backfill exactly to the pin's mark and the WAL never restarts; with the pin on
+/// SQLite belief: with the read lock on a read mark above 0, the application's automatic PASSIVE
+/// checkpoints backfill exactly to the read lock's mark and the WAL never restarts; with the read lock on
 /// read mark 0, the application's first write restarts the WAL once and its automatic checkpoints
 /// backfill nothing. [`Sqlite`]'s committed read reports both, and its own checkpoint, once
 /// the application is done, backfills the whole log.
 #[test]
-fn the_apps_autocheckpoint_stops_at_a_pin_in_another_process() {
+fn the_apps_autocheckpoint_stops_at_a_read_lock_in_another_process() {
     let dir = TempDir::new().unwrap();
     let db = dir.path().join("app.db");
     create(&db, 4096);
-    let mut pin = Sqlite::open(&db).unwrap();
-    // The open's own schema commits are in the WAL, unbackfilled: the pin sits above read mark 0.
-    let start = pin.committed().unwrap();
+    let mut lock = Sqlite::open(&db).unwrap();
+    // The open's own schema commits are in the WAL, unbackfilled: the read lock sits above read mark 0.
+    let start = lock.committed().unwrap();
     let mark = start.end().frame_count();
     assert!(mark > 0 && start.backfilled() == 0, "{start:?}");
     assert_eq!(read_marks_held(&db).len(), 1);
@@ -270,11 +270,11 @@ fn the_apps_autocheckpoint_stops_at_a_pin_in_another_process() {
         assert_eq!(s.backfilled, expected, "{s:?}");
     }
     assert!(
-        pin.wal_path().exists(),
+        lock.wal_path().exists(),
         "the application's last close kept the WAL"
     );
     let last = seen.last().unwrap().log;
-    let after = pin.committed().unwrap();
+    let after = lock.committed().unwrap();
     assert_eq!(
         (
             after.end().frame_count(),
@@ -283,9 +283,9 @@ fn the_apps_autocheckpoint_stops_at_a_pin_in_another_process() {
         ),
         (last, mark, start.end().salts())
     );
-    let run = pin.checkpoint(CheckpointMode::Passive).unwrap();
+    let run = lock.checkpoint(CheckpointMode::Passive).unwrap();
     assert_eq!((run.busy, run.log, run.checkpointed), (false, last, last));
-    // Retaken over a fully backfilled WAL, the pin is on read mark 0.
+    // Retaken over a fully backfilled WAL, the read lock is on read mark 0.
     assert_eq!(read_marks_held(&db), vec![0]);
 
     let again = run_application("app-4096", &db);
@@ -299,7 +299,7 @@ fn the_apps_autocheckpoint_stops_at_a_pin_in_another_process() {
     assert_one_generation(&again, restarted);
     assert!(again.iter().all(|s| s.backfilled == 0), "{again:?}");
     let last = again.last().unwrap().log;
-    let after = pin.committed().unwrap();
+    let after = lock.committed().unwrap();
     assert_eq!(
         (
             after.end().frame_count(),
@@ -308,7 +308,7 @@ fn the_apps_autocheckpoint_stops_at_a_pin_in_another_process() {
         ),
         (last, 0, restarted)
     );
-    let run = pin.checkpoint(CheckpointMode::Passive).unwrap();
+    let run = lock.checkpoint(CheckpointMode::Passive).unwrap();
     assert_eq!((run.busy, run.log, run.checkpointed), (false, last, last));
 }
 
@@ -334,16 +334,16 @@ fn snapshots_since(rig: &Rig<Sqlite>, from: usize) -> Vec<Option<SnapshotCause>>
         .collect()
 }
 
-/// Puts the pin on a read mark above 0: an application reader holds the log while the actor
-/// checkpoints, so the checkpoint stops short and the pin is retaken over unbackfilled frames.
-fn pin_above_read_mark_zero(rig: &mut Rig<Sqlite>) {
+/// Puts the read lock on a read mark above 0: an application reader holds the log while the actor
+/// checkpoints, so the checkpoint stops short and the read lock is retaken over unbackfilled frames.
+fn read_lock_above_read_mark_zero(rig: &mut Rig<Sqlite>) {
     let reader = open_app(rig.db(), rig.vfs(), "NORMAL").unwrap();
     reader
         .execute_batch("BEGIN; SELECT count(*) FROM t;")
         .unwrap();
     let begin = rig.ticks().len();
     // A PASSIVE that readers stop short reports success (SQLite resets its BUSY), so the
-    // checkpoint is seen as a run, and the pin's new mark in the locks.
+    // checkpoint is seen as a run, and the read lock's new mark in the locks.
     for _ in 0..20 {
         rig.insert(1500).unwrap();
         rig.settle().unwrap();
@@ -356,8 +356,8 @@ fn pin_above_read_mark_zero(rig: &mut Rig<Sqlite>) {
     assert!(marks.len() == 1 && marks[0] > 0, "{marks:?}");
 }
 
-/// The engine over a pin whose application checkpoints at SQLite's default: after an application in
-/// another process wrote past 1000 frames, once with the pin above read mark 0 and once on it,
+/// The engine over a read lock whose application checkpoints at SQLite's default: after an application in
+/// another process wrote past 1000 frames, once with the read lock above read mark 0 and once on it,
 /// the actor's sync restores every committed transaction, with no snapshot.
 #[test]
 fn the_engine_restores_everything_a_app_at_the_default_autocheckpoint_wrote() {
@@ -368,15 +368,15 @@ fn the_engine_restores_everything_a_app_at_the_default_autocheckpoint_wrote() {
     };
     let mut rig = Rig::<Sqlite>::new(dir.path(), cfg).unwrap();
     rig.settle().unwrap();
-    pin_above_read_mark_zero(&mut rig);
+    read_lock_above_read_mark_zero(&mut rig);
     let before = rig.backend().unwrap().committed().unwrap();
 
     let seen = run_application("app-512", rig.db());
     assert_one_generation(&seen, before.end().salts());
     rig.observe().unwrap();
     let after = rig.backend().unwrap().committed().unwrap();
-    // The application's checkpoints moved the backfill up to the pin's mark, never past the frames
-    // that were there when the pin was taken.
+    // The application's checkpoints moved the backfill up to the read lock's mark, never past the frames
+    // that were there when the read lock was taken.
     assert!(
         after.backfilled() > before.backfilled(),
         "{before:?} {after:?}"
@@ -427,7 +427,7 @@ fn the_engine_restores_everything_a_app_at_the_default_autocheckpoint_wrote() {
     );
 }
 
-/// Where the pin sits when the application starts writing.
+/// Where the read lock sits when the application starts writing.
 #[derive(Clone, Copy, Debug)]
 enum Placement {
     /// Over the open's own unbackfilled schema commits: a read mark above 0.
@@ -436,27 +436,27 @@ enum Placement {
     OnMarkZero,
 }
 
-/// A database in `dir`, the pin in `placement`, and one observer per assumed application threshold
-/// in `assumed`, each having seen the read where the pin was taken.
-fn pinned(
+/// A database in `dir`, the read lock in `placement`, and one observer per assumed application threshold
+/// in `assumed`, each having seen the read where the read lock was taken.
+fn under_read_lock(
     dir: &TempDir,
     placement: Placement,
     assumed: &[Option<NonZeroU32>],
 ) -> (PathBuf, Sqlite, Vec<AppCheckpointObserver>) {
     let db = dir.path().join("app.db");
     create(&db, 4096);
-    let mut pin = Sqlite::open(&db).unwrap();
+    let mut lock = Sqlite::open(&db).unwrap();
     let mut observers: Vec<AppCheckpointObserver> = assumed
         .iter()
         .map(|a| AppCheckpointObserver::new(*a))
         .collect();
     for observer in &mut observers {
-        assert_eq!(observer.poll(pin.committed().unwrap()), None);
+        assert_eq!(observer.poll(lock.committed().unwrap()), None);
     }
     if let Placement::OnMarkZero = placement {
-        let run = pin.checkpoint(CheckpointMode::Passive).unwrap();
+        let run = lock.checkpoint(CheckpointMode::Passive).unwrap();
         assert!(!run.busy && run.checkpointed == run.log, "{run:?}");
-        let after = pin.committed().unwrap();
+        let after = lock.committed().unwrap();
         for observer in &mut observers {
             observer.ours(Some(after), Some(run));
         }
@@ -466,7 +466,7 @@ fn pinned(
         Placement::AboveMarkZero => assert!(marks.len() == 1 && marks[0] > 0, "{marks:?}"),
         Placement::OnMarkZero => assert_eq!(marks, vec![0]),
     }
-    (db, pin, observers)
+    (db, lock, observers)
 }
 
 /// The application writes 95 commits (about 1140 frames, past SQLite's threshold), then 10 more, as
@@ -474,7 +474,7 @@ fn pinned(
 /// poll, and the backfill counts the application itself saw after each of its commits.
 fn app_writes(
     db: &Path,
-    pin: &mut Sqlite,
+    lock: &mut Sqlite,
     observers: &mut [AppCheckpointObserver],
     setting: &str,
 ) -> (Vec<Vec<Option<AppCheckpoint>>>, Vec<u32>) {
@@ -483,7 +483,7 @@ fn app_writes(
     for commits in [95, 10] {
         let app = run_application(&format!("application-{setting}-{commits}"), db);
         backfills.extend(app.iter().map(|s| s.backfilled));
-        let read = pin.committed().unwrap();
+        let read = lock.committed().unwrap();
         assert!(read.end().frame_count() > AUTOCHECKPOINT, "{read:?}");
         for (observer, seen) in observers.iter_mut().zip(&mut seen) {
             seen.push(observer.poll(read));
@@ -492,17 +492,17 @@ fn app_writes(
     (seen, backfills)
 }
 
-/// An application at SQLite's defaults raises the application-checkpoint notice wherever the pin sits. Above
-/// read mark 0 its checkpoint copies the frames below the pin (a backfill the replicator did not
+/// An application at SQLite's defaults raises the application-checkpoint notice wherever the read lock sits. Above
+/// read mark 0 its checkpoint copies the frames below the read lock (a backfill the replicator did not
 /// run), and its next attempts copy nothing more; on read mark 0 its attempts copy nothing at all
 /// and show only as the WAL growing past the threshold with nothing backfilled.
 #[test]
 fn an_app_at_the_defaults_raises_the_notice_on_either_read_mark() {
     let default = Some(SQLITE_AUTOCHECKPOINT);
     let dir = TempDir::new().unwrap();
-    let (db, mut pin, mut observers) = pinned(&dir, Placement::AboveMarkZero, &[default]);
-    let mark = pin.committed().unwrap().end().frame_count();
-    let (seen, backfills) = app_writes(&db, &mut pin, &mut observers, "default");
+    let (db, mut lock, mut observers) = under_read_lock(&dir, Placement::AboveMarkZero, &[default]);
+    let mark = lock.committed().unwrap().end().frame_count();
+    let (seen, backfills) = app_writes(&db, &mut lock, &mut observers, "default");
     assert!(
         backfills.contains(&mark),
         "the application's checkpoint ran"
@@ -520,8 +520,8 @@ fn an_app_at_the_defaults_raises_the_notice_on_either_read_mark() {
     assert_eq!(observers[0].counts().ran(), 1);
 
     let dir = TempDir::new().unwrap();
-    let (db, mut pin, mut observers) = pinned(&dir, Placement::OnMarkZero, &[default]);
-    let (seen, backfills) = app_writes(&db, &mut pin, &mut observers, "default");
+    let (db, mut lock, mut observers) = under_read_lock(&dir, Placement::OnMarkZero, &[default]);
+    let (seen, backfills) = app_writes(&db, &mut lock, &mut observers, "default");
     assert!(backfills.iter().all(|b| *b == 0), "nothing could be copied");
     assert!(
         matches!(seen[0][..], [None, Some(AppCheckpoint::Stalled { .. })]),
@@ -534,7 +534,7 @@ fn an_app_at_the_defaults_raises_the_notice_on_either_read_mark() {
     );
 }
 
-/// An application at `wal_autocheckpoint = 0` raises nothing. Above read mark 0 the frames below the pin
+/// An application at `wal_autocheckpoint = 0` raises nothing. Above read mark 0 the frames below the read lock
 /// stay unbackfilled, which an application at the defaults would have copied, so nothing is inferred
 /// even at the default threshold. On read mark 0 the wal-index looks the same as for an application whose
 /// attempts fail, so only the threshold the observer is told tells them apart: told `None`,
@@ -543,8 +543,9 @@ fn an_app_at_the_defaults_raises_the_notice_on_either_read_mark() {
 fn an_app_at_wal_autocheckpoint_0_raises_none() {
     let default = Some(SQLITE_AUTOCHECKPOINT);
     let dir = TempDir::new().unwrap();
-    let (db, mut pin, mut observers) = pinned(&dir, Placement::AboveMarkZero, &[default, None]);
-    let (seen, backfills) = app_writes(&db, &mut pin, &mut observers, "off");
+    let (db, mut lock, mut observers) =
+        under_read_lock(&dir, Placement::AboveMarkZero, &[default, None]);
+    let (seen, backfills) = app_writes(&db, &mut lock, &mut observers, "off");
     assert!(
         backfills.iter().all(|b| *b == 0),
         "the application ran no checkpoint"
@@ -552,8 +553,9 @@ fn an_app_at_wal_autocheckpoint_0_raises_none() {
     assert_eq!(seen, vec![vec![None, None]; 2]);
 
     let dir = TempDir::new().unwrap();
-    let (db, mut pin, mut observers) = pinned(&dir, Placement::OnMarkZero, &[None, default]);
-    let (seen, backfills) = app_writes(&db, &mut pin, &mut observers, "off");
+    let (db, mut lock, mut observers) =
+        under_read_lock(&dir, Placement::OnMarkZero, &[None, default]);
+    let (seen, backfills) = app_writes(&db, &mut lock, &mut observers, "off");
     assert!(backfills.iter().all(|b| *b == 0));
     assert_eq!(seen[0], [None, None], "told the application runs none");
     assert!(

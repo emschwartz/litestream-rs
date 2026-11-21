@@ -16,7 +16,7 @@ use lsr_ltx::{DbPages, PageNo};
 use lsr_wal::{CommittedEnd, Salts};
 use thiserror::Error;
 
-use crate::position::{ReadEpoch, WalFileLen};
+use crate::position::{ReadLockHold, WalFileLen};
 
 #[cfg(any(test, feature = "testing"))]
 mod fake;
@@ -69,14 +69,14 @@ pub enum SourceError {
 pub struct CommittedRead {
     end: CommittedEnd,
     backfilled: u32,
-    epoch: ReadEpoch,
+    epoch: ReadLockHold,
 }
 
 impl CommittedRead {
     /// A read taken under the hold `epoch`; `None` when `backfilled` exceeds
     /// the frame count, which no wal-index holds.
     #[must_use]
-    pub const fn new(end: CommittedEnd, backfilled: u32, epoch: ReadEpoch) -> Option<Self> {
+    pub const fn new(end: CommittedEnd, backfilled: u32, epoch: ReadLockHold) -> Option<Self> {
         if backfilled > end.frame_count() {
             None
         } else {
@@ -92,7 +92,7 @@ impl CommittedRead {
     /// with the read, not from a second call, so nothing can retake the
     /// transaction between the two.
     #[must_use]
-    pub const fn epoch(&self) -> ReadEpoch {
+    pub const fn epoch(&self) -> ReadLockHold {
         self.epoch
     }
 
@@ -160,7 +160,7 @@ pub trait WalSource {
 
     /// Which hold of the read transaction the answers above belong to now;
     /// [`CommittedRead::epoch`] is the one a given read was taken under.
-    fn epoch(&self) -> ReadEpoch;
+    fn epoch(&self) -> ReadLockHold;
 }
 
 /// The database file, read for snapshots.
@@ -202,7 +202,7 @@ pub struct CheckpointRun {
     /// Frames copied into the database file.
     pub checkpointed: u32,
     /// The epoch of the read transaction retaken after the checkpoint.
-    pub epoch: ReadEpoch,
+    pub epoch: ReadLockHold,
 }
 
 /// The write barrier on `_litestream_lock`, held between `begin_barrier` and `end_barrier`.

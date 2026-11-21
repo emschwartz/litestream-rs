@@ -12,7 +12,7 @@
 //! **The child** runs with the parent's environment, standard input from `/dev/null`, and the
 //! parent's standard output and error (`replicate.go:472-475`). It starts only after every
 //! database that exists has its read transaction held (Go starts it after `Store.Open`, which
-//! takes no lock, so Go's child can write before the pin exists). One thread waits for it and
+//! takes no lock, so Go's child can write before the read lock exists). One thread waits for it and
 //! wakes the daemon when it exits.
 //!
 //! **Signals** reach the child through [`Child::forward`]. The waiting thread first waits for

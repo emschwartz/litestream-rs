@@ -22,7 +22,7 @@ use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
-/// A step's end as the engine takes it: the proof when the read epoch still
+/// A step's end as the engine takes it: the proof when the read-lock hold still
 /// holds, else the unpinned position and no proof.
 fn confirmed<W: WalSource>(
     reached: lsr_core::ReachedEnd,
@@ -236,7 +236,7 @@ impl Rig {
 }
 
 fn assert_continue(verdict: &Verdict) {
-    assert_eq!(verdict.event, None, "no PinViolated or LocalRewound");
+    assert_eq!(verdict.event, None, "no ReadLockViolated or LocalRewound");
     assert!(
         matches!(verdict.recovered, Recovered::Continue(_)),
         "expected Continue, got {:?}",
@@ -246,7 +246,7 @@ fn assert_continue(verdict: &Verdict) {
 
 /// An application checkpoint of a kind that restarts or truncates the WAL, run while our read
 /// transaction holds a mark above zero: SQLite cannot restart under it, so nothing changes.
-fn outside_checkpoint_against_pin(pragma: &str) {
+fn outside_checkpoint_against_read_lock(pragma: &str) {
     let mut rig = Rig::new(4096);
     assert!(matches!(rig.sync(), Did::Wrote { .. }), "the snapshot");
     rig.write(500);
@@ -255,7 +255,7 @@ fn outside_checkpoint_against_pin(pragma: &str) {
     let position = rig.txid();
 
     let (busy, _, _) = rig.app_checkpoint(pragma);
-    assert_eq!(busy, 1, "the pin blocks the restart");
+    assert_eq!(busy, 1, "the read lock blocks the restart");
     assert_eq!(rig.wal_header(), header, "salts and sequence unchanged");
     assert_eq!(rig.wal_len(), len, "the file is not truncated");
 
@@ -278,13 +278,13 @@ fn outside_checkpoint_against_pin(pragma: &str) {
 }
 
 #[test]
-fn outside_restart_against_pin_above_zero() {
-    outside_checkpoint_against_pin("PRAGMA wal_checkpoint(RESTART)");
+fn outside_restart_against_read_lock_above_zero() {
+    outside_checkpoint_against_read_lock("PRAGMA wal_checkpoint(RESTART)");
 }
 
 #[test]
-fn outside_truncate_against_pin_above_zero() {
-    outside_checkpoint_against_pin("PRAGMA wal_checkpoint(TRUNCATE)");
+fn outside_truncate_against_read_lock_above_zero() {
+    outside_checkpoint_against_read_lock("PRAGMA wal_checkpoint(TRUNCATE)");
 }
 
 /// Our read transaction is retaken on read mark 0 (the WAL fully backfilled); one application write
@@ -317,10 +317,10 @@ fn restart_under_read_mark_zero(repin: bool) -> Rig {
 }
 
 #[test]
-fn pin_on_zero_one_restart() {
+fn read_lock_on_zero_one_restart() {
     let mut rig = restart_under_read_mark_zero(false);
     let verdict = rig.verdict();
-    assert_eq!(verdict.event, None, "no PinViolated");
+    assert_eq!(verdict.event, None, "no ReadLockViolated");
     assert!(
         matches!(
             verdict.recovered,
@@ -343,10 +343,10 @@ fn pin_on_zero_one_restart() {
 }
 
 #[test]
-fn pin_on_zero_proven_restart_continues_in_the_new_generation() {
+fn read_lock_on_zero_proven_restart_continues_in_the_new_generation() {
     let mut rig = restart_under_read_mark_zero(true);
     let verdict = rig.verdict();
-    assert_eq!(verdict.event, None::<RecoverEvent>, "no PinViolated");
+    assert_eq!(verdict.event, None::<RecoverEvent>, "no ReadLockViolated");
     assert!(
         matches!(verdict.recovered, Recovered::WalRestarted(_)),
         "{:?}",

@@ -161,7 +161,7 @@ fn the_scheduled_verify_runs_on_its_interval_and_a_clean_replica_passes() {
     assert_eq!(check.runs.passed, 1, "{check:?}");
     assert_eq!(check.last_good.map(|(txid, _)| txid), replicated(&health));
     assert_eq!(check.failing, None);
-    assert_eq!(check.pinned, None);
+    assert_eq!(check.kept_restore_point, None);
     assert_eq!(check.worst_finding, None);
     assert!(!first.is_degraded());
     let seen = next_verified(&events);
@@ -222,7 +222,7 @@ fn a_wrong_page_in_the_replica_is_degraded_with_the_page_and_txid_and_pins_the_l
         matches!(failing.found, Mismatch::Pages { first, pages: 1, .. } if first == page),
         "{failing:?}"
     );
-    assert_eq!(failed.verification.pinned, Some(good));
+    assert_eq!(failed.verification.kept_restore_point, Some(good));
     assert!(failed.is_degraded());
     assert_eq!(failed.phase, Phase::Running, "a degraded state, not a stop");
     let seen = next_verified(&events);
@@ -234,7 +234,7 @@ fn a_wrong_page_in_the_replica_is_degraded_with_the_page_and_txid_and_pins_the_l
     site.commit(1);
     advance(&replicator, &clock, POLL);
     wait(&replicator, |h| caught_up(h) && replicated(h) > Some(txid));
-    // A snapshot rewrites every page; the next run passes and lets the pin go.
+    // A snapshot rewrites every page; the next run passes and lets the read lock go.
     replicator.request_snapshot();
     site.commit(1);
     advance(&replicator, &clock, POLL);
@@ -242,7 +242,7 @@ fn a_wrong_page_in_the_replica_is_degraded_with_the_page_and_txid_and_pins_the_l
     clock.advance(EVERY);
     let passed = wait(&replicator, |h| h.verification.runs.passed == 2);
     assert_eq!(passed.verification.failing, None);
-    assert_eq!(passed.verification.pinned, None);
+    assert_eq!(passed.verification.kept_restore_point, None);
     assert_eq!(
         passed.verification.last_good.map(|(txid, _)| txid),
         replicated(&fixed)

@@ -21,7 +21,7 @@
 //! Protocol notes. A PASSIVE takes a write barrier, seals (syncs through the committed end),
 //! checkpoints, and releases the barrier on every path; a barrier that could not be released never
 //! replaces the fault that came first. The checkpoint releases and retakes the read transaction, so
-//! from the moment it is called the position is demoted to [`Continuity::Unpinned`] and is
+//! from the moment it is called the position is demoted to [`Continuity::Broken`] and is
 //! pinned again only by a step that proves `synced == committed` at the new epoch (or by step 6,
 //! which the barrier makes sound). Success and fault both return a [`Staged`]: the last position
 //! that is true together with the files the completed steps staged, so a fault after the seal
@@ -41,7 +41,7 @@ use lsr_wal::{OpenError, WalHeader, WalReader};
 use crate::fault::{BugSite, Fault, Next, SnapshotCause};
 use crate::layout::FileInfo;
 use crate::pages::PageTable;
-use crate::position::{Continuity, Position, ReadEpoch, SyncedThrough};
+use crate::position::{Continuity, Position, ReadLockHold, SyncedThrough};
 use crate::source::{CheckpointMode, CheckpointRun, Checkpointer, PageSource, WalSource};
 use crate::store::ObjectStore;
 use crate::sync::{Step, StepEnd, SyncConfig, Synced, sync_step};
@@ -333,7 +333,7 @@ pub fn next_wake(state: &CheckpointState, cfg: &CheckpointConfig) -> Option<Time
 /// proved it reached the committed end.
 #[derive(Debug, PartialEq, Eq)]
 enum Reached {
-    /// A step reached the committed end at the read epoch that still holds.
+    /// A step reached the committed end at the read-lock hold that still holds.
     Through(SyncedThrough),
     /// No step since proved the end: the checkpoint released the read
     /// transaction, or a PASSIVE that restarted nothing left our own bump
@@ -405,7 +405,7 @@ pub struct Checkpointed {
     /// What happened.
     pub outcome: CheckpointOutcome,
     /// What SQLite's checkpoint call reported as the read transaction was retaken: where the
-    /// pin now sits, for the application-checkpoint observer (`crate::app`).
+    /// read lock now sits, for the application-checkpoint observer (`crate::app`).
     pub run: Option<CheckpointRun>,
 }
 
@@ -462,14 +462,14 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_, 
         self.good.position()
     }
 
-    fn unpin(&mut self) {
-        self.good = Reached::Short(self.position().with_continuity(Continuity::Unpinned));
+    fn release_read_lock(&mut self) {
+        self.good = Reached::Short(self.position().with_continuity(Continuity::Broken));
     }
 
     /// Step 6: pinned again, but not through (our bump frame is past it).
-    fn pin(&mut self, epoch: ReadEpoch) {
+    fn take_read_lock(&mut self, epoch: ReadLockHold) {
         if self.wal.epoch() == epoch {
-            self.good = Reached::Short(self.position().with_continuity(Continuity::Pinned(epoch)));
+            self.good = Reached::Short(self.position().with_continuity(Continuity::Held(epoch)));
         }
     }
 
@@ -534,7 +534,7 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_, 
         if self.header()? == before {
             // Sound only because the barrier kept writers out until the read
             // transaction was retaken.
-            self.pin(run.epoch);
+            self.take_read_lock(run.epoch);
             return Ok(if run.busy {
                 CheckpointOutcome::Busy
             } else {
@@ -548,7 +548,7 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_, 
     async fn seal_and_checkpoint(&mut self) -> Result<CheckpointRun, Fault> {
         self.step(Step::Incremental(self.position())).await?;
         let run = self.ck.checkpoint(CheckpointMode::Passive);
-        self.unpin();
+        self.release_read_lock();
         let run = run.map_err(Fault::from_source)?;
         self.run = Some(run);
         Ok(run)
@@ -557,7 +557,7 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_, 
     async fn truncate(&mut self) -> Result<CheckpointOutcome, Fault> {
         let before = self.header()?;
         let run = self.ck.checkpoint(CheckpointMode::Truncate);
-        self.unpin();
+        self.release_read_lock();
         let run = run.map_err(Fault::from_source)?;
         self.run = Some(run);
         self.ck.bump_seq().map_err(Fault::from_source)?;

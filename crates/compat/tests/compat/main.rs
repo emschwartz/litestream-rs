@@ -24,7 +24,7 @@ mod live_source;
 #[cfg(test)]
 mod matrix;
 #[cfg(test)]
-mod ofd_pin;
+mod ofd_read_lock;
 #[cfg(test)]
 mod pinned;
 #[cfg(test)]

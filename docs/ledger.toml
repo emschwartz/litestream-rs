@@ -171,7 +171,7 @@
 "TestReplicateCommandCloseReturnsError" = { counterpart = "lsr-cli::cli::daemon::a_second_signal_cuts_the_drain" }
 "TestReplicateCommandUsageMentionsControlSocketConfig" = { reason = "The control socket and its HTTP server (register, unregister, start, stop, sync, info, list, status over the socket) are not in v1 (docs/PLAN.md section 1, 'Not in v1')." }
 "TestReplicateShutdown" = { counterpart = ["lsr-cli::cli::daemon::two_databases_from_one_config_drain_on_sigterm_and_restore", "lsr-cli::cli::daemon::a_second_signal_cuts_the_drain", "lsr-cli::cli::sidecar::a_signal_is_forwarded_and_the_drain_waits_for_the_child", "lsr-cli::cli::sidecar::a_child_that_ignores_the_signal_is_killed_at_the_deadline", "lsr-cli::cli::sidecar::a_child_dying_by_a_signal_is_clean_in_a_shutdown_and_exits_1_outside_one", "lsr-cli::cli::sidecar::a_child_failing_after_the_forwarded_signal_exits_1"] }
-"TestShutdownExecHelper" = { counterpart = ["lsr-cli::cli::sidecar::exec_child", "lsr-cli::cli::sidecar::the_child_runs_after_the_pin_and_its_exit_drains_then_exits_0_or_1_as_go"] }
+"TestShutdownExecHelper" = { counterpart = ["lsr-cli::cli::sidecar::exec_child", "lsr-cli::cli::sidecar::the_child_runs_after_the_read_lock_and_its_exit_drains_then_exits_0_or_1_as_go"] }
 "TestShutdownTimeoutConfig" = { reason = "`shutdown-timeout` has no effect in v1, which bounds shutdown by `shutdown-sync-timeout` alone: any value is accepted with one warning (lsr-config::config::classes::no_effect_knobs_warn_once_each), and the deadline is lsr-config::config::map::shutdown_sync_timeout_is_the_drain_grace_and_the_shared_deadline." }
 
 ["litestream/cmd/litestream/main_test.go"]
@@ -623,9 +623,9 @@
 "TestDB_Sync/OverwritePrevPosition" = { counterpart = ["lsr-core::recover::tests::rule_8_a_frame_before_the_end_that_does_not_verify_is_prev_frame_mismatch", "lsr-core::recover::tests::go_parity_an_unknown_salt_snapshots"] }
 "TestDB_Sync/TruncatePageN" = { counterpart = "lsr-core::checkpoint::tests::a_failed_passive_at_the_threshold_goes_to_truncate" }
 "TestDB_SyncAfterVacuum" = { counterpart = ["lsr-wal::wal::pagemap::shrinking_drops_pages_above_the_new_size_including_earlier_ones", "lsr-compat::compat::live_matches_sim::shrink_commits_a_smaller_database"] }
-"TestDB_SyncAndWait" = { counterpart = "lsr-replica::replica::replicator::start_returns_with_the_pin_held_and_stop_drains_every_commit" }
+"TestDB_SyncAndWait" = { counterpart = "lsr-replica::replica::replicator::start_returns_with_the_read_lock_held_and_stop_drains_every_commit" }
 "TestDB_SyncAndWait/NoReplica" = { reason = "Go-only: a DB with no replica attached. A Rust replicator cannot be built without its store, so the state does not exist." }
-"TestDB_SyncAndWait/OK" = { counterpart = "lsr-replica::replica::replicator::start_returns_with_the_pin_held_and_stop_drains_every_commit" }
+"TestDB_SyncAndWait/OK" = { counterpart = "lsr-replica::replica::replicator::start_returns_with_the_read_lock_held_and_stop_drains_every_commit" }
 "TestDB_SyncStatus" = { counterpart = "lsr-replica::replica::replicator::health_compares_the_local_and_replica_positions" }
 "TestDB_SyncStatus/AfterDBSyncOnly" = { counterpart = "lsr-replica::replica::replicator::health_compares_the_local_and_replica_positions" }
 "TestDB_SyncStatus/AfterFullSync" = { counterpart = "lsr-replica::replica::replicator::health_compares_the_local_and_replica_positions" }

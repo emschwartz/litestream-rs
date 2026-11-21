@@ -19,7 +19,7 @@ fn child_process_entry() {
 
 fn child(role: &str, db: &Path) -> bool {
     #[cfg(target_os = "linux")]
-    if sidecar_pin::child(role, db) {
+    if sidecar_read_lock::child(role, db) {
         return true;
     }
     faults::child(role, db) || kill::child(role, db)
@@ -44,7 +44,7 @@ mod kill;
 #[cfg(test)]
 mod power_loss;
 #[cfg(test)]
-mod sidecar_pin;
+mod sidecar_read_lock;
 #[cfg(test)]
 mod wal_index;
 #[cfg(test)]

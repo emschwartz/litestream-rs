@@ -1,5 +1,5 @@
 //! `lsr replicate` with `-exec` and with `addr`, run as real processes: the child starts
-//! after the pin, its exit drains and the daemon exits 0 or 1 as Go does, signals reach it;
+//! after the read lock, its exit drains and the daemon exits 0 or 1 as Go does, signals reach it;
 //! `/metrics` and `/healthz` on exactly the address given, with their bounds. Every wait is
 //! on a line the daemon (or its child) prints, a response, or the process ending.
 //!
@@ -75,7 +75,7 @@ fn with_child(setup: &Setup, mode: &str, code: i32) -> Command {
     command
 }
 
-/// The child's side; does nothing unless the daemon started it. Modes: `pin` tries a
+/// The child's side; does nothing unless the daemon started it. Modes: `read-lock` tries a
 /// TRUNCATE checkpoint (BUSY while the daemon's read transaction is held), writes ten
 /// rows and exits; `signal` waits for a signal and exits; `abort` waits for a signal
 /// and then dies by SIGABRT, a signal the daemon did not send; `ignore` ignores
@@ -93,7 +93,7 @@ fn exec_child() {
         out.flush().unwrap();
     };
     match mode.as_str() {
-        "pin" => {
+        "read lock" => {
             let db = std::env::var("LSR_EXEC_DB").unwrap();
             let conn = database(Path::new(&db));
             // rusqlite waits 5 s on a busy lock by default; the answer is wanted now.
@@ -145,12 +145,12 @@ fn exec_child() {
 /// for a child that exited 0, 1 for any other code (`replicate.go:92`, `main.go:97-103`),
 /// with the child's own code in the log.
 #[test]
-fn the_child_runs_after_the_pin_and_its_exit_drains_then_exits_0_or_1_as_go() {
+fn the_child_runs_after_the_read_lock_and_its_exit_drains_then_exits_0_or_1_as_go() {
     for (code, exit) in [(0, 0), (7, 1)] {
         let setup = setup("", "");
         let app = database(&setup.db);
         write(&app, 20);
-        let mut daemon = Daemon::spawn(with_child(&setup, "pin", code));
+        let mut daemon = Daemon::spawn(with_child(&setup, "read lock", code));
         let (pinned, _) = daemon.wait_for(&["child: truncate busy=1"]);
         let (status, out) = daemon.finish();
         assert_eq!(status.code(), Some(exit), "{out:#?}");

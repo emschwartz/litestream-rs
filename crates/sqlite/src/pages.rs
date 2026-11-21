@@ -167,7 +167,7 @@ fn page_offset(pgno: PageNo, page_size: u32) -> Option<u64> {
 impl PageSource for Sqlite {
     fn page_count(&mut self) -> Result<DbPages, SourceError> {
         let mut inner = self.lock();
-        inner.ensure_pinned()?;
+        inner.ensure_read_lock_held()?;
         let len = inner.file().size().map_err(rc_error)?;
         let pages = len
             .checked_div(u64::from(inner.page_size().get()))
@@ -179,7 +179,7 @@ impl PageSource for Sqlite {
 
     fn read_page(&mut self, pgno: PageNo, buf: &mut [u8]) -> Result<(), SourceError> {
         let mut inner = self.lock();
-        inner.ensure_pinned()?;
+        inner.ensure_read_lock_held()?;
         let size = inner.page_size().get();
         if u32::try_from(buf.len()) != Ok(size) {
             return Err(SourceError::Io(io::ErrorKind::InvalidInput));

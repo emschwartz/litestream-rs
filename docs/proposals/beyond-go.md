@@ -18,7 +18,7 @@ Several gaps found while planning phase 3 can only be closed by state Go has no 
 | G4 | Another writer on the same prefix is seen only when a listing shows files above the local newest staged file, and both writers' files can interleave before that | Detected at boot or after an ambiguous upload, as Go | A writer identity on every file, or a conditional PUT | #13 |
 | G5 | A Go- or Rust-written chain with `NoChecksum` files gives nothing to check a restored page against except the live database | Scheduled verify-restores (PLAN section 7) | Rolling checksums in LTX headers (D2) | #14 |
 | G6 | A corrupt compacted file fails a restore even when its inputs survive; nothing links a file to the file before it | Boot read-back repairs the newest file per level (phase 2 6g2) | A parent-file checksum per file, and a planner that routes around a bad file | #14 |
-| G7 | The pin's read mark 0 does not block a WAL restart, so correctness there rests on ruling F1 | F1 plus its abandoned-frames check | A pure-Rust pin on a read-mark slot of 1 or more | #9 |
+| G7 | The read lock's read mark 0 does not block a WAL restart, so correctness there rests on ruling F1 | F1 plus its abandoned-frames check | A pure-Rust read lock on a read-mark slot of 1 or more | #9 |
 
 G7 needs no new file or format: it is listed because it is also behaviour beyond Go. Conditional PUTs (G4, second option) and rolling checksums (G5) use what S3 and LTX already define, but they change what Go would see or accept, so they belong here too.
 
@@ -46,7 +46,7 @@ D2 already decides the first: turn on tracked checksums once rollback to Go is n
 
 ### 4. Not formats, but beyond Go (G7, and checks against the replica)
 
-- The pure-Rust pin (#9), if phase 3's fault suite finds a case F1 misses.
+- The pure-Rust read lock (#9), if phase 3's fault suite finds a case F1 misses.
 - An opt-in verify at boot against the replica (#10), and a low-rate scrubber of the live database against the table (PLAN "Later versions").
 
 ## Order, if accepted

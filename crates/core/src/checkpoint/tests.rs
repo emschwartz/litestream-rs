@@ -469,7 +469,7 @@ fn a_passive_with_nothing_in_the_way_seals_then_follows_the_writer_restart() {
     );
     assert_eq!(
         done.staged.proof().unwrap().position().continuity(),
-        Continuity::Pinned(rig.wal.epoch())
+        Continuity::Held(rig.wal.epoch())
     );
 }
 
@@ -485,7 +485,7 @@ fn a_passive_held_back_by_a_reader_is_not_restarted() {
     // so the position is pinned again, at the epoch the checkpoint retook.
     assert_eq!(
         done.staged.position().continuity(),
-        Continuity::Pinned(rig.wal.epoch())
+        Continuity::Held(rig.wal.epoch())
     );
     // Our own bump frame is past it: no proof that it is the committed end.
     assert_eq!(done.staged.proof(), None);
@@ -512,7 +512,7 @@ fn a_passive_that_restarts_the_wal_starts_a_new_generation_file() {
     assert_ne!(rig.wal.salts(), before);
     assert_eq!(done.staged.files().len(), 2);
     let position = done.staged.proof().unwrap().position();
-    assert_eq!(position.continuity(), Continuity::Pinned(rig.wal.epoch()));
+    assert_eq!(position.continuity(), Continuity::Held(rig.wal.epoch()));
     assert_eq!(position.txid().get(), 3);
 }
 
@@ -619,10 +619,7 @@ fn a_position_after_a_checkpoint_is_pinned_at_the_epoch_it_retook() {
         before, after,
         "the checkpoint released the read transaction"
     );
-    assert_eq!(
-        done.staged.position().continuity(),
-        Continuity::Pinned(after)
-    );
+    assert_eq!(done.staged.position().continuity(), Continuity::Held(after));
 }
 
 /// The protocol's own steps ignore the sync cap: a seal that stopped at the
@@ -650,7 +647,7 @@ fn the_seal_takes_every_committed_transaction_whatever_the_cap() {
 fn a_position_after_a_checkpoint_fault_is_unpinned() {
     let (_, result) = fail_at(SourceOp::BumpSeq, CheckpointMode::Passive);
     let failed = result.unwrap_err();
-    assert_eq!(failed.staged.position().continuity(), Continuity::Unpinned);
+    assert_eq!(failed.staged.position().continuity(), Continuity::Broken);
     assert_eq!(failed.staged.position().txid().get(), 2);
 }
 
@@ -658,7 +655,7 @@ fn a_position_after_a_checkpoint_fault_is_unpinned() {
 fn a_failure_before_the_checkpoint_keeps_the_pinned_position() {
     let (_, result) = fail_at(SourceOp::BeginBarrier, CheckpointMode::Passive);
     let failed = result.unwrap_err();
-    assert_ne!(failed.staged.position().continuity(), Continuity::Unpinned);
+    assert_ne!(failed.staged.position().continuity(), Continuity::Broken);
     assert_eq!(failed.staged.position().txid().get(), 1);
 }
 

@@ -36,7 +36,7 @@ use std::io::{Read, Seek};
 use crate::fault::{BugSite, Clamped, Fault, HaltCause, SnapshotCause};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::pages::{PageTable, snapshot_clears};
-use crate::position::{Continuity, LastPage, Position, ReachedEnd, ReadEpoch};
+use crate::position::{Continuity, LastPage, Position, ReachedEnd, ReadLockHold};
 use crate::recover::Recovered;
 use crate::source::{CommittedRead, PageSource};
 use crate::store::{ObjectStore, StoreError, Upload};
@@ -521,7 +521,7 @@ pub(crate) async fn stage<R: Read + Seek, P: PageSource, L: ObjectStore>(
 
 /// Scans the WAL from `step`'s start and stages one file, or none when nothing is new.
 ///
-/// `committed` carries the read epoch it was taken under. A position pinned
+/// `committed` carries the read-lock hold it was taken under. A position pinned
 /// to another epoch fails with `ReadTxLost`: the checkpoint
 /// protocol retook the read transaction, and `recover` must prove the new one.
 /// `pages` is the page checksum table (`crate::pages`): every database-file page
@@ -563,8 +563,8 @@ async fn run<R: Read + Seek, P: PageSource, L: ObjectStore>(
     let epoch = committed.epoch();
     let start = Start::of(step, wal)?;
     forget(pages, step, wal.header().page_size());
-    if let Some(Continuity::Pinned(pin)) = start.held.map(|held| held.continuity())
-        && pin != epoch
+    if let Some(Continuity::Held(held)) = start.held.map(|held| held.continuity())
+        && held != epoch
     {
         return Err(Fault::ReadTxLost);
     }
@@ -615,7 +615,7 @@ async fn run<R: Read + Seek, P: PageSource, L: ObjectStore>(
         commit,
         last_page,
         header.fields().timestamp,
-        Continuity::Unpinned,
+        Continuity::Broken,
     );
     let stopped_short =
         scanned.limited && scanned.cursor.next().get() != committed.end().offset().get();
@@ -635,7 +635,7 @@ struct Source<'a, P> {
 
 /// How far a staged position can be trusted: not at all under a reset
 /// wal-index, unpinned when the cap stopped it short, otherwise the proof.
-fn ended(position: Position, reset: bool, stopped_short: bool, epoch: ReadEpoch) -> StepEnd {
+fn ended(position: Position, reset: bool, stopped_short: bool, epoch: ReadLockHold) -> StepEnd {
     if reset {
         StepEnd::Unproven(position)
     } else if stopped_short {

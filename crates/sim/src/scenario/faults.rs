@@ -1492,10 +1492,10 @@ fn uploaded_again(report: &RunReport) -> Result<(), String> {
 const APP_THRESHOLD: u32 = 4;
 
 /// The app runs SQLite's automatic checkpoint (at [`APP_THRESHOLD`] frames) and the engine is
-/// told so. With the pin above read mark 0 (the driver's first frame), the app's first checkpoint
-/// past the threshold copies the frames below the pin and its next attempts copy nothing; a
-/// another process's read stops the engine's own checkpoint short, so the pin is retaken above read mark 0
-/// and the app backfills once more; after the engine's full checkpoints the pin is on read mark 0
+/// told so. With the read lock above read mark 0 (the driver's first frame), the app's first checkpoint
+/// past the threshold copies the frames below the read lock and its next attempts copy nothing; a
+/// another process's read stops the engine's own checkpoint short, so the read lock is retaken above read mark 0
+/// and the app backfills once more; after the engine's full checkpoints the read lock is on read mark 0
 /// and every attempt copies nothing. The engine counts each backfill the app made and none of
 /// its own, infers the attempts that copied nothing on both marks, and the replica restores
 /// every commit.

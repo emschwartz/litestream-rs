@@ -131,73 +131,81 @@ fn the_ladder_deletes_old_snapshots_what_they_floor_and_covered_level_zero() {
     assert_eq!(keys(&run(ladder())), expected_ladder_deletes());
 }
 
-fn pinned(pin: u64) -> MaintainState {
+fn pinned(restore_point: u64) -> MaintainState {
     let mut state = MaintainState::default();
-    state.set_pin(Some(txid(pin)));
+    state.set_kept_restore_point(Some(txid(restore_point)));
     state
 }
 
-fn pinned_run(files: Vec<FileInfo>, pin: u64) -> Retention {
+fn pinned_run(files: Vec<FileInfo>, restore_point: u64) -> Retention {
     let now = newest_created_at(&files);
-    retention_state(&inv(files), at(now), &defaults(), None, &pinned(pin))
+    retention_state(
+        &inv(files),
+        at(now),
+        &defaults(),
+        None,
+        &pinned(restore_point),
+    )
 }
 
 /// A degraded task pins a restore point: its chain stays, and everything
-/// else the rules delete still goes (the pin never freezes retention).
+/// else the rules delete still goes (the kept restore point never freezes retention).
 #[test]
-fn a_pin_keeps_its_restore_chain_and_the_rest_is_retained_as_usual() {
-    for pin in [10, 20] {
-        let got = keys(&pinned_run(ladder(), pin));
-        let kept = key(9, 1, pin);
+fn a_kept_restore_point_keeps_its_chain_and_the_rest_is_retained_as_usual() {
+    for restore_point in [10, 20] {
+        let got = keys(&pinned_run(ladder(), restore_point));
+        let kept = key(9, 1, restore_point);
         let want: Vec<FileKey> = expected_ladder_deletes()
             .into_iter()
             .filter(|k| *k != kept)
             .collect();
-        assert_eq!(got, want, "pin {pin}");
+        assert_eq!(got, want, "kept restore point {restore_point}");
         let rest = without(&inv(ladder()), &got);
-        let restores = plan(&rest, KeyTarget::Txid(txid(pin)));
+        let restores = plan(&rest, KeyTarget::Txid(txid(restore_point)));
         assert!(
-            matches!(&restores, PlanOutcome::Plan(chain) if chain.reaches() == txid(pin)),
-            "pin {pin}: {restores:?}"
+            matches!(&restores, PlanOutcome::Plan(chain) if chain.reaches() == txid(restore_point)),
+            "kept restore point {restore_point}: {restores:?}"
         );
     }
 }
 
 /// A pinned transaction the listing cannot restore holds every delete: the
-/// pin cannot tell which files a later listing would need for it.
+/// kept restore point cannot tell which files a later listing would need for it.
 #[test]
-fn a_pin_that_does_not_plan_holds() {
+fn a_kept_restore_point_that_does_not_plan_holds() {
     let got = pinned_run(ladder(), 27);
     assert!(
         matches!(
             &got,
-            Retention::Held(Hold::PinUnplannable { pin, .. }) if *pin == txid(27)
+            Retention::Held(Hold::RestorePointUnplannable { restore_point, .. }) if *restore_point == txid(27)
         ),
         "{got:?}"
     );
 }
 
-/// For every transaction of the ladder as the pin: either retention holds, or
-/// the pin still restores without the job and the newest state does too.
+/// For every transaction of the ladder as the kept restore point: either retention holds, or
+/// the kept restore point still restores without the job and the newest state does too.
 #[test]
-fn no_pin_is_ever_deleted_from_under_its_restore() {
-    for pin in 1..=30 {
-        match pinned_run(ladder(), pin) {
-            Retention::Held(Hold::PinUnplannable { .. }) | Retention::Wait { .. } => {}
+fn no_kept_restore_point_is_ever_deleted_from_under_its_restore() {
+    for restore_point in 1..=30 {
+        match pinned_run(ladder(), restore_point) {
+            Retention::Held(Hold::RestorePointUnplannable { .. }) | Retention::Wait { .. } => {}
             Retention::Delete(job) => {
                 let rest = without(&inv(ladder()), job.keys());
-                let at_pin = plan(&rest, KeyTarget::Txid(txid(pin)));
+                let at_restore_point = plan(&rest, KeyTarget::Txid(txid(restore_point)));
                 assert!(
-                    matches!(&at_pin, PlanOutcome::Plan(c) if c.reaches() == txid(pin)),
-                    "pin {pin}: {at_pin:?}"
+                    matches!(&at_restore_point, PlanOutcome::Plan(c) if c.reaches() == txid(restore_point)),
+                    "kept restore point {restore_point}: {at_restore_point:?}"
                 );
                 let latest = plan(&rest, KeyTarget::Latest);
                 assert!(
                     matches!(&latest, PlanOutcome::Plan(c) if c.reaches() == txid(30)),
-                    "pin {pin}: {latest:?}"
+                    "kept restore point {restore_point}: {latest:?}"
                 );
             }
-            other @ Retention::Held(_) => panic!("pin {pin}: {other:?}"),
+            other @ Retention::Held(_) => {
+                panic!("kept restore point {restore_point}: {other:?}")
+            }
         }
     }
 }

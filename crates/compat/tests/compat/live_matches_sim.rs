@@ -15,7 +15,7 @@
 //!   restart is not fed: the model has to produce it, or the LTX bytes differ.
 //! - **Not fed, so compared:** when the WAL restarts, what a checkpoint backfills and how far, what
 //!   each read mark pins, the WAL offsets and size every file records, the database size, the
-//!   checksums, every checkpoint's three numbers and read epoch, and the sequence of calls the sync
+//!   checksums, every checkpoint's three numbers and read-lock hold, and the sequence of calls the sync
 //!   engine makes of its checkpointer.
 //!
 //! Known difference, accounted for: the model's `bump_seq` writes page 1, real SQLite writes the
@@ -50,7 +50,7 @@ use proptest::prelude::*;
 use rusqlite::Connection;
 use tempfile::TempDir;
 
-/// A step's end as the engine takes it: the proof when the read epoch still
+/// A step's end as the engine takes it: the proof when the read-lock hold still
 /// holds, else the unpinned position and no proof.
 fn confirmed<W: WalSource>(
     reached: lsr_core::ReachedEnd,
@@ -244,12 +244,12 @@ impl Checkpointer for RealCk {
     }
 }
 
-/// A checkpoint's numbers and read epoch on both sides.
+/// A checkpoint's numbers and read-lock hold on both sides.
 fn same_run(call: Call, model: &CheckpointRun, real: Option<CheckpointRun>) {
     assert_eq!(
         format!("{model:?}"),
         format!("{:?}", real.expect("a checkpoint event carries its run")),
-        "{call:?}: the checkpoint's numbers or read epoch differ"
+        "{call:?}: the checkpoint's numbers or read-lock hold differ"
     );
 }
 

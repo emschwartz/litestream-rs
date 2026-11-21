@@ -198,7 +198,7 @@ fn a_read_transaction_that_cannot_be_retaken_is_lost_until_it_can() {
     app.execute_batch("CREATE TABLE _litestream_seq (id INTEGER PRIMARY KEY, seq INTEGER)")
         .unwrap();
     live.committed().unwrap();
-    assert_eq!(live.epoch(), first.next(), "a new hold of the pin");
+    assert_eq!(live.epoch(), first.next(), "a new hold of the read lock");
 }
 
 /// A reopen's first hold of the read transaction is not the closed one's first hold: a position

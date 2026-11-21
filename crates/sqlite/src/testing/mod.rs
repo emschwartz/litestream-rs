@@ -1,6 +1,6 @@
 //! Test support for the real-SQLite fault suite (the crate's `testing` feature).
 //!
-//! Two pieces, both generic over what holds the pin, so a later backend runs the same suite:
+//! Two pieces, both generic over what holds the read lock, so a later backend runs the same suite:
 //!
 //! - [`vfs`]: [`FaultVfs`], a VFS that delegates to `unix` and fails reads, writes, syncs,
 //!   truncates and locks on a schedule, writes short, loses power (every write since a file's

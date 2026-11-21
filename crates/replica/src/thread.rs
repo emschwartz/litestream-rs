@@ -16,7 +16,7 @@
 //! operator's snapshot request not yet staged, each task's degraded state and the restore
 //! point retention keeps for them, the scheduled verify's pending read, and the application
 //! checkpoint counts. This thread keeps only the stop's deadline, to cap its own waits, and
-//! hands the scheduled verify's pin over after every tick.
+//! hands the scheduled verify's read lock over after every tick.
 //!
 //! Health's progress (what is synced, what the replica holds, what a stop would leave) is
 //! `Progress`, which only a booted engine overwrites: a fresh engine knows nothing yet, and
@@ -380,8 +380,11 @@ impl Worker {
             .scheduled
             .as_mut()
             .and_then(|scheduled| scheduled.after_tick(&mut self.actor, now));
-        let verify = self.scheduled.as_ref().and_then(Scheduled::pinned);
-        self.actor.pin_for_verify(verify);
+        let verify = self
+            .scheduled
+            .as_ref()
+            .and_then(Scheduled::kept_restore_point);
+        self.actor.keep_restore_point_for_verify(verify);
         // The snapshot is written before the event goes out, so a sink that reads health on an
         // event sees the state after it.
         self.observe(now);

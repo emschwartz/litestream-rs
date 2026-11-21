@@ -306,11 +306,11 @@ pub enum Hold {
     },
     /// The restore point pinned while a task is degraded does not plan, on
     /// the listing or without the planned delete.
-    #[error("the pinned restore point {pin} does not plan: {outcome:?}")]
-    PinUnplannable {
+    #[error("the pinned restore point {restore_point} does not plan: {outcome:?}")]
+    RestorePointUnplannable {
         /// The pinned transaction.
-        pin: Txid,
-        /// What the planner said; never a plan that reaches the pin.
+        restore_point: Txid,
+        /// What the planner said; never a plan that reaches the kept restore point.
         outcome: PlanOutcome,
     },
     /// The planned delete would have broken the newest restore. A bug in the

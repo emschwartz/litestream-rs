@@ -3,7 +3,7 @@
 //! **Without `-exec`**, the first SIGINT, SIGTERM or SIGHUP begins the drain.
 //!
 //! **With `-exec`**, the child starts once [`Daemon::start`] has returned, so every database
-//! that exists has its pin held (a signal that came during the start means no child at all,
+//! that exists has its read lock held (a signal that came during the start means no child at all,
 //! as Go cancels its start). Then, as Go's `runUntilStopped` (`replicate.go:74-143`):
 //! - the child exiting begins the drain, with the whole shutdown deadline from that moment;
 //! - the first signal is forwarded to the child, and the drain waits for the child to exit,

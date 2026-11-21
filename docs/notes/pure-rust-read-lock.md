@@ -1,4 +1,4 @@
-# Pure-Rust pin and checkpoint for litestream-rs: what Turso shows, what C SQLite needs
+# Pure-Rust read lock and checkpoint for litestream-rs: what Turso shows, what C SQLite needs
 
 Research notes authored by Claude (claude-opus-5-5), 2026-11-20. Scratch paths below are not in the repository.
 
@@ -50,7 +50,7 @@ What Turso IS good for as a reference:
 - the checkpoint state machine shape: modes, upper bounds, max-safe-frame, restart
 - a ~90-line OFD/fcntl byte-lock wrapper
 
-## 3. C SQLite: what pin and checkpoint need [M line ranges in sqlite3.c]
+## 3. C SQLite: what read lock and checkpoint need [M line ranges in sqlite3.c]
 Locks and constants:
 - WAL_WRITE_LOCK 0, CKPT 1, RECOVER 2, READ(I)=3+I, WAL_NREADER=5 (67166-67171)
 - Lock bytes start at offset 120 (UNIX_SHM_BASE); DMS at 128
@@ -73,12 +73,12 @@ Functions:
 | walMerge+walMergesort+walIteratorNext | 68735-68850, 67467-67504 | ~136 |
 | walHashGet/walFramePage/walIndexPage(Realloc) | 67660-68117 | ~80 |
 | walIndexRecover (NOT needed if we refuse to recover) | 68294-68518 | 225 |
-| walRestartLog (writer side, informs pin) | 70833-70873 | 41 |
+| walRestartLog (writer side, informs read lock) | 70833-70873 | 41 |
 | unixShmLock | 45938-46130 | 193 |
 | unixShmMap | 45760-45893 | 134 |
 | unixLockSharedMemory (DMS) | 45504-45569 | 66 |
 
-Pin
+Read lock
 - C path: TryHdr + ReadHdr (no recovery) + the TryBeginRead core, about 250 C lines of logic once SETLK_TIMEOUT, snapshot and heap-memory branches are dropped.
 - Rust estimate: about 300-450 lines [I]:
   - open -shm (never truncate, never close)
@@ -106,7 +106,7 @@ Checkpoint PASSIVE+TRUNCATE
   - the OFD lock survived close() of other fds
   - closing ANY fd on the file dropped the process's traditional locks
   - Linux OFD semantics are documented the same way [I]
-- Pin [I, from the code read]:
+- Read lock [I, from the code read]:
   - Sound with OFD locks, given two conditions: (1) our -shm and db fds are never closed during process life, because closing them drops the APP's POSIX locks (howtocorrupt §2.2); (2) we never run recovery or truncate -shm.
   - Writing a read-mark is safe if done exactly like SQLite: hold an exclusive OFD lock on READ(n), pwrite aReadMark[n], downgrade. The application's attempt to change that slot calls fcntl, gets BUSY and retries (walTryBeginRead handles WAL_RETRY). The application never caches marks across a lock.
   - Primitives: libc::fcntl with F_OFD_SETLK, which needs unsafe. rustix's fcntl_lock is whole-file only, and nix exposes OFD on linux only [I]. So: one small crate with unsafe allowed, ~40 lines. pread/pwrite on -shm (no mmap needed) relies on the unified page cache, coherent on Linux and macOS [I].
@@ -117,19 +117,19 @@ Checkpoint PASSIVE+TRUNCATE
   - any future change in SQLite's checkpoint protocol must be tracked by hand
   - Not recommended.
 ### B: separate process
-- Pin: sound with plain F_SETLK or OFD, since POSIX locks conflict across processes [I]. Same code; the close() hazard is gone.
+- Read lock: sound with plain F_SETLK or OFD, since POSIX locks conflict across processes [I]. Same code; the close() hazard is gone.
 - Checkpoint: same correctness burden as A minus the close() hazard [I]. SQLite itself is the reference for multi-process access, so the protocol is designed for this case.
 ### C: application uses no C SQLite (Turso)
 - Pure-Rust -shm code is irrelevant [M]:
   - Turso's wal-index lives in process memory (InProcessWalCoordination, wal.rs:873) or in .tshm.
   - It locks the db file exclusively in single-process mode (unix.rs:70).
-- Pin and checkpoint must go through Turso's API (begin_read_tx; pager.checkpoint(mode) as in multiprocess_tests.rs:31-37). Or: speak .tshm, an unstable v1 format (SHARED_WAL_COORDINATION_VERSION=1).
+- Read lock and checkpoint must go through Turso's API (begin_read_tx; pager.checkpoint(mode) as in multiprocess_tests.rs:31-37). Or: speak .tshm, an unstable v1 format (SHARED_WAL_COORDINATION_VERSION=1).
 
-## 5. Middle option: pure-Rust pin, application does every checkpoint
-- Guarantee: yes, "no frame vanishes before it is copied", if the pin holds a slot n >= 1 [I from walformat + walRestartLog]:
+## 5. Middle option: pure-Rust read lock, application does every checkpoint
+- Guarantee: yes, "no frame vanishes before it is copied", if the read lock holds a slot n >= 1 [I from walformat + walRestartLog]:
   - The WAL is only overwritten by a writer restart (walRestartLog) or a RESTART/TRUNCATE checkpoint (walRestartHdr).
   - Both need exclusive READ(1..4) (walBusyLock), which a shared lock on any slot >= 1 blocks.
-  - Holding READ(0) does NOT block a reset (walformat.html). So even when fully backfilled the pin must use slot >= 1, unlike a normal SQLite reader.
+  - Holding READ(0) does NOT block a reset (walformat.html). So even when fully backfilled the read lock must use slot >= 1, unlike a normal SQLite reader.
   - Checkpoints still backfill up to our mark, which is harmless.
 - Size: ~300-450 lines + tests [I].
 - Catches:
@@ -147,7 +147,7 @@ Checkpoint PASSIVE+TRUNCATE
   - A newer WAL version means recovery fails with SQLITE_CANTOPEN.
   - A wal-index header that passes the checksum but carries a version other than 3007000 means "no read-transaction is opened and SQLite returns SQLITE_CANTOPEN".
   - "Technically, the various VFSes are free to implement these locks however they see fit. However, compatibility is encouraged so that VFSes can interoperate."
-- So the version is a guard: a future layout change makes an old reader refuse, not misread. A Rust pin must check iVersion==3007000 and refuse otherwise.
+- So the version is a guard: a future layout change makes an old reader refuse, not misread. A Rust read lock must check iVersion==3007000 and refuse otherwise.
 - WAL file format and checksum: version 3007000 since 3.7.0 (2010) [M constant; date I].
 ### History
 From gh api commits on sqlite/sqlite, saved in scratch/wal_c_log.txt and scratch/os_unix_log.txt [M].
@@ -169,12 +169,12 @@ Branches wal2 and begin-concurrent (not on trunk) would change the layout and lo
 Open (not verified). See the Open list.
 ### Conclusion
 - (a) Reading the WAL and the -shm header: YES. The bytes are unchanged since 2010, and there is a version check.
-- (b) Pin: YES. The lock offsets and read-mark semantics have not changed since 2010. The last change touching an external locker is 3.51.0 (2025-11), and it is harmless.
+- (b) Read lock: YES. The lock offsets and read-mark semantics have not changed since 2010. The last change touching an external locker is 3.51.0 (2025-11), and it is harmless.
 - (c) Checkpoint: NO. The checkpoint/restart behaviour had a corruption race fixed 2026-03 (3.51.3), and a fork would not get such fixes.
 
 ## Open
 - Other implementations speaking live -shm against C SQLite: LiteFS (FUSE, sees all lock calls), mvsqlite, rqlite (uses C SQLite), libSQL (a C fork), sqlite-wasm OPFS (no shm), modernc (transpiled C, so the same code). Unverified; no breakage reports searched.
 - Exact release dates for TRUNCATE (3.8.8) and SNAPSHOT (3.10): not checked; the changes.html fetch was truncated.
-- Linux OFD vs same-process POSIX conflict: answered 2026-11-20, it conflicts as on macOS (`docs/spikes.md`, "#9 OFD"). That run also found the pin needs the DMS byte as well as a read mark, or the application's last close deletes `-wal`.
+- Linux OFD vs same-process POSIX conflict: answered 2026-11-20, it conflicts as on macOS (`docs/spikes.md`, "#9 OFD"). That run also found the read lock needs the DMS byte as well as a read mark, or the application's last close deletes `-wal`.
 - Whether libsqlite3-sys builds with SQLITE_ENABLE_SETLK_TIMEOUT: answered 2026-11-20, it does not, and SQLite 3.54.1 never blocks on `-shm` locks even with it (`docs/spikes.md`, "#9 SETLK").
 - Whether nix or rustix expose F_OFD_SETLK on macOS: not checked.

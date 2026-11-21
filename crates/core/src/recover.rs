@@ -24,7 +24,7 @@
 //! When none follows, nothing is lost and the position continues; the sync step
 //! then has nothing to stage and no proof to give.
 //!
-//! Rule 6 proves one restart with the read-transaction pin and `salt1 + 1`; it
+//! Rule 6 proves one restart with the read lock and `salt1 + 1`; it
 //! does not check `checkpoint_seq`, which real SQLite takes from the restarting
 //! connection's own count. At boot, rule 9 compares the whole newest staged file with
 //! the WAL range it covers (page bytes and commit size), not only the last page,
@@ -49,7 +49,7 @@ use lsr_wal::{
 use crate::fault::{Fault, HaltCause, SnapshotCause};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::ltx_read::{LtxRead, ReadFault};
-use crate::position::{Continuity, LastPage, Position, ReadEpoch, WalFileLen};
+use crate::position::{Continuity, LastPage, Position, ReadLockHold, WalFileLen};
 use crate::source::CommittedRead;
 use crate::store::{ObjectStore, PageLimit, ReadLen, StoreError};
 
@@ -522,8 +522,8 @@ pub struct WalView {
     pub len: Option<WalFileLen>,
     /// The wal-index read; `None` when none was taken.
     pub committed: Option<CommittedRead>,
-    /// The read epoch the answers above belong to.
-    pub epoch: ReadEpoch,
+    /// The read-lock hold the answers above belong to.
+    pub epoch: ReadLockHold,
 }
 
 /// The two reads of the WAL that only a running position needs.
@@ -621,7 +621,7 @@ pub enum RecoverEvent {
     },
     /// The continuity proof failed: frames were appended after the position was
     /// pinned and then abandoned by a restart. A bug in the proof, or a broken lock.
-    PinViolated {
+    ReadLockViolated {
         /// The position's end.
         synced: WalOffset,
     },
@@ -756,8 +756,8 @@ fn restarted(
         return plain(changed);
     };
     let pinned = match position.continuity() {
-        Continuity::Pinned(epoch) => epoch == wal.epoch,
-        Continuity::Unpinned => false,
+        Continuity::Held(epoch) => epoch == wal.epoch,
+        Continuity::Broken => false,
     };
     let proven = pinned && header.salts().salt1 == seen.salts.salt1.wrapping_add(1);
     if !proven {
@@ -767,7 +767,7 @@ fn restarted(
     if new_end.get() < seen.end.get() && probes.stale_next {
         return Verdict {
             recovered: changed,
-            event: Some(RecoverEvent::PinViolated { synced: seen.end }),
+            event: Some(RecoverEvent::ReadLockViolated { synced: seen.end }),
         };
     }
     plain(Recovered::WalRestarted(Position::new(
@@ -861,10 +861,10 @@ fn reset_past(
     if !reset || !probes.stale_next {
         return None;
     }
-    let pinned = position.continuity() == Continuity::Pinned(wal.epoch);
+    let pinned = position.continuity() == Continuity::Held(wal.epoch);
     Some(Refusal {
         cause: SnapshotCause::GenerationChanged,
-        event: pinned.then_some(RecoverEvent::PinViolated { synced: seen.end }),
+        event: pinned.then_some(RecoverEvent::ReadLockViolated { synced: seen.end }),
     })
 }
 
@@ -917,9 +917,9 @@ fn continued(
         PositionSource::Boot(_) => None,
     };
     let continuity = match prior {
-        Some(Continuity::Pinned(epoch)) if epoch == wal.epoch => Continuity::Pinned(epoch),
-        Some(_) | None if at_committed_end => Continuity::Pinned(wal.epoch),
-        Some(_) | None => Continuity::Unpinned,
+        Some(Continuity::Held(epoch)) if epoch == wal.epoch => Continuity::Held(epoch),
+        Some(_) | None if at_committed_end => Continuity::Held(wal.epoch),
+        Some(_) | None => Continuity::Broken,
     };
     match source {
         PositionSource::Running(position, _) => Ok(position.with_continuity(continuity)),
