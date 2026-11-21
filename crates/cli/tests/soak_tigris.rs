@@ -6,14 +6,13 @@
 //! through one `lsr replicate -config` process with a Go-style config (levels 30 s,
 //! 5 min and 30 min, snapshots hourly kept 6 h). After every commit the writer waits until the
 //! newest level-0 object in the bucket ends at the live WAL's committed end, and records the
-//! transaction it reached: that commit is acknowledged. One acknowledged commit in
-//! [`SAMPLE_EVERY`] also records the database's page hashes, read from a copy of the
-//! database and its WAL taken under a read transaction with the writer idle, then
-//! checkpointed, so the copy holds exactly the pages SQLite would read.
+//! transaction it reached: that commit is acknowledged, and a digest of its pages is
+//! recorded, read from a copy of the database and its WAL taken under a read transaction
+//! with the writer idle, then checkpointed, so the copy holds exactly the pages SQLite reads.
 //!
 //! Every check interval (an hour by default) the writer pauses: `lsr restore` at Latest and
-//! at a random sampled transaction inside the snapshot retention are compared with the
-//! recorded hashes, with `PRAGMA integrity_check`; the process's resident memory, threads
+//! at a random transaction a replica promises exactly (the end of a compacted file or a
+//! snapshot, inside the retention) are compared with the recorded digests, with `PRAGMA integrity_check`; the process's resident memory, threads
 //! and open files are read, and its log is scanned for warnings. A mismatch is a finding and
 //! the soak goes on; findings are asserted only after the process stopped and the run
 //! prefix was deleted. Zero findings is the pass bar.
@@ -38,8 +37,6 @@ mod soak {
     use lsr_ltx::{HEADER_LEN, Header};
     use lsr_store_s3::{S3Config, S3Credentials, S3Store, SecretString, UreqTransport};
 
-    /// One acknowledged commit in this many records its page hashes.
-    const SAMPLE_EVERY: u64 = 50;
     /// The longest one commit may take to reach the bucket before the soak gives up.
     const CATCH_UP: Duration = Duration::from_secs(600);
     /// The snapshot retention in the config; a sampled target is picked inside it, an hour
@@ -221,10 +218,34 @@ dbs:
         }
     }
 
-    struct Sample {
-        txid: u64,
+    /// What one acknowledged commit left: a digest of its pages and when it was acknowledged.
+    struct Acked {
+        digest: u64,
+        pages: u32,
         at: Instant,
-        pages: PageDigest,
+    }
+
+    /// A short digest of every page hash; two databases with equal digests have equal pages
+    /// (SipHash over the per-page SHA-256 hashes, with fixed keys).
+    fn digest(pages: &PageDigest) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        pages.page_size.hash(&mut h);
+        pages.page_hashes.hash(&mut h);
+        h.finish()
+    }
+
+    /// The live WAL's salts and committed frame count: a replicator commit changes them.
+    fn wal_mark(wl: &Workload, db: &Path) -> Option<((u32, u32), u64)> {
+        let mut head = [0u8; 32];
+        fs::File::open(db.with_extension("db-wal"))
+            .and_then(|mut f| f.read_exact(&mut head))
+            .ok()?;
+        let salts = (
+            u32::from_be_bytes(head[16..20].try_into().unwrap()),
+            u32::from_be_bytes(head[20..24].try_into().unwrap()),
+        );
+        Some((salts, wl.wal_frames().ok()?))
     }
 
     /// Resident memory (KiB), threads and open files of one process, from ps and lsof.
@@ -272,7 +293,8 @@ dbs:
         rng: SplitMix,
         commits: u64,
         last: u64,
-        samples: Vec<Sample>,
+        /// Every acknowledged transaction inside the retention window, by TXID.
+        acked: std::collections::BTreeMap<u64, Acked>,
         findings: Vec<String>,
         /// Warning lines of the log already printed.
         warned: usize,
@@ -285,11 +307,8 @@ dbs:
                 Some(step) => self.wl.apply(step).expect("step"),
                 None => self.wl.touch().expect("touch"),
             }
-            self.acknowledge();
+            self.record();
             self.commits += 1;
-            if self.commits.is_multiple_of(SAMPLE_EVERY) {
-                self.sample();
-            }
         }
 
         /// Waits until the bucket holds everything the WAL has committed and records the
@@ -318,32 +337,45 @@ dbs:
             };
         }
 
-        /// Records the pages of the acknowledged head. A replicator commit between the
-        /// acknowledgement and the copy would label the copy with an older transaction, so the
-        /// head is acknowledged again after the copy and the copy retaken until both agree.
+        /// Acknowledges the head and records its pages. A replicator commit between the
+        /// acknowledgement and the copy would label the copy with an older transaction; such a
+        /// commit changes the WAL, so the copy is retaken until the WAL did not move across it.
         #[expect(
             clippy::disallowed_methods,
-            reason = "a sample's age picks restorable targets"
+            reason = "an entry's age bounds the window"
         )]
-        fn sample(&mut self) {
+        fn record(&mut self) {
             loop {
                 self.acknowledge();
-                let before = self.last;
+                let before = wal_mark(&self.wl, &self.db);
                 let pages = live_pages(&self.db, &self.scratch);
-                self.acknowledge();
-                if self.last == before {
-                    self.samples.push(Sample {
-                        txid: before,
-                        at: Instant::now(),
-                        pages,
-                    });
+                if before.is_some() && wal_mark(&self.wl, &self.db) == before {
+                    self.acked.insert(
+                        self.last,
+                        Acked {
+                            digest: digest(&pages),
+                            pages: pages.page_count,
+                            at: Instant::now(),
+                        },
+                    );
                     return;
                 }
                 eprintln!(
-                    "SAMPLE retaken: the head moved from {before:x} to {:x}",
+                    "RECORD retaken: the WAL moved during the copy at {:x}",
                     self.last
                 );
             }
+        }
+
+        /// Creates `scratch` again after a cycle dropped it, so the next cycle can fill it.
+        fn recreate_scratch(&mut self) {
+            let conn = rusqlite::Connection::open(&self.db).expect("open");
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS scratch(id INTEGER PRIMARY KEY, filler TEXT NOT NULL)",
+            )
+            .expect("create scratch");
+            drop(conn);
+            self.acknowledge();
         }
 
         /// A host checkpoint through its own connection, as an application would run one.
@@ -359,7 +391,7 @@ dbs:
             self.commit(None);
         }
 
-        fn compare(&mut self, label: &str, txid: Option<u64>, want: &PageDigest) {
+        fn compare(&mut self, label: &str, txid: Option<u64>, want: (u64, u32)) {
             let out = self.scratch.join("restored.db");
             remove(&out);
             let (code, stderr) = self.bucket.restore(&out, txid);
@@ -368,12 +400,12 @@ dbs:
                 .flatten()
                 .filter(|_| integrity_check(&out).is_ok());
             match got {
-                Some(got) if &got == want => {
+                Some(got) if digest(&got) == want.0 => {
                     eprintln!("CHECK {label}: same pages ({} pages)", got.page_count)
                 }
                 Some(got) => self.findings.push(format!(
                     "{label}: {} pages restored, {} expected, pages differ",
-                    got.page_count, want.page_count
+                    got.page_count, want.1
                 )),
                 None => self.findings.push(format!(
                     "{label}: lsr restore exit {code}: {}",
@@ -383,27 +415,55 @@ dbs:
             remove(&out);
         }
 
+        /// TXIDs a replica promises to restore exactly: the ends of the files on the compacted
+        /// levels and the snapshots, as listed now.
+        fn boundaries(&self) -> Vec<u64> {
+            let mut ends = Vec::new();
+            for level in Level::ALL.into_iter().filter(|&l| l != Level::ZERO) {
+                let mut after = None;
+                loop {
+                    let page =
+                        block_on(self.store.list(level, after, PageLimit::MAX)).expect("list");
+                    ends.extend(page.files.iter().map(|f| f.key.range().max().get()));
+                    match page.next {
+                        Some(next) => after = Some(next),
+                        None => break,
+                    }
+                }
+            }
+            ends
+        }
+
         fn check(&mut self, hour: u64) {
-            self.sample();
+            self.record();
             let latest = self
-                .samples
-                .last()
-                .map(|s| s.pages.clone())
-                .expect("a sample");
-            self.compare(
-                &format!("hour {hour} latest {:x}", self.last),
-                None,
-                &latest,
-            );
+                .acked
+                .get(&self.last)
+                .map(|a| (a.digest, a.pages))
+                .expect("the head");
+            self.compare(&format!("hour {hour} latest {:x}", self.last), None, latest);
             let window = Duration::from_secs((RETENTION_HOURS - 1) * 3600);
-            let pool: Vec<usize> = (0..self.samples.len())
-                .filter(|&i| self.samples[i].at.elapsed() < window)
+            self.acked.retain(|_, a| a.at.elapsed() < window);
+            let pool: Vec<u64> = self
+                .boundaries()
+                .into_iter()
+                .filter(|t| self.acked.contains_key(t) && *t != self.last)
                 .collect();
-            let pick =
-                pool[usize::try_from(self.rng.below(u64::try_from(pool.len()).unwrap())).unwrap()];
-            let (txid, pages) = (self.samples[pick].txid, self.samples[pick].pages.clone());
-            self.compare(&format!("hour {hour} txid {txid:x}"), Some(txid), &pages);
-            self.samples.retain(|s| s.at.elapsed() < window);
+            if let Some(len) = u64::try_from(pool.len()).ok().filter(|&n| n > 0) {
+                let txid = pool[usize::try_from(self.rng.below(len)).unwrap()];
+                let want = self
+                    .acked
+                    .get(&txid)
+                    .map(|a| (a.digest, a.pages))
+                    .expect("acked");
+                self.compare(
+                    &format!("hour {hour} txid {txid:x} of {len}"),
+                    Some(txid),
+                    want,
+                );
+            } else {
+                eprintln!("CHECK hour {hour}: no compacted boundary acknowledged yet");
+            }
             let log = fs::read_to_string(&self.log).unwrap_or_default();
             let warned: Vec<&str> = log
                 .lines()
@@ -415,17 +475,16 @@ dbs:
             }
             self.warned = warnings;
             eprintln!(
-                "HOUR {hour}: commits {} head {:x} samples {} | lsr {} | log warnings {warnings} | findings {}",
+                "HOUR {hour}: commits {} head {:x} acked {} | lsr {} | log warnings {warnings} | findings {}",
                 self.commits,
                 self.last,
-                self.samples.len(),
+                self.acked.len(),
                 resources(self.child.id()),
                 self.findings.len()
             );
         }
     }
 
-    /// Removes a file the soak made, if it is there.
     /// Removes a database file the soak made, and the -wal and -shm SQLite leaves beside it.
     fn remove(path: &Path) {
         for suffix in ["", "-wal", "-shm"] {
@@ -433,6 +492,26 @@ dbs:
             if file.exists() {
                 fs::remove_file(&file).expect("remove a scratch file");
             }
+        }
+    }
+
+    /// Stops the replicator and deletes the run prefix when the soak ends, passed or not, so
+    /// a panic leaves neither a process nor objects behind.
+    impl Drop for Soak {
+        fn drop(&mut self) {
+            if matches!(self.child.try_wait(), Ok(None)) {
+                let sent = Command::new("kill")
+                    .args(["-INT", &self.child.id().to_string()])
+                    .status();
+                if sent.is_err() {
+                    self.child.kill().expect("kill lsr");
+                }
+            }
+            let status = self.child.wait().expect("wait for lsr");
+            eprintln!("STOP lsr replicate: {status}; {}", tail(&self.log));
+            let left = delete_all(&self.store);
+            eprintln!("CLEANUP {left} objects left under {}", self.bucket.path);
+            assert!(std::thread::panicking() || left == 0, "{left} objects left");
         }
     }
 
@@ -495,7 +574,7 @@ dbs:
             rng: SplitMix::new(0x50a6_7e57),
             commits: 0,
             last: 0,
-            samples: Vec::new(),
+            acked: std::collections::BTreeMap::new(),
             findings: Vec::new(),
             warned: 0,
         }
@@ -522,6 +601,9 @@ dbs:
             for step in steady(i) {
                 soak.commit(step);
             }
+            if i % 600 == 400 {
+                soak.recreate_scratch();
+            }
             if i % 97 == 50 {
                 soak.outside_checkpoint();
             }
@@ -533,15 +615,8 @@ dbs:
             }
         }
         soak.check(hour + 1);
-        Command::new("kill")
-            .args(["-INT", &soak.child.id().to_string()])
-            .status()
-            .expect("send SIGINT");
-        let status = soak.child.wait().expect("wait for lsr");
-        eprintln!("STOP lsr replicate: {status}; {}", tail(&soak.log));
-        let left = delete_all(&soak.store);
-        eprintln!("CLEANUP {left} objects left under {}", soak.bucket.path);
-        assert_eq!(left, 0, "objects left");
-        assert!(soak.findings.is_empty(), "findings: {:#?}", soak.findings);
+        let findings = std::mem::take(&mut soak.findings);
+        drop(soak);
+        assert!(findings.is_empty(), "findings: {findings:#?}");
     }
 }
