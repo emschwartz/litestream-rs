@@ -101,20 +101,37 @@ fn every_kind_of_operation_appears() {
 
 #[test]
 fn a_fault_shape_only_pairs_with_the_operation_it_means() {
+    let mut drawn = std::collections::BTreeSet::new();
     for op in history(seed(9), 20_000, &Weights::default()) {
         if let Op::StoreFault { op, shape, .. } = op {
+            drawn.insert(crate::reach::variant(&shape));
             match shape {
-                FaultShape::ErrorAfterPublish(_) | FaultShape::SizeMismatch => {
-                    assert_eq!(op, StoreOp::Upload);
-                }
-                FaultShape::Error(_) => {}
-                FaultShape::FlipByteOnRead { .. }
-                | FaultShape::Rate { .. }
+                FaultShape::ErrorAfterPublish(_)
+                | FaultShape::SizeMismatch
                 | FaultShape::ChecksumMismatch
-                | FaultShape::CorruptPublish => {
-                    panic!("the generator never draws {shape:?}");
-                }
+                | FaultShape::CorruptPublish => assert_eq!(op, StoreOp::Upload),
+                FaultShape::FlipByteOnRead { .. } => assert_eq!(op, StoreOp::Read),
+                FaultShape::Error(_) | FaultShape::Rate { .. } => {}
             }
         }
     }
+    assert_eq!(drawn.len(), 7, "{drawn:?}");
+}
+
+#[test]
+fn the_scenario_only_steps_are_drawn_too() {
+    let ops = history(seed(4), 20_000, &Weights::default());
+    let has = |f: fn(&Op) -> bool| ops.iter().any(f);
+    assert!(has(|op| matches!(op, Op::Shrink { .. })));
+    assert!(has(|op| matches!(op, Op::Remote(RemoteOp::RollBack))));
+    assert!(has(|op| matches!(op, Op::WalDamage { .. })));
+    assert!(has(|op| matches!(op, Op::StagingDamage(_))));
+    assert!(has(|op| matches!(op, Op::Heal)));
+    assert!(has(|op| matches!(
+        op,
+        Op::StoreFault {
+            op: StoreOp::Delete,
+            ..
+        }
+    )));
 }

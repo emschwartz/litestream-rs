@@ -10,13 +10,14 @@
 //! `Faults<YieldEachCall<Recorder<MemStore>>>`. Both keep a raw `MemStore` handle for the
 //! oracle and for power loss, so neither a fault nor a yield touches a check.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use lsr_core::conformance::block_on;
 use lsr_core::{
     Entropy, FakeClock, FileInfo, FileKey, MemStore, RecordingSleeper, SeededEntropy, StoreError,
 };
-use lsr_ltx::{PageNo, PageSize, Timestamp};
+use lsr_ltx::{PageNo, PageSize, Timestamp, Txid};
 use lsr_wal::{Salts, WalOffset};
 
 use crate::exec::{Polls, RunEnd, run_until};
@@ -221,6 +222,12 @@ pub struct World {
     pub model: Model,
     /// What the engine has acknowledged.
     pub acked: Acked,
+    /// Transactions a bucket rollback took from the replica for good.
+    pub lost: BTreeSet<Txid>,
+    /// Files another writer put: its transaction, and the one it copied.
+    pub foreign: Vec<(Txid, Txid)>,
+    /// Files the engine deleted as a repair, after they failed to verify.
+    pub repaired: Vec<FileKey>,
     crash_entropy: SeededEntropy,
     in_tick: Option<CommittedInTick>,
 }
@@ -275,6 +282,9 @@ impl World {
             volatile: volatile_handle,
             model: Model::new(initial),
             acked: Acked::new(),
+            lost: BTreeSet::new(),
+            foreign: Vec::new(),
+            repaired: Vec::new(),
             crash_entropy: SeededEntropy::new(seed.stream(5)),
             in_tick: None,
         }
@@ -557,7 +567,7 @@ impl World {
     ///
     /// # Errors
     /// The store's error when it cannot list or delete.
-    pub fn remote_roll_back(&self) -> Result<bool, StoreError> {
+    pub fn remote_roll_back(&mut self) -> Result<bool, StoreError> {
         use lsr_core::{Level, ObjectStore, PageLimit};
         let mut files = Vec::new();
         for level in Level::ALL {
@@ -566,12 +576,23 @@ impl World {
         let Some(newest) = files.iter().map(|f| f.key.range().max()).max() else {
             return Ok(false);
         };
-        let keys: Vec<FileKey> = files
-            .iter()
-            .map(|f| f.key)
-            .filter(|key| key.range().max() == newest)
-            .collect();
+        let (gone, kept): (Vec<FileInfo>, Vec<FileInfo>) =
+            files.iter().partition(|f| f.key.range().max() == newest);
+        let keys: Vec<FileKey> = gone.iter().map(|f| f.key).collect();
         self.remote_delete(&keys)?;
+        // What no kept file covers is gone from the replica for good.
+        for key in &keys {
+            let range = key.range();
+            for raw in range.min().get()..=range.max().get() {
+                let covered = kept.iter().any(|f| {
+                    let r = f.key.range();
+                    r.min().get() <= raw && raw <= r.max().get()
+                });
+                if let (false, Some(txid)) = (covered, Txid::new(raw)) {
+                    self.lost.insert(txid);
+                }
+            }
+        }
         Ok(true)
     }
 
@@ -589,14 +610,22 @@ impl World {
     ///
     /// # Errors
     /// The store's error when it cannot list or write.
-    pub fn remote_put_unrecognized(&self) -> Result<bool, StoreError> {
+    pub fn remote_put_unrecognized(&mut self) -> Result<bool, StoreError> {
+        self.remote_put_foreign().map(|put| put.is_some())
+    }
+
+    /// [`Self::remote_put_unrecognized`], returning the key and bytes put.
+    ///
+    /// # Errors
+    /// The store's error when it cannot list or write.
+    pub fn remote_put_foreign(&mut self) -> Result<Option<(FileKey, Vec<u8>)>, StoreError> {
         use lsr_core::{Level, ObjectStore};
         use lsr_ltx::TxidRange;
         let Some(newest) = self.remote_level_zero()?.last().map(|f| f.key) else {
-            return Ok(false);
+            return Ok(None);
         };
         let Some(next) = newest.range().max().next() else {
-            return Ok(false);
+            return Ok(None);
         };
         let key = FileKey::new(Level::ZERO, TxidRange::single(next));
         // Another writer's file is a sound one: the same pages under the next
@@ -604,13 +633,26 @@ impl World {
         let Some(bytes) = rewritten(&read_all(&self.remote_raw, &newest)?, |fields| {
             fields.txids = TxidRange::single(next);
         }) else {
-            return Ok(false);
+            return Ok(None);
         };
         let at = lsr_core::Clock::now(self.clock.as_ref());
         let mut up = block_on(self.remote_raw.begin_upload(&key, at))?;
         block_on(lsr_core::Upload::write(&mut up, &bytes))?;
         block_on(lsr_core::Upload::commit(up))?;
-        Ok(true)
+        self.foreign.push((next, newest.range().max()));
+        Ok(Some((key, bytes)))
+    }
+
+    /// Deletes replica `key` if it still holds exactly `bytes`; whether it did.
+    ///
+    /// # Errors
+    /// The store's error when it cannot read or delete.
+    pub fn remote_remove_if(&self, key: FileKey, bytes: &[u8]) -> Result<bool, StoreError> {
+        match read_all(&self.remote_raw, &key) {
+            Ok(now) if now == bytes => self.remote_delete(&[key]).map(|()| true),
+            Ok(_) | Err(StoreError::NotFound { .. }) => Ok(false),
+            Err(other) => Err(other),
+        }
     }
 
     /// Deletes the newest level-0 file; false when there is none.
@@ -681,17 +723,22 @@ impl World {
         Ok(files)
     }
 
-    /// The page size each staged and replica file's header names, a file
-    /// whose header does not decode left out.
+    /// The page size each replica file's header names, and each staged
+    /// file's when `staged`, a file whose header does not decode left out.
     ///
     /// # Errors
     /// What the store said when it could not list or read.
-    pub fn page_sizes(&self) -> Result<Vec<(FileKey, PageSize)>, String> {
+    pub fn page_sizes(&self, staged: bool) -> Result<Vec<(FileKey, PageSize)>, String> {
         use lsr_core::{Inventory, ObjectStore, ReadLen};
         use lsr_ltx::{HEADER_LEN, Header};
         let len = u32::try_from(HEADER_LEN).ok().and_then(ReadLen::new);
         let mut out = Vec::new();
-        for store in [&self.staging_raw, &self.remote_raw] {
+        let stores = if staged {
+            vec![&self.staging_raw, &self.remote_raw]
+        } else {
+            vec![&self.remote_raw]
+        };
+        for store in stores {
             let inventory = block_on(Inventory::load(store)).map_err(|err| err.to_string())?;
             for info in inventory.files() {
                 let Some(len) = len else { break };
@@ -758,11 +805,16 @@ impl World {
     /// # Errors
     /// The first [`Violation`].
     pub fn check(&self, retention: Option<Windows>) -> Result<Checked, Violation> {
-        let exempt = self.remote_faults.rejected();
+        let mut exempt = self.remote_faults.rejected();
+        exempt.extend(&self.repaired);
+        let damaged = self.remote_faults.damaged();
         let ground = Ground {
             staging: Some(&self.staging_recorder),
             retention,
             exempt: &exempt,
+            lost: &self.lost,
+            foreign: &self.foreign,
+            damaged: &damaged,
         };
         check_with(
             &self.model,

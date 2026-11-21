@@ -224,6 +224,8 @@ fn is_straddler(file: &FileInfo, reach: Txid) -> bool {
 #[must_use]
 pub fn allows(expected: &Expected, files: &[FileInfo], got: &Answer) -> bool {
     match (expected, got) {
+        // The planner chose a file; whether it reads is the store's business.
+        (_, Answer::Unreadable(_)) => true,
         (Expected::Plan(want), Answer::Reached { txid, inside: None }) => want == txid,
         (
             Expected::AsOfInside { reach, .. },
@@ -279,6 +281,9 @@ pub enum Answer {
     },
     /// The planner refused.
     Refused(PlanOutcome),
+    /// The plan named a file the store damaged as it published it, and the
+    /// restore stopped on it with a typed error: loud, not a wrong answer.
+    Unreadable(FileKey),
 }
 
 impl fmt::Display for Answer {
@@ -290,6 +295,7 @@ impl fmt::Display for Answer {
                 inside: Some(key),
             } => write!(f, "{} inside {key:?}", txid.get()),
             Self::Refused(outcome) => write!(f, "{outcome:?}"),
+            Self::Unreadable(key) => write!(f, "a damaged {key:?}"),
         }
     }
 }

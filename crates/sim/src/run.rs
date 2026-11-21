@@ -153,6 +153,10 @@ pub struct RunReport {
     /// The replica's objects a corrupt publish changed, when the run was
     /// asked to record.
     pub remote_damaged: Vec<lsr_core::FileKey>,
+    /// The replica's objects a commit published and then reported as failed
+    /// or wrong (the engine may delete them as untrusted), when the run was
+    /// asked to record.
+    pub remote_rejected: Vec<lsr_core::FileKey>,
     /// What every engine of the run saw of the app's checkpoints.
     pub app_checkpoints: AppCheckpoints,
     /// The app's automatic checkpoints, as the model counted them.
@@ -182,6 +186,10 @@ pub struct Opts {
     /// Switches retention just before this step: on the running engine, as
     /// an operator would, and for every engine booted after it.
     pub switch_retention: Option<(u32, RetentionMode)>,
+    /// The operations were drawn, not written: a step with nothing to act on
+    /// is skipped, and the model is checked against SQLite's rules before
+    /// every step. [`run_with`] sets it.
+    pub drawn: bool,
 }
 
 /// The configuration every run gives the actor.
@@ -259,6 +267,19 @@ struct Runner {
     app_autocheckpoint: Option<NonZeroU32>,
     /// What engines replaced so far saw of the app's checkpoints.
     app_before: AppCheckpoints,
+    /// Persistent causes an operation the history drew makes legitimate: a
+    /// stop or a degraded task for one of them is not a bug.
+    expected: Vec<StopCause>,
+    /// A drawn step that has nothing to act on is skipped, not a failure.
+    lenient: bool,
+    /// Page sizes the database had before a drawn resize: an engine that
+    /// remembers one may stop on the change.
+    expected_sizes: Vec<PageSize>,
+    /// A drawn step put a staging backup back.
+    restored_staging: bool,
+    /// A store fault fails calls at a rate and has not healed: a drain may
+    /// end at its deadline.
+    rate_active: bool,
 }
 
 fn below(rng: &SeededEntropy, upper: u64) -> u64 {
@@ -297,6 +318,11 @@ impl Runner {
             saved: None,
             app_autocheckpoint: Some(lsr_core::SQLITE_AUTOCHECKPOINT),
             app_before: AppCheckpoints::NONE,
+            expected: Vec::new(),
+            lenient: false,
+            expected_sizes: Vec::new(),
+            restored_staging: false,
+            rate_active: false,
         }
     }
 
@@ -573,6 +599,10 @@ impl Runner {
             Event::Booted { cause: Some(cause) } | Event::Resnapshot(cause) => {
                 reach.bump(format!("snapshot.{}", variant(&CauseKind::from(cause))));
             }
+            Event::Maintained {
+                event: lsr_core::MaintainedEvent::Repaired(key),
+                ..
+            } => self.w.repaired.push(*key),
             Event::Booted { cause: None }
             | Event::Synced { .. }
             | Event::Checkpointed { .. }
@@ -648,7 +678,9 @@ impl Runner {
         for _ in 0..DRAIN_TICKS {
             match self.step(None)?.0 {
                 Step::Drained(txid) => return self.drained(txid),
-                Step::Stopped(StopCause::Shutdown) if degraded => return Ok(()),
+                Step::Stopped(StopCause::Shutdown) if degraded || self.rate_active => {
+                    return Ok(());
+                }
                 Step::Stopped(StopCause::Shutdown) => {
                     self.reboot();
                     self.actor
@@ -689,7 +721,10 @@ impl Runner {
             .map_err(|e| bug_fault(e.to_string()))?
             .last()
             .map(|file| file.key.range().max());
-        if staged > txid || remote != txid {
+        // A bucket rollback can take the drained file after the engine
+        // confirmed it; the engine learns of it only at its next listing.
+        let rolled_back = txid.is_some_and(|txid| self.w.lost.contains(&txid));
+        if staged > txid || (remote != txid && !rolled_back) {
             return Err(bug_fault(format!(
                 "a drain finished at {txid:?} with {staged:?} staged and {remote:?} on the replica"
             )));
@@ -795,6 +830,10 @@ impl Runner {
     /// the engine, the app ends its readers and vacuums, and the engine starts
     /// again; a write transaction the app holds refuses the vacuum.
     fn resize(&mut self, new: PageSize) {
+        let old = self.w.sqlite.page_size();
+        if self.lenient && !self.expected_sizes.contains(&old) {
+            self.expected_sizes.push(old);
+        }
         self.w.crash(CrashKind::Process);
         for id in std::mem::take(&mut self.readers) {
             self.w.sqlite.other_process_reader_end(id);
@@ -809,7 +848,12 @@ impl Runner {
     /// holds one, so a change the replica did not follow stops the engine
     /// before it stages anything. `None` while there is no file.
     fn replica_page_size(&self) -> Result<Option<PageSize>, Violation> {
-        let sizes = self.w.page_sizes().map_err(bug_fault)?;
+        // A staging backup put back holds what an older engine staged, which
+        // the running engine refuses rather than uploads.
+        let sizes = self
+            .w
+            .page_sizes(!self.restored_staging)
+            .map_err(bug_fault)?;
         let Some((_, first)) = sizes.first() else {
             return Ok(None);
         };
@@ -825,10 +869,24 @@ impl Runner {
     /// change between the files staged or published and the database.
     fn stop_expected(&self, cause: StopCause) -> bool {
         if let StopCause::PageSizeChanged { was, now } = cause {
+            // The files of the old size may all be gone (a bucket rollback, a
+            // wiped staging directory) while the engine still remembers it.
+            let remembered = self.expected_sizes.contains(&was);
             return now == self.w.sqlite.page_size()
-                && self.replica_page_size().ok().flatten() == Some(was);
+                && (remembered || self.replica_page_size().ok().flatten() == Some(was));
         }
         self.allow_stop
+            || self
+                .expected
+                .iter()
+                .any(|want| std::mem::discriminant(want) == std::mem::discriminant(&cause))
+    }
+
+    /// Makes `cause` legitimate for the rest of the run.
+    fn expect(&mut self, cause: StopCause) {
+        if !self.expected.contains(&cause) {
+            self.expected.push(cause);
+        }
     }
 
     fn vacuum(&mut self, to: Option<PageSize>) {
@@ -847,6 +905,45 @@ impl Runner {
             }
             None => {}
         }
+    }
+
+    /// The app drops up to `pages` pages from the end of the database, when it
+    /// holds no open transaction.
+    fn shrink(&mut self, pages: u8) {
+        let size = self.w.sqlite.db_size();
+        if !self.spilled.is_empty() || size < 2 {
+            return;
+        }
+        let to = size.saturating_sub(u32::from(pages)).max(1);
+        if self.w.app_shrink(to).is_some() {
+            self.report.reach.bump("commit.shrinks");
+        }
+    }
+
+    /// Another writer's file sits on the replica for `ticks` ticks; then the
+    /// operator removes it, if it still holds that writer's bytes, and starts
+    /// the engine again. The engine may have listed it, so nothing it
+    /// acknowledged before the removal is held against `Latest`.
+    fn second_writer(&mut self, ticks: u8) -> Result<(), Violation> {
+        let put = self
+            .w
+            .remote_put_foreign()
+            .map_err(|err| bug_fault(format!("the second writer's put failed: {err}")))?;
+        let Some((key, bytes)) = put else {
+            return Ok(());
+        };
+        self.report.reach.bump("remote.second_writer");
+        self.expect(StopCause::OtherWriter);
+        for _ in 0..ticks {
+            self.tick()?;
+        }
+        self.w
+            .remote_remove_if(key, &bytes)
+            .map_err(|err| bug_fault(format!("removing the second writer's file failed: {err}")))?;
+        self.w.acked.note_rewound();
+        self.w.crash(CrashKind::Process);
+        self.crashed(CrashKind::Process);
+        Ok(())
     }
 
     fn spill(&mut self) {
@@ -868,12 +965,25 @@ impl Runner {
     }
 
     fn store_fault(
-        &self,
+        &mut self,
         target: Target,
         op: lsr_core::StoreOp,
         ahead: u8,
         shape: crate::FaultShape,
     ) {
+        if target == Target::Remote
+            && matches!(
+                shape,
+                crate::FaultShape::CorruptPublish
+                    | crate::FaultShape::ChecksumMismatch
+                    | crate::FaultShape::FlipByteOnRead { .. }
+            )
+        {
+            self.expect(StopCause::RemoteCorrupt);
+        }
+        if matches!(shape, crate::FaultShape::Rate { .. }) {
+            self.rate_active = true;
+        }
         let faults = match target {
             Target::Staging => &self.w.staging_faults,
             Target::Remote => &self.w.remote_faults,
@@ -882,24 +992,36 @@ impl Runner {
     }
 
     fn scenario_bool(&self, what: &str, done: bool) -> Result<(), Violation> {
-        Self::scenario_step(what, Ok(done))
+        self.step_done(what, Ok(done))
+    }
+
+    /// A scenario step that had nothing to act on fails the scenario; in a
+    /// drawn history it is skipped.
+    fn step_done(&self, what: &str, done: Result<bool, StagedEditError>) -> Result<(), Violation> {
+        match done {
+            Ok(false) if self.lenient => Ok(()),
+            other => Self::scenario_step(what, other),
+        }
     }
 
     fn remote(&mut self, op: RemoteOp) -> Result<(), Violation> {
-        let w = &self.w;
         let done = match op {
-            RemoteOp::PutUnrecognized => w.remote_put_unrecognized(),
-            RemoteOp::RemoveUnrecognized => w.remote_level_zero().and_then(|files| {
-                files.last().map_or(Ok(false), |newest| {
-                    w.remote_delete(&[newest.key]).map(|()| true)
+            RemoteOp::PutUnrecognized => self.w.remote_put_unrecognized(),
+            RemoteOp::RemoveUnrecognized => {
+                let w = &self.w;
+                w.remote_level_zero().and_then(|files| {
+                    files.last().map_or(Ok(false), |newest| {
+                        w.remote_delete(&[newest.key]).map(|()| true)
+                    })
                 })
-            }),
-            RemoteOp::RollBack => w.remote_roll_back(),
+            }
+            RemoteOp::RollBack => self.w.remote_roll_back(),
         };
         if matches!(op, RemoteOp::RollBack) {
             self.w.acked.note_rewound();
+            self.expect(StopCause::RemoteRegressed);
         }
-        Self::scenario_step(&format!("{op:?}"), done.map_err(StagedEditError::from))
+        self.step_done(&format!("{op:?}"), done.map_err(StagedEditError::from))
     }
 
     fn env_fault(&mut self, fault: EnvFault) -> Result<(), Violation> {
@@ -981,6 +1103,13 @@ impl Runner {
                     true
                 })
                 .map_err(StagedEditError::from),
+            MetaOp::Restore if self.lenient && self.saved.is_some() => {
+                self.restored_staging = true;
+                match &self.saved {
+                    Some(copy) => w.replace_staging(copy).map(|()| true),
+                    None => Ok(false),
+                }
+            }
             MetaOp::Restore => match &self.saved {
                 Some(copy) => w.replace_staging(copy).map(|()| true),
                 None => Ok(false),
@@ -1002,7 +1131,7 @@ impl Runner {
                 bytes.truncate(half);
             }),
         };
-        Self::scenario_step(&format!("{op:?}"), done)
+        self.step_done(&format!("{op:?}"), done)
     }
 
     fn wal_damage(&mut self, op: WalOp) -> Result<(), Violation> {
@@ -1023,8 +1152,56 @@ impl Runner {
                 sqlite.flip_bit(start.get().saturating_add(34).saturating_mul(8))
             }
         };
-        Self::scenario_step(&format!("{op:?}"), Ok(applied))?;
+        self.expect(StopCause::WalCorrupt);
+        self.expect(StopCause::WalTruncated);
+        self.step_done(&format!("{op:?}"), Ok(applied))?;
         self.w.adopt_local_state();
+        Ok(())
+    }
+
+    /// The WAL is damaged, the engine runs `ticks` ticks, then the app heals
+    /// it: a flipped bit back, then its connections let go, another process
+    /// truncates, and it commits a page.
+    fn wal_damage_healed(&mut self, op: WalOp, ticks: u8) -> Result<(), Violation> {
+        // A regrowth rewrites the generation from frame 1; frames a checkpoint
+        // already copied would then differ from the database file, which
+        // makes the database two things at once (SQLite's readers and its
+        // next checkpoint would disagree), so it is drawn only before any copy.
+        let regrows = matches!(
+            op,
+            WalOp::RegrowSameSalts(_) | WalOp::RegrowWithoutCommitMarks(_)
+        );
+        if regrows && self.w.sqlite.backfilled() > 0 {
+            return Ok(());
+        }
+        // A cut below the committed end leaves the wal-index naming frames the
+        // file no longer holds, which no SQLite reader can make sense of; a
+        // drawn cut takes only frames past it (a rolled-back or spilled tail).
+        let op = match op {
+            WalOp::TruncateAtFrame(past) => {
+                WalOp::TruncateAtFrame(self.w.sqlite.mx_frame().saturating_add(past % 4))
+            }
+            other @ (WalOp::TearHeader
+            | WalOp::RewriteSameLength(_)
+            | WalOp::RegrowSameSalts(_)
+            | WalOp::RegrowWithoutCommitMarks(_)
+            | WalOp::FlipLastFrameBit) => other,
+        };
+        self.wal_damage(op)?;
+        self.report.reach.bump(format!("wal.{}", variant(&op)));
+        for _ in 0..ticks {
+            self.tick()?;
+        }
+        if op == WalOp::FlipLastFrameBit {
+            self.wal_damage(op)?;
+        }
+        self.app_lets_go();
+        if self.w.sqlite.our_reader_end() {
+            self.report.reach.bump("wal.our_reader_ended");
+        }
+        self.w
+            .other_process_checkpoint(crate::sqlite::OtherProcessMode::Truncate);
+        self.commit(1, false);
         Ok(())
     }
 
@@ -1069,6 +1246,19 @@ impl Runner {
                 self.w.sqlite.set_app_autocheckpoint(*frames);
                 self.app_autocheckpoint = frames.and_then(NonZeroU32::new);
                 self.actor.set_app_autocheckpoint(self.app_autocheckpoint);
+            }
+            Op::Shrink { pages } => self.shrink(*pages),
+            Op::SecondWriter { ticks } => self.second_writer(*ticks)?,
+            Op::StagingDamage(op) => {
+                self.w.crash(CrashKind::Process);
+                self.crashed(CrashKind::Process);
+                self.meta(*op)?;
+            }
+            Op::WalDamage { op, ticks } => self.wal_damage_healed(*op, *ticks)?,
+            Op::Heal => {
+                self.rate_active = false;
+                self.w.remote_faults.heal();
+                self.w.staging_faults.heal();
             }
             Op::OurReader { begin } => {
                 let done = if *begin {
@@ -1150,6 +1340,13 @@ impl Runner {
 
     /// The end of a history: drain, judge the replica, check the resources.
     fn finish(&mut self) -> Result<(), Violation> {
+        if self.lenient && !self.w.model_matches_sqlite() {
+            return Err(bug_fault("the model no longer matches SQLite's rules"));
+        }
+        // Liveness is judged once every fault has cleared.
+        self.rate_active = false;
+        self.w.remote_faults.heal();
+        self.w.staging_faults.heal();
         self.drain()?;
         self.restore_all()?;
         memory(
@@ -1244,7 +1441,11 @@ pub fn run_with(
     weights: &Weights,
     opts: &Opts,
 ) -> Result<RunReport, Failure> {
-    run_ops(seed, &history(seed, steps, weights), opts)
+    let opts = Opts {
+        drawn: true,
+        ..opts.clone()
+    };
+    run_ops(seed, &history(seed, steps, weights), &opts)
 }
 
 /// Runs the given operations, then the final drain and judgment.
@@ -1258,6 +1459,7 @@ pub fn run_with(
 pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure> {
     let steps = u32::try_from(ops.len()).unwrap_or(u32::MAX);
     let mut runner = Runner::new(seed);
+    runner.lenient = opts.drawn;
     runner.trace = opts.trace;
     runner.record = opts.record;
     runner.allow_stop = opts.allow_stop;
@@ -1287,6 +1489,12 @@ pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure
         if opts.trace {
             runner.report.trace.push(format!("{step}: {op:?}"));
         }
+        if runner.lenient && !runner.w.model_matches_sqlite() {
+            return Err(Failure {
+                trace: runner.report.trace,
+                ..fail(bug_fault("the model no longer matches SQLite's rules"))
+            });
+        }
         if let Err(violation) = runner.apply(op) {
             return Err(Failure {
                 trace: runner.report.trace,
@@ -1309,6 +1517,7 @@ pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure
         runner.report.remote_events = runner.w.remote_recorder.events();
         runner.report.staging_events = runner.w.staging_recorder.events();
         runner.report.remote_damaged = runner.w.remote_faults.damaged();
+        runner.report.remote_rejected = runner.w.remote_faults.rejected();
     }
     Ok(runner.report)
 }

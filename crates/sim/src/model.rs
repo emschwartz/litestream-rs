@@ -170,6 +170,8 @@ pub struct SnapshotNote {
     pub rewound: bool,
     /// Recorder events at the time.
     pub at: usize,
+    /// Its place among every snapshot and stage note.
+    pub seq: u64,
 }
 
 /// A staged level-0 file's commit, noted when the engine staged it: a power
@@ -187,6 +189,8 @@ pub struct StageNote {
     pub commit: CommitId,
     /// Replica recorder events at the time.
     pub at: usize,
+    /// Its place among every snapshot and stage note.
+    pub seq: u64,
 }
 
 /// Every commit, the local branch they sit on, and the snapshot notes.
@@ -198,6 +202,7 @@ pub struct Model {
     branch: u32,
     notes: Vec<SnapshotNote>,
     stages: Vec<StageNote>,
+    seq: u64,
 }
 
 impl Model {
@@ -223,6 +228,7 @@ impl Model {
             branch: 0,
             notes: Vec::new(),
             stages: Vec::new(),
+            seq: 0,
         }
     }
 
@@ -336,7 +342,9 @@ impl Model {
     /// was staged from whichever commit sits there now.
     pub fn note_stage(&mut self, txid: Txid, salts: Salts, end: u64, at: usize) {
         if let Some(commit) = self.find(salts, end, usize::MAX) {
+            self.seq = self.seq.saturating_add(1);
             self.stages.push(StageNote {
+                seq: self.seq,
                 txid,
                 salts,
                 end,
@@ -357,20 +365,30 @@ impl Model {
     }
 
     /// The commit the newest file staged for `txid` by `at` held, whatever
-    /// its WAL range: for a file whose header lost its WAL origin after it
-    /// was staged.
+    /// its WAL range, snapshot or not: for a file whose header names no WAL
+    /// range (a snapshot of an empty WAL, or a file that lost its origin).
     #[must_use]
     pub fn staged_as(&self, txid: Txid, at: usize) -> Option<CommitId> {
-        self.stages
+        let stage = self
+            .stages
             .iter()
             .rev()
             .find(|n| n.txid == txid && n.at <= at)
-            .map(|n| n.commit)
+            .map(|n| (n.seq, n.commit));
+        let snapshot = self
+            .notes
+            .iter()
+            .rev()
+            .find(|n| n.txid == txid && n.at <= at)
+            .map(|n| (n.seq, n.commit));
+        stage.max(snapshot).map(|(_, commit)| commit)
     }
 
     /// Notes that a snapshot ending at `txid` was built from `commit`.
     pub fn note_snapshot(&mut self, txid: Txid, commit: CommitId, rewound: bool, at: usize) {
+        self.seq = self.seq.saturating_add(1);
         self.notes.push(SnapshotNote {
+            seq: self.seq,
             txid,
             commit,
             rewound,

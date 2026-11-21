@@ -263,6 +263,15 @@ impl FaultHandle {
         lock(&self.state).rejected.clone()
     }
 
+    /// Stops every fault that fails at a rate.
+    pub fn heal(&self) {
+        for entry in &mut lock(&self.state).schedule {
+            if matches!(entry.shape, FaultShape::Rate { .. }) {
+                entry.fired = true;
+            }
+        }
+    }
+
     /// One-shot faults that have not fired yet.
     #[must_use]
     pub fn pending(&self) -> usize {
