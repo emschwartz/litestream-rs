@@ -6,6 +6,7 @@
 use std::fmt;
 use std::num::NonZeroU64;
 use std::str::FromStr;
+use std::time::Duration;
 
 /// A transaction id: a position in a replica's history, starting at 1.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -122,6 +123,9 @@ impl FromStr for Txid {
 pub struct Timestamp(i64);
 
 impl Timestamp {
+    /// The last instant a timestamp holds.
+    pub const MAX: Self = Self(i64::MAX);
+
     /// Wraps a millisecond count taken from a header or a store listing.
     #[must_use]
     pub const fn from_unix_millis(millis: i64) -> Self {
@@ -132,6 +136,22 @@ impl Timestamp {
     #[must_use]
     pub const fn unix_millis(self) -> i64 {
         self.0
+    }
+
+    /// The instant `by` later, to the whole millisecond, or `None` past the
+    /// last instant a timestamp holds.
+    #[must_use]
+    pub fn checked_add(self, by: Duration) -> Option<Self> {
+        let millis = i64::try_from(by.as_millis()).ok()?;
+        self.0.checked_add(millis).map(Self)
+    }
+
+    /// The instant `by` earlier, to the whole millisecond, or `None` before
+    /// the first instant a timestamp holds.
+    #[must_use]
+    pub fn checked_sub(self, by: Duration) -> Option<Self> {
+        let millis = i64::try_from(by.as_millis()).ok()?;
+        self.0.checked_sub(millis).map(Self)
     }
 }
 
@@ -866,5 +886,35 @@ mod tests {
             TxidRange::single(txid(3)).min(),
             TxidRange::single(txid(3)).max()
         );
+    }
+
+    #[test]
+    fn instant_arithmetic_is_whole_milliseconds_and_never_wraps() {
+        let t = Timestamp::from_unix_millis(10_000);
+        let ms = Duration::from_millis;
+        assert_eq!(
+            t.checked_sub(ms(4_000)),
+            Some(Timestamp::from_unix_millis(6_000))
+        );
+        assert_eq!(
+            t.checked_add(ms(4_000)),
+            Some(Timestamp::from_unix_millis(14_000))
+        );
+        assert_eq!(
+            t.checked_sub(Duration::from_micros(1_999)),
+            Some(Timestamp::from_unix_millis(9_999)),
+            "a part millisecond is dropped, as the stored stamps are whole"
+        );
+        assert_eq!(
+            t.checked_sub(ms(20_000)).map(Timestamp::unix_millis),
+            Some(-10_000)
+        );
+        let first = Timestamp::from_unix_millis(i64::MIN);
+        let last = Timestamp::MAX;
+        assert_eq!(first.checked_sub(ms(1)), None);
+        assert_eq!(last.checked_add(ms(1)), None);
+        assert_eq!(t.checked_add(Duration::MAX), None);
+        assert_eq!(t.checked_sub(Duration::MAX), None);
+        assert_eq!(first.checked_add(Duration::ZERO), Some(first));
     }
 }

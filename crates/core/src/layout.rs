@@ -355,6 +355,38 @@ impl StoredStamp {
     pub const fn origin(self) -> StampOrigin {
         self.origin
     }
+
+    /// The stamp as an instant a writer set, or `None` for one at or before
+    /// the Unix epoch: that is a writer that stamped nothing (Go leaves the
+    /// field zero), never a file created in 1970, so nothing may age it.
+    #[must_use]
+    pub const fn real(self) -> Option<RealStamp> {
+        if self.at.unix_millis() > 0 {
+            Some(RealStamp(self.at))
+        } else {
+            None
+        }
+    }
+}
+
+/// A stored stamp that is a real creation time: after the Unix epoch. Only
+/// [`StoredStamp::real`] makes one, so code that ages a file by its stamp
+/// cannot be handed the zero a writer leaves when it stamps nothing.
+///
+/// ```compile_fail
+/// # use lsr_core::RealStamp;
+/// # use lsr_ltx::Timestamp;
+/// let _ = RealStamp(Timestamp::from_unix_millis(0));
+/// ```
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct RealStamp(Timestamp);
+
+impl RealStamp {
+    /// The instant.
+    #[must_use]
+    pub const fn at(self) -> Timestamp {
+        self.0
+    }
 }
 
 /// Where a [`StoredStamp`] came from.
@@ -372,6 +404,31 @@ pub enum StampOrigin {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn only_a_stamp_after_the_epoch_is_real() {
+        let ms = Timestamp::from_unix_millis;
+        for origin in [
+            StoredStamp::metadata,
+            StoredStamp::mtime,
+            StoredStamp::fallback,
+        ] {
+            for unset in [i64::MIN, -1, 0] {
+                assert_eq!(origin(ms(unset)).real(), None, "{unset}");
+            }
+            for set in [1, 1_700_000_000_000, i64::MAX] {
+                assert_eq!(origin(ms(set)).real().map(RealStamp::at), Some(ms(set)));
+            }
+        }
+        let (early, late) = (
+            StoredStamp::mtime(ms(5)).real(),
+            StoredStamp::metadata(ms(6)).real(),
+        );
+        assert!(
+            early < late,
+            "real stamps order by instant, whatever their origin"
+        );
+    }
 
     fn range(min: u64, max: u64) -> TxidRange {
         TxidRange::new(Txid::new(min).unwrap(), Txid::new(max).unwrap()).unwrap()

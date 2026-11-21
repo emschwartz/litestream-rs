@@ -100,8 +100,7 @@ use lsr_ltx::{Timestamp, Txid};
 
 use super::{DeleteJob, Hold, L0Retention, MAX_DELETE, MaintainState, Maintenance};
 use crate::inventory::{Inventory, is_snapshot_start};
-use crate::layout::StoredStamp;
-use crate::layout::{FileInfo, FileKey, Level};
+use crate::layout::{FileInfo, FileKey, Level, RealStamp, StoredStamp};
 use crate::plan::{KeyTarget, PlanOutcome, plan};
 use crate::stamps::{Resolve, Stamps};
 
@@ -165,24 +164,31 @@ fn decide(
         return Ok(Retention::Held(hold));
     }
     let anchors = anchor_files(inventory);
-    let mut newest_stamp: Option<i64> = None;
-    for info in &anchors {
-        let at = stamp_of(stamps, info)?.unix_millis();
-        newest_stamp = Some(newest_stamp.map_or(at, |newest| newest.max(at)));
-    }
-    let Some(newest_stamp) = newest_stamp else {
+    if anchors.is_empty() {
         return Ok(Retention::Wait { until: None });
-    };
+    }
+    // A file with no real stamp sets no anchor: it has no age to measure.
+    let mut newest_stamp: Option<Timestamp> = None;
+    for info in &anchors {
+        if let Some(stamp) = stamp_of(stamps, info)? {
+            let at = stamp.at();
+            newest_stamp = Some(newest_stamp.map_or(at, |newest| newest.max(at)));
+        }
+    }
     if let Some(hold) = unstamped(anchors.iter(), stamps)?.or(stamps_backwards(inventory, stamps)?)
     {
         return Ok(Retention::Held(hold));
     }
-    let anchor = now.unix_millis().min(newest_stamp);
+    // Every anchor unstamped and none held: no snapshot, so nothing to age.
+    let Some(newest_stamp) = newest_stamp else {
+        return Ok(Retention::Wait { until: None });
+    };
+    let anchor = now.min(newest_stamp);
     let found = match candidates(inventory, anchor, newest_stamp, config, stamps)? {
         Ok(found) => found,
         Err(hold) => return Ok(Retention::Held(hold)),
     };
-    let until = found.wake.map(Timestamp::from_unix_millis);
+    let until = found.wake;
     if found.keys.is_empty() {
         return Ok(Retention::Wait { until });
     }
@@ -328,9 +334,10 @@ fn latest_unplannable(inventory: &Inventory) -> Option<Hold> {
     }
 }
 
-/// The file's exact stamp, or the request for it.
-fn stamp_of(stamps: &Stamps, info: &FileInfo) -> Needs<Timestamp> {
-    stamps.exact(info).map(StoredStamp::at).ok_or(*info)
+/// The file's exact stamp when it is a real one (`None` for a writer that
+/// stamped nothing), or the request for it.
+fn stamp_of(stamps: &Stamps, info: &FileInfo) -> Needs<Option<RealStamp>> {
+    stamps.exact(info).map(StoredStamp::real).ok_or(*info)
 }
 
 /// Whether a stamp at or before the epoch is no stamp at all for this file:
@@ -344,7 +351,7 @@ fn unstamped<'a>(
     stamps: &Stamps,
 ) -> Needs<Option<Hold>> {
     for info in files.filter(|info| aged(info)) {
-        if stamp_of(stamps, info)?.unix_millis() <= 0 {
+        if stamp_of(stamps, info)?.is_none() {
             return Ok(Some(Hold::Unstamped { key: info.key }));
         }
     }
@@ -370,11 +377,11 @@ fn stamps_backwards(inventory: &Inventory, stamps: &Stamps) -> Needs<Option<Hold
 struct Found {
     keys: Vec<FileKey>,
     /// The earliest instant a rule would delete more, in anchor time.
-    wake: Option<i64>,
+    wake: Option<Timestamp>,
 }
 
 impl Found {
-    fn wake_at(&mut self, at: i64, newest_stamp: i64) {
+    fn wake_at(&mut self, at: Timestamp, newest_stamp: Timestamp) {
         // The anchor never passes the newest stamp, so a later instant is
         // never reached without a new write.
         if at <= newest_stamp {
@@ -383,15 +390,32 @@ impl Found {
     }
 }
 
-fn millis(d: Duration) -> i64 {
-    i64::try_from(d.as_millis()).unwrap_or(i64::MAX)
+/// `stamp` plus `age`: the instant it ages out. Past the last instant a
+/// timestamp holds it is that last instant, which the anchor never passes.
+fn aged_at(stamp: RealStamp, age: Duration) -> Timestamp {
+    stamp.at().checked_add(age).unwrap_or(Timestamp::MAX)
+}
+
+/// Whether `stamp` is at or after `anchor - age`. Every stamp is when that
+/// instant is before the first one a timestamp holds.
+fn not_before(stamp: RealStamp, anchor: Timestamp, age: Duration) -> bool {
+    anchor
+        .checked_sub(age)
+        .is_none_or(|cutoff| stamp.at() >= cutoff)
+}
+
+/// Whether `stamp` is after `anchor - age`: too young to age out.
+fn after(stamp: RealStamp, anchor: Timestamp, age: Duration) -> bool {
+    anchor
+        .checked_sub(age)
+        .is_none_or(|cutoff| stamp.at() > cutoff)
 }
 
 /// What the rules chose, or the hold a level 0 file's stamp calls for.
 fn candidates(
     inventory: &Inventory,
-    anchor: i64,
-    newest_stamp: i64,
+    anchor: Timestamp,
+    newest_stamp: Timestamp,
     config: &Maintenance,
     stamps: &Stamps,
 ) -> Needs<Result<Found, Hold>> {
@@ -400,20 +424,25 @@ fn candidates(
     let Some(last) = snaps.len().checked_sub(1) else {
         return Ok(Ok(found));
     };
-    let retention = millis(config.snapshot_retention());
-    let cutoff = anchor.saturating_sub(retention);
+    let retention = config.snapshot_retention();
     let mut first = last;
     for (position, info) in snaps.iter().enumerate() {
-        if stamp_of(stamps, info)?.unix_millis() >= cutoff {
+        // The gate held on any unstamped snapshot; this is its fail-closed twin.
+        let Some(stamp) = stamp_of(stamps, info)? else {
+            return Ok(Err(Hold::Unstamped { key: info.key }));
+        };
+        if not_before(stamp, anchor, retention) {
             first = position;
             break;
         }
     }
     if let Some(retained) = snaps.get(first).filter(|_| first < last) {
-        let aged_out = stamp_of(stamps, retained)?
-            .unix_millis()
-            .saturating_add(retention)
-            .saturating_add(1);
+        let Some(stamp) = stamp_of(stamps, retained)? else {
+            return Ok(Err(Hold::Unstamped { key: retained.key }));
+        };
+        let aged_out = aged_at(stamp, retention)
+            .checked_add(Duration::from_millis(1))
+            .unwrap_or(Timestamp::MAX);
         found.wake_at(aged_out, newest_stamp);
     }
     let floor = first
@@ -463,8 +492,8 @@ fn levels_one_to_eight(
 /// What the level 0 rule measures against.
 struct LevelZero {
     floor: Option<Txid>,
-    anchor: i64,
-    newest_stamp: i64,
+    anchor: Timestamp,
+    newest_stamp: Timestamp,
     age: Duration,
 }
 
@@ -479,7 +508,6 @@ fn level_zero(
     found: &mut Found,
 ) -> Needs<Option<Hold>> {
     let cover = merged_ranges(kept);
-    let cutoff = scan.anchor.saturating_sub(millis(scan.age));
     let files = inventory.level(Level::ZERO);
     let mut chosen = 0_usize;
     for info in files.iter().take(files.len().saturating_sub(1)) {
@@ -492,12 +520,11 @@ fn level_zero(
         if chosen == MAX_DELETE {
             return Ok(None);
         }
-        let created = stamp_of(stamps, info)?.unix_millis();
-        if created <= 0 {
+        let Some(created) = stamp_of(stamps, info)? else {
             return Ok(Some(Hold::Unstamped { key: info.key }));
-        }
-        if created > cutoff {
-            found.wake_at(created.saturating_add(millis(scan.age)), scan.newest_stamp);
+        };
+        if after(created, scan.anchor, scan.age) {
+            found.wake_at(aged_at(created, scan.age), scan.newest_stamp);
             return Ok(None);
         }
         found.keys.push(info.key);

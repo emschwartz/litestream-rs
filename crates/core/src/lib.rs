@@ -55,8 +55,8 @@ pub use host::{
 };
 pub use inventory::{Inventory, InventoryError, is_snapshot_start};
 pub use layout::{
-    FileInfo, FileKey, Level, ListedStamp, ParseKeyError, RangeSide, StampOrigin, StoredStamp,
-    cmp_range, file_name, is_scratch_name, parse_file_name,
+    FileInfo, FileKey, Level, ListedStamp, ParseKeyError, RangeSide, RealStamp, StampOrigin,
+    StoredStamp, cmp_range, file_name, is_scratch_name, parse_file_name,
 };
 pub use maintain::{
     CompactJob, ConfigError, DeleteJob, Due, Hold, Interval, IntervalError, Job, JobError,

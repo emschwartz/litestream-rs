@@ -509,6 +509,38 @@ fn an_unstamped_last_file_holds_only_at_level_zero_or_nine() {
     assert!(matches!(run(l1), Retention::Delete(_)));
 }
 
+/// A stamp at or before the epoch is a writer that stamped nothing. Read as
+/// an instant it would be a file from 1970, older than any retention, and go
+/// first; it is a hold instead, however far ahead the clock is.
+#[test]
+fn a_zero_stamped_file_is_never_aged_as_from_1970() {
+    for unset in [0, -1, i64::MIN] {
+        let mut files = ladder();
+        files.retain(|f| f.key != key(0, 25, 25));
+        files.push(file(0, 25, 25, unset));
+        match retention(&inv(files), Timestamp::MAX, &one_level(), None) {
+            Retention::Held(hold) => assert_eq!(
+                hold,
+                Hold::Unstamped {
+                    key: key(0, 25, 25)
+                },
+                "{unset}"
+            ),
+            other @ (Retention::Delete(_) | Retention::Wait { .. }) => {
+                panic!("{unset}: {other:?}")
+            }
+        }
+    }
+    // The same ladder with a real stamp ages that file as usual.
+    let deleted = keys(&retention(
+        &inv(ladder()),
+        Timestamp::MAX,
+        &one_level(),
+        None,
+    ));
+    assert!(deleted.contains(&key(0, 25, 25)), "{deleted:?}");
+}
+
 #[test]
 fn snapshots_whose_stamps_run_backwards_hold_with_a_text_about_stored_times() {
     let mut files = ladder();
@@ -1447,6 +1479,10 @@ fn chunks_x(x: &mut Xs, from: u64, to: u64, most: u64) -> Vec<(u64, u64)> {
         a = z + 1;
     }
     out
+}
+
+fn millis(d: Duration) -> i64 {
+    i64::try_from(d.as_millis()).unwrap()
 }
 
 /// The instants at which some rule changes: every stamp plus each retention,
