@@ -1,0 +1,120 @@
+//! Watching a handover between two replicator processes on one [`Site`]: what each process
+//! staged and uploaded, read from the meta directory and the replica, never from timing.
+//!
+//! A process's position is the newest transaction any file covers in the meta directory or
+//! the replica ([`tip`]): a process stages a level-0 file in the meta directory before it
+//! uploads it, so a file staged by a process killed before its upload still counts, and the
+//! next process uploads it. A boot that continues writes its first file at `tip + 1`, holding
+//! only the pages its transactions wrote; a boot that snapshots writes every page of the
+//! database at `tip + 1` (Go's `writeLTXFromDB`, Rust's snapshot step), or at transaction 1.
+//! [`wait_boot_file`] finds that file and [`crate::Summary::holds_every_page`] tells the two
+//! apart. A new level-9 file ([`snapshots`]) is the other kind of snapshot a boot can take.
+
+use std::collections::BTreeSet;
+use std::path::Path;
+use std::time::Duration;
+
+use lsr_core::Level;
+use lsr_ltx::Txid;
+
+use crate::chain::Site;
+use crate::error::CompatError;
+use crate::replica::{Summary, l0_starting_at, list, newest_txid};
+use crate::replicator::{Replicator, wait_until};
+
+/// How long a process may take to stage, upload or boot before the wait is a failure: far
+/// above Rust's one-second poll and Go's 100 ms monitor.
+pub const PROCESS_STEP: Duration = Duration::from_secs(30);
+
+/// The newest transaction staged or uploaded on `site`.
+///
+/// # Errors
+/// [`CompatError`] when a listing fails.
+pub fn tip(site: &Site) -> Result<Option<Txid>, CompatError> {
+    newest_txid(&[site.meta.as_path(), site.replica.as_path()])
+}
+
+/// The newest transaction the replica holds.
+///
+/// # Errors
+/// [`CompatError`] when the listing fails.
+pub fn uploaded(site: &Site) -> Result<Option<Txid>, CompatError> {
+    newest_txid(&[site.replica.as_path()])
+}
+
+/// The replica's level-9 files, by path.
+///
+/// # Errors
+/// [`CompatError`] when the listing fails.
+pub fn snapshots(replica: &Path) -> Result<BTreeSet<String>, CompatError> {
+    Ok(list(replica)?
+        .files
+        .into_iter()
+        .filter(|f| f.key.level() == Level::SNAPSHOT)
+        .map(|f| f.rel)
+        .collect())
+}
+
+/// Waits until `process` staged a transaction past `after`; returns the new tip.
+///
+/// # Errors
+/// [`CompatError`] when the process exits or stages nothing within [`PROCESS_STEP`].
+pub fn wait_staged_past(
+    process: &mut Replicator,
+    site: &Site,
+    after: Option<Txid>,
+) -> Result<Txid, CompatError> {
+    let mut now = None;
+    wait_until("a newer staged transaction", PROCESS_STEP, || {
+        process.ensure_running()?;
+        now = tip(site)?;
+        Ok(now > after)
+    })?;
+    now.ok_or_else(|| CompatError::Fixture("nothing was staged".to_owned()))
+}
+
+/// Waits until the replica holds everything `process` staged.
+///
+/// # Errors
+/// [`CompatError`] when the process exits or does not upload within [`PROCESS_STEP`].
+pub fn wait_uploaded(process: &mut Replicator, site: &Site) -> Result<Txid, CompatError> {
+    let mut now = None;
+    wait_until(
+        "the replica to hold every staged file",
+        PROCESS_STEP,
+        || {
+            process.ensure_running()?;
+            let staged = tip(site)?;
+            now = uploaded(site)?;
+            Ok(staged.is_some() && now == staged)
+        },
+    )?;
+    now.ok_or_else(|| CompatError::Fixture("nothing was uploaded".to_owned()))
+}
+
+/// Waits for the level-0 file a booting `process` writes first, the one that starts at
+/// `after + 1`, and reads it whole. The caller commits first, so there is something to write.
+///
+/// # Errors
+/// [`CompatError`] when the process exits, writes no such file within [`PROCESS_STEP`], or
+/// the file does not decode.
+pub fn wait_boot_file(
+    process: &mut Replicator,
+    site: &Site,
+    after: Txid,
+) -> Result<Summary, CompatError> {
+    let next = after
+        .get()
+        .checked_add(1)
+        .and_then(Txid::new)
+        .ok_or_else(|| CompatError::Fixture(format!("no transaction follows {after}")))?;
+    let dirs = [site.meta.as_path(), site.replica.as_path()];
+    let mut found = None;
+    let what = format!("the boot's first file at {next}");
+    wait_until(&what, PROCESS_STEP, || {
+        process.ensure_running()?;
+        found = l0_starting_at(&dirs, next)?;
+        Ok(found.is_some())
+    })?;
+    found.ok_or_else(|| CompatError::Timeout(what.clone()))
+}

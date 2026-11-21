@@ -174,6 +174,28 @@ impl Site {
         Ok(())
     }
 
+    /// Readies the site for replicator processes: `rows` rows of 3000 bytes in one
+    /// transaction (about one 4096-byte page each, so a snapshot holds many more pages than
+    /// a few commits write), the two tables both replicators create on their first boot
+    /// (Go's statements, `db.go:1172-1182`), so no replicator ever commits a transaction of
+    /// its own, then a TRUNCATE checkpoint, so the WAL starts empty.
+    ///
+    /// # Errors
+    /// [`CompatError::Sqlite`] when SQLite refuses.
+    pub fn prepare_for_processes(&self, rows: u32) -> Result<(), CompatError> {
+        self.app.execute_batch(
+            "CREATE TABLE IF NOT EXISTS _litestream_seq (id INTEGER PRIMARY KEY, seq INTEGER);
+             CREATE TABLE IF NOT EXISTS _litestream_lock (id INTEGER);",
+        )?;
+        self.app.execute(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?1)
+             INSERT INTO t(v) SELECT randomblob(3000) FROM n",
+            [rows],
+        )?;
+        self.checkpoint(Outside::Truncate)?;
+        Ok(())
+    }
+
     /// Runs a checkpoint on the application connection; returns SQLite's busy, log and
     /// checkpointed counts.
     ///

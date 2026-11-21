@@ -7,7 +7,7 @@ use std::time::UNIX_EPOCH;
 use crate::error::CompatError;
 use lsr_core::{FileInfo, FileKey, Level, parse_file_name};
 use lsr_core::{ListedStamp, StoredStamp};
-use lsr_ltx::{HEADER_LEN, Header, Timestamp};
+use lsr_ltx::{Event, HEADER_LEN, Header, ReadDecoder, Timestamp, Txid, lock_page};
 
 /// One LTX file of a replica.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,6 +133,87 @@ pub fn newest_l0(replica: &Path) -> Result<Option<Header>, CompatError> {
     };
     let head: Option<&[u8; HEADER_LEN]> = bytes.get(..HEADER_LEN).and_then(|b| b.try_into().ok());
     Ok(head.and_then(|h| Header::decode(h).ok()))
+}
+
+/// One LTX file read whole and verified: its header and how many pages it holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Summary {
+    /// The file's header.
+    pub header: Header,
+    /// The number of pages in the file.
+    pub pages: u32,
+}
+
+impl Summary {
+    /// Whether the file holds every page of the database (its commit size, less the lock
+    /// page when the database reaches it): what a snapshot holds, whatever its transaction
+    /// range. A level-0 file that continues a WAL holds only the pages its transactions wrote.
+    pub fn holds_every_page(&self) -> bool {
+        let commit = self.header.fields().commit;
+        let lock = u32::from(commit >= lock_page(self.header.page_size()));
+        self.pages.saturating_add(lock) >= commit
+    }
+}
+
+/// Reads and verifies the LTX file at `path`; `None` when it vanished first (compaction and
+/// retention delete files while a live replica is read).
+///
+/// # Errors
+/// [`CompatError::Fixture`] when the file does not decode or verify.
+pub fn summarize(path: &Path) -> Result<Option<Summary>, CompatError> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(CompatError::io(path)(e)),
+    };
+    let bad = |e: lsr_ltx::DecodeError| CompatError::Fixture(format!("{}: {e}", path.display()));
+    let mut decoder = ReadDecoder::new(bytes.as_slice());
+    let mut header = None;
+    let mut pages: u32 = 0;
+    while let Some(event) = decoder.next_event().map_err(bad)? {
+        match event {
+            Event::Header(h) => header = Some(h),
+            Event::Page { .. } => pages = pages.saturating_add(1),
+        }
+    }
+    decoder.finish().map_err(bad)?;
+    let header =
+        header.ok_or_else(|| CompatError::Fixture(format!("{}: no header", path.display())))?;
+    Ok(Some(Summary { header, pages }))
+}
+
+/// The level-0 file whose transactions start at `min`, from the first of `dirs` that holds
+/// one (a meta directory and a replica share the layout), read whole; `None` when no
+/// directory has it yet.
+///
+/// # Errors
+/// [`CompatError`] when a listing fails or the file does not decode.
+pub fn l0_starting_at(dirs: &[&Path], min: Txid) -> Result<Option<Summary>, CompatError> {
+    for dir in dirs {
+        let found = list(dir)?
+            .files
+            .into_iter()
+            .find(|f| f.key.level() == Level::ZERO && f.key.range().min() == min);
+        if let Some(file) = found
+            && let Some(summary) = summarize(&dir.join(&file.rel))?
+        {
+            return Ok(Some(summary));
+        }
+    }
+    Ok(None)
+}
+
+/// The newest transaction any file of any level in `dirs` covers.
+///
+/// # Errors
+/// [`CompatError`] when a listing fails.
+pub fn newest_txid(dirs: &[&Path]) -> Result<Option<Txid>, CompatError> {
+    let mut newest = None;
+    for dir in dirs {
+        let here = list(dir)?.files.iter().map(|f| f.key.range().max()).max();
+        newest = newest.max(here);
+    }
+    Ok(newest)
 }
 
 #[cfg(test)]

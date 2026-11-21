@@ -25,6 +25,28 @@ pub fn write_config_snapshotting(
     replica: &Path,
     snapshot_interval: &str,
 ) -> Result<(), CompatError> {
+    write_config_with(path, db, replica, snapshot_interval, "1h")
+}
+
+/// [`write_config`] whose snapshot window is a day, as Rust's default, so neither Go nor Rust
+/// takes a scheduled snapshot while a test runs once one exists (both snapshot at once when
+/// the replica has none). A new snapshot during such a run is then a forced one, never the
+/// schedule's, unless the run crosses midnight UTC, where both windows start.
+pub fn write_config_daily_snapshots(
+    path: &Path,
+    db: &Path,
+    replica: &Path,
+) -> Result<(), CompatError> {
+    write_config_with(path, db, replica, "24h", "24h")
+}
+
+fn write_config_with(
+    path: &Path,
+    db: &Path,
+    replica: &Path,
+    snapshot_interval: &str,
+    snapshot_retention: &str,
+) -> Result<(), CompatError> {
     let text = format!(
         "levels:
   - interval: 1s
@@ -32,7 +54,7 @@ pub fn write_config_snapshotting(
   - interval: 4s
 snapshot:
   interval: {snapshot_interval}
-  retention: 1h
+  retention: {snapshot_retention}
 dbs:
   - path: {db}
     monitor-interval: 100ms
@@ -44,7 +66,8 @@ dbs:
 ",
         db = db.display(),
         replica = replica.display(),
-        snapshot_interval = snapshot_interval
+        snapshot_interval = snapshot_interval,
+        snapshot_retention = snapshot_retention,
     );
     fs::write(path, text).map_err(CompatError::io(path))
 }

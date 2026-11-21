@@ -27,12 +27,18 @@
 //! `ltx.Decoder.Verify` it (`go/verify`). [`read_with_vfs`] opens a replica through upstream's
 //! read-replica VFS extension, from a small C host (`c/vfs-read.c`), for the direction where
 //! the Go VFS reads what Rust wrote.
+//!
+//! The process half: [`Replicator`] runs Go's `litestream replicate` or Rust's `lsr replicate`
+//! on one [`Site`], stopped by SIGINT or killed by SIGKILL, and the watchers re-exported from
+//! the handover module ([`tip`], [`wait_boot_file`], [`snapshots`]) read what each process
+//! staged and uploaded, so a test can tell a boot that continued from one that snapshotted.
 
 mod binaries;
 mod chain;
 mod error;
 mod generate;
 mod golive;
+mod handover;
 mod manifest;
 mod pages;
 mod replica;
@@ -53,16 +59,22 @@ pub use error::CompatError;
 pub use generate::generate;
 pub use golive::{
     GoRestore, build_verify_helper, go_verify, restore_with_go, rfc3339_millis, write_config,
-    write_config_snapshotting,
+    write_config_daily_snapshots, write_config_snapshotting,
+};
+pub use handover::{
+    PROCESS_STEP, snapshots, tip, uploaded, wait_boot_file, wait_staged_past, wait_uploaded,
 };
 pub use manifest::{
     FIXTURE_FORMAT, FileEntry, MANIFEST_FILE, Manifest, Outcome, Target, TargetEntry, all_fixtures,
     fixture_dir, fixtures_root,
 };
 pub use pages::{PageDigest, hash_pages, integrity_check};
-pub use replica::{Listing, ReplicaFile, list, newest_l0, parse_rel, rel_of};
-pub use replicator::{Replicator, wait_until};
+pub use replica::{
+    Listing, ReplicaFile, Summary, l0_starting_at, list, newest_l0, newest_txid, parse_rel, rel_of,
+    summarize,
+};
+pub use replicator::{Kind, Replicator, lsr_binary, wait_until};
 pub use rsrestore::{Staged, chain_files, copy_tree, restore_replica, stage};
 pub use scenario::{Scenario, Step};
 pub use vfs::{VfsRead, VfsView, build_vfs_reader, read_plain, read_with_vfs};
-pub use workload::Workload;
+pub use workload::{SplitMix, Workload};
