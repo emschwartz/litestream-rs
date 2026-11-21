@@ -6,6 +6,8 @@
 #[cfg(test)]
 mod created_at_sources;
 #[cfg(test)]
+mod gates;
+#[cfg(test)]
 mod plan_adversarial;
 #[cfg(test)]
 mod plan_exhaustive;
