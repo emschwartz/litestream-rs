@@ -852,7 +852,7 @@
 "TestReadTXIDFile/MalformedFile" = { reason = "Restore -follow (a continuously updated local read replica and its TXID file) is a read replica, which is not in v1 (docs/PLAN.md section 1: the Go VFS stays in use for reading)." }
 "TestReadTXIDFile/MissingFile" = { reason = "Restore -follow (a continuously updated local read replica and its TXID file) is a read replica, which is not in v1 (docs/PLAN.md section 1: the Go VFS stays in use for reading)." }
 "TestReadTXIDFile/ValidFile" = { reason = "Restore -follow (a continuously updated local read replica and its TXID file) is a read replica, which is not in v1 (docs/PLAN.md section 1: the Go VFS stays in use for reading)." }
-"TestReplica_CalcRestorePlan" = { counterpart = "lsr-core::plan::tests::plan_agrees_with_the_exhaustive_model" }
+"TestReplica_CalcRestorePlan" = { counterpart = ["lsr-core::plan::tests::plan_agrees_with_the_exhaustive_model", "lsr-core::core::plan_exhaustive::exhaustive::every_small_inventory_plans_as_the_contract_says"] }
 "TestReplica_CalcRestorePlan/ErrNoFiles" = { counterpart = "lsr-core::plan::tests::an_empty_replica_is_its_own_outcome" }
 "TestReplica_CalcRestorePlan/ErrTxNotAvailable" = { counterpart = "lsr-core::plan::tests::a_transaction_beyond_the_newest_is_its_own_outcome" }
 "TestReplica_CalcRestorePlan/GapInLevelResolvedByLowerLevel" = { counterpart = ["lsr-core::core::plan_adversarial::review::plan_matches_the_reachable_set", "lsr-core::plan::tests::a_target_with_the_finer_files_present_plans_to_it"] }

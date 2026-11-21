@@ -6,6 +6,8 @@
 #[cfg(test)]
 mod plan_adversarial;
 #[cfg(test)]
+mod plan_exhaustive;
+#[cfg(test)]
 mod plan_lazy;
 #[cfg(test)]
 mod secret_shapes;

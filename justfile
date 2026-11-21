@@ -239,3 +239,8 @@ ledger-fresh:
 # (`just upstream` first). The ledger test in `check` reads this file, never the clone.
 ledger:
     ./scripts/upstream-tests.sh > docs/ledger/upstream-tests.txt
+
+# The large exhaustive planner sweeps (crates/core/tests/core/plan_exhaustive.rs): every inventory of
+# up to five files, and of four files over a wider range. Minutes; not part of check.
+plan-exhaustive:
+    cargo nextest run -p lsr-core --test core --run-ignored only --no-capture --locked -E 'test(/^plan_exhaustive::/)'
