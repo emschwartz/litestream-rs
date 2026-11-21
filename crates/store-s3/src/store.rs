@@ -233,10 +233,7 @@ impl<T: Transport> ObjectStore for S3Store<T> {
     }
 
     fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {
-        match kind {
-            BatchKind::Reads | BatchKind::Lists => READ_CONCURRENCY,
-            BatchKind::ResolvedCreatedAt => CREATION_TIME_CONCURRENCY,
-        }
+        Inner::<T>::width(kind)
     }
 
     async fn read_many(&self, reads: &[ReadAt]) -> Vec<Result<Vec<u8>, StoreError>> {
@@ -327,6 +324,15 @@ impl<T: Transport> Inner<T> {
             .map_err(|err| classify_transport(op, &err))
     }
 
+    /// How many requests of `kind` go out at once: the one answer both the planner
+    /// ([`ObjectStore::batch_width`]) and the batches themselves use.
+    pub(crate) const fn width(kind: BatchKind) -> NonZeroUsize {
+        match kind {
+            BatchKind::Reads | BatchKind::Lists => READ_CONCURRENCY,
+            BatchKind::ResolvedCreatedAt => CREATION_TIME_CONCURRENCY,
+        }
+    }
+
     /// Sends a batch with at most `limit` requests in flight; one result per
     /// request, in order, whatever each status.
     pub(crate) fn send_many(
@@ -392,7 +398,7 @@ impl<T: Transport> Inner<T> {
         let op = StoreOp::Read;
         self.batch(
             op,
-            READ_CONCURRENCY,
+            Self::width(BatchKind::Reads),
             reads.iter().copied(),
             |at| {
                 let request =
@@ -483,7 +489,7 @@ impl<T: Transport> Inner<T> {
         let op = StoreOp::Read;
         let results = self.batch(
             op,
-            CREATION_TIME_CONCURRENCY,
+            Self::width(BatchKind::ResolvedCreatedAt),
             files.iter(),
             |file| Ok((self.request(op, |b, now| b.head(now, &file.key))?, file)),
             |file, response| Self::judge_head(file, response),
