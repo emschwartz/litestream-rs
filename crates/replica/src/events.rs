@@ -18,12 +18,6 @@ use crate::health::VerifyOutcome;
 pub enum Event {
     /// What one tick of the engine did (never `Idle`).
     Engine(lsr_core::Event),
-    /// Someone else checkpointed the database: the application promised not to. `total` counts every
-    /// one seen since the start.
-    ForeignCheckpoint {
-        /// Every one seen so far.
-        total: u64,
-    },
     /// The application checkpointed, or its automatic checkpoint is attempting checkpoints that
     /// cannot run (`Health::app_notice` says what it costs). `total` counts every
     /// observation since the start.
@@ -177,14 +171,16 @@ mod tests {
     fn a_full_channel_drops_the_oldest_and_counts_it() {
         let (mut sink, rx) = ChannelSink::new(NonZeroUsize::new(2).unwrap());
         for total in 1..=3 {
-            sink.event(&Event::ForeignCheckpoint { total });
+            sink.event(&Event::Panicked {
+                rebuilt: total == 2,
+            });
         }
         assert_eq!(rx.dropped(), 1);
         assert_eq!(
             rx.drain(),
             [
-                Event::ForeignCheckpoint { total: 2 },
-                Event::ForeignCheckpoint { total: 3 }
+                Event::Panicked { rebuilt: true },
+                Event::Panicked { rebuilt: false }
             ]
         );
         assert_eq!(rx.try_recv(), None);

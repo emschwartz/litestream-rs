@@ -586,7 +586,7 @@ mod tests {
     }
 
     #[test]
-    fn a_app_client_on_its_own_runtime() {
+    fn an_app_client_on_its_own_runtime() {
         let client = app_client();
         let transport =
             ReqwestTransport::with_client(client, Duration::from_secs(5)).expect("transport");
@@ -597,7 +597,7 @@ mod tests {
     }
 
     #[test]
-    fn a_app_client_on_the_app_runtime() {
+    fn an_app_client_on_the_app_runtime() {
         let runtime = Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()

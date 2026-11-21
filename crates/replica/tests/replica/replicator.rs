@@ -562,7 +562,7 @@ fn a_panic_under_strict_responses_stops_with_bug() {
 
 /// A checkpoint the application ran behind the replicator's back is counted and reported.
 #[test]
-fn a_app_checkpoint_is_counted_and_reported() {
+fn an_app_checkpoint_is_counted_and_reported() {
     let site = Site::new();
     let (runtime, clock) = fake();
     let replicator = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
@@ -584,10 +584,6 @@ fn a_app_checkpoint_is_counted_and_reported() {
     assert!(!health.is_degraded(), "a notice, not a degraded state");
     let seen = events.drain();
     assert!(
-        seen.contains(&Event::ForeignCheckpoint { total: 1 }),
-        "{seen:?}"
-    );
-    assert!(
         seen.iter().any(|event| matches!(
             event,
             Event::AppCheckpoint {
@@ -608,7 +604,7 @@ fn a_app_checkpoint_is_counted_and_reported() {
 /// WAL grows past SQLite's automatic checkpoint threshold until the replicator's own
 /// checkpoints run: no application checkpoint is seen, none is inferred, and no notice is raised.
 #[test]
-fn a_app_at_wal_autocheckpoint_0_raises_no_notice() {
+fn an_app_at_wal_autocheckpoint_0_raises_no_notice() {
     let site = Site::new();
     let (runtime, clock) = fake();
     let replicator = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
