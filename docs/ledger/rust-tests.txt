@@ -358,11 +358,18 @@ lsr-core actor::tests::degraded::a_bug_rebuilds_the_actor_and_boots_again_after_
 lsr-core actor::tests::degraded::a_bug_stops_under_strict
 lsr-core actor::tests::degraded::a_corrupt_committed_frame_is_never_staged_nor_snapshotted_past
 lsr-core actor::tests::degraded::a_degraded_lane_pins_the_replicas_newest_transaction_until_it_recovers
+lsr-core actor::tests::degraded::a_degraded_maintenance_job_counts_its_retries
 lsr-core actor::tests::degraded::a_drain_whose_boot_stays_degraded_ends_at_its_deadline
 lsr-core actor::tests::degraded::a_page_size_change_keeps_the_boot_degraded_and_stages_nothing
+lsr-core actor::tests::degraded::a_rebuild_keeps_a_request_for_live_pages
+lsr-core actor::tests::degraded::a_rebuild_keeps_a_snapshot_request_made_behind_another_cause
+lsr-core actor::tests::degraded::a_rebuild_keeps_an_operators_snapshot_request
+lsr-core actor::tests::degraded::a_rebuild_reads_again_the_live_pages_nobody_took
+lsr-core actor::tests::degraded::a_rebuilt_actor_keeps_what_was_asked_and_reported_and_boots_again
 lsr-core actor::tests::degraded::a_refused_retention_delete_leaves_sync_and_upload_running
 lsr-core actor::tests::degraded::a_regressed_replica_is_listed_again_and_uploads_go_on
 lsr-core actor::tests::degraded::a_second_writer_stops_the_engine_by_default
+lsr-core actor::tests::degraded::booted_follows_the_engines_own_rebuild
 lsr-core actor::tests::degraded::continuing_past_a_second_writer_boots_again
 lsr-core actor::tests::degraded::revoked_credentials_degrade_the_upload_lane_until_an_upload_succeeds
 lsr-core actor::tests::degraded::the_degraded_backoff_doubles_to_the_cap_and_no_further
@@ -534,6 +541,7 @@ lsr-core fault::tests::no_staging_error_is_blamed_on_the_replica
 lsr-core fault::tests::nothing_to_snapshot_retries
 lsr-core fault::tests::page_size_changed_is_persistent_naming_both_sizes
 lsr-core fault::tests::read_tx_lost_retries
+lsr-core fault::tests::readers_held_retries
 lsr-core fault::tests::remote_ahead_of_local_is_a_foreign_writer
 lsr-core fault::tests::remote_corrupt_is_persistent
 lsr-core fault::tests::remote_object_missing_retries
@@ -804,7 +812,8 @@ lsr-core position::tests::a_file_covers_the_synced_end_exactly
 lsr-core position::tests::a_file_one_byte_short_does_not_cover
 lsr-core position::tests::a_longer_file_than_synced_is_not_the_synced_offset
 lsr-core position::tests::a_position_takes_its_synced_end_and_page_size_from_its_cursor
-lsr-core position::tests::a_through_proof_gives_back_its_position
+lsr-core position::tests::a_reached_end_is_proven_only_at_the_epoch_it_was_reached_in
+lsr-core position::tests::a_reached_end_whose_epoch_moved_is_no_proof
 lsr-core position::tests::epochs_count_up
 lsr-core position::tests::replacing_continuity_changes_nothing_else
 lsr-core recover::remote::tests::a_replica_tip_over_one_read_is_checked_whole
@@ -862,6 +871,7 @@ lsr-core recover::tests::rule_9a_a_commit_the_position_never_covered_under_a_res
 lsr-core recover::tests::rule_9a_a_pinned_position_with_a_commit_after_it_under_a_reset_index_is_the_tripwire
 lsr-core recover::tests::rule_9a_a_reset_index_with_nothing_after_the_position_continues_as_it_was
 lsr-core recover::tests::rule_9a_a_rolled_back_spill_after_the_position_is_no_commit
+lsr-core recover::tests::the_header_read_is_one_header_long
 lsr-core recover::tests::the_loader_calls_a_page_with_other_bytes_a_mismatch_and_a_missing_one_not_in_tip
 lsr-core recover::tests::the_loader_calls_garbage_unreadable_and_an_empty_directory_none
 lsr-core recover::tests::the_loader_reads_the_newest_file_and_matches_the_last_page
@@ -993,7 +1003,7 @@ lsr-core store::tests::scratch_names_are_not_counted_as_foreign
 lsr-core sync::tests::a_boot_seed_from_the_staged_files_is_the_table_the_steps_built
 lsr-core sync::tests::a_cap_of_one_byte_writes_a_file_per_transaction
 lsr-core sync::tests::a_cap_stops_on_the_first_commit_that_reaches_it
-lsr-core sync::tests::a_clock_stepping_backwards_gets_an_equal_timestamp_and_one_clamped
+lsr-core sync::tests::a_clock_stepping_backwards_gets_an_equal_timestamp
 lsr-core sync::tests::a_commit_after_the_position_under_a_reset_index_is_never_called_done
 lsr-core sync::tests::a_corrupt_committed_frame_halts
 lsr-core sync::tests::a_corrupt_frame_under_an_unchanged_header_still_halts
@@ -1070,6 +1080,7 @@ lsr-core upload::tests::review_a_failed_retry_after_a_checksum_mismatch_does_not
 lsr-core upload::tests::review_a_restart_after_a_checksum_mismatch_does_not_confirm_the_rejected_bytes
 lsr-core upload::tests::steady_state_makes_no_list_call_in_a_thousand_ticks
 lsr-core upload::tests::steady_state_makes_no_read_call
+lsr-core upload::tests::the_upload_reads_in_quarter_mebibyte_chunks
 lsr-core verify::tests::a_broken_checksum_link_across_levels_is_unrestorable
 lsr-core verify::tests::a_chain_ending_in_a_commit_zero_file_is_unrestorable
 lsr-core verify::tests::a_clean_replica_has_no_findings_at_either_depth
@@ -1491,6 +1502,7 @@ lsr-sim::faults fsync_fails_once
 lsr-sim::faults host_autocheckpoints
 lsr-sim::faults meta_dir_deleted_mid_run
 lsr-sim::faults reacquire_fails_after_checkpoint
+lsr-sim::faults readers_hold_the_wal
 lsr-sim::faults remote_bitrot_on_list_read
 lsr-sim::faults remote_file_deleted_externally
 lsr-sim::faults restart_between_steps
