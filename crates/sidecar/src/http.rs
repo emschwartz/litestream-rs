@@ -38,7 +38,7 @@ pub const MAX_CONNECTIONS: usize = 8;
 /// The longest request head read.
 pub const MAX_REQUEST: usize = 8 * 1024;
 /// The wait allowed for each read or write on a connection.
-pub const DEADLINE: Duration = Duration::from_secs(5);
+pub(crate) const DEADLINE: Duration = Duration::from_secs(5);
 /// What is read and dropped after a refused request, so the close is clean.
 const DRAIN: usize = 64 * 1024;
 
@@ -64,7 +64,7 @@ pub enum AddrError {
 
 /// Where to listen.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Target {
+pub(crate) enum Target {
     /// Every interface (an empty host).
     Every {
         /// The port.
@@ -83,7 +83,7 @@ pub enum Target {
 ///
 /// # Errors
 /// [`AddrError`].
-pub fn target(addr: &str) -> Result<Target, AddrError> {
+pub(crate) fn target(addr: &str) -> Result<Target, AddrError> {
     // Go discards SplitHostPort's error and sees an empty port: every malformed address
     // gets Go's one message.
     let no_port = || AddrError::NoPort {
@@ -129,7 +129,11 @@ fn split_host_port(addr: &str) -> Option<(&str, &str)> {
 ///
 /// # Errors
 /// The bind or the thread failed.
-pub fn serve(target: &Target, board: Board, clock: Arc<dyn Clock>) -> io::Result<SocketAddr> {
+pub(crate) fn serve(
+    target: &Target,
+    board: Board,
+    clock: Arc<dyn Clock>,
+) -> io::Result<SocketAddr> {
     let listener = match target {
         Target::Every { port } => {
             TcpListener::bind(("::", *port)).or_else(|_v6| TcpListener::bind(("0.0.0.0", *port)))?

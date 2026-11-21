@@ -40,7 +40,7 @@ use rustix::process::{Pid, Signal, WaitId, WaitIdOptions};
 
 /// What wakes the daemon's main thread.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Wake {
+pub(crate) enum Wake {
     /// The first SIGINT, SIGTERM or SIGHUP.
     Signal(i32),
     /// The `-exec` child exited (or could not be started).
@@ -49,7 +49,7 @@ pub enum Wake {
 
 /// Where go-shellwords stopped reading: an unquoted shell operator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Stop {
+pub(crate) struct Stop {
     /// The operator.
     pub operator: char,
     /// Go's `Parser.Position`: the operator's index in characters, one less after a word that
@@ -59,7 +59,7 @@ pub struct Stop {
 
 /// What go-shellwords' `Parse` returns for a line it accepts.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Words {
+pub(crate) struct Words {
     /// The words.
     pub args: Vec<String>,
     /// Where it stopped, if it did before the end.
@@ -173,7 +173,7 @@ enum Flow {
 ///
 /// # Errors
 /// [`Unbalanced`], where go-shellwords returns its error.
-pub fn split(line: &str) -> Result<Words, Unbalanced> {
+pub(crate) fn split(line: &str) -> Result<Words, Unbalanced> {
     let mut args = Vec::new();
     let mut s = State::default();
     let mut stop = None;
@@ -359,7 +359,7 @@ fn lock(shared: &Mutex<Shared>) -> MutexGuard<'_, Shared> {
 
 /// A running (or ended) child.
 #[derive(Clone, Debug)]
-pub struct Child {
+pub(crate) struct Child {
     pid: Pid,
     shared: Arc<Mutex<Shared>>,
 }
@@ -369,7 +369,7 @@ impl Child {
     ///
     /// # Errors
     /// The program could not be started, or the waiting thread could not be.
-    pub fn spawn(command: &ExecCommand, wake: SyncSender<Wake>) -> io::Result<Self> {
+    pub(crate) fn spawn(command: &ExecCommand, wake: SyncSender<Wake>) -> io::Result<Self> {
         let mut child = Command::new(command.program())
             .args(command.args())
             .stdin(Stdio::null())
@@ -403,7 +403,7 @@ impl Child {
 
     /// Begins a shutdown begun by `signal`: sends it to the child if it has not exited, and
     /// remembers that a death by a signal from now on is clean.
-    pub fn forward(&self, signal: i32) {
+    pub(crate) fn forward(&self, signal: i32) {
         let mut state = lock(&self.shared);
         state.shutdown = true;
         let Some(sig) = Signal::from_named_raw(signal) else {
@@ -415,7 +415,7 @@ impl Child {
     }
 
     /// Kills the child (Go's `Process.Kill` when its shutdown is cut short).
-    pub fn kill(&self) {
+    pub(crate) fn kill(&self) {
         let mut state = lock(&self.shared);
         if !state.exited && rustix::process::kill_process(self.pid, Signal::KILL).is_ok() {
             state.killed = true;
@@ -424,7 +424,7 @@ impl Child {
 
     /// How it ended, once it has.
     #[must_use]
-    pub fn end(&self) -> Option<ChildEnd> {
+    pub(crate) fn end(&self) -> Option<ChildEnd> {
         let state = lock(&self.shared);
         let during = if state.killed {
             During::Kill

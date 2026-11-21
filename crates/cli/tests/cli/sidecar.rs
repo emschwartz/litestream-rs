@@ -634,14 +634,14 @@ fn an_oversized_request_and_too_many_connections_are_refused() {
     let addr = bound(&mut daemon);
     let long = format!(
         "GET /metrics HTTP/1.1\r\nX-Padding: {}\r\n",
-        "a".repeat(lsr_sidecar::http::MAX_REQUEST)
+        "a".repeat(lsr_sidecar::MAX_REQUEST)
     );
     assert_eq!(get(addr, &long).0, 431);
     assert_eq!(fetch(addr, "/healthz").0, 200);
 
     // Two more than the bound: the two connections above may still hold their places
     // for a moment after their answers arrived.
-    let held: Vec<TcpStream> = (0..lsr_sidecar::http::MAX_CONNECTIONS + 2)
+    let held: Vec<TcpStream> = (0..lsr_sidecar::MAX_CONNECTIONS + 2)
         .map(|_| TcpStream::connect(addr).unwrap())
         .collect();
     let (status, body) = fetch(addr, "/healthz");

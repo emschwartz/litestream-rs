@@ -482,7 +482,7 @@ fn verify_series(out: &mut Out, dbs: &[(String, &Health)]) {
 
 /// The `/metrics` body.
 #[must_use]
-pub fn render(views: &[DbView], now: Timestamp) -> String {
+pub(crate) fn render(views: &[DbView], now: Timestamp) -> String {
     let mut out = Out(String::new());
     let dbs = running(views);
     go_db_series(&mut out, &dbs);

@@ -24,7 +24,7 @@ use crate::logging::json_string;
 
 /// Where one database stands, as the board holds it.
 #[derive(Clone, Debug)]
-pub enum Entry {
+pub(crate) enum Entry {
     /// Its file does not exist yet.
     Waiting,
     /// Its store, restore or start failed.
@@ -42,7 +42,7 @@ struct Row {
 
 /// Every database the daemon was given, and where each stands.
 #[derive(Clone, Debug, Default)]
-pub struct Board(Arc<Mutex<Vec<Row>>>);
+pub(crate) struct Board(Arc<Mutex<Vec<Row>>>);
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     // Each critical section leaves plain data behind.
@@ -51,7 +51,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 impl Board {
     /// Adds a database at the end.
-    pub fn push(&self, path: PathBuf, replica_type: &'static str, entry: Entry) {
+    pub(crate) fn push(&self, path: PathBuf, replica_type: &'static str, entry: Entry) {
         lock(&self.0).push(Row {
             path,
             replica_type,
@@ -60,7 +60,7 @@ impl Board {
     }
 
     /// Changes the `index`th database's entry.
-    pub fn set(&self, index: usize, entry: Entry) {
+    pub(crate) fn set(&self, index: usize, entry: Entry) {
         if let Some(row) = lock(&self.0).get_mut(index) {
             row.entry = entry;
         }
@@ -68,7 +68,7 @@ impl Board {
 
     /// A copy of every database's state, the replicators' health read after the lock.
     #[must_use]
-    pub fn views(&self) -> Vec<DbView> {
+    pub(crate) fn views(&self) -> Vec<DbView> {
         let rows: Vec<_> = lock(&self.0)
             .iter()
             .map(|row| (row.path.clone(), row.replica_type, row.entry.clone()))
@@ -89,7 +89,7 @@ impl Board {
 
 /// One database, read for a request.
 #[derive(Clone, Debug)]
-pub struct DbView {
+pub(crate) struct DbView {
     /// The database path.
     pub path: PathBuf,
     /// Go's `replica_type` label: `file` or `s3`.
@@ -100,7 +100,7 @@ pub struct DbView {
 
 /// Where one database stands, read for a request.
 #[derive(Clone, Debug)]
-pub enum DbState {
+pub(crate) enum DbState {
     /// Its file does not exist yet.
     Waiting,
     /// It failed to start.
@@ -112,7 +112,7 @@ pub enum DbState {
 impl DbView {
     /// The state's name: the replicator's phase, or `waiting` or `failed`.
     #[must_use]
-    pub fn state_name(&self) -> &'static str {
+    pub(crate) fn state_name(&self) -> &'static str {
         match &self.state {
             DbState::Waiting => "waiting",
             DbState::Failed => "failed",
@@ -122,7 +122,7 @@ impl DbView {
 
     /// Whether this database makes `/healthz` 503.
     #[must_use]
-    pub fn down(&self) -> bool {
+    pub(crate) fn down(&self) -> bool {
         match &self.state {
             DbState::Waiting => false,
             DbState::Failed => true,
@@ -136,7 +136,7 @@ impl DbView {
 
 /// A phase's name.
 #[must_use]
-pub const fn phase_name(phase: Phase) -> &'static str {
+pub(crate) const fn phase_name(phase: Phase) -> &'static str {
     match phase {
         Phase::Booting => "booting",
         Phase::Running => "running",
@@ -149,7 +149,7 @@ pub const fn phase_name(phase: Phase) -> &'static str {
 
 /// A task's name.
 #[must_use]
-pub const fn task_name(task: Task) -> &'static str {
+pub(crate) const fn task_name(task: Task) -> &'static str {
     match task {
         Task::Sync => "sync",
         Task::Checkpoint => "checkpoint",
@@ -161,7 +161,7 @@ pub const fn task_name(task: Task) -> &'static str {
 
 /// A degraded cause's name (the page number and sizes are in `/healthz` only).
 #[must_use]
-pub const fn cause_name(cause: DegradedCause) -> &'static str {
+pub(crate) const fn cause_name(cause: DegradedCause) -> &'static str {
     match cause {
         DegradedCause::Credentials => "credentials",
         DegradedCause::StoreRefused => "store_refused",
@@ -179,7 +179,7 @@ pub const fn cause_name(cause: DegradedCause) -> &'static str {
 
 /// A stop cause's name: the degraded cause it stopped on, or `shutdown` for a drain's end.
 #[must_use]
-pub const fn stop_name(cause: StopCause) -> &'static str {
+pub(crate) const fn stop_name(cause: StopCause) -> &'static str {
     match DegradedCause::of(cause) {
         Some(cause) => cause_name(cause),
         None => "shutdown",
@@ -188,7 +188,7 @@ pub const fn stop_name(cause: StopCause) -> &'static str {
 
 /// A snapshot cause's name.
 #[must_use]
-pub const fn snapshot_name(cause: SnapshotCause) -> &'static str {
+pub(crate) const fn snapshot_name(cause: SnapshotCause) -> &'static str {
     match cause {
         SnapshotCause::FirstSync => "first_sync",
         SnapshotCause::BehindRemote { .. } => "behind_remote",
@@ -205,7 +205,7 @@ pub const fn snapshot_name(cause: SnapshotCause) -> &'static str {
 
 /// An application notice's kind.
 #[must_use]
-pub const fn notice_name(notice: AppNotice) -> &'static str {
+pub(crate) const fn notice_name(notice: AppNotice) -> &'static str {
     match notice {
         AppNotice::Checkpointing { .. } => "checkpointing",
         AppNotice::Stalled { .. } => "stalled",
@@ -304,7 +304,7 @@ fn running_json(o: &mut Object, health: &Health) {
 
 /// The `/healthz` body, and whether every database is up.
 #[must_use]
-pub fn healthz(views: &[DbView], now: Timestamp) -> (bool, String) {
+pub(crate) fn healthz(views: &[DbView], now: Timestamp) -> (bool, String) {
     let down: Vec<String> = views
         .iter()
         .filter(|v| v.down())
