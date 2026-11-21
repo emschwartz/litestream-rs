@@ -227,6 +227,13 @@ pub enum Done {
         /// Whether to print JSON.
         json: bool,
     },
+    /// A replicator ran until a signal and stopped.
+    Replicated {
+        /// The database.
+        database: PathBuf,
+        /// How the stop ended.
+        stopped: lsr_replica::Stopped,
+    },
     /// The help text.
     Help,
     /// The version.
@@ -290,6 +297,12 @@ pub enum CliError {
     /// Writing the result failed.
     #[error("writing the result: {0}")]
     Output(#[source] io::Error),
+    /// The replicator did not start.
+    #[error("starting the replicator: {0}")]
+    Start(#[from] lsr_replica::StartError),
+    /// The signal handlers could not be installed.
+    #[error("watching for signals: {0}")]
+    Signals(#[source] io::Error),
 }
 
 impl From<RestoreError> for CliError {
@@ -338,6 +351,8 @@ pub fn exit_for_done(done: &Done) -> Exit {
             Some(Severity::Degraded) => Exit::Degraded,
             Some(Severity::Unrestorable) => Exit::Refused,
         },
+        Done::Replicated { stopped, .. } if crate::replicate::drained(stopped) => Exit::Success,
+        Done::Replicated { .. } => Exit::Environment,
         Done::Restore(_) | Done::Files { .. } | Done::Help | Done::Version => Exit::Success,
     }
 }
@@ -367,7 +382,9 @@ pub fn exit_for_error(error: &CliError) -> Exit {
         | CliError::Sidecar { .. }
         | CliError::Create(_)
         | CliError::Clear(_)
-        | CliError::Output(_) => Exit::Environment,
+        | CliError::Output(_)
+        | CliError::Start(_)
+        | CliError::Signals(_) => Exit::Environment,
     }
 }
 
@@ -380,6 +397,7 @@ pub async fn run(command: Command) -> Result<Done, CliError> {
         Command::Restore(args) => restore_command(args).await,
         Command::Verify(args) => verify_command(args).await,
         Command::Files(args) => files_command(args).await,
+        Command::Replicate(args) => crate::replicate::replicate(args),
         Command::Help => Ok(Done::Help),
         Command::Version => Ok(Done::Version),
     }

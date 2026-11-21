@@ -222,10 +222,66 @@ pub enum Command {
     Verify(VerifyArgs),
     /// List a replica's files.
     Files(FilesArgs),
+    /// Replicate a live database until a signal stops it.
+    Replicate(ReplicateArgs),
     /// Print the help text.
     Help,
     /// Print the version.
     Version,
+}
+
+/// `lsr replicate <db> <replica>`.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ReplicateArgs {
+    /// The database, which must exist.
+    pub database: PathBuf,
+    /// Where it goes: a directory (created if missing) or an `s3://` URL, whose query takes
+    /// the S3 settings (`endpoint`, `region`, `forcePathStyle`).
+    pub replica: Replica,
+}
+
+/// The usage line of `lsr replicate`, for the help text.
+pub const REPLICATE_USAGE: &str = "lsr replicate <db> <replica>";
+
+/// One line for the help text.
+pub const REPLICATE_SUMMARY: &str = "replicate a live database to a directory or an s3:// URL until SIGINT, SIGTERM or SIGHUP, then sync what is committed and stop";
+
+/// `<db> <replica>`, nothing else.
+fn parse_replicate(rest: &[String]) -> Result<Command, UsageError> {
+    if rest.iter().any(|arg| is_help(arg)) {
+        return Ok(Command::Help);
+    }
+    if let Some(flag) = rest.iter().find(|arg| arg.starts_with('-') && *arg != "-") {
+        return Err(UsageError::UnknownFlag {
+            command: "replicate",
+            flag: flag.clone(),
+        });
+    }
+    let [database, replica] = rest else {
+        return Err(UsageError::ReplicateArguments { found: rest.len() });
+    };
+    Ok(Command::Replicate(ReplicateArgs {
+        database: PathBuf::from(database),
+        replica: replica_of(replica)?,
+    }))
+}
+
+/// A replica named on its own: a directory, or an `s3://` URL with its settings in the query.
+fn replica_of(value: &str) -> Result<Replica, UsageError> {
+    match value.split_once("://") {
+        None => Ok(Replica::Dir(PathBuf::from(value))),
+        Some((scheme, _)) if scheme.eq_ignore_ascii_case("s3") => {
+            let config =
+                S3Config::from_url(value).map_err(|reason| UsageError::BadReplicaUrl { reason })?;
+            if names_a_provider_endpoint(config.bucket().as_str()) {
+                return Err(UsageError::EndpointInReplicaHost);
+            }
+            Ok(Replica::S3(Box::new(config)))
+        }
+        Some((scheme, _)) => Err(UsageError::UnsupportedReplica {
+            scheme: scheme.to_owned(),
+        }),
+    }
 }
 
 /// `lsr restore`.
@@ -383,6 +439,15 @@ pub enum UsageError {
         "--replica host names a provider endpoint, not a bucket; write s3://<bucket>/<prefix> and pass the endpoint with --endpoint"
     )]
     EndpointInReplicaHost,
+    /// `lsr replicate` takes exactly a database and a replica.
+    #[error(
+        "replicate takes a database and a replica, not {found} arguments: {}",
+        REPLICATE_USAGE
+    )]
+    ReplicateArguments {
+        /// How many were given.
+        found: usize,
+    },
     /// An argument that is not UTF-8, which a flag value cannot be.
     #[error("argument {position} is not valid UTF-8")]
     NotUtf8 {
@@ -599,6 +664,7 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
         "restore" => CommandName::Restore,
         "verify" => CommandName::Verify,
         "files" => CommandName::Files,
+        "replicate" => return parse_replicate(args.get(1..).unwrap_or_default()),
         other => {
             return Err(UsageError::UnknownCommand {
                 name: other.to_owned(),

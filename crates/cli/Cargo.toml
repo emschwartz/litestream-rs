@@ -15,12 +15,16 @@ path = "src/main.rs"
 lsr-core.workspace = true
 lsr-local.workspace = true
 lsr-ltx.workspace = true
+lsr-replica.workspace = true
 lsr-store-fs.workspace = true
 lsr-store-s3.workspace = true
+signal-hook.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 lsr-compat.workspace = true
+# The replicate process test sets up its own host connection as a host must.
+lsr-sqlite.workspace = true
 lsr-core = { workspace = true, features = ["testing"] }
 # FakeS3 drives the S3 path in-process; it sits behind the feature.
 lsr-store-s3 = { workspace = true, features = ["testing"] }
