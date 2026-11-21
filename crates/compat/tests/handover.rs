@@ -444,8 +444,8 @@ mod live_go {
     use lsr_compat::{
         Chain, Era, GoBuild, GoRestore, Replicator, Shape, Site, Target, Written, builds_in,
         builds_under_test, clock_ending_now, hash_pages, integrity_check, list, newest_l0,
-        real_now_ms, restore_replica, restore_with_go, wait_until, write_config,
-        write_config_snapshotting,
+        real_now_ms, restore_replica, restore_with_go, tip, wait_staged_past, wait_until,
+        write_config, write_config_snapshotting,
     };
     use lsr_core::{Event, Level, RestoreTarget};
     use lsr_ltx::{Header, Txid};
@@ -671,17 +671,20 @@ mod live_go {
         }
     }
 
+    /// How many commits land between two waits for Go to stage, so a staged file can hold
+    /// several commits, as between two of Go's polls under a real workload.
+    const COMMITS_PER_STAGE: usize = 5;
+
     /// Go writes 40 commits and stops. Returns the site, the txid Go stopped at and the pages
-    /// the database held then.
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "paces the app's commits for a real Go process polling the WAL; a known exception to the no-sleeps rule (AGENTS.md), to be replaced by a condition"
-    )]
+    /// the database held then. After every [`COMMITS_PER_STAGE`] commits the app waits until
+    /// Go has staged a file past what it had staged before them, so Go's meta directory
+    /// holds a run of level-0 files rather than one file for the whole burst.
     fn go_writes_and_stops(build: &GoBuild, config: &Path) -> (Site, u64, Vec<String>) {
         let bin = build.binary().expect("the build under test is present");
         let mut site = Site::create(4096, 33).expect("site");
         write_config(config, &site.db, &site.replica).expect("config");
         let mut go = Replicator::start(&bin, config, &site.dir().join("go.log")).expect("start");
+        let mut staged = tip(&site).expect("tip");
         for i in 0..40 {
             site.commit(if i % 7 == 6 {
                 Shape::Tiny
@@ -689,8 +692,10 @@ mod live_go {
                 Shape::Insert { bytes: 900 }
             })
             .expect("commit");
-            std::thread::sleep(Duration::from_millis(30));
             go.ensure_running().expect("Go runs");
+            if (i + 1) % COMMITS_PER_STAGE == 0 {
+                staged = Some(wait_staged_past(&mut go, &site, staged).expect("Go stages"));
+            }
         }
         wait_quiet(&mut go, &site.meta, 0).expect("Go catches up");
         go.stop().expect("stop");
