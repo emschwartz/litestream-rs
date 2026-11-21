@@ -11,14 +11,14 @@ of a long sequence, not fragments.
 
 ```bash
 rust-analyzer lsif . > /tmp/lsif.json
-python3 -I scripts/single-callers.py /tmp/lsif.json . > docs/function-length/single-callers.tsv
+python3 -I scripts/single-callers.py /tmp/lsif.json . > /tmp/single-callers.tsv
 ```
 
 `scripts/single-callers.py` counts callers from rust-analyzer's reference index and lengths the way
 clippy counts them (body lines, no blanks or comments). Its header lists what it leaves out: test
 code, `use` re-exports, and trait methods and trait-impl methods, whose callers go through the
-trait. The full list is [`function-length/single-callers.tsv`](function-length/single-callers.tsv),
-one row per function, with the caller and both lengths. As a check on the length count, the
+trait. The output is one row per function, with the caller and both lengths; it is not kept in
+the repo (it was a snapshot that nothing read). As a check on the length count, the
 longest function the script finds is 67 lines; clippy rejects anything above 70.
 
 ## Numbers
