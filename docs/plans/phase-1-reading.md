@@ -279,7 +279,7 @@ Each block is one branch, green on `just check` alone. MinIO tests skip with a m
 
 **Files:** `crates/store-s3/{Cargo.toml,src/lib.rs,src/config.rs,src/credentials.rs,src/request.rs,src/response.rs,src/classify.rs,src/transport.rs}`; workspace `Cargo.toml`; `deny.toml` (ruling F4).
 
-**Consumes:** `FileKey`, `Level`, `TxidRange`, `PageLimit`, `ReadLen`, `StoreError`, `StoreOp`, `CorruptCause`, `layout::{file_name, is_scratch_name, FILE_NAME_LEN}`, `Clock`; rusty-s3 0.11 (BSD-2-Clause; 0.12 was inside the 3-day publish-age cooldown and has the same source; features `rustcrypto` and `full`; `full` gates `DeleteObjects` and adds serde_json, which is already in the lock file), md-5 (MIT OR Apache-2.0; rusty-s3 already depends on it).
+**Consumes:** `FileKey`, `Level`, `TxidRange`, `PageLimit`, `ReadLen`, `StoreError`, `StoreOp`, `CorruptCause`, `layout::{file_name, is_scratch_name, FILE_NAME_LEN}`, `Clock`; rusty-s3 0.12 (BSD-2-Clause; its source is the same as 0.11, which it replaced only to move to jiff 1.0; features `rustcrypto` and `full`; `full` gates `DeleteObjects` and adds serde_json, which is already in the lock file), md-5 (MIT OR Apache-2.0; rusty-s3 already depends on it).
 
 **Produces:**
 - `pub struct S3Credentials`: `new(access_key_id: String, secret: SecretString) -> Self`, `with_session_token(self, SecretString) -> Self`. Fields private. Hand-written `Debug` prints `S3Credentials { access_key_id: "AK..", .. }` (first two chars only). No `Display`, `Clone` only, no `Serialize`.
