@@ -11,7 +11,10 @@
 //!   off value, Go tuning knobs v1 warns about, and the `litestream-rs` section Go does not
 //!   define, so it shows both programs start on such a file.
 //! - `go_and_rust_sidecars_alternate_on_one_config_file`: the alternation run of
-//!   `alternation.rs` with Rust as the daemon on Go's config file.
+//!   `alternation.rs` with Rust as the daemon on Go's config file, so both sides checkpoint
+//!   on the file's schedule (every 5 s, PASSIVE at 1,000 pages, TRUNCATE at 1,500 under the
+//!   `host-readers: none` claim) and the run crosses checkpoints, WAL restarts and TRUNCATEs
+//!   on both.
 //!
 //! Metrics are not compared: the daemon does not serve `addr` yet (it warns that the listener
 //! is not served), so there is no `/metrics` to scrape.

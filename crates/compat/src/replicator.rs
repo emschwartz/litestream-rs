@@ -191,6 +191,12 @@ impl Replicator {
         self.kind
     }
 
+    /// The process id, for a test that pauses the process (SIGSTOP) at a point it observed,
+    /// so the process cannot move past it before the kill.
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     /// The last lines of the process output.
     pub fn log_tail(&self) -> String {
         let text = fs::read_to_string(&self.log).unwrap_or_default();
