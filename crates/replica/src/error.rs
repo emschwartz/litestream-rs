@@ -46,8 +46,11 @@ pub enum StartError {
         /// The size SQLite reported.
         bytes: u32,
     },
-    /// The replicator thread could not be started.
-    #[error("the replicator thread cannot be started: {kind:?}")]
+    /// The replicator thread could not be started. Each database needs its own thread
+    /// (`lsr_replica::stack`), so the usual cause is the process's thread limit.
+    #[error(
+        "the replicator thread cannot be started ({kind:?}): each database runs on a thread of its own, and the process may be at its thread limit (RLIMIT_NPROC, kernel.threads-max) or out of memory"
+    )]
     Thread {
         /// What the OS said.
         kind: io::ErrorKind,

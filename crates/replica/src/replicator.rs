@@ -390,10 +390,10 @@ impl Replicator {
             runtime,
         )
         .with_sink(events);
-        let handle = std::thread::Builder::new()
-            .name("lsr-replica".to_owned())
-            .spawn(move || worker.run())
-            .map_err(|err| StartError::Thread { kind: err.kind() })?;
+        let handle = crate::stack::spawn("lsr-replica", crate::stack::ENGINE_STACK, move || {
+            worker.run()
+        })
+        .map_err(|err| StartError::Thread { kind: err.kind() })?;
         *lock(&shared.thread) = Some(handle);
         Ok(())
     }
@@ -618,9 +618,8 @@ impl Future for FinalSync {
             watch.watching = true;
             let (shared, deadline) = (Arc::clone(&self.shared), self.deadline);
             let slot = Arc::clone(&self.watch);
-            let spawned = std::thread::Builder::new()
-                .name("lsr-final-sync".to_owned())
-                .spawn(move || {
+            let spawned =
+                crate::stack::spawn("lsr-final-sync", crate::stack::WAIT_STACK, move || {
                     let result = settle(&shared, deadline);
                     let waker = {
                         let mut watch = lock(&slot);

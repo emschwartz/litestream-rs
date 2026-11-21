@@ -8,6 +8,7 @@
 //! main thread on the first and, once shutdown has begun, cuts it short, as Go's
 //! `runUntilStopped` ends its shutdown on a second signal.
 
+use lsr_replica::stack;
 use std::io;
 use std::thread::JoinHandle;
 
@@ -40,13 +41,11 @@ impl Watch {
     pub fn install(on_signal: impl Fn(i32) + Send + 'static) -> io::Result<Self> {
         let mut signals = Signals::new([SIGINT, SIGTERM, SIGHUP])?;
         let handle = signals.handle();
-        let thread = std::thread::Builder::new()
-            .name("lsr-signals".to_owned())
-            .spawn(move || {
-                for signal in signals.forever() {
-                    on_signal(signal);
-                }
-            })?;
+        let thread = stack::spawn("lsr-signals", stack::WAIT_STACK, move || {
+            for signal in signals.forever() {
+                on_signal(signal);
+            }
+        })?;
         Ok(Self {
             handle,
             thread: Some(thread),

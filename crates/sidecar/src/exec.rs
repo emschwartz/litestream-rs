@@ -30,6 +30,7 @@
 //! signal stay in the "subprocess ended" log line. Passing the child's code on, as a wrapper
 //! such as `env` or `timeout` does, is the alternative recorded in issue #41.
 
+use lsr_replica::stack;
 use std::io;
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc::SyncSender;
@@ -381,21 +382,19 @@ impl Child {
             .ok_or_else(|| io::Error::other("the child's process id is out of range"))?;
         let shared = Arc::new(Mutex::new(Shared::default()));
         let ours = Arc::clone(&shared);
-        let spawned = std::thread::Builder::new()
-            .name("lsr-exec".to_owned())
-            .spawn(move || {
-                exited(pid);
-                lock(&ours).exited = true;
-                let status = child.wait();
-                lock(&ours).status = Some(match status {
-                    Ok(status) => status_of(status),
-                    // Reaping failed after the exit was seen: nothing says it was clean.
-                    Err(_) => Status::Exited(1),
-                });
-                if wake.try_send(Wake::ChildExited).is_err() {
-                    // The daemon is already stopping and no longer listens.
-                }
+        let spawned = stack::spawn("lsr-exec", stack::WAIT_STACK, move || {
+            exited(pid);
+            lock(&ours).exited = true;
+            let status = child.wait();
+            lock(&ours).status = Some(match status {
+                Ok(status) => status_of(status),
+                // Reaping failed after the exit was seen: nothing says it was clean.
+                Err(_) => Status::Exited(1),
             });
+            if wake.try_send(Wake::ChildExited).is_err() {
+                // The daemon is already stopping and no longer listens.
+            }
+        });
         match spawned {
             Ok(_thread) => Ok(Self { pid, shared }),
             Err(error) => Err(error),

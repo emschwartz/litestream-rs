@@ -357,9 +357,10 @@ impl Daemon {
         };
         let (stop, stopped) = mpsc::sync_channel(1);
         let daemon = Arc::clone(self);
-        let spawned = std::thread::Builder::new()
-            .name("lsr-waiter".to_owned())
-            .spawn(move || daemon.wait_loop(interval, &stopped));
+        let spawned =
+            lsr_replica::stack::spawn("lsr-waiter", lsr_replica::stack::ENGINE_STACK, move || {
+                daemon.wait_loop(interval, &stopped)
+            });
         match spawned {
             Ok(thread) => Some(Waiter { stop, thread }),
             Err(error) => {

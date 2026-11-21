@@ -179,9 +179,9 @@ impl Scheduled {
     fn hand_over(&mut self, live: LivePages, now: Timestamp) {
         if let Some((store, park)) = self.start.take() {
             let job = Arc::clone(&self.job);
-            let spawned = std::thread::Builder::new()
-                .name(THREAD.to_owned())
-                .spawn(move || serve(&job, &store, &*park));
+            let spawned = crate::stack::spawn(THREAD, crate::stack::ENGINE_STACK, move || {
+                serve(&job, &store, &*park)
+            });
             if spawned.is_err() {
                 // No thread, so no run: counted, and tried again at the next interval.
                 self.health.runs.incomplete = self.health.runs.incomplete.saturating_add(1);

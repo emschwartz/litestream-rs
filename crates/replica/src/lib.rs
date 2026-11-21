@@ -49,6 +49,7 @@ mod replicator;
 mod restore;
 mod runtime;
 mod scheduled;
+pub mod stack;
 mod store;
 mod thread;
 

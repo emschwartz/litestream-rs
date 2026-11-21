@@ -21,6 +21,7 @@
 //! 405, any other path 404, a request line that is not HTTP/1 is 400. Every response closes
 //! the connection.
 
+use lsr_replica::stack;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
@@ -136,9 +137,9 @@ pub fn serve(target: &Target, board: Board, clock: Arc<dyn Clock>) -> io::Result
         Target::Host { host, port } => TcpListener::bind((host.as_str(), *port))?,
     };
     let local = listener.local_addr()?;
-    std::thread::Builder::new()
-        .name("lsr-http".to_owned())
-        .spawn(move || accept(&listener, &board, &clock))?;
+    stack::spawn("lsr-http", stack::WAIT_STACK, move || {
+        accept(&listener, &board, &clock);
+    })?;
     Ok(local)
 }
 
@@ -163,12 +164,10 @@ impl Slot {
 
     /// Runs `work` on a thread of its own that holds this place until it ends.
     fn run(self, work: impl FnOnce() + Send + 'static) {
-        let spawned = std::thread::Builder::new()
-            .name("lsr-http-conn".to_owned())
-            .spawn(move || {
-                let _slot = self;
-                work();
-            });
+        let spawned = stack::spawn("lsr-http-conn", stack::WAIT_STACK, move || {
+            let _slot = self;
+            work();
+        });
         if spawned.is_err() {
             // The thread could not start; the place came back with the closure.
         }
