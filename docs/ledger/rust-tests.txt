@@ -103,6 +103,7 @@ lsr-compat binaries::tests::era_follows_the_name
 lsr-compat binaries::tests::frame_writers_are_the_first_two
 lsr-compat binaries::tests::live::a_live_module_gets_the_builds
 lsr-compat binaries::tests::names_round_trip
+lsr-compat binaries::tests::only_builds_with_the_upstream_fix_read_the_wal_index_end
 lsr-compat binaries::tests::pinned_versions_agree_with_their_era
 lsr-compat binaries::tests::the_builds_are_refused_outside_a_live_module
 lsr-compat binaries::tests::the_known_table_is_ordered_and_complete
@@ -113,6 +114,10 @@ lsr-compat pages::tests::integrity_check_accepts_a_real_database_and_rejects_gar
 lsr-compat pages::tests::rejects_ragged_and_headerless_files
 lsr-compat replica::tests::go_file_keys_round_trip
 lsr-compat replica::tests::names_go_would_not_write_are_foreign
+lsr-compat s3::tests::a_scrubbed_child_sees_no_aws_variable
+lsr-compat s3::tests::anything_but_loopback_http_is_refused
+lsr-compat s3::tests::credential_variables_are_scrubbed_and_others_kept
+lsr-compat s3::tests::loopback_http_endpoints_pass_normalised
 lsr-compat scenario::tests::every_scenario_holds_the_full_mix
 lsr-compat scenario::tests::names_round_trip_and_are_distinct
 lsr-compat vfs::tests::parses_every_record_kind
@@ -120,6 +125,7 @@ lsr-compat vfs::tests::refuses_an_unknown_record
 lsr-compat vfs::tests::the_environment_names_the_sqlite_when_either_variable_is_set
 lsr-compat workload::tests::splitmix_matches_its_reference_vector
 lsr-compat workload::tests::the_same_seed_writes_the_same_pages
+lsr-compat::alternation a_tail_past_the_wal_index_is_recognised
 lsr-compat::alternation live::go_and_rust_alternate_on_one_prefix
 lsr-compat::compaction go_compacted_files_equal_ours_on_header_and_pages
 lsr-compat::fixtures every_version_and_scenario_has_a_fixture
@@ -174,6 +180,7 @@ lsr-compat::ofd_pin the_ofd_pin_survives_another_descriptor_closing_and_the_posi
 lsr-compat::ofd_pin with_a_busy_timeout_the_checkpoint_still_reports_busy
 lsr-compat::releases every_release_tag_is_known
 lsr-compat::releases quirks_name_known_releases
+lsr-compat::releases wal_index_end_follows_the_clone
 lsr-compat::rust_chains go_verifies_every_rust_file
 lsr-compat::rust_chains live::go_compacts_and_prunes_a_rust_replica
 lsr-compat::rust_chains live::go_restores_rust_chain_as_of
@@ -181,6 +188,9 @@ lsr-compat::rust_chains live::go_restores_rust_chain_each_txid
 lsr-compat::rust_chains live::go_restores_rust_chain_latest
 lsr-compat::rust_chains rust_chain_covers_every_shape
 lsr-compat::rust_chains rust_restores_its_own_chain_at_every_point
+lsr-compat::s3 s3::over_s3_go_and_rust_hand_over
+lsr-compat::s3 s3::over_s3_go_restores_rust_replica
+lsr-compat::s3 s3::over_s3_rust_restores_go_replica
 lsr-compat::sidecar live::go_and_rust_sidecars_alternate_on_one_config_file
 lsr-compat::sidecar live::go_config_and_meta_start_the_rust_sidecar_with_no_snapshot
 lsr-compat::verify every_fixture_verifies_at_both_depths_except_the_recorded_gap
@@ -284,6 +294,7 @@ lsr-config::config map::bucket_path_and_endpoint_keys_without_a_url
 lsr-config::config map::checkpoint_interval_of_zero_turns_the_timed_checkpoint_off
 lsr-config::config map::credentials_from_the_file
 lsr-config::config map::host_autocheckpoint_defaults_to_sqlite_s_and_can_be_off
+lsr-config::config map::l0_retention_check_interval_maps_and_defaults_to_go_s_15s
 lsr-config::config map::meta_path_is_expanded_and_used_as_is
 lsr-config::config map::min_checkpoint_page_count_must_be_above_zero
 lsr-config::config map::monitor_interval_is_the_poll_and_zero_is_refused
@@ -378,6 +389,7 @@ lsr-core actor::tests::lanes::a_restarted_wal_with_nothing_new_is_not_reported_a
 lsr-core actor::tests::lanes::a_sync_whose_epoch_moved_does_not_checkpoint_and_asks_for_the_next_tick
 lsr-core actor::tests::lanes::an_idle_tick_does_not_open_the_wal
 lsr-core actor::tests::lanes::an_interval_due_with_nothing_to_checkpoint_does_not_spin
+lsr-core actor::tests::listing::a_steady_writer_lists_once_per_check_interval_not_per_upload
 lsr-core actor::tests::live::a_drain_reads_no_live_pages
 lsr-core actor::tests::live::a_verify_pin_is_kept_beside_a_lane_pin_and_the_older_wins
 lsr-core actor::tests::live::live_pages_are_read_once_asked_at_the_replica_s_transaction
@@ -669,6 +681,8 @@ lsr-core maintain::tests::an_empty_replica_with_nothing_published_has_nothing_to
 lsr-core maintain::tests::an_idle_database_writes_no_snapshot_however_old_the_last_one
 lsr-core maintain::tests::an_input_missing_everywhere_is_a_replan
 lsr-core maintain::tests::an_old_snapshot_and_a_newer_position_ask_for_a_new_snapshot
+lsr-core maintain::tests::an_upload_lists_at_the_next_window_or_the_check_interval
+lsr-core maintain::tests::an_upload_s_listing_is_after_it_and_no_later_than_any_wake
 lsr-core maintain::tests::due_matches_main_on_stored_listings
 lsr-core maintain::tests::every_input_must_be_one_level_below_the_destination
 lsr-core maintain::tests::go_defaults_run_through_new_and_match_go
@@ -1325,6 +1339,13 @@ lsr-replica store::tests::conformance_cases::stamp_of_an_overwritten_file_is_ref
 lsr-replica store::tests::conformance_cases::stamp_returns_the_committed_stamp
 lsr-replica store::tests::conformance_cases::two_uploads_to_one_key
 lsr-replica store::tests::metered_calls_and_bytes_are_counted
+lsr-replica::rebuild a_database_removed_after_a_panic_still_stops_at_the_deadline
+lsr-replica::rebuild a_database_replaced_after_a_panic_is_degraded_and_not_reopened
+lsr-replica::rebuild a_database_replaced_after_a_panic_stops_when_configured_to
+lsr-replica::rebuild a_degraded_lane_is_still_reported_while_the_engine_is_rebuilt
+lsr-replica::rebuild a_panic_during_a_drain_still_stops_at_the_deadline
+lsr-replica::rebuild a_panic_keeps_what_is_left_in_health_and_the_deadline_report
+lsr-replica::rebuild an_operator_snapshot_request_survives_a_panic_before_the_boot
 lsr-replica::replicator a_host_at_wal_autocheckpoint_0_raises_no_notice
 lsr-replica::replicator a_host_checkpoint_is_counted_and_reported
 lsr-replica::replicator a_panic_rebuilds_the_engine_and_replication_continues
@@ -1724,6 +1745,21 @@ lsr-store-s3 response::tests::response_faults_map_to_store_errors
 lsr-store-s3 secrets::credentials_never_print
 lsr-store-s3 transport::tests::body_cap_is_twice_the_largest_read
 lsr-store-s3 transport::tests::io_kinds_map_to_transport_kinds
+lsr-store-s3 trust::tests::env_child
+lsr-store-s3 trust::tests::go_unix::a_bundle_linked_from_a_dir_counts_once_and_junk_is_ignored
+lsr-store-s3 trust::tests::go_unix::an_empty_variable_counts_as_unset
+lsr-store-s3 trust::tests::go_unix::nothing_found_falls_back_to_mozilla_roots
+lsr-store-s3 trust::tests::go_unix::only_the_first_readable_default_file_is_read_and_every_default_dir
+lsr-store-s3 trust::tests::go_unix::reqwest_falls_back_to_mozilla_roots_and_still_refuses_the_private_ca
+lsr-store-s3 trust::tests::go_unix::reqwest_refuses_a_private_ca_the_system_files_lack
+lsr-store-s3 trust::tests::go_unix::reqwest_trusts_a_private_ca_in_ssl_cert_dir
+lsr-store-s3 trust::tests::go_unix::reqwest_trusts_a_private_ca_named_by_ssl_cert_file
+lsr-store-s3 trust::tests::go_unix::ssl_cert_dir_replaces_the_default_dirs_and_splits_on_colons
+lsr-store-s3 trust::tests::go_unix::ssl_cert_file_replaces_the_default_files_and_keeps_the_default_dirs
+lsr-store-s3 trust::tests::go_unix::ureq_refuses_a_private_ca_the_system_files_lack
+lsr-store-s3 trust::tests::go_unix::ureq_trusts_a_private_ca_in_ssl_cert_dir
+lsr-store-s3 trust::tests::go_unix::ureq_trusts_a_private_ca_named_by_ssl_cert_file
+lsr-store-s3 trust::tests::the_default_clients_read_the_process_environment
 lsr-store-s3 ureq_transport::tests::a_connection_closed_early_is_an_error
 lsr-store-s3 ureq_transport::tests::a_redirect_is_a_response_not_followed
 lsr-store-s3::fake cases::bad_part_digest_is_refused_before_it_is_stored
