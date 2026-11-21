@@ -13,7 +13,7 @@ use crate::response::parse_create;
 use crate::transport::{HttpResponse, Transport, TransportError};
 
 /// The most pages of open uploads [`open_uploads`] follows before it gives up.
-pub const MAX_UPLOAD_PAGES: usize = 100;
+pub(super) const MAX_UPLOAD_PAGES: usize = 100;
 
 impl Method {
     const fn to_signer(self) -> rusty_s3::Method {
@@ -111,7 +111,7 @@ pub struct OpenUpload {
 ///
 /// # Errors
 /// [`RawError`].
-pub fn send_raw(
+pub(super) fn send_raw(
     transport: &dyn Transport,
     builder: &RequestBuilder,
     clock: &dyn Clock,
@@ -246,7 +246,7 @@ pub fn abandon_upload(
 
 /// The text of each `<tag>` element in `xml`, unescaped; enough for S3's flat listings.
 #[must_use]
-pub fn xml_text(xml: &str, tag: &str) -> Vec<String> {
+pub(super) fn xml_text(xml: &str, tag: &str) -> Vec<String> {
     let (open, close) = (format!("<{tag}>"), format!("</{tag}>"));
     xml.split(open.as_str())
         .skip(1)

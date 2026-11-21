@@ -55,37 +55,37 @@ use crate::credentials::{S3Credentials, SecretString};
 use ini::Flavor;
 
 /// The variables tried for the access key id, in order.
-pub const ACCESS_KEY_ID_VARS: [&str; 3] = [
+pub(crate) const ACCESS_KEY_ID_VARS: [&str; 3] = [
     "AWS_ACCESS_KEY_ID",
     "LITESTREAM_ACCESS_KEY_ID",
     "AWS_ACCESS_KEY",
 ];
 /// The variables tried for the secret access key, in order.
-pub const SECRET_ACCESS_KEY_VARS: [&str; 3] = [
+pub(crate) const SECRET_ACCESS_KEY_VARS: [&str; 3] = [
     "AWS_SECRET_ACCESS_KEY",
     "LITESTREAM_SECRET_ACCESS_KEY",
     "AWS_SECRET_KEY",
 ];
 /// The variable holding a session token, read with environment keys only.
-pub const SESSION_TOKEN_VAR: &str = "AWS_SESSION_TOKEN";
+pub(crate) const SESSION_TOKEN_VAR: &str = "AWS_SESSION_TOKEN";
 /// The variable naming the profile; a profile it names must exist.
-pub const PROFILE_VAR: &str = "AWS_PROFILE";
+pub(crate) const PROFILE_VAR: &str = "AWS_PROFILE";
 /// The profile variable read when [`PROFILE_VAR`] is unset; not checked.
-pub const DEFAULT_PROFILE_VAR: &str = "AWS_DEFAULT_PROFILE";
+pub(crate) const DEFAULT_PROFILE_VAR: &str = "AWS_DEFAULT_PROFILE";
 /// The variable overriding the shared credentials file's path.
-pub const SHARED_CREDENTIALS_FILE_VAR: &str = "AWS_SHARED_CREDENTIALS_FILE";
+pub(crate) const SHARED_CREDENTIALS_FILE_VAR: &str = "AWS_SHARED_CREDENTIALS_FILE";
 /// The variable overriding the shared config file's path.
-pub const CONFIG_FILE_VAR: &str = "AWS_CONFIG_FILE";
+pub(crate) const CONFIG_FILE_VAR: &str = "AWS_CONFIG_FILE";
 /// The variable holding the home directory the default paths sit under.
 #[cfg(windows)]
 pub const HOME_VAR: &str = "USERPROFILE";
 /// The variable holding the home directory the default paths sit under.
 #[cfg(not(windows))]
-pub const HOME_VAR: &str = "HOME";
+pub(crate) const HOME_VAR: &str = "HOME";
 /// The profile read when no variable names one.
-pub const DEFAULT_PROFILE: &str = "default";
+pub(crate) const DEFAULT_PROFILE: &str = "default";
 /// The largest shared file read; real ones are a few hundred bytes.
-pub const MAX_SHARED_FILE_BYTES: u64 = 1024 * 1024;
+pub(crate) const MAX_SHARED_FILE_BYTES: u64 = 1024 * 1024;
 
 type Env = dyn Fn(&str) -> Option<String> + Send + Sync;
 
