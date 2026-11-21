@@ -50,7 +50,7 @@ use thiserror::Error;
 use self::dry_run::latest_restore;
 use crate::inventory::{Inventory, InventoryError, is_snapshot_start};
 use crate::layout::{FileInfo, FileKey, Level, StoredStamp};
-use crate::ltx_read::{LtxRead, ReadFault};
+use crate::ltx_read::{BrokenLink, LinkEnd, LtxRead, ReadFault, check_link};
 use crate::plan::{KeyTarget, PlanOutcome, plan};
 use crate::restore::RestoreError;
 use crate::store::{ObjectStore, ReadLen, StoreError};
@@ -620,8 +620,7 @@ fn older_history(inventory: &Inventory, base: &FileInfo, next: &FileInfo, findin
 struct Before {
     key: FileKey,
     level: Level,
-    through: Txid,
-    post_apply: Option<DbChecksum>,
+    end: LinkEnd,
 }
 
 /// How the headers' timestamps differ from the store's.
@@ -818,12 +817,8 @@ impl<'a> Walk<'a> {
     ) {
         let header = verified.header();
         let level = key.level();
-        let contiguous = |before: &Before| {
-            before.level == level && before.through.next() == Some(header.txids().min())
-        };
-        if let Some(before) = self.before.as_ref().filter(|before| contiguous(before))
-            && let (Some(expected), Some(found)) = (before.post_apply, header.fields().pre_apply)
-            && expected != found
+        if let Some(before) = self.before.as_ref().filter(|before| before.level == level)
+            && let Err(BrokenLink { expected, found }) = check_link(before.end, header)
         {
             findings.push(Finding::ChecksumChain {
                 key: *key,
@@ -835,8 +830,7 @@ impl<'a> Walk<'a> {
         self.before = Some(Before {
             key: *key,
             level,
-            through: header.txids().max(),
-            post_apply: verified.trailer().post_apply(),
+            end: LinkEnd::of(verified),
         });
     }
 }

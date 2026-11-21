@@ -53,7 +53,7 @@ use lsr_ltx::{
 use thiserror::Error;
 
 use crate::layout::{FileInfo, FileKey, Level};
-use crate::ltx_read::{LtxRead, Next, ReadFault};
+use crate::ltx_read::{BrokenLink, LinkEnd, LtxRead, Next, ReadFault, check_link};
 use crate::store::{ObjectStore, ReadLen, StoreError, Upload};
 
 #[cfg(test)]
@@ -609,9 +609,9 @@ impl<'a, S: ObjectStore> Merge<'a, S> {
     fn verified_chain(&self) -> Result<Verified, CompactError> {
         let mut before = &self.first;
         for after in &self.rest {
-            if let (Some(done), Some(found)) = (before.verified, after.header.fields().pre_apply)
-                && let Some(expected) = done.trailer().post_apply()
-                && expected != found
+            if let Some(done) = before.verified
+                && let Err(BrokenLink { expected, found }) =
+                    check_link(LinkEnd::of(&done), &after.header)
             {
                 return Err(after
                     .reader

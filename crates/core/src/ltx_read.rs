@@ -18,10 +18,57 @@
 use std::convert::Infallible;
 use std::mem;
 
-use lsr_ltx::{DecodeError, Decoder, Event, Header, Verified};
+use lsr_ltx::{DbChecksum, DecodeError, Decoder, Event, Header, Txid, Verified};
 
 use crate::layout::FileKey;
 use crate::store::{ObjectStore, ReadLen, StoreError};
+
+/// Where a verified file ends, for the file applied after it to be checked
+/// against: its last transaction and, when it tracks one, the database
+/// checksum after it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LinkEnd {
+    through: Txid,
+    post_apply: Option<DbChecksum>,
+}
+
+impl LinkEnd {
+    pub(crate) fn of(verified: &Verified) -> Self {
+        Self {
+            through: verified.header().txids().max(),
+            post_apply: verified.trailer().post_apply(),
+        }
+    }
+
+    /// Whether `header`'s file starts at the transaction right after.
+    pub(crate) fn followed_by(&self, header: &Header) -> bool {
+        self.through.next() == Some(header.txids().min())
+    }
+}
+
+/// Two neighbouring files that do not chain: the first ends at a database
+/// checksum that is not the one the second says it starts from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BrokenLink {
+    pub(crate) expected: DbChecksum,
+    pub(crate) found: DbChecksum,
+}
+
+/// The checksum-chain rule, stated once for restore, verify and compaction.
+///
+/// A file's pre-apply checksum is the database before its own first
+/// transaction, so it can be compared with the file before only when it
+/// starts right after that file ends: an overlapping file's predecessor has
+/// already moved past that state. Files that track no checksum (every file Go
+/// and this port write today) have nothing to compare and pass.
+pub(crate) fn check_link(before: LinkEnd, header: &Header) -> Result<(), BrokenLink> {
+    match (before.post_apply, header.fields().pre_apply) {
+        (Some(expected), Some(found)) if before.followed_by(header) && expected != found => {
+            Err(BrokenLink { expected, found })
+        }
+        (Some(_) | None, Some(_) | None) => Ok(()),
+    }
+}
 
 #[cfg(test)]
 mod tests;

@@ -34,7 +34,7 @@ use thiserror::Error;
 
 use crate::inventory::{Inventory, InventoryError};
 use crate::layout::{FileInfo, FileKey};
-use crate::ltx_read::{LtxRead, ReadFault};
+use crate::ltx_read::{BrokenLink, LinkEnd, LtxRead, ReadFault, check_link};
 use crate::plan::{AsOfPlanner, ContiguousChain, KeyTarget, PlanOutcome, RestoreTarget, plan};
 use crate::stamps::{Resolve, ResolveError, Stamps, Step, resolve};
 use crate::store::{ObjectStore, ReadLen, StoreError};
@@ -542,16 +542,6 @@ fn check_header(key: FileKey, header: &Header, previous: Previous<'_>) -> Result
             found: header.page_size(),
         });
     }
-    // An overlapping file's pre-apply checksum is the state before its own
-    // first transaction, which the previous file has already moved past; only
-    // a file that starts right after the previous one can be compared.
-    let contiguous = previous.header().txids().max().next() == Some(header.txids().min());
-    if let (Some(expected), Some(found)) =
-        (previous.trailer().post_apply(), header.fields().pre_apply)
-        && contiguous
-        && expected != found
-    {
-        return Err(FileFault::ChecksumChain { expected, found });
-    }
-    Ok(())
+    check_link(LinkEnd::of(previous), header)
+        .map_err(|BrokenLink { expected, found }| FileFault::ChecksumChain { expected, found })
 }
