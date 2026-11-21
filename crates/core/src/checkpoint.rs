@@ -209,7 +209,7 @@ pub fn decide(state: &CheckpointState, observed: &Observed, cfg: &CheckpointConf
 /// time trigger too, except that `Idle { expect_bump: true }` absorbs exactly one
 /// one-transaction sync: our own bump frame (#896, `db.go:1503-1506`).
 #[must_use]
-pub fn after_sync(
+pub(crate) fn after_sync(
     state: CheckpointState,
     wrote_txs: u32,
     observed: &Observed,
@@ -266,7 +266,7 @@ pub enum CheckpointOutcome {
 /// - Every other finished checkpoint is `Idle`; it expects a bump frame unless the
 ///   protocol already synced it (a restart or a truncate does).
 #[must_use]
-pub fn after_checkpoint(
+pub(crate) fn after_checkpoint(
     state: CheckpointState,
     decision: Decision,
     outcome: &CheckpointOutcome,
@@ -311,7 +311,7 @@ pub fn after_checkpoint(
 
 /// When the time trigger comes due, if it is armed.
 #[must_use]
-pub fn next_wake(state: &CheckpointState, cfg: &CheckpointConfig) -> Option<Timestamp> {
+pub(crate) fn next_wake(state: &CheckpointState, cfg: &CheckpointConfig) -> Option<Timestamp> {
     match (state, cfg.interval) {
         (CheckpointState::Pending { last }, Some(interval)) => Some(last.saturating_add(interval)),
         (CheckpointState::Pending { .. }, None)

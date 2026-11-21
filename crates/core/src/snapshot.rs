@@ -58,7 +58,7 @@ pub struct SnapshotFailed {
 /// # Errors
 /// [`SnapshotFailed`]. Retrying the same call is safe: the key is the same and
 /// a commit replaces whatever an earlier, rejected one left under it.
-pub async fn write_snapshot<W: WalSource, P: PageSource, S: ObjectStore>(
+pub(crate) async fn write_snapshot<W: WalSource, P: PageSource, S: ObjectStore>(
     proof: &SyncedThrough,
     wal: &mut W,
     db: &mut P,

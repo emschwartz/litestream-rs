@@ -178,7 +178,7 @@ impl PageFrom {
 /// `prev_commit` that the map lacks), which come from the
 /// database file (Go `db.go:2504-2561`).
 #[must_use]
-pub fn plan_pages(
+pub(crate) fn plan_pages(
     map: &PageMap,
     prev_commit: Option<u32>,
     commit: NonZeroU32,
@@ -209,7 +209,7 @@ pub fn plan_pages(
 
 /// The header Go writes (`db.go:2294-2311`): untracked, with no pre-apply checksum.
 #[must_use]
-pub const fn header_fields(
+pub(crate) const fn header_fields(
     txid: Txid,
     commit: NonZeroU32,
     page_size: PageSize,
