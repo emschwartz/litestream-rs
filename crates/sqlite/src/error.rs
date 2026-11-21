@@ -114,6 +114,16 @@ pub enum SetupError {
         /// The configured page threshold.
         pages: i64,
     },
+    /// The connection has no database file (in-memory or temporary), so it cannot be the
+    /// replicated database.
+    #[error("the connection has no database file")]
+    NoFile,
+    /// The connection's file could not be looked at.
+    #[error("the connection's database file cannot be read: {0:?}")]
+    Stat(std::io::ErrorKind),
+    /// The connection opens another file than the replicated database.
+    #[error("the connection opens another database than the one replicated")]
+    OtherDatabase,
 }
 
 /// Sorts a SQLite result code (primary or extended) the way a sync loop needs it.

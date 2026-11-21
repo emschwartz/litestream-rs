@@ -14,7 +14,8 @@ use std::time::Duration;
 use lsr_core::{CheckpointMode, Checkpointer, PageSource, ReadEpoch, SourceError, WalSource};
 use lsr_ltx::{PageNo, PageSize};
 use lsr_sqlite::{
-    OpenError, SetupError, Sqlite, SqliteConfig, app_connection, check_app_connection,
+    DatabaseFile, OpenError, SetupError, Sqlite, SqliteConfig, app_connection, app_connection_for,
+    app_connection_raw, check_app_connection,
 };
 use rusqlite::Connection;
 use rusqlite::limits::Limit;
@@ -219,4 +220,65 @@ fn a_checkpoint_blocked_by_readers_reports_busy_in_the_run() {
     let run = live.checkpoint(CheckpointMode::Truncate).unwrap();
     assert!(run.busy, "{run:?}");
     assert_eq!(run.epoch, ReadEpoch::new(2));
+}
+
+/// A connection is set up only for the database it names: an in-memory one has no file, one on
+/// another file is refused, and a second path to the same file (a hard link) is the same file.
+#[test]
+fn setup_checks_which_file_the_connection_opens() {
+    let (dir, path, _app) = fresh();
+    let database = DatabaseFile::of(&path).unwrap();
+    let memory = Connection::open_in_memory().unwrap();
+    assert!(matches!(
+        app_connection_for(&memory, &database),
+        Err(SetupError::NoFile)
+    ));
+    let (_other_dir, other, _other_app) = fresh();
+    assert!(matches!(
+        app_connection_for(&app(&other), &database),
+        Err(SetupError::OtherDatabase)
+    ));
+    let linked = dir.path().join("linked.db");
+    std::fs::hard_link(&path, &linked).unwrap();
+    let conn = app(&linked);
+    app_connection_for(&conn, &database).unwrap();
+    check_app_connection(&conn).unwrap();
+}
+
+#[test]
+fn a_connection_whose_file_is_gone_cannot_be_checked() {
+    let (dir, path, _app) = fresh();
+    let database = DatabaseFile::of(&path).unwrap();
+    let doomed = dir.path().join("doomed.db");
+    let conn = app(&doomed);
+    conn.execute_batch("CREATE TABLE t(x)").unwrap();
+    std::fs::remove_file(&doomed).unwrap();
+    assert!(matches!(
+        app_connection_for(&conn, &database),
+        Err(SetupError::Stat(std::io::ErrorKind::NotFound))
+    ));
+}
+
+/// The raw-handle form does what the rusqlite form does, and leaves the handle open.
+#[test]
+fn a_raw_handle_is_set_up_and_stays_open() {
+    let (_dir, path, _app) = fresh();
+    let database = DatabaseFile::of(&path).unwrap();
+    let conn = app(&path);
+    #[expect(
+        unsafe_code,
+        reason = "rusqlite hands out the raw handle only through an unsafe fn"
+    )]
+    // SAFETY: the handle is used only while `conn` lives, by this thread.
+    let handle = unsafe { conn.handle() };
+    #[expect(
+        unsafe_code,
+        reason = "the test hands over the raw handle a host would"
+    )]
+    // SAFETY: `handle` is open on this crate's SQLite and used by no other thread during the call.
+    let setup = unsafe { app_connection_raw(handle, &database) };
+    setup.unwrap();
+    check_app_connection(&conn).unwrap();
+    conn.execute_batch("INSERT INTO t(v) VALUES (x'01')")
+        .unwrap();
 }

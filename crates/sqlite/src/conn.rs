@@ -393,6 +393,86 @@ pub fn app_connection(conn: &Connection) -> Result<(), SetupError> {
         .map_err(SetupError::Sqlite)
 }
 
+/// Which database file a path names: its device and inode on Unix, so a second path to the same
+/// file (a hard link, a symlink, a relative path) is the same file, and a file replaced at the
+/// same path is not. Elsewhere, the canonical path.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DatabaseFile {
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+    #[cfg(not(unix))]
+    path: PathBuf,
+}
+
+impl DatabaseFile {
+    /// The file `path` names now. A stat, never an open: no descriptor is opened or closed.
+    ///
+    /// # Errors
+    /// The stat's error (the file is missing or unreadable).
+    pub fn of(path: &Path) -> io::Result<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let meta = std::fs::metadata(path)?;
+            Ok(Self {
+                dev: meta.dev(),
+                ino: meta.ino(),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(Self {
+                path: std::fs::canonicalize(path)?,
+            })
+        }
+    }
+}
+
+/// [`app_connection`], after checking that `conn` opens `database`: a host that sets up a
+/// connection to some other file gets an error, not a replicator that never sees its writes.
+///
+/// # Errors
+/// [`SetupError::NoFile`] for a connection with no file (in-memory or temporary);
+/// [`SetupError::OtherDatabase`] when its file is not `database`; else as [`app_connection`].
+pub fn app_connection_for(conn: &Connection, database: &DatabaseFile) -> Result<(), SetupError> {
+    let path = conn
+        .path()
+        .filter(|path| !path.is_empty())
+        .ok_or(SetupError::NoFile)?;
+    let found = DatabaseFile::of(Path::new(path)).map_err(|err| SetupError::Stat(err.kind()))?;
+    if &found != database {
+        return Err(SetupError::OtherDatabase);
+    }
+    app_connection(conn)
+}
+
+/// [`app_connection_for`] on a raw SQLite handle, for a host on sqlx, diesel or its own FFI.
+/// The handle stays the host's: nothing here closes it.
+///
+/// # Safety
+/// `db` is an open connection, used by no other thread during the call, and opened by the
+/// SQLite library this crate links: a second copy of SQLite in the process does not share its
+/// locks with this one (PLAN section 6). Note that `wal_autocheckpoint` replaces any
+/// `sqlite3_wal_hook` the host set on the connection.
+///
+/// # Errors
+/// As [`app_connection_for`]; [`SetupError::Sqlite`] when the handle cannot be wrapped.
+#[expect(
+    unsafe_code,
+    reason = "a host's raw handle can only be borrowed through rusqlite's unsafe from_handle"
+)]
+pub unsafe fn app_connection_raw(
+    db: *mut rusqlite::ffi::sqlite3,
+    database: &DatabaseFile,
+) -> Result<(), SetupError> {
+    // SAFETY: the caller promises an open handle of this library's SQLite that no other thread
+    // uses during the call; `from_handle` borrows it and its drop does not close it.
+    let conn = unsafe { Connection::from_handle(db) }.map_err(SetupError::Sqlite)?;
+    app_connection_for(&conn, database)
+}
+
 /// Reads back what [`app_connection`] sets.
 ///
 /// # Errors

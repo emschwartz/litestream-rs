@@ -26,6 +26,9 @@
 //!
 //! [`app_connection`] and [`check_app_connection`] set up and check the host's own connections
 //! (`SQLITE_FCNTL_PERSIST_WAL` on, `wal_autocheckpoint = 0`, PLAN section 6).
+//! [`app_connection_for`] first checks that the connection opens a given [`DatabaseFile`]
+//! (device and inode), and [`app_connection_raw`] does the same on a raw handle, for a host
+//! whose connections are not rusqlite's; it is here because only this crate may use `unsafe`.
 //!
 //! The `testing` feature adds [`testing`]: the fault-injecting VFS and the harness of the
 //! real-SQLite fault suite in `tests/`.
@@ -40,5 +43,10 @@ mod shm;
 #[cfg(feature = "testing")]
 pub mod testing;
 
-pub use conn::{Sqlite, SqliteConfig, app_connection, check_app_connection};
+pub use conn::{
+    DatabaseFile, Sqlite, SqliteConfig, app_connection, app_connection_for, app_connection_raw,
+    check_app_connection,
+};
 pub use error::{OpenError, Refusal, SetupError};
+/// SQLite's C interface, for the raw handle [`app_connection_raw`] takes.
+pub use rusqlite::ffi;
