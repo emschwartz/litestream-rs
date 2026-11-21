@@ -23,6 +23,14 @@
 //! everything is deleted at the end (also when the test fails), then the prefix
 //! is listed again and must be empty. Mismatches are collected and asserted only
 //! after the cleanup, so a finding never leaves objects behind.
+//!
+//! Go is stopped while it may be mid-upload, and an incomplete multipart upload
+//! is invisible to an object listing but still billed, so the cleanup also lists
+//! the prefix's multipart uploads (ListMultipartUploads, which no store call
+//! makes), aborts each, and counts any still listed as left. Those requests are
+//! signed here with rusty-s3, as the store signs its own, with Tigris's
+//! consistency header. A second ignored test leaves an upload open under its own
+//! prefix and checks that the same cleanup aborts it.
 
 // `cfg(test)` is always set here; it marks the helpers as test code, so clippy.toml's
 // allow-*-in-tests cover them as they cover #[test] fns.
@@ -52,8 +60,8 @@ mod tigris {
     use lsr_local::FileSink;
     use lsr_ltx::{HEADER_LEN, Header};
     use lsr_store_s3::{
-        HttpRequest, HttpResponse, Method, S3Config, S3Credentials, S3Store, SecretString,
-        Transport, TransportError, UreqTransport,
+        HttpRequest, HttpResponse, Method, Provider, S3Config, S3Credentials, S3Store,
+        SecretString, Transport, TransportError, UreqTransport, UrlStyle,
     };
 
     /// The replica must reach this many files before the targets are restored.
@@ -131,12 +139,13 @@ mod tigris {
         secret: String,
     }
 
-    fn bucket() -> Bucket {
+    /// The bucket with the replica at `leaf` under the run prefix.
+    fn bucket(leaf: &str) -> Bucket {
         Bucket {
             endpoint: var("AWS_ENDPOINT_URL_S3"),
             region: var("AWS_REGION"),
             bucket: var("LSR_TIGRIS_BUCKET"),
-            path: format!("{}/go", var("LSR_TIGRIS_PREFIX")),
+            path: format!("{}/{leaf}", var("LSR_TIGRIS_PREFIX")),
             access: var("AWS_ACCESS_KEY_ID"),
             secret: var("AWS_SECRET_ACCESS_KEY"),
         }
@@ -185,10 +194,14 @@ mod tigris {
             format!("s3://{}/{}", self.bucket, self.path)
         }
 
-        fn store(&self) -> (S3Store<Counting>, Arc<Counts>) {
+        fn config(&self) -> S3Config {
             let escaped = self.endpoint.replace(':', "%3A").replace('/', "%2F");
             let url = format!("{}?endpoint={escaped}&region={}", self.url(), self.region);
-            let config = S3Config::from_url(&url).expect("config");
+            S3Config::from_url(&url).expect("config")
+        }
+
+        fn store(&self) -> (S3Store<Counting>, Arc<Counts>) {
+            let config = self.config();
             let counts = Arc::new(Counts::default());
             let transport = Counting {
                 inner: UreqTransport::new(config.deadline()),
@@ -734,18 +747,232 @@ dbs:
         (deleted, left)
     }
 
-    /// Deletes the replica's prefix when the test ends, passed or not.
+    /// Signed requests the store does not make: multipart uploads by listing.
+    struct Raw {
+        bucket: rusty_s3::Bucket,
+        access: String,
+        secret: String,
+        region: String,
+        tigris: bool,
+        agent: ureq::Agent,
+    }
+
+    /// One open multipart upload: its full key and id.
+    struct Open {
+        key: String,
+        id: String,
+    }
+
+    /// The text of each `<tag>` element in `xml`, unescaped.
+    fn tags(xml: &str, tag: &str) -> Vec<String> {
+        let (open, close) = (format!("<{tag}>"), format!("</{tag}>"));
+        xml.split(open.as_str())
+            .skip(1)
+            .filter_map(|rest| rest.split_once(close.as_str()).map(|(text, _)| text))
+            .map(|text| {
+                text.replace("&lt;", "<")
+                    .replace("&gt;", ">")
+                    .replace("&quot;", "\"")
+                    .replace("&apos;", "'")
+                    .replace("&amp;", "&")
+            })
+            .collect()
+    }
+
+    impl Raw {
+        fn new(b: &Bucket) -> Self {
+            let config = b.config();
+            let style = match config.style() {
+                UrlStyle::Path => rusty_s3::UrlStyle::Path,
+                UrlStyle::VirtualHost => rusty_s3::UrlStyle::VirtualHost,
+            };
+            let bucket = rusty_s3::Bucket::new(
+                config.endpoint().url().clone(),
+                style,
+                b.bucket.clone(),
+                b.region.clone(),
+            )
+            .expect("bucket");
+            let agent = ureq::Agent::new_with_config(
+                ureq::Agent::config_builder()
+                    .http_status_as_error(false)
+                    .max_redirects(0)
+                    .timeout_global(Some(config.deadline()))
+                    .build(),
+            );
+            Self {
+                bucket,
+                access: b.access.clone(),
+                secret: b.secret.clone(),
+                region: b.region.clone(),
+                tigris: config.provider() == Provider::Tigris,
+                agent,
+            }
+        }
+
+        /// Sends one signed request (`object` a full key, None the bucket) and
+        /// returns the body. A non-2xx status panics with the body, never the URL,
+        /// which carries the signature.
+        fn send(
+            &self,
+            method: rusty_s3::Method,
+            object: Option<&str>,
+            query: &[(&str, &str)],
+            body: Vec<u8>,
+        ) -> String {
+            let base = match object {
+                Some(key) => self.bucket.object_url(key),
+                None => self.bucket.base_url().clone(),
+            };
+            let headers: &[(&str, &str)] = if self.tigris {
+                &[("x-tigris-consistent", "true")]
+            } else {
+                &[]
+            };
+            // `sign` merges the query with its own sorted `X-Amz-*` pairs and assumes
+            // both are sorted; an unsorted one signs a canonical request the server
+            // does not rebuild (SignatureDoesNotMatch).
+            let mut query = query.to_vec();
+            query.sort_unstable();
+            let now = jiff::Timestamp::from_millisecond(real_now_ms().expect("clock"))
+                .expect("now in range");
+            let url = rusty_s3::signing::sign(
+                &now,
+                method,
+                base,
+                &self.access,
+                &self.secret,
+                None,
+                &self.region,
+                120,
+                query.iter().copied(),
+                headers.iter().copied(),
+            );
+            let mut request = ureq::http::Request::builder()
+                .method(method.to_str())
+                .uri(url.as_str());
+            for (name, value) in headers {
+                request = request.header(*name, *value);
+            }
+            let what = format!("{} {object:?}", method.to_str());
+            let mut response = self
+                .agent
+                .run(request.body(body).expect("request"))
+                .unwrap_or_else(|e| panic!("{what}: {e}"));
+            let status = response.status().as_u16();
+            let text = response.body_mut().read_to_string().unwrap_or_default();
+            assert!(
+                (200..300).contains(&status),
+                "{what}: status {status}: {text}"
+            );
+            text
+        }
+
+        /// Every multipart upload open under `prefix`, following the listing's
+        /// markers. Keys outside `prefix` are dropped, in case a server ignores it.
+        fn uploads(&self, prefix: &str) -> Vec<Open> {
+            let mut open = Vec::new();
+            let mut markers: Option<(String, String)> = None;
+            for _page in 0..100 {
+                let mut query = vec![("uploads", ""), ("prefix", prefix)];
+                if let Some((key, id)) = &markers {
+                    query.push(("key-marker", key.as_str()));
+                    query.push(("upload-id-marker", id.as_str()));
+                }
+                let xml = self.send(rusty_s3::Method::Get, None, &query, Vec::new());
+                for upload in tags(&xml, "Upload") {
+                    let key = tags(&upload, "Key").pop().expect("Key");
+                    let id = tags(&upload, "UploadId").pop().expect("UploadId");
+                    if key.starts_with(prefix) {
+                        open.push(Open { key, id });
+                    }
+                }
+                if tags(&xml, "IsTruncated").first().map(String::as_str) != Some("true") {
+                    return open;
+                }
+                let next = |tag: &str| tags(&xml, tag).pop().expect("a next marker");
+                markers = Some((next("NextKeyMarker"), next("NextUploadIdMarker")));
+            }
+            panic!("more than 100 pages of multipart uploads under {prefix}");
+        }
+
+        fn abort(&self, upload: &Open) {
+            let query = [("uploadId", upload.id.as_str())];
+            self.send(
+                rusty_s3::Method::Delete,
+                Some(&upload.key),
+                &query,
+                Vec::new(),
+            );
+        }
+
+        /// Starts an upload of `key`, sends its first part and leaves it open.
+        fn abandon(&self, key: &str) {
+            let created = self.send(
+                rusty_s3::Method::Post,
+                Some(key),
+                &[("uploads", "")],
+                Vec::new(),
+            );
+            let id = tags(&created, "UploadId").pop().expect("UploadId");
+            let query = [("partNumber", "1"), ("uploadId", id.as_str())];
+            self.send(rusty_s3::Method::Put, Some(key), &query, vec![7; 1024]);
+        }
+    }
+
+    /// Aborts every multipart upload under the replica's prefix; returns
+    /// (aborted, left).
+    fn abort_all(b: &Bucket) -> (usize, usize) {
+        let raw = Raw::new(b);
+        let prefix = format!("{}/", b.path);
+        let open = raw.uploads(&prefix);
+        for upload in &open {
+            raw.abort(upload);
+        }
+        (open.len(), raw.uploads(&prefix).len())
+    }
+
+    /// Deletes the replica's prefix when the test ends, passed or not: its
+    /// objects, then its open multipart uploads.
     struct Cleanup<'a>(&'a Bucket);
+
+    impl Cleanup<'_> {
+        /// Returns (objects deleted, uploads aborted, objects and uploads left).
+        fn run(&self) -> (usize, usize, usize) {
+            let (deleted, objects_left) = delete_all(self.0);
+            let (aborted, uploads_left) = abort_all(self.0);
+            eprintln!(
+                "CLEANUP deleted {deleted} objects and aborted {aborted} multipart uploads under {}; {objects_left} objects and {uploads_left} uploads left",
+                self.0.path
+            );
+            (deleted, aborted, objects_left + uploads_left)
+        }
+    }
 
     impl Drop for Cleanup<'_> {
         fn drop(&mut self) {
-            let (deleted, left) = delete_all(self.0);
-            eprintln!(
-                "CLEANUP deleted {deleted} objects under {}; {left} left",
-                self.0.path
+            let (_, _, left) = self.run();
+            assert!(
+                std::thread::panicking() || left == 0,
+                "{left} objects or multipart uploads left"
             );
-            assert!(std::thread::panicking() || left == 0, "{left} objects left");
         }
+    }
+
+    /// An upload left open, as Go leaves one when it is stopped mid-upload, is
+    /// aborted by the cleanup, and the prefix then lists none. Its own prefix
+    /// keeps it clear of the Go run's uploads, which are in flight meanwhile.
+    #[test]
+    #[ignore = "needs the Tigris bucket (just tigris-restore)"]
+    fn cleanup_aborts_an_upload_left_open() {
+        let b = bucket("abandoned-upload");
+        let cleanup = Cleanup(&b);
+        let raw = Raw::new(&b);
+        let key = format!("{}/0000/0000000000000001-0000000000000001.ltx", b.path);
+        raw.abandon(&key);
+        let open = raw.uploads(&format!("{}/", b.path));
+        assert_eq!(open.len(), 1, "the abandoned upload is listed");
+        assert_eq!(cleanup.run(), (0, 1, 0), "deleted, aborted, left");
     }
 
     fn print(row: &Row) {
@@ -766,7 +993,7 @@ dbs:
     #[test]
     #[ignore = "needs the Tigris bucket and Go v0.5.18 (just tigris-restore)"]
     fn go_written_tigris_replica_restores_the_same_in_rust_and_go() {
-        let b = bucket();
+        let b = bucket("go");
         let work = tempfile::tempdir().expect("tempdir");
         let _cleanup = Cleanup(&b);
         let size = Size::from_env();

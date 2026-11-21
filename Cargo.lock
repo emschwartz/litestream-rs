@@ -835,6 +835,7 @@ checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 name = "lsr-cli"
 version = "0.0.0"
 dependencies = [
+ "jiff",
  "lsr-compat",
  "lsr-config",
  "lsr-core",
@@ -846,10 +847,12 @@ dependencies = [
  "lsr-store-fs",
  "lsr-store-s3",
  "rusqlite",
+ "rusty-s3",
  "serde_json",
  "signal-hook",
  "tempfile",
  "thiserror",
+ "ureq",
 ]
 
 [[package]]

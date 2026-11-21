@@ -32,8 +32,13 @@ lsr-core = { workspace = true, features = ["testing"] }
 lsr-store-s3 = { workspace = true, features = ["testing"] }
 # The Tigris run (tests/tigris.rs) checkpoints the live database Go replicated.
 rusqlite.workspace = true
+# The Tigris run's cleanup lists and aborts multipart uploads, which no store call
+# does, signing them as the store signs its own requests.
+jiff.workspace = true
+rusty-s3.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
+ureq.workspace = true
 
 [lints]
 workspace = true
