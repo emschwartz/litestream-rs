@@ -33,7 +33,8 @@ use lsr_core::{
     VerifyError, plan, resolve, restore, verify,
 };
 use lsr_local::{
-    ClearError, CreateError, FileSink, IntegrityCheck, IntegrityFailure, clear_sidecars, preflight,
+    ClearError, CreateError, FileSink, IntegrityCheck, IntegrityFailure, PublishError,
+    clear_sidecars, preflight,
 };
 use lsr_store_fs::FsStore;
 use lsr_store_s3::{ConfigError, CredentialError};
@@ -295,6 +296,10 @@ pub enum CliError {
     /// SQLite found the restored database invalid; nothing was published.
     #[error("{0}; nothing was published")]
     Integrity(IntegrityFailure),
+    /// Publishing the restored database failed; the error says whether it is visible at
+    /// the output (complete and verified, but maybe not durable) or not there at all.
+    #[error("{0}")]
+    Publish(PublishError),
     /// The restore failed for another reason.
     #[error("{0}")]
     Restore(RestoreError),
@@ -338,10 +343,13 @@ impl From<RestoreError> for CliError {
                 source,
             } => match IntegrityFailure::in_io(&source) {
                 Some(failure) => Self::Integrity(failure.clone()),
-                None => Self::Restore(RestoreError::Sink {
-                    op: SinkOp::Publish,
-                    source,
-                }),
+                None => match PublishError::from_io(source) {
+                    Ok(publish) => Self::Publish(publish),
+                    Err(source) => Self::Restore(RestoreError::Sink {
+                        op: SinkOp::Publish,
+                        source,
+                    }),
+                },
             },
             other @ (RestoreError::Inventory(_)
             | RestoreError::Store(_)
@@ -454,6 +462,7 @@ pub fn exit_for_error(error: &CliError) -> Exit {
         | CliError::Sidecar { .. }
         | CliError::Create(_)
         | CliError::Clear(_)
+        | CliError::Publish(_)
         | CliError::Output(_) => Exit::Environment,
     }
 }
@@ -581,6 +590,7 @@ fn no_ltx_folder(error: CliError, path: PathBuf) -> CliError {
         | CliError::Inventory(_)
         | CliError::NoLtxFolder { .. }
         | CliError::Integrity(_)
+        | CliError::Publish(_)
         | CliError::Restore(_)
         | CliError::Verify(_)
         | CliError::Sidecar { .. }

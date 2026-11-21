@@ -25,8 +25,11 @@
 //! the target, which fails when the target exists, so a database a rival
 //! created meanwhile is never overwritten; fsync the directory; unlink the
 //! scratch; fsync the directory. Nothing but the sink's own scratch is ever
-//! removed. A step that fails after the link leaves the target in place with
-//! its data already fsynced; the error says durability of the name is unknown.
+//! removed. A failed publish says which way it left the target ([PublishError],
+//! found with [PublishError::in_io]): a step before the link leaves nothing at
+//! the target ([PublishError::NotVisible]); a step after it leaves the target in
+//! place with its data already fsynced, but the name, or the scratch's removal,
+//! may not survive a crash ([PublishError::VisibleNotDurable]).
 //! An fsync is never retried: after a failed fsync the kernel may have dropped
 //! the dirty pages, and a second one would report success over lost data.
 //!
@@ -99,6 +102,152 @@ pub enum ClearError {
         /// The I/O error.
         source: io::Error,
     },
+}
+
+/// One step of [FileSink::publish] after the SQLite check, for [PublishError].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PublishStep {
+    /// The fsync of the scratch's data.
+    SyncScratch,
+    /// The check that the target and its sidecars are still absent.
+    CheckAbsent,
+    /// The hard link of the scratch to the target.
+    Link,
+    /// The fsync of the directory that makes the target's name durable.
+    SyncName,
+    /// The unlink of the scratch's name.
+    RemoveScratch,
+    /// The fsync of the directory that makes the unlink durable.
+    SyncRemoval,
+}
+
+impl PublishStep {
+    /// Whether the target is visible once this step has failed.
+    #[must_use]
+    pub const fn after_link(self) -> bool {
+        match self {
+            Self::SyncScratch | Self::CheckAbsent | Self::Link => false,
+            Self::SyncName | Self::RemoveScratch | Self::SyncRemoval => true,
+        }
+    }
+}
+
+impl std::fmt::Display for PublishStep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::SyncScratch => "syncing the restored data",
+            Self::CheckAbsent => "checking the target is still absent",
+            Self::Link => "linking the restored file into place",
+            Self::SyncName => "syncing the directory after the link",
+            Self::RemoveScratch => "removing the scratch file",
+            Self::SyncRemoval => "syncing the directory after removing the scratch",
+        })
+    }
+}
+
+/// Why [FileSink::publish] failed after the SQLite check, by what it left at the target.
+#[derive(Debug, Error)]
+pub enum PublishError {
+    /// Nothing was made visible: the target and its sidecars are as they were.
+    #[error("{} was not published ({step}): {source}", .target.display())]
+    NotVisible {
+        /// The target.
+        target: PathBuf,
+        /// The step that failed.
+        step: PublishStep,
+        /// The I/O error.
+        source: io::Error,
+    },
+    /// The target exists with its data fsynced, but the step that failed means its name,
+    /// or the removal of the scratch, may not survive a crash. It is not removed: it is a
+    /// complete, verified database.
+    #[error("{} is published but may not survive a crash ({step}): {source}", .target.display())]
+    VisibleNotDurable {
+        /// The target.
+        target: PathBuf,
+        /// The step that failed.
+        step: PublishStep,
+        /// The I/O error.
+        source: io::Error,
+    },
+}
+
+impl PublishError {
+    fn at(target: &Path, step: PublishStep, source: io::Error) -> Self {
+        let target = target.to_path_buf();
+        if step.after_link() {
+            Self::VisibleNotDurable {
+                target,
+                step,
+                source,
+            }
+        } else {
+            Self::NotVisible {
+                target,
+                step,
+                source,
+            }
+        }
+    }
+
+    /// The failure inside an error [FileSink::publish] returned, if that is why it failed.
+    #[must_use]
+    pub fn in_io(err: &io::Error) -> Option<&Self> {
+        err.get_ref().and_then(|inner| inner.downcast_ref::<Self>())
+    }
+
+    /// The failure inside an error [FileSink::publish] returned, owned; the error back
+    /// when it holds none.
+    ///
+    /// # Errors
+    /// `err` itself when it holds no [PublishError].
+    pub fn from_io(err: io::Error) -> Result<Self, io::Error> {
+        if Self::in_io(&err).is_none() {
+            return Err(err);
+        }
+        let kind = err.kind();
+        match err.into_inner().map(|inner| inner.downcast::<Self>()) {
+            Some(Ok(publish)) => Ok(*publish),
+            Some(Err(other)) => Err(io::Error::new(kind, other)),
+            None => Err(io::Error::from(kind)),
+        }
+    }
+
+    fn into_io(self) -> io::Error {
+        let kind = match &self {
+            Self::NotVisible { source, .. } | Self::VisibleNotDurable { source, .. } => {
+                source.kind()
+            }
+        };
+        io::Error::new(kind, self)
+    }
+}
+
+/// The file system steps of a publish, behind a trait so a test can fail each one.
+trait PublishFs {
+    fn sync_scratch(&mut self) -> io::Result<()>;
+    fn first_present(&self) -> io::Result<Option<PathBuf>>;
+    fn link(&self) -> io::Result<()>;
+    fn sync_dir(&self) -> io::Result<()>;
+    fn remove_scratch(&self) -> io::Result<()>;
+}
+
+/// The publish steps after the SQLite check, in order, each failure tagged with its step.
+fn publish_steps(fs: &mut impl PublishFs, target: &Path) -> Result<(), PublishError> {
+    let at = |step| move |source| PublishError::at(target, step, source);
+    fs.sync_scratch().map_err(at(PublishStep::SyncScratch))?;
+    if let Some(path) = fs.first_present().map_err(at(PublishStep::CheckAbsent))? {
+        let source = io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("{} appeared during the restore", path.display()),
+        );
+        return Err(at(PublishStep::CheckAbsent)(source));
+    }
+    fs.link().map_err(at(PublishStep::Link))?;
+    fs.sync_dir().map_err(at(PublishStep::SyncName))?;
+    fs.remove_scratch()
+        .map_err(at(PublishStep::RemoveScratch))?;
+    fs.sync_dir().map_err(at(PublishStep::SyncRemoval))
 }
 
 /// A database being restored into a scratch file beside its target.
@@ -259,12 +408,27 @@ impl FileSink {
     pub fn scratch_path(&self) -> &Path {
         &self.scratch
     }
+}
 
-    fn link_and_sync(&self) -> io::Result<()> {
-        fs::hard_link(&self.scratch, &self.target)?;
-        sync_dir(&self.target)?;
-        fs::remove_file(&self.scratch)?;
+impl PublishFs for FileSink {
+    fn sync_scratch(&mut self) -> io::Result<()> {
+        self.file.sync_all()
+    }
+
+    fn first_present(&self) -> io::Result<Option<PathBuf>> {
+        first_present(&self.target)
+    }
+
+    fn link(&self) -> io::Result<()> {
+        fs::hard_link(&self.scratch, &self.target)
+    }
+
+    fn sync_dir(&self) -> io::Result<()> {
         sync_dir(&self.target)
+    }
+
+    fn remove_scratch(&self) -> io::Result<()> {
+        fs::remove_file(&self.scratch)
     }
 }
 
@@ -305,16 +469,14 @@ impl DatabaseSink for FileSink {
         Ok(total)
     }
 
+    /// # Errors
+    /// An [IntegrityFailure] (found with [IntegrityFailure::in_io]) when SQLite finds the
+    /// database invalid, else a [PublishError] (found with [PublishError::in_io]) saying
+    /// whether the target is visible.
     fn publish(mut self) -> io::Result<()> {
         integrity::check(&self.scratch, self.integrity)?;
-        self.file.sync_all()?;
-        if let Some(path) = first_present(&self.target)? {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("{} appeared during the restore", path.display()),
-            ));
-        }
-        self.link_and_sync()?;
+        let target = self.target.clone();
+        publish_steps(&mut self, &target).map_err(PublishError::into_io)?;
         self.published = true;
         Ok(())
     }
@@ -327,6 +489,9 @@ impl Drop for FileSink {
         }
     }
 }
+
+#[cfg(test)]
+mod publish_tests;
 
 #[cfg(test)]
 mod tests {

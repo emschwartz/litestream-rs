@@ -312,3 +312,41 @@ fn dry_run_over_s3_plans_what_the_restore_applies() {
     }
     assert!(stamped > 0, "an as-of target read stamps");
 }
+
+/// A publish that failed says whether the database is at the output: before the link it
+/// is not there; after it, it is there (complete and verified) but may not be durable.
+#[test]
+fn a_publish_failure_says_whether_the_database_is_visible() {
+    let output = Path::new("/restore/app.db");
+    for (error, visible) in [
+        (
+            lsr_local::PublishError::NotVisible {
+                target: output.to_owned(),
+                step: lsr_local::PublishStep::Link,
+                source: std::io::Error::other("disk full"),
+            },
+            false,
+        ),
+        (
+            lsr_local::PublishError::VisibleNotDurable {
+                target: output.to_owned(),
+                step: lsr_local::PublishStep::SyncName,
+                source: std::io::Error::other("fsync failed"),
+            },
+            true,
+        ),
+    ] {
+        let failed = RestoreError::Sink {
+            op: SinkOp::Publish,
+            source: std::io::Error::other(error),
+        };
+        let cli = CliError::from(failed);
+        assert!(matches!(cli, CliError::Publish(_)), "{cli:?}");
+        assert_eq!(exit_for_error(&cli), Exit::Environment);
+        let line = crate::render::error_line(&cli);
+        assert!(line.contains("/restore/app.db"), "{line}");
+        let says_visible = line.contains("is published but may not survive a crash");
+        let says_absent = line.contains("was not published");
+        assert_eq!((says_visible, says_absent), (visible, !visible), "{line}");
+    }
+}
