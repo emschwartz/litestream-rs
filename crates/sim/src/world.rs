@@ -10,6 +10,8 @@
 //! `Faults<YieldEachCall<Recorder<MemStore>>>`. Both keep a raw `MemStore` handle for the
 //! oracle and for power loss, so neither a fault nor a yield touches a check.
 
+use std::sync::Arc;
+
 use lsr_core::conformance::block_on;
 use lsr_core::{
     Entropy, FakeClock, FileInfo, FileKey, MemStore, RecordingSleeper, SeededEntropy, StoreError,
@@ -19,11 +21,12 @@ use lsr_wal::{Salts, WalOffset};
 
 use crate::exec::{Polls, RunEnd, run_until};
 use crate::model::{CommitId, Model, PageImage};
-use crate::oracle::{Acked, Checked, Violation, check};
+use crate::oracle::{Acked, Checked, Ground, Violation, Windows, check_with};
 use crate::seed::Seed;
 use crate::sqlite::{AppCommit, CrashKind, OtherProcessMode, SimSqlite};
 use crate::store::{
-    FaultHandle, Faults, Lost, Recorder, RecorderLog, Volatile, VolatileHandle, YieldEachCall,
+    FaultHandle, Faults, HighWater, Lost, Recorder, RecorderLog, Volatile, VolatileHandle,
+    YieldEachCall,
 };
 
 /// The staging store the actor sees.
@@ -187,8 +190,11 @@ pub struct World {
     pub seed: Seed,
     /// SQLite's rules.
     pub sqlite: SimSqlite,
-    /// The clock the actor reads.
-    pub clock: FakeClock,
+    /// The clock the actor reads; the recorders read it too.
+    pub clock: Arc<FakeClock>,
+    /// The latest time the actor has been told: the run loop notes each
+    /// tick's, and the recorders read it.
+    pub high: HighWater,
     /// The sleeper the actor waits on.
     pub sleeper: RecordingSleeper,
     /// The actor's randomness.
@@ -227,11 +233,13 @@ impl World {
     #[must_use]
     pub fn new(seed: Seed, page_size: PageSize, db_pages: u32) -> Self {
         let sqlite = SimSqlite::new(page_size, db_pages, seed.stream(1));
+        let clock = Arc::new(FakeClock::new(Timestamp::from_unix_millis(EPOCH_MILLIS)));
+        let high = HighWater::default();
         let staging_raw = MemStore::new();
         let remote_raw = MemStore::new();
         let volatile = Volatile::new(staging_raw.clone());
         let volatile_handle = volatile.handle();
-        let staging_recorder = Recorder::new(volatile);
+        let staging_recorder = Recorder::new(volatile).with_clock(Arc::clone(&clock), high.clone());
         let staging_recorder_log = staging_recorder.log();
         let staging = Faults::new(
             YieldEachCall::new(staging_recorder),
@@ -239,7 +247,8 @@ impl World {
             seed.stream(2),
         )
         .volatile_on_late_error(volatile_handle.clone());
-        let remote_recorder = Recorder::new(remote_raw.clone());
+        let remote_recorder =
+            Recorder::new(remote_raw.clone()).with_clock(Arc::clone(&clock), high.clone());
         let remote_recorder_log = remote_recorder.log();
         let remote = Faults::new(
             YieldEachCall::new(remote_recorder),
@@ -251,7 +260,8 @@ impl World {
         Self {
             seed,
             sqlite,
-            clock: FakeClock::new(Timestamp::from_unix_millis(EPOCH_MILLIS)),
+            clock,
+            high,
             sleeper: RecordingSleeper::new(),
             entropy: SeededEntropy::new(seed.stream(4)),
             staging_faults: staging.handle(),
@@ -596,7 +606,7 @@ impl World {
         }) else {
             return Ok(false);
         };
-        let at = lsr_core::Clock::now(&self.clock);
+        let at = lsr_core::Clock::now(self.clock.as_ref());
         let mut up = block_on(self.remote_raw.begin_upload(&key, at))?;
         block_on(lsr_core::Upload::write(&mut up, &bytes))?;
         block_on(lsr_core::Upload::commit(up))?;
@@ -743,16 +753,23 @@ impl World {
             })
     }
 
-    /// Judges the replica.
+    /// Judges the replica, and retention's deletes against `retention`.
     ///
     /// # Errors
     /// The first [`Violation`].
-    pub fn check(&self) -> Result<Checked, Violation> {
-        check(
+    pub fn check(&self, retention: Option<Windows>) -> Result<Checked, Violation> {
+        let exempt = self.remote_faults.rejected();
+        let ground = Ground {
+            staging: Some(&self.staging_recorder),
+            retention,
+            exempt: &exempt,
+        };
+        check_with(
             &self.model,
             &self.remote_recorder,
             &self.remote_raw,
             &self.acked,
+            ground,
         )
     }
 }

@@ -7,26 +7,34 @@
 //! image. A file's WAL origin names the commit that ended it, so the oracle maps
 //! a transaction id to a commit without reading a single page of a file.
 //!
-//! Two properties are checked, over the unfaulted store handle:
+//! What is checked, over the unfaulted store handle:
 //!
-//! - every transaction from the oldest snapshot to the newest restores to the
-//!   image of the commit it covers, or is refused because it lies strictly
-//!   inside a kept compacted file (a refusal the planner documents);
+//! - every transaction from 1 to the newest gets the answer the planner's
+//!   contract gives for the listing ([`crate::contract`], derived from the
+//!   contract's text, not the planner's code): a plan restores to the image of
+//!   the commit it covers, and a refusal is accepted only where no chain of
+//!   kept files reaches the transaction exactly. From the oldest snapshot on,
+//!   only a refusal inside a kept compacted file is history the replica may
+//!   lack;
 //! - `Latest` restores to the image of its commit, and is not older than the
-//!   newest transaction the engine acknowledged, except across a rewind.
+//!   newest transaction the engine acknowledged, except across a rewind;
+//! - with the staging recorder, every created-at time the replica took is a
+//!   stamp the simulator's clock allows, and `AsOf` restores at instants
+//!   around each created-at time get the contract's answer and are never
+//!   newer than the instant (`as_of`);
+//! - with retention windows, no delete removed a file younger than its
+//!   window (`retention`).
 
 use std::collections::BTreeMap;
 use std::fmt;
 
 use lsr_core::conformance::block_on;
-use lsr_core::{
-    Did, FileInfo, Inventory, MemSink, MemStore, PlanOutcome, RestoreError, RestoreTarget,
-    is_snapshot_start, restore,
-};
-use lsr_ltx::{Txid, TxidRange};
+use lsr_core::{Did, FileKey, Inventory, MemStore, PlanOutcome, RestoreTarget, is_snapshot_start};
+use lsr_ltx::{Timestamp, Txid, TxidRange};
 use lsr_wal::Salts;
 use thiserror::Error;
 
+use crate::contract::{self, Answer, Expected};
 use crate::model::{CommitId, Model, PageImage};
 use crate::store::{RecorderEvent, RecorderLog};
 
@@ -141,6 +149,50 @@ pub enum Violation {
         /// The most allowed.
         limit: u64,
     },
+    /// The planner answered something its contract does not allow.
+    #[error("restoring {target:?} gave {got} where the planner's contract says {expected}")]
+    WrongAnswer {
+        /// What was asked.
+        target: RestoreTarget,
+        /// What the contract allows, as the oracle derived it.
+        expected: Expected,
+        /// What the restore answered.
+        got: Box<Answer>,
+    },
+    /// A replica file's created-at time is not the time its newest
+    /// transaction was staged.
+    #[error(
+        "{key:?} was put as created at {created_at:?}, a time no staged file that ends at its last transaction was stamped with"
+    )]
+    WrongCreatedAt {
+        /// The file.
+        key: FileKey,
+        /// The created-at time it was put with.
+        created_at: Timestamp,
+    },
+    /// An `AsOf` restore reached a transaction that was first staged at or
+    /// after the instant: a later state than the one asked for.
+    #[error("restoring as of {instant:?} reached {reached}, first staged at {staged:?}")]
+    AsOfTooNew {
+        /// The instant asked for.
+        instant: Timestamp,
+        /// The transaction reached.
+        reached: u64,
+        /// When the first file ending at it was staged.
+        staged: Timestamp,
+    },
+    /// Retention deleted a file younger than its window.
+    #[error(
+        "{key:?}, created at {created_at:?}, was deleted when the engine had been told {latest:?}"
+    )]
+    RetentionTooEager {
+        /// The file.
+        key: FileKey,
+        /// Its created-at time.
+        created_at: Timestamp,
+        /// The latest time the engine had been told when it deleted it.
+        latest: Timestamp,
+    },
     /// The engine reported its own bug, or the oracle could not decide.
     #[error("bug fault: {context}")]
     BugFault {
@@ -216,10 +268,25 @@ impl Acked {
 pub struct Checked {
     /// Transactions restored and compared.
     pub restored: u32,
-    /// Transactions refused for lying inside a compacted file.
+    /// Transactions from the oldest snapshot on refused for lying inside a
+    /// compacted file.
     pub inside_file: u32,
+    /// Transactions below the oldest snapshot's end, refused as the
+    /// contract says.
+    pub below_base: u32,
     /// What `Latest` reached.
     pub latest: Option<Txid>,
+    /// `AsOf` restores that met their instant exactly.
+    pub as_of_planned: u32,
+    /// `AsOf` restores whose instant fell inside a file.
+    pub as_of_inside: u32,
+    /// `AsOf` restores the contract refuses.
+    pub as_of_refused: u32,
+    /// Replica files whose created-at time was judged against the staging
+    /// recorder.
+    pub stamps: u32,
+    /// Deleted keys judged against their retention window.
+    pub deletes: u32,
 }
 
 impl Checked {
@@ -228,9 +295,15 @@ impl Checked {
         reach.bump("check.runs");
         reach.add("check.txid.restored", u64::from(self.restored));
         reach.add("check.txid.inside", u64::from(self.inside_file));
+        reach.add("check.txid.below_base", u64::from(self.below_base));
         if self.latest.is_some() {
             reach.bump("check.latest");
         }
+        reach.add("check.asof.planned", u64::from(self.as_of_planned));
+        reach.add("check.asof.inside", u64::from(self.as_of_inside));
+        reach.add("check.asof.refused", u64::from(self.as_of_refused));
+        reach.add("check.stamps", u64::from(self.stamps));
+        reach.add("check.deletes", u64::from(self.deletes));
     }
 }
 
@@ -247,6 +320,7 @@ fn covers(model: &Model, recorder: &RecorderLog) -> Result<BTreeMap<Txid, Commit
             key,
             header: Some(header),
             origin,
+            ..
         } = event
         else {
             continue;
@@ -328,55 +402,17 @@ fn first_diff(image: &PageImage, got: &lsr_core::Database) -> Option<u32> {
     })
 }
 
-enum Restored {
-    Same(Txid),
-    Inside,
-}
-
-fn restore_and_compare(
-    remote: &MemStore,
-    target: RestoreTarget,
-    files: &[FileInfo],
-    model: &Model,
-    cover: &BTreeMap<Txid, CommitId>,
-) -> Result<Restored, Violation> {
-    let sink = MemSink::new();
-    match block_on(restore(remote, target, sink.clone())) {
-        Ok(done) => {
-            let reached = done.reached();
-            let commit = cover
-                .get(&reached)
-                .and_then(|id| model.rec(*id))
-                .ok_or_else(|| {
-                    bug_fault(format!("no commit known for transaction {}", reached.get()))
-                })?;
-            let db = sink
-                .published()
-                .ok_or_else(|| bug_fault("restore returned without publishing"))?;
-            if let Some(page) = first_diff(&commit.image, &db) {
-                return Err(Violation::RestoreMismatch {
-                    target,
-                    commit: commit.id,
-                    first_diff: page,
-                });
-            }
-            Ok(Restored::Same(reached))
-        }
-        Err(RestoreError::NoPlan(no)) => match (target, no.outcome()) {
-            (RestoreTarget::Txid(t), PlanOutcome::InsideFile { file, .. })
-                if files.iter().any(|f| {
-                    f.key == *file && f.key.range().min() <= t && t < f.key.range().max()
-                }) =>
-            {
-                Ok(Restored::Inside)
-            }
-            (_, outcome) => Err(Violation::RestoreRefused {
-                target,
-                outcome: outcome.clone(),
-            }),
-        },
-        Err(other) => Err(bug_fault(format!("restore {target:?}: {other}"))),
-    }
+/// What the oracle knows besides the model and the replica's recorder.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Ground<'a> {
+    /// What the staging store really did, read with the simulator's clock:
+    /// the created-at time of every replica file is judged against it.
+    pub staging: Option<&'a RecorderLog>,
+    /// How long retention keeps files, when the run judges its deletes.
+    pub retention: Option<Windows>,
+    /// Keys the engine may delete whatever their age: commits the store
+    /// reported failed or wrong.
+    pub exempt: &'a [FileKey],
 }
 
 /// Judges the replica. `remote` is the raw store handle: no fault or yield
@@ -390,26 +426,42 @@ pub fn check(
     remote: &MemStore,
     acked: &Acked,
 ) -> Result<Checked, Violation> {
+    check_with(model, recorder, remote, acked, Ground::default())
+}
+
+/// [`check`] with what else the oracle knows: with the staging recorder it
+/// also judges every created-at time and how new an `AsOf` restore may be.
+///
+/// # Errors
+/// The first [`Violation`] found.
+pub fn check_with(
+    model: &Model,
+    recorder: &RecorderLog,
+    remote: &MemStore,
+    acked: &Acked,
+    ground: Ground<'_>,
+) -> Result<Checked, Violation> {
     let cover = covers(model, recorder)?;
     let inventory = block_on(Inventory::load(remote))
         .map_err(|err| bug_fault(format!("listing the replica: {err}")))?;
     let files = inventory.files();
     let mut out = Checked::default();
+    let judge = as_of::Judge {
+        remote,
+        files,
+        model,
+        cover: &cover,
+        staging: ground.staging,
+    };
     let oldest = files
         .iter()
-        .filter(|f| is_snapshot_start(f) || f.key.range().min() == Txid::MIN)
+        .filter(|f| is_snapshot_start(f))
         .map(|f| f.key.range().max())
         .min();
-    if let (Some(from), Some(newest)) = (oldest, inventory.newest()) {
-        let mut raw = from.get();
-        while raw <= newest.get() {
-            let Some(txid) = Txid::new(raw) else { break };
-            match restore_and_compare(remote, RestoreTarget::Txid(txid), files, model, &cover)? {
-                Restored::Same(_) => out.restored = out.restored.saturating_add(1),
-                Restored::Inside => out.inside_file = out.inside_file.saturating_add(1),
-            }
-            raw = raw.saturating_add(1);
-        }
+    let reach = contract::Reach::over(files, |_| true);
+    let newest = inventory.newest().map_or(0, Txid::get);
+    for txid in (1..=newest).filter_map(Txid::new) {
+        judge.txid(txid, &reach, oldest, &mut out)?;
     }
     if files.is_empty() {
         return match acked.highest() {
@@ -420,10 +472,14 @@ pub fn check(
             None => Ok(out),
         };
     }
-    let Restored::Same(latest) =
-        restore_and_compare(remote, RestoreTarget::Latest, files, model, &cover)?
-    else {
-        return Err(bug_fault("latest reported a refusal inside a file"));
+    let latest = match judge.restore(RestoreTarget::Latest)? {
+        Answer::Reached { txid, .. } => txid,
+        Answer::Refused(outcome) => {
+            return Err(Violation::RestoreRefused {
+                target: RestoreTarget::Latest,
+                outcome,
+            });
+        }
     };
     if let Some(acked) = acked.highest().filter(|a| *a > latest) {
         return Err(Violation::LatestLostAck {
@@ -432,8 +488,20 @@ pub fn check(
         });
     }
     out.latest = Some(latest);
+    if let Some(staging) = ground.staging {
+        out.stamps = as_of::stamps(recorder, staging)?;
+    }
+    if let Some(windows) = ground.retention {
+        out.deletes = retention::deletes(recorder, windows, ground.exempt)?;
+    }
+    judge.all(&mut out)?;
     Ok(out)
 }
+
+mod as_of;
+mod retention;
+
+pub use retention::Windows;
 
 #[cfg(test)]
 mod tests;

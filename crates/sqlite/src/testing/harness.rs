@@ -756,6 +756,7 @@ impl<B: Backend> Rig<B> {
                 key,
                 header: Some(_),
                 origin,
+                ..
             } = event
             else {
                 continue;
