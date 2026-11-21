@@ -28,8 +28,43 @@ fn restore_latest_is_the_default_target() {
             target: RestoreTarget::Latest,
             clear_sidecars: false,
             integrity_check: IntegrityCheck::Off,
+            if_db_not_exists: false,
+            if_replica_exists: false,
+            dry_run: false,
+            json: false,
         }))
     );
+}
+
+/// Go's restore switches, under Go's names with this CLI's two dashes.
+#[test]
+fn restore_takes_the_skip_dry_run_and_json_switches() {
+    for (flag, pick) in [
+        ("--if-db-not-exists", 0_usize),
+        ("--if-replica-exists", 1),
+        ("--dry-run", 2),
+        ("--json", 3),
+    ] {
+        let Ok(Command::Restore(args)) = parsed(&format!("restore --replica r {flag} --output o"))
+        else {
+            panic!("{flag} did not parse");
+        };
+        let got = [
+            args.if_db_not_exists,
+            args.if_replica_exists,
+            args.dry_run,
+            args.json,
+        ];
+        let mut want = [false; 4];
+        want[pick] = true;
+        assert_eq!(got, want, "{flag}");
+    }
+    let Ok(Command::Restore(args)) = parsed(
+        "restore --replica r --output o --dry-run --json --if-db-not-exists --if-replica-exists",
+    ) else {
+        panic!("all four did not parse together");
+    };
+    assert!(args.dry_run && args.json && args.if_db_not_exists && args.if_replica_exists);
 }
 
 #[test]

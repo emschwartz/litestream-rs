@@ -401,16 +401,16 @@
 "TestRestoreCommand_ParallelismDeprecated" = { reason = "Go-only: a deprecated -parallelism flag kept for old scripts. Rust's restore reads sequentially and never had the flag." }
 "TestRestoreCommand_RestoreReportsAdvancedTXID" = { reason = "Rust deliberately differs: a restore plans from one listing snapshot (docs/PLAN.md phase 1, restore planner) and reports the txid it planned (lsr-core restore::tests::restore_reports_stamps_read), so a replica that advances mid-restore does not change the answer." }
 "TestRestoreCommand_RunAllowsEmptyOutput" = { reason = "Rust deliberately differs: restore refuses any existing target, even an empty file (lsr-local tests::create_refuses_a_target_that_exists), because publish never overwrites (docs/PLAN.md phase 1, restore executor)." }
-"TestRestoreCommand_RunDryRunJSONOutput" = { missing = "A restore dry run that prints the plan (files, target txid) as JSON and writes nothing; `lsr restore` has no dry run." }
+"TestRestoreCommand_RunDryRunJSONOutput" = { counterpart = ["lsr-cli::cli::cli::dry_run_json_lists_the_chain_the_restore_applies", "lsr-cli::cli::cli::dry_run_prints_the_plan_and_writes_nothing", "lsr-cli::bin/lsr::run::tests::dry_run_over_s3_plans_what_the_restore_applies"] }
 "TestRestoreCommand_RunForceOverwritesExistingOutput" = { reason = "Rust deliberately differs: there is no -force; restore never overwrites an existing target (lsr-cli::cli an_existing_output_exits_3_and_stays_byte_identical) and the caller removes it first." }
-"TestRestoreCommand_RunIfReplicaExists" = { missing = "restore -if-replica-exists: on an empty replica the command exits 0 and writes no file (used by container entrypoints); `lsr restore` has no such flag and an empty replica is an error." }
-"TestRestoreCommand_RunJSONOutput" = { missing = "`lsr restore --json` reporting the restored txid and path; verify and files have JSON output, restore does not." }
+"TestRestoreCommand_RunIfReplicaExists" = { counterpart = ["lsr-cli::cli::cli::if_replica_exists_exits_0_on_an_empty_replica_and_writes_nothing", "lsr-cli::cli::cli::if_replica_exists_still_refuses_what_a_non_empty_replica_cannot_meet"] }
+"TestRestoreCommand_RunJSONOutput" = { counterpart = "lsr-cli::cli::cli::restore_json_reports_go_s_fields" }
 "TestRestoreCommand_RunMissingOutputPathForReplicaURL" = { counterpart = "lsr-cli::bin/lsr::args::tests::missing_required_flag_for_every_required_flag" }
 "TestRestoreCommand_RunOrphanedSidecars" = { counterpart = ["lsr-cli::cli::cli::a_stale_sidecar_refuses_until_clear_sidecars", "lsr-local::tests::create_refuses_each_sidecar_and_removes_nothing"] }
 "TestRestoreCommand_RunRequiresForceForExistingJournal" = { counterpart = "lsr-local::tests::a_stale_journal_blocks_the_restore_until_cleared" }
 "TestRestoreCommand_RunRequiresForceForExistingOutput" = { counterpart = "lsr-cli::cli::cli::an_existing_output_exits_3_and_stays_byte_identical" }
 "TestRestoreCommand_RunSuggestedOutputArgs" = { counterpart = "lsr-cli::cli::cli::usage_errors_exit_64_with_one_stderr_line_and_no_stdout" }
-"TestRestoreCommand_RunUnavailableTarget" = { counterpart = ["lsr-cli::cli::cli::every_target_matches_the_manifest", "lsr-core::plan::tests::a_transaction_beyond_the_newest_is_its_own_outcome"] }
+"TestRestoreCommand_RunUnavailableTarget" = { counterpart = ["lsr-cli::cli::cli::every_target_matches_the_manifest", "lsr-cli::cli::cli::dry_run_json_lists_the_chain_the_restore_applies", "lsr-core::plan::tests::a_transaction_beyond_the_newest_is_its_own_outcome"] }
 
 ["litestream/cmd/litestream/start_stop_test.go"]
 "TestStartCommand_RunAlreadyRunning" = { reason = "A CLI command that talks to the running daemon over the control socket; the control socket is not in v1 (docs/PLAN.md section 1)." }

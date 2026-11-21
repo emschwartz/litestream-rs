@@ -646,4 +646,325 @@ mod cli {
         assert_eq!(run.code, 0, "{}", run.stderr);
         assert_eq!(fs::read(&output).expect("read"), db);
     }
+
+    fn json_of(run: &Run) -> Value {
+        assert_eq!(
+            run.stdout.lines().count(),
+            1,
+            "one JSON line: {}",
+            run.stdout
+        );
+        serde_json::from_str(&run.stdout).expect("stdout is JSON")
+    }
+
+    fn strings(extra: &[&str]) -> Vec<String> {
+        extra.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// A directory replica that holds no LTX file: what a fresh replica looks like.
+    fn empty_replica(root: &Path) -> PathBuf {
+        let replica = root.join("replica");
+        fs::create_dir_all(replica.join("ltx")).expect("ltx dir");
+        replica
+    }
+
+    fn restore_from(replica: &Path, output: &Path, extra: &[&str]) -> Run {
+        let mut args = vec![
+            "restore",
+            "--replica",
+            path_str(replica),
+            "--output",
+            path_str(output),
+        ];
+        args.extend_from_slice(extra);
+        lsr(&args)
+    }
+
+    fn latest_chain(staged: &Staged) -> lsr_core::ContiguousChain {
+        let inventory = block_on(Inventory::load(&FsStore::new(staged.replica()))).expect("list");
+        let PlanOutcome::Plan(chain) = lsr_core::plan(&inventory, lsr_core::KeyTarget::Latest)
+        else {
+            panic!("the small fixture has a plan")
+        };
+        chain
+    }
+
+    /// Go's `-if-db-not-exists`: an existing output ends the command with 0 before
+    /// the replica is opened, and nothing is touched.
+    #[test]
+    fn if_db_not_exists_skips_an_existing_output_without_reading_the_replica() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = dir.path().join("out.db");
+        fs::write(&output, b"live").expect("plant");
+        let nowhere = dir.path().join("no-such-replica");
+        let run = restore_from(&nowhere, &output, &["--if-db-not-exists"]);
+        assert_eq!((run.code, run.stderr.as_str()), (0, ""), "{}", run.stdout);
+        assert!(run.stdout.contains("already exists"), "{}", run.stdout);
+        assert_eq!(fs::read(&output).expect("read"), b"live");
+        assert_eq!(fs::read_dir(dir.path()).expect("dir").count(), 1);
+        let json = json_of(&restore_from(
+            &nowhere,
+            &output,
+            &["--if-db-not-exists", "--json"],
+        ));
+        assert_eq!(json["skipped"], json!("output_exists"), "{json}");
+        assert_eq!(json["db_path"], json!(path_str(&output)), "{json}");
+
+        // Absent output: the flag changes nothing and the restore runs.
+        let (staged, manifest) = small_fixture();
+        let fresh = dir.path().join("fresh.db");
+        let run = restore(&staged, &fresh, &strings(&["--if-db-not-exists"]));
+        assert_eq!(run.code, 0, "{}", run.stderr);
+        assert_pages_equal(&fresh, latest_pages(&manifest), "absent output");
+    }
+
+    /// Go's `-if-replica-exists`: a replica with no LTX file ends with 0 and no file;
+    /// without the flag the same replica is a refused restore.
+    #[test]
+    fn if_replica_exists_exits_0_on_an_empty_replica_and_writes_nothing() {
+        let work = tempfile::tempdir().expect("tempdir");
+        let replica = empty_replica(work.path());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = dir.path().join("out.db");
+        let refused = restore_from(&replica, &output, &[]);
+        assert_eq!((refused.code, refused.stdout.as_str()), (2, ""));
+        for extra in [
+            &["--if-replica-exists"][..],
+            &["--if-replica-exists", "--txid", "0000000000000005"],
+            &["--if-replica-exists", "--timestamp", "2026-01-01T00:00:00Z"],
+            &["--if-replica-exists", "--dry-run"],
+        ] {
+            let run = restore_from(&replica, &output, extra);
+            assert_eq!((run.code, run.stderr.as_str()), (0, ""), "{extra:?}");
+            assert!(
+                run.stdout.contains("no backup"),
+                "{extra:?}: {}",
+                run.stdout
+            );
+            assert!(dir_is_empty(dir.path()), "{extra:?}");
+        }
+        let json = json_of(&restore_from(
+            &replica,
+            &output,
+            &["--if-replica-exists", "--json"],
+        ));
+        assert_eq!(json["skipped"], json!("empty_replica"), "{json}");
+        assert!(dir_is_empty(dir.path()));
+    }
+
+    /// Stricter than Go, which exits 0 on every "transaction not available": the
+    /// flag covers an empty replica only. A replica with files that cannot meet the
+    /// target is still refused, and a directory without ltx/ is still not a replica.
+    #[test]
+    fn if_replica_exists_still_refuses_what_a_non_empty_replica_cannot_meet() {
+        let (staged, _) = small_fixture();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = dir.path().join("out.db");
+        let beyond = restore(
+            &staged,
+            &output,
+            &strings(&["--if-replica-exists", "--txid", "7fffffffffffffff"]),
+        );
+        assert_eq!((beyond.code, beyond.stdout.as_str()), (2, ""));
+        assert!(
+            beyond.stderr.contains("beyond the newest"),
+            "{}",
+            beyond.stderr
+        );
+        let mut gaps = 0_usize;
+        for (fixture, manifest) in fixtures() {
+            if !latest_is_gap(&manifest) {
+                continue;
+            }
+            let staged = stage(&fixture, &manifest).expect("stage");
+            let gap = restore(&staged, &output, &strings(&["--if-replica-exists"]));
+            assert_eq!((gap.code, gap.stdout.as_str()), (2, ""), "{}", gap.stderr);
+            gaps += 1;
+        }
+        assert!(gaps > 0);
+        let bare = tempfile::tempdir().expect("tempdir");
+        let run = restore_from(bare.path(), &output, &["--if-replica-exists"]);
+        assert_eq!((run.code, run.stdout.as_str()), (3, ""));
+        assert!(run.stderr.contains("not a file replica"), "{}", run.stderr);
+        assert!(dir_is_empty(dir.path()));
+    }
+
+    /// Go's `-dry-run` text: the source, target, replica kind, transaction range
+    /// and one row per file the restore would fetch, in order. Nothing is written.
+    #[test]
+    fn dry_run_prints_the_plan_and_writes_nothing() {
+        let (staged, _) = small_fixture();
+        let chain = latest_chain(&staged);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = dir.path().join("out.db");
+        let run = restore(&staged, &output, &strings(&["--dry-run"]));
+        assert_eq!((run.code, run.stderr.as_str()), (0, ""), "{}", run.stdout);
+        assert!(dir_is_empty(dir.path()));
+        let lines: Vec<&str> = run.stdout.lines().collect();
+        assert_eq!(lines.first(), Some(&"Restore plan:"), "{}", run.stdout);
+        for want in [
+            format!("  source: {}", path_str(&staged.replica())),
+            format!("  target: {}", path_str(&output)),
+            "  replica: file".to_owned(),
+            format!(
+                "  txid range: {} - {}",
+                chain.snapshot().key.range().min(),
+                chain.reaches()
+            ),
+            "Files to fetch:".to_owned(),
+        ] {
+            assert!(lines.contains(&want.as_str()), "{want:?} in {}", run.stdout);
+        }
+        let header = lines
+            .iter()
+            .position(|line| line.starts_with("level"))
+            .expect("table header");
+        let rows: Vec<Vec<&str>> = lines[header + 1..]
+            .iter()
+            .map(|line| line.split_whitespace().collect())
+            .collect();
+        assert_eq!(rows.len(), chain.files().len(), "{}", run.stdout);
+        for (row, info) in rows.iter().zip(chain.files()) {
+            assert_eq!(row[0], info.key.level().to_string());
+            assert_eq!(row[1], info.key.file_name());
+            assert_eq!(row[2], info.key.range().min().to_string());
+            assert_eq!(row[3], info.key.range().max().to_string());
+            assert_eq!(row[4], info.size.to_string());
+        }
+    }
+
+    /// Every target of every fixture: the dry run refuses exactly when the restore
+    /// does, with the same message, and otherwise names the chain the restore
+    /// applies. The JSON keys are Go's.
+    #[test]
+    fn dry_run_json_lists_the_chain_the_restore_applies() {
+        let mut planned = 0_usize;
+        for (fixture, manifest) in fixtures() {
+            let staged = stage(&fixture, &manifest).expect("stage");
+            for entry in &manifest.targets {
+                let label = format!("{} {:?}", manifest.scenario, entry.target);
+                let target = target_flags(entry.target);
+                let dir = tempfile::tempdir().expect("tempdir");
+                let output = dir.path().join("out.db");
+                let mut dry = target.clone();
+                dry.extend(strings(&["--dry-run", "--json"]));
+                let plan = restore(&staged, &output, &dry);
+                assert!(dir_is_empty(dir.path()), "{label}");
+                let mut real = target.clone();
+                real.push("--json".to_owned());
+                let done = restore(&staged, &output, &real);
+                assert_eq!(plan.code, done.code, "{label}: {}", plan.stderr);
+                if done.code != 0 {
+                    assert_eq!(
+                        (plan.stdout.as_str(), &plan.stderr),
+                        ("", &done.stderr),
+                        "{label}"
+                    );
+                    continue;
+                }
+                let (plan, done) = (json_of(&plan), json_of(&done));
+                assert_eq!(
+                    plan["source"],
+                    json!(path_str(&staged.replica())),
+                    "{label}"
+                );
+                assert_eq!(plan["target_path"], json!(path_str(&output)), "{label}");
+                assert_eq!(plan["replica"], json!("file"), "{label}");
+                assert_eq!(plan["min_txid"], json!("0000000000000001"), "{label}");
+                assert_eq!(plan["max_txid"], done["txid"], "{label}");
+                let files = plan["files"].as_array().expect("files");
+                assert_eq!(
+                    Some(u64::try_from(files.len()).expect("count")),
+                    done["files"].as_u64(),
+                    "{label}"
+                );
+                for file in files {
+                    for key in ["level", "name", "min_txid", "max_txid", "size", "timestamp"] {
+                        assert!(!file[key].is_null(), "{label}: {key} in {file}");
+                    }
+                }
+                planned += 1;
+            }
+        }
+        assert!(planned > 0);
+    }
+
+    /// Stricter than Go, whose dry run never looks at the output: it checks the
+    /// output as the restore would, and lists the sidecars --clear-sidecars would
+    /// remove without removing them.
+    #[test]
+    fn dry_run_checks_the_output_as_a_restore_would() {
+        let (staged, _) = small_fixture();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = dir.path().join("out.db");
+        fs::write(&output, b"live").expect("plant");
+        let exists = restore(&staged, &output, &strings(&["--dry-run"]));
+        assert_eq!((exists.code, exists.stdout.as_str()), (3, ""));
+        assert!(
+            exists.stderr.contains("already exists"),
+            "{}",
+            exists.stderr
+        );
+        fs::remove_file(&output).expect("remove");
+
+        let wal = dir.path().join("out.db-wal");
+        fs::write(&wal, b"stale").expect("plant");
+        let refused = restore(&staged, &output, &strings(&["--dry-run"]));
+        assert_eq!((refused.code, refused.stdout.as_str()), (3, ""));
+        assert!(
+            refused.stderr.contains("--clear-sidecars"),
+            "{}",
+            refused.stderr
+        );
+        let listed = restore(
+            &staged,
+            &output,
+            &strings(&["--dry-run", "--clear-sidecars"]),
+        );
+        assert_eq!(listed.code, 0, "{}", listed.stderr);
+        assert!(
+            listed
+                .stdout
+                .contains(&format!("would remove stale {}", path_str(&wal))),
+            "{}",
+            listed.stdout
+        );
+        let json = json_of(&restore(
+            &staged,
+            &output,
+            &strings(&["--dry-run", "--clear-sidecars", "--json"]),
+        ));
+        assert_eq!(
+            json["sidecars_to_remove"],
+            json!([path_str(&wal)]),
+            "{json}"
+        );
+        assert_eq!(fs::read(&wal).expect("read"), b"stale");
+        assert!(!output.exists());
+    }
+
+    /// Go's `-json` result: db_path, replica, txid, duration_ms and integrity_check,
+    /// for the database the text form describes.
+    #[test]
+    fn restore_json_reports_go_s_fields() {
+        let (staged, manifest) = small_fixture();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = dir.path().join("out.db");
+        let run = restore(
+            &staged,
+            &output,
+            &strings(&["--json", "--integrity-check", "quick"]),
+        );
+        assert_eq!((run.code, run.stderr.as_str()), (0, ""));
+        assert_pages_equal(&output, latest_pages(&manifest), "json restore");
+        let json = json_of(&run);
+        assert_eq!(json["db_path"], json!(path_str(&output)), "{json}");
+        assert_eq!(json["replica"], json!("file"), "{json}");
+        assert_eq!(json["integrity_check"], json!("quick"), "{json}");
+        assert!(json["duration_ms"].is_u64(), "{json}");
+        let chain = latest_chain(&staged);
+        assert_eq!(json["txid"], json!(chain.reaches().to_string()), "{json}");
+        assert_eq!(json["files"], json!(chain.files().len()), "{json}");
+        assert!(json["checksum_verified"].is_boolean(), "{json}");
+    }
 }

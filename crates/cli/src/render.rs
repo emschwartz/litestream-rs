@@ -3,17 +3,24 @@
 //! JSON is written by hand: keys are fixed and values are numbers, booleans,
 //! hex transaction ids, RFC 3339 times, paths and messages, so a ten-line
 //! escaper is all the format needs. Tests parse it back with `serde_json`.
+//!
+//! Restore's JSON and its dry-run text keep Go's keys and layout
+//! (cmd/litestream/restore.go: `RestoreResult`, `RestorePlan`,
+//! `printDryRunPlan`), then add what this restore also knows. JSON is one line,
+//! as for verify and files, where Go indents. A skip prints one object too,
+//! where Go prints only a log line, so a JSON reader always gets an answer.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use lsr_core::{
-    Depth, FileInfo, FileKey, Finding, Inventory, Level, LevelSummary, PlanOutcome, Report,
-    Restored, Severity,
+    ContiguousChain, Depth, FileInfo, FileKey, Finding, Inventory, Level, LevelSummary,
+    PlanOutcome, Report, Restored, Severity,
 };
 use lsr_ltx::{Timestamp, Txid, TxidRange};
 
 use crate::args::{CommandName, FLAGS};
-use crate::run::{CliError, Done, Exit};
+use crate::run::{CliError, Done, Exit, Finished, RestoreDone, Skip, Source};
 use lsr_core::ListedStamp;
 use lsr_local::IntegrityCheck;
 
@@ -35,12 +42,7 @@ macro_rules! putln {
 /// The stdout text of a finished command.
 pub fn done(done: &Done) -> String {
     match done {
-        Done::Restored {
-            output,
-            restored,
-            cleared,
-            integrity_check,
-        } => restored_text(output, restored, cleared, *integrity_check),
+        Done::Restore(done) => restore(done),
         Done::Verified {
             depth,
             report,
@@ -169,6 +171,251 @@ pub fn plan_outcome(outcome: &PlanOutcome) -> String {
             key_path(file)
         ),
     }
+}
+
+fn restore(done: &RestoreDone) -> String {
+    let RestoreDone {
+        output,
+        source,
+        json,
+        finished,
+    } = done;
+    match (finished, *json) {
+        (
+            Finished::Restored {
+                restored,
+                cleared,
+                integrity_check,
+                ..
+            },
+            false,
+        ) => restored_text(output, restored, cleared, *integrity_check),
+        (
+            Finished::Restored {
+                restored,
+                cleared,
+                integrity_check,
+                elapsed,
+            },
+            true,
+        ) => restored_json(
+            output,
+            source,
+            restored,
+            cleared,
+            *integrity_check,
+            *elapsed,
+        ),
+        (
+            Finished::Planned {
+                chain,
+                stamps_read,
+                sidecars_to_remove,
+            },
+            false,
+        ) => plan_text(output, source, chain, *stamps_read, sidecars_to_remove),
+        (
+            Finished::Planned {
+                chain,
+                stamps_read,
+                sidecars_to_remove,
+            },
+            true,
+        ) => plan_json(output, source, chain, *stamps_read, sidecars_to_remove),
+        (Finished::Skipped { skip, cleared }, false) => skipped_text(output, *skip, cleared),
+        (Finished::Skipped { skip, cleared }, true) => skipped_json(output, source, *skip, cleared),
+    }
+}
+
+/// Go's `-integrity-check` word for the check.
+const fn integrity_word(check: IntegrityCheck) -> &'static str {
+    match check {
+        IntegrityCheck::Off => "none",
+        IntegrityCheck::Quick => "quick",
+        IntegrityCheck::Full => "full",
+    }
+}
+
+const fn skip_word(skip: Skip) -> &'static str {
+    match skip {
+        Skip::OutputExists => "output_exists",
+        Skip::EmptyReplica => "empty_replica",
+    }
+}
+
+fn path_array(paths: &[PathBuf]) -> String {
+    let items: Vec<String> = paths
+        .iter()
+        .map(|path| quote(&path.display().to_string()))
+        .collect();
+    array(&items)
+}
+
+fn restored_json(
+    output: &Path,
+    source: &Source,
+    restored: &Restored,
+    cleared: &[PathBuf],
+    integrity_check: IntegrityCheck,
+    elapsed: Duration,
+) -> String {
+    let mut out = object(&[
+        ("db_path", quote(&output.display().to_string())),
+        ("replica", quote(source.kind().word())),
+        ("txid", quote(&restored.reached().to_string())),
+        ("duration_ms", elapsed.as_millis().to_string()),
+        ("integrity_check", quote(integrity_word(integrity_check))),
+        ("page_size", restored.page_size().get().to_string()),
+        ("pages", restored.commit().to_string()),
+        ("files", restored.files().to_string()),
+        ("bytes_read", restored.bytes_read().to_string()),
+        ("stamps_read", restored.stamps_read().to_string()),
+        (
+            "checksum_verified",
+            restored.post_apply().is_some().to_string(),
+        ),
+        ("sidecars_removed", path_array(cleared)),
+    ]);
+    out.push('\n');
+    out
+}
+
+fn skipped_text(output: &Path, skip: Skip, cleared: &[PathBuf]) -> String {
+    let mut out = String::new();
+    for path in cleared {
+        putln!(out, "removed stale {}", path.display());
+    }
+    match skip {
+        Skip::OutputExists => putln!(
+            out,
+            "skipped: {} already exists (--if-db-not-exists)",
+            output.display()
+        ),
+        Skip::EmptyReplica => putln!(
+            out,
+            "skipped: the replica holds no backup (--if-replica-exists); nothing written to {}",
+            output.display()
+        ),
+    }
+    out
+}
+
+fn skipped_json(output: &Path, source: &Source, skip: Skip, cleared: &[PathBuf]) -> String {
+    let mut out = object(&[
+        ("skipped", quote(skip_word(skip))),
+        ("db_path", quote(&output.display().to_string())),
+        ("replica", quote(source.kind().word())),
+        ("sidecars_removed", path_array(cleared)),
+    ]);
+    out.push('\n');
+    out
+}
+
+/// One row of Go's dry-run table: level, file, min_txid, max_txid, size, timestamp.
+fn plan_row(info: &FileInfo) -> [String; 6] {
+    let range = info.key.range();
+    let (time, exact) = listed_time(info);
+    let note = if exact { "" } else { " (listed)" };
+    [
+        info.key.level().to_string(),
+        info.key.file_name(),
+        range.min().to_string(),
+        range.max().to_string(),
+        info.size.to_string(),
+        format!("{time}{note}"),
+    ]
+}
+
+/// Left-aligned columns two spaces apart, as Go's tabwriter prints them.
+fn columns(rows: &[[String; 6]]) -> String {
+    let mut widths = [0_usize; 6];
+    for row in rows {
+        for (width, cell) in widths.iter_mut().zip(row) {
+            *width = (*width).max(cell.len());
+        }
+    }
+    let mut out = String::new();
+    for row in rows {
+        let cells: Vec<String> = row
+            .iter()
+            .zip(widths)
+            .map(|(cell, width)| format!("{cell:<width$}"))
+            .collect();
+        putln!(out, "{}", cells.join("  ").trim_end());
+    }
+    out
+}
+
+fn plan_text(
+    output: &Path,
+    source: &Source,
+    chain: &ContiguousChain,
+    stamps_read: u64,
+    sidecars_to_remove: &[PathBuf],
+) -> String {
+    let mut out = String::new();
+    for path in sidecars_to_remove {
+        putln!(out, "would remove stale {}", path.display());
+    }
+    out.push_str("Restore plan:\n");
+    putln!(out, "  source: {}", source.name());
+    putln!(out, "  target: {}", output.display());
+    putln!(out, "  replica: {}", source.kind().word());
+    putln!(
+        out,
+        "  txid range: {} - {}",
+        chain.snapshot().key.range().min(),
+        chain.reaches()
+    );
+    if stamps_read > 0 {
+        putln!(out, "  exact stamps read to plan: {stamps_read}");
+    }
+    out.push_str("\nFiles to fetch:\n");
+    let header = ["level", "file", "min_txid", "max_txid", "size", "timestamp"].map(str::to_owned);
+    let rows: Vec<[String; 6]> = std::iter::once(header)
+        .chain(chain.files().iter().map(plan_row))
+        .collect();
+    out.push_str(&columns(&rows));
+    out
+}
+
+fn plan_file_json(info: &FileInfo) -> String {
+    let range = info.key.range();
+    let (time, exact) = listed_time(info);
+    object(&[
+        ("level", info.key.level().get().to_string()),
+        ("name", quote(&info.key.file_name())),
+        ("min_txid", quote(&range.min().to_string())),
+        ("max_txid", quote(&range.max().to_string())),
+        ("size", info.size.to_string()),
+        ("timestamp", quote(&time.to_string())),
+        ("stamp_exact", exact.to_string()),
+    ])
+}
+
+fn plan_json(
+    output: &Path,
+    source: &Source,
+    chain: &ContiguousChain,
+    stamps_read: u64,
+    sidecars_to_remove: &[PathBuf],
+) -> String {
+    let files: Vec<String> = chain.files().iter().map(plan_file_json).collect();
+    let mut out = object(&[
+        ("source", quote(source.name())),
+        ("target_path", quote(&output.display().to_string())),
+        ("replica", quote(source.kind().word())),
+        (
+            "min_txid",
+            quote(&chain.snapshot().key.range().min().to_string()),
+        ),
+        ("max_txid", quote(&chain.reaches().to_string())),
+        ("files", array(&files)),
+        ("stamps_read", stamps_read.to_string()),
+        ("sidecars_to_remove", path_array(sidecars_to_remove)),
+    ]);
+    out.push('\n');
+    out
 }
 
 fn restored_text(

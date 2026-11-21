@@ -153,6 +153,27 @@ pub const FLAGS: &[FlagSpec] = &[
         help: "run SQLite's quick_check or integrity_check on the result before publishing it; a failure publishes nothing (default none)",
     },
     FlagSpec {
+        name: "--if-db-not-exists",
+        value: None,
+        required: false,
+        commands: &[CommandName::Restore],
+        help: "exit 0 without restoring when something already exists at the output",
+    },
+    FlagSpec {
+        name: "--if-replica-exists",
+        value: None,
+        required: false,
+        commands: &[CommandName::Restore],
+        help: "exit 0 without restoring when the replica holds no LTX file; a target a replica with files cannot meet is still refused",
+    },
+    FlagSpec {
+        name: "--dry-run",
+        value: None,
+        required: false,
+        commands: &[CommandName::Restore],
+        help: "check the output and print the files a restore would apply, writing and removing nothing",
+    },
+    FlagSpec {
         name: "--depth",
         value: Some("names|contents"),
         required: false,
@@ -170,7 +191,11 @@ pub const FLAGS: &[FlagSpec] = &[
         name: "--json",
         value: None,
         required: false,
-        commands: &[CommandName::Verify, CommandName::Files],
+        commands: &[
+            CommandName::Restore,
+            CommandName::Verify,
+            CommandName::Files,
+        ],
         help: "print one JSON object instead of text",
     },
 ];
@@ -215,6 +240,14 @@ pub struct RestoreArgs {
     pub clear_sidecars: bool,
     /// SQLite's check of the result before it is published.
     pub integrity_check: IntegrityCheck,
+    /// Succeed without restoring when the output exists.
+    pub if_db_not_exists: bool,
+    /// Succeed without restoring when the replica holds no LTX file.
+    pub if_replica_exists: bool,
+    /// Plan and check only; write nothing.
+    pub dry_run: bool,
+    /// JSON instead of text.
+    pub json: bool,
 }
 
 /// `lsr verify`.
@@ -583,6 +616,10 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
             target: flags.target()?,
             clear_sidecars: flags.has("--clear-sidecars"),
             integrity_check: flags.integrity_check()?,
+            if_db_not_exists: flags.has("--if-db-not-exists"),
+            if_replica_exists: flags.has("--if-replica-exists"),
+            dry_run: flags.has("--dry-run"),
+            json: flags.has("--json"),
         }),
         CommandName::Verify => Command::Verify(VerifyArgs {
             replica: flags.replica()?,

@@ -8,16 +8,27 @@
 //! SQLite's check on the scratch before publishing; a database SQLite finds
 //! invalid is a refused restore ([`CliError::Integrity`]), and nothing is left
 //! at the output.
+//!
+//! Go's restore switches, with Go's names: `--if-db-not-exists` looks at the
+//! output before the replica is opened and ends with [`Skip::OutputExists`];
+//! `--if-replica-exists` turns [`PlanOutcome::EmptyReplica`], and only that, into
+//! [`Skip::EmptyReplica`], because a replica with files that cannot meet the
+//! target is a refusal, never a quiet success; `--dry-run` runs the restore's
+//! own checks of the output read-only (`preflight`), lists and plans exactly as
+//! the restore does, and stops before the first write. Every way a restore ends
+//! is one [`Finished`] value, so the text and the JSON describe the same thing.
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use lsr_core::{
-    Depth, Inventory, InventoryError, ObjectStore, PlanOutcome, Report, RestoreError,
-    RestoreTarget, Restored, Severity, SinkOp, VerifyError, restore, verify,
+    AsOfPlanner, ContiguousChain, Depth, Inventory, InventoryError, KeyTarget, ObjectStore,
+    PlanOutcome, Report, ResolveError, RestoreError, RestoreTarget, Restored, Severity, SinkOp,
+    VerifyError, plan, resolve, restore, verify,
 };
 use lsr_local::{
-    ClearError, CreateError, FileSink, IntegrityCheck, IntegrityFailure, clear_sidecars,
+    ClearError, CreateError, FileSink, IntegrityCheck, IntegrityFailure, clear_sidecars, preflight,
 };
 use lsr_store_fs::FsStore;
 use lsr_store_s3::ConfigError;
@@ -78,20 +89,124 @@ impl Exit {
     }
 }
 
-/// What a command produced.
+/// The kind of store a replica lives in, as Go names it in its JSON.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ReplicaKind {
+    /// A directory.
+    File,
+    /// A bucket prefix.
+    S3,
+}
+
+impl ReplicaKind {
+    /// Go's `ReplicaClient.Type()` word.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::S3 => "s3",
+        }
+    }
+}
+
+/// Where a restore reads from, named without anything the URL may hide: an
+/// S3 replica is `s3://<bucket>/<prefix>`, never the typed URL with its query.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Source {
+    kind: ReplicaKind,
+    name: String,
+}
+
+impl Source {
+    fn of(replica: &Replica) -> Self {
+        match replica {
+            Replica::Dir(path) => Self {
+                kind: ReplicaKind::File,
+                name: path.display().to_string(),
+            },
+            Replica::S3(config) => Self {
+                kind: ReplicaKind::S3,
+                name: format!(
+                    "s3://{}/{}",
+                    config.bucket().as_str(),
+                    config.prefix().as_str()
+                ),
+            },
+        }
+    }
+
+    /// The store's kind.
+    #[must_use]
+    pub const fn kind(&self) -> ReplicaKind {
+        self.kind
+    }
+
+    /// The replica's printable name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// Why a restore succeeded without restoring.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Skip {
+    /// `--if-db-not-exists`: something exists at the output.
+    OutputExists,
+    /// `--if-replica-exists`: the replica holds no LTX file.
+    EmptyReplica,
+}
+
+/// How a restore that did not fail ended.
 #[derive(Debug)]
-pub enum Done {
+pub enum Finished {
     /// A database was published.
     Restored {
-        /// The database.
-        output: PathBuf,
         /// What the executor did.
         restored: Restored,
         /// Stale sidecars removed first.
         cleared: Vec<PathBuf>,
         /// The SQLite check the database passed before it was published.
         integrity_check: IntegrityCheck,
+        /// Wall time of the clearing and the restore, for Go's `duration_ms`.
+        elapsed: Duration,
     },
+    /// `--dry-run`: the files a restore would apply; nothing was written.
+    Planned {
+        /// The chain, in the order it would be applied.
+        chain: ContiguousChain,
+        /// Exact stamps read to plan an as-of target.
+        stamps_read: u64,
+        /// Stale sidecars `--clear-sidecars` would remove first.
+        sidecars_to_remove: Vec<PathBuf>,
+    },
+    /// Nothing was restored, by request.
+    Skipped {
+        /// Why.
+        skip: Skip,
+        /// Stale sidecars removed before the replica turned out empty.
+        cleared: Vec<PathBuf>,
+    },
+}
+
+/// What `lsr restore` produced.
+#[derive(Debug)]
+pub struct RestoreDone {
+    /// The database path given.
+    pub output: PathBuf,
+    /// Where from.
+    pub source: Source,
+    /// Whether to print JSON.
+    pub json: bool,
+    /// How it ended.
+    pub finished: Finished,
+}
+
+/// What a command produced.
+#[derive(Debug)]
+pub enum Done {
+    /// A restore ran to an end: restored, planned or skipped.
+    Restore(Box<RestoreDone>),
     /// A replica was checked.
     Verified {
         /// How much was read.
@@ -227,7 +342,7 @@ pub fn exit_for_done(done: &Done) -> Exit {
             Some(Severity::Degraded) => Exit::Degraded,
             Some(Severity::Unrestorable) => Exit::Refused,
         },
-        Done::Restored { .. } | Done::Files { .. } | Done::Help | Done::Version => Exit::Success,
+        Done::Restore(_) | Done::Files { .. } | Done::Help | Done::Version => Exit::Success,
     }
 }
 
@@ -295,15 +410,46 @@ async fn restore_command(args: RestoreArgs) -> Result<Done, CliError> {
         target,
         clear_sidecars,
         integrity_check,
+        if_db_not_exists,
+        if_replica_exists,
+        dry_run,
+        json,
     } = args;
+    let source = Source::of(&replica);
     let how = How {
         target,
         clear_sidecars_first: clear_sidecars,
         integrity_check,
+        if_replica_exists,
     };
-    match open(&replica)? {
-        Opened::Dir(store) => restore_on(&store, output, how).await,
-        Opened::S3(store) => restore_on(&store, output, how).await,
+    let finished = if if_db_not_exists && output_exists(&output)? {
+        Finished::Skipped {
+            skip: Skip::OutputExists,
+            cleared: Vec::new(),
+        }
+    } else {
+        match (open(&replica)?, dry_run) {
+            (Opened::Dir(store), false) => restore_on(&store, &output, how).await?,
+            (Opened::Dir(store), true) => plan_on(&store, &output, how).await?,
+            (Opened::S3(store), false) => restore_on(&store, &output, how).await?,
+            (Opened::S3(store), true) => plan_on(&store, &output, how).await?,
+        }
+    };
+    Ok(Done::Restore(Box::new(RestoreDone {
+        output,
+        source,
+        json,
+        finished,
+    })))
+}
+
+/// Whether anything is at the output, as the sink judges it: a path that
+/// cannot be inspected is an error, not a reason to skip.
+fn output_exists(output: &Path) -> Result<bool, CliError> {
+    match preflight(output) {
+        Ok(_) => Ok(false),
+        Err(CreateError::TargetExists(_)) => Ok(true),
+        Err(other) => Err(other.into()),
     }
 }
 
@@ -312,41 +458,113 @@ struct How {
     target: RestoreTarget,
     clear_sidecars_first: bool,
     integrity_check: IntegrityCheck,
+    if_replica_exists: bool,
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "Go's duration_ms is wall time the user sees; it decides nothing"
+)]
+fn started() -> Instant {
+    Instant::now()
 }
 
 async fn restore_on<S: ObjectStore>(
     store: &S,
-    output: PathBuf,
+    output: &Path,
     how: How,
-) -> Result<Done, CliError> {
+) -> Result<Finished, CliError> {
     let How {
         target,
         clear_sidecars_first,
         integrity_check,
+        if_replica_exists,
     } = how;
+    let start = started();
     let cleared = if clear_sidecars_first {
-        clear_sidecars(&output)?
+        clear_sidecars(output)?
     } else {
         Vec::new()
     };
     let attempt = async {
-        let sink = FileSink::create(&output)?.with_integrity_check(integrity_check);
+        let sink = FileSink::create(output)?.with_integrity_check(integrity_check);
         let restored = restore(store, target, sink).await?;
         Ok::<_, CliError>(restored)
     }
     .await;
     match attempt {
-        Ok(restored) => Ok(Done::Restored {
-            output,
+        Ok(restored) => Ok(Finished::Restored {
             restored,
             cleared,
             integrity_check,
+            elapsed: start.elapsed(),
         }),
+        Err(CliError::NoPlan(PlanOutcome::EmptyReplica)) if if_replica_exists => {
+            Ok(Finished::Skipped {
+                skip: Skip::EmptyReplica,
+                cleared,
+            })
+        }
         Err(source) if cleared.is_empty() => Err(source),
         Err(source) => Err(CliError::AfterClearing {
             cleared,
             source: Box::new(source),
         }),
+    }
+}
+
+/// The restore's checks and plan, without its writes: the output is checked
+/// as [`FileSink::create`] would, sidecars are listed instead of removed, and
+/// the replica is listed and planned as [`restore`] plans its first attempt.
+async fn plan_on<S: ObjectStore>(store: &S, output: &Path, how: How) -> Result<Finished, CliError> {
+    let sidecars_to_remove = preflight(output)?;
+    if let Some(path) = sidecars_to_remove
+        .first()
+        .filter(|_| !how.clear_sidecars_first)
+    {
+        return Err(CliError::Sidecar { path: path.clone() });
+    }
+    let inventory = Inventory::load(store).await?;
+    let (outcome, stamps_read) = plan_target(store, &inventory, how.target).await?;
+    match outcome {
+        PlanOutcome::Plan(chain) => Ok(Finished::Planned {
+            chain,
+            stamps_read,
+            sidecars_to_remove,
+        }),
+        PlanOutcome::EmptyReplica if how.if_replica_exists => Ok(Finished::Skipped {
+            skip: Skip::EmptyReplica,
+            cleared: Vec::new(),
+        }),
+        other @ (PlanOutcome::EmptyReplica
+        | PlanOutcome::NoSnapshot { .. }
+        | PlanOutcome::BeyondNewest { .. }
+        | PlanOutcome::AsOfInsideFile { .. }
+        | PlanOutcome::Gap { .. }
+        | PlanOutcome::InsideFile { .. }
+        | PlanOutcome::MalformedSnapshot { .. }) => Err(CliError::NoPlan(other)),
+    }
+}
+
+/// The planner the restore uses for [target], and the stamps it read. A store
+/// failure is the restore's own error for it, so the two exit alike.
+async fn plan_target<S: ObjectStore>(
+    store: &S,
+    inventory: &Inventory,
+    target: RestoreTarget,
+) -> Result<(PlanOutcome, u64), CliError> {
+    let instant = match target {
+        RestoreTarget::Latest => return Ok((plan(inventory, KeyTarget::Latest), 0)),
+        RestoreTarget::Txid(txid) => return Ok((plan(inventory, KeyTarget::Txid(txid)), 0)),
+        RestoreTarget::AsOf(instant) => instant,
+    };
+    let mut planner = AsOfPlanner::new(inventory, instant);
+    match resolve(store, &mut planner).await {
+        Ok(resolved) => Ok((resolved.value, resolved.stamps_read)),
+        Err(ResolveError::Store(err)) => Err(CliError::Restore(RestoreError::Store(err))),
+        Err(ResolveError::Repeated { key }) => {
+            Err(CliError::Restore(RestoreError::StampRepeated { key }))
+        }
     }
 }
 

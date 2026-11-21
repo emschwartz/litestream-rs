@@ -3,6 +3,7 @@
 //! directory replica.
 
 use std::fs;
+use std::path::Path;
 use std::sync::Arc;
 
 use lsr_compat::{Manifest, Staged, all_fixtures, stage};
@@ -179,20 +180,28 @@ enum Outcome {
     Refused(String),
 }
 
-fn outcome(done: Result<Done, CliError>) -> Outcome {
+fn outcome(output: &Path, done: Result<Finished, CliError>) -> Outcome {
     match done {
-        Ok(Done::Restored { output, .. }) => Outcome::Database(fs::read(output).unwrap()),
-        Ok(_) => panic!("not a restore"),
+        Ok(Finished::Restored { .. }) => Outcome::Database(fs::read(output).unwrap()),
+        Ok(other) => panic!("not a restore: {other:?}"),
         Err(err) => Outcome::Refused(err.to_string()),
+    }
+}
+
+fn how(target: RestoreTarget) -> How {
+    How {
+        target,
+        clear_sidecars_first: false,
+        integrity_check: IntegrityCheck::Off,
+        if_replica_exists: false,
     }
 }
 
 /// The latest state, with the full SQLite check: the fixtures are real databases.
 fn latest_checked() -> How {
     How {
-        target: RestoreTarget::Latest,
-        clear_sidecars_first: false,
         integrity_check: IntegrityCheck::Full,
+        ..how(RestoreTarget::Latest)
     }
 }
 
@@ -202,16 +211,15 @@ fn restore_and_verify_over_s3_equal_the_directory() {
         let (fake, _) = bucket_of(&staged, true);
         let store = s3_store(fake);
         let dir = FsStore::new(staged.replica());
-        let from_dir = outcome(block_on(restore_on(
-            &dir,
-            staged.output("dir.db"),
-            latest_checked(),
-        )));
-        let from_s3 = outcome(block_on(restore_on(
-            &store,
-            staged.output("s3.db"),
-            latest_checked(),
-        )));
+        let (dir_db, s3_db) = (staged.output("dir.db"), staged.output("s3.db"));
+        let from_dir = outcome(
+            &dir_db,
+            block_on(restore_on(&dir, &dir_db, latest_checked())),
+        );
+        let from_s3 = outcome(
+            &s3_db,
+            block_on(restore_on(&store, &s3_db, latest_checked())),
+        );
         assert_eq!(from_s3, from_dir);
         let want = block_on(verify(&dir, Depth::Contents)).unwrap();
         let got = block_on(verify(&store, Depth::Contents)).unwrap();
@@ -257,4 +265,46 @@ fn a_throttled_listing_is_retried() {
         panic!("not files");
     };
     assert_eq!(by_time(inventory.files()), by_time(&infos));
+}
+
+/// A dry run over a bucket without stored stamps reads the exact stamps an
+/// as-of plan needs, as the restore does, and names the chain the restore
+/// applies; it writes nothing.
+#[test]
+fn dry_run_over_s3_plans_what_the_restore_applies() {
+    let mut stamped = 0_u64;
+    for fixture in all_fixtures().unwrap() {
+        let manifest = Manifest::load(&fixture).unwrap();
+        let staged = stage(&fixture, &manifest).unwrap();
+        for entry in &manifest.targets {
+            let Some(target) = entry.target.restore_target() else {
+                continue;
+            };
+            let (fake, _) = bucket_of(&staged, false);
+            let store = s3_store(fake);
+            let output = staged.output("out.db");
+            let planned = block_on(plan_on(&store, &output, how(target)));
+            assert!(!output.exists());
+            let restored = block_on(restore_on(&store, &output, how(target)));
+            match (planned, restored) {
+                (
+                    Ok(Finished::Planned {
+                        chain, stamps_read, ..
+                    }),
+                    Ok(Finished::Restored { restored, .. }),
+                ) => {
+                    assert_eq!(chain.reaches(), restored.reached(), "{target:?}");
+                    assert_eq!(chain.files().len(), restored.files(), "{target:?}");
+                    assert_eq!(stamps_read, restored.stamps_read(), "{target:?}");
+                    stamped += stamps_read;
+                }
+                (Err(plan), Err(done)) => assert_eq!(plan.to_string(), done.to_string()),
+                (plan, done) => panic!("{target:?}: dry run {plan:?}, restore {done:?}"),
+            }
+            if output.exists() {
+                fs::remove_file(&output).unwrap();
+            }
+        }
+    }
+    assert!(stamped > 0, "an as-of target read stamps");
 }

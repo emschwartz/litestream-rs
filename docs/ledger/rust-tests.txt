@@ -4,11 +4,18 @@ lsr-cli::cli cli::a_stale_sidecar_refuses_until_clear_sidecars
 lsr-cli::cli cli::an_argument_that_is_not_utf8_is_a_usage_error
 lsr-cli::cli cli::an_existing_output_exits_3_and_stays_byte_identical
 lsr-cli::cli cli::clear_sidecars_never_touches_an_existing_target
+lsr-cli::cli cli::dry_run_checks_the_output_as_a_restore_would
+lsr-cli::cli cli::dry_run_json_lists_the_chain_the_restore_applies
+lsr-cli::cli cli::dry_run_prints_the_plan_and_writes_nothing
 lsr-cli::cli cli::every_target_matches_the_manifest
 lsr-cli::cli cli::files_json_agrees_with_the_inventory_and_text_lists_the_same
 lsr-cli::cli cli::help_and_version_print_to_stdout_and_exit_0
+lsr-cli::cli cli::if_db_not_exists_skips_an_existing_output_without_reading_the_replica
+lsr-cli::cli cli::if_replica_exists_exits_0_on_an_empty_replica_and_writes_nothing
+lsr-cli::cli cli::if_replica_exists_still_refuses_what_a_non_empty_replica_cannot_meet
 lsr-cli::cli cli::integrity_check_publishes_a_valid_database_in_every_mode
 lsr-cli::cli cli::integrity_check_refuses_a_corrupt_b_tree_with_exit_2
+lsr-cli::cli cli::restore_json_reports_go_s_fields
 lsr-cli::cli cli::usage_errors_exit_64_with_one_stderr_line_and_no_stdout
 lsr-cli::cli cli::verify_exit_codes_follow_the_latest_outcome
 lsr-cli::cli cli::verify_json_agrees_with_the_library_report
@@ -40,6 +47,7 @@ lsr-cli::bin/lsr args::tests::no_command
 lsr-cli::bin/lsr args::tests::parse_s3_forms
 lsr-cli::bin/lsr args::tests::restore_latest_is_the_default_target
 lsr-cli::bin/lsr args::tests::restore_reads_every_flag_in_any_order
+lsr-cli::bin/lsr args::tests::restore_takes_the_skip_dry_run_and_json_switches
 lsr-cli::bin/lsr args::tests::s3_flags_are_taken_by_every_command
 lsr-cli::bin/lsr args::tests::s3_flags_set_endpoint_region_and_style
 lsr-cli::bin/lsr args::tests::s3_flags_with_a_directory_replica_are_refused
@@ -53,6 +61,7 @@ lsr-cli::bin/lsr replica::tests::credentials_need_the_key_id_and_the_secret
 lsr-cli::bin/lsr replica::tests::entropy_stays_below_its_bound_and_varies
 lsr-cli::bin/lsr run::tests::a_403_is_an_environment_error_that_names_no_secret
 lsr-cli::bin/lsr run::tests::a_throttled_listing_is_retried
+lsr-cli::bin/lsr run::tests::dry_run_over_s3_plans_what_the_restore_applies
 lsr-cli::bin/lsr run::tests::files_over_s3_count_every_stamp_taken_from_last_modified
 lsr-cli::bin/lsr run::tests::files_over_s3_list_what_the_directory_lists
 lsr-cli::bin/lsr run::tests::files_prints_listed_stamps_without_heads
@@ -895,6 +904,7 @@ lsr-local tests::create_refuses_a_target_that_exists
 lsr-local tests::create_refuses_each_sidecar_and_removes_nothing
 lsr-local tests::every_check_publishes_a_valid_database_and_nothing_beside_it
 lsr-local tests::off_publishes_the_corrupt_b_tree_as_restored
+lsr-local tests::preflight_reports_what_create_and_clear_would_meet_and_touches_nothing
 lsr-local tests::published_bytes_are_the_pages_written_and_only_the_target_remains
 lsr-local tests::quick_and_full_refuse_a_corrupt_b_tree_and_leave_nothing
 lsr-local tests::reset_empties_the_scratch
