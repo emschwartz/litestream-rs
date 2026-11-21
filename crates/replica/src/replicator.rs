@@ -246,6 +246,16 @@ impl Shared {
     }
 }
 
+/// What [`Replicator::launch`] hands the thread.
+struct Launch<'a> {
+    database: &'a Path,
+    meta: &'a Path,
+    store: Arc<dyn DynStore>,
+    config: Config,
+    runtime: Runtime,
+    events: Option<Box<dyn EventSink>>,
+}
+
 /// One replicated database. Cheap to clone: every clone is the same thread.
 #[derive(Clone)]
 pub struct Replicator {
@@ -304,6 +314,33 @@ impl Replicator {
         config: Config,
         runtime: Runtime,
     ) -> Result<Self, StartError> {
+        Self::start_inner(database, store, config, runtime, None)
+    }
+
+    /// [`Replicator::start_with`] with the event sink in place before the thread starts, so
+    /// it sees every event, the first boot's included. A sink set later with
+    /// [`Replicator::set_events`] sees only what comes after the thread picks it up, which
+    /// may be after the first boot.
+    ///
+    /// # Errors
+    /// As [`Replicator::start`].
+    pub fn start_with_events(
+        database: &Path,
+        store: Arc<dyn DynStore>,
+        config: Config,
+        runtime: Runtime,
+        events: Box<dyn EventSink>,
+    ) -> Result<Self, StartError> {
+        Self::start_inner(database, store, config, runtime, Some(events))
+    }
+
+    fn start_inner(
+        database: &Path,
+        store: Arc<dyn DynStore>,
+        config: Config,
+        runtime: Runtime,
+        events: Option<Box<dyn EventSink>>,
+    ) -> Result<Self, StartError> {
         let open = |err: io::Error| StartError::Open { kind: err.kind() };
         let file = DatabaseFile::of(database).map_err(open)?;
         let meta = config.meta_dir_for(database).ok_or(StartError::Open {
@@ -311,7 +348,15 @@ impl Replicator {
         })?;
         let shared = Arc::new(Shared::new(file, &config, &runtime));
         register(&shared)?;
-        let started = Self::launch(&shared, database, &meta, store, config, runtime);
+        let launch = Launch {
+            database,
+            meta: &meta,
+            store,
+            config,
+            runtime,
+            events,
+        };
+        let started = Self::launch(&shared, launch);
         if started.is_err() {
             shared.unregister();
         }
@@ -324,14 +369,15 @@ impl Replicator {
         })
     }
 
-    fn launch(
-        shared: &Arc<Shared>,
-        database: &Path,
-        meta: &Path,
-        store: Arc<dyn DynStore>,
-        config: Config,
-        runtime: Runtime,
-    ) -> Result<(), StartError> {
+    fn launch(shared: &Arc<Shared>, launch: Launch<'_>) -> Result<(), StartError> {
+        let Launch {
+            database,
+            meta,
+            store,
+            config,
+            runtime,
+            events,
+        } = launch;
         std::fs::create_dir_all(meta).map_err(|err| StartError::MetaDir { kind: err.kind() })?;
         let sqlite = Sqlite::open(database)?;
         let worker = Worker::new(
@@ -342,7 +388,8 @@ impl Replicator {
             store,
             config,
             runtime,
-        );
+        )
+        .with_sink(events);
         let handle = std::thread::Builder::new()
             .name("lsr-replica".to_owned())
             .spawn(move || worker.run())
@@ -417,7 +464,10 @@ impl Replicator {
         self.shared.command(|commands| commands.accept_pages = true);
     }
 
-    /// Sends every event from now on to `sink`, replacing the sink before it.
+    /// Sends every event from the thread's next turn on to `sink`, replacing the sink before
+    /// it. Events the thread emitted before it took the sink, the first boot's among them,
+    /// went to the sink before it (or nowhere): give the first sink to
+    /// [`Replicator::start_with_events`] to see them all.
     pub fn set_events(&self, sink: Box<dyn EventSink>) {
         self.shared.command(|commands| commands.sink = Some(sink));
     }

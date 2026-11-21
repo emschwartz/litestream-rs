@@ -159,6 +159,12 @@ impl Worker {
         }
     }
 
+    /// The sink events go to from the first turn, before any [`crate::Replicator::set_events`].
+    pub(crate) fn with_sink(mut self, sink: Option<Box<dyn EventSink>>) -> Self {
+        self.sink = sink;
+        self
+    }
+
     /// The thread's body. Its connections close before the outcome is published, so a host
     /// that waits on the stop finds the database free of this replicator.
     pub(crate) fn run(self) {

@@ -123,6 +123,58 @@ fn wait_booted_reports_the_first_boot() {
     site.assert_restores(&*store);
 }
 
+/// A sink given at the start sees the first boot's event, here the recovery of the position
+/// an earlier replicator left. A sink set after the start sees it only if the thread takes the
+/// sink before it boots: the daemon set its log sink that way and lost the boot's log line in
+/// about one boot in twenty. Waiting for the boot before setting the sink makes that loss
+/// certain, which is what the first half shows.
+#[test]
+fn a_sink_given_at_start_sees_the_first_boot() {
+    let site = Site::new();
+    let store = site.store();
+    let first = Replicator::start(&site.db, Arc::clone(&store), config()).unwrap();
+    site.commit(2);
+    assert!(matches!(
+        first.stop(PATIENCE).wait(),
+        Stopped::Drained { txid: Some(_) }
+    ));
+    drop(first);
+    let recovered = Event::Engine(EngineEvent::Booted { cause: None });
+
+    let (runtime, _clock) = fake();
+    let late = Replicator::start_with(&site.db, Arc::clone(&store), config(), runtime).unwrap();
+    assert_eq!(late.wait_booted(PATIENCE), Booted::Booted);
+    let (sink, events) = ChannelSink::new(NonZeroUsize::new(256).unwrap());
+    late.set_events(Box::new(sink));
+    assert!(matches!(
+        late.stop(PATIENCE).wait(),
+        Stopped::Drained { .. }
+    ));
+    drop(late);
+    let seen = events.drain();
+    assert!(!seen.contains(&recovered), "{seen:?}");
+
+    let (runtime, _clock) = fake();
+    let (sink, events) = ChannelSink::new(NonZeroUsize::new(256).unwrap());
+    let replicator = Replicator::start_with_events(
+        &site.db,
+        Arc::clone(&store),
+        config(),
+        runtime,
+        Box::new(sink),
+    )
+    .unwrap();
+    assert_eq!(replicator.wait_booted(PATIENCE), Booted::Booted);
+    assert!(matches!(
+        replicator.stop(PATIENCE).wait(),
+        Stopped::Drained { .. }
+    ));
+    let seen = events.drain();
+    assert_eq!(seen.first(), Some(&recovered), "{seen:?}");
+    assert_eq!(events.dropped(), 0);
+    site.assert_restores(&*store);
+}
+
 /// A boot the store refuses is degraded and keeps trying (the default responses); once the
 /// store takes the credentials again, the next retry boots.
 #[test]
