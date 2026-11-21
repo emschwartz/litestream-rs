@@ -37,7 +37,7 @@ use lsr_config::{DbPlan, Plan, ReplicaPlan};
 use lsr_core::{Clock, PlanOutcome, RestoreError as CoreRestoreError};
 use lsr_replica::{DynStore, Replicator, RestoreError, Runtime, Stopped, restore_if_missing};
 use lsr_store_fs::FsStore;
-use lsr_store_s3::{CredentialChain, S3Store};
+use lsr_store_s3::{CredentialChain, CredentialError, S3Store};
 
 use crate::exec::ChildEnd;
 use crate::health::{Board, Entry};
@@ -222,7 +222,10 @@ impl Daemon {
         let store = match open_store(plan.replica()) {
             Ok(store) => Some(store),
             Err(why) => {
-                let fields = [("path", path.as_path().into()), ("error", why.into())];
+                let fields = [
+                    ("path", path.as_path().into()),
+                    ("error", why.to_string().into()),
+                ];
                 self.log.error("cannot open replica", &fields);
                 None
             }
@@ -519,9 +522,21 @@ fn exists(path: &Path) -> bool {
     !matches!(std::fs::symlink_metadata(path), Err(e) if e.kind() == io::ErrorKind::NotFound)
 }
 
+/// Why a replica's store could not be opened. Each variant is the source's own message, so the
+/// log line a person reads is unchanged.
+#[derive(Debug, thiserror::Error)]
+enum OpenStoreError {
+    /// No usable S3 credentials.
+    #[error("{0}")]
+    Credentials(#[from] CredentialError),
+    /// The S3 config cannot address its bucket.
+    #[error("{0}")]
+    Store(#[from] lsr_store_s3::ConfigError),
+}
+
 /// The store for a replica; S3 credentials are resolved now, from the file or the
 /// environment and shared files (Go copies `LITESTREAM_*` to `AWS_*`; the chain reads both).
-fn open_store(replica: &ReplicaPlan) -> Result<Arc<dyn DynStore>, String> {
+fn open_store(replica: &ReplicaPlan) -> Result<Arc<dyn DynStore>, OpenStoreError> {
     match replica {
         ReplicaPlan::File(dir) => Ok(Arc::new(FsStore::new(dir))),
         ReplicaPlan::S3 {
@@ -534,9 +549,8 @@ fn open_store(replica: &ReplicaPlan) -> Result<Arc<dyn DynStore>, String> {
                 }
                 lsr_config::Credentials::FromEnvironment => CredentialChain::from_process(),
             };
-            let resolved = chain.resolve().map_err(|e| e.to_string())?;
-            let store = S3Store::new((**config).clone(), resolved.into_credentials())
-                .map_err(|e| e.to_string())?;
+            let resolved = chain.resolve()?;
+            let store = S3Store::new((**config).clone(), resolved.into_credentials())?;
             Ok(Arc::new(store))
         }
     }
@@ -548,6 +562,15 @@ mod tests {
 
     use super::*;
     use crate::logging::Logger;
+
+    #[test]
+    fn a_store_that_cannot_open_says_why_in_the_sources_words() {
+        let error = OpenStoreError::from(lsr_store_s3::ConfigError::BadUrl);
+        assert!(matches!(error, OpenStoreError::Store(_)));
+        assert_eq!(error.to_string(), "malformed replica url");
+        let dir = ReplicaPlan::File(std::path::PathBuf::from("/replica"));
+        open_store(&dir).unwrap();
+    }
 
     fn daemon(started: &Started) -> Daemon {
         let text = "shutdown-sync-timeout: 30s\ndbs: []\n";
