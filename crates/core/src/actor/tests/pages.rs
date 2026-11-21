@@ -79,11 +79,11 @@ fn a_flipped_database_page_degrades_the_sync_task_ships_the_file_and_keeps_synci
         actor.degraded(Task::Sync).map(|d| d.cause),
         Some(mismatch())
     );
-    assert_eq!(actor.retention_pin(), held);
+    assert_eq!(actor.kept_restore_point(), held);
 }
 
 #[test]
-fn a_frame_that_rewrites_the_page_clears_the_degraded_state_and_the_pin() {
+fn a_frame_that_rewrites_the_page_clears_the_degraded_state_and_the_kept_restore_point() {
     let (mut rig, mut actor) = caught_up_with(go_like());
     flip(&mut rig);
     actor.request_snapshot();
@@ -93,7 +93,7 @@ fn a_frame_that_rewrites_the_page_clears_the_degraded_state_and_the_pin() {
     rig.follow(&mut actor, T0 + 10_000, 50);
     rig.tick(&mut actor, T0 + 20_000);
     assert_eq!(actor.degraded(Task::Sync), None);
-    assert_eq!(actor.retention_pin(), None);
+    assert_eq!(actor.kept_restore_point(), None);
 }
 
 #[test]

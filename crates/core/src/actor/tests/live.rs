@@ -65,26 +65,29 @@ fn a_drain_reads_no_live_pages() {
     assert_eq!(actor.take_live_pages(), None);
 }
 
-/// A verify's pin is the restore point retention keeps; a degraded task's
+/// A verify's kept restore point is the restore point retention keeps; a degraded task's
 /// older one wins while both stand, and each goes on its own.
 #[test]
-fn a_verify_pin_is_kept_beside_a_lane_pin_and_the_older_wins() {
+fn a_verify_restore_point_is_kept_beside_a_task_restore_point_and_the_older_wins() {
     let (mut rig, mut actor) = caught_up();
-    assert_eq!(actor.retention_pin(), None);
+    assert_eq!(actor.kept_restore_point(), None);
     let first = newest_on_replica(&rig).unwrap();
     rig.commit(8);
     rig.settle(&mut actor, T0 + 1);
     let second = newest_on_replica(&rig).unwrap();
     assert!(second > first);
-    actor.pin_for_verify(Some(second));
-    assert_eq!(actor.retention_pin(), Some(second));
-    actor.kept.lane_pin = LanePin::Held(Some(first));
-    assert_eq!(actor.retention_pin(), Some(first));
+    actor.keep_restore_point_for_verify(Some(second));
+    assert_eq!(actor.kept_restore_point(), Some(second));
+    actor.kept.task_restore_point = TaskRestorePoint::Held(Some(first));
+    assert_eq!(actor.kept_restore_point(), Some(first));
     actor.engine.maintain.stale = false;
-    actor.pin_for_verify(None);
-    assert_eq!(actor.retention_pin(), Some(first));
-    assert!(actor.engine.maintain.stale, "a released pin lists again");
-    actor.pin_for_verify(Some(second));
-    actor.kept.lane_pin = LanePin::Free;
-    assert_eq!(actor.retention_pin(), Some(second));
+    actor.keep_restore_point_for_verify(None);
+    assert_eq!(actor.kept_restore_point(), Some(first));
+    assert!(
+        actor.engine.maintain.stale,
+        "a released kept restore point lists again"
+    );
+    actor.keep_restore_point_for_verify(Some(second));
+    actor.kept.task_restore_point = TaskRestorePoint::Free;
+    assert_eq!(actor.kept_restore_point(), Some(second));
 }

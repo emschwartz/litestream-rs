@@ -60,7 +60,7 @@ use std::mem;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use lsr_core::{
-    Barrier, CheckpointMode, CheckpointRun, Checkpointer, CommittedRead, PageSource, ReadEpoch,
+    Barrier, CheckpointMode, CheckpointRun, Checkpointer, CommittedRead, PageSource, ReadLockHold,
     SourceError, SourceOp, WalFileLen, WalSource, WriteLock,
 };
 use lsr_ltx::{DbPages, PageNo, PageSize};
@@ -244,7 +244,7 @@ struct State {
     rng: u64,
     // When set, the values SQLite would draw at random are these instead.
     forced: Option<Salts>,
-    epoch: ReadEpoch,
+    epoch: ReadLockHold,
     next_reader: u32,
     next_token: u64,
     barrier: Option<u64>,
@@ -843,7 +843,7 @@ impl SimSqlite {
             pool_checkpoints: 0,
             rng: seed,
             forced: None,
-            epoch: ReadEpoch::first(),
+            epoch: ReadLockHold::first(),
             next_reader: 0,
             next_token: 0,
             barrier: None,
@@ -896,8 +896,8 @@ impl SimSqlite {
     }
 
     /// What the driver does at process start (`db.go:1673`): a WAL under a header
-    /// gets one frame so the pin lands above read mark 0, then the read transaction
-    /// that holds the WAL in place begins. Any earlier pin ended with its process.
+    /// gets one frame so the read lock lands above read mark 0, then the read transaction
+    /// that holds the WAL in place begins. Any earlier read lock ended with its process.
     pub fn start_driver(&self) {
         self.with(|state| {
             state.end(Conn::Ours);
@@ -1415,7 +1415,7 @@ impl WalSource for SimSource {
         CommittedRead::new(end, index.backfilled, state.epoch).ok_or(SourceError::Busy)
     }
 
-    fn epoch(&self) -> ReadEpoch {
+    fn epoch(&self) -> ReadLockHold {
         lock(&self.state).epoch
     }
 }

@@ -77,13 +77,13 @@
 //!    scan: created-at times follow transactions, so the files after a young one are
 //!    young.
 //!
-//! The pin. While a task of the actor is degraded, [`MaintainState::pin`]
+//! The kept restore point. While a task of the actor is degraded, [`MaintainState::kept_restore_point`]
 //! names the newest transaction the replica held when it began. Before the
 //! cut, every file of that transaction's restore chain (`plan` at it) leaves
-//! the candidates, and the self-check also asks that the pin still plans
+//! the candidates, and the self-check also asks that the kept restore point still plans
 //! without the job. Everything else is retained by the rules above, so the
-//! history after the pin keeps rolling: the pin keeps one restore point, it
-//! never freezes every delete. A pin that does not plan on the listing is a
+//! history after the kept restore point keeps rolling: it keeps one restore point and
+//! never freezes every delete. A kept restore point that does not plan on the listing is a
 //! hold.
 //!
 //! The candidates are sorted by key and cut to [`MAX_DELETE`]. Key order puts
@@ -203,8 +203,8 @@ fn decide(
         return Ok(Retention::Wait { until });
     }
     let mut keys = found.keys;
-    if let Some(pin) = state.pin() {
-        match pinned_chain(inventory, pin) {
+    if let Some(restore_point) = state.kept_restore_point() {
+        match pinned_chain(inventory, restore_point) {
             Ok(chain) => keys.retain(|key| !chain.contains(key)),
             Err(hold) => return Ok(Retention::Held(hold)),
         }
@@ -219,10 +219,12 @@ fn decide(
         // nothing is the fail-closed answer if it ever is not.
         return Ok(Retention::Wait { until });
     };
-    Ok(match self_check(inventory, &job, state.pin()) {
-        Some(hold) => Retention::Held(hold),
-        None => Retention::Delete(job),
-    })
+    Ok(
+        match self_check(inventory, &job, state.kept_restore_point()) {
+            Some(hold) => Retention::Held(hold),
+            None => Retention::Delete(job),
+        },
+    )
 }
 
 /// The files whose created-at times set the anchor and the snapshot rule: the last file
@@ -614,15 +616,15 @@ fn covered(cover: &[(Txid, Txid)], info: &FileInfo) -> bool {
 }
 
 /// The keys of the pinned restore point's chain, or the hold when it does not plan.
-fn pinned_chain(inventory: &Inventory, pin: Txid) -> Result<Vec<FileKey>, Hold> {
-    match plan(inventory, KeyTarget::Txid(pin)) {
-        PlanOutcome::Plan(chain) if chain.reaches() == pin => {
+fn pinned_chain(inventory: &Inventory, restore_point: Txid) -> Result<Vec<FileKey>, Hold> {
+    match plan(inventory, KeyTarget::Txid(restore_point)) {
+        PlanOutcome::Plan(chain) if chain.reaches() == restore_point => {
             Ok(chain.files().iter().map(|info| info.key).collect())
         }
-        PlanOutcome::Plan(chain) => Err(Hold::PinUnplannable {
-            pin,
+        PlanOutcome::Plan(chain) => Err(Hold::RestorePointUnplannable {
+            restore_point,
             outcome: PlanOutcome::BeyondNewest {
-                requested: pin,
+                requested: restore_point,
                 newest: chain.reaches(),
             },
         }),
@@ -632,11 +634,14 @@ fn pinned_chain(inventory: &Inventory, pin: Txid) -> Result<Vec<FileKey>, Hold> 
         | PlanOutcome::AsOfInsideFile { .. }
         | PlanOutcome::Gap { .. }
         | PlanOutcome::InsideFile { .. }
-        | PlanOutcome::MalformedSnapshot { .. }) => Err(Hold::PinUnplannable { pin, outcome }),
+        | PlanOutcome::MalformedSnapshot { .. }) => Err(Hold::RestorePointUnplannable {
+            restore_point,
+            outcome,
+        }),
     }
 }
 
-fn self_check(inventory: &Inventory, job: &DeleteJob, pin: Option<Txid>) -> Option<Hold> {
+fn self_check(inventory: &Inventory, job: &DeleteJob, restore_point: Option<Txid>) -> Option<Hold> {
     let rest = Inventory::from_files(
         inventory
             .files()
@@ -650,8 +655,8 @@ fn self_check(inventory: &Inventory, job: &DeleteJob, pin: Option<Txid>) -> Opti
             outcome: PlanOutcome::EmptyReplica,
         });
     };
-    if let Some(pin) = pin
-        && let Err(hold) = pinned_chain(&rest, pin)
+    if let Some(restore_point) = restore_point
+        && let Err(hold) = pinned_chain(&rest, restore_point)
     {
         return Some(hold);
     }

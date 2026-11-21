@@ -35,11 +35,11 @@ fn caught_up(health: &lsr_replica::Health) -> bool {
 /// truncate the WAL; a stop after commits drains them all, and a restore equals the database.
 /// Afterwards the replicator's connections are closed: nothing holds the WAL.
 #[test]
-fn start_returns_with_the_pin_held_and_stop_drains_every_commit() {
+fn start_returns_with_the_read_lock_held_and_stop_drains_every_commit() {
     let site = Site::new();
     let store = site.store();
     let replicator = Replicator::start(&site.db, Arc::clone(&store), config()).unwrap();
-    assert!(truncate_is_busy(&site.db), "the pin holds the WAL");
+    assert!(truncate_is_busy(&site.db), "the read lock holds the WAL");
     site.commit(5);
     let stopped = replicator.stop(PATIENCE).wait();
     let Stopped::Drained { txid: Some(txid) } = stopped else {

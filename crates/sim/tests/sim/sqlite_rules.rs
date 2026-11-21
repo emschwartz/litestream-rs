@@ -501,7 +501,7 @@ mod rules {
         assert_eq!(
             pair.commit_moved(0b0100),
             Moved::Same,
-            "no restart under the pin"
+            "no restart under the read lock"
         );
     }
 
@@ -517,7 +517,7 @@ mod rules {
         let (busy, log, checkpointed) = pair.checkpoint(OtherProcessMode::Passive);
         assert!(
             !busy && checkpointed == 0 && log == 2,
-            "nothing backfilled past the pin"
+            "nothing backfilled past the read lock"
         );
         assert_eq!(pair.commit_moved(0b1000), Moved::Same, "no second restart");
     }

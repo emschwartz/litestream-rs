@@ -92,7 +92,7 @@ fn a_commit_after_the_position_under_a_reset_index_is_a_snapshot() {
     );
 }
 
-/// The reset gives no pin: a position the checkpoint protocol left unpinned
+/// The reset gives no read lock: a position the checkpoint protocol left unpinned
 /// stays unpinned, so the header the next commit writes is an unproven restart.
 #[test]
 fn the_next_commit_after_a_reset_with_the_read_transaction_retaken_is_a_snapshot() {

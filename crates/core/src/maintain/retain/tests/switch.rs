@@ -1,6 +1,6 @@
 //! The retention switch (Go's `retention.enabled`): off, the planner deletes
 //! nothing while compaction and snapshots run as usual; back on, deletes
-//! resume under the usual rules; the pin behaves as before either way.
+//! resume under the usual rules; the kept restore point behaves as before either way.
 
 use super::*;
 use crate::maintain::tests::{due_state, lazy_due};
@@ -69,19 +69,19 @@ fn with_retention_off_no_created_at_is_read_for_retention() {
     assert_eq!(asked, Vec::<FileKey>::new());
 }
 
-/// A pin behaves the same whether retention was always on or was switched
-/// off and back on: the pinned chain stays and the rest goes. Off, the pin
-/// changes nothing, and even a pin that does not plan holds nothing.
+/// A kept restore point behaves the same whether retention was always on or was switched
+/// off and back on: the pinned chain stays and the rest goes. Off, the kept restore point
+/// changes nothing, and even a kept restore point that does not plan holds nothing.
 #[test]
-fn a_degraded_tasks_pin_behaves_the_same_once_retention_is_back_on() {
-    for pin in [10, 20, 27] {
-        let always = due_on(ladder(), &one_level(), &mut pinned(pin));
+fn a_degraded_tasks_kept_restore_point_behaves_the_same_once_retention_is_back_on() {
+    for restore_point in [10, 20, 27] {
+        let always = due_on(ladder(), &one_level(), &mut pinned(restore_point));
         let mut config = off(one_level());
-        let while_off = due_on(ladder(), &config, &mut pinned(pin));
-        assert_eq!(while_off, QUIET, "pin {pin}");
+        let while_off = due_on(ladder(), &config, &mut pinned(restore_point));
+        assert_eq!(while_off, QUIET, "kept restore point {restore_point}");
         config.set_retention(RetentionMode::Enforce);
-        let back_on = due_on(ladder(), &config, &mut pinned(pin));
-        assert_eq!(back_on, always, "pin {pin}");
+        let back_on = due_on(ladder(), &config, &mut pinned(restore_point));
+        assert_eq!(back_on, always, "kept restore point {restore_point}");
     }
     let kept = key(9, 1, 10);
     let want: Vec<FileKey> = expected_ladder_deletes()
@@ -97,7 +97,7 @@ fn a_degraded_tasks_pin_behaves_the_same_once_retention_is_back_on() {
         matches!(
             &held,
             Due::Wait {
-                held: Some(Hold::PinUnplannable { .. }),
+                held: Some(Hold::RestorePointUnplannable { .. }),
                 ..
             }
         ),

@@ -2,7 +2,7 @@
 //!
 //! The checkpoint runs on the reader through `sqlite3_wal_checkpoint_v2`, after its read
 //! transaction ends and before it is retaken, as Go defers the retake (`db.go:2805-2849`). Ending
-//! and retaking is what moves the [`ReadEpoch`]. The C call, not the pragma, because its result
+//! and retaking is what moves the [`ReadLockHold`]. The C call, not the pragma, because its result
 //! code tells a checkpoint that ran but was blocked by readers (`SQLITE_BUSY` with both frame
 //! counts set: `busy` in the run) from one that never ran because another connection held the
 //! checkpoint lock (`SQLITE_BUSY` with counts of -1: [`SourceError::Busy`]); the pragma reports

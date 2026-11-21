@@ -22,7 +22,7 @@ use lsr_wal::WalReader;
 use rusqlite::Connection;
 use tempfile::TempDir;
 
-/// A step's end as the engine takes it: the proof when the read epoch still
+/// A step's end as the engine takes it: the proof when the read-lock hold still
 /// holds, else the unpinned position and no proof.
 fn confirmed<W: WalSource>(
     reached: lsr_core::ReachedEnd,

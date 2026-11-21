@@ -178,7 +178,7 @@ fn pinned(reached: ReachedEnd) -> Position {
     let epoch = reached.epoch();
     reached
         .into_position()
-        .with_continuity(Continuity::Pinned(epoch))
+        .with_continuity(Continuity::Held(epoch))
 }
 
 fn position_of(synced: Synced) -> Position {
@@ -303,11 +303,11 @@ fn an_idle_step_returns_the_committed_end_pinned() {
     let Synced::Idle(reached) = synced else {
         panic!("{synced:?}");
     };
-    assert_eq!(reached.position().continuity(), Continuity::Unpinned);
+    assert_eq!(reached.position().continuity(), Continuity::Broken);
     let through = reached.confirm(&rig.wal).unwrap();
     assert_eq!(
         through.position().continuity(),
-        Continuity::Pinned(rig.wal.epoch())
+        Continuity::Held(rig.wal.epoch())
     );
     assert_eq!(rig.files().len(), 1);
 }
@@ -555,7 +555,7 @@ fn a_snapshot_under_a_reset_index_takes_every_page_from_the_database_and_proves_
     else {
         panic!("{synced:?}");
     };
-    assert_eq!(position.continuity(), Continuity::Unpinned);
+    assert_eq!(position.continuity(), Continuity::Broken);
     assert_eq!(position.synced().offset().frame_index(), 0);
     assert_eq!(position.cursor().salts(), rig.wal.salts());
     let files = rig.files();
@@ -635,8 +635,8 @@ fn a_cap_stops_on_the_first_commit_that_reaches_it() {
         .map(|p| p.cursor().next().frame_index())
         .collect();
     assert_eq!(frames, [5, 8]);
-    assert_eq!(ends[0].continuity(), Continuity::Unpinned);
-    assert_eq!(ends[1].continuity(), Continuity::Pinned(rig.wal.epoch()));
+    assert_eq!(ends[0].continuity(), Continuity::Broken);
+    assert_eq!(ends[1].continuity(), Continuity::Held(rig.wal.epoch()));
 }
 
 #[test]
@@ -653,7 +653,7 @@ fn a_cap_of_one_byte_writes_a_file_per_transaction() {
     assert_eq!(sizes(&rig), [FRAME, 3 * FRAME, FRAME, 2 * FRAME]);
     let committed = rig.wal.committed_end().offset().get();
     for end in &ends[..3] {
-        assert_eq!(end.continuity(), Continuity::Unpinned);
+        assert_eq!(end.continuity(), Continuity::Broken);
         assert!(end.cursor().next().get() < committed);
     }
 }
@@ -1041,8 +1041,8 @@ struct Chain {
     position: Option<Position>,
     clock: i64,
     spilled: bool,
-    /// The one hold every copy is read under, as one unbroken pin would see them.
-    epoch: ReadEpoch,
+    /// The one hold every copy is read under, as one unbroken read lock would see them.
+    epoch: ReadLockHold,
 }
 
 /// Runs steps over a copy until the committed end is staged.
@@ -1174,7 +1174,7 @@ fn workload(ps: u32, cap: Option<u64>, ops: &[Op]) -> bool {
         position: None,
         clock: 0,
         spilled: false,
-        epoch: ReadEpoch::first(),
+        epoch: ReadLockHold::first(),
     };
     sync_copy(&mut chain, &db.copy(), size, cap);
     for op in ops {
@@ -1330,7 +1330,7 @@ fn read_mark_zero() -> MarkZero {
     commit(&rig.wal, &[1, 2], 2);
     commit(&rig.wal, &[3], 3);
     rig.wal.backfill(u32::MAX);
-    rig.wal.pin_reader();
+    rig.wal.hold_reader();
     assert_eq!(rig.wal.read_mark(), Some(0));
     for n in 1..=3 {
         rig.db.write_page(pg(n), &[u8::try_from(n).unwrap(); 512]);
@@ -1415,7 +1415,7 @@ fn an_app_truncate_checkpoint_during_a_snapshot_scan_is_not_a_halt() {
 
 #[test]
 fn an_app_write_that_restarts_the_wal_during_a_snapshot_scan_is_not_a_halt() {
-    // Under read mark 0 the next write restarts the WAL in place (so the pin does not stop it),
+    // Under read mark 0 the next write restarts the WAL in place (so the read lock does not stop it),
     // overwriting the header and frame 1 the open reader is about to scan.
     assert_not_halted(snapshot_under_read_mark_zero(restart_file));
 }

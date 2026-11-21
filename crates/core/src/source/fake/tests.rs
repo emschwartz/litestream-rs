@@ -59,7 +59,7 @@ fn fact_1_no_restart_under_a_read_mark_above_zero() {
     fake.append_tx(&tx(1), size(2));
     let before = (fake.salts(), fake.checkpoint_seq());
     // Fully backfilled, but a reader holds mark 1: the writer cannot restart.
-    fake.pin_reader_at(1);
+    fake.hold_reader_at(1);
     assert_eq!(fake.backfill(u32::MAX), 1);
     assert!(!fake.try_restart());
     for fill in 2..8 {
@@ -75,7 +75,7 @@ fn fact_1_holds_for_a_checkpoint_that_retakes_a_mark_above_zero() {
     let fake = wal();
     fake.append_tx(&tx(1), size(2));
     fake.append_tx(&tx(2), size(2));
-    fake.pin_reader_at(2);
+    fake.hold_reader_at(2);
     fake.backfill(1);
     fake.append_tx(&tx(3), size(2));
     assert_eq!(fake.restarts(), 0);
@@ -93,14 +93,14 @@ fn fact_2_under_read_mark_zero_the_next_write_restarts_once() {
     let fake = wal();
     fake.append_tx(&tx(1), size(2));
     fake.backfill(u32::MAX);
-    fake.pin_reader();
+    fake.hold_reader();
     assert_eq!(fake.read_mark(), Some(0));
     let old = fake.salts();
     fake.append_tx(&tx(2), size(2));
     assert_eq!(fake.restarts(), 1);
     assert_eq!(fake.salts().salt1, old.salt1.wrapping_add(1));
     assert_eq!(fake.checkpoint_seq(), 1);
-    // The new generation is neither backfilled nor restarted while the pin holds.
+    // The new generation is neither backfilled nor restarted while the read lock holds.
     for fill in 3..9 {
         fake.append_tx(&tx(fill), size(2));
         assert_eq!(fake.backfill(u32::MAX), 0);
@@ -111,15 +111,19 @@ fn fact_2_under_read_mark_zero_the_next_write_restarts_once() {
 }
 
 #[test]
-fn fact_2_an_old_generation_that_grows_under_a_read_mark_zero_pin_is_never_restarted() {
+fn fact_2_an_old_generation_that_grows_under_a_read_mark_zero_read_lock_is_never_restarted() {
     let fake = wal();
     fake.append_tx(&tx(1), size(2));
-    // Not fully backfilled when the pin is taken on read mark 0 by a reader of an older state.
-    fake.pin_reader_at(0);
+    // Not fully backfilled when the read lock is taken on read mark 0 by a reader of an older state.
+    fake.hold_reader_at(0);
     let generation = fake.salts();
     for fill in 2..9 {
         fake.append_tx(&tx(fill), size(2));
-        assert_eq!(fake.backfill(u32::MAX), 0, "the pin holds backfill at zero");
+        assert_eq!(
+            fake.backfill(u32::MAX),
+            0,
+            "the read lock holds backfill at zero"
+        );
         assert!(!fake.try_restart());
     }
     assert_eq!(fake.salts(), generation);
@@ -154,7 +158,7 @@ fn an_uncommitted_spill_is_in_the_file_below_no_committed_end() {
 fn a_truncating_checkpoint_empties_the_file_and_retakes_the_read_transaction() {
     let fake = wal();
     fake.append_tx(&tx(1), size(2));
-    fake.pin_reader();
+    fake.hold_reader();
     let mut checkpointer = FakeCheckpointer::new(fake.clone());
     let before = fake.epoch();
     let run = checkpointer.checkpoint(CheckpointMode::Truncate).unwrap();
@@ -245,7 +249,7 @@ fn a_scripted_committed_read_overrides_the_file() {
 #[test]
 fn a_committed_read_never_backfills_past_its_frames() {
     let end = CommittedEnd::new(3, Salts { salt1: 1, salt2: 2 }, ps());
-    let epoch = ReadEpoch::first();
+    let epoch = ReadLockHold::first();
     assert!(CommittedRead::new(end, 4, epoch).is_none());
     assert!(
         CommittedRead::new(end, 3, epoch)

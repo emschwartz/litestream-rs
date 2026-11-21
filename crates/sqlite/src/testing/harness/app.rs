@@ -11,7 +11,7 @@
 //! }`, so the child serves the application and nothing else. Its connections keep SQLite's defaults
 //! (automatic checkpoint every 1000 frames, no `PERSIST_WAL`, the default VFS, busy timeout
 //! zero, which is also SQLite's default) and only `synchronous` is set, as the rig's in-process
-//! application sets it. The pin, the engine, the stores and the oracle stay in the test process, so
+//! application sets it. The read lock, the engine, the stores and the oracle stay in the test process, so
 //! every lock the application takes or drops is another process's, as with a sidecar.
 //!
 //! The protocol is one request line on the child's stdin and one reply line on its stdout,
@@ -43,7 +43,7 @@ pub enum Placement {
     /// In the test process, set up as replication asks, through the rig's fault VFS.
     #[default]
     InProcess,
-    /// In a child process at SQLite's defaults; the pin and the engine stay in the test process.
+    /// In a child process at SQLite's defaults; the read lock and the engine stay in the test process.
     SeparateProcess,
 }
 
@@ -220,12 +220,12 @@ impl App {
     }
 
     /// The application's process opens and closes the database and `-shm` with `std::fs`. In this
-    /// process that would drop the pin's locks too, which is the hazard the descriptor rule
+    /// process that would drop the read lock's locks too, which is the hazard the descriptor rule
     /// exists for, so only the separate application does it.
     pub(super) fn touch(&mut self) -> Result<(), RigError> {
         match self {
             Self::Local { .. } => Err(RigError::State(
-                "open the database files with std::fs in the pin's own process",
+                "open the database files with std::fs in the read lock's own process",
             )),
             Self::Child(child) => child.request(APP, "touch", "").map(drop),
         }
@@ -533,7 +533,7 @@ fn touch(db: &Path) -> String {
     for path in [db.to_owned(), suffixed(db, "-shm")] {
         #[expect(
             clippy::disallowed_methods,
-            reason = "the application's own process drops its own locks on purpose; the pin is another process's"
+            reason = "the application's own process drops its own locks on purpose; the read lock is another process's"
         )]
         let opened = std::fs::File::open(&path);
         if let Err(err) = opened {

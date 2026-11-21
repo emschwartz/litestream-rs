@@ -85,7 +85,7 @@ Tests added: `entropy_is_splitmix64` and `below_scales_the_whole_output` (`env.r
 `a_small_output_is_written_to_the_upload_once` and a lower bound on the measured peak in the memory-bound test
 (`compact/tests.rs`), `the_failed_state_stays_at_the_threshold`,
 `a_position_after_a_checkpoint_is_pinned_at_the_epoch_it_retook`,
-`the_seal_takes_every_committed_transaction_whatever_the_cap` and the pin assertion in
+`the_seal_takes_every_committed_transaction_whatever_the_cap` and the read lock assertion in
 `a_passive_held_back_by_a_reader_is_not_restarted` (`checkpoint/tests.rs`), `a_first_boot_lists_each_level_once`
 and `a_requested_snapshot_is_staged_on_a_quiet_wal` (`actor/tests.rs`).
 
@@ -94,8 +94,8 @@ and `a_requested_snapshot_is_staged_on_a_quiet_wal` (`actor/tests.rs`).
 | `actor.rs:335:9` | replace Actor::request_snapshot with () |
 | `actor.rs:1190:52` | replace match guard confirmed.is_some() with true in boot_recover |
 | `checkpoint.rs:218:62` | replace match guard !over_truncate(observed, cfg) with true in after_sync |
-| `checkpoint.rs:386:9` | replace Protocol<'_, W, P, C, L>::pin with () |
-| `checkpoint.rs:386:29` | replace == with != in Protocol<'_, W, P, C, L>::pin |
+| `checkpoint.rs:386:9` | replace Protocol<'_, W, P, C, L>::read lock with () |
+| `checkpoint.rs:386:29` | replace == with != in Protocol<'_, W, P, C, L>::read lock |
 | `checkpoint.rs:398:13` | delete field cap from struct SyncConfig expression in Protocol<'_, W, P, C, L>::step |
 | `compact.rs:68:31` | replace * with + |
 | `compact.rs:68:31` | replace * with / |
@@ -236,7 +236,7 @@ Each was run again with `--file <file> --re '<file>:<line>:<col>'` and both test
 | `actor.rs:1213:48` | replace > with >= in Actor::next | `an_interval_due_with_nothing_to_checkpoint_does_not_spin` |
 
 Two test doubles grew a knob for these: the actor tests' `Counting` store can cap a listing page (a store may
-return fewer keys than the limit) and can move the WAL's read epoch when the next upload begins, as another
+return fewer keys than the limit) and can move the WAL's read-lock hold when the next upload begins, as another
 connection's checkpoint would in the middle of a sync step; it also logs the keys it is asked to delete.
 
 #### Equivalent (9)

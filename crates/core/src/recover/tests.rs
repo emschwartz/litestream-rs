@@ -177,7 +177,7 @@ fn rule_2_a_remote_below_the_newest_staged_file_is_pending_uploads() {
 #[test]
 fn rule_2_running_behind_the_remote_halts() {
     let wal = fresh();
-    let pos = position(&wal, 2, Continuity::Unpinned);
+    let pos = position(&wal, 2, Continuity::Broken);
     assert_eq!(
         run_running(&wal, &pos, Some(3)).recovered,
         Recovered::Halt(HaltCause::OtherWriter)
@@ -212,7 +212,7 @@ fn rule_3_an_unreadable_newest_staged_file_snapshots_after_the_newer_of_newest_s
 #[test]
 fn rule_4_no_wal_file_is_wal_missing() {
     let wal = fresh();
-    let pos = position(&wal, 2, Continuity::Unpinned);
+    let pos = position(&wal, 2, Continuity::Broken);
     let mut gone = view(&wal);
     gone.header = None;
     gone.len = None;
@@ -251,7 +251,7 @@ fn rule_4_a_torn_header_is_wal_missing() {
 #[test]
 fn rule_5_a_new_page_size_halts() {
     let wal = fresh();
-    let pos = position(&wal, 2, Continuity::Unpinned);
+    let pos = position(&wal, 2, Continuity::Broken);
     let other = FakeWal::new(PageSize::new(1024).unwrap(), salts(10));
     assert_eq!(
         recover(
@@ -275,7 +275,7 @@ fn restarted(wal: &FakeWal) {
 #[test]
 fn a_pinned_position_follows_a_restart_it_can_prove() {
     let wal = fresh();
-    let pos = position(&wal, 2, Continuity::Pinned(wal.epoch()));
+    let pos = position(&wal, 2, Continuity::Held(wal.epoch()));
     restarted(&wal);
     let verdict = run_running(&wal, &pos, None);
     let Recovered::WalRestarted(next) = verdict.recovered else {
@@ -294,7 +294,7 @@ fn a_pinned_position_follows_a_restart_it_can_prove() {
 #[test]
 fn an_unpinned_position_snapshots_on_a_restart() {
     let wal = fresh();
-    let pos = position(&wal, 2, Continuity::Unpinned);
+    let pos = position(&wal, 2, Continuity::Broken);
     restarted(&wal);
     assert_eq!(
         run_running(&wal, &pos, None).recovered,
@@ -303,9 +303,9 @@ fn an_unpinned_position_snapshots_on_a_restart() {
 }
 
 #[test]
-fn a_pin_from_another_epoch_proves_nothing() {
+fn a_read_lock_from_another_epoch_proves_nothing() {
     let wal = fresh();
-    let pos = position(&wal, 2, Continuity::Pinned(wal.epoch()));
+    let pos = position(&wal, 2, Continuity::Held(wal.epoch()));
     restarted(&wal);
     wal.set_epoch(wal.epoch().next());
     assert_eq!(
@@ -317,7 +317,7 @@ fn a_pin_from_another_epoch_proves_nothing() {
 #[test]
 fn two_restarts_are_not_one() {
     let wal = fresh();
-    let pos = position(&wal, 2, Continuity::Pinned(wal.epoch()));
+    let pos = position(&wal, 2, Continuity::Held(wal.epoch()));
     restarted(&wal);
     restarted(&wal);
     assert_eq!(
@@ -327,10 +327,10 @@ fn two_restarts_are_not_one() {
 }
 
 #[test]
-fn the_abandoned_frames_check_catches_frames_abandoned_after_the_pin() {
+fn the_abandoned_frames_check_catches_frames_abandoned_after_the_read_lock() {
     let wal = fresh();
-    let pos = position(&wal, 2, Continuity::Pinned(wal.epoch()));
-    // Frames appended after the pin, then a restart that rewrites the header in
+    let pos = position(&wal, 2, Continuity::Held(wal.epoch()));
+    // Frames appended after the read lock, then a restart that rewrites the header in
     // place: the old frames' bytes are still in the file past the new end.
     commit(&wal, &[1], 3);
     wal.force_restart();
@@ -341,7 +341,7 @@ fn the_abandoned_frames_check_catches_frames_abandoned_after_the_pin() {
     );
     assert_eq!(
         verdict.event,
-        Some(RecoverEvent::PinViolated {
+        Some(RecoverEvent::ReadLockViolated {
             synced: pos.synced().offset()
         })
     );
@@ -350,7 +350,7 @@ fn the_abandoned_frames_check_catches_frames_abandoned_after_the_pin() {
 #[test]
 fn a_restart_that_has_grown_past_the_old_end_is_followed() {
     let wal = fresh();
-    let pos = position(&wal, 2, Continuity::Pinned(wal.epoch()));
+    let pos = position(&wal, 2, Continuity::Held(wal.epoch()));
     wal.force_restart();
     commit(&wal, &[1], 3);
     commit(&wal, &[2], 3);
@@ -396,7 +396,7 @@ fn go_parity_a_salt_reset_at_boot_snapshots() {
 #[test]
 fn a_committed_end_before_the_newest_staged_file_is_a_rewind() {
     let wal = fresh();
-    let pos = position(&wal, 2, Continuity::Unpinned);
+    let pos = position(&wal, 2, Continuity::Broken);
     let mut seen = view(&wal);
     let end = lsr_wal::CommittedEnd::new(1, wal.salts(), PS);
     seen.committed = CommittedRead::new(end, 0, wal.epoch());
@@ -444,7 +444,7 @@ fn go_parity_a_wal_truncated_after_synced_to_end_is_now_a_snapshot() {
 #[test]
 fn rule_7_a_file_cut_by_a_frame_is_a_rewind_for_a_running_position_too() {
     let wal = fresh();
-    let pos = position(&wal, 2, Continuity::Unpinned);
+    let pos = position(&wal, 2, Continuity::Broken);
     let before = wal.file_bytes().len();
     wal.truncate_file(before - 1000);
     let verdict = run_running(&wal, &pos, None);
@@ -461,7 +461,7 @@ fn rule_7_a_file_cut_by_a_frame_is_a_rewind_for_a_running_position_too() {
 #[test]
 fn rule_8_a_frame_before_the_end_that_does_not_verify_is_prev_frame_mismatch() {
     let wal = fresh();
-    let pos = position(&wal, 2, Continuity::Unpinned);
+    let pos = position(&wal, 2, Continuity::Broken);
     let at = usize::try_from(pos.cursor().next().get()).unwrap();
     // A byte inside the last frame's page: its checksum fails.
     wal.corrupt_byte(at - 10);
@@ -475,7 +475,7 @@ fn rule_8_a_frame_before_the_end_that_does_not_verify_is_prev_frame_mismatch() {
 #[test]
 fn rule_9_a_last_page_that_differs_snapshots() {
     let wal = fresh();
-    let pos = position(&wal, 2, Continuity::Unpinned);
+    let pos = position(&wal, 2, Continuity::Broken);
     let other = LastPage::new(pg(9), pos.last_page().digest());
     let moved = Position::new(
         pos.txid(),
@@ -483,7 +483,7 @@ fn rule_9_a_last_page_that_differs_snapshots() {
         pos.commit(),
         other,
         pos.timestamp(),
-        Continuity::Unpinned,
+        Continuity::Broken,
     );
     assert_eq!(
         run_running(&wal, &moved, None).recovered,
@@ -589,7 +589,7 @@ fn under_reset(wal: &FakeWal, pos: &Position) -> Verdict {
 #[test]
 fn rule_9a_a_reset_index_with_nothing_after_the_position_continues_as_it_was() {
     let wal = fresh();
-    for continuity in [Continuity::Pinned(wal.epoch()), Continuity::Unpinned] {
+    for continuity in [Continuity::Held(wal.epoch()), Continuity::Broken] {
         let pos = position(&wal, 2, continuity);
         assert_eq!(under_reset(&wal, &pos), plain(Recovered::Continue(pos)));
     }
@@ -599,7 +599,7 @@ fn rule_9a_a_reset_index_with_nothing_after_the_position_continues_as_it_was() {
 fn rule_9a_a_commit_the_position_never_covered_under_a_reset_index_is_a_snapshot() {
     let wal = FakeWal::new(PS, salts(10));
     commit(&wal, &[1, 2], 2);
-    let pos = position(&wal, 1, Continuity::Unpinned);
+    let pos = position(&wal, 1, Continuity::Broken);
     commit(&wal, &[2, 3], 3);
     assert_eq!(
         under_reset(&wal, &pos),
@@ -611,7 +611,7 @@ fn rule_9a_a_commit_the_position_never_covered_under_a_reset_index_is_a_snapshot
 fn rule_9a_a_pinned_position_with_a_commit_after_it_under_a_reset_index_is_an_abandoned_frame() {
     let wal = FakeWal::new(PS, salts(10));
     commit(&wal, &[1, 2], 2);
-    let pos = position(&wal, 1, Continuity::Pinned(wal.epoch()));
+    let pos = position(&wal, 1, Continuity::Held(wal.epoch()));
     commit(&wal, &[2, 3], 3);
     let verdict = under_reset(&wal, &pos);
     assert_eq!(
@@ -620,7 +620,7 @@ fn rule_9a_a_pinned_position_with_a_commit_after_it_under_a_reset_index_is_an_ab
     );
     assert_eq!(
         verdict.event,
-        Some(RecoverEvent::PinViolated {
+        Some(RecoverEvent::ReadLockViolated {
             synced: pos.synced().offset()
         })
     );
@@ -630,7 +630,7 @@ fn rule_9a_a_pinned_position_with_a_commit_after_it_under_a_reset_index_is_an_ab
 fn rule_9a_a_rolled_back_spill_after_the_position_is_no_commit() {
     let wal = FakeWal::new(PS, salts(10));
     commit(&wal, &[1, 2], 2);
-    let pos = position(&wal, 1, Continuity::Unpinned);
+    let pos = position(&wal, 1, Continuity::Broken);
     wal.append_uncommitted(&[(pg(3), vec![3; PS.bytes()])]);
     assert_eq!(under_reset(&wal, &pos), plain(Recovered::Continue(pos)));
 }
@@ -639,7 +639,7 @@ fn rule_9a_a_rolled_back_spill_after_the_position_is_no_commit() {
 #[test]
 fn rule_10_a_running_position_continues_as_it_is() {
     let wal = fresh();
-    let pos = position(&wal, 2, Continuity::Pinned(wal.epoch()));
+    let pos = position(&wal, 2, Continuity::Held(wal.epoch()));
     assert_eq!(
         run_running(&wal, &pos, Some(2)).recovered,
         Recovered::Continue(pos)
@@ -657,7 +657,7 @@ fn a_boot_continue_at_the_committed_end_is_pinned() {
     ) else {
         panic!("continue");
     };
-    assert_eq!(next.continuity(), Continuity::Pinned(wal.epoch()));
+    assert_eq!(next.continuity(), Continuity::Held(wal.epoch()));
     assert_eq!(next.cursor().next(), wal.committed_end().offset());
 }
 
@@ -673,29 +673,29 @@ fn a_boot_continue_below_the_committed_end_is_unpinned() {
     ) else {
         panic!("continue");
     };
-    assert_eq!(next.continuity(), Continuity::Unpinned);
+    assert_eq!(next.continuity(), Continuity::Broken);
 }
 
 #[test]
 fn a_pinned_position_from_an_older_epoch_at_the_committed_end_is_repinned() {
     let wal = fresh();
-    let pos = position(&wal, 2, Continuity::Pinned(wal.epoch()));
+    let pos = position(&wal, 2, Continuity::Held(wal.epoch()));
     wal.set_epoch(wal.epoch().next());
     let Recovered::Continue(next) = run_running(&wal, &pos, None).recovered else {
         panic!("continue");
     };
-    assert_eq!(next.continuity(), Continuity::Pinned(wal.epoch()));
+    assert_eq!(next.continuity(), Continuity::Held(wal.epoch()));
 }
 
 #[test]
 fn a_pinned_position_below_the_committed_end_stays_pinned() {
     let wal = fresh();
-    let pos = position(&wal, 2, Continuity::Pinned(wal.epoch()));
+    let pos = position(&wal, 2, Continuity::Held(wal.epoch()));
     commit(&wal, &[3], 3);
     let Recovered::Continue(next) = run_running(&wal, &pos, None).recovered else {
         panic!("continue");
     };
-    assert_eq!(next.continuity(), Continuity::Pinned(wal.epoch()));
+    assert_eq!(next.continuity(), Continuity::Held(wal.epoch()));
 }
 
 #[test]
@@ -731,7 +731,7 @@ fn go_parity_an_end_at_offset_32_continues() {
 fn go_parity_an_end_one_frame_past_32_is_checked_not_skipped() {
     let wal = FakeWal::new(PS, salts(10));
     commit(&wal, &[1], 1);
-    let pos = position(&wal, 1, Continuity::Unpinned);
+    let pos = position(&wal, 1, Continuity::Broken);
     assert_eq!(pos.cursor().next().frame_index(), 1);
     assert!(matches!(
         run_running(&wal, &pos, None).recovered,
@@ -746,7 +746,7 @@ fn go_parity_an_end_one_frame_past_32_is_checked_not_skipped() {
             lsr_ltx::PageChecksum::of(pos.last_page().pgno(), &[]),
         ),
         pos.timestamp(),
-        Continuity::Unpinned,
+        Continuity::Broken,
     );
     assert_eq!(
         run_running(&wal, &wrong, None).recovered,
@@ -908,8 +908,8 @@ enum NewestStagedFileKind {
     BootUnreadable,
     BootMismatch,
     BootNotInNewestStagedFile,
-    Pinned,
-    Unpinned,
+    Held,
+    Broken,
     NoNewestStagedFile,
 }
 
@@ -930,8 +930,8 @@ fn triple() -> impl Strategy<Value = Triple> {
             Just(NewestStagedFileKind::BootUnreadable),
             Just(NewestStagedFileKind::BootMismatch),
             Just(NewestStagedFileKind::BootNotInNewestStagedFile),
-            Just(NewestStagedFileKind::Pinned),
-            Just(NewestStagedFileKind::Unpinned),
+            Just(NewestStagedFileKind::Held),
+            Just(NewestStagedFileKind::Broken),
             Just(NewestStagedFileKind::NoNewestStagedFile),
         ],
         prop::collection::vec(op(), 0..3),
@@ -982,8 +982,8 @@ fn boot_view(kind: NewestStagedFileKind, pos: &Position) -> NewestStagedFile {
         NewestStagedFileKind::BootNotInNewestStagedFile => LastPageCheck::NotInNewestStagedFile,
         NewestStagedFileKind::Boot
         | NewestStagedFileKind::BootUnreadable
-        | NewestStagedFileKind::Pinned
-        | NewestStagedFileKind::Unpinned
+        | NewestStagedFileKind::Held
+        | NewestStagedFileKind::Broken
         | NewestStagedFileKind::NoNewestStagedFile => LastPageCheck::Match {
             last_page: pos.last_page(),
             cursor: pos.cursor(),
@@ -994,8 +994,8 @@ fn boot_view(kind: NewestStagedFileKind, pos: &Position) -> NewestStagedFile {
         NewestStagedFileKind::Boot
         | NewestStagedFileKind::BootMismatch
         | NewestStagedFileKind::BootNotInNewestStagedFile
-        | NewestStagedFileKind::Pinned
-        | NewestStagedFileKind::Unpinned
+        | NewestStagedFileKind::Held
+        | NewestStagedFileKind::Broken
         | NewestStagedFileKind::NoNewestStagedFile => NewestStagedFile::Readable {
             txid: pos.txid(),
             origin: WalOrigin::new(32, end.saturating_sub(32), head.salt1, head.salt2).unwrap(),
@@ -1018,13 +1018,13 @@ fn evaluate(triple: &Triple) -> Option<Recovered> {
     let epoch = wal.epoch();
     let held_pos = held.map(|(cursor, frame, size)| {
         let continuity = match triple.kind {
-            NewestStagedFileKind::Pinned => Continuity::Pinned(epoch),
+            NewestStagedFileKind::Held => Continuity::Held(epoch),
             NewestStagedFileKind::Boot
             | NewestStagedFileKind::BootUnreadable
             | NewestStagedFileKind::BootMismatch
             | NewestStagedFileKind::BootNotInNewestStagedFile
-            | NewestStagedFileKind::Unpinned
-            | NewestStagedFileKind::NoNewestStagedFile => Continuity::Unpinned,
+            | NewestStagedFileKind::Broken
+            | NewestStagedFileKind::NoNewestStagedFile => Continuity::Broken,
         };
         Position::new(
             txid(id),
@@ -1049,7 +1049,7 @@ fn evaluate(triple: &Triple) -> Option<Recovered> {
     let newest_staged = held_pos.as_ref().map(|pos| boot_view(triple.kind, pos));
     let source = match (triple.kind, held_pos.as_ref(), newest_staged.as_ref()) {
         (NewestStagedFileKind::NoNewestStagedFile, ..) | (_, None, _) => None,
-        (NewestStagedFileKind::Pinned | NewestStagedFileKind::Unpinned, Some(pos), _) => {
+        (NewestStagedFileKind::Held | NewestStagedFileKind::Broken, Some(pos), _) => {
             let probes = WalReader::open(Cursor::new(wal.file_bytes()))
                 .ok()
                 .and_then(|mut r| Probes::read(&mut r, pos).ok())?;
@@ -1108,16 +1108,16 @@ proptest! {
 // The check that catches abandoned frames needs a whole committed transaction of the old
 // generation; a rolled-back spill was never part of the database.
 #[test]
-fn the_abandoned_frames_check_ignores_a_rolled_back_spill_past_the_pin() {
+fn the_abandoned_frames_check_ignores_a_rolled_back_spill_past_the_read_lock() {
     let wal = fresh();
     // An application transaction spills a frame past the committed end, then rolls back.
     wal.append_uncommitted(&[(pg(3), vec![9; PS.bytes()])]);
     wal.backfill(u32::MAX);
-    // We re-pin at the committed end (an idle step): the WAL is fully backfilled, so read mark 0.
+    // We re-read lock at the committed end (an idle step): the WAL is fully backfilled, so read mark 0.
     wal.set_epoch(wal.epoch().next());
-    wal.pin_reader();
+    wal.hold_reader();
     assert_eq!(wal.read_mark(), Some(0));
-    let pos = position(&wal, 2, Continuity::Pinned(wal.epoch()));
+    let pos = position(&wal, 2, Continuity::Held(wal.epoch()));
     // The next application write restarts the WAL once, as SQLite allows under read mark 0.
     wal.force_restart();
     commit(&wal, &[1], 3);
@@ -1135,14 +1135,14 @@ fn the_abandoned_frames_check_ignores_a_rolled_back_spill_past_the_pin() {
 #[test]
 fn the_abandoned_frames_check_still_fires_when_a_spill_follows_a_committed_transaction() {
     let wal = fresh();
-    let pos = position(&wal, 2, Continuity::Pinned(wal.epoch()));
+    let pos = position(&wal, 2, Continuity::Held(wal.epoch()));
     commit(&wal, &[1], 3);
     wal.append_uncommitted(&[(pg(2), vec![9; PS.bytes()])]);
     wal.force_restart();
     let verdict = run_running(&wal, &pos, None);
     assert_eq!(
         verdict.event,
-        Some(RecoverEvent::PinViolated {
+        Some(RecoverEvent::ReadLockViolated {
             synced: pos.synced().offset()
         })
     );
@@ -1153,7 +1153,7 @@ fn the_abandoned_frames_check_still_fires_when_a_spill_follows_a_committed_trans
 #[test]
 fn rule_6_a_restart_with_an_unrelated_checkpoint_seq_is_still_one_restart() {
     let wal = fresh();
-    let pos = position(&wal, 2, Continuity::Pinned(wal.epoch()));
+    let pos = position(&wal, 2, Continuity::Held(wal.epoch()));
     let old = *reader(wal.file_bytes()).header();
     let next = Salts {
         salt1: old.salts().salt1.wrapping_add(1),

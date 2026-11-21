@@ -94,7 +94,7 @@ fn whole<W: WalSource>(proof: &SyncedThrough, wal: &mut W) -> Result<Whole<W::Wa
     let committed = wal.committed().map_err(Fault::from_source)?;
     let salts = reader.header().salts();
     let page_size = position.page_size();
-    if position.continuity() != Continuity::Pinned(committed.epoch()) {
+    if position.continuity() != Continuity::Held(committed.epoch()) {
         return Err(Fault::ReadTxLost);
     }
     if reader.header().page_size() != page_size {

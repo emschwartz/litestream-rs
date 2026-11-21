@@ -14,7 +14,7 @@ too-many-lines-threshold = 70
 #
 # No descriptor on a database or its `-shm` may be opened and closed in this
 # crate: closing any descriptor on a file drops every POSIX lock the process
-# holds on it, the pin's read-mark lock included. Replicators open their files
+# holds on it, the read lock's read-mark lock included. Replicators open their files
 # through SQLite, and the directory scan reads headers in lsr-config before any
 # replicator starts.
 disallowed-methods = [
@@ -22,7 +22,7 @@ disallowed-methods = [
     { path = "std::time::Instant::now", reason = "take a `Clock`, or a deadline from the caller" },
     { path = "std::thread::sleep", reason = "take a `Sleeper` (lsr_core::Sleeper)" },
     { path = "jiff::Timestamp::now", reason = "take a `Clock` (lsr_core::Clock)" },
-    { path = "std::fs::File::open", reason = "a closed descriptor on a database or -shm drops the pin's locks" },
-    { path = "std::fs::OpenOptions::open", reason = "a closed descriptor on a database or -shm drops the pin's locks" },
-    { path = "std::fs::read", reason = "opens and closes a descriptor; on a database or -shm that drops the pin's locks" },
+    { path = "std::fs::File::open", reason = "a closed descriptor on a database or -shm drops the read lock's locks" },
+    { path = "std::fs::OpenOptions::open", reason = "a closed descriptor on a database or -shm drops the read lock's locks" },
+    { path = "std::fs::read", reason = "opens and closes a descriptor; on a database or -shm that drops the read lock's locks" },
 ]

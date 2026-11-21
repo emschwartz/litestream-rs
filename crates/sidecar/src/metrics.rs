@@ -39,7 +39,7 @@
 //! - `lsr_replicated_txid{db}`, the newest transaction on the replica.
 //! - `lsr_unreplicated_since_timestamp_seconds{db}` while a commit is not on the replica,
 //!   and `lsr_unreplicated_age_seconds{db}` (0 when caught up): the lag to alert on.
-//! - `lsr_wal_bytes{db}`: the WAL file's size, which a pin held while uploads fail grows.
+//! - `lsr_wal_bytes{db}`: the WAL file's size, which a read lock held while uploads fail grows.
 //! - `lsr_app_checkpoints_total{db,kind}` (`backfilled`, `restarted`, `stalled`) and
 //!   `lsr_app_notice{db,kind}` 1 while the application-checkpoint notice stands.
 //! - `lsr_resnapshot_pending{db,cause}` 1 when the next sync is a snapshot.

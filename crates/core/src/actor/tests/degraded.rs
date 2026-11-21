@@ -157,7 +157,7 @@ fn a_refused_retention_delete_leaves_sync_and_upload_running() {
 }
 
 /// While a task is degraded, retention pins the newest transaction the
-/// replica held when it began; the pin goes once every task has recovered.
+/// replica held when it began; the kept restore point goes once every task has recovered.
 #[test]
 fn a_degraded_lane_pins_the_replicas_newest_transaction_until_it_recovers() {
     let (mut rig, mut actor) = caught_up_go_like();
@@ -167,21 +167,21 @@ fn a_degraded_lane_pins_the_replicas_newest_transaction_until_it_recovers() {
     rig.tick(&mut actor, T0 + 10);
     let failed = rig.tick(&mut actor, T0 + 10);
     assert!(degraded(&failed).is_some(), "{failed:?}");
-    assert_eq!(actor.retention_pin(), held);
-    // A second task degrading later keeps the first pin.
+    assert_eq!(actor.kept_restore_point(), held);
+    // A second task degrading later keeps the first kept restore point.
     actor.fault(Task::Checkpoint, Fault::WalUnlinked, ts(T0 + 20));
-    assert_eq!(actor.retention_pin(), held);
+    assert_eq!(actor.kept_restore_point(), held);
     rig.follow(&mut actor, T0 + 1_010, 50);
     assert_eq!(actor.degraded(Task::Upload), None);
     assert_eq!(
-        actor.retention_pin(),
+        actor.kept_restore_point(),
         held,
         "the checkpoint task is still degraded"
     );
     actor.kept.tasks.get_mut(Task::Checkpoint).succeed();
     let tick = rig.tick(&mut actor, T0 + 100_000_000);
     let tasks: Vec<_> = Task::ALL.iter().map(|l| actor.degraded(*l)).collect();
-    assert_eq!(actor.retention_pin(), None, "{tick:?} {tasks:?}");
+    assert_eq!(actor.kept_restore_point(), None, "{tick:?} {tasks:?}");
 }
 
 /// `Bug` never continues from the state it left: the actor is rebuilt and
@@ -514,7 +514,7 @@ fn a_rebuilt_actor_keeps_what_was_asked_and_reported_and_boots_again() {
         }
     );
     assert_eq!(fresh.degraded(Task::Upload), actor.degraded(Task::Upload));
-    assert_eq!(fresh.retention_pin(), held);
+    assert_eq!(fresh.kept_restore_point(), held);
     assert_eq!(
         fresh.pending_snapshot(),
         Some(SnapshotCause::OperatorRequested)

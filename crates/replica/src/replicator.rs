@@ -459,7 +459,7 @@ impl Replicator {
     /// An operator accepts the database file as it is: every page the page checksum table
     /// found changed without a WAL frame (the degraded cause
     /// `DegradedCause::DatabasePageMismatch`) is trusted with the bytes it now holds, and the
-    /// degradation and the retention pin it held go.
+    /// degradation and the kept restore point it held go.
     pub fn accept_database_pages(&self) {
         self.shared.command(|commands| commands.accept_pages = true);
     }

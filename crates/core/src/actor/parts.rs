@@ -68,7 +68,7 @@ impl Stop {
 
 /// The restore point retention keeps while a task is degraded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum LanePin {
+pub(super) enum TaskRestorePoint {
     /// No task is degraded, or none has been since the last release.
     Free,
     /// The newest transaction the replica held when the first task degraded
@@ -76,7 +76,7 @@ pub(super) enum LanePin {
     Held(Option<Txid>),
 }
 
-impl LanePin {
+impl TaskRestorePoint {
     const fn txid(self) -> Option<Txid> {
         match self {
             Self::Free => None,
@@ -96,9 +96,9 @@ pub(super) struct Kept {
     /// The clock's last reading.
     pub(super) last: Option<Timestamp>,
     pub(super) clamp_reported: bool,
-    pub(super) lane_pin: LanePin,
+    pub(super) task_restore_point: TaskRestorePoint,
     /// The restore point a scheduled verify asked retention to keep.
-    pub(super) verify_pin: Option<Txid>,
+    pub(super) verify_restore_point: Option<Txid>,
     /// The live database's pages a scheduled verify asked for.
     pub(super) live: Live,
     /// An operator asked for a snapshot that has not been staged yet.
@@ -115,8 +115,8 @@ impl Kept {
             tasks: Tasks::default(),
             last: None,
             clamp_reported: false,
-            lane_pin: LanePin::Free,
-            verify_pin: None,
+            task_restore_point: TaskRestorePoint::Free,
+            verify_restore_point: None,
             live: Live::Idle,
             snapshot_asked: false,
             app: AppCheckpointObserver::default(),
@@ -134,8 +134,8 @@ impl Kept {
             tasks,
             last,
             clamp_reported,
-            lane_pin,
-            verify_pin,
+            task_restore_point,
+            verify_restore_point,
             live,
             snapshot_asked,
             app: _,
@@ -146,8 +146,8 @@ impl Kept {
             tasks: *tasks,
             last: *last,
             clamp_reported: *clamp_reported,
-            lane_pin: *lane_pin,
-            verify_pin: *verify_pin,
+            task_restore_point: *task_restore_point,
+            verify_restore_point: *verify_restore_point,
             live: live.rebuilt(),
             snapshot_asked: *snapshot_asked,
             app: observer,
@@ -157,8 +157,8 @@ impl Kept {
     /// The restore point retention keeps: the older of the two asked for, a
     /// degraded task's and a scheduled verify's. Derived on every read, so
     /// there is no copy to fall behind.
-    pub(super) fn retention_pin(&self) -> Option<Txid> {
-        match (self.lane_pin.txid(), self.verify_pin) {
+    pub(super) fn kept_restore_point(&self) -> Option<Txid> {
+        match (self.task_restore_point.txid(), self.verify_restore_point) {
             (Some(task), Some(verify)) => Some(task.min(verify)),
             (task, verify) => task.or(verify),
         }

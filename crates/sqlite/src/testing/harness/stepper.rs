@@ -288,7 +288,7 @@ impl<B: Backend> Stepper<B> {
         }
     }
 
-    /// Takes a step's end as the engine does: the proof when the read epoch
+    /// Takes a step's end as the engine does: the proof when the read-lock hold
     /// still holds, the unpinned position when it moved.
     fn confirm(&mut self, reached: ReachedEnd) {
         match reached.confirm(&self.backend) {

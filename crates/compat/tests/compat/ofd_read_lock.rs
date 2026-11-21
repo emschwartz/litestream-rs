@@ -1,19 +1,19 @@
-//! The pure-Rust pin's two Linux questions (#9; answers in `docs/spikes.md`, "Phase 3 spikes";
-//! background in `docs/notes/pure-rust-pin.md`, sections 4A and 5).
+//! The pure-Rust read lock's two Linux questions (#9; answers in `docs/spikes.md`, "Phase 3 spikes";
+//! background in `docs/notes/pure-rust-read-lock.md`, sections 4A and 5).
 //!
-//! A pin held without a SQLite connection is a shared lock on a `-shm` read-mark byte
+//! A read lock held without a SQLite connection is a shared lock on a `-shm` read-mark byte
 //! (`120 + 3 + slot`), taken through a descriptor of our own. SQLite in the same process keeps
 //! per-process lock counts and calls `fcntl(F_SETLK)` on its own descriptor, and classic POSIX
 //! record locks never conflict within one process, so only an open-file-description lock
-//! (`F_OFD_SETLK`) can be seen by it. The probes take the pin as the pure-Rust pin would: an
+//! (`F_OFD_SETLK`) can be seen by it. The probes take the read lock as the pure-Rust read lock would: an
 //! exclusive OFD lock on the slot, the slot's mark written as the header's `mxFrame`, then a
 //! downgrade to shared. They then ask SQLite's own checkpoints and writers what they see.
 //!
 //! Second question: whether the bundled build has `SQLITE_ENABLE_SETLK_TIMEOUT`, under which
 //! SQLite could block in `F_SETLKW` on our lock instead of reporting busy.
 //!
-//! Measurement only; the pin itself is not built (it is deferred, see
-//! `docs/plans/phase-3-syncing.md`, the section on the deferred pure-Rust pin).
+//! Measurement only; the read lock itself is not built (it is deferred, see
+//! `docs/plans/phase-3-syncing.md`, the section on the deferred pure-Rust read lock).
 
 #![cfg(target_os = "linux")]
 #![expect(
@@ -43,7 +43,7 @@ const SHM_DMS: i64 = 128;
 const READ_MARK_0: u64 = 100;
 /// `WalIndexHdr.mxFrame` is byte 16 of header copy 0.
 const MX_FRAME: u64 = 16;
-/// The pure-Rust pin's slot: any of 1 to 4 blocks a WAL restart; 0 does not (walformat.html).
+/// The pure-Rust read lock's slot: any of 1 to 4 blocks a WAL restart; 0 does not (walformat.html).
 const SLOT: i64 = 1;
 
 /// A record lock taken through `fcntl`, either kind.
@@ -109,9 +109,9 @@ fn read_mark(shm: &File, slot: i64) -> u32 {
     read_u32(shm, read_mark_offset(slot))
 }
 
-/// The pin as the pure-Rust pin would take it: exclusive on the slot, mark := `mxFrame`,
+/// The read lock as the pure-Rust read lock would take it: exclusive on the slot, mark := `mxFrame`,
 /// downgrade to shared (an OFD lock is replaced atomically). Returns the mark.
-fn pin(shm: &File, kind: Kind, slot: i64) -> u32 {
+fn take_read_lock(shm: &File, kind: Kind, slot: i64) -> u32 {
     let byte = read_lock_byte(slot);
     lock(shm, kind, libc::F_WRLCK, byte, 1, false).unwrap();
     let mx_frame = read_u32(shm, MX_FRAME);
@@ -121,7 +121,7 @@ fn pin(shm: &File, kind: Kind, slot: i64) -> u32 {
     mx_frame
 }
 
-fn unpin(shm: &File, kind: Kind, slot: i64) {
+fn release_read_lock(shm: &File, kind: Kind, slot: i64) {
     lock(shm, kind, libc::F_UNLCK, read_lock_byte(slot), 1, false).unwrap();
 }
 
@@ -266,17 +266,17 @@ fn waiter_queued(path: &Path, want: &str) -> bool {
 }
 
 #[test]
-fn an_ofd_pin_on_a_read_mark_makes_restart_and_truncate_busy() {
+fn an_ofd_read_lock_on_a_read_mark_makes_restart_and_truncate_busy() {
     let (_dir, path, app, shm) = fresh_db();
     let outside = connect(&path);
-    let mark = pin(&shm, Kind::Ofd, SLOT);
+    let mark = take_read_lock(&shm, Kind::Ofd, SLOT);
     assert_eq!(
         mark, 4,
         "four frames: CREATE TABLE (two pages) and two inserts"
     );
     let before = salts(&path);
 
-    // The pin is at the WAL's end, so PASSIVE may backfill everything; RESTART and TRUNCATE
+    // The read lock is at the WAL's end, so PASSIVE may backfill everything; RESTART and TRUNCATE
     // must then wait for readers on slots 1..4, and SQLite sees ours.
     assert_eq!(checkpoint(&outside, "PASSIVE"), (0, 4, 4));
     assert_eq!(checkpoint(&outside, "RESTART"), (1, 4, 4));
@@ -284,21 +284,21 @@ fn an_ofd_pin_on_a_read_mark_makes_restart_and_truncate_busy() {
     assert_eq!(checkpoint(&outside, "TRUNCATE"), (1, 4, 4));
     assert_eq!(wal_len(&path), len, "TRUNCATE left the WAL's length alone");
 
-    // A writer on a fully backfilled WAL would restart it; with the pin it appends instead.
+    // A writer on a fully backfilled WAL would restart it; with the read lock it appends instead.
     commit(&app, 3);
     assert_eq!(salts(&path), before, "the writer did not restart the WAL");
-    // Frames past the pin are never backfilled: the checkpoint stops at the mark.
+    // Frames past the read lock are never backfilled: the checkpoint stops at the mark.
     assert_eq!(checkpoint(&outside, "PASSIVE"), (0, 5, 4));
     assert_eq!(read_mark(&shm, SLOT), mark, "SQLite left our mark alone");
 
     // Released, everything proceeds as normal: RESTART succeeds, the next commit restarts.
-    unpin(&shm, Kind::Ofd, SLOT);
+    release_read_lock(&shm, Kind::Ofd, SLOT);
     assert_eq!(checkpoint(&outside, "RESTART"), (0, 5, 5));
     commit(&app, 4);
     assert_ne!(
         salts(&path),
         before,
-        "the WAL restarted once the pin was gone"
+        "the WAL restarted once the read lock was gone"
     );
     drop((outside, app));
 }
@@ -307,7 +307,7 @@ fn an_ofd_pin_on_a_read_mark_makes_restart_and_truncate_busy() {
 fn a_posix_lock_from_our_own_descriptor_pins_nothing() {
     let (_dir, path, app, shm) = fresh_db();
     let outside = connect(&path);
-    pin(&shm, Kind::Posix, SLOT);
+    take_read_lock(&shm, Kind::Posix, SLOT);
     let before = salts(&path);
     assert!(
         locks_on(&suffixed(&path, "-shm")).contains(&"POSIX READ 124 124".to_owned()),
@@ -316,18 +316,22 @@ fn a_posix_lock_from_our_own_descriptor_pins_nothing() {
     // SQLite's exclusive lock on the same byte is the process's own: it upgrades ours.
     assert_eq!(checkpoint(&outside, "RESTART"), (0, 4, 4));
     commit(&app, 3);
-    assert_ne!(salts(&path), before, "the WAL restarted under the 'pin'");
+    assert_ne!(
+        salts(&path),
+        before,
+        "the WAL restarted under the 'read lock'"
+    );
     drop((outside, app));
 }
 
 #[test]
-fn the_ofd_pin_survives_another_descriptor_closing_and_the_posix_locks_do_not() {
+fn the_ofd_read_lock_survives_another_descriptor_closing_and_the_posix_locks_do_not() {
     let (_dir, path, app, shm) = fresh_db();
     let shm_path = suffixed(&path, "-shm");
     // The application's reader holds read mark 0's byte or a slot's, and the DMS byte, as POSIX locks.
     app.execute_batch("BEGIN").unwrap();
     assert_eq!(count(&app), 2);
-    pin(&shm, Kind::Ofd, 2);
+    take_read_lock(&shm, Kind::Ofd, 2);
     let held = locks_on(&shm_path);
     assert!(held.contains(&"OFDLCK READ 125 125".to_owned()), "{held:?}");
     assert!(held.contains(&"POSIX READ 128 128".to_owned()), "{held:?}");
@@ -341,7 +345,7 @@ fn the_ofd_pin_survives_another_descriptor_closing_and_the_posix_locks_do_not() 
         "only the OFD lock is left"
     );
 
-    // SQLite still sees the pin: RESTART from a new connection is busy on slot 2.
+    // SQLite still sees the read lock: RESTART from a new connection is busy on slot 2.
     let outside = connect(&path);
     let (busy, _, _) = checkpoint(&outside, "RESTART");
     assert_eq!(busy, 1);
@@ -354,10 +358,10 @@ fn the_ofd_pin_survives_another_descriptor_closing_and_the_posix_locks_do_not() 
 /// a `-shm` read-mark lock does not stop, and then checkpoints in exclusive mode, where its
 /// read-mark locks are no-ops (`walLockExclusive`, `sqlite3.c`), and deletes `-wal`.
 #[test]
-fn the_apps_last_close_ignores_a_read_mark_pin_but_not_a_pin_on_the_dms_byte() {
+fn the_apps_last_close_ignores_a_read_mark_read_lock_but_not_a_read_lock_on_the_dms_byte() {
     for hold_dms in [false, true] {
         let (_dir, path, app, shm) = fresh_db();
-        pin(&shm, Kind::Ofd, SLOT);
+        take_read_lock(&shm, Kind::Ofd, SLOT);
         if hold_dms {
             lock(&shm, Kind::Ofd, libc::F_RDLCK, SHM_DMS, 1, false).unwrap();
         }
@@ -370,8 +374,8 @@ fn the_apps_last_close_ignores_a_read_mark_pin_but_not_a_pin_on_the_dms_byte() {
             (hold_dms, hold_dms),
             "hold_dms = {hold_dms}"
         );
-        // Without the DMS lock the frame after the pin went into the database file and the
-        // WAL is gone, so a pin reader's view of the database at frame 3 no longer exists.
+        // Without the DMS lock the frame after the read lock went into the database file and the
+        // WAL is gone, so a read lock reader's view of the database at frame 3 no longer exists.
         let reopened = connect(&path);
         assert_eq!(count(&reopened), 3);
         drop(reopened);
@@ -409,7 +413,7 @@ fn with_a_busy_timeout_the_checkpoint_still_reports_busy() {
     outside
         .busy_timeout(std::time::Duration::from_millis(1))
         .unwrap();
-    pin(&shm, Kind::Ofd, SLOT);
+    take_read_lock(&shm, Kind::Ofd, SLOT);
     assert_eq!(checkpoint(&outside, "RESTART"), (1, 4, 4));
     assert_eq!(checkpoint(&outside, "TRUNCATE"), (1, 4, 4));
     drop((outside, app));
@@ -421,7 +425,7 @@ fn with_a_busy_timeout_the_checkpoint_still_reports_busy() {
 fn a_blocking_posix_lock_waits_behind_an_ofd_lock_in_the_same_process() {
     let (_dir, path, app, shm) = fresh_db();
     let shm_path = suffixed(&path, "-shm");
-    pin(&shm, Kind::Ofd, SLOT);
+    take_read_lock(&shm, Kind::Ofd, SLOT);
     let theirs = File::options()
         .read(true)
         .write(true)
@@ -443,9 +447,9 @@ fn a_blocking_posix_lock_waits_behind_an_ofd_lock_in_the_same_process() {
     );
     assert!(
         granted.try_recv().is_err(),
-        "it waits while the pin is held"
+        "it waits while the read lock is held"
     );
-    unpin(&shm, Kind::Ofd, SLOT);
+    release_read_lock(&shm, Kind::Ofd, SLOT);
     assert_eq!(granted.recv().unwrap(), Ok(()));
     // Its descriptor is closed only after the application's: closing it drops the application's POSIX locks.
     let theirs = waiter.join().unwrap();

@@ -1,12 +1,12 @@
 //! The observer, read by read: each kind of application checkpoint, the replicator's own checkpoints
-//! seen as nothing, and a property over a model of SQLite's backfill under a pin.
+//! seen as nothing, and a property over a model of SQLite's backfill under a read lock.
 
 use lsr_ltx::PageSize;
 use lsr_wal::{CommittedEnd, Salts};
 use proptest::prelude::*;
 
 use super::*;
-use crate::position::ReadEpoch;
+use crate::position::ReadLockHold;
 
 const T: Option<NonZeroU32> = Some(SQLITE_AUTOCHECKPOINT);
 
@@ -21,19 +21,19 @@ fn read(generation: u32, frames: u32, backfilled: u32) -> CommittedRead {
     CommittedRead::new(
         CommittedEnd::new(frames, salts(generation), PageSize::MIN),
         backfilled,
-        ReadEpoch::first(),
+        ReadLockHold::first(),
     )
     .unwrap()
 }
 
 /// What SQLite's checkpoint call reports: the frames in the WAL and the frames backfilled as
-/// the pin is retaken.
+/// the read lock is retaken.
 fn ran(log: u32, checkpointed: u32) -> Option<CheckpointRun> {
     Some(CheckpointRun {
         busy: false,
         log,
         checkpointed,
-        epoch: ReadEpoch::first().next(),
+        epoch: ReadLockHold::first().next(),
     })
 }
 
@@ -52,7 +52,7 @@ fn the_first_read_is_a_baseline() {
     assert_eq!(observer.counts(), AppCheckpoints::NONE);
 }
 
-/// The pin above read mark 0: the application's checkpoint copies up to it, once.
+/// The read lock above read mark 0: the application's checkpoint copies up to it, once.
 #[test]
 fn a_backfill_the_replicator_did_not_run_is_a_app_checkpoint() {
     let mut observer = AppCheckpointObserver::default();
@@ -89,7 +89,7 @@ fn a_restart_after_a_full_backfill_is_not_one() {
     assert_eq!(seen, [None, None]);
 }
 
-/// The pin on read mark 0: the replicator's full checkpoint, then its own one-frame write
+/// The read lock on read mark 0: the replicator's full checkpoint, then its own one-frame write
 /// restarted the WAL, and the WAL grew past the threshold over two reads with nothing
 /// backfilled.
 #[test]
@@ -124,7 +124,7 @@ fn growth_past_the_threshold_on_read_mark_zero_is_a_stall() {
     );
 }
 
-/// The pin above read mark 0: once the application's checkpoint reached the pin, its next attempts copy
+/// The read lock above read mark 0: once the application's checkpoint reached the read lock, its next attempts copy
 /// nothing more.
 #[test]
 fn growth_past_the_threshold_after_a_capped_backfill_is_a_stall() {
@@ -147,10 +147,10 @@ fn growth_past_the_threshold_after_a_capped_backfill_is_a_stall() {
     );
 }
 
-/// The pin above read mark 0 with frames below it unbackfilled: an application attempt would have copied
+/// The read lock above read mark 0 with frames below it unbackfilled: an application attempt would have copied
 /// them, so growth with nothing copied means the application runs no automatic checkpoint.
 #[test]
-fn growth_with_frames_below_the_pin_unbackfilled_is_no_stall() {
+fn growth_with_frames_below_the_read_lock_unbackfilled_is_no_stall() {
     let mut observer = AppCheckpointObserver::default();
     let seen = polls(
         &mut observer,
@@ -159,10 +159,10 @@ fn growth_with_frames_below_the_pin_unbackfilled_is_no_stall() {
     assert_eq!(seen, [None, None, None]);
 }
 
-/// The replicator's checkpoint stopped short of the end: the pin is retaken at the frames it
+/// The replicator's checkpoint stopped short of the end: the read lock is retaken at the frames it
 /// left, and an application attempt would copy up to them.
 #[test]
-fn the_pin_after_a_short_checkpoint_of_ours_is_where_it_stopped() {
+fn the_read_lock_after_a_short_checkpoint_of_ours_is_where_it_stopped() {
     let mut observer = AppCheckpointObserver::default();
     observer.ours(Some(read(1, 1001, 600)), ran(1000, 600));
     let app_off = polls(&mut observer, &[read(1, 1100, 600), read(1, 1200, 600)]);
@@ -257,21 +257,21 @@ fn counts_carry_across_a_replaced_engine() {
     assert_eq!((both.ran(), both.stalled, both.last), (3, 1, later.last));
 }
 
-/// The pin's read mark in the model: SQLite's read mark 0, or a mark at a frame.
+/// The read lock's read mark in the model: SQLite's read mark 0, or a mark at a frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Pin {
+enum ReadMark {
     Zero,
     At(u32),
 }
 
-/// SQLite's backfill and restart rules under one pin and no other reader (the rules of
+/// SQLite's backfill and restart rules under one read lock and no other reader (the rules of
 /// `crates/sim/src/sqlite.rs`: backfill limit, restart, mark choice).
 #[derive(Clone, Copy, Debug)]
 struct Model {
     generation: u32,
     frames: u32,
     backfilled: u32,
-    pin: Pin,
+    read_mark: ReadMark,
     app_threshold: Option<u32>,
 }
 
@@ -280,7 +280,7 @@ struct Model {
 struct Interval {
     app_backfilled: bool,
     app_attempt_did_nothing: bool,
-    pin_above_zero_unreached: bool,
+    read_lock_above_zero_unreached: bool,
 }
 
 impl Model {
@@ -297,7 +297,7 @@ impl Model {
             return;
         }
         let before = self.backfilled;
-        if let Pin::At(mark) = self.pin {
+        if let ReadMark::At(mark) = self.read_mark {
             self.backfilled = self.backfilled.max(mark.min(self.frames));
         }
         if self.backfilled > before {
@@ -308,17 +308,17 @@ impl Model {
     }
 
     /// The replicator's checkpoint: `full` copies everything, else half (an application reader
-    /// stopped it). The pin is retaken as SQLite picks a mark, then the replicator writes one
-    /// frame of its own (which restarts a fully backfilled log under a pin on read mark 0). Returns
+    /// stopped it). The read lock is retaken as SQLite picks a mark, then the replicator writes one
+    /// frame of its own (which restarts a fully backfilled log under a read lock on read mark 0). Returns
     /// what the checkpoint call reported.
     fn ours(&mut self, full: bool) -> Option<CheckpointRun> {
         let to = if full { self.frames } else { self.frames / 2 };
         self.backfilled = self.backfilled.max(to);
         let run = ran(self.frames, self.backfilled);
-        self.pin = if self.backfilled == self.frames {
-            Pin::Zero
+        self.read_mark = if self.backfilled == self.frames {
+            ReadMark::Zero
         } else {
-            Pin::At(self.frames)
+            ReadMark::At(self.frames)
         };
         self.write(1);
         run
@@ -326,7 +326,7 @@ impl Model {
 
     /// A commit of `frames` frames, under SQLite's restart rule.
     fn write(&mut self, frames: u32) {
-        if self.pin == Pin::Zero && self.frames > 0 && self.backfilled == self.frames {
+        if self.read_mark == ReadMark::Zero && self.frames > 0 && self.backfilled == self.frames {
             self.generation = self.generation.saturating_add(1);
             self.frames = 0;
             self.backfilled = 0;
@@ -353,20 +353,20 @@ fn step() -> impl Strategy<Value = Step> {
 proptest! {
     /// Every application backfill between two polls is observed once, the replicator's own
     /// checkpoints never are, a stall is inferred only where an application attempt did nothing, and
-    /// an application running no automatic checkpoint shows nothing while the pin sits above read mark 0
+    /// an application running no automatic checkpoint shows nothing while the read lock sits above read mark 0
     /// with frames below it unbackfilled.
     #[test]
     fn app_checkpoints_are_seen_and_the_replicators_are_not(
         steps in prop::collection::vec(step(), 1..120),
         threshold in prop::option::of(100u32..400),
-        pin_at_start in 0u32..3,
+        read_lock_at_start in 0u32..3,
         told in any::<bool>(),
     ) {
         let mut model = Model {
             generation: 1,
-            frames: pin_at_start,
+            frames: read_lock_at_start,
             backfilled: 0,
-            pin: if pin_at_start == 0 { Pin::Zero } else { Pin::At(pin_at_start) },
+            read_mark: if read_lock_at_start == 0 { ReadMark::Zero } else { ReadMark::At(read_lock_at_start) },
             app_threshold: threshold,
         };
         let assumed = if told { threshold.and_then(NonZeroU32::new) } else { T };
@@ -376,8 +376,8 @@ proptest! {
         for step in steps {
             match step {
                 Step::AppCommit(frames) => {
-                    if matches!(model.pin, Pin::At(mark) if model.backfilled < mark) {
-                        interval.pin_above_zero_unreached = true;
+                    if matches!(model.read_mark, ReadMark::At(mark) if model.backfilled < mark) {
+                        interval.read_lock_above_zero_unreached = true;
                     }
                     model.app_commit(frames, &mut interval);
                 }
@@ -398,7 +398,7 @@ proptest! {
                                 prop_assert!(interval.app_attempt_did_nothing, "{interval:?}");
                             } else {
                                 // The blind spot: told nothing, the application runs none.
-                                prop_assert!(!interval.pin_above_zero_unreached);
+                                prop_assert!(!interval.read_lock_above_zero_unreached);
                             }
                         }
                         Some(AppCheckpoint::Restarted) => {

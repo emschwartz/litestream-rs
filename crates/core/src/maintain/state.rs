@@ -15,7 +15,7 @@
 //!   level, and retention holds until it is gone. A listing cannot tell such an
 //!   object from a good one, and the inputs it "covers" would be deleted.
 //!
-//! - The retention pin. While a task of the actor is degraded, the newest
+//! - The kept restore point. While a task of the actor is degraded, the newest
 //!   transaction the replica held when the degradation began is pinned: the
 //!   files of its restore chain are not deleted, and the rest of the replica
 //!   is retained as usual (`retain`). The actor sets it and clears it.
@@ -81,20 +81,20 @@ pub struct MaintainState {
     /// At most one per level above 0: a level's delete runs first.
     distrusted: BTreeMap<Level, FileKey>,
     /// The restore point retention keeps with its chain.
-    pin: Option<Txid>,
+    kept_restore_point: Option<Txid>,
 }
 
 impl MaintainState {
     /// Keeps the restore chain of `txid` from retention, or (`None`) lets the
-    /// last pin go.
-    pub const fn set_pin(&mut self, txid: Option<Txid>) {
-        self.pin = txid;
+    /// last kept restore point go.
+    pub const fn set_kept_restore_point(&mut self, txid: Option<Txid>) {
+        self.kept_restore_point = txid;
     }
 
     /// The restore point retention keeps, if one is pinned.
     #[must_use]
-    pub const fn pin(&self) -> Option<Txid> {
-        self.pin
+    pub const fn kept_restore_point(&self) -> Option<Txid> {
+        self.kept_restore_point
     }
 
     /// Notes how `job` ended at `now`.

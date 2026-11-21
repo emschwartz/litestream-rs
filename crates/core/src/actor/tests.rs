@@ -45,7 +45,7 @@ struct Counting {
     /// When non-zero, the most keys one listing page returns: a store may
     /// return fewer than the limit.
     page_cap: Arc<AtomicU32>,
-    /// A WAL whose read epoch the next upload begun moves, as a checkpoint
+    /// A WAL whose read-lock hold the next upload begun moves, as a checkpoint
     /// by another connection would mid-step.
     moves_epoch: Arc<std::sync::Mutex<Option<FakeWal>>>,
     /// A WAL the application commits a transaction to (page 1 filled with the byte)

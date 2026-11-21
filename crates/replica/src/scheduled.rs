@@ -164,9 +164,9 @@ impl Scheduled {
     }
 
     /// The restore point a failing run keeps from retention. The replicator's thread hands
-    /// it to the engine, with any other pin it holds, after every tick.
-    pub(crate) const fn pinned(&self) -> Option<Txid> {
-        self.health.pinned
+    /// it to the engine, with any other kept restore point it holds, after every tick.
+    pub(crate) const fn kept_restore_point(&self) -> Option<Txid> {
+        self.health.kept_restore_point
     }
 
     fn hand_over(&mut self, live: LivePages, now: Timestamp) {
@@ -204,14 +204,15 @@ impl Scheduled {
                 bump(&mut runs.passed);
                 health.last_good = Some((txid, now));
                 health.failing = None;
-                health.pinned = None;
+                health.kept_restore_point = None;
             }
             VerifyOutcome::Failed(found) => {
                 bump(&mut runs.failed);
                 let since = health.failing.map_or(now, |was| was.since);
                 health.failing = Some(VerifyFailure { since, txid, found });
-                if health.pinned.is_none() {
-                    health.pinned = Some(health.last_good.map_or(txid, |(good, _)| good));
+                if health.kept_restore_point.is_none() {
+                    health.kept_restore_point =
+                        Some(health.last_good.map_or(txid, |(good, _)| good));
                 }
             }
             VerifyOutcome::Merged => bump(&mut runs.merged),

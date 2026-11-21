@@ -24,7 +24,7 @@
 //!
 //! [`Stepper`] is the sync engine without the actor: `recover_traced`, `sync_step` and
 //! `checkpoint` over a backend and an in-memory staging store, for cases that check the
-//! engine's verdict at one point (the pin cases, the abandoned-frames check).
+//! engine's verdict at one point (the read lock cases, the abandoned-frames check).
 
 use std::collections::BTreeMap;
 use std::io;
@@ -68,11 +68,11 @@ pub trait Backend: WalSource + PageSource + Checkpointer + Clone {
     type OpenError: std::error::Error + Send + Sync + 'static;
     /// The name the suite's messages use.
     const NAME: &'static str;
-    /// Whether the pin, retaken over a fully backfilled WAL, sits on read mark 0, which does not
+    /// Whether the read lock, retaken over a fully backfilled WAL, sits on read mark 0, which does not
     /// block a WAL restart (walformat.html). The cases whose answer depends on it state both.
-    const PIN_ON_MARK_ZERO: bool;
+    const READ_LOCK_ON_MARK_ZERO: bool;
 
-    /// Opens the database at `path` through the VFS named `vfs`, holding the pin, with the
+    /// Opens the database at `path` through the VFS named `vfs`, holding the read lock, with the
     /// default WAL size limit.
     ///
     /// # Errors
@@ -96,7 +96,7 @@ pub trait Backend: WalSource + PageSource + Checkpointer + Clone {
 impl Backend for Sqlite {
     type OpenError = OpenError;
     const NAME: &'static str = "rusqlite read transaction";
-    const PIN_ON_MARK_ZERO: bool = true;
+    const READ_LOCK_ON_MARK_ZERO: bool = true;
 
     fn open_limited(
         path: &Path,

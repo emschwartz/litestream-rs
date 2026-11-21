@@ -93,7 +93,7 @@ fn a_failed_prune_waits_out_its_backoff() {
 #[test]
 fn a_restarted_wal_with_nothing_new_is_not_reported_as_a_sync() {
     let (mut rig, mut actor) = caught_up();
-    rig.wal.unpin_reader();
+    rig.wal.release_reader();
     rig.wal.backfill(u32::MAX);
     assert!(rig.wal.try_restart(), "a fully backfilled WAL restarts");
     let tick = rig.tick(&mut actor, T0 + 1);
@@ -125,7 +125,7 @@ fn upload_backing_off(rig: &mut Rig, actor: &mut Actor) {
     );
 }
 
-/// The read epoch moved while a sync staged its file: the sync proves
+/// The read-lock hold moved while a sync staged its file: the sync proves
 /// nothing, so the checkpoint it would have allowed waits for the next tick,
 /// which is asked for at once.
 #[test]

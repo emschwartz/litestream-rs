@@ -7,8 +7,8 @@
 //! 1. A read mark above 0 blocks every restart. Salts never change.
 //! 2. Under read mark 0 the next write restarts the WAL once (salt1 + 1,
 //!    checkpoint_seq + 1), and the new generation can be neither backfilled nor
-//!    restarted while the pin holds. An old generation that grows under a read-mark-0
-//!    pin is never backfilled, so it is never restarted either.
+//!    restarted while the read lock holds. An old generation that grows under a read-mark-0
+//!    read lock is never backfilled, so it is never restarted either.
 //!
 //! The model is SQLite's own rule: a writer restarts only when it sees a fully
 //! backfilled WAL (it reads on read mark 0) and no reader holds a mark above 0. Frames
@@ -34,7 +34,7 @@ use super::{
     Barrier, CheckpointMode, CheckpointRun, Checkpointer, CommittedRead, PageSource, SourceError,
     WalSource, WriteLock,
 };
-use crate::position::{ReadEpoch, WalFileLen};
+use crate::position::{ReadLockHold, WalFileLen};
 
 const MAGIC_LITTLE: u32 = 0x377f_0682;
 const FORMAT_VERSION: u32 = 3_007_000;
@@ -113,7 +113,7 @@ struct WalState {
     db_size: u32,
     // The read mark our own reader holds; None when it holds no read transaction.
     read_mark: Option<u32>,
-    epoch: ReadEpoch,
+    epoch: ReadLockHold,
     restarts: u32,
     forced: Option<CommittedRead>,
     injections: Injections,
@@ -224,7 +224,7 @@ impl WalState {
         self.backfilled
     }
 
-    fn pin(&mut self) {
+    fn take_read_lock(&mut self) {
         self.read_mark = Some(if self.backfilled == self.mx_frame {
             0
         } else {
@@ -262,7 +262,7 @@ impl FakeWal {
             backfilled: 0,
             db_size: 1,
             read_mark: None,
-            epoch: ReadEpoch::first(),
+            epoch: ReadLockHold::first(),
             restarts: 0,
             forced: None,
             injections: Injections::default(),
@@ -314,17 +314,17 @@ impl FakeWal {
 
     /// Takes the read transaction the way SQLite picks a mark: 0 when the WAL is
     /// fully backfilled, the frame count otherwise.
-    pub fn pin_reader(&self) {
-        lock(&self.state).pin();
+    pub fn hold_reader(&self) {
+        lock(&self.state).take_read_lock();
     }
 
     /// Takes the read transaction on a chosen mark.
-    pub fn pin_reader_at(&self, mark: u32) {
+    pub fn hold_reader_at(&self, mark: u32) {
         lock(&self.state).read_mark = Some(mark);
     }
 
     /// Releases the read transaction.
-    pub fn unpin_reader(&self) {
+    pub fn release_reader(&self) {
         lock(&self.state).read_mark = None;
     }
 
@@ -336,12 +336,12 @@ impl FakeWal {
 
     /// The epoch `WalSource::epoch` reports.
     #[must_use]
-    pub fn epoch(&self) -> ReadEpoch {
+    pub fn epoch(&self) -> ReadLockHold {
         lock(&self.state).epoch
     }
 
     /// Sets the epoch `WalSource::epoch` reports.
-    pub fn set_epoch(&self, epoch: ReadEpoch) {
+    pub fn set_epoch(&self, epoch: ReadLockHold) {
         lock(&self.state).epoch = epoch;
     }
 
@@ -443,7 +443,7 @@ impl FakeWal {
         let log = state.mx_frame;
         let checkpointed = state.backfilled;
         state.epoch = state.epoch.next();
-        state.pin();
+        state.take_read_lock();
         CheckpointRun {
             busy,
             log,
@@ -479,7 +479,7 @@ impl WalSource for FakeWal {
         CommittedRead::new(state.end(), state.backfilled, state.epoch).ok_or(SourceError::Busy)
     }
 
-    fn epoch(&self) -> ReadEpoch {
+    fn epoch(&self) -> ReadLockHold {
         lock(&self.state).epoch
     }
 }

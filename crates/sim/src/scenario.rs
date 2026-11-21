@@ -683,7 +683,7 @@ pub fn restart_during_read_lock_lapse() -> Scenario {
 }
 
 /// An outside TRUNCATE and one commit restart the WAL between two ticks: the
-/// next step reports a changed generation (not a violated pin).
+/// next step reports a changed generation (not a violated read lock).
 #[must_use]
 pub fn pinned_on_zero_single_restart() -> Scenario {
     build(
