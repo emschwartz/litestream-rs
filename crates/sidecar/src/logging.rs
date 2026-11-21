@@ -23,6 +23,8 @@ use lsr_config::{LogFormat, LogLevel};
 use lsr_core::{Clock, Event as EngineEvent};
 use lsr_replica::{Event, EventSink, Txid, VerifyOutcome};
 
+use crate::json::string as json_string;
+
 /// One field's value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Value {
@@ -225,27 +227,6 @@ pub(crate) fn text_line(
     }
     line.push('\n');
     line
-}
-
-/// A JSON string literal.
-pub(crate) fn json_string(text: &str) -> String {
-    let mut out = String::with_capacity(text.len().saturating_add(2));
-    out.push('"');
-    for c in text.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\t' => out.push_str("\\t"),
-            '\r' => out.push_str("\\r"),
-            c if c.is_control() => {
-                out.push_str(&format!("\\u{:04x}", u32::from(c)));
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
 }
 
 /// slog's `JSONHandler` line.
