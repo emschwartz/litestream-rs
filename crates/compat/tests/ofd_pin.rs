@@ -193,28 +193,80 @@ fn fresh_db() -> (TempDir, PathBuf, Connection, File) {
     (dir, path, host, shm)
 }
 
-/// This process's locks on `path`'s inode from `/proc/locks`, as `KIND TYPE START END`.
-/// OFD locks show as `OFDLCK` with pid -1; blocked waiters as lines with `->`.
+/// `path`'s device and inode as `/proc` lock listings print them (`%02x:%02x:%lu`).
+fn lock_id(path: &Path) -> String {
+    let meta = fs::metadata(path).unwrap();
+    let dev = meta.dev();
+    format!(
+        "{:02x}:{:02x}:{}",
+        libc::major(dev),
+        libc::minor(dev),
+        meta.ino()
+    )
+}
+
+/// The locks held on `path`'s inode through this process's descriptors, as `KIND TYPE START
+/// END` (OFD locks show as `OFDLCK`).
+///
+/// Read from `/proc/self/fdinfo` of every descriptor open on the inode, not from `/proc/locks`:
+/// the kernel prints a descriptor's locks into fdinfo in one pass under the file's lock list
+/// lock, while `/proc/locks` lists every lock on the machine a page per read, so locks other
+/// processes take or drop between two reads shift the listing and one of ours shows twice or
+/// not at all. Each fdinfo shows the locks taken through that descriptor (POSIX and OFD alike),
+/// so their union is every lock this process holds. A lock line carries the inode, so a
+/// descriptor number reused by another thread between listing and reading adds nothing.
 fn locks_on(path: &Path) -> Vec<String> {
-    let inode = format!(":{}", fs::metadata(path).unwrap().ino());
-    let pid = std::process::id().to_string();
-    let mut locks: Vec<String> = fs::read_to_string("/proc/locks")
-        .unwrap()
-        .lines()
-        .filter_map(|line| {
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            let (waiter, rest) = match fields.get(1) {
-                Some(&"->") => (true, fields.get(2..)?),
-                _ => (false, fields.get(1..)?),
+    let id = lock_id(path);
+    let mut locks = Vec::new();
+    for fd in fs::read_dir("/proc/self/fdinfo").unwrap() {
+        // A descriptor closed since the listing has no fdinfo left: it holds nothing.
+        let Ok(info) = fs::read_to_string(fd.unwrap().path()) else {
+            continue;
+        };
+        for line in info.lines() {
+            // `lock:\t1: OFDLCK ADVISORY  READ -1 fe:00:1234 125 125`
+            let Some(lock) = line.strip_prefix("lock:") else {
+                continue;
             };
-            let ours = (rest.first() == Some(&"OFDLCK") || rest.get(3) == Some(&pid.as_str()))
-                && rest.get(4).is_some_and(|f| f.ends_with(&inode));
-            let words = [*rest.first()?, *rest.get(2)?, *rest.get(5)?, *rest.get(6)?];
-            ours.then(|| format!("{}{}", if waiter { "-> " } else { "" }, words.join(" ")))
-        })
-        .collect();
+            let fields: Vec<&str> = lock.split_whitespace().collect();
+            if fields.get(5) == Some(&id.as_str()) {
+                let words = [1, 3, 6, 7].map(|i| fields.get(i).copied().unwrap_or_default());
+                locks.push(words.join(" "));
+            }
+        }
+    }
     locks.sort();
     locks
+}
+
+/// The most `/proc/locks` listings [`waiter_queued`] reads before it gives up.
+const MAX_LISTINGS: usize = 100_000;
+
+/// Whether `/proc/locks` comes to list a blocked request on `path`'s inode as `KIND TYPE START
+/// END`, within [`MAX_LISTINGS`] listings.
+///
+/// Waiters show nowhere else (fdinfo lists granted locks only), so this reads `/proc/locks`,
+/// whose listing may be torn: a line can be skipped or shown twice, but never shows a request
+/// that was not queued when it was read. So one listing that shows the waiter answers, and a
+/// listing that misses it is read again, a bounded number of times.
+fn waiter_queued(path: &Path, want: &str) -> bool {
+    let id = lock_id(path);
+    for _ in 0..MAX_LISTINGS {
+        let listing = fs::read_to_string("/proc/locks").unwrap();
+        // `1: -> POSIX  ADVISORY  WRITE 4321 fe:00:1234 124 124`
+        let queued = listing.lines().any(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let words = [2, 4, 7, 8].map(|i| fields.get(i).copied().unwrap_or_default());
+            fields.get(1) == Some(&"->")
+                && fields.get(6) == Some(&id.as_str())
+                && words.join(" ") == want
+        });
+        if queued {
+            return true;
+        }
+        thread::yield_now();
+    }
+    false
 }
 
 #[test]
@@ -389,16 +441,10 @@ fn a_blocking_posix_lock_waits_behind_an_ofd_lock_in_the_same_process() {
         done.send(result.map_err(|e| e.kind())).unwrap();
         theirs
     });
-    let queued = "-> POSIX WRITE 124 124".to_owned();
-    let mut seen = false;
-    for _ in 0..1_000_000 {
-        if locks_on(&shm_path).contains(&queued) {
-            seen = true;
-            break;
-        }
-        thread::yield_now();
-    }
-    assert!(seen, "the blocking request never queued");
+    assert!(
+        waiter_queued(&shm_path, "POSIX WRITE 124 124"),
+        "the blocking request never queued"
+    );
     assert!(
         granted.try_recv().is_err(),
         "it waits while the pin is held"
