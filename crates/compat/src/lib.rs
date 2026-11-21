@@ -58,8 +58,8 @@ mod workload;
 
 pub use binaries::{
     Era, FIRST_WAL_INDEX_END_PATCH, GoBuild, GoVersion, KNOWN_RELEASES, LIVE_MODULE, QUIRKS, Quirk,
-    QuirkEntry, VERSIONS_ENV, WAL_INDEX_END_COMMIT, builds_in, builds_under_test, go_binary,
-    is_live_test, workspace_root,
+    QuirkEntry, S3_MODULE, VERSIONS_ENV, WAL_INDEX_END_COMMIT, builds_in, builds_under_test,
+    go_binary, is_live_test, workspace_root,
 };
 pub use chain::{
     Chain, Outside, Point, STEP_MS, Shape, Site, Written, clock_ending_now, real_now_ms,

@@ -231,10 +231,19 @@ pub const LIVE_MODULE: &str = "live";
 /// [`LIVE_MODULE`], so `just compat-live` runs it.
 #[must_use]
 pub fn is_live_test(path: &str) -> bool {
+    in_module(path, LIVE_MODULE)
+}
+
+/// The module the live tests over MinIO sit in. `just compat-s3` runs them on their own,
+/// since they need a MinIO server, so `just compat-live` leaves them out on purpose.
+pub const S3_MODULE: &str = "s3";
+
+/// Whether a test path names `module` among the modules it sits in.
+fn in_module(path: &str, module: &str) -> bool {
     let modules = path
         .rsplit_once("::")
         .map_or("", |(modules, _test)| modules);
-    modules.split("::").any(|module| module == LIVE_MODULE)
+    modules.split("::").any(|m| m == module)
 }
 
 /// The builds the live tests run against: the names in `LSR_COMPAT_VERSIONS` when set
@@ -250,9 +259,9 @@ pub fn is_live_test(path: &str) -> bool {
 )]
 pub fn builds_under_test() -> Vec<GoBuild> {
     let caller = std::thread::current().name().unwrap_or_default().to_owned();
-    if !is_live_test(&caller) {
+    if !is_live_test(&caller) && !in_module(&caller, S3_MODULE) {
         panic!(
-            "{caller:?} runs the Go builds under test but is not in a `mod {LIVE_MODULE}`, so `just compat-live` would skip it"
+            "{caller:?} runs the Go builds under test but is not in a `mod {LIVE_MODULE}` (or `mod {S3_MODULE}` for MinIO), so `just compat-live` would skip it"
         );
     }
     match std::env::var(VERSIONS_ENV) {
@@ -332,6 +341,8 @@ mod tests {
         assert!(!is_live_test("live_go::go_resumes_from_rust_meta"));
         assert!(!is_live_test("process::live"));
         assert!(!is_live_test("go_vfs_reads_rust_replica"));
+        assert!(in_module("s3::over_s3_go_restores_rust_replica", S3_MODULE));
+        assert!(!is_live_test("s3::over_s3_go_restores_rust_replica"));
     }
 
     /// The guard: a test outside a live module that asks for the builds fails, so moving
