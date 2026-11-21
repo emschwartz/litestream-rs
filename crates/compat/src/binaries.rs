@@ -76,6 +76,10 @@ const LAST_FRAMES_PATCH: u32 = 15;
 /// The first release tag whose VFS takes `LITESTREAM_REPLICA_URL`, so reads a file replica.
 const FIRST_FILE_VFS_PATCH: u32 = 3;
 
+/// The first release tag that retries a snapshot the database was not ready for, instead of
+/// waiting a whole snapshot interval (upstream feb65fb, #888).
+const FIRST_SNAPSHOT_RETRY_PATCH: u32 = 4;
+
 /// A Go build the live tests run: its binary name (a tag, a short commit or `main`) and
 /// the era derived from it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -120,6 +124,14 @@ impl GoBuild {
     /// script does not build it.
     pub fn vfs_reads_files(&self) -> bool {
         release_patch(&self.name).is_none_or(|n| n >= FIRST_FILE_VFS_PATCH)
+    }
+
+    /// Whether this build writes its first snapshot soon after it starts. Every 0.5 release
+    /// tries one at start; before v0.5.4 a try made before the database's first sync fails
+    /// and the next waits the whole snapshot interval (`store.go`, `monitorCompactionLevel`,
+    /// fixed upstream in feb65fb), so a short run may never see a snapshot from it.
+    pub fn snapshots_soon_after_start(&self) -> bool {
+        release_patch(&self.name).is_none_or(|n| n >= FIRST_SNAPSHOT_RETRY_PATCH)
     }
 
     /// Where the built VFS extension lives; an error naming the build script when absent.

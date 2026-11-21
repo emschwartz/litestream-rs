@@ -146,11 +146,13 @@ fn go_restore(bin: &Path, config: &Path, site: &Site, target: Target, name: &str
 
 /// One daemon's turn over every site: it comes up with every database, each database commits
 /// [`COMMITS`] transactions, each staged before the next, and the replicas end holding them
-/// all and a snapshot. Returns each database's boot file when it had a previous tip.
+/// all, and a snapshot when `snapshot` says the daemon writes one this soon. Returns each
+/// database's boot file when it had a previous tip.
 fn turn(
     process: &mut Replicator,
     sites: &mut [Site],
     previous: &[Option<Txid>],
+    snapshot: bool,
 ) -> Vec<Option<Summary>> {
     process
         .wait_up_all(sites.len(), UP)
@@ -168,6 +170,9 @@ fn turn(
     }
     for site in sites.iter() {
         wait_uploaded(process, site).expect("uploaded");
+        if !snapshot {
+            continue;
+        }
         wait_until("a snapshot on the replica", UP, || {
             process.ensure_running()?;
             Ok(!snapshots(&site.replica)?.is_empty())
@@ -228,6 +233,21 @@ fn assert_no_new_snapshot(name: &str, sites: &[Site], before: &Left) {
     }
 }
 
+/// Go left no snapshot, so lsr may write its scheduled first one, as Go from v0.5.4 does at
+/// start; that is not a snapshot forced by a lost position, which `assert_continued` and the
+/// absence of a logged cause already rule out. Anything more than that one file fails.
+fn assert_at_most_a_first_snapshot(name: &str, sites: &[Site], before: &Left) {
+    for (k, site) in sites.iter().enumerate() {
+        let now = snapshots(&site.replica).expect("l9");
+        let new: Vec<_> = now.difference(&before.l9[k]).collect();
+        assert!(
+            before.l9[k].is_empty() && new.len() <= 1,
+            "{name}: database {k}: snapshots {now:?} after Go's {:?}",
+            before.l9[k]
+        );
+    }
+}
+
 /// What Go said about the file's keys it does not define, if anything, for the report.
 fn go_key_warnings(log: &str) -> Vec<&str> {
     log.lines()
@@ -255,7 +275,11 @@ fn sidecar_handover(build: &GoBuild, lsr: &Path) {
     check_config(lsr, &config);
 
     let mut go = Replicator::start(&bin, &config, &site_log(&sites, "go-1.log")).expect("Go");
-    turn(&mut go, &mut sites, &[None; DATABASES]);
+    // Before v0.5.4 Go may write no snapshot in a run this short, so none is waited for, on
+    // Go's turn or lsr's; lsr is then checked against whatever snapshots Go left, possibly
+    // none, so a snapshot lsr wrote still fails the run.
+    let snapshot = build.snapshots_soon_after_start();
+    turn(&mut go, &mut sites, &[None; DATABASES], snapshot);
     let go_log = go.log_text();
     go.stop().expect("Go stops");
     for warning in go_key_warnings(&go_log) {
@@ -266,11 +290,15 @@ fn sidecar_handover(build: &GoBuild, lsr: &Path) {
     let log = site_log(&sites, "lsr.log");
     let mut rs = Replicator::start_lsr_config(lsr, &config, &log).expect("lsr");
     let previous: Vec<Option<Txid>> = at_go.tips.iter().copied().map(Some).collect();
-    let boots = turn(&mut rs, &mut sites, &previous);
+    let boots = turn(&mut rs, &mut sites, &previous, snapshot);
     let rs_log = rs.log_text();
     rs.stop().expect("lsr drains and exits 0");
     assert_continued(name, Kind::Rust, &boots, &at_go.tips);
-    assert_no_new_snapshot(name, &sites, &at_go);
+    if snapshot {
+        assert_no_new_snapshot(name, &sites, &at_go);
+    } else {
+        assert_at_most_a_first_snapshot(name, &sites, &at_go);
+    }
     assert_eq!(
         rs_log.matches("replica position recovered").count(),
         DATABASES,
@@ -299,7 +327,7 @@ fn sidecar_handover(build: &GoBuild, lsr: &Path) {
 fn go_resumes(name: &str, bin: &Path, config: &Path, sites: &mut [Site], at_rust: &Left) {
     let mut go = Replicator::start(bin, config, &site_log(sites, "go-2.log")).expect("Go");
     let previous: Vec<Option<Txid>> = at_rust.tips.iter().copied().map(Some).collect();
-    let boots = turn(&mut go, sites, &previous);
+    let boots = turn(&mut go, sites, &previous, true);
     go.stop().expect("Go stops");
     assert_continued(name, Kind::Go, &boots, &at_rust.tips);
     assert_no_new_snapshot(name, sites, at_rust);
