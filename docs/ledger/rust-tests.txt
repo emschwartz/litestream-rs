@@ -39,6 +39,7 @@ lsr-cli::s3 s3::missing_credentials_exit_3_and_name_the_variable
 lsr-cli::s3 s3::restore_from_minio_matches_dir
 lsr-cli::s3 s3::secret_never_on_stderr_against_a_403
 lsr-cli::s3 s3::secret_never_on_stderr_against_an_unreachable_endpoint
+lsr-cli::soak_tigris soak::lsr_replicate_soaks_against_tigris
 lsr-cli::tigris tigris::go_written_tigris_replica_restores_the_same_in_rust_and_go
 lsr-cli::bin/lsr args::tests::a_flag_overrides_the_url_query
 lsr-cli::bin/lsr args::tests::a_url_replica_is_refused_by_scheme_only
