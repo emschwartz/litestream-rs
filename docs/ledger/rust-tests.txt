@@ -111,6 +111,10 @@ lsr-compat pages::tests::integrity_check_accepts_a_real_database_and_rejects_gar
 lsr-compat pages::tests::rejects_ragged_and_headerless_files
 lsr-compat replica::tests::go_file_keys_round_trip
 lsr-compat replica::tests::names_go_would_not_write_are_foreign
+lsr-compat s3::tests::a_scrubbed_child_sees_no_aws_variable
+lsr-compat s3::tests::anything_but_loopback_http_is_refused
+lsr-compat s3::tests::credential_variables_are_scrubbed_and_others_kept
+lsr-compat s3::tests::loopback_http_endpoints_pass_normalised
 lsr-compat scenario::tests::every_scenario_holds_the_full_mix
 lsr-compat scenario::tests::names_round_trip_and_are_distinct
 lsr-compat vfs::tests::parses_every_record_kind
@@ -181,6 +185,9 @@ lsr-compat::rust_chains go_restores_rust_chain_latest
 lsr-compat::rust_chains go_verifies_every_rust_file
 lsr-compat::rust_chains rust_chain_covers_every_shape
 lsr-compat::rust_chains rust_restores_its_own_chain_at_every_point
+lsr-compat::s3 s3::over_s3_go_and_rust_hand_over
+lsr-compat::s3 s3::over_s3_go_restores_rust_replica
+lsr-compat::s3 s3::over_s3_rust_restores_go_replica
 lsr-compat::sidecar go_and_rust_sidecars_alternate_on_one_config_file
 lsr-compat::sidecar go_config_and_meta_start_the_rust_sidecar_with_no_snapshot
 lsr-compat::verify every_fixture_verifies_at_both_depths_except_the_recorded_gap

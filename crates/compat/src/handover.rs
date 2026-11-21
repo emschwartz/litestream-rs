@@ -2,7 +2,7 @@
 //! staged and uploaded, read from the meta directory and the replica, never from timing.
 //!
 //! A process's position is the newest transaction any file covers in the meta directory or
-//! the replica ([`tip`]): a process stages a level-0 file in the meta directory before it
+//! the replica, a directory or a MinIO prefix ([`crate::Remote`]) ([`tip`]): a process stages a level-0 file in the meta directory before it
 //! uploads it, so a file staged by a process killed before its upload still counts, and the
 //! next process uploads it. A boot that continues writes its first file at `tip + 1`, holding
 //! only the pages its transactions wrote; a boot that snapshots writes every page of the
@@ -31,7 +31,7 @@ pub const PROCESS_STEP: Duration = Duration::from_secs(30);
 /// # Errors
 /// [`CompatError`] when a listing fails.
 pub fn tip(site: &Site) -> Result<Option<Txid>, CompatError> {
-    newest_txid(&[site.meta.as_path(), site.replica.as_path()])
+    Ok(newest_txid(&[site.meta.as_path()])?.max(site.remote().newest_txid()?))
 }
 
 /// The newest transaction the replica holds.
@@ -39,7 +39,7 @@ pub fn tip(site: &Site) -> Result<Option<Txid>, CompatError> {
 /// # Errors
 /// [`CompatError`] when the listing fails.
 pub fn uploaded(site: &Site) -> Result<Option<Txid>, CompatError> {
-    newest_txid(&[site.replica.as_path()])
+    site.remote().newest_txid()
 }
 
 /// The replica's level-9 files, by path.
@@ -108,12 +108,14 @@ pub fn wait_boot_file(
         .checked_add(1)
         .and_then(Txid::new)
         .ok_or_else(|| CompatError::Fixture(format!("no transaction follows {after}")))?;
-    let dirs = [site.meta.as_path(), site.replica.as_path()];
     let mut found = None;
     let what = format!("the boot's first file at {next}");
     wait_until(&what, PROCESS_STEP, || {
         process.ensure_running()?;
-        found = l0_starting_at(&dirs, next)?;
+        found = match l0_starting_at(&[site.meta.as_path()], next)? {
+            Some(staged) => Some(staged),
+            None => site.remote().l0_starting_at(next)?,
+        };
         Ok(found.is_some())
     })?;
     found.ok_or_else(|| CompatError::Timeout(what.clone()))

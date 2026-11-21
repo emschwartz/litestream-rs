@@ -166,8 +166,16 @@ pub fn summarize(path: &Path) -> Result<Option<Summary>, CompatError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(CompatError::io(path)(e)),
     };
-    let bad = |e: lsr_ltx::DecodeError| CompatError::Fixture(format!("{}: {e}", path.display()));
-    let mut decoder = ReadDecoder::new(bytes.as_slice());
+    summarize_bytes(&bytes, &path.display().to_string()).map(Some)
+}
+
+/// Decodes and verifies one LTX file held in memory; `name` labels a failure.
+///
+/// # Errors
+/// [`CompatError::Fixture`] when the bytes do not decode or verify.
+pub fn summarize_bytes(bytes: &[u8], name: &str) -> Result<Summary, CompatError> {
+    let bad = |e: lsr_ltx::DecodeError| CompatError::Fixture(format!("{name}: {e}"));
+    let mut decoder = ReadDecoder::new(bytes);
     let mut header = None;
     let mut pages: u32 = 0;
     while let Some(event) = decoder.next_event().map_err(bad)? {
@@ -177,9 +185,8 @@ pub fn summarize(path: &Path) -> Result<Option<Summary>, CompatError> {
         }
     }
     decoder.finish().map_err(bad)?;
-    let header =
-        header.ok_or_else(|| CompatError::Fixture(format!("{}: no header", path.display())))?;
-    Ok(Some(Summary { header, pages }))
+    let header = header.ok_or_else(|| CompatError::Fixture(format!("{name}: no header")))?;
+    Ok(Summary { header, pages })
 }
 
 /// The level-0 file whose transactions start at `min`, from the first of `dirs` that holds

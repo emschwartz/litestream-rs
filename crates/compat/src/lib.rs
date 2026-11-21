@@ -32,6 +32,12 @@
 //! on one [`Site`], stopped by SIGINT or killed by SIGKILL, and the watchers re-exported from
 //! the handover module ([`tip`], [`wait_boot_file`], [`snapshots`]) read what each process
 //! staged and uploaded, so a test can tell a boot that continued from one that snapshotted.
+//!
+//! The replica of a [`Site`] is a directory or a prefix of a local MinIO bucket ([`Remote`],
+//! [`S3Replica`]), so the same checks run with Go's AWS SDK and Rust's S3 store on one bucket
+//! (`just compat-s3`). Every child process the harness starts runs without the machine's
+//! `AWS_*` and `LITESTREAM_*` variables ([`scrub_env`]), and the S3 checks refuse any endpoint
+//! but loopback `http` ([`loopback_endpoint`]): they never reach a real object store.
 
 mod binaries;
 mod chain;
@@ -41,9 +47,11 @@ mod golive;
 mod handover;
 mod manifest;
 mod pages;
+mod remote;
 mod replica;
 mod replicator;
 mod rsrestore;
+mod s3;
 mod scenario;
 mod vfs;
 mod workload;
@@ -58,8 +66,8 @@ pub use chain::{
 pub use error::CompatError;
 pub use generate::generate;
 pub use golive::{
-    GoRestore, build_verify_helper, go_verify, restore_with_go, rfc3339_millis, write_config,
-    write_config_daily_snapshots, write_config_snapshotting,
+    GoRestore, Schedule, build_verify_helper, go_verify, restore_with_go, rfc3339_millis,
+    write_config, write_config_daily_snapshots, write_config_for, write_config_snapshotting,
 };
 pub use handover::{
     PROCESS_STEP, snapshots, tip, uploaded, wait_boot_file, wait_staged_past, wait_uploaded,
@@ -69,12 +77,17 @@ pub use manifest::{
     fixture_dir, fixtures_root,
 };
 pub use pages::{PageDigest, hash_pages, integrity_check};
+pub use remote::Remote;
 pub use replica::{
     Listing, ReplicaFile, Summary, l0_starting_at, list, newest_l0, newest_txid, parse_rel, rel_of,
-    summarize,
+    summarize, summarize_bytes,
 };
 pub use replicator::{Kind, Replicator, lsr_binary, wait_until};
 pub use rsrestore::{Staged, chain_files, copy_tree, restore_replica, stage};
+pub use s3::{
+    ACCESS_KEY_VAR, BUCKET_VAR, ENDPOINT_VAR, MinioEnv, S3Replica, SECRET_KEY_VAR,
+    loopback_endpoint, scrub_env,
+};
 pub use scenario::{Scenario, Step};
 pub use vfs::{VfsRead, VfsView, build_vfs_reader, read_plain, read_with_vfs};
 pub use workload::{SplitMix, Workload};

@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 
 use crate::binaries::workspace_root;
 use crate::error::CompatError;
+use crate::s3::{home_beside, scrub_env};
 
 const POLL: Duration = Duration::from_millis(20);
 
@@ -121,7 +122,11 @@ pub fn lsr_binary() -> Result<PathBuf, CompatError> {
     }
 }
 
+/// Starts `command` with its output in `log`, never with the machine's own `AWS_*` or
+/// `LITESTREAM_*` variables or home directory ([`crate::scrub_env`]): a replicator writing to
+/// MinIO must not find a real key or endpoint.
 fn spawn(command: &mut Command, binary: &Path, log: &Path) -> Result<Child, CompatError> {
+    scrub_env(command, &home_beside(log))?;
     let out = fs::File::create(log).map_err(CompatError::io(log))?;
     let err = out.try_clone().map_err(CompatError::io(log))?;
     command

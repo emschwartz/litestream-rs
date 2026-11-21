@@ -9,6 +9,8 @@ use rusqlite::Connection;
 
 use crate::error::CompatError;
 use crate::manifest::Target;
+use crate::remote::Remote;
+use crate::s3::{home_beside, scrub_env};
 
 /// The configuration both `replicate` and `restore` read: short intervals so a replica holds
 /// every level and several snapshots within seconds. The keys exist, with the same meaning,
@@ -47,27 +49,82 @@ fn write_config_with(
     snapshot_interval: &str,
     snapshot_retention: &str,
 ) -> Result<(), CompatError> {
+    let schedule = Schedule {
+        levels: Schedule::FAST.levels,
+        snapshot_interval,
+        snapshot_retention,
+    };
+    write_config_for(path, db, &Remote::Dir(replica.to_path_buf()), schedule)
+}
+
+/// How often a replicator compacts and snapshots, in Go's duration syntax: the `levels`
+/// intervals and the `snapshot` section of the config file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Schedule<'a> {
+    /// The compaction level intervals, level 1 first.
+    pub levels: &'a [&'a str],
+    /// `snapshot.interval`.
+    pub snapshot_interval: &'a str,
+    /// `snapshot.retention`.
+    pub snapshot_retention: &'a str,
+}
+
+impl Schedule<'static> {
+    /// Short intervals, so a replica holds every level and several snapshots within seconds
+    /// ([`write_config`]).
+    pub const FAST: Self = Self {
+        levels: &["1s", "2s", "4s"],
+        snapshot_interval: "3s",
+        snapshot_retention: "1h",
+    };
+
+    /// [`Schedule::FAST`]'s levels with a day-long snapshot window
+    /// ([`write_config_daily_snapshots`]).
+    pub const DAILY_SNAPSHOTS: Self = Self {
+        levels: &["1s", "2s", "4s"],
+        snapshot_interval: "24h",
+        snapshot_retention: "24h",
+    };
+
+    /// No compaction and no scheduled snapshot within a run: the replica holds the boot's
+    /// snapshot and one level-0 file per sync, each stamped when it was written, so a restore
+    /// at an instant between two syncs has exactly one right answer, whichever stamp a reader
+    /// takes (Go before v0.5.16 reads only the object's `LastModified`).
+    pub const LEVEL_ZERO_ONLY: Self = Self {
+        levels: &["1h"],
+        snapshot_interval: "24h",
+        snapshot_retention: "24h",
+    };
+}
+
+/// The config file for `db` replicating to `remote` on `schedule`. For an S3 remote it names
+/// the endpoint, path style, region and credentials explicitly (`s3.rs`); Go v0.5.0 and later
+/// read every key it writes, and so does `lsr replicate -config`.
+pub fn write_config_for(
+    path: &Path,
+    db: &Path,
+    remote: &Remote,
+    schedule: Schedule<'_>,
+) -> Result<(), CompatError> {
+    let levels: String = schedule
+        .levels
+        .iter()
+        .map(|interval| format!("  - interval: {interval}\n"))
+        .collect();
     let text = format!(
         "levels:
-  - interval: 1s
-  - interval: 2s
-  - interval: 4s
-snapshot:
+{levels}snapshot:
   interval: {snapshot_interval}
   retention: {snapshot_retention}
 dbs:
   - path: {db}
     monitor-interval: 100ms
     checkpoint-interval: 1h
-    replica:
-      type: file
-      path: {replica}
-      sync-interval: 100ms
-",
+{replica}",
         db = db.display(),
-        replica = replica.display(),
-        snapshot_interval = snapshot_interval,
-        snapshot_retention = snapshot_retention,
+        snapshot_interval = schedule.snapshot_interval,
+        snapshot_retention = schedule.snapshot_retention,
+        replica = remote.yaml(),
     );
     fs::write(path, text).map_err(CompatError::io(path))
 }
@@ -85,7 +142,8 @@ pub enum GoRestore {
 }
 
 /// `litestream restore` of `db_path`'s replica from `config` into `out` for a target, with
-/// the given pinned binary.
+/// the given pinned binary, in an environment without `AWS_*` or `LITESTREAM_*` variables
+/// ([`scrub_env`]).
 pub fn restore_with_go(
     binary: &Path,
     config: &Path,
@@ -109,6 +167,7 @@ pub fn restore_with_go(
         }
     }
     cmd.arg(db_path);
+    scrub_env(&mut cmd, &home_beside(out))?;
     let output = cmd.output().map_err(CompatError::io(binary))?;
     if output.status.success() {
         return Ok(GoRestore::Restored);

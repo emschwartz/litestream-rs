@@ -800,6 +800,7 @@ dependencies = [
  "lsr-sim",
  "lsr-sqlite",
  "lsr-store-fs",
+ "lsr-store-s3",
  "lsr-wal",
  "proptest",
  "rusqlite",

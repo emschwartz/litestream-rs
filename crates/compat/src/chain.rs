@@ -33,7 +33,9 @@ use tempfile::TempDir;
 
 use crate::error::CompatError;
 use crate::pages::hash_pages;
+use crate::remote::Remote;
 use crate::replica;
+use crate::s3::S3Replica;
 use crate::workload::SplitMix;
 
 /// Virtual milliseconds between two commits of a run.
@@ -89,7 +91,9 @@ impl Outside {
 }
 
 /// The application's side: a database in WAL mode with autocheckpoint off, an open connection
-/// that stays open across replicator restarts, and the directories a replicator uses.
+/// that stays open across replicator restarts, and the directories a replicator uses. Its
+/// replica is the directory `replica` ([`Site::create`]) or a prefix of a local MinIO bucket
+/// ([`Site::create_on_s3`]); [`Site::remote`] reads either.
 #[derive(Debug)]
 pub struct Site {
     dir: TempDir,
@@ -97,12 +101,13 @@ pub struct Site {
     pub db: PathBuf,
     /// Go's meta directory beside the database; L0 files live in `ltx/0` under it.
     pub meta: PathBuf,
-    /// The file replica.
+    /// The file replica; unused (and never created) when the replica is on S3.
     pub replica: PathBuf,
     /// The application's connection.
     pub app: Connection,
     page_size: u32,
     rng: SplitMix,
+    remote: Remote,
 }
 
 impl Site {
@@ -111,10 +116,26 @@ impl Site {
     /// # Errors
     /// [`CompatError`] when the directory or SQLite refuses.
     pub fn create(page_size: u32, seed: u64) -> Result<Self, CompatError> {
+        Self::create_with(page_size, seed, None)
+    }
+
+    /// [`Site::create`] whose replica is `s3`, a prefix of a local MinIO bucket.
+    ///
+    /// # Errors
+    /// As [`Site::create`].
+    pub fn create_on_s3(page_size: u32, seed: u64, s3: S3Replica) -> Result<Self, CompatError> {
+        Self::create_with(page_size, seed, Some(s3))
+    }
+
+    fn create_with(page_size: u32, seed: u64, s3: Option<S3Replica>) -> Result<Self, CompatError> {
         let dir = tempfile::tempdir().map_err(CompatError::io(std::env::temp_dir()))?;
         let db = dir.path().join("app.db");
         let meta = dir.path().join(".app.db-litestream");
         let replica = dir.path().join("replica");
+        let remote = s3.map_or_else(
+            || Remote::Dir(replica.clone()),
+            |s3| Remote::S3(Box::new(s3)),
+        );
         let app = Connection::open(&db)?;
         app.busy_timeout(Duration::from_secs(2))?;
         app.pragma_update(None, "page_size", page_size)?;
@@ -133,7 +154,13 @@ impl Site {
             app,
             page_size,
             rng: SplitMix::new(seed),
+            remote,
         })
+    }
+
+    /// Where the replica lives.
+    pub const fn remote(&self) -> &Remote {
+        &self.remote
     }
 
     /// The directory holding everything of this site.
@@ -347,8 +374,14 @@ impl Chain {
     /// tick, so a site that already has a replica and meta directory is continued.
     ///
     /// # Errors
-    /// [`CompatError`] when SQLite or the schedule refuses.
+    /// [`CompatError`] when SQLite or the schedule refuses, and [`CompatError::Fixture`] for a
+    /// site whose replica is on S3: the in-process chain writes a directory replica only.
     pub fn start(site: Site, clock_ms: i64) -> Result<Self, CompatError> {
+        if matches!(site.remote(), Remote::S3(_)) {
+            return Err(CompatError::Fixture(
+                "the in-process chain writes a directory replica, not S3".to_owned(),
+            ));
+        }
         let live = Sqlite::open(&site.db)?;
         Ok(Self {
             staging: FsStore::new(&site.meta),

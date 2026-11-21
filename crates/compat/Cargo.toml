@@ -16,6 +16,7 @@ lsr-local.workspace = true
 lsr-ltx.workspace = true
 lsr-sqlite.workspace = true
 lsr-store-fs.workspace = true
+lsr-store-s3.workspace = true
 lsr-wal.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
