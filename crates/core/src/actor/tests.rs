@@ -1390,3 +1390,4 @@ fn a_crash_between_the_drop_and_the_snapshot_boots_clean() {
 
 mod lanes;
 mod rejected_snapshot;
+mod remote_tip;

@@ -1221,7 +1221,7 @@ impl Actor {
 
 /// What a boot found.
 struct Booted {
-    /// The newest staged file.
+    /// The newest staged file, or the replica's newest level-0 file.
     tip: Option<TipView>,
     /// What recovery makes of it.
     recovered: Recovered,
@@ -1229,8 +1229,9 @@ struct Booted {
     page_size: Option<PageSize>,
 }
 
-/// The newest staged file, the replica's page size, and what recovery makes
-/// of them. A WAL whose page size is not the replica's halts here, before
+/// The newest staged file (or, with none staged, the replica's newest
+/// level-0 file), the replica's page size, and what recovery makes of them.
+/// A WAL whose page size is not the replica's halts here, before
 /// anything is staged.
 async fn boot_recover<W: WalSource, L: ObjectStore, R: ObjectStore>(
     wal: &mut W,
@@ -1240,7 +1241,11 @@ async fn boot_recover<W: WalSource, L: ObjectStore, R: ObjectStore>(
 ) -> Result<Booted, Fault> {
     let committed = wal.committed().map_err(Fault::from_source)?;
     let mut reader = open_reader(wal)?;
-    let tip = TipView::load(staging, reader.as_mut()).await?;
+    let tip = match (TipView::load(staging, reader.as_mut()).await?, confirmed) {
+        // Nothing staged: the replica's newest level-0 file is the tip.
+        (None, Some(newest)) => TipView::load_remote(remote, reader.as_mut(), newest).await?,
+        (staged, _) => staged,
+    };
     let view = wal_view(wal, reader.as_ref(), committed)?;
     let page_size = match tip {
         Some(TipView::Readable { page_size, .. }) => Some(page_size),

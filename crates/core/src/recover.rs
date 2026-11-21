@@ -4,9 +4,10 @@
 //! of the wal-index and the WAL header saw it, and at the replica's newest
 //! transaction, and says whether to continue where the tip ended, continue in a
 //! restarted WAL, snapshot, or halt. It reads nothing: the reads are done by
-//! [`TipView::load`] and [`Probes::read`], so every rule below can be driven from
-//! a table of inputs. Go answers the same question in `verifyWithExecutor`
-//! (`db.go:1782-1925`) with a heuristic per branch; the rules here replace two
+//! [`TipView::load`] (or, with nothing staged, [`TipView::load_remote`], which
+//! reads the same tip back from the replica) and [`Probes::read`], so every rule
+//! below can be driven from a table of inputs. Go answers the same question in
+//! `verifyWithExecutor` (`db.go:1782-1925`) with a heuristic per branch; the rules here replace two
 //! of those heuristics with the read-transaction proof of [`Continuity`].
 //!
 //! Rules, first match wins: 1 no tip, 2 replica ahead, 3 tip unreadable,
@@ -161,18 +162,34 @@ impl TipView {
         let Some(header) = header.filter(|_| newest.key.range().min() == txid) else {
             return Ok(Some(Self::Unreadable { txid }));
         };
-        let fields = header.fields();
-        let end = fields.wal.and_then(|origin| {
-            WalOffset::new(
-                origin.offset().saturating_add(origin.size()),
-                fields.page_size,
-            )
-        });
-        let (Some(origin), Some(end), Some(commit)) =
-            (fields.wal, end, NonZeroU32::new(fields.commit))
-        else {
+        let Some(origin) = Origin::of(&header) else {
             return Ok(Some(Self::Unreadable { txid }));
         };
+        let file = TipFile {
+            store: staging,
+            key: newest.key,
+            fault: Fault::from_staging,
+        };
+        let view = Self::checked(&file, None, &header, origin, wal).await?;
+        Ok(Some(view.unwrap_or(Self::Unreadable { txid })))
+    }
+
+    /// Checks a tip whose header names a WAL origin against `wal`: the frame
+    /// before its end and the whole range it covers (ruling V3). `first`, when
+    /// given, is the file's first [`TIP_READ`] bytes, already read. `None` when
+    /// the file does not decode and verify whole.
+    async fn checked<S: ObjectStore, R: Read + Seek>(
+        file: &TipFile<'_, S>,
+        first: Option<Vec<u8>>,
+        header: &Header,
+        at: Origin,
+        wal: Option<&mut WalReader<R>>,
+    ) -> Result<Option<Self>, Fault> {
+        let Origin {
+            origin,
+            end,
+            commit,
+        } = at;
         let (salt1, salt2) = origin.salts();
         let salts = Salts { salt1, salt2 };
         let frame = match wal {
@@ -196,15 +213,15 @@ impl TipView {
             Some((_, _, Range::Pages { pages, .. })) => pages,
             Some((_, _, Range::Rewritten | Range::NotInThisWal)) | None => &none,
         };
-        let Some(pages) = scan_pages(staging, &newest, wanted, expected).await? else {
-            return Ok(Some(Self::Unreadable { txid }));
+        let Some(pages) = scan_pages(file, first, wanted, expected).await? else {
+            return Ok(None);
         };
         let last_page = match frame {
             None => LastPageCheck::NoFrame(Miss::Truncated),
             Some((wal, check, range)) => {
                 let checked = match_last_page(wal, check, end, salts, &pages)?;
                 if matches!(checked, LastPageCheck::Match { .. })
-                    && !range.agrees(&pages, fields.commit)
+                    && !range.agrees(&pages, commit.get())
                 {
                     LastPageCheck::Rewritten
                 } else {
@@ -212,8 +229,9 @@ impl TipView {
                 }
             }
         };
+        let fields = header.fields();
         Ok(Some(Self::Readable {
-            txid,
+            txid: header.txids().max(),
             origin,
             commit,
             page_size: fields.page_size,
@@ -221,6 +239,40 @@ impl TipView {
             last_page,
         }))
     }
+}
+
+/// Where in the WAL a tip's header says it came from, when it says so usably.
+#[derive(Clone, Copy)]
+struct Origin {
+    origin: WalOrigin,
+    end: WalOffset,
+    commit: NonZeroU32,
+}
+
+impl Origin {
+    /// `None` with no WAL origin, an end off a frame boundary, or a commit of 0.
+    fn of(header: &Header) -> Option<Self> {
+        let fields = header.fields();
+        let origin = fields.wal?;
+        let end = WalOffset::new(
+            origin.offset().saturating_add(origin.size()),
+            fields.page_size,
+        )?;
+        let commit = NonZeroU32::new(fields.commit)?;
+        Some(Self {
+            origin,
+            end,
+            commit,
+        })
+    }
+}
+
+/// A tip file and the store it is read from. `fault` names a store error as
+/// staging's or the replica's.
+struct TipFile<'a, S> {
+    store: &'a S,
+    key: FileKey,
+    fault: fn(&StoreError) -> Fault,
 }
 
 /// What a decode of the tip saw of the pages it was asked about.
@@ -390,10 +442,12 @@ pub(crate) async fn read_header<S: ObjectStore>(
         .and_then(|raw| Header::decode(&raw).ok()))
 }
 
-/// Decodes and verifies the whole file; `None` when it fails to.
-async fn scan_pages<L: ObjectStore>(
-    staging: &L,
-    file: &FileInfo,
+/// Decodes and verifies the whole file; `None` when it fails to. A read
+/// shorter than asked is the file's end (the store's contract), so a file under
+/// [`TIP_READ`] bytes takes one read, or none when `first` holds it.
+async fn scan_pages<S: ObjectStore>(
+    file: &TipFile<'_, S>,
+    mut first: Option<Vec<u8>>,
     wanted: Option<PageNo>,
     expected: &BTreeMap<PageNo, Checksum>,
 ) -> Result<Option<TipPages>, Fault> {
@@ -409,14 +463,16 @@ async fn scan_pages<L: ObjectStore>(
     let mut decoder = Decoder::new();
     let mut offset = 0u64;
     loop {
-        let bytes = staging
-            .read(&file.key, offset, chunk)
-            .await
-            .map_err(|err| Fault::from_staging(&err))?;
-        if bytes.is_empty() {
-            break;
-        }
-        offset = offset.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+        let bytes = match first.take() {
+            Some(bytes) => bytes,
+            None => file
+                .store
+                .read(&file.key, offset, chunk)
+                .await
+                .map_err(|err| (file.fault)(&err))?,
+        };
+        let read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        offset = offset.saturating_add(read);
         let mut input = bytes.as_slice();
         while !input.is_empty() {
             let Ok((used, event)) = decoder.feed(input) else {
@@ -435,6 +491,9 @@ async fn scan_pages<L: ObjectStore>(
                 }
             }
             input = input.get(used..).unwrap_or_default();
+        }
+        if read < chunk.get() {
+            break;
         }
     }
     seen.holds_wal_pages = !differing && matching == expected.len();
@@ -798,6 +857,8 @@ fn continued(tip: &Tip<'_>, wal: &WalView, at_committed_end: bool) -> Result<Pos
         Tip::Boot(_) => Err(refuse(SnapshotCause::LastPageMismatch)),
     }
 }
+
+mod remote;
 
 #[cfg(test)]
 mod tests;

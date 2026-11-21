@@ -10,30 +10,30 @@ use crate::source::{CommittedRead, FakeWal};
 
 const PS: PageSize = PageSize::MIN;
 
-fn pg(n: u32) -> PageNo {
+pub(super) fn pg(n: u32) -> PageNo {
     PageNo::new(n, PS).unwrap()
 }
 
-fn txid(n: u64) -> Txid {
+pub(super) fn txid(n: u64) -> Txid {
     Txid::new(n).unwrap()
 }
 
-fn nz(n: u32) -> NonZeroU32 {
+pub(super) fn nz(n: u32) -> NonZeroU32 {
     NonZeroU32::new(n).unwrap()
 }
 
-fn salts(n: u32) -> Salts {
+pub(super) fn salts(n: u32) -> Salts {
     Salts {
         salt1: n,
         salt2: n.wrapping_mul(7).wrapping_add(1),
     }
 }
 
-fn ts(n: i64) -> Timestamp {
+pub(super) fn ts(n: i64) -> Timestamp {
     Timestamp::from_unix_millis(n)
 }
 
-fn commit(wal: &FakeWal, pages: &[u32], size: u32) {
+pub(super) fn commit(wal: &FakeWal, pages: &[u32], size: u32) {
     let pages: Vec<(PageNo, Vec<u8>)> = pages
         .iter()
         .map(|n| (pg(*n), vec![u8::try_from(*n).unwrap(); PS.bytes()]))
@@ -41,7 +41,7 @@ fn commit(wal: &FakeWal, pages: &[u32], size: u32) {
     wal.append_tx(&pages, nz(size));
 }
 
-fn reader(bytes: Vec<u8>) -> WalReader<Cursor<Vec<u8>>> {
+pub(super) fn reader(bytes: Vec<u8>) -> WalReader<Cursor<Vec<u8>>> {
     WalReader::open(Cursor::new(bytes)).unwrap()
 }
 
@@ -88,7 +88,7 @@ fn boot(wal: &FakeWal, id: u64) -> TipView {
     }
 }
 
-fn view(wal: &FakeWal) -> WalView {
+pub(super) fn view(wal: &FakeWal) -> WalView {
     let bytes = wal.file_bytes();
     WalView {
         header: WalReader::open(Cursor::new(bytes.clone()))
@@ -111,7 +111,7 @@ fn snapshot(after: Option<u64>, cause: SnapshotCause) -> Recovered {
     }
 }
 
-fn fresh() -> FakeWal {
+pub(super) fn fresh() -> FakeWal {
     let wal = FakeWal::new(PS, salts(10));
     commit(&wal, &[1, 2], 2);
     commit(&wal, &[2, 3], 3);
@@ -621,7 +621,12 @@ fn go_parity_an_end_one_frame_past_32_is_checked_not_skipped() {
 }
 
 // The loader.
-fn encode_tip(wal: &FakeWal, id: u64, page_bytes: &[(u32, u8)], commit_size: u32) -> Vec<u8> {
+pub(super) fn encode_tip(
+    wal: &FakeWal,
+    id: u64,
+    page_bytes: &[(u32, u8)],
+    commit_size: u32,
+) -> Vec<u8> {
     let (cursor, _frame, _size) = end_of(wal.file_bytes()).unwrap();
     let head = *reader(wal.file_bytes()).header();
     let origin = WalOrigin::new(
@@ -639,7 +644,7 @@ fn encode_tip(wal: &FakeWal, id: u64, page_bytes: &[(u32, u8)], commit_size: u32
     enc.finish(None).unwrap().0
 }
 
-async fn put(store: &crate::MemStore, id: u64, bytes: &[u8]) {
+pub(super) async fn put(store: &crate::MemStore, id: u64, bytes: &[u8]) {
     use crate::{ObjectStore, Upload};
     let key = FileKey::new(Level::ZERO, lsr_ltx::TxidRange::single(txid(id)));
     let mut up = store.begin_upload(&key, ts(7)).await.unwrap();
@@ -1046,7 +1051,7 @@ fn load_against(
 
 /// A WAL whose second transaction was dropped by power loss and regrown with the
 /// same last page and a page 2 of other bytes.
-fn regrown() -> FakeWal {
+pub(super) fn regrown() -> FakeWal {
     let wal = FakeWal::new(PS, salts(10));
     commit(&wal, &[1, 2], 2);
     wal.append_tx(
@@ -1059,7 +1064,7 @@ fn regrown() -> FakeWal {
     wal
 }
 
-fn is_rewound(recovered: Recovered) -> bool {
+pub(super) fn is_rewound(recovered: Recovered) -> bool {
     matches!(
         recovered,
         Recovered::Snapshot {
