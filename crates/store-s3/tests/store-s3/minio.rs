@@ -2,7 +2,8 @@
 //!
 //! Every test needs `LSR_MINIO_ENDPOINT` (`http://127.0.0.1:9000`, set by the
 //! recipe) and skips with a message when it is unset, so `just check` never
-//! needs Docker. The server, its pinned image and its throwaway credentials
+//! needs Docker. With `LSR_REQUIRE_MINIO` set (the recipe sets it under CI) a missing or
+//! unreachable server fails the test instead: a green run must mean the server answered. The server, its pinned image and its throwaway credentials
 //! live in `scripts/minio.sh`; the credential defaults in `server()` repeat that script
 //! and can be overridden with `LSR_MINIO_ACCESS_KEY` and `LSR_MINIO_SECRET_KEY`.
 //! Each test works under its own prefix in the shared bucket, so tests run in
@@ -31,11 +32,45 @@ fn server() -> Option<Server> {
     })
 }
 
+/// Whether CI (or the developer) demands the server: no skipping, no running without it.
+fn required() -> bool {
+    std::env::var_os("LSR_REQUIRE_MINIO").is_some_and(|v| !v.is_empty())
+}
+
+/// Panics unless the endpoint accepts a TCP connection, so a test that expects an error
+/// cannot pass on a server that is simply absent.
+fn require_reachable(endpoint: &str) {
+    let authority = endpoint
+        .split_once("://")
+        .map_or(endpoint, |(_, rest)| rest)
+        .split('/')
+        .next()
+        .unwrap_or_default();
+    let addr = std::net::ToSocketAddrs::to_socket_addrs(authority)
+        .ok()
+        .and_then(|mut addrs| addrs.next());
+    let reached = addr.is_some_and(|addr| {
+        std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(5)).is_ok()
+    });
+    assert!(
+        reached,
+        "LSR_REQUIRE_MINIO is set but MinIO is unreachable at {endpoint} (just minio-up); \
+         refusing to pass without running"
+    );
+}
+
 fn connect() -> Option<RealHarness> {
     let Some(server) = server() else {
+        assert!(
+            !required(),
+            "LSR_REQUIRE_MINIO is set but LSR_MINIO_ENDPOINT is not; refusing to skip (just minio-up)"
+        );
         eprintln!("skipped: set LSR_MINIO_ENDPOINT (just minio-up)");
         return None;
     };
+    if required() {
+        require_reachable(&server.endpoint);
+    }
     Some(RealHarness::connect(&server))
 }
 
