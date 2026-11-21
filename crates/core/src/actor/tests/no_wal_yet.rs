@@ -97,11 +97,11 @@ fn a_restored_database_with_no_wal_header_ticks_by_the_poll_not_the_cpu() {
     }
 }
 
-/// The bump that would write the header keeps failing: the sync lane waits
+/// The bump that would write the header keeps failing: the sync task waits
 /// its doubling backoff, and a level-9 snapshot that is due waits with it
 /// rather than stepping the WAL on every tick.
 #[test]
-fn a_failing_header_write_waits_out_the_sync_lanes_backoff() {
+fn a_failing_header_write_waits_out_the_sync_tasks_backoff() {
     for snapshot_due in [false, true] {
         let (mut rig, mut actor) = restored_with_no_wal(snapshot_due);
         for _ in 0..1_000 {

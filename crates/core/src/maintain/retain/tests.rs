@@ -142,7 +142,7 @@ fn pinned_run(files: Vec<FileInfo>, pin: u64) -> Retention {
     retention_state(&inv(files), at(now), &defaults(), None, &pinned(pin))
 }
 
-/// A degraded lane pins a restore point: its chain stays, and everything
+/// A degraded task pins a restore point: its chain stays, and everything
 /// else the rules delete still goes (the pin never freezes retention).
 #[test]
 fn a_pin_keeps_its_restore_chain_and_the_rest_is_retained_as_usual() {
@@ -1207,7 +1207,7 @@ fn wake(
             // The level-0 scan stops at the first young file, so a level-0
             // file with no created-at time behind it is not read until that file
             // ages out. The wake is honest, and the hold it meets then
-            // carries no wake time, so the lane sleeps instead of spinning.
+            // carries no wake time, so the task sleeps instead of spinning.
             let without_created_at_behind = matches!(
                 &at_wake,
                 Retention::Held(Hold::NoCreatedAt { key })
@@ -1844,7 +1844,7 @@ fn retention_never_deletes_on_last_modified() {
 
 /// A young level-0 file ahead of an without a created-at time one: the without a created-at time file is
 /// behind the scan's stop, so the wake time is promised, and at it the hold
-/// has no wake time of its own (the lane sleeps, it does not spin).
+/// has no wake time of its own (the task sleeps, it does not spin).
 #[test]
 fn a_file_without_created_at_behind_a_young_one_is_a_hold_at_the_wake_not_a_spin() {
     let mut files = ladder();

@@ -14,8 +14,8 @@ use std::time::Duration;
 
 use common::{PATIENCE, Site, config, fake, wait};
 use lsr_replica::{
-    Config, DegradedCause, DynStore, FinalSync, Health, Lane, NonZeroDuration, Phase, Replicator,
-    Response, Responses, SnapshotCause, StopCause, Stopped,
+    Config, DegradedCause, DynStore, FinalSync, Health, NonZeroDuration, Phase, Replicator,
+    Response, Responses, SnapshotCause, StopCause, Stopped, Task,
 };
 use rusqlite::Connection;
 
@@ -176,10 +176,10 @@ fn an_operator_snapshot_request_survives_a_panic_before_the_boot() {
     site.assert_restores(&*site.store());
 }
 
-/// A lane the dropped engine reported degraded is still reported while the fresh engine waits
+/// A task the dropped engine reported degraded is still reported while the fresh engine waits
 /// to boot.
 #[test]
-fn a_degraded_lane_is_still_reported_while_the_engine_is_rebuilt() {
+fn a_degraded_task_is_still_reported_while_the_engine_is_rebuilt() {
     let site = Site::new();
     let faulty = site.faulty();
     let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
@@ -189,9 +189,9 @@ fn a_degraded_lane_is_still_reported_while_the_engine_is_rebuilt() {
     faulty.refuse.store(true, Ordering::SeqCst);
     site.commit(1);
     clock.advance(POLL);
-    let degraded = wait(&replicator, |h| h.lane(Lane::Upload).is_some());
+    let degraded = wait(&replicator, |h| h.task(Task::Upload).is_some());
     assert_eq!(
-        degraded.lane(Lane::Upload).map(|d| d.cause),
+        degraded.task(Task::Upload).map(|d| d.cause),
         Some(DegradedCause::Credentials)
     );
     // The upload's retry panics.
@@ -200,12 +200,12 @@ fn a_degraded_lane_is_still_reported_while_the_engine_is_rebuilt() {
     let rebuilt = wait(&replicator, |h| h.counters.panics >= 1);
     clock.hold();
     assert_eq!(
-        rebuilt.lane(Lane::Upload),
-        degraded.lane(Lane::Upload),
+        rebuilt.task(Task::Upload),
+        degraded.task(Task::Upload),
         "{rebuilt:?}"
     );
     assert_eq!(
-        rebuilt.lane(Lane::Sync).map(|d| d.cause),
+        rebuilt.task(Task::Sync).map(|d| d.cause),
         Some(DegradedCause::Bug)
     );
     faulty.panic_always.store(false, Ordering::SeqCst);
@@ -261,10 +261,10 @@ fn a_database_replaced_after_a_panic_is_degraded_and_not_reopened() {
     clock.advance(POLL);
     let health = wait(&replicator, |h| {
         h.phase == Phase::Running
-            || h.lane(Lane::Sync).map(|d| d.cause) == Some(DegradedCause::WalUnlinked)
+            || h.task(Task::Sync).map(|d| d.cause) == Some(DegradedCause::WalUnlinked)
     });
     assert_eq!(
-        health.lane(Lane::Sync).map(|d| d.cause),
+        health.task(Task::Sync).map(|d| d.cause),
         Some(DegradedCause::WalUnlinked),
         "{health:?}"
     );
@@ -272,10 +272,10 @@ fn a_database_replaced_after_a_panic_is_degraded_and_not_reopened() {
     // It keeps trying, at the doubling wait, and keeps saying why.
     clock.advance(Duration::from_secs(2));
     let later = wait(&replicator, |h| {
-        h.lane(Lane::Sync).is_some_and(|d| d.retries >= 2)
+        h.task(Task::Sync).is_some_and(|d| d.retries >= 2)
     });
     assert_eq!(
-        later.lane(Lane::Sync).map(|d| d.cause),
+        later.task(Task::Sync).map(|d| d.cause),
         Some(DegradedCause::WalUnlinked)
     );
     assert!(matches!(

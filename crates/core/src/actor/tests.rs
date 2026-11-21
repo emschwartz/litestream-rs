@@ -422,7 +422,7 @@ fn snapshot_job_writes_level_9() {
 }
 
 #[test]
-fn retry_backs_off_per_lane() {
+fn retry_backs_off_per_task() {
     let (mut rig, mut actor) = caught_up();
     rig.remote
         .inner
@@ -439,13 +439,13 @@ fn retry_backs_off_per_lane() {
     assert!(
         matches!(event(&first), Some(Event::Retrying { until, .. }) if *until == ts(T0 + 1_010))
     );
-    // The prune of staged file 1 is not the upload lane's to hold.
+    // The prune of staged file 1 is not the upload task's to hold.
     let pruned = rig.settle(&mut actor, T0 + 10);
     assert_eq!(
         pruned.last().and_then(next_of),
         Some(Next::At(ts(T0 + 1_010)))
     );
-    // The sync lane does not wait on the upload lane.
+    // The sync task does not wait on the upload task.
     rig.commit(3);
     assert_eq!(
         event(&rig.tick(&mut actor, T0 + 20)),
@@ -556,7 +556,7 @@ fn everything(rig: &Rig) -> (Vec<FileInfo>, Vec<FileInfo>) {
     (all(&rig.staging), all(&rig.remote))
 }
 
-/// Before the boot only the boot runs, and it waits on the sync lane: a boot
+/// Before the boot only the boot runs, and it waits on the sync task: a boot
 /// that failed asks to run at the end of its wait, not at once.
 #[test]
 fn a_failed_boot_waits_without_spinning() {
@@ -1041,21 +1041,21 @@ fn job_retry_reports_the_levels_wait() {
     );
 }
 
-const LANES: [Lane; 5] = [
-    Lane::Sync,
-    Lane::Checkpoint,
-    Lane::Upload,
-    Lane::Prune,
-    Lane::Maintenance,
+const TASKS: [Task; 5] = [
+    Task::Sync,
+    Task::Checkpoint,
+    Task::Upload,
+    Task::Prune,
+    Task::Maintenance,
 ];
 
 /// Every deadline the actor holds, read from where each is kept.
 fn held(actor: &Actor) -> Vec<Timestamp> {
     let running = actor.phase() == Phase::Running;
-    let mut held: Vec<Timestamp> = LANES
+    let mut held: Vec<Timestamp> = TASKS
         .iter()
-        .filter(|lane| running || matches!(lane, Lane::Sync | Lane::Upload))
-        .filter_map(|lane| actor.kept.lanes.get(*lane).until())
+        .filter(|task| running || matches!(task, Task::Sync | Task::Upload))
+        .filter_map(|task| actor.kept.tasks.get(*task).until())
         .collect();
     if running {
         if let Gate::Until(at) = actor.engine.gate {
@@ -1081,9 +1081,9 @@ proptest::proptest! {
         let (mut rig, mut actor) = caught_up();
         let now = T0.saturating_add(10_000);
         let at = |offset: i64| ts(now.saturating_add(offset));
-        for (lane, wait) in LANES.iter().zip(waits) {
+        for (task, wait) in TASKS.iter().zip(waits) {
             if let Some(wait) = wait {
-                actor.kept.lanes.get_mut(*lane).fail(|_| at(wait));
+                actor.kept.tasks.get_mut(*task).fail(|_| at(wait));
             }
         }
         actor.engine.gate = match gate {
@@ -1103,7 +1103,7 @@ proptest::proptest! {
             }
             Next::OnWalChange => proptest::prop_assert_eq!(soonest, None),
         }
-        // A tick with a passed deadline runs that lane or lets the deadline go.
+        // A tick with a passed deadline runs that task or lets the deadline go.
         let tick = rig.tick(&mut actor, now);
         if let Tick::Ran { next, .. } = tick {
             let passed = held(&actor).into_iter().any(|t| t <= ts(now));
@@ -1351,7 +1351,7 @@ fn created_at_failure_is_a_maintain_fault() {
         "{tick:?}"
     );
     assert_eq!(Rig::files(&rig.remote, Level::ZERO), before, "a job ran");
-    // Before its wait the lane neither relists nor reads a created-at time.
+    // Before its wait the task neither relists nor reads a created-at time.
     let io = rig.io();
     let idle = rig.tick(&mut actor, at + 29_000);
     assert_eq!(event(&idle), Some(&Event::Idle), "{idle:?}");
@@ -1541,7 +1541,7 @@ fn a_torn_staged_file_the_replica_holds_is_dropped_and_the_snapshot_takes_the_ne
 }
 
 #[test]
-fn the_upload_lane_drops_a_staged_file_that_turned_unreadable_and_snapshots() {
+fn the_upload_task_drops_a_staged_file_that_turned_unreadable_and_snapshots() {
     for torn in [truncated, flipped] {
         let (mut rig, mut actor) = caught_up();
         rig.commit(2);
@@ -1592,10 +1592,10 @@ fn a_crash_between_the_drop_and_the_snapshot_boots_clean() {
 mod checkpoint_failed;
 mod degraded;
 mod index_reset;
-mod lanes;
 mod listing;
 mod live;
 mod newest_replica_file;
 mod no_wal_yet;
 mod pages;
 mod rejected_snapshot;
+mod tasks;

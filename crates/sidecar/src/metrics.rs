@@ -33,8 +33,8 @@
 //! **New series** under `lsr_`, for what Go has no series for:
 //! - `lsr_db_state{db,state}` 1, the state `/healthz` names (`booting`, `running`,
 //!   `draining`, `stopped`, `gone`, `forked`, `waiting`, `failed`).
-//! - `lsr_degraded{db,lane,cause}` 1 while a lane keeps failing, and
-//!   `lsr_degraded_since_timestamp_seconds{db,lane,cause}`.
+//! - `lsr_degraded{db,task,cause}` 1 while a task keeps failing, and
+//!   `lsr_degraded_since_timestamp_seconds{db,task,cause}`.
 //! - `lsr_stopped{db,cause}` 1 once stopped (`shutdown` after a drain).
 //! - `lsr_replicated_txid{db}`, the newest transaction on the replica.
 //! - `lsr_unreplicated_since_timestamp_seconds{db}` while a commit is not on the replica,
@@ -57,11 +57,11 @@
 use std::fmt::Display;
 
 use lsr_replica::{
-    Health, Lane, Mismatch, OpCounters, Phase, StoreCounters, Timestamp, VerifyFailure,
+    Health, Mismatch, OpCounters, Phase, StoreCounters, Task, Timestamp, VerifyFailure,
 };
 
 use crate::health::{
-    DbState, DbView, cause_name, lane_name, notice_name, snapshot_name, stop_name,
+    DbState, DbView, cause_name, notice_name, snapshot_name, stop_name, task_name,
 };
 
 /// The rendered text.
@@ -274,15 +274,15 @@ fn state_series(out: &mut Out, views: &[DbView], now: Timestamp) {
         out.sample(name, &[("db", &db), ("state", view.state_name())], 1);
     }
     let dbs = running(views);
-    out.family("lsr_degraded", "gauge", "1 while a lane keeps failing");
+    out.family("lsr_degraded", "gauge", "1 while a task keeps failing");
     let at = "lsr_degraded_since_timestamp_seconds";
     let mut since_lines = Vec::new();
     for (db, health) in &dbs {
-        for lane in Lane::ALL {
-            if let Some(d) = health.lane(lane) {
+        for task in Task::ALL {
+            if let Some(d) = health.task(task) {
                 let labels = [
                     ("db", db.as_str()),
-                    ("lane", lane_name(lane)),
+                    ("task", task_name(task)),
                     ("cause", cause_name(d.cause)),
                 ];
                 out.sample("lsr_degraded", &labels, 1);
@@ -290,7 +290,7 @@ fn state_series(out: &mut Out, views: &[DbView], now: Timestamp) {
             }
         }
     }
-    out.family(at, "gauge", "When the lane began failing this way");
+    out.family(at, "gauge", "When the task began failing this way");
     for (labels, value) in since_lines {
         out.sample(at, &labels, value);
     }

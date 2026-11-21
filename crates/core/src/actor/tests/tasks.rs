@@ -1,4 +1,4 @@
-//! When each lane runs, and when the actor asks to be ticked again.
+//! When each task runs, and when the actor asks to be ticked again.
 
 use super::*;
 use crate::source::{CheckpointEffect, CheckpointScript};
@@ -9,7 +9,7 @@ fn checkpoints_at(min_pages: u32) -> ActorConfig {
     config
 }
 
-/// A failed checkpoint waits out its lane's backoff: a sync in between
+/// A failed checkpoint waits out its task's backoff: a sync in between
 /// stages the new transaction and does not checkpoint.
 #[test]
 fn a_failed_checkpoint_waits_out_its_backoff() {
@@ -70,7 +70,7 @@ fn a_checkpoint_reports_busy_exactly_when_it_was() {
     }
 }
 
-/// A failed prune waits out its lane's backoff before it deletes again.
+/// A failed prune waits out its task's backoff before it deletes again.
 #[test]
 fn a_failed_prune_waits_out_its_backoff() {
     let (mut rig, mut actor) = caught_up();
@@ -88,7 +88,7 @@ fn a_failed_prune_waits_out_its_backoff() {
 }
 
 /// A WAL that moved to a new generation with no new transaction stages
-/// nothing, and the tick goes on to the other lanes instead of reporting an
+/// nothing, and the tick goes on to the other tasks instead of reporting an
 /// empty sync.
 #[test]
 fn a_restarted_wal_with_nothing_new_is_not_reported_as_a_sync() {
@@ -103,8 +103,8 @@ fn a_restarted_wal_with_nothing_new_is_not_reported_as_a_sync() {
     );
 }
 
-/// Puts the upload lane into its backoff with a failed upload of 2, so the
-/// staged file keeps no other lane busy.
+/// Puts the upload task into its backoff with a failed upload of 2, so the
+/// staged file keeps no other task busy.
 fn upload_backing_off(rig: &mut Rig, actor: &mut Actor) {
     rig.remote
         .inner
@@ -249,7 +249,7 @@ fn a_busy_truncate_waits_one_interval() {
     assert_eq!(truncates(&rig), 2, "{:?}", rig.ck.calls());
 }
 
-/// A wait that has passed is let go even when its lane finds no work: the
+/// A wait that has passed is let go even when its task finds no work: the
 /// WAL restarted under SQLite, so there is nothing left to checkpoint, and
 /// the actor settles instead of asking for a tick at once forever.
 #[test]
@@ -264,7 +264,7 @@ fn a_passed_wait_with_no_work_left_is_not_a_deadline() {
         let waiting = if gate {
             actor.engine.gate.until()
         } else {
-            actor.kept.lanes.get(Lane::Checkpoint).until()
+            actor.kept.tasks.get(Task::Checkpoint).until()
         };
         let until = waiting.unwrap_or_else(|| panic!("no wait is held: {:?}", rig.ck.calls()));
         rig.wal.force_restart();

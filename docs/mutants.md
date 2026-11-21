@@ -221,7 +221,7 @@ Each was run again with `--file <file> --re '<file>:<line>:<col>'` and both test
 | `created_at.rs:41:9` | replace ResolvedCreatedAt::len -> usize with 1 | same |
 | `created_at.rs:47:9` | replace ResolvedCreatedAt::is_empty -> bool with false | same |
 | `actor.rs:293:5` | replace leaves_bad_snapshot -> bool with true | `a_snapshot_that_fails_before_its_commit_deletes_nothing` (`actor/tests/rejected_snapshot.rs`) |
-| `actor.rs:586:13` | replace && with \|\| in Actor::checkpoint_decision | `a_failed_checkpoint_waits_out_its_backoff` (`actor/tests/lanes.rs`, as are the rest) |
+| `actor.rs:586:13` | replace && with \|\| in Actor::checkpoint_decision | `a_failed_checkpoint_waits_out_its_backoff` (`actor/tests/tasks.rs`, as are the rest) |
 | `actor.rs:587:13` | replace && with \|\| in Actor::checkpoint_decision | same |
 | `actor.rs:616:42` | replace && with \|\| in Actor::wal_unit | `an_idle_tick_does_not_open_the_wal` |
 | `actor.rs:617:77` | delete ! in Actor::wal_unit | same |
@@ -273,7 +273,7 @@ survivor. For the actor and maintenance mutants other tests also fail outright; 
 | --- | --- | --- |
 | `actor.rs:397:27` | replace match guard now < prev with true in Actor::clock | After one reported clamp the clock answers the first instant forever, so the actor never sees time pass and `retention_failure`'s tick loop (actor tests) follows `Next::At` forever. Also fails `a_failed_prune_blocks_nothing_else`. |
 | `actor.rs:397:31` | replace < with > in Actor::clock | Every forward step reads as a step back, the same frozen clock and the same loop. Also fails `a_failed_prune_blocks_nothing_else`. |
-| `actor.rs:1173:61` | delete ! in Actor::ready_work | The upload lane counts as ready when it is idle, so `next` is always `Now` and `retention_failure`'s loop follows it forever; `settle` panics as never settled in three other tests. |
+| `actor.rs:1173:61` | delete ! in Actor::ready_work | The upload task counts as ready when it is idle, so `next` is always `Now` and `retention_failure`'s loop follows it forever; `settle` panics as never settled in three other tests. |
 | `compact.rs:371:9` | replace Reader::refill with Ok(true) | The end of an input is never reported, so `Reader::step` refills from an empty read forever. |
 | `compact.rs:382:16` | replace > with >= in Reader::refill | An empty read counts as more input: the same loop. |
 | `compact.rs:396:25` | replace >= with < in Reader::step | A consumed chunk is never refilled, so `Reader::step` loops on an empty remainder. |
@@ -330,7 +330,7 @@ column) and is caught.
 | `maintain/state.rs:136:9` | replace MaintainState::record_delete with () | `a_failed_delete_of_a_distrusted_output_backs_its_level_off` (`maintain/tests.rs`) |
 | `maintain/state.rs:194:63` | replace == with != in MaintainState::retry_at | same |
 | `maintain/state.rs:207:9` | replace MaintainState::forget_unlisted with () | `a_distrusted_output_gone_from_the_listing_is_forgotten` |
-| `actor/state.rs:88:9` | replace Retry::expire with () | `a_passed_wait_with_no_work_left_is_not_a_deadline` (`actor/tests/lanes.rs`, as are the rest) |
+| `actor/state.rs:88:9` | replace Retry::expire with () | `a_passed_wait_with_no_work_left_is_not_a_deadline` (`actor/tests/tasks.rs`, as are the rest) |
 | `actor/state.rs:88:55` | replace > with >= in Retry::expire | same |
 | `actor/state.rs:197:32` | replace match guard at <= now with false in Gate::expire | same |
 | `actor/state.rs:180:9` | replace Gate::open -> bool with true | `a_busy_truncate_waits_for_the_next_write` |

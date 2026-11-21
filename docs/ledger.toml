@@ -555,7 +555,7 @@
 "TestIsSQLiteBusyError" = { counterpart = ["lsr-core::checkpoint::tests::a_busy_passive_reports_busy", "lsr-core::fault::tests::sqlite_busy_retries"] }
 "TestReplicaMonitor_DrainsLimitedBacklogWithoutWaitingForInterval" = { counterpart = "lsr-core::upload::tests::files_per_tick_is_honoured_and_asks_to_step_again" }
 "TestReplicaMonitor_IdleRecordsSyncHealth" = { counterpart = "lsr-replica::replica::replicator::an_idle_replicator_keeps_its_health_current" }
-"TestReplicaMonitor_RecoversFromPositionError" = { counterpart = ["lsr-core::actor::tests::a_failed_boot_waits_without_spinning", "lsr-core::actor::tests::retry_backs_off_per_lane"] }
+"TestReplicaMonitor_RecoversFromPositionError" = { counterpart = ["lsr-core::actor::tests::a_failed_boot_waits_without_spinning", "lsr-core::actor::tests::retry_backs_off_per_task"] }
 "TestReplica_LockSyncDoesNotStarveQueuedWaiter" = { reason = "Go-only: fairness and context handling of Go mutexes shared between goroutines (the exec, sync and checkpoint locks). The Rust engine is one actor driven tick by tick with no shared locks (docs/PLAN.md section 3)." }
 "TestReplica_SyncHonorsContextWaitingForSyncLock" = { reason = "Go-only: context.Context cancellation. The Rust core is sans-IO and advances one tick at a time (docs/PLAN.md section 2, goal 5); there is no context to cancel, and shutdown is final_sync with a deadline." }
 "TestReplica_SyncOnceLimitsLTXFiles" = { counterpart = "lsr-core::upload::tests::files_per_tick_is_honoured_and_asks_to_step_again" }
@@ -1084,7 +1084,7 @@
 "TestReplicaClient_PutObjectContentMD5OtherOperations/WALSegments" = { reason = "The v0.3 generations/ layout (snapshots and WAL segments under generations/) is not in v1 (docs/PLAN.md section 1); Rust reads and writes the v0.5 LTX layout only." }
 "TestReplicaClient_R2ConcurrencyDefault" = { counterpart = "lsr-store-s3::store-s3::store::cases::memory_is_at_most_the_concurrency_in_parts" }
 "TestReplicaClient_RetriesThrottledList" = { counterpart = "lsr-cli::bin/lsr::run::tests::a_throttled_listing_is_retried" }
-"TestReplicaClient_RetryerSurvivesSustainedFailures" = { counterpart = ["lsr-core::retry::tests::calls_and_waits_stay_within_the_policy", "lsr-core::actor::tests::retry_backs_off_per_lane"] }
+"TestReplicaClient_RetryerSurvivesSustainedFailures" = { counterpart = ["lsr-core::retry::tests::calls_and_waits_stay_within_the_policy", "lsr-core::actor::tests::retry_backs_off_per_task"] }
 "TestReplicaClient_S3DebugEnvVar" = { reason = "Go-only: an environment variable that turns on the AWS SDK's request logging. lsr-store-s3's errors and debug output never carry secrets (lsr-store-s3 secrets::credentials_never_print) and there is no SDK log." }
 "TestReplicaClient_SSE_C_Headers" = { reason = "S3 server-side encryption (SSE-C, SSE-KMS) is a Go store option v1 does not offer: lsr-store-s3's configuration is endpoint, region, path style and part size (crates/store-s3/src/config.rs module doc), and D6 (docs/PLAN.md section 8) adds nothing beyond what the contract needs." }
 "TestReplicaClient_SSE_C_Headers/OpenLTXFile_SSEC" = { reason = "S3 server-side encryption (SSE-C, SSE-KMS) is a Go store option v1 does not offer: lsr-store-s3's configuration is endpoint, region, path style and part size (crates/store-s3/src/config.rs module doc), and D6 (docs/PLAN.md section 8) adds nothing beyond what the contract needs." }
@@ -1123,7 +1123,7 @@
 "TestReplicaClient_WriteLTXFile_StreamLargeMultipartRoundTrip" = { counterpart = "lsr-store-s3::store-s3::store::cases::multipart_round_trip_keeps_bytes_and_created_at" }
 "TestReplicaClient_WriteLTXFile_StreamSmallSinglePut" = { counterpart = "lsr-store-s3::store-s3::store::cases::one_below_part_size_uses_put" }
 "TestTransportRetryer_RetriesProviderThrottleResponses" = { counterpart = ["lsr-store-s3::store-s3::faults::cases::status_408_is_transient", "lsr-store-s3::classify::tests::classify_success_retry_and_throttle"] }
-"TestTransportRetryer_SurvivesSustainedFailures" = { counterpart = ["lsr-core::retry::tests::bounds_double_then_stop_at_the_cap", "lsr-core::actor::tests::retry_backs_off_per_lane"] }
+"TestTransportRetryer_SurvivesSustainedFailures" = { counterpart = ["lsr-core::retry::tests::bounds_double_then_stop_at_the_cap", "lsr-core::actor::tests::retry_backs_off_per_task"] }
 "TestTransportRetryer_Throttling" = { counterpart = "lsr-store-s3::store-s3::faults::cases::throttle_then_success" }
 
 ["litestream/server_internal_test.go"]

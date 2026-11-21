@@ -49,7 +49,7 @@ mod upload;
 mod verify;
 
 pub use actor::{
-    Actor, ActorConfig, Degraded, Env, Event, Lane, MaintainedEvent, Phase, Tick, Unfinished,
+    Actor, ActorConfig, Degraded, Env, Event, MaintainedEvent, Phase, Task, Tick, Unfinished,
 };
 pub use app::{
     AppCheckpoint, AppCheckpointObserver, AppCheckpoints, SQLITE_AUTOCHECKPOINT, Watch, observe,

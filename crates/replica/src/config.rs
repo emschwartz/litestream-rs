@@ -63,7 +63,7 @@ pub struct SyncLimits {
     /// A step stops after the first transaction that brings it to this many WAL bytes; `None`
     /// is no cap. A snapshot ignores it.
     pub wal_bytes_per_step: Option<NonZeroU64>,
-    /// Files uploaded per tick before the other lanes get a turn; `None` is all staged.
+    /// Files uploaded per tick before the other tasks get a turn; `None` is all staged.
     pub files_per_upload: Option<NonZeroU32>,
 }
 

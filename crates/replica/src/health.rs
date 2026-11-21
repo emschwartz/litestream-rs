@@ -10,8 +10,8 @@
 use std::fmt;
 
 use lsr_core::{
-    AppCheckpoint, AppCheckpoints, Degraded, HaltCause, Lane, PersistentCause, Severity,
-    SnapshotCause,
+    AppCheckpoint, AppCheckpoints, Degraded, HaltCause, PersistentCause, Severity, SnapshotCause,
+    Task,
 };
 use lsr_ltx::{Timestamp, Txid};
 
@@ -144,7 +144,7 @@ pub struct Health {
     pub observed_at: Timestamp,
     /// What it is doing.
     pub phase: Phase,
-    /// Per lane, in [`Lane::ALL`] order (sync, checkpoint, upload, prune, maintenance): the
+    /// Per task, in [`Task::ALL`] order (sync, checkpoint, upload, prune, maintenance): the
     /// persistent failure it keeps retrying, if any.
     pub degraded: [Option<Degraded>; 5],
     /// The newest transaction staged locally, and when the thread first saw it.
@@ -303,14 +303,14 @@ impl Health {
         }
     }
 
-    /// The lane's degraded state.
+    /// The task's degraded state.
     #[must_use]
-    pub fn lane(&self, lane: Lane) -> Option<Degraded> {
-        let index = Lane::ALL.iter().position(|each| *each == lane)?;
+    pub fn task(&self, task: Task) -> Option<Degraded> {
+        let index = Task::ALL.iter().position(|each| *each == task)?;
         self.degraded.get(index).copied().flatten()
     }
 
-    /// Whether any lane is degraded, or the scheduled verify is failing.
+    /// Whether any task is degraded, or the scheduled verify is failing.
     #[must_use]
     pub fn is_degraded(&self) -> bool {
         self.degraded.iter().any(Option::is_some) || self.verification.failing.is_some()

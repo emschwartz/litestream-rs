@@ -15,7 +15,7 @@
 //!   level, and retention holds until it is gone. A listing cannot tell such an
 //!   object from a good one, and the inputs it "covers" would be deleted.
 //!
-//! - The retention pin. While a lane of the actor is degraded, the newest
+//! - The retention pin. While a task of the actor is degraded, the newest
 //!   transaction the replica held when the degradation began is pinned: the
 //!   files of its restore chain are not deleted, and the rest of the replica
 //!   is retained as usual (`retain`). The actor sets it and clears it.
