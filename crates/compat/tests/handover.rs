@@ -809,3 +809,226 @@ mod live_go {
         );
     }
 }
+
+/// Go and `lsr replicate` hand one database over to each other as processes: the same
+/// database, meta directory and replica, each process stopped the way an operator stops it.
+mod process {
+    use std::collections::BTreeSet;
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    use lsr_compat::{
+        Era, GoBuild, GoRestore, Kind, Replicator, Shape, Site, Summary, Target, builds_under_test,
+        hash_pages, integrity_check, lsr_binary, restore_replica, restore_with_go, snapshots, tip,
+        wait_boot_file, wait_staged_past, wait_until, wait_uploaded, write_config,
+        write_config_daily_snapshots,
+    };
+    use lsr_core::RestoreTarget;
+    use lsr_ltx::Txid;
+
+    use super::fs;
+
+    const UP: Duration = Duration::from_secs(30);
+    const COMMITS: u32 = 8;
+
+    fn pages_of(path: &Path) -> Vec<String> {
+        integrity_check(path).expect("integrity_check");
+        hash_pages(path).expect("hash").page_hashes
+    }
+
+    fn fresh(site: &Site, name: &str) -> PathBuf {
+        let out = site.dir().join(name);
+        for suffix in ["", "-wal", "-shm"] {
+            drop(fs::remove_file(format!("{}{suffix}", out.display())));
+        }
+        out
+    }
+
+    fn rust_restore(site: &Site, target: RestoreTarget, name: &str) -> Vec<String> {
+        let out = fresh(site, name);
+        let restored = restore_replica(&site.replica, target, &out).expect("sink");
+        assert!(
+            restored.is_ok(),
+            "{name}: Rust cannot restore: {restored:?}"
+        );
+        pages_of(&out)
+    }
+
+    fn go_restore(
+        bin: &Path,
+        config: &Path,
+        site: &Site,
+        target: Target,
+        name: &str,
+    ) -> Vec<String> {
+        let out = fresh(site, name);
+        let result = restore_with_go(bin, config, &site.db, &out, target).expect("go runs");
+        assert_eq!(result, GoRestore::Restored, "{name}: Go restore");
+        pages_of(&out)
+    }
+
+    /// One process's turn: it comes up on what the previous one left, the application commits
+    /// [`COMMITS`] transactions, each staged before the next, and the process stops with
+    /// SIGINT once the replica holds them all and a snapshot. Returns the boot's first file
+    /// when there was a previous tip.
+    fn turn(mut process: Replicator, site: &mut Site, previous: Option<Txid>) -> Option<Summary> {
+        let kind = process.kind();
+        process.wait_up(UP).expect("the process comes up");
+        let mut at = previous;
+        let mut boot = None;
+        for i in 0..COMMITS {
+            site.commit(Shape::Insert { bytes: 300 }).expect("commit");
+            if let (0, Some(prev)) = (i, previous) {
+                boot = Some(wait_boot_file(&mut process, site, prev).expect("the boot's file"));
+            }
+            at = Some(wait_staged_past(&mut process, site, at).expect("staged"));
+        }
+        wait_uploaded(&mut process, site).expect("uploaded");
+        wait_until("a snapshot on the replica", UP, || {
+            process.ensure_running()?;
+            Ok(!snapshots(&site.replica)?.is_empty())
+        })
+        .expect("a snapshot exists");
+        let stopped = process.stop();
+        assert!(
+            stopped.is_ok(),
+            "{kind:?} does not stop cleanly: {stopped:?}"
+        );
+        boot
+    }
+
+    /// The switch to `kind` continued: its first file is the next transaction and holds only
+    /// what the commits wrote.
+    fn assert_continued(name: &str, kind: Kind, boot: Option<&Summary>, prev: Txid) {
+        let boot = boot.expect("a boot file after a previous tip");
+        let fields = boot.header.fields();
+        assert_eq!(
+            fields.txids.min().get(),
+            prev.get() + 1,
+            "{name}: {kind:?}'s first file"
+        );
+        assert!(
+            !boot.header.is_snapshot() && !boot.holds_every_page(),
+            "{name}: {kind:?} snapshotted at boot: its first file holds {} of {} pages",
+            boot.pages,
+            fields.commit
+        );
+    }
+
+    /// Go replicates and stops; `lsr replicate` starts on the same database, meta directory
+    /// and replica, and its first file is the next transaction, incremental, with no new
+    /// snapshot. Then the reverse on the same site: Go resumes from the meta directory `lsr`
+    /// left. Rust restores the combined chain at each handover point; Go restores it when it
+    /// reads block-encoded files (a frame-era Go cannot, so the reverse half needs v0.5.16 or
+    /// later).
+    #[test]
+    #[ignore = "runs the pinned Go binaries; just compat"]
+    fn rust_resumes_from_go_meta_as_a_process() {
+        let lsr = lsr_binary().expect("lsr builds");
+        for build in builds_under_test() {
+            process_handover(&build, &lsr);
+        }
+    }
+
+    fn process_handover(build: &GoBuild, lsr: &Path) {
+        let name = build.name();
+        let bin = build.binary().expect("the build under test is present");
+        let mut site = Site::create(4096, 51).expect("site");
+        site.prepare_for_processes(200).expect("prepare");
+        let config = site.dir().join("go.yml");
+        write_config_daily_snapshots(&config, &site.db, &site.replica).expect("config");
+        let log = |site: &Site, n: &str| site.dir().join(n);
+        // Every Go version snapshots within seconds on this one; the daily window of `config`
+        // keeps the later turns from taking a scheduled snapshot once one exists.
+        let first = site.dir().join("go-first.yml");
+        write_config(&first, &site.db, &site.replica).expect("config");
+        let go = Replicator::start(&bin, &first, &log(&site, "go-1.log")).expect("start Go");
+        assert_eq!(turn(go, &mut site, None), None);
+        let go_tip = tip(&site).expect("tip").expect("Go staged");
+        let at_go_stop = site.hash_now().expect("hash");
+        let l9 = snapshots(&site.replica).expect("l9");
+
+        let rs = Replicator::start_lsr(lsr, &site.db, &site.replica, &log(&site, "lsr.log"))
+            .expect("start lsr");
+        let boot = turn(rs, &mut site, Some(go_tip));
+        assert_continued(name, Kind::Rust, boot.as_ref(), go_tip);
+        assert_eq!(
+            snapshots(&site.replica).expect("l9"),
+            l9,
+            "{name}: Rust took a snapshot"
+        );
+        let rust_tip = tip(&site).expect("tip").expect("Rust staged");
+        let at_rust_stop = site.hash_now().expect("hash");
+        assert_eq!(
+            rust_restore(&site, RestoreTarget::Latest, "rs-1.db"),
+            at_rust_stop,
+            "{name}"
+        );
+        assert_eq!(
+            rust_restore(&site, RestoreTarget::Txid(go_tip), "rs-go-tip.db"),
+            at_go_stop,
+            "{name}: Rust at the txid where Go stopped"
+        );
+        println!(
+            "{name}: Go stopped at {go_tip}, lsr continued at {:016x}",
+            go_tip.get() + 1
+        );
+        if build.era() == Era::Frames {
+            println!("{name}: reads only frame-encoded files, so cannot resume from lsr's");
+            return;
+        }
+        let latest = go_restore(&bin, &config, &site, Target::Latest, "go-1.db");
+        assert_eq!(latest, at_rust_stop, "{name}: Go on the Go-then-Rust chain");
+        go_resumes_from_lsr(
+            name,
+            &bin,
+            &config,
+            &mut site,
+            (rust_tip, &at_rust_stop),
+            &l9,
+        );
+    }
+
+    /// Go starts on what `lsr` left at `rust_tip`, whose pages were `at_rust_stop`.
+    fn go_resumes_from_lsr(
+        name: &str,
+        bin: &Path,
+        config: &Path,
+        site: &mut Site,
+        (rust_tip, at_rust_stop): (Txid, &[String]),
+        l9: &BTreeSet<String>,
+    ) {
+        let log = site.dir().join("go-2.log");
+        let go = Replicator::start(bin, config, &log).expect("start Go");
+        let boot = turn(go, site, Some(rust_tip));
+        assert_continued(name, Kind::Go, boot.as_ref(), rust_tip);
+        assert_eq!(
+            snapshots(&site.replica).expect("l9"),
+            *l9,
+            "{name}: Go took a snapshot"
+        );
+        let at_end = site.hash_now().expect("hash");
+        assert_eq!(
+            go_restore(bin, config, site, Target::Latest, "go-2.db"),
+            at_end,
+            "{name}"
+        );
+        assert_eq!(
+            rust_restore(site, RestoreTarget::Latest, "rs-2.db"),
+            at_end,
+            "{name}"
+        );
+        let at_rust = Target::Txid {
+            txid: rust_tip.get(),
+        };
+        assert_eq!(
+            go_restore(bin, config, site, at_rust, "go-rs-tip.db"),
+            at_rust_stop,
+            "{name}: Go at the txid where lsr stopped"
+        );
+        println!(
+            "{name}: lsr stopped at {rust_tip}, Go continued at {:016x}",
+            rust_tip.get() + 1
+        );
+    }
+}

@@ -87,9 +87,10 @@ compat:
 # upstream's tip) and run the live tests over exactly those: just compat-live v0.5.3 main.
 compat-live +names:
     ./scripts/build-go-litestream.sh {{names}}
-    LSR_COMPAT_VERSIONS="{{names}}" cargo nextest run -p lsr-compat --run-ignored all --locked --no-fail-fast -E 'test(go_restores_rust_chain_) | test(go_compacts_and_prunes) | test(go_resumes_) | test(rust_resumes_from_go_meta) | test(rust_restores_what_go_wrote) | test(go_restores_what_rust_encoded) | test(go_vfs_reads_rust_replica)'
+    LSR_COMPAT_VERSIONS="{{names}}" cargo nextest run -p lsr-compat --run-ignored all --locked --no-fail-fast -E 'test(go_restores_rust_chain_) | test(go_compacts_and_prunes) | test(go_resumes_) | test(rust_resumes_from_go_meta) | test(rust_restores_what_go_wrote) | test(go_restores_what_rust_encoded) | test(go_vfs_reads_rust_replica) | test(go_and_rust_alternate)'
 
-# Every release tag v0.5.N: Go writes and Rust restores, Rust writes and Go restores, handover both ways.
+# Every release tag v0.5.N: Go writes and Rust restores, Rust writes and Go restores, handover both
+# ways, and (from v0.5.16, the first release that reads Rust's files) Go and Rust alternating on one prefix.
 compat-releases: (compat-live "releases")
 
 # Every upstream release tag is in the compat table (fetches the clone's tags first).

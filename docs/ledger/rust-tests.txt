@@ -87,6 +87,7 @@ lsr-compat vfs::tests::parses_every_record_kind
 lsr-compat vfs::tests::refuses_an_unknown_record
 lsr-compat workload::tests::splitmix_matches_its_reference_vector
 lsr-compat workload::tests::the_same_seed_writes_the_same_pages
+lsr-compat::alternation go_and_rust_alternate_on_one_prefix
 lsr-compat::compaction go_compacted_files_equal_ours_on_header_and_pages
 lsr-compat::fixtures every_version_and_scenario_has_a_fixture
 lsr-compat::fixtures fixtures_stay_within_budget
@@ -100,6 +101,7 @@ lsr-compat::handover live_go::go_resumes_after_rust_checkpoint
 lsr-compat::handover live_go::go_resumes_from_rust_meta
 lsr-compat::handover live_go::rust_restores_what_go_wrote
 lsr-compat::handover live_go::rust_resumes_from_go_meta
+lsr-compat::handover process::rust_resumes_from_go_meta_as_a_process
 lsr-compat::handover rust_continues_from_every_go_written_tip_and_its_next_file_passes_go_rules
 lsr-compat::handover the_go_transcription_says_no_when_the_wal_does_not_match
 lsr-compat::ledger every_counterpart_exists
