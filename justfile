@@ -89,9 +89,10 @@ sqlite-big:
 # The VFS test's C host needs a SQLite with sqlite3_load_extension. It takes SQLITE3_CFLAGS and
 # SQLITE3_LIBS when set, then on macOS Homebrew's (`brew install sqlite`; the system one lacks
 # the function), then `pkg-config sqlite3`, then plain -lsqlite3 (crates/compat/src/vfs.rs).
+# The ledger's counterpart check is ignored too, but it needs the listing ledger-fresh writes.
 compat:
     ./scripts/build-go-litestream.sh
-    cargo nextest run -p lsr-compat --run-ignored all --locked
+    cargo nextest run -p lsr-compat --run-ignored all --locked -E 'not test(every_counterpart_exists)'
 
 # Build the named Go versions (tags, commits, `releases` for every v0.5.N tag, `main` for
 # upstream's tip) and run the live tests over exactly those: just compat-live v0.5.3 main.
@@ -212,27 +213,25 @@ soak-tigris hours:
 upstream:
     ./scripts/fetch-upstream.sh
 
-# The committed list of Rust tests the ledger checks against matches the workspace, so a
-# renamed or deleted counterpart fails the gate instead of passing on a stale list. The list is
-# generated on Linux (some tests are Linux-only), so on another OS the step is skipped; CI, on
+# Every counterpart the upstream-test ledger (docs/ledger.toml) names is a Rust test that exists,
+# so a renamed or deleted counterpart fails the gate. The Rust test list is generated here into
+# target/ and never committed, so a branch that adds a test touches no shared list. Some tests
+# are Linux-only and the ledger names some of them, so on another OS the step is skipped; CI, on
 # Linux, still enforces it.
 ledger-fresh:
     #!/usr/bin/env bash
     set -euo pipefail
     if [ "$(uname)" != Linux ]; then
-        echo "ledger-fresh: skipped: the committed test list is generated on Linux"
+        echo "ledger-fresh: skipped: the ledger names Linux-only tests"
         exit 0
     fi
-    fresh="$(cargo nextest list --workspace --all-features --locked --run-ignored all --message-format oneline --color never)"
-    if ! diff -q <(printf '%s\n' "$fresh") docs/ledger/rust-tests.txt >/dev/null; then
-        diff <(printf '%s\n' "$fresh") docs/ledger/rust-tests.txt | head -20 >&2 || true
-        echo "ledger-fresh: docs/ledger/rust-tests.txt is stale; run 'just ledger' (or regenerate it with the nextest list line there) and check docs/ledger.toml" >&2
-        exit 1
-    fi
+    # Absolute, since nextest runs the test in the package's directory.
+    mkdir -p "${CARGO_TARGET_DIR:-target}/ledger"
+    list="$(cd "${CARGO_TARGET_DIR:-target}/ledger" && pwd)/rust-tests.txt"
+    cargo nextest list --workspace --all-features --locked --run-ignored all --message-format oneline --color never > "$list"
+    LSR_LEDGER_RUST_TESTS="$list" cargo nextest run -p lsr-compat --test ledger --locked --run-ignored only -E 'test(every_counterpart_exists)'
 
-# Regenerate the upstream-test ledger's inputs in docs/ledger/: the upstream test names from
-# the pinned clones (`just upstream` first) and every Rust test nextest lists, ignored ones
-# included. The ledger test in `check` reads these files, never the clone or the build.
+# Regenerate the upstream test names in docs/ledger/upstream-tests.txt from the pinned clones
+# (`just upstream` first). The ledger test in `check` reads this file, never the clone.
 ledger:
     ./scripts/upstream-tests.sh > docs/ledger/upstream-tests.txt
-    cargo nextest list --workspace --all-features --locked --run-ignored all --message-format oneline --color never > docs/ledger/rust-tests.txt

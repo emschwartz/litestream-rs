@@ -228,7 +228,7 @@ The suite is the contract for any backend: it holds every case of `crates/compat
 
 **Semantics:** one entry per top-level `func Test…` and per `t.Run` name that is a string literal (a recent upstream checkout has about 360 top-level test functions; PLAN's "about 900" counts subtests). Each entry is `counterpart = "<crate>::<test path>"` or `reason = "<why it does not apply>"` (the VFS read replica, v0.3 layout, the control socket: section 1's "not in v1"). The committed list of upstream test names is the input, so the test needs no clone.
 
-**Tests:** `every_upstream_test_is_in_the_ledger` (a name on the list with no entry fails), `every_counterpart_exists` (each named Rust test is in `cargo nextest list` output, read from a file `just ledger` writes), and no entry without one of the two keys. The PR states the entry count and how many are counterparts.
+**Tests:** `every_upstream_test_is_in_the_ledger` (a name on the list with no entry fails), `every_counterpart_exists` (each named Rust test is in `cargo nextest list` output, read from a file `just ledger` writes; later `just ledger-fresh` writes it under `target/` instead of committing it), and no entry without one of the two keys. The PR states the entry count and how many are counterparts.
 
 ### Task 9: the 72-hour Tigris soak (run, not a branch; needs the credentials machine)
 

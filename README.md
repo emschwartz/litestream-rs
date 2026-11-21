@@ -34,7 +34,7 @@ Each crate is `crates/<name>`, package `lsr-<name>`. Listed from the bottom of t
 
 | Needs | Command | What runs |
 |---|---|---|
-| Nothing | `just check` | Format, clippy, every test that is not ignored, doctests, the S3 client feature builds, and the committed test list (Linux). The land gate. |
+| Nothing | `just check` | Format, clippy, every test that is not ignored, doctests, the S3 client feature builds, and the ledger's counterparts against a fresh test list (Linux). The land gate. |
 | Nothing, minutes | `just sqlite-big`, `just sim-soak <secs>`, `just sim-nightly`, `just fuzz-seed`, `just mutants <crate>` | The large real-SQLite cases (several GB of disk), rotating simulator seeds, the fuzz seed corpus, mutation testing. |
 | Docker | `just test-s3` | The S3 store and `lsr` against a throwaway MinIO; skipped when Docker is down. |
 | Go | `just upstream`, then `just compat`, `just compat-live <names>`, `just compat-releases`, `just compat-tags`, `just compat-regen` | Pinned Go builds from `.upstream/` (a worktree shares the main checkout's): Go writes and Rust restores, the reverse, handovers and alternation, the Go VFS (which also needs a C compiler and SQLite headers). `compat-tags` needs only the clone. |
