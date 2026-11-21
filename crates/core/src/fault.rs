@@ -41,7 +41,7 @@ use lsr_ltx::{PageNo, PageSize, Timestamp, Txid};
 use lsr_wal::{PageMapError, ReadPageError, ResumeError, WalError, WalOffset};
 
 use crate::source::SourceError;
-use crate::store::{CorruptCause, StoreError};
+use crate::store::{CorruptCause, ListingStalled, StoreError};
 
 /// The longest a retry waits (Go `DefaultSyncBackoffMax`).
 pub const MAX_BACKOFF: Duration = Duration::from_secs(5 * 60);
@@ -619,6 +619,15 @@ impl Fault {
                 | CorruptCause::BadCreatedAt => Self::StagedLost,
             },
         }
+    }
+
+    /// A staging listing whose cursor does not advance. The local store is
+    /// misbehaving, so this is [`Self::LocalIo`]: retried with backoff and
+    /// reported degraded, never [`Self::StagedLost`], which would delete
+    /// staged files that may be sound.
+    #[must_use]
+    pub const fn from_staging_listing(_stalled: ListingStalled) -> Self {
+        Self::LocalIo
     }
 
     /// A WAL scan error. Go turns every bad frame into end of file

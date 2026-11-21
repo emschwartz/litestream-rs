@@ -43,7 +43,7 @@ use lsr_ltx::{Decoder, Header, Txid, TxidRange};
 use crate::fault::{BugSite, Fault};
 use crate::inventory::{Inventory, InventoryError};
 use crate::layout::{FileInfo, FileKey, Level};
-use crate::store::{ObjectStore, PageLimit, ReadLen, StoreError, Upload};
+use crate::store::{ListAt, ObjectStore, PageLimit, ReadLen, StoreError, Upload};
 
 /// How much of a staged file is read at once.
 const CHUNK: ReadLen = ReadLen::or_chunk(256 * 1024);
@@ -180,7 +180,7 @@ fn fail(state: UploadState, fault: Fault) -> UploadFailed {
 pub(crate) fn inventory_fault(err: &InventoryError) -> Fault {
     match err {
         InventoryError::Store(err) => Fault::from_remote(err),
-        InventoryError::ConflictingDuplicate { .. } | InventoryError::ListingStalled { .. } => {
+        InventoryError::ConflictingDuplicate { .. } | InventoryError::ListingStalled(_) => {
             Fault::RemoteCorrupt
         }
     }
@@ -356,10 +356,10 @@ async fn staged_from<L: ObjectStore>(
     from: Option<Txid>,
 ) -> Result<Vec<FileInfo>, Fault> {
     let mut files = Vec::new();
-    let mut after = None;
+    let mut at = ListAt::first(Level::ZERO);
     loop {
         let page = staging
-            .list(Level::ZERO, after, PageLimit::MAX)
+            .list(at.level, at.after, PageLimit::MAX)
             .await
             .map_err(|err| Fault::from_staging(&err))?;
         files.extend(
@@ -367,8 +367,11 @@ async fn staged_from<L: ObjectStore>(
                 .iter()
                 .filter(|info| from.is_none_or(|from| info.key.range().max() >= from)),
         );
-        match page.next {
-            Some(next) => after = Some(next),
+        match at
+            .following(page.next)
+            .map_err(Fault::from_staging_listing)?
+        {
+            Some(next) => at = next,
             None => return Ok(files),
         }
     }

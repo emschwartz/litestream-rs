@@ -1384,3 +1384,10 @@ fn the_header_read_is_one_header_long() {
     assert_eq!(HEADER_READ.get(), u64::try_from(HEADER_LEN).unwrap());
     assert_eq!(NEWEST_STAGED_READ.get(), 1 << 20);
 }
+
+#[test]
+fn a_staging_listing_whose_cursor_never_advances_is_a_fault_not_a_loop() {
+    let staging = crate::stuck::StuckListing::new(crate::MemStore::new());
+    let got = crate::conformance::block_on(newest_level_zero(&staging));
+    assert_eq!(got, Err(Fault::LocalIo));
+}

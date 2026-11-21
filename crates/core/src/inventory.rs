@@ -8,11 +8,11 @@
 
 use std::collections::BTreeMap;
 
-use lsr_ltx::{Txid, TxidRange};
+use lsr_ltx::Txid;
 use thiserror::Error;
 
-use crate::layout::{FileInfo, FileKey, Level, ListedTime, cmp_range};
-use crate::store::{BatchKind, ListAt, ObjectStore, PageLimit, StoreError};
+use crate::layout::{FileInfo, FileKey, Level, ListedTime};
+use crate::store::{BatchKind, ListAt, ListingStalled, ObjectStore, PageLimit, StoreError};
 
 /// The page size a full scan asks for. A backend that proves "more follows"
 /// with one key past the page (S3 caps a request at [`PageLimit::MAX`] keys)
@@ -38,14 +38,9 @@ pub enum InventoryError {
         key: FileKey,
     },
     /// A store returned a cursor that does not move forward, which would page
-    /// forever. A store that does this is broken, not busy.
-    #[error("listing of level {level} returned cursor {cursor:?} that does not advance")]
-    ListingStalled {
-        /// The level being listed.
-        level: Level,
-        /// The cursor that did not advance.
-        cursor: TxidRange,
-    },
+    /// forever.
+    #[error(transparent)]
+    ListingStalled(#[from] ListingStalled),
 }
 
 /// Whether a file can be the start of a restore chain: its range begins at
@@ -85,7 +80,7 @@ impl Inventory {
         let width = store.batch_width(BatchKind::Lists).get();
         let mut going: Vec<ListAt> = Level::ALL
             .iter()
-            .map(|&level| ListAt { level, after: None })
+            .map(|&level| ListAt::first(level))
             .collect();
         while !going.is_empty() {
             let round: Vec<ListAt> = going.iter().take(width).copied().collect();
@@ -96,17 +91,7 @@ impl Inventory {
                 let seen: &mut usize = skipped.entry(at.level).or_default();
                 *seen = seen.saturating_add(page.skipped);
                 files.extend(page.files);
-                let Some(cursor) = page.next else { continue };
-                if at.after.is_some_and(|prev| cmp_range(cursor, prev).is_le()) {
-                    return Err(InventoryError::ListingStalled {
-                        level: at.level,
-                        cursor,
-                    });
-                }
-                next.push(ListAt {
-                    level: at.level,
-                    after: Some(cursor),
-                });
+                next.extend(at.following(page.next)?);
             }
             next.extend(going.into_iter().skip(round.len()));
             going = next;
@@ -232,7 +217,7 @@ mod tests {
     use crate::layout::ListedTime;
     use crate::mem::{MemStore, MemUpload};
     use crate::store::{Listing, ReadLen, StoreOp, Upload};
-    use lsr_ltx::Timestamp;
+    use lsr_ltx::{Timestamp, TxidRange};
     use std::future::{Future, ready};
 
     fn key(level: u8, min: u64, max: u64) -> FileKey {
@@ -456,10 +441,10 @@ mod tests {
         let got = block_on(Inventory::load(&Stuck));
         assert_eq!(
             got,
-            Err(InventoryError::ListingStalled {
+            Err(InventoryError::ListingStalled(ListingStalled {
                 level: Level::ZERO,
                 cursor: key(0, 1, 1).range(),
-            })
+            }))
         );
     }
 }

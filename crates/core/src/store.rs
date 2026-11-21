@@ -354,6 +354,48 @@ pub struct ListAt {
     pub after: Option<TxidRange>,
 }
 
+/// A listing returned a cursor at or before the one it was asked from, so
+/// following it would page forever. A store that does this is broken, not busy.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Error)]
+#[error("listing of level {level} returned cursor {cursor:?} that does not advance")]
+pub struct ListingStalled {
+    /// The level being listed.
+    pub level: Level,
+    /// The cursor that did not advance.
+    pub cursor: TxidRange,
+}
+
+impl ListAt {
+    /// The first page of `level`.
+    #[must_use]
+    pub const fn first(level: Level) -> Self {
+        Self { level, after: None }
+    }
+
+    /// Where to ask next, given the `next` cursor of the page this item
+    /// returned: `None` when the listing is complete. Every paged loop steps
+    /// through this, so none can follow a cursor that fails to move forward.
+    ///
+    /// # Errors
+    /// [`ListingStalled`] when `next` is not strictly after `self.after`.
+    pub fn following(self, next: Option<TxidRange>) -> Result<Option<Self>, ListingStalled> {
+        let Some(cursor) = next else { return Ok(None) };
+        if self
+            .after
+            .is_some_and(|prev| cmp_range(cursor, prev).is_le())
+        {
+            return Err(ListingStalled {
+                level: self.level,
+                cursor,
+            });
+        }
+        Ok(Some(Self {
+            level: self.level,
+            after: Some(cursor),
+        }))
+    }
+}
+
 /// Which batch method a width is asked for. A store limits each kind apart
 /// because a backend's limits differ per kind of request.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
