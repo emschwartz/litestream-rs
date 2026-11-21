@@ -10,6 +10,9 @@ ignore = []
 [bans]
 multiple-versions = "allow"
 wildcards = "deny"
+# The lsr-* crates reach each other by path with no version; none is published
+# (`publish = false`), so a path dependency cannot become a wildcard on crates.io.
+allow-wildcard-paths = true
 
 [licenses]
 version = 2
