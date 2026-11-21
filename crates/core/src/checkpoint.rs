@@ -158,15 +158,6 @@ fn over_truncate(observed: &Observed, cfg: &CheckpointConfig) -> bool {
         .is_some_and(|limit| observed.synced_frames >= limit.get())
 }
 
-fn since(last: Timestamp, now: Timestamp) -> Duration {
-    u64::try_from(now.unix_millis().saturating_sub(last.unix_millis()))
-        .map_or(Duration::ZERO, Duration::from_millis)
-}
-
-fn after(last: Timestamp, wait: Duration) -> Timestamp {
-    last.saturating_add(wait)
-}
-
 /// Go's priority ladder (`checkpointIfNeeded`, `db.go:1507-1594`).
 ///
 /// 1. Only the truncate threshold can trigger while the last step was stopped
@@ -203,7 +194,7 @@ pub fn decide(state: &CheckpointState, observed: &Observed, cfg: &CheckpointConf
     if let CheckpointState::Pending { last } = state
         && cfg
             .interval
-            .is_some_and(|interval| since(*last, observed.now) >= interval)
+            .is_some_and(|interval| observed.now.saturating_duration_since(*last) >= interval)
         && observed.synced_frames > 1
     {
         return Decision::Passive(CheckpointTrigger::Interval);
@@ -299,9 +290,9 @@ pub fn after_checkpoint(
             );
         }
         (Decision::Truncate, CheckpointOutcome::Busy | CheckpointOutcome::NotRestarted) => {
-            let wake = cfg
-                .interval
-                .map_or(Next::OnWalChange, |interval| Next::At(after(now, interval)));
+            let wake = cfg.interval.map_or(Next::OnWalChange, |interval| {
+                Next::At(now.saturating_add(interval))
+            });
             return (CheckpointState::PassiveFailedAtTruncate { last: now }, wake);
         }
         (Decision::Passive(CheckpointTrigger::MinPages), CheckpointOutcome::Busy) => idle(true),
@@ -322,7 +313,7 @@ pub fn after_checkpoint(
 #[must_use]
 pub fn next_wake(state: &CheckpointState, cfg: &CheckpointConfig) -> Option<Timestamp> {
     match (state, cfg.interval) {
-        (CheckpointState::Pending { last }, Some(interval)) => Some(after(*last, interval)),
+        (CheckpointState::Pending { last }, Some(interval)) => Some(last.saturating_add(interval)),
         (CheckpointState::Pending { .. }, None)
         | (CheckpointState::Idle { .. }, _)
         | (CheckpointState::PassiveFailedAtTruncate { .. }, _) => None,

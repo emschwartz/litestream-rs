@@ -106,8 +106,8 @@ fn seconds(millis: u64) -> String {
 }
 
 fn since(now: Timestamp, then: Timestamp) -> String {
-    let ms = now.unix_millis().saturating_sub(then.unix_millis());
-    seconds(u64::try_from(ms).unwrap_or(0))
+    let ms = now.saturating_duration_since(then).as_millis();
+    seconds(u64::try_from(ms).unwrap_or(u64::MAX))
 }
 
 fn unix_seconds(at: Timestamp) -> String {

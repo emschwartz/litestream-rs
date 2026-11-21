@@ -161,6 +161,13 @@ impl Timestamp {
         let millis = i64::try_from(by.as_millis()).ok()?;
         self.0.checked_sub(millis).map(Self)
     }
+
+    /// The time from `earlier` to `self`, zero when `earlier` is not before it.
+    #[must_use]
+    pub fn saturating_duration_since(self, earlier: Self) -> Duration {
+        u64::try_from(self.0.saturating_sub(earlier.0))
+            .map_or(Duration::ZERO, Duration::from_millis)
+    }
 }
 
 /// Milliseconds in a day.
@@ -950,5 +957,22 @@ mod tests {
         );
         assert_eq!(last.saturating_add(ms(1)), last);
         assert_eq!(t.saturating_add(Duration::MAX), last);
+    }
+
+    #[test]
+    fn the_time_since_an_instant_is_zero_when_it_is_not_in_the_past() {
+        let ms = Duration::from_millis;
+        let at = Timestamp::from_unix_millis;
+        assert_eq!(at(10_000).saturating_duration_since(at(4_000)), ms(6_000));
+        assert_eq!(
+            at(4_000).saturating_duration_since(at(10_000)),
+            Duration::ZERO
+        );
+        assert_eq!(at(7).saturating_duration_since(at(7)), Duration::ZERO);
+        assert_eq!(at(-5).saturating_duration_since(at(-9)), ms(4));
+        assert_eq!(
+            Timestamp::MAX.saturating_duration_since(at(i64::MIN)),
+            ms(u64::MAX >> 1)
+        );
     }
 }
