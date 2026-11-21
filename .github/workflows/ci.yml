@@ -18,6 +18,16 @@ jobs:
           tool: cargo-nextest,just
       - run: just check
 
+  # Advisories, bans, licenses and sources (deny.toml), over all features.
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny,just
+      - run: just deny
+
   # Commit subjects follow Conventional Commits (AGENTS.md); pull requests only,
   # since main's history before the rule is not rewritten.
   commit-check:

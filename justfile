@@ -7,6 +7,10 @@ check: fmt-check clippy test doctest features ledger-fresh
 fmt-check:
     cargo fmt --all -- --check
 
+# Advisories, bans, licenses and sources over every feature (deny.toml); needs cargo-deny.
+deny:
+    cargo deny --locked check
+
 clippy:
     cargo clippy --workspace --all-targets --locked -- -D warnings
 

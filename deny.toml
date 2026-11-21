@@ -10,6 +10,8 @@ ignore = []
 [bans]
 multiple-versions = "allow"
 wildcards = "deny"
+# The workspace's own path dependencies carry no version; every crate is `publish = false`.
+allow-wildcard-paths = true
 
 [licenses]
 version = 2
