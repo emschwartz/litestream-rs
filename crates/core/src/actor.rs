@@ -1543,7 +1543,7 @@ impl Actor {
         let stamps_read = decided.stamps_read;
         match decided.value {
             Due::Wait { until, held } => {
-                self.lanes.get_mut(Lane::Maintenance).succeed();
+                self.maintained(now);
                 self.maintain.until = until;
                 let event = Event::Maintained {
                     event: MaintainedEvent::Waiting { held },
@@ -1583,7 +1583,7 @@ impl Actor {
         }
         // The listing no longer holds: the next tick lists and reads back again.
         self.maintain.stale = true;
-        self.lanes.get_mut(Lane::Maintenance).succeed();
+        self.maintained(now);
         let event = Event::Maintained {
             event: MaintainedEvent::Repaired(key),
             stamps_read: 0,
@@ -1619,8 +1619,21 @@ impl Actor {
                 return self.fault(waiter, maintain_fault(&err), now);
             }
         };
-        self.lanes.get_mut(Lane::Maintenance).succeed();
+        self.maintained(now);
         self.ran(Event::Maintained { event, stamps_read }, now)
+    }
+
+    /// A maintenance step went well. The lane's degraded state goes unless a
+    /// job's level is still waiting out its own backoff: that job has not
+    /// succeeded, whatever else did, and the listing that finds it waiting
+    /// (or another level's job) is not its success.
+    fn maintained(&mut self, now: Timestamp) {
+        let lane = self.lanes.get_mut(Lane::Maintenance);
+        if self.maintain.state.backing_off(now) {
+            lane.clear_wait();
+        } else {
+            lane.succeed();
+        }
     }
 
     /// Where a failed job waits: its level's backoff when `MaintainState`
@@ -1696,7 +1709,7 @@ impl Actor {
             .record_snapshot(now, written.as_ref().err().map(|failed| &failed.fault));
         match written {
             Ok(info) => {
-                self.lanes.get_mut(Lane::Maintenance).succeed();
+                self.maintained(now);
                 let event = MaintainedEvent::Snapshot(info);
                 self.ran(Event::Maintained { event, stamps_read }, now)
             }

@@ -102,7 +102,9 @@ pub struct Degraded {
 pub(super) struct Retry {
     attempts: Option<NonZeroU32>,
     until: Option<Timestamp>,
-    degraded: Option<(PersistentCause, Timestamp)>,
+    /// The degraded state counts its own failures: a maintenance job whose
+    /// level keeps the wait clears `attempts` on every failure.
+    degraded: Option<Degraded>,
 }
 
 impl Retry {
@@ -137,17 +139,22 @@ impl Retry {
     /// Marks the lane degraded by `cause`; returns when the degradation began,
     /// which a later failure of the same run keeps.
     pub(super) fn degrade(&mut self, cause: PersistentCause, now: Timestamp) -> Timestamp {
-        let since = self.degraded.map_or(now, |(_, since)| since);
-        self.degraded = Some((cause, since));
+        let since = self.degraded.map_or(now, |was| was.since);
+        let counted = self.degraded.map_or(1, |was| was.retries.saturating_add(1));
+        self.degraded = Some(Degraded {
+            cause,
+            since,
+            retries: counted.max(self.attempts.map_or(1, NonZeroU32::get)),
+        });
         since
     }
 
-    /// The lane's degraded state, if it has one.
+    /// The lane's degraded state, if it has one. Its count is never below
+    /// the lane's own: a failure that only retries counts too.
     pub(super) fn degraded(&self) -> Option<Degraded> {
-        self.degraded.map(|(cause, since)| Degraded {
-            cause,
-            since,
-            retries: self.attempts.map_or(1, NonZeroU32::get),
+        self.degraded.map(|was| Degraded {
+            retries: was.retries.max(self.attempts.map_or(1, NonZeroU32::get)),
+            ..was
         })
     }
 
@@ -166,7 +173,8 @@ impl Retry {
     pub(super) fn succeed(&mut self) {
         let kept = self
             .degraded
-            .filter(|(cause, _)| matches!(cause, PersistentCause::DatabasePageMismatch { .. }));
+            .filter(|was| matches!(was.cause, PersistentCause::DatabasePageMismatch { .. }))
+            .map(|was| Degraded { retries: 1, ..was });
         *self = Self {
             degraded: kept,
             ..Self::default()
@@ -223,8 +231,8 @@ impl Lanes {
         for lane in Lane::ALL {
             let retry = self.get_mut(lane);
             if matches!(
-                retry.degraded,
-                Some((PersistentCause::DatabasePageMismatch { .. }, _))
+                retry.degraded.map(|was| was.cause),
+                Some(PersistentCause::DatabasePageMismatch { .. })
             ) {
                 retry.degraded = None;
             }

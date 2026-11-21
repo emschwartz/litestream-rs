@@ -442,3 +442,36 @@ fn a_rebuild_keeps_a_snapshot_request_made_behind_another_cause() {
         Some(SnapshotCause::OperatorRequested)
     );
 }
+
+/// A maintenance job that keeps failing persistently waits on its level's
+/// backoff, not the lane's, and its degraded state still counts every
+/// failure.
+#[test]
+fn a_degraded_maintenance_job_counts_its_retries() {
+    let (mut rig, mut actor) = caught_up_go_like();
+    let mut now = T0 + 60_000;
+    rig.commit(2);
+    rig.settle(&mut actor, T0 + 1);
+    for _ in 0..3 {
+        rig.remote
+            .inner
+            .inject_failure(StoreOp::Upload, refused(StoreOp::Upload));
+    }
+    let mut counted = Vec::new();
+    for _ in 0..200 {
+        let tick = rig.tick(&mut actor, now);
+        if let Some((lane, _, _)) = degraded(&tick) {
+            assert_eq!(lane, Lane::Maintenance, "{tick:?}");
+            counted.push(actor.degraded(Lane::Maintenance).map(|d| d.retries));
+        }
+        match next_of(&tick) {
+            Some(Next::Now) => {}
+            Some(Next::At(at)) => now = now.max(at.unix_millis()),
+            Some(Next::OnWalChange) | None => break,
+        }
+        if counted.len() == 3 {
+            break;
+        }
+    }
+    assert_eq!(counted, [Some(1), Some(2), Some(3)]);
+}

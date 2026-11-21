@@ -192,6 +192,11 @@ impl MaintainState {
         self.retries.insert(level, Retry { failures, until });
     }
 
+    /// Whether any level's failed job is waiting out its backoff at `now`.
+    pub(crate) fn backing_off(&self, now: Timestamp) -> bool {
+        self.retries.values().any(|retry| retry.until > now)
+    }
+
     /// When the level may be planned again, if it is backing off at `now`.
     pub(super) fn backing_off_until(&self, level: Level, now: Timestamp) -> Option<Timestamp> {
         self.retries
