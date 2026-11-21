@@ -78,50 +78,7 @@ also caught by a core test) and missed `actor.rs:573:13`. The second run execute
 
 ### Caught by new tests (31)
 
-Tests added: `entropy_is_splitmix64` and `below_scales_the_whole_output` (`env.rs`),
-`the_longest_backoff_is_five_minutes` (`fault/tests.rs`),
-`with_created_at_keeps_every_file_and_gives_each_its_stored_created_at` (`inventory.rs`),
-`debug_and_the_range_side_print_what_a_log_line_needs` (`layout.rs`), `the_chunk_is_one_mebibyte`,
-`a_small_output_is_written_to_the_upload_once` and a lower bound on the measured peak in the memory-bound test
-(`compact/tests.rs`), `the_failed_state_stays_at_the_threshold`,
-`a_position_after_a_checkpoint_is_pinned_at_the_epoch_it_retook`,
-`the_seal_takes_every_committed_transaction_whatever_the_cap` and the read lock assertion in
-`a_passive_held_back_by_a_reader_is_not_restarted` (`checkpoint/tests.rs`), `a_first_boot_lists_each_level_once`
-and `a_requested_snapshot_is_staged_on_a_quiet_wal` (`actor/tests.rs`).
-
-| Where | Mutation |
-| --- | --- |
-| `actor.rs:335:9` | replace Actor::request_snapshot with () |
-| `actor.rs:1190:52` | replace match guard confirmed.is_some() with true in boot_recover |
-| `checkpoint.rs:218:62` | replace match guard !over_truncate(observed, cfg) with true in after_sync |
-| `checkpoint.rs:386:9` | replace Protocol<'_, W, P, C, L>::read lock with () |
-| `checkpoint.rs:386:29` | replace == with != in Protocol<'_, W, P, C, L>::read lock |
-| `checkpoint.rs:398:13` | delete field cap from struct SyncConfig expression in Protocol<'_, W, P, C, L>::step |
-| `compact.rs:68:31` | replace * with + |
-| `compact.rs:68:31` | replace * with / |
-| `compact.rs:304:9` | replace Compacted::peak_buffered -> usize with 0 |
-| `compact.rs:304:9` | replace Compacted::peak_buffered -> usize with 1 |
-| `compact.rs:488:9` | replace Input::held -> usize with 0 |
-| `compact.rs:488:9` | replace Input::held -> usize with 1 |
-| `compact.rs:549:9` | replace Merge<'a, S>::observe with () |
-| `compact.rs:708:39` | replace >= with < in write_output |
-| `env.rs:145:13` | replace fakes::SeededEntropy::next_u64 -> u64 with 0 |
-| `env.rs:145:13` | replace fakes::SeededEntropy::next_u64 -> u64 with 1 |
-| `env.rs:149:31` | replace ^ with \| in fakes::SeededEntropy::next_u64 |
-| `env.rs:149:31` | replace ^ with & in fakes::SeededEntropy::next_u64 |
-| `env.rs:150:32` | replace ^ with \| in fakes::SeededEntropy::next_u64 |
-| `env.rs:149:39` | replace >> with << in fakes::SeededEntropy::next_u64 |
-| `env.rs:150:32` | replace ^ with & in fakes::SeededEntropy::next_u64 |
-| `env.rs:150:41` | replace >> with << in fakes::SeededEntropy::next_u64 |
-| `env.rs:151:19` | replace ^ with \| in fakes::SeededEntropy::next_u64 |
-| `env.rs:151:19` | replace ^ with & in fakes::SeededEntropy::next_u64 |
-| `env.rs:151:28` | replace >> with << in fakes::SeededEntropy::next_u64 |
-| `env.rs:159:13` | replace fakes::<impl Entropy for SeededEntropy>::below -> u64 with 0 |
-| `env.rs:160:32` | replace >> with << in fakes::<impl Entropy for SeededEntropy>::below |
-| `fault.rs:27:57` | replace * with + |
-| `inventory.rs:112:9` | replace Inventory::with_created_at -> Result<Self, StoreError> with Ok(Default::default()) |
-| `layout.rs:93:9` | replace <impl fmt::Display for RangeSide>::fmt -> fmt::Result with Ok(Default::default()) |
-| `layout.rs:245:9` | replace <impl fmt::Debug for FileKey>::fmt -> fmt::Result with Ok(Default::default()) |
+31 survivors were killed by tests added for them; the list is in this file's git history. They are not listed because the tests now guard them.
 
 ### Equivalent (no input can tell the mutant from the original)
 
@@ -202,42 +159,7 @@ No survivor revealed a bug.
 
 #### Caught by new tests (28)
 
-Each was run again with `--file <file> --re '<file>:<line>:<col>'` and both test packages, and is caught.
-
-| Where | Mutation | Test |
-| --- | --- | --- |
-| `plan.rs:441:41` | replace && with \|\| in explain_shortfall | `a_refused_snapshot_past_a_hole_is_reported_as_refused` (`plan.rs`) |
-| `plan.rs:563:9` | replace AsOfPlanner::comparisons -> u64 with 0 | `comparisons_count_both_sorts_and_every_heap_step` (`tests/core/plan_lazy.rs`) |
-| `plan.rs:563:9` | replace AsOfPlanner::comparisons -> u64 with 1 | same |
-| `plan.rs:733:5` | replace depth -> u64 with 0 | same |
-| `recover.rs:756:42` | replace match guard at_start with false in frame_state | `rule_9_at_boot_a_newest_staged_file_ending_at_the_wal_start_has_no_frame_to_miss` (`recover/tests.rs`) |
-| `sync.rs:35:29` | replace << with >> (`DEFAULT_CAP`) | `the_default_cap_is_go_s_64_mib` (`sync/tests.rs`) |
-| `sync.rs:38:27` | replace << with >> (`FLUSH_AT`) | `a_small_file_reaches_the_upload_in_one_write` (`sync/tests.rs`) |
-| `sync.rs:231:28` | replace > with >= in clamp | `an_equal_clock_is_not_a_clamp` (`sync/tests.rs`); the existing proptest draws equal created-at times about once in a thousand cases |
-| `retry.rs:341:9` | replace RetryingUpload::abort with Ok(()) | the call count in `abort_passes_through` (`retry/tests.rs`) |
-| `upload.rs:49:24` | replace * with + (`CHUNK`) | the read count in `a_staged_file_larger_than_one_chunk_is_streamed_whole` (`upload/tests.rs`) |
-| `upload.rs:253:23` | replace match guard newest > confirmed with true in list_step | `a_listing_does_not_read_back_a_tail_already_confirmed` (`upload/tests.rs`) |
-| `created_at.rs:41:9` | replace ResolvedCreatedAt::len -> usize with 0 | `the_ledger_counts_each_created_at_resolved_through_the_store` (`created_at.rs`) |
-| `created_at.rs:41:9` | replace ResolvedCreatedAt::len -> usize with 1 | same |
-| `created_at.rs:47:9` | replace ResolvedCreatedAt::is_empty -> bool with false | same |
-| `actor.rs:293:5` | replace leaves_bad_snapshot -> bool with true | `a_snapshot_that_fails_before_its_commit_deletes_nothing` (`actor/tests/rejected_snapshot.rs`) |
-| `actor.rs:586:13` | replace && with \|\| in Actor::checkpoint_decision | `a_failed_checkpoint_waits_out_its_backoff` (`actor/tests/tasks.rs`, as are the rest) |
-| `actor.rs:587:13` | replace && with \|\| in Actor::checkpoint_decision | same |
-| `actor.rs:616:42` | replace && with \|\| in Actor::wal_unit | `an_idle_tick_does_not_open_the_wal` |
-| `actor.rs:617:77` | delete ! in Actor::wal_unit | same |
-| `actor.rs:630:16` | replace > with >= in Actor::wal_unit | `a_restarted_wal_with_nothing_new_is_not_reported_as_a_sync` |
-| `actor.rs:757:42` | replace match guard !epoch_moved with true in Actor::absorb | `a_sync_whose_epoch_moved_does_not_checkpoint_and_asks_for_the_next_tick` |
-| `actor.rs:821:33` | replace == with != in Actor::checkpoint_unit | `a_checkpoint_reports_busy_exactly_when_it_was` |
-| `actor.rs:917:40` | replace && with \|\| in Actor::prune_unit | `a_failed_prune_waits_out_its_backoff` |
-| `actor.rs:931:31` | replace == with != in Actor::prune_unit | `a_prune_continues_past_a_full_page` |
-| `actor.rs:1170:17` | replace \|\| with && in Actor::ready_work | `a_pending_snapshot_asks_for_the_next_tick_at_once` |
-| `actor.rs:1171:17` | replace \|\| with && in Actor::ready_work | same |
-| `actor.rs:1172:17` | replace \|\| with && in Actor::ready_work | `a_sync_whose_epoch_moved_does_not_checkpoint_and_asks_for_the_next_tick` |
-| `actor.rs:1213:48` | replace > with >= in Actor::next | `an_interval_due_with_nothing_to_checkpoint_does_not_spin` |
-
-Two test doubles grew a knob for these: the actor tests' `Counting` store can cap a listing page (a store may
-return fewer keys than the limit) and can move the WAL's read-lock hold when the next upload begins, as another
-connection's checkpoint would in the middle of a sync step; it also logs the keys it is asked to delete.
+28 survivors were killed by tests added for them; the list is in this file's git history. They are not listed because the tests now guard them.
 
 #### Equivalent (9)
 
@@ -310,33 +232,7 @@ the files now excluded. All 21 timeouts are explained. No survivor in `core` is 
 
 #### Caught by new tests (22)
 
-Each was run again with the targeted command (both test packages, `--file` and `--re` on its line and
-column) and is caught.
-
-| Where | Mutation | Test |
-| --- | --- | --- |
-| `verify.rs:71:28` | replace * with + (`CHUNK_BYTES`) | `a_file_longer_than_one_chunk_is_read_whole_in_four_mebibyte_reads` (`verify/tests.rs`, as are the next eight) |
-| `verify.rs:71:35` | replace * with + (`CHUNK_BYTES`) | same |
-| `verify.rs:71:35` | replace * with / (`CHUNK_BYTES`) | same |
-| `verify.rs:757:20` | replace < with <= in Walk::read | same: a full chunk is not the end of the object |
-| `verify.rs:310:9` | replace LevelSummary::bytes -> u64 with 1 | `level_summaries_count_files_bytes_and_range` now checks the sum |
-| `verify.rs:322:9` | replace LevelSummary::skipped -> usize with 0 | `level_summaries_count_unrecognized_names` |
-| `verify.rs:521:55` | replace && with \|\| in name_findings | `a_stray_level_zero_base_beside_a_newer_snapshot_reports_nothing` |
-| `verify.rs:656:41` | replace == with != in Walk::finish | `the_page_size_reference_is_the_base_even_when_the_odd_file_is_read_first` |
-| `verify/dry_run.rs:32:9` | replace DigestSink::truncate with Ok(()) | `a_database_that_shrinks_then_grows_verifies_clean` |
-| `maintain/retain.rs:321:5` | replace aged -> bool with true | `a_last_file_without_created_at_holds_only_at_level_zero_or_nine` (`maintain/retain/tests.rs`) |
-| `maintain/retain.rs:321:22` | replace == with != in aged | same |
-| `maintain/retain.rs:470:57` | replace < with <= in level_zero | `a_level_zero_file_ending_at_the_floor_is_not_below_it` |
-| `maintain/state.rs:136:9` | replace MaintainState::record_delete with () | `a_failed_delete_of_a_distrusted_output_backs_its_level_off` (`maintain/tests.rs`) |
-| `maintain/state.rs:194:63` | replace == with != in MaintainState::retry_at | same |
-| `maintain/state.rs:207:9` | replace MaintainState::forget_unlisted with () | `a_distrusted_output_gone_from_the_listing_is_forgotten` |
-| `actor/state.rs:88:9` | replace Retry::expire with () | `a_passed_wait_with_no_work_left_is_not_a_deadline` (`actor/tests/tasks.rs`, as are the rest) |
-| `actor/state.rs:88:55` | replace > with >= in Retry::expire | same |
-| `actor/state.rs:197:32` | replace match guard at <= now with false in Gate::expire | same |
-| `actor/state.rs:180:9` | replace Gate::open -> bool with true | `a_busy_truncate_waits_for_the_next_write` |
-| `actor/state.rs:182:36` | replace >= with < in Gate::open | `a_busy_truncate_waits_one_interval` |
-| `upload.rs:331:17` | replace < with <= in same_bytes | `a_listed_copy_that_differs_past_the_first_chunk_is_uploaded_again` (`upload/tests.rs`) |
-| `upload.rs:389:17` | replace < with <= in decodes | `a_large_replica_tail_without_a_staged_copy_verifies_whole` |
+22 survivors were killed by tests added for them; the list is in this file's git history. They are not listed because the tests now guard them.
 
 #### Equivalent (5)
 
