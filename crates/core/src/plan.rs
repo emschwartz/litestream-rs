@@ -201,7 +201,10 @@ pub enum PlanOutcome {
 
 /// Whether a file starting at [`min`] can follow a chain that ends at [`reach`].
 fn touches(min: Txid, reach: Txid) -> bool {
-    reach.next().is_none_or(|one_past| min <= one_past)
+    match reach.next() {
+        None => true,
+        Some(one_past) => min <= one_past,
+    }
 }
 
 fn eligible(info: &FileInfo, target: RestoreTarget) -> bool {
@@ -382,27 +385,76 @@ fn no_snapshot(inventory: &Inventory) -> PlanOutcome {
 
 /// Greedy interval cover over the eligible files of levels 0 to 8, one sweep
 /// in order of first transaction.
+///
+/// Plain loops, `get`, `checked_add` and hand-written comparisons only, so the
+/// Lean proofs are about this code and not a model of it. A stable sort by
+/// first transaction keeps the inventory's key order among equal starts, which
+/// is the order `sweep_order` gives.
 fn extend(chain: &mut ContiguousChain, pool: &[FileInfo]) {
-    let mut sweep: Vec<FileInfo> = pool
-        .iter()
-        .filter(|info| !info.key.level().is_snapshot())
-        .copied()
-        .collect();
-    sweep.sort_by_key(sweep_order);
-    let mut sweep = sweep.into_iter().peekable();
+    let mut sweep = extension_candidates(pool);
+    sweep.sort_by_key(|info| info.key.range().min());
+    let mut next = 0_usize;
     loop {
-        let mut best: Option<FileInfo> = None;
-        while let Some(info) = sweep.next_if(|i| touches(i.key.range().min(), chain.reaches())) {
-            let beats = best.is_none_or(|held| preference(&info) > preference(&held));
-            if info.key.range().max() > chain.reaches() && beats {
-                best = Some(info);
-            }
-        }
+        let (best, resume) = best_touching(&sweep, next, chain.reaches());
+        next = resume;
         match best {
             Some(info) if chain.push(info) => {}
             Some(_) | None => break,
         }
     }
+}
+
+/// The files an extension step may take: every level but the snapshot level.
+fn extension_candidates(pool: &[FileInfo]) -> Vec<FileInfo> {
+    let mut sweep = Vec::new();
+    for info in pool {
+        if !info.key.level().is_snapshot() {
+            sweep.push(*info);
+        }
+    }
+    sweep
+}
+
+/// One extension step: consumes the files of `sweep` from `next` on that
+/// touch `reach`, and returns the most preferred of them that passes it with
+/// the index the next step resumes from. A consumed file that is not chosen
+/// ends at or before the chosen one, so it never passes a later reach and
+/// need not be seen again.
+fn best_touching(sweep: &[FileInfo], start: usize, reach: Txid) -> (Option<FileInfo>, usize) {
+    let mut best: Option<FileInfo> = None;
+    let mut next = start;
+    while let Some(&info) = sweep.get(next) {
+        if !touches(info.key.range().min(), reach) {
+            break;
+        }
+        let beats = match best {
+            None => true,
+            Some(held) => prefers(&info, &held),
+        };
+        if info.key.range().max() > reach && beats {
+            best = Some(info);
+        }
+        match next.checked_add(1) {
+            Some(after) => next = after,
+            // Unreachable: `next` indexes a slice, so it is below `usize::MAX`.
+            None => break,
+        }
+    }
+    (best, next)
+}
+
+/// Whether `info` beats `held` at an extension step: `preference(info) >
+/// preference(held)`, spelled out because Aeneas cannot translate tuple or
+/// `Reverse` comparisons.
+fn prefers(info: &FileInfo, held: &FileInfo) -> bool {
+    let (mine, theirs) = (info.key.range(), held.key.range());
+    if mine.max() != theirs.max() {
+        return mine.max() > theirs.max();
+    }
+    if info.key.level() != held.key.level() {
+        return info.key.level() > held.key.level();
+    }
+    mine.min() < theirs.min()
 }
 
 /// Larger is better: furthest reach, then higher level, then earlier start.
@@ -778,6 +830,25 @@ mod tests {
             panic!("expected a plan, got {outcome:?}");
         };
         chain.files().iter().map(|f| f.key).collect()
+    }
+
+    /// `prefers` spells out `preference(a) > preference(b)` for the Lean
+    /// translation; this holds it to the tuple order it replaces.
+    #[test]
+    fn prefers_is_the_preference_order() {
+        let mut files = Vec::new();
+        for level in [0, 1, 8] {
+            for min in 1..=3 {
+                for max in min..=4 {
+                    files.push(at(level, min, max));
+                }
+            }
+        }
+        for a in &files {
+            for b in &files {
+                assert_eq!(prefers(a, b), preference(a) > preference(b), "{a:?} {b:?}");
+            }
+        }
     }
 
     const ALL_TARGETS: [RestoreTarget; 3] = [
