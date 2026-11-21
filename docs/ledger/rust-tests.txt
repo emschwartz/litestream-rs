@@ -1506,6 +1506,10 @@ lsr-sim::faults readers_hold_the_wal
 lsr-sim::faults remote_bitrot_on_list_read
 lsr-sim::faults remote_file_deleted_externally
 lsr-sim::faults restart_between_steps
+lsr-sim::faults sealed_then_bump_busy
+lsr-sim::faults sealed_then_bump_io
+lsr-sim::faults sealed_then_checkpoint_busy
+lsr-sim::faults sealed_then_checkpoint_io
 lsr-sim::faults second_writer_mid_run
 lsr-sim::faults shm_end_inside_tx
 lsr-sim::faults shm_header_mid_update
@@ -1757,6 +1761,7 @@ lsr-store-s3 response::tests::response_faults_map_to_store_errors
 lsr-store-s3 secrets::credentials_never_print
 lsr-store-s3 transport::tests::body_cap_is_twice_the_largest_read
 lsr-store-s3 transport::tests::io_kinds_map_to_transport_kinds
+lsr-store-s3 trust::tests::a_native_tls_host_client_refusing_the_certificate_is_tls
 lsr-store-s3 trust::tests::env_child
 lsr-store-s3 trust::tests::go_unix::a_bundle_linked_from_a_dir_counts_once_and_junk_is_ignored
 lsr-store-s3 trust::tests::go_unix::an_empty_variable_counts_as_unset
