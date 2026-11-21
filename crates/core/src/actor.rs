@@ -80,17 +80,16 @@ use crate::checkpoint::{
     CheckpointConfig, CheckpointFailed, CheckpointOutcome, CheckpointState, Decision, Observed,
     Staged, after_checkpoint, after_sync, checkpoint, decide, next_wake,
 };
-use crate::compact::CompactError;
-use crate::created_at::{ResolveError, ResolvedCreatedAt, resolve};
+use crate::created_at::{ResolvedCreatedAt, resolve};
 use crate::fault::{
-    Action, Backoff, BugSite, Clamped, Fault, Next, PersistentCause, Policy, Responses,
-    SnapshotCause, StopCause, backoff_wait, policy,
+    Action, Backoff, Clamped, Fault, Next, PersistentCause, Policy, Responses, SnapshotCause,
+    StopCause, backoff_wait, policy,
 };
 use crate::inventory::Inventory;
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::maintain::{
-    Due, Job, MAX_DELETE, MaintainError, Maintenance, Outcome, ReadBack, RetentionHold, due,
-    listing_after_upload, read_back, run_compact, run_delete,
+    Due, Job, MAX_DELETE, Maintenance, Outcome, ReadBack, RetentionHold, due, listing_after_upload,
+    read_back, run_compact, run_delete,
 };
 use crate::pages::{PageChecksumTable, seeded};
 use crate::position::{Position, SyncedThrough, WalFileLen};
@@ -330,67 +329,6 @@ fn wal_view<W: WalSource, R: std::io::Read + std::io::Seek>(
         committed: Some(committed),
         epoch: committed.epoch(),
     })
-}
-
-fn compact_fault(err: &CompactError) -> Fault {
-    match err {
-        CompactError::InputVanished { .. } => Fault::RemoteObjectMissing,
-        CompactError::Source(err) | CompactError::Dest(err) => Fault::from_remote(err),
-        CompactError::Input { .. } | CompactError::Encode(_) => Fault::RemoteCorrupt,
-        CompactError::Inputs(_) | CompactError::SnapshotLevel { .. } => {
-            Fault::Bug(BugSite::CompactionInputs)
-        }
-    }
-}
-
-/// Whether a failed snapshot may have left an object under its key: the store
-/// answered the commit with a size or a checksum that is not the one sent.
-const fn leaves_bad_snapshot(fault: Fault) -> bool {
-    match fault {
-        Fault::UploadAmbiguous | Fault::UploadChecksumMismatch => true,
-        Fault::StoreTransient
-        | Fault::StoreThrottled { .. }
-        | Fault::StoreAuth
-        | Fault::RemoteObjectMissing
-        | Fault::StoreRefused
-        | Fault::RemoteCorrupt
-        | Fault::RemoteAheadOfLocal
-        | Fault::RemoteRegressed
-        | Fault::StagedLost
-        | Fault::LocalDiskFull
-        | Fault::LocalIo
-        | Fault::LocalFsyncFailed
-        | Fault::SqliteBusy
-        | Fault::ReadersHeld
-        | Fault::WalMoved
-        | Fault::WalIndexInconsistent
-        | Fault::WalChangedUnderRead
-        | Fault::NothingToSnapshot
-        | Fault::ReadTxLost
-        | Fault::PageSizeChanged { .. }
-        | Fault::WalCorruptBelowCommitted
-        | Fault::WalTruncatedBelowCommitted
-        | Fault::WalUnlinked
-        | Fault::DatabasePageMismatch { .. }
-        | Fault::ShutdownDeadline
-        | Fault::Bug(_) => false,
-    }
-}
-
-fn created_at_fault(err: &ResolveError) -> Fault {
-    match err {
-        ResolveError::Store(err) => Fault::from_remote(err),
-        ResolveError::Repeated { .. } => Fault::Bug(BugSite::CreatedAtRepeated),
-    }
-}
-
-fn maintain_fault(err: &MaintainError) -> Fault {
-    match err {
-        MaintainError::Compact(err) | MaintainError::OutputDistrusted { source: err, .. } => {
-            compact_fault(err)
-        }
-        MaintainError::Delete(err) => Fault::from_remote(err),
-    }
 }
 
 impl Actor {
@@ -1523,7 +1461,9 @@ impl Actor {
         // A failed created-at time read leaves the listing owed: the next tick lists again.
         let decided = match decided {
             Ok(decided) => decided,
-            Err(err) => return Some(self.fault(Task::Maintenance, created_at_fault(&err), now)),
+            Err(err) => {
+                return Some(self.fault(Task::Maintenance, Fault::from_created_at(&err), now));
+            }
         };
         self.engine.maintain.stale = false;
         self.engine.maintain.level_one = Level::new(1)
@@ -1605,7 +1545,7 @@ impl Actor {
             Outcome::Replan { .. } => MaintainedEvent::Replan,
             Outcome::Failed(err) => {
                 let waiter = self.job_waiter(job, now);
-                return self.fault(waiter, maintain_fault(&err), now);
+                return self.fault(waiter, Fault::from_maintain(&err), now);
             }
         };
         self.maintained(now);
@@ -1731,7 +1671,7 @@ impl Actor {
                 // The store took the commit and then said the object is not
                 // what was sent: it is listed, so it goes, as a rejected
                 // compaction output does.
-                if leaves_bad_snapshot(fault) && env.remote.delete(&[key]).await.is_err() {
+                if fault.leaves_bad_snapshot() && env.remote.delete(&[key]).await.is_err() {
                     self.engine.maintain.state.distrust_snapshot(key);
                 }
                 let waiter = self.job_waiter(job, now);

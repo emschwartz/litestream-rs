@@ -2,6 +2,7 @@
 //! trying with the capped backoff and the others run, or the actor stops.
 
 use super::*;
+use crate::fault::BugSite;
 
 fn degraded(tick: &Tick) -> Option<(Task, PersistentCause, Timestamp)> {
     match event(tick) {
