@@ -814,8 +814,10 @@ lsr-core position::tests::a_longer_file_than_synced_is_not_the_synced_offset
 lsr-core position::tests::a_position_takes_its_synced_end_and_page_size_from_its_cursor
 lsr-core position::tests::a_reached_end_is_proven_only_at_the_epoch_it_was_reached_in
 lsr-core position::tests::a_reached_end_whose_epoch_moved_is_no_proof
-lsr-core position::tests::epochs_count_up
+lsr-core position::tests::epochs_count_up_within_one_holder
 lsr-core position::tests::replacing_continuity_changes_nothing_else
+lsr-core position::tests::the_first_epochs_of_two_holders_differ
+lsr-core position::tests::two_sources_never_report_the_same_epoch
 lsr-core recover::remote::tests::a_replica_tip_over_one_read_is_checked_whole
 lsr-core recover::remote::tests::a_replica_tip_that_does_not_verify_is_corrupt
 lsr-core recover::remote::tests::a_replica_tip_whose_header_names_another_transaction_is_corrupt
@@ -880,6 +882,7 @@ lsr-core restore::tests::a_chain_that_ends_in_zero_pages_is_rejected
 lsr-core restore::tests::a_chain_with_no_level_nine_file_restores_to_the_model
 lsr-core restore::tests::a_checksum_chain_break_is_reported_and_publishes_nothing
 lsr-core restore::tests::a_failed_listing_is_an_inventory_error
+lsr-core restore::tests::a_failed_publish_says_what_it_left_at_the_target
 lsr-core restore::tests::a_file_cut_short_is_truncated_not_a_shorter_database
 lsr-core restore::tests::a_file_deleted_between_plan_and_read_is_replanned_once
 lsr-core restore::tests::a_file_gone_before_its_stamp_is_read_is_replanned
@@ -1174,7 +1177,7 @@ lsr-fuzzing::corpus plan_corpus_replays
 lsr-fuzzing::corpus wal_corpus_replays
 lsr-fuzzing::seed write_seeds
 lsr-fuzzing::seed write_wal_seeds
-lsr-local publish_tests::a_publish_error_survives_the_trip_through_io_error
+lsr-local publish_tests::a_publish_error_says_what_it_left
 lsr-local publish_tests::each_failed_step_says_whether_the_target_is_visible
 lsr-local tests::a_failed_restore_leaves_no_target_and_no_scratch
 lsr-local tests::a_file_that_is_not_a_database_is_refused_like_a_failed_check
@@ -1561,8 +1564,10 @@ lsr-sim::sqlite_rules rules::two_readers_grow_old_generation
 lsr-sqlite checkpoint::tests::checkpoint_results_sort_by_code_and_counts
 lsr-sqlite conn::tests::a_page_size_sqlite_does_not_allow_is_refused
 lsr-sqlite conn::tests::a_read_transaction_sqlite_ended_is_taken_again
+lsr-sqlite conn::tests::a_reader_and_writer_on_different_files_are_a_split_open
 lsr-sqlite conn::tests::a_writer_left_in_a_transaction_does_not_wedge_later_locks
 lsr-sqlite error::tests::result_codes_sort_into_source_errors
+lsr-sqlite identity::tests::only_sqlites_unix_vfses_are_read_as_unix_files
 lsr-sqlite pages::tests::a_missing_table_or_method_is_refused_before_any_call
 lsr-sqlite pages::tests::an_unknown_schema_has_no_file_pointer
 lsr-sqlite pages::tests::page_offsets_are_checked
@@ -1590,6 +1595,8 @@ lsr-sqlite::errors a_failing_setup_pragma_is_a_sqlite_error
 lsr-sqlite::errors a_page_past_the_end_is_short_and_a_wrong_buffer_is_invalid_input
 lsr-sqlite::errors a_raw_handle_is_set_up_and_stays_open
 lsr-sqlite::errors a_read_transaction_that_cannot_be_retaken_is_lost_until_it_can
+lsr-sqlite::errors a_reopen_never_repeats_an_epoch_of_the_open_before
+lsr-sqlite::errors another_vfs_cannot_tell_which_file_it_opened
 lsr-sqlite::errors check_reports_each_setting_that_is_off
 lsr-sqlite::errors ending_a_lock_that_is_not_held_is_invalid_input
 lsr-sqlite::errors host_helpers_on_a_pooled_connection
@@ -1598,6 +1605,7 @@ lsr-sqlite::errors open_an_in_memory_database_is_not_wal
 lsr-sqlite::errors open_with_an_unknown_vfs_is_a_sqlite_error
 lsr-sqlite::errors setup_checks_which_file_the_connection_opens
 lsr-sqlite::errors setup_on_an_in_memory_connection_has_no_file_to_persist
+lsr-sqlite::errors the_opened_file_is_told_by_its_descriptor_after_the_path_is_replaced
 lsr-sqlite::faults a_deleted_database_halts_and_the_replica_keeps_its_history
 lsr-sqlite::faults a_read_error_at_each_step_of_a_cycle_is_retried_and_loses_nothing
 lsr-sqlite::faults a_restore_after_data_loss_replicates_into_the_same_replica
