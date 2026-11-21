@@ -526,10 +526,10 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_, 
                 ..
             } => return Err(Fault::Bug),
         };
-        self.good = Reached::Through(through);
-        if self.wal.epoch() != epoch {
-            self.unpin();
-        }
+        self.good = match through.confirm(&*self.wal) {
+            Ok(through) => Reached::Through(through),
+            Err(position) => Reached::Short(position),
+        };
         Ok(())
     }
 

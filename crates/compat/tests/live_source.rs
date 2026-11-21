@@ -29,6 +29,18 @@ use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
+/// A step's end as the engine takes it: the proof when the read epoch still
+/// holds, else the unpinned position and no proof.
+fn confirmed<W: WalSource>(
+    reached: lsr_core::ReachedEnd,
+    wal: &W,
+) -> (Option<Position>, Option<SyncedThrough>) {
+    match reached.confirm(wal) {
+        Ok(through) => (Some(*through.position()), Some(through)),
+        Err(position) => (Some(position), None),
+    }
+}
+
 /// A tiny deterministic generator, so a chain replays from its seed.
 struct Rng(u64);
 
@@ -172,8 +184,7 @@ impl Rig {
         .expect("step");
         match synced {
             Synced::Idle(through) => {
-                self.position = Some(*through.position());
-                self.through = Some(through);
+                (self.position, self.through) = confirmed(through, &self.live);
                 Did::Idle
             }
             Synced::Wrote {
@@ -182,8 +193,7 @@ impl Rig {
                 txs,
                 ..
             } => {
-                self.position = Some(*through.position());
-                self.through = Some(through);
+                (self.position, self.through) = confirmed(through, &self.live);
                 Did::Wrote { file, txs }
             }
             Synced::Wrote {

@@ -170,13 +170,21 @@ fn decode(bytes: &[u8]) -> (Header, Vec<(PageNo, Vec<u8>)>) {
     (header.unwrap(), pages)
 }
 
+/// The position as a driver that confirmed the step's epoch would hold it.
+fn pinned(reached: ReachedEnd) -> Position {
+    let epoch = reached.epoch();
+    reached
+        .into_position()
+        .with_continuity(Continuity::Pinned(epoch))
+}
+
 fn position_of(synced: Synced) -> Position {
     match synced {
-        Synced::Idle(through) => through.into_position(),
+        Synced::Idle(through) => pinned(through),
         Synced::Wrote {
             end: StepEnd::Through(through),
             ..
-        } => through.into_position(),
+        } => pinned(through),
         Synced::Wrote {
             end: StepEnd::Limited(position) | StepEnd::Unproven(position),
             ..
@@ -290,9 +298,11 @@ fn an_idle_step_returns_the_committed_end_pinned() {
     let synced = rig
         .step(Step::Incremental(position), &SyncConfig::default(), 2000)
         .unwrap();
-    let Synced::Idle(through) = synced else {
+    let Synced::Idle(reached) = synced else {
         panic!("{synced:?}");
     };
+    assert_eq!(reached.position().continuity(), Continuity::Unpinned);
+    let through = reached.confirm(&rig.wal).unwrap();
     assert_eq!(
         through.position().continuity(),
         Continuity::Pinned(rig.wal.epoch())
@@ -591,7 +601,7 @@ fn run_capped(cap: u64, txs: &[(&[u32], u32)]) -> (Rig, Vec<Position>) {
                 end: StepEnd::Through(through),
                 ..
             } => {
-                ends.push(*through.position());
+                ends.push(pinned(through));
                 break;
             }
             Synced::Idle(_) => break,

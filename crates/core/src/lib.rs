@@ -70,7 +70,7 @@ pub use pages::{Mismatch, PageTable, snapshot_clears};
 pub use plan::plan_reference;
 pub use plan::{AsOfPlanner, ContiguousChain, KeyTarget, PlanOutcome, RestoreTarget, plan};
 pub use position::{
-    Continuity, LastPage, Position, ReadEpoch, SyncedOffset, SyncedThrough, WalFileLen,
+    Continuity, LastPage, Position, ReachedEnd, ReadEpoch, SyncedOffset, SyncedThrough, WalFileLen,
 };
 pub use recover::{
     FrameCheck, LastPageCheck, Miss, Probes, RecoverEvent, Recovered, Tip, TipView, Verdict,

@@ -76,10 +76,42 @@ fn replacing_continuity_changes_nothing_else() {
     );
 }
 
+/// A step's end is a proof only once the epoch is read again and is the same:
+/// then the position is pinned to it.
 #[test]
-fn a_through_proof_gives_back_its_position() {
-    let at = position(Continuity::Pinned(ReadEpoch::new(1)));
-    let proof = SyncedThrough::new(at);
-    assert_eq!(proof.position(), &at);
-    assert_eq!(proof.into_position(), at);
+fn a_reached_end_is_proven_only_at_the_epoch_it_was_reached_in() {
+    let epoch = ReadEpoch::new(1);
+    let wal = crate::source::FakeWal::new(
+        lsr_ltx::PageSize::MIN,
+        lsr_wal::Salts { salt1: 1, salt2: 2 },
+    );
+    wal.set_epoch(epoch);
+    let at = position(Continuity::Pinned(ReadEpoch::new(9)));
+    let reached = ReachedEnd::new(at, epoch);
+    let unpinned = at.with_continuity(Continuity::Unpinned);
+    assert_eq!(
+        reached.position(),
+        &unpinned,
+        "nothing is pinned before the second read"
+    );
+    let proof = reached.confirm(&wal).unwrap();
+    let pinned = at.with_continuity(Continuity::Pinned(epoch));
+    assert_eq!(proof.position(), &pinned);
+    assert_eq!(proof.into_position(), pinned);
+}
+
+/// The read transaction was released and retaken since the step began: no
+/// proof, and the position comes back unpinned.
+#[test]
+fn a_reached_end_whose_epoch_moved_is_no_proof() {
+    let epoch = ReadEpoch::new(1);
+    let wal = crate::source::FakeWal::new(
+        lsr_ltx::PageSize::MIN,
+        lsr_wal::Salts { salt1: 1, salt2: 2 },
+    );
+    wal.set_epoch(epoch.next());
+    let at = position(Continuity::Unpinned);
+    let reached = ReachedEnd::new(at, epoch);
+    assert_eq!(reached.confirm(&wal), Err(at));
+    assert_eq!(ReachedEnd::new(at, epoch).into_position(), at);
 }

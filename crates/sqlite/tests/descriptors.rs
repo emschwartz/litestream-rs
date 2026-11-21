@@ -27,6 +27,18 @@ use lsr_wal::WalReader;
 use rusqlite::Connection;
 use tempfile::TempDir;
 
+/// A step's end as the engine takes it: the proof when the read epoch still
+/// holds, else the unpinned position and no proof.
+fn confirmed<W: WalSource>(
+    reached: lsr_core::ReachedEnd,
+    wal: &W,
+) -> (Option<Position>, Option<SyncedThrough>) {
+    match reached.confirm(wal) {
+        Ok(through) => (Some(*through.position()), Some(through)),
+        Err(position) => (Some(position), None),
+    }
+}
+
 fn suffixed(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(suffix);
@@ -171,8 +183,7 @@ impl Engine {
                 ..
             } => panic!("the test never meets a wal-index reset ahead of its header"),
         };
-        self.position = Some(*through.position());
-        self.through = Some(through);
+        (self.position, self.through) = confirmed(through, &self.live);
     }
 
     fn checkpoint(&mut self, mode: CheckpointMode) {

@@ -368,9 +368,9 @@ impl Rig {
         };
         match self.step(step, 1000) {
             Synced::Wrote {
-                end: StepEnd::Through(through),
+                end: StepEnd::Through(reached),
                 ..
-            } => through,
+            } => reached.confirm(&self.wal).unwrap(),
             other @ (Synced::Idle(_) | Synced::IndexReset | Synced::Wrote { .. }) => {
                 panic!("expected a snapshot through the end, got {other:?}")
             }

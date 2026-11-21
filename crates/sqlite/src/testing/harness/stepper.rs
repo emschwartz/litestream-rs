@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    CheckpointMode, CheckpointOutcome, FileInfo, MemStore, PageTable, Position, Probes, Step,
-    StepEnd, SyncConfig, Synced, SyncedThrough, Tip, Verdict, WalView, checkpoint, recover_traced,
-    sync_step,
+    CheckpointMode, CheckpointOutcome, FileInfo, MemStore, PageTable, Position, Probes, ReachedEnd,
+    Step, StepEnd, SyncConfig, Synced, SyncedThrough, Tip, Verdict, WalView, checkpoint,
+    recover_traced, sync_step,
 };
 use lsr_ltx::{Timestamp, Txid};
 use lsr_wal::{Salts, WalReader};
@@ -263,19 +263,17 @@ impl<B: Backend> Stepper<B> {
         ))
         .map_err(|failed| RigError::Store(format!("{failed:?}")))?;
         match synced {
-            Synced::Idle(through) => {
-                self.position = Some(*through.position());
-                self.through = Some(through);
+            Synced::Idle(reached) => {
+                self.confirm(reached);
                 Ok(StepDid::Idle)
             }
             Synced::Wrote {
                 file,
-                end: StepEnd::Through(through),
+                end: StepEnd::Through(reached),
                 txs,
                 ..
             } => {
-                self.position = Some(*through.position());
-                self.through = Some(through);
+                self.confirm(reached);
                 Ok(StepDid::Wrote { file, txs })
             }
             Synced::Wrote {
@@ -289,6 +287,21 @@ impl<B: Backend> Stepper<B> {
             } => Err(RigError::State(
                 "prove a position under a wal-index reset ahead of its header",
             )),
+        }
+    }
+
+    /// Takes a step's end as the engine does: the proof when the read epoch
+    /// still holds, the unpinned position when it moved.
+    fn confirm(&mut self, reached: ReachedEnd) {
+        match reached.confirm(&self.backend) {
+            Ok(through) => {
+                self.position = Some(*through.position());
+                self.through = Some(through);
+            }
+            Err(position) => {
+                self.position = Some(position);
+                self.through = None;
+            }
         }
     }
 

@@ -16,10 +16,11 @@
 //! position is in the header's generation and not the index's, so the header
 //! the next commit writes goes through `recover` as any restart does.
 //!
-//! The step sees one epoch. A driver that wants the second half of the F1
-//! condition (the epoch unchanged after the staging commit) compares
-//! `WalSource::epoch` again and demotes the returned position with
-//! `Position::with_continuity(Continuity::Unpinned)` when it moved.
+//! The step sees one epoch, so what it returns at the committed end is a
+//! [`ReachedEnd`], not a proof. The second half of the condition (the epoch
+//! unchanged after the staging commit) is `ReachedEnd::confirm`, which reads
+//! `WalSource::epoch` again and hands back the proof, or the position
+//! unpinned when the epoch moved.
 
 use std::num::{NonZeroU32, NonZeroU64};
 
@@ -35,7 +36,7 @@ use std::io::{Read, Seek};
 use crate::fault::{Clamped, Fault, HaltCause, SnapshotCause};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::pages::{PageTable, snapshot_clears};
-use crate::position::{Continuity, LastPage, Position, ReadEpoch, SyncedThrough};
+use crate::position::{Continuity, LastPage, Position, ReachedEnd, ReadEpoch};
 use crate::recover::Recovered;
 use crate::source::{CommittedRead, PageSource};
 use crate::store::{ObjectStore, StoreError, Upload};
@@ -119,8 +120,9 @@ impl TryFrom<Recovered> for Step {
 /// Where a step ended.
 #[derive(Debug, PartialEq, Eq)]
 pub enum StepEnd {
-    /// Everything committed is staged.
-    Through(SyncedThrough),
+    /// Everything committed is staged; [`ReachedEnd::confirm`] makes it the
+    /// proof.
+    Through(ReachedEnd),
     /// The cap stopped the scan on a commit boundary.
     Limited(Position),
     /// A snapshot staged while the wal-index was reset ahead of the WAL header
@@ -134,7 +136,7 @@ pub enum StepEnd {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Synced {
     /// Nothing new: the position is the committed end.
-    Idle(SyncedThrough),
+    Idle(ReachedEnd),
     /// Nothing to stage, and no proof: the wal-index was reset ahead of the WAL
     /// header ([`CommittedRead::reset_ahead_of`]) and no commit follows the
     /// position, so everything committed is already staged. The position is
@@ -595,9 +597,9 @@ async fn run<R: Read + Seek, P: PageSource, L: ObjectStore>(
         return Ok(Synced::IndexReset);
     }
     if nothing && let Some(held) = start.held {
-        return Ok(Synced::Idle(SyncedThrough::new(
-            held.with_cursor(scanned.cursor)
-                .with_continuity(Continuity::Pinned(epoch)),
+        return Ok(Synced::Idle(ReachedEnd::new(
+            held.with_cursor(scanned.cursor),
+            epoch,
         )));
     }
     let page_size = wal.header().page_size();
@@ -655,9 +657,7 @@ fn ended(position: Position, reset: bool, stopped_short: bool, epoch: ReadEpoch)
     } else if stopped_short {
         StepEnd::Limited(position)
     } else {
-        StepEnd::Through(SyncedThrough::new(
-            position.with_continuity(Continuity::Pinned(epoch)),
-        ))
+        StepEnd::Through(ReachedEnd::new(position, epoch))
     }
 }
 

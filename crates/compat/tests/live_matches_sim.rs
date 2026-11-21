@@ -53,6 +53,18 @@ use proptest::prelude::*;
 use rusqlite::Connection;
 use tempfile::TempDir;
 
+/// A step's end as the engine takes it: the proof when the read epoch still
+/// holds, else the unpinned position and no proof.
+fn confirmed<W: WalSource>(
+    reached: lsr_core::ReachedEnd,
+    wal: &W,
+) -> (Option<Position>, Option<SyncedThrough>) {
+    match reached.confirm(wal) {
+        Ok(through) => (Some(*through.position()), Some(through)),
+        Err(position) => (Some(position), None),
+    }
+}
+
 const WAL_HEADER: usize = 32;
 const FRAME_HEADER: usize = 24;
 
@@ -386,8 +398,7 @@ impl<S: WalSource, P: PageSource, C: Checkpointer> Engine<S, P, C> {
         .expect("step");
         match synced {
             Synced::Idle(through) => {
-                self.position = Some(*through.position());
-                self.through = Some(through);
+                (self.position, self.through) = confirmed(through, &self.src);
                 format!("{seen} idle")
             }
             Synced::Wrote {
@@ -396,8 +407,7 @@ impl<S: WalSource, P: PageSource, C: Checkpointer> Engine<S, P, C> {
                 txs,
                 ..
             } => {
-                self.position = Some(*through.position());
-                self.through = Some(through);
+                (self.position, self.through) = confirmed(through, &self.src);
                 format!("{seen} wrote {file:?} over {txs} transactions")
             }
             Synced::Wrote {

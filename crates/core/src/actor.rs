@@ -92,7 +92,7 @@ use crate::maintain::{
     listing_after_upload, read_back, run_compact, run_delete,
 };
 use crate::pages::{PageTable, seeded};
-use crate::position::{Continuity, Position, ReadEpoch, SyncedThrough, WalFileLen};
+use crate::position::{Position, ReadEpoch, SyncedThrough, WalFileLen};
 use crate::recover::{
     FrameCheck, Miss, Probes, Recovered, Tip, TipView, WalView, read_header, recover,
 };
@@ -1105,7 +1105,7 @@ impl Actor {
         )
         .await
         .map_err(|failed| failed.fault)?;
-        Ok(self.absorb(synced, committed.end(), env.wal.epoch() != epoch, now))
+        Ok(self.absorb(synced, committed.end(), &*env.wal, now))
     }
 
     fn plan_step<W: WalSource>(
@@ -1194,16 +1194,17 @@ impl Actor {
         )
     }
 
-    /// Takes in a step's result. `epoch_moved`: the read epoch changed
-    /// between the step's start and its staging commit, so (F1) the position
-    /// is not pinned and there is no proof. `committed` is the wal-index read
+    /// Takes in a step's result. A step that reached the committed end is
+    /// confirmed against `wal`'s epoch, read again here, after the staging
+    /// commit: when it moved, the position is not pinned and there is no
+    /// proof. `committed` is the wal-index read
     /// the step ran under: a reset at it is remembered, so the actor waits for
     /// the index to change instead of stepping again.
-    fn absorb(
+    fn absorb<W: WalSource>(
         &mut self,
         synced: Synced,
         committed: CommittedEnd,
-        epoch_moved: bool,
+        wal: &W,
         now: Timestamp,
     ) -> Stepped {
         let (files, txs, end) = match synced {
@@ -1227,17 +1228,13 @@ impl Actor {
             }
         };
         let (position, proof, tail) = match end {
-            StepEnd::Through(through) if !epoch_moved => {
-                (*through.position(), Some(through), Tail::Synced)
-            }
-            StepEnd::Through(through) => (through.into_position(), None, Tail::Synced),
+            StepEnd::Through(reached) => match reached.confirm(wal) {
+                Ok(through) => (*through.position(), Some(through), Tail::Synced),
+                Err(position) => (position, None, Tail::Synced),
+            },
+            // Neither is pinned: the step never claimed the committed end.
             StepEnd::Limited(position) => (position, None, Tail::More),
             StepEnd::Unproven(position) => (position, None, Tail::Reset(committed)),
-        };
-        let position = if epoch_moved {
-            position.with_continuity(Continuity::Unpinned)
-        } else {
-            position
         };
         self.engine.course.moved(position, tail, files == 1);
         let observed = Observed::of(now, &position, !self.more_wal());

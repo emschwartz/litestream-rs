@@ -15,6 +15,8 @@ use std::num::NonZeroU32;
 use lsr_ltx::{PageChecksum, PageNo, PageSize, Timestamp, Txid};
 use lsr_wal::{FrameCursor, FrameRef, WalOffset};
 
+use crate::source::WalSource;
+
 /// The end of the WAL bytes covered by the newest staged L0 file.
 ///
 /// Not a file length: see [`WalFileLen`].
@@ -251,20 +253,69 @@ impl Position {
     }
 }
 
+/// A position a sync step found at the committed end of the wal-index read it
+/// ran under, during one read epoch: half of the proof. The other half is that
+/// the epoch still held once the step's file was staged, and only
+/// [`Self::confirm`], which reads the epoch again, turns this into a
+/// [`SyncedThrough`].
+#[derive(Debug, PartialEq, Eq)]
+pub struct ReachedEnd {
+    position: Position,
+    epoch: ReadEpoch,
+}
+
+impl ReachedEnd {
+    /// Only the sync step finds one.
+    pub(crate) const fn new(position: Position, epoch: ReadEpoch) -> Self {
+        Self {
+            position: position.with_continuity(Continuity::Unpinned),
+            epoch,
+        }
+    }
+
+    /// The position, unpinned: only [`Self::confirm`] pins it.
+    #[must_use]
+    pub const fn position(&self) -> &Position {
+        &self.position
+    }
+
+    /// The read epoch the step ran under.
+    #[must_use]
+    pub const fn epoch(&self) -> ReadEpoch {
+        self.epoch
+    }
+
+    /// The position, unpinned, giving up the chance to prove it.
+    #[must_use]
+    pub const fn into_position(self) -> Position {
+        self.position
+    }
+
+    /// Reads `wal`'s epoch again. The same epoch is the proof.
+    ///
+    /// # Errors
+    /// The position, unpinned, when the read transaction was released and
+    /// retaken since the step began: a restart in between could have dropped
+    /// frames the step never saw.
+    pub fn confirm<W: WalSource>(self, wal: &W) -> Result<SyncedThrough, Position> {
+        if wal.epoch() == self.epoch {
+            let pinned = Continuity::Pinned(self.epoch);
+            Ok(SyncedThrough(self.position.with_continuity(pinned)))
+        } else {
+            Err(self.position)
+        }
+    }
+}
+
 /// The proof that a completed sync reached the committed end.
 ///
-/// Built only by the sync step, in `StepEnd::Through`, and consumed by the
-/// checkpoint protocol; it has no `Clone`, so a proof cannot outlive the
-/// position it describes.
+/// Built only by [`ReachedEnd::confirm`], from a sync step's end and a second
+/// read of the epoch, and consumed by the checkpoint protocol; it has no
+/// `Clone`, so a proof cannot outlive the position it describes.
 #[derive(Debug, PartialEq, Eq)]
 pub struct SyncedThrough(Position);
 
 impl SyncedThrough {
-    /// Only the sync step proves it.
-    pub(crate) const fn new(position: Position) -> Self {
-        Self(position)
-    }
-
     /// The position that equals the committed end.
     #[must_use]
     pub const fn position(&self) -> &Position {
