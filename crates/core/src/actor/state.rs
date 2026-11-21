@@ -10,8 +10,9 @@ use std::num::NonZeroU32;
 
 use lsr_ltx::{Timestamp, Txid};
 
+use super::Actor;
 use crate::fault::{HaltCause, Next, PersistentCause};
-use crate::maintain::MaintainState;
+use crate::maintain::{MaintainState, RetentionMode};
 
 /// What the actor is doing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -297,5 +298,24 @@ impl Maintain {
     /// Whether `due` could answer differently than it last did.
     pub(super) fn wants_listing(&self, now: Timestamp) -> bool {
         self.stale || self.until.is_some_and(|until| now >= until)
+    }
+}
+
+impl Actor {
+    /// Switches retention on or off while the actor runs, as Go's
+    /// `Store.SetRetentionEnabled` does (`store.go:573-581`). Compaction and
+    /// snapshots are unaffected. The next maintenance tick lists the replica
+    /// again, so switching it on resumes deletes under the usual rules at once
+    /// rather than at the last wait's end. A restart takes the setting from
+    /// the [`super::ActorConfig`] it is given.
+    pub fn set_retention(&mut self, retention: RetentionMode) {
+        self.cfg.maintenance.set_retention(retention);
+        self.maintain.stale = true;
+    }
+
+    /// Whether retention deletes anything right now.
+    #[must_use]
+    pub const fn retention(&self) -> RetentionMode {
+        self.cfg.maintenance.retention()
     }
 }

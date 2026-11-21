@@ -43,7 +43,9 @@
 //!
 //! Deletes come last: when no compaction or snapshot is ready, `retain` plans
 //! one delete job against a listing that already holds the newest coverage, or
-//! says why it refuses (`Due::Wait { held }`).
+//! says why it refuses (`Due::Wait { held }`). With retention switched off
+//! ([`RetentionMode::Off`]) that step is skipped: it reads no stamp, plans no
+//! delete and reports no hold, and the wait is the schedule's alone.
 //!
 //! The snapshot is written by task 4's loop, which owns the database position;
 //! [`SnapshotJob`] only says when. Compaction never deletes its inputs, so a
@@ -67,7 +69,9 @@ use crate::stamps::{Resolve, Stamps};
 use crate::store::{CorruptCause, ObjectStore, StoreError};
 use retain::{Retention, retention};
 
-pub use config::{ConfigError, Interval, IntervalError, L0Retention, Maintenance, Setting};
+pub use config::{
+    ConfigError, Interval, IntervalError, L0Retention, Maintenance, RetentionMode, Setting,
+};
 pub use state::MaintainState;
 
 #[cfg(test)]
@@ -412,9 +416,14 @@ fn decide(
     if let Some(job) = absorb(step, &mut until) {
         return Ok(Due::Run(job));
     }
-    let retained = match retention(inventory, now, config, published, state, stamps) {
-        Resolve::Done(retained) => retained,
-        Resolve::Need(file) => return Err(file),
+    let retained = match config.retention() {
+        RetentionMode::Off => return Ok(Due::Wait { until, held: None }),
+        RetentionMode::Enforce => {
+            match retention(inventory, now, config, published, state, stamps) {
+                Resolve::Done(retained) => retained,
+                Resolve::Need(file) => return Err(file),
+            }
+        }
     };
     Ok(match retained {
         Retention::Delete(job) => Due::Run(Job::Delete(job)),

@@ -1806,3 +1806,5 @@ fn an_unstamped_file_behind_a_young_one_is_a_hold_at_the_wake_not_a_spin() {
         "{due:?}"
     );
 }
+
+mod switch;

@@ -6,6 +6,12 @@
 //! interval has no window. [`Maintenance`] cannot be built in a shape that
 //! makes retention or cadence meaningless; Go loads some of those shapes, so
 //! each stricter rule says so.
+//!
+//! Retention can be switched off ([`RetentionMode::Off`], Go's
+//! `retention.enabled: false`), for a bucket whose lifecycle rules delete old
+//! files instead, or a replica that keeps everything. It is a separate
+//! setting rather than a zero duration, because a duration of zero is refused
+//! everywhere above and "keep forever" is not a length of time.
 
 use std::time::Duration;
 
@@ -162,6 +168,27 @@ pub enum L0Retention {
     After(Duration),
 }
 
+/// Whether maintenance deletes old files from the replica (Go's
+/// `retention.enabled`, `store.go:133-136`).
+///
+/// With [`Self::Off`], maintenance still compacts and snapshots on the same
+/// schedule, and the staged copies on local disk are still pruned once level
+/// 1 covers them (Go: "Local file cleanup still occurs"). Two deletes are not
+/// retention and still run: removing a file this process wrote that the store
+/// rejected, and the boot read-back's repair of a newest file that does not
+/// verify. Both remove bytes that do not decode, never history, and without
+/// them compaction of that level would stop; Go does neither.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum RetentionMode {
+    /// Delete what the snapshot retention and [`L0Retention`] allow. Go's
+    /// default (`store.go:168`).
+    #[default]
+    Enforce,
+    /// Delete no snapshot, compacted file or level-0 file: the replica keeps
+    /// every file until something outside this process removes it.
+    Off,
+}
+
 /// A checked maintenance schedule.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Maintenance {
@@ -170,6 +197,7 @@ pub struct Maintenance {
     snapshot_interval: Interval,
     snapshot_retention: Duration,
     l0: L0Retention,
+    retention: RetentionMode,
 }
 
 impl Maintenance {
@@ -178,7 +206,8 @@ impl Maintenance {
     /// Checked in order: the level count; every duration nonzero and whole
     /// milliseconds; intervals strictly increasing; the snapshot interval above
     /// the top level's; retention at least the snapshot interval. The last
-    /// three are stricter than Go.
+    /// three are stricter than Go. Retention is enforced; see
+    /// [`Self::with_retention`].
     ///
     /// # Errors
     /// The first violation, as a [`ConfigError`].
@@ -216,6 +245,7 @@ impl Maintenance {
             snapshot_interval: snapshot,
             snapshot_retention,
             l0,
+            retention: RetentionMode::Enforce,
         })
     }
 
@@ -258,7 +288,7 @@ impl Maintenance {
     };
 
     /// Go's defaults: levels of 30 s, 5 min and 1 h, snapshots every 24 h
-    /// kept 24 h, level 0 kept 5 min once covered. A test feeds the same
+    /// kept 24 h, level 0 kept 5 min once covered, retention enforced. A test feeds the same
     /// numbers through [`Maintenance::new`].
     #[must_use]
     pub fn go_default() -> Self {
@@ -268,6 +298,7 @@ impl Maintenance {
             snapshot_interval: Interval(DEFAULT_SNAPSHOT_MILLIS),
             snapshot_retention: Duration::from_millis(DEFAULT_SNAPSHOT_MILLIS),
             l0: L0Retention::After(Duration::from_millis(DEFAULT_L0_RETENTION_MILLIS)),
+            retention: RetentionMode::Enforce,
         }
     }
 
@@ -301,5 +332,25 @@ impl Maintenance {
     #[must_use]
     pub const fn l0_retention(&self) -> L0Retention {
         self.l0
+    }
+
+    /// Whether retention deletes anything.
+    #[must_use]
+    pub const fn retention(&self) -> RetentionMode {
+        self.retention
+    }
+
+    /// The same schedule with retention switched on or off. Every other
+    /// setting is already checked and does not depend on it.
+    #[must_use]
+    pub const fn with_retention(mut self, retention: RetentionMode) -> Self {
+        self.retention = retention;
+        self
+    }
+
+    /// Switches retention on or off in place, as Go's `SetRetentionEnabled`
+    /// does on a running store (`store.go:573-581`).
+    pub const fn set_retention(&mut self, retention: RetentionMode) {
+        self.retention = retention;
     }
 }

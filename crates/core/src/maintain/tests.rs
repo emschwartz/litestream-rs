@@ -912,7 +912,7 @@ fn lazy_store(files: &[FileInfo]) -> MemStore {
 
 /// `due` over a lazy listing of `files`: the decision and the keys whose
 /// stamps it asked for.
-fn lazy_due(
+pub(super) fn lazy_due(
     files: &[FileInfo],
     now: i64,
     cfg: &Maintenance,
