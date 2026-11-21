@@ -117,7 +117,13 @@ fn a_fault_fires_once_on_its_call_inside_the_window() {
     assert_eq!(fired.len(), 1);
     assert_eq!(
         fired[0].path.as_deref(),
-        Some(dir.path().join("a.db-wal").as_path())
+        Some(
+            std::fs::canonicalize(dir.path())
+                .unwrap()
+                .join("a.db-wal")
+                .as_path()
+        ),
+        "SQLite names the file by its canonical path (macOS's /var is a symlink)"
     );
     assert!(vfs.calls(FileKind::Wal, Op::Write) >= 2);
     vfs.reset_calls();

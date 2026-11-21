@@ -35,15 +35,16 @@ fn big_config(page_size: u32) -> RigConfig {
     }
 }
 
-/// Free bytes on the filesystem holding `dir`, from `df`.
+/// Free bytes on the filesystem holding `dir`, from `df`. POSIX output (`-P`) in 1 KiB blocks
+/// (`-k`) is the form both GNU and BSD `df` print: a header, then one line per filesystem whose
+/// fourth column is the available blocks.
 fn free_bytes(dir: &Path) -> u64 {
-    let out = Command::new("df")
-        .args(["--output=avail", "-B1"])
-        .arg(dir)
-        .output()
-        .unwrap();
+    let out = Command::new("df").arg("-Pk").arg(dir).output().unwrap();
+    assert!(out.status.success(), "df -Pk failed: {out:?}");
     let text = String::from_utf8(out.stdout).unwrap();
-    text.lines().nth(1).unwrap().trim().parse().unwrap()
+    let line = text.lines().nth(1).unwrap();
+    let kib: u64 = line.split_whitespace().nth(3).unwrap().parse().unwrap();
+    kib.checked_mul(1024).unwrap()
 }
 
 /// Commits `rows` rows of `bytes` zero bytes each, the actor settling after every commit.

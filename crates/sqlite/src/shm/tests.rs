@@ -124,6 +124,7 @@ fn the_guard_refuses_every_connection_whose_wal_index_is_not_mapped() {
     );
 }
 
+#[cfg(target_os = "linux")]
 fn descriptors_under(dir: &Path) -> BTreeMap<String, PathBuf> {
     std::fs::read_dir("/proc/self/fd")
         .unwrap()
@@ -137,6 +138,7 @@ fn descriptors_under(dir: &Path) -> BTreeMap<String, PathBuf> {
         .collect()
 }
 
+#[cfg(target_os = "linux")]
 type XShmUnmap = unsafe extern "C" fn(*mut ffi::sqlite3_file, c_int) -> c_int;
 
 /// What the guard prevents: `xShmMap` on a connection whose WAL never mapped `-shm` opens (and
