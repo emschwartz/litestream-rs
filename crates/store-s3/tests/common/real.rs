@@ -1,5 +1,6 @@
 //! What minio.rs and tigris.rs share: a store over a real server, raw signed
-//! requests for what the store never sends, a redacting dump, and the case
+//! requests for what the store never sends (signed by the store's own
+//! `RequestBuilder::raw`, behind the `testing` feature), a redacting dump, and the case
 //! bodies that hold on every provider. Each including file declares it with
 //! `#[cfg(test)] #[path = "common/real.rs"] mod real;`.
 
@@ -178,7 +179,6 @@ pub struct RealHarness {
     pub server: Server,
     pub config: S3Config,
     pub prefix: Prefix,
-    agent: ureq::Agent,
 }
 
 #[expect(
@@ -238,21 +238,12 @@ impl RealHarness {
             WallClock,
         )
         .unwrap();
-        let agent = ureq::Agent::new_with_config(
-            ureq::Agent::config_builder()
-                .http_status_as_error(false)
-                .max_redirects(0)
-                .max_redirects_will_error(false)
-                .timeout_global(Some(config.deadline()))
-                .build(),
-        );
         Self {
             store,
             counts,
             server: server.clone(),
             config,
             prefix,
-            agent,
         }
     }
 
@@ -270,115 +261,50 @@ impl RealHarness {
         transport.send(request).unwrap()
     }
 
-    /// A signed request the builder cannot make: any method, query, headers, body.
+    /// A signed request the builder cannot make: any method, query, headers, body, signed
+    /// by the store's own raw builder (`RequestBuilder::raw`) and sent through a plain client.
     /// `object` is a full key; None addresses the bucket.
     pub fn raw(
         &self,
         method: &str,
         object: Option<&str>,
         query: &[(&str, &str)],
-        headers: &[(&str, &str)],
+        headers: &[(&'static str, &str)],
         body: &[u8],
     ) -> Raw {
-        let (url, signed_headers) = self.sign(method, object, query, headers);
-        let mut builder = ureq::http::Request::builder()
-            .method(method)
-            .uri(url.as_str());
-        for (name, value) in &signed_headers {
-            builder = builder.header(*name, *value);
-        }
-        let mut response = self
-            .agent
-            .run(builder.body(body.to_vec()).unwrap())
+        let verb = match method {
+            "GET" => lsr_store_s3::Method::Get,
+            "HEAD" => lsr_store_s3::Method::Head,
+            "PUT" => lsr_store_s3::Method::Put,
+            "POST" => lsr_store_s3::Method::Post,
+            "DELETE" => lsr_store_s3::Method::Delete,
+            other => panic!("method {other}"),
+        };
+        let headers = headers.iter().map(|(n, v)| (*n, (*v).to_owned())).collect();
+        let request = self
+            .builder()
+            .raw(WallClock.now(), verb, object, query, headers, body.to_vec())
+            .unwrap();
+        let response = store_transport(self.config.deadline())
+            .send(request)
             .unwrap_or_else(|err| {
                 panic!(
                     "{method} failed: {}",
                     redact(&self.server, &err.to_string())
                 )
             });
-        let status = response.status().as_u16();
-        let headers = response
-            .headers()
-            .iter()
-            .map(|(n, v)| {
-                (
-                    n.as_str().to_owned(),
-                    String::from_utf8_lossy(v.as_bytes()).into_owned(),
-                )
-            })
-            .collect();
-        let body = response.body_mut().read_to_vec().unwrap_or_default();
         let raw = Raw {
-            status,
-            headers,
-            body,
+            status: response.status(),
+            headers: response.headers().to_vec(),
+            body: response.body().to_vec(),
         };
         self.counts.requests.fetch_add(1, Ordering::Relaxed);
         self.counts.note_raw(&raw);
         raw
     }
 
-    /// The presigned URL and the headers that were signed with it.
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "signs raw requests against a real server's clock"
-    )]
-    fn sign<'a>(
-        &self,
-        method: &str,
-        object: Option<&str>,
-        query: &[(&str, &str)],
-        headers: &[(&'a str, &'a str)],
-    ) -> (url::Url, Vec<(&'a str, &'a str)>) {
-        let bucket = rusty_s3::Bucket::new(
-            url::Url::parse(&self.server.endpoint).unwrap(),
-            match self.config.style() {
-                lsr_store_s3::UrlStyle::Path => rusty_s3::UrlStyle::Path,
-                lsr_store_s3::UrlStyle::VirtualHost => rusty_s3::UrlStyle::VirtualHost,
-            },
-            self.server.bucket.clone(),
-            self.server.region.clone(),
-        )
-        .unwrap();
-        let base = match object {
-            Some(key) => bucket.object_url(key),
-            None => bucket.base_url().clone(),
-        };
-        let mut signed_headers: Vec<(&str, &str)> = headers.to_vec();
-        if self.config.provider() == lsr_store_s3::Provider::Tigris {
-            signed_headers.push(("x-tigris-consistent", "true"));
-        }
-        let verb = match method {
-            "GET" => rusty_s3::Method::Get,
-            "HEAD" => rusty_s3::Method::Head,
-            "PUT" => rusty_s3::Method::Put,
-            "POST" => rusty_s3::Method::Post,
-            "DELETE" => rusty_s3::Method::Delete,
-            other => panic!("method {other}"),
-        };
-        // `sign` merges this with its own sorted `X-Amz-*` pairs and assumes both
-        // are sorted; an unsorted query signs a canonical request the server
-        // does not rebuild (SignatureDoesNotMatch). rusty-s3's actions keep a
-        // sorted map, so only this raw path needs it.
-        let mut query = query.to_vec();
-        query.sort_unstable();
-        let url = rusty_s3::signing::sign(
-            &jiff::Timestamp::now(),
-            verb,
-            base,
-            &self.server.access,
-            &self.server.secret,
-            None,
-            &self.server.region,
-            120,
-            query.iter().copied(),
-            signed_headers.iter().copied(),
-        );
-        (url, signed_headers)
-    }
-
     /// A PUT that bypasses the store: any key, any headers.
-    pub fn raw_put(&self, object: &str, body: &[u8], headers: &[(&str, &str)]) {
+    pub fn raw_put(&self, object: &str, body: &[u8], headers: &[(&'static str, &str)]) {
         let raw = self.raw("PUT", Some(object), &[], headers, body);
         assert_eq!(raw.status, 200, "{}", self.dump(&raw));
     }

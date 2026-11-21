@@ -57,6 +57,11 @@ pub use request::{
     HttpRequest, MAX_DELETE_KEYS, Method, RequestBuilder, RequestError, UploadId, WriteRequest,
     level_prefix, object_key, range_header, start_after,
 };
+#[cfg(feature = "testing")]
+pub use request::{
+    MAX_UPLOAD_PAGES, OpenUpload, RawError, abandon_upload, abort_upload, open_uploads, send_raw,
+    xml_text,
+};
 #[cfg(feature = "reqwest")]
 pub use reqwest_transport::{ReqwestSetupError, ReqwestTransport};
 pub use response::{

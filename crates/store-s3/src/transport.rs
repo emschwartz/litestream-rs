@@ -60,6 +60,12 @@ impl HttpResponse {
         &self.body
     }
 
+    /// Every header, as received.
+    #[must_use]
+    pub fn headers(&self) -> &[(String, String)] {
+        &self.headers
+    }
+
     /// Whether the whole body arrived.
     #[must_use]
     pub fn body_complete(&self) -> bool {

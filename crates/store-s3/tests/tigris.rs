@@ -587,7 +587,7 @@ mod tigris {
         object: &str,
         upload: &UploadId,
         etag: &str,
-        headers: &[(&str, &str)],
+        headers: &[(&'static str, &str)],
     ) -> real::Raw {
         let xml = format!(
             "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber>\

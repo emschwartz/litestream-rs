@@ -60,8 +60,9 @@ mod tigris {
     use lsr_local::FileSink;
     use lsr_ltx::{HEADER_LEN, Header};
     use lsr_store_s3::{
-        HttpRequest, HttpResponse, Method, Provider, S3Config, S3Credentials, S3Store,
-        SecretString, Transport, TransportError, UreqTransport, UrlStyle,
+        HttpRequest, HttpResponse, Method, OpenUpload, RequestBuilder, S3Config, S3Credentials,
+        S3Store, SecretString, SystemClock, Transport, TransportError, UreqTransport,
+        abandon_upload, abort_upload, open_uploads,
     };
 
     /// The replica must reach this many files before the targets are restored.
@@ -756,176 +757,45 @@ dbs:
         (deleted, left)
     }
 
-    /// Signed requests the store does not make: multipart uploads by listing.
+    /// Signed requests the store does not make (multipart uploads by listing), through
+    /// the store's own raw builder and upload listing (lsr-store-s3's `testing` feature).
     struct Raw {
-        bucket: rusty_s3::Bucket,
-        access: String,
-        secret: String,
-        region: String,
-        tigris: bool,
-        agent: ureq::Agent,
-    }
-
-    /// One open multipart upload: its full key and id.
-    struct Open {
-        key: String,
-        id: String,
-    }
-
-    /// The text of each `<tag>` element in `xml`, unescaped.
-    fn tags(xml: &str, tag: &str) -> Vec<String> {
-        let (open, close) = (format!("<{tag}>"), format!("</{tag}>"));
-        xml.split(open.as_str())
-            .skip(1)
-            .filter_map(|rest| rest.split_once(close.as_str()).map(|(text, _)| text))
-            .map(|text| {
-                text.replace("&lt;", "<")
-                    .replace("&gt;", ">")
-                    .replace("&quot;", "\"")
-                    .replace("&apos;", "'")
-                    .replace("&amp;", "&")
-            })
-            .collect()
+        builder: RequestBuilder,
+        transport: UreqTransport,
     }
 
     impl Raw {
         fn new(b: &Bucket) -> Self {
             let config = b.config();
-            let style = match config.style() {
-                UrlStyle::Path => rusty_s3::UrlStyle::Path,
-                UrlStyle::VirtualHost => rusty_s3::UrlStyle::VirtualHost,
-            };
-            let bucket = rusty_s3::Bucket::new(
-                config.endpoint().url().clone(),
-                style,
-                b.bucket.clone(),
-                b.region.clone(),
-            )
-            .expect("bucket");
-            let agent = ureq::Agent::new_with_config(
-                ureq::Agent::config_builder()
-                    .http_status_as_error(false)
-                    .max_redirects(0)
-                    .timeout_global(Some(config.deadline()))
-                    .build(),
-            );
+            let credentials =
+                S3Credentials::new(b.access.clone(), SecretString::new(b.secret.clone()));
             Self {
-                bucket,
-                access: b.access.clone(),
-                secret: b.secret.clone(),
-                region: b.region.clone(),
-                tigris: config.provider() == Provider::Tigris,
-                agent,
+                builder: RequestBuilder::new(&config, &credentials).expect("builder"),
+                transport: UreqTransport::new(config.deadline()),
             }
         }
 
-        /// Sends one signed request (`object` a full key, None the bucket) and
-        /// returns the body. A non-2xx status panics with the body, never the URL,
-        /// which carries the signature.
-        fn send(
-            &self,
-            method: rusty_s3::Method,
-            object: Option<&str>,
-            query: &[(&str, &str)],
-            body: Vec<u8>,
-        ) -> String {
-            let base = match object {
-                Some(key) => self.bucket.object_url(key),
-                None => self.bucket.base_url().clone(),
-            };
-            let headers: &[(&str, &str)] = if self.tigris {
-                &[("x-tigris-consistent", "true")]
-            } else {
-                &[]
-            };
-            // `sign` merges the query with its own sorted `X-Amz-*` pairs and assumes
-            // both are sorted; an unsorted one signs a canonical request the server
-            // does not rebuild (SignatureDoesNotMatch).
-            let mut query = query.to_vec();
-            query.sort_unstable();
-            let now = jiff::Timestamp::from_millisecond(real_now_ms().expect("clock"))
-                .expect("now in range");
-            let url = rusty_s3::signing::sign(
-                &now,
-                method,
-                base,
-                &self.access,
-                &self.secret,
-                None,
-                &self.region,
-                120,
-                query.iter().copied(),
-                headers.iter().copied(),
-            );
-            let mut request = ureq::http::Request::builder()
-                .method(method.to_str())
-                .uri(url.as_str());
-            for (name, value) in headers {
-                request = request.header(*name, *value);
-            }
-            let what = format!("{} {object:?}", method.to_str());
-            let mut response = self
-                .agent
-                .run(request.body(body).expect("request"))
-                .unwrap_or_else(|e| panic!("{what}: {e}"));
-            let status = response.status().as_u16();
-            let text = response.body_mut().read_to_string().unwrap_or_default();
-            assert!(
-                (200..300).contains(&status),
-                "{what}: status {status}: {text}"
-            );
-            text
+        /// Every multipart upload open under `prefix`.
+        fn uploads(&self, prefix: &str) -> Vec<OpenUpload> {
+            open_uploads(&self.transport, &self.builder, &SystemClock, prefix)
+                .unwrap_or_else(|e| panic!("listing the uploads under {prefix}: {e}"))
         }
 
-        /// Every multipart upload open under `prefix`, following the listing's
-        /// markers. Keys outside `prefix` are dropped, in case a server ignores it.
-        fn uploads(&self, prefix: &str) -> Vec<Open> {
-            let mut open = Vec::new();
-            let mut markers: Option<(String, String)> = None;
-            for _page in 0..100 {
-                let mut query = vec![("uploads", ""), ("prefix", prefix)];
-                if let Some((key, id)) = &markers {
-                    query.push(("key-marker", key.as_str()));
-                    query.push(("upload-id-marker", id.as_str()));
-                }
-                let xml = self.send(rusty_s3::Method::Get, None, &query, Vec::new());
-                for upload in tags(&xml, "Upload") {
-                    let key = tags(&upload, "Key").pop().expect("Key");
-                    let id = tags(&upload, "UploadId").pop().expect("UploadId");
-                    if key.starts_with(prefix) {
-                        open.push(Open { key, id });
-                    }
-                }
-                if tags(&xml, "IsTruncated").first().map(String::as_str) != Some("true") {
-                    return open;
-                }
-                let next = |tag: &str| tags(&xml, tag).pop().expect("a next marker");
-                markers = Some((next("NextKeyMarker"), next("NextUploadIdMarker")));
-            }
-            panic!("more than 100 pages of multipart uploads under {prefix}");
-        }
-
-        fn abort(&self, upload: &Open) {
-            let query = [("uploadId", upload.id.as_str())];
-            self.send(
-                rusty_s3::Method::Delete,
-                Some(&upload.key),
-                &query,
-                Vec::new(),
-            );
+        fn abort(&self, upload: &OpenUpload) {
+            abort_upload(&self.transport, &self.builder, &SystemClock, upload)
+                .unwrap_or_else(|e| panic!("aborting an upload of {}: {e}", upload.key));
         }
 
         /// Starts an upload of `key`, sends its first part and leaves it open.
         fn abandon(&self, key: &str) {
-            let created = self.send(
-                rusty_s3::Method::Post,
-                Some(key),
-                &[("uploads", "")],
-                Vec::new(),
-            );
-            let id = tags(&created, "UploadId").pop().expect("UploadId");
-            let query = [("partNumber", "1"), ("uploadId", id.as_str())];
-            self.send(rusty_s3::Method::Put, Some(key), &query, vec![7; 1024]);
+            abandon_upload(
+                &self.transport,
+                &self.builder,
+                &SystemClock,
+                key,
+                vec![7; 1024],
+            )
+            .unwrap_or_else(|e| panic!("leaving an upload of {key} open: {e}"));
         }
     }
 

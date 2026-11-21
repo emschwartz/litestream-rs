@@ -34,7 +34,15 @@ use crate::config::{ConfigError, Prefix, Provider, S3Config};
 use crate::credentials::S3Credentials;
 
 #[cfg(feature = "testing")]
+mod raw;
+#[cfg(feature = "testing")]
 mod tamper;
+
+#[cfg(feature = "testing")]
+pub use raw::{
+    MAX_UPLOAD_PAGES, OpenUpload, RawError, abandon_upload, abort_upload, open_uploads, send_raw,
+    xml_text,
+};
 
 /// How long a presigned URL stays valid.
 const EXPIRES_IN: Duration = Duration::from_secs(300);
