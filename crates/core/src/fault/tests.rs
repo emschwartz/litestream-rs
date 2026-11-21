@@ -31,8 +31,8 @@ fn key() -> FileKey {
     FileKey::new(Level::ZERO, TxidRange::single(Txid::new(1).unwrap()))
 }
 
-fn halt(cause: HaltCause) -> Policy {
-    Policy::Halt(cause)
+fn persistent(cause: PersistentCause) -> Policy {
+    Policy::Persistent(cause)
 }
 
 fn doubling() -> Policy {
@@ -66,9 +66,9 @@ policy_is!(
     doubling()
 );
 policy_is!(
-    store_auth_halts_on_credentials,
+    store_auth_is_persistent_on_credentials,
     Fault::StoreAuth,
-    halt(HaltCause::Credentials)
+    persistent(PersistentCause::Credentials)
 );
 policy_is!(
     remote_object_missing_retries,
@@ -82,24 +82,24 @@ policy_is!(
     doubling()
 );
 policy_is!(
-    store_refused_halts,
+    store_refused_is_persistent,
     Fault::StoreRefused,
-    halt(HaltCause::StoreRefused)
+    persistent(PersistentCause::StoreRefused)
 );
 policy_is!(
-    remote_corrupt_halts,
+    remote_corrupt_is_persistent,
     Fault::RemoteCorrupt,
-    halt(HaltCause::RemoteCorrupt)
+    persistent(PersistentCause::RemoteCorrupt)
 );
 policy_is!(
-    remote_ahead_of_local_halts_as_foreign_writer,
+    remote_ahead_of_local_is_a_foreign_writer,
     Fault::RemoteAheadOfLocal,
-    halt(HaltCause::ForeignWriter)
+    persistent(PersistentCause::ForeignWriter)
 );
 policy_is!(
-    remote_regressed_halts,
+    remote_regressed_is_persistent,
     Fault::RemoteRegressed,
-    halt(HaltCause::RemoteRegressed)
+    persistent(PersistentCause::RemoteRegressed)
 );
 policy_is!(staged_lost_retries, Fault::StagedLost, doubling());
 policy_is!(local_disk_full_retries, Fault::LocalDiskFull, doubling());
@@ -128,37 +128,41 @@ policy_is!(
 );
 policy_is!(read_tx_lost_retries, Fault::ReadTxLost, doubling());
 policy_is!(
-    page_size_changed_halts_naming_both_sizes,
+    page_size_changed_is_persistent_naming_both_sizes,
     Fault::PageSizeChanged {
         was: PageSize::MIN,
         now: ps()
     },
-    halt(HaltCause::PageSizeChanged {
+    persistent(PersistentCause::PageSizeChanged {
         was: PageSize::MIN,
         now: ps()
     })
 );
 policy_is!(
-    wal_corrupt_below_committed_halts,
+    wal_corrupt_below_committed_is_persistent,
     Fault::WalCorruptBelowCommitted,
-    halt(HaltCause::WalCorrupt)
+    persistent(PersistentCause::WalCorrupt)
 );
 policy_is!(
-    wal_truncated_below_committed_halts,
+    wal_truncated_below_committed_is_persistent,
     Fault::WalTruncatedBelowCommitted,
-    halt(HaltCause::WalTruncated)
+    persistent(PersistentCause::WalTruncated)
 );
 policy_is!(
-    wal_unlinked_halts,
+    wal_unlinked_is_persistent,
     Fault::WalUnlinked,
-    halt(HaltCause::WalUnlinked)
+    persistent(PersistentCause::WalUnlinked)
 );
 policy_is!(
     shutdown_deadline_halts,
     Fault::ShutdownDeadline,
-    halt(HaltCause::Shutdown)
+    Policy::Shutdown
 );
-policy_is!(bug_halts, Fault::Bug, halt(HaltCause::Bug));
+policy_is!(
+    bug_is_persistent,
+    Fault::Bug,
+    persistent(PersistentCause::Bug)
+);
 
 /// Ties every variant to a test above: a new variant breaks this match first.
 #[test]
@@ -192,6 +196,120 @@ fn every_fault_has_a_named_policy_test() {
         | Fault::Bug => true,
     };
     assert!(tested(&Fault::Bug));
+}
+
+fn every_persistent_cause() -> [PersistentCause; 10] {
+    [
+        PersistentCause::Credentials,
+        PersistentCause::StoreRefused,
+        PersistentCause::RemoteCorrupt,
+        PersistentCause::ForeignWriter,
+        PersistentCause::RemoteRegressed,
+        PersistentCause::WalCorrupt,
+        PersistentCause::WalTruncated,
+        PersistentCause::WalUnlinked,
+        PersistentCause::PageSizeChanged {
+            was: PageSize::MIN,
+            now: ps(),
+        },
+        PersistentCause::Bug,
+    ]
+}
+
+/// Ties the list above to the enum: a new cause breaks this match first.
+#[test]
+fn every_persistent_cause_is_listed() {
+    let listed = |cause: PersistentCause| match cause {
+        PersistentCause::Credentials
+        | PersistentCause::StoreRefused
+        | PersistentCause::RemoteCorrupt
+        | PersistentCause::ForeignWriter
+        | PersistentCause::RemoteRegressed
+        | PersistentCause::WalCorrupt
+        | PersistentCause::WalTruncated
+        | PersistentCause::WalUnlinked
+        | PersistentCause::PageSizeChanged { .. }
+        | PersistentCause::Bug => true,
+    };
+    assert!(every_persistent_cause().into_iter().all(listed));
+}
+
+#[test]
+fn go_like_keeps_trying_on_every_cause_but_a_second_writer() {
+    for cause in every_persistent_cause() {
+        assert_eq!(
+            Responses::GO_LIKE.stops(cause),
+            cause == PersistentCause::ForeignWriter,
+            "{cause:?}"
+        );
+    }
+    assert_eq!(Responses::default(), Responses::GO_LIKE);
+}
+
+#[test]
+fn strict_stops_on_every_cause() {
+    for cause in every_persistent_cause() {
+        assert!(Responses::STRICT.stops(cause), "{cause:?}");
+    }
+}
+
+/// Keeping trying on a bug, or past a second writer, never resumes the state
+/// the failure left: both rebuild. A replica that went backwards is listed
+/// again; every other cause retries the same step.
+#[test]
+fn keeping_trying_rebuilds_where_the_state_cannot_be_trusted() {
+    let all = Responses {
+        foreign_writer: ForeignWriter::ContinueAndInterleaveHistories,
+        ..Responses::GO_LIKE
+    };
+    for cause in every_persistent_cause() {
+        let want = match cause {
+            PersistentCause::Bug | PersistentCause::ForeignWriter => Action::Rebuild,
+            PersistentCause::RemoteRegressed => Action::Relist,
+            PersistentCause::Credentials
+            | PersistentCause::StoreRefused
+            | PersistentCause::RemoteCorrupt
+            | PersistentCause::WalCorrupt
+            | PersistentCause::WalTruncated
+            | PersistentCause::WalUnlinked
+            | PersistentCause::PageSizeChanged { .. } => Action::Retry,
+        };
+        assert_eq!(all.action(cause), want, "{cause:?}");
+    }
+}
+
+/// Each field answers for its own cause only.
+#[test]
+fn each_field_names_one_cause() {
+    for cause in every_persistent_cause() {
+        let mut one = Responses::GO_LIKE;
+        match cause {
+            PersistentCause::Credentials => one.credentials = Response::Stop,
+            PersistentCause::StoreRefused => one.store_refused = Response::Stop,
+            PersistentCause::RemoteCorrupt => one.remote_corrupt = Response::Stop,
+            PersistentCause::ForeignWriter => {
+                one.foreign_writer = ForeignWriter::ContinueAndInterleaveHistories;
+            }
+            PersistentCause::RemoteRegressed => one.remote_regressed = Response::Stop,
+            PersistentCause::WalCorrupt => one.wal_corrupt = Response::Stop,
+            PersistentCause::WalTruncated => one.wal_truncated = Response::Stop,
+            PersistentCause::WalUnlinked => one.wal_unlinked = Response::Stop,
+            PersistentCause::PageSizeChanged { .. } => one.page_size_changed = Response::Stop,
+            PersistentCause::Bug => one.bug = Response::Stop,
+        }
+        for other in every_persistent_cause() {
+            let flipped = Responses::GO_LIKE.stops(other) != one.stops(other);
+            assert_eq!(flipped, other == cause, "{cause:?} changed {other:?}");
+        }
+    }
+}
+
+#[test]
+fn a_persistent_cause_and_its_stop_cause_round_trip() {
+    for cause in every_persistent_cause() {
+        assert_eq!(PersistentCause::of(HaltCause::from(cause)), Some(cause));
+    }
+    assert_eq!(PersistentCause::of(HaltCause::Shutdown), None);
 }
 
 fn store_fault(err: &StoreError) -> Fault {

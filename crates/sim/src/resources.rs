@@ -132,7 +132,7 @@ pub fn delta(before: TapCounts, after: TapCounts) -> TapCounts {
 
 const fn lists_allowed(event: &Event) -> bool {
     match event {
-        Event::Booted { .. } | Event::Retrying { .. } => true,
+        Event::Booted { .. } | Event::Retrying { .. } | Event::Degraded { .. } => true,
         Event::Maintained { .. } | Event::Uploaded(_) => true,
         Event::Synced { .. }
         | Event::Checkpointed { .. }

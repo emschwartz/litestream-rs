@@ -11,7 +11,7 @@ use proptest::prelude::*;
 
 use super::*;
 use crate::conformance::block_on;
-use crate::fault::{Backoff, HaltCause, Policy, policy};
+use crate::fault::{Backoff, PersistentCause, Policy, policy};
 use crate::layout::StoredStamp;
 use crate::mem::{MemStore, MemUpload};
 use crate::store::{CorruptCause, Listing, StoreError, StoreOp};
@@ -655,14 +655,14 @@ fn a_missing_staged_file_is_lost_not_skipped() {
 }
 
 #[test]
-fn a_remote_ahead_of_local_halts() {
+fn a_remote_ahead_of_local_is_a_second_writer() {
     let (staging, remote) = (MemStore::new(), MemStore::new());
     put_bytes(&remote, key(3), &encode(3));
     let failed = failure(next(UploadState::Unknown, &staging, &remote, 2));
     assert_eq!(failed.fault, Fault::RemoteAheadOfLocal);
     assert_eq!(
         policy(&failed.fault),
-        Policy::Halt(HaltCause::ForeignWriter)
+        Policy::Persistent(PersistentCause::ForeignWriter)
     );
     assert_eq!(failed.state, UploadState::Unknown);
     let failed = failure(next(UploadState::Unknown, &staging, &remote, 0));
@@ -670,7 +670,7 @@ fn a_remote_ahead_of_local_halts() {
 }
 
 #[test]
-fn a_remote_that_went_backwards_halts() {
+fn a_remote_that_went_backwards_is_a_persistent_fault() {
     let (staging, remote) = (MemStore::new(), MemStore::new());
     put_bytes(&remote, key(1), &encode(1));
     let state = UploadState::ListFirst {
@@ -680,7 +680,7 @@ fn a_remote_that_went_backwards_halts() {
     assert_eq!(failed.fault, Fault::RemoteRegressed);
     assert_eq!(
         policy(&failed.fault),
-        Policy::Halt(HaltCause::RemoteRegressed)
+        Policy::Persistent(PersistentCause::RemoteRegressed)
     );
     assert_eq!(failed.state, state);
     let empty = MemStore::new();

@@ -9,6 +9,26 @@
 //! [`backoff_wait`]); the actor that owns the clock does the waiting and the
 //! state machine hands it a [`Next`].
 //!
+//! A [`Policy::Persistent`] fault is one that waiting alone is not expected to
+//! fix: credentials refused, a corrupt object, a damaged WAL, a second writer.
+//! What happens then is configuration, one field of [`Responses`] per
+//! [`PersistentCause`] (`docs/PLAN.md`, decision D7). [`Response::KeepTrying`]
+//! puts the lane that failed in a degraded state: it retries with the doubling
+//! wait, capped at [`MAX_BACKOFF`] as Go's sync loop is, the other lanes keep
+//! running, and every retry that fails is reported. [`Response::Stop`] stops
+//! the whole engine for a person, as every persistent fault did before.
+//! [`Responses::GO_LIKE`] (the default) keeps trying everywhere except on a
+//! second writer; [`Responses::STRICT`] stops on every cause.
+//!
+//! What keeping trying never does, whatever the configuration, follows from
+//! the code rather than from a check of the response: the engine has one
+//! replica and never writes anywhere else; a WAL frame reaches a staged file
+//! only from a scan that verified it; and every snapshot first scans the whole
+//! WAL to the committed end, so a WAL corrupt below that end fails the snapshot
+//! before a database page is read. Two causes cannot be retried from the
+//! state they left: a bug rebuilds the engine and boots again, and a replica
+//! that went backwards is listed again and taken as it now is.
+//!
 //! Two things are deliberately not faults. A clock that steps backwards is
 //! clamped and reported as [`Clamped`]. A power-loss WAL rewind is a snapshot
 //! with cause [`SnapshotCause::LocalRewound`]: it is expected under
@@ -141,7 +161,8 @@ pub enum SnapshotCause {
     OperatorRequested,
 }
 
-/// Why the engine stops and waits for a person.
+/// Why the engine stopped and waits for a person: a [`PersistentCause`]
+/// whose configured response is to stop, or a drain whose deadline passed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HaltCause {
     /// Credentials or permissions refuse the store.
@@ -177,6 +198,222 @@ pub enum HaltCause {
     Bug,
 }
 
+/// A failure that waiting alone is not expected to fix. The configured
+/// [`Responses`] say whether the engine keeps trying or stops.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PersistentCause {
+    /// Credentials or permissions refuse the store.
+    Credentials,
+    /// The store refuses a request outright (not credentials).
+    StoreRefused,
+    /// A replica object is corrupt.
+    RemoteCorrupt,
+    /// Another writer replicates into this replica.
+    ForeignWriter,
+    /// The replica went backwards.
+    RemoteRegressed,
+    /// A committed WAL frame is corrupt.
+    WalCorrupt,
+    /// The WAL is truncated below its committed end.
+    WalTruncated,
+    /// The WAL file is gone.
+    WalUnlinked,
+    /// The database's page size is not the one its replica holds.
+    PageSizeChanged {
+        /// The replica's page size.
+        was: PageSize,
+        /// The database's page size now.
+        now: PageSize,
+    },
+    /// A bug in this program.
+    Bug,
+}
+
+impl PersistentCause {
+    /// The persistent cause behind a stop cause; `None` for the one stop that
+    /// is not configurable, the end of a drain.
+    #[must_use]
+    pub const fn of(cause: HaltCause) -> Option<Self> {
+        match cause {
+            HaltCause::Credentials => Some(Self::Credentials),
+            HaltCause::StoreRefused => Some(Self::StoreRefused),
+            HaltCause::RemoteCorrupt => Some(Self::RemoteCorrupt),
+            HaltCause::ForeignWriter => Some(Self::ForeignWriter),
+            HaltCause::RemoteRegressed => Some(Self::RemoteRegressed),
+            HaltCause::WalCorrupt => Some(Self::WalCorrupt),
+            HaltCause::WalTruncated => Some(Self::WalTruncated),
+            HaltCause::WalUnlinked => Some(Self::WalUnlinked),
+            HaltCause::PageSizeChanged { was, now } => Some(Self::PageSizeChanged { was, now }),
+            HaltCause::Bug => Some(Self::Bug),
+            HaltCause::Shutdown => None,
+        }
+    }
+}
+
+impl From<PersistentCause> for HaltCause {
+    fn from(cause: PersistentCause) -> Self {
+        match cause {
+            PersistentCause::Credentials => Self::Credentials,
+            PersistentCause::StoreRefused => Self::StoreRefused,
+            PersistentCause::RemoteCorrupt => Self::RemoteCorrupt,
+            PersistentCause::ForeignWriter => Self::ForeignWriter,
+            PersistentCause::RemoteRegressed => Self::RemoteRegressed,
+            PersistentCause::WalCorrupt => Self::WalCorrupt,
+            PersistentCause::WalTruncated => Self::WalTruncated,
+            PersistentCause::WalUnlinked => Self::WalUnlinked,
+            PersistentCause::PageSizeChanged { was, now } => Self::PageSizeChanged { was, now },
+            PersistentCause::Bug => Self::Bug,
+        }
+    }
+}
+
+/// What the engine does about one [`PersistentCause`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Response {
+    /// The lane that failed is degraded and retries with the capped doubling
+    /// wait; the other lanes keep running.
+    KeepTrying,
+    /// The engine stops until a person restarts it.
+    Stop,
+}
+
+/// What the engine does when the replica holds another writer's files.
+/// Its own type: continuing damages the history, so it cannot be set by
+/// copying another cause's [`Response`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForeignWriter {
+    /// The engine stops: no upload, no compaction, no delete.
+    Stop,
+    /// The engine boots again and snapshots after the other writer's newest
+    /// transaction, so the replica's one history interleaves two databases,
+    /// and retention may delete the other writer's files.
+    ContinueAndInterleaveHistories,
+}
+
+/// The response to each persistent cause: one named field per cause, never a
+/// map, so a new cause does not build until every preset names its response.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Responses {
+    /// The store refuses the credentials.
+    pub credentials: Response,
+    /// The store refuses a request outright.
+    pub store_refused: Response,
+    /// A replica object is corrupt.
+    pub remote_corrupt: Response,
+    /// The replica went backwards. Keeping trying lists the replica again and
+    /// continues from what it now holds.
+    pub remote_regressed: Response,
+    /// A committed WAL frame is corrupt. Keeping trying rescans: nothing is
+    /// staged until the frame verifies or the WAL starts a new generation.
+    pub wal_corrupt: Response,
+    /// The WAL is truncated below its committed end.
+    pub wal_truncated: Response,
+    /// The WAL file was deleted.
+    pub wal_unlinked: Response,
+    /// The database's page size is not the replica's. Keeping trying never
+    /// writes the new size: the way out is a restart onto a new prefix.
+    pub page_size_changed: Response,
+    /// A condition the code rules out happened. Keeping trying rebuilds the
+    /// engine and boots again after the wait; it never continues from the
+    /// state the failure left.
+    pub bug: Response,
+    /// Another writer replicates into this replica.
+    pub foreign_writer: ForeignWriter,
+}
+
+impl Responses {
+    /// Go's behaviour (the default): keep trying on every cause, stop on a
+    /// second writer.
+    pub const GO_LIKE: Self = Self {
+        credentials: Response::KeepTrying,
+        store_refused: Response::KeepTrying,
+        remote_corrupt: Response::KeepTrying,
+        remote_regressed: Response::KeepTrying,
+        wal_corrupt: Response::KeepTrying,
+        wal_truncated: Response::KeepTrying,
+        wal_unlinked: Response::KeepTrying,
+        page_size_changed: Response::KeepTrying,
+        bug: Response::KeepTrying,
+        foreign_writer: ForeignWriter::Stop,
+    };
+
+    /// Stop on every cause.
+    pub const STRICT: Self = Self {
+        credentials: Response::Stop,
+        store_refused: Response::Stop,
+        remote_corrupt: Response::Stop,
+        remote_regressed: Response::Stop,
+        wal_corrupt: Response::Stop,
+        wal_truncated: Response::Stop,
+        wal_unlinked: Response::Stop,
+        page_size_changed: Response::Stop,
+        bug: Response::Stop,
+        foreign_writer: ForeignWriter::Stop,
+    };
+
+    /// Whether `cause` stops the engine.
+    #[must_use]
+    pub const fn stops(&self, cause: PersistentCause) -> bool {
+        matches!(self.action(cause), Action::Stop)
+    }
+
+    /// What the actor does about `cause`.
+    pub(crate) const fn action(&self, cause: PersistentCause) -> Action {
+        let response = match cause {
+            PersistentCause::Credentials => self.credentials,
+            PersistentCause::StoreRefused => self.store_refused,
+            PersistentCause::RemoteCorrupt => self.remote_corrupt,
+            PersistentCause::WalCorrupt => self.wal_corrupt,
+            PersistentCause::WalTruncated => self.wal_truncated,
+            PersistentCause::WalUnlinked => self.wal_unlinked,
+            PersistentCause::PageSizeChanged { .. } => self.page_size_changed,
+            PersistentCause::RemoteRegressed => {
+                return match self.remote_regressed {
+                    Response::KeepTrying => Action::Relist,
+                    Response::Stop => Action::Stop,
+                };
+            }
+            PersistentCause::Bug => {
+                return match self.bug {
+                    Response::KeepTrying => Action::Rebuild,
+                    Response::Stop => Action::Stop,
+                };
+            }
+            PersistentCause::ForeignWriter => {
+                return match self.foreign_writer {
+                    ForeignWriter::ContinueAndInterleaveHistories => Action::Rebuild,
+                    ForeignWriter::Stop => Action::Stop,
+                };
+            }
+        };
+        match response {
+            Response::KeepTrying => Action::Retry,
+            Response::Stop => Action::Stop,
+        }
+    }
+}
+
+impl Default for Responses {
+    fn default() -> Self {
+        Self::GO_LIKE
+    }
+}
+
+/// What the actor does about a persistent cause, from its [`Response`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Action {
+    /// Degrade the lane and retry the same step after the wait.
+    Retry,
+    /// Degrade the upload lane, forget what the replica was known to hold,
+    /// and list it again after the wait.
+    Relist,
+    /// Degrade the sync lane, drop every piece of engine state, and boot
+    /// again after the wait.
+    Rebuild,
+    /// Stop the engine.
+    Stop,
+}
+
 /// How long to wait before a retry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Backoff {
@@ -192,8 +429,11 @@ pub enum Backoff {
 pub enum Policy {
     /// Try again after a wait.
     Retry(Backoff),
-    /// Stop.
-    Halt(HaltCause),
+    /// Keep trying in a degraded state, or stop: the configured [`Responses`]
+    /// for this cause decide.
+    Persistent(PersistentCause),
+    /// Stop: a drain's deadline passed with work left. Not configurable.
+    Shutdown,
 }
 
 /// The action for a fault. Total and pure.
@@ -218,20 +458,22 @@ pub const fn policy(fault: &Fault) -> Policy {
         | Fault::NothingToSnapshot
         | Fault::StagedLost
         | Fault::ReadTxLost => Policy::Retry(Backoff::Doubling),
-        Fault::PageSizeChanged { was, now } => Policy::Halt(HaltCause::PageSizeChanged {
-            was: *was,
-            now: *now,
-        }),
-        Fault::StoreAuth => Policy::Halt(HaltCause::Credentials),
-        Fault::StoreRefused => Policy::Halt(HaltCause::StoreRefused),
-        Fault::RemoteCorrupt => Policy::Halt(HaltCause::RemoteCorrupt),
-        Fault::RemoteAheadOfLocal => Policy::Halt(HaltCause::ForeignWriter),
-        Fault::RemoteRegressed => Policy::Halt(HaltCause::RemoteRegressed),
-        Fault::WalCorruptBelowCommitted => Policy::Halt(HaltCause::WalCorrupt),
-        Fault::WalTruncatedBelowCommitted => Policy::Halt(HaltCause::WalTruncated),
-        Fault::WalUnlinked => Policy::Halt(HaltCause::WalUnlinked),
-        Fault::ShutdownDeadline => Policy::Halt(HaltCause::Shutdown),
-        Fault::Bug => Policy::Halt(HaltCause::Bug),
+        Fault::PageSizeChanged { was, now } => {
+            Policy::Persistent(PersistentCause::PageSizeChanged {
+                was: *was,
+                now: *now,
+            })
+        }
+        Fault::StoreAuth => Policy::Persistent(PersistentCause::Credentials),
+        Fault::StoreRefused => Policy::Persistent(PersistentCause::StoreRefused),
+        Fault::RemoteCorrupt => Policy::Persistent(PersistentCause::RemoteCorrupt),
+        Fault::RemoteAheadOfLocal => Policy::Persistent(PersistentCause::ForeignWriter),
+        Fault::RemoteRegressed => Policy::Persistent(PersistentCause::RemoteRegressed),
+        Fault::WalCorruptBelowCommitted => Policy::Persistent(PersistentCause::WalCorrupt),
+        Fault::WalTruncatedBelowCommitted => Policy::Persistent(PersistentCause::WalTruncated),
+        Fault::WalUnlinked => Policy::Persistent(PersistentCause::WalUnlinked),
+        Fault::ShutdownDeadline => Policy::Shutdown,
+        Fault::Bug => Policy::Persistent(PersistentCause::Bug),
     }
 }
 
@@ -312,7 +554,8 @@ impl Fault {
 
     /// A WAL scan error. Go turns every bad frame into end of file
     /// (`wal_reader.go:180-182`, `191-193`), so a corrupt committed frame looks
-    /// like the end of the WAL there; here it is a halt.
+    /// like the end of the WAL there; here it is a persistent fault, and
+    /// nothing past it is staged.
     #[must_use]
     pub fn from_wal(err: WalError) -> Self {
         match err {

@@ -1105,8 +1105,8 @@ fn assert_not_halted(result: Result<Synced, StepFailed>) {
     if let Err(failed) = result {
         let policy = crate::fault::policy(&failed.fault);
         assert!(
-            !matches!(policy, crate::fault::Policy::Halt(_)),
-            "a legal application checkpoint halted replication: {:?} -> {policy:?}",
+            !matches!(policy, crate::fault::Policy::Persistent(_)),
+            "a legal application checkpoint stopped or degraded replication: {:?} -> {policy:?}",
             failed.fault
         );
     }

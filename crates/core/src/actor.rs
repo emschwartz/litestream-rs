@@ -24,6 +24,19 @@
 //! [`Actor::fault`]. A retry waits on its own lane; the others keep running.
 //! Every store call is an await point, and a future dropped at any of them is
 //! a crash that the next boot recovers from.
+//!
+//! A persistent fault, and a recovery verdict that names a stop cause, goes
+//! to the configured [`Responses`] (`crate::fault` has the rules). Under
+//! `KeepTrying` the lane that failed is degraded: each retry that fails ends
+//! its tick with [`Event::Degraded`], the wait doubles up to
+//! [`crate::MAX_BACKOFF`], the other lanes run, and the lane's next success
+//! clears it. A failed retention delete degrades maintenance; sync and upload
+//! go on. While any lane is degraded, retention pins the newest transaction
+//! the replica held when the first one began (`maintain::retain`), and the
+//! pin goes once every lane has recovered. A bug, and a second writer whose
+//! response is to continue, rebuild the actor and boot again after the wait;
+//! a replica that went backwards is listed again. Under `Stop` the actor
+//! halts, as every persistent fault did before.
 
 mod state;
 
@@ -33,15 +46,18 @@ use std::time::Duration;
 use lsr_ltx::{PageSize, Timestamp, Txid};
 use lsr_wal::{OpenError, WalReader};
 
-pub use state::Phase;
-use state::{Gate, Lane, Lanes, Maintain};
+pub use state::{Degraded, Lane, Phase};
+use state::{Gate, Lanes, Maintain};
 
 use crate::checkpoint::{
     CheckpointConfig, CheckpointFailed, CheckpointOutcome, CheckpointState, Decision, Observed,
     after_checkpoint, after_sync, checkpoint, decide, next_wake,
 };
 use crate::compact::CompactError;
-use crate::fault::{Clamped, Fault, HaltCause, Next, Policy, SnapshotCause, backoff_wait, policy};
+use crate::fault::{
+    Action, Backoff, Clamped, Fault, HaltCause, Next, PersistentCause, Policy, Responses,
+    SnapshotCause, backoff_wait, policy,
+};
 use crate::inventory::Inventory;
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::maintain::{
@@ -93,6 +109,8 @@ pub struct ActorConfig {
     pub retry_interval: Duration,
     /// How long a drain may take before work left is a halt.
     pub shutdown_grace: Duration,
+    /// What each persistent failure does: keep trying, or stop.
+    pub responses: Responses,
 }
 
 /// What a maintenance tick did.
@@ -149,6 +167,18 @@ pub enum Event {
     },
     /// Nothing was ready.
     Idle,
+    /// A persistent fault whose configured response is to keep trying: the
+    /// lane is degraded and waits, the others run.
+    Degraded {
+        /// The lane that failed.
+        lane: Lane,
+        /// Why.
+        cause: PersistentCause,
+        /// When the lane first failed this way without a success between.
+        since: Timestamp,
+        /// When the retry is due.
+        until: Timestamp,
+    },
     /// A fault whose policy is to retry; its lane waits.
     Retrying {
         /// What went wrong.
@@ -189,7 +219,7 @@ enum Stepped {
     },
     /// Recovery says the next step is a snapshot.
     Resnapshot(SnapshotCause),
-    /// Recovery says stop.
+    /// Recovery names a stop cause; the configured response decides.
     Halt(HaltCause),
 }
 
@@ -220,6 +250,9 @@ pub struct Actor {
     pruned: Option<Txid>,
     last: Option<Timestamp>,
     clamp_reported: bool,
+    /// A lane is degraded and retention holds its pin (which is `None` when
+    /// the replica held nothing as the degradation began).
+    pinned: bool,
 }
 
 fn later(at: Timestamp, wait: Duration) -> Timestamp {
@@ -334,6 +367,7 @@ impl Actor {
             pruned: None,
             last: None,
             clamp_reported: false,
+            pinned: false,
         }
     }
 
@@ -341,6 +375,12 @@ impl Actor {
     #[must_use]
     pub const fn phase(&self) -> Phase {
         self.phase
+    }
+
+    /// The lane's degraded state, if a persistent failure left it in one.
+    #[must_use]
+    pub fn degraded(&self, lane: Lane) -> Option<Degraded> {
+        self.lanes.get(lane).degraded()
     }
 
     /// Makes the next sync a snapshot (an operator asked). A cause already
@@ -380,6 +420,13 @@ impl Actor {
             }
         };
         self.expire(now);
+        self.release_pin();
+        // A boot that keeps failing must not outlast a drain's deadline.
+        if let (false, Phase::Draining { deadline }) = (self.booted, self.phase)
+            && now >= deadline
+        {
+            return self.fault(Lane::Sync, Fault::ShutdownDeadline, now);
+        }
         if !self.booted {
             return self.boot(&mut env, now).await;
         }
@@ -414,20 +461,109 @@ impl Actor {
     fn fault(&mut self, waiter: impl Into<Waiter>, fault: Fault, now: Timestamp) -> Tick {
         match policy(&fault) {
             Policy::Retry(backoff) => {
-                let until = match waiter.into() {
-                    Waiter::Kept(until) => until,
-                    Waiter::Lane(lane) => {
-                        let interval = self.cfg.retry_interval;
-                        self.lanes.get_mut(lane).fail(|attempt| {
-                            let wait = backoff_wait(backoff, attempt, interval);
-                            later(now, wait)
-                        })
-                    }
-                };
+                let until = self.wait(waiter.into(), backoff, now);
                 self.ran(Event::Retrying { fault, until }, now)
             }
-            Policy::Halt(cause) => self.halt(cause),
+            Policy::Persistent(cause) => self.persistent(waiter.into(), cause, now),
+            Policy::Shutdown => self.halt(HaltCause::Shutdown),
         }
+    }
+
+    /// Counts a failure where its wait is kept; returns when the wait ends.
+    fn wait(&mut self, waiter: Waiter, backoff: Backoff, now: Timestamp) -> Timestamp {
+        match waiter {
+            Waiter::Kept(until) => until,
+            Waiter::Lane(lane) => {
+                let interval = self.cfg.retry_interval;
+                self.lanes.get_mut(lane).fail(|attempt| {
+                    let wait = backoff_wait(backoff, attempt, interval);
+                    later(now, wait)
+                })
+            }
+        }
+    }
+
+    /// A recovery verdict that names a stop cause: a persistent one goes to
+    /// the configured response, the end of a drain stops.
+    fn verdict(&mut self, lane: Lane, cause: HaltCause, now: Timestamp) -> Tick {
+        match PersistentCause::of(cause) {
+            Some(cause) => self.persistent(Waiter::Lane(lane), cause, now),
+            None => self.halt(cause),
+        }
+    }
+
+    /// What the configured response makes of a persistent cause: a stop, or
+    /// a degraded lane that waits the doubling backoff. The only place
+    /// `Responses` is read.
+    fn persistent(&mut self, waiter: Waiter, cause: PersistentCause, now: Timestamp) -> Tick {
+        let action = self.cfg.responses.action(cause);
+        if action == Action::Stop {
+            return self.halt(HaltCause::from(cause));
+        }
+        self.pin_retention();
+        let waiter = match action {
+            Action::Stop | Action::Retry => waiter,
+            Action::Relist => {
+                // What the replica was known to hold is gone from it: the
+                // retry lists it and continues from what it holds now.
+                self.upload = UploadState::ListFirst { confirmed: None };
+                waiter
+            }
+            Action::Rebuild => {
+                self.rebuild();
+                Waiter::Lane(Lane::Sync)
+            }
+        };
+        let lane = match waiter {
+            Waiter::Lane(lane) => lane,
+            Waiter::Kept(_) => Lane::Maintenance,
+        };
+        let until = self.wait(waiter, Backoff::Doubling, now);
+        let since = self.lanes.get_mut(lane).degrade(cause, now);
+        let event = Event::Degraded {
+            lane,
+            cause,
+            since,
+            until,
+        };
+        self.ran(event, now)
+    }
+
+    /// Pins the newest transaction the replica holds for retention, unless a
+    /// degradation already pinned one.
+    fn pin_retention(&mut self) {
+        if !self.pinned {
+            self.pinned = true;
+            self.maintain.state.set_pin(self.upload.confirmed());
+        }
+    }
+
+    /// Lets the pin go once no lane is degraded; the next listing may then
+    /// delete what it kept.
+    fn release_pin(&mut self) {
+        if self.pinned && !self.lanes.any_degraded() {
+            self.pinned = false;
+            self.maintain.state.set_pin(None);
+            self.maintain.stale = true;
+        }
+    }
+
+    /// Replaces every piece of engine state with a fresh actor's, so the next
+    /// tick boots from the replica and the WAL again. Kept: the phase, the
+    /// clock's last reading, the lanes (their waits and degraded states are
+    /// reports, not engine state) and the retention pin.
+    fn rebuild(&mut self) {
+        let mut fresh = Self::new(self.cfg.clone());
+        fresh.phase = match self.phase {
+            Phase::Running => Phase::Boot,
+            phase @ (Phase::Boot | Phase::Draining { .. } | Phase::Halted(_)) => phase,
+        };
+        fresh.lanes = self.lanes;
+        fresh.last = self.last;
+        fresh.clamp_reported = self.clamp_reported;
+        fresh.pinned = self.pinned;
+        fresh.maintain.state.set_pin(self.maintain.state.pin());
+        *self = fresh;
     }
 
     /// Lets every passed deadline go, so the tick runs its lane and `next`
@@ -487,7 +623,7 @@ impl Actor {
                 None
             }
             Recovered::Snapshot { cause, .. } => Some(cause),
-            Recovered::Halt(cause) => return self.halt(cause),
+            Recovered::Halt(cause) => return self.verdict(Lane::Sync, cause, now),
         };
         // A staged file that did not verify was deleted with all after it:
         // the next file is a snapshot even when the WAL could continue.
@@ -650,7 +786,7 @@ impl Actor {
                 self.pending = Some(cause);
                 Err(self.ran(Event::Resnapshot(cause), now))
             }
-            Ok(Stepped::Halt(cause)) => Err(self.halt(cause)),
+            Ok(Stepped::Halt(cause)) => Err(self.verdict(Lane::Sync, cause, now)),
             Err(fault) => Err(self.fault(Lane::Sync, fault, now)),
         }
     }
@@ -979,7 +1115,7 @@ impl Actor {
         now: Timestamp,
     ) -> Option<Tick> {
         let ready = self.running()
-            && self.lanes.ready(Lane::Maintain, now)
+            && self.lanes.ready(Lane::Maintenance, now)
             && self.uploads_idle()
             && self.maintain.wants_listing(now);
         if !ready {
@@ -987,7 +1123,7 @@ impl Actor {
         }
         let inventory = match Inventory::load(env.remote).await {
             Ok(inventory) => inventory,
-            Err(err) => return Some(self.fault(Lane::Maintain, inventory_fault(&err), now)),
+            Err(err) => return Some(self.fault(Lane::Maintenance, inventory_fault(&err), now)),
         };
         if self.maintain.read_back_owed
             && let Some(tick) = self.read_back_unit(env.remote, &inventory, now).await
@@ -1003,7 +1139,7 @@ impl Actor {
         // A failed stamp read leaves the listing owed: the next tick lists again.
         let decided = match decided {
             Ok(decided) => decided,
-            Err(err) => return Some(self.fault(Lane::Maintain, stamp_fault(&err), now)),
+            Err(err) => return Some(self.fault(Lane::Maintenance, stamp_fault(&err), now)),
         };
         self.maintain.stale = false;
         self.maintain.level_one = Level::new(1)
@@ -1012,7 +1148,7 @@ impl Actor {
         let stamps_read = decided.stamps_read;
         match decided.value {
             Due::Wait { until, held } => {
-                self.lanes.get_mut(Lane::Maintain).succeed();
+                self.lanes.get_mut(Lane::Maintenance).succeed();
                 self.maintain.until = until;
                 let event = Event::Maintained {
                     event: MaintainedEvent::Waiting { held },
@@ -1043,16 +1179,16 @@ impl Actor {
             }
             Ok(ReadBack::Rotten { key, covered: true }) => key,
             Ok(ReadBack::Rotten { covered: false, .. }) => {
-                return Some(self.fault(Lane::Maintain, Fault::RemoteCorrupt, now));
+                return Some(self.fault(Lane::Maintenance, Fault::RemoteCorrupt, now));
             }
-            Err(fault) => return Some(self.fault(Lane::Maintain, fault, now)),
+            Err(fault) => return Some(self.fault(Lane::Maintenance, fault, now)),
         };
         if let Err(err) = remote.delete(&[key]).await {
-            return Some(self.fault(Lane::Maintain, Fault::from_remote(&err), now));
+            return Some(self.fault(Lane::Maintenance, Fault::from_remote(&err), now));
         }
         // The listing no longer holds: the next tick lists and reads back again.
         self.maintain.stale = true;
-        self.lanes.get_mut(Lane::Maintain).succeed();
+        self.lanes.get_mut(Lane::Maintenance).succeed();
         let event = Event::Maintained {
             event: MaintainedEvent::Repaired(key),
             stamps_read: 0,
@@ -1088,21 +1224,22 @@ impl Actor {
                 return self.fault(waiter, maintain_fault(&err), now);
             }
         };
-        self.lanes.get_mut(Lane::Maintain).succeed();
+        self.lanes.get_mut(Lane::Maintenance).succeed();
         self.ran(Event::Maintained { event, stamps_read }, now)
     }
 
     /// Where a failed job waits: its level's backoff when `MaintainState`
     /// keeps one (R3: the other levels keep running), else the maintenance
     /// lane, so a failing retention delete backs off instead of relisting
-    /// at once. A level's wait is not the lane's failure, so the lane resets.
+    /// at once. A level's wait is not the lane's failure, so the lane's wait
+    /// resets; a degraded state stays.
     fn job_waiter(&mut self, job: &Job, now: Timestamp) -> Waiter {
         match self.maintain.state.retry_at(job, now) {
             Some(until) => {
-                self.lanes.get_mut(Lane::Maintain).succeed();
+                self.lanes.get_mut(Lane::Maintenance).clear_wait();
                 Waiter::Kept(until)
             }
-            None => Waiter::Lane(Lane::Maintain),
+            None => Waiter::Lane(Lane::Maintenance),
         }
     }
 
@@ -1133,7 +1270,7 @@ impl Actor {
             .record_snapshot(now, written.as_ref().err().map(|failed| &failed.fault));
         match written {
             Ok(info) => {
-                self.lanes.get_mut(Lane::Maintain).succeed();
+                self.lanes.get_mut(Lane::Maintenance).succeed();
                 let event = MaintainedEvent::Snapshot(info);
                 self.ran(Event::Maintained { event, stamps_read }, now)
             }
@@ -1173,7 +1310,7 @@ impl Actor {
         let upload = self.lanes.ready(Lane::Upload, now) && !self.uploads_idle();
         let prune = running && self.lanes.ready(Lane::Prune, now) && self.prune_bound().is_some();
         let maintain = running
-            && self.lanes.ready(Lane::Maintain, now)
+            && self.lanes.ready(Lane::Maintenance, now)
             && self.uploads_idle()
             && self.maintain.wants_listing(now);
         sync || upload || prune || maintain
@@ -1192,7 +1329,7 @@ impl Actor {
         let only_running = [
             lane(Lane::Checkpoint),
             lane(Lane::Prune),
-            lane(Lane::Maintain),
+            lane(Lane::Maintenance),
             self.gate.until(),
             self.maintain.until,
         ];

@@ -13,8 +13,9 @@ use std::num::{NonZeroU32, NonZeroU64};
 use std::time::Duration;
 
 use lsr_core::{
-    Actor, ActorConfig, CheckpointConfig, Clock, Entropy, Env, Event, HaltCause, Maintenance, Next,
-    SeededEntropy, SyncConfig, Tick, UploadConfig,
+    Actor, ActorConfig, CheckpointConfig, Clock, Entropy, Env, Event, Fault, HaltCause, Lane,
+    MAX_BACKOFF, Maintenance, Next, PersistentCause, Responses, SeededEntropy, SyncConfig, Tick,
+    UploadConfig,
 };
 use lsr_ltx::{PageNo, PageSize, Timestamp, Txid};
 use lsr_wal::{Salts, WalOffset};
@@ -95,6 +96,9 @@ pub enum Seen {
     Event(Event),
     /// A tick that halted the engine.
     Halt(HaltCause),
+    /// A lane that was degraded is not any more: its work succeeded on the
+    /// same engine, with no restart between.
+    Recovered(Lane),
     /// A snapshot file was staged, taking this transaction.
     Snapshot(Txid),
     /// The oracle judged the replica and found nothing wrong.
@@ -156,8 +160,12 @@ pub struct Opts {
     pub trace: bool,
     /// Record what the engine and the oracle did in [`RunReport::seen`].
     pub record: bool,
-    /// A halt is expected: it ends the run's ticks without being a bug.
+    /// The scenario's persistent fault is expected: a halt for it ends the
+    /// run's ticks, and a lane it keeps degraded ends a drain or the idle
+    /// check, without being a bug.
     pub allow_halt: bool,
+    /// What each persistent fault does; the default keeps trying.
+    pub responses: Responses,
 }
 
 /// The configuration every run gives the actor.
@@ -177,12 +185,15 @@ pub fn actor_config() -> ActorConfig {
         maintenance: Maintenance::go_default(),
         retry_interval: Duration::from_secs(1),
         shutdown_grace: Duration::from_secs(10),
+        responses: Responses::GO_LIKE,
     }
 }
 
 /// What one actor step came to.
 enum Step {
     Ran,
+    /// A lane kept trying a persistent fault.
+    Degraded(PersistentCause),
     Drained,
     Halted(HaltCause),
     Crashed,
@@ -207,6 +218,12 @@ struct Runner {
     quiet: bool,
     record: bool,
     allow_halt: bool,
+    responses: Responses,
+    /// Which lanes the current engine reported degraded after its last tick.
+    degraded: [bool; 5],
+    /// The latest time the current engine has been told: its retry waits are
+    /// measured from it, since an earlier reading is clamped.
+    latest: Option<Timestamp>,
     saved: Option<StagedCopy>,
 }
 
@@ -239,6 +256,9 @@ impl Runner {
             quiet: false,
             record: false,
             allow_halt: false,
+            responses: Responses::GO_LIKE,
+            degraded: [false; 5],
+            latest: None,
             saved: None,
         }
     }
@@ -249,8 +269,13 @@ impl Runner {
 
     fn reboot(&mut self) {
         self.w.start_driver();
-        self.actor = Actor::new(actor_config());
+        self.actor = Actor::new(ActorConfig {
+            responses: self.responses,
+            ..actor_config()
+        });
         self.unwatched = true;
+        self.degraded = [false; 5];
+        self.latest = None;
     }
 
     fn limits(&self) -> Limits {
@@ -390,23 +415,8 @@ impl Runner {
         }
         let (step, event) = match ended {
             TickEnd::Done(Tick::Ran { event, next }) => {
-                if self.record {
-                    self.report.seen.push(Seen::Event(event.clone()));
-                }
-                if let Event::Uploaded(did) = &event {
-                    self.w.acked.on_did(did);
-                }
-                if matches!(event, Event::Idle) && matches!(next, Next::Now) {
-                    self.report.spins = self.report.spins.saturating_add(1);
-                    self.w.clock.advance(SPIN_STEP);
-                }
-                self.quiet = matches!(next, Next::OnWalChange);
-                if self.unwatched && !matches!(next, Next::Now) {
-                    self.unwatched = false;
-                } else {
-                    self.follow(next);
-                }
-                (Step::Ran, Some(event))
+                let step = self.ran(&event, next, began)?;
+                (step, Some(event))
             }
             TickEnd::Done(Tick::Halted(cause)) => {
                 if self.record {
@@ -436,11 +446,75 @@ impl Runner {
         Ok((step, stats))
     }
 
+    /// Takes in a tick that ran: records it, checks its retry wait, and
+    /// moves the clock as a driver would.
+    fn ran(&mut self, event: &Event, next: Next, began: Timestamp) -> Result<Step, Violation> {
+        if self.record {
+            self.report.seen.push(Seen::Event(event.clone()));
+        }
+        let began = self.latest.map_or(began, |latest| latest.max(began));
+        self.latest = Some(began);
+        capped(event, began)?;
+        self.note_recovered();
+        if let Event::Uploaded(did) = event {
+            self.w.acked.on_did(did);
+        }
+        if matches!(event, Event::Idle) && matches!(next, Next::Now) {
+            self.report.spins = self.report.spins.saturating_add(1);
+            self.w.clock.advance(SPIN_STEP);
+        }
+        self.quiet = matches!(next, Next::OnWalChange);
+        if self.unwatched && !matches!(next, Next::Now) {
+            self.unwatched = false;
+        } else {
+            self.follow(next);
+        }
+        match event {
+            // A bug kept trying is still a bug, whatever the run expects.
+            Event::Degraded {
+                cause: PersistentCause::Bug,
+                ..
+            } => Err(bug_fault("the engine met a bug and rebuilt itself")),
+            Event::Degraded { cause, .. } => Ok(Step::Degraded(*cause)),
+            Event::Booted { .. }
+            | Event::Synced { .. }
+            | Event::Checkpointed { .. }
+            | Event::Uploaded(_)
+            | Event::Maintained { .. }
+            | Event::Idle
+            | Event::Retrying { .. }
+            | Event::Resnapshot(_)
+            | Event::Clamped(_) => Ok(Step::Ran),
+        }
+    }
+
     fn tick(&mut self) -> Result<(), Violation> {
         match self.step(None)?.0 {
             Step::Halted(cause) if self.halt_expected(cause) => Ok(()),
             Step::Halted(cause) => Err(bug_fault(format!("the engine halted: {cause:?}"))),
+            Step::Degraded(cause) => self.degraded_expected(cause),
             Step::Ran | Step::Drained | Step::Crashed => Ok(()),
+        }
+    }
+
+    /// A lane degraded by a persistent fault the run does not expect is a
+    /// bug, as a halt for it would be. `Bug` is never expected.
+    fn degraded_expected(&self, cause: PersistentCause) -> Result<(), Violation> {
+        if cause != PersistentCause::Bug && self.halt_expected(HaltCause::from(cause)) {
+            Ok(())
+        } else {
+            Err(bug_fault(format!("a lane is degraded: {cause:?}")))
+        }
+    }
+
+    /// Records each lane the tick took out of its degraded state.
+    fn note_recovered(&mut self) {
+        for (was, lane) in self.degraded.iter_mut().zip(Lane::ALL) {
+            let now = self.actor.degraded(lane).is_some();
+            if *was && !now && self.record {
+                self.report.seen.push(Seen::Recovered(lane));
+            }
+            *was = now;
         }
     }
 
@@ -462,14 +536,23 @@ impl Runner {
     }
 
     /// Stops the engine and runs it until it says it is drained.
+    ///
+    /// A lane the scenario's fault keeps degraded may outlast the grace: the
+    /// drain then ends at its deadline, as a halt for that fault would end it.
     fn drain(&mut self) -> Result<(), Violation> {
         self.actor.begin_shutdown(self.now());
+        let mut degraded = false;
         for _ in 0..DRAIN_TICKS {
             match self.step(None)?.0 {
                 Step::Drained => return Ok(()),
+                Step::Halted(HaltCause::Shutdown) if degraded => return Ok(()),
                 Step::Halted(HaltCause::Shutdown) => {
                     self.reboot();
                     self.actor.begin_shutdown(self.now());
+                }
+                Step::Degraded(cause) => {
+                    self.degraded_expected(cause)?;
+                    degraded = true;
                 }
                 Step::Halted(cause) if self.halt_expected(cause) => return Ok(()),
                 Step::Halted(cause) => {
@@ -858,13 +941,8 @@ impl Runner {
         for _ in 0..SETTLE_TICKS {
             let spins = self.report.spins;
             let (step, stats) = self.step(None)?;
-            if let Step::Halted(cause) = step {
-                if self.halt_expected(cause) {
-                    return Ok(());
-                }
-                return Err(bug_fault(format!(
-                    "the engine halted while idle: {cause:?}"
-                )));
+            if self.ends_idle(&step)? {
+                return Ok(());
             }
             if matches!(stats.event, Some(Event::Idle)) && self.report.spins == spins && self.quiet
             {
@@ -882,17 +960,25 @@ impl Runner {
         let mut window = IdleWindow::default();
         for _ in 0..IDLE_TICKS {
             let (step, stats) = self.step(None)?;
-            if let Step::Halted(cause) = step {
-                if self.halt_expected(cause) {
-                    return Ok(());
-                }
-                return Err(bug_fault(format!(
-                    "the engine halted while idle: {cause:?}"
-                )));
+            if self.ends_idle(&step)? {
+                return Ok(());
             }
             window.add(&stats);
         }
         window.check()
+    }
+
+    /// Whether a step ends the idle check: an expected halt, or a lane the
+    /// scenario's fault keeps degraded (an engine retrying is not idle).
+    fn ends_idle(&self, step: &Step) -> Result<bool, Violation> {
+        match step {
+            Step::Halted(cause) if self.halt_expected(*cause) => Ok(true),
+            Step::Halted(cause) => Err(bug_fault(format!(
+                "the engine halted while idle: {cause:?}"
+            ))),
+            Step::Degraded(cause) => self.degraded_expected(*cause).map(|()| true),
+            Step::Ran | Step::Drained | Step::Crashed => Ok(false),
+        }
     }
 
     /// The end of a history: drain, judge the replica, check the resources.
@@ -903,6 +989,35 @@ impl Runner {
         self.idle()?;
         self.replica_page_size().map(drop)
     }
+}
+
+/// Every retry wait is capped: a persistent fault's at [`MAX_BACKOFF`], a
+/// retried one's at the later of that and the wait the store named.
+fn capped(event: &Event, began: Timestamp) -> Result<(), Violation> {
+    let (until, named) = match event {
+        Event::Degraded { until, .. } => (*until, None),
+        Event::Retrying {
+            until,
+            fault: Fault::StoreThrottled { retry_after },
+        } => (*until, *retry_after),
+        Event::Retrying { until, .. } => (*until, None),
+        Event::Booted { .. }
+        | Event::Synced { .. }
+        | Event::Checkpointed { .. }
+        | Event::Uploaded(_)
+        | Event::Maintained { .. }
+        | Event::Idle
+        | Event::Resnapshot(_)
+        | Event::Clamped(_) => return Ok(()),
+    };
+    let cap = named.map_or(MAX_BACKOFF, |named| named.max(MAX_BACKOFF));
+    let millis = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
+    let wait = until.unix_millis().saturating_sub(began.unix_millis());
+    within(
+        Bound::RetryWait,
+        u64::try_from(wait).unwrap_or(0),
+        millis(cap),
+    )
 }
 
 /// Runs the history of `steps` operations that `seed` names.
@@ -948,6 +1063,8 @@ pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure
     runner.trace = opts.trace;
     runner.record = opts.record;
     runner.allow_halt = opts.allow_halt;
+    runner.responses = opts.responses;
+    runner.reboot();
     for (index, op) in ops.iter().enumerate() {
         let step = u32::try_from(index).unwrap_or(u32::MAX);
         let fail = |violation| Failure {

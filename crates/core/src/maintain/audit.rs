@@ -17,8 +17,9 @@
 //! the replica loses nothing by it: a restore to the file's last transaction
 //! still plans from the other files. Compaction then builds the level again
 //! from the same inputs, and a missing snapshot is due at once. When nothing
-//! else reaches that transaction the file stays where it is and the engine
-//! halts with `RemoteCorrupt`, as it does for any corrupt object.
+//! else reaches that transaction the file stays where it is and the read-back
+//! fails with `RemoteCorrupt`, as any corrupt object does (a persistent fault:
+//! the configured response keeps maintenance degraded or stops the engine).
 //!
 //! The cost is one pass over each newest file in [`ReadLen`]-sized ranged
 //! reads, once per boot and never in steady state.

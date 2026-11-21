@@ -31,8 +31,8 @@ use lsr_core::conformance::block_on;
 use lsr_core::{
     Actor, ActorConfig, CheckpointConfig, CheckpointMode, Checkpointer, Clock, Env, Event,
     FakeClock, Fault, FileInfo, HaltCause, Inventory, L0Retention, Maintenance, MemStore, Next,
-    ObjectStore, PageSource, ReadLen, StoreError, SyncConfig, Tick, Upload, UploadConfig,
-    WalSource,
+    ObjectStore, PageSource, ReadLen, Responses, StoreError, SyncConfig, Tick, Upload,
+    UploadConfig, WalSource,
 };
 use lsr_ltx::{PageNo, PageSize, Timestamp, Txid};
 use lsr_sim::{
@@ -151,7 +151,8 @@ impl Default for RigConfig {
 /// The actor configuration of the suite: small checkpoint thresholds so a short workload runs
 /// a PASSIVE and a TRUNCATE, no time trigger (checkpoints follow the workload, not the fake
 /// clock), and compaction on, with every level-0 file and snapshot kept for a day so the oracle
-/// can restore every transaction the run made.
+/// can restore every transaction the run made. Every persistent fault stops the engine
+/// (`Responses::STRICT`), so a case can name the cause it stops with.
 #[must_use]
 pub fn rig_actor_config() -> ActorConfig {
     let secs = Duration::from_secs;
@@ -177,6 +178,7 @@ pub fn rig_actor_config() -> ActorConfig {
         maintenance,
         retry_interval: Duration::from_secs(1),
         shutdown_grace: secs(30),
+        responses: Responses::STRICT,
     }
 }
 
@@ -616,6 +618,7 @@ impl<B: Backend> Rig<B> {
             Event::Uploaded(did) => self.acked.on_did(did),
             Event::Retrying { fault, .. } => self.faults.push(*fault),
             Event::Booted { .. }
+            | Event::Degraded { .. }
             | Event::Synced { .. }
             | Event::Checkpointed { .. }
             | Event::Maintained { .. }

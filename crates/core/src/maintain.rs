@@ -298,6 +298,15 @@ pub enum Hold {
         /// The snapshot with the higher transactions and the older stamp.
         later: FileKey,
     },
+    /// The restore point pinned while a lane is degraded does not plan, on
+    /// the listing or without the planned delete.
+    #[error("the pinned restore point {pin} does not plan: {outcome:?}")]
+    PinUnplannable {
+        /// The pinned transaction.
+        pin: Txid,
+        /// What the planner said; never a plan that reaches the pin.
+        outcome: PlanOutcome,
+    },
     /// The planned delete would have broken the newest restore. A bug in the
     /// rules, caught before any key was named.
     #[error("the planned delete would break the newest restore: {outcome:?}")]

@@ -255,6 +255,16 @@ fn cfg() -> ActorConfig {
         maintenance: Maintenance::go_default(),
         retry_interval: Duration::from_secs(1),
         shutdown_grace: Duration::from_secs(10),
+        // The tests written before the configurable responses expect a stop.
+        responses: Responses::STRICT,
+    }
+}
+
+/// [`cfg`] with the default responses: keep trying, stop on a second writer.
+fn go_like() -> ActorConfig {
+    ActorConfig {
+        responses: Responses::GO_LIKE,
+        ..cfg()
     }
 }
 
@@ -655,6 +665,61 @@ fn drain_deadline_halts() {
     );
 }
 
+/// A drain whose upload fails a few times retries inside the deadline and
+/// ends drained, with every committed transaction on the replica.
+#[test]
+fn a_drain_retries_a_transient_upload_and_drains() {
+    let (mut rig, mut actor) = caught_up();
+    for _ in 0..3 {
+        rig.remote
+            .inner
+            .inject_failure(StoreOp::Upload, transient(StoreOp::Upload));
+    }
+    rig.commit(2);
+    actor.begin_shutdown(ts(T0 + 10));
+    let seen = rig.follow(&mut actor, T0 + 10, 50);
+    assert_eq!(seen.last(), Some(&Tick::Drained), "{seen:?}");
+    let retries = seen
+        .iter()
+        .filter(|t| matches!(event(t), Some(Event::Retrying { .. })))
+        .count();
+    assert_eq!(retries, 3, "{seen:?}");
+    let newest = Rig::files(&rig.remote, Level::ZERO)
+        .iter()
+        .map(|f| f.key.range().max().get())
+        .max();
+    assert_eq!(newest, Some(2));
+}
+
+/// A drain against a store that throttles with a named wait waits it out
+/// inside the deadline and ends drained.
+#[test]
+fn a_drain_waits_out_a_throttled_upload_and_drains() {
+    let (mut rig, mut actor) = caught_up();
+    for _ in 0..2 {
+        rig.remote
+            .inner
+            .inject_failure(StoreOp::Upload, throttled(StoreOp::Upload, 2_000));
+    }
+    rig.commit(2);
+    actor.begin_shutdown(ts(T0 + 10));
+    let seen = rig.follow(&mut actor, T0 + 10, 50);
+    assert_eq!(seen.last(), Some(&Tick::Drained), "{seen:?}");
+    let waits: Vec<Timestamp> = seen
+        .iter()
+        .filter_map(|t| match event(t) {
+            Some(Event::Retrying { until, .. }) => Some(*until),
+            Some(_) | None => None,
+        })
+        .collect();
+    assert_eq!(waits, vec![ts(T0 + 2_010), ts(T0 + 4_010)], "{seen:?}");
+    let newest = Rig::files(&rig.remote, Level::ZERO)
+        .iter()
+        .map(|f| f.key.range().max().get())
+        .max();
+    assert_eq!(newest, Some(2));
+}
+
 /// The fault events a run produced: each is one call of `policy`.
 fn routed(seen: &[Tick]) -> usize {
     seen.iter()
@@ -852,7 +917,7 @@ const LANES: [Lane; 5] = [
     Lane::Checkpoint,
     Lane::Upload,
     Lane::Prune,
-    Lane::Maintain,
+    Lane::Maintenance,
 ];
 
 /// Every deadline the actor holds, read from where each is kept.
@@ -1388,6 +1453,7 @@ fn a_crash_between_the_drop_and_the_snapshot_boots_clean() {
     assert_eq!(restored(&rig), 2);
 }
 
+mod degraded;
 mod lanes;
 mod rejected_snapshot;
 mod remote_tip;

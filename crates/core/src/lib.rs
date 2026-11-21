@@ -30,7 +30,7 @@ mod sync;
 mod upload;
 mod verify;
 
-pub use actor::{Actor, ActorConfig, Env, Event, MaintainedEvent, Phase, Tick};
+pub use actor::{Actor, ActorConfig, Degraded, Env, Event, Lane, MaintainedEvent, Phase, Tick};
 pub use checkpoint::{
     CheckpointConfig, CheckpointFailed, CheckpointOutcome, CheckpointState, Checkpointed, Decision,
     Observed, Why, after_checkpoint, after_sync, checkpoint, decide, next_wake,
@@ -42,8 +42,8 @@ pub use env::{Clock, Entropy, Sleeper};
 #[cfg(any(test, feature = "testing"))]
 pub use env::{FakeClock, RecordingSleeper, SeededEntropy};
 pub use fault::{
-    Backoff, Clamped, Fault, HaltCause, MAX_BACKOFF, Next, Policy, SnapshotCause, backoff_wait,
-    policy, retry_wait,
+    Backoff, Clamped, Fault, ForeignWriter, HaltCause, MAX_BACKOFF, Next, PersistentCause, Policy,
+    Response, Responses, SnapshotCause, backoff_wait, policy, retry_wait,
 };
 pub use inventory::{Inventory, InventoryError, is_snapshot_start};
 pub use layout::{

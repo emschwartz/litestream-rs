@@ -15,6 +15,11 @@
 //!   level, and retention holds until it is gone. A listing cannot tell such an
 //!   object from a good one, and the inputs it "covers" would be deleted.
 //!
+//! - The retention pin. While a lane of the actor is degraded, the newest
+//!   transaction the replica held when the degradation began is pinned: the
+//!   files of its restore chain are not deleted, and the rest of the replica
+//!   is retained as usual (`retain`). The actor sets it and clears it.
+//!
 //! Nothing here can make retention delete more than a fresh state would: a
 //! remembered fact only holds or delays. (The retention anchor is not kept
 //! for that reason; see `retain`.)
@@ -28,7 +33,7 @@ use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 use std::time::Duration;
 
-use lsr_ltx::Timestamp;
+use lsr_ltx::{Timestamp, Txid};
 
 use super::{CompactJob, DeleteJob, Job, MaintainError, Outcome};
 use crate::compact::CompactError;
@@ -75,9 +80,23 @@ pub struct MaintainState {
     retries: BTreeMap<Level, Retry>,
     /// At most one per level above 0: a level's delete runs first.
     distrusted: BTreeMap<Level, FileKey>,
+    /// The restore point retention keeps with its chain.
+    pin: Option<Txid>,
 }
 
 impl MaintainState {
+    /// Keeps the restore chain of `txid` from retention, or (`None`) lets the
+    /// last pin go.
+    pub const fn set_pin(&mut self, txid: Option<Txid>) {
+        self.pin = txid;
+    }
+
+    /// The restore point retention keeps, if one is pinned.
+    #[must_use]
+    pub const fn pin(&self) -> Option<Txid> {
+        self.pin
+    }
+
     /// Notes how `job` ended at `now`.
     pub fn record(&mut self, now: Timestamp, job: &Job, outcome: &Outcome) {
         match job {

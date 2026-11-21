@@ -1,17 +1,22 @@
 //! One scenario per [`Fault`], and the scenarios of faults that are not
 //! faults: the clock stepping back.
+//!
+//! A persistent fault's scenarios hold under every set of responses: each
+//! names its cause with [`Expect::Stopped`], which is a halt where the
+//! responses stop and a degraded lane where they keep trying, and the ones
+//! whose fault clears also expect [`Expect::Recovered`].
 
 use std::time::Duration;
 
 use lsr_core::{
-    Event, Fault, FileKey, HaltCause, Level, MaintainedEvent, SnapshotCause, SourceError, SourceOp,
-    StoreError, StoreOp,
+    Event, Fault, FileKey, HaltCause, Level, MaintainedEvent, PersistentCause, SnapshotCause,
+    SourceError, SourceOp, StoreError, StoreOp,
 };
 use lsr_ltx::PageSize;
 
 use super::{
     CauseKind, EventMatch, Expect, SEED, SETTLE, Scenario, build, commit, ticks,
-    vacuum_page_size_change,
+    vacuum_page_size_change, vacuum_page_size_change_and_back,
 };
 use crate::generate::{EnvFault, MetaOp, Op, RemoteOp, Target, WalOp};
 use crate::run::{RunReport, Seen};
@@ -142,7 +147,13 @@ impl From<&Fault> for FaultKind {
     }
 }
 
-/// The halt a fault's policy names, if its policy is a halt.
+/// The persistent cause a fault's policy names, if it has one.
+#[must_use]
+pub fn persistent_of(kind: FaultKind) -> Option<PersistentCause> {
+    halt_of(kind).and_then(PersistentCause::of)
+}
+
+/// The stop cause a fault's policy names, if its policy can stop the engine.
 #[must_use]
 pub fn halt_of(kind: FaultKind) -> Option<HaltCause> {
     let page = PageSize::MIN;
@@ -180,7 +191,7 @@ pub fn halt_of(kind: FaultKind) -> Option<HaltCause> {
 }
 
 /// Whether a scenario's expectations name this fault: the retry it ends in,
-/// or the halt its policy names.
+/// or the stop cause its policy names.
 #[must_use]
 pub fn names_fault(scenario: &Scenario, kind: FaultKind) -> bool {
     scenario
@@ -193,7 +204,7 @@ pub fn names_fault(scenario: &Scenario, kind: FaultKind) -> bool {
             (Expect::Event(EventMatch::Resnapshot(CauseKind::LocalTipUnreadable)), _) => {
                 kind == FaultKind::StagedLost
             }
-            (Expect::Halt(got), Some(halt)) => {
+            (Expect::Stopped(got), Some(halt)) => {
                 std::mem::discriminant(got) == std::mem::discriminant(&halt)
             }
             _ => false,
@@ -224,8 +235,11 @@ pub fn fault_scenarios(kind: FaultKind) -> &'static [fn() -> Scenario] {
         FaultKind::WalChangedUnderRead => &[frame_overwritten_between_scan_and_read],
         FaultKind::NothingToSnapshot => &[db_created_no_pages],
         FaultKind::ReadTxLost => &[reacquire_fails_after_checkpoint],
-        FaultKind::PageSizeChanged => &[vacuum_page_size_change],
-        FaultKind::WalCorruptBelowCommitted => &[bit_flip_in_committed_frame],
+        FaultKind::PageSizeChanged => &[vacuum_page_size_change, vacuum_page_size_change_and_back],
+        FaultKind::WalCorruptBelowCommitted => &[
+            bit_flip_in_committed_frame,
+            bit_flip_in_committed_frame_healed,
+        ],
         FaultKind::WalTruncatedBelowCommitted => &[wal_truncated_externally_under_lock],
         FaultKind::WalUnlinked => &[wal_unlinked_mid_run],
         FaultKind::ShutdownDeadline => &[sigterm_during_upload],
@@ -434,7 +448,11 @@ fn throttle_waits(report: &RunReport) -> Result<(), String> {
                 }
                 waiting = Some(*until);
             }
-            Seen::Event(_) | Seen::Halt(_) | Seen::Snapshot(_) | Seen::Oracle => {}
+            Seen::Event(_)
+            | Seen::Halt(_)
+            | Seen::Recovered(_)
+            | Seen::Snapshot(_)
+            | Seen::Oracle => {}
         }
     }
     if early == 0 {
@@ -443,12 +461,27 @@ fn throttle_waits(report: &RunReport) -> Result<(), String> {
     Ok(())
 }
 
-/// No later tick calls the replica: the halt is final until a restart.
+/// A halt for the scenario's fault, not the end of a drain whose deadline a
+/// degraded lane outlasted.
+fn stopped(seen: &Seen) -> bool {
+    matches!(seen, Seen::Halt(cause) if *cause != HaltCause::Shutdown)
+}
+
+/// No later tick calls the replica: the halt is final until a restart. Where
+/// the responses keep trying there is no halt to be quiet after: a lane was
+/// degraded instead, which the expectations check.
 fn quiet_after_halt(report: &RunReport) -> Result<(), String> {
+    let degraded = report
+        .seen
+        .iter()
+        .any(|seen| matches!(seen, Seen::Event(Event::Degraded { .. })));
+    if degraded && !report.seen.iter().any(stopped) {
+        return Ok(());
+    }
     let mut halted = false;
     for (at, seen) in report.seen.iter().enumerate() {
         match seen {
-            Seen::Halt(_) => halted = true,
+            Seen::Halt(_) if stopped(seen) => halted = true,
             Seen::Event(Event::Booted { .. }) => halted = false,
             // A restore's reboot lists the replica in its first tick, and the
             // oracle has just judged: that tick is not the halted engine's.
@@ -464,10 +497,15 @@ fn quiet_after_halt(report: &RunReport) -> Result<(), String> {
                     "{remote_calls} calls to the replica after the halt"
                 ));
             }
-            Seen::Event(_) | Seen::Snapshot(_) | Seen::Oracle | Seen::Tick { .. } => {}
+            Seen::Event(_)
+            | Seen::Halt(_)
+            | Seen::Recovered(_)
+            | Seen::Snapshot(_)
+            | Seen::Oracle
+            | Seen::Tick { .. } => {}
         }
     }
-    if report.seen.iter().any(|s| matches!(s, Seen::Halt(_))) {
+    if report.seen.iter().any(stopped) {
         Ok(())
     } else {
         Err("the engine never halted".to_owned())
@@ -487,7 +525,7 @@ pub fn creds_revoked_mid_run() -> Scenario {
                 op: StoreOp::Upload,
             }),
         )],
-        vec![Expect::Halt(HaltCause::Credentials)],
+        vec![Expect::Stopped(HaltCause::Credentials), Expect::Recovered],
     );
     s.check = Some(quiet_after_halt);
     s
@@ -506,7 +544,7 @@ pub fn store_refuses_upload() -> Scenario {
                 status: 403,
             }),
         )],
-        vec![Expect::Halt(HaltCause::StoreRefused)],
+        vec![Expect::Stopped(HaltCause::StoreRefused), Expect::Recovered],
     );
     s.check = Some(quiet_after_halt);
     s
@@ -617,6 +655,7 @@ fn deleted_then_put_again(report: &RunReport) -> Result<(), String> {
             }
             Seen::Event(_)
             | Seen::Halt(_)
+            | Seen::Recovered(_)
             | Seen::Snapshot(_)
             | Seen::Oracle
             | Seen::Tick { .. } => {}
@@ -641,7 +680,11 @@ pub fn remote_bitrot_on_list_read() -> Scenario {
             ticks(SETTLE),
             vec![Op::Restore],
         ],
-        vec![Expect::Halt(HaltCause::RemoteCorrupt), Expect::Oracle],
+        vec![
+            Expect::Stopped(HaltCause::RemoteCorrupt),
+            Expect::Recovered,
+            Expect::Oracle,
+        ],
     )
 }
 
@@ -667,7 +710,7 @@ pub fn second_writer_mid_run() -> Scenario {
             ticks(SETTLE),
             vec![Op::Remote(RemoteOp::RemoveForeign), Op::Restore],
         ],
-        vec![Expect::Halt(HaltCause::ForeignWriter), Expect::Oracle],
+        vec![Expect::Stopped(HaltCause::ForeignWriter), Expect::Oracle],
     );
     s.check = Some(quiet_after_halt);
     s
@@ -699,7 +742,11 @@ pub fn bucket_rolled_back() -> Scenario {
             ticks(SETTLE),
             vec![Op::Restore],
         ],
-        vec![Expect::Halt(HaltCause::RemoteRegressed), Expect::Oracle],
+        vec![
+            Expect::Stopped(HaltCause::RemoteRegressed),
+            Expect::Recovered,
+            Expect::Oracle,
+        ],
     );
     s.check = Some(quiet_after_halt);
     s
@@ -775,8 +822,15 @@ fn staged_files_dropped(report: &RunReport) -> Result<(), String> {
     for seen in &report.seen {
         match seen {
             Seen::Halt(cause) => return Err(format!("halted: {cause:?}")),
+            Seen::Event(Event::Degraded { cause, .. }) => {
+                return Err(format!("degraded: {cause:?}"));
+            }
             Seen::Event(Event::Resnapshot(SnapshotCause::LocalTipUnreadable)) => lost = true,
-            Seen::Event(_) | Seen::Snapshot(_) | Seen::Oracle | Seen::Tick { .. } => {}
+            Seen::Event(_)
+            | Seen::Recovered(_)
+            | Seen::Snapshot(_)
+            | Seen::Oracle
+            | Seen::Tick { .. } => {}
         }
     }
     if lost {
@@ -926,23 +980,88 @@ pub fn reacquire_fails_after_checkpoint() -> Scenario {
     )
 }
 
-/// One bit of a committed frame that is not yet synced flips on disk.
+/// One bit of a committed frame that is not yet synced flips on disk, and
+/// stays flipped. Where the responses keep trying, the sync lane stays
+/// degraded to the end: nothing past the frame is staged, and no snapshot is.
 #[must_use]
 pub fn bit_flip_in_committed_frame() -> Scenario {
     let mut s = injected(
         "bit_flip_in_committed_frame",
-        vec![commit(3, false), Op::Wal(WalOp::FlipLastFrameBit)],
-        vec![Expect::Halt(HaltCause::WalCorrupt)],
+        vec![
+            commit(3, false),
+            Op::Wal(WalOp::FlipLastFrameBit),
+            Op::RequestSnapshot,
+        ],
+        vec![Expect::Stopped(HaltCause::WalCorrupt)],
+    );
+    s.check = Some(nothing_staged_past_the_corrupt_frame);
+    s
+}
+
+/// As [`bit_flip_in_committed_frame`], and the bit flips back before the
+/// next commit: the frame verifies again and the lane recovers.
+#[must_use]
+pub fn bit_flip_in_committed_frame_healed() -> Scenario {
+    let mut s = injected(
+        "bit_flip_in_committed_frame_healed",
+        vec![
+            commit(3, false),
+            Op::Wal(WalOp::FlipLastFrameBit),
+            Op::Tick,
+            Op::Tick,
+            Op::Wal(WalOp::FlipLastFrameBit),
+        ],
+        vec![Expect::Stopped(HaltCause::WalCorrupt), Expect::Recovered],
     );
     s.check = Some(quiet_after_halt);
     s
+}
+
+/// The halt is quiet; or, where the responses keep trying, from the first
+/// degraded sync to the end no file is staged at all: not the corrupt
+/// frame's transaction, not one after it, and not a snapshot.
+fn nothing_staged_past_the_corrupt_frame(report: &RunReport) -> Result<(), String> {
+    if report.seen.iter().any(stopped) {
+        return quiet_after_halt(report);
+    }
+    let mut degraded = false;
+    for seen in &report.seen {
+        match seen {
+            Seen::Event(Event::Degraded {
+                cause: PersistentCause::WalCorrupt,
+                ..
+            }) => degraded = true,
+            Seen::Event(Event::Synced { files }) if degraded && *files > 0 => {
+                return Err("a file was staged past the corrupt frame".to_owned());
+            }
+            Seen::Snapshot(txid) if degraded => {
+                return Err(format!(
+                    "a snapshot at {txid} was staged past the corrupt frame"
+                ));
+            }
+            Seen::Recovered(lane) if degraded => {
+                return Err(format!("{lane:?} recovered while the frame is corrupt"));
+            }
+            Seen::Event(_)
+            | Seen::Halt(_)
+            | Seen::Recovered(_)
+            | Seen::Snapshot(_)
+            | Seen::Oracle
+            | Seen::Tick { .. } => {}
+        }
+    }
+    if degraded {
+        Ok(())
+    } else {
+        Err("the sync lane was never degraded".to_owned())
+    }
 }
 
 /// The WAL file is cut short below the committed end while the engine holds
 /// the lock.
 #[must_use]
 pub fn wal_truncated_externally_under_lock() -> Scenario {
-    let mut expect = vec![Expect::Halt(HaltCause::WalTruncated), Expect::Oracle];
+    let mut expect = vec![Expect::Stopped(HaltCause::WalTruncated), Expect::Oracle];
     let mut s = build(
         "wal_truncated_externally_under_lock",
         vec![
@@ -967,7 +1086,7 @@ pub fn wal_unlinked_mid_run() -> Scenario {
     let mut s = injected(
         "wal_unlinked_mid_run",
         vec![Op::EnvFault(EnvFault::UnlinkWal), commit(2, false)],
-        vec![Expect::Halt(HaltCause::WalUnlinked)],
+        vec![Expect::Stopped(HaltCause::WalUnlinked)],
     );
     s.check = Some(quiet_after_halt);
     s
@@ -994,7 +1113,7 @@ pub fn sigterm_during_upload() -> Scenario {
             ticks(SETTLE),
             vec![Op::Restore],
         ],
-        vec![Expect::Halt(HaltCause::Shutdown), Expect::Oracle],
+        vec![Expect::Stopped(HaltCause::Shutdown), Expect::Oracle],
     )
 }
 
@@ -1022,7 +1141,9 @@ fn one_clamp_no_fault(report: &RunReport) -> Result<(), String> {
     for seen in &report.seen {
         match seen {
             Seen::Event(Event::Clamped(_)) => clamps = clamps.saturating_add(1),
-            Seen::Event(Event::Retrying { .. }) | Seen::Halt(_) => faulted = true,
+            Seen::Event(Event::Retrying { .. } | Event::Degraded { .. })
+            | Seen::Halt(_)
+            | Seen::Recovered(_) => faulted = true,
             Seen::Event(_) | Seen::Snapshot(_) | Seen::Oracle | Seen::Tick { .. } => {}
         }
     }
@@ -1088,9 +1209,12 @@ fn repaired_key(report: &RunReport) -> Result<FileKey, String> {
             event: MaintainedEvent::Repaired(key),
             ..
         }) => Some(*key),
-        Seen::Event(_) | Seen::Halt(_) | Seen::Snapshot(_) | Seen::Oracle | Seen::Tick { .. } => {
-            None
-        }
+        Seen::Event(_)
+        | Seen::Halt(_)
+        | Seen::Recovered(_)
+        | Seen::Snapshot(_)
+        | Seen::Oracle
+        | Seen::Tick { .. } => None,
     });
     match (keys.next(), keys.next()) {
         (Some(key), None) => Ok(key),

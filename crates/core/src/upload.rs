@@ -18,7 +18,7 @@
 //! replica is corrupt. The read-back runs at boot and after an ambiguous commit
 //! only, so steady state makes no list and no read call. A listing is also
 //! never trusted to move the position backwards or past the local tip: either
-//! is a halt, not a guess.
+//! is a persistent fault for the actor's configured response, not a guess.
 //!
 //! Each staged file is streamed through the LTX decoder while it is copied. The
 //! bytes are written to an upload that no listing can see, and the upload is
@@ -164,7 +164,8 @@ pub fn plan_upload(state: &UploadState, local_tip: Option<Txid>) -> UploadPlan {
 /// # Errors
 /// [`UploadFailed`] with the state to continue from and the fault. A listing
 /// that shows the replica ahead of `local_tip` or behind what was confirmed, a
-/// staged file that is missing or fails verification: all halts by policy.
+/// staged file that is missing or fails verification: persistent faults
+/// (a second writer, a replica that went backwards) and `StagedLost`.
 pub async fn upload_next<L: ObjectStore, S: ObjectStore>(
     state: UploadState,
     staging: &L,

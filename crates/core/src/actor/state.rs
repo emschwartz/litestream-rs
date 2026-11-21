@@ -1,15 +1,16 @@
 //! What the actor is doing, and what each lane remembers between ticks.
 //!
 //! [`Phase`] is the one closed answer to "what is the actor doing". The lanes
-//! keep only what a later tick needs: a retry wait, the checkpoint gate, and
-//! when maintenance must list the replica again. None of it holds a borrow of
-//! the environment.
+//! keep only what a later tick needs: a retry wait, whether the run of
+//! failures behind it is a persistent one (the lane's [`Degraded`] state), the
+//! checkpoint gate, and when maintenance must list the replica again. None of
+//! it holds a borrow of the environment.
 
 use std::num::NonZeroU32;
 
 use lsr_ltx::{Timestamp, Txid};
 
-use crate::fault::{HaltCause, Next};
+use crate::fault::{HaltCause, Next, PersistentCause};
 use crate::maintain::MaintainState;
 
 /// What the actor is doing.
@@ -24,7 +25,8 @@ pub enum Phase {
         /// When work still left becomes [`HaltCause::Shutdown`].
         deadline: Timestamp,
     },
-    /// Stopped for a person: every later tick returns at once, with no I/O.
+    /// Stopped for a person, by a cause whose configured response is to stop
+    /// or by a drain's deadline: every later tick returns at once, with no I/O.
     Halted(HaltCause),
 }
 
@@ -47,9 +49,10 @@ impl Phase {
     }
 }
 
-/// The four kinds of work, each with its own retry wait.
+/// The five kinds of work, each with its own retry wait and its own degraded
+/// state: a failure in one lane holds no other.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Lane {
+pub enum Lane {
     /// Reading the WAL into staged files (and booting).
     Sync,
     /// The checkpoint protocol.
@@ -60,15 +63,40 @@ pub(super) enum Lane {
     Prune,
     /// Listing the replica for maintenance, and a failed job whose level
     /// keeps no wait of its own (a retention delete). A job whose level does
-    /// keep one waits there (R3), not here.
-    Maintain,
+    /// keep one waits there (R3), not here, but its persistent failure is
+    /// still this lane's degraded state.
+    Maintenance,
 }
 
-/// One lane's retry memory: how many failures in a row, and until when it waits.
+impl Lane {
+    /// Every lane, in priority order.
+    pub const ALL: [Self; 5] = [
+        Self::Sync,
+        Self::Checkpoint,
+        Self::Upload,
+        Self::Prune,
+        Self::Maintenance,
+    ];
+}
+
+/// A lane that met a persistent failure and keeps trying.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Degraded {
+    /// The newest failure's cause.
+    pub cause: PersistentCause,
+    /// When the lane first failed this way without a success between.
+    pub since: Timestamp,
+    /// Failures in a row, the first included.
+    pub retries: u32,
+}
+
+/// One lane's retry memory: how many failures in a row, until when it waits,
+/// and whether the run of failures is a persistent one.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Retry {
     attempts: Option<NonZeroU32>,
     until: Option<Timestamp>,
+    degraded: Option<(PersistentCause, Timestamp)>,
 }
 
 impl Retry {
@@ -100,7 +128,32 @@ impl Retry {
         until
     }
 
-    /// A success: the next failure starts from the first attempt.
+    /// Marks the lane degraded by `cause`; returns when the degradation began,
+    /// which a later failure of the same run keeps.
+    pub(super) fn degrade(&mut self, cause: PersistentCause, now: Timestamp) -> Timestamp {
+        let since = self.degraded.map_or(now, |(_, since)| since);
+        self.degraded = Some((cause, since));
+        since
+    }
+
+    /// The lane's degraded state, if it has one.
+    pub(super) fn degraded(&self) -> Option<Degraded> {
+        self.degraded.map(|(cause, since)| Degraded {
+            cause,
+            since,
+            retries: self.attempts.map_or(1, NonZeroU32::get),
+        })
+    }
+
+    /// Forgets the wait and the count, not a degradation: a maintenance job
+    /// whose level keeps its own wait failed.
+    pub(super) const fn clear_wait(&mut self) {
+        self.attempts = None;
+        self.until = None;
+    }
+
+    /// A success: the next failure starts from the first attempt, and the
+    /// lane is no longer degraded.
     pub(super) fn succeed(&mut self) {
         *self = Self::default();
     }
@@ -123,7 +176,7 @@ impl Lanes {
             Lane::Checkpoint => &self.checkpoint,
             Lane::Upload => &self.upload,
             Lane::Prune => &self.prune,
-            Lane::Maintain => &self.maintain,
+            Lane::Maintenance => &self.maintain,
         }
     }
 
@@ -133,7 +186,7 @@ impl Lanes {
             Lane::Checkpoint => &mut self.checkpoint,
             Lane::Upload => &mut self.upload,
             Lane::Prune => &mut self.prune,
-            Lane::Maintain => &mut self.maintain,
+            Lane::Maintenance => &mut self.maintain,
         }
     }
 
@@ -141,15 +194,16 @@ impl Lanes {
         self.get(lane).ready(now)
     }
 
+    /// Whether any lane is degraded.
+    pub(super) fn any_degraded(&self) -> bool {
+        Lane::ALL
+            .iter()
+            .any(|lane| self.get(*lane).degraded().is_some())
+    }
+
     /// Lets every passed wait go (W1: a passed deadline is work, not a wait).
     pub(super) fn expire(&mut self, now: Timestamp) {
-        for lane in [
-            Lane::Sync,
-            Lane::Checkpoint,
-            Lane::Upload,
-            Lane::Prune,
-            Lane::Maintain,
-        ] {
+        for lane in Lane::ALL {
             self.get_mut(lane).expire(now);
         }
     }

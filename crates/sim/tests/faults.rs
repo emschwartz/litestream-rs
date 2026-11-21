@@ -1,10 +1,12 @@
 //! One scenario per fault: each drives the engine into that fault and checks
 //! what was seen, with the oracle judging the replica.
 
+use lsr_core::{Event, HaltCause, Responses};
 use lsr_sim::Op;
+use lsr_sim::run::Seen;
 use lsr_sim::scenario::{
-    self, FaultKind, Scenario, clock_scenarios, fault_reason, fault_scenarios, names_fault,
-    run_scenario, window_scenarios,
+    self, FaultKind, Scenario, clock_scenarios, fault_reason, fault_scenarios, halt_of,
+    names_fault, persistent_of, run_scenario, window_scenarios,
 };
 
 fn run(make: fn() -> Scenario) {
@@ -39,6 +41,104 @@ fn every_fault_has_a_scenario_or_a_reason() {
             "{kind:?} has no scenario and no reason"
         );
     }
+}
+
+/// The scenarios of every fault whose policy can stop the engine or degrade
+/// a lane, the end of a drain included (it stops under every response).
+fn persistent_scenarios() -> Vec<(FaultKind, fn() -> Scenario)> {
+    FaultKind::ALL
+        .into_iter()
+        .filter(|kind| halt_of(*kind).is_some())
+        .flat_map(|kind| fault_scenarios(kind).iter().map(move |make| (kind, *make)))
+        .collect()
+}
+
+/// Under the strict responses every persistent fault's scenario stops the
+/// engine with its cause, as before the responses were configurable.
+#[test]
+fn under_strict_every_persistent_scenario_stops_with_its_cause() {
+    for (kind, make) in persistent_scenarios() {
+        let scenario = make().under(Responses::STRICT);
+        assert!(!scenario.keeps_trying(), "{}", scenario.name);
+        let report = run_scenario(&scenario);
+        let report = report.unwrap_or_else(|why| panic!("{why}"));
+        let want = halt_of(kind).unwrap();
+        assert!(
+            report.seen.iter().any(|seen| matches!(
+                seen,
+                Seen::Halt(cause) if std::mem::discriminant(cause) == std::mem::discriminant(&want)
+            )),
+            "{} did not stop with {want:?}",
+            scenario.name
+        );
+    }
+}
+
+/// Under the default responses every persistent fault but a second writer
+/// (and the end of a drain) degrades a lane instead, the oracle holds, and
+/// no engine halts (a drain may end at its deadline while the lane is
+/// degraded). A scenario whose fault clears expects the lane to
+/// recover; each such fault has at least one that does, except the ones the
+/// simulator cannot undo (a WAL cut short or unlinked stays so, and a page
+/// size change clears only through a restart).
+#[test]
+fn under_go_like_every_persistent_scenario_degrades_and_the_oracle_holds() {
+    let mut recovers = std::collections::BTreeSet::new();
+    for (kind, make) in persistent_scenarios() {
+        let scenario = make().under(Responses::GO_LIKE);
+        let report = run_scenario(&scenario).unwrap_or_else(|why| panic!("{why}"));
+        let Some(cause) = persistent_of(kind).filter(|c| !Responses::GO_LIKE.stops(*c)) else {
+            continue;
+        };
+        assert!(scenario.keeps_trying(), "{}", scenario.name);
+        assert!(
+            !report
+                .seen
+                .iter()
+                .any(|seen| matches!(seen, Seen::Halt(cause) if *cause != HaltCause::Shutdown)),
+            "{} halted",
+            scenario.name
+        );
+        assert!(
+            report.seen.iter().any(|seen| matches!(
+                seen,
+                Seen::Event(Event::Degraded { cause: got, .. })
+                    if std::mem::discriminant(got) == std::mem::discriminant(&cause)
+            )),
+            "{} degraded no lane by {cause:?}",
+            scenario.name
+        );
+        assert!(report.seen.contains(&Seen::Oracle), "{}", scenario.name);
+        if report
+            .seen
+            .iter()
+            .any(|seen| matches!(seen, Seen::Recovered(_)))
+        {
+            recovers.insert(format!("{kind:?}"));
+        }
+    }
+    for kind in [
+        FaultKind::StoreAuth,
+        FaultKind::StoreRefused,
+        FaultKind::RemoteCorrupt,
+        FaultKind::RemoteRegressed,
+        FaultKind::WalCorruptBelowCommitted,
+    ] {
+        assert!(
+            recovers.contains(&format!("{kind:?}")),
+            "{kind:?} never recovers"
+        );
+    }
+}
+
+/// A second writer stops the engine under the default responses too, and
+/// the cause stays: no later tick uploads or maintains.
+#[test]
+fn under_go_like_a_second_writer_stops_uploads_and_maintenance() {
+    let scenario = scenario::second_writer_mid_run().under(Responses::GO_LIKE);
+    assert!(!scenario.keeps_trying());
+    let report = run_scenario(&scenario).unwrap_or_else(|why| panic!("{why}"));
+    assert!(report.seen.contains(&Seen::Halt(HaltCause::ForeignWriter)));
 }
 
 #[test]
@@ -237,4 +337,14 @@ fn corrupt_l9_publish_then_power_loss() {
 #[test]
 fn corrupt_l0_publish_then_power_loss() {
     run(scenario::corrupt_l0_publish_then_power_loss);
+}
+
+#[test]
+fn vacuum_page_size_change_and_back() {
+    run(scenario::vacuum_page_size_change_and_back);
+}
+
+#[test]
+fn bit_flip_in_committed_frame_healed() {
+    run(scenario::bit_flip_in_committed_frame_healed);
 }

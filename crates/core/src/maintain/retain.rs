@@ -74,6 +74,15 @@
 //!    scan: stamps follow transactions, so the files after a young one are
 //!    young.
 //!
+//! The pin. While a lane of the actor is degraded, [`MaintainState::pin`]
+//! names the newest transaction the replica held when it began. Before the
+//! cut, every file of that transaction's restore chain (`plan` at it) leaves
+//! the candidates, and the self-check also asks that the pin still plans
+//! without the job. Everything else is retained by the rules above, so the
+//! history after the pin keeps rolling: the pin keeps one restore point, it
+//! never freezes every delete. A pin that does not plan on the listing is a
+//! hold.
+//!
 //! The candidates are sorted by key and cut to [`MAX_DELETE`]. Key order puts
 //! levels 0 to 8 before the snapshots, so the floor's snapshot is still listed
 //! while the files under it go, and the next call computes the same floor.
@@ -178,6 +187,15 @@ fn decide(
         return Ok(Retention::Wait { until });
     }
     let mut keys = found.keys;
+    if let Some(pin) = state.pin() {
+        match pinned_chain(inventory, pin) {
+            Ok(chain) => keys.retain(|key| !chain.contains(key)),
+            Err(hold) => return Ok(Retention::Held(hold)),
+        }
+        if keys.is_empty() {
+            return Ok(Retention::Wait { until });
+        }
+    }
     keys.sort();
     keys.truncate(MAX_DELETE);
     let Ok(job) = DeleteJob::new(keys) else {
@@ -185,7 +203,7 @@ fn decide(
         // nothing is the fail-closed answer if it ever is not.
         return Ok(Retention::Wait { until });
     };
-    Ok(match self_check(inventory, &job) {
+    Ok(match self_check(inventory, &job, state.pin()) {
         Some(hold) => Retention::Held(hold),
         None => Retention::Delete(job),
     })
@@ -519,7 +537,30 @@ fn covered(cover: &[(Txid, Txid)], info: &FileInfo) -> bool {
         .is_some_and(|(start, end)| *start <= range.min() && range.max() <= *end)
 }
 
-fn self_check(inventory: &Inventory, job: &DeleteJob) -> Option<Hold> {
+/// The keys of the pinned restore point's chain, or the hold when it does not plan.
+fn pinned_chain(inventory: &Inventory, pin: Txid) -> Result<Vec<FileKey>, Hold> {
+    match plan(inventory, KeyTarget::Txid(pin)) {
+        PlanOutcome::Plan(chain) if chain.reaches() == pin => {
+            Ok(chain.files().iter().map(|info| info.key).collect())
+        }
+        PlanOutcome::Plan(chain) => Err(Hold::PinUnplannable {
+            pin,
+            outcome: PlanOutcome::BeyondNewest {
+                requested: pin,
+                newest: chain.reaches(),
+            },
+        }),
+        outcome @ (PlanOutcome::EmptyReplica
+        | PlanOutcome::NoSnapshot { .. }
+        | PlanOutcome::BeyondNewest { .. }
+        | PlanOutcome::AsOfInsideFile { .. }
+        | PlanOutcome::Gap { .. }
+        | PlanOutcome::InsideFile { .. }
+        | PlanOutcome::MalformedSnapshot { .. }) => Err(Hold::PinUnplannable { pin, outcome }),
+    }
+}
+
+fn self_check(inventory: &Inventory, job: &DeleteJob, pin: Option<Txid>) -> Option<Hold> {
     let rest = Inventory::from_files(
         inventory
             .files()
@@ -533,6 +574,11 @@ fn self_check(inventory: &Inventory, job: &DeleteJob) -> Option<Hold> {
             outcome: PlanOutcome::EmptyReplica,
         });
     };
+    if let Some(pin) = pin
+        && let Err(hold) = pinned_chain(&rest, pin)
+    {
+        return Some(hold);
+    }
     match plan(&rest, KeyTarget::Latest) {
         PlanOutcome::Plan(chain) if Some(chain.reaches()) == inventory.newest() => None,
         // A plan that stops short of the newest transaction.

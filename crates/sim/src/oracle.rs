@@ -51,6 +51,8 @@ pub enum Bound {
     UploadBuffer,
     /// Ticks the engine took to drain its queue.
     DrainTicks,
+    /// Milliseconds a retry waits.
+    RetryWait,
 }
 
 impl fmt::Display for Bound {
@@ -65,6 +67,7 @@ impl fmt::Display for Bound {
             Self::ListCalls => "listing calls",
             Self::UploadBuffer => "upload buffer",
             Self::DrainTicks => "ticks to drain",
+            Self::RetryWait => "retry wait in milliseconds",
         };
         f.write_str(name)
     }

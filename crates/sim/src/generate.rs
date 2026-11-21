@@ -208,9 +208,9 @@ pub struct Weights {
     /// [`Op::Restore`].
     pub restore: u32,
     /// Whether a vacuum may change the page size. A replica prefix holds one
-    /// page size, so after a resize the engine halts at its next boot
-    /// (`HaltCause::PageSizeChanged`) and the states acknowledged before it
-    /// still restore; the runner expects that halt.
+    /// page size, so after a resize the engine's next boot stops, or keeps
+    /// retrying in a degraded state, on `PageSizeChanged`, and the states
+    /// acknowledged before it still restore; the runner expects either.
     pub vacuum_resizes: bool,
 }
 

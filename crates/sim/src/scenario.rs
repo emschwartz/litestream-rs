@@ -6,8 +6,18 @@
 //! matched, in order, against what the run recorded. [`scenario_of`] has one
 //! arm per [`SnapshotCause`] and no wildcard: a new cause does not compile
 //! until it names its scenarios.
+//!
+//! A scenario runs under one set of [`Responses`], the default unless
+//! [`Scenario::under`] says otherwise. [`Expect::Stopped`] reads that set: a
+//! cause whose response is to stop must halt the engine, one whose response
+//! is to keep trying must degrade a lane, and [`Expect::Recovered`] then asks
+//! for that lane to recover once the fault clears (it is skipped where the
+//! engine stops). So one list of expectations states both behaviours, and the
+//! fault tests run each persistent fault's scenarios under both presets.
 
-use lsr_core::{CheckpointMode, HaltCause, Level, MaintainedEvent, SnapshotCause};
+use lsr_core::{
+    CheckpointMode, HaltCause, Level, MaintainedEvent, PersistentCause, Responses, SnapshotCause,
+};
 use lsr_ltx::PageSize;
 
 use crate::generate::{EnvFault, MetaOp, Op, WalOp};
@@ -90,14 +100,25 @@ pub type Check = fn(&RunReport) -> Result<(), String>;
 pub enum Expect {
     /// An event.
     Event(EventMatch),
-    /// The engine halted for this cause.
-    Halt(HaltCause),
+    /// The engine met this cause: it halted for it where the scenario's
+    /// responses stop on it, and a lane is degraded by it where they keep
+    /// trying.
+    Stopped(HaltCause),
+    /// A lane that a kept-trying cause degraded recovered on the same
+    /// engine. Skipped where the scenario's responses stop.
+    Recovered,
     /// The oracle restored and judged the replica and found nothing wrong.
     Oracle,
 }
 
+/// Whether `responses` stop the engine on `cause`; the end of a drain always does.
+#[must_use]
+pub fn stops(responses: &Responses, cause: HaltCause) -> bool {
+    PersistentCause::of(cause).is_none_or(|cause| responses.stops(cause))
+}
+
 impl Expect {
-    fn matches(&self, seen: &Seen) -> bool {
+    fn matches(&self, seen: &Seen, responses: &Responses) -> bool {
         use lsr_core::Event;
         match (self, seen) {
             (Self::Event(EventMatch::Booted(want)), Seen::Event(Event::Booted { cause })) => {
@@ -124,9 +145,12 @@ impl Expect {
                     ..
                 }),
             ) => key.level() == *want,
-            (Self::Halt(want), Seen::Halt(got)) => want == got,
-            (Self::Oracle, Seen::Oracle) => true,
-            (Self::Event(_) | Self::Halt(_) | Self::Oracle, _) => false,
+            (Self::Stopped(want), Seen::Halt(got)) => stops(responses, *want) && want == got,
+            (Self::Stopped(want), Seen::Event(Event::Degraded { cause, .. })) => {
+                !stops(responses, *want) && *want == HaltCause::from(*cause)
+            }
+            (Self::Recovered, Seen::Recovered(_)) | (Self::Oracle, Seen::Oracle) => true,
+            (Self::Event(_) | Self::Stopped(_) | Self::Recovered | Self::Oracle, _) => false,
         }
     }
 }
@@ -145,6 +169,26 @@ pub struct Scenario {
     /// A judgment of the whole run, for what no single event shows: a call
     /// that must not happen, an order of calls.
     pub check: Option<Check>,
+    /// What each persistent fault does in this run.
+    pub responses: Responses,
+}
+
+impl Scenario {
+    /// The same scenario under other responses.
+    #[must_use]
+    pub const fn under(mut self, responses: Responses) -> Self {
+        self.responses = responses;
+        self
+    }
+
+    /// Whether the scenario's persistent fault keeps a lane trying under its
+    /// responses.
+    #[must_use]
+    pub fn keeps_trying(&self) -> bool {
+        self.expect
+            .iter()
+            .any(|want| matches!(want, Expect::Stopped(cause) if !stops(&self.responses, *cause)))
+    }
 }
 
 /// Runs a scenario and matches its expectations.
@@ -155,7 +199,11 @@ pub struct Scenario {
 pub fn run_scenario(scenario: &Scenario) -> Result<RunReport, String> {
     let opts = Opts {
         record: true,
-        allow_halt: scenario.expect.iter().any(|e| matches!(e, Expect::Halt(_))),
+        allow_halt: scenario
+            .expect
+            .iter()
+            .any(|e| matches!(e, Expect::Stopped(_))),
+        responses: scenario.responses,
         ..Opts::default()
     };
     // The failure's own replay line names the seed's random history, which
@@ -169,8 +217,14 @@ pub fn run_scenario(scenario: &Scenario) -> Result<RunReport, String> {
         )
     })?;
     let mut seen = report.seen.iter();
-    for (index, want) in scenario.expect.iter().enumerate() {
-        if !seen.any(|got| want.matches(got)) {
+    let keeps_trying = scenario.keeps_trying();
+    let wanted = scenario
+        .expect
+        .iter()
+        .enumerate()
+        .filter(|(_, want)| keeps_trying || **want != Expect::Recovered);
+    for (index, want) in wanted {
+        if !seen.any(|got| want.matches(got, &scenario.responses)) {
             return Err(format!(
                 "{}: expectation {index} ({want:?}) never showed; seen {:?}",
                 scenario.name, report.seen
@@ -239,6 +293,7 @@ fn build(name: &'static str, ops: Vec<Vec<Op>>, expect: Vec<Expect>) -> Scenario
         ops: ops.into_iter().flatten().collect(),
         expect,
         check: None,
+        responses: Responses::GO_LIKE,
     }
 }
 
@@ -467,9 +522,10 @@ pub fn wal_header_torn() -> Scenario {
 }
 
 /// A VACUUM into another page size while the engine is down. A replica
-/// prefix holds one page size, so the boot halts before it stages anything;
-/// the run then checks that nothing of the new size was staged or published
-/// and that every state from before the change still restores.
+/// prefix holds one page size, so the boot stops, or keeps retrying, before
+/// it stages anything; the run then checks that nothing of the new size was
+/// staged or published and that every state from before the change still
+/// restores.
 #[must_use]
 pub fn vacuum_page_size_change() -> Scenario {
     let changed = HaltCause::PageSizeChanged {
@@ -489,7 +545,43 @@ pub fn vacuum_page_size_change() -> Scenario {
             ticks(SETTLE),
             vec![Op::Restore],
         ],
-        vec![Expect::Halt(changed), Expect::Oracle],
+        vec![Expect::Stopped(changed), Expect::Oracle],
+    )
+}
+
+/// As [`vacuum_page_size_change`], then the operator vacuums back to the
+/// replica's page size: the restart that takes boots and replicates again.
+#[must_use]
+pub fn vacuum_page_size_change_and_back() -> Scenario {
+    let changed = HaltCause::PageSizeChanged {
+        was: PageSize::MIN,
+        now: PageSize::new(2048).unwrap_or(PageSize::MIN),
+    };
+    build(
+        "vacuum_page_size_change_and_back",
+        vec![
+            synced(),
+            vec![
+                Op::Vacuum {
+                    page_size: PageSize::new(2048),
+                },
+                commit(1, false),
+            ],
+            ticks(SETTLE),
+            vec![
+                Op::Vacuum {
+                    page_size: Some(PageSize::MIN),
+                },
+                commit(2, false),
+            ],
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        vec![
+            Expect::Stopped(changed),
+            Expect::Event(EventMatch::Booted(Some(CauseKind::GenerationChanged))),
+            Expect::Oracle,
+        ],
     )
 }
 

@@ -23,7 +23,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use lsr_core::conformance::block_on;
 use lsr_core::{
     Actor, ActorConfig, CheckpointConfig, CheckpointMode, Env, Event, L0Retention, Level,
-    Maintenance, SyncConfig, Tick, UploadConfig,
+    Maintenance, Responses, SyncConfig, Tick, UploadConfig,
 };
 use lsr_ltx::{Timestamp, Txid};
 use lsr_sqlite::Sqlite;
@@ -311,6 +311,8 @@ fn config() -> Result<ActorConfig, CompatError> {
         maintenance,
         retry_interval: Duration::from_millis(100),
         shutdown_grace: secs(10),
+        // A fixture run must fail loudly on any persistent fault, not degrade.
+        responses: Responses::STRICT,
     })
 }
 
