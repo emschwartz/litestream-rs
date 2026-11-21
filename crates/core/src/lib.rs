@@ -101,8 +101,7 @@ pub use sync::{
     sync_step,
 };
 pub use upload::{
-    Did, Ticked, UploadConfig, UploadFailed, UploadPlan, UploadState, Uploaded, plan_upload,
-    upload_next, upload_tick,
+    Did, UploadConfig, UploadFailed, UploadPlan, UploadState, Uploaded, plan_upload, upload_next,
 };
 pub use verify::{
     Compared, Depth, Finding, LevelSummary, LivePages, MAX_FINDINGS, Report, Severity, Verified,

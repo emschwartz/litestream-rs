@@ -85,21 +85,6 @@ pub enum Step {
     },
 }
 
-impl Step {
-    /// The same step with the clamp's last timestamp set (a snapshot has no position to carry it).
-    #[must_use]
-    pub fn with_prev_timestamp(self, prev: Option<Timestamp>) -> Self {
-        match self {
-            Self::Snapshot { after, cause, .. } => Self::Snapshot {
-                after,
-                prev_timestamp: prev,
-                cause,
-            },
-            Self::Incremental(_) | Self::NewGeneration(_) => self,
-        }
-    }
-}
-
 impl TryFrom<Recovered> for Step {
     type Error = HaltCause;
 
@@ -149,8 +134,6 @@ pub enum Synced {
         file: FileInfo,
         /// Where the step stopped.
         end: StepEnd,
-        /// Set when the clock read before the last timestamp used.
-        clamped: Option<Clamped>,
         /// How many WAL transactions the file covers (0 for a snapshot of a
         /// database the WAL holds nothing of): what the checkpoint policy's
         /// "was that only our own bump frame" question needs.
@@ -605,7 +588,7 @@ async fn run<R: Read + Seek, P: PageSource, L: ObjectStore>(
     let page_size = wal.header().page_size();
     let commit = commit_of(&scanned.map, db)?;
     let plan = plan_pages(&scanned.map, start.prev_commit, commit, page_size);
-    let (header, clamped) = stamp(&start, &scanned, wal, commit, cfg.node_id, now)?;
+    let header = stamp(&start, &scanned, wal, commit, cfg.node_id, now)?;
     let key = FileKey::new(Level::ZERO, TxidRange::single(start.txid));
     let (file, last_written) = stage(
         staging,
@@ -638,7 +621,6 @@ async fn run<R: Read + Seek, P: PageSource, L: ObjectStore>(
     Ok(Synced::Wrote {
         file,
         end,
-        clamped,
         txs: scanned.txs,
     })
 }
@@ -702,11 +684,11 @@ fn stamp<R: Read + Seek>(
     commit: NonZeroU32,
     node_id: u64,
     now: Timestamp,
-) -> Result<(Header, Option<Clamped>), Fault> {
+) -> Result<Header, Fault> {
     let salts = wal.header().salts();
     let size = scanned.cursor.next().get().saturating_sub(start.begin);
     let origin = WalOrigin::new(start.begin, size, salts.salt1, salts.salt2).ok_or(Fault::Bug)?;
-    let (timestamp, clamped) = clamp(start.prev_timestamp, now);
+    let (timestamp, _clamped) = clamp(start.prev_timestamp, now);
     let fields = header_fields(
         start.txid,
         commit,
@@ -715,8 +697,7 @@ fn stamp<R: Read + Seek>(
         timestamp,
         node_id,
     );
-    let header = Header::new(fields).map_err(|_err| Fault::Bug)?;
-    Ok((header, clamped))
+    Header::new(fields).map_err(|_err| Fault::Bug)
 }
 
 #[cfg(test)]

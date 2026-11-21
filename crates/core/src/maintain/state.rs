@@ -185,10 +185,7 @@ impl MaintainState {
             failures,
             RETRY_BASE,
         );
-        let until = Timestamp::from_unix_millis(
-            now.unix_millis()
-                .saturating_add(i64::try_from(wait.as_millis()).unwrap_or(i64::MAX)),
-        );
+        let until = now.saturating_add(wait);
         self.retries.insert(level, Retry { failures, until });
     }
 

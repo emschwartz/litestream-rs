@@ -34,19 +34,19 @@
 //! except a checksum mismatch: the store may hold wrong bytes under the key, so
 //! the state stays, the key is deleted (best effort, so readers do not see the
 //! bad tip while the retry is pending) and the same key is written again.
-//! Core runs no timer: [`upload_tick`] tells the actor whether to step again.
+//! Core runs no timer: the actor steps [`upload_next`] up to its per-tick limit.
 
 use std::num::NonZeroU32;
 
 use lsr_ltx::{Decoder, Header, Txid, TxidRange};
 
-use crate::fault::{Fault, Next};
+use crate::fault::Fault;
 use crate::inventory::{Inventory, InventoryError};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::store::{ObjectStore, PageLimit, ReadLen, StoreError, Upload};
 
 /// How much of a staged file is read at once.
-const CHUNK: u32 = 256 * 1024;
+const CHUNK: ReadLen = ReadLen::or_chunk(256 * 1024);
 
 /// What this engine knows about the replica's newest transaction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -126,18 +126,6 @@ pub struct UploadFailed {
     pub fault: Fault,
 }
 
-/// A whole tick.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Ticked {
-    /// The state to plan from next.
-    pub state: UploadState,
-    /// How many files this tick committed.
-    pub put: u32,
-    /// `Now` when the tick stopped at its file budget with more staged,
-    /// otherwise `OnWalChange`.
-    pub next: Next,
-}
-
 fn staged_key(txid: Txid) -> FileKey {
     FileKey::new(Level::ZERO, TxidRange::single(txid))
 }
@@ -179,43 +167,6 @@ pub async fn upload_next<L: ObjectStore, S: ObjectStore>(
         }),
         UploadPlan::List => list_step(state, staging, remote, local_tip).await,
         UploadPlan::Upload(key) => put_step(state, staging, remote, key).await,
-    }
-}
-
-/// Steps until the plan is idle or `config` says the tick is full.
-///
-/// # Errors
-/// The first failed step; its state already includes what this tick confirmed.
-pub async fn upload_tick<L: ObjectStore, S: ObjectStore>(
-    mut state: UploadState,
-    config: UploadConfig,
-    staging: &L,
-    remote: &S,
-    local_tip: Option<Txid>,
-) -> Result<Ticked, UploadFailed> {
-    let mut put = 0_u32;
-    loop {
-        let full = config.files_per_tick.is_some_and(|cap| put >= cap.get());
-        if full && plan_upload(&state, local_tip) != UploadPlan::Idle {
-            return Ok(Ticked {
-                state,
-                put,
-                next: Next::Now,
-            });
-        }
-        let step = upload_next(state, staging, remote, local_tip).await?;
-        state = step.state;
-        match step.did {
-            Did::Nothing => {
-                return Ok(Ticked {
-                    state,
-                    put,
-                    next: Next::OnWalChange,
-                });
-            }
-            Did::Listed { .. } => {}
-            Did::Put(_) => put = put.saturating_add(1),
-        }
     }
 }
 
@@ -289,7 +240,7 @@ async fn tail_is_sound<L: ObjectStore, S: ObjectStore>(
         return Ok(true);
     };
     let after = tail.prev().map(TxidRange::single);
-    let limit = PageLimit::new(1).ok_or(Fault::Bug)?;
+    let limit = PageLimit::ONE;
     let page = staging
         .list(Level::ZERO, after, limit)
         .await
@@ -313,7 +264,7 @@ async fn same_bytes<L: ObjectStore, S: ObjectStore>(
     remote: &S,
     key: &FileKey,
 ) -> Result<bool, Fault> {
-    let len = ReadLen::new(CHUNK).ok_or(Fault::Bug)?;
+    let len = CHUNK;
     let mut offset = 0_u64;
     loop {
         let ours = staging
@@ -374,7 +325,7 @@ async fn decodes<S: ObjectStore>(
     key: &FileKey,
     store_fault: fn(&StoreError) -> Fault,
 ) -> Result<bool, Fault> {
-    let len = ReadLen::new(CHUNK).ok_or(Fault::Bug)?;
+    let len = CHUNK;
     let mut decoder = Decoder::new();
     let mut offset = 0_u64;
     loop {
@@ -563,7 +514,7 @@ async fn copy_verified<L: ObjectStore, S: ObjectStore>(
     key: &FileKey,
     upload: &mut Option<S::Upload>,
 ) -> Result<u64, PutError> {
-    let len = ReadLen::new(CHUNK).ok_or(PutError::Before(Fault::Bug))?;
+    let len = CHUNK;
     let mut decoder = Decoder::new();
     let mut held = Vec::new();
     let mut offset = 0_u64;

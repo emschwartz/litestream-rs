@@ -281,11 +281,6 @@ pub struct Actor {
     engine: Engine,
 }
 
-fn later(at: Timestamp, wait: Duration) -> Timestamp {
-    let millis = i64::try_from(wait.as_millis()).unwrap_or(i64::MAX);
-    Timestamp::from_unix_millis(at.unix_millis().saturating_add(millis))
-}
-
 /// Where a retry's wait is kept.
 #[derive(Clone, Copy, Debug)]
 enum Waiter {
@@ -548,7 +543,7 @@ impl Actor {
     /// own: `now` plus the configured shutdown grace.
     #[must_use]
     pub fn shutdown_deadline(&self, now: Timestamp) -> Timestamp {
-        later(now, self.kept.cfg.shutdown_grace)
+        now.saturating_add(self.kept.cfg.shutdown_grace)
     }
 
     /// Starts a drain that must finish by `deadline`. A drain already begun
@@ -644,7 +639,7 @@ impl Actor {
                 let interval = self.kept.cfg.retry_interval;
                 self.kept.lanes.get_mut(lane).fail(|attempt| {
                     let wait = backoff_wait(backoff, attempt, interval);
-                    later(now, wait)
+                    now.saturating_add(wait)
                 })
             }
         }

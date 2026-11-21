@@ -62,7 +62,7 @@ use crate::ltx_read::{LtxRead, ReadFault};
 use crate::store::{ObjectStore, PageLimit, ReadLen};
 
 /// How much of a staged file one read asks for while seeding.
-const SEED_READ: u32 = 1 << 20;
+const SEED_READ: ReadLen = ReadLen::CHUNK;
 
 /// A database-file page whose bytes are not the ones the table holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -231,7 +231,7 @@ async fn seed_file<L: ObjectStore>(
     key: &FileKey,
     table: &mut PageTable,
 ) -> Result<(), Fault> {
-    let chunk = ReadLen::new(SEED_READ).ok_or(Fault::Bug)?;
+    let chunk = SEED_READ;
     let mut pages = Vec::new();
     let mut read = LtxRead::new(*key, chunk);
     let verified: Result<_, ReadFault> = read

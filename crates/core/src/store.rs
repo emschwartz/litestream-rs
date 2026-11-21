@@ -42,12 +42,16 @@ impl PageLimit {
     /// The largest page as a limit; equals [`Self::MAX_RAW`] (pinned by a test).
     pub const MAX: Self = Self(NonZeroU16::MIN.saturating_add(999));
 
+    /// A page of one entry.
+    pub const ONE: Self = Self(NonZeroU16::MIN);
+
     /// Returns `None` for zero or above [`Self::MAX_RAW`].
     #[must_use]
-    pub fn new(raw: u16) -> Option<Self> {
-        NonZeroU16::new(raw)
-            .filter(|n| n.get() <= Self::MAX_RAW)
-            .map(Self)
+    pub const fn new(raw: u16) -> Option<Self> {
+        match NonZeroU16::new(raw) {
+            Some(n) if n.get() <= Self::MAX_RAW => Some(Self(n)),
+            Some(_) | None => None,
+        }
     }
 
     /// The limit as a count.
@@ -66,12 +70,29 @@ impl ReadLen {
     /// The largest read.
     pub const MAX_RAW: u32 = 16_777_216;
 
+    /// One mebibyte: the chunk a file is read in when nothing calls for
+    /// another size (pinned by a test).
+    pub const CHUNK: Self = Self(NonZeroU32::MIN.saturating_add(1_048_575));
+
     /// Returns `None` for zero or above [`Self::MAX_RAW`].
     #[must_use]
-    pub fn new(raw: u32) -> Option<Self> {
-        NonZeroU32::new(raw)
-            .filter(|n| n.get() <= Self::MAX_RAW)
-            .map(Self)
+    pub const fn new(raw: u32) -> Option<Self> {
+        match NonZeroU32::new(raw) {
+            Some(n) if n.get() <= Self::MAX_RAW => Some(Self(n)),
+            Some(_) | None => None,
+        }
+    }
+
+    /// `raw` as a length, or [`Self::CHUNK`] when it is not one. For a
+    /// module's own constant, so that a read size is a value fixed when the
+    /// crate is built and no call site has a failure to handle; a test pins
+    /// each such constant to the size it names.
+    #[must_use]
+    pub const fn or_chunk(raw: u32) -> Self {
+        match Self::new(raw) {
+            Some(len) => len,
+            None => Self::CHUNK,
+        }
     }
 
     /// The length as a byte count.
@@ -435,6 +456,11 @@ mod tests {
         assert_eq!(PageLimit::new(0), None);
         assert_eq!(PageLimit::new(1001), None);
         assert_eq!(PageLimit::new(1000).map(PageLimit::get), Some(1000));
+        assert_eq!(ReadLen::CHUNK.get(), 1 << 20);
+        assert_eq!(ReadLen::or_chunk(7).get(), 7);
+        assert_eq!(ReadLen::or_chunk(0), ReadLen::CHUNK);
+        assert_eq!(ReadLen::or_chunk(u32::MAX), ReadLen::CHUNK);
+        assert_eq!(PageLimit::ONE.get(), 1);
         assert_eq!(ReadLen::new(0), None);
         assert_eq!(ReadLen::new(16_777_217), None);
         assert_eq!(ReadLen::new(16_777_216).map(ReadLen::get), Some(16_777_216));

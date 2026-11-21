@@ -316,12 +316,8 @@ fn sink_fault(op: SinkOp) -> impl FnOnce(io::Error) -> RestoreError {
     move |source| RestoreError::Sink { op, source }
 }
 
-#[expect(
-    clippy::expect_used,
-    reason = "4 MiB is inside ReadLen's bound; a test pins it"
-)]
-fn chunk_len() -> ReadLen {
-    ReadLen::new(CHUNK_BYTES).expect("CHUNK_BYTES is within ReadLen::MAX_RAW")
+const fn chunk_len() -> ReadLen {
+    ReadLen::or_chunk(CHUNK_BYTES)
 }
 
 /// Rebuilds the database [target] names from [store] into [sink] and publishes it.

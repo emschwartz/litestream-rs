@@ -212,7 +212,6 @@ fn a_snapshot_takes_the_wal_pages_and_fills_the_rest_from_the_database() {
         synced,
         Synced::Wrote {
             end: StepEnd::Through(_),
-            clamped: None,
             ..
         }
     ));
@@ -766,7 +765,7 @@ fn a_corrupt_committed_frame_halts() {
 }
 
 #[test]
-fn a_clock_stepping_backwards_gets_an_equal_timestamp_and_one_clamped() {
+fn a_clock_stepping_backwards_gets_an_equal_timestamp() {
     let mut rig = Rig::new();
     commit(&rig.wal, &[1], 1);
     let position = position_of(rig.snapshot(1000));
@@ -774,16 +773,7 @@ fn a_clock_stepping_backwards_gets_an_equal_timestamp_and_one_clamped() {
     let synced = rig
         .step(Step::Incremental(position), &SyncConfig::default(), 500)
         .unwrap();
-    let Synced::Wrote { clamped, .. } = &synced else {
-        panic!("{synced:?}");
-    };
-    assert_eq!(
-        *clamped,
-        Some(Clamped {
-            prev: ts(1000),
-            now: ts(500)
-        })
-    );
+    assert!(matches!(synced, Synced::Wrote { .. }), "{synced:?}");
     assert_eq!(rig.files()[1].1.fields().timestamp, ts(1000));
 }
 

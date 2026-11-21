@@ -1279,3 +1279,9 @@ fn a_range_missing_from_this_wal_does_not_veto() {
         "{tip:?}"
     );
 }
+
+#[test]
+fn the_header_read_is_one_header_long() {
+    assert_eq!(HEADER_READ.get(), u64::try_from(HEADER_LEN).unwrap());
+    assert_eq!(TIP_READ.get(), 1 << 20);
+}

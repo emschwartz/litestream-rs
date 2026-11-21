@@ -832,10 +832,6 @@ impl<'a> Walk<'a> {
     }
 }
 
-#[expect(
-    clippy::expect_used,
-    reason = "4 MiB is inside ReadLen's bound; a test pins it"
-)]
-fn chunk_len() -> ReadLen {
-    ReadLen::new(CHUNK_BYTES).expect("CHUNK_BYTES is within ReadLen::MAX_RAW")
+const fn chunk_len() -> ReadLen {
+    ReadLen::or_chunk(CHUNK_BYTES)
 }

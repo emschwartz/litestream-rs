@@ -34,7 +34,7 @@ use lsr_wal::WalReader;
 use super::{Origin, TIP_READ, TipFile, TipView};
 use crate::fault::Fault;
 use crate::layout::{FileKey, Level};
-use crate::store::{ObjectStore, ReadLen, StoreError};
+use crate::store::{ObjectStore, StoreError};
 
 impl TipView {
     /// Reads the replica's level-0 file for `newest`, the replica's newest
@@ -52,7 +52,7 @@ impl TipView {
         newest: Txid,
     ) -> Result<Option<Self>, Fault> {
         let key = FileKey::new(Level::ZERO, TxidRange::single(newest));
-        let len = ReadLen::new(TIP_READ).ok_or(Fault::Bug)?;
+        let len = TIP_READ;
         let first = match remote.read(&key, 0, len).await {
             Ok(first) => first,
             Err(StoreError::NotFound { .. }) => return Ok(None),

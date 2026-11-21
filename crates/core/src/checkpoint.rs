@@ -38,7 +38,7 @@ use std::time::Duration;
 use lsr_ltx::Timestamp;
 use lsr_wal::{OpenError, WalHeader, WalReader};
 
-use crate::fault::{Clamped, Fault, Next, SnapshotCause};
+use crate::fault::{Fault, Next, SnapshotCause};
 use crate::layout::FileInfo;
 use crate::pages::PageTable;
 use crate::position::{Continuity, Position, ReadEpoch, SyncedThrough};
@@ -164,8 +164,7 @@ fn since(last: Timestamp, now: Timestamp) -> Duration {
 }
 
 fn after(last: Timestamp, wait: Duration) -> Timestamp {
-    let millis = i64::try_from(wait.as_millis()).unwrap_or(i64::MAX);
-    Timestamp::from_unix_millis(last.unix_millis().saturating_add(millis))
+    last.saturating_add(wait)
 }
 
 /// Go's priority ladder (`checkpointIfNeeded`, `db.go:1507-1594`).
@@ -358,7 +357,6 @@ impl Reached {
 pub struct Staged {
     reached: Reached,
     files: Vec<FileInfo>,
-    clamped: Vec<Clamped>,
 }
 
 impl Staged {
@@ -393,12 +391,6 @@ impl Staged {
     #[must_use]
     pub fn files(&self) -> &[FileInfo] {
         &self.files
-    }
-
-    /// Clock steps back the staged files were stamped around.
-    #[must_use]
-    pub fn clamped(&self) -> &[Clamped] {
-        &self.clamped
     }
 }
 
@@ -445,7 +437,6 @@ struct Protocol<'a, W, P, C, L> {
     now: Timestamp,
     good: Reached,
     files: Vec<FileInfo>,
-    clamped: Vec<Clamped>,
     run: Option<CheckpointRun>,
 }
 
@@ -514,11 +505,9 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_, 
             Synced::Wrote {
                 file,
                 end: StepEnd::Through(through),
-                clamped,
                 ..
             } => {
                 self.files.push(file);
-                self.clamped.extend(clamped);
                 through
             }
             Synced::Wrote {
@@ -648,7 +637,6 @@ pub async fn checkpoint<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectS
         now,
         good: Reached::Through(proof),
         files: Vec::new(),
-        clamped: Vec::new(),
         run: None,
     };
     let result = match mode {
@@ -658,7 +646,6 @@ pub async fn checkpoint<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectS
     let staged = Staged {
         reached: protocol.good,
         files: protocol.files,
-        clamped: protocol.clamped,
     };
     match result {
         Ok(outcome) => Ok(Checkpointed {

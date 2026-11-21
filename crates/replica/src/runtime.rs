@@ -98,8 +98,7 @@ pub(crate) fn millis_until(now: Timestamp, until: Timestamp) -> u64 {
 
 /// `at` plus `wait`, saturating.
 pub(crate) fn later(at: Timestamp, wait: Duration) -> Timestamp {
-    let millis = i64::try_from(wait.as_millis()).unwrap_or(i64::MAX);
-    Timestamp::from_unix_millis(at.unix_millis().saturating_add(millis))
+    at.saturating_add(wait)
 }
 
 /// The wall clock.

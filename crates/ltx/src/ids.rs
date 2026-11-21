@@ -146,6 +146,14 @@ impl Timestamp {
         self.0.checked_add(millis).map(Self)
     }
 
+    /// The instant `by` later, to the whole millisecond, stopping at
+    /// [`Self::MAX`]: a wait too long to hold never ends.
+    #[must_use]
+    pub fn saturating_add(self, by: Duration) -> Self {
+        let millis = i64::try_from(by.as_millis()).unwrap_or(i64::MAX);
+        Self(self.0.saturating_add(millis))
+    }
+
     /// The instant `by` earlier, to the whole millisecond, or `None` before
     /// the first instant a timestamp holds.
     #[must_use]
@@ -936,5 +944,11 @@ mod tests {
         assert_eq!(t.checked_add(Duration::MAX), None);
         assert_eq!(t.checked_sub(Duration::MAX), None);
         assert_eq!(first.checked_add(Duration::ZERO), Some(first));
+        assert_eq!(
+            t.saturating_add(ms(4_000)),
+            Timestamp::from_unix_millis(14_000)
+        );
+        assert_eq!(last.saturating_add(ms(1)), last);
+        assert_eq!(t.saturating_add(Duration::MAX), last);
     }
 }

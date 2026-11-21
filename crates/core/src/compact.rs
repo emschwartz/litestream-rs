@@ -317,13 +317,9 @@ struct Budget {
 }
 
 impl Budget {
-    #[expect(
-        clippy::expect_used,
-        reason = "1 MiB is inside ReadLen's bound; a test pins it"
-    )]
     fn standard() -> Self {
         Self {
-            chunk: ReadLen::new(CHUNK_BYTES).expect("CHUNK_BYTES is within ReadLen::MAX_RAW"),
+            chunk: ReadLen::or_chunk(CHUNK_BYTES),
             flush: usize::try_from(CHUNK_BYTES).unwrap_or(usize::MAX),
         }
     }

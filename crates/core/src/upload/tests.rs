@@ -11,10 +11,62 @@ use proptest::prelude::*;
 
 use super::*;
 use crate::conformance::block_on;
+use crate::fault::Next;
 use crate::fault::{Backoff, PersistentCause, Policy, policy};
 use crate::layout::StoredStamp;
 use crate::mem::{MemStore, MemUpload};
 use crate::store::{CorruptCause, Listing, StoreError, StoreOp};
+
+// The whole-tick loop the actor runs (`Actor::upload_unit`), as these tests
+// drive it: the uploader itself only steps.
+/// A whole tick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Ticked {
+    /// The state to plan from next.
+    state: UploadState,
+    /// How many files this tick committed.
+    put: u32,
+    /// `Now` when the tick stopped at its file budget with more staged,
+    /// otherwise `OnWalChange`.
+    next: Next,
+}
+
+/// Steps until the plan is idle or `config` says the tick is full.
+///
+/// # Errors
+/// The first failed step; its state already includes what this tick confirmed.
+async fn upload_tick<L: ObjectStore, S: ObjectStore>(
+    mut state: UploadState,
+    config: UploadConfig,
+    staging: &L,
+    remote: &S,
+    local_tip: Option<Txid>,
+) -> Result<Ticked, UploadFailed> {
+    let mut put = 0_u32;
+    loop {
+        let full = config.files_per_tick.is_some_and(|cap| put >= cap.get());
+        if full && plan_upload(&state, local_tip) != UploadPlan::Idle {
+            return Ok(Ticked {
+                state,
+                put,
+                next: Next::Now,
+            });
+        }
+        let step = upload_next(state, staging, remote, local_tip).await?;
+        state = step.state;
+        match step.did {
+            Did::Nothing => {
+                return Ok(Ticked {
+                    state,
+                    put,
+                    next: Next::OnWalChange,
+                });
+            }
+            Did::Listed { .. } => {}
+            Did::Put(_) => put = put.saturating_add(1),
+        }
+    }
+}
 
 fn txid(n: u64) -> Txid {
     Txid::new(n).unwrap()
@@ -977,4 +1029,9 @@ fn a_rejected_commit_deletes_the_key() {
     });
     let failed = failure(next(UploadState::At(None), &staging, &remote, 1));
     assert_eq!(failed.state, UploadState::At(None));
+}
+
+#[test]
+fn the_upload_reads_in_quarter_mebibyte_chunks() {
+    assert_eq!(CHUNK.get(), 256 * 1024);
 }

@@ -54,7 +54,10 @@ use crate::source::CommittedRead;
 use crate::store::{ObjectStore, PageLimit, ReadLen, StoreError};
 
 /// How much of the tip one store read asks for while it is verified.
-const TIP_READ: u32 = 1 << 20;
+const TIP_READ: ReadLen = ReadLen::CHUNK;
+
+/// A read of exactly one LTX header ([`HEADER_LEN`], pinned by a test).
+const HEADER_READ: ReadLen = ReadLen::or_chunk(100);
 
 /// Why a frame could not be had at a resume point.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -442,11 +445,10 @@ pub(crate) async fn read_header<S: ObjectStore>(
     key: &FileKey,
     fault: fn(&StoreError) -> Fault,
 ) -> Result<Option<Header>, Fault> {
-    let len = u32::try_from(HEADER_LEN).ok().and_then(ReadLen::new);
-    let Some(len) = len else {
-        return Err(Fault::Bug);
-    };
-    let bytes = store.read(key, 0, len).await.map_err(|err| fault(&err))?;
+    let bytes = store
+        .read(key, 0, HEADER_READ)
+        .await
+        .map_err(|err| fault(&err))?;
     Ok(<[u8; HEADER_LEN]>::try_from(bytes)
         .ok()
         .and_then(|raw| Header::decode(&raw).ok()))
@@ -461,9 +463,7 @@ async fn scan_pages<S: ObjectStore>(
     wanted: Option<PageNo>,
     expected: &BTreeMap<PageNo, PageChecksum>,
 ) -> Result<Option<TipPages>, Fault> {
-    let Some(chunk) = ReadLen::new(TIP_READ) else {
-        return Err(Fault::Bug);
-    };
+    let chunk = TIP_READ;
     let mut seen = TipPages {
         wanted: None,
         last: None,
