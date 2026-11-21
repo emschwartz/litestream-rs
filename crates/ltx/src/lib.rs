@@ -23,6 +23,7 @@ mod ids;
 mod index;
 mod order;
 mod page;
+mod time;
 mod trailer;
 
 pub use checksum::{DbChecksum, FileChecksum, PageChecksum};
@@ -38,10 +39,11 @@ pub mod testing {
 pub use error::{DecodeError, EncodeError, Section};
 pub use frame::FrameError;
 pub use header::{HEADER_LEN, Header, HeaderError, HeaderFields, WalOrigin};
-pub use ids::{ParseTxidError, TimeField, Timestamp, TimestampParseError, Txid, TxidRange};
+pub use ids::{ParseTxidError, Txid, TxidRange};
 pub use index::{INDEX_TAIL_LEN, IndexError};
 #[cfg(any(test, feature = "testing"))]
 pub use index::{IndexEntry, PageIndex, decode_frame};
 pub use order::OrderError;
 pub use page::{DbPages, PageNo, PageRef, PageSize, lock_page};
+pub use time::{TimeField, Timestamp, TimestampParseError};
 pub use trailer::{TRAILER_LEN, Trailer, TrailerError};

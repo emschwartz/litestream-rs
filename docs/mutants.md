@@ -26,7 +26,7 @@ nothing else would notice the helper being wrong.
 ## ltx
 
 Every mutant not listed below is caught or unviable (does not compile). Tests added for the first run's
-survivors: `tests/ltx/pins.rs`, the `tests` modules of `checksum.rs`, `encoder.rs`, `frame.rs`, `ids.rs`
+survivors: `tests/ltx/pins.rs`, the `tests` modules of `checksum.rs`, `encoder.rs`, `frame.rs`, `ids.rs`, `time.rs`
 and `page.rs`.
 
 Tally (581 generated, about 7 minutes at four jobs): first run 29 missed, 477 caught, 68 unviable, 7 timeouts;
