@@ -7,8 +7,8 @@
 //! - `go_config_and_meta_start_the_rust_sidecar_with_no_snapshot`: Go runs three databases from
 //!   one file, stops; `lsr replicate -config` starts on the file unchanged and each database's
 //!   next file is Go's position plus one, incremental, with no snapshot cause logged; then Go starts
-//!   again on what `lsr` left, the same way. The file carries Go keys v1 accepts only at their
-//!   off value, Go tuning knobs v1 warns about, and the `litestream-rs` section Go does not
+//!   again on what `lsr` left, the same way. The file carries Go keys litestream-rs accepts only at their
+//!   off value, Go tuning knobs litestream-rs warns about, and the `litestream-rs` section Go does not
 //!   define, so it shows both programs start on such a file.
 //! - `go_and_rust_sidecars_alternate_on_one_config_file`: the alternation run of
 //!   `alternation.rs` with Rust as the daemon on Go's config file, so both sides checkpoint
@@ -45,8 +45,8 @@ const COMMITS: u32 = 6;
 const UP: Duration = Duration::from_secs(30);
 
 /// The daemon config both programs read. Beside what replicates, it holds keys Go knows and
-/// v1 accepts only at their off value (`socket.enabled`, `mcp-addr`, `heartbeat-url`,
-/// `auto-recover`), Go tuning knobs v1 accepts with a warning (`shutdown-sync-interval`,
+/// litestream-rs accepts only at their off value (`socket.enabled`, `mcp-addr`, `heartbeat-url`,
+/// `auto-recover`), Go tuning knobs litestream-rs accepts with a warning (`shutdown-sync-interval`,
 /// `busy-timeout`), and the Rust-only section, which Go ignores. The application keeps
 /// `wal_autocheckpoint = 0` (`AppFixture`), which the section says.
 fn write_sidecar_config(path: &Path, fixtures: &[AppFixture]) {

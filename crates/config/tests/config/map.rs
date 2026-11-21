@@ -1,4 +1,4 @@
-//! From a loaded config to replicators: each key v1 honours against the Go line
+//! From a loaded config to replicators: each key litestream-rs honours against the Go line
 //! it copies, the refusals, and `dir` expansion (Go's directory tests in
 //! `cmd/litestream/main_test.go`, ported by scenario).
 
@@ -277,7 +277,7 @@ fn shutdown_sync_timeout_is_the_drain_grace_and_the_shared_deadline() {
 }
 
 /// Go's `validation.interval` is the scheduled verify's interval for every database; at zero
-/// or less Go starts no validation monitor (`store.go:268`), and neither does v1. The
+/// or less Go starts no validation monitor (`store.go:268`), and neither does litestream-rs. The
 /// replica-level `validation-interval` Go parses and never reads, so it changes nothing.
 #[test]
 fn validation_interval_is_the_scheduled_verify_s_and_zero_is_off() {
@@ -510,7 +510,7 @@ fn s3_refusals() {
     );
 }
 
-/// Go accepts the signing and MD5 query keys; v1 notes they change nothing.
+/// Go accepts the signing and MD5 query keys; litestream-rs notes they change nothing.
 /// `concurrency` is honoured, so it adds no note.
 #[test]
 fn no_effect_query_keys_are_noted() {
@@ -831,7 +831,7 @@ fn a_dir_that_finds_nothing_is_refused() {
     );
 }
 
-/// Go's `TestNewDBsFromDirectoryConfig_EmptyDirectoryWithWatch`: v1 refuses `watch`.
+/// Go's `TestNewDBsFromDirectoryConfig_EmptyDirectoryWithWatch`: litestream-rs refuses `watch`.
 #[test]
 fn watching_a_dir_is_refused_at_load() {
     let problems = refused(

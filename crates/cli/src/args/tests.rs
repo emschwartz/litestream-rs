@@ -431,7 +431,7 @@ fn parse_s3_forms() {
 
 /// The hosts Go's `s3.ParseHost` takes apart, read as the daemon reads them: an AWS
 /// virtual host gives the bucket and region, MinIO's `bucket.host:port` the bucket and an
-/// http endpoint in path style; a provider whose endpoint v1 does not derive is refused.
+/// http endpoint in path style; a provider whose endpoint litestream-rs does not derive is refused.
 #[test]
 fn go_s_host_spellings_read_as_the_daemon_reads_them() {
     let aws = s3("files --replica s3://my-bucket.s3.us-west-2.amazonaws.com/db");

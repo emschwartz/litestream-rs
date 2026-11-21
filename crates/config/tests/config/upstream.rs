@@ -75,7 +75,7 @@ fn the_credentials_uncommented_load() {
 }
 
 #[test]
-fn the_socket_example_enables_the_socket_which_v1_refuses() {
+fn the_socket_example_enables_the_socket_which_litestream_rs_refuses() {
     let problems = refused(&uncomment("# Control socket", "# dbs:"));
     assert_eq!(problems.len(), 1, "{problems:#?}");
     assert!(matches!(
@@ -85,7 +85,7 @@ fn the_socket_example_enables_the_socket_which_v1_refuses() {
 }
 
 #[test]
-fn the_database_examples_name_backends_v1_refuses() {
+fn the_database_examples_name_backends_litestream_rs_refuses() {
     let text = uncomment("# dbs:", "# ----");
     let problems = refused(&text);
     // The example sets `url` twice on one replica (s3, then nats) and uses sftp on the other.

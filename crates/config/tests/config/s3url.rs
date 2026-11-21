@@ -62,7 +62,7 @@ fn each_bad_shape_is_refused() {
             "s3://b/p?skipVerify=true",
             ReplicaProblem::QueryNotInV1 {
                 name: "skipVerify".to_owned(),
-                why: "v1 always verifies TLS certificates",
+                why: "litestream-rs always verifies TLS certificates",
             },
         ),
         (
