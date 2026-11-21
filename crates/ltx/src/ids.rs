@@ -505,6 +505,17 @@ impl TxidRange {
         (min <= max).then_some(Self { min, max })
     }
 
+    /// The range from the first transaction through `max`: what a snapshot of
+    /// the database at `max` covers. Never empty, since no id is below
+    /// [`Txid::MIN`].
+    #[must_use]
+    pub const fn from_start(max: Txid) -> Self {
+        Self {
+            min: Txid::MIN,
+            max,
+        }
+    }
+
     /// The range holding exactly one transaction.
     #[must_use]
     pub const fn single(txid: Txid) -> Self {
@@ -886,6 +897,15 @@ mod tests {
             TxidRange::single(txid(3)).min(),
             TxidRange::single(txid(3)).max()
         );
+    }
+
+    #[test]
+    fn a_range_from_the_start_is_every_transaction_through_its_end() {
+        for max in [Txid::MIN, txid(9), Txid::MAX] {
+            let range = TxidRange::from_start(max);
+            assert_eq!(Some(range), TxidRange::new(Txid::MIN, max));
+            assert_eq!((range.min(), range.max()), (Txid::MIN, max));
+        }
     }
 
     #[test]

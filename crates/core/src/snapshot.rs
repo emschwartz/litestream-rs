@@ -24,12 +24,12 @@
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 
-use lsr_ltx::{Header, HeaderFields, PageChecksum, PageSize, Timestamp, Txid, TxidRange};
+use lsr_ltx::{Header, HeaderFields, PageChecksum, PageSize, Timestamp};
 use lsr_wal::{CommittedEnd, OpenError, WalReader};
 use thiserror::Error;
 
 use crate::fault::Fault;
-use crate::layout::{FileInfo, FileKey, Level};
+use crate::layout::{FileInfo, FileKey};
 use crate::pages::PageTable;
 use crate::position::{Continuity, SyncedThrough};
 use crate::source::{CommittedRead, PageSource, WalSource};
@@ -66,15 +66,7 @@ pub async fn write_snapshot<W: WalSource, P: PageSource, S: ObjectStore>(
     remote: &S,
     now: Timestamp,
 ) -> Result<FileInfo, SnapshotFailed> {
-    let txid = proof.position().txid();
-    let Some(range) = TxidRange::new(Txid::MIN, txid) else {
-        let key = FileKey::new(Level::SNAPSHOT, TxidRange::single(txid));
-        return Err(SnapshotFailed {
-            fault: Fault::Bug,
-            key,
-        });
-    };
-    let key = FileKey::new(Level::SNAPSHOT, range);
+    let key = FileKey::snapshot(proof.position().txid());
     run(proof, &key, wal, db, pages, remote, now)
         .await
         .map_err(|fault| SnapshotFailed { fault, key })

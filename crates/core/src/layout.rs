@@ -200,6 +200,13 @@ impl FileKey {
         Self { level, range }
     }
 
+    /// The snapshot of the database at `txid`: level 9, transactions 1
+    /// through `txid`.
+    #[must_use]
+    pub const fn snapshot(txid: Txid) -> Self {
+        Self::new(Level::SNAPSHOT, TxidRange::from_start(txid))
+    }
+
     /// The compaction level.
     #[must_use]
     pub const fn level(&self) -> Level {
@@ -427,6 +434,18 @@ mod tests {
         assert!(
             early < late,
             "real stamps order by instant, whatever their origin"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_key_is_level_nine_from_the_first_transaction() {
+        for max in [1, 2, u64::MAX] {
+            let key = FileKey::snapshot(Txid::new(max).unwrap());
+            assert_eq!(key, FileKey::new(Level::SNAPSHOT, range(1, max)));
+        }
+        assert_eq!(
+            FileKey::snapshot(Txid::new(0x2a).unwrap()).to_string(),
+            "0009/0000000000000001-000000000000002a.ltx"
         );
     }
 

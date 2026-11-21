@@ -2,13 +2,14 @@ use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::num::NonZeroU32;
 
-use lsr_ltx::{Event, Header, PageNo, PageSize, ReadDecoder, Timestamp};
+use lsr_ltx::{Event, Header, PageNo, PageSize, ReadDecoder, Timestamp, Txid, TxidRange};
 use lsr_wal::Salts;
 use proptest::prelude::*;
 
 use super::*;
 use crate::conformance::block_on;
 use crate::fault::SnapshotCause;
+use crate::layout::Level;
 use crate::mem::MemStore;
 use crate::position::{Position, ReadEpoch};
 use crate::source::{FakeDb, FakeWal, SourceError, SourceOp};
