@@ -56,7 +56,9 @@ impl DatabaseSink for DigestSink<'_> {
         Ok(total)
     }
 
-    fn publish(self) -> io::Result<()> {
+    type PublishError = std::convert::Infallible;
+
+    fn publish(self) -> Result<(), Self::PublishError> {
         Ok(())
     }
 }
@@ -182,6 +184,7 @@ fn named_file(error: &RestoreError, last: FileKey) -> Option<FileKey> {
         RestoreError::Inventory(_)
         | RestoreError::NoPlan(_)
         | RestoreError::Store(_)
-        | RestoreError::Sink { .. } => None,
+        | RestoreError::Sink { .. }
+        | RestoreError::Publish { .. } => None,
     }
 }

@@ -791,7 +791,6 @@ fn a_sink_failing_at_each_operation_never_publishes() {
         (SinkOp::WritePage, 5),
         (SinkOp::Truncate, 0),
         (SinkOp::Truncate, 3),
-        (SinkOp::Publish, 0),
     ];
     for (op, nth) in cases {
         let store = four_file_replica();
@@ -803,6 +802,31 @@ fn a_sink_failing_at_each_operation_never_publishes() {
             "{op:?} {nth}: {result:?}"
         );
         assert_eq!(sink.published(), None, "{op:?} {nth}");
+    }
+}
+
+/// A publish that fails says what it left: nothing, or the database visible
+/// but not durable, and the restore error carries that answer.
+#[test]
+fn a_failed_publish_says_what_it_left_at_the_target() {
+    for left in [PublishLeft::Nothing, PublishLeft::VisibleNotDurable] {
+        let store = four_file_replica();
+        let sink = MemSink::new();
+        sink.fail_publish(left);
+        let result = block_on(restore(&store, RestoreTarget::Latest, sink.clone()));
+        let Err(RestoreError::Publish { left: got, source }) = result else {
+            panic!("{left:?}: {result:?}");
+        };
+        assert_eq!(got, left);
+        assert!(
+            source.downcast_ref::<MemPublishError>().is_some(),
+            "{source}"
+        );
+        assert_eq!(
+            sink.published().is_some(),
+            left == PublishLeft::VisibleNotDurable,
+            "{left:?}"
+        );
     }
 }
 

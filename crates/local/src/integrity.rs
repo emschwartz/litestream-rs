@@ -90,13 +90,15 @@ impl IntegrityFailure {
     pub const fn more(&self) -> bool {
         self.more
     }
+}
 
-    /// The failure inside an error [crate::FileSink::publish] returned, if
-    /// that is why it failed.
-    #[must_use]
-    pub fn in_io(err: &io::Error) -> Option<&Self> {
-        err.get_ref().and_then(|inner| inner.downcast_ref::<Self>())
-    }
+/// Why [check] did not pass: SQLite's verdict, or the check could not run.
+#[derive(Debug)]
+pub(crate) enum CheckError {
+    /// SQLite found the database invalid.
+    Refused(IntegrityFailure),
+    /// SQLite or the file system failed before a verdict.
+    Failed(io::Error),
 }
 
 /// A `file:` URI for an absolute path: every byte but the unreserved ones and
@@ -151,10 +153,9 @@ fn run_pragma(path: &Path, pragma: &str) -> rusqlite::Result<Vec<String>> {
 /// Runs [check] on the database at [path] and closes the connection.
 ///
 /// # Errors
-/// An [io::Error] of kind `InvalidData` wrapping an [IntegrityFailure] when
-/// SQLite finds the database invalid (found with [IntegrityFailure::in_io]);
-/// any other SQLite failure as an `Other` error.
-pub(crate) fn check(path: &Path, check: IntegrityCheck) -> io::Result<()> {
+/// [CheckError::Refused] when SQLite finds the database invalid; any other
+/// SQLite failure as [CheckError::Failed].
+pub(crate) fn check(path: &Path, check: IntegrityCheck) -> Result<(), CheckError> {
     let Some(pragma) = check.pragma() else {
         return Ok(());
     };
@@ -164,7 +165,7 @@ pub(crate) fn check(path: &Path, check: IntegrityCheck) -> io::Result<()> {
         }
         Ok(rows) => problems(&rows).map(str::to_owned).collect::<Vec<_>>(),
         Err(err) if err.sqlite_error_code().is_some_and(is_verdict) => vec![err.to_string()],
-        Err(err) => return Err(io::Error::other(err)),
+        Err(err) => return Err(CheckError::Failed(io::Error::other(err))),
     };
     let more = messages.len() > KEPT_MESSAGES;
     let mut messages = messages;
@@ -172,12 +173,9 @@ pub(crate) fn check(path: &Path, check: IntegrityCheck) -> io::Result<()> {
     if messages.is_empty() {
         messages.push("no rows and no \"ok\"".to_owned());
     }
-    Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        IntegrityFailure {
-            pragma,
-            messages,
-            more,
-        },
-    ))
+    Err(CheckError::Refused(IntegrityFailure {
+        pragma,
+        messages,
+        more,
+    }))
 }

@@ -26,7 +26,8 @@
 //! created meanwhile is never overwritten; fsync the directory; unlink the
 //! scratch; fsync the directory. Nothing but the sink's own scratch is ever
 //! removed. A failed publish says which way it left the target ([PublishError],
-//! found with [PublishError::in_io]): a step before the link leaves nothing at
+//! which is core's `PublishFailure`): a refused check
+//! ([PublishError::Integrity]) or a step before the link leaves nothing at
 //! the target ([PublishError::NotVisible]); a step after it leaves the target in
 //! place with its data already fsynced, but the name, or the scratch's removal,
 //! may not survive a crash ([PublishError::VisibleNotDurable]).
@@ -107,6 +108,8 @@ pub enum ClearError {
 /// One step of [FileSink::publish] after the SQLite check, for [PublishError].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PublishStep {
+    /// SQLite's check of the scratch, which could not run.
+    Check,
     /// The fsync of the scratch's data.
     SyncScratch,
     /// The check that the target and its sidecars are still absent.
@@ -126,7 +129,7 @@ impl PublishStep {
     #[must_use]
     pub const fn after_link(self) -> bool {
         match self {
-            Self::SyncScratch | Self::CheckAbsent | Self::Link => false,
+            Self::Check | Self::SyncScratch | Self::CheckAbsent | Self::Link => false,
             Self::SyncName | Self::RemoveScratch | Self::SyncRemoval => true,
         }
     }
@@ -135,6 +138,7 @@ impl PublishStep {
 impl std::fmt::Display for PublishStep {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
+            Self::Check => "running SQLite's check of the restored database",
             Self::SyncScratch => "syncing the restored data",
             Self::CheckAbsent => "checking the target is still absent",
             Self::Link => "linking the restored file into place",
@@ -145,9 +149,13 @@ impl std::fmt::Display for PublishStep {
     }
 }
 
-/// Why [FileSink::publish] failed after the SQLite check, by what it left at the target.
+/// Why [FileSink::publish] failed, by what it left at the target.
 #[derive(Debug, Error)]
 pub enum PublishError {
+    /// SQLite found the restored database invalid: nothing was made visible, and the
+    /// scratch is removed.
+    #[error("{0}; nothing was published")]
+    Integrity(IntegrityFailure),
     /// Nothing was made visible: the target and its sidecars are as they were.
     #[error("{} was not published ({step}): {source}", .target.display())]
     NotVisible {
@@ -189,37 +197,14 @@ impl PublishError {
             }
         }
     }
+}
 
-    /// The failure inside an error [FileSink::publish] returned, if that is why it failed.
-    #[must_use]
-    pub fn in_io(err: &io::Error) -> Option<&Self> {
-        err.get_ref().and_then(|inner| inner.downcast_ref::<Self>())
-    }
-
-    /// The failure inside an error [FileSink::publish] returned, owned; the error back
-    /// when it holds none.
-    ///
-    /// # Errors
-    /// `err` itself when it holds no [PublishError].
-    pub fn from_io(err: io::Error) -> Result<Self, io::Error> {
-        if Self::in_io(&err).is_none() {
-            return Err(err);
+impl lsr_core::PublishFailure for PublishError {
+    fn left(&self) -> lsr_core::PublishLeft {
+        match self {
+            Self::Integrity(_) | Self::NotVisible { .. } => lsr_core::PublishLeft::Nothing,
+            Self::VisibleNotDurable { .. } => lsr_core::PublishLeft::VisibleNotDurable,
         }
-        let kind = err.kind();
-        match err.into_inner().map(|inner| inner.downcast::<Self>()) {
-            Some(Ok(publish)) => Ok(*publish),
-            Some(Err(other)) => Err(io::Error::new(kind, other)),
-            None => Err(io::Error::from(kind)),
-        }
-    }
-
-    fn into_io(self) -> io::Error {
-        let kind = match &self {
-            Self::NotVisible { source, .. } | Self::VisibleNotDurable { source, .. } => {
-                source.kind()
-            }
-        };
-        io::Error::new(kind, self)
     }
 }
 
@@ -469,14 +454,20 @@ impl DatabaseSink for FileSink {
         Ok(total)
     }
 
+    type PublishError = PublishError;
+
     /// # Errors
-    /// An [IntegrityFailure] (found with [IntegrityFailure::in_io]) when SQLite finds the
-    /// database invalid, else a [PublishError] (found with [PublishError::in_io]) saying
-    /// whether the target is visible.
-    fn publish(mut self) -> io::Result<()> {
-        integrity::check(&self.scratch, self.integrity)?;
+    /// [PublishError::Integrity] when SQLite finds the database invalid, else the step
+    /// that failed and whether the target is visible.
+    fn publish(mut self) -> Result<(), PublishError> {
         let target = self.target.clone();
-        publish_steps(&mut self, &target).map_err(PublishError::into_io)?;
+        integrity::check(&self.scratch, self.integrity).map_err(|err| match err {
+            integrity::CheckError::Refused(failure) => PublishError::Integrity(failure),
+            integrity::CheckError::Failed(source) => {
+                PublishError::at(&target, PublishStep::Check, source)
+            }
+        })?;
+        publish_steps(&mut self, &target)?;
         self.published = true;
         Ok(())
     }
@@ -764,11 +755,20 @@ mod tests {
             let sidecar = dir.path().join(format!("db{suffix}"));
             fs::write(&sidecar, b"theirs").unwrap();
             let err = sink.publish().unwrap_err();
-            assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+            assert!(already_exists(&err), "{err}");
             assert!(err.to_string().contains(&format!("db{suffix}")), "{err}");
             assert_eq!(fs::read(&sidecar).unwrap(), b"theirs");
             assert_eq!(names(&dir), BTreeSet::from([format!("db{suffix}")]));
         }
+    }
+
+    /// A refusal before the link because something is already at a path.
+    fn already_exists(err: &PublishError) -> bool {
+        matches!(
+            err,
+            PublishError::NotVisible { step: PublishStep::CheckAbsent, source, .. }
+                if source.kind() == io::ErrorKind::AlreadyExists
+        )
     }
 
     #[test]
@@ -780,7 +780,7 @@ mod tests {
         fs::write(&target, b"someone else's").unwrap();
         fs::write(dir.path().join("db-wal"), b"their wal").unwrap();
         let err = sink.publish().unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert!(already_exists(&err), "{err}");
         assert_eq!(fs::read(&target).unwrap(), b"someone else's");
         // Their WAL belongs to their database: it is not ours to remove.
         assert_eq!(fs::read(dir.path().join("db-wal")).unwrap(), b"their wal");
@@ -905,12 +905,16 @@ mod tests {
 
     fn integrity_failure(result: Result<(), RestoreError>) -> IntegrityFailure {
         match result {
-            Err(RestoreError::Sink {
-                op: lsr_core::SinkOp::Publish,
-                source,
-            }) => IntegrityFailure::in_io(&source)
-                .unwrap_or_else(|| panic!("not an integrity failure: {source}"))
-                .clone(),
+            Err(RestoreError::Publish { source, .. }) => match source.downcast::<PublishError>() {
+                Ok(failure) => match *failure {
+                    PublishError::Integrity(failure) => failure,
+                    other @ (PublishError::NotVisible { .. }
+                    | PublishError::VisibleNotDurable { .. }) => {
+                        panic!("not an integrity failure: {other}")
+                    }
+                },
+                Err(source) => panic!("not the sink's error: {source}"),
+            },
             other => panic!("expected a refused publish, got {other:?}"),
         }
     }
@@ -1028,8 +1032,7 @@ mod tests {
         }
         sink.write_page(page(2, &[0xDE; 512])).unwrap();
         let err = sink.publish().unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        assert!(IntegrityFailure::in_io(&err).is_some(), "{err}");
+        assert!(matches!(err, PublishError::Integrity(_)), "{err}");
         assert!(names(&dir).is_empty());
     }
 

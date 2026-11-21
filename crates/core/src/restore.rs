@@ -49,7 +49,7 @@ mod mem_sink;
 mod tests;
 
 #[cfg(any(test, feature = "testing"))]
-pub use mem_sink::{Database, MemSink};
+pub use mem_sink::{Database, MemPublishError, MemSink};
 
 /// Plans attempted before the replica is called unstable.
 pub const MAX_ATTEMPTS: u8 = 3;
@@ -58,7 +58,9 @@ pub const MAX_ATTEMPTS: u8 = 3;
 /// page, whatever the file's size.
 const CHUNK_BYTES: u32 = 4 * 1024 * 1024;
 
-/// What a restore was doing to its sink when the sink failed.
+/// What a restore was doing to its sink when the sink failed. A failed
+/// publish is not one of these: it is [RestoreError::Publish], which says
+/// what the failure left at the target.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum SinkOp {
     /// [DatabaseSink::write_page].
@@ -69,8 +71,6 @@ pub enum SinkOp {
     Reset,
     /// [DatabaseSink::checksum].
     Checksum,
-    /// [DatabaseSink::publish].
-    Publish,
 }
 
 impl std::fmt::Display for SinkOp {
@@ -80,8 +80,39 @@ impl std::fmt::Display for SinkOp {
             Self::Truncate => "truncate",
             Self::Reset => "reset",
             Self::Checksum => "checksum",
-            Self::Publish => "publish",
         })
+    }
+}
+
+/// What a failed [DatabaseSink::publish] left at the target.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PublishLeft {
+    /// Nothing: the target and anything beside it are as they were.
+    Nothing,
+    /// A complete, verified database is visible at the target, but the
+    /// failed step means it may not survive a crash.
+    VisibleNotDurable,
+}
+
+impl std::fmt::Display for PublishLeft {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Nothing => "nothing was published",
+            Self::VisibleNotDurable => "the database is visible but may not survive a crash",
+        })
+    }
+}
+
+/// A sink's publish error: whatever detail it carries, it says what it left
+/// at the target.
+pub trait PublishFailure: std::error::Error + Send + Sync + 'static {
+    /// What the failed publish left at the target.
+    fn left(&self) -> PublishLeft;
+}
+
+impl PublishFailure for std::convert::Infallible {
+    fn left(&self) -> PublishLeft {
+        match *self {}
     }
 }
 
@@ -118,19 +149,19 @@ pub trait DatabaseSink {
     /// Whatever the underlying read reports.
     fn checksum(&mut self, pages: DbPages, page_size: PageSize) -> io::Result<DbChecksum>;
 
+    /// Why [Self::publish] failed, saying what it left at the target.
+    type PublishError: PublishFailure;
+
     /// Makes the database durable and visible. A failed durability step is
     /// never retried.
     ///
     /// # Errors
-    /// The step that failed. A failure does not mean nothing is visible: the
+    /// [Self::PublishError]. A failure does not mean nothing is visible: the
     /// last steps make the name durable after the database is in place, so a
     /// publish can fail with a complete, verified database visible at the
-    /// target that may not survive a crash. `io::Error` cannot say which, so
-    /// a sink that can tell the two apart carries the answer inside it
-    /// (`lsr-local`'s `PublishError`: `NotVisible` or `VisibleNotDurable`),
-    /// and a caller that must know asks the sink's own error type. A caller
-    /// that cannot must assume the target may exist.
-    fn publish(self) -> io::Result<()>;
+    /// target that may not survive a crash. The error's
+    /// [PublishFailure::left] says which.
+    fn publish(self) -> Result<(), Self::PublishError>;
 }
 
 /// Why a file in the chain cannot be applied.
@@ -170,7 +201,8 @@ pub enum FileFault {
     EmptyDatabase,
 }
 
-/// Why a restore failed. Nothing is published in any case.
+/// Why a restore failed. Nothing is published, except after a
+/// [Self::Publish] that says it left the database visible.
 #[derive(Debug, Error)]
 pub enum RestoreError {
     /// The replica could not be listed completely.
@@ -215,13 +247,23 @@ pub enum RestoreError {
         /// The file asked for twice.
         key: FileKey,
     },
-    /// The destination failed.
+    /// The destination failed before it was asked to publish.
     #[error("sink failed to {op}: {source}")]
     Sink {
         /// What the restore was doing.
         op: SinkOp,
         /// The I/O error.
         source: io::Error,
+    },
+    /// Every file verified and the database added up, but the sink's publish
+    /// failed.
+    #[error("publish failed, {left}: {source}")]
+    Publish {
+        /// What the failure left at the target.
+        left: PublishLeft,
+        /// The sink's own error ([DatabaseSink::PublishError]), for a caller
+        /// that knows the sink and wants its detail.
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
 }
 
@@ -330,7 +372,8 @@ const fn chunk_len() -> ReadLen {
 /// Rebuilds the database [target] names from [store] into [sink] and publishes it.
 ///
 /// # Errors
-/// [RestoreError]; the sink is dropped unpublished in every case.
+/// [RestoreError]; the sink is dropped unpublished in every case but a
+/// [RestoreError::Publish] that left the database visible.
 pub async fn restore<S: ObjectStore, K: DatabaseSink>(
     store: &S,
     target: RestoreTarget,
@@ -363,7 +406,10 @@ pub(crate) async fn restore_from<S: ObjectStore, K: DatabaseSink>(
         match applied {
             Ok((chain, last)) => {
                 verify_end_state(&mut sink, &last)?;
-                sink.publish().map_err(sink_fault(SinkOp::Publish))?;
+                sink.publish().map_err(|err| RestoreError::Publish {
+                    left: err.left(),
+                    source: Box::new(err),
+                })?;
                 return Ok(Restored {
                     reached: chain.reaches(),
                     page_size: last.header().page_size(),

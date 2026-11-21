@@ -336,9 +336,9 @@ fn a_publish_failure_says_whether_the_database_is_visible() {
             true,
         ),
     ] {
-        let failed = RestoreError::Sink {
-            op: SinkOp::Publish,
-            source: std::io::Error::other(error),
+        let failed = RestoreError::Publish {
+            left: lsr_core::PublishFailure::left(&error),
+            source: Box::new(error),
         };
         let cli = CliError::from(failed);
         assert!(matches!(cli, CliError::Publish(_)), "{cli:?}");

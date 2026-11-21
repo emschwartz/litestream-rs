@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use lsr_ltx::{DbChecksum, DbPages, PageChecksum, PageNo, PageRef, PageSize};
 
-use super::{DatabaseSink, SinkOp};
+use super::{DatabaseSink, PublishFailure, PublishLeft, SinkOp};
 
 /// A published database: sparse, zero pages implicit.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -56,6 +56,7 @@ struct State {
     pages: BTreeMap<u32, Vec<u8>>,
     calls: BTreeMap<SinkOp, usize>,
     faults: Vec<(SinkOp, usize)>,
+    publish_fault: Option<PublishLeft>,
     published: Option<Database>,
     /// One page of zeros to compare against: a std memcmp is far faster than
     /// a byte loop, which matters for a million-page database.
@@ -109,6 +110,12 @@ impl MemSink {
     /// Makes the nth call (0-based) of [op] fail, counted over the sink's life.
     pub fn fail_at(&self, op: SinkOp, nth: usize) {
         self.lock().faults.push((op, nth));
+    }
+
+    /// Makes the publish fail, leaving `left` at the target: with
+    /// [PublishLeft::VisibleNotDurable] the database is published all the same.
+    pub fn fail_publish(&self, left: PublishLeft) {
+        self.lock().publish_fault = Some(left);
     }
 
     /// How many times [op] has been called.
@@ -177,17 +184,34 @@ impl DatabaseSink for MemSink {
         Ok(total)
     }
 
-    fn publish(self) -> io::Result<()> {
+    type PublishError = MemPublishError;
+
+    fn publish(self) -> Result<(), MemPublishError> {
         let mut state = self.lock();
-        state.enter(SinkOp::Publish)?;
+        let fault = state.publish_fault;
+        if fault == Some(PublishLeft::Nothing) {
+            return Err(MemPublishError(PublishLeft::Nothing));
+        }
         let page_size = state
             .page_size
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "nothing was written"))?;
+            .ok_or(MemPublishError(PublishLeft::Nothing))?;
         state.published = Some(Database {
             page_size,
             page_count: state.page_count,
             pages: state.pages.clone(),
         });
-        Ok(())
+        fault.map_or(Ok(()), |left| Err(MemPublishError(left)))
+    }
+}
+
+/// [MemSink]'s publish failure: the one [MemSink::fail_publish] asked for, or
+/// a publish with nothing written.
+#[derive(Debug, thiserror::Error)]
+#[error("publish failed: {0}")]
+pub struct MemPublishError(PublishLeft);
+
+impl PublishFailure for MemPublishError {
+    fn left(&self) -> PublishLeft {
+        self.0
     }
 }

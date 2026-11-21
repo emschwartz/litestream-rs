@@ -92,9 +92,10 @@ pub use recover::{
     WalView, recover, recover_traced,
 };
 #[cfg(any(test, feature = "testing"))]
-pub use restore::{Database, MemSink};
+pub use restore::{Database, MemPublishError, MemSink};
 pub use restore::{
-    DatabaseSink, FileFault, MAX_ATTEMPTS, NoPlan, RestoreError, Restored, SinkOp, restore,
+    DatabaseSink, FileFault, MAX_ATTEMPTS, NoPlan, PublishFailure, PublishLeft, RestoreError,
+    Restored, SinkOp, restore,
 };
 pub use retry::{Class, RetryPolicy, RetryStats, Retrying, RetryingUpload, classify};
 pub use snapshot::{SnapshotFailed, write_snapshot};

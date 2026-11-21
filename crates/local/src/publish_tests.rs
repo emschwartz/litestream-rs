@@ -6,7 +6,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use lsr_core::DatabaseSink;
+use lsr_core::{DatabaseSink, PublishFailure, PublishLeft};
 use lsr_ltx::{PageNo, PageRef, PageSize};
 use tempfile::TempDir;
 
@@ -96,6 +96,7 @@ fn each_failed_step_says_whether_the_target_is_visible() {
                 );
                 assert_eq!(*at, step);
             }
+            PublishError::Integrity(_) => panic!("{step:?}: the steps run no check"),
         }
         assert_eq!(step.after_link(), fs.linked.get(), "{step:?}");
         assert!(err.to_string().contains("/t/db"), "{err}");
@@ -103,7 +104,7 @@ fn each_failed_step_says_whether_the_target_is_visible() {
 }
 
 #[test]
-fn a_publish_error_survives_the_trip_through_io_error() {
+fn a_publish_error_says_what_it_left() {
     let dir = TempDir::new().unwrap();
     let target = dir.path().join("db");
     let mut sink = FileSink::create(&target).unwrap();
@@ -113,16 +114,13 @@ fn a_publish_error_survives_the_trip_through_io_error() {
         .unwrap();
     fs::write(&target, b"someone else's").unwrap();
     let err = sink.publish().unwrap_err();
-    assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+    assert_eq!(err.left(), PublishLeft::Nothing);
     assert!(matches!(
-        PublishError::in_io(&err),
-        Some(PublishError::NotVisible {
+        &err,
+        PublishError::NotVisible {
             step: PublishStep::CheckAbsent,
+            source,
             ..
-        })
+        } if source.kind() == io::ErrorKind::AlreadyExists
     ));
-    let owned = PublishError::from_io(err).unwrap();
-    assert!(matches!(owned, PublishError::NotVisible { .. }), "{owned}");
-    let plain = PublishError::from_io(io::Error::other("unrelated")).unwrap_err();
-    assert_eq!(plain.to_string(), "unrelated");
 }

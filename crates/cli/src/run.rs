@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 
 use lsr_core::{
     AsOfPlanner, ContiguousChain, Depth, Inventory, InventoryError, KeyTarget, ObjectStore,
-    PlanOutcome, Report, ResolveError, RestoreError, RestoreTarget, Restored, Severity, SinkOp,
+    PlanOutcome, Report, ResolveError, RestoreError, RestoreTarget, Restored, Severity,
     VerifyError, plan, resolve, restore, verify,
 };
 use lsr_local::{
@@ -338,18 +338,13 @@ impl From<RestoreError> for CliError {
     fn from(err: RestoreError) -> Self {
         match err {
             RestoreError::NoPlan(none) => Self::NoPlan(none.outcome().clone()),
-            RestoreError::Sink {
-                op: SinkOp::Publish,
-                source,
-            } => match IntegrityFailure::in_io(&source) {
-                Some(failure) => Self::Integrity(failure.clone()),
-                None => match PublishError::from_io(source) {
-                    Ok(publish) => Self::Publish(publish),
-                    Err(source) => Self::Restore(RestoreError::Sink {
-                        op: SinkOp::Publish,
-                        source,
-                    }),
+            RestoreError::Publish { left, source } => match source.downcast::<PublishError>() {
+                Ok(publish) => match *publish {
+                    PublishError::Integrity(failure) => Self::Integrity(failure),
+                    other @ (PublishError::NotVisible { .. }
+                    | PublishError::VisibleNotDurable { .. }) => Self::Publish(other),
                 },
+                Err(source) => Self::Restore(RestoreError::Publish { left, source }),
             },
             other @ (RestoreError::Inventory(_)
             | RestoreError::Store(_)
@@ -450,7 +445,8 @@ pub fn exit_for_error(error: &CliError) -> Exit {
             | RestoreError::Store(_)
             | RestoreError::Unstable { .. }
             | RestoreError::StampRepeated { .. }
-            | RestoreError::Sink { .. } => Exit::Environment,
+            | RestoreError::Sink { .. }
+            | RestoreError::Publish { .. } => Exit::Environment,
         },
         CliError::AfterClearing { source, .. } => exit_for_error(source),
         CliError::Daemon(error) => daemon_exit(error),
