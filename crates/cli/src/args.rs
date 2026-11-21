@@ -224,6 +224,10 @@ pub enum Command {
     Files(FilesArgs),
     /// Replicate a live database until a signal stops it.
     Replicate(ReplicateArgs),
+    /// Go's `replicate` daemon: the arguments after `replicate`, read by `lsr-sidecar`.
+    Daemon(Vec<String>),
+    /// `lsr config check <file>`.
+    ConfigCheck(PathBuf),
     /// Print the help text.
     Help,
     /// Print the version.
@@ -246,16 +250,25 @@ pub const REPLICATE_USAGE: &str = "lsr replicate <db> <replica>";
 /// One line for the help text.
 pub const REPLICATE_SUMMARY: &str = "replicate a live database to a directory or an s3:// URL until SIGINT, SIGTERM or SIGHUP, then sync what is committed and stop";
 
-/// `<db> <replica>`, nothing else.
+/// The daemon's usage line, for the help text.
+pub const DAEMON_USAGE: &str =
+    "lsr replicate [-config <file>] [Go's replicate flags] [DB_PATH REPLICA_URL]";
+
+/// One line for the help text.
+pub const DAEMON_SUMMARY: &str = "Go's replicate daemon: every database in litestream.yml (default $LITESTREAM_CONFIG, else /etc/litestream.yml), until a signal; lsr replicate -h lists the flags";
+
+/// `lsr config check`'s usage line.
+pub const CONFIG_CHECK_USAGE: &str = "lsr config check <file>";
+
+/// One line for the help text.
+pub const CONFIG_CHECK_SUMMARY: &str = "read a Go litestream.yml as the daemon would and print every refusal and warning; touches no database or bucket";
+
+/// `lsr replicate`: two plain arguments are the one-database form; anything else, flags or
+/// no arguments, is the daemon.
 fn parse_replicate(rest: &[String]) -> Result<Command, UsageError> {
-    if rest.iter().any(|arg| is_help(arg)) {
-        return Ok(Command::Help);
-    }
-    if let Some(flag) = rest.iter().find(|arg| arg.starts_with('-') && *arg != "-") {
-        return Err(UsageError::UnknownFlag {
-            command: "replicate",
-            flag: flag.clone(),
-        });
+    let flagless = !rest.iter().any(|arg| arg.starts_with('-') && *arg != "-");
+    if !flagless || rest.is_empty() {
+        return Ok(Command::Daemon(rest.to_vec()));
     }
     let [database, replica] = rest else {
         return Err(UsageError::ReplicateArguments { found: rest.len() });
@@ -264,6 +277,24 @@ fn parse_replicate(rest: &[String]) -> Result<Command, UsageError> {
         database: PathBuf::from(database),
         replica: replica_of(replica)?,
     }))
+}
+
+/// `config check <file>`.
+fn parse_config(rest: &[String]) -> Result<Command, UsageError> {
+    match rest {
+        [check, file] if check == "check" && !is_help(file) => {
+            Ok(Command::ConfigCheck(PathBuf::from(file)))
+        }
+        [check, ..] if check == "check" && rest.iter().any(|a| is_help(a)) => Ok(Command::Help),
+        [check, ..] if check == "check" => Err(UsageError::ConfigCheckArguments {
+            found: rest.len().saturating_sub(1),
+        }),
+        [] => Err(UsageError::NoCommand),
+        [other, ..] if is_help(other) => Ok(Command::Help),
+        [other, ..] => Err(UsageError::UnknownCommand {
+            name: format!("config {other}"),
+        }),
+    }
 }
 
 /// A replica named on its own: a directory, or an `s3://` URL with its settings in the query.
@@ -445,6 +476,15 @@ pub enum UsageError {
         REPLICATE_USAGE
     )]
     ReplicateArguments {
+        /// How many were given.
+        found: usize,
+    },
+    /// `lsr config check` takes exactly one file.
+    #[error(
+        "config check takes one file, not {found} arguments: {}",
+        CONFIG_CHECK_USAGE
+    )]
+    ConfigCheckArguments {
         /// How many were given.
         found: usize,
     },
@@ -665,6 +705,7 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
         "verify" => CommandName::Verify,
         "files" => CommandName::Files,
         "replicate" => return parse_replicate(args.get(1..).unwrap_or_default()),
+        "config" => return parse_config(args.get(1..).unwrap_or_default()),
         other => {
             return Err(UsageError::UnknownCommand {
                 name: other.to_owned(),

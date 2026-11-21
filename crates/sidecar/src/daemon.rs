@@ -1,0 +1,462 @@
+//! One process, many databases: a replicator per database, a waiter for
+//! databases that do not exist yet, and one drain at the end.
+//!
+//! **Start.** In config order, per database: open its store; with
+//! `-restore-if-db-not-exists` (or the key) and no file, restore the newest state,
+//! a replica with no files being Go's "no backup found, starting fresh"; then
+//! `Replicator::start`, which returns once the read transaction pins the WAL. A
+//! database that fails any of these is logged and left out; the others keep
+//! running (Go exits instead), and the exit code says so at the end.
+//!
+//! **Waiting.** A database whose file does not exist yet is checked again every
+//! `monitor-interval` by one waiter thread, which starts it once the file appears
+//! (Go `db.go:611-614`). It looks with `metadata`, which opens no descriptor.
+//!
+//! **Stop.** The first SIGINT, SIGTERM or SIGHUP (or, with `-once`, the start
+//! finishing) ends the waiter and asks every replicator to stop within what is
+//! left of one deadline, `shutdown-sync-timeout` from the signal: all drain at
+//! once, so N databases take the budget once, not N times (Go closes them in
+//! turn). A second signal cuts every drain to nothing. Each database's outcome is
+//! one log line.
+
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::thread::JoinHandle;
+use std::time::Duration;
+
+use lsr_config::{DbPlan, Plan, ReplicaPlan};
+use lsr_core::{Clock, PlanOutcome, RestoreError as CoreRestoreError};
+use lsr_replica::{DynStore, Replicator, RestoreError, Runtime, Stopped, restore_if_missing};
+use lsr_store_fs::FsStore;
+use lsr_store_s3::{CredentialChain, S3Store};
+
+use crate::logging::{DbEvents, Logger, Value};
+use crate::signals;
+
+/// How one database ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum End {
+    /// Its replicator stopped this way.
+    Stopped(Stopped),
+    /// It never started: its store, restore or start failed.
+    DidNotStart,
+    /// Its file never appeared.
+    NeverAppeared,
+}
+
+/// Every database's end, in config order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Finished {
+    /// Each database and how it ended.
+    pub dbs: Vec<(PathBuf, End)>,
+}
+
+impl Finished {
+    /// Whether everything committed reached its replica: every replicator drained, none
+    /// failed to start. A database that never appeared had nothing to replicate.
+    #[must_use]
+    pub fn clean(&self) -> bool {
+        self.dbs.iter().all(|(_, end)| match end {
+            End::Stopped(Stopped::Drained { .. }) | End::NeverAppeared => true,
+            End::Stopped(
+                Stopped::DeadlineReached { .. } | Stopped::Stopped(_) | Stopped::Gone(_),
+            )
+            | End::DidNotStart => false,
+        })
+    }
+}
+
+/// Where one database stands.
+enum State {
+    Waiting,
+    Running(Replicator),
+    Failed,
+}
+
+struct Slot {
+    plan: DbPlan,
+    store: Option<Arc<dyn DynStore>>,
+    restore: bool,
+    state: State,
+    /// The last start failure logged, so a retried database logs each error once.
+    last_error: Option<String>,
+}
+
+/// Why a start failed: the log message and the error.
+struct Failure {
+    msg: &'static str,
+    error: String,
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    // Each critical section leaves plain data behind.
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Every replicator started so far, for a second signal to cut.
+#[derive(Clone, Debug, Default)]
+pub struct Started(Arc<Mutex<Vec<Replicator>>>);
+
+impl Started {
+    fn add(&self, replicator: &Replicator) {
+        lock(&self.0).push(replicator.clone());
+    }
+
+    /// Cuts every drain to nothing.
+    pub fn cut(&self) {
+        for replicator in lock(&self.0).iter() {
+            drop(replicator.stop(Duration::ZERO));
+        }
+    }
+}
+
+/// The daemon over a plan.
+pub struct Daemon {
+    log: Arc<Logger>,
+    clock: Arc<dyn Clock>,
+    started: Started,
+    grace: Duration,
+    slots: Arc<Mutex<Vec<Slot>>>,
+}
+
+impl std::fmt::Debug for Daemon {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Daemon")
+            .field("grace", &self.grace)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Daemon {
+    /// Opens every store and starts every database that exists.
+    #[must_use]
+    pub fn start(plan: &Plan, restore_all: bool, log: Arc<Logger>, started: Started) -> Self {
+        let daemon = Self {
+            log,
+            clock: Runtime::system().clock,
+            started,
+            grace: plan.shutdown_sync_timeout(),
+            slots: Arc::new(Mutex::new(Vec::new())),
+        };
+        if plan.dbs().is_empty() {
+            daemon
+                .log
+                .error("no databases specified in configuration", &[]);
+        }
+        for db in plan.dbs() {
+            let restore = db.restore_if_missing() || (restore_all && !db.from_dir());
+            let slot = daemon.open(db.clone(), restore);
+            lock(&daemon.slots).push(slot);
+        }
+        daemon
+    }
+
+    fn open(&self, plan: DbPlan, restore: bool) -> Slot {
+        let path = plan.path().to_owned();
+        let store = match open_store(plan.replica()) {
+            Ok(store) => Some(store),
+            Err(why) => {
+                let fields = [("path", path.as_path().into()), ("error", why.into())];
+                self.log.error("cannot open replica", &fields);
+                None
+            }
+        };
+        let mut slot = Slot {
+            plan,
+            store,
+            restore,
+            state: State::Failed,
+            last_error: None,
+        };
+        if slot.store.is_some() {
+            match self.try_start(&slot, true) {
+                Ok(state) => slot.state = state,
+                Err(failure) => self.failed(&mut slot, failure, false),
+            }
+        }
+        slot
+    }
+
+    /// Starts one database if its file exists; `first` logs the wait the first time.
+    fn try_start(&self, slot: &Slot, first: bool) -> Result<State, Failure> {
+        let path = slot.plan.path();
+        let Some(store) = &slot.store else {
+            return Ok(State::Failed);
+        };
+        if slot.restore && !exists(path) {
+            self.restore(path, store)?;
+        }
+        if !exists(path) {
+            if first {
+                self.log
+                    .info("waiting for database", &[("path", path.into())]);
+            }
+            return Ok(State::Waiting);
+        }
+        match Replicator::start(path, Arc::clone(store), slot.plan.config().clone()) {
+            Ok(replicator) => {
+                replicator.set_events(Box::new(DbEvents::new(Arc::clone(&self.log), path)));
+                self.started.add(&replicator);
+                self.initialized(&slot.plan);
+                Ok(State::Running(replicator))
+            }
+            Err(error) => Err(Failure {
+                msg: "cannot start database",
+                error: error.to_string(),
+            }),
+        }
+    }
+
+    /// Logs a failed start, once per distinct error for a database that is retried.
+    fn failed(&self, slot: &mut Slot, failure: Failure, retried: bool) {
+        if slot.last_error.as_ref() == Some(&failure.error) {
+            return;
+        }
+        let fields = [
+            ("path", slot.plan.path().into()),
+            ("error", failure.error.clone().into()),
+            ("retrying", retried.into()),
+        ];
+        self.log.error(failure.msg, &fields);
+        slot.last_error = Some(failure.error);
+    }
+
+    fn initialized(&self, plan: &DbPlan) {
+        let path = plan.path();
+        self.log.info("initialized db", &[("path", path.into())]);
+        let kind = ("type", plan.replica().kind().into());
+        match plan.replica() {
+            ReplicaPlan::File(dir) => {
+                let fields = [kind, ("path", dir.as_path().into())];
+                self.log.info("replicating to", &fields);
+            }
+            ReplicaPlan::S3 { config, .. } => {
+                let fields = [
+                    kind,
+                    ("bucket", config.bucket().as_str().into()),
+                    ("path", config.prefix().as_str().into()),
+                    ("region", config.region().as_str().into()),
+                    ("endpoint", config.endpoint().url().as_str().into()),
+                ];
+                self.log.info("replicating to", &fields);
+            }
+        }
+    }
+
+    /// Go's `restoreIfNeeded`.
+    fn restore(&self, path: &Path, store: &Arc<dyn DynStore>) -> Result<(), Failure> {
+        self.log.info(
+            "attempting restore before replication",
+            &[("path", path.into())],
+        );
+        match restore_if_missing(&**store, path) {
+            Ok(Some(_)) => self.log.info("restore completed", &[("path", path.into())]),
+            Ok(None) => self.log.info(
+                "database exists, skipping restore",
+                &[("path", path.into())],
+            ),
+            Err(RestoreError::Restore(CoreRestoreError::NoPlan(none)))
+                if *none.outcome() == PlanOutcome::EmptyReplica =>
+            {
+                self.log
+                    .info("no backup found, starting fresh", &[("path", path.into())]);
+            }
+            Err(error) => {
+                return Err(Failure {
+                    msg: "restore failed",
+                    error: error.to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Starts the waiter for databases whose file does not exist yet, if there are any.
+    #[must_use]
+    pub fn wait_for_files(self: &Arc<Self>) -> Option<Waiter> {
+        let interval = {
+            let slots = lock(&self.slots);
+            slots
+                .iter()
+                .filter(|s| matches!(s.state, State::Waiting))
+                .map(|s| s.plan.config().poll_interval.get())
+                .min()?
+        };
+        let (stop, stopped) = mpsc::sync_channel(1);
+        let daemon = Arc::clone(self);
+        let spawned = std::thread::Builder::new()
+            .name("lsr-waiter".to_owned())
+            .spawn(move || daemon.wait_loop(interval, &stopped));
+        match spawned {
+            Ok(thread) => Some(Waiter { stop, thread }),
+            Err(error) => {
+                let fields = [("error", error.to_string().into())];
+                self.log
+                    .error("cannot watch for databases to appear", &fields);
+                None
+            }
+        }
+    }
+
+    fn wait_loop(&self, interval: Duration, stopped: &Receiver<()>) {
+        loop {
+            match stopped.recv_timeout(interval) {
+                Err(RecvTimeoutError::Timeout) => {}
+                Ok(()) | Err(RecvTimeoutError::Disconnected) => return,
+            }
+            let mut slots = lock(&self.slots);
+            let mut left = false;
+            for slot in slots.iter_mut() {
+                if matches!(slot.state, State::Waiting) {
+                    // A file that appears mid-creation may not open yet: retry, as Go does.
+                    match self.try_start(slot, false) {
+                        Ok(state) => slot.state = state,
+                        Err(failure) => self.failed(slot, failure, true),
+                    }
+                    left |= matches!(slot.state, State::Waiting);
+                }
+            }
+            if !left {
+                return;
+            }
+        }
+    }
+
+    /// Drains every running database within one deadline, and reports each.
+    #[must_use]
+    pub fn stop(&self, waiter: Option<Waiter>) -> Finished {
+        if let Some(waiter) = waiter {
+            waiter.end();
+        }
+        let begun = self.clock.now();
+        let slots = std::mem::take(&mut *lock(&self.slots));
+        let syncs: Vec<_> = slots
+            .iter()
+            .map(|slot| match &slot.state {
+                State::Running(replicator) => Some(replicator.stop(self.left(begun))),
+                State::Waiting | State::Failed => None,
+            })
+            .collect();
+        let mut dbs = Vec::new();
+        for (slot, sync) in slots.iter().zip(syncs) {
+            let path = slot.plan.path().to_owned();
+            let end = match (sync, &slot.state) {
+                (Some(sync), _) => End::Stopped(sync.wait()),
+                (None, State::Waiting) => End::NeverAppeared,
+                (None, State::Failed | State::Running(_)) => End::DidNotStart,
+            };
+            self.ended(&path, &end);
+            dbs.push((path, end));
+        }
+        Finished { dbs }
+    }
+
+    /// What is left of the shutdown budget begun at `begun`.
+    fn left(&self, begun: lsr_ltx::Timestamp) -> Duration {
+        let spent = self
+            .clock
+            .now()
+            .unix_millis()
+            .saturating_sub(begun.unix_millis());
+        let spent = Duration::from_millis(u64::try_from(spent).unwrap_or(0));
+        self.grace.saturating_sub(spent)
+    }
+
+    fn ended(&self, path: &Path, end: &End) {
+        let at = ("path", Value::from(path));
+        match end {
+            End::Stopped(Stopped::Drained { txid }) => {
+                let txid = txid.map_or_else(|| "none".to_owned(), |t| t.to_string());
+                self.log
+                    .info("database drained", &[at, ("txid", txid.into())]);
+            }
+            End::Stopped(Stopped::DeadlineReached {
+                unsynced_wal_bytes,
+                staged_not_uploaded,
+            }) => {
+                let fields = [
+                    at,
+                    ("unsynced_wal_bytes", (*unsynced_wal_bytes).into()),
+                    (
+                        "staged_not_uploaded",
+                        u64::from(*staged_not_uploaded).into(),
+                    ),
+                ];
+                self.log
+                    .error("database not drained: deadline reached", &fields);
+            }
+            End::Stopped(Stopped::Stopped(cause)) => {
+                let fields = [at, ("cause", format!("{cause:?}").into())];
+                self.log
+                    .error("database had stopped before the drain", &fields);
+            }
+            End::Stopped(Stopped::Gone(gone)) => {
+                let fields = [at, ("cause", format!("{gone:?}").into())];
+                self.log.error("database replicator is gone", &fields);
+            }
+            End::DidNotStart => self.log.error("database did not start", &[at]),
+            End::NeverAppeared => self.log.info("database never appeared", &[at]),
+        }
+    }
+
+    /// The log.
+    #[must_use]
+    pub fn log(&self) -> &Logger {
+        &self.log
+    }
+
+    /// Logs the signal that began the shutdown.
+    pub fn signalled(&self, signal: i32) {
+        let fields = [("signal", signals::name(signal).into())];
+        self.log
+            .info("signal received, litestream shutting down", &fields);
+    }
+}
+
+/// The waiter thread and its stop.
+#[derive(Debug)]
+pub struct Waiter {
+    stop: SyncSender<()>,
+    thread: JoinHandle<()>,
+}
+
+impl Waiter {
+    fn end(self) {
+        if self.stop.try_send(()).is_err() {
+            // A stop is already queued, or the thread is done.
+        }
+        if self.thread.join().is_err() {
+            // The waiter panicked; its slots stay as they were.
+        }
+    }
+}
+
+/// Whether the database file is there, without opening it.
+fn exists(path: &Path) -> bool {
+    !matches!(std::fs::symlink_metadata(path), Err(e) if e.kind() == io::ErrorKind::NotFound)
+}
+
+/// The store for a replica; S3 credentials are resolved now, from the file or the
+/// environment and shared files (Go copies `LITESTREAM_*` to `AWS_*`; the chain reads both).
+fn open_store(replica: &ReplicaPlan) -> Result<Arc<dyn DynStore>, String> {
+    match replica {
+        ReplicaPlan::File(dir) => Ok(Arc::new(FsStore::new(dir))),
+        ReplicaPlan::S3 {
+            config,
+            credentials,
+        } => {
+            let chain = match credentials {
+                lsr_config::Credentials::FromConfig(given) => {
+                    CredentialChain::from_process().with_explicit(given.clone())
+                }
+                lsr_config::Credentials::FromEnvironment => CredentialChain::from_process(),
+            };
+            let resolved = chain.resolve().map_err(|e| e.to_string())?;
+            let store = S3Store::new((**config).clone(), resolved.into_credentials())
+                .map_err(|e| e.to_string())?;
+            Ok(Arc::new(store))
+        }
+    }
+}

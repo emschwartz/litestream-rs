@@ -82,8 +82,12 @@ impl Exit {
         match self {
             Self::Success => "success (verify: nothing worse than a note)",
             Self::Degraded => "verify found a degraded replica",
-            Self::Refused => "verify found it unrestorable, or the restore was refused",
-            Self::Environment => "store, destination or I/O failure",
+            Self::Refused => {
+                "verify found it unrestorable, the restore was refused, or a config was refused"
+            }
+            Self::Environment => {
+                "store, destination or I/O failure; for replicate, a database that did not start or drain"
+            }
             Self::Usage => "usage error",
         }
     }
@@ -234,6 +238,12 @@ pub enum Done {
         /// How the stop ended.
         stopped: lsr_replica::Stopped,
     },
+    /// The daemon ran and stopped; it logged everything as it went.
+    Daemon(lsr_sidecar::Finished),
+    /// The daemon's own usage text.
+    DaemonHelp(&'static str),
+    /// A config file was read; the report says whether it loads.
+    ConfigChecked(Box<lsr_config::Report>),
     /// The help text.
     Help,
     /// The version.
@@ -303,6 +313,9 @@ pub enum CliError {
     /// The signal handlers could not be installed.
     #[error("watching for signals: {0}")]
     Signals(#[source] io::Error),
+    /// The daemon did not start: its command line, its config, or its signal handlers.
+    #[error("replicate: {0}")]
+    Daemon(#[from] lsr_sidecar::SidecarError),
 }
 
 impl From<RestoreError> for CliError {
@@ -353,7 +366,46 @@ pub fn exit_for_done(done: &Done) -> Exit {
         },
         Done::Replicated { stopped, .. } if crate::replicate::drained(stopped) => Exit::Success,
         Done::Replicated { .. } => Exit::Environment,
-        Done::Restore(_) | Done::Files { .. } | Done::Help | Done::Version => Exit::Success,
+        Done::Daemon(finished) if finished.clean() => Exit::Success,
+        Done::Daemon(_) => Exit::Environment,
+        Done::ConfigChecked(report) => config_exit(report),
+        Done::Restore(_)
+        | Done::Files { .. }
+        | Done::DaemonHelp(_)
+        | Done::Help
+        | Done::Version => Exit::Success,
+    }
+}
+
+/// A config that loads is success; one that is refused is a refusal, unless the file could
+/// not be read at all.
+fn config_exit(report: &lsr_config::Report) -> Exit {
+    use lsr_config::ProblemKind;
+    let unreadable = report.errors.iter().any(|problem| {
+        matches!(
+            problem.kind,
+            ProblemKind::NotFound { .. } | ProblemKind::Unreadable { .. }
+        )
+    });
+    if report.is_ok() {
+        Exit::Success
+    } else if unreadable {
+        Exit::Environment
+    } else {
+        Exit::Refused
+    }
+}
+
+/// The daemon's errors, on the one table.
+fn daemon_exit(error: &lsr_sidecar::SidecarError) -> Exit {
+    use lsr_sidecar::SidecarError;
+    match error {
+        SidecarError::Usage(_) => Exit::Usage,
+        SidecarError::Config(_) if error.is_missing_config() => Exit::Environment,
+        SidecarError::Config(_) | SidecarError::Map(_) | SidecarError::NotBuilt { .. } => {
+            Exit::Refused
+        }
+        SidecarError::Stdin(_) | SidecarError::Signals(_) => Exit::Environment,
     }
 }
 
@@ -374,6 +426,7 @@ pub fn exit_for_error(error: &CliError) -> Exit {
             | RestoreError::Sink { .. } => Exit::Environment,
         },
         CliError::AfterClearing { source, .. } => exit_for_error(source),
+        CliError::Daemon(error) => daemon_exit(error),
         CliError::NoReplica { .. }
         | CliError::Credentials(_)
         | CliError::S3Config(_)
@@ -398,6 +451,11 @@ pub async fn run(command: Command) -> Result<Done, CliError> {
         Command::Verify(args) => verify_command(args).await,
         Command::Files(args) => files_command(args).await,
         Command::Replicate(args) => crate::replicate::replicate(args),
+        Command::Daemon(args) => match lsr_sidecar::run(&args)? {
+            lsr_sidecar::Outcome::Help(text) => Ok(Done::DaemonHelp(text)),
+            lsr_sidecar::Outcome::Ran(finished) => Ok(Done::Daemon(finished)),
+        },
+        Command::ConfigCheck(path) => Ok(Done::ConfigChecked(Box::new(lsr_config::check(&path)))),
         Command::Help => Ok(Done::Help),
         Command::Version => Ok(Done::Version),
     }

@@ -1,0 +1,174 @@
+//! Go's `replicate_test.go` flag cases, ported by scenario.
+
+use super::*;
+
+fn args(line: &[&str]) -> Vec<String> {
+    line.iter().map(|s| (*s).to_owned()).collect()
+}
+
+fn run(line: &[&str]) -> Flags {
+    match parse(&args(line)) {
+        Ok(Parsed::Run(flags)) => flags,
+        other => panic!("{line:?}: {other:?}"),
+    }
+}
+
+fn refused(line: &[&str]) -> UsageError {
+    match parse(&args(line)) {
+        Err(error) => error,
+        Ok(other) => panic!("{line:?} accepted: {other:?}"),
+    }
+}
+
+const POSITIONAL: [&str; 2] = ["test.db", "s3://bucket/test.db"];
+
+fn with_positional<'a>(flags: &[&'a str]) -> Vec<&'a str> {
+    let mut line = flags.to_vec();
+    line.extend(POSITIONAL);
+    line
+}
+
+/// `TestReplicateCommand_ParseFlags_OnceFlags`.
+#[test]
+fn once_and_its_companions() {
+    let flags = run(&with_positional(&["-once"]));
+    assert!(flags.once && !flags.force_snapshot && !flags.enforce_retention);
+    let flags = run(&with_positional(&["-once", "-force-snapshot"]));
+    assert!(flags.once && flags.force_snapshot);
+    let flags = run(&with_positional(&["-once", "-enforce-retention"]));
+    assert!(flags.once && flags.enforce_retention);
+    let flags = run(&with_positional(&[
+        "-once",
+        "-force-snapshot",
+        "-enforce-retention",
+    ]));
+    assert!(flags.once && flags.force_snapshot && flags.enforce_retention);
+    assert_eq!(
+        refused(&with_positional(&["-force-snapshot"])),
+        UsageError::ForceSnapshotWithoutOnce
+    );
+    assert_eq!(
+        refused(&with_positional(&["-enforce-retention"])),
+        UsageError::EnforceRetentionWithoutOnce
+    );
+    assert_eq!(
+        refused(&with_positional(&["-once", "-exec", "echo test"])),
+        UsageError::OnceWithExec
+    );
+}
+
+/// `TestReplicateCommand_ParseFlags_FlagPositioning`.
+#[test]
+fn flags_come_before_the_positional_arguments() {
+    assert_eq!(
+        refused(&["test.db", "s3://bucket/test.db", "-exec", "echo test"]),
+        UsageError::FlagAfterArguments {
+            flag: "-exec".to_owned()
+        }
+    );
+    assert_eq!(
+        refused(&["test.db", "s3://bucket/test.db", "-config", "/c"]),
+        UsageError::FlagAfterArguments {
+            flag: "-config".to_owned()
+        }
+    );
+    let flags = run(&with_positional(&["-exec", "echo test", "-no-expand-env"]));
+    assert_eq!(flags.exec.as_deref(), Some("echo test"));
+    assert!(flags.no_expand_env);
+    assert_eq!(
+        flags.source,
+        Source::OneDatabase {
+            database: "test.db".to_owned(),
+            replica: "s3://bucket/test.db".to_owned(),
+        }
+    );
+    assert_eq!(
+        refused(&["test.db"]),
+        UsageError::OnlyDatabase {
+            database: "test.db".to_owned()
+        }
+    );
+}
+
+/// `TestReplicateCommand_ParseFlags_LogLevel`; the environment's part is the daemon's.
+#[test]
+fn log_level_flag() {
+    assert_eq!(
+        run(&with_positional(&["-log-level", "debug"])).log_level,
+        Some(LogLevel::Debug)
+    );
+    assert_eq!(
+        run(&with_positional(&["-log-level=TRACE"])).log_level,
+        Some(LogLevel::Trace)
+    );
+    assert_eq!(
+        run(&with_positional(&["--log-level", "error"])).log_level,
+        Some(LogLevel::Error)
+    );
+    assert_eq!(run(&with_positional(&[])).log_level, None);
+    let flags = run(&with_positional(&["-log-level", "warn", "-once"]));
+    assert_eq!(flags.log_level, Some(LogLevel::Warn));
+    assert!(flags.once);
+    assert_eq!(
+        refused(&["test.db", "s3://bucket/test.db", "-log-level", "debug"]),
+        UsageError::FlagAfterArguments {
+            flag: "-log-level".to_owned()
+        }
+    );
+    assert!(matches!(
+        refused(&with_positional(&["-log-level", "loud"])),
+        UsageError::BadLogLevel { .. }
+    ));
+}
+
+#[test]
+fn go_s_flag_syntax() {
+    let flags = run(&["-config=/a.yml", "--config", "/b.yml"]);
+    assert_eq!(flags.source, Source::Config(Some("/b.yml".to_owned())));
+    assert!(!run(&["-once=false"]).once);
+    assert_eq!(
+        refused(&["-once=maybe"]),
+        UsageError::BadBool {
+            name: "once",
+            value: "maybe".to_owned()
+        }
+    );
+    assert_eq!(
+        refused(&["-config"]),
+        UsageError::MissingValue { name: "config" }
+    );
+    assert_eq!(
+        refused(&["-bogus"]),
+        UsageError::UnknownFlag {
+            name: "bogus".to_owned()
+        }
+    );
+    assert_eq!(parse(&args(&["-h"])), Ok(Parsed::Help));
+    assert_eq!(parse(&args(&["--help"])), Ok(Parsed::Help));
+    assert_eq!(run(&[]).source, Source::Config(None));
+    let flags = run(&["--", "-odd.db", "/replica"]);
+    assert_eq!(
+        flags.source,
+        Source::OneDatabase {
+            database: "-odd.db".to_owned(),
+            replica: "/replica".to_owned()
+        }
+    );
+    assert_eq!(
+        refused(&["-config", "/c.yml", "a.db", "/r"]),
+        UsageError::ReplicaAndConfig
+    );
+    assert_eq!(refused(&["a.db", "/r", "/s"]), UsageError::MultipleReplicas);
+}
+
+/// Go's `resolveConfigPath`.
+#[test]
+fn the_config_path_is_the_flag_then_the_environment_then_the_default() {
+    let env = |name: &str| (name == "LITESTREAM_CONFIG").then(|| "/env.yml".to_owned());
+    assert_eq!(
+        config_path(Some("/flag.yml"), env),
+        PathBuf::from("/flag.yml")
+    );
+    assert_eq!(config_path(None, env), PathBuf::from("/env.yml"));
+    assert_eq!(config_path(None, |_| None), PathBuf::from(DEFAULT_CONFIG));
+}

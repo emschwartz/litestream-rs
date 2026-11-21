@@ -1,0 +1,21 @@
+[package]
+name = "lsr-sidecar"
+version = "0.0.0"
+description = "The replicate daemon: Go Litestream's litestream.yml and command line, one replicator per database, in one process."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lsr-config.workspace = true
+lsr-core.workspace = true
+lsr-ltx.workspace = true
+lsr-replica.workspace = true
+lsr-store-fs.workspace = true
+lsr-store-s3.workspace = true
+signal-hook.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

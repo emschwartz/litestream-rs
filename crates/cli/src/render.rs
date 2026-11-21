@@ -19,7 +19,10 @@ use lsr_core::{
 };
 use lsr_ltx::{Timestamp, Txid, TxidRange};
 
-use crate::args::{CommandName, FLAGS, REPLICATE_SUMMARY, REPLICATE_USAGE};
+use crate::args::{
+    CONFIG_CHECK_SUMMARY, CONFIG_CHECK_USAGE, CommandName, DAEMON_SUMMARY, DAEMON_USAGE, FLAGS,
+    REPLICATE_SUMMARY, REPLICATE_USAGE,
+};
 use crate::run::{CliError, Done, Exit, Finished, RestoreDone, Skip, Source};
 use lsr_core::ListedStamp;
 use lsr_local::IntegrityCheck;
@@ -65,6 +68,9 @@ pub fn done(done: &Done) -> String {
             json: true,
         } => files_json(inventory, *stamp_fallbacks),
         Done::Replicated { database, stopped } => replicated(database, stopped),
+        Done::Daemon(_) => String::new(),
+        Done::DaemonHelp(text) => (*text).to_owned(),
+        Done::ConfigChecked(report) => report.to_string(),
         Done::Help => help(),
         Done::Version => format!("lsr {}\n", env!("CARGO_PKG_VERSION")),
     }
@@ -103,6 +109,8 @@ pub fn help() -> String {
         }
     }
     putln!(out, "\n{REPLICATE_USAGE}\n  {REPLICATE_SUMMARY}");
+    putln!(out, "\n{DAEMON_USAGE}\n  {DAEMON_SUMMARY}");
+    putln!(out, "\n{CONFIG_CHECK_USAGE}\n  {CONFIG_CHECK_SUMMARY}");
     out.push_str(
         "\nlsr --help, lsr -h: this text; lsr --version, lsr -V: the version\n\nexit codes:\n",
     );
