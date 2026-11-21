@@ -6,14 +6,13 @@
 //! target up to one past the end, and holds the outcome to an oracle written
 //! from the contract in the `plan` module doc, not from the planner's code:
 //! the set of transactions some chain of eligible files can end at, found by
-//! fixpoint. The `AsOf` sweep enumerates smaller inventories under every
+//! fixpoint, and for a refusal the whole outcome, payloads included. The `AsOf` sweep enumerates smaller inventories under every
 //! assignment of distinct exact stamps and every instant, and holds the lazy
 //! planner (over lazy, exact and mixed listings) to the exact one.
 //!
-//! Where the module doc does not say which refusal wins, the oracle accepts
-//! every refusal whose own text applies and tallies the case, so the code's
-//! choice is neither encoded nor hidden (see the notes printed with
-//! `--no-capture`).
+//! The contract decides every case, so the oracle demands exactly the one
+//! outcome it names; the tally printed with `--no-capture` counts the cases per
+//! outcome so an empty bucket shows.
 
 #[cfg(test)]
 #[expect(
@@ -150,14 +149,6 @@ mod exhaustive {
             .find(|e| ends[usize::try_from(*e).unwrap()])
     }
 
-    /// The refusals whose own doc text applies, for a case with a base but no plan.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-    enum Refusal {
-        Inside,
-        Gap,
-        Malformed,
-    }
-
     type Tally = BTreeMap<String, u64>;
 
     fn note(tally: &mut Tally, what: String) {
@@ -184,208 +175,99 @@ mod exhaustive {
         assert_eq!(reach, goal);
     }
 
-    /// Checks one `plan` outcome against the contract; panics with the case on failure.
+    /// The outcome the contract demands when it is not a plan, computed from
+    /// the files alone: the first refusal in precedence order, with every
+    /// payload (requirement and design tier alike). `None` means a plan is due.
+    fn expected_refusal(files: &[R], t: T) -> Option<PlanOutcome> {
+        let txid = |n: u64| Txid::new(n).unwrap();
+        let Some(newest) = files.iter().map(|f| f.max).max() else {
+            return Some(PlanOutcome::EmptyReplica);
+        };
+        let goal = match t {
+            T::Latest => newest,
+            T::Txid(n) if n > newest => {
+                return Some(PlanOutcome::BeyondNewest {
+                    requested: txid(n),
+                    newest: txid(newest),
+                });
+            }
+            T::Txid(n) => n,
+        };
+        let ends = chain_ends(files, t);
+        if ends[usize::try_from(goal).unwrap()] {
+            return None;
+        }
+        // The reach: the furthest any chain gets, 0 when no chain starts.
+        let r = furthest(&ends).unwrap_or(0);
+        if let T::Txid(n) = t
+            && let Some(f) = files
+                .iter()
+                .filter(|f| f.usable() && f.min <= r + 1 && f.max > n)
+                .min_by_key(|f| (f.max, Reverse(f.level), f.min))
+        {
+            return Some(PlanOutcome::InsideFile {
+                requested: txid(n),
+                file: f.key(),
+            });
+        }
+        if !files.iter().any(|f| t.admits(f) && f.min == 1) {
+            let mut malformed: Vec<&R> = files.iter().filter(|f| !f.usable()).collect();
+            malformed.sort_by_key(|f| (f.level, f.min, f.max));
+            return Some(PlanOutcome::NoSnapshot {
+                oldest_snapshot: files
+                    .iter()
+                    .filter(|f| f.min == 1)
+                    .map(|f| txid(f.max))
+                    .min(),
+                malformed_snapshots: malformed.into_iter().map(R::key).collect(),
+            });
+        }
+        let past = || files.iter().filter(|f| f.max > r);
+        if let Some(next) = past()
+            .filter(|f| f.usable() && f.min > r + 1)
+            .map(|f| f.min)
+            .min()
+        {
+            return Some(PlanOutcome::Gap {
+                have_through: txid(r),
+                next_starts: txid(next),
+            });
+        }
+        let refused = past()
+            .filter(|f| !f.usable())
+            .min_by_key(|f| (f.level, f.min, f.max))
+            .unwrap_or_else(|| panic!("no refusal applies: {files:?} {t:?}"));
+        Some(PlanOutcome::MalformedSnapshot {
+            have_through: txid(r),
+            file: refused.key(),
+        })
+    }
+
+    /// Holds one `plan` outcome to the contract: a plan exactly when a chain
+    /// reaches the target, else the whole outcome the contract names.
     fn verify(files: &[R], t: T, tally: &mut Tally) {
         let inv = Inventory::from_files(files.iter().map(|r| info(r, 0))).unwrap();
         let out = plan(&inv, t.key_target());
         let case = format!("{files:?} {t:?} -> {out:?}");
-        let Some(newest) = files.iter().map(|f| f.max).max() else {
-            assert_eq!(out, PlanOutcome::EmptyReplica, "{case}");
-            return;
-        };
-        if let T::Txid(n) = t
-            && n > newest
-        {
-            // A request past everything held. NoSnapshot's own text ("none exists")
-            // also applies when no file begins at 1; the doc does not rank the two.
-            let beyond = PlanOutcome::BeyondNewest {
-                requested: Txid::new(n).unwrap(),
-                newest: Txid::new(newest).unwrap(),
-            };
-            if files.iter().any(|f| f.min == 1) {
-                assert_eq!(out, beyond, "{case}");
-            } else {
-                let is_no_snapshot = matches!(out, PlanOutcome::NoSnapshot { .. });
-                assert!(out == beyond || is_no_snapshot, "{case}");
-                let chose = if is_no_snapshot {
-                    "NoSnapshot"
-                } else {
-                    "BeyondNewest"
-                };
-                note(
-                    tally,
-                    format!("past the end, no base: [BeyondNewest, NoSnapshot] -> {chose}"),
-                );
-            }
-            if let PlanOutcome::NoSnapshot { .. } = &out {
-                assert_no_snapshot(&out, files, &case);
-            }
-            return;
-        }
-        let goal = match t {
-            T::Latest => newest,
-            T::Txid(n) => n,
-        };
-        let ends = chain_ends(files, t);
-        let has_base = files.iter().any(|f| t.admits(f) && f.min == 1);
-        if ends[usize::try_from(goal).unwrap()] {
+        let name = if let Some(want) = expected_refusal(files, t) {
+            assert_eq!(out, want, "{case}");
+            format!("{out:?}")
+                .split([' ', '('])
+                .next()
+                .unwrap()
+                .to_owned()
+        } else {
             let PlanOutcome::Plan(chain) = &out else {
-                panic!("a chain to {goal} exists but the outcome is not a plan: {case}");
+                panic!("a chain to the target exists but the outcome is not a plan: {case}");
+            };
+            let goal = match t {
+                T::Latest => files.iter().map(|f| f.max).max().unwrap(),
+                T::Txid(n) => n,
             };
             assert_chain(chain, files, t, goal, &inv);
-            return;
-        }
-        assert!(
-            !matches!(out, PlanOutcome::Plan(_)),
-            "a plan with no chain: {case}"
-        );
-        assert!(
-            !matches!(
-                out,
-                PlanOutcome::AsOfInsideFile { .. } | PlanOutcome::EmptyReplica
-            ),
-            "{case}"
-        );
-        if !has_base {
-            verify_no_base(&out, files, goal, tally, &case);
-            return;
-        }
-        verify_refusal(&out, files, t, furthest(&ends).unwrap(), tally, &case);
-    }
-
-    /// No eligible base. A transaction-1 file that covers the target is
-    /// InsideFile (the chain is empty, reach 0); otherwise no file begins at 1.
-    fn verify_no_base(out: &PlanOutcome, files: &[R], goal: u64, tally: &mut Tally, case: &str) {
-        let covers = |f: &&R| f.min == 1 && f.max > goal;
-        let nearest = files
-            .iter()
-            .filter(covers)
-            .min_by_key(|f| (f.max, Reverse(f.level), f.key()));
-        if let Some(nearest) = nearest {
-            let want = PlanOutcome::InsideFile {
-                requested: Txid::new(goal).unwrap(),
-                file: nearest.key(),
-            };
-            assert_eq!(out, &want, "{case}");
-            note(
-                tally,
-                "no eligible base, a transaction-1 file covers the target: InsideFile".into(),
-            );
-        } else {
-            assert_no_snapshot(out, files, case);
-        }
-    }
-
-    fn assert_no_snapshot(out: &PlanOutcome, files: &[R], case: &str) {
-        let PlanOutcome::NoSnapshot {
-            oldest_snapshot,
-            malformed_snapshots,
-        } = out
-        else {
-            panic!("no eligible base must be NoSnapshot: {case}");
+            "Plan".to_owned()
         };
-        let oldest = files.iter().filter(|f| f.min == 1).map(|f| f.max).min();
-        assert_eq!(oldest_snapshot.map(Txid::get), oldest, "{case}");
-        let mut want: Vec<FileKey> = files
-            .iter()
-            .filter(|f| f.level == 9 && f.min != 1)
-            .map(R::key)
-            .collect();
-        let mut got = malformed_snapshots.clone();
-        want.sort();
-        got.sort();
-        assert_eq!(got, want, "{case}");
-    }
-
-    /// InsideFile's own text (Txid only): a usable file holds the requested
-    /// transaction strictly before its end. Whether it must also link to the
-    /// chain is not said; both readings are accepted.
-    fn covering(files: &[R], t: T) -> Vec<&R> {
-        match t {
-            T::Txid(n) => files
-                .iter()
-                .filter(|f| f.usable() && f.min <= n && f.max > n)
-                .collect(),
-            T::Latest => Vec::new(),
-        }
-    }
-
-    /// A base exists, no chain reaches the goal: the outcome is one of the
-    /// refusals whose doc text applies, with the fields the doc defines.
-    fn verify_refusal(out: &PlanOutcome, files: &[R], t: T, r: u64, tally: &mut Tally, case: &str) {
-        let eligible_usable_beyond = |f: &&R| t.admits(f) && f.usable() && f.max > r;
-        let inside = covering(files, t);
-        // Gap: a usable file past the chain starts beyond a hole. Eligible-only
-        // and all-files readings differ for Txid; either value is accepted.
-        let hole = |f: &&R| f.usable() && f.max > r && f.min > r + 1;
-        let gap_all: Option<u64> = files.iter().filter(hole).map(|f| f.min).min();
-        let gap_eligible: Option<u64> = files
-            .iter()
-            .filter(|f| t.admits(f))
-            .filter(hole)
-            .map(|f| f.min)
-            .min();
-        // Malformed: the only history past the chain is in refused level-9 files.
-        let refused: Vec<&R> = files.iter().filter(|f| !f.usable() && f.max > r).collect();
-        let malformed = !refused.is_empty() && !files.iter().any(|f| eligible_usable_beyond(&f));
-
-        let allowed: Vec<Refusal> = [
-            (!inside.is_empty(), Refusal::Inside),
-            (gap_all.is_some(), Refusal::Gap),
-            (malformed, Refusal::Malformed),
-        ]
-        .into_iter()
-        .filter_map(|(applies, refusal)| applies.then_some(refusal))
-        .collect();
-        assert!(
-            !allowed.is_empty(),
-            "no refusal applies, yet no plan: {case}"
-        );
-        let chose = match out {
-            PlanOutcome::InsideFile { requested, file } => {
-                assert!(inside.iter().any(|f| f.is(file)), "{case}");
-                assert_eq!(
-                    Some(requested.get()),
-                    match t {
-                        T::Txid(n) => Some(n),
-                        T::Latest => None,
-                    },
-                    "{case}"
-                );
-                Refusal::Inside
-            }
-            PlanOutcome::Gap {
-                have_through,
-                next_starts,
-            } => {
-                assert_eq!(have_through.get(), r, "{case}");
-                let next = Some(next_starts.get());
-                assert!(next == gap_all || next == gap_eligible, "{case}");
-                Refusal::Gap
-            }
-            PlanOutcome::MalformedSnapshot { have_through, file } => {
-                assert_eq!(have_through.get(), r, "{case}");
-                assert!(refused.iter().any(|f| f.is(file)), "{case}");
-                Refusal::Malformed
-            }
-            other @ (PlanOutcome::Plan(_)
-            | PlanOutcome::EmptyReplica
-            | PlanOutcome::NoSnapshot { .. }
-            | PlanOutcome::BeyondNewest { .. }
-            | PlanOutcome::AsOfInsideFile { .. }) => {
-                panic!("not a refusal for a case with a base: {other:?} {case}")
-            }
-        };
-        assert!(
-            allowed.contains(&chose),
-            "{chose:?} not among {allowed:?}: {case}"
-        );
-        if allowed.len() > 1 {
-            note(
-                tally,
-                format!("refusals applying together: {allowed:?} -> {chose:?}"),
-            );
-        }
+        note(tally, name);
     }
 
     /// One sweep: every inventory of up to `n` files over `1..=d` with `levels`.

@@ -201,6 +201,11 @@ mod review {
             if let PlanOutcome::InsideFile { requested, file } = &out {
                 prop_assert!(file.range().max() > *requested);
                 prop_assert!(inv.files().iter().any(|i| i.key == *file));
+                // Usable, and linking to the chain: it starts at most one past
+                // the furthest reach (transaction 1 when no chain starts).
+                prop_assert!(!file.level().is_snapshot() || file.range().min().get() == 1);
+                let reach = ends.iter().max().copied().unwrap_or(0);
+                prop_assert!(file.range().min().get() <= reach.saturating_add(1));
             }
             if let PlanOutcome::Plan(c) | PlanOutcome::AsOfInsideFile { chain: c, .. } = &out {
                 prop_assert_eq!(Some(c.reaches().get()), want);
