@@ -6,6 +6,7 @@
 #   minio.sh up       start the container and create the bucket (skips, exit 0, when Docker is down)
 #   minio.sh running  exit 0 when the container is up
 #   minio.sh down     remove the container
+#   minio.sh env      print the export lines the test recipes eval (endpoint, bucket, credentials)
 #
 # The image is Chainguard's MinIO build, pinned by digest: MinIO no longer
 # publishes images itself. If the digest stops resolving, re-pin it and re-run
@@ -70,13 +71,20 @@ case "${1:-}" in
     running)
         have_docker && running
         ;;
+    env)
+        printf 'export LSR_MINIO_ENDPOINT=%s\n' "$ENDPOINT"
+        printf 'export LSR_COMPAT_S3_ENDPOINT=%s\n' "$ENDPOINT"
+        printf 'export LSR_COMPAT_S3_BUCKET=%s\n' "$BUCKET"
+        printf 'export LSR_COMPAT_S3_ACCESS_KEY=%s\n' "$ROOT_USER"
+        printf 'export LSR_COMPAT_S3_SECRET_KEY=%s\n' "$ROOT_PASSWORD"
+        ;;
     down)
         if have_docker; then
             docker rm -f "$NAME" >/dev/null 2>&1 || true
         fi
         ;;
     *)
-        echo "usage: minio.sh up|running|down" >&2
+        echo "usage: minio.sh up|running|env|down" >&2
         exit 2
         ;;
 esac
