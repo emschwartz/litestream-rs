@@ -46,7 +46,7 @@ fn a_restored_database_with_no_write_ticks_by_the_poll_and_snapshots_at_once() {
     for _ in 0..60 {
         clock.advance(POLL);
         let now = clock.now();
-        wait(&replicator, |h| h.observed_at >= now);
+        wait(&replicator, |h| h.reported_at >= now);
     }
     let health = replicator.health();
     assert!(health.counters.ticks <= BOUND, "{health:?}");

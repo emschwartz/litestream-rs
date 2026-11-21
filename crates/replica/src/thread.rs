@@ -610,7 +610,7 @@ impl Worker {
         let (seen, progress) = (&self.seen, &self.progress);
         self.shared.update(|state| {
             let health = &mut state.health;
-            health.observed_at = parts.now;
+            health.reported_at = parts.now;
             health.phase = parts.phase;
             health.degraded = parts.degraded;
             health.synced = progress.synced;

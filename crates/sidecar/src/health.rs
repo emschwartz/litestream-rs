@@ -299,7 +299,7 @@ fn running_json(o: &mut Object, health: &Health) {
         health.resnapshot.map(|c| snapshot_name(c).to_owned()),
     );
     o.maybe("app_notice", health.app_notice().map(|n| n.to_string()));
-    o.text("observed_at", &health.observed_at.to_string());
+    o.text("reported_at", &health.reported_at.to_string());
 }
 
 /// The `/healthz` body, and whether every database is up.

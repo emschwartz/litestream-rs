@@ -46,7 +46,7 @@
 //! - `lsr_checkpoints_total{db}`, `lsr_checkpoints_busy_total{db}`, `lsr_uploads_total{db}`,
 //!   `lsr_retries_total{db}`, `lsr_panics_total{db}`.
 //! - `lsr_replica_operation_errors_total{replica_type,operation}`.
-//! - `lsr_observed_age_seconds{db}`: how old the replicator's last health write is; a large
+//! - `lsr_health_report_age_seconds{db}`: how old the replicator's last health write is; a large
 //!   value means its thread is stuck in a store call.
 //! - The scheduled verify (`validation.interval`): `lsr_verify_runs_total{db,result}`
 //!   (`passed`, `failed`, `merged`, `incomplete`), `lsr_verify_failing{db}` 1 while a run
@@ -304,10 +304,10 @@ fn state_series(out: &mut Out, views: &[DbView], now: Timestamp) {
             out.sample("lsr_stopped", &[("db", db), ("cause", stop_name(cause))], 1);
         }
     }
-    let name = "lsr_observed_age_seconds";
+    let name = "lsr_health_report_age_seconds";
     out.family(name, "gauge", "Age of the replicator's last health report");
     for (db, health) in &dbs {
-        out.sample(name, &[("db", db)], since(now, health.observed_at));
+        out.sample(name, &[("db", db)], since(now, health.reported_at));
     }
 }
 
