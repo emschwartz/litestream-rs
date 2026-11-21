@@ -6,6 +6,10 @@
 //! in a feature rather than under `cfg(test)`, stays free of panics.
 //! `block_on` is a few lines of std because the stores complete without a
 //! reactor, and the suite should not pick the backends' runtime for them.
+//!
+//! Every store in the repository passes, so a check that stopped checking would
+//! go unnoticed; the module's own tests run cases against stores broken on
+//! purpose, one promise each, and require the case to fail.
 
 use std::fmt;
 use std::future::Future;
@@ -811,3 +815,6 @@ macro_rules! conformance_suite {
         }
     };
 }
+
+#[cfg(test)]
+mod tests;
