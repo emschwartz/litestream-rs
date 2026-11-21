@@ -3,7 +3,7 @@
 //! Sans-IO: this crate names no runtime, spawns no thread, reads no clock and
 //! opens no file. What it needs comes in through traits: the replica and the
 //! local staging directory are both an [`ObjectStore`] (`lsr-store-s3`,
-//! `lsr-store-fs`; [`MemStore`] is the model they are tested against), SQLite
+//! `lsr-store-fs`; `MemStore`, behind the `testing` feature, is the model they are tested against), SQLite
 //! is a [`WalSource`], a [`PageSource`] and a [`Checkpointer`] (`lsr-sqlite`),
 //! a restore writes into a [`DatabaseSink`] (`lsr-local`), and time, waiting
 //! and chance are [`Clock`], [`Sleeper`] and [`Entropy`].
@@ -34,6 +34,7 @@ mod inventory;
 mod layout;
 mod ltx_read;
 mod maintain;
+#[cfg(any(test, feature = "testing"))]
 mod mem;
 mod pages;
 mod plan;
@@ -84,6 +85,7 @@ pub use maintain::{
     MAX_DELETE, MaintainError, MaintainState, Maintenance, Outcome, RetentionHold, RetentionMode,
     Setting, SnapshotJob, due, run_delete,
 };
+#[cfg(any(test, feature = "testing"))]
 pub use mem::{MemStore, MemUpload};
 pub use pages::{Mismatch, PageChecksumTable};
 #[cfg(feature = "testing")]
