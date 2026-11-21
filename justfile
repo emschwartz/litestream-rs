@@ -176,7 +176,7 @@ ledger-fresh:
         echo "ledger-fresh: skipped: the committed test list is generated on Linux"
         exit 0
     fi
-    fresh="$(cargo nextest list --workspace --all-features --locked --run-ignored all --message-format oneline)"
+    fresh="$(cargo nextest list --workspace --all-features --locked --run-ignored all --message-format oneline --color never)"
     if ! diff -q <(printf '%s\n' "$fresh") docs/ledger/rust-tests.txt >/dev/null; then
         diff <(printf '%s\n' "$fresh") docs/ledger/rust-tests.txt | head -20 >&2 || true
         echo "ledger-fresh: docs/ledger/rust-tests.txt is stale; run 'just ledger' (or regenerate it with the nextest list line there) and check docs/ledger.toml" >&2
@@ -188,4 +188,4 @@ ledger-fresh:
 # included. The ledger test in `check` reads these files, never the clone or the build.
 ledger:
     ./scripts/upstream-tests.sh > docs/ledger/upstream-tests.txt
-    cargo nextest list --workspace --all-features --locked --run-ignored all --message-format oneline > docs/ledger/rust-tests.txt
+    cargo nextest list --workspace --all-features --locked --run-ignored all --message-format oneline --color never > docs/ledger/rust-tests.txt
