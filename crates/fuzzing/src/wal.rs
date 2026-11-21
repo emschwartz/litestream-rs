@@ -237,11 +237,10 @@ fn check_tx(cursor: &FrameCursor, tx: &CommittedTx) {
         expected = expected.saturating_add(1);
     }
     if tx.frames().is_empty()
-        || tx.commit() == 0
         || tx.end().next().frame_index() != expected
         || tx.end().salts() != cursor.salts()
     {
-        violation("a transaction is empty, uncommitted or ends elsewhere than its last frame");
+        violation("a transaction is empty or ends elsewhere than its last frame");
     }
 }
 
@@ -502,8 +501,9 @@ fn check_page_map(wal: &Wal, whole: &Scan) {
         for frame in tx.frames() {
             model.insert(frame.pgno().get(), *frame);
         }
-        model.retain(|pgno, _| *pgno <= tx.commit());
-        if map.commit() != tx.commit() || map.pages().any(|f| f.pgno().get() > map.commit()) {
+        let commit = tx.commit();
+        model.retain(|pgno, _| *pgno <= commit.get());
+        if map.commit() != Some(commit) || map.pages().any(|f| f.pgno().get() > commit.get()) {
             violation("the page map holds a page above its commit");
         }
     }

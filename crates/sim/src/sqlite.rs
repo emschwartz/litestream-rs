@@ -701,7 +701,7 @@ impl State {
                 index
                     .pgnos
                     .extend(tx.frames().iter().map(|frame| frame.pgno().get()));
-                index.db_size = tx.commit();
+                index.db_size = tx.commit().get();
                 cursor = *tx.end();
                 index.tx_ends.push(cursor.next().frame_index());
             }

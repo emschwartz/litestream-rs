@@ -1,5 +1,7 @@
 //! The page map: newest frame wins, shrinking drops pages, order is enforced.
 
+use std::num::NonZeroU32;
+
 use lsr_wal::{PageMap, PageMapError, ScanLimit};
 
 use crate::common::{Wal, open, scan, size};
@@ -24,7 +26,7 @@ fn listing(map: &PageMap) -> Vec<(u32, u32)> {
 #[test]
 fn an_empty_map_spans_nothing() {
     let map = PageMap::new(size(PS));
-    assert_eq!(map.commit(), 0);
+    assert_eq!(map.commit(), None);
     assert_eq!(map.pages().count(), 0);
     let (start, end) = map.range();
     assert_eq!(start, end);
@@ -39,7 +41,7 @@ fn the_newest_frame_of_a_page_wins() {
     wal.tx(&[2], 3, 0);
     let map = map_of(&wal);
     assert_eq!(listing(&map), [(1, 0), (2, 4), (3, 3)]);
-    assert_eq!(map.commit(), 3);
+    assert_eq!(map.commit(), NonZeroU32::new(3));
     let (start, end) = map.range();
     assert_eq!((start.frame_index(), end.frame_index()), (0, 5));
     assert!(map.get(map.pages().next().unwrap().pgno()).is_some());
@@ -52,7 +54,7 @@ fn shrinking_drops_pages_above_the_new_size_including_earlier_ones() {
     wal.tx(&[1], 2, 0); // the database shrinks to two pages
     let map = map_of(&wal);
     assert_eq!(listing(&map), [(1, 4), (2, 1)]);
-    assert_eq!(map.commit(), 2);
+    assert_eq!(map.commit(), NonZeroU32::new(2));
 }
 
 #[test]

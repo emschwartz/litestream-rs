@@ -872,7 +872,7 @@ proptest! {
         prev in prop::option::of(1_u32..12),
     ) {
         let map = map_of(&txs);
-        let commit = nz(map.commit());
+        let commit = map.commit().unwrap();
         let plan = plan_pages(&map, prev, commit, PS);
         let numbers: Vec<u32> = plan.iter().map(|p| p.pgno().get()).collect();
         prop_assert!(numbers.windows(2).all(|w| matches!(w, [a, b] if a < b)));

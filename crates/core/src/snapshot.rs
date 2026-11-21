@@ -111,7 +111,7 @@ fn whole<W: WalSource>(proof: &SyncedThrough, wal: &mut W) -> Result<Whole<W::Wa
         .ok_or(Fault::Bug(BugSite::SnapshotScan))?;
     let map = scan_whole(&mut reader, upto)?;
     let commit = position.commit();
-    if map.commit() != 0 && map.commit() != commit.get() {
+    if map.commit().is_some_and(|scanned| scanned != commit) {
         return Err(Fault::Bug(BugSite::SnapshotScan));
     }
     let plan = plan_pages(&map, None, commit, page_size);

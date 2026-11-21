@@ -1,6 +1,7 @@
 //! Scanning a WAL for committed transactions.
 
 use std::io::{self, Read, Seek, SeekFrom};
+use std::num::NonZeroU32;
 
 use crate::checksum::WalChecksum;
 use crate::conv::{Fields, usize_from};
@@ -85,7 +86,7 @@ pub enum Tail {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommittedTx {
     frames: Vec<FrameRef>,
-    commit: u32,
+    commit: NonZeroU32,
     end: FrameCursor,
 }
 
@@ -96,9 +97,10 @@ impl CommittedTx {
         &self.frames
     }
 
-    /// The database size in pages after the transaction.
+    /// The database size in pages after the transaction: never zero, since a
+    /// commit frame is the one frame that stores a size.
     #[must_use]
-    pub const fn commit(&self) -> u32 {
+    pub const fn commit(&self) -> NonZeroU32 {
         self.commit
     }
 
@@ -391,10 +393,10 @@ impl<R: Read + Seek> WalReader<R> {
                 checksum: frame.checksum,
                 salts: at.salts,
             };
-            if frame.commit != 0 {
+            if let Some(commit) = NonZeroU32::new(frame.commit) {
                 return Ok(TxOutcome::Tx(CommittedTx {
                     frames,
-                    commit: frame.commit,
+                    commit,
                     end: at,
                 }));
             }

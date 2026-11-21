@@ -670,7 +670,7 @@ fn record(pages: &mut PageTable, plan: &[PageFrom], commit: NonZeroU32) {
 /// The database size after the scanned transactions, or the database file's
 /// when the scan found none (a snapshot of a WAL that holds nothing).
 fn commit_of<P: PageSource>(map: &PageMap, db: &mut P) -> Result<NonZeroU32, Fault> {
-    match NonZeroU32::new(map.commit()) {
+    match map.commit() {
         Some(commit) => Ok(commit),
         None => NonZeroU32::new(db.page_count().map_err(Fault::from_source)?)
             .ok_or(Fault::NothingToSnapshot),

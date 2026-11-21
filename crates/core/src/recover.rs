@@ -240,7 +240,7 @@ impl TipView {
                     | LastPageCheck::NoFrame(_)
                     | LastPageCheck::Rewritten => false,
                 };
-                if matched && !range.agrees(&pages, commit.get()) {
+                if matched && !range.agrees(&pages, commit) {
                     LastPageCheck::Rewritten
                 } else {
                     checked
@@ -305,10 +305,10 @@ struct TipPages {
 /// What the WAL holds in the tip's range of frames (ruling V3).
 enum Range {
     /// The newest version of each page, and the commit size of the range's last
-    /// transaction (0 for an empty range).
+    /// transaction (`None` for an empty range).
     Pages {
         pages: BTreeMap<PageNo, PageChecksum>,
-        commit: u32,
+        commit: Option<NonZeroU32>,
     },
     /// The range does not start or end on a transaction boundary of this WAL.
     Rewritten,
@@ -318,10 +318,10 @@ enum Range {
 }
 
 impl Range {
-    fn agrees(&self, tip: &TipPages, tip_commit: u32) -> bool {
+    fn agrees(&self, tip: &TipPages, tip_commit: NonZeroU32) -> bool {
         match self {
             Self::Pages { commit, .. } => {
-                tip.holds_wal_pages && (*commit == 0 || *commit == tip_commit)
+                tip.holds_wal_pages && commit.is_none_or(|commit| commit == tip_commit)
             }
             Self::Rewritten => false,
             Self::NotInThisWal => true,

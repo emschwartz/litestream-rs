@@ -114,7 +114,10 @@ fn rechaining_lets_a_changed_commit_field_through() {
     assert!(whole_of(0, &file).txs.is_empty());
     let whole = whole_of(WAL_RECHAIN, &file);
     assert_eq!(whole.txs.len(), 4);
-    assert_eq!(whole.txs.first().map(CommittedTx::commit), Some(5));
+    assert_eq!(
+        whole.txs.first().map(CommittedTx::commit),
+        std::num::NonZeroU32::new(5)
+    );
     wal(&input(
         [WAL_RECHAIN, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         &file,

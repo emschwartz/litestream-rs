@@ -398,7 +398,7 @@ mod rules {
         {
             out.push((
                 tx.frames().iter().map(|f| f.pgno().get()).collect(),
-                tx.commit(),
+                tx.commit().get(),
             ));
             cursor = *tx.end();
         }

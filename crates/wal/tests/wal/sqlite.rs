@@ -6,6 +6,7 @@
 //! the page map applied over it. They must agree page for page and in length.
 
 use std::fs;
+use std::num::NonZeroU32;
 use std::path::Path;
 
 use lsr_ltx::PageNo;
@@ -116,7 +117,7 @@ fn oracle(copy: &Copy) -> (u32, Vec<u8>) {
 fn apply(map: &PageMap, db: &[u8], reader: &mut WalReader<Cursor<Vec<u8>>>) -> Vec<u8> {
     let ps = map.page_size();
     let mut out = Vec::new();
-    for n in 1..=map.commit() {
+    for n in 1..=map.commit().map_or(0, NonZeroU32::get) {
         let pgno = PageNo::new(n, ps).unwrap();
         let mut page = vec![0; ps.bytes()];
         if let Some(frame) = map.get(pgno) {

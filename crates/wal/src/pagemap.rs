@@ -2,6 +2,7 @@
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::num::NonZeroU32;
 
 use lsr_ltx::{PageNo, PageSize};
 
@@ -23,7 +24,7 @@ use crate::scan::CommittedTx;
 pub struct PageMap {
     page_size: PageSize,
     pages: BTreeMap<PageNo, FrameRef>,
-    commit: u32,
+    commit: Option<NonZeroU32>,
     start: Option<WalOffset>,
     end: WalOffset,
     salts: Option<Salts>,
@@ -36,7 +37,7 @@ impl PageMap {
         Self {
             page_size,
             pages: BTreeMap::new(),
-            commit: 0,
+            commit: None,
             start: None,
             end: WalOffset::start(page_size),
             salts: None,
@@ -80,9 +81,10 @@ impl PageMap {
         for frame in tx.frames() {
             self.pages.insert(frame.pgno(), *frame);
         }
-        self.commit = tx.commit();
+        let commit = tx.commit();
+        self.commit = Some(commit);
         while let Some(top) = self.pages.last_entry() {
-            if top.key().get() <= self.commit {
+            if top.key().get() <= commit.get() {
                 break;
             }
             top.remove();
@@ -104,9 +106,9 @@ impl PageMap {
         self.pages.get(&pgno)
     }
 
-    /// The database size in pages after the last transaction applied; zero before any.
+    /// The database size in pages after the last transaction applied; `None` before any.
     #[must_use]
-    pub const fn commit(&self) -> u32 {
+    pub const fn commit(&self) -> Option<NonZeroU32> {
         self.commit
     }
 

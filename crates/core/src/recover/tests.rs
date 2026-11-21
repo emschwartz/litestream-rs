@@ -52,7 +52,7 @@ fn end_of(bytes: Vec<u8>) -> Option<(FrameCursor, FrameRef, u32)> {
     let mut last = None;
     while let Ok(TxOutcome::Tx(tx)) = wal.next_tx(&at, ScanLimit::FirstInvalidFrame) {
         at = *tx.end();
-        last = Some((at, *tx.frames().last()?, tx.commit()));
+        last = Some((at, *tx.frames().last()?, tx.commit().get()));
     }
     last
 }

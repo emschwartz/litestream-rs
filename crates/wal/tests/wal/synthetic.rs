@@ -130,7 +130,7 @@ fn scan_yields_each_transaction_then_a_clean_end() {
     let sizes: Vec<_> = scanned
         .txs
         .iter()
-        .map(|tx| (tx.frames().len(), tx.commit()))
+        .map(|tx| (tx.frames().len(), tx.commit().get()))
         .collect();
     assert_eq!(sizes, [(2, 2), (2, 3)]);
     let first = &scanned.txs[0].frames()[0];
