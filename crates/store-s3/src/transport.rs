@@ -3,9 +3,22 @@
 //! A [`Transport`] sends one [`HttpRequest`] and returns the response it got,
 //! whatever the status. Only a failure to get a response at all is an error,
 //! and [`TransportError`] carries kinds only, never a URL, a header or a body.
+//!
+//! [`Transport::send_many`] sends a batch with at most `limit` requests in
+//! flight and returns one result per request, in order. Its default sends them
+//! one after another, so the in-memory and fault-injecting transports stay
+//! deterministic; the socket clients override it. A blocking client gets
+//! concurrency from [`send_on_threads`]: up to `limit` scoped threads for the
+//! batch, all joined before it returns, so no thread outlives the call and no
+//! pool idles between batches. Each request keeps its own deadline, and what
+//! a status means is still judged per request by the layers above.
 
 use std::fmt;
 use std::io;
+use std::num::NonZeroUsize;
+use std::panic::{self, AssertUnwindSafe};
+use std::sync::{Mutex, PoisonError};
+use std::thread;
 
 use thiserror::Error;
 
@@ -143,6 +156,90 @@ pub trait Transport: Send + Sync {
     /// # Errors
     /// [`TransportError`] when no response arrived.
     fn send(&self, request: HttpRequest) -> Result<HttpResponse, TransportError>;
+
+    /// Sends every request with at most `limit` in flight and returns their
+    /// results in request order. The default sends them one at a time.
+    fn send_many(
+        &self,
+        requests: Vec<HttpRequest>,
+        _limit: NonZeroUsize,
+    ) -> Vec<Result<HttpResponse, TransportError>> {
+        requests
+            .into_iter()
+            .map(|request| self.send(request))
+            .collect()
+    }
+}
+
+/// The stack of a batch worker thread: an HTTPS request through ureq and
+/// rustls needs 48 KiB (see `lsr-replica`'s `stack` module for how that was
+/// measured), and this is about five times that.
+pub const BATCH_STACK: usize = 256 * 1024;
+
+/// One result slot per request of a batch.
+type Slots = Vec<Option<Result<HttpResponse, TransportError>>>;
+
+/// [`Transport::send_many`] for a blocking transport: the calling thread and
+/// up to `limit - 1` scoped threads (named `s3-batch`, [`BATCH_STACK`] each)
+/// take requests from one queue in order, so at most `limit` are in flight.
+/// Every thread is joined before this returns. A thread the OS refuses only
+/// narrows the batch, since the calling thread works the queue too. A request
+/// whose send panicked is reported in its slot as an I/O failure, whichever
+/// thread ran it, and the thread goes on to the next request.
+pub fn send_on_threads<T: Transport + ?Sized>(
+    transport: &T,
+    requests: Vec<HttpRequest>,
+    limit: NonZeroUsize,
+) -> Vec<Result<HttpResponse, TransportError>> {
+    let count = requests.len();
+    let helpers = limit.get().min(count).saturating_sub(1);
+    if helpers == 0 {
+        return requests
+            .into_iter()
+            .map(|request| transport.send(request))
+            .collect();
+    }
+    let queue = Mutex::new(requests.into_iter().enumerate());
+    let slots: Mutex<Slots> = Mutex::new((0..count).map(|_| None).collect());
+    let work = || {
+        loop {
+            let next = queue.lock().unwrap_or_else(PoisonError::into_inner).next();
+            let Some((at, request)) = next else { break };
+            let sent = panic::catch_unwind(AssertUnwindSafe(|| transport.send(request)));
+            let result = sent.unwrap_or(Err(TransportError::Io(io::ErrorKind::Other)));
+            if let Some(slot) = slots
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get_mut(at)
+            {
+                *slot = Some(result);
+            }
+        }
+    };
+    thread::scope(|scope| {
+        let handles: Vec<_> = (0..helpers)
+            .filter_map(|_| {
+                thread::Builder::new()
+                    .name("s3-batch".to_owned())
+                    .stack_size(BATCH_STACK)
+                    .spawn_scoped(scope, work)
+                    .ok()
+            })
+            .collect();
+        work();
+        for handle in handles {
+            // Sends cannot panic out of `work`, so a join has nothing to report.
+            match handle.join() {
+                Ok(()) | Err(_) => {}
+            }
+        }
+    });
+    slots
+        .into_inner()
+        .unwrap_or_else(PoisonError::into_inner)
+        .into_iter()
+        .map(|slot| slot.unwrap_or(Err(TransportError::Io(io::ErrorKind::Other))))
+        .collect()
 }
 
 #[cfg(all(test, any(feature = "ureq", feature = "reqwest")))]
@@ -171,5 +268,139 @@ mod tests {
             map_io(io::ErrorKind::PermissionDenied),
             TransportError::Io(io::ErrorKind::PermissionDenied)
         );
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "the gauge counts a few dozen requests"
+)]
+mod batch_tests {
+    use std::sync::Condvar;
+
+    use url::Url;
+
+    use super::*;
+    use crate::request::Method;
+
+    /// Counts requests in flight. Each send waits until `limit` are in flight
+    /// at once (or every request has started), so a batch that can reach its
+    /// limit does, and the peak shows whether it ever passed it. A path that
+    /// starts `/fail` gets an error, `/panic` a panic.
+    struct Gauge {
+        limit: usize,
+        total: usize,
+        state: Mutex<(usize, usize, usize, bool)>,
+        changed: Condvar,
+    }
+
+    impl Gauge {
+        fn new(limit: usize, total: usize) -> Self {
+            Self {
+                limit,
+                total,
+                state: Mutex::new((0, 0, 0, false)),
+                changed: Condvar::new(),
+            }
+        }
+
+        fn peak(&self) -> usize {
+            self.state.lock().unwrap().2
+        }
+    }
+
+    impl Transport for Gauge {
+        #[expect(
+            clippy::panic_in_result_fn,
+            reason = "a `/panic` path panics on purpose"
+        )]
+        fn send(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            let (in_flight, started, peak, released) = &mut *state;
+            *in_flight += 1;
+            *started += 1;
+            *peak = (*peak).max(*in_flight);
+            if *in_flight >= self.limit || *started == self.total {
+                *released = true;
+            }
+            self.changed.notify_all();
+            let mut state = self
+                .changed
+                .wait_while(state, |s| !s.3)
+                .unwrap_or_else(PoisonError::into_inner);
+            state.0 -= 1;
+            drop(state);
+            let path = request.url().path().to_owned();
+            if path.starts_with("/fail") {
+                return Err(TransportError::ConnectionReset);
+            }
+            assert!(!path.starts_with("/panic"), "worker panic");
+            Ok(HttpResponse::new(200, Vec::new(), path.into_bytes(), true))
+        }
+    }
+
+    fn batch(paths: &[&str]) -> Vec<HttpRequest> {
+        paths
+            .iter()
+            .map(|path| {
+                let url = Url::parse(&format!("http://127.0.0.1{path}")).unwrap();
+                HttpRequest::for_test(Method::Get, url, Vec::new())
+            })
+            .collect()
+    }
+
+    fn bodies(
+        results: &[Result<HttpResponse, TransportError>],
+    ) -> Vec<Result<String, TransportError>> {
+        results
+            .iter()
+            .map(|r| {
+                r.as_ref()
+                    .map(|resp| String::from_utf8(resp.body().to_vec()).unwrap())
+                    .map_err(|err| *err)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_batch_reaches_its_limit_and_never_passes_it() {
+        let paths: Vec<String> = (0..23).map(|n| format!("/{n}")).collect();
+        let names: Vec<&str> = paths.iter().map(String::as_str).collect();
+        for limit in [1, 2, 3, 8] {
+            let gauge = Gauge::new(limit, names.len());
+            let got = send_on_threads(&gauge, batch(&names), NonZeroUsize::new(limit).unwrap());
+            assert_eq!(gauge.peak(), limit, "limit {limit}");
+            let want: Vec<Result<String, TransportError>> = paths.iter().cloned().map(Ok).collect();
+            assert_eq!(bodies(&got), want, "results come back in request order");
+        }
+    }
+
+    #[test]
+    fn a_failed_request_is_reported_in_its_own_slot() {
+        let gauge = Gauge::new(4, 5);
+        let got = send_on_threads(
+            &gauge,
+            batch(&["/a", "/fail", "/b", "/panic", "/c"]),
+            NonZeroUsize::new(4).unwrap(),
+        );
+        assert_eq!(
+            bodies(&got),
+            vec![
+                Ok("/a".to_owned()),
+                Err(TransportError::ConnectionReset),
+                Ok("/b".to_owned()),
+                Err(TransportError::Io(io::ErrorKind::Other)),
+                Ok("/c".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_default_batch_is_sequential() {
+        let gauge = Gauge::new(1, 3);
+        let got = gauge.send_many(batch(&["/x", "/y", "/z"]), NonZeroUsize::new(8).unwrap());
+        assert_eq!(gauge.peak(), 1);
+        assert_eq!(bodies(&got).len(), 3);
     }
 }

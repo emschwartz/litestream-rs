@@ -45,8 +45,8 @@ pub use chain::{
 };
 pub use classify::{S3Code, classify, classify_transport, is_range_past_end};
 pub use config::{
-    BucketName, ConfigError, DEFAULT_REGION, Endpoint, PartSize, Prefix, Provider, Region,
-    S3Config, UrlStyle,
+    BucketName, ConfigError, DEFAULT_CONCURRENCY, DEFAULT_REGION, Endpoint, PartSize, Prefix,
+    Provider, Region, S3Config, UrlStyle,
 };
 pub use credentials::{S3Credentials, SecretString};
 #[cfg(feature = "testing")]
@@ -69,7 +69,7 @@ pub use response::{
     parse_create, parse_delete_failures, parse_head, parse_list, quoted_md5,
 };
 pub use store::{ListStats, S3Store, SystemClock};
-pub use transport::{HttpResponse, Transport, TransportError};
+pub use transport::{BATCH_STACK, HttpResponse, Transport, TransportError, send_on_threads};
 pub use upload::S3Upload;
 #[cfg(feature = "ureq")]
 pub use ureq_transport::UreqTransport;

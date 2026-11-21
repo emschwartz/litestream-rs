@@ -1,5 +1,6 @@
 //! What identifies a replica on an S3-compatible service: endpoint, bucket,
-//! prefix, region, addressing style, provider and part size, each a type that
+//! prefix, region, addressing style, provider, part size and request
+//! concurrency, each a type that
 //! holds only a usable value.
 //!
 //! Reading an `s3://` URL is not here: `lsr-config`'s `S3Url` is the one parser,
@@ -7,6 +8,7 @@
 //! here carries any part of a URL.
 
 use std::fmt;
+use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use thiserror::Error;
@@ -289,11 +291,15 @@ pub struct S3Config {
     style: UrlStyle,
     provider: Provider,
     part_size: PartSize,
+    concurrency: NonZeroUsize,
     deadline: Duration,
 }
 
 /// How long one request may take end to end unless told otherwise.
 const DEFAULT_DEADLINE: Duration = Duration::from_secs(60);
+
+/// How many requests of one batch may be in flight unless told otherwise.
+pub const DEFAULT_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(7);
 
 impl S3Config {
     /// A configuration with the defaults the endpoint's provider gets:
@@ -323,6 +329,7 @@ impl S3Config {
             } else {
                 PartSize::MIN
             },
+            concurrency: DEFAULT_CONCURRENCY,
             deadline: DEFAULT_DEADLINE,
         }
     }
@@ -353,6 +360,18 @@ impl S3Config {
     #[must_use]
     pub fn with_part_size(mut self, part_size: PartSize) -> Self {
         self.part_size = part_size;
+        self
+    }
+
+    /// Replaces how many requests of one batch may be in flight at once: the
+    /// parts of a multipart upload, the ranged reads ahead of a restore, the
+    /// levels of a listing, the stamps of a decision. Memory held by a batch
+    /// is at most this many request bodies or responses: `concurrency` times
+    /// the part size for an upload, times the read size for a read. One sends
+    /// every request after the one before it.
+    #[must_use]
+    pub fn with_concurrency(mut self, concurrency: NonZeroUsize) -> Self {
+        self.concurrency = concurrency;
         self
     }
 
@@ -403,6 +422,12 @@ impl S3Config {
     #[must_use]
     pub fn part_size(&self) -> PartSize {
         self.part_size
+    }
+
+    /// How many requests of one batch may be in flight at once.
+    #[must_use]
+    pub fn concurrency(&self) -> NonZeroUsize {
+        self.concurrency
     }
 
     /// The per-request deadline the transport enforces.
@@ -474,5 +499,10 @@ mod tests {
             })
         );
         assert_eq!(PartSize::new(5 * 1024 * 1024), Ok(PartSize::MIN));
+    }
+
+    #[test]
+    fn default_concurrency_is_eight() {
+        assert_eq!(DEFAULT_CONCURRENCY.get(), 8);
     }
 }
