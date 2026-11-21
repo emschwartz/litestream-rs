@@ -7,7 +7,8 @@
 //! its date. Every seed's replay line is printed before the run, so a hang or
 //! a crash of the process still names its seed, and every failure is printed
 //! again at the end with its replay line. A failing seed belongs in the fixed
-//! set once the bug is fixed.
+//! set once the bug is fixed, as its list of operations: replayed by seed, it
+//! would stop reproducing the bug the next time the generator changes.
 
 use std::time::{Duration, Instant};
 

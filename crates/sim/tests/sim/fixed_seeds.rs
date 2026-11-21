@@ -5,7 +5,8 @@
 mod fixed {
     use std::time::{Duration, Instant};
 
-    use lsr_sim::{Seed, Weights, run};
+    use lsr_sim::run::run_ops;
+    use lsr_sim::{Generator, Op, Opts, Seed, Weights, frozen_history, run};
 
     const STEPS: u32 = 300;
     const BUDGET: Duration = Duration::from_secs(10);
@@ -65,9 +66,44 @@ mod fixed {
         batch(57);
     }
 
+    /// A regression: the history `seed` drew in `steps` operations under
+    /// the frozen generator it was found with, so a new draw in the live
+    /// generator never reshapes it.
     fn replay(seed: u64, steps: u32) {
-        if let Err(failure) = run(Seed::new(seed), steps, &Weights::default()) {
+        let seed = Seed::new(seed);
+        let ops = frozen_history(seed, steps, Generator::V1);
+        if let Err(failure) = run_ops(seed, &ops, &Opts::default()) {
             panic!("{failure}");
+        }
+    }
+
+    /// Every regression above, with a digest of its operations.
+    const REGRESSIONS: [(u64, u32, u64); 6] = [
+        (0x25, 44, 0xcc32_7036_14fd_e9c0),
+        (0x2d, 256, 0x09b3_c7db_4d3c_63f9),
+        (0x46, 252, 0x7d0a_3cb2_c84c_6298),
+        (0x0000_126d_68ef_1c07, 52, 0x44cb_38c0_6961_9272),
+        (0x0000_126d_68ed_250e, 215, 0xf04f_3f7b_7f9b_6425),
+        (0x0000_126d_68ef_545f, 176, 0xb236_1b18_218a_c8df),
+    ];
+
+    /// FNV-1a over the operations' debug text: stable across builds, and any
+    /// change to an operation or its fields changes it.
+    fn digest(ops: &[Op]) -> u64 {
+        format!("{ops:?}")
+            .bytes()
+            .fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+            })
+    }
+
+    /// A frozen generator that drew something else would let every
+    /// regression above pass without reaching its bug.
+    #[test]
+    fn regression_histories_never_change() {
+        for (seed, steps, want) in REGRESSIONS {
+            let ops = frozen_history(Seed::new(seed), steps, Generator::V1);
+            assert_eq!(digest(&ops), want, "seed {seed:#x} at {steps} steps");
         }
     }
 
@@ -122,8 +158,7 @@ mod fixed {
     #[test]
     fn a_snapshot_id_taken_again_after_a_lost_staged_snapshot() {
         use lsr_ltx::PageSize;
-        use lsr_sim::run::run_ops;
-        use lsr_sim::{CrashKind, EnvFault, Op, Opts};
+        use lsr_sim::{CrashKind, EnvFault};
         let ops = [
             Op::Crash(CrashKind::Power),
             Op::Tick,
