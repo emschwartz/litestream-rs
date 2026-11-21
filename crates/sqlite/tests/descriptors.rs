@@ -18,8 +18,8 @@ use std::time::Duration;
 
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    CheckpointMode, MemStore, Probes, Step, StepEnd, SyncConfig, Synced, SyncedThrough, Tip,
-    WalSource, WalView, checkpoint, recover_traced, sync_step,
+    CheckpointMode, MemStore, Position, Probes, Step, StepEnd, SyncConfig, Synced, SyncedThrough,
+    Tip, WalSource, WalView, checkpoint, recover_traced, sync_step,
 };
 use lsr_ltx::Timestamp;
 use lsr_sqlite::Sqlite;
@@ -121,6 +121,7 @@ struct Engine {
     live: Sqlite,
     staging: MemStore,
     through: Option<SyncedThrough>,
+    position: Option<Position>,
     now: i64,
 }
 
@@ -135,10 +136,10 @@ impl Engine {
             committed: Some(committed),
             epoch: self.live.epoch(),
         };
-        let tip = self.through.as_ref().map(|through| {
-            let position = through.position();
-            Tip::Running(position, Probes::read(&mut wal, position).unwrap())
-        });
+        let tip = self
+            .position
+            .as_ref()
+            .map(|position| Tip::Running(position, Probes::read(&mut wal, position).unwrap()));
         let step = Step::try_from(recover_traced(tip, &view, None).recovered).unwrap();
         self.now = self.now.saturating_add(10);
         let mut db = self.live.clone();
@@ -154,7 +155,7 @@ impl Engine {
             Timestamp::from_unix_millis(self.now),
         ))
         .unwrap();
-        self.through = Some(match synced {
+        let through = match synced {
             Synced::Idle(through)
             | Synced::Wrote {
                 end: StepEnd::Through(through),
@@ -169,7 +170,9 @@ impl Engine {
                 end: StepEnd::Unproven(_),
                 ..
             } => panic!("the test never meets a wal-index reset ahead of its header"),
-        });
+        };
+        self.position = Some(*through.position());
+        self.through = Some(through);
     }
 
     fn checkpoint(&mut self, mode: CheckpointMode) {
@@ -187,7 +190,8 @@ impl Engine {
             Timestamp::from_unix_millis(self.now),
         ))
         .unwrap();
-        self.through = Some(done.through);
+        self.position = Some(done.staged.position());
+        self.through = done.staged.into_proof();
     }
 }
 
@@ -231,6 +235,7 @@ fn a_sync_and_checkpoint_cycle_opens_and_closes_no_descriptor_on_the_database_or
         live: Sqlite::open(&db).unwrap(),
         staging: MemStore::new(),
         through: None,
+        position: None,
         now: 1_000,
     };
     cycle(&app, &mut engine);

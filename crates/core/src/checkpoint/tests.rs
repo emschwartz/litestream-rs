@@ -377,6 +377,10 @@ impl Rig {
         }
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "the protocol's own result, returned as is"
+    )]
     fn run(
         &mut self,
         proof: SyncedThrough,
@@ -385,6 +389,10 @@ impl Rig {
         self.run_with(proof, mode, &SyncConfig::default())
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "the protocol's own result, returned as is"
+    )]
     fn run_with(
         &mut self,
         proof: SyncedThrough,
@@ -404,7 +412,7 @@ impl Rig {
         ))
     }
 
-    fn files(&self) -> Vec<Staged> {
+    fn files(&self) -> Vec<StagedFile> {
         block_on(async {
             let listing = self
                 .store
@@ -432,7 +440,7 @@ impl Rig {
     }
 }
 
-type Staged = (FileInfo, Header, Vec<(PageNo, Vec<u8>)>);
+type StagedFile = (FileInfo, Header, Vec<(PageNo, Vec<u8>)>);
 
 fn script(busy: bool, effect: CheckpointEffect) -> CheckpointScript {
     CheckpointScript { busy, effect }
@@ -446,7 +454,7 @@ fn a_passive_with_nothing_in_the_way_seals_then_follows_the_writer_restart() {
     let done = rig.run(proof, CheckpointMode::Passive).unwrap();
     // A fully backfilled WAL is restarted by the bump frame's writer, as SQLite does.
     assert_eq!(done.outcome, CheckpointOutcome::Restarted);
-    assert_eq!(done.files.len(), 2);
+    assert_eq!(done.staged.files().len(), 2);
     assert_eq!(
         rig.ck.calls(),
         [
@@ -457,7 +465,7 @@ fn a_passive_with_nothing_in_the_way_seals_then_follows_the_writer_restart() {
         ]
     );
     assert_eq!(
-        done.through.position().continuity(),
+        done.staged.proof().unwrap().position().continuity(),
         Continuity::Pinned(rig.wal.epoch())
     );
 }
@@ -473,9 +481,11 @@ fn a_passive_held_back_by_a_reader_is_not_restarted() {
     // The barrier kept writers out until the read transaction was retaken,
     // so the position is pinned again, at the epoch the checkpoint retook.
     assert_eq!(
-        done.through.position().continuity(),
+        done.staged.position().continuity(),
         Continuity::Pinned(rig.wal.epoch())
     );
+    // Our own bump frame is past it: no proof that it is the committed end.
+    assert_eq!(done.staged.proof(), None);
 }
 
 #[test]
@@ -497,8 +507,8 @@ fn a_passive_that_restarts_the_wal_starts_a_new_generation_file() {
     let done = rig.run(proof, CheckpointMode::Passive).unwrap();
     assert_eq!(done.outcome, CheckpointOutcome::Restarted);
     assert_ne!(rig.wal.salts(), before);
-    assert_eq!(done.files.len(), 2);
-    let position = done.through.position();
+    assert_eq!(done.staged.files().len(), 2);
+    let position = done.staged.proof().unwrap().position();
     assert_eq!(position.continuity(), Continuity::Pinned(rig.wal.epoch()));
     assert_eq!(position.txid().get(), 3);
 }
@@ -509,7 +519,7 @@ fn a_truncate_snapshots_the_new_generation_once_under_the_write_lock() {
     let proof = rig.proof();
     let done = rig.run(proof, CheckpointMode::Truncate).unwrap();
     assert_eq!(done.outcome, CheckpointOutcome::Truncated);
-    assert_eq!(done.files.len(), 1);
+    assert_eq!(done.staged.files().len(), 1);
     let files = rig.files();
     let (_, header, _) = files.last().unwrap();
     assert_eq!(header.fields().txids.max().get(), 2);
@@ -548,9 +558,9 @@ fn a_busy_truncate_that_changed_nothing_takes_no_snapshot() {
     rig.ck.script(script(true, CheckpointEffect::Nothing));
     let done = rig.run(proof, CheckpointMode::Truncate).unwrap();
     assert_eq!(done.outcome, CheckpointOutcome::Busy);
-    assert!(done.files.len() <= 1);
+    assert!(done.staged.files().len() <= 1);
     assert!(!rig.ck.calls().contains(&CheckpointCall::BeginWriteLock));
-    assert_eq!(rig.files().len(), 1 + done.files.len());
+    assert_eq!(rig.files().len(), 1 + done.staged.files().len());
 }
 
 // Failures at each step of the protocol.
@@ -607,7 +617,7 @@ fn a_position_after_a_checkpoint_is_pinned_at_the_epoch_it_retook() {
         "the checkpoint released the read transaction"
     );
     assert_eq!(
-        done.through.position().continuity(),
+        done.staged.position().continuity(),
         Continuity::Pinned(after)
     );
 }
@@ -623,8 +633,8 @@ fn the_seal_takes_every_committed_transaction_whatever_the_cap() {
         rig.commit(&[2]);
         rig.commit(&[1, 3]);
         let done = rig.run_with(proof, CheckpointMode::Passive, cfg).unwrap();
-        let files: Vec<_> = done.files.iter().map(|f| f.key).collect();
-        (files, done.through.position().txid(), done.outcome)
+        let files: Vec<_> = done.staged.files().iter().map(|f| f.key).collect();
+        (files, done.staged.position().txid(), done.outcome)
     };
     let capped = SyncConfig {
         cap: NonZeroU64::new(1),
@@ -637,16 +647,16 @@ fn the_seal_takes_every_committed_transaction_whatever_the_cap() {
 fn a_position_after_a_checkpoint_fault_is_unpinned() {
     let (_, result) = fail_at(SourceOp::BumpSeq, CheckpointMode::Passive);
     let failed = result.unwrap_err();
-    assert_eq!(failed.position.continuity(), Continuity::Unpinned);
-    assert_eq!(failed.position.txid().get(), 2);
+    assert_eq!(failed.staged.position().continuity(), Continuity::Unpinned);
+    assert_eq!(failed.staged.position().txid().get(), 2);
 }
 
 #[test]
 fn a_failure_before_the_checkpoint_keeps_the_pinned_position() {
     let (_, result) = fail_at(SourceOp::BeginBarrier, CheckpointMode::Passive);
     let failed = result.unwrap_err();
-    assert_ne!(failed.position.continuity(), Continuity::Unpinned);
-    assert_eq!(failed.position.txid().get(), 1);
+    assert_ne!(failed.staged.position().continuity(), Continuity::Unpinned);
+    assert_eq!(failed.staged.position().txid().get(), 1);
 }
 
 #[test]
@@ -684,4 +694,65 @@ fn every_truncate_step_failure_releases_the_write_lock() {
             );
         }
     }
+}
+
+/// A step that fails after a step staged a file hands that file back with
+/// the position it leaves, so the caller can upload it.
+#[test]
+fn a_failure_after_a_staging_step_hands_back_the_file_it_staged() {
+    for (op, mode) in [
+        (SourceOp::Checkpoint, CheckpointMode::Passive),
+        (SourceOp::EndBarrier, CheckpointMode::Passive),
+        (SourceOp::BumpSeq, CheckpointMode::Passive),
+        (SourceOp::EndWriteLock, CheckpointMode::Truncate),
+    ] {
+        let (rig, result) = fail_at(op, mode);
+        let failed = result.unwrap_err();
+        let position = failed.staged.position();
+        let newest = failed
+            .staged
+            .files()
+            .iter()
+            .map(|f| f.key.range().max())
+            .max();
+        assert_eq!(newest, Some(position.txid()), "{op:?}");
+        let on_disk = rig.files().last().map(|(info, _, _)| info.key);
+        assert_eq!(
+            on_disk,
+            failed.staged.files().last().map(|f| f.key),
+            "{op:?}"
+        );
+    }
+}
+
+/// The proof comes back only when the protocol's last step reached the
+/// committed end: a restart followed, or a TRUNCATE's catch-up or snapshot.
+#[test]
+fn a_checkpoint_returns_a_proof_only_after_a_step_through_the_end() {
+    let run = |effect: Option<CheckpointEffect>, mode| {
+        let mut rig = Rig::new();
+        let proof = rig.proof();
+        rig.commit(&[3]);
+        if let Some(effect) = effect {
+            rig.ck.script(script(false, effect));
+        }
+        let done = rig.run(proof, mode).unwrap();
+        (done.outcome, done.staged.proof().is_some())
+    };
+    assert_eq!(
+        run(None, CheckpointMode::Passive),
+        (CheckpointOutcome::Restarted, true)
+    );
+    assert_eq!(
+        run(Some(CheckpointEffect::Backfill(1)), CheckpointMode::Passive),
+        (CheckpointOutcome::NotRestarted, false)
+    );
+    assert_eq!(
+        run(None, CheckpointMode::Truncate),
+        (CheckpointOutcome::Truncated, true)
+    );
+    assert_eq!(
+        run(Some(CheckpointEffect::Nothing), CheckpointMode::Truncate),
+        (CheckpointOutcome::NotRestarted, true)
+    );
 }

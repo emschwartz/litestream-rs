@@ -41,9 +41,9 @@ use std::time::Duration;
 use lsr_core::conformance::block_on;
 use lsr_core::{
     Barrier, CheckpointMode, CheckpointRun, Checkpointer, CommittedRead, Level, MemStore,
-    ObjectStore, PageLimit, PageSource, Probes, ReadLen, SourceError, Step, StepEnd, SyncConfig,
-    Synced, SyncedThrough, Tip, Verdict, WalSource, WalView, WriteLock, checkpoint, recover_traced,
-    sync_step,
+    ObjectStore, PageLimit, PageSource, Position, Probes, ReadLen, SourceError, Step, StepEnd,
+    SyncConfig, Synced, SyncedThrough, Tip, Verdict, WalSource, WalView, WriteLock, checkpoint,
+    recover_traced, sync_step,
 };
 use lsr_ltx::{PageNo, PageSize, Timestamp};
 use lsr_sim::{ReaderId, SimCheckpointer, SimPages, SimSource, SimSqlite, StrangerMode};
@@ -317,6 +317,7 @@ struct Engine<S: WalSource, P: PageSource, C: Checkpointer> {
     staging: MemStore,
     cfg: SyncConfig,
     through: Option<SyncedThrough>,
+    position: Option<Position>,
     now: i64,
 }
 
@@ -329,6 +330,7 @@ impl<S: WalSource, P: PageSource, C: Checkpointer> Engine<S, P, C> {
             staging: MemStore::new(),
             cfg: SyncConfig::default(),
             through: None,
+            position: None,
             now: 1_000,
         }
     }
@@ -349,7 +351,7 @@ impl<S: WalSource, P: PageSource, C: Checkpointer> Engine<S, P, C> {
     }
 
     fn verdict(&self, wal: &mut WalReader<S::Wal>, view: &WalView) -> Verdict {
-        match self.through.as_ref().map(SyncedThrough::position) {
+        match self.position.as_ref() {
             None => recover_traced(None, view, None),
             Some(position) => {
                 let probes = Probes::read(wal, position).expect("probes");
@@ -384,6 +386,7 @@ impl<S: WalSource, P: PageSource, C: Checkpointer> Engine<S, P, C> {
         .expect("step");
         match synced {
             Synced::Idle(through) => {
+                self.position = Some(*through.position());
                 self.through = Some(through);
                 format!("{seen} idle")
             }
@@ -393,6 +396,7 @@ impl<S: WalSource, P: PageSource, C: Checkpointer> Engine<S, P, C> {
                 txs,
                 ..
             } => {
+                self.position = Some(*through.position());
                 self.through = Some(through);
                 format!("{seen} wrote {file:?} over {txs} transactions")
             }
@@ -425,8 +429,10 @@ impl<S: WalSource, P: PageSource, C: Checkpointer> Engine<S, P, C> {
             Timestamp::from_unix_millis(self.now),
         ))
         .expect("checkpoint");
-        self.through = Some(done.through);
-        format!("{:?} {:?}", done.outcome, done.files)
+        let did = format!("{:?} {:?}", done.outcome, done.staged.files());
+        self.position = Some(done.staged.position());
+        self.through = done.staged.into_proof();
+        did
     }
 
     /// Every staged file, whole, in key order.

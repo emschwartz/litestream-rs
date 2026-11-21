@@ -195,7 +195,7 @@ fn a_bug_rebuilds_the_actor_and_boots_again_after_the_wait() {
     };
     assert_eq!((lane, cause), (Lane::Sync, PersistentCause::Bug));
     assert_eq!(actor.phase(), Phase::Boot);
-    assert_eq!(actor.position, None, "nothing of the old state is kept");
+    assert_eq!(actor.position(), None, "nothing of the old state is kept");
     let io = rig.io();
     let early = rig.tick(&mut actor, T0 + 500);
     assert_eq!(event(&early), Some(&Event::Idle));

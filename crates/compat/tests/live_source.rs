@@ -17,9 +17,9 @@ use std::time::Duration;
 use lsr_compat::{hash_pages, integrity_check};
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    CheckpointMode, Checkpointer, CommittedRead, FileInfo, MemSink, MemStore, PageSource, Probes,
-    ReadEpoch, RecoverEvent, Recovered, RestoreTarget, SnapshotCause, SourceError, Step, StepEnd,
-    SyncConfig, Synced, SyncedThrough, Tip, Verdict, WalSource, WalView, checkpoint,
+    CheckpointMode, Checkpointer, CommittedRead, FileInfo, MemSink, MemStore, PageSource, Position,
+    Probes, ReadEpoch, RecoverEvent, Recovered, RestoreTarget, SnapshotCause, SourceError, Step,
+    StepEnd, SyncConfig, Synced, SyncedThrough, Tip, Verdict, WalSource, WalView, checkpoint,
     recover_traced, restore, sync_step,
 };
 use lsr_ltx::{PageNo, PageSize, Timestamp, Txid};
@@ -58,6 +58,7 @@ struct Rig {
     staging: MemStore,
     cfg: SyncConfig,
     through: Option<SyncedThrough>,
+    position: Option<Position>,
     now: i64,
 }
 
@@ -85,6 +86,7 @@ impl Rig {
             staging,
             cfg: SyncConfig::default(),
             through: None,
+            position: None,
             now: 1_000,
         };
         rig.write(100);
@@ -122,7 +124,7 @@ impl Rig {
     }
 
     fn txid(&self) -> Txid {
-        self.through.as_ref().expect("synced").position().txid()
+        self.position.expect("synced").txid()
     }
 
     /// The WAL as one read of its header and one read of the wal-index see it.
@@ -142,7 +144,7 @@ impl Rig {
     /// What the engine would decide now from the last proven position.
     fn verdict(&mut self) -> Verdict {
         let (mut wal, view, _) = self.view();
-        match self.through.as_ref().map(SyncedThrough::position) {
+        match self.position.as_ref() {
             None => recover_traced(None, &view, None),
             Some(position) => {
                 let probes = Probes::read(&mut wal, position).expect("probes");
@@ -170,6 +172,7 @@ impl Rig {
         .expect("step");
         match synced {
             Synced::Idle(through) => {
+                self.position = Some(*through.position());
                 self.through = Some(through);
                 Did::Idle
             }
@@ -179,6 +182,7 @@ impl Rig {
                 txs,
                 ..
             } => {
+                self.position = Some(*through.position());
                 self.through = Some(through);
                 Did::Wrote { file, txs }
             }
@@ -216,7 +220,8 @@ impl Rig {
             Timestamp::from_unix_millis(self.now),
         ))
         .expect("checkpoint");
-        self.through = Some(done.through);
+        self.position = Some(done.staged.position());
+        self.through = done.staged.into_proof();
         done.outcome
     }
 

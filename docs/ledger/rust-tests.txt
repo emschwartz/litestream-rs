@@ -331,6 +331,8 @@ lsr-core actor::tests::audit::a_rotten_snapshot_the_lower_levels_cover_is_delete
 lsr-core actor::tests::audit::the_cover_test_is_the_restore_planner
 lsr-core actor::tests::boot_lists_then_recovers_then_uploads
 lsr-core actor::tests::checkpoint_call_is_recorded
+lsr-core actor::tests::checkpoint_failed::a_drain_after_a_failed_checkpoint_waits_for_the_file_it_staged
+lsr-core actor::tests::checkpoint_failed::a_file_a_failed_checkpoint_staged_is_uploaded
 lsr-core actor::tests::clock_back_clamped_once
 lsr-core actor::tests::degraded::a_bug_rebuilds_the_actor_and_boots_again_after_the_wait
 lsr-core actor::tests::degraded::a_bug_stops_under_strict
@@ -407,9 +409,11 @@ lsr-core checkpoint::tests::a_busy_interval_passive_keeps_the_trigger_for_one_mo
 lsr-core checkpoint::tests::a_busy_passive_reports_busy
 lsr-core checkpoint::tests::a_busy_truncate_that_changed_nothing_takes_no_snapshot
 lsr-core checkpoint::tests::a_capped_step_only_triggers_the_truncate_threshold
+lsr-core checkpoint::tests::a_checkpoint_returns_a_proof_only_after_a_step_through_the_end
 lsr-core checkpoint::tests::a_commit_before_the_truncate_is_in_the_snapshot
 lsr-core checkpoint::tests::a_failed_passive_at_the_threshold_goes_to_truncate
 lsr-core checkpoint::tests::a_failed_release_never_replaces_the_first_fault
+lsr-core checkpoint::tests::a_failure_after_a_staging_step_hands_back_the_file_it_staged
 lsr-core checkpoint::tests::a_failure_before_the_checkpoint_keeps_the_pinned_position
 lsr-core checkpoint::tests::a_passive_held_back_by_a_reader_is_not_restarted
 lsr-core checkpoint::tests::a_passive_that_restarts_the_wal_starts_a_new_generation_file

@@ -46,6 +46,10 @@ struct Counting {
     /// A WAL whose read epoch the next upload begun moves, as a checkpoint
     /// by another connection would mid-step.
     moves_epoch: Arc<std::sync::Mutex<Option<FakeWal>>>,
+    /// A WAL the host commits a transaction to (page 1 filled with the byte)
+    /// as the next upload begins: a commit that lands after a sync step read
+    /// the committed end.
+    commits_on_upload: Arc<std::sync::Mutex<Option<(FakeWal, u8)>>>,
 }
 
 impl Counting {
@@ -127,6 +131,9 @@ impl ObjectStore for Counting {
         self.count();
         if let Some(wal) = self.moves_epoch.lock().unwrap().take() {
             wal.set_epoch(wal.epoch().next());
+        }
+        if let Some((wal, n)) = self.commits_on_upload.lock().unwrap().take() {
+            wal.append_tx(&[(pg(1), vec![n; PS.bytes()])], nz(3));
         }
         self.inner.begin_upload(key, created_at)
     }
@@ -1562,6 +1569,7 @@ fn a_crash_between_the_drop_and_the_snapshot_boots_clean() {
     assert_eq!(restored(&rig), 2);
 }
 
+mod checkpoint_failed;
 mod degraded;
 mod index_reset;
 mod lanes;

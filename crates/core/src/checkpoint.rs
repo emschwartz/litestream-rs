@@ -23,7 +23,11 @@
 //! replaces the fault that came first. The checkpoint releases and retakes the read transaction, so
 //! from the moment it is called the position is demoted to [`Continuity::Unpinned`] and is
 //! pinned again only by a step that proves `synced == committed` at the new epoch (or by step 6,
-//! which the barrier makes sound). A fault returns the last position that is true. A step that
+//! which the barrier makes sound). Success and fault both return a [`Staged`]: the last position
+//! that is true together with the files the completed steps staged, so a fault after the seal
+//! (a busy checkpoint, a failed bump or release) cannot strand the sealed file unuploaded. Its
+//! proof is present only when the last step reached the committed end at the current epoch; a
+//! PASSIVE that restarted nothing ends pinned but behind our own bump frame. A step that
 //! finds the wal-index reset ahead of the WAL header proves nothing, so the protocol stops there
 //! with `WalMoved` and the position it had; a snapshot such a step staged is written again over
 //! the same key by the next step from that position.
@@ -323,31 +327,101 @@ pub fn next_wake(state: &CheckpointState, cfg: &CheckpointConfig) -> Option<Time
     }
 }
 
+/// Where the protocol's last step left the position, and whether that step
+/// proved it reached the committed end.
+#[derive(Debug, PartialEq, Eq)]
+enum Reached {
+    /// A step reached the committed end at the read epoch that still holds.
+    Through(SyncedThrough),
+    /// No step since proved the end: the checkpoint released the read
+    /// transaction, or a PASSIVE that restarted nothing left our own bump
+    /// frame past the position (by design).
+    Short(Position),
+}
+
+impl Reached {
+    const fn position(&self) -> Position {
+        match self {
+            Self::Through(through) => *through.position(),
+            Self::Short(position) => *position,
+        }
+    }
+}
+
+/// What a checkpoint staged and the position that follows from it, whether
+/// the checkpoint finished or not.
+///
+/// One value so a caller cannot take the position and drop the files: the
+/// position's transaction is the newest file staged, and a file a step staged
+/// before a later step failed must still be uploaded.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Staged {
+    reached: Reached,
+    files: Vec<FileInfo>,
+    clamped: Vec<Clamped>,
+}
+
+impl Staged {
+    /// The last position that is true; its transaction is the newest staged
+    /// file. It is unpinned once the checkpoint released the read transaction,
+    /// unless a later step pinned it again.
+    #[must_use]
+    pub const fn position(&self) -> Position {
+        self.reached.position()
+    }
+
+    /// The proof that the position equals the committed end, present only when
+    /// the protocol ended on a step that reached it at the current epoch.
+    #[must_use]
+    pub const fn proof(&self) -> Option<&SyncedThrough> {
+        match &self.reached {
+            Reached::Through(through) => Some(through),
+            Reached::Short(_) => None,
+        }
+    }
+
+    /// The proof, giving up the rest.
+    #[must_use]
+    pub fn into_proof(self) -> Option<SyncedThrough> {
+        match self.reached {
+            Reached::Through(through) => Some(through),
+            Reached::Short(_) => None,
+        }
+    }
+
+    /// The files staged on the way: the seal, the new generation or the boundary snapshot.
+    #[must_use]
+    pub fn files(&self) -> &[FileInfo] {
+        &self.files
+    }
+
+    /// Clock steps back the staged files were stamped around.
+    #[must_use]
+    pub fn clamped(&self) -> &[Clamped] {
+        &self.clamped
+    }
+}
+
 /// A finished checkpoint.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Checkpointed {
-    /// The proof that the position reached the committed end at the current epoch
-    /// (a PASSIVE that restarted nothing leaves our own bump frame past it, by design).
-    pub through: SyncedThrough,
+    /// What was staged, the position it leaves and its proof, if any.
+    pub staged: Staged,
     /// What happened.
     pub outcome: CheckpointOutcome,
-    /// The files staged on the way: the seal, the new generation or the boundary snapshot.
-    pub files: Vec<FileInfo>,
-    /// Clock steps back the staged files were stamped around.
-    pub clamped: Vec<Clamped>,
     /// What SQLite's checkpoint call reported as the read transaction was retaken: where the
     /// pin now sits, for the host-checkpoint observer (`crate::host`).
     pub run: Option<CheckpointRun>,
 }
 
 /// A checkpoint that did not finish.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct CheckpointFailed {
     /// What went wrong.
     pub fault: Fault,
-    /// The last position that is true. It moved only for a step that completed,
-    /// and is unpinned once the checkpoint released the read transaction.
-    pub position: Position,
+    /// What the steps that completed staged, and the last position that is
+    /// true. The position moved only for a step that completed.
+    pub staged: Staged,
     /// What SQLite's checkpoint call reported, when it returned before the fault.
     pub run: Option<CheckpointRun>,
 }
@@ -369,7 +443,7 @@ struct Protocol<'a, W, P, C, L> {
     staging: &'a L,
     cfg: SyncConfig,
     now: Timestamp,
-    good: Position,
+    good: Reached,
     files: Vec<FileInfo>,
     clamped: Vec<Clamped>,
     run: Option<CheckpointRun>,
@@ -389,13 +463,19 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_, 
         Ok(*self.reader()?.header())
     }
 
-    fn unpin(&mut self) {
-        self.good = self.good.with_continuity(Continuity::Unpinned);
+    /// The last position that is true.
+    const fn position(&self) -> Position {
+        self.good.position()
     }
 
+    fn unpin(&mut self) {
+        self.good = Reached::Short(self.position().with_continuity(Continuity::Unpinned));
+    }
+
+    /// Step 6: pinned again, but not through (our bump frame is past it).
     fn pin(&mut self, epoch: ReadEpoch) {
         if self.wal.epoch() == epoch {
-            self.good = self.good.with_continuity(Continuity::Pinned(epoch));
+            self.good = Reached::Short(self.position().with_continuity(Continuity::Pinned(epoch)));
         }
     }
 
@@ -446,7 +526,7 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_, 
                 ..
             } => return Err(Fault::Bug),
         };
-        self.good = through.into_position();
+        self.good = Reached::Through(through);
         if self.wal.epoch() != epoch {
             self.unpin();
         }
@@ -471,12 +551,12 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_, 
                 CheckpointOutcome::NotRestarted
             });
         }
-        self.step(Step::NewGeneration(self.good)).await?;
+        self.step(Step::NewGeneration(self.position())).await?;
         Ok(CheckpointOutcome::Restarted)
     }
 
     async fn seal_and_checkpoint(&mut self) -> Result<CheckpointRun, Fault> {
-        self.step(Step::Incremental(self.good)).await?;
+        self.step(Step::Incremental(self.position())).await?;
         let run = self.ck.checkpoint(CheckpointMode::Passive);
         self.unpin();
         let run = run.map_err(Fault::from_source)?;
@@ -496,11 +576,11 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_, 
             .wal
             .len()
             .map_err(Fault::from_source)?
-            .is_none_or(|len| !len.covers(self.good.synced()));
+            .is_none_or(|len| !len.covers(self.position().synced()));
         if after == before && !shorter {
             // No barrier held writers out, so a commit may sit between the
             // proof and the checkpoint: catch up before claiming the end.
-            self.step(Step::Incremental(self.good)).await?;
+            self.step(Step::Incremental(self.position())).await?;
             return Ok(if run.busy {
                 CheckpointOutcome::Busy
             } else {
@@ -516,8 +596,8 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_, 
     async fn boundary_snapshot(&mut self) -> Result<(), Fault> {
         let lock = self.ck.begin_write_lock().map_err(Fault::from_source)?;
         let snapshot = Step::Snapshot {
-            after: Some(self.good.txid()),
-            prev_timestamp: Some(self.good.timestamp()),
+            after: Some(self.position().txid()),
+            prev_timestamp: Some(self.position().timestamp()),
             cause: SnapshotCause::CheckpointBoundary,
         };
         let stepped = self.step(snapshot).await;
@@ -529,17 +609,23 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_, 
 
 /// Runs one checkpoint from a position that reached the committed end.
 ///
-/// The proof is consumed and a new one returned: it carries the position, so a
-/// stale one cannot be passed. A PASSIVE seals, checkpoints under a write
-/// barrier, and follows a restarted WAL; a TRUNCATE checkpoints and, when the
-/// WAL changed, snapshots under the write lock. Every barrier or lock taken is
+/// The proof is consumed, and a new one comes back in [`Staged`] only when the
+/// last step reached the committed end: it carries the position, so a stale
+/// one cannot be passed. A PASSIVE seals, checkpoints under a write barrier,
+/// and follows a restarted WAL; a TRUNCATE checkpoints and, when the WAL
+/// changed, snapshots under the write lock. Every barrier or lock taken is
 /// released first on a fault, and a failed release never replaces that fault.
 ///
 /// # Errors
-/// [`CheckpointFailed`], with the last position that is true.
+/// [`CheckpointFailed`], with what the completed steps staged and the last
+/// position that is true.
 #[expect(
     clippy::too_many_arguments,
     reason = "the plan fixes this signature; each argument is a distinct source of the protocol"
+)]
+#[expect(
+    clippy::result_large_err,
+    reason = "a failure carries what was staged, as a success does; one is returned per checkpoint"
 )]
 pub async fn checkpoint<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore>(
     proof: SyncedThrough,
@@ -560,7 +646,7 @@ pub async fn checkpoint<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectS
         staging,
         cfg: *cfg,
         now,
-        good: proof.into_position(),
+        good: Reached::Through(proof),
         files: Vec::new(),
         clamped: Vec::new(),
         run: None,
@@ -569,17 +655,20 @@ pub async fn checkpoint<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectS
         CheckpointMode::Passive => protocol.passive().await,
         CheckpointMode::Truncate => protocol.truncate().await,
     };
+    let staged = Staged {
+        reached: protocol.good,
+        files: protocol.files,
+        clamped: protocol.clamped,
+    };
     match result {
         Ok(outcome) => Ok(Checkpointed {
-            through: SyncedThrough::new(protocol.good),
+            staged,
             outcome,
-            files: protocol.files,
-            clamped: protocol.clamped,
             run: protocol.run,
         }),
         Err(fault) => Err(CheckpointFailed {
             fault,
-            position: protocol.good,
+            staged,
             run: protocol.run,
         }),
     }

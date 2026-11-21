@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    CheckpointMode, CheckpointOutcome, FileInfo, MemStore, PageTable, Probes, Step, StepEnd,
-    SyncConfig, Synced, SyncedThrough, Tip, Verdict, WalView, checkpoint, recover_traced,
+    CheckpointMode, CheckpointOutcome, FileInfo, MemStore, PageTable, Position, Probes, Step,
+    StepEnd, SyncConfig, Synced, SyncedThrough, Tip, Verdict, WalView, checkpoint, recover_traced,
     sync_step,
 };
 use lsr_ltx::{Timestamp, Txid};
@@ -43,6 +43,7 @@ pub struct Stepper<B: Backend> {
     /// What the engine staged.
     pub staging: MemStore,
     through: Option<SyncedThrough>,
+    position: Option<Position>,
     /// The page checksum table, as the actor keeps one.
     pages: PageTable,
     now: i64,
@@ -78,6 +79,7 @@ impl<B: Backend> Stepper<B> {
             backend,
             staging: MemStore::new(),
             through: None,
+            position: None,
             pages: PageTable::new(),
             now: 1_000,
         };
@@ -191,15 +193,13 @@ impl<B: Backend> Stepper<B> {
     /// The last proven position's transaction.
     #[must_use]
     pub fn txid(&self) -> Option<Txid> {
-        self.through.as_ref().map(|t| t.position().txid())
+        self.position.map(|p| p.txid())
     }
 
     /// The synced end of the last proven position, in bytes.
     #[must_use]
     pub fn synced_end(&self) -> Option<u64> {
-        self.through
-            .as_ref()
-            .map(|t| t.position().synced().offset().get())
+        self.position.map(|p| p.synced().offset().get())
     }
 
     fn view(&mut self) -> Result<(WalReader<B::Wal>, WalView, lsr_core::CommittedRead), RigError> {
@@ -226,7 +226,7 @@ impl<B: Backend> Stepper<B> {
     /// The backend's, as [`RigError::Store`].
     pub fn verdict(&mut self) -> Result<Verdict, RigError> {
         let (mut wal, view, committed) = self.view()?;
-        let Some(position) = self.through.as_ref().map(SyncedThrough::position) else {
+        let Some(position) = self.position.as_ref() else {
             return Ok(recover_traced(None, &view, None));
         };
         let probes = Probes::read_against(&mut wal, position, &committed)
@@ -264,6 +264,7 @@ impl<B: Backend> Stepper<B> {
         .map_err(|failed| RigError::Store(format!("{failed:?}")))?;
         match synced {
             Synced::Idle(through) => {
+                self.position = Some(*through.position());
                 self.through = Some(through);
                 Ok(StepDid::Idle)
             }
@@ -273,6 +274,7 @@ impl<B: Backend> Stepper<B> {
                 txs,
                 ..
             } => {
+                self.position = Some(*through.position());
                 self.through = Some(through);
                 Ok(StepDid::Wrote { file, txs })
             }
@@ -317,7 +319,8 @@ impl<B: Backend> Stepper<B> {
             Timestamp::from_unix_millis(self.now),
         ))
         .map_err(|failed| RigError::Store(format!("{failed:?}")))?;
-        self.through = Some(done.through);
+        self.position = Some(done.staged.position());
+        self.through = done.staged.into_proof();
         Ok(done.outcome)
     }
 }

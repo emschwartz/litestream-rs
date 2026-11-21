@@ -62,7 +62,7 @@ use state::{Gate, Lanes, Maintain};
 
 use crate::checkpoint::{
     CheckpointConfig, CheckpointFailed, CheckpointOutcome, CheckpointState, Decision, Observed,
-    after_checkpoint, after_sync, checkpoint, decide, next_wake,
+    Staged, after_checkpoint, after_sync, checkpoint, decide, next_wake,
 };
 use crate::compact::CompactError;
 use crate::fault::{
@@ -256,17 +256,47 @@ enum Stepped {
     Halt(HaltCause),
 }
 
+/// Where the next sync step resumes, which also names the newest staged
+/// transaction.
+///
+/// One value, not a position beside a staged transaction id: every staged
+/// level-0 file comes from a step whose position names it, so a position's
+/// transaction is the newest staged one, and the two cannot disagree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Resume {
+    /// The last synced position; its transaction is the newest staged.
+    From(Position),
+    /// No position: a boot that found nothing to continue, or a staged file
+    /// lost. The next sync is a snapshot; this is the newest transaction
+    /// still staged (or, with nothing staged, the replica's newest level-0
+    /// file), if any.
+    Snapshot(Option<Txid>),
+}
+
+impl Resume {
+    const fn position(self) -> Option<Position> {
+        match self {
+            Self::From(position) => Some(position),
+            Self::Snapshot(_) => None,
+        }
+    }
+
+    const fn staged(self) -> Option<Txid> {
+        match self {
+            Self::From(position) => Some(position.txid()),
+            Self::Snapshot(staged) => staged,
+        }
+    }
+}
+
 /// The replication engine for one database.
 #[derive(Clone, Debug)]
 pub struct Actor {
     cfg: ActorConfig,
     phase: Phase,
     booted: bool,
-    /// The last synced position; `None` until the first sync after a boot
-    /// that found nothing to continue.
-    position: Option<Position>,
-    /// The newest staged transaction.
-    staged: Option<Txid>,
+    /// Where the next sync resumes, and so the newest staged transaction.
+    resume: Resume,
     /// Set when the next sync is a snapshot.
     pending: Option<SnapshotCause>,
     /// The replica's page size, one per prefix; `None` while the replica and
@@ -402,8 +432,7 @@ impl Actor {
             cfg,
             phase: Phase::Boot,
             booted: false,
-            position: None,
-            staged: None,
+            resume: Resume::Snapshot(None),
             pending: None,
             page_size: None,
             more_wal: false,
@@ -449,7 +478,13 @@ impl Actor {
     /// The newest transaction staged locally.
     #[must_use]
     pub const fn staged(&self) -> Option<Txid> {
-        self.staged
+        self.resume.staged()
+    }
+
+    /// The last synced position, `None` until the first sync after a boot
+    /// that found nothing to continue.
+    const fn position(&self) -> Option<Position> {
+        self.resume.position()
     }
 
     /// The newest transaction the replica was confirmed to hold.
@@ -489,7 +524,7 @@ impl Actor {
     pub fn unsynced_bytes(&self, committed: CommittedRead) -> u64 {
         let end = committed.end();
         let total = end.offset().get();
-        match self.position {
+        match self.position() {
             Some(position) if position.cursor().salts() == end.salts() => {
                 total.saturating_sub(position.synced().offset().get())
             }
@@ -794,10 +829,13 @@ impl Actor {
         self.page_size = page_size;
         let cause = match recovered {
             Recovered::Continue(position) | Recovered::WalRestarted(position) => {
-                self.position = Some(position);
+                self.resume = Resume::From(position);
                 None
             }
-            Recovered::Snapshot { cause, .. } => Some(cause),
+            Recovered::Snapshot { cause, .. } => {
+                self.resume = Resume::Snapshot(tip.map(|tip| tip.txid()));
+                Some(cause)
+            }
             Recovered::Halt(cause) => return self.verdict(Lane::Sync, cause, now),
         };
         // A staged file that did not verify was deleted with all after it:
@@ -808,14 +846,13 @@ impl Actor {
         }
         // Only a boot that continues seeds the table (ruling P5): a snapshot
         // records every page it reads.
-        if let (None, Some(position)) = (self.pending, self.position) {
+        if let (None, Some(position)) = (self.pending, self.position()) {
             match seeded(env.staging, position.commit()).await {
                 Ok(pages) => self.pages = pages,
                 Err(fault) => return self.fault(Lane::Sync, fault, now),
             }
         }
         self.upload = upload;
-        self.staged = tip.map(|tip| tip.txid());
         self.checkpoint = CheckpointState::boot(now);
         self.lanes.get_mut(Lane::Sync).succeed();
         self.booted = true;
@@ -924,7 +961,7 @@ impl Actor {
                 .filter(|info| Some(info.key.range().min()) > confirmed)
                 .count(),
             Err(_) => {
-                let staged = self.staged.map_or(0, Txid::get);
+                let staged = self.staged().map_or(0, Txid::get);
                 let confirmed = confirmed.map_or(0, Txid::get);
                 usize::try_from(staged.saturating_sub(confirmed)).unwrap_or(usize::MAX)
             }
@@ -945,7 +982,7 @@ impl Actor {
 
     fn wal_moved(&self, committed: CommittedRead) -> bool {
         let end = committed.end();
-        self.position.is_none_or(|position| {
+        self.position().is_none_or(|position| {
             self.reset != Some(end)
                 && (end.salts() != position.cursor().salts()
                     || end.offset() != position.synced().offset())
@@ -953,21 +990,18 @@ impl Actor {
     }
 
     fn uploads_idle(&self) -> bool {
-        plan_upload(&self.upload, self.staged) == UploadPlan::Idle
+        plan_upload(&self.upload, self.staged()) == UploadPlan::Idle
     }
 
     /// The newest transaction anything has: a snapshot follows it.
     fn snapshot_after(&self) -> Option<Txid> {
-        self.position
-            .map(|position| position.txid())
-            .max(self.staged)
-            .max(self.upload.confirmed())
+        self.staged().max(self.upload.confirmed())
     }
 
     /// The checkpoint the policy wants now, when its lane and the sync lane
     /// that must prove it first may both run.
     fn checkpoint_decision(&self, now: Timestamp) -> Option<(Decision, CheckpointMode)> {
-        let position = self.position.filter(|_| self.reset.is_none())?;
+        let position = self.position().filter(|_| self.reset.is_none())?;
         let free = self.gate.open(now)
             && self.lanes.ready(Lane::Checkpoint, now)
             && self.lanes.ready(Lane::Sync, now);
@@ -1026,7 +1060,7 @@ impl Actor {
 
     /// Whether everything staged is on the replica.
     fn caught_up(&self) -> bool {
-        self.staged.is_some() && self.staged == self.upload.confirmed()
+        self.staged().is_some() && self.staged() == self.upload.confirmed()
     }
 
     /// Reads the live pages when `proof` is at the transaction the replica
@@ -1111,7 +1145,7 @@ impl Actor {
         reader: &mut WalReader<W::Wal>,
         committed: CommittedRead,
     ) -> Result<Result<Step, Stepped>, Fault> {
-        match (self.pending, self.position) {
+        match (self.pending, self.position()) {
             (Some(cause), position) => Ok(Ok(Step::Snapshot {
                 after: self.snapshot_after(),
                 prev_timestamp: position.map(|position| position.timestamp()),
@@ -1167,7 +1201,7 @@ impl Actor {
         wal: &mut W,
         committed: CommittedRead,
     ) -> Result<Stepped, Fault> {
-        let (None, Some(position)) = (self.pending, self.position) else {
+        let (None, Some(position)) = (self.pending, self.position()) else {
             return Err(Fault::WalMoved);
         };
         let view = wal_view::<W, W::Wal>(wal, None, committed)?;
@@ -1208,8 +1242,7 @@ impl Actor {
                     proof: None,
                 };
             }
-            Synced::Wrote { file, end, txs, .. } => {
-                self.staged = self.staged.max(Some(file.key.range().max()));
+            Synced::Wrote { end, txs, .. } => {
                 self.pending = None;
                 if self.gate == Gate::NextWrite {
                     self.gate = Gate::Open;
@@ -1232,7 +1265,7 @@ impl Actor {
         } else {
             position
         };
-        self.position = Some(position);
+        self.resume = Resume::From(position);
         let observed = Observed::of(now, &position, !self.more_wal);
         self.checkpoint = after_sync(self.checkpoint, txs, &observed, &self.cfg.checkpoint);
         Stepped::Synced { files, proof }
@@ -1272,18 +1305,12 @@ impl Actor {
         self.host.ours(env.wal.committed().ok(), run);
         let done = match done {
             Ok(done) => done,
-            Err(CheckpointFailed {
-                fault, position, ..
-            }) => {
-                self.position = Some(position);
+            Err(CheckpointFailed { fault, staged, .. }) => {
+                self.took(staged);
                 return self.fault(Lane::Checkpoint, fault, now);
             }
         };
-        let position = *done.through.position();
-        self.position = Some(position);
-        for file in &done.files {
-            self.staged = self.staged.max(Some(file.key.range().max()));
-        }
+        let position = self.took(done.staged);
         let observed = Observed::of(now, &position, true);
         let (state, next) = after_checkpoint(
             self.checkpoint,
@@ -1297,6 +1324,15 @@ impl Actor {
         self.lanes.get_mut(Lane::Checkpoint).succeed();
         let busy = done.outcome == CheckpointOutcome::Busy;
         self.ran(Event::Checkpointed { mode, busy }, now)
+    }
+
+    /// What a checkpoint staged, finished or not: the files its steps staged
+    /// are uploaded from the position it left, whose transaction is the
+    /// newest of them, so a fault after the seal cannot leave one behind.
+    fn took(&mut self, staged: Staged) -> Position {
+        let position = staged.position();
+        self.resume = Resume::From(position);
+        position
     }
 
     /// Staged files to the replica, up to the per-tick limit.
@@ -1321,8 +1357,8 @@ impl Actor {
             .map_or(u32::MAX, NonZeroU32::get);
         let mut last = Did::Nothing;
         for _ in 0..limit {
-            let plan = plan_upload(&self.upload, self.staged);
-            match upload_next(self.upload, env.staging, env.remote, self.staged).await {
+            let plan = plan_upload(&self.upload, self.staged());
+            match upload_next(self.upload, env.staging, env.remote, self.staged()).await {
                 Ok(uploaded) => {
                     self.upload = uploaded.state;
                     last = uploaded.did;
@@ -1366,9 +1402,8 @@ impl Actor {
         if let Err(fault) = drop_staged_from(env.staging, from).await {
             return self.fault(Lane::Upload, fault, now);
         }
-        self.staged = from.prev();
         // The position is past `from`; a snapshot after it would leave a hole.
-        self.position = None;
+        self.resume = Resume::Snapshot(from.prev());
         let cause = SnapshotCause::LocalTipUnreadable;
         self.pending = Some(cause);
         self.lanes.get_mut(Lane::Upload).succeed();
@@ -1433,7 +1468,7 @@ impl Actor {
     /// (boot's rule 9 and V3 compare it with the WAL). `None` before the
     /// first maintenance listing.
     fn prune_bound(&self) -> Option<Txid> {
-        let below_tip = self.staged?.prev()?;
+        let below_tip = self.staged()?.prev()?;
         let bound = self
             .upload
             .confirmed()?
