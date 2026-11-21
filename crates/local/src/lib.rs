@@ -156,6 +156,30 @@ pub fn clear_sidecars(target: &Path) -> Result<Vec<PathBuf>, ClearError> {
     Ok(removed)
 }
 
+/// Checks [target] the way [FileSink::create] does, changing nothing, and
+/// returns the stale sidecars beside it: what [clear_sidecars] would remove.
+/// A dry run reports from this what a restore would meet.
+///
+/// # Errors
+/// [CreateError::TargetExists] when the target exists, or
+/// [CreateError::Inspect] when a path cannot be inspected.
+pub fn preflight(target: &Path) -> Result<Vec<PathBuf>, CreateError> {
+    let inspect = |path: &Path| {
+        let path = path.to_path_buf();
+        move |source| CreateError::Inspect { path, source }
+    };
+    if exists(target).map_err(inspect(target))? {
+        return Err(CreateError::TargetExists(target.to_path_buf()));
+    }
+    let mut present = Vec::new();
+    for path in sidecars(target) {
+        if exists(&path).map_err(inspect(&path))? {
+            present.push(path);
+        }
+    }
+    Ok(present)
+}
+
 /// The first of the target and its sidecars that exists.
 fn first_present(target: &Path) -> io::Result<Option<PathBuf>> {
     for path in std::iter::once(target.to_path_buf()).chain(sidecars(target)) {
@@ -479,6 +503,25 @@ mod tests {
             assert_eq!(fs::read(&sidecar).unwrap(), b"stale");
             assert_eq!(names(&dir).len(), 1, "{suffix}: no scratch left behind");
         }
+    }
+
+    #[test]
+    fn preflight_reports_what_create_and_clear_would_meet_and_touches_nothing() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("db");
+        assert_eq!(preflight(&target).unwrap(), Vec::<PathBuf>::new());
+        fs::write(dir.path().join("db-wal"), b"stale").unwrap();
+        fs::write(dir.path().join("db-journal"), b"stale").unwrap();
+        assert_eq!(
+            preflight(&target).unwrap(),
+            vec![dir.path().join("db-wal"), dir.path().join("db-journal")]
+        );
+        fs::write(&target, b"live").unwrap();
+        assert!(matches!(
+            preflight(&target),
+            Err(CreateError::TargetExists(path)) if path == target
+        ));
+        assert_eq!(names(&dir).len(), 3, "nothing created or removed");
     }
 
     #[test]
