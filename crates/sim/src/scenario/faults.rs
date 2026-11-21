@@ -237,7 +237,7 @@ pub fn fault_scenarios(kind: FaultKind) -> &'static [fn() -> Scenario] {
         FaultKind::LocalIo => &[eio_on_wal_read],
         FaultKind::LocalFsyncFailed => &[fsync_fails_once],
         FaultKind::SqliteBusy => &[busy_on_barrier, shm_header_mid_update],
-        FaultKind::WalMoved => &[restart_between_steps],
+        FaultKind::WalMoved => &[wal_header_torn_while_running],
         FaultKind::WalIndexInconsistent => &[shm_end_inside_tx],
         FaultKind::WalChangedUnderRead => &[frame_overwritten_between_scan_and_read],
         FaultKind::NothingToSnapshot => &[db_created_no_pages],
@@ -925,7 +925,9 @@ pub fn shm_header_mid_update() -> Scenario {
     )
 }
 
-/// The WAL file restarts between the engine's reads.
+/// A TRUNCATE from outside empties the WAL between the engine's steps, while
+/// its read was lapsed. The next sync is a `WalMissing` snapshot, which writes
+/// the WAL header itself rather than wait for the app's next write.
 #[must_use]
 pub fn restart_between_steps() -> Scenario {
     build(
@@ -939,7 +941,40 @@ pub fn restart_between_steps() -> Scenario {
             ticks(SETTLE),
             vec![Op::Restore],
         ],
-        vec![retries(FaultKind::WalMoved), Expect::Oracle],
+        vec![
+            Expect::Event(EventMatch::Resnapshot(CauseKind::WalMissing)),
+            Expect::Event(EventMatch::Snapshotted),
+            Expect::Oracle,
+        ],
+    )
+}
+
+/// The WAL header is zeroed under a running engine. The snapshot that follows
+/// writes a frame to get a header, but SQLite writes a header only at the
+/// start of a log, so the header stays torn and the step retries as the WAL
+/// having moved, on the lane's backoff, until a TRUNCATE and a commit heal it.
+#[must_use]
+pub fn wal_header_torn_while_running() -> Scenario {
+    build(
+        "wal_header_torn_while_running",
+        vec![
+            live(),
+            vec![Op::Wal(WalOp::TearHeader)],
+            ticks(SETTLE),
+            vec![
+                Op::OurReader { begin: false },
+                Op::StrangerCheckpoint(StrangerMode::Truncate),
+                commit(1, false),
+            ],
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        vec![
+            Expect::Event(EventMatch::Resnapshot(CauseKind::WalMissing)),
+            retries(FaultKind::WalMoved),
+            Expect::Event(EventMatch::Snapshotted),
+            Expect::Oracle,
+        ],
     )
 }
 

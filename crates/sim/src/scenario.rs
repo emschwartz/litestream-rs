@@ -245,7 +245,12 @@ pub fn scenario_of(cause: SnapshotCause) -> &'static [fn() -> Scenario] {
         SnapshotCause::FirstSync => &[empty_meta_boot],
         SnapshotCause::BehindRemote { .. } => &[newest_staged_file_lost, restored_old_meta],
         SnapshotCause::LocalTipUnreadable => &[tip_byte_flip, tip_truncated, tip_no_wal_origin],
-        SnapshotCause::WalMissing => &[wal_deleted_while_down, wal_header_torn],
+        SnapshotCause::WalMissing => &[
+            wal_deleted_while_down,
+            wal_header_torn,
+            restored_with_no_wal,
+            restart_between_steps,
+        ],
         SnapshotCause::GenerationChanged => &[
             app_checkpoint_while_down,
             meta_wiped_wal_restarted,
@@ -309,8 +314,8 @@ fn after_restart(name: &'static str, damage: Vec<Op>, cause: CauseKind) -> Scena
     after_restart_then(name, damage, Vec::new(), cause)
 }
 
-/// As [`after_restart`], with `then` after the boot tick: a WAL that was
-/// deleted or torn comes back only when the app writes again.
+/// As [`after_restart`], with `then` after the boot tick: the app's write that
+/// heals a WAL the engine's own header write could not (a torn header).
 fn after_restart_then(
     name: &'static str,
     damage: Vec<Op>,
@@ -508,6 +513,50 @@ pub fn wal_deleted_while_down() -> Scenario {
         vec![commit(1, false)],
         CauseKind::WalMissing,
     )
+}
+
+/// A database a restore just published: the database file holds every
+/// transaction, the WAL is empty with no header, the staging directory is gone
+/// and the replica holds the tip. The real driver writes nothing at open once
+/// `_litestream_seq` exists, so the boot finds no header and the first sync is a
+/// `WalMissing` snapshot. It writes the header itself and runs at once, with no
+/// write from the app and no retry.
+#[must_use]
+pub fn restored_with_no_wal() -> Scenario {
+    let mut s = build(
+        "restored_with_no_wal",
+        vec![
+            synced(),
+            vec![
+                Op::OurReader { begin: false },
+                Op::StrangerCheckpoint(StrangerMode::Truncate),
+                Op::EnvFault(EnvFault::DriverWritesNothing),
+                Op::EnvFault(EnvFault::WipeStaging),
+            ],
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        vec![
+            Expect::Event(EventMatch::Booted(Some(CauseKind::WalMissing))),
+            Expect::Event(EventMatch::Snapshotted),
+            Expect::Oracle,
+        ],
+    );
+    s.check = Some(snapshots_with_no_retry);
+    s
+}
+
+/// The engine retried nothing: the snapshot did not wait on a backoff.
+fn snapshots_with_no_retry(report: &RunReport) -> Result<(), String> {
+    use lsr_core::Event;
+    if let Some(retry) = report
+        .seen
+        .iter()
+        .find(|seen| matches!(seen, Seen::Event(Event::Retrying { .. })))
+    {
+        return Err(format!("the engine retried: {retry:?}"));
+    }
+    Ok(())
 }
 
 /// The WAL header is zeroed.

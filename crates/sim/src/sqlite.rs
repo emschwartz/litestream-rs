@@ -213,6 +213,9 @@ struct Faults {
     empty_db: bool,
     // The next TRUNCATE that finishes fails to truncate the file.
     truncate_fails: bool,
+    // The next driver start writes no WAL header: the real driver's open,
+    // whose only write is `CREATE TABLE IF NOT EXISTS`.
+    driver_writes_nothing: bool,
 }
 
 impl Faults {
@@ -831,7 +834,9 @@ impl SimSqlite {
     pub fn start_driver(&self) {
         self.with(|state| {
             state.end(Conn::Ours);
-            if state.wal.len() < 32
+            let skip = mem::take(&mut state.faults.driver_writes_nothing);
+            if !skip
+                && state.wal.len() < 32
                 && let Some(first) = PageNo::new(1, state.page_size)
             {
                 let data = state.image_page(1);
@@ -1163,6 +1168,13 @@ impl SimSqlite {
     /// fault suite found this state (`crates/sqlite/tests/faults.rs`).
     pub fn fail_next_truncate(&self) {
         self.with(|state| state.faults.truncate_fails = true);
+    }
+
+    /// The next driver start writes nothing, as the real driver's open writes
+    /// nothing once `_litestream_seq` exists (a database a restore published):
+    /// a WAL with no header stays without one until the engine or the app writes.
+    pub fn driver_writes_nothing_once(&self) {
+        self.with(|state| state.faults.driver_writes_nothing = true);
     }
 
     /// The next call of `op` fails with `err`.

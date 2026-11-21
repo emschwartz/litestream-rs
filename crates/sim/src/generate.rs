@@ -55,6 +55,9 @@ pub enum EnvFault {
     /// One byte of this page of the database file flips, outside SQLite; the
     /// database the host serves has it from then on. Scenarios only.
     FlipDatabasePage(u32),
+    /// The next driver start writes no WAL header, as the real driver's open
+    /// does not once `_litestream_seq` exists. Scenarios only.
+    DriverWritesNothing,
 }
 
 /// One step of a history.

@@ -21,6 +21,7 @@ lsr-cli::cli cli::verify_exit_codes_follow_the_latest_outcome
 lsr-cli::cli cli::verify_json_agrees_with_the_library_report
 lsr-cli::daemon daemon::a_database_created_after_start_is_picked_up
 lsr-cli::daemon daemon::a_missing_or_refused_config_does_not_start
+lsr-cli::daemon daemon::a_restored_database_snapshots_with_no_write_and_no_retry
 lsr-cli::daemon daemon::a_second_signal_cuts_the_drain
 lsr-cli::daemon daemon::config_check_reads_go_s_example_file
 lsr-cli::daemon daemon::go_s_flag_refusals_are_usage_errors
@@ -361,6 +362,10 @@ lsr-core actor::tests::lanes::an_idle_tick_does_not_open_the_wal
 lsr-core actor::tests::lanes::an_interval_due_with_nothing_to_checkpoint_does_not_spin
 lsr-core actor::tests::maintenance_waits_for_idle_uploads
 lsr-core actor::tests::next_is_never_after_a_held_deadline
+lsr-core actor::tests::no_wal_yet::a_drain_of_a_restored_database_with_no_wal_header_finishes
+lsr-core actor::tests::no_wal_yet::a_failing_header_write_waits_out_the_sync_lanes_backoff
+lsr-core actor::tests::no_wal_yet::a_header_write_that_failed_once_snapshots_on_the_retry
+lsr-core actor::tests::no_wal_yet::a_restored_database_with_no_wal_header_ticks_by_the_poll_not_the_cpu
 lsr-core actor::tests::nothing_is_pruned_before_the_first_listing
 lsr-core actor::tests::pages::a_boot_that_continues_checks_pages_the_last_run_recorded
 lsr-core actor::tests::pages::a_boot_that_snapshots_does_not_seed
@@ -1288,6 +1293,7 @@ lsr-replica::replicator start_refuses_a_missing_database_and_an_unusable_meta_di
 lsr-replica::replicator start_returns_with_the_pin_held_and_stop_drains_every_commit
 lsr-replica::replicator verify_and_restore_if_missing_use_the_shared_store
 lsr-replica::replicator wait_booted_reports_the_first_boot
+lsr-replica::restored a_restored_database_with_no_write_ticks_by_the_poll_and_snapshots_at_once
 lsr-sidecar exec::tests::a_child_end_is_clean_as_go_counts_it
 lsr-sidecar exec::tests::a_command_go_would_run_differently_is_refused
 lsr-sidecar exec::tests::split_matches_go_shellwords
@@ -1419,6 +1425,7 @@ lsr-sim::faults under_go_like_every_persistent_scenario_degrades_and_the_oracle_
 lsr-sim::faults under_strict_every_persistent_scenario_stops_with_its_cause
 lsr-sim::faults vacuum_page_size_change
 lsr-sim::faults vacuum_page_size_change_and_back
+lsr-sim::faults wal_header_torn_while_running
 lsr-sim::faults wal_truncated_externally_under_lock
 lsr-sim::faults wal_unlinked_mid_run
 lsr-sim::fixed_seeds fixed::a_torn_staged_file_is_dropped_seed_0x25
@@ -1436,6 +1443,7 @@ lsr-sim::replay replay::replay_the_named_run
 lsr-sim::retention retention::switching_retention_on_in_a_running_engine_resumes_deletes
 lsr-sim::retention retention::with_retention_off_a_long_run_deletes_nothing_and_still_compacts_and_snapshots
 lsr-sim::snapshot_causes a_page_size_change_halts_and_the_old_states_restore
+lsr-sim::snapshot_causes a_restored_database_with_no_wal_snapshots_with_no_retry
 lsr-sim::snapshot_causes a_wiped_meta_continues_from_the_replicas_tip
 lsr-sim::snapshot_causes every_cause_has_a_scenario
 lsr-sim::snapshot_causes every_scenario_runs

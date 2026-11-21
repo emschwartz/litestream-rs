@@ -77,7 +77,7 @@ use crate::maintain::{
     run_compact, run_delete,
 };
 use crate::pages::{PageTable, seeded};
-use crate::position::{Continuity, Position, SyncedThrough, WalFileLen};
+use crate::position::{Continuity, Position, ReadEpoch, SyncedThrough, WalFileLen};
 use crate::recover::{
     FrameCheck, Miss, Probes, Recovered, Tip, TipView, WalView, read_header, recover,
 };
@@ -987,10 +987,9 @@ impl Actor {
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
     ) -> Result<Stepped, Fault> {
-        let epoch = env.wal.epoch();
-        let committed = env.wal.committed().map_err(Fault::from_source)?;
-        let Some(mut reader) = open_reader(env.wal)? else {
-            return self.without_wal(env.wal, committed);
+        let (mut reader, committed, epoch) = match self.open_wal(env)? {
+            Ok(opened) => opened,
+            Err(verdict) => return Ok(verdict),
         };
         let size = reader.header().page_size();
         if let Some(was) = self.page_size.filter(|was| *was != size) {
@@ -1039,8 +1038,41 @@ impl Actor {
         }
     }
 
-    /// No readable WAL. A pending snapshot waits for SQLite to write one;
-    /// otherwise recovery classifies the loss.
+    /// The WAL a step reads, with the wal-index read and the read epoch it
+    /// runs under, or what recovery makes of a WAL with no header.
+    ///
+    /// A pending snapshot that finds no header writes one first, through one
+    /// `_litestream_seq` bump, as Go's `ensureWALExists` does before every
+    /// sync (`db.go:826`). A database a restore just published, or one whose
+    /// WAL a host truncated while we were down, has none until someone writes,
+    /// and the snapshot is what puts the database file's pages on the replica:
+    /// waiting for the host's next write would leave them off it, and a drain
+    /// could never finish. A WAL still without a header after the bump is
+    /// `WalMoved`, retried on the sync lane's backoff.
+    #[expect(
+        clippy::type_complexity,
+        reason = "a private step's two exits: the opened WAL, or the verdict that ends it"
+    )]
+    fn open_wal<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore, R: ObjectStore>(
+        &self,
+        env: &mut Env<'_, W, P, C, L, R>,
+    ) -> Result<Result<(WalReader<W::Wal>, CommittedRead, ReadEpoch), Stepped>, Fault> {
+        let epoch = env.wal.epoch();
+        let committed = env.wal.committed().map_err(Fault::from_source)?;
+        if let Some(reader) = open_reader(env.wal)? {
+            return Ok(Ok((reader, committed, epoch)));
+        }
+        if self.pending.is_none() {
+            return self.without_wal(env.wal, committed).map(Err);
+        }
+        env.ck.bump_seq().map_err(Fault::from_source)?;
+        let epoch = env.wal.epoch();
+        let committed = env.wal.committed().map_err(Fault::from_source)?;
+        let reader = open_reader(env.wal)?.ok_or(Fault::WalMoved)?;
+        Ok(Ok((reader, committed, epoch)))
+    }
+
+    /// No readable WAL and no snapshot pending: recovery classifies the loss.
     fn without_wal<W: WalSource>(
         &self,
         wal: &mut W,
@@ -1478,6 +1510,12 @@ impl Actor {
         now: Timestamp,
         stamps_read: u64,
     ) -> Tick {
+        // The snapshot's step is the sync lane's work and waits on its wait.
+        if !self.lanes.ready(Lane::Sync, now) {
+            self.wait_for_sync();
+            let event = MaintainedEvent::Waiting { held: None };
+            return self.ran(Event::Maintained { event, stamps_read }, now);
+        }
         let stepped = self.step(env, now).await;
         let proof = match self.stepped(stepped, now) {
             Ok((0, Some(proof))) => proof,
@@ -1491,7 +1529,15 @@ impl Actor {
                 return self.ran(Event::Maintained { event, stamps_read }, now);
             }
             Ok((files, _)) => return self.ran(Event::Synced { files }, now),
-            Err(tick) => return tick,
+            // A failed step waits on the sync lane, and the listing with it:
+            // the next is due when the step may run again, not at once.
+            Err(Tick::Ran { event, .. }) => {
+                self.wait_for_sync();
+                return self.ran(event, now);
+            }
+            Err(tick @ (Tick::Halted(_) | Tick::Drained { .. } | Tick::DeadlineReached(_))) => {
+                return tick;
+            }
         };
         let written = write_snapshot(
             &proof,
@@ -1522,6 +1568,14 @@ impl Actor {
                 self.fault(waiter, fault, now)
             }
         }
+    }
+
+    /// Maintenance lists again when the sync lane's wait ends, or after the
+    /// next upload when it holds none (a recovery verdict made the next sync a
+    /// snapshot, whose upload marks the listing stale).
+    fn wait_for_sync(&mut self) {
+        self.maintain.stale = false;
+        self.maintain.until = self.lanes.get(Lane::Sync).until();
     }
 
     const fn running(&self) -> bool {

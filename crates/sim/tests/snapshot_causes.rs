@@ -4,7 +4,8 @@
 use lsr_core::SnapshotCause;
 use lsr_ltx::{PageSize, Txid};
 use lsr_sim::scenario::{
-    Scenario, meta_wiped_remote_kept, run_scenario, scenario_of, vacuum_page_size_change,
+    Scenario, meta_wiped_remote_kept, restored_with_no_wal, run_scenario, scenario_of,
+    vacuum_page_size_change,
 };
 use lsr_wal::WalOffset;
 
@@ -83,4 +84,12 @@ fn a_page_size_change_halts_and_the_old_states_restore() {
 #[test]
 fn a_wiped_meta_continues_from_the_replicas_tip() {
     run(meta_wiped_remote_kept);
+}
+
+/// A database a restore just published, whose WAL has no header and whose
+/// driver writes none: the first sync is a snapshot that writes the header
+/// itself, at once and with no retry.
+#[test]
+fn a_restored_database_with_no_wal_snapshots_with_no_retry() {
+    run(restored_with_no_wal);
 }

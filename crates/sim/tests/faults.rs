@@ -274,6 +274,11 @@ fn restart_between_steps() {
 }
 
 #[test]
+fn wal_header_torn_while_running() {
+    run(scenario::wal_header_torn_while_running);
+}
+
+#[test]
 fn shm_end_inside_tx() {
     run(scenario::shm_end_inside_tx);
 }

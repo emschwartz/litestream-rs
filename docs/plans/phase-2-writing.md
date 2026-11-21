@@ -967,7 +967,7 @@ The 4a fakes are scripted: a test says what a checkpoint does. The simulator nee
 | FirstSync | `empty_meta_boot` |
 | BehindRemote | `meta_wiped_remote_kept`, `restored_old_meta` |
 | LocalTipUnreadable | `tip_byte_flip`, `tip_truncated` (Power crash tears a volatile staged key), `tip_no_wal_origin` |
-| WalMissing | `wal_deleted_while_down`, `wal_header_torn` |
+| WalMissing | `wal_deleted_while_down`, `wal_header_torn`, `restored_with_no_wal`, `restart_between_steps` |
 | PageSizeChanged | `vacuum_page_size_change` |
 | GenerationChanged | `app_checkpoint_while_down`, `restart_during_read_lock_lapse` |
 | PrevFrameMismatch | `wal_rewritten_same_length`, `cursor_mid_tx` |
@@ -1004,7 +1004,7 @@ Plus `pinned_on_zero_single_restart`: our read tx on mark 0, one app write resta
 | LocalIo | `eio_on_wal_read` |
 | LocalFsyncFailed | `fsync_fails_once` (reachable through `Fault::from_staging`) |
 | SqliteBusy | `busy_on_barrier`, `shm_header_mid_update` |
-| WalMoved | `restart_between_steps` |
+| WalMoved | `wal_header_torn_while_running` |
 | WalIndexInconsistent | `shm_end_inside_tx` |
 | WalChangedUnderRead | `frame_overwritten_between_scan_and_read` |
 | NothingToSnapshot | `db_created_no_pages` |

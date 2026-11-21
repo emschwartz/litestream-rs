@@ -35,6 +35,16 @@ mod daemon {
         seen: Vec<String>,
     }
 
+    /// A test that fails mid-run leaves no daemon behind.
+    impl Drop for Daemon {
+        fn drop(&mut self) {
+            if matches!(self.child.try_wait(), Ok(None)) {
+                drop(self.child.kill());
+                drop(self.child.wait());
+            }
+        }
+    }
+
     impl Daemon {
         fn start(args: &[&str]) -> Self {
             let mut child = lsr()
@@ -76,6 +86,27 @@ mod daemon {
                     Ok(line) => {
                         self.seen.push(line.clone());
                         if found(&line) {
+                            return line;
+                        }
+                    }
+                    Err(error) => panic!("no line with {parts:?} ({error}): {:#?}", self.seen),
+                }
+            }
+        }
+
+        /// Waits for a line holding every one of `parts`, failing at the `cap`th `retrying`
+        /// line on the way: a daemon that retries without waiting prints them without end.
+        fn wait_retrying_under(&mut self, parts: &[&str], cap: usize) -> String {
+            let mut retries = 0;
+            loop {
+                match self.lines.recv_timeout(PATIENCE) {
+                    Ok(line) => {
+                        self.seen.push(line.clone());
+                        if line.contains("msg=retrying") {
+                            retries = usize::saturating_add(retries, 1);
+                            assert!(retries < cap, "{retries} retries: {line}");
+                        }
+                        if parts.iter().all(|p| line.contains(p)) {
                             return line;
                         }
                     }
@@ -324,6 +355,50 @@ mod daemon {
         let (status, out) = daemon.finish();
         assert_eq!(status.code(), Some(0), "{out}");
         restores_to(dir.path(), &replica, &app);
+    }
+
+    /// A database the daemon restored, with no write from the host: the WAL has no header,
+    /// and the first sync is a snapshot that writes one itself. It is staged at once, with no
+    /// retry; before, the sync lane logged `retrying` some 70,000 times in four seconds.
+    #[test]
+    fn a_restored_database_snapshots_with_no_write_and_no_retry() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("app.db");
+        let replica = dir.path().join("replica");
+        let db_arg = db.to_str().unwrap();
+        let replica_url = format!("file://{}", replica.display());
+        let replica_arg = replica_url.as_str();
+        {
+            let app = database(&db);
+            write(&app, 6);
+            let (status, out) = Daemon::start(&["-once", db_arg, replica_arg]).finish();
+            assert_eq!(status.code(), Some(0), "{out}");
+        }
+        for sidecar in ["", "-wal", "-shm"] {
+            let path = PathBuf::from(format!("{}{sidecar}", db.display()));
+            if path.exists() {
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+        std::fs::remove_dir_all(dir.path().join(".app.db-litestream")).unwrap();
+        let flags = [
+            "-log-level",
+            "debug",
+            "-restore-if-db-not-exists",
+            db_arg,
+            replica_arg,
+        ];
+        let mut daemon = Daemon::start(&flags);
+        daemon.wait_for(&["msg=\"restore completed\""]);
+        daemon.wait_for(&["msg=\"initialized db\""]);
+        daemon.wait_retrying_under(&["msg=\"wal synced\"", "files=1"], 10);
+        daemon.wait_retrying_under(&["msg=uploaded", "Put("], 10);
+        daemon.signal("TERM");
+        let (status, out) = daemon.finish();
+        assert_eq!(status.code(), Some(0), "{out}");
+        let retries = out.lines().filter(|l| l.contains("msg=retrying")).count();
+        assert_eq!(retries, 0, "{out}");
+        restores_to(dir.path(), &replica, &Connection::open(&db).unwrap());
     }
 
     /// Go's `TestReadConfig/ReadsFromStdin` and `ReadsFromStdinSelectedByEnv`.
