@@ -448,6 +448,19 @@ lsr-core fault::tests::wal_index_inconsistent_retries
 lsr-core fault::tests::wal_moved_retries
 lsr-core fault::tests::wal_truncated_below_committed_is_persistent
 lsr-core fault::tests::wal_unlinked_is_persistent
+lsr-core host::tests::a_backfill_the_replicator_did_not_run_is_a_host_checkpoint
+lsr-core host::tests::a_restart_after_a_full_backfill_is_not_one
+lsr-core host::tests::a_restart_after_an_unfinished_backfill_is_a_host_checkpoint
+lsr-core host::tests::counts_carry_across_a_replaced_engine
+lsr-core host::tests::crossing_the_threshold_once_before_the_replicator_checkpoints_is_no_stall
+lsr-core host::tests::growth_past_the_threshold_after_a_capped_backfill_is_a_stall
+lsr-core host::tests::growth_past_the_threshold_on_mark_zero_is_a_stall
+lsr-core host::tests::growth_with_frames_below_the_pin_unbackfilled_is_no_stall
+lsr-core host::tests::host_checkpoints_are_seen_and_the_replicators_are_not
+lsr-core host::tests::no_stall_without_a_threshold
+lsr-core host::tests::the_first_read_is_a_baseline
+lsr-core host::tests::the_pin_after_a_short_checkpoint_of_ours_is_where_it_stopped
+lsr-core host::tests::the_replicators_own_checkpoints_are_never_noticed
 lsr-core inventory::tests::a_cursor_that_does_not_advance_is_a_typed_give_up
 lsr-core inventory::tests::a_failed_page_is_an_error_not_a_short_inventory
 lsr-core inventory::tests::a_key_given_twice_with_different_details_is_an_error_in_any_order
@@ -1158,6 +1171,7 @@ lsr-replica config::tests::untracked_readers_never_truncate
 lsr-replica config::tests::zero_is_not_a_duration_here
 lsr-replica events::tests::a_full_channel_drops_the_oldest_and_counts_it
 lsr-replica events::tests::recv_ends_when_the_sink_is_gone
+lsr-replica health::tests::the_host_notice_says_what_it_costs
 lsr-replica readers::tests::guards_count_overlapping_readers
 lsr-replica runtime::tests::a_held_fake_park_waits_for_the_clock
 lsr-replica runtime::tests::a_passed_deadline_returns_at_once
@@ -1184,6 +1198,7 @@ lsr-replica store::tests::conformance_cases::stamp_of_an_overwritten_file_is_ref
 lsr-replica store::tests::conformance_cases::stamp_returns_the_committed_stamp
 lsr-replica store::tests::conformance_cases::two_uploads_to_one_key
 lsr-replica store::tests::metered_calls_and_bytes_are_counted
+lsr-replica::replicator a_host_at_wal_autocheckpoint_0_raises_no_notice
 lsr-replica::replicator a_host_checkpoint_is_counted_and_reported
 lsr-replica::replicator a_panic_rebuilds_the_engine_and_replication_continues
 lsr-replica::replicator a_panic_under_strict_responses_stops_with_bug
@@ -1305,6 +1320,7 @@ lsr-sim::faults every_scenario_is_tested_here
 lsr-sim::faults every_scenario_names_its_fault
 lsr-sim::faults frame_overwritten_between_scan_and_read
 lsr-sim::faults fsync_fails_once
+lsr-sim::faults host_autocheckpoints
 lsr-sim::faults meta_dir_deleted_mid_run
 lsr-sim::faults reacquire_fails_after_checkpoint
 lsr-sim::faults remote_bitrot_on_list_read
@@ -1420,6 +1436,8 @@ lsr-sqlite::kill a_writer_killed_mid_transaction_leaves_no_page_in_any_file
 lsr-sqlite::kill child_process_entry
 lsr-sqlite::power_loss a_boot_after_a_loss_that_left_a_header_only_wal_settles
 lsr-sqlite::power_loss power_loss_at_each_wal_sync_loses_no_acknowledged_transaction
+lsr-sqlite::sidecar_pin a_host_at_the_defaults_raises_the_notice_on_either_read_mark
+lsr-sqlite::sidecar_pin a_host_at_wal_autocheckpoint_0_raises_none
 lsr-sqlite::sidecar_pin child_process_entry
 lsr-sqlite::sidecar_pin the_engine_restores_everything_a_host_at_the_default_autocheckpoint_wrote
 lsr-sqlite::sidecar_pin the_hosts_autocheckpoint_stops_at_a_pin_in_another_process
