@@ -51,7 +51,7 @@ use crate::layout::{FileInfo, FileKey, Level};
 use crate::ltx_read::{LtxRead, ReadFault};
 use crate::position::{Continuity, LastPage, Position, ReadLockHold, WalFileLen};
 use crate::source::CommittedRead;
-use crate::store::{ObjectStore, PageLimit, ReadLen, StoreError};
+use crate::store::{ListAt, ObjectStore, PageLimit, ReadLen, StoreError};
 
 /// How much of the newest staged file one store read asks for while it is verified.
 const NEWEST_STAGED_READ: ReadLen = ReadLen::CHUNK;
@@ -434,15 +434,18 @@ fn match_last_page<R: Read + Seek>(
 }
 
 async fn newest_level_zero<L: ObjectStore>(staging: &L) -> Result<Option<FileInfo>, Fault> {
-    let (mut after, mut newest) = (None, None);
+    let (mut at, mut newest) = (ListAt::first(Level::ZERO), None);
     loop {
         let page = staging
-            .list(Level::ZERO, after, PageLimit::MAX)
+            .list(at.level, at.after, PageLimit::MAX)
             .await
             .map_err(|err| Fault::from_staging(&err))?;
         newest = page.files.last().copied().or(newest);
-        match page.next {
-            Some(next) => after = Some(next),
+        match at
+            .following(page.next)
+            .map_err(Fault::from_staging_listing)?
+        {
+            Some(next) => at = next,
             None => return Ok(newest),
         }
     }

@@ -59,7 +59,7 @@ use lsr_ltx::{Event, PageChecksum, PageNo, PageSize};
 use crate::fault::{Fault, SnapshotCause};
 use crate::layout::{FileKey, Level};
 use crate::ltx_read::{LtxRead, ReadFault};
-use crate::store::{ObjectStore, PageLimit, ReadLen};
+use crate::store::{ListAt, ObjectStore, PageLimit, ReadLen};
 
 /// How much of a staged file one read asks for while seeding.
 const SEED_READ: ReadLen = ReadLen::CHUNK;
@@ -206,17 +206,20 @@ pub(crate) async fn seeded<L: ObjectStore>(
     commit: NonZeroU32,
 ) -> Result<PageChecksumTable, Fault> {
     let mut table = PageChecksumTable::new();
-    let mut after = None;
+    let mut at = ListAt::first(Level::ZERO);
     loop {
         let page = staging
-            .list(Level::ZERO, after, PageLimit::MAX)
+            .list(at.level, at.after, PageLimit::MAX)
             .await
             .map_err(|err| Fault::from_staging(&err))?;
         for info in &page.files {
             seed_file(staging, &info.key, &mut table).await?;
         }
-        match page.next {
-            Some(next) => after = Some(next),
+        match at
+            .following(page.next)
+            .map_err(Fault::from_staging_listing)?
+        {
+            Some(next) => at = next,
             None => break,
         }
     }

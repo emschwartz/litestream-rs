@@ -1038,3 +1038,10 @@ fn a_rejected_commit_deletes_the_key() {
 fn the_upload_reads_in_quarter_mebibyte_chunks() {
     assert_eq!(CHUNK.get(), 256 * 1024);
 }
+
+#[test]
+fn a_staging_listing_whose_cursor_never_advances_is_a_fault_not_a_loop() {
+    let staging = crate::stuck::StuckListing::new(MemStore::new());
+    let got = block_on(drop_staged_from(&staging, txid(1)));
+    assert_eq!(got, Err(Fault::LocalIo));
+}

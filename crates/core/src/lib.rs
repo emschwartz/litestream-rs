@@ -44,6 +44,8 @@ mod retry;
 mod snapshot;
 mod source;
 mod store;
+#[cfg(test)]
+mod stuck;
 mod sync;
 mod upload;
 mod verify;
@@ -114,8 +116,8 @@ pub use source::{
     CheckpointCall, CheckpointEffect, CheckpointScript, FakeCheckpointer, FakeDb, FakeWal, SourceOp,
 };
 pub use store::{
-    BatchKind, CorruptCause, ListAt, Listing, ObjectStore, PageLimit, PartNumber, ReadAt, ReadLen,
-    StoreError, StoreOp, Upload, build_listing,
+    BatchKind, CorruptCause, ListAt, Listing, ListingStalled, ObjectStore, PageLimit, PartNumber,
+    ReadAt, ReadLen, StoreError, StoreOp, Upload, build_listing,
 };
 pub use sync::{
     PageFrom, Step, StepEnd, StepFailed, SyncConfig, Synced, clamp, header_fields, plan_pages,
