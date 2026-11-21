@@ -5,6 +5,16 @@
 //! Written once over [`Backend`]; each `#[test]` runs it for the rusqlite read transaction
 //! ([`Sqlite`]). A case whose answer depends on the backend states both answers in one table
 //! (`mark_zero_answers`), keyed by [`Backend::PIN_ON_MARK_ZERO`], never in a skip.
+//!
+//! Each case also runs in both [`Placement`]s (`both`): the host in this process, set up as
+//! replication asks, and the host in a child process at SQLite's defaults (automatic
+//! checkpoints at 1000 frames, no `PERSIST_WAL`), with the pin, the engine and the oracle
+//! here, as beside a sidecar. One case's answer differs by placement and states both
+//! (`tripwire_answers`; both are a snapshot). In this process only:
+//! `persist_wal_keeps_a_wal_a_page_size_change_makes_stale`, which is about the in-process
+//! host's own setting, and the power-loss file (`power_loss.rs`), whose loss undoes what the
+//! host wrote through this process's fault VFS. The killed-writer file (`kill.rs`) runs in
+//! both. The cases only a host at SQLite's defaults has are in `host_at_defaults.rs`.
 
 #![expect(
     clippy::unwrap_used,
@@ -23,11 +33,11 @@ use lsr_core::{
     SourceError, Tick, policy,
 };
 use lsr_sqlite::Sqlite;
-use lsr_sqlite::testing::harness::open_app;
 use lsr_sqlite::testing::{
-    Backend, Effect, FileKind, Op, Rig, RigConfig, RigError, StepDid, Stepper,
+    Backend, Effect, FileKind, Op, Placement, Rig, RigConfig, RigError, StepDid, Stepper,
+    serve_host,
 };
-use rusqlite::{FileControl, ffi};
+use rusqlite::ffi;
 use tempfile::TempDir;
 
 #[expect(
@@ -40,6 +50,9 @@ mod common;
 /// (`common::spawn`).
 #[test]
 fn child_process_entry() {
+    if serve_host() {
+        return;
+    }
     let Some((role, db)) = common::role() else {
         return;
     };
@@ -49,8 +62,15 @@ fn child_process_entry() {
     }
 }
 
-fn rig<B: Backend>(dir: &TempDir) -> Rig<B> {
-    Rig::new(dir.path(), RigConfig::default()).unwrap()
+fn rig<B: Backend>(dir: &TempDir, placement: Placement) -> Rig<B> {
+    Rig::new(dir.path(), RigConfig::placed(placement)).unwrap()
+}
+
+/// Runs `case` with the host in each placement.
+fn both(case: impl Fn(Placement)) {
+    for placement in Placement::ALL {
+        case(placement);
+    }
 }
 
 // ----------------------------------------------------------------- the fault matrix
@@ -91,16 +111,21 @@ fn settle_or_write<B: Backend>(rig: &mut Rig<B>, needed: &mut bool) -> Result<()
 /// sync, a PASSIVE and a TRUNCATE), runs the cycle, and checks: the fault fired, every fault
 /// the actor reported retries and is one an I/O error may become, the actor never halted, the
 /// cycle completed, and the oracle restores every transaction on the replica.
-fn each_step<B: Backend>(kind: FileKind, op: Op, effect: Effect) -> Vec<Outcome> {
+fn each_step<B: Backend>(
+    placement: Placement,
+    kind: FileKind,
+    op: Op,
+    effect: Effect,
+) -> Vec<Outcome> {
     let dir = TempDir::new().unwrap();
-    let mut dry = rig::<B>(&dir);
+    let mut dry = rig::<B>(&dir, placement);
     dry.cycle().unwrap();
     dry.check().unwrap();
     let steps = dry.first_calls(kind, op);
     let mut outcomes = Vec::new();
     for nth in steps {
         let dir = TempDir::new().unwrap();
-        let mut rig = rig::<B>(&dir);
+        let mut rig = rig::<B>(&dir, placement);
         rig.vfs().arm(lsr_sqlite::testing::Fault {
             kind,
             op,
@@ -109,7 +134,10 @@ fn each_step<B: Backend>(kind: FileKind, op: Op, effect: Effect) -> Vec<Outcome>
         });
         let mut needed_a_write = false;
         let done = rig.cycle_with(|rig| settle_or_write(rig, &mut needed_a_write));
-        let at = format!("{} {kind:?} {op:?} {effect:?} at call {nth}", B::NAME);
+        let at = format!(
+            "{} {placement:?} {kind:?} {op:?} {effect:?} at call {nth}",
+            B::NAME
+        );
         assert_eq!(rig.vfs().fired().len(), 1, "{at}: the fault fired once");
         done.unwrap_or_else(|err| panic!("{at}: {err}; faults {:?}", rig.faults()));
         for fault in rig.faults() {
@@ -127,8 +155,19 @@ fn each_step<B: Backend>(kind: FileKind, op: Op, effect: Effect) -> Vec<Outcome>
             needed_a_write,
         });
     }
-    assert!(!outcomes.is_empty(), "{kind:?} {op:?} runs in a cycle");
+    assert!(
+        !outcomes.is_empty(),
+        "{placement:?} {kind:?} {op:?} runs in a cycle"
+    );
     outcomes
+}
+
+/// [`each_step`] in both placements, the outcomes of both in turn.
+fn each_step_both<B: Backend>(kind: FileKind, op: Op, effect: Effect) -> Vec<Outcome> {
+    Placement::ALL
+        .into_iter()
+        .flat_map(|placement| each_step::<B>(placement, kind, op, effect))
+        .collect()
 }
 
 /// A read error on the database file (the engine's page reads, SQLite's own) or on the WAL
@@ -136,7 +175,7 @@ fn each_step<B: Backend>(kind: FileKind, op: Op, effect: Effect) -> Vec<Outcome>
 #[test]
 fn a_read_error_at_each_step_of_a_cycle_is_retried_and_loses_nothing() {
     for kind in [FileKind::Main, FileKind::Wal] {
-        let outcomes = each_step::<Sqlite>(kind, Op::Read, Effect::Error(Op::Read.error()));
+        let outcomes = each_step_both::<Sqlite>(kind, Op::Read, Effect::Error(Op::Read.error()));
         assert!(
             outcomes.iter().all(|o| !o.faults.is_empty()),
             "every step's read is the engine's to see: {outcomes:?}"
@@ -149,7 +188,7 @@ fn a_read_error_at_each_step_of_a_cycle_is_retried_and_loses_nothing() {
 #[test]
 fn a_write_error_at_each_step_of_a_cycle_is_retried_and_loses_nothing() {
     for kind in [FileKind::Main, FileKind::Wal] {
-        each_step::<Sqlite>(kind, Op::Write, Effect::Error(Op::Write.error()));
+        each_step_both::<Sqlite>(kind, Op::Write, Effect::Error(Op::Write.error()));
     }
 }
 
@@ -158,7 +197,7 @@ fn a_write_error_at_each_step_of_a_cycle_is_retried_and_loses_nothing() {
 #[test]
 fn a_short_write_at_each_step_of_a_cycle_is_disk_full_and_loses_nothing() {
     for kind in [FileKind::Main, FileKind::Wal] {
-        let outcomes = each_step::<Sqlite>(kind, Op::Write, Effect::ShortWrite);
+        let outcomes = each_step_both::<Sqlite>(kind, Op::Write, Effect::ShortWrite);
         assert!(
             outcomes
                 .iter()
@@ -174,7 +213,7 @@ fn a_short_write_at_each_step_of_a_cycle_is_disk_full_and_loses_nothing() {
 #[test]
 fn a_sync_error_at_each_step_of_a_cycle_is_retried_and_loses_nothing() {
     for kind in [FileKind::Main, FileKind::Wal] {
-        let outcomes = each_step::<Sqlite>(kind, Op::Sync, Effect::Error(Op::Sync.error()));
+        let outcomes = each_step_both::<Sqlite>(kind, Op::Sync, Effect::Error(Op::Sync.error()));
         assert!(
             outcomes
                 .iter()
@@ -189,7 +228,7 @@ fn a_sync_error_at_each_step_of_a_cycle_is_retried_and_loses_nothing() {
 #[test]
 fn a_truncate_error_at_each_step_of_a_cycle_is_retried_and_loses_nothing() {
     for kind in [FileKind::Main, FileKind::Wal] {
-        each_step::<Sqlite>(kind, Op::Truncate, Effect::Error(Op::Truncate.error()));
+        each_step_both::<Sqlite>(kind, Op::Truncate, Effect::Error(Op::Truncate.error()));
     }
 }
 
@@ -197,7 +236,7 @@ fn a_truncate_error_at_each_step_of_a_cycle_is_retried_and_loses_nothing() {
 /// write lock is the engine's `SqliteBusy`.
 #[test]
 fn a_wal_index_lock_refused_at_each_step_of_a_cycle_is_retried_and_loses_nothing() {
-    each_step::<Sqlite>(FileKind::Main, Op::ShmLock, Effect::Error(ffi::SQLITE_BUSY));
+    each_step_both::<Sqlite>(FileKind::Main, Op::ShmLock, Effect::Error(ffi::SQLITE_BUSY));
 }
 
 /// SQLite belief: a connection in WAL mode takes its shared lock on the database file once,
@@ -206,12 +245,12 @@ fn a_wal_index_lock_refused_at_each_step_of_a_cycle_is_retried_and_loses_nothing
 /// where it is a typed error and nothing stays pinned.
 #[test]
 fn no_step_takes_a_file_lock_and_a_lock_error_at_open_is_an_open_error() {
-    lock_error_at_open::<Sqlite>();
+    both(lock_error_at_open::<Sqlite>);
 }
 
-fn lock_error_at_open<B: Backend>() {
+fn lock_error_at_open<B: Backend>(placement: Placement) {
     let dir = TempDir::new().unwrap();
-    let mut rig = rig::<B>(&dir);
+    let mut rig = rig::<B>(&dir, placement);
     rig.cycle().unwrap();
     assert!(rig.first_calls(FileKind::Main, Op::Lock).is_empty());
     assert!(rig.first_calls(FileKind::Wal, Op::Lock).is_empty());
@@ -242,7 +281,7 @@ fn lock_error_at_open<B: Backend>() {
 /// TRUNCATE that succeeds empties the file, so neither reaches this state.)
 #[test]
 fn an_idle_database_settles_after_a_checkpoint_reset_the_wal_index() {
-    let outcomes = each_step::<Sqlite>(
+    let outcomes = each_step_both::<Sqlite>(
         FileKind::Wal,
         Op::Truncate,
         Effect::Error(Op::Truncate.error()),
@@ -260,8 +299,8 @@ fn an_idle_database_settles_after_a_checkpoint_reset_the_wal_index() {
 
 // ----------------------------------------------------------------- the pin, step by step
 
-fn stepper<B: Backend>(dir: &TempDir) -> Stepper<B> {
-    Stepper::new(dir.path(), 4096).unwrap()
+fn stepper<B: Backend>(dir: &TempDir, placement: Placement) -> Stepper<B> {
+    Stepper::placed(dir.path(), 4096, placement).unwrap()
 }
 
 fn wrote(did: &StepDid) -> bool {
@@ -282,12 +321,12 @@ fn assert_continue(verdict: &lsr_core::Verdict) {
 /// engine's synced end is the same after each mode and the commit that follows it.
 #[test]
 fn no_synced_frame_is_overwritten_while_pinned() {
-    no_synced_frame_is_overwritten::<Sqlite>();
+    both(no_synced_frame_is_overwritten::<Sqlite>);
 }
 
-fn no_synced_frame_is_overwritten<B: Backend>() {
+fn no_synced_frame_is_overwritten<B: Backend>(placement: Placement) {
     let dir = TempDir::new().unwrap();
-    let mut s = stepper::<B>(&dir);
+    let mut s = stepper::<B>(&dir, placement);
     assert!(wrote(&s.sync().unwrap()), "the snapshot");
     for mode in ["PASSIVE", "FULL", "RESTART", "TRUNCATE"] {
         s.write(700).unwrap();
@@ -311,12 +350,12 @@ fn no_synced_frame_is_overwritten<B: Backend>() {
 /// the WAL whole.
 #[test]
 fn a_stranger_truncate_reports_busy_and_the_wal_keeps_its_length() {
-    stranger_truncate::<Sqlite>();
+    both(stranger_truncate::<Sqlite>);
 }
 
-fn stranger_truncate<B: Backend>() {
+fn stranger_truncate<B: Backend>(placement: Placement) {
     let dir = TempDir::new().unwrap();
-    let mut s = stepper::<B>(&dir);
+    let mut s = stepper::<B>(&dir, placement);
     s.sync().unwrap();
     s.write(900).unwrap();
     s.sync().unwrap();
@@ -332,20 +371,18 @@ fn stranger_truncate<B: Backend>() {
 /// `sqlite3WalClose` needs. The engine continues where it was.
 #[test]
 fn the_pin_survives_the_hosts_last_connection_closing() {
-    pin_survives_host_close::<Sqlite>();
+    both(pin_survives_host_close::<Sqlite>);
 }
 
-fn pin_survives_host_close<B: Backend>() {
+fn pin_survives_host_close<B: Backend>(placement: Placement) {
     let dir = TempDir::new().unwrap();
-    let mut s = stepper::<B>(&dir);
+    let mut s = stepper::<B>(&dir, placement);
     s.sync().unwrap();
     s.write(800).unwrap();
     s.sync().unwrap();
     let before = s.wal_bytes().unwrap();
-    let vfs = *s.vfs();
-    let db = s.db().to_owned();
     // Swap the host's connection for a fresh one, closing the only host connection there was.
-    s.app = open_app(&db, &vfs, "NORMAL").unwrap();
+    s.host_open(0).unwrap();
     assert_eq!(s.wal_bytes().unwrap(), before, "no checkpoint, no delete");
     assert_continue(&s.verdict().unwrap());
     s.write(800).unwrap();
@@ -389,12 +426,12 @@ fn poke(path: &Path, offset: usize, bytes: &[u8]) {
 /// read: the committed end is `Busy` (retry), never a guess.
 #[test]
 fn a_wal_index_with_an_unknown_version_is_refused() {
-    unknown_wal_index_version::<Sqlite>();
+    both(unknown_wal_index_version::<Sqlite>);
 }
 
-fn unknown_wal_index_version<B: Backend>() {
+fn unknown_wal_index_version<B: Backend>(placement: Placement) {
     let dir = TempDir::new().unwrap();
-    let mut s = stepper::<B>(&dir);
+    let mut s = stepper::<B>(&dir, placement);
     s.write(500).unwrap();
     s.backend.committed().unwrap();
     let shm = shm_path(s.db());
@@ -416,12 +453,12 @@ fn unknown_wal_index_version<B: Backend>() {
 /// and the host's next read is what rebuilds the index.
 #[test]
 fn an_invalid_wal_index_is_not_ready_never_recovered_by_us() {
-    invalid_wal_index::<Sqlite>();
+    both(invalid_wal_index::<Sqlite>);
 }
 
-fn invalid_wal_index<B: Backend>() {
+fn invalid_wal_index<B: Backend>(placement: Placement) {
     let dir = TempDir::new().unwrap();
-    let mut s = stepper::<B>(&dir);
+    let mut s = stepper::<B>(&dir, placement);
     s.write(500).unwrap();
     let good = s.backend.committed().unwrap();
     let shm = shm_path(s.db());
@@ -466,9 +503,9 @@ const fn mark_zero_answers(on_mark_zero: bool) -> Answer {
     }
 }
 
-fn outside_checkpoint<B: Backend>(mode: &str, mark_zero: bool) {
+fn outside_checkpoint<B: Backend>(placement: Placement, mode: &str, mark_zero: bool) {
     let dir = TempDir::new().unwrap();
-    let mut s = stepper::<B>(&dir);
+    let mut s = stepper::<B>(&dir, placement);
     s.sync().unwrap();
     s.write(500).unwrap();
     s.sync().unwrap();
@@ -481,7 +518,10 @@ fn outside_checkpoint<B: Backend>(mode: &str, mark_zero: bool) {
     }
     let salts = s.salts().unwrap();
     let len = s.wal_bytes().unwrap().len();
-    let at = format!("{} outside {mode}, mark zero {mark_zero}", B::NAME);
+    let at = format!(
+        "{} {placement:?} outside {mode}, mark zero {mark_zero}",
+        B::NAME
+    );
     let (busy, _, _) = s.app_checkpoint(mode).unwrap();
     s.write(300).unwrap();
     let verdict = s.verdict().unwrap();
@@ -515,9 +555,11 @@ fn outside_checkpoint<B: Backend>(mode: &str, mark_zero: bool) {
 /// Upstream #946 and #1580 were beliefs about outside checkpoints; this is the whole table.
 #[test]
 fn outside_passive_restart_and_truncate_while_pinned_and_on_mark_zero() {
-    for mode in ["PASSIVE", "RESTART", "TRUNCATE"] {
-        for mark_zero in [false, true] {
-            outside_checkpoint::<Sqlite>(mode, mark_zero);
+    for placement in Placement::ALL {
+        for mode in ["PASSIVE", "RESTART", "TRUNCATE"] {
+            for mark_zero in [false, true] {
+                outside_checkpoint::<Sqlite>(placement, mode, mark_zero);
+            }
         }
     }
 }
@@ -532,38 +574,34 @@ fn outside_passive_restart_and_truncate_while_pinned_and_on_mark_zero() {
 /// proof follows.) A pin on a mark above zero blocks the same way.
 #[test]
 fn the_pin_on_mark_zero_blocks_every_backfill_past_it() {
-    mark_zero_blocks_backfill::<Sqlite>();
+    both(mark_zero_blocks_backfill::<Sqlite>);
 }
 
 /// A pin on read mark 0 at the synced end, then a host reader's write after it, in the same
 /// generation (the reader began on a mark above zero, so its write does not restart the log).
-fn frames_after_a_mark_zero_pin<B: Backend>(s: &mut Stepper<B>) -> rusqlite::Connection {
+/// The reader is the host's connection 1, left open.
+fn frames_after_a_mark_zero_pin<B: Backend>(s: &mut Stepper<B>) {
     s.sync().unwrap();
     for _ in 0..3 {
         s.write(500).unwrap();
     }
     s.sync().unwrap();
-    let vfs = *s.vfs();
-    let other = open_app(s.db(), &vfs, "NORMAL").unwrap();
-    other
-        .execute_batch("BEGIN; SELECT count(*) FROM t;")
-        .unwrap();
+    s.host_open(1).unwrap();
+    s.host_exec(1, "BEGIN; SELECT count(*) FROM t;").unwrap();
     let run = s.backend.checkpoint(CheckpointMode::Passive).unwrap();
     assert!(!run.busy && run.checkpointed == run.log, "{run:?}");
     assert!(
         matches!(s.sync().unwrap(), StepDid::Idle),
         "re-pinned on mark 0"
     );
-    other
-        .execute_batch("INSERT INTO t(v) VALUES (randomblob(500)); COMMIT;")
+    s.host_exec(1, "INSERT INTO t(v) VALUES (randomblob(500)); COMMIT;")
         .unwrap();
-    other
 }
 
-fn mark_zero_blocks_backfill<B: Backend>() {
+fn mark_zero_blocks_backfill<B: Backend>(placement: Placement) {
     let dir = TempDir::new().unwrap();
-    let mut s = stepper::<B>(&dir);
-    let _other = frames_after_a_mark_zero_pin(&mut s);
+    let mut s = stepper::<B>(&dir, placement);
+    frames_after_a_mark_zero_pin(&mut s);
     let salts = s.salts().unwrap();
     let before = s.backend.committed().unwrap();
     for mode in ["PASSIVE", "RESTART", "TRUNCATE"] {
@@ -593,10 +631,11 @@ fn mark_zero_blocks_backfill<B: Backend>() {
 /// backfills, and restarts the log over those frames before the engine read them. The proof
 /// still holds on paper (same read epoch, `salt1 + 1`), and the tripwire sees the old
 /// generation's frame past the synced end: `PinViolated` and a snapshot, never a silent
-/// continue past the lost transaction.
+/// continue past the lost transaction. The answer differs by placement (`tripwire_answers`);
+/// both are a snapshot.
 #[test]
 fn the_tripwire_fires_when_a_broken_lock_lets_frames_after_the_pin_be_abandoned() {
-    tripwire::<Sqlite>();
+    both(tripwire::<Sqlite>);
 }
 
 /// The child's work for the tripwire: append, backfill, restart.
@@ -615,9 +654,27 @@ fn host_restarts_the_wal(db: &Path) {
         .unwrap();
 }
 
-fn tripwire<B: Backend>() {
+/// How the tripwire case ends, by where the host runs: how many times the child restarted the
+/// log, and whether the proof alone would have followed it (so only the tripwire stops it).
+///
+/// In process, the descriptor this process closes drops the host's locks on `-shm` too, its
+/// dead-man-switch lock included, so the child is the only process left holding the
+/// wal-index: it runs SQLite's recovery, which rebuilds the index with nothing backfilled.
+/// Its first write appends, its checkpoint backfills it, and its second write restarts the
+/// log once (`salt1 + 1`), which the proof would follow: `PinViolated`. With the host in
+/// another process, the host keeps the wal-index alive, the child sees the log fully
+/// backfilled, and its first write restarts at once: two restarts (`salt1 + 2`), which no
+/// proof follows, so the snapshot needs no tripwire.
+const fn tripwire_answers(placement: Placement) -> (u32, bool) {
+    match placement {
+        Placement::InProcess => (1, true),
+        Placement::SeparateProcess => (2, false),
+    }
+}
+
+fn tripwire<B: Backend>(placement: Placement) {
     let dir = TempDir::new().unwrap();
-    let mut s = stepper::<B>(&dir);
+    let mut s = stepper::<B>(&dir, placement);
     s.sync().unwrap();
     for _ in 0..4 {
         s.write(500).unwrap();
@@ -642,10 +699,11 @@ fn tripwire<B: Backend>() {
         "{}",
         String::from_utf8_lossy(&out.stdout)
     );
+    let (restarts, tripped) = tripwire_answers(placement);
     assert_eq!(
         s.salts().unwrap().salt1,
-        salts.salt1.wrapping_add(1),
-        "restarted"
+        salts.salt1.wrapping_add(restarts),
+        "{placement:?}: restarted"
     );
     let verdict = s.verdict().unwrap();
     let synced = lsr_wal::WalOffset::new(
@@ -653,7 +711,8 @@ fn tripwire<B: Backend>() {
         lsr_ltx::PageSize::new(4096).unwrap(),
     )
     .unwrap();
-    assert_eq!(verdict.event, Some(RecoverEvent::PinViolated { synced }));
+    let tripwire = tripped.then_some(RecoverEvent::PinViolated { synced });
+    assert_eq!(verdict.event, tripwire, "{placement:?}: {verdict:?}");
     assert!(
         matches!(
             verdict.recovered,
@@ -672,12 +731,12 @@ fn tripwire<B: Backend>() {
 /// every page it moved and the database's new size; the oracle restores the shrunk database.
 #[test]
 fn a_vacuum_replicates_through_the_wal() {
-    vacuum::<Sqlite>();
+    both(vacuum::<Sqlite>);
 }
 
-fn vacuum<B: Backend>() {
+fn vacuum<B: Backend>(placement: Placement) {
     let dir = TempDir::new().unwrap();
-    let mut rig = rig::<B>(&dir);
+    let mut rig = rig::<B>(&dir, placement);
     for _ in 0..30 {
         rig.insert(3000).unwrap();
     }
@@ -704,31 +763,24 @@ fn vacuum<B: Backend>() {
 /// (a replica prefix holds one page size, as Go's), and the replica keeps what it had.
 #[test]
 fn a_vacuum_cannot_change_the_page_size_in_wal_mode_and_a_change_halts_at_boot() {
-    page_size_change::<Sqlite>();
+    both(page_size_change::<Sqlite>);
 }
 
-fn page_size_change<B: Backend>() {
+fn page_size_change<B: Backend>(placement: Placement) {
     let dir = TempDir::new().unwrap();
-    let mut rig = rig::<B>(&dir);
+    let mut rig = rig::<B>(&dir, placement);
     rig.insert(3000).unwrap();
     rig.settle().unwrap();
     rig.exec("PRAGMA page_size = 8192; VACUUM;").unwrap();
     rig.settle().unwrap();
-    let size: u32 = rig
-        .app()
-        .unwrap()
-        .query_row("PRAGMA page_size", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(size, 4096, "WAL mode keeps the page size");
+    let size = rig.query("PRAGMA page_size").unwrap();
+    assert_eq!(size, [4096], "WAL mode keeps the page size");
     rig.check().unwrap();
     rig.stop_replicator();
     // PERSIST_WAL would keep the old page size's WAL through the change
-    // (`persist_wal_keeps_a_wal_a_page_size_change_makes_stale`): the host turns it off first.
-    let mut off = 0;
-    rig.app()
-        .unwrap()
-        .file_control(Some(rusqlite::MAIN_DB), FileControl::PersistWal(&mut off))
-        .unwrap();
+    // (`persist_wal_keeps_a_wal_a_page_size_change_makes_stale`): the host turns it off first
+    // (a host at SQLite's defaults never had it on).
+    rig.host_persist_wal_off().unwrap();
     rig.exec(
         "PRAGMA journal_mode = DELETE; PRAGMA page_size = 8192; VACUUM; PRAGMA journal_mode = WAL;",
     )
@@ -785,7 +837,7 @@ fn persist_wal_keeps_a_wal_a_page_size_change_makes_stale() {
 /// (`WalUnlinked`) rather than snapshot a database it can no longer follow.
 #[test]
 fn a_wal_deleted_by_another_process_while_pinned_halts_the_engine() {
-    wal_deleted::<Sqlite>();
+    both(wal_deleted::<Sqlite>);
 }
 
 fn remove_by_another_process(path: &Path) {
@@ -793,15 +845,13 @@ fn remove_by_another_process(path: &Path) {
     assert!(status.success(), "rm {}", path.display());
 }
 
-fn wal_deleted<B: Backend>() {
+fn wal_deleted<B: Backend>(placement: Placement) {
     let dir = TempDir::new().unwrap();
-    let mut rig = rig::<B>(&dir);
+    let mut rig = rig::<B>(&dir, placement);
     rig.insert(3000).unwrap();
     rig.settle().unwrap();
     remove_by_another_process(&rig.wal());
-    rig.app()
-        .unwrap()
-        .execute_batch("INSERT INTO t(v) VALUES (randomblob(700))")
+    rig.exec_unseen("INSERT INTO t(v) VALUES (randomblob(700))")
         .unwrap();
     assert_eq!(
         rig.backend().unwrap().committed().err(),
@@ -816,12 +866,12 @@ fn wal_deleted<B: Backend>() {
 /// see, and the replica keeps every transaction it had.
 #[test]
 fn a_deleted_database_halts_and_the_replica_keeps_its_history() {
-    database_deleted::<Sqlite>();
+    both(database_deleted::<Sqlite>);
 }
 
-fn database_deleted<B: Backend>() {
+fn database_deleted<B: Backend>(placement: Placement) {
     let dir = TempDir::new().unwrap();
-    let mut rig = rig::<B>(&dir);
+    let mut rig = rig::<B>(&dir, placement);
     for _ in 0..12 {
         rig.insert(2000).unwrap();
         rig.settle().unwrap();
@@ -831,9 +881,7 @@ fn database_deleted<B: Backend>() {
     for path in [wal, shm_path(&db), db] {
         remove_by_another_process(&path);
     }
-    rig.app()
-        .unwrap()
-        .execute_batch("INSERT INTO t(v) VALUES (randomblob(700))")
+    rig.exec_unseen("INSERT INTO t(v) VALUES (randomblob(700))")
         .unwrap();
     assert_eq!(rig.until_halt().unwrap(), HaltCause::WalUnlinked);
     let after = rig.check().unwrap();
@@ -847,17 +895,17 @@ fn database_deleted<B: Backend>() {
 /// snapshots (`WalMissing`).
 #[test]
 fn the_wal_survives_the_replicator_closing_last() {
-    replicator_closes_last::<Sqlite>();
+    both(replicator_closes_last::<Sqlite>);
 }
 
-fn replicator_closes_last<B: Backend>() {
+fn replicator_closes_last<B: Backend>(placement: Placement) {
     let dir = TempDir::new().unwrap();
-    let mut rig = rig::<B>(&dir);
+    let mut rig = rig::<B>(&dir, placement);
     for _ in 0..3 {
         rig.insert(1500).unwrap();
         rig.settle().unwrap();
     }
-    rig.close_app();
+    rig.close_app().unwrap();
     rig.stop_replicator();
     assert!(rig.wal().exists(), "the WAL outlives the last connection");
     rig.open_app().unwrap();
@@ -891,15 +939,15 @@ fn replicator_closes_last<B: Backend>() {
     rig.check().unwrap();
 }
 
-/// Upstream `TestConcurrentOperations`: four host connections on four threads commit at once
-/// while the actor ticks over them, then the host's outside checkpoints and the actor's own
+/// Upstream `TestConcurrentOperations`: four host connections on four threads (of the host's
+/// process) commit at once while the actor ticks over them, then the host's outside checkpoints and the actor's own
 /// PASSIVE and TRUNCATE run a full cycle; the oracle restores every transaction.
 #[test]
 fn concurrent_writers_and_outside_checkpoints_replicate() {
-    concurrent::<Sqlite>();
+    both(concurrent::<Sqlite>);
 }
 
-fn concurrent<B: Backend>() {
+fn concurrent<B: Backend>(placement: Placement) {
     let dir = TempDir::new().unwrap();
     let mut cfg = RigConfig::default();
     // While threads commit, no checkpoint may let the log restart: the rig reads each commit
@@ -909,49 +957,13 @@ fn concurrent<B: Backend>() {
         min_pages: None,
         truncate_pages: None,
     };
+    cfg.placement = placement;
     let mut rig = Rig::<B>::new(dir.path(), cfg).unwrap();
     rig.insert(100).unwrap();
     rig.settle().unwrap();
-    let (db, name) = (rig.db().to_owned(), rig.vfs().name().to_owned());
-    std::thread::scope(|scope| {
-        let writers: Vec<_> = (0..4_u32)
-            .map(|w| {
-                let (db, name) = (&db, &name);
-                scope.spawn(move || {
-                    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE;
-                    let conn =
-                        rusqlite::Connection::open_with_flags_and_vfs(db, flags, name.as_str())
-                            .unwrap();
-                    conn.busy_timeout(std::time::Duration::from_secs(30))
-                        .unwrap();
-                    lsr_sqlite::app_connection(&conn).unwrap();
-                    for n in 0..25_u32 {
-                        conn.execute(
-                            "INSERT INTO t(v) VALUES (randomblob(?1))",
-                            [200 + w * 300 + n * 7],
-                        )
-                        .unwrap();
-                    }
-                })
-            })
-            .collect();
-        while !writers
-            .iter()
-            .all(std::thread::ScopedJoinHandle::is_finished)
-        {
-            assert!(!matches!(rig.tick().unwrap(), Tick::Halted(_)));
-        }
-        for writer in writers {
-            writer.join().unwrap();
-        }
-    });
+    rig.writers_while_ticking(4, 25).unwrap();
     rig.settle().unwrap();
-    let rows: i64 = rig
-        .app()
-        .unwrap()
-        .query_row("SELECT count(*) FROM t", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(rows, 101);
+    assert_eq!(rig.query("SELECT count(*) FROM t").unwrap(), [101]);
     for mode in ["PASSIVE", "RESTART", "TRUNCATE"] {
         rig.exec(&format!("PRAGMA wal_checkpoint({mode})")).unwrap();
         rig.insert(900).unwrap();
@@ -970,7 +982,7 @@ fn concurrent<B: Backend>() {
 /// replica; a second restore holds the writes made after the first.
 #[test]
 fn a_restore_after_data_loss_replicates_into_the_same_replica() {
-    restore_then_replicate::<Sqlite>();
+    both(restore_then_replicate::<Sqlite>);
 }
 
 fn restored_bytes(replica: &Path) -> Vec<u8> {
@@ -987,9 +999,9 @@ fn restored_bytes(replica: &Path) -> Vec<u8> {
         .collect()
 }
 
-fn restore_then_replicate<B: Backend>() {
+fn restore_then_replicate<B: Backend>(placement: Placement) {
     let dir = TempDir::new().unwrap();
-    let mut rig = rig::<B>(&dir);
+    let mut rig = rig::<B>(&dir, placement);
     for _ in 0..10 {
         rig.insert(1200).unwrap();
         rig.settle().unwrap();

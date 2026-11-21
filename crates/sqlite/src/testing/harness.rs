@@ -16,6 +16,12 @@
 //! What the actor's ticks see is only what the backend shows them; faults fire only inside
 //! ticks unless a test opens the VFS window itself, so a schedule counts the engine's calls.
 //!
+//! The host's connections live where [`RigConfig::placement`] says ([`Placement`], module
+//! `host`): in this process, set up as replication asks, or in a child process at SQLite's
+//! defaults, as beside a sidecar, reached over a pipe. Either way the rig reads the host's
+//! frame count from the host's own connection and the frames from the WAL file, so the model
+//! and the oracle are the same in both.
+//!
 //! [`Stepper`] is the sync engine without the actor: `recover_traced`, `sync_step` and
 //! `checkpoint` over a backend and an in-memory staging store, for cases that check the
 //! engine's verdict at one point (the pin cases, the tripwire).
@@ -45,9 +51,16 @@ use rusqlite::{Connection, OpenFlags};
 use crate::testing::vfs::{FaultVfs, FileKind, Op, VfsError, seed_prng};
 use crate::{OpenError, Sqlite, SqliteConfig};
 
+mod host;
 mod stepper;
 
+pub use host::{CHILD_ENTRY, HOST_DB, MARK, Placement, serve_host};
 pub use stepper::{StepDid, Stepper};
+
+use host::{APP, Host};
+
+/// The host connection a cycle's long reader uses.
+const READER: u32 = 1;
 
 /// What the suite needs of a backend: the engine's three doors and a way to open them.
 pub trait Backend: WalSource + PageSource + Checkpointer + Clone {
@@ -116,6 +129,9 @@ pub enum RigError {
     /// The rig's own state does not allow the step (a step after a crash, before the reboot).
     #[error("the rig cannot {0} now")]
     State(&'static str),
+    /// The host process (`Placement::SeparateProcess`) did not start, answer or stay up.
+    #[error("the host process: {0}")]
+    Host(String),
 }
 
 /// How a rig is built.
@@ -133,6 +149,8 @@ pub struct RigConfig {
     pub oracle: bool,
     /// Record what writes replace, so a power loss can undo them.
     pub power: bool,
+    /// Where the host application runs.
+    pub placement: Placement,
 }
 
 impl Default for RigConfig {
@@ -144,6 +162,18 @@ impl Default for RigConfig {
             seed: DEFAULT_SEED,
             oracle: true,
             power: false,
+            placement: Placement::InProcess,
+        }
+    }
+}
+
+impl RigConfig {
+    /// The default rig with the host in `placement`.
+    #[must_use]
+    pub fn placed(placement: Placement) -> Self {
+        Self {
+            placement,
+            ..Self::default()
         }
     }
 }
@@ -297,8 +327,9 @@ impl Mirror {
 }
 
 /// SQLite's frame count for the WAL, as the application connection sees it.
-fn wal_frames(app: &Connection) -> Result<u32, rusqlite::Error> {
-    let log: i64 = app.query_row("PRAGMA wal_checkpoint(NOOP)", [], |row| row.get(1))?;
+fn wal_frames(host: &mut Host) -> Result<u32, RigError> {
+    let row = host.query(APP, "PRAGMA wal_checkpoint(NOOP)")?;
+    let log = row.get(1).copied().unwrap_or(0);
     Ok(u32::try_from(log).unwrap_or(0))
 }
 
@@ -341,7 +372,7 @@ pub struct Rig<B: Backend> {
     db: PathBuf,
     cfg: RigConfig,
     vfs: FaultVfs,
-    app: Option<Connection>,
+    host: Host,
     backend: Option<B>,
     actor: Actor,
     clock: FakeClock,
@@ -383,7 +414,8 @@ impl<B: Backend> Rig<B> {
         if cfg.power {
             vfs.track_durability();
         }
-        let app = open_app(&db, &vfs, cfg.synchronous)?;
+        let mut host = Host::new(cfg.placement, &db, vfs, cfg.synchronous)?;
+        host.open(APP)?;
         let backend =
             B::open_backend(&db, vfs.name()).map_err(|err| RigError::Open(Box::new(err)))?;
         let staging = Tap::new(FsStore::new(root.join("meta")));
@@ -400,7 +432,7 @@ impl<B: Backend> Rig<B> {
             cfg,
             wal_syncs: vfs.syncs(FileKind::Wal),
             vfs,
-            app: Some(app),
+            host,
             backend: Some(backend),
             clock: FakeClock::new(Timestamp::from_unix_millis(1_700_000_000_000)),
             staging_log: staging.log(),
@@ -448,9 +480,53 @@ impl<B: Backend> Rig<B> {
     /// The host's connection.
     ///
     /// # Errors
-    /// [`RigError::State`] after a crash, before the reboot.
+    /// [`RigError::State`] after a crash, before the reboot, or with the host in another
+    /// process.
     pub fn app(&self) -> Result<&Connection, RigError> {
-        self.app.as_ref().ok_or(RigError::State("reach the app"))
+        self.host
+            .local(APP)
+            .ok_or(RigError::State("reach the app's connection"))
+    }
+
+    /// Where the host runs.
+    #[must_use]
+    pub const fn placement(&self) -> Placement {
+        self.host.placement()
+    }
+
+    /// The first row of `sql` on the host's connection, every column an integer.
+    ///
+    /// # Errors
+    /// [`RigError`].
+    pub fn query(&mut self, sql: &str) -> Result<Vec<i64>, RigError> {
+        self.host.query(APP, sql)
+    }
+
+    /// Runs `sql` on the host's connection without reading what it committed, for a commit
+    /// the model cannot follow (a WAL deleted under it).
+    ///
+    /// # Errors
+    /// [`RigError`].
+    pub fn exec_unseen(&mut self, sql: &str) -> Result<(), RigError> {
+        self.host.exec(APP, sql)
+    }
+
+    /// Turns `SQLITE_FCNTL_PERSIST_WAL` off on the host's connection (a host at SQLite's
+    /// defaults never had it on).
+    ///
+    /// # Errors
+    /// [`RigError`].
+    pub fn host_persist_wal_off(&mut self) -> Result<(), RigError> {
+        self.host.persist_wal_off(APP)
+    }
+
+    /// The host's process opens and closes the database and `-shm` with `std::fs`, dropping
+    /// its own POSIX locks on them. Only for a host in another process.
+    ///
+    /// # Errors
+    /// [`RigError::State`] in process; the host's error.
+    pub fn host_touches_the_files(&mut self) -> Result<(), RigError> {
+        self.host.touch()
     }
 
     /// The backend.
@@ -531,11 +607,14 @@ impl<B: Backend> Rig<B> {
     /// # Errors
     /// [`RigError`].
     pub fn exec(&mut self, sql: &str) -> Result<(), RigError> {
+        if !self.host.is_open(APP) {
+            return Err(RigError::State("reach the app"));
+        }
         self.vfs.set_window(self.everywhere);
-        let done = self.app()?.execute_batch(sql);
+        let done = self.host.exec(APP, sql);
         self.vfs.set_window(false);
         self.observe()?;
-        Ok(done?)
+        done
     }
 
     /// Inserts one row of `bytes` random bytes.
@@ -565,13 +644,13 @@ impl<B: Backend> Rig<B> {
     /// [`RigError`].
     pub fn observe(&mut self) -> Result<(), RigError> {
         self.note_syncs();
+        if self.model.is_none() || !self.host.is_open(APP) || !self.vfs.powered() {
+            return Ok(());
+        }
+        let frames = wal_frames(&mut self.host)?;
         let Some(model) = self.model.as_mut() else {
             return Ok(());
         };
-        let Some(app) = self.app.as_ref().filter(|_| self.vfs.powered()) else {
-            return Ok(());
-        };
-        let frames = wal_frames(app)?;
         let at = self.remote_log.len();
         for tx in self.mirror.drain(frames)? {
             let app = AppCommit {
@@ -733,30 +812,32 @@ impl<B: Backend> Rig<B> {
             settle(self)?;
         }
         let begin = self.ticks.len();
-        let mut reader: Option<(Connection, usize)> = None;
+        // When the host's long reader took its snapshot, by tick.
+        let mut reader: Option<usize> = None;
         let mut released = Some(begin);
         for _ in 0..80 {
             let retake = released.is_some_and(|at| {
                 at == begin || self.checkpointed_since(at, CheckpointMode::Passive, false)
             });
             if retake {
-                let conn = open_app(&self.db, &self.vfs, self.cfg.synchronous)?;
-                conn.execute_batch("BEGIN; SELECT count(*) FROM t;")?;
-                reader = Some((conn, self.ticks.len()));
+                self.host.open(READER)?;
+                self.host.exec(READER, "BEGIN; SELECT count(*) FROM t;")?;
+                reader = Some(self.ticks.len());
                 released = None;
             }
             self.insert(3000)?;
             settle(self)?;
             if self.checkpointed_since(begin, CheckpointMode::Truncate, false) {
-                drop(reader);
+                self.host.close(READER)?;
                 self.insert(3000)?;
                 return settle(self);
             }
-            let blocked = reader.as_ref().is_some_and(|(_, taken)| {
-                self.checkpointed_since(*taken, CheckpointMode::Passive, true)
-                    || self.checkpointed_since(*taken, CheckpointMode::Truncate, true)
+            let blocked = reader.is_some_and(|taken| {
+                self.checkpointed_since(taken, CheckpointMode::Passive, true)
+                    || self.checkpointed_since(taken, CheckpointMode::Truncate, true)
             });
             if blocked {
+                self.host.close(READER)?;
                 reader = None;
                 released = Some(self.ticks.len());
             }
@@ -783,6 +864,60 @@ impl<B: Backend> Rig<B> {
             }
         }
         Err(RigError::Unsettled(SETTLE_TICKS))
+    }
+
+    /// One tick that must not halt.
+    fn tick_unhalted(&mut self) -> Result<(), RigError> {
+        match self.tick()? {
+            Tick::Halted(cause) => Err(RigError::Halted(cause)),
+            Tick::Ran { .. } | Tick::Drained { .. } | Tick::DeadlineReached(_) => Ok(()),
+        }
+    }
+
+    /// `writers` host connections, on threads of their own in the host's process, commit
+    /// `rows` rows each at once while the actor ticks; returns once every writer is done.
+    ///
+    /// # Errors
+    /// [`RigError::Halted`] when a tick halts, a writer's error, or the rig's own.
+    pub fn writers_while_ticking(&mut self, writers: u32, rows: u32) -> Result<(), RigError> {
+        let Some(child) = self.host.child_mut() else {
+            return self.local_writers(writers, rows);
+        };
+        child.start_writers(writers, rows)?;
+        loop {
+            self.tick_unhalted()?;
+            let child = self
+                .host
+                .child_mut()
+                .ok_or(RigError::State("lose the host process"))?;
+            if child.writers_done()? {
+                return Ok(());
+            }
+        }
+    }
+
+    fn local_writers(&mut self, writers: u32, rows: u32) -> Result<(), RigError> {
+        let (db, name) = (self.db.clone(), self.vfs.name().to_owned());
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..writers)
+                .map(|w| {
+                    let (db, name) = (&db, name.as_str());
+                    scope.spawn(move || local_writer(db, name, w, rows))
+                })
+                .collect();
+            while !handles
+                .iter()
+                .all(std::thread::ScopedJoinHandle::is_finished)
+            {
+                self.tick_unhalted()?;
+            }
+            for handle in handles {
+                handle
+                    .join()
+                    .map_err(|_panic| RigError::State("join a writer that panicked"))??;
+            }
+            Ok(())
+        })
     }
 
     /// The oracle's verdict on the replica as it is now.
@@ -828,9 +963,12 @@ impl<B: Backend> Rig<B> {
         self.backend = None;
     }
 
-    /// Drops the host's connection.
-    pub fn close_app(&mut self) {
-        self.app = None;
+    /// Closes the host's connection.
+    ///
+    /// # Errors
+    /// SQLite's close.
+    pub fn close_app(&mut self) -> Result<(), RigError> {
+        self.host.close(APP)
     }
 
     /// Opens the host's connection again.
@@ -838,7 +976,7 @@ impl<B: Backend> Rig<B> {
     /// # Errors
     /// [`RigError`].
     pub fn open_app(&mut self) -> Result<(), RigError> {
-        self.app = Some(open_app(&self.db, &self.vfs, self.cfg.synchronous)?);
+        self.host.open(APP)?;
         self.observe()
     }
 }
@@ -852,10 +990,10 @@ impl<B: Backend> Rig<B> {
     /// [`RigError`].
     pub fn reboot_after_power_loss(&mut self) -> Result<(), RigError> {
         self.backend = None;
-        self.app = None;
+        self.host.discard_all()?;
         self.vfs.restore_power()?;
-        let app = open_app(&self.db, &self.vfs, self.cfg.synchronous)?;
-        let frames = wal_frames(&app)?;
+        self.host.open(APP)?;
+        let frames = wal_frames(&mut self.host)?;
         let bytes = read_file(&self.wal())?;
         let salts = match (be32(&bytes, 16), be32(&bytes, 20)) {
             (Some(salt1), Some(salt2)) => Some(Salts { salt1, salt2 }),
@@ -867,7 +1005,6 @@ impl<B: Backend> Rig<B> {
         self.mirror.seen = salts.map(|salts| (salts, frames));
         self.acked.note_rewound();
         self.wal_syncs = self.vfs.syncs(FileKind::Wal);
-        self.app = Some(app);
         self.restart()
     }
 
@@ -880,7 +1017,7 @@ impl<B: Backend> Rig<B> {
     /// [`RigError`].
     pub fn replace_database(&mut self, bytes: &[u8], staging: &Path) -> Result<(), RigError> {
         self.backend = None;
-        self.app = None;
+        self.host.discard_all()?;
         let io_at = |path: &Path| {
             let path = path.to_owned();
             move |source| RigError::Io { path, source }
@@ -900,9 +1037,25 @@ impl<B: Backend> Rig<B> {
         std::fs::write(&self.db, bytes).map_err(io_at(&self.db))?;
         self.mirror.seen = None;
         self.staging_seen = self.staging_log.len();
-        self.app = Some(open_app(&self.db, &self.vfs, self.cfg.synchronous)?);
+        self.host.open(APP)?;
         self.restart()
     }
+}
+
+/// One in-process concurrent writer: a host connection through the rig's VFS, set up as
+/// replication asks, waiting on the others' write lock.
+fn local_writer(db: &Path, vfs: &str, writer: u32, rows: u32) -> Result<(), RigError> {
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE;
+    let conn = Connection::open_with_flags_and_vfs(db, flags, vfs)?;
+    conn.busy_timeout(Duration::from_secs(30))?;
+    crate::app_connection(&conn).map_err(|err| RigError::Open(Box::new(err)))?;
+    for n in 0..rows {
+        conn.execute(
+            "INSERT INTO t(v) VALUES (randomblob(?1))",
+            [host::writer_row_bytes(writer, n)],
+        )?;
+    }
+    Ok(())
 }
 
 /// Copies every file of `from` into `to`, so the oracle can judge a replica on disk.

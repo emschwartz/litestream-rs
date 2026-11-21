@@ -1,6 +1,8 @@
 //! A host writer in another process, SIGKILLed mid-transaction: nothing it did not commit, and
 //! nothing it committed that SQLite never indexed, reaches any LTX file, staged or replicated,
-//! and the next writer's transactions over the same WAL slots replicate as normal.
+//! and the next writer's transactions over the same WAL slots replicate as normal. Each case
+//! runs with the rig's own host in this process and in another one at SQLite's defaults
+//! (`lsr_sqlite::testing::Placement`).
 
 #![expect(
     clippy::unwrap_used,
@@ -15,7 +17,8 @@ use std::path::Path;
 use lsr_ltx::{Event, ReadDecoder};
 use lsr_sqlite::Sqlite;
 use lsr_sqlite::testing::{
-    Backend, Effect, Fault, FaultVfs, FileKind, HANG_LINE, Op, Rig, RigConfig,
+    Backend, Effect, Fault, FaultVfs, FileKind, HANG_LINE, Op, Placement, Rig, RigConfig,
+    serve_host,
 };
 use tempfile::TempDir;
 
@@ -30,6 +33,9 @@ const READY: &str = "lsr-kill-test: mid-transaction";
 /// The child processes' entry: a no-op in the test run, the role's work in a child.
 #[test]
 fn child_process_entry() {
+    if serve_host() {
+        return;
+    }
     let Some((role, db)) = common::role() else {
         return;
     };
@@ -127,9 +133,16 @@ fn wal_holds_marker(rig: &Rig<impl Backend>) -> bool {
     contains(&wal, MARKER)
 }
 
+/// The killed writer is a process of its own in both placements of the host.
 fn killed_writer<B: Backend>(role: &str) {
+    for placement in Placement::ALL {
+        killed_writer_beside::<B>(role, placement);
+    }
+}
+
+fn killed_writer_beside<B: Backend>(role: &str, placement: Placement) {
     let dir = TempDir::new().unwrap();
-    let mut rig = Rig::<B>::new(dir.path(), RigConfig::default()).unwrap();
+    let mut rig = Rig::<B>::new(dir.path(), RigConfig::placed(placement)).unwrap();
     for _ in 0..6 {
         rig.insert(1500).unwrap();
         rig.settle().unwrap();
@@ -157,12 +170,12 @@ fn killed_writer<B: Backend>(role: &str) {
     }
     let checked = rig.check().unwrap();
     assert!(checked.restored > 30, "{checked:?}");
-    let rows: i64 = rig
-        .app()
-        .unwrap()
-        .query_row("SELECT count(*) FROM t", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(rows, 37, "none of the killed writer's rows");
+    let rows = rig.query("SELECT count(*) FROM t").unwrap();
+    assert_eq!(
+        rows,
+        [37],
+        "{placement:?}: none of the killed writer's rows"
+    );
     assert!(!any_page_holds(&dir.path().join("meta"), MARKER), "staged");
     assert!(!any_page_holds(rig.replica_root(), MARKER), "replicated");
 }
