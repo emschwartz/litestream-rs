@@ -13,6 +13,7 @@ mod compact;
 pub mod conformance;
 mod env;
 mod fault;
+mod host;
 mod inventory;
 mod layout;
 mod maintain;
@@ -47,6 +48,9 @@ pub use env::{FakeClock, RecordingSleeper, SeededEntropy};
 pub use fault::{
     Backoff, Clamped, Fault, ForeignWriter, HaltCause, MAX_BACKOFF, Next, PersistentCause, Policy,
     Response, Responses, SnapshotCause, backoff_wait, policy, retry_wait,
+};
+pub use host::{
+    HostCheckpoint, HostCheckpoints, HostObserver, SQLITE_AUTOCHECKPOINT, Watch, observe,
 };
 pub use inventory::{Inventory, InventoryError, is_snapshot_start};
 pub use layout::{

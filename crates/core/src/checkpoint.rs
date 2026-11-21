@@ -38,7 +38,7 @@ use crate::fault::{Clamped, Fault, Next, SnapshotCause};
 use crate::layout::FileInfo;
 use crate::pages::PageTable;
 use crate::position::{Continuity, Position, ReadEpoch, SyncedThrough};
-use crate::source::{CheckpointMode, Checkpointer, PageSource, WalSource};
+use crate::source::{CheckpointMode, CheckpointRun, Checkpointer, PageSource, WalSource};
 use crate::store::ObjectStore;
 use crate::sync::{Step, StepEnd, SyncConfig, Synced, sync_step};
 
@@ -335,6 +335,9 @@ pub struct Checkpointed {
     pub files: Vec<FileInfo>,
     /// Clock steps back the staged files were stamped around.
     pub clamped: Vec<Clamped>,
+    /// What SQLite's checkpoint call reported as the read transaction was retaken: where the
+    /// pin now sits, for the host-checkpoint observer (`crate::host`).
+    pub run: Option<CheckpointRun>,
 }
 
 /// A checkpoint that did not finish.
@@ -345,6 +348,8 @@ pub struct CheckpointFailed {
     /// The last position that is true. It moved only for a step that completed,
     /// and is unpinned once the checkpoint released the read transaction.
     pub position: Position,
+    /// What SQLite's checkpoint call reported, when it returned before the fault.
+    pub run: Option<CheckpointRun>,
 }
 
 /// Why the WAL could not be opened as a reader.
@@ -367,6 +372,7 @@ struct Protocol<'a, W, P, C, L> {
     good: Position,
     files: Vec<FileInfo>,
     clamped: Vec<Clamped>,
+    run: Option<CheckpointRun>,
 }
 
 impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_, W, P, C, L> {
@@ -469,11 +475,13 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_, 
         Ok(CheckpointOutcome::Restarted)
     }
 
-    async fn seal_and_checkpoint(&mut self) -> Result<crate::source::CheckpointRun, Fault> {
+    async fn seal_and_checkpoint(&mut self) -> Result<CheckpointRun, Fault> {
         self.step(Step::Incremental(self.good)).await?;
         let run = self.ck.checkpoint(CheckpointMode::Passive);
         self.unpin();
-        run.map_err(Fault::from_source)
+        let run = run.map_err(Fault::from_source)?;
+        self.run = Some(run);
+        Ok(run)
     }
 
     async fn truncate(&mut self) -> Result<CheckpointOutcome, Fault> {
@@ -481,6 +489,7 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_, 
         let run = self.ck.checkpoint(CheckpointMode::Truncate);
         self.unpin();
         let run = run.map_err(Fault::from_source)?;
+        self.run = Some(run);
         self.ck.bump_seq().map_err(Fault::from_source)?;
         let after = self.header()?;
         let shorter = self
@@ -554,6 +563,7 @@ pub async fn checkpoint<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectS
         good: proof.into_position(),
         files: Vec::new(),
         clamped: Vec::new(),
+        run: None,
     };
     let result = match mode {
         CheckpointMode::Passive => protocol.passive().await,
@@ -565,10 +575,12 @@ pub async fn checkpoint<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectS
             outcome,
             files: protocol.files,
             clamped: protocol.clamped,
+            run: protocol.run,
         }),
         Err(fault) => Err(CheckpointFailed {
             fault,
             position: protocol.good,
+            run: protocol.run,
         }),
     }
 }

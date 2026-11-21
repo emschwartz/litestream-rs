@@ -44,11 +44,10 @@
 //! `Halted(Shutdown)`. The wal-index gives a frame offset, not a transaction
 //! id, so what is left is counted in WAL bytes and staged files.
 //!
-//! The actor also counts checkpoints it did not run: a wal-index whose
-//! backfill count grew within one generation, or whose generation changed
-//! when no checkpoint of its own had emptied the WAL, was checkpointed by
-//! someone else ([`Actor::foreign_checkpoints`]). The host promised not to;
-//! the count is how a broken promise shows.
+//! The actor also hands every wal-index read, and the read after each of its
+//! own checkpoints, to a [`HostObserver`] (`crate::host`), which counts the
+//! checkpoints it did not run and infers the host's automatic checkpoints that
+//! cannot run ([`Actor::host_checkpoints`]). The count changes no decision.
 
 mod state;
 
@@ -56,7 +55,7 @@ use std::num::NonZeroU32;
 use std::time::Duration;
 
 use lsr_ltx::{PageSize, Timestamp, Txid};
-use lsr_wal::{CommittedEnd, OpenError, Salts, WalReader};
+use lsr_wal::{CommittedEnd, OpenError, WalReader};
 
 pub use state::{Degraded, Lane, Phase};
 use state::{Gate, Lanes, Maintain};
@@ -70,6 +69,7 @@ use crate::fault::{
     Action, Backoff, Clamped, Fault, HaltCause, Next, PersistentCause, Policy, Responses,
     SnapshotCause, backoff_wait, policy,
 };
+use crate::host::{HostCheckpoints, HostObserver};
 use crate::inventory::Inventory;
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::maintain::{
@@ -241,23 +241,6 @@ pub struct Unfinished {
     pub staged_not_uploaded: u32,
 }
 
-/// The wal-index's backfill count as last read, to tell a checkpoint this
-/// actor did not run.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Backfill {
-    salts: Salts,
-    frames: u32,
-}
-
-impl Backfill {
-    const fn of(committed: CommittedRead) -> Self {
-        Self {
-            salts: committed.end().salts(),
-            frames: committed.backfilled(),
-        }
-    }
-}
-
 /// What a sync step left.
 enum Stepped {
     /// The step ran; the proof is set when it reached the committed end at an
@@ -308,13 +291,8 @@ pub struct Actor {
     /// A lane is degraded and retention holds its pin (which is `None` when
     /// the replica held nothing as the degradation began).
     pinned: bool,
-    /// The last wal-index backfill read, for counting foreign checkpoints.
-    backfill: Option<Backfill>,
-    /// This actor's own checkpoint left the WAL fully backfilled, so the next
-    /// generation change is its own.
-    restart_owed: bool,
-    /// Checkpoints run by someone else.
-    foreign_checkpoints: u64,
+    /// What the host's checkpoints did between reads.
+    host: HostObserver,
 }
 
 fn later(at: Timestamp, wait: Duration) -> Timestamp {
@@ -432,9 +410,7 @@ impl Actor {
             last: None,
             clamp_reported: false,
             pinned: false,
-            backfill: None,
-            restart_owed: false,
-            foreign_checkpoints: 0,
+            host: HostObserver::default(),
         }
     }
 
@@ -478,7 +454,20 @@ impl Actor {
     /// Checkpoints someone else ran on the database since this actor began.
     #[must_use]
     pub const fn foreign_checkpoints(&self) -> u64 {
-        self.foreign_checkpoints
+        self.host.counts().ran()
+    }
+
+    /// What the host's checkpoints did since this actor began.
+    #[must_use]
+    pub const fn host_checkpoints(&self) -> HostCheckpoints {
+        self.host.counts()
+    }
+
+    /// The host's `wal_autocheckpoint`, in frames (`None`: it runs none). The
+    /// default is SQLite's, 1000; it only changes what the host-checkpoint
+    /// notice infers.
+    pub const fn set_host_autocheckpoint(&mut self, frames: Option<NonZeroU32>) {
+        self.host.set_autocheckpoint(frames);
     }
 
     /// Committed WAL bytes past the synced position: all of `committed` when
@@ -687,9 +676,7 @@ impl Actor {
         fresh.clamp_reported = self.clamp_reported;
         fresh.pinned = self.pinned;
         fresh.maintain.state.set_pin(self.maintain.state.pin());
-        fresh.backfill = self.backfill;
-        fresh.restart_owed = self.restart_owed;
-        fresh.foreign_checkpoints = self.foreign_checkpoints;
+        fresh.host = self.host;
         *self = fresh;
     }
 
@@ -887,32 +874,6 @@ impl Actor {
         }
     }
 
-    /// Counts a checkpoint this actor did not run, from one wal-index read:
-    /// the backfill count grew within a generation, or the generation changed
-    /// though no checkpoint of this actor's had emptied the WAL.
-    fn note_backfill(&mut self, committed: CommittedRead) {
-        let seen = Backfill::of(committed);
-        if let Some(last) = self.backfill {
-            let foreign = if last.salts == seen.salts {
-                seen.frames > last.frames
-            } else {
-                !std::mem::take(&mut self.restart_owed)
-            };
-            if foreign {
-                self.foreign_checkpoints = self.foreign_checkpoints.saturating_add(1);
-            }
-        }
-        self.backfill = Some(seen);
-    }
-
-    /// After this actor's own checkpoint: the backfill it left is the new
-    /// baseline, and when it emptied the WAL the next generation is its own.
-    fn rebase_backfill<W: WalSource>(&mut self, wal: &mut W) {
-        let read = wal.committed().ok();
-        self.backfill = read.map(Backfill::of);
-        self.restart_owed = read.is_some_and(|read| read.fully_backfilled());
-    }
-
     /// Everything committed is staged and everything staged is on the replica.
     fn settled<W: WalSource>(&self, wal: &mut W) -> bool {
         let synced = wal
@@ -977,7 +938,7 @@ impl Actor {
             Ok(committed) => committed,
             Err(err) => return Some(self.fault(Lane::Sync, Fault::from_source(err), now)),
         };
-        self.note_backfill(committed);
+        self.host.poll(committed);
         let wants_proof = may_checkpoint && self.checkpoint_decision(now).is_some();
         let quiet = !self.wal_moved(committed) && self.pending.is_none() && !self.more_wal;
         if quiet && !wants_proof {
@@ -1183,10 +1144,16 @@ impl Actor {
             now,
         )
         .await;
-        self.rebase_backfill(env.wal);
+        let run = match &done {
+            Ok(done) => done.run,
+            Err(failed) => failed.run,
+        };
+        self.host.ours(env.wal.committed().ok(), run);
         let done = match done {
             Ok(done) => done,
-            Err(CheckpointFailed { fault, position }) => {
+            Err(CheckpointFailed {
+                fault, position, ..
+            }) => {
                 self.position = Some(position);
                 return self.fault(Lane::Checkpoint, fault, now);
             }

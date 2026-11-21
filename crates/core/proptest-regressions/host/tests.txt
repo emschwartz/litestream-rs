@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 5fc2a3b8da1172d5eca773df112556a660aa6de45e2aa6219307e5a81a318c9e # shrinks to steps = [HostCommit(39), HostCommit(64), HostCommit(75), HostCommit(45), HostCommit(71), HostCommit(65), HostCommit(62), HostCommit(13), HostCommit(60), HostCommit(75), HostCommit(8), HostCommit(49), HostCommit(43), HostCommit(56), HostCommit(31), HostCommit(52), HostCommit(49), HostCommit(67), HostCommit(59), HostCommit(15), Ours { full: false }, HostCommit(1), Poll], threshold = None, pin_at_start = 2, told = false
