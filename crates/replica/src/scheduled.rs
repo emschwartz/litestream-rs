@@ -169,13 +169,6 @@ impl Scheduled {
         self.health.pinned
     }
 
-    /// A fresh engine after a panic: a pending read is asked for again.
-    pub(crate) fn rebuilt(&self, actor: &mut Actor) {
-        if let Stage::Reading = self.stage {
-            actor.read_live_pages();
-        }
-    }
-
     fn hand_over(&mut self, live: LivePages, now: Timestamp) {
         if let Some((store, park)) = self.start.take() {
             let job = Arc::clone(&self.job);

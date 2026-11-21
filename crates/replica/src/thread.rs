@@ -11,13 +11,12 @@
 //! with `HaltCause::Bug`. A panic outside that catch ends the thread; its exit guard then
 //! reports `Gone::ThreadDied` to every waiter.
 //!
-//! What a fresh engine must not forget is one group, `Survivors`, handed whole to every
-//! engine this thread builds: a stop's deadline, an operator's snapshot request not yet taken,
-//! and what the last booted engine reported that a fresh one starts without (its degraded
-//! lanes, shown until the fresh engine boots, and the retention pin they held, kept until the
-//! fresh engine has booted, has no lane degraded and has replicated past it). The host's
-//! checkpoint threshold comes from the config, and the scheduled verify re-asks for its own
-//! pin and pending read.
+//! What a fresh engine must not forget is the engine's own to keep: the fresh one is built
+//! from the dropped one (`Actor::rebuilt`), which carries over a stop's deadline, an
+//! operator's snapshot request not yet staged, each lane's degraded state and the restore
+//! point retention keeps for them, the scheduled verify's pending read, and the host
+//! checkpoint counts. This thread keeps only the stop's deadline, to cap its own waits, and
+//! hands the scheduled verify's pin over after every tick.
 //!
 //! Health's progress (what is synced, what the replica holds, what a stop would leave) is
 //! `Progress`, which only a booted engine overwrites: a fresh engine knows nothing yet, and
@@ -40,9 +39,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use lsr_core::{
-    Actor, ActorConfig, Degraded, Did, Env, Event as EngineEvent, HaltCause, HostCheckpoints, Lane,
-    Level, ObjectStore, PageLimit, PersistentCause, Phase as EnginePhase, Response, Tick,
-    Unfinished, WalSource, retry_wait,
+    Actor, Degraded, Did, Env, Event as EngineEvent, HaltCause, HostCheckpoints, Lane, Level,
+    ObjectStore, PageLimit, PersistentCause, Phase as EnginePhase, Response, Tick, Unfinished,
+    WalSource, retry_wait,
 };
 use lsr_ltx::{Timestamp, Txid};
 use lsr_sqlite::{DatabaseFile, Sqlite};
@@ -87,102 +86,13 @@ enum Reopen {
     Replaced,
 }
 
-/// What a booted engine reported that a fresh one starts without.
-#[derive(Clone, Copy, Debug, Default)]
-struct Carried {
-    /// Its degraded lanes, reported until the fresh engine boots.
-    lanes: [Option<Degraded>; 5],
-    /// The restore point retention kept for them.
-    pin: Option<Txid>,
-}
-
-impl Carried {
-    /// What `actor` reports now, over what was carried before and not yet let go.
-    fn and(self, actor: &Actor) -> Self {
-        let mut lanes = Lane::ALL.map(|lane| actor.degraded(lane));
-        for (lane, kept) in lanes.iter_mut().zip(self.lanes) {
-            *lane = lane.or(kept);
-        }
-        let pin = lanes
-            .iter()
-            .any(Option::is_some)
-            .then(|| actor.retention_pin())
-            .flatten();
-        Self {
-            lanes,
-            pin: earlier(pin, self.pin),
-        }
-    }
-}
-
-/// What every fresh engine is handed, whole (see the module doc).
-#[derive(Debug, Default)]
-struct Survivors {
-    /// The earliest stop asked for.
-    stop: Option<Timestamp>,
-    /// An operator asked for a snapshot that no engine has taken yet.
-    snapshot_asked: bool,
-    carried: Carried,
-}
-
-impl Survivors {
-    /// The restore point retention keeps: the older of the verify's and the carried one.
-    fn pin(&self, verify: Option<Txid>) -> Option<Txid> {
-        earlier(verify, self.carried.pin)
-    }
-}
-
-/// The older of two restore points.
-fn earlier(a: Option<Txid>, b: Option<Txid>) -> Option<Txid> {
-    match (a, b) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (a, b) => a.or(b),
-    }
-}
-
-/// An engine, and whether it has booted.
-struct Engine {
-    actor: Actor,
-    booted: bool,
-}
-
 /// An engine that has booted: the only one whose positions [`Progress`] takes.
 #[derive(Clone, Copy)]
 struct BootedEngine<'a>(&'a Actor);
 
-impl Engine {
-    /// A fresh engine with everything that must survive a rebuild applied.
-    fn fresh(
-        actor_cfg: &ActorConfig,
-        config: &Config,
-        survivors: &Survivors,
-        scheduled: Option<&Scheduled>,
-    ) -> Self {
-        let mut actor = Actor::new(actor_cfg.clone());
-        actor.set_host_autocheckpoint(config.host_autocheckpoint);
-        if let Some(deadline) = survivors.stop {
-            actor.begin_shutdown(deadline);
-        }
-        if survivors.snapshot_asked {
-            actor.request_snapshot();
-        }
-        if let Some(scheduled) = scheduled {
-            scheduled.rebuilt(&mut actor);
-        }
-        actor.pin_for_verify(survivors.pin(scheduled.and_then(Scheduled::pinned)));
-        Self {
-            actor,
-            booted: false,
-        }
-    }
-
-    const fn booted(&self) -> Option<BootedEngine<'_>> {
-        if self.booted {
-            Some(BootedEngine(&self.actor))
-        } else {
-            None
-        }
-    }
+/// The engine, if it has booted.
+fn booted(actor: &Actor) -> Option<BootedEngine<'_>> {
+    actor.booted().then_some(BootedEngine(actor))
 }
 
 /// What health says is synced, replicated and left, as the last booted engine knew it.
@@ -232,12 +142,8 @@ impl Progress {
 #[derive(Debug, Default)]
 struct Seen {
     counters: Counters,
-    /// Foreign checkpoints counted by engines a panic dropped.
-    foreign_before: u64,
     /// The foreign checkpoint total last reported as an event.
     foreign_reported: u64,
-    /// Host checkpoints seen by engines a panic dropped.
-    host_before: HostCheckpoints,
     /// The host checkpoint total last reported as an event.
     host_reported: u64,
     stopped_reported: bool,
@@ -249,8 +155,7 @@ pub(crate) struct Worker {
     database: PathBuf,
     staging: FsStore,
     remote: Metered,
-    engine: Engine,
-    actor_cfg: ActorConfig,
+    actor: Actor,
     config: Config,
     runtime: Runtime,
     sink: Option<Box<dyn EventSink>>,
@@ -259,7 +164,8 @@ pub(crate) struct Worker {
     /// The thread itself stopped the replicator: a panic under `Responses::bug = Stop`, or a
     /// replaced database under `Responses::wal_unlinked = Stop`.
     stopped: Option<HaltCause>,
-    survivors: Survivors,
+    /// The earliest stop asked for: every wait of this thread is capped at it.
+    stop: Option<Timestamp>,
     progress: Progress,
     seen: Seen,
     /// The scheduled verify, when `Config::verify_interval` is set.
@@ -292,7 +198,8 @@ impl Worker {
         config: Config,
         runtime: Runtime,
     ) -> Self {
-        let actor_cfg = config.actor();
+        let mut actor = Actor::new(config.actor());
+        actor.set_host_autocheckpoint(config.host_autocheckpoint);
         let now = runtime.clock.now();
         let scheduled = config.verify_interval.map(|every| {
             let store = Metered::new(
@@ -307,22 +214,20 @@ impl Worker {
             Arc::clone(&shared.meters),
             Arc::clone(&runtime.clock),
         );
-        let survivors = Survivors::default();
         Self {
             shared,
             sqlite: Some(sqlite),
             database: database.to_owned(),
             staging: FsStore::new(meta),
             remote,
-            engine: Engine::fresh(&actor_cfg, &config, &survivors, scheduled.as_ref()),
-            actor_cfg,
+            actor,
             next_poll: later(now, config.poll_interval.get()),
             config,
             runtime,
             sink: None,
             rebuilt: None,
             stopped: None,
-            survivors,
+            stop: None,
             progress: Progress::default(),
             seen: Seen::default(),
             scheduled,
@@ -366,9 +271,8 @@ impl Worker {
 
     fn take_commands(&mut self) {
         let commands = self.shared.take_commands();
-        let actor = &mut self.engine.actor;
+        let actor = &mut self.actor;
         if commands.snapshot {
-            self.survivors.snapshot_asked = true;
             actor.request_snapshot();
         }
         if commands.accept_pages {
@@ -378,18 +282,15 @@ impl Worker {
             self.sink = Some(sink);
         }
         if let Some(deadline) = commands.stop {
-            let deadline = self
-                .survivors
-                .stop
-                .map_or(deadline, |was| was.min(deadline));
-            self.survivors.stop = Some(deadline);
+            let deadline = self.stop.map_or(deadline, |was| was.min(deadline));
+            self.stop = Some(deadline);
             actor.begin_shutdown(deadline);
         }
     }
 
     /// A wait until `at`, never past a stop's deadline.
     fn park_until(&self, at: Option<Timestamp>) -> Turn {
-        Turn::Wait(match (at, self.survivors.stop) {
+        Turn::Wait(match (at, self.stop) {
             (Some(at), Some(deadline)) => Some(at.min(deadline)),
             (at, deadline) => at.or(deadline),
         })
@@ -401,7 +302,7 @@ impl Worker {
         }
         if let Some(rebuilt) = self.rebuilt {
             // No engine runs to see the deadline pass: it ends here.
-            if self.survivors.stop.is_some_and(|deadline| now >= deadline) {
+            if self.stop.is_some_and(|deadline| now >= deadline) {
                 return Turn::Done(deadline_reached(self.counted_high()));
             }
             if rebuilt.until > now {
@@ -409,7 +310,7 @@ impl Worker {
             }
         }
         if let Some(scheduled) = self.scheduled.as_mut() {
-            scheduled.before_tick(&mut self.engine.actor, now);
+            scheduled.before_tick(&mut self.actor, now);
         }
         self.shared.update(|state| state.tick_began = Some(now));
         let ticked = catch_unwind(AssertUnwindSafe(|| self.tick(now)));
@@ -457,7 +358,7 @@ impl Worker {
             staging: &self.staging,
             remote: &self.remote,
         };
-        Ok(block_on(self.engine.actor.tick(env, now)))
+        Ok(block_on(self.actor.tick(env, now)))
     }
 
     fn after(&mut self, tick: Tick, now: Timestamp) -> Turn {
@@ -472,8 +373,9 @@ impl Worker {
         let verified = self
             .scheduled
             .as_mut()
-            .and_then(|scheduled| scheduled.after_tick(&mut self.engine.actor, now));
-        self.settle_survivors();
+            .and_then(|scheduled| scheduled.after_tick(&mut self.actor, now));
+        let verify = self.scheduled.as_ref().and_then(Scheduled::pinned);
+        self.actor.pin_for_verify(verify);
         // The snapshot is written before the event goes out, so a sink that reads health on an
         // event sees the state after it.
         self.observe(now);
@@ -488,28 +390,10 @@ impl Worker {
         }
     }
 
-    /// The engine booted: the rebuild is over, and its own lanes are reported from now on.
+    /// The engine booted: the rebuild is over.
     fn booted(&mut self) {
         self.rebuilt = None;
-        self.engine.booted = true;
-        self.survivors.carried.lanes = Carried::default().lanes;
         self.shared.update(|state| state.booted = true);
-    }
-
-    /// Lets go what the engine has made moot, and hands it the retention pin.
-    fn settle_survivors(&mut self) {
-        let actor = &self.engine.actor;
-        if actor.pending_snapshot().is_none() {
-            self.survivors.snapshot_asked = false;
-        }
-        let moved_on = self.engine.booted
-            && Lane::ALL.iter().all(|lane| actor.degraded(*lane).is_none())
-            && actor.replicated() > self.survivors.carried.pin;
-        if moved_on {
-            self.survivors.carried.pin = None;
-        }
-        let verify = self.scheduled.as_ref().and_then(Scheduled::pinned);
-        self.engine.actor.pin_for_verify(self.survivors.pin(verify));
     }
 
     fn ran(&mut self, event: EngineEvent, next: lsr_core::Next, now: Timestamp) -> Turn {
@@ -529,7 +413,7 @@ impl Worker {
         }
         self.report_foreign();
         self.report_host();
-        if self.survivors.stop.is_some() && progress {
+        if self.stop.is_some() && progress {
             return Turn::Again;
         }
         match next {
@@ -546,7 +430,7 @@ impl Worker {
         if !std::mem::replace(&mut self.seen.stopped_reported, true) {
             self.emit(&Event::Stopped(cause));
         }
-        if self.survivors.stop.is_some() {
+        if self.stop.is_some() {
             Turn::Done(Stopped::Stopped(cause))
         } else {
             Turn::Wait(None)
@@ -578,10 +462,8 @@ impl Worker {
         }
     }
 
-    fn foreign_total(&self) -> u64 {
-        self.seen
-            .foreign_before
-            .saturating_add(self.engine.actor.foreign_checkpoints())
+    const fn foreign_total(&self) -> u64 {
+        self.actor.foreign_checkpoints()
     }
 
     fn report_foreign(&mut self) {
@@ -592,10 +474,8 @@ impl Worker {
         }
     }
 
-    fn host_total(&self) -> HostCheckpoints {
-        self.seen
-            .host_before
-            .then(self.engine.actor.host_checkpoints())
+    const fn host_total(&self) -> HostCheckpoints {
+        self.actor.host_checkpoints()
     }
 
     fn report_host(&mut self) {
@@ -625,11 +505,6 @@ impl Worker {
     /// rebuild after the wait, or stop, as the configured response says.
     fn panicked(&mut self, now: Timestamp) -> Turn {
         self.seen.counters.panics = self.seen.counters.panics.saturating_add(1);
-        self.seen.foreign_before = self.foreign_total();
-        self.seen.host_before = self.host_total();
-        if self.engine.booted().is_some() {
-            self.survivors.carried = self.survivors.carried.and(&self.engine.actor);
-        }
         self.sqlite = None;
         let rebuild = self.config.responses.bug == Response::KeepTrying;
         self.emit(&Event::Panicked { rebuilt: rebuild });
@@ -638,14 +513,8 @@ impl Worker {
             self.observe(now);
             return self.halted(HaltCause::Bug);
         }
-        self.engine = Engine::fresh(
-            &self.actor_cfg,
-            &self.config,
-            &self.survivors,
-            self.scheduled.as_ref(),
-        );
-        self.seen.foreign_reported = self.seen.foreign_reported.max(self.foreign_total());
-        self.seen.host_reported = self.seen.host_reported.max(self.host_total().total());
+        // The dropped engine's reports and what was asked of it go to the fresh one.
+        self.actor = self.actor.rebuilt();
         let until = self.schedule_rebuild(PersistentCause::Bug, now);
         self.observe(now);
         self.park_until(Some(until))
@@ -701,7 +570,7 @@ impl Worker {
     /// Writes the health snapshot.
     fn observe(&mut self, now: Timestamp) {
         let measured = self.left();
-        let left = match (self.engine.booted(), measured) {
+        let left = match (booted(&self.actor), measured) {
             (Some(engine), Some(left)) => {
                 self.progress.advance(engine, left, now);
                 left
@@ -721,7 +590,7 @@ impl Worker {
     }
 
     fn publish(&self, parts: &SnapshotParts) {
-        let resnapshot = self.engine.actor.pending_snapshot();
+        let resnapshot = self.actor.pending_snapshot();
         let foreign = self.foreign_total();
         let host = self.host_total();
         let verification = self
@@ -753,7 +622,7 @@ impl Worker {
     /// connection, or a failed read of the wal-index.
     fn left(&self) -> Option<Unfinished> {
         let committed = self.sqlite.clone()?.committed().ok()?;
-        let actor = &self.engine.actor;
+        let actor = &self.actor;
         let staged = actor.staged().map_or(0, Txid::get);
         let replicated = actor.replicated().map_or(0, Txid::get);
         Some(Unfinished {
@@ -808,10 +677,7 @@ impl Worker {
     }
 
     fn degraded(&self) -> [Option<Degraded>; 5] {
-        let mut lanes = Lane::ALL.map(|lane| self.engine.actor.degraded(lane));
-        for (lane, kept) in lanes.iter_mut().zip(self.survivors.carried.lanes) {
-            *lane = lane.or(kept);
-        }
+        let mut lanes = Lane::ALL.map(|lane| self.actor.degraded(lane));
         if let (Some(rebuilt), Some(sync)) = (self.rebuilt, lanes.first_mut()) {
             *sync = Some(Degraded {
                 cause: rebuilt.cause,
@@ -835,7 +701,7 @@ impl Worker {
         if let Some(cause) = self.stopped {
             return Phase::Stopped(cause);
         }
-        match self.engine.actor.phase() {
+        match self.actor.phase() {
             EnginePhase::Boot => Phase::Booting,
             EnginePhase::Running => Phase::Running,
             EnginePhase::Draining { .. } => Phase::Draining,
