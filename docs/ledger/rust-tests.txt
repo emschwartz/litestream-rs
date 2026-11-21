@@ -284,6 +284,7 @@ lsr-config::config map::bucket_path_and_endpoint_keys_without_a_url
 lsr-config::config map::checkpoint_interval_of_zero_turns_the_timed_checkpoint_off
 lsr-config::config map::credentials_from_the_file
 lsr-config::config map::host_autocheckpoint_defaults_to_sqlite_s_and_can_be_off
+lsr-config::config map::l0_retention_check_interval_maps_and_defaults_to_go_s_15s
 lsr-config::config map::meta_path_is_expanded_and_used_as_is
 lsr-config::config map::min_checkpoint_page_count_must_be_above_zero
 lsr-config::config map::monitor_interval_is_the_poll_and_zero_is_refused
@@ -373,6 +374,7 @@ lsr-core actor::tests::lanes::a_restarted_wal_with_nothing_new_is_not_reported_a
 lsr-core actor::tests::lanes::a_sync_whose_epoch_moved_does_not_checkpoint_and_asks_for_the_next_tick
 lsr-core actor::tests::lanes::an_idle_tick_does_not_open_the_wal
 lsr-core actor::tests::lanes::an_interval_due_with_nothing_to_checkpoint_does_not_spin
+lsr-core actor::tests::listing::a_steady_writer_lists_once_per_check_interval_not_per_upload
 lsr-core actor::tests::live::a_drain_reads_no_live_pages
 lsr-core actor::tests::live::a_verify_pin_is_kept_beside_a_lane_pin_and_the_older_wins
 lsr-core actor::tests::live::live_pages_are_read_once_asked_at_the_replica_s_transaction
@@ -664,6 +666,8 @@ lsr-core maintain::tests::an_empty_replica_with_nothing_published_has_nothing_to
 lsr-core maintain::tests::an_idle_database_writes_no_snapshot_however_old_the_last_one
 lsr-core maintain::tests::an_input_missing_everywhere_is_a_replan
 lsr-core maintain::tests::an_old_snapshot_and_a_newer_position_ask_for_a_new_snapshot
+lsr-core maintain::tests::an_upload_lists_at_the_next_window_or_the_check_interval
+lsr-core maintain::tests::an_upload_s_listing_is_after_it_and_no_later_than_any_wake
 lsr-core maintain::tests::due_matches_main_on_stored_listings
 lsr-core maintain::tests::every_input_must_be_one_level_below_the_destination
 lsr-core maintain::tests::go_defaults_run_through_new_and_match_go

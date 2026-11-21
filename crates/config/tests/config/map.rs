@@ -10,7 +10,9 @@ use lsr_config::{
     Credentials, DbPlan, Env, Expand, GoConfig, MapProblemKind, Plan, ReplicaPlan, ReplicaProblem,
     plan,
 };
-use lsr_core::{ForeignWriter, L0Retention, Maintenance, Response, Responses, RetentionMode};
+use lsr_core::{
+    ForeignWriter, Interval, L0Retention, Maintenance, Response, Responses, RetentionMode,
+};
 use lsr_replica::{NonZeroDuration, ReaderTracking};
 use lsr_store_s3::{Provider, UrlStyle};
 use tempfile::TempDir;
@@ -222,6 +224,33 @@ fn schedule_settings_become_core_s_maintenance() {
     .unwrap()
     .with_retention(RetentionMode::Off);
     assert_eq!(db.config().maintenance, want);
+}
+
+/// Go's `l0-retention-check-interval` (`store.go:92`, 15 s) is how long an upload waits for
+/// the next maintenance listing; before it was mapped, every upload listed the replica.
+#[test]
+fn l0_retention_check_interval_maps_and_defaults_to_go_s_15s() {
+    let every = |text: &str| {
+        one(&format!("{text}{}", db_with("")))
+            .config()
+            .maintenance
+            .l0_check_interval()
+    };
+    let iv = |secs: u64| Interval::new(Duration::from_secs(secs)).unwrap();
+    assert_eq!(every(""), iv(15));
+    assert_eq!(every("l0-retention-check-interval: 1m\n"), iv(60));
+    assert_eq!(Maintenance::go_default().l0_check_interval(), iv(15));
+    let problems = unmapped(&format!(
+        "l0-retention-check-interval: 1500us\n{}",
+        db_with("")
+    ));
+    assert!(
+        matches!(
+            problems.as_slice(),
+            [(at, MapProblemKind::Duration { .. })] if at == "l0-retention-check-interval"
+        ),
+        "{problems:#?}"
+    );
 }
 
 /// Core refuses levels that are not increasing; Go loads them.

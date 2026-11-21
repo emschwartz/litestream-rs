@@ -18,10 +18,13 @@
 //!   121359 and less than zero is off, `db.go:1599-1608`).
 //! - `max-sync-wal-bytes` (Go 64 MiB; zero or less is no cap, `wal_reader.go:241`)
 //!   and `max-sync-ltx-files` (Go 256; zero or less is all, `replica.go:208`).
-//! - `levels`, `snapshot`, `l0-retention` (zero keeps level 0) and
+//! - `levels`, `snapshot`, `l0-retention` (zero keeps level 0),
+//!   `l0-retention-check-interval` (Go 15 s; zero or less Go refuses at load) and
 //!   `retention.enabled` become core's `Maintenance`, which refuses some shapes Go
 //!   loads (levels not increasing, snapshots not above the top level, retention
-//!   below the interval); each refusal names the setting.
+//!   below the interval); each refusal names the setting. The check interval is
+//!   how long an upload waits for the next maintenance listing when the next
+//!   compaction window is further away, as Go's level-0 retention ticker.
 //! - `shutdown-sync-timeout` (Go 30 s) is each replicator's drain grace, and the
 //!   daemon's one shutdown deadline.
 //! - `validation.interval` (Go unset: off) is the scheduled verify's interval for every
@@ -30,9 +33,6 @@
 //!   `litestream-rs.host-autocheckpoint` (SQLite's 1000 unless stated; `0` or `off` for a
 //!   host at `wal_autocheckpoint = 0`), which only lets health infer host checkpoint
 //!   attempts the wal-index cannot show.
-//!
-//! `l0-retention-check-interval` has no counterpart: level 0 is pruned by the
-//! maintenance lane on its own schedule.
 //!
 //! A `dir` entry is scanned once, here (`dir.rs`, the static scan of the plan's
 //! directory ruling): every database it finds gets Go's replica path and meta
@@ -53,8 +53,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use lsr_core::{
-    CheckpointConfig, ConfigError as MaintenanceError, ForeignWriter, L0Retention, Maintenance,
-    Response, Responses, RetentionMode,
+    CheckpointConfig, ConfigError as MaintenanceError, ForeignWriter, Interval, L0Retention,
+    Maintenance, Response, Responses, RetentionMode,
 };
 use lsr_replica::{Config, NonZeroDuration, ReaderTracking, SyncLimits};
 use lsr_store_s3::{S3Config, S3Credentials};
@@ -577,17 +577,31 @@ fn maintenance(config: &GoConfig, found: &mut Found) -> Option<Maintenance> {
     } else {
         L0Retention::After(l0)
     };
+    let check = l0_check(config.l0_retention_check_interval(), found)?;
     match Maintenance::new(levels, interval, retention, l0) {
-        Ok(schedule) => Some(schedule.with_retention(if config.retention_enabled() {
-            RetentionMode::Enforce
-        } else {
-            RetentionMode::Off
-        })),
+        Ok(schedule) => Some(schedule.with_l0_check_interval(check).with_retention(
+            if config.retention_enabled() {
+                RetentionMode::Enforce
+            } else {
+                RetentionMode::Off
+            },
+        )),
         Err(error) => {
             found.problem(&KeyPath::root(), MapProblemKind::Maintenance(error));
             None
         }
     }
+}
+
+/// `l0-retention-check-interval` as core's interval: whole milliseconds above
+/// zero (load already refused zero and less, as Go's `Validate` does).
+fn l0_check(value: GoDuration, found: &mut Found) -> Option<Interval> {
+    let every = value.to_std().and_then(|d| Interval::new(d).ok());
+    if every.is_none() {
+        let at = KeyPath::root().key("l0-retention-check-interval");
+        found.problem(&at, MapProblemKind::Duration { value });
+    }
+    every
 }
 
 /// `litestream-rs.responses` over Go's.
