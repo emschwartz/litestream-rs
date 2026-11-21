@@ -61,7 +61,7 @@ pub use layout::{
 pub use maintain::{
     CompactJob, ConfigError, DeleteJob, Due, Hold, Interval, IntervalError, Job, JobError,
     L0Retention, MAX_DELETE, MaintainError, MaintainState, Maintenance, Outcome, RetentionMode,
-    Setting, SnapshotJob, due, go_truncate, run_compact, run_delete,
+    Setting, SnapshotJob, due, go_truncate, listing_after_upload, run_compact, run_delete,
 };
 pub use mem::{MemStore, MemUpload};
 pub use pages::{Mismatch, PageTable, snapshot_clears};

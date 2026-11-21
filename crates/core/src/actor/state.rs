@@ -289,9 +289,11 @@ impl Gate {
 pub(super) struct Maintain {
     /// The planner's per-level backoff and distrusted outputs.
     pub(super) state: MaintainState,
-    /// An upload or a job changed the replica since the last listing.
+    /// A job, a boot or a setting changed what a listing would decide: the
+    /// next maintenance tick lists.
     pub(super) stale: bool,
-    /// The last `Due::Wait.until`.
+    /// When the next listing is due: the last `Due::Wait.until`, brought
+    /// forward by each upload to when its file can first matter.
     pub(super) until: Option<Timestamp>,
     /// The last transaction of the replica's level 1 in the last listing;
     /// `None` before the first. A staged file at or below it was compacted.
@@ -321,6 +323,11 @@ impl Maintain {
             self.until = None;
             self.stale = true;
         }
+    }
+
+    /// Brings the next listing forward to `at`, never back.
+    pub(super) fn list_by(&mut self, at: Timestamp) {
+        self.until = Some(self.until.map_or(at, |until| until.min(at)));
     }
 
     /// Whether `due` could answer differently than it last did.

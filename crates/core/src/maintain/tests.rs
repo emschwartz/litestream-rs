@@ -145,6 +145,8 @@ fn go_defaults_run_through_new_and_match_go() {
     assert_eq!(go.snapshot_interval(), iv(86_400));
     assert_eq!(go.snapshot_retention(), secs(86_400));
     assert_eq!(go.l0_retention(), L0Retention::After(secs(300)));
+    assert_eq!(go.l0_check_interval(), iv(15)); // store.go:92
+    assert_eq!(from_new.l0_check_interval(), iv(15));
 }
 
 #[test]
@@ -890,6 +892,78 @@ proptest! {
                 due(&settled, at(now + later), &cfg, None),
                 Due::Wait { until: None, held: None }
             );
+        }
+    }
+}
+
+// When an upload makes the next listing due.
+
+/// Go's defaults: the earlier of level 1's next 30 s window and 15 s from now.
+#[test]
+fn an_upload_lists_at_the_next_window_or_the_check_interval() {
+    let go = defaults();
+    // 10 s into a window: the check interval, 15 s later, comes first.
+    let window = go_truncate(at(T0), iv(30)).unix_millis();
+    assert_eq!(
+        listing_after_upload(at(window + 1_000), &go),
+        at(window + 16_000)
+    );
+    // 20 s into it: the window's end comes first.
+    assert_eq!(
+        listing_after_upload(at(window + 20_000), &go),
+        at(window + 30_000)
+    );
+    // With nothing to delete from level 0 only the windows wake it.
+    let keep = Maintenance::new(
+        vec![secs(30), secs(300), secs(3600)],
+        secs(86_400),
+        secs(86_400),
+        L0Retention::Keep,
+    )
+    .unwrap();
+    let off = go.clone().with_retention(RetentionMode::Off);
+    for cfg in [keep, off] {
+        assert_eq!(
+            listing_after_upload(at(window + 1_000), &cfg),
+            at(window + 30_000)
+        );
+    }
+    let slow = go.with_l0_check_interval(iv(60));
+    assert_eq!(
+        listing_after_upload(at(window + 1_000), &slow),
+        at(window + 30_000)
+    );
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// Always after the upload, never after the next window of any level or
+    /// of the snapshot, and never after the check interval while level 0 is
+    /// deleted.
+    #[test]
+    fn an_upload_s_listing_is_after_it_and_no_later_than_any_wake(
+        now in -10_000_000_000i64..10_000_000_000,
+        which in 0..2usize,
+        check in 1u64..120,
+        off in any::<bool>(),
+    ) {
+        let base = if which == 0 { defaults() } else { small() };
+        let mode = if off { RetentionMode::Off } else { RetentionMode::Enforce };
+        let cfg = base.with_l0_check_interval(iv(check)).with_retention(mode);
+        let wake = listing_after_upload(at(now), &cfg);
+        prop_assert!(wake > at(now));
+        for l in 1..=9 {
+            let interval = if l == 9 { Some(cfg.snapshot_interval()) } else { cfg.interval(level(l)) };
+            if let Some(interval) = interval {
+                let (_, next) = next_window(at(now), interval);
+                prop_assert!(wake <= next);
+            }
+        }
+        let deletes_l0 = !off && matches!(cfg.l0_retention(), L0Retention::After(_));
+        if deletes_l0 {
+            let millis = i64::try_from(check).unwrap() * 1000;
+            prop_assert!(wake <= at(now + millis));
         }
     }
 }

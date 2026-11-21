@@ -12,6 +12,13 @@
 //! files instead, or a replica that keeps everything. It is a separate
 //! setting rather than a zero duration, because a duration of zero is refused
 //! everywhere above and "keep forever" is not a length of time.
+//!
+//! The level-0 retention check interval (Go's `l0-retention-check-interval`)
+//! bounds how long an upload waits for the next listing, and with it how soon
+//! a covered level-0 file is seen to be old enough to delete. Go sweeps level
+//! 0 on that ticker (`store.go:658-680`); here it is a wake time of the one
+//! maintenance listing, so it changes when the replica is listed and never
+//! what a listing decides.
 
 use std::time::Duration;
 
@@ -29,6 +36,8 @@ const DEFAULT_LEVEL_MILLIS: [u64; 3] = [30_000, 300_000, 3_600_000];
 const DEFAULT_SNAPSHOT_MILLIS: u64 = 86_400_000;
 /// Go's level-0 retention, 5 min (`store.go:88`).
 const DEFAULT_L0_RETENTION_MILLIS: u64 = 300_000;
+/// Go's level-0 retention check interval, 15 s (`store.go:92`).
+const DEFAULT_L0_CHECK_MILLIS: u64 = 15_000;
 
 /// Which setting a [`ConfigError`] is about.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -197,6 +206,7 @@ pub struct Maintenance {
     snapshot_interval: Interval,
     snapshot_retention: Duration,
     l0: L0Retention,
+    l0_check: Interval,
     retention: RetentionMode,
 }
 
@@ -245,6 +255,7 @@ impl Maintenance {
             snapshot_interval: snapshot,
             snapshot_retention,
             l0,
+            l0_check: Interval(DEFAULT_L0_CHECK_MILLIS),
             retention: RetentionMode::Enforce,
         })
     }
@@ -288,8 +299,9 @@ impl Maintenance {
     };
 
     /// Go's defaults: levels of 30 s, 5 min and 1 h, snapshots every 24 h
-    /// kept 24 h, level 0 kept 5 min once covered, retention enforced. A test feeds the same
-    /// numbers through [`Maintenance::new`].
+    /// kept 24 h, level 0 kept 5 min once covered and checked every 15 s,
+    /// retention enforced. A test feeds the same numbers through
+    /// [`Maintenance::new`].
     #[must_use]
     pub fn go_default() -> Self {
         Self {
@@ -298,6 +310,7 @@ impl Maintenance {
             snapshot_interval: Interval(DEFAULT_SNAPSHOT_MILLIS),
             snapshot_retention: Duration::from_millis(DEFAULT_SNAPSHOT_MILLIS),
             l0: L0Retention::After(Duration::from_millis(DEFAULT_L0_RETENTION_MILLIS)),
+            l0_check: Interval(DEFAULT_L0_CHECK_MILLIS),
             retention: RetentionMode::Enforce,
         }
     }
@@ -332,6 +345,20 @@ impl Maintenance {
     #[must_use]
     pub const fn l0_retention(&self) -> L0Retention {
         self.l0
+    }
+
+    /// How often level-0 retention is checked while uploads continue (Go's
+    /// `l0-retention-check-interval`, 15 s unless set).
+    #[must_use]
+    pub const fn l0_check_interval(&self) -> Interval {
+        self.l0_check
+    }
+
+    /// The same schedule with another level-0 retention check interval.
+    #[must_use]
+    pub const fn with_l0_check_interval(mut self, every: Interval) -> Self {
+        self.l0_check = every;
+        self
     }
 
     /// Whether retention deletes anything.

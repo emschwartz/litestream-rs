@@ -19,6 +19,13 @@
 //! 4. Maintenance, only once uploads are idle, so a snapshot's last
 //!    transaction is at most what was published. Its first listing after a
 //!    boot is read back first: the newest file of each level must verify.
+//!    An upload does not make a listing due at once: the next one waits for
+//!    the next compaction window or the level-0 retention check interval,
+//!    whichever comes first ([`crate::listing_after_upload`]), as Go's
+//!    monitors wait for their tickers. A job, a boot, a released pin or a
+//!    switched retention still lists on the next tick, and every job is
+//!    planned from a listing made in its own tick, so a delete never acts on
+//!    an older one.
 //!
 //! Every failure becomes a [`Fault`] and goes through [`policy`] once, in
 //! [`Actor::fault`]. A retry waits on its own lane; the others keep running.
@@ -73,8 +80,8 @@ use crate::host::{HostCheckpoints, HostObserver};
 use crate::inventory::Inventory;
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::maintain::{
-    Due, Hold, Job, MAX_DELETE, MaintainError, Maintenance, Outcome, ReadBack, due, read_back,
-    run_compact, run_delete,
+    Due, Hold, Job, MAX_DELETE, MaintainError, Maintenance, Outcome, ReadBack, due,
+    listing_after_upload, read_back, run_compact, run_delete,
 };
 use crate::pages::{PageTable, seeded};
 use crate::position::{Continuity, Position, ReadEpoch, SyncedThrough, WalFileLen};
@@ -1373,7 +1380,11 @@ impl Actor {
             }
             match last {
                 Did::Nothing => break,
-                Did::Listed { .. } | Did::Put(_) => self.maintain.stale = true,
+                Did::Listed { .. } => self.maintain.stale = true,
+                Did::Put(_) => {
+                    let at = listing_after_upload(now, &self.cfg.maintenance);
+                    self.maintain.list_by(at);
+                }
             }
             if self.uploads_idle() {
                 break;
@@ -1696,7 +1707,7 @@ impl Actor {
 
     /// Maintenance lists again when the sync lane's wait ends, or after the
     /// next upload when it holds none (a recovery verdict made the next sync a
-    /// snapshot, whose upload marks the listing stale).
+    /// snapshot, whose upload makes a listing due).
     fn wait_for_sync(&mut self) {
         self.maintain.stale = false;
         self.maintain.until = self.lanes.get(Lane::Sync).until();

@@ -38,6 +38,8 @@ fn ts(n: i64) -> Timestamp {
 struct Counting {
     inner: MemStore,
     calls: Arc<AtomicU32>,
+    /// The listing calls among them.
+    lists: Arc<AtomicU32>,
     reads: Arc<std::sync::Mutex<Vec<FileKey>>>,
     deletes: Arc<std::sync::Mutex<Vec<FileKey>>>,
     /// When non-zero, the most keys one listing page returns: a store may
@@ -59,6 +61,10 @@ impl Counting {
 
     fn count(&self) {
         self.calls.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn lists(&self) -> u32 {
+        self.lists.load(Ordering::SeqCst)
     }
 
     /// How often `key`'s bytes were read from their start.
@@ -83,6 +89,7 @@ impl ObjectStore for Counting {
         limit: PageLimit,
     ) -> impl Future<Output = Result<Listing, StoreError>> + Send {
         self.count();
+        self.lists.fetch_add(1, Ordering::SeqCst);
         let cap = self.page_cap.load(Ordering::SeqCst);
         let limit = u16::try_from(cap)
             .ok()
@@ -988,6 +995,11 @@ fn level_one_max(rig: &Rig) -> Option<u64> {
         .map(|f| f.key.range().max().get())
 }
 
+/// When maintenance next lists after an upload at `now` under [`cfg`].
+fn listing_due(now: i64) -> i64 {
+    listing_after_upload(ts(now), &cfg().maintenance).unix_millis()
+}
+
 /// Commits `n` and runs the actor until it has staged and uploaded it.
 fn commit_and_settle(rig: &mut Rig, actor: &mut Actor, n: u8, now: i64) {
     rig.commit(n);
@@ -997,16 +1009,17 @@ fn commit_and_settle(rig: &mut Rig, actor: &mut Actor, n: u8, now: i64) {
 #[test]
 fn job_retry_reports_the_levels_wait() {
     let (mut rig, mut actor) = caught_up();
-    let at = T0 + 60_000;
+    let uploaded = T0 + 60_000;
     rig.commit(2);
     assert_eq!(
-        event(&rig.tick(&mut actor, at)),
+        event(&rig.tick(&mut actor, uploaded)),
         Some(&Event::Synced { files: 1 })
     );
     assert!(matches!(
-        event(&rig.tick(&mut actor, at)),
+        event(&rig.tick(&mut actor, uploaded)),
         Some(Event::Uploaded(_))
     ));
+    let at = listing_due(uploaded);
     // The level-1 compaction's output write fails; the wait is the level's.
     rig.remote
         .inner
@@ -1330,8 +1343,9 @@ fn stamp_failure_is_a_maintain_fault() {
             .inner
             .inject_failure(StoreOp::Read, throttled(StoreOp::Read, millis));
     }
-    let tick = rig.tick(&mut actor, T0 + 10);
-    let until = ts(T0 + 30_010);
+    let at = listing_due(T0 + 10);
+    let tick = rig.tick(&mut actor, at);
+    let until = ts(at + 30_000);
     assert!(
         matches!(event(&tick), Some(Event::Retrying { until: u, .. }) if *u == until),
         "{tick:?}"
@@ -1339,7 +1353,7 @@ fn stamp_failure_is_a_maintain_fault() {
     assert_eq!(Rig::files(&rig.remote, Level::ZERO), before, "a job ran");
     // Before its wait the lane neither relists nor reads a stamp.
     let io = rig.io();
-    let idle = rig.tick(&mut actor, T0 + 29_000);
+    let idle = rig.tick(&mut actor, at + 29_000);
     assert_eq!(event(&idle), Some(&Event::Idle), "{idle:?}");
     assert_eq!(rig.io(), io);
     // At the wait it lists again and the next failure doubles the wait.
@@ -1573,6 +1587,7 @@ mod checkpoint_failed;
 mod degraded;
 mod index_reset;
 mod lanes;
+mod listing;
 mod live;
 mod no_wal_yet;
 mod pages;

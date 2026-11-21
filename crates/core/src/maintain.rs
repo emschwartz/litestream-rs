@@ -357,6 +357,40 @@ fn next_window(now: Timestamp, interval: Interval) -> (Timestamp, Timestamp) {
     (start, next)
 }
 
+/// When maintenance next lists the replica after an upload at `now`: the
+/// earliest of the next window of every compaction level and of the snapshot,
+/// and, while retention deletes level 0, `now` plus the level-0 retention
+/// check interval. Always after `now`.
+///
+/// An upload gives a level something to compact, but no level compacts twice
+/// inside one window, so listing before the next window opens can only find
+/// level-0 files to delete; Go looks for those on its check interval
+/// (`store.go:658-680`) and for compactions on each level's window
+/// (`store.go:591-656`). Listing at once after every upload instead lists the
+/// whole replica once a second for a database that writes once a second.
+#[must_use]
+pub fn listing_after_upload(now: Timestamp, config: &Maintenance) -> Timestamp {
+    let check = match (config.retention(), config.l0_retention()) {
+        (RetentionMode::Enforce, L0Retention::After(_)) => {
+            let step = i64::try_from(config.l0_check_interval().millis()).unwrap_or(i64::MAX);
+            Some(Timestamp::from_unix_millis(
+                now.unix_millis().saturating_add(step),
+            ))
+        }
+        (RetentionMode::Enforce, L0Retention::Keep)
+        | (RetentionMode::Off, L0Retention::Keep | L0Retention::After(_)) => None,
+    };
+    let levels = Level::ALL
+        .iter()
+        .filter_map(|level| config.interval(*level));
+    levels
+        .chain([config.snapshot_interval()])
+        .map(|interval| next_window(now, interval).1)
+        .chain(check)
+        .min()
+        .unwrap_or(now)
+}
+
 /// What one level, or the snapshot, wants.
 enum Step {
     Run(Job),
