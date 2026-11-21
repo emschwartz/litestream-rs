@@ -9,7 +9,13 @@
 //!
 //! Loading an extension from Rust needs `unsafe` (rusqlite's `load_extension`), which only
 //! the SQLite crate may use, so the host is a small C program, `c/vfs-read.c`, built with the
-//! system C compiler against the system SQLite. It prints `PRAGMA integrity_check`, the VFS's
+//! system C compiler. It needs a SQLite that has `sqlite3_load_extension`, which macOS's
+//! system library lacks, so the SQLite it links is the first of these that answers:
+//! `SQLITE3_CFLAGS` / `SQLITE3_LIBS` from the environment (split on whitespace, no shell
+//! quoting); on macOS, Homebrew's `sqlite` (`brew --prefix sqlite`) when its header is there;
+//! `pkg-config --cflags --libs sqlite3`; else plain `-lsqlite3`. Homebrew comes before
+//! `pkg-config` on macOS because Homebrew's `pkg-config` describes the system SDK's SQLite,
+//! the one without the function. It prints `PRAGMA integrity_check`, the VFS's
 //! `litestream_txid()` and every row of every table in one line format, and writes every page
 //! exactly as the VFS's `xRead` returns it. Run without the extension over an ordinary file,
 //! it prints the same format, so the rows of a reference database compare line for line.
@@ -91,10 +97,12 @@ impl VfsView {
     }
 }
 
-/// Builds the C host into `into` with the system C compiler and SQLite (`cc ... -lsqlite3`).
+/// Builds the C host into `into` with the system C compiler and the SQLite the module doc's
+/// order picks.
 ///
 /// # Errors
-/// [`CompatError::Process`] when the compiler or the SQLite headers are missing.
+/// [`CompatError::Process`] when the compiler or the SQLite headers are missing; the command
+/// names the flags used and where they came from.
 pub fn build_vfs_reader(into: &Path) -> Result<PathBuf, CompatError> {
     let source = crate::workspace_root()
         .join("crates")
@@ -102,22 +110,103 @@ pub fn build_vfs_reader(into: &Path) -> Result<PathBuf, CompatError> {
         .join("c")
         .join("vfs-read.c");
     let binary = into.join("vfs-read");
+    let sqlite = sqlite_flags();
     let output = Command::new("cc")
         .arg("-O1")
+        .args(&sqlite.cflags)
         .arg("-o")
         .arg(&binary)
         .arg(&source)
-        .arg("-lsqlite3")
+        .args(&sqlite.libs)
         .output()
         .map_err(CompatError::io("cc"))?;
     if output.status.success() {
         Ok(binary)
     } else {
         Err(CompatError::Process {
-            command: format!("cc {}", source.display()),
+            command: format!(
+                "cc {} {} {} (SQLite from {})",
+                sqlite.cflags.join(" "),
+                source.display(),
+                sqlite.libs.join(" "),
+                sqlite.from
+            ),
             detail: String::from_utf8_lossy(&output.stderr).into_owned(),
         })
     }
+}
+
+/// The compiler and linker flags for one SQLite, and which source named it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SqliteFlags {
+    from: &'static str,
+    cflags: Vec<String>,
+    libs: Vec<String>,
+}
+
+/// The first SQLite of the module doc's order that answers.
+fn sqlite_flags() -> SqliteFlags {
+    let env = |name| std::env::var(name).ok();
+    from_env(env("SQLITE3_CFLAGS"), env("SQLITE3_LIBS"))
+        .or_else(|| cfg!(target_os = "macos").then(homebrew).flatten())
+        .or_else(pkg_config)
+        .unwrap_or_else(|| SqliteFlags {
+            from: "the system default",
+            cflags: Vec::new(),
+            libs: words("-lsqlite3"),
+        })
+}
+
+/// The environment's flags, when either variable is set. An unset `SQLITE3_LIBS` still links
+/// `-lsqlite3`, so `SQLITE3_CFLAGS` alone can point at other headers.
+fn from_env(cflags: Option<String>, libs: Option<String>) -> Option<SqliteFlags> {
+    if cflags.is_none() && libs.is_none() {
+        return None;
+    }
+    Some(SqliteFlags {
+        from: "SQLITE3_CFLAGS / SQLITE3_LIBS",
+        cflags: cflags.as_deref().map(words).unwrap_or_default(),
+        libs: words(libs.as_deref().unwrap_or("-lsqlite3")),
+    })
+}
+
+/// Homebrew's keg-only `sqlite`, when `brew` is installed and the formula is: `brew --prefix`
+/// prints the prefix of a formula that is not installed too, so the header is checked.
+fn homebrew() -> Option<SqliteFlags> {
+    let prefix = PathBuf::from(stdout_of("brew", &["--prefix", "sqlite"])?.trim());
+    let include = prefix.join("include");
+    let lib = prefix.join("lib");
+    include.join("sqlite3.h").is_file().then(|| SqliteFlags {
+        from: "Homebrew (brew --prefix sqlite)",
+        cflags: vec![format!("-I{}", include.display())],
+        libs: vec![format!("-L{}", lib.display()), "-lsqlite3".to_owned()],
+    })
+}
+
+/// `pkg-config`'s answer for `sqlite3`, when the tool and the package are there.
+fn pkg_config() -> Option<SqliteFlags> {
+    Some(SqliteFlags {
+        from: "pkg-config sqlite3",
+        cflags: words(&stdout_of("pkg-config", &["--cflags", "sqlite3"])?),
+        libs: words(&stdout_of("pkg-config", &["--libs", "sqlite3"])?),
+    })
+}
+
+/// What `program args` printed, when it ran and succeeded; a missing tool is `None`.
+fn stdout_of(program: &str, args: &[&str]) -> Option<String> {
+    let out = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn words(flags: &str) -> Vec<String> {
+    flags.split_whitespace().map(str::to_owned).collect()
 }
 
 /// Opens the file replica at `replica` through the VFS extension `library` and reads it all;
@@ -233,6 +322,23 @@ mod tests {
         assert_eq!(view.integrity, ["ok"]);
         assert_eq!(view.txid, Some(42));
         assert_eq!(view.rows, ["a\ti1,t6869"]);
+    }
+
+    #[test]
+    fn the_environment_names_the_sqlite_when_either_variable_is_set() {
+        assert_eq!(from_env(None, None), None);
+        let both = from_env(
+            Some(" -I/opt/sqlite/include ".to_owned()),
+            Some("-L/opt/sqlite/lib  -lsqlite3".to_owned()),
+        )
+        .expect("set");
+        assert_eq!(both.cflags, ["-I/opt/sqlite/include"]);
+        assert_eq!(both.libs, ["-L/opt/sqlite/lib", "-lsqlite3"]);
+        let cflags_only = from_env(Some("-I/x".to_owned()), None).expect("set");
+        assert_eq!(cflags_only.libs, ["-lsqlite3"]);
+        let libs_only = from_env(None, Some("/x/libsqlite3.a".to_owned())).expect("set");
+        assert!(libs_only.cflags.is_empty());
+        assert_eq!(libs_only.libs, ["/x/libsqlite3.a"]);
     }
 
     #[test]

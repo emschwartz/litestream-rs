@@ -38,6 +38,13 @@ mkdir -p "$out"
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
 failed=0
+# The system libraries the Go c-archive needs when linked into the extension. On macOS the Go
+# runtime also calls into CoreFoundation and Security (certificate roots) and the resolver
+# library (res_9_ninit and friends), which Linux's libc provides.
+vfs_libs="-lpthread -ldl -lm"
+if [ "$(uname)" = Darwin ]; then
+    vfs_libs="$vfs_libs -framework CoreFoundation -framework Security -lresolv"
+fi
 # Exports `rev` into the scratch directory, once per name; sets `dir`.
 export_rev() {
     dir="$scratch/$1"
@@ -70,7 +77,7 @@ build_vfs() {
             -buildmode=c-archive -o vfs.a ./cmd/litestream-vfs &&
         cp vfs.h src/litestream-vfs.h &&
         gcc -DSQLITE3VFS_LOADABLE_EXT -fPIC -shared -o "$so.tmp" src/litestream-vfs.c vfs.a \
-            -lpthread -ldl -lm &&
+            $vfs_libs &&
         mv "$so.tmp" "$so") >"$scratch/$v.vfs.log" 2>&1; then
         echo "$v: vfs built $(git -C "$src" rev-parse --short "$rev")"
     else

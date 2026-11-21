@@ -96,6 +96,7 @@ lsr-compat scenario::tests::every_scenario_holds_the_full_mix
 lsr-compat scenario::tests::names_round_trip_and_are_distinct
 lsr-compat vfs::tests::parses_every_record_kind
 lsr-compat vfs::tests::refuses_an_unknown_record
+lsr-compat vfs::tests::the_environment_names_the_sqlite_when_either_variable_is_set
 lsr-compat workload::tests::splitmix_matches_its_reference_vector
 lsr-compat workload::tests::the_same_seed_writes_the_same_pages
 lsr-compat::alternation go_and_rust_alternate_on_one_prefix
