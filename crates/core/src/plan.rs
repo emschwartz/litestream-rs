@@ -6,26 +6,66 @@
 //! shorter history: upstream's timestamp restore stops at a hole and exits 0,
 //! and this planner reports [`PlanOutcome::Gap`] instead.
 //!
-//! How a plan is chosen:
-//! - Eligibility: [`RestoreTarget::Latest`] admits every file; [`Txid`] admits
-//!   files with a last transaction at or below the target; [`AsOf`] admits files
-//!   created strictly before the instant. Go skips a file when
-//!   [`!info.CreatedAt.Before(timestamp)`] in both the snapshot loop and
-//!   [`restoreLevelCursor.refresh`] (replica.go), the same comparison.
+//! # Contract
+//!
+//! A chain for a target is a run of eligible files: the first begins at
+//! transaction 1 (any level), each later one is from levels 0 to 8, starts at
+//! most one past the previous end and ends beyond it. Its reach is its last
+//! transaction. Eligibility: [`RestoreTarget::Latest`] admits every file;
+//! [`Txid`] admits files whose last transaction is at or below the target;
+//! [`AsOf`] admits files created strictly before the instant. Go skips a file
+//! when [`!info.CreatedAt.Before(timestamp)`] in both the snapshot loop and
+//! [`restoreLevelCursor.refresh`] (replica.go), the same comparison.
+//!
+//! For `Latest` and `Txid` the outcome is [`PlanOutcome::Plan`] if and only if
+//! an eligible chain from a transaction-1 base reaches the target exactly, and
+//! the plan is such a chain. The target is the requested transaction, or for
+//! `Latest` the largest last transaction of any file, refused ones included:
+//! history held only in a refused file makes `Latest` refuse, not plan to the
+//! usable end.
+//!
+//! Otherwise the refusal is the first of these that applies: request validity,
+//! then a starting point, then the first obstacle at the chain's end, where the
+//! reach `r` is the furthest any eligible chain gets.
+//! 1. [`PlanOutcome::EmptyReplica`]: the listing holds no file.
+//! 2. [`PlanOutcome::BeyondNewest`]: a `Txid` past every file. A wrong request
+//!    is not reported as a broken replica.
+//! 3. [`PlanOutcome::NoSnapshot`]: for `Latest` and `Txid`, no file at all
+//!    begins at transaction 1; for `AsOf`, none created before the instant.
+//! 4. [`PlanOutcome::InsideFile`] (`Txid` only): a usable file links to the
+//!    chain (starts at most one past `r`, with `r` = 0 when no eligible file
+//!    begins at transaction 1) and ends past the target. Only finer files are
+//!    missing, so any hole lies beyond the target and does not matter.
+//! 5. [`PlanOutcome::Gap`]: a usable file lies past `r` and does not link.
+//! 6. [`PlanOutcome::MalformedSnapshot`]: only refused level-9 files lie past
+//!    `r`. Gap wins over it because a hole is the claim an operator can act on.
+//!
+//! Payloads are public fields, so callers match on them. Requirements, true of
+//! every outcome: `have_through` is `r`; `requested` and `newest` are as
+//! named; `oldest_snapshot` is the smallest last transaction of all files that
+//! begin at transaction 1, whatever the target; `malformed_snapshots` is every
+//! refused level-9 key, in ascending key order (level, first
+//! transaction, last transaction); the file `InsideFile` names
+//! is usable, links and passes the target; the file `MalformedSnapshot` names
+//! is a refused file past `r`. Design choices among files that all qualify,
+//! pinned by tests but open to change: `InsideFile` names the nearest-ending
+//! file, then the higher level, then the lower key; `Gap::next_starts` is the
+//! smallest first transaction over every usable file past `r` that does not
+//! link, whatever the target and eligibility (where history resumes is a fact
+//! about the replica, not the request); `MalformedSnapshot` names the lowest
+//! key.
+//!
+//! How a plan is chosen within the contract:
 //! - The base is the eligible file that begins at transaction 1 (any level;
 //!   LTX calls such a file a snapshot) and reaches furthest. Ties go to the
-//!   higher level, then the lower key. A base that reaches further can reach
-//!   everything a nearer one can: any file that bridges from the nearer base
-//!   also touches the further one's end. A level-9 file that begins later is
-//!   never a base.
+//!   higher level. A base that reaches further can reach everything a nearer
+//!   one can: any file that bridges from the nearer base also touches the
+//!   further one's end. A level-9 file that begins later is never a base.
 //! - Each step takes the eligible file, from levels 0 to 8, that touches the
 //!   chain's end (first transaction at most one past it) and reaches furthest.
 //!   Ties go to the higher level, then the lower first transaction: fewer,
 //!   larger files. An overlapping file is valid because a file holds the
 //!   newest version of every page it touches.
-//! - A plan must end exactly at the target: at the requested transaction, or
-//!   for [`RestoreTarget::Latest`] at the largest last transaction of any
-//!   file. Anything short of that is explained, not returned.
 //! - [`AsOf`] ends where the eligible chain ends, not at the largest eligible
 //!   transaction (ruling A1). An eligible file past the end that does not
 //!   connect is a stray left by level-0 retention, never a reason to refuse.
@@ -180,27 +220,29 @@ pub enum PlanOutcome {
         /// The nearest-ending file that straddles the instant.
         file: FileKey,
     },
-    /// The chain stops short and the next eligible file starts after a hole.
+    /// The chain stops short and the nearest usable file beyond it starts after
+    /// a hole.
     Gap {
         /// The last transaction the chain reaches.
         have_through: Txid,
-        /// The first transaction of the nearest file beyond the hole.
+        /// The smallest first transaction among every usable file past the hole,
+        /// eligible or not.
         next_starts: Txid,
     },
-    /// A requested transaction falls strictly inside a file, and the finer
-    /// files that would stop at it are gone.
+    /// A requested transaction falls strictly inside a file that links to the
+    /// chain, and the finer files that would stop at it are gone.
     InsideFile {
         /// What was asked for.
         requested: Txid,
-        /// The file that covers it.
+        /// The nearest-ending file that covers it.
         file: FileKey,
     },
-    /// The only history beyond the chain is in level-9 files that do not
-    /// start at transaction 1.
+    /// Every file past the chain's end is a level-9 file that does not start at
+    /// transaction 1, whatever the target.
     MalformedSnapshot {
         /// The last transaction the chain reaches.
         have_through: Txid,
-        /// A refused file that holds history beyond it.
+        /// The lowest-keyed refused file that holds history beyond it.
         file: FileKey,
     },
 }
