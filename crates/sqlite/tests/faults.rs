@@ -19,8 +19,8 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use lsr_core::{
-    CheckpointMode, Fault, HaltCause, Policy, RecoverEvent, Recovered, SnapshotCause, SourceError,
-    Tick, policy,
+    CheckpointMode, Event, Fault, HaltCause, Policy, RecoverEvent, Recovered, SnapshotCause,
+    SourceError, Tick, policy,
 };
 use lsr_sqlite::Sqlite;
 use lsr_sqlite::testing::harness::open_app;
@@ -840,6 +840,56 @@ fn database_deleted<B: Backend>() {
     let after = rig.check().unwrap();
     assert_eq!(after.latest, before.latest);
     assert_eq!(after.restored, before.restored);
+}
+
+/// The replicator closing after the host: with `SQLITE_FCNTL_PERSIST_WAL` on its own two
+/// connections, the last close checkpoints but keeps the WAL file, so the next start continues
+/// the same generation with no snapshot. Without it, SQLite deletes the WAL and the next boot
+/// snapshots (`WalMissing`).
+#[test]
+fn the_wal_survives_the_replicator_closing_last() {
+    replicator_closes_last::<Sqlite>();
+}
+
+fn replicator_closes_last<B: Backend>() {
+    let dir = TempDir::new().unwrap();
+    let mut rig = rig::<B>(&dir);
+    for _ in 0..3 {
+        rig.insert(1500).unwrap();
+        rig.settle().unwrap();
+    }
+    rig.close_app();
+    rig.stop_replicator();
+    assert!(rig.wal().exists(), "the WAL outlives the last connection");
+    rig.open_app().unwrap();
+    rig.restart().unwrap();
+    rig.insert(1500).unwrap();
+    rig.settle().unwrap();
+    let booted: Vec<&Tick> = rig
+        .ticks()
+        .iter()
+        .filter(|t| {
+            matches!(
+                t,
+                Tick::Ran {
+                    event: Event::Booted { .. },
+                    ..
+                }
+            )
+        })
+        .collect();
+    assert_eq!(booted.len(), 2);
+    assert!(
+        matches!(
+            booted[1],
+            Tick::Ran {
+                event: Event::Booted { cause: None },
+                ..
+            }
+        ),
+        "{booted:?}"
+    );
+    rig.check().unwrap();
 }
 
 /// Upstream `TestConcurrentOperations`: four host connections on four threads commit at once
