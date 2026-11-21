@@ -1,0 +1,804 @@
+//! From a loaded config to replicators: each key v1 honours against the Go line
+//! it copies, the refusals, and `dir` expansion (Go's directory tests in
+//! `cmd/litestream/main_test.go`, ported by scenario).
+
+use std::num::{NonZeroU32, NonZeroU64};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use lsr_config::{
+    Credentials, DbPlan, Env, Expand, GoConfig, MapProblemKind, Plan, ReplicaPlan, ReplicaProblem,
+    plan,
+};
+use lsr_core::{ForeignWriter, L0Retention, Maintenance, Response, Responses, RetentionMode};
+use lsr_replica::{NonZeroDuration, ReaderTracking};
+use lsr_store_s3::{Provider, UrlStyle};
+use tempfile::TempDir;
+
+use crate::common::{TestEnv, parse, refused};
+
+fn planned_with(text: &str, env: &dyn Env) -> Plan {
+    let loaded = match GoConfig::parse(text, Expand::Off, env) {
+        Ok(loaded) => loaded,
+        Err(error) => panic!("refused at load:\n{}", error.report()),
+    };
+    match plan(&loaded.config, env) {
+        Ok(plan) => plan,
+        Err(error) => panic!("refused at mapping: {:#?}", error.problems()),
+    }
+}
+
+fn planned(text: &str) -> Plan {
+    planned_with(text, &TestEnv::default())
+}
+
+fn one(text: &str) -> DbPlan {
+    let plan = planned(text);
+    assert_eq!(plan.dbs().len(), 1, "{plan:#?}");
+    plan.dbs().first().unwrap().clone()
+}
+
+/// The mapping problems of a file that loads.
+fn unmapped(text: &str) -> Vec<(String, MapProblemKind)> {
+    let env = TestEnv::default();
+    let config = parse(text).config;
+    match plan(&config, &env) {
+        Ok(plan) => panic!("mapped: {plan:#?}"),
+        Err(error) => error
+            .problems()
+            .iter()
+            .map(|p| (p.at.to_string(), p.kind.clone()))
+            .collect(),
+    }
+}
+
+fn db_with(keys: &str) -> String {
+    format!("dbs:\n  - path: /data/app.db\n{keys}    replica:\n      path: /backup\n")
+}
+
+fn s3_with(replica: &str) -> DbPlan {
+    one(&format!(
+        "dbs:\n  - path: /data/app.db\n    replica:\n{replica}"
+    ))
+}
+
+fn s3_config(db: &DbPlan) -> &lsr_store_s3::S3Config {
+    match db.replica() {
+        ReplicaPlan::S3 { config, .. } => config,
+        ReplicaPlan::File(path) => panic!("a file replica at {}", path.display()),
+    }
+}
+
+fn s3_refusal(replica: &str) -> ReplicaProblem {
+    let problems = unmapped(&format!(
+        "dbs:\n  - path: /data/app.db\n    replica:\n{replica}"
+    ));
+    match problems.as_slice() {
+        [(_, MapProblemKind::Replica(problem))] => problem.clone(),
+        other => panic!("{other:#?}"),
+    }
+}
+
+fn secs(n: u64) -> NonZeroDuration {
+    NonZeroDuration::new(Duration::from_secs(n)).unwrap()
+}
+
+/// Go's `NewDB` defaults (`db.go:32-38`, `db.go:342`) and `NewReplica`'s
+/// (`replica.go:26-27`), and the store defaults of `DefaultConfig`.
+#[test]
+fn an_entry_with_no_settings_gets_go_s_defaults() {
+    let db = one(&db_with(""));
+    assert_eq!(db.path(), Path::new("/data/app.db"));
+    assert_eq!(db.meta_dir(), Path::new("/data/.app.db-litestream"));
+    let config = db.config();
+    assert_eq!(config.poll_interval, secs(1));
+    assert_eq!(config.retry_interval, secs(1));
+    assert_eq!(config.checkpoint.interval, Some(Duration::from_secs(60)));
+    assert_eq!(config.checkpoint.min_pages, NonZeroU32::new(1000));
+    assert_eq!(config.checkpoint.truncate_pages, None);
+    assert_eq!(config.readers, ReaderTracking::Untracked);
+    assert_eq!(config.maintenance, Maintenance::go_default());
+    assert_eq!(
+        config.sync_limits.wal_bytes_per_step,
+        NonZeroU64::new(64 << 20)
+    );
+    assert_eq!(config.sync_limits.files_per_upload, NonZeroU32::new(256));
+    assert_eq!(config.responses, Responses::GO_LIKE);
+    assert_eq!(config.shutdown_grace, Duration::from_secs(30));
+    assert!(matches!(db.replica(), ReplicaPlan::File(p) if p == Path::new("/backup")));
+    assert!(!db.restore_if_missing());
+}
+
+#[test]
+fn monitor_interval_is_the_poll_and_zero_is_refused() {
+    let db = one(&db_with("    monitor-interval: 250ms\n"));
+    assert_eq!(
+        db.config().poll_interval,
+        NonZeroDuration::new(Duration::from_millis(250)).unwrap()
+    );
+    let problems = unmapped(&db_with("    monitor-interval: 0s\n"));
+    assert!(
+        matches!(problems.as_slice(), [(at, MapProblemKind::MonitorOff { .. })] if at == "dbs[0].monitor-interval"),
+        "{problems:#?}"
+    );
+}
+
+/// Go's `CheckpointInterval > 0` check (`db.go:1571`).
+#[test]
+fn checkpoint_interval_of_zero_turns_the_timed_checkpoint_off() {
+    let db = one(&db_with("    checkpoint-interval: 2m\n"));
+    assert_eq!(
+        db.config().checkpoint.interval,
+        Some(Duration::from_secs(120))
+    );
+    let db = one(&db_with("    checkpoint-interval: 0s\n"));
+    assert_eq!(db.config().checkpoint.interval, None);
+}
+
+/// Go refuses a non-positive count when the database opens (`db.go:872`).
+#[test]
+fn min_checkpoint_page_count_must_be_above_zero() {
+    let db = one(&db_with("    min-checkpoint-page-count: 500\n"));
+    assert_eq!(db.config().checkpoint.min_pages, NonZeroU32::new(500));
+    let problems = unmapped(&db_with("    min-checkpoint-page-count: 0\n"));
+    assert!(
+        matches!(
+            problems.as_slice(),
+            [(_, MapProblemKind::MinCheckpointPages { value: 0 })]
+        ),
+        "{problems:#?}"
+    );
+    let problems = unmapped(&db_with("    min-checkpoint-page-count: 9999999999\n"));
+    assert!(
+        matches!(problems.as_slice(), [(_, MapProblemKind::TooLarge { .. })]),
+        "{problems:#?}"
+    );
+}
+
+/// Go's `effectiveTruncatePageN` (`db.go:1599-1608`), under the operator's claim.
+#[test]
+fn truncate_page_n_acts_as_go_only_under_the_claim() {
+    let claim = "litestream-rs:\n  host-readers: none\n";
+    let db = one(&format!("{claim}{}", db_with("")));
+    assert_eq!(db.config().readers, ReaderTracking::Tracked);
+    assert_eq!(
+        db.config().checkpoint.truncate_pages,
+        NonZeroU32::new(121_359)
+    );
+    let db = one(&format!(
+        "{claim}{}",
+        db_with("    truncate-page-n: 5000\n")
+    ));
+    assert_eq!(db.config().checkpoint.truncate_pages, NonZeroU32::new(5000));
+    let db = one(&format!("{claim}{}", db_with("    truncate-page-n: -1\n")));
+    assert_eq!(db.config().checkpoint.truncate_pages, None);
+}
+
+/// `wal_reader.go:241` and `replica.go:208`: zero or less is no limit.
+#[test]
+fn sync_limits_follow_go_with_zero_as_no_limit() {
+    let db = one(
+        "dbs:\n  - path: /data/app.db\n    max-sync-wal-bytes: 1024\n    replica:\n      path: /backup\n      max-sync-ltx-files: 10\n",
+    );
+    assert_eq!(
+        db.config().sync_limits.wal_bytes_per_step,
+        NonZeroU64::new(1024)
+    );
+    assert_eq!(
+        db.config().sync_limits.files_per_upload,
+        NonZeroU32::new(10)
+    );
+    let db = one(
+        "dbs:\n  - path: /data/app.db\n    max-sync-wal-bytes: 0\n    replica:\n      path: /backup\n      max-sync-ltx-files: 0\n",
+    );
+    assert_eq!(db.config().sync_limits.wal_bytes_per_step, None);
+    assert_eq!(db.config().sync_limits.files_per_upload, None);
+}
+
+/// Go's replica backoff starts at the sync interval (`replica.go:449-456`); the
+/// top-level setting is copied into the replica as Go's `SetDefaults` does.
+#[test]
+fn sync_interval_is_the_first_retry_wait() {
+    let db = one(&format!("sync-interval: 10s\n{}", db_with("")));
+    assert_eq!(db.config().retry_interval, secs(10));
+}
+
+#[test]
+fn schedule_settings_become_core_s_maintenance() {
+    let db = one(&format!(
+        "levels:\n  - interval: 1m\n  - interval: 10m\nsnapshot:\n  interval: 2h\n  retention: 48h\nl0-retention: 0s\nretention:\n  enabled: false\n{}",
+        db_with("")
+    ));
+    let want = Maintenance::new(
+        vec![Duration::from_secs(60), Duration::from_secs(600)],
+        Duration::from_secs(7200),
+        Duration::from_secs(172_800),
+        L0Retention::Keep,
+    )
+    .unwrap()
+    .with_retention(RetentionMode::Off);
+    assert_eq!(db.config().maintenance, want);
+}
+
+/// Core refuses levels that are not increasing; Go loads them.
+#[test]
+fn a_schedule_core_refuses_is_refused_naming_it() {
+    let problems = unmapped(&format!(
+        "levels:\n  - interval: 10m\n  - interval: 1m\n{}",
+        db_with("")
+    ));
+    assert!(
+        matches!(problems.as_slice(), [(_, MapProblemKind::Maintenance(_))]),
+        "{problems:#?}"
+    );
+}
+
+#[test]
+fn shutdown_sync_timeout_is_the_drain_grace_and_the_shared_deadline() {
+    let plan = planned(&format!("shutdown-sync-timeout: 5s\n{}", db_with("")));
+    assert_eq!(plan.shutdown_sync_timeout(), Duration::from_secs(5));
+    assert_eq!(
+        plan.dbs().first().unwrap().config().shutdown_grace,
+        Duration::from_secs(5)
+    );
+}
+
+#[test]
+fn responses_override_go_s_one_by_one() {
+    let db = one(&format!(
+        "litestream-rs:\n  responses:\n    credentials: stop\n    foreign-writer: continue-and-interleave-histories\n{}",
+        db_with("")
+    ));
+    let responses = db.config().responses;
+    assert_eq!(responses.credentials, Response::Stop);
+    assert_eq!(responses.store_refused, Response::KeepTrying);
+    assert_eq!(
+        responses.foreign_writer,
+        ForeignWriter::ContinueAndInterleaveHistories
+    );
+}
+
+/// A Rust-only setting: the host's `wal_autocheckpoint`, SQLite's 1000 unless stated.
+#[test]
+fn host_autocheckpoint_defaults_to_sqlite_s_and_can_be_off() {
+    let frames = |head: &str| {
+        one(&format!("{head}{}", db_with("")))
+            .config()
+            .host_autocheckpoint
+    };
+    assert_eq!(frames(""), NonZeroU32::new(1000));
+    assert_eq!(
+        frames("litestream-rs:\n  host-autocheckpoint: 500\n"),
+        NonZeroU32::new(500)
+    );
+    assert_eq!(frames("litestream-rs:\n  host-autocheckpoint: 0\n"), None);
+    assert_eq!(frames("litestream-rs:\n  host-autocheckpoint: off\n"), None);
+    let problems = refused(&format!(
+        "litestream-rs:\n  host-autocheckpoint: lots\n{}",
+        db_with("")
+    ));
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.path.to_string() == "litestream-rs.host-autocheckpoint"),
+        "{problems:#?}"
+    );
+}
+
+/// Go's `TestNewDBFromConfig_MetaPathExpansion`.
+#[test]
+fn meta_path_is_expanded_and_used_as_is() {
+    let db = one(&db_with("    meta-path: ~/litestream-meta\n"));
+    assert_eq!(db.meta_dir(), Path::new("/home/u/litestream-meta"));
+}
+
+#[test]
+fn relative_paths_are_made_absolute_as_go_does() {
+    let db = one("dbs:\n  - path: app.db\n    replica:\n      path: backup\n");
+    assert_eq!(db.path(), Path::new("/work/app.db"));
+    assert_eq!(db.meta_dir(), Path::new("/work/.app.db-litestream"));
+    assert!(matches!(db.replica(), ReplicaPlan::File(p) if p == Path::new("/work/backup")));
+}
+
+#[test]
+fn restore_if_db_not_exists_is_carried() {
+    let db = one(&db_with("    restore-if-db-not-exists: true\n"));
+    assert!(db.restore_if_missing());
+}
+
+/// Go's `TestNewFileReplicaFromConfig` and its file URL form.
+#[test]
+fn a_file_replica_from_path_or_url() {
+    let db = s3_with("      url: file:///backup/app\n");
+    assert!(matches!(db.replica(), ReplicaPlan::File(p) if p == Path::new("/backup/app")));
+    let problem = s3_refusal("      url: file:///backup\n      path: /other\n");
+    assert_eq!(problem, ReplicaProblem::FileUrlAndPath);
+    let problem = s3_refusal("      type: file\n");
+    assert_eq!(problem, ReplicaProblem::FilePathRequired);
+}
+
+/// Go's `TestNewFileReplicaFromConfig_LegacyEscapedURLPath`.
+#[test]
+fn an_escaped_file_url_uses_the_legacy_directory_only_when_it_alone_exists() {
+    let dir = TempDir::new().unwrap();
+    let decoded = dir.path().join("daily backup");
+    let legacy = dir.path().join("daily%20backup");
+    let url = format!(
+        "      url: file://{}/daily%20backup\n",
+        dir.path().display()
+    );
+    let db = s3_with(&url);
+    assert!(matches!(db.replica(), ReplicaPlan::File(p) if *p == decoded));
+    std::fs::create_dir(&legacy).unwrap();
+    let db = s3_with(&url);
+    assert!(matches!(db.replica(), ReplicaPlan::File(p) if *p == legacy));
+    std::fs::create_dir(&decoded).unwrap();
+    assert!(matches!(
+        s3_refusal(&url),
+        ReplicaProblem::LegacyBoth { .. }
+    ));
+}
+
+/// Go's `TestNewS3ReplicaFromConfig/URL` and `URLWithoutQuery`: AWS, virtual host.
+#[test]
+fn an_s3_url_names_the_bucket_and_prefix() {
+    let db = s3_with("      url: s3://my-bucket/db/app\n");
+    let config = s3_config(&db);
+    assert_eq!(config.bucket().as_str(), "my-bucket");
+    assert_eq!(config.prefix().as_str(), "db/app");
+    assert_eq!(config.region().as_str(), "us-east-1");
+    assert_eq!(
+        config.endpoint().url().as_str(),
+        "https://s3.us-east-1.amazonaws.com/"
+    );
+    assert_eq!(config.style(), UrlStyle::VirtualHost);
+    assert!(matches!(
+        db.replica(),
+        ReplicaPlan::S3 {
+            credentials: Credentials::FromEnvironment,
+            ..
+        }
+    ));
+}
+
+/// Go's `URLWithEndpointQuery` and `ConfigOverridesQuery`: an endpoint turns path
+/// style on, the file's keys win over the query.
+#[test]
+fn query_settings_apply_and_the_file_s_keys_win() {
+    let db =
+        s3_with("      url: s3://b/p?endpoint=localhost:9000&region=eu-west-1&partSize=10485760\n");
+    let config = s3_config(&db);
+    assert_eq!(config.endpoint().url().as_str(), "http://localhost:9000/");
+    assert_eq!(config.region().as_str(), "eu-west-1");
+    assert_eq!(config.style(), UrlStyle::Path);
+    assert_eq!(config.part_size().get(), 10 << 20);
+    let db = s3_with(
+        "      url: s3://b/p?endpoint=https://example.com&forcePathStyle=false\n      region: us-west-2\n      part-size: 6MiB\n",
+    );
+    let config = s3_config(&db);
+    assert_eq!(config.style(), UrlStyle::VirtualHost);
+    assert_eq!(config.region().as_str(), "us-west-2");
+    assert_eq!(config.part_size().get(), 6 << 20);
+}
+
+/// Go's `TestNewS3ReplicaClientFromConfig/HTTPSEndpoint` and the bucket and path keys.
+#[test]
+fn bucket_path_and_endpoint_keys_without_a_url() {
+    let db = s3_with(
+        "      type: s3\n      bucket: b\n      path: x/y\n      endpoint: fly.storage.tigris.dev\n      region: auto\n",
+    );
+    let config = s3_config(&db);
+    assert_eq!(
+        config.endpoint().url().as_str(),
+        "https://fly.storage.tigris.dev/"
+    );
+    assert_eq!(config.provider(), Provider::Tigris);
+    assert_eq!(config.style(), UrlStyle::Path);
+    assert_eq!(config.prefix().as_str(), "x/y");
+}
+
+/// Go's `s3.ParseHost` for AWS virtual hosts and MinIO's `bucket.host:port`
+/// (`TestNewS3ReplicaFromConfig/MinIO`).
+#[test]
+fn provider_hosts_go_splits() {
+    let db = s3_with("      url: s3://my-bucket.s3.eu-west-1.amazonaws.com/db\n");
+    let config = s3_config(&db);
+    assert_eq!(config.bucket().as_str(), "my-bucket");
+    assert_eq!(config.region().as_str(), "eu-west-1");
+    let db = s3_with("      url: s3://my-bucket.localhost:9000/db\n");
+    let config = s3_config(&db);
+    assert_eq!(config.bucket().as_str(), "my-bucket");
+    assert_eq!(config.endpoint().url().as_str(), "http://localhost:9000/");
+    assert_eq!(config.style(), UrlStyle::Path);
+    assert!(matches!(
+        s3_refusal("      url: s3://b.nyc3.digitaloceanspaces.com/db\n"),
+        ReplicaProblem::ProviderHost { .. }
+    ));
+}
+
+#[test]
+fn s3_refusals() {
+    assert_eq!(
+        s3_refusal("      url: s3://b/p\n      bucket: c\n"),
+        ReplicaProblem::S3UrlAndBucket
+    );
+    assert_eq!(
+        s3_refusal("      url: s3://b/p\n      path: q\n"),
+        ReplicaProblem::S3UrlAndPath
+    );
+    assert_eq!(
+        s3_refusal("      type: s3\n      path: q\n"),
+        ReplicaProblem::BucketRequired
+    );
+    assert!(matches!(
+        s3_refusal("      url: s3://b/p?skipVerify=true\n"),
+        ReplicaProblem::QueryNotInV1 { .. }
+    ));
+    assert!(matches!(
+        s3_refusal("      url: s3://b/p?storageClass=GLACIER\n"),
+        ReplicaProblem::QueryNotInV1 { .. }
+    ));
+    assert!(matches!(
+        s3_refusal("      url: s3://b/p?forcePathstyle=true\n"),
+        ReplicaProblem::QueryUnknown { .. }
+    ));
+    assert_eq!(
+        s3_refusal("      url: s3://b/p\n      access-key-id: AKIA\n"),
+        ReplicaProblem::HalfCredentials
+    );
+    assert!(matches!(
+        s3_refusal("      url: s3://arn:aws:s3:us-east-1:123:accesspoint/ap/db\n"),
+        ReplicaProblem::AccessPoint
+    ));
+    assert!(matches!(
+        s3_refusal("      url: s3://b/p?partSize=big\n"),
+        ReplicaProblem::QueryNotNumber { .. }
+    ));
+    // Go's `ExplicitTypeWithEndpointLikeURL`.
+    assert_eq!(
+        s3_refusal("      type: s3\n      url: rook-ceph-rgw:8080\n      path: path\n"),
+        ReplicaProblem::S3UrlAndPath
+    );
+}
+
+/// Go accepts the signing and MD5 query keys; v1 notes they change nothing.
+#[test]
+fn no_effect_query_keys_are_noted() {
+    let plan = planned(
+        "dbs:\n  - path: /data/app.db\n    replica:\n      url: s3://b/p?signPayload=false&concurrency=8\n",
+    );
+    assert_eq!(plan.notes().len(), 2, "{:#?}", plan.notes());
+}
+
+#[test]
+fn credentials_from_the_file() {
+    let db = s3_with(
+        "      url: s3://b/p\n      access-key-id: AKIA\n      secret-access-key: s3cr3t\n",
+    );
+    assert!(matches!(
+        db.replica(),
+        ReplicaPlan::S3 {
+            credentials: Credentials::FromConfig(_),
+            ..
+        }
+    ));
+    let debug = format!("{db:?}");
+    assert!(!debug.contains("s3cr3t"), "{debug}");
+}
+
+/// Go keeps the first of a duplicate and lets two databases share a replica.
+#[test]
+fn one_database_one_replica_one_meta_directory() {
+    let problems = unmapped(
+        "dbs:\n  - path: /a.db\n    replica:\n      path: /r/a\n  - path: /b.db\n    replica:\n      path: /r/a\n",
+    );
+    assert!(
+        matches!(problems.as_slice(), [(at, MapProblemKind::SharedReplica { .. })] if at == "dbs[1]"),
+        "{problems:#?}"
+    );
+    let problems = unmapped(
+        "dbs:\n  - path: /a.db\n    replica:\n      url: s3://b/p\n  - path: /b.db\n    replica:\n      url: s3://b/p\n",
+    );
+    assert!(
+        matches!(
+            problems.as_slice(),
+            [(_, MapProblemKind::SharedReplica { .. })]
+        ),
+        "{problems:#?}"
+    );
+    let problems = unmapped(
+        "dbs:\n  - path: /a.db\n    meta-path: /m\n    replica:\n      path: /r/a\n  - path: /b.db\n    meta-path: /m\n    replica:\n      path: /r/b\n",
+    );
+    assert!(
+        matches!(
+            problems.as_slice(),
+            [(_, MapProblemKind::SharedMetaDir { .. })]
+        ),
+        "{problems:#?}"
+    );
+}
+
+#[test]
+fn a_database_named_by_a_path_and_a_dir_is_refused() {
+    let tree = Tree::new(&["app.db"]);
+    let problems = unmapped(&format!(
+        "dbs:\n  - path: {root}/app.db\n    replica:\n      path: /r/one\n  - dir: {root}\n    pattern: '*.db'\n    replica:\n      path: /r/dir\n",
+        root = tree.root().display()
+    ));
+    assert!(
+        matches!(problems.as_slice(), [(at, MapProblemKind::DuplicateDatabase { .. })] if at == "dbs[1]"),
+        "{problems:#?}"
+    );
+}
+
+#[test]
+fn an_entry_without_a_replica_is_refused() {
+    let problems = unmapped("dbs:\n  - path: /a.db\n");
+    assert!(
+        matches!(problems.as_slice(), [(_, MapProblemKind::NoReplica)]),
+        "{problems:#?}"
+    );
+}
+
+/// Go's positional `replicate DB_PATH REPLICA_URL`.
+#[test]
+fn the_positional_form_is_one_database() {
+    let env = TestEnv::default();
+    let loaded = GoConfig::for_one_database("app \"x\".db", "s3://b/p", &env).unwrap();
+    let plan = plan(&loaded.config, &env).unwrap();
+    let db = plan.dbs().first().unwrap();
+    assert_eq!(db.path(), Path::new("/work/app \"x\".db"));
+    assert_eq!(s3_config(db).prefix().as_str(), "p");
+    GoConfig::for_one_database("a.db", "gs://b/p", &env).unwrap_err();
+}
+
+/// A directory of synthetic database files: a SQLite header is all the scan reads.
+struct Tree(TempDir);
+
+impl Tree {
+    fn new(files: &[&str]) -> Self {
+        let dir = TempDir::new().unwrap();
+        for file in files {
+            let path = dir.path().join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let mut bytes = b"SQLite format 3\0".to_vec();
+            bytes.resize(4096, 0);
+            std::fs::write(path, bytes).unwrap();
+        }
+        Self(dir)
+    }
+
+    fn root(&self) -> &Path {
+        self.0.path()
+    }
+
+    fn plan(&self, entry: &str) -> Plan {
+        planned(&format!(
+            "dbs:\n  - dir: {}\n{entry}",
+            self.root().display()
+        ))
+    }
+}
+
+fn replicas(plan: &Plan, root: &Path) -> Vec<(PathBuf, String)> {
+    plan.dbs()
+        .iter()
+        .map(|db| {
+            let replica = match db.replica() {
+                ReplicaPlan::File(path) => path.display().to_string(),
+                ReplicaPlan::S3 { config, .. } => {
+                    format!("{}/{}", config.bucket().as_str(), config.prefix().as_str())
+                }
+            };
+            (db.path().strip_prefix(root).unwrap().to_owned(), replica)
+        })
+        .collect()
+}
+
+/// Go's `TestNewDBsFromDirectoryConfig_SubdirectoryPaths` and `_UniquePaths`.
+#[test]
+fn a_recursive_dir_keeps_relative_paths_under_a_file_replica() {
+    let tree = Tree::new(&[
+        "db1.db",
+        "team-a/db2.db",
+        "team-b/nested/db3.db",
+        "notes.txt",
+    ]);
+    let plan =
+        tree.plan("    pattern: '*.db'\n    recursive: true\n    replica:\n      path: /backup\n");
+    assert_eq!(
+        replicas(&plan, tree.root()),
+        [
+            (PathBuf::from("db1.db"), "/backup/db1.db".to_owned()),
+            (
+                PathBuf::from("team-a/db2.db"),
+                "/backup/team-a/db2.db".to_owned()
+            ),
+            (
+                PathBuf::from("team-b/nested/db3.db"),
+                "/backup/team-b/nested/db3.db".to_owned()
+            ),
+        ]
+    );
+    let db = plan.dbs().get(1).unwrap();
+    assert_eq!(db.meta_dir(), tree.root().join("team-a/.db2.db-litestream"));
+}
+
+/// `FindSQLiteDatabases` without `recursive`, and `IsSQLiteDatabase`.
+#[test]
+fn a_flat_dir_skips_subdirectories_and_files_that_are_not_databases() {
+    let tree = Tree::new(&["a.db", "sub/b.db"]);
+    std::fs::write(tree.root().join("fake.db"), b"not a database").unwrap();
+    let plan = tree.plan("    pattern: '*.db'\n    replica:\n      path: /backup\n");
+    assert_eq!(
+        replicas(&plan, tree.root()),
+        [(PathBuf::from("a.db"), "/backup/a.db".to_owned())]
+    );
+}
+
+/// Go's `TestNewDBsFromDirectoryConfig_S3URL` and `_DuplicateFilenames`.
+#[test]
+fn a_dir_under_an_s3_url_appends_the_relative_path() {
+    let tree = Tree::new(&["team-a/db.sqlite", "team-b/nested/db.sqlite"]);
+    let plan = tree.plan(
+        "    pattern: '*.sqlite'\n    recursive: true\n    replica:\n      url: s3://test-bucket/backups\n",
+    );
+    assert_eq!(
+        replicas(&plan, tree.root()),
+        [
+            (
+                PathBuf::from("team-a/db.sqlite"),
+                "test-bucket/backups/team-a/db.sqlite".to_owned()
+            ),
+            (
+                PathBuf::from("team-b/nested/db.sqlite"),
+                "test-bucket/backups/team-b/nested/db.sqlite".to_owned()
+            ),
+        ]
+    );
+    let plan = tree.plan(
+        "    pattern: '*.sqlite'\n    recursive: true\n    replica:\n      type: s3\n      bucket: test-bucket\n      path: backups\n",
+    );
+    assert_eq!(replicas(&plan, tree.root()).len(), 2);
+}
+
+/// Go's `TestNewDBsFromDirectoryConfig_ReplicasArrayURL`.
+#[test]
+fn a_dir_with_the_deprecated_replicas_list() {
+    let tree = Tree::new(&["db1.sqlite", "subs/db2.sqlite"]);
+    let plan = tree.plan(
+        "    pattern: '*.sqlite'\n    recursive: true\n    replicas:\n      - url: s3://legacy-bucket/base\n",
+    );
+    assert_eq!(
+        replicas(&plan, tree.root()),
+        [
+            (
+                PathBuf::from("db1.sqlite"),
+                "legacy-bucket/base/db1.sqlite".to_owned()
+            ),
+            (
+                PathBuf::from("subs/db2.sqlite"),
+                "legacy-bucket/base/subs/db2.sqlite".to_owned()
+            ),
+        ]
+    );
+}
+
+/// Go's `TestNewDBsFromDirectoryConfig_MetaPathPerDatabase`.
+#[test]
+fn a_dir_with_meta_path_gives_each_database_its_own() {
+    let tree = Tree::new(&["primary.db", "team/nested/analytics.db"]);
+    let plan = tree.plan(
+        "    pattern: '*.db'\n    recursive: true\n    meta-path: ~/meta-root\n    replica:\n      path: /backup\n",
+    );
+    let metas: Vec<_> = plan
+        .dbs()
+        .iter()
+        .map(|db| db.meta_dir().to_owned())
+        .collect();
+    assert_eq!(
+        metas,
+        [
+            PathBuf::from("/home/u/meta-root/.primary.db-litestream"),
+            PathBuf::from("/home/u/meta-root/team/nested/.analytics.db-litestream"),
+        ]
+    );
+}
+
+/// Go's `TestNewDBsFromDirectoryConfig_MetaDir`: no leading dot under `meta-dir`.
+#[test]
+fn a_dir_with_meta_dir_mirrors_the_tree() {
+    let tree = Tree::new(&["tenant-a/data.metadata", "tenant-b/nested/data.metadata"]);
+    let plan = tree.plan(
+        "    pattern: '*.metadata'\n    recursive: true\n    meta-dir: /state\n    replica:\n      path: /replicas\n",
+    );
+    let metas: Vec<_> = plan
+        .dbs()
+        .iter()
+        .map(|db| db.meta_dir().to_owned())
+        .collect();
+    assert_eq!(
+        metas,
+        [
+            PathBuf::from("/state/tenant-a/data.metadata-litestream"),
+            PathBuf::from("/state/tenant-b/nested/data.metadata-litestream"),
+        ]
+    );
+}
+
+/// Go's `TestNewDBsFromDirectoryConfig_EmptyBasePath` and `_SpecialCharacters`.
+#[test]
+fn a_dir_under_a_file_replica_with_no_path_and_odd_names() {
+    let tree = Tree::new(&["my database.db", "tenant#1.db"]);
+    let plan = tree.plan("    pattern: '*.db'\n    replica:\n      type: file\n");
+    assert_eq!(
+        replicas(&plan, tree.root()),
+        [
+            (
+                PathBuf::from("my database.db"),
+                "/work/my database.db".to_owned()
+            ),
+            (PathBuf::from("tenant#1.db"), "/work/tenant#1.db".to_owned()),
+        ]
+    );
+}
+
+/// Go's `TestNewDBsFromDirectoryConfig_EmptyDirectoryRequiresDatabases`.
+#[test]
+fn a_dir_that_finds_nothing_is_refused() {
+    let tree = Tree::new(&[]);
+    let problems = unmapped(&format!(
+        "dbs:\n  - dir: {}\n    pattern: '*.db'\n    replica:\n      path: /backup\n",
+        tree.root().display()
+    ));
+    assert!(
+        matches!(
+            problems.as_slice(),
+            [(
+                _,
+                MapProblemKind::Dir(lsr_config::DirProblem::NoDatabases { .. })
+            )]
+        ),
+        "{problems:#?}"
+    );
+}
+
+/// Go's `TestNewDBsFromDirectoryConfig_EmptyDirectoryWithWatch`: v1 refuses `watch`.
+#[test]
+fn watching_a_dir_is_refused_at_load() {
+    let problems = refused(
+        "dbs:\n  - dir: /data\n    pattern: '*.db'\n    watch: true\n    replica:\n      path: /backup\n",
+    );
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.path.to_string() == "dbs[0].watch"),
+        "{problems:#?}"
+    );
+}
+
+/// Go's `filepath.Match` on the file name.
+#[test]
+fn patterns_are_go_s_glob() {
+    let tree = Tree::new(&["a1.db", "b2.db", "c.db", "a1.sqlite"]);
+    let plan = tree.plan("    pattern: '[ab]?.db'\n    replica:\n      path: /backup\n");
+    let names: Vec<_> = replicas(&plan, tree.root())
+        .into_iter()
+        .map(|(p, _)| p)
+        .collect();
+    assert_eq!(names, [PathBuf::from("a1.db"), PathBuf::from("b2.db")]);
+    let problems = unmapped(&format!(
+        "dbs:\n  - dir: {}\n    pattern: '[a'\n    replica:\n      path: /backup\n",
+        tree.root().display()
+    ));
+    assert!(
+        matches!(
+            problems.as_slice(),
+            [(
+                _,
+                MapProblemKind::Dir(lsr_config::DirProblem::BadPattern { .. })
+            )]
+        ),
+        "{problems:#?}"
+    );
+}

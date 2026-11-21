@@ -327,6 +327,7 @@ const AGE: &[Key] = &[
 /// Rust-only settings): Go ignores it, so the same file still starts Go.
 const RUST: &[Key] = &[
     key("host-readers", Str, Implemented),
+    key("host-autocheckpoint", Str, Implemented),
     key("responses", Map(Section::Responses), Implemented),
 ];
 

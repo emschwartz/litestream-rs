@@ -15,6 +15,8 @@
 //!    the `host-readers: none` claim.
 //! 5. `LOG_LEVEL` over `logging.level`; the snapshot-retention warning.
 
+use std::num::NonZeroU32;
+
 use crate::config::{
     DbConfig, DbSource, DirSource, ForeignWriterSetting, GoConfig, HostReaders, LogFormat,
     LogLevel, Logging, ReplicaConfig, ReplicaKind, ResponseSetting, ResponseSettings, RustSettings,
@@ -26,6 +28,9 @@ use crate::expand::{Env, clean, expand_path};
 use crate::walk::{Fields, Listed, Walk};
 
 const MIN_HEARTBEAT: GoDuration = GoDuration::from_secs(60);
+
+/// SQLite's default `wal_autocheckpoint`, in frames.
+const SQLITE_AUTOCHECKPOINT: u32 = 1000;
 
 pub(crate) fn build(top: &Fields, env: &dyn Env, walk: &mut Walk) -> GoConfig {
     let rust = rust_settings(top.map("litestream-rs"), walk);
@@ -521,7 +526,37 @@ fn rust_settings(fields: Option<&Fields>, walk: &mut Walk) -> RustSettings {
         .unwrap_or_default();
     RustSettings {
         host_readers,
+        host_autocheckpoint: host_autocheckpoint(fields, walk),
         responses,
+    }
+}
+
+/// `host-autocheckpoint`: frames, or `0` and `off` for none; SQLite's 1000 when absent.
+fn host_autocheckpoint(fields: Option<&Fields>, walk: &mut Walk) -> Option<NonZeroU32> {
+    let Some(text) = fields.and_then(|f| f.string("host-autocheckpoint")) else {
+        return NonZeroU32::new(SQLITE_AUTOCHECKPOINT);
+    };
+    if text == "off" {
+        return None;
+    }
+    match text.parse::<u32>() {
+        Ok(frames) => NonZeroU32::new(frames),
+        Err(_) => {
+            let path = KeyPath::root()
+                .key("litestream-rs")
+                .key("host-autocheckpoint");
+            let line = fields.and_then(|f| f.line("host-autocheckpoint"));
+            let allowed = "a page count, 0 or off";
+            walk.problem(
+                path,
+                line,
+                ProblemKind::UnsupportedValue {
+                    value: text,
+                    allowed,
+                },
+            );
+            NonZeroU32::new(SQLITE_AUTOCHECKPOINT)
+        }
     }
 }
 

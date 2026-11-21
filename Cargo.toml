@@ -14,9 +14,11 @@ publish = false
 # a crate adds features on top, never a version.
 [workspace.dependencies]
 lsr-compat = { path = "crates/compat" }
+lsr-config = { path = "crates/config" }
 lsr-core = { path = "crates/core" }
 lsr-local = { path = "crates/local" }
 lsr-replica = { path = "crates/replica" }
+lsr-sidecar = { path = "crates/sidecar" }
 lsr-ltx = { path = "crates/ltx" }
 lsr-sim = { path = "crates/sim" }
 lsr-sqlite = { path = "crates/sqlite" }

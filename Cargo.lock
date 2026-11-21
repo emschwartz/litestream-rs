@@ -836,10 +836,12 @@ name = "lsr-cli"
 version = "0.0.0"
 dependencies = [
  "lsr-compat",
+ "lsr-config",
  "lsr-core",
  "lsr-local",
  "lsr-ltx",
  "lsr-replica",
+ "lsr-sidecar",
  "lsr-sqlite",
  "lsr-store-fs",
  "lsr-store-s3",
@@ -876,10 +878,15 @@ dependencies = [
 name = "lsr-config"
 version = "0.0.0"
 dependencies = [
+ "lsr-core",
+ "lsr-replica",
+ "lsr-store-s3",
+ "percent-encoding",
  "proptest",
  "saphyr-parser",
  "tempfile",
  "thiserror",
+ "url",
 ]
 
 [[package]]
@@ -940,6 +947,20 @@ dependencies = [
  "lsr-store-fs",
  "rusqlite",
  "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "lsr-sidecar"
+version = "0.0.0"
+dependencies = [
+ "lsr-config",
+ "lsr-core",
+ "lsr-ltx",
+ "lsr-replica",
+ "lsr-store-fs",
+ "lsr-store-s3",
+ "signal-hook",
  "thiserror",
 ]
 

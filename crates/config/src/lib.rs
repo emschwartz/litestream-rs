@@ -26,6 +26,7 @@ mod duration;
 mod error;
 mod expand;
 mod keys;
+mod map;
 mod size;
 mod value;
 mod walk;
@@ -45,6 +46,10 @@ pub use error::{
     WarningKind,
 };
 pub use expand::{Env, Expand, PathError, ProcessEnv, clean, expand_path, strip_sqlite_prefix};
+pub use map::{
+    Credentials, DbPlan, DirProblem, MapError, MapProblem, MapProblemKind, Note, Plan, ReplicaPlan,
+    ReplicaProblem, default_meta, plan,
+};
 pub use size::{SizeError, parse_byte_size};
 
 use error::Problem as P;
@@ -111,6 +116,42 @@ impl GoConfig {
             Err(ConfigError::new(report))
         }
     }
+}
+
+impl GoConfig {
+    /// The config Go's `replicate DB_PATH REPLICA_URL` builds: Go's defaults and one
+    /// database with one replica, read through the same checks as a file.
+    ///
+    /// # Errors
+    /// A [`ConfigError`] when the URL names a replica type v1 does not have.
+    pub fn for_one_database(
+        database: &str,
+        replica_url: &str,
+        env: &dyn Env,
+    ) -> Result<Loaded, ConfigError> {
+        let text = format!(
+            "dbs:\n  - path: {}\n    replica:\n      url: {}\n",
+            quoted(database),
+            quoted(replica_url)
+        );
+        Self::parse(&text, Expand::Off, env)
+    }
+}
+
+/// A YAML double-quoted scalar holding `text` exactly.
+fn quoted(text: &str) -> String {
+    let mut out = String::with_capacity(text.len().saturating_add(2));
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04x}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn report_of(problem: P) -> Report {

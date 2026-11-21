@@ -497,6 +497,7 @@ pub struct ResponseSettings {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RustSettings {
     pub(crate) host_readers: HostReaders,
+    pub(crate) host_autocheckpoint: Option<std::num::NonZeroU32>,
     pub(crate) responses: ResponseSettings,
 }
 
@@ -505,6 +506,13 @@ impl RustSettings {
     #[must_use]
     pub fn host_readers(self) -> HostReaders {
         self.host_readers
+    }
+    /// `host-autocheckpoint`: the `wal_autocheckpoint` the host's connections run, in
+    /// frames; `None` for `0` or `off`. SQLite's default, 1000, when the key is absent, since
+    /// the replicator cannot read another process's setting.
+    #[must_use]
+    pub fn host_autocheckpoint(self) -> Option<std::num::NonZeroU32> {
+        self.host_autocheckpoint
     }
     /// `responses`.
     #[must_use]
