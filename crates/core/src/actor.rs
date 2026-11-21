@@ -65,7 +65,7 @@ use lsr_ltx::{PageSize, Timestamp, Txid};
 use lsr_wal::{CommittedEnd, OpenError, WalReader};
 
 pub use state::{Degraded, Lane, Phase};
-use state::{Gate, Lanes, Maintain};
+use state::{Gate, Lanes, Live, Maintain};
 
 use crate::checkpoint::{
     CheckpointConfig, CheckpointFailed, CheckpointOutcome, CheckpointState, Decision, Observed,
@@ -333,10 +333,8 @@ pub struct Actor {
     lane_pin: Option<Txid>,
     /// The restore point a scheduled verify asked retention to keep.
     verify_pin: Option<Txid>,
-    /// A scheduled verify waits for the live database's pages.
-    live_wanted: bool,
-    /// The live database's pages, read for a scheduled verify and not yet taken.
-    live: Option<LivePages>,
+    /// The live database's pages a scheduled verify asked for.
+    live: Live,
     /// What the host's checkpoints did between reads.
     host: HostObserver,
 }
@@ -457,8 +455,7 @@ impl Actor {
             pinned: false,
             lane_pin: None,
             verify_pin: None,
-            live_wanted: false,
-            live: None,
+            live: Live::Idle,
             host: HostObserver::default(),
         }
     }
@@ -544,12 +541,12 @@ impl Actor {
     /// ([`crate::verify_against`]). A running engine reads them in a sync tick
     /// once uploads have caught up, under that tick's proof, as a level-9
     /// snapshot reads the database; [`Self::take_live_pages`] hands them over.
-    pub const fn read_live_pages(&mut self) {
-        self.live_wanted = true;
+    pub fn read_live_pages(&mut self) {
+        self.live.ask();
     }
 
     /// The live pages read since the last call, if any.
-    pub const fn take_live_pages(&mut self) -> Option<LivePages> {
+    pub fn take_live_pages(&mut self) -> Option<LivePages> {
         self.live.take()
     }
 
@@ -777,7 +774,7 @@ impl Actor {
         fresh.pinned = self.pinned;
         fresh.lane_pin = self.lane_pin;
         fresh.verify_pin = self.verify_pin;
-        fresh.live_wanted = self.live_wanted;
+        fresh.live = self.live.rebuilt();
         fresh.maintain.state.set_pin(self.maintain.state.pin());
         fresh.host = self.host;
         *self = fresh;
@@ -1041,7 +1038,7 @@ impl Actor {
             Err(err) => return Some(self.fault(Lane::Sync, Fault::from_source(err), now)),
         };
         self.host.poll(committed);
-        let wants_live = may_checkpoint && self.live_wanted && self.caught_up();
+        let wants_live = may_checkpoint && self.live.wanted() && self.caught_up();
         let wants_proof = may_checkpoint && (self.checkpoint_decision(now).is_some() || wants_live);
         let quiet = !self.wal_moved(committed) && self.pending.is_none() && !self.more_wal;
         if quiet && !wants_proof {
@@ -1081,8 +1078,7 @@ impl Actor {
             return Ok(());
         }
         let live = read_live(proof, env.wal, env.db, &mut self.pages)?;
-        self.live = Some(live);
-        self.live_wanted = false;
+        self.live = Live::Read(live);
         Ok(())
     }
 

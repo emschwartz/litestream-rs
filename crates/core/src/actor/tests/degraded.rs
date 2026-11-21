@@ -360,3 +360,47 @@ fn a_drain_whose_boot_stays_degraded_ends_at_its_deadline() {
         "{seen:?}"
     );
 }
+
+/// Ticks, following the actor's wake times, until it has booted again.
+fn boot_again(rig: &mut Rig, actor: &mut Actor, now: i64) -> i64 {
+    let mut now = now;
+    for _ in 0..50 {
+        let tick = rig.tick(actor, now);
+        if matches!(event(&tick), Some(Event::Booted { .. })) {
+            return now;
+        }
+        match next_of(&tick) {
+            Some(Next::At(at)) => now = now.max(at.unix_millis()),
+            Some(Next::Now | Next::OnWalChange) | None => {}
+        }
+    }
+    panic!("never booted again");
+}
+
+/// Live pages read for a scheduled verify and not yet taken are lost with
+/// the rest of the engine's state by a rebuild: the request stands, and the
+/// rebuilt engine reads them again.
+#[test]
+fn a_rebuild_reads_again_the_live_pages_nobody_took() {
+    let (mut rig, mut actor) = caught_up_go_like();
+    actor.read_live_pages();
+    rig.settle(&mut actor, T0 + 1);
+    // Read, and waiting to be taken, as the rebuild comes.
+    actor.fault(Lane::Upload, Fault::Bug, ts(T0 + 10));
+    let now = boot_again(&mut rig, &mut actor, T0 + 10);
+    rig.settle(&mut actor, now + 1);
+    let live = actor.take_live_pages();
+    assert!(live.is_some(), "the verify would wait forever");
+    assert_eq!(live.map(|live| live.txid().get()), replica_tip(&rig));
+}
+
+/// A request not yet served survives a rebuild too.
+#[test]
+fn a_rebuild_keeps_a_request_for_live_pages() {
+    let (mut rig, mut actor) = caught_up_go_like();
+    actor.read_live_pages();
+    actor.fault(Lane::Upload, Fault::Bug, ts(T0 + 10));
+    let now = boot_again(&mut rig, &mut actor, T0 + 10);
+    rig.settle(&mut actor, now + 1);
+    assert!(actor.take_live_pages().is_some());
+}

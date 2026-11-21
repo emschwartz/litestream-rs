@@ -13,6 +13,7 @@ use lsr_ltx::{Timestamp, Txid};
 use super::Actor;
 use crate::fault::{HaltCause, Next, PersistentCause};
 use crate::maintain::{MaintainState, RetentionMode};
+use crate::verify::LivePages;
 
 /// What the actor is doing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -279,6 +280,53 @@ impl Gate {
         match self {
             Self::Until(at) if at <= now => Self::Open,
             Self::Until(_) | Self::Open | Self::NextWrite => self,
+        }
+    }
+}
+
+/// The live database's pages a scheduled verify compares a restore with:
+/// asked for, read, taken. One value, so a request cannot be forgotten while
+/// the pages it was answered with are dropped.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum Live {
+    /// Nobody asked.
+    Idle,
+    /// Asked for; the next sync tick with the uploads caught up reads them.
+    Wanted,
+    /// Read, and not yet taken.
+    Read(LivePages),
+}
+
+impl Live {
+    /// Asks for the pages; pages already read and not taken are read again.
+    pub(super) fn ask(&mut self) {
+        *self = Self::Wanted;
+    }
+
+    pub(super) const fn wanted(&self) -> bool {
+        match self {
+            Self::Wanted => true,
+            Self::Idle | Self::Read(_) => false,
+        }
+    }
+
+    /// The pages, once: taken, nobody is asking any more.
+    pub(super) fn take(&mut self) -> Option<LivePages> {
+        match std::mem::replace(self, Self::Idle) {
+            Self::Read(live) => Some(live),
+            asked @ (Self::Idle | Self::Wanted) => {
+                *self = asked;
+                None
+            }
+        }
+    }
+
+    /// What a rebuilt engine starts with: pages read and not yet taken were
+    /// read by the engine being replaced, so they are asked for again.
+    pub(super) const fn rebuilt(&self) -> Self {
+        match self {
+            Self::Idle => Self::Idle,
+            Self::Wanted | Self::Read(_) => Self::Wanted,
         }
     }
 }
