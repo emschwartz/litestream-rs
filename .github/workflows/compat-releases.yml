@@ -41,12 +41,9 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest,just
-      - uses: actions/setup-go@v6
+      - uses: ./.github/actions/go-compat
         with:
-          go-version: stable
-      # The Go VFS test builds a small C application against the SQLite headers.
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsqlite3-dev
-      - run: just upstream
+          cache: "false"
       - run: just compat-live "$NAME"
         env:
           NAME: ${{ matrix.name }}
@@ -78,15 +75,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest,just
-      - uses: actions/setup-go@v6
-        with:
-          go-version: stable
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsqlite3-dev
-      - run: just upstream
-      - uses: actions/cache@v4
-        with:
-          path: .upstream/bin
-          key: go-bin-${{ runner.os }}-${{ hashFiles('scripts/build-go-litestream.sh') }}-v0.5.0-v0.5.15-v0.5.16-v0.5.18-041a8c3
+      - uses: ./.github/actions/go-compat
       # The input goes through the environment and is checked to be a number; never shell text.
       - id: seed
         env:

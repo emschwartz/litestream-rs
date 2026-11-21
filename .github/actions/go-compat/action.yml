@@ -1,0 +1,25 @@
+name: go-compat
+description: Go, the SQLite headers and the pinned upstream sources the compat tests build against. Run after just is installed.
+inputs:
+  cache:
+    description: Cache .upstream/bin (the pinned Go builds). Off where a job builds only a few names.
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@v6
+      with:
+        go-version: stable
+    # The Go VFS test builds a small C application against the SQLite headers, and the build
+    # script needs them for the VFS extensions on a cache miss.
+    - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsqlite3-dev
+      shell: bash
+    - run: just upstream
+      shell: bash
+    # The key covers what decides the binaries: the build script, the pinned upstream commit
+    # (fetch-upstream.sh) and the fixtures, whose directories name the pinned Go versions.
+    - if: inputs.cache == 'true'
+      uses: actions/cache@v4
+      with:
+        path: .upstream/bin
+        key: go-bin-${{ runner.os }}-${{ hashFiles('scripts/build-go-litestream.sh', 'scripts/fetch-upstream.sh', 'crates/compat/fixtures/*/*/manifest.json') }}

@@ -16,6 +16,7 @@
 set -eu
 cd "$(dirname "$0")/.."
 root=$(pwd)
+repo=$root
 # A worktree has no .upstream of its own; the main checkout's is shared.
 if [ ! -d "$root/.upstream" ]; then
     common=$(git rev-parse --path-format=absolute --git-common-dir)
@@ -24,9 +25,10 @@ fi
 src="$root/.upstream/litestream"
 out="$root/.upstream/bin"
 [ -d "$src/.git" ] || { echo "run 'just upstream' first" >&2; exit 1; }
-# The pinned set: the tags the committed fixtures cover, plus the pinned HEAD the research
-# read, named by its short commit so the binary name says what it is.
-requested="${*:-v0.5.0 v0.5.15 v0.5.16 v0.5.18 041a8c3}"
+# The pinned set is the committed fixture directories (crates/compat/fixtures/<name>): the tags
+# they cover plus the pinned HEAD the research read, named by its short commit so the binary
+# name says what it is. The compat crate's fixtures test keeps them equal to `GoVersion::ALL`.
+requested="${*:-$(ls "$repo/crates/compat/fixtures")}"
 versions=""
 for v in $requested; do
     case $v in
