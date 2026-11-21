@@ -151,6 +151,8 @@ test-tigris:
 # thousand requests; the test deletes its run prefix, failed or not. Go's AWS SDK
 # refuses AWS_CA_BUNDLE with litestream's own HTTP client, so it is unset; Go reads
 # SSL_CERT_FILE for the same roots. Release build, so the elapsed times mean something.
+# LSR_TIGRIS_PAGE_SIZE, LSR_TIGRIS_GROW_MIB and LSR_TIGRIS_MIN_FILES make the run larger
+# (crates/cli/tests/tigris.rs); unset, it is the few-minute run.
 tigris-restore:
     ./scripts/build-go-litestream.sh v0.5.18
     env -u AWS_CA_BUNDLE ./scripts/tigris.sh cargo nextest run --release -p lsr-cli --test tigris --run-ignored only --no-capture --locked

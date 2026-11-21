@@ -14,6 +14,11 @@
 //! compacted file is refused by Rust (`AsOfInsideFile`, by design) and compared
 //! through the chain's own end, as `crates/compat/tests/matrix.rs` does.
 //!
+//! The run's size comes from the environment (see [`Size`]): by default a 4096-byte-page
+//! database of about 10 MB; `LSR_TIGRIS_PAGE_SIZE=16384 LSR_TIGRIS_GROW_MIB=4608 just
+//! tigris-restore` first grows the database past SQLite's lock page and 4 GiB with
+//! compressible blobs, so the replica stays small while restores write gigabytes.
+//!
 //! The test is ignored: the recipe supplies credentials and one run prefix, and
 //! everything is deleted at the end (also when the test fails), then the prefix
 //! is listed again and must be empty. Mismatches are collected and asserted only
@@ -63,6 +68,54 @@ mod tigris {
     const SHAPE_EVERY: u32 = 20;
     const MAX_STEPS: u32 = 4000;
     const CATCH_UP: Duration = Duration::from_secs(60);
+    /// A grown database's commits can be a whole-file VACUUM; Go needs minutes for one.
+    const CATCH_UP_GROWN: Duration = Duration::from_secs(900);
+    /// Bytes per growth commit: one compressible blob, so the replica stays small.
+    const GROW_STEP: u64 = 64 << 20;
+
+    /// How big the run is, from the environment, so the default stays the
+    /// few-minute run: `LSR_TIGRIS_PAGE_SIZE` (default 4096),
+    /// `LSR_TIGRIS_GROW_MIB` (grow the database past this many MiB after the
+    /// initial load, before the steady mix; default 0, no growth) and
+    /// `LSR_TIGRIS_MIN_FILES` (default [`MIN_FILES`]).
+    #[derive(Debug, Clone, Copy)]
+    struct Size {
+        page_size: u32,
+        grow_bytes: u64,
+        min_files: usize,
+    }
+
+    fn number<T: std::str::FromStr>(name: &str, default: T) -> T {
+        match std::env::var(name) {
+            Ok(s) => s
+                .parse()
+                .unwrap_or_else(|_| panic!("{name}={s} is not a number")),
+            Err(_) => default,
+        }
+    }
+
+    impl Size {
+        fn from_env() -> Self {
+            Self {
+                page_size: number("LSR_TIGRIS_PAGE_SIZE", 4096),
+                grow_bytes: number::<u64>("LSR_TIGRIS_GROW_MIB", 0) << 20,
+                min_files: number("LSR_TIGRIS_MIN_FILES", MIN_FILES),
+            }
+        }
+
+        fn catch_up(self) -> Duration {
+            if self.grow_bytes == 0 {
+                CATCH_UP
+            } else {
+                CATCH_UP_GROWN
+            }
+        }
+
+        /// Room for the steps a larger file count needs (about 1.5 commits per file).
+        fn max_steps(self) -> u32 {
+            MAX_STEPS.max(u32::try_from(self.min_files * 3).unwrap_or(u32::MAX))
+        }
+    }
 
     fn var(name: &str) -> String {
         std::env::var(name).unwrap_or_else(|_| panic!("{name} is not set: run just tigris-restore"))
@@ -284,6 +337,7 @@ dbs:
         /// Wall-clock instants between commits, for the as-of targets.
         instants: Vec<i64>,
         steps: u32,
+        catch_up: Duration,
     }
 
     impl Live {
@@ -292,8 +346,14 @@ dbs:
                 Some(step) => self.wl.apply(step).expect("step"),
                 None => self.wl.touch().expect("touch"),
             }
-            let Self { wl, rep, db, .. } = self;
-            wait_until("the bucket to catch up with the WAL", CATCH_UP, || {
+            let Self {
+                wl,
+                rep,
+                db,
+                catch_up,
+                ..
+            } = self;
+            wait_until("the bucket to catch up with the WAL", *catch_up, || {
                 rep.ensure_running()?;
                 Ok(caught_up(store, wl, db))
             })
@@ -316,7 +376,7 @@ dbs:
     }
 
     /// Files per level, and whether the replica has the shape the run wants.
-    fn shape<S: ObjectStore>(store: &S) -> ([usize; 10], bool) {
+    fn shape<S: ObjectStore>(store: &S, min_files: usize) -> ([usize; 10], bool) {
         let inventory = block_on(Inventory::load(store)).expect("inventory");
         let counts = Level::ALL.map(|level| inventory.level(level).len());
         let mut snapshots: Vec<u64> = inventory
@@ -326,18 +386,18 @@ dbs:
             .collect();
         snapshots.dedup();
         let total: usize = counts.iter().sum();
-        let ok = total >= MIN_FILES && counts[..4].iter().all(|&n| n > 0) && snapshots.len() >= 3;
+        let ok = total >= min_files && counts[..4].iter().all(|&n| n > 0) && snapshots.len() >= 3;
         (counts, ok)
     }
 
     /// Runs Go and the workload until the bucket holds the wanted shape; returns
     /// the live database's digest after Go stopped and a final checkpoint.
-    fn generate(b: &Bucket, work: &Path) -> (PathBuf, PathBuf, Vec<i64>, PageDigest) {
+    fn generate(b: &Bucket, work: &Path, size: Size) -> (PathBuf, PathBuf, Vec<i64>, PageDigest) {
         let (store, _) = b.store();
         let (db, config) = (work.join("app.db"), work.join("litestream.yml"));
         b.write_go_config(&config, &db);
         let before = real_now_ms().expect("clock");
-        let wl = Workload::create(&db, 4096, 0x8_7e57).expect("workload");
+        let wl = Workload::create(&db, size.page_size, 0x8_7e57).expect("workload");
         let go = go_binary(GoVersion::V0_5_18).expect("just tigris-restore builds Go v0.5.18");
         let rep = Replicator::start(&go, &config, &work.join("go.log")).expect("replicate");
         let mut live = Live {
@@ -346,11 +406,13 @@ dbs:
             db,
             instants: vec![before],
             steps: 0,
+            catch_up: size.catch_up(),
         };
         live.commit(&store, None);
         for _ in 0..BULK_TXNS {
             live.commit(&store, Some(Step::Insert(1000)));
         }
+        grow(&mut live, &store, size);
         let mut i = 0;
         loop {
             for step in steady(i) {
@@ -359,13 +421,17 @@ dbs:
             i += 1;
             if i % SHAPE_EVERY == 0 {
                 live.instants.push(real_now_ms().expect("clock"));
-                let (counts, ok) = shape(&store);
+                let (counts, ok) = shape(&store, size.min_files);
                 eprintln!("RUN step {i}: files per level {counts:?}");
                 if ok && i > VACUUM_AT {
                     break;
                 }
             }
-            assert!(i < MAX_STEPS, "no shape after {MAX_STEPS} steps");
+            assert!(
+                i < size.max_steps(),
+                "no shape after {} steps",
+                size.max_steps()
+            );
         }
         live.wl.settle().expect("settle");
         live.commit(&store, None);
@@ -376,6 +442,7 @@ dbs:
             db,
             instants,
             steps,
+            ..
         } = live;
         rep.stop().expect("stop Go");
         drop(wl);
@@ -386,6 +453,19 @@ dbs:
         let digest = hash_pages(&db).expect("hash the live database");
         eprintln!("RUN {steps} commits; {} pages live", digest.page_count);
         (config, db, instants, digest)
+    }
+
+    /// Commits compressible blobs until the database file passes `size.grow_bytes`.
+    fn grow<S: ObjectStore>(live: &mut Live, store: &S, size: Size) {
+        let page = u64::from(size.page_size);
+        let pages = u32::try_from(GROW_STEP / page).expect("pages per step");
+        while u64::from(live.wl.page_count().expect("page count")) * page < size.grow_bytes {
+            live.commit(store, Some(Step::Blob(pages)));
+            if live.steps.is_multiple_of(16) {
+                let mib = (u64::from(live.wl.page_count().expect("page count")) * page) >> 20;
+                eprintln!("RUN grown to {mib} MiB");
+            }
+        }
     }
 
     /// How one target came out.
@@ -484,6 +564,17 @@ dbs:
                 .as_ref()
                 .map_or((0, 0), |r| (r.files(), r.bytes_read()));
             let verdict = self.verdict(n, target, &rust, &cli, &go, [&rust_out, &cli_out, &go_out]);
+            // A grown run's outputs are gigabytes each; compared, they are not needed again,
+            // except Latest's Rust output, which the caller compares with the live database.
+            for who in ["rust", "lsr", "go", "lsr-chain"] {
+                if n == 0 && who == "rust" {
+                    continue;
+                }
+                let dir = self.work.join(format!("t{n}-{who}"));
+                if dir.exists() {
+                    fs::remove_dir_all(&dir).expect("remove a compared output");
+                }
+            }
             Row {
                 label: label.to_owned(),
                 target,
@@ -678,7 +769,9 @@ dbs:
         let b = bucket();
         let work = tempfile::tempdir().expect("tempdir");
         let _cleanup = Cleanup(&b);
-        let (config, db, instants, live) = generate(&b, work.path());
+        let size = Size::from_env();
+        eprintln!("SIZE {size:?}");
+        let (config, db, instants, live) = generate(&b, work.path(), size);
         let (store, _) = b.store();
         let inventory = block_on(Inventory::load(&store)).expect("inventory");
         let per_level = Level::ALL.map(|l| inventory.level(l).len());
