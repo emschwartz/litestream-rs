@@ -566,7 +566,7 @@
 
 ["litestream/db_killed_writer_test.go"]
 "TestDB_ClosePreservesWALLocks" = { counterpart = ["lsr-sqlite::descriptors::a_sync_and_checkpoint_cycle_opens_and_closes_no_descriptor_on_the_database_or_shm", "lsr-sqlite::descriptors::closing_a_descriptor_on_shm_drops_the_locks_sqlite_holds"] }
-"TestDB_WriterKilledBeforeWALIndexUpdate" = { missing = "A writer process SIGKILLed after writing and syncing a commit's WAL frames but before updating the wal-index: its transaction never appears in any LTX file, and the next writer's frames over the same slots replicate correctly (the real-SQLite fault suite, not built yet)." }
+"TestDB_WriterKilledBeforeWALIndexUpdate" = { counterpart = "lsr-sqlite::kill::a_writer_killed_before_the_wal_index_update_is_never_replicated" }
 "TestDB_WriterKilledBeforeWALIndexUpdate_UnusableHeader" = { counterpart = "lsr-sqlite::shm::tests::header_checks_refuse_what_sqlite_refuses" }
 
 ["litestream/db_shutdown_test.go"]
@@ -866,7 +866,7 @@
 "TestReplica_CalcRestoreTarget/TimestampBeforeAllFiles" = { counterpart = "lsr-core::plan::tests::without_an_eligible_snapshot_the_outcome_says_so" }
 "TestReplica_CalcRestoreTarget/TimestampInSnapshotRange" = { counterpart = "lsr-core::plan::tests::a_snapshot_can_straddle_the_instant_too" }
 "TestReplica_ContextCancellationNoLogs" = { reason = "Go-only: context.Context cancellation. The Rust core is sans-IO and advances one tick at a time (docs/PLAN.md section 2, goal 5); there is no context to cancel, and shutdown is final_sync with a deadline." }
-"TestReplica_RestoreAndReplicateAfterDataLoss" = { missing = "Restore a replica into a fresh database, replicate new writes to the same prefix, and a second restore holds them (Go issue #781). Rust's boot sees a replica ahead of a new local WAL; what it does there (snapshot or foreign-writer stop) is untested against a real database." }
+"TestReplica_RestoreAndReplicateAfterDataLoss" = { counterpart = "lsr-sqlite::faults::a_restore_after_data_loss_replicates_into_the_same_replica" }
 "TestReplica_RestoreReplanBounded" = { counterpart = "lsr-core::restore::tests::files_vanishing_on_every_attempt_are_unstable" }
 "TestReplica_RestoreReplanPastTarget" = { counterpart = ["lsr-core::restore::tests::a_file_deleted_between_plan_and_read_is_replanned_once", "lsr-core::plan::tests::a_target_inside_a_compacted_file_names_the_file"] }
 "TestReplica_RestoreReplansDeletedFile" = { counterpart = "lsr-core::restore::tests::a_file_deleted_between_plan_and_read_is_replanned_once" }
@@ -1199,7 +1199,7 @@
 "TestStore_ValidationMonitor/RunsPeriodically" = { missing = "A periodic verify of the replica on a configured interval, off unless configured (Go's validation-interval). docs/PLAN.md section 7 makes scheduled verify-restores a v1 requirement; lsr-core verify exists, the schedule does not." }
 
 ["litestream/tests/integration/boundary_test.go"]
-"Test1GBBoundary" = { missing = "A real SQLite database grown past 1 GiB (the lock page at 16 KiB pages) replicates and restores page-identical, the lock page never in a file (the big real-SQLite tests, not built yet)." }
+"Test1GBBoundary" = { counterpart = "lsr-sqlite::big::a_16k_page_database_past_1_gib_crosses_the_lock_page" }
 "TestLockPageWithDifferentPageSizes" = { counterpart = ["lsr-core::sync::tests::the_lock_page_is_never_planned_even_when_the_database_crosses_it", "lsr-ltx::order::tests::snapshot_crosses_the_lock_page_at_every_size", "lsr-core::restore::tests::the_lock_page_is_never_written_and_reads_as_zeros"] }
 
 ["litestream/tests/integration/compatibility_test.go"]
@@ -1219,7 +1219,7 @@
 
 ["litestream/tests/integration/concurrent_test.go"]
 "TestBusyTimeout" = { counterpart = ["lsr-core::checkpoint::tests::a_busy_passive_reports_busy", "lsr-compat::live_source::the_barrier_waits_for_no_one"] }
-"TestConcurrentOperations" = { missing = "Several writer connections commit concurrently into a real database under replication, with outside checkpoints; a restore at every acknowledged txid matches (the real-SQLite fault suite, not built yet)." }
+"TestConcurrentOperations" = { counterpart = "lsr-sqlite::faults::concurrent_writers_and_outside_checkpoints_replicate" }
 "TestRapidCheckpoints" = { counterpart = "lsr-compat::live_matches_sim::outside_checkpoints_and_restarts" }
 "TestWALGrowth" = { counterpart = ["lsr-core::sync::tests::one_oversized_transaction_makes_one_file", "lsr-core::sync::tests::a_cap_stops_on_the_first_commit_that_reaches_it"] }
 
@@ -1271,7 +1271,7 @@
 "TestRestore_S3ConnectionDrop" = { counterpart = ["lsr-store-s3::faults::cases::a_truncated_get_is_transient_never_a_short_read", "lsr-store-s3::faults::cases::connection_reset_is_transient_and_tls_failure_is_auth"] }
 
 ["litestream/tests/integration/scenario_test.go"]
-"TestDatabaseDeletion" = { missing = "The database file deleted (with its WAL) while replicating: the replicator reports a typed fault in health() and the replica keeps its history (lsr-sim covers an unlinked WAL, wal_unlinked_mid_run, not a deleted database)." }
+"TestDatabaseDeletion" = { counterpart = ["lsr-sqlite::faults::a_deleted_database_halts_and_the_replica_keeps_its_history", "lsr-sqlite::faults::a_wal_deleted_by_another_process_while_pinned_halts_the_engine"] }
 "TestDatabaseIntegrity" = { counterpart = "lsr-compat::live_source::live_sync_chain_restores" }
 "TestFreshStart" = { counterpart = "lsr-core::recover::tests::rule_1_no_tip_is_a_first_sync" }
 
