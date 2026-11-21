@@ -33,11 +33,15 @@ pub enum Phase {
 
 impl Phase {
     /// The phase after `begin_shutdown`. A halt stays a halt, and a second
-    /// shutdown keeps the first deadline.
-    pub(super) const fn drain(self, deadline: Timestamp) -> Self {
+    /// shutdown keeps the earlier of the two deadlines: a later call can
+    /// shorten a drain, never lengthen it.
+    pub(super) fn drain(self, deadline: Timestamp) -> Self {
         match self {
             Self::Boot | Self::Running => Self::Draining { deadline },
-            Self::Draining { .. } | Self::Halted(_) => self,
+            Self::Draining { deadline: was } => Self::Draining {
+                deadline: was.min(deadline),
+            },
+            Self::Halted(_) => self,
         }
     }
 

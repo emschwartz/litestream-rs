@@ -435,7 +435,14 @@ impl Runner {
                 }
                 (Step::Halted(cause), None)
             }
-            TickEnd::Done(Tick::Drained) => (Step::Drained, None),
+            TickEnd::Done(Tick::Drained { .. }) => (Step::Drained, None),
+            TickEnd::Done(Tick::DeadlineReached(_)) => {
+                let cause = HaltCause::Shutdown;
+                if self.record {
+                    self.report.seen.push(Seen::Halt(cause));
+                }
+                (Step::Halted(cause), None)
+            }
             TickEnd::Crashed { polls, kind, .. } => {
                 self.last_polls = polls.max(1);
                 self.crashed(kind);
@@ -551,7 +558,8 @@ impl Runner {
     /// A lane the scenario's fault keeps degraded may outlast the grace: the
     /// drain then ends at its deadline, as a halt for that fault would end it.
     fn drain(&mut self) -> Result<(), Violation> {
-        self.actor.begin_shutdown(self.now());
+        self.actor
+            .begin_shutdown(self.actor.shutdown_deadline(self.now()));
         let mut degraded = false;
         for _ in 0..DRAIN_TICKS {
             match self.step(None)?.0 {
@@ -559,7 +567,8 @@ impl Runner {
                 Step::Halted(HaltCause::Shutdown) if degraded => return Ok(()),
                 Step::Halted(HaltCause::Shutdown) => {
                     self.reboot();
-                    self.actor.begin_shutdown(self.now());
+                    self.actor
+                        .begin_shutdown(self.actor.shutdown_deadline(self.now()));
                 }
                 Step::Degraded(cause) => {
                     self.degraded_expected(cause)?;

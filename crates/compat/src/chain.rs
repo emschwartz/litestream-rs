@@ -380,7 +380,7 @@ impl Chain {
                 Tick::Halted(cause) => {
                     return Err(CompatError::Fixture(format!("the actor halted: {cause:?}")));
                 }
-                Tick::Drained => {
+                Tick::Drained { .. } | Tick::DeadlineReached(_) => {
                     return Err(CompatError::Fixture("the actor drained unasked".to_owned()));
                 }
             }
@@ -539,8 +539,10 @@ impl Chain {
     /// # Errors
     /// [`CompatError::Fixture`] when the drain halts or does not finish.
     pub fn finish(mut self) -> Result<Written, CompatError> {
-        self.actor
-            .begin_shutdown(Timestamp::from_unix_millis(self.clock));
+        let deadline = self
+            .actor
+            .shutdown_deadline(Timestamp::from_unix_millis(self.clock));
+        self.actor.begin_shutdown(deadline);
         for _ in 0..MAX_TICKS {
             let (mut wal, mut db, mut ck) =
                 (self.live.clone(), self.live.clone(), self.live.clone());
@@ -553,7 +555,7 @@ impl Chain {
             };
             let now = Timestamp::from_unix_millis(self.clock);
             match block_on(self.actor.tick(env, now)) {
-                Tick::Drained => {
+                Tick::Drained { .. } => {
                     self.archive_new()?;
                     let Self {
                         site,
@@ -572,6 +574,11 @@ impl Chain {
                 Tick::Ran { event, .. } => self.events.push(event),
                 Tick::Halted(cause) => {
                     return Err(CompatError::Fixture(format!("the drain halted: {cause:?}")));
+                }
+                Tick::DeadlineReached(left) => {
+                    return Err(CompatError::Fixture(format!(
+                        "the drain ran out of time: {left:?}"
+                    )));
                 }
             }
         }

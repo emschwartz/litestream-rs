@@ -301,7 +301,10 @@ fn snapshots_since(rig: &Rig<Sqlite>, from: usize) -> Vec<Option<SnapshotCause>>
                 event: Event::Booted { cause },
                 ..
             } => Some(*cause),
-            Tick::Ran { .. } | Tick::Halted(_) | Tick::Drained => None,
+            Tick::Ran { .. }
+            | Tick::Halted(_)
+            | Tick::Drained { .. }
+            | Tick::DeadlineReached(_) => None,
         })
         .collect()
 }

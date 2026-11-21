@@ -50,6 +50,19 @@ struct Outcome {
     needed_a_write: bool,
 }
 
+/// The snapshot cause a boot named, for a tick that is a boot.
+fn boot_cause(tick: &Tick) -> Option<Option<SnapshotCause>> {
+    match tick {
+        Tick::Ran {
+            event: Event::Booted { cause },
+            ..
+        } => Some(*cause),
+        Tick::Ran { .. } | Tick::Halted(_) | Tick::Drained { .. } | Tick::DeadlineReached(_) => {
+            None
+        }
+    }
+}
+
 /// The outcome of a loss at each WAL sync, keyed by sync number. `strict`: the boot must settle
 /// before the host writes again.
 fn each_wal_sync<B: Backend>(strict: bool) -> BTreeMap<u32, Outcome> {
@@ -99,13 +112,7 @@ fn each_wal_sync<B: Backend>(strict: bool) -> BTreeMap<u32, Outcome> {
             .ticks()
             .iter()
             .skip(boots)
-            .find_map(|tick| match tick {
-                Tick::Ran {
-                    event: Event::Booted { cause },
-                    ..
-                } => Some(*cause),
-                Tick::Ran { .. } | Tick::Halted(_) | Tick::Drained => None,
-            })
+            .find_map(boot_cause)
             .unwrap_or_else(|| panic!("{at}: booted"));
         assert!(
             matches!(

@@ -70,9 +70,12 @@ fn an_idle_database_under_a_reset_index_settles_with_no_checkpoint() {
 fn a_drain_under_a_reset_index_finishes() {
     let (mut rig, mut actor) = caught_up();
     rig.wal.script_committed(Some(reset(&rig.wal)));
-    actor.begin_shutdown(ts(T0 + 10));
+    actor.begin_shutdown(actor.shutdown_deadline(ts(T0 + 10)));
     let seen = rig.follow(&mut actor, T0 + 10, 20);
-    assert_eq!(seen.last(), Some(&Tick::Drained), "{seen:?}");
+    assert!(
+        matches!(seen.last(), Some(Tick::Drained { .. })),
+        "{seen:?}"
+    );
 }
 
 #[test]

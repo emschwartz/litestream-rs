@@ -37,6 +37,18 @@
 //! response is to continue, rebuild the actor and boot again after the wait;
 //! a replica that went backwards is listed again. Under `Stop` the actor
 //! halts, as every persistent fault did before.
+//!
+//! A drain ends in one of two ticks: [`Tick::Drained`] with the newest
+//! transaction the replica holds, or, at its deadline, [`Tick::DeadlineReached`]
+//! with what was left ([`Unfinished`]); every tick after that one is
+//! `Halted(Shutdown)`. The wal-index gives a frame offset, not a transaction
+//! id, so what is left is counted in WAL bytes and staged files.
+//!
+//! The actor also counts checkpoints it did not run: a wal-index whose
+//! backfill count grew within one generation, or whose generation changed
+//! when no checkpoint of its own had emptied the WAL, was checkpointed by
+//! someone else ([`Actor::foreign_checkpoints`]). The host promised not to;
+//! the count is how a broken promise shows.
 
 mod state;
 
@@ -44,7 +56,7 @@ use std::num::NonZeroU32;
 use std::time::Duration;
 
 use lsr_ltx::{PageSize, Timestamp, Txid};
-use lsr_wal::{CommittedEnd, OpenError, WalReader};
+use lsr_wal::{CommittedEnd, OpenError, Salts, WalReader};
 
 pub use state::{Degraded, Lane, Phase};
 use state::{Gate, Lanes, Maintain};
@@ -65,7 +77,7 @@ use crate::maintain::{
     run_compact, run_delete,
 };
 use crate::pages::{PageTable, seeded};
-use crate::position::{Continuity, Position, SyncedThrough};
+use crate::position::{Continuity, Position, SyncedThrough, WalFileLen};
 use crate::recover::{
     FrameCheck, Miss, Probes, Recovered, Tip, TipView, WalView, read_header, recover,
 };
@@ -108,7 +120,9 @@ pub struct ActorConfig {
     /// The first retry wait; each further failure doubles it, up to
     /// [`crate::MAX_BACKOFF`] (Go's sync interval, `replica.go:440-457`).
     pub retry_interval: Duration,
-    /// How long a drain may take before work left is a halt.
+    /// How long a drain may take when the caller has no deadline of its own
+    /// ([`Actor::shutdown_deadline`]); [`Actor::begin_shutdown`] takes the
+    /// deadline itself.
     pub shutdown_grace: Duration,
     /// What each persistent failure does: keep trying, or stop.
     pub responses: Responses,
@@ -207,7 +221,41 @@ pub enum Tick {
     /// Stopped; every later tick returns this.
     Halted(HaltCause),
     /// A drain finished: everything committed is on the replica.
-    Drained,
+    Drained {
+        /// The newest transaction the replica holds; `None` when it holds
+        /// none (nothing was ever committed).
+        txid: Option<Txid>,
+    },
+    /// A drain's deadline passed with work left. The actor is halted with
+    /// [`HaltCause::Shutdown`]; every later tick returns that.
+    DeadlineReached(Unfinished),
+}
+
+/// What a drain left when its deadline passed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Unfinished {
+    /// Committed WAL bytes past the synced position: the whole committed WAL
+    /// when the position is in another generation or unknown.
+    pub unsynced_wal_bytes: u64,
+    /// Staged level-0 files the replica was not confirmed to hold.
+    pub staged_not_uploaded: u32,
+}
+
+/// The wal-index's backfill count as last read, to tell a checkpoint this
+/// actor did not run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Backfill {
+    salts: Salts,
+    frames: u32,
+}
+
+impl Backfill {
+    const fn of(committed: CommittedRead) -> Self {
+        Self {
+            salts: committed.end().salts(),
+            frames: committed.backfilled(),
+        }
+    }
 }
 
 /// What a sync step left.
@@ -260,6 +308,13 @@ pub struct Actor {
     /// A lane is degraded and retention holds its pin (which is `None` when
     /// the replica held nothing as the degradation began).
     pinned: bool,
+    /// The last wal-index backfill read, for counting foreign checkpoints.
+    backfill: Option<Backfill>,
+    /// This actor's own checkpoint left the WAL fully backfilled, so the next
+    /// generation change is its own.
+    restart_owed: bool,
+    /// Checkpoints run by someone else.
+    foreign_checkpoints: u64,
 }
 
 fn later(at: Timestamp, wait: Duration) -> Timestamp {
@@ -377,6 +432,9 @@ impl Actor {
             last: None,
             clamp_reported: false,
             pinned: false,
+            backfill: None,
+            restart_owed: false,
+            foreign_checkpoints: 0,
         }
     }
 
@@ -399,15 +457,62 @@ impl Actor {
         self.pages.accept();
     }
 
+    /// The newest transaction staged locally.
+    #[must_use]
+    pub const fn staged(&self) -> Option<Txid> {
+        self.staged
+    }
+
+    /// The newest transaction the replica was confirmed to hold.
+    #[must_use]
+    pub const fn replicated(&self) -> Option<Txid> {
+        self.upload.confirmed()
+    }
+
+    /// Why the next sync is a snapshot, when it is one.
+    #[must_use]
+    pub const fn pending_snapshot(&self) -> Option<SnapshotCause> {
+        self.pending
+    }
+
+    /// Checkpoints someone else ran on the database since this actor began.
+    #[must_use]
+    pub const fn foreign_checkpoints(&self) -> u64 {
+        self.foreign_checkpoints
+    }
+
+    /// Committed WAL bytes past the synced position: all of `committed` when
+    /// the position is unknown or in another generation.
+    #[must_use]
+    pub fn unsynced_bytes(&self, committed: CommittedRead) -> u64 {
+        let end = committed.end();
+        let total = end.offset().get();
+        match self.position {
+            Some(position) if position.cursor().salts() == end.salts() => {
+                total.saturating_sub(position.synced().offset().get())
+            }
+            Some(_) | None => total,
+        }
+    }
+
     /// Makes the next sync a snapshot (an operator asked). A cause already
     /// pending is kept.
     pub fn request_snapshot(&mut self) {
         self.pending.get_or_insert(SnapshotCause::OperatorRequested);
     }
 
-    /// Starts a drain that must finish by `now` plus the shutdown grace.
-    pub fn begin_shutdown(&mut self, now: Timestamp) {
-        self.phase = self.phase.drain(later(now, self.cfg.shutdown_grace));
+    /// The deadline of a drain begun at `now` by a caller with none of its
+    /// own: `now` plus the configured shutdown grace.
+    #[must_use]
+    pub fn shutdown_deadline(&self, now: Timestamp) -> Timestamp {
+        later(now, self.cfg.shutdown_grace)
+    }
+
+    /// Starts a drain that must finish by `deadline`. A drain already begun
+    /// keeps the earlier of the two deadlines, so a second call can shorten
+    /// it and never lengthen it.
+    pub fn begin_shutdown(&mut self, deadline: Timestamp) {
+        self.phase = self.phase.drain(deadline);
     }
 
     /// Runs at most one unit of work.
@@ -444,7 +549,7 @@ impl Actor {
         if let (false, Phase::Draining { deadline }) = (self.booted, self.phase)
             && now >= deadline
         {
-            return self.fault(Lane::Sync, Fault::ShutdownDeadline, now);
+            return self.missed(&mut env, now).await;
         }
         if !self.booted {
             return self.boot(&mut env, now).await;
@@ -582,6 +687,9 @@ impl Actor {
         fresh.clamp_reported = self.clamp_reported;
         fresh.pinned = self.pinned;
         fresh.maintain.state.set_pin(self.maintain.state.pin());
+        fresh.backfill = self.backfill;
+        fresh.restart_owed = self.restart_owed;
+        fresh.foreign_checkpoints = self.foreign_checkpoints;
         *self = fresh;
     }
 
@@ -696,9 +804,9 @@ impl Actor {
     ) -> Tick {
         if now >= deadline {
             return if self.settled(env.wal) {
-                Tick::Drained
+                self.drained()
             } else {
-                self.fault(Lane::Sync, Fault::ShutdownDeadline, now)
+                self.missed(env, now).await
             };
         }
         if let Some(tick) = self.wal_unit(env, now, false).await {
@@ -708,10 +816,101 @@ impl Actor {
             return tick;
         }
         if self.settled(env.wal) {
-            Tick::Drained
+            self.drained()
         } else {
             self.ran(Event::Idle, now)
         }
+    }
+
+    const fn drained(&self) -> Tick {
+        Tick::Drained {
+            txid: self.upload.confirmed(),
+        }
+    }
+
+    /// The drain's deadline passed with work left: what was left, and the
+    /// halt the deadline's fault routes to.
+    async fn missed<
+        W: WalSource,
+        P: PageSource,
+        C: Checkpointer,
+        L: ObjectStore,
+        R: ObjectStore,
+    >(
+        &mut self,
+        env: &mut Env<'_, W, P, C, L, R>,
+        now: Timestamp,
+    ) -> Tick {
+        let unfinished = self.unfinished(env).await;
+        match self.fault(Lane::Sync, Fault::ShutdownDeadline, now) {
+            Tick::Halted(HaltCause::Shutdown) => Tick::DeadlineReached(unfinished),
+            other @ (Tick::Ran { .. }
+            | Tick::Halted(_)
+            | Tick::Drained { .. }
+            | Tick::DeadlineReached(_)) => other,
+        }
+    }
+
+    /// What is not on the replica. A failed read counts high, never low: the
+    /// WAL file's length for the bytes, every staged transaction past the
+    /// confirmed one for the files.
+    async fn unfinished<
+        W: WalSource,
+        P: PageSource,
+        C: Checkpointer,
+        L: ObjectStore,
+        R: ObjectStore,
+    >(
+        &self,
+        env: &mut Env<'_, W, P, C, L, R>,
+    ) -> Unfinished {
+        let unsynced_wal_bytes = match env.wal.committed() {
+            Ok(committed) => self.unsynced_bytes(committed),
+            Err(_) => env.wal.len().ok().flatten().map_or(0, WalFileLen::bytes),
+        };
+        let confirmed = self.upload.confirmed();
+        let count = match env.staging.list(Level::ZERO, None, PageLimit::MAX).await {
+            Ok(listing) => listing
+                .files
+                .iter()
+                .filter(|info| Some(info.key.range().min()) > confirmed)
+                .count(),
+            Err(_) => {
+                let staged = self.staged.map_or(0, Txid::get);
+                let confirmed = confirmed.map_or(0, Txid::get);
+                usize::try_from(staged.saturating_sub(confirmed)).unwrap_or(usize::MAX)
+            }
+        };
+        Unfinished {
+            unsynced_wal_bytes,
+            staged_not_uploaded: u32::try_from(count).unwrap_or(u32::MAX),
+        }
+    }
+
+    /// Counts a checkpoint this actor did not run, from one wal-index read:
+    /// the backfill count grew within a generation, or the generation changed
+    /// though no checkpoint of this actor's had emptied the WAL.
+    fn note_backfill(&mut self, committed: CommittedRead) {
+        let seen = Backfill::of(committed);
+        if let Some(last) = self.backfill {
+            let foreign = if last.salts == seen.salts {
+                seen.frames > last.frames
+            } else {
+                !std::mem::take(&mut self.restart_owed)
+            };
+            if foreign {
+                self.foreign_checkpoints = self.foreign_checkpoints.saturating_add(1);
+            }
+        }
+        self.backfill = Some(seen);
+    }
+
+    /// After this actor's own checkpoint: the backfill it left is the new
+    /// baseline, and when it emptied the WAL the next generation is its own.
+    fn rebase_backfill<W: WalSource>(&mut self, wal: &mut W) {
+        let read = wal.committed().ok();
+        self.backfill = read.map(Backfill::of);
+        self.restart_owed = read.is_some_and(|read| read.fully_backfilled());
     }
 
     /// Everything committed is staged and everything staged is on the replica.
@@ -778,6 +977,7 @@ impl Actor {
             Ok(committed) => committed,
             Err(err) => return Some(self.fault(Lane::Sync, Fault::from_source(err), now)),
         };
+        self.note_backfill(committed);
         let wants_proof = may_checkpoint && self.checkpoint_decision(now).is_some();
         let quiet = !self.wal_moved(committed) && self.pending.is_none() && !self.more_wal;
         if quiet && !wants_proof {
@@ -983,6 +1183,7 @@ impl Actor {
             now,
         )
         .await;
+        self.rebase_backfill(env.wal);
         let done = match done {
             Ok(done) => done,
             Err(CheckpointFailed { fault, position }) => {

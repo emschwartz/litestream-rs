@@ -31,7 +31,9 @@ mod sync;
 mod upload;
 mod verify;
 
-pub use actor::{Actor, ActorConfig, Degraded, Env, Event, Lane, MaintainedEvent, Phase, Tick};
+pub use actor::{
+    Actor, ActorConfig, Degraded, Env, Event, Lane, MaintainedEvent, Phase, Tick, Unfinished,
+};
 pub use checkpoint::{
     CheckpointConfig, CheckpointFailed, CheckpointOutcome, CheckpointState, Checkpointed, Decision,
     Observed, Why, after_checkpoint, after_sync, checkpoint, decide, next_wake,

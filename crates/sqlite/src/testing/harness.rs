@@ -685,7 +685,8 @@ impl<B: Backend> Rig<B> {
         for _ in 0..SETTLE_TICKS {
             match self.tick()? {
                 Tick::Halted(cause) => return Err(RigError::Halted(cause)),
-                Tick::Drained => return Ok(()),
+                Tick::Drained { .. } => return Ok(()),
+                Tick::DeadlineReached(_) => return Err(RigError::Halted(HaltCause::Shutdown)),
                 Tick::Ran {
                     event: Event::Idle,
                     next,

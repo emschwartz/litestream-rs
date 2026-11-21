@@ -215,7 +215,9 @@ impl Rig {
             let tick = self.tick(actor, now);
             let next = match &tick {
                 Tick::Ran { next, .. } => *next,
-                Tick::Halted(_) | Tick::Drained => Next::OnWalChange,
+                Tick::Halted(_) | Tick::Drained { .. } | Tick::DeadlineReached(_) => {
+                    Next::OnWalChange
+                }
             };
             seen.push(tick);
             match next {
@@ -271,14 +273,14 @@ fn go_like() -> ActorConfig {
 fn event(tick: &Tick) -> Option<&Event> {
     match tick {
         Tick::Ran { event, .. } => Some(event),
-        Tick::Halted(_) | Tick::Drained => None,
+        Tick::Halted(_) | Tick::Drained { .. } | Tick::DeadlineReached(_) => None,
     }
 }
 
 fn next_of(tick: &Tick) -> Option<Next> {
     match tick {
         Tick::Ran { next, .. } => Some(*next),
-        Tick::Halted(_) | Tick::Drained => None,
+        Tick::Halted(_) | Tick::Drained { .. } | Tick::DeadlineReached(_) => None,
     }
 }
 
@@ -628,9 +630,12 @@ fn clock_back_clamped_once() {
 fn drain_finishes_uploads() {
     let (mut rig, mut actor) = caught_up();
     rig.commit(2);
-    actor.begin_shutdown(ts(T0 + 10));
+    actor.begin_shutdown(actor.shutdown_deadline(ts(T0 + 10)));
     let seen = rig.follow(&mut actor, T0 + 10, 20);
-    assert_eq!(seen.last(), Some(&Tick::Drained), "{seen:?}");
+    assert!(
+        matches!(seen.last(), Some(Tick::Drained { txid: Some(_) })),
+        "{seen:?}"
+    );
     assert!(
         !seen
             .iter()
@@ -656,13 +661,109 @@ fn drain_deadline_halts() {
             .inject_failure(StoreOp::Upload, transient(StoreOp::Upload));
     }
     rig.commit(2);
-    actor.begin_shutdown(ts(T0 + 10));
+    actor.begin_shutdown(actor.shutdown_deadline(ts(T0 + 10)));
     let seen = rig.follow(&mut actor, T0 + 10, 50);
+    // Transaction 2 is synced and staged, not uploaded: no WAL bytes left,
+    // one staged file.
     assert_eq!(
         seen.last(),
-        Some(&Tick::Halted(HaltCause::Shutdown)),
+        Some(&Tick::DeadlineReached(Unfinished {
+            unsynced_wal_bytes: 0,
+            staged_not_uploaded: 1,
+        })),
         "{seen:?}"
     );
+    assert_eq!(
+        rig.tick(&mut actor, T0 + 60_000),
+        Tick::Halted(HaltCause::Shutdown)
+    );
+}
+
+/// A zero deadline with a commit not yet synced ends at once, counting the
+/// commit's WAL bytes, and retries nothing (Go's `TestDB_Close_SyncRetry`,
+/// zero timeout).
+#[test]
+fn a_zero_deadline_reports_unsynced_bytes_and_does_no_work() {
+    let (mut rig, mut actor) = caught_up();
+    let before = rig.wal.committed_end().offset().get();
+    rig.commit(2);
+    let after = rig.wal.committed_end().offset().get();
+    let calls = rig.remote.calls();
+    actor.begin_shutdown(ts(T0 + 10));
+    let tick = rig.tick(&mut actor, T0 + 10);
+    assert_eq!(
+        tick,
+        Tick::DeadlineReached(Unfinished {
+            unsynced_wal_bytes: after - before,
+            staged_not_uploaded: 0,
+        })
+    );
+    assert_eq!(rig.remote.calls(), calls);
+}
+
+/// A second shutdown can shorten a drain and never lengthen it.
+#[test]
+fn a_second_shutdown_keeps_the_earlier_deadline() {
+    let (_rig, mut actor) = caught_up();
+    actor.begin_shutdown(ts(T0 + 1_000));
+    actor.begin_shutdown(ts(T0 + 5_000));
+    assert_eq!(
+        actor.phase(),
+        Phase::Draining {
+            deadline: ts(T0 + 1_000)
+        }
+    );
+    actor.begin_shutdown(ts(T0 + 10));
+    assert_eq!(
+        actor.phase(),
+        Phase::Draining {
+            deadline: ts(T0 + 10)
+        }
+    );
+}
+
+/// A backfill the actor did not run is counted; its own checkpoints are not.
+#[test]
+fn a_host_checkpoint_is_counted_and_its_own_is_not() {
+    let (mut rig, mut actor) = caught_up();
+    rig.commit(2);
+    rig.settle(&mut actor, T0 + 10);
+    assert_eq!(actor.foreign_checkpoints(), 0);
+    let frames = rig.wal.committed_end().frame_count();
+    assert!(rig.wal.backfill(frames) > 0);
+    rig.commit(3);
+    rig.settle(&mut actor, T0 + 20);
+    assert_eq!(actor.foreign_checkpoints(), 1);
+    // A restart nobody here asked for is a second one.
+    rig.wal.force_restart();
+    rig.commit(4);
+    rig.settle(&mut actor, T0 + 30);
+    assert_eq!(actor.foreign_checkpoints(), 2);
+}
+
+#[test]
+fn the_actor_s_own_checkpoint_is_not_foreign() {
+    let mut rig = Rig::new();
+    let cfg = ActorConfig {
+        checkpoint: CheckpointConfig {
+            interval: None,
+            min_pages: NonZeroU32::new(1),
+            truncate_pages: None,
+        },
+        ..cfg()
+    };
+    let mut actor = Actor::new(cfg);
+    let mut seen = rig.settle(&mut actor, T0);
+    for n in 2..6 {
+        rig.commit(n);
+        seen.extend(rig.settle(&mut actor, T0 + i64::from(n) * 1_000));
+    }
+    assert!(
+        seen.iter()
+            .any(|t| matches!(event(t), Some(Event::Checkpointed { .. }))),
+        "{seen:?}"
+    );
+    assert_eq!(actor.foreign_checkpoints(), 0, "{seen:?}");
 }
 
 /// A drain whose upload fails a few times retries inside the deadline and
@@ -676,9 +777,13 @@ fn a_drain_retries_a_transient_upload_and_drains() {
             .inject_failure(StoreOp::Upload, transient(StoreOp::Upload));
     }
     rig.commit(2);
-    actor.begin_shutdown(ts(T0 + 10));
+    actor.begin_shutdown(actor.shutdown_deadline(ts(T0 + 10)));
     let seen = rig.follow(&mut actor, T0 + 10, 50);
-    assert_eq!(seen.last(), Some(&Tick::Drained), "{seen:?}");
+    assert_eq!(
+        seen.last(),
+        Some(&Tick::Drained { txid: Txid::new(2) }),
+        "{seen:?}"
+    );
     let retries = seen
         .iter()
         .filter(|t| matches!(event(t), Some(Event::Retrying { .. })))
@@ -702,9 +807,13 @@ fn a_drain_waits_out_a_throttled_upload_and_drains() {
             .inject_failure(StoreOp::Upload, throttled(StoreOp::Upload, 2_000));
     }
     rig.commit(2);
-    actor.begin_shutdown(ts(T0 + 10));
+    actor.begin_shutdown(actor.shutdown_deadline(ts(T0 + 10)));
     let seen = rig.follow(&mut actor, T0 + 10, 50);
-    assert_eq!(seen.last(), Some(&Tick::Drained), "{seen:?}");
+    assert_eq!(
+        seen.last(),
+        Some(&Tick::Drained { txid: Txid::new(2) }),
+        "{seen:?}"
+    );
     let waits: Vec<Timestamp> = seen
         .iter()
         .filter_map(|t| match event(t) {
@@ -964,7 +1073,7 @@ proptest::proptest! {
         };
         actor.maintain.until = maintain.map(at);
         if draining {
-            actor.begin_shutdown(ts(now));
+            actor.begin_shutdown(actor.shutdown_deadline(ts(now)));
         }
         let soonest = held(&actor).into_iter().min();
         match actor.next(ts(now)) {

@@ -352,12 +352,11 @@ fn a_drain_whose_boot_stays_degraded_ends_at_its_deadline() {
     let (mut rig, _) = caught_up();
     resize(&mut rig, big());
     let mut actor = Actor::new(go_like());
-    actor.begin_shutdown(ts(T0 + 10));
+    actor.begin_shutdown(actor.shutdown_deadline(ts(T0 + 10)));
     let seen = rig.follow(&mut actor, T0 + 10, 50);
     assert!(seen.iter().any(|t| degraded(t).is_some()), "{seen:?}");
-    assert_eq!(
-        seen.last(),
-        Some(&Tick::Halted(HaltCause::Shutdown)),
+    assert!(
+        matches!(seen.last(), Some(Tick::DeadlineReached(_))),
         "{seen:?}"
     );
 }
