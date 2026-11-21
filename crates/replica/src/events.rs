@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
-use lsr_core::HaltCause;
+use lsr_core::{HaltCause, HostCheckpoint};
 
 /// Something the replicator did or found.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -19,6 +19,15 @@ pub enum Event {
     /// one seen since the start.
     ForeignCheckpoint {
         /// Every one seen so far.
+        total: u64,
+    },
+    /// The host checkpointed, or its automatic checkpoint is attempting checkpoints that
+    /// cannot run (`Health::host_notice` says what it costs). `total` counts every
+    /// observation since the start.
+    HostCheckpoint {
+        /// What was seen.
+        seen: HostCheckpoint,
+        /// Every observation so far.
         total: u64,
     },
     /// The thread caught a panic. Under `Responses::bug = KeepTrying` the engine is rebuilt

@@ -8,7 +8,10 @@ use std::num::{NonZeroU32, NonZeroU64};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use lsr_core::{ActorConfig, CheckpointConfig, Maintenance, Responses, SyncConfig, UploadConfig};
+use lsr_core::{
+    ActorConfig, CheckpointConfig, Maintenance, Responses, SQLITE_AUTOCHECKPOINT, SyncConfig,
+    UploadConfig,
+};
 
 /// A duration that is never zero.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -98,6 +101,12 @@ pub struct Config {
     pub readers: ReaderTracking,
     /// How long a drop may drain (Go's shutdown sync timeout, 30 s, `db.go:36`).
     pub shutdown_grace: Duration,
+    /// The `wal_autocheckpoint` the host's connections run, in frames, or `None` when every
+    /// one of them sets it to 0 (`app_connection` does). Default: SQLite's own, 1000, since
+    /// the replicator cannot read another connection's setting. It decides nothing; it only
+    /// lets [`crate::Health::host_notice`] infer the host's checkpoint attempts that cannot
+    /// run, which the wal-index alone cannot tell from a host that runs none.
+    pub host_autocheckpoint: Option<NonZeroU32>,
 }
 
 impl Default for Config {
@@ -112,6 +121,7 @@ impl Default for Config {
             responses: Responses::GO_LIKE,
             readers: ReaderTracking::Untracked,
             shutdown_grace: Duration::from_secs(30),
+            host_autocheckpoint: Some(SQLITE_AUTOCHECKPOINT),
         }
     }
 }

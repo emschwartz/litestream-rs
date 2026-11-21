@@ -2,8 +2,16 @@
 //! the outcomes of the first boot ([`Booted`]) and of a stop ([`Stopped`]).
 //!
 //! A snapshot is a copy: reading it takes one lock for as long as a clone, never across I/O.
+//!
+//! The host's own checkpoints are a notice ([`HostNotice`]), never a degraded state: the pin
+//! keeps them from costing the replica anything, and what they cost the host is said in the
+//! notice's text.
 
-use lsr_core::{Degraded, HaltCause, Lane, PersistentCause, SnapshotCause};
+use std::fmt;
+
+use lsr_core::{
+    Degraded, HaltCause, HostCheckpoint, HostCheckpoints, Lane, PersistentCause, SnapshotCause,
+};
 use lsr_ltx::{Timestamp, Txid};
 
 /// What the replicator is doing.
@@ -153,6 +161,9 @@ pub struct Health {
     pub resnapshot: Option<SnapshotCause>,
     /// Checkpoints someone else ran: the host promised not to (PLAN section 6).
     pub foreign_checkpoints: u64,
+    /// What the host's checkpoints did, those that cannot run included; read it as text
+    /// through [`Health::host_notice`].
+    pub host_checkpoints: HostCheckpoints,
     /// Running totals.
     pub counters: Counters,
 }
@@ -171,6 +182,7 @@ impl Health {
             db_bytes: 0,
             resnapshot: None,
             foreign_checkpoints: 0,
+            host_checkpoints: HostCheckpoints::NONE,
             counters: Counters {
                 ticks: 0,
                 syncs: 0,
@@ -207,6 +219,64 @@ impl Health {
     pub fn is_degraded(&self) -> bool {
         self.degraded.iter().any(Option::is_some)
     }
+
+    /// What the host's checkpoints cost, from the newest one seen; `None` while none was.
+    #[must_use]
+    pub const fn host_notice(&self) -> Option<HostNotice> {
+        let host = &self.host_checkpoints;
+        match host.last {
+            None => None,
+            Some(HostCheckpoint::Stalled { frames }) => Some(HostNotice::Stalled { frames }),
+            Some(HostCheckpoint::Backfilled { .. } | HostCheckpoint::Restarted) => {
+                Some(HostNotice::Checkpointing { ran: host.ran() })
+            }
+        }
+    }
+}
+
+/// What the host's checkpoints cost. Not a degraded state: replication stays correct either
+/// way. Its text says what to change in the host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostNotice {
+    /// The host ran checkpoints the replicator did not, `ran` of them so far. They copy only
+    /// frames below the replicator's pin into the database file and never restart the WAL
+    /// under it.
+    Checkpointing {
+        /// Host checkpoints that changed the wal-index.
+        ran: u64,
+    },
+    /// The WAL grew past the host's automatic checkpoint threshold with nothing new copied:
+    /// each host commit runs a checkpoint attempt that does nothing.
+    Stalled {
+        /// Frames in the WAL when it was seen.
+        frames: u32,
+    },
+}
+
+/// What the host changes to stop both: its connections' settings, which a replicator in
+/// another process cannot set.
+const ADVICE: &str = "set wal_autocheckpoint = 0 and SQLITE_FCNTL_PERSIST_WAL on every \
+     connection the host opens (app_connection does both), and tell the replicator \
+     (host_autocheckpoint: None)";
+
+impl fmt::Display for HostNotice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Checkpointing { ran } => write!(
+                f,
+                "the host ran {ran} checkpoint(s) of its own: they stop at the replicator's \
+                 read transaction and cost the replica nothing, but past its automatic \
+                 checkpoint threshold every host commit runs one; {ADVICE}"
+            ),
+            Self::Stalled { frames } => write!(
+                f,
+                "the WAL holds {frames} frames, past the host's automatic checkpoint \
+                 threshold, with nothing new copied into the database: every host commit now \
+                 runs a checkpoint attempt that does nothing until the replicator \
+                 checkpoints, and the WAL keeps growing until then; {ADVICE}"
+            ),
+        }
+    }
 }
 
 impl OpCounters {
@@ -215,4 +285,48 @@ impl OpCounters {
         errors: 0,
         millis: 0,
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn with(last: Option<HostCheckpoint>) -> Health {
+        let mut health = Health::new(Timestamp::from_unix_millis(0));
+        health.host_checkpoints = HostCheckpoints {
+            backfilled: 2,
+            restarted: 1,
+            stalled: 1,
+            last,
+        };
+        health
+    }
+
+    /// The notice follows the newest observation, says what it costs and what to change,
+    /// and is never a degraded state.
+    #[test]
+    fn the_host_notice_says_what_it_costs() {
+        assert_eq!(with(None).host_notice(), None);
+        let ran = with(Some(HostCheckpoint::Restarted));
+        assert_eq!(
+            ran.host_notice(),
+            Some(HostNotice::Checkpointing { ran: 3 })
+        );
+        assert!(!ran.is_degraded());
+        let stalled = with(Some(HostCheckpoint::Stalled { frames: 1200 }));
+        let Some(notice) = stalled.host_notice() else {
+            panic!("no notice");
+        };
+        let text = notice.to_string();
+        for words in [
+            "1200 frames",
+            "every host commit now runs a checkpoint attempt that does nothing",
+            "until the replicator checkpoints",
+            "the WAL keeps growing",
+            "wal_autocheckpoint = 0",
+        ] {
+            assert!(text.contains(words), "{text}");
+        }
+        assert!(!stalled.is_degraded());
+    }
 }

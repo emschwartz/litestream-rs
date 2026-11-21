@@ -49,7 +49,9 @@ mod thread;
 pub use config::{Config, NonZeroDuration, ReaderTracking, SyncLimits};
 pub use error::{RestoreError, StartError};
 pub use events::{ChannelSink, Event, EventReceiver, EventSink};
-pub use health::{Booted, Counters, Gone, Health, OpCounters, Phase, Stopped, StoreCounters};
+pub use health::{
+    Booted, Counters, Gone, Health, HostNotice, OpCounters, Phase, Stopped, StoreCounters,
+};
 pub use readers::ReaderGuard;
 pub use replicator::{FinalSync, Replicator};
 pub use restore::{restore, restore_if_missing, verify};
@@ -60,8 +62,9 @@ pub use store::{BoxFuture, DynStore, DynUpload};
 
 pub use lsr_core::{
     CheckpointConfig, Clock, Degraded, Depth, Entropy, ForeignWriter, HaltCause as StopCause,
-    L0Retention, Lane, Maintenance, PersistentCause as DegradedCause, Report, Response, Responses,
-    RestoreTarget, Restored, SnapshotCause,
+    HostCheckpoint, HostCheckpoints, L0Retention, Lane, Maintenance,
+    PersistentCause as DegradedCause, Report, Response, Responses, RestoreTarget, Restored,
+    SnapshotCause,
 };
 pub use lsr_ltx::{Timestamp, Txid};
 pub use lsr_sqlite::{DatabaseFile, SetupError, app_connection_raw, ffi};

@@ -18,8 +18,8 @@ use common::{PATIENCE, Site, assert_same, config, fake, truncate_is_busy, wait};
 use lsr_core::{CheckpointMode, Event as EngineEvent, Fault};
 use lsr_replica::{
     Booted, ChannelSink, CheckpointConfig, Config, DegradedCause, Depth, DynStore, Event,
-    EventSink, Gone, Lane, Phase, ReaderTracking, Replicator, Responses, SetupError, StartError,
-    StopCause, Stopped, restore_if_missing, verify,
+    EventSink, Gone, HostCheckpoint, HostCheckpoints, HostNotice, Lane, Phase, ReaderTracking,
+    Replicator, Responses, SetupError, StartError, StopCause, Stopped, restore_if_missing, verify,
 };
 use rusqlite::Connection;
 
@@ -524,9 +524,25 @@ fn a_host_checkpoint_is_counted_and_reported() {
     clock.advance(POLL);
     let health = wait(&replicator, |h| h.foreign_checkpoints == 1 && caught_up(h));
     assert_eq!(health.foreign_checkpoints, 1);
+    assert_eq!(health.host_checkpoints.backfilled, 1);
+    assert_eq!(
+        health.host_notice(),
+        Some(HostNotice::Checkpointing { ran: 1 })
+    );
+    assert!(!health.is_degraded(), "a notice, not a degraded state");
     let seen = events.drain();
     assert!(
         seen.contains(&Event::ForeignCheckpoint { total: 1 }),
+        "{seen:?}"
+    );
+    assert!(
+        seen.iter().any(|event| matches!(
+            event,
+            Event::HostCheckpoint {
+                seen: HostCheckpoint::Backfilled { .. },
+                total: 1
+            }
+        )),
         "{seen:?}"
     );
     assert!(matches!(
@@ -534,6 +550,41 @@ fn a_host_checkpoint_is_counted_and_reported() {
         Stopped::Drained { .. }
     ));
     site.assert_restores(&*site.store());
+}
+
+/// The host's connections keep `wal_autocheckpoint = 0` (`app_connection` sets it), and the
+/// WAL grows past SQLite's automatic checkpoint threshold until the replicator's own
+/// checkpoints run: no host checkpoint is seen, none is inferred, and no notice is raised.
+#[test]
+fn a_host_at_wal_autocheckpoint_0_raises_no_notice() {
+    let site = Site::new();
+    let (runtime, clock) = fake();
+    let replicator = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
+    let (sink, events) = ChannelSink::new(NonZeroUsize::new(256).unwrap());
+    replicator.set_events(Box::new(sink));
+    let mut health = wait(&replicator, caught_up);
+    for _ in 0..6 {
+        let before = health.synced.map(|(txid, _)| txid);
+        site.commit(200);
+        clock.advance(POLL);
+        health = wait(&replicator, |h| {
+            caught_up(h) && h.synced.map(|(txid, _)| txid) > before
+        });
+    }
+    assert!(health.counters.checkpoints >= 1, "{health:?}");
+    assert_eq!(health.host_checkpoints, HostCheckpoints::NONE);
+    assert_eq!(health.host_notice(), None);
+    let seen = events.drain();
+    assert!(
+        !seen
+            .iter()
+            .any(|event| matches!(event, Event::HostCheckpoint { .. })),
+        "{seen:?}"
+    );
+    assert!(matches!(
+        replicator.stop(PATIENCE).wait(),
+        Stopped::Drained { .. }
+    ));
 }
 
 /// Go's idle replica monitor: with nothing to do, every poll still writes the health

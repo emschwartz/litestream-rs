@@ -17,8 +17,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use lsr_core::{
-    Actor, ActorConfig, Degraded, Did, Env, Event as EngineEvent, HaltCause, Lane, PersistentCause,
-    Phase as EnginePhase, Response, Tick, Unfinished, WalSource, retry_wait,
+    Actor, ActorConfig, Degraded, Did, Env, Event as EngineEvent, HaltCause, HostCheckpoints, Lane,
+    PersistentCause, Phase as EnginePhase, Response, Tick, Unfinished, WalSource, retry_wait,
 };
 use lsr_ltx::{Timestamp, Txid};
 use lsr_sqlite::Sqlite;
@@ -62,7 +62,18 @@ struct Seen {
     foreign_before: u64,
     /// The foreign checkpoint total last reported as an event.
     foreign_reported: u64,
+    /// Host checkpoints seen by engines a panic dropped.
+    host_before: HostCheckpoints,
+    /// The host checkpoint total last reported as an event.
+    host_reported: u64,
     stopped_reported: bool,
+}
+
+/// A fresh engine, told the host's automatic checkpoint threshold.
+fn engine(actor_cfg: &ActorConfig, config: &Config) -> Actor {
+    let mut actor = Actor::new(actor_cfg.clone());
+    actor.set_host_autocheckpoint(config.host_autocheckpoint);
+    actor
 }
 
 pub(crate) struct Worker {
@@ -123,7 +134,7 @@ impl Worker {
             database: database.to_owned(),
             staging: FsStore::new(meta),
             remote,
-            actor: Actor::new(actor_cfg.clone()),
+            actor: engine(&actor_cfg, &config),
             actor_cfg,
             next_poll: later(now, config.poll_interval.get()),
             config,
@@ -259,6 +270,7 @@ impl Worker {
             self.emit(&Event::Engine(event));
         }
         self.report_foreign();
+        self.report_host();
         if self.stop.is_some() && progress {
             return Turn::Again;
         }
@@ -320,6 +332,23 @@ impl Worker {
         }
     }
 
+    fn host_total(&self) -> HostCheckpoints {
+        self.seen.host_before.then(self.actor.host_checkpoints())
+    }
+
+    fn report_host(&mut self) {
+        let host = self.host_total();
+        if let Some(seen) = host.last
+            && host.total() > self.seen.host_reported
+        {
+            self.seen.host_reported = host.total();
+            self.emit(&Event::HostCheckpoint {
+                seen,
+                total: host.total(),
+            });
+        }
+    }
+
     /// Hands `event` to the sink; a panic in it is counted, never fatal.
     fn emit(&mut self, event: &Event) {
         let Some(sink) = self.sink.as_mut() else {
@@ -335,6 +364,7 @@ impl Worker {
     fn panicked(&mut self, now: Timestamp) -> Turn {
         self.seen.counters.panics = self.seen.counters.panics.saturating_add(1);
         self.seen.foreign_before = self.foreign_total();
+        self.seen.host_before = self.host_total();
         self.sqlite = None;
         let rebuild = self.config.responses.bug == Response::KeepTrying;
         self.emit(&Event::Panicked { rebuilt: rebuild });
@@ -343,8 +373,9 @@ impl Worker {
             self.observe(now);
             return self.halted(HaltCause::Bug);
         }
-        self.actor = Actor::new(self.actor_cfg.clone());
+        self.actor = engine(&self.actor_cfg, &self.config);
         self.seen.foreign_reported = self.seen.foreign_reported.max(self.foreign_total());
+        self.seen.host_reported = self.seen.host_reported.max(self.host_total().total());
         if let Some(deadline) = self.stop {
             self.actor.begin_shutdown(deadline);
         }
@@ -419,6 +450,7 @@ impl Worker {
     fn publish(&self, parts: &SnapshotParts) {
         let resnapshot = self.actor.pending_snapshot();
         let foreign = self.foreign_total();
+        let host = self.host_total();
         let seen = &self.seen;
         self.shared.update(|state| {
             let health = &mut state.health;
@@ -432,6 +464,7 @@ impl Worker {
             health.db_bytes = parts.db_bytes;
             health.resnapshot = resnapshot;
             health.foreign_checkpoints = foreign;
+            health.host_checkpoints = host;
             health.counters = seen.counters;
             state.left = parts.left;
         });
