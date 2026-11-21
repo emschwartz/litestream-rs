@@ -1163,9 +1163,25 @@ fn check_listing(
         Retention::Wait { until } => wake(inventory, cfg, published, *until, now),
         Retention::Held(_) => {}
     }
-    if !matches!(first, Retention::Held(_)) {
+    // The level 0 scan stops at the first young file on the promise that
+    // the files after it are young (see "Rules" in the module docs). Later
+    // snapshot stamps move the floor, which changes which files the scan
+    // reads at all, so with level 0 stamps running backwards the rewrite can
+    // unblock a delete the true stamps never reached. That is not a promise
+    // of the design.
+    if !matches!(first, Retention::Held(_)) && level_zero_stamps_follow_keys(inventory) {
         later_stamps(inventory, now, cfg, published, &first, noise);
     }
+}
+
+/// Whether the level 0 files' stamps never decrease in key order.
+fn level_zero_stamps_follow_keys(inventory: &Inventory) -> bool {
+    let stamps: Vec<i64> = inventory
+        .level(Level::ZERO)
+        .iter()
+        .map(|f| f.exact_stamp().unwrap().at().unix_millis())
+        .collect();
+    stamps.is_sorted()
 }
 
 fn wake(
@@ -1294,19 +1310,47 @@ proptest! {
         weird in any::<bool>(),
         which in 0usize..4,
     ) {
-        let listing = build(&data, weird);
-        if listing.files.is_empty() {
-            return Ok(());
-        }
-        let mut inventory = inv(listing.files.clone());
-        if let Some((l, count)) = listing.skipped {
-            inventory = inventory.with_skipped(l, count);
-        }
-        let mut b = Bytes { data: &data, at: 7 };
-        let now = at(pick_now(&mut b, inventory.files()));
-        let cfg = &configs()[which];
-        check_listing(&inventory, now, cfg, listing.published, listing.sane, &mut b);
+        check_generated(&data, weird, which);
     }
+}
+
+/// One generated listing, every rule checked: the body of the property, so a
+/// shrunk case can be replayed by name.
+fn check_generated(data: &[u8], weird: bool, which: usize) {
+    let listing = build(data, weird);
+    if listing.files.is_empty() {
+        return;
+    }
+    let mut inventory = inv(listing.files.clone());
+    if let Some((l, count)) = listing.skipped {
+        inventory = inventory.with_skipped(l, count);
+    }
+    let mut b = Bytes { data, at: 7 };
+    let now = at(pick_now(&mut b, inventory.files()));
+    let cfg = &configs()[which];
+    check_listing(
+        &inventory,
+        now,
+        cfg,
+        listing.published,
+        listing.sane,
+        &mut b,
+    );
+}
+
+/// A shrunk failure of the property: a level 0 file with a young stamp sorts
+/// before an old one, and later snapshot stamps move the floor so that the
+/// young file stops blocking the old one's delete. Stamps like that are not
+/// a writer's, so the later-stamps rule does not apply to them.
+#[test]
+fn a_level_zero_file_stamped_out_of_order_is_outside_the_later_stamps_rule() {
+    let data = [
+        107, 0, 0, 0, 0, 0, 0, 63, 209, 174, 13, 0, 0, 0, 0, 0, 0, 0, 0, 85, 10, 40, 73, 0, 38, 0,
+        132, 128, 0, 92, 39, 24, 178, 233, 155, 133, 85, 227, 108, 64, 8, 106, 247, 0, 1, 0, 0, 70,
+        0, 70, 0, 0, 0, 100, 70, 0, 0, 100, 0, 0, 0, 0, 0, 0, 100, 0, 100, 0, 53, 65, 2, 2, 92, 79,
+        0, 0, 240, 203, 184, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    check_generated(&data, true, 0);
 }
 
 /// Write histories run through `due`, every delete job checked.
