@@ -83,7 +83,7 @@ const FIRST_SNAPSHOT_RETRY_PATCH: u32 = 4;
 /// The first release tag that stops reading the WAL at the wal-index's committed end
 /// (upstream [`WAL_INDEX_END_COMMIT`], #1581), or `None` while no release contains that
 /// commit. When upstream tags one, this becomes `Some(N)`: `wal_index_end_follows_the_clone`
-/// in `tests/releases.rs` fails until it does.
+/// in `tests/compat/releases.rs` fails until it does.
 pub const FIRST_WAL_INDEX_END_PATCH: Option<u32> = None;
 
 /// The upstream commit that made Go read the committed WAL end from the wal-index:

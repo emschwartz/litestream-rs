@@ -18,7 +18,7 @@ nothing else would notice the helper being wrong.
 - **Excluded** in `.cargo/mutants.toml` (`exclude_globs`): `crates/core/src/source/fake.rs` with its
   submodules (the scripted WAL, database and checkpointer fakes) and `crates/core/src/restore/mem_sink.rs`
   (the in-memory restore target). They are checked another way:
-  `crates/compat/tests/live_matches_sim.rs` compares the simulator's SQLite model with real SQLite. The
+  `crates/compat/tests/compat/live_matches_sim.rs` compares the simulator's SQLite model with real SQLite. The
   exclusion drops `cargo mutants --list -p lsr-core` from 1705 mutants to 1569 (102 in `fake.rs`, 34 in
   `mem_sink.rs`); `mem.rs` keeps its 24 and `conformance.rs` its 49. A run that wants them anyway passes
   `--no-config`.
@@ -207,7 +207,7 @@ Each was run again with `--file <file> --re '<file>:<line>:<col>'` and both test
 | Where | Mutation | Test |
 | --- | --- | --- |
 | `plan.rs:441:41` | replace && with \|\| in explain_shortfall | `a_refused_snapshot_past_a_hole_is_reported_as_refused` (`plan.rs`) |
-| `plan.rs:563:9` | replace AsOfPlanner::comparisons -> u64 with 0 | `comparisons_count_both_sorts_and_every_heap_step` (`tests/plan_lazy.rs`) |
+| `plan.rs:563:9` | replace AsOfPlanner::comparisons -> u64 with 0 | `comparisons_count_both_sorts_and_every_heap_step` (`tests/core/plan_lazy.rs`) |
 | `plan.rs:563:9` | replace AsOfPlanner::comparisons -> u64 with 1 | same |
 | `plan.rs:733:5` | replace depth -> u64 with 0 | same |
 | `recover.rs:756:42` | replace match guard at_start with false in frame_state | `rule_9_at_boot_a_tip_ending_at_the_wal_start_has_no_frame_to_miss` (`recover/tests.rs`) |
@@ -353,7 +353,7 @@ column) and is caught.
 Seven were the conformance-harness survivors, caught since (see "Kept test helpers"). The other thirteen
 were in `source/fake.rs` and `restore/mem_sink.rs`, which are no longer mutated: a mutant there changes what
 a test asks of the engine, not what the engine does, and the fakes are checked against real SQLite by
-`crates/compat/tests/live_matches_sim.rs` (see "Scope").
+`crates/compat/tests/compat/live_matches_sim.rs` (see "Scope").
 
 #### Timeouts (8): the loop that spins
 

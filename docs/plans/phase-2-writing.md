@@ -52,7 +52,7 @@ The constraints of `docs/plans/phase-1-reading.md` apply unchanged. In addition:
 
 ### Task 2: the compactor (branch `compactor`)
 
-**Files:** create `crates/core/src/compact.rs` and `crates/core/src/compact/tests.rs`; export from `crates/core/src/lib.rs`. A new test file `crates/compat/tests/compaction.rs` (touch nothing else in `crates/compat` but its `Cargo.toml` if a dependency is missing). If the encoder needs a way to hand written bytes out between pages, add the smallest accessor to `crates/ltx/src/encoder.rs` with its own test.
+**Files:** create `crates/core/src/compact.rs` and `crates/core/src/compact/tests.rs`; export from `crates/core/src/lib.rs`. A new test file `crates/compat/tests/compat/compaction.rs` (touch nothing else in `crates/compat` but its `Cargo.toml` if a dependency is missing). If the encoder needs a way to hand written bytes out between pages, add the smallest accessor to `crates/ltx/src/encoder.rs` with its own test.
 
 **Consumes:** `lsr_core::{ObjectStore, Upload, FileInfo, FileKey, Level, ReadLen, StoreError}`, `lsr_ltx::{Decoder, Event, Verified, Encoder, Header, HeaderFields}`. The read loop is `apply_file`/`feed_chunk` in `crates/core/src/restore.rs`: one `Decoder` per file fed by chunked `store.read`; an empty chunk ends the file and only `decoder.finish()` says it was whole. When both loops need the same code, extract it into one private module both use, as a first commit that changes no behavior.
 
@@ -80,7 +80,7 @@ The constraints of `docs/plans/phase-1-reading.md` apply unchanged. In addition:
 - Each fault at each point: a flipped byte in input i (every i for a small chain), a truncated input, an input vanishing at each read, a read error, upload write failure, commit failure after publish (`MemStore::inject_failure_after_publish`): the destination holds no new file unless the commit itself reported it, and no scratch survives.
 - `PageSurvivesShrink` on a hand-built chain.
 - A memory check: with 32 inputs of 2,000 pages each, peak buffered bytes stay under the stated bound (count bytes held, not the allocator).
-- In `crates/compat/tests/compaction.rs` (runs in `just check`, no Go binary): for every Go-written level 1 or 2 file in every fixture whose range is exactly covered by files one level down that are still present (at most 32), compacting those with this code yields Go's commit, TXID range, timestamp, pre-apply checksum and tracked flag, and the same page numbers with the same bytes. Assert the number of files compared is above a floor you measure, so the test cannot pass by comparing nothing.
+- In `crates/compat/tests/compat/compaction.rs` (runs in `just check`, no Go binary): for every Go-written level 1 or 2 file in every fixture whose range is exactly covered by files one level down that are still present (at most 32), compacting those with this code yields Go's commit, TXID range, timestamp, pre-apply checksum and tracked flag, and the same page numbers with the same bytes. Assert the number of files compared is above a floor you measure, so the test cannot pass by comparing nothing.
 
 ### Task 3: the environment traits and the retrying store (branch `store-retry`)
 
@@ -254,7 +254,7 @@ Go citations are `.upstream/litestream/<file>:<line>` unless they name `.upstrea
 **Files:**
 - Create `crates/core/src/{recover,sync}.rs`, `crates/core/src/recover/tests.rs` and `crates/core/src/sync/tests.rs`.
 - Add one method, with its test, to `crates/wal/src/scan.rs`: `pub fn frame_before(&mut self, at: WalOffset, expected: Salts) -> Result<FrameRef, ResumeError>`. It uses the same verified read as `resume` and returns the commit frame's `FrameRef`, which carries its `pgno` and digest.
-- Add `crates/compat/tests/handover.rs`.
+- Add `crates/compat/tests/compat/handover.rs`.
 
 **Consumes:**
 - 4a.
@@ -751,7 +751,7 @@ Critical path: 4b, 6b, 6c, 6f, 6g1/6g2. 6a can start today. 6d can start the day
 - **S9:** `just check` runs 64 seeds of 300 steps; 6f measures the wall time and moves the number if the gate grows by more than 10 s.
 - **S10:** `Fault::from_remote` and `Fault::from_staging` already tell the two stores apart (landed), so every `Fault` is reachable from a scenario.
 - **PLAN amended with this block:** the actor is sequential until a measurement says otherwise (PLAN said a `JoinSet`); the simulator's VACUUM has two shapes (same page size, changed page size); the phase 2 exit says what "acknowledged" promises across a local rewind; the memory bound the simulator checks is one buffer at most one part.
-- **`crates/compat/tests/handover.rs` has two halves:** 4b's `go_would_continue` and 7b's live Go resume. Each task adds its half and leaves the other alone.
+- **`crates/compat/tests/compat/handover.rs` has two halves:** 4b's `go_would_continue` and 7b's live Go resume. Each task adds its half and leaves the other alone.
 
 ---
 
@@ -956,7 +956,7 @@ The 4a fakes are scripted: a test says what a checkpoint does. The simulator nee
 
 ### Task 6g1: one scenario per SnapshotCause (branch `sim-snapshot-causes`)
 
-**Files:** `crates/sim/tests/snapshot_causes.rs`, `crates/sim/src/scenario.rs` (`Scenario`: a fixed op list plus expected events). Touch no other file.
+**Files:** `crates/sim/tests/sim/snapshot_causes.rs`, `crates/sim/src/scenario.rs` (`Scenario`: a fixed op list plus expected events). Touch no other file.
 
 **Produces:** `pub struct Scenario { pub name: &'static str, pub ops: Vec<Op>, pub expect: Vec<Expect> }`, `pub enum Expect { Event(EventMatch), Halt(HaltCause), Oracle }`; `pub fn scenario_of(cause: SnapshotCause) -> &'static [fn() -> Scenario]`, an exhaustive match with no `_` arm: a new cause does not compile without a scenario.
 
@@ -984,7 +984,7 @@ Plus `pinned_on_zero_single_restart`: our read tx on mark 0, one app write resta
 
 ### Task 6g2: one scenario per Fault (branch `sim-faults`)
 
-**Files:** `crates/sim/tests/faults.rs`; add `pub fn fault_scenarios(fault: FaultKind) -> &'static [fn() -> Scenario]` to `crates/sim/src/scenario.rs`. If 6g1 has not landed, this branch rebases on it; the file is shared but the two functions are disjoint.
+**Files:** `crates/sim/tests/sim/faults.rs`; add `pub fn fault_scenarios(fault: FaultKind) -> &'static [fn() -> Scenario]` to `crates/sim/src/scenario.rs`. If 6g1 has not landed, this branch rebases on it; the file is shared but the two functions are disjoint.
 
 **Semantics:** `FaultKind` is `Fault` without payloads, with an exhaustive `From<&Fault>`. Each scenario asserts the policy outcome (one `Retrying`, `Resnapshot` or `Halted`) and the oracle afterwards. Table:
 
@@ -1025,7 +1025,7 @@ Plus `clock_steps_back_10s` (`Clamped`: one event, no fault, no retry).
 
 ### Task 7a: a live SQLite source and the outside-checkpoint cases (branch `compat-live-source`)
 
-**Files:** create `crates/compat/src/live_source.rs` (test support, behind the crate's existing test-only use), `crates/compat/tests/live_source.rs`. Export from `crates/compat/src/lib.rs`. Touch no other file. No Go binary; runs in `just check`.
+**Files:** create `crates/compat/src/live_source.rs` (test support, behind the crate's existing test-only use), `crates/compat/tests/compat/live_source.rs`. Export from `crates/compat/src/lib.rs`. Touch no other file. No Go binary; runs in `just check`.
 
 **Dependencies:** none new (rusqlite 0.43 bundled is already a compat dependency; `lsr-wal` feature `testing` for the shm decode helpers only if 6a exports them).
 
@@ -1042,14 +1042,14 @@ Plus `clock_steps_back_10s` (`Clamped`: one event, no fault, no retry).
 - `outside_restart_against_pin_above_zero`: we hold a read tx above mark 0; a second app connection writes, then runs `PRAGMA wal_checkpoint(RESTART)`: busy=1, the WAL header's salts and seq unchanged; our next `recover` is `Continue` and the next step is incremental.
 - `outside_truncate_against_pin_above_zero`: as above with TRUNCATE; the file is not truncated.
 - `pin_on_zero_one_restart`: our read tx taken when the WAL is fully backfilled (mark 0); one app write restarts the WAL; our next step reports `GenerationChanged`, no `PinViolated`; a second app write does not restart again.
-- `live_matches_sim`: a seeded op list applied to `LiveSqlite` and to `SimSqlite` (6d, as a dev-dependency); after each sync the staged LTX files are byte-equal. As built: `crates/compat/tests/live_matches_sim.rs`, a proptest plus named cases; salts drawn at random by the model go through `SimSqlite::force_random_salts`, and the model's commits mirror the real WAL's pages.
+- `live_matches_sim`: a seeded op list applied to `LiveSqlite` and to `SimSqlite` (6d, as a dev-dependency); after each sync the staged LTX files are byte-equal. As built: `crates/compat/tests/compat/live_matches_sim.rs`, a proptest plus named cases; salts drawn at random by the model go through `SimSqlite::force_random_salts`, and the model's commits mirror the real WAL's pages.
 - `live_sync_chain_restores`: 200 rusqlite commits of random size through `sync_step` and `checkpoint`; `restore` at every txid equals `hash_pages` of a copy taken at that commit; `integrity_check` passes.
 
 ---
 
 ### Task 7b: Go reads and resumes Rust chains (branch `compat-go-chains`)
 
-**Files:** create `crates/compat/tests/rust_chains.rs` and `crates/compat/tests/handover.rs` (4b planned the file with `go_would_continue`; this adds the live case). Every test `#[ignore = "runs the pinned Go binary; just compat"]`. Touch no other file.
+**Files:** create `crates/compat/tests/compat/rust_chains.rs` and `crates/compat/tests/compat/handover.rs` (4b planned the file with `go_would_continue`; this adds the live case). Every test `#[ignore = "runs the pinned Go binary; just compat"]`. Touch no other file.
 
 **Consumes:** `Actor` (6c), `LiveSqlite` (7a), `FsStore`, `Workload`, `hash_pages`, `integrity_check`, `go_binary`, `GoVersion::ALL`, `write_config`, `restore_with_go`, `build_verify_helper`, `go_verify`, `rfc3339_millis`.
 
@@ -1114,7 +1114,7 @@ As built: a throttle's `retry_after` no longer replaces the backoff, as "Semanti
 
 ### Task 6i: the simulator's first two findings (branch `sim-findings`)
 
-Found by 6f's fixed seeds (`review_` tests in `crates/sim/tests/fixed_seeds.rs`). Rulings:
+Found by 6f's fixed seeds (`review_` tests in `crates/sim/tests/sim/fixed_seeds.rs`). Rulings:
 
 - **P1, the page size is fixed for the life of a replica.** SQLite cannot change the page size in WAL mode; it takes leaving WAL mode, a `VACUUM` and coming back. A replica that mixed page sizes could not be compacted or restored by Go, and the replica is the contract. So a database whose page size differs from the replica's is a typed halt at the source, `Halt(PageSizeChanged { was, now })`, raised by boot and by the sync step before anything of the new size is staged, never `RemoteCorrupt` from a later compaction. Everything staged and uploaded before the change stays restorable. The operator's way out is a new replica prefix. Before building, read what Go does in `.upstream`'s source on a page-size change and write it into this block in two lines; if Go follows the change in a way the replica shows, stop and report instead of building the halt. The simulator keeps `vacuum_resizes` on: the model expects this halt, expects no file of the new size in staging or the replica, and checks the last acknowledged state before the change still restores.
 - **T1, a staged file that does not verify is lost, not corrupt.** A staged file is derived local state: the database can always produce a snapshot in its place. A power loss can tear a staged file that was not yet uploaded. Today boot sees the unreadable tip, snapshots one transaction higher and leaves the torn file, and the upload lane halts on it with `StagedCorrupt`. Rule: a staged level-0 file that fails verification, at boot or when the upload lane reads it, is treated exactly as a missing one (`StagedLost`). The file and every staged file after it are deleted from staging (uploads go in order, so none of those is at the replica unless the boot listing shows it); the next file is a snapshot that takes the first transaction the replica does not hold, so the level-0 chain has no hole. If the boot listing shows the replica already holds the torn file's transaction, the local copy is deleted and the snapshot takes the next transaction. `StagedCorrupt` stops being a halt; if nothing else produces it the variant goes. A staged file that verifies but differs from what the replica holds under the same key stays what it is today (R1). First settle, by reading the fs stager and `Stage::power_loss`, whether the torn file was synced before it was treated as staged: if the stager returns before the file and its directory entry are durable, that is its own defect, fixed first in its own commit; if the simulator tears synced files, say so and keep T1 as the handling. Tests: the two replay seeds as named tests; a mixed staging directory (readable, torn in the middle, readable after) with exactly what is deleted and which transaction the snapshot takes, for both "replica holds it" and "replica lacks it"; the upload lane meeting a file that turns unreadable mid-run; a crash between the delete and the snapshot boots clean.

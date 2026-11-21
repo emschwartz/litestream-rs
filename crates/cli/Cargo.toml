@@ -24,7 +24,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 lsr-compat.workspace = true
-# The `-exec` child in tests/sidecar.rs watches signals as a real child would.
+# The `-exec` child in tests/cli/sidecar.rs watches signals as a real child would.
 signal-hook.workspace = true
 # The replicate process test sets up its own host connection as a host must.
 lsr-sqlite.workspace = true
@@ -32,7 +32,7 @@ lsr-core = { workspace = true, features = ["testing"] }
 # FakeS3 drives the S3 path in-process, and the Tigris run's cleanup lists and aborts
 # multipart uploads with the store's raw requests; both sit behind the feature.
 lsr-store-s3 = { workspace = true, features = ["testing"] }
-# The Tigris run (tests/tigris.rs) checkpoints the live database Go replicated.
+# The Tigris run (tests/cli/tigris.rs) checkpoints the live database Go replicated.
 rusqlite.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

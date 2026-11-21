@@ -158,7 +158,7 @@ A mismatch between Rust and Go on a valid replica is a defect in Rust until show
 
 ### Task 6a: `verify`, the replica checker (branch `verify`; the CLI is task 6b, after the restore review)
 
-**Files:** create `crates/core/src/verify.rs` and `crates/core/src/verify/tests.rs`; export from `lib.rs`; a new test file `crates/compat/tests/verify.rs` (nothing else in `crates/compat` but a `Cargo.toml` line if needed). Touch `restore.rs` only to share its read loop through a private module, as a first commit that changes no behavior, and only if another branch has not already done so on main.
+**Files:** create `crates/core/src/verify.rs` and `crates/core/src/verify/tests.rs`; export from `lib.rs`; a new test file `crates/compat/tests/compat/verify.rs` (nothing else in `crates/compat` but a `Cargo.toml` line if needed). Touch `restore.rs` only to share its read loop through a private module, as a first commit that changes no behavior, and only if another branch has not already done so on main.
 
 **Consumes:** `Inventory::load`, `files()`, `skipped(level)`, `malformed_snapshots()`; `plan`, `PlanOutcome`, `RestoreTarget`; `lsr_ltx::Decoder`.
 
@@ -169,7 +169,7 @@ A mismatch between Rust and Go on a valid replica is a defect in Rust until show
 - `VerifyError { Inventory(InventoryError), Store(StoreError) }`: only what stops the walk.
 - Memory is one decoder and one chunk whatever the replica's size; findings are capped at a named constant with a final `Truncated { more }` finding.
 
-**Tests:** one `MemStore` replica per finding, asserting exactly that finding and its severity; a clean replica has none; a gap behind the newest snapshot and a gap in front of it are both reported with the right numbers; `Names` reads zero objects (count the calls); a file that vanishes mid-walk; a failing read is an error, not a finding. In `crates/compat/tests/verify.rs`: every fixture has no `Unrestorable` finding at either depth, except each `mid-chain-gap` fixture, which reports exactly its manifest's gap; assert the totals of files read so the test cannot pass on nothing.
+**Tests:** one `MemStore` replica per finding, asserting exactly that finding and its severity; a clean replica has none; a gap behind the newest snapshot and a gap in front of it are both reported with the right numbers; `Names` reads zero objects (count the calls); a file that vanishes mid-walk; a failing read is an error, not a finding. In `crates/compat/tests/compat/verify.rs`: every fixture has no `Unrestorable` finding at either depth, except each `mid-chain-gap` fixture, which reports exactly its manifest's gap; assert the totals of files read so the test cannot pass on nothing.
 
 ### Task 6b: the CLI (branch `cli`)
 
@@ -194,7 +194,7 @@ A mismatch between Rust and Go on a valid replica is a defect in Rust until show
   - `--dry-run`: Go's "Restore plan:" text (source, target, replica kind, txid range, then level, file, min and max txid, size and time per file) or Go's `RestorePlan` JSON keys. The plan is made exactly as the restore makes its first attempt, reading the exact stamps an as-of target needs; a target with no exact plan is the restore's own refusal. Departure: Go never looks at the output in a dry run; here `lsr_local::preflight` checks it read-only, so an existing output or a stale sidecar is the restore's own error, and with `--clear-sidecars` the sidecars it would remove are listed and kept.
   - `--json` on restore: Go's `RestoreResult` keys (`db_path`, `replica`, `txid`, `duration_ms`, `integrity_check`) plus pages, page size, files, bytes and stamps read, whether the database checksum was verified, and the sidecars removed. A skip prints one object (`skipped`: `output_exists`, `empty_replica` or `no_ltx_folder`) where Go prints only a log line. JSON is one line, as for verify and files. An S3 source prints as `s3://<bucket>/<prefix>`, never the typed URL, which may carry a query.
 
-**Tests:** table tests for `parse`, one per `UsageError` variant and per command; `tests/cli.rs` runs the binary (`env!("CARGO_BIN_EXE_lsr")`) over `crates/compat/fixtures` (read the manifest shapes from `lsr-compat` as a dev-dependency): restore of Latest for every fixture equals the manifest's page hashes; `--txid` and `--timestamp` targets from the manifest; a gap target exits 2 and leaves no file at the output or beside it; an existing output exits 3 and is byte-identical afterwards; a planted `-journal` refuses, then succeeds with `--clear-sidecars`; `verify` exits 0 on a clean fixture and 2 on each `mid-chain-gap` fixture at its newest gap... (use what `crates/compat/tests/verify.rs` established about those fixtures); `verify --json` and `files --json` parse and agree with the library's `Report` and `Inventory`; `--help` lists every flag the parser accepts (generated from one table so they cannot drift).
+**Tests:** table tests for `parse`, one per `UsageError` variant and per command; `tests/cli.rs` runs the binary (`env!("CARGO_BIN_EXE_lsr")`) over `crates/compat/fixtures` (read the manifest shapes from `lsr-compat` as a dev-dependency): restore of Latest for every fixture equals the manifest's page hashes; `--txid` and `--timestamp` targets from the manifest; a gap target exits 2 and leaves no file at the output or beside it; an existing output exits 3 and is byte-identical afterwards; a planted `-journal` refuses, then succeeds with `--clear-sidecars`; `verify` exits 0 on a clean fixture and 2 on each `mid-chain-gap` fixture at its newest gap... (use what `crates/compat/tests/compat/verify.rs` established about those fixtures); `verify --json` and `files --json` parse and agree with the library's `Report` and `Inventory`; `--help` lists every flag the parser accepts (generated from one table so they cannot drift).
 
 ### Task 8: `lsr-store-s3`
 
@@ -330,7 +330,7 @@ Each block is one branch, green on `just check` alone. MinIO tests skip with a m
 
 #### Task 8c: ureq transport, the five operations, conformance on MinIO
 
-**Files:** `crates/store-s3/src/{ureq_transport.rs,store.rs,list.rs,upload.rs}`, `crates/store-s3/tests/minio.rs`, `justfile`, `scripts/minio.sh`.
+**Files:** `crates/store-s3/src/{ureq_transport.rs,store.rs,list.rs,upload.rs}`, `crates/store-s3/tests/store-s3/minio.rs`, `justfile`, `scripts/minio.sh`.
 
 **Consumes:** 8b; `ObjectStore`, `Upload`, `Listing`, `build_listing`, `FileInfo`, `Timestamp`, `conformance_suite!`, `Harness`; ureq 3 (MIT OR Apache-2.0) with `default-features = false, features = ["rustls"]` and `webpki-roots` (ruling F4).
 
@@ -372,7 +372,7 @@ Each block is one branch, green on `just check` alone. MinIO tests skip with a m
 
 #### Task 8d: fake S3 and the recorded-fault layer
 
-**Files:** `crates/store-s3/src/fake.rs` (behind feature `testing`), `crates/store-s3/src/fault.rs`, `crates/store-s3/tests/faults.rs`.
+**Files:** `crates/store-s3/src/fake.rs` (behind feature `testing`), `crates/store-s3/src/fault.rs`, `crates/store-s3/tests/store-s3/faults.rs`.
 
 **Consumes:** 8b `Transport`, `HttpRequest`, `HttpResponse`; `Retrying`, `RetryPolicy`, `FakeClock`, `RecordingSleeper`, `SeededEntropy`.
 
@@ -440,7 +440,7 @@ Each block is one branch, green on `just check` alone. MinIO tests skip with a m
 
 #### Task 8f: CLI, the S3 replica form
 
-**Files:** `crates/cli/src/{args.rs,run.rs,replica.rs}`, `crates/cli/Cargo.toml`, `crates/cli/tests/s3.rs`.
+**Files:** `crates/cli/src/{args.rs,run.rs,replica.rs}`, `crates/cli/Cargo.toml`, `crates/cli/tests/cli/s3.rs`.
 
 **Consumes:** `Flags::replica` and `UsageError::UnsupportedReplica` (args.rs:242, :329), 8c `S3Store`, `S3Config::from_url`, `S3Credentials`.
 
@@ -536,7 +536,7 @@ Notation for the bounds: N files; S files that begin at transaction 1, at every 
 
 #### Task 8g1: stamp types, the two store methods, the resolve driver
 
-**Files:** `crates/core/src/{layout.rs,store.rs,stamps.rs (new),lib.rs,mem.rs,retry.rs,inventory.rs,plan.rs,maintain.rs,maintain/retain.rs,verify.rs,verify/dry_run.rs,conformance.rs}`; the test stores `Counting` (actor/tests.rs), `Spy` (compact/tests.rs), `Stuck` (inventory.rs), `Wrapped` (restore/tests.rs, verify/tests.rs), `SizeLiar` and `DeleteRefuser` (retry/tests.rs), `Probe` (upload/tests.rs); `crates/core/tests/stamp_sources.rs` (new); `crates/store-fs/src/lib.rs` (`FsStore`); `crates/store-s3/src/{store.rs,list.rs,upload.rs}` (`S3Store`); `crates/sim/src/store.rs` (`Faults`, `Yield`, `Tap`, `Stage`, over core's `MemStore`); `crates/cli/src/{replica.rs,render.rs}` (`Counted`); `crates/compat/src/{replica.rs,chain.rs,replicator.rs}` wherever they build a `FileInfo`; `crates/fuzzing/src/plan.rs`; every test that builds a `FileInfo`.
+**Files:** `crates/core/src/{layout.rs,store.rs,stamps.rs (new),lib.rs,mem.rs,retry.rs,inventory.rs,plan.rs,maintain.rs,maintain/retain.rs,verify.rs,verify/dry_run.rs,conformance.rs}`; the test stores `Counting` (actor/tests.rs), `Spy` (compact/tests.rs), `Stuck` (inventory.rs), `Wrapped` (restore/tests.rs, verify/tests.rs), `SizeLiar` and `DeleteRefuser` (retry/tests.rs), `Probe` (upload/tests.rs); `crates/core/tests/core/stamp_sources.rs` (new); `crates/store-fs/src/lib.rs` (`FsStore`); `crates/store-s3/src/{store.rs,list.rs,upload.rs}` (`S3Store`); `crates/sim/src/store.rs` (`Faults`, `Yield`, `Tap`, `Stage`, over core's `MemStore`); `crates/cli/src/{replica.rs,render.rs}` (`Counted`); `crates/compat/src/{replica.rs,chain.rs,replicator.rs}` wherever they build a `FileInfo`; `crates/fuzzing/src/plan.rs`; every test that builds a `FileInfo`.
 
 **Consumes:** `FileInfo` (layout.rs), `ObjectStore` (store.rs), `ReadLen`, `StoreError`, `CorruptCause::BadStamp`, `ListStats` (store-s3 store.rs), `Inventory`.
 
@@ -569,7 +569,7 @@ Notation for the bounds: N files; S files that begin at transaction 1, at every 
 - Conformance (conformance.rs, every harness: mem in both modes, fs, FakeS3, MinIO): `stamp_returns_the_committed_stamp` (commits at 0 ms, 1 ms, a leap-day instant and the header maximum; `stamp` of each listed file returns it, origin not `Fallback`); `listed_stamp_is_exact_or_marked` (a listed file is `Stored` equal to the committed stamp, or `LastModified`); `stamp_of_a_vanished_file_is_not_found`; `stamp_of_an_overwritten_file_is_refused` (re-commit the key with another size: `Transient { InvalidData }`); `read_with_stamp_agrees_with_read_and_stamp`.
 - stamps.rs: `resolve_asks_each_key_once` (a step that asks the same key twice gets `Repeated`); `resolve_counts_stamps_read`; `stored_listing_resolves_with_no_calls` (`MemStore::new`: `stamp_calls() == 0`).
 - mem.rs: `lazy_mode_lists_last_modified` (listed `LastModified` equals the clock at commit, or the value set; `stamp` returns the commit's stamp).
-- Source guards (`crates/core/tests/stamp_sources.rs`, a std::fs walk of `crates/`, no new dependency): `stored_stamp_constructors_only_in_stores` (`StoredStamp::{metadata,mtime,fallback}` only in `crates/store-*`, `crates/core/src/mem.rs`, `crates/compat` and test files); `last_modified_matched_only_in_allowed_sites` (G2's list plus test files).
+- Source guards (`crates/core/tests/core/stamp_sources.rs`, a std::fs walk of `crates/`, no new dependency): `stored_stamp_constructors_only_in_stores` (`StoredStamp::{metadata,mtime,fallback}` only in `crates/store-*`, `crates/core/src/mem.rs`, `crates/compat` and test files); `last_modified_matched_only_in_allowed_sites` (G2's list plus test files).
 - Every existing suite stays green with unchanged outcomes (fixtures move from `created_at` to `listed`).
 
 **Must not touch:** planner, retention or schedule logic (only the accessor change in item 4); S3 list's request pattern; CLI flags.
@@ -674,7 +674,7 @@ Notation for the bounds: N files; S files that begin at transaction 1, at every 
 
 #### Task 8g5: request counts over 10^4 files
 
-**Files:** `crates/store-s3/tests/request_counts.rs` (new).
+**Files:** `crates/store-s3/tests/store-s3/request_counts.rs` (new).
 
 **Consumes:** 8g1 to 8g4; FakeS3's per-method request counts.
 
@@ -706,4 +706,4 @@ Notation for the bounds: N files; S files that begin at transaction 1, at every 
 
 **Found (8g6):** the walk and restore both read until an empty chunk, so every file cost one data GET plus one empty GET at offset == size; a short chunk already means the end (the `read` contract). The second listing was restore's own `Inventory::load` inside the dry run; it now plans over the walk's listing (a vanished file still makes restore list afresh, pinned by `a_file_that_vanishes_mid_walk_is_a_note`). The latest plan's files are still opened twice (walk, then dry run), so GETs equal `files_read`, FILES + plan files.
 
-Found by 8g5's request counts (`crates/store-s3/tests/request_counts.rs`): verify Contents sends 20018 GETs for 10009 files and 52 LIST pages where every other operation sends 26. First establish why (which two reads per file; why the listing is paged twice) and write it into this block in two lines. Rule: a file small enough to arrive in one chunk is verified from one GET; a larger file takes one GET per chunk and no separate header or trailer read. A second listing stays only if it guards something (a replica changing under the walk) and a test shows what it catches; otherwise it goes. Verify-before-use is not weakened: every check verify makes today (per-file checksum, index, header level and TXID range against the key, level coverage, contiguity) is still made, on the bytes of that one read. Pin the new counts in `request_counts.rs` (verify Contents GET equals the file count for the fixture; LIST as ruled) and in the table test.
+Found by 8g5's request counts (`crates/store-s3/tests/store-s3/request_counts.rs`): verify Contents sends 20018 GETs for 10009 files and 52 LIST pages where every other operation sends 26. First establish why (which two reads per file; why the listing is paged twice) and write it into this block in two lines. Rule: a file small enough to arrive in one chunk is verified from one GET; a larger file takes one GET per chunk and no separate header or trailer read. A second listing stays only if it guards something (a replica changing under the walk) and a test shows what it catches; otherwise it goes. Verify-before-use is not weakened: every check verify makes today (per-file checksum, index, header level and TXID range against the key, level coverage, contiguity) is still made, on the bytes of that one read. Pin the new counts in `request_counts.rs` (verify Contents GET equals the file count for the fixture; LIST as ruled) and in the table test.

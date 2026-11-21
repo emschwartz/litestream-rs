@@ -5,7 +5,7 @@
 # `conformance.rs` (the checks every real store must pass) stay in. The scripted
 # WAL and database fakes and the in-memory restore sink are left out: a mutant
 # there weakens a test rather than the engine, and they are checked another way
-# (crates/compat/tests/live_matches_sim.rs compares the simulator's SQLite model
+# (crates/compat/tests/compat/live_matches_sim.rs compares the simulator's SQLite model
 # with real SQLite).
 exclude_globs = [
     "crates/core/src/source/fake.rs",

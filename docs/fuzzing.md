@@ -6,7 +6,7 @@ counts as passing. It has not been run yet: a cloud session is too short for it.
 ## Targets
 
 Each target is a one-line `fuzz/fuzz_targets/<target>.rs` calling into `crates/fuzzing`, and
-`crates/fuzzing/tests/corpus.rs` replays the committed corpus in `just check`. `just fuzz-seed`
+`crates/fuzzing/tests/fuzzing/corpus.rs` replays the committed corpus in `just check`. `just fuzz-seed`
 writes the seeds: the LTX targets' from the Go-written fixtures, the `wal` target's from WALs built
 with `lsr_wal::testing::WalBuilder` and a few written by SQLite.
 

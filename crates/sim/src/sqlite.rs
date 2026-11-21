@@ -5,7 +5,7 @@
 //! and a reader's mark interact as they do in SQLite. The rules were read from the
 //! bundled amalgamation (rusqlite 0.43, SQLite 3.54.1: `walTryBeginRead`,
 //! `walCheckpoint`, `sqlite3WalCheckpoint`, `walRestartLog`, `walFrames`) and are
-//! checked against it by `tests/sqlite_rules.rs`:
+//! checked against it by `tests/sim/sqlite_rules.rs`:
 //!
 //! - **R1, backfill:** a checkpoint copies each page's newest frame when that frame is at
 //!   or below the smallest mark above 0 held by any reader (a page rewritten above
@@ -1246,7 +1246,7 @@ impl SimSqlite {
     /// the wal-index and then fails to truncate the file (`ftruncate` failing):
     /// the file keeps the old header and frames until the next commit writes a
     /// header. Our own checkpoint call reports the I/O error. The real-SQLite
-    /// fault suite found this state (`crates/sqlite/tests/faults.rs`).
+    /// fault suite found this state (`crates/sqlite/tests/sqlite/faults.rs`).
     pub fn fail_next_truncate(&self) {
         self.with(|state| state.faults.truncate_fails = true);
     }

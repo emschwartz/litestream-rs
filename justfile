@@ -53,18 +53,18 @@ doctest:
 
 # Replays one simulator run, printing every operation: just sim-replay 0x2a [steps].
 sim-replay seed steps="300":
-    LSR_SIM_SEED={{seed}} LSR_SIM_STEPS={{steps}} cargo nextest run -p lsr-sim --test replay --no-capture --locked
+    LSR_SIM_SEED={{seed}} LSR_SIM_STEPS={{steps}} cargo nextest run -p lsr-sim --test sim -E 'test(/^replay::/)' --no-capture --locked
 
 # Runs rotating simulator seeds for the given seconds from a base seed (default: now).
 sim-soak seconds base=`date +%s`:
-    LSR_SIM_BASE_SEED={{base}} LSR_SIM_SECONDS={{seconds}} cargo nextest run -p lsr-sim --test soak --run-ignored only --no-capture --locked
+    LSR_SIM_BASE_SEED={{base}} LSR_SIM_SECONDS={{seconds}} cargo nextest run -p lsr-sim --test sim -E 'test(/^soak::/)' --run-ignored only --no-capture --locked
 
 # The nightly rotating seed set: seeds follow from the UTC date (YYYYMMDD), a million per night,
 # so no two nights share one and a night is rerun with `just sim-nightly <seconds> <YYYYMMDD>`.
 # A failing seed is printed last as its replay line. The arguments reach the test as environment
 # variables only, never as shell text.
 sim-nightly $LSR_SIM_SECONDS="900" $LSR_SIM_DAY=`date -u +%Y%m%d`:
-    env -u LSR_SIM_BASE_SEED cargo nextest run -p lsr-sim --test soak --run-ignored only --no-capture --locked
+    env -u LSR_SIM_BASE_SEED cargo nextest run -p lsr-sim --test sim -E 'test(/^soak::/)' --run-ignored only --no-capture --locked
 
 # Mutation testing for one crate (just mutants ltx); results in target/mutants/mutants.out.
 # Survivors are killed by a test or recorded in docs/mutants.md. Not part of check.
@@ -82,7 +82,7 @@ spawn name:
 # database past 1 GiB, one past 4 GiB (skipped below 20 GB free disk), a WAL past the sync cap.
 # Minutes and several gigabytes of temporary files; not part of check.
 sqlite-big:
-    cargo nextest run -p lsr-sqlite --test big --run-ignored only --no-capture --locked
+    cargo nextest run -p lsr-sqlite --test sqlite -E 'test(/^big::/)' --run-ignored only --no-capture --locked
 
 # Build the pinned Go binaries and their VFS extensions, then run the live checks against them
 # (not part of check; the VFS test also needs a C compiler and the SQLite headers).
@@ -92,7 +92,7 @@ sqlite-big:
 # The ledger's counterpart check is ignored too, but it needs the listing ledger-fresh writes.
 compat:
     ./scripts/build-go-litestream.sh
-    cargo nextest run -p lsr-compat --run-ignored all --locked -E 'not test(every_counterpart_exists)'
+    cargo nextest run -p lsr-compat --run-ignored all --locked -E 'not test(=ledger::every_counterpart_exists)'
 
 # Build the named Go versions (tags, commits, `releases` for every v0.5.N tag, `main` for
 # upstream's tip) and run the live tests over exactly those: just compat-live v0.5.3 main.
@@ -127,7 +127,7 @@ fuzz-cmin target *args:
 
 # Rebuild the seed corpus from the Go-written fixtures, and the wal seeds from built and SQLite WALs.
 fuzz-seed:
-    cargo nextest run -p lsr-fuzzing --test seed --run-ignored only --locked
+    cargo nextest run -p lsr-fuzzing --test fuzzing -E 'test(/^seed::/)' --run-ignored only --locked
 
 # A throwaway MinIO in Docker for the S3 conformance suite (skips when Docker is down).
 minio-up:
@@ -142,17 +142,17 @@ test-s3: minio-up
     set -euo pipefail
     if ./scripts/minio.sh running; then
         LSR_MINIO_ENDPOINT="http://127.0.0.1:${LSR_MINIO_PORT:-9000}" \
-            cargo nextest run -p lsr-store-s3 --test minio --locked --no-fail-fast
+            cargo nextest run -p lsr-store-s3 --test store-s3 -E 'test(/^minio::/)' --locked --no-fail-fast
         LSR_MINIO_ENDPOINT="http://127.0.0.1:${LSR_MINIO_PORT:-9000}" LSR_S3_TRANSPORT=reqwest \
-            cargo nextest run -p lsr-store-s3 --features reqwest --test minio --locked --no-fail-fast
+            cargo nextest run -p lsr-store-s3 --features reqwest --test store-s3 -E 'test(/^minio::/)' --locked --no-fail-fast
         LSR_MINIO_ENDPOINT="http://127.0.0.1:${LSR_MINIO_PORT:-9000}" \
-            cargo nextest run -p lsr-cli --test s3 --locked --no-fail-fast
+            cargo nextest run -p lsr-cli --test cli -E 'test(/^s3::/)' --locked --no-fail-fast
     else
         echo "test-s3: MinIO is not running; S3 tests skipped"
     fi
 
 # Each restores what the other wrote at Latest, a txid and an instant, and they hand one prefix
-# over both ways, over the pinned builds (crates/compat/tests/s3.rs). Needs Docker; fails, never
+# over both ways, over the pinned builds (crates/compat/tests/compat/s3.rs). Needs Docker; fails, never
 # skips, when MinIO is not up. Never a real store: every AWS_* and LITESTREAM_* variable is unset
 # first, the tests read only the LSR_COMPAT_S3_* ones set here (MinIO's throwaway credentials
 # from scripts/minio.sh) and refuse any endpoint but loopback http.
@@ -172,14 +172,14 @@ compat-s3: minio-up
         LSR_COMPAT_S3_BUCKET=lsr-test \
         LSR_COMPAT_S3_ACCESS_KEY=lsrtestroot \
         LSR_COMPAT_S3_SECRET_KEY=lsrtest-throwaway-0000 \
-        cargo nextest run -p lsr-compat --test s3 --run-ignored all --locked --no-fail-fast
+        cargo nextest run -p lsr-compat --test compat -E 'test(/^s3::/)' --run-ignored all --locked --no-fail-fast
 
 # The two alternation runs (Go and Rust taking turns on one prefix, each turn killed at a
 # seeded point) over the pinned builds; compat-releases.yml prints the seed of a nightly run.
 # Both alternation runs with one seed: just compat-alternation <seed> replays a nightly failure.
 compat-alternation $LSR_ALTERNATION_SEED:
     ./scripts/build-go-litestream.sh
-    cargo nextest run -p lsr-compat --test alternation --test sidecar --run-ignored all --locked --no-fail-fast --no-capture -E 'test(go_and_rust_alternate_on_one_prefix) | test(go_and_rust_sidecars_alternate_on_one_config_file)'
+    cargo nextest run -p lsr-compat --test compat --run-ignored all --locked --no-fail-fast --no-capture -E 'test(go_and_rust_alternate_on_one_prefix) | test(go_and_rust_sidecars_alternate_on_one_config_file)'
 
 # The store and the conformance suite against the real Tigris bucket of task 8t.
 # Never part of check or CI: it needs credentials (a file outside the repo, or
@@ -187,7 +187,7 @@ compat-alternation $LSR_ALTERNATION_SEED:
 # Everything it writes sits under one run prefix, deleted afterwards with the aws CLI.
 test-tigris:
     # LSR_S3_TRANSPORT=reqwest runs the same tests over the reqwest client.
-    ./scripts/tigris.sh cargo nextest run -p lsr-store-s3 --features reqwest --test tigris --run-ignored only --no-capture --locked --no-fail-fast
+    ./scripts/tigris.sh cargo nextest run -p lsr-store-s3 --features reqwest --test store-s3 -E 'test(/^tigris::/)' --run-ignored only --no-capture --locked --no-fail-fast
 
 # Task 8t item 10: Go v0.5.18 replicates the compat workload straight to Tigris
 # (a few hundred files, levels 0 to 3 and 9), then `lsr verify`, and `lsr restore`
@@ -196,10 +196,10 @@ test-tigris:
 # refuses AWS_CA_BUNDLE with litestream's own HTTP client, so it is unset; Go reads
 # SSL_CERT_FILE for the same roots. Release build, so the elapsed times mean something.
 # LSR_TIGRIS_PAGE_SIZE, LSR_TIGRIS_GROW_MIB and LSR_TIGRIS_MIN_FILES make the run larger
-# (crates/cli/tests/tigris.rs); unset, it is the few-minute run.
+# (crates/cli/tests/cli/tigris.rs); unset, it is the few-minute run.
 tigris-restore:
     ./scripts/build-go-litestream.sh v0.5.18
-    env -u AWS_CA_BUNDLE ./scripts/tigris.sh cargo nextest run --release -p lsr-cli --test tigris --run-ignored only --no-capture --locked
+    env -u AWS_CA_BUNDLE ./scripts/tigris.sh cargo nextest run --release -p lsr-cli --test cli -E 'test(/^tigris::/)' --run-ignored only --no-capture --locked
 
 # The long soak of `lsr replicate` against the Tigris bucket (docs/plans/phase-3-syncing.md, task 9):
 # a synthetic writer for the given hours, a restore at Latest and at a random sampled transaction
@@ -207,7 +207,7 @@ tigris-restore:
 # printed as HOUR lines. Never part of check or CI. Afterwards, check that the run prefix lists
 # empty, multipart uploads included.
 soak-tigris hours:
-    LSR_SOAK_HOURS={{hours}} ./scripts/tigris.sh cargo nextest run --release -p lsr-cli --test soak_tigris --run-ignored only --no-capture --locked
+    LSR_SOAK_HOURS={{hours}} ./scripts/tigris.sh cargo nextest run --release -p lsr-cli --test cli -E 'test(/^soak_tigris::/)' --run-ignored only --no-capture --locked
 
 # Pinned upstream sources, read-only reference for the port and input to the compat harness.
 upstream:
@@ -229,7 +229,7 @@ ledger-fresh:
     mkdir -p "${CARGO_TARGET_DIR:-target}/ledger"
     list="$(cd "${CARGO_TARGET_DIR:-target}/ledger" && pwd)/rust-tests.txt"
     cargo nextest list --workspace --all-features --locked --run-ignored all --message-format oneline --color never > "$list"
-    LSR_LEDGER_RUST_TESTS="$list" cargo nextest run -p lsr-compat --test ledger --locked --run-ignored only -E 'test(every_counterpart_exists)'
+    LSR_LEDGER_RUST_TESTS="$list" cargo nextest run -p lsr-compat --test compat --locked --run-ignored only -E 'test(=ledger::every_counterpart_exists)'
 
 # Regenerate the upstream test names in docs/ledger/upstream-tests.txt from the pinned clones
 # (`just upstream` first). The ledger test in `check` reads this file, never the clone.
