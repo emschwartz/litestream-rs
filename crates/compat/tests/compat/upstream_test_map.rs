@@ -63,9 +63,32 @@ fn read(path: &PathBuf) -> String {
     fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
-fn test_map() -> TestMap {
+/// The file as written: the shared `[reasons]` table, then one table per upstream file.
+#[derive(Debug, Deserialize)]
+struct Doc {
+    #[serde(default)]
+    reasons: BTreeMap<String, String>,
+    #[serde(flatten)]
+    files: TestMap,
+}
+
+fn doc() -> Doc {
     let path = docs().join("upstream-test-map.toml");
     toml::from_str(&read(&path)).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()))
+}
+
+/// The entries with each `reason = "@<id>"` replaced by the shared sentence it names.
+fn test_map() -> TestMap {
+    let Doc { reasons, mut files } = doc();
+    for entry in files.values_mut().flat_map(BTreeMap::values_mut) {
+        if let Some(id) = entry.reason.as_deref().and_then(|r| r.strip_prefix('@')) {
+            let text = reasons
+                .get(id)
+                .unwrap_or_else(|| panic!("reason \"@{id}\" is not defined in [reasons]"));
+            entry.reason = Some(text.clone());
+        }
+    }
+    files
 }
 
 /// The upstream names as `(file, name)`, from the script's tab-separated lines.
@@ -149,6 +172,22 @@ fn every_entry_names_an_upstream_test() {
         "docs/upstream-test-map.toml has entries for names upstream-tests.txt lacks:\n{}",
         stray.join("\n")
     );
+}
+
+/// Every shared reason is used by some entry: an id nothing names is dead text.
+#[test]
+fn every_shared_reason_is_used() {
+    let Doc { reasons, files } = doc();
+    let used: BTreeSet<&str> = files
+        .values()
+        .flat_map(BTreeMap::values)
+        .filter_map(|e| e.reason.as_deref()?.strip_prefix('@'))
+        .collect();
+    let unused: Vec<_> = reasons
+        .keys()
+        .filter(|id| !used.contains(id.as_str()))
+        .collect();
+    assert!(unused.is_empty(), "unused shared reasons: {unused:?}");
 }
 
 /// Each entry has exactly one of the three keys, none of them empty.
