@@ -162,6 +162,7 @@ Same run and probe file.
 |---|---|---|
 | S6, YAML fidelity against Go's `gopkg.in/yaml.v2` | answered | `saphyr-parser` 0.3.4 (MIT OR Apache-2.0, no `unsafe` of its own, one new transitive crate `arraydeque` 0.5.1, MIT OR Apache-2.0) as an event parser, with yaml.v2's YAML 1.1 resolution and decode rules ported into `lsr-config`. Every reading Go makes is reproduced except where the table below says v1 refuses. See below. |
 | S7, the host's automatic checkpoints against a pin in another process | answered | Harmless to the replica, and no snapshot. With the pin on a read mark above 0, the host's automatic PASSIVE backfills exactly to the pin's mark and the WAL never restarts; with the pin on read mark 0 (where every full checkpoint of the replicator's own leaves it), the WAL restarts once at the next write and the host's checkpoints then backfill nothing at all. The WAL grows until the replicator's own checkpoint. The engine restores every commit either way. See below. |
+| #19, why a large restore took twice Go's time | answered | Mostly local: the LTX CRC-64 did one table lookup per byte (about 390 MB/s) over every decompressed page, 13 of the 16 s of decoding a 4.8 GiB snapshot. Slice-by-16 takes a local Latest restore of a 4.8 GiB, 16 KiB-page Go replica from 27 s to 10.8 s (Go v0.5.18: 45 s). Sequential 4 MiB GETs cost 5 to 9 s of the 49 s seen on Tigris; read-ahead of one chunk is the next step if a Tigris re-run still trails Go. See below. |
 
 ## S6: YAML fidelity against yaml.v2
 
@@ -233,3 +234,41 @@ So:
 4. Nothing here argues for revisiting the no-TRUNCATE default: the host's checkpoints are PASSIVE, and the replicator's own PASSIVE finishes whenever no host read transaction is open.
 
 Not measured: the plan's ten-minute run of `lsr replicate` beside a host (that command is still being built on another branch), and the repeat at `wal_autocheckpoint = 0`, which runs no host checkpoint at all, so its counts follow from the second half above. A host's explicit RESTART or TRUNCATE against the pin is covered, in one process, by `outside_restart_against_pin_above_zero` and `outside_truncate_against_pin_above_zero` (`crates/compat/tests/live_source.rs`); task 8 runs the fault suite across processes.
+
+## #19: why a large restore took twice Go's time
+
+Reported (issue #19, 2026-11-21): a 4.5 GiB database, 16 KiB pages, 295,665 pages, Go-written replica on Tigris. Latest took 49 s in Rust against 25.6 s in Go over 29 files (113 MB): 10 LIST and 53 GET, one 51 MB snapshot read in 13 ranged GETs and 23 s (Go 14.9 s). A follow-up run put each 4 MiB GET at 0.10 to 0.17 s. At 10 MB the two were even.
+
+**Reproduction, no network.** Run on 2026-11-21, Linux 6.18 x86_64, 4 cores, 15 GiB RAM, ext4 on a virtual disk, warm page cache. A database of 312,199 pages of 16 KiB (4.76 GiB; rows of 16 random bytes and 3000 zero bytes, so it compresses about 55 to 1 like the reported one) was replicated by Go v0.5.18 to a file replica (levels 5 s, 20 s, 60 s), then 60 rounds of 3000 random-row updates three seconds apart. Latest plans 5 files, 124 MB: a 91 MB L3 snapshot-from-1, an 18.8 MB L3 file and three L2 files of 4 to 5 MB; 428,557 pages applied. Rust and Go outputs are byte-identical (`cmp`). Rust is the release `lsr restore`; Go is `litestream restore -o <out> file://<replica>`.
+
+| | wall | user | sys |
+|---|---|---|---|
+| Rust before (one-table CRC) | 25.4, 27.4, 28.8 s | 21.2 s | 2.2 s |
+| Rust after (slice-by-16 CRC) | 10.6, 10.9, 10.8 s | 6.5 s | 2.7 s |
+| Go v0.5.18 | 45.4, 44.7, 45.0 s | 35.4 s | 6.4 s |
+
+Where the Rust time went (before), from a throwaway decode harness over the snapshot file in memory and `strace -c`:
+
+| Part | Before | After | How measured |
+|---|---|---|---|
+| decode of the 91 MB snapshot (312,200 pages, 5.1 GB out) | 16.1 s (318 MB/s) | 4.4 s (1,160 MB/s) | `Decoder::feed` in 4 MiB chunks, as `restore` does |
+| of which CRC-64 over the same bytes | 13.0 s (393 MB/s) | 2.0 s (2,500 MB/s) | `Checksum::of_page` over 312,200 pages |
+| of which LZ4 and the rest | about 3 s | about 2.4 s | the difference |
+| page writes | 428,557 `write` + 428,588 `lseek`, about 2 s of system time | same | `strace -c`, `time` |
+| fsync (scratch, then directory twice) | 1.8 s wall | same | `strace -w -c` |
+| store reads | 583 `read`, under 0.1 s | same | `strace -c` |
+| end-state database checksum | not run: Go v0.5.18 does not track the post-apply checksum | | the restore's own report |
+
+**Cause.** The LTX CRC-64 used the `crc` crate's default, one 256-entry table and one lookup per byte. A restore hashes every decompressed page into the file checksum (and, for a tracked snapshot, into the database checksum too), so the CRC bounded the decoder at about 390 MB/s: 3.15 s per GB of pages, against 0.86 s per GB after. Over the network this CPU time is added to, not overlapped with, the reads, because a chunk is read and then decoded before the next is asked for. Go hashes with slicing-by-8, and its 32 concurrent file streams overlap its CPU with the transfer; locally its compactor costs it more CPU than Rust spends, which is why locally Go is the slower one.
+
+**Fix (this branch).** `lsr-ltx` now runs the CRC slice-by-16: sixteen tables, 32 KiB, built at compile time; no new dependency, no caching, no concurrency, memory per file unchanged. The values are the same CRC, pinned by property tests against a bit-at-a-time reference over arbitrary lengths and splits, plus the catalogue check value. Writing gains too: the encoder hashes every page with the same CRC.
+
+**What the network adds.** Reads are sequential, 4 MiB per GET, and each file costs at least one. At the observed 0.10 to 0.17 s per 4 MiB GET, 53 GETs are 5.3 to 9.0 s; the latency part alone, at the 8t HEAD round trip (p50 84.7 ms, p95 175.8 ms), is 4.5 to 9.3 s. Against the 49 s total that is the smaller part: on the reported snapshot (295,665 pages, 4.84 GB decompressed) the old CRC alone predicts about 15 s of decode (3.15 s per GB) out of its 23 s, leaving about 8 s for its 13 GETs, which matches the observed GET times. With the fix that file's decode drops to about 4 s, so it should take about 12 s against Go's 14.9 s. Not yet re-measured on Tigris; that run is the next step and decides whether anything below is worth doing.
+
+Options for the network part, none done here:
+
+1. **Larger chunks** (16 MiB). Fewer round trips only within large files: the reported restore drops from 53 GETs to at least 29 (one per file), saving at most 24 round trips, about 2 s at p50. Memory per restore rises from 4 MiB to 16 MiB plus a page. One-line change, no concurrency.
+2. **Read-ahead of one chunk** (recommended). While chunk n decodes, the GET for chunk n+1 (or the first chunk of the next file) is in flight, on the same task with no thread. It hides the smaller of transfer and decode per chunk, so up to the whole 5 to 9 s of GET time on this shape, with memory fixed at two chunks (8 MiB). Costs: one request in flight beside the decode (the concurrency the rules ask a measurement for, which this note supplies), a read that must be dropped cleanly on a decode error or a vanished file, and a test that the second read never starts past the end of a file the decoder has finished.
+3. **Parallel files within a memory bound** (Go opens up to 32 files at once). Files must apply oldest first, so later files' bytes wait in memory, bounded by files in flight times chunk size, or the restore must merge streams the way Go's compactor does. Helps chains of many small files (round-trip bound), where option 2 already overlaps most of it; the largest change and the most memory.
+
+Recommendation: land the CRC fix, re-run the Tigris restore, and do option 2 only if Rust is still behind Go there.

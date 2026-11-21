@@ -1111,11 +1111,14 @@ lsr-local tests::the_check_reads_the_scratch_as_it_is_at_publish
 lsr-local tests::the_scratch_is_removed_on_drop_unless_published
 lsr-local tests::the_scratch_is_the_target_name_plus_restore
 lsr-local tests::truncate_sets_the_exact_length_and_growth_reads_as_zeros
+lsr-ltx checksum::tests::a_page_checksum_is_the_bitwise_crc_of_number_and_bytes
 lsr-ltx checksum::tests::checksums_print_as_sixteen_hex_digits
 lsr-ltx checksum::tests::database_checksum_is_incremental
 lsr-ltx checksum::tests::page_checksum_always_carries_the_flag
 lsr-ltx checksum::tests::page_checksum_matches_go
 lsr-ltx checksum::tests::raw_checksum_needs_the_flag
+lsr-ltx checksum::tests::the_crc_is_go_iso_on_its_check_string
+lsr-ltx checksum::tests::the_sliced_crc_equals_the_bitwise_one
 lsr-ltx encoder::tests::bytes_drained_between_pages_reassemble_into_the_same_verified_file
 lsr-ltx encoder::tests::commit_zero_file_decodes_to_a_verified_empty_file
 lsr-ltx frame::tests::frame_limit_is_enforced_mid_frame_and_exactly_at_the_limit
