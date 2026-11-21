@@ -1136,6 +1136,9 @@ lsr-ltx::ltx fixtures::go_fixtures_decode_to_what_go_read
 lsr-ltx::ltx fixtures::page_index_reads_every_page_out_of_order
 lsr-ltx::ltx fixtures::re_encoded_fixtures_decode_to_the_same_pages
 lsr-ltx::ltx fixtures::read_decoder_matches_the_push_decoder
+lsr-ltx::ltx page_64k::an_incompressible_64k_page_decodes_from_an_lz4_frame
+lsr-ltx::ltx page_64k::an_incompressible_64k_page_round_trips_block_encoded
+lsr-ltx::ltx page_64k::the_page_is_incompressible
 lsr-ltx::ltx pins::decoder_header_appears_with_the_header_event_and_stays
 lsr-ltx::ltx pins::index_frame_sizes_are_accepted_at_both_bounds_and_refused_beyond
 lsr-ltx::ltx pins::trailer_encodes_post_apply_then_file_checksum_big_endian

@@ -16,6 +16,8 @@ mod errors;
 #[cfg(test)]
 mod fixtures;
 #[cfg(test)]
+mod page_64k;
+#[cfg(test)]
 mod pins;
 #[cfg(test)]
 mod roundtrip;

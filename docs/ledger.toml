@@ -1530,7 +1530,7 @@
 "TestDecoder" = { counterpart = ["lsr-ltx::ltx::fixtures::go_fixtures_decode_to_what_go_read", "lsr-ltx::ltx::roundtrip::encode_then_decode_is_identity"] }
 "TestDecoder_64KBPageSize" = { counterpart = "lsr-ltx::ltx::fixtures::fixtures_cover_both_page_encodings" }
 "TestDecoder_64KBPageSize/Compressible" = { counterpart = ["lsr-ltx::ltx::fixtures::go_fixtures_decode_to_what_go_read", "lsr-ltx::ltx::fixtures::re_encoded_fixtures_decode_to_the_same_pages"] }
-"TestDecoder_64KBPageSize/Incompressible" = { missing = "A 64 KiB page of random bytes (LZ4 cannot shrink it) encodes and decodes to the same page; the round-trip property draws page sizes up to 4096 only and the 65536 fixtures are compressible." }
+"TestDecoder_64KBPageSize/Incompressible" = { counterpart = ["lsr-ltx::ltx::page_64k::an_incompressible_64k_page_round_trips_block_encoded", "lsr-ltx::ltx::page_64k::an_incompressible_64k_page_decodes_from_an_lz4_frame"] }
 "TestDecoder_DecodeDatabaseTo" = { counterpart = "lsr-core::restore::tests::applies_files_oldest_first_and_newest_page_wins" }
 "TestDecoder_DecodeDatabaseTo/ErrNonSnapshot" = { counterpart = "lsr-core::restore::tests::a_level_zero_file_named_from_one_whose_header_is_not_a_snapshot_is_rejected" }
 "TestDecoder_DecodeDatabaseTo/OK" = { counterpart = "lsr-core::restore::tests::restore_equals_the_model_at_every_transaction" }
