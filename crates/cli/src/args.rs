@@ -20,7 +20,7 @@
 use std::path::PathBuf;
 
 use lsr_config::{ReplicaProblem, S3Overrides, S3Url, s3_config};
-use lsr_core::{Depth, RestoreTarget};
+use lsr_core::{AsOfInside, Depth, RestoreTarget};
 use lsr_local::IntegrityCheck;
 use lsr_ltx::{ParseTxidError, Timestamp, TimestampParseError, Txid};
 use lsr_store_s3::{ConfigError, Endpoint, Region, S3Config};
@@ -141,6 +141,13 @@ pub const FLAGS: &[FlagSpec] = &[
         required: false,
         commands: &[CommandName::Restore],
         help: "restore the newest state created before this instant (not with --txid)",
+    },
+    FlagSpec {
+        name: "--allow-earlier",
+        value: None,
+        required: false,
+        commands: &[CommandName::Restore],
+        help: "With --timestamp, restore the newest state provably before the instant when the instant falls inside a compacted file, instead of refusing.",
     },
     FlagSpec {
         name: "--clear-sidecars",
@@ -276,6 +283,8 @@ pub struct RestoreArgs {
     pub output: PathBuf,
     /// The state to rebuild.
     pub target: RestoreTarget,
+    /// What to do when `--timestamp` falls inside a compacted file.
+    pub as_of_inside: AsOfInside,
     /// Whether to remove stale sidecars first.
     pub clear_sidecars: bool,
     /// SQLite's check of the result before it is published.
@@ -355,6 +364,9 @@ pub enum UsageError {
     /// Both `--txid` and `--timestamp`.
     #[error("give --txid or --timestamp, not both")]
     ConflictingTargets,
+    /// `--allow-earlier` without `--timestamp`.
+    #[error("--allow-earlier needs --timestamp")]
+    AllowEarlierWithoutTimestamp,
     /// A bare word where a flag belongs.
     #[error("unexpected argument {argument:?}")]
     UnexpectedArgument {
@@ -572,6 +584,16 @@ impl Flags {
         }
     }
 
+    fn as_of_inside(&self, target: RestoreTarget) -> Result<AsOfInside, UsageError> {
+        match (self.has("--allow-earlier"), target) {
+            (false, _) => Ok(AsOfInside::Refuse),
+            (true, RestoreTarget::AsOf(_)) => Ok(AsOfInside::TakeEarlier),
+            (true, RestoreTarget::Latest | RestoreTarget::Txid(_)) => {
+                Err(UsageError::AllowEarlierWithoutTimestamp)
+            }
+        }
+    }
+
     fn depth(&self) -> Result<Depth, UsageError> {
         match self.value("--depth") {
             None | Some("contents") => Ok(Depth::Contents),
@@ -625,17 +647,21 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
         Scan::Flags(seen) => Flags { command, seen },
     };
     Ok(match command {
-        CommandName::Restore => Command::Restore(RestoreArgs {
-            replica: flags.replica()?,
-            output: PathBuf::from(flags.require("--output")?),
-            target: flags.target()?,
-            clear_sidecars: flags.has("--clear-sidecars"),
-            integrity_check: flags.integrity_check()?,
-            if_db_not_exists: flags.has("--if-db-not-exists"),
-            if_replica_exists: flags.has("--if-replica-exists"),
-            dry_run: flags.has("--dry-run"),
-            json: flags.has("--json"),
-        }),
+        CommandName::Restore => {
+            let target = flags.target()?;
+            Command::Restore(RestoreArgs {
+                replica: flags.replica()?,
+                output: PathBuf::from(flags.require("--output")?),
+                target,
+                as_of_inside: flags.as_of_inside(target)?,
+                clear_sidecars: flags.has("--clear-sidecars"),
+                integrity_check: flags.integrity_check()?,
+                if_db_not_exists: flags.has("--if-db-not-exists"),
+                if_replica_exists: flags.has("--if-replica-exists"),
+                dry_run: flags.has("--dry-run"),
+                json: flags.has("--json"),
+            })
+        }
         CommandName::Verify => Command::Verify(VerifyArgs {
             replica: flags.replica()?,
             depth: flags.depth()?,

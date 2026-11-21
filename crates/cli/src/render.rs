@@ -158,11 +158,16 @@ pub fn plan_outcome(outcome: &PlanOutcome) -> String {
         PlanOutcome::BeyondNewest { requested, newest } => {
             format!("transaction {requested} is beyond the newest, {newest}")
         }
-        PlanOutcome::AsOfInsideFile { chain, file } => format!(
-            "the instant falls inside {}; the newest state before it ends at transaction {}",
-            key_path(file),
-            chain.reaches()
-        ),
+        PlanOutcome::AsOfInsideFile { chain, file } => {
+            format!(
+                "the instant falls inside {}; the newest state before it ends at transaction {}",
+                key_path(file),
+                chain.reaches()
+            ) + &format!(
+                "; rerun with --allow-earlier to restore that state, or with --txid {}",
+                chain.reaches()
+            )
+        }
         PlanOutcome::Gap {
             have_through,
             next_starts,
@@ -236,6 +241,30 @@ fn restore(done: &RestoreDone) -> String {
     }
 }
 
+/// The stderr lines of a finished command: a restore that accepted an instant
+/// inside a compacted file says so, since its database may lack transactions
+/// committed before the instant.
+pub fn warnings(done: &Done) -> String {
+    let Done::Restore(done) = done else {
+        return String::new();
+    };
+    match &done.finished {
+        Finished::Restored { restored, .. } => {
+            restored.inside_file().map_or_else(String::new, |file| {
+                inside_warning(&file, restored.reached())
+            })
+        }
+        Finished::Planned { .. } | Finished::Skipped { .. } => String::new(),
+    }
+}
+
+fn inside_warning(file: &FileKey, reached: Txid) -> String {
+    format!(
+        "warning: the instant falls inside {}; restored the state at transaction {reached}, which may leave out transactions committed before the instant\n",
+        key_path(file)
+    )
+}
+
 /// Go's `-integrity-check` word for the check.
 const fn integrity_word(check: IntegrityCheck) -> &'static str {
     match check {
@@ -269,7 +298,7 @@ fn restored_json(
     integrity_check: IntegrityCheck,
     elapsed: Duration,
 ) -> String {
-    let mut out = object(&[
+    let mut fields = vec![
         ("db_path", quote(&output.display().to_string())),
         ("replica", quote(source.kind().word())),
         ("txid", quote(&restored.reached().to_string())),
@@ -285,7 +314,11 @@ fn restored_json(
             restored.post_apply().is_some().to_string(),
         ),
         ("sidecars_removed", path_array(cleared)),
-    ]);
+    ];
+    if let Some(file) = restored.inside_file() {
+        fields.push(("inside_file", quote(&key_path(&file))));
+    }
+    let mut out = object(&fields);
     out.push('\n');
     out
 }

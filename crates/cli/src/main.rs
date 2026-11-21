@@ -47,7 +47,12 @@ fn finish() -> Exit {
         Ok(done) => {
             let exit = run::exit_for_done(&done);
             match emit(io::stdout().lock(), &render::done(&done)) {
-                Ok(()) => exit,
+                Ok(()) => {
+                    if emit(io::stderr().lock(), &render::warnings(&done)).is_err() {
+                        // A warning that cannot be written has nowhere else to go.
+                    }
+                    exit
+                }
                 Err(err) => report(&CliError::Output(err)),
             }
         }

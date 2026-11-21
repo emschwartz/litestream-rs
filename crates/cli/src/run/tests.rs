@@ -195,6 +195,7 @@ fn outcome(output: &Path, done: Result<Finished, CliError>) -> Outcome {
 fn how(target: RestoreTarget) -> How {
     How {
         target,
+        as_of_inside: AsOfInside::Refuse,
         clear_sidecars_first: false,
         integrity_check: IntegrityCheck::Off,
         if_replica_exists: false,

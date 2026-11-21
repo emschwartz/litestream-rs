@@ -1,6 +1,7 @@
 use lsr_store_s3::{Provider, UrlStyle};
 
 use super::*;
+use lsr_core::AsOfInside;
 
 fn words(line: &str) -> Vec<String> {
     line.split_whitespace().map(str::to_owned).collect()
@@ -26,6 +27,7 @@ fn restore_latest_is_the_default_target() {
             replica: Replica::Dir("r".into()),
             output: "o".into(),
             target: RestoreTarget::Latest,
+            as_of_inside: AsOfInside::Refuse,
             clear_sidecars: false,
             integrity_check: IntegrityCheck::Off,
             if_db_not_exists: false,
@@ -250,6 +252,39 @@ fn two_targets_at_once() {
         ),
         UsageError::ConflictingTargets
     );
+}
+
+#[test]
+fn allow_earlier_takes_the_earlier_state_for_a_timestamp() {
+    let line = "restore --replica r --output o --timestamp 2026-01-01T00:00:00Z";
+    let Ok(Command::Restore(plain)) = parsed(line) else {
+        panic!("not a restore");
+    };
+    assert_eq!(plain.as_of_inside, AsOfInside::Refuse);
+    let Ok(Command::Restore(accepting)) = parsed(&format!("{line} --allow-earlier")) else {
+        panic!("not a restore");
+    };
+    assert_eq!(accepting.as_of_inside, AsOfInside::TakeEarlier);
+}
+
+#[test]
+fn allow_earlier_without_a_timestamp_is_a_usage_error() {
+    for target in ["", "--txid 0000000000000001"] {
+        assert_eq!(
+            usage(&format!(
+                "restore --replica r --output o {target} --allow-earlier"
+            )),
+            UsageError::AllowEarlierWithoutTimestamp
+        );
+    }
+    assert_eq!(
+        UsageError::AllowEarlierWithoutTimestamp.to_string(),
+        "--allow-earlier needs --timestamp"
+    );
+    assert!(matches!(
+        parsed("verify --replica r --allow-earlier"),
+        Err(UsageError::UnknownFlag { .. })
+    ));
 }
 
 #[test]
@@ -572,6 +607,11 @@ fn every_flag_in_the_table_is_accepted_by_its_commands() {
                 "r"
             };
             let base = match command {
+                CommandName::Restore if spec.name == "--allow-earlier" => {
+                    format!(
+                        "restore --replica {replica} --output o --timestamp 2026-01-01T00:00:00Z"
+                    )
+                }
                 CommandName::Restore => format!("restore --replica {replica} --output o"),
                 CommandName::Verify => format!("verify --replica {replica}"),
                 CommandName::Files => format!("files --replica {replica}"),

@@ -11,8 +11,8 @@
 //! is polling that condition. Each target is restored three ways: in process
 //! over a request-counting transport (the counts and elapsed time of the
 //! report), by the built `lsr`, and by Go. An as-of instant that falls inside a
-//! compacted file is refused by Rust (`AsOfInsideFile`, by design) and compared
-//! through the chain's own end, as `crates/compat/tests/compat/matrix.rs` does.
+//! compacted file is refused by Rust (`AsOfInsideFile`, by design); `lsr restore
+//! --allow-earlier` at the same instant is then compared with Go's restore on pages.
 //!
 //! The run's size comes from the environment (see [`Size`]): by default a 4096-byte-page
 //! database of about 10 MB; `LSR_TIGRIS_PAGE_SIZE=16384 LSR_TIGRIS_GROW_MIB=4608 just
@@ -492,7 +492,7 @@ fn grow<S: ObjectStore>(live: &mut Live, store: &S, size: Size) {
 enum Verdict {
     /// Rust (in process and `lsr`) and Go restored equal pages, integrity ok.
     Same { reached: u64 },
-    /// Rust refused `AsOfInsideFile`; the chain's own end equals Go's as-of restore.
+    /// Rust refused `AsOfInsideFile`; `--allow-earlier` restored the pages Go restored.
     ViaInsideFile { reaches: u64 },
     /// Both refused.
     BothRefuse { rust: String, go: String },
@@ -505,7 +505,7 @@ impl Verdict {
         match self {
             Self::Same { reached } => format!("same pages, txid {reached:x}"),
             Self::ViaInsideFile { reaches } => {
-                format!("rust AsOfInsideFile; chain end {reaches:x} same pages as go")
+                format!("rust AsOfInsideFile; --allow-earlier at {reaches:x} same pages as go")
             }
             Self::BothRefuse { rust, go } => format!("both refuse: rust {rust}; go {go}"),
             Self::Mismatch(what) => format!("MISMATCH {what}"),
@@ -637,9 +637,23 @@ impl Ctx<'_> {
             {
                 let reaches = chain.reaches().get();
                 let chain_out = self.out(n, "lsr-chain");
-                let (run, _) = self.cli(Target::Txid { txid: reaches }, &chain_out);
+                let mut extra = lsr_target(target);
+                extra.extend([
+                    "--allow-earlier".into(),
+                    "--output".into(),
+                    chain_out.display().to_string(),
+                ]);
+                let extra: Vec<&str> = extra.iter().map(String::as_str).collect();
+                let (run, _) = self.b.lsr("restore", &extra);
+                let warned = run.stderr.starts_with("warning: the instant falls inside ")
+                    && run.stderr.contains(&format!(
+                        "restored the state at transaction {:016x},",
+                        reaches
+                    ));
                 match (cli.code, run.code, checked(&chain_out), checked(go_out)) {
-                    (2, 0, Ok(a), Ok(g)) if a == g && matches!(target, Target::AsOf { .. }) => {
+                    (2, 0, Ok(a), Ok(g))
+                        if a == g && warned && matches!(target, Target::AsOf { .. }) =>
+                    {
                         Verdict::ViaInsideFile { reaches }
                     }
                     other => Verdict::Mismatch(format!(

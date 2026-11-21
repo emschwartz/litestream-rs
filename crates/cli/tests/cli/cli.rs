@@ -96,6 +96,35 @@ fn assert_pages_equal(path: &Path, want: &Outcome, label: &str) {
     assert_eq!(&got.page_hashes, page_hashes, "{label}: page hashes");
 }
 
+/// The refusal names the way out, and `--allow-earlier` then restores the pages Go wrote for
+/// the same instant, with the warning on stderr and the file in the JSON.
+fn assert_accepting_matches_go(
+    staged: &Staged,
+    entry: &lsr_compat::TargetEntry,
+    refusal: &str,
+    label: &str,
+) {
+    assert!(
+        refusal.contains("; rerun with --allow-earlier to restore that state, or with --txid "),
+        "{label}: {refusal}"
+    );
+    let mut flags = target_flags(entry.target);
+    flags.extend(["--allow-earlier".to_owned(), "--json".to_owned()]);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let output = dir.path().join("out.db");
+    let run = restore(staged, &output, &flags);
+    assert_eq!(run.code, 0, "{label}: {}", run.stderr);
+    assert_pages_equal(&output, &entry.outcome, label);
+    let json = json_of(&run);
+    let file = json["inside_file"].as_str().expect("inside_file");
+    assert!(file.starts_with("ltx/"), "{label}: {file}");
+    let want = format!(
+        "warning: the instant falls inside {file}; restored the state at transaction {}, which may leave out transactions committed before the instant\n",
+        json["txid"].as_str().expect("txid")
+    );
+    assert_eq!(run.stderr, want, "{label}");
+}
+
 /// Every target of every fixture: the pages Go wrote, or a refusal that leaves nothing.
 #[test]
 fn every_target_matches_the_manifest() {
@@ -131,6 +160,7 @@ fn every_target_matches_the_manifest() {
                         run.stderr
                     );
                     assert!(dir_is_empty(dir.path()), "{label}");
+                    assert_accepting_matches_go(&staged, entry, &run.stderr, &label);
                     refused += 1;
                 }
                 Outcome::Gap {

@@ -28,9 +28,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use lsr_core::{
-    AsOfPlanner, ContiguousChain, Depth, Inventory, InventoryError, KeyTarget, ObjectStore,
-    PlanOutcome, Report, ResolveError, RestoreError, RestoreTarget, Restored, Severity,
-    VerifyError, plan, resolve, restore, verify,
+    AsOfInside, AsOfPlanner, ContiguousChain, Depth, Inventory, InventoryError, KeyTarget,
+    ObjectStore, PlanOutcome, Report, ResolveError, RestoreError, RestoreOptions, RestoreTarget,
+    Restored, Severity, VerifyError, plan, resolve, restore_with, verify,
 };
 use lsr_local::{
     ClearError, CreateError, FileSink, IntegrityCheck, IntegrityFailure, PublishError,
@@ -501,6 +501,7 @@ async fn restore_command(args: RestoreArgs) -> Result<Done, CliError> {
         replica,
         output,
         target,
+        as_of_inside,
         clear_sidecars,
         integrity_check,
         if_db_not_exists,
@@ -511,6 +512,7 @@ async fn restore_command(args: RestoreArgs) -> Result<Done, CliError> {
     let source = Source::of(&replica);
     let how = How {
         target,
+        as_of_inside,
         clear_sidecars_first: clear_sidecars,
         integrity_check,
         if_replica_exists,
@@ -610,6 +612,7 @@ fn output_exists(output: &Path) -> Result<bool, CliError> {
 /// How a restore runs, apart from where from and where to.
 struct How {
     target: RestoreTarget,
+    as_of_inside: AsOfInside,
     clear_sidecars_first: bool,
     integrity_check: IntegrityCheck,
     if_replica_exists: bool,
@@ -630,6 +633,7 @@ async fn restore_on<S: ObjectStore>(
 ) -> Result<Finished, CliError> {
     let How {
         target,
+        as_of_inside,
         clear_sidecars_first,
         integrity_check,
         if_replica_exists,
@@ -642,7 +646,8 @@ async fn restore_on<S: ObjectStore>(
     };
     let attempt = async {
         let sink = FileSink::create(output)?.with_integrity_check(integrity_check);
-        let restored = restore(store, target, sink).await?;
+        let options = RestoreOptions { as_of_inside };
+        let restored = restore_with(store, target, options, sink).await?;
         Ok::<_, CliError>(restored)
     }
     .await;
@@ -681,6 +686,15 @@ async fn plan_on<S: ObjectStore>(store: &S, output: &Path, how: How) -> Result<F
     let inventory = Inventory::load(store).await?;
     let (outcome, stamps_read) = plan_target(store, &inventory, how.target).await?;
     match outcome {
+        PlanOutcome::AsOfInsideFile { chain, .. }
+            if how.as_of_inside == AsOfInside::TakeEarlier =>
+        {
+            Ok(Finished::Planned {
+                chain,
+                stamps_read,
+                sidecars_to_remove,
+            })
+        }
         PlanOutcome::Plan(chain) => Ok(Finished::Planned {
             chain,
             stamps_read,
