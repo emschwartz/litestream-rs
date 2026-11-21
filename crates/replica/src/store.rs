@@ -1,0 +1,478 @@
+//! The host's store, type-erased, and the counters every call through it feeds.
+//!
+//! `ObjectStore` returns `impl Future`, so it cannot be a trait object. [`DynStore`] is the
+//! same contract with each call's future boxed (one allocation per call, next to an HTTP
+//! request or a file operation), so the engine is compiled once inside this crate rather than
+//! once per host store type. Every `ObjectStore` is a `DynStore`, and `dyn DynStore` is an
+//! `ObjectStore` again, so the same `Arc` serves the replicator, `restore` and `verify`.
+//!
+//! [`Metered`] wraps the replica's store inside the thread and counts each operation's calls,
+//! errors and time on the injected clock, and the bytes uploaded (Go's store metrics).
+
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use lsr_core::{
+    Clock, FileInfo, FileKey, Level, Listing, ObjectStore, PageLimit, ReadLen, StoreError,
+    StoredStamp, Upload,
+};
+use lsr_ltx::{Timestamp, TxidRange};
+
+use crate::health::{OpCounters, StoreCounters};
+use crate::runtime::millis_until;
+
+/// A boxed future that may move between threads.
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// [`ObjectStore`] with boxed futures, so a store can sit behind `Arc<dyn DynStore>`.
+/// Implemented for every `ObjectStore`; a host never implements it itself.
+pub trait DynStore: Send + Sync {
+    /// [`ObjectStore::list`].
+    fn list_boxed(
+        &self,
+        level: Level,
+        after: Option<TxidRange>,
+        limit: PageLimit,
+    ) -> BoxFuture<'_, Result<Listing, StoreError>>;
+
+    /// [`ObjectStore::read`].
+    fn read_boxed<'a>(
+        &'a self,
+        key: &'a FileKey,
+        offset: u64,
+        len: ReadLen,
+    ) -> BoxFuture<'a, Result<Vec<u8>, StoreError>>;
+
+    /// [`ObjectStore::stamp`].
+    fn stamp_boxed<'a>(
+        &'a self,
+        file: &'a FileInfo,
+    ) -> BoxFuture<'a, Result<StoredStamp, StoreError>>;
+
+    /// [`ObjectStore::read_with_stamp`].
+    fn read_with_stamp_boxed<'a>(
+        &'a self,
+        file: &'a FileInfo,
+        len: ReadLen,
+    ) -> BoxFuture<'a, Result<(Vec<u8>, StoredStamp), StoreError>>;
+
+    /// [`ObjectStore::begin_upload`].
+    fn begin_upload_boxed<'a>(
+        &'a self,
+        key: &'a FileKey,
+        created_at: Timestamp,
+    ) -> BoxFuture<'a, Result<Box<dyn DynUpload>, StoreError>>;
+
+    /// [`ObjectStore::delete`].
+    fn delete_boxed<'a>(&'a self, keys: &'a [FileKey]) -> BoxFuture<'a, Result<(), StoreError>>;
+}
+
+/// [`Upload`] with boxed futures.
+pub trait DynUpload: Send {
+    /// [`Upload::write`].
+    fn write_boxed<'a>(&'a mut self, chunk: &'a [u8]) -> BoxFuture<'a, Result<(), StoreError>>;
+    /// [`Upload::commit`].
+    fn commit_boxed(self: Box<Self>) -> BoxFuture<'static, Result<FileInfo, StoreError>>;
+    /// [`Upload::abort`].
+    fn abort_boxed(self: Box<Self>) -> BoxFuture<'static, Result<(), StoreError>>;
+}
+
+impl<U: Upload + 'static> DynUpload for U {
+    fn write_boxed<'a>(&'a mut self, chunk: &'a [u8]) -> BoxFuture<'a, Result<(), StoreError>> {
+        Box::pin(self.write(chunk))
+    }
+
+    fn commit_boxed(self: Box<Self>) -> BoxFuture<'static, Result<FileInfo, StoreError>> {
+        Box::pin((*self).commit())
+    }
+
+    fn abort_boxed(self: Box<Self>) -> BoxFuture<'static, Result<(), StoreError>> {
+        Box::pin((*self).abort())
+    }
+}
+
+impl<S> DynStore for S
+where
+    S: ObjectStore,
+    S::Upload: 'static,
+{
+    fn list_boxed(
+        &self,
+        level: Level,
+        after: Option<TxidRange>,
+        limit: PageLimit,
+    ) -> BoxFuture<'_, Result<Listing, StoreError>> {
+        Box::pin(self.list(level, after, limit))
+    }
+
+    fn read_boxed<'a>(
+        &'a self,
+        key: &'a FileKey,
+        offset: u64,
+        len: ReadLen,
+    ) -> BoxFuture<'a, Result<Vec<u8>, StoreError>> {
+        Box::pin(self.read(key, offset, len))
+    }
+
+    fn stamp_boxed<'a>(
+        &'a self,
+        file: &'a FileInfo,
+    ) -> BoxFuture<'a, Result<StoredStamp, StoreError>> {
+        Box::pin(self.stamp(file))
+    }
+
+    fn read_with_stamp_boxed<'a>(
+        &'a self,
+        file: &'a FileInfo,
+        len: ReadLen,
+    ) -> BoxFuture<'a, Result<(Vec<u8>, StoredStamp), StoreError>> {
+        Box::pin(self.read_with_stamp(file, len))
+    }
+
+    fn begin_upload_boxed<'a>(
+        &'a self,
+        key: &'a FileKey,
+        created_at: Timestamp,
+    ) -> BoxFuture<'a, Result<Box<dyn DynUpload>, StoreError>> {
+        let begun = self.begin_upload(key, created_at);
+        Box::pin(async move {
+            let upload: Box<dyn DynUpload> = Box::new(begun.await?);
+            Ok(upload)
+        })
+    }
+
+    fn delete_boxed<'a>(&'a self, keys: &'a [FileKey]) -> BoxFuture<'a, Result<(), StoreError>> {
+        Box::pin(self.delete(keys))
+    }
+}
+
+/// A type-erased upload as an [`Upload`] again. Each call names the trait object's method:
+/// `Box<dyn DynUpload>` is itself a `DynUpload` through the blanket impl, and a method call
+/// on the box would find that one and recurse.
+impl Upload for Box<dyn DynUpload> {
+    async fn write(&mut self, chunk: &[u8]) -> Result<(), StoreError> {
+        let upload: &mut dyn DynUpload = &mut **self;
+        upload.write_boxed(chunk).await
+    }
+
+    async fn commit(self) -> Result<FileInfo, StoreError> {
+        let upload: Box<dyn DynUpload> = self;
+        DynUpload::commit_boxed(upload).await
+    }
+
+    async fn abort(self) -> Result<(), StoreError> {
+        let upload: Box<dyn DynUpload> = self;
+        DynUpload::abort_boxed(upload).await
+    }
+}
+
+/// A borrowed `dyn DynStore` as a sized [`ObjectStore`], for the engine's functions, which
+/// take their store by type.
+#[derive(Clone, Copy)]
+pub(crate) struct Erased<'a>(pub(crate) &'a dyn DynStore);
+
+impl ObjectStore for Erased<'_> {
+    type Upload = Box<dyn DynUpload>;
+
+    async fn list(
+        &self,
+        level: Level,
+        after: Option<TxidRange>,
+        limit: PageLimit,
+    ) -> Result<Listing, StoreError> {
+        self.0.list_boxed(level, after, limit).await
+    }
+
+    async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
+        self.0.read_boxed(key, offset, len).await
+    }
+
+    async fn stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
+        self.0.stamp_boxed(file).await
+    }
+
+    async fn read_with_stamp(
+        &self,
+        file: &FileInfo,
+        len: ReadLen,
+    ) -> Result<(Vec<u8>, StoredStamp), StoreError> {
+        self.0.read_with_stamp_boxed(file, len).await
+    }
+
+    async fn begin_upload(
+        &self,
+        key: &FileKey,
+        created_at: Timestamp,
+    ) -> Result<Self::Upload, StoreError> {
+        self.0.begin_upload_boxed(key, created_at).await
+    }
+
+    async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
+        self.0.delete_boxed(keys).await
+    }
+}
+
+/// One operation's running totals.
+#[derive(Debug, Default)]
+pub(crate) struct OpMeter {
+    calls: AtomicU64,
+    errors: AtomicU64,
+    millis: AtomicU64,
+}
+
+impl OpMeter {
+    fn note<T>(&self, result: &Result<T, StoreError>, began: Timestamp, ended: Timestamp) {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        if result.is_err() {
+            self.errors.fetch_add(1, Ordering::Relaxed);
+        }
+        self.millis
+            .fetch_add(millis_until(began, ended), Ordering::Relaxed);
+    }
+
+    fn read(&self) -> OpCounters {
+        OpCounters {
+            calls: self.calls.load(Ordering::Relaxed),
+            errors: self.errors.load(Ordering::Relaxed),
+            millis: self.millis.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Every operation's totals, shared between the thread and the health snapshot.
+#[derive(Debug, Default)]
+pub(crate) struct Meters {
+    list: OpMeter,
+    read: OpMeter,
+    stamp: OpMeter,
+    begin_upload: OpMeter,
+    write: OpMeter,
+    commit: OpMeter,
+    abort: OpMeter,
+    delete: OpMeter,
+    bytes_uploaded: AtomicU64,
+}
+
+impl Meters {
+    pub(crate) fn read(&self) -> StoreCounters {
+        StoreCounters {
+            list: self.list.read(),
+            read: self.read.read(),
+            stamp: self.stamp.read(),
+            begin_upload: self.begin_upload.read(),
+            write: self.write.read(),
+            commit: self.commit.read(),
+            abort: self.abort.read(),
+            delete: self.delete.read(),
+            bytes_uploaded: self.bytes_uploaded.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// The replica's store as the thread uses it: every call counted.
+pub(crate) struct Metered {
+    store: Arc<dyn DynStore>,
+    meters: Arc<Meters>,
+    clock: Arc<dyn Clock>,
+}
+
+impl Metered {
+    pub(crate) const fn new(
+        store: Arc<dyn DynStore>,
+        meters: Arc<Meters>,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
+        Self {
+            store,
+            meters,
+            clock,
+        }
+    }
+}
+
+/// Runs `call`, counting it on `meter`.
+async fn metered<T>(
+    clock: &dyn Clock,
+    meter: &OpMeter,
+    call: impl Future<Output = Result<T, StoreError>>,
+) -> Result<T, StoreError> {
+    let began = clock.now();
+    let result = call.await;
+    meter.note(&result, began, clock.now());
+    result
+}
+
+/// An upload whose writes and commit are counted; the bytes count once committed.
+pub(crate) struct MeteredUpload {
+    inner: Box<dyn DynUpload>,
+    meters: Arc<Meters>,
+    clock: Arc<dyn Clock>,
+    written: u64,
+}
+
+impl Upload for MeteredUpload {
+    async fn write(&mut self, chunk: &[u8]) -> Result<(), StoreError> {
+        let clock = Arc::clone(&self.clock);
+        let meters = Arc::clone(&self.meters);
+        let result = metered(
+            &*clock,
+            &meters.write,
+            DynUpload::write_boxed(&mut *self.inner, chunk),
+        )
+        .await;
+        if result.is_ok() {
+            let len = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
+            self.written = self.written.saturating_add(len);
+        }
+        result
+    }
+
+    async fn commit(self) -> Result<FileInfo, StoreError> {
+        let result = metered(
+            &*self.clock,
+            &self.meters.commit,
+            DynUpload::commit_boxed(self.inner),
+        )
+        .await;
+        if result.is_ok() {
+            self.meters
+                .bytes_uploaded
+                .fetch_add(self.written, Ordering::Relaxed);
+        }
+        result
+    }
+
+    async fn abort(self) -> Result<(), StoreError> {
+        metered(
+            &*self.clock,
+            &self.meters.abort,
+            DynUpload::abort_boxed(self.inner),
+        )
+        .await
+    }
+}
+
+impl ObjectStore for Metered {
+    type Upload = MeteredUpload;
+
+    async fn list(
+        &self,
+        level: Level,
+        after: Option<TxidRange>,
+        limit: PageLimit,
+    ) -> Result<Listing, StoreError> {
+        let call = self.store.list_boxed(level, after, limit);
+        metered(&*self.clock, &self.meters.list, call).await
+    }
+
+    async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
+        let call = self.store.read_boxed(key, offset, len);
+        metered(&*self.clock, &self.meters.read, call).await
+    }
+
+    async fn stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
+        let call = self.store.stamp_boxed(file);
+        metered(&*self.clock, &self.meters.stamp, call).await
+    }
+
+    async fn read_with_stamp(
+        &self,
+        file: &FileInfo,
+        len: ReadLen,
+    ) -> Result<(Vec<u8>, StoredStamp), StoreError> {
+        let call = self.store.read_with_stamp_boxed(file, len);
+        metered(&*self.clock, &self.meters.read, call).await
+    }
+
+    async fn begin_upload(
+        &self,
+        key: &FileKey,
+        created_at: Timestamp,
+    ) -> Result<Self::Upload, StoreError> {
+        let call = self.store.begin_upload_boxed(key, created_at);
+        let inner = metered(&*self.clock, &self.meters.begin_upload, call).await?;
+        Ok(MeteredUpload {
+            inner,
+            meters: Arc::clone(&self.meters),
+            clock: Arc::clone(&self.clock),
+            written: 0,
+        })
+    }
+
+    async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
+        let call = self.store.delete_boxed(keys);
+        metered(&*self.clock, &self.meters.delete, call).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use lsr_core::conformance::{Failure, Harness, block_on};
+    use lsr_core::{FakeClock, MemStore};
+    use lsr_ltx::Txid;
+
+    use super::*;
+
+    /// The shared store conformance suite over `dyn DynStore`, so erasing a store changes
+    /// nothing a caller can see.
+    struct ErasedHarness {
+        mem: Arc<MemStore>,
+        erased: Erased<'static>,
+    }
+
+    impl ErasedHarness {
+        fn new() -> Self {
+            let mem = Arc::new(MemStore::new());
+            // Leaked so the harness can lend a `'static` trait object; a test's few bytes.
+            let held: &'static Arc<MemStore> = Box::leak(Box::new(Arc::clone(&mem)));
+            let erased: &'static dyn DynStore = &**held;
+            Self {
+                mem,
+                erased: Erased(erased),
+            }
+        }
+    }
+
+    impl Harness for ErasedHarness {
+        type Store = Erased<'static>;
+
+        fn store(&self) -> &Self::Store {
+            &self.erased
+        }
+
+        fn plant_foreign(&self, level: Level, name: &str) -> Result<(), Failure> {
+            self.mem.plant_foreign(level, name);
+            Ok(())
+        }
+    }
+
+    lsr_core::conformance_suite!(ErasedHarness::new);
+
+    #[test]
+    fn metered_calls_and_bytes_are_counted() {
+        let store: Arc<dyn DynStore> = Arc::new(MemStore::new());
+        let meters = Arc::new(Meters::default());
+        let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(Timestamp::from_unix_millis(0)));
+        let metered = Metered::new(store, Arc::clone(&meters), clock);
+        let key = FileKey::new(Level::ZERO, TxidRange::new(Txid::MIN, Txid::MIN).unwrap());
+        block_on(async {
+            let mut upload = metered
+                .begin_upload(&key, Timestamp::from_unix_millis(0))
+                .await
+                .unwrap();
+            upload.write(b"abc").await.unwrap();
+            upload.commit().await.unwrap();
+            metered
+                .list(Level::ZERO, None, PageLimit::MAX)
+                .await
+                .unwrap();
+        });
+        let counted = meters.read();
+        assert_eq!(counted.bytes_uploaded, 3);
+        assert_eq!(counted.commit.calls, 1);
+        assert_eq!(counted.list.calls, 1);
+        assert_eq!(counted.list.errors, 0);
+    }
+}

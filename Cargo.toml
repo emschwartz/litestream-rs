@@ -16,6 +16,7 @@ publish = false
 lsr-compat = { path = "crates/compat" }
 lsr-core = { path = "crates/core" }
 lsr-local = { path = "crates/local" }
+lsr-replica = { path = "crates/replica" }
 lsr-ltx = { path = "crates/ltx" }
 lsr-sim = { path = "crates/sim" }
 lsr-sqlite = { path = "crates/sqlite" }
@@ -38,6 +39,8 @@ saphyr-parser = { version = "0.3.4", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1", default-features = false, features = ["std"] }
 sha2 = { version = "0.11.1", default-features = false }
+# The CLI's `replicate` waits for SIGINT, SIGTERM and SIGHUP without unsafe code of its own.
+signal-hook = { version = "0.3.18", default-features = false, features = ["iterator"] }
 tempfile = { version = "3", default-features = false }
 thiserror = "2.0.21"
 tokio = { version = "1", default-features = false, features = ["rt"] }

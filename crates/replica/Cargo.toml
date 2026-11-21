@@ -1,0 +1,32 @@
+[package]
+name = "lsr-replica"
+version = "0.0.0"
+description = "The public API: a replicator thread per database, its health, and restore and verify over the same store."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# `Replicator::app_connection` on a rusqlite connection. A feature because the type pins the
+# host to this crate's rusqlite version.
+rusqlite = ["dep:rusqlite"]
+# `Runtime::fake`: a clock that moves when a test says so, and a park that waits on it.
+testing = ["lsr-core/testing"]
+
+[dependencies]
+lsr-core.workspace = true
+lsr-local.workspace = true
+lsr-ltx.workspace = true
+lsr-sqlite.workspace = true
+lsr-store-fs.workspace = true
+rusqlite = { workspace = true, optional = true }
+thiserror.workspace = true
+
+[dev-dependencies]
+lsr-replica = { workspace = true, features = ["rusqlite", "testing"] }
+rusqlite.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

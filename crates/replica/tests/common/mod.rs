@@ -1,0 +1,252 @@
+//! What the end-to-end tests share: a real SQLite database with the host's own connection, a
+//! file replica, a store whose faults a test switches on, and the check every test ends with
+//! (a restore of the replica equals the database).
+
+#![expect(
+    clippy::unwrap_used,
+    reason = "clippy.toml exempts only #[test] bodies; these are the tests' own helpers, where a failure is the test failing"
+)]
+#![expect(
+    dead_code,
+    reason = "each test file uses a different part of the helpers"
+)]
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::time::Duration;
+
+use lsr_core::{
+    FileInfo, FileKey, Level, Listing, ObjectStore, PageLimit, ReadLen, StoreError, StoreOp,
+    StoredStamp,
+};
+use lsr_ltx::TxidRange;
+use lsr_replica::{
+    Config, DynStore, FakeClockHandle, Health, Replicator, RestoreTarget, Runtime, Timestamp,
+    restore,
+};
+use lsr_store_fs::FsStore;
+use rusqlite::Connection;
+use tempfile::TempDir;
+
+/// The fake clock's start: 2023-11-14, any fixed instant would do.
+pub const START: Timestamp = Timestamp::from_unix_millis(1_700_000_000_000);
+
+/// Long enough that a test never sees it run out unless it is stuck.
+pub const PATIENCE: Duration = Duration::from_secs(600);
+
+/// A database in a directory of its own, with the host's connection and a replica beside it.
+pub struct Site {
+    pub dir: TempDir,
+    pub db: PathBuf,
+    pub replica: PathBuf,
+    pub app: Connection,
+    restores: AtomicU32,
+}
+
+impl Site {
+    /// A WAL-mode database holding one empty table; the host's connection is set up as a host
+    /// must set every connection up.
+    pub fn new() -> Self {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("app.db");
+        let app = Connection::open(&db).unwrap();
+        app.busy_timeout(Duration::from_secs(5)).unwrap();
+        app.query_row("PRAGMA journal_mode = wal", [], |_row| Ok(()))
+            .unwrap();
+        lsr_sqlite::app_connection(&app).unwrap();
+        app.execute_batch("CREATE TABLE t(id INTEGER PRIMARY KEY, v BLOB)")
+            .unwrap();
+        let replica = dir.path().join("replica");
+        Self {
+            dir,
+            db,
+            replica,
+            app,
+            restores: AtomicU32::new(0),
+        }
+    }
+
+    /// The file replica as the store a host passes in.
+    pub fn store(&self) -> Arc<dyn DynStore> {
+        Arc::new(FsStore::new(&self.replica))
+    }
+
+    /// A file replica whose faults the test switches.
+    pub fn faulty(&self) -> Arc<Faulty> {
+        Arc::new(Faulty::new(FsStore::new(&self.replica)))
+    }
+
+    /// `n` committed transactions, one row each, of a few pages.
+    pub fn commit(&self, n: u32) {
+        for _ in 0..n {
+            self.app
+                .execute("INSERT INTO t(v) VALUES (randomblob(3000))", [])
+                .unwrap();
+        }
+    }
+
+    /// Every row, in order.
+    pub fn rows(conn: &Connection) -> Vec<(i64, Vec<u8>)> {
+        let mut stmt = conn.prepare("SELECT id, v FROM t ORDER BY id").unwrap();
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    /// A fresh path in the site's directory.
+    pub fn path(&self, name: &str) -> PathBuf {
+        let n = self.restores.fetch_add(1, Ordering::Relaxed);
+        self.dir.path().join(format!("{name}-{n}.db"))
+    }
+
+    /// Restores the newest state into a new file and checks it holds what the database holds
+    /// and passes SQLite's integrity check.
+    pub fn assert_restores(&self, store: &dyn DynStore) {
+        let to = self.path("restored");
+        restore(store, RestoreTarget::Latest, &to).unwrap();
+        assert_same(&self.app, &to);
+    }
+}
+
+/// `restored` holds the rows `app` sees and is a sound database.
+pub fn assert_same(app: &Connection, restored: &Path) {
+    let copy = Connection::open(restored).unwrap();
+    let check: String = copy
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(check, "ok");
+    assert_eq!(Site::rows(&copy), Site::rows(app));
+}
+
+/// The deterministic runtime: the clock moves only when the test says so.
+pub fn fake() -> (Runtime, FakeClockHandle) {
+    Runtime::fake(START, 7)
+}
+
+/// Go's defaults.
+pub fn config() -> Config {
+    Config::default()
+}
+
+/// Waits until `done` holds, failing the test if it never does.
+pub fn wait(replicator: &Replicator, done: impl Fn(&Health) -> bool) -> Health {
+    match replicator.wait_until(PATIENCE, done) {
+        Some(health) => health,
+        None => panic_with(&replicator.health()),
+    }
+}
+
+#[expect(
+    clippy::panic,
+    reason = "a helper failing the test with the state it saw"
+)]
+fn panic_with(health: &Health) -> ! {
+    panic!("the replicator never got there: {health:?}")
+}
+
+/// `SELECT busy FROM pragma_wal_checkpoint('TRUNCATE')` on a fresh connection: `true` when
+/// something holds the WAL.
+pub fn truncate_is_busy(db: &Path) -> bool {
+    let conn = Connection::open(db).unwrap();
+    conn.busy_timeout(Duration::ZERO).unwrap();
+    let busy: i64 = conn
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))
+        .unwrap();
+    busy != 0
+}
+
+/// A file replica whose faults the test switches on and off.
+pub struct Faulty {
+    inner: FsStore,
+    /// Uploads fail as a dropped connection does.
+    pub fail_uploads: AtomicBool,
+    /// Every call is refused for credentials.
+    pub refuse: AtomicBool,
+    /// The next this many listings panic.
+    pub panics: AtomicU32,
+}
+
+impl Faulty {
+    fn new(inner: FsStore) -> Self {
+        Self {
+            inner,
+            fail_uploads: AtomicBool::new(false),
+            refuse: AtomicBool::new(false),
+            panics: AtomicU32::new(0),
+        }
+    }
+
+    fn gate(&self, op: StoreOp) -> Result<(), StoreError> {
+        if self.refuse.load(Ordering::SeqCst) {
+            return Err(StoreError::Auth { op });
+        }
+        Ok(())
+    }
+
+    #[expect(clippy::panic, reason = "the fault this store injects is a panic")]
+    fn maybe_panic(&self) {
+        let armed = self
+            .panics
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok();
+        if armed {
+            panic!("an injected panic inside a store call");
+        }
+    }
+}
+
+impl ObjectStore for Faulty {
+    type Upload = <FsStore as ObjectStore>::Upload;
+
+    async fn list(
+        &self,
+        level: Level,
+        after: Option<TxidRange>,
+        limit: PageLimit,
+    ) -> Result<Listing, StoreError> {
+        self.gate(StoreOp::List)?;
+        self.maybe_panic();
+        self.inner.list(level, after, limit).await
+    }
+
+    async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
+        self.gate(StoreOp::Read)?;
+        self.inner.read(key, offset, len).await
+    }
+
+    async fn stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
+        self.gate(StoreOp::Read)?;
+        self.inner.stamp(file).await
+    }
+
+    async fn read_with_stamp(
+        &self,
+        file: &FileInfo,
+        len: ReadLen,
+    ) -> Result<(Vec<u8>, StoredStamp), StoreError> {
+        self.gate(StoreOp::Read)?;
+        self.inner.read_with_stamp(file, len).await
+    }
+
+    async fn begin_upload(
+        &self,
+        key: &FileKey,
+        created_at: Timestamp,
+    ) -> Result<Self::Upload, StoreError> {
+        self.gate(StoreOp::Upload)?;
+        if self.fail_uploads.load(Ordering::SeqCst) {
+            return Err(StoreError::Transient {
+                op: StoreOp::Upload,
+                kind: std::io::ErrorKind::TimedOut,
+            });
+        }
+        self.inner.begin_upload(key, created_at).await
+    }
+
+    async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
+        self.gate(StoreOp::Delete)?;
+        self.inner.delete(keys).await
+    }
+}
