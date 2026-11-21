@@ -35,7 +35,7 @@ use std::io::{Read, Seek};
 
 use crate::fault::{BugSite, Clamped, Fault, SnapshotCause, StopCause};
 use crate::layout::{FileInfo, FileKey, Level};
-use crate::pages::{PageTable, snapshot_clears};
+use crate::pages::{PageChecksumTable, snapshot_clears};
 use crate::position::{Continuity, LastPage, Position, ReachedEnd, ReadLockHold};
 use crate::recover::Recovered;
 use crate::source::{CommittedRead, PageSource};
@@ -441,7 +441,7 @@ async fn fill<R: Read + Seek, P: PageSource, U: Upload>(
     plan: &[PageFrom],
     wal: &mut WalReader<R>,
     db: &mut P,
-    pages: &mut PageTable,
+    pages: &mut PageChecksumTable,
     map_store: fn(&StoreError) -> Fault,
 ) -> Result<Option<LastPage>, Fault> {
     let mut encoder =
@@ -499,7 +499,7 @@ pub(crate) async fn stage<R: Read + Seek, P: PageSource, L: ObjectStore>(
     plan: &[PageFrom],
     wal: &mut WalReader<R>,
     db: &mut P,
-    pages: &mut PageTable,
+    pages: &mut PageChecksumTable,
     map_store: fn(&StoreError) -> Fault,
 ) -> Result<(FileInfo, Option<LastPage>), Fault> {
     let mut upload = store
@@ -538,7 +538,7 @@ pub async fn sync_step<R: Read + Seek, P: PageSource, L: ObjectStore>(
     wal: &mut WalReader<R>,
     committed: CommittedRead,
     db: &mut P,
-    pages: &mut PageTable,
+    pages: &mut PageChecksumTable,
     staging: &L,
     cfg: &SyncConfig,
     now: Timestamp,
@@ -630,7 +630,7 @@ async fn run<R: Read + Seek, P: PageSource, L: ObjectStore>(
 /// The database file and its page checksum table, as one argument.
 struct Source<'a, P> {
     db: &'a mut P,
-    pages: &'a mut PageTable,
+    pages: &'a mut PageChecksumTable,
 }
 
 /// How far a staged position can be trusted: not at all under a reset
@@ -647,7 +647,7 @@ fn ended(position: Position, reset: bool, stopped_short: bool, epoch: ReadLockHo
 
 /// Empties the table on a page-size change and before a snapshot whose cause
 /// says the WAL may hold frames the database never got.
-fn forget(pages: &mut PageTable, step: &Step, page_size: PageSize) {
+fn forget(pages: &mut PageChecksumTable, step: &Step, page_size: PageSize) {
     pages.fit(page_size);
     if let Step::Snapshot { cause, .. } = step
         && snapshot_clears(cause)
@@ -658,7 +658,7 @@ fn forget(pages: &mut PageTable, step: &Step, page_size: PageSize) {
 
 /// Records the staged WAL pages, the newest copy of each, and forgets pages the
 /// database no longer has.
-fn record(pages: &mut PageTable, plan: &[PageFrom], commit: NonZeroU32) {
+fn record(pages: &mut PageChecksumTable, plan: &[PageFrom], commit: NonZeroU32) {
     for page in plan {
         match page {
             PageFrom::Wal(frame) => pages.record(frame.pgno(), frame.digest()),

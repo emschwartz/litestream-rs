@@ -441,7 +441,7 @@ Staging is any `ObjectStore`. In production it is `FsStore` rooted at Go's meta 
 
   The first four fields are in `db.go:226-259`.
 - `Observed { now: Timestamp, synced_frames: u32, through: bool }`.
-- `Decision { Nothing, Passive(Why), Truncate }`, with `Why { TruncateThreshold, MinPages, Interval }`.
+- `Decision { Nothing, Passive(CheckpointTrigger), Truncate }`, with `CheckpointTrigger { TruncateThreshold, MinPages, Interval }`.
 - Pure functions:
   - `decide(&CheckpointState, &Observed, &CheckpointConfig) -> Decision`;
   - `after_sync(CheckpointState, wrote_txs: u32, &Observed, &CheckpointConfig) -> CheckpointState`;
@@ -661,7 +661,7 @@ Order: 5a, then 5b. 5a is independent of task 4. Retention deletes get a blind r
 
 ### Task 5b: retention (branch `retention`)
 
-**Files:** create `crates/core/src/maintain/retain.rs` and `crates/core/src/maintain/retain/tests.rs`; in `crates/core/src/maintain.rs` add the `held` field, `Hold`, and the call to retention at the end of `due`. Touch no other file.
+**Files:** create `crates/core/src/maintain/retain.rs` and `crates/core/src/maintain/retain/tests.rs`; in `crates/core/src/maintain.rs` add the `held` field, `RetentionHold`, and the call to retention at the end of `due`. Touch no other file.
 
 **Consumes:** task 5a (`due`, `Due`, `DeleteJob`, `MAX_DELETE`, `Maintenance`, `L0Retention`, `Inventory::level`), `lsr_core::{plan, PlanOutcome, RestoreTarget, ContiguousChain, is_snapshot_start, Inventory}`.
 
@@ -672,13 +672,13 @@ Order: 5a, then 5b. 5a is independent of task 4. Retention deletes get a blind r
 - Go on S3 lists `LastModified` for retention (`useMetadata=false`, `s3/replica_client.go:1430, 1473, 1756-1764`); this port uses `FileInfo.created_at`, the header timestamp. Upload time is never earlier, so Go keeps Rust's files at least as long as Rust does.
 
 **Produces** (in `maintain.rs`, the rules in `retain.rs`):
-- `Due::Wait { until: Option<Timestamp>, held: Option<Hold> }`: `held` names why deletions are refused right now; compaction and snapshots still run when held.
-- `pub enum Hold { UnrecognizedNames { level: Level, count: usize }, MalformedSnapshot { key: FileKey }, ListingBehind { listed: Option<Txid>, published: Txid }, Hole { after: Txid, next: Option<Txid> }, LatestUnplannable { outcome: PlanOutcome }, NoCreatedAt { key: FileKey }, SnapshotCreatedAtBackwards { earlier: FileKey, later: FileKey }, SelfCheck { outcome: PlanOutcome } }`. `LatestUnplannable` and `SelfCheck` never carry `PlanOutcome::Plan`.
-- No new public function: retention is reached through `due`. `retain.rs` exposes `pub(super) fn retention(inventory: &Inventory, now: Timestamp, config: &Maintenance, published: Option<Txid>) -> Retention` with `pub(super) enum Retention { Delete(DeleteJob), Wait { until: Option<Timestamp> }, Held(Hold) }`.
+- `Due::Wait { until: Option<Timestamp>, held: Option<RetentionHold> }`: `held` names why deletions are refused right now; compaction and snapshots still run when held.
+- `pub enum RetentionHold { UnrecognizedNames { level: Level, count: usize }, MalformedSnapshot { key: FileKey }, ListingBehind { listed: Option<Txid>, published: Txid }, Hole { after: Txid, next: Option<Txid> }, LatestUnplannable { outcome: PlanOutcome }, NoCreatedAt { key: FileKey }, SnapshotCreatedAtBackwards { earlier: FileKey, later: FileKey }, SelfCheck { outcome: PlanOutcome } }`. `LatestUnplannable` and `SelfCheck` never carry `PlanOutcome::Plan`.
+- No new public function: retention is reached through `due`. `retain.rs` exposes `pub(super) fn retention(inventory: &Inventory, now: Timestamp, config: &Maintenance, published: Option<Txid>) -> Retention` with `pub(super) enum Retention { Delete(DeleteJob), Wait { until: Option<Timestamp> }, Held(RetentionHold) }`.
 
 **Semantics:**
 1. `due` calls retention only when no compaction or snapshot job is ready, so deletes are planned against a listing that already holds the newest coverage. One delete job per call, like every job.
-2. Trust gate, checked first; the first failure is the `Hold` and no file is deleted:
+2. Trust gate, checked first; the first failure is the `RetentionHold` and no file is deleted:
    - `inventory.skipped(level) > 0` for any level: `UnrecognizedNames`. A name this code cannot parse may be a file that covers something.
    - any `malformed_snapshots()`: `MalformedSnapshot`.
    - `published` above `inventory.newest()`: `ListingBehind`. The listing misses a file this process knows it wrote, so it is stale or partial.
@@ -708,7 +708,7 @@ Order: 5a, then 5b. 5a is independent of task 4. Retention deletes get a blind r
   2. Every `t` from the oldest retained snapshot's max to `newest()` that `plan(Txid(t))` restored before still restores, or a kept file `g` at level 1 or above has `g.min <= t < g.max` and `plan(Txid(g.max))` restores (the documented loss to compaction granularity). Same for `AsOf` at each kept file's `created_at` plus 1 ms.
   3. For every kept snapshot `S`: the inventory after the job with every other snapshot removed plans `Latest` to `newest()` (so no delete names a file `S`'s chain needs).
   4. Every level's last file before the job is there after, and each level's deleted files are a prefix of it.
-  5. Fail closed: each gate condition of semantics 2, injected into an otherwise deletable inventory, gives `Wait { held: Some(that Hold) }` and never a `Delete`. One named test per `Hold` variant; `SelfCheck` is reached through a test-only hook in `retain.rs` that breaks rule 6.
+  5. Fail closed: each gate condition of semantics 2, injected into an otherwise deletable inventory, gives `Wait { held: Some(that RetentionHold) }` and never a `Delete`. One named test per `RetentionHold` variant; `SelfCheck` is reached through a test-only hook in `retain.rs` that breaks rule 6.
   6. Clock: for any history, `due` at `now = Timestamp::from_unix_millis(i64::MAX)` deletes exactly what it deletes at `now` equal to the newest created-at time; `now` far behind deletes nothing.
   7. Listing omission: removing any subset of files from the listing (with `published: None`) never deletes a key that the full listing would keep.
   8. Created-at times rewritten later by any monotone amount never delete a key the true created-at times would keep.
@@ -821,7 +821,7 @@ The sequential driver phase 3 reuses. Sans-IO: it owns no thread, no timer, no c
 - `pub enum Phase { Boot, Running, Draining { deadline: Timestamp }, Stopped(StopCause) }`.
 - `impl Actor { pub fn new(cfg: ActorConfig) -> Self; pub fn phase(&self) -> Phase; pub fn request_snapshot(&mut self); pub fn begin_shutdown(&mut self, now: Timestamp); pub async fn tick<..>(&mut self, env: Env<'_, ..>, now: Timestamp) -> Tick }`.
 - `pub enum Tick { Ran { event: Event, next: Next }, Stopped(StopCause), Drained }`.
-- `pub enum Event { Booted { cause: Option<SnapshotCause> }, Synced { files: u32 }, Checkpointed { mode: CheckpointMode, busy: bool }, Uploaded(Did), Maintained(MaintainedEvent), Idle, Retrying { fault: Fault, attempt: NonZeroU32 }, Resnapshot(SnapshotCause), Clamped(Clamped) }` and `pub enum MaintainedEvent { Compacted(FileInfo), Snapshot(FileInfo), Deleted(usize), Replan, Waiting { held: Option<Hold> } }`.
+- `pub enum Event { Booted { cause: Option<SnapshotCause> }, Synced { files: u32 }, Checkpointed { mode: CheckpointMode, busy: bool }, Uploaded(Did), Maintained(MaintainedEvent), Idle, Retrying { fault: Fault, attempt: NonZeroU32 }, Resnapshot(SnapshotCause), Clamped(Clamped) }` and `pub enum MaintainedEvent { Compacted(FileInfo), Snapshot(FileInfo), Deleted(usize), Replan, Waiting { held: Option<RetentionHold> } }`.
 
 **Semantics:**
 1. Boot (phase `Boot`): list the remote once (`upload_next` from `UploadState::ListFirst`), then `NewestStagedFile::load`, then `recover(Some(PositionSource::Boot(..)), &view, remote_newest)`. The boot order is 4d's: list, recover with that remote, upload. Booting is a tick; a crash mid-boot boots again.
@@ -1074,7 +1074,7 @@ Plus `clock_steps_back_10s` (`Clamped`: one event, no fault, no retry).
 A blind review found six defects; four have failing tests on branch `review-maintain` (`7dd7866`, names start `review_`). Rulings:
 
 - **R1, what confirms an upload (replaces the size rule in "4d, what confirms an upload"):** a listing confirms a key newer than `confirmed` only by content. The listed object is read back and compared with the staged file, streamed in chunks (sizes first, then bytes); equal confirms, anything else means upload again over the same key. With no staged counterpart the object must decode and verify as LTX naming that key; if it does not, the fault is `RemoteCorrupt`. This runs at boot and after an ambiguous commit only, so steady state still makes no list and no read call. After a commit the store rejected (`UploadChecksumMismatch`), the uploader also deletes the key, best effort, so readers do not see the bad newest staged file while the retry is pending.
-- **R2, a compaction output the store rejected:** when `run_compact`'s commit fails with a corrupt-destination error (size or checksum mismatch), the executor deletes the output key. If that delete fails, the key is remembered as distrusted in the maintenance state: `due` plans its delete before anything else at that level, and retention holds (`Hold::OutputDistrusted`) until it is gone. A distrusted key never counts as cover.
+- **R2, a compaction output the store rejected:** when `run_compact`'s commit fails with a corrupt-destination error (size or checksum mismatch), the executor deletes the output key. If that delete fails, the key is remembered as distrusted in the maintenance state: `due` plans its delete before anything else at that level, and retention holds (`RetentionHold::OutputDistrusted`) until it is gone. A distrusted key never counts as cover.
 - **R3, one failing job must not starve the rest:** a failed job's level is skipped until its retry time (doubling, capped at `MAX_BACKOFF`); `due` returns the next ready job at another level. A level-1 compaction whose local input fails to decode falls back to the replica's copy of that input, as it already does when the file is missing.
 - **R4, the file store checks before it publishes:** `lsr-store-fs` compares the temp file's size with the bytes written after fsync and before the rename; a mismatch removes the temp file and returns `CommitSizeMismatch { removed: true }`. The check after the rename stays.
 - **R5, the two low findings:** write the test for each first. Retention's anchor is not remembered (the first form of this ruling kept the largest anchor seen; withdrawn, because one clock reading far ahead would then keep retention deleting after the clock came back; the rule is not monotone in the anchor, so "a lower anchor deletes less" is not a property: a level-0 file straddling the high anchor's floor stays, and at a lower anchor the level 1 file below that floor is kept, covers it, and the file goes. What holds: every job is restore-safe for the range its anchor promises, any subset of a job is as safe as the whole, and the promised range only shrinks as the anchor rises). A clock that steps back may keep a snapshot whose level-0 chain an earlier job cut; a restore goes through the newer snapshot. One uncovered L0 file must not block deleting L0 files above it that are covered. If either fix needs more than the retention module and its state, document the limit in the module doc and say so in the report.

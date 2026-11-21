@@ -4,7 +4,7 @@
 //! nothing in the file says it was copied right, or that nothing else wrote it
 //! since. The engine reads database-file pages for a snapshot (every page the WAL
 //! does not hold) and for the pages the database grew by that no scanned WAL frame
-//! holds (the "grown pages" below; `plan_pages` in `sync.rs`). [`PageTable`] is checked
+//! holds (the "grown pages" below; `plan_pages` in `sync.rs`). [`PageChecksumTable`] is checked
 //! before every such page is used, so a page that changed since the engine last
 //! knew it is caught instead of shipped silently (`docs/plans/phase-3-syncing.md`,
 //! the page-table section).
@@ -23,7 +23,7 @@
 //! When it is emptied: at every snapshot whose cause is not the checkpoint
 //! boundary or an operator's request (after a rewind it holds digests of frames
 //! a power loss removed; after an unproven restart, of frames the database may
-//! never have got), and when the page size changes. [`PageTable::truncate`]
+//! never have got), and when the page size changes. [`PageChecksumTable::truncate`]
 //! drops pages above the commit when the database shrinks.
 //!
 //! What it cannot check:
@@ -43,7 +43,7 @@
 //! the response that keeps trying, the retry finds those same bytes and ships
 //! them (that is the database the application serves), while the page stays reported
 //! until a verified WAL frame records it again, the table is emptied, or an
-//! operator accepts it ([`PageTable::accept`]).
+//! operator accepts it ([`PageChecksumTable::accept`]).
 //!
 //! Memory: one entry per recorded page, a 4-byte page number and an 8-byte
 //! digest in a `BTreeMap`, about 13 to 29 bytes a page with the map's nodes:
@@ -77,7 +77,7 @@ pub struct Mismatch {
 
 /// Page number to the checksum of the bytes the database file should hold.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct PageTable {
+pub struct PageChecksumTable {
     page_size: Option<PageSize>,
     pages: BTreeMap<PageNo, PageChecksum>,
     /// Pages found different from `pages`, with the digest found: reported,
@@ -85,7 +85,7 @@ pub struct PageTable {
     mismatched: BTreeMap<PageNo, PageChecksum>,
 }
 
-impl PageTable {
+impl PageChecksumTable {
     /// An empty table: every page is recorded on its first read.
     #[must_use]
     pub const fn new() -> Self {
@@ -204,8 +204,8 @@ pub const fn snapshot_clears(cause: &SnapshotCause) -> bool {
 pub(crate) async fn seeded<L: ObjectStore>(
     staging: &L,
     commit: NonZeroU32,
-) -> Result<PageTable, Fault> {
-    let mut table = PageTable::new();
+) -> Result<PageChecksumTable, Fault> {
+    let mut table = PageChecksumTable::new();
     let mut after = None;
     loop {
         let page = staging
@@ -229,7 +229,7 @@ pub(crate) async fn seeded<L: ObjectStore>(
 async fn seed_file<L: ObjectStore>(
     staging: &L,
     key: &FileKey,
-    table: &mut PageTable,
+    table: &mut PageChecksumTable,
 ) -> Result<(), Fault> {
     let chunk = SEED_READ;
     let mut pages = Vec::new();

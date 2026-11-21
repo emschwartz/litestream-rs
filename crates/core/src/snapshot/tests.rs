@@ -127,7 +127,7 @@ impl Rig {
             &mut wal,
             committed,
             &mut self.db,
-            &mut PageTable::new(),
+            &mut PageChecksumTable::new(),
             &self.staging,
             &SyncConfig::default(),
             ts(now),
@@ -155,7 +155,7 @@ impl Rig {
             proof,
             &mut self.wal,
             db,
-            &mut PageTable::new(),
+            &mut PageChecksumTable::new(),
             &self.remote,
             ts(now),
         ))

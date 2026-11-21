@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    CheckpointMode, CheckpointOutcome, FileInfo, MemStore, PageTable, Position, PositionSource,
-    Probes, ReachedEnd, Step, StepEnd, SyncConfig, Synced, SyncedThrough, Verdict, WalView,
-    checkpoint, recover_traced, sync_step,
+    CheckpointMode, CheckpointOutcome, FileInfo, MemStore, PageChecksumTable, Position,
+    PositionSource, Probes, ReachedEnd, Step, StepEnd, SyncConfig, Synced, SyncedThrough, Verdict,
+    WalView, checkpoint, recover_traced, sync_step,
 };
 use lsr_ltx::{Timestamp, Txid};
 use lsr_wal::{Salts, WalReader};
@@ -45,7 +45,7 @@ pub struct Stepper<B: Backend> {
     through: Option<SyncedThrough>,
     position: Option<Position>,
     /// The page checksum table, as the actor keeps one.
-    pages: PageTable,
+    pages: PageChecksumTable,
     now: i64,
 }
 
@@ -80,7 +80,7 @@ impl<B: Backend> Stepper<B> {
             staging: MemStore::new(),
             through: None,
             position: None,
-            pages: PageTable::new(),
+            pages: PageChecksumTable::new(),
             now: 1_000,
         };
         stepper.write(100)?;

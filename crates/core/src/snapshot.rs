@@ -30,7 +30,7 @@ use thiserror::Error;
 
 use crate::fault::{BugSite, Fault};
 use crate::layout::{FileInfo, FileKey};
-use crate::pages::PageTable;
+use crate::pages::PageChecksumTable;
 use crate::position::{Continuity, SyncedThrough};
 use crate::source::{CommittedRead, PageSource, WalSource};
 use crate::store::ObjectStore;
@@ -62,7 +62,7 @@ pub async fn write_snapshot<W: WalSource, P: PageSource, S: ObjectStore>(
     proof: &SyncedThrough,
     wal: &mut W,
     db: &mut P,
-    pages: &mut PageTable,
+    pages: &mut PageChecksumTable,
     remote: &S,
     now: Timestamp,
 ) -> Result<FileInfo, SnapshotFailed> {
@@ -128,7 +128,7 @@ async fn run<W: WalSource, P: PageSource, S: ObjectStore>(
     key: &FileKey,
     wal: &mut W,
     db: &mut P,
-    pages: &mut PageTable,
+    pages: &mut PageChecksumTable,
     remote: &S,
     now: Timestamp,
 ) -> Result<FileInfo, Fault> {
@@ -179,7 +179,7 @@ pub(crate) fn read_live<W: WalSource, P: PageSource>(
     proof: &SyncedThrough,
     wal: &mut W,
     db: &mut P,
-    pages: &mut PageTable,
+    pages: &mut PageChecksumTable,
 ) -> Result<LivePages, Fault> {
     let Whole {
         plan,

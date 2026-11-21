@@ -40,7 +40,7 @@ use lsr_wal::{OpenError, WalHeader, WalReader};
 
 use crate::fault::{BugSite, Fault, Next, SnapshotCause};
 use crate::layout::FileInfo;
-use crate::pages::PageTable;
+use crate::pages::PageChecksumTable;
 use crate::position::{Continuity, Position, ReadLockHold, SyncedThrough};
 use crate::source::{CheckpointMode, CheckpointRun, Checkpointer, PageSource, WalSource};
 use crate::store::ObjectStore;
@@ -133,7 +133,7 @@ impl Observed {
 
 /// Why a PASSIVE checkpoint is called for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Why {
+pub enum CheckpointTrigger {
     /// The WAL is at the truncate threshold; try PASSIVE before the blocking TRUNCATE.
     TruncateThreshold,
     /// The WAL is at the minimum.
@@ -148,7 +148,7 @@ pub enum Decision {
     /// Nothing.
     Nothing,
     /// A PASSIVE checkpoint.
-    Passive(Why),
+    Passive(CheckpointTrigger),
     /// A TRUNCATE checkpoint.
     Truncate,
 }
@@ -182,7 +182,7 @@ pub fn decide(state: &CheckpointState, observed: &Observed, cfg: &CheckpointConf
         return match state {
             CheckpointState::PassiveFailedAtTruncate { .. } => Decision::Truncate,
             CheckpointState::Idle { .. } | CheckpointState::Pending { .. } => {
-                Decision::Passive(Why::TruncateThreshold)
+                Decision::Passive(CheckpointTrigger::TruncateThreshold)
             }
         };
     }
@@ -198,7 +198,7 @@ pub fn decide(state: &CheckpointState, observed: &Observed, cfg: &CheckpointConf
             .min_pages
             .is_some_and(|min| observed.synced_frames >= min.get())
     {
-        return Decision::Passive(Why::MinPages);
+        return Decision::Passive(CheckpointTrigger::MinPages);
     }
     if let CheckpointState::Pending { last } = state
         && cfg
@@ -206,7 +206,7 @@ pub fn decide(state: &CheckpointState, observed: &Observed, cfg: &CheckpointConf
             .is_some_and(|interval| since(*last, observed.now) >= interval)
         && observed.synced_frames > 1
     {
-        return Decision::Passive(Why::Interval);
+        return Decision::Passive(CheckpointTrigger::Interval);
     }
     Decision::Nothing
 }
@@ -290,7 +290,7 @@ pub fn after_checkpoint(
     let next = match (decision, outcome) {
         (Decision::Nothing, _) => state,
         (
-            Decision::Passive(Why::TruncateThreshold),
+            Decision::Passive(CheckpointTrigger::TruncateThreshold),
             CheckpointOutcome::Busy | CheckpointOutcome::NotRestarted,
         ) => {
             return (
@@ -304,8 +304,8 @@ pub fn after_checkpoint(
                 .map_or(Next::OnWalChange, |interval| Next::At(after(now, interval)));
             return (CheckpointState::PassiveFailedAtTruncate { last: now }, wake);
         }
-        (Decision::Passive(Why::MinPages), CheckpointOutcome::Busy) => idle(true),
-        (Decision::Passive(Why::Interval), CheckpointOutcome::Busy) => {
+        (Decision::Passive(CheckpointTrigger::MinPages), CheckpointOutcome::Busy) => idle(true),
+        (Decision::Passive(CheckpointTrigger::Interval), CheckpointOutcome::Busy) => {
             CheckpointState::Pending { last: now }
         }
         (
@@ -433,7 +433,7 @@ const fn open_fault(err: &OpenError) -> Fault {
 struct Protocol<'a, W, P, C, L> {
     wal: &'a mut W,
     db: &'a mut P,
-    pages: &'a mut PageTable,
+    pages: &'a mut PageChecksumTable,
     ck: &'a mut C,
     staging: &'a L,
     cfg: SyncConfig,
@@ -622,7 +622,7 @@ pub async fn checkpoint<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectS
     mode: CheckpointMode,
     wal: &mut W,
     db: &mut P,
-    pages: &mut PageTable,
+    pages: &mut PageChecksumTable,
     ck: &mut C,
     staging: &L,
     cfg: &SyncConfig,

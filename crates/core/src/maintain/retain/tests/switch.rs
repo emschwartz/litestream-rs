@@ -97,7 +97,7 @@ fn a_degraded_tasks_kept_restore_point_behaves_the_same_once_retention_is_back_o
         matches!(
             &held,
             Due::Wait {
-                held: Some(Hold::RestorePointUnplannable { .. }),
+                held: Some(RetentionHold::RestorePointUnplannable { .. }),
                 ..
             }
         ),

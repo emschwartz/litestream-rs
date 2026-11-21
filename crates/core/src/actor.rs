@@ -89,10 +89,10 @@ use crate::fault::{
 use crate::inventory::Inventory;
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::maintain::{
-    Due, Hold, Job, MAX_DELETE, MaintainError, Maintenance, Outcome, ReadBack, due,
+    Due, Job, MAX_DELETE, MaintainError, Maintenance, Outcome, ReadBack, RetentionHold, due,
     listing_after_upload, read_back, run_compact, run_delete,
 };
-use crate::pages::{PageTable, seeded};
+use crate::pages::{PageChecksumTable, seeded};
 use crate::position::{Position, SyncedThrough, WalFileLen};
 use crate::recover::{
     FrameCheck, Miss, NewestStagedFile, PositionSource, Probes, Recovered, WalView, read_header,
@@ -162,7 +162,7 @@ pub enum MaintainedEvent {
     /// Nothing is due.
     Waiting {
         /// Why deletions are refused, if they are.
-        held: Option<Hold>,
+        held: Option<RetentionHold>,
     },
 }
 
@@ -834,7 +834,7 @@ impl Actor {
                 snapshot: Some(_), ..
             }
             | Course::Snapshot { .. }
-            | Course::Unbooted => PageTable::new(),
+            | Course::Unbooted => PageChecksumTable::new(),
         };
         // Every step succeeded: the engine is assigned whole.
         self.engine = Engine {

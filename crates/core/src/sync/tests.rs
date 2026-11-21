@@ -56,7 +56,7 @@ struct Rig {
     wal: FakeWal,
     db: FakeDb,
     store: MemStore,
-    pages: PageTable,
+    pages: PageChecksumTable,
 }
 
 impl Rig {
@@ -71,7 +71,7 @@ impl Rig {
             ),
             db: FakeDb::new(PS),
             store: MemStore::new(),
-            pages: PageTable::new(),
+            pages: PageChecksumTable::new(),
         }
     }
 
@@ -707,7 +707,7 @@ fn a_page_that_changes_between_scan_and_read_is_a_retry_and_stages_nothing() {
         &mut wal,
         committed,
         &mut rig.db,
-        &mut PageTable::new(),
+        &mut PageChecksumTable::new(),
         &rig.store,
         &SyncConfig::default(),
         ts(1),
@@ -834,7 +834,7 @@ fn a_small_file_reaches_the_upload_in_one_write() {
         &plan,
         &mut wal,
         &mut db,
-        &mut PageTable::new(),
+        &mut PageChecksumTable::new(),
         Fault::from_staging,
     ))
     .unwrap();
@@ -1037,7 +1037,7 @@ struct Chain {
     store: MemStore,
     /// Kept across every step: a database page that a step reads and that
     /// does not match is the table's false alarm, and fails the run.
-    pages: PageTable,
+    pages: PageChecksumTable,
     position: Option<Position>,
     clock: i64,
     spilled: bool,
@@ -1170,7 +1170,7 @@ fn workload(ps: u32, cap: Option<u64>, ops: &[Op]) -> bool {
     let db = Db::new(ps);
     let mut chain = Chain {
         store: MemStore::new(),
-        pages: PageTable::new(),
+        pages: PageChecksumTable::new(),
         position: None,
         clock: 0,
         spilled: false,
@@ -1371,7 +1371,7 @@ fn snapshot_under_read_mark_zero(
         &mut zero.wal,
         zero.committed,
         &mut zero.rig.db,
-        &mut PageTable::new(),
+        &mut PageChecksumTable::new(),
         &zero.rig.store,
         &SyncConfig::default(),
         ts(1),
@@ -1467,7 +1467,7 @@ fn fill_under_read_mark_zero(file: impl FnOnce(&Rig) -> Vec<u8>) -> Result<Synce
         &mut zero.wal,
         zero.committed,
         &mut zero.rig.db,
-        &mut PageTable::new(),
+        &mut PageChecksumTable::new(),
         &zero.rig.store,
         &SyncConfig::default(),
         ts(1),
