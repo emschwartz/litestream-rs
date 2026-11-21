@@ -4,7 +4,8 @@
 //! **Start.** In config order, per database: open its store; with
 //! `-restore-if-db-not-exists` (or the key) and no file, restore the newest state,
 //! a replica with no files being Go's "no backup found, starting fresh"; then
-//! `Replicator::start`, which returns once the read transaction pins the WAL. A
+//! `Replicator::start_with_events`, which returns once the read transaction pins the
+//! WAL; the log sink goes in with it, before the thread runs, so no boot line is lost. A
 //! database that fails any of these is logged and left out; the others keep
 //! running (Go exits instead), and the exit code says so at the end.
 //!
@@ -232,9 +233,16 @@ impl Daemon {
             }
             return Ok(State::Waiting);
         }
-        match Replicator::start(path, Arc::clone(store), slot.plan.config().clone()) {
+        // The log sink goes in with the start: one set afterwards can miss the boot's line.
+        let started = Replicator::start_with_events(
+            path,
+            Arc::clone(store),
+            slot.plan.config().clone(),
+            Runtime::system(),
+            Box::new(DbEvents::new(Arc::clone(&self.log), path)),
+        );
+        match started {
             Ok(replicator) => {
-                replicator.set_events(Box::new(DbEvents::new(Arc::clone(&self.log), path)));
                 self.started.add(&replicator);
                 self.initialized(&slot.plan);
                 Ok(State::Running(replicator))

@@ -21,8 +21,8 @@
 //! turn. The one exception is a boot after the previous process restarted or truncated the WAL
 //! and died before it staged anything in the new generation: then both engines' rules take a
 //! snapshot, and the test asserts that this is the situation and that the cause the process
-//! logged is the one those rules give (`generation.rs`; the daemon can lose its boot line, see
-//! `Run::boot_cause`). The turn then ends at its kill point:
+//! logged is the one those rules give (`generation.rs`; the Rust daemon's is read from its
+//! boot line in `Run::boot_cause`). The turn then ends at its kill point:
 //! - `AfterCommit`: at once after a commit, while the process may be reading the WAL;
 //! - `Staged`: once the meta directory holds a level-0 file the replica does not. The test
 //!   polls without sleeping and stops the process with SIGSTOP the moment it sees one, then
@@ -224,8 +224,6 @@ struct Run {
     expect: Expect,
     /// Application commits SQLite refused busy and the run tried again.
     busy: u32,
-    /// Rust daemon boots that logged no boot line.
-    lost_boot_lines: std::cell::Cell<u32>,
 }
 
 fn kind_key(kind: Kind) -> &'static str {
@@ -282,7 +280,6 @@ impl Run {
             schedule,
             expect: Expect::First,
             busy: 0,
-            lost_boot_lines: std::cell::Cell::new(0),
             site,
         }
     }
@@ -575,23 +572,18 @@ impl Run {
         match (process.kind(), self.launch) {
             (Kind::Rust, Launch::Arguments) => None,
             (Kind::Rust, Launch::ConfigFile) => {
+                // The daemon's log sink is in place before its replicator's thread runs,
+                // so every boot logs this line.
                 let mut line = String::new();
-                let waited = wait_until("the boot's log line", BOOT_LINE, || {
+                wait_until("the boot's log line", BOOT_LINE, || {
                     process.ensure_running()?;
                     line = (process.log_text().lines())
                         .find(|l| l.contains("replica position recovered"))
                         .unwrap_or_default()
                         .to_owned();
                     Ok(!line.is_empty())
-                });
-                if !reached(waited, at) {
-                    // The daemon installs its log sink after the replicator starts
-                    // (`crates/sidecar/src/daemon.rs`, `try_start`), so a boot that runs
-                    // first logs nothing. Reported, and judged as `Arguments` is.
-                    println!("{at}: the daemon logged no boot line (its sink came too late)");
-                    self.lost_boot_lines.set(self.lost_boot_lines.get() + 1);
-                    return None;
-                }
+                })
+                .unwrap_or_else(|e| panic!("{at}: the daemon logged no boot line: {e}"));
                 line.split_once("cause=")
                     .map(|(_, c)| c.split_whitespace().next().unwrap_or_default().to_owned())
             }
@@ -990,12 +982,11 @@ pub fn alternate(build: &GoBuild, lsr: &Path, seed: u64, launch: Launch) {
     run.final_turn(KILLED_TURNS, kind_of(KILLED_TURNS));
     println!(
         "{}: seed {seed}: {KILLED_TURNS} switches, {} transactions restored, {} commits \
-         ({} retried busy, {} Rust boot lines lost); {}",
+         ({} retried busy); {}",
         run.name,
         run.checked,
         run.oracle.states.len() - 1,
         run.busy,
-        run.lost_boot_lines.get(),
         run.summary()
     );
     run.assert_crossed();
