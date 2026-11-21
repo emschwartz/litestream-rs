@@ -25,6 +25,9 @@
 //! [`app_connection`] and [`check_app_connection`] set up and check the host's own connections
 //! (`SQLITE_FCNTL_PERSIST_WAL` on, `wal_autocheckpoint = 0`, PLAN section 6).
 //!
+//! The `testing` feature adds [`testing`]: the fault-injecting VFS and the harness of the
+//! real-SQLite fault suite in `tests/`.
+//!
 //! `unsafe` is allowed in this crate only, one reasoned `#[expect(unsafe_code)]` per site.
 
 mod checkpoint;
@@ -32,6 +35,8 @@ mod conn;
 mod error;
 mod pages;
 mod shm;
+#[cfg(feature = "testing")]
+pub mod testing;
 
 pub use conn::{Sqlite, SqliteConfig, app_connection, check_app_connection};
 pub use error::{OpenError, Refusal, SetupError};

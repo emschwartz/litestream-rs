@@ -10,9 +10,16 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# The real-SQLite fault suite's support: the fault-injecting VFS and the harness that drives the
+# actor over a backend and judges the replica with the simulator's oracle.
+testing = ["dep:lsr-sim", "dep:lsr-store-fs", "lsr-core/testing"]
+
 [dependencies]
 lsr-core.workspace = true
 lsr-ltx.workspace = true
+lsr-sim = { workspace = true, optional = true }
+lsr-store-fs = { workspace = true, optional = true }
 lsr-wal.workspace = true
 rusqlite.workspace = true
 thiserror.workspace = true
@@ -22,4 +29,8 @@ thiserror.workspace = true
 lsr-core = { workspace = true, features = ["testing"] }
 # `set_limit`, so a setup pragma can be made to fail in its error's test.
 rusqlite = { workspace = true, features = ["limits"] }
+# The fault suite in tests/ runs on the testing feature.
+lsr-sqlite = { workspace = true, features = ["testing"] }
+# The big cases restore into a file and compare it with the database.
+lsr-local.workspace = true
 tempfile.workspace = true
