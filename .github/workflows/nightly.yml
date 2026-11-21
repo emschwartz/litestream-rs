@@ -11,8 +11,8 @@ permissions:
   contents: read
 
 jobs:
-  # Development runs on macOS too (AGENTS.md); `just check` skips ledger-fresh there, since the
-  # ledger names Linux-only tests.
+  # Development runs on macOS too (AGENTS.md); `just check` skips upstream-test-map-fresh there, since the
+  # test map names Linux-only tests.
   macos:
     runs-on: macos-latest
     timeout-minutes: 60

@@ -27,14 +27,14 @@ Each crate is `crates/<name>`, package `lsr-<name>`. Listed from the bottom of t
 | `sidecar` | The `replicate` daemon: Go's command line and config, many databases in one process, signals, `-exec`, `/metrics` and `/healthz`. |
 | `cli` | The `lsr` binary: `restore`, `verify`, `files`, `config check`, and `replicate`, which is the sidecar. |
 | `sim` | Dev only: the deterministic simulator, a model of SQLite's WAL checked against SQLite, the oracle. |
-| `compat` | Dev only: pinned Go binaries, seeded workloads, golden fixtures, the cross-implementation tests and the upstream-test ledger. |
+| `compat` | Dev only: pinned Go binaries, seeded workloads, golden fixtures, the cross-implementation tests and the upstream test map. |
 | `fuzzing` | Dev only: the fuzz targets as plain functions, replayed over the committed corpus in the test suite; `fuzz/` drives them with cargo-fuzz. |
 
 ## Tests by what they need
 
 | Needs | Command | What runs |
 |---|---|---|
-| Nothing | `just check` | Format, clippy, every test that is not ignored, doctests, the S3 client feature builds, and the ledger's counterparts against a fresh test list (Linux). The land gate. |
+| Nothing | `just check` | Format, clippy, every test that is not ignored, doctests, the S3 client feature builds, and the test map's counterparts against a fresh test list (Linux). The land gate. |
 | Nothing, minutes | `just sqlite-big`, `just sim-soak <secs>`, `just sim-nightly`, `just fuzz-seed`, `just mutants <crate>` | The large real-SQLite cases (several GB of disk), rotating simulator seeds, the fuzz seed corpus, mutation testing. |
 | Docker | `just test-s3` | The S3 store and `lsr` against a throwaway MinIO; skipped when Docker is down (a failure under CI). |
 | Go | `just upstream`, then `just compat`, `just compat-live <names>`, `just compat-releases`, `just compat-tags`, `just compat-regen` | Pinned Go builds from `.upstream/` (a worktree shares the main checkout's): Go writes and Rust restores, the reverse, handovers and alternation, the Go VFS (which also needs a C compiler and SQLite headers). `compat-tags` needs only the clone. |
