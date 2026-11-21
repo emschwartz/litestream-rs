@@ -19,8 +19,10 @@
 //! Errors inside the trait methods are core's `SourceError`: `Busy` for a contended lock or a
 //! wal-index header a writer is mid-way through (retry), `DiskFull`, `Short` for a page past the
 //! end of the file, `ReadTxLost` when the read transaction cannot be retaken (the next call
-//! retakes it, in a new epoch), and `Io` for the rest. This backend never returns `FsyncFailed`
-//! (it syncs nothing) or `Unlinked` (it does not yet detect a WAL deleted under it).
+//! retakes it, in a new epoch), `Unlinked` when the WAL path no longer names the file SQLite
+//! holds open (deleted, or replaced, by another process: SQLite keeps writing the deleted file,
+//! out of every reader's reach), and `Io` for the rest. This backend never returns
+//! `FsyncFailed`: it syncs nothing.
 //!
 //! [`app_connection`] and [`check_app_connection`] set up and check the host's own connections
 //! (`SQLITE_FCNTL_PERSIST_WAL` on, `wal_autocheckpoint = 0`, PLAN section 6).

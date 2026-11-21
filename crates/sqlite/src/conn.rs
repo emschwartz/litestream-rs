@@ -1,7 +1,7 @@
 //! The two connections, the read transaction that pins the WAL, and the WAL door.
 
 use std::ffi::{OsString, c_int};
-use std::fs::File;
+use std::fs::{File, Metadata};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -58,6 +58,10 @@ pub(crate) struct Inner {
     pub(crate) reader: Connection,
     pub(crate) writer: Connection,
     wal_path: PathBuf,
+    /// The file the WAL path named once the first read transaction was held. SQLite keeps that
+    /// file open for the reader's whole life, so any other file at the path, or none, means it
+    /// was deleted under the pin; `None` when it could not be told.
+    wal_id: Option<FileId>,
     page_size: PageSize,
     /// How many read transactions have been taken; the current one is this many.
     pub(crate) epoch: u64,
@@ -66,6 +70,27 @@ pub(crate) struct Inner {
     /// The id of the barrier or write lock the writer connection holds.
     held: Option<u64>,
     next_token: u64,
+}
+
+/// Which file a path named: device and inode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileId {
+    dev: u64,
+    ino: u64,
+}
+
+#[cfg(unix)]
+fn file_id(meta: &Metadata) -> Option<FileId> {
+    use std::os::unix::fs::MetadataExt;
+    Some(FileId {
+        dev: meta.dev(),
+        ino: meta.ino(),
+    })
+}
+
+#[cfg(not(unix))]
+const fn file_id(_meta: &Metadata) -> Option<FileId> {
+    None
 }
 
 /// The statement that takes the write lock without leaving a row (it is always rolled back).
@@ -151,11 +176,17 @@ impl Sqlite {
         shm::guard(&reader, path)?;
         let file = FileHandle::new(file_pointer(&reader, rusqlite::MAIN_DB)?)?;
         let region = shm::map(&file)?;
+        let wal_path = suffixed(path, "-wal");
+        // The read transaction holds the WAL open, so this is the file SQLite writes.
+        let wal_id = std::fs::metadata(&wal_path)
+            .ok()
+            .and_then(|meta| file_id(&meta));
         let inner = Inner {
             raw: Raw { file, region },
             reader,
             writer,
-            wal_path: suffixed(path, "-wal"),
+            wal_path,
+            wal_id,
             page_size,
             epoch: 1,
             pinned: true,
@@ -189,6 +220,31 @@ impl Inner {
 
     pub(crate) const fn page_size(&self) -> PageSize {
         self.page_size
+    }
+
+    /// `Unlinked` unless `found` (the file at the WAL path now, if any) is the WAL SQLite holds.
+    fn same_wal(&self, found: Option<&Metadata>) -> Result<(), SourceError> {
+        let Some(id) = self.wal_id else {
+            return Ok(());
+        };
+        match found.and_then(file_id) {
+            Some(now) if now == id => Ok(()),
+            Some(_) => Err(SourceError::Unlinked),
+            None if found.is_some() => Ok(()),
+            None => Err(SourceError::Unlinked),
+        }
+    }
+
+    /// The WAL path's metadata, checked to be the WAL SQLite holds; `None` only when the WAL
+    /// was never known.
+    fn wal_meta(&self) -> Result<Option<Metadata>, SourceError> {
+        let found = match std::fs::metadata(&self.wal_path) {
+            Ok(meta) => Some(meta),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+            Err(err) => return Err(io_error(&err)),
+        };
+        self.same_wal(found.as_ref())?;
+        Ok(found)
     }
 
     /// Takes the read transaction again (a new epoch).
@@ -261,29 +317,39 @@ impl WalSource for Sqlite {
     type Wal = File;
 
     fn open(&mut self) -> Result<Option<File>, SourceError> {
+        let inner = self.lock();
         #[expect(
             clippy::disallowed_methods,
             reason = "SQLite takes no POSIX lock on -wal, so this descriptor's close drops none"
         )]
-        let opened = File::open(&self.lock().wal_path);
-        match opened {
-            Ok(file) => Ok(Some(file)),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(io_error(&err)),
-        }
+        let opened = File::open(&inner.wal_path);
+        let file = match opened {
+            Ok(file) => file,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                inner.same_wal(None)?;
+                return Ok(None);
+            }
+            Err(err) => return Err(io_error(&err)),
+        };
+        // The file opened, not the path's state a moment earlier, is what the engine reads.
+        let meta = file.metadata().map_err(|err| io_error(&err))?;
+        inner.same_wal(Some(&meta))?;
+        Ok(Some(file))
     }
 
     fn len(&mut self) -> Result<Option<WalFileLen>, SourceError> {
-        match std::fs::metadata(&self.lock().wal_path) {
-            Ok(meta) => Ok(Some(WalFileLen::new(meta.len()))),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(io_error(&err)),
-        }
+        Ok(self
+            .lock()
+            .wal_meta()?
+            .map(|meta| WalFileLen::new(meta.len())))
     }
 
     fn committed(&mut self) -> Result<CommittedRead, SourceError> {
         let mut inner = self.lock();
         inner.ensure_pinned()?;
+        // The wal-index still counts the frames SQLite writes to a deleted WAL: refuse to name
+        // an end the WAL path cannot show.
+        inner.wal_meta()?;
         let header =
             shm::read_header(inner.raw.region.words()).map_err(|_retry| SourceError::Busy)?;
         let salts = Salts {
