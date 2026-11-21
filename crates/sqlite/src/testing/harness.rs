@@ -2,7 +2,7 @@
 //!
 //! A [`Rig`] owns one database in a directory of its own: the application's connection (`app`) and the
 //! backend, both opened through a fresh [`FaultVfs`]; an [`Actor`] ticked on a [`FakeClock`];
-//! staging and replica on `FsStore`s, each behind a `Tap` that records what it took.
+//! staging and replica on `FsStore`s, each behind a `Recorder` that records what it took.
 //!
 //! Ground truth never comes from the code under test. The database's first image is read from
 //! the file before any connection is open. After every application statement and every tick,
@@ -42,7 +42,8 @@ use lsr_core::{
 };
 use lsr_ltx::{PageNo, PageSize, Timestamp, Txid};
 use lsr_sim::{
-    Acked, AppCommit, Checked, CommitId, Model, PageImage, Tap, TapEvent, TapLog, Violation,
+    Acked, AppCommit, Checked, CommitId, Model, PageImage, Recorder, RecorderEvent, RecorderLog,
+    Violation,
 };
 use lsr_store_fs::FsStore;
 use lsr_wal::{Salts, WalOffset};
@@ -398,10 +399,10 @@ pub struct Rig<B: Backend> {
     backend: Option<B>,
     actor: Actor,
     clock: FakeClock,
-    staging: Tap<FsStore>,
-    remote: Tap<FsStore>,
-    staging_log: TapLog,
-    remote_log: TapLog,
+    staging: Recorder<FsStore>,
+    remote: Recorder<FsStore>,
+    staging_log: RecorderLog,
+    remote_log: RecorderLog,
     remote_root: PathBuf,
     model: Option<Model>,
     mirror: Mirror,
@@ -440,9 +441,9 @@ impl<B: Backend> Rig<B> {
         app.open(APP)?;
         let backend = B::open_limited(&db, vfs.name(), cfg.journal_size_limit)
             .map_err(|err| RigError::Open(Box::new(err)))?;
-        let staging = Tap::new(FsStore::new(root.join("meta")));
+        let staging = Recorder::new(FsStore::new(root.join("meta")));
         let remote_root = root.join("replica");
-        let remote = Tap::new(FsStore::new(&remote_root));
+        let remote = Recorder::new(FsStore::new(&remote_root));
         let mut rig = Self {
             mirror: Mirror {
                 wal: suffixed(&db, "-wal"),
@@ -591,7 +592,7 @@ impl<B: Backend> Rig<B> {
 
     /// What the replica and the staging directory really took, in order.
     #[must_use]
-    pub fn store_events(&self) -> (Vec<TapEvent>, Vec<TapEvent>) {
+    pub fn store_events(&self) -> (Vec<RecorderEvent>, Vec<RecorderEvent>) {
         (self.remote_log.events(), self.staging_log.events())
     }
 
@@ -751,7 +752,7 @@ impl<B: Backend> Rig<B> {
     fn note_staged(&mut self, newest_commit: Option<CommitId>, at: usize) {
         let events = self.staging_log.events();
         for event in events.iter().skip(self.staging_seen) {
-            let TapEvent::Put {
+            let RecorderEvent::Put {
                 key,
                 header: Some(_),
                 origin,

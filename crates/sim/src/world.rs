@@ -6,8 +6,8 @@
 //! hands each tick's future to [`World::run_tick`], the one seam between this
 //! harness and the actor.
 //!
-//! Staging is `Faults<Yield<Tap<Stage<MemStore>>>>` and the replica is
-//! `Faults<Yield<Tap<MemStore>>>`. Both keep a raw `MemStore` handle for the
+//! Staging is `Faults<YieldEachCall<Recorder<Volatile<MemStore>>>>` and the replica is
+//! `Faults<YieldEachCall<Recorder<MemStore>>>`. Both keep a raw `MemStore` handle for the
 //! oracle and for power loss, so neither a fault nor a yield touches a check.
 
 use lsr_core::conformance::block_on;
@@ -22,12 +22,14 @@ use crate::model::{CommitId, Model, PageImage};
 use crate::oracle::{Acked, Checked, Violation, check};
 use crate::seed::Seed;
 use crate::sqlite::{AppCommit, CrashKind, OtherProcessMode, SimSqlite};
-use crate::store::{FaultHandle, Faults, Lost, Stage, StageHandle, Tap, TapLog, Yield};
+use crate::store::{
+    FaultHandle, Faults, Lost, Recorder, RecorderLog, Volatile, VolatileHandle, YieldEachCall,
+};
 
 /// The staging store the actor sees.
-pub type StagingStore = Faults<Yield<Tap<Stage<MemStore>>>>;
+pub type StagingStore = Faults<YieldEachCall<Recorder<Volatile<MemStore>>>>;
 /// The replica store the actor sees.
-pub type RemoteStore = Faults<Yield<Tap<MemStore>>>;
+pub type RemoteStore = Faults<YieldEachCall<Recorder<MemStore>>>;
 
 /// Why the harness could not rewrite a staged file.
 #[derive(Debug, thiserror::Error)]
@@ -171,7 +173,7 @@ pub enum TickEnd<T> {
 pub struct CommittedInTick {
     /// The commit.
     pub id: CommitId,
-    /// The staging tap's length at the commit: what the tick staged from that
+    /// The staging recorder's length at the commit: what the tick staged from that
     /// event on was cut after it.
     pub staged_from: usize,
     /// How many pages it wrote.
@@ -200,15 +202,15 @@ pub struct World {
     /// The replica with nothing in front of it: what the oracle restores from.
     pub remote_raw: MemStore,
     /// What the staging store really did.
-    pub staging_tap: TapLog,
+    pub staging_recorder: RecorderLog,
     /// What the replica really did.
-    pub remote_tap: TapLog,
+    pub remote_recorder: RecorderLog,
     /// Schedules staging faults.
     pub staging_faults: FaultHandle,
     /// Schedules replica faults.
     pub remote_faults: FaultHandle,
     /// Staging's power-loss bookkeeping.
-    pub stage: StageHandle,
+    pub volatile: VolatileHandle,
     /// What the database really was.
     pub model: Model,
     /// What the engine has acknowledged.
@@ -227,16 +229,24 @@ impl World {
         let sqlite = SimSqlite::new(page_size, db_pages, seed.stream(1));
         let staging_raw = MemStore::new();
         let remote_raw = MemStore::new();
-        let stage = Stage::new(staging_raw.clone());
-        let stage_handle = stage.handle();
-        let staging_tap = Tap::new(stage);
-        let staging_tap_log = staging_tap.log();
-        let staging = Faults::new(Yield::new(staging_tap), Vec::new(), seed.stream(2))
-            .volatile_on_late_error(stage_handle.clone());
-        let remote_tap = Tap::new(remote_raw.clone());
-        let remote_tap_log = remote_tap.log();
-        let remote = Faults::new(Yield::new(remote_tap), Vec::new(), seed.stream(3))
-            .corrupting_through(remote_raw.clone());
+        let volatile = Volatile::new(staging_raw.clone());
+        let volatile_handle = volatile.handle();
+        let staging_recorder = Recorder::new(volatile);
+        let staging_recorder_log = staging_recorder.log();
+        let staging = Faults::new(
+            YieldEachCall::new(staging_recorder),
+            Vec::new(),
+            seed.stream(2),
+        )
+        .volatile_on_late_error(volatile_handle.clone());
+        let remote_recorder = Recorder::new(remote_raw.clone());
+        let remote_recorder_log = remote_recorder.log();
+        let remote = Faults::new(
+            YieldEachCall::new(remote_recorder),
+            Vec::new(),
+            seed.stream(3),
+        )
+        .corrupting_through(remote_raw.clone());
         let initial = PageImage::from_bytes(page_size, &sqlite.image());
         Self {
             seed,
@@ -250,9 +260,9 @@ impl World {
             remote,
             staging_raw,
             remote_raw,
-            staging_tap: staging_tap_log,
-            remote_tap: remote_tap_log,
-            stage: stage_handle,
+            staging_recorder: staging_recorder_log,
+            remote_recorder: remote_recorder_log,
+            volatile: volatile_handle,
             model: Model::new(initial),
             acked: Acked::new(),
             crash_entropy: SeededEntropy::new(seed.stream(5)),
@@ -276,7 +286,7 @@ impl World {
         }
         Some(
             self.model
-                .commit(&written, db_size, app, self.remote_tap.len()),
+                .commit(&written, db_size, app, self.remote_recorder.len()),
         )
     }
 
@@ -285,7 +295,7 @@ impl World {
     /// must not grow the database: the pages a growth re-adds are read from the
     /// rules after the tick, when the engine may have changed them.
     pub fn arm_commit_in_tick(&self, pages: Vec<(PageNo, Vec<u8>)>, db_size: u32) {
-        let (remote, staging) = (self.remote_tap.clone(), self.staging_tap.clone());
+        let (remote, staging) = (self.remote_recorder.clone(), self.staging_recorder.clone());
         let created_at = Box::new(move || (remote.len(), staging.len()));
         self.sqlite.arm_commit_in_tick(pages, db_size, created_at);
     }
@@ -358,7 +368,7 @@ impl World {
             .collect();
         Some(
             self.model
-                .commit(&pages, db_size, app, self.remote_tap.len()),
+                .commit(&pages, db_size, app, self.remote_recorder.len()),
         )
     }
 
@@ -374,14 +384,14 @@ impl World {
             salts: self.sqlite.salts(),
             end: WalOffset::from_frame_index(0, new),
         };
-        Some(self.model.vacuum(image, app, self.remote_tap.len()))
+        Some(self.model.vacuum(image, app, self.remote_recorder.len()))
     }
 
     /// Records a commit the engine made itself: a checkpoint's bump of page 1
     /// (`db.go:1668`) puts a one-page commit into the WAL that the app never
     /// made, and a file of the sync that follows ends on it. Its pages are the
     /// newest commit's, so the model keeps the newest commit's image under the new end. `at` is the
-    /// replica tap's length when the tick started, so no earlier put can be
+    /// replica recorder's length when the tick started, so no earlier put can be
     /// taken to cover it.
     pub fn sync_model_at(&mut self, at: usize) {
         let frames = self.sqlite.mx_frame();
@@ -405,7 +415,7 @@ impl World {
     /// The driver starts: see `SimSqlite::start_driver`. The bump frame it may
     /// write is a commit the app never made, which the model takes up now.
     pub fn start_driver(&mut self) {
-        let at = self.remote_tap.len();
+        let at = self.remote_recorder.len();
         self.sqlite.start_driver();
         self.sync_model_at(at);
     }
@@ -432,7 +442,7 @@ impl World {
     /// and tells the model which commits went with them.
     pub fn run_tick<F: Future>(&mut self, fut: F, plan: Option<CrashPlan>) -> TickEnd<F::Output> {
         let budget = plan.map_or(Polls::UNBOUNDED, |p| p.at_poll);
-        let at = self.remote_tap.len();
+        let at = self.remote_recorder.len();
         let ran = run_until(fut, budget);
         // The app's commit inside the tick came before the engine's own frames
         // that followed it, so the model takes it up first.
@@ -457,7 +467,7 @@ impl World {
             CrashKind::Process => Vec::new(),
             CrashKind::Power => {
                 let lost = block_on(
-                    self.stage
+                    self.volatile
                         .power_loss(&self.staging_raw, &self.crash_entropy),
                 )
                 .unwrap_or_default();
@@ -713,7 +723,7 @@ impl World {
             salts: self.sqlite.salts(),
             end: WalOffset::from_frame_index(self.sqlite.mx_frame(), page_size),
         };
-        self.model.vacuum(image, app, self.remote_tap.len());
+        self.model.vacuum(image, app, self.remote_recorder.len());
     }
 
     /// Whether the model's newest image is the database the rules hold: a check
@@ -738,7 +748,12 @@ impl World {
     /// # Errors
     /// The first [`Violation`].
     pub fn check(&self) -> Result<Checked, Violation> {
-        check(&self.model, &self.remote_tap, &self.remote_raw, &self.acked)
+        check(
+            &self.model,
+            &self.remote_recorder,
+            &self.remote_raw,
+            &self.acked,
+        )
     }
 }
 

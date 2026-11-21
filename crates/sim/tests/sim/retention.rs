@@ -4,7 +4,7 @@
 
 use lsr_core::{Event, FileKey, MaintainedEvent, RetentionMode};
 use lsr_sim::run::Seen;
-use lsr_sim::{Opts, RunReport, Seed, TapEvent, Weights, run_with};
+use lsr_sim::{Opts, RecorderEvent, RunReport, Seed, Weights, run_with};
 
 const STEPS: u32 = 300;
 const SEEDS: std::ops::RangeInclusive<u64> = 1..=8;
@@ -45,7 +45,7 @@ fn add(sum: &mut Tally, report: &RunReport) {
         }
     }
     for event in &report.remote_events {
-        if let TapEvent::Delete { keys } = event {
+        if let RecorderEvent::Delete { keys } = event {
             sum.deleted.extend(keys);
         }
     }

@@ -5,15 +5,15 @@ use lsr_ltx::PageNo;
 use super::*;
 use crate::model::{Model, PageImage};
 use crate::sqlite::AppCommit;
-use crate::store::Tap;
+use crate::store::Recorder;
 use crate::testkit::{PAGE, SALTS, fkey, ltx, origin, pgno, ps, put, txid, wal_end};
 
 /// Three one-frame commits of page 1 filled 10, 11, 12, and a replica that
 /// holds them faithfully as three level-0 files.
 struct Fixture {
     model: Model,
-    tap: crate::store::TapLog,
-    store: Tap<MemStore>,
+    recorder: crate::store::RecorderLog,
+    store: Recorder<MemStore>,
     raw: MemStore,
 }
 
@@ -23,8 +23,8 @@ fn page(fill: u8) -> Vec<u8> {
 
 fn fixture() -> Fixture {
     let raw = MemStore::new();
-    let store = Tap::new(raw.clone());
-    let tap = store.log();
+    let store = Recorder::new(raw.clone());
+    let recorder = store.log();
     let mut model = Model::new(PageImage::from_bytes(ps(), &[]));
     for n in 1..=3_u32 {
         let fill = u8::try_from(n.saturating_add(9)).unwrap();
@@ -36,21 +36,21 @@ fn fixture() -> Fixture {
                 salts: SALTS,
                 end: wal_end(n),
             },
-            tap.len(),
+            recorder.len(),
         );
         let t = u64::from(n);
         put(&store, 0, t, t, &ltx(t, t, 1, fill, Some(origin(n, n))));
     }
     Fixture {
         model,
-        tap,
+        recorder,
         store,
         raw,
     }
 }
 
 fn run(f: &Fixture, acked: &Acked) -> Result<Checked, Violation> {
-    check(&f.model, &f.tap, &f.raw, acked)
+    check(&f.model, &f.recorder, &f.raw, acked)
 }
 
 #[test]
@@ -148,8 +148,8 @@ fn oracle_catches_a_reused_transaction_id() {
 #[test]
 fn oracle_pairs_a_reissued_snapshot_with_its_newest_note() {
     let raw = MemStore::new();
-    let store = Tap::new(raw.clone());
-    let tap = store.log();
+    let store = Recorder::new(raw.clone());
+    let recorder = store.log();
     let mut model = Model::new(PageImage::from_bytes(ps(), &[]));
     let mut commit = |fill: u8, frames: u32| {
         model.commit(
@@ -159,15 +159,15 @@ fn oracle_pairs_a_reissued_snapshot_with_its_newest_note() {
                 salts: SALTS,
                 end: wal_end(frames),
             },
-            tap.len(),
+            recorder.len(),
         )
     };
     let lost = commit(10, 1);
     let kept = commit(20, 2);
-    model.note_snapshot(txid(1), lost, false, tap.len());
-    model.note_snapshot(txid(1), kept, false, tap.len());
+    model.note_snapshot(txid(1), lost, false, recorder.len());
+    model.note_snapshot(txid(1), kept, false, recorder.len());
     put(&store, 0, 1, 1, &ltx(1, 1, 1, 20, None));
-    let done = check(&model, &tap, &raw, &Acked::new()).unwrap();
+    let done = check(&model, &recorder, &raw, &Acked::new()).unwrap();
     assert_eq!(done.restored, 1);
     assert_eq!(done.latest, Some(txid(1)));
 }

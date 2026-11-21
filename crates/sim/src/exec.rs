@@ -3,7 +3,7 @@
 //! A crash is dropping the future at one of its `Pending` results. Every
 //! borrow, read-transaction handle and in-flight upload the future held dies with
 //! it, exactly as a process death takes them, while the stores and the SQLite
-//! model it touched stay. `Yield` (in `store`) makes every store call return
+//! model it touched stay. `YieldEachCall` (in `store`) makes every store call return
 //! `Pending` once, so every store call is a crash point and nothing else is.
 //! The waker is a no-op: a future that is not ready is simply polled again.
 

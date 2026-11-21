@@ -1,19 +1,19 @@
 //! Store wrappers: faults, crash points, ground truth and power loss.
 //!
 //! Each wrapper is an [`ObjectStore`] over another. The simulator stacks them
-//! as `Faults<Yield<Tap<Stage<MemStore>>>>` for the staging directory and
-//! `Faults<Yield<Tap<MemStore>>>` for the replica, and keeps a plain `MemStore`
+//! as `Faults<YieldEachCall<Recorder<Volatile<MemStore>>>>` for the staging directory and
+//! `Faults<YieldEachCall<Recorder<MemStore>>>` for the replica, and keeps a plain `MemStore`
 //! handle to the same state: the oracle's restores read through that handle, so
 //! no fault or yield ever touches a check.
 //!
 //! - [`Faults`] fails calls on a schedule. Faults live here so the raw store
 //!   stays clean.
-//! - [`Yield`] returns `Pending` once before every call, which is what makes
+//! - [`YieldEachCall`] returns `Pending` once before every call, which is what makes
 //!   each store call a crash point for the executor.
-//! - [`Tap`] records what the store really did, below the faults, so a commit
+//! - [`Recorder`] records what the store really did, below the faults, so a commit
 //!   that a fault turned into an error still shows as published. The code under
 //!   test never reads it.
-//! - [`Stage`] tracks which staged files are not yet durable, for a power loss.
+//! - [`Volatile`] tracks which staged files are not yet durable, for a power loss.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
@@ -253,7 +253,7 @@ impl FaultHandle {
 pub struct Faults<S> {
     inner: S,
     state: Arc<Mutex<FaultState>>,
-    stage: Option<StageHandle>,
+    volatile: Option<VolatileHandle>,
     raw: Option<MemStore>,
 }
 
@@ -283,7 +283,7 @@ impl<S> Faults<S> {
         Self {
             inner,
             state: Arc::new(Mutex::new(state)),
-            stage: None,
+            volatile: None,
             raw: None,
         }
     }
@@ -296,11 +296,11 @@ impl<S> Faults<S> {
         self
     }
 
-    /// Marks a key volatile in `stage` whenever a commit publishes and then
+    /// Marks a key volatile in `volatile` whenever a commit publishes and then
     /// fails: the staging store's "rename done, sync failed".
     #[must_use]
-    pub fn volatile_on_late_error(mut self, stage: StageHandle) -> Self {
-        self.stage = Some(stage);
+    pub fn volatile_on_late_error(mut self, volatile: VolatileHandle) -> Self {
+        self.volatile = Some(volatile);
         self
     }
 
@@ -388,7 +388,7 @@ impl<S: ObjectStore> ObjectStore for Faults<S> {
             key: *key,
             wrote: 0,
             state: Arc::clone(&self.state),
-            stage: self.stage.clone(),
+            volatile: self.volatile.clone(),
             raw: self.raw.clone(),
         })
     }
@@ -408,7 +408,7 @@ pub struct FaultsUpload<U> {
     key: FileKey,
     wrote: u64,
     state: Arc<Mutex<FaultState>>,
-    stage: Option<StageHandle>,
+    volatile: Option<VolatileHandle>,
     raw: Option<MemStore>,
 }
 
@@ -457,8 +457,8 @@ impl<U: Upload> Upload for FaultsUpload<U> {
             }
             Verdict::AfterPublish(err) => {
                 self.inner.commit().await?;
-                if let Some(stage) = &self.stage {
-                    stage.mark_volatile(self.key);
+                if let Some(volatile) = &self.volatile {
+                    volatile.mark_volatile(self.key);
                 }
                 Err(err)
             }
@@ -508,11 +508,11 @@ impl Future for YieldNow {
 
 /// A store whose every call is one await point.
 #[derive(Clone, Debug)]
-pub struct Yield<S> {
+pub struct YieldEachCall<S> {
     inner: S,
 }
 
-impl<S> Yield<S> {
+impl<S> YieldEachCall<S> {
     /// Wraps `inner`.
     #[must_use]
     pub const fn new(inner: S) -> Self {
@@ -520,7 +520,7 @@ impl<S> Yield<S> {
     }
 }
 
-impl<S: ObjectStore> ObjectStore for Yield<S> {
+impl<S: ObjectStore> ObjectStore for YieldEachCall<S> {
     type Upload = YieldUpload<S::Upload>;
 
     async fn list(
@@ -568,7 +568,7 @@ impl<S: ObjectStore> ObjectStore for Yield<S> {
     }
 }
 
-/// An upload through [`Yield`].
+/// An upload through [`YieldEachCall`].
 #[derive(Debug)]
 pub struct YieldUpload<U> {
     inner: U,
@@ -591,11 +591,11 @@ impl<U: Upload> Upload for YieldUpload<U> {
     }
 }
 
-// ------------------------------------------------------------------- Tap
+// ------------------------------------------------------------------- Recorder
 
 /// One thing the store really did.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum TapEvent {
+pub enum RecorderEvent {
     /// A commit.
     Put {
         /// The object.
@@ -612,9 +612,9 @@ pub enum TapEvent {
     },
 }
 
-/// Call counts a [`Tap`] keeps for the resource properties.
+/// Call counts a [`Recorder`] keeps for the resource properties.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct TapCounts {
+pub struct RecorderCounts {
     /// Listing calls.
     pub lists: u64,
     /// Read calls.
@@ -638,20 +638,20 @@ pub struct TapCounts {
 
 #[derive(Debug, Default)]
 struct TapState {
-    events: Vec<TapEvent>,
-    counts: TapCounts,
+    events: Vec<RecorderEvent>,
+    counts: RecorderCounts,
 }
 
-/// The reading side of a [`Tap`].
+/// The reading side of a [`Recorder`].
 #[derive(Clone, Debug, Default)]
-pub struct TapLog {
+pub struct RecorderLog {
     state: Arc<Mutex<TapState>>,
 }
 
-impl TapLog {
+impl RecorderLog {
     /// Every event so far, oldest first.
     #[must_use]
-    pub fn events(&self) -> Vec<TapEvent> {
+    pub fn events(&self) -> Vec<RecorderEvent> {
         lock(&self.state).events.clone()
     }
 
@@ -669,7 +669,7 @@ impl TapLog {
 
     /// The call counts.
     #[must_use]
-    pub fn counts(&self) -> TapCounts {
+    pub fn counts(&self) -> RecorderCounts {
         lock(&self.state).counts
     }
 
@@ -680,29 +680,29 @@ impl TapLog {
 
 /// A store that records what it did.
 #[derive(Clone, Debug)]
-pub struct Tap<S> {
+pub struct Recorder<S> {
     inner: S,
-    log: TapLog,
+    log: RecorderLog,
 }
 
-impl<S> Tap<S> {
+impl<S> Recorder<S> {
     /// Wraps `inner` with an empty log.
     #[must_use]
     pub fn new(inner: S) -> Self {
         Self {
             inner,
-            log: TapLog::default(),
+            log: RecorderLog::default(),
         }
     }
 
     /// The log; clones share it.
     #[must_use]
-    pub fn log(&self) -> TapLog {
+    pub fn log(&self) -> RecorderLog {
         self.log.clone()
     }
 }
 
-impl<S: ObjectStore> ObjectStore for Tap<S> {
+impl<S: ObjectStore> ObjectStore for Recorder<S> {
     type Upload = TapUpload<S>;
 
     async fn list(
@@ -755,7 +755,7 @@ impl<S: ObjectStore> ObjectStore for Tap<S> {
 
         self.inner.delete(keys).await?;
         self.log.with(|s| {
-            s.events.push(TapEvent::Delete {
+            s.events.push(RecorderEvent::Delete {
                 keys: keys.to_vec(),
             });
         });
@@ -763,14 +763,14 @@ impl<S: ObjectStore> ObjectStore for Tap<S> {
     }
 }
 
-/// An upload through [`Tap`].
+/// An upload through [`Recorder`].
 #[derive(Debug)]
 pub struct TapUpload<S: ObjectStore> {
     inner: S::Upload,
     key: FileKey,
     head: Vec<u8>,
     wrote: u64,
-    log: TapLog,
+    log: RecorderLog,
 }
 
 fn parse_header(head: &[u8]) -> Option<Header> {
@@ -810,10 +810,10 @@ impl<S: ObjectStore> Upload for TapUpload<S> {
         let outcome = inner.commit().await;
         log.with(|s| {
             bump(&mut s.counts.commits);
-            // Only an object the store accepted is recorded: the tap sits below
+            // Only an object the store accepted is recorded: the recorder sits below
             // `Faults`, so a commit it sees fail never published.
             if outcome.is_ok() {
-                s.events.push(TapEvent::Put {
+                s.events.push(RecorderEvent::Put {
                     key,
                     header,
                     origin: header.and_then(|h| h.fields().wal),
@@ -848,17 +848,17 @@ pub enum Lost {
     },
 }
 
-/// The side of a [`Stage`] the simulator keeps: which keys are volatile, and the
+/// The side of a [`Volatile`] the simulator keeps: which keys are volatile, and the
 /// power loss itself.
 #[derive(Clone, Debug, Default)]
-pub struct StageHandle {
+pub struct VolatileHandle {
     state: Arc<Mutex<StageState>>,
 }
 
 /// How much a power loss reads of a file at once.
 const LOSS_READ: u32 = 1 << 20;
 
-impl StageHandle {
+impl VolatileHandle {
     /// A key that is visible but not yet durable.
     pub fn mark_volatile(&self, key: FileKey) {
         lock(&self.state).volatile.insert(key);
@@ -942,29 +942,29 @@ async fn read_all<S: ObjectStore>(store: &S, key: &FileKey) -> Result<Vec<u8>, S
 /// commit sits above this one and this one saw it succeed. A later successful
 /// commit is a directory sync and makes every earlier rename durable.
 #[derive(Clone, Debug)]
-pub struct Stage<S> {
+pub struct Volatile<S> {
     inner: S,
-    handle: StageHandle,
+    handle: VolatileHandle,
 }
 
-impl<S> Stage<S> {
+impl<S> Volatile<S> {
     /// Wraps `inner` with nothing volatile.
     #[must_use]
     pub fn new(inner: S) -> Self {
         Self {
             inner,
-            handle: StageHandle::default(),
+            handle: VolatileHandle::default(),
         }
     }
 
     /// The handle; clones share state.
     #[must_use]
-    pub fn handle(&self) -> StageHandle {
+    pub fn handle(&self) -> VolatileHandle {
         self.handle.clone()
     }
 }
 
-impl<S: ObjectStore> ObjectStore for Stage<S> {
+impl<S: ObjectStore> ObjectStore for Volatile<S> {
     type Upload = StageUpload<S::Upload>;
 
     async fn list(
@@ -1016,11 +1016,11 @@ impl<S: ObjectStore> ObjectStore for Stage<S> {
     }
 }
 
-/// An upload through [`Stage`].
+/// An upload through [`Volatile`].
 #[derive(Debug)]
 pub struct StageUpload<U> {
     inner: U,
-    handle: StageHandle,
+    handle: VolatileHandle,
 }
 
 impl<U: Upload> Upload for StageUpload<U> {
