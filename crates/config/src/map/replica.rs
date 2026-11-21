@@ -7,28 +7,18 @@
 //! existing is refused, as Go's `ResolveLegacyFileReplicaPath`.
 //!
 //! **S3.** `url` or `bucket` and `path`, Go's precedence: the file's keys win
-//! over the URL's parts and query. The host is the bucket, as Go's `ParseHost`
-//! reads it for plain names, AWS virtual hosts (`bucket.s3.region.amazonaws.com`)
-//! and MinIO's `bucket.host:port`; another provider's host spelling (DigitalOcean,
-//! Backblaze, Filebase, Scaleway, Neon) and access point ARNs are refused with a
-//! pointer to `bucket` plus `endpoint`, since v1 does not derive their endpoints.
-//! Query keys Go reads: `endpoint`, `region`, `forcePathStyle` (and
-//! `force-path-style`), `partSize` (`part-size`) are honoured; `skipVerify=true`
-//! and a `storageClass` are refused, as their file keys are; the signing, MD5 and
-//! `concurrency` keys are accepted with a note, as their file keys are. A key Go
-//! does not read is refused. Path style follows Go: on when an endpoint is
-//! given, unless set; otherwise as the provider needs.
+//! over the URL's parts and query. The URL is read by the one `s3://` parser
+//! (`s3.rs`, which the command line's `--replica` uses too), so the daemon and
+//! `lsr restore` accept the same URLs.
 
 use std::io;
 use std::path::{Path, PathBuf};
 
-use lsr_store_s3::{
-    BucketName, ConfigError as S3Error, Endpoint, PartSize, Prefix, Region, S3Config,
-    S3Credentials, SecretString, UrlStyle,
-};
+use lsr_store_s3::{ConfigError as S3Error, S3Config, S3Credentials, SecretString};
 use percent_encoding::percent_decode_str;
 use url::Url;
 
+use super::s3::{S3Overrides, S3Url, s3_config};
 use super::{Credentials, Found, MapProblemKind, Note, ReplicaPlan};
 use crate::config::{ReplicaConfig, ReplicaKind};
 use crate::error::KeyPath;
@@ -74,6 +64,11 @@ pub enum ReplicaProblem {
     /// The URL does not parse.
     #[error("the replica url does not parse")]
     BadUrl,
+    /// The URL carries a user or password; credentials never come from a URL.
+    #[error(
+        "the replica url carries credentials; give them as access-key-id and secret-access-key, or in the environment"
+    )]
+    UserInfo,
     /// A host Go splits into bucket and a provider endpoint v1 does not derive.
     #[error(
         "the url host names a provider endpoint ({provider}); give the bucket alone as the host, or as `bucket`, and the endpoint as `endpoint`"
@@ -216,18 +211,6 @@ fn legacy_or(
     Some(legacy)
 }
 
-/// What the URL said, before the file's keys override it.
-#[derive(Default)]
-struct FromUrl {
-    bucket: Option<String>,
-    path: Option<String>,
-    region: Option<String>,
-    endpoint: Option<String>,
-    path_style: Option<bool>,
-    path_style_set: bool,
-    part_size: Option<u64>,
-}
-
 fn s3(at: &KeyPath, replica: &ReplicaConfig, found: &mut Found) -> Option<ReplicaPlan> {
     let s3 = replica.s3();
     if replica.url().is_some() && replica.path().is_some() {
@@ -238,37 +221,30 @@ fn s3(at: &KeyPath, replica: &ReplicaConfig, found: &mut Found) -> Option<Replic
         refuse(at, found, ReplicaProblem::S3UrlAndBucket);
         return None;
     }
-    let from_url = match replica.url() {
-        Some(url) => s3_url(&at.key("url"), url, found)?,
-        None => FromUrl::default(),
+    let url = match replica.url().map(S3Url::parse) {
+        None => None,
+        Some(Ok(url)) => Some(url),
+        Some(Err(problem)) => {
+            refuse(&at.key("url"), found, problem);
+            return None;
+        }
     };
-    let text = |own: Option<&str>, url: Option<String>| {
-        own.map(str::to_owned).filter(|s| !s.is_empty()).or(url)
+    for text in url.iter().flat_map(S3Url::notes) {
+        let (at, text) = (at.key("url"), *text);
+        found.notes.push(Note { at, text });
+    }
+    let over = S3Overrides {
+        bucket: s3.bucket(),
+        path: replica.path(),
+        region: s3.region(),
+        endpoint: s3.endpoint(),
+        force_path_style: s3.force_path_style(),
+        part_size: s3.part_size(),
     };
-    let bucket = text(s3.bucket(), from_url.bucket);
-    let path = text(replica.path(), from_url.path).unwrap_or_default();
-    let region = text(s3.region(), from_url.region);
-    let endpoint = text(s3.endpoint(), from_url.endpoint).map(|e| ensure_scheme(&e));
-    let Some(bucket) = bucket else {
-        refuse(at, found, ReplicaProblem::BucketRequired);
-        return None;
-    };
-    // Go: path style when an endpoint is given; the file's key, else the URL's, wins.
-    let (style, style_set) = match (s3.force_path_style(), from_url.path_style) {
-        (Some(own), _) => (own, true),
-        (None, Some(url)) => (url || s3.endpoint().is_some(), from_url.path_style_set),
-        (None, None) => (endpoint.is_some(), false),
-    };
-    let built = build(&bucket, &path, region, endpoint, (style, style_set));
-    let part_size = s3.part_size().or(from_url.part_size);
-    let built = built.and_then(|config| match part_size {
-        None => Ok(config),
-        Some(bytes) => PartSize::new(bytes).map(|size| config.with_part_size(size)),
-    });
-    let config = match built {
+    let config = match s3_config(url, &over) {
         Ok(config) => config,
-        Err(error) => {
-            refuse(at, found, ReplicaProblem::S3(error));
+        Err(problem) => {
+            refuse(at, found, problem);
             return None;
         }
     };
@@ -277,28 +253,6 @@ fn s3(at: &KeyPath, replica: &ReplicaConfig, found: &mut Found) -> Option<Replic
         config: Box::new(config),
         credentials,
     })
-}
-
-fn build(
-    bucket: &str,
-    path: &str,
-    region: Option<String>,
-    endpoint: Option<String>,
-    (path_style, set): (bool, bool),
-) -> Result<S3Config, S3Error> {
-    let region = Region::new(region.as_deref().unwrap_or(lsr_store_s3::DEFAULT_REGION))?;
-    let endpoint = match endpoint {
-        Some(text) => Endpoint::new(&text)?,
-        None => Endpoint::new(&format!("https://s3.{}.amazonaws.com", region.as_str()))?,
-    };
-    let config = S3Config::new(endpoint, BucketName::new(bucket)?, Prefix::new(path)?);
-    // Unset, the provider's own need (MinIO, an address) still turns path style on, as Go's.
-    let path_style = path_style || (!set && config.style() == UrlStyle::Path);
-    Ok(config.with_region(region).with_style(if path_style {
-        UrlStyle::Path
-    } else {
-        UrlStyle::VirtualHost
-    }))
 }
 
 fn credentials(at: &KeyPath, replica: &ReplicaConfig, found: &mut Found) -> Option<Credentials> {
@@ -317,198 +271,6 @@ fn credentials(at: &KeyPath, replica: &ReplicaConfig, found: &mut Found) -> Opti
             None
         }
     }
-}
-
-/// Go's `EnsureEndpointScheme`: http for local hosts, https otherwise.
-fn ensure_scheme(endpoint: &str) -> String {
-    let lower = endpoint.to_ascii_lowercase();
-    if lower.starts_with("http://") || lower.starts_with("https://") {
-        return endpoint.to_owned();
-    }
-    let host = endpoint.split(['/', ':']).next().unwrap_or("");
-    let local = host == "localhost"
-        || host == "127.0.0.1"
-        || host.ends_with(".local")
-        || host.ends_with(".localhost")
-        || [
-            "192.168.", "10.", "172.16.", "172.17.", "172.18.", "172.19.", "172.2", "172.30.",
-            "172.31.",
-        ]
-        .iter()
-        .any(|prefix| host.starts_with(prefix));
-    format!("{}://{endpoint}", if local { "http" } else { "https" })
-}
-
-/// The URL's parts and query, as Go reads them.
-fn s3_url(at: &KeyPath, text: &str, found: &mut Found) -> Option<FromUrl> {
-    if text.to_ascii_lowercase().starts_with("s3://arn:") {
-        refuse(at, found, ReplicaProblem::AccessPoint);
-        return None;
-    }
-    let Ok(url) = Url::parse(text) else {
-        refuse(at, found, ReplicaProblem::BadUrl);
-        return None;
-    };
-    let host = match url.port() {
-        Some(port) => format!("{}:{port}", url.host_str().unwrap_or("")),
-        None => url.host_str().unwrap_or("").to_owned(),
-    };
-    let mut out = match parse_host(&host) {
-        Ok(out) => out,
-        Err(problem) => {
-            refuse(at, found, problem);
-            return None;
-        }
-    };
-    let decoded = percent_decode_str(url.path())
-        .decode_utf8()
-        .map(|p| clean(&p));
-    let Ok(path) = decoded else {
-        refuse(at, found, ReplicaProblem::BadUrl);
-        return None;
-    };
-    let path = path.trim_start_matches('/');
-    out.path = (!path.is_empty() && path != ".").then(|| path.to_owned());
-    for (name, value) in url.query_pairs() {
-        query(at, &name, &value, &mut out, found)?;
-    }
-    Some(out)
-}
-
-/// One query key; `None` when it is refused.
-fn query(
-    at: &KeyPath,
-    name: &str,
-    value: &str,
-    out: &mut FromUrl,
-    found: &mut Found,
-) -> Option<()> {
-    match read_query(name, value, out) {
-        Ok(None) => Some(()),
-        Ok(Some(text)) => {
-            found.notes.push(Note {
-                at: at.clone(),
-                text,
-            });
-            Some(())
-        }
-        Err(problem) => {
-            refuse(at, found, problem);
-            None
-        }
-    }
-}
-
-/// Applies one query key to `out`; a note when it has no effect in v1.
-fn read_query(
-    name: &str,
-    value: &str,
-    out: &mut FromUrl,
-) -> Result<Option<&'static str>, ReplicaProblem> {
-    let not_in_v1 = |why: &'static str| ReplicaProblem::QueryNotInV1 {
-        name: name.to_owned(),
-        why,
-    };
-    let truthy = matches!(
-        value.to_ascii_lowercase().as_str(),
-        "true" | "1" | "t" | "yes"
-    );
-    match name {
-        "endpoint" if !value.is_empty() => {
-            out.endpoint = Some(ensure_scheme(value));
-            if !out.path_style_set {
-                out.path_style = Some(true);
-            }
-        }
-        "region" if !value.is_empty() => out.region = Some(value.to_owned()),
-        "forcePathStyle" | "force-path-style" if !value.is_empty() => {
-            out.path_style = Some(truthy);
-            out.path_style_set = true;
-        }
-        "skipVerify" if value == "true" => {
-            return Err(not_in_v1("v1 always verifies TLS certificates"));
-        }
-        "storageClass" | "storage-class" if !value.is_empty() => {
-            return Err(not_in_v1("an S3 storage class"));
-        }
-        "partSize" | "part-size" => match value.parse::<u64>() {
-            Ok(bytes) if bytes > 0 => out.part_size = Some(bytes),
-            Ok(_) | Err(_) => {
-                let name = name.to_owned();
-                return Err(ReplicaProblem::QueryNotNumber { name });
-            }
-        },
-        "signPayload" | "sign-payload" | "signAcceptEncoding" | "sign-accept-encoding" => {
-            return Ok(Some(
-                "the url's signing setting has no effect: v1's S3 client signs requests one fixed way",
-            ));
-        }
-        "requireContentMD5"
-        | "require-content-md5"
-        | "putObjectContentMD5"
-        | "put-object-content-md5" => {
-            return Ok(Some(
-                "the url's Content-MD5 setting has no effect: v1 always sends Content-MD5 on uploads",
-            ));
-        }
-        "concurrency" => {
-            return Ok(Some(
-                "the url's concurrency has no effect: v1 uploads one part at a time",
-            ));
-        }
-        "endpoint" | "region" | "forcePathStyle" | "force-path-style" | "skipVerify"
-        | "storageClass" | "storage-class" => {}
-        other => {
-            let name = other.to_owned();
-            return Err(ReplicaProblem::QueryUnknown { name });
-        }
-    }
-    Ok(None)
-}
-
-/// Go's `s3.ParseHost`, for the spellings v1 maps.
-fn parse_host(host: &str) -> Result<FromUrl, ReplicaProblem> {
-    let mut out = FromUrl::default();
-    if host.contains(':') && !host.contains(".com") {
-        out.path_style = Some(true);
-        match host.split_once('.') {
-            Some((bucket, rest)) => {
-                out.bucket = Some(bucket.to_owned());
-                out.endpoint = Some(format!("http://{rest}"));
-                out.region = Some(lsr_store_s3::DEFAULT_REGION.to_owned());
-            }
-            None => out.endpoint = Some(format!("http://{host}")),
-        }
-        return Ok(out);
-    }
-    if let Some(rest) = host.strip_suffix(".amazonaws.com") {
-        let (bucket, region) = match rest.strip_suffix(".s3") {
-            Some(bucket) => (bucket, None),
-            None => match rest.rsplit_once('.') {
-                Some((before, region)) => match before.strip_suffix(".s3") {
-                    Some(bucket) => (bucket, Some(region)),
-                    None => (host, None),
-                },
-                None => (host, None),
-            },
-        };
-        out.bucket = Some(bucket.to_owned()).filter(|b| !b.is_empty());
-        out.region = region.map(str::to_owned);
-        return Ok(out);
-    }
-    for (suffix, provider) in [
-        (".digitaloceanspaces.com", "DigitalOcean Spaces"),
-        (".backblazeb2.com", "Backblaze B2"),
-        ("s3.filebase.com", "Filebase"),
-        (".scw.cloud", "Scaleway"),
-        (".neon.tech", "Neon"),
-    ] {
-        if host.ends_with(suffix) {
-            return Err(ReplicaProblem::ProviderHost { provider });
-        }
-    }
-    out.bucket = Some(host.to_owned()).filter(|b| !b.is_empty());
-    Ok(out)
 }
 
 /// The replica both plans write to, named without credentials, when it is one place.

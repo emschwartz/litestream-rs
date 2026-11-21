@@ -196,8 +196,17 @@ mod tigris {
 
         fn config(&self) -> S3Config {
             let escaped = self.endpoint.replace(':', "%3A").replace('/', "%2F");
-            let url = format!("{}?endpoint={escaped}&region={}", self.url(), self.region);
-            S3Config::from_url(&url).expect("config")
+            // Virtual-host style, as these runs always used; Go's rule would pick path style.
+            let url = format!(
+                "{}?endpoint={escaped}&region={}&forcePathStyle=false",
+                self.url(),
+                self.region
+            );
+            lsr_config::s3_config(
+                Some(lsr_config::S3Url::parse(&url).expect("url")),
+                &lsr_config::S3Overrides::default(),
+            )
+            .expect("config")
         }
 
         fn store(&self) -> (S3Store<Counting>, Arc<Counts>) {

@@ -3,11 +3,12 @@
 //! replica, each turn ended by SIGKILL at a point chosen from a seed the test prints, and every
 //! switch must be a plain restart unless the engines' own rules call for a snapshot there.
 //!
-//! [`Launch`] says how Rust starts. `Arguments` is the one-database form `lsr replicate DB
-//! REPLICA`, with Rust's own defaults (a PASSIVE checkpoint at 1,000 WAL pages, one a minute,
-//! never a TRUNCATE). `ConfigFile` is the daemon on the very file Go reads, `lsr replicate
-//! -config go.yml`, so both sides are config-driven processes with Go's intervals and
-//! checkpoint settings (Rust then compacts every second too). Go always reads the file.
+//! [`Launch`] says how Rust starts. `Arguments` is Go's one-database form `lsr replicate DB
+//! file://REPLICA`, with Go's defaults (a PASSIVE checkpoint at 1,000 WAL pages, one a
+//! minute, and never a TRUNCATE, which Rust takes only with the `host-readers: none` claim).
+//! `ConfigFile` is the daemon on the very file Go reads, `lsr replicate -config go.yml`, so
+//! both sides are config-driven processes with Go's intervals and checkpoint settings (Rust
+//! then compacts every second too). Go always reads the file.
 //!
 //! The file checkpoints often: `checkpoint-interval: 5s`, `min-checkpoint-page-count: 1000`
 //! and `truncate-page-n: 1500` (Rust takes the last only with the `litestream-rs.host-readers:
@@ -21,8 +22,8 @@
 //! turn. The one exception is a boot after the previous process restarted or truncated the WAL
 //! and died before it staged anything in the new generation: then both engines' rules take a
 //! snapshot, and the test asserts that this is the situation and that the cause the process
-//! logged is the one those rules give (`generation.rs`; the Rust daemon's is read from its
-//! boot line in `Run::boot_cause`). The turn then ends at its kill point:
+//! logged is the one those rules give (`generation.rs`; Rust's is read from its boot line in
+//! `Run::boot_cause`). The turn then ends at its kill point:
 //! - `AfterCommit`: at once after a commit, while the process may be reading the WAL;
 //! - `Staged`: once the meta directory holds a level-0 file the replica does not. The test
 //!   polls without sleeping and stops the process with SIGSTOP the moment it sees one, then
@@ -148,7 +149,7 @@ const POINTS: [KillAt; 7] = [
 /// How Rust's turns start. See the module doc.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Launch {
-    /// `lsr replicate DB REPLICA`.
+    /// `lsr replicate DB file://REPLICA`.
     Arguments,
     /// `lsr replicate -config <Go's file>`.
     ConfigFile,
@@ -592,13 +593,11 @@ impl Run {
         );
     }
 
-    /// The cause the boot's log names, if it names one: Rust's `snapshot required` boot line
-    /// (the daemon only; `lsr replicate DB REPLICA` logs nothing), Go's `reason` on the sync
-    /// that wrote the boot's file.
+    /// The cause the boot's log names, if it names one: Rust's boot line (either launch is
+    /// the daemon), Go's `reason` on the sync that wrote the boot's file.
     fn boot_cause(&self, process: &mut Replicator, prev: Txid, at: &str) -> Option<String> {
         match (process.kind(), self.launch) {
-            (Kind::Rust, Launch::Arguments) => None,
-            (Kind::Rust, Launch::ConfigFile) => {
+            (Kind::Rust, Launch::Arguments | Launch::ConfigFile) => {
                 // The daemon's log sink is in place before its replicator's thread runs,
                 // so every boot logs this line.
                 let mut line = String::new();

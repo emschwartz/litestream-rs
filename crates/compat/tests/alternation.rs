@@ -1,9 +1,9 @@
-//! The alternation test: Go's `litestream replicate` and Rust's `lsr replicate DB REPLICA`
+//! The alternation test: Go's `litestream replicate` and Rust's `lsr replicate DB file://REPLICA`
 //! take turns on one database, meta directory and replica, each turn ended by SIGKILL at a
 //! point chosen from a seed the test prints, and every switch must be a plain restart unless
 //! the WAL restarted unseen before the kill. The runs cross checkpoints and WAL restarts: Go
 //! checkpoints from its config file (every 5 s, at 1,000 pages, TRUNCATE at 1,500), Rust with
-//! its own defaults (PASSIVE at 1,000 pages). The run, its kill points and its oracle are in
+//! Go's defaults for that form (PASSIVE at 1,000 pages). The run, its kill points and its oracle are in
 //! `alternate/mod.rs`, shared with `sidecar.rs`, which runs the same alternation with both
 //! sides reading one config file, so Rust also checkpoints on Go's schedule and runs TRUNCATE.
 //!

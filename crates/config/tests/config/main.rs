@@ -2,7 +2,7 @@
 //! (`go`), the four key classes and every out-of-scope feature (`classes`),
 //! yaml.v2's readings measured with Go (`fidelity`), environment expansion
 //! (`env`), upstream's example file (`upstream`), and the mapping onto
-//! replicators (`map`).
+//! replicators (`map`), and the one `s3://` URL parser (`s3url`).
 
 #[cfg(test)]
 mod classes;
@@ -16,5 +16,7 @@ mod fidelity;
 mod go;
 #[cfg(test)]
 mod map;
+#[cfg(test)]
+mod s3url;
 #[cfg(test)]
 mod upstream;

@@ -1,18 +1,14 @@
-//! What identifies a replica on an S3-compatible service, and how a URL
-//! spells it.
+//! What identifies a replica on an S3-compatible service: endpoint, bucket,
+//! prefix, region, addressing style, provider and part size, each a type that
+//! holds only a usable value.
 //!
-//! The URL form is `s3://<bucket>/<prefix>?endpoint=<http(s) url>&region=<r>&forcePathStyle=<bool>&partSize=<bytes>`.
-//! It is narrower than Go's on purpose: the host is the bucket verbatim (Go
-//! also splits provider hostnames such as `bucket.s3.amazonaws.com`), a
-//! query key this parser does not know is refused (Go ignores it, so a
-//! misspelt `forcePathStyle` would silently change behaviour), and userinfo is
-//! refused because credentials come from [`crate::S3Credentials`], never from a
-//! URL. No error here carries any part of the URL.
+//! Reading an `s3://` URL is not here: `lsr-config`'s `S3Url` is the one parser,
+//! Go's grammar, for the daemon's config and the command line alike. No error
+//! here carries any part of a URL.
 
 use std::fmt;
 use std::time::Duration;
 
-use percent_encoding::percent_decode_str;
 use thiserror::Error;
 use url::{Host, Url};
 
@@ -26,7 +22,7 @@ pub enum ConfigError {
     /// The text is not a usable URL, or a query value is malformed.
     #[error("malformed replica url")]
     BadUrl,
-    /// The scheme is not `s3` (replica URL) or not `http`/`https` (endpoint).
+    /// The endpoint's scheme is not `http` or `https`.
     #[error("unsupported url scheme")]
     UnsupportedScheme,
     /// The prefix is empty. Go would build keys with a leading slash; a replica
@@ -51,9 +47,6 @@ pub enum ConfigError {
     /// The region is empty or has characters other than letters, digits and dashes.
     #[error("bad region")]
     BadRegion,
-    /// The query holds a key this parser does not know.
-    #[error("unknown url parameter")]
-    UnknownParameter,
 }
 
 /// How the bucket is addressed in the URL.
@@ -334,47 +327,6 @@ impl S3Config {
         }
     }
 
-    /// Parses an `s3://` replica URL; see the module docs for the form.
-    ///
-    /// # Errors
-    /// A [`ConfigError`] naming what is wrong, never the URL itself.
-    pub fn from_url(text: &str) -> Result<Self, ConfigError> {
-        let url = Url::parse(text).map_err(|_unparsed| ConfigError::BadUrl)?;
-        if url.scheme() != "s3" {
-            return Err(ConfigError::UnsupportedScheme);
-        }
-        if !url.username().is_empty() || url.password().is_some() || url.port().is_some() {
-            return Err(ConfigError::BadUrl);
-        }
-        let bucket = BucketName::new(url.host_str().unwrap_or(""))?;
-        let path = url.path().strip_prefix('/').unwrap_or_else(|| url.path());
-        let decoded = percent_decode_str(path)
-            .decode_utf8()
-            .map_err(|_bytes| ConfigError::BadPrefix)?;
-        let prefix = Prefix::new(&decoded)?;
-        let params = Params::read(&url)?;
-        let region = match params.region {
-            Some(name) => Region::new(&name)?,
-            None => Region(DEFAULT_REGION.to_owned()),
-        };
-        let endpoint = match params.endpoint {
-            Some(text) => Endpoint::new(&text)?,
-            None => Endpoint::new(&format!("https://s3.{}.amazonaws.com", region.as_str()))?,
-        };
-        let mut config = Self::new(endpoint, bucket, prefix).with_region(region);
-        if let Some(path_style) = params.path_style {
-            config.style = if path_style {
-                UrlStyle::Path
-            } else {
-                UrlStyle::VirtualHost
-            };
-        }
-        if let Some(bytes) = params.part_size {
-            config.part_size = PartSize::new(bytes)?;
-        }
-        Ok(config)
-    }
-
     /// Replaces the region.
     #[must_use]
     pub fn with_region(mut self, region: Region) -> Self {
@@ -460,44 +412,6 @@ impl S3Config {
     }
 }
 
-/// The query of a replica URL.
-struct Params {
-    endpoint: Option<String>,
-    region: Option<String>,
-    path_style: Option<bool>,
-    part_size: Option<u64>,
-}
-
-impl Params {
-    fn read(url: &Url) -> Result<Self, ConfigError> {
-        let mut params = Self {
-            endpoint: None,
-            region: None,
-            path_style: None,
-            part_size: None,
-        };
-        for (key, value) in url.query_pairs() {
-            match key.as_ref() {
-                "endpoint" => params.endpoint = Some(value.into_owned()),
-                "region" => params.region = Some(value.into_owned()),
-                "forcePathStyle" | "force-path-style" => {
-                    params.path_style = Some(match value.as_ref() {
-                        "true" => true,
-                        "false" => false,
-                        _ => return Err(ConfigError::BadUrl),
-                    });
-                }
-                "partSize" | "part-size" => {
-                    params.part_size =
-                        Some(value.parse().map_err(|_malformed| ConfigError::BadUrl)?);
-                }
-                _ => return Err(ConfigError::UnknownParameter),
-            }
-        }
-        Ok(params)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -530,67 +444,14 @@ mod tests {
     }
 
     #[test]
-    fn from_url_reads_the_documented_form() {
-        let config = S3Config::from_url(
-            "s3://my-bucket/db/one?endpoint=http%3A%2F%2Flocalhost%3A9000&region=eu-west-1&partSize=8388608",
-        )
-        .unwrap();
-        assert_eq!(config.bucket().as_str(), "my-bucket");
-        assert_eq!(config.prefix().as_str(), "db/one");
-        assert_eq!(config.region().as_str(), "eu-west-1");
-        assert_eq!(config.provider(), Provider::Minio);
-        assert_eq!(config.style(), UrlStyle::Path);
-        assert_eq!(config.part_size().get(), 8_388_608);
-    }
-
-    #[test]
-    fn from_url_defaults_to_aws_virtual_host() {
-        let config = S3Config::from_url("s3://b/p").unwrap();
-        assert_eq!(
-            config.endpoint().url().as_str(),
-            "https://s3.us-east-1.amazonaws.com/"
-        );
-        assert_eq!(config.provider(), Provider::Aws);
-        assert_eq!(config.style(), UrlStyle::VirtualHost);
-        assert_eq!(config.part_size(), PartSize::MIN);
-    }
-
-    #[test]
     fn tigris_gets_its_part_size() {
-        let config =
-            S3Config::from_url("s3://b/p?endpoint=https%3A%2F%2Ffly.storage.tigris.dev").unwrap();
+        let config = S3Config::new(
+            Endpoint::new("https://fly.storage.tigris.dev").unwrap(),
+            BucketName::new("b").unwrap(),
+            Prefix::new("p").unwrap(),
+        );
         assert_eq!(config.provider(), Provider::Tigris);
         assert_eq!(config.part_size(), PartSize::TIGRIS);
-    }
-
-    #[test]
-    fn from_url_refuses_each_bad_shape() {
-        let cases = [
-            ("not a url", ConfigError::BadUrl),
-            ("https://b/p", ConfigError::UnsupportedScheme),
-            ("s3://b", ConfigError::EmptyPrefix),
-            ("s3://b/", ConfigError::EmptyPrefix),
-            ("s3://b/p/", ConfigError::BadPrefix),
-            ("s3:///p", ConfigError::MissingBucket),
-            ("s3://b%20c/p", ConfigError::BadBucket),
-            ("s3://b/p?region=", ConfigError::BadRegion),
-            (
-                "s3://b/p?partSize=1024",
-                ConfigError::PartSizeTooSmall { bytes: 1024 },
-            ),
-            ("s3://b/p?partSize=big", ConfigError::BadUrl),
-            ("s3://b/p?forcePathStyle=yes", ConfigError::BadUrl),
-            ("s3://b/p?skipVerify=true", ConfigError::UnknownParameter),
-            (
-                "s3://b/p?endpoint=ftp%3A%2F%2Fh",
-                ConfigError::UnsupportedScheme,
-            ),
-            ("s3://user:pw@b/p", ConfigError::BadUrl),
-            ("s3://b:9000/p", ConfigError::BadUrl),
-        ];
-        for (text, want) in cases {
-            assert_eq!(S3Config::from_url(text), Err(want), "{text}");
-        }
     }
 
     #[test]

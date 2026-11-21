@@ -73,15 +73,14 @@ fn credentials_never_print() {
         ConfigError::MissingBucket,
         ConfigError::BadBucket,
         ConfigError::BadRegion,
-        ConfigError::UnknownParameter,
         ConfigError::PartSizeTooSmall { bytes: 1 },
     ];
     for error in errors {
         assert_clean("config error", &format!("{error:?} {error}"));
     }
-    let secret_url = format!("s3://user:{CANARY}@bucket/p?x={CANARY}");
-    let refused = S3Config::from_url(&secret_url).unwrap_err();
-    assert_clean("url error", &format!("{refused:?} {refused}"));
+    let secret_endpoint = format!("https://user:{CANARY}@host/?x={CANARY}");
+    let refused = Endpoint::new(&secret_endpoint).unwrap_err();
+    assert_clean("endpoint error", &format!("{refused:?} {refused}"));
 
     let body = format!("<Error><Code>AccessDenied</Code><Message>{CANARY}</Message></Error>");
     for status in [200, 400, 403, 404, 429, 500, 503] {

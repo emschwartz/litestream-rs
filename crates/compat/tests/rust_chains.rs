@@ -18,16 +18,14 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use lsr_compat::{
-    Chain, Era, GoBuild, GoRestore, Replicator, Site, Target, Written, build_verify_helper,
-    builds_in, builds_under_test, clock_ending_now, go_verify, hash_pages, integrity_check, list,
-    newest_l0, restore_replica, restore_with_go, wait_until, write_config,
+    Chain, Era, GoBuild, GoRestore, Replicator, Site, Target, UP_LINE, Written,
+    build_verify_helper, builds_in, builds_under_test, clock_ending_now, go_verify, hash_pages,
+    integrity_check, list, newest_l0, restore_replica, restore_with_go, wait_until, write_config,
 };
 use lsr_core::{Event, Level, MaintainedEvent, PlanOutcome, RestoreError, RestoreTarget};
 use lsr_ltx::{Timestamp, Txid};
 
 const COMMITS: u32 = 300;
-/// The line every Go build logs at its default level once its store is running.
-const GO_IS_UP: &str = "replicating to";
 /// Longer than the longest monitor interval in the Go config (4s).
 const MONITORS_RAN: Duration = Duration::from_secs(6);
 
@@ -375,7 +373,7 @@ fn compacts_and_prunes(build: &GoBuild) {
             if go_snapshots {
                 return Ok(newest_l9(&written.site.replica)? > rust_l9);
             }
-            let up = std::fs::read_to_string(&go_log).is_ok_and(|log| log.contains(GO_IS_UP));
+            let up = std::fs::read_to_string(&go_log).is_ok_and(|log| log.contains(UP_LINE));
             if up && up_since.is_none() {
                 up_since = Some(Instant::now());
             }

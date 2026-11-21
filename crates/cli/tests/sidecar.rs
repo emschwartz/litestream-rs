@@ -8,102 +8,20 @@
 
 // `cfg(test)` marks the helpers as test code, so clippy.toml's allow-*-in-tests cover them.
 #[cfg(test)]
+mod common;
+
+#[cfg(test)]
 mod sidecar {
     use std::collections::BTreeMap;
-    use std::io::{BufRead, BufReader, Read, Write};
+    use std::io::{Read, Write};
     use std::net::{SocketAddr, TcpStream};
     use std::path::{Path, PathBuf};
-    use std::process::{Child, Command, ExitStatus, Stdio};
-    use std::sync::mpsc::{self, Receiver};
+    use std::process::Command;
     use std::time::Duration;
 
-    use lsr_replica::{DynStore, RestoreTarget, restore};
-    use lsr_store_fs::FsStore;
-    use rusqlite::Connection;
     use tempfile::TempDir;
 
-    /// How long any one line may take: a failure bound, never a pacing wait.
-    const PATIENCE: Duration = Duration::from_secs(60);
-
-    fn lsr() -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_lsr"));
-        command
-            .env_remove("LOG_LEVEL")
-            .env_remove("LITESTREAM_CONFIG")
-            .env_remove("LSR_EXEC_CHILD");
-        command
-    }
-
-    /// A running daemon and every stdout line it (and its child) prints.
-    struct Daemon {
-        child: Child,
-        lines: Receiver<String>,
-        seen: Vec<String>,
-    }
-
-    impl Daemon {
-        fn spawn(mut command: Command) -> Self {
-            let mut child = command
-                .stdout(Stdio::piped())
-                .stderr(Stdio::inherit())
-                .spawn()
-                .unwrap();
-            let stdout = child.stdout.take().unwrap();
-            let (send, lines) = mpsc::sync_channel(4096);
-            std::thread::spawn(move || {
-                for line in BufReader::new(stdout).lines() {
-                    let Ok(line) = line else { return };
-                    if send.send(line).is_err() {
-                        return;
-                    }
-                }
-            });
-            Self {
-                child,
-                lines,
-                seen: Vec::new(),
-            }
-        }
-
-        /// Waits for a line holding every one of `parts`; its index among the lines seen.
-        fn wait_for(&mut self, parts: &[&str]) -> (usize, String) {
-            let found = |line: &String| parts.iter().all(|p| line.contains(p));
-            if let Some(at) = self.seen.iter().position(found) {
-                return (at, self.seen[at].clone());
-            }
-            loop {
-                match self.lines.recv_timeout(PATIENCE) {
-                    Ok(line) => {
-                        self.seen.push(line.clone());
-                        if found(&line) {
-                            return (self.seen.len().saturating_sub(1), line);
-                        }
-                    }
-                    Err(error) => panic!("no line with {parts:?} ({error}): {:#?}", self.seen),
-                }
-            }
-        }
-
-        fn signal(&self, name: &str) {
-            kill(name, self.child.id());
-        }
-
-        /// Waits for the process to end; its status and every line it printed.
-        fn finish(mut self) -> (ExitStatus, Vec<String>) {
-            let status = self.child.wait().unwrap();
-            self.seen.extend(self.lines.iter());
-            (status, self.seen)
-        }
-    }
-
-    fn kill(name: &str, pid: u32) {
-        let status = Command::new("kill")
-            .arg(format!("-{name}"))
-            .arg(pid.to_string())
-            .status()
-            .unwrap();
-        assert!(status.success());
-    }
+    use crate::common::{Daemon, database, kill, lsr, restores_to, rows, write};
 
     /// The index of the first line holding `part`.
     fn index(lines: &[String], part: &str) -> usize {
@@ -111,40 +29,6 @@ mod sidecar {
             .iter()
             .position(|l| l.contains(part))
             .unwrap_or_else(|| panic!("no {part:?} in {lines:#?}"))
-    }
-
-    /// A host database: WAL, the host settings a replicated database needs, one table.
-    fn database(path: &Path) -> Connection {
-        let conn = Connection::open(path).unwrap();
-        conn.query_row("PRAGMA journal_mode = wal", [], |_row| Ok(()))
-            .unwrap();
-        lsr_sqlite::app_connection(&conn).unwrap();
-        conn.execute_batch("CREATE TABLE IF NOT EXISTS t(id INTEGER PRIMARY KEY, v BLOB)")
-            .unwrap();
-        conn
-    }
-
-    fn write(conn: &Connection, rows: usize) {
-        for _ in 0..rows {
-            conn.execute("INSERT INTO t(v) VALUES (randomblob(2000))", [])
-                .unwrap();
-        }
-    }
-
-    fn rows(conn: &Connection) -> Vec<(i64, Vec<u8>)> {
-        let mut stmt = conn.prepare("SELECT id, v FROM t ORDER BY id").unwrap();
-        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-            .unwrap()
-            .collect::<Result<_, _>>()
-            .unwrap()
-    }
-
-    /// Restores the replica in `dir` and checks it equals `conn`.
-    fn restores_to(dir: &Path, replica: &Path, conn: &Connection) {
-        let store: std::sync::Arc<dyn DynStore> = std::sync::Arc::new(FsStore::new(replica));
-        let to = dir.join("restored.db");
-        restore(&*store, RestoreTarget::Latest, &to).unwrap();
-        assert_eq!(rows(&Connection::open(&to).unwrap()), rows(conn));
     }
 
     /// One database at `dir/app.db` replicated to `dir/replica`, with `extra` top-level keys.

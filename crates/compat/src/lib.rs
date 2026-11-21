@@ -82,7 +82,7 @@ pub use replica::{
     Listing, ReplicaFile, Summary, l0_starting_at, list, newest_l0, newest_txid, parse_rel, rel_of,
     summarize, summarize_bytes,
 };
-pub use replicator::{Kind, Replicator, lsr_binary, wait_until};
+pub use replicator::{Kind, Replicator, UP_LINE, lsr_binary, wait_until};
 pub use rsrestore::{Staged, chain_files, copy_tree, restore_replica, stage};
 pub use s3::{
     ACCESS_KEY_VAR, BUCKET_VAR, ENDPOINT_VAR, MinioEnv, S3Replica, SECRET_KEY_VAR,

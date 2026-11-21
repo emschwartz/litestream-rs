@@ -315,16 +315,16 @@
 "TestParseByteSize" = { counterpart = "lsr-config::size::tests::go_parse_byte_size_table" }
 "TestParseByteSizeOverflow" = { counterpart = "lsr-config::size::tests::ten_exabytes_is_too_large" }
 "TestParseConfig_StrictWarnings" = { counterpart = ["lsr-config::config::go::keys_go_does_not_know_are_refused_where_go_warns", "lsr-config::config::go::a_duplicate_key_is_refused_where_go_warns", "lsr-config::config::go::the_strict_warnings_valid_case_has_no_unknown_keys"] }
-"TestParseReplicaURLWithQuery" = { counterpart = "lsr-store-s3::config::tests::from_url_reads_the_documented_form" }
-"TestParseReplicaURLWithQuery/BackwardCompatibility" = { reason = "Rust's S3 replica URL is deliberately narrower than Go's (crates/store-s3/src/config.rs module doc): the host is the bucket verbatim, provider hostnames are not split, unknown query keys are refused and credentials never come from a URL. This Go parsing behaviour has no counterpart by design." }
+"TestParseReplicaURLWithQuery" = { counterpart = "lsr-config::config::s3url::reads_the_documented_form" }
+"TestParseReplicaURLWithQuery/BackwardCompatibility" = { counterpart = "lsr-config::config::map::query_settings_apply_and_the_file_s_keys_win" }
 "TestParseReplicaURLWithQuery/FileURL" = { counterpart = "lsr-cli::bin/lsr::args::tests::a_url_replica_is_refused_by_scheme_only" }
 "TestParseReplicaURLWithQuery/S3TigrisExample" = { counterpart = ["lsr-store-s3::config::tests::provider_comes_from_the_host", "lsr-store-s3::config::tests::tigris_gets_its_part_size"] }
-"TestParseReplicaURLWithQuery/S3WithEndpoint" = { counterpart = "lsr-store-s3::config::tests::from_url_reads_the_documented_form" }
+"TestParseReplicaURLWithQuery/S3WithEndpoint" = { counterpart = "lsr-config::config::s3url::reads_the_documented_form" }
 "TestParseReplicaURLWithQuery/S3WithSkipVerify" = { reason = "A skip-TLS-verify option is a Go store option v1 does not offer: lsr-store-s3 always verifies TLS through rustls (crates/store-s3/src/transport.rs)." }
-"TestParseReplicaURLWithQuery/S3WithoutQuery" = { counterpart = "lsr-store-s3::config::tests::from_url_defaults_to_aws_virtual_host" }
-"TestParseReplicaURL_AccessPoint" = { reason = "S3 access point ARNs are a Go store option v1 does not offer: lsr-store-s3 names a bucket only (crates/store-s3/src/config.rs module doc)." }
-"TestParseReplicaURL_AccessPoint/Invalid" = { reason = "S3 access point ARNs are a Go store option v1 does not offer: lsr-store-s3 names a bucket only (crates/store-s3/src/config.rs module doc)." }
-"TestParseReplicaURL_AccessPoint/WithPrefix" = { reason = "S3 access point ARNs are a Go store option v1 does not offer: lsr-store-s3 names a bucket only (crates/store-s3/src/config.rs module doc)." }
+"TestParseReplicaURLWithQuery/S3WithoutQuery" = { counterpart = "lsr-config::config::s3url::a_bare_url_is_aws_in_virtual_host_style" }
+"TestParseReplicaURL_AccessPoint" = { reason = "S3 access point ARNs are a Go store option v1 does not offer: the one s3:// URL parser refuses them (crates/config/src/map/s3.rs module doc)." }
+"TestParseReplicaURL_AccessPoint/Invalid" = { reason = "S3 access point ARNs are a Go store option v1 does not offer: the one s3:// URL parser refuses them (crates/config/src/map/s3.rs module doc)." }
+"TestParseReplicaURL_AccessPoint/WithPrefix" = { reason = "S3 access point ARNs are a Go store option v1 does not offer: the one s3:// URL parser refuses them (crates/config/src/map/s3.rs module doc)." }
 "TestReadConfig" = { counterpart = ["lsr-config::config::go::load_reads_the_file", "lsr-cli::daemon::daemon::the_config_can_come_from_standard_input"] }
 "TestReadConfig/ReadsFromFile" = { counterpart = "lsr-config::config::go::load_reads_the_file" }
 "TestReadConfig/ReadsFromStdin" = { counterpart = "lsr-cli::daemon::daemon::the_config_can_come_from_standard_input" }
@@ -804,7 +804,7 @@
 "TestReplicaClient_PITR_CalcRestorePlanWithManyFiles/TimestampBased" = { counterpart = "lsr-core::plan_lazy::lazy::plan_as_of_reads_within_the_bound" }
 "TestReplicaClient_PITR_ManyLTXFiles" = { counterpart = "lsr-store-s3::request_counts::cases::as_of_heads_are_bounded" }
 "TestReplicaClient_PITR_TimestampFiltering" = { counterpart = "lsr-core::plan_lazy::lazy::plan_as_of_equals_the_exact_planner" }
-"TestReplicaClient_S3_BucketValidation" = { counterpart = "lsr-store-s3::config::tests::from_url_refuses_each_bad_shape" }
+"TestReplicaClient_S3_BucketValidation" = { counterpart = "lsr-config::config::s3url::each_bad_shape_is_refused" }
 "TestReplicaClient_S3_ConcurrencyLimits" = { counterpart = "lsr-store-s3::store::cases::memory_is_one_part" }
 "TestReplicaClient_S3_ErrorContext" = { counterpart = "lsr-store-s3::response::tests::response_faults_map_to_store_errors" }
 "TestReplicaClient_S3_MultipartThresholds" = { counterpart = ["lsr-store-s3::store::cases::exactly_part_size_uses_multipart", "lsr-store-s3::store::cases::one_below_part_size_uses_put"] }
@@ -937,7 +937,7 @@
 "TestBoolQueryValue/Nil query" = { reason = "Go-only helper with no product behaviour of its own (URL or query-value plumbing in the Go replica-URL parser)." }
 "TestBoolQueryValue/True values" = { reason = "Go-only helper with no product behaviour of its own (URL or query-value plumbing in the Go replica-URL parser)." }
 "TestCleanReplicaURLPath" = { counterpart = "lsr-store-s3::config::tests::prefix_refuses_empty_and_slashes" }
-"TestEnsureEndpointScheme" = { reason = "Rust's S3 replica URL is deliberately narrower than Go's (crates/store-s3/src/config.rs module doc): the host is the bucket verbatim, provider hostnames are not split, unknown query keys are refused and credentials never come from a URL. This Go parsing behaviour has no counterpart by design." }
+"TestEnsureEndpointScheme" = { counterpart = ["lsr-config::config::map::query_settings_apply_and_the_file_s_keys_win", "lsr-config::config::map::bucket_path_and_endpoint_keys_without_a_url"] }
 "TestIntQueryValue" = { reason = "Go-only helper with no product behaviour of its own (URL or query-value plumbing in the Go replica-URL parser)." }
 "TestIntQueryValue/Alias order" = { reason = "Go-only helper with no product behaviour of its own (URL or query-value plumbing in the Go replica-URL parser)." }
 "TestIntQueryValue/Empty value not set" = { reason = "Go-only helper with no product behaviour of its own (URL or query-value plumbing in the Go replica-URL parser)." }
@@ -960,12 +960,12 @@
 "TestIsSupabaseEndpoint" = { reason = "Rust tells apart only Tigris, AWS, R2 and MinIO-like hosts (crates/store-s3/src/config.rs, Provider); any other provider gets the generic S3 behaviour. Go's per-provider host detection and defaults for this provider have no counterpart (v1 targets Tigris, docs/spikes.md)." }
 "TestIsTigrisEndpoint" = { counterpart = "lsr-store-s3::config::tests::provider_comes_from_the_host" }
 "TestIsURL" = { reason = "Go-only helper with no product behaviour of its own (URL or query-value plumbing in the Go replica-URL parser)." }
-"TestNewReplicaClientFromURL" = { counterpart = "lsr-store-s3::config::tests::from_url_reads_the_documented_form" }
+"TestNewReplicaClientFromURL" = { counterpart = "lsr-config::config::s3url::reads_the_documented_form" }
 "TestNewReplicaClientFromURL/ABS" = { reason = "Azure Blob Storage backend: backends other than S3 and a local directory are not in v1 (docs/PLAN.md section 1)." }
 "TestNewReplicaClientFromURL/ABS_MissingBucket" = { reason = "Azure Blob Storage backend: backends other than S3 and a local directory are not in v1 (docs/PLAN.md section 1)." }
 "TestNewReplicaClientFromURL/ABS_WithAccount" = { reason = "Azure Blob Storage backend: backends other than S3 and a local directory are not in v1 (docs/PLAN.md section 1)." }
 "TestNewReplicaClientFromURL/ABS_WithEndpoint" = { reason = "Azure Blob Storage backend: backends other than S3 and a local directory are not in v1 (docs/PLAN.md section 1)." }
-"TestNewReplicaClientFromURL/EmptyURL" = { counterpart = "lsr-store-s3::config::tests::from_url_refuses_each_bad_shape" }
+"TestNewReplicaClientFromURL/EmptyURL" = { counterpart = "lsr-config::config::s3url::each_bad_shape_is_refused" }
 "TestNewReplicaClientFromURL/File" = { counterpart = "lsr-cli::bin/lsr::args::tests::a_url_replica_is_refused_by_scheme_only" }
 "TestNewReplicaClientFromURL/File_EmptyPathReturnsDot" = { reason = "Go-only: resolving a file:// replica path written with the pre-0.5 percent-escaping. The Rust CLI takes a directory path as given." }
 "TestNewReplicaClientFromURL/GS" = { reason = "Google Cloud Storage backend: backends other than S3 and a local directory are not in v1 (docs/PLAN.md section 1)." }
@@ -977,11 +977,11 @@
 "TestNewReplicaClientFromURL/OSS" = { reason = "Alibaba OSS backend: backends other than S3 and a local directory are not in v1 (docs/PLAN.md section 1)." }
 "TestNewReplicaClientFromURL/OSS_MissingBucket" = { reason = "Alibaba OSS backend: backends other than S3 and a local directory are not in v1 (docs/PLAN.md section 1)." }
 "TestNewReplicaClientFromURL/OSS_WithRegion" = { reason = "Alibaba OSS backend: backends other than S3 and a local directory are not in v1 (docs/PLAN.md section 1)." }
-"TestNewReplicaClientFromURL/S3" = { counterpart = "lsr-store-s3::config::tests::from_url_reads_the_documented_form" }
-"TestNewReplicaClientFromURL/S3WithQueryParams" = { counterpart = ["lsr-store-s3::config::tests::from_url_reads_the_documented_form", "lsr-cli::bin/lsr::args::tests::a_flag_overrides_the_url_query"] }
-"TestNewReplicaClientFromURL/S3_ARN" = { reason = "S3 access point ARNs are a Go store option v1 does not offer: lsr-store-s3 names a bucket only (crates/store-s3/src/config.rs module doc)." }
-"TestNewReplicaClientFromURL/S3_ARN_WithQueryParams" = { reason = "S3 access point ARNs are a Go store option v1 does not offer: lsr-store-s3 names a bucket only (crates/store-s3/src/config.rs module doc)." }
-"TestNewReplicaClientFromURL/S3_MissingBucket" = { counterpart = "lsr-store-s3::config::tests::from_url_refuses_each_bad_shape" }
+"TestNewReplicaClientFromURL/S3" = { counterpart = "lsr-config::config::s3url::reads_the_documented_form" }
+"TestNewReplicaClientFromURL/S3WithQueryParams" = { counterpart = ["lsr-config::config::s3url::reads_the_documented_form", "lsr-cli::bin/lsr::args::tests::a_flag_overrides_the_url_query"] }
+"TestNewReplicaClientFromURL/S3_ARN" = { reason = "S3 access point ARNs are a Go store option v1 does not offer: the one s3:// URL parser refuses them (crates/config/src/map/s3.rs module doc)." }
+"TestNewReplicaClientFromURL/S3_ARN_WithQueryParams" = { reason = "S3 access point ARNs are a Go store option v1 does not offer: the one s3:// URL parser refuses them (crates/config/src/map/s3.rs module doc)." }
+"TestNewReplicaClientFromURL/S3_MissingBucket" = { counterpart = "lsr-config::config::s3url::each_bad_shape_is_refused" }
 "TestNewReplicaClientFromURL/SFTP" = { reason = "SFTP backend: backends other than S3 and a local directory are not in v1 (docs/PLAN.md section 1)." }
 "TestNewReplicaClientFromURL/SFTP_MissingHost" = { reason = "SFTP backend: backends other than S3 and a local directory are not in v1 (docs/PLAN.md section 1)." }
 "TestNewReplicaClientFromURL/SFTP_RequiresUserError" = { reason = "SFTP backend: backends other than S3 and a local directory are not in v1 (docs/PLAN.md section 1)." }
@@ -993,8 +993,8 @@
 "TestNewReplicaClientFromURL/WebDAV_MissingHost" = { reason = "WebDAV backend: backends other than S3 and a local directory are not in v1 (docs/PLAN.md section 1)." }
 "TestNewReplicaClientFromURL/WebDAV_WithCredentials" = { reason = "WebDAV backend: backends other than S3 and a local directory are not in v1 (docs/PLAN.md section 1)." }
 "TestParseReplicaURL_FilePath" = { reason = "Go-only: resolving a file:// replica path written with the pre-0.5 percent-escaping. The Rust CLI takes a directory path as given." }
-"TestParseS3AccessPointURL" = { reason = "S3 access point ARNs are a Go store option v1 does not offer: lsr-store-s3 names a bucket only (crates/store-s3/src/config.rs module doc)." }
-"TestRegionFromS3ARN" = { reason = "S3 access point ARNs are a Go store option v1 does not offer: lsr-store-s3 names a bucket only (crates/store-s3/src/config.rs module doc)." }
+"TestParseS3AccessPointURL" = { reason = "S3 access point ARNs are a Go store option v1 does not offer: the one s3:// URL parser refuses them (crates/config/src/map/s3.rs module doc)." }
+"TestRegionFromS3ARN" = { reason = "S3 access point ARNs are a Go store option v1 does not offer: the one s3:// URL parser refuses them (crates/config/src/map/s3.rs module doc)." }
 "TestReplicaTypeFromURL" = { counterpart = "lsr-cli::bin/lsr::args::tests::parse_s3_forms" }
 "TestResolveLegacyFileReplicaPath" = { reason = "Go-only: resolving a file:// replica path written with the pre-0.5 percent-escaping. The Rust CLI takes a directory path as given." }
 "TestResolveLegacyFileReplicaPath/BothExist" = { reason = "Go-only: resolving a file:// replica path written with the pre-0.5 percent-escaping. The Rust CLI takes a directory path as given." }
@@ -1003,9 +1003,9 @@
 "TestResolveLegacyFileReplicaPath/NeitherExists" = { reason = "Go-only: resolving a file:// replica path written with the pre-0.5 percent-escaping. The Rust CLI takes a directory path as given." }
 "TestS3ProviderDefaults" = { counterpart = ["lsr-store-s3::config::tests::tigris_gets_its_part_size", "lsr-store-s3::request::tests::provider_headers_and_no_checksum_headers"] }
 "TestS3ProviderDefaults_QueryParamOverrides" = { counterpart = "lsr-cli::bin/lsr::args::tests::a_flag_overrides_the_url_query" }
-"TestS3ProviderDefaults_QueryParamOverrides/ForcePathStyle_ExplicitFalse" = { counterpart = "lsr-store-s3::config::tests::from_url_reads_the_documented_form" }
+"TestS3ProviderDefaults_QueryParamOverrides/ForcePathStyle_ExplicitFalse" = { counterpart = "lsr-config::config::s3url::reads_the_documented_form" }
 "TestS3ProviderDefaults_QueryParamOverrides/RequireMD5_ExplicitTrue_Tigris" = { counterpart = "lsr-store-s3::request::tests::put_carries_length_md5_and_stamp" }
-"TestS3ProviderDefaults_QueryParamOverrides/SignPayload_ExplicitFalse" = { reason = "Rust's S3 replica URL is deliberately narrower than Go's (crates/store-s3/src/config.rs module doc): the host is the bucket verbatim, provider hostnames are not split, unknown query keys are refused and credentials never come from a URL. This Go parsing behaviour has no counterpart by design." }
+"TestS3ProviderDefaults_QueryParamOverrides/SignPayload_ExplicitFalse" = { counterpart = "lsr-config::config::map::no_effect_query_keys_are_noted" }
 
 ["litestream/s3/leaser_test.go"]
 "TestLeaser_AcquireLease_ActiveLease" = { reason = "Multi-writer leases (the S3 leaser) are not in v1 (docs/PLAN.md section 1); a second writer is detected and stops uploads instead (lsr-sim::faults second_writer_mid_run)." }
@@ -1040,37 +1040,37 @@
 "TestMarshalDeleteObjects_EdgeCases/NilOptionalFields" = { reason = "Go-only: configuration of the AWS SDK for Go (its retryer, uploader manager, checksum middleware or HTTP client). lsr-store-s3 signs its own requests with rusty-s3 over ureq or reqwest and has no SDK to configure." }
 "TestMarshalDeleteObjects_EdgeCases/QuietFlag" = { counterpart = "lsr-store-s3::fake::cases::quiet_delete_of_a_missing_key_reports_nothing" }
 "TestNewReplicaClientFromURL_EndpointEnvVar" = { reason = "Rust deliberately differs: the endpoint comes only from the URL's endpoint parameter or the --endpoint flag (lsr-cli args::tests::s3_flags_set_endpoint_region_and_style), never from AWS_ENDPOINT_URL_S3, so the environment cannot silently redirect a replica." }
-"TestNewReplicaClientFromURL_InvalidUploadParams" = { counterpart = "lsr-store-s3::config::tests::from_url_refuses_each_bad_shape" }
+"TestNewReplicaClientFromURL_InvalidUploadParams" = { counterpart = "lsr-config::config::s3url::each_bad_shape_is_refused" }
 "TestNewReplicaClientFromURL_NeonExplicitEndpoint" = { reason = "Rust tells apart only Tigris, AWS, R2 and MinIO-like hosts (crates/store-s3/src/config.rs, Provider); any other provider gets the generic S3 behaviour. Go's per-provider host detection and defaults for this provider have no counterpart (v1 targets Tigris, docs/spikes.md)." }
-"TestNewReplicaClientFromURL_QueryParamAliases" = { reason = "Rust's S3 replica URL is deliberately narrower than Go's (crates/store-s3/src/config.rs module doc): the host is the bucket verbatim, provider hostnames are not split, unknown query keys are refused and credentials never come from a URL. This Go parsing behaviour has no counterpart by design." }
+"TestNewReplicaClientFromURL_QueryParamAliases" = { counterpart = ["lsr-config::config::s3url::reads_the_documented_form", "lsr-config::config::s3url::each_bad_shape_is_refused", "lsr-config::config::map::no_effect_query_keys_are_noted"] }
 "TestNewReplicaClientFromURL_SessionToken" = { counterpart = ["lsr-store-s3::chain::tests::environment_alone", "lsr-store-s3::chain::tests::values_never_print"] }
-"TestNewReplicaClientFromURL_SignAcceptEncoding" = { reason = "Rust's S3 replica URL is deliberately narrower than Go's (crates/store-s3/src/config.rs module doc): the host is the bucket verbatim, provider hostnames are not split, unknown query keys are refused and credentials never come from a URL. This Go parsing behaviour has no counterpart by design." }
-"TestParseHost" = { reason = "Rust's S3 replica URL is deliberately narrower than Go's (crates/store-s3/src/config.rs module doc): the host is the bucket verbatim, provider hostnames are not split, unknown query keys are refused and credentials never come from a URL. This Go parsing behaviour has no counterpart by design." }
-"TestParseURL" = { counterpart = "lsr-store-s3::config::tests::from_url_reads_the_documented_form" }
+"TestNewReplicaClientFromURL_SignAcceptEncoding" = { counterpart = "lsr-config::config::map::no_effect_query_keys_are_noted" }
+"TestParseHost" = { counterpart = ["lsr-config::config::map::provider_hosts_go_splits", "lsr-cli::bin/lsr::args::tests::go_s_host_spellings_read_as_the_daemon_reads_them"] }
+"TestParseURL" = { counterpart = "lsr-config::config::s3url::reads_the_documented_form" }
 "TestReplicaClientDeleteLTXFiles_ContentMD5" = { counterpart = "lsr-store-s3::fake::cases::delete_without_or_with_a_wrong_digest_is_refused" }
 "TestReplicaClientDeleteLTXFiles_ContentMD5/Disabled" = { reason = "Go-only switch: Rust always sends Content-MD5 on DeleteObjects, with no option to leave it out (lsr-store-s3::fake delete_without_or_with_a_wrong_digest_is_refused)." }
 "TestReplicaClientDeleteLTXFiles_ContentMD5/Enabled" = { counterpart = "lsr-store-s3::fake::cases::delete_without_or_with_a_wrong_digest_is_refused" }
 "TestReplicaClientDeleteLTXFiles_PreexistingContentMD5" = { reason = "Go-only: configuration of the AWS SDK for Go (its retryer, uploader manager, checksum middleware or HTTP client). lsr-store-s3 signs its own requests with rusty-s3 over ureq or reqwest and has no SDK to configure." }
 "TestReplicaClientPayloadSigning" = { counterpart = "lsr-store-s3::fake::cases::signing_rule_is_enforced_both_ways" }
 "TestReplicaClient_AcceptEncodingSigning" = { counterpart = "lsr-store-s3::request::tests::every_header_sent_is_signed" }
-"TestReplicaClient_AccessPointARN" = { reason = "S3 access point ARNs are a Go store option v1 does not offer: lsr-store-s3 names a bucket only (crates/store-s3/src/config.rs module doc)." }
-"TestReplicaClient_AccessPointARN/ARNAsBucketName" = { reason = "S3 access point ARNs are a Go store option v1 does not offer: lsr-store-s3 names a bucket only (crates/store-s3/src/config.rs module doc)." }
-"TestReplicaClient_AccessPointARN/ARNRejectsPathStyle" = { reason = "S3 access point ARNs are a Go store option v1 does not offer: lsr-store-s3 names a bucket only (crates/store-s3/src/config.rs module doc)." }
-"TestReplicaClient_AccessPointARN/ARNWithPath" = { reason = "S3 access point ARNs are a Go store option v1 does not offer: lsr-store-s3 names a bucket only (crates/store-s3/src/config.rs module doc)." }
-"TestReplicaClient_ConfigureEndpoint" = { counterpart = "lsr-store-s3::config::tests::from_url_reads_the_documented_form" }
+"TestReplicaClient_AccessPointARN" = { reason = "S3 access point ARNs are a Go store option v1 does not offer: the one s3:// URL parser refuses them (crates/config/src/map/s3.rs module doc)." }
+"TestReplicaClient_AccessPointARN/ARNAsBucketName" = { reason = "S3 access point ARNs are a Go store option v1 does not offer: the one s3:// URL parser refuses them (crates/config/src/map/s3.rs module doc)." }
+"TestReplicaClient_AccessPointARN/ARNRejectsPathStyle" = { reason = "S3 access point ARNs are a Go store option v1 does not offer: the one s3:// URL parser refuses them (crates/config/src/map/s3.rs module doc)." }
+"TestReplicaClient_AccessPointARN/ARNWithPath" = { reason = "S3 access point ARNs are a Go store option v1 does not offer: the one s3:// URL parser refuses them (crates/config/src/map/s3.rs module doc)." }
+"TestReplicaClient_ConfigureEndpoint" = { counterpart = "lsr-config::config::s3url::reads_the_documented_form" }
 "TestReplicaClient_CredentialConfiguration" = { counterpart = "lsr-store-s3::chain::tests::precedence_is_explicit_environment_credentials_file_config_file" }
 "TestReplicaClient_CredentialConfiguration/WithDefaultCredentialChain" = { counterpart = ["lsr-store-s3::chain::tests::shared_credentials_file_alone", "lsr-store-s3::chain::tests::shared_config_file_alone", "lsr-store-s3::chain::tests::the_missing_error_names_every_source_tried", "lsr-cli::s3::s3::credentials_come_from_a_shared_credentials_file"] }
 "TestReplicaClient_CredentialConfiguration/WithStaticCredentials" = { counterpart = ["lsr-store-s3::chain::tests::explicit_values_alone", "lsr-store-s3::chain::tests::environment_alone"] }
 "TestReplicaClient_CustomEndpoint_DisablesChecksumFeatures" = { counterpart = "lsr-store-s3::request::tests::provider_headers_and_no_checksum_headers" }
-"TestReplicaClient_DefaultRegionUsage" = { counterpart = "lsr-store-s3::config::tests::from_url_defaults_to_aws_virtual_host" }
+"TestReplicaClient_DefaultRegionUsage" = { counterpart = "lsr-config::config::s3url::a_bare_url_is_aws_in_virtual_host_style" }
 "TestReplicaClient_DefaultRegionUsage/ParseHost_MinIO" = { counterpart = "lsr-store-s3::config::tests::provider_comes_from_the_host" }
 "TestReplicaClient_DefaultSignPayload" = { counterpart = "lsr-store-s3::request::tests::every_header_sent_is_signed" }
 "TestReplicaClient_HTTPClientConfiguration" = { reason = "Go-only: configuration of the AWS SDK for Go (its retryer, uploader manager, checksum middleware or HTTP client). lsr-store-s3 signs its own requests with rusty-s3 over ureq or reqwest and has no SDK to configure." }
 "TestReplicaClient_HTTPClientConfiguration/WithSkipVerify" = { reason = "A skip-TLS-verify option is a Go store option v1 does not offer: lsr-store-s3 always verifies TLS through rustls (crates/store-s3/src/transport.rs)." }
 "TestReplicaClient_HTTPClientConfiguration/WithoutSkipVerify" = { counterpart = "lsr-store-s3::reqwest_transport::tests::a_tls_handshake_with_a_plain_server_is_tls" }
-"TestReplicaClient_Init_BucketValidation" = { counterpart = "lsr-store-s3::config::tests::from_url_refuses_each_bad_shape" }
-"TestReplicaClient_Init_BucketValidation/EmptyBucket" = { counterpart = "lsr-store-s3::config::tests::from_url_refuses_each_bad_shape" }
-"TestReplicaClient_Init_BucketValidation/ValidBucket" = { counterpart = "lsr-store-s3::config::tests::from_url_reads_the_documented_form" }
+"TestReplicaClient_Init_BucketValidation" = { counterpart = "lsr-config::config::s3url::each_bad_shape_is_refused" }
+"TestReplicaClient_Init_BucketValidation/EmptyBucket" = { counterpart = "lsr-config::config::s3url::each_bad_shape_is_refused" }
+"TestReplicaClient_Init_BucketValidation/ValidBucket" = { counterpart = "lsr-config::config::s3url::reads_the_documented_form" }
 "TestReplicaClient_MultipartUploadThreshold" = { counterpart = ["lsr-store-s3::store::cases::exactly_part_size_uses_multipart", "lsr-store-s3::store::cases::one_below_part_size_uses_put"] }
 "TestReplicaClient_NoSSE_Headers" = { counterpart = "lsr-store-s3::request::tests::provider_headers_and_no_checksum_headers" }
 "TestReplicaClient_ProviderEndpointDetection" = { counterpart = "lsr-store-s3::config::tests::provider_comes_from_the_host" }
@@ -1109,7 +1109,7 @@
 "TestReplicaClient_TigrisConsistentHeader" = { counterpart = "lsr-store-s3::request::tests::provider_headers_and_no_checksum_headers" }
 "TestReplicaClient_UnsignedPayload_NoChunkedEncoding" = { counterpart = "lsr-store-s3::request::tests::put_carries_length_md5_and_stamp" }
 "TestReplicaClient_UploaderConfiguration" = { reason = "Go-only: configuration of the AWS SDK for Go (its retryer, uploader manager, checksum middleware or HTTP client). lsr-store-s3 signs its own requests with rusty-s3 over ureq or reqwest and has no SDK to configure." }
-"TestReplicaClient_UploaderConfiguration/CustomPartSize" = { counterpart = "lsr-store-s3::config::tests::from_url_reads_the_documented_form" }
+"TestReplicaClient_UploaderConfiguration/CustomPartSize" = { counterpart = "lsr-config::config::s3url::reads_the_documented_form" }
 "TestReplicaClient_UploaderConfiguration/DefaultConfiguration" = { reason = "Go-only: configuration of the AWS SDK for Go (its retryer, uploader manager, checksum middleware or HTTP client). lsr-store-s3 signs its own requests with rusty-s3 over ureq or reqwest and has no SDK to configure." }
 "TestReplicaClient_WriteLTXFile_MultipartParamParity" = { counterpart = "lsr-store-s3::store::cases::multipart_stamp_is_the_commit_stamp" }
 "TestReplicaClient_WriteLTXFile_PartSizeBelowMinimum" = { counterpart = "lsr-store-s3::config::tests::part_size_has_a_floor" }
@@ -1265,7 +1265,7 @@
 "TestQuickValidation" = { counterpart = "lsr-compat::live_source::live_sync_chain_restores" }
 
 ["litestream/tests/integration/s3_access_point_test.go"]
-"TestS3AccessPointLocalStack" = { reason = "S3 access point ARNs are a Go store option v1 does not offer: lsr-store-s3 names a bucket only (crates/store-s3/src/config.rs module doc)." }
+"TestS3AccessPointLocalStack" = { reason = "S3 access point ARNs are a Go store option v1 does not offer: the one s3:// URL parser refuses them (crates/config/src/map/s3.rs module doc)." }
 
 ["litestream/tests/integration/s3_restore_connection_drop_test.go"]
 "TestRestore_S3ConnectionDrop" = { counterpart = ["lsr-store-s3::faults::cases::a_truncated_get_is_transient_never_a_short_read", "lsr-store-s3::faults::cases::connection_reset_is_transient_and_tls_failure_is_auth"] }

@@ -22,8 +22,12 @@ use crate::replica::remote;
 const NOW: i64 = 1_700_000_000_000;
 
 fn config() -> S3Config {
-    S3Config::from_url("s3://lsr-test/p?endpoint=http%3A%2F%2F127.0.0.1%3A9000&forcePathStyle=true")
-        .unwrap()
+    let url = "s3://lsr-test/p?endpoint=http%3A%2F%2F127.0.0.1%3A9000&forcePathStyle=true";
+    lsr_config::s3_config(
+        Some(lsr_config::S3Url::parse(url).unwrap()),
+        &lsr_config::S3Overrides::default(),
+    )
+    .unwrap()
 }
 
 fn creds() -> S3Credentials {

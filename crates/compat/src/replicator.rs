@@ -2,12 +2,11 @@
 //! the one way the harness waits: polling a condition.
 //!
 //! Both kinds write their output to one log file. A test knows a process is up when its log
-//! says so ([`Replicator::wait_up`]: Go logs `replicating to` once its store runs, `lsr` prints
-//! `replicating <db>` once its read transaction is held, and `lsr replicate -config` logs
-//! Go's `replicating to` once each database's is; [`Replicator::wait_up_all`] waits for one
-//! line per database). Both programs run from a config file ([`Replicator::start`],
+//! says so ([`Replicator::wait_up`]): both log Go's [`UP_LINE`], Go once its store runs and
+//! `lsr` once a database's read transaction is held; [`Replicator::wait_up_all`] waits for
+//! one line per database. Both programs run from a config file ([`Replicator::start`],
 //! [`Replicator::start_lsr_config`]), or Rust from Go's two-argument form
-//! ([`Replicator::start_lsr`]). [`Replicator::stop`] is the
+//! ([`Replicator::start_lsr`], `lsr replicate DB_PATH file://REPLICA`). [`Replicator::stop`] is the
 //! operator's SIGINT, after which both drain and exit; [`Replicator::kill`] is SIGKILL, the
 //! crash the alternation test ends each turn with.
 //!
@@ -26,6 +25,9 @@ use crate::error::CompatError;
 use crate::s3::{home_beside, scrub_env};
 
 const POLL: Duration = Duration::from_millis(20);
+
+/// What Go's `litestream replicate` and `lsr replicate` both log once a database replicates.
+pub const UP_LINE: &str = "replicating to";
 
 /// Polls `cond` until it holds or `timeout` passes.
 ///
@@ -57,7 +59,7 @@ pub fn wait_until(
 pub enum Kind {
     /// Go's `litestream replicate -config <file>`.
     Go,
-    /// Rust's `lsr replicate <db> <replica>` or `lsr replicate -config <file>`.
+    /// Rust's `lsr replicate <db> <replica url>` or `lsr replicate -config <file>`.
     Rust,
 }
 
@@ -67,14 +69,6 @@ impl Kind {
         match self {
             Self::Go => "litestream replicate",
             Self::Rust => "lsr replicate",
-        }
-    }
-
-    /// What the process writes to its log once it runs.
-    const fn up_line(self) -> &'static str {
-        match self {
-            Self::Go => "replicating to",
-            Self::Rust => "replicating ",
         }
     }
 }
@@ -151,8 +145,9 @@ impl Replicator {
         })
     }
 
-    /// Starts Rust's `binary replicate db replica` (from [`lsr_binary`]), output to `log`.
-    /// It stages in Go's meta directory beside the database, as Go does.
+    /// Starts Rust's `binary replicate db file://replica` (from [`lsr_binary`]), Go's
+    /// two-argument form, output to `log`. It stages in Go's meta directory beside the
+    /// database, as Go does.
     ///
     /// # Errors
     /// [`CompatError`] when the log or the process cannot be created.
@@ -163,7 +158,8 @@ impl Replicator {
         log: &Path,
     ) -> Result<Self, CompatError> {
         let mut command = Command::new(binary);
-        command.arg("replicate").arg(db).arg(replica);
+        let url = format!("file://{}", replica.display());
+        command.arg("replicate").arg(db).arg(url);
         Ok(Self {
             child: spawn(&mut command, binary, log)?,
             log: log.to_path_buf(),
@@ -229,11 +225,10 @@ impl Replicator {
     /// [`CompatError::Process`] when it exited first, [`CompatError::Timeout`] when it said
     /// nothing within `timeout`.
     pub fn wait_up(&mut self, timeout: Duration) -> Result<(), CompatError> {
-        let line = self.kind.up_line();
         let log = self.log.clone();
         wait_until(&format!("{} to run", self.kind.command()), timeout, || {
             self.ensure_running()?;
-            Ok(fs::read_to_string(&log).is_ok_and(|text| text.contains(line)))
+            Ok(fs::read_to_string(&log).is_ok_and(|text| text.contains(UP_LINE)))
         })
     }
 
@@ -242,13 +237,12 @@ impl Replicator {
     /// # Errors
     /// As [`Replicator::wait_up`].
     pub fn wait_up_all(&mut self, databases: usize, timeout: Duration) -> Result<(), CompatError> {
-        let line = self.kind.up_line();
         let log = self.log.clone();
         let what = format!("{} to run {databases} databases", self.kind.command());
         wait_until(&what, timeout, || {
             self.ensure_running()?;
             let text = fs::read_to_string(&log).unwrap_or_default();
-            Ok(text.lines().filter(|l| l.contains(line)).count() >= databases)
+            Ok(text.lines().filter(|l| l.contains(UP_LINE)).count() >= databases)
         })
     }
 

@@ -288,8 +288,6 @@ Usage:
 
 \tlsr replicate [arguments] DB_PATH REPLICA_URL
 
-\tlsr replicate DB_PATH REPLICA   (no flags: one database until a signal, as before)
-
 Arguments:
 
 \t-config PATH

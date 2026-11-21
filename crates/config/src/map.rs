@@ -46,6 +46,7 @@
 
 mod dir;
 mod replica;
+mod s3;
 
 use std::fmt;
 use std::num::{NonZeroU32, NonZeroU64};
@@ -315,6 +316,7 @@ pub enum MapProblemKind {
 
 pub use dir::DirProblem;
 pub use replica::ReplicaProblem;
+pub use s3::{S3Overrides, S3Url, s3_config};
 
 /// Collects problems and notes during one mapping.
 #[derive(Default)]

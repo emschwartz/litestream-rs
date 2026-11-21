@@ -5,168 +5,54 @@
 
 // `cfg(test)` marks the helpers as test code, so clippy.toml's allow-*-in-tests cover them.
 #[cfg(test)]
-mod daemon {
-    use std::io::{BufRead, BufReader};
-    use std::path::{Path, PathBuf};
-    use std::process::{Child, Command, ExitStatus, Stdio};
-    use std::sync::mpsc::{self, Receiver};
-    use std::time::Duration;
+mod common;
 
-    use lsr_replica::{DynStore, RestoreTarget, restore};
-    use lsr_store_fs::FsStore;
+#[cfg(test)]
+mod daemon {
+    use std::path::{Path, PathBuf};
+    use std::process::{ExitStatus, Stdio};
+
     use rusqlite::Connection;
     use tempfile::TempDir;
 
-    /// How long any one line may take: a failure bound, never a pacing wait.
-    const PATIENCE: Duration = Duration::from_secs(60);
+    use crate::common::{Daemon, database, lsr, restores_to, rows, write};
 
-    fn lsr() -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_lsr"));
-        command
-            .env_remove("LOG_LEVEL")
-            .env_remove("LITESTREAM_CONFIG");
-        command
+    /// `lsr replicate <args>`.
+    fn start(args: &[&str]) -> Daemon {
+        let mut command = lsr();
+        command.arg("replicate").args(args);
+        Daemon::spawn(command)
     }
 
-    /// A running daemon and every stdout line it prints.
-    struct Daemon {
-        child: Child,
-        lines: Receiver<String>,
-        seen: Vec<String>,
+    fn with_config(config: &Path) -> Daemon {
+        start(&["-config", config.to_str().unwrap()])
     }
 
-    /// A test that fails mid-run leaves no daemon behind.
-    impl Drop for Daemon {
-        fn drop(&mut self) {
-            if matches!(self.child.try_wait(), Ok(None)) {
-                drop(self.child.kill());
-                drop(self.child.wait());
+    /// Waits for the process to end; its status and every line it printed, as one text.
+    fn finish(daemon: Daemon) -> (ExitStatus, String) {
+        let (status, lines) = daemon.finish();
+        (status, lines.join("\n"))
+    }
+
+    /// Waits for a line holding every one of `parts`, failing at the `cap`th `retrying`
+    /// line on the way: a daemon that retries without waiting prints them without end.
+    fn wait_retrying_under(daemon: &mut Daemon, parts: &[&str], cap: usize) -> String {
+        let mut retries = 0;
+        loop {
+            let line = daemon.next_line(parts);
+            if line.contains("msg=retrying") {
+                retries = usize::saturating_add(retries, 1);
+                assert!(retries < cap, "{retries} retries: {line}");
+            }
+            if parts.iter().all(|p| line.contains(p)) {
+                return line;
             }
         }
     }
 
-    impl Daemon {
-        fn start(args: &[&str]) -> Self {
-            let mut child = lsr()
-                .arg("replicate")
-                .args(args)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::inherit())
-                .spawn()
-                .unwrap();
-            let stdout = child.stdout.take().unwrap();
-            let (send, lines) = mpsc::sync_channel(4096);
-            std::thread::spawn(move || {
-                for line in BufReader::new(stdout).lines() {
-                    let Ok(line) = line else { return };
-                    if send.send(line).is_err() {
-                        return;
-                    }
-                }
-            });
-            Self {
-                child,
-                lines,
-                seen: Vec::new(),
-            }
-        }
-
-        fn with_config(config: &Path) -> Self {
-            Self::start(&["-config", config.to_str().unwrap()])
-        }
-
-        /// Waits for a line holding every one of `parts`.
-        fn wait_for(&mut self, parts: &[&str]) -> String {
-            let found = |line: &String| parts.iter().all(|p| line.contains(p));
-            if let Some(line) = self.seen.iter().find(|l| found(l)) {
-                return line.clone();
-            }
-            loop {
-                match self.lines.recv_timeout(PATIENCE) {
-                    Ok(line) => {
-                        self.seen.push(line.clone());
-                        if found(&line) {
-                            return line;
-                        }
-                    }
-                    Err(error) => panic!("no line with {parts:?} ({error}): {:#?}", self.seen),
-                }
-            }
-        }
-
-        /// Waits for a line holding every one of `parts`, failing at the `cap`th `retrying`
-        /// line on the way: a daemon that retries without waiting prints them without end.
-        fn wait_retrying_under(&mut self, parts: &[&str], cap: usize) -> String {
-            let mut retries = 0;
-            loop {
-                match self.lines.recv_timeout(PATIENCE) {
-                    Ok(line) => {
-                        self.seen.push(line.clone());
-                        if line.contains("msg=retrying") {
-                            retries = usize::saturating_add(retries, 1);
-                            assert!(retries < cap, "{retries} retries: {line}");
-                        }
-                        if parts.iter().all(|p| line.contains(p)) {
-                            return line;
-                        }
-                    }
-                    Err(error) => panic!("no line with {parts:?} ({error}): {:#?}", self.seen),
-                }
-            }
-        }
-
-        fn signal(&self, name: &str) {
-            let status = Command::new("kill")
-                .arg(format!("-{name}"))
-                .arg(self.child.id().to_string())
-                .status()
-                .unwrap();
-            assert!(status.success());
-        }
-
-        /// Waits for the process to end, and every line it printed.
-        fn finish(mut self) -> (ExitStatus, String) {
-            let status = self.child.wait().unwrap();
-            self.seen.extend(self.lines.iter());
-            (status, self.seen.join("\n"))
-        }
-    }
-
-    /// A host database: WAL, the host settings a replicated database needs, one table.
-    fn database(path: &Path) -> Connection {
-        let conn = Connection::open(path).unwrap();
-        conn.query_row("PRAGMA journal_mode = wal", [], |_row| Ok(()))
-            .unwrap();
-        lsr_sqlite::app_connection(&conn).unwrap();
-        conn.execute_batch("CREATE TABLE IF NOT EXISTS t(id INTEGER PRIMARY KEY, v BLOB)")
-            .unwrap();
-        conn
-    }
-
-    fn write(conn: &Connection, rows: usize) {
-        for _ in 0..rows {
-            conn.execute("INSERT INTO t(v) VALUES (randomblob(2000))", [])
-                .unwrap();
-        }
-    }
-
-    fn rows(conn: &Connection) -> Vec<(i64, Vec<u8>)> {
-        let mut stmt = conn.prepare("SELECT id, v FROM t ORDER BY id").unwrap();
-        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-            .unwrap()
-            .collect::<Result<_, _>>()
-            .unwrap()
-    }
-
-    /// Restores the replica in `dir` and checks it equals `conn`.
-    fn restores_to(dir: &Path, replica: &Path, conn: &Connection) {
-        let store: std::sync::Arc<dyn DynStore> = std::sync::Arc::new(FsStore::new(replica));
-        let to = dir.join(format!(
-            "restored-{}.db",
-            replica.file_name().unwrap().to_string_lossy()
-        ));
-        restore(&*store, RestoreTarget::Latest, &to).unwrap();
-        assert_eq!(rows(&Connection::open(&to).unwrap()), rows(conn));
+    /// Go's `file://` URL for a replica directory, the two-argument form's replica.
+    fn file_url(dir: &Path) -> String {
+        format!("file://{}", dir.display())
     }
 
     fn config(dir: &Path, text: &str) -> PathBuf {
@@ -193,13 +79,13 @@ mod daemon {
             dir.path(),
             &format!("dbs:\n{}{}", entry(&a, &ra), entry(&b, &rb)),
         );
-        let mut daemon = Daemon::with_config(&cfg);
+        let mut daemon = with_config(&cfg);
         daemon.wait_for(&["msg=\"initialized db\"", &format!("path={}", a.display())]);
         daemon.wait_for(&["msg=\"initialized db\"", &format!("path={}", b.display())]);
         write(&app_a, 20);
         write(&app_b, 30);
         daemon.signal("TERM");
-        let (status, out) = daemon.finish();
+        let (status, out) = finish(daemon);
         assert_eq!(status.code(), Some(0), "{out}");
         assert!(out.contains("signal=terminated"), "{out}");
         assert_eq!(out.matches("msg=\"database drained\"").count(), 2, "{out}");
@@ -221,7 +107,7 @@ mod daemon {
                 replica.display()
             ),
         );
-        let mut daemon = Daemon::with_config(&cfg);
+        let mut daemon = with_config(&cfg);
         daemon.wait_for(&["msg=\"waiting for database\""]);
         let app = database(&late);
         write(&app, 10);
@@ -231,7 +117,7 @@ mod daemon {
         ]);
         write(&app, 10);
         daemon.signal("INT");
-        let (status, out) = daemon.finish();
+        let (status, out) = finish(daemon);
         assert_eq!(status.code(), Some(0), "{out}");
         restores_to(dir.path(), &replica, &app);
     }
@@ -249,12 +135,12 @@ mod daemon {
             dir.path(),
             &format!("dbs:\n{}{}", entry(&bad, &rbad), entry(&good, &rg)),
         );
-        let mut daemon = Daemon::with_config(&cfg);
+        let mut daemon = with_config(&cfg);
         daemon.wait_for(&["level=ERROR", "msg=\"cannot start database\"", "bad.db"]);
         daemon.wait_for(&["msg=\"initialized db\"", "good.db"]);
         write(&app, 25);
         daemon.signal("TERM");
-        let (status, out) = daemon.finish();
+        let (status, out) = finish(daemon);
         assert_eq!(status.code(), Some(3), "{out}");
         assert!(out.contains("msg=\"database did not start\""), "{out}");
         assert_eq!(out.matches("msg=\"database drained\"").count(), 1, "{out}");
@@ -277,13 +163,13 @@ mod daemon {
             dir.path(),
             &format!("shutdown-sync-timeout: 1h\ndbs:\n{}", entry(&db, &replica)),
         );
-        let mut daemon = Daemon::with_config(&cfg);
+        let mut daemon = with_config(&cfg);
         daemon.wait_for(&["msg=\"initialized db\""]);
         write(&app, 5);
         daemon.signal("TERM");
         daemon.wait_for(&["msg=\"signal received, litestream shutting down\""]);
         daemon.signal("HUP");
-        let (status, out) = daemon.finish();
+        let (status, out) = finish(daemon);
         assert_eq!(status.code(), Some(3), "{out}");
         assert!(
             out.contains("msg=\"database not drained: deadline reached\""),
@@ -303,7 +189,7 @@ mod daemon {
         write(&app, 15);
         let cfg = config(dir.path(), &format!("dbs:\n{}", entry(&db, &replica)));
         let cfg = cfg.to_str().unwrap();
-        let (status, out) = Daemon::start(&["-once", "-config", cfg]).finish();
+        let (status, out) = finish(start(&["-once", "-config", cfg]));
         assert_eq!(status.code(), Some(0), "{out}");
         restores_to(dir.path(), &replica, &app);
         for flag in ["-force-snapshot", "-enforce-retention"] {
@@ -324,7 +210,7 @@ mod daemon {
         let replica_url = format!("file://{}", replica.display());
         let replica_arg = replica_url.as_str();
         let flags = ["-once", "-restore-if-db-not-exists", db_arg, replica_arg];
-        let (status, out) = Daemon::start(&flags).finish();
+        let (status, out) = finish(start(&flags));
         assert_eq!(status.code(), Some(0), "{out}");
         assert!(
             out.contains("msg=\"no backup found, starting fresh\""),
@@ -333,7 +219,7 @@ mod daemon {
         let want = {
             let app = database(&db);
             write(&app, 12);
-            let (status, out) = Daemon::start(&["-once", db_arg, replica_arg]).finish();
+            let (status, out) = finish(start(&["-once", db_arg, replica_arg]));
             assert_eq!(status.code(), Some(0), "{out}");
             rows(&app)
         };
@@ -345,14 +231,14 @@ mod daemon {
         }
         std::fs::remove_dir_all(dir.path().join(".app.db-litestream")).unwrap();
         // The host starts once the daemon has restored and pinned the database, and writes.
-        let mut daemon = Daemon::start(&["-restore-if-db-not-exists", db_arg, replica_arg]);
+        let mut daemon = start(&["-restore-if-db-not-exists", db_arg, replica_arg]);
         daemon.wait_for(&["msg=\"restore completed\""]);
         daemon.wait_for(&["msg=\"initialized db\""]);
         let app = database(&db);
         assert_eq!(rows(&app), want);
         write(&app, 8);
         daemon.signal("TERM");
-        let (status, out) = daemon.finish();
+        let (status, out) = finish(daemon);
         assert_eq!(status.code(), Some(0), "{out}");
         restores_to(dir.path(), &replica, &app);
     }
@@ -371,7 +257,7 @@ mod daemon {
         {
             let app = database(&db);
             write(&app, 6);
-            let (status, out) = Daemon::start(&["-once", db_arg, replica_arg]).finish();
+            let (status, out) = finish(start(&["-once", db_arg, replica_arg]));
             assert_eq!(status.code(), Some(0), "{out}");
         }
         for sidecar in ["", "-wal", "-shm"] {
@@ -388,13 +274,13 @@ mod daemon {
             db_arg,
             replica_arg,
         ];
-        let mut daemon = Daemon::start(&flags);
+        let mut daemon = start(&flags);
         daemon.wait_for(&["msg=\"restore completed\""]);
         daemon.wait_for(&["msg=\"initialized db\""]);
-        daemon.wait_retrying_under(&["msg=\"wal synced\"", "files=1"], 10);
-        daemon.wait_retrying_under(&["msg=uploaded", "Put("], 10);
+        wait_retrying_under(&mut daemon, &["msg=\"wal synced\"", "files=1"], 10);
+        wait_retrying_under(&mut daemon, &["msg=uploaded", "Put("], 10);
         daemon.signal("TERM");
-        let (status, out) = daemon.finish();
+        let (status, out) = finish(daemon);
         assert_eq!(status.code(), Some(0), "{out}");
         let retries = out.lines().filter(|l| l.contains("msg=retrying")).count();
         assert_eq!(retries, 0, "{out}");
@@ -451,7 +337,7 @@ mod daemon {
                 entry(&db, &dir.path().join("r"))
             ),
         );
-        let (status, out) = Daemon::start(&["-once", "-config", cfg.to_str().unwrap()]).finish();
+        let (status, out) = finish(start(&["-once", "-config", cfg.to_str().unwrap()]));
         assert_eq!(status.code(), Some(0), "{out}");
         for line in out.lines() {
             let value: serde_json::Value = serde_json::from_str(line).unwrap();
@@ -460,6 +346,47 @@ mod daemon {
             }
         }
         assert!(out.contains("\"msg\":\"initialized db\""), "{out}");
+    }
+
+    /// Go's `litestream replicate DB REPLICA_URL`: one database, Go's up line once its read
+    /// transaction is held, and each stop signal drains it and exits 0, so a restore of what
+    /// it wrote equals the database. This is the process the compatibility tests kill.
+    #[test]
+    fn the_two_argument_form_drains_on_each_stop_signal() {
+        for name in ["TERM", "INT", "HUP"] {
+            let dir = TempDir::new().unwrap();
+            let db = dir.path().join("app.db");
+            let replica = dir.path().join("replica");
+            let app = database(&db);
+            let url = file_url(&replica);
+            let mut daemon = start(&[db.to_str().unwrap(), &url]);
+            daemon.wait_for(&["msg=\"replicating to\"", "type=file"]);
+            write(&app, 20);
+            daemon.signal(name);
+            let (status, out) = finish(daemon);
+            assert_eq!(status.code(), Some(0), "SIG{name}: {out}");
+            assert!(out.contains("msg=\"database drained\""), "SIG{name}: {out}");
+            restores_to(dir.path(), &replica, &app);
+        }
+    }
+
+    /// Go's replica argument is a URL: a plain directory is "file replica url required"
+    /// there, and refused here before any database is opened.
+    #[test]
+    fn the_two_argument_form_refuses_a_plain_directory_as_go_does() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("app.db");
+        let replica = dir.path().join("replica");
+        let out = lsr()
+            .arg("replicate")
+            .arg(&db)
+            .arg(&replica)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8(out.stderr).unwrap();
+        assert_eq!(out.status.code(), Some(2), "{stderr}");
+        assert!(stderr.contains("file replica url required"), "{stderr}");
+        assert!(!replica.exists() && !db.exists());
     }
 
     #[test]

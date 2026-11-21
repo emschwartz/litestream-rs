@@ -247,13 +247,6 @@ pub enum Done {
         /// Whether to print JSON.
         json: bool,
     },
-    /// A replicator ran until a signal and stopped.
-    Replicated {
-        /// The database.
-        database: PathBuf,
-        /// How the stop ended.
-        stopped: lsr_replica::Stopped,
-    },
     /// The daemon ran and stopped; it logged everything as it went.
     Daemon(lsr_sidecar::Finished),
     /// The daemon's own usage text.
@@ -331,12 +324,6 @@ pub enum CliError {
     /// Writing the result failed.
     #[error("writing the result: {0}")]
     Output(#[source] io::Error),
-    /// The replicator did not start.
-    #[error("starting the replicator: {0}")]
-    Start(#[from] lsr_replica::StartError),
-    /// The signal handlers could not be installed.
-    #[error("watching for signals: {0}")]
-    Signals(#[source] io::Error),
     /// The daemon did not start: its command line, its config, or its signal handlers.
     #[error("replicate: {0}")]
     Daemon(#[from] lsr_sidecar::SidecarError),
@@ -388,8 +375,6 @@ pub fn exit_for_done(done: &Done) -> Exit {
             Some(Severity::Degraded) => Exit::Degraded,
             Some(Severity::Unrestorable) => Exit::Refused,
         },
-        Done::Replicated { stopped, .. } if crate::replicate::drained(stopped) => Exit::Success,
-        Done::Replicated { .. } => Exit::Environment,
         Done::Daemon(finished) => match (finished.clean(), finished.ran_exec()) {
             (true, _) => Exit::Success,
             (false, true) => Exit::ExecFailed,
@@ -469,9 +454,7 @@ pub fn exit_for_error(error: &CliError) -> Exit {
         | CliError::Sidecar { .. }
         | CliError::Create(_)
         | CliError::Clear(_)
-        | CliError::Output(_)
-        | CliError::Start(_)
-        | CliError::Signals(_) => Exit::Environment,
+        | CliError::Output(_) => Exit::Environment,
     }
 }
 
@@ -484,7 +467,6 @@ pub async fn run(command: Command) -> Result<Done, CliError> {
         Command::Restore(args) => restore_command(args).await,
         Command::Verify(args) => verify_command(args).await,
         Command::Files(args) => files_command(args).await,
-        Command::Replicate(args) => crate::replicate::replicate(args),
         Command::Daemon(args) => match lsr_sidecar::run(&args)? {
             lsr_sidecar::Outcome::Help(text) => Ok(Done::DaemonHelp(text)),
             lsr_sidecar::Outcome::Ran(finished) => Ok(Done::Daemon(finished)),
@@ -605,8 +587,6 @@ fn no_ltx_folder(error: CliError, path: PathBuf) -> CliError {
         | CliError::Create(_)
         | CliError::Clear(_)
         | CliError::Output(_)
-        | CliError::Start(_)
-        | CliError::Signals(_)
         | CliError::Daemon(_)) => other,
     }
 }

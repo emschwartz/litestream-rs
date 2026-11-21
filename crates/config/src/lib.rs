@@ -48,7 +48,7 @@ pub use error::{
 pub use expand::{Env, Expand, PathError, ProcessEnv, clean, expand_path, strip_sqlite_prefix};
 pub use map::{
     Credentials, DbPlan, DirProblem, MapError, MapProblem, MapProblemKind, Note, Plan, ReplicaPlan,
-    ReplicaProblem, default_meta, plan,
+    ReplicaProblem, S3Overrides, S3Url, default_meta, plan, s3_config,
 };
 pub use size::{SizeError, parse_byte_size};
 

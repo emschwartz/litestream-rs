@@ -16,15 +16,16 @@ lsr-core.workspace = true
 lsr-local.workspace = true
 lsr-ltx.workspace = true
 lsr-config.workspace = true
-lsr-replica.workspace = true
 lsr-sidecar.workspace = true
 lsr-store-fs.workspace = true
 lsr-store-s3.workspace = true
-signal-hook.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 lsr-compat.workspace = true
+lsr-replica.workspace = true
+# The `-exec` child in tests/sidecar.rs watches signals as a real child would.
+signal-hook.workspace = true
 # The replicate process test sets up its own host connection as a host must.
 lsr-sqlite.workspace = true
 lsr-core = { workspace = true, features = ["testing"] }

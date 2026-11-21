@@ -21,7 +21,7 @@ mod s3 {
     use lsr_core::conformance::block_on;
     use lsr_core::{FileInfo, Inventory, ObjectStore, Upload};
     use lsr_store_fs::FsStore;
-    use lsr_store_s3::{S3Config, S3Credentials, S3Store, SecretString};
+    use lsr_store_s3::{S3Credentials, S3Store, SecretString};
 
     const CANARY_SECRET: &str = "CANARY-secret-0123456789";
     const CANARY_KEY: &str = "CANARYKEYID0123";
@@ -291,9 +291,11 @@ mod s3 {
         /// Puts every file of a directory replica under `prefix`.
         fn seed(&self, replica: &Path, prefix: &str) {
             let escaped = self.endpoint.replace(':', "%3A").replace('/', "%2F");
-            let config = S3Config::from_url(&format!(
-                "s3://lsr-test/{prefix}?endpoint={escaped}&forcePathStyle=true"
-            ))
+            let url = format!("s3://lsr-test/{prefix}?endpoint={escaped}&forcePathStyle=true");
+            let config = lsr_config::s3_config(
+                Some(lsr_config::S3Url::parse(&url).expect("url")),
+                &lsr_config::S3Overrides::default(),
+            )
             .expect("config");
             let credentials =
                 S3Credentials::new(self.access.clone(), SecretString::new(self.secret.clone()));

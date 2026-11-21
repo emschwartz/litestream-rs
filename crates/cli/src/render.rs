@@ -21,12 +21,10 @@ use lsr_ltx::{Timestamp, Txid, TxidRange};
 
 use crate::args::{
     CONFIG_CHECK_SUMMARY, CONFIG_CHECK_USAGE, CommandName, DAEMON_SUMMARY, DAEMON_USAGE, FLAGS,
-    REPLICATE_SUMMARY, REPLICATE_USAGE,
 };
 use crate::run::{CliError, Done, Exit, Finished, RestoreDone, Skip, Source};
 use lsr_core::ListedStamp;
 use lsr_local::IntegrityCheck;
-use lsr_replica::Stopped;
 
 /// Appends formatted text to a `String`, which cannot fail.
 macro_rules! put {
@@ -67,7 +65,6 @@ pub fn done(done: &Done) -> String {
             stamp_fallbacks,
             json: true,
         } => files_json(inventory, *stamp_fallbacks),
-        Done::Replicated { database, stopped } => replicated(database, stopped),
         Done::Daemon(_) => String::new(),
         Done::DaemonHelp(text) => (*text).to_owned(),
         Done::ConfigChecked(checked) => checked.to_string(),
@@ -108,7 +105,6 @@ pub fn help() -> String {
             putln!(out, "  {:<20}{}", spec.name, spec.help);
         }
     }
-    putln!(out, "\n{REPLICATE_USAGE}\n  {REPLICATE_SUMMARY}");
     putln!(out, "\n{DAEMON_USAGE}\n  {DAEMON_SUMMARY}");
     putln!(out, "\n{CONFIG_CHECK_USAGE}\n  {CONFIG_CHECK_SUMMARY}");
     out.push_str(
@@ -118,31 +114,6 @@ pub fn help() -> String {
         putln!(out, "  {:<3}{}", exit.code(), exit.meaning());
     }
     out
-}
-
-/// How a replicator's stop ended, as one line.
-fn replicated(database: &Path, stopped: &Stopped) -> String {
-    let database = database.display();
-    match stopped {
-        Stopped::Drained { txid: Some(txid) } => {
-            format!("stopped {database}: drained, the replica holds every commit through {txid}\n")
-        }
-        Stopped::Drained { txid: None } => {
-            format!("stopped {database}: drained, nothing was ever committed\n")
-        }
-        Stopped::DeadlineReached {
-            unsynced_wal_bytes,
-            staged_not_uploaded,
-        } => format!(
-            "stopped {database}: out of time with {unsynced_wal_bytes} WAL bytes not synced and {staged_not_uploaded} staged files not uploaded; the next start continues from them\n"
-        ),
-        Stopped::Stopped(cause) => {
-            format!("stopped {database}: the replicator had already stopped: {cause:?}\n")
-        }
-        Stopped::Gone(gone) => {
-            format!("stopped {database}: the replicator thread is gone: {gone:?}\n")
-        }
-    }
 }
 
 /// `a, b, c`, for an error line.

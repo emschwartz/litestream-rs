@@ -383,45 +383,81 @@ fn parse_s3_forms() {
     assert_eq!(
         usage("files --replica s3://bucket"),
         UsageError::BadReplicaUrl {
-            reason: ConfigError::EmptyPrefix
+            reason: ReplicaProblem::S3(ConfigError::EmptyPrefix)
         }
     );
-    assert_eq!(
-        usage("files --replica s3://%"),
+    assert!(matches!(
+        usage("files --replica s3:///p"),
         UsageError::BadReplicaUrl {
-            reason: ConfigError::BadBucket
+            reason: ReplicaProblem::BucketRequired
         }
-    );
-    // Departure: Go reads s3://filebase.com/bucket/path as bucket "bucket", key
-    // "path"; here the host is the bucket, so the form is refused, not misread.
-    assert_eq!(
-        usage("files --replica s3://filebase.com/bucket/path"),
-        UsageError::EndpointInReplicaHost
-    );
+    ));
 }
 
+/// The hosts Go's `s3.ParseHost` takes apart, read as the daemon reads them: an AWS
+/// virtual host gives the bucket and region, MinIO's `bucket.host:port` the bucket and an
+/// http endpoint in path style; a provider whose endpoint v1 does not derive is refused.
 #[test]
-fn hosts_go_would_split_are_refused_not_misread() {
+fn go_s_host_spellings_read_as_the_daemon_reads_them() {
+    let aws = s3("files --replica s3://my-bucket.s3.us-west-2.amazonaws.com/db");
+    assert_eq!(aws.bucket().as_str(), "my-bucket");
+    assert_eq!(aws.region().as_str(), "us-west-2");
+    assert_eq!(
+        aws.endpoint().url().as_str(),
+        "https://s3.us-west-2.amazonaws.com/"
+    );
+    let minio = s3("files --replica s3://bucket.localhost:9000/p");
+    assert_eq!(minio.bucket().as_str(), "bucket");
+    assert_eq!(minio.endpoint().url().as_str(), "http://localhost:9000/");
+    assert_eq!(minio.style(), UrlStyle::Path);
     for host in [
-        "bucket.s3.amazonaws.com",
-        "bucket.s3.us-west-2.amazonaws.com",
         "bucket.nyc3.digitaloceanspaces.com",
         "bucket.s3.us-west-000.backblazeb2.com",
         "bucket.s3.fr-par.scw.cloud",
     ] {
-        assert_eq!(
-            usage(&format!("files --replica s3://{host}/p")),
-            UsageError::EndpointInReplicaHost,
+        assert!(
+            matches!(
+                usage(&format!("files --replica s3://{host}/p")),
+                UsageError::BadReplicaUrl {
+                    reason: ReplicaProblem::ProviderHost { .. }
+                }
+            ),
             "{host}"
         );
     }
-    // Go's MinIO form bucket.host:port: a port is refused by the URL parser.
-    assert_eq!(
-        usage("files --replica s3://bucket.localhost:9000/p"),
-        UsageError::BadReplicaUrl {
-            reason: ConfigError::BadUrl
-        }
-    );
+}
+
+/// `lsr restore --replica <url>` names the same bucket, prefix, endpoint, region, style
+/// and part size the daemon's `lsr replicate DB_PATH <url>` replicates to.
+#[test]
+fn restore_accepts_every_url_the_daemon_accepts() {
+    for url in [
+        "s3://bucket/path",
+        "s3://my-bucket.s3.amazonaws.com/db/app",
+        "s3://my-bucket.s3.eu-west-1.amazonaws.com/db",
+        "s3://bucket.localhost:9000/p",
+        "s3://b/p?endpoint=localhost:9000&region=eu-west-1",
+        "s3://b/p?endpoint=https://fly.storage.tigris.dev&region=auto",
+        "s3://b/p?endpoint=https://example.com&forcePathStyle=false",
+        "s3://b/p?partSize=10485760",
+        "s3://b/p?signPayload=false&concurrency=8",
+    ] {
+        let loaded =
+            lsr_config::GoConfig::for_one_database("/data/app.db", url, &lsr_config::ProcessEnv)
+                .unwrap();
+        let plan = lsr_config::plan(&loaded.config, &lsr_config::ProcessEnv).unwrap();
+        let lsr_config::ReplicaPlan::S3 { config: daemon, .. } = plan.dbs()[0].replica() else {
+            panic!("{url}: not an S3 replica");
+        };
+        let restore = match parsed(&format!("restore --replica {url} --output o")) {
+            Ok(Command::Restore(RestoreArgs {
+                replica: Replica::S3(config),
+                ..
+            })) => config,
+            other => panic!("{url}: {other:?}"),
+        };
+        assert_eq!(restore, *daemon, "{url}");
+    }
 }
 
 #[test]
@@ -433,10 +469,10 @@ fn s3_flags_set_endpoint_region_and_style() {
     assert_eq!(config.region().as_str(), "eu-west-1");
     assert_eq!(config.style(), UrlStyle::Path);
     assert_eq!(config.provider(), Provider::Minio);
-    // The provider decides the style when no flag does.
+    // As Go's `endpoint` key: an endpoint turns path style on.
     let tigris = s3("files --replica s3://b/p --endpoint https://fly.storage.tigris.dev");
     assert_eq!(tigris.provider(), Provider::Tigris);
-    assert_eq!(tigris.style(), UrlStyle::VirtualHost);
+    assert_eq!(tigris.style(), UrlStyle::Path);
 }
 
 #[test]
@@ -483,14 +519,17 @@ fn a_url_with_userinfo_or_a_secret_query_never_prints() {
     assert_eq!(
         err,
         UsageError::BadReplicaUrl {
-            reason: ConfigError::BadUrl
+            reason: ReplicaProblem::UserInfo
         }
     );
+    assert!(!err.to_string().contains("hunter2"));
     let err = usage("files --replica s3://b/p?secret=hunter2");
     assert_eq!(
         err,
         UsageError::BadReplicaUrl {
-            reason: ConfigError::UnknownParameter
+            reason: ReplicaProblem::QueryUnknown {
+                name: "secret".to_owned()
+            }
         }
     );
     assert!(!err.to_string().contains("hunter2"));

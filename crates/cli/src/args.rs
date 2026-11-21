@@ -7,15 +7,19 @@
 //! as the next argument (`--replica dir`); a value that starts with `--` is
 //! read as a missing value, so a path like that is written `./--name`.
 //!
-//! `--replica` is a directory or an `s3://<bucket>/<prefix>` URL. The S3 flags
-//! (`--endpoint`, `--region`, `--force-path-style`) are folded into the URL's
-//! own query and parsed once by `S3Config::from_url`, so a flag overrides the
-//! query and the provider defaults follow the final endpoint. Credentials are
-//! not parsed here (this module reads no environment); `replica.rs` takes them
-//! from the AWS variables and shared files.
+//! `--replica` is a directory or an `s3://` URL, read by the daemon's own parser
+//! (`lsr_config::S3Url`), so `lsr restore` accepts every URL a `replica: url:`
+//! entry does, Go's host spellings included. The S3 flags (`--endpoint`,
+//! `--region`, `--force-path-style`) override the URL as a replica entry's keys
+//! do. Credentials are not parsed here (this module reads no environment);
+//! `replica.rs` takes them from the AWS variables and shared files.
+//!
+//! `lsr replicate` is the daemon's command line, read by `lsr-sidecar`, Go's
+//! two-argument form `lsr replicate DB_PATH REPLICA_URL` included.
 
 use std::path::PathBuf;
 
+use lsr_config::{ReplicaProblem, S3Overrides, S3Url, s3_config};
 use lsr_core::{Depth, RestoreTarget};
 use lsr_local::IntegrityCheck;
 use lsr_ltx::{ParseTxidError, Timestamp, TimestampParseError, Txid};
@@ -222,8 +226,6 @@ pub enum Command {
     Verify(VerifyArgs),
     /// List a replica's files.
     Files(FilesArgs),
-    /// Replicate a live database until a signal stops it.
-    Replicate(ReplicateArgs),
     /// Go's `replicate` daemon: the arguments after `replicate`, read by `lsr-sidecar`.
     Daemon(Vec<String>),
     /// `lsr config check <file>`.
@@ -234,50 +236,18 @@ pub enum Command {
     Version,
 }
 
-/// `lsr replicate <db> <replica>`.
-#[derive(Debug, PartialEq, Eq)]
-pub struct ReplicateArgs {
-    /// The database, which must exist.
-    pub database: PathBuf,
-    /// Where it goes: a directory (created if missing) or an `s3://` URL, whose query takes
-    /// the S3 settings (`endpoint`, `region`, `forcePathStyle`).
-    pub replica: Replica,
-}
-
-/// The usage line of `lsr replicate`, for the help text.
-pub const REPLICATE_USAGE: &str = "lsr replicate <db> <replica>";
-
-/// One line for the help text.
-pub const REPLICATE_SUMMARY: &str = "replicate a live database to a directory or an s3:// URL until SIGINT, SIGTERM or SIGHUP, then sync what is committed and stop";
-
 /// The daemon's usage line, for the help text.
 pub const DAEMON_USAGE: &str =
     "lsr replicate [-config <file>] [Go's replicate flags] [DB_PATH REPLICA_URL]";
 
 /// One line for the help text.
-pub const DAEMON_SUMMARY: &str = "Go's replicate daemon: every database in litestream.yml (default $LITESTREAM_CONFIG, else /etc/litestream.yml), until a signal; lsr replicate -h lists the flags";
+pub const DAEMON_SUMMARY: &str = "Go's replicate daemon: every database in litestream.yml (default $LITESTREAM_CONFIG, else /etc/litestream.yml), or DB_PATH alone to REPLICA_URL (file:// or s3://, as Go), until a signal; lsr replicate -h lists the flags";
 
 /// `lsr config check`'s usage line.
 pub const CONFIG_CHECK_USAGE: &str = "lsr config check <file>";
 
 /// One line for the help text.
 pub const CONFIG_CHECK_SUMMARY: &str = "read a Go litestream.yml as the daemon would and print every refusal and warning a start would; writes nothing and touches no bucket, but scans a dir entry as a start does";
-
-/// `lsr replicate`: two plain arguments are the one-database form; anything else, flags or
-/// no arguments, is the daemon.
-fn parse_replicate(rest: &[String]) -> Result<Command, UsageError> {
-    let flagless = !rest.iter().any(|arg| arg.starts_with('-') && *arg != "-");
-    if !flagless || rest.is_empty() {
-        return Ok(Command::Daemon(rest.to_vec()));
-    }
-    let [database, replica] = rest else {
-        return Err(UsageError::ReplicateArguments { found: rest.len() });
-    };
-    Ok(Command::Replicate(ReplicateArgs {
-        database: PathBuf::from(database),
-        replica: replica_of(replica)?,
-    }))
-}
 
 /// `config check <file>`.
 fn parse_config(rest: &[String]) -> Result<Command, UsageError> {
@@ -293,24 +263,6 @@ fn parse_config(rest: &[String]) -> Result<Command, UsageError> {
         [other, ..] if is_help(other) => Ok(Command::Help),
         [other, ..] => Err(UsageError::UnknownCommand {
             name: format!("config {other}"),
-        }),
-    }
-}
-
-/// A replica named on its own: a directory, or an `s3://` URL with its settings in the query.
-fn replica_of(value: &str) -> Result<Replica, UsageError> {
-    match value.split_once("://") {
-        None => Ok(Replica::Dir(PathBuf::from(value))),
-        Some((scheme, _)) if scheme.eq_ignore_ascii_case("s3") => {
-            let config =
-                S3Config::from_url(value).map_err(|reason| UsageError::BadReplicaUrl { reason })?;
-            if names_a_provider_endpoint(config.bucket().as_str()) {
-                return Err(UsageError::EndpointInReplicaHost);
-            }
-            Ok(Replica::S3(Box::new(config)))
-        }
-        Some((scheme, _)) => Err(UsageError::UnsupportedReplica {
-            scheme: scheme.to_owned(),
         }),
     }
 }
@@ -443,12 +395,13 @@ pub enum UsageError {
         /// The scheme, never the rest of the URL (it may hold credentials).
         scheme: String,
     },
-    /// `--replica s3://...` is not a usable bucket and prefix. The reason names
-    /// the shape that is wrong, never any part of the URL.
+    /// `--replica s3://...` is not a usable bucket and prefix, as the daemon reads it.
+    /// The reason names the shape that is wrong, never any part of the URL but a
+    /// query key.
     #[error("--replica: {reason}")]
     BadReplicaUrl {
         /// What is wrong.
-        reason: ConfigError,
+        reason: ReplicaProblem,
     },
     /// `--endpoint` or `--region` is not usable.
     #[error("{flag}: {reason}")]
@@ -463,21 +416,6 @@ pub enum UsageError {
     S3FlagForDirectory {
         /// The flag.
         flag: &'static str,
-    },
-    /// The URL's host is a provider endpoint (or a `host:port`), which Go splits
-    /// into bucket and endpoint; here the host is the bucket, verbatim.
-    #[error(
-        "--replica host names a provider endpoint, not a bucket; write s3://<bucket>/<prefix> and pass the endpoint with --endpoint"
-    )]
-    EndpointInReplicaHost,
-    /// `lsr replicate` takes exactly a database and a replica.
-    #[error(
-        "replicate takes a database and a replica, not {found} arguments: {}",
-        REPLICATE_USAGE
-    )]
-    ReplicateArguments {
-        /// How many were given.
-        found: usize,
     },
     /// `lsr config check` takes exactly one file.
     #[error(
@@ -494,33 +432,6 @@ pub enum UsageError {
         /// 1-based position after `lsr`.
         position: usize,
     },
-}
-
-/// Percent-encodes everything but the unreserved characters.
-fn query_escape(raw: &str) -> String {
-    raw.bytes()
-        .map(|byte| {
-            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
-                char::from(byte).to_string()
-            } else {
-                format!("%{byte:02X}")
-            }
-        })
-        .collect()
-}
-
-/// Hosts Go's `ParseHost` takes apart into bucket, region and endpoint
-/// (rc.go:1820-1871); here the host is the bucket, so these would name the wrong one.
-fn names_a_provider_endpoint(host: &str) -> bool {
-    const SUFFIXES: [&str; 6] = [
-        ".amazonaws.com",
-        ".digitaloceanspaces.com",
-        ".backblazeb2.com",
-        "filebase.com",
-        ".scw.cloud",
-        ".neon.tech",
-    ];
-    SUFFIXES.iter().any(|suffix| host.ends_with(suffix))
 }
 
 /// What the scan of one subcommand's arguments found.
@@ -610,38 +521,32 @@ impl Flags {
         }
     }
 
-    /// The URL with the S3 flags appended to its query (the last value of a key
-    /// wins in `from_url`), so the flags override the query.
+    /// The URL as the daemon reads it, with the S3 flags in place of a replica
+    /// entry's keys, so a flag overrides the URL's host and query.
     fn s3(&self, url: &str) -> Result<Replica, UsageError> {
-        let mut extra = Vec::new();
-        if let Some(endpoint) = self.value("--endpoint") {
+        let endpoint = self.value("--endpoint");
+        if let Some(endpoint) = endpoint {
             Endpoint::new(endpoint).map_err(|reason| UsageError::BadS3Flag {
                 flag: "--endpoint",
                 reason,
             })?;
-            extra.push(format!("endpoint={}", query_escape(endpoint)));
         }
-        if let Some(region) = self.value("--region") {
+        let region = self.value("--region");
+        if let Some(region) = region {
             Region::new(region).map_err(|reason| UsageError::BadS3Flag {
                 flag: "--region",
                 reason,
             })?;
-            extra.push(format!("region={}", query_escape(region)));
         }
-        if self.has("--force-path-style") {
-            extra.push("forcePathStyle=true".to_owned());
-        }
-        let base = url.split_once('#').map_or(url, |(base, _fragment)| base);
-        let joined = match (extra.is_empty(), base.contains('?')) {
-            (true, _) => base.to_owned(),
-            (false, true) => format!("{base}&{}", extra.join("&")),
-            (false, false) => format!("{base}?{}", extra.join("&")),
+        let over = S3Overrides {
+            region,
+            endpoint,
+            force_path_style: self.has("--force-path-style").then_some(true),
+            ..S3Overrides::default()
         };
-        let config =
-            S3Config::from_url(&joined).map_err(|reason| UsageError::BadReplicaUrl { reason })?;
-        if names_a_provider_endpoint(config.bucket().as_str()) {
-            return Err(UsageError::EndpointInReplicaHost);
-        }
+        let bad = |reason| UsageError::BadReplicaUrl { reason };
+        let parsed = S3Url::parse(url).map_err(bad)?;
+        let config = s3_config(Some(parsed), &over).map_err(bad)?;
         Ok(Replica::S3(Box::new(config)))
     }
 
@@ -704,7 +609,9 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
         "restore" => CommandName::Restore,
         "verify" => CommandName::Verify,
         "files" => CommandName::Files,
-        "replicate" => return parse_replicate(args.get(1..).unwrap_or_default()),
+        "replicate" => {
+            return Ok(Command::Daemon(args.get(1..).unwrap_or_default().to_vec()));
+        }
         "config" => return parse_config(args.get(1..).unwrap_or_default()),
         other => {
             return Err(UsageError::UnknownCommand {
