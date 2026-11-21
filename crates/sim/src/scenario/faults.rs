@@ -285,6 +285,20 @@ pub fn host_scenarios() -> &'static [fn() -> Scenario] {
     &[host_autocheckpoints]
 }
 
+/// A checkpoint whose seal staged the app's commit inside the tick, and
+/// whose next step then failed: the scenarios that are not tied to one fault.
+/// A failed barrier release has none: the rules keep a barrier whose release
+/// failed held, so the app never writes again (core's actor tests cover it).
+#[must_use]
+pub fn seal_scenarios() -> &'static [fn() -> Scenario] {
+    &[
+        sealed_then_checkpoint_busy,
+        sealed_then_checkpoint_io,
+        sealed_then_bump_busy,
+        sealed_then_bump_io,
+    ]
+}
+
 /// The crash windows of a compaction's output: the scenarios that are not tied
 /// to one fault.
 #[must_use]
@@ -1527,4 +1541,87 @@ fn host_counted(report: &RunReport) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// The app commits inside a tick, after the sync read the committed end and
+/// before the PASSIVE checkpoint's barrier (nine frames make one due), so the
+/// checkpoint's seal stages that commit; then `op` fails with `err`. The
+/// engine stops before any other commit: the drain must upload the sealed
+/// file on its own and name its transaction, and the oracle restore it.
+fn sealed_then(name: &'static str, op: SourceOp, err: SourceError) -> Scenario {
+    let mut s = build(
+        name,
+        vec![
+            live(),
+            vec![
+                commit(9, false),
+                Op::EnvFault(EnvFault::Source(op, err)),
+                Op::CommitInTick { pages: 2 },
+                Op::Shutdown,
+                Op::Restore,
+            ],
+        ],
+        vec![Expect::Oracle],
+    );
+    s.check = Some(sealed_then_failed);
+    s
+}
+
+/// The commit happened inside the tick and the checkpoint after it failed.
+fn sealed_then_failed(report: &RunReport) -> Result<(), String> {
+    if report.commits_in_tick != 1 {
+        return Err(format!(
+            "{} commits inside a tick, not one",
+            report.commits_in_tick
+        ));
+    }
+    let failed = report
+        .seen
+        .iter()
+        .any(|seen| matches!(seen, Seen::Event(Event::Retrying { .. })));
+    if failed {
+        Ok(())
+    } else {
+        Err("no checkpoint step failed".to_owned())
+    }
+}
+
+/// [`sealed_then`]: the checkpoint is busy.
+#[must_use]
+pub fn sealed_then_checkpoint_busy() -> Scenario {
+    sealed_then(
+        "sealed_then_checkpoint_busy",
+        SourceOp::Checkpoint,
+        SourceError::Busy,
+    )
+}
+
+/// [`sealed_then`]: the checkpoint fails with an I/O error.
+#[must_use]
+pub fn sealed_then_checkpoint_io() -> Scenario {
+    sealed_then(
+        "sealed_then_checkpoint_io",
+        SourceOp::Checkpoint,
+        SourceError::Io(std::io::ErrorKind::Other),
+    )
+}
+
+/// [`sealed_then`]: the sequence bump is busy.
+#[must_use]
+pub fn sealed_then_bump_busy() -> Scenario {
+    sealed_then(
+        "sealed_then_bump_busy",
+        SourceOp::BumpSeq,
+        SourceError::Busy,
+    )
+}
+
+/// [`sealed_then`]: the sequence bump fails with an I/O error.
+#[must_use]
+pub fn sealed_then_bump_io() -> Scenario {
+    sealed_then(
+        "sealed_then_bump_io",
+        SourceOp::BumpSeq,
+        SourceError::Io(std::io::ErrorKind::Other),
+    )
 }

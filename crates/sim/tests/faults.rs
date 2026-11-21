@@ -6,7 +6,7 @@ use lsr_sim::Op;
 use lsr_sim::run::Seen;
 use lsr_sim::scenario::{
     self, FaultKind, Scenario, clock_scenarios, fault_reason, fault_scenarios, halt_of,
-    host_scenarios, names_fault, persistent_of, run_scenario, window_scenarios,
+    host_scenarios, names_fault, persistent_of, run_scenario, seal_scenarios, window_scenarios,
 };
 
 fn run(make: fn() -> Scenario) {
@@ -161,6 +161,7 @@ fn every_scenario_is_tested_here() {
     let mut all: Vec<fn() -> Scenario> = clock_scenarios().to_vec();
     all.extend_from_slice(window_scenarios());
     all.extend_from_slice(host_scenarios());
+    all.extend_from_slice(seal_scenarios());
     for kind in FaultKind::ALL {
         all.extend_from_slice(fault_scenarios(kind));
     }
@@ -336,6 +337,26 @@ fn clock_steps_back_10s() {
 #[test]
 fn host_autocheckpoints() {
     run(scenario::host_autocheckpoints);
+}
+
+#[test]
+fn sealed_then_checkpoint_busy() {
+    run(scenario::sealed_then_checkpoint_busy);
+}
+
+#[test]
+fn sealed_then_checkpoint_io() {
+    run(scenario::sealed_then_checkpoint_io);
+}
+
+#[test]
+fn sealed_then_bump_busy() {
+    run(scenario::sealed_then_bump_busy);
+}
+
+#[test]
+fn sealed_then_bump_io() {
+    run(scenario::sealed_then_bump_io);
 }
 
 #[test]

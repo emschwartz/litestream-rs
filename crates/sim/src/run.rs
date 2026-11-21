@@ -128,6 +128,8 @@ pub struct RunReport {
     pub power_losses: u32,
     /// Drains the operator asked for.
     pub shutdowns: u32,
+    /// Commits the app made inside a tick, before a checkpoint's barrier.
+    pub commits_in_tick: u32,
     /// Oracle restores of the whole replica.
     pub checks: u32,
     /// The longest the WAL grew, in frames.
@@ -204,7 +206,8 @@ enum Step {
     Ran,
     /// A lane kept trying a persistent fault.
     Degraded(PersistentCause),
-    Drained,
+    /// A drain finished, naming the newest transaction on the replica.
+    Drained(Option<Txid>),
     Halted(HaltCause),
     Crashed,
 }
@@ -337,10 +340,20 @@ impl Runner {
 
     /// Tells the model about each snapshot the tick staged: the database it was
     /// cut from is the tip as the tick began, since the app does nothing during
-    /// a tick.
-    fn note_snapshots(&mut self, tip: Option<crate::CommitId>, at: usize) {
+    /// a tick, unless the app committed inside it (`in_tick`, with the staging
+    /// event it came before): from that event on, the tip is that commit.
+    fn note_snapshots(
+        &mut self,
+        began: Option<crate::CommitId>,
+        in_tick: Option<(crate::CommitId, usize)>,
+        at: usize,
+    ) {
         let events = self.w.staging_tap.events();
-        for event in events.iter().skip(self.staging_seen) {
+        for (index, event) in events.iter().enumerate().skip(self.staging_seen) {
+            let tip = match in_tick {
+                Some((commit, from)) if index >= from => Some(commit),
+                Some(_) | None => began,
+            };
             if let crate::TapEvent::Put {
                 key,
                 header: Some(_),
@@ -435,7 +448,8 @@ impl Runner {
         let began = self.now();
         let ended = self.run_one(plan);
         self.report.ticks = self.report.ticks.saturating_add(1);
-        self.note_snapshots(tip, at);
+        let in_tick = self.took_commit_in_tick();
+        self.note_snapshots(tip, in_tick, at);
         self.note_tick(began, remote0);
         if self.trace {
             self.report.trace.push(format!("    tick: {ended:?}"));
@@ -451,7 +465,7 @@ impl Runner {
                 }
                 (Step::Halted(cause), None)
             }
-            TickEnd::Done(Tick::Drained { .. }) => (Step::Drained, None),
+            TickEnd::Done(Tick::Drained { txid }) => (Step::Drained(txid), None),
             TickEnd::Done(Tick::DeadlineReached(_)) => {
                 let cause = HaltCause::Shutdown;
                 if self.record {
@@ -527,7 +541,7 @@ impl Runner {
             Step::Halted(cause) if self.halt_expected(cause) => Ok(()),
             Step::Halted(cause) => Err(bug_fault(format!("the engine halted: {cause:?}"))),
             Step::Degraded(cause) => self.degraded_expected(cause),
-            Step::Ran | Step::Drained | Step::Crashed => Ok(()),
+            Step::Ran | Step::Drained(_) | Step::Crashed => Ok(()),
         }
     }
 
@@ -579,7 +593,7 @@ impl Runner {
         let mut degraded = false;
         for _ in 0..DRAIN_TICKS {
             match self.step(None)?.0 {
-                Step::Drained => return Ok(()),
+                Step::Drained(txid) => return self.drained(txid),
                 Step::Halted(HaltCause::Shutdown) if degraded => return Ok(()),
                 Step::Halted(HaltCause::Shutdown) => {
                     self.reboot();
@@ -604,6 +618,50 @@ impl Runner {
             u64::from(DRAIN_TICKS).saturating_add(1),
             u64::from(DRAIN_TICKS),
         )
+    }
+
+    /// A drain that says it finished names a transaction that covers every
+    /// staged level-0 file and that the replica's newest level-0 file reaches:
+    /// nothing staged was left behind.
+    fn drained(&self, txid: Option<Txid>) -> Result<(), Violation> {
+        let staged = self
+            .w
+            .newest_staged()
+            .map_err(|e| bug_fault(e.to_string()))?;
+        let staged = staged.map(|file| file.key.range().max());
+        let remote = self
+            .w
+            .remote_level_zero()
+            .map_err(|e| bug_fault(e.to_string()))?
+            .last()
+            .map(|file| file.key.range().max());
+        if staged > txid || remote != txid {
+            return Err(bug_fault(format!(
+                "a drain finished at {txid:?} with {staged:?} staged and {remote:?} on the replica"
+            )));
+        }
+        Ok(())
+    }
+
+    /// The app's commit inside the tick that just ran, if it made one: the
+    /// spilled pages went with it.
+    fn took_commit_in_tick(&mut self) -> Option<(crate::CommitId, usize)> {
+        let taken = self.w.take_commit_in_tick()?;
+        self.report.commits_in_tick = self.report.commits_in_tick.saturating_add(1);
+        self.spilled.clear();
+        let n = u64::try_from(taken.pages).unwrap_or(u64::MAX);
+        self.max_tx_pages = self.max_tx_pages.max(n);
+        Some((taken.id, taken.staged_from))
+    }
+
+    /// One tick in which the app commits `count` pages right before a
+    /// checkpoint takes its barrier, if the tick takes one.
+    fn commit_in_tick(&mut self, count: u8) -> Result<(), Violation> {
+        let size = self.w.sqlite.db_size();
+        let mut all = self.spilled.clone();
+        all.extend(self.pick_pages(u32::from(count), size));
+        self.w.arm_commit_in_tick(all, size);
+        self.tick()
     }
 
     fn page_bytes(&self, fill: u32, stamp: u64) -> Vec<u8> {
@@ -913,6 +971,7 @@ impl Runner {
     fn apply(&mut self, op: &Op) -> Result<(), Violation> {
         match op {
             Op::Commit { pages, grow } => self.commit(*pages, *grow),
+            Op::CommitInTick { pages } => self.commit_in_tick(*pages)?,
             Op::Spill => self.spill(),
             Op::Rollback => {
                 if self.w.sqlite.rollback() {
@@ -1025,7 +1084,7 @@ impl Runner {
                 "the engine halted while idle: {cause:?}"
             ))),
             Step::Degraded(cause) => self.degraded_expected(*cause).map(|()| true),
-            Step::Ran | Step::Drained | Step::Crashed => Ok(false),
+            Step::Ran | Step::Drained(_) | Step::Crashed => Ok(false),
         }
     }
 

@@ -252,6 +252,41 @@ struct State {
     faults: Faults,
     app_autocheckpoint: Option<u32>,
     app_auto: AutoTally,
+    // The app's commit armed for the next barrier, and the one it made there.
+    in_tick: Option<InTick>,
+    in_tick_done: Option<InTickCommit>,
+}
+
+/// Where the harness's logs stood: its own stamps, opaque to the rules.
+pub type Stamp = Box<dyn Fn() -> (usize, usize) + Send>;
+
+/// A commit armed by [`SimSqlite::arm_commit_in_tick`].
+struct InTick {
+    pages: Vec<(PageNo, Vec<u8>)>,
+    db_size: u32,
+    stamp: Stamp,
+}
+
+impl std::fmt::Debug for InTick {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InTick")
+            .field("pages", &self.pages.len())
+            .field("db_size", &self.db_size)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The app's commit made inside a tick, right before a checkpoint's barrier.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InTickCommit {
+    /// The pages it wrote.
+    pub pages: Vec<(PageNo, Vec<u8>)>,
+    /// The database's size in pages after it.
+    pub db_size: u32,
+    /// Where it sits in the WAL.
+    pub app: AppCommit,
+    /// The armed stamp's value at the moment of the commit.
+    pub stamp: (usize, usize),
 }
 
 fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
@@ -282,6 +317,35 @@ fn splitmix(state: &mut u64) -> u32 {
 }
 
 impl State {
+    /// The app commits `pages` leaving `db_size` pages, then runs its automatic
+    /// checkpoint (R4).
+    fn app_commit(&mut self, pages: &[(PageNo, Vec<u8>)], db_size: u32) -> Option<AppCommit> {
+        if db_size == 0 || !self.write(Conn::App, pages, Some(db_size)) {
+            return None;
+        }
+        let commit = AppCommit {
+            salts: self.index.salts,
+            end: WalOffset::from_frame_index(self.index.mx_frame, self.page_size),
+        };
+        self.autocheckpoint();
+        Some(commit)
+    }
+
+    /// Makes the armed in-tick commit, if any, and keeps what it made.
+    fn commit_in_tick(&mut self) {
+        let Some(armed) = self.in_tick.take() else {
+            return;
+        };
+        if let Some(app) = self.app_commit(&armed.pages, armed.db_size) {
+            self.in_tick_done = Some(InTickCommit {
+                pages: armed.pages,
+                db_size: armed.db_size,
+                app,
+                stamp: (armed.stamp)(),
+            });
+        }
+    }
+
     /// One of the two salts SQLite draws from `sqlite3_randomness`: the forced value when a
     /// test has named one, else the next of the seeded stream.
     fn random_salt(&mut self, second: bool) -> u32 {
@@ -786,6 +850,8 @@ impl SimSqlite {
             faults: Faults::default(),
             app_autocheckpoint: None,
             app_auto: AutoTally::default(),
+            in_tick: None,
+            in_tick_done: None,
         };
         Self {
             state: Arc::new(Mutex::new(state)),
@@ -861,16 +927,30 @@ impl SimSqlite {
     /// `db_size`. `None` when there are no pages, `db_size` is 0, or another
     /// connection holds the write lock.
     pub fn commit(&self, pages: &[(PageNo, Vec<u8>)], db_size: u32) -> Option<AppCommit> {
+        self.with(|state| state.app_commit(pages, db_size))
+    }
+
+    /// Arms a commit the app makes inside the engine's next tick: right before
+    /// a checkpoint takes its write barrier, after the tick's sync read the
+    /// committed end. `stamp` is read at that moment, so the harness can tell
+    /// what happened before the commit and what after. It replaces any armed
+    /// commit; [`SimSqlite::take_commit_in_tick`] disarms it.
+    pub fn arm_commit_in_tick(&self, pages: Vec<(PageNo, Vec<u8>)>, db_size: u32, stamp: Stamp) {
         self.with(|state| {
-            if db_size == 0 || !state.write(Conn::App, pages, Some(db_size)) {
-                return None;
-            }
-            let commit = AppCommit {
-                salts: state.index.salts,
-                end: WalOffset::from_frame_index(state.index.mx_frame, state.page_size),
-            };
-            state.autocheckpoint();
-            Some(commit)
+            state.in_tick = Some(InTick {
+                pages,
+                db_size,
+                stamp,
+            });
+        });
+    }
+
+    /// The armed commit if a barrier made it (`None` when no barrier came or
+    /// the commit was refused), and disarms it either way.
+    pub fn take_commit_in_tick(&self) -> Option<InTickCommit> {
+        self.with(|state| {
+            state.in_tick = None;
+            state.in_tick_done.take()
         })
     }
 
@@ -1415,6 +1495,9 @@ pub struct SimCheckpointer {
 impl Checkpointer for SimCheckpointer {
     fn begin_barrier(&mut self) -> Result<Barrier, SourceError> {
         let mut state = lock(&self.state);
+        // The host commits after the tick's sync read the committed end and before the
+        // barrier keeps writers out: the commit the checkpoint's seal must stage.
+        state.commit_in_tick();
         state.faults.take(SourceOp::BeginBarrier)?;
         let id = state.take_writer(Conn::Barrier)?;
         state.barrier = Some(id);

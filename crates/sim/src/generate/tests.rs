@@ -57,6 +57,7 @@ fn a_vacuum_keeps_the_page_size_when_resizes_are_off() {
 fn every_kind_of_operation_appears() {
     let ops = history(seed(3), 20_000, &Weights::default());
     let has = |f: fn(&Op) -> bool| ops.iter().any(f);
+    assert!(has(|op| matches!(op, Op::CommitInTick { .. })));
     assert!(has(|op| matches!(op, Op::Spill)));
     assert!(has(|op| matches!(op, Op::Rollback)));
     assert!(has(|op| matches!(op, Op::Vacuum { page_size: None })));

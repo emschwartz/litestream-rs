@@ -166,6 +166,18 @@ pub enum TickEnd<T> {
     },
 }
 
+/// The app's commit inside a tick, as the model recorded it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommittedInTick {
+    /// The commit.
+    pub id: CommitId,
+    /// The staging tap's length at the commit: what the tick staged from that
+    /// event on was cut after it.
+    pub staged_from: usize,
+    /// How many pages it wrote.
+    pub pages: usize,
+}
+
 /// Everything one run holds.
 #[derive(Debug)]
 pub struct World {
@@ -202,6 +214,7 @@ pub struct World {
     /// What the engine has acknowledged.
     pub acked: Acked,
     crash_entropy: SeededEntropy,
+    in_tick: Option<CommittedInTick>,
 }
 
 /// The first instant of a run's clock.
@@ -243,6 +256,7 @@ impl World {
             model: Model::new(initial),
             acked: Acked::new(),
             crash_entropy: SeededEntropy::new(seed.stream(5)),
+            in_tick: None,
         }
     }
 
@@ -264,6 +278,37 @@ impl World {
             self.model
                 .commit(&written, db_size, app, self.remote_tap.len()),
         )
+    }
+
+    /// Arms a commit of `pages`, leaving `db_size` pages, that the app makes
+    /// inside the next tick, right before a checkpoint takes its barrier. It
+    /// must not grow the database: the pages a growth re-adds are read from the
+    /// rules after the tick, when the engine may have changed them.
+    pub fn arm_commit_in_tick(&self, pages: Vec<(PageNo, Vec<u8>)>, db_size: u32) {
+        let (remote, staging) = (self.remote_tap.clone(), self.staging_tap.clone());
+        let stamp = Box::new(move || (remote.len(), staging.len()));
+        self.sqlite.arm_commit_in_tick(pages, db_size, stamp);
+    }
+
+    /// The app's commit inside the last tick, once: see [`World::arm_commit_in_tick`].
+    pub fn take_commit_in_tick(&mut self) -> Option<CommittedInTick> {
+        self.in_tick.take()
+    }
+
+    /// Records the armed commit in the model if the tick made it, and
+    /// disarms it.
+    fn record_commit_in_tick(&mut self) -> Option<CommittedInTick> {
+        let done = self.sqlite.take_commit_in_tick()?;
+        let (remote_at, staged_from) = done.stamp;
+        self.retire_generation(done.app.salts);
+        let id = self
+            .model
+            .commit(&done.pages, done.db_size, done.app, remote_at);
+        Some(CommittedInTick {
+            id,
+            staged_from,
+            pages: done.pages.len(),
+        })
     }
 
     /// A commit under new salts means the WAL restarted, which needs a finished
@@ -389,6 +434,9 @@ impl World {
         let budget = plan.map_or(Polls::UNBOUNDED, |p| p.at_poll);
         let at = self.remote_tap.len();
         let ran = run_until(fut, budget);
+        // The app's commit inside the tick came before the engine's own frames
+        // that followed it, so the model takes it up first.
+        self.in_tick = self.record_commit_in_tick();
         // Before the crash takes anything: a power loss decides which of the
         // engine's own commits survive, so the model must know them first.
         self.sync_model_at(at);

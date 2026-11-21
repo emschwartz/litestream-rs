@@ -70,6 +70,15 @@ pub enum Op {
         /// The database grows by a few pages.
         grow: bool,
     },
+    /// The actor runs one tick, and the app commits `pages` random pages
+    /// inside it: after the tick's sync read the committed end, right before a
+    /// checkpoint takes its write barrier (nothing, if the tick takes none).
+    /// The checkpoint's seal must stage that commit, and keep it staged when a
+    /// later step fails.
+    CommitInTick {
+        /// How many pages it writes; it never grows the database.
+        pages: u8,
+    },
     /// The app writes frames of a transaction and does not commit.
     Spill,
     /// The app rolls its open transaction back.
@@ -195,6 +204,8 @@ pub struct Weights {
     pub tick: u32,
     /// [`Op::Commit`].
     pub commit: u32,
+    /// [`Op::CommitInTick`].
+    pub commit_in_tick: u32,
     /// [`Op::Spill`].
     pub spill: u32,
     /// [`Op::Rollback`].
@@ -233,6 +244,7 @@ impl Default for Weights {
         Self {
             tick: 40,
             commit: 25,
+            commit_in_tick: 3,
             spill: 3,
             rollback: 2,
             vacuum: 1,
@@ -254,6 +266,7 @@ impl Default for Weights {
 enum Kind {
     Tick,
     Commit,
+    CommitInTick,
     Spill,
     Rollback,
     Vacuum,
@@ -269,10 +282,11 @@ enum Kind {
 }
 
 impl Weights {
-    fn table(&self) -> [(Kind, u32); 14] {
+    fn table(&self) -> [(Kind, u32); 15] {
         [
             (Kind::Tick, self.tick),
             (Kind::Commit, self.commit),
+            (Kind::CommitInTick, self.commit_in_tick),
             (Kind::Spill, self.spill),
             (Kind::Rollback, self.rollback),
             (Kind::Vacuum, self.vacuum),
@@ -425,6 +439,9 @@ fn draw(weights: &Weights, entropy: &SeededEntropy) -> Op {
         Kind::Commit => Op::Commit {
             pages: small(entropy, 4).saturating_add(1),
             grow: below(entropy, 6) == 0,
+        },
+        Kind::CommitInTick => Op::CommitInTick {
+            pages: small(entropy, 4).saturating_add(1),
         },
         Kind::Spill => Op::Spill,
         Kind::Rollback => Op::Rollback,
