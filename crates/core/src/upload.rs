@@ -43,7 +43,8 @@ use lsr_ltx::{Decoder, Header, Txid, TxidRange};
 use crate::fault::{BugSite, Fault};
 use crate::inventory::{Inventory, InventoryError};
 use crate::layout::{FileInfo, FileKey, Level};
-use crate::store::{ListAt, ObjectStore, PageLimit, ReadLen, StoreError, Upload};
+use crate::ltx_read::verifies;
+use crate::store::{ListAt, ObjectStore, PageLimit, ReadLen, Upload};
 
 /// How much of a staged file is read at once.
 const CHUNK: ReadLen = ReadLen::or_chunk(256 * 1024);
@@ -306,47 +307,17 @@ pub(crate) async fn remote_verifies<S: ObjectStore>(
     remote: &S,
     key: &FileKey,
 ) -> Result<bool, Fault> {
-    decodes(remote, key, Fault::from_remote).await
+    verifies(remote, key, CHUNK, Fault::from_remote).await
 }
 
 /// Whether the staged file `key` verifies whole and names exactly `key`.
 /// A missing or unusable one does not; any other store error is the fault.
 async fn staged_verifies<L: ObjectStore>(staging: &L, key: &FileKey) -> Result<bool, Fault> {
-    match decodes(staging, key, Fault::from_staging).await {
+    match verifies(staging, key, CHUNK, Fault::from_staging).await {
         Ok(verifies) => Ok(verifies),
         Err(Fault::StagedLost) => Ok(false),
         Err(fault) => Err(fault),
     }
-}
-
-/// Streams `key` through the LTX decoder and says whether it verifies whole
-/// and names exactly `key`. `store_fault` names a store error, which is never
-/// a verdict on the bytes.
-async fn decodes<S: ObjectStore>(
-    store: &S,
-    key: &FileKey,
-    store_fault: fn(&StoreError) -> Fault,
-) -> Result<bool, Fault> {
-    let len = CHUNK;
-    let mut decoder = Decoder::new();
-    let mut offset = 0_u64;
-    loop {
-        let chunk = store
-            .read(key, offset, len)
-            .await
-            .map_err(|err| store_fault(&err))?;
-        if !feed_all(&mut decoder, &chunk)? {
-            return Ok(false);
-        }
-        let read = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
-        offset = offset.saturating_add(read);
-        if read < len.get() {
-            break;
-        }
-    }
-    Ok(decoder
-        .finish()
-        .is_ok_and(|verified| verified.header().txids() == key.range()))
 }
 
 /// The staged level-0 files whose last transaction is at least `from`
