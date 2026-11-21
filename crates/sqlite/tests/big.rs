@@ -115,7 +115,9 @@ fn a_16k_page_database_past_1_gib_crosses_the_lock_page() {
     let dir = TempDir::new().unwrap();
     let mut rig = Rig::<Sqlite>::new(dir.path(), big_config(16384)).unwrap();
     grow(&mut rig, 132, 8 * MIB);
-    let pages = lsr_core::PageSource::page_count(rig.backend().unwrap()).unwrap();
+    let pages = lsr_core::PageSource::page_count(rig.backend().unwrap())
+        .unwrap()
+        .get();
     let lock_page = u32::try_from(GIB / 16384 + 1).unwrap();
     assert!(pages > lock_page + 100, "{pages} pages");
     restore_matches(rig, dir.path());
@@ -134,7 +136,9 @@ fn a_database_past_4_gib_replicates_and_restores() {
     }
     let mut rig = Rig::<Sqlite>::new(dir.path(), big_config(4096)).unwrap();
     grow(&mut rig, 66, 64 * MIB);
-    let pages = lsr_core::PageSource::page_count(rig.backend().unwrap()).unwrap();
+    let pages = lsr_core::PageSource::page_count(rig.backend().unwrap())
+        .unwrap()
+        .get();
     assert!(u64::from(pages) * 4096 > 4 * GIB, "{pages} pages");
     restore_matches(rig, dir.path());
 }

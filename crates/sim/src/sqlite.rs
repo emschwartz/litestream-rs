@@ -63,7 +63,7 @@ use lsr_core::{
     Barrier, CheckpointMode, CheckpointRun, Checkpointer, CommittedRead, PageSource, ReadEpoch,
     SourceError, SourceOp, WalFileLen, WalSource, WriteLock,
 };
-use lsr_ltx::{PageNo, PageSize};
+use lsr_ltx::{DbPages, PageNo, PageSize};
 use lsr_wal::testing::{WalBuilder, page};
 use lsr_wal::{
     ByteOrder, CommittedEnd, FRAME_HEADER_LEN, HEADER_LEN, Salts, ScanLimit, TxOutcome,
@@ -1463,13 +1463,13 @@ pub struct SimPages {
 }
 
 impl PageSource for SimPages {
-    fn page_count(&mut self) -> Result<u32, SourceError> {
+    fn page_count(&mut self) -> Result<DbPages, SourceError> {
         let mut state = lock(&self.state);
         state.faults.take(SourceOp::PageCount)?;
         if std::mem::take(&mut state.faults.empty_db) {
-            return Ok(0);
+            return Ok(DbPages::EMPTY);
         }
-        Ok(state.db_pages())
+        Ok(DbPages::new(state.db_pages()))
     }
 
     fn read_page(&mut self, pgno: PageNo, buf: &mut [u8]) -> Result<(), SourceError> {

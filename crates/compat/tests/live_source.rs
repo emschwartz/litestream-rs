@@ -481,7 +481,7 @@ fn page_reads_come_from_the_database_file() {
     rig.live
         .checkpoint(CheckpointMode::Passive)
         .expect("passive");
-    let pages = rig.live.page_count().expect("count");
+    let pages = rig.live.page_count().expect("count").get();
     assert!(pages >= 2, "{pages}");
     let size = PageSize::new(4096).expect("size");
     let mut buf = vec![0; 4096];

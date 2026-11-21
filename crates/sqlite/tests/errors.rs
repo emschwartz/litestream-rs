@@ -159,7 +159,7 @@ fn a_page_past_the_end_is_short_and_a_wrong_buffer_is_invalid_input() {
     let mut live = Sqlite::open(&path).unwrap();
     live.checkpoint(CheckpointMode::Passive).unwrap();
     let size = PageSize::new(4096).unwrap();
-    let pages = live.page_count().unwrap();
+    let pages = live.page_count().unwrap().get();
     let beyond = PageNo::new(pages + 1, size).unwrap();
     let mut buf = vec![0; 4096];
     assert_eq!(

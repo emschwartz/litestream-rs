@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::num::NonZeroU32;
 
-use lsr_ltx::{Event, Header, PageNo, PageSize, ReadDecoder, Timestamp, Txid, TxidRange};
+use lsr_ltx::{DbPages, Event, Header, PageNo, PageSize, ReadDecoder, Timestamp, Txid, TxidRange};
 use lsr_wal::Salts;
 use proptest::prelude::*;
 
@@ -235,7 +235,7 @@ struct Racing {
 }
 
 impl PageSource for Racing {
-    fn page_count(&mut self) -> Result<u32, SourceError> {
+    fn page_count(&mut self) -> Result<DbPages, SourceError> {
         self.inner.page_count()
     }
 

@@ -5,7 +5,8 @@ use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::PoisonError;
 
 use lsr_ltx::{
-    Event, Header, PageNo, PageSize, ReadDecoder, Timestamp, Txid, TxidRange, WalOrigin, lock_page,
+    DbPages, Event, Header, PageNo, PageSize, ReadDecoder, Timestamp, Txid, TxidRange, WalOrigin,
+    lock_page,
 };
 use lsr_wal::{CommittedEnd, PageMap, Salts, ScanLimit, TxOutcome, WalReader};
 use proptest::prelude::*;
@@ -1000,8 +1001,9 @@ struct BytesDb {
 }
 
 impl PageSource for BytesDb {
-    fn page_count(&mut self) -> Result<u32, SourceError> {
+    fn page_count(&mut self) -> Result<DbPages, SourceError> {
         u32::try_from(self.bytes.len().div_ceil(self.page_size.bytes()))
+            .map(DbPages::new)
             .map_err(|_err| SourceError::Io(io::ErrorKind::InvalidData))
     }
 

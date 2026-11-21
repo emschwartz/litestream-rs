@@ -25,7 +25,7 @@ use std::io::Cursor;
 use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use lsr_ltx::{PageNo, PageSize};
+use lsr_ltx::{DbPages, PageNo, PageSize};
 use lsr_wal::{
     ByteOrder, CommittedEnd, FRAME_HEADER_LEN, HEADER_LEN, Salts, WalChecksum, WalOffset,
 };
@@ -671,9 +671,9 @@ impl FakeDb {
 }
 
 impl PageSource for FakeDb {
-    fn page_count(&mut self) -> Result<u32, SourceError> {
+    fn page_count(&mut self) -> Result<DbPages, SourceError> {
         self.injections.take(SourceOp::PageCount)?;
-        Ok(self.count)
+        Ok(DbPages::new(self.count))
     }
 
     fn read_page(&mut self, pgno: PageNo, buf: &mut [u8]) -> Result<(), SourceError> {

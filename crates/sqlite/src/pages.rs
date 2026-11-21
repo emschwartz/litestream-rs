@@ -16,7 +16,7 @@ use std::mem::offset_of;
 use std::ptr::{self, NonNull};
 
 use lsr_core::{PageSource, SourceError};
-use lsr_ltx::PageNo;
+use lsr_ltx::{DbPages, PageNo};
 use rusqlite::{Connection, ffi};
 
 use crate::Sqlite;
@@ -165,14 +165,16 @@ fn page_offset(pgno: PageNo, page_size: u32) -> Option<u64> {
 }
 
 impl PageSource for Sqlite {
-    fn page_count(&mut self) -> Result<u32, SourceError> {
+    fn page_count(&mut self) -> Result<DbPages, SourceError> {
         let mut inner = self.lock();
         inner.ensure_pinned()?;
         let len = inner.file().size().map_err(rc_error)?;
         let pages = len
             .checked_div(u64::from(inner.page_size().get()))
             .unwrap_or(0);
-        u32::try_from(pages).map_err(|_big| SourceError::Io(io::ErrorKind::InvalidData))
+        u32::try_from(pages)
+            .map(DbPages::new)
+            .map_err(|_big| SourceError::Io(io::ErrorKind::InvalidData))
     }
 
     fn read_page(&mut self, pgno: PageNo, buf: &mut [u8]) -> Result<(), SourceError> {

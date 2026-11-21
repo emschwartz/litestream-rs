@@ -134,7 +134,7 @@ proptest! {
         let len = db.wal_file().map(|wal| WalFileLen::new(u64::try_from(wal.len()).unwrap()));
         prop_assert_eq!(source.len().unwrap(), len);
         let mut pages = db.pages();
-        let count = pages.page_count().unwrap();
+        let count = pages.page_count().unwrap().get();
         prop_assert_eq!(u64::from(count).saturating_mul(u64::from(PS)), u64::try_from(db.db_file().len()).unwrap());
         let mut buf = vec![0; 512];
         let beyond = pgno(count.saturating_add(1));
@@ -208,7 +208,7 @@ fn spill_rollback_and_total_methods() {
     assert_eq!(db.shrink(4), None);
     db.shrink(2).unwrap();
     db.stranger_checkpoint(StrangerMode::Passive).unwrap();
-    assert_eq!(db.pages().page_count(), Ok(2));
+    assert_eq!(db.pages().page_count(), Ok(lsr_ltx::DbPages::new(2)));
 }
 
 #[test]

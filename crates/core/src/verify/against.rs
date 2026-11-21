@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 
-use lsr_ltx::{PageChecksum, PageSize, Txid};
+use lsr_ltx::{PageChecksum, PageNo, PageSize, Txid};
 
 use super::dry_run::digest_restore;
 use super::{Findings, Report, VerifyError, name_findings, report};
@@ -31,7 +31,7 @@ pub struct LivePages {
     txid: Txid,
     page_size: PageSize,
     commit: NonZeroU32,
-    pages: BTreeMap<u32, PageChecksum>,
+    pages: BTreeMap<PageNo, PageChecksum>,
 }
 
 impl LivePages {
@@ -39,7 +39,7 @@ impl LivePages {
         txid: Txid,
         page_size: PageSize,
         commit: NonZeroU32,
-        pages: BTreeMap<u32, PageChecksum>,
+        pages: BTreeMap<PageNo, PageChecksum>,
     ) -> Self {
         Self {
             txid,
@@ -186,8 +186,14 @@ const fn inside_file(outcome: &PlanOutcome) -> bool {
 }
 
 fn compare(live: &LivePages, restored: &BTreeMap<u32, PageChecksum>, commit: u32) -> Compared {
-    let differ = |n: &u32| live.pages.get(n) != restored.get(n);
-    let mut keys: Vec<u32> = live.pages.keys().chain(restored.keys()).copied().collect();
+    let live_page = |n: u32| PageNo::new(n, live.page_size).and_then(|pgno| live.pages.get(&pgno));
+    let differ = |n: &u32| live_page(*n) != restored.get(n);
+    let mut keys: Vec<u32> = live
+        .pages
+        .keys()
+        .map(|pgno| pgno.get())
+        .chain(restored.keys().copied())
+        .collect();
     keys.sort_unstable();
     keys.dedup();
     let differing: Vec<u32> = keys.into_iter().filter(differ).collect();

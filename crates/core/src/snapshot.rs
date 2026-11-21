@@ -202,7 +202,7 @@ pub(crate) fn read_live<W: WalSource, P: PageSource>(
                 PageChecksum::of(*pgno, &buf)
             }
         };
-        digests.insert(page.pgno().get(), digest);
+        digests.insert(page.pgno(), digest);
     }
     Ok(LivePages::new(
         proof.position().txid(),

@@ -1,6 +1,6 @@
 use std::num::NonZeroU32;
 
-use lsr_ltx::{PageNo, PageSize};
+use lsr_ltx::{DbPages, PageNo, PageSize};
 use lsr_wal::{Salts, ScanLimit, TxOutcome, WalReader};
 
 use super::*;
@@ -263,7 +263,7 @@ fn a_committed_read_never_backfills_past_its_frames() {
 fn the_fake_db_reads_pages_and_reports_short_ones() {
     let mut db = FakeDb::new(ps());
     db.write_page(pg(3), &[7; 512]);
-    assert_eq!(db.page_count().unwrap(), 3);
+    assert_eq!(db.page_count().unwrap(), DbPages::new(3));
     let mut buf = vec![0; 512];
     db.read_page(pg(3), &mut buf).unwrap();
     assert_eq!(buf, vec![7; 512]);
@@ -276,5 +276,5 @@ fn the_fake_db_reads_pages_and_reports_short_ones() {
     db.inject(SourceOp::PageCount, SourceError::DiskFull);
     assert_eq!(db.page_count().unwrap_err(), SourceError::DiskFull);
     db.set_page_count(1);
-    assert_eq!(db.page_count().unwrap(), 1);
+    assert_eq!(db.page_count().unwrap(), DbPages::new(1));
 }

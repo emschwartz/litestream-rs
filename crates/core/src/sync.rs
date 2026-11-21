@@ -672,7 +672,7 @@ fn record(pages: &mut PageTable, plan: &[PageFrom], commit: NonZeroU32) {
 fn commit_of<P: PageSource>(map: &PageMap, db: &mut P) -> Result<NonZeroU32, Fault> {
     match map.commit() {
         Some(commit) => Ok(commit),
-        None => NonZeroU32::new(db.page_count().map_err(Fault::from_source)?)
+        None => NonZeroU32::new(db.page_count().map_err(Fault::from_source)?.get())
             .ok_or(Fault::NothingToSnapshot),
     }
 }

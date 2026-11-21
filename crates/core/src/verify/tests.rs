@@ -1071,7 +1071,7 @@ mod against {
             .iter()
             .map(|(pgno, seed)| {
                 let page = PageNo::new(*pgno, ps).unwrap();
-                (*pgno, PageChecksum::of(page, &page_of(ps, *seed)))
+                (page, PageChecksum::of(page, &page_of(ps, *seed)))
             })
             .collect();
         let commit = NonZeroU32::new(u32::try_from(state.len()).unwrap()).unwrap();

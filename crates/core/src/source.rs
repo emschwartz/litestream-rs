@@ -12,7 +12,7 @@
 
 use std::io::{self, Read, Seek};
 
-use lsr_ltx::PageNo;
+use lsr_ltx::{DbPages, PageNo};
 use lsr_wal::{CommittedEnd, Salts};
 use thiserror::Error;
 
@@ -169,7 +169,7 @@ pub trait PageSource {
     ///
     /// # Errors
     /// [`SourceError`] when the stat fails.
-    fn page_count(&mut self) -> Result<u32, SourceError>;
+    fn page_count(&mut self) -> Result<DbPages, SourceError>;
 
     /// Reads one page into `buf`, which is exactly one page long.
     ///
