@@ -4,7 +4,7 @@
 use std::fs;
 use std::io::Cursor;
 
-use lsr_ltx::{Checksum, Encoder, Event, INDEX_TAIL_LEN, PageIndex, ReadDecoder, decode_frame};
+use lsr_ltx::{DbChecksum, Encoder, Event, INDEX_TAIL_LEN, PageIndex, ReadDecoder, decode_frame};
 
 use crate::common::{Decoded, decode, decode_chunked, expect, fixtures, sha256_hex};
 
@@ -29,7 +29,7 @@ fn check_against_sidecar(name: &str, decoded: &Decoded) {
             "timestamp",
             u64::try_from(f.timestamp.unix_millis()).unwrap(),
         ),
-        ("pre_apply", f.pre_apply.map_or(0, Checksum::get)),
+        ("pre_apply", f.pre_apply.map_or(0, DbChecksum::get)),
         ("wal_offset", wal.0),
         ("wal_size", wal.1),
         ("wal_salt1", wal.2),
@@ -41,7 +41,7 @@ fn check_against_sidecar(name: &str, decoded: &Decoded) {
                 .verified
                 .trailer()
                 .post_apply()
-                .map_or(0, Checksum::get),
+                .map_or(0, DbChecksum::get),
         ),
         (
             "file_checksum",
@@ -116,7 +116,8 @@ fn read_decoder_matches_the_push_decoder() {
         let mut reader = ReadDecoder::new(Cursor::new(&bytes));
         let mut pages = Vec::new();
         while let Some(event) = reader.next_event().unwrap() {
-            if let Event::Page { pgno, data } = event {
+            if let Event::Page(page) = event {
+                let (pgno, data) = (page.pgno(), page.data());
                 pages.push((pgno.get(), data.to_vec()));
             }
         }

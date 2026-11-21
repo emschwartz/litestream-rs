@@ -233,7 +233,8 @@ mod matrix {
             let mut decoder = ReadDecoder::new(fs::File::open(path).expect("open"));
             let mut pages = Vec::new();
             while let Some(event) = decoder.next_event().expect("decode") {
-                if let lsr_ltx::Event::Page { pgno, data } = event {
+                if let lsr_ltx::Event::Page(page) = event {
+                    let (pgno, data) = (page.pgno(), page.data());
                     pages.push((pgno, data.to_vec()));
                 }
             }

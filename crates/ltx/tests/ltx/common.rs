@@ -30,7 +30,7 @@ pub fn decode_chunked(bytes: &[u8], chunks: &[usize]) -> Result<Decoded, DecodeE
             let (used, event) = decoder.feed(chunk)?;
             match event {
                 Some(Event::Header(h)) => header = Some(h),
-                Some(Event::Page { pgno, data }) => pages.push((pgno.get(), data.to_vec())),
+                Some(Event::Page(page)) => pages.push((page.pgno().get(), page.data().to_vec())),
                 None if used == chunk.len() => {}
                 None => return Err(DecodeError::Poisoned), // unreachable: no event means all input was used
             }

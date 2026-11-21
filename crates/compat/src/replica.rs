@@ -173,7 +173,7 @@ pub fn summarize(path: &Path) -> Result<Option<Summary>, CompatError> {
     while let Some(event) = decoder.next_event().map_err(bad)? {
         match event {
             Event::Header(h) => header = Some(h),
-            Event::Page { .. } => pages = pages.saturating_add(1),
+            Event::Page(_) => pages = pages.saturating_add(1),
         }
     }
     decoder.finish().map_err(bad)?;

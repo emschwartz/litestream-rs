@@ -80,7 +80,8 @@ fn reencode_file(old: &[u8]) -> Result<Vec<u8>, String> {
                 encoder =
                     Some(Encoder::new(Vec::new(), header).map_err(|e| format!("encode: {e}"))?);
             }
-            Event::Page { pgno, data } => {
+            Event::Page(page) => {
+                let (pgno, data) = (page.pgno(), page.data());
                 let enc = encoder.as_mut().ok_or("a page before the header")?;
                 enc.write_page(pgno, data)
                     .map_err(|e| format!("encode: {e}"))?;

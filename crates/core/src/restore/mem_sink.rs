@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use lsr_ltx::{Checksum, PageNo, PageSize};
+use lsr_ltx::{DbChecksum, DbPages, PageChecksum, PageNo, PageRef, PageSize};
 
 use super::{DatabaseSink, SinkOp};
 
@@ -124,18 +124,12 @@ impl MemSink {
     }
 }
 
-fn page_size_of(data: &[u8]) -> io::Result<PageSize> {
-    u32::try_from(data.len())
-        .ok()
-        .and_then(PageSize::new)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "not a page size"))
-}
-
 impl DatabaseSink for MemSink {
-    fn write_page(&mut self, pgno: PageNo, data: &[u8]) -> io::Result<()> {
+    fn write_page(&mut self, page: PageRef<'_>) -> io::Result<()> {
+        let (pgno, data) = (page.pgno(), page.data());
         let mut state = self.lock();
         state.enter(SinkOp::WritePage)?;
-        state.set_page_size(page_size_of(data)?)?;
+        state.set_page_size(page.size())?;
         state.page_count = state.page_count.max(pgno.get());
         if state.zeros.len() != data.len() {
             state.zeros = vec![0; data.len()];
@@ -148,7 +142,8 @@ impl DatabaseSink for MemSink {
         Ok(())
     }
 
-    fn truncate(&mut self, pages: u32, page_size: PageSize) -> io::Result<()> {
+    fn truncate(&mut self, pages: DbPages, page_size: PageSize) -> io::Result<()> {
+        let pages = pages.get();
         let mut state = self.lock();
         state.enter(SinkOp::Truncate)?;
         state.set_page_size(page_size)?;
@@ -166,18 +161,18 @@ impl DatabaseSink for MemSink {
         Ok(())
     }
 
-    fn checksum(&mut self, pages: u32, page_size: PageSize) -> io::Result<Checksum> {
+    fn checksum(&mut self, pages: DbPages, page_size: PageSize) -> io::Result<DbChecksum> {
         let mut state = self.lock();
         state.enter(SinkOp::Checksum)?;
         let zero_page = vec![0; page_size.bytes()];
-        let mut total = Checksum::EMPTY;
-        for n in 1..=pages {
+        let mut total = DbChecksum::EMPTY;
+        for n in 1..=pages.get() {
             // The lock page is the one number PageNo refuses.
             let Some(pgno) = PageNo::new(n, page_size) else {
                 continue;
             };
             let data = state.pages.get(&n).unwrap_or(&zero_page);
-            total = total.toggle(Checksum::of_page(pgno, data));
+            total = total.toggle(PageChecksum::of(pgno, data));
         }
         Ok(total)
     }

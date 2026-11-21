@@ -2,7 +2,7 @@
 //! unpinned: see docs/mutants.md.
 
 use lsr_ltx::{
-    Checksum, Decoder, Event, Header, HeaderFields, IndexError, PageIndex, PageSize, TRAILER_LEN,
+    DbChecksum, Decoder, Event, Header, HeaderFields, IndexError, PageIndex, PageSize, TRAILER_LEN,
     Timestamp, Trailer, Txid, TxidRange,
 };
 
@@ -63,7 +63,7 @@ fn trailer_encodes_post_apply_then_file_checksum_big_endian() {
     let tracked = Trailer::decode(&bytes, &header(true)).unwrap();
     assert_eq!(
         tracked.post_apply(),
-        Checksum::from_raw(flag | 0x1122_3344_5566_7788)
+        DbChecksum::from_raw(flag | 0x1122_3344_5566_7788)
     );
     assert_eq!(tracked.encode(), bytes);
 }

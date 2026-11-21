@@ -40,7 +40,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use lsr_core::DatabaseSink;
-use lsr_ltx::{Checksum, PageNo, PageSize};
+use lsr_ltx::{DbChecksum, DbPages, PageChecksum, PageNo, PageRef, PageSize};
 use thiserror::Error;
 
 pub mod integrity;
@@ -276,39 +276,30 @@ fn sync_dir(target: &Path) -> io::Result<()> {
     File::open(dir)?.sync_all()
 }
 
-fn page_offset(pgno: PageNo, page_len: usize) -> io::Result<u64> {
-    let len = u64::try_from(page_len).map_err(io::Error::other)?;
-    u64::from(pgno.get().saturating_sub(1))
-        .checked_mul(len)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "page offset overflows"))
-}
-
 impl DatabaseSink for FileSink {
-    fn write_page(&mut self, pgno: PageNo, data: &[u8]) -> io::Result<()> {
-        self.file
-            .seek(SeekFrom::Start(page_offset(pgno, data.len())?))?;
-        self.file.write_all(data)
+    fn write_page(&mut self, page: PageRef<'_>) -> io::Result<()> {
+        self.file.seek(SeekFrom::Start(page.offset()))?;
+        self.file.write_all(page.data())
     }
 
-    fn truncate(&mut self, pages: u32, page_size: PageSize) -> io::Result<()> {
-        self.file
-            .set_len(u64::from(pages).saturating_mul(u64::from(page_size.get())))
+    fn truncate(&mut self, pages: DbPages, page_size: PageSize) -> io::Result<()> {
+        self.file.set_len(pages.bytes(page_size))
     }
 
     fn reset(&mut self) -> io::Result<()> {
         self.file.set_len(0)
     }
 
-    fn checksum(&mut self, pages: u32, page_size: PageSize) -> io::Result<Checksum> {
+    fn checksum(&mut self, pages: DbPages, page_size: PageSize) -> io::Result<DbChecksum> {
         self.file.seek(SeekFrom::Start(0))?;
         let mut page = vec![0_u8; page_size.bytes()];
-        let mut total = Checksum::EMPTY;
-        for n in 1..=pages {
+        let mut total = DbChecksum::EMPTY;
+        for n in 1..=pages.get() {
             self.file.read_exact(&mut page)?;
             // The lock page is the one number PageNo refuses; its bytes are
             // read past and not counted.
             if let Some(pgno) = PageNo::new(n, page_size) {
-                total = total.toggle(Checksum::of_page(pgno, &page));
+                total = total.toggle(PageChecksum::of(pgno, &page));
             }
         }
         Ok(total)
@@ -357,6 +348,25 @@ mod tests {
         PageNo::new(n, ps(512)).unwrap()
     }
 
+    fn page(n: u32, data: &[u8]) -> PageRef<'_> {
+        PageRef::new(pgno(n), ps(512), data).unwrap()
+    }
+
+    #[test]
+    fn a_page_lands_where_its_page_size_puts_it() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("db");
+        let mut sink = FileSink::create(&target).unwrap();
+        let size = ps(1024);
+        let data = [5; 1024];
+        let second = PageRef::new(PageNo::new(2, size).unwrap(), size, &data).unwrap();
+        sink.write_page(second).unwrap();
+        sink.publish().unwrap();
+        let mut want = vec![0; 1024];
+        want.extend([5; 1024]);
+        assert_eq!(fs::read(&target).unwrap(), want);
+    }
+
     fn names(dir: &TempDir) -> BTreeSet<String> {
         fs::read_dir(dir.path())
             .unwrap()
@@ -400,7 +410,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let target = dir.path().join("db");
         let mut first = FileSink::create(&target).unwrap();
-        first.write_page(pgno(1), &[1; 512]).unwrap();
+        first.write_page(page(1, &[1; 512])).unwrap();
         assert!(matches!(
             FileSink::create(&target),
             Err(CreateError::RestoreInProgress(path)) if path == dir.path().join("db.restore")
@@ -419,7 +429,7 @@ mod tests {
         fs::write(dir.path().join("db.restore"), vec![9; 4096]).unwrap();
         let mut sink = FileSink::create(&target).unwrap();
         assert_eq!(fs::metadata(sink.scratch_path()).unwrap().len(), 0);
-        sink.write_page(pgno(1), &[1; 512]).unwrap();
+        sink.write_page(page(1, &[1; 512])).unwrap();
         sink.publish().unwrap();
         assert_eq!(fs::read(&target).unwrap(), vec![1; 512]);
         assert_eq!(names(&dir), BTreeSet::from(["db".to_owned()]));
@@ -429,7 +439,7 @@ mod tests {
     fn the_scratch_is_removed_on_drop_unless_published() {
         let dir = TempDir::new().unwrap();
         let mut sink = FileSink::create(&dir.path().join("db")).unwrap();
-        sink.write_page(pgno(1), &[1; 512]).unwrap();
+        sink.write_page(page(1, &[1; 512])).unwrap();
         assert_eq!(names(&dir).len(), 1);
         drop(sink);
         assert!(names(&dir).is_empty());
@@ -440,9 +450,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let target = dir.path().join("db");
         let mut sink = FileSink::create(&target).unwrap();
-        sink.write_page(pgno(3), &[3; 512]).unwrap();
-        sink.write_page(pgno(1), &[1; 512]).unwrap();
-        sink.truncate(4, ps(512)).unwrap();
+        sink.write_page(page(3, &[3; 512])).unwrap();
+        sink.write_page(page(1, &[1; 512])).unwrap();
+        sink.truncate(DbPages::new(4), ps(512)).unwrap();
         sink.publish().unwrap();
         let mut want = [1_u8; 512].to_vec();
         want.extend([0; 512]);
@@ -457,9 +467,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let target = dir.path().join("db");
         let mut sink = FileSink::create(&target).unwrap();
-        sink.write_page(pgno(2), &[9; 512]).unwrap();
-        sink.truncate(1, ps(512)).unwrap();
-        sink.truncate(2, ps(512)).unwrap();
+        sink.write_page(page(2, &[9; 512])).unwrap();
+        sink.truncate(DbPages::new(1), ps(512)).unwrap();
+        sink.truncate(DbPages::new(2), ps(512)).unwrap();
         sink.publish().unwrap();
         assert_eq!(fs::read(&target).unwrap(), vec![0; 1024]);
     }
@@ -468,13 +478,13 @@ mod tests {
     fn checksum_reads_back_what_the_file_holds() {
         let dir = TempDir::new().unwrap();
         let mut sink = FileSink::create(&dir.path().join("db")).unwrap();
-        sink.write_page(pgno(3), &[3; 512]).unwrap();
-        sink.truncate(4, ps(512)).unwrap();
-        let mut want = Checksum::EMPTY;
+        sink.write_page(page(3, &[3; 512])).unwrap();
+        sink.truncate(DbPages::new(4), ps(512)).unwrap();
+        let mut want = DbChecksum::EMPTY;
         for (n, seed) in [(1, 0_u8), (2, 0), (3, 3), (4, 0)] {
-            want = want.toggle(Checksum::of_page(pgno(n), &[seed; 512]));
+            want = want.toggle(PageChecksum::of(pgno(n), &[seed; 512]));
         }
-        assert_eq!(sink.checksum(4, ps(512)).unwrap(), want);
+        assert_eq!(sink.checksum(DbPages::new(4), ps(512)).unwrap(), want);
     }
 
     #[test]
@@ -482,9 +492,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let target = dir.path().join("db");
         let mut sink = FileSink::create(&target).unwrap();
-        sink.write_page(pgno(1), &[1; 512]).unwrap();
+        sink.write_page(page(1, &[1; 512])).unwrap();
         sink.reset().unwrap();
-        sink.write_page(pgno(1), &[2; 512]).unwrap();
+        sink.write_page(page(1, &[2; 512])).unwrap();
         sink.publish().unwrap();
         assert_eq!(fs::read(&target).unwrap(), vec![2; 512]);
     }
@@ -571,7 +581,7 @@ mod tests {
         ));
         clear_sidecars(&target).unwrap();
         let mut sink = FileSink::create(&target).unwrap();
-        sink.write_page(pgno(1), &[1; 512]).unwrap();
+        sink.write_page(page(1, &[1; 512])).unwrap();
         sink.publish().unwrap();
         assert_eq!(fs::read(&target).unwrap(), vec![1; 512]);
         assert_eq!(names(&dir), BTreeSet::from(["db".to_owned()]));
@@ -585,7 +595,7 @@ mod tests {
             let dir = TempDir::new().unwrap();
             let target = dir.path().join("db");
             let mut sink = FileSink::create(&target).unwrap();
-            sink.write_page(pgno(1), &[1; 512]).unwrap();
+            sink.write_page(page(1, &[1; 512])).unwrap();
             let sidecar = dir.path().join(format!("db{suffix}"));
             fs::write(&sidecar, b"theirs").unwrap();
             let err = sink.publish().unwrap_err();
@@ -601,7 +611,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let target = dir.path().join("db");
         let mut sink = FileSink::create(&target).unwrap();
-        sink.write_page(pgno(1), &[1; 512]).unwrap();
+        sink.write_page(page(1, &[1; 512])).unwrap();
         fs::write(&target, b"someone else's").unwrap();
         fs::write(dir.path().join("db-wal"), b"their wal").unwrap();
         let err = sink.publish().unwrap_err();
@@ -659,7 +669,7 @@ mod tests {
         let store = replica(&snapshot_bytes(3, 7));
         let sink = FileSink::create(&target).unwrap();
         let restored = block_on(restore(&store, RestoreTarget::Latest, sink)).unwrap();
-        assert_eq!(restored.commit(), 3);
+        assert_eq!(restored.commit(), DbPages::new(3));
         assert_eq!(fs::read(&target).unwrap(), vec![7; 1536]);
         assert_eq!(names(&dir), BTreeSet::from(["db".to_owned()]));
     }
@@ -848,10 +858,10 @@ mod tests {
         let mut sink = FileSink::create(&target)
             .unwrap()
             .with_integrity_check(IntegrityCheck::Full);
-        for (n, page) in (1..).zip(db.as_chunks::<512>().0) {
-            sink.write_page(pgno(n), page).unwrap();
+        for (n, bytes) in (1..).zip(db.as_chunks::<512>().0) {
+            sink.write_page(page(n, bytes)).unwrap();
         }
-        sink.write_page(pgno(2), &[0xDE; 512]).unwrap();
+        sink.write_page(page(2, &[0xDE; 512])).unwrap();
         let err = sink.publish().unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(IntegrityFailure::in_io(&err).is_some(), "{err}");

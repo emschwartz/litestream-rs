@@ -39,7 +39,7 @@ use std::io::{Read, Seek};
 use std::num::NonZeroU32;
 
 use lsr_ltx::{
-    Checksum, Decoder, Event, HEADER_LEN, Header, PageNo, PageSize, Timestamp, Txid, WalOrigin,
+    Event, HEADER_LEN, Header, PageChecksum, PageNo, PageSize, Timestamp, Txid, WalOrigin,
 };
 use lsr_wal::{
     FrameCursor, FrameRef, PageMap, ResumeError, Salts, ScanLimit, TxOutcome, WalError, WalHeader,
@@ -48,6 +48,7 @@ use lsr_wal::{
 
 use crate::fault::{Fault, HaltCause, SnapshotCause};
 use crate::layout::{FileInfo, FileKey, Level};
+use crate::ltx_read::{LtxRead, ReadFault};
 use crate::position::{Continuity, LastPage, Position, ReadEpoch, WalFileLen};
 use crate::source::CommittedRead;
 use crate::store::{ObjectStore, PageLimit, ReadLen, StoreError};
@@ -286,7 +287,7 @@ struct TipFile<'a, S> {
 
 /// What a decode of the tip saw of the pages it was asked about.
 struct TipPages {
-    wanted: Option<Checksum>,
+    wanted: Option<PageChecksum>,
     last: Option<LastPage>,
     /// Every page the WAL holds in the tip's range is in the tip with the same bytes.
     /// The tip may hold more: pages the database file supplied (walgrowth, a snapshot's).
@@ -298,7 +299,7 @@ enum Range {
     /// The newest version of each page, and the commit size of the range's last
     /// transaction (0 for an empty range).
     Pages {
-        pages: BTreeMap<PageNo, Checksum>,
+        pages: BTreeMap<PageNo, PageChecksum>,
         commit: u32,
     },
     /// The range does not start or end on a transaction boundary of this WAL.
@@ -456,9 +457,9 @@ pub(crate) async fn read_header<S: ObjectStore>(
 /// [`TIP_READ`] bytes takes one read, or none when `first` holds it.
 async fn scan_pages<S: ObjectStore>(
     file: &TipFile<'_, S>,
-    mut first: Option<Vec<u8>>,
+    first: Option<Vec<u8>>,
     wanted: Option<PageNo>,
-    expected: &BTreeMap<PageNo, Checksum>,
+    expected: &BTreeMap<PageNo, PageChecksum>,
 ) -> Result<Option<TipPages>, Fault> {
     let Some(chunk) = ReadLen::new(TIP_READ) else {
         return Err(Fault::Bug);
@@ -469,26 +470,14 @@ async fn scan_pages<S: ObjectStore>(
         holds_wal_pages: false,
     };
     let (mut matching, mut differing) = (0_usize, false);
-    let mut decoder = Decoder::new();
-    let mut offset = 0u64;
-    loop {
-        let bytes = match first.take() {
-            Some(bytes) => bytes,
-            None => file
-                .store
-                .read(&file.key, offset, chunk)
-                .await
-                .map_err(|err| (file.fault)(&err))?,
-        };
-        let read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        offset = offset.saturating_add(read);
-        let mut input = bytes.as_slice();
-        while !input.is_empty() {
-            let Ok((used, event)) = decoder.feed(input) else {
-                return Ok(None);
-            };
-            if let Some(Event::Page { pgno, data }) = event {
-                let digest = Checksum::of_page(pgno, data);
+    let mut read = match first {
+        Some(bytes) => LtxRead::with_first(file.key, chunk, bytes),
+        None => LtxRead::new(file.key, chunk),
+    };
+    let verified: Result<_, ReadFault> = read
+        .read_verified(file.store, |event| {
+            if let Event::Page(page) = event {
+                let (pgno, digest) = (page.pgno(), page.checksum());
                 seen.last = Some(LastPage::new(pgno, digest));
                 if wanted == Some(pgno) {
                     seen.wanted = Some(digest);
@@ -499,14 +488,18 @@ async fn scan_pages<S: ObjectStore>(
                     None => {}
                 }
             }
-            input = input.get(used..).unwrap_or_default();
+            Ok(())
+        })
+        .await;
+    match verified {
+        Ok(_) => {
+            seen.holds_wal_pages = !differing && matching == expected.len();
+            Ok(Some(seen))
         }
-        if read < chunk.get() {
-            break;
-        }
+        Err(ReadFault::Store(err)) => Err((file.fault)(&err)),
+        Err(ReadFault::Decode(_)) => Ok(None),
+        Err(ReadFault::Rejected(never)) => match never {},
     }
-    seen.holds_wal_pages = !differing && matching == expected.len();
-    Ok(decoder.finish().ok().map(|_| seen))
 }
 
 /// What a step knows of the WAL before it recovers: one read of the WAL header

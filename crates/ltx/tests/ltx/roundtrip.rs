@@ -2,8 +2,8 @@
 //! however the input is chunked.
 
 use lsr_ltx::{
-    Checksum, Encoder, Header, HeaderFields, PageNo, PageSize, Timestamp, Txid, TxidRange,
-    WalOrigin,
+    DbChecksum, Encoder, Header, HeaderFields, PageChecksum, PageNo, PageSize, Timestamp, Txid,
+    TxidRange, WalOrigin,
 };
 use proptest::prelude::*;
 
@@ -13,7 +13,7 @@ use crate::common::{decode, decode_chunked};
 struct Case {
     header: Header,
     pages: Vec<(u32, Vec<u8>)>,
-    post: Option<Checksum>,
+    post: Option<DbChecksum>,
     chunks: Vec<usize>,
 }
 
@@ -67,7 +67,7 @@ fn case() -> impl Strategy<Value = Case> {
                         .unwrap(),
                         timestamp: Timestamp::from_unix_millis(timestamp),
                         pre_apply: (tracked && !snapshot)
-                            .then(|| Checksum::from_raw(pre | (1 << 63)).unwrap()),
+                            .then(|| DbChecksum::from_raw(pre | (1 << 63)).unwrap()),
                         wal: WalOrigin::new(32 + pre % 100, pre % 5000, salts.0, salts.1),
                         node_id: pre,
                     })
@@ -75,14 +75,14 @@ fn case() -> impl Strategy<Value = Case> {
                     let pages: Vec<(u32, Vec<u8>)> = pgnos.into_iter().zip(datas).collect();
                     let post = tracked.then(|| {
                         if snapshot {
-                            pages.iter().fold(Checksum::EMPTY, |sum, (pgno, data)| {
-                                sum.toggle(Checksum::of_page(
+                            pages.iter().fold(DbChecksum::EMPTY, |sum, (pgno, data)| {
+                                sum.toggle(PageChecksum::of(
                                     PageNo::new(*pgno, page_size).unwrap(),
                                     data,
                                 ))
                             })
                         } else {
-                            Checksum::from_raw(pre.rotate_left(7) | (1 << 63)).unwrap()
+                            DbChecksum::from_raw(pre.rotate_left(7) | (1 << 63)).unwrap()
                         }
                     });
                     Case {

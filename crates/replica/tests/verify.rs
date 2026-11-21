@@ -102,7 +102,7 @@ fn rewrite_newest_page(site: &Site) -> (Txid, u32) {
         while let Some(event) = decoder.next_event().unwrap() {
             match event {
                 LtxEvent::Header(h) => header = Some(h),
-                LtxEvent::Page { pgno, data } => pages.push((pgno, data.to_vec())),
+                LtxEvent::Page(page) => pages.push((page.pgno(), page.data().to_vec())),
             }
         }
         let header = header.unwrap();

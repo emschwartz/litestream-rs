@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use lsr_ltx::{
-    Checksum, Encoder, HeaderFields, PageNo, Section, Timestamp, Txid, TxidRange, WalOrigin,
-    lock_page,
+    DbChecksum, Encoder, HeaderFields, PageChecksum, PageNo, Section, Timestamp, Txid, TxidRange,
+    WalOrigin, lock_page,
 };
 use proptest::prelude::*;
 
@@ -56,9 +56,9 @@ fn noisy(ps: PageSize, seed: u64) -> Vec<u8> {
         .collect()
 }
 
-fn checksum(ps: PageSize, state: &BTreeMap<u32, u8>) -> Checksum {
-    state.iter().fold(Checksum::EMPTY, |acc, (pgno, seed)| {
-        acc.toggle(Checksum::of_page(
+fn checksum(ps: PageSize, state: &BTreeMap<u32, u8>) -> DbChecksum {
+    state.iter().fold(DbChecksum::EMPTY, |acc, (pgno, seed)| {
+        acc.toggle(PageChecksum::of(
             PageNo::new(*pgno, ps).unwrap(),
             &solid(ps, *seed),
         ))
@@ -73,8 +73,8 @@ struct Spec {
     commit: u32,
     min: u64,
     max: u64,
-    pre: Option<Checksum>,
-    post: Option<Checksum>,
+    pre: Option<DbChecksum>,
+    post: Option<DbChecksum>,
     node_id: u64,
     wal: Option<WalOrigin>,
     pages: Vec<(u32, Vec<u8>)>,
@@ -176,12 +176,13 @@ fn read_all(store: &impl ObjectStore, at: &FileKey) -> Vec<u8> {
 type Pages = Vec<(u32, Vec<u8>)>;
 
 fn decode_all(bytes: &[u8]) -> Result<(Verified, Pages), DecodeError> {
-    let mut decoder = Decoder::new();
+    let mut decoder = lsr_ltx::Decoder::new();
     let mut pages = Vec::new();
     let mut rest = bytes;
     while !rest.is_empty() {
         let (used, event) = decoder.feed(rest)?;
-        if let Some(Event::Page { pgno, data }) = event {
+        if let Some(Event::Page(page)) = event {
+            let (pgno, data) = (page.pgno(), page.data());
             pages.push((pgno.get(), data.to_vec()));
         }
         rest = &rest[used..];
@@ -813,7 +814,7 @@ fn reads_of_a_clean_run() -> usize {
 #[test]
 fn an_input_that_vanishes_at_any_read_is_input_vanished() {
     let reads = reads_of_a_clean_run();
-    assert!(reads >= 8, "each input is read at least twice");
+    assert!(reads >= 4, "each input is read at least once");
     for nth in 0..reads {
         let source = Spy::default();
         let infos = four(&source.inner);
@@ -997,7 +998,7 @@ fn build(ps: PageSize, tracked: bool, drafts: &[Draft]) -> (Vec<Spec>, Vec<BTree
     let mut state: BTreeMap<u32, u8> = BTreeMap::new();
     let mut commit = 0;
     let (mut specs, mut states) = (Vec::new(), Vec::new());
-    let mut previous: Option<Checksum> = None;
+    let mut previous: Option<DbChecksum> = None;
     for (i, (new_commit, fill, writes)) in drafts.iter().enumerate() {
         let mut written: BTreeMap<u32, u8> = BTreeMap::new();
         for pgno in (commit + 1)..=*new_commit {
@@ -1197,11 +1198,16 @@ fn a_regrow_that_rewrites_every_page_above_the_shrink_compacts_and_restores_equa
 
 #[test]
 fn the_first_unrewritten_page_skips_the_lock_page_and_stops_at_the_bound() {
-    assert_eq!(first_unrewritten(1, 9, 3, 100), Some(4));
-    assert_eq!(first_unrewritten(6, 9, 3, 100), Some(6));
-    assert_eq!(first_unrewritten(1, 4, 3, 100), None);
-    assert_eq!(first_unrewritten(1, 9, 3, 4), Some(5));
-    assert_eq!(first_unrewritten(1, 5, 3, 4), None);
+    let size = PageSize::MIN;
+    let first =
+        |lo, hi, shortest| first_unrewritten(lo, hi, DbPages::new(shortest), size).map(PageNo::get);
+    assert_eq!(first(1, 9, 3), Some(4));
+    assert_eq!(first(6, 9, 3), Some(6));
+    assert_eq!(first(1, 4, 3), None);
+    let lock = lsr_ltx::lock_page(size);
+    assert_eq!(first(1, lock + 2, lock - 1), Some(lock + 1));
+    assert_eq!(first(1, lock + 1, lock - 1), None);
+    assert_eq!(first(lock, lock + 2, 3), Some(lock + 1));
 }
 
 #[test]

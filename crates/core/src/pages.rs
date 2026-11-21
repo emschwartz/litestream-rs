@@ -54,10 +54,11 @@
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 
-use lsr_ltx::{Checksum, Decoder, Event, PageNo, PageSize};
+use lsr_ltx::{Event, PageChecksum, PageNo, PageSize};
 
 use crate::fault::{Fault, SnapshotCause};
 use crate::layout::{FileKey, Level};
+use crate::ltx_read::{LtxRead, ReadFault};
 use crate::store::{ObjectStore, PageLimit, ReadLen};
 
 /// How much of a staged file one read asks for while seeding.
@@ -69,19 +70,19 @@ pub struct Mismatch {
     /// The page.
     pub pgno: PageNo,
     /// The digest the table held.
-    pub recorded: Checksum,
+    pub recorded: PageChecksum,
     /// The digest of the bytes read.
-    pub found: Checksum,
+    pub found: PageChecksum,
 }
 
 /// Page number to the checksum of the bytes the database file should hold.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PageTable {
     page_size: Option<PageSize>,
-    pages: BTreeMap<PageNo, Checksum>,
+    pages: BTreeMap<PageNo, PageChecksum>,
     /// Pages found different from `pages`, with the digest found: reported,
     /// and accepted as the file's bytes until a frame records the page again.
-    mismatched: BTreeMap<PageNo, Checksum>,
+    mismatched: BTreeMap<PageNo, PageChecksum>,
 }
 
 impl PageTable {
@@ -104,7 +105,7 @@ impl PageTable {
     }
 
     /// Records a page from a verified WAL frame; a mismatch on it is over.
-    pub fn record(&mut self, pgno: PageNo, digest: Checksum) {
+    pub fn record(&mut self, pgno: PageNo, digest: PageChecksum) {
         self.pages.insert(pgno, digest);
         self.mismatched.remove(&pgno);
     }
@@ -116,7 +117,7 @@ impl PageTable {
     /// # Errors
     /// [`Mismatch`] when the bytes differ from both.
     pub fn check(&mut self, pgno: PageNo, page: &[u8]) -> Result<(), Mismatch> {
-        let found = Checksum::of_page(pgno, page);
+        let found = PageChecksum::of(pgno, page);
         let Some(recorded) = self.pages.get(&pgno).copied() else {
             self.pages.insert(pgno, found);
             return Ok(());
@@ -159,7 +160,7 @@ impl PageTable {
 
     /// The digest the table holds for `pgno`.
     #[must_use]
-    pub fn get(&self, pgno: PageNo) -> Option<Checksum> {
+    pub fn get(&self, pgno: PageNo) -> Option<PageChecksum> {
         self.pages.get(&pgno).copied()
     }
 
@@ -231,44 +232,26 @@ async fn seed_file<L: ObjectStore>(
     table: &mut PageTable,
 ) -> Result<(), Fault> {
     let chunk = ReadLen::new(SEED_READ).ok_or(Fault::Bug)?;
-    let mut decoder = Decoder::new();
     let mut pages = Vec::new();
-    let mut size = None;
-    let mut offset = 0_u64;
-    loop {
-        let bytes = staging
-            .read(key, offset, chunk)
-            .await
-            .map_err(|err| Fault::from_staging(&err))?;
-        let read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        offset = offset.saturating_add(read);
-        let mut input = bytes.as_slice();
-        while !input.is_empty() {
-            let Ok((used, event)) = decoder.feed(input) else {
-                table.clear();
-                return Ok(());
-            };
-            match event {
-                Some(Event::Header(header)) => size = Some(header.page_size()),
-                Some(Event::Page { pgno, data }) => {
-                    pages.push((pgno, Checksum::of_page(pgno, data)));
-                }
-                None => {}
+    let mut read = LtxRead::new(*key, chunk);
+    let verified: Result<_, ReadFault> = read
+        .read_verified(staging, |event| {
+            if let Event::Page(page) = event {
+                pages.push((page.pgno(), page.checksum()));
             }
-            input = input.get(used..).unwrap_or_default();
-        }
-        if read < chunk.get() {
-            break;
-        }
-    }
-    match (decoder.finish(), size) {
-        (Ok(_), Some(size)) => {
-            table.fit(size);
+            Ok(())
+        })
+        .await;
+    match verified {
+        Ok(verified) => {
+            table.fit(verified.header().page_size());
             for (pgno, digest) in pages {
                 table.record(pgno, digest);
             }
         }
-        (Ok(_) | Err(_), _) => table.clear(),
+        Err(ReadFault::Store(err)) => return Err(Fault::from_staging(&err)),
+        Err(ReadFault::Decode(_)) => table.clear(),
+        Err(ReadFault::Rejected(never)) => match never {},
     }
     Ok(())
 }

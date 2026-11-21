@@ -28,7 +28,8 @@ use crate::frame::{FrameParser, Progress};
 use crate::index::Varint;
 use crate::order::PageSequence;
 use crate::{
-    Checksum, DecodeError, HEADER_LEN, Header, IndexError, PageNo, Section, TRAILER_LEN, Trailer,
+    DbChecksum, DecodeError, HEADER_LEN, Header, IndexError, PageNo, PageRef, Section, TRAILER_LEN,
+    Trailer,
 };
 
 /// One thing the decoder found.
@@ -36,13 +37,10 @@ use crate::{
 pub enum Event<'a> {
     /// The header, always first.
     Header(Header),
-    /// One page, decompressed. Not yet verified: see [`Decoder::finish`].
-    Page {
-        /// The page number.
-        pgno: PageNo,
-        /// Exactly one page of bytes.
-        data: &'a [u8],
-    },
+    /// One page, decompressed, exactly one page of the header's page size.
+    /// Not yet verified: a caller stages it and commits only once
+    /// [`Decoder::finish`] returns [`Verified`].
+    Page(PageRef<'a>),
 }
 
 /// A whole file that passed every check.
@@ -155,10 +153,10 @@ impl Decoder {
     fn event(&self, pending: Pending) -> Option<Event<'_>> {
         match (pending, &self.inner) {
             (Pending::Header(header), _) => Some(Event::Header(header)),
-            (Pending::Page(pgno), Inner::Body(body)) => Some(Event::Page {
-                pgno,
-                data: body.frame.page(),
-            }),
+            // `frame_unit` checked this page fits before it reported it.
+            (Pending::Page(pgno), Inner::Body(body)) => {
+                PageRef::new(pgno, body.header.page_size(), body.frame.page()).map(Event::Page)
+            }
             (Pending::Page(_), Inner::Header | Inner::Done(_) | Inner::Failed) => None,
         }
     }
@@ -261,7 +259,7 @@ struct Body {
     frame_start: u64,
     current: Option<PageNo>,
     /// The database checksum so far, for tracked snapshots only.
-    db: Option<Checksum>,
+    db: Option<DbChecksum>,
     frames: Crc64,
     frame_count: u64,
     listed: Crc64,
@@ -285,7 +283,7 @@ impl Body {
             offset: u64_from(HEADER_LEN),
             frame_start: 0,
             current: None,
-            db: (header.tracked() && header.is_snapshot()).then_some(Checksum::EMPTY),
+            db: (header.tracked() && header.is_snapshot()).then_some(DbChecksum::EMPTY),
             frames: Crc64::new(),
             frame_count: 0,
             listed: Crc64::new(),
@@ -350,9 +348,10 @@ impl Body {
             }
             Progress::Page(_) => {
                 let pgno = self.current.ok_or(DecodeError::Poisoned)?;
-                let page = self.frame.page();
-                self.file.update(page);
-                self.db = self.db.map(|db| db.toggle(Checksum::of_page(pgno, page)));
+                let page = PageRef::new(pgno, self.header.page_size(), self.frame.page())
+                    .ok_or(DecodeError::Poisoned)?;
+                self.file.update(page.data());
+                self.db = self.db.map(|db| db.toggle(page.checksum()));
                 hash_entry(
                     &mut self.frames,
                     [
@@ -415,7 +414,7 @@ impl Body {
                 section: Section::Trailer,
             })?;
         self.file.update(bytes.get(..8).unwrap_or_default());
-        let computed = mem::replace(&mut self.file, Crc64::new()).finish();
+        let computed = mem::replace(&mut self.file, Crc64::new()).finish_file();
         let trailer = Trailer::decode(bytes, &self.header)?;
         if trailer.file_checksum() != computed {
             return Err(DecodeError::FileChecksum {

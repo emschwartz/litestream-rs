@@ -24,7 +24,7 @@
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 
-use lsr_ltx::{Checksum, Header, HeaderFields, PageSize, Timestamp, Txid, TxidRange};
+use lsr_ltx::{Header, HeaderFields, PageChecksum, PageSize, Timestamp, Txid, TxidRange};
 use lsr_wal::{CommittedEnd, OpenError, WalReader};
 use thiserror::Error;
 
@@ -206,7 +206,7 @@ pub(crate) fn read_live<W: WalSource, P: PageSource>(
                     .map_err(|mismatch| Fault::DatabasePageMismatch {
                         pgno: mismatch.pgno,
                     })?;
-                Checksum::of_page(*pgno, &buf)
+                PageChecksum::of(*pgno, &buf)
             }
         };
         digests.insert(page.pgno().get(), digest);

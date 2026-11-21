@@ -5,7 +5,9 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use lsr_ltx::{Checksum, Encoder, Header, HeaderFields, PageNo, Section, Timestamp, TxidRange};
+use lsr_ltx::{
+    DbChecksum, Encoder, Header, HeaderFields, PageChecksum, PageNo, Section, Timestamp, TxidRange,
+};
 
 use super::*;
 use crate::conformance::block_on;
@@ -32,9 +34,9 @@ fn page_of(ps: PageSize, seed: u8) -> Vec<u8> {
     vec![seed; ps.bytes()]
 }
 
-fn checksum(ps: PageSize, state: &BTreeMap<u32, u8>) -> Checksum {
-    state.iter().fold(Checksum::EMPTY, |acc, (pgno, seed)| {
-        acc.toggle(Checksum::of_page(
+fn checksum(ps: PageSize, state: &BTreeMap<u32, u8>) -> DbChecksum {
+    state.iter().fold(DbChecksum::EMPTY, |acc, (pgno, seed)| {
+        acc.toggle(PageChecksum::of(
             PageNo::new(*pgno, ps).unwrap(),
             &page_of(ps, *seed),
         ))
@@ -51,8 +53,8 @@ struct Spec {
     commit: u32,
     min: u64,
     max: u64,
-    pre: Option<Checksum>,
-    post: Option<Checksum>,
+    pre: Option<DbChecksum>,
+    post: Option<DbChecksum>,
     pages: Vec<(u32, u8)>,
 }
 
@@ -371,7 +373,7 @@ fn the_page_size_reference_is_the_base_even_when_the_odd_file_is_read_first() {
 #[test]
 fn a_database_that_shrinks_then_grows_verifies_clean() {
     let ps = size(512);
-    let zero = Checksum::of_page(PageNo::new(3, ps).unwrap(), &[0; 512]);
+    let zero = PageChecksum::of(PageNo::new(3, ps).unwrap(), &[0; 512]);
     let mut snap = Spec::plain(512, 1, 1, &[(1, 1), (2, 2), (3, 3), (4, 4)]);
     snap.tracked = true;
     let four = checksum(ps, &BTreeMap::from([(1, 1), (2, 2), (3, 3), (4, 4)]));
@@ -804,7 +806,7 @@ fn restore_outcome(
     ))
 }
 
-fn tracked_snapshot(store: &MemStore) -> Checksum {
+fn tracked_snapshot(store: &MemStore) -> DbChecksum {
     let ps = size(512);
     let state = BTreeMap::from([(1, 1_u8)]);
     let mut snap = Spec::plain(512, 1, 1, &[(1, 1)]);
@@ -1069,7 +1071,7 @@ mod against {
             .iter()
             .map(|(pgno, seed)| {
                 let page = PageNo::new(*pgno, ps).unwrap();
-                (*pgno, Checksum::of_page(page, &page_of(ps, *seed)))
+                (*pgno, PageChecksum::of(page, &page_of(ps, *seed)))
             })
             .collect();
         let commit = NonZeroU32::new(u32::try_from(state.len()).unwrap()).unwrap();

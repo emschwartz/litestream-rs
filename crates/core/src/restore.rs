@@ -1,9 +1,11 @@
 //! The restore executor: a planned chain of LTX files becomes one database.
 //!
 //! [restore] loads the inventory, plans, then applies the chain's files oldest
-//! first into a [DatabaseSink]. A file is read in bounded chunks and pushed
-//! through one [Decoder]; its header is checked before any of its pages are
-//! written, and nothing counts until the decoder returns [lsr_ltx::Verified].
+//! first into a [DatabaseSink]. A file is read in bounded chunks through one
+//! decoder (the shared `LtxRead`); its header is checked before any of its pages
+//! are written, and nothing counts until the decoder returns [lsr_ltx::Verified].
+//! A sink takes a [PageRef], which is exactly one page of its page size, so
+//! where a page lands follows from the page size and never from a slice length.
 //! The sink is truncated to the file's commit after every file, so newest wins,
 //! pages above the final commit are dropped, and a shrink followed by growth
 //! leaves zeros, never an older file's pages. The sink is published only after
@@ -26,12 +28,13 @@
 use std::io;
 
 use lsr_ltx::{
-    Checksum, DecodeError, Decoder, Event, Header, PageNo, PageSize, Txid, TxidRange, Verified,
+    DbChecksum, DbPages, DecodeError, Event, Header, PageRef, PageSize, Txid, TxidRange, Verified,
 };
 use thiserror::Error;
 
 use crate::inventory::{Inventory, InventoryError};
 use crate::layout::{FileInfo, FileKey};
+use crate::ltx_read::{LtxRead, ReadFault};
 use crate::plan::{AsOfPlanner, ContiguousChain, KeyTarget, PlanOutcome, RestoreTarget, plan};
 use crate::stamps::{Resolve, ResolveError, Stamps, Step, resolve};
 use crate::store::{ObjectStore, ReadLen, StoreError};
@@ -85,18 +88,18 @@ impl std::fmt::Display for SinkOp {
 /// Where a restored database is built. Synchronous on purpose: one thread per
 /// database drives a restore, and a sink is plain file I/O.
 pub trait DatabaseSink {
-    /// Writes one page at byte offset (pgno - 1) times the page size. Writing
-    /// past the end grows the database.
+    /// Writes one page at [PageRef::offset], (pgno - 1) times its page size.
+    /// Writing past the end grows the database.
     ///
     /// # Errors
     /// Whatever the underlying write reports.
-    fn write_page(&mut self, pgno: PageNo, data: &[u8]) -> io::Result<()>;
+    fn write_page(&mut self, page: PageRef<'_>) -> io::Result<()>;
 
     /// Makes the length exactly pages times page size. Growth reads as zeros.
     ///
     /// # Errors
     /// Whatever the underlying resize reports.
-    fn truncate(&mut self, pages: u32, page_size: PageSize) -> io::Result<()>;
+    fn truncate(&mut self, pages: DbPages, page_size: PageSize) -> io::Result<()>;
 
     /// Back to empty, for a restore that starts over.
     ///
@@ -113,7 +116,7 @@ pub trait DatabaseSink {
     ///
     /// # Errors
     /// Whatever the underlying read reports.
-    fn checksum(&mut self, pages: u32, page_size: PageSize) -> io::Result<Checksum>;
+    fn checksum(&mut self, pages: DbPages, page_size: PageSize) -> io::Result<DbChecksum>;
 
     /// Makes the database durable and visible, or fails and leaves it not
     /// visible. A failed durability step is never retried.
@@ -151,9 +154,9 @@ pub enum FileFault {
     #[error("pre-apply checksum {found} but the previous file ended at {expected}")]
     ChecksumChain {
         /// The previous file's post-apply checksum.
-        expected: Checksum,
+        expected: DbChecksum,
         /// This file's pre-apply checksum.
-        found: Checksum,
+        found: DbChecksum,
     },
     /// The chain ends in a database of zero pages.
     #[error("the restored database has no pages")]
@@ -194,9 +197,9 @@ pub enum RestoreError {
     #[error("the restored database has checksum {found}, the last file says {expected}")]
     DatabaseChecksum {
         /// The last file's post-apply checksum.
-        expected: Checksum,
+        expected: DbChecksum,
         /// What the sink holds.
-        found: Checksum,
+        found: DbChecksum,
     },
     /// The as-of planner asked twice for one stamp: a planner bug, refused
     /// rather than looped on.
@@ -233,12 +236,12 @@ impl NoPlan {
 pub struct Restored {
     reached: Txid,
     page_size: PageSize,
-    commit: u32,
+    commit: DbPages,
     files: usize,
     bytes_read: u64,
     attempts: u8,
     stamps_read: u64,
-    post_apply: Option<Checksum>,
+    post_apply: Option<DbChecksum>,
 }
 
 impl Restored {
@@ -256,7 +259,7 @@ impl Restored {
 
     /// The database's length in pages.
     #[must_use]
-    pub const fn commit(&self) -> u32 {
+    pub const fn commit(&self) -> DbPages {
         self.commit
     }
 
@@ -288,7 +291,7 @@ impl Restored {
 
     /// The database checksum after the last file, when the writer tracked it.
     #[must_use]
-    pub const fn post_apply(&self) -> Option<Checksum> {
+    pub const fn post_apply(&self) -> Option<DbChecksum> {
         self.post_apply
     }
 }
@@ -361,7 +364,7 @@ pub(crate) async fn restore_from<S: ObjectStore, K: DatabaseSink>(
                 return Ok(Restored {
                     reached: chain.reaches(),
                     page_size: last.header().page_size(),
-                    commit: last.header().commit(),
+                    commit: last.header().pages(),
                     files: chain.files().len(),
                     bytes_read,
                     attempts: attempt,
@@ -452,7 +455,7 @@ fn verify_end_state<K: DatabaseSink>(sink: &mut K, last: &Verified) -> Result<()
         return Ok(());
     };
     let found = sink
-        .checksum(last.header().commit(), last.header().page_size())
+        .checksum(last.header().pages(), last.header().page_size())
         .map_err(sink_fault(SinkOp::Checksum))?;
     if found == expected {
         Ok(())
@@ -490,60 +493,28 @@ async fn apply_file<S: ObjectStore, K: DatabaseSink>(
     bytes_read: &mut u64,
 ) -> Result<Verified, Abort> {
     let key = info.key;
-    let mut decoder = Decoder::new();
-    let mut offset = 0_u64;
-    loop {
-        let chunk = match store.read(&key, offset, chunk_len()).await {
-            Ok(chunk) => chunk,
-            Err(StoreError::NotFound { .. }) => return Err(Abort::Vanished(key)),
-            Err(err) => return Err(RestoreError::Store(err).into()),
-        };
-        // The listed size is advisory: only the decoder knows where a file ends.
-        let len = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
-        offset = offset.saturating_add(len);
-        *bytes_read = bytes_read.saturating_add(len);
-        feed_chunk(&mut decoder, &chunk, key, previous, sink)?;
-        // A short chunk is the end of the object (the read contract), so no
-        // empty read follows to learn it.
-        if len < chunk_len().get() {
-            break;
-        }
-    }
-    let verified = decoder.finish().map_err(|err| RestoreError::File {
-        key,
-        fault: FileFault::Decode(err),
+    let mut read = LtxRead::new(key, chunk_len());
+    let applied = read
+        .read_verified(store, |event| match event {
+            Event::Header(header) => check_header(key, &header, previous)
+                .map_err(|fault| RestoreError::File { key, fault }),
+            Event::Page(page) => sink.write_page(page).map_err(sink_fault(SinkOp::WritePage)),
+        })
+        .await;
+    *bytes_read = bytes_read.saturating_add(read.bytes_read());
+    let verified = applied.map_err(|fault| match fault {
+        ReadFault::Store(StoreError::NotFound { .. }) => Abort::Vanished(key),
+        ReadFault::Store(err) => Abort::Fatal(RestoreError::Store(err)),
+        ReadFault::Decode(err) => Abort::Fatal(RestoreError::File {
+            key,
+            fault: FileFault::Decode(err),
+        }),
+        ReadFault::Rejected(err) => Abort::Fatal(err),
     })?;
     let header = verified.header();
-    sink.truncate(header.commit(), header.page_size())
+    sink.truncate(header.pages(), header.page_size())
         .map_err(sink_fault(SinkOp::Truncate))?;
     Ok(verified)
-}
-
-fn feed_chunk<K: DatabaseSink>(
-    decoder: &mut Decoder,
-    chunk: &[u8],
-    key: FileKey,
-    previous: Previous<'_>,
-    sink: &mut K,
-) -> Result<(), RestoreError> {
-    let file_fault = |fault| RestoreError::File { key, fault };
-    let mut rest = chunk;
-    while !rest.is_empty() {
-        let (used, event) = decoder
-            .feed(rest)
-            .map_err(|err| file_fault(FileFault::Decode(err)))?;
-        match event {
-            Some(Event::Header(header)) => {
-                check_header(key, &header, previous).map_err(file_fault)?;
-            }
-            Some(Event::Page { pgno, data }) => sink
-                .write_page(pgno, data)
-                .map_err(sink_fault(SinkOp::WritePage))?,
-            None => {}
-        }
-        rest = rest.get(used..).unwrap_or_default();
-    }
-    Ok(())
 }
 
 /// Every check that must pass before the first page of a file is written.

@@ -4,8 +4,8 @@
 //! Upstream `TestDecoder_64KBPageSize/Incompressible`.
 
 use lsr_ltx::{
-    Checksum, Encoder, Header, HeaderFields, PageNo, PageSize, ReadDecoder, Timestamp, Txid,
-    TxidRange, WalOrigin,
+    DbChecksum, Encoder, Header, HeaderFields, PageChecksum, PageNo, PageSize, ReadDecoder,
+    Timestamp, Txid, TxidRange, WalOrigin,
 };
 
 use crate::common::{Legacy, RawHeader, assemble, decode, decode_chunked};
@@ -32,11 +32,8 @@ fn page_size() -> PageSize {
     PageSize::new(PS).unwrap()
 }
 
-fn post_apply(page: &[u8]) -> Checksum {
-    Checksum::EMPTY.toggle(Checksum::of_page(
-        PageNo::new(1, page_size()).unwrap(),
-        page,
-    ))
+fn post_apply(page: &[u8]) -> DbChecksum {
+    DbChecksum::EMPTY.toggle(PageChecksum::of(PageNo::new(1, page_size()).unwrap(), page))
 }
 
 /// The header upstream's test writes: a one-page snapshot at TXID 1, checksums tracked.
@@ -88,7 +85,8 @@ fn an_incompressible_64k_page_round_trips_block_encoded() {
     let mut reader = ReadDecoder::new(bytes.as_slice());
     let mut pages = Vec::new();
     while let Some(event) = reader.next_event().unwrap() {
-        if let lsr_ltx::Event::Page { pgno, data } = event {
+        if let lsr_ltx::Event::Page(page) = event {
+            let (pgno, data) = (page.pgno(), page.data());
             pages.push((pgno.get(), data.to_vec()));
         }
     }

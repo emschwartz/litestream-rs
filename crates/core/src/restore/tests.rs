@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use lsr_ltx::{
-    Checksum, Encoder, Header, HeaderFields, PageNo, PageSize, Section, Timestamp, Txid, TxidRange,
-    lock_page,
+    DbChecksum, DbPages, Encoder, Header, HeaderFields, PageChecksum, PageNo, PageRef, PageSize,
+    Section, Timestamp, Txid, TxidRange, lock_page,
 };
 use proptest::prelude::*;
 
@@ -39,9 +39,9 @@ fn page_of(ps: PageSize, seed: u8) -> Vec<u8> {
     vec![seed; ps.bytes()]
 }
 
-fn checksum(ps: PageSize, state: &BTreeMap<u32, u8>) -> Checksum {
-    state.iter().fold(Checksum::EMPTY, |acc, (pgno, seed)| {
-        acc.toggle(Checksum::of_page(
+fn checksum(ps: PageSize, state: &BTreeMap<u32, u8>) -> DbChecksum {
+    state.iter().fold(DbChecksum::EMPTY, |acc, (pgno, seed)| {
+        acc.toggle(PageChecksum::of(
             PageNo::new(*pgno, ps).unwrap(),
             &page_of(ps, *seed),
         ))
@@ -56,8 +56,8 @@ struct Spec {
     commit: u32,
     min: u64,
     max: u64,
-    pre: Option<Checksum>,
-    post: Option<Checksum>,
+    pre: Option<DbChecksum>,
+    post: Option<DbChecksum>,
     pages: Vec<(u32, u8)>,
 }
 
@@ -163,7 +163,7 @@ fn applies_files_oldest_first_and_newest_page_wins() {
     // zeros, not the snapshot's 3.
     assert_eq!(seeds(&db), [5, 9, 0, 7]);
     assert_eq!(restored.reached(), txid(4));
-    assert_eq!(restored.commit(), 4);
+    assert_eq!(restored.commit(), DbPages::new(4));
     assert_eq!(restored.files(), 4);
     assert_eq!(restored.attempts(), 1);
     assert_eq!(restored.page_size(), size(512));
@@ -326,11 +326,15 @@ fn a_tracked_chain_is_checksummed_once_before_publish() {
 fn the_sink_checksum_counts_unwritten_pages_as_zeros() {
     let ps = size(512);
     let mut sink = MemSink::new();
-    sink.write_page(PageNo::new(3, ps).unwrap(), &page_of(ps, 3))
+    let three = page_of(ps, 3);
+    sink.write_page(PageRef::new(PageNo::new(3, ps).unwrap(), ps, &three).unwrap())
         .unwrap();
-    sink.truncate(4, ps).unwrap();
+    sink.truncate(DbPages::new(4), ps).unwrap();
     let state = BTreeMap::from([(1, 0_u8), (2, 0), (3, 3), (4, 0)]);
-    assert_eq!(sink.checksum(4, ps).unwrap(), checksum(ps, &state));
+    assert_eq!(
+        sink.checksum(DbPages::new(4), ps).unwrap(),
+        checksum(ps, &state)
+    );
 }
 
 #[test]
@@ -852,7 +856,7 @@ fn the_lock_page_is_never_written_and_reads_as_zeros() {
     let store = MemStore::new();
     put(&store, 9, 1, 1, &encoder.finish(None).unwrap().0);
     let (result, sink) = run(&store, RestoreTarget::Latest);
-    assert_eq!(result.unwrap().commit(), commit);
+    assert_eq!(result.unwrap().commit().get(), commit);
     let db = sink.published().unwrap();
     assert_eq!(db.page(lock), Some(vec![0; 512]));
     assert_eq!(db.page(lock - 1), Some(vec![7; 512]));

@@ -1,6 +1,6 @@
 use std::num::NonZeroU32;
 
-use lsr_ltx::{Checksum, PageNo, PageSize, Timestamp, Txid};
+use lsr_ltx::{PageChecksum, PageNo, PageSize, Timestamp, Txid};
 use lsr_wal::{Salts, WalOffset, WalReader};
 
 use crate::source::{FakeWal, WalSource};
@@ -48,7 +48,10 @@ fn position(continuity: Continuity) -> Position {
         Txid::new(5).unwrap(),
         reader.cursor_at_start(),
         NonZeroU32::MIN,
-        LastPage::new(PageNo::new(2, ps()).unwrap(), Checksum::EMPTY),
+        LastPage::new(
+            PageNo::new(2, ps()).unwrap(),
+            PageChecksum::of(PageNo::new(2, ps()).unwrap(), &[]),
+        ),
         Timestamp::from_unix_millis(9),
         continuity,
     )

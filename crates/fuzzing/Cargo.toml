@@ -9,7 +9,8 @@ publish.workspace = true
 
 [dependencies]
 lsr-core = { workspace = true, features = ["testing"] }
-lsr-ltx.workspace = true
+# The `index` target reads one page out of order, which only the testing feature offers.
+lsr-ltx = { workspace = true, features = ["testing"] }
 lsr-wal.workspace = true
 
 [dev-dependencies]

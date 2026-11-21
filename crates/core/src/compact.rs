@@ -4,8 +4,9 @@
 //! file to a destination store. Source and destination differ because level 0
 //! is read from the local copy and every other level from the replica.
 //!
-//! Each input is read in bounded chunks through its own [Decoder]; the pages of
-//! all inputs are merged in ascending page order and the newest input holding a
+//! Each input is read in bounded chunks through its own decoder (the shared
+//! `LtxRead`, which ends a file at its first short chunk); the pages of all
+//! inputs are merged in ascending page order and the newest input holding a
 //! page wins. A page above the output's commit is dropped, and the lock page
 //! never appears because [PageNo] cannot hold it. Memory is one read chunk and
 //! one page per input plus the encoder's output buffer, whatever the database
@@ -20,7 +21,7 @@
 //! checksum; otherwise it is untracked with no checksums, which is what Go's
 //! level compactor writes (decision D2).
 //!
-//! Nothing is published unless every input's [Decoder::finish] returned
+//! Nothing is published unless every input's decoder finished with
 //! [lsr_ltx::Verified] and every checksum link held. Headers are all read and
 //! checked before the upload begins. On any error the upload is aborted; a
 //! failed abort never replaces the original error. A commit that fails after
@@ -42,15 +43,17 @@
 //! The output level must be above every input's level
 //! ([InputsError::LevelNotAbove]), checked before any store call.
 
+use std::convert::Infallible;
 use std::mem;
 
 use lsr_ltx::{
-    Checksum, DecodeError, Decoder, EncodeError, Encoder, Event, Header, HeaderFields, PageNo,
-    PageSize, Trailer, TxidRange, Verified, lock_page,
+    DbChecksum, DbPages, DecodeError, EncodeError, Encoder, Event, Header, HeaderFields, PageNo,
+    PageSize, Trailer, TxidRange, Verified,
 };
 use thiserror::Error;
 
 use crate::layout::{FileInfo, FileKey, Level};
+use crate::ltx_read::{LtxRead, Next, ReadFault};
 use crate::store::{ObjectStore, ReadLen, StoreError, Upload};
 
 #[cfg(test)]
@@ -192,9 +195,9 @@ pub enum InputFault {
     #[error("pre-apply checksum {found} but the previous input ended at {expected}")]
     ChecksumChain {
         /// The previous input's post-apply checksum.
-        expected: Checksum,
+        expected: DbChecksum,
         /// This input's pre-apply checksum.
-        found: Checksum,
+        found: DbChecksum,
     },
     /// The page's newest copy is in this input but a later input shrank the
     /// database below it and never rewrote it, which SQLite cannot produce.
@@ -335,90 +338,65 @@ enum Step {
 
 /// One input's bytes: chunked reads pushed through one decoder.
 struct Reader {
-    key: FileKey,
-    decoder: Decoder,
-    chunk: Vec<u8>,
-    pos: usize,
-    offset: u64,
+    read: LtxRead,
 }
 
 impl Reader {
-    const fn new(key: FileKey) -> Self {
+    const fn new(key: FileKey, chunk: ReadLen) -> Self {
         Self {
-            key,
-            decoder: Decoder::new(),
-            chunk: Vec::new(),
-            pos: 0,
-            offset: 0,
+            read: LtxRead::new(key, chunk),
         }
+    }
+
+    const fn key(&self) -> FileKey {
+        self.read.key()
     }
 
     fn fault(&self, fault: InputFault) -> CompactError {
         CompactError::Input {
-            key: self.key,
+            key: self.key(),
             fault,
         }
     }
 
-    /// Reads the next chunk; false at the end of the object.
-    async fn refill<S: ObjectStore>(
-        &mut self,
-        source: &S,
-        chunk_len: ReadLen,
-        bytes_read: &mut u64,
-    ) -> Result<bool, CompactError> {
-        // The old chunk goes first so one input never holds two.
-        self.chunk = Vec::new();
-        self.pos = 0;
-        let chunk = match source.read(&self.key, self.offset, chunk_len).await {
-            Ok(chunk) => chunk,
-            Err(StoreError::NotFound { key }) => return Err(CompactError::InputVanished { key }),
-            Err(err) => return Err(CompactError::Source(err)),
-        };
-        let len = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
-        self.offset = self.offset.saturating_add(len);
-        *bytes_read = bytes_read.saturating_add(len);
-        self.chunk = chunk;
-        Ok(len > 0)
-    }
-
     /// Advances to the next header, page or verified end, copying a page's
-    /// bytes into `page`. The listed size is advisory: only the decoder knows
-    /// where a file ends.
+    /// bytes into `page`. Bytes read are added to `bytes_read` as they arrive.
     async fn step<S: ObjectStore>(
         &mut self,
         source: &S,
-        budget: Budget,
         bytes_read: &mut u64,
         page: &mut Vec<u8>,
     ) -> Result<Step, CompactError> {
-        loop {
-            if self.pos >= self.chunk.len()
-                && !self.refill(source, budget.chunk, bytes_read).await?
-            {
-                let decoder = mem::take(&mut self.decoder);
-                return match decoder.finish() {
-                    Ok(verified) => Ok(Step::End(verified)),
-                    Err(err) => Err(self.fault(InputFault::Decode(err))),
-                };
+        let before = self.read.bytes_read();
+        let next = self
+            .read
+            .next(source, |event| {
+                Ok::<_, Infallible>(match event {
+                    Event::Header(header) => Step::Header(header),
+                    Event::Page(found) => {
+                        page.clear();
+                        page.extend_from_slice(found.data());
+                        Step::Page(found.pgno())
+                    }
+                })
+            })
+            .await;
+        let read = self.read.bytes_read().saturating_sub(before);
+        *bytes_read = bytes_read.saturating_add(read);
+        match next {
+            Ok(Next::Event(step)) => Ok(step),
+            Ok(Next::End(verified)) => Ok(Step::End(verified)),
+            Err(ReadFault::Store(StoreError::NotFound { key })) => {
+                Err(CompactError::InputVanished { key })
             }
-            let rest = self.chunk.get(self.pos..).unwrap_or_default();
-            let key = self.key;
-            let (used, event) = self.decoder.feed(rest).map_err(|err| CompactError::Input {
-                key,
-                fault: InputFault::Decode(err),
-            })?;
-            self.pos = self.pos.saturating_add(used);
-            match event {
-                Some(Event::Header(header)) => return Ok(Step::Header(header)),
-                Some(Event::Page { pgno, data }) => {
-                    page.clear();
-                    page.extend_from_slice(data);
-                    return Ok(Step::Page(pgno));
-                }
-                None => {}
-            }
+            Err(ReadFault::Store(err)) => Err(CompactError::Source(err)),
+            Err(ReadFault::Decode(err)) => Err(self.fault(InputFault::Decode(err))),
+            Err(ReadFault::Rejected(never)) => match never {},
         }
+    }
+
+    fn held(&self) -> usize {
+        self.read.held()
     }
 }
 
@@ -433,7 +411,7 @@ struct Input {
 
 impl Input {
     fn key(&self) -> FileKey {
-        self.reader.key
+        self.reader.key()
     }
 
     /// Reads the header. A decoder that yields anything else first has
@@ -444,9 +422,9 @@ impl Input {
         key: FileKey,
         bytes_read: &mut u64,
     ) -> Result<Self, CompactError> {
-        let mut reader = Reader::new(key);
+        let mut reader = Reader::new(key, budget.chunk);
         let mut page = Vec::new();
-        match reader.step(source, budget, bytes_read, &mut page).await? {
+        match reader.step(source, bytes_read, &mut page).await? {
             Step::Header(header) => Ok(Self {
                 reader,
                 header,
@@ -464,17 +442,12 @@ impl Input {
     async fn fill<S: ObjectStore>(
         &mut self,
         source: &S,
-        budget: Budget,
         bytes_read: &mut u64,
     ) -> Result<(), CompactError> {
         if self.head.is_some() || self.verified.is_some() {
             return Ok(());
         }
-        match self
-            .reader
-            .step(source, budget, bytes_read, &mut self.page)
-            .await?
-        {
+        match self.reader.step(source, bytes_read, &mut self.page).await? {
             Step::Page(pgno) => self.head = Some(pgno),
             Step::End(verified) => self.verified = Some(verified),
             Step::Header(_) => {
@@ -485,7 +458,7 @@ impl Input {
     }
 
     fn held(&self) -> usize {
-        self.reader.chunk.len().saturating_add(self.page.len())
+        self.reader.held().saturating_add(self.page.len())
     }
 }
 
@@ -582,10 +555,10 @@ impl<'a, S: ObjectStore> Merge<'a, S> {
         &mut self,
         buffered_output: usize,
     ) -> Result<Option<(PageNo, usize)>, CompactError> {
-        let (source, budget) = (self.source, self.budget);
+        let source = self.source;
         let mut bytes_read = self.bytes_read;
         for input in std::iter::once(&mut self.first).chain(self.rest.iter_mut()) {
-            input.fill(source, budget, &mut bytes_read).await?;
+            input.fill(source, &mut bytes_read).await?;
         }
         self.bytes_read = bytes_read;
         self.observe(buffered_output);
@@ -612,7 +585,7 @@ impl<'a, S: ObjectStore> Merge<'a, S> {
         let shrunk = self
             .all()
             .skip(winner.saturating_add(1))
-            .any(|later| later.header.commit() < pgno.get());
+            .any(|later| !later.header.pages().contains(pgno));
         match self.all().nth(winner) {
             Some(input) if shrunk => {
                 Err(input.reader.fault(InputFault::PageSurvivesShrink { pgno }))
@@ -628,11 +601,8 @@ impl<'a, S: ObjectStore> Merge<'a, S> {
         let Some(shortest) = self.all().min_by_key(|input| input.header.commit()) else {
             return Ok(());
         };
-        let lock = lock_page(self.first.header.page_size());
-        let Some(pgno) = first_unrewritten(lo, hi, shortest.header.commit(), lock) else {
-            return Ok(());
-        };
-        match PageNo::new(pgno, self.first.header.page_size()) {
+        let size = self.first.header.page_size();
+        match first_unrewritten(lo, hi, shortest.header.pages(), size) {
             Some(pgno) => Err(shortest.reader.fault(InputFault::PageNotRewritten { pgno })),
             None => Ok(()),
         }
@@ -661,14 +631,13 @@ impl<'a, S: ObjectStore> Merge<'a, S> {
     }
 }
 
-/// The first page in `lo..hi` above `shortest` (the smallest commit among the
-/// inputs) that is not the lock page.
-fn first_unrewritten(lo: u32, hi: u32, shortest: u32, lock: u32) -> Option<u32> {
-    let mut pgno = lo.max(shortest.saturating_add(1));
-    if pgno == lock {
-        pgno = pgno.saturating_add(1);
-    }
-    (pgno < hi).then_some(pgno)
+/// The first page in `lo..hi` past the end of `shortest` (the smallest
+/// database among the inputs) that a file can hold: never the lock page.
+fn first_unrewritten(lo: u32, hi: u32, shortest: DbPages, size: PageSize) -> Option<PageNo> {
+    let past = shortest.get().saturating_add(1);
+    let pgno = PageNo::new(lo.max(past), size)
+        .or_else(|| PageNo::new(lo.max(past).saturating_add(1), size))?;
+    (pgno.get() < hi).then_some(pgno)
 }
 
 /// The header's range must be the one in the file's name.
@@ -694,7 +663,7 @@ async fn write_output<S: ObjectStore, U: Upload>(
     let mut unchecked_from = 1_u32;
     // The header sits in the encoder's buffer; it goes out with the first flush.
     while let Some((pgno, winner)) = merge.next_page(encoder.writer_mut().len()).await? {
-        if pgno.get() > header.commit() {
+        if !header.pages().contains(pgno) {
             continue;
         }
         merge.check_unheld(unchecked_from, pgno.get())?;

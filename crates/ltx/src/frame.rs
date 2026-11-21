@@ -36,6 +36,7 @@ use crate::conv::{Cursor, u64_from, usize_from};
 /// Bytes in a page header.
 pub(crate) const PAGE_HEADER_LEN: usize = 6;
 /// The smallest possible frame: a page header, a length and a one-byte block.
+#[cfg(any(test, feature = "testing"))]
 pub(crate) const MIN_FRAME_LEN: usize = PAGE_HEADER_LEN + 4 + 1;
 
 const FLAG_SIZE_PREFIX: u16 = 1;

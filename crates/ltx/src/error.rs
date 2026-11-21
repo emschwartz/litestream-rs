@@ -4,7 +4,9 @@ use std::io;
 
 use thiserror::Error;
 
-use crate::{Checksum, FrameError, HeaderError, IndexError, OrderError, TrailerError};
+use crate::{
+    DbChecksum, FileChecksum, FrameError, HeaderError, IndexError, OrderError, TrailerError,
+};
 
 /// The part of a file the input ended in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,17 +54,17 @@ pub enum DecodeError {
     #[error("file checksum mismatch: computed {computed}, stored {stored}")]
     FileChecksum {
         /// The checksum over the bytes read.
-        computed: Checksum,
+        computed: FileChecksum,
         /// The trailer's checksum.
-        stored: Checksum,
+        stored: FileChecksum,
     },
     /// A tracked snapshot's pages do not match its post-apply checksum.
     #[error("snapshot post-apply checksum mismatch: computed {computed}, stored {stored:?}")]
     PostApplyMismatch {
         /// The checksum over the snapshot's pages.
-        computed: Checksum,
+        computed: DbChecksum,
         /// The trailer's post-apply checksum.
-        stored: Option<Checksum>,
+        stored: Option<DbChecksum>,
     },
     /// The input ended before the file did.
     #[error("file truncated in the {section:?} section")]
@@ -106,9 +108,9 @@ pub enum EncodeError {
     #[error("snapshot post-apply checksum {given} does not match its pages, {computed}")]
     PostApplyMismatch {
         /// The checksum over the pages written.
-        computed: Checksum,
+        computed: DbChecksum,
         /// The checksum the caller passed.
-        given: Checksum,
+        given: DbChecksum,
     },
     /// A call after a write already failed, leaving partial output.
     #[error("encoder already failed")]

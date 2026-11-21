@@ -3,9 +3,10 @@
 use std::io::{self, Read, Write};
 
 use lsr_ltx::{
-    Checksum, DecodeError, Decoder, EncodeError, Encoder, FrameError, Header, HeaderError,
-    HeaderFields, IndexEntry, IndexError, OrderError, PageIndex, PageNo, PageSize, ReadDecoder,
-    Section, Timestamp, Trailer, TrailerError, Txid, TxidRange, decode_frame, lock_page,
+    DbChecksum, DecodeError, Decoder, EncodeError, Encoder, FrameError, Header, HeaderError,
+    HeaderFields, IndexEntry, IndexError, OrderError, PageChecksum, PageIndex, PageNo, PageSize,
+    ReadDecoder, Section, Timestamp, Trailer, TrailerError, Txid, TxidRange, decode_frame,
+    lock_page,
 };
 
 use crate::common::{
@@ -509,9 +510,9 @@ fn post_apply_mismatch() {
         ..RawHeader::untracked(PS, 2, 1)
     };
     let ps = PageSize::new(PS).unwrap();
-    let right = Checksum::EMPTY
-        .toggle(Checksum::of_page(PageNo::new(1, ps).unwrap(), &page(PS, 1)))
-        .toggle(Checksum::of_page(PageNo::new(2, ps).unwrap(), &page(PS, 2)));
+    let right = DbChecksum::EMPTY
+        .toggle(PageChecksum::of(PageNo::new(1, ps).unwrap(), &page(PS, 1)))
+        .toggle(PageChecksum::of(PageNo::new(2, ps).unwrap(), &page(PS, 2)));
     decode(&assemble(&header, &snapshot_frames(), right.get())).unwrap();
     let wrong = assemble(&header, &snapshot_frames(), right.get() ^ 1);
     assert!(
@@ -632,7 +633,7 @@ fn header(tracked: bool, commit: u32, min: u64) -> Header {
         commit,
         txids: TxidRange::single(Txid::new(min).unwrap()),
         timestamp: Timestamp::from_unix_millis(0),
-        pre_apply: (tracked && min > 1).then_some(Checksum::EMPTY),
+        pre_apply: (tracked && min > 1).then_some(DbChecksum::EMPTY),
         wal: None,
         node_id: 0,
     })
@@ -679,7 +680,7 @@ fn encode_order() {
 
 #[test]
 fn encode_trailer() {
-    let some = Some(Checksum::EMPTY);
+    let some = Some(DbChecksum::EMPTY);
     let finish = |header: Header, post| Encoder::new(Vec::new(), header).unwrap().finish(post);
     assert!(matches!(
         finish(header(false, 1, 5), some),
@@ -734,7 +735,7 @@ fn decode_frame_checks_the_entry_and_clears_out_on_error() {
 fn encode_post_apply_mismatch() {
     let mut encoder = Encoder::new(Vec::new(), header(true, 1, 1)).unwrap();
     encoder.write_page(pgno(1), &[7; 512]).unwrap();
-    let wrong = Checksum::EMPTY;
+    let wrong = DbChecksum::EMPTY;
     assert!(
         matches!(encoder.finish(Some(wrong)), Err(EncodeError::PostApplyMismatch { given, .. }) if given == wrong)
     );

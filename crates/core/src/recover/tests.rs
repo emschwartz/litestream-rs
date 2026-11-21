@@ -644,7 +644,7 @@ fn go_parity_an_end_at_offset_32_continues() {
     let bytes = wal.file_bytes();
     let head = *reader(bytes.clone()).header();
     let cursor = reader(bytes).cursor_at_start();
-    let last = LastPage::new(pg(1), lsr_ltx::Checksum::of_page(pg(1), &[0; 512]));
+    let last = LastPage::new(pg(1), lsr_ltx::PageChecksum::of(pg(1), &[0; 512]));
     let tip = TipView::Readable {
         txid: txid(3),
         origin: WalOrigin::new(32, 0, head.salts().salt1, head.salts().salt2).unwrap(),
@@ -677,7 +677,10 @@ fn go_parity_an_end_one_frame_past_32_is_checked_not_skipped() {
         pos.txid(),
         pos.cursor(),
         pos.commit(),
-        LastPage::new(pos.last_page().pgno(), lsr_ltx::Checksum::EMPTY),
+        LastPage::new(
+            pos.last_page().pgno(),
+            lsr_ltx::PageChecksum::of(pos.last_page().pgno(), &[]),
+        ),
         pos.timestamp(),
         Continuity::Unpinned,
     );

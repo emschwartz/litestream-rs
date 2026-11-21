@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use lsr_ltx::{Checksum, PageNo, PageSize};
+use lsr_ltx::{PageChecksum, PageNo, PageSize};
 
 use crate::checksum::{ByteOrder, WalChecksum};
 use crate::conv::Fields;
@@ -169,7 +169,7 @@ pub enum FrameFault {
 pub struct FrameRef {
     pub(crate) pgno: PageNo,
     pub(crate) offset: WalOffset,
-    pub(crate) digest: Checksum,
+    pub(crate) digest: PageChecksum,
 }
 
 impl FrameRef {
@@ -187,7 +187,7 @@ impl FrameRef {
 
     /// The LTX page checksum of the page as the scan verified it.
     #[must_use]
-    pub const fn digest(&self) -> Checksum {
+    pub const fn digest(&self) -> PageChecksum {
         self.digest
     }
 }
@@ -199,7 +199,7 @@ pub(crate) struct VerifiedFrame {
     pub(crate) commit: u32,
     /// The running checksum after this frame.
     pub(crate) checksum: WalChecksum,
-    pub(crate) digest: Checksum,
+    pub(crate) digest: PageChecksum,
 }
 
 /// Checks one whole frame (`FRAME_HEADER_LEN` plus a page) against the
@@ -239,7 +239,7 @@ pub(crate) fn verify_frame(
         pgno,
         commit,
         checksum,
-        digest: Checksum::of_page(pgno, page),
+        digest: PageChecksum::of(pgno, page),
     })
 }
 

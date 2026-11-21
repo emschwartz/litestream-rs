@@ -15,7 +15,7 @@ use std::num::NonZeroU32;
 use thiserror::Error;
 
 use crate::page::lock_page;
-use crate::{Header, PageNo, PageSize};
+use crate::{DbPages, Header, PageNo, PageSize};
 
 /// A page number out of place.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
@@ -65,6 +65,7 @@ pub(crate) struct PageSequence {
     snapshot: bool,
     commit: u32,
     lock: u32,
+    page_size: PageSize,
     /// The last page accepted, zero before the first.
     last: u32,
 }
@@ -79,6 +80,7 @@ impl PageSequence {
             snapshot,
             commit,
             lock: lock_page(page_size),
+            page_size,
             last: 0,
         }
     }
@@ -109,12 +111,10 @@ impl PageSequence {
         Ok(PageNo::checked(pgno))
     }
 
-    pub(crate) const fn finish(&self) -> Result<(), OrderError> {
-        let end = if self.commit == self.lock {
-            self.commit.saturating_sub(1)
-        } else {
-            self.commit
-        };
+    pub(crate) fn finish(&self) -> Result<(), OrderError> {
+        let end = DbPages::new(self.commit)
+            .last_page(self.page_size)
+            .map_or(0, PageNo::get);
         if self.snapshot && self.last != end {
             return Err(OrderError::SnapshotShort {
                 last: self.last,

@@ -30,7 +30,8 @@ fn decode(bytes: &[u8]) -> (lsr_ltx::Header, Pages) {
     let mut rest = bytes;
     while !rest.is_empty() {
         let (used, event) = decoder.feed(rest).expect("Go's file decodes");
-        if let Some(Event::Page { pgno, data }) = event {
+        if let Some(Event::Page(page)) = event {
+            let (pgno, data) = (page.pgno(), page.data());
             pages.push((pgno.get(), data.to_vec()));
         }
         rest = &rest[used..];

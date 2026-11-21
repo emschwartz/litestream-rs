@@ -933,6 +933,7 @@ name = "lsr-ltx"
 version = "0.0.0"
 dependencies = [
  "crc",
+ "lsr-ltx",
  "lz4_flex",
  "proptest",
  "sha2",

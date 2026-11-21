@@ -36,7 +36,7 @@ fn decode(bytes: &[u8]) -> (Header, Vec<(PageNo, Vec<u8>)>) {
     while let Some(event) = decoder.next_event().expect("decode") {
         match event {
             Event::Header(h) => header = Some(h),
-            Event::Page { pgno, data } => pages.push((pgno, data.to_vec())),
+            Event::Page(page) => pages.push((page.pgno(), page.data().to_vec())),
         }
     }
     decoder.finish().expect("finish");

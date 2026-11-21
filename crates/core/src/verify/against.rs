@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 
-use lsr_ltx::{Checksum, PageSize, Txid};
+use lsr_ltx::{PageChecksum, PageSize, Txid};
 
 use super::dry_run::digest_restore;
 use super::{Findings, Report, VerifyError, name_findings, report};
@@ -31,7 +31,7 @@ pub struct LivePages {
     txid: Txid,
     page_size: PageSize,
     commit: NonZeroU32,
-    pages: BTreeMap<u32, Checksum>,
+    pages: BTreeMap<u32, PageChecksum>,
 }
 
 impl LivePages {
@@ -39,7 +39,7 @@ impl LivePages {
         txid: Txid,
         page_size: PageSize,
         commit: NonZeroU32,
-        pages: BTreeMap<u32, Checksum>,
+        pages: BTreeMap<u32, PageChecksum>,
     ) -> Self {
         Self {
             txid,
@@ -155,7 +155,7 @@ pub async fn verify_against<S: ObjectStore>(
     let (result, files_read, bytes_read) =
         digest_restore(store, inventory.clone(), target, &mut restored).await;
     let compared = match result {
-        Ok(done) => compare(live, &restored, done.commit()),
+        Ok(done) => compare(live, &restored, done.commit().get()),
         Err(RestoreError::Inventory(err)) => return Err(VerifyError::Inventory(err)),
         Err(RestoreError::Store(err)) => return Err(VerifyError::Store(err)),
         Err(RestoreError::NoPlan(no)) if matches!(no.outcome(), PlanOutcome::InsideFile { .. }) => {
@@ -170,7 +170,7 @@ pub async fn verify_against<S: ObjectStore>(
     Ok(Verified { report, compared })
 }
 
-fn compare(live: &LivePages, restored: &BTreeMap<u32, Checksum>, commit: u32) -> Compared {
+fn compare(live: &LivePages, restored: &BTreeMap<u32, PageChecksum>, commit: u32) -> Compared {
     let differ = |n: &u32| live.pages.get(n) != restored.get(n);
     let mut keys: Vec<u32> = live.pages.keys().chain(restored.keys()).copied().collect();
     keys.sort_unstable();

@@ -10,7 +10,7 @@ use crate::frame::{
     verify_frame,
 };
 use crate::header::{HEADER_LEN, Salts, WalHeader};
-use lsr_ltx::{Checksum, PageSize};
+use lsr_ltx::{PageChecksum, PageSize};
 
 /// Where the next frame starts and the checksum it continues from.
 ///
@@ -475,7 +475,7 @@ impl<R: Read + Seek> WalReader<R> {
         if read_at(&mut self.reader, at, buf)? < buf.len() {
             return Err(ReadPageError::Truncated { pgno, offset });
         }
-        if Checksum::of_page(pgno, buf) != frame.digest {
+        if PageChecksum::of(pgno, buf) != frame.digest {
             return Err(ReadPageError::ChangedSinceScan { pgno, offset });
         }
         Ok(())

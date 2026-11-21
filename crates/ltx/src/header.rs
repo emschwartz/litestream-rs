@@ -15,9 +15,9 @@
 
 use thiserror::Error;
 
-use crate::checksum::Checksum;
+use crate::DbChecksum;
 use crate::conv::Cursor;
-use crate::{PageSize, Timestamp, Txid, TxidRange};
+use crate::{DbPages, PageSize, Timestamp, Txid, TxidRange};
 
 /// Bytes in an encoded header.
 pub const HEADER_LEN: usize = 100;
@@ -135,7 +135,7 @@ pub struct HeaderFields {
     pub timestamp: Timestamp,
     /// The database checksum before this file applies: present exactly when
     /// the file is tracked and not a snapshot.
-    pub pre_apply: Option<Checksum>,
+    pub pre_apply: Option<DbChecksum>,
     /// The WAL range the pages came from, if any.
     pub wal: Option<WalOrigin>,
     /// The writing node, zero when unset.
@@ -157,7 +157,7 @@ impl Header {
         let snapshot = fields.txids.min() == Txid::MIN;
         if (fields.tracked && !snapshot) != fields.pre_apply.is_some() {
             return Err(HeaderError::PreApply {
-                raw: fields.pre_apply.map_or(0, Checksum::get),
+                raw: fields.pre_apply.map_or(0, DbChecksum::get),
             });
         }
         Ok(Self(fields))
@@ -193,6 +193,13 @@ impl Header {
         self.0.commit
     }
 
+    /// The database's length in pages after this file applies: the commit
+    /// field, typed so membership and the last page follow the lock-page rule.
+    #[must_use]
+    pub const fn pages(&self) -> DbPages {
+        DbPages::new(self.0.commit)
+    }
+
     /// The transactions this file covers.
     #[must_use]
     pub const fn txids(&self) -> TxidRange {
@@ -225,7 +232,7 @@ impl Header {
         let timestamp = Timestamp::from_unix_millis(cursor.i64());
         let pre_apply = match cursor.u64() {
             0 => None,
-            raw => Some(Checksum::from_raw(raw).ok_or(HeaderError::PreApply { raw })?),
+            raw => Some(DbChecksum::from_raw(raw).ok_or(HeaderError::PreApply { raw })?),
         };
         let wal = wal_origin(cursor.i64(), cursor.i64(), cursor.u32(), cursor.u32())?;
         let node_id = cursor.u64();
@@ -258,7 +265,7 @@ impl Header {
         out[16..24].copy_from_slice(&f.txids.min().get().to_be_bytes());
         out[24..32].copy_from_slice(&f.txids.max().get().to_be_bytes());
         out[32..40].copy_from_slice(&f.timestamp.unix_millis().to_be_bytes());
-        out[40..48].copy_from_slice(&f.pre_apply.map_or(0, Checksum::get).to_be_bytes());
+        out[40..48].copy_from_slice(&f.pre_apply.map_or(0, DbChecksum::get).to_be_bytes());
         out[48..56].copy_from_slice(&wal.0.to_be_bytes());
         out[56..64].copy_from_slice(&wal.1.to_be_bytes());
         out[64..68].copy_from_slice(&wal.2.to_be_bytes());
@@ -304,7 +311,7 @@ mod tests {
             )
             .unwrap(),
             timestamp: Timestamp::from_unix_millis(1_700_000_000_000),
-            pre_apply: Checksum::from_raw(pre),
+            pre_apply: DbChecksum::from_raw(pre),
             wal: WalOrigin::new(32, 4120, 1, 2),
             node_id: 3,
         }

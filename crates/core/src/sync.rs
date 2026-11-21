@@ -24,7 +24,7 @@
 use std::num::{NonZeroU32, NonZeroU64};
 
 use lsr_ltx::{
-    Checksum, Encoder, Header, HeaderFields, PageNo, PageSize, Timestamp, Txid, TxidRange,
+    Encoder, Header, HeaderFields, PageChecksum, PageNo, PageSize, Timestamp, Txid, TxidRange,
     WalOrigin,
 };
 use lsr_wal::{
@@ -478,7 +478,7 @@ async fn fill<R: Read + Seek, P: PageSource, U: Upload>(
         if index.saturating_add(1) == plan.len() {
             last = Some(LastPage::new(
                 page.pgno(),
-                Checksum::of_page(page.pgno(), &buf),
+                PageChecksum::of(page.pgno(), &buf),
             ));
         }
         if encoder.writer_mut().len() >= FLUSH_AT {

@@ -12,7 +12,7 @@
 
 use std::num::NonZeroU32;
 
-use lsr_ltx::{Checksum, PageNo, PageSize, Timestamp, Txid};
+use lsr_ltx::{PageChecksum, PageNo, PageSize, Timestamp, Txid};
 use lsr_wal::{FrameCursor, FrameRef, WalOffset};
 
 /// The end of the WAL bytes covered by the newest staged L0 file.
@@ -126,13 +126,13 @@ pub enum Continuity {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LastPage {
     pgno: PageNo,
-    digest: Checksum,
+    digest: PageChecksum,
 }
 
 impl LastPage {
     /// The page `pgno` whose bytes checksum to `digest`.
     #[must_use]
-    pub const fn new(pgno: PageNo, digest: Checksum) -> Self {
+    pub const fn new(pgno: PageNo, digest: PageChecksum) -> Self {
         Self { pgno, digest }
     }
 
@@ -150,7 +150,7 @@ impl LastPage {
 
     /// The checksum of the page's bytes.
     #[must_use]
-    pub const fn digest(&self) -> Checksum {
+    pub const fn digest(&self) -> PageChecksum {
         self.digest
     }
 }

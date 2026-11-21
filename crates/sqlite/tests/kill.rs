@@ -118,7 +118,8 @@ fn any_page_holds(root: &Path, needle: &[u8]) -> bool {
         let file = std::fs::File::open(&path).unwrap();
         let mut decoder = ReadDecoder::new(file);
         while let Some(event) = decoder.next_event().unwrap() {
-            if let Event::Page { data, .. } = event {
+            if let Event::Page(page) = event {
+                let data = page.data();
                 found |= contains(data, needle);
             }
         }

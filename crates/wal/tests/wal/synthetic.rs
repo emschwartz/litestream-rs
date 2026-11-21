@@ -4,7 +4,7 @@ use std::cell::Cell;
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
 use std::rc::Rc;
 
-use lsr_ltx::{Checksum, lock_page};
+use lsr_ltx::{PageChecksum, lock_page};
 use lsr_wal::{
     ByteOrder, CommittedEnd, FrameFault, HEADER_LEN, HeaderError, OpenError, ReadPageError,
     ResumeError, Salts, ScanLimit, Tail, WalChecksum, WalError, WalHeader, WalOffset, WalReader,
@@ -138,7 +138,7 @@ fn scan_yields_each_transaction_then_a_clean_end() {
     assert_eq!(first.offset(), WalOffset::start(size(PS)));
     assert_eq!(
         first.digest(),
-        Checksum::of_page(first.pgno(), &page(PS, 11))
+        PageChecksum::of(first.pgno(), &page(PS, 11))
     );
     assert_eq!(scanned.at, *scanned.txs[1].end());
     assert_eq!(

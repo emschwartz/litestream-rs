@@ -1,7 +1,7 @@
 //! The `index` target: one page located and decoded out of order.
 
 use lsr_ltx::{
-    Checksum, Header, HeaderFields, INDEX_TAIL_LEN, PageIndex, PageSize, Timestamp, Txid,
+    DbChecksum, Header, HeaderFields, INDEX_TAIL_LEN, PageIndex, PageSize, Timestamp, Txid,
     TxidRange, decode_frame,
 };
 
@@ -35,7 +35,7 @@ fn build_header(spec: [u8; HEADER_SPEC_LEN]) -> Option<Header> {
         commit,
         txids: TxidRange::new(min, max)?,
         timestamp: Timestamp::from_unix_millis(i64::from(millis)),
-        pre_apply: (tracked && min != Txid::MIN).then_some(Checksum::EMPTY),
+        pre_apply: (tracked && min != Txid::MIN).then_some(DbChecksum::EMPTY),
         wal: None,
         node_id: 0,
     })

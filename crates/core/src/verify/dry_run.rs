@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use lsr_ltx::{Checksum, PageNo, PageSize, Timestamp, TxidRange};
+use lsr_ltx::{DbChecksum, DbPages, PageChecksum, PageNo, PageRef, PageSize, Timestamp, TxidRange};
 
 use super::VerifyError;
 use crate::inventory::Inventory;
@@ -18,16 +18,17 @@ use crate::store::{Listing, ObjectStore, PageLimit, ReadLen, StoreError};
 /// A [DatabaseSink] that keeps each page's checksum and nothing else: 8 bytes
 /// a page, no page bytes, and nothing is ever published.
 struct DigestSink<'a> {
-    pages: &'a mut BTreeMap<u32, Checksum>,
+    pages: &'a mut BTreeMap<u32, PageChecksum>,
 }
 
 impl DatabaseSink for DigestSink<'_> {
-    fn write_page(&mut self, pgno: PageNo, data: &[u8]) -> io::Result<()> {
-        self.pages.insert(pgno.get(), Checksum::of_page(pgno, data));
+    fn write_page(&mut self, page: PageRef<'_>) -> io::Result<()> {
+        self.pages.insert(page.pgno().get(), page.checksum());
         Ok(())
     }
 
-    fn truncate(&mut self, pages: u32, _page_size: PageSize) -> io::Result<()> {
+    fn truncate(&mut self, pages: DbPages, _page_size: PageSize) -> io::Result<()> {
+        let pages = pages.get();
         drop(self.pages.split_off(&pages.saturating_add(1)));
         Ok(())
     }
@@ -37,10 +38,10 @@ impl DatabaseSink for DigestSink<'_> {
         Ok(())
     }
 
-    fn checksum(&mut self, pages: u32, page_size: PageSize) -> io::Result<Checksum> {
+    fn checksum(&mut self, pages: DbPages, page_size: PageSize) -> io::Result<DbChecksum> {
         let zero_page = vec![0; page_size.bytes()];
-        let mut total = Checksum::EMPTY;
-        for n in 1..=pages {
+        let mut total = DbChecksum::EMPTY;
+        for n in 1..=pages.get() {
             // The lock page is the one number PageNo refuses.
             let Some(pgno) = PageNo::new(n, page_size) else {
                 continue;
@@ -49,7 +50,7 @@ impl DatabaseSink for DigestSink<'_> {
                 .pages
                 .get(&n)
                 .copied()
-                .unwrap_or_else(|| Checksum::of_page(pgno, &zero_page));
+                .unwrap_or_else(|| PageChecksum::of(pgno, &zero_page));
             total = total.toggle(page);
         }
         Ok(total)
@@ -157,7 +158,7 @@ pub(super) async fn digest_restore<S: ObjectStore>(
     store: &S,
     listed: Inventory,
     target: RestoreTarget,
-    pages: &mut BTreeMap<u32, Checksum>,
+    pages: &mut BTreeMap<u32, PageChecksum>,
 ) -> (Result<Restored, RestoreError>, usize, u64) {
     let counting = Counting {
         inner: store,

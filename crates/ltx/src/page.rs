@@ -7,6 +7,7 @@
 use std::fmt;
 use std::num::NonZeroU32;
 
+use crate::PageChecksum;
 use crate::conv::usize_from;
 
 /// Byte offset of SQLite's pending byte.
@@ -90,6 +91,117 @@ impl fmt::Display for PageNo {
     }
 }
 
+/// One page's bytes with the page size they are a page of: `data` is exactly
+/// one page long and `pgno` is a page a database of that size can hold, so a
+/// writer places it from the page size, never from the length of a slice.
+///
+/// ```
+/// # use lsr_ltx::{PageNo, PageRef, PageSize};
+/// let size = PageSize::new(4096).unwrap();
+/// let pgno = PageNo::new(2, size).unwrap();
+/// assert!(PageRef::new(pgno, size, &[0; 512]).is_none());
+/// assert_eq!(PageRef::new(pgno, size, &[0; 4096]).unwrap().offset(), 4096);
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageRef<'a> {
+    pgno: PageNo,
+    size: PageSize,
+    data: &'a [u8],
+}
+
+impl<'a> PageRef<'a> {
+    /// Returns `None` unless `data` is exactly one page of `size` and `pgno`
+    /// is not the lock page at `size`.
+    #[must_use]
+    pub fn new(pgno: PageNo, size: PageSize, data: &'a [u8]) -> Option<Self> {
+        let fits = data.len() == size.bytes() && PageNo::new(pgno.get(), size).is_some();
+        fits.then_some(Self { pgno, size, data })
+    }
+
+    /// The page number.
+    #[must_use]
+    pub const fn pgno(&self) -> PageNo {
+        self.pgno
+    }
+
+    /// The page size.
+    #[must_use]
+    pub const fn size(&self) -> PageSize {
+        self.size
+    }
+
+    /// Exactly one page of bytes.
+    #[must_use]
+    pub const fn data(&self) -> &'a [u8] {
+        self.data
+    }
+
+    /// Where the page starts in a database file: (pgno - 1) times the page size.
+    #[must_use]
+    pub fn offset(&self) -> u64 {
+        // At most (2^32 - 2) * 2^16, far inside u64.
+        u64::from(self.pgno.get().wrapping_sub(1)).wrapping_mul(u64::from(self.size.0))
+    }
+
+    /// The page's checksum.
+    #[must_use]
+    pub fn checksum(&self) -> PageChecksum {
+        PageChecksum::of(self.pgno, self.data)
+    }
+}
+
+/// A database's length in pages, as an LTX header's commit field stores it.
+///
+/// The lock page counts toward the length but is never held, so the last page
+/// a file of the database holds is [`DbPages::last_page`], not the length.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DbPages(u32);
+
+impl DbPages {
+    /// A database of no pages.
+    pub const EMPTY: Self = Self(0);
+
+    /// A database of `pages` pages.
+    #[must_use]
+    pub const fn new(pages: u32) -> Self {
+        Self(pages)
+    }
+
+    /// The length in pages.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    /// Whether `pgno` is inside the database.
+    #[must_use]
+    pub const fn contains(self, pgno: PageNo) -> bool {
+        pgno.get() <= self.0
+    }
+
+    /// The highest page a file of this database holds: the last page, or the
+    /// one below it when the last page is the lock page. `None` when empty.
+    #[must_use]
+    pub const fn last_page(self, page_size: PageSize) -> Option<PageNo> {
+        match PageNo::new(self.0, page_size) {
+            Some(pgno) => Some(pgno),
+            None => PageNo::new(self.0.saturating_sub(1), page_size),
+        }
+    }
+
+    /// The database's length in bytes.
+    #[must_use]
+    pub fn bytes(self, page_size: PageSize) -> u64 {
+        u64::from(self.0).wrapping_mul(u64::from(page_size.0))
+    }
+}
+
+impl fmt::Display for DbPages {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,5 +246,60 @@ mod tests {
             assert_eq!(PageNo::new(lock - 1, size).map(PageNo::get), Some(lock - 1));
             assert_eq!(PageNo::new(lock + 1, size).map(PageNo::get), Some(lock + 1));
         }
+    }
+
+    #[test]
+    fn a_page_ref_is_exactly_one_page_of_its_size() {
+        let small = PageSize::MIN;
+        let big = PageSize::new(4096).unwrap();
+        let pgno = PageNo::new(3, big).unwrap();
+        for len in [0, 511, 513, 4095, 4097] {
+            assert_eq!(PageRef::new(pgno, big, &vec![0; len]), None, "{len}");
+        }
+        let data = vec![7; 4096];
+        let page = PageRef::new(pgno, big, &data).unwrap();
+        assert_eq!(
+            (page.pgno(), page.size(), page.data()),
+            (pgno, big, &data[..])
+        );
+        assert_eq!(page.offset(), 2 * 4096);
+        assert_eq!(page.checksum(), PageChecksum::of(pgno, &data));
+        // A page number checked at one size can be another size's lock page.
+        let lock = PageNo::new(lock_page(small), big).unwrap();
+        assert_eq!(PageRef::new(lock, small, &[0; 512]), None);
+        let top = PageNo::new(u32::MAX, PageSize::MAX).unwrap();
+        let max = vec![0; 65536];
+        let last = PageRef::new(top, PageSize::MAX, &max).unwrap();
+        assert_eq!(last.offset(), u64::from(u32::MAX - 1) * 65536);
+    }
+
+    #[test]
+    fn the_last_page_of_a_database_skips_the_lock_page() {
+        for shift in 9..=16 {
+            let size = PageSize::new(1 << shift).unwrap();
+            let lock = lock_page(size);
+            let last = |n: u32| DbPages::new(n).last_page(size).map(PageNo::get);
+            assert_eq!(last(0), None);
+            assert_eq!(last(1), Some(1));
+            assert_eq!(last(lock - 1), Some(lock - 1));
+            assert_eq!(last(lock), Some(lock - 1));
+            assert_eq!(last(lock + 1), Some(lock + 1));
+        }
+    }
+
+    #[test]
+    fn a_database_holds_the_pages_up_to_its_length() {
+        let size = PageSize::new(4096).unwrap();
+        let pages = DbPages::new(5);
+        assert!(pages.contains(PageNo::new(1, size).unwrap()));
+        assert!(pages.contains(PageNo::new(5, size).unwrap()));
+        assert!(!pages.contains(PageNo::new(6, size).unwrap()));
+        assert!(!DbPages::EMPTY.contains(PageNo::new(1, size).unwrap()));
+        assert_eq!(pages.bytes(size), 5 * 4096);
+        assert_eq!(
+            DbPages::new(u32::MAX).bytes(PageSize::MAX),
+            u64::from(u32::MAX) * 65536
+        );
+        assert_eq!(pages.to_string(), "5");
     }
 }

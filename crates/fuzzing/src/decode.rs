@@ -15,9 +15,9 @@ impl From<Event<'_>> for Seen {
     fn from(event: Event<'_>) -> Self {
         match event {
             Event::Header(header) => Self::Header(header),
-            Event::Page { pgno, data } => Self::Page {
-                pgno,
-                data: data.to_vec(),
+            Event::Page(page) => Self::Page {
+                pgno: page.pgno(),
+                data: page.data().to_vec(),
             },
         }
     }

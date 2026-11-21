@@ -16,7 +16,7 @@ mod probe;
 
 use std::collections::BTreeMap;
 
-use lsr_ltx::{Checksum, PageSize};
+use lsr_ltx::{PageChecksum, PageSize};
 use lsr_wal::{
     ByteOrder, CommittedEnd, CommittedTx, FRAME_HEADER_LEN, FrameCursor, FrameFault, FrameRef,
     HEADER_LEN, OpenError, PageMap, PageMapError, ReadPageError, ResumeError, Salts, ScanLimit,
@@ -550,7 +550,7 @@ fn check_pages(reader: &mut WalReader<Probe>, frames: &[FrameRef], buf: &mut [u8
         if let Err(error) = reader.read_page(frame, buf) {
             violation(&format!("a scanned page does not read back: {error:?}"));
         }
-        if Checksum::of_page(frame.pgno(), buf) != frame.digest() {
+        if PageChecksum::of(frame.pgno(), buf) != frame.digest() {
             violation("a page read back does not match its digest");
         }
     }

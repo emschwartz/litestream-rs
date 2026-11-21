@@ -429,7 +429,7 @@ impl Rig {
                 while let Some(event) = decoder.next_event().unwrap() {
                     match event {
                         Event::Header(h) => header = Some(h),
-                        Event::Page { pgno, data } => pages.push((pgno, data.to_vec())),
+                        Event::Page(page) => pages.push((page.pgno(), page.data().to_vec())),
                     }
                 }
                 decoder.finish().unwrap();

@@ -19,7 +19,7 @@ use crate::frame::PAGE_HEADER_LEN;
 use crate::index::put_uvarint;
 use crate::order::PageSequence;
 use crate::trailer::check_post_apply;
-use crate::{Checksum, EncodeError, HEADER_LEN, Header, PageNo, Trailer};
+use crate::{DbChecksum, EncodeError, HEADER_LEN, Header, PageChecksum, PageNo, Trailer};
 
 /// Writes one LTX file to `W`.
 #[derive(Debug)]
@@ -31,7 +31,7 @@ pub struct Encoder<W> {
     offset: u64,
     index: Vec<u8>,
     /// The database checksum so far, for tracked snapshots only.
-    db: Option<Checksum>,
+    db: Option<DbChecksum>,
     failed: bool,
 }
 
@@ -61,7 +61,7 @@ impl<W: Write> Encoder<W> {
             file,
             offset: u64_from(HEADER_LEN),
             index: Vec::new(),
-            db: (header.tracked() && header.is_snapshot()).then_some(Checksum::EMPTY),
+            db: (header.tracked() && header.is_snapshot()).then_some(DbChecksum::EMPTY),
             failed: false,
         })
     }
@@ -96,7 +96,7 @@ impl<W: Write> Encoder<W> {
         self.seq = seq;
         self.file.update(&head);
         self.file.update(data);
-        self.db = self.db.map(|db| db.toggle(Checksum::of_page(pgno, data)));
+        self.db = self.db.map(|db| db.toggle(PageChecksum::of(pgno, data)));
         let size = u64_from(head.len()).saturating_add(u64_from(block.len()));
         put_uvarint(&mut self.index, u64::from(pgno.get()));
         put_uvarint(&mut self.index, self.offset);
@@ -116,7 +116,7 @@ impl<W: Write> Encoder<W> {
     /// post-apply checksum that does not fit, [`EncodeError::Io`] or
     /// [`EncodeError::Poisoned`] for a failed write. Nothing is written on the
     /// first three.
-    pub fn finish(mut self, post_apply: Option<Checksum>) -> Result<(W, Trailer), EncodeError> {
+    pub fn finish(mut self, post_apply: Option<DbChecksum>) -> Result<(W, Trailer), EncodeError> {
         if self.failed {
             return Err(EncodeError::Poisoned);
         }
@@ -132,9 +132,9 @@ impl<W: Write> Encoder<W> {
         put_uvarint(&mut tail, 0);
         let index_len = u64_from(tail.len().saturating_sub(PAGE_HEADER_LEN));
         tail.extend_from_slice(&index_len.to_be_bytes());
-        tail.extend_from_slice(&post_apply.map_or(0, Checksum::get).to_be_bytes());
+        tail.extend_from_slice(&post_apply.map_or(0, DbChecksum::get).to_be_bytes());
         self.file.update(&tail);
-        let trailer = Trailer::new(post_apply, self.file.finish());
+        let trailer = Trailer::new(post_apply, self.file.finish_file());
         tail.extend_from_slice(&trailer.file_checksum().get().to_be_bytes());
         self.writer.write_all(&tail)?;
         self.writer.flush()?;
@@ -161,12 +161,12 @@ impl<W: Write> Encoder<W> {
 /// # Errors
 ///
 /// [`EncodeError::Trailer`] when `post_apply` does not fit the header (a
-/// tracked file needs `Checksum::EMPTY`, an untracked one none), and
+/// tracked file needs `DbChecksum::EMPTY`, an untracked one none), and
 /// [`EncodeError::Order`] when the header is a snapshot with commit above 0.
 #[cfg(any(test, feature = "testing"))]
 pub fn encode_commit_zero(
     header: Header,
-    post_apply: Option<Checksum>,
+    post_apply: Option<DbChecksum>,
 ) -> Result<Vec<u8>, EncodeError> {
     Ok(Encoder::start(Vec::new(), header)?.finish(post_apply)?.0)
 }
@@ -189,7 +189,7 @@ mod tests {
             node_id: 0,
         })
         .unwrap();
-        let bytes = encode_commit_zero(header, Some(Checksum::EMPTY)).unwrap();
+        let bytes = encode_commit_zero(header, Some(DbChecksum::EMPTY)).unwrap();
         let mut decoder = Decoder::new();
         let mut rest = bytes.as_slice();
         while !rest.is_empty() {

@@ -34,10 +34,10 @@ fn staged_page(rig: &Rig, pgno: PageNo) -> Vec<Vec<u8>> {
             let mut decoder = ReadDecoder::new(bytes.as_slice());
             let mut found = None;
             while let Some(event) = decoder.next_event().unwrap() {
-                if let lsr_ltx::Event::Page { pgno: at, data } = event
-                    && at == pgno
+                if let lsr_ltx::Event::Page(page) = event
+                    && page.pgno() == pgno
                 {
-                    found = Some(data.to_vec());
+                    found = Some(page.data().to_vec());
                 }
             }
             found

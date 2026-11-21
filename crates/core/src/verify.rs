@@ -44,12 +44,13 @@
 
 use std::time::Duration;
 
-use lsr_ltx::{Checksum, DecodeError, Decoder, Header, PageSize, Txid, TxidRange};
+use lsr_ltx::{DbChecksum, DecodeError, Header, PageSize, Txid, TxidRange};
 use thiserror::Error;
 
 use self::dry_run::latest_restore;
 use crate::inventory::{Inventory, InventoryError, is_snapshot_start};
 use crate::layout::{FileInfo, FileKey, Level, StoredStamp};
+use crate::ltx_read::{LtxRead, ReadFault};
 use crate::plan::{KeyTarget, PlanOutcome, plan};
 use crate::restore::RestoreError;
 use crate::store::{ObjectStore, ReadLen, StoreError};
@@ -190,9 +191,9 @@ pub enum Finding {
         /// The later file.
         key: FileKey,
         /// The earlier file's post-apply checksum.
-        expected: Checksum,
+        expected: DbChecksum,
         /// The later file's pre-apply checksum.
-        found: Checksum,
+        found: DbChecksum,
         /// Whether the latest restore applies these two files in a row.
         in_latest_plan: bool,
     },
@@ -611,7 +612,7 @@ struct Before {
     key: FileKey,
     level: Level,
     through: Txid,
-    post_apply: Option<Checksum>,
+    post_apply: Option<DbChecksum>,
 }
 
 /// How the headers' timestamps differ from the store's.
@@ -738,54 +739,30 @@ impl<'a> Walk<'a> {
         store: &S,
         info: &FileInfo,
     ) -> Result<Option<Read>, VerifyError> {
-        let key = &info.key;
-        let mut stamp = None;
-        let mut decoder = Decoder::new();
-        let mut offset = 0_u64;
-        let mut opened = false;
-        let mut failure = None;
-        while failure.is_none() {
-            let got = if offset == 0 {
-                store
-                    .read_with_stamp(info, chunk_len())
-                    .await
-                    .map(|(chunk, stored)| {
-                        stamp = Some(stored);
-                        chunk
-                    })
-            } else {
-                store.read(key, offset, chunk_len()).await
-            };
-            let chunk = match got {
-                Ok(chunk) => chunk,
-                Err(StoreError::NotFound { .. }) => return Ok(None),
-                Err(err) => return Err(VerifyError::Store(err)),
-            };
-            if !opened {
-                opened = true;
-                self.files_read = self.files_read.saturating_add(1);
-            }
-            // The listed size is advisory: only the decoder knows where a file
-            // ends, and a short chunk is the end of the object (the read
-            // contract), so no empty read follows to learn it.
-            let len = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
-            offset = offset.saturating_add(len);
-            self.bytes_read = self.bytes_read.saturating_add(len);
-            failure = feed_all(&mut decoder, &chunk).err();
-            if len < chunk_len().get() {
-                break;
-            }
-        }
-        let header = decoder.header().copied();
-        let decoded = match failure {
-            Some(error) => Err(error),
-            None => decoder.finish(),
+        let first = match store.read_with_stamp(info, chunk_len()).await {
+            Ok(first) => first,
+            Err(StoreError::NotFound { .. }) => return Ok(None),
+            Err(err) => return Err(VerifyError::Store(err)),
+        };
+        let (chunk, stamp) = first;
+        self.files_read = self.files_read.saturating_add(1);
+        // The listed size is advisory: the read runs to where the decoder says
+        // the file ends, and a damaged file stops it at the damage.
+        let mut read = LtxRead::with_first(info.key, chunk_len(), chunk);
+        let result: Result<_, ReadFault> = read.read_verified(store, |_| Ok(())).await;
+        self.bytes_read = self.bytes_read.saturating_add(read.bytes_read());
+        let decoded = match result {
+            Ok(verified) => Ok(verified),
+            Err(ReadFault::Decode(error)) => Err(error),
+            Err(ReadFault::Store(StoreError::NotFound { .. })) => return Ok(None),
+            Err(ReadFault::Store(err)) => return Err(VerifyError::Store(err)),
+            Err(ReadFault::Rejected(never)) => match never {},
         };
         Ok(Some(Read {
-            header,
-            stamp,
+            header: read.header().copied(),
+            stamp: Some(stamp),
             decoded,
-            bytes: offset,
+            bytes: read.bytes_read(),
         }))
     }
 
@@ -853,15 +830,6 @@ impl<'a> Walk<'a> {
             post_apply: verified.trailer().post_apply(),
         });
     }
-}
-
-fn feed_all(decoder: &mut Decoder, chunk: &[u8]) -> Result<(), DecodeError> {
-    let mut rest = chunk;
-    while !rest.is_empty() {
-        let (used, _event) = decoder.feed(rest)?;
-        rest = rest.get(used..).unwrap_or_default();
-    }
-    Ok(())
 }
 
 #[expect(

@@ -199,7 +199,8 @@ impl Rig {
         while let Some(event) = decoder.next_event().unwrap() {
             match event {
                 Event::Header(h) => header = Some(h),
-                Event::Page { pgno, data } => {
+                Event::Page(page) => {
+                    let (pgno, data) = (page.pgno(), page.data());
                     assert!(data.iter().all(|b| *b == data[0]), "page {pgno:?}");
                     pages.insert(pgno.get(), data[0]);
                 }

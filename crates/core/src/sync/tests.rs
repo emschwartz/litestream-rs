@@ -163,7 +163,7 @@ fn decode(bytes: &[u8]) -> (Header, Vec<(PageNo, Vec<u8>)>) {
     while let Some(event) = decoder.next_event().unwrap() {
         match event {
             Event::Header(h) => header = Some(h),
-            Event::Page { pgno, data } => pages.push((pgno, data.to_vec())),
+            Event::Page(page) => pages.push((page.pgno(), page.data().to_vec())),
         }
     }
     decoder.finish().unwrap();
@@ -349,7 +349,7 @@ fn a_snapshot_records_every_page_it_ships() {
     assert_eq!(rig.pages.len(), 3);
     let files = rig.files();
     for (pgno, data) in &files[0].2 {
-        assert_eq!(rig.pages.get(*pgno), Some(Checksum::of_page(*pgno, data)));
+        assert_eq!(rig.pages.get(*pgno), Some(PageChecksum::of(*pgno, data)));
     }
 }
 
@@ -380,7 +380,7 @@ fn a_walgrowth_page_is_recorded_by_its_read_and_a_later_snapshot_checks_it() {
     let grown = position_of(rig.step_at(Step::Incremental(first)).unwrap());
     assert_eq!(
         rig.pages.get(pg(3)),
-        Some(Checksum::of_page(pg(3), &[db_fill(3); 512]))
+        Some(PageChecksum::of(pg(3), &[db_fill(3); 512]))
     );
     rig.db.write_page(pg(3), &[0x44; 512]);
     let failed = rig.step_at(operator_snapshot(&grown)).unwrap_err();
@@ -403,7 +403,7 @@ fn a_local_rewind_empties_the_table_and_raises_no_mismatch() {
     assert_eq!(rig.pages.mismatch(), None);
     assert_eq!(
         rig.pages.get(pg(3)),
-        Some(Checksum::of_page(pg(3), &[0x33; 512]))
+        Some(PageChecksum::of(pg(3), &[0x33; 512]))
     );
 }
 

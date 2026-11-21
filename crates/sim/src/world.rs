@@ -84,7 +84,7 @@ fn rewritten(bytes: &[u8], edit: impl FnOnce(&mut lsr_ltx::HeaderFields)) -> Opt
         let (used, event) = decoder.feed(rest).ok()?;
         match event {
             Some(Event::Header(found)) => header = Some(found),
-            Some(Event::Page { pgno, data }) => pages.push((pgno, data.to_vec())),
+            Some(Event::Page(page)) => pages.push((page.pgno(), page.data().to_vec())),
             None => {}
         }
         if used == 0 {

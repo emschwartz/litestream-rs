@@ -16,8 +16,8 @@ fn page(fill: u8) -> Vec<u8> {
     vec![fill; PS.bytes()]
 }
 
-fn digest(n: u32, fill: u8) -> Checksum {
-    Checksum::of_page(pg(n), &page(fill))
+fn digest(n: u32, fill: u8) -> PageChecksum {
+    PageChecksum::of(pg(n), &page(fill))
 }
 
 fn table() -> PageTable {
