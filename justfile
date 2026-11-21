@@ -2,7 +2,7 @@
 default: check
 
 # The land gate: format, lints, tests. A branch lands only when this is green.
-check: fmt-check clippy test doctest features ledger-fresh
+check: fmt-check clippy test doctest features upstream-test-map-fresh
 
 fmt-check:
     cargo fmt --all -- --check
@@ -93,10 +93,10 @@ sqlite-big:
 # The VFS test's C application needs a SQLite with sqlite3_load_extension. It takes SQLITE3_CFLAGS and
 # SQLITE3_LIBS when set, then on macOS Homebrew's (`brew install sqlite`; the system one lacks
 # the function), then `pkg-config sqlite3`, then plain -lsqlite3 (crates/compat/src/vfs.rs).
-# The ledger's counterpart check is ignored too, but it needs the listing ledger-fresh writes.
+# The test map's counterpart check is ignored too, but it needs the listing upstream-test-map-fresh writes.
 compat:
     ./scripts/build-go-litestream.sh
-    cargo nextest run -p lsr-compat --run-ignored all --locked -E 'not test(=ledger::every_counterpart_exists)'
+    cargo nextest run -p lsr-compat --run-ignored all --locked -E 'not test(=upstream_test_map::every_counterpart_exists)'
 
 # Build the named Go versions (tags, commits, `releases` for every v0.5.N tag, `main` for
 # upstream's newest staged file) and run the live tests over exactly those: just compat-live v0.5.3 main.
@@ -223,28 +223,28 @@ soak-tigris hours:
 upstream:
     ./scripts/fetch-upstream.sh
 
-# Every counterpart the upstream-test ledger (docs/ledger.toml) names is a Rust test that exists,
+# Every counterpart the upstream test map (docs/upstream-test-map.toml) names is a Rust test that exists,
 # so a renamed or deleted counterpart fails the gate. The Rust test list is generated here into
 # target/ and never committed, so a branch that adds a test touches no shared list. Some tests
-# are Linux-only and the ledger names some of them, so on another OS the step is skipped; CI, on
+# are Linux-only and the test map names some of them, so on another OS the step is skipped; CI, on
 # Linux, still enforces it.
-ledger-fresh:
+upstream-test-map-fresh:
     #!/usr/bin/env bash
     set -euo pipefail
     if [ "$(uname)" != Linux ]; then
-        echo "ledger-fresh: skipped: the ledger names Linux-only tests"
+        echo "upstream-test-map-fresh: skipped: the test map names Linux-only tests"
         exit 0
     fi
     # Absolute, since nextest runs the test in the package's directory.
-    mkdir -p "${CARGO_TARGET_DIR:-target}/ledger"
-    list="$(cd "${CARGO_TARGET_DIR:-target}/ledger" && pwd)/rust-tests.txt"
+    mkdir -p "${CARGO_TARGET_DIR:-target}/upstream-test-map"
+    list="$(cd "${CARGO_TARGET_DIR:-target}/upstream-test-map" && pwd)/rust-tests.txt"
     cargo nextest list --workspace --all-features --locked --run-ignored all --message-format oneline --color never > "$list"
-    LSR_LEDGER_RUST_TESTS="$list" cargo nextest run -p lsr-compat --test compat --locked --run-ignored only -E 'test(=ledger::every_counterpart_exists)'
+    LSR_UPSTREAM_TEST_MAP_RUST_TESTS="$list" cargo nextest run -p lsr-compat --test compat --locked --run-ignored only -E 'test(=upstream_test_map::every_counterpart_exists)'
 
-# Regenerate the upstream test names in docs/ledger/upstream-tests.txt from the pinned clones
-# (`just upstream` first). The ledger test in `check` reads this file, never the clone.
-ledger:
-    ./scripts/upstream-tests.sh > docs/ledger/upstream-tests.txt
+# Regenerate the upstream test names in docs/upstream-test-map/upstream-tests.txt from the pinned clones
+# (`just upstream` first). The test map test in `check` reads this file, never the clone.
+upstream-test-map:
+    ./scripts/upstream-tests.sh > docs/upstream-test-map/upstream-tests.txt
 
 # The large exhaustive planner sweeps (crates/core/tests/core/plan_exhaustive.rs): every inventory of
 # up to five files, and of four files over a wider range. Minutes; not part of check.

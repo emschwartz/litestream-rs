@@ -1,9 +1,9 @@
 #!/bin/sh
-# Lists every upstream Go test the ledger (docs/ledger.toml) must map: each top-level
+# Lists every upstream Go test the test map (docs/upstream-test-map.toml) must map: each top-level
 # `func TestX(t *testing.T)` and each `t.Run("literal", ...)` inside one, nested as
 # TestX/outer/inner, one per line as `<repo>/<file><TAB><name>`, sorted. Reads the
 # pinned clones in .upstream/ (`just upstream`); its output is committed as
-# docs/ledger/upstream-tests.txt (`just ledger`) so the ledger test needs no clone.
+# docs/upstream-test-map/upstream-tests.txt (`just upstream-test-map`) so the test map test needs no clone.
 #
 # Subtests named by an expression (a table's tt.name, fmt.Sprintf) are not listed: their
 # names exist only at run time, and the enclosing top-level test's entry covers them.

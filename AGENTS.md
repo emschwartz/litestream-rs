@@ -33,7 +33,7 @@
 - A crate's integration tests are one binary, `crates/<name>/tests/<name>/main.rs`, with a module per file: add a module there, not a new `tests/*.rs` file, which would link a binary of its own (lsr-compat's `layout` test refuses a second one). A test that starts the binary again as a child names its test by full path (`sidecar::exec_child`), or uses the crate root's `child_process_entry` (lsr-sqlite).
 
 ## Build and commands
-- Development runs on Linux and macOS; CI runs on Linux. `just check` passes on both (on macOS it skips `ledger-fresh`, since the ledger names Linux-only tests).
+- Development runs on Linux and macOS; CI runs on Linux. `just check` passes on both (on macOS it skips `upstream-test-map-fresh`, since the test map names Linux-only tests).
 - `just check` is the land gate: format, clippy, tests. Scope while iterating: `cargo clippy -p <crate> --all-targets -- -D warnings`, `cargo nextest run -p <crate> <test name>`. The README lists which tests need nothing, Docker, Go or Tigris.
 - `just upstream` clones the pinned upstream sources into `.upstream/` (read-only reference: `litestream` at 041a8c3, `ltx` at v0.5.3).
 - Crates live in `crates/<name>` and are named `lsr-<name>` (working prefix).

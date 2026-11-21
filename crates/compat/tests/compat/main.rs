@@ -16,8 +16,6 @@ mod handover;
 #[cfg(test)]
 mod layout;
 #[cfg(test)]
-mod ledger;
-#[cfg(test)]
 mod live_matches_sim;
 #[cfg(test)]
 mod live_source;
@@ -35,6 +33,8 @@ mod rust_chains;
 mod s3;
 #[cfg(test)]
 mod sidecar;
+#[cfg(test)]
+mod upstream_test_map;
 #[cfg(test)]
 mod verify;
 #[cfg(test)]

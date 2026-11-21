@@ -1,5 +1,5 @@
-# The upstream-test ledger: every Go test at the pinned upstream commits (litestream
-# 041a8c3, ltx v0.5.3), as listed in docs/ledger/upstream-tests.txt by
+# The upstream test map: every Go test at the pinned upstream commits (litestream
+# 041a8c3, ltx v0.5.3), as listed in docs/upstream-test-map/upstream-tests.txt by
 # scripts/upstream-tests.sh, mapped to exactly one of:
 #   counterpart = "<nextest binary id>::<test path>" (or a list): Rust tests that check
 #                 the same behaviour, each one `cargo nextest list` prints;
@@ -7,8 +7,8 @@
 #                 differently by a named Rust test);
 #   missing     = what a Rust test should check: the work list.
 # One table per upstream file; keys are `TestX` or `TestX/subtest` as the script prints
-# them. crates/compat/tests/compat/ledger.rs checks the whole file in `just check`, whose
-# `ledger-fresh` step lists the Rust tests into target/ and checks every counterpart
+# them. crates/compat/tests/compat/upstream_test_map.rs checks the whole file in `just check`, whose
+# `upstream-test-map-fresh` step lists the Rust tests into target/ and checks every counterpart
 # against that list; nothing needs regenerating after adding or renaming a Rust test.
 
 ["litestream/_examples/library/library_example_test.go"]
