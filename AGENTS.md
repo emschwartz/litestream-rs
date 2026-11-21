@@ -13,6 +13,7 @@
 - Sans-IO core: decisions are pure functions over typed inputs; I/O sits behind traits (`Clock`, `Sleeper`, `Entropy`, `ObjectStore` for the replica and for local staging, `WalSource`, `PageSource`, `Checkpointer`, `DatabaseSink`) so the simulator can drive every path.
 - Never use bytes that were not verified on the read that produced them.
 - Bounded everything: channels, retries, fan-in, memory per file. No unbounded queue. Every retry wait is capped, and a failure that persists is a typed degraded state the health handle reports (D7); it never retries silently and never spins.
+- No panic in release builds. Assertions come in three tiers: `debug_assert!` for cheap pre and postconditions (positive and negative space); `invariant!(cond, BugSite::X)` for invariants whose violation release must report, a panic in debug and test builds and `Fault::Bug` in release, which rebuilds the engine instead of killing the host; the `verify` feature (`lsr_core::VERIFY`, on in the sim, fuzz and tests, off in release) for expensive checks.
 - No caching and no parallelism unless a measurement in the PR justifies it.
 
 ## Rust style
