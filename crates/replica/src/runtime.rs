@@ -169,8 +169,9 @@ impl Park for SystemPark {
 }
 
 /// Chance from the standard library's randomly keyed hasher; jitter needs spread, not secrecy.
+/// The entropy [`Runtime::system`] uses, and the `lsr` commands' retry layer.
 #[derive(Debug, Default)]
-struct OsEntropy {
+pub struct OsEntropy {
     state: RandomState,
     draws: AtomicU64,
 }
@@ -340,5 +341,7 @@ mod tests {
             assert!(entropy.below(upper) < upper);
         }
         assert_eq!(entropy.below(0), 0);
+        let draws: Vec<u64> = (0..64).map(|_| entropy.below(1000)).collect();
+        assert!(draws.iter().any(|draw| *draw != draws[0]), "{draws:?}");
     }
 }

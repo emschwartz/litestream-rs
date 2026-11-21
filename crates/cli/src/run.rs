@@ -764,7 +764,7 @@ async fn files_on_s3<T: lsr_store_s3::Transport>(
         .map_err(InventoryError::Store)?;
     Ok(Done::Files {
         inventory,
-        stamp_fallbacks: Some(store.inner().fell_back()),
+        stamp_fallbacks: Some(store.inner().stamp_stats().fell_back),
         json,
     })
 }

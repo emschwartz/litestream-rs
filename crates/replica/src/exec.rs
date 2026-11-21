@@ -19,8 +19,10 @@ impl Wake for ThreadWaker {
     }
 }
 
-/// Runs `fut` to completion on the calling thread.
-pub(crate) fn block_on<F: Future>(fut: F) -> F::Output {
+/// Runs `fut` to completion on the calling thread, parking it while the future is pending.
+/// The one small executor of the workspace's blocking callers (the replicator thread, the
+/// `lsr` commands); it links no runtime.
+pub fn block_on<F: Future>(fut: F) -> F::Output {
     let mut fut = pin!(fut);
     let waker = Waker::from(Arc::new(ThreadWaker(thread::current())));
     let mut cx = Context::from_waker(&waker);

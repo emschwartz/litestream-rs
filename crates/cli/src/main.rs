@@ -2,44 +2,20 @@
 //!
 //! A thin root: collect arguments, parse, run, print, exit. Stdout carries only
 //! the result; every failure is one line on stderr. The stores are async over
-//! blocking file I/O and complete without a reactor, so a thread-parking
-//! `block_on` of a few lines drives them and no runtime is linked.
+//! blocking file I/O and complete without a reactor, so the library's
+//! thread-parking `block_on` drives them and no runtime is linked.
 
 mod args;
 mod render;
 mod replica;
 mod run;
 
-use std::future::Future;
 use std::io::{self, Write};
-use std::pin::pin;
 use std::process::ExitCode;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
-use std::thread::{self, Thread};
 
 use args::UsageError;
+use lsr_replica::block_on;
 use run::{CliError, Done, Exit};
-
-struct ThreadWaker(Thread);
-
-impl Wake for ThreadWaker {
-    fn wake(self: Arc<Self>) {
-        self.0.unpark();
-    }
-}
-
-fn block_on<F: Future>(fut: F) -> F::Output {
-    let mut fut = pin!(fut);
-    let waker = Waker::from(Arc::new(ThreadWaker(thread::current())));
-    let mut cx = Context::from_waker(&waker);
-    loop {
-        match fut.as_mut().poll(&mut cx) {
-            Poll::Ready(out) => return out,
-            Poll::Pending => thread::park(),
-        }
-    }
-}
 
 fn command_line() -> Result<Vec<String>, UsageError> {
     std::env::args_os()

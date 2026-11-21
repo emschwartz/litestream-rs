@@ -56,6 +56,7 @@ mod thread;
 pub use config::{Config, NonZeroDuration, ReaderTracking, SyncLimits};
 pub use error::{RestoreError, StartError};
 pub use events::{ChannelSink, Event, EventReceiver, EventSink};
+pub use exec::block_on;
 pub use health::{
     Booted, Counters, Gone, Health, HostNotice, Mismatch, OpCounters, Phase, Stopped,
     StoreCounters, Verification, VerifyFailure, VerifyOutcome, VerifyRuns,
@@ -65,7 +66,7 @@ pub use replicator::{FinalSync, Replicator};
 pub use restore::{restore, restore_if_missing, verify};
 #[cfg(feature = "testing")]
 pub use runtime::FakeClockHandle;
-pub use runtime::{CALLER_SLICE, Park, Runtime};
+pub use runtime::{CALLER_SLICE, OsEntropy, Park, Runtime};
 pub use store::{BoxFuture, DynStore, DynUpload};
 
 pub use lsr_core::{
