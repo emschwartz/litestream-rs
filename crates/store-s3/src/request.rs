@@ -39,16 +39,13 @@ mod raw;
 mod tamper;
 
 #[cfg(feature = "testing")]
-pub use raw::{
-    MAX_UPLOAD_PAGES, OpenUpload, RawError, abandon_upload, abort_upload, open_uploads, send_raw,
-    xml_text,
-};
+pub use raw::{OpenUpload, abandon_upload, abort_upload, open_uploads};
 
 /// How long a presigned URL stays valid.
 const EXPIRES_IN: Duration = Duration::from_secs(300);
 
 /// Go's `MaxKeys`: the most one DeleteObjects may name.
-pub const MAX_DELETE_KEYS: usize = 1000;
+pub(crate) const MAX_DELETE_KEYS: usize = 1000;
 
 // S3's DeleteObjects cap, and room for a whole delete job (core keeps one under
 // `MAX_DELETE`) in one request.
@@ -243,14 +240,14 @@ pub fn level_prefix(prefix: &Prefix, level: Level) -> String {
 
 /// The key a listing seeks past to start after `cursor`: the cursor's own full key.
 #[must_use]
-pub fn start_after(prefix: &Prefix, level: Level, cursor: TxidRange) -> String {
+pub(crate) fn start_after(prefix: &Prefix, level: Level, cursor: TxidRange) -> String {
     format!("{}{}.ltx", level_prefix(prefix, level), cursor)
 }
 
 /// `Range: bytes=<offset>-<end>`. The end saturates at `u64::MAX`, which is
 /// valid HTTP; Go computes `off+size-1` unchecked (rc.go:693-707).
 #[must_use]
-pub fn range_header(offset: u64, len: ReadLen) -> String {
+pub(crate) fn range_header(offset: u64, len: ReadLen) -> String {
     let end = offset.saturating_add(len.get().saturating_sub(1));
     format!("bytes={offset}-{end}")
 }

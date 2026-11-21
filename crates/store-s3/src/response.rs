@@ -158,7 +158,9 @@ pub fn parse_head(r: &HttpResponse) -> Result<Head, ResponseError> {
 ///
 /// # Errors
 /// [`ResponseError::BadCreatedAt`] when the created-at time is present and does not parse.
-pub fn parse_created_at_header(r: &HttpResponse) -> Result<Option<Timestamp>, ResponseError> {
+pub(crate) fn parse_created_at_header(
+    r: &HttpResponse,
+) -> Result<Option<Timestamp>, ResponseError> {
     match r.header(CREATED_AT_HEADER) {
         None => Ok(None),
         Some(text) => Timestamp::parse_rfc3339(text)

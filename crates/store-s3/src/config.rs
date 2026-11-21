@@ -298,7 +298,7 @@ pub struct S3Config {
 const DEFAULT_DEADLINE: Duration = Duration::from_secs(60);
 
 /// Multipart parts in flight unless told otherwise (Go: `DefaultConcurrency`).
-pub const DEFAULT_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(4);
+pub(crate) const DEFAULT_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(4);
 
 /// Multipart parts in flight on Cloudflare R2 unless told otherwise. Go forces
 /// 2 there; here a configured value wins, because the cap behind it (about 2
@@ -307,7 +307,7 @@ pub const DEFAULT_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(4
 /// Tigris has no special case: it documents no limit and its own docs use 8
 /// concurrent parts, so it gets [`DEFAULT_CONCURRENCY`] (Go's 2 there was a
 /// conservative default with no measured limit).
-pub const R2_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(1);
+pub(crate) const R2_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(1);
 
 /// Creation-time HEADs in flight at once. Go allows 50 (`MetadataConcurrency`),
 /// a figure taken from AWS's 5,500 HEAD/s per prefix and never measured on R2

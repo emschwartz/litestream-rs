@@ -37,17 +37,11 @@ mod upload;
 #[cfg(feature = "ureq")]
 mod ureq_transport;
 
-pub use chain::{
-    ACCESS_KEY_ID_VARS, CONFIG_FILE_VAR, CredentialChain, CredentialError, DEFAULT_PROFILE,
-    DEFAULT_PROFILE_VAR, EnvGap, FileLook, FileOutcome, HOME_VAR, MAX_SHARED_FILE_BYTES,
-    PROFILE_VAR, Resolved, SECRET_ACCESS_KEY_VARS, SESSION_TOKEN_VAR, SHARED_CREDENTIALS_FILE_VAR,
-    Source, Tried,
-};
+pub use chain::{CredentialChain, CredentialError, EnvGap, FileOutcome, Resolved, Source, Tried};
 pub use classify::{S3Code, classify, classify_transport, is_range_past_end};
 pub use config::{
-    BucketName, CREATION_TIME_CONCURRENCY, ConfigError, DEFAULT_CONCURRENCY, DEFAULT_REGION,
-    Endpoint, PartSize, Prefix, Provider, R2_CONCURRENCY, READ_CONCURRENCY, Region, S3Config,
-    UrlStyle,
+    BucketName, CREATION_TIME_CONCURRENCY, ConfigError, DEFAULT_REGION, Endpoint, PartSize, Prefix,
+    Provider, READ_CONCURRENCY, Region, S3Config, UrlStyle,
 };
 pub use credentials::{S3Credentials, SecretString};
 #[cfg(feature = "testing")]
@@ -55,14 +49,11 @@ pub use fake::FakeS3;
 #[cfg(feature = "testing")]
 pub use fault::{Fault, FaultTransport, RequestShape, Shape};
 pub use request::{
-    HttpRequest, MAX_DELETE_KEYS, Method, RequestBuilder, RequestError, UploadId, WriteRequest,
-    level_prefix, object_key, range_header, start_after,
+    HttpRequest, Method, RequestBuilder, RequestError, UploadId, WriteRequest, level_prefix,
+    object_key,
 };
 #[cfg(feature = "testing")]
-pub use request::{
-    MAX_UPLOAD_PAGES, OpenUpload, RawError, abandon_upload, abort_upload, open_uploads, send_raw,
-    xml_text,
-};
+pub use request::{OpenUpload, abandon_upload, abort_upload, open_uploads};
 #[cfg(feature = "reqwest")]
 pub use reqwest_transport::{ReqwestSetupError, ReqwestTransport};
 pub use response::{
@@ -70,7 +61,7 @@ pub use response::{
     parse_create, parse_delete_failures, parse_head, parse_list, quoted_md5,
 };
 pub use store::{ListStats, S3Store, SystemClock};
-pub use transport::{BATCH_STACK, HttpResponse, Transport, TransportError, send_on_threads};
+pub use transport::{HttpResponse, Transport, TransportError, send_on_threads};
 pub use upload::S3Upload;
 #[cfg(feature = "ureq")]
 pub use ureq_transport::UreqTransport;

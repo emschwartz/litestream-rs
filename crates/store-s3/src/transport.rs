@@ -174,7 +174,7 @@ pub trait Transport: Send + Sync {
 /// The stack of a batch worker thread: an HTTPS request through ureq and
 /// rustls needs 48 KiB (see `lsr-replica`'s `stack` module for how that was
 /// measured), and this is about five times that.
-pub const BATCH_STACK: usize = 256 * 1024;
+pub(crate) const BATCH_STACK: usize = 256 * 1024;
 
 /// One result slot per request of a batch.
 type Slots = Vec<Option<Result<HttpResponse, TransportError>>>;
