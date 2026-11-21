@@ -175,3 +175,45 @@ mod fixed {
         }
     }
 }
+
+#[cfg(test)]
+mod lapse {
+    use lsr_sim::run::run_ops;
+    use lsr_sim::{Op, Opts, OtherProcessMode, Seed};
+
+    /// The engine's read transaction lapses; another process truncates the
+    /// WAL and the app commits, so the next sync snapshots. Then the app
+    /// commits again and another process restarts the WAL before the engine
+    /// reads that commit. The simulated source answered committed reads
+    /// under the old hold without retaking the read transaction, so the
+    /// engine took the restart as harmless and the replica lost the commit.
+    #[test]
+    fn a_restart_after_a_lapsed_read_lock_loses_no_commit() {
+        let ops = [
+            Op::Tick,
+            Op::Tick,
+            Op::Tick,
+            Op::Tick,
+            Op::OurReader { begin: false },
+            Op::OtherProcessCheckpoint(OtherProcessMode::Truncate),
+            Op::Commit {
+                pages: 1,
+                grow: false,
+            },
+            Op::Tick,
+            Op::Tick,
+            Op::Commit {
+                pages: 1,
+                grow: false,
+            },
+            Op::OtherProcessCheckpoint(OtherProcessMode::Restart),
+            Op::Commit {
+                pages: 2,
+                grow: true,
+            },
+        ];
+        if let Err(failure) = run_ops(Seed::new(0x3a), &ops, &Opts::default()) {
+            panic!("{}", failure.violation);
+        }
+    }
+}
