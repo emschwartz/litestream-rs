@@ -1152,6 +1152,8 @@ lsr-sim::snapshot_causes a_wiped_meta_continues_from_the_replicas_tip
 lsr-sim::snapshot_causes every_cause_has_a_scenario
 lsr-sim::snapshot_causes every_scenario_runs
 lsr-sim::soak soak::rotating_seeds
+lsr-sim::sqlite_rules rules::a_growing_commit_writes_every_page_it_adds
+lsr-sim::sqlite_rules rules::a_growing_commit_writes_the_pages_it_freed
 lsr-sim::sqlite_rules rules::our_reader_blocks_leaving_wal_mode
 lsr-sim::sqlite_rules rules::pinned_above_zero_blocks_all_modes
 lsr-sim::sqlite_rules rules::pinned_on_zero_restarts_once

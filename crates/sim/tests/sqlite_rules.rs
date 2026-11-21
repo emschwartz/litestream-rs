@@ -16,13 +16,14 @@
 #[cfg(test)]
 mod rules {
     use std::fs;
+    use std::io::Cursor;
     use std::path::PathBuf;
     use std::time::Duration;
 
     use lsr_core::{CheckpointMode, Checkpointer};
     use lsr_ltx::{PageNo, PageSize};
     use lsr_sim::{ReaderId, SimSqlite, StrangerMode};
-    use lsr_wal::{HEADER_LEN, WalHeader};
+    use lsr_wal::{HEADER_LEN, ScanLimit, TxOutcome, WalHeader, WalReader};
     use proptest::prelude::*;
     use rusqlite::Connection;
     use tempfile::TempDir;
@@ -384,6 +385,104 @@ mod rules {
         assert!(!sim.rewrite_page_size(bigger));
         assert!(sim.our_reader_end());
         assert!(sim.rewrite_page_size(bigger));
+    }
+
+    /// Each committed transaction in `wal`: its frames' page numbers and its database size.
+    fn transactions(wal: &[u8]) -> Vec<(Vec<u32>, u32)> {
+        let mut reader = WalReader::open(Cursor::new(wal)).unwrap();
+        let mut cursor = reader.cursor_at_start();
+        let mut out = Vec::new();
+        while let TxOutcome::Tx(tx) = reader
+            .next_tx(&cursor, ScanLimit::FirstInvalidFrame)
+            .unwrap()
+        {
+            out.push((
+                tx.frames().iter().map(|f| f.pgno().get()).collect(),
+                tx.commit(),
+            ));
+            cursor = *tx.end();
+        }
+        out
+    }
+
+    /// Whether `pages` holds every page from `old + 1` to `new`.
+    fn writes_added(pages: &[u32], old: u32, new: u32) -> bool {
+        (old.saturating_add(1)..=new).all(|pgno| pages.contains(&pgno))
+    }
+
+    /// What `sqlite::tests::power_crash_keeps_checkpointed_pages` builds its history on. A
+    /// transaction that grew the database, spilled and shrank again before it committed leaves
+    /// its spilled frames above its commit's size in the WAL, in SQLite and in the model. A
+    /// commit that grows the database writes every page it adds, so such an old frame is never
+    /// the newest of a page a later growth brings back; a growth that wrote only its last page
+    /// would leave the page reading a frame no checkpoint copies.
+    #[test]
+    fn a_growing_commit_writes_every_page_it_adds() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.db");
+        let app = open(&path);
+        app.execute_batch(&format!(
+            "PRAGMA page_size = {PAGE_SIZE}; PRAGMA auto_vacuum = FULL; PRAGMA journal_mode = WAL;
+             CREATE TABLE a (v BLOB); INSERT INTO a VALUES (randomblob(8));"
+        ))
+        .unwrap();
+        pragma(&app, StrangerMode::Truncate);
+        app.execute_batch(
+            "PRAGMA cache_size = 1;
+             BEGIN; CREATE TABLE b (v BLOB); INSERT INTO b VALUES (randomblob(2500));
+             DROP TABLE b; UPDATE a SET v = randomblob(8); COMMIT;
+             PRAGMA cache_size = -2000;
+             BEGIN; CREATE TABLE c (v BLOB); INSERT INTO c VALUES (randomblob(1200)); COMMIT;",
+        )
+        .unwrap();
+        let txs = transactions(&fs::read(dir.path().join("test.db-wal")).unwrap());
+        let [(shrunk, small), (grown, big)] = txs.as_slice() else {
+            panic!("two transactions: {txs:?}");
+        };
+        assert!(
+            shrunk.iter().any(|pgno| pgno > small),
+            "spilled frames stay: {txs:?}"
+        );
+        assert!(big > small && writes_added(grown, *small, *big), "{txs:?}");
+
+        let sim = SimSqlite::new(page_size(), 4, 1);
+        let seven = PageNo::new(7, page_size()).unwrap();
+        assert!(sim.spill(&[(seven, vec![0xee; 512])]));
+        sim.commit(&pages(0b0001, 1), 4).unwrap();
+        let txs = transactions(&sim.wal_file().unwrap());
+        assert_eq!(
+            txs,
+            [(vec![7, 2], 4)],
+            "the model keeps the spilled frame too"
+        );
+    }
+
+    /// Pages a growing transaction frees again before it commits are written all the same:
+    /// SQLite's hint not to write a freed page does not reach the WAL.
+    #[test]
+    fn a_growing_commit_writes_the_pages_it_freed() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.db");
+        let app = open(&path);
+        app.execute_batch(&format!(
+            "PRAGMA page_size = {PAGE_SIZE}; PRAGMA journal_mode = WAL;
+             CREATE TABLE a (v BLOB); INSERT INTO a VALUES (randomblob(8));"
+        ))
+        .unwrap();
+        pragma(&app, StrangerMode::Truncate);
+        let old: u32 = app
+            .query_row("PRAGMA page_count", [], |row| row.get(0))
+            .unwrap();
+        app.execute_batch(
+            "BEGIN; CREATE TABLE b (v BLOB); INSERT INTO b VALUES (randomblob(3000));
+             DELETE FROM b; COMMIT;",
+        )
+        .unwrap();
+        let txs = transactions(&fs::read(dir.path().join("test.db-wal")).unwrap());
+        let [(grown, new)] = txs.as_slice() else {
+            panic!("one transaction: {txs:?}");
+        };
+        assert!(*new > old && writes_added(grown, old, *new), "{txs:?}");
     }
 
     #[test]

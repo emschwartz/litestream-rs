@@ -25,6 +25,14 @@
 //!   `nBackfill == mxFrame`, else mark `mxFrame`. A writer that held mark 0
 //!   takes mark `mxFrame` (after any restart) before its first frame.
 //!
+//! A reader takes each page's newest frame at or below `mxFrame`, as SQLite's
+//! `walFindFrame` does, but ignores SQLite's floor (`minFrame`, `nBackfill + 1` when the
+//! read began). The two differ only for a page whose newest frame is above an old
+//! commit's size, so no checkpoint copied it, and that a later growth leaves unwritten.
+//! SQLite never grows that way: a growing commit writes every page it adds, spilled and
+//! freed ones included (`a_growing_commit_writes_every_page_it_adds`), so callers that
+//! grow the database must write the added pages too.
+//!
 //! The connections are the app (commits, spills, a stranger's checkpoints), our
 //! read connection, our pool connection (checkpoints and `bump_seq`), the
 //! barrier and write-lock transactions, and stranger readers. Only the app and the
