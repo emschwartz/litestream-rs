@@ -657,6 +657,81 @@ fn restore_reports_stamps_read() {
     assert_eq!(store.stamp_calls(), 4);
 }
 
+/// Transactions 1 and 2, then a compacted file for 3 to 5 whose finer files
+/// are gone: an instant at 3.5 s falls inside it.
+fn straddled_replica() -> MemStore {
+    let store = MemStore::with_listed_last_modified();
+    put_spec(&store, 9, &Spec::plain(512, 2, 1, 1, &[(1, 1), (2, 2)]));
+    put_spec(&store, 0, &Spec::plain(512, 2, 2, 2, &[(2, 9)]));
+    put_spec(&store, 1, &Spec::plain(512, 3, 3, 5, &[(1, 5), (3, 7)]));
+    store
+}
+
+fn run_as_of_inside(
+    store: &impl ObjectStore,
+    as_of_inside: AsOfInside,
+) -> (Result<Restored, RestoreError>, MemSink) {
+    let sink = MemSink::new();
+    let target = RestoreTarget::AsOf(Timestamp::from_unix_millis(3500));
+    let options = RestoreOptions { as_of_inside };
+    (
+        block_on(restore_with(store, target, options, sink.clone())),
+        sink,
+    )
+}
+
+#[test]
+fn an_instant_inside_a_compacted_file_is_refused_by_default() {
+    let store = straddled_replica();
+    let (plain, sink) = run(
+        &store,
+        RestoreTarget::AsOf(Timestamp::from_unix_millis(3500)),
+    );
+    let (explicit, _) = run_as_of_inside(&store, AsOfInside::Refuse);
+    for result in [plain, explicit] {
+        let Err(RestoreError::NoPlan(no)) = result else {
+            panic!("expected a refusal, got {result:?}");
+        };
+        let PlanOutcome::AsOfInsideFile { chain, file } = no.outcome() else {
+            panic!("expected AsOfInsideFile, got {no:?}");
+        };
+        assert_eq!((chain.reaches(), *file), (txid(2), key(1, 3, 5)));
+    }
+    assert_eq!(sink.published(), None);
+    assert_eq!(RestoreOptions::default().as_of_inside, AsOfInside::Refuse);
+}
+
+#[test]
+fn take_earlier_applies_the_chain_and_names_the_straddling_file() {
+    let store = straddled_replica();
+    let (result, sink) = run_as_of_inside(&store, AsOfInside::TakeEarlier);
+    let restored = result.unwrap();
+    assert_eq!((restored.reached(), restored.files()), (txid(2), 2));
+    assert_eq!(restored.inside_file(), Some(key(1, 3, 5)));
+    assert_eq!(seeds(&sink.published().unwrap()), [1, 9]);
+}
+
+#[test]
+fn take_earlier_leaves_exact_restores_and_gaps_alone() {
+    let store = fill_four(MemStore::with_listed_last_modified());
+    let (exact, _) = run_as_of_inside(&store, AsOfInside::TakeEarlier);
+    let exact = exact.unwrap();
+    assert_eq!((exact.reached(), exact.inside_file()), (txid(3), None));
+    // A hole before the instant is a refusal whatever the option says.
+    let gapped = MemStore::with_listed_last_modified();
+    put_spec(&gapped, 9, &Spec::plain(512, 1, 1, 1, &[(1, 1)]));
+    put_spec(&gapped, 0, &Spec::plain(512, 1, 3, 3, &[(1, 2)]));
+    let (result, sink) = run_as_of_inside(&gapped, AsOfInside::TakeEarlier);
+    assert!(
+        matches!(
+            result,
+            Err(RestoreError::NoPlan(ref no)) if matches!(no.outcome(), PlanOutcome::Gap { .. })
+        ),
+        "{result:?}"
+    );
+    assert_eq!(sink.published(), None);
+}
+
 #[test]
 fn a_file_gone_before_its_stamp_is_read_is_replanned() {
     let inner = fill_four(MemStore::with_listed_last_modified());

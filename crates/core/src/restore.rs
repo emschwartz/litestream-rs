@@ -22,6 +22,10 @@
 //! counts as a vanished file. [Restored::stamps_read] reports how many were
 //! read, over every attempt. `Latest` and `Txid` read no stamp.
 //!
+//! An `AsOf` instant inside a compacted file is refused unless
+//! [RestoreOptions::as_of_inside] is [AsOfInside::TakeEarlier]; then the plan's
+//! chain is applied and [Restored::inside_file] names the file that straddled.
+//!
 //! The lock page is never written: [PageNo] cannot hold it, so the decoder
 //! rejects a file that does, and a sink reads it as zeros.
 
@@ -57,6 +61,28 @@ pub const MAX_ATTEMPTS: u8 = 3;
 /// Bytes asked of the store per read: memory per file stays one chunk plus one
 /// page, whatever the file's size.
 const CHUNK_BYTES: u32 = 4 * 1024 * 1024;
+
+/// What a restore does when an `AsOf` instant falls inside a compacted file
+/// ([PlanOutcome::AsOfInsideFile]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum AsOfInside {
+    /// Fail with [RestoreError::NoPlan]: the contract is the state at the
+    /// instant or an error, never a shorter history.
+    #[default]
+    Refuse,
+    /// Apply the plan's chain, the newest state provably before the instant,
+    /// and name the straddling file in [Restored::inside_file]. Go always does
+    /// this; here the caller asks for it. It covers `AsOfInsideFile` only: an
+    /// as-of [PlanOutcome::Gap] stays a refusal.
+    TakeEarlier,
+}
+
+/// How a restore treats the cases it can either refuse or accept.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct RestoreOptions {
+    /// What to do when the instant falls inside a compacted file.
+    pub as_of_inside: AsOfInside,
+}
 
 /// What a restore was doing to its sink when the sink failed. A failed
 /// publish is not one of these: it is [RestoreError::Publish], which says
@@ -291,6 +317,7 @@ pub struct Restored {
     attempts: u8,
     stamps_read: u64,
     post_apply: Option<DbChecksum>,
+    inside_file: Option<FileKey>,
 }
 
 impl Restored {
@@ -343,6 +370,15 @@ impl Restored {
     pub const fn post_apply(&self) -> Option<DbChecksum> {
         self.post_apply
     }
+
+    /// The file that straddled the instant when [AsOfInside::TakeEarlier]
+    /// accepted it: the database then holds the state before that file, which
+    /// may leave out transactions committed before the instant. `None` for
+    /// every restore that met its target exactly.
+    #[must_use]
+    pub const fn inside_file(&self) -> Option<FileKey> {
+        self.inside_file
+    }
 }
 
 /// How one attempt ended without a database.
@@ -379,7 +415,20 @@ pub async fn restore<S: ObjectStore, K: DatabaseSink>(
     target: RestoreTarget,
     sink: K,
 ) -> Result<Restored, RestoreError> {
-    restore_from(store, None, target, sink).await
+    restore_with(store, target, RestoreOptions::default(), sink).await
+}
+
+/// [restore] with [options] for the cases it can either refuse or accept.
+///
+/// # Errors
+/// As [restore].
+pub async fn restore_with<S: ObjectStore, K: DatabaseSink>(
+    store: &S,
+    target: RestoreTarget,
+    options: RestoreOptions,
+    sink: K,
+) -> Result<Restored, RestoreError> {
+    restore_from(store, None, target, options, sink).await
 }
 
 /// [restore], whose first attempt plans over `listed` when given instead of
@@ -388,6 +437,7 @@ pub(crate) async fn restore_from<S: ObjectStore, K: DatabaseSink>(
     store: &S,
     mut listed: Option<Inventory>,
     target: RestoreTarget,
+    options: RestoreOptions,
     mut sink: K,
 ) -> Result<Restored, RestoreError> {
     let mut attempt = 1_u8;
@@ -398,13 +448,14 @@ pub(crate) async fn restore_from<S: ObjectStore, K: DatabaseSink>(
             store,
             listed.take(),
             target,
+            options,
             &mut sink,
             &mut bytes_read,
             &mut stamps_read,
         )
         .await;
         match applied {
-            Ok((chain, last)) => {
+            Ok((chain, last, inside_file)) => {
                 verify_end_state(&mut sink, &last)?;
                 sink.publish().map_err(|err| RestoreError::Publish {
                     left: err.left(),
@@ -419,6 +470,7 @@ pub(crate) async fn restore_from<S: ObjectStore, K: DatabaseSink>(
                     attempts: attempt,
                     stamps_read,
                     post_apply: last.trailer().post_apply(),
+                    inside_file,
                 });
             }
             Err(Abort::Fatal(err)) => return Err(err),
@@ -441,18 +493,24 @@ async fn attempt_once<S: ObjectStore, K: DatabaseSink>(
     store: &S,
     listed: Option<Inventory>,
     target: RestoreTarget,
+    options: RestoreOptions,
     sink: &mut K,
     bytes_read: &mut u64,
     stamps_read: &mut u64,
-) -> Result<(ContiguousChain, Verified), Abort> {
+) -> Result<(ContiguousChain, Verified, Option<FileKey>), Abort> {
     let inventory = match listed {
         Some(inventory) => inventory,
         None => Inventory::load(store)
             .await
             .map_err(RestoreError::Inventory)?,
     };
-    let chain = match plan_target(store, &inventory, target, stamps_read).await? {
-        PlanOutcome::Plan(chain) => chain,
+    let (chain, inside_file) = match plan_target(store, &inventory, target, stamps_read).await? {
+        PlanOutcome::Plan(chain) => (chain, None),
+        PlanOutcome::AsOfInsideFile { chain, file }
+            if options.as_of_inside == AsOfInside::TakeEarlier =>
+        {
+            (chain, Some(file))
+        }
         other @ (PlanOutcome::EmptyReplica
         | PlanOutcome::NoSnapshot { .. }
         | PlanOutcome::BeyondNewest { .. }
@@ -464,7 +522,7 @@ async fn attempt_once<S: ObjectStore, K: DatabaseSink>(
         }
     };
     let last = apply_chain(store, &chain, sink, bytes_read).await?;
-    Ok((chain, last))
+    Ok((chain, last, inside_file))
 }
 
 /// The plan for [target]: an instant asks for the stamps it needs, counted

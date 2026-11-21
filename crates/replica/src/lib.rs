@@ -63,17 +63,17 @@ pub use health::{
 };
 pub use readers::ReaderGuard;
 pub use replicator::{FinalSync, Replicator};
-pub use restore::{restore, restore_if_missing, verify};
+pub use restore::{restore, restore_if_missing, restore_with, verify};
 #[cfg(feature = "testing")]
 pub use runtime::FakeClockHandle;
 pub use runtime::{CALLER_SLICE, OsEntropy, Park, Runtime};
 pub use store::{BoxFuture, DynStore, DynUpload};
 
 pub use lsr_core::{
-    CheckpointConfig, Clock, Degraded, Depth, Entropy, ForeignWriter, HaltCause as StopCause,
-    HostCheckpoint, HostCheckpoints, L0Retention, Lane, Maintenance,
-    PersistentCause as DegradedCause, Report, Response, Responses, RestoreTarget, Restored,
-    Severity, SnapshotCause,
+    AsOfInside, CheckpointConfig, Clock, Degraded, Depth, Entropy, ForeignWriter,
+    HaltCause as StopCause, HostCheckpoint, HostCheckpoints, L0Retention, Lane, Maintenance,
+    PersistentCause as DegradedCause, Report, Response, Responses, RestoreOptions, RestoreTarget,
+    Restored, Severity, SnapshotCause,
 };
 pub use lsr_ltx::{Timestamp, Txid};
 pub use lsr_sqlite::{DatabaseFile, SetupError, app_connection_raw, ffi};

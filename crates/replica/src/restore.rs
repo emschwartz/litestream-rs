@@ -8,7 +8,7 @@
 use std::io;
 use std::path::Path;
 
-use lsr_core::{Depth, Report, RestoreTarget, Restored, VerifyError};
+use lsr_core::{Depth, Report, RestoreOptions, RestoreTarget, Restored, VerifyError};
 use lsr_local::{CreateError, FileSink};
 
 use crate::error::RestoreError;
@@ -26,8 +26,27 @@ pub fn restore(
     target: RestoreTarget,
     to: &Path,
 ) -> Result<Restored, RestoreError> {
+    restore_with(store, target, RestoreOptions::default(), to)
+}
+
+/// [`restore`] with `options` for the cases it can either refuse or accept, such as an instant
+/// inside a compacted file.
+///
+/// # Errors
+/// As [`restore`].
+pub fn restore_with(
+    store: &dyn DynStore,
+    target: RestoreTarget,
+    options: RestoreOptions,
+    to: &Path,
+) -> Result<Restored, RestoreError> {
     let sink = FileSink::create(to)?;
-    Ok(block_on(lsr_core::restore(&Erased(store), target, sink))?)
+    Ok(block_on(lsr_core::restore_with(
+        &Erased(store),
+        target,
+        options,
+        sink,
+    ))?)
 }
 
 /// Checks every file of the replica, to `depth`, without restoring.

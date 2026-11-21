@@ -83,9 +83,9 @@
 //!   after the chain's end up to the instant cannot be told from the rest of
 //!   the file. That is [`PlanOutcome::AsOfInsideFile`], never a plain
 //!   [`PlanOutcome::Plan`]: the chain is the newest state restorable at or
-//!   before the instant, and the caller must choose to accept it. A level 0-8
-//!   file that ends right after the chain removes the doubt (`dates_next`):
-//!   it is ineligible (else the chain would have taken it), and its stamp is
+//!   before the instant, and [`crate::AsOfInside::TakeEarlier`] on the restore
+//!   (the CLI's `--allow-earlier`) accepts it. A level 0-8 file that ends
+//!   right after the chain removes the doubt (`dates_next`): it is ineligible (else the chain would have taken it), and its stamp is
 //!   the stamp of the level-0 file that first carried its newest transaction,
 //!   because a level-0 file is that carrier and compaction stamps its output
 //!   with its newest input's stamp (here and in Go). So that transaction was

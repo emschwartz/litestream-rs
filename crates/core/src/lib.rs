@@ -91,12 +91,12 @@ pub use recover::{
     FrameCheck, LastPageCheck, Miss, Probes, RecoverEvent, Recovered, Tip, TipView, Verdict,
     WalView, recover, recover_traced,
 };
+pub use restore::{
+    AsOfInside, DatabaseSink, FileFault, MAX_ATTEMPTS, NoPlan, PublishFailure, PublishLeft,
+    RestoreError, RestoreOptions, Restored, SinkOp, restore, restore_with,
+};
 #[cfg(any(test, feature = "testing"))]
 pub use restore::{Database, MemPublishError, MemSink};
-pub use restore::{
-    DatabaseSink, FileFault, MAX_ATTEMPTS, NoPlan, PublishFailure, PublishLeft, RestoreError,
-    Restored, SinkOp, restore,
-};
 pub use retry::{Class, RetryPolicy, RetryStats, Retrying, RetryingUpload, classify};
 pub use snapshot::{SnapshotFailed, write_snapshot};
 pub use source::{
