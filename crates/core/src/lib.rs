@@ -1,8 +1,23 @@
-//! Replica layout and the object-store contract.
+//! The replication engine and everything it decides, with no I/O of its own.
 //!
-//! Sans-IO: this crate names no runtime, reads no clock and opens no file. The
-//! backends (`lsr-store-fs` today) implement [`ObjectStore`]; [`MemStore`] is the
-//! model they are tested against.
+//! Sans-IO: this crate names no runtime, spawns no thread, reads no clock and
+//! opens no file. What it needs comes in through traits: the replica and the
+//! local staging directory are both an [`ObjectStore`] (`lsr-store-s3`,
+//! `lsr-store-fs`; [`MemStore`] is the model they are tested against), SQLite
+//! is a [`WalSource`], a [`PageSource`] and a [`Checkpointer`] (`lsr-sqlite`),
+//! a restore writes into a [`DatabaseSink`] (`lsr-local`), and time, waiting
+//! and chance are [`Clock`], [`Sleeper`] and [`Entropy`].
+//!
+//! What is here:
+//! - the replica's layout and the store contract (`layout`, `store`,
+//!   `inventory`, `stamps`);
+//! - reading a replica: the restore planner and executor and the verifier
+//!   (`plan`, `restore`, `verify`);
+//! - writing one: position recovery, the sync step, the checkpoint policy
+//!   and protocol, uploads, compaction, snapshots and retention (`recover`,
+//!   `sync`, `checkpoint`, `upload`, `compact`, `snapshot`, `maintain`);
+//! - the [`Actor`] that runs those in one priority order, one unit of work a
+//!   tick, and the closed set of faults with a policy each (`actor`, `fault`).
 
 #![forbid(unsafe_code)]
 

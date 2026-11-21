@@ -57,7 +57,7 @@ A Cargo workspace (decision D1: its own repository). Each crate is `crates/<name
 | `cli` | The `lsr` binary: `restore`, `verify`, `files`, `config check`; `replicate` is the sidecar | Stdout carries only the result; one closed exit-code table |
 | `fuzzing` | Fuzz targets as plain functions over bytes, replayed over the committed corpus in the test suite (`fuzz/` drives them with cargo-fuzz) | Dev only |
 
-Traits at the core boundary: `Clock`, `Rng`, `ObjectStore`, `LocalStore` (the local L0 staging directory), `WalSource`, `PageSource`, `Checkpointer`, `EventSink`.
+Traits at the core boundary: `Clock`, `Sleeper`, `Entropy`, `ObjectStore` (the replica, and the local L0 staging directory through the same trait), `WalSource`, `PageSource`, `Checkpointer`, `DatabaseSink` (where a restore writes). `EventSink` is the replica crate's, for the host.
 
 **Concurrency.** One OS thread per database owns both SQLite connections (the long-lived read transaction and the writer used for the sequence bump and barrier) and takes commands over a bounded channel; that removes upstream's `execSem` and `chkMu`. Uploads, compaction and retention run in one sequential actor, in priority order; concurrent tasks wait for a measurement that shows the sequential actor falling behind. Snapshots stream page chunks through a bounded channel into a multipart upload. Shutdown is a state with a deadline, not a cancellation race. Every thread gets an explicit stack (512 KiB for one that runs the engine, 64 KiB for one that only waits); `crates/replica/src/stack.rs` says how they were measured and how many threads a database costs. Issue #17 tracks a shared pool for hosts with many databases.
 
@@ -71,7 +71,7 @@ Traits at the core boundary: `Clock`, `Rng`, `ObjectStore`, `LocalStore` (the lo
 | Pages count only at commit frames; drop pages above commit (#881) | The reader yields whole `CommittedTx` values, never frames |
 | Lock page never encoded (page 65537 at 16 KiB) | `PageNo::new(n, page_size)` rejects it; the encoder takes `PageNo` only |
 | Logical WAL offset vs physical file size (#997, #946) | Distinct `SyncedOffset` and `WalFileLen` types with no conversion between them |
-| Checkpoint only after syncing through the WAL (#896, #1347 chain) | `checkpoint(proof: SyncedThrough, mode, …) -> Result<Checkpointed, CheckpointFailed>`; the proof is the position itself, not `Clone`, built only by a sync step that reached the committed end, so a stale proof cannot exist |
+| Checkpoint only after syncing through the WAL (#896, #1347 chain) | `checkpoint(proof: SyncedThrough, mode, …) -> Result<Checkpointed, CheckpointFailed>`; the proof is the position itself, not `Clone`, built only by `ReachedEnd::confirm`: a sync step that reached the committed end, and a second read of the epoch that finds it unchanged, so a stale proof cannot exist |
 | Six syncing flags that drifted apart (`syncedToWALEnd`, `truncatePassiveFailed`, …) | One `CheckpointState` enum plus `Continuity` on the position |
 | A WAL restart is safe to follow only under an unbroken read transaction | `ReadEpoch` counts each time the read transaction is taken; `Continuity::Pinned(epoch)` is set only when the synced end equalled the committed end during that epoch; any other salt change is a snapshot |
 | Committed end and backfill count read together | `WalSource::committed() -> CommittedRead { end, backfilled }` from one wal-index read |

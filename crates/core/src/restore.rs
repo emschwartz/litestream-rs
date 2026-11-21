@@ -118,11 +118,18 @@ pub trait DatabaseSink {
     /// Whatever the underlying read reports.
     fn checksum(&mut self, pages: DbPages, page_size: PageSize) -> io::Result<DbChecksum>;
 
-    /// Makes the database durable and visible, or fails and leaves it not
-    /// visible. A failed durability step is never retried.
+    /// Makes the database durable and visible. A failed durability step is
+    /// never retried.
     ///
     /// # Errors
-    /// The step that failed.
+    /// The step that failed. A failure does not mean nothing is visible: the
+    /// last steps make the name durable after the database is in place, so a
+    /// publish can fail with a complete, verified database visible at the
+    /// target that may not survive a crash. `io::Error` cannot say which, so
+    /// a sink that can tell the two apart carries the answer inside it
+    /// (`lsr-local`'s `PublishError`: `NotVisible` or `VisibleNotDurable`),
+    /// and a caller that must know asks the sink's own error type. A caller
+    /// that cannot must assume the target may exist.
     fn publish(self) -> io::Result<()>;
 }
 

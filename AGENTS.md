@@ -10,7 +10,7 @@
 ## Design rules
 - Invariants live in types. A value that exists is valid: constructors return `Option` or `Result`, fields are private. Prefer a type that cannot hold the bad state over a runtime check, and a runtime check over an assert.
 - Closed enums for states, faults and causes; every `match` on them is exhaustive (the wildcard-arm lints enforce it). A new variant must break the build everywhere it matters.
-- Sans-IO core: decisions are pure functions over typed inputs; I/O sits behind traits (`Clock`, `Rng`, `ObjectStore`, `LocalStore`, `WalSource`, `PageSource`, `Checkpointer`, `EventSink`) so the simulator can drive every path.
+- Sans-IO core: decisions are pure functions over typed inputs; I/O sits behind traits (`Clock`, `Sleeper`, `Entropy`, `ObjectStore` for the replica and for local staging, `WalSource`, `PageSource`, `Checkpointer`, `DatabaseSink`) so the simulator can drive every path.
 - Never use bytes that were not verified on the read that produced them.
 - Bounded everything: channels, retries, fan-in, memory per file. No unbounded queue. Every retry wait is capped, and a failure that persists is a typed degraded state the health handle reports (D7); it never retries silently and never spins.
 - No caching and no parallelism unless a measurement in the PR justifies it.
