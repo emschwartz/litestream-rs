@@ -261,6 +261,39 @@ fn setup_checks_which_file_the_connection_opens() {
     check_app_connection(&conn).unwrap();
 }
 
+/// The file is replaced at its path after the open and before the identity check: the path now
+/// names the new file, but the identity is the one SQLite opened, read from its descriptor.
+#[cfg(unix)]
+#[test]
+fn the_opened_file_is_told_by_its_descriptor_after_the_path_is_replaced() {
+    let (dir, path, app) = fresh();
+    let original = DatabaseFile::of(&path).unwrap();
+    let live = Sqlite::open(&path).unwrap();
+    drop(app);
+    let (_other_dir, other, other_app) = fresh();
+    drop(other_app);
+    let moved = dir.path().join("moved.db");
+    std::fs::rename(&path, &moved).unwrap();
+    std::fs::rename(&other, &path).unwrap();
+    let now = DatabaseFile::of(&path).unwrap();
+    assert_ne!(now, original, "the path names the replacement");
+    assert_eq!(live.database_file(), Ok(Some(original)));
+}
+
+/// A VFS other than SQLite's unix ones keeps its own file layout: the identity cannot be read,
+/// and the answer says so rather than guess.
+#[test]
+fn another_vfs_cannot_tell_which_file_it_opened() {
+    let (_dir, path, _app) = fresh();
+    let vfs = lsr_sqlite::testing::FaultVfs::register("lsr-errors-identity").unwrap();
+    let config = SqliteConfig {
+        vfs: Some(vfs.name().to_owned()),
+        ..SqliteConfig::default()
+    };
+    let live = Sqlite::open_with(&path, &config).unwrap();
+    assert_eq!(live.database_file(), Ok(None));
+}
+
 #[test]
 fn a_connection_whose_file_is_gone_cannot_be_checked() {
     let (dir, path, _app) = fresh();

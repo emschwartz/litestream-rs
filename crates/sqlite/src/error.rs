@@ -40,6 +40,29 @@ pub enum OpenError {
     Refused(#[from] Refusal),
 }
 
+/// The reader and the writer opened different database files: the path was swapped between
+/// their two opens.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("the reader and the writer hold different database files")]
+pub struct SplitOpen {
+    pub(crate) reader: crate::DatabaseFile,
+    pub(crate) writer: crate::DatabaseFile,
+}
+
+impl SplitOpen {
+    /// The reader's file.
+    #[must_use]
+    pub const fn reader(&self) -> &crate::DatabaseFile {
+        &self.reader
+    }
+
+    /// The writer's file.
+    #[must_use]
+    pub const fn writer(&self) -> &crate::DatabaseFile {
+        &self.writer
+    }
+}
+
 /// Why the reader's `sqlite3_file` was not used. Each case would otherwise make SQLite open a
 /// `-shm` descriptor on this library's behalf, or call through a pointer that is not there.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]

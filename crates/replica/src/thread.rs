@@ -29,9 +29,10 @@
 //! that finds the deadline passed while the engine waits to be rebuilt ends there.
 //!
 //! The connections reopen by path, but the replicator was registered by device and inode.
-//! A reopen that finds another file at the path (or none) does not open it: the database
-//! the replicator follows is gone from under it, which is `WalUnlinked` at its configured
-//! response, never a second database replicated into the same replica.
+//! A reopen that finds another file at the path (or none) does not open it, and one whose
+//! opened descriptor names another file does not keep it: the database the replicator
+//! follows is gone from under it, which is `WalUnlinked` at its configured response, never a
+//! second database replicated into the same replica.
 
 use std::num::NonZeroU32;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -324,7 +325,8 @@ impl Worker {
 
     /// The connections, reopened if a panic closed them, while the path still names the
     /// registered file. That is checked before the open, which writes to the file it opens,
-    /// and again after it, for a file swapped in between.
+    /// and again after it, for a file swapped in between: on both descriptors SQLite opened,
+    /// so a swap after either open cannot pass, and on the path, which the WAL is read by.
     fn connection(&mut self) -> Result<Sqlite, Reopen> {
         if let Some(sqlite) = &self.sqlite {
             return Ok(sqlite.clone());
@@ -337,6 +339,12 @@ impl Worker {
         };
         registered(&self.database)?;
         let sqlite = Sqlite::open(&self.database).map_err(|_open| Reopen::Failed)?;
+        match sqlite.database_file() {
+            Ok(Some(opened)) if opened == self.shared.database => {}
+            Ok(Some(_)) | Err(_) => return Err(Reopen::Replaced),
+            Ok(None) => {}
+        }
+        // The WAL is still read by path, so the path must name the file the descriptors do.
         registered(&self.database)?;
         self.sqlite = Some(sqlite.clone());
         Ok(sqlite)

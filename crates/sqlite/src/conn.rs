@@ -13,7 +13,7 @@ use lsr_ltx::PageSize;
 use lsr_wal::{CommittedEnd, Salts};
 use rusqlite::{Connection, FileControl, OpenFlags};
 
-use crate::error::{OpenError, SetupError};
+use crate::error::{OpenError, SetupError, SplitOpen};
 use crate::pages::{FileHandle, file_pointer};
 use crate::shm::{self, Region};
 
@@ -256,6 +256,25 @@ impl Sqlite {
         })
     }
 
+    /// The database file both connections hold open, from SQLite's own descriptors rather than
+    /// the path, which may name another file by now: a caller that checked the path before the
+    /// open compares this, not a second stat, so a file swapped in after the open, or between
+    /// the reader's open and the writer's, cannot pass. `Ok(None)` when it cannot be told (a VFS
+    /// other than SQLite's unix ones, or not Unix); the caller falls back to the path.
+    ///
+    /// # Errors
+    /// [`SplitOpen`] when the reader and the writer hold different files.
+    pub fn database_file(&self) -> Result<Option<DatabaseFile>, SplitOpen> {
+        let inner = self.lock();
+        let reader = crate::identity::opened(&inner.reader);
+        let writer = crate::identity::opened(&inner.writer);
+        match (reader, writer) {
+            (Some(reader), Some(writer)) if reader != writer => Err(SplitOpen { reader, writer }),
+            (Some(reader), Some(_)) => Ok(Some(reader)),
+            (None, _) | (_, None) => Ok(None),
+        }
+    }
+
     /// The write-ahead log's path, for tests that copy or inspect it.
     #[must_use]
     pub fn wal_path(&self) -> PathBuf {
@@ -493,18 +512,23 @@ impl DatabaseFile {
     pub fn of(path: &Path) -> io::Result<Self> {
         #[cfg(unix)]
         {
-            use std::os::unix::fs::MetadataExt;
-            let meta = std::fs::metadata(path)?;
-            Ok(Self {
-                dev: meta.dev(),
-                ino: meta.ino(),
-            })
+            Ok(Self::of_metadata(&std::fs::metadata(path)?))
         }
         #[cfg(not(unix))]
         {
             Ok(Self {
                 path: std::fs::canonicalize(path)?,
             })
+        }
+    }
+
+    /// The file a stat or an `fstat` described.
+    #[cfg(unix)]
+    pub(crate) fn of_metadata(meta: &Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        Self {
+            dev: meta.dev(),
+            ino: meta.ino(),
         }
     }
 }
@@ -623,6 +647,23 @@ mod tests {
             Err(SourceError::Io(io::ErrorKind::InvalidInput)),
             "a lock is released once"
         );
+    }
+
+    /// The path is swapped between the reader's open and the writer's: each descriptor names
+    /// its own file, and the identity is refused rather than taken from either.
+    #[cfg(unix)]
+    #[test]
+    fn a_reader_and_writer_on_different_files_are_a_split_open() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let sqlite = opened(dir.path());
+        let reader = DatabaseFile::of(&dir.path().join("app.db")).unwrap();
+        let other = tempfile::TempDir::new().unwrap();
+        let swapped = opened(other.path());
+        let writer = DatabaseFile::of(&other.path().join("app.db")).unwrap();
+        drop(swapped);
+        sqlite.lock().writer =
+            connect(&other.path().join("app.db"), &SqliteConfig::default()).unwrap();
+        assert_eq!(sqlite.database_file(), Err(SplitOpen { reader, writer }));
     }
 
     /// SQLite can end a read transaction itself (an I/O error rolls it back). The pin is

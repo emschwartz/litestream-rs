@@ -38,6 +38,8 @@
 //! [`app_connection_for`] first checks that the connection opens a given [`DatabaseFile`]
 //! (device and inode), and [`app_connection_raw`] does the same on a raw handle, for a host
 //! whose connections are not rusqlite's; it is here because only this crate may use `unsafe`.
+//! [`Sqlite::database_file`] says which file the reader opened, from SQLite's own descriptor
+//! (the `identity` module), for a caller that must not trust a second stat of the path.
 //!
 //! The `testing` feature adds [`testing`]: the fault-injecting VFS and the harness of the
 //! real-SQLite fault suite in `tests/`.
@@ -47,6 +49,7 @@
 mod checkpoint;
 mod conn;
 mod error;
+mod identity;
 mod pages;
 mod shm;
 #[cfg(feature = "testing")]
@@ -56,6 +59,6 @@ pub use conn::{
     DEFAULT_JOURNAL_SIZE_LIMIT, DatabaseFile, Sqlite, SqliteConfig, app_connection,
     app_connection_for, app_connection_raw, check_app_connection,
 };
-pub use error::{OpenError, Refusal, SetupError};
+pub use error::{OpenError, Refusal, SetupError, SplitOpen};
 /// SQLite's C interface, for the raw handle [`app_connection_raw`] takes.
 pub use rusqlite::ffi;
