@@ -66,10 +66,16 @@ fn history(db: &SimSqlite, steps: Vec<Step>) -> (Vec<Vec<u8>>, usize) {
     for step in steps {
         match step {
             Step::Commit(pages, fill) => {
+                // A commit that grows the database writes every page it adds, as SQLite's
+                // does (`sqlite_rules::a_growing_commit_writes_every_page_it_adds`). Without
+                // them a page above an earlier shrink would read an old frame that no
+                // checkpoint copies.
+                let old = db.db_size();
                 let mut pages = pages;
+                pages.extend(old.saturating_add(1)..=pages.iter().copied().max().unwrap());
                 pages.sort_unstable();
                 pages.dedup();
-                let size = db.db_size().max(*pages.last().unwrap());
+                let size = old.max(*pages.last().unwrap());
                 if db.commit(&tx(&pages, fill), size).is_some() {
                     images.push(db.image());
                 }

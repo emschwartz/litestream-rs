@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc e7e8d203235e3624125c3b9cab7497d313fa03a512ced3d93a6c1afa2fed1ddc # shrinks to steps = []
 cc 81ec5daa5ee1f6182b56c15e27002fb6e3e81ae93edb48c27e3ca3b35e83e468 # shrinks to steps = [Commit([1], 0), Commit([1], 0), Ours(true), Commit([1], 1), Checkpoint(Passive)]
+cc 36d132150a8018c874822af034a359cd74a6a03ccc2e8326a672834e84188366 # shrinks to steps = [Spill(7), Commit([1], 0), Reader(true), Checkpoint(Passive), Commit([8], 0), Reader(false), Checkpoint(Passive), Commit([1], 1)]
