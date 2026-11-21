@@ -55,8 +55,9 @@ pub use app::{
     AppCheckpoint, AppCheckpointObserver, AppCheckpoints, SQLITE_AUTOCHECKPOINT, Watch, observe,
 };
 pub use checkpoint::{
-    CheckpointConfig, CheckpointFailed, CheckpointOutcome, CheckpointState, Checkpointed, Decision,
-    Observed, Staged, Why, after_checkpoint, after_sync, checkpoint, decide, next_wake,
+    CheckpointConfig, CheckpointFailed, CheckpointOutcome, CheckpointState, CheckpointTrigger,
+    Checkpointed, Decision, Observed, Staged, after_checkpoint, after_sync, checkpoint, decide,
+    next_wake,
 };
 pub use compact::{
     CompactError, Compacted, CompactionInputs, InputFault, InputsError, MAX_INPUTS, compact,
@@ -78,12 +79,12 @@ pub use layout::{
     ParseKeyError, RangeSide, cmp_range, file_name, is_scratch_name, parse_file_name,
 };
 pub use maintain::{
-    CompactJob, ConfigError, DeleteJob, Due, Hold, Interval, IntervalError, Job, JobError,
-    L0Retention, MAX_DELETE, MaintainError, MaintainState, Maintenance, Outcome, RetentionMode,
+    CompactJob, ConfigError, DeleteJob, Due, Interval, IntervalError, Job, JobError, L0Retention,
+    MAX_DELETE, MaintainError, MaintainState, Maintenance, Outcome, RetentionHold, RetentionMode,
     Setting, SnapshotJob, due, go_truncate, listing_after_upload, run_compact, run_delete,
 };
 pub use mem::{MemStore, MemUpload};
-pub use pages::{Mismatch, PageTable, snapshot_clears};
+pub use pages::{Mismatch, PageChecksumTable, snapshot_clears};
 #[cfg(feature = "testing")]
 #[doc(hidden)]
 pub use plan::plan_reference;

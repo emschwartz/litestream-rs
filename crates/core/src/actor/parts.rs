@@ -23,7 +23,7 @@ use super::state::{Gate, Live, Maintain, Phase, Tasks};
 use crate::app::AppCheckpointObserver;
 use crate::checkpoint::CheckpointState;
 use crate::fault::{SnapshotCause, StopCause};
-use crate::pages::PageTable;
+use crate::pages::PageChecksumTable;
 use crate::position::Position;
 use crate::upload::UploadState;
 
@@ -293,7 +293,7 @@ pub(super) struct Engine {
     /// staging are both empty.
     pub(super) page_size: Option<PageSize>,
     /// What each database-file page should hold (`crate::pages`).
-    pub(super) pages: PageTable,
+    pub(super) pages: PageChecksumTable,
     pub(super) checkpoint: CheckpointState,
     pub(super) gate: Gate,
     pub(super) upload: UploadState,
@@ -308,7 +308,7 @@ impl Engine {
         Self {
             course: Course::Unbooted,
             page_size: None,
-            pages: PageTable::new(),
+            pages: PageChecksumTable::new(),
             // Replaced at boot, when the time is known.
             checkpoint: CheckpointState::boot(Timestamp::from_unix_millis(0)),
             gate: Gate::Open,

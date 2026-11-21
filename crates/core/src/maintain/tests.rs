@@ -1562,7 +1562,7 @@ fn a_distrusted_output_holds_retention_until_deleted() {
         &mut state,
     );
     assert!(
-        matches!(&held, Due::Wait { held: Some(Hold::OutputDistrusted { key }), .. } if *key == out),
+        matches!(&held, Due::Wait { held: Some(RetentionHold::OutputDistrusted { key }), .. } if *key == out),
         "{held:?}"
     );
     let done = block_on(run_delete(&delete, &replica));
@@ -1572,7 +1572,7 @@ fn a_distrusted_output_holds_retention_until_deleted() {
         !matches!(
             after,
             Due::Wait {
-                held: Some(Hold::OutputDistrusted { .. }),
+                held: Some(RetentionHold::OutputDistrusted { .. }),
                 ..
             }
         ),

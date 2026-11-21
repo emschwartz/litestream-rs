@@ -104,7 +104,7 @@ fn run(files: Vec<FileInfo>) -> Retention {
     retention(&inv(files), at(now), &defaults(), None)
 }
 
-fn held(files: Vec<FileInfo>) -> Hold {
+fn held(files: Vec<FileInfo>) -> RetentionHold {
     match run(files) {
         Retention::Held(hold) => hold,
         other @ (Retention::Delete(_) | Retention::Wait { .. }) => panic!("not held: {other:?}"),
@@ -177,7 +177,7 @@ fn a_kept_restore_point_that_does_not_plan_holds() {
     assert!(
         matches!(
             &got,
-            Retention::Held(Hold::RestorePointUnplannable { restore_point, .. }) if *restore_point == txid(27)
+            Retention::Held(RetentionHold::RestorePointUnplannable { restore_point, .. }) if *restore_point == txid(27)
         ),
         "{got:?}"
     );
@@ -189,7 +189,8 @@ fn a_kept_restore_point_that_does_not_plan_holds() {
 fn no_kept_restore_point_is_ever_deleted_from_under_its_restore() {
     for restore_point in 1..=30 {
         match pinned_run(ladder(), restore_point) {
-            Retention::Held(Hold::RestorePointUnplannable { .. }) | Retention::Wait { .. } => {}
+            Retention::Held(RetentionHold::RestorePointUnplannable { .. })
+            | Retention::Wait { .. } => {}
             Retention::Delete(job) => {
                 let rest = without(&inv(ladder()), job.keys());
                 let at_restore_point = plan(&rest, KeyTarget::Txid(txid(restore_point)));
@@ -406,7 +407,7 @@ fn a_hole_after_the_newest_snapshot_holds() {
     );
     assert_eq!(
         held(files),
-        Hold::Hole {
+        RetentionHold::Hole {
             after: txid(24),
             next: Some(txid(26))
         }
@@ -421,7 +422,7 @@ fn unrecognized_names_hold() {
     let got = retention(&inventory, at(T0 + 200 * HOUR), &defaults(), None);
     assert_eq!(
         got,
-        Retention::Held(Hold::UnrecognizedNames {
+        Retention::Held(RetentionHold::UnrecognizedNames {
             level: level(1),
             count: 2
         })
@@ -432,7 +433,10 @@ fn unrecognized_names_hold() {
 fn a_malformed_snapshot_holds() {
     let mut files = ladder();
     files.push(file(9, 5, 30, created_at_of(30)));
-    assert_eq!(held(files), Hold::MalformedSnapshot { key: key(9, 5, 30) });
+    assert_eq!(
+        held(files),
+        RetentionHold::MalformedSnapshot { key: key(9, 5, 30) }
+    );
 }
 
 #[test]
@@ -442,7 +446,7 @@ fn a_listing_behind_what_was_published_holds() {
     let got = retention(&inv(files), now, &defaults(), Some(txid(31)));
     assert_eq!(
         got,
-        Retention::Held(Hold::ListingBehind {
+        Retention::Held(RetentionHold::ListingBehind {
             listed: Some(txid(30)),
             published: txid(31)
         })
@@ -450,7 +454,7 @@ fn a_listing_behind_what_was_published_holds() {
     let empty = retention(&Inventory::default(), now, &defaults(), Some(txid(1)));
     assert_eq!(
         empty,
-        Retention::Held(Hold::ListingBehind {
+        Retention::Held(RetentionHold::ListingBehind {
             listed: None,
             published: txid(1)
         })
@@ -467,7 +471,7 @@ fn a_latest_that_does_not_plan_holds() {
     let files: Vec<FileInfo> = (5..=8).map(|n| file(0, n, n, created_at_of(n))).collect();
     assert_eq!(
         held(files),
-        Hold::LatestUnplannable {
+        RetentionHold::LatestUnplannable {
             outcome: PlanOutcome::NoSnapshot {
                 oldest_snapshot: None,
                 malformed_snapshots: vec![]
@@ -483,14 +487,17 @@ fn a_snapshot_or_level_zero_file_without_created_at_holds_and_other_levels_do_no
     l0.push(file(0, 26, 26, 0));
     assert_eq!(
         held(l0),
-        Hold::NoCreatedAt {
+        RetentionHold::NoCreatedAt {
             key: key(0, 26, 26)
         }
     );
     let mut snap = ladder();
     snap.retain(|f| f.key != key(9, 1, 10));
     snap.push(file(9, 1, 10, -5));
-    assert_eq!(held(snap), Hold::NoCreatedAt { key: key(9, 1, 10) });
+    assert_eq!(
+        held(snap),
+        RetentionHold::NoCreatedAt { key: key(9, 1, 10) }
+    );
     let mut l1 = ladder();
     l1.retain(|f| f.key != key(1, 1, 10));
     l1.push(file(1, 1, 10, 0));
@@ -520,7 +527,7 @@ fn a_last_file_without_created_at_holds_only_at_level_zero_or_nine() {
     l0.push(file(0, 30, 30, 0));
     assert_eq!(
         held(l0),
-        Hold::NoCreatedAt {
+        RetentionHold::NoCreatedAt {
             key: key(0, 30, 30)
         }
     );
@@ -542,7 +549,7 @@ fn a_file_with_a_zero_created_at_is_never_aged_as_from_1970() {
         match retention(&inv(files), Timestamp::MAX, &one_level(), None) {
             Retention::Held(hold) => assert_eq!(
                 hold,
-                Hold::NoCreatedAt {
+                RetentionHold::NoCreatedAt {
                     key: key(0, 25, 25)
                 },
                 "{unset}"
@@ -570,7 +577,7 @@ fn snapshots_whose_created_at_run_backwards_hold_with_a_text_about_stored_times(
     let hold = held(files);
     assert_eq!(
         hold,
-        Hold::SnapshotCreatedAtBackwards {
+        RetentionHold::SnapshotCreatedAtBackwards {
             earlier: key(9, 1, 10),
             later: key(9, 1, 20)
         }
@@ -616,7 +623,7 @@ fn a_rule_that_breaks_the_newest_restore_is_caught_by_the_self_check() {
     assert!(
         matches!(
             got,
-            Retention::Held(Hold::SelfCheck {
+            Retention::Held(RetentionHold::SelfCheck {
                 outcome: PlanOutcome::Gap { .. }
             })
         ),
@@ -632,7 +639,7 @@ fn the_gate_reports_the_first_failure_in_its_order() {
     let got = retention(&inventory, at(T0 + 200 * HOUR), &defaults(), None);
     assert_eq!(
         got,
-        Retention::Held(Hold::UnrecognizedNames {
+        Retention::Held(RetentionHold::UnrecognizedNames {
             level: level(0),
             count: 1
         })
@@ -675,7 +682,7 @@ fn a_hold_shows_in_the_wait_and_compaction_still_runs_while_held() {
         due(&held_inv, now, &cfg, None),
         Due::Wait {
             until: None,
-            held: Some(Hold::UnrecognizedNames {
+            held: Some(RetentionHold::UnrecognizedNames {
                 level: level(2),
                 count: 1
             })
@@ -1218,7 +1225,7 @@ fn wake(
             // carries no wake time, so the task sleeps instead of spinning.
             let without_created_at_behind = matches!(
                 &at_wake,
-                Retention::Held(Hold::NoCreatedAt { key })
+                Retention::Held(RetentionHold::NoCreatedAt { key })
                     if key.level() == Level::ZERO
                         && inv
                             .files()
@@ -1882,7 +1889,7 @@ fn a_file_without_created_at_behind_a_young_one_is_a_hold_at_the_wake_not_a_spin
     let at_wake = retention(&inv(files.clone()), wake, &cfg, None);
     assert_eq!(
         at_wake,
-        Retention::Held(Hold::NoCreatedAt {
+        Retention::Held(RetentionHold::NoCreatedAt {
             key: key(0, 26, 26)
         })
     );

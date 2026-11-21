@@ -104,7 +104,7 @@ fn a_rejected_snapshot_that_cannot_be_deleted_goes_first_and_holds_retention() {
             event(tick),
             Some(Event::Maintained {
                 event: MaintainedEvent::Waiting {
-                    held: Some(Hold::OutputDistrusted { key }),
+                    held: Some(RetentionHold::OutputDistrusted { key }),
                 },
                 ..
             }) if *key == bad.key

@@ -80,7 +80,7 @@ fn go_ladder(state: &CheckpointState, o: &Observed, c: &CheckpointConfig) -> Dec
         return if failed {
             Decision::Truncate
         } else {
-            Decision::Passive(Why::TruncateThreshold)
+            Decision::Passive(CheckpointTrigger::TruncateThreshold)
         };
     }
     if !o.through {
@@ -90,7 +90,7 @@ fn go_ladder(state: &CheckpointState, o: &Observed, c: &CheckpointConfig) -> Dec
         && let Some(min) = c.min_pages
         && o.synced_frames >= min.get()
     {
-        return Decision::Passive(Why::MinPages);
+        return Decision::Passive(CheckpointTrigger::MinPages);
     }
     let waited = o
         .now
@@ -101,7 +101,7 @@ fn go_ladder(state: &CheckpointState, o: &Observed, c: &CheckpointConfig) -> Dec
         && waited >= i64::try_from(interval.as_millis()).unwrap()
         && o.synced_frames > 1
     {
-        return Decision::Passive(Why::Interval);
+        return Decision::Passive(CheckpointTrigger::Interval);
     }
     Decision::Nothing
 }
@@ -143,7 +143,7 @@ fn the_interval_counts_from_last_and_is_inclusive() {
     assert_eq!(decide(&state, &obs(5999, 5, true), &c), Decision::Nothing);
     assert_eq!(
         decide(&state, &obs(6000, 5, true), &c),
-        Decision::Passive(Why::Interval)
+        Decision::Passive(CheckpointTrigger::Interval)
     );
     assert_eq!(next_wake(&state, &c), Some(ts(6000)));
 }
@@ -162,7 +162,7 @@ fn a_capped_step_only_triggers_the_truncate_threshold() {
     assert_eq!(decide(&state, &obs(100, 5, false), &c), Decision::Nothing);
     assert_eq!(
         decide(&state, &obs(100, 10, false), &c),
-        Decision::Passive(Why::TruncateThreshold)
+        Decision::Passive(CheckpointTrigger::TruncateThreshold)
     );
 }
 
@@ -179,7 +179,7 @@ fn the_passive_before_a_truncate_hands_back_now() {
     let o = obs(50, 10, true);
     let (state, next) = after_checkpoint(
         CheckpointState::Pending { last: ts(0) },
-        Decision::Passive(Why::TruncateThreshold),
+        Decision::Passive(CheckpointTrigger::TruncateThreshold),
         &CheckpointOutcome::NotRestarted,
         &o,
         &c,
@@ -254,7 +254,7 @@ fn a_busy_interval_passive_keeps_the_trigger_for_one_more_interval() {
     let c = cfg(Some(1000), 0, 0);
     let (state, next) = after_checkpoint(
         CheckpointState::Pending { last: ts(0) },
-        Decision::Passive(Why::Interval),
+        Decision::Passive(CheckpointTrigger::Interval),
         &CheckpointOutcome::Busy,
         &obs(1000, 5, true),
         &c,
@@ -353,7 +353,7 @@ impl Rig {
             &mut wal,
             committed,
             &mut self.db,
-            &mut PageTable::new(),
+            &mut PageChecksumTable::new(),
             &self.store,
             &SyncConfig::default(),
             ts(now),
@@ -407,7 +407,7 @@ impl Rig {
             mode,
             &mut self.wal,
             &mut self.db,
-            &mut PageTable::new(),
+            &mut PageChecksumTable::new(),
             &mut self.ck,
             &self.store,
             cfg,

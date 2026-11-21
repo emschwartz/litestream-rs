@@ -7,7 +7,7 @@
 //! implemented.
 //!
 //! Trust gate. Before any rule runs the listing must be trustworthy; the first
-//! failure is a [`Hold`] and nothing is deleted. A name this code cannot
+//! failure is a [`RetentionHold`] and nothing is deleted. A name this code cannot
 //! parse, a malformed snapshot, a listing missing a file this process knows it
 //! wrote, a hole after the newest snapshot, a history that does not plan, a
 //! snapshot or level-0 file without a non-zero created-at time, and snapshots whose created-at times
@@ -101,7 +101,7 @@ use std::time::Duration;
 
 use lsr_ltx::{Timestamp, Txid};
 
-use super::{DeleteJob, Hold, L0Retention, MAX_DELETE, MaintainState, Maintenance};
+use super::{DeleteJob, L0Retention, MAX_DELETE, MaintainState, Maintenance, RetentionHold};
 use crate::created_at::{Need, Resolve, ResolvedCreatedAt};
 use crate::inventory::{Inventory, is_snapshot_start};
 use crate::layout::{CreatedAt, FileInfo, FileKey, Level, NonZeroCreatedAt};
@@ -133,7 +133,7 @@ pub(super) enum Retention {
     /// new write.
     Wait { until: Option<Timestamp> },
     /// Deletions are refused.
-    Held(Hold),
+    Held(RetentionHold),
 }
 
 /// A decision step that may need one more created-at time: `Err` names the file, and
@@ -244,14 +244,18 @@ fn anchor_files(inventory: &Inventory) -> Vec<FileInfo> {
     files
 }
 
-fn gate(inventory: &Inventory, published: Option<Txid>, state: &MaintainState) -> Option<Hold> {
+fn gate(
+    inventory: &Inventory,
+    published: Option<Txid>,
+    state: &MaintainState,
+) -> Option<RetentionHold> {
     distrusted(inventory, state)
         .or_else(|| unrecognized_names(inventory))
         .or_else(|| {
             inventory
                 .malformed_snapshots()
                 .first()
-                .map(|key| Hold::MalformedSnapshot { key: *key })
+                .map(|key| RetentionHold::MalformedSnapshot { key: *key })
         })
         .or_else(|| listing_behind(inventory, published))
         .or_else(|| hole(inventory))
@@ -259,31 +263,31 @@ fn gate(inventory: &Inventory, published: Option<Txid>, state: &MaintainState) -
 }
 
 /// A compaction output or a snapshot the store rejected that is still listed.
-fn distrusted(inventory: &Inventory, state: &MaintainState) -> Option<Hold> {
+fn distrusted(inventory: &Inventory, state: &MaintainState) -> Option<RetentionHold> {
     Level::ALL.iter().skip(1).find_map(|level| {
         let key = state.distrusted_at(*level)?;
         inventory
             .level(*level)
             .iter()
             .any(|info| info.key == key)
-            .then_some(Hold::OutputDistrusted { key })
+            .then_some(RetentionHold::OutputDistrusted { key })
     })
 }
 
-fn unrecognized_names(inventory: &Inventory) -> Option<Hold> {
+fn unrecognized_names(inventory: &Inventory) -> Option<RetentionHold> {
     Level::ALL.iter().find_map(|level| {
         let count = inventory.skipped(*level);
-        (count > 0).then_some(Hold::UnrecognizedNames {
+        (count > 0).then_some(RetentionHold::UnrecognizedNames {
             level: *level,
             count,
         })
     })
 }
 
-fn listing_behind(inventory: &Inventory, published: Option<Txid>) -> Option<Hold> {
+fn listing_behind(inventory: &Inventory, published: Option<Txid>) -> Option<RetentionHold> {
     let published = published?;
     let listed = inventory.newest();
-    (listed < Some(published)).then_some(Hold::ListingBehind { listed, published })
+    (listed < Some(published)).then_some(RetentionHold::ListingBehind { listed, published })
 }
 
 /// The level-9 files a restore can start from, ascending.
@@ -298,7 +302,7 @@ fn snapshots(inventory: &Inventory) -> Vec<&FileInfo> {
 /// A transaction after the newest snapshot, up to the newest one anywhere,
 /// that no file of levels 0 to 8 covers. Checked before the plan so the hold
 /// names the cause: a hole there also makes `Latest` unplannable.
-fn hole(inventory: &Inventory) -> Option<Hold> {
+fn hole(inventory: &Inventory) -> Option<RetentionHold> {
     let newest = inventory.newest()?;
     let snapshot = snapshots(inventory)
         .last()
@@ -313,26 +317,26 @@ fn hole(inventory: &Inventory) -> Option<Hold> {
     for info in files {
         let range = info.key.range();
         if reach.next().is_some_and(|one_past| range.min() > one_past) {
-            return Some(Hold::Hole {
+            return Some(RetentionHold::Hole {
                 after: reach,
                 next: Some(range.min()),
             });
         }
         reach = reach.max(range.max());
     }
-    (reach < newest).then_some(Hold::Hole {
+    (reach < newest).then_some(RetentionHold::Hole {
         after: reach,
         next: None,
     })
 }
 
-fn latest_unplannable(inventory: &Inventory) -> Option<Hold> {
+fn latest_unplannable(inventory: &Inventory) -> Option<RetentionHold> {
     let newest = inventory.newest()?;
     match plan(inventory, KeyTarget::Latest) {
         PlanOutcome::Plan(chain) if chain.reaches() == newest => None,
         // A plan that stops short is a missing tail; the planner never
         // returns one, and the hold must not claim a plan.
-        PlanOutcome::Plan(chain) => Some(Hold::Hole {
+        PlanOutcome::Plan(chain) => Some(RetentionHold::Hole {
             after: chain.reaches(),
             next: None,
         }),
@@ -342,7 +346,9 @@ fn latest_unplannable(inventory: &Inventory) -> Option<Hold> {
         | PlanOutcome::AsOfInsideFile { .. }
         | PlanOutcome::Gap { .. }
         | PlanOutcome::InsideFile { .. }
-        | PlanOutcome::MalformedSnapshot { .. }) => Some(Hold::LatestUnplannable { outcome }),
+        | PlanOutcome::MalformedSnapshot { .. }) => {
+            Some(RetentionHold::LatestUnplannable { outcome })
+        }
     }
 }
 
@@ -364,10 +370,10 @@ fn aged(info: &FileInfo) -> bool {
 fn without_created_at<'a>(
     files: impl Iterator<Item = &'a FileInfo>,
     resolved: &ResolvedCreatedAt,
-) -> Needs<Option<Hold>> {
+) -> Needs<Option<RetentionHold>> {
     for info in files.filter(|info| aged(info)) {
         if created_at_of(resolved, info)?.is_none() {
-            return Ok(Some(Hold::NoCreatedAt { key: info.key }));
+            return Ok(Some(RetentionHold::NoCreatedAt { key: info.key }));
         }
     }
     Ok(None)
@@ -376,12 +382,12 @@ fn without_created_at<'a>(
 fn created_at_backwards(
     inventory: &Inventory,
     resolved: &ResolvedCreatedAt,
-) -> Needs<Option<Hold>> {
+) -> Needs<Option<RetentionHold>> {
     for pair in snapshots(inventory).windows(2) {
         if let [earlier, later] = pair
             && created_at_of(resolved, earlier)? > created_at_of(resolved, later)?
         {
-            return Ok(Some(Hold::SnapshotCreatedAtBackwards {
+            return Ok(Some(RetentionHold::SnapshotCreatedAtBackwards {
                 earlier: earlier.key,
                 later: later.key,
             }));
@@ -436,7 +442,7 @@ fn candidates(
     newest_created_at: Timestamp,
     config: &Maintenance,
     resolved: &ResolvedCreatedAt,
-) -> Needs<Result<Found, Hold>> {
+) -> Needs<Result<Found, RetentionHold>> {
     let mut found = Found::default();
     let snaps = snapshots(inventory);
     let Some(last) = snaps.len().checked_sub(1) else {
@@ -447,7 +453,7 @@ fn candidates(
     for (position, info) in snaps.iter().enumerate() {
         // The gate held on any without a created-at time snapshot; this is its fail-closed twin.
         let Some(created_at) = created_at_of(resolved, info)? else {
-            return Ok(Err(Hold::NoCreatedAt { key: info.key }));
+            return Ok(Err(RetentionHold::NoCreatedAt { key: info.key }));
         };
         if not_before(created_at, anchor, retention) {
             first = position;
@@ -456,7 +462,7 @@ fn candidates(
     }
     if let Some(retained) = snaps.get(first).filter(|_| first < last) {
         let Some(created_at) = created_at_of(resolved, retained)? else {
-            return Ok(Err(Hold::NoCreatedAt { key: retained.key }));
+            return Ok(Err(RetentionHold::NoCreatedAt { key: retained.key }));
         };
         let aged_out = aged_at(created_at, retention)
             .checked_add(Duration::from_millis(1))
@@ -524,7 +530,7 @@ fn level_zero(
     kept: &[FileInfo],
     resolved: &ResolvedCreatedAt,
     found: &mut Found,
-) -> Needs<Option<Hold>> {
+) -> Needs<Option<RetentionHold>> {
     let cover = merged_ranges(kept);
     let files = inventory.level(Level::ZERO);
     let mut chosen = 0_usize;
@@ -542,7 +548,7 @@ fn level_zero(
             return Err(level_zero_need(files, scan, &cover, resolved, info, chosen));
         }
         let Some(created) = created_at_of(resolved, info)? else {
-            return Ok(Some(Hold::NoCreatedAt { key: info.key }));
+            return Ok(Some(RetentionHold::NoCreatedAt { key: info.key }));
         };
         if after(created, scan.anchor, scan.age) {
             found.wake_at(aged_at(created, scan.age), scan.newest_created_at);
@@ -616,12 +622,12 @@ fn covered(cover: &[(Txid, Txid)], info: &FileInfo) -> bool {
 }
 
 /// The keys of the pinned restore point's chain, or the hold when it does not plan.
-fn pinned_chain(inventory: &Inventory, restore_point: Txid) -> Result<Vec<FileKey>, Hold> {
+fn pinned_chain(inventory: &Inventory, restore_point: Txid) -> Result<Vec<FileKey>, RetentionHold> {
     match plan(inventory, KeyTarget::Txid(restore_point)) {
         PlanOutcome::Plan(chain) if chain.reaches() == restore_point => {
             Ok(chain.files().iter().map(|info| info.key).collect())
         }
-        PlanOutcome::Plan(chain) => Err(Hold::RestorePointUnplannable {
+        PlanOutcome::Plan(chain) => Err(RetentionHold::RestorePointUnplannable {
             restore_point,
             outcome: PlanOutcome::BeyondNewest {
                 requested: restore_point,
@@ -634,14 +640,18 @@ fn pinned_chain(inventory: &Inventory, restore_point: Txid) -> Result<Vec<FileKe
         | PlanOutcome::AsOfInsideFile { .. }
         | PlanOutcome::Gap { .. }
         | PlanOutcome::InsideFile { .. }
-        | PlanOutcome::MalformedSnapshot { .. }) => Err(Hold::RestorePointUnplannable {
+        | PlanOutcome::MalformedSnapshot { .. }) => Err(RetentionHold::RestorePointUnplannable {
             restore_point,
             outcome,
         }),
     }
 }
 
-fn self_check(inventory: &Inventory, job: &DeleteJob, restore_point: Option<Txid>) -> Option<Hold> {
+fn self_check(
+    inventory: &Inventory,
+    job: &DeleteJob,
+    restore_point: Option<Txid>,
+) -> Option<RetentionHold> {
     let rest = Inventory::from_files(
         inventory
             .files()
@@ -651,7 +661,7 @@ fn self_check(inventory: &Inventory, job: &DeleteJob, restore_point: Option<Txid
     );
     let Ok(rest) = rest else {
         // A subset of a valid listing cannot conflict; hold if it somehow does.
-        return Some(Hold::SelfCheck {
+        return Some(RetentionHold::SelfCheck {
             outcome: PlanOutcome::EmptyReplica,
         });
     };
@@ -663,7 +673,7 @@ fn self_check(inventory: &Inventory, job: &DeleteJob, restore_point: Option<Txid
     match plan(&rest, KeyTarget::Latest) {
         PlanOutcome::Plan(chain) if Some(chain.reaches()) == inventory.newest() => None,
         // A plan that stops short of the newest transaction.
-        PlanOutcome::Plan(chain) => Some(Hold::SelfCheck {
+        PlanOutcome::Plan(chain) => Some(RetentionHold::SelfCheck {
             outcome: PlanOutcome::BeyondNewest {
                 requested: inventory.newest().unwrap_or(chain.reaches()),
                 newest: chain.reaches(),
@@ -675,6 +685,6 @@ fn self_check(inventory: &Inventory, job: &DeleteJob, restore_point: Option<Txid
         | PlanOutcome::AsOfInsideFile { .. }
         | PlanOutcome::Gap { .. }
         | PlanOutcome::InsideFile { .. }
-        | PlanOutcome::MalformedSnapshot { .. }) => Some(Hold::SelfCheck { outcome }),
+        | PlanOutcome::MalformedSnapshot { .. }) => Some(RetentionHold::SelfCheck { outcome }),
     }
 }

@@ -241,7 +241,7 @@ pub enum Job {
 /// Every variant is a listing that cannot safely be read as a history; the
 /// rules and the gate's order are in the `retain` module docs.
 #[derive(Clone, PartialEq, Eq, Debug, Error)]
-pub enum Hold {
+pub enum RetentionHold {
     /// A name in the listing could not be parsed; it may be a file that
     /// covers something.
     #[error("{count} unparsable names at {level}")]
@@ -333,7 +333,7 @@ pub enum Due {
         /// does without a new write.
         until: Option<Timestamp>,
         /// Why deletions are refused right now, if they are.
-        held: Option<Hold>,
+        held: Option<RetentionHold>,
     },
 }
 

@@ -20,8 +20,8 @@ fn digest(n: u32, fill: u8) -> PageChecksum {
     PageChecksum::of(pg(n), &page(fill))
 }
 
-fn table() -> PageTable {
-    let mut table = PageTable::new();
+fn table() -> PageChecksumTable {
+    let mut table = PageChecksumTable::new();
     table.fit(PS);
     table
 }
