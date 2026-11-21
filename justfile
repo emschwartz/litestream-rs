@@ -159,6 +159,14 @@ tigris-restore:
     ./scripts/build-go-litestream.sh v0.5.18
     env -u AWS_CA_BUNDLE ./scripts/tigris.sh cargo nextest run --release -p lsr-cli --test tigris --run-ignored only --no-capture --locked
 
+# The long soak of `lsr replicate` against the Tigris bucket (docs/plans/phase-3-syncing.md, task 9):
+# a synthetic writer for the given hours, a restore at Latest and at a random sampled transaction
+# compared with recorded page hashes every hour (LSR_SOAK_CHECK_SECS), resources and log warnings
+# printed as HOUR lines. Never part of check or CI. Afterwards, check that the run prefix lists
+# empty, multipart uploads included.
+soak-tigris hours:
+    LSR_SOAK_HOURS={{hours}} ./scripts/tigris.sh cargo nextest run --release -p lsr-cli --test soak_tigris --run-ignored only --no-capture --locked
+
 # Pinned upstream sources, read-only reference for the port and input to the compat harness.
 upstream:
     ./scripts/fetch-upstream.sh
