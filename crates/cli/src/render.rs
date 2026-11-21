@@ -25,6 +25,7 @@ use crate::args::{
 use crate::run::{CliError, Done, Exit, Finished, RestoreDone, Skip, Source};
 use lsr_core::ListedTime;
 use lsr_local::IntegrityCheck;
+use lsr_sidecar::json_string as quote;
 
 /// Appends formatted text to a `String`, which cannot fail.
 macro_rules! put {
@@ -744,27 +745,6 @@ fn verify_text(report: &Report, depth: Depth) -> String {
         "result: {}",
         report.worst().map_or("clean", severity_name)
     );
-    out
-}
-
-/// A JSON string literal.
-fn quote(text: &str) -> String {
-    let mut out = String::with_capacity(text.len().saturating_add(2));
-    out.push('"');
-    for ch in text.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            control if control.is_control() => {
-                put!(out, "\\u{:04x}", u32::from(control));
-            }
-            plain => out.push(plain),
-        }
-    }
-    out.push('"');
     out
 }
 

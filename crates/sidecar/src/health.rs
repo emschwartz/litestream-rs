@@ -20,7 +20,7 @@ use lsr_replica::{
     Timestamp,
 };
 
-use crate::logging::json_string;
+use crate::json::string as json_string;
 
 /// Where one database stands, as the board holds it.
 #[derive(Clone, Debug)]
