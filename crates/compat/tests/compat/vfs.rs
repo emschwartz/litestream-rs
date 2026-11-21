@@ -6,14 +6,14 @@
 //! The chain is the one `rust_chains.rs` restores with Go: page-count growth, a delete and a
 //! VACUUM that shrink the file, compaction to levels 1 and 2 and a snapshot. Each build under
 //! test with a file-reading VFS runs (`just compat`: the pinned five; `just compat-live`: the
-//! names given). The frame era's VFS reads only frame-encoded files, so it refuses, and the
+//! names given). The frame page encoding's VFS reads only frame-encoded files, so it refuses, and the
 //! refusal is asserted; before v0.5.3 the VFS reads S3 only and has nothing to open here.
 
 use std::collections::BTreeSet;
 use std::path::Path;
 
 use lsr_compat::{
-    AppFixture, Chain, Era, VfsRead, Written, build_vfs_reader, builds_under_test,
+    AppFixture, Chain, PageEncoding, VfsRead, Written, build_vfs_reader, builds_under_test,
     clock_ending_now, hash_pages, integrity_check, read_plain, read_with_vfs, restore_replica,
 };
 use lsr_core::RestoreTarget;
@@ -94,8 +94,8 @@ mod live {
             std::fs::create_dir_all(&scratch).expect("mkdir");
             let result = read_with_vfs(&reader, &library, &written.fixture.replica, &scratch)
                 .expect("the application runs");
-            match (build.era(), result) {
-                (Era::Blocks, VfsRead::Read(view)) => {
+            match (build.page_encoding(), result) {
+                (PageEncoding::Block, VfsRead::Read(view)) => {
                     assert_eq!(view.integrity, ["ok"], "{name}");
                     assert_eq!(view.txid, Some(newest.txid.get()), "{name}");
                     assert!(view.rows == want.rows, "{name}: the rows differ");
@@ -109,10 +109,10 @@ mod live {
                     );
                     read += 1;
                 }
-                (Era::Blocks, VfsRead::Refused { detail }) => {
+                (PageEncoding::Block, VfsRead::Refused { detail }) => {
                     panic!("{name} refused a Rust replica: {detail}")
                 }
-                (Era::Frames, VfsRead::Refused { detail }) => {
+                (PageEncoding::Frame, VfsRead::Refused { detail }) => {
                     // What matters is that a build predating block-encoded pages refuses
                     // instead of reading wrong data. The reason is the page encoding (an
                     // LZ4 frame decoder handed a block), the same one these builds give Go
@@ -127,7 +127,9 @@ mod live {
                     };
                     println!("{name} on a Rust replica: refused ({why}), {detail}");
                 }
-                (Era::Frames, VfsRead::Read(_)) => panic!("{name} read a block-encoded replica"),
+                (PageEncoding::Frame, VfsRead::Read(_)) => {
+                    panic!("{name} read a block-encoded replica")
+                }
             }
         }
         println!("{read} builds read the replica through the VFS");

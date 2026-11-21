@@ -461,10 +461,10 @@ mod live {
         use std::time::{Duration, Instant};
 
         use lsr_compat::{
-            AppFixture, Chain, Era, GoBuild, GoRestore, Replicator, Shape, Target, Written,
-            builds_in, builds_under_test, clock_ending_now, hash_pages, integrity_check, list,
-            newest_l0, position, real_now_ms, restore_replica, restore_with_go, wait_staged_past,
-            wait_until, write_config, write_config_snapshotting,
+            AppFixture, Chain, GoBuild, GoRestore, PageEncoding, Replicator, Shape, Target,
+            Written, builds_in, builds_under_test, clock_ending_now, hash_pages, integrity_check,
+            list, newest_l0, position, real_now_ms, restore_replica, restore_with_go,
+            wait_staged_past, wait_until, write_config, write_config_snapshotting,
         };
         use lsr_core::{Event, Level, RestoreTarget};
         use lsr_ltx::{Header, Txid};
@@ -476,13 +476,13 @@ mod live {
             hash_pages(path).expect("hash").page_hashes
         }
 
-        /// Runs `each` over the block-era builds under test, and says so when the run names none:
-        /// the Rust-to-Go direction has nothing to run then, because frame-era builds refuse
-        /// Rust's files (Go-to-Rust handover runs over every era).
+        /// Runs `each` over the block-encoding builds under test, and says so when the run names none:
+        /// the Rust-to-Go direction has nothing to run then, because frame-encoding builds refuse
+        /// Rust's files (Go-to-Rust handover runs over every page encoding).
         fn for_blocks(mut each: impl FnMut(&GoBuild)) {
-            let builds = builds_in(Era::Blocks);
+            let builds = builds_in(PageEncoding::Block);
             if builds.is_empty() {
-                println!("no block-era build under test: nothing to hand over");
+                println!("no block-encoding build under test: nothing to hand over");
             }
             for build in &builds {
                 each(build);
@@ -653,7 +653,7 @@ mod live {
             for_blocks(|build| resumes(build, true));
         }
 
-        /// Every build under test, frame era included, writes a replica from a live database that
+        /// Every build under test, frame page encoding included, writes a replica from a live database that
         /// Rust restores to the pages the database held, the same pages Go's own restore returns.
         #[test]
         #[ignore = "runs the Go binaries; just compat"]
@@ -756,9 +756,9 @@ mod live {
         }
 
         /// Go writes, stops; the Rust actor boots from Go's meta and replica and goes on. Rust
-        /// restores the combined chain at the end and at the txid where Go stopped. A block-era Go
-        /// restores it too; a frame-era Go refuses it (it reads only frames), and the newest
-        /// block-era build under test, when there is one, reads the frames-then-blocks chain.
+        /// restores the combined chain at the end and at the txid where Go stopped. A block-encoding Go
+        /// restores it too; a frame-encoding Go refuses it (it reads only frames), and the newest
+        /// block-encoding build under test, when there is one, reads the frames-then-blocks chain.
         fn rust_resumes(build: &GoBuild) {
             let name = build.name();
             let bin = build.binary().expect("the build under test is present");
@@ -779,7 +779,7 @@ mod live {
                 .find(|e| matches!(e, Event::Booted { .. }))
                 .ok_or_else(|| format!("{name}: Rust never booted: {:?}", written.events))
                 .expect("a Booted event");
-            println!("{name} ({:?}): Rust boot {boot:?}", build.era());
+            println!("{name} ({:?}): Rust boot {boot:?}", build.page_encoding());
             let want = &written.points.last().expect("points").page_hashes;
             rust_restores_combined(&written, RestoreTarget::Latest, want, "latest");
             rust_restores_combined(
@@ -788,11 +788,11 @@ mod live {
                 &at_stop,
                 "mid",
             );
-            match build.era() {
-                Era::Blocks => {
+            match build.page_encoding() {
+                PageEncoding::Block => {
                     go_reads_combined(&bin, &fixture_config, &written, go_newest, &at_stop, "Go")
                 }
-                Era::Frames => {
+                PageEncoding::Frame => {
                     let out = written.fixture.dir().join("refused.db");
                     let result = restore_with_go(
                         &bin,
@@ -806,7 +806,7 @@ mod live {
                         matches!(result, GoRestore::Refused { .. }),
                         "{name} read the combined chain: {result:?}"
                     );
-                    match builds_in(Era::Blocks).pop() {
+                    match builds_in(PageEncoding::Block).pop() {
                         Some(newest) => {
                             let newest_bin =
                                 newest.binary().expect("the build under test is present");
@@ -820,7 +820,7 @@ mod live {
                             );
                         }
                         None => println!(
-                            "{name}: no block-era build under test; Rust's restore is the assertion"
+                            "{name}: no block-encoding build under test; Rust's restore is the assertion"
                         ),
                     }
                 }
@@ -862,7 +862,7 @@ mod live {
         use std::time::Duration;
 
         use lsr_compat::{
-            AppFixture, Era, GoBuild, GoRestore, Kind, Replicator, Shape, Summary, Target,
+            AppFixture, GoBuild, GoRestore, Kind, PageEncoding, Replicator, Shape, Summary, Target,
             builds_under_test, hash_pages, integrity_check, lsr_binary, position, restore_replica,
             restore_with_go, snapshots, wait_boot_file, wait_staged_past, wait_until,
             wait_uploaded, write_config, write_config_daily_snapshots,
@@ -970,7 +970,7 @@ mod live {
         /// and replica, and its first file is the next transaction, incremental, with no new
         /// snapshot. Then the reverse on the same fixture: Go resumes from the meta directory `lsr`
         /// left. Rust restores the combined chain at each handover point; Go restores it when it
-        /// reads block-encoded files (a frame-era Go cannot, so the reverse half needs v0.5.16 or
+        /// reads block-encoded files (a frame-encoding Go cannot, so the reverse half needs v0.5.16 or
         /// later).
         #[test]
         #[ignore = "runs the pinned Go binaries; just compat"]
@@ -1033,7 +1033,7 @@ mod live {
                 "{name}: Go stopped at {go_newest}, lsr continued at {:016x}",
                 go_newest.get() + 1
             );
-            if build.era() == Era::Frames {
+            if build.page_encoding() == PageEncoding::Frame {
                 println!("{name}: reads only frame-encoded files, so cannot resume from lsr's");
                 return;
             }

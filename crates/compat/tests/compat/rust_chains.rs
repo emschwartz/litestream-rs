@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use lsr_compat::{
-    AppFixture, Chain, Era, GoBuild, GoRestore, Replicator, Target, UP_LINE, Written,
+    AppFixture, Chain, GoBuild, GoRestore, PageEncoding, Replicator, Target, UP_LINE, Written,
     build_verify_helper, builds_in, builds_under_test, clock_ending_now, go_verify, hash_pages,
     integrity_check, list, newest_l0, restore_replica, restore_with_go, wait_until, write_config,
 };
@@ -255,7 +255,7 @@ fn compacts_and_prunes(build: &GoBuild) {
 mod live {
     use super::*;
 
-    /// Every build in the block era restores the latest state; the frame era reads only frames
+    /// Every build in the block page encoding restores the latest state; the frame page encoding reads only frames
     /// and refuses, and the refusal is asserted rather than skipped.
     #[test]
     #[ignore = "runs the Go binaries; just compat"]
@@ -266,12 +266,12 @@ mod live {
         for build in builds_under_test() {
             let name = build.name();
             let (result, out) = go_restore(&build, &written, &config, "latest.db", Target::Latest);
-            match build.era() {
-                Era::Blocks => {
+            match build.page_encoding() {
+                PageEncoding::Block => {
                     assert_eq!(result, GoRestore::Restored, "{name}");
                     assert_eq!(&restored_pages(&out), want, "{name}");
                 }
-                Era::Frames => {
+                PageEncoding::Frame => {
                     println!("{name} on a Rust chain: {result:?}");
                     assert!(
                         matches!(result, GoRestore::Refused { .. }),
@@ -300,7 +300,7 @@ mod live {
         );
         targets.sort();
         targets.dedup();
-        for build in builds_in(Era::Blocks) {
+        for build in builds_in(PageEncoding::Block) {
             let version = build.name();
             let mut checked = 0;
             for txid in &targets {
@@ -350,7 +350,7 @@ mod live {
         let written = write_chain(COMMITS, 4096, 11);
         let config = go_config(&written);
         let stride = (written.points.len() / 30).max(1);
-        for build in builds_in(Era::Blocks) {
+        for build in builds_in(PageEncoding::Block) {
             for point in written.points.iter().step_by(stride) {
                 let at = point.at_ms + 40;
                 let rs = written.fixture.dir().join("rs.db");
@@ -399,7 +399,7 @@ mod live {
     #[test]
     #[ignore = "runs the pinned Go binary for several seconds; just compat"]
     fn go_compacts_and_prunes_a_rust_replica() {
-        for build in builds_in(Era::Blocks) {
+        for build in builds_in(PageEncoding::Block) {
             compacts_and_prunes(&build);
         }
     }

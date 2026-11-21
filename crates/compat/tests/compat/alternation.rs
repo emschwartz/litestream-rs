@@ -8,13 +8,13 @@
 //! sides reading one config file, so Rust also checkpoints on Go's schedule and runs TRUNCATE.
 //!
 //! Seeds: `LSR_ALTERNATION_SEED` (decimal) replays a run; without it the seed is the clock.
-//! The Go builds are those under test in the block era (`just compat-live`); a frame-era
+//! The Go builds are those under test in the block page encoding (`just compat-live`); a frame-encoding
 //! build cannot read Rust's files, so it has nothing to alternate with.
 
 use crate::alternate;
 
 use alternate::{Launch, alternate, seed};
-use lsr_compat::{Era, builds_in, lsr_binary};
+use lsr_compat::{PageEncoding, builds_in, lsr_binary};
 
 /// The evidence the exception for #38 rests on is found when a writer leaves a whole
 /// transaction past the wal-index's end, in a continued WAL and as the first frame of a
@@ -42,9 +42,11 @@ mod live {
     #[test]
     #[ignore = "runs the pinned Go binaries; just compat"]
     fn go_and_rust_alternate_on_one_prefix() {
-        let builds = builds_in(Era::Blocks);
+        let builds = builds_in(PageEncoding::Block);
         if builds.is_empty() {
-            println!("no block-era build under test: a frame-era Go cannot read Rust's files");
+            println!(
+                "no block-encoding build under test: a frame-encoding Go cannot read Rust's files"
+            );
             return;
         }
         let lsr = lsr_binary().expect("lsr builds");

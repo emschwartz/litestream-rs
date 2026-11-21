@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use lsr_compat::{
-    CompatError, Era, GoBuild, GoRestore, GoVersion, Manifest, Outcome, Scenario, Target,
+    CompatError, GoBuild, GoRestore, GoVersion, Manifest, Outcome, PageEncoding, Scenario, Target,
     all_fixtures, build_verify_helper, builds_in, copy_tree, generate, go_binary, go_verify,
     hash_pages, integrity_check, restore_replica, restore_with_go, stage, write_config,
 };
@@ -182,7 +182,7 @@ mod live {
     use super::*;
 
     /// Every replica file of every fixture, rewritten by `lsr_ltx::Encoder`, restores under each
-    /// block-era Go build under test to the pages the manifest records; the frame era refuses.
+    /// block-encoding Go build under test to the pages the manifest records; the frame page encoding refuses.
     #[test]
     #[ignore = "runs the pinned Go binaries; just compat"]
     fn go_restores_what_rust_encoded() {
@@ -205,7 +205,7 @@ mod live {
                 let Outcome::Restored { page_hashes, .. } = &entry.outcome else {
                     continue;
                 };
-                for build in builds_in(Era::Blocks) {
+                for build in builds_in(PageEncoding::Block) {
                     let label = format!(
                         "{} reading {} {} {:?}",
                         build.name(),
@@ -228,7 +228,7 @@ mod live {
                 .iter()
                 .any(|t| matches!(t.outcome, Outcome::Restored { .. }))
             {
-                for build in builds_in(Era::Frames) {
+                for build in builds_in(PageEncoding::Frame) {
                     let (got, _) = run(&build, Target::Latest);
                     assert!(
                         matches!(got, GoRestore::Refused { .. }),

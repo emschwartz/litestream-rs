@@ -16,7 +16,7 @@
 //! tests, on every push (`just compat`). Releases: every upstream tag `v0.5.N` without a
 //! pre-release suffix ([`KNOWN_RELEASES`]), live tests only (`just compat-releases`). Floating:
 //! upstream `main` and any tag newer than the table (`just compat-live main`), nightly. The
-//! live tests take a [`GoBuild`] and an [`Era`]; a release that differs from its era is one
+//! live tests take a [`GoBuild`] and an [`PageEncoding`]; a release that differs from its page encoding is one
 //! row in [`QUIRKS`], and tests assert the quirk instead of skipping. Out of scope: Litestream
 //! 0.3.x and 0.4.x, a different replica format; the port reads and writes the 0.5 LTX layout only.
 //!
@@ -57,9 +57,9 @@ mod vfs;
 mod workload;
 
 pub use binaries::{
-    Era, FIRST_WAL_INDEX_END_PATCH, GoBuild, GoVersion, KNOWN_RELEASES, LIVE_MODULE, QUIRKS, Quirk,
-    QuirkEntry, S3_MODULE, VERSIONS_ENV, WAL_INDEX_END_COMMIT, builds_in, builds_under_test,
-    go_binary, is_live_test, workspace_root,
+    FIRST_WAL_INDEX_END_PATCH, GoBuild, GoVersion, KNOWN_RELEASES, LIVE_MODULE, PageEncoding,
+    QUIRKS, Quirk, QuirkEntry, S3_MODULE, VERSIONS_ENV, WAL_INDEX_END_COMMIT, builds_in,
+    builds_under_test, go_binary, is_live_test, workspace_root,
 };
 pub use chain::{
     AppFixture, Chain, Outside, Point, STEP_MS, Shape, Written, clock_ending_now, real_now_ms,
