@@ -149,3 +149,62 @@ Same run and probe file.
 1. **Not compiled in.** `sqlite3_compileoption_used("ENABLE_SETLK_TIMEOUT")` is 0 (`the_bundled_sqlite_is_built_without_setlk_timeout`). The `libsqlite3-sys` 0.40.0 build script passes a fixed list (`-DSQLITE_CORE`, `-DSQLITE_ENABLE_API_ARMOR`, `-DSQLITE_ENABLE_FTS5`, `-DSQLITE_THREADSAFE=1` and others, `build.rs:170-184`) that does not include it, and adds options only from `LIBSQLITE3_FLAGS` (`build.rs:340-351`). The test asserts the option is on exactly when `LIBSQLITE3_FLAGS` asked for it, so a build that turns it on fails loudly rather than silently changing the answer.
 2. **Even with it, SQLite 3.54.1 does not block on `-shm` locks.** Every `-shm` lock goes through `osSetPosixAdvisoryLock` (`sqlite3.c:42388-42434`). With the option on and a busy timeout set, that function's comment calls its body "placeholder code": outside `SQLITE_TEST` builds it makes one non-blocking `F_SETLK` and clears the timeout, so the caller gets `SQLITE_BUSY`. The only `F_SETLKW` in the file (`sqlite3.c:42481`) is the database file's shared range under `SQLITE_FCNTL_BLOCK_ON_CONNECT`, a read lock that a pin's read lock does not conflict with. Measured: the whole probe file rebuilt with `LIBSQLITE3_FLAGS="SQLITE_ENABLE_SETLK_TIMEOUT=1"` in a separate target directory passes unchanged (the compile option reads true), and `strace -f -e trace=fcntl` over the busy-timeout test and the main pin test shows zero `F_SETLKW` calls and four `F_SETLK` calls on bytes 124 to 127 refused with `EAGAIN`, the same as the default build.
 3. So the risk the research note raised (SQLite blocking in `F_SETLKW` behind our lock) does not exist in this SQLite, with or without the option. A host that links a different SQLite with a real blocking implementation would wait up to its busy timeout instead of getting busy at once, which the kernel behaviour in the previous spike's answer 5 shows is what it would do; the pin should be short either way.
+
+# Phase 4 spikes
+
+| Spike | Status | Answer |
+|---|---|---|
+| S6, YAML fidelity against Go's `gopkg.in/yaml.v2` | answered | `saphyr-parser` 0.3.4 (MIT OR Apache-2.0, no `unsafe` of its own, one new transitive crate `arraydeque` 0.5.1, MIT OR Apache-2.0) as an event parser, with yaml.v2's YAML 1.1 resolution and decode rules ported into `lsr-config`. Every reading Go makes is reproduced except where the table below says v1 refuses. See below. |
+
+## S6: YAML fidelity against yaml.v2
+
+Run on 2026-11-21 with Go 1.24.7 and `gopkg.in/yaml.v2` v2.4.0 (the version upstream's `go.mod` pins at 041a8c3), from the module cache. The probe is a 200-line Go program (not committed: it lived in a scratch directory) that decodes 110 YAML snippets into a struct with one field of each Go type the config uses (`*time.Duration`, `bool`, `*bool`, `string`, `*int`, `*int64`, `uint32`, `[]string`, `interface{}`, a nested struct, a slice of struct pointers), once with `yaml.Unmarshal` (what Litestream decodes with) and once with `yaml.UnmarshalStrict` (Litestream's diagnostic second pass, which only warns). Its expected values are transcribed into `crates/config/tests/config/fidelity.rs`, run against real config keys, and into the unit tests of `value.rs`, `duration.rs`, `size.rs` and `expand.rs`. A second probe ran Go's `os.Expand` with Litestream's mapping over 21 strings; `expand.rs`'s `expands_as_go_os_expand` is that table.
+
+**Parser choice.** The plan's candidates were `saphyr` and `yaml-rust2` (`serde_yaml` is archived). Both are YAML 1.2 loaders over the same scanner (yaml-rust2 is the older fork; `saphyr-parser` is that scanner and parser split out). Both resolve scalars by YAML 1.2's core schema, which is wrong for Go (`yes` is a string, `0600` is decimal 600), so neither's loaded tree can be used as is. `saphyr-parser` alone gives events with each scalar's raw text, its style (plain or quoted), anchor ids, tags and line/column spans, and nothing else: `lsr-config` builds its own tree from them and applies yaml.v2's rules from the Go type of each key, which is what the plan's "walk a node tree" asks for. It is `no_std`, has no `unsafe` code (its dependency `arraydeque` has some, for its fixed-capacity ring buffer), and depends only on `arraydeque` and `thiserror` (already in the workspace). `saphyr` (the loader) and `yaml-rust2` add `hashlink`, `hashbrown` and optional `encoding_rs` for a tree we would throw away. Default features off (`saphyr-parser` has only `debug_prints`); the workspace's 3-day publish-age cooldown accepted 0.3.4.
+
+**How Go reads a scalar** (yaml.v2 `resolve.go` and `decode.go`), and so how `lsr-config` reads it: a quoted or block scalar is always a string; a plain one resolves by its first character, so a string field takes the scalar's text whatever it resolves to, and a typed field takes only what resolves to its type. Environment expansion runs first, over the raw text, comments included.
+
+| Case | yaml.v2 (measured) | Rust parser alone | `lsr-config` |
+|---|---|---|---|
+| Duration `10s`, `"10s"`, `1h30m`, `1.5h`, `300ms`, `3µs`, `+5s`, `-1h` | `time.ParseDuration` | string | same, `time.ParseDuration` ported line for line |
+| Duration `5` (bare integer) | 5ns | integer 5 | 5ns, plus a warning naming the reading |
+| Duration `1.5` (bare float) | 1ns (truncated) | float | **refused** (`Fractional`) |
+| Duration `"5"`, `10 s`, `10S`, `1d` | type error | string | type error naming `Duration` |
+| Duration empty, `null`, `~` | nil (unset) | null | unset |
+| Booleans `y Y yes Yes YES on On ON true True TRUE` and the `n`/`no`/`off`/`false` forms | `true` / `false` (YAML 1.1) | strings except `true`/`false` | YAML 1.1 table ported: booleans |
+| Boolean `tRue`, `"true"`, `1` | type error | string, string, integer | type error |
+| String field given `yes`, `0600`, `1.0`, `123`, `2001-01-01` | the text as written | typed values | the text as written |
+| String field given `null`, `~`, `""` | `""` | null / empty | unset (Go cannot tell these apart either) |
+| String `abc # note`, `abc#note`, `a:b`, `a\tb`, escapes, `'it''s'`, `\|` and `>` blocks | YAML text rules | same | same (from the parser) |
+| Integer `0600`, `0o600` | 384 (octal) | 600, 384 | 384: Go's `ParseInt(s, 0, 64)` ported |
+| Integer `08` | 8 (not octal: falls through to the float 8) | 8 | 8 |
+| Integer `0x10`, `0b101`, `1_000`, `+5`, `-5`, `1e3` | 16, 5, 1000, 5, -5, 1000 | mixed | same as Go |
+| Integer `2.7` | 2 (truncated) | float | **refused** (`Fractional`) |
+| Integer `"5"`, `99999999999999999999`, `.inf` | type error | | type error / out of range |
+| `uint32` `0600`, `-1` | 384, type error | | 384, out of range |
+| Anchors and aliases | expanded | alias events | expanded, at most 10,000 nodes added (bounded); unknown anchor is a syntax error in both |
+| Merge `<<: *base` then explicit keys | explicit keys win | a key named `<<` | same as Go |
+| Merge `<<: [*a, *b]` | first mapping wins | | same as Go |
+| Explicit key **before** a `<<` that also sets it | the merge wins (the YAML spec says the key wins) | | **refused** (`MergeOverridesKey`): the two readings differ |
+| Second document (`---`) | ignored silently | second document events | **refused** (`MultipleDocuments`); an empty document after `---` is allowed |
+| `...` document end, `%YAML 1.1` directive, BOM, CRLF | accepted | accepted | accepted |
+| Tab as indentation | error ("found character that cannot start any token") | error | error, with the parser's message |
+| Tab after `key:` (`s:\tv`) | accepted as a space | **error** ("':' must be followed by a valid YAML whitespace") | refused with its own message (`TabAfterColon`): "write a space" |
+| Tab inside a value | kept | kept | kept |
+| Duplicate key | last wins; `UnmarshalStrict` warns | both delivered | **refused** (`Duplicate`, naming both lines) |
+| Duplicate section key (`in:` twice) | the two mappings merged field by field | both delivered | **refused** |
+| Unknown key, wrong case (`S:`), integer key (`1:`) | ignored; strict pass warns | | **refused** with a "did you mean" within two edits (ruling R1) |
+| Explicit tags (`!!str 5`, `!foo`) | resolved by tag | tag delivered | **refused** (`Tag`): no config needs one |
+| Top-level list or scalar | type error | | type error (`Mapping` expected) |
+| Mapping where a scalar is expected, list where a mapping is | type error | | type error |
+| Leading space before the top-level keys (Go's own `DBRetentionShorterThanInterval` test) | accepted | accepted | accepted |
+| Null item in a list of mappings (`dbs: [~]`) | a nil entry (Go then dereferences it) | | **refused** (`EmptyItem`) |
+| Empty `snapshot:` / `l0-retention:` | nil; `ParseConfig` restores the defaults | | defaults |
+| Empty `levels:` | nil: no levels (defaults are **not** restored) | | no levels, as Go (task 2 decides what v1 does with none) |
+| Empty file, comments only | defaults | no document | defaults |
+
+**Environment expansion** (`os.Expand` with Litestream's mapping, all 21 cases matching Go): `$NAME` takes the longest run of ASCII letters, digits and `_`, `${NAME}` everything to the next `}`; one shell-special character (`$`, `0`-`9`, `*`, `#`, `@`, `!`, `?`, `-`) is a name of its own, never set, so `$$` and `$1` become nothing; `${}` and an unclosed `${` are dropped; a `$` before anything else, or at the end, is kept; `${A:-b}` looks up the name `A:-b`; `$PID` is the process id. An unset variable expands to nothing, as in Go, and the loader warns once per name. Expansion happens before parsing, so a value holding YAML syntax changes the document (`env.rs::expansion_happens_before_parsing_as_in_go`). Handled in the loader, not refused, since it is what every Go user's file relies on.
+
+**Byte sizes and durations** are not YAML: `part-size` is Litestream's `ParseByteSize` over go-humanize v1.0.1's `ParseBytes` (ported, and Go's `TestParseByteSize` table passes), durations are `time.ParseDuration` (ported, with a property test that whatever Go's `Duration.String` prints parses back).
+
+So: every difference between the Rust parser and yaml.v2 is either handled in the loader (YAML 1.1 booleans, octal and the integer forms, string fields taking raw text, bare-number durations, merge order, documents after the first being events) or refused with an error that names the line and says what to write instead (tab after a colon, a key a merge overrides, a second document, duplicates, tags, fractions Go would truncate).
