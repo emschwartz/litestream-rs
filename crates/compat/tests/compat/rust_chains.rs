@@ -22,7 +22,7 @@ const COMMITS: u32 = 300;
 /// Longer than the longest monitor interval in the Go config (4s).
 const MONITORS_RAN: Duration = Duration::from_secs(6);
 
-/// Removes a database and the sidecars SQLite left beside it, so the path can be restored to again.
+/// Removes a database and the journal files SQLite left beside it, so the path can be restored to again.
 fn clear(path: &Path) {
     for suffix in ["", "-wal", "-shm", "-journal"] {
         let file = PathBuf::from(format!("{}{suffix}", path.display()));

@@ -218,7 +218,7 @@ fn a_degraded_task_is_still_reported_while_the_engine_is_rebuilt() {
     ));
 }
 
-/// Moves another database over the replicated one's path, sidecars and all, as a restore in
+/// Moves another database over the replicated one's path, journal files and all, as a restore in
 /// place would.
 fn replace(site: &Site) -> std::path::PathBuf {
     let other = site.path("other");

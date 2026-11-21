@@ -222,18 +222,30 @@ fn restore(done: &RestoreDone) -> String {
             Finished::Planned {
                 chain,
                 created_at_read,
-                sidecars_to_remove,
+                journal_files_to_remove,
             },
             false,
-        ) => plan_text(output, source, chain, *created_at_read, sidecars_to_remove),
+        ) => plan_text(
+            output,
+            source,
+            chain,
+            *created_at_read,
+            journal_files_to_remove,
+        ),
         (
             Finished::Planned {
                 chain,
                 created_at_read,
-                sidecars_to_remove,
+                journal_files_to_remove,
             },
             true,
-        ) => plan_json(output, source, chain, *created_at_read, sidecars_to_remove),
+        ) => plan_json(
+            output,
+            source,
+            chain,
+            *created_at_read,
+            journal_files_to_remove,
+        ),
         (Finished::Skipped { skip, cleared }, false) => {
             skipped_text(output, source, *skip, cleared)
         }
@@ -313,7 +325,7 @@ fn restored_json(
             "checksum_verified",
             restored.post_apply().is_some().to_string(),
         ),
-        ("sidecars_removed", path_array(cleared)),
+        ("journal_files_removed", path_array(cleared)),
     ];
     if let Some(file) = restored.inside_file() {
         fields.push(("inside_file", quote(&key_path(&file))));
@@ -354,7 +366,7 @@ fn skipped_json(output: &Path, source: &Source, skip: Skip, cleared: &[PathBuf])
         ("skipped", quote(skip_word(skip))),
         ("db_path", quote(&output.display().to_string())),
         ("replica", quote(source.kind().word())),
-        ("sidecars_removed", path_array(cleared)),
+        ("journal_files_removed", path_array(cleared)),
     ]);
     out.push('\n');
     out
@@ -400,10 +412,10 @@ fn plan_text(
     source: &Source,
     chain: &ContiguousChain,
     created_at_read: u64,
-    sidecars_to_remove: &[PathBuf],
+    journal_files_to_remove: &[PathBuf],
 ) -> String {
     let mut out = String::new();
-    for path in sidecars_to_remove {
+    for path in journal_files_to_remove {
         putln!(out, "would remove stale {}", path.display());
     }
     out.push_str("Restore plan:\n");
@@ -447,7 +459,7 @@ fn plan_json(
     source: &Source,
     chain: &ContiguousChain,
     created_at_read: u64,
-    sidecars_to_remove: &[PathBuf],
+    journal_files_to_remove: &[PathBuf],
 ) -> String {
     let files: Vec<String> = chain.files().iter().map(plan_file_json).collect();
     let mut out = object(&[
@@ -461,7 +473,10 @@ fn plan_json(
         ("max_txid", quote(&chain.reaches().to_string())),
         ("files", array(&files)),
         ("created_at_read", created_at_read.to_string()),
-        ("sidecars_to_remove", path_array(sidecars_to_remove)),
+        (
+            "journal_files_to_remove",
+            path_array(journal_files_to_remove),
+        ),
     ]);
     out.push('\n');
     out

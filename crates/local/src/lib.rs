@@ -8,18 +8,18 @@
 //! interleave, and a scratch left by a crashed restore (the lock died with its
 //! process) is reclaimed instead of lingering at up to the database's size.
 //!
-//! Sidecars: SQLite replays a stale `<target>-wal` and treats a stale
+//! Journal files: SQLite replays a stale `<target>-wal` and treats a stale
 //! `<target>-journal` as a hot journal, either of which corrupts the restored
 //! pages on first open. A restore never deletes a file it does not own, so
-//! [FileSink::create] refuses while any of the three sidecars exists, and the
-//! caller clears them first with [clear_sidecars] (the normal path: a database
+//! [FileSink::create] refuses while any of the three journal files exists, and the
+//! caller clears them first with [clear_journal_files] (the normal path: a database
 //! deleted under SQLITE_FCNTL_PERSIST_WAL leaves its `-wal` behind).
 //!
 //! [FileSink::publish] makes the database visible, in this order: run the
 //! SQLite check the sink was given ([FileSink::with_integrity_check], none by
 //! default; see the [integrity] module), so a database SQLite finds invalid
 //! is refused with an [IntegrityFailure] and its scratch removed; fsync the
-//! scratch; check the target and all three sidecars are still absent (else
+//! scratch; check the target and all three journal files are still absent (else
 //! `AlreadyExists` naming the path, nothing touched); hard-link the scratch to
 //! the target, which fails when the target exists, so a database a rival
 //! created meanwhile is never overwritten; fsync the directory; unlink the
@@ -51,7 +51,7 @@ pub mod integrity;
 pub use integrity::{IntegrityCheck, IntegrityFailure};
 
 /// The files SQLite keeps beside a database that must not outlive it.
-const SIDECAR_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
+const JOURNAL_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
 
 /// Why a [FileSink] could not be created.
 #[derive(Debug, Error)]
@@ -61,10 +61,10 @@ pub enum CreateError {
     TargetExists(PathBuf),
     /// A `-wal`, `-shm` or `-journal` file exists beside the absent target;
     /// SQLite would replay it over the restored database. Call
-    /// [clear_sidecars] first if it is known stale.
-    #[error("{} exists beside the restore target; clear it with clear_sidecars first", path.display())]
-    Sidecar {
-        /// The sidecar.
+    /// [clear_journal_files] first if it is known stale.
+    #[error("{} exists beside the restore target; clear it with clear_journal_files first", path.display())]
+    JournalFile {
+        /// The journal file.
         path: PathBuf,
     },
     /// Another restore of this target holds the scratch file.
@@ -88,11 +88,11 @@ pub enum CreateError {
     },
 }
 
-/// Why [clear_sidecars] failed.
+/// Why [clear_journal_files] failed.
 #[derive(Debug, Error)]
 pub enum ClearError {
-    /// The target exists: its sidecars belong to a live database.
-    #[error("{} exists; its sidecars are not stale", .0.display())]
+    /// The target exists: its journal files belong to a live database.
+    #[error("{} exists; its journal files are not stale", .0.display())]
     TargetExists(PathBuf),
     /// A path could not be inspected or removed.
     #[error("{}: {source}", path.display())]
@@ -111,7 +111,7 @@ pub enum PublishStep {
     Check,
     /// The fsync of the scratch's data.
     SyncScratch,
-    /// The check that the target and its sidecars are still absent.
+    /// The check that the target and its journal files are still absent.
     CheckAbsent,
     /// The hard link of the scratch to the target.
     Link,
@@ -155,7 +155,7 @@ pub enum PublishError {
     /// scratch is removed.
     #[error("{0}; nothing was published")]
     Integrity(IntegrityFailure),
-    /// Nothing was made visible: the target and its sidecars are as they were.
+    /// Nothing was made visible: the target and its journal files are as they were.
     #[error("{} was not published ({step}): {source}", .target.display())]
     NotVisible {
         /// The target.
@@ -250,8 +250,8 @@ fn suffixed(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-fn sidecars(target: &Path) -> [PathBuf; 3] {
-    SIDECAR_SUFFIXES.map(|suffix| suffixed(target, suffix))
+fn journal_files(target: &Path) -> [PathBuf; 3] {
+    JOURNAL_SUFFIXES.map(|suffix| suffixed(target, suffix))
 }
 
 fn exists(path: &Path) -> io::Result<bool> {
@@ -269,7 +269,7 @@ fn exists(path: &Path) -> io::Result<bool> {
 /// # Errors
 /// [ClearError::TargetExists] when the target exists; otherwise the failing
 /// removal or fsync.
-pub fn clear_sidecars(target: &Path) -> Result<Vec<PathBuf>, ClearError> {
+pub fn clear_journal_files(target: &Path) -> Result<Vec<PathBuf>, ClearError> {
     let io_at = |path: &Path| {
         let path = path.to_path_buf();
         move |source| ClearError::Io { path, source }
@@ -278,7 +278,7 @@ pub fn clear_sidecars(target: &Path) -> Result<Vec<PathBuf>, ClearError> {
         return Err(ClearError::TargetExists(target.to_path_buf()));
     }
     let mut removed = Vec::new();
-    for path in sidecars(target) {
+    for path in journal_files(target) {
         match fs::remove_file(&path) {
             Ok(()) => removed.push(path),
             Err(err) if err.kind() == io::ErrorKind::NotFound => {}
@@ -290,7 +290,7 @@ pub fn clear_sidecars(target: &Path) -> Result<Vec<PathBuf>, ClearError> {
 }
 
 /// Checks [target] the way [FileSink::create] does, changing nothing, and
-/// returns the stale sidecars beside it: what [clear_sidecars] would remove.
+/// returns the stale journal files beside it: what [clear_journal_files] would remove.
 /// A dry run reports from this what a restore would meet.
 ///
 /// # Errors
@@ -305,7 +305,7 @@ pub fn preflight(target: &Path) -> Result<Vec<PathBuf>, CreateError> {
         return Err(CreateError::TargetExists(target.to_path_buf()));
     }
     let mut present = Vec::new();
-    for path in sidecars(target) {
+    for path in journal_files(target) {
         if exists(&path).map_err(inspect(&path))? {
             present.push(path);
         }
@@ -313,9 +313,9 @@ pub fn preflight(target: &Path) -> Result<Vec<PathBuf>, CreateError> {
     Ok(present)
 }
 
-/// The first of the target and its sidecars that exists.
+/// The first of the target and its journal files that exists.
 fn first_present(target: &Path) -> io::Result<Option<PathBuf>> {
-    for path in std::iter::once(target.to_path_buf()).chain(sidecars(target)) {
+    for path in std::iter::once(target.to_path_buf()).chain(journal_files(target)) {
         if exists(&path)? {
             return Ok(Some(path));
         }
@@ -325,10 +325,10 @@ fn first_present(target: &Path) -> io::Result<Option<PathBuf>> {
 
 impl FileSink {
     /// Starts a restore of [target]: opens and locks the scratch file
-    /// `<target>.restore`, empty. Nothing exists at [target] or its sidecars.
+    /// `<target>.restore`, empty. Nothing exists at [target] or its journal files.
     ///
     /// # Errors
-    /// [CreateError::TargetExists], [CreateError::Sidecar],
+    /// [CreateError::TargetExists], [CreateError::Journal file],
     /// [CreateError::RestoreInProgress], or the I/O failure.
     pub fn create(target: &Path) -> Result<Self, CreateError> {
         let inspect = |path: &Path| {
@@ -338,9 +338,9 @@ impl FileSink {
         if exists(target).map_err(inspect(target))? {
             return Err(CreateError::TargetExists(target.to_path_buf()));
         }
-        for path in sidecars(target) {
+        for path in journal_files(target) {
             if exists(&path).map_err(inspect(&path))? {
-                return Err(CreateError::Sidecar { path });
+                return Err(CreateError::JournalFile { path });
             }
         }
         let scratch = suffixed(target, ".restore");
@@ -655,17 +655,17 @@ mod tests {
     }
 
     #[test]
-    fn create_refuses_each_sidecar_and_removes_nothing() {
+    fn create_refuses_each_journal_file_and_removes_nothing() {
         for suffix in ["-wal", "-shm", "-journal"] {
             let dir = TempDir::new().unwrap();
             let target = dir.path().join("db");
-            let sidecar = dir.path().join(format!("db{suffix}"));
-            fs::write(&sidecar, b"stale").unwrap();
+            let journal_file = dir.path().join(format!("db{suffix}"));
+            fs::write(&journal_file, b"stale").unwrap();
             assert!(matches!(
                 FileSink::create(&target),
-                Err(CreateError::Sidecar { path }) if path == sidecar
+                Err(CreateError::JournalFile { path }) if path == journal_file
             ));
-            assert_eq!(fs::read(&sidecar).unwrap(), b"stale");
+            assert_eq!(fs::read(&journal_file).unwrap(), b"stale");
             assert_eq!(names(&dir).len(), 1, "{suffix}: no scratch left behind");
         }
     }
@@ -690,31 +690,31 @@ mod tests {
     }
 
     #[test]
-    fn clear_sidecars_removes_the_three_and_reports_them() {
+    fn clear_journal_files_removes_the_three_and_reports_them() {
         let dir = TempDir::new().unwrap();
         let target = dir.path().join("db");
         for suffix in ["-wal", "-shm", "-journal"] {
             fs::write(dir.path().join(format!("db{suffix}")), b"stale").unwrap();
         }
         fs::write(dir.path().join("db-other"), b"not ours").unwrap();
-        let mut removed = clear_sidecars(&target).unwrap();
+        let mut removed = clear_journal_files(&target).unwrap();
         removed.sort();
         assert_eq!(
             removed,
             ["db-journal", "db-shm", "db-wal"].map(|n| dir.path().join(n))
         );
         assert_eq!(names(&dir), BTreeSet::from(["db-other".to_owned()]));
-        assert!(clear_sidecars(&target).unwrap().is_empty());
+        assert!(clear_journal_files(&target).unwrap().is_empty());
     }
 
     #[test]
-    fn clear_sidecars_refuses_a_target_that_exists() {
+    fn clear_journal_files_refuses_a_target_that_exists() {
         let dir = TempDir::new().unwrap();
         let target = dir.path().join("db");
         fs::write(&target, b"live").unwrap();
         fs::write(dir.path().join("db-wal"), b"its wal").unwrap();
         assert!(matches!(
-            clear_sidecars(&target),
+            clear_journal_files(&target),
             Err(ClearError::TargetExists(path)) if path == target
         ));
         assert_eq!(fs::read(dir.path().join("db-wal")).unwrap(), b"its wal");
@@ -723,7 +723,7 @@ mod tests {
     /// Review: a stale rollback journal beside the target is a hot journal to
     /// SQLite, which rolls its old pages back over the restored database on
     /// the first open ("database disk image is malformed", reproduced with
-    /// sqlite3). Create refuses; after clear_sidecars the restore publishes
+    /// sqlite3). Create refuses; after clear_journal_files the restore publishes
     /// exactly the database and nothing else.
     #[test]
     fn a_stale_journal_blocks_the_restore_until_cleared() {
@@ -732,9 +732,9 @@ mod tests {
         fs::write(dir.path().join("db-journal"), b"stale hot journal").unwrap();
         assert!(matches!(
             FileSink::create(&target),
-            Err(CreateError::Sidecar { .. })
+            Err(CreateError::JournalFile { .. })
         ));
-        clear_sidecars(&target).unwrap();
+        clear_journal_files(&target).unwrap();
         let mut sink = FileSink::create(&target).unwrap();
         sink.write_page(page(1, &[1; 512])).unwrap();
         sink.publish().unwrap();
@@ -742,21 +742,21 @@ mod tests {
         assert_eq!(names(&dir), BTreeSet::from(["db".to_owned()]));
     }
 
-    /// A sidecar that appears after create is a rival's (or a stale file's);
+    /// A journal file that appears after create is a rival's (or a stale file's);
     /// publish refuses and leaves it, and the target, alone.
     #[test]
-    fn a_sidecar_appearing_after_create_makes_publish_refuse() {
+    fn a_journal_file_appearing_after_create_makes_publish_refuse() {
         for suffix in ["-wal", "-shm", "-journal"] {
             let dir = TempDir::new().unwrap();
             let target = dir.path().join("db");
             let mut sink = FileSink::create(&target).unwrap();
             sink.write_page(page(1, &[1; 512])).unwrap();
-            let sidecar = dir.path().join(format!("db{suffix}"));
-            fs::write(&sidecar, b"theirs").unwrap();
+            let journal_file = dir.path().join(format!("db{suffix}"));
+            fs::write(&journal_file, b"theirs").unwrap();
             let err = sink.publish().unwrap_err();
             assert!(already_exists(&err), "{err}");
             assert!(err.to_string().contains(&format!("db{suffix}")), "{err}");
-            assert_eq!(fs::read(&sidecar).unwrap(), b"theirs");
+            assert_eq!(fs::read(&journal_file).unwrap(), b"theirs");
             assert_eq!(names(&dir), BTreeSet::from([format!("db{suffix}")]));
         }
     }

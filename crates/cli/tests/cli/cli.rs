@@ -254,7 +254,7 @@ fn an_existing_output_exits_3_and_stays_byte_identical() {
 }
 
 #[test]
-fn a_stale_sidecar_refuses_until_clear_sidecars() {
+fn a_stale_journal_file_refuses_until_clear_journal_files() {
     let (staged, manifest) = small_fixture();
     let dir = tempfile::tempdir().expect("tempdir");
     let output = dir.path().join("out.db");
@@ -268,13 +268,13 @@ fn a_stale_sidecar_refuses_until_clear_sidecars() {
         refused.stderr
     );
     assert!(
-        refused.stderr.contains("--clear-sidecars"),
+        refused.stderr.contains("--clear-journal-files"),
         "{}",
         refused.stderr
     );
     assert!(journal.exists() && !output.exists());
 
-    let cleared = restore(&staged, &output, &["--clear-sidecars".to_owned()]);
+    let cleared = restore(&staged, &output, &["--clear-journal-files".to_owned()]);
     assert_eq!(cleared.code, 0, "{}", cleared.stderr);
     assert!(
         cleared.stdout.contains("out.db-journal"),
@@ -286,14 +286,14 @@ fn a_stale_sidecar_refuses_until_clear_sidecars() {
 }
 
 #[test]
-fn clear_sidecars_never_touches_an_existing_target() {
+fn clear_journal_files_never_touches_an_existing_target() {
     let (staged, _) = small_fixture();
     let dir = tempfile::tempdir().expect("tempdir");
     let output = dir.path().join("out.db");
     let wal = dir.path().join("out.db-wal");
     fs::write(&output, b"live").expect("plant");
     fs::write(&wal, b"belongs to it").expect("plant");
-    let run = restore(&staged, &output, &["--clear-sidecars".to_owned()]);
+    let run = restore(&staged, &output, &["--clear-journal-files".to_owned()]);
     assert_eq!(run.code, 3, "{}", run.stderr);
     assert_eq!(fs::read(&wal).expect("read"), b"belongs to it");
     assert_eq!(fs::read(&output).expect("read"), b"live");
@@ -539,7 +539,7 @@ fn help_and_version_print_to_stdout_and_exit_0() {
         "verify",
         "files",
         "--replica",
-        "--clear-sidecars",
+        "--clear-journal-files",
         "--integrity-check",
         "none|quick|full",
         "64",
@@ -980,7 +980,7 @@ fn dry_run_json_lists_the_chain_the_restore_applies() {
 }
 
 /// Stricter than Go, whose dry run never looks at the output: it checks the
-/// output as the restore would, and lists the sidecars --clear-sidecars would
+/// output as the restore would, and lists the journal files --clear-journal-files would
 /// remove without removing them.
 #[test]
 fn dry_run_checks_the_output_as_a_restore_would() {
@@ -1002,14 +1002,14 @@ fn dry_run_checks_the_output_as_a_restore_would() {
     let refused = restore(&staged, &output, &strings(&["--dry-run"]));
     assert_eq!((refused.code, refused.stdout.as_str()), (3, ""));
     assert!(
-        refused.stderr.contains("--clear-sidecars"),
+        refused.stderr.contains("--clear-journal-files"),
         "{}",
         refused.stderr
     );
     let listed = restore(
         &staged,
         &output,
-        &strings(&["--dry-run", "--clear-sidecars"]),
+        &strings(&["--dry-run", "--clear-journal-files"]),
     );
     assert_eq!(listed.code, 0, "{}", listed.stderr);
     assert!(
@@ -1022,10 +1022,10 @@ fn dry_run_checks_the_output_as_a_restore_would() {
     let json = json_of(&restore(
         &staged,
         &output,
-        &strings(&["--dry-run", "--clear-sidecars", "--json"]),
+        &strings(&["--dry-run", "--clear-journal-files", "--json"]),
     ));
     assert_eq!(
-        json["sidecars_to_remove"],
+        json["journal_files_to_remove"],
         json!([path_str(&wal)]),
         "{json}"
     );

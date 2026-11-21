@@ -334,7 +334,7 @@ crates/fuzzing/src/plan.rs	126	furthest_reach	25	crates/fuzzing/src/plan.rs	117	
 crates/fuzzing/src/plan.rs	157	check_inside_file	21	crates/fuzzing/src/plan.rs	196	check_reason	39	60
 crates/fuzzing/src/plan.rs	186	check_reason	39	crates/fuzzing/src/plan.rs	240	plan	9	48
 crates/fuzzing/src/plan.rs	246	check_lazy	8	crates/fuzzing/src/plan.rs	241	plan	9	17
-crates/local/src/lib.rs	131	clear_sidecars	17	crates/cli/src/run.rs	291	restore_on	23	40
+crates/local/src/lib.rs	131	clear_journal_files	17	crates/cli/src/run.rs	291	restore_on	23	40
 crates/local/src/lib.rs	152	first_present	6	crates/local/src/lib.rs	278	publish	10	16
 crates/local/src/lib.rs	222	link_and_sync	4	crates/local/src/lib.rs	284	publish	10	14
 crates/local/src/lib.rs	238	page_offset	4	crates/local/src/lib.rs	248	write_page	3	7

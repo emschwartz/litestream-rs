@@ -150,7 +150,7 @@ pub const FLAGS: &[FlagSpec] = &[
         help: "With --timestamp, restore the newest state provably before the instant when the instant falls inside a compacted file, instead of refusing.",
     },
     FlagSpec {
-        name: "--clear-sidecars",
+        name: "--clear-journal-files",
         value: None,
         required: false,
         commands: &[CommandName::Restore],
@@ -285,8 +285,8 @@ pub struct RestoreArgs {
     pub target: RestoreTarget,
     /// What to do when `--timestamp` falls inside a compacted file.
     pub as_of_inside: AsOfInside,
-    /// Whether to remove stale sidecars first.
-    pub clear_sidecars: bool,
+    /// Whether to remove stale journal files first.
+    pub clear_journal_files: bool,
     /// SQLite's check of the result before it is published.
     pub integrity_check: IntegrityCheck,
     /// Succeed without restoring when the output exists.
@@ -654,7 +654,7 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
                 output: PathBuf::from(flags.require("--output")?),
                 target,
                 as_of_inside: flags.as_of_inside(target)?,
-                clear_sidecars: flags.has("--clear-sidecars"),
+                clear_journal_files: flags.has("--clear-journal-files"),
                 integrity_check: flags.integrity_check()?,
                 if_db_not_exists: flags.has("--if-db-not-exists"),
                 if_replica_exists: flags.has("--if-replica-exists"),
