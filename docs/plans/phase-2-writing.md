@@ -1004,6 +1004,7 @@ Plus `pinned_on_zero_single_restart`: our read tx on mark 0, one app write resta
 | LocalIo | `eio_on_wal_read` |
 | LocalFsyncFailed | `fsync_fails_once` (reachable through `Fault::from_staging`) |
 | SqliteBusy | `busy_on_barrier`, `shm_header_mid_update` |
+| ReadersHeld | `readers_hold_the_wal` |
 | WalMoved | `wal_header_torn_while_running` |
 | WalIndexInconsistent | `shm_end_inside_tx` |
 | WalChangedUnderRead | `frame_overwritten_between_scan_and_read` |

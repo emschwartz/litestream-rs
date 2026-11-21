@@ -110,6 +110,7 @@ policy_is!(
     doubling()
 );
 policy_is!(sqlite_busy_retries, Fault::SqliteBusy, doubling());
+policy_is!(readers_held_retries, Fault::ReadersHeld, doubling());
 policy_is!(wal_moved_retries, Fault::WalMoved, doubling());
 policy_is!(
     wal_index_inconsistent_retries,
@@ -188,6 +189,7 @@ fn every_fault_has_a_named_policy_test() {
         | Fault::LocalIo
         | Fault::LocalFsyncFailed
         | Fault::SqliteBusy
+        | Fault::ReadersHeld
         | Fault::WalMoved
         | Fault::WalIndexInconsistent
         | Fault::WalChangedUnderRead
@@ -693,6 +695,7 @@ fn from_source_maps_every_variant() {
         (SourceError::DiskFull, Fault::LocalDiskFull),
         (SourceError::FsyncFailed, Fault::LocalFsyncFailed),
         (SourceError::Busy, Fault::SqliteBusy),
+        (SourceError::ReadersHeld, Fault::ReadersHeld),
         (SourceError::Short { pgno: page() }, Fault::LocalIo),
         (SourceError::Unlinked, Fault::WalUnlinked),
         (SourceError::ReadTxLost, Fault::ReadTxLost),

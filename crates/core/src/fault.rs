@@ -98,6 +98,10 @@ pub enum Fault {
     LocalFsyncFailed,
     /// SQLite is busy, or the wal-index is mid-update.
     SqliteBusy,
+    /// A TRUNCATE checkpoint was refused before SQLite was asked: the host
+    /// said its readers hold the WAL (or tracks none). Not `SqliteBusy`:
+    /// no lock was contended, and it lasts as long as the readers do.
+    ReadersHeld,
     /// The WAL moved behind the reader; the next recover classifies how.
     WalMoved,
     /// The wal-index names a committed end inside a transaction.
@@ -478,6 +482,7 @@ pub const fn policy(fault: &Fault) -> Policy {
         | Fault::LocalIo
         | Fault::LocalFsyncFailed
         | Fault::SqliteBusy
+        | Fault::ReadersHeld
         | Fault::WalMoved
         | Fault::WalIndexInconsistent
         | Fault::WalChangedUnderRead
@@ -647,6 +652,7 @@ impl Fault {
             SourceError::DiskFull => Self::LocalDiskFull,
             SourceError::FsyncFailed => Self::LocalFsyncFailed,
             SourceError::Busy => Self::SqliteBusy,
+            SourceError::ReadersHeld => Self::ReadersHeld,
             SourceError::Unlinked => Self::WalUnlinked,
             SourceError::ReadTxLost => Self::ReadTxLost,
         }

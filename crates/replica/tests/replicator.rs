@@ -443,7 +443,7 @@ fn a_reader_guard_holds_off_truncate() {
         matches!(
             event,
             Event::Engine(EngineEvent::Retrying {
-                fault: Fault::SqliteBusy,
+                fault: Fault::ReadersHeld,
                 ..
             })
         )

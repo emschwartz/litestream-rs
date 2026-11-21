@@ -58,6 +58,8 @@ pub enum FaultKind {
     LocalFsyncFailed,
     /// [`Fault::SqliteBusy`].
     SqliteBusy,
+    /// [`Fault::ReadersHeld`].
+    ReadersHeld,
     /// [`Fault::WalMoved`].
     WalMoved,
     /// [`Fault::WalIndexInconsistent`].
@@ -86,7 +88,7 @@ pub enum FaultKind {
 
 impl FaultKind {
     /// Every fault, in the order of [`Fault`].
-    pub const ALL: [Self; 27] = [
+    pub const ALL: [Self; 28] = [
         Self::StoreTransient,
         Self::StoreThrottled,
         Self::StoreAuth,
@@ -102,6 +104,7 @@ impl FaultKind {
         Self::LocalIo,
         Self::LocalFsyncFailed,
         Self::SqliteBusy,
+        Self::ReadersHeld,
         Self::WalMoved,
         Self::WalIndexInconsistent,
         Self::WalChangedUnderRead,
@@ -135,6 +138,7 @@ impl From<&Fault> for FaultKind {
             Fault::LocalIo => Self::LocalIo,
             Fault::LocalFsyncFailed => Self::LocalFsyncFailed,
             Fault::SqliteBusy => Self::SqliteBusy,
+            Fault::ReadersHeld => Self::ReadersHeld,
             Fault::WalMoved => Self::WalMoved,
             Fault::WalIndexInconsistent => Self::WalIndexInconsistent,
             Fault::WalChangedUnderRead => Self::WalChangedUnderRead,
@@ -189,6 +193,7 @@ pub fn halt_of(kind: FaultKind) -> Option<HaltCause> {
         | FaultKind::LocalIo
         | FaultKind::LocalFsyncFailed
         | FaultKind::SqliteBusy
+        | FaultKind::ReadersHeld
         | FaultKind::WalMoved
         | FaultKind::WalIndexInconsistent
         | FaultKind::WalChangedUnderRead
@@ -237,6 +242,7 @@ pub fn fault_scenarios(kind: FaultKind) -> &'static [fn() -> Scenario] {
         FaultKind::LocalIo => &[eio_on_wal_read],
         FaultKind::LocalFsyncFailed => &[fsync_fails_once],
         FaultKind::SqliteBusy => &[busy_on_barrier, shm_header_mid_update],
+        FaultKind::ReadersHeld => &[readers_hold_the_wal],
         FaultKind::WalMoved => &[wal_header_torn_while_running],
         FaultKind::WalIndexInconsistent => &[shm_end_inside_tx],
         FaultKind::WalChangedUnderRead => &[frame_overwritten_between_scan_and_read],
@@ -912,6 +918,23 @@ pub fn busy_on_barrier() -> Scenario {
             commit(9, true),
         ],
         vec![retries(FaultKind::SqliteBusy)],
+    )
+}
+
+/// The host's readers hold the WAL when a checkpoint is asked for: it is
+/// refused before SQLite is asked, and retried.
+#[must_use]
+pub fn readers_hold_the_wal() -> Scenario {
+    injected(
+        "readers_hold_the_wal",
+        vec![
+            Op::EnvFault(EnvFault::Source(
+                SourceOp::Checkpoint,
+                SourceError::ReadersHeld,
+            )),
+            commit(9, true),
+        ],
+        vec![retries(FaultKind::ReadersHeld)],
     )
 }
 

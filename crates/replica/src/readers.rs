@@ -4,8 +4,9 @@
 //! replicator whether one is coming. So TRUNCATE runs only on the host's word
 //! (`docs/plans/phase-3-syncing.md`, the reader ruling): under [`ReaderTracking::Untracked`] it
 //! never runs, and under [`ReaderTracking::Tracked`] it runs only while no [`ReaderGuard`]
-//! lives. A TRUNCATE asked for while one does is reported busy without calling SQLite, so the
-//! engine waits its backoff and asks again. PASSIVE checkpoints never wait on readers and are
+//! lives. A TRUNCATE asked for while one does is refused without calling SQLite, as
+//! `SourceError::ReadersHeld` and not as busy (SQLite was never asked), so the engine waits its
+//! backoff and asks again. PASSIVE checkpoints never wait on readers and are
 //! unaffected.
 
 use std::sync::Arc;
@@ -79,7 +80,7 @@ impl Checkpointer for Guarded {
 
     fn checkpoint(&mut self, mode: CheckpointMode) -> Result<CheckpointRun, SourceError> {
         match mode {
-            CheckpointMode::Truncate if !self.may_truncate() => Err(SourceError::Busy),
+            CheckpointMode::Truncate if !self.may_truncate() => Err(SourceError::ReadersHeld),
             CheckpointMode::Truncate | CheckpointMode::Passive => self.sqlite.checkpoint(mode),
         }
     }

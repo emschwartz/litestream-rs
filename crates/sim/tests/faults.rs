@@ -264,6 +264,11 @@ fn busy_on_barrier() {
 }
 
 #[test]
+fn readers_hold_the_wal() {
+    run(scenario::readers_hold_the_wal);
+}
+
+#[test]
 fn shm_header_mid_update() {
     run(scenario::shm_header_mid_update);
 }
