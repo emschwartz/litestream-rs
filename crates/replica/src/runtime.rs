@@ -93,7 +93,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// Milliseconds from `now` to `until`, zero when it has passed.
 pub(crate) fn millis_until(now: Timestamp, until: Timestamp) -> u64 {
-    u64::try_from(until.unix_millis().saturating_sub(now.unix_millis())).unwrap_or(0)
+    u64::try_from(until.saturating_duration_since(now).as_millis()).unwrap_or(u64::MAX)
 }
 
 /// `at` plus `wait`, saturating.

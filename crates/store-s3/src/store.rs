@@ -356,9 +356,8 @@ impl<T: Transport> Inner<T> {
 
     /// Fails as a timeout once more than four deadlines have passed since `start`.
     pub(crate) fn within_budget(&self, op: StoreOp, start: Timestamp) -> Result<(), StoreError> {
-        let limit = i64::try_from(self.deadline.saturating_mul(4).as_millis()).unwrap_or(i64::MAX);
-        let spent = self.now().unix_millis().saturating_sub(start.unix_millis());
-        if spent > limit {
+        let spent = self.now().saturating_duration_since(start);
+        if spent > self.deadline.saturating_mul(4) {
             return Err(StoreError::Transient {
                 op,
                 kind: io::ErrorKind::TimedOut,
