@@ -166,6 +166,30 @@ impl ContiguousChain {
         fits
     }
 
+    /// Recomputes the chain's invariants from its files alone and checks every
+    /// file is in the listing: the greedy cover in `extend` is the only thing
+    /// that built it, so nothing else would notice a gap. Expensive, so only
+    /// under [`crate::VERIFY`].
+    fn is_contiguous(&self, inventory: &Inventory) -> bool {
+        let mut reaches = None;
+        for info in &self.files {
+            let range = info.key.range();
+            let fits = match reaches {
+                None => is_snapshot_start(info),
+                Some(end) => {
+                    !info.key.level().is_snapshot()
+                        && touches(range.min(), end)
+                        && range.max() > end
+                }
+            };
+            if !fits || !inventory.files().contains(info) {
+                return false;
+            }
+            reaches = Some(range.max());
+        }
+        reaches == Some(self.reaches) && self.files.first() == Some(&self.snapshot)
+    }
+
     /// The files to apply, oldest state first: the base, then each extension.
     #[must_use]
     pub fn files(&self) -> &[FileInfo] {
@@ -312,6 +336,19 @@ pub fn plan_reference(inventory: &Inventory, target: RestoreTarget) -> PlanOutco
 }
 
 fn plan_exact(inventory: &Inventory, target: RestoreTarget) -> PlanOutcome {
+    let outcome = plan_unchecked(inventory, target);
+    if crate::VERIFY
+        && let PlanOutcome::Plan(chain) | PlanOutcome::AsOfInsideFile { chain, .. } = &outcome
+    {
+        debug_assert!(
+            chain.is_contiguous(inventory),
+            "the planner returned a chain that is not contiguous: {chain:?}"
+        );
+    }
+    outcome
+}
+
+fn plan_unchecked(inventory: &Inventory, target: RestoreTarget) -> PlanOutcome {
     let Some(newest) = inventory.newest() else {
         return PlanOutcome::EmptyReplica;
     };

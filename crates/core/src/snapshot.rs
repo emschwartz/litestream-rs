@@ -108,12 +108,13 @@ fn whole<W: WalSource>(proof: &SyncedThrough, wal: &mut W) -> Result<Whole<W::Wa
     }
     let synced = CommittedEnd::new(position.synced().offset().frame_index(), salts, page_size);
     let upto = CommittedRead::new(synced, committed.backfilled(), committed.epoch())
-        .ok_or(Fault::Bug(BugSite::SnapshotScan))?;
+        .ok_or_else(|| BugSite::SnapshotScan.hit())?;
     let map = scan_whole(&mut reader, upto)?;
     let commit = position.commit();
-    if map.commit().is_some_and(|scanned| scanned != commit) {
-        return Err(Fault::Bug(BugSite::SnapshotScan));
-    }
+    crate::invariant!(
+        map.commit().is_none_or(|scanned| scanned == commit),
+        BugSite::SnapshotScan
+    );
     let plan = plan_pages(&map, None, commit, page_size);
     Ok(Whole {
         reader,
@@ -150,7 +151,7 @@ async fn run<W: WalSource, P: PageSource, S: ObjectStore>(
         wal: None,
         node_id: 0,
     })
-    .map_err(|_err| Fault::Bug(BugSite::Encode))?;
+    .map_err(|_err| BugSite::Encode.hit())?;
     let (file, _last) = stage(
         remote,
         key,

@@ -9,7 +9,10 @@ publish.workspace = true
 
 [features]
 # The shared store conformance suite, for the crates that implement ObjectStore.
-testing = []
+testing = ["verify"]
+# Expensive self-checks (`lsr_core::VERIFY`): on in the sim, fuzz and tests through
+# `testing`, off in release builds of the cli and sidecar.
+verify = []
 
 [dependencies]
 lsr-ltx.workspace = true

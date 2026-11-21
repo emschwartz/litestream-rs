@@ -1039,3 +1039,18 @@ proptest! {
         prop_assert_eq!(plan_reference(&shuffled, goal.target()), outcome);
     }
 }
+
+/// The `verify` re-check accepts what the planner builds and rejects a chain
+/// with a gap, which no other test could build through `plan`.
+#[test]
+fn verify_recheck_rejects_a_chain_with_a_gap() {
+    let listing = inv(&[at(9, 1, 3), at(0, 4, 6)]);
+    let PlanOutcome::Plan(chain) = plan(&listing, KeyTarget::Latest) else {
+        panic!("expected a plan");
+    };
+    assert!(chain.is_contiguous(&listing));
+    let mut broken = chain.clone();
+    broken.files.push(at(0, 9, 12));
+    broken.reaches = txid(12);
+    assert!(!broken.is_contiguous(&listing));
+}

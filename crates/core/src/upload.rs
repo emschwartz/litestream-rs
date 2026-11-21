@@ -441,7 +441,7 @@ async fn put_staged<L: ObjectStore, S: ObjectStore>(
         }
     };
     let Some(open) = upload else {
-        return Err(PutError::Before(Fault::Bug(BugSite::UploadNeverOpened)));
+        return Err(PutError::Before(BugSite::UploadNeverOpened.hit()));
     };
     match open.commit().await {
         Ok(info) if info.key == *key && info.size == wrote => Ok(info),
@@ -465,9 +465,7 @@ fn feed_all(decoder: &mut Decoder, chunk: &[u8]) -> Result<bool, Fault> {
         let Ok((used, _)) = decoder.feed(rest) else {
             return Ok(false);
         };
-        if used == 0 {
-            return Err(Fault::Bug(BugSite::DecoderStalled));
-        }
+        crate::invariant!(used != 0, BugSite::DecoderStalled);
         rest = rest.get(used..).unwrap_or_default();
     }
     Ok(true)
