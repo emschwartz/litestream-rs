@@ -10,6 +10,10 @@ mod fake;
 #[cfg(test)]
 mod faults;
 #[cfg(test)]
+mod gates;
+#[cfg(test)]
+mod latency;
+#[cfg(test)]
 mod limits;
 #[cfg(test)]
 mod minio;

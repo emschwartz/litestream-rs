@@ -17,7 +17,7 @@ use crate::common;
     clippy::arithmetic_side_effects,
     reason = "fixture arithmetic on small bounded counts and instants"
 )]
-mod cases {
+pub(crate) mod cases {
     use std::collections::BTreeSet;
     use std::io::Cursor;
     use std::sync::Arc;
@@ -38,12 +38,12 @@ mod cases {
     };
     use lsr_wal::WalReader;
 
-    const EPOCH_MS: i64 = 1_700_000_000_000;
-    const TXNS: u64 = 9000;
+    pub(crate) const EPOCH_MS: i64 = 1_700_000_000_000;
+    pub(crate) const TXNS: u64 = 9000;
     const LEVEL_ZERO_FILES: u64 = 300;
     const SNAPSHOT_EVERY: u64 = 1000;
     const SNAPSHOT_LAG_MS: i64 = 5000;
-    const FILES: usize = 9998;
+    pub(crate) const FILES: usize = 9998;
     const PAGE_BYTES: u32 = 512;
 
     /// Transaction n's created-at time: one second apart.
@@ -60,7 +60,7 @@ mod cases {
         u8::try_from(n % 250).unwrap() + 1
     }
 
-    fn txid(n: u64) -> Txid {
+    pub(crate) fn txid(n: u64) -> Txid {
         Txid::new(n).unwrap()
     }
 
@@ -112,7 +112,7 @@ mod cases {
     }
 
     /// The fault layer shared between the store and the test that counts.
-    struct Shared(Arc<FaultTransport<FakeS3>>);
+    pub(crate) struct Shared(Arc<FaultTransport<FakeS3>>);
 
     impl Transport for Shared {
         fn send(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
@@ -120,15 +120,15 @@ mod cases {
         }
     }
 
-    type Store = S3Store<Shared>;
+    pub(crate) type Store = S3Store<Shared>;
 
-    struct Rig {
+    pub(crate) struct Rig {
         wire: Arc<FaultTransport<FakeS3>>,
     }
 
     impl Rig {
         /// The 10^4-file replica, committed through a store.
-        fn build() -> Self {
+        pub(crate) fn build() -> Self {
             let wire = Arc::new(FaultTransport::new(fake()));
             let rig = Self { wire };
             let store = rig.store();
@@ -143,8 +143,13 @@ mod cases {
             rig
         }
 
+        /// A handle on the bucket's wire, for a store of the test's own transport.
+        pub(crate) fn shared(&self) -> Shared {
+            Shared(Arc::clone(&self.wire))
+        }
+
         /// A store with clean created-at time stats over the same bucket.
-        fn store(&self) -> Store {
+        pub(crate) fn store(&self) -> Store {
             S3Store::with_transport(
                 config(),
                 credentials(),
@@ -256,11 +261,11 @@ mod cases {
         }
     }
 
-    fn now_ms() -> i64 {
+    pub(crate) fn now_ms() -> i64 {
         created_at(TXNS).unix_millis() + 500
     }
 
-    fn instant_back(age: Duration) -> Timestamp {
+    pub(crate) fn instant_back(age: Duration) -> Timestamp {
         Timestamp::from_unix_millis(now_ms() - i64::try_from(age.as_millis()).unwrap())
     }
 
@@ -497,7 +502,7 @@ mod cases {
         (row, resolved.value)
     }
 
-    fn retention_config(l0: L0Retention) -> Maintenance {
+    pub(crate) fn retention_config(l0: L0Retention) -> Maintenance {
         let levels = vec![
             Duration::from_secs(30),
             Duration::from_secs(300),
