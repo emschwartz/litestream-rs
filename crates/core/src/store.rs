@@ -261,6 +261,13 @@ impl PartNumber {
     }
 }
 
+// S3's own caps, which every backend must be able to honour: a page of at most
+// 1000 keys, a read of at most 16 MiB (what keeps a read's memory flat), at most
+// 10000 parts. Raising one past the provider's cap fails at build time.
+const _: () = assert!(PageLimit::MAX_RAW <= 1000);
+const _: () = assert!(ReadLen::MAX_RAW <= 16 * 1024 * 1024);
+const _: () = assert!(PartNumber::MAX_RAW <= 10_000);
+
 /// Everything a store can do wrong, in the classes that need different
 /// handling. The store never retries; the caller picks the policy.
 #[derive(Clone, PartialEq, Eq, Debug, Error)]

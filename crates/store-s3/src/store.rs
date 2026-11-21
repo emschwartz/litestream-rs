@@ -584,3 +584,69 @@ impl<T: Transport> Inner<T> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[cfg(feature = "testing")]
+mod part_cap_tests {
+    use lsr_core::FakeClock;
+
+    use super::*;
+    use crate::config::{BucketName, Endpoint, Prefix};
+    use crate::credentials::SecretString;
+    use crate::fake::FakeS3;
+    use crate::multipart::PAYLOAD_TOO_LARGE;
+    use crate::request::UploadId;
+
+    fn store() -> S3Store<FakeS3> {
+        let config = S3Config::new(
+            Endpoint::new("http://localhost:9000").unwrap(),
+            BucketName::new("bucket").unwrap(),
+            Prefix::new("db").unwrap(),
+        );
+        let credentials = S3Credentials::new(
+            "AKIAIOSFODNN7EXAMPLE".to_owned(),
+            SecretString::new("secret".to_owned()),
+        );
+        let at = Timestamp::from_unix_millis(1_369_353_600_000);
+        let fake = FakeS3::new(&config, FakeClock::new(at));
+        S3Store::with_transport(config, credentials, fake, FakeClock::new(at)).unwrap()
+    }
+
+    fn refused_as_too_large(first: usize, parts: usize) -> bool {
+        let key = FileKey::new(
+            Level::ZERO,
+            lsr_ltx::TxidRange::new(
+                lsr_ltx::Txid::new(1).unwrap(),
+                lsr_ltx::Txid::new(1).unwrap(),
+            )
+            .unwrap(),
+        );
+        let id = UploadId::new("no-such-upload".to_owned());
+        let result = store()
+            .inner
+            .put_parts(&key, &id, first, vec![Vec::new(); parts]);
+        matches!(
+            result,
+            Err(StoreError::Refused {
+                status: PAYLOAD_TOO_LARGE,
+                ..
+            })
+        )
+    }
+
+    /// A part number past 10000 is refused before any request is sent; 10000 is
+    /// sent (and then fails here only because the upload id does not exist).
+    #[test]
+    fn part_numbers_stop_at_the_cap() {
+        assert!(!refused_as_too_large(10_000, 1), "part 10000 is allowed");
+        assert!(refused_as_too_large(10_001, 1), "part 10001 is refused");
+        assert!(
+            !refused_as_too_large(9_999, 2),
+            "parts up to 10000 are allowed"
+        );
+        assert!(
+            refused_as_too_large(10_000, 2),
+            "a batch ending at 10001 is refused"
+        );
+    }
+}

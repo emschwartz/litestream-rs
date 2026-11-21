@@ -88,6 +88,9 @@ mod tests;
 /// Most keys one `DeleteObjects` call takes on S3 (`s3/replica_client.go:58`).
 pub const MAX_DELETE: usize = 1000;
 
+// A job must fit one DeleteObjects call, or a retried job would not converge on one request.
+const _: () = assert!(MAX_DELETE >= 1 && MAX_DELETE <= 1000);
+
 /// Go's zero time, 0001-01-01 UTC, in Unix milliseconds.
 const GO_ZERO_UNIX_MILLIS: i128 = -62_135_596_800_000;
 

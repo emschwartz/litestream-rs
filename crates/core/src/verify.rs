@@ -74,6 +74,10 @@ pub const MAX_FINDINGS: usize = 1000;
 /// Bytes asked of the store per read.
 const CHUNK_BYTES: u32 = 4 * 1024 * 1024;
 
+// `ReadLen::or_chunk` falls back to 1 MiB for a size it refuses, which would
+// silently change the memory per file this constant states.
+const _: () = assert!(CHUNK_BYTES >= 1 && CHUNK_BYTES <= ReadLen::MAX_RAW);
+
 /// How much of the replica to look at.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Depth {

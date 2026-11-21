@@ -50,6 +50,11 @@ const EXPIRES_IN: Duration = Duration::from_secs(300);
 /// Go's `MaxKeys`: the most one DeleteObjects may name.
 pub const MAX_DELETE_KEYS: usize = 1000;
 
+// S3's DeleteObjects cap, and room for a whole delete job (core keeps one under
+// `MAX_DELETE`) in one request.
+const _: () = assert!(MAX_DELETE_KEYS <= 1000);
+const _: () = assert!(MAX_DELETE_KEYS >= lsr_core::MAX_DELETE);
+
 /// The object metadata key Go stores a file's timestamp under.
 const CREATED_AT_HEADER: &str = "x-amz-meta-litestream-timestamp";
 
@@ -915,6 +920,23 @@ mod tests {
             b.complete_multipart(now(), &k, &upload(), &[]).unwrap_err(),
             RequestError::BadBatch {
                 len: 0,
+                max: 10_000
+            }
+        );
+    }
+
+    /// S3 takes 10000 parts in one completion and no more.
+    #[test]
+    fn complete_multipart_takes_the_part_cap_and_no_more() {
+        let b = minio();
+        let etags = |n: usize| vec!["\"d41d8cd98f00b204e9800998ecf8427e\"".to_owned(); n];
+        b.complete_multipart(now(), &key(0, 1, 1), &upload(), &etags(10_000))
+            .unwrap();
+        assert_eq!(
+            b.complete_multipart(now(), &key(0, 1, 1), &upload(), &etags(10_001))
+                .unwrap_err(),
+            RequestError::BadBatch {
+                len: 10_001,
                 max: 10_000
             }
         );
