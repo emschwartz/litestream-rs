@@ -348,7 +348,7 @@
 "TestS3ReplicaConfig_PartSizeAndConcurrency/WithPartSize_IEC" = { counterpart = "lsr-config::config::go::part_size_in_iec_and_si_units_and_concurrency_has_no_effect" }
 "TestS3ReplicaConfig_PartSizeAndConcurrency/WithPartSize_SI" = { counterpart = "lsr-config::config::go::part_size_in_iec_and_si_units_and_concurrency_has_no_effect" }
 "TestStripSQLitePrefix" = { counterpart = "lsr-config::expand::tests::go_strip_sqlite_prefix_table" }
-"TestX509FallbackRoots" = { reason = "Go-only: falling back to bundled x509 roots when the system has none. Rust's S3 transport always uses bundled webpki roots (deny.toml, the webpki-roots entry), so there is no fallback to test." }
+"TestX509FallbackRoots" = { counterpart = "lsr-store-s3::trust::tests::go_unix::nothing_found_falls_back_to_mozilla_roots" }
 
 ["litestream/cmd/litestream/register_test.go"]
 "TestRegisterCommand_Run" = { reason = "A CLI command that talks to the running daemon over the control socket; the control socket is not in v1 (docs/PLAN.md section 1)." }

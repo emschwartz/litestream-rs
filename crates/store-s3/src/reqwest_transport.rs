@@ -23,9 +23,14 @@
 //! the redirect. Build the client with `redirect(Policy::none())` to see the
 //! redirect itself.
 //!
-//! TLS is reqwest's: with this crate's feature set, rustls with the platform's
-//! certificate verifier, so system and corporate roots are trusted where
-//! ureq's Mozilla roots (ruling F4) are not.
+//! TLS on the own client is rustls on ring, set up by the store and handed to
+//! reqwest whole, trusting what Go's `crypto/x509` trusts, exactly as
+//! [`UreqTransport`](crate::UreqTransport) does (the `trust` module). This
+//! crate enables reqwest's `rustls-no-provider` only, so it brings no second
+//! crypto provider (reqwest's default is aws-lc-rs, a C build). A host client
+//! keeps its own TLS and its own roots; it needs a provider from the host's
+//! reqwest features (reqwest's default `rustls` feature has one) or one the
+//! host installed as the process default, or reqwest panics building it.
 
 use std::io;
 use std::time::Duration;
@@ -35,6 +40,7 @@ use tokio::runtime::{Builder, Handle, Runtime};
 use crate::request::{HttpRequest, Method};
 use crate::transport::{HttpResponse, Transport, TransportError};
 use crate::transport::{MAX_BODY, map_io};
+use crate::trust::{self, Roots};
 
 /// Why a [`ReqwestTransport`] could not be built.
 #[derive(Debug, thiserror::Error)]
@@ -97,12 +103,20 @@ impl std::fmt::Debug for ReqwestTransport {
 
 impl ReqwestTransport {
     /// The store's own client and runtime; every request ends within `deadline`.
+    /// It trusts the certificate authorities Go would trust in this process,
+    /// as [`UreqTransport::new`](crate::UreqTransport::new) describes.
     ///
     /// # Errors
     /// [`ReqwestSetupError`] when the client or the runtime cannot be built.
     pub fn new(deadline: Duration) -> Result<Self, ReqwestSetupError> {
+        Self::with_roots(deadline, trust::system())
+    }
+
+    pub(crate) fn with_roots(deadline: Duration, roots: Roots) -> Result<Self, ReqwestSetupError> {
+        let tls = trust::rustls_config(roots).map_err(|_tls| ReqwestSetupError::Client)?;
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            .tls_backend_preconfigured(tls)
             .build()
             .map_err(|_build| ReqwestSetupError::Client)?;
         Ok(Self {
@@ -310,6 +324,16 @@ mod tests {
         ReqwestTransport::new(Duration::from_secs(5)).expect("transport")
     }
 
+    /// A host's client: with only `rustls-no-provider` enabled, reqwest needs
+    /// a rustls config (or a process default provider) to build one.
+    fn host_client() -> reqwest::Client {
+        let tls = trust::rustls_config(trust::system()).expect("tls config");
+        reqwest::Client::builder()
+            .tls_backend_preconfigured(tls)
+            .build()
+            .expect("client")
+    }
+
     const OK: &[u8] =
         b"HTTP/1.1 200 OK\r\netag: \"abc\"\r\ncontent-length: 5\r\nconnection: close\r\n\r\nhello";
 
@@ -414,7 +438,7 @@ mod tests {
 
     #[test]
     fn a_host_client_on_its_own_runtime() {
-        let client = reqwest::Client::new();
+        let client = host_client();
         let transport =
             ReqwestTransport::with_client(client, Duration::from_secs(5)).expect("transport");
         let response = transport
@@ -431,7 +455,7 @@ mod tests {
             .build()
             .expect("runtime");
         let transport = ReqwestTransport::with_client_on(
-            reqwest::Client::new(),
+            host_client(),
             runtime.handle().clone(),
             Duration::from_secs(5),
         );

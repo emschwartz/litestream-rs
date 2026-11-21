@@ -5,7 +5,9 @@
 //! redirects are not followed (a redirect from a presigned URL is a
 //! misconfigured endpoint, and the retry layers decide what to do), nothing is
 //! retried, and [`timeout_global`] bounds each request end to end. TLS is
-//! rustls with Mozilla's roots (ruling F4); ureq speaks HTTP/1.1 only.
+//! rustls on ring, trusting what Go's `crypto/x509` trusts (the system store,
+//! with `SSL_CERT_FILE` and `SSL_CERT_DIR` on Linux; see the `trust` module);
+//! ureq speaks HTTP/1.1 only.
 //!
 //! Response bodies are read whole but bounded: a body over `MAX_BODY` is an
 //! error, so a server that ignores a Range header cannot make a read allocate
@@ -14,10 +16,17 @@
 use std::io;
 use std::time::Duration;
 
+#[cfg(all(unix, not(target_vendor = "apple")))]
+use std::sync::Arc;
+
 use ureq::http;
+#[cfg(all(unix, not(target_vendor = "apple")))]
+use ureq::tls::Certificate;
+use ureq::tls::RootCerts;
 
 use crate::request::{HttpRequest, Method};
 use crate::transport::{HttpResponse, MAX_BODY, Transport, TransportError, map_io};
+use crate::trust::{self, Roots};
 
 /// A [`Transport`] over one shared connection pool.
 #[derive(Clone)]
@@ -33,14 +42,25 @@ impl std::fmt::Debug for UreqTransport {
 
 impl UreqTransport {
     /// A client whose every request fails as [`TransportError::Timeout`] after
-    /// `deadline`.
+    /// `deadline`. It trusts the certificate authorities Go would trust in
+    /// this process: on Linux the system bundle and directories, replaced by
+    /// `SSL_CERT_FILE` and `SSL_CERT_DIR` when set, Mozilla's roots when the
+    /// system has none; on macOS and Windows the operating system's verifier.
     #[must_use]
     pub fn new(deadline: Duration) -> Self {
+        Self::with_roots(deadline, trust::system())
+    }
+
+    pub(crate) fn with_roots(deadline: Duration, roots: Roots) -> Self {
+        let tls = ureq::tls::TlsConfig::builder()
+            .root_certs(root_certs(roots))
+            .build();
         let config = ureq::Agent::config_builder()
             .http_status_as_error(false)
             .max_redirects(0)
             .max_redirects_will_error(false)
             .timeout_global(Some(deadline))
+            .tls_config(tls)
             .build();
         Self {
             agent: ureq::Agent::new_with_config(config),
@@ -60,6 +80,22 @@ impl UreqTransport {
         builder
             .body(request.body().to_vec())
             .map_err(|_malformed| TransportError::Io(io::ErrorKind::InvalidInput))
+    }
+}
+
+fn root_certs(roots: Roots) -> RootCerts {
+    match roots {
+        #[cfg(all(unix, not(target_vendor = "apple")))]
+        Roots::Certs(certs) => RootCerts::Specific(Arc::new(
+            certs
+                .iter()
+                .map(|cert| Certificate::from_der(cert.as_ref()).to_owned())
+                .collect(),
+        )),
+        #[cfg(all(unix, not(target_vendor = "apple")))]
+        Roots::Mozilla => RootCerts::WebPki,
+        #[cfg(not(all(unix, not(target_vendor = "apple"))))]
+        Roots::Platform => RootCerts::PlatformVerifier,
     }
 }
 
@@ -118,6 +154,13 @@ fn map_error(err: &ureq::Error) -> TransportError {
     ) {
         TransportError::Connect
     } else if matches!(err, ureq::Error::Tls(_) | ureq::Error::Rustls(_)) {
+        TransportError::Tls
+    } else if let ureq::Error::Io(io_err) = err
+        && io_err
+            .get_ref()
+            .is_some_and(|inner| inner.is::<rustls::Error>())
+    {
+        // A refused certificate reaches ureq as rustls' error inside an `io::Error`.
         TransportError::Tls
     } else if let ureq::Error::Io(io_err) = err {
         map_io(io_err.kind())

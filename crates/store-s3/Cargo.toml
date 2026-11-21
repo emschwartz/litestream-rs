@@ -13,9 +13,18 @@ default = ["ureq"]
 testing = []
 # HTTP clients, any combination: `UreqTransport` (blocking, no runtime; the
 # default and what `S3Store::new` uses) and `ReqwestTransport` (for hosts that
-# already build reqwest and Tokio).
-ureq = ["dep:ureq"]
-reqwest = ["dep:reqwest", "dep:rustls", "dep:tokio"]
+# already build reqwest and Tokio). The clients the store builds itself trust
+# what Go's crypto/x509 trusts (the `trust` module).
+ureq = ["dep:ureq", "dep:rustls"]
+reqwest = [
+    "dep:reqwest",
+    "dep:rustls",
+    "rustls/ring",
+    "rustls/tls12",
+    "dep:rustls-platform-verifier",
+    "dep:tokio",
+    "dep:webpki-roots",
+]
 
 [dependencies]
 lsr-core.workspace = true
@@ -28,15 +37,28 @@ rusty-s3.workspace = true
 thiserror.workspace = true
 ureq = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
-# Only to recognise a TLS failure inside reqwest's error chain.
-rustls = { workspace = true, optional = true }
+# Root certificates from the system's files; for reqwest also its TLS config on ring,
+# and recognising a TLS failure inside reqwest's error chain.
+rustls = { workspace = true, optional = true, features = ["std"] }
 tokio = { workspace = true, optional = true }
 url.workspace = true
 zeroize.workspace = true
 
+# Where Go reads root files itself (Linux, the BSDs), so does the store, and it falls
+# back to Mozilla's roots as Go does (ureq carries its own copy).
+[target.'cfg(all(unix, not(target_vendor = "apple")))'.dependencies]
+webpki-roots = { workspace = true, optional = true }
+
+# Where Go asks the operating system (macOS, Windows), so does the store.
+[target.'cfg(not(all(unix, not(target_vendor = "apple"))))'.dependencies]
+ureq = { workspace = true, optional = true, features = ["platform-verifier"] }
+rustls-platform-verifier = { workspace = true, optional = true }
+
 [dev-dependencies]
 # A host runtime with worker threads, for the reqwest transport's tests.
 tokio = { workspace = true, features = ["rt-multi-thread"] }
+# The TLS server under a private certificate authority in the trust tests.
+rustls = { workspace = true, features = ["ring", "std", "tls12"] }
 lsr-core = { workspace = true, features = ["testing"] }
 # Integration tests need FakeS3 and the fault layer, which sit behind the feature.
 lsr-store-s3 = { workspace = true, features = ["testing"] }

@@ -4,6 +4,13 @@
 //! what it does not cover), signed requests as data, response parsers and
 //! the error classification. The blocking HTTP client and the store itself come
 //! after this layer; everything here is pure and testable without a network.
+//!
+//! The HTTP client is a feature: `ureq` (the default, no async runtime) or
+//! `reqwest`. A host that already builds reqwest depends on this crate with
+//! `default-features = false, features = ["reqwest"]`, so ureq and its copy of
+//! the TLS stack stay out of its build. Either client, when the store builds
+//! it, trusts the certificate authorities Go's `crypto/x509` trusts (the
+//! `trust` module).
 
 mod chain;
 mod classify;
@@ -24,6 +31,8 @@ mod response;
 mod secrets;
 mod store;
 mod transport;
+#[cfg(any(feature = "ureq", feature = "reqwest"))]
+mod trust;
 mod upload;
 #[cfg(feature = "ureq")]
 mod ureq_transport;

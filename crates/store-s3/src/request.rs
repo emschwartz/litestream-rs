@@ -73,7 +73,7 @@ pub struct HttpRequest {
 
 impl HttpRequest {
     /// A request to `url` with these headers and no body, for transport tests.
-    #[cfg(all(test, feature = "reqwest"))]
+    #[cfg(all(test, any(feature = "reqwest", feature = "ureq")))]
     pub(crate) fn for_test(method: Method, url: Url, headers: Vec<(&'static str, String)>) -> Self {
         Self {
             method,

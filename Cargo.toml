@@ -32,8 +32,12 @@ libc = { version = "0.2.191", default-features = false }
 lz4_flex = { version = "0.14.2", default-features = false, features = ["std", "safe-decode", "safe-encode"] }
 md-5 = { version = "0.11", default-features = false }
 percent-encoding = { version = "2", default-features = false, features = ["alloc"] }
-reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+# `rustls-no-provider`: the store hands reqwest a finished rustls config on ring (the provider
+# ureq already builds), so reqwest's own default provider, aws-lc-rs (a C build), stays out.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false }
+# The operating system's certificate verifier, used on macOS and Windows as Go uses it there.
+rustls-platform-verifier = { version = "0.7", default-features = false }
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 rusqlite = { version = "0.43", default-features = false, features = ["bundled"] }
 # The sidecar forwards signals to its -exec child and waits for it without reaping
@@ -52,6 +56,8 @@ tokio = { version = "1", default-features = false, features = ["rt"] }
 toml = { version = "1.1", default-features = false, features = ["parse", "serde", "std"] }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 url = { version = "2", default-features = false, features = ["std"] }
+# Mozilla's roots, trusted when the system has none (as Go's x509roots/fallback, which litestream links).
+webpki-roots = { version = "1", default-features = false }
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
 
 # The lint set is strict by design, plus the four marked "port" below. Gates run with
