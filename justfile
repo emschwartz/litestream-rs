@@ -71,6 +71,12 @@ mutants crate *args:
 spawn name:
     git -C "{{justfile_directory()}}" worktree add ".worktrees/{{name}}" -b "{{name}}" main
 
+# The large real-SQLite cases (docs/plans/phase-3-syncing.md, the fault suite): a 16 KiB-page
+# database past 1 GiB, one past 4 GiB (skipped below 20 GB free disk), a WAL past the sync cap.
+# Minutes and several gigabytes of temporary files; not part of check.
+sqlite-big:
+    cargo nextest run -p lsr-sqlite --test big --run-ignored only --no-capture --locked
+
 # Build the pinned Go binaries, then run the live checks against them (not part of check).
 compat:
     ./scripts/build-go-litestream.sh
