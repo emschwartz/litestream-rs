@@ -1,9 +1,27 @@
 # Mutation testing
 
 `just mutants <crate>` runs cargo-mutants 27.1.0 over `lsr-<crate>` with nextest, four jobs, the tree copied with
-its `.git`, results in `target/mutants/mutants.out/`. No exclude patterns are configured. Phase 2's exit criterion is that every
+its `.git`, results in `target/mutants/mutants.out/`. It runs on demand, not in CI. Phase 2's exit criterion is that every
 survivor in `ltx` and `core` is killed by a test or listed here with a reason. `ltx` meets that; `core` is part way
 (see its section).
+
+## Scope: which test-only code is mutated
+
+Test-only helper code is mutated only where product correctness depends on it (the decision in issue #22).
+A mutant in a test helper weakens a test rather than the engine, so it is worth a run and a triage only when
+nothing else would notice the helper being wrong.
+
+- **Mutated:** `crates/core/src/mem.rs`, the in-memory store. It is public, other crates test against it, and
+  the simulator uses it as its reference model of an object store. `crates/core/src/conformance.rs`, the
+  shared checks the real S3 and filesystem stores must pass: a check that stops checking would let a broken
+  store through.
+- **Excluded** in `.cargo/mutants.toml` (`exclude_globs`): `crates/core/src/source/fake.rs` with its
+  submodules (the scripted WAL, database and checkpointer fakes) and `crates/core/src/restore/mem_sink.rs`
+  (the in-memory restore target). They are checked another way:
+  `crates/compat/tests/live_matches_sim.rs` compares the simulator's SQLite model with real SQLite. The
+  exclusion drops `cargo mutants --list -p lsr-core` from 1705 mutants to 1569 (102 in `fake.rs`, 34 in
+  `mem_sink.rs`); `mem.rs` keeps its 24 and `conformance.rs` its 49. A run that wants them anyway passes
+  `--no-config`.
 
 ## ltx
 
@@ -40,9 +58,9 @@ test, not a survivor, but it is reported separately and slower than a catch.
 
 **Status: met.** The first run was stopped at 899 of 1463 mutants (about eight hours on four shared
 cores). The second run, over both test packages, finished, and every one of its survivors is killed by a
-test, equivalent, explained, or in a test double (see the two "Second run" sections). The exit bar, zero
-unexplained survivors, is met for `core`; whether test doubles should be mutated at all is open in
-issue #22.
+test, equivalent or explained (see the two "Second run" sections and "Kept test helpers" below). The exit
+bar, zero unexplained survivors, is met for `core`. Which test doubles are mutated is settled in "Scope"
+above; the survivors of the excluded files are no longer listed.
 
 The recipe needed one change before it could run at all: `core` has a guard test that lists the tracked files
 with git, cargo-mutants copies the tree without `.git` by default, and so the unmutated baseline failed and no
@@ -50,8 +68,8 @@ mutant was tested. `just mutants` now passes `--copy-vcs true`.
 
 Tally of the first run so far: 491 caught, 88 missed, 13 timeouts, 307 unviable. Of the 88 missed,
 31 are now caught by new tests (each run again and confirmed caught), 1 is equivalent, 7 are in the store
-conformance harness, and 49 were left open; the second run caught or explained every one of those it
-has reached.
+conformance harness (now caught: "Kept test helpers" below), and 49 were left open; the second run caught or
+explained every one of those it has reached.
 
 This run executes `lsr-core`'s own tests only. The actor's widest tests are the simulator's scenarios in
 `lsr-sim`, which a `-p lsr-core` run does not execute. A trial with `--test-package lsr-core --test-package lsr-sim`
@@ -111,12 +129,12 @@ and `a_requested_snapshot_is_staged_on_a_quiet_wal` (`actor/tests.rs`).
 | --- | --- | --- |
 | `layout.rs` `FileKey::from_str` | `(raw << 4) \| digit` becomes `^` | The shift leaves the low nibble zero and `digit` is below 16, so the operands never overlap. |
 
-### In the store conformance harness (explained, not killed)
+### In the store conformance harness (caught since)
 
 `conformance.rs` is the suite every `ObjectStore` runs, built only for tests. A mutant here does not change the
 engine: it makes the suite ask less of a store, and the stores in this repository are correct, so they pass the
-weaker suite too. Nothing runs the suite against a store that is wrong on purpose; that self-test is what would
-kill these, and it is not written.
+weaker suite too. The first two runs left these seven; the suite's self-tests (`conformance/tests.rs`) now
+catch them, see "Kept test helpers" below. Line numbers are those of the first run.
 
 | Where | Mutation |
 | --- | --- |
@@ -243,10 +261,8 @@ connection's checkpoint would in the middle of a sync step; it also logs the key
 
 #### Harness (7)
 
-The seven `conformance.rs` survivors are the ones the first run left, at the same lines, and the table
-above explains them. A self-test (the suite run against a store that is wrong on purpose, one wrong store per
-check) would kill them; it is not cheap, since each survivor needs its own deliberately broken store, and it
-tests the harness rather than any shipped code.
+The seven `conformance.rs` survivors are the ones the first run left, at the same lines. The suite's
+self-tests now catch them; see "Kept test helpers" below.
 
 #### Timeouts (13): the loop that spins
 
@@ -275,23 +291,22 @@ The second run finished: 586 mutants in 78 minutes, 349 caught, 131 unviable, 85
 first batch above is 45 of the missed and 13 of the timeouts; this section is the other 40 missed and 8
 timeouts. Line numbers are those of commit `ec5bc07`, as above.
 
-| File | Killed | Equivalent | Test double | Timeout |
-| --- | --- | --- | --- | --- |
-| `verify.rs` | 8 | | | 1 |
-| `verify/dry_run.rs` | 1 | 2 | | |
-| `maintain/retain.rs` | 3 | 3 | | 1 |
-| `maintain/state.rs` | 3 | | | |
-| `actor/state.rs` | 5 | | | |
-| `upload.rs` | 2 | | | 6 |
-| `source/fake.rs` | | | 11 | |
-| `restore/mem_sink.rs` | | | 2 | |
-| Total | 22 | 5 | 13 | 8 |
+| File | Killed | Equivalent | Timeout |
+| --- | --- | --- | --- |
+| `verify.rs` | 8 | | 1 |
+| `verify/dry_run.rs` | 1 | 2 | |
+| `maintain/retain.rs` | 3 | 3 | 1 |
+| `maintain/state.rs` | 3 | | |
+| `actor/state.rs` | 5 | | |
+| `upload.rs` | 2 | | 6 |
+| Total | 22 | 5 | 8 |
 
-No survivor revealed a bug.
+The other 13 missed were in `source/fake.rs` (11) and `restore/mem_sink.rs` (2), which are now excluded
+from mutation (see "Scope"), so they are not listed. No survivor revealed a bug.
 
 Tally of the whole second run, both batches: of 85 missed, 50 are caught by new tests, 14 are equivalent,
-1 is explained but not killed, and 20 are in test doubles (the seven conformance-harness survivors and the
-thirteen below). All 21 timeouts are explained. No survivor in `core` is unexplained.
+1 is explained but not killed, 7 are the conformance-harness survivors (caught since, below) and 13 are in
+the files now excluded. All 21 timeouts are explained. No survivor in `core` is unexplained.
 
 #### Caught by new tests (22)
 
@@ -335,30 +350,10 @@ column) and is caught.
 
 #### Test doubles (20)
 
-These files are fakes the tests and the simulator drive the engine with, not engine code: a mutant there
-changes what a test asks of the engine, not what the engine does, and the engine passes the weaker test too.
-No tests are written for them. Whether test doubles are mutated at all is open in issue #22.
-
-| Where | Mutation | Why it survives |
-| --- | --- | --- |
-| `conformance.rs` (7) | see "In the store conformance harness" above | The suite asks less of a store; every store here is correct. |
-| `source/fake.rs:93:20` | `write_at`: `<` becomes `<=` | Resizing to the length the buffer already has changes nothing. |
-| `source/fake.rs:301:9` | `FakeWal::try_restart` returns false | No test in the run needed the fake to restart on request. |
-| `source/fake.rs:328:9` | `FakeWal::unpin_reader` does nothing | Same: only a restart on request needs the reader gone. |
-| `source/fake.rs:334:9` | `FakeWal::read_mark` returns `Some(0)` | No test reads the mark. |
-| `source/fake.rs:370:19` | `corrupt_byte`: `^=` becomes `\|=` | Setting every bit still corrupts the bytes the tests pick. |
-| `source/fake.rs:389:9` | `FakeWal::checkpoint_seq` returns 1 | No test depends on the sequence this accessor reports. |
-| `source/fake.rs:401:9` | `FakeWal::backfilled` returns 0 | No test depends on the backfill count this accessor reports. |
-| `source/fake.rs:428:61` | `checkpoint_run`: `Truncate && !busy` becomes `\|\|` | No test scripts a busy checkpoint with the natural effect. |
-| `source/fake.rs:578:9` | `FakeCheckpointer::fresh_id` returns 0 | Nothing compares two barrier or lock ids. |
-| `source/fake.rs:578:9` | `FakeCheckpointer::fresh_id` returns 1 | Same. |
-| `source/fake.rs:663:43` | `FakeDb::set_page_count`: `<=` becomes `>` | Tests set the count before writing pages, so there is nothing to drop. |
-| `restore/mem_sink.rs:79:27` | `set_page_size`: guard `have != size` becomes false | Restore refuses mixed page sizes before it writes, so the sink never sees a change. |
-| `restore/mem_sink.rs:140:30` | `write_page`: `!=` becomes `==` | A zero page is then stored instead of left implicit; `Database::page` reads the same, and no test compares two databases that differ only in that. |
-
-`try_restart` and `unpin_reader` are now used by `a_restarted_wal_with_nothing_new_is_not_reported_as_a_sync`
-(from the first batch, added after the run copied the tree), which asserts the restart, so a later run
-should catch both.
+Seven were the conformance-harness survivors, caught since (see "Kept test helpers"). The other thirteen
+were in `source/fake.rs` and `restore/mem_sink.rs`, which are no longer mutated: a mutant there changes what
+a test asks of the engine, not what the engine does, and the fakes are checked against real SQLite by
+`crates/compat/tests/live_matches_sim.rs` (see "Scope").
 
 #### Timeouts (8): the loop that spins
 
@@ -373,6 +368,36 @@ should catch both.
 | `verify.rs:757:20` | replace < with > in Walk::read | The walk's read loop never ends on a short chunk and reads empty chunks forever (every `Depth::Contents` test). |
 | `maintain/retain.rs:362:15` | replace <= with > in Found::wake_at | Retention only names wake instants past the newest stamp, which the anchor never reaches, so `retention_failure`'s tick loop (actor tests) follows `Next::At` forever. Also fails `a_covered_level_zero_file_wakes_when_it_is_old_enough`. |
 
-### Not yet run
+### Kept test helpers: `mem.rs` and `conformance.rs`
 
-Nothing: the second run covered every file of `lsr-core`.
+The suite's self-tests in `crates/core/src/conformance/tests.rs` run its cases against a wrapped `MemStore`
+that breaks one promise and require the case to fail, with a message that names the check. They also pin the
+harness behaviour the cases rely on.
+
+| Test | Promise or behaviour | Kills (first-run line numbers) |
+| --- | --- | --- |
+| `a_store_that_reads_back_nothing_after_a_late_failed_commit_fails_the_suite` | after a commit that fails once its object is published, reads agree with the listing | `379:8` (`delete !`), `128:9` (returns false), `28:9` (empty message) |
+| `a_store_that_lists_another_exact_stamp_fails_the_suite` | a listed stamp is the committed one or marked last-modified | `634:5` (`exact_or_marked` true), `28:9` |
+| `a_harness_that_cannot_inject_skips_the_late_commit_case` | the trait's default declines to inject, so a store that cannot be made to fail late is not failed for it | `99:9` (default true), `379:8` |
+| `the_mem_harness_injects_a_late_commit_failure` | the in-memory harness does inject | `128:9` |
+| `the_last_modified_harness_lists_last_modified` | the second in-memory harness really lists last-modified times, so the suite runs once in each listing mode | `111:9` |
+| `block_on_resumes_a_future_that_was_woken` | `block_on` resumes a future that woke itself before it returned pending | `61:9`, by non-termination (below) |
+
+Run: `just mutants core --file crates/core/src/conformance.rs --file crates/core/src/mem.rs`, `lsr-core`'s
+own tests, at commit `dfc7886`. 73 mutants (49 in `conformance.rs`, 24 in `mem.rs`): 29 caught, 43 unviable,
+1 timeout, 0 missed. No survivor in either file.
+
+| File | Mutants | Caught | Unviable | Timeout | Missed |
+| --- | --- | --- | --- | --- | --- |
+| `conformance.rs` | 49 | 15 | 33 | 1 | 0 |
+| `mem.rs` | 24 | 14 | 10 | 0 | 0 |
+
+The one timeout is `conformance.rs:65:9`, `ThreadWaker::wake` replaced by `()`: the woken future is never
+polled again because `block_on` stays parked, so `block_on_resumes_a_future_that_was_woken` hangs and is
+killed. That is a failing test, not a survivor; no test can see a thread that never unparks other than by
+waiting for it. Most of the unviable mutants replace a function returning `Result<(), Failure>`, a key, a
+stamp or a listing with `Default::default()`, which those types do not implement.
+
+The four-job run filled the disk after 70 mutants and reported four of them unviable from the failed build
+(`conformance.rs:65:9`, `71:5`, `504:12`, `mem.rs:103:9` with 0). They were run again at one job, with the
+three it had not reached, and the tally above counts the second result.
