@@ -463,6 +463,12 @@ impl<B: Backend> Rig<B> {
             .ok_or(RigError::State("reach the backend"))
     }
 
+    /// The actor, to read what it counted.
+    #[must_use]
+    pub const fn actor(&self) -> &Actor {
+        &self.actor
+    }
+
     /// Every tick so far, in order.
     #[must_use]
     pub fn ticks(&self) -> &[Tick] {

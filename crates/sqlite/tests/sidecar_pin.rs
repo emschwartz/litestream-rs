@@ -17,6 +17,9 @@
 //!
 //! Which read mark the pin holds is read from `/proc/locks` (read lock `i` is byte `123 + i`
 //! of `-shm`), so the file is Linux only; nothing here opens the database or `-shm`.
+//!
+//! The last two tests run core's host-checkpoint observer over the same reads, in both
+//! placements of the pin, with the host at SQLite's defaults and at `wal_autocheckpoint = 0`.
 
 #![cfg(target_os = "linux")]
 #![expect(
@@ -30,12 +33,14 @@
 )]
 
 use std::io::{BufRead, BufReader, Read, Write};
+use std::num::NonZeroU32;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    CheckpointMode, Checkpointer, Event, RestoreTarget, SnapshotCause, Tick, WalSource,
+    CheckpointMode, Checkpointer, Event, HostCheckpoint, HostObserver, RestoreTarget,
+    SQLITE_AUTOCHECKPOINT, SnapshotCause, Tick, WalSource,
 };
 use lsr_local::FileSink;
 use lsr_sqlite::Sqlite;
@@ -65,12 +70,16 @@ fn child_process_entry() {
     let Some((role, db)) = common::role() else {
         return;
     };
-    let (commits, row): (u32, u32) = match role.as_str() {
-        "app-4096" => (110, 40_000),
-        "app-512" => (100, 5_000),
-        other => panic!("unknown role {other}"),
+    let (commits, row, automatic): (u32, u32, bool) = match role.as_str() {
+        "app-4096" => (110, 40_000, true),
+        "app-512" => (100, 5_000, true),
+        // `host-default-<commits>` or `host-off-<commits>`, at 4096-byte pages.
+        other => match other.strip_prefix("host-").and_then(|r| r.split_once('-')) {
+            Some((setting, commits)) => (commits.parse().unwrap(), 40_000, setting == "default"),
+            None => panic!("unknown role {other}"),
+        },
     };
-    application(&db, commits, row);
+    application(&db, commits, row, automatic);
 }
 
 /// What the application saw after one commit: SQLite's frame count, the frames backfilled,
@@ -82,9 +91,10 @@ struct Seen {
     salts: Salts,
 }
 
-/// The application: SQLite's defaults, `commits` commits of a `row`-byte random row, and after
-/// each one line saying what the commit (and its automatic checkpoint) left.
-fn application(db: &Path, commits: u32, row: u32) {
+/// The application: SQLite's defaults (or, unless `automatic`, `wal_autocheckpoint = 0`),
+/// `commits` commits of a `row`-byte random row, and after each one line saying what the
+/// commit (and its automatic checkpoint) left.
+fn application(db: &Path, commits: u32, row: u32, automatic: bool) {
     let conn = Connection::open(db).unwrap();
     let auto: u32 = conn
         .query_row("PRAGMA wal_autocheckpoint", [], |r| r.get(0))
@@ -93,6 +103,9 @@ fn application(db: &Path, commits: u32, row: u32) {
         auto, AUTOCHECKPOINT,
         "the application keeps SQLite's default"
     );
+    if !automatic {
+        conn.execute_batch("PRAGMA wal_autocheckpoint = 0").unwrap();
+    }
     conn.execute_batch("PRAGMA synchronous = NORMAL").unwrap();
     let mut out = std::io::stdout().lock();
     for _ in 0..commits {
@@ -365,6 +378,9 @@ fn the_engine_restores_everything_a_host_at_the_default_autocheckpoint_wrote() {
     rig.settle().unwrap();
     assert_eq!(snapshots_since(&rig, from), vec![]);
     assert_eq!(read_marks_held(rig.db()), vec![0]);
+    // The actor counted the host's backfill as a checkpoint it did not run.
+    let host = rig.actor().host_checkpoints();
+    assert_eq!((host.backfilled, host.restarted), (1, 0), "{host:?}");
 
     let again = run_application("app-512", rig.db());
     assert!(again.iter().all(|s| s.backfilled == 0), "{again:?}");
@@ -373,6 +389,8 @@ fn the_engine_restores_everything_a_host_at_the_default_autocheckpoint_wrote() {
     let from = rig.ticks().len();
     rig.settle().unwrap();
     assert_eq!(snapshots_since(&rig, from), vec![]);
+    // The restart at the actor's own write after its full checkpoint is no host checkpoint.
+    assert_eq!(rig.actor().host_checkpoints().ran(), 1);
 
     // The oracle restores at every TXID on the replica (one per synced file, each covering
     // many of the application's commits) and compares the pages with SQLite's own image of
@@ -394,5 +412,130 @@ fn the_engine_restores_everything_a_host_at_the_default_autocheckpoint_wrote() {
     assert_eq!(
         rows(&Connection::open(&restored).unwrap()),
         rows(rig.app().unwrap())
+    );
+}
+
+/// Where the pin sits when the host starts writing.
+#[derive(Clone, Copy, Debug)]
+enum Placement {
+    /// Over the open's own unbackfilled schema commits: a read mark above 0.
+    AboveMarkZero,
+    /// Retaken after the replicator's own full checkpoint: read mark 0.
+    OnMarkZero,
+}
+
+/// A database in `dir`, the pin in `placement`, and one observer per assumed host threshold
+/// in `assumed`, each having seen the read where the pin was taken.
+fn pinned(
+    dir: &TempDir,
+    placement: Placement,
+    assumed: &[Option<NonZeroU32>],
+) -> (PathBuf, Sqlite, Vec<HostObserver>) {
+    let db = dir.path().join("app.db");
+    create(&db, 4096);
+    let mut pin = Sqlite::open(&db).unwrap();
+    let mut observers: Vec<HostObserver> = assumed.iter().map(|a| HostObserver::new(*a)).collect();
+    for observer in &mut observers {
+        assert_eq!(observer.poll(pin.committed().unwrap()), None);
+    }
+    if let Placement::OnMarkZero = placement {
+        let run = pin.checkpoint(CheckpointMode::Passive).unwrap();
+        assert!(!run.busy && run.checkpointed == run.log, "{run:?}");
+        let after = pin.committed().unwrap();
+        for observer in &mut observers {
+            observer.ours(Some(after), Some(run));
+        }
+    }
+    let marks = read_marks_held(&db);
+    match placement {
+        Placement::AboveMarkZero => assert!(marks.len() == 1 && marks[0] > 0, "{marks:?}"),
+        Placement::OnMarkZero => assert_eq!(marks, vec![0]),
+    }
+    (db, pin, observers)
+}
+
+/// The host writes 95 commits (about 1140 frames, past SQLite's threshold), then 10 more, as
+/// two processes, and every observer polls after each. Returns what each observer saw per
+/// poll, and the backfill counts the host itself saw after each of its commits.
+fn host_writes(
+    db: &Path,
+    pin: &mut Sqlite,
+    observers: &mut [HostObserver],
+    setting: &str,
+) -> (Vec<Vec<Option<HostCheckpoint>>>, Vec<u32>) {
+    let mut seen = vec![Vec::new(); observers.len()];
+    let mut backfills = Vec::new();
+    for commits in [95, 10] {
+        let host = run_application(&format!("host-{setting}-{commits}"), db);
+        backfills.extend(host.iter().map(|s| s.backfilled));
+        let read = pin.committed().unwrap();
+        assert!(read.end().frame_count() > AUTOCHECKPOINT, "{read:?}");
+        for (observer, seen) in observers.iter_mut().zip(&mut seen) {
+            seen.push(observer.poll(read));
+        }
+    }
+    (seen, backfills)
+}
+
+/// A host at SQLite's defaults raises the host-checkpoint notice wherever the pin sits. Above
+/// mark 0 its checkpoint copies the frames below the pin (a backfill the replicator did not
+/// run), and its next attempts copy nothing more; on mark 0 its attempts copy nothing at all
+/// and show only as the WAL growing past the threshold with nothing backfilled.
+#[test]
+fn a_host_at_the_defaults_raises_the_notice_on_either_read_mark() {
+    let default = Some(SQLITE_AUTOCHECKPOINT);
+    let dir = TempDir::new().unwrap();
+    let (db, mut pin, mut observers) = pinned(&dir, Placement::AboveMarkZero, &[default]);
+    let mark = pin.committed().unwrap().end().frame_count();
+    let (seen, backfills) = host_writes(&db, &mut pin, &mut observers, "default");
+    assert!(backfills.contains(&mark), "the host's checkpoint ran");
+    assert!(
+        matches!(
+            seen[0][..],
+            [
+                Some(HostCheckpoint::Backfilled { from: 0, to }),
+                Some(HostCheckpoint::Stalled { .. })
+            ] if to == mark
+        ),
+        "{seen:?}"
+    );
+    assert_eq!(observers[0].counts().ran(), 1);
+
+    let dir = TempDir::new().unwrap();
+    let (db, mut pin, mut observers) = pinned(&dir, Placement::OnMarkZero, &[default]);
+    let (seen, backfills) = host_writes(&db, &mut pin, &mut observers, "default");
+    assert!(backfills.iter().all(|b| *b == 0), "nothing could be copied");
+    assert!(
+        matches!(seen[0][..], [None, Some(HostCheckpoint::Stalled { .. })]),
+        "{seen:?}"
+    );
+    assert_eq!(observers[0].counts().ran(), 0, "no host checkpoint ran");
+}
+
+/// A host at `wal_autocheckpoint = 0` raises nothing. Above mark 0 the frames below the pin
+/// stay unbackfilled, which a host at the defaults would have copied, so nothing is inferred
+/// even at the default threshold. On mark 0 the wal-index looks the same as for a host whose
+/// attempts fail, so only the threshold the observer is told tells them apart: told `None`,
+/// it raises nothing; left at SQLite's default, it infers the attempts it cannot see.
+#[test]
+fn a_host_at_wal_autocheckpoint_0_raises_none() {
+    let default = Some(SQLITE_AUTOCHECKPOINT);
+    let dir = TempDir::new().unwrap();
+    let (db, mut pin, mut observers) = pinned(&dir, Placement::AboveMarkZero, &[default, None]);
+    let (seen, backfills) = host_writes(&db, &mut pin, &mut observers, "off");
+    assert!(
+        backfills.iter().all(|b| *b == 0),
+        "the host ran no checkpoint"
+    );
+    assert_eq!(seen, vec![vec![None, None]; 2]);
+
+    let dir = TempDir::new().unwrap();
+    let (db, mut pin, mut observers) = pinned(&dir, Placement::OnMarkZero, &[None, default]);
+    let (seen, backfills) = host_writes(&db, &mut pin, &mut observers, "off");
+    assert!(backfills.iter().all(|b| *b == 0));
+    assert_eq!(seen[0], [None, None], "told the host runs none");
+    assert!(
+        matches!(seen[1][..], [None, Some(HostCheckpoint::Stalled { .. })]),
+        "the one case the wal-index cannot tell apart: {seen:?}"
     );
 }
