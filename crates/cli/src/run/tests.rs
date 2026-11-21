@@ -187,6 +187,15 @@ fn outcome(done: Result<Done, CliError>) -> Outcome {
     }
 }
 
+/// The latest state, with the full SQLite check: the fixtures are real databases.
+fn latest_checked() -> How {
+    How {
+        target: RestoreTarget::Latest,
+        clear_sidecars_first: false,
+        integrity_check: IntegrityCheck::Full,
+    }
+}
+
 #[test]
 fn restore_and_verify_over_s3_equal_the_directory() {
     for staged in staged_fixtures() {
@@ -196,14 +205,12 @@ fn restore_and_verify_over_s3_equal_the_directory() {
         let from_dir = outcome(block_on(restore_on(
             &dir,
             staged.output("dir.db"),
-            RestoreTarget::Latest,
-            false,
+            latest_checked(),
         )));
         let from_s3 = outcome(block_on(restore_on(
             &store,
             staged.output("s3.db"),
-            RestoreTarget::Latest,
-            false,
+            latest_checked(),
         )));
         assert_eq!(from_s3, from_dir);
         let want = block_on(verify(&dir, Depth::Contents)).unwrap();

@@ -17,6 +17,7 @@
 use std::path::PathBuf;
 
 use lsr_core::{Depth, RestoreTarget};
+use lsr_local::IntegrityCheck;
 use lsr_ltx::{ParseTxidError, Timestamp, TimestampParseError, Txid};
 use lsr_store_s3::{ConfigError, Endpoint, Region, S3Config};
 use thiserror::Error;
@@ -145,6 +146,13 @@ pub const FLAGS: &[FlagSpec] = &[
         help: "first remove a stale -wal, -shm or -journal beside the output",
     },
     FlagSpec {
+        name: "--integrity-check",
+        value: Some("none|quick|full"),
+        required: false,
+        commands: &[CommandName::Restore],
+        help: "run SQLite's quick_check or integrity_check on the result before publishing it; a failure publishes nothing (default none)",
+    },
+    FlagSpec {
         name: "--depth",
         value: Some("names|contents"),
         required: false,
@@ -205,6 +213,8 @@ pub struct RestoreArgs {
     pub target: RestoreTarget,
     /// Whether to remove stale sidecars first.
     pub clear_sidecars: bool,
+    /// SQLite's check of the result before it is published.
+    pub integrity_check: IntegrityCheck,
 }
 
 /// `lsr verify`.
@@ -297,6 +307,12 @@ pub enum UsageError {
     /// `--depth` is neither `names` nor `contents`.
     #[error("--depth {value:?}: expected names or contents")]
     BadDepth {
+        /// What was typed.
+        value: String,
+    },
+    /// `--integrity-check` is not `none`, `quick` or `full`.
+    #[error("--integrity-check {value:?}: expected none, quick or full")]
+    BadIntegrityCheck {
         /// What was typed.
         value: String,
     },
@@ -521,6 +537,18 @@ impl Flags {
             }),
         }
     }
+
+    /// Go's `-integrity-check` words, exactly (cmd/litestream/restore.go).
+    fn integrity_check(&self) -> Result<IntegrityCheck, UsageError> {
+        match self.value("--integrity-check") {
+            None | Some("none") => Ok(IntegrityCheck::Off),
+            Some("quick") => Ok(IntegrityCheck::Quick),
+            Some("full") => Ok(IntegrityCheck::Full),
+            Some(other) => Err(UsageError::BadIntegrityCheck {
+                value: other.to_owned(),
+            }),
+        }
+    }
 }
 
 /// Reads a command line (without the program name).
@@ -554,6 +582,7 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
             output: PathBuf::from(flags.require("--output")?),
             target: flags.target()?,
             clear_sidecars: flags.has("--clear-sidecars"),
+            integrity_check: flags.integrity_check()?,
         }),
         CommandName::Verify => Command::Verify(VerifyArgs {
             replica: flags.replica()?,

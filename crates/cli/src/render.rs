@@ -15,6 +15,7 @@ use lsr_ltx::{Timestamp, Txid, TxidRange};
 use crate::args::{CommandName, FLAGS};
 use crate::run::{CliError, Done, Exit};
 use lsr_core::ListedStamp;
+use lsr_local::IntegrityCheck;
 
 /// Appends formatted text to a `String`, which cannot fail.
 macro_rules! put {
@@ -38,7 +39,8 @@ pub fn done(done: &Done) -> String {
             output,
             restored,
             cleared,
-        } => restored_text(output, restored, cleared),
+            integrity_check,
+        } => restored_text(output, restored, cleared, *integrity_check),
         Done::Verified {
             depth,
             report,
@@ -169,7 +171,12 @@ pub fn plan_outcome(outcome: &PlanOutcome) -> String {
     }
 }
 
-fn restored_text(output: &Path, restored: &Restored, cleared: &[PathBuf]) -> String {
+fn restored_text(
+    output: &Path,
+    restored: &Restored,
+    cleared: &[PathBuf],
+    integrity_check: IntegrityCheck,
+) -> String {
     let checksum = if restored.post_apply().is_some() {
         "database checksum verified"
     } else {
@@ -193,6 +200,9 @@ fn restored_text(output: &Path, restored: &Restored, cleared: &[PathBuf]) -> Str
     // for every other restore stays as it was.
     if restored.stamps_read() > 0 {
         putln!(out, "{} exact stamps read to plan", restored.stamps_read());
+    }
+    if let Some(pragma) = integrity_check.pragma() {
+        putln!(out, "SQLite {pragma} passed before publishing");
     }
     out
 }

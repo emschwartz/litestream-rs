@@ -4,16 +4,21 @@
 //! A restore never touches an existing target: [`FileSink::create`] refuses it
 //! and any stale sidecar, and the executor publishes by hard link. With
 //! `--clear-sidecars` the stale files are removed first and a failure after that
-//! still reports what was removed.
+//! still reports what was removed. With `--integrity-check` the sink runs
+//! SQLite's check on the scratch before publishing; a database SQLite finds
+//! invalid is a refused restore ([`CliError::Integrity`]), and nothing is left
+//! at the output.
 
 use std::io;
 use std::path::PathBuf;
 
 use lsr_core::{
     Depth, Inventory, InventoryError, ObjectStore, PlanOutcome, Report, RestoreError,
-    RestoreTarget, Restored, Severity, VerifyError, restore, verify,
+    RestoreTarget, Restored, Severity, SinkOp, VerifyError, restore, verify,
 };
-use lsr_local::{ClearError, CreateError, FileSink, clear_sidecars};
+use lsr_local::{
+    ClearError, CreateError, FileSink, IntegrityCheck, IntegrityFailure, clear_sidecars,
+};
 use lsr_store_fs::FsStore;
 use lsr_store_s3::ConfigError;
 use thiserror::Error;
@@ -84,6 +89,8 @@ pub enum Done {
         restored: Restored,
         /// Stale sidecars removed first.
         cleared: Vec<PathBuf>,
+        /// The SQLite check the database passed before it was published.
+        integrity_check: IntegrityCheck,
     },
     /// A replica was checked.
     Verified {
@@ -140,6 +147,9 @@ pub enum CliError {
     /// The replica has no exact answer for the target.
     #[error("no exact restore: {}", render::plan_outcome(.0))]
     NoPlan(PlanOutcome),
+    /// SQLite found the restored database invalid; nothing was published.
+    #[error("{0}; nothing was published")]
+    Integrity(IntegrityFailure),
     /// The restore failed for another reason.
     #[error("{0}")]
     Restore(RestoreError),
@@ -175,6 +185,16 @@ impl From<RestoreError> for CliError {
     fn from(err: RestoreError) -> Self {
         match err {
             RestoreError::NoPlan(none) => Self::NoPlan(none.outcome().clone()),
+            RestoreError::Sink {
+                op: SinkOp::Publish,
+                source,
+            } => match IntegrityFailure::in_io(&source) {
+                Some(failure) => Self::Integrity(failure.clone()),
+                None => Self::Restore(RestoreError::Sink {
+                    op: SinkOp::Publish,
+                    source,
+                }),
+            },
             other @ (RestoreError::Inventory(_)
             | RestoreError::Store(_)
             | RestoreError::File { .. }
@@ -216,7 +236,7 @@ pub fn exit_for_done(done: &Done) -> Exit {
 pub fn exit_for_error(error: &CliError) -> Exit {
     match error {
         CliError::Usage(_) => Exit::Usage,
-        CliError::NoPlan(_) => Exit::Refused,
+        CliError::NoPlan(_) | CliError::Integrity(_) => Exit::Refused,
         CliError::Restore(err) => match err {
             RestoreError::NoPlan(_)
             | RestoreError::File { .. }
@@ -274,26 +294,43 @@ async fn restore_command(args: RestoreArgs) -> Result<Done, CliError> {
         output,
         target,
         clear_sidecars,
+        integrity_check,
     } = args;
+    let how = How {
+        target,
+        clear_sidecars_first: clear_sidecars,
+        integrity_check,
+    };
     match open(&replica)? {
-        Opened::Dir(store) => restore_on(&store, output, target, clear_sidecars).await,
-        Opened::S3(store) => restore_on(&store, output, target, clear_sidecars).await,
+        Opened::Dir(store) => restore_on(&store, output, how).await,
+        Opened::S3(store) => restore_on(&store, output, how).await,
     }
+}
+
+/// How a restore runs, apart from where from and where to.
+struct How {
+    target: RestoreTarget,
+    clear_sidecars_first: bool,
+    integrity_check: IntegrityCheck,
 }
 
 async fn restore_on<S: ObjectStore>(
     store: &S,
     output: PathBuf,
-    target: RestoreTarget,
-    clear_sidecars_first: bool,
+    how: How,
 ) -> Result<Done, CliError> {
+    let How {
+        target,
+        clear_sidecars_first,
+        integrity_check,
+    } = how;
     let cleared = if clear_sidecars_first {
         clear_sidecars(&output)?
     } else {
         Vec::new()
     };
     let attempt = async {
-        let sink = FileSink::create(&output)?;
+        let sink = FileSink::create(&output)?.with_integrity_check(integrity_check);
         let restored = restore(store, target, sink).await?;
         Ok::<_, CliError>(restored)
     }
@@ -303,6 +340,7 @@ async fn restore_on<S: ObjectStore>(
             output,
             restored,
             cleared,
+            integrity_check,
         }),
         Err(source) if cleared.is_empty() => Err(source),
         Err(source) => Err(CliError::AfterClearing {

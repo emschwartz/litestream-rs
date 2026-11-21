@@ -27,6 +27,7 @@ fn restore_latest_is_the_default_target() {
             output: "o".into(),
             target: RestoreTarget::Latest,
             clear_sidecars: false,
+            integrity_check: IntegrityCheck::Off,
         }))
     );
 }
@@ -262,6 +263,46 @@ fn bad_depth() {
     );
 }
 
+/// Go's `-integrity-check` words, and its default of none.
+#[test]
+fn integrity_check_takes_go_s_three_words() {
+    for (word, want) in [
+        ("none", IntegrityCheck::Off),
+        ("quick", IntegrityCheck::Quick),
+        ("full", IntegrityCheck::Full),
+    ] {
+        let Ok(Command::Restore(args)) = parsed(&format!(
+            "restore --replica r --output o --integrity-check {word}"
+        )) else {
+            panic!("{word} did not parse");
+        };
+        assert_eq!(args.integrity_check, want, "{word}");
+    }
+}
+
+#[test]
+fn bad_integrity_check() {
+    for word in ["Quick", "integrity", "off", "true", "quick_check"] {
+        assert_eq!(
+            usage(&format!(
+                "restore --replica r --output o --integrity-check {word}"
+            )),
+            UsageError::BadIntegrityCheck { value: word.into() },
+            "{word}"
+        );
+    }
+    assert_eq!(
+        usage("restore --replica r --output o --integrity-check"),
+        UsageError::MissingValue {
+            flag: "--integrity-check"
+        }
+    );
+    assert!(matches!(
+        usage("verify --replica r --integrity-check quick"),
+        UsageError::UnknownFlag { .. }
+    ));
+}
+
 #[test]
 fn a_url_replica_is_refused_by_scheme_only() {
     let https = usage("files --replica https://x/y");
@@ -467,6 +508,7 @@ fn every_flag_in_the_table_is_accepted_by_its_commands() {
                 "--txid" => "0000000000000001",
                 "--timestamp" => "2026-01-01T00:00:00Z",
                 "--depth" => "names",
+                "--integrity-check" => "full",
                 _ => "x",
             };
             let extra = spec.value.map_or(String::new(), |_| format!(" {value}"));

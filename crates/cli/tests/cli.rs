@@ -512,6 +512,8 @@ mod cli {
             "files",
             "--replica",
             "--clear-sidecars",
+            "--integrity-check",
+            "none|quick|full",
             "64",
         ] {
             assert!(help.stdout.contains(word), "{word}");
@@ -519,5 +521,129 @@ mod cli {
         let version = lsr(&["--version"]);
         assert_eq!(version.code, 0);
         assert!(version.stdout.starts_with("lsr "));
+    }
+
+    /// A WAL-mode SQLite database of 512-byte pages with a table and an index.
+    fn sqlite_pages() -> Vec<u8> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("source.db");
+        let conn = rusqlite::Connection::open(&path).expect("open");
+        conn.execute_batch(
+            "PRAGMA page_size = 512; PRAGMA journal_mode = WAL;
+             CREATE TABLE t (x TEXT); CREATE INDEX t_x ON t (x);",
+        )
+        .expect("schema");
+        for n in 0..200 {
+            conn.execute("INSERT INTO t VALUES (?1)", [format!("{n:0>40}")])
+                .expect("insert");
+        }
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .expect("checkpoint");
+        drop(conn);
+        fs::read(&path).expect("read")
+    }
+
+    /// A directory replica whose one snapshot holds exactly [db]'s pages:
+    /// valid LTX, whether or not the pages are a valid SQLite database.
+    fn replica_of(dir: &Path, db: &[u8]) {
+        use lsr_core::{FileKey, Level, ObjectStore, Upload};
+        use lsr_ltx::{Encoder, Header, HeaderFields, PageNo, PageSize, Txid, TxidRange};
+        let size = PageSize::new(512).expect("page size");
+        let one = TxidRange::single(Txid::new(1).expect("txid"));
+        let commit = u32::try_from(db.len() / 512).expect("pages");
+        let header = Header::new(HeaderFields {
+            tracked: false,
+            page_size: size,
+            commit,
+            txids: one,
+            timestamp: Timestamp::from_unix_millis(1000),
+            pre_apply: None,
+            wal: None,
+            node_id: 0,
+        })
+        .expect("header");
+        let mut encoder = Encoder::new(Vec::new(), header).expect("encoder");
+        for (n, page) in (1..=commit).zip(db.as_chunks::<512>().0) {
+            let pgno = PageNo::new(n, size).expect("pgno");
+            encoder.write_page(pgno, page).expect("page");
+        }
+        let bytes = encoder.finish(None).expect("finish").0;
+        fs::create_dir_all(dir.join("ltx")).expect("ltx dir");
+        let store = FsStore::new(dir);
+        block_on(async {
+            let key = FileKey::new(Level::SNAPSHOT, one);
+            let mut upload = store
+                .begin_upload(&key, Timestamp::from_unix_millis(1000))
+                .await
+                .expect("begin");
+            upload.write(&bytes).await.expect("write");
+            upload.commit().await.expect("commit");
+        });
+    }
+
+    fn restore_checked(replica: &Path, output: &Path, check: &str) -> Run {
+        lsr(&[
+            "restore",
+            "--replica",
+            path_str(replica),
+            "--output",
+            path_str(output),
+            "--integrity-check",
+            check,
+        ])
+    }
+
+    #[test]
+    fn integrity_check_publishes_a_valid_database_in_every_mode() {
+        let db = sqlite_pages();
+        let work = tempfile::tempdir().expect("tempdir");
+        let replica = work.path().join("replica");
+        replica_of(&replica, &db);
+        for (check, line) in [
+            ("none", None),
+            ("quick", Some("SQLite quick_check passed")),
+            ("full", Some("SQLite integrity_check passed")),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let output = dir.path().join("out.db");
+            let run = restore_checked(&replica, &output, check);
+            assert_eq!((run.code, run.stderr.as_str()), (0, ""), "{check}");
+            assert_eq!(fs::read(&output).expect("read"), db, "{check}");
+            assert_eq!(run.stdout.contains("passed"), line.is_some(), "{check}");
+            if let Some(line) = line {
+                assert!(run.stdout.contains(line), "{check}: {}", run.stdout);
+            }
+            assert_eq!(fs::read_dir(dir.path()).expect("dir").count(), 1, "{check}");
+        }
+    }
+
+    /// Valid LTX, broken b-tree: quick and full refuse with exit 2 (a refused
+    /// restore) naming SQLite's problem and leave nothing; none publishes it.
+    #[test]
+    fn integrity_check_refuses_a_corrupt_b_tree_with_exit_2() {
+        let mut db = sqlite_pages();
+        db[512..1024].fill(0xDE);
+        let work = tempfile::tempdir().expect("tempdir");
+        let replica = work.path().join("replica");
+        replica_of(&replica, &db);
+        for check in ["quick", "full"] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let output = dir.path().join("out.db");
+            let run = restore_checked(&replica, &output, check);
+            assert_eq!((run.code, run.stdout.as_str()), (2, ""), "{check}");
+            assert!(run.stderr.contains("page 2"), "{check}: {}", run.stderr);
+            assert!(
+                run.stderr.contains("nothing was published"),
+                "{check}: {}",
+                run.stderr
+            );
+            assert_eq!(run.stderr.lines().count(), 1, "{check}: {}", run.stderr);
+            assert!(dir_is_empty(dir.path()), "{check}");
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = dir.path().join("out.db");
+        let run = restore_checked(&replica, &output, "none");
+        assert_eq!(run.code, 0, "{}", run.stderr);
+        assert_eq!(fs::read(&output).expect("read"), db);
     }
 }

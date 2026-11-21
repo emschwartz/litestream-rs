@@ -180,7 +180,7 @@ A mismatch between Rust and Go on a valid replica is a defect in Rust until show
 **Produces:**
 - `Timestamp::parse_rfc3339(&str) -> Result<Self, TimestampParseError>` and `Display` as `YYYY-MM-DDTHH:MM:SS.mmmZ`: accepts `Z` or a numeric offset, 0 to 9 fractional digits truncated to milliseconds; refuses anything else by name (closed error enum). Hand-written, no date crate; a proptest round-trips every millisecond value in a wide range and checks leap-year days against a days-from-civil model written independently.
 - `args::parse(args: &[String]) -> Result<Command, UsageError>`, pure, no I/O, no process exit; `Command { Restore(RestoreArgs), Verify(VerifyArgs), Files(FilesArgs), Help, Version }`; no argument-parsing dependency. A flag given twice, an unknown flag, a missing value and two targets at once are each their own `UsageError` variant.
-  - `lsr restore --replica <dir> --output <path> [--txid <16 hex digits> | --timestamp <rfc3339>] [--clear-sidecars]`
+  - `lsr restore --replica <dir> --output <path> [--txid <16 hex digits> | --timestamp <rfc3339>] [--clear-sidecars] [--integrity-check none|quick|full]`
   - `lsr verify --replica <dir> [--depth names|contents] [--json]` (default `contents`)
   - `lsr files --replica <dir> [--json]`: every file by level: key, size, stored time.
 - `--replica` is a file replica directory (the one holding `ltx/`); the S3 form arrives with task 8, and the parser refuses a URL with "not supported yet" as its own variant.
@@ -478,7 +478,7 @@ Run 8c and 8e's MinIO suites and the spike questions against a throwaway Tigris 
 
 Task 8g (stamps without a HEAD per file) is its own section, after ruling A1 below.
 
-A later CLI step also adds an optional `PRAGMA integrity_check` on the scratch file before publish (needs the SQLite crate of phase 3).
+The optional SQLite check on the scratch file before publish is in: `FileSink::with_integrity_check` (`lsr_local::IntegrityCheck`: off, `PRAGMA quick_check` or `PRAGMA integrity_check`) and `lsr restore --integrity-check none|quick|full`, Go's flag and values with its default of none. It uses `rusqlite` directly on the immutable scratch rather than the phase 3 SQLite crate; a database SQLite finds invalid exits 2 and nothing is published.
 
 
 ### As-of ruling A1: a stray file before the instant is not a gap
