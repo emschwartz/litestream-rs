@@ -27,7 +27,7 @@ lsr-store-s3 = { path = "crates/store-s3" }
 lsr-wal = { path = "crates/wal" }
 base64 = { version = "0.23", default-features = false, features = ["alloc"] }
 crc = "3.4.0"
-jiff = { version = "0.2", default-features = false, features = ["std"] }
+jiff = { version = "1.0", default-features = false, features = ["std"] }
 libc = { version = "0.2.191", default-features = false }
 lz4_flex = { version = "0.14.2", default-features = false, features = ["std", "safe-decode", "safe-encode"] }
 md-5 = { version = "0.11", default-features = false }
@@ -37,8 +37,8 @@ native-tls = { version = "0.2.16", default-features = false }
 percent-encoding = { version = "2", default-features = false, features = ["alloc"] }
 # `rustls-no-provider`: the store hands reqwest a finished rustls config on ring (the provider
 # ureq already builds), so reqwest's own default provider, aws-lc-rs (a C build), stays out.
-reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
-rustls = { version = "0.23", default-features = false }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23.46", default-features = false }
 # The operating system's certificate verifier, used on macOS and Windows as Go uses it there.
 rustls-platform-verifier = { version = "0.7", default-features = false }
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
@@ -46,19 +46,19 @@ rusqlite = { version = "0.43", default-features = false, features = ["bundled"] 
 # The sidecar forwards signals to its -exec child and waits for it without reaping
 # (`kill`, `waitid`), which needs unsafe code otherwise. Already in the lock through tempfile.
 rustix = { version = "1.1.6", default-features = false, features = ["std", "process"] }
-rusty-s3 = { version = "0.11", default-features = false, features = ["rustcrypto", "full"] }
+rusty-s3 = { version = "0.12", default-features = false, features = ["rustcrypto", "full"] }
 saphyr-parser = { version = "0.3.4", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1", default-features = false, features = ["std"] }
 sha2 = { version = "0.11.1", default-features = false }
 # The CLI's `replicate` waits for SIGINT, SIGTERM and SIGHUP without unsafe code of its own.
-signal-hook = { version = "0.3.18", default-features = false, features = ["iterator"] }
+signal-hook = { version = "0.4.6", default-features = false, features = ["iterator"] }
 tempfile = { version = "3", default-features = false }
 thiserror = "2.0.21"
-tokio = { version = "1", default-features = false, features = ["rt"] }
+tokio = { version = "1.54.1", default-features = false, features = ["rt"] }
 toml = { version = "1.1", default-features = false, features = ["parse", "serde", "std"] }
-ureq = { version = "3", default-features = false, features = ["rustls"] }
-url = { version = "2", default-features = false, features = ["std"] }
+ureq = { version = "3.5.2", default-features = false, features = ["rustls"] }
+url = { version = "2.5.4", default-features = false, features = ["std"] }
 # Mozilla's roots, trusted when the system has none (as Go's x509roots/fallback, which litestream links).
 webpki-roots = { version = "1", default-features = false }
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
