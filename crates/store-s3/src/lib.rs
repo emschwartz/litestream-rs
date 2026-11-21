@@ -45,8 +45,9 @@ pub use chain::{
 };
 pub use classify::{S3Code, classify, classify_transport, is_range_past_end};
 pub use config::{
-    BucketName, ConfigError, DEFAULT_CONCURRENCY, DEFAULT_REGION, Endpoint, PartSize, Prefix,
-    Provider, Region, S3Config, UrlStyle,
+    BucketName, CREATION_TIME_CONCURRENCY, ConfigError, DEFAULT_CONCURRENCY, DEFAULT_REGION,
+    Endpoint, PartSize, Prefix, Provider, R2_CONCURRENCY, READ_CONCURRENCY, Region, S3Config,
+    UrlStyle,
 };
 pub use credentials::{S3Credentials, SecretString};
 #[cfg(feature = "testing")]

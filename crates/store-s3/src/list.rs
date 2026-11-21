@@ -26,6 +26,7 @@ use lsr_core::{
 use lsr_ltx::{Timestamp, TxidRange};
 
 use crate::classify::classify;
+use crate::config::READ_CONCURRENCY;
 use crate::request::HttpRequest;
 use crate::response::{ListPage, ListedFile, parse_list};
 use crate::store::Inner;
@@ -207,7 +208,7 @@ impl<T: Transport> Inner<T> {
                 Err(err) => failed.push((at, err)),
             }
         }
-        let answers = self.send_many(OP, requests);
+        let answers = self.send_many(OP, READ_CONCURRENCY, requests);
         for (at, answer) in sent_for.into_iter().zip(answers) {
             let Some(slot) = runs.get_mut(at) else {
                 continue;

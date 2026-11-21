@@ -15,10 +15,10 @@
 //!
 //! Memory is one chunk: the old chunk is dropped before the next read. A read
 //! told the object's listed size ([`LtxRead::sized`]) on a store whose
-//! [`ObjectStore::batch_width`] is above one also reads ahead: when it runs
+//! [`ObjectStore::batch_width`] for [`BatchKind::Reads`] is above one also reads ahead: when it runs
 //! out it asks for up to that many chunks in one [`ObjectStore::read_many`],
 //! never more than the listed size still needs, and feeds them to the decoder
-//! in order. Memory is then at most `batch_width` chunks. The chunks are held
+//! in order. Memory is then at most that many chunks. The chunks are held
 //! as fetched and reach the decoder exactly as sequential reads would, so the
 //! verification rule above is unchanged; a failed read in a batch is held in
 //! its place and reported only when the decoder gets there, so a fault is the
@@ -32,7 +32,7 @@ use std::mem;
 use lsr_ltx::{DbChecksum, DecodeError, Decoder, Event, Header, Txid, Verified};
 
 use crate::layout::FileKey;
-use crate::store::{ObjectStore, ReadAt, ReadLen, StoreError};
+use crate::store::{BatchKind, ObjectStore, ReadAt, ReadLen, StoreError};
 
 /// Where a verified file ends, for the file applied after it to be checked
 /// against: its last transaction and, when it tracks one, the database
@@ -245,7 +245,7 @@ impl LtxRead {
         self.chunk = Vec::new();
         self.pos = 0;
         if self.ahead.is_empty() {
-            let count = self.batch(store.batch_width().get());
+            let count = self.batch(store.batch_width(BatchKind::Reads).get());
             if count <= 1 {
                 let chunk = store.read(&self.key, self.offset, self.len).await?;
                 self.take(chunk);

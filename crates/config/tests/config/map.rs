@@ -520,7 +520,8 @@ fn no_effect_query_keys_are_noted() {
     assert_eq!(plan.notes().len(), 1, "{:#?}", plan.notes());
 }
 
-/// The replica's `concurrency` wins over the URL's; zero leaves the default.
+/// The replica's `concurrency` wins over the URL's; zero leaves Go's default
+/// of 5 parts (R2 2, see `S3Config::concurrency`).
 #[test]
 fn concurrency_reaches_the_store_config() {
     let of = |text: &str| match planned(text).dbs()[0].replica() {
@@ -528,9 +529,9 @@ fn concurrency_reaches_the_store_config() {
         other @ ReplicaPlan::File(_) => panic!("not S3: {other:?}"),
     };
     let base = "dbs:\n  - path: /data/app.db\n    replica:\n      url: s3://b/p";
-    assert_eq!(of(&format!("{base}\n")), 8);
+    assert_eq!(of(&format!("{base}\n")), 5);
     assert_eq!(of(&format!("{base}?concurrency=3\n")), 3);
-    assert_eq!(of(&format!("{base}?concurrency=0\n")), 8);
+    assert_eq!(of(&format!("{base}?concurrency=0\n")), 5);
     assert_eq!(
         of(&format!("{base}?concurrency=3\n      concurrency: 5\n")),
         5

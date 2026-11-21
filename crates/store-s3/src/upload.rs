@@ -4,7 +4,7 @@
 //! object that ends below the part size is sent as one PUT, as Go does (rc.go:814).
 //! The write that fills the buffer starts a multipart upload (the stamp rides on
 //! CreateMultipartUpload), and each full buffer becomes the next part. Full
-//! parts wait until the store's concurrency of them is ready (the buffer
+//! parts wait until the `concurrency` setting's worth of them is ready (the buffer
 //! filling counts as one), then go out as one batch, so memory is at most
 //! that many parts. With a concurrency of one each part is sent by the write
 //! that filled it, as before. A failed part fails the upload (at the write or

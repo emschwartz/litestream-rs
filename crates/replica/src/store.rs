@@ -16,8 +16,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use lsr_core::{
-    Clock, FileInfo, FileKey, Level, ListAt, Listing, ObjectStore, PageLimit, ReadAt, ReadLen,
-    StoreError, StoredStamp, Upload,
+    BatchKind, Clock, FileInfo, FileKey, Level, ListAt, Listing, ObjectStore, PageLimit, ReadAt,
+    ReadLen, StoreError, StoredStamp, Upload,
 };
 use lsr_ltx::{Timestamp, TxidRange};
 
@@ -70,7 +70,7 @@ pub trait DynStore: Send + Sync {
     fn delete_boxed<'a>(&'a self, keys: &'a [FileKey]) -> BoxFuture<'a, Result<(), StoreError>>;
 
     /// [`ObjectStore::batch_width`].
-    fn batch_width_dyn(&self) -> NonZeroUsize;
+    fn batch_width_dyn(&self, kind: BatchKind) -> NonZeroUsize;
 
     /// [`ObjectStore::read_many`].
     fn read_many_boxed<'a>(
@@ -170,8 +170,8 @@ where
         Box::pin(self.delete(keys))
     }
 
-    fn batch_width_dyn(&self) -> NonZeroUsize {
-        self.batch_width()
+    fn batch_width_dyn(&self, kind: BatchKind) -> NonZeroUsize {
+        self.batch_width(kind)
     }
 
     fn read_many_boxed<'a>(
@@ -262,8 +262,8 @@ impl ObjectStore for Erased<'_> {
         self.0.delete_boxed(keys).await
     }
 
-    fn batch_width(&self) -> NonZeroUsize {
-        self.0.batch_width_dyn()
+    fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {
+        self.0.batch_width_dyn(kind)
     }
 
     async fn read_many(&self, reads: &[ReadAt]) -> Vec<Result<Vec<u8>, StoreError>> {
@@ -475,8 +475,8 @@ impl ObjectStore for Metered {
         metered(&*self.clock, &self.meters.delete, call).await
     }
 
-    fn batch_width(&self) -> NonZeroUsize {
-        self.store.batch_width_dyn()
+    fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {
+        self.store.batch_width_dyn(kind)
     }
 
     /// Each read of the batch counts as one call, timed as the whole batch:

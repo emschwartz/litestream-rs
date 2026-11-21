@@ -14,9 +14,9 @@
 //! **Query.** `endpoint`, `region`, `forcePathStyle` (and `force-path-style`),
 //! `partSize` (`part-size`) and `concurrency` are honoured; `skipVerify=true` and
 //! a `storageClass` are refused; the signing and MD5 keys are accepted with a
-//! note, since they change nothing in v1. Go's `concurrency` is the parts of one
-//! upload in flight; here it bounds every batch of requests the store sends
-//! (parts, reads ahead, listing levels, stamps), and zero leaves the default. A key Go does not read is refused.
+//! note, since they change nothing in v1. `concurrency` is Go's multipart-parts
+//! setting: the parts of one upload in flight. Zero leaves the default (5,
+//! R2 2). Reads, listings and creation-time HEADs have fixed limits and no key. A key Go does not read is refused.
 //!
 //! **Precedence.** [`S3Overrides`] (a replica entry's keys, or the command line's
 //! flags) win over the URL's parts and query. Path style follows Go: on when an
@@ -102,7 +102,7 @@ pub struct S3Overrides<'a> {
     pub force_path_style: Option<bool>,
     /// `part-size`, in bytes.
     pub part_size: Option<u64>,
-    /// `concurrency`: requests in flight per batch; zero is unset.
+    /// `concurrency`: multipart parts in flight (Go's setting); zero is unset.
     pub concurrency: Option<u64>,
 }
 

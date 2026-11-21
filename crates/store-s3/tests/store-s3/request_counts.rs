@@ -715,23 +715,31 @@ mod cases {
         assert_eq!(counts.list, 9 + 10);
     }
 
+    /// A transport that sends every batch one request at a time (the trait's
+    /// default), the baseline side-by-side sending is compared with.
+    struct OneByOne(Shared);
+
+    impl Transport for OneByOne {
+        fn send(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
+            self.0.send(request)
+        }
+    }
+
     /// Listing the levels side by side changes nothing but the wall time: the
-    /// same inventory from the same requests at concurrency 1 and 8.
+    /// same inventory from the same requests as one at a time.
     #[test]
     fn levels_listed_at_once_give_the_same_inventory() {
         let rig = Rig::build();
-        let at = |width: usize| {
-            let store = S3Store::with_transport(
-                config().with_concurrency(std::num::NonZeroUsize::new(width).unwrap()),
-                credentials(),
-                Shared(Arc::clone(&rig.wire)),
-                FakeClock::new(now()),
-            )
-            .unwrap();
-            rig.counted(|| block_on(Inventory::load(&store)).unwrap())
-        };
-        let (one, one_counts) = at(1);
-        let (eight, eight_counts) = at(8);
+        let (eight, eight_counts) =
+            rig.counted(|| block_on(Inventory::load(&rig.store())).unwrap());
+        let sequential = S3Store::with_transport(
+            config(),
+            credentials(),
+            OneByOne(Shared(Arc::clone(&rig.wire))),
+            FakeClock::new(now()),
+        )
+        .unwrap();
+        let (one, one_counts) = rig.counted(|| block_on(Inventory::load(&sequential)).unwrap());
         assert_eq!(one, eight);
         assert_eq!(one_counts, eight_counts);
     }

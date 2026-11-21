@@ -32,7 +32,8 @@ use crate::env::{Entropy, Sleeper};
 use crate::layout::StoredStamp;
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::store::{
-    CorruptCause, ListAt, Listing, ObjectStore, PageLimit, ReadAt, ReadLen, StoreError, Upload,
+    BatchKind, CorruptCause, ListAt, Listing, ObjectStore, PageLimit, ReadAt, ReadLen, StoreError,
+    Upload,
 };
 
 /// How a [`StoreError`] should be handled.
@@ -313,8 +314,8 @@ impl<S: ObjectStore, P: Sleeper, E: Entropy> ObjectStore for Retrying<S, P, E> {
         core.run(|| core.inner.delete(keys)).await
     }
 
-    fn batch_width(&self) -> NonZeroUsize {
-        self.core.inner.batch_width()
+    fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {
+        self.core.inner.batch_width(kind)
     }
 
     /// One batch through the inner store, then each failed stamp read retried

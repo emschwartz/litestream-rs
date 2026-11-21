@@ -12,7 +12,7 @@ use lsr_ltx::{Txid, TxidRange};
 use thiserror::Error;
 
 use crate::layout::{FileInfo, FileKey, Level, ListedStamp, cmp_range};
-use crate::store::{ListAt, ObjectStore, PageLimit, StoreError};
+use crate::store::{BatchKind, ListAt, ObjectStore, PageLimit, StoreError};
 
 /// The page size a full scan asks for. A backend that proves "more follows"
 /// with one key past the page (S3 caps a request at [`PageLimit::MAX`] keys)
@@ -71,7 +71,7 @@ pub struct Inventory {
 impl Inventory {
     /// Lists every level to the end. The only async code in the planner.
     ///
-    /// Up to the store's [`ObjectStore::batch_width`] levels are listed at
+    /// Up to the store's [`BatchKind::Lists`] width of levels are listed at
     /// once: each round asks for the next page of the first that many levels
     /// still going, in level order, so at width one this is level 0 to the
     /// end, then level 1, as one loop would do it.
@@ -82,7 +82,7 @@ impl Inventory {
     pub async fn load<S: ObjectStore>(store: &S) -> Result<Self, InventoryError> {
         let mut files = Vec::new();
         let mut skipped = BTreeMap::new();
-        let width = store.batch_width().get();
+        let width = store.batch_width(BatchKind::Lists).get();
         let mut going: Vec<ListAt> = Level::ALL
             .iter()
             .map(|&level| ListAt { level, after: None })
@@ -134,12 +134,12 @@ impl Inventory {
 
     /// The same inventory with every file's stamp read from the store, one
     /// stamp (a HEAD on S3) per file, so each is `Stored` afterwards. Reads go
-    /// out `batch_width` at a time through [`ObjectStore::stamp_many`].
+    /// out [`BatchKind::Stamps`] width at a time through [`ObjectStore::stamp_many`].
     ///
     /// # Errors
     /// The first failed read in key order; never a partly stamped inventory.
     pub async fn stamped<S: ObjectStore>(mut self, store: &S) -> Result<Self, StoreError> {
-        let width = store.batch_width().get();
+        let width = store.batch_width(BatchKind::Stamps).get();
         for files in self.files.chunks_mut(width) {
             let read = store.stamp_many(files).await;
             if read.len() != files.len() {

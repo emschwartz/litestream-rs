@@ -7,8 +7,12 @@
 //!
 //! Batches: a call that needs several independent requests (the parts of an
 //! upload, reads ahead, the levels of a listing, a set of stamps) builds them
-//! all, hands them to [`Transport::send_many`] with the configured
-//! concurrency, and judges each response alone, exactly as a single request.
+//! all, hands them to [`Transport::send_many`] with the limit of their kind,
+//! and judges each response alone, exactly as a single request. The kinds are
+//! limited apart, as Go does: multipart parts by the `concurrency` setting
+//! (provider defaults in [`S3Config::concurrency`]), HEADs by
+//! `CREATION_TIME_CONCURRENCY`, ranged reads and listing pages by
+//! `READ_CONCURRENCY`.
 //!
 //! Deadlines: the transport bounds one request. A call that sends several (a
 //! listing, a large delete) also checks the `Clock` between them against four
@@ -20,13 +24,15 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lsr_core::{
-    Clock, FileInfo, FileKey, Level, ListAt, ListedStamp, Listing, ObjectStore, PageLimit, ReadAt,
-    ReadLen, StampOrigin, StoreError, StoreOp, StoredStamp,
+    BatchKind, Clock, FileInfo, FileKey, Level, ListAt, ListedStamp, Listing, ObjectStore,
+    PageLimit, ReadAt, ReadLen, StampOrigin, StoreError, StoreOp, StoredStamp,
 };
 use lsr_ltx::{Timestamp, TxidRange};
 
 use crate::classify::{classify, classify_transport, is_range_past_end};
-use crate::config::{ConfigError, PartSize, Prefix, S3Config};
+use crate::config::{
+    CREATION_TIME_CONCURRENCY, ConfigError, PartSize, Prefix, READ_CONCURRENCY, S3Config,
+};
 use crate::credentials::S3Credentials;
 use crate::orphans::Orphans;
 use crate::request::{HttpRequest, MAX_DELETE_KEYS, RequestBuilder, RequestError};
@@ -226,8 +232,11 @@ impl<T: Transport> ObjectStore for S3Store<T> {
         self.inner.delete(keys)
     }
 
-    fn batch_width(&self) -> NonZeroUsize {
-        self.inner.concurrency
+    fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {
+        match kind {
+            BatchKind::Reads | BatchKind::Lists => READ_CONCURRENCY,
+            BatchKind::Stamps => CREATION_TIME_CONCURRENCY,
+        }
     }
 
     async fn read_many(&self, reads: &[ReadAt]) -> Vec<Result<Vec<u8>, StoreError>> {
@@ -318,15 +327,16 @@ impl<T: Transport> Inner<T> {
             .map_err(|err| classify_transport(op, &err))
     }
 
-    /// Sends a batch with the configured concurrency; one result per request,
-    /// in order, whatever each status.
+    /// Sends a batch with at most `limit` requests in flight; one result per
+    /// request, in order, whatever each status.
     pub(crate) fn send_many(
         &self,
         op: StoreOp,
+        limit: NonZeroUsize,
         requests: Vec<HttpRequest>,
     ) -> Vec<Result<HttpResponse, StoreError>> {
         self.transport
-            .send_many(requests, self.concurrency)
+            .send_many(requests, limit)
             .into_iter()
             .map(|sent| sent.map_err(|err| classify_transport(op, &err)))
             .collect()
@@ -383,6 +393,7 @@ impl<T: Transport> Inner<T> {
         let op = StoreOp::Read;
         self.batch(
             op,
+            READ_CONCURRENCY,
             reads.iter().copied(),
             |at| {
                 let request =
@@ -400,6 +411,7 @@ impl<T: Transport> Inner<T> {
     pub(crate) fn batch<I, J, R>(
         &self,
         op: StoreOp,
+        limit: NonZeroUsize,
         items: impl IntoIterator<Item = I>,
         mut build: impl FnMut(I) -> Result<(HttpRequest, J), StoreError>,
         judge: impl Fn(J, &HttpResponse) -> Result<R, StoreError>,
@@ -415,7 +427,7 @@ impl<T: Transport> Inner<T> {
                 Err(err) => contexts.push(Err(err)),
             }
         }
-        let mut sent = self.send_many(op, requests).into_iter();
+        let mut sent = self.send_many(op, limit, requests).into_iter();
         contexts
             .into_iter()
             .map(|context| {
@@ -472,6 +484,7 @@ impl<T: Transport> Inner<T> {
         let op = StoreOp::Read;
         let results = self.batch(
             op,
+            CREATION_TIME_CONCURRENCY,
             files.iter(),
             |file| Ok((self.request(op, |b, now| b.head(now, &file.key))?, file)),
             |file, response| Self::judge_head(file, response),

@@ -447,8 +447,8 @@ impl S3Settings {
     pub fn part_size(&self) -> Option<u64> {
         self.part_size
     }
-    /// `concurrency`: requests in flight per batch. Zero or less is unset, as
-    /// Go then keeps its default.
+    /// `concurrency`: multipart parts in flight, as in Go. Zero or less is
+    /// unset, as Go then keeps its default.
     #[must_use]
     pub fn concurrency(&self) -> Option<u64> {
         self.concurrency

@@ -112,8 +112,8 @@ pub use stamps::{
     resolve_counted,
 };
 pub use store::{
-    CorruptCause, ListAt, Listing, ObjectStore, PageLimit, PartNumber, ReadAt, ReadLen, StoreError,
-    StoreOp, Upload, build_listing,
+    BatchKind, CorruptCause, ListAt, Listing, ObjectStore, PageLimit, PartNumber, ReadAt, ReadLen,
+    StoreError, StoreOp, Upload, build_listing,
 };
 pub use sync::{
     PageFrom, Step, StepEnd, StepFailed, SyncConfig, Synced, clamp, header_fields, plan_pages,

@@ -6,7 +6,7 @@
 //! exact stamp it needs next ([`Need`]), optionally followed by the files it
 //! expects to need after it. [`resolve`] reads the needed stamp, plus as many
 //! of those expected ones as the store runs at once
-//! ([`ObjectStore::batch_width`]) in one [`ObjectStore::stamp_many`], and drops
+//! ([`ObjectStore::batch_width`] of [`BatchKind::Stamps`]) in one [`ObjectStore::stamp_many`], and drops
 //! the collected [`Stamps`] with the decision: nothing is kept across
 //! listings, attempts or ticks, so this is a ledger and not a cache. At width
 //! one only the needed stamp is read, one call per request, as before. A read
@@ -22,7 +22,7 @@ use std::collections::btree_map::Entry;
 use thiserror::Error;
 
 use crate::layout::{FileInfo, FileKey, ListedStamp, StoredStamp};
-use crate::store::{ObjectStore, StoreError};
+use crate::store::{BatchKind, ObjectStore, StoreError};
 
 /// The exact stamps resolved during one decision.
 #[derive(Clone, Debug, Default)]
@@ -158,7 +158,7 @@ pub enum ResolveError {
 }
 
 /// Drives `step` to completion, answering each request with the needed stamp
-/// and up to `batch_width - 1` of the ones it names ahead (see the module docs).
+/// and up to the stamps width minus one of the ones it names ahead (see the module docs).
 ///
 /// # Errors
 /// The store's error from the first failed read of a needed stamp, or
@@ -183,7 +183,7 @@ pub async fn resolve_counted<S: ObjectStore, P: Step>(
     stamps_read: &mut u64,
 ) -> Result<P::Output, ResolveError> {
     let mut stamps = Stamps::default();
-    let width = store.batch_width().get();
+    let width = store.batch_width(BatchKind::Stamps).get();
     loop {
         let need = match step.advance(&stamps) {
             Resolve::Done(value) => return Ok(value),
@@ -391,7 +391,7 @@ mod tests {
             self.inner.delete(keys).await
         }
 
-        fn batch_width(&self) -> std::num::NonZeroUsize {
+        fn batch_width(&self, _: BatchKind) -> std::num::NonZeroUsize {
             std::num::NonZeroUsize::new(self.width).unwrap()
         }
 

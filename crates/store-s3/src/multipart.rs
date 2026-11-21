@@ -7,7 +7,7 @@
 //! and MinIO; it is checked for that shape and the part count only, because
 //! the part digests it is made of were each verified already.
 //!
-//! Parts go out as batches of up to the store's concurrency
+//! Parts go out as batches of up to the `concurrency` setting
 //! ([`Transport::send_many`]); each part is judged alone, exactly as when
 //! parts went one at a time, and the ETags are kept in part order.
 
@@ -98,6 +98,7 @@ impl<T: Transport> Inner<T> {
             .map(|(at, body)| (first.saturating_add(at), body));
         self.batch(
             op,
+            self.concurrency,
             numbered,
             |(n, body)| {
                 let number = number(n)?;

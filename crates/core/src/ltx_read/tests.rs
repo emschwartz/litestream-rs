@@ -270,7 +270,7 @@ impl ObjectStore for Wide {
         self.inner.delete(keys).await
     }
 
-    fn batch_width(&self) -> std::num::NonZeroUsize {
+    fn batch_width(&self, _: BatchKind) -> std::num::NonZeroUsize {
         std::num::NonZeroUsize::new(self.width).unwrap()
     }
 

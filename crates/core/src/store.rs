@@ -23,7 +23,8 @@
 //!   each item exactly as the single method would, one result per item in
 //!   order. Their defaults call the single method item by item, so a store
 //!   that is not concurrent (the simulator's, a directory) needs nothing.
-//!   [`ObjectStore::batch_width`] says how many items a store runs at once;
+//!   [`ObjectStore::batch_width`] says how many items of a [`BatchKind`] a
+//!   store runs at once (a store may allow more HEADs than ranged reads);
 //!   callers size their batches by it, so at width one nothing is fetched
 //!   ahead of need and the call sequence is the one sequential code makes.
 
@@ -353,6 +354,18 @@ pub struct ListAt {
     pub after: Option<TxidRange>,
 }
 
+/// Which batch method a width is asked for. A store limits each kind apart
+/// because a backend's limits differ per kind of request.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BatchKind {
+    /// [`ObjectStore::read_many`].
+    Reads,
+    /// [`ObjectStore::list_many`].
+    Lists,
+    /// [`ObjectStore::stamp_many`].
+    Stamps,
+}
+
 /// A backend holding a replica's LTX objects, keyed by [`FileKey`].
 ///
 /// Futures are `Send` and name no runtime; a backend may complete them
@@ -406,10 +419,11 @@ pub trait ObjectStore: Send + Sync {
     /// retried delete converges.
     fn delete(&self, keys: &[FileKey]) -> impl Future<Output = Result<(), StoreError>> + Send;
 
-    /// How many items of a batch this store runs at once. A caller asks for
-    /// at most this many at a time, so its memory is this many responses.
-    /// One, the default, means the batch methods are sequential.
-    fn batch_width(&self) -> NonZeroUsize {
+    /// How many items of a batch of `kind` this store runs at once. A caller
+    /// asks for at most this many at a time, so its memory is this many
+    /// responses. One, the default, means the batch methods are sequential.
+    fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {
+        let _ = kind;
         NonZeroUsize::MIN
     }
 
