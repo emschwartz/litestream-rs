@@ -110,11 +110,19 @@ fn go_vfs_reads_rust_replica() {
                 panic!("{name} refused a Rust replica: {detail}")
             }
             (Era::Frames, VfsRead::Refused { detail }) => {
-                // The refusal is the page encoding (an LZ4 frame decoder handed a block),
-                // the same one this build gives Go v0.5.16's own replicas.
+                // What matters is that a build predating block-encoded pages refuses
+                // instead of reading wrong data. The reason is the page encoding (an
+                // LZ4 frame decoder handed a block), the same one these builds give Go
+                // v0.5.16's own replicas; v0.5.7 to v0.5.15 log it, and v0.5.3 to v0.5.6
+                // refuse with only "SQL logic error" and no such log line (issue #30),
+                // so the log line is reported, not required.
                 let log = std::fs::read_to_string(scratch.join("vfs.log")).unwrap_or_default();
-                assert!(log.contains("lz4: bad magic number"), "{name}: {detail}");
-                println!("{name} on a Rust replica: refused, {detail}");
+                let why = if log.contains("lz4: bad magic number") {
+                    "lz4 frame decoder"
+                } else {
+                    "no reason logged"
+                };
+                println!("{name} on a Rust replica: refused ({why}), {detail}");
             }
             (Era::Frames, VfsRead::Read(_)) => panic!("{name} read a block-encoded replica"),
         }
