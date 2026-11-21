@@ -511,7 +511,7 @@
 "TestDB_CloseDeletesMetrics" = { reason = "Go-only: Prometheus collectors. The library reports through EventSink events and the health() handle (docs/PLAN.md phase 3, public API); a host exports its own metrics." }
 "TestDB_ClosePreservesSharedMetrics" = { reason = "Go-only: Prometheus collectors. The library reports through EventSink events and the health() handle (docs/PLAN.md phase 3, public API); a host exports its own metrics." }
 "TestDB_ClosePreservesSharedRetentionMetrics" = { reason = "Go-only: Prometheus collectors. The library reports through EventSink events and the health() handle (docs/PLAN.md phase 3, public API); a host exports its own metrics." }
-"TestDB_CloseWithCanceledContextStillCleansUp" = { missing = "Dropping a replicator, or a final_sync whose deadline has already passed, still ends the read transaction and closes both connections (phase 3 public API and SQLite backend, not built yet)." }
+"TestDB_CloseWithCanceledContextStillCleansUp" = { counterpart = ["lsr-replica::replicator::dropping_the_last_handle_drains_and_closes", "lsr-replica::replicator::a_zero_deadline_reports_what_was_left_and_the_next_start_continues"] }
 "TestDB_ConcurrentMetricOwners" = { reason = "Go-only: Prometheus collectors. The library reports through EventSink events and the health() handle (docs/PLAN.md phase 3, public API); a host exports its own metrics." }
 "TestDB_DiskFullGaugeResetsOnOtherSyncErrors" = { reason = "Go-only: Prometheus collectors. The library reports through EventSink events and the health() handle (docs/PLAN.md phase 3, public API); a host exports its own metrics." }
 "TestDB_ExceedsTruncateThreshold" = { counterpart = "lsr-core::checkpoint::tests::decide_follows_the_ladder" }
@@ -553,7 +553,7 @@
 "TestIsDiskFullError" = { counterpart = ["lsr-core::fault::tests::from_staging_names_the_local_fault_for_every_store_error", "lsr-core::store::tests::io_errors_classify_without_inventing_not_found"] }
 "TestIsSQLiteBusyError" = { counterpart = ["lsr-core::checkpoint::tests::a_busy_passive_reports_busy", "lsr-core::fault::tests::sqlite_busy_retries"] }
 "TestReplicaMonitor_DrainsLimitedBacklogWithoutWaitingForInterval" = { counterpart = "lsr-core::upload::tests::files_per_tick_is_honoured_and_asks_to_step_again" }
-"TestReplicaMonitor_IdleRecordsSyncHealth" = { missing = "An idle replicator's health() keeps its last-sync time current when there is nothing to upload (phase 3 public API, not built yet)." }
+"TestReplicaMonitor_IdleRecordsSyncHealth" = { counterpart = "lsr-replica::replicator::an_idle_replicator_keeps_its_health_current" }
 "TestReplicaMonitor_RecoversFromPositionError" = { counterpart = ["lsr-core::actor::tests::a_failed_boot_waits_without_spinning", "lsr-core::actor::tests::retry_backs_off_per_lane"] }
 "TestReplica_LockSyncDoesNotStarveQueuedWaiter" = { reason = "Go-only: fairness and context handling of Go mutexes shared between goroutines (the exec, sync and checkpoint locks). The Rust engine is one actor driven tick by tick with no shared locks (docs/PLAN.md section 3)." }
 "TestReplica_SyncHonorsContextWaitingForSyncLock" = { reason = "Go-only: context.Context cancellation. The Rust core is sans-IO and advances one tick at a time (docs/PLAN.md section 2, goal 5); there is no context to cancel, and shutdown is final_sync with a deadline." }
@@ -578,7 +578,7 @@
 "TestDB_Close_SyncRetry/RespectsContextCancellation" = { reason = "Go-only: context.Context cancellation. The Rust core is sans-IO and advances one tick at a time (docs/PLAN.md section 2, goal 5); there is no context to cancel, and shutdown is final_sync with a deadline." }
 "TestDB_Close_SyncRetry/SucceedsAfterTransientFailure" = { counterpart = "lsr-core::actor::tests::a_drain_retries_a_transient_upload_and_drains" }
 "TestDB_Close_SyncRetry/SuccessFirstAttempt" = { counterpart = "lsr-core::actor::tests::drain_finishes_uploads" }
-"TestDB_Close_SyncRetry/ZeroTimeoutNoRetry" = { missing = "final_sync with a deadline already passed and work pending returns DeadlineReached with both offsets at once, making no retry (phase 3 public API, not built yet)." }
+"TestDB_Close_SyncRetry/ZeroTimeoutNoRetry" = { counterpart = ["lsr-replica::replicator::a_zero_deadline_reports_what_was_left_and_the_next_start_continues", "lsr-core::actor::tests::a_zero_deadline_reports_unsynced_bytes_and_does_no_work"] }
 
 ["litestream/db_test.go"]
 "TestCompaction_PreservesLastTimestamp" = { counterpart = "lsr-core::compact::tests::the_output_header_takes_the_first_and_last_inputs_as_go_does" }
@@ -622,14 +622,14 @@
 "TestDB_Sync/OverwritePrevPosition" = { counterpart = ["lsr-core::recover::tests::rule_8_a_frame_before_the_end_that_does_not_verify_is_prev_frame_mismatch", "lsr-core::recover::tests::go_parity_an_unknown_salt_snapshots"] }
 "TestDB_Sync/TruncatePageN" = { counterpart = "lsr-core::checkpoint::tests::a_failed_passive_at_the_threshold_goes_to_truncate" }
 "TestDB_SyncAfterVacuum" = { counterpart = ["lsr-wal::wal::pagemap::shrinking_drops_pages_above_the_new_size_including_earlier_ones", "lsr-compat::live_matches_sim::shrink_commits_a_smaller_database"] }
-"TestDB_SyncAndWait" = { missing = "final_sync(deadline) returns Drained once every committed transaction is on the replica (Go's SyncAndWait). Phase 3's public API, not built yet; the actor's drain is covered by lsr-core actor::tests::drain_finishes_uploads." }
+"TestDB_SyncAndWait" = { counterpart = "lsr-replica::replicator::start_returns_with_the_pin_held_and_stop_drains_every_commit" }
 "TestDB_SyncAndWait/NoReplica" = { reason = "Go-only: a DB with no replica attached. A Rust replicator cannot be built without its store, so the state does not exist." }
-"TestDB_SyncAndWait/OK" = { missing = "final_sync(deadline) returns Drained once every committed transaction is on the replica (Go's SyncAndWait). Phase 3's public API, not built yet; the actor's drain is covered by lsr-core actor::tests::drain_finishes_uploads." }
-"TestDB_SyncStatus" = { missing = "A health() report comparing the local committed txid with the replica's (Go's SyncStatus: before any sync, after a local sync only, after a full sync, after new writes). The health handle is phase 3's public API, not built yet." }
-"TestDB_SyncStatus/AfterDBSyncOnly" = { missing = "A health() report comparing the local committed txid with the replica's (Go's SyncStatus: before any sync, after a local sync only, after a full sync, after new writes). The health handle is phase 3's public API, not built yet." }
-"TestDB_SyncStatus/AfterFullSync" = { missing = "A health() report comparing the local committed txid with the replica's (Go's SyncStatus: before any sync, after a local sync only, after a full sync, after new writes). The health handle is phase 3's public API, not built yet." }
-"TestDB_SyncStatus/AfterNewWrites" = { missing = "A health() report comparing the local committed txid with the replica's (Go's SyncStatus: before any sync, after a local sync only, after a full sync, after new writes). The health handle is phase 3's public API, not built yet." }
-"TestDB_SyncStatus/BeforeSync" = { missing = "A health() report comparing the local committed txid with the replica's (Go's SyncStatus: before any sync, after a local sync only, after a full sync, after new writes). The health handle is phase 3's public API, not built yet." }
+"TestDB_SyncAndWait/OK" = { counterpart = "lsr-replica::replicator::start_returns_with_the_pin_held_and_stop_drains_every_commit" }
+"TestDB_SyncStatus" = { counterpart = "lsr-replica::replicator::health_compares_the_local_and_replica_positions" }
+"TestDB_SyncStatus/AfterDBSyncOnly" = { counterpart = "lsr-replica::replicator::health_compares_the_local_and_replica_positions" }
+"TestDB_SyncStatus/AfterFullSync" = { counterpart = "lsr-replica::replicator::health_compares_the_local_and_replica_positions" }
+"TestDB_SyncStatus/AfterNewWrites" = { counterpart = "lsr-replica::replicator::health_compares_the_local_and_replica_positions" }
+"TestDB_SyncStatus/BeforeSync" = { counterpart = "lsr-replica::replicator::health_compares_the_local_and_replica_positions" }
 "TestDB_SyncStatus/CancelledContext" = { reason = "Go-only: context.Context cancellation. The Rust core is sans-IO and advances one tick at a time (docs/PLAN.md section 2, goal 5); there is no context to cancel, and shutdown is final_sync with a deadline." }
 "TestDB_SyncStatus/NoReplica" = { reason = "Go-only: a DB with no replica attached. A Rust replicator cannot be built without its store, so the state does not exist." }
 "TestDB_WALPath" = { reason = "Go-only: a path accessor on the Go DB type. Rust takes paths from the caller and names no database path of its own." }
