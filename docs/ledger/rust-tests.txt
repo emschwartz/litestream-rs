@@ -50,6 +50,7 @@ lsr-cli::sidecar sidecar::exec_lines_go_would_misread_are_refused
 lsr-cli::sidecar sidecar::health_is_200_while_degraded_and_503_once_stopped
 lsr-cli::sidecar sidecar::metrics_and_health_are_served_on_exactly_the_given_address
 lsr-cli::sidecar sidecar::the_child_runs_after_the_pin_and_its_exit_drains_with_its_code
+lsr-cli::soak_tigris soak::lsr_replicate_soaks_against_tigris
 lsr-cli::tigris tigris::cleanup_aborts_an_upload_left_open
 lsr-cli::tigris tigris::go_written_tigris_replica_restores_the_same_in_rust_and_go
 lsr-cli::bin/lsr args::tests::a_flag_overrides_the_url_query
