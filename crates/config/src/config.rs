@@ -333,6 +333,17 @@ pub enum ReplicaKind {
     File,
 }
 
+impl ReplicaKind {
+    /// Go's `ReplicaClient.Type()` word, which its JSON output and the `type` key use.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::S3 => "s3",
+        }
+    }
+}
+
 /// A replica, top-level settings copied in where it does not set them (Go's `SetDefaults`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReplicaConfig {

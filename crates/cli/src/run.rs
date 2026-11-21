@@ -27,6 +27,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use lsr_config::ReplicaKind;
 use lsr_core::{
     AsOfInside, AsOfPlanner, ContiguousChain, Depth, Inventory, InventoryError, KeyTarget,
     ObjectStore, PlanOutcome, Report, ResolveError, RestoreError, RestoreOptions, RestoreTarget,
@@ -103,26 +104,6 @@ impl Exit {
             Self::ExecFailed => {
                 "replicate -exec: the run failed, as Go exits 1 (the child exited non-zero, died by a signal outside a shutdown, was killed or did not start, or a database did not start or drain); the child's own code is in the log"
             }
-        }
-    }
-}
-
-/// The kind of store a replica lives in, as Go names it in its JSON.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ReplicaKind {
-    /// A directory.
-    File,
-    /// A bucket prefix.
-    S3,
-}
-
-impl ReplicaKind {
-    /// Go's `ReplicaClient.Type()` word.
-    #[must_use]
-    pub const fn word(self) -> &'static str {
-        match self {
-            Self::File => "file",
-            Self::S3 => "s3",
         }
     }
 }
