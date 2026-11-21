@@ -335,6 +335,9 @@ pub struct Actor {
     verify_pin: Option<Txid>,
     /// The live database's pages a scheduled verify asked for.
     live: Live,
+    /// An operator asked for a snapshot that has not been staged yet. Kept
+    /// beside `pending`, which a rebuild resets and another cause may hold.
+    snapshot_asked: bool,
     /// What the host's checkpoints did between reads.
     host: HostObserver,
 }
@@ -456,6 +459,7 @@ impl Actor {
             lane_pin: None,
             verify_pin: None,
             live: Live::Idle,
+            snapshot_asked: false,
             host: HostObserver::default(),
         }
     }
@@ -571,6 +575,7 @@ impl Actor {
     /// Makes the next sync a snapshot (an operator asked). A cause already
     /// pending is kept.
     pub fn request_snapshot(&mut self) {
+        self.snapshot_asked = true;
         self.pending.get_or_insert(SnapshotCause::OperatorRequested);
     }
 
@@ -775,6 +780,10 @@ impl Actor {
         fresh.lane_pin = self.lane_pin;
         fresh.verify_pin = self.verify_pin;
         fresh.live = self.live.rebuilt();
+        fresh.snapshot_asked = self.snapshot_asked;
+        if self.snapshot_asked {
+            fresh.pending = Some(SnapshotCause::OperatorRequested);
+        }
         fresh.maintain.state.set_pin(self.maintain.state.pin());
         fresh.host = self.host;
         *self = fresh;
@@ -1246,7 +1255,10 @@ impl Actor {
                 };
             }
             Synced::Wrote { end, txs, .. } => {
-                self.pending = None;
+                // With a cause pending, the step that wrote was the snapshot.
+                if self.pending.take().is_some() {
+                    self.snapshot_asked = false;
+                }
                 if self.gate == Gate::NextWrite {
                     self.gate = Gate::Open;
                 }

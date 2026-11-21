@@ -404,3 +404,41 @@ fn a_rebuild_keeps_a_request_for_live_pages() {
     rig.settle(&mut actor, now + 1);
     assert!(actor.take_live_pages().is_some());
 }
+
+/// An operator's snapshot request is not engine state: a rebuild before the
+/// snapshot was staged still owes it.
+#[test]
+fn a_rebuild_keeps_an_operators_snapshot_request() {
+    let (mut rig, mut actor) = caught_up_go_like();
+    actor.request_snapshot();
+    actor.fault(Lane::Upload, Fault::Bug, ts(T0 + 10));
+    assert_eq!(
+        actor.pending_snapshot(),
+        Some(SnapshotCause::OperatorRequested)
+    );
+    let now = boot_again(&mut rig, &mut actor, T0 + 10);
+    let staged = actor.staged();
+    rig.settle(&mut actor, now + 1);
+    assert_eq!(actor.pending_snapshot(), None, "the snapshot was staged");
+    assert!(actor.staged() > staged);
+}
+
+/// The request also survives when another cause was pending before it and
+/// took its place in the engine.
+#[test]
+fn a_rebuild_keeps_a_snapshot_request_made_behind_another_cause() {
+    let (mut rig, mut actor) = caught_up_go_like();
+    rig.commit(2);
+    rig.tick(&mut actor, T0 + 1);
+    tear(&rig, 2, truncated);
+    let lost = rig.tick(&mut actor, T0 + 1);
+    let was = actor.pending_snapshot();
+    assert_eq!(was, Some(SnapshotCause::LocalTipUnreadable), "{lost:?}");
+    actor.request_snapshot();
+    assert_eq!(actor.pending_snapshot(), was);
+    actor.fault(Lane::Upload, Fault::Bug, ts(T0 + 10));
+    assert_eq!(
+        actor.pending_snapshot(),
+        Some(SnapshotCause::OperatorRequested)
+    );
+}
