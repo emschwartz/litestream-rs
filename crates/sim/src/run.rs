@@ -21,7 +21,7 @@ use lsr_ltx::{PageNo, PageSize, Timestamp, Txid};
 use lsr_wal::{Salts, WalOffset};
 
 use crate::generate::{EnvFault, MetaOp, Op, RemoteOp, Target, WalOp, Weights, history};
-use crate::oracle::{Bound, Violation, bug_fault, within};
+use crate::oracle::{Bound, Violation, Windows, bug_fault, within};
 use crate::reach::{Reach, variant};
 use crate::resources::{
     CheckpointTally, CountingCheckpointer, IdleWindow, Limits, TickStats, delta, memory, per_tick,
@@ -205,6 +205,17 @@ pub fn actor_config() -> ActorConfig {
     }
 }
 
+/// How long `maintenance` keeps snapshots and level-0 files.
+fn windows(maintenance: &Maintenance) -> Windows {
+    Windows {
+        snapshots: maintenance.snapshot_retention(),
+        level_zero: match maintenance.l0_retention() {
+            lsr_core::L0Retention::After(window) => Some(window),
+            lsr_core::L0Retention::Keep => None,
+        },
+    }
+}
+
 /// What one actor step came to.
 enum Step {
     Ran,
@@ -328,6 +339,7 @@ impl Runner {
         let staging = self.w.staging.clone();
         let remote = self.w.remote.clone();
         let now = self.now();
+        self.w.high.note(now);
         let actor = &mut self.actor;
         let fut = async {
             let env = Env {
@@ -362,6 +374,7 @@ impl Runner {
                 key,
                 header: Some(_),
                 origin: Some(origin),
+                ..
             } = event
                 && origin.size() > 0
                 && key.level().get() == 0
@@ -376,6 +389,7 @@ impl Runner {
                 key,
                 header: Some(_),
                 origin,
+                ..
             } = event
                 && origin.is_none_or(|origin| origin.size() == 0)
                 && key.level().get() == 0
@@ -933,7 +947,7 @@ impl Runner {
 
     fn restore_all(&mut self) -> Result<(), Violation> {
         self.report.checks = self.report.checks.saturating_add(1);
-        let checked = self.w.check()?;
+        let checked = self.w.check(Some(windows(&actor_config().maintenance)))?;
         checked.tally(&mut self.report.reach);
         self.replica_page_size()?;
         if self.record {
@@ -1157,7 +1171,7 @@ impl Runner {
                 crate::RecorderEvent::Put { key, .. } => {
                     reach.bump(format!("put.level.{}", key.level().get()));
                 }
-                crate::RecorderEvent::Delete { keys } => {
+                crate::RecorderEvent::Delete { keys, .. } => {
                     reach.bump("delete.calls");
                     reach.add("delete.keys", u64::try_from(keys.len()).unwrap_or(u64::MAX));
                 }

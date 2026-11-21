@@ -21,7 +21,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
 
-use lsr_core::CreatedAt;
+use lsr_core::{Clock, CreatedAt, FakeClock};
 use lsr_core::{
     CorruptCause, Entropy, FileInfo, FileKey, Level, Listing, MemStore, ObjectStore, PageLimit,
     ReadLen, SeededEntropy, StoreError, StoreOp, Upload,
@@ -131,6 +131,7 @@ struct FaultState {
     schedule: Vec<Entry>,
     rng: SeededEntropy,
     damaged: Vec<FileKey>,
+    rejected: Vec<FileKey>,
 }
 
 impl FaultState {
@@ -255,6 +256,13 @@ impl FaultHandle {
             .collect()
     }
 
+    /// The objects a commit published and then reported as failed or wrong,
+    /// in order: the engine may distrust and delete each.
+    #[must_use]
+    pub fn rejected(&self) -> Vec<FileKey> {
+        lock(&self.state).rejected.clone()
+    }
+
     /// One-shot faults that have not fired yet.
     #[must_use]
     pub fn pending(&self) -> usize {
@@ -298,6 +306,7 @@ impl<S> Faults<S> {
             schedule,
             rng: SeededEntropy::new(seed),
             damaged: Vec::new(),
+            rejected: Vec::new(),
         };
         Self {
             inner,
@@ -469,6 +478,12 @@ impl<U: Upload> Upload for FaultsUpload<U> {
 
     async fn commit(self) -> Result<FileInfo, StoreError> {
         let verdict = lock(&self.state).decide(Call::Commit);
+        if matches!(
+            verdict,
+            Verdict::AfterPublish(_) | Verdict::SizeMismatch | Verdict::Checksum | Verdict::Corrupt
+        ) {
+            lock(&self.state).rejected.push(self.key);
+        }
         match verdict {
             Verdict::Fail(err) => {
                 drop(self.inner);
@@ -623,11 +638,24 @@ pub enum RecorderEvent {
         header: Option<Header>,
         /// The WAL range its pages came from, from the header.
         origin: Option<WalOrigin>,
+        /// The created-at time the code under test gave the upload.
+        created_at: Timestamp,
+        /// The simulator's clock when the store took it, read below the code
+        /// under test: what the oracle judges created-at times against.
+        at: Timestamp,
+        /// The latest time the code under test had been told by then: an
+        /// engine that clamps its clock against an earlier reading never
+        /// stamps past it.
+        high: Timestamp,
     },
     /// A delete the store accepted.
     Delete {
         /// The keys it was asked to remove.
         keys: Vec<FileKey>,
+        /// The simulator's clock when the store took it.
+        at: Timestamp,
+        /// The latest time the code under test had been told by then.
+        high: Timestamp,
     },
 }
 
@@ -655,10 +683,47 @@ pub struct RecorderCounts {
     pub written_bytes: u64,
 }
 
+/// The latest time the code under test has been told, shared between the
+/// run loop, which notes each tick's time, and the recorders.
+#[derive(Clone, Debug, Default)]
+pub struct HighWater(Arc<Mutex<Option<Timestamp>>>);
+
+impl HighWater {
+    /// Notes that the code under test was told `at`.
+    pub fn note(&self, at: Timestamp) {
+        let mut high = lock(&self.0);
+        *high = Some(high.map_or(at, |high| high.max(at)));
+    }
+
+    /// The latest time noted, at least `now`.
+    #[must_use]
+    pub fn at_least(&self, now: Timestamp) -> Timestamp {
+        lock(&self.0).map_or(now, |high| high.max(now))
+    }
+}
+
 #[derive(Debug, Default)]
 struct TapState {
     events: Vec<RecorderEvent>,
     counts: RecorderCounts,
+    clock: Option<(Arc<FakeClock>, HighWater)>,
+}
+
+impl TapState {
+    /// The clock now and the latest the code under test has been told, both
+    /// at 0 without a clock.
+    fn times(&self) -> (Timestamp, Timestamp) {
+        self.clock.as_ref().map_or(
+            (
+                Timestamp::from_unix_millis(0),
+                Timestamp::from_unix_millis(0),
+            ),
+            |(clock, high)| {
+                let now = clock.now();
+                (now, high.at_least(now))
+            },
+        )
+    }
 }
 
 /// The reading side of a [`Recorder`].
@@ -714,6 +779,14 @@ impl<S> Recorder<S> {
         }
     }
 
+    /// Reads `clock` and `high` at every commit, for the times a
+    /// [`RecorderEvent::Put`] carries.
+    #[must_use]
+    pub fn with_clock(self, clock: Arc<FakeClock>, high: HighWater) -> Self {
+        self.log.with(|s| s.clock = Some((clock, high)));
+        self
+    }
+
     /// The log; clones share it.
     #[must_use]
     pub fn log(&self) -> RecorderLog {
@@ -763,6 +836,7 @@ impl<S: ObjectStore> ObjectStore for Recorder<S> {
         Ok(TapUpload {
             inner,
             key: *key,
+            created_at,
             head: Vec::new(),
             wrote: 0,
             log: self.log.clone(),
@@ -774,8 +848,11 @@ impl<S: ObjectStore> ObjectStore for Recorder<S> {
 
         self.inner.delete(keys).await?;
         self.log.with(|s| {
+            let (at, high) = s.times();
             s.events.push(RecorderEvent::Delete {
                 keys: keys.to_vec(),
+                at,
+                high,
             });
         });
         Ok(())
@@ -787,6 +864,7 @@ impl<S: ObjectStore> ObjectStore for Recorder<S> {
 pub struct TapUpload<S: ObjectStore> {
     inner: S::Upload,
     key: FileKey,
+    created_at: Timestamp,
     head: Vec<u8>,
     wrote: u64,
     log: RecorderLog,
@@ -821,6 +899,7 @@ impl<S: ObjectStore> Upload for TapUpload<S> {
         let Self {
             inner,
             key,
+            created_at,
             head,
             log,
             ..
@@ -832,10 +911,14 @@ impl<S: ObjectStore> Upload for TapUpload<S> {
             // Only an object the store accepted is recorded: the recorder sits below
             // `Faults`, so a commit it sees fail never published.
             if outcome.is_ok() {
+                let (at, high) = s.times();
                 s.events.push(RecorderEvent::Put {
                     key,
                     header,
                     origin: header.and_then(|h| h.fields().wal),
+                    created_at,
+                    at,
+                    high,
                 });
             }
         });

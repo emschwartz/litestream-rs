@@ -45,7 +45,7 @@ fn add(sum: &mut Tally, report: &RunReport) {
         }
     }
     for event in &report.remote_events {
-        if let RecorderEvent::Delete { keys } = event {
+        if let RecorderEvent::Delete { keys, .. } = event {
             sum.deleted.extend(keys);
         }
     }

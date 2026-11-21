@@ -666,7 +666,9 @@ fn deleted_then_put_again(report: &RunReport) -> Result<(), String> {
                 written_again = true;
                 break;
             }
-            RecorderEvent::Delete { keys } if keys.len() == 1 => deleted = keys.first().copied(),
+            RecorderEvent::Delete { keys, .. } if keys.len() == 1 => {
+                deleted = keys.first().copied()
+            }
             RecorderEvent::Put { .. } | RecorderEvent::Delete { .. } => {}
         }
     }
@@ -1362,7 +1364,7 @@ fn rebuilt_at(report: &RunReport, level: u8) -> Result<(), String> {
         .position(|event| matches!(event, RecorderEvent::Put { key: put, .. } if *put == key))
         .ok_or_else(|| format!("{key} was never published"))?;
     let mut later = events.iter().skip(published.saturating_add(1));
-    if !later.any(|event| *event == RecorderEvent::Delete { keys: vec![key] }) {
+    if !later.any(|event| matches!(event, RecorderEvent::Delete { keys, .. } if *keys == [key])) {
         return Err(format!("{key} was never deleted alone"));
     }
     // `later` now starts after the delete.

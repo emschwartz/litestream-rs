@@ -14,6 +14,7 @@
 //! builds the actor from [`World`]'s handles and passes each tick's future to
 //! [`World::run_tick`].
 
+pub mod contract;
 pub mod exec;
 pub mod generate;
 pub mod model;
@@ -32,7 +33,9 @@ pub mod world;
 pub use exec::{Polls, RunEnd, count_polls, run_until};
 pub use generate::{EnvFault, Generator, Op, Target, Weights, frozen_history, history};
 pub use model::{CommitId, CommitRec, Model, PageImage};
-pub use oracle::{Acked, Bound, Checked, Violation, bug_fault, check, within};
+pub use oracle::{
+    Acked, Bound, Checked, Ground, Violation, Windows, bug_fault, check, check_with, within,
+};
 pub use reach::Reach;
 pub use run::{Failure, Opts, RunReport, run, run_with, shrink};
 pub use seed::{ParseDayError, ParseSeedError, SEEDS_PER_NIGHT, Seed, nightly_base, replay_line};
@@ -41,8 +44,8 @@ pub use sqlite::{
     ReaderId, SimCheckpointer, SimPages, SimSource, SimSqlite, SimWal,
 };
 pub use store::{
-    FaultHandle, FaultShape, Faults, Lost, Recorder, RecorderCounts, RecorderEvent, RecorderLog,
-    Volatile, VolatileHandle, YieldEachCall,
+    FaultHandle, FaultShape, Faults, HighWater, Lost, Recorder, RecorderCounts, RecorderEvent,
+    RecorderLog, Volatile, VolatileHandle, YieldEachCall,
 };
 pub use world::{
     CommittedInTick, CrashPlan, RemoteStore, StagedEditError, StagingStore, TickEnd, World,
