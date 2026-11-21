@@ -31,6 +31,7 @@ use std::mem;
 
 use lsr_ltx::{DbChecksum, DecodeError, Decoder, Event, Header, Txid, Verified};
 
+use crate::fault::Fault;
 use crate::layout::FileKey;
 use crate::store::{BatchKind, ObjectStore, ReadAt, ReadLen, StoreError};
 
@@ -83,6 +84,29 @@ pub(crate) fn check_link(before: LinkEnd, header: &Header) -> Result<(), BrokenL
 
 #[cfg(test)]
 mod tests;
+
+/// Reads `key` through the decoder, `len` bytes at a time, and says whether it
+/// verifies whole and names exactly `key`. `store_fault` names a store error,
+/// which is never a verdict on the bytes.
+///
+/// # Errors
+/// The store's fault when a read fails.
+pub(crate) async fn verifies<S: ObjectStore>(
+    store: &S,
+    key: &FileKey,
+    len: ReadLen,
+    store_fault: fn(&StoreError) -> Fault,
+) -> Result<bool, Fault> {
+    match LtxRead::new(*key, len)
+        .read_verified(store, |_| Ok::<(), Infallible>(()))
+        .await
+    {
+        Ok(verified) => Ok(verified.header().txids() == key.range()),
+        Err(ReadFault::Store(err)) => Err(store_fault(&err)),
+        Err(ReadFault::Decode(_undecodable)) => Ok(false),
+        Err(ReadFault::Rejected(never)) => match never {},
+    }
+}
 
 /// Why an object could not be read to a verified end.
 #[derive(Debug)]
