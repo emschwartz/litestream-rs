@@ -1449,6 +1449,9 @@ lsr-sim::faults wal_unlinked_mid_run
 lsr-sim::fixed_seeds fixed::a_torn_staged_file_is_dropped_seed_0x25
 lsr-sim::fixed_seeds fixed::a_torn_staged_file_is_dropped_seed_0x2d
 lsr-sim::fixed_seeds fixed::a_torn_staged_file_is_dropped_seed_0x46
+lsr-sim::fixed_seeds fixed::page_size_vacuum_and_staging_wipe_seed_0x126d68ed250e
+lsr-sim::fixed_seeds fixed::page_size_vacuum_and_staging_wipe_seed_0x126d68ef1c07
+lsr-sim::fixed_seeds fixed::page_size_vacuum_and_staging_wipe_seed_0x126d68ef545f
 lsr-sim::fixed_seeds fixed::seeds_17_to_24
 lsr-sim::fixed_seeds fixed::seeds_1_to_8
 lsr-sim::fixed_seeds fixed::seeds_25_to_32
