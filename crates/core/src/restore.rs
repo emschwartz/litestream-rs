@@ -18,9 +18,9 @@
 //! with backoff belongs to a store wrapper, and core holds no timer.
 //!
 //! An `AsOf` target plans through [AsOfPlanner], which asks the store for the
-//! exact stamps it needs one at a time ([resolve]); a stamp whose file is gone
-//! counts as a vanished file. [Restored::stamps_read] reports how many were
-//! read, over every attempt. `Latest` and `Txid` read no stamp.
+//! exact created-at times it needs one at a time ([resolve]); a created-at time whose file is gone
+//! counts as a vanished file. [Restored::created_at_read] reports how many were
+//! read, over every attempt. `Latest` and `Txid` read no created-at time.
 //!
 //! An `AsOf` instant inside a compacted file is refused unless
 //! [RestoreOptions::as_of_inside] is [AsOfInside::TakeEarlier]; then the plan's
@@ -36,11 +36,11 @@ use lsr_ltx::{
 };
 use thiserror::Error;
 
+use crate::created_at::{ResolveError, resolve_counted};
 use crate::inventory::{Inventory, InventoryError};
 use crate::layout::{FileInfo, FileKey};
 use crate::ltx_read::{BrokenLink, LinkEnd, LtxRead, ReadFault, check_link};
 use crate::plan::{AsOfPlanner, ContiguousChain, KeyTarget, PlanOutcome, RestoreTarget, plan};
-use crate::stamps::{ResolveError, resolve_counted};
 use crate::store::{ObjectStore, ReadLen, StoreError};
 
 #[cfg(any(test, feature = "testing"))]
@@ -266,10 +266,10 @@ pub enum RestoreError {
         /// What the sink holds.
         found: DbChecksum,
     },
-    /// The as-of planner asked twice for one stamp: a planner bug, refused
+    /// The as-of planner asked twice for one created-at time: a planner bug, refused
     /// rather than looped on.
-    #[error("the as-of planner asked twice for the stamp of {key}")]
-    StampRepeated {
+    #[error("the as-of planner asked twice for the created-at time of {key}")]
+    CreatedAtRepeated {
         /// The file asked for twice.
         key: FileKey,
     },
@@ -315,7 +315,7 @@ pub struct Restored {
     files: usize,
     bytes_read: u64,
     attempts: u8,
-    stamps_read: u64,
+    created_at_read: u64,
     post_apply: Option<DbChecksum>,
     inside_file: Option<FileKey>,
 }
@@ -357,12 +357,12 @@ impl Restored {
         self.attempts
     }
 
-    /// Exact stamps asked of the store while planning, summed over every
+    /// Exact created-at times asked of the store while planning, summed over every
     /// attempt; 0 for a target other than `AsOf` and for a listing that
-    /// carries exact stamps.
+    /// carries exact created-at times.
     #[must_use]
-    pub const fn stamps_read(&self) -> u64 {
-        self.stamps_read
+    pub const fn created_at_read(&self) -> u64 {
+        self.created_at_read
     }
 
     /// The database checksum after the last file, when the writer tracked it.
@@ -442,7 +442,7 @@ pub(crate) async fn restore_from<S: ObjectStore, K: DatabaseSink>(
 ) -> Result<Restored, RestoreError> {
     let mut attempt = 1_u8;
     let mut bytes_read = 0_u64;
-    let mut stamps_read = 0_u64;
+    let mut created_at_read = 0_u64;
     loop {
         let applied = attempt_once(
             store,
@@ -451,7 +451,7 @@ pub(crate) async fn restore_from<S: ObjectStore, K: DatabaseSink>(
             options,
             &mut sink,
             &mut bytes_read,
-            &mut stamps_read,
+            &mut created_at_read,
         )
         .await;
         match applied {
@@ -468,7 +468,7 @@ pub(crate) async fn restore_from<S: ObjectStore, K: DatabaseSink>(
                     files: chain.files().len(),
                     bytes_read,
                     attempts: attempt,
-                    stamps_read,
+                    created_at_read,
                     post_apply: last.trailer().post_apply(),
                     inside_file,
                 });
@@ -496,7 +496,7 @@ async fn attempt_once<S: ObjectStore, K: DatabaseSink>(
     options: RestoreOptions,
     sink: &mut K,
     bytes_read: &mut u64,
-    stamps_read: &mut u64,
+    created_at_read: &mut u64,
 ) -> Result<(ContiguousChain, Verified, Option<FileKey>), Abort> {
     let inventory = match listed {
         Some(inventory) => inventory,
@@ -504,7 +504,8 @@ async fn attempt_once<S: ObjectStore, K: DatabaseSink>(
             .await
             .map_err(RestoreError::Inventory)?,
     };
-    let (chain, inside_file) = match plan_target(store, &inventory, target, stamps_read).await? {
+    let (chain, inside_file) = match plan_target(store, &inventory, target, created_at_read).await?
+    {
         PlanOutcome::Plan(chain) => (chain, None),
         PlanOutcome::AsOfInsideFile { chain, file }
             if options.as_of_inside == AsOfInside::TakeEarlier =>
@@ -525,13 +526,13 @@ async fn attempt_once<S: ObjectStore, K: DatabaseSink>(
     Ok((chain, last, inside_file))
 }
 
-/// The plan for [target]: an instant asks for the stamps it needs, counted
-/// into [stamps_read] whether or not the call succeeded.
+/// The plan for [target]: an instant asks for the created-at times it needs, counted
+/// into [created_at_read] whether or not the call succeeded.
 async fn plan_target<S: ObjectStore>(
     store: &S,
     inventory: &Inventory,
     target: RestoreTarget,
-    stamps_read: &mut u64,
+    created_at_read: &mut u64,
 ) -> Result<PlanOutcome, Abort> {
     let instant = match target {
         RestoreTarget::Latest => return Ok(plan(inventory, KeyTarget::Latest)),
@@ -539,11 +540,11 @@ async fn plan_target<S: ObjectStore>(
         RestoreTarget::AsOf(instant) => instant,
     };
     let mut planner = AsOfPlanner::new(inventory, instant);
-    match resolve_counted(store, &mut planner, stamps_read).await {
+    match resolve_counted(store, &mut planner, created_at_read).await {
         Ok(outcome) => Ok(outcome),
         Err(ResolveError::Store(StoreError::NotFound { key })) => Err(Abort::Vanished(key)),
         Err(ResolveError::Store(err)) => Err(RestoreError::Store(err).into()),
-        Err(ResolveError::Repeated { key }) => Err(RestoreError::StampRepeated { key }.into()),
+        Err(ResolveError::Repeated { key }) => Err(RestoreError::CreatedAtRepeated { key }.into()),
     }
 }
 

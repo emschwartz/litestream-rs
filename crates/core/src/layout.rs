@@ -289,56 +289,56 @@ pub struct FileInfo {
     pub size: u64,
     /// What the listing says about when the file was created: exact, or only
     /// the backend's own modification time. Readers that decide by time take
-    /// [`FileInfo::exact_stamp`] or ask the store for [`StoredStamp`].
-    pub listed: ListedStamp,
+    /// [`FileInfo::created_at`] or ask the store for [`CreatedAt`].
+    pub listed: ListedTime,
 }
 
 impl FileInfo {
-    /// The exact stored stamp the listing carried, when it did.
+    /// The exact stored created-at time the listing carried, when it did.
     #[must_use]
-    pub const fn exact_stamp(&self) -> Option<StoredStamp> {
+    pub const fn created_at(&self) -> Option<CreatedAt> {
         match self.listed {
-            ListedStamp::Stored(stamp) => Some(stamp),
-            ListedStamp::LastModified(_) => None,
+            ListedTime::Created(created_at) => Some(created_at),
+            ListedTime::LastModified(_) => None,
         }
     }
 }
 
 /// The time a listing attaches to a file.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ListedStamp {
-    /// Exact: what the writer stamped, read with the listing at no extra
+pub enum ListedTime {
+    /// Exact: what the writer recorded as created, read with the listing at no extra
     /// request.
-    Stored(StoredStamp),
-    /// The backend's last-modified time. It is not a stamp: it can differ from
+    Created(CreatedAt),
+    /// The backend's last-modified time. It is not a created-at time: it can differ from
     /// the stored one by any writer clock lead, so no reader decides by it.
     LastModified(Timestamp),
 }
 
-/// A file's stored creation stamp, with where it came from. Only stores make
+/// The time a writer recorded as a file's creation, with where it came from. Only stores make
 /// one, so a reader cannot pass a `LastModified` off as exact.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct StoredStamp {
+pub struct CreatedAt {
     at: Timestamp,
-    origin: StampOrigin,
+    origin: CreatedAtSource,
 }
 
-impl StoredStamp {
-    /// A stamp read from the object's metadata.
+impl CreatedAt {
+    /// A created-at time read from the object's metadata.
     #[must_use]
     pub const fn metadata(at: Timestamp) -> Self {
         Self {
             at,
-            origin: StampOrigin::Metadata,
+            origin: CreatedAtSource::Metadata,
         }
     }
 
-    /// A stamp that is the file's modification time, as a file store keeps it.
+    /// A created-at time that is the file's modification time, as a file store keeps it.
     #[must_use]
     pub const fn mtime(at: Timestamp) -> Self {
         Self {
             at,
-            origin: StampOrigin::Mtime,
+            origin: CreatedAtSource::Mtime,
         }
     }
 
@@ -347,7 +347,7 @@ impl StoredStamp {
     pub const fn fallback(last_modified: Timestamp) -> Self {
         Self {
             at: last_modified,
-            origin: StampOrigin::Fallback,
+            origin: CreatedAtSource::Fallback,
         }
     }
 
@@ -359,36 +359,36 @@ impl StoredStamp {
 
     /// Where it was read from.
     #[must_use]
-    pub const fn origin(self) -> StampOrigin {
+    pub const fn origin(self) -> CreatedAtSource {
         self.origin
     }
 
-    /// The stamp as an instant a writer set, or `None` for one at or before
-    /// the Unix epoch: that is a writer that stamped nothing (Go leaves the
+    /// The created-at time as an instant a writer set, or `None` for one at or before
+    /// the Unix epoch: that is a writer that recorded no created-at time (Go leaves the
     /// field zero), never a file created in 1970, so nothing may age it.
     #[must_use]
-    pub const fn real(self) -> Option<RealStamp> {
+    pub const fn non_zero(self) -> Option<NonZeroCreatedAt> {
         if self.at.unix_millis() > 0 {
-            Some(RealStamp(self.at))
+            Some(NonZeroCreatedAt(self.at))
         } else {
             None
         }
     }
 }
 
-/// A stored stamp that is a real creation time: after the Unix epoch. Only
-/// [`StoredStamp::real`] makes one, so code that ages a file by its stamp
-/// cannot be handed the zero a writer leaves when it stamps nothing.
+/// A created-at time that is a non-zero creation time: after the Unix epoch. Only
+/// [`CreatedAt::non_zero`] makes one, so code that ages a file by its created-at time
+/// cannot be handed the zero a writer leaves when it records no created-at time.
 ///
 /// ```compile_fail
-/// # use lsr_core::RealStamp;
+/// # use lsr_core::NonZeroCreatedAt;
 /// # use lsr_ltx::Timestamp;
-/// let _ = RealStamp(Timestamp::from_unix_millis(0));
+/// let _ = NonZeroCreatedAt(Timestamp::from_unix_millis(0));
 /// ```
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub struct RealStamp(Timestamp);
+pub struct NonZeroCreatedAt(Timestamp);
 
-impl RealStamp {
+impl NonZeroCreatedAt {
     /// The instant.
     #[must_use]
     pub const fn at(self) -> Timestamp {
@@ -396,9 +396,9 @@ impl RealStamp {
     }
 }
 
-/// Where a [`StoredStamp`] came from.
+/// Where a [`CreatedAt`] came from.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum StampOrigin {
+pub enum CreatedAtSource {
     /// The object's stored metadata.
     Metadata,
     /// The file's modification time.
@@ -413,27 +413,26 @@ mod tests {
     use proptest::prelude::*;
 
     #[test]
-    fn only_a_stamp_after_the_epoch_is_real() {
+    fn only_a_created_at_after_the_epoch_is_real() {
         let ms = Timestamp::from_unix_millis;
-        for origin in [
-            StoredStamp::metadata,
-            StoredStamp::mtime,
-            StoredStamp::fallback,
-        ] {
+        for origin in [CreatedAt::metadata, CreatedAt::mtime, CreatedAt::fallback] {
             for unset in [i64::MIN, -1, 0] {
-                assert_eq!(origin(ms(unset)).real(), None, "{unset}");
+                assert_eq!(origin(ms(unset)).non_zero(), None, "{unset}");
             }
             for set in [1, 1_700_000_000_000, i64::MAX] {
-                assert_eq!(origin(ms(set)).real().map(RealStamp::at), Some(ms(set)));
+                assert_eq!(
+                    origin(ms(set)).non_zero().map(NonZeroCreatedAt::at),
+                    Some(ms(set))
+                );
             }
         }
         let (early, late) = (
-            StoredStamp::mtime(ms(5)).real(),
-            StoredStamp::metadata(ms(6)).real(),
+            CreatedAt::mtime(ms(5)).non_zero(),
+            CreatedAt::metadata(ms(6)).non_zero(),
         );
         assert!(
             early < late,
-            "real stamps order by instant, whatever their origin"
+            "non-zero created-at times order by instant, whatever their origin"
         );
     }
 

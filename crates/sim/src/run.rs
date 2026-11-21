@@ -664,10 +664,10 @@ impl Runner {
         self.tick()
     }
 
-    fn page_bytes(&self, fill: u32, stamp: u64) -> Vec<u8> {
+    fn page_bytes(&self, fill: u32, created_at: u64) -> Vec<u8> {
         let size = self.w.sqlite.page_size().bytes();
         let mut data = vec![u8::try_from(fill % 256).unwrap_or(0); size];
-        for (slot, byte) in data.iter_mut().zip(stamp.to_be_bytes()) {
+        for (slot, byte) in data.iter_mut().zip(created_at.to_be_bytes()) {
             *slot = byte;
         }
         data
@@ -684,8 +684,8 @@ impl Runner {
             .into_iter()
             .filter_map(|n| {
                 let page = PageNo::new(n, size)?;
-                let stamp = u64::from(self.report.steps) << 16 | u64::from(n);
-                Some((page, self.page_bytes(small(&self.rng, 256), stamp)))
+                let created_at = u64::from(self.report.steps) << 16 | u64::from(n);
+                Some((page, self.page_bytes(small(&self.rng, 256), created_at)))
             })
             .collect()
     }
@@ -695,8 +695,8 @@ impl Runner {
         (1..=upto)
             .filter_map(|n| {
                 let page = PageNo::new(n, size)?;
-                let stamp = u64::from(self.report.steps) << 16 | u64::from(n);
-                Some((page, self.page_bytes(small(&self.rng, 256), stamp)))
+                let created_at = u64::from(self.report.steps) << 16 | u64::from(n);
+                Some((page, self.page_bytes(small(&self.rng, 256), created_at)))
             })
             .collect()
     }

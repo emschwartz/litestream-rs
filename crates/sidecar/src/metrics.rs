@@ -180,9 +180,9 @@ type CounterSeries = (&'static str, &'static str, fn(&Health) -> u64);
 /// Go's operations, from the replicator's per-call totals.
 fn operations(store: &StoreCounters) -> Ops {
     let read = OpCounters {
-        calls: store.read.calls.saturating_add(store.stamp.calls),
-        errors: store.read.errors.saturating_add(store.stamp.errors),
-        millis: store.read.millis.saturating_add(store.stamp.millis),
+        calls: store.read.calls.saturating_add(store.created_at.calls),
+        errors: store.read.errors.saturating_add(store.created_at.errors),
+        millis: store.read.millis.saturating_add(store.created_at.millis),
     };
     [
         ("GET", read),

@@ -5,8 +5,8 @@ use std::path::Path;
 use std::time::UNIX_EPOCH;
 
 use crate::error::CompatError;
+use lsr_core::{CreatedAt, ListedTime};
 use lsr_core::{FileInfo, FileKey, Level, parse_file_name};
-use lsr_core::{ListedStamp, StoredStamp};
 use lsr_ltx::{Event, HEADER_LEN, Header, ReadDecoder, Timestamp, Txid, lock_page};
 
 /// One LTX file of a replica.
@@ -50,9 +50,7 @@ pub fn info_of(file: &ReplicaFile) -> FileInfo {
     FileInfo {
         key: file.key,
         size: file.size,
-        listed: ListedStamp::Stored(StoredStamp::mtime(Timestamp::from_unix_millis(
-            file.mtime_ms,
-        ))),
+        listed: ListedTime::Created(CreatedAt::mtime(Timestamp::from_unix_millis(file.mtime_ms))),
     }
 }
 

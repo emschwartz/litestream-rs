@@ -164,7 +164,7 @@ mod cases {
         );
         let head = parse_head(&send(&t, builder().head(now(), &k).unwrap())).unwrap();
         assert_eq!(
-            (head.size, head.stamp.unwrap().unix_millis()),
+            (head.size, head.created_at.unwrap().unix_millis()),
             (4, 1_700_000_000_123)
         );
         let page = parse_list(&list_page(&t, 10), &prefix(), Level::ZERO).unwrap();

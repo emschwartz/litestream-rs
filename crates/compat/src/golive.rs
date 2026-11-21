@@ -87,8 +87,8 @@ impl Schedule<'static> {
     };
 
     /// No compaction and no scheduled snapshot within a run: the replica holds the boot's
-    /// snapshot and one level-0 file per sync, each stamped when it was written, so a restore
-    /// at an instant between two syncs has exactly one right answer, whichever stamp a reader
+    /// snapshot and one level-0 file per sync, each recorded as created when it was written, so a restore
+    /// at an instant between two syncs has exactly one right answer, whichever created-at time a reader
     /// takes (Go before v0.5.16 reads only the object's `LastModified`).
     pub const LEVEL_ZERO_ONLY: Self = Self {
         levels: &["1h"],

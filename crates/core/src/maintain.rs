@@ -7,12 +7,12 @@
 //! returns one job; the caller runs it, records the outcome, lists again and
 //! asks again.
 //!
-//! Stamps are read lazily. The schedule asks for the destination level's last
+//! Created-at times are read lazily. The schedule asks for the destination level's last
 //! file only when the source has files above it, and for the newest snapshot
 //! only when one is otherwise due; retention's reads are listed in its module
 //! doc. Each ask is a [`Resolve::Need`], so a listing that carries no exact
-//! stamps costs a request per ask and the job sequence is the one a fully
-//! stamped listing gives.
+//! created-at times costs a request per ask and the job sequence is the one a listing that
+//! carries every created-at time gives.
 //!
 //! A level whose last job failed is skipped until its retry time, so one
 //! failing level never keeps the snapshot or the deletes from being planned.
@@ -44,7 +44,7 @@
 //! Deletes come last: when no compaction or snapshot is ready, `retain` plans
 //! one delete job against a listing that already holds the newest coverage, or
 //! says why it refuses (`Due::Wait { held }`). With retention switched off
-//! ([`RetentionMode::Off`]) that step is skipped: it reads no stamp, plans no
+//! ([`RetentionMode::Off`]) that step is skipped: it reads no created-at time, plans no
 //! delete and reports no hold, and the wait is the schedule's alone.
 //!
 //! The snapshot is written by the actor's loop, which owns the database position;
@@ -62,10 +62,10 @@ use lsr_ltx::{Timestamp, Txid};
 use thiserror::Error;
 
 use crate::compact::{CompactError, CompactionInputs, MAX_INPUTS, compact};
+use crate::created_at::{Need, Resolve, ResolvedCreatedAt};
 use crate::inventory::{Inventory, is_snapshot_start};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::plan::PlanOutcome;
-use crate::stamps::{Need, Resolve, Stamps};
 use crate::store::{CorruptCause, ObjectStore, StoreError};
 use retain::{Retention, retention};
 
@@ -286,20 +286,22 @@ pub enum Hold {
         /// The output.
         key: FileKey,
     },
-    /// A snapshot or level-0 file with no usable stamp.
+    /// A snapshot or level-0 file with no usable created-at time.
     #[error("{key} has no creation time")]
-    Unstamped {
+    NoCreatedAt {
         /// The file.
         key: FileKey,
     },
-    /// Snapshots whose stamps run backwards, so age means nothing. A copied
+    /// Snapshots whose created-at times run backwards, so age means nothing. A copied
     /// replica whose stored times were reset lands here: the stored times no
     /// longer follow the headers.
-    #[error("{later} is stamped before {earlier}: the stored times no longer follow the headers")]
-    SnapshotStampsBackwards {
+    #[error(
+        "{later} is recorded as created before {earlier}: the stored times no longer follow the headers"
+    )]
+    SnapshotCreatedAtBackwards {
         /// The snapshot with the lower transactions.
         earlier: FileKey,
-        /// The snapshot with the higher transactions and the older stamp.
+        /// The snapshot with the higher transactions and the older created-at time.
         later: FileKey,
     },
     /// The restore point pinned while a lane is degraded does not plan, on
@@ -398,10 +400,10 @@ enum Step {
     Idle,
 }
 
-/// The next job, or when to ask again, or the one stamp needed first. See the
+/// The next job, or when to ask again, or the one created-at time needed first. See the
 /// module docs for the rules.
 ///
-/// A stamp the listing does not carry is asked for through [`Resolve::Need`];
+/// A created-at time the listing does not carry is asked for through [`Resolve::Need`];
 /// the caller resolves it and calls again from the start, so everything here is
 /// restartable. Writes to the state only to forget distrusted keys the listing
 /// no longer holds, which is idempotent.
@@ -412,9 +414,9 @@ pub fn due(
     config: &Maintenance,
     published: Option<Txid>,
     state: &mut MaintainState,
-    stamps: &Stamps,
+    resolved: &ResolvedCreatedAt,
 ) -> Resolve<Due> {
-    match decide(inventory, now, config, published, state, stamps) {
+    match decide(inventory, now, config, published, state, resolved) {
         Ok(due) => Resolve::Done(due),
         Err(file) => Resolve::Need(file),
     }
@@ -426,7 +428,7 @@ fn decide(
     config: &Maintenance,
     published: Option<Txid>,
     state: &mut MaintainState,
-    stamps: &Stamps,
+    resolved: &ResolvedCreatedAt,
 ) -> Result<Due, Need> {
     state.forget_unlisted(|key| inventory.level(key.level()).iter().any(|f| f.key == *key));
     let mut until: Option<Timestamp> = None;
@@ -435,7 +437,7 @@ fn decide(
         .skip(1)
         .take(usize::from(config.top().get()));
     for level in levels {
-        let step = plan_level(inventory, now, config, *level, state, stamps)?;
+        let step = plan_level(inventory, now, config, *level, state, resolved)?;
         if let Some(job) = absorb(step, &mut until) {
             return Ok(Due::Run(job));
         }
@@ -445,7 +447,7 @@ fn decide(
         (Some(retry), _) => Step::Wait(retry),
         // A rejected snapshot goes before the next one is written.
         (None, Some(bad)) => delete_first(bad),
-        (None, None) => plan_snapshot(inventory, now, config, published, stamps)?,
+        (None, None) => plan_snapshot(inventory, now, config, published, resolved)?,
     };
     if let Some(job) = absorb(step, &mut until) {
         return Ok(Due::Run(job));
@@ -453,7 +455,7 @@ fn decide(
     let retained = match config.retention() {
         RetentionMode::Off => return Ok(Due::Wait { until, held: None }),
         RetentionMode::Enforce => {
-            match retention(inventory, now, config, published, state, stamps) {
+            match retention(inventory, now, config, published, state, resolved) {
                 Resolve::Done(retained) => retained,
                 Resolve::Need(file) => return Err(file),
             }
@@ -497,7 +499,7 @@ fn plan_level(
     config: &Maintenance,
     dst: Level,
     state: &MaintainState,
-    stamps: &Stamps,
+    resolved: &ResolvedCreatedAt,
 ) -> Result<Step, Need> {
     let (Some(src_level), Some(interval)) = (
         Level::new(dst.get().saturating_sub(1)),
@@ -528,7 +530,7 @@ fn plan_level(
     }
     let (start, next) = next_window(now, interval);
     if let Some(info) = dst_last
-        && stamped_after(stamps, info, start)?
+        && created_after(resolved, info, start)?
     {
         return Ok(Step::Wait(next));
     }
@@ -572,7 +574,7 @@ fn plan_snapshot(
     now: Timestamp,
     config: &Maintenance,
     published: Option<Txid>,
-    stamps: &Stamps,
+    resolved: &ResolvedCreatedAt,
 ) -> Result<Step, Need> {
     let Some(pos) = inventory.newest().max(published) else {
         return Ok(Step::Idle);
@@ -593,7 +595,7 @@ fn plan_snapshot(
         return Ok(Step::Idle);
     }
     let (start, next) = next_window(now, config.snapshot_interval());
-    if stamped_after(stamps, snap, start)? {
+    if created_after(resolved, snap, start)? {
         return Ok(Step::Wait(next));
     }
     Ok(Step::Run(Job::Snapshot(SnapshotJob {
@@ -602,11 +604,15 @@ fn plan_snapshot(
     })))
 }
 
-/// Whether the file was stamped after `start`, or the request for its stamp.
-fn stamped_after(stamps: &Stamps, info: &FileInfo, start: Timestamp) -> Result<bool, Need> {
-    stamps
+/// Whether the file was recorded as created after `start`, or the request for its created-at time.
+fn created_after(
+    resolved: &ResolvedCreatedAt,
+    info: &FileInfo,
+    start: Timestamp,
+) -> Result<bool, Need> {
+    resolved
         .exact(info)
-        .map(|stamp| stamp.at() > start)
+        .map(|created_at| created_at.at() > start)
         .ok_or_else(|| Need::one(*info))
 }
 
@@ -708,7 +714,7 @@ const fn leaves_bad_output(err: &StoreError) -> bool {
             CorruptCause::ChecksumMismatch { .. } => true,
             CorruptCause::NotARegularFile
             | CorruptCause::TimestampOutOfRange
-            | CorruptCause::BadStamp => false,
+            | CorruptCause::BadCreatedAt => false,
         },
         StoreError::Transient { .. }
         | StoreError::Throttled { .. }

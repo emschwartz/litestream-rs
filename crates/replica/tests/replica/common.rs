@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use lsr_core::{
-    FileInfo, FileKey, Level, Listing, ObjectStore, PageLimit, ReadLen, StoreError, StoreOp,
-    StoredStamp,
+    CreatedAt, FileInfo, FileKey, Level, Listing, ObjectStore, PageLimit, ReadLen, StoreError,
+    StoreOp,
 };
 use lsr_ltx::TxidRange;
 use lsr_replica::{
@@ -217,18 +217,18 @@ impl ObjectStore for Faulty {
         self.inner.read(key, offset, len).await
     }
 
-    async fn stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
+    async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
         self.gate(StoreOp::Read)?;
-        self.inner.stamp(file).await
+        self.inner.created_at(file).await
     }
 
-    async fn read_with_stamp(
+    async fn read_with_created_at(
         &self,
         file: &FileInfo,
         len: ReadLen,
-    ) -> Result<(Vec<u8>, StoredStamp), StoreError> {
+    ) -> Result<(Vec<u8>, CreatedAt), StoreError> {
         self.gate(StoreOp::Read)?;
-        self.inner.read_with_stamp(file, len).await
+        self.inner.read_with_created_at(file, len).await
     }
 
     async fn begin_upload(

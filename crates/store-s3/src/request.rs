@@ -51,7 +51,7 @@ const EXPIRES_IN: Duration = Duration::from_secs(300);
 pub const MAX_DELETE_KEYS: usize = 1000;
 
 /// The object metadata key Go stores a file's timestamp under.
-const STAMP_HEADER: &str = "x-amz-meta-litestream-timestamp";
+const CREATED_AT_HEADER: &str = "x-amz-meta-litestream-timestamp";
 
 const USER_AGENT: &str = concat!("litestream-rs/", env!("CARGO_PKG_VERSION"));
 
@@ -399,7 +399,7 @@ impl RequestBuilder {
         Ok(Self::finish(Method::Get, signed, Vec::new()))
     }
 
-    /// HEAD of one object: its size and stored stamp.
+    /// HEAD of one object: its size and stored created-at time.
     ///
     /// # Errors
     /// [`RequestError::ClockOutOfRange`].
@@ -429,7 +429,7 @@ impl RequestBuilder {
     }
 
     /// A single PUT with `Content-Length` (also when 0), `Content-MD5` and the
-    /// stamp. The stamp is millisecond RFC 3339 with `Z`: the same instant Go's
+    /// created-at time. The created-at time is millisecond RFC 3339 with `Z`: the same instant Go's
     /// RFC3339Nano writes (rc.go:892-898), and Go's parser reads it.
     ///
     /// # Errors
@@ -439,7 +439,7 @@ impl RequestBuilder {
         now: Timestamp,
         key: &FileKey,
         body: Vec<u8>,
-        stamp: Timestamp,
+        created_at: Timestamp,
     ) -> Result<WriteRequest, RequestError> {
         let object = self.object(key);
         let mut action = self.bucket.put_object(Some(&self.credentials), &object);
@@ -447,11 +447,11 @@ impl RequestBuilder {
             &mut action,
             now,
             body,
-            vec![(STAMP_HEADER, stamp.to_string())],
+            vec![(CREATED_AT_HEADER, created_at.to_string())],
         )
     }
 
-    /// Starts a multipart upload; the stamp is set here, on the object.
+    /// Starts a multipart upload; the created-at time is set here, on the object.
     ///
     /// # Errors
     /// [`RequestError::ClockOutOfRange`].
@@ -459,13 +459,17 @@ impl RequestBuilder {
         &self,
         now: Timestamp,
         key: &FileKey,
-        stamp: Timestamp,
+        created_at: Timestamp,
     ) -> Result<HttpRequest, RequestError> {
         let object = self.object(key);
         let mut action = self
             .bucket
             .create_multipart_upload(Some(&self.credentials), &object);
-        let signed = self.sign(&mut action, now, vec![(STAMP_HEADER, stamp.to_string())])?;
+        let signed = self.sign(
+            &mut action,
+            now,
+            vec![(CREATED_AT_HEADER, created_at.to_string())],
+        )?;
         Ok(Self::finish(Method::Post, signed, Vec::new()))
     }
 
@@ -808,22 +812,27 @@ mod tests {
     }
 
     #[test]
-    fn put_carries_length_md5_and_stamp() {
+    fn put_carries_length_md5_and_created_at() {
         let k = key(0, 1, 1);
-        let stamp = Timestamp::from_unix_millis(1_795_182_585_566);
+        let created_at = Timestamp::from_unix_millis(1_795_182_585_566);
         let req = minio()
-            .put_object(now(), &k, b"hello".to_vec(), stamp)
+            .put_object(now(), &k, b"hello".to_vec(), created_at)
             .unwrap();
         assert_eq!(req.method(), Method::Put);
         assert_eq!(req.header("content-length"), Some("5"));
         assert_eq!(req.header("content-md5"), Some("XUFAKrxLKna5cZ2REBfFkg=="));
-        assert_eq!(req.header(STAMP_HEADER), Some("2026-11-20T13:49:45.566Z"));
+        assert_eq!(
+            req.header(CREATED_AT_HEADER),
+            Some("2026-11-20T13:49:45.566Z")
+        );
         assert_eq!(
             crate::response::hex(&req.md5()),
             "5d41402abc4b2a76b9719d911017c592"
         );
         assert_eq!(req.body(), b"hello");
-        let empty = minio().put_object(now(), &k, Vec::new(), stamp).unwrap();
+        let empty = minio()
+            .put_object(now(), &k, Vec::new(), created_at)
+            .unwrap();
         assert_eq!(empty.header("content-length"), Some("0"));
         assert_eq!(
             empty.header("content-md5"),
@@ -878,7 +887,7 @@ mod tests {
             Some(body.len().to_string().as_str())
         );
         let create = b.create_multipart(now(), &k, now()).unwrap();
-        assert!(create.header(STAMP_HEADER).is_some());
+        assert!(create.header(CREATED_AT_HEADER).is_some());
     }
 
     #[test]

@@ -35,7 +35,7 @@ mod cases {
         let head = send(&fake, builder().head(now(), &k).unwrap());
         let parsed = parse_head(&head).unwrap();
         assert_eq!(parsed.size, 5);
-        assert_eq!(parsed.stamp.unwrap().unix_millis(), 1_700_000_000_123);
+        assert_eq!(parsed.created_at.unwrap().unix_millis(), 1_700_000_000_123);
 
         let got = send(
             &fake,
@@ -346,9 +346,9 @@ mod cases {
         let head = parse_head(&send(&fake, builder().head(now(), &k).unwrap())).unwrap();
         assert_eq!(head.size, 5_242_889);
         assert_eq!(
-            head.stamp,
+            head.created_at,
             Some(now()),
-            "the stamp set at create is on the object"
+            "the created-at time set at create is on the object"
         );
         assert_eq!(fake.open_uploads(), 0);
     }

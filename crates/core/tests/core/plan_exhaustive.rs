@@ -7,7 +7,7 @@
 //! from the contract in the `plan` module doc, not from the planner's code:
 //! the set of transactions some chain of eligible files can end at, found by
 //! fixpoint, and for a refusal the whole outcome, payloads included. The `AsOf` sweep enumerates smaller inventories under every
-//! assignment of distinct exact stamps and every instant, and holds the lazy
+//! assignment of distinct exact created-at times and every instant, and holds the lazy
 //! planner (over lazy, exact and mixed listings) to the exact one.
 //!
 //! The contract decides every case, so the oracle demands exactly the one
@@ -25,9 +25,9 @@ mod exhaustive {
 
     use lsr_core::conformance::block_on;
     use lsr_core::{
-        AsOfPlanner, ContiguousChain, FileInfo, FileKey, Inventory, KeyTarget, Level, ListedStamp,
-        MemStore, ObjectStore, PlanOutcome, Resolve, RestoreTarget, StampStep, Stamps, StoredStamp,
-        Upload, plan, plan_reference, resolve,
+        AsOfPlanner, ContiguousChain, CreatedAt, CreatedAtStep, FileInfo, FileKey, Inventory,
+        KeyTarget, Level, ListedTime, MemStore, ObjectStore, PlanOutcome, Resolve,
+        ResolvedCreatedAt, RestoreTarget, Upload, plan, plan_reference, resolve,
     };
     use lsr_ltx::{Timestamp, Txid, TxidRange};
 
@@ -56,11 +56,11 @@ mod exhaustive {
         }
     }
 
-    fn info(r: &R, stamp: i64) -> FileInfo {
+    fn info(r: &R, created_at: i64) -> FileInfo {
         FileInfo {
             key: r.key(),
             size: 1,
-            listed: ListedStamp::Stored(StoredStamp::mtime(Timestamp::from_unix_millis(stamp))),
+            listed: ListedTime::Created(CreatedAt::mtime(Timestamp::from_unix_millis(created_at))),
         }
     }
 
@@ -338,26 +338,26 @@ mod exhaustive {
         }
     }
 
-    /// Calls `f` with every injective assignment of `stamps` to `n` files.
-    fn assignments(stamps: &[i64], n: usize, held: &mut Vec<i64>, f: &mut impl FnMut(&[i64])) {
+    /// Calls `f` with every injective assignment of `resolved` to `n` files.
+    fn assignments(resolved: &[i64], n: usize, held: &mut Vec<i64>, f: &mut impl FnMut(&[i64])) {
         if held.len() == n {
             f(held);
             return;
         }
-        for &s in stamps {
+        for &s in resolved {
             if !held.contains(&s) {
                 held.push(s);
-                assignments(stamps, n, held, f);
+                assignments(resolved, n, held, f);
                 held.pop();
             }
         }
     }
 
-    fn store_of(files: &[R], stamps: &[i64]) -> MemStore {
+    fn store_of(files: &[R], resolved: &[i64]) -> MemStore {
         let store = MemStore::with_listed_last_modified();
         block_on(async {
-            for (r, &stamp) in files.iter().zip(stamps) {
-                let at = Timestamp::from_unix_millis(stamp);
+            for (r, &created_at) in files.iter().zip(resolved) {
+                let at = Timestamp::from_unix_millis(created_at);
                 let mut up = store.begin_upload(&r.key(), at).await.unwrap();
                 up.write(b"x").await.unwrap();
                 up.commit().await.unwrap();
@@ -366,12 +366,12 @@ mod exhaustive {
         store
     }
 
-    /// One inventory under one stamp assignment: every instant, every mix of
+    /// One inventory under one created-at time assignment: every instant, every mix of
     /// exact and last-modified-only listings.
-    fn check_as_of(files: &[R], stamps: &[i64], instants: &[i64]) {
+    fn check_as_of(files: &[R], resolved: &[i64], instants: &[i64]) {
         let exact =
-            Inventory::from_files(files.iter().zip(stamps).map(|(r, s)| info(r, *s))).unwrap();
-        let store = store_of(files, stamps);
+            Inventory::from_files(files.iter().zip(resolved).map(|(r, s)| info(r, *s))).unwrap();
+        let store = store_of(files, resolved);
         let lazy = block_on(Inventory::load(&store)).unwrap();
         for mask in 0u32..1 << files.len() {
             // Bit i set: file i is listed exact; clear: last-modified only.
@@ -381,7 +381,7 @@ mod exhaustive {
                 .map(|l| {
                     let i = files.iter().position(|r| r.is(&l.key)).unwrap();
                     if mask >> i & 1 == 1 {
-                        info(&files[i], stamps[i])
+                        info(&files[i], resolved[i])
                     } else {
                         *l
                     }
@@ -396,11 +396,15 @@ mod exhaustive {
                 assert_eq!(
                     reduce(&got.value),
                     want,
-                    "mask={mask:b} t={t} files={files:?} stamps={stamps:?}"
+                    "mask={mask:b} t={t} files={files:?} created-at times={resolved:?}"
                 );
                 if mask == (1 << files.len()) - 1 {
-                    assert_eq!(got.stamps_read, 0, "an exact listing reads no stamp");
-                    let direct = AsOfPlanner::new(&mixed, instant).advance(&Stamps::default());
+                    assert_eq!(
+                        got.created_at_read, 0,
+                        "an exact listing reads no created-at time"
+                    );
+                    let direct =
+                        AsOfPlanner::new(&mixed, instant).advance(&ResolvedCreatedAt::default());
                     assert_eq!(
                         direct.clone(),
                         Resolve::Done(plan_reference(&mixed, RestoreTarget::AsOf(instant)))
@@ -410,14 +414,14 @@ mod exhaustive {
         }
     }
 
-    fn sweep_as_of(d: u64, levels: &[u8], n: usize, stamps: &[i64]) -> (u64, u64) {
-        let mut instants: Vec<i64> = stamps.to_vec();
-        instants.push(stamps.iter().max().unwrap() + 100);
+    fn sweep_as_of(d: u64, levels: &[u8], n: usize, resolved: &[i64]) -> (u64, u64) {
+        let mut instants: Vec<i64> = resolved.to_vec();
+        instants.push(resolved.iter().max().unwrap() + 100);
         let keys = universe(d, levels);
         let (mut inventories, mut cases) = (0u64, 0u64);
         subsets(&keys, n, &mut |files| {
             inventories += 1;
-            assignments(stamps, files.len(), &mut Vec::new(), &mut |assigned| {
+            assignments(resolved, files.len(), &mut Vec::new(), &mut |assigned| {
                 check_as_of(files, assigned, &instants);
                 cases += u64::try_from(instants.len()).unwrap() << files.len();
             });
@@ -429,7 +433,7 @@ mod exhaustive {
     fn every_small_inventory_plans_as_of_the_same_lazily() {
         let counts = sweep_as_of(4, &[0, 1, 9], 3, &[100, 200, 300]);
         report(
-            "as-of D=4 levels {0,1,9} N<=3, 3 stamps",
+            "as-of D=4 levels {0,1,9} N<=3, 3 created-at times",
             counts,
             &Tally::new(),
         );
@@ -440,7 +444,7 @@ mod exhaustive {
     fn every_larger_inventory_plans_as_of_the_same_lazily() {
         let counts = sweep_as_of(5, &[0, 1, 8, 9], 3, &[100, 200, 300, 400]);
         report(
-            "as-of D=5 levels {0,1,8,9} N<=3, 3 stamps",
+            "as-of D=5 levels {0,1,8,9} N<=3, 3 created-at times",
             counts,
             &Tally::new(),
         );

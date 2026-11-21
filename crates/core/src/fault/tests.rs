@@ -513,11 +513,11 @@ fn from_staging_refused_is_local_io_and_checksum_is_fsync() {
         cause: CorruptCause::ChecksumMismatch { part: None },
     };
     assert_eq!(Fault::from_staging(&mismatch), Fault::LocalFsyncFailed);
-    let stamp = StoreError::Corrupt {
+    let created_at = StoreError::Corrupt {
         key: None,
-        cause: CorruptCause::BadStamp,
+        cause: CorruptCause::BadCreatedAt,
     };
-    assert_eq!(Fault::from_staging(&stamp), Fault::StagedLost);
+    assert_eq!(Fault::from_staging(&created_at), Fault::StagedLost);
 }
 
 #[test]
@@ -525,7 +525,7 @@ fn from_remote_any_other_corrupt_is_remote_corrupt() {
     for cause in [
         CorruptCause::NotARegularFile,
         CorruptCause::TimestampOutOfRange,
-        CorruptCause::BadStamp,
+        CorruptCause::BadCreatedAt,
     ] {
         let err = StoreError::Corrupt { key: None, cause };
         assert_eq!(store_fault(&err), Fault::RemoteCorrupt);

@@ -80,7 +80,7 @@ also caught by a core test) and missed `actor.rs:573:13`. The second run execute
 
 Tests added: `entropy_is_splitmix64` and `below_scales_the_whole_output` (`env.rs`),
 `the_longest_backoff_is_five_minutes` (`fault/tests.rs`),
-`stamped_keeps_every_file_and_gives_each_its_stored_stamp` (`inventory.rs`),
+`with_created_at_keeps_every_file_and_gives_each_its_stored_created_at` (`inventory.rs`),
 `debug_and_the_range_side_print_what_a_log_line_needs` (`layout.rs`), `the_chunk_is_one_mebibyte`,
 `a_small_output_is_written_to_the_upload_once` and a lower bound on the measured peak in the memory-bound test
 (`compact/tests.rs`), `the_failed_state_stays_at_the_threshold`,
@@ -119,7 +119,7 @@ and `a_requested_snapshot_is_staged_on_a_quiet_wal` (`actor/tests.rs`).
 | `env.rs:159:13` | replace fakes::<impl Entropy for SeededEntropy>::below -> u64 with 0 |
 | `env.rs:160:32` | replace >> with << in fakes::<impl Entropy for SeededEntropy>::below |
 | `fault.rs:27:57` | replace * with + |
-| `inventory.rs:112:9` | replace Inventory::stamped -> Result<Self, StoreError> with Ok(Default::default()) |
+| `inventory.rs:112:9` | replace Inventory::with_created_at -> Result<Self, StoreError> with Ok(Default::default()) |
 | `layout.rs:93:9` | replace <impl fmt::Display for RangeSide>::fmt -> fmt::Result with Ok(Default::default()) |
 | `layout.rs:245:9` | replace <impl fmt::Debug for FileKey>::fmt -> fmt::Result with Ok(Default::default()) |
 
@@ -162,7 +162,7 @@ its timeout table names the loop each one spins; `retry.rs:205:9` is caught outr
 | `compact.rs:396:25` | replace >= with < in Reader::step |
 | `maintain.rs:457:72` | replace > with == in plan_level |
 | `maintain.rs:457:72` | replace > with >= in plan_level |
-| `maintain.rs:535:5` | replace stamped_after -> Result<bool, FileInfo> with Ok(true) |
+| `maintain.rs:535:5` | replace created_after -> Result<bool, FileInfo> with Ok(true) |
 | `restore.rs:508:16` | replace < with == in apply_file |
 | `restore.rs:508:16` | replace < with > in apply_file |
 | `retry.rs:205:9` | replace Core<S, P, E>::wait_after -> Option<Duration> with Some(Default::default()) |
@@ -192,7 +192,7 @@ No survivor revealed a bug.
 | `layout.rs` | | 1 | | | |
 | `retry.rs` | 1 | | | | |
 | `upload.rs` | 2 | | | | 1 |
-| `stamps.rs` | 3 | | | | |
+| `created_at.rs` | 3 | | | | |
 | `actor.rs` | 14 | 1 | 1 | | 3 |
 | `conformance.rs` | | | | 7 | |
 | `compact.rs` | | | | | 3 |
@@ -213,13 +213,13 @@ Each was run again with `--file <file> --re '<file>:<line>:<col>'` and both test
 | `recover.rs:756:42` | replace match guard at_start with false in frame_state | `rule_9_at_boot_a_tip_ending_at_the_wal_start_has_no_frame_to_miss` (`recover/tests.rs`) |
 | `sync.rs:35:29` | replace << with >> (`DEFAULT_CAP`) | `the_default_cap_is_go_s_64_mib` (`sync/tests.rs`) |
 | `sync.rs:38:27` | replace << with >> (`FLUSH_AT`) | `a_small_file_reaches_the_upload_in_one_write` (`sync/tests.rs`) |
-| `sync.rs:231:28` | replace > with >= in clamp | `an_equal_clock_is_not_a_clamp` (`sync/tests.rs`); the existing proptest draws equal stamps about once in a thousand cases |
+| `sync.rs:231:28` | replace > with >= in clamp | `an_equal_clock_is_not_a_clamp` (`sync/tests.rs`); the existing proptest draws equal created-at times about once in a thousand cases |
 | `retry.rs:341:9` | replace RetryingUpload::abort with Ok(()) | the call count in `abort_passes_through` (`retry/tests.rs`) |
 | `upload.rs:49:24` | replace * with + (`CHUNK`) | the read count in `a_staged_file_larger_than_one_chunk_is_streamed_whole` (`upload/tests.rs`) |
 | `upload.rs:253:23` | replace match guard newest > confirmed with true in list_step | `a_listing_does_not_read_back_a_tail_already_confirmed` (`upload/tests.rs`) |
-| `stamps.rs:41:9` | replace Stamps::len -> usize with 0 | `the_ledger_counts_each_stamp_resolved_through_the_store` (`stamps.rs`) |
-| `stamps.rs:41:9` | replace Stamps::len -> usize with 1 | same |
-| `stamps.rs:47:9` | replace Stamps::is_empty -> bool with false | same |
+| `created_at.rs:41:9` | replace ResolvedCreatedAt::len -> usize with 0 | `the_ledger_counts_each_created_at_resolved_through_the_store` (`created_at.rs`) |
+| `created_at.rs:41:9` | replace ResolvedCreatedAt::len -> usize with 1 | same |
+| `created_at.rs:47:9` | replace ResolvedCreatedAt::is_empty -> bool with false | same |
 | `actor.rs:293:5` | replace leaves_bad_snapshot -> bool with true | `a_snapshot_that_fails_before_its_commit_deletes_nothing` (`actor/tests/rejected_snapshot.rs`) |
 | `actor.rs:586:13` | replace && with \|\| in Actor::checkpoint_decision | `a_failed_checkpoint_waits_out_its_backoff` (`actor/tests/lanes.rs`, as are the rest) |
 | `actor.rs:587:13` | replace && with \|\| in Actor::checkpoint_decision | same |
@@ -279,7 +279,7 @@ survivor. For the actor and maintenance mutants other tests also fail outright; 
 | `compact.rs:396:25` | replace >= with < in Reader::step | A consumed chunk is never refilled, so `Reader::step` loops on an empty remainder. |
 | `maintain.rs:472:72` | replace > with == in plan_level | A source file that begins at the destination's last transaction counts as above it, so the level always has a window to compact again and `retention_failure`'s loop never reaches the retention delete. Also fails `a_crash_between_prunes_boots_clean`. |
 | `maintain.rs:472:72` | replace > with >= in plan_level | Same. |
-| `maintain.rs:555:5` | replace stamped_after with Ok(true) | The day's snapshot always counts as taken, so retention, which follows it, never runs and `retention_failure`'s loop follows each window's `Next::At` forever. Also fails `a_crash_between_prunes_boots_clean`. |
+| `maintain.rs:555:5` | replace created_after with Ok(true) | The day's snapshot always counts as taken, so retention, which follows it, never runs and `retention_failure`'s loop follows each window's `Next::At` forever. Also fails `a_crash_between_prunes_boots_clean`. |
 | `restore.rs:508:16` | replace < with == in apply_file | The read loop ends only on a chunk of exactly the read length; past the end every read is empty, forever (every actor test that restores). |
 | `restore.rs:508:16` | replace < with > in apply_file | The loop never ends on a short chunk: the same. |
 | `store.rs:80:9` | replace ReadLen::get with 0 | Every read returns nothing, and the uploader's read loops (`same_bytes` and the staged copy) end only on a chunk shorter than `ReadLen::get`, now 0. |
@@ -324,7 +324,7 @@ column) and is caught.
 | `verify.rs:521:55` | replace && with \|\| in name_findings | `a_stray_level_zero_base_beside_a_newer_snapshot_reports_nothing` |
 | `verify.rs:656:41` | replace == with != in Walk::finish | `the_page_size_reference_is_the_base_even_when_the_odd_file_is_read_first` |
 | `verify/dry_run.rs:32:9` | replace DigestSink::truncate with Ok(()) | `a_database_that_shrinks_then_grows_verifies_clean` |
-| `maintain/retain.rs:321:5` | replace aged -> bool with true | `an_unstamped_last_file_holds_only_at_level_zero_or_nine` (`maintain/retain/tests.rs`) |
+| `maintain/retain.rs:321:5` | replace aged -> bool with true | `a_last_file_without_created_at_holds_only_at_level_zero_or_nine` (`maintain/retain/tests.rs`) |
 | `maintain/retain.rs:321:22` | replace == with != in aged | same |
 | `maintain/retain.rs:470:57` | replace < with <= in level_zero | `a_level_zero_file_ending_at_the_floor_is_not_below_it` |
 | `maintain/state.rs:136:9` | replace MaintainState::record_delete with () | `a_failed_delete_of_a_distrusted_output_backs_its_level_off` (`maintain/tests.rs`) |
@@ -343,7 +343,7 @@ column) and is caught.
 | Where | Mutation | Why |
 | --- | --- | --- |
 | `verify/dry_run.rs:37:9` | `DigestSink::reset` becomes `Ok(())` | Restore resets the sink only to apply a whole chain again from transaction 1, and that chain writes every page any earlier attempt wrote (at its newest version) or truncates it away, so nothing a reset would have cleared reaches the checksum. |
-| `verify/dry_run.rs:118:9` | the dry run's `Counting::delete` becomes `Ok(())` | `restore_from` never deletes: restore, the planner, the inventory and the stamp ledger only list and read. |
+| `verify/dry_run.rs:118:9` | the dry run's `Counting::delete` becomes `Ok(())` | `restore_from` never deletes: restore, the planner, the inventory and the created-at time ledger only list and read. |
 | `maintain/retain.rs:273:82` | `hole`: `max() > snapshot` becomes `>=` | A file that ends at the newest snapshot's end starts at or below it, so it never starts past `reach + 1`, and `reach.max(..)` leaves `reach`, which is already at least the snapshot's end, unchanged. |
 | `maintain/retain.rs:287:12` | `hole`: `reach < newest` becomes `>` | `reach` only takes file ends, so it never passes `newest` and `>` is never true; and `<` is true only when the newest file is a level-9 file that does not start at 1, which `gate` holds as a malformed snapshot before it calls `hole`. |
 | `maintain/retain.rs:537:37` | `self_check`: guard `Some(chain.reaches()) == inventory.newest()` becomes `true` | No rule deletes the last file of a level, so the newest file survives every job, and a `Latest` plan of the rest is either no plan or one that reaches the rest's newest, which is the listing's. |
@@ -366,7 +366,7 @@ a test asks of the engine, not what the engine does, and the fakes are checked a
 | `upload.rs:592:17` | replace < with == in copy_verified | The staged copy reads empty chunks past the end forever. |
 | `upload.rs:592:17` | replace < with > in copy_verified | Same. |
 | `verify.rs:757:20` | replace < with > in Walk::read | The walk's read loop never ends on a short chunk and reads empty chunks forever (every `Depth::Contents` test). |
-| `maintain/retain.rs:362:15` | replace <= with > in Found::wake_at | Retention only names wake instants past the newest stamp, which the anchor never reaches, so `retention_failure`'s tick loop (actor tests) follows `Next::At` forever. Also fails `a_covered_level_zero_file_wakes_when_it_is_old_enough`. |
+| `maintain/retain.rs:362:15` | replace <= with > in Found::wake_at | Retention only names wake instants past the newest created-at time, which the anchor never reaches, so `retention_failure`'s tick loop (actor tests) follows `Next::At` forever. Also fails `a_covered_level_zero_file_wakes_when_it_is_old_enough`. |
 
 ### Kept test helpers: `mem.rs` and `conformance.rs`
 
@@ -377,7 +377,7 @@ harness behaviour the cases rely on.
 | Test | Promise or behaviour | Kills (first-run line numbers) |
 | --- | --- | --- |
 | `a_store_that_reads_back_nothing_after_a_late_failed_commit_fails_the_suite` | after a commit that fails once its object is published, reads agree with the listing | `379:8` (`delete !`), `128:9` (returns false), `28:9` (empty message) |
-| `a_store_that_lists_another_exact_stamp_fails_the_suite` | a listed stamp is the committed one or marked last-modified | `634:5` (`exact_or_marked` true), `28:9` |
+| `a_store_that_lists_another_exact_created_at_fails_the_suite` | a listed created-at time is the committed one or marked last-modified | `634:5` (`exact_or_marked` true), `28:9` |
 | `a_harness_that_cannot_inject_skips_the_late_commit_case` | the trait's default declines to inject, so a store that cannot be made to fail late is not failed for it | `99:9` (default true), `379:8` |
 | `the_mem_harness_injects_a_late_commit_failure` | the in-memory harness does inject | `128:9` |
 | `the_last_modified_harness_lists_last_modified` | the second in-memory harness really lists last-modified times, so the suite runs once in each listing mode | `111:9` |
@@ -396,7 +396,7 @@ The one timeout is `conformance.rs:65:9`, `ThreadWaker::wake` replaced by `()`: 
 polled again because `block_on` stays parked, so `block_on_resumes_a_future_that_was_woken` hangs and is
 killed. That is a failing test, not a survivor; no test can see a thread that never unparks other than by
 waiting for it. Most of the unviable mutants replace a function returning `Result<(), Failure>`, a key, a
-stamp or a listing with `Default::default()`, which those types do not implement.
+created-at time or a listing with `Default::default()`, which those types do not implement.
 
 The four-job run filled the disk after 70 mutants and reported four of them unviable from the failed build
 (`conformance.rs:65:9`, `71:5`, `504:12`, `mem.rs:103:9` with 0). They were run again at one job, with the

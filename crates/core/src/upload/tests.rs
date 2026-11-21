@@ -13,7 +13,7 @@ use super::*;
 use crate::conformance::block_on;
 use crate::fault::Next;
 use crate::fault::{Backoff, PersistentCause, Policy, policy};
-use crate::layout::StoredStamp;
+use crate::layout::CreatedAt;
 use crate::mem::{MemStore, MemUpload};
 use crate::store::{CorruptCause, Listing, StoreError, StoreOp};
 
@@ -80,7 +80,7 @@ fn ps() -> PageSize {
     PageSize::new(4096).unwrap()
 }
 
-fn stamp(n: u64) -> Timestamp {
+fn created_at(n: u64) -> Timestamp {
     Timestamp::from_unix_millis(i64::try_from(n).unwrap().saturating_mul(1000))
 }
 
@@ -91,7 +91,7 @@ fn encode(n: u64) -> Vec<u8> {
         page_size: ps(),
         commit: 2,
         txids: TxidRange::single(txid(n)),
-        timestamp: stamp(n),
+        timestamp: created_at(n),
         pre_apply: None,
         wal: None,
         node_id: 0,
@@ -109,7 +109,7 @@ fn encode(n: u64) -> Vec<u8> {
 
 fn put_bytes(store: &MemStore, at: FileKey, bytes: &[u8]) -> FileInfo {
     block_on(async {
-        let mut up = store.begin_upload(&at, stamp(1)).await.unwrap();
+        let mut up = store.begin_upload(&at, created_at(1)).await.unwrap();
         up.write(bytes).await.unwrap();
         up.commit().await.unwrap()
     })
@@ -205,23 +205,23 @@ impl ObjectStore for Probe {
         self.inner.read(key, offset, len)
     }
 
-    fn stamp(
+    fn created_at(
         &self,
         file: &FileInfo,
-    ) -> impl Future<Output = Result<StoredStamp, StoreError>> + Send {
-        self.inner.stamp(file)
+    ) -> impl Future<Output = Result<CreatedAt, StoreError>> + Send {
+        self.inner.created_at(file)
     }
 
-    fn read_with_stamp(
+    fn read_with_created_at(
         &self,
         file: &FileInfo,
         len: ReadLen,
-    ) -> impl Future<Output = Result<(Vec<u8>, StoredStamp), StoreError>> + Send {
+    ) -> impl Future<Output = Result<(Vec<u8>, CreatedAt), StoreError>> + Send {
         {
             let mut log = self.log();
             log.reads = log.reads.saturating_add(1);
         }
-        self.inner.read_with_stamp(file, len)
+        self.inner.read_with_created_at(file, len)
     }
 
     fn begin_upload(
@@ -371,7 +371,7 @@ fn a_listing_of_an_empty_replica_then_uploads_from_one() {
     assert_eq!(info.key, key(1));
     assert_eq!(info.size, u64::try_from(bytes.len()).unwrap());
     assert_eq!(read_all(&remote, &key(1)), bytes);
-    assert_eq!(info.exact_stamp().unwrap().at(), stamp(1));
+    assert_eq!(info.created_at().unwrap().at(), created_at(1));
 }
 
 #[test]
@@ -622,7 +622,7 @@ fn big_file() -> Vec<u8> {
         page_size: ps(),
         commit: 200,
         txids: TxidRange::single(txid(1)),
-        timestamp: stamp(1),
+        timestamp: created_at(1),
         pre_apply: None,
         wal: None,
         node_id: 0,

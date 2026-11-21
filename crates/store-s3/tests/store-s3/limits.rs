@@ -8,8 +8,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    BatchKind, FakeClock, FileInfo, Level, ListAt, ListedStamp, ObjectStore, ReadAt, ReadLen,
-    Upload,
+    BatchKind, FakeClock, FileInfo, Level, ListAt, ListedTime, ObjectStore, ReadAt, ReadLen, Upload,
 };
 use lsr_ltx::Timestamp;
 use lsr_store_s3::{
@@ -119,9 +118,9 @@ fn concurrency_governs_only_parts() {
     let files = [FileInfo {
         key: k,
         size: 4,
-        listed: ListedStamp::LastModified(now()),
+        listed: ListedTime::LastModified(now()),
     }];
-    block_on(store.stamp_many(&files));
+    block_on(store.created_at_many(&files));
     assert_eq!(seen(&limits), [8, 16]);
 }
 
@@ -140,11 +139,11 @@ fn creation_time_heads_go_sixteen_at_a_time() {
     let files = [FileInfo {
         key: k,
         size: 4,
-        listed: ListedStamp::LastModified(now()),
+        listed: ListedTime::LastModified(now()),
     }];
-    assert_eq!(block_on(store.stamp_many(&files)).len(), 1);
+    assert_eq!(block_on(store.created_at_many(&files)).len(), 1);
     assert_eq!(seen(&limits), [16]);
-    assert_eq!(store.batch_width(BatchKind::Stamps).get(), 16);
+    assert_eq!(store.batch_width(BatchKind::ResolvedCreatedAt).get(), 16);
 }
 
 #[test]

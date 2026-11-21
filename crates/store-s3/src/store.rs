@@ -6,7 +6,7 @@
 //! means is decided in one place. The store never retries.
 //!
 //! Batches: a call that needs several independent requests (the parts of an
-//! upload, reads ahead, the levels of a listing, a set of stamps) builds them
+//! upload, reads ahead, the levels of a listing, a set of created-at times) builds them
 //! all, hands them to [`Transport::send_many`] with the limit of their kind,
 //! and judges each response alone, exactly as a single request. The kinds are
 //! limited apart, as Go does: multipart parts by the `concurrency` setting
@@ -24,8 +24,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lsr_core::{
-    BatchKind, Clock, FileInfo, FileKey, Level, ListAt, ListedStamp, Listing, ObjectStore,
-    PageLimit, ReadAt, ReadLen, StampOrigin, StoreError, StoreOp, StoredStamp,
+    BatchKind, Clock, CreatedAt, CreatedAtSource, FileInfo, FileKey, Level, ListAt, ListedTime,
+    Listing, ObjectStore, PageLimit, ReadAt, ReadLen, StoreError, StoreOp,
 };
 use lsr_ltx::{Timestamp, TxidRange};
 
@@ -36,22 +36,22 @@ use crate::config::{
 use crate::credentials::S3Credentials;
 use crate::orphans::Orphans;
 use crate::request::{HttpRequest, MAX_DELETE_KEYS, RequestBuilder, RequestError};
-use crate::response::{Head, parse_delete_failures, parse_head, parse_stamp_header};
+use crate::response::{Head, parse_created_at_header, parse_delete_failures, parse_head};
 use crate::transport::{HttpResponse, Transport};
 use crate::upload::S3Upload;
 #[cfg(feature = "ureq")]
 use crate::ureq_transport::UreqTransport;
 
-/// What the stamps read so far found, for the event layer (this crate emits no
-/// events). A listing reads none; each [`ObjectStore::stamp`] and
-/// [`ObjectStore::read_with_stamp`] that settles adds one.
+/// What the created-at times read so far found, for the event layer (this crate emits no
+/// events). A listing reads none; each [`ObjectStore::created_at`] and
+/// [`ObjectStore::read_with_created_at`] that settles adds one.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct ListStats {
-    /// Stamps that came from the object's metadata.
-    pub stamped: u64,
-    /// Objects with no stamp metadata, stamped with their `LastModified`.
+    /// Created-at times that came from the object's metadata.
+    pub from_metadata: u64,
+    /// Objects with no created-at time metadata, which take their `LastModified` as the created-at time.
     pub fell_back: u64,
-    /// Files listed and gone by the time they were stamped or read.
+    /// Files listed and gone by the time their created-at time or content was read.
     pub vanished: u64,
 }
 
@@ -177,9 +177,9 @@ impl<T: Transport> S3Store<T> {
         self.inner.orphans.len()
     }
 
-    /// The stamp counts since the store was made (a listing reads none).
+    /// The created-at time counts since the store was made (a listing reads none).
     #[must_use]
-    pub fn stamp_stats(&self) -> ListStats {
+    pub fn created_at_stats(&self) -> ListStats {
         *self
             .inner
             .stats
@@ -204,16 +204,16 @@ impl<T: Transport> ObjectStore for S3Store<T> {
         self.inner.read(key, offset, len)
     }
 
-    async fn stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
-        self.inner.stamp(file)
+    async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
+        self.inner.created_at(file)
     }
 
-    async fn read_with_stamp(
+    async fn read_with_created_at(
         &self,
         file: &FileInfo,
         len: ReadLen,
-    ) -> Result<(Vec<u8>, StoredStamp), StoreError> {
-        self.inner.read_with_stamp(file, len)
+    ) -> Result<(Vec<u8>, CreatedAt), StoreError> {
+        self.inner.read_with_created_at(file, len)
     }
 
     async fn begin_upload(
@@ -235,7 +235,7 @@ impl<T: Transport> ObjectStore for S3Store<T> {
     fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {
         match kind {
             BatchKind::Reads | BatchKind::Lists => READ_CONCURRENCY,
-            BatchKind::Stamps => CREATION_TIME_CONCURRENCY,
+            BatchKind::ResolvedCreatedAt => CREATION_TIME_CONCURRENCY,
         }
     }
 
@@ -251,29 +251,29 @@ impl<T: Transport> ObjectStore for S3Store<T> {
         self.inner.list_many(pages, limit)
     }
 
-    async fn stamp_many(&self, files: &[FileInfo]) -> Vec<Result<StoredStamp, StoreError>> {
-        self.inner.stamp_many(files)
+    async fn created_at_many(&self, files: &[FileInfo]) -> Vec<Result<CreatedAt, StoreError>> {
+        self.inner.created_at_many(files)
     }
 }
 
-/// The stamp a HEAD settles: the object's metadata when it has one, else the
+/// The created-at time a HEAD settles: the object's metadata when it has one, else the
 /// listed `LastModified` marked as the fallback. The size must be the one the
 /// caller saw, or the object was overwritten since and a retry reads the new one.
-fn stamp_from_head(
+fn created_at_from_head(
     op: StoreOp,
     head: &Head,
     size: u64,
     last_modified: Timestamp,
-) -> Result<StoredStamp, StoreError> {
+) -> Result<CreatedAt, StoreError> {
     if head.size != size {
         return Err(StoreError::Transient {
             op,
             kind: io::ErrorKind::InvalidData,
         });
     }
-    Ok(match head.stamp {
-        Some(stamp) => StoredStamp::metadata(stamp),
-        None => StoredStamp::fallback(last_modified),
+    Ok(match head.created_at {
+        Some(created_at) => CreatedAt::metadata(created_at),
+        None => CreatedAt::fallback(last_modified),
     })
 }
 
@@ -307,7 +307,7 @@ impl<T: Transport> Inner<T> {
         self.clock.now()
     }
 
-    /// Builds a request stamped with the current time.
+    /// Builds a request signed with the current time.
     pub(crate) fn request<R>(
         &self,
         op: StoreOp,
@@ -371,13 +371,13 @@ impl<T: Transport> Inner<T> {
         add(&mut self.stats.lock().unwrap_or_else(PoisonError::into_inner));
     }
 
-    /// Counts how one stamp read ended: found by metadata or by fallback, or the file was gone.
-    fn tally_stamp(&self, result: &Result<StoredStamp, StoreError>) {
+    /// Counts how one created-at time read ended: found by metadata or by fallback, or the file was gone.
+    fn tally_created_at(&self, result: &Result<CreatedAt, StoreError>) {
         self.tally(|stats| match result {
-            Ok(stamp) => match stamp.origin() {
-                StampOrigin::Fallback => stats.fell_back = stats.fell_back.saturating_add(1),
-                StampOrigin::Metadata | StampOrigin::Mtime => {
-                    stats.stamped = stats.stamped.saturating_add(1);
+            Ok(created_at) => match created_at.origin() {
+                CreatedAtSource::Fallback => stats.fell_back = stats.fell_back.saturating_add(1),
+                CreatedAtSource::Metadata | CreatedAtSource::Mtime => {
+                    stats.from_metadata = stats.from_metadata.saturating_add(1);
                 }
             },
             Err(StoreError::NotFound { .. }) => {
@@ -448,16 +448,16 @@ impl<T: Transport> Inner<T> {
         Self::range_body(key, offset, len, &response)
     }
 
-    /// One HEAD: the stamp the object carries, else the `LastModified` the
+    /// One HEAD: the created-at time the object carries, else the `LastModified` the
     /// listing gave for it, checked against the size the caller saw. An
-    /// unparseable stamp is `Corrupt { BadStamp }` here, not at listing time (a listing cannot see metadata).
-    fn stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
-        let result = self.head_stamp(file);
-        self.tally_stamp(&result);
+    /// unparseable created-at time is `Corrupt { BadCreatedAt }` here, not at listing time (a listing cannot see metadata).
+    fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
+        let result = self.head_created_at(file);
+        self.tally_created_at(&result);
         result
     }
 
-    fn head_stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
+    fn head_created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
         let op = StoreOp::Read;
         let key = file.key;
         let request = self.request(op, |b, now| b.head(now, &key))?;
@@ -465,22 +465,22 @@ impl<T: Transport> Inner<T> {
         Self::judge_head(file, &response)
     }
 
-    /// What one HEAD's answer says about `file`'s stamp.
-    fn judge_head(file: &FileInfo, response: &HttpResponse) -> Result<StoredStamp, StoreError> {
+    /// What one HEAD's answer says about `file`'s created-at time.
+    fn judge_head(file: &FileInfo, response: &HttpResponse) -> Result<CreatedAt, StoreError> {
         let op = StoreOp::Read;
         let key = file.key;
         classify(op, Some(&key), None, response)?;
         let head = parse_head(response).map_err(|err| err.into_store(op, Some(key)))?;
         let listed = match file.listed {
-            ListedStamp::Stored(stamp) => stamp.at(),
-            ListedStamp::LastModified(at) => at,
+            ListedTime::Created(created_at) => created_at.at(),
+            ListedTime::LastModified(at) => at,
         };
-        stamp_from_head(op, &head, file.size, listed)
+        created_at_from_head(op, &head, file.size, listed)
     }
 
     /// One HEAD per file as one batch, each judged and counted as
-    /// [`Self::stamp`] does.
-    fn stamp_many(&self, files: &[FileInfo]) -> Vec<Result<StoredStamp, StoreError>> {
+    /// [`Self::created_at`] does.
+    fn created_at_many(&self, files: &[FileInfo]) -> Vec<Result<CreatedAt, StoreError>> {
         let op = StoreOp::Read;
         let results = self.batch(
             op,
@@ -490,40 +490,40 @@ impl<T: Transport> Inner<T> {
             |file, response| Self::judge_head(file, response),
         );
         for result in &results {
-            self.tally_stamp(result);
+            self.tally_created_at(result);
         }
         results
     }
 
-    /// The first bytes and the stamp from one ranged GET, which carries the
+    /// The first bytes and the created-at time from one ranged GET, which carries the
     /// object's metadata; a response without it costs one HEAD more.
-    fn read_with_stamp(
+    fn read_with_created_at(
         &self,
         file: &FileInfo,
         len: ReadLen,
-    ) -> Result<(Vec<u8>, StoredStamp), StoreError> {
+    ) -> Result<(Vec<u8>, CreatedAt), StoreError> {
         let op = StoreOp::Read;
         let key = file.key;
         let request = self.request(op, |b, now| b.get_range(now, &key, 0, len))?;
         let response = self.send(op, request)?;
         let bytes = Self::range_body(&key, 0, len, &response).inspect_err(|err| {
             if let StoreError::NotFound { .. } = err {
-                self.tally_stamp(&Err(err.clone()));
+                self.tally_created_at(&Err(err.clone()));
             }
         })?;
         let carried = match response.status() {
             200 | 206 => {
-                parse_stamp_header(&response).map_err(|err| err.into_store(op, Some(key)))?
+                parse_created_at_header(&response).map_err(|err| err.into_store(op, Some(key)))?
             }
             _ => None,
         };
         match carried {
             Some(at) => {
-                let stamp = StoredStamp::metadata(at);
-                self.tally_stamp(&Ok(stamp));
-                Ok((bytes, stamp))
+                let created_at = CreatedAt::metadata(at);
+                self.tally_created_at(&Ok(created_at));
+                Ok((bytes, created_at))
             }
-            None => Ok((bytes, self.stamp(file)?)),
+            None => Ok((bytes, self.created_at(file)?)),
         }
     }
 

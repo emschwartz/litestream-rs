@@ -11,7 +11,7 @@ fn off(config: Maintenance) -> Maintenance {
 }
 
 fn due_on(files: Vec<FileInfo>, config: &Maintenance, state: &mut MaintainState) -> Due {
-    let now = newest_stamp(&files);
+    let now = newest_created_at(&files);
     due_state(&inv(files), at(now), config, None, state)
 }
 
@@ -53,14 +53,14 @@ fn with_retention_off_no_snapshot_compacted_or_level_zero_file_is_deleted() {
     assert_eq!(got, QUIET);
 }
 
-/// Off, retention reads no stamp: on a listing that carries none, the
-/// ladder costs no stamp request at all, where enforcing it reads several
-/// (Go skips only the delete call; reading stamps for deletes that never
+/// Off, retention reads no created-at time: on a listing that carries none, the
+/// ladder costs no created-at time request at all, where enforcing it reads several
+/// (Go skips only the delete call; reading created-at times for deletes that never
 /// happen buys nothing).
 #[test]
-fn with_retention_off_no_stamp_is_read_for_retention() {
+fn with_retention_off_no_created_at_is_read_for_retention() {
     let files = ladder();
-    let now = newest_stamp(&files);
+    let now = newest_created_at(&files);
     let (enforced, asked) = lazy_due(&files, now, &one_level(), None);
     assert_eq!(deleted(&enforced), expected_ladder_deletes());
     assert!(!asked.is_empty());

@@ -29,7 +29,7 @@ use std::time::Duration;
 use lsr_ltx::{Timestamp, TxidRange};
 
 use crate::env::{Entropy, Sleeper};
-use crate::layout::StoredStamp;
+use crate::layout::CreatedAt;
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::store::{
     BatchKind, CorruptCause, ListAt, Listing, ObjectStore, PageLimit, ReadAt, ReadLen, StoreError,
@@ -278,18 +278,19 @@ impl<S: ObjectStore, P: Sleeper, E: Entropy> ObjectStore for Retrying<S, P, E> {
         core.run(|| core.inner.read(key, offset, len)).await
     }
 
-    async fn stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
+    async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
         let core = &*self.core;
-        core.run(|| core.inner.stamp(file)).await
+        core.run(|| core.inner.created_at(file)).await
     }
 
-    async fn read_with_stamp(
+    async fn read_with_created_at(
         &self,
         file: &FileInfo,
         len: ReadLen,
-    ) -> Result<(Vec<u8>, StoredStamp), StoreError> {
+    ) -> Result<(Vec<u8>, CreatedAt), StoreError> {
         let core = &*self.core;
-        core.run(|| core.inner.read_with_stamp(file, len)).await
+        core.run(|| core.inner.read_with_created_at(file, len))
+            .await
     }
 
     async fn begin_upload(
@@ -318,15 +319,15 @@ impl<S: ObjectStore, P: Sleeper, E: Entropy> ObjectStore for Retrying<S, P, E> {
         self.core.inner.batch_width(kind)
     }
 
-    /// One batch through the inner store, then each failed stamp read retried
+    /// One batch through the inner store, then each failed created-at time read retried
     /// alone under the policy, in order.
-    async fn stamp_many(&self, files: &[FileInfo]) -> Vec<Result<StoredStamp, StoreError>> {
+    async fn created_at_many(&self, files: &[FileInfo]) -> Vec<Result<CreatedAt, StoreError>> {
         let core = &*self.core;
-        let firsts = core.inner.stamp_many(files).await;
+        let firsts = core.inner.created_at_many(files).await;
         let mut out = Vec::with_capacity(firsts.len());
         for (file, first) in files.iter().zip(firsts) {
             Counters::bump(&core.counters.calls);
-            out.push(core.settle(first, || core.inner.stamp(file)).await);
+            out.push(core.settle(first, || core.inner.created_at(file)).await);
         }
         out
     }

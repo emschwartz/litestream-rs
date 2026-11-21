@@ -458,7 +458,7 @@ impl<S: WalSource, P: PageSource, C: Checkpointer> Engine<S, P, C> {
                         format!(
                             "{:?} {:?}",
                             info.key,
-                            info.exact_stamp().expect("an exact stamp").at()
+                            info.created_at().expect("an exact created-at time").at()
                         ),
                         bytes,
                     ));

@@ -257,14 +257,14 @@ struct State {
     in_tick_done: Option<InTickCommit>,
 }
 
-/// Where the harness's logs stood: its own stamps, opaque to the rules.
-pub type Stamp = Box<dyn Fn() -> (usize, usize) + Send>;
+/// Where the harness's logs stood: its own created-at times, opaque to the rules.
+pub type CreatedAt = Box<dyn Fn() -> (usize, usize) + Send>;
 
 /// A commit armed by [`SimSqlite::arm_commit_in_tick`].
 struct InTick {
     pages: Vec<(PageNo, Vec<u8>)>,
     db_size: u32,
-    stamp: Stamp,
+    created_at: CreatedAt,
 }
 
 impl std::fmt::Debug for InTick {
@@ -285,8 +285,8 @@ pub struct InTickCommit {
     pub db_size: u32,
     /// Where it sits in the WAL.
     pub app: AppCommit,
-    /// The armed stamp's value at the moment of the commit.
-    pub stamp: (usize, usize),
+    /// The armed created-at time's value at the moment of the commit.
+    pub created_at: (usize, usize),
 }
 
 fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
@@ -341,7 +341,7 @@ impl State {
                 pages: armed.pages,
                 db_size: armed.db_size,
                 app,
-                stamp: (armed.stamp)(),
+                created_at: (armed.created_at)(),
             });
         }
     }
@@ -933,15 +933,20 @@ impl SimSqlite {
 
     /// Arms a commit the app makes inside the engine's next tick: right before
     /// a checkpoint takes its write barrier, after the tick's sync read the
-    /// committed end. `stamp` is read at that moment, so the harness can tell
+    /// committed end. `created_at` is read at that moment, so the harness can tell
     /// what happened before the commit and what after. It replaces any armed
     /// commit; [`SimSqlite::take_commit_in_tick`] disarms it.
-    pub fn arm_commit_in_tick(&self, pages: Vec<(PageNo, Vec<u8>)>, db_size: u32, stamp: Stamp) {
+    pub fn arm_commit_in_tick(
+        &self,
+        pages: Vec<(PageNo, Vec<u8>)>,
+        db_size: u32,
+        created_at: CreatedAt,
+    ) {
         self.with(|state| {
             state.in_tick = Some(InTick {
                 pages,
                 db_size,
-                stamp,
+                created_at,
             });
         });
     }

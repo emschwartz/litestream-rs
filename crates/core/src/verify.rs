@@ -49,7 +49,7 @@ use thiserror::Error;
 
 use self::dry_run::latest_restore;
 use crate::inventory::{Inventory, InventoryError, is_snapshot_start};
-use crate::layout::{FileInfo, FileKey, Level, StoredStamp};
+use crate::layout::{CreatedAt, FileInfo, FileKey, Level};
 use crate::ltx_read::{BrokenLink, LinkEnd, LtxRead, ReadFault, check_link};
 use crate::plan::{KeyTarget, PlanOutcome, plan};
 use crate::restore::RestoreError;
@@ -645,8 +645,8 @@ struct Walk<'a> {
 /// What reading one file produced.
 struct Read {
     header: Option<Header>,
-    /// The stored stamp, from the same request as the first chunk.
-    stamp: Option<StoredStamp>,
+    /// The stored created-at time, from the same request as the first chunk.
+    created_at: Option<CreatedAt>,
     decoded: Result<lsr_ltx::Verified, DecodeError>,
     bytes: u64,
 }
@@ -714,7 +714,7 @@ impl<'a> Walk<'a> {
             self.before = None;
             return Ok(());
         };
-        if let (Some(header), Some(stored)) = (&read.header, read.stamp) {
+        if let (Some(header), Some(stored)) = (&read.header, read.created_at) {
             self.check_header(key, stored, header, findings);
         }
         let in_latest_plan = self.in_plan(key);
@@ -747,12 +747,12 @@ impl<'a> Walk<'a> {
         store: &S,
         info: &FileInfo,
     ) -> Result<Option<Read>, VerifyError> {
-        let first = match store.read_with_stamp(info, chunk_len()).await {
+        let first = match store.read_with_created_at(info, chunk_len()).await {
             Ok(first) => first,
             Err(StoreError::NotFound { .. }) => return Ok(None),
             Err(err) => return Err(VerifyError::Store(err)),
         };
-        let (chunk, stamp) = first;
+        let (chunk, created_at) = first;
         self.files_read = self.files_read.saturating_add(1);
         // The listed size is advisory: the read runs to where the decoder says
         // the file ends, and a damaged file stops it at the damage.
@@ -768,7 +768,7 @@ impl<'a> Walk<'a> {
         };
         Ok(Some(Read {
             header: read.header().copied(),
-            stamp: Some(stamp),
+            created_at: Some(created_at),
             decoded,
             bytes: read.bytes_read(),
         }))
@@ -777,7 +777,7 @@ impl<'a> Walk<'a> {
     fn check_header(
         &mut self,
         key: FileKey,
-        stored: StoredStamp,
+        stored: CreatedAt,
         header: &Header,
         findings: &mut Findings,
     ) {
@@ -796,12 +796,12 @@ impl<'a> Walk<'a> {
             });
         }
         self.page_sizes.push((key, header.page_size()));
-        let stamped = header.fields().timestamp.unix_millis();
+        let in_header = header.fields().timestamp.unix_millis();
         let stored = stored.at().unix_millis();
-        if stamped != stored {
+        if in_header != stored {
             self.skew.files = self.skew.files.saturating_add(1);
             self.skew.first.get_or_insert(key);
-            self.skew.largest_millis = self.skew.largest_millis.max(stamped.abs_diff(stored));
+            self.skew.largest_millis = self.skew.largest_millis.max(in_header.abs_diff(stored));
         }
     }
 

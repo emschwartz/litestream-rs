@@ -80,6 +80,7 @@ use crate::checkpoint::{
     Staged, after_checkpoint, after_sync, checkpoint, decide, next_wake,
 };
 use crate::compact::CompactError;
+use crate::created_at::{ResolveError, ResolvedCreatedAt, resolve};
 use crate::fault::{
     Action, Backoff, BugSite, Clamped, Fault, HaltCause, Next, PersistentCause, Policy, Responses,
     SnapshotCause, backoff_wait, policy,
@@ -98,7 +99,6 @@ use crate::recover::{
 };
 use crate::snapshot::{SnapshotFailed, read_live, write_snapshot};
 use crate::source::{CheckpointMode, Checkpointer, CommittedRead, PageSource, WalSource};
-use crate::stamps::{ResolveError, Stamps, resolve};
 use crate::store::{ObjectStore, PageLimit};
 use crate::sync::{Step, StepEnd, SyncConfig, Synced, sync_step};
 use crate::upload::{
@@ -192,9 +192,9 @@ pub enum Event {
     Maintained {
         /// What it did.
         event: MaintainedEvent,
-        /// How many stamps the decision read from the replica (zero when the
+        /// How many created-at times the decision read from the replica (zero when the
         /// listing carried them, or when the step did not consult the planner).
-        stamps_read: u64,
+        created_at_read: u64,
     },
     /// Nothing was ready.
     Idle,
@@ -376,10 +376,10 @@ const fn leaves_bad_snapshot(fault: Fault) -> bool {
     }
 }
 
-fn stamp_fault(err: &ResolveError) -> Fault {
+fn created_at_fault(err: &ResolveError) -> Fault {
     match err {
         ResolveError::Store(err) => Fault::from_remote(err),
-        ResolveError::Repeated { .. } => Fault::Bug(BugSite::StampRepeated),
+        ResolveError::Repeated { .. } => Fault::Bug(BugSite::CreatedAtRepeated),
     }
 }
 
@@ -1073,7 +1073,7 @@ impl Actor {
     /// recovery verdict ends.
     #[expect(
         clippy::result_large_err,
-        reason = "Tick is the early-exit value of a private step and is returned at once; FileInfo's stamp pushed it past the threshold"
+        reason = "Tick is the early-exit value of a private step and is returned at once; FileInfo's created-at time pushed it past the threshold"
     )]
     fn stepped(
         &mut self,
@@ -1457,7 +1457,7 @@ impl Actor {
         }
         let event = Event::Maintained {
             event: MaintainedEvent::Deleted(keys.len()),
-            stamps_read: 0,
+            created_at_read: 0,
         };
         Some(self.ran(event, now))
     }
@@ -1513,33 +1513,35 @@ impl Actor {
             .set_pin(self.kept.retention_pin());
         let decided = {
             let (cfg, state) = (&self.kept.cfg.maintenance, &mut self.engine.maintain.state);
-            let mut step = |stamps: &Stamps| due(&inventory, now, cfg, published, state, stamps);
+            let mut step = |resolved: &ResolvedCreatedAt| {
+                due(&inventory, now, cfg, published, state, resolved)
+            };
             resolve(env.remote, &mut step).await
         };
-        // A failed stamp read leaves the listing owed: the next tick lists again.
+        // A failed created-at time read leaves the listing owed: the next tick lists again.
         let decided = match decided {
             Ok(decided) => decided,
-            Err(err) => return Some(self.fault(Lane::Maintenance, stamp_fault(&err), now)),
+            Err(err) => return Some(self.fault(Lane::Maintenance, created_at_fault(&err), now)),
         };
         self.engine.maintain.stale = false;
         self.engine.maintain.level_one = Level::new(1)
             .and_then(|level| inventory.level(level).last())
             .map(|info| info.key.range().max());
-        let stamps_read = decided.stamps_read;
+        let created_at_read = decided.created_at_read;
         match decided.value {
             Due::Wait { until, held } => {
                 self.maintained(now);
                 self.engine.maintain.until = until;
                 let event = Event::Maintained {
                     event: MaintainedEvent::Waiting { held },
-                    stamps_read,
+                    created_at_read,
                 };
                 Some(self.ran(event, now))
             }
             Due::Run(job) => {
                 // Whatever the job does, the next listing is what to plan from.
                 self.engine.maintain.stale = true;
-                Some(self.run_job(env, &job, now, stamps_read).await)
+                Some(self.run_job(env, &job, now, created_at_read).await)
             }
         }
     }
@@ -1571,7 +1573,7 @@ impl Actor {
         self.maintained(now);
         let event = Event::Maintained {
             event: MaintainedEvent::Repaired(key),
-            stamps_read: 0,
+            created_at_read: 0,
         };
         Some(self.ran(event, now))
     }
@@ -1587,12 +1589,12 @@ impl Actor {
         env: &mut Env<'_, W, P, C, L, R>,
         job: &Job,
         now: Timestamp,
-        stamps_read: u64,
+        created_at_read: u64,
     ) -> Tick {
         let outcome = match job {
             Job::Compact(compact) => run_compact(compact, env.staging, env.remote).await,
             Job::Delete(delete) => run_delete(delete, env.remote).await,
-            Job::Snapshot(_) => return self.snapshot_job(env, job, now, stamps_read).await,
+            Job::Snapshot(_) => return self.snapshot_job(env, job, now, created_at_read).await,
         };
         self.engine.maintain.state.record(now, job, &outcome);
         let event = match outcome {
@@ -1605,7 +1607,13 @@ impl Actor {
             }
         };
         self.maintained(now);
-        self.ran(Event::Maintained { event, stamps_read }, now)
+        self.ran(
+            Event::Maintained {
+                event,
+                created_at_read,
+            },
+            now,
+        )
     }
 
     /// A maintenance step went well. The lane's degraded state goes unless a
@@ -1649,13 +1657,19 @@ impl Actor {
         env: &mut Env<'_, W, P, C, L, R>,
         job: &Job,
         now: Timestamp,
-        stamps_read: u64,
+        created_at_read: u64,
     ) -> Tick {
         // The snapshot's step is the sync lane's work and waits on its wait.
         if !self.kept.lanes.ready(Lane::Sync, now) {
             self.wait_for_sync();
             let event = MaintainedEvent::Waiting { held: None };
-            return self.ran(Event::Maintained { event, stamps_read }, now);
+            return self.ran(
+                Event::Maintained {
+                    event,
+                    created_at_read,
+                },
+                now,
+            );
         }
         let stepped = self.step(env, now).await;
         let proof = match self.stepped(stepped, now) {
@@ -1667,7 +1681,13 @@ impl Actor {
                 self.engine.maintain.stale = false;
                 self.engine.maintain.until = None;
                 let event = MaintainedEvent::Waiting { held: None };
-                return self.ran(Event::Maintained { event, stamps_read }, now);
+                return self.ran(
+                    Event::Maintained {
+                        event,
+                        created_at_read,
+                    },
+                    now,
+                );
             }
             Ok((files, _)) => return self.ran(Event::Synced { files }, now),
             // A failed step waits on the sync lane, and the listing with it:
@@ -1697,7 +1717,13 @@ impl Actor {
             Ok(info) => {
                 self.maintained(now);
                 let event = MaintainedEvent::Snapshot(info);
-                self.ran(Event::Maintained { event, stamps_read }, now)
+                self.ran(
+                    Event::Maintained {
+                        event,
+                        created_at_read,
+                    },
+                    now,
+                )
             }
             Err(SnapshotFailed { fault, key }) => {
                 // The store took the commit and then said the object is not

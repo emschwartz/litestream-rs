@@ -21,7 +21,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
 
-use lsr_core::StoredStamp;
+use lsr_core::CreatedAt;
 use lsr_core::{
     CorruptCause, Entropy, FileInfo, FileKey, Level, Listing, MemStore, ObjectStore, PageLimit,
     ReadLen, SeededEntropy, StoreError, StoreOp, Upload,
@@ -351,27 +351,27 @@ impl<S: ObjectStore> ObjectStore for Faults<S> {
         Ok(bytes)
     }
 
-    async fn stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
+    async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
         if let Verdict::Fail(err) = self.verdict(Call::Read) {
             return Err(err);
         }
-        self.inner.stamp(file).await
+        self.inner.created_at(file).await
     }
 
-    async fn read_with_stamp(
+    async fn read_with_created_at(
         &self,
         file: &FileInfo,
         len: ReadLen,
-    ) -> Result<(Vec<u8>, StoredStamp), StoreError> {
+    ) -> Result<(Vec<u8>, CreatedAt), StoreError> {
         let verdict = self.verdict(Call::Read);
         if let Verdict::Fail(err) = &verdict {
             return Err(err.clone());
         }
-        let (mut bytes, stamp) = self.inner.read_with_stamp(file, len).await?;
+        let (mut bytes, created_at) = self.inner.read_with_created_at(file, len).await?;
         if let Verdict::Flip(at) = verdict {
             flip(&mut bytes, 0, at);
         }
-        Ok((bytes, stamp))
+        Ok((bytes, created_at))
     }
 
     async fn begin_upload(
@@ -420,7 +420,7 @@ fn checksum_mismatch(key: FileKey) -> StoreError {
 }
 
 /// Changes one byte in the middle of the published object, keeping its size
-/// and its stamp.
+/// and its created-at time.
 async fn damage(raw: &MemStore, info: &FileInfo) -> Result<(), StoreError> {
     let mut bytes = read_all(raw, &info.key).await?;
     let middle = bytes.len() / 2;
@@ -428,8 +428,8 @@ async fn damage(raw: &MemStore, info: &FileInfo) -> Result<(), StoreError> {
         *byte ^= 0xff;
     }
     let at = info
-        .exact_stamp()
-        .map_or(Timestamp::from_unix_millis(0), |stamp| stamp.at());
+        .created_at()
+        .map_or(Timestamp::from_unix_millis(0), |created_at| created_at.at());
     let mut up = raw.begin_upload(&info.key, at).await?;
     up.write(&bytes).await?;
     up.commit().await?;
@@ -538,18 +538,18 @@ impl<S: ObjectStore> ObjectStore for Yield<S> {
         self.inner.read(key, offset, len).await
     }
 
-    async fn stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
+    async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
         YieldNow(false).await;
-        self.inner.stamp(file).await
+        self.inner.created_at(file).await
     }
 
-    async fn read_with_stamp(
+    async fn read_with_created_at(
         &self,
         file: &FileInfo,
         len: ReadLen,
-    ) -> Result<(Vec<u8>, StoredStamp), StoreError> {
+    ) -> Result<(Vec<u8>, CreatedAt), StoreError> {
         YieldNow(false).await;
-        self.inner.read_with_stamp(file, len).await
+        self.inner.read_with_created_at(file, len).await
     }
 
     async fn begin_upload(
@@ -655,7 +655,7 @@ impl TapLog {
         lock(&self.state).events.clone()
     }
 
-    /// How many events there are: the stamp the model records per commit.
+    /// How many events there are: the created-at time the model records per commit.
     #[must_use]
     pub fn len(&self) -> usize {
         lock(&self.state).events.len()
@@ -720,17 +720,17 @@ impl<S: ObjectStore> ObjectStore for Tap<S> {
         self.inner.read(key, offset, len).await
     }
 
-    async fn stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
-        self.inner.stamp(file).await
+    async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
+        self.inner.created_at(file).await
     }
 
-    async fn read_with_stamp(
+    async fn read_with_created_at(
         &self,
         file: &FileInfo,
         len: ReadLen,
-    ) -> Result<(Vec<u8>, StoredStamp), StoreError> {
+    ) -> Result<(Vec<u8>, CreatedAt), StoreError> {
         self.log.with(|s| bump(&mut s.counts.reads));
-        self.inner.read_with_stamp(file, len).await
+        self.inner.read_with_created_at(file, len).await
     }
 
     async fn begin_upload(
@@ -833,7 +833,7 @@ impl<S: ObjectStore> Upload for TapUpload<S> {
 #[derive(Debug, Default)]
 struct StageState {
     volatile: BTreeSet<FileKey>,
-    stamps: BTreeMap<FileKey, Timestamp>,
+    resolved: BTreeMap<FileKey, Timestamp>,
 }
 
 /// What a power loss did to one volatile staged file.
@@ -901,9 +901,9 @@ impl StageHandle {
                 let prefix = bytes
                     .get(..usize::try_from(kept).unwrap_or(0))
                     .unwrap_or_default();
-                let stamp = lock(&self.state).stamps.get(&key).copied();
+                let created_at = lock(&self.state).resolved.get(&key).copied();
                 let mut up = raw
-                    .begin_upload(&key, stamp.unwrap_or(Timestamp::from_unix_millis(0)))
+                    .begin_upload(&key, created_at.unwrap_or(Timestamp::from_unix_millis(0)))
                     .await?;
                 up.write(prefix).await?;
                 up.commit().await?;
@@ -980,16 +980,16 @@ impl<S: ObjectStore> ObjectStore for Stage<S> {
         self.inner.read(key, offset, len).await
     }
 
-    async fn stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
-        self.inner.stamp(file).await
+    async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
+        self.inner.created_at(file).await
     }
 
-    async fn read_with_stamp(
+    async fn read_with_created_at(
         &self,
         file: &FileInfo,
         len: ReadLen,
-    ) -> Result<(Vec<u8>, StoredStamp), StoreError> {
-        self.inner.read_with_stamp(file, len).await
+    ) -> Result<(Vec<u8>, CreatedAt), StoreError> {
+        self.inner.read_with_created_at(file, len).await
     }
 
     async fn begin_upload(
@@ -998,7 +998,7 @@ impl<S: ObjectStore> ObjectStore for Stage<S> {
         created_at: Timestamp,
     ) -> Result<Self::Upload, StoreError> {
         let inner = self.inner.begin_upload(key, created_at).await?;
-        lock(&self.handle.state).stamps.insert(*key, created_at);
+        lock(&self.handle.state).resolved.insert(*key, created_at);
         Ok(StageUpload {
             inner,
             handle: self.handle.clone(),
@@ -1010,7 +1010,7 @@ impl<S: ObjectStore> ObjectStore for Stage<S> {
         let mut state = lock(&self.handle.state);
         for key in keys {
             state.volatile.remove(key);
-            state.stamps.remove(key);
+            state.resolved.remove(key);
         }
         Ok(())
     }

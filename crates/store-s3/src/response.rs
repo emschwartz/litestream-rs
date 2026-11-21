@@ -21,8 +21,8 @@ use crate::config::Prefix;
 use crate::request::{UploadId, level_prefix};
 use crate::transport::HttpResponse;
 
-/// The metadata header a file's stamp is stored in.
-const STAMP_HEADER: &str = "x-amz-meta-litestream-timestamp";
+/// The metadata header a file's created-at time is stored in.
+const CREATED_AT_HEADER: &str = "x-amz-meta-litestream-timestamp";
 
 /// Why a 2xx response could not be used.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Error)]
@@ -36,20 +36,20 @@ pub enum ResponseError {
     /// Listed keys are not strictly ascending.
     #[error("listing is out of order")]
     NotAscending,
-    /// The stamp header is present and does not parse.
-    #[error("stamp header does not parse")]
-    BadStamp,
+    /// The created-at time header is present and does not parse.
+    #[error("litestream-timelitestream-timestamp header does not parse")]
+    BadCreatedAt,
 }
 
 impl ResponseError {
-    /// The store error for this fault. A bad stamp is the object's fault, the
+    /// The store error for this fault. A bad created-at time is the object's fault, the
     /// rest a response worth asking for again.
     #[must_use]
     pub fn into_store(self, op: StoreOp, key: Option<FileKey>) -> StoreError {
         match self {
-            Self::BadStamp => StoreError::Corrupt {
+            Self::BadCreatedAt => StoreError::Corrupt {
                 key,
-                cause: CorruptCause::BadStamp,
+                cause: CorruptCause::BadCreatedAt,
             },
             Self::Malformed | Self::KeyOutsidePrefix | Self::NotAscending => {
                 StoreError::Transient {
@@ -68,7 +68,7 @@ pub struct ListedFile {
     pub key: FileKey,
     /// Its size from the listing.
     pub size: u64,
-    /// `LastModified`: what a listing lists for a file. It is never a stamp.
+    /// `LastModified`: what a listing lists for a file. It is never a created-at time.
     pub last_modified: Timestamp,
 }
 
@@ -135,35 +135,35 @@ pub fn parse_list(
 pub struct Head {
     /// `Content-Length`.
     pub size: u64,
-    /// The stored stamp, `None` when the object has no stamp metadata.
-    pub stamp: Option<Timestamp>,
+    /// The stored created-at time, `None` when the object has no created-at time metadata.
+    pub created_at: Option<Timestamp>,
 }
 
 /// Parses a HEAD response.
 ///
 /// # Errors
 /// [`ResponseError::Malformed`] without a numeric `Content-Length`,
-/// [`ResponseError::BadStamp`] when the stamp is present and does not parse.
+/// [`ResponseError::BadCreatedAt`] when the created-at time is present and does not parse.
 pub fn parse_head(r: &HttpResponse) -> Result<Head, ResponseError> {
     let size = r
         .header("content-length")
         .and_then(|text| text.trim().parse().ok())
         .ok_or(ResponseError::Malformed)?;
-    let stamp = parse_stamp_header(r)?;
-    Ok(Head { size, stamp })
+    let created_at = parse_created_at_header(r)?;
+    Ok(Head { size, created_at })
 }
 
-/// The stored stamp on any response that carries the object's metadata (a
+/// The stored created-at time on any response that carries the object's metadata (a
 /// HEAD or a GET), `None` when the object has none.
 ///
 /// # Errors
-/// [`ResponseError::BadStamp`] when the stamp is present and does not parse.
-pub fn parse_stamp_header(r: &HttpResponse) -> Result<Option<Timestamp>, ResponseError> {
-    match r.header(STAMP_HEADER) {
+/// [`ResponseError::BadCreatedAt`] when the created-at time is present and does not parse.
+pub fn parse_created_at_header(r: &HttpResponse) -> Result<Option<Timestamp>, ResponseError> {
+    match r.header(CREATED_AT_HEADER) {
         None => Ok(None),
         Some(text) => Timestamp::parse_rfc3339(text)
             .map(Some)
-            .map_err(|_bad| ResponseError::BadStamp),
+            .map_err(|_bad| ResponseError::BadCreatedAt),
     }
 }
 
@@ -365,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    fn head_reads_size_and_stamp() {
+    fn head_reads_size_and_created_at() {
         let h = parse_head(&with_headers(&[
             ("Content-Length", "42"),
             (
@@ -376,14 +376,14 @@ mod tests {
         .unwrap();
         assert_eq!(h.size, 42);
         assert_eq!(
-            h.stamp.map(|t| t.to_string()).as_deref(),
+            h.created_at.map(|t| t.to_string()).as_deref(),
             Some("2025-01-02T03:04:05.123Z")
         );
         assert_eq!(
             parse_head(&with_headers(&[("content-length", "0")])),
             Ok(Head {
                 size: 0,
-                stamp: None
+                created_at: None
             })
         );
         assert_eq!(
@@ -395,7 +395,7 @@ mod tests {
                 ("content-length", "1"),
                 ("x-amz-meta-litestream-timestamp", "yesterday")
             ])),
-            Err(ResponseError::BadStamp)
+            Err(ResponseError::BadCreatedAt)
         );
     }
 
@@ -451,10 +451,10 @@ mod tests {
     fn response_faults_map_to_store_errors() {
         let k = None;
         assert_eq!(
-            ResponseError::BadStamp.into_store(StoreOp::List, k),
+            ResponseError::BadCreatedAt.into_store(StoreOp::List, k),
             StoreError::Corrupt {
                 key: None,
-                cause: CorruptCause::BadStamp
+                cause: CorruptCause::BadCreatedAt
             }
         );
         assert_eq!(

@@ -10,10 +10,10 @@ use proptest::prelude::*;
 
 use super::*;
 use crate::conformance::block_on;
-use crate::layout::{ListedStamp, StoredStamp};
+use crate::created_at::{Resolve, ResolvedCreatedAt};
+use crate::layout::{CreatedAt, ListedTime};
 use crate::mem::MemStore;
 use crate::plan::{KeyTarget, PlanOutcome, plan};
-use crate::stamps::{Resolve, Stamps};
 use crate::store::{PageLimit, StoreOp, Upload};
 
 /// A day-aligned instant (2023-11-15), so every default window starts on it.
@@ -43,7 +43,7 @@ pub(super) fn file(l: u8, min: u64, max: u64, created: i64) -> FileInfo {
     FileInfo {
         key: key(l, min, max),
         size: 1,
-        listed: ListedStamp::Stored(StoredStamp::mtime(at(created))),
+        listed: ListedTime::Created(CreatedAt::mtime(at(created))),
     }
 }
 
@@ -79,7 +79,7 @@ pub(super) fn due(
     )
 }
 
-/// `super::due` on a listing that carries every stamp, so nothing is asked.
+/// `super::due` on a listing that carries every created-at time, so nothing is asked.
 pub(super) fn due_state(
     inventory: &Inventory,
     now: Timestamp,
@@ -87,9 +87,16 @@ pub(super) fn due_state(
     published: Option<Txid>,
     state: &mut MaintainState,
 ) -> Due {
-    match super::due(inventory, now, config, published, state, &Stamps::default()) {
+    match super::due(
+        inventory,
+        now,
+        config,
+        published,
+        state,
+        &ResolvedCreatedAt::default(),
+    ) {
         Resolve::Done(due) => due,
-        Resolve::Need(file) => panic!("a stored listing asked for a stamp: {file:?}"),
+        Resolve::Need(file) => panic!("a stored listing asked for a created-at time: {file:?}"),
     }
 }
 
@@ -679,7 +686,7 @@ fn a_go_shaped_inventory_plans_what_go_plans_at_three_instants() {
     // compactor.go:104-195).
     let job = run_job(due_at(&i, T0 + 1000));
     assert_eq!(compact_job(&job).output_key(), key(1, 1001, 1020));
-    // Once that output is stamped inside the window, Go's level is too early
+    // Once that output is recorded as created inside the window, Go's level is too early
     // (store.go:797-858) and the next job is the snapshot: its newest
     // snapshot is over 24 h old and the position moved (store.go:584-589).
     let mut done = i.files().to_vec();
@@ -693,7 +700,7 @@ fn a_go_shaped_inventory_plans_what_go_plans_at_three_instants() {
 fn a_go_shaped_snapshot_waits_inside_its_window_and_runs_after() {
     let day = 86_400_000;
     let i = converged(T0 + 1, 4, 6);
-    // The newest snapshot (4) is below position 6, stamped inside today's
+    // The newest snapshot (4) is below position 6, recorded as created inside today's
     // window: too early (store.go:797-858). The next window runs it
     // (store.go:584-589).
     assert_eq!(
@@ -733,9 +740,7 @@ impl Model {
                 self.files.push(FileInfo {
                     key: c.output_key(),
                     size: 1,
-                    listed: ListedStamp::Stored(StoredStamp::mtime(
-                        last.exact_stamp().unwrap().at(),
-                    )),
+                    listed: ListedTime::Created(CreatedAt::mtime(last.created_at().unwrap().at())),
                 });
             }
             Job::Snapshot(s) => self.files.push(file(9, 1, s.through.get(), now)),
@@ -747,7 +752,7 @@ impl Model {
 /// What every job and every wait must satisfy.
 #[derive(Default)]
 struct Checker {
-    /// Per level: the window start of the last job, and its output's stamp.
+    /// Per level: the window start of the last job, and its output's created-at time.
     last: BTreeMap<Level, (Timestamp, Timestamp)>,
     newest_l0: Option<Txid>,
 }
@@ -773,17 +778,17 @@ impl Checker {
         }
         let interval = cfg.interval(c.level()).unwrap();
         let start = go_truncate(now, interval);
-        if let Some((window, stamp)) = self.last.get(&c.level())
+        if let Some((window, created_at)) = self.last.get(&c.level())
             && *window == start
         {
             assert!(
-                *stamp <= start,
+                *created_at <= start,
                 "a second job in one window at {}",
                 c.level()
             );
         }
-        let stamp = files.last().unwrap().exact_stamp().unwrap().at();
-        self.last.insert(c.level(), (start, stamp));
+        let created_at = files.last().unwrap().created_at().unwrap().at();
+        self.last.insert(c.level(), (start, created_at));
     }
 
     fn after(&self, model: &Model) {
@@ -814,7 +819,7 @@ impl Checker {
             if pending {
                 let start = go_truncate(now, cfg.interval(dst).unwrap());
                 assert!(
-                    last.is_some_and(|f| f.exact_stamp().unwrap().at() > start),
+                    last.is_some_and(|f| f.created_at().unwrap().at() > start),
                     "level {l} idle with work"
                 );
             }
@@ -970,13 +975,13 @@ proptest! {
 
 // The schedule on a listing that carries only last-modified times.
 
-/// A lazy store holding `files` (one byte each, stamped as listed).
+/// A lazy store holding `files` (one byte each, recorded as created as listed).
 fn lazy_store(files: &[FileInfo]) -> MemStore {
     let store = MemStore::with_listed_last_modified();
     block_on(async {
         for f in files {
-            let stamp = f.exact_stamp().unwrap().at();
-            let mut up = store.begin_upload(&f.key, stamp).await.unwrap();
+            let created_at = f.created_at().unwrap().at();
+            let mut up = store.begin_upload(&f.key, created_at).await.unwrap();
             up.write(b"x").await.unwrap();
             up.commit().await.unwrap();
         }
@@ -985,7 +990,7 @@ fn lazy_store(files: &[FileInfo]) -> MemStore {
 }
 
 /// `due` over a lazy listing of `files`: the decision and the keys whose
-/// stamps it asked for.
+/// created-at times it asked for.
 pub(super) fn lazy_due(
     files: &[FileInfo],
     now: i64,
@@ -996,23 +1001,23 @@ pub(super) fn lazy_due(
     let listing = load(&store);
     let mut state = MaintainState::default();
     let mut asked = Vec::new();
-    let mut step = |stamps: &Stamps| {
-        let got = super::due(&listing, at(now), cfg, published, &mut state, stamps);
+    let mut step = |resolved: &ResolvedCreatedAt| {
+        let got = super::due(&listing, at(now), cfg, published, &mut state, resolved);
         if let Resolve::Need(file) = &got {
             asked.push(file.first().key);
         }
         got
     };
-    let done = block_on(crate::stamps::resolve(&store, &mut step)).unwrap();
-    assert_eq!(done.stamps_read, store.stamp_calls());
-    assert_eq!(done.stamps_read, u64::try_from(asked.len()).unwrap());
+    let done = block_on(crate::created_at::resolve(&store, &mut step)).unwrap();
+    assert_eq!(done.created_at_read, store.created_at_calls());
+    assert_eq!(done.created_at_read, u64::try_from(asked.len()).unwrap());
     (done.value, asked)
 }
 
 #[test]
 fn schedule_reads_only_lasts_with_work() {
-    // L1 has files above its last, so its last file's stamp is needed and
-    // no other: L2 is empty, L0 and the snapshot decide without a stamp.
+    // L1 has files above its last, so its last file's created-at time is needed and
+    // no other: L2 is empty, L0 and the snapshot decide without a created-at time.
     let mut files = l0_run(1, 5, T0 - 100_000);
     files.push(file(1, 1, 3, T0 - 1));
     let (got, asked) = lazy_due(&files, T0 + 1, &defaults(), None);
@@ -1020,7 +1025,7 @@ fn schedule_reads_only_lasts_with_work() {
     assert_eq!(asked, vec![key(1, 1, 3)]);
 
     // Every level caught up and no snapshot yet: the snapshot is due
-    // without any stamp.
+    // without any created-at time.
     let mut files = l0_run(1, 3, T0 - 100_000);
     files.extend([
         file(1, 1, 3, T0 - 1),
@@ -1031,13 +1036,13 @@ fn schedule_reads_only_lasts_with_work() {
     assert!(matches!(got, Due::Run(Job::Snapshot(_))), "{got:?}");
     assert!(asked.is_empty(), "{asked:?}");
 
-    // Only an otherwise-due snapshot asks for the newest snapshot's stamp.
+    // Only an otherwise-due snapshot asks for the newest snapshot's created-at time.
     let due_files = converged(T0 - 1000, 3, 4).files().to_vec();
     let (got, asked) = lazy_due(&due_files, T0 + 5000, &defaults(), None);
     assert!(matches!(got, Due::Run(Job::Snapshot(_))), "{got:?}");
     assert_eq!(asked, vec![key(9, 1, 3)]);
-    // Idle, nothing is due: the schedule asks for no snapshot stamp, so every
-    // stamp read is retention's (lasts, snapshot starts, scanned level 0).
+    // Idle, nothing is due: the schedule asks for no snapshot created-at time, so every
+    // created-at time read is retention's (lasts, snapshot starts, scanned level 0).
     let idle_files = converged(T0 - 5 * 86_400_000, 4, 4).files().to_vec();
     let (got, asked) = lazy_due(&idle_files, T0, &defaults(), None);
     assert_eq!(
@@ -1054,7 +1059,7 @@ fn schedule_reads_only_lasts_with_work() {
 }
 
 /// Two decisions agree: a compaction is the same when it reads the same
-/// keys, whatever stamp kind its inputs were listed with.
+/// keys, whatever created-at time kind its inputs were listed with.
 fn same_decision(a: &Due, b: &Due) -> bool {
     match (a, b) {
         (Due::Run(Job::Compact(x)), Due::Run(Job::Compact(y))) => {
@@ -1068,7 +1073,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(24))]
 
     /// A lazy listing decides what the stored one does at every tick of a
-    /// write history, and never asks for a stamp it could do without.
+    /// write history, and never asks for a created-at time it could do without.
     #[test]
     fn due_matches_main_on_stored_listings((which, events) in history()) {
         let cfg = if which == 0 { defaults() } else { small() };
@@ -1337,7 +1342,7 @@ fn truncate_to_half(replica: &MemStore, out: &FileKey) {
             )
             .await
             .unwrap();
-        let created = load(replica).level(level(1))[0].exact_stamp().unwrap().at();
+        let created = load(replica).level(level(1))[0].created_at().unwrap().at();
         let mut up = replica.begin_upload(out, created).await.unwrap();
         up.write(&whole[..whole.len() / 2]).await.unwrap();
         up.commit().await.unwrap();

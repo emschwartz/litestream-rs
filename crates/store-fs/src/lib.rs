@@ -6,10 +6,10 @@
 //! store wrote and this store reads one Go wrote.
 //!
 //! A commit writes a scratch file next to the target (`<name>.<pid>-<n>.tmp`,
-//! created exclusively, so two uploads to one key never share bytes), stamps
-//! its mtime with the creation stamp as Go does (the stamp is the file's mtime),
-//! fsyncs it, renames it into place and fsyncs the directory. Go stamps the
-//! mtime after the rename; stamping first means no reader ever sees the file
+//! created exclusively, so two uploads to one key never share bytes), sets
+//! its mtime to the created-at time as Go does (the created-at time is the file's mtime),
+//! fsyncs it, renames it into place and fsyncs the directory. Go sets the
+//! mtime after the rename; setting it first means no reader ever sees the file
 //! with the wrong time.
 //!
 //! Scratch names: the counter restarts with every store and the pid repeats
@@ -52,8 +52,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lsr_core::{
-    CorruptCause, FileInfo, FileKey, Level, ListedStamp, Listing, ObjectStore, PageLimit, ReadLen,
-    StoreError, StoreOp, StoredStamp, Upload, build_listing, parse_file_name,
+    CorruptCause, CreatedAt, FileInfo, FileKey, Level, ListedTime, Listing, ObjectStore, PageLimit,
+    ReadLen, StoreError, StoreOp, Upload, build_listing, parse_file_name,
 };
 use lsr_ltx::{Timestamp, TxidRange};
 
@@ -190,7 +190,7 @@ impl FsStore {
         Ok((bytes, meta))
     }
 
-    fn stamp_now(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
+    fn created_at_now(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
         let key = file.key;
         let meta = fs::metadata(self.file_path(&key))
             .map_err(|err| StoreError::from_io(StoreOp::Read, Some(key), &err))?;
@@ -206,21 +206,21 @@ impl FsStore {
                 kind: io::ErrorKind::InvalidData,
             });
         }
-        mtime_stamp(&meta, key, StoreOp::Read)
+        mtime_created_at(&meta, key, StoreOp::Read)
     }
 
-    fn read_with_stamp_now(
+    fn read_with_created_at_now(
         &self,
         file: &FileInfo,
         len: ReadLen,
-    ) -> Result<(Vec<u8>, StoredStamp), StoreError> {
+    ) -> Result<(Vec<u8>, CreatedAt), StoreError> {
         let (bytes, meta) = self.read_open(&file.key, 0, len)?;
-        Ok((bytes, mtime_stamp(&meta, file.key, StoreOp::Read)?))
+        Ok((bytes, mtime_created_at(&meta, file.key, StoreOp::Read)?))
     }
 
     fn begin_now(&self, key: &FileKey, created_at: Timestamp) -> Result<FsUpload, StoreError> {
         let fail = |err: io::Error| StoreError::from_io(StoreOp::Upload, None, &err);
-        let stamp = to_system_time(created_at).ok_or(StoreError::Corrupt {
+        let mtime = to_system_time(created_at).ok_or(StoreError::Corrupt {
             key: Some(*key),
             cause: CorruptCause::TimestampOutOfRange,
         })?;
@@ -233,7 +233,7 @@ impl FsStore {
             target: self.file_path(key),
             scratch,
             file,
-            stamp,
+            mtime,
             created_at,
             written: 0,
         })
@@ -306,21 +306,25 @@ fn classify(level: Level, entry: &DirEntry, name: &str) -> Result<Entry, StoreEr
     if !meta.is_file() {
         return Err(not_a_file);
     }
-    let stamp = mtime_stamp(&meta, key, StoreOp::List)?;
+    let created_at = mtime_created_at(&meta, key, StoreOp::List)?;
     Ok(Entry::File(FileInfo {
         key,
         size: meta.len(),
-        listed: ListedStamp::Stored(stamp),
+        listed: ListedTime::Created(created_at),
     }))
 }
 
-/// The file's mtime as its stamp: this store keeps the writer's stamp there.
-fn mtime_stamp(meta: &fs::Metadata, key: FileKey, op: StoreOp) -> Result<StoredStamp, StoreError> {
+/// The file's mtime as its created-at time: this store keeps the writer's created-at time there.
+fn mtime_created_at(
+    meta: &fs::Metadata,
+    key: FileKey,
+    op: StoreOp,
+) -> Result<CreatedAt, StoreError> {
     let modified = meta
         .modified()
         .map_err(|err| StoreError::from_io(op, Some(key), &err))?;
     from_system_time(modified)
-        .map(StoredStamp::mtime)
+        .map(CreatedAt::mtime)
         .ok_or(StoreError::Corrupt {
             key: Some(key),
             cause: CorruptCause::TimestampOutOfRange,
@@ -383,19 +387,19 @@ impl ObjectStore for FsStore {
         ready(self.read_now(key, offset, len))
     }
 
-    fn stamp(
+    fn created_at(
         &self,
         file: &FileInfo,
-    ) -> impl Future<Output = Result<StoredStamp, StoreError>> + Send {
-        ready(self.stamp_now(file))
+    ) -> impl Future<Output = Result<CreatedAt, StoreError>> + Send {
+        ready(self.created_at_now(file))
     }
 
-    fn read_with_stamp(
+    fn read_with_created_at(
         &self,
         file: &FileInfo,
         len: ReadLen,
-    ) -> impl Future<Output = Result<(Vec<u8>, StoredStamp), StoreError>> + Send {
-        ready(self.read_with_stamp_now(file, len))
+    ) -> impl Future<Output = Result<(Vec<u8>, CreatedAt), StoreError>> + Send {
+        ready(self.read_with_created_at_now(file, len))
     }
 
     fn begin_upload(
@@ -419,7 +423,7 @@ pub struct FsUpload {
     target: PathBuf,
     scratch: PathBuf,
     file: File,
-    stamp: SystemTime,
+    mtime: SystemTime,
     created_at: Timestamp,
     written: u64,
 }
@@ -428,7 +432,7 @@ impl FsUpload {
     fn commit_now(self) -> Result<FileInfo, StoreError> {
         let fail = |err: io::Error| StoreError::from_io(StoreOp::Upload, None, &err);
         let result = (|| {
-            self.file.set_modified(self.stamp)?;
+            self.file.set_modified(self.mtime)?;
             self.file.sync_all()?;
             let size = self.file.metadata()?.len();
             if size != self.written {
@@ -455,7 +459,7 @@ impl FsUpload {
             Ok(Ok(size)) => Ok(FileInfo {
                 key: self.key,
                 size,
-                listed: ListedStamp::Stored(StoredStamp::mtime(self.created_at)),
+                listed: ListedTime::Created(CreatedAt::mtime(self.created_at)),
             }),
             Err(err) => {
                 // Best effort: a scratch file that survives is invisible anyway.
@@ -567,7 +571,7 @@ mod tests {
             vec![FileInfo {
                 key: key(0, 1, 2),
                 size: 9,
-                listed: ListedStamp::Stored(StoredStamp::mtime(Timestamp::from_unix_millis(
+                listed: ListedTime::Created(CreatedAt::mtime(Timestamp::from_unix_millis(
                     1_700_000_000_456
                 ))),
             }]
@@ -579,7 +583,7 @@ mod tests {
     }
 
     #[test]
-    fn commit_lands_where_go_looks_with_the_stamp_as_mtime() {
+    fn commit_lands_where_go_looks_with_the_created_at_as_mtime() {
         let h = FsHarness::new();
         let target = key(9, 1, 7);
         block_on(async {
@@ -841,7 +845,7 @@ mod tests {
     }
 
     #[test]
-    fn begin_upload_with_an_unrepresentable_stamp_is_corrupt_not_a_panic() {
+    fn begin_upload_with_an_unrepresentable_created_at_is_corrupt_not_a_panic() {
         let h = FsHarness::new();
         let target = key(0, 1, 1);
         let err = block_on(

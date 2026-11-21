@@ -259,7 +259,7 @@ fn unique_prefix() -> String {
 fn upload(store: &S3Store, info: &FileInfo, body: &[u8]) {
     block_on(async {
         let mut up = store
-            .begin_upload(&info.key, info.exact_stamp().unwrap().at())
+            .begin_upload(&info.key, info.created_at().unwrap().at())
             .await
             .expect("begin");
         up.write(body).await.expect("write");

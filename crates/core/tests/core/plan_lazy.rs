@@ -1,11 +1,11 @@
 //! The as-of planner in query form: [`AsOfPlanner`] over a listing that carries
 //! only last-modified times, driven by [`resolve`], against [`plan_reference`] over the same
-//! files with every stamp exact.
+//! files with every created-at time exact.
 
 #[cfg(test)]
 #[expect(
     clippy::arithmetic_side_effects,
-    reason = "the generator and fixtures do arithmetic on small bounded transaction ids and stamps"
+    reason = "the generator and fixtures do arithmetic on small bounded transaction ids and created-at times"
 )]
 mod lazy {
     use std::cmp::Reverse;
@@ -13,8 +13,8 @@ mod lazy {
 
     use lsr_core::conformance::block_on;
     use lsr_core::{
-        AsOfPlanner, FileInfo, FileKey, Inventory, Level, ListedStamp, MemStore, ObjectStore,
-        PlanOutcome, Resolve, RestoreTarget, StampStep, Stamps, StoredStamp, Upload,
+        AsOfPlanner, CreatedAt, CreatedAtStep, FileInfo, FileKey, Inventory, Level, ListedTime,
+        MemStore, ObjectStore, PlanOutcome, Resolve, ResolvedCreatedAt, RestoreTarget, Upload,
         plan_reference, resolve,
     };
     use lsr_ltx::{Timestamp, Txid, TxidRange};
@@ -25,15 +25,15 @@ mod lazy {
         level: u8,
         min: u64,
         max: u64,
-        stamp: i64,
+        created_at: i64,
     }
 
-    fn f(level: u8, min: u64, max: u64, stamp: i64) -> F {
+    fn f(level: u8, min: u64, max: u64, created_at: i64) -> F {
         F {
             level,
             min,
             max,
-            stamp,
+            created_at,
         }
     }
 
@@ -50,7 +50,7 @@ mod lazy {
         FileInfo {
             key: key(f),
             size: 1,
-            listed: ListedStamp::Stored(StoredStamp::mtime(at(f.stamp))),
+            listed: ListedTime::Created(CreatedAt::mtime(at(f.created_at))),
         }
     }
 
@@ -92,7 +92,7 @@ mod lazy {
         };
         block_on(async {
             for f in files {
-                let mut up = store.begin_upload(&key(f), at(f.stamp)).await.unwrap();
+                let mut up = store.begin_upload(&key(f), at(f.created_at)).await.unwrap();
                 up.write(b"x").await.unwrap();
                 up.commit().await.unwrap();
             }
@@ -100,11 +100,11 @@ mod lazy {
         store
     }
 
-    /// What one lazy run decided and which stamps it asked for, in order.
+    /// What one lazy run decided and which created-at times it asked for, in order.
     struct Run {
         outcome: O,
         asked: Vec<FileKey>,
-        stamps_read: u64,
+        created_at_read: u64,
         comparisons: u64,
     }
 
@@ -112,21 +112,21 @@ mod lazy {
         let inv = block_on(Inventory::load(store)).unwrap();
         let mut planner = AsOfPlanner::new(&inv, at(t));
         let mut asked = Vec::new();
-        let (outcome, stamps_read) = {
-            let mut step = |stamps: &Stamps| {
-                let next = planner.advance(stamps);
+        let (outcome, created_at_read) = {
+            let mut step = |resolved: &ResolvedCreatedAt| {
+                let next = planner.advance(resolved);
                 if let Resolve::Need(info) = &next {
                     asked.push(info.first().key);
                 }
                 next
             };
             let got = block_on(resolve(store, &mut step)).unwrap();
-            (reduce(&got.value), got.stamps_read)
+            (reduce(&got.value), got.created_at_read)
         };
         Run {
             outcome,
             asked,
-            stamps_read,
+            created_at_read,
             comparisons: planner.comparisons(),
         }
     }
@@ -136,20 +136,20 @@ mod lazy {
         let store = store(files, true);
         let run = run_on(&store, t);
         assert_eq!(run.outcome, reference(files, t), "t={t} {files:?}");
-        assert_eq!(run.stamps_read, u64::try_from(run.asked.len()).unwrap());
-        assert_eq!(store.stamp_calls(), run.stamps_read);
+        assert_eq!(run.created_at_read, u64::try_from(run.asked.len()).unwrap());
+        assert_eq!(store.created_at_calls(), run.created_at_read);
         run
     }
 
     /// The bound: transaction-1 files plus the level 0-8 files that touch and
     /// pass the chain's end at some step, the chain modelled here from keys
-    /// and exact stamps.
+    /// and exact created-at times.
     fn bound(files: &[F], t: i64) -> BTreeSet<FileKey> {
         let mut out: BTreeSet<FileKey> = files.iter().filter(|f| f.min == 1).map(key).collect();
         let pref = |f: &F| (f.max, f.level, Reverse(f.min));
         let base = files
             .iter()
-            .filter(|f| f.min == 1 && f.stamp < t)
+            .filter(|f| f.min == 1 && f.created_at < t)
             .max_by_key(|f| (f.max, f.level, Reverse(key(f))));
         let Some(base) = base else { return out };
         if base.level != 9 && base.min != 1 {
@@ -164,7 +164,7 @@ mod lazy {
             out.extend(passing.iter().map(|f| key(f)));
             match passing
                 .iter()
-                .filter(|f| f.stamp < t)
+                .filter(|f| f.created_at < t)
                 .max_by_key(|f| pref(f))
             {
                 Some(next) => reach = next.max,
@@ -187,14 +187,14 @@ mod lazy {
             self.next() % n.max(1)
         }
 
-        fn stamp(&mut self, n: u64) -> i64 {
+        fn created_at(&mut self, n: u64) -> i64 {
             i64::try_from(self.below(n)).unwrap()
         }
     }
 
-    /// Up to [`count`] files over transactions 1..=[`n`]. Mode 0: stamps at
-    /// random; mode 1: stamps non-decreasing in the last transaction; mode 2:
-    /// the writer's shape, level 0-8 files stamped as their last transaction
+    /// Up to [`count`] files over transactions 1..=[`n`]. Mode 0: created-at times at
+    /// random; mode 1: created-at times non-decreasing in the last transaction; mode 2:
+    /// the writer's shape, level 0-8 files recorded as created as their last transaction
     /// and a snapshot any time after it.
     fn listing(rng: &mut Rng, n: u64, count: u64, mode: u8) -> Vec<F> {
         let levels = [0u8, 0, 0, 1, 1, 2, 9, 9];
@@ -217,12 +217,12 @@ mod lazy {
                 let mut of = vec![0i64];
                 for _ in 0..=n + 1 {
                     let last = *of.last().unwrap();
-                    of.push(last + rng.stamp(3) * 100);
+                    of.push(last + rng.created_at(3) * 100);
                 }
                 for file in &mut files {
                     let base = of[usize::try_from(file.max).unwrap()];
-                    file.stamp = if file.level == 9 {
-                        base + rng.stamp(4) * 100
+                    file.created_at = if file.level == 9 {
+                        base + rng.created_at(4) * 100
                     } else {
                         base
                     };
@@ -232,13 +232,13 @@ mod lazy {
                 files.sort_by_key(|file| file.max);
                 let mut s = 0;
                 for file in &mut files {
-                    s += rng.stamp(3) * 100;
-                    file.stamp = s;
+                    s += rng.created_at(3) * 100;
+                    file.created_at = s;
                 }
             }
             _ => {
                 for file in &mut files {
-                    file.stamp = rng.stamp(6) * 100;
+                    file.created_at = rng.created_at(6) * 100;
                 }
             }
         }
@@ -248,19 +248,23 @@ mod lazy {
     fn instants(files: &[F]) -> Vec<i64> {
         let mut v: BTreeSet<i64> = BTreeSet::from([-1, 1_000_000]);
         for file in files {
-            v.extend([file.stamp - 1, file.stamp, file.stamp + 1]);
+            v.extend([file.created_at - 1, file.created_at, file.created_at + 1]);
         }
         v.into_iter().collect()
     }
 
     /// One generated listing at every instant that matters: the lazy plan is
-    /// the exact one, asks each stamp once and stays within the bound.
+    /// the exact one, asks each created-at time once and stays within the bound.
     fn survey_case(seed: u64, n: u64, count: u64, mode: u8) {
         let files = listing(&mut Rng(seed | 1), n, count, mode);
         for t in instants(&files) {
             let run = check(&files, t);
             let distinct: BTreeSet<FileKey> = run.asked.iter().copied().collect();
-            assert_eq!(distinct.len(), run.asked.len(), "a stamp read twice");
+            assert_eq!(
+                distinct.len(),
+                run.asked.len(),
+                "a created-at time read twice"
+            );
             let allowed = bound(&files, t);
             assert!(
                 distinct.is_subset(&allowed),
@@ -282,10 +286,10 @@ mod lazy {
             survey_case(seed, n, count, mode);
         }
 
-        /// Stamps the planner did not read are set to the extremes; it asks for
-        /// the same stamps and decides the same.
+        /// Created-at times the planner did not read are set to the extremes; it asks for
+        /// the same created-at times and decides the same.
         #[test]
-        fn unread_stamps_cannot_change_the_outcome(
+        fn unread_created_at_cannot_change_the_outcome(
             seed in any::<u64>(),
             n in 2u64..8,
             count in 2u64..8,
@@ -298,7 +302,7 @@ mod lazy {
                 for extreme in [i64::MIN, i64::MAX] {
                     let moved: Vec<F> = files
                         .iter()
-                        .map(|file| if read.contains(&key(file)) { *file } else { F { stamp: extreme, ..*file } })
+                        .map(|file| if read.contains(&key(file)) { *file } else { F { created_at: extreme, ..*file } })
                         .collect();
                     let again = run_on(&store(&moved, true), t);
                     prop_assert_eq!(&again.asked, &first.asked);
@@ -336,7 +340,7 @@ mod lazy {
     }
 
     #[test]
-    fn plan_as_of_reads_each_stamp_once() {
+    fn plan_as_of_reads_each_created_at_once() {
         // The straddle rule's candidates are the files the last step read.
         let files = [f(9, 1, 3, 300), f(1, 4, 10, 1000), f(0, 4, 4, 1000)];
         let run = check(&files, 950);
@@ -348,7 +352,7 @@ mod lazy {
     fn plan_as_of_ignores_last_modified() {
         let files = [f(9, 1, 2, 100), f(0, 3, 3, 200), f(0, 4, 4, 300)];
         let store = store(&files, true);
-        // Last-modified times that would flip every file if read as stamps.
+        // Last-modified times that would flip every file if read as created-at times.
         store.set_last_modified(&key(&files[0]), at(1_000));
         store.set_last_modified(&key(&files[1]), at(0));
         store.set_last_modified(&key(&files[2]), at(0));
@@ -362,17 +366,17 @@ mod lazy {
         let files = [f(9, 1, 2, 100), f(0, 3, 3, 200), f(1, 3, 6, 600)];
         let store = store(&files, false);
         let run = run_on(&store, 250);
-        assert_eq!((run.stamps_read, store.stamp_calls()), (0, 0));
+        assert_eq!((run.created_at_read, store.created_at_calls()), (0, 0));
         assert_eq!(run.outcome, reference(&files, 250));
         // A planner given an exact listing decides on its first advance.
         let inv = Inventory::from_files(files.iter().map(stored)).unwrap();
         let mut planner = AsOfPlanner::new(&inv, at(250));
-        let got = planner.advance(&Stamps::default());
+        let got = planner.advance(&ResolvedCreatedAt::default());
         assert_eq!(
             got,
             Resolve::Done(plan_reference(&inv, RestoreTarget::AsOf(at(250))))
         );
-        assert_eq!(planner.advance(&Stamps::default()), got);
+        assert_eq!(planner.advance(&ResolvedCreatedAt::default()), got);
     }
 
     #[test]
@@ -382,7 +386,7 @@ mod lazy {
             run.outcome,
             O::Other(format!("{:?}", PlanOutcome::EmptyReplica))
         );
-        assert_eq!(run.stamps_read, 0);
+        assert_eq!(run.created_at_read, 0);
     }
 
     #[test]
@@ -399,7 +403,7 @@ mod lazy {
         assert_eq!(run.outcome, O::Inside(vec![key(&files[0])], key(&files[2])));
     }
 
-    /// A snapshot ending one past the chain is stamped when written, not when
+    /// A snapshot ending one past the chain is recorded as created when written, not when
     /// that transaction committed, so it does not lift the straddle: the lazy
     /// planner names the compacted file, as it does without the snapshot.
     #[test]
@@ -419,7 +423,7 @@ mod lazy {
         assert_eq!(run.outcome, O::Inside(vec![key(&files[0])], key(&files[1])));
         assert!(
             !run.asked.contains(&key(&files[2])),
-            "a stray's stamp was read"
+            "a stray's created-at time was read"
         );
     }
 
@@ -453,20 +457,20 @@ mod lazy {
     #[test]
     fn plan_as_of_is_linear() {
         let mut files = Vec::new();
-        let stamp = |max: u64| i64::try_from(max).unwrap() * 10;
+        let created_at = |max: u64| i64::try_from(max).unwrap() * 10;
         for n in 1..=9_000u64 {
-            files.push(f(0, n, n, stamp(n)));
+            files.push(f(0, n, n, created_at(n)));
         }
         for n in 0..900u64 {
-            files.push(f(1, n * 10 + 1, n * 10 + 10, stamp(n * 10 + 10)));
+            files.push(f(1, n * 10 + 1, n * 10 + 10, created_at(n * 10 + 10)));
         }
         for n in 0..90u64 {
-            files.push(f(2, n * 100 + 1, n * 100 + 100, stamp(n * 100 + 100)));
+            files.push(f(2, n * 100 + 1, n * 100 + 100, created_at(n * 100 + 100)));
         }
         for n in 1..=9u64 {
-            files.push(f(9, 1, n * 1_000, stamp(n * 1_000) + 5));
+            files.push(f(9, 1, n * 1_000, created_at(n * 1_000) + 5));
         }
-        let t = stamp(1_003) + 1;
+        let t = created_at(1_003) + 1;
         let run = check(&files, t);
         let chain = match &run.outcome {
             O::Plan(chain) => chain.len(),
@@ -483,9 +487,9 @@ mod lazy {
         let starts = files.iter().filter(|f| f.min == 1).count();
         let starts = u64::try_from(starts).unwrap();
         assert!(
-            run.stamps_read < 2 * 4 + starts + 10,
-            "{} stamps read",
-            run.stamps_read
+            run.created_at_read < 2 * 4 + starts + 10,
+            "{} created-at times read",
+            run.created_at_read
         );
     }
 
@@ -503,7 +507,7 @@ mod lazy {
         // level-0 files (seven at least).
         let least = 1 + 7;
         assert!(sorted >= least, "{sorted} comparisons for two sorts");
-        let mut step = |stamps: &Stamps| planner.advance(stamps);
+        let mut step = |resolved: &ResolvedCreatedAt| planner.advance(resolved);
         let got = block_on(resolve(&store, &mut step)).unwrap();
         assert_eq!(
             reduce(&got.value),
@@ -524,9 +528,9 @@ mod lazy {
     /// The step contract seen from outside: an exact listing is decided on the
     /// first advance whichever way the planner is driven.
     #[test]
-    fn the_planner_is_a_stamp_step() {
-        fn decide<S: StampStep>(step: &mut S) -> Resolve<S::Output> {
-            step.advance(&Stamps::default())
+    fn the_planner_is_a_created_at_step() {
+        fn decide<S: CreatedAtStep>(step: &mut S) -> Resolve<S::Output> {
+            step.advance(&ResolvedCreatedAt::default())
         }
         let files = [f(9, 1, 2, 100)];
         let inv = Inventory::from_files(files.iter().map(stored)).unwrap();

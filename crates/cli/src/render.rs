@@ -23,7 +23,7 @@ use crate::args::{
     CONFIG_CHECK_SUMMARY, CONFIG_CHECK_USAGE, CommandName, DAEMON_SUMMARY, DAEMON_USAGE, FLAGS,
 };
 use crate::run::{CliError, Done, Exit, Finished, RestoreDone, Skip, Source};
-use lsr_core::ListedStamp;
+use lsr_core::ListedTime;
 use lsr_local::IntegrityCheck;
 
 /// Appends formatted text to a `String`, which cannot fail.
@@ -57,14 +57,14 @@ pub fn done(done: &Done) -> String {
         } => verify_json(report, *depth),
         Done::Files {
             inventory,
-            stamp_fallbacks,
+            created_at_fallbacks,
             json: false,
-        } => files_text(inventory, *stamp_fallbacks),
+        } => files_text(inventory, *created_at_fallbacks),
         Done::Files {
             inventory,
-            stamp_fallbacks,
+            created_at_fallbacks,
             json: true,
-        } => files_json(inventory, *stamp_fallbacks),
+        } => files_json(inventory, *created_at_fallbacks),
         Done::Daemon(_) => String::new(),
         Done::DaemonHelp(text) => (*text).to_owned(),
         Done::ConfigChecked(checked) => checked.to_string(),
@@ -221,19 +221,19 @@ fn restore(done: &RestoreDone) -> String {
         (
             Finished::Planned {
                 chain,
-                stamps_read,
+                created_at_read,
                 sidecars_to_remove,
             },
             false,
-        ) => plan_text(output, source, chain, *stamps_read, sidecars_to_remove),
+        ) => plan_text(output, source, chain, *created_at_read, sidecars_to_remove),
         (
             Finished::Planned {
                 chain,
-                stamps_read,
+                created_at_read,
                 sidecars_to_remove,
             },
             true,
-        ) => plan_json(output, source, chain, *stamps_read, sidecars_to_remove),
+        ) => plan_json(output, source, chain, *created_at_read, sidecars_to_remove),
         (Finished::Skipped { skip, cleared }, false) => {
             skipped_text(output, source, *skip, cleared)
         }
@@ -308,7 +308,7 @@ fn restored_json(
         ("pages", restored.commit().to_string()),
         ("files", restored.files().to_string()),
         ("bytes_read", restored.bytes_read().to_string()),
-        ("stamps_read", restored.stamps_read().to_string()),
+        ("created_at_read", restored.created_at_read().to_string()),
         (
             "checksum_verified",
             restored.post_apply().is_some().to_string(),
@@ -399,7 +399,7 @@ fn plan_text(
     output: &Path,
     source: &Source,
     chain: &ContiguousChain,
-    stamps_read: u64,
+    created_at_read: u64,
     sidecars_to_remove: &[PathBuf],
 ) -> String {
     let mut out = String::new();
@@ -416,8 +416,8 @@ fn plan_text(
         chain.snapshot().key.range().min(),
         chain.reaches()
     );
-    if stamps_read > 0 {
-        putln!(out, "  exact stamps read to plan: {stamps_read}");
+    if created_at_read > 0 {
+        putln!(out, "  created-at times read to plan: {created_at_read}");
     }
     out.push_str("\nFiles to fetch:\n");
     let header = ["level", "file", "min_txid", "max_txid", "size", "timestamp"].map(str::to_owned);
@@ -438,7 +438,7 @@ fn plan_file_json(info: &FileInfo) -> String {
         ("max_txid", quote(&range.max().to_string())),
         ("size", info.size.to_string()),
         ("timestamp", quote(&time.to_string())),
-        ("stamp_exact", exact.to_string()),
+        ("created_at_exact", exact.to_string()),
     ])
 }
 
@@ -446,7 +446,7 @@ fn plan_json(
     output: &Path,
     source: &Source,
     chain: &ContiguousChain,
-    stamps_read: u64,
+    created_at_read: u64,
     sidecars_to_remove: &[PathBuf],
 ) -> String {
     let files: Vec<String> = chain.files().iter().map(plan_file_json).collect();
@@ -460,7 +460,7 @@ fn plan_json(
         ),
         ("max_txid", quote(&chain.reaches().to_string())),
         ("files", array(&files)),
-        ("stamps_read", stamps_read.to_string()),
+        ("created_at_read", created_at_read.to_string()),
         ("sidecars_to_remove", path_array(sidecars_to_remove)),
     ]);
     out.push('\n');
@@ -492,10 +492,14 @@ fn restored_text(
         restored.files(),
         restored.bytes_read(),
     );
-    // Only an as-of restore over a lazily listed store reads stamps; the line
+    // Only an as-of restore over a lazily listed store reads created-at times; the line
     // for every other restore stays as it was.
-    if restored.stamps_read() > 0 {
-        putln!(out, "{} exact stamps read to plan", restored.stamps_read());
+    if restored.created_at_read() > 0 {
+        putln!(
+            out,
+            "{} created-at times read to plan",
+            restored.created_at_read()
+        );
     }
     if let Some(pragma) = integrity_check.pragma() {
         putln!(out, "SQLite {pragma} passed before publishing");
@@ -824,7 +828,7 @@ fn verify_json(report: &Report, depth: Depth) -> String {
     out
 }
 
-fn files_text(inventory: &Inventory, stamp_fallbacks: Option<u64>) -> String {
+fn files_text(inventory: &Inventory, created_at_fallbacks: Option<u64>) -> String {
     let mut out = String::new();
     for info in inventory.files() {
         let (time, exact) = listed_time(info);
@@ -834,18 +838,18 @@ fn files_text(inventory: &Inventory, stamp_fallbacks: Option<u64>) -> String {
     if inventory.skipped_total() > 0 {
         putln!(out, "foreign names skipped: {}", inventory.skipped_total());
     }
-    if let Some(count) = stamp_fallbacks {
+    if let Some(count) = created_at_fallbacks {
         putln!(out, "stored times taken from LastModified: {count}");
     }
     out
 }
 
-/// The time a listing gave for a file, and whether it is the exact stamp or
+/// The time a listing gave for a file, and whether it is the exact created-at time or
 /// only the bucket's `LastModified`.
 fn listed_time(info: &FileInfo) -> (Timestamp, bool) {
     match info.listed {
-        ListedStamp::Stored(stamp) => (stamp.at(), true),
-        ListedStamp::LastModified(at) => (at, false),
+        ListedTime::Created(created_at) => (created_at.at(), true),
+        ListedTime::LastModified(at) => (at, false),
     }
 }
 
@@ -860,18 +864,18 @@ fn file_json(info: &FileInfo) -> String {
         ("size", info.size.to_string()),
         ("created_at", quote(&created.to_string())),
         ("created_at_ms", created.unix_millis().to_string()),
-        ("stamp_exact", exact.to_string()),
+        ("created_at_exact", exact.to_string()),
     ])
 }
 
-fn files_json(inventory: &Inventory, stamp_fallbacks: Option<u64>) -> String {
+fn files_json(inventory: &Inventory, created_at_fallbacks: Option<u64>) -> String {
     let files: Vec<String> = inventory.files().iter().map(file_json).collect();
     let mut fields = vec![
         ("files", array(&files)),
         ("foreign_names", inventory.skipped_total().to_string()),
     ];
-    if let Some(count) = stamp_fallbacks {
-        fields.push(("stamps_from_last_modified", count.to_string()));
+    if let Some(count) = created_at_fallbacks {
+        fields.push(("created_at_from_last_modified", count.to_string()));
     }
     let mut out = object(&fields);
     out.push('\n');

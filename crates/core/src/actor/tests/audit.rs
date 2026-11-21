@@ -24,7 +24,7 @@ fn newest_upper(rig: &Rig) -> Vec<FileInfo> {
         .collect()
 }
 
-/// Rewrites the replica's object with one byte changed: same size, same stamp.
+/// Rewrites the replica's object with one byte changed: same size, same created-at time.
 fn rot(rig: &Rig, info: &FileInfo) {
     let store = &rig.remote.inner;
     let all = ReadLen::new(ReadLen::MAX_RAW).unwrap();
