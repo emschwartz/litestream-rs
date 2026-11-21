@@ -371,46 +371,48 @@ impl<T: Transport> Inner<T> {
         let op = StoreOp::Read;
         self.batch(
             op,
-            reads,
-            |at| self.request(op, |b, now| b.get_range(now, &at.key, at.offset, at.len)),
+            reads.iter().copied(),
+            |at| {
+                let request =
+                    self.request(op, |b, now| b.get_range(now, &at.key, at.offset, at.len))?;
+                Ok((request, at))
+            },
             |at, response| Self::range_body(&at.key, at.offset, at.len, response),
         )
     }
 
-    /// One request per item, sent as one batch; `judge` turns each response
-    /// into its item's result. Items whose request could not be built keep
-    /// that error and are not sent.
-    pub(crate) fn batch<I, R>(
+    /// One request per item, sent as one batch. `build` makes an item's
+    /// request and what judging its answer needs; `judge` turns each response
+    /// into the item's result. An item whose request could not be built keeps
+    /// that error and is not sent.
+    pub(crate) fn batch<I, J, R>(
         &self,
         op: StoreOp,
-        items: &[I],
-        build: impl Fn(&I) -> Result<HttpRequest, StoreError>,
-        judge: impl Fn(&I, &HttpResponse) -> Result<R, StoreError>,
+        items: impl IntoIterator<Item = I>,
+        mut build: impl FnMut(I) -> Result<(HttpRequest, J), StoreError>,
+        judge: impl Fn(J, &HttpResponse) -> Result<R, StoreError>,
     ) -> Vec<Result<R, StoreError>> {
-        let mut requests = Vec::with_capacity(items.len());
-        let mut unbuilt = Vec::with_capacity(items.len());
+        let mut requests = Vec::new();
+        let mut contexts = Vec::new();
         for item in items {
             match build(item) {
-                Ok(request) => {
+                Ok((request, context)) => {
                     requests.push(request);
-                    unbuilt.push(None);
+                    contexts.push(Ok(context));
                 }
-                Err(err) => unbuilt.push(Some(err)),
+                Err(err) => contexts.push(Err(err)),
             }
         }
         let mut sent = self.send_many(op, requests).into_iter();
-        items
-            .iter()
-            .zip(unbuilt)
-            .map(|(item, unbuilt)| {
-                if let Some(err) = unbuilt {
-                    return Err(err);
-                }
+        contexts
+            .into_iter()
+            .map(|context| {
+                let context = context?;
                 let response = sent.next().unwrap_or(Err(StoreError::Transient {
                     op,
                     kind: io::ErrorKind::Other,
                 }))?;
-                judge(item, &response)
+                judge(context, &response)
             })
             .collect()
     }

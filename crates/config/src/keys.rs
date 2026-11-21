@@ -157,11 +157,7 @@ const SETTINGS: &[Key] = &[
     ),
     inert("storage-class", Str, Inert::Empty, "an S3 storage class"),
     key("part-size", Bytes, Implemented),
-    key(
-        "concurrency",
-        Int,
-        NoEffect("v1 uploads one part at a time"),
-    ),
+    key("concurrency", Int, Implemented),
     inert("sse-customer-algorithm", Str, Inert::Empty, SSE),
     inert("sse-customer-key", Secret, Inert::Empty, SSE),
     inert("sse-customer-key-path", Str, Inert::Empty, SSE),

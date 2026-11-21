@@ -437,6 +437,10 @@ fn build_replica(fields: &Fields, top: &Fields, walk: &mut Walk) -> Option<Repli
                 .boolean("force-path-style")
                 .or_else(|| top.boolean("force-path-style")),
             part_size: fields.bytes("part-size"),
+            concurrency: fields
+                .int("concurrency")
+                .and_then(|n| u64::try_from(n).ok())
+                .filter(|n| *n > 0),
         },
     })
 }

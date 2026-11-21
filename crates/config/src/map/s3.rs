@@ -12,15 +12,19 @@
 //! URL (Go ignores it, which would quietly use other credentials).
 //!
 //! **Query.** `endpoint`, `region`, `forcePathStyle` (and `force-path-style`),
-//! `partSize` (`part-size`) are honoured; `skipVerify=true` and a `storageClass`
-//! are refused; the signing, MD5 and `concurrency` keys are accepted with a note,
-//! since they change nothing in v1. A key Go does not read is refused.
+//! `partSize` (`part-size`) and `concurrency` are honoured; `skipVerify=true` and
+//! a `storageClass` are refused; the signing and MD5 keys are accepted with a
+//! note, since they change nothing in v1. Go's `concurrency` is the parts of one
+//! upload in flight; here it bounds every batch of requests the store sends
+//! (parts, reads ahead, listing levels, stamps), and zero leaves the default. A key Go does not read is refused.
 //!
 //! **Precedence.** [`S3Overrides`] (a replica entry's keys, or the command line's
 //! flags) win over the URL's parts and query. Path style follows Go: on when an
 //! endpoint is given, unless set; otherwise as the provider needs.
 //!
 //! No problem holds the URL, its userinfo or a query value.
+
+use std::num::NonZeroUsize;
 
 use lsr_store_s3::{BucketName, Endpoint, PartSize, Prefix, Region, S3Config, UrlStyle};
 use percent_encoding::percent_decode_str;
@@ -39,6 +43,7 @@ pub struct S3Url {
     path_style: Option<bool>,
     path_style_set: bool,
     part_size: Option<u64>,
+    concurrency: Option<u64>,
     notes: Vec<&'static str>,
 }
 
@@ -97,6 +102,8 @@ pub struct S3Overrides<'a> {
     pub force_path_style: Option<bool>,
     /// `part-size`, in bytes.
     pub part_size: Option<u64>,
+    /// `concurrency`: requests in flight per batch; zero is unset.
+    pub concurrency: Option<u64>,
 }
 
 /// The store's configuration from a URL (if any) and the settings that override it.
@@ -121,12 +128,21 @@ pub fn s3_config(url: Option<S3Url>, over: &S3Overrides<'_>) -> Result<S3Config,
     };
     let config =
         build(&bucket, &path, region, endpoint, (style, style_set)).map_err(ReplicaProblem::S3)?;
-    match over.part_size.or(url.part_size) {
-        None => Ok(config),
+    let config = match over.part_size.or(url.part_size) {
+        None => config,
         Some(bytes) => PartSize::new(bytes)
             .map(|size| config.with_part_size(size))
-            .map_err(ReplicaProblem::S3),
-    }
+            .map_err(ReplicaProblem::S3)?,
+    };
+    let concurrency = over
+        .concurrency
+        .or(url.concurrency)
+        .and_then(|n| usize::try_from(n).ok())
+        .and_then(NonZeroUsize::new);
+    Ok(match concurrency {
+        Some(n) => config.with_concurrency(n),
+        None => config,
+    })
 }
 
 fn build(
@@ -223,11 +239,13 @@ fn read_query(
                 "the url's Content-MD5 setting has no effect: v1 always sends Content-MD5 on uploads",
             ));
         }
-        "concurrency" => {
-            return Ok(Some(
-                "the url's concurrency has no effect: v1 uploads one part at a time",
-            ));
-        }
+        "concurrency" => match value.parse::<u64>() {
+            Ok(n) => out.concurrency = Some(n).filter(|n| *n > 0),
+            Err(_) => {
+                let name = name.to_owned();
+                return Err(ReplicaProblem::QueryNotNumber { name });
+            }
+        },
         "endpoint" | "region" | "forcePathStyle" | "force-path-style" | "skipVerify"
         | "storageClass" | "storage-class" => {}
         other => {

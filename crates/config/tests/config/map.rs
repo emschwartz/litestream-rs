@@ -511,12 +511,30 @@ fn s3_refusals() {
 }
 
 /// Go accepts the signing and MD5 query keys; v1 notes they change nothing.
+/// `concurrency` is honoured, so it adds no note.
 #[test]
 fn no_effect_query_keys_are_noted() {
     let plan = planned(
         "dbs:\n  - path: /data/app.db\n    replica:\n      url: s3://b/p?signPayload=false&concurrency=8\n",
     );
-    assert_eq!(plan.notes().len(), 2, "{:#?}", plan.notes());
+    assert_eq!(plan.notes().len(), 1, "{:#?}", plan.notes());
+}
+
+/// The replica's `concurrency` wins over the URL's; zero leaves the default.
+#[test]
+fn concurrency_reaches_the_store_config() {
+    let of = |text: &str| match planned(text).dbs()[0].replica() {
+        ReplicaPlan::S3 { config, .. } => config.concurrency().get(),
+        other @ ReplicaPlan::File(_) => panic!("not S3: {other:?}"),
+    };
+    let base = "dbs:\n  - path: /data/app.db\n    replica:\n      url: s3://b/p";
+    assert_eq!(of(&format!("{base}\n")), 8);
+    assert_eq!(of(&format!("{base}?concurrency=3\n")), 3);
+    assert_eq!(of(&format!("{base}?concurrency=0\n")), 8);
+    assert_eq!(
+        of(&format!("{base}?concurrency=3\n      concurrency: 5\n")),
+        5
+    );
 }
 
 #[test]

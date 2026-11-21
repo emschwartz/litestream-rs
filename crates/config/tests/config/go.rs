@@ -544,7 +544,7 @@ fn an_empty_file_has_go_defaults() {
 // TestS3ReplicaConfig_PartSizeAndConcurrency
 
 #[test]
-fn part_size_in_iec_and_si_units_and_concurrency_has_no_effect() {
+fn part_size_in_iec_and_si_units_and_concurrency() {
     let base = "dbs:\n  - path: /path/to/db\n    replicas:\n      - type: s3\n        bucket: mybucket\n        path: mypath\n        region: us-east-1\n";
     let part = |extra: &str| {
         parse(&format!("{base}{extra}")).config.dbs()[0]
@@ -562,10 +562,16 @@ fn part_size_in_iec_and_si_units_and_concurrency_has_no_effect() {
     let replica = loaded.config.dbs()[0].replica().unwrap();
     assert_eq!(replica.kind(), ReplicaKind::S3);
     assert_eq!(replica.s3().bucket(), Some("mybucket"));
-    assert!(matches!(
-        warnings_at(&loaded.report.warnings, "dbs[0].replicas[0].concurrency")[..],
-        [WarningKind::NoEffect { .. }]
+    assert_eq!(replica.s3().concurrency(), Some(10));
+    assert!(warnings_at(&loaded.report.warnings, "dbs[0].replicas[0].concurrency").is_empty());
+    let zero = parse(&format!(
+        "{base}        concurrency: 0
+"
     ));
+    assert_eq!(
+        zero.config.dbs()[0].replica().unwrap().s3().concurrency(),
+        None
+    );
 }
 
 // TestDBConfig_CheckpointFields, TestDBConfig_MaxSyncWALBytes

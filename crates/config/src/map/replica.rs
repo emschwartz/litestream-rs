@@ -240,6 +240,7 @@ fn s3(at: &KeyPath, replica: &ReplicaConfig, found: &mut Found) -> Option<Replic
         endpoint: s3.endpoint(),
         force_path_style: s3.force_path_style(),
         part_size: s3.part_size(),
+        concurrency: s3.concurrency(),
     };
     let config = match s3_config(url, &over) {
         Ok(config) => config,
