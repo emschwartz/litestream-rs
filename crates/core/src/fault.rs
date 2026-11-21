@@ -40,6 +40,9 @@ use std::time::Duration;
 use lsr_ltx::{PageNo, PageSize, Timestamp, Txid};
 use lsr_wal::{PageMapError, ReadPageError, ResumeError, WalError, WalOffset};
 
+use crate::compact::CompactError;
+use crate::created_at::ResolveError;
+use crate::maintain::MaintainError;
 use crate::source::SourceError;
 use crate::store::{CorruptCause, ListingStalled, StoreError};
 
@@ -703,6 +706,74 @@ impl Fault {
             SourceError::ReadersHeld => Self::ReadersHeld,
             SourceError::Unlinked => Self::WalUnlinked,
             SourceError::ReadTxLost => Self::ReadTxLost,
+        }
+    }
+
+    /// An error from compaction.
+    #[must_use]
+    pub(crate) fn from_compact(err: &CompactError) -> Self {
+        match err {
+            CompactError::InputVanished { .. } => Self::RemoteObjectMissing,
+            CompactError::Source(err) | CompactError::Dest(err) => Self::from_remote(err),
+            CompactError::Input { .. } | CompactError::Encode(_) => Self::RemoteCorrupt,
+            CompactError::Inputs(_) | CompactError::SnapshotLevel { .. } => {
+                Self::Bug(BugSite::CompactionInputs)
+            }
+        }
+    }
+
+    /// Whether a failed snapshot may have left an object under its key: the store
+    /// answered the commit with a size or a checksum that is not the one sent.
+    #[must_use]
+    pub(crate) const fn leaves_bad_snapshot(self) -> bool {
+        match self {
+            Self::UploadAmbiguous | Self::UploadChecksumMismatch => true,
+            Self::StoreTransient
+            | Self::StoreThrottled { .. }
+            | Self::StoreAuth
+            | Self::RemoteObjectMissing
+            | Self::StoreRefused
+            | Self::RemoteCorrupt
+            | Self::RemoteAheadOfLocal
+            | Self::RemoteRegressed
+            | Self::StagedLost
+            | Self::LocalDiskFull
+            | Self::LocalIo
+            | Self::LocalFsyncFailed
+            | Self::SqliteBusy
+            | Self::ReadersHeld
+            | Self::WalMoved
+            | Self::WalIndexInconsistent
+            | Self::WalChangedUnderRead
+            | Self::NothingToSnapshot
+            | Self::ReadTxLost
+            | Self::PageSizeChanged { .. }
+            | Self::WalCorruptBelowCommitted
+            | Self::WalTruncatedBelowCommitted
+            | Self::WalUnlinked
+            | Self::DatabasePageMismatch { .. }
+            | Self::ShutdownDeadline
+            | Self::Bug(_) => false,
+        }
+    }
+
+    /// An error resolving a file's created-at time.
+    #[must_use]
+    pub(crate) fn from_created_at(err: &ResolveError) -> Self {
+        match err {
+            ResolveError::Store(err) => Self::from_remote(err),
+            ResolveError::Repeated { .. } => Self::Bug(BugSite::CreatedAtRepeated),
+        }
+    }
+
+    /// An error from a maintenance step.
+    #[must_use]
+    pub(crate) fn from_maintain(err: &MaintainError) -> Self {
+        match err {
+            MaintainError::Compact(err) | MaintainError::OutputDistrusted { source: err, .. } => {
+                Self::from_compact(err)
+            }
+            MaintainError::Delete(err) => Self::from_remote(err),
         }
     }
 }
