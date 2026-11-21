@@ -141,6 +141,29 @@ test-s3: minio-up
         echo "test-s3: MinIO is not running; S3 tests skipped"
     fi
 
+# Each restores what the other wrote at Latest, a txid and an instant, and they hand one prefix
+# over both ways, over the pinned builds (crates/compat/tests/s3.rs). Needs Docker; fails, never
+# skips, when MinIO is not up. Never a real store: every AWS_* and LITESTREAM_* variable is unset
+# first, the tests read only the LSR_COMPAT_S3_* ones set here (MinIO's throwaway credentials
+# from scripts/minio.sh) and refuse any endpoint but loopback http.
+# Go and Rust on one MinIO bucket: restores and handovers both ways.
+compat-s3: minio-up
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! ./scripts/minio.sh running; then
+        echo "compat-s3: MinIO is not running (it needs Docker); nothing ran" >&2
+        exit 1
+    fi
+    for var in $(compgen -e); do
+        case "$var" in AWS_* | LITESTREAM_*) unset "$var" ;; esac
+    done
+    ./scripts/build-go-litestream.sh
+    LSR_COMPAT_S3_ENDPOINT="http://127.0.0.1:${LSR_MINIO_PORT:-9000}" \
+        LSR_COMPAT_S3_BUCKET=lsr-test \
+        LSR_COMPAT_S3_ACCESS_KEY=lsrtestroot \
+        LSR_COMPAT_S3_SECRET_KEY=lsrtest-throwaway-0000 \
+        cargo nextest run -p lsr-compat --test s3 --run-ignored all --locked --no-fail-fast
+
 # The store and the conformance suite against the real Tigris bucket of task 8t.
 # Never part of check or CI: it needs credentials (a file outside the repo, or
 # AWS_* variables) and spends real requests (docs/spikes.md, Task 8t).

@@ -64,4 +64,32 @@ jobs:
         with:
           path: .upstream/bin
           key: go-bin-${{ runner.os }}-${{ hashFiles('scripts/build-go-litestream.sh') }}-v0.5.0-v0.5.15-v0.5.16-v0.5.18-041a8c3
+      # The alternation runs take one fixed seed here, so a push or pull request never fails on
+      # a kill point nobody chose; compat-releases.yml tries a new seed every night.
       - run: just compat
+        env:
+          LSR_ALTERNATION_SEED: "1"
+
+  # Go and Rust on one S3 bucket: MinIO in Docker, as test-s3, with the throwaway credentials in
+  # scripts/minio.sh. The recipe unsets every AWS_* and LITESTREAM_* variable and the tests
+  # refuse any endpoint but loopback http, so no real store is reachable from them.
+  compat-s3:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,just
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+      # Building the VFS extensions beside the binaries, on a cache miss, needs the SQLite headers.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsqlite3-dev
+      - run: just upstream
+      - uses: actions/cache@v4
+        with:
+          path: .upstream/bin
+          key: go-bin-${{ runner.os }}-${{ hashFiles('scripts/build-go-litestream.sh') }}-v0.5.0-v0.5.15-v0.5.16-v0.5.18-041a8c3
+      - run: just compat-s3
