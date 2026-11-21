@@ -1,5 +1,5 @@
 //! Go Litestream's `litestream.yml`, read as Go 041a8c3 reads it, and held to
-//! v1's rule that a file never means less than it says
+//! litestream-rs's rule that a file never means less than it says
 //! (docs/plans/phase-4-sidecar.md, the config section).
 //!
 //! A load runs, in order:
@@ -10,7 +10,7 @@
 //! 3. **The walk** (`walk.rs`): every key looked up in Go's tables
 //!    (`keys.rs`) and read as yaml.v2 reads that Go type (`value.rs`), so
 //!    `yes` is a boolean, `0600` is octal, and a bare `5` duration is 5ns. Each
-//!    key's class applies: implemented keys are kept, inert keys are refused
+//!    key's class applies: implemented keys are kept, off-only keys are refused
 //!    unless at their off value, no-effect keys warn, unknown keys are refused
 //!    with a "did you mean".
 //! 4. **The build** (`build.rs`): Go's defaults, snapshot promotion, path
@@ -123,7 +123,7 @@ impl GoConfig {
     /// database with one replica, read through the same checks as a file.
     ///
     /// # Errors
-    /// A [`ConfigError`] when the URL names a replica type v1 does not have.
+    /// A [`ConfigError`] when the URL names a replica type litestream-rs does not have.
     pub fn for_one_database(
         database: &str,
         replica_url: &str,

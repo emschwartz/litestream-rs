@@ -1,7 +1,7 @@
 //! yaml.v2's readings, measured: each expected value below is what Go 1.24
 //! with gopkg.in/yaml.v2 v2.4.0 decoded the same YAML into a field of the
 //! same Go type (the probe and its output are in docs/spikes.md, the YAML decoding section). Where
-//! v1 refuses what Go reads, the case says so.
+//! litestream-rs refuses what Go reads, the case says so.
 
 use lsr_config::{Expected, GoDuration, ProblemKind, ReplicaConfig, WarningKind};
 
@@ -70,7 +70,7 @@ fn durations() {
             "{text}: {kind:?}"
         );
     }
-    // Go truncates 1.5 to 1ns; v1 refuses the fraction.
+    // Go truncates 1.5 to 1ns; litestream-rs refuses the fraction.
     assert_eq!(refused_at("sync-interval", "1.5"), ProblemKind::Fractional);
 }
 
@@ -184,7 +184,7 @@ fn integers() {
         refused_at("max-sync-ltx-files", ".inf"),
         ProblemKind::OutOfRange { .. }
     ));
-    // Go truncates 2.7 to 2; v1 refuses the fraction.
+    // Go truncates 2.7 to 2; litestream-rs refuses the fraction.
     assert_eq!(
         refused_at("max-sync-ltx-files", "2.7"),
         ProblemKind::Fractional

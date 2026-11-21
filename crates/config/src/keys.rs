@@ -1,12 +1,12 @@
 //! Every key Go's `Config` defines at 041a8c3 (`cmd/litestream/main.go`,
 //! `server.go`, `internal/log.go`), section by section, with what Go reads it
-//! as and how v1 treats it (docs/plans/phase-4-sidecar.md, the config section):
-//! implemented, inert unless asked for, or a knob with no effect. One table
+//! as and how litestream-rs treats it (docs/plans/phase-4-sidecar.md, the config section):
+//! implemented, off-only unless asked for, or a knob with no effect. One table
 //! per Go struct; `ReplicaSettings` is inlined both at the top level and in
 //! each replica, as Go inlines it.
 //!
 //! Classification calls beyond the plan's list, each with its reason:
-//! - `sse-*` and `storage-class` are inert (refused when set), not no-effect:
+//! - `sse-*` and `storage-class` are off-only (refused when set), not no-effect:
 //!   ignoring them would write unencrypted objects, or objects in another
 //!   storage class, where the operator asked otherwise (Go itself refuses
 //!   `age` for the same reason).
@@ -59,9 +59,9 @@ pub(crate) enum Read {
     Maps(Section),
 }
 
-/// The values at which an inert key asks for nothing.
+/// The values at which an off-only key asks for nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Inert {
+pub(crate) enum OffValue {
     /// `false` or null.
     False,
     /// Empty or null.
@@ -72,12 +72,12 @@ pub(crate) enum Inert {
     Any,
 }
 
-/// How v1 treats a key.
+/// How litestream-rs treats a key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Rule {
     Implemented,
-    /// Inert at these values; otherwise this feature is not in v1.
-    Inert(Inert, &'static str),
+    /// Accepted only at these values; otherwise this feature is not in litestream-rs.
+    OffOnly(OffValue, &'static str),
     /// Accepted with a warning saying why it does nothing.
     NoEffect(&'static str),
 }
@@ -94,7 +94,7 @@ impl Key {
     pub(crate) fn class(&self) -> KeyClass {
         match self.rule {
             Rule::Implemented => KeyClass::Implemented,
-            Rule::Inert(..) => KeyClass::Inert,
+            Rule::OffOnly(..) => KeyClass::OffOnly,
             Rule::NoEffect(_) => KeyClass::NoEffect,
         }
     }
@@ -111,21 +111,21 @@ const fn key(name: &'static str, read: Read, rule: Rule) -> Key {
 use Read::{Any, Bool, Bytes, Duration, Int, List, Map, Maps, Secret, Str, Uint32};
 use Rule::{Implemented, NoEffect};
 
-const fn inert(name: &'static str, read: Read, at: Inert, feature: &'static str) -> Key {
-    key(name, read, Rule::Inert(at, feature))
+const fn off_only(name: &'static str, read: Read, at: OffValue, feature: &'static str) -> Key {
+    key(name, read, Rule::OffOnly(at, feature))
 }
 
 const fn other_backend(name: &'static str, read: Read) -> Key {
-    inert(
+    off_only(
         name,
         read,
-        Inert::Any,
+        OffValue::Any,
         "a replica backend other than s3 and file",
     )
 }
 
-const MD5: &str = "v1 always sends Content-MD5 on uploads";
-const SIGNING: &str = "v1's S3 client signs requests one fixed way";
+const MD5: &str = "litestream-rs always sends Content-MD5 on uploads";
+const SIGNING: &str = "litestream-rs's S3 client signs requests one fixed way";
 const SSE: &str = "server-side encryption";
 
 /// Go's `ReplicaSettings`, inlined at the top level and in every replica.
@@ -139,7 +139,7 @@ const SETTINGS: &[Key] = &[
         ),
     ),
     key("max-sync-ltx-files", Int, Implemented),
-    inert("auto-recover", Bool, Inert::False, "auto-recover"),
+    off_only("auto-recover", Bool, OffValue::False, "auto-recover"),
     key("access-key-id", Secret, Implemented),
     key("secret-access-key", Secret, Implemented),
     key("region", Str, Implemented),
@@ -153,15 +153,15 @@ const SETTINGS: &[Key] = &[
     key(
         "skip-verify",
         Bool,
-        NoEffect("v1 always verifies TLS certificates"),
+        NoEffect("litestream-rs always verifies TLS certificates"),
     ),
-    inert("storage-class", Str, Inert::Empty, "an S3 storage class"),
+    off_only("storage-class", Str, OffValue::Empty, "an S3 storage class"),
     key("part-size", Bytes, Implemented),
     key("concurrency", Int, Implemented),
-    inert("sse-customer-algorithm", Str, Inert::Empty, SSE),
-    inert("sse-customer-key", Secret, Inert::Empty, SSE),
-    inert("sse-customer-key-path", Str, Inert::Empty, SSE),
-    inert("sse-kms-key-id", Str, Inert::Empty, SSE),
+    off_only("sse-customer-algorithm", Str, OffValue::Empty, SSE),
+    off_only("sse-customer-key", Secret, OffValue::Empty, SSE),
+    off_only("sse-customer-key-path", Str, OffValue::Empty, SSE),
+    off_only("sse-kms-key-id", Str, OffValue::Empty, SSE),
     other_backend("account-name", Str),
     other_backend("account-key", Secret),
     other_backend("sas-token", Secret),
@@ -187,17 +187,17 @@ const SETTINGS: &[Key] = &[
     other_backend("max-reconnects", Int),
     other_backend("reconnect-wait", Duration),
     other_backend("timeout", Duration),
-    inert("age", Map(Section::Age), Inert::Any, "age encryption"),
+    off_only("age", Map(Section::Age), OffValue::Any, "age encryption"),
 ];
 
 /// Go's `Config`, before the inlined settings; searched first, so its
 /// `part-size` wins over the settings' one.
 const TOP: &[Key] = &[
     key("addr", Str, Implemented),
-    inert(
+    off_only(
         "socket",
         Map(Section::Socket),
-        Inert::Any,
+        OffValue::Any,
         "the control socket",
     ),
     key("levels", Maps(Section::Level), Implemented),
@@ -205,29 +205,29 @@ const TOP: &[Key] = &[
     key("validation", Map(Section::Validation), Implemented),
     key("l0-retention", Duration, Implemented),
     key("l0-retention-check-interval", Duration, Implemented),
-    inert(
+    off_only(
         "verify-compaction",
         Bool,
-        Inert::False,
+        OffValue::False,
         "compaction verification",
     ),
     key("retention", Map(Section::Retention), Implemented),
-    inert("heartbeat-url", Str, Inert::Empty, "heartbeats"),
-    inert("heartbeat-interval", Duration, Inert::Any, "heartbeats"),
+    off_only("heartbeat-url", Str, OffValue::Empty, "heartbeats"),
+    off_only("heartbeat-interval", Duration, OffValue::Any, "heartbeats"),
     key("dbs", Maps(Section::Db), Implemented),
     key("exec", Str, Implemented),
     key("logging", Map(Section::Logging), Implemented),
-    inert("mcp-addr", Str, Inert::Empty, "the MCP server"),
+    off_only("mcp-addr", Str, OffValue::Empty, "the MCP server"),
     key("shutdown-sync-timeout", Duration, Implemented),
     key(
         "shutdown-sync-interval",
         Duration,
-        NoEffect("v1's final sync retries on its own schedule"),
+        NoEffect("litestream-rs's final sync retries on its own schedule"),
     ),
     key(
         "shutdown-timeout",
         Any,
-        NoEffect("v1 bounds shutdown by shutdown-sync-timeout alone"),
+        NoEffect("litestream-rs bounds shutdown by shutdown-sync-timeout alone"),
     ),
     key(
         "part-size",
@@ -245,9 +245,9 @@ const SNAPSHOT: &[Key] = &[
 const RETENTION: &[Key] = &[key("enabled", Bool, Implemented)];
 
 const SOCKET: &[Key] = &[
-    inert("enabled", Bool, Inert::False, "the control socket"),
-    inert("path", Str, Inert::Any, "the control socket"),
-    inert("permissions", Uint32, Inert::Any, "the control socket"),
+    off_only("enabled", Bool, OffValue::False, "the control socket"),
+    off_only("path", Str, OffValue::Any, "the control socket"),
+    off_only("permissions", Uint32, OffValue::Any, "the control socket"),
 ];
 
 const VALIDATION: &[Key] = &[key("interval", Duration, Implemented)];
@@ -259,7 +259,7 @@ const LOGGING: &[Key] = &[
     key(
         "source",
         Bool,
-        NoEffect("v1's log lines carry no source location"),
+        NoEffect("litestream-rs's log lines carry no source location"),
     ),
 ];
 
@@ -270,10 +270,10 @@ const DB: &[Key] = &[
     key("dir", Str, Implemented),
     key("pattern", Str, Implemented),
     key("recursive", Bool, Implemented),
-    inert(
+    off_only(
         "watch",
         Bool,
-        Inert::False,
+        OffValue::False,
         "watching a directory for new databases",
     ),
     key("snapshot", Map(Section::Snapshot), Implemented),
@@ -284,7 +284,7 @@ const DB: &[Key] = &[
     key(
         "busy-timeout",
         Duration,
-        NoEffect("v1's connections run with busy timeout zero"),
+        NoEffect("litestream-rs's connections run with busy timeout zero"),
     ),
     key("min-checkpoint-page-count", Int, Implemented),
     key("truncate-page-n", Int, Implemented),
@@ -307,8 +307,8 @@ const REPLICA: &[Key] = &[
 ];
 
 const AGE: &[Key] = &[
-    inert("identities", List, Inert::EmptyList, "age encryption"),
-    inert("recipients", List, Inert::EmptyList, "age encryption"),
+    off_only("identities", List, OffValue::EmptyList, "age encryption"),
+    off_only("recipients", List, OffValue::EmptyList, "age encryption"),
 ];
 
 /// The one key Go does not define, which holds every Rust-only setting: Go ignores it, so the

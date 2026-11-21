@@ -1,6 +1,6 @@
-//! The typed config: what v1 does with a Go file, Go's defaults applied.
+//! The typed config: what litestream-rs does with a Go file, Go's defaults applied.
 //!
-//! Only implemented keys appear here; inert keys were checked and no-effect
+//! Only implemented keys appear here; off-only keys were checked and no-effect
 //! keys warned about during the load. `Option` stands where Go uses a pointer
 //! and applies its default later, when it builds the database or replica
 //! (the `map` module turns those into the replicator's own config). Plain types only: no
@@ -35,7 +35,7 @@ pub mod defaults {
     pub const SHUTDOWN_SYNC_INTERVAL: GoDuration = GoDuration::from_millis(500);
 }
 
-/// A Go config file as v1 runs it.
+/// A Go config file as litestream-rs runs it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GoConfig {
     pub(crate) addr: Option<String>,
@@ -83,7 +83,7 @@ impl GoConfig {
     pub fn l0_retention_check_interval(&self) -> GoDuration {
         self.l0_retention_check_interval
     }
-    /// `retention.enabled`: whether v1 deletes what retention expires (Go's default, true).
+    /// `retention.enabled`: whether litestream-rs deletes what retention expires (Go's default, true).
     #[must_use]
     pub fn retention_enabled(&self) -> bool {
         self.retention_enabled
@@ -324,7 +324,7 @@ impl DbConfig {
     }
 }
 
-/// The two replica types v1 has.
+/// The two replica types litestream-rs has.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReplicaKind {
     /// An S3-compatible bucket.
@@ -398,7 +398,7 @@ impl fmt::Debug for Secret {
     }
 }
 
-/// The S3 keys v1 implements.
+/// The S3 keys litestream-rs implements.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct S3Settings {
     pub(crate) access_key_id: Option<Secret>,
@@ -460,7 +460,7 @@ impl S3Settings {
 /// (docs/plans/phase-4-sidecar.md, the TRUNCATE section).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppReaders {
-    /// Nothing stated (the default): v1 never checkpoints with TRUNCATE.
+    /// Nothing stated (the default): litestream-rs never checkpoints with TRUNCATE.
     Unknown,
     /// `none`: the application holds no long readers, so `truncate-page-n` acts as in Go.
     None,

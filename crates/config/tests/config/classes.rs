@@ -39,14 +39,14 @@ fn one_key_of_each_class() {
             .iter()
             .any(|(p, c)| p.to_string() == "dbs[0].replica.type" && *c == KeyClass::Implemented)
     );
-    // Inert: accepted at its off value, refused naming the key otherwise.
+    // Off-only: accepted at its off value, refused naming the key otherwise.
     let loaded = parse(&top("socket:\n  enabled: false"));
     assert!(
         loaded
             .report
             .keys
             .iter()
-            .any(|(p, c)| p.to_string() == "socket.enabled" && *c == KeyClass::Inert)
+            .any(|(p, c)| p.to_string() == "socket.enabled" && *c == KeyClass::OffOnly)
     );
     assert_eq!(
         problem_at(
@@ -78,7 +78,7 @@ fn one_key_of_each_class() {
     );
 }
 
-/// Every Go feature v1 lacks, its key path, a line at its off value and a line at its on value.
+/// Every Go feature litestream-rs lacks, its key path, a line at its off value and a line at its on value.
 type Place = fn(&str) -> String;
 
 const OUT_OF_SCOPE: &[(Place, &str, &str, &str)] = &[

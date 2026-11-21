@@ -76,16 +76,16 @@ impl fmt::Display for KeyPath {
     }
 }
 
-/// How v1 treats a key Go defines: implemented, accepted only at its off value, a knob with no
+/// How litestream-rs treats a key Go defines: implemented, accepted only at its off value, a knob with no
 /// effect, or refused (docs/plans/phase-4-sidecar.md, the config section).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum KeyClass {
-    /// Go knows it and v1 does what it says.
+    /// Go knows it and litestream-rs does what it says.
     Implemented,
-    /// Go knows it for a feature v1 lacks: accepted only at the value that
+    /// Go knows it for a feature litestream-rs lacks: accepted only at the value that
     /// asks for nothing (`enabled: false`, empty), refused otherwise.
-    Inert,
-    /// Go knows it as a tuning knob with no counterpart in v1: accepted, with
+    OffOnly,
+    /// Go knows it as a tuning knob with no counterpart in litestream-rs: accepted, with
     /// one warning.
     NoEffect,
     /// Go does not know it: refused, with the nearest Go key when one is close.
@@ -267,14 +267,14 @@ pub enum ProblemKind {
     /// An empty item in a list of mappings, which Go would crash on.
     #[error("an empty list item")]
     EmptyItem,
-    /// A Go feature v1 does not have, asked for.
-    #[error("{feature} is not in v1; remove the key or set it to its off value")]
+    /// A Go feature litestream-rs does not have, asked for.
+    #[error("{feature} is not in litestream-rs; remove the key or set it to its off value")]
     NotInV1 {
         /// The feature, in words.
         feature: &'static str,
     },
-    /// A replica type Go has and v1 does not.
-    #[error("replica type `{name}` is not in v1, which replicates to s3 and file only")]
+    /// A replica type Go has and litestream-rs does not.
+    #[error("replica type `{name}` is not in litestream-rs, which replicates to s3 and file only")]
     UnsupportedReplicaType {
         /// The type, from `type:` or the URL scheme.
         name: String,
@@ -366,7 +366,7 @@ pub enum ProblemKind {
     ReplicaPathIsUrl,
     /// `truncate-page-n` without the operator's claim that the application holds no long readers.
     #[error(
-        "TRUNCATE checkpoints need `litestream-rs: {{app-readers: none}}`: without that claim v1 never truncates (an application reader would make every attempt a wasted snapshot)"
+        "TRUNCATE checkpoints need `litestream-rs: {{app-readers: none}}`: without that claim litestream-rs never truncates (an application reader would make every attempt a wasted snapshot)"
     )]
     TruncateNeedsClaim,
     /// A path that cannot be made absolute.
@@ -394,12 +394,12 @@ impl fmt::Display for Problem {
     }
 }
 
-/// Something the file asks that v1 reads but does not fully do, or that reads
+/// Something the file asks that litestream-rs reads but does not fully do, or that reads
 /// oddly. Never a refusal.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum WarningKind {
-    /// A Go tuning knob with no counterpart in v1.
-    #[error("has no effect in v1: {why}")]
+    /// A Go tuning knob with no counterpart in litestream-rs.
+    #[error("has no effect in litestream-rs: {why}")]
     NoEffect {
         /// Why.
         why: &'static str,
@@ -426,9 +426,9 @@ pub enum WarningKind {
         /// The interval.
         interval: GoDuration,
     },
-    /// Go would TRUNCATE the WAL at 121359 pages; v1 does not without the claim.
+    /// Go would TRUNCATE the WAL at 121359 pages; litestream-rs does not without the claim.
     #[error(
-        "Go checkpoints with TRUNCATE at truncate-page-n (121359 pages by default); v1 does not unless `litestream-rs: {{app-readers: none}}` states the application holds no long readers"
+        "Go checkpoints with TRUNCATE at truncate-page-n (121359 pages by default); litestream-rs does not unless `litestream-rs: {{app-readers: none}}` states the application holds no long readers"
     )]
     NoTruncateWithoutClaim,
 }

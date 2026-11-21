@@ -7,14 +7,14 @@
 //! virtual hosts (`bucket.s3.region.amazonaws.com`), and MinIO's `bucket.host:port`
 //! or a bare `host:port` (an `http://` endpoint, path style). Another provider's
 //! host spelling (DigitalOcean, Backblaze, Filebase, Scaleway, Neon) and access
-//! point ARNs are refused with a pointer to `bucket` plus `endpoint`, since v1 does
+//! point ARNs are refused with a pointer to `bucket` plus `endpoint`, since litestream-rs does
 //! not derive their endpoints. Userinfo is refused: credentials never come from a
 //! URL (Go ignores it, which would quietly use other credentials).
 //!
 //! **Query.** `endpoint`, `region`, `forcePathStyle` (and `force-path-style`),
 //! `partSize` (`part-size`) and `concurrency` are honoured; `skipVerify=true` and
 //! a `storageClass` are refused; the signing and MD5 keys are accepted with a
-//! note, since they change nothing in v1. `concurrency` is Go's multipart-parts
+//! note, since they change nothing in litestream-rs. `concurrency` is Go's multipart-parts
 //! setting: the parts of one upload in flight. Zero leaves the default (5,
 //! R2 2). Reads, listings and creation-time HEADs have fixed limits and no key. A key Go does not read is refused.
 //!
@@ -79,7 +79,7 @@ impl S3Url {
         Ok(out)
     }
 
-    /// The query keys accepted that change nothing in v1, one line each.
+    /// The query keys accepted that change nothing in litestream-rs, one line each.
     #[must_use]
     pub fn notes(&self) -> &[&'static str] {
         &self.notes
@@ -187,13 +187,13 @@ pub(super) fn ensure_scheme(endpoint: &str) -> String {
     format!("{}://{endpoint}", if local { "http" } else { "https" })
 }
 
-/// Applies one query key to `out`; a note when it has no effect in v1.
+/// Applies one query key to `out`; a note when it has no effect in litestream-rs.
 fn read_query(
     name: &str,
     value: &str,
     out: &mut S3Url,
 ) -> Result<Option<&'static str>, ReplicaProblem> {
-    let not_in_v1 = |why: &'static str| ReplicaProblem::QueryNotInV1 {
+    let not_in_litestream_rs = |why: &'static str| ReplicaProblem::QueryNotInV1 {
         name: name.to_owned(),
         why,
     };
@@ -214,10 +214,12 @@ fn read_query(
             out.path_style_set = true;
         }
         "skipVerify" if value == "true" => {
-            return Err(not_in_v1("v1 always verifies TLS certificates"));
+            return Err(not_in_litestream_rs(
+                "litestream-rs always verifies TLS certificates",
+            ));
         }
         "storageClass" | "storage-class" if !value.is_empty() => {
-            return Err(not_in_v1("an S3 storage class"));
+            return Err(not_in_litestream_rs("an S3 storage class"));
         }
         "partSize" | "part-size" => match value.parse::<u64>() {
             Ok(bytes) if bytes > 0 => out.part_size = Some(bytes),
@@ -228,7 +230,7 @@ fn read_query(
         },
         "signPayload" | "sign-payload" | "signAcceptEncoding" | "sign-accept-encoding" => {
             return Ok(Some(
-                "the url's signing setting has no effect: v1's S3 client signs requests one fixed way",
+                "the url's signing setting has no effect: litestream-rs's S3 client signs requests one fixed way",
             ));
         }
         "requireContentMD5"
@@ -236,7 +238,7 @@ fn read_query(
         | "putObjectContentMD5"
         | "put-object-content-md5" => {
             return Ok(Some(
-                "the url's Content-MD5 setting has no effect: v1 always sends Content-MD5 on uploads",
+                "the url's Content-MD5 setting has no effect: litestream-rs always sends Content-MD5 on uploads",
             ));
         }
         "concurrency" => match value.parse::<u64>() {
@@ -256,7 +258,7 @@ fn read_query(
     Ok(None)
 }
 
-/// Go's `s3.ParseHost`, for the spellings v1 maps.
+/// Go's `s3.ParseHost`, for the spellings litestream-rs maps.
 fn parse_host(host: &str) -> Result<S3Url, ReplicaProblem> {
     let mut out = S3Url::default();
     if host.contains(':') && !host.contains(".com") {

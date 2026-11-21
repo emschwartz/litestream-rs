@@ -1,12 +1,12 @@
 //! The walk over the node tree: every key looked up in its section's table,
 //! its value read as Go reads it, and the key's class applied. Unknown keys,
-//! type errors and inert keys asked to do something become problems; no-effect
+//! type errors and off-only keys asked to do something become problems; no-effect
 //! keys and bare-number durations become warnings. What survives is a
 //! [`Fields`] per mapping, typed but not yet interpreted.
 
 use crate::duration::GoDuration;
 use crate::error::{Expected, KeyClass, KeyPath, Problem, ProblemKind, Warning, WarningKind};
-use crate::keys::{self, Inert, Key, Read, Rule, Section};
+use crate::keys::{self, Key, OffValue, Read, Rule, Section};
 use crate::value::{self, found};
 use crate::yaml::{Node, NodeKind};
 
@@ -252,8 +252,8 @@ impl Walk {
             Rule::NoEffect(why) => {
                 self.warn(path.clone(), Some(line), WarningKind::NoEffect { why })
             }
-            Rule::Inert(at, feature) => {
-                if !is_inert(at, value) {
+            Rule::OffOnly(at, feature) => {
+                if !is_off_value(at, value) {
                     self.problem(path.clone(), Some(line), ProblemKind::NotInV1 { feature });
                 }
             }
@@ -261,12 +261,12 @@ impl Walk {
     }
 }
 
-fn is_inert(at: Inert, value: &Value) -> bool {
+fn is_off_value(at: OffValue, value: &Value) -> bool {
     match at {
-        Inert::Any => true,
-        Inert::False => matches!(value, Value::Null | Value::Bool(false)),
-        Inert::Empty => matches!(value, Value::Null),
-        Inert::EmptyList => match value {
+        OffValue::Any => true,
+        OffValue::False => matches!(value, Value::Null | Value::Bool(false)),
+        OffValue::Empty => matches!(value, Value::Null),
+        OffValue::EmptyList => match value {
             Value::Null => true,
             Value::List(items) => items.is_empty(),
             Value::Str(_)

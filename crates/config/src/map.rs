@@ -8,10 +8,10 @@
 //! - `meta-path`, else Go's `.<name>-litestream` beside the database (`db.go:342`),
 //!   always written into [`Config::meta_dir`], so a Go meta directory is the one used.
 //! - `monitor-interval` (Go 1 s) is the WAL poll. Go's zero turns its monitor off
-//!   and nothing is ever synced; v1 refuses it rather than replicate nothing.
+//!   and nothing is ever synced; litestream-rs refuses it rather than replicate nothing.
 //! - `sync-interval` (Go 1 s) is the first retry wait, doubling to 5 minutes, as
 //!   Go's replica backoff (`replica.go:449-456`). Go also uploads only once per
-//!   sync interval; v1 uploads on the poll that staged the file.
+//!   sync interval; litestream-rs uploads on the poll that staged the file.
 //! - `checkpoint-interval` (Go 1 m; zero or less is off, `db.go:1571`),
 //!   `min-checkpoint-page-count` (Go 1000; zero or less Go refuses at open,
 //!   `db.go:872`), `truncate-page-n` (only with `app-readers: none`; Go's zero is
@@ -262,7 +262,7 @@ pub enum MapProblemKind {
         /// The value.
         value: i64,
     },
-    /// A duration v1 cannot represent (negative where it must not be).
+    /// A duration litestream-rs cannot represent (negative where it must not be).
     #[error("{value} is not a usable duration here")]
     Duration {
         /// The value.

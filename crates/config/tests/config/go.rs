@@ -1,5 +1,5 @@
 //! Go's config tests in `cmd/litestream/main_test.go` at 041a8c3, one Rust test
-//! per Go scenario, each with Go's expected values or Go's error. Where v1
+//! per Go scenario, each with Go's expected values or Go's error. Where litestream-rs
 //! refuses at load what Go refuses only when it starts the database, or what
 //! Go accepts and ignores, the test says so.
 
@@ -97,7 +97,7 @@ fn directory_entry_keeps_its_meta_dir() {
     assert_eq!(dir.meta_dir(), Some("/path/to/litestream-state"));
 }
 
-// TestParseConfig_StrictWarnings: Go warns, v1 refuses, and suggests.
+// TestParseConfig_StrictWarnings: Go warns, litestream-rs refuses, and suggests.
 
 #[test]
 fn keys_go_does_not_know_are_refused_where_go_warns() {
@@ -591,7 +591,7 @@ fn checkpoint_fields() {
         (unset.min_checkpoint_page_count(), unset.truncate_page_n()),
         (None, None)
     );
-    // Without the claim that the application holds no long readers, v1 never truncates.
+    // Without the claim that the application holds no long readers, litestream-rs never truncates.
     let problems = refused(
         "dbs:\n  - path: /tmp/test.db\n    truncate-page-n: 100000\n    replica:\n      url: file:///tmp/replica\n",
     );

@@ -15,7 +15,7 @@
 //! - a string takes the scalar's text whatever it resolved to (`yes`, `0600`
 //!   and `1.0` stay as written);
 //! - a bool takes only a boolean (a quoted `"true"` is a type error);
-//! - an integer takes an integer, or a float Go truncates; v1 refuses a
+//! - an integer takes an integer, or a float Go truncates; litestream-rs refuses a
 //!   fraction instead of dropping it;
 //! - a `time.Duration` takes a string through `time.ParseDuration`, or an
 //!   integer as nanoseconds (`sync-interval: 5` is 5ns in Go: read the same,

@@ -69,7 +69,7 @@ pub enum ReplicaProblem {
         "the replica url carries credentials; give them as access-key-id and secret-access-key, or in the environment"
     )]
     UserInfo,
-    /// A host Go splits into bucket and a provider endpoint v1 does not derive.
+    /// A host Go splits into bucket and a provider endpoint litestream-rs does not derive.
     #[error(
         "the url host names a provider endpoint ({provider}); give the bucket alone as the host, or as `bucket`, and the endpoint as `endpoint`"
     )]
@@ -78,10 +78,10 @@ pub enum ReplicaProblem {
         provider: &'static str,
     },
     /// An S3 access point ARN.
-    #[error("S3 access point ARNs are not in v1; give the bucket and endpoint")]
+    #[error("S3 access point ARNs are not in litestream-rs; give the bucket and endpoint")]
     AccessPoint,
-    /// A query key that asks for something v1 does not do.
-    #[error("url parameter {name} is not in v1 ({why})")]
+    /// A query key that asks for something litestream-rs does not do.
+    #[error("url parameter {name} is not in litestream-rs ({why})")]
     QueryNotInV1 {
         /// The key.
         name: String,

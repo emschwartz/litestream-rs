@@ -1,7 +1,7 @@
 [package]
 name = "lsr-config"
 version = "0.0.0"
-description = "Go Litestream's litestream.yml, read as Go reads it, with v1's refusals and warnings."
+description = "Go Litestream's litestream.yml, read as Go reads it, with litestream-rs's refusals and warnings."
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
