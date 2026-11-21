@@ -37,7 +37,7 @@ pub enum StartError {
         code: i32,
     },
     /// SQLite's file handle or wal-index cannot be used without this library opening a
-    /// descriptor of its own on the database, which would drop the host's locks.
+    /// descriptor of its own on the database, which would drop the application's locks.
     #[error("SQLite's own file handle cannot be used: {0}")]
     Refused(#[from] lsr_sqlite::Refusal),
     /// SQLite reported a page size no SQLite build allows.

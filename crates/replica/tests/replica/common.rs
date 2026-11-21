@@ -1,4 +1,4 @@
-//! What the end-to-end tests share: a real SQLite database with the host's own connection, a
+//! What the end-to-end tests share: a real SQLite database with the application's own connection, a
 //! file replica, a store whose faults a test switches on, and the check every test ends with
 //! (a restore of the replica equals the database).
 
@@ -31,7 +31,7 @@ pub const START: Timestamp = Timestamp::from_unix_millis(1_700_000_000_000);
 /// Long enough that a test never sees it run out unless it is stuck.
 pub const PATIENCE: Duration = Duration::from_secs(600);
 
-/// A database in a directory of its own, with the host's connection and a replica beside it.
+/// A database in a directory of its own, with the application's connection and a replica beside it.
 pub struct Site {
     pub dir: TempDir,
     pub db: PathBuf,
@@ -41,7 +41,7 @@ pub struct Site {
 }
 
 impl Site {
-    /// A WAL-mode database holding one empty table; the host's connection is set up as a host
+    /// A WAL-mode database holding one empty table; the application's connection is set up as an application
     /// must set every connection up.
     pub fn new() -> Self {
         let dir = TempDir::new().unwrap();
@@ -63,7 +63,7 @@ impl Site {
         }
     }
 
-    /// The file replica as the store a host passes in.
+    /// The file replica as the store an application passes in.
     pub fn store(&self) -> Arc<dyn DynStore> {
         Arc::new(FsStore::new(&self.replica))
     }

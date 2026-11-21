@@ -8,7 +8,7 @@
 //! replica's newest transaction, read-only.
 //!
 //! Loading an extension from Rust needs `unsafe` (rusqlite's `load_extension`), which only
-//! the SQLite crate may use, so the host is a small C program, `c/vfs-read.c`, built with the
+//! the SQLite crate may use, so the application is a small C program, `c/vfs-read.c`, built with the
 //! system C compiler. It needs a SQLite that has `sqlite3_load_extension`, which macOS's
 //! system library lacks, so the SQLite it links is the first of these that answers:
 //! `SQLITE3_CFLAGS` / `SQLITE3_LIBS` from the environment (split on whitespace, no shell
@@ -40,7 +40,7 @@ const READ_TIMEOUT: Duration = Duration::from_secs(120);
 /// Header bytes of page 1 the VFS rewrites on every read.
 const REWRITTEN: [std::ops::Range<usize>; 2] = [18..20, 24..28];
 
-/// What the C host saw of one database.
+/// What the C application saw of one database.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VfsView {
     /// The rows of `PRAGMA integrity_check`.
@@ -56,11 +56,11 @@ pub struct VfsView {
 /// The outcome of one read through the VFS.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VfsRead {
-    /// The host read every table and page.
+    /// The application read every table and page.
     Read(VfsView),
-    /// The extension or SQLite refused: the host's exit status and error line.
+    /// The extension or SQLite refused: the application's exit status and error line.
     Refused {
-        /// What the host said.
+        /// What the application said.
         detail: String,
     },
 }
@@ -97,7 +97,7 @@ impl VfsView {
     }
 }
 
-/// Builds the C host into `into` with the system C compiler and the SQLite the module doc's
+/// Builds the C application into `into` with the system C compiler and the SQLite the module doc's
 /// order picks.
 ///
 /// # Errors
@@ -213,7 +213,7 @@ fn words(flags: &str) -> Vec<String> {
 /// the pages go to `<scratch>/vfs.pages`, the VFS's log to `<scratch>/vfs.log`.
 ///
 /// # Errors
-/// [`CompatError`] when the host cannot run, does not finish in time, or prints what it
+/// [`CompatError`] when the application cannot run, does not finish in time, or prints what it
 /// should not.
 pub fn read_with_vfs(
     reader: &Path,
@@ -238,7 +238,7 @@ pub fn read_with_vfs(
 /// `<scratch>/plain.pages`.
 ///
 /// # Errors
-/// [`CompatError`] when the host cannot run or refuses an ordinary database.
+/// [`CompatError`] when the application cannot run or refuses an ordinary database.
 pub fn read_plain(reader: &Path, db: &Path, scratch: &Path) -> Result<VfsView, CompatError> {
     let mut cmd = Command::new(reader);
     cmd.arg(db).arg(scratch.join("plain.pages"));
@@ -251,7 +251,7 @@ pub fn read_plain(reader: &Path, db: &Path, scratch: &Path) -> Result<VfsView, C
     }
 }
 
-/// Runs the host with its output in files (a full dump is megabytes, too much for a pipe the
+/// Runs the application with its output in files (a full dump is megabytes, too much for a pipe the
 /// harness only drains at the end) and parses what it printed.
 fn run(mut cmd: Command, scratch: &Path, name: &str) -> Result<VfsRead, CompatError> {
     let out = scratch.join(format!("{name}.out"));
@@ -299,7 +299,7 @@ fn parse(text: &str, pages: PathBuf) -> Result<VfsView, CompatError> {
         pages,
     };
     for line in text.lines() {
-        let bad = || CompatError::Fixture(format!("the VFS host printed {line:?}"));
+        let bad = || CompatError::Fixture(format!("the VFS application printed {line:?}"));
         let (kind, rest) = line.split_once('\t').ok_or_else(bad)?;
         match kind {
             "integrity" => view.integrity.push(rest.to_owned()),

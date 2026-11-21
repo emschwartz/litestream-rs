@@ -301,7 +301,7 @@ impl DbConfig {
     pub fn min_checkpoint_page_count(&self) -> Option<i64> {
         self.min_checkpoint_page_count
     }
-    /// `truncate-page-n`; set only with the `host-readers: none` claim.
+    /// `truncate-page-n`; set only with the `app-readers: none` claim.
     #[must_use]
     pub fn truncate_page_n(&self) -> Option<i64> {
         self.truncate_page_n
@@ -455,14 +455,14 @@ impl S3Settings {
     }
 }
 
-/// What the operator states about the host's readers: TRUNCATE waits for every reader, so it
-/// runs only when the operator says the host holds no long readers
+/// What the operator states about the application's readers: TRUNCATE waits for every reader, so it
+/// runs only when the operator says the application holds no long readers
 /// (docs/plans/phase-4-sidecar.md, the TRUNCATE section).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HostReaders {
+pub enum AppReaders {
     /// Nothing stated (the default): v1 never checkpoints with TRUNCATE.
     Unknown,
-    /// `none`: the host holds no long readers, so `truncate-page-n` acts as in Go.
+    /// `none`: the application holds no long readers, so `truncate-page-n` acts as in Go.
     None,
 }
 
@@ -512,23 +512,23 @@ pub struct ResponseSettings {
 /// The `litestream-rs` section, which Go ignores.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RustSettings {
-    pub(crate) host_readers: HostReaders,
-    pub(crate) host_autocheckpoint: Option<std::num::NonZeroU32>,
+    pub(crate) app_readers: AppReaders,
+    pub(crate) app_autocheckpoint: Option<std::num::NonZeroU32>,
     pub(crate) responses: ResponseSettings,
 }
 
 impl RustSettings {
-    /// `host-readers`.
+    /// `app-readers`.
     #[must_use]
-    pub fn host_readers(self) -> HostReaders {
-        self.host_readers
+    pub fn app_readers(self) -> AppReaders {
+        self.app_readers
     }
-    /// `host-autocheckpoint`: the `wal_autocheckpoint` the host's connections run, in
+    /// `app-autocheckpoint`: the `wal_autocheckpoint` the application's connections run, in
     /// frames; `None` for `0` or `off`. SQLite's default, 1000, when the key is absent, since
     /// the replicator cannot read another process's setting.
     #[must_use]
-    pub fn host_autocheckpoint(self) -> Option<std::num::NonZeroU32> {
-        self.host_autocheckpoint
+    pub fn app_autocheckpoint(self) -> Option<std::num::NonZeroU32> {
+        self.app_autocheckpoint
     }
     /// `responses`.
     #[must_use]

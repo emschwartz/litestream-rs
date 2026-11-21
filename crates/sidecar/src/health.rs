@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use lsr_replica::{
-    DegradedCause, Gone, Health, HostNotice, Lane, Phase, Replicator, SnapshotCause, StopCause,
+    AppNotice, DegradedCause, Gone, Health, Lane, Phase, Replicator, SnapshotCause, StopCause,
     Timestamp,
 };
 
@@ -203,12 +203,12 @@ pub const fn snapshot_name(cause: SnapshotCause) -> &'static str {
     }
 }
 
-/// A host notice's kind.
+/// An application notice's kind.
 #[must_use]
-pub const fn notice_name(notice: HostNotice) -> &'static str {
+pub const fn notice_name(notice: AppNotice) -> &'static str {
     match notice {
-        HostNotice::Checkpointing { .. } => "checkpointing",
-        HostNotice::Stalled { .. } => "stalled",
+        AppNotice::Checkpointing { .. } => "checkpointing",
+        AppNotice::Stalled { .. } => "stalled",
     }
 }
 
@@ -298,7 +298,7 @@ fn running_json(o: &mut Object, health: &Health) {
         "resnapshot",
         health.resnapshot.map(|c| snapshot_name(c).to_owned()),
     );
-    o.maybe("host_notice", health.host_notice().map(|n| n.to_string()));
+    o.maybe("app_notice", health.app_notice().map(|n| n.to_string()));
     o.text("observed_at", &health.observed_at.to_string());
 }
 

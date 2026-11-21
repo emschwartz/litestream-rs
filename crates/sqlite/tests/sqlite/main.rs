@@ -3,12 +3,12 @@
 
 use std::path::Path;
 
-/// The child processes' entry, the one test `lsr_sqlite::testing`'s separate-process host and
+/// The child processes' entry, the one test `lsr_sqlite::testing`'s separate-process application and
 /// `common::spawn` start this binary again to run (by its name, `--exact`): a no-op in the test
-/// run; in a child, the host or the role a module's `child` names.
+/// run; in a child, the application or the role a module's `child` names.
 #[test]
 fn child_process_entry() {
-    if lsr_sqlite::testing::serve_host() {
+    if lsr_sqlite::testing::serve_app() {
         return;
     }
     let Some((role, db)) = common::role() else {
@@ -28,6 +28,8 @@ fn child(role: &str, db: &Path) -> bool {
 // `cfg(test)` is always set here; it marks the helpers as test code, so clippy.toml's
 // allow-*-in-tests cover them as they cover #[test] fns.
 #[cfg(test)]
+mod app_at_defaults;
+#[cfg(test)]
 mod big;
 #[cfg(test)]
 mod common;
@@ -37,8 +39,6 @@ mod descriptors;
 mod errors;
 #[cfg(test)]
 mod faults;
-#[cfg(test)]
-mod host_at_defaults;
 #[cfg(test)]
 mod kill;
 #[cfg(test)]

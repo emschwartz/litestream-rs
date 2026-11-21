@@ -1,7 +1,7 @@
-//! A host writer in another process, SIGKILLed mid-transaction: nothing it did not commit, and
+//! An application writer in another process, SIGKILLed mid-transaction: nothing it did not commit, and
 //! nothing it committed that SQLite never indexed, reaches any LTX file, staged or replicated,
 //! and the next writer's transactions over the same WAL slots replicate as normal. Each case
-//! runs with the rig's own host in this process and in another one at SQLite's defaults
+//! runs with the rig's own application in this process and in another one at SQLite's defaults
 //! (`lsr_sqlite::testing::Placement`).
 
 use std::io::Write;
@@ -122,7 +122,7 @@ fn wal_holds_marker(rig: &Rig<impl Backend>) -> bool {
     contains(&wal, MARKER)
 }
 
-/// The killed writer is a process of its own in both placements of the host.
+/// The killed writer is a process of its own in both placements of the application.
 fn killed_writer<B: Backend>(role: &str) {
     for placement in Placement::ALL {
         killed_writer_beside::<B>(role, placement);

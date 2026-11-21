@@ -41,7 +41,7 @@
 //! A page that does not match is [`Mismatch`], which the step turns into
 //! `Fault::DatabasePageMismatch`. The table remembers the bytes it found: under
 //! the response that keeps trying, the retry finds those same bytes and ships
-//! them (that is the database the host serves), while the page stays reported
+//! them (that is the database the application serves), while the page stays reported
 //! until a verified WAL frame records it again, the table is emptied, or an
 //! operator accepts it ([`PageTable::accept`]).
 //!

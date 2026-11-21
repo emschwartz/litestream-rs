@@ -58,9 +58,9 @@
 //! id, so what is left is counted in WAL bytes and staged files.
 //!
 //! The actor also hands every wal-index read, and the read after each of its
-//! own checkpoints, to a [`HostObserver`] (`crate::host`), which counts the
-//! checkpoints it did not run and infers the host's automatic checkpoints that
-//! cannot run ([`Actor::host_checkpoints`]). The count changes no decision.
+//! own checkpoints, to a [`AppCheckpointObserver`] (`crate::app`), which counts the
+//! checkpoints it did not run and infers the application's automatic checkpoints that
+//! cannot run ([`Actor::app_checkpoints`]). The count changes no decision.
 
 mod parts;
 mod state;
@@ -75,6 +75,7 @@ use parts::{Course, Engine, Kept, LanePin, Stop, Tail};
 pub use state::{Degraded, Lane, Phase};
 use state::{Gate, Live};
 
+use crate::app::AppCheckpoints;
 use crate::checkpoint::{
     CheckpointConfig, CheckpointFailed, CheckpointOutcome, CheckpointState, Decision, Observed,
     Staged, after_checkpoint, after_sync, checkpoint, decide, next_wake,
@@ -85,7 +86,6 @@ use crate::fault::{
     Action, Backoff, BugSite, Clamped, Fault, HaltCause, Next, PersistentCause, Policy, Responses,
     SnapshotCause, backoff_wait, policy,
 };
-use crate::host::HostCheckpoints;
 use crate::inventory::Inventory;
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::maintain::{
@@ -409,13 +409,13 @@ impl Actor {
     /// halt, each lane's wait and degraded state and the retention pin they
     /// hold, a scheduled verify's pin and its request for live pages (pages
     /// read and not yet taken are read again), an operator's snapshot request
-    /// not yet staged, the clock's last reading and the host-checkpoint
+    /// not yet staged, the clock's last reading and the application-checkpoint
     /// counts (not the wal-index read they were counted from: the caller
     /// may have reopened the connections since).
     #[must_use]
     pub fn rebuilt(&self) -> Self {
         Self {
-            kept: self.kept.rebuilt(self.kept.host.reopened()),
+            kept: self.kept.rebuilt(self.kept.app.reopened()),
             engine: Engine::fresh(),
         }
     }
@@ -495,20 +495,20 @@ impl Actor {
     /// Checkpoints someone else ran on the database since this actor began.
     #[must_use]
     pub const fn foreign_checkpoints(&self) -> u64 {
-        self.kept.host.counts().ran()
+        self.kept.app.counts().ran()
     }
 
-    /// What the host's checkpoints did since this actor began.
+    /// What the application's checkpoints did since this actor began.
     #[must_use]
-    pub const fn host_checkpoints(&self) -> HostCheckpoints {
-        self.kept.host.counts()
+    pub const fn app_checkpoints(&self) -> AppCheckpoints {
+        self.kept.app.counts()
     }
 
-    /// The host's `wal_autocheckpoint`, in frames (`None`: it runs none). The
-    /// default is SQLite's, 1000; it only changes what the host-checkpoint
+    /// The application's `wal_autocheckpoint`, in frames (`None`: it runs none). The
+    /// default is SQLite's, 1000; it only changes what the application-checkpoint
     /// notice infers.
-    pub const fn set_host_autocheckpoint(&mut self, frames: Option<NonZeroU32>) {
-        self.kept.host.set_autocheckpoint(frames);
+    pub const fn set_app_autocheckpoint(&mut self, frames: Option<NonZeroU32>) {
+        self.kept.app.set_autocheckpoint(frames);
     }
 
     /// Committed WAL bytes past the synced position: all of `committed` when
@@ -736,10 +736,10 @@ impl Actor {
 
     /// Replaces the engine with a fresh one, so the next tick boots from the
     /// replica and the WAL again ([`Self::rebuilt`] says what is kept). The
-    /// connections are the same, so the host observer's last read stands.
+    /// connections are the same, so the application observer's last read stands.
     fn rebuild(&mut self) {
         *self = Self {
-            kept: self.kept.rebuilt(self.kept.host),
+            kept: self.kept.rebuilt(self.kept.app),
             engine: Engine::fresh(),
         };
     }
@@ -1024,7 +1024,7 @@ impl Actor {
             Ok(committed) => committed,
             Err(err) => return Some(self.fault(Lane::Sync, Fault::from_source(err), now)),
         };
-        self.kept.host.poll(committed);
+        self.kept.app.poll(committed);
         let wants_live = may_checkpoint && self.kept.live.wanted() && self.caught_up();
         let wants_proof = may_checkpoint && (self.checkpoint_decision(now).is_some() || wants_live);
         let quiet = !self.wal_moved(committed) && self.pending().is_none() && !self.more_wal();
@@ -1162,9 +1162,9 @@ impl Actor {
     /// A pending snapshot that finds no header writes one first, through one
     /// `_litestream_seq` bump, as Go's `ensureWALExists` does before every
     /// sync (`db.go:826`). A database a restore just published, or one whose
-    /// WAL a host truncated while we were down, has none until someone writes,
+    /// WAL an application truncated while we were down, has none until someone writes,
     /// and the snapshot is what puts the database file's pages on the replica:
-    /// waiting for the host's next write would leave them off it, and a drain
+    /// waiting for the application's next write would leave them off it, and a drain
     /// could never finish. A WAL still without a header after the bump is
     /// `WalMoved`, retried on the sync lane's backoff.
     #[expect(
@@ -1296,7 +1296,7 @@ impl Actor {
             Ok(done) => done.run,
             Err(failed) => failed.run,
         };
-        self.kept.host.ours(env.wal.committed().ok(), run);
+        self.kept.app.ours(env.wal.committed().ok(), run);
         let done = match done {
             Ok(done) => done,
             Err(CheckpointFailed { fault, staged, .. }) => {

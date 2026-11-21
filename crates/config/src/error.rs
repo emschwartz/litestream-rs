@@ -364,9 +364,9 @@ pub enum ProblemKind {
     /// A URL in `path`.
     #[error("replica path cannot be a url, please use the 'url' field instead")]
     ReplicaPathIsUrl,
-    /// `truncate-page-n` without the operator's claim that the host holds no long readers.
+    /// `truncate-page-n` without the operator's claim that the application holds no long readers.
     #[error(
-        "TRUNCATE checkpoints need `litestream-rs: {{host-readers: none}}`: without that claim v1 never truncates (a host reader would make every attempt a wasted snapshot)"
+        "TRUNCATE checkpoints need `litestream-rs: {{app-readers: none}}`: without that claim v1 never truncates (an application reader would make every attempt a wasted snapshot)"
     )]
     TruncateNeedsClaim,
     /// A path that cannot be made absolute.
@@ -428,7 +428,7 @@ pub enum WarningKind {
     },
     /// Go would TRUNCATE the WAL at 121359 pages; v1 does not without the claim.
     #[error(
-        "Go checkpoints with TRUNCATE at truncate-page-n (121359 pages by default); v1 does not unless `litestream-rs: {{host-readers: none}}` states the host holds no long readers"
+        "Go checkpoints with TRUNCATE at truncate-page-n (121359 pages by default); v1 does not unless `litestream-rs: {{app-readers: none}}` states the application holds no long readers"
     )]
     NoTruncateWithoutClaim,
 }

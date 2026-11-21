@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use lsr_compat::{
-    Chain, Era, GoBuild, GoRestore, Replicator, Site, Target, UP_LINE, Written,
+    AppFixture, Chain, Era, GoBuild, GoRestore, Replicator, Target, UP_LINE, Written,
     build_verify_helper, builds_in, builds_under_test, clock_ending_now, go_verify, hash_pages,
     integrity_check, list, newest_l0, restore_replica, restore_with_go, wait_until, write_config,
 };
@@ -36,8 +36,9 @@ fn clear(path: &Path) {
 
 /// Runs the chain writer for `commits` commits at `page_size` and drains it.
 fn write_chain(commits: u32, page_size: u32, seed: u64) -> Written {
-    let site = Site::create(page_size, seed).expect("site");
-    let mut chain = Chain::start(site, clock_ending_now(commits).expect("clock")).expect("start");
+    let fixture = AppFixture::create(page_size, seed).expect("fixture");
+    let mut chain =
+        Chain::start(fixture, clock_ending_now(commits).expect("clock")).expect("start");
     chain.run(commits).expect("run");
     chain.finish().expect("finish")
 }
@@ -64,18 +65,20 @@ fn rust_restore(
 #[test]
 fn rust_restores_its_own_chain_at_every_point() {
     let written = write_chain(25, 4096, 7);
-    let out = written.site.dir().join("rs.db");
+    let out = written.fixture.dir().join("rs.db");
     let latest = written.points.last().expect("points");
-    restore_replica(&written.site.replica, RestoreTarget::Latest, &out)
+    restore_replica(&written.fixture.replica, RestoreTarget::Latest, &out)
         .expect("sink")
         .expect("latest restores");
     assert_eq!(restored_pages(&out), latest.page_hashes);
     let mut checked = 0;
     for point in &written.points {
         clear(&out);
-        if let Some(Ok(())) =
-            rust_restore(&written.site.replica, RestoreTarget::Txid(point.txid), &out)
-        {
+        if let Some(Ok(())) = rust_restore(
+            &written.fixture.replica,
+            RestoreTarget::Txid(point.txid),
+            &out,
+        ) {
             assert_eq!(
                 restored_pages(&out),
                 point.page_hashes,
@@ -89,8 +92,8 @@ fn rust_restores_its_own_chain_at_every_point() {
 }
 
 fn go_config(written: &Written) -> PathBuf {
-    let config = written.site.dir().join("go.yml");
-    write_config(&config, &written.site.db, &written.site.replica).expect("config");
+    let config = written.fixture.dir().join("go.yml");
+    write_config(&config, &written.fixture.db, &written.fixture.replica).expect("config");
     config
 }
 
@@ -102,9 +105,9 @@ fn go_restore(
     target: Target,
 ) -> (GoRestore, PathBuf) {
     let bin = build.binary().expect("the build under test is present");
-    let out = written.site.dir().join(name);
+    let out = written.fixture.dir().join(name);
     clear(&out);
-    let result = restore_with_go(&bin, config, &written.site.db, &out, target).expect("go runs");
+    let result = restore_with_go(&bin, config, &written.fixture.db, &out, target).expect("go runs");
     (result, out)
 }
 
@@ -132,7 +135,7 @@ fn go_verifies_every_rust_file() {
 #[ignore = "runs 300 commits; just compat"]
 fn rust_chain_covers_every_shape() {
     let written = write_chain(COMMITS, 4096, 11);
-    let files = list(&written.site.replica).expect("list").files;
+    let files = list(&written.fixture.replica).expect("list").files;
     let levels: std::collections::BTreeSet<u8> =
         written.archive.iter().filter_map(|p| level_of(p)).collect();
     for level in [0, 1, 2, 9] {
@@ -183,7 +186,7 @@ fn compacts_and_prunes(build: &GoBuild) {
     let written = write_chain(COMMITS, 4096, 11);
     let bin = build.binary().expect("the build under test is present");
     let config = go_config(&written);
-    let before = list(&written.site.replica).expect("list").files.len();
+    let before = list(&written.fixture.replica).expect("list").files.len();
     let newest_l9 = |dir: &Path| -> Result<Option<u64>, lsr_compat::CompatError> {
         Ok(list(dir)?
             .files
@@ -192,8 +195,8 @@ fn compacts_and_prunes(build: &GoBuild) {
             .map(|f| f.key.range().max().get())
             .max())
     };
-    let rust_l9 = newest_l9(&written.site.replica).expect("l9");
-    let tip = newest_l0(&written.site.meta)
+    let rust_l9 = newest_l9(&written.fixture.replica).expect("l9");
+    let tip = newest_l0(&written.fixture.meta)
         .expect("l0")
         .map(|h| h.fields().txids.max());
     // Go's store snapshots only when its position (the newest L0, which it reads from the
@@ -202,7 +205,7 @@ fn compacts_and_prunes(build: &GoBuild) {
     // replica holds before Go starts, never from how long Go takes.
     let go_snapshots = tip.is_some_and(|t| rust_l9.is_none_or(|l9| t.get() > l9));
     println!("Rust's newest L9 {rust_l9:?}, tip {tip:?}: Go snapshots {go_snapshots}");
-    let go_log = written.site.dir().join("go.log");
+    let go_log = written.fixture.dir().join("go.log");
     let mut go = Replicator::start(&bin, &config, &go_log).expect("start");
     // Either Go takes its own snapshot of the unchanged database, or the Rust snapshot is
     // already at the tip and Go declines. A declining Go logs nothing at its default level
@@ -215,7 +218,7 @@ fn compacts_and_prunes(build: &GoBuild) {
         || {
             go.ensure_running()?;
             if go_snapshots {
-                return Ok(newest_l9(&written.site.replica)? > rust_l9);
+                return Ok(newest_l9(&written.fixture.replica)? > rust_l9);
             }
             let up = std::fs::read_to_string(&go_log).is_ok_and(|log| log.contains(UP_LINE));
             if up && up_since.is_none() {
@@ -225,8 +228,8 @@ fn compacts_and_prunes(build: &GoBuild) {
         },
     )
     .map_err(|e| {
-        let tip = newest_l0(&written.site.meta).ok().flatten().map(|h| h.fields().txids.max());
-        let log = std::fs::read_to_string(written.site.dir().join("go.log")).unwrap_or_default();
+        let tip = newest_l0(&written.fixture.meta).ok().flatten().map(|h| h.fields().txids.max());
+        let log = std::fs::read_to_string(written.fixture.dir().join("go.log")).unwrap_or_default();
         let tail: Vec<&str> = log.lines().rev().take(25).collect();
         format!("{e:?}: Rust's newest L9 ends at {rust_l9:?}, Go's meta tip {tip:?}; Go log tail {tail:#?}")
     })
@@ -234,14 +237,14 @@ fn compacts_and_prunes(build: &GoBuild) {
     go.stop().expect("stop");
     println!(
         "files before {before}, after {}",
-        list(&written.site.replica).expect("list").files.len()
+        list(&written.fixture.replica).expect("list").files.len()
     );
     let want = &written.points.last().expect("points").page_hashes;
     let (result, out) = go_restore(build, &written, &config, "after.db", Target::Latest);
     assert_eq!(result, GoRestore::Restored);
     assert_eq!(&restored_pages(&out), want);
-    let rs = written.site.dir().join("rs-after.db");
-    restore_replica(&written.site.replica, RestoreTarget::Latest, &rs)
+    let rs = written.fixture.dir().join("rs-after.db");
+    restore_replica(&written.fixture.replica, RestoreTarget::Latest, &rs)
         .expect("sink")
         .expect("Rust restores after Go");
     assert_eq!(&restored_pages(&rs), want);
@@ -289,7 +292,7 @@ mod live {
         let config = go_config(&written);
         let mut targets: Vec<Txid> = written.points.iter().map(|p| p.txid).collect();
         targets.extend(
-            list(&written.site.replica)
+            list(&written.fixture.replica)
                 .expect("list")
                 .files
                 .iter()
@@ -301,10 +304,10 @@ mod live {
             let version = build.name();
             let mut checked = 0;
             for txid in &targets {
-                let rs = written.site.dir().join("rs.db");
+                let rs = written.fixture.dir().join("rs.db");
                 clear(&rs);
                 let Some(rust) =
-                    rust_restore(&written.site.replica, RestoreTarget::Txid(*txid), &rs)
+                    rust_restore(&written.fixture.replica, RestoreTarget::Txid(*txid), &rs)
                 else {
                     continue;
                 };
@@ -350,10 +353,10 @@ mod live {
         for build in builds_in(Era::Blocks) {
             for point in written.points.iter().step_by(stride) {
                 let at = point.at_ms + 40;
-                let rs = written.site.dir().join("rs.db");
+                let rs = written.fixture.dir().join("rs.db");
                 clear(&rs);
                 let rust = restore_replica(
-                    &written.site.replica,
+                    &written.fixture.replica,
                     RestoreTarget::AsOf(Timestamp::from_unix_millis(at)),
                     &rs,
                 )
@@ -373,10 +376,10 @@ mod live {
                     (Err(RestoreError::NoPlan(no)), GoRestore::Restored)
                         if let PlanOutcome::AsOfInsideFile { chain, .. } = no.outcome() =>
                     {
-                        let end = written.site.dir().join("end.db");
+                        let end = written.fixture.dir().join("end.db");
                         clear(&end);
                         restore_replica(
-                            &written.site.replica,
+                            &written.fixture.replica,
                             RestoreTarget::Txid(chain.reaches()),
                             &end,
                         )

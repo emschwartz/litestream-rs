@@ -8,7 +8,7 @@
 //! the test does not choose. So a restore is compared with the recorded states on every page
 //! but one, and that one is checked by meaning instead:
 //!
-//! - The masked page is the root page of `_litestream_seq`, which the site creates before any
+//! - The masked page is the root page of `_litestream_seq`, which the fixture creates before any
 //!   replicator starts. The table holds at most one row of two integers, so its root is a leaf
 //!   (checked: the page's b-tree type byte is 0x0d in every restore) and it is the table's
 //!   only page. No application row, index entry or freelist page can live on it: without
@@ -38,7 +38,7 @@ use std::fs::{self, File};
 use std::io::{self, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use lsr_compat::{Site, hash_pages, integrity_check};
+use lsr_compat::{AppFixture, hash_pages, integrity_check};
 use rusqlite::{Connection, OptionalExtension};
 
 /// The b-tree page type of a table leaf.
@@ -62,8 +62,8 @@ fn seq_in(conn: &Connection) -> i64 {
 }
 
 /// The live database's `_litestream_seq` value, through the application's connection.
-pub fn live_seq(site: &Site) -> i64 {
-    seq_in(&site.app)
+pub fn live_seq(fixture: &AppFixture) -> i64 {
+    seq_in(&fixture.app)
 }
 
 /// The root page of `_litestream_seq` in the database at `path`.
@@ -77,14 +77,14 @@ fn seq_root_in(conn: &Connection) -> u32 {
 }
 
 /// The live database's `_litestream_seq` root page.
-pub fn seq_root(site: &Site) -> u32 {
-    let root = seq_root_in(&site.app);
+pub fn seq_root(fixture: &AppFixture) -> u32 {
+    let root = seq_root_in(&fixture.app);
     assert!(root > 1, "_litestream_seq's root is page {root}");
     root
 }
 
-fn scratch(site: &Site, name: &str) -> PathBuf {
-    let dir = site.dir().join("capture");
+fn scratch(fixture: &AppFixture, name: &str) -> PathBuf {
+    let dir = fixture.dir().join("capture");
     fs::create_dir_all(&dir).expect("capture dir");
     for suffix in ["", "-wal", "-shm"] {
         drop(fs::remove_file(dir.join(format!("{name}{suffix}"))));
@@ -107,8 +107,8 @@ pub struct Held {
 }
 
 impl Held {
-    /// Opens the site's database file and wal-index, which the application created.
-    pub fn open(site: &Site) -> Self {
+    /// Opens the fixture's database file and wal-index, which the application created.
+    pub fn open(fixture: &AppFixture) -> Self {
         let open = |path: PathBuf| {
             fs::OpenOptions::new()
                 .read(true)
@@ -117,8 +117,8 @@ impl Held {
                 .expect("open a file the application created")
         };
         Self {
-            db: open(site.db.clone()),
-            shm: open(PathBuf::from(format!("{}-shm", site.db.display()))),
+            db: open(fixture.db.clone()),
+            shm: open(PathBuf::from(format!("{}-shm", fixture.db.display()))),
         }
     }
 
@@ -136,8 +136,8 @@ impl Held {
 }
 
 /// The database as of now, copied inside a read transaction (see the module doc).
-pub fn capture(site: &Site, held: &Held) -> State {
-    capture_wal(site, held, "copy.db", None)
+pub fn capture(fixture: &AppFixture, held: &Held) -> State {
+    capture_wal(fixture, held, "copy.db", None)
 }
 
 /// The state SQLite recovers from the database file and the first `wal_len` bytes of the WAL
@@ -145,12 +145,12 @@ pub fn capture(site: &Site, held: &Held) -> State {
 /// directory. With no wal-index beside the copy, SQLite rebuilds one from the WAL alone, so
 /// the copy holds every valid transaction in those bytes, committed in the live wal-index or
 /// not (`uncommitted.rs` relies on this).
-pub fn capture_wal(site: &Site, held: &Held, name: &str, wal_len: Option<u64>) -> State {
-    let copy = scratch(site, name);
-    let wal = PathBuf::from(format!("{}-wal", site.db.display()));
+pub fn capture_wal(fixture: &AppFixture, held: &Held, name: &str, wal_len: Option<u64>) -> State {
+    let copy = scratch(fixture, name);
+    let wal = PathBuf::from(format!("{}-wal", fixture.db.display()));
     let copy_wal = format!("{}-wal", copy.display());
-    site.app.execute_batch("BEGIN").expect("begin");
-    let _: i64 = site
+    fixture.app.execute_batch("BEGIN").expect("begin");
+    let _: i64 = fixture
         .app
         .query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))
         .expect("take the read lock");
@@ -163,7 +163,7 @@ pub fn capture_wal(site: &Site, held: &Held, name: &str, wal_len: Option<u64>) -
             .and_then(|f| f.set_len(len))
             .expect("cut the copied wal");
     }
-    site.app.execute_batch("COMMIT").expect("end the read");
+    fixture.app.execute_batch("COMMIT").expect("end the read");
     let conn = Connection::open(&copy).expect("open the copy");
     conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
         .expect("fold the copy's wal");

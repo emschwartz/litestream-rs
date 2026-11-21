@@ -405,7 +405,7 @@ pub struct Checkpointed {
     /// What happened.
     pub outcome: CheckpointOutcome,
     /// What SQLite's checkpoint call reported as the read transaction was retaken: where the
-    /// pin now sits, for the host-checkpoint observer (`crate::host`).
+    /// pin now sits, for the application-checkpoint observer (`crate::app`).
     pub run: Option<CheckpointRun>,
 }
 

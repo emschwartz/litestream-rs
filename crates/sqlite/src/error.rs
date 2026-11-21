@@ -117,7 +117,7 @@ pub enum Refusal {
     Misaligned,
 }
 
-/// Why a host connection is not set up as replication needs (PLAN section 6).
+/// Why an application connection is not set up as replication needs (PLAN section 6).
 #[derive(Debug, thiserror::Error)]
 pub enum SetupError {
     /// `SQLITE_FCNTL_PERSIST_WAL` failed: the connection's main database has no file (an

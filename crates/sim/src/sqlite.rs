@@ -1504,7 +1504,7 @@ pub struct SimCheckpointer {
 impl Checkpointer for SimCheckpointer {
     fn begin_barrier(&mut self) -> Result<Barrier, SourceError> {
         let mut state = lock(&self.state);
-        // The host commits after the tick's sync read the committed end and before the
+        // The application commits after the tick's sync read the committed end and before the
         // barrier keeps writers out: the commit the checkpoint's seal must stage.
         state.commit_in_tick();
         state.faults.take(SourceOp::BeginBarrier)?;

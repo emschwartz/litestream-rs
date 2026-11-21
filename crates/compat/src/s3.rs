@@ -1,4 +1,4 @@
-//! A site's replica on a prefix of a local MinIO bucket, so Go's AWS SDK and Rust's S3 store
+//! A fixture's replica on a prefix of a local MinIO bucket, so Go's AWS SDK and Rust's S3 store
 //! meet on one bucket (`just compat-s3`).
 //!
 //! These checks must never reach a real object store, and the machines that run them may hold

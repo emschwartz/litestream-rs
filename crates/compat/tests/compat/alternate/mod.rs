@@ -5,13 +5,13 @@
 //!
 //! [`Launch`] says how Rust starts. `Arguments` is Go's one-database form `lsr replicate DB
 //! file://REPLICA`, with Go's defaults (a PASSIVE checkpoint at 1,000 WAL pages, one a
-//! minute, and never a TRUNCATE, which Rust takes only with the `host-readers: none` claim).
+//! minute, and never a TRUNCATE, which Rust takes only with the `app-readers: none` claim).
 //! `ConfigFile` is the daemon on the very file Go reads, `lsr replicate -config go.yml`, so
 //! both sides are config-driven processes with Go's intervals and checkpoint settings (Rust
 //! then compacts every second too). Go always reads the file.
 //!
 //! The file checkpoints often: `checkpoint-interval: 5s`, `min-checkpoint-page-count: 1000`
-//! and `truncate-page-n: 1500` (Rust takes the last only with the `litestream-rs.host-readers:
+//! and `truncate-page-n: 1500` (Rust takes the last only with the `litestream-rs.app-readers:
 //! none` claim, which the file makes). Commits that rewrite about a hundred 3,000-byte rows
 //! ("churn") push the WAL past 1,000 pages within a turn, so every turn may cross a
 //! checkpoint, a WAL restart or a TRUNCATE, and the database stays under 10 MB.
@@ -72,7 +72,7 @@
 //! new level-9 file is a forced snapshot, unless the run crosses midnight UTC, which the test
 //! reports instead of failing.
 //!
-//! A failed run keeps its site directory under the system temporary directory, as
+//! A failed run keeps its fixture directory under the system temporary directory, as
 //! `lsr-alternation-<seed>-<build><launch>`, and prints where.
 //!
 //! Seeds: `LSR_ALTERNATION_SEED` (decimal) replays a run; without it the seed is the clock.
@@ -94,7 +94,7 @@ use std::time::{Duration, Instant};
 
 use generation::{Expect, tip_origin, wal_len, wal_salts};
 use lsr_compat::{
-    CompatError, GoBuild, GoRestore, Kind, Replicator, Shape, Site, SplitMix, Target,
+    AppFixture, CompatError, GoBuild, GoRestore, Kind, Replicator, Shape, SplitMix, Target,
     l0_starting_at, list, real_now_ms, restore_replica, restore_with_go, snapshots, tip, uploaded,
     wait_boot_file, wait_staged_past, wait_until, wait_uploaded,
 };
@@ -115,7 +115,7 @@ const REACH_CHECKPOINT: Duration = Duration::from_secs(30);
 const MS_PER_DAY: i64 = 86_400_000;
 /// How long the daemon's boot line may lag its first file.
 const BOOT_LINE: Duration = Duration::from_secs(5);
-/// Rows the site prepares; churn rewrites a random hundred of them.
+/// Rows the fixture prepares; churn rewrites a random hundred of them.
 const ROWS: u32 = 200;
 /// Churn commits a checkpoint turn writes first: about 1,200 WAL pages.
 const CHURN_TO_CHECKPOINT: u32 = 12;
@@ -177,8 +177,8 @@ snapshot:
   interval: 24h
   retention: 24h
 litestream-rs:
-  host-autocheckpoint: off
-  host-readers: none
+  app-autocheckpoint: off
+  app-readers: none
 dbs:
   - path: {db}
     monitor-interval: 100ms
@@ -210,12 +210,12 @@ struct TurnReport {
     boot_snapshot: Option<String>,
 }
 
-/// One run: the site, both programs and everything the oracle needs.
+/// One run: the fixture, both programs and everything the oracle needs.
 struct Run {
     name: String,
     seed: u64,
     rng: SplitMix,
-    site: Site,
+    fixture: AppFixture,
     go: PathBuf,
     lsr: PathBuf,
     launch: Launch,
@@ -254,22 +254,24 @@ fn kind_key(kind: Kind) -> &'static str {
 
 impl Run {
     fn new(build: &GoBuild, lsr: &Path, seed: u64, launch: Launch) -> Self {
-        let site = Site::create(4096, seed).expect("site");
-        site.prepare_for_processes(ROWS).expect("prepare");
+        let fixture = AppFixture::create(4096, seed).expect("fixture");
+        fixture.prepare_for_processes(ROWS).expect("prepare");
         // A replicator holds the write lock for a snapshot or a checkpoint barrier, which can
         // take seconds here; the application waits, as one would.
-        site.app
+        fixture
+            .app
             .busy_timeout(Duration::from_secs(30))
             .expect("busy timeout");
         // One row the TRUNCATE turns rewrite whole: a commit of thousands of pages that leaves
         // the database the same size.
-        site.app
+        fixture
+            .app
             .execute_batch("CREATE TABLE wide(id INTEGER PRIMARY KEY, v BLOB)")
             .expect("wide");
-        let config = site.dir().join("go.yml");
-        write_config(&config, &site.db, &site.replica);
-        let held = Held::open(&site);
-        let oracle = Oracle::new(capture(&site, &held), seq_root(&site));
+        let config = fixture.dir().join("go.yml");
+        write_config(&config, &fixture.db, &fixture.replica);
+        let held = Held::open(&fixture);
+        let oracle = Oracle::new(capture(&fixture, &held), seq_root(&fixture));
         let mut rng = SplitMix::new(seed);
         let mut schedule = BTreeMap::new();
         for kind in [Kind::Go, Kind::Rust] {
@@ -305,7 +307,7 @@ impl Run {
             tail: None,
             tails: 0,
             taken: 0,
-            site,
+            fixture,
         }
     }
 
@@ -318,11 +320,14 @@ impl Run {
     }
 
     fn start(&self, turn: u32, kind: Kind) -> Replicator {
-        let log = self.site.dir().join(format!("turn-{turn:02}-{kind:?}.log"));
+        let log = self
+            .fixture
+            .dir()
+            .join(format!("turn-{turn:02}-{kind:?}.log"));
         match (kind, self.launch) {
             (Kind::Go, _) => Replicator::start(&self.go, &self.config, &log),
             (Kind::Rust, Launch::Arguments) => {
-                Replicator::start_lsr(&self.lsr, &self.site.db, &self.site.replica, &log)
+                Replicator::start_lsr(&self.lsr, &self.fixture.db, &self.fixture.replica, &log)
             }
             (Kind::Rust, Launch::ConfigFile) => {
                 Replicator::start_lsr_config(&self.lsr, &self.config, &log)
@@ -338,9 +343,10 @@ impl Run {
         } else {
             200 + u32::try_from(self.rng.below(400)).expect("small")
         };
-        let floor = live_seq(&self.site);
-        self.busy_retry("commit", |site| site.commit(Shape::Insert { bytes }));
-        self.oracle.record(capture(&self.site, &self.held), floor);
+        let floor = live_seq(&self.fixture);
+        self.busy_retry("commit", |fixture| fixture.commit(Shape::Insert { bytes }));
+        self.oracle
+            .record(capture(&self.fixture, &self.held), floor);
     }
 
     /// Runs one application commit, again while SQLite refuses it busy. A replicator that
@@ -350,11 +356,11 @@ impl Run {
     fn busy_retry(
         &mut self,
         what: &str,
-        mut write: impl FnMut(&mut Site) -> Result<(), CompatError>,
+        mut write: impl FnMut(&mut AppFixture) -> Result<(), CompatError>,
     ) {
         let mut busy = 0;
-        let site = &mut self.site;
-        wait_until(what, UP, || match write(site) {
+        let fixture = &mut self.fixture;
+        wait_until(what, UP, || match write(fixture) {
             Ok(()) => Ok(true),
             Err(CompatError::Sqlite(rusqlite::Error::SqliteFailure(e, _)))
                 if e.code == rusqlite::ErrorCode::DatabaseBusy =>
@@ -371,16 +377,17 @@ impl Run {
     /// One commit rewriting about a hundred of the prepared rows: about a hundred WAL pages,
     /// no growth.
     fn churn(&mut self) {
-        let floor = live_seq(&self.site);
-        self.busy_retry("churn", |site| {
-            site.app.execute(
+        let floor = live_seq(&self.fixture);
+        self.busy_retry("churn", |fixture| {
+            fixture.app.execute(
                 "UPDATE t SET v = randomblob(3000) WHERE id IN
                    (SELECT id FROM t WHERE id BETWEEN 2 AND ?1 ORDER BY random() LIMIT 100)",
                 [ROWS + 1],
             )?;
             Ok(())
         });
-        self.oracle.record(capture(&self.site, &self.held), floor);
+        self.oracle
+            .record(capture(&self.fixture, &self.held), floor);
     }
 
     fn next_point(&mut self, kind: Kind) -> KillAt {
@@ -395,8 +402,8 @@ impl Run {
 }
 
 impl Drop for Run {
-    /// A failed run keeps its site (logs, config, database, WAL, meta directory and replica),
-    /// which the site's temporary directory would take with it: they are the evidence.
+    /// A failed run keeps its fixture (logs, config, database, WAL, meta directory and replica),
+    /// which the fixture's temporary directory would take with it: they are the evidence.
     fn drop(&mut self) {
         if !std::thread::panicking() {
             return;
@@ -407,7 +414,7 @@ impl Drop for Run {
             self.name.replace([' ', '(', ')'], "")
         ));
         drop(std::fs::create_dir_all(&keep));
-        if let Ok(entries) = std::fs::read_dir(self.site.dir()) {
+        if let Ok(entries) = std::fs::read_dir(self.fixture.dir()) {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 if entry.path().is_dir() {
@@ -417,7 +424,7 @@ impl Drop for Run {
                 }
             }
         }
-        println!("{}: the site is kept in {}", self.name, keep.display());
+        println!("{}: the fixture is kept in {}", self.name, keep.display());
     }
 }
 
@@ -430,19 +437,19 @@ const fn truncates(kind: Kind, launch: Launch) -> bool {
 }
 
 /// Whether the meta directory holds a level-0 file newer than everything uploaded.
-fn staged_ahead(site: &Site) -> Result<bool, CompatError> {
-    let staged = list(&site.meta)?
+fn staged_ahead(fixture: &AppFixture) -> Result<bool, CompatError> {
+    let staged = list(&fixture.meta)?
         .files
         .iter()
         .filter(|f| f.key.level() == Level::ZERO)
         .map(|f| f.key.range().max())
         .max();
-    Ok(staged > uploaded(site)?)
+    Ok(staged > uploaded(fixture)?)
 }
 
 /// The replica's files at levels 1 to 8, and whether a scratch file is in flight there.
-fn compaction_view(site: &Site) -> Result<(Vec<String>, bool), CompatError> {
-    let listing = list(&site.replica)?;
+fn compaction_view(fixture: &AppFixture) -> Result<(Vec<String>, bool), CompatError> {
+    let listing = list(&fixture.replica)?;
     let higher = listing
         .files
         .iter()
@@ -457,8 +464,8 @@ fn compaction_view(site: &Site) -> Result<(Vec<String>, bool), CompatError> {
 }
 
 /// Whether an upload is in flight in the replica's level 0.
-fn uploading(site: &Site) -> Result<bool, CompatError> {
-    Ok(list(&site.replica)?
+fn uploading(fixture: &AppFixture) -> Result<bool, CompatError> {
+    Ok(list(&fixture.replica)?
         .foreign
         .iter()
         .any(|n| n.ends_with(".tmp") && n.starts_with("ltx/0/")))
@@ -473,17 +480,17 @@ fn reached(waited: Result<(), CompatError>, at: &str) -> bool {
     }
 }
 
-/// Polls `cond` over the site while the process keeps running.
+/// Polls `cond` over the fixture while the process keeps running.
 fn wait_on(
-    site: &Site,
+    fixture: &AppFixture,
     process: &mut Replicator,
     what: &str,
     timeout: Duration,
-    cond: &dyn Fn(&Site) -> Result<bool, CompatError>,
+    cond: &dyn Fn(&AppFixture) -> Result<bool, CompatError>,
 ) -> Result<(), CompatError> {
     wait_until(what, timeout, || {
         process.ensure_running()?;
-        cond(site)
+        cond(fixture)
     })
 }
 
@@ -494,16 +501,16 @@ fn wait_on(
     reason = "waits on a real process, which keeps real time"
 )]
 fn spin_on(
-    site: &Site,
+    fixture: &AppFixture,
     process: &mut Replicator,
     what: &str,
     timeout: Duration,
-    cond: &dyn Fn(&Site) -> Result<bool, CompatError>,
+    cond: &dyn Fn(&AppFixture) -> Result<bool, CompatError>,
 ) -> Result<(), CompatError> {
     let deadline = Instant::now().checked_add(timeout);
     loop {
         process.ensure_running()?;
-        if cond(site)? {
+        if cond(fixture)? {
             return Ok(());
         }
         if deadline.is_some_and(|d| Instant::now() >= d) {
@@ -521,8 +528,8 @@ fn pause(process: &Replicator) {
 }
 
 /// Whether the newest staged file is in the WAL generation with these salts.
-fn tip_in(site: &Site, salts: Option<(u32, u32)>) -> bool {
-    let origin = tip_origin(site).and_then(|(_, origin)| origin);
+fn tip_in(fixture: &AppFixture, salts: Option<(u32, u32)>) -> bool {
+    let origin = tip_origin(fixture).and_then(|(_, origin)| origin);
     origin.map(lsr_ltx::WalOrigin::salts) == salts
 }
 
@@ -542,7 +549,7 @@ impl Run {
             self.first_boot(process, &at);
             return None;
         };
-        let boot = wait_boot_file(process, &self.site, prev)
+        let boot = wait_boot_file(process, &self.fixture, prev)
             .unwrap_or_else(|e| panic!("{at}: no file continues {prev}: {e}"));
         let fields = boot.header.fields();
         let snapshotted = boot.header.is_snapshot() || boot.holds_every_page();
@@ -574,13 +581,13 @@ impl Run {
     fn first_boot(&mut self, process: &mut Replicator, at: &str) {
         wait_until("the first snapshot", UP, || {
             process.ensure_running()?;
-            Ok(!snapshots(&self.site.replica)?.is_empty())
+            Ok(!snapshots(&self.fixture.replica)?.is_empty())
         })
         .expect("a first snapshot");
-        wait_uploaded(process, &self.site).expect("uploaded");
-        self.l9 = Some(snapshots(&self.site.replica).expect("l9"));
+        wait_uploaded(process, &self.fixture).expect("uploaded");
+        self.l9 = Some(snapshots(&self.fixture.replica).expect("l9"));
         // The first sync is a snapshot: the check every later boot passes must see it.
-        let dirs = [self.site.meta.as_path(), self.site.replica.as_path()];
+        let dirs = [self.fixture.meta.as_path(), self.fixture.replica.as_path()];
         let first = l0_starting_at(&dirs, Txid::MIN)
             .expect("read")
             .expect("a first file");
@@ -642,11 +649,11 @@ impl Run {
     /// A few commits, about half of them each waited on until staged, and in about half the
     /// turns a churn commit or two, so the WAL keeps growing toward a checkpoint.
     fn work(&mut self, process: &mut Replicator) {
-        let mut at = tip(&self.site).expect("tip");
+        let mut at = tip(&self.fixture).expect("tip");
         for _ in 0..1 + self.rng.below(4) {
             self.commit(false);
             if self.rng.below(2) == 0 {
-                at = Some(wait_staged_past(process, &self.site, at).expect("staged"));
+                at = Some(wait_staged_past(process, &self.fixture, at).expect("staged"));
             }
         }
         for _ in 0..self.rng.below(3) {
@@ -663,19 +670,26 @@ impl Run {
             }
             KillAt::Staged => {
                 self.commit(true);
-                let waited = spin_on(&self.site, process, "a staged file", REACH, &staged_ahead);
+                let waited = spin_on(
+                    &self.fixture,
+                    process,
+                    "a staged file",
+                    REACH,
+                    &staged_ahead,
+                );
                 if !reached(waited, at) {
                     return false;
                 }
                 pause(process);
-                staged_ahead(&self.site).expect("list")
+                staged_ahead(&self.fixture).expect("list")
             }
             KillAt::Uploading => {
-                let before = uploaded(&self.site).expect("uploaded");
+                let before = uploaded(&self.fixture).expect("uploaded");
                 self.commit(true);
-                let landed = |site: &Site| Ok(uploading(site)? || uploaded(site)? > before);
+                let landed =
+                    |fixture: &AppFixture| Ok(uploading(fixture)? || uploaded(fixture)? > before);
                 reached(
-                    wait_on(&self.site, process, "an upload", REACH, &landed),
+                    wait_on(&self.fixture, process, "an upload", REACH, &landed),
                     at,
                 )
             }
@@ -687,13 +701,13 @@ impl Run {
     }
 
     fn reach_compaction(&self, process: &mut Replicator, at: &str) -> bool {
-        let (before, _) = compaction_view(&self.site).expect("list");
-        let moved = |site: &Site| {
-            let (now, scratch) = compaction_view(site)?;
+        let (before, _) = compaction_view(&self.fixture).expect("list");
+        let moved = |fixture: &AppFixture| {
+            let (now, scratch) = compaction_view(fixture)?;
             Ok(scratch || now.iter().any(|rel| !before.contains(rel)))
         };
         let waited = wait_on(
-            &self.site,
+            &self.fixture,
             process,
             "a compaction",
             REACH_COMPACTION,
@@ -704,13 +718,13 @@ impl Run {
 
     /// Churn until the process commits a checkpoint's `_litestream_seq` bump.
     fn reach_checkpoint(&mut self, process: &mut Replicator, at: &str) -> bool {
-        let before = live_seq(&self.site);
+        let before = live_seq(&self.fixture);
         for _ in 0..CHURN_TO_CHECKPOINT {
             self.churn();
         }
-        let bumped = |site: &Site| Ok(live_seq(site) > before);
+        let bumped = |fixture: &AppFixture| Ok(live_seq(fixture) > before);
         let waited = wait_on(
-            &self.site,
+            &self.fixture,
             process,
             "a checkpoint",
             REACH_CHECKPOINT,
@@ -722,13 +736,13 @@ impl Run {
     /// Churn until the WAL restarts, stop the process at once, and see whether it has staged
     /// anything in the new generation yet.
     fn reach_restart(&mut self, process: &mut Replicator, at: &str) -> bool {
-        let before = wal_salts(&self.site);
+        let before = wal_salts(&self.fixture);
         for _ in 0..CHURN_TO_CHECKPOINT {
             self.churn();
         }
-        let moved = |site: &Site| Ok(wal_salts(site) != before);
+        let moved = |fixture: &AppFixture| Ok(wal_salts(fixture) != before);
         let waited = spin_on(
-            &self.site,
+            &self.fixture,
             process,
             "a WAL restart",
             REACH_CHECKPOINT,
@@ -738,14 +752,14 @@ impl Run {
             return false;
         }
         pause(process);
-        tip_in(&self.site, before)
+        tip_in(&self.fixture, before)
     }
 
     /// Hold a read so the PASSIVE cannot restart the WAL past `truncate-page-n`, wait for the
     /// process's attempt, end the read, and stop the process the moment the WAL shrinks.
     fn reach_truncate(&mut self, process: &mut Replicator, at: &str) -> bool {
         self.commit(false);
-        let reader = Connection::open(&self.site.db).expect("open a reader");
+        let reader = Connection::open(&self.fixture.db).expect("open a reader");
         reader
             .busy_timeout(Duration::from_secs(30))
             .expect("busy timeout");
@@ -757,31 +771,38 @@ impl Run {
         // threshold wherever it began (its file keeps its length across restarts). One commit,
         // because once the process retries TRUNCATE under the held read, it holds the write
         // lock nearly all the time and further commits starve (`busy_retry`).
-        let floor = live_seq(&self.site);
-        let frame = u64::from(self.site.page_size());
+        let floor = live_seq(&self.fixture);
+        let frame = u64::from(self.fixture.page_size());
         let bytes = i64::try_from((TRUNCATE_PAGES + 200) * frame).expect("small");
-        self.busy_retry("a wide commit", |site| {
-            site.app.execute(
+        self.busy_retry("a wide commit", |fixture| {
+            fixture.app.execute(
                 "INSERT OR REPLACE INTO wide(id, v) VALUES (1, randomblob(?1))",
                 [bytes],
             )?;
             Ok(())
         });
-        self.oracle.record(capture(&self.site, &self.held), floor);
+        self.oracle
+            .record(capture(&self.fixture, &self.held), floor);
         // Two bumps past the threshold: the first may come from a sync that measured the WAL
         // just before it (a plain PASSIVE, which leaves no failed attempt behind, so the next
         // sync would PASSIVE again and restart the WAL instead of truncating it).
-        let before = live_seq(&self.site);
-        let attempted = |site: &Site| Ok(live_seq(site) > before + 1);
+        let before = live_seq(&self.fixture);
+        let attempted = |fixture: &AppFixture| Ok(live_seq(fixture) > before + 1);
         let what = "a failed checkpoint at the truncate threshold";
-        let waited = wait_on(&self.site, process, what, REACH_CHECKPOINT, &attempted);
+        let waited = wait_on(&self.fixture, process, what, REACH_CHECKPOINT, &attempted);
         drop(reader);
         if !reached(waited, at) {
             return false;
         }
-        let long = wal_len(&self.site);
-        let shrunk = |site: &Site| Ok(wal_len(site) < long);
-        let waited = spin_on(&self.site, process, "a TRUNCATE", REACH_CHECKPOINT, &shrunk);
+        let long = wal_len(&self.fixture);
+        let shrunk = |fixture: &AppFixture| Ok(wal_len(fixture) < long);
+        let waited = spin_on(
+            &self.fixture,
+            process,
+            "a TRUNCATE",
+            REACH_CHECKPOINT,
+            &shrunk,
+        );
         if !reached(waited, at) {
             return false;
         }
@@ -792,7 +813,7 @@ impl Run {
 
 impl Run {
     fn output(&self, name: &str) -> PathBuf {
-        let out = self.site.dir().join(name);
+        let out = self.fixture.dir().join(name);
         for suffix in ["", "-wal", "-shm"] {
             drop(std::fs::remove_file(format!("{}{suffix}", out.display())));
         }
@@ -803,16 +824,16 @@ impl Run {
     /// a recorded state at or after the previous one's (`oracle.rs`), and Go restores the
     /// newest to the same pages. Returns how many transactions were checked.
     fn check_acknowledged(&mut self, at: &str) -> u64 {
-        let Some(newest) = uploaded(&self.site).expect("uploaded") else {
+        let Some(newest) = uploaded(&self.fixture).expect("uploaded") else {
             return 0;
         };
         let from = self.checked;
-        let live = live_seq(&self.site);
+        let live = live_seq(&self.fixture);
         let mut last: Option<State> = None;
         for txid in from + 1..=newest.get() {
             let out = self.output("rs.db");
             let target = RestoreTarget::Txid(Txid::new(txid).expect("txid"));
-            let result = restore_replica(&self.site.replica, target, &out).expect("sink");
+            let result = restore_replica(&self.fixture.replica, target, &out).expect("sink");
             assert!(
                 result.is_ok(),
                 "{at}: Rust cannot restore {txid:#x}: {result:?}"
@@ -836,7 +857,7 @@ impl Run {
         if let Some(last) = last {
             let out = self.output("go.db");
             let target = Target::Txid { txid: newest.get() };
-            let result = restore_with_go(&self.go, &self.config, &self.site.db, &out, target)
+            let result = restore_with_go(&self.go, &self.config, &self.fixture.db, &out, target)
                 .expect("go runs");
             assert_eq!(result, GoRestore::Restored, "{at}: Go restores {newest}");
             let go = restored(&out, self.oracle.root());
@@ -848,7 +869,9 @@ impl Run {
     /// Before a Go boot: the uncommitted WAL tail it may take, if the files hold one.
     fn look_for_tail(&mut self, kind: Kind, previous: Option<Txid>, at: &str) {
         self.tail = match (kind, previous) {
-            (Kind::Go, Some(prev)) => uncommitted::read(&self.site, &self.held, &self.oracle, prev),
+            (Kind::Go, Some(prev)) => {
+                uncommitted::read(&self.fixture, &self.held, &self.oracle, prev)
+            }
             (Kind::Go | Kind::Rust, _) => None,
         };
         if let Some(tail) = &self.tail {
@@ -895,8 +918,8 @@ impl Run {
 
     /// One killed turn: start, boot, work, the kill point, SIGKILL, then the oracle.
     fn killed_turn(&mut self, turn: u32, kind: Kind) {
-        let previous = tip(&self.site).expect("tip");
-        let (seq, salts) = (live_seq(&self.site), wal_salts(&self.site));
+        let previous = tip(&self.fixture).expect("tip");
+        let (seq, salts) = (live_seq(&self.fixture), wal_salts(&self.fixture));
         self.look_for_tail(kind, previous, &self.at(turn, kind));
         let mut process = self.start(turn, kind);
         let at = self.at(turn, kind);
@@ -906,15 +929,15 @@ impl Run {
         let point = self.next_point(kind);
         let got_there = self.reach(&mut process, point, &at);
         process.kill().unwrap_or_else(|e| panic!("{at}: {e}"));
-        self.expect = generation::expect(&self.site);
+        self.expect = generation::expect(&self.fixture);
         self.check_snapshots(&at);
         let checked = self.check_acknowledged(&at);
         let report = TurnReport {
             kind,
             point,
             reached: got_there,
-            checkpoints: live_seq(&self.site) - seq,
-            restarted: wal_salts(&self.site) != salts,
+            checkpoints: live_seq(&self.fixture) - seq,
+            restarted: wal_salts(&self.fixture) != salts,
             boot_snapshot,
         };
         println!(
@@ -940,7 +963,7 @@ impl Run {
     /// No level-9 file appeared since the first turn's, unless a new UTC day began.
     fn check_snapshots(&self, at: &str) {
         let Some(first) = &self.l9 else { return };
-        let now = snapshots(&self.site.replica).expect("l9");
+        let now = snapshots(&self.fixture.replica).expect("l9");
         if now == *first {
             return;
         }
@@ -955,7 +978,7 @@ impl Run {
     /// The last switch, stopped the way an operator stops it: everything committed is on the
     /// replica, and both restore the newest transaction to the database as it is.
     fn final_turn(&mut self, turn: u32, kind: Kind) {
-        let previous = tip(&self.site).expect("tip");
+        let previous = tip(&self.fixture).expect("tip");
         self.look_for_tail(kind, previous, &self.at(turn, kind));
         let mut process = self.start(turn, kind);
         let at = self.at(turn, kind);
@@ -965,18 +988,18 @@ impl Run {
             println!("{at}: the last boot snapshotted: {cause}");
         }
         self.work(&mut process);
-        wait_uploaded(&mut process, &self.site).expect("uploaded");
+        wait_uploaded(&mut process, &self.fixture).expect("uploaded");
         process.stop().unwrap_or_else(|e| panic!("{at}: {e}"));
         self.check_snapshots(&at);
         self.check_acknowledged(&at);
-        let want = capture(&self.site, &self.held);
+        let want = capture(&self.fixture, &self.held);
         let recorded = self.oracle.states.last().expect("states");
         assert!(
             self.oracle.same_but_seq(&recorded.pages, &want.pages),
             "{at}: the recorded end"
         );
         let out = self.output("latest.db");
-        let result = restore_replica(&self.site.replica, RestoreTarget::Latest, &out);
+        let result = restore_replica(&self.fixture.replica, RestoreTarget::Latest, &out);
         assert!(result.expect("sink").is_ok(), "{at}: Rust restores Latest");
         assert_eq!(
             restored(&out, self.oracle.root()),
@@ -984,8 +1007,14 @@ impl Run {
             "{at}: Rust at Latest"
         );
         let out = self.output("go-latest.db");
-        let result = restore_with_go(&self.go, &self.config, &self.site.db, &out, Target::Latest)
-            .expect("go runs");
+        let result = restore_with_go(
+            &self.go,
+            &self.config,
+            &self.fixture.db,
+            &out,
+            Target::Latest,
+        )
+        .expect("go runs");
         assert_eq!(result, GoRestore::Restored, "{at}: Go restores Latest");
         assert_eq!(
             restored(&out, self.oracle.root()),

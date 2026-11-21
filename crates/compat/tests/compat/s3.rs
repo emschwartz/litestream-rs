@@ -1,6 +1,6 @@
 //! Go and Rust on one S3 bucket: a local MinIO, with Go's AWS SDK on one side and Rust's
 //! S3 store (the rusty-s3 signer over ureq) on the other. Every other compat check uses a
-//! directory replica; these run the same harness over S3 ([`Site::create_on_s3`]), so they
+//! directory replica; these run the same harness over S3 ([`AppFixture::create_on_s3`]), so they
 //! also cover request signing, key encoding (the run prefix holds a space, `+` and `=`),
 //! listing across pages (the harness lists two files a page), multipart uploads (a database
 //! of about 8 MB makes every writer's boot snapshot larger than the 5 MiB part size) and the
@@ -15,17 +15,17 @@
 //! Not here: the alternation run (`alternation.rs`). Its kill points watch the directory
 //! replica's scratch files to land a kill mid-upload or mid-compaction, which S3 does not show
 //! (an upload in flight is invisible until it completes), so running it over S3 would need
-//! new kill points, not a new site.
+//! new kill points, not a new fixture.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use lsr_compat::{
-    ENDPOINT_VAR, Era, GoBuild, GoRestore, Kind, MinioEnv, Remote, Replicator, S3Replica, Schedule,
-    Shape, Site, Summary, Target, builds_in, builds_under_test, hash_pages, integrity_check,
-    lsr_binary, real_now_ms, restore_with_go, tip, uploaded, wait_boot_file, wait_staged_past,
-    wait_until, wait_uploaded, write_config_for,
+    AppFixture, ENDPOINT_VAR, Era, GoBuild, GoRestore, Kind, MinioEnv, Remote, Replicator,
+    S3Replica, Schedule, Shape, Summary, Target, builds_in, builds_under_test, hash_pages,
+    integrity_check, lsr_binary, real_now_ms, restore_with_go, tip, uploaded, wait_boot_file,
+    wait_staged_past, wait_until, wait_uploaded, write_config_for,
 };
 use lsr_core::RestoreTarget;
 use lsr_ltx::{Timestamp, Txid};
@@ -50,22 +50,22 @@ fn minio() -> Option<MinioEnv> {
 }
 
 /// A prefix unique to the run, holding characters a key must encode.
-fn site(env: &MinioEnv, test: &str, seed: u64) -> Site {
+fn fixture(env: &MinioEnv, test: &str, seed: u64) -> AppFixture {
     let now = real_now_ms().expect("clock");
     let prefix = format!("compat s3+{test}={now}-{}", std::process::id());
     let s3 = S3Replica::new(env, &prefix).expect("an S3 replica");
-    Site::create_on_s3(4096, seed, s3).expect("site")
+    AppFixture::create_on_s3(4096, seed, s3).expect("fixture")
 }
 
-fn s3_of(site: &Site) -> &S3Replica {
-    match site.remote() {
+fn s3_of(fixture: &AppFixture) -> &S3Replica {
+    match fixture.remote() {
         Remote::S3(s3) => s3,
-        Remote::Dir(dir) => panic!("{} is not an S3 site", dir.display()),
+        Remote::Dir(dir) => panic!("{} is not an S3 fixture", dir.display()),
     }
 }
 
-fn snapshots(site: &Site) -> BTreeSet<String> {
-    site.remote().snapshots().expect("list the snapshots")
+fn snapshots(fixture: &AppFixture) -> BTreeSet<String> {
+    fixture.remote().snapshots().expect("list the snapshots")
 }
 
 fn pages_of(path: &Path) -> Vec<String> {
@@ -73,17 +73,17 @@ fn pages_of(path: &Path) -> Vec<String> {
     hash_pages(path).expect("hash").page_hashes
 }
 
-fn fresh(site: &Site, name: &str) -> PathBuf {
-    let out = site.dir().join(name);
+fn fresh(fixture: &AppFixture, name: &str) -> PathBuf {
+    let out = fixture.dir().join(name);
     for suffix in ["", "-wal", "-shm"] {
         drop(std::fs::remove_file(format!("{}{suffix}", out.display())));
     }
     out
 }
 
-fn config(site: &Site, name: &str, schedule: Schedule<'_>) -> PathBuf {
-    let path = site.dir().join(name);
-    write_config_for(&path, &site.db, site.remote(), schedule).expect("config");
+fn config(fixture: &AppFixture, name: &str, schedule: Schedule<'_>) -> PathBuf {
+    let path = fixture.dir().join(name);
+    write_config_for(&path, &fixture.db, fixture.remote(), schedule).expect("config");
     path
 }
 
@@ -109,25 +109,27 @@ struct Mark {
 /// transactions, each staged before the next, and each round is uploaded before its mark
 /// is taken. The next round starts only once the clock has passed the mark, so every file
 /// of a later round is recorded as created after it. Stops the writer with SIGINT.
-fn write_rounds(mut process: Replicator, site: &mut Site) -> Vec<Mark> {
+fn write_rounds(mut process: Replicator, fixture: &mut AppFixture) -> Vec<Mark> {
     let kind = process.kind();
     process.wait_up(UP).expect("the writer comes up");
     // The boot's first file holds every page (a level-0 file from transaction 1, or a
     // snapshot), whichever a version writes first.
     wait_until("the writer's first upload", UP, || {
         process.ensure_running()?;
-        Ok(uploaded(site)?.is_some())
+        Ok(uploaded(fixture)?.is_some())
     })
     .expect("a first upload");
-    let mut at = tip(site).expect("tip");
+    let mut at = tip(fixture).expect("tip");
     let mut marks = Vec::new();
     for _ in 0..3 {
         for _ in 0..3 {
-            site.commit(Shape::Insert { bytes: 900 }).expect("commit");
-            at = Some(wait_staged_past(&mut process, site, at).expect("staged"));
+            fixture
+                .commit(Shape::Insert { bytes: 900 })
+                .expect("commit");
+            at = Some(wait_staged_past(&mut process, fixture, at).expect("staged"));
         }
-        let txid = wait_uploaded(&mut process, site).expect("uploaded");
-        let pages = site.hash_now().expect("hash");
+        let txid = wait_uploaded(&mut process, fixture).expect("uploaded");
+        let pages = fixture.hash_now().expect("hash");
         let at_ms = real_now_ms().expect("clock");
         wait_until("the clock to pass the mark", UP, || {
             Ok(real_now_ms()? > at_ms)
@@ -137,7 +139,7 @@ fn write_rounds(mut process: Replicator, site: &mut Site) -> Vec<Mark> {
     }
     let stopped = process.stop();
     assert!(stopped.is_ok(), "{kind:?} does not stop: {stopped:?}");
-    let largest = s3_of(site).largest().expect("list");
+    let largest = s3_of(fixture).largest().expect("list");
     assert!(
         largest > PART,
         "{kind:?}: no object went past the {PART}-byte part size (largest {largest})"
@@ -171,10 +173,10 @@ fn targets(marks: &[Mark]) -> [(&'static str, RestoreTarget, Target, &[String]);
     ]
 }
 
-fn rust_reads(site: &Site, marks: &[Mark], label: &str) {
+fn rust_reads(fixture: &AppFixture, marks: &[Mark], label: &str) {
     for (name, target, _, want) in targets(marks) {
-        let out = fresh(site, &format!("rs-{name}.db"));
-        let restored = site.remote().restore(target, &out).expect("sink");
+        let out = fresh(fixture, &format!("rs-{name}.db"));
+        let restored = fixture.remote().restore(target, &out).expect("sink");
         assert!(
             restored.is_ok(),
             "{label}: Rust cannot restore {name}: {restored:?}"
@@ -183,11 +185,11 @@ fn rust_reads(site: &Site, marks: &[Mark], label: &str) {
     }
 }
 
-fn go_reads(build: &GoBuild, config: &Path, site: &Site, marks: &[Mark], label: &str) {
+fn go_reads(build: &GoBuild, config: &Path, fixture: &AppFixture, marks: &[Mark], label: &str) {
     let bin = build.binary().expect("the build under test is present");
     for (name, _, target, want) in targets(marks) {
-        let out = fresh(site, &format!("go-{}-{name}.db", build.name()));
-        let result = restore_with_go(&bin, config, &site.db, &out, target).expect("go runs");
+        let out = fresh(fixture, &format!("go-{}-{name}.db", build.name()));
+        let result = restore_with_go(&bin, config, &fixture.db, &out, target).expect("go runs");
         assert_eq!(
             result,
             GoRestore::Restored,
@@ -208,14 +210,14 @@ fn over_s3_rust_restores_go_replica() {
     for build in builds_under_test() {
         let label = format!("{} wrote", build.name());
         let bin = build.binary().expect("the build under test is present");
-        let mut site = site(&env, "go-writes", 61);
-        site.prepare_for_processes(BIG_ROWS).expect("prepare");
-        let config = config(&site, "go.yml", Schedule::LEVEL_ZERO_ONLY);
-        let go = start(Kind::Go, &bin, &config, &site.dir().join("go.log"));
-        let marks = write_rounds(go, &mut site);
-        rust_reads(&site, &marks, &label);
-        go_reads(&build, &config, &site, &marks, &label);
-        s3_of(&site).delete_all().expect("clean up");
+        let mut fixture = fixture(&env, "go-writes", 61);
+        fixture.prepare_for_processes(BIG_ROWS).expect("prepare");
+        let config = config(&fixture, "go.yml", Schedule::LEVEL_ZERO_ONLY);
+        let go = start(Kind::Go, &bin, &config, &fixture.dir().join("go.log"));
+        let marks = write_rounds(go, &mut fixture);
+        rust_reads(&fixture, &marks, &label);
+        go_reads(&build, &config, &fixture, &marks, &label);
+        s3_of(&fixture).delete_all().expect("clean up");
     }
 }
 
@@ -227,49 +229,55 @@ fn over_s3_rust_restores_go_replica() {
 fn over_s3_go_restores_rust_replica() {
     let Some(env) = minio() else { return };
     let lsr = lsr_binary().expect("lsr builds");
-    let mut site = site(&env, "rust-writes", 62);
-    site.prepare_for_processes(BIG_ROWS).expect("prepare");
-    let config = config(&site, "lsr.yml", Schedule::LEVEL_ZERO_ONLY);
-    let rust = start(Kind::Rust, &lsr, &config, &site.dir().join("lsr.log"));
-    let marks = write_rounds(rust, &mut site);
-    rust_reads(&site, &marks, "lsr wrote");
+    let mut fixture = fixture(&env, "rust-writes", 62);
+    fixture.prepare_for_processes(BIG_ROWS).expect("prepare");
+    let config = config(&fixture, "lsr.yml", Schedule::LEVEL_ZERO_ONLY);
+    let rust = start(Kind::Rust, &lsr, &config, &fixture.dir().join("lsr.log"));
+    let marks = write_rounds(rust, &mut fixture);
+    rust_reads(&fixture, &marks, "lsr wrote");
     for build in builds_in(Era::Blocks) {
-        go_reads(&build, &config, &site, &marks, "lsr wrote");
+        go_reads(&build, &config, &fixture, &marks, "lsr wrote");
     }
     for build in builds_in(Era::Frames) {
         let bin = build.binary().expect("the build under test is present");
-        let out = fresh(&site, &format!("go-{}-refused.db", build.name()));
+        let out = fresh(&fixture, &format!("go-{}-refused.db", build.name()));
         let result =
-            restore_with_go(&bin, &config, &site.db, &out, Target::Latest).expect("go runs");
+            restore_with_go(&bin, &config, &fixture.db, &out, Target::Latest).expect("go runs");
         assert!(
             matches!(result, GoRestore::Refused { .. }),
             "{} read a block-encoded replica: {result:?}",
             build.name()
         );
     }
-    s3_of(&site).delete_all().expect("clean up");
+    s3_of(&fixture).delete_all().expect("clean up");
 }
 
-/// One process's turn on an S3 site: it comes up on what the previous one left, the
+/// One process's turn on an S3 fixture: it comes up on what the previous one left, the
 /// application commits [`COMMITS`] transactions, each staged before the next, and the
 /// process stops with SIGINT once MinIO holds them all and a snapshot. Returns the boot's
 /// first file when there was a previous tip.
-fn turn(mut process: Replicator, site: &mut Site, previous: Option<Txid>) -> Option<Summary> {
+fn turn(
+    mut process: Replicator,
+    fixture: &mut AppFixture,
+    previous: Option<Txid>,
+) -> Option<Summary> {
     let kind = process.kind();
     process.wait_up(UP).expect("the process comes up");
     let mut at = previous;
     let mut boot = None;
     for i in 0..COMMITS {
-        site.commit(Shape::Insert { bytes: 300 }).expect("commit");
+        fixture
+            .commit(Shape::Insert { bytes: 300 })
+            .expect("commit");
         if let (0, Some(prev)) = (i, previous) {
-            boot = Some(wait_boot_file(&mut process, site, prev).expect("the boot's file"));
+            boot = Some(wait_boot_file(&mut process, fixture, prev).expect("the boot's file"));
         }
-        at = Some(wait_staged_past(&mut process, site, at).expect("staged"));
+        at = Some(wait_staged_past(&mut process, fixture, at).expect("staged"));
     }
-    wait_uploaded(&mut process, site).expect("uploaded");
+    wait_uploaded(&mut process, fixture).expect("uploaded");
     wait_until("a snapshot on S3", UP, || {
         process.ensure_running()?;
-        Ok(!site.remote().snapshots()?.is_empty())
+        Ok(!fixture.remote().snapshots()?.is_empty())
     })
     .expect("a snapshot exists");
     let stopped = process.stop();
@@ -295,9 +303,9 @@ fn assert_continued(name: &str, kind: Kind, boot: Option<&Summary>, prev: Txid) 
     );
 }
 
-fn rust_restore(site: &Site, target: RestoreTarget, name: &str) -> Vec<String> {
-    let out = fresh(site, name);
-    let restored = site.remote().restore(target, &out).expect("sink");
+fn rust_restore(fixture: &AppFixture, target: RestoreTarget, name: &str) -> Vec<String> {
+    let out = fresh(fixture, name);
+    let restored = fixture.remote().restore(target, &out).expect("sink");
     assert!(
         restored.is_ok(),
         "{name}: Rust cannot restore: {restored:?}"
@@ -305,9 +313,15 @@ fn rust_restore(site: &Site, target: RestoreTarget, name: &str) -> Vec<String> {
     pages_of(&out)
 }
 
-fn go_restore(bin: &Path, config: &Path, site: &Site, target: Target, name: &str) -> Vec<String> {
-    let out = fresh(site, name);
-    let result = restore_with_go(bin, config, &site.db, &out, target).expect("go runs");
+fn go_restore(
+    bin: &Path,
+    config: &Path,
+    fixture: &AppFixture,
+    target: Target,
+    name: &str,
+) -> Vec<String> {
+    let out = fresh(fixture, name);
+    let result = restore_with_go(bin, config, &fixture.db, &out, target).expect("go runs");
     assert_eq!(result, GoRestore::Restored, "{name}: Go restore");
     pages_of(&out)
 }
@@ -330,54 +344,54 @@ fn over_s3_go_and_rust_hand_over() {
 fn hand_over(env: &MinioEnv, build: &GoBuild, lsr: &Path) {
     let name = build.name();
     let bin = build.binary().expect("the build under test is present");
-    let mut site = site(env, "handover", 63);
-    site.prepare_for_processes(200).expect("prepare");
+    let mut fixture = fixture(env, "handover", 63);
+    fixture.prepare_for_processes(200).expect("prepare");
     // Go snapshots within seconds on the first config; the daily window of the second
     // keeps the later turns from taking a scheduled snapshot once one exists.
-    let first = config(&site, "go-first.yml", Schedule::FAST);
-    let daily = config(&site, "daily.yml", Schedule::DAILY_SNAPSHOTS);
-    let go = start(Kind::Go, &bin, &first, &site.dir().join("go-1.log"));
-    assert!(turn(go, &mut site, None).is_none());
-    let go_tip = tip(&site).expect("tip").expect("Go staged");
-    let at_go_stop = site.hash_now().expect("hash");
-    let l9 = snapshots(&site);
+    let first = config(&fixture, "go-first.yml", Schedule::FAST);
+    let daily = config(&fixture, "daily.yml", Schedule::DAILY_SNAPSHOTS);
+    let go = start(Kind::Go, &bin, &first, &fixture.dir().join("go-1.log"));
+    assert!(turn(go, &mut fixture, None).is_none());
+    let go_tip = tip(&fixture).expect("tip").expect("Go staged");
+    let at_go_stop = fixture.hash_now().expect("hash");
+    let l9 = snapshots(&fixture);
 
-    let rs = start(Kind::Rust, lsr, &daily, &site.dir().join("lsr.log"));
-    let boot = turn(rs, &mut site, Some(go_tip));
+    let rs = start(Kind::Rust, lsr, &daily, &fixture.dir().join("lsr.log"));
+    let boot = turn(rs, &mut fixture, Some(go_tip));
     assert_continued(name, Kind::Rust, boot.as_ref(), go_tip);
-    assert_eq!(snapshots(&site), l9, "{name}: Rust took a snapshot");
-    let rust_tip = tip(&site).expect("tip").expect("Rust staged");
-    let at_rust_stop = site.hash_now().expect("hash");
+    assert_eq!(snapshots(&fixture), l9, "{name}: Rust took a snapshot");
+    let rust_tip = tip(&fixture).expect("tip").expect("Rust staged");
+    let at_rust_stop = fixture.hash_now().expect("hash");
     assert_eq!(
-        rust_restore(&site, RestoreTarget::Latest, "rs-1.db"),
+        rust_restore(&fixture, RestoreTarget::Latest, "rs-1.db"),
         at_rust_stop,
         "{name}"
     );
     assert_eq!(
-        rust_restore(&site, RestoreTarget::Txid(go_tip), "rs-go-tip.db"),
+        rust_restore(&fixture, RestoreTarget::Txid(go_tip), "rs-go-tip.db"),
         at_go_stop,
         "{name}: Rust at the txid where Go stopped"
     );
     if build.era() == Era::Frames {
         println!("{name}: reads only frame-encoded files, so cannot resume from lsr's");
-        s3_of(&site).delete_all().expect("clean up");
+        s3_of(&fixture).delete_all().expect("clean up");
         return;
     }
-    let latest = go_restore(&bin, &daily, &site, Target::Latest, "go-1.db");
+    let latest = go_restore(&bin, &daily, &fixture, Target::Latest, "go-1.db");
     assert_eq!(latest, at_rust_stop, "{name}: Go on the Go-then-Rust chain");
 
-    let go = start(Kind::Go, &bin, &daily, &site.dir().join("go-2.log"));
-    let boot = turn(go, &mut site, Some(rust_tip));
+    let go = start(Kind::Go, &bin, &daily, &fixture.dir().join("go-2.log"));
+    let boot = turn(go, &mut fixture, Some(rust_tip));
     assert_continued(name, Kind::Go, boot.as_ref(), rust_tip);
-    assert_eq!(snapshots(&site), l9, "{name}: Go took a snapshot");
-    let at_end = site.hash_now().expect("hash");
+    assert_eq!(snapshots(&fixture), l9, "{name}: Go took a snapshot");
+    let at_end = fixture.hash_now().expect("hash");
     assert_eq!(
-        go_restore(&bin, &daily, &site, Target::Latest, "go-2.db"),
+        go_restore(&bin, &daily, &fixture, Target::Latest, "go-2.db"),
         at_end,
         "{name}"
     );
     assert_eq!(
-        rust_restore(&site, RestoreTarget::Latest, "rs-2.db"),
+        rust_restore(&fixture, RestoreTarget::Latest, "rs-2.db"),
         at_end,
         "{name}"
     );
@@ -385,10 +399,10 @@ fn hand_over(env: &MinioEnv, build: &GoBuild, lsr: &Path) {
         txid: rust_tip.get(),
     };
     assert_eq!(
-        go_restore(&bin, &daily, &site, at_rust, "go-rs-tip.db"),
+        go_restore(&bin, &daily, &fixture, at_rust, "go-rs-tip.db"),
         at_rust_stop,
         "{name}: Go at the txid where lsr stopped"
     );
     println!("{name}: Go -> lsr at {go_tip}, lsr -> Go at {rust_tip}, over S3");
-    s3_of(&site).delete_all().expect("clean up");
+    s3_of(&fixture).delete_all().expect("clean up");
 }

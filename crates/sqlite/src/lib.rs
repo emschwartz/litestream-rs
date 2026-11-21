@@ -1,4 +1,4 @@
-//! The sync engine's doors on a live SQLite database in the host's process.
+//! The sync engine's doors on a live SQLite database in the application's process.
 //!
 //! [`Sqlite`] implements `lsr_core`'s `WalSource`, `PageSource` and `Checkpointer` over two
 //! rusqlite connections, the way Go's `db.go` uses its pool. The reader holds one long read
@@ -19,7 +19,7 @@
 //!
 //! The one rule this crate exists to keep: **no descriptor on the database file or its `-shm`
 //! is ever opened and closed here.** Closing any descriptor on a file drops every POSIX lock the
-//! process holds on it, the host's SQLite locks included. So the committed end comes from the
+//! process holds on it, the application's SQLite locks included. So the committed end comes from the
 //! wal-index header through SQLite's own mapping of `-shm` (the `shm` module's doc explains the guard and
 //! the read), and database pages through the reader's own `sqlite3_file` (`xRead`, `xFileSize`). Only
 //! the `-wal` file is opened with `std::fs`: SQLite takes no POSIX lock on it. The crate's
@@ -33,10 +33,10 @@
 //! out of every reader's reach), and `Io` for the rest. This backend never returns
 //! `FsyncFailed`: it syncs nothing.
 //!
-//! [`app_connection`] and [`check_app_connection`] set up and check the host's own connections
+//! [`app_connection`] and [`check_app_connection`] set up and check the application's own connections
 //! (`SQLITE_FCNTL_PERSIST_WAL` on, `wal_autocheckpoint = 0`, PLAN section 6).
 //! [`app_connection_for`] first checks that the connection opens a given [`DatabaseFile`]
-//! (device and inode), and [`app_connection_raw`] does the same on a raw handle, for a host
+//! (device and inode), and [`app_connection_raw`] does the same on a raw handle, for an application
 //! whose connections are not rusqlite's; it is here because only this crate may use `unsafe`.
 //! [`Sqlite::database_file`] says which file the reader opened, from SQLite's own descriptor
 //! (the `identity` module), for a caller that must not trust a second stat of the path.

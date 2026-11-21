@@ -11,7 +11,7 @@ use lsr_core::{
 use lsr_ltx::{Timestamp, Txid};
 use lsr_wal::{Salts, WalReader};
 
-use super::host::{APP, Host, Placement};
+use super::app::{APP, App, Placement};
 use super::{Backend, RigError, be32, create, fresh_vfs, read_file, suffixed};
 use crate::testing::vfs::FaultVfs;
 
@@ -29,15 +29,15 @@ pub enum StepDid {
     },
 }
 
-/// A host connection and a backend on one database, and the engine's last proven position.
-/// The host is in this process (`crate::app_connection` set up, busy timeout zero) or in
+/// An application connection and a backend on one database, and the engine's last proven position.
+/// The application is in this process (`crate::app_connection` set up, busy timeout zero) or in
 /// another one at SQLite's defaults ([`Placement`]); its connection 0 is the application's,
-/// any other id a second host connection a case opens.
+/// any other id a second application connection a case opens.
 #[derive(Debug)]
 pub struct Stepper<B: Backend> {
     db: PathBuf,
     vfs: FaultVfs,
-    host: Host,
+    app: App,
     /// The backend under test.
     pub backend: B,
     /// What the engine staged.
@@ -51,7 +51,7 @@ pub struct Stepper<B: Backend> {
 
 impl<B: Backend> Stepper<B> {
     /// A database `app.db` in `root` with one table and one row, and a backend on it, the
-    /// host in this process.
+    /// application in this process.
     ///
     /// # Errors
     /// [`RigError`].
@@ -59,7 +59,7 @@ impl<B: Backend> Stepper<B> {
         Self::placed(root, page_size, Placement::InProcess)
     }
 
-    /// [`Self::new`] with the host in `placement`.
+    /// [`Self::new`] with the application in `placement`.
     ///
     /// # Errors
     /// [`RigError`].
@@ -68,14 +68,14 @@ impl<B: Backend> Stepper<B> {
         vfs.set_window(false);
         let db = root.join("app.db");
         create(&db, &vfs, page_size)?;
-        let mut host = Host::new(placement, &db, vfs, "NORMAL")?;
-        host.open(APP)?;
+        let mut app = App::new(placement, &db, vfs, "NORMAL")?;
+        app.open(APP)?;
         let backend =
             B::open_backend(&db, vfs.name()).map_err(|err| RigError::Open(Box::new(err)))?;
         let mut stepper = Self {
             db,
             vfs,
-            host,
+            app,
             backend,
             staging: MemStore::new(),
             through: None,
@@ -99,44 +99,44 @@ impl<B: Backend> Stepper<B> {
         &self.vfs
     }
 
-    /// Where the host runs.
+    /// Where the application runs.
     #[must_use]
     pub const fn placement(&self) -> Placement {
-        self.host.placement()
+        self.app.placement()
     }
 
-    /// Opens host connection `id` (0 is the application's: opening it again closes the old
+    /// Opens application connection `id` (0 is the application's: opening it again closes the old
     /// one first).
     ///
     /// # Errors
     /// SQLite's.
-    pub fn host_open(&mut self, id: u32) -> Result<(), RigError> {
-        self.host.open(id)
+    pub fn app_open(&mut self, id: u32) -> Result<(), RigError> {
+        self.app.open(id)
     }
 
-    /// Runs `sql` on host connection `id`.
+    /// Runs `sql` on application connection `id`.
     ///
     /// # Errors
     /// SQLite's.
-    pub fn host_exec(&mut self, id: u32, sql: &str) -> Result<(), RigError> {
-        self.host.exec(id, sql)
+    pub fn app_exec(&mut self, id: u32, sql: &str) -> Result<(), RigError> {
+        self.app.exec(id, sql)
     }
 
-    /// Closes host connection `id`.
+    /// Closes application connection `id`.
     ///
     /// # Errors
     /// SQLite's.
-    pub fn host_close(&mut self, id: u32) -> Result<(), RigError> {
-        self.host.close(id)
+    pub fn app_close(&mut self, id: u32) -> Result<(), RigError> {
+        self.app.close(id)
     }
 
-    /// The host's process opens and closes the database and `-shm` with `std::fs`. Only for a
-    /// host in another process.
+    /// The application's process opens and closes the database and `-shm` with `std::fs`. Only for a
+    /// application in another process.
     ///
     /// # Errors
-    /// [`RigError::State`] in process; the host's error.
-    pub fn host_touches_the_files(&mut self) -> Result<(), RigError> {
-        self.host.touch()
+    /// [`RigError::State`] in process; the application's error.
+    pub fn app_touches_the_files(&mut self) -> Result<(), RigError> {
+        self.app.touch()
     }
 
     /// The WAL file.
@@ -150,7 +150,7 @@ impl<B: Backend> Stepper<B> {
     /// # Errors
     /// SQLite's.
     pub fn write(&mut self, bytes: u32) -> Result<(), RigError> {
-        self.host.exec(
+        self.app.exec(
             APP,
             &format!("INSERT INTO t(v) VALUES (randomblob({bytes}))"),
         )
@@ -176,13 +176,13 @@ impl<B: Backend> Stepper<B> {
         }
     }
 
-    /// A checkpoint run by the host, as `PRAGMA wal_checkpoint(<mode>)`: busy, log, checkpointed.
+    /// A checkpoint run by the application, as `PRAGMA wal_checkpoint(<mode>)`: busy, log, checkpointed.
     ///
     /// # Errors
     /// SQLite's.
     pub fn app_checkpoint(&mut self, mode: &str) -> Result<(i64, i64, i64), RigError> {
         let row = self
-            .host
+            .app
             .query(APP, &format!("PRAGMA wal_checkpoint({mode})"))?;
         match row[..] {
             [busy, log, done] => Ok((busy, log, done)),

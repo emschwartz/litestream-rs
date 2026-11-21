@@ -1,20 +1,20 @@
-//! Replicate a live SQLite database in the host's process, Litestream-compatible.
+//! Replicate a live SQLite database in the application's process, Litestream-compatible.
 //!
-//! A host builds a store (`S3Store` over ureq or reqwest, `FsStore`, or its own), wraps it once
+//! An application builds a store (`S3Store` over ureq or reqwest, `FsStore`, or its own), wraps it once
 //! in an `Arc`, and calls [`Replicator::start`] once per database before its connection pool
 //! opens. The replicator owns one OS thread and two SQLite connections, holds a read
-//! transaction that pins the WAL from before the host's first write, and returns a handle.
+//! transaction that pins the WAL from before the application's first write, and returns a handle.
 //!
-//! - Each connection the host opens goes through [`Replicator::app_connection`] (feature
+//! - Each connection the application opens goes through [`Replicator::app_connection`] (feature
 //!   `rusqlite`) or [`app_connection_raw`], which sets `SQLITE_FCNTL_PERSIST_WAL` and
 //!   `wal_autocheckpoint = 0` after checking it opens this database (PLAN section 6).
-//! - Each long read the host starts holds a [`ReaderGuard`] from [`Replicator::long_reader`];
+//! - Each long read the application starts holds a [`ReaderGuard`] from [`Replicator::long_reader`];
 //!   under [`ReaderTracking::Tracked`] no TRUNCATE checkpoint runs while one lives.
 //! - [`Replicator::health`] can be read at any time: one lock, no I/O.
-//! - [`Replicator::stop`] runs at shutdown, after the host's writers close, and reports
+//! - [`Replicator::stop`] runs at shutdown, after the application's writers close, and reports
 //!   whether everything committed reached the replica ([`Stopped`]).
 //!
-//! Nothing runs on the host's threads, no async runtime is required, and time, waiting and
+//! Nothing runs on the application's threads, no async runtime is required, and time, waiting and
 //! chance come in through [`Runtime`], so tests drive all of them ([`Runtime::fake`], feature
 //! `testing`). Not covered by `Runtime`: an `S3Store` signs with its own clock, and HTTP request
 //! deadlines run on real time inside the HTTP client.
@@ -58,8 +58,8 @@ pub use error::{RestoreError, StartError};
 pub use events::{ChannelSink, Event, EventReceiver, EventSink};
 pub use exec::block_on;
 pub use health::{
-    Booted, Counters, Gone, Health, HostNotice, Mismatch, OpCounters, Phase, Stopped,
-    StoreCounters, Verification, VerifyFailure, VerifyOutcome, VerifyRuns,
+    AppNotice, Booted, Counters, Gone, Health, Mismatch, OpCounters, Phase, Stopped, StoreCounters,
+    Verification, VerifyFailure, VerifyOutcome, VerifyRuns,
 };
 pub use readers::ReaderGuard;
 pub use replicator::{FinalSync, Replicator};
@@ -70,8 +70,8 @@ pub use runtime::{CALLER_SLICE, OsEntropy, Park, Runtime};
 pub use store::{BoxFuture, DynStore, DynUpload};
 
 pub use lsr_core::{
-    AsOfInside, CheckpointConfig, Clock, Degraded, Depth, Entropy, ForeignWriter,
-    HaltCause as StopCause, HostCheckpoint, HostCheckpoints, L0Retention, Lane, Maintenance,
+    AppCheckpoint, AppCheckpoints, AsOfInside, CheckpointConfig, Clock, Degraded, Depth, Entropy,
+    ForeignWriter, HaltCause as StopCause, L0Retention, Lane, Maintenance,
     PersistentCause as DegradedCause, Report, Response, Responses, RestoreOptions, RestoreTarget,
     Restored, Severity, SnapshotCause,
 };

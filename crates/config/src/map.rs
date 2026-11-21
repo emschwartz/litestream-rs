@@ -14,7 +14,7 @@
 //!   sync interval; v1 uploads on the poll that staged the file.
 //! - `checkpoint-interval` (Go 1 m; zero or less is off, `db.go:1571`),
 //!   `min-checkpoint-page-count` (Go 1000; zero or less Go refuses at open,
-//!   `db.go:872`), `truncate-page-n` (only with `host-readers: none`; Go's zero is
+//!   `db.go:872`), `truncate-page-n` (only with `app-readers: none`; Go's zero is
 //!   121359 and less than zero is off, `db.go:1599-1608`).
 //! - `max-sync-wal-bytes` (Go 64 MiB; zero or less is no cap, `wal_reader.go:241`)
 //!   and `max-sync-ltx-files` (Go 256; zero or less is all, `replica.go:208`).
@@ -30,8 +30,8 @@
 //! - `validation.interval` (Go unset: off) is the scheduled verify's interval for every
 //!   database; zero or less is off, as Go starts its monitor only above zero (`store.go:268`).
 //! - `litestream-rs.responses` over `Responses::GO_LIKE`, and
-//!   `litestream-rs.host-autocheckpoint` (SQLite's 1000 unless stated; `0` or `off` for a
-//!   host at `wal_autocheckpoint = 0`), which only lets health infer host checkpoint
+//!   `litestream-rs.app-autocheckpoint` (SQLite's 1000 unless stated; `0` or `off` for a
+//!   application at `wal_autocheckpoint = 0`), which only lets health infer application checkpoint
 //!   attempts the wal-index cannot show.
 //!
 //! A `dir` entry is scanned once, here (`dir.rs`, a static scan at start, as Go derives the
@@ -61,7 +61,7 @@ use lsr_replica::{Config, NonZeroDuration, ReaderTracking, SyncLimits};
 use lsr_store_s3::{S3Config, S3Credentials};
 
 use crate::config::{
-    DbConfig, DbSource, ForeignWriterSetting, GoConfig, HostReaders, ResponseSetting,
+    AppReaders, DbConfig, DbSource, ForeignWriterSetting, GoConfig, ResponseSetting,
     ResponseSettings,
 };
 use crate::duration::GoDuration;
@@ -451,12 +451,12 @@ fn settings(
         maintenance: maintenance?.clone(),
         sync_limits: sync_limits?,
         responses: responses(config.rust().responses()),
-        readers: match config.rust().host_readers() {
-            HostReaders::Unknown => ReaderTracking::Untracked,
-            HostReaders::None => ReaderTracking::Tracked,
+        readers: match config.rust().app_readers() {
+            AppReaders::Unknown => ReaderTracking::Untracked,
+            AppReaders::None => ReaderTracking::Tracked,
         },
         shutdown_grace,
-        host_autocheckpoint: config.rust().host_autocheckpoint(),
+        app_autocheckpoint: config.rust().app_autocheckpoint(),
         verify_interval: config.validation_interval().and_then(positive),
     })
 }
@@ -514,11 +514,11 @@ fn checkpoint(
             found,
         )?),
     };
-    let truncate_pages = match (config.rust().host_readers(), db.truncate_page_n()) {
-        (HostReaders::Unknown, _) => None,
-        (HostReaders::None, None) => NonZeroU32::new(go::TRUNCATE_PAGES),
-        (HostReaders::None, Some(value)) if value < 0 => None,
-        (HostReaders::None, Some(value)) => {
+    let truncate_pages = match (config.rust().app_readers(), db.truncate_page_n()) {
+        (AppReaders::Unknown, _) => None,
+        (AppReaders::None, None) => NonZeroU32::new(go::TRUNCATE_PAGES),
+        (AppReaders::None, Some(value)) if value < 0 => None,
+        (AppReaders::None, Some(value)) => {
             Some(count(value, &entry.key("truncate-page-n"), found)?)
         }
     };

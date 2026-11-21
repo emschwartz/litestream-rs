@@ -279,10 +279,10 @@ pub fn clock_scenarios() -> &'static [fn() -> Scenario] {
     &[clock_steps_back_10s]
 }
 
-/// Scenarios that are not tied to one fault: the host checkpoints on its own.
+/// Scenarios that are not tied to one fault: the application checkpoints on its own.
 #[must_use]
-pub fn host_scenarios() -> &'static [fn() -> Scenario] {
-    &[host_autocheckpoints]
+pub fn app_scenarios() -> &'static [fn() -> Scenario] {
+    &[app_autocheckpoints]
 }
 
 /// A checkpoint whose seal staged the app's commit inside the tick, and
@@ -935,7 +935,7 @@ pub fn busy_on_barrier() -> Scenario {
     )
 }
 
-/// The host's readers hold the WAL when a checkpoint is asked for: it is
+/// The application's readers hold the WAL when a checkpoint is asked for: it is
 /// refused before SQLite is asked, and retried.
 #[must_use]
 pub fn readers_hold_the_wal() -> Scenario {
@@ -1187,7 +1187,7 @@ const FLIPPED: u32 = 3;
 /// table recorded it at the first snapshot, so the read is a mismatch naming
 /// the page: a stop under strict responses, before the page is shipped; under
 /// the default a degraded sync lane that ships the page as the file holds it
-/// (the database the host serves, which the oracle then judges by), keeps
+/// (the database the application serves, which the oracle then judges by), keeps
 /// syncing and pins retention.
 #[must_use]
 pub fn db_page_flipped_under_sync() -> Scenario {
@@ -1481,11 +1481,11 @@ fn uploaded_again(report: &RunReport) -> Result<(), String> {
     }
 }
 
-/// The app's automatic checkpoint threshold in [`host_autocheckpoints`], in frames: small,
+/// The app's automatic checkpoint threshold in [`app_autocheckpoints`], in frames: small,
 /// so a few commits cross it, and below the engine's own PASSIVE threshold.
-const HOST_THRESHOLD: u32 = 4;
+const APP_THRESHOLD: u32 = 4;
 
-/// The app runs SQLite's automatic checkpoint (at [`HOST_THRESHOLD`] frames) and the engine is
+/// The app runs SQLite's automatic checkpoint (at [`APP_THRESHOLD`] frames) and the engine is
 /// told so. With the pin above read mark 0 (the driver's first frame), the app's first checkpoint
 /// past the threshold copies the frames below the pin and its next attempts copy nothing; a
 /// stranger's read stops the engine's own checkpoint short, so the pin is retaken above read mark 0
@@ -1494,13 +1494,13 @@ const HOST_THRESHOLD: u32 = 4;
 /// its own, infers the attempts that copied nothing on both marks, and the replica restores
 /// every commit.
 #[must_use]
-pub fn host_autocheckpoints() -> Scenario {
+pub fn app_autocheckpoints() -> Scenario {
     let step = |pages| vec![commit(pages, false), Op::Tick];
     let ones = |n| (0..n).flat_map(|_| step(1)).collect::<Vec<_>>();
     let mut s = build(
-        "host_autocheckpoints",
+        "app_autocheckpoints",
         vec![
-            vec![Op::HostAutocheckpoint(Some(HOST_THRESHOLD))],
+            vec![Op::AppAutocheckpoint(Some(APP_THRESHOLD))],
             ticks(4),
             step(3),
             step(1),
@@ -1521,14 +1521,14 @@ pub fn host_autocheckpoints() -> Scenario {
             Expect::Oracle,
         ],
     );
-    s.check = Some(host_counted);
+    s.check = Some(app_counted);
     s
 }
 
 /// Every backfill the app's automatic checkpoints made was counted, nothing else was counted
 /// as a checkpoint that ran, and the attempts that copied nothing were inferred.
-fn host_counted(report: &RunReport) -> Result<(), String> {
-    let (seen, app) = (report.host_checkpoints, report.app_autocheckpoints);
+fn app_counted(report: &RunReport) -> Result<(), String> {
+    let (seen, app) = (report.app_checkpoints, report.app_autocheckpoints);
     if app.backfilled < 2 || app.attempts <= app.backfilled {
         return Err(format!("the scenario did not run both halves: {app:?}"));
     }

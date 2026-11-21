@@ -1,4 +1,4 @@
-//! `-exec` (and the `exec` key): the host application as the daemon's child.
+//! `-exec` (and the `exec` key): the application as the daemon's child.
 //!
 //! **The command line** is split as Go splits it, by go-shellwords v1.0.12's `Parse` with its
 //! defaults (`replicate.go:467`): no environment or backtick expansion, single quotes keep

@@ -13,16 +13,17 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use lsr_compat::{
-    Chain, Era, Site, VfsRead, Written, build_vfs_reader, builds_under_test, clock_ending_now,
-    hash_pages, integrity_check, read_plain, read_with_vfs, restore_replica,
+    AppFixture, Chain, Era, VfsRead, Written, build_vfs_reader, builds_under_test,
+    clock_ending_now, hash_pages, integrity_check, read_plain, read_with_vfs, restore_replica,
 };
 use lsr_core::RestoreTarget;
 
 const COMMITS: u32 = 300;
 
 fn write_chain() -> Written {
-    let site = Site::create(4096, 11).expect("site");
-    let mut chain = Chain::start(site, clock_ending_now(COMMITS).expect("clock")).expect("start");
+    let fixture = AppFixture::create(4096, 11).expect("fixture");
+    let mut chain =
+        Chain::start(fixture, clock_ending_now(COMMITS).expect("clock")).expect("start");
     chain.run(COMMITS).expect("run");
     chain.finish().expect("finish")
 }
@@ -61,11 +62,12 @@ mod live {
         let written = write_chain();
         assert_shapes(&written);
         let newest = written.points.last().expect("points");
-        let dir = written.site.dir();
-        let reader = build_vfs_reader(dir).expect("the C host builds (cc and SQLite headers)");
+        let dir = written.fixture.dir();
+        let reader =
+            build_vfs_reader(dir).expect("the C application builds (cc and SQLite headers)");
         // The reference: the newest transaction restored by Rust, checked against the source.
         let reference = dir.join("reference.db");
-        restore_replica(&written.site.replica, RestoreTarget::Latest, &reference)
+        restore_replica(&written.fixture.replica, RestoreTarget::Latest, &reference)
             .expect("sink")
             .expect("latest restores");
         integrity_check(&reference).expect("reference integrity");
@@ -75,7 +77,8 @@ mod live {
         );
         let plain = dir.join("plain");
         std::fs::create_dir_all(&plain).expect("mkdir");
-        let want = read_plain(&reader, &reference, &plain).expect("the host reads the reference");
+        let want =
+            read_plain(&reader, &reference, &plain).expect("the application reads the reference");
         assert!(want.rows.len() > 10, "only {} rows", want.rows.len());
         let mut read = 0;
         for build in builds_under_test() {
@@ -89,8 +92,8 @@ mod live {
                 .expect("the VFS of the build under test is built");
             let scratch = dir.join(format!("vfs-{name}"));
             std::fs::create_dir_all(&scratch).expect("mkdir");
-            let result = read_with_vfs(&reader, &library, &written.site.replica, &scratch)
-                .expect("the host runs");
+            let result = read_with_vfs(&reader, &library, &written.fixture.replica, &scratch)
+                .expect("the application runs");
             match (build.era(), result) {
                 (Era::Blocks, VfsRead::Read(view)) => {
                     assert_eq!(view.integrity, ["ok"], "{name}");

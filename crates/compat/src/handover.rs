@@ -1,4 +1,4 @@
-//! Watching a handover between two replicator processes on one [`Site`]: what each process
+//! Watching a handover between two replicator processes on one [`AppFixture`]: what each process
 //! staged and uploaded, read from the meta directory and the replica, never from timing.
 //!
 //! A process's position is the newest transaction any file covers in the meta directory or
@@ -17,7 +17,7 @@ use std::time::Duration;
 use lsr_core::Level;
 use lsr_ltx::Txid;
 
-use crate::chain::Site;
+use crate::chain::AppFixture;
 use crate::error::CompatError;
 use crate::replica::{Summary, l0_starting_at, list, newest_txid};
 use crate::replicator::{Replicator, wait_until};
@@ -26,20 +26,20 @@ use crate::replicator::{Replicator, wait_until};
 /// above Rust's one-second poll and Go's 100 ms monitor.
 pub const PROCESS_STEP: Duration = Duration::from_secs(30);
 
-/// The newest transaction staged or uploaded on `site`.
+/// The newest transaction staged or uploaded on `fixture`.
 ///
 /// # Errors
 /// [`CompatError`] when a listing fails.
-pub fn tip(site: &Site) -> Result<Option<Txid>, CompatError> {
-    Ok(newest_txid(&[site.meta.as_path()])?.max(site.remote().newest_txid()?))
+pub fn tip(fixture: &AppFixture) -> Result<Option<Txid>, CompatError> {
+    Ok(newest_txid(&[fixture.meta.as_path()])?.max(fixture.remote().newest_txid()?))
 }
 
 /// The newest transaction the replica holds.
 ///
 /// # Errors
 /// [`CompatError`] when the listing fails.
-pub fn uploaded(site: &Site) -> Result<Option<Txid>, CompatError> {
-    site.remote().newest_txid()
+pub fn uploaded(fixture: &AppFixture) -> Result<Option<Txid>, CompatError> {
+    fixture.remote().newest_txid()
 }
 
 /// The replica's level-9 files, by path.
@@ -61,13 +61,13 @@ pub fn snapshots(replica: &Path) -> Result<BTreeSet<String>, CompatError> {
 /// [`CompatError`] when the process exits or stages nothing within [`PROCESS_STEP`].
 pub fn wait_staged_past(
     process: &mut Replicator,
-    site: &Site,
+    fixture: &AppFixture,
     after: Option<Txid>,
 ) -> Result<Txid, CompatError> {
     let mut now = None;
     wait_until("a newer staged transaction", PROCESS_STEP, || {
         process.ensure_running()?;
-        now = tip(site)?;
+        now = tip(fixture)?;
         Ok(now > after)
     })?;
     now.ok_or_else(|| CompatError::Fixture("nothing was staged".to_owned()))
@@ -77,15 +77,15 @@ pub fn wait_staged_past(
 ///
 /// # Errors
 /// [`CompatError`] when the process exits or does not upload within [`PROCESS_STEP`].
-pub fn wait_uploaded(process: &mut Replicator, site: &Site) -> Result<Txid, CompatError> {
+pub fn wait_uploaded(process: &mut Replicator, fixture: &AppFixture) -> Result<Txid, CompatError> {
     let mut now = None;
     wait_until(
         "the replica to hold every staged file",
         PROCESS_STEP,
         || {
             process.ensure_running()?;
-            let staged = tip(site)?;
-            now = uploaded(site)?;
+            let staged = tip(fixture)?;
+            now = uploaded(fixture)?;
             Ok(staged.is_some() && now == staged)
         },
     )?;
@@ -100,7 +100,7 @@ pub fn wait_uploaded(process: &mut Replicator, site: &Site) -> Result<Txid, Comp
 /// the file does not decode.
 pub fn wait_boot_file(
     process: &mut Replicator,
-    site: &Site,
+    fixture: &AppFixture,
     after: Txid,
 ) -> Result<Summary, CompatError> {
     let next = after
@@ -112,9 +112,9 @@ pub fn wait_boot_file(
     let what = format!("the boot's first file at {next}");
     wait_until(&what, PROCESS_STEP, || {
         process.ensure_running()?;
-        found = match l0_starting_at(&[site.meta.as_path()], next)? {
+        found = match l0_starting_at(&[fixture.meta.as_path()], next)? {
             Some(staged) => Some(staged),
-            None => site.remote().l0_starting_at(next)?,
+            None => fixture.remote().l0_starting_at(next)?,
         };
         Ok(found.is_some())
     })?;

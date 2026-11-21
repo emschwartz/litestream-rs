@@ -62,7 +62,7 @@ fn a_flipped_database_page_degrades_the_sync_lane_ships_the_file_and_keeps_synci
         )),
         "{seen:?}"
     );
-    // The database the host serves is what reached the replica.
+    // The database the application serves is what reached the replica.
     assert_eq!(
         staged_page(&rig, three()).last(),
         Some(&vec![0xEE; PS.bytes()])

@@ -1,11 +1,11 @@
-//! The [`Transport`] over `reqwest`, for hosts that already build it (feature `reqwest`).
+//! The [`Transport`] over `reqwest`, for applications that already build it (feature `reqwest`).
 //!
-//! Three constructors, by how much of the host's stack to share:
+//! Three constructors, by how much of the application's stack to share:
 //! - [`ReqwestTransport::new`]: the store's own client and its own
 //!   single-threaded Tokio runtime. Nothing is shared.
-//! - [`ReqwestTransport::with_client`]: the host's `reqwest::Client` (its pool,
+//! - [`ReqwestTransport::with_client`]: the application's `reqwest::Client` (its pool,
 //!   proxy and TLS roots), driven on the store's own runtime.
-//! - [`ReqwestTransport::with_client_on`]: the host's client on the host's
+//! - [`ReqwestTransport::with_client_on`]: the application's client on the application's
 //!   runtime, through a `tokio::runtime::Handle`.
 //!
 //! The store is blocking (it runs on its replicator thread), so each request
@@ -20,7 +20,7 @@
 //! is a response, nothing is retried, each request is bounded by the deadline
 //! end to end (reqwest's per-request timeout, which covers the body), and a
 //! body over `MAX_BODY` is an error. The own
-//! client follows no redirects. A host client keeps its own redirect policy;
+//! client follows no redirects. An application client keeps its own redirect policy;
 //! reqwest's default follows up to ten, and a presigned URL redirected to
 //! another host fails its signature there, so the store sees a 403 instead of
 //! the redirect. Build the client with `redirect(Policy::none())` to see the
@@ -30,11 +30,11 @@
 //! reqwest whole, trusting what Go's `crypto/x509` trusts, exactly as
 //! [`UreqTransport`](crate::UreqTransport) does (the `trust` module). This
 //! crate enables reqwest's `rustls-no-provider` only, so it brings no second
-//! crypto provider (reqwest's default is aws-lc-rs, a C build). A host client
-//! keeps its own TLS and its own roots; it needs a provider from the host's
+//! crypto provider (reqwest's default is aws-lc-rs, a C build). An application client
+//! keeps its own TLS and its own roots; it needs a provider from the application's
 //! reqwest features (reqwest's default `rustls` feature has one) or one the
-//! host installed as the process default, or reqwest panics building it. A
-//! host client on native-tls needs this crate's `native-tls` feature for its
+//! application installed as the process default, or reqwest panics building it. A
+//! application client on native-tls needs this crate's `native-tls` feature for its
 //! TLS failures to be [`TransportError::Tls`] rather than a connection error.
 
 use std::io;
@@ -64,8 +64,8 @@ pub enum ReqwestSetupError {
 enum Driver {
     /// A single-threaded runtime the transport owns.
     Own(Runtime),
-    /// The host's runtime.
-    Host(Handle),
+    /// The application's runtime.
+    App(Handle),
 }
 
 impl Driver {
@@ -83,7 +83,7 @@ impl Driver {
     fn block_on<F: std::future::Future>(&self, future: F) -> F::Output {
         match self {
             Self::Own(runtime) => runtime.block_on(future),
-            Self::Host(handle) => handle.block_on(future),
+            Self::App(handle) => handle.block_on(future),
         }
     }
 }
@@ -99,7 +99,7 @@ impl std::fmt::Debug for ReqwestTransport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let driver = match self.driver {
             Driver::Own(_) => "own runtime",
-            Driver::Host(_) => "host runtime",
+            Driver::App(_) => "application runtime",
         };
         f.debug_struct("ReqwestTransport")
             .field("driver", &driver)
@@ -133,7 +133,7 @@ impl ReqwestTransport {
         })
     }
 
-    /// The host's client, on the store's own runtime.
+    /// The application's client, on the store's own runtime.
     ///
     /// # Errors
     /// [`ReqwestSetupError::Runtime`] when the runtime cannot be started.
@@ -148,12 +148,12 @@ impl ReqwestTransport {
         })
     }
 
-    /// The host's client on the host's runtime.
+    /// The application's client on the application's runtime.
     #[must_use]
     pub fn with_client_on(client: reqwest::Client, runtime: Handle, deadline: Duration) -> Self {
         Self {
             client,
-            driver: Driver::Host(runtime),
+            driver: Driver::App(runtime),
             deadline,
         }
     }
@@ -332,7 +332,7 @@ fn below<'a>(
 /// Whether a TLS library's error is anywhere in the chain, so a certificate
 /// failure is `Tls` here as it is under ureq: rustls's (hyper-rustls nests it in
 /// two `io::Error`s), and with the `native-tls` feature, native-tls's, from a
-/// host client built on it. reqwest has no TLS kind of its own to ask for, so
+/// application client built on it. reqwest has no TLS kind of its own to ask for, so
 /// the chain is matched by type.
 fn is_tls(err: &reqwest::Error) -> bool {
     let mut current: Option<&(dyn std::error::Error + 'static)> = Some(err);
@@ -417,9 +417,9 @@ mod tests {
         ReqwestTransport::new(Duration::from_secs(5)).expect("transport")
     }
 
-    /// A host's client: with only `rustls-no-provider` enabled, reqwest needs
+    /// An application's client: with only `rustls-no-provider` enabled, reqwest needs
     /// a rustls config (or a process default provider) to build one.
-    fn host_client() -> reqwest::Client {
+    fn app_client() -> reqwest::Client {
         let tls = trust::rustls_config(trust::system()).expect("tls config");
         reqwest::Client::builder()
             .tls_backend_preconfigured(tls)
@@ -586,8 +586,8 @@ mod tests {
     }
 
     #[test]
-    fn a_host_client_on_its_own_runtime() {
-        let client = host_client();
+    fn a_app_client_on_its_own_runtime() {
+        let client = app_client();
         let transport =
             ReqwestTransport::with_client(client, Duration::from_secs(5)).expect("transport");
         let response = transport
@@ -597,14 +597,14 @@ mod tests {
     }
 
     #[test]
-    fn a_host_client_on_the_host_runtime() {
+    fn a_app_client_on_the_app_runtime() {
         let runtime = Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()
             .build()
             .expect("runtime");
         let transport = ReqwestTransport::with_client_on(
-            host_client(),
+            app_client(),
             runtime.handle().clone(),
             Duration::from_secs(5),
         );

@@ -1,6 +1,6 @@
 //! The process harness the `lsr replicate` tests share: the binary with a clean
 //! environment, a running daemon whose stdout lines are read on a thread, signals, a
-//! host database, and a restore compared with it. Every wait is on a line the daemon
+//! application database, and a restore compared with it. Every wait is on a line the daemon
 //! prints or on the process ending; [`PATIENCE`] only bounds a failure. Each test file
 //! uses all of it, so nothing here is dead in either binary.
 
@@ -120,7 +120,7 @@ pub fn kill(name: &str, pid: u32) {
     assert!(status.success());
 }
 
-/// A host database: WAL, the host settings a replicated database needs, one table.
+/// An application database: WAL, the application settings a replicated database needs, one table.
 pub fn database(path: &Path) -> Connection {
     let conn = Connection::open(path).unwrap();
     conn.query_row("PRAGMA journal_mode = wal", [], |_row| Ok(()))

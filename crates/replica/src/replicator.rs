@@ -289,7 +289,7 @@ impl Replicator {
     /// Opens the replication connections, takes the read transaction that pins the WAL,
     /// starts the thread, and returns. The first boot (listing the replica, recovering the
     /// position) runs on the thread afterwards and shows in [`Replicator::health`]; no store
-    /// call happens on the caller's thread. Call it before the host's connection pool opens.
+    /// call happens on the caller's thread. Call it before the application's connection pool opens.
     ///
     /// If a replicator for the same file (device and inode, not path) is still draining in
     /// this process, waits for it, up to its shutdown grace.
@@ -473,7 +473,7 @@ impl Replicator {
     }
 
     /// Held for the length of a long read; while any guard lives the replicator runs no
-    /// TRUNCATE checkpoint. It matters only under `ReaderTracking::Tracked`, where the host
+    /// TRUNCATE checkpoint. It matters only under `ReaderTracking::Tracked`, where the application
     /// promises to hold one for every long read.
     pub fn long_reader(&self) -> ReaderGuard {
         ReaderGuard::new(&self.shared.readers)
@@ -485,9 +485,9 @@ impl Replicator {
         &self.shared.database
     }
 
-    /// Sets `SQLITE_FCNTL_PERSIST_WAL` on and `wal_autocheckpoint = 0` on one of the host's
+    /// Sets `SQLITE_FCNTL_PERSIST_WAL` on and `wal_autocheckpoint = 0` on one of the application's
     /// connections, after checking that it opens this replicator's database (device and
-    /// inode). Call it on every connection the host opens, pooled ones included.
+    /// inode). Call it on every connection the application opens, pooled ones included.
     ///
     /// # Errors
     /// [`lsr_sqlite::SetupError`]: the connection has no file or opens another one, or a

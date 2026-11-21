@@ -6,7 +6,7 @@ Evidence base: upstream read at benbjohnson/litestream 041a8c3 (v0.5.18-21) and 
 
 ## Status (2026-11-20)
 
-Scope for now is the library itself, phases 0 to 3, then a sidecar (phase 4), built to the quality bar in sections 2 and 4. Integration into a host application (a shadow run, then a cutover) is out of scope for this repository; section 6 lists what a host must provide. Decisions D1 to D5 are taken; see section 8.
+Scope for now is the library itself, phases 0 to 3, then a sidecar (phase 4), built to the quality bar in sections 2 and 4. Integration into an application application (a shadow run, then a cutover) is out of scope for this repository; section 6 lists what an application must provide. Decisions D1 to D5 are taken; see section 8.
 
 ## 1. Goal and contract
 
@@ -31,7 +31,7 @@ Build an in-process Rust library that replicates a WAL-mode SQLite database to S
 3. **Every case is handled or the build fails.** Recovery is parsed once into a closed enum and matched exhaustively. No wildcard arms on domain enums (clippy `wildcard_enum_match_arm`, `match_wildcard_for_single_variants` denied).
 4. **Uncontrollable faults are a closed enum, each with a named policy**: retry with backoff, re-snapshot, or a degraded state that alerts; stopping is the response only where continuing would damage existing backups, and is configurable per cause (D7). A test fails if a variant has no simulator scenario.
 5. **Sans-IO core.** Time, randomness, the object store, the WAL, database pages and checkpoints all sit behind traits. The core never spawns, sleeps or reads a clock (enforced by `clippy.toml` `disallowed-methods`). This is what makes deterministic simulation possible.
-6. **Never harm the host application.** No panic crosses the library boundary. Data-dependent failures return typed errors and put the replicator in a degraded state that keeps trying (or stops, where D7 says so); the app keeps serving and the health handle says why. Memory, I/O and queue depths are bounded by named constants. The write lock is never held while waiting on readers.
+6. **Never harm the application application.** No panic crosses the library boundary. Data-dependent failures return typed errors and put the replicator in a degraded state that keeps trying (or stops, where D7 says so); the app keeps serving and the health handle says why. Memory, I/O and queue depths are bounded by named constants. The write lock is never held while waiting on readers.
 7. **Real SQLite gets the same test weight as the simulator.** Four severe upstream bugs were wrong beliefs about SQLite (#946, #1580, #875, #1344); a simulator built on the same beliefs cannot find them.
 8. **Compatibility is tested continuously against pinned Go binaries**, in four directions across a version matrix. Upstream has no cross-version tests; this project does.
 9. **Reversible rollout.** Shadow first, small database first, and a tested path back to the Go sidecar at every step.
@@ -45,7 +45,7 @@ A Cargo workspace (decision D1: its own repository). Each crate is `crates/<name
 | `ltx` | Header, page frame, index, trailer; checksums; streaming decoder and encoder; both LZ4 read paths | `forbid(unsafe_code)`, no I/O beyond `Read`/`Write`, fuzzed, Kani on checksum math |
 | `wal` | The SQLite WAL reader: header and frame checksums, committed transactions only, page maps | No I/O beyond `Read`; fuzzed |
 | `core` | Position recovery, sync planning, checkpoint decision, upload sequencing, compaction, retention, restore planning | Sans-IO; depends only on `ltx`, `wal` and the traits |
-| `store-s3` | `ObjectStore` on `rusty-s3` behind a `Transport` trait: blocking `ureq` by default (no runtime), `reqwest` as a feature for hosts that already have it: PUT, multipart (an abandoned upload's id goes on a bounded list and is aborted on next use; the bucket's lifecycle rule is the backstop), ranged GET, paged LIST, batch DELETE; independent requests go out as one batch with a limit per kind, per kind: multipart parts by `concurrency` (Go's key; default 5, R2 2 unless set), creation-time HEADs 16 (Go allows 50, an unmeasured figure), reads ahead and listing levels 8 (Go does neither side by side), on scoped threads under ureq | Own retry classifier (408, 429, 5xx, connection reset retryable; jittered backoff); payload checksum policy explicit, never an SDK default; a failed LIST page is an error, never a short listing |
+| `store-s3` | `ObjectStore` on `rusty-s3` behind a `Transport` trait: blocking `ureq` by default (no runtime), `reqwest` as a feature for applications that already have it: PUT, multipart (an abandoned upload's id goes on a bounded list and is aborted on next use; the bucket's lifecycle rule is the backstop), ranged GET, paged LIST, batch DELETE; independent requests go out as one batch with a limit per kind, per kind: multipart parts by `concurrency` (Go's key; default 5, R2 2 unless set), creation-time HEADs 16 (Go allows 50, an unmeasured figure), reads ahead and listing levels 8 (Go does neither side by side), on scoped threads under ureq | Own retry classifier (408, 429, 5xx, connection reset retryable; jittered backoff); payload checksum policy explicit, never an SDK default; a failed LIST page is an error, never a short listing |
 | `store-fs` | `ObjectStore` on a directory | Used by tests and by the Go cross-restore harness |
 | `local` | The restore sink: a scratch file beside the target, the SQLite check, publish by hard link | Never overwrites or deletes a file it does not own; a failed publish says whether the target is visible |
 | `sqlite` | `WalSource`, `PageSource`, `Checkpointer` on `rusqlite` plus raw FFI; the per-database actor thread | The only crate with `unsafe`; each site carries `#[expect(unsafe_code, reason = …)]` |
@@ -57,9 +57,9 @@ A Cargo workspace (decision D1: its own repository). Each crate is `crates/<name
 | `cli` | The `lsr` binary: `restore`, `verify`, `files`, `config check`; `replicate` is the sidecar | Stdout carries only the result; one closed exit-code table |
 | `fuzzing` | Fuzz targets as plain functions over bytes, replayed over the committed corpus in the test suite (`fuzz/` drives them with cargo-fuzz) | Dev only |
 
-Traits at the core boundary: `Clock`, `Sleeper`, `Entropy`, `ObjectStore` (the replica, and the local L0 staging directory through the same trait), `WalSource`, `PageSource`, `Checkpointer`, `DatabaseSink` (where a restore writes). `EventSink` is the replica crate's, for the host.
+Traits at the core boundary: `Clock`, `Sleeper`, `Entropy`, `ObjectStore` (the replica, and the local L0 staging directory through the same trait), `WalSource`, `PageSource`, `Checkpointer`, `DatabaseSink` (where a restore writes). `EventSink` is the replica crate's, for the application.
 
-**Concurrency.** One OS thread per database owns both SQLite connections (the long-lived read transaction and the writer used for the sequence bump and barrier) and takes commands over a bounded channel; that removes upstream's `execSem` and `chkMu`. Uploads, compaction and retention run in one sequential actor, in priority order; concurrent tasks wait for a measurement that shows the sequential actor falling behind. Snapshots stream page chunks through a bounded channel into a multipart upload. Shutdown is a state with a deadline, not a cancellation race. Every thread gets an explicit stack (512 KiB for one that runs the engine, 64 KiB for one that only waits); `crates/replica/src/stack.rs` says how they were measured and how many threads a database costs. Issue #17 tracks a shared pool for hosts with many databases.
+**Concurrency.** One OS thread per database owns both SQLite connections (the long-lived read transaction and the writer used for the sequence bump and barrier) and takes commands over a bounded channel; that removes upstream's `execSem` and `chkMu`. Uploads, compaction and retention run in one sequential actor, in priority order; concurrent tasks wait for a measurement that shows the sequential actor falling behind. Snapshots stream page chunks through a bounded channel into a multipart upload. Shutdown is a state with a deadline, not a cancellation race. Every thread gets an explicit stack (512 KiB for one that runs the engine, 64 KiB for one that only waits); `crates/replica/src/stack.rs` says how they were measured and how many threads a database costs. Issue #17 tracks a shared pool for applications with many databases.
 
 **Local state.** The staging directory uses Go's meta-directory layout (`<meta>/ltx/0/<txid>-<txid>.ltx`), so either implementation can resume from the other's state without a snapshot (decision D4).
 
@@ -153,7 +153,7 @@ Workspace, lint set, CI, pinned Go binaries. Settle what the research left unver
 
 ### Phase 3: syncing on real SQLite
 - `sqlite` crate: actor thread; read transaction held from before the application's first write; `PRAGMA wal_checkpoint(NOOP)` for mxFrame; `sqlite3_wal_checkpoint_v2` for typed busy results; PASSIVE with barrier transaction and seal sync; TRUNCATE with the unconditional boundary snapshot under the write lock; `SQLITE_FCNTL_PERSIST_WAL` and `wal_autocheckpoint = 0` helpers for every application connection; database pages read through one never-closed descriptor or SQLite's own (`SQLITE_FCNTL_FILE_POINTER`).
-- Checkpoint policy: PASSIVE by default; TRUNCATE only when the host reports no pinned readers; never wait on readers while holding the write lock.
+- Checkpoint policy: PASSIVE by default; TRUNCATE only when the application reports no pinned readers; never wait on readers while holding the write lock.
 - Position recovery from the bucket alone (last L0 header: WAL offset, size, salts, commit), so a missing local directory does not force a snapshot when the WAL still matches.
 - Public API: `start` returns once the read lock is held; `final_sync(deadline)` returns a typed outcome; `health()` is a cheap handle (last synced TXID, age, state, degraded or stop cause).
 - Change detection by 1-second polling (a wal hook is a later optimisation).
@@ -163,30 +163,30 @@ Workspace, lint set, CI, pinned Go binaries. Settle what the research left unver
 **Exit:** the fault suite and the upstream-test ledger are green; handover in both directions happens without a snapshot when the WAL is intact; an alternation test switches Go and Rust on one prefix repeatedly, with a SIGKILL at a random point in each handover (mid-upload, mid-compaction, with local files not yet uploaded), and every switch is a plain restart with no forced snapshot and no restore mismatch (one exception, for Go builds without upstream bcd69ae, every release through v0.5.18: Go's boot transaction may hold a WAL tail SQLite never committed, left by a Rust process stopped mid-commit, and the test accepts that one restore when it equals exactly the tail's state; known Go bug #38, `docs/plans/phase-3-syncing.md`. A minimum Go version for handover will be named once upstream tags a release containing bcd69ae); a 72-hour soak against real Tigris with a synthetic writer shows zero oracle failures and the resource properties holding.
 
 ### Phase 4: the sidecar (a separate process, as Go runs)
-Added 2026-11-20 at the owner's request. A `litestream`-style daemon over the same library, so a host that cannot embed Rust (or runs Go's sidecar today) can switch by replacing a binary.
-- `lsr replicate` grown into a daemon: one process, many databases, each its own actor thread; signals for reload and shutdown (`final_sync` on SIGTERM within a deadline); `health()` exposed for the host (a status file or a local HTTP endpoint, decided in the phase 4 task plan).
+Added 2026-11-20 at the owner's request. A `litestream`-style daemon over the same library, so an application that cannot embed Rust (or runs Go's sidecar today) can switch by replacing a binary.
+- `lsr replicate` grown into a daemon: one process, many databases, each its own actor thread; signals for reload and shutdown (`final_sync` on SIGTERM within a deadline); `health()` exposed for the application (a status file or a local HTTP endpoint, decided in the phase 4 task plan).
 - Configuration: whether to read Go's `litestream.yml` as is (drop-in) or a stricter subset that refuses unknown keys (design goal: "disabled" is not zero), decided in the phase 4 task plan.
 - The pin across processes: a SQLite read transaction in the sidecar works as in phase 3 (ruling P0); POSIX locks conflict across processes, so the in-process descriptor hazard of section 6 is gone, and the pure-Rust pin of #9 is simpler here (`docs/notes/pure-rust-pin.md`, deployment B).
-- Checkpoints from outside the host: the host must still run with `wal_autocheckpoint = 0` and `PERSIST_WAL`, which a sidecar cannot set for it; the phase 4 plan says how that is checked and what happens when the host checkpoints anyway (phase 3's outside-checkpoint cases already cover the replication side).
+- Checkpoints from outside the application: the application must still run with `wal_autocheckpoint = 0` and `PERSIST_WAL`, which a sidecar cannot set for it; the phase 4 plan says how that is checked and what happens when the application checkpoints anyway (phase 3's outside-checkpoint cases already cover the replication side).
 - Compatibility: the phase 3 alternation test, run as Go sidecar to Rust sidecar and back on one prefix.
 **Exit:** the alternation test and the phase 3 fault suite pass with the library in a separate process; a Go user's config and meta directory start the Rust sidecar with no snapshot when the WAL is intact.
 
 ### Later versions
 From the storage-fault review against TigerBeetle's fault model (2026-11-20). Repair from peers, quorum and direct I/O do not transfer to a single node with an asynchronous replica; these do: a low-rate scrubber of the live database against the page checksum table; rolling-checksum tracking (D2), which the table makes cheap; a second bucket as a repair source for restore; a parent-file checksum linking each file to its predecessor; a restore planner that routes around a corrupt file through the lower-level files that cover the same transactions (today a corrupt compacted file fails the restore even when its inputs survive).
 
-## 6. Host integration
+## 6. Application integration
 
-Out of scope for this repository. A host that adopts the library provides:
+Out of scope for this repository. An application that adopts the library provides:
 
 - The replicator started before any connection pool opens, with `PERSIST_WAL` and `wal_autocheckpoint = 0` on every connection, and no other checkpointer on the live file.
 - No `std::fs` open of the database files anywhere in the process: closing any descriptor on the file drops every POSIX lock SQLite holds.
 - `final_sync` called after its writers close, inside its shutdown budget.
 - A signal for long-lived readers, so the library stays PASSIVE while one runs.
-- One SQLite in the process, and it is ours: `lsr-sqlite` builds SQLite 3.54.1 through `rusqlite`'s `bundled` feature (`libsqlite3-sys` 0.40), and the `wal-index` and pin code depend on that build. `libsqlite3-sys` declares `links = "sqlite3"`, so Cargo allows one copy per build: the host's own `rusqlite`, `sqlx` or other SQLite crate must resolve to the same `libsqlite3-sys` 0.40 (a compatible `rusqlite` 0.43), or the build fails at resolution, never at run time. Cargo features unify, so the host's connections then run on the same bundled build.
+- One SQLite in the process, and it is ours: `lsr-sqlite` builds SQLite 3.54.1 through `rusqlite`'s `bundled` feature (`libsqlite3-sys` 0.40), and the `wal-index` and pin code depend on that build. `libsqlite3-sys` declares `links = "sqlite3"`, so Cargo allows one copy per build: the application's own `rusqlite`, `sqlx` or other SQLite crate must resolve to the same `libsqlite3-sys` 0.40 (a compatible `rusqlite` 0.43), or the build fails at resolution, never at run time. Cargo features unify, so the application's connections then run on the same bundled build.
 
 ## 7. What this design does not prevent
 
-- A wrong belief about SQLite that both the simulator and the real-SQLite tests share. Mitigation: a shadow run in the host and scheduled verify-restores, permanently.
+- A wrong belief about SQLite that both the simulator and the real-SQLite tests share. Mitigation: a shadow run in the application and scheduled verify-restores, permanently.
 - A stale page inside a Go-written or v1 Rust-written chain: with `NoChecksum` files there is nothing to check a page against except a restore compared with the live database. Scheduled verify-restores are therefore a v1 requirement, not an extra.
 - A stray process (`sqlite3`, a CLI) that checkpoints or deletes the WAL. The library detects it (`SnapshotCause`) but pays a snapshot.
 - Shared fate: an OOM kill ends replication until restart; the unsynced tail stays on the volume.
@@ -196,7 +196,7 @@ Out of scope for this repository. A host that adopts the library provides:
 
 | # | Decision | Outcome |
 |---|---|---|
-| D1 | Own repository or a crate in the host's workspace | **Decided: own repository.** Its own CI matrix (Go binaries, fuzz, Linux power-loss tests), no host dependency, usable by others |
+| D1 | Own repository or a crate in the application's workspace | **Decided: own repository.** Its own CI matrix (Go binaries, fuzz, Linux power-loss tests), no application dependency, usable by others |
 | D2 | Track rolling checksums in Rust-written files | **Decided: not until after cutover.** v1 writes `NoChecksum` as Go does. Go's level compactor forces `NoChecksum` on its output while copying the last input's post-apply checksum (compactor.go:165 at 041a8c3), so a tracked last input fails with "post-apply checksum not allowed" (read in code, not run), and Go restore reads tracked chains only from v0.5.18. Tracking would break rollback to Go. Turn it on once Go is no longer the fallback writer. With the page checksum table, tracking needs no prior page content and no extra scan, so rollback is the only remaining reason to wait |
 | D3 | Adopt the existing prefixes or start new ones | **Decided: adopt**, so tooling, the VFS and the retention window carry over |
 | D4 | Local staging layout | **Decided: Go's meta-directory layout.** Requirement: switching between Go and Rust in either direction, at any moment, is a restart (phase 3 alternation test) |

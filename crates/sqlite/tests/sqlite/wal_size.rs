@@ -1,7 +1,7 @@
 //! The WAL file's size after a restart: SQLite cuts the file back to `journal_size_limit` only on
 //! the connection whose write restarts the log, which after the replicator's own checkpoint is
 //! its sequence bump on the writer connection (upstream Litestream #1605: a WAL that kept its
-//! 1.7 GB peak for good). The actor cases run with the host in both placements.
+//! 1.7 GB peak for good). The actor cases run with the application in both placements.
 
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
@@ -19,7 +19,7 @@ fn len(path: &Path) -> u64 {
     std::fs::metadata(path).unwrap().len()
 }
 
-/// A WAL database with table `t`, and a host connection set up as replication asks.
+/// A WAL database with table `t`, and an application connection set up as replication asks.
 fn database(dir: &Path) -> (Connection, PathBuf) {
     let db = dir.join("app.db");
     let app = Connection::open(&db).unwrap();
@@ -30,7 +30,7 @@ fn database(dir: &Path) -> (Connection, PathBuf) {
 }
 
 /// One transaction of `rows` rows of `bytes` bytes: the WAL grows by more than their product.
-/// One line, since the host in a child process takes one statement per line.
+/// One line, since the application in a child process takes one statement per line.
 fn burst_sql(rows: u64, bytes: u64, blob: &str) -> String {
     format!(
         "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < {rows}) \
@@ -124,7 +124,7 @@ fn no_resnapshot_and_no_fault(rig: &Rig<Sqlite>) {
 /// The WAL reader and the actor across the shrink: the file is cut to the limit after the
 /// actor's own restart, and the syncs after it continue the new generation from the start of
 /// the shorter file, with no snapshot and no fault; a second burst and restart on the shrunk
-/// file do the same, and the replica restores every transaction to what the host committed.
+/// file do the same, and the replica restores every transaction to what the application committed.
 #[test]
 fn the_actor_continues_with_no_snapshot_after_the_wal_shrinks() {
     for placement in Placement::ALL {

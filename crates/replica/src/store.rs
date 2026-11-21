@@ -1,9 +1,9 @@
-//! The host's store, type-erased, and the counters every call through it feeds.
+//! The application's store, type-erased, and the counters every call through it feeds.
 //!
 //! `ObjectStore` returns `impl Future`, so it cannot be a trait object. [`DynStore`] is the
 //! same contract with each call's future boxed (one allocation per call, next to an HTTP
 //! request or a file operation), so the engine is compiled once inside this crate rather than
-//! once per host store type. Every `ObjectStore` is a `DynStore`, and `dyn DynStore` is an
+//! once per application store type. Every `ObjectStore` is a `DynStore`, and `dyn DynStore` is an
 //! `ObjectStore` again, so the same `Arc` serves the replicator, `restore` and `verify`.
 //!
 //! [`Metered`] wraps the replica's store inside the thread and counts each operation's calls,
@@ -28,7 +28,7 @@ use crate::runtime::millis_until;
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// [`ObjectStore`] with boxed futures, so a store can sit behind `Arc<dyn DynStore>`.
-/// Implemented for every `ObjectStore`; a host never implements it itself.
+/// Implemented for every `ObjectStore`; an application never implements it itself.
 pub trait DynStore: Send + Sync {
     /// [`ObjectStore::list`].
     fn list_boxed(

@@ -9,7 +9,7 @@ publish.workspace = true
 
 [features]
 # `Replicator::app_connection` on a rusqlite connection. A feature because the type pins the
-# host to this crate's rusqlite version.
+# application to this crate's rusqlite version.
 rusqlite = ["dep:rusqlite"]
 # `Runtime::fake`: a clock that moves when a test says so, and a park that waits on it.
 testing = ["lsr-core/testing"]

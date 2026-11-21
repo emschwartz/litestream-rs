@@ -25,15 +25,15 @@
 //! the pages Go wrote into the manifest. The live half (`just compat`) re-encodes every
 //! fixture file with `lsr_ltx::Encoder` and has the pinned Go versions restore and
 //! `ltx.Decoder.Verify` it (`go/verify`). [`read_with_vfs`] opens a replica through upstream's
-//! read-replica VFS extension, from a small C host (`c/vfs-read.c`), for the direction where
+//! read-replica VFS extension, from a small C application (`c/vfs-read.c`), for the direction where
 //! the Go VFS reads what Rust wrote.
 //!
 //! The process half: [`Replicator`] runs Go's `litestream replicate` or Rust's `lsr replicate`
-//! on one [`Site`], stopped by SIGINT or killed by SIGKILL, and the watchers re-exported from
+//! on one [`AppFixture`], stopped by SIGINT or killed by SIGKILL, and the watchers re-exported from
 //! the handover module ([`tip`], [`wait_boot_file`], [`snapshots`]) read what each process
 //! staged and uploaded, so a test can tell a boot that continued from one that snapshotted.
 //!
-//! The replica of a [`Site`] is a directory or a prefix of a local MinIO bucket ([`Remote`],
+//! The replica of a [`AppFixture`] is a directory or a prefix of a local MinIO bucket ([`Remote`],
 //! [`S3Replica`]), so the same checks run with Go's AWS SDK and Rust's S3 store on one bucket
 //! (`just compat-s3`). Every child process the harness starts runs without the machine's
 //! `AWS_*` and `LITESTREAM_*` variables ([`scrub_env`]), and the S3 checks refuse any endpoint
@@ -62,7 +62,7 @@ pub use binaries::{
     go_binary, is_live_test, workspace_root,
 };
 pub use chain::{
-    Chain, Outside, Point, STEP_MS, Shape, Site, Written, clock_ending_now, real_now_ms,
+    AppFixture, Chain, Outside, Point, STEP_MS, Shape, Written, clock_ending_now, real_now_ms,
 };
 pub use error::CompatError;
 pub use generate::generate;

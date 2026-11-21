@@ -85,7 +85,7 @@ Pin
   - shared OFD lock on DMS
   - pread both header copies, compare, checksum, isInit, iVersion==3007000
   - read nBackfill and marks; pick or claim a slot >= 1 (exclusive lock, pwrite the mark at 100+4n, downgrade); take the shared lock; re-read the header and confirm unchanged
-  - on an invalid header, return "not ready" and let the host's connection run recovery
+  - on an invalid header, return "not ready" and let the application's connection run recovery
 
 Checkpoint PASSIVE+TRUNCATE
 - C path: ReadHdr + walCheckpoint + sqlite3WalCheckpoint + iterator/merge + hash lookup + restart/truncate + busy locks, about 800-950 C lines.
@@ -98,8 +98,8 @@ Checkpoint PASSIVE+TRUNCATE
   - the Checkpointer trait also needs WAL_WRITE_LOCK (crates/core/src/source.rs:241) and bump_seq
 
 ## 4. Deployments
-### A: same process as the host's C SQLite
-- How SQLite locks in-process [M]: unixShmLock (46040-46110) keeps per-process aLock[] counts. Only the first shared locker of a slot calls fcntl. An exclusive lock calls fcntl whenever no sibling holds the slot. Traditional F_SETLK from our own fd never conflicts with the host (same process) and silently pins nothing.
+### A: same process as the application's C SQLite
+- How SQLite locks in-process [M]: unixShmLock (46040-46110) keeps per-process aLock[] counts. Only the first shared locker of a slot calls fcntl. An exclusive lock calls fcntl whenever no sibling holds the slot. Traditional F_SETLK from our own fd never conflicts with the application (same process) and silently pins nothing.
 - OFD locks work, measured on this Mac (Darwin 25.6.0, scratch/ofdtest.py):
   - F_OFD_SETLK (cmd 90, in libc for apple: libc-0.2.168 apple/mod.rs:3756) took a shared lock
   - a same-process traditional F_SETLK F_WRLCK on another fd was then refused (EAGAIN)
@@ -107,25 +107,25 @@ Checkpoint PASSIVE+TRUNCATE
   - closing ANY fd on the file dropped the process's traditional locks
   - Linux OFD semantics are documented the same way [I]
 - Pin [I, from the code read]:
-  - Sound with OFD locks, given two conditions: (1) our -shm and db fds are never closed during process life, because closing them drops the HOST's POSIX locks (howtocorrupt §2.2); (2) we never run recovery or truncate -shm.
-  - Writing a read-mark is safe if done exactly like SQLite: hold an exclusive OFD lock on READ(n), pwrite aReadMark[n], downgrade. The host's attempt to change that slot calls fcntl, gets BUSY and retries (walTryBeginRead handles WAL_RETRY). The host never caches marks across a lock.
+  - Sound with OFD locks, given two conditions: (1) our -shm and db fds are never closed during process life, because closing them drops the APP's POSIX locks (howtocorrupt §2.2); (2) we never run recovery or truncate -shm.
+  - Writing a read-mark is safe if done exactly like SQLite: hold an exclusive OFD lock on READ(n), pwrite aReadMark[n], downgrade. The application's attempt to change that slot calls fcntl, gets BUSY and retries (walTryBeginRead handles WAL_RETRY). The application never caches marks across a lock.
   - Primitives: libc::fcntl with F_OFD_SETLK, which needs unsafe. rustix's fcntl_lock is whole-file only, and nix exposes OFD on linux only [I]. So: one small crate with unsafe allowed, ~40 lines. pread/pwrite on -shm (no mmap needed) relies on the unified page cache, coherent on Linux and macOS [I].
-  - Side effect since 3.51.0: unixIsSharingShmNode (45333) sees our DMS lock, so the host's last connection will not delete -wal/-shm or switch journal_mode out of WAL (harmless, documented as such).
+  - Side effect since 3.51.0: unixIsSharingShmNode (45333) sees our DMS lock, so the application's last connection will not delete -wal/-shm or switch journal_mode out of WAL (harmless, documented as such).
 - Checkpoint: possible in principle with the same primitives [I]. Blast radius:
   - an ordering or fsync bug, a wrong nBackfill, or a truncate race = live db corruption
-  - closing a db fd = all the host's db locks gone
+  - closing a db fd = all the application's db locks gone
   - any future change in SQLite's checkpoint protocol must be tracked by hand
   - Not recommended.
 ### B: separate process
 - Pin: sound with plain F_SETLK or OFD, since POSIX locks conflict across processes [I]. Same code; the close() hazard is gone.
 - Checkpoint: same correctness burden as A minus the close() hazard [I]. SQLite itself is the reference for multi-process access, so the protocol is designed for this case.
-### C: host uses no C SQLite (Turso)
+### C: application uses no C SQLite (Turso)
 - Pure-Rust -shm code is irrelevant [M]:
   - Turso's wal-index lives in process memory (InProcessWalCoordination, wal.rs:873) or in .tshm.
   - It locks the db file exclusively in single-process mode (unix.rs:70).
 - Pin and checkpoint must go through Turso's API (begin_read_tx; pager.checkpoint(mode) as in multiprocess_tests.rs:31-37). Or: speak .tshm, an unstable v1 format (SHARED_WAL_COORDINATION_VERSION=1).
 
-## 5. Middle option: pure-Rust pin, host does every checkpoint
+## 5. Middle option: pure-Rust pin, application does every checkpoint
 - Guarantee: yes, "no frame vanishes before it is copied", if the pin holds a slot n >= 1 [I from walformat + walRestartLog]:
   - The WAL is only overwritten by a writer restart (walRestartLog) or a RESTART/TRUNCATE checkpoint (walRestartHdr).
   - Both need exclusive READ(1..4) (walBusyLock), which a shared lock on any slot >= 1 blocks.
@@ -133,9 +133,9 @@ Checkpoint PASSIVE+TRUNCATE
   - Checkpoints still backfill up to our mark, which is harmless.
 - Size: ~300-450 lines + tests [I].
 - Catches:
-  - the host's TRUNCATE returns BUSY while pinned
+  - the application's TRUNCATE returns BUSY while pinned
   - the WAL grows while pinned, so pins must be short
-  - an invalid header (no connection yet, or a crash) needs the host to recover first
+  - an invalid header (no connection yet, or a crash) needs the application to recover first
   - Linux and macOS need OFD for A
 - Recommended if anything is done.
 
@@ -175,6 +175,6 @@ Open (not verified). See the Open list.
 ## Open
 - Other implementations speaking live -shm against C SQLite: LiteFS (FUSE, sees all lock calls), mvsqlite, rqlite (uses C SQLite), libSQL (a C fork), sqlite-wasm OPFS (no shm), modernc (transpiled C, so the same code). Unverified; no breakage reports searched.
 - Exact release dates for TRUNCATE (3.8.8) and SNAPSHOT (3.10): not checked; the changes.html fetch was truncated.
-- Linux OFD vs same-process POSIX conflict: answered 2026-11-20, it conflicts as on macOS (`docs/spikes.md`, "#9 OFD"). That run also found the pin needs the DMS byte as well as a read mark, or the host's last close deletes `-wal`.
+- Linux OFD vs same-process POSIX conflict: answered 2026-11-20, it conflicts as on macOS (`docs/spikes.md`, "#9 OFD"). That run also found the pin needs the DMS byte as well as a read mark, or the application's last close deletes `-wal`.
 - Whether libsqlite3-sys builds with SQLITE_ENABLE_SETLK_TIMEOUT: answered 2026-11-20, it does not, and SQLite 3.54.1 never blocks on `-shm` locks even with it (`docs/spikes.md`, "#9 SETLK").
 - Whether nix or rustix expose F_OFD_SETLK on macOS: not checked.

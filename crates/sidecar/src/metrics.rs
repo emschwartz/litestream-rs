@@ -40,8 +40,8 @@
 //! - `lsr_unreplicated_since_timestamp_seconds{db}` while a commit is not on the replica,
 //!   and `lsr_unreplicated_age_seconds{db}` (0 when caught up): the lag to alert on.
 //! - `lsr_wal_bytes{db}`: the WAL file's size, which a pin held while uploads fail grows.
-//! - `lsr_host_checkpoints_total{db,kind}` (`backfilled`, `restarted`, `stalled`) and
-//!   `lsr_host_notice{db,kind}` 1 while the host-checkpoint notice stands.
+//! - `lsr_app_checkpoints_total{db,kind}` (`backfilled`, `restarted`, `stalled`) and
+//!   `lsr_app_notice{db,kind}` 1 while the application-checkpoint notice stands.
 //! - `lsr_resnapshot_pending{db,cause}` 1 when the next sync is a snapshot.
 //! - `lsr_checkpoints_total{db}`, `lsr_checkpoints_busy_total{db}`, `lsr_uploads_total{db}`,
 //!   `lsr_retries_total{db}`, `lsr_panics_total{db}`.
@@ -354,27 +354,31 @@ fn lag_series(out: &mut Out, dbs: &[(String, &Health)], now: Timestamp) {
     );
 }
 
-fn host_series(out: &mut Out, dbs: &[(String, &Health)]) {
-    let name = "lsr_host_checkpoints_total";
+fn app_series(out: &mut Out, dbs: &[(String, &Health)]) {
+    let name = "lsr_app_checkpoints_total";
     out.family(
         name,
         "counter",
-        "Checkpoints the host ran, or tried to, by kind",
+        "Checkpoints the application ran, or tried to, by kind",
     );
     for (db, health) in dbs {
-        let host = &health.host_checkpoints;
+        let app = &health.app_checkpoints;
         for (kind, n) in [
-            ("backfilled", host.backfilled),
-            ("restarted", host.restarted),
-            ("stalled", host.stalled),
+            ("backfilled", app.backfilled),
+            ("restarted", app.restarted),
+            ("stalled", app.stalled),
         ] {
             out.sample(name, &[("db", db), ("kind", kind)], n);
         }
     }
-    let name = "lsr_host_notice";
-    out.family(name, "gauge", "1 while the host-checkpoint notice stands");
+    let name = "lsr_app_notice";
+    out.family(
+        name,
+        "gauge",
+        "1 while the application-checkpoint notice stands",
+    );
     for (db, health) in dbs {
-        if let Some(notice) = health.host_notice() {
+        if let Some(notice) = health.app_notice() {
             out.sample(name, &[("db", db), ("kind", notice_name(notice))], 1);
         }
     }
@@ -485,7 +489,7 @@ pub fn render(views: &[DbView], now: Timestamp) -> String {
     go_replica_series(&mut out, views);
     state_series(&mut out, views, now);
     lag_series(&mut out, &dbs, now);
-    host_series(&mut out, &dbs);
+    app_series(&mut out, &dbs);
     counter_series(&mut out, &dbs);
     verify_series(&mut out, &dbs);
     out.0

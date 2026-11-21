@@ -168,25 +168,25 @@ fn wal_len(path: &Path) -> u64 {
     fs::metadata(suffixed(path, "-wal")).unwrap().len()
 }
 
-/// A WAL database with one table and four committed frames, the host connection that wrote
+/// A WAL database with one table and four committed frames, the application connection that wrote
 /// them (kept open so `-wal` and `-shm` stay), and our own read-write `-shm` descriptor.
 fn fresh_db() -> (TempDir, PathBuf, Connection, File) {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("db");
-    let host = connect(&path);
-    let mode: String = host
+    let app = connect(&path);
+    let mode: String = app
         .query_row("PRAGMA journal_mode = wal", [], |r| r.get(0))
         .unwrap();
     assert_eq!(mode, "wal");
-    host.execute_batch("CREATE TABLE t (v INTEGER)").unwrap();
-    commit(&host, 1);
-    commit(&host, 2);
+    app.execute_batch("CREATE TABLE t (v INTEGER)").unwrap();
+    commit(&app, 1);
+    commit(&app, 2);
     let shm = OpenOptions::new()
         .read(true)
         .write(true)
         .open(suffixed(&path, "-shm"))
         .unwrap();
-    (dir, path, host, shm)
+    (dir, path, app, shm)
 }
 
 /// `path`'s device and inode as `/proc` lock listings print them (`%02x:%02x:%lu`).
@@ -267,7 +267,7 @@ fn waiter_queued(path: &Path, want: &str) -> bool {
 
 #[test]
 fn an_ofd_pin_on_a_read_mark_makes_restart_and_truncate_busy() {
-    let (_dir, path, host, shm) = fresh_db();
+    let (_dir, path, app, shm) = fresh_db();
     let outside = connect(&path);
     let mark = pin(&shm, Kind::Ofd, SLOT);
     assert_eq!(
@@ -285,7 +285,7 @@ fn an_ofd_pin_on_a_read_mark_makes_restart_and_truncate_busy() {
     assert_eq!(wal_len(&path), len, "TRUNCATE left the WAL's length alone");
 
     // A writer on a fully backfilled WAL would restart it; with the pin it appends instead.
-    commit(&host, 3);
+    commit(&app, 3);
     assert_eq!(salts(&path), before, "the writer did not restart the WAL");
     // Frames past the pin are never backfilled: the checkpoint stops at the mark.
     assert_eq!(checkpoint(&outside, "PASSIVE"), (0, 5, 4));
@@ -294,18 +294,18 @@ fn an_ofd_pin_on_a_read_mark_makes_restart_and_truncate_busy() {
     // Released, everything proceeds as normal: RESTART succeeds, the next commit restarts.
     unpin(&shm, Kind::Ofd, SLOT);
     assert_eq!(checkpoint(&outside, "RESTART"), (0, 5, 5));
-    commit(&host, 4);
+    commit(&app, 4);
     assert_ne!(
         salts(&path),
         before,
         "the WAL restarted once the pin was gone"
     );
-    drop((outside, host));
+    drop((outside, app));
 }
 
 #[test]
 fn a_posix_lock_from_our_own_descriptor_pins_nothing() {
-    let (_dir, path, host, shm) = fresh_db();
+    let (_dir, path, app, shm) = fresh_db();
     let outside = connect(&path);
     pin(&shm, Kind::Posix, SLOT);
     let before = salts(&path);
@@ -315,18 +315,18 @@ fn a_posix_lock_from_our_own_descriptor_pins_nothing() {
     );
     // SQLite's exclusive lock on the same byte is the process's own: it upgrades ours.
     assert_eq!(checkpoint(&outside, "RESTART"), (0, 4, 4));
-    commit(&host, 3);
+    commit(&app, 3);
     assert_ne!(salts(&path), before, "the WAL restarted under the 'pin'");
-    drop((outside, host));
+    drop((outside, app));
 }
 
 #[test]
 fn the_ofd_pin_survives_another_descriptor_closing_and_the_posix_locks_do_not() {
-    let (_dir, path, host, shm) = fresh_db();
+    let (_dir, path, app, shm) = fresh_db();
     let shm_path = suffixed(&path, "-shm");
-    // The host's reader holds read mark 0's byte or a slot's, and the DMS byte, as POSIX locks.
-    host.execute_batch("BEGIN").unwrap();
-    assert_eq!(count(&host), 2);
+    // The application's reader holds read mark 0's byte or a slot's, and the DMS byte, as POSIX locks.
+    app.execute_batch("BEGIN").unwrap();
+    assert_eq!(count(&app), 2);
     pin(&shm, Kind::Ofd, 2);
     let held = locks_on(&shm_path);
     assert!(held.contains(&"OFDLCK READ 125 125".to_owned()), "{held:?}");
@@ -345,24 +345,24 @@ fn the_ofd_pin_survives_another_descriptor_closing_and_the_posix_locks_do_not() 
     let outside = connect(&path);
     let (busy, _, _) = checkpoint(&outside, "RESTART");
     assert_eq!(busy, 1);
-    host.execute_batch("COMMIT").unwrap();
-    drop((outside, host));
+    app.execute_batch("COMMIT").unwrap();
+    drop((outside, app));
     drop(shm);
 }
 
-/// The last host connection closing: SQLite takes an EXCLUSIVE lock on the database file, which
+/// The last application connection closing: SQLite takes an EXCLUSIVE lock on the database file, which
 /// a `-shm` read-mark lock does not stop, and then checkpoints in exclusive mode, where its
 /// read-mark locks are no-ops (`walLockExclusive`, `sqlite3.c`), and deletes `-wal`.
 #[test]
-fn the_hosts_last_close_ignores_a_read_mark_pin_but_not_a_pin_on_the_dms_byte() {
+fn the_apps_last_close_ignores_a_read_mark_pin_but_not_a_pin_on_the_dms_byte() {
     for hold_dms in [false, true] {
-        let (_dir, path, host, shm) = fresh_db();
+        let (_dir, path, app, shm) = fresh_db();
         pin(&shm, Kind::Ofd, SLOT);
         if hold_dms {
             lock(&shm, Kind::Ofd, libc::F_RDLCK, SHM_DMS, 1, false).unwrap();
         }
-        commit(&host, 3);
-        drop(host);
+        commit(&app, 3);
+        drop(app);
         let wal_left = suffixed(&path, "-wal").exists();
         let shm_left = suffixed(&path, "-shm").exists();
         assert_eq!(
@@ -404,7 +404,7 @@ fn the_bundled_sqlite_is_built_without_setlk_timeout() {
 /// lock timeout too (`sqlite3_busy_timeout` sets both): the checkpoint still reports busy.
 #[test]
 fn with_a_busy_timeout_the_checkpoint_still_reports_busy() {
-    let (_dir, path, host, shm) = fresh_db();
+    let (_dir, path, app, shm) = fresh_db();
     let outside = connect(&path);
     outside
         .busy_timeout(std::time::Duration::from_millis(1))
@@ -412,14 +412,14 @@ fn with_a_busy_timeout_the_checkpoint_still_reports_busy() {
     pin(&shm, Kind::Ofd, SLOT);
     assert_eq!(checkpoint(&outside, "RESTART"), (1, 4, 4));
     assert_eq!(checkpoint(&outside, "TRUNCATE"), (1, 4, 4));
-    drop((outside, host));
+    drop((outside, app));
 }
 
 /// What a blocking caller would do: the kernel queues a POSIX `F_SETLKW` behind an OFD lock in
 /// the same process (it shows in `/proc/locks` as a waiter) and grants it on release.
 #[test]
 fn a_blocking_posix_lock_waits_behind_an_ofd_lock_in_the_same_process() {
-    let (_dir, path, host, shm) = fresh_db();
+    let (_dir, path, app, shm) = fresh_db();
     let shm_path = suffixed(&path, "-shm");
     pin(&shm, Kind::Ofd, SLOT);
     let theirs = File::options()
@@ -447,8 +447,8 @@ fn a_blocking_posix_lock_waits_behind_an_ofd_lock_in_the_same_process() {
     );
     unpin(&shm, Kind::Ofd, SLOT);
     assert_eq!(granted.recv().unwrap(), Ok(()));
-    // Its descriptor is closed only after the host's: closing it drops the host's POSIX locks.
+    // Its descriptor is closed only after the application's: closing it drops the application's POSIX locks.
     let theirs = waiter.join().unwrap();
-    drop(host);
+    drop(app);
     drop(theirs);
 }

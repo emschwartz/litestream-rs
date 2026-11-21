@@ -41,9 +41,9 @@ pub enum SourceError {
     /// SQLite reported busy, or the wal-index header is mid-update (its two copies differ).
     #[error("SQLite is busy")]
     Busy,
-    /// The checkpoint was not attempted: the host's readers hold the WAL, and
+    /// The checkpoint was not attempted: the application's readers hold the WAL, and
     /// a TRUNCATE would wait on them. Nothing is wrong with SQLite.
-    #[error("the host's readers hold the WAL")]
+    #[error("the application's readers hold the WAL")]
     ReadersHeld,
     /// A database page read returned fewer bytes than a page.
     #[error("short read of page {pgno:?}")]

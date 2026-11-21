@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use lsr_config::{
-    DbSource, Expand, GoConfig, GoDuration, HostReaders, KeyClass, ProblemKind, ReplicaKind,
+    AppReaders, DbSource, Expand, GoConfig, GoDuration, KeyClass, ProblemKind, ReplicaKind,
     WarningKind, defaults,
 };
 
@@ -537,7 +537,7 @@ fn an_empty_file_has_go_defaults() {
     );
     assert!(config.retention_enabled());
     assert_eq!(config.addr(), None);
-    assert_eq!(config.rust().host_readers(), HostReaders::Unknown);
+    assert_eq!(config.rust().app_readers(), AppReaders::Unknown);
     assert!(config.dbs().is_empty());
 }
 
@@ -580,7 +580,7 @@ fn part_size_in_iec_and_si_units_and_concurrency() {
 fn checkpoint_fields() {
     let db = |text: &str| config(text).dbs()[0].clone();
     let both = db(
-        "dbs:\n  - path: /tmp/test.db\n    min-checkpoint-page-count: 2000\n    truncate-page-n: 100000\n    replica:\n      url: file:///tmp/replica\nlitestream-rs:\n  host-readers: none\n",
+        "dbs:\n  - path: /tmp/test.db\n    min-checkpoint-page-count: 2000\n    truncate-page-n: 100000\n    replica:\n      url: file:///tmp/replica\nlitestream-rs:\n  app-readers: none\n",
     );
     assert_eq!(
         (both.min_checkpoint_page_count(), both.truncate_page_n()),
@@ -591,7 +591,7 @@ fn checkpoint_fields() {
         (unset.min_checkpoint_page_count(), unset.truncate_page_n()),
         (None, None)
     );
-    // Without the claim that the host holds no long readers, v1 never truncates.
+    // Without the claim that the application holds no long readers, v1 never truncates.
     let problems = refused(
         "dbs:\n  - path: /tmp/test.db\n    truncate-page-n: 100000\n    replica:\n      url: file:///tmp/replica\n",
     );

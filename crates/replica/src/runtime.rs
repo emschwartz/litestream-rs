@@ -44,7 +44,7 @@ pub struct Runtime {
     pub clock: Arc<dyn Clock>,
     /// Where the thread waits.
     pub park: Arc<dyn Park>,
-    /// Chance, for whatever the host's store layers want jittered.
+    /// Chance, for whatever the application's store layers want jittered.
     pub entropy: Arc<dyn Entropy>,
 }
 

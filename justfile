@@ -43,7 +43,7 @@ commit-check base="":
 
 # The S3 store's HTTP clients (docs/plans/phase-1-reading.md, ruling F2 as amended):
 # each builds alone, all build together, and reqwest's own tests run (ureq's run in `test`),
-# then the test of a host's native-tls client, which needs the `native-tls` feature.
+# then the test of an application's native-tls client, which needs the `native-tls` feature.
 features:
     cargo clippy -p lsr-store-s3 --no-default-features --lib --locked -- -D warnings
     cargo clippy -p lsr-store-s3 --no-default-features --features reqwest --lib --locked -- -D warnings
@@ -90,7 +90,7 @@ sqlite-big:
 
 # Build the pinned Go binaries and their VFS extensions, then run the live checks against them
 # (not part of check; the VFS test also needs a C compiler and the SQLite headers).
-# The VFS test's C host needs a SQLite with sqlite3_load_extension. It takes SQLITE3_CFLAGS and
+# The VFS test's C application needs a SQLite with sqlite3_load_extension. It takes SQLITE3_CFLAGS and
 # SQLITE3_LIBS when set, then on macOS Homebrew's (`brew install sqlite`; the system one lacks
 # the function), then `pkg-config sqlite3`, then plain -lsqlite3 (crates/compat/src/vfs.rs).
 # The ledger's counterpart check is ignored too, but it needs the listing ledger-fresh writes.
