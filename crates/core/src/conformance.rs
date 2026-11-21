@@ -21,7 +21,7 @@ use std::thread::{self, Thread};
 use lsr_ltx::{Timestamp, Txid, TxidRange};
 
 use crate::layout::{FileInfo, FileKey, Level, ListedStamp, StampOrigin};
-use crate::store::{ObjectStore, PageLimit, ReadAt, ReadLen, StoreError, StoreOp, Upload};
+use crate::store::{ListAt, ObjectStore, PageLimit, ReadAt, ReadLen, StoreError, StoreOp, Upload};
 
 /// Why a conformance case failed.
 #[derive(Debug)]
@@ -828,6 +828,48 @@ pub async fn read_many_agrees_with_read<H: Harness>(h: &H) -> Check {
     Ok(())
 }
 
+/// `list_many` answers each listing as `list` does, in order.
+///
+/// # Errors
+/// A [`Failure`] naming the rule that broke.
+pub async fn list_many_agrees_with_list<H: Harness>(h: &H) -> Check {
+    let store = h.store();
+    for n in 1..=5 {
+        put_stamped(store, key(0, n, n)?, b"x", at(STAMP)).await?;
+    }
+    put_stamped(store, key(2, 1, 4)?, b"y", at(STAMP)).await?;
+    let limit = limit(2)?;
+    let first = store.list(Level::ZERO, None, limit).await?;
+    let pages = [
+        ListAt {
+            level: Level::ZERO,
+            after: None,
+        },
+        ListAt {
+            level: Level::ZERO,
+            after: first.next,
+        },
+        ListAt {
+            level: key(2, 1, 1)?.level(),
+            after: None,
+        },
+        ListAt {
+            level: key(5, 1, 1)?.level(),
+            after: None,
+        },
+    ];
+    let mut want = Vec::new();
+    for page in &pages {
+        want.push(store.list(page.level, page.after, limit).await);
+    }
+    ensure_eq!(
+        store.list_many(&pages, limit).await,
+        want,
+        "list_many against list"
+    );
+    Ok(())
+}
+
 /// Hands the suite to a backend: one test per case, each on a fresh harness.
 ///
 /// `make` is an expression that builds the harness, called once per test.
@@ -855,6 +897,7 @@ macro_rules! conformance_suite {
             stamp_of_an_overwritten_file_is_refused,
             read_with_stamp_agrees_with_read_and_stamp,
             read_many_agrees_with_read,
+            list_many_agrees_with_list,
         );
     };
     (@each $make:expr; $($case:ident,)+) => {

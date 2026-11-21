@@ -19,7 +19,7 @@
 //! - Retrying is the caller's decision, made from the [`StoreError`] variant.
 //! - Every method returns within a deadline the implementation enforces, failing as
 //!   `Transient`; core holds no timer.
-//! - The batch methods (`read_many` here, more as callers need them) answer
+//! - The batch methods (`read_many`, `list_many`) answer
 //!   each item exactly as the single method would, one result per item in
 //!   order. Their defaults call the single method item by item, so a store
 //!   that is not concurrent (the simulator's, a directory) needs nothing.
@@ -344,6 +344,15 @@ pub struct ReadAt {
     pub len: ReadLen,
 }
 
+/// One listing of a batch: the page of `level` strictly after `after`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ListAt {
+    /// The level.
+    pub level: Level,
+    /// The cursor, as for [`ObjectStore::list`].
+    pub after: Option<TxidRange>,
+}
+
 /// A backend holding a replica's LTX objects, keyed by [`FileKey`].
 ///
 /// Futures are `Send` and name no runtime; a backend may complete them
@@ -413,6 +422,22 @@ pub trait ObjectStore: Send + Sync {
             let mut out = Vec::with_capacity(reads.len());
             for at in reads {
                 out.push(self.read(&at.key, at.offset, at.len).await);
+            }
+            out
+        }
+    }
+
+    /// [`Self::list`] for each item with the same `limit`, one result per
+    /// item, in order.
+    fn list_many(
+        &self,
+        pages: &[ListAt],
+        limit: PageLimit,
+    ) -> impl Future<Output = Vec<Result<Listing, StoreError>>> + Send {
+        async move {
+            let mut out = Vec::with_capacity(pages.len());
+            for at in pages {
+                out.push(self.list(at.level, at.after, limit).await);
             }
             out
         }

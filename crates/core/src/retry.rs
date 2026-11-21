@@ -32,7 +32,7 @@ use crate::env::{Entropy, Sleeper};
 use crate::layout::StoredStamp;
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::store::{
-    CorruptCause, Listing, ObjectStore, PageLimit, ReadAt, ReadLen, StoreError, Upload,
+    CorruptCause, ListAt, Listing, ObjectStore, PageLimit, ReadAt, ReadLen, StoreError, Upload,
 };
 
 /// How a [`StoreError`] should be handled.
@@ -315,6 +315,26 @@ impl<S: ObjectStore, P: Sleeper, E: Entropy> ObjectStore for Retrying<S, P, E> {
 
     fn batch_width(&self) -> NonZeroUsize {
         self.core.inner.batch_width()
+    }
+
+    /// One batch through the inner store, then each failed listing retried
+    /// alone under the policy, in order.
+    async fn list_many(
+        &self,
+        pages: &[ListAt],
+        limit: PageLimit,
+    ) -> Vec<Result<Listing, StoreError>> {
+        let core = &*self.core;
+        let firsts = core.inner.list_many(pages, limit).await;
+        let mut out = Vec::with_capacity(firsts.len());
+        for (at, first) in pages.iter().zip(firsts) {
+            Counters::bump(&core.counters.calls);
+            let settled = core
+                .settle(first, || core.inner.list(at.level, at.after, limit))
+                .await;
+            out.push(settled);
+        }
+        out
     }
 
     /// One batch through the inner store, then each failed read retried

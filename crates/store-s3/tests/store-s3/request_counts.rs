@@ -701,4 +701,38 @@ mod cases {
         rows.extend(files_rows(&rig));
         print_table(&rows);
     }
+
+    /// A full scan sends one LIST per page of keys: 9000 level-1 files are ten
+    /// requests, not the nineteen a page of exactly 1000 cost (one more key
+    /// proved the page was not the last, and the next page fetched it again).
+    #[test]
+    fn a_full_scan_sends_one_list_per_page() {
+        let rig = Rig::build();
+        let store = rig.store();
+        let (loaded, counts) = rig.counted(|| block_on(Inventory::load(&store)));
+        assert_eq!(loaded.unwrap().files().len(), FILES);
+        // Levels 0, 2, 3, 9 and the five empty ones take one request each.
+        assert_eq!(counts.list, 9 + 10);
+    }
+
+    /// Listing the levels side by side changes nothing but the wall time: the
+    /// same inventory from the same requests at concurrency 1 and 8.
+    #[test]
+    fn levels_listed_at_once_give_the_same_inventory() {
+        let rig = Rig::build();
+        let at = |width: usize| {
+            let store = S3Store::with_transport(
+                config().with_concurrency(std::num::NonZeroUsize::new(width).unwrap()),
+                credentials(),
+                Shared(Arc::clone(&rig.wire)),
+                FakeClock::new(now()),
+            )
+            .unwrap();
+            rig.counted(|| block_on(Inventory::load(&store)).unwrap())
+        };
+        let (one, one_counts) = at(1);
+        let (eight, eight_counts) = at(8);
+        assert_eq!(one, eight);
+        assert_eq!(one_counts, eight_counts);
+    }
 }

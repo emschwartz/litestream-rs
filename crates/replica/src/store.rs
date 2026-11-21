@@ -16,8 +16,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use lsr_core::{
-    Clock, FileInfo, FileKey, Level, Listing, ObjectStore, PageLimit, ReadAt, ReadLen, StoreError,
-    StoredStamp, Upload,
+    Clock, FileInfo, FileKey, Level, ListAt, Listing, ObjectStore, PageLimit, ReadAt, ReadLen,
+    StoreError, StoredStamp, Upload,
 };
 use lsr_ltx::{Timestamp, TxidRange};
 
@@ -77,6 +77,13 @@ pub trait DynStore: Send + Sync {
         &'a self,
         reads: &'a [ReadAt],
     ) -> BoxFuture<'a, Vec<Result<Vec<u8>, StoreError>>>;
+
+    /// [`ObjectStore::list_many`].
+    fn list_many_boxed<'a>(
+        &'a self,
+        pages: &'a [ListAt],
+        limit: PageLimit,
+    ) -> BoxFuture<'a, Vec<Result<Listing, StoreError>>>;
 }
 
 /// [`Upload`] with boxed futures.
@@ -167,6 +174,14 @@ where
     ) -> BoxFuture<'a, Vec<Result<Vec<u8>, StoreError>>> {
         Box::pin(self.read_many(reads))
     }
+
+    fn list_many_boxed<'a>(
+        &'a self,
+        pages: &'a [ListAt],
+        limit: PageLimit,
+    ) -> BoxFuture<'a, Vec<Result<Listing, StoreError>>> {
+        Box::pin(self.list_many(pages, limit))
+    }
 }
 
 /// A type-erased upload as an [`Upload`] again. Each call names the trait object's method:
@@ -240,6 +255,14 @@ impl ObjectStore for Erased<'_> {
 
     async fn read_many(&self, reads: &[ReadAt]) -> Vec<Result<Vec<u8>, StoreError>> {
         self.0.read_many_boxed(reads).await
+    }
+
+    async fn list_many(
+        &self,
+        pages: &[ListAt],
+        limit: PageLimit,
+    ) -> Vec<Result<Listing, StoreError>> {
+        self.0.list_many_boxed(pages, limit).await
     }
 }
 
@@ -447,6 +470,21 @@ impl ObjectStore for Metered {
         let ended = self.clock.now();
         for result in &results {
             self.meters.read.note(result, began, ended);
+        }
+        results
+    }
+
+    /// Each listing of the batch counts as one call, timed as the whole batch.
+    async fn list_many(
+        &self,
+        pages: &[ListAt],
+        limit: PageLimit,
+    ) -> Vec<Result<Listing, StoreError>> {
+        let began = self.clock.now();
+        let results = self.store.list_many_boxed(pages, limit).await;
+        let ended = self.clock.now();
+        for result in &results {
+            self.meters.list.note(result, began, ended);
         }
         results
     }

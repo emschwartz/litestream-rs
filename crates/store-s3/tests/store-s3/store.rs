@@ -121,6 +121,29 @@ mod cases {
     }
 
     #[test]
+    fn a_failed_listing_in_a_batch_fails_only_its_own_slot() {
+        let (wire, store) = store_with(4);
+        put_through(&store, &key(0, 1, 1), b"x").unwrap();
+        put_through(&store, &key(1, 1, 1), b"y").unwrap();
+        wire.push(Fault::Status {
+            on: Shape::List,
+            status: 500,
+            code: Some("InternalError"),
+            retry_after: None,
+        });
+        let pages = [Level::ZERO, Level::new(1).unwrap(), Level::new(2).unwrap()]
+            .map(|level| lsr_core::ListAt { level, after: None });
+        let got = block_on(store.list_many(&pages, limit(10)));
+        assert!(
+            matches!(got[0], Err(StoreError::Transient { .. })),
+            "{got:?}"
+        );
+        assert_eq!(got[1].as_ref().unwrap().files.len(), 1);
+        assert!(got[2].as_ref().unwrap().files.is_empty());
+        assert_eq!(count(&wire, Shape::List), 3);
+    }
+
+    #[test]
     fn head_404_between_list_and_stamp() {
         let h = FakeHarness::new();
         let k = key(0, 1, 1);

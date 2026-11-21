@@ -20,8 +20,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lsr_core::{
-    Clock, FileInfo, FileKey, Level, ListedStamp, Listing, ObjectStore, PageLimit, ReadAt, ReadLen,
-    StampOrigin, StoreError, StoreOp, StoredStamp,
+    Clock, FileInfo, FileKey, Level, ListAt, ListedStamp, Listing, ObjectStore, PageLimit, ReadAt,
+    ReadLen, StampOrigin, StoreError, StoreOp, StoredStamp,
 };
 use lsr_ltx::{Timestamp, TxidRange};
 
@@ -232,6 +232,14 @@ impl<T: Transport> ObjectStore for S3Store<T> {
 
     async fn read_many(&self, reads: &[ReadAt]) -> Vec<Result<Vec<u8>, StoreError>> {
         self.inner.read_many(reads)
+    }
+
+    async fn list_many(
+        &self,
+        pages: &[ListAt],
+        limit: PageLimit,
+    ) -> Vec<Result<Listing, StoreError>> {
+        self.inner.list_many(pages, limit)
     }
 }
 
