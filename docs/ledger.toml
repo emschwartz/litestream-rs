@@ -576,7 +576,7 @@
 "TestDB_Close_SyncRetry/FailsAfterTimeout" = { counterpart = "lsr-core::actor::tests::drain_deadline_halts" }
 "TestDB_Close_SyncRetry/NilDoneBehavesLikeClose" = { reason = "Go-only: Close's done-channel plumbing; see AlreadyClosedDoneSkipsSync." }
 "TestDB_Close_SyncRetry/RespectsContextCancellation" = { reason = "Go-only: context.Context cancellation. The Rust core is sans-IO and advances one tick at a time (docs/PLAN.md section 2, goal 5); there is no context to cancel, and shutdown is final_sync with a deadline." }
-"TestDB_Close_SyncRetry/SucceedsAfterTransientFailure" = { missing = "A shutdown drain whose upload fails transiently a few times retries within the deadline and ends Drained with every committed transaction on the replica." }
+"TestDB_Close_SyncRetry/SucceedsAfterTransientFailure" = { counterpart = "lsr-core::actor::tests::a_drain_retries_a_transient_upload_and_drains" }
 "TestDB_Close_SyncRetry/SuccessFirstAttempt" = { counterpart = "lsr-core::actor::tests::drain_finishes_uploads" }
 "TestDB_Close_SyncRetry/ZeroTimeoutNoRetry" = { missing = "final_sync with a deadline already passed and work pending returns DeadlineReached with both offsets at once, making no retry (phase 3 public API, not built yet)." }
 
@@ -1276,7 +1276,7 @@
 "TestFreshStart" = { counterpart = "lsr-core::recover::tests::rule_1_no_tip_is_a_first_sync" }
 
 ["litestream/tests/integration/shutdown_retry_test.go"]
-"TestShutdownSyncRetry_429Errors" = { missing = "A shutdown drain against a store answering 429 with Retry-After keeps retrying within the deadline and ends Drained (lsr-core covers 429 while running, actor::tests::throttle_retry_after_honored, and a drain that runs out of time, drain_deadline_halts)." }
+"TestShutdownSyncRetry_429Errors" = { counterpart = "lsr-core::actor::tests::a_drain_waits_out_a_throttled_upload_and_drains" }
 
 ["litestream/tests/integration/soak_replicate_restore_test.go"]
 "TestSoakReplicateRestore" = { reason = "A long-running soak of the Go binary (minutes to hours, Docker or cloud credentials). Rust's counterpart is the simulator's nightly rotating seeds (just sim-nightly) and the 72-hour Tigris soak run by hand (docs/plans/phase-3-syncing.md, the Tigris soak); neither is a test in this listing." }
