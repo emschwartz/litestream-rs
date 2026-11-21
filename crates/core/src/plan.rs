@@ -60,6 +60,11 @@
 //! for [`KeyTarget`] (`Latest` and `Txid`), which read no stamp; `plan_reference`
 //! is the exact `AsOf` planner over a listing whose stamps are all exact, kept
 //! as the test oracle.
+//!
+//! The extension sweep (`extend` and its helpers) is written in the subset of
+//! Rust that Charon and Aeneas translate to Lean. `verification/lean/` proves
+//! about that translation that the chain it builds is contiguous and that no
+//! other choice of files reaches further.
 
 use std::cmp::{Ordering, Reverse};
 use std::collections::BinaryHeap;

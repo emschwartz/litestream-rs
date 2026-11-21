@@ -169,6 +169,13 @@ tigris-restore:
 soak-tigris hours:
     LSR_SOAK_HOURS={{hours}} ./scripts/tigris.sh cargo nextest run --release -p lsr-cli --test soak_tigris --run-ignored only --no-capture --locked
 
+# Machine-checked Lean proofs about the restore planner's extension step
+# (verification/lean/README.md): regenerate the translation with Charon and Aeneas, fail if it
+# differs from the committed one, then check the proofs. Needs the pinned charon and aeneas
+# (on PATH or in AENEAS_BIN) and elan; not part of check.
+verify-lean:
+    ./scripts/verify-lean.sh
+
 # Pinned upstream sources, read-only reference for the port and input to the compat harness.
 upstream:
     ./scripts/fetch-upstream.sh
