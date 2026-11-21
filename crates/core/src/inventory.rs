@@ -14,11 +14,17 @@ use thiserror::Error;
 use crate::layout::{FileInfo, FileKey, Level, ListedTime};
 use crate::store::{BatchKind, ListAt, ListingStalled, ObjectStore, PageLimit, StoreError};
 
+/// [`SCAN_PAGE`] as a count. Checked at build time: `PageLimit::new` would refuse
+/// zero or a count over the cap, and the fallback to the cap would then
+/// quietly bring back the doubled requests this size avoids.
+const SCAN_PAGE_RAW: u16 = PageLimit::MAX_RAW - 1;
+const _: () = assert!(SCAN_PAGE_RAW >= 1 && SCAN_PAGE_RAW < PageLimit::MAX_RAW);
+
 /// The page size a full scan asks for. A backend that proves "more follows"
 /// with one key past the page (S3 caps a request at [`PageLimit::MAX`] keys)
 /// needs a second request for a page of exactly that size, and the next page
 /// then fetches the same keys again. One short of the cap fills a request.
-const SCAN_PAGE: PageLimit = match PageLimit::new(PageLimit::MAX_RAW - 1) {
+const SCAN_PAGE: PageLimit = match PageLimit::new(SCAN_PAGE_RAW) {
     Some(limit) => limit,
     None => PageLimit::MAX,
 };

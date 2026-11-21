@@ -62,6 +62,10 @@ pub const MAX_ATTEMPTS: u8 = 3;
 /// page, whatever the file's size.
 const CHUNK_BYTES: u32 = 4 * 1024 * 1024;
 
+// `ReadLen::or_chunk` falls back to 1 MiB for a size it refuses, which would
+// silently change the memory per file this constant states.
+const _: () = assert!(CHUNK_BYTES >= 1 && CHUNK_BYTES <= ReadLen::MAX_RAW);
+
 /// What a restore does when an `AsOf` instant falls inside a compacted file
 /// ([PlanOutcome::AsOfInsideFile]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
