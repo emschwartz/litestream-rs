@@ -356,6 +356,18 @@ impl Model {
             .map(|n| n.commit)
     }
 
+    /// The commit the newest file staged for `txid` by `at` held, whatever
+    /// its WAL range: for a file whose header lost its WAL origin after it
+    /// was staged.
+    #[must_use]
+    pub fn staged_as(&self, txid: Txid, at: usize) -> Option<CommitId> {
+        self.stages
+            .iter()
+            .rev()
+            .find(|n| n.txid == txid && n.at <= at)
+            .map(|n| n.commit)
+    }
+
     /// Notes that a snapshot ending at `txid` was built from `commit`.
     pub fn note_snapshot(&mut self, txid: Txid, commit: CommitId, rewound: bool, at: usize) {
         self.notes.push(SnapshotNote {

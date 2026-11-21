@@ -217,3 +217,32 @@ mod lapse {
         }
     }
 }
+
+#[cfg(test)]
+mod page_size {
+    use lsr_ltx::PageSize;
+    use lsr_sim::generate::MetaOp;
+    use lsr_sim::run::run_ops;
+    use lsr_sim::{Op, Opts, Seed};
+
+    /// A snapshot is staged at 512-byte pages and never uploaded; the
+    /// database is vacuumed into 2048-byte pages, and while the engine is
+    /// down the staged file loses its WAL origin. The boot found the newest
+    /// staged file unusable as a position and, with an empty replica, had no
+    /// page size to compare: it staged a 2048-byte snapshot beside the
+    /// 512-byte file and uploaded both, so the replica held two page sizes.
+    #[test]
+    fn an_unusable_staged_file_still_names_its_page_size() {
+        let ops = [
+            Op::CommitInTick { pages: 4 },
+            Op::Tick,
+            Op::Vacuum {
+                page_size: PageSize::new(2048),
+            },
+            Op::Meta(MetaOp::StripNewestOrigin),
+        ];
+        if let Err(failure) = run_ops(Seed::new(0x453), &ops, &Opts::default()) {
+            panic!("{}", failure.violation);
+        }
+    }
+}

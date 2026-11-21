@@ -351,6 +351,8 @@ fn covers(model: &Model, recorder: &RecorderLog) -> Result<BTreeMap<Txid, Commit
                     .rev()
                     .find(|n| n.txid == max && n.at <= at)
                     .map(|n| n.commit)
+                    // A staged file rewritten without its origin.
+                    .or_else(|| model.staged_as(max, at))
             }),
         };
         let Some(commit) = commit else { continue };
