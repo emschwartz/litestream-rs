@@ -45,7 +45,7 @@ use lsr_replica::Runtime;
 
 pub use daemon::{End, Finished};
 pub use error::SidecarError;
-pub use exec::{ChildEnd, ExecCommand, ExecError};
+pub use exec::{ChildEnd, During, ExecCommand, ExecError};
 pub use flags::{Parsed, UsageError};
 pub use http::AddrError;
 

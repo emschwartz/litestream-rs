@@ -298,8 +298,10 @@ Arguments:
 
 \t-exec CMD
 \t    Executes a subcommand once every database is pinned. Litestream will exit
-\t    when the child process exits, with its exit status; signals are forwarded
-\t    to it. Overrides the config file's exec. Cannot be used with -once.
+\t    when the child process exits: 0 if it exited 0 and every database drained,
+\t    else 1, as Go does (the child's own code is logged). Signals are forwarded
+\t    to it, and a child that then dies by a signal counts as clean. Overrides
+\t    the config file's exec. Cannot be used with -once.
 
 \t-once
 \t    Replicate once and exit: sync and upload every database, then stop.

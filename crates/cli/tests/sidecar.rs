@@ -1,7 +1,7 @@
 //! `lsr replicate` with `-exec` and with `addr`, run as real processes: the child starts
-//! after the pin, its exit drains and passes on its code, signals reach it; `/metrics` and
-//! `/healthz` on exactly the address given, with their bounds. Every wait is on a line the
-//! daemon (or its child) prints, a response, or the process ending.
+//! after the pin, its exit drains and the daemon exits 0 or 1 as Go does, signals reach it;
+//! `/metrics` and `/healthz` on exactly the address given, with their bounds. Every wait is
+//! on a line the daemon (or its child) prints, a response, or the process ending.
 //!
 //! The `-exec` child is this test binary again, running [`sidecar::exec_child`] with its mode
 //! in `LSR_EXEC_CHILD`, as Go's own tests use theirs (`TestShutdownExecHelper`).
@@ -199,8 +199,10 @@ mod sidecar {
 
     /// The child's side; does nothing unless the daemon started it. Modes: `pin` tries a
     /// TRUNCATE checkpoint (BUSY while the daemon's read transaction is held), writes ten
-    /// rows and exits; `signal` waits for a signal and exits; `ignore` ignores signals;
-    /// `die` keeps the default actions. Each prints `child:` lines on stdout.
+    /// rows and exits; `signal` waits for a signal and exits; `abort` waits for a signal
+    /// and then dies by SIGABRT, a signal the daemon did not send; `ignore` ignores
+    /// signals; `die` keeps the default actions; `exit` exits at once. Each prints
+    /// `child:` lines on stdout.
     #[test]
     fn exec_child() {
         let Ok(mode) = std::env::var("LSR_EXEC_CHILD") else {
@@ -227,18 +229,28 @@ mod sidecar {
                 say("wrote".to_owned());
                 std::process::exit(code);
             }
-            "signal" | "ignore" => {
+            "signal" | "abort" | "ignore" => {
                 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
                 let mut signals =
                     signal_hook::iterator::Signals::new([SIGINT, SIGTERM, SIGHUP]).unwrap();
                 say(format!("ready pid={}", std::process::id()));
                 for signal in signals.forever() {
-                    if mode == "signal" {
-                        say(format!("got {signal}"));
-                        std::process::exit(code);
+                    match mode.as_str() {
+                        "signal" => {
+                            say(format!("got {signal}"));
+                            std::process::exit(code);
+                        }
+                        "abort" => {
+                            say(format!("aborting on {signal}"));
+                            std::process::abort();
+                        }
+                        _ => say(format!("ignored {signal}")),
                     }
-                    say(format!("ignored {signal}"));
                 }
+            }
+            "exit" => {
+                say("exiting".to_owned());
+                std::process::exit(code);
             }
             "die" => {
                 say(format!("ready pid={}", std::process::id()));
@@ -251,17 +263,19 @@ mod sidecar {
     }
 
     /// The child starts only once the daemon's read transaction pins the WAL (its TRUNCATE
-    /// is BUSY), its writes are drained when it exits, and the daemon exits with its code.
+    /// is BUSY), its writes are drained when it exits, and the daemon exits as Go does: 0
+    /// for a child that exited 0, 1 for any other code (`replicate.go:92`, `main.go:97-103`),
+    /// with the child's own code in the log.
     #[test]
-    fn the_child_runs_after_the_pin_and_its_exit_drains_with_its_code() {
-        for code in [0, 7] {
+    fn the_child_runs_after_the_pin_and_its_exit_drains_then_exits_0_or_1_as_go() {
+        for (code, exit) in [(0, 0), (7, 1)] {
             let setup = setup("", "");
             let app = database(&setup.db);
             write(&app, 20);
             let mut daemon = Daemon::spawn(with_child(&setup, "pin", code));
             let (pinned, _) = daemon.wait_for(&["child: truncate busy=1"]);
             let (status, out) = daemon.finish();
-            assert_eq!(status.code(), Some(code), "{out:#?}");
+            assert_eq!(status.code(), Some(exit), "{out:#?}");
             assert!(index(&out, "msg=\"initialized db\"") < pinned, "{out:#?}");
             let exited = index(&out, "msg=\"subprocess exited, litestream shutting down\"");
             assert!(index(&out, "child: wrote") < exited, "{out:#?}");
@@ -296,26 +310,73 @@ mod sidecar {
         }
     }
 
-    /// A child the forwarded signal kills counts as a clean exit (Go `replicate.go:152`); one
-    /// killed by a signal the daemon did not send fails with 128 + the signal.
+    /// A child that exits non-zero after the forwarded signal fails the run with 1, as Go's
+    /// "cannot wait for exec process" does (`replicate.go:150-153`).
     #[test]
-    fn a_child_killed_by_the_forwarded_signal_is_clean_and_by_another_is_not() {
+    fn a_child_failing_after_the_forwarded_signal_exits_1() {
         let setup = setup("", "");
         drop(database(&setup.db));
-        let mut daemon = Daemon::spawn(with_child(&setup, "die", 0));
+        let mut daemon = Daemon::spawn(with_child(&setup, "signal", 3));
         daemon.wait_for(&["child: ready"]);
         daemon.signal("TERM");
         let (status, out) = daemon.finish();
-        assert_eq!(status.code(), Some(0), "{out:#?}");
-        index(&out, "forwarded=true");
+        assert_eq!(status.code(), Some(1), "{out:#?}");
+        index(&out, "child: got 15");
+        assert!(
+            out.iter()
+                .any(|l| l.contains("msg=\"subprocess ended\"") && l.contains("code=3")),
+            "{out:#?}"
+        );
+    }
+
+    /// During a shutdown begun by a signal, a child that dies by any signal is clean, the
+    /// forwarded one or another (Go `replicate.go:152` checks only for "signal:"); a child
+    /// killed by a signal outside a shutdown fails the run with 1.
+    #[test]
+    fn a_child_dying_by_a_signal_is_clean_in_a_shutdown_and_exits_1_outside_one() {
+        let setup = setup("", "");
+        drop(database(&setup.db));
+        for (mode, signal) in [("die", "number=15"), ("abort", "number=6")] {
+            let mut daemon = Daemon::spawn(with_child(&setup, mode, 0));
+            daemon.wait_for(&["child: ready"]);
+            daemon.signal("TERM");
+            let (status, out) = daemon.finish();
+            assert_eq!(status.code(), Some(0), "{mode}: {out:#?}");
+            let ended = &out[index(&out, "msg=\"subprocess ended\"")];
+            assert!(ended.contains(signal), "{mode}: {ended}");
+            assert!(ended.contains("during=shutdown"), "{mode}: {ended}");
+        }
 
         let mut daemon = Daemon::spawn(with_child(&setup, "die", 0));
         let (_, ready) = daemon.wait_for(&["child: ready"]);
         let pid: u32 = ready.rsplit('=').next().unwrap().parse().unwrap();
         kill("KILL", pid);
         let (status, out) = daemon.finish();
-        assert_eq!(status.code(), Some(128 + 9), "{out:#?}");
+        assert_eq!(status.code(), Some(1), "{out:#?}");
+        let ended = &out[index(&out, "msg=\"subprocess ended\"")];
+        assert!(
+            ended.contains("number=9") && ended.contains("during=run"),
+            "{ended}"
+        );
         index(&out, "msg=\"database drained\"");
+    }
+
+    /// A child that exits 0 while a database did not start still fails the run with 1, as
+    /// Go joins the close error to the child's result.
+    #[test]
+    fn a_clean_child_with_a_database_that_did_not_start_exits_1() {
+        let setup = setup("", "");
+        std::fs::write(&setup.db, vec![0x5a_u8; 8192]).unwrap();
+        let mut daemon = Daemon::spawn(with_child(&setup, "exit", 0));
+        daemon.wait_for(&["child: exiting"]);
+        let (status, out) = daemon.finish();
+        assert_eq!(status.code(), Some(1), "{out:#?}");
+        index(&out, "msg=\"database did not start\"");
+        assert!(
+            out.iter()
+                .any(|l| l.contains("msg=\"subprocess ended\"") && l.contains("code=0")),
+            "{out:#?}"
+        );
     }
 
     /// A child that ignores the forwarded signal is killed at the shutdown deadline, as Go
@@ -329,8 +390,10 @@ mod sidecar {
         daemon.signal("TERM");
         daemon.wait_for(&["child: ignored 15"]);
         let (status, out) = daemon.finish();
-        assert_eq!(status.code(), Some(128 + 9), "{out:#?}");
+        assert_eq!(status.code(), Some(1), "{out:#?}");
         index(&out, "killing it");
+        let ended = &out[index(&out, "msg=\"subprocess ended\"")];
+        assert!(ended.contains("during=kill"), "{ended}");
     }
 
     /// What Go would run differently from what the line says is refused before any database
@@ -367,7 +430,8 @@ mod sidecar {
             .arg(&setup.config)
             .args(["-exec", "/nonexistent/lsr-test-program"]);
         let (status, out) = Daemon::spawn(command).finish();
-        assert_eq!(status.code(), Some(3), "{out:#?}");
+        // Go returns "cannot start exec command" and exits 1 (`replicate.go:477`).
+        assert_eq!(status.code(), Some(1), "{out:#?}");
         index(&out, "msg=\"cannot start exec command\"");
         index(&out, "msg=\"database drained\"");
     }

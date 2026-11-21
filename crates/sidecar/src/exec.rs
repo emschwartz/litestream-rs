@@ -21,9 +21,14 @@
 //! are `rustix`'s (Apache-2.0 WITH LLVM-exception, Apache-2.0 or MIT), already in the lock file
 //! through `tempfile`, because sending a signal to another process needs `unsafe` otherwise.
 //!
-//! **How the child ended** ([`ChildEnd`]) feeds the exit code: an exit of 0, or a death by a
-//! signal the daemon forwarded, is clean (Go `replicate.go:152`); any other exit status is
-//! passed on, and a death by any other signal is `128 + signal`, as a shell reports it.
+//! **How the child ended** ([`ChildEnd`]) decides whether the run is clean, as Go decides it:
+//! an exit of 0 is clean; so is a death by any signal once a shutdown begun by a signal has
+//! forwarded it ([`During::Shutdown`]; Go `replicate.go:152` only checks for "signal:"); any
+//! other exit status, a death by a signal outside a shutdown, and a child the daemon had to
+//! kill are not. Go's `replicate` then returns an error and its `main` exits 1
+//! (`main.go:97-103`), whatever the child's own code, so the CLI exits 1 too; the code and the
+//! signal stay in the "subprocess ended" log line. Passing the child's code on, as a wrapper
+//! such as `env` or `timeout` does, is the alternative recorded in issue #41.
 
 use std::io;
 use std::process::{Command, ExitStatus, Stdio};
@@ -265,50 +270,70 @@ impl ExecCommand {
     }
 }
 
+/// What the daemon was doing when a signal ended the child.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum During {
+    /// Running: no shutdown signal had reached the daemon (the child crashed, or something
+    /// else killed it). Go's `result` is the child's error and the run fails.
+    Run,
+    /// A shutdown begun by a signal, which the daemon forwarded. Go counts any death by a
+    /// signal here as clean (`replicate.go:152` checks only for the "signal:" prefix).
+    Shutdown,
+    /// The daemon killed it: at the shutdown deadline, or on a second signal. Go fails the
+    /// run with "shutdown timed out" or "shutdown interrupted".
+    Kill,
+}
+
+impl During {
+    /// The word for the log.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Run => "run",
+            Self::Shutdown => "shutdown",
+            Self::Kill => "kill",
+        }
+    }
+}
+
 /// How the child ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChildEnd {
     /// It exited with this status.
     Exited(i32),
-    /// A signal ended it; `forwarded` when the daemon had forwarded that signal to it.
+    /// A signal ended it.
     Signalled {
         /// The signal.
         signal: i32,
-        /// Whether the daemon forwarded it (a clean end, as Go counts it).
-        forwarded: bool,
+        /// What the daemon was doing then.
+        during: During,
     },
     /// It could not be started.
     DidNotStart,
 }
 
 impl ChildEnd {
-    /// Whether the child ended as Go counts a success.
+    /// Whether the child ended as Go counts a success: an exit of 0, or a death by any
+    /// signal during a shutdown begun by a signal. Anything else makes Go's `replicate`
+    /// return an error, which its `main` prints and exits 1 on (`main.go:97-103`).
     #[must_use]
     pub const fn clean(self) -> bool {
         match self {
             Self::Exited(code) => code == 0,
-            Self::Signalled { forwarded, .. } => forwarded,
+            Self::Signalled { during, .. } => match during {
+                During::Shutdown => true,
+                During::Run | During::Kill => false,
+            },
             Self::DidNotStart => false,
         }
     }
+}
 
-    /// The exit status to pass on: the child's own when it failed, `128 + signal` for a signal
-    /// the daemon did not forward. `None` for a clean end, and for a child that never ran (the
-    /// daemon's own failure code applies).
-    #[must_use]
-    pub fn code(self) -> Option<u8> {
-        match self {
-            Self::Exited(0)
-            | Self::Signalled {
-                forwarded: true, ..
-            }
-            | Self::DidNotStart => None,
-            Self::Exited(code) => Some(u8::try_from(code).unwrap_or(1)),
-            Self::Signalled { signal, .. } => {
-                Some(u8::try_from(signal.saturating_add(128)).unwrap_or(u8::MAX))
-            }
-        }
-    }
+/// How the process ended, before the daemon's part in it is known.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Status {
+    Exited(i32),
+    Signalled(i32),
 }
 
 /// What the waiting thread and the signal forwarder share.
@@ -316,10 +341,14 @@ impl ChildEnd {
 struct Shared {
     /// Set once the child has exited, before it is reaped: no signal is sent after.
     exited: bool,
-    /// Every signal forwarded so far.
-    forwarded: Vec<i32>,
+    /// A shutdown begun by a signal: the signal was forwarded, or was due when the child had
+    /// just died (Go's select may take the signal first; its `shutdown` then reads the death
+    /// as "signal:" and counts it clean).
+    shutdown: bool,
+    /// The daemon sent it SIGKILL.
+    killed: bool,
     /// How it ended, once reaped.
-    end: Option<ChildEnd>,
+    status: Option<Status>,
 }
 
 fn lock(shared: &Mutex<Shared>) -> MutexGuard<'_, Shared> {
@@ -358,13 +387,11 @@ impl Child {
                 exited(pid);
                 lock(&ours).exited = true;
                 let status = child.wait();
-                let mut state = lock(&ours);
-                state.end = Some(match status {
-                    Ok(status) => end_of(status, &state.forwarded),
+                lock(&ours).status = Some(match status {
+                    Ok(status) => status_of(status),
                     // Reaping failed after the exit was seen: nothing says it was clean.
-                    Err(_) => ChildEnd::Exited(1),
+                    Err(_) => Status::Exited(1),
                 });
-                drop(state);
                 if wake.try_send(Wake::ChildExited).is_err() {
                     // The daemon is already stopping and no longer listens.
                 }
@@ -375,32 +402,42 @@ impl Child {
         }
     }
 
-    /// Sends `signal` to the child if it has not exited, and remembers it was forwarded.
+    /// Begins a shutdown begun by `signal`: sends it to the child if it has not exited, and
+    /// remembers that a death by a signal from now on is clean.
     pub fn forward(&self, signal: i32) {
+        let mut state = lock(&self.shared);
+        state.shutdown = true;
         let Some(sig) = Signal::from_named_raw(signal) else {
             return;
         };
-        let mut state = lock(&self.shared);
-        if state.exited {
-            return;
-        }
-        if rustix::process::kill_process(self.pid, sig).is_ok() {
-            state.forwarded.push(signal);
+        if !state.exited && rustix::process::kill_process(self.pid, sig).is_err() {
+            // It exited between the check and the call; the waiting thread sees it.
         }
     }
 
     /// Kills the child (Go's `Process.Kill` when its shutdown is cut short).
     pub fn kill(&self) {
-        let state = lock(&self.shared);
-        if !state.exited && rustix::process::kill_process(self.pid, Signal::KILL).is_err() {
-            // It exited between the check and the call; the waiting thread sees it.
+        let mut state = lock(&self.shared);
+        if !state.exited && rustix::process::kill_process(self.pid, Signal::KILL).is_ok() {
+            state.killed = true;
         }
     }
 
     /// How it ended, once it has.
     #[must_use]
     pub fn end(&self) -> Option<ChildEnd> {
-        lock(&self.shared).end
+        let state = lock(&self.shared);
+        let during = if state.killed {
+            During::Kill
+        } else if state.shutdown {
+            During::Shutdown
+        } else {
+            During::Run
+        };
+        state.status.map(|status| match status {
+            Status::Exited(code) => ChildEnd::Exited(code),
+            Status::Signalled(signal) => ChildEnd::Signalled { signal, during },
+        })
     }
 }
 
@@ -418,16 +455,13 @@ fn exited(pid: Pid) {
     }
 }
 
-fn end_of(status: ExitStatus, forwarded: &[i32]) -> ChildEnd {
+fn status_of(status: ExitStatus) -> Status {
     use std::os::unix::process::ExitStatusExt as _;
     match (status.code(), status.signal()) {
-        (Some(code), _) => ChildEnd::Exited(code),
-        (None, Some(signal)) => ChildEnd::Signalled {
-            signal,
-            forwarded: forwarded.contains(&signal),
-        },
+        (Some(code), _) => Status::Exited(code),
+        (None, Some(signal)) => Status::Signalled(signal),
         // Stopped or continued are not exits; `wait` reports only exits.
-        (None, None) => ChildEnd::Exited(1),
+        (None, None) => Status::Exited(1),
     }
 }
 

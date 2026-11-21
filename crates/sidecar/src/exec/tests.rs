@@ -119,23 +119,20 @@ fn a_command_go_would_run_differently_is_refused() {
     ));
 }
 
+/// Go's rule (`replicate.go:92`, `:152`): an exit of 0 is clean, any other code is not; a
+/// death by any signal is clean only in a shutdown begun by a signal, never one the daemon
+/// had to kill.
 #[test]
 fn a_child_end_is_clean_as_go_counts_it() {
     assert!(ChildEnd::Exited(0).clean());
-    assert_eq!(ChildEnd::Exited(0).code(), None);
-    assert_eq!(ChildEnd::Exited(3).code(), Some(3));
-    let forwarded = ChildEnd::Signalled {
-        signal: 15,
-        forwarded: true,
-    };
-    assert!(forwarded.clean());
-    assert_eq!(forwarded.code(), None);
-    let killed = ChildEnd::Signalled {
-        signal: 9,
-        forwarded: false,
-    };
-    assert!(!killed.clean());
-    assert_eq!(killed.code(), Some(137));
+    for code in [1, 3, 7, 255] {
+        assert!(!ChildEnd::Exited(code).clean(), "{code}");
+    }
+    for signal in [6, 9, 15] {
+        let end = |during| ChildEnd::Signalled { signal, during };
+        assert!(end(During::Shutdown).clean(), "{signal}");
+        assert!(!end(During::Run).clean(), "{signal}");
+        assert!(!end(During::Kill).clean(), "{signal}");
+    }
     assert!(!ChildEnd::DidNotStart.clean());
-    assert_eq!(ChildEnd::DidNotStart.code(), None);
 }

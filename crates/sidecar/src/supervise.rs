@@ -182,11 +182,11 @@ fn ended(daemon: &Daemon, end: ChildEnd) {
             let code = ("code", Value::Int(i64::from(code)));
             daemon.log().info("subprocess ended", &[code, clean]);
         }
-        ChildEnd::Signalled { signal, forwarded } => {
+        ChildEnd::Signalled { signal, during } => {
             let fields = [
                 ("signal", signals::name(signal).into()),
                 ("number", Value::Int(i64::from(signal))),
-                ("forwarded", forwarded.into()),
+                ("during", during.word().into()),
                 clean,
             ];
             daemon.log().info("subprocess ended", &fields);

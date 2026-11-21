@@ -57,20 +57,18 @@ pub enum Exit {
     Environment,
     /// The command line is wrong.
     Usage,
-    /// `replicate -exec`: the child's own failing exit status, passed on (128 + the signal
-    /// for a child a signal the daemon did not forward ended). Never 0.
-    Child(u8),
+    /// `replicate -exec`: the run did not end clean, for any reason (the child failed or did
+    /// not start, or a database did not start or drain). Go's `main` exits 1 on every error
+    /// (`main.go:97-103`), so the child's own code is not passed on; it is in the log.
+    ExecFailed,
 }
-
-/// The help line for [`Exit::Child`], which has no one code.
-pub const CHILD_EXIT_MEANING: &str =
-    "N  replicate -exec: the child's own failing exit status, or 128 + the signal that ended it";
 
 impl Exit {
     /// Every code, for the help text.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Success,
         Self::Degraded,
+        Self::ExecFailed,
         Self::Refused,
         Self::Environment,
         Self::Usage,
@@ -81,11 +79,10 @@ impl Exit {
     pub const fn code(self) -> u8 {
         match self {
             Self::Success => 0,
-            Self::Degraded => 1,
+            Self::Degraded | Self::ExecFailed => 1,
             Self::Refused => 2,
             Self::Environment => 3,
             Self::Usage => 64,
-            Self::Child(code) => code,
         }
     }
 
@@ -99,10 +96,12 @@ impl Exit {
                 "verify found it unrestorable, the restore was refused, or a config was refused"
             }
             Self::Environment => {
-                "store, destination or I/O failure; for replicate, a database that did not start or drain"
+                "store, destination or I/O failure; for replicate without -exec, a database that did not start or drain"
             }
             Self::Usage => "usage error",
-            Self::Child(_) => CHILD_EXIT_MEANING,
+            Self::ExecFailed => {
+                "replicate -exec: the run failed, as Go exits 1 (the child exited non-zero, died by a signal outside a shutdown, was killed or did not start, or a database did not start or drain); the child's own code is in the log"
+            }
         }
     }
 }
@@ -390,10 +389,10 @@ pub fn exit_for_done(done: &Done) -> Exit {
         },
         Done::Replicated { stopped, .. } if crate::replicate::drained(stopped) => Exit::Success,
         Done::Replicated { .. } => Exit::Environment,
-        Done::Daemon(finished) => match finished.child_code() {
-            Some(code) => Exit::Child(code),
-            None if finished.clean() => Exit::Success,
-            None => Exit::Environment,
+        Done::Daemon(finished) => match (finished.clean(), finished.ran_exec()) {
+            (true, _) => Exit::Success,
+            (false, true) => Exit::ExecFailed,
+            (false, false) => Exit::Environment,
         },
         Done::ConfigChecked(report) => config_exit(report),
         Done::Restore(_)

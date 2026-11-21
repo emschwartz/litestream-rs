@@ -78,10 +78,11 @@ impl Finished {
         dbs && self.child.is_none_or(ChildEnd::clean)
     }
 
-    /// The child's own failing exit status, to pass on (see [`ChildEnd::code`]).
+    /// Whether `-exec` asked for a child, started or not: such a run exits as Go's does, 0
+    /// when clean and 1 otherwise.
     #[must_use]
-    pub fn child_code(&self) -> Option<u8> {
-        self.child.and_then(ChildEnd::code)
+    pub const fn ran_exec(&self) -> bool {
+        self.child.is_some()
     }
 }
 
