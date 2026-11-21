@@ -30,7 +30,7 @@
 - Go compatibility is differential: generate with Go, read with Rust, and the reverse, comparing restored pages.
 - Tests wait on conditions, never on the clock. No sleeps.
 - Property tests (`proptest`) for every codec and every pure planner. Keep each test under a second where possible.
-- A crate's integration tests are one binary, `crates/<name>/tests/<name>/main.rs`, with a module per file: add a module there, not a new `tests/*.rs` file, which would link a binary of its own. A test that starts the binary again as a child names its test by full path (`sidecar::exec_child`), or uses the crate root's `child_process_entry` (lsr-sqlite).
+- A crate's integration tests are one binary, `crates/<name>/tests/<name>/main.rs`, with a module per file: add a module there, not a new `tests/*.rs` file, which would link a binary of its own (lsr-compat's `layout` test refuses a second one). A test that starts the binary again as a child names its test by full path (`sidecar::exec_child`), or uses the crate root's `child_process_entry` (lsr-sqlite).
 
 ## Build and commands
 - Development runs on Linux and macOS; CI runs on Linux. `just check` passes on both (on macOS it skips `ledger-fresh`, since the ledger names Linux-only tests).
