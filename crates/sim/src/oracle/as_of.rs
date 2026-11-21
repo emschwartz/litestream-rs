@@ -18,11 +18,11 @@
 //! `r`. So that staging came before `t`: an `AsOf` restore is never newer than
 //! the instant ([`Violation::AsOfTooNew`]).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    AsOfInside, FileInfo, MemSink, MemStore, PlanOutcome, RestoreError, RestoreOptions,
+    AsOfInside, FileInfo, FileKey, MemSink, MemStore, PlanOutcome, RestoreError, RestoreOptions,
     RestoreTarget, restore_with,
 };
 use lsr_ltx::{Timestamp, Txid};
@@ -51,12 +51,17 @@ fn stagings(staging: &RecorderLog) -> Stagings {
 
 /// Judges the created-at time of every file the replica took: each lies
 /// between the clock and its latest reading at some staging of a file that
-/// ends at the same transaction, or for a snapshot at its own put. Returns
-/// how many were judged.
+/// ends at the same transaction, or for a snapshot at its own put. A file
+/// ending at another writer's transaction is skipped. Returns how many were
+/// judged.
 ///
 /// # Errors
 /// [`Violation::WrongCreatedAt`] for the first that does not.
-pub fn stamps(remote: &RecorderLog, staging: &RecorderLog) -> Result<u32, Violation> {
+pub fn stamps(
+    remote: &RecorderLog,
+    staging: &RecorderLog,
+    foreign: &[(Txid, Txid)],
+) -> Result<u32, Violation> {
     let staged = stagings(staging);
     let mut judged = 0_u32;
     for event in remote.events() {
@@ -70,6 +75,13 @@ pub fn stamps(remote: &RecorderLog, staging: &RecorderLog) -> Result<u32, Violat
         else {
             continue;
         };
+        // Another writer stamped its own file; the engine only copies it.
+        if foreign
+            .iter()
+            .any(|(theirs, _)| *theirs == key.range().max())
+        {
+            continue;
+        }
         let within = |(at, high): &(Timestamp, Timestamp)| *at <= created_at && created_at <= *high;
         let fits = if key.level().is_snapshot() {
             within(&(at, high))
@@ -98,6 +110,12 @@ pub struct Judge<'a> {
     pub cover: &'a BTreeMap<Txid, CommitId>,
     /// The staging recorder, when the run kept one with a clock.
     pub staging: Option<&'a RecorderLog>,
+    /// Transactions a bucket rollback took for good.
+    pub lost: &'a BTreeSet<Txid>,
+    /// Objects the store damaged as it published them.
+    pub damaged: &'a [FileKey],
+    /// Transactions another writer put a file for.
+    pub foreign: &'a [(Txid, Txid)],
 }
 
 /// The instants worth asking about: just before, at and just after each
@@ -147,6 +165,7 @@ impl Judge<'_> {
                     out.as_of_inside = out.as_of_inside.saturating_add(1);
                 }
                 Answer::Refused(_) => out.as_of_refused = out.as_of_refused.saturating_add(1),
+                Answer::Unreadable(_) => out.damaged = out.damaged.saturating_add(1),
             }
         }
         Ok(())
@@ -175,6 +194,10 @@ impl Judge<'_> {
         let Some(staging) = self.staging else {
             return Ok(());
         };
+        // Another writer's file carries its own time, not a staging's.
+        if self.foreign.iter().any(|(theirs, _)| *theirs == reached) {
+            return Ok(());
+        }
         let first = stagings(staging)
             .get(&reached)
             .and_then(|times| times.iter().map(|(at, _)| *at).min());
@@ -212,13 +235,39 @@ impl Judge<'_> {
         let below = oldest.is_none_or(|oldest| txid < oldest);
         match got {
             Answer::Reached { .. } => out.restored = out.restored.saturating_add(1),
+            Answer::Unreadable(_) => out.damaged = out.damaged.saturating_add(1),
             Answer::Refused(_) if below => out.below_base = out.below_base.saturating_add(1),
             Answer::Refused(PlanOutcome::InsideFile { .. }) => {
                 out.inside_file = out.inside_file.saturating_add(1);
             }
+            Answer::Refused(outcome) if self.over_lost(&outcome) => {
+                out.lost = out.lost.saturating_add(1);
+            }
             Answer::Refused(outcome) => return Err(Violation::RestoreRefused { target, outcome }),
         }
         Ok(())
+    }
+
+    /// Whether `outcome` is explained by what a bucket rollback took: a gap
+    /// over a lost transaction, or no snapshot once transaction 1 was lost.
+    pub fn over_lost(&self, outcome: &PlanOutcome) -> bool {
+        match outcome {
+            PlanOutcome::Gap {
+                have_through,
+                next_starts,
+            } => self
+                .lost
+                .range(..*next_starts)
+                .next_back()
+                .is_some_and(|lost| lost > have_through),
+            PlanOutcome::NoSnapshot { .. } => self.lost.contains(&Txid::MIN),
+            PlanOutcome::Plan(_)
+            | PlanOutcome::EmptyReplica
+            | PlanOutcome::BeyondNewest { .. }
+            | PlanOutcome::AsOfInsideFile { .. }
+            | PlanOutcome::InsideFile { .. }
+            | PlanOutcome::MalformedSnapshot { .. } => false,
+        }
     }
 
     /// Restores `target`, taking the earlier state when an instant falls
@@ -231,6 +280,9 @@ impl Judge<'_> {
         let done = match block_on(restore_with(self.remote, target, options, sink.clone())) {
             Ok(done) => done,
             Err(RestoreError::NoPlan(no)) => return Ok(Answer::Refused(no.outcome().clone())),
+            Err(RestoreError::File { key, .. }) if self.damaged.contains(&key) => {
+                return Ok(Answer::Unreadable(key));
+            }
             Err(other) => return Err(bug_fault(format!("restore {target:?}: {other}"))),
         };
         let reached = done.reached();

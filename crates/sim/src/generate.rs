@@ -132,9 +132,10 @@ pub enum Op {
     Restart,
     /// The machine loses power between ticks. Scenarios only.
     PowerLoss,
-    /// A step on the staging directory while the engine is down. Scenarios only.
+    /// A step on the staging directory, with the engine as it is: scenarios
+    /// stop it first where they mean it down.
     Meta(MetaOp),
-    /// Damage to the WAL file that SQLite would not do itself. Scenarios only.
+    /// Damage to the WAL file that SQLite would not do itself.
     Wal(WalOp),
     /// Our own read transaction ends or begins, as at a checkpoint's lapse.
     /// Scenarios only.
@@ -147,6 +148,35 @@ pub enum Op {
     /// The app's `wal_autocheckpoint` becomes this many frames (`None`: 0, the model's
     /// default), and the engine is told so. Scenarios only.
     AppAutocheckpoint(Option<u32>),
+    /// The app shrinks the database by up to this many pages (it keeps at
+    /// least one): a commit of page 1 with a smaller size.
+    Shrink {
+        /// How many pages at most it drops.
+        pages: u8,
+    },
+    /// Another writer puts a level-0 file one transaction past the replica's
+    /// newest, the engine runs this many ticks with it there, then the
+    /// operator removes it (if it still holds the other writer's bytes) and
+    /// restarts the engine.
+    SecondWriter {
+        /// Ticks the engine runs while the other writer's file is there.
+        ticks: u8,
+    },
+    /// The process dies, this is done to the staging directory, and a new
+    /// process starts: a staging step while the engine is down.
+    StagingDamage(MetaOp),
+    /// Every store fault that fails at a rate stops failing.
+    Heal,
+    /// The WAL is damaged, the engine runs this many ticks, and then the app
+    /// heals it as an application would: its connections let go, another
+    /// process truncates the WAL, and it commits again (a flipped bit is
+    /// flipped back first).
+    WalDamage {
+        /// The damage.
+        op: WalOp,
+        /// Ticks the engine runs with the damage in place.
+        ticks: u8,
+    },
 }
 
 /// What a scenario does to the staging directory, the engine's own memory of
@@ -236,6 +266,19 @@ pub struct Weights {
     pub request_snapshot: u32,
     /// [`Op::Restore`].
     pub restore: u32,
+    /// [`Op::Shrink`].
+    pub shrink: u32,
+    /// [`Op::SecondWriter`].
+    pub second_writer: u32,
+    /// [`Op::Remote`] with [`RemoteOp::RollBack`].
+    pub roll_back: u32,
+    /// [`Op::WalDamage`].
+    pub wal_damage: u32,
+    /// [`Op::StagingDamage`], and [`Op::Meta`] with the steps that need no
+    /// restart.
+    pub staging_damage: u32,
+    /// [`Op::Heal`].
+    pub heal: u32,
     /// Whether a vacuum may change the page size. A replica prefix holds one
     /// page size, so after a resize the engine's next boot stops, or keeps
     /// retrying in a degraded state, on `PageSizeChanged`, and the states
@@ -263,6 +306,16 @@ impl Default for Weights {
             shutdown: 1,
             request_snapshot: 1,
             restore: 2,
+            shrink: 2,
+            // Off until an owner decides what a second writer may do to the
+            // replica: maintenance compacts its file before the engine meets
+            // it, then the engine's own upload replaces it, so the replica
+            // holds two histories for one transaction.
+            second_writer: 0,
+            roll_back: 1,
+            wal_damage: 1,
+            staging_damage: 1,
+            heal: 1,
             vacuum_resizes: true,
         }
     }
@@ -285,10 +338,16 @@ enum Kind {
     Shutdown,
     RequestSnapshot,
     Restore,
+    Shrink,
+    SecondWriter,
+    RollBack,
+    WalDamage,
+    StagingDamage,
+    Heal,
 }
 
 impl Weights {
-    fn table(&self) -> [(Kind, u32); 15] {
+    fn table(&self) -> [(Kind, u32); 21] {
         [
             (Kind::Tick, self.tick),
             (Kind::Commit, self.commit),
@@ -305,6 +364,12 @@ impl Weights {
             (Kind::Shutdown, self.shutdown),
             (Kind::RequestSnapshot, self.request_snapshot),
             (Kind::Restore, self.restore),
+            (Kind::Shrink, self.shrink),
+            (Kind::SecondWriter, self.second_writer),
+            (Kind::RollBack, self.roll_back),
+            (Kind::WalDamage, self.wal_damage),
+            (Kind::StagingDamage, self.staging_damage),
+            (Kind::Heal, self.heal),
         ]
     }
 
@@ -369,22 +434,71 @@ fn store_fault(entropy: &SeededEntropy) -> Op {
             StoreOp::Read,
             StoreOp::Upload,
             StoreOp::Upload,
+            StoreOp::Delete,
         ],
     )
     .unwrap_or(StoreOp::Upload);
     let error = store_error(entropy, op);
-    let shape = match (op, below(entropy, 4)) {
-        (StoreOp::Upload, 0) => FaultShape::ErrorAfterPublish(error),
-        (StoreOp::Upload, 1) => FaultShape::SizeMismatch,
-        (StoreOp::List | StoreOp::Read | StoreOp::Upload | StoreOp::Delete, _) => {
-            FaultShape::Error(error)
-        }
-    };
     Op::StoreFault {
         target,
         op,
         ahead: small(entropy, 4),
-        shape,
+        shape: shape(entropy, op, error),
+    }
+}
+
+/// A fault shape that means something for `op`: the commit shapes for an
+/// upload, a flipped byte for a read, and a rate (between 1% and 10%, until
+/// an [`Op::Heal`]) or a plain error for any.
+fn shape(entropy: &SeededEntropy, op: StoreOp, error: StoreError) -> FaultShape {
+    let rate = |entropy: &SeededEntropy, err| FaultShape::Rate {
+        per_mille: u16::try_from(below(entropy, 91).saturating_add(10)).unwrap_or(10),
+        err,
+    };
+    match (op, below(entropy, 8)) {
+        (StoreOp::Upload, 0) => FaultShape::ErrorAfterPublish(error),
+        (StoreOp::Upload, 1) => FaultShape::SizeMismatch,
+        (StoreOp::Upload, 2) => FaultShape::ChecksumMismatch,
+        (StoreOp::Upload, 3) => FaultShape::CorruptPublish,
+        (StoreOp::Read, 0 | 1) => FaultShape::FlipByteOnRead {
+            at: below(entropy, 4096),
+        },
+        (_, 7) => rate(entropy, error),
+        (StoreOp::List | StoreOp::Read | StoreOp::Upload | StoreOp::Delete, _) => {
+            FaultShape::Error(error)
+        }
+    }
+}
+
+/// Damage to the WAL. [`WalOp::RewriteSameLength`] is left out: it leaves the
+/// wal-index naming a generation the file no longer holds, which SQLite's
+/// next open would recover and the rules never do, so the engine would wait
+/// for ever on a state no real database stays in.
+fn wal_damage(entropy: &SeededEntropy) -> Op {
+    let seed = below(entropy, u64::MAX);
+    let op = match below(entropy, 5) {
+        0 => WalOp::TearHeader,
+        1 => WalOp::TruncateAtFrame(u32::try_from(below(entropy, 40)).unwrap_or(0)),
+        2 => WalOp::RegrowSameSalts(seed),
+        3 => WalOp::RegrowWithoutCommitMarks(seed),
+        _ => WalOp::FlipLastFrameBit,
+    };
+    Op::WalDamage {
+        op,
+        ticks: small(entropy, 8),
+    }
+}
+
+fn staging_damage(entropy: &SeededEntropy) -> Op {
+    match below(entropy, 8) {
+        0 => Op::Meta(MetaOp::Save),
+        1 => Op::Meta(MetaOp::DeleteAll),
+        2 => Op::StagingDamage(MetaOp::Restore),
+        3 => Op::StagingDamage(MetaOp::DeleteNewest),
+        4 => Op::StagingDamage(MetaOp::FlipNewestByte),
+        5 => Op::StagingDamage(MetaOp::TruncateNewest),
+        6 => Op::StagingDamage(MetaOp::StripNewestOrigin),
+        _ => Op::Meta(MetaOp::FlipNewestByte),
     }
 }
 
@@ -477,6 +591,16 @@ fn draw(weights: &Weights, entropy: &SeededEntropy) -> Op {
         Kind::Shutdown => Op::Shutdown,
         Kind::RequestSnapshot => Op::RequestSnapshot,
         Kind::Restore => Op::Restore,
+        Kind::Shrink => Op::Shrink {
+            pages: small(entropy, 3).saturating_add(1),
+        },
+        Kind::SecondWriter => Op::SecondWriter {
+            ticks: small(entropy, 8),
+        },
+        Kind::RollBack => Op::Remote(RemoteOp::RollBack),
+        Kind::WalDamage => wal_damage(entropy),
+        Kind::StagingDamage => staging_damage(entropy),
+        Kind::Heal => Op::Heal,
     }
 }
 

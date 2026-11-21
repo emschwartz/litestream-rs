@@ -25,9 +25,10 @@ fn run(seed: u64, opts: &Opts) -> RunReport {
 struct Tally {
     compacted: usize,
     snapshots: usize,
-    /// Every key the replica was asked to delete. A file the store damaged
-    /// as it was published would be removed even with retention off (a
-    /// repair, not retention); these seeds damage none.
+    /// Every key the replica was asked to delete, but those a commit
+    /// published and the store then reported failed or wrong: the engine
+    /// removes such a file as untrusted even with retention off (a repair,
+    /// not retention).
     deleted: Vec<FileKey>,
 }
 
@@ -46,7 +47,9 @@ fn add(sum: &mut Tally, report: &RunReport) {
     }
     for event in &report.remote_events {
         if let RecorderEvent::Delete { keys, .. } = event {
-            sum.deleted.extend(keys);
+            let untrusted = |key: &&FileKey| report.remote_rejected.contains(key);
+            sum.deleted
+                .extend(keys.iter().filter(|key| !untrusted(key)));
         }
     }
 }

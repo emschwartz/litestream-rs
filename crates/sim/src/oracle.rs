@@ -25,7 +25,7 @@
 //! - with retention windows, no delete removed a file younger than its
 //!   window (`retention`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use lsr_core::conformance::block_on;
@@ -287,6 +287,10 @@ pub struct Checked {
     pub stamps: u32,
     /// Deleted keys judged against their retention window.
     pub deletes: u32,
+    /// Restores refused over a gap that a bucket rollback left.
+    pub lost: u32,
+    /// Restores that stopped on a file the store damaged.
+    pub damaged: u32,
 }
 
 impl Checked {
@@ -304,6 +308,8 @@ impl Checked {
         reach.add("check.asof.refused", u64::from(self.as_of_refused));
         reach.add("check.stamps", u64::from(self.stamps));
         reach.add("check.deletes", u64::from(self.deletes));
+        reach.add("check.lost", u64::from(self.lost));
+        reach.add("check.damaged", u64::from(self.damaged));
     }
 }
 
@@ -312,8 +318,15 @@ fn range_str(range: TxidRange) -> String {
 }
 
 /// Which commit each transaction id covers, from the recorder and the model.
-fn covers(model: &Model, recorder: &RecorderLog) -> Result<BTreeMap<Txid, CommitId>, Violation> {
-    let rewound = model.snapshot_notes().iter().any(|n| n.rewound) || model.rewound();
+fn covers(
+    model: &Model,
+    recorder: &RecorderLog,
+    ground: Ground<'_>,
+) -> Result<BTreeMap<Txid, CommitId>, Violation> {
+    // A rewind, or a bucket rollback, lets the engine take an id again.
+    let rewound = model.snapshot_notes().iter().any(|n| n.rewound)
+        || model.rewound()
+        || !ground.lost.is_empty();
     let mut cover: BTreeMap<Txid, CommitId> = BTreeMap::new();
     for (at, event) in recorder.events().iter().enumerate() {
         let RecorderEvent::Put {
@@ -342,22 +355,26 @@ fn covers(model: &Model, recorder: &RecorderLog) -> Result<BTreeMap<Txid, Commit
             // A staged snapshot lost before upload (torn by a power loss, or
             // its staging directory wiped) leaves its note behind, and the
             // engine takes the same id again from a later commit. Staging holds
-            // one file per id, so the file put is the newest noted by then.
-            None => cover.get(&max).copied().or_else(|| {
+            // one file per id, so a level-0 file put is the newest noted by
+            // then; so is one put again after a bucket rollback took the
+            // first. A compacted file names no origin and carries the commit
+            // of the level-0 file that ended it.
+            None => {
                 let _ = header;
-                model
-                    .snapshot_notes()
-                    .iter()
-                    .rev()
-                    .find(|n| n.txid == max && n.at <= at)
-                    .map(|n| n.commit)
-                    // A staged file rewritten without its origin.
-                    .or_else(|| model.staged_as(max, at))
-            }),
+                let noted = model.staged_as(max, at);
+                let known = cover.get(&max).copied();
+                if key.level().get() == 0 {
+                    noted.or(known)
+                } else {
+                    known.or(noted)
+                }
+            }
         };
         let Some(commit) = commit else { continue };
         match cover.get(&max) {
-            Some(first) if *first != commit && !rewound => {
+            // A put the store reported failed or wrong may be put again from
+            // another commit under the same id.
+            Some(first) if *first != commit && !rewound && !ground.exempt.contains(key) => {
                 return Err(Violation::TxidReused {
                     txid: max.get(),
                     first: *first,
@@ -369,21 +386,34 @@ fn covers(model: &Model, recorder: &RecorderLog) -> Result<BTreeMap<Txid, Commit
             }
         }
     }
-    if !rewound {
-        let mut previous: Option<(Txid, CommitId)> = None;
-        for (txid, commit) in &cover {
-            if let Some((lower, low_commit)) = previous.filter(|(_, c)| c > commit) {
-                return Err(Violation::CoversNotIncreasing {
-                    lower: lower.get(),
-                    low_commit,
-                    higher: txid.get(),
-                    high_commit: *commit,
-                });
-            }
-            previous = Some((*txid, *commit));
+    // Another writer's file holds the pages of the file it copied, so its
+    // transaction is that file's commit wherever it was compacted into.
+    for (theirs, copied) in ground.foreign {
+        if let Some(commit) = cover.get(copied).copied() {
+            cover.entry(*theirs).or_insert(commit);
         }
     }
+    if !rewound {
+        increasing(&cover)?;
+    }
     Ok(cover)
+}
+
+/// A later transaction id never covers an earlier commit.
+fn increasing(cover: &BTreeMap<Txid, CommitId>) -> Result<(), Violation> {
+    let mut previous: Option<(Txid, CommitId)> = None;
+    for (txid, commit) in cover {
+        if let Some((lower, low_commit)) = previous.filter(|(_, c)| c > commit) {
+            return Err(Violation::CoversNotIncreasing {
+                lower: lower.get(),
+                low_commit,
+                higher: txid.get(),
+                high_commit: *commit,
+            });
+        }
+        previous = Some((*txid, *commit));
+    }
+    Ok(())
 }
 
 /// The first page where the restored database differs from `image`.
@@ -405,7 +435,7 @@ fn first_diff(image: &PageImage, got: &lsr_core::Database) -> Option<u32> {
 }
 
 /// What the oracle knows besides the model and the replica's recorder.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct Ground<'a> {
     /// What the staging store really did, read with the simulator's clock:
     /// the created-at time of every replica file is judged against it.
@@ -415,6 +445,32 @@ pub struct Ground<'a> {
     /// Keys the engine may delete whatever their age: commits the store
     /// reported failed or wrong.
     pub exempt: &'a [FileKey],
+    /// Transactions taken from the replica for good from outside (a bucket
+    /// rollback): a gap over one of them is the loss, not a bug.
+    pub lost: &'a BTreeSet<Txid>,
+    /// Files another writer put: its transaction, and the transaction whose
+    /// file's pages it holds.
+    pub foreign: &'a [(Txid, Txid)],
+    /// Objects the store damaged as it published them: a restore may stop on
+    /// one with a typed error.
+    pub damaged: &'a [FileKey],
+}
+
+/// Nothing lost.
+static NONE_LOST: BTreeSet<Txid> = BTreeSet::new();
+
+impl Default for Ground<'_> {
+    /// Nothing besides the model and the recorder.
+    fn default() -> Self {
+        Self {
+            staging: None,
+            retention: None,
+            exempt: &[],
+            lost: &NONE_LOST,
+            foreign: &[],
+            damaged: &[],
+        }
+    }
 }
 
 /// Judges the replica. `remote` is the raw store handle: no fault or yield
@@ -443,7 +499,7 @@ pub fn check_with(
     acked: &Acked,
     ground: Ground<'_>,
 ) -> Result<Checked, Violation> {
-    let cover = covers(model, recorder)?;
+    let cover = covers(model, recorder, ground)?;
     let inventory = block_on(Inventory::load(remote))
         .map_err(|err| bug_fault(format!("listing the replica: {err}")))?;
     let files = inventory.files();
@@ -454,6 +510,9 @@ pub fn check_with(
         model,
         cover: &cover,
         staging: ground.staging,
+        lost: ground.lost,
+        damaged: ground.damaged,
+        foreign: ground.foreign,
     };
     let oldest = files
         .iter()
@@ -476,6 +535,14 @@ pub fn check_with(
     }
     let latest = match judge.restore(RestoreTarget::Latest)? {
         Answer::Reached { txid, .. } => txid,
+        Answer::Refused(outcome) if judge.over_lost(&outcome) => {
+            out.lost = out.lost.saturating_add(1);
+            return Ok(out);
+        }
+        Answer::Unreadable(_) => {
+            out.damaged = out.damaged.saturating_add(1);
+            return Ok(out);
+        }
         Answer::Refused(outcome) => {
             return Err(Violation::RestoreRefused {
                 target: RestoreTarget::Latest,
@@ -491,7 +558,7 @@ pub fn check_with(
     }
     out.latest = Some(latest);
     if let Some(staging) = ground.staging {
-        out.stamps = as_of::stamps(recorder, staging)?;
+        out.stamps = as_of::stamps(recorder, staging, ground.foreign)?;
     }
     if let Some(windows) = ground.retention {
         out.deletes = retention::deletes(recorder, windows, ground.exempt)?;
