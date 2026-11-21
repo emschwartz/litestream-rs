@@ -191,15 +191,15 @@ compat-alternation $LSR_ALTERNATION_SEED:
     ./scripts/build-go-litestream.sh
     cargo nextest run -p lsr-compat --test compat --run-ignored all --locked --no-fail-fast --no-capture -E 'test(go_and_rust_alternate_on_one_prefix) | test(go_and_rust_sidecars_alternate_on_one_config_file)'
 
-# The store and the conformance suite against the real Tigris bucket of task 8t.
+# The store and the conformance suite against the real Tigris bucket.
 # Never part of check or CI: it needs credentials (a file outside the repo, or
-# AWS_* variables) and spends real requests (docs/spikes.md, Task 8t).
+# AWS_* variables) and spends real requests (docs/spikes.md).
 # Everything it writes sits under one run prefix, deleted afterwards with the aws CLI.
 test-tigris:
     # LSR_S3_TRANSPORT=reqwest runs the same tests over the reqwest client.
     ./scripts/tigris.sh cargo nextest run -p lsr-store-s3 --features reqwest --test store-s3 -E 'test(/^tigris::/)' --run-ignored only --no-capture --locked --no-fail-fast
 
-# Task 8t item 10: Go v0.5.18 replicates the compat workload straight to Tigris
+# A production-shaped restore: Go v0.5.18 replicates the compat workload straight to Tigris
 # (a few hundred files, levels 0 to 3 and 9), then `lsr verify`, and `lsr restore`
 # and Go's restore at the same targets compared on pages. A few minutes and a few
 # thousand requests; the test deletes its run prefix, failed or not. Go's AWS SDK
@@ -211,7 +211,7 @@ tigris-restore:
     ./scripts/build-go-litestream.sh v0.5.18
     env -u AWS_CA_BUNDLE ./scripts/tigris.sh cargo nextest run --release -p lsr-cli --test cli -E 'test(/^tigris::/)' --run-ignored only --no-capture --locked
 
-# The long soak of `lsr replicate` against the Tigris bucket (docs/plans/phase-3-syncing.md, task 9):
+# The long soak of `lsr replicate` against the Tigris bucket (docs/plans/phase-3-syncing.md, the soak section):
 # a synthetic writer for the given hours, a restore at Latest and at a random sampled transaction
 # compared with recorded page hashes every hour (LSR_SOAK_CHECK_SECS), resources and log warnings
 # printed as HOUR lines. Never part of check or CI. Afterwards, check that the run prefix lists

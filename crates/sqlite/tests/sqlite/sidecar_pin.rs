@@ -256,7 +256,7 @@ fn the_hosts_autocheckpoint_stops_at_a_pin_in_another_process() {
     let db = dir.path().join("app.db");
     create(&db, 4096);
     let mut pin = Sqlite::open(&db).unwrap();
-    // The open's own schema commits are in the WAL, unbackfilled: the pin sits above mark 0.
+    // The open's own schema commits are in the WAL, unbackfilled: the pin sits above read mark 0.
     let start = pin.committed().unwrap();
     let mark = start.end().frame_count();
     assert!(mark > 0 && start.backfilled() == 0, "{start:?}");
@@ -336,7 +336,7 @@ fn snapshots_since(rig: &Rig<Sqlite>, from: usize) -> Vec<Option<SnapshotCause>>
 
 /// Puts the pin on a read mark above 0: a host reader holds the log while the actor
 /// checkpoints, so the checkpoint stops short and the pin is retaken over unbackfilled frames.
-fn pin_above_mark_zero(rig: &mut Rig<Sqlite>) {
+fn pin_above_read_mark_zero(rig: &mut Rig<Sqlite>) {
     let reader = open_app(rig.db(), rig.vfs(), "NORMAL").unwrap();
     reader
         .execute_batch("BEGIN; SELECT count(*) FROM t;")
@@ -368,7 +368,7 @@ fn the_engine_restores_everything_a_host_at_the_default_autocheckpoint_wrote() {
     };
     let mut rig = Rig::<Sqlite>::new(dir.path(), cfg).unwrap();
     rig.settle().unwrap();
-    pin_above_mark_zero(&mut rig);
+    pin_above_read_mark_zero(&mut rig);
     let before = rig.backend().unwrap().committed().unwrap();
 
     let seen = run_application("app-512", rig.db());
@@ -490,8 +490,8 @@ fn host_writes(
 }
 
 /// A host at SQLite's defaults raises the host-checkpoint notice wherever the pin sits. Above
-/// mark 0 its checkpoint copies the frames below the pin (a backfill the replicator did not
-/// run), and its next attempts copy nothing more; on mark 0 its attempts copy nothing at all
+/// read mark 0 its checkpoint copies the frames below the pin (a backfill the replicator did not
+/// run), and its next attempts copy nothing more; on read mark 0 its attempts copy nothing at all
 /// and show only as the WAL growing past the threshold with nothing backfilled.
 #[test]
 fn a_host_at_the_defaults_raises_the_notice_on_either_read_mark() {
@@ -524,9 +524,9 @@ fn a_host_at_the_defaults_raises_the_notice_on_either_read_mark() {
     assert_eq!(observers[0].counts().ran(), 0, "no host checkpoint ran");
 }
 
-/// A host at `wal_autocheckpoint = 0` raises nothing. Above mark 0 the frames below the pin
+/// A host at `wal_autocheckpoint = 0` raises nothing. Above read mark 0 the frames below the pin
 /// stay unbackfilled, which a host at the defaults would have copied, so nothing is inferred
-/// even at the default threshold. On mark 0 the wal-index looks the same as for a host whose
+/// even at the default threshold. On read mark 0 the wal-index looks the same as for a host whose
 /// attempts fail, so only the threshold the observer is told tells them apart: told `None`,
 /// it raises nothing; left at SQLite's default, it infers the attempts it cannot see.
 #[test]

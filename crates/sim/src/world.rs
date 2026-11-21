@@ -2,7 +2,7 @@
 //!
 //! [`World`] owns the SQLite rules, the clock, both stores with their wrappers,
 //! and the model and acknowledgement record the oracle judges against. It owns
-//! no loop logic: the run loop (task 6f) builds the actor from these handles and
+//! no loop logic: the run loop builds the actor from these handles and
 //! hands each tick's future to [`World::run_tick`], the one seam between this
 //! harness and the actor.
 //!

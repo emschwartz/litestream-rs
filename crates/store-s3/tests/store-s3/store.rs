@@ -1,5 +1,5 @@
 //! The store over FakeS3: the conformance suite (no Docker, in `just check`) and
-//! the cases 8d could only state at the Transport level because they need the
+//! the cases the Transport level could only state at the Transport level because they need the
 //! store's five operations or `Retrying`.
 
 use crate::common;

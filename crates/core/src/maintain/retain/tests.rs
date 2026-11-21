@@ -247,7 +247,7 @@ fn level_zero_files_the_levels_do_not_cover_stay() {
 
 #[test]
 fn level_zero_skips_an_uncovered_file_and_deletes_the_covered_ones_above_it() {
-    // 27 is uncovered and stays; 28 and 29 are covered and go (review R5; the
+    // 27 is uncovered and stays; 28 and 29 are covered and go (the
     // scan used to stop at 27 and keep them).
     let mut files = ladder();
     files.retain(|f| f.key != key(1, 21, 30));
@@ -901,7 +901,7 @@ fn check_delete(
         let is = after.level(l);
         assert_eq!(is.is_empty(), was.is_empty(), "{l} emptied");
         let gone = was.len() - is.len();
-        // Level 0 is judged file by file (review R5): the covered, aged files
+        // Level 0 is judged file by file: the covered, aged files
         // go and an uncovered one in between stays, so only 1 to 8 are prefixes.
         if l != Level::ZERO {
             assert_eq!(&was[gone..], is, "{l} did not lose a prefix");

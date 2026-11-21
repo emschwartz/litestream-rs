@@ -3,11 +3,11 @@
 //! SQLite writes a page to the WAL and later copies it into the database file;
 //! nothing in the file says it was copied right, or that nothing else wrote it
 //! since. The engine reads database-file pages for a snapshot (every page the WAL
-//! does not hold) and for "walgrowth" (pages above the previous commit that the
-//! scanned frames lack, `plan_pages` in `sync.rs`). [`PageTable`] is checked
+//! does not hold) and for the pages the database grew by that no scanned WAL frame
+//! holds (the "grown pages" below; `plan_pages` in `sync.rs`). [`PageTable`] is checked
 //! before every such page is used, so a page that changed since the engine last
 //! knew it is caught instead of shipped silently (`docs/plans/phase-3-syncing.md`,
-//! rulings P1 and P5).
+//! the page-table section).
 //!
 //! What feeds it:
 //! - Every WAL page a sync step staged is recorded with the digest the scan
@@ -28,7 +28,7 @@
 //!
 //! What it cannot check:
 //! - A database page above the previous commit that no scanned frame holds
-//!   (`plan_pages`' walgrowth pages in `sync.rs`). The table holds no page above
+//!   (`plan_pages`' grown pages in `sync.rs`). The table holds no page above
 //!   the last commit it saw, since a shrink forgets them, so every such read is
 //!   a first read and is trusted; a later snapshot checks the page.
 //! - Any page at its first read after the table was emptied.

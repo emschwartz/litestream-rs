@@ -1,4 +1,4 @@
-//! Request counts over a writer-shaped replica of 10^4 files (Task 8g5).
+//! Request counts over a writer-shaped replica of 10^4 files.
 //!
 //! The fixture is committed through the store into FakeS3, which lists
 //! LastModified only, so every exact stamp an operation needs is a HEAD and the
@@ -7,7 +7,7 @@
 //! newest 300, and eight snapshots (every 1000 transactions, stamped 5 s after
 //! their last). Nothing here asserts a wall-clock time. The table that
 //! [request_count_table] prints is the record: LIST, HEAD and GET per
-//! operation, and what the F1 listing would have sent as HEADs.
+//! operation, and what a listing that read a HEAD per file would have sent.
 
 use crate::common;
 
@@ -192,11 +192,11 @@ mod cases {
         }
     }
 
-    /// One table row; [f1_heads] is what the F1 list-time HEADs would have added.
+    /// One table row; [per_file_heads] is what a HEAD per listed file would have added.
     struct Row {
         what: String,
         counts: Counts,
-        f1_heads: usize,
+        per_file_heads: usize,
         note: String,
     }
 
@@ -208,7 +208,7 @@ mod cases {
                 self.counts.list,
                 self.counts.head,
                 self.counts.get,
-                self.f1_heads,
+                self.per_file_heads,
                 self.note
             );
         }
@@ -245,7 +245,7 @@ mod cases {
         Row {
             what: what.to_owned(),
             counts,
-            f1_heads: FILES,
+            per_file_heads: FILES,
             note: format!("{} files applied", restored.files()),
         }
     }
@@ -368,7 +368,7 @@ mod cases {
         let row = Row {
             what: format!("verify {depth:?}"),
             counts,
-            f1_heads: FILES,
+            per_file_heads: FILES,
             note: format!("{} files read", report.files_read()),
         };
         (row, report.files_read())
@@ -395,7 +395,7 @@ mod cases {
         Row {
             what: "uploader boot inventory".to_owned(),
             counts,
-            f1_heads: FILES,
+            per_file_heads: FILES,
             note: "list, then the tail read back".to_owned(),
         }
     }
@@ -412,7 +412,7 @@ mod cases {
         Row {
             what: "recover level-0 listing".to_owned(),
             counts,
-            f1_heads: usize::try_from(LEVEL_ZERO_FILES).unwrap(),
+            per_file_heads: usize::try_from(LEVEL_ZERO_FILES).unwrap(),
             note: "newest level-0 file, header read".to_owned(),
         }
     }
@@ -437,13 +437,13 @@ mod cases {
             Row {
                 what: "lsr files".to_owned(),
                 counts: plain,
-                f1_heads: FILES,
+                per_file_heads: FILES,
                 note: "listed times, no stamp read".to_owned(),
             },
             Row {
                 what: "lsr files --stamps".to_owned(),
                 counts,
-                f1_heads: FILES,
+                per_file_heads: FILES,
                 note: "one HEAD per file, by request".to_owned(),
             },
         ]
@@ -485,7 +485,7 @@ mod cases {
         let row = Row {
             what: what.to_owned(),
             counts,
-            f1_heads: FILES,
+            per_file_heads: FILES,
             note: format!("{} stamps read", resolved.stamps_read),
         };
         (row, resolved.value)
@@ -569,7 +569,7 @@ mod cases {
 
     fn print_table(rows: &[Row]) {
         println!(
-            "| {:<48} | LIST | HEAD  | GET    | F1 HEAD (est.) | note |",
+            "| {:<48} | LIST | HEAD  | GET    | per-file HEAD (est.) | note |",
             "operation (10^4 files)"
         );
         for row in rows {
@@ -628,7 +628,7 @@ mod cases {
         assert_eq!(names.counts.get, 0, "Names reads no object");
     }
 
-    /// Task 8g6: every file is one GET (a short chunk is the end of the
+    /// Every file is one GET (a short chunk is the end of the
     /// object, no empty read follows), and one listing serves the walk and the
     /// dry run. The latest plan's files are opened twice by design (the walk,
     /// then the dry run), so GETs equal the files verify reports opening.

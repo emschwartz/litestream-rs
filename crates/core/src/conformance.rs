@@ -109,7 +109,7 @@ pub trait Harness {
 pub struct MemHarness(crate::MemStore);
 
 impl MemHarness {
-    /// A harness whose store lists `LastModified`, as S3 does after 8g4.
+    /// A harness whose store lists `LastModified`, as S3 does.
     #[must_use]
     pub fn listing_last_modified() -> Self {
         Self(crate::MemStore::with_listed_last_modified())

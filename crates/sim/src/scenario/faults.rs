@@ -1455,7 +1455,7 @@ fn damaged_a_snapshot(report: &RunReport) -> Result<(), String> {
 /// the passive checkpoint stages one more file, and its upload is the next
 /// to the replica. The uploader's delete fails and power is lost. The next
 /// boot reads the replica's newest level 0 file back against the staged one
-/// (R1) and uploads it again over the same key.
+/// (a listing confirms a file only by content) and uploads it again over the same key.
 #[must_use]
 pub fn corrupt_l0_publish_then_power_loss() -> Scenario {
     let mut s =
@@ -1486,10 +1486,10 @@ fn uploaded_again(report: &RunReport) -> Result<(), String> {
 const HOST_THRESHOLD: u32 = 4;
 
 /// The app runs SQLite's automatic checkpoint (at [`HOST_THRESHOLD`] frames) and the engine is
-/// told so. With the pin above mark 0 (the driver's first frame), the app's first checkpoint
+/// told so. With the pin above read mark 0 (the driver's first frame), the app's first checkpoint
 /// past the threshold copies the frames below the pin and its next attempts copy nothing; a
-/// stranger's read stops the engine's own checkpoint short, so the pin is retaken above mark 0
-/// and the app backfills once more; after the engine's full checkpoints the pin is on mark 0
+/// stranger's read stops the engine's own checkpoint short, so the pin is retaken above read mark 0
+/// and the app backfills once more; after the engine's full checkpoints the pin is on read mark 0
 /// and every attempt copies nothing. The engine counts each backfill the app made and none of
 /// its own, infers the attempts that copied nothing on both marks, and the replica restores
 /// every commit.

@@ -17,7 +17,7 @@ pub trait Clock: Send + Sync {
     fn now(&self) -> Timestamp;
 }
 
-/// Suspends the calling task. Retry waits are the only caller in core.
+/// Suspends the calling future. Retry waits are the only caller in core.
 pub trait Sleeper: Send + Sync {
     /// Completes after `wait`.
     fn sleep(&self, wait: Duration) -> impl Future<Output = ()> + Send;

@@ -1,19 +1,19 @@
 //! A rule-based model of SQLite's WAL, its wal-index and its locks.
 //!
-//! The 4a fakes are scripted: a test says what a checkpoint does. [`SimSqlite`]
+//! The scripted WAL fakes in `lsr-core` have a test say what a checkpoint does. [`SimSqlite`]
 //! instead follows SQLite's rules, so a stranger's checkpoint, a writer's restart
 //! and a reader's mark interact as they do in SQLite. The rules were read from the
 //! bundled amalgamation (rusqlite 0.43, SQLite 3.54.1: `walTryBeginRead`,
 //! `walCheckpoint`, `sqlite3WalCheckpoint`, `walRestartLog`, `walFrames`) and are
 //! checked against it by `tests/sim/sqlite_rules.rs`:
 //!
-//! - **R1, backfill:** a checkpoint copies each page's newest frame when that frame is at
+//! - **Backfill limit:** a checkpoint copies each page's newest frame when that frame is at
 //!   or below the smallest mark above 0 held by any reader (a page rewritten above
-//!   it is not copied at all), and nothing while a reader holds mark 0 with
+//!   it is not copied at all), and nothing while a reader holds read mark 0 with
 //!   `nBackfill < mxFrame`. RESTART and TRUNCATE are busy unless everything is
 //!   backfilled and no reader holds a mark above 0; they need the write lock and
 //!   degrade to PASSIVE, busy, when another connection holds it.
-//! - **R2, restart:** a writer starting a transaction on mark 0 with
+//! - **Restart:** a writer starting a transaction on read mark 0 with
 //!   `nBackfill > 0` and no reader on a mark above 0 restarts the WAL: salt1 + 1,
 //!   salt2 new, frames from 1. A TRUNCATE that finishes restarts the same way and
 //!   empties the file; a RESTART that finishes changes nothing on disk, and the
@@ -21,8 +21,8 @@
 //!   connection's* checkpoint count (`Wal.nCkpt`: its restarts, plus the header's
 //!   value when it ran recovery), and a connection whose count is 0 writes both
 //!   salts random.
-//! - **R3, mark choice:** a read transaction takes mark 0 when
-//!   `nBackfill == mxFrame`, else mark `mxFrame`. A writer that held mark 0
+//! - **Mark choice:** a read transaction takes read mark 0 when
+//!   `nBackfill == mxFrame`, else mark `mxFrame`. A writer that held read mark 0
 //!   takes mark `mxFrame` (after any restart) before its first frame.
 //!
 //! A reader takes each page's newest frame at or below `mxFrame`, as SQLite's
@@ -33,9 +33,9 @@
 //! freed ones included (`a_growing_commit_writes_every_page_it_adds`), so callers that
 //! grow the database must write the added pages too.
 //!
-//! - **R4, automatic checkpoint:** with a threshold set
+//! - **Automatic checkpoint:** with a threshold set
 //!   ([`SimSqlite::set_app_autocheckpoint`]), every app commit that leaves `mxFrame` at or
-//!   past it runs a PASSIVE on the app's connection under R1 (`sqlite3WalDefaultHook`).
+//!   past it runs a PASSIVE on the app's connection under the backfill limit (`sqlite3WalDefaultHook`).
 //!   SQLite reports none of them to the app, so the model counts them
 //!   ([`SimSqlite::app_autocheckpoints`]).
 //!
@@ -115,7 +115,7 @@ pub struct CheckpointNumbers {
     pub checkpointed: u32,
 }
 
-/// The app's automatic checkpoints so far (R4).
+/// The app's automatic checkpoints so far.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AutoTally {
     /// Checkpoints run after a commit at or past the threshold.
@@ -318,7 +318,7 @@ fn splitmix(state: &mut u64) -> u32 {
 
 impl State {
     /// The app commits `pages` leaving `db_size` pages, then runs its automatic
-    /// checkpoint (R4).
+    /// checkpoint.
     fn app_commit(&mut self, pages: &[(PageNo, Vec<u8>)], db_size: u32) -> Option<AppCommit> {
         if db_size == 0 || !self.write(Conn::App, pages, Some(db_size)) {
             return None;
@@ -375,7 +375,8 @@ impl State {
         u32::try_from(pages).unwrap_or(u32::MAX)
     }
 
-    /// R3.
+    /// The mark a new read transaction takes: read mark 0 when the WAL is fully backfilled, else
+    /// the last frame's.
     fn mark_now(&self) -> Mark {
         if self.index.backfilled == self.index.mx_frame {
             Mark::Zero
@@ -486,7 +487,7 @@ impl State {
         self.index.pgnos.push(pgno);
     }
 
-    /// The start of a write transaction by `by`: R2, then R3's writer mark.
+    /// The start of a write transaction by `by`: the restart rule, then the writer's mark choice.
     fn start_write(&mut self, by: Conn) {
         let mark = self
             .readers
@@ -597,7 +598,7 @@ impl State {
         self.index.backfilled = upto;
     }
 
-    /// R1's backfill step of `walCheckpoint`.
+    /// The backfill step of `walCheckpoint`, under the backfill limit.
     fn backfill(&mut self) {
         let index = &self.index;
         if index.backfilled >= index.mx_frame {
@@ -667,7 +668,7 @@ impl State {
         )
     }
 
-    /// R4, right after an app commit.
+    /// The automatic checkpoint, right after an app commit.
     fn autocheckpoint(&mut self) {
         let Some(at) = self.app_autocheckpoint else {
             return;
@@ -895,7 +896,7 @@ impl SimSqlite {
     }
 
     /// What the driver does at process start (`db.go:1673`): a WAL under a header
-    /// gets one frame so the pin lands above mark 0, then the read transaction
+    /// gets one frame so the pin lands above read mark 0, then the read transaction
     /// that holds the WAL in place begins. Any earlier pin ended with its process.
     pub fn start_driver(&self) {
         self.with(|state| {
@@ -913,7 +914,7 @@ impl SimSqlite {
         });
     }
 
-    /// Begins our read transaction under R3; false if it is held.
+    /// Begins our read transaction under the mark-choice rule; false if it is held.
     pub fn our_reader_begin(&self) -> bool {
         self.with(|state| state.begin(Conn::Ours))
     }
@@ -954,7 +955,7 @@ impl SimSqlite {
         })
     }
 
-    /// The app's `wal_autocheckpoint` in frames (R4); `None`, the model's default, is 0.
+    /// The app's `wal_autocheckpoint` in frames; `None`, the model's default, is 0.
     pub fn set_app_autocheckpoint(&self, frames: Option<u32>) {
         self.with(|state| state.app_autocheckpoint = frames.filter(|n| *n > 0));
     }
@@ -1004,7 +1005,7 @@ impl SimSqlite {
         })
     }
 
-    /// A stranger begins a read transaction under R3.
+    /// A stranger begins a read transaction under the mark-choice rule.
     pub fn stranger_reader_begin(&self) -> ReaderId {
         self.with(|state| {
             let id = ReaderId(state.next_reader);

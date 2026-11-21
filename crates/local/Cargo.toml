@@ -1,7 +1,7 @@
 [package]
 name = "lsr-local"
 version = "0.0.0"
-description = "The local filesystem side of Litestream: the restore sink today, the meta directory and WAL reading in phase 2."
+description = "The local filesystem side of Litestream: the restore sink."
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

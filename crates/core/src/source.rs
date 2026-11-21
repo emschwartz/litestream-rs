@@ -61,7 +61,7 @@ pub enum SourceError {
 
 /// One read of the wal-index.
 ///
-/// In phase 3 this is the header at `-shm` offset 0, read under the read lock:
+/// This is the header at `-shm` offset 0, read under the read lock:
 /// the two 48-byte copies must be equal with a valid `aCksum`; `mxFrame` is at
 /// byte 16, `aSalt` at byte 32, `nBackfill` at byte 96. Unequal copies mean a
 /// writer is mid-update and the read is `SourceError::Busy`.

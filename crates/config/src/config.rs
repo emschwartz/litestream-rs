@@ -3,7 +3,7 @@
 //! Only implemented keys appear here; inert keys were checked and no-effect
 //! keys warned about during the load. `Option` stands where Go uses a pointer
 //! and applies its default later, when it builds the database or replica
-//! (task 2 maps those onto the replicator's own config). Plain types only: no
+//! (the `map` module turns those into the replicator's own config). Plain types only: no
 //! dependency on the replicator.
 
 use std::fmt;
@@ -455,7 +455,9 @@ impl S3Settings {
     }
 }
 
-/// What the operator states about the host's readers (docs/plans/phase-4-sidecar.md, the TRUNCATE ruling).
+/// What the operator states about the host's readers: TRUNCATE waits for every reader, so it
+/// runs only when the operator says the host holds no long readers
+/// (docs/plans/phase-4-sidecar.md, the TRUNCATE section).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostReaders {
     /// Nothing stated (the default): v1 never checkpoints with TRUNCATE.

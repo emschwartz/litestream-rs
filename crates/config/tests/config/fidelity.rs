@@ -1,6 +1,6 @@
 //! yaml.v2's readings, measured: each expected value below is what Go 1.24
 //! with gopkg.in/yaml.v2 v2.4.0 decoded the same YAML into a field of the
-//! same Go type (the probe and its output are in docs/spikes.md, "S6"). Where
+//! same Go type (the probe and its output are in docs/spikes.md, the YAML decoding section). Where
 //! v1 refuses what Go reads, the case says so.
 
 use lsr_config::{Expected, GoDuration, ProblemKind, ReplicaConfig, WarningKind};

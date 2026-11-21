@@ -4,13 +4,13 @@
 //!
 //! Written once over [`Backend`]; each `#[test]` runs it for the rusqlite read transaction
 //! ([`Sqlite`]). A case whose answer depends on the backend states both answers in one table
-//! (`mark_zero_answers`), keyed by [`Backend::PIN_ON_MARK_ZERO`], never in a skip.
+//! (`read_mark_zero_answers`), keyed by [`Backend::PIN_ON_MARK_ZERO`], never in a skip.
 //!
 //! Each case also runs in both [`Placement`]s (`both`): the host in this process, set up as
 //! replication asks, and the host in a child process at SQLite's defaults (automatic
 //! checkpoints at 1000 frames, no `PERSIST_WAL`), with the pin, the engine and the oracle
 //! here, as beside a sidecar. One case's answer differs by placement and states both
-//! (`tripwire_answers`; both are a snapshot). In this process only:
+//! (`abandoned_frames_answers`; both are a snapshot). In this process only:
 //! `persist_wal_keeps_a_wal_a_page_size_change_makes_stale`, which is about the in-process
 //! host's own setting, and the power-loss file (`power_loss.rs`), whose loss undoes what the
 //! host wrote through this process's fault VFS. The killed-writer file (`kill.rs`) runs in
@@ -469,7 +469,7 @@ fn invalid_wal_index<B: Backend>(placement: Placement) {
 /// What an outside checkpoint does to the pin, by mode and by the pin's read mark. A pin on a
 /// mark above zero blocks RESTART and TRUNCATE, and the next commit appends. A pin retaken over
 /// a fully backfilled WAL sits on read mark 0, which does not stop a restart (walformat.html):
-/// RESTART and TRUNCATE go through, and after any mode the next commit, itself on mark 0,
+/// RESTART and TRUNCATE go through, and after any mode the next commit, itself on read mark 0,
 /// restarts the log; the engine follows because the new generation is `salt1 + 1` in the same
 /// read epoch. A backend that pins on a mark above zero even then answers "blocked" in both
 /// columns.
@@ -481,21 +481,21 @@ enum Answer {
     Restarts,
 }
 
-const fn mark_zero_answers(on_mark_zero: bool) -> Answer {
-    if on_mark_zero {
+const fn read_mark_zero_answers(on_read_mark_zero: bool) -> Answer {
+    if on_read_mark_zero {
         Answer::Restarts
     } else {
         Answer::Blocked
     }
 }
 
-fn outside_checkpoint<B: Backend>(placement: Placement, mode: &str, mark_zero: bool) {
+fn outside_checkpoint<B: Backend>(placement: Placement, mode: &str, read_mark_zero: bool) {
     let dir = TempDir::new().unwrap();
     let mut s = stepper::<B>(&dir, placement);
     s.sync().unwrap();
     s.write(500).unwrap();
     s.sync().unwrap();
-    if mark_zero {
+    if read_mark_zero {
         let run = s.backend.checkpoint(CheckpointMode::Passive).unwrap();
         assert!(!run.busy && run.checkpointed == run.log, "{run:?}");
         assert!(s.backend.committed().unwrap().fully_backfilled());
@@ -505,14 +505,14 @@ fn outside_checkpoint<B: Backend>(placement: Placement, mode: &str, mark_zero: b
     let salts = s.salts().unwrap();
     let len = s.wal_bytes().unwrap().len();
     let at = format!(
-        "{} {placement:?} outside {mode}, mark zero {mark_zero}",
+        "{} {placement:?} outside {mode}, read mark zero {read_mark_zero}",
         B::NAME
     );
     let (busy, _, _) = s.app_checkpoint(mode).unwrap();
     s.write(300).unwrap();
     let verdict = s.verdict().unwrap();
     assert_eq!(verdict.event, None, "{at}");
-    match mark_zero_answers(mark_zero && B::PIN_ON_MARK_ZERO) {
+    match read_mark_zero_answers(read_mark_zero && B::PIN_ON_MARK_ZERO) {
         Answer::Blocked => {
             assert!(mode == "PASSIVE" || busy == 1, "{at}: busy");
             assert_eq!(s.salts().unwrap(), salts, "{at}: same generation");
@@ -540,11 +540,11 @@ fn outside_checkpoint<B: Backend>(placement: Placement, mode: &str, mark_zero: b
 
 /// Upstream #946 and #1580 were beliefs about outside checkpoints; this is the whole table.
 #[test]
-fn outside_passive_restart_and_truncate_while_pinned_and_on_mark_zero() {
+fn outside_passive_restart_and_truncate_while_pinned_and_on_read_mark_zero() {
     for placement in Placement::ALL {
         for mode in ["PASSIVE", "RESTART", "TRUNCATE"] {
-            for mark_zero in [false, true] {
-                outside_checkpoint::<Sqlite>(placement, mode, mark_zero);
+            for read_mark_zero in [false, true] {
+                outside_checkpoint::<Sqlite>(placement, mode, read_mark_zero);
             }
         }
     }
@@ -552,21 +552,21 @@ fn outside_passive_restart_and_truncate_while_pinned_and_on_mark_zero() {
 
 /// SQLite belief: a reader on read mark 0 holds `WAL_READ_LOCK(0)`, which every backfill needs
 /// exclusively (`walCheckpoint`), because such a reader reads the database file directly. So
-/// once a host writer that began on a mark above zero appends frames after a mark-0 pin, no
+/// once a host writer that began on a mark above zero appends frames after a read-mark-0 pin, no
 /// checkpoint can backfill them and no writer can restart the log over them while the pin
 /// holds: the frames the continuity proof cannot see are never abandoned, and the engine
-/// continues. (The ruling on the pin, docs/plans/phase-3-syncing.md, worried that mark 0 does
+/// continues. (The plan, docs/plans/phase-3-syncing.md, worried that read mark 0 does
 /// not block a restart; it blocks every restart but the one at the very next commit, which the
 /// proof follows.) A pin on a mark above zero blocks the same way.
 #[test]
-fn the_pin_on_mark_zero_blocks_every_backfill_past_it() {
-    both(mark_zero_blocks_backfill::<Sqlite>);
+fn the_pin_on_read_mark_zero_blocks_every_backfill_past_it() {
+    both(read_mark_zero_blocks_backfill::<Sqlite>);
 }
 
 /// A pin on read mark 0 at the synced end, then a host reader's write after it, in the same
 /// generation (the reader began on a mark above zero, so its write does not restart the log).
 /// The reader is the host's connection 1, left open.
-fn frames_after_a_mark_zero_pin<B: Backend>(s: &mut Stepper<B>) {
+fn frames_after_a_read_mark_zero_pin<B: Backend>(s: &mut Stepper<B>) {
     s.sync().unwrap();
     for _ in 0..3 {
         s.write(500).unwrap();
@@ -578,16 +578,16 @@ fn frames_after_a_mark_zero_pin<B: Backend>(s: &mut Stepper<B>) {
     assert!(!run.busy && run.checkpointed == run.log, "{run:?}");
     assert!(
         matches!(s.sync().unwrap(), StepDid::Idle),
-        "re-pinned on mark 0"
+        "re-pinned on read mark 0"
     );
     s.host_exec(1, "INSERT INTO t(v) VALUES (randomblob(500)); COMMIT;")
         .unwrap();
 }
 
-fn mark_zero_blocks_backfill<B: Backend>(placement: Placement) {
+fn read_mark_zero_blocks_backfill<B: Backend>(placement: Placement) {
     let dir = TempDir::new().unwrap();
     let mut s = stepper::<B>(&dir, placement);
-    frames_after_a_mark_zero_pin(&mut s);
+    frames_after_a_read_mark_zero_pin(&mut s);
     let salts = s.salts().unwrap();
     let before = s.backend.committed().unwrap();
     for mode in ["PASSIVE", "RESTART", "TRUNCATE"] {
@@ -611,20 +611,20 @@ fn mark_zero_blocks_backfill<B: Backend>(placement: Placement) {
     assert_eq!(txs, 2);
 }
 
-/// The continuity proof's tripwire on real SQLite. The pin's locks are broken the one way the
+/// The check that catches frames abandoned after the read lock was taken, on real SQLite. The pin's locks are broken the one way the
 /// descriptor rule exists to prevent: a descriptor on `-shm` opened and closed in this process
 /// drops every POSIX lock the process holds on it. Another process then appends after the pin,
 /// backfills, and restarts the log over those frames before the engine read them. The proof
-/// still holds on paper (same read epoch, `salt1 + 1`), and the tripwire sees the old
+/// still holds on paper (same read epoch, `salt1 + 1`), and that check sees the old
 /// generation's frame past the synced end: `PinViolated` and a snapshot, never a silent
-/// continue past the lost transaction. The answer differs by placement (`tripwire_answers`);
+/// continue past the lost transaction. The answer differs by placement (`abandoned_frames_answers`);
 /// both are a snapshot.
 #[test]
-fn the_tripwire_fires_when_a_broken_lock_lets_frames_after_the_pin_be_abandoned() {
-    both(tripwire::<Sqlite>);
+fn the_abandoned_frames_check_fires_when_a_broken_lock_lets_frames_after_the_pin_be_abandoned() {
+    both(abandoned_frames::<Sqlite>);
 }
 
-/// The child's work for the tripwire: append, backfill, restart.
+/// The child's work for the abandoned-frames check: append, backfill, restart.
 fn host_restarts_the_wal(db: &Path) {
     let conn = rusqlite::Connection::open(db).unwrap();
     conn.busy_timeout(std::time::Duration::ZERO).unwrap();
@@ -640,8 +640,8 @@ fn host_restarts_the_wal(db: &Path) {
         .unwrap();
 }
 
-/// How the tripwire case ends, by where the host runs: how many times the child restarted the
-/// log, and whether the proof alone would have followed it (so only the tripwire stops it).
+/// How the abandoned-frames case ends, by where the host runs: how many times the child restarted the
+/// log, and whether the proof alone would have followed it (so only the abandoned-frames check stops it).
 ///
 /// In process, the descriptor this process closes drops the host's locks on `-shm` too, its
 /// dead-man-switch lock included, so the child is the only process left holding the
@@ -650,15 +650,15 @@ fn host_restarts_the_wal(db: &Path) {
 /// log once (`salt1 + 1`), which the proof would follow: `PinViolated`. With the host in
 /// another process, the host keeps the wal-index alive, the child sees the log fully
 /// backfilled, and its first write restarts at once: two restarts (`salt1 + 2`), which no
-/// proof follows, so the snapshot needs no tripwire.
-const fn tripwire_answers(placement: Placement) -> (u32, bool) {
+/// proof follows, so the snapshot needs no such check.
+const fn abandoned_frames_answers(placement: Placement) -> (u32, bool) {
     match placement {
         Placement::InProcess => (1, true),
         Placement::SeparateProcess => (2, false),
     }
 }
 
-fn tripwire<B: Backend>(placement: Placement) {
+fn abandoned_frames<B: Backend>(placement: Placement) {
     let dir = TempDir::new().unwrap();
     let mut s = stepper::<B>(&dir, placement);
     s.sync().unwrap();
@@ -670,7 +670,7 @@ fn tripwire<B: Backend>(placement: Placement) {
     assert!(!run.busy && run.checkpointed == run.log, "{run:?}");
     assert!(
         matches!(s.sync().unwrap(), StepDid::Idle),
-        "pinned on mark 0"
+        "pinned on read mark 0"
     );
     let salts = s.salts().unwrap();
     #[expect(
@@ -685,7 +685,7 @@ fn tripwire<B: Backend>(placement: Placement) {
         "{}",
         String::from_utf8_lossy(&out.stdout)
     );
-    let (restarts, tripped) = tripwire_answers(placement);
+    let (restarts, tripped) = abandoned_frames_answers(placement);
     assert_eq!(
         s.salts().unwrap().salt1,
         salts.salt1.wrapping_add(restarts),
@@ -697,8 +697,8 @@ fn tripwire<B: Backend>(placement: Placement) {
         lsr_ltx::PageSize::new(4096).unwrap(),
     )
     .unwrap();
-    let tripwire = tripped.then_some(RecoverEvent::PinViolated { synced });
-    assert_eq!(verdict.event, tripwire, "{placement:?}: {verdict:?}");
+    let expected = tripped.then_some(RecoverEvent::PinViolated { synced });
+    assert_eq!(verdict.event, expected, "{placement:?}: {verdict:?}");
     assert!(
         matches!(
             verdict.recovered,

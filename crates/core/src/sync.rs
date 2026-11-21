@@ -173,8 +173,9 @@ impl PageFrom {
 /// The pages of one file, ascending.
 ///
 /// A snapshot (`prev_commit` is `None`) lists every page up to `commit` except
-/// the lock page. An incremental lists the map's pages and the "walgrowth"
-/// pages: those above `prev_commit` that the map lacks, which come from the
+/// the lock page. An incremental lists the map's pages and the pages
+/// the database grew by that no scanned frame holds ("grown pages": those above
+/// `prev_commit` that the map lacks), which come from the
 /// database file (Go `db.go:2504-2561`).
 #[must_use]
 pub fn plan_pages(
@@ -317,9 +318,9 @@ pub(crate) fn scan_whole<R: Read + Seek>(
 }
 
 /// The fault for a failed WAL read, `halt` when the failure means damage below
-/// the committed end (ruling V1).
+/// the committed end: a WAL that changes under a scan is moved, not corrupt.
 ///
-/// A read on mark 0 holds no lock against an application TRUNCATE checkpoint or
+/// A read on read mark 0 holds no lock against an application TRUNCATE checkpoint or
 /// a restart in place, so a short or non-verifying frame can be the WAL moving
 /// under the read. The header is read again, after the failed read: other salts,
 /// a short file or no header is `WalMoved` (`recover` classifies what happened),

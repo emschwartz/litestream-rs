@@ -1,8 +1,8 @@
 //! The recorded-fault layer over FakeS3, at the Transport level: each case
-//! builds requests with 8b's builders, sends them through
-//! `FaultTransport<FakeS3>` and reads the result with 8b's classifier and
-//! parsers. Cases that need the store's five operations (8c) and `Retrying`'s
-//! sleep are listed in the task report as wired after 8c.
+//! builds requests with the request builders, sends them through
+//! `FaultTransport<FakeS3>` and reads the result with the response classifier and
+//! parsers. Cases that need the store's five operations and `Retrying`'s
+//! sleep are in `store.rs`.
 
 use crate::common;
 use crate::wire;

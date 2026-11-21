@@ -548,8 +548,8 @@
 "TestDB_WALIndexMaxFrame" = { counterpart = ["lsr-sqlite::sqlite::wal_index::the_committed_read_agrees_with_the_file_across_checkpoints_and_a_restart", "lsr-compat::compat::live_source::committed_read_matches_the_wal_file"] }
 "TestDB_WALPageCoverage_AllNewPagesPresent" = { counterpart = "lsr-wal::wal::sqlite::every_operation_at_every_page_size_matches_sqlite" }
 "TestDB_WriteLTXFromWALHonorsCanceledContext" = { reason = "Go-only: context.Context cancellation. The Rust core is sans-IO and advances one tick at a time (docs/PLAN.md section 2, goal 5); there is no context to cancel, and shutdown is final_sync with a deadline." }
-"TestDB_WriteLTXFromWAL_FillsMissingGrowthPagesFromDB" = { counterpart = "lsr-core::sync::tests::walgrowth_pages_come_from_the_database_file" }
-"TestDB_WriteLTXFromWAL_PageGrowthCoverage" = { counterpart = ["lsr-core::sync::tests::walgrowth_pages_come_from_the_database_file", "lsr-compat::compat::live_matches_sim::commits_overwrites_and_growth"] }
+"TestDB_WriteLTXFromWAL_FillsMissingGrowthPagesFromDB" = { counterpart = "lsr-core::sync::tests::grown_pages_come_from_the_database_file" }
+"TestDB_WriteLTXFromWAL_PageGrowthCoverage" = { counterpart = ["lsr-core::sync::tests::grown_pages_come_from_the_database_file", "lsr-compat::compat::live_matches_sim::commits_overwrites_and_growth"] }
 "TestDB_releaseReadLock_DoubleRollback" = { reason = "Go-only: database/sql reports an error when a transaction it already rolled back is rolled back again. The Rust SQLite backend will hold the read transaction on a connection it owns (docs/plans/phase-3-syncing.md, the rusqlite backend), with one owner for ending it." }
 "TestIsDiskFullError" = { counterpart = ["lsr-core::fault::tests::from_staging_names_the_local_fault_for_every_store_error", "lsr-core::store::tests::io_errors_classify_without_inventing_not_found"] }
 "TestIsSQLiteBusyError" = { counterpart = ["lsr-core::checkpoint::tests::a_busy_passive_reports_busy", "lsr-core::fault::tests::sqlite_busy_retries"] }
@@ -637,7 +637,7 @@
 "TestStore_EnforceSnapshotRetention_RetainsInFlightRestorePlanFiles" = { reason = "Covered by lsr-core restore::tests::a_file_deleted_between_plan_and_read_is_replanned_once differently: Go's store pins the files of a restore in flight in the same process; a Rust restore re-plans, bounded, when a planned file vanishes (docs/PLAN.md phase 1, restore planner), and level 0 is kept longer than a restore takes." }
 
 ["litestream/db_wal_rewind_test.go"]
-"TestDB_SnapshotAfterWALRewind" = { counterpart = ["lsr-core::recover::tests::f2_a_committed_end_before_the_tip_is_a_rewind", "lsr-core::sync::tests::a_snapshot_takes_the_wal_pages_and_fills_the_rest_from_the_database"] }
+"TestDB_SnapshotAfterWALRewind" = { counterpart = ["lsr-core::recover::tests::a_committed_end_before_the_tip_is_a_rewind", "lsr-core::sync::tests::a_snapshot_takes_the_wal_pages_and_fills_the_rest_from_the_database"] }
 
 ["litestream/file/replica_client_test.go"]
 "TestReplicaClient_GenerationsV3" = { reason = "The v0.3 generations/ layout (snapshots and WAL segments under generations/) is not in v1 (docs/PLAN.md section 1); Rust reads and writes the v0.5 LTX layout only." }

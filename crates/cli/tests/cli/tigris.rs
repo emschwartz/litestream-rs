@@ -1,4 +1,4 @@
-//! Task 8t item 10 against the real Tigris bucket (`just tigris-restore`): a
+//! A production-shaped restore against the real Tigris bucket (`just tigris-restore`): a
 //! replica written by Go v0.5.18 straight to Tigris, then `lsr verify`, and
 //! `lsr restore` and Go's `litestream restore` of it at the same targets,
 //! compared on restored pages (never on LTX bytes) with `PRAGMA integrity_check`.

@@ -1,4 +1,4 @@
-//! The four key classes (docs/plans/phase-4-sidecar.md, the config ruling),
+//! The four key classes (docs/plans/phase-4-sidecar.md, the config section),
 //! every out-of-scope Go feature at its off value and at its on value, and
 //! secrets kept out of every message.
 

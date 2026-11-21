@@ -112,7 +112,7 @@ fn check_chain(inventory: &Inventory, target: RestoreTarget, chain: &ContiguousC
     let wanted = match target {
         RestoreTarget::Txid(wanted) => Some(wanted),
         RestoreTarget::Latest => eligible_files().map(|info| info.key.range().max()).max(),
-        // Ruling A1: an as-of plan ends where the eligible chain can reach, and an
+        // An as-of plan ends where the eligible chain can reach, and an
         // eligible file that does not connect is not a reason to stop earlier.
         RestoreTarget::AsOf(_) => furthest_reach(eligible_files().map(|info| info.key)),
     };

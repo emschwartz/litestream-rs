@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs one command against the real Tigris bucket of task 8t (docs/spikes.md):
+# Runs one command against the real Tigris bucket (docs/spikes.md):
 # credentials from a file outside the repo, else the AWS_* variables already set
 # (a cloud session's environment carries them that way), and one fresh run prefix
 # in LSR_TIGRIS_PREFIX that everything the command writes sits under.
@@ -14,7 +14,7 @@ elif [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ] || [
     exit 1
 fi
 export LSR_TIGRIS_BUCKET="${LSR_TIGRIS_BUCKET:-litestream-rs-test}"
-export LSR_TIGRIS_PREFIX="8t/$(date -u +%F)-$(openssl rand -hex 4)"
+export LSR_TIGRIS_PREFIX="tigris-runs/$(date -u +%F)-$(openssl rand -hex 4)"
 echo "tigris: bucket $LSR_TIGRIS_BUCKET prefix $LSR_TIGRIS_PREFIX" >&2
 status=0
 "$@" || status=$?

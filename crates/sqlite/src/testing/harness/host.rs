@@ -1,7 +1,7 @@
 //! Where the host application runs: in the test process, or in a child process at SQLite's
 //! defaults, as an application beside a sidecar runs.
 //!
-//! [`Placement::InProcess`] is the suite as phase 3 wrote it: the host's connections live in
+//! [`Placement::InProcess`] is the original form of the suite: the host's connections live in
 //! the test process, through the rig's fault VFS, set up as replication asks
 //! (`crate::app_connection`: `PERSIST_WAL` on, automatic checkpoints off).
 //!

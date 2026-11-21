@@ -1,7 +1,6 @@
 //! The local filesystem side of Litestream.
 //!
-//! Today that is [FileSink], where a restore builds its database. Phase 2 adds
-//! the meta directory and WAL reading here.
+//! Today that is [FileSink], where a restore builds its database.
 //!
 //! A restore writes a scratch file `<target>.restore` next to the target,
 //! never the target. [FileSink::create] opens it without truncating, takes an

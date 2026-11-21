@@ -161,8 +161,8 @@ impl<T: Transport> S3Store<T> {
         })
     }
 
-    /// Aborts the multipart uploads that were dropped or failed, oldest first
-    /// (ruling F3), and returns how many are settled. The first failure stops
+    /// Aborts the multipart uploads that were dropped or failed, oldest first, and
+    /// returns how many are settled. The first failure stops
     /// the pass and keeps that upload and the rest listed.
     ///
     /// # Errors
@@ -449,8 +449,8 @@ impl<T: Transport> Inner<T> {
     }
 
     /// One HEAD: the stamp the object carries, else the `LastModified` the
-    /// listing gave for it (F9), checked against the size the caller saw. An
-    /// unparseable stamp is `Corrupt { BadStamp }` here, not at listing time (G6).
+    /// listing gave for it, checked against the size the caller saw. An
+    /// unparseable stamp is `Corrupt { BadStamp }` here, not at listing time (a listing cannot see metadata).
     fn stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
         let result = self.head_stamp(file);
         self.tally_stamp(&result);

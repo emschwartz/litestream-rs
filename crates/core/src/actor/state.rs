@@ -46,7 +46,7 @@ pub enum Lane {
     Prune,
     /// Listing the replica for maintenance, and a failed job whose level
     /// keeps no wait of its own (a retention delete). A job whose level does
-    /// keep one waits there (R3), not here, but its persistent failure is
+    /// keep one waits there, not here, so one failing level starves no other, but its persistent failure is
     /// still this lane's degraded state.
     Maintenance,
 }

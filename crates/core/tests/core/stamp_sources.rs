@@ -1,4 +1,4 @@
-//! Source guards for the stamp types (ruling G2): who may make a
+//! Source guards for the stamp types (no reader decides on a last-modified time): who may make a
 //! [`StoredStamp`] and who may look at a bare last-modified time. A walk of
 //! `crates/` with std only.
 

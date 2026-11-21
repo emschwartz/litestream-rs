@@ -93,7 +93,7 @@ const NO_CHECKPOINTS: CheckpointConfig = CheckpointConfig {
 /// 0, so the host's backfill is the only one: the actor counts it, takes no snapshot, and the
 /// oracle restores every transaction.
 #[test]
-fn the_hosts_automatic_checkpoints_against_a_pin_above_mark_0_lose_nothing() {
+fn the_hosts_automatic_checkpoints_against_a_pin_above_read_mark_0_lose_nothing() {
     let dir = TempDir::new().unwrap();
     let mut rig = separate(&dir, NO_CHECKPOINTS);
     let from = rig.ticks().len();

@@ -89,7 +89,7 @@ fn fact_1_holds_for_a_checkpoint_that_retakes_a_mark_above_zero() {
 }
 
 #[test]
-fn fact_2_under_mark_zero_the_next_write_restarts_once() {
+fn fact_2_under_read_mark_zero_the_next_write_restarts_once() {
     let fake = wal();
     fake.append_tx(&tx(1), size(2));
     fake.backfill(u32::MAX);
@@ -111,10 +111,10 @@ fn fact_2_under_mark_zero_the_next_write_restarts_once() {
 }
 
 #[test]
-fn fact_2_an_old_generation_that_grows_under_a_mark_zero_pin_is_never_restarted() {
+fn fact_2_an_old_generation_that_grows_under_a_read_mark_zero_pin_is_never_restarted() {
     let fake = wal();
     fake.append_tx(&tx(1), size(2));
-    // Not fully backfilled when the pin is taken on mark 0 by a reader of an older state.
+    // Not fully backfilled when the pin is taken on read mark 0 by a reader of an older state.
     fake.pin_reader_at(0);
     let generation = fake.salts();
     for fill in 2..9 {

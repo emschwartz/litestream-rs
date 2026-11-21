@@ -414,7 +414,7 @@ fn parse_s3_forms() {
         "a/b/c"
     );
     // Departure: Go accepts a bucket with no path and builds keys with a leading
-    // slash; an empty prefix is refused (ruling F10).
+    // slash; an empty prefix is refused.
     assert_eq!(
         usage("files --replica s3://bucket"),
         UsageError::BadReplicaUrl {

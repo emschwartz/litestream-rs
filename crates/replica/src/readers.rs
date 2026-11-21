@@ -2,7 +2,7 @@
 //!
 //! A TRUNCATE checkpoint waits for every reader to finish, and SQLite cannot tell the
 //! replicator whether one is coming. So TRUNCATE runs only on the host's word
-//! (`docs/plans/phase-3-syncing.md`, the reader ruling): under [`ReaderTracking::Untracked`] it
+//! (`docs/plans/phase-3-syncing.md`, the reader-tracking section): under [`ReaderTracking::Untracked`] it
 //! never runs, and under [`ReaderTracking::Tracked`] it runs only while no [`ReaderGuard`]
 //! lives. A TRUNCATE asked for while one does is refused without calling SQLite, as
 //! `SourceError::ReadersHeld` and not as busy (SQLite was never asked), so the engine waits its

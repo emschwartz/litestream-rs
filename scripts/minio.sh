@@ -9,7 +9,7 @@
 #
 # The image is Chainguard's MinIO build, pinned by digest: MinIO no longer
 # publishes images itself. If the digest stops resolving, re-pin it and re-run
-# the spike questions in docs/spikes.md (Task 8s).
+# the MinIO spike questions in docs/spikes.md.
 set -eu
 
 IMAGE=cgr.dev/chainguard/minio@sha256:e9cf6b99c226e9539ed0f14b6f00e37b07da153c7ba1f4f8709c807574b471ec

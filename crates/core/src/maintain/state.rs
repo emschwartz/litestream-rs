@@ -102,7 +102,7 @@ impl MaintainState {
         match job {
             Job::Compact(job) => self.record_compact(now, job, outcome),
             Job::Delete(job) => self.record_delete(now, job, outcome),
-            // Task 4's loop runs it and reports through `record_snapshot`.
+            // The actor's loop runs it and reports through `record_snapshot`.
             Job::Snapshot(_) => {}
         }
     }

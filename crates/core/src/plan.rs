@@ -67,7 +67,7 @@
 //!   larger files. An overlapping file is valid because a file holds the
 //!   newest version of every page it touches.
 //! - [`AsOf`] ends where the eligible chain ends, not at the largest eligible
-//!   transaction (ruling A1). An eligible file past the end that does not
+//!   transaction. An eligible file past the end that does not
 //!   connect is a stray left by level-0 retention, never a reason to refuse.
 //!   What lies past the end is judged by keys over the whole inventory,
 //!   stamps not consulted (`bridges_nothing_past`): a usable file that touches
@@ -101,7 +101,7 @@
 //! each step the files that touch and pass the chain's end, in preference
 //! order, until the first eligible one. What lies past the end is judged by
 //! keys, and the straddle rule looks only at files the last step already
-//! read. Each phase makes the decision [`plan`] makes with every stamp known,
+//! read. Each pass makes the decision [`plan`] makes with every stamp known,
 //! so the order of the reads never changes the answer. When it asks for a
 //! base's stamp it names the later bases ahead, and when it judges the
 //! straddlers it names all of them, so a store that runs batches reads those
@@ -352,7 +352,7 @@ fn plan_exact(inventory: &Inventory, target: RestoreTarget) -> PlanOutcome {
 
 /// The outcome for an `AsOf` chain, which ends where the eligible files take
 /// it. Eligible files past the end that do not connect are strays, never a
-/// reason to refuse (ruling A1). What lies past the end is judged by keys over
+/// reason to refuse. What lies past the end is judged by keys over
 /// the whole inventory ([`bridges_nothing_past`]); a chain that passes is
 /// [`PlanOutcome::AsOfInsideFile`] when a later file straddles, else a plan. A
 /// stray never changes which.
@@ -573,7 +573,7 @@ type Preference = (Txid, Level, Reverse<Txid>);
 
 /// Where an [`AsOfPlanner`] is.
 #[derive(Clone, Debug)]
-enum Phase {
+enum Pass {
     /// Walking the transaction-1 files for the first eligible one.
     Base,
     /// Extending the chain one eligible file at a time.
@@ -605,7 +605,7 @@ pub struct AsOfPlanner<'a> {
     /// Indexes into `sweep` that touched the end and were not yet settled.
     touching: BinaryHeap<(Preference, usize)>,
     chain: Option<ContiguousChain>,
-    phase: Phase,
+    pass: Pass,
     comparisons: u64,
 }
 
@@ -633,10 +633,10 @@ impl<'a> AsOfPlanner<'a> {
             .copied()
             .collect();
         sweep.sort_by(|a, b| counted(sweep_order(a).cmp(&sweep_order(b))));
-        let phase = if inventory.is_empty() {
-            Phase::Done(PlanOutcome::EmptyReplica)
+        let pass = if inventory.is_empty() {
+            Pass::Done(PlanOutcome::EmptyReplica)
         } else {
-            Phase::Base
+            Pass::Base
         };
         Self {
             inventory,
@@ -647,7 +647,7 @@ impl<'a> AsOfPlanner<'a> {
             entered: 0,
             touching: BinaryHeap::new(),
             chain: None,
-            phase,
+            pass,
             comparisons,
         }
     }
@@ -660,7 +660,7 @@ impl<'a> AsOfPlanner<'a> {
         self.comparisons
     }
 
-    /// Phase 1: the first eligible transaction-1 file in base order is the
+    /// Pass 1: the first eligible transaction-1 file in base order is the
     /// base, which is the one [`plan`] picks.
     fn find_base(&mut self, stamps: &Stamps) -> Resolve<()> {
         while let Some(info) = self.starts.get(self.next_start).copied() {
@@ -674,27 +674,27 @@ impl<'a> AsOfPlanner<'a> {
                 }
                 Some(true) => {
                     self.chain = ContiguousChain::start(info);
-                    self.phase = match self.chain {
-                        Some(_) => Phase::Extend,
-                        None => Phase::Done(no_snapshot(self.inventory)),
+                    self.pass = match self.chain {
+                        Some(_) => Pass::Extend,
+                        None => Pass::Done(no_snapshot(self.inventory)),
                     };
                     return Resolve::Done(());
                 }
                 Some(false) => self.next_start = self.next_start.saturating_add(1),
             }
         }
-        self.phase = Phase::Done(no_snapshot(self.inventory));
+        self.pass = Pass::Done(no_snapshot(self.inventory));
         Resolve::Done(())
     }
 
-    /// Phase 2: at each step the most preferred eligible file that touches
+    /// Pass 2: at each step the most preferred eligible file that touches
     /// and passes the end, which is the file [`plan`]'s sweep pushes (a file
     /// it passes over ends at or before the one chosen, so it never passes a
     /// later end). A settled file leaves the heap for good: an ineligible one
     /// stays ineligible, and a file at or below the end stays there.
     fn extend(&mut self, stamps: &Stamps) -> Resolve<()> {
         let Some(chain) = self.chain.as_mut() else {
-            self.phase = Phase::Done(no_snapshot(self.inventory));
+            self.pass = Pass::Done(no_snapshot(self.inventory));
             return Resolve::Done(());
         };
         loop {
@@ -733,16 +733,16 @@ impl<'a> AsOfPlanner<'a> {
                 break;
             }
         }
-        self.phase = Phase::Past;
+        self.pass = Pass::Past;
         Resolve::Done(())
     }
 
-    /// Phase 3: what lies past the reach, by keys ([`bridges_nothing_past`]),
+    /// Pass 3: what lies past the reach, by keys ([`bridges_nothing_past`]),
     /// then the straddle rule, whose candidates all touch and pass the reach
     /// and so were read by the last step.
     fn judge_past(&mut self, stamps: &Stamps) -> Resolve<()> {
         let Some(chain) = self.chain.as_ref() else {
-            self.phase = Phase::Done(no_snapshot(self.inventory));
+            self.pass = Pass::Done(no_snapshot(self.inventory));
             return Resolve::Done(());
         };
         let reach = chain.reaches();
@@ -763,7 +763,7 @@ impl<'a> AsOfPlanner<'a> {
                 Resolve::Done(None) => PlanOutcome::Plan(chain.clone()),
             }
         };
-        self.phase = Phase::Done(outcome);
+        self.pass = Pass::Done(outcome);
         Resolve::Done(())
     }
 }
@@ -773,11 +773,11 @@ impl Step for AsOfPlanner<'_> {
 
     fn advance(&mut self, stamps: &Stamps) -> Resolve<PlanOutcome> {
         loop {
-            let step = match &self.phase {
-                Phase::Done(outcome) => return Resolve::Done(outcome.clone()),
-                Phase::Base => self.find_base(stamps),
-                Phase::Extend => self.extend(stamps),
-                Phase::Past => self.judge_past(stamps),
+            let step = match &self.pass {
+                Pass::Done(outcome) => return Resolve::Done(outcome.clone()),
+                Pass::Base => self.find_base(stamps),
+                Pass::Extend => self.extend(stamps),
+                Pass::Past => self.judge_past(stamps),
             };
             if let Resolve::Need(info) = step {
                 return Resolve::Need(info);
@@ -1474,7 +1474,7 @@ mod tests {
 
     #[test]
     fn a_stray_past_a_straddling_file_is_still_inside_file() {
-        // L0 20 is stamped before the instant but does not connect (ruling A1:
+        // L0 20 is stamped before the instant but does not connect (a stray is
         // ignored, full stop), and L1 4-9 links, so the replica continues. The
         // outcome is the one without the stray: the state at 3, inside L1 4-9.
         let files = [
@@ -1548,7 +1548,7 @@ mod tests {
 
     /// The transaction a correct restore must end at, if any file qualifies.
     /// An instant ends at the furthest state some chain of admitted files
-    /// reaches, whatever else is admitted (ruling A1).
+    /// reaches, whatever else is admitted.
     fn model_end(files: &[Spec], goal: Goal) -> Option<u64> {
         match goal {
             Goal::Txid(n) => Some(n),

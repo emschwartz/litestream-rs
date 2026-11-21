@@ -19,7 +19,8 @@
 //! from the first; the node id and WAL origin are dropped. The output is tracked
 //! only when every input is, and then carries the last input's post-apply
 //! checksum; otherwise it is untracked with no checksums, which is what Go's
-//! level compactor writes (decision D2).
+//! level compactor writes (Go's compactor rejects tracked checksums, so they stay off
+//! until rollback to Go is no longer needed).
 //!
 //! Nothing is published unless every input's decoder finished with
 //! [lsr_ltx::Verified] and every checksum link held. Headers are all read and

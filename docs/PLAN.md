@@ -142,7 +142,7 @@ Workspace, lint set, CI, pinned Go binaries. Settle what the research left unver
 **Value alone:** an independent verifier for existing Litestream backups (upstream restore defaults to no integrity check and exits 0 on corrupt output).
 
 ### Phase 2: writing (sans-IO core, simulator, compaction)
-- Core state machine: `recover`, sync planning from a `WalSource` (incremental from a cursor, walgrowth pages from the database file, snapshot from page 1), checkpoint `decide()`, upload sequencing, level compaction, snapshot schedule, retention.
+- Core state machine: `recover`, sync planning from a `WalSource` (incremental from a cursor, the pages the database grew by that no scanned WAL frame holds (grown pages), from the database file, snapshot from page 1), checkpoint `decide()`, upload sequencing, level compaction, snapshot schedule, retention.
 - Compactor: k-way merge with bounded fan-in (upstream #1467 is open on unbounded fan-in); header fields per upstream's merge rule so Go accepts the output.
 - Retention deletes only what a higher level covers, keeps contiguity and the newest file, and keeps L0 files longer than the longest expected restore takes (a long restore fails partway if retention deletes files its plan had named).
 - Upload integrity: each staged file is verified on the same read that uploads it. Single PUTs and parts send Content-MD5 and compare the returned ETag with a local MD5. Tigris documents verifying only a sha256 checksum and lists a wrong sha256 on PutObject as accepted; whether it checks Content-MD5 is undocumented (task 8t settles it), so the ETag compare is the check that does not depend on the provider.

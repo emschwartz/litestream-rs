@@ -49,7 +49,7 @@ fn the_first_read_is_a_baseline() {
     assert_eq!(observer.counts(), HostCheckpoints::NONE);
 }
 
-/// The pin above mark 0: the host's checkpoint copies up to it, once.
+/// The pin above read mark 0: the host's checkpoint copies up to it, once.
 #[test]
 fn a_backfill_the_replicator_did_not_run_is_a_host_checkpoint() {
     let mut observer = HostObserver::default();
@@ -86,11 +86,11 @@ fn a_restart_after_a_full_backfill_is_not_one() {
     assert_eq!(seen, [None, None]);
 }
 
-/// The pin on mark 0: the replicator's full checkpoint, then its own one-frame write
+/// The pin on read mark 0: the replicator's full checkpoint, then its own one-frame write
 /// restarted the WAL, and the WAL grew past the threshold over two reads with nothing
 /// backfilled.
 #[test]
-fn growth_past_the_threshold_on_mark_zero_is_a_stall() {
+fn growth_past_the_threshold_on_read_mark_zero_is_a_stall() {
     let mut observer = HostObserver::default();
     observer.poll(read(1, 900, 0));
     observer.ours(Some(read(2, 1, 0)), ran(1000, 1000));
@@ -121,7 +121,7 @@ fn growth_past_the_threshold_on_mark_zero_is_a_stall() {
     );
 }
 
-/// The pin above mark 0: once the host's checkpoint reached the pin, its next attempts copy
+/// The pin above read mark 0: once the host's checkpoint reached the pin, its next attempts copy
 /// nothing more.
 #[test]
 fn growth_past_the_threshold_after_a_capped_backfill_is_a_stall() {
@@ -144,7 +144,7 @@ fn growth_past_the_threshold_after_a_capped_backfill_is_a_stall() {
     );
 }
 
-/// The pin above mark 0 with frames below it unbackfilled: a host attempt would have copied
+/// The pin above read mark 0 with frames below it unbackfilled: a host attempt would have copied
 /// them, so growth with nothing copied means the host runs no automatic checkpoint.
 #[test]
 fn growth_with_frames_below_the_pin_unbackfilled_is_no_stall() {
@@ -254,7 +254,7 @@ fn counts_carry_across_a_replaced_engine() {
     assert_eq!((both.ran(), both.stalled, both.last), (3, 1, later.last));
 }
 
-/// The pin's read mark in the model: SQLite's mark 0, or a mark at a frame.
+/// The pin's read mark in the model: SQLite's read mark 0, or a mark at a frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Pin {
     Zero,
@@ -262,7 +262,7 @@ enum Pin {
 }
 
 /// SQLite's backfill and restart rules under one pin and no other reader (the rules of
-/// `crates/sim/src/sqlite.rs`, R1 to R3).
+/// `crates/sim/src/sqlite.rs`: backfill limit, restart, mark choice).
 #[derive(Clone, Copy, Debug)]
 struct Model {
     generation: u32,
@@ -306,7 +306,7 @@ impl Model {
 
     /// The replicator's checkpoint: `full` copies everything, else half (a host reader
     /// stopped it). The pin is retaken as SQLite picks a mark, then the replicator writes one
-    /// frame of its own (which restarts a fully backfilled log under a pin on mark 0). Returns
+    /// frame of its own (which restarts a fully backfilled log under a pin on read mark 0). Returns
     /// what the checkpoint call reported.
     fn ours(&mut self, full: bool) -> Option<CheckpointRun> {
         let to = if full { self.frames } else { self.frames / 2 };
@@ -350,7 +350,7 @@ fn step() -> impl Strategy<Value = Step> {
 proptest! {
     /// Every host backfill between two polls is observed once, the replicator's own
     /// checkpoints never are, a stall is inferred only where a host attempt did nothing, and
-    /// a host running no automatic checkpoint shows nothing while the pin sits above mark 0
+    /// a host running no automatic checkpoint shows nothing while the pin sits above read mark 0
     /// with frames below it unbackfilled.
     #[test]
     fn host_checkpoints_are_seen_and_the_replicators_are_not(

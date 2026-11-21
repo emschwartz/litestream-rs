@@ -132,7 +132,7 @@ impl ReadEpoch {
 ///
 /// `Pinned(e)` means: during read epoch `e`, this position's synced end
 /// equalled the committed end. While the epoch holds, a read mark above 0 blocks
-/// every restart, and under mark 0 a restart can happen once and cannot be
+/// every restart, and under read mark 0 a restart can happen once and cannot be
 /// followed by another, so nothing past the position can be discarded.
 ///
 /// It is assigned in exactly three places:

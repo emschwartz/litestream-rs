@@ -10,7 +10,7 @@
 //!   be replayed, and a failed commit may have published, so the right move
 //!   is the caller's: list, then decide.
 //! - A backend-named wait longer than the policy's cap is returned, not slept:
-//!   long waits belong to the caller's schedule, not to a task holding a
+//!   long waits belong to the caller's schedule, not to a caller holding a
 //!   connection and a lock.
 //! - Every retry has a limit: after `attempts` calls the last error is returned
 //!   as it came.

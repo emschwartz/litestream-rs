@@ -11,8 +11,8 @@
 //!
 //! 1. Sync when the WAL's committed end moved, a snapshot step is pending, or
 //!    the checkpoint decision wants a proof; then, in the same tick, the
-//!    checkpoint the decision calls for, consuming that sync's proof (F1: no
-//!    checkpoint without one, and a proof never outlives its tick).
+//!    checkpoint the decision calls for, consuming that sync's proof (no
+//!    checkpoint runs without one, and a proof never outlives its tick).
 //! 2. Upload while staged files are not on the replica.
 //! 3. Prune staged level-0 files the replica's level 1 covers, keeping the
 //!    tip.
@@ -764,8 +764,8 @@ impl Actor {
         }
     }
 
-    /// Lists the replica, reads the newest staged file and recovers (4d's
-    /// order). A failure anywhere boots again from the start.
+    /// Lists the replica, reads the newest staged file and recovers (in
+    /// that order). A failure anywhere boots again from the start.
     async fn boot<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore, R: ObjectStore>(
         &mut self,
         env: &mut Env<'_, W, P, C, L, R>,
@@ -817,8 +817,8 @@ impl Actor {
                 cause: pending.unwrap_or(found),
             },
         };
-        // Only a boot that continues seeds the table (ruling P5): a snapshot
-        // records every page it reads.
+        // Only a boot that continues seeds the table, from the staged files boot
+        // already verified: a snapshot records every page it reads.
         let pages = match course {
             Course::At {
                 position,
@@ -1464,8 +1464,8 @@ impl Actor {
 
     /// The newest staged transaction a prune may delete through, when it is
     /// past what was pruned: confirmed at the replica, compacted into its
-    /// level 1 (compaction reads staged inputs first, R3), and below the tip
-    /// (boot's rule 9 and V3 compare it with the WAL). `None` before the
+    /// level 1 (compaction reads staged inputs first), and below the tip
+    /// (boot's rule 9 compares the whole tip with the WAL). `None` before the
     /// first maintenance listing.
     fn prune_bound(&self) -> Option<Txid> {
         let below_tip = self.staged()?.prev()?;
@@ -1478,8 +1478,9 @@ impl Actor {
         Some(bound).filter(|bound| self.engine.pruned < Some(*bound))
     }
 
-    /// Lists the replica and runs what maintenance says is due (S4: only once
-    /// every staged file is published).
+    /// Lists the replica and runs what maintenance says is due, only once
+    /// every staged file is published (so a snapshot's last transaction is at or below the
+    /// published one).
     async fn maintain_unit<
         W: WalSource,
         P: PageSource,
@@ -1621,7 +1622,7 @@ impl Actor {
     }
 
     /// Where a failed job waits: its level's backoff when `MaintainState`
-    /// keeps one (R3: the other levels keep running), else the maintenance
+    /// keeps one (the other levels keep running), else the maintenance
     /// lane, so a failing retention delete backs off instead of relisting
     /// at once. A level's wait is not the lane's failure, so the lane's wait
     /// resets; a degraded state stays.
@@ -1701,7 +1702,7 @@ impl Actor {
             Err(SnapshotFailed { fault, key }) => {
                 // The store took the commit and then said the object is not
                 // what was sent: it is listed, so it goes, as a rejected
-                // compaction output does (R2).
+                // compaction output does.
                 if leaves_bad_snapshot(fault) && env.remote.delete(&[key]).await.is_err() {
                     self.engine.maintain.state.distrust_snapshot(key);
                 }

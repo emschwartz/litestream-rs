@@ -28,7 +28,7 @@
 //! the current window (`go_truncate(now, interval)`), and then only the source
 //! files above the destination's max, as one strictly contiguous run of at
 //! most [`MAX_INPUTS`]. The output carries the last input's timestamp
-//! (task 2), so a backlog keeps passing the window test until a run's last
+//! (so a compaction never makes its output look older than its inputs), so a backlog keeps passing the window test until a run's last
 //! input is newer than the window start: 100 source files drain as four jobs
 //! in one window and the last one closes it. A hole in the source ends the run
 //! and the next job starts after it, so a hole one level down is the same hole
@@ -47,7 +47,7 @@
 //! ([`RetentionMode::Off`]) that step is skipped: it reads no stamp, plans no
 //! delete and reports no hold, and the wait is the schedule's alone.
 //!
-//! The snapshot is written by task 4's loop, which owns the database position;
+//! The snapshot is written by the actor's loop, which owns the database position;
 //! [`SnapshotJob`] only says when. Compaction never deletes its inputs, so a
 //! crash at any point leaves a replica that restores: the inputs are still
 //! there and the output is either visible or absent. Deletion is a separate
@@ -182,7 +182,7 @@ impl CompactJob {
 pub struct SnapshotJob {
     /// The newest snapshot's last transaction; `None` when there is none.
     pub after: Option<Txid>,
-    /// The newest position the planner saw. Task 4 snapshots its own
+    /// The newest position the planner saw. The actor snapshots its own
     /// position, which is at least this.
     pub through: Txid,
 }
@@ -231,7 +231,7 @@ impl DeleteJob {
 pub enum Job {
     /// Merge a run of files into the next level.
     Compact(CompactJob),
-    /// Write a snapshot (task 4's job to run).
+    /// Write a snapshot (the actor's loop runs it).
     Snapshot(SnapshotJob),
     /// Delete files.
     Delete(DeleteJob),
