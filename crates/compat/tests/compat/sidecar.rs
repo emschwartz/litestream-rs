@@ -33,10 +33,9 @@ use std::time::Duration;
 
 use alternate::{Launch, alternate, seed};
 use lsr_compat::{
-    AppFixture, GoBuild, GoRestore, Kind, PageEncoding, Replicator, Shape, Summary, Target,
-    builds_in, builds_under_test, hash_pages, integrity_check, lsr_binary, position,
-    restore_replica, restore_with_go, snapshots, wait_boot_file, wait_staged_past, wait_until,
-    wait_uploaded,
+    AppFixture, GoBuild, Kind, PageEncoding, Replicator, Shape, Summary, Target, builds_in,
+    builds_under_test, go_restore, lsr_binary, position, rust_restore, snapshots, wait_boot_file,
+    wait_staged_past, wait_until, wait_uploaded,
 };
 use lsr_core::RestoreTarget;
 use lsr_ltx::Txid;
@@ -107,42 +106,6 @@ fn check_config(lsr: &Path, config: &Path) {
     for knob in ["shutdown-sync-interval", "busy-timeout"] {
         assert!(text.contains(knob), "no warning for {knob}: {text}");
     }
-}
-
-fn pages_of(path: &Path) -> Vec<String> {
-    integrity_check(path).expect("integrity_check");
-    hash_pages(path).expect("hash").page_hashes
-}
-
-fn fresh(fixture: &AppFixture, name: &str) -> PathBuf {
-    let out = fixture.dir().join(name);
-    for suffix in ["", "-wal", "-shm"] {
-        drop(std::fs::remove_file(format!("{}{suffix}", out.display())));
-    }
-    out
-}
-
-fn rust_restore(fixture: &AppFixture, target: RestoreTarget, name: &str) -> Vec<String> {
-    let out = fresh(fixture, name);
-    let restored = restore_replica(&fixture.replica, target, &out).expect("sink");
-    assert!(
-        restored.is_ok(),
-        "{name}: Rust cannot restore: {restored:?}"
-    );
-    pages_of(&out)
-}
-
-fn go_restore(
-    bin: &Path,
-    config: &Path,
-    fixture: &AppFixture,
-    target: Target,
-    name: &str,
-) -> Vec<String> {
-    let out = fresh(fixture, name);
-    let result = restore_with_go(bin, config, &fixture.db, &out, target).expect("go runs");
-    assert_eq!(result, GoRestore::Restored, "{name}: Go restore");
-    pages_of(&out)
 }
 
 /// One daemon's turn over every fixture: it comes up with every database, each database commits
