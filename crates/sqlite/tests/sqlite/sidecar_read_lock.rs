@@ -327,7 +327,7 @@ fn snapshots_since(rig: &Rig<Sqlite>, from: usize) -> Vec<Option<SnapshotCause>>
                 ..
             } => Some(*cause),
             Tick::Ran { .. }
-            | Tick::Halted(_)
+            | Tick::Stopped(_)
             | Tick::Drained { .. }
             | Tick::DeadlineReached(_) => None,
         })

@@ -241,11 +241,11 @@ impl<B: Backend> Stepper<B> {
     /// Recovers, then runs the step the verdict calls for.
     ///
     /// # Errors
-    /// [`RigError::Store`] for a halt or a failed step.
+    /// [`RigError::Store`] for a stop or a failed step.
     pub fn sync(&mut self) -> Result<StepDid, RigError> {
         let verdict = self.verdict()?;
         let step = Step::try_from(verdict.recovered)
-            .map_err(|halt| RigError::Store(format!("the verdict halts: {halt:?}")))?;
+            .map_err(|stop| RigError::Store(format!("the verdict stops: {stop:?}")))?;
         let (mut wal, _, committed) = self.view()?;
         self.now = self.now.saturating_add(10);
         let mut db = self.backend.clone();

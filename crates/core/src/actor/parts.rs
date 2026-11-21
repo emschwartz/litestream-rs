@@ -22,7 +22,7 @@ use super::ActorConfig;
 use super::state::{Gate, Live, Maintain, Phase, Tasks};
 use crate::app::AppCheckpointObserver;
 use crate::checkpoint::CheckpointState;
-use crate::fault::{HaltCause, SnapshotCause};
+use crate::fault::{SnapshotCause, StopCause};
 use crate::pages::PageTable;
 use crate::position::Position;
 use crate::upload::UploadState;
@@ -34,15 +34,15 @@ pub(super) enum Stop {
     No,
     /// Shutting down: only sync and upload run, until the deadline.
     Draining {
-        /// When work still left becomes [`HaltCause::Shutdown`].
+        /// When work still left becomes [`StopCause::Shutdown`].
         deadline: Timestamp,
     },
     /// Stopped: every later tick returns at once, with no I/O.
-    Halted(HaltCause),
+    Stopped(StopCause),
 }
 
 impl Stop {
-    /// After `begin_shutdown`. A halt stays a halt, and a second shutdown
+    /// After `begin_shutdown`. A stop stays a stop, and a second shutdown
     /// keeps the earlier of the two deadlines: a later call can shorten a
     /// drain, never lengthen it.
     pub(super) fn drain(self, deadline: Timestamp) -> Self {
@@ -51,14 +51,14 @@ impl Stop {
             Self::Draining { deadline: was } => Self::Draining {
                 deadline: was.min(deadline),
             },
-            Self::Halted(_) => self,
+            Self::Stopped(_) => self,
         }
     }
 
     /// The public phase: a stop, or whether the engine has booted.
     pub(super) const fn phase(self, booted: bool) -> Phase {
         match (self, booted) {
-            (Self::Halted(cause), _) => Phase::Halted(cause),
+            (Self::Stopped(cause), _) => Phase::Stopped(cause),
             (Self::Draining { deadline }, _) => Phase::Draining { deadline },
             (Self::No, false) => Phase::Boot,
             (Self::No, true) => Phase::Running,

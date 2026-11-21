@@ -175,12 +175,12 @@ fn rule_2_a_remote_below_the_newest_staged_file_is_pending_uploads() {
 }
 
 #[test]
-fn rule_2_running_behind_the_remote_halts() {
+fn rule_2_running_behind_the_remote_stops() {
     let wal = fresh();
     let pos = position(&wal, 2, Continuity::Broken);
     assert_eq!(
         run_running(&wal, &pos, Some(3)).recovered,
-        Recovered::Halt(HaltCause::OtherWriter)
+        Recovered::Stop(StopCause::OtherWriter)
     );
 }
 
@@ -249,7 +249,7 @@ fn rule_4_a_torn_header_is_wal_missing() {
 
 // Rule 5.
 #[test]
-fn rule_5_a_new_page_size_halts() {
+fn rule_5_a_new_page_size_stops() {
     let wal = fresh();
     let pos = position(&wal, 2, Continuity::Broken);
     let other = FakeWal::new(PageSize::new(1024).unwrap(), salts(10));
@@ -259,7 +259,7 @@ fn rule_5_a_new_page_size_halts() {
             &view(&other),
             None
         ),
-        Recovered::Halt(HaltCause::PageSizeChanged {
+        Recovered::Stop(StopCause::PageSizeChanged {
             was: PageSize::MIN,
             now: PageSize::new(1024).unwrap(),
         })
@@ -952,8 +952,8 @@ fn shape(recovered: &Recovered) -> String {
     match recovered {
         Recovered::Continue(_) => "Continue".into(),
         Recovered::WalRestarted(_) => "WalRestarted".into(),
-        Recovered::Halt(HaltCause::PageSizeChanged { .. }) => "Halt(PageSizeChanged)".into(),
-        Recovered::Halt(cause) => format!("Halt({cause:?})"),
+        Recovered::Stop(StopCause::PageSizeChanged { .. }) => "Stop(PageSizeChanged)".into(),
+        Recovered::Stop(cause) => format!("Stop({cause:?})"),
         Recovered::Snapshot { cause, .. } => match cause {
             SnapshotCause::BehindRemote { .. } => "BehindRemote".into(),
             SnapshotCause::LocalRewound { .. } => "LocalRewound".into(),
@@ -1087,12 +1087,12 @@ fn generated_triples_cover_every_outcome_recover_can_produce() {
         "BehindRemote",
         "NewestStagedFileUnreadable",
         "WalMissing",
-        "Halt(PageSizeChanged)",
+        "Stop(PageSizeChanged)",
         "GenerationChanged",
         "PrevFrameMismatch",
         "LastPageMismatch",
         "LocalRewound",
-        "Halt(OtherWriter)",
+        "Stop(OtherWriter)",
     ] {
         assert!(seen.contains(want), "never produced {want}: {seen:?}");
     }

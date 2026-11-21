@@ -405,7 +405,7 @@ impl Chain {
     /// Runs the actor until it reports nothing ready.
     ///
     /// # Errors
-    /// [`CompatError::Fixture`] when the actor retries, resnapshots into a halt or does not
+    /// [`CompatError::Fixture`] when the actor retries, resnapshots into a stop or does not
     /// settle: a healthy run on a local disk does none of these.
     pub fn settle(&mut self) -> Result<(), CompatError> {
         for _ in 0..MAX_TICKS {
@@ -432,8 +432,10 @@ impl Chain {
                     )));
                 }
                 Tick::Ran { event, .. } => self.events.push(event),
-                Tick::Halted(cause) => {
-                    return Err(CompatError::Fixture(format!("the actor halted: {cause:?}")));
+                Tick::Stopped(cause) => {
+                    return Err(CompatError::Fixture(format!(
+                        "the actor stopped: {cause:?}"
+                    )));
                 }
                 Tick::Drained { .. } | Tick::DeadlineReached(_) => {
                     return Err(CompatError::Fixture("the actor drained unasked".to_owned()));
@@ -593,7 +595,7 @@ impl Chain {
     /// run recorded; the live connections close, the application's stays open.
     ///
     /// # Errors
-    /// [`CompatError::Fixture`] when the drain halts or does not finish.
+    /// [`CompatError::Fixture`] when the drain stops or does not finish.
     pub fn finish(mut self) -> Result<Written, CompatError> {
         let deadline = self
             .actor
@@ -628,8 +630,10 @@ impl Chain {
                     });
                 }
                 Tick::Ran { event, .. } => self.events.push(event),
-                Tick::Halted(cause) => {
-                    return Err(CompatError::Fixture(format!("the drain halted: {cause:?}")));
+                Tick::Stopped(cause) => {
+                    return Err(CompatError::Fixture(format!(
+                        "the drain stopped: {cause:?}"
+                    )));
                 }
                 Tick::DeadlineReached(left) => {
                     return Err(CompatError::Fixture(format!(

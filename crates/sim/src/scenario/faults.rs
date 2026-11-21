@@ -2,15 +2,15 @@
 //! faults: the clock stepping back.
 //!
 //! A persistent fault's scenarios hold under every set of responses: each
-//! names its cause with [`Expect::Stopped`], which is a halt where the
+//! names its cause with [`Expect::Stopped`], which is a stop where the
 //! responses stop and a degraded task where they keep trying, and the ones
 //! whose fault clears also expect [`Expect::Recovered`].
 
 use std::time::Duration;
 
 use lsr_core::{
-    Event, Fault, FileKey, HaltCause, Level, MaintainedEvent, PersistentCause, SnapshotCause,
-    SourceError, SourceOp, StoreError, StoreOp,
+    Event, Fault, FileKey, Level, MaintainedEvent, PersistentCause, SnapshotCause, SourceError,
+    SourceOp, StopCause, StoreError, StoreOp,
 };
 use lsr_ltx::PageSize;
 
@@ -158,31 +158,31 @@ impl From<&Fault> for FaultKind {
 /// The persistent cause a fault's policy names, if it has one.
 #[must_use]
 pub fn persistent_of(kind: FaultKind) -> Option<PersistentCause> {
-    halt_of(kind).and_then(PersistentCause::of)
+    stop_of(kind).and_then(PersistentCause::of)
 }
 
 /// The stop cause a fault's policy names, if its policy can stop the engine.
 #[must_use]
-pub fn halt_of(kind: FaultKind) -> Option<HaltCause> {
+pub fn stop_of(kind: FaultKind) -> Option<StopCause> {
     let page = PageSize::MIN;
     match kind {
-        FaultKind::StoreAuth => Some(HaltCause::Credentials),
-        FaultKind::StoreRefused => Some(HaltCause::StoreRefused),
-        FaultKind::RemoteCorrupt => Some(HaltCause::RemoteCorrupt),
-        FaultKind::RemoteAheadOfLocal => Some(HaltCause::OtherWriter),
-        FaultKind::RemoteRegressed => Some(HaltCause::RemoteRegressed),
-        FaultKind::PageSizeChanged => Some(HaltCause::PageSizeChanged {
+        FaultKind::StoreAuth => Some(StopCause::Credentials),
+        FaultKind::StoreRefused => Some(StopCause::StoreRefused),
+        FaultKind::RemoteCorrupt => Some(StopCause::RemoteCorrupt),
+        FaultKind::RemoteAheadOfLocal => Some(StopCause::OtherWriter),
+        FaultKind::RemoteRegressed => Some(StopCause::RemoteRegressed),
+        FaultKind::PageSizeChanged => Some(StopCause::PageSizeChanged {
             was: page,
             now: page,
         }),
-        FaultKind::WalCorruptBelowCommitted => Some(HaltCause::WalCorrupt),
-        FaultKind::WalTruncatedBelowCommitted => Some(HaltCause::WalTruncated),
-        FaultKind::WalUnlinked => Some(HaltCause::WalUnlinked),
+        FaultKind::WalCorruptBelowCommitted => Some(StopCause::WalCorrupt),
+        FaultKind::WalTruncatedBelowCommitted => Some(StopCause::WalTruncated),
+        FaultKind::WalUnlinked => Some(StopCause::WalUnlinked),
         FaultKind::DatabasePageMismatch => {
-            lsr_ltx::PageNo::new(1, page).map(|pgno| HaltCause::DatabasePageMismatch { pgno })
+            lsr_ltx::PageNo::new(1, page).map(|pgno| StopCause::DatabasePageMismatch { pgno })
         }
-        FaultKind::ShutdownDeadline => Some(HaltCause::Shutdown),
-        FaultKind::Bug => Some(HaltCause::Bug),
+        FaultKind::ShutdownDeadline => Some(StopCause::Shutdown),
+        FaultKind::Bug => Some(StopCause::Bug),
         FaultKind::StoreTransient
         | FaultKind::StoreThrottled
         | FaultKind::RemoteObjectMissing
@@ -209,15 +209,15 @@ pub fn names_fault(scenario: &Scenario, kind: FaultKind) -> bool {
     scenario
         .expect
         .iter()
-        .any(|want| match (want, halt_of(kind)) {
+        .any(|want| match (want, stop_of(kind)) {
             (Expect::Event(EventMatch::Retrying(got)), _) => *got == kind,
             // The lost file's policy is a snapshot at the first transaction the
             // replica lacks, announced as this resnapshot.
             (Expect::Event(EventMatch::Resnapshot(CauseKind::NewestStagedFileUnreadable)), _) => {
                 kind == FaultKind::StagedLost
             }
-            (Expect::Stopped(got), Some(halt)) => {
-                std::mem::discriminant(got) == std::mem::discriminant(&halt)
+            (Expect::Stopped(got), Some(stop)) => {
+                std::mem::discriminant(got) == std::mem::discriminant(&stop)
             }
             _ => false,
         })
@@ -483,7 +483,7 @@ fn throttle_waits(report: &RunReport) -> Result<(), String> {
                 waiting = Some(*until);
             }
             Seen::Event(_)
-            | Seen::Halt(_)
+            | Seen::Stop(_)
             | Seen::Recovered(_)
             | Seen::Snapshot(_)
             | Seen::Oracle => {}
@@ -495,32 +495,32 @@ fn throttle_waits(report: &RunReport) -> Result<(), String> {
     Ok(())
 }
 
-/// A halt for the scenario's fault, not the end of a drain whose deadline a
+/// A stop for the scenario's fault, not the end of a drain whose deadline a
 /// degraded task outlasted.
-fn stopped(seen: &Seen) -> bool {
-    matches!(seen, Seen::Halt(cause) if *cause != HaltCause::Shutdown)
+fn stopped_by_fault(seen: &Seen) -> bool {
+    matches!(seen, Seen::Stop(cause) if *cause != StopCause::Shutdown)
 }
 
-/// No later tick calls the replica: the halt is final until a restart. Where
-/// the responses keep trying there is no halt to be quiet after: a task was
+/// No later tick calls the replica: the stop is final until a restart. Where
+/// the responses keep trying there is no stop to be quiet after: a task was
 /// degraded instead, which the expectations check.
-fn quiet_after_halt(report: &RunReport) -> Result<(), String> {
+fn quiet_after_stop(report: &RunReport) -> Result<(), String> {
     let degraded = report
         .seen
         .iter()
         .any(|seen| matches!(seen, Seen::Event(Event::Degraded { .. })));
-    if degraded && !report.seen.iter().any(stopped) {
+    if degraded && !report.seen.iter().any(stopped_by_fault) {
         return Ok(());
     }
-    let mut halted = false;
+    let mut stopped = false;
     for (at, seen) in report.seen.iter().enumerate() {
         match seen {
-            Seen::Halt(_) if stopped(seen) => halted = true,
-            Seen::Event(Event::Booted { .. }) => halted = false,
+            Seen::Stop(_) if stopped_by_fault(seen) => stopped = true,
+            Seen::Event(Event::Booted { .. }) => stopped = false,
             // A restore's reboot lists the replica in its first tick, and the
-            // oracle has just judged: that tick is not the halted engine's.
+            // oracle has just judged: that tick is not the stopped engine's.
             Seen::Tick { remote_calls, .. }
-                if halted
+                if stopped
                     && *remote_calls != 0
                     && !matches!(
                         at.checked_sub(1).and_then(|p| report.seen.get(p)),
@@ -528,25 +528,25 @@ fn quiet_after_halt(report: &RunReport) -> Result<(), String> {
                     ) =>
             {
                 return Err(format!(
-                    "{remote_calls} calls to the replica after the halt"
+                    "{remote_calls} calls to the replica after the stop"
                 ));
             }
             Seen::Event(_)
-            | Seen::Halt(_)
+            | Seen::Stop(_)
             | Seen::Recovered(_)
             | Seen::Snapshot(_)
             | Seen::Oracle
             | Seen::Tick { .. } => {}
         }
     }
-    if report.seen.iter().any(stopped) {
+    if report.seen.iter().any(stopped_by_fault) {
         Ok(())
     } else {
-        Err("the engine never halted".to_owned())
+        Err("the engine never stopped".to_owned())
     }
 }
 
-/// The credentials stop working in the middle of the run: a halt, and no
+/// The credentials stop working in the middle of the run: a stop, and no
 /// further calls.
 #[must_use]
 pub fn creds_revoked_mid_run() -> Scenario {
@@ -559,9 +559,9 @@ pub fn creds_revoked_mid_run() -> Scenario {
                 op: StoreOp::Upload,
             }),
         )],
-        vec![Expect::Stopped(HaltCause::Credentials), Expect::Recovered],
+        vec![Expect::Stopped(StopCause::Credentials), Expect::Recovered],
     );
-    s.check = Some(quiet_after_halt);
+    s.check = Some(quiet_after_stop);
     s
 }
 
@@ -578,9 +578,9 @@ pub fn store_refuses_upload() -> Scenario {
                 status: 403,
             }),
         )],
-        vec![Expect::Stopped(HaltCause::StoreRefused), Expect::Recovered],
+        vec![Expect::Stopped(StopCause::StoreRefused), Expect::Recovered],
     );
-    s.check = Some(quiet_after_halt);
+    s.check = Some(quiet_after_stop);
     s
 }
 
@@ -688,7 +688,7 @@ fn deleted_then_put_again(report: &RunReport) -> Result<(), String> {
                 );
             }
             Seen::Event(_)
-            | Seen::Halt(_)
+            | Seen::Stop(_)
             | Seen::Recovered(_)
             | Seen::Snapshot(_)
             | Seen::Oracle
@@ -715,7 +715,7 @@ pub fn remote_bitrot_on_list_read() -> Scenario {
             vec![Op::Restore],
         ],
         vec![
-            Expect::Stopped(HaltCause::RemoteCorrupt),
+            Expect::Stopped(StopCause::RemoteCorrupt),
             Expect::Recovered,
             Expect::Oracle,
         ],
@@ -744,9 +744,9 @@ pub fn second_writer_mid_run() -> Scenario {
             ticks(SETTLE),
             vec![Op::Remote(RemoteOp::RemoveUnrecognized), Op::Restore],
         ],
-        vec![Expect::Stopped(HaltCause::OtherWriter), Expect::Oracle],
+        vec![Expect::Stopped(StopCause::OtherWriter), Expect::Oracle],
     );
-    s.check = Some(quiet_after_halt);
+    s.check = Some(quiet_after_stop);
     s
 }
 
@@ -777,12 +777,12 @@ pub fn bucket_rolled_back() -> Scenario {
             vec![Op::Restore],
         ],
         vec![
-            Expect::Stopped(HaltCause::RemoteRegressed),
+            Expect::Stopped(StopCause::RemoteRegressed),
             Expect::Recovered,
             Expect::Oracle,
         ],
     );
-    s.check = Some(quiet_after_halt);
+    s.check = Some(quiet_after_stop);
     s
 }
 
@@ -859,7 +859,7 @@ fn staged_files_dropped(report: &RunReport) -> Result<(), String> {
     let mut lost = false;
     for seen in &report.seen {
         match seen {
-            Seen::Halt(cause) => return Err(format!("halted: {cause:?}")),
+            Seen::Stop(cause) => return Err(format!("stopped: {cause:?}")),
             Seen::Event(Event::Degraded { cause, .. }) => {
                 return Err(format!("degraded: {cause:?}"));
             }
@@ -1084,7 +1084,7 @@ pub fn bit_flip_in_committed_frame() -> Scenario {
             Op::Wal(WalOp::FlipLastFrameBit),
             Op::RequestSnapshot,
         ],
-        vec![Expect::Stopped(HaltCause::WalCorrupt)],
+        vec![Expect::Stopped(StopCause::WalCorrupt)],
     );
     s.check = Some(nothing_staged_past_the_corrupt_frame);
     s
@@ -1103,18 +1103,18 @@ pub fn bit_flip_in_committed_frame_healed() -> Scenario {
             Op::Tick,
             Op::Wal(WalOp::FlipLastFrameBit),
         ],
-        vec![Expect::Stopped(HaltCause::WalCorrupt), Expect::Recovered],
+        vec![Expect::Stopped(StopCause::WalCorrupt), Expect::Recovered],
     );
-    s.check = Some(quiet_after_halt);
+    s.check = Some(quiet_after_stop);
     s
 }
 
-/// The halt is quiet; or, where the responses keep trying, from the first
+/// The stop is quiet; or, where the responses keep trying, from the first
 /// degraded sync to the end no file is staged at all: not the corrupt
 /// frame's transaction, not one after it, and not a snapshot.
 fn nothing_staged_past_the_corrupt_frame(report: &RunReport) -> Result<(), String> {
-    if report.seen.iter().any(stopped) {
-        return quiet_after_halt(report);
+    if report.seen.iter().any(stopped_by_fault) {
+        return quiet_after_stop(report);
     }
     let mut degraded = false;
     for seen in &report.seen {
@@ -1135,7 +1135,7 @@ fn nothing_staged_past_the_corrupt_frame(report: &RunReport) -> Result<(), Strin
                 return Err(format!("{task:?} recovered while the frame is corrupt"));
             }
             Seen::Event(_)
-            | Seen::Halt(_)
+            | Seen::Stop(_)
             | Seen::Recovered(_)
             | Seen::Snapshot(_)
             | Seen::Oracle
@@ -1153,7 +1153,7 @@ fn nothing_staged_past_the_corrupt_frame(report: &RunReport) -> Result<(), Strin
 /// the lock.
 #[must_use]
 pub fn wal_truncated_externally_under_lock() -> Scenario {
-    let mut expect = vec![Expect::Stopped(HaltCause::WalTruncated), Expect::Oracle];
+    let mut expect = vec![Expect::Stopped(StopCause::WalTruncated), Expect::Oracle];
     let mut s = build(
         "wal_truncated_externally_under_lock",
         vec![
@@ -1168,7 +1168,7 @@ pub fn wal_truncated_externally_under_lock() -> Scenario {
         ],
         std::mem::take(&mut expect),
     );
-    s.check = Some(quiet_after_halt);
+    s.check = Some(quiet_after_stop);
     s
 }
 
@@ -1178,9 +1178,9 @@ pub fn wal_unlinked_mid_run() -> Scenario {
     let mut s = injected(
         "wal_unlinked_mid_run",
         vec![Op::EnvFault(EnvFault::UnlinkWal), commit(2, false)],
-        vec![Expect::Stopped(HaltCause::WalUnlinked)],
+        vec![Expect::Stopped(StopCause::WalUnlinked)],
     );
-    s.check = Some(quiet_after_halt);
+    s.check = Some(quiet_after_stop);
     s
 }
 
@@ -1198,7 +1198,7 @@ const FLIPPED: u32 = 3;
 #[must_use]
 pub fn db_page_flipped_under_sync() -> Scenario {
     let pgno = lsr_ltx::PageNo::new(FLIPPED, PageSize::MIN);
-    let flipped = pgno.map_or(HaltCause::Bug, |pgno| HaltCause::DatabasePageMismatch {
+    let flipped = pgno.map_or(StopCause::Bug, |pgno| StopCause::DatabasePageMismatch {
         pgno,
     });
     injected(
@@ -1232,7 +1232,7 @@ pub fn sigterm_during_upload() -> Scenario {
             ticks(SETTLE),
             vec![Op::Restore],
         ],
-        vec![Expect::Stopped(HaltCause::Shutdown), Expect::Oracle],
+        vec![Expect::Stopped(StopCause::Shutdown), Expect::Oracle],
     )
 }
 
@@ -1261,7 +1261,7 @@ fn one_clamp_no_fault(report: &RunReport) -> Result<(), String> {
         match seen {
             Seen::Event(Event::Clamped(_)) => clamps = clamps.saturating_add(1),
             Seen::Event(Event::Retrying { .. } | Event::Degraded { .. })
-            | Seen::Halt(_)
+            | Seen::Stop(_)
             | Seen::Recovered(_) => faulted = true,
             Seen::Event(_) | Seen::Snapshot(_) | Seen::Oracle | Seen::Tick { .. } => {}
         }
@@ -1270,7 +1270,7 @@ fn one_clamp_no_fault(report: &RunReport) -> Result<(), String> {
         return Err(format!("{clamps} clamp events, want 1"));
     }
     if faulted {
-        return Err("a fault or a halt followed the clamp".to_owned());
+        return Err("a fault or a stop followed the clamp".to_owned());
     }
     Ok(())
 }
@@ -1329,7 +1329,7 @@ fn repaired_key(report: &RunReport) -> Result<FileKey, String> {
             ..
         }) => Some(*key),
         Seen::Event(_)
-        | Seen::Halt(_)
+        | Seen::Stop(_)
         | Seen::Recovered(_)
         | Seen::Snapshot(_)
         | Seen::Oracle

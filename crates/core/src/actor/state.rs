@@ -11,7 +11,7 @@ use std::num::NonZeroU32;
 use lsr_ltx::{Timestamp, Txid};
 
 use super::Actor;
-use crate::fault::{HaltCause, Next, PersistentCause};
+use crate::fault::{Next, PersistentCause, StopCause};
 use crate::maintain::{MaintainState, RetentionMode};
 use crate::verify::LivePages;
 
@@ -24,12 +24,12 @@ pub enum Phase {
     Running,
     /// Shutting down: only sync and upload run, until the deadline.
     Draining {
-        /// When work still left becomes [`HaltCause::Shutdown`].
+        /// When work still left becomes [`StopCause::Shutdown`].
         deadline: Timestamp,
     },
     /// Stopped for a person, by a cause whose configured response is to stop
     /// or by a drain's deadline: every later tick returns at once, with no I/O.
-    Halted(HaltCause),
+    Stopped(StopCause),
 }
 
 /// The five kinds of work, each with its own retry wait and its own degraded

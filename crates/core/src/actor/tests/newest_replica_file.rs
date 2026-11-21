@@ -33,7 +33,7 @@ fn with_staging_gone_boot_continues_from_the_replicas_newest_staged_file() {
     assert_eq!(rig.remote.reads_of(&newest_staged_file_key()), 2);
     rig.commit(3);
     let seen = rig.settle(&mut actor, T0 + 2);
-    no_halt(&seen);
+    no_stop(&seen);
     assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2), (3, 3)]);
     assert_eq!(snapshots(&rig), vec![1]);
     assert_eq!(restored(&rig), 3);
@@ -72,7 +72,7 @@ fn with_staging_gone_a_wal_that_restarted_snapshots_as_a_staged_newest_staged_fi
 }
 
 #[test]
-fn with_staging_gone_a_replica_newest_staged_file_naming_another_transaction_halts_corrupt() {
+fn with_staging_gone_a_replica_newest_staged_file_naming_another_transaction_stops_corrupt() {
     let (mut rig, mut actor) = wiped();
     // The newest staged file whose header names transaction 1 under key 2. The upload task's
     // read-back judges the newest key first, as it did before the newest staged file was read.
@@ -91,7 +91,7 @@ fn with_staging_gone_a_replica_newest_staged_file_naming_another_transaction_hal
     });
     let seen = rig.follow(&mut actor, T0 + 2, 5);
     assert!(
-        seen.contains(&Tick::Halted(HaltCause::RemoteCorrupt)),
+        seen.contains(&Tick::Stopped(StopCause::RemoteCorrupt)),
         "{seen:?}"
     );
 }

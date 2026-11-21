@@ -8,7 +8,7 @@
 //! SQLite connections are dropped, since the panic may have unwound through either; under
 //! `Responses::bug = KeepTrying` a fresh engine boots again after the retry wait (doubling, at
 //! most once per wait), with the connections reopened, and under `Stop` the replicator stops
-//! with `HaltCause::Bug`. A panic outside that catch ends the thread; its exit guard then
+//! with `StopCause::Bug`. A panic outside that catch ends the thread; its exit guard then
 //! reports `Gone::ThreadDied` to every waiter.
 //!
 //! What a fresh engine must not forget is the engine's own to keep: the fresh one is built
@@ -40,8 +40,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use lsr_core::{
-    Actor, AppCheckpoints, Degraded, Did, Env, Event as EngineEvent, HaltCause, Level, ObjectStore,
-    PageLimit, PersistentCause, Phase as EnginePhase, Response, Task, Tick, Unfinished, WalSource,
+    Actor, AppCheckpoints, Degraded, Did, Env, Event as EngineEvent, Level, ObjectStore, PageLimit,
+    PersistentCause, Phase as EnginePhase, Response, StopCause, Task, Tick, Unfinished, WalSource,
     retry_wait,
 };
 use lsr_ltx::{Timestamp, Txid};
@@ -162,7 +162,7 @@ pub(crate) struct Worker {
     rebuilt: Option<Rebuilt>,
     /// The thread itself stopped the replicator: a panic under `Responses::bug = Stop`, or a
     /// replaced database under `Responses::wal_unlinked = Stop`.
-    stopped: Option<HaltCause>,
+    stopped: Option<StopCause>,
     /// The earliest stop asked for: every wait of this thread is capped at it.
     stop: Option<Timestamp>,
     progress: Progress,
@@ -297,7 +297,7 @@ impl Worker {
 
     fn turn(&mut self, now: Timestamp) -> Turn {
         if let Some(cause) = self.stopped {
-            return self.halted(cause);
+            return self.stopped(cause);
         }
         if let Some(rebuilt) = self.rebuilt {
             // No engine runs to see the deadline pass: it ends here.
@@ -395,7 +395,7 @@ impl Worker {
             Tick::Ran { event, next } => self.ran(event, next, now),
             Tick::Drained { txid } => Turn::Done(Stopped::Drained { txid }),
             Tick::DeadlineReached(left) => Turn::Done(deadline_reached(left)),
-            Tick::Halted(cause) => self.halted(cause),
+            Tick::Stopped(cause) => self.stopped(cause),
         }
     }
 
@@ -439,7 +439,7 @@ impl Worker {
     }
 
     /// A stopped engine waits for the stop, which then reports its cause.
-    fn halted(&mut self, cause: HaltCause) -> Turn {
+    fn stopped(&mut self, cause: StopCause) -> Turn {
         if !std::mem::replace(&mut self.seen.stopped_reported, true) {
             self.emit(&Event::Stopped(cause));
         }
@@ -514,9 +514,9 @@ impl Worker {
         let rebuild = self.config.responses.bug == Response::KeepTrying;
         self.emit(&Event::Panicked { rebuilt: rebuild });
         if !rebuild {
-            self.stopped = Some(HaltCause::Bug);
+            self.stopped = Some(StopCause::Bug);
             self.observe(now);
-            return self.halted(HaltCause::Bug);
+            return self.stopped(StopCause::Bug);
         }
         // The dropped engine's reports and what was asked of it go to the fresh one.
         self.actor = self.actor.rebuilt();
@@ -552,10 +552,10 @@ impl Worker {
             Reopen::Replaced => PersistentCause::WalUnlinked,
         };
         if self.config.responses.stops(cause) {
-            let cause = HaltCause::from(cause);
+            let cause = StopCause::from(cause);
             self.stopped = Some(cause);
             self.observe(now);
-            return self.halted(cause);
+            return self.stopped(cause);
         }
         let until = self.schedule_rebuild(cause, now);
         let replaced = match reopen {
@@ -714,7 +714,7 @@ impl Worker {
             EnginePhase::Boot => Phase::Booting,
             EnginePhase::Running => Phase::Running,
             EnginePhase::Draining { .. } => Phase::Draining,
-            EnginePhase::Halted(cause) => Phase::Stopped(cause),
+            EnginePhase::Stopped(cause) => Phase::Stopped(cause),
         }
     }
 }

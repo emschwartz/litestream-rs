@@ -3,7 +3,7 @@
 //! [`recover`] looks at the newest staged file, at the WAL as one read
 //! of the wal-index and the WAL header saw it, and at the replica's newest
 //! transaction, and says whether to continue where the newest staged file ended, continue in a
-//! restarted WAL, snapshot, or halt. It reads nothing: the reads are done by
+//! restarted WAL, snapshot, or stop. It reads nothing: the reads are done by
 //! [`NewestStagedFile::load`] (or, with nothing staged, [`NewestStagedFile::load_remote`], which
 //! reads the same newest staged file back from the replica) and [`Probes::read`], so every rule
 //! below can be driven from a table of inputs. Go answers the same question in
@@ -30,8 +30,8 @@
 //! the WAL range it covers (page bytes and commit size), not only the last page,
 //! so a tail dropped by power loss and regrown differently is a rewind.
 //!
-//! Rule 5 is a halt, not a snapshot: a replica prefix holds one page size. At
-//! boot the actor also halts when the newest staged file is not readable but the replica's
+//! Rule 5 is a stop, not a snapshot: a replica prefix holds one page size. At
+//! boot the actor also stops when the newest staged file is not readable but the replica's
 //! newest file names another size than the WAL, before `recover` runs.
 
 use std::collections::BTreeMap;
@@ -46,7 +46,7 @@ use lsr_wal::{
     WalOffset, WalReader,
 };
 
-use crate::fault::{Fault, HaltCause, SnapshotCause};
+use crate::fault::{Fault, SnapshotCause, StopCause};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::ltx_read::{LtxRead, ReadFault};
 use crate::position::{Continuity, LastPage, Position, ReadLockHold, WalFileLen};
@@ -604,7 +604,7 @@ pub enum Recovered {
         cause: SnapshotCause,
     },
     /// Stop.
-    Halt(HaltCause),
+    Stop(StopCause),
 }
 
 /// Something a person should hear about, beside the decision.
@@ -666,7 +666,7 @@ pub fn recover_traced(
                 after: Some(ahead),
                 cause: SnapshotCause::BehindRemote { local: txid },
             },
-            PositionSource::Running(..) => Recovered::Halt(HaltCause::OtherWriter),
+            PositionSource::Running(..) => Recovered::Stop(StopCause::OtherWriter),
         });
     }
     let after = Some(remote.map_or(txid, |remote| remote.max(txid)));
@@ -679,7 +679,7 @@ pub fn recover_traced(
         });
     };
     if seen.page_size != header.page_size() {
-        return plain(Recovered::Halt(HaltCause::PageSizeChanged {
+        return plain(Recovered::Stop(StopCause::PageSizeChanged {
             was: seen.page_size,
             now: header.page_size(),
         }));

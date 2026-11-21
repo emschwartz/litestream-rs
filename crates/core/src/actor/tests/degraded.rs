@@ -36,7 +36,7 @@ fn newest_replica_file(rig: &Rig) -> Option<u64> {
         .max()
 }
 
-/// The counterpart of `halt_is_terminal`: under the default responses the
+/// The counterpart of `stop_is_terminal`: under the default responses the
 /// upload task is degraded, sync goes on, and the next upload that succeeds
 /// clears it.
 #[test]
@@ -130,7 +130,7 @@ fn a_refused_retention_delete_leaves_sync_and_upload_running() {
             );
             break now;
         }
-        assert!(!matches!(tick, Tick::Halted(_)), "{tick:?}");
+        assert!(!matches!(tick, Tick::Stopped(_)), "{tick:?}");
         match next_of(&tick) {
             Some(Next::Now) => {}
             Some(Next::At(at)) => now = at.unix_millis(),
@@ -217,7 +217,7 @@ fn a_bug_rebuilds_the_actor_and_boots_again_after_the_wait() {
 fn a_bug_stops_under_strict() {
     let (_rig, mut actor) = caught_up();
     let tick = actor.fault(Task::Upload, Fault::Bug(BugSite::PageMap), ts(T0 + 10));
-    assert_eq!(tick, Tick::Halted(HaltCause::Bug));
+    assert_eq!(tick, Tick::Stopped(StopCause::Bug));
 }
 
 /// Another writer stops uploads and maintenance under the default
@@ -226,13 +226,13 @@ fn a_bug_stops_under_strict() {
 fn a_second_writer_stops_the_engine_by_default() {
     let (mut rig, mut actor) = caught_up_go_like();
     let tick = actor.fault(Task::Upload, Fault::RemoteAheadOfLocal, ts(T0 + 10));
-    assert_eq!(tick, Tick::Halted(HaltCause::OtherWriter));
+    assert_eq!(tick, Tick::Stopped(StopCause::OtherWriter));
     let io = rig.io();
     rig.commit(2);
     for at in [T0 + 10, T0 + 600_000] {
         assert_eq!(
             rig.tick(&mut actor, at),
-            Tick::Halted(HaltCause::OtherWriter)
+            Tick::Stopped(StopCause::OtherWriter)
         );
     }
     assert_eq!(rig.io(), io, "no upload, no maintenance, no sync");
@@ -307,7 +307,7 @@ fn a_page_size_change_keeps_the_boot_degraded_and_stages_nothing() {
             .all(|(task, cause, _)| task == Task::Sync && cause == changed),
         "{seen:?}"
     );
-    assert!(seen.iter().all(|t| !matches!(t, Tick::Halted(_))));
+    assert!(seen.iter().all(|t| !matches!(t, Tick::Stopped(_))));
     assert_eq!(everything(&rig), before);
     assert_eq!(actor.degraded(Task::Sync).map(|d| d.cause), Some(changed));
 }

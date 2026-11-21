@@ -111,7 +111,7 @@ fn the_replicas_newest_staged_file_decides_as_the_same_file_staged_would() {
     assert!(is_rewound(causes[4]), "{causes:?}");
     let cause = |at: usize| match causes[at] {
         Recovered::Snapshot { cause, .. } => Some(cause),
-        Recovered::Continue(_) | Recovered::WalRestarted(_) | Recovered::Halt(_) => None,
+        Recovered::Continue(_) | Recovered::WalRestarted(_) | Recovered::Stop(_) => None,
     };
     assert_eq!(cause(5), Some(SnapshotCause::LastPageMismatch));
     assert_eq!(cause(6), Some(SnapshotCause::GenerationChanged));

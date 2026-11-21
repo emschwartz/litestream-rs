@@ -32,7 +32,7 @@
 //! Two things are deliberately not faults. A clock that steps backwards is
 //! clamped and reported as [`Clamped`]. A power-loss WAL rewind is a snapshot
 //! with cause [`SnapshotCause::LocalRewound`]: it is expected under
-//! `synchronous=NORMAL`, and halting would leave every later write unreplicated.
+//! `synchronous=NORMAL`, and stopping would leave every later write unreplicated.
 
 use std::num::NonZeroU32;
 use std::time::Duration;
@@ -206,7 +206,7 @@ pub enum SnapshotCause {
 /// Why the engine stopped and waits for a person: a [`PersistentCause`]
 /// whose configured response is to stop, or a drain whose deadline passed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HaltCause {
+pub enum StopCause {
     /// Credentials or permissions refuse the store.
     Credentials,
     /// The store refuses a request outright (not credentials).
@@ -285,25 +285,25 @@ impl PersistentCause {
     /// The persistent cause behind a stop cause; `None` for the one stop that
     /// is not configurable, the end of a drain.
     #[must_use]
-    pub const fn of(cause: HaltCause) -> Option<Self> {
+    pub const fn of(cause: StopCause) -> Option<Self> {
         match cause {
-            HaltCause::Credentials => Some(Self::Credentials),
-            HaltCause::StoreRefused => Some(Self::StoreRefused),
-            HaltCause::RemoteCorrupt => Some(Self::RemoteCorrupt),
-            HaltCause::OtherWriter => Some(Self::OtherWriter),
-            HaltCause::RemoteRegressed => Some(Self::RemoteRegressed),
-            HaltCause::WalCorrupt => Some(Self::WalCorrupt),
-            HaltCause::WalTruncated => Some(Self::WalTruncated),
-            HaltCause::WalUnlinked => Some(Self::WalUnlinked),
-            HaltCause::PageSizeChanged { was, now } => Some(Self::PageSizeChanged { was, now }),
-            HaltCause::DatabasePageMismatch { pgno } => Some(Self::DatabasePageMismatch { pgno }),
-            HaltCause::Bug => Some(Self::Bug),
-            HaltCause::Shutdown => None,
+            StopCause::Credentials => Some(Self::Credentials),
+            StopCause::StoreRefused => Some(Self::StoreRefused),
+            StopCause::RemoteCorrupt => Some(Self::RemoteCorrupt),
+            StopCause::OtherWriter => Some(Self::OtherWriter),
+            StopCause::RemoteRegressed => Some(Self::RemoteRegressed),
+            StopCause::WalCorrupt => Some(Self::WalCorrupt),
+            StopCause::WalTruncated => Some(Self::WalTruncated),
+            StopCause::WalUnlinked => Some(Self::WalUnlinked),
+            StopCause::PageSizeChanged { was, now } => Some(Self::PageSizeChanged { was, now }),
+            StopCause::DatabasePageMismatch { pgno } => Some(Self::DatabasePageMismatch { pgno }),
+            StopCause::Bug => Some(Self::Bug),
+            StopCause::Shutdown => None,
         }
     }
 }
 
-impl From<PersistentCause> for HaltCause {
+impl From<PersistentCause> for StopCause {
     fn from(cause: PersistentCause) -> Self {
         match cause {
             PersistentCause::Credentials => Self::Credentials,

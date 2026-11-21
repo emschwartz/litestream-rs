@@ -377,7 +377,7 @@ impl<S: WalSource, P: PageSource, C: Checkpointer> Engine<S, P, C> {
         let verdict = self.verdict(&mut wal, &view);
         let seen = format!("{verdict:?} {committed:?}");
         let Ok(step) = Step::try_from(verdict.recovered) else {
-            return format!("halt {seen}");
+            return format!("stop {seen}");
         };
         self.now += 10;
         let synced = block_on(sync_step(

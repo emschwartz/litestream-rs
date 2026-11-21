@@ -201,7 +201,7 @@ impl Rig {
 
     /// Recovers, then runs whatever step the decision calls for.
     fn sync(&mut self) -> Did {
-        let step = Step::try_from(self.verdict().recovered).expect("no halt");
+        let step = Step::try_from(self.verdict().recovered).expect("no stop");
         self.run(step)
     }
 

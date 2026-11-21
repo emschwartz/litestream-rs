@@ -77,7 +77,7 @@ Traits at the core boundary: `Clock`, `Sleeper`, `Entropy`, `ObjectStore` (the r
 | Committed end and backfill count read together | `WalSource::committed() -> CommittedRead { end, backfilled }` from one wal-index read |
 | Restart recovery (10 of 13 commits to upstream's verify are fixes or reverts) | `fn recover(...) -> Recovered`, matched exhaustively |
 | Restore chain has no gaps | `ContiguousChain`, whose only constructor returns `PlanOutcome::Gap { have_through, next_starts }` on a hole; `RestoreTarget { Latest, Txid, AsOf }` replaces zero-valued mode flags |
-| Local TXID never below the remote's | At boot `recover` returns `Snapshot { after: remote newest, cause: BehindRemote }`; mid-run it is `Halt(OtherWriter)` |
+| Local TXID never below the remote's | At boot `recover` returns `Snapshot { after: remote newest, cause: BehindRemote }`; mid-run it is `Stop(OtherWriter)` |
 | An upload whose commit failed may or may not be visible | `UploadState::ListFirst`: nothing uploads until a listing settles it |
 | "Disabled" is not zero | Config fields are `Option<NonZeroU32>` and friends; unknown keys rejected |
 
@@ -86,7 +86,7 @@ enum Recovered {
     Continue(Position),
     WalRestarted(Position),
     Snapshot { after: Option<Txid>, cause: SnapshotCause },
-    Halt(HaltCause),
+    Stop(StopCause),
 }
 enum SnapshotCause {
     FirstSync, BehindRemote { local }, NewestStagedFileUnreadable, WalMissing, PageSizeChanged,
@@ -101,7 +101,7 @@ Exact signatures live in `docs/plans/phase-2-writing.md`, task 4.
 
 ### Faults
 
-One closed `Fault` enum covers what the library cannot prevent: store transient, throttled, auth, not found, corrupt object; local disk full or I/O error; SQLite busy; WAL changed under a read; external checkpoint; WAL deleted by another process; shutdown deadline reached. `fn policy(&Fault) -> Policy { Retry(Backoff) | Resnapshot(SnapshotCause) | Halt(HaltCause) }` is exhaustive; `Backoff` is `Doubling` or `After(Duration)` so a store's `Retry-After` is honoured. Two things are deliberately not faults: a clock that steps backwards is clamped and reported as a `Clamped` event, and a power-loss WAL rewind is a snapshot with cause `LocalRewound` (it is expected under `synchronous=NORMAL`). Hard `assert!` exists only in the simulator's oracle.
+One closed `Fault` enum covers what the library cannot prevent: store transient, throttled, auth, not found, corrupt object; local disk full or I/O error; SQLite busy; WAL changed under a read; external checkpoint; WAL deleted by another process; shutdown deadline reached. `fn policy(&Fault) -> Policy { Retry(Backoff) | Resnapshot(SnapshotCause) | Stop(StopCause) }` is exhaustive; `Backoff` is `Doubling` or `After(Duration)` so a store's `Retry-After` is honoured. Two things are deliberately not faults: a clock that steps backwards is clamped and reported as a `Clamped` event, and a power-loss WAL rewind is a snapshot with cause `LocalRewound` (it is expected under `synchronous=NORMAL`). Hard `assert!` exists only in the simulator's oracle.
 
 ## 4. How correctness is established
 
@@ -157,7 +157,7 @@ Workspace, lint set, CI, pinned Go binaries. Settle what the research left unver
 - Position recovery from the bucket alone (last L0 header: WAL offset, size, salts, commit), so a missing local directory does not force a snapshot when the WAL still matches.
 - Public API: `start` returns once the read lock is held; `final_sync(deadline)` returns a typed outcome; `health()` is a cheap handle (last synced TXID, age, state, degraded or stop cause).
 - Change detection by 1-second polling (a wal hook is a later optimisation).
-- A WAL checksum or salt mismatch below the committed end is `Fault::WalCorruptBelowCommitted` with policy Halt, never end-of-WAL (Go returns EOF there, wal_reader.go:188). LTX pages are taken from the verified read; there is no second, unchecked read of a page.
+- A WAL checksum or salt mismatch below the committed end is `Fault::WalCorruptBelowCommitted` with policy Stop, never end-of-WAL (Go returns EOF there, wal_reader.go:188). LTX pages are taken from the verified read; there is no second, unchecked read of a page.
 - Page checksum table: page number to CRC, fed by verified WAL frames and seeded by the first snapshot. A database-file page that does not match is never uploaded. The policy for a mismatch and for an unexplained WAL rewind is fixed in the phase 3 task plan (P1, P2).
 - Real-SQLite fault suite and all four compat directions, including Go, Rust, Go handover on one prefix with no forced snapshot.
 **Exit:** the fault suite and the upstream-test ledger are green; handover in both directions happens without a snapshot when the WAL is intact; an alternation test switches Go and Rust on one prefix repeatedly, with a SIGKILL at a random point in each handover (mid-upload, mid-compaction, with local files not yet uploaded), and every switch is a plain restart with no forced snapshot and no restore mismatch (one exception, for Go builds without upstream bcd69ae, every release through v0.5.18: Go's boot transaction may hold a WAL tail SQLite never committed, left by a Rust process stopped mid-commit, and the test accepts that one restore when it equals exactly the tail's state; known Go bug #38, `docs/plans/phase-3-syncing.md`. A minimum Go version for handover will be named once upstream tags a release containing bcd69ae); a 72-hour soak against real Tigris with a synthetic writer shows zero oracle failures and the resource properties holding.

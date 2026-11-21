@@ -81,7 +81,7 @@ fn a_boot_reads_back_the_newest_file_of_each_level_once() {
     let before: Vec<usize> = newest.iter().map(|f| rig.remote.reads_of(&f.key)).collect();
     let mut actor = Actor::new(cfg());
     let seen = rig.settle(&mut actor, T0 + 2);
-    no_halt(&seen);
+    no_stop(&seen);
     assert!(repaired(&seen).is_empty(), "{seen:?}");
     for (info, before) in newest.iter().zip(before) {
         assert!(
@@ -111,7 +111,7 @@ fn a_rotten_newest_file_the_lower_levels_cover_is_deleted_and_rebuilt() {
     assert!(!decodes(&rig, &bad.key));
     let mut actor = Actor::new(cfg());
     let seen = rig.follow(&mut actor, T0 + 60_000, 50);
-    no_halt(&seen);
+    no_stop(&seen);
     assert_eq!(repaired(&seen), vec![bad.key], "{seen:?}");
     let rebuilt = Rig::files(&rig.remote, one);
     let last = rebuilt.last().unwrap();
@@ -132,7 +132,7 @@ fn a_rotten_snapshot_the_lower_levels_cover_is_deleted_and_taken_again() {
     rot(&rig, &bad);
     let mut actor = Actor::new(cfg());
     let seen = rig.follow(&mut actor, T0 + 60_000, 50);
-    no_halt(&seen);
+    no_stop(&seen);
     assert_eq!(repaired(&seen), vec![bad.key], "{seen:?}");
     let snapshots = Rig::files(&rig.remote, Level::SNAPSHOT);
     assert!(!snapshots.is_empty(), "the snapshot is due again at once");
@@ -141,7 +141,7 @@ fn a_rotten_snapshot_the_lower_levels_cover_is_deleted_and_taken_again() {
 }
 
 #[test]
-fn a_rotten_newest_file_nothing_else_covers_halts_and_stays() {
+fn a_rotten_newest_file_nothing_else_covers_stops_and_stays() {
     let mut rig = replica();
     let bad = *Rig::files(&rig.remote, Level::SNAPSHOT).last().unwrap();
     let others: Vec<FileKey> = block_on(Inventory::load(&rig.remote.inner))
@@ -157,7 +157,7 @@ fn a_rotten_newest_file_nothing_else_covers_halts_and_stays() {
     let seen = rig.follow(&mut actor, T0 + 60_000, 50);
     assert_eq!(
         seen.last(),
-        Some(&Tick::Halted(HaltCause::RemoteCorrupt)),
+        Some(&Tick::Stopped(StopCause::RemoteCorrupt)),
         "{seen:?}"
     );
     assert!(repaired(&seen).is_empty());
@@ -192,7 +192,7 @@ fn a_failed_read_back_retries_and_deletes_nothing() {
     );
     assert_eq!(upper(&rig), before);
     let seen = rig.follow(&mut actor, T0 + 60_000, 50);
-    no_halt(&seen);
+    no_stop(&seen);
     assert!(repaired(&seen).is_empty());
     for info in newest_upper(&rig) {
         assert!(rig.remote.reads_of(&info.key) > 0 || !before.contains(&info));

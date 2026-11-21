@@ -43,7 +43,7 @@
 //! kept restore point goes once every task has recovered. A bug, and another writer whose
 //! response is to continue, rebuild the actor and boot again after the wait;
 //! a replica that went backwards is listed again. Under `Stop` the actor
-//! halts, as every persistent fault did before.
+//! stops, as every persistent fault did before.
 //!
 //! The actor is two halves (`parts`): what a rebuild keeps (the
 //! configuration, what was asked of it, what it reports) and the engine a
@@ -54,7 +54,7 @@
 //! A drain ends in one of two ticks: [`Tick::Drained`] with the newest
 //! transaction the replica holds, or, at its deadline, [`Tick::DeadlineReached`]
 //! with what was left ([`Unfinished`]); every tick after that one is
-//! `Halted(Shutdown)`. The wal-index gives a frame offset, not a transaction
+//! `Stopped(Shutdown)`. The wal-index gives a frame offset, not a transaction
 //! id, so what is left is counted in WAL bytes and staged files.
 //!
 //! The actor also hands every wal-index read, and the read after each of its
@@ -83,8 +83,8 @@ use crate::checkpoint::{
 use crate::compact::CompactError;
 use crate::created_at::{ResolveError, ResolvedCreatedAt, resolve};
 use crate::fault::{
-    Action, Backoff, BugSite, Clamped, Fault, HaltCause, Next, PersistentCause, Policy, Responses,
-    SnapshotCause, backoff_wait, policy,
+    Action, Backoff, BugSite, Clamped, Fault, Next, PersistentCause, Policy, Responses,
+    SnapshotCause, StopCause, backoff_wait, policy,
 };
 use crate::inventory::Inventory;
 use crate::layout::{FileInfo, FileKey, Level};
@@ -236,15 +236,15 @@ pub enum Tick {
         next: Next,
     },
     /// Stopped; every later tick returns this.
-    Halted(HaltCause),
+    Stopped(StopCause),
     /// A drain finished: everything committed is on the replica.
     Drained {
         /// The newest transaction the replica holds; `None` when it holds
         /// none (nothing was ever committed).
         txid: Option<Txid>,
     },
-    /// A drain's deadline passed with work left. The actor is halted with
-    /// [`HaltCause::Shutdown`]; every later tick returns that.
+    /// A drain's deadline passed with work left. The actor is stopped with
+    /// [`StopCause::Shutdown`]; every later tick returns that.
     DeadlineReached(Unfinished),
 }
 
@@ -269,7 +269,7 @@ enum Stepped {
     /// Recovery says the next step is a snapshot.
     Resnapshot(SnapshotCause),
     /// Recovery names a stop cause; the configured response decides.
-    Halt(HaltCause),
+    Stop(StopCause),
 }
 
 /// The replication engine for one database.
@@ -407,7 +407,7 @@ impl Actor {
     /// trusted (a panic unwound through a tick): a fresh engine that boots
     /// from the replica and the WAL again, beside everything that is not the
     /// engine's to forget. Kept: the configuration, a drain's deadline or a
-    /// halt, each task's wait and degraded state and the kept restore point they
+    /// stop, each task's wait and degraded state and the kept restore point they
     /// hold, a scheduled verify's kept restore point and its request for live pages (pages
     /// read and not yet taken are read again), an operator's snapshot request
     /// not yet staged, the clock's last reading and the application-checkpoint
@@ -593,8 +593,8 @@ impl Actor {
         L: ObjectStore,
         R: ObjectStore,
     {
-        if let Stop::Halted(cause) = self.kept.stop {
-            return Tick::Halted(cause);
+        if let Stop::Stopped(cause) = self.kept.stop {
+            return Tick::Stopped(cause);
         }
         let now = match self.clock(now) {
             Ok(now) => now,
@@ -622,7 +622,7 @@ impl Actor {
         match self.kept.stop {
             Stop::No => self.run(&mut env, now).await,
             Stop::Draining { deadline } => self.drain(&mut env, now, deadline).await,
-            Stop::Halted(cause) => Tick::Halted(cause),
+            Stop::Stopped(cause) => Tick::Stopped(cause),
         }
     }
 
@@ -654,7 +654,7 @@ impl Actor {
                 self.ran(Event::Retrying { fault, until }, now)
             }
             Policy::Persistent(cause) => self.persistent(waiter.into(), cause, now),
-            Policy::Shutdown => self.halt(HaltCause::Shutdown),
+            Policy::Shutdown => self.stop(StopCause::Shutdown),
         }
     }
 
@@ -674,10 +674,10 @@ impl Actor {
 
     /// A recovery verdict that names a stop cause: a persistent one goes to
     /// the configured response, the end of a drain stops.
-    fn verdict(&mut self, task: Task, cause: HaltCause, now: Timestamp) -> Tick {
+    fn verdict(&mut self, task: Task, cause: StopCause, now: Timestamp) -> Tick {
         match PersistentCause::of(cause) {
             Some(cause) => self.persistent(Waiter::Task(task), cause, now),
-            None => self.halt(cause),
+            None => self.stop(cause),
         }
     }
 
@@ -687,7 +687,7 @@ impl Actor {
     fn persistent(&mut self, waiter: Waiter, cause: PersistentCause, now: Timestamp) -> Tick {
         let action = self.kept.cfg.responses.action(cause);
         if action == Action::Stop {
-            return self.halt(HaltCause::from(cause));
+            return self.stop(StopCause::from(cause));
         }
         self.keep_restore_point();
         let waiter = match action {
@@ -754,9 +754,9 @@ impl Actor {
         self.engine.maintain.expire(now);
     }
 
-    fn halt(&mut self, cause: HaltCause) -> Tick {
-        self.kept.stop = Stop::Halted(cause);
-        Tick::Halted(cause)
+    fn stop(&mut self, cause: StopCause) -> Tick {
+        self.kept.stop = Stop::Stopped(cause);
+        Tick::Stopped(cause)
     }
 
     fn ran(&self, event: Event, now: Timestamp) -> Tick {
@@ -777,7 +777,7 @@ impl Actor {
             return self.ran(Event::Idle, now);
         }
         // At boot a replica ahead of the local newest staged file is `recover`'s to judge (a
-        // snapshot after it), not the uploader's (a halt), so the listing names no newest staged file.
+        // snapshot after it), not the uploader's (a stop), so the listing names no newest staged file.
         let start = UploadState::ListFirst { confirmed: None };
         let upload = match upload_next(start, env.staging, env.remote, Some(Txid::MAX)).await {
             Ok(listed) => listed.state,
@@ -799,7 +799,7 @@ impl Actor {
         let from = match recovered {
             Recovered::Continue(position) | Recovered::WalRestarted(position) => Ok(position),
             Recovered::Snapshot { cause, .. } => Err(cause),
-            Recovered::Halt(cause) => return self.verdict(Task::Sync, cause, now),
+            Recovered::Stop(cause) => return self.verdict(Task::Sync, cause, now),
         };
         // A staged file that did not verify was deleted with all after it:
         // the next file is a snapshot even when the WAL could continue.
@@ -903,7 +903,7 @@ impl Actor {
     }
 
     /// The drain's deadline passed with work left: what was left, and the
-    /// halt the deadline's fault routes to.
+    /// stop the deadline's fault routes to.
     async fn missed<
         W: WalSource,
         P: PageSource,
@@ -917,9 +917,9 @@ impl Actor {
     ) -> Tick {
         let unfinished = self.unfinished(env).await;
         match self.fault(Task::Sync, Fault::ShutdownDeadline, now) {
-            Tick::Halted(HaltCause::Shutdown) => Tick::DeadlineReached(unfinished),
+            Tick::Stopped(StopCause::Shutdown) => Tick::DeadlineReached(unfinished),
             other @ (Tick::Ran { .. }
-            | Tick::Halted(_)
+            | Tick::Stopped(_)
             | Tick::Drained { .. }
             | Tick::DeadlineReached(_)) => other,
         }
@@ -1091,7 +1091,7 @@ impl Actor {
                 self.engine.course.snapshot_for(cause, false);
                 Err(self.ran(Event::Resnapshot(cause), now))
             }
-            Ok(Stepped::Halt(cause)) => Err(self.verdict(Task::Sync, cause, now)),
+            Ok(Stepped::Stop(cause)) => Err(self.verdict(Task::Sync, cause, now)),
             Err(fault) => Err(self.fault(Task::Sync, fault, now)),
         }
     }
@@ -1698,7 +1698,7 @@ impl Actor {
                 self.wait_for_sync();
                 return self.ran(event, now);
             }
-            Err(tick @ (Tick::Halted(_) | Tick::Drained { .. } | Tick::DeadlineReached(_))) => {
+            Err(tick @ (Tick::Stopped(_) | Tick::Drained { .. } | Tick::DeadlineReached(_))) => {
                 return tick;
             }
         };
@@ -1797,7 +1797,7 @@ impl Actor {
         let task = |task: Task| self.kept.tasks.get(task).until();
         let deadline = match self.kept.stop {
             Stop::Draining { deadline } => Some(deadline),
-            Stop::No | Stop::Halted(_) => None,
+            Stop::No | Stop::Stopped(_) => None,
         };
         let only_running = [
             task(Task::Checkpoint),
@@ -1841,7 +1841,7 @@ struct Booted {
 
 /// The newest staged file (or, with none staged, the replica's newest
 /// level-0 file), the replica's page size, and what recovery makes of them.
-/// A WAL whose page size is not the replica's halts here, before
+/// A WAL whose page size is not the replica's stops here, before
 /// anything is staged.
 async fn boot_recover<W: WalSource, L: ObjectStore, R: ObjectStore>(
     wal: &mut W,
@@ -1871,7 +1871,7 @@ async fn boot_recover<W: WalSource, L: ObjectStore, R: ObjectStore>(
     };
     let now = view.header.map(|header| header.page_size());
     let recovered = match page_size.zip(now).filter(|(was, now)| was != now) {
-        Some((was, now)) => Recovered::Halt(HaltCause::PageSizeChanged { was, now }),
+        Some((was, now)) => Recovered::Stop(StopCause::PageSizeChanged { was, now }),
         None => recover(
             newest_staged.as_ref().map(PositionSource::Boot),
             &view,
@@ -1909,7 +1909,7 @@ const fn step_of(recovered: Recovered) -> Result<Step, Stepped> {
         Recovered::Continue(position) => Ok(Step::Incremental(position)),
         Recovered::WalRestarted(position) => Ok(Step::NewGeneration(position)),
         Recovered::Snapshot { cause, .. } => Err(Stepped::Resnapshot(cause)),
-        Recovered::Halt(cause) => Err(Stepped::Halt(cause)),
+        Recovered::Stop(cause) => Err(Stepped::Stop(cause)),
     }
 }
 
