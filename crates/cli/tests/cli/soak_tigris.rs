@@ -1,5 +1,5 @@
 //! The long soak of `lsr replicate` against the real Tigris bucket
-//! (`just soak-tigris <hours>`; docs/plans/phase-3-syncing.md, task 9).
+//! (`just soak-tigris <hours>`; see docs/plans/phase-3-syncing.md, the soak section).
 //!
 //! A synthetic writer (the compat workload: inserts, updates, deletes, overflow blobs, a
 //! scratch table filled, dropped and VACUUMed, and outside TRUNCATE checkpoints) commits

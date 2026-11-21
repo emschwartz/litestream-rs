@@ -76,7 +76,8 @@ impl fmt::Display for KeyPath {
     }
 }
 
-/// How v1 treats a key Go defines (docs/plans/phase-4-sidecar.md, the config ruling).
+/// How v1 treats a key Go defines: implemented, accepted only at its off value, a knob with no
+/// effect, or refused (docs/plans/phase-4-sidecar.md, the config section).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum KeyClass {
     /// Go knows it and v1 does what it says.

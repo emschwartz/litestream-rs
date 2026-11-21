@@ -1,6 +1,6 @@
 //! Go Litestream's `litestream.yml`, read as Go 041a8c3 reads it, and held to
 //! v1's rule that a file never means less than it says
-//! (docs/plans/phase-4-sidecar.md, the config ruling and task 1).
+//! (docs/plans/phase-4-sidecar.md, the config section).
 //!
 //! A load runs, in order:
 //! 1. **Environment expansion** over the raw text (`expand.rs`), unless

@@ -410,7 +410,7 @@ mod lazy {
         assert_eq!(check(&[files[0], files[2]], 300).outcome, run.outcome);
     }
 
-    /// Ruling A1: an eligible file past the end that does not connect is a
+    /// An eligible file past the end that does not connect is a
     /// stray; it neither extends the chain nor removes the straddle.
     #[test]
     fn a_stray_does_not_hide_a_straddle() {

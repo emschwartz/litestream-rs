@@ -1,20 +1,20 @@
 //! In-memory sources for tests and the simulator.
 //!
 //! [`FakeWal`] models the two SQLite facts that make a WAL restart harmless under
-//! a pinned read transaction (ruling F1, measured on SQLite 3.47.1), because the
+//! a pinned read transaction (measured on SQLite 3.47.1), because the
 //! sync engine's safety argument stands on them:
 //!
 //! 1. A read mark above 0 blocks every restart. Salts never change.
-//! 2. Under mark 0 the next write restarts the WAL once (salt1 + 1,
+//! 2. Under read mark 0 the next write restarts the WAL once (salt1 + 1,
 //!    checkpoint_seq + 1), and the new generation can be neither backfilled nor
-//!    restarted while the pin holds. An old generation that grows under a mark-0
+//!    restarted while the pin holds. An old generation that grows under a read-mark-0
 //!    pin is never backfilled, so it is never restarted either.
 //!
 //! The model is SQLite's own rule: a writer restarts only when it sees a fully
-//! backfilled WAL (it reads on mark 0) and no reader holds a mark above 0. Frames
+//! backfilled WAL (it reads on read mark 0) and no reader holds a mark above 0. Frames
 //! written past the last commit (a spill) are not in `mxFrame`, so a rolled-back
 //! spill does not stop the restart and its bytes stay in the file past the new end.
-//! A reader on mark 0 holds back the checkpoint's safe frame at 0, which is why
+//! A reader on read mark 0 holds back the checkpoint's safe frame at 0, which is why
 //! nothing is backfilled under it.
 //!
 //! A restart rewrites the header in place and leaves the old frames' bytes in
@@ -289,14 +289,14 @@ impl FakeWal {
     }
 
     /// Copies frames into the database file, at most up to `upto` and never past
-    /// what our own read mark allows (a reader on mark 0 allows none). Returns
+    /// what our own read mark allows (a reader on read mark 0 allows none). Returns
     /// `nBackfill` afterwards.
     pub fn backfill(&self, upto: u32) -> u32 {
         lock(&self.state).backfill(upto)
     }
 
     /// Restarts the WAL if SQLite would: fully backfilled, no write in progress, no
-    /// reader above mark 0. Returns whether it did.
+    /// reader above read mark 0. Returns whether it did.
     pub fn try_restart(&self) -> bool {
         let mut state = lock(&self.state);
         let due = state.restart_is_due();

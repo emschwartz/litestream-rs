@@ -1,6 +1,6 @@
-//! An in-memory S3 that answers the nine request shapes 8b builds.
+//! An in-memory S3 that answers the nine request shapes the store builds.
 //!
-//! It reproduces what task 8s measured on MinIO (docs/spikes.md): a wrong
+//! It reproduces what the MinIO spike measured (docs/spikes.md): a wrong
 //! Content-MD5 is 400 BadDigest and a malformed one 400 InvalidDigest; any
 //! range on a zero-byte object, or one starting at or past the end, is 416
 //! InvalidRange, while a range that straddles the end is clipped to a 206; a
@@ -307,7 +307,7 @@ fn metadata(request: &HttpRequest) -> Vec<(String, String)> {
         .collect()
 }
 
-/// MinIO's signing rule, both directions (spike 8s finding 1).
+/// MinIO's signing rule, both directions (docs/spikes.md).
 fn check_signed_headers(request: &HttpRequest) -> Result<(), HttpResponse> {
     let denied = || error_response(400, Some("AccessDenied"), None);
     let signed = query(request, "X-Amz-SignedHeaders").ok_or_else(denied)?;

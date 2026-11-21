@@ -13,7 +13,7 @@
 //! SQLite could block in `F_SETLKW` on our lock instead of reporting busy.
 //!
 //! Measurement only; the pin itself is not built (it is deferred, see
-//! `docs/plans/phase-3-syncing.md`, "Task 2: deferred").
+//! `docs/plans/phase-3-syncing.md`, the section on the deferred pure-Rust pin).
 
 #![cfg(target_os = "linux")]
 #![expect(

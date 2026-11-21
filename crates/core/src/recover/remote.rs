@@ -7,7 +7,7 @@
 //! from (offset, size, salts) and the commit size, and its pages are what the
 //! WAL held there. [`TipView::load_remote`] reads that file and runs it through
 //! the same checks a staged tip gets (the frame before its end, and the
-//! whole-range compare of ruling V3), so `recover` continues without a snapshot
+//! whole-range compare), so `recover` continues without a snapshot
 //! exactly when it would have with the file still staged.
 //!
 //! The read is one GET of the key the boot's listing named newest, from byte

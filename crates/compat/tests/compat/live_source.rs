@@ -287,9 +287,9 @@ fn outside_truncate_against_pin_above_zero() {
     outside_checkpoint_against_pin("PRAGMA wal_checkpoint(TRUNCATE)");
 }
 
-/// Our read transaction is retaken on mark 0 (the WAL fully backfilled); one application write
+/// Our read transaction is retaken on read mark 0 (the WAL fully backfilled); one application write
 /// then restarts the WAL, which SQLite does once and not again until a checkpoint.
-fn restart_under_mark_zero(repin: bool) -> Rig {
+fn restart_under_read_mark_zero(repin: bool) -> Rig {
     let mut rig = Rig::new(4096);
     rig.sync();
     rig.write(500);
@@ -303,7 +303,7 @@ fn restart_under_mark_zero(repin: bool) -> Rig {
     assert_eq!(run.epoch.count(), 2, "the read transaction was retaken");
     assert!(
         rig.live.committed().expect("committed").fully_backfilled(),
-        "mark 0"
+        "read mark 0"
     );
     if repin {
         let Did::Idle = rig.sync() else {
@@ -318,7 +318,7 @@ fn restart_under_mark_zero(repin: bool) -> Rig {
 
 #[test]
 fn pin_on_zero_one_restart() {
-    let mut rig = restart_under_mark_zero(false);
+    let mut rig = restart_under_read_mark_zero(false);
     let verdict = rig.verdict();
     assert_eq!(verdict.event, None, "no PinViolated");
     assert!(
@@ -344,7 +344,7 @@ fn pin_on_zero_one_restart() {
 
 #[test]
 fn pin_on_zero_proven_restart_continues_in_the_new_generation() {
-    let mut rig = restart_under_mark_zero(true);
+    let mut rig = restart_under_read_mark_zero(true);
     let verdict = rig.verdict();
     assert_eq!(verdict.event, None::<RecoverEvent>, "no PinViolated");
     assert!(

@@ -92,7 +92,7 @@ fn retry_after(r: &HttpResponse) -> Option<Duration> {
 }
 
 /// Whether a response is S3 saying the range starts at or past the end
-/// (status 416; spike 8s finding 6). A read treats it as zero bytes.
+/// (status 416, as MinIO answers; docs/spikes.md). A read treats it as zero bytes.
 #[must_use]
 pub fn is_range_past_end(r: &HttpResponse) -> bool {
     r.status() == 416

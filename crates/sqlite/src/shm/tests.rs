@@ -1,5 +1,5 @@
 //! The guard, the mapping and the header checks, on raw connections. These carry over the
-//! answers of the wal-index spike (`docs/spikes.md`, "Phase 3 spikes", S1) that need the
+//! answers of the wal-index spike (`docs/spikes.md`, "Phase 3 spikes") that need the
 //! crate's internals; the ones visible through `Sqlite` are in `tests/`.
 
 use std::collections::BTreeMap;

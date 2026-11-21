@@ -1,4 +1,4 @@
-//! FakeS3 against the behaviours task 8s measured on MinIO (docs/spikes.md).
+//! FakeS3 against the behaviours the MinIO spike measured (docs/spikes.md).
 
 use crate::common;
 use crate::wire;

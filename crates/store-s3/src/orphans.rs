@@ -5,7 +5,7 @@
 //! next `begin_upload`, or by `S3Store::abort_orphans`. The list holds
 //! at most 64 ids; a 65th pushes the oldest off, and the bucket's
 //! `AbortIncompleteMultipartUpload` rule is the backstop for what falls off
-//! (ruling F3). An id whose abort fails goes back, so an outage costs one
+//! (drop does no I/O, so a failed upload's id waits here). An id whose abort fails goes back, so an outage costs one
 //! request per attempt and never grows the list.
 
 use std::collections::VecDeque;

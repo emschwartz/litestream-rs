@@ -1,4 +1,4 @@
-//! How a replicator runs: Go's behaviour by default (`docs/PLAN.md`, decision D6).
+//! How a replicator runs: Go's behaviour by default (`docs/PLAN.md`, the Go-compatibility rule).
 //!
 //! A setting that cannot be zero is a type that cannot hold zero ([`NonZeroDuration`],
 //! `NonZeroU32`, `NonZeroU64`), so Go's "zero means the default" cannot happen here, and a
@@ -44,8 +44,8 @@ impl NonZeroDuration {
     }
 }
 
-/// Whether the host says when it holds a long read (`docs/plans/phase-3-syncing.md`, the
-/// ruling that TRUNCATE needs the host's word).
+/// Whether the host says when it holds a long read (TRUNCATE needs the host's word;
+/// see `docs/plans/phase-3-syncing.md`, the reader-tracking section).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ReaderTracking {
     /// The host gives no signal, so a reader may always be running: the replicator never

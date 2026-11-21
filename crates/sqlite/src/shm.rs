@@ -1,6 +1,6 @@
 //! The wal-index header, read through SQLite's own mapping of `-shm`.
 //!
-//! Mechanism (measured in `docs/spikes.md`, "Phase 3 spikes", S1). The reader's `sqlite3_file`
+//! Mechanism (measured in `docs/spikes.md`, "Phase 3 spikes", the wal-index header spike). The reader's `sqlite3_file`
 //! is asked for region 0 with `xShmMap(file, 0, 32768, 0, &p)`. That call opens nothing only
 //! when the connection's WAL has already mapped `-shm`; [`guard`] checks that first, in this
 //! order: a read transaction is open (`walIndexReadHdr` maps region 0 when one starts), the

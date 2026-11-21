@@ -28,17 +28,17 @@
 //!
 //! The ceiling is where the pin stops a checkpoint. After our own checkpoint it comes from
 //! what SQLite's checkpoint call reported as the pin was retaken: 0 when the call left the
-//! WAL fully backfilled (the pin is then on mark 0, where nothing can be copied), else the
+//! WAL fully backfilled (the pin is then on read mark 0, where nothing can be copied), else the
 //! frame count (the pin's mark; the PASSIVE's write barrier keeps commits out until the
 //! retake). Without that report it is the frame count at the read after, or at the first
 //! read: an estimate from above, so that a wrong one can only miss a stall, never invent
 //! one. A new generation sets it to 0 (SQLite restarts the log under a held pin only when the
-//! pin is on mark 0), and a host checkpoint that stopped short sets it to where it stopped.
+//! pin is on read mark 0), and a host checkpoint that stopped short sets it to where it stopped.
 //!
 //! The wal-index cannot tell a host at `wal_autocheckpoint = 0` from a host whose attempts
-//! fail on mark 0: both leave the WAL growing with nothing backfilled. Where the pin is above
-//! mark 0 the two differ (an attempt would have backfilled to the ceiling), and no stall is
-//! inferred. On mark 0 only the threshold the observer is given tells them apart, so a host
+//! fail on read mark 0: both leave the WAL growing with nothing backfilled. Where the pin is above
+//! read mark 0 the two differ (an attempt would have backfilled to the ceiling), and no stall is
+//! inferred. On read mark 0 only the threshold the observer is given tells them apart, so a host
 //! known to run at 0 should be stated as `None`.
 //!
 //! None of this is a [`crate::Fault`] or a degraded state, and none of it changes a decision.

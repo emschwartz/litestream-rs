@@ -34,8 +34,8 @@
 //!   host at `wal_autocheckpoint = 0`), which only lets health infer host checkpoint
 //!   attempts the wal-index cannot show.
 //!
-//! A `dir` entry is scanned once, here (`dir.rs`, the static scan of the plan's
-//! directory ruling): every database it finds gets Go's replica path and meta
+//! A `dir` entry is scanned once, here (`dir.rs`, a static scan at start, as Go derives the
+//! paths): every database it finds gets Go's replica path and meta
 //! path for its relative path. The scan reads each candidate's 16-byte header,
 //! before any replicator opens it.
 //!

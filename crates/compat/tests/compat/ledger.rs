@@ -1,4 +1,4 @@
-//! The upstream-test ledger (PLAN section 4, phase 3 task 8): every upstream Go test is
+//! The upstream-test ledger (PLAN section 4): every upstream Go test is
 //! mapped, in `docs/ledger.toml`, to the Rust tests that check the same behaviour, to a
 //! reason it does not apply, or to a `missing` note that names the test still to write.
 //!

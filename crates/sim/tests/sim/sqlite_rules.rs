@@ -544,7 +544,7 @@ mod rules {
         let (_, log, checkpointed) = pair.checkpoint(StrangerMode::Passive);
         assert!(
             checkpointed == 1 && log == 3,
-            "the mark-0 reader blocks backfill"
+            "the read-mark-0 reader blocks backfill"
         );
         pair.apply(Op::StrangerEnd(0));
         let (_, log, checkpointed) = pair.checkpoint(StrangerMode::Passive);

@@ -227,7 +227,7 @@ fn a_snapshot_takes_the_wal_pages_and_fills_the_rest_from_the_database() {
 }
 
 #[test]
-fn walgrowth_pages_come_from_the_database_file() {
+fn grown_pages_come_from_the_database_file() {
     let mut rig = Rig::new();
     commit(&rig.wal, &[1, 2], 2);
     let first = position_of(rig.snapshot(1000));
@@ -379,10 +379,10 @@ fn a_database_page_flipped_between_two_syncs_is_a_mismatch_naming_it_and_stages_
     assert_eq!(fills(&files[1].2), [(1, db_fill(1)), (2, 2), (3, 0x33)]);
 }
 
-/// A walgrowth page is above every commit the table knows, so its read is a
+/// A grown page is above every commit the table knows, so its read is a
 /// first read; it records the page, and a later snapshot checks it.
 #[test]
-fn a_walgrowth_page_is_recorded_by_its_read_and_a_later_snapshot_checks_it() {
+fn a_grown_page_is_recorded_by_its_read_and_a_later_snapshot_checks_it() {
     let mut rig = Rig::new();
     commit(&rig.wal, &[1], 1);
     let first = position_of(rig.snapshot(1000));
@@ -1239,7 +1239,7 @@ proptest! {
     }
 }
 
-// An application checkpoint under our mark-0 read transaction (ruling V1).
+// An application checkpoint under our read-mark-0 read transaction.
 
 type Later = std::sync::Arc<std::sync::Mutex<Option<(u64, Vec<u8>)>>>;
 
@@ -1316,7 +1316,7 @@ impl Seek for SharedWal {
     }
 }
 
-/// A fully backfilled WAL with our read transaction on mark 0 and a reader open
+/// A fully backfilled WAL with our read transaction on read mark 0 and a reader open
 /// over a shared copy of it.
 struct MarkZero {
     rig: Rig,
@@ -1325,7 +1325,7 @@ struct MarkZero {
     committed: CommittedRead,
 }
 
-fn mark_zero() -> MarkZero {
+fn read_mark_zero() -> MarkZero {
     let mut rig = Rig::new();
     commit(&rig.wal, &[1, 2], 2);
     commit(&rig.wal, &[3], 3);
@@ -1359,10 +1359,12 @@ fn snapshot_step() -> Step {
     }
 }
 
-/// A snapshot step over a mark-0 WAL after `mutate`: what the application does to
+/// A snapshot step over a read-mark-0 WAL after `mutate`: what the application does to
 /// the file between our reader opening it and the scan.
-fn snapshot_under_mark_zero(mutate: impl FnOnce(&Rig, &SharedWal)) -> Result<Synced, StepFailed> {
-    let mut zero = mark_zero();
+fn snapshot_under_read_mark_zero(
+    mutate: impl FnOnce(&Rig, &SharedWal),
+) -> Result<Synced, StepFailed> {
+    let mut zero = read_mark_zero();
     mutate(&zero.rig, &zero.shared);
     block_on(sync_step(
         snapshot_step(),
@@ -1406,16 +1408,16 @@ fn assert_not_halted(result: Result<Synced, StepFailed>) {
 
 #[test]
 fn an_app_truncate_checkpoint_during_a_snapshot_scan_is_not_a_halt() {
-    // SQLite lets wal_checkpoint(TRUNCATE) finish against a mark-0 reader once the
+    // SQLite lets wal_checkpoint(TRUNCATE) finish against a read-mark-0 reader once the
     // WAL is fully backfilled: it waits only on READ_LOCK(1..N).
-    assert_not_halted(snapshot_under_mark_zero(truncate_file));
+    assert_not_halted(snapshot_under_read_mark_zero(truncate_file));
 }
 
 #[test]
 fn an_app_write_that_restarts_the_wal_during_a_snapshot_scan_is_not_a_halt() {
-    // Under mark 0 the next write restarts the WAL in place (plan, F1 verdict),
+    // Under read mark 0 the next write restarts the WAL in place (so the pin does not stop it),
     // overwriting the header and frame 1 the open reader is about to scan.
-    assert_not_halted(snapshot_under_mark_zero(restart_file));
+    assert_not_halted(snapshot_under_read_mark_zero(restart_file));
 }
 
 const WAL_HEADER: usize = 32;
@@ -1425,19 +1427,19 @@ const SCANNED: u64 = 32 + 3 * (24 + 512);
 
 #[test]
 fn a_scan_over_a_truncated_wal_is_wal_moved() {
-    let result = snapshot_under_mark_zero(truncate_file);
+    let result = snapshot_under_read_mark_zero(truncate_file);
     assert_eq!(fault_of(result), Some(Fault::WalMoved));
 }
 
 #[test]
 fn a_scan_over_a_restarted_wal_is_wal_moved() {
-    let result = snapshot_under_mark_zero(restart_file);
+    let result = snapshot_under_read_mark_zero(restart_file);
     assert_eq!(fault_of(result), Some(Fault::WalMoved));
 }
 
 #[test]
 fn a_corrupt_frame_under_an_unchanged_header_still_halts() {
-    let result = snapshot_under_mark_zero(|rig, shared| {
+    let result = snapshot_under_read_mark_zero(|rig, shared| {
         let mut bytes = rig.wal.file_bytes();
         bytes[WAL_HEADER + 24 + 5] ^= 0xFF;
         shared.replace(bytes);
@@ -1447,7 +1449,7 @@ fn a_corrupt_frame_under_an_unchanged_header_still_halts() {
 
 #[test]
 fn a_short_file_under_an_unchanged_header_still_halts() {
-    let result = snapshot_under_mark_zero(|rig, shared| {
+    let result = snapshot_under_read_mark_zero(|rig, shared| {
         let mut bytes = rig.wal.file_bytes();
         bytes.truncate(WAL_HEADER + FRAME_BYTES + 100);
         shared.replace(bytes);
@@ -1457,8 +1459,8 @@ fn a_short_file_under_an_unchanged_header_still_halts() {
 
 /// A step whose scan finishes before the application changes the file, so the
 /// change lands in the page fill.
-fn fill_under_mark_zero(file: impl FnOnce(&Rig) -> Vec<u8>) -> Result<Synced, StepFailed> {
-    let mut zero = mark_zero();
+fn fill_under_read_mark_zero(file: impl FnOnce(&Rig) -> Vec<u8>) -> Result<Synced, StepFailed> {
+    let mut zero = read_mark_zero();
     zero.shared.replace_after_reading(SCANNED, file(&zero.rig));
     block_on(sync_step(
         snapshot_step(),
@@ -1475,14 +1477,14 @@ fn fill_under_mark_zero(file: impl FnOnce(&Rig) -> Vec<u8>) -> Result<Synced, St
 #[test]
 fn a_fill_over_a_truncated_wal_is_wal_moved() {
     assert_eq!(
-        fault_of(fill_under_mark_zero(|_| Vec::new())),
+        fault_of(fill_under_read_mark_zero(|_| Vec::new())),
         Some(Fault::WalMoved)
     );
 }
 
 #[test]
 fn a_fill_over_a_restarted_wal_is_a_retry_not_a_halt() {
-    let result = fill_under_mark_zero(|rig| {
+    let result = fill_under_read_mark_zero(|rig| {
         // Frame 1 is overwritten with another page 1: the scan's digest no longer holds.
         rig.wal.append_tx(&[(pg(1), vec![0x77; PS.bytes()])], nz(3));
         rig.wal.file_bytes()
@@ -1492,7 +1494,7 @@ fn a_fill_over_a_restarted_wal_is_a_retry_not_a_halt() {
 
 #[test]
 fn a_fill_over_a_short_file_under_an_unchanged_header_still_halts() {
-    let result = fill_under_mark_zero(|rig| {
+    let result = fill_under_read_mark_zero(|rig| {
         let mut bytes = rig.wal.file_bytes();
         bytes.truncate(WAL_HEADER + FRAME_BYTES + 100);
         bytes
@@ -1504,12 +1506,12 @@ fn a_fill_over_a_short_file_under_an_unchanged_header_still_halts() {
 fn a_snapshots_whole_scan_follows_the_same_rule() {
     let moves: [fn(&Rig, &SharedWal); 2] = [truncate_file, restart_file];
     for mutate in moves {
-        let mut zero = mark_zero();
+        let mut zero = read_mark_zero();
         mutate(&zero.rig, &zero.shared);
         let err = scan_whole(&mut zero.wal, zero.committed).unwrap_err();
         assert_eq!(err, Fault::WalMoved);
     }
-    let mut zero = mark_zero();
+    let mut zero = read_mark_zero();
     let mut bytes = zero.rig.wal.file_bytes();
     bytes[WAL_HEADER + 24 + 5] ^= 0xFF;
     zero.shared.replace(bytes);

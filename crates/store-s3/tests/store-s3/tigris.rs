@@ -1,4 +1,4 @@
-//! The S3 store against the real Tigris bucket (`just test-tigris`), task 8t.
+//! The S3 store against the real Tigris bucket (`just test-tigris`).
 //!
 //! Every test is ignored: the recipe sources the credentials file, names a
 //! per-run prefix under the bucket and runs them with `--run-ignored only`.
@@ -593,33 +593,49 @@ fn raw_complete(
     )
 }
 
-// G4 (docs/proposals/beyond-go.md): what a conditional write does on Tigris.
-// Measured only; the store sends no conditional header (D6).
+// What a conditional write does on Tigris (docs/proposals/beyond-go.md, conditional writes).
+// Measured only; the store sends no conditional header, since Go sends none and the
+// replica format adds nothing Go does not write.
 
 #[test]
 #[ignore = "needs a Tigris bucket (just test-tigris)"]
-fn g4_if_none_match_on_put() {
+fn if_none_match_on_put() {
     let h = h();
     let object = h.object(&h.key(0, 1, 1));
     let star = [("if-none-match", "*")];
     let first = h.raw("PUT", Some(&object), &[], &star, b"first");
-    obs(&h, "G4 PUT If-None-Match:* to a new key", &first);
+    obs(
+        &h,
+        "conditional write PUT If-None-Match:* to a new key",
+        &first,
+    );
     let second = h.raw("PUT", Some(&object), &[], &star, b"second");
-    obs(&h, "G4 PUT If-None-Match:* to an existing key", &second);
+    obs(
+        &h,
+        "conditional write PUT If-None-Match:* to an existing key",
+        &second,
+    );
     let after = raw_body(&h, &object);
     eprintln!(
-        "OBS G4 object after both: {:?}",
+        "OBS conditional write object after both: {:?}",
         after.as_deref().map(String::from_utf8_lossy)
     );
-    assert_eq!(first.status, 200, "G4: a new key is written");
-    assert_eq!(second.status, 412, "G4: an existing key refuses");
+    assert_eq!(first.status, 200, "conditional write: a new key is written");
+    assert_eq!(
+        second.status, 412,
+        "conditional write: an existing key refuses"
+    );
     assert_eq!(second.tag("Code").as_deref(), Some("PreconditionFailed"));
-    assert_eq!(after.as_deref(), Some(&b"first"[..]), "G4: unchanged");
+    assert_eq!(
+        after.as_deref(),
+        Some(&b"first"[..]),
+        "conditional write: unchanged"
+    );
 }
 
 #[test]
 #[ignore = "needs a Tigris bucket (just test-tigris)"]
-fn g4_if_none_match_on_complete_multipart() {
+fn if_none_match_on_complete_multipart() {
     let h = h();
     let key = h.key(0, 1, 1);
     let object = h.object(&key);
@@ -629,33 +645,37 @@ fn g4_if_none_match_on_complete_multipart() {
     let b = start_multipart(&h, &key, Timestamp::from_unix_millis(2));
     let eb = put_part(&h, &key, &b, 1, b"BBBB".to_vec());
     let first = raw_complete(&h, &object, &a, &ea, &star);
-    obs(&h, "G4 Complete If-None-Match:* to a new key", &first);
+    obs(
+        &h,
+        "conditional write Complete If-None-Match:* to a new key",
+        &first,
+    );
     let second = raw_complete(&h, &object, &b, &eb, &star);
     obs(
         &h,
-        "G4 Complete If-None-Match:* to an existing key",
+        "conditional write Complete If-None-Match:* to an existing key",
         &second,
     );
     let after = raw_body(&h, &object);
     eprintln!(
-        "OBS G4 object after both: {:?}",
+        "OBS conditional write object after both: {:?}",
         after.as_deref().map(String::from_utf8_lossy)
     );
     let open = h.open_uploads();
-    eprintln!("OBS G4 open uploads after the refused complete: {open}");
+    eprintln!("OBS conditional write open uploads after the refused complete: {open}");
     let abort = h.send(
         h.builder()
             .abort_multipart(WallClock.now(), &key, &b)
             .unwrap(),
     );
-    obs_response("G4 abort of the refused upload", &abort);
+    obs_response("conditional write abort of the refused upload", &abort);
     let put = h.raw("PUT", Some(&h.object(&h.key(0, 2, 2))), &[], &[], b"x");
     let c = start_multipart(&h, &h.key(0, 2, 2), Timestamp::from_unix_millis(3));
     let ec = put_part(&h, &h.key(0, 2, 2), &c, 1, b"CCCC".to_vec());
     let over_put = raw_complete(&h, &h.object(&h.key(0, 2, 2)), &c, &ec, &star);
     obs(
         &h,
-        "G4 Complete If-None-Match:* over a single PUT",
+        "conditional write Complete If-None-Match:* over a single PUT",
         &over_put,
     );
     let _ = h.send(
@@ -664,26 +684,30 @@ fn g4_if_none_match_on_complete_multipart() {
             .unwrap(),
     );
     assert_eq!(put.status, 200);
-    assert_eq!(first.status, 200, "G4: a new key completes");
+    assert_eq!(first.status, 200, "conditional write: a new key completes");
     assert!(
         first.tag("Code").is_none(),
-        "G4: no error document in the 200"
+        "conditional write: no error document in the 200"
     );
     assert_eq!(
         second.status, 412,
-        "G4: an existing key refuses the complete"
+        "conditional write: an existing key refuses the complete"
     );
     assert_eq!(second.tag("Code").as_deref(), Some("PreconditionFailed"));
-    assert_eq!(after.as_deref(), Some(&b"AAAA"[..]), "G4: unchanged");
+    assert_eq!(
+        after.as_deref(),
+        Some(&b"AAAA"[..]),
+        "conditional write: unchanged"
+    );
     assert_eq!(
         over_put.status, 412,
-        "G4: a PUT's object counts as existing"
+        "conditional write: a PUT's object counts as existing"
     );
 }
 
 #[test]
 #[ignore = "needs a Tigris bucket (just test-tigris)"]
-fn g4_if_match_on_put() {
+fn if_match_on_put() {
     let h = h();
     let object = h.object(&h.key(0, 1, 1));
     let v1 = h.raw("PUT", Some(&object), &[], &[], b"v1");
@@ -695,7 +719,11 @@ fn g4_if_match_on_put() {
         &[("if-match", e1.as_str())],
         b"v2",
     );
-    obs(&h, "G4 PUT If-Match with the current ETag", &right);
+    obs(
+        &h,
+        "conditional write PUT If-Match with the current ETag",
+        &right,
+    );
     let after_right = raw_body(&h, &object);
     let wrong = h.raw(
         "PUT",
@@ -704,7 +732,11 @@ fn g4_if_match_on_put() {
         &[("if-match", e1.as_str())],
         b"v3",
     );
-    obs(&h, "G4 PUT If-Match with a stale ETag", &wrong);
+    obs(
+        &h,
+        "conditional write PUT If-Match with a stale ETag",
+        &wrong,
+    );
     let after_wrong = raw_body(&h, &object);
     let missing = h.object(&h.key(0, 2, 2));
     let absent = h.raw(
@@ -714,20 +746,34 @@ fn g4_if_match_on_put() {
         &[("if-match", e1.as_str())],
         b"v4",
     );
-    obs(&h, "G4 PUT If-Match to an absent key", &absent);
+    obs(
+        &h,
+        "conditional write PUT If-Match to an absent key",
+        &absent,
+    );
     let after_absent = raw_body(&h, &missing);
     eprintln!(
-        "OBS G4 after right {:?}, after wrong {:?}, absent key {:?}",
+        "OBS conditional write after right {:?}, after wrong {:?}, absent key {:?}",
         after_right.as_deref().map(String::from_utf8_lossy),
         after_wrong.as_deref().map(String::from_utf8_lossy),
         after_absent.as_deref().map(String::from_utf8_lossy),
     );
-    assert_eq!(right.status, 200, "G4: the current ETag writes");
+    assert_eq!(
+        right.status, 200,
+        "conditional write: the current ETag writes"
+    );
     assert_eq!(after_right.as_deref(), Some(&b"v2"[..]));
-    assert_eq!(wrong.status, 412, "G4: a stale ETag refuses");
+    assert_eq!(wrong.status, 412, "conditional write: a stale ETag refuses");
     assert_eq!(wrong.tag("Code").as_deref(), Some("PreconditionFailed"));
-    assert_eq!(after_wrong.as_deref(), Some(&b"v2"[..]), "G4: unchanged");
-    assert_eq!(absent.status, 404, "G4: If-Match on an absent key");
+    assert_eq!(
+        after_wrong.as_deref(),
+        Some(&b"v2"[..]),
+        "conditional write: unchanged"
+    );
+    assert_eq!(
+        absent.status, 404,
+        "conditional write: If-Match on an absent key"
+    );
     assert_eq!(absent.tag("Code").as_deref(), Some("NoSuchKey"));
-    assert_eq!(after_absent, None, "G4: nothing written");
+    assert_eq!(after_absent, None, "conditional write: nothing written");
 }

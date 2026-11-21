@@ -26,9 +26,9 @@
 //!
 //! Rule 6 proves one restart with the read-transaction pin and `salt1 + 1`; it
 //! does not check `checkpoint_seq`, which real SQLite takes from the restarting
-//! connection's own count (ruling V4). At boot, rule 9 compares the whole tip with
+//! connection's own count. At boot, rule 9 compares the whole tip with
 //! the WAL range it covers (page bytes and commit size), not only the last page,
-//! so a tail dropped by power loss and regrown differently is a rewind (ruling V3).
+//! so a tail dropped by power loss and regrown differently is a rewind.
 //!
 //! Rule 5 is a halt, not a snapshot: a replica prefix holds one page size. At
 //! boot the actor also halts when the tip is not readable but the replica's
@@ -188,7 +188,7 @@ impl TipView {
     }
 
     /// Checks a tip whose header names a WAL origin against `wal`: the frame
-    /// before its end and the whole range it covers (ruling V3). `first`, when
+    /// before its end and the whole range it covers. `first`, when
     /// given, is the file's first [`TIP_READ`] bytes, already read. `None` when
     /// the file does not decode and verify whole.
     async fn checked<S: ObjectStore, R: Read + Seek>(
@@ -298,11 +298,11 @@ struct TipPages {
     wanted: Option<PageChecksum>,
     last: Option<LastPage>,
     /// Every page the WAL holds in the tip's range is in the tip with the same bytes.
-    /// The tip may hold more: pages the database file supplied (walgrowth, a snapshot's).
+    /// The tip may hold more: pages the database file supplied (grown pages, a snapshot's).
     holds_wal_pages: bool,
 }
 
-/// What the WAL holds in the tip's range of frames (ruling V3).
+/// What the WAL holds in the tip's range of frames.
 enum Range {
     /// The newest version of each page, and the commit size of the range's last
     /// transaction (`None` for an empty range).
@@ -394,7 +394,7 @@ fn tip_range<R: Read + Seek>(
 
 /// The scan from the origin stopped short of the tip's end. If the header still names
 /// the scanned generation the range was rewritten; if not, the WAL moved under the
-/// read and the caller retries (ruling V1's helper, `generation_unchanged`).
+/// read and the caller retries (`generation_unchanged` tells the two apart).
 fn unreached<R: Read + Seek>(wal: &mut WalReader<R>) -> Result<Range, Fault> {
     match wal.generation_unchanged() {
         Ok(true) => Ok(Range::Rewritten),
@@ -530,7 +530,7 @@ pub struct Probes {
     /// chains from its end, asked only when the WAL's header names another generation,
     /// or (through [`Self::read_against`]) when the wal-index was reset ahead of a header
     /// that names the position's. Frames with no commit after them are a rolled-back
-    /// spill and do not count (ruling V2).
+    /// spill and do not count.
     pub stale_next: bool,
 }
 
@@ -833,7 +833,7 @@ fn same_generation(
 
 /// Rule 9a: the wal-index was reset ahead of the header and a commit follows the
 /// position. A position pinned at this epoch cannot have one after it (the reset
-/// needed a backfill its read lock blocks), so finding one is F1's tripwire.
+/// needed a backfill its read lock blocks), so finding one is what the check that catches frames abandoned after the read lock was taken exists for.
 fn reset_past(tip: &Tip<'_>, seen: &Seen, header: &WalHeader, wal: &WalView) -> Option<Refusal> {
     let Tip::Running(position, probes) = tip else {
         return None;

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Every non-test function with exactly one caller, for the D5 checkpoint (docs/function-length.md).
+"""Every non-test function with exactly one caller, for the function-length review (docs/function-length.md).
 
 usage:
     rust-analyzer lsif . > /tmp/lsif.json

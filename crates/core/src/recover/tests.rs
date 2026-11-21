@@ -241,14 +241,14 @@ fn rule_5_a_new_page_size_halts() {
     );
 }
 
-// Rule 6 and F1.
+// Rule 6: a restart the read-transaction continuity proof can follow.
 fn restarted(wal: &FakeWal) {
     wal.force_restart();
     commit(wal, &[1], 3);
 }
 
 #[test]
-fn f1_a_pinned_position_follows_a_restart_it_can_prove() {
+fn a_pinned_position_follows_a_restart_it_can_prove() {
     let wal = fresh();
     let pos = position(&wal, 2, Continuity::Pinned(wal.epoch()));
     restarted(&wal);
@@ -267,7 +267,7 @@ fn f1_a_pinned_position_follows_a_restart_it_can_prove() {
 }
 
 #[test]
-fn f1_an_unpinned_position_snapshots_on_a_restart() {
+fn an_unpinned_position_snapshots_on_a_restart() {
     let wal = fresh();
     let pos = position(&wal, 2, Continuity::Unpinned);
     restarted(&wal);
@@ -278,7 +278,7 @@ fn f1_an_unpinned_position_snapshots_on_a_restart() {
 }
 
 #[test]
-fn f1_a_pin_from_another_epoch_proves_nothing() {
+fn a_pin_from_another_epoch_proves_nothing() {
     let wal = fresh();
     let pos = position(&wal, 2, Continuity::Pinned(wal.epoch()));
     restarted(&wal);
@@ -290,7 +290,7 @@ fn f1_a_pin_from_another_epoch_proves_nothing() {
 }
 
 #[test]
-fn f1_two_restarts_are_not_one() {
+fn two_restarts_are_not_one() {
     let wal = fresh();
     let pos = position(&wal, 2, Continuity::Pinned(wal.epoch()));
     restarted(&wal);
@@ -302,7 +302,7 @@ fn f1_two_restarts_are_not_one() {
 }
 
 #[test]
-fn f1_the_tripwire_catches_frames_abandoned_after_the_pin() {
+fn the_abandoned_frames_check_catches_frames_abandoned_after_the_pin() {
     let wal = fresh();
     let pos = position(&wal, 2, Continuity::Pinned(wal.epoch()));
     // Frames appended after the pin, then a restart that rewrites the header in
@@ -323,7 +323,7 @@ fn f1_the_tripwire_catches_frames_abandoned_after_the_pin() {
 }
 
 #[test]
-fn f1_a_restart_that_has_grown_past_the_old_end_is_followed() {
+fn a_restart_that_has_grown_past_the_old_end_is_followed() {
     let wal = fresh();
     let pos = position(&wal, 2, Continuity::Pinned(wal.epoch()));
     wal.force_restart();
@@ -359,9 +359,9 @@ fn go_parity_a_salt_reset_at_boot_snapshots() {
     );
 }
 
-// Rule 7 and F2.
+// Rule 7: a committed end before the tip's end is a rewind.
 #[test]
-fn f2_a_committed_end_before_the_tip_is_a_rewind() {
+fn a_committed_end_before_the_tip_is_a_rewind() {
     let wal = fresh();
     let pos = position(&wal, 2, Continuity::Unpinned);
     let mut seen = view(&wal);
@@ -556,7 +556,7 @@ fn rule_9a_a_commit_the_position_never_covered_under_a_reset_index_is_a_snapshot
 }
 
 #[test]
-fn rule_9a_a_pinned_position_with_a_commit_after_it_under_a_reset_index_is_the_tripwire() {
+fn rule_9a_a_pinned_position_with_a_commit_after_it_under_a_reset_index_is_an_abandoned_frame() {
     let wal = FakeWal::new(PS, salts(10));
     commit(&wal, &[1, 2], 2);
     let pos = position(&wal, 1, Continuity::Pinned(wal.epoch()));
@@ -595,7 +595,7 @@ fn rule_10_a_running_position_continues_as_it_is() {
 }
 
 #[test]
-fn f1_a_boot_continue_at_the_committed_end_is_pinned() {
+fn a_boot_continue_at_the_committed_end_is_pinned() {
     let wal = fresh();
     let tip = boot(&wal, 2);
     let Recovered::Continue(next) = recover(Some(Tip::Boot(&tip)), &view(&wal), None) else {
@@ -606,7 +606,7 @@ fn f1_a_boot_continue_at_the_committed_end_is_pinned() {
 }
 
 #[test]
-fn f1_a_boot_continue_below_the_committed_end_is_unpinned() {
+fn a_boot_continue_below_the_committed_end_is_unpinned() {
     let wal = fresh();
     let tip = boot(&wal, 2);
     commit(&wal, &[3], 3);
@@ -617,7 +617,7 @@ fn f1_a_boot_continue_below_the_committed_end_is_unpinned() {
 }
 
 #[test]
-fn f1_a_pinned_position_from_an_older_epoch_at_the_committed_end_is_repinned() {
+fn a_pinned_position_from_an_older_epoch_at_the_committed_end_is_repinned() {
     let wal = fresh();
     let pos = position(&wal, 2, Continuity::Pinned(wal.epoch()));
     wal.set_epoch(wal.epoch().next());
@@ -628,7 +628,7 @@ fn f1_a_pinned_position_from_an_older_epoch_at_the_committed_end_is_repinned() {
 }
 
 #[test]
-fn f1_a_pinned_position_below_the_committed_end_stays_pinned() {
+fn a_pinned_position_below_the_committed_end_stays_pinned() {
     let wal = fresh();
     let pos = position(&wal, 2, Continuity::Pinned(wal.epoch()));
     commit(&wal, &[3], 3);
@@ -1028,19 +1028,20 @@ proptest! {
     }
 }
 
-// The tripwire needs a whole committed transaction of the old generation (ruling V2).
+// The check that catches abandoned frames needs a whole committed transaction of the old
+// generation; a rolled-back spill was never part of the database.
 #[test]
-fn f1_the_tripwire_ignores_a_rolled_back_spill_past_the_pin() {
+fn the_abandoned_frames_check_ignores_a_rolled_back_spill_past_the_pin() {
     let wal = fresh();
     // An application transaction spills a frame past the committed end, then rolls back.
     wal.append_uncommitted(&[(pg(3), vec![9; PS.bytes()])]);
     wal.backfill(u32::MAX);
-    // We re-pin at the committed end (an idle step): the WAL is fully backfilled, so mark 0.
+    // We re-pin at the committed end (an idle step): the WAL is fully backfilled, so read mark 0.
     wal.set_epoch(wal.epoch().next());
     wal.pin_reader();
     assert_eq!(wal.read_mark(), Some(0));
     let pos = position(&wal, 2, Continuity::Pinned(wal.epoch()));
-    // The next application write restarts the WAL once, as SQLite allows under mark 0.
+    // The next application write restarts the WAL once, as SQLite allows under read mark 0.
     wal.force_restart();
     commit(&wal, &[1], 3);
     let verdict = run_running(&wal, &pos, None);
@@ -1055,7 +1056,7 @@ fn f1_the_tripwire_ignores_a_rolled_back_spill_past_the_pin() {
 }
 
 #[test]
-fn f1_the_tripwire_still_fires_when_a_spill_follows_a_committed_transaction() {
+fn the_abandoned_frames_check_still_fires_when_a_spill_follows_a_committed_transaction() {
     let wal = fresh();
     let pos = position(&wal, 2, Continuity::Pinned(wal.epoch()));
     commit(&wal, &[1], 3);
@@ -1070,7 +1071,8 @@ fn f1_the_tripwire_still_fires_when_a_spill_follows_a_committed_transaction() {
     );
 }
 
-// Ruling V4: rule 6 does not look at checkpoint_seq.
+// Rule 6 does not look at checkpoint_seq: real SQLite writes the restarting connection's own
+// count there, so only `salt1 + 1` in the shared wal-index header proves the restart.
 #[test]
 fn rule_6_a_restart_with_an_unrelated_checkpoint_seq_is_still_one_restart() {
     let wal = fresh();
@@ -1100,7 +1102,7 @@ fn rule_6_a_restart_with_an_unrelated_checkpoint_seq_is_still_one_restart() {
     ));
 }
 
-// Ruling V3: boot compares the whole tip with the WAL range it covers.
+// Boot compares the whole tip with the WAL range it covers, not only its last page.
 /// Loads the tip staged from `staged` (pages `tip_pages`, database size `commit_size`)
 /// against the WAL as it is now.
 fn load_against(
@@ -1168,7 +1170,7 @@ fn a_tip_lacking_a_page_the_range_holds_is_a_rewind() {
 
 #[test]
 fn a_tip_with_a_page_from_the_database_file_still_continues() {
-    // The walgrowth or snapshot step supplies page 1 from the database file.
+    // The grown-pages or snapshot step supplies page 1 from the database file.
     let wal = FakeWal::new(PS, salts(10));
     commit(&wal, &[2, 3], 3);
     let recovered = load_against(&wal, &wal, &[(1, 1), (2, 2), (3, 3)], 3);

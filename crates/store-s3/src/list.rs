@@ -1,4 +1,4 @@
-//! Listing a level: LIST pages only, never a HEAD (ruling G1). Several levels
+//! Listing a level: LIST pages only, never a HEAD (a HEAD per file made a listing cost one request per file). Several levels
 //! can be listed at once ([`Inner::list_many`]): each round sends the next
 //! page of every listing still going as one batch.
 //!

@@ -12,7 +12,7 @@
 //! A [`Policy::Persistent`] fault is one that waiting alone is not expected to
 //! fix: credentials refused, a corrupt object, a damaged WAL, a second writer.
 //! What happens then is configuration, one field of [`Responses`] per
-//! [`PersistentCause`] (`docs/PLAN.md`, decision D7). [`Response::KeepTrying`]
+//! [`PersistentCause`] (`docs/PLAN.md`, the degraded-state section). [`Response::KeepTrying`]
 //! puts the lane that failed in a degraded state: it retries with the doubling
 //! wait, capped at [`MAX_BACKOFF`] as Go's sync loop is, the other lanes keep
 //! running, and every retry that fails is reported. [`Response::Stop`] stops

@@ -147,7 +147,7 @@ Checkpoint PASSIVE+TRUNCATE
   - A newer WAL version means recovery fails with SQLITE_CANTOPEN.
   - A wal-index header that passes the checksum but carries a version other than 3007000 means "no read-transaction is opened and SQLite returns SQLITE_CANTOPEN".
   - "Technically, the various VFSes are free to implement these locks however they see fit. However, compatibility is encouraged so that VFSes can interoperate."
-- So the version is a tripwire: a future layout change makes an old reader refuse, not misread. A Rust pin must check iVersion==3007000 and refuse otherwise.
+- So the version is a guard: a future layout change makes an old reader refuse, not misread. A Rust pin must check iVersion==3007000 and refuse otherwise.
 - WAL file format and checksum: version 3007000 since 3.7.0 (2010) [M constant; date I].
 ### History
 From gh api commits on sqlite/sqlite, saved in scratch/wal_c_log.txt and scratch/os_unix_log.txt [M].
@@ -168,7 +168,7 @@ Branches wal2 and begin-concurrent (not on trunk) would change the layout and lo
 ### Other live -shm implementations
 Open (not verified). See the Open list.
 ### Conclusion
-- (a) Reading the WAL and the -shm header: YES. The bytes are unchanged since 2010, and there is a version tripwire.
+- (a) Reading the WAL and the -shm header: YES. The bytes are unchanged since 2010, and there is a version check.
 - (b) Pin: YES. The lock offsets and read-mark semantics have not changed since 2010. The last change touching an external locker is 3.51.0 (2025-11), and it is harmless.
 - (c) Checkpoint: NO. The checkpoint/restart behaviour had a corruption race fixed 2026-03 (3.51.3), and a fork would not get such fixes.
 

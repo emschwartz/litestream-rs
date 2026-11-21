@@ -24,7 +24,7 @@
 //!
 //! [`Stepper`] is the sync engine without the actor: `recover_traced`, `sync_step` and
 //! `checkpoint` over a backend and an in-memory staging store, for cases that check the
-//! engine's verdict at one point (the pin cases, the tripwire).
+//! engine's verdict at one point (the pin cases, the abandoned-frames check).
 
 use std::collections::BTreeMap;
 use std::io;
