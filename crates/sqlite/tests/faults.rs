@@ -780,6 +780,68 @@ fn persist_wal_keeps_a_wal_a_page_size_change_makes_stale() {
     assert_eq!(rows, 1, "the database file itself is sound");
 }
 
+/// A WAL deleted by another process while the pin holds it: SQLite keeps writing the unlinked
+/// file through its open descriptors, so every later commit is invisible to anything that opens
+/// the path. The backend must say so (`SourceError::Unlinked`), and the engine halts
+/// (`WalUnlinked`) rather than snapshot a database it can no longer follow.
+#[test]
+fn a_wal_deleted_by_another_process_while_pinned_halts_the_engine() {
+    wal_deleted::<Sqlite>();
+}
+
+fn remove_by_another_process(path: &Path) {
+    let status = Command::new("rm").arg(path).status().unwrap();
+    assert!(status.success(), "rm {}", path.display());
+}
+
+fn wal_deleted<B: Backend>() {
+    let dir = TempDir::new().unwrap();
+    let mut rig = rig::<B>(&dir);
+    rig.insert(3000).unwrap();
+    rig.settle().unwrap();
+    remove_by_another_process(&rig.wal());
+    rig.app()
+        .unwrap()
+        .execute_batch("INSERT INTO t(v) VALUES (randomblob(700))")
+        .unwrap();
+    assert_eq!(
+        rig.backend().unwrap().committed().err(),
+        Some(SourceError::Unlinked)
+    );
+    assert_eq!(rig.until_halt().unwrap(), HaltCause::WalUnlinked);
+    rig.check().unwrap();
+}
+
+/// Upstream `TestDatabaseDeletion`: the database, its WAL and `-shm` deleted while replicating.
+/// The engine halts with a typed cause instead of replicating from what its descriptors still
+/// see, and the replica keeps every transaction it had.
+#[test]
+fn a_deleted_database_halts_and_the_replica_keeps_its_history() {
+    database_deleted::<Sqlite>();
+}
+
+fn database_deleted<B: Backend>() {
+    let dir = TempDir::new().unwrap();
+    let mut rig = rig::<B>(&dir);
+    for _ in 0..12 {
+        rig.insert(2000).unwrap();
+        rig.settle().unwrap();
+    }
+    let before = rig.check().unwrap();
+    let (db, wal) = (rig.db().to_owned(), rig.wal());
+    for path in [wal, shm_path(&db), db] {
+        remove_by_another_process(&path);
+    }
+    rig.app()
+        .unwrap()
+        .execute_batch("INSERT INTO t(v) VALUES (randomblob(700))")
+        .unwrap();
+    assert_eq!(rig.until_halt().unwrap(), HaltCause::WalUnlinked);
+    let after = rig.check().unwrap();
+    assert_eq!(after.latest, before.latest);
+    assert_eq!(after.restored, before.restored);
+}
+
 /// Upstream `TestConcurrentOperations`: four host connections on four threads commit at once
 /// while the actor ticks over them, then the host's outside checkpoints and the actor's own
 /// PASSIVE and TRUNCATE run a full cycle; the oracle restores every transaction.
