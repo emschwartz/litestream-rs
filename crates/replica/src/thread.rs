@@ -143,8 +143,8 @@ impl Progress {
 #[derive(Debug, Default)]
 struct Seen {
     counters: Counters,
-    /// The foreign checkpoint total last reported as an event.
-    foreign_reported: u64,
+    /// The application checkpoint total that ran, last reported as an event.
+    app_ran_reported: u64,
     /// The application checkpoint total last reported as an event.
     app_reported: u64,
     stopped_reported: bool,
@@ -424,7 +424,7 @@ impl Worker {
         if !idle {
             self.emit(&Event::Engine(event));
         }
-        self.report_foreign();
+        self.report_app_ran();
         self.report_app();
         if self.stop.is_some() && progress {
             return Turn::Again;
@@ -475,14 +475,14 @@ impl Worker {
         }
     }
 
-    const fn foreign_total(&self) -> u64 {
-        self.actor.foreign_checkpoints()
+    const fn app_ran_total(&self) -> u64 {
+        self.actor.app_checkpoints_ran()
     }
 
-    fn report_foreign(&mut self) {
-        let total = self.foreign_total();
-        if total > self.seen.foreign_reported {
-            self.seen.foreign_reported = total;
+    fn report_app_ran(&mut self) {
+        let total = self.app_ran_total();
+        if total > self.seen.app_ran_reported {
+            self.seen.app_ran_reported = total;
             self.emit(&Event::ForeignCheckpoint { total });
         }
     }
@@ -608,7 +608,7 @@ impl Worker {
 
     fn publish(&self, parts: &SnapshotParts) {
         let resnapshot = self.actor.pending_snapshot();
-        let foreign = self.foreign_total();
+        let ran = self.app_ran_total();
         let app = self.app_total();
         let verification = self
             .scheduled
@@ -627,7 +627,7 @@ impl Worker {
             health.wal_bytes = parts.wal_bytes;
             health.db_bytes = parts.db_bytes;
             health.resnapshot = resnapshot;
-            health.foreign_checkpoints = foreign;
+            health.app_checkpoints_ran = ran;
             health.app_checkpoints = app;
             health.counters = seen.counters;
             health.verification = verification;

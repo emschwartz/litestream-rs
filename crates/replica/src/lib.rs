@@ -35,7 +35,7 @@
 //! What a second Go process on the same meta directory or bucket prefix does is not refused
 //! at start (Go leaves no reliable local sign, and `start` makes no store call); it is caught
 //! when the replica shows files above the local tip, which stops the replicator by default
-//! (`Responses::GO_LIKE`, `foreign_writer: Stop`).
+//! (`Responses::GO_LIKE`, `other_writer: Stop`).
 
 #![forbid(unsafe_code)]
 
@@ -71,7 +71,7 @@ pub use store::{BoxFuture, DynStore, DynUpload};
 
 pub use lsr_core::{
     AppCheckpoint, AppCheckpoints, AsOfInside, CheckpointConfig, Clock, Degraded, Depth, Entropy,
-    ForeignWriter, HaltCause as StopCause, L0Retention, Lane, Maintenance,
+    HaltCause as StopCause, L0Retention, Lane, Maintenance, OtherWriter,
     PersistentCause as DegradedCause, Report, Response, Responses, RestoreOptions, RestoreTarget,
     Restored, Severity, SnapshotCause,
 };

@@ -1,7 +1,7 @@
 //! A rule-based model of SQLite's WAL, its wal-index and its locks.
 //!
 //! The scripted WAL fakes in `lsr-core` have a test say what a checkpoint does. [`SimSqlite`]
-//! instead follows SQLite's rules, so a stranger's checkpoint, a writer's restart
+//! instead follows SQLite's rules, so another process's checkpoint, a writer's restart
 //! and a reader's mark interact as they do in SQLite. The rules were read from the
 //! bundled amalgamation (rusqlite 0.43, SQLite 3.54.1: `walTryBeginRead`,
 //! `walCheckpoint`, `sqlite3WalCheckpoint`, `walRestartLog`, `walFrames`) and are
@@ -39,9 +39,9 @@
 //!   SQLite reports none of them to the app, so the model counts them
 //!   ([`SimSqlite::app_autocheckpoints`]).
 //!
-//! The connections are the app (commits, spills, a stranger's checkpoints), our
+//! The connections are the app (commits, spills, another process's checkpoints), our
 //! read connection, our pool connection (checkpoints and `bump_seq`), the
-//! barrier and write-lock transactions, and stranger readers. Only the app and the
+//! barrier and write-lock transactions, and other-process readers. Only the app and the
 //! pool write frames or checkpoint, so only they carry a checkpoint count.
 //!
 //! Durability follows `synchronous=NORMAL`: a commit is not fsynced; the WAL is
@@ -79,14 +79,14 @@ const ORDER: ByteOrder = ByteOrder::Little;
 /// Bytes of a frame header that the running checksum covers.
 const CHECKSUMMED_FRAME_HEADER_LEN: usize = 8;
 
-/// A stranger's read transaction.
+/// Another process's read transaction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ReaderId(u32);
 
 /// A checkpoint mode as another process can ask for it (core's
 /// [`CheckpointMode`] has no RESTART).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StrangerMode {
+pub enum OtherProcessMode {
     /// `PRAGMA wal_checkpoint(PASSIVE)`.
     Passive,
     /// `PRAGMA wal_checkpoint(RESTART)`.
@@ -95,7 +95,7 @@ pub enum StrangerMode {
     Truncate,
 }
 
-impl From<CheckpointMode> for StrangerMode {
+impl From<CheckpointMode> for OtherProcessMode {
     fn from(mode: CheckpointMode) -> Self {
         match mode {
             CheckpointMode::Passive => Self::Passive,
@@ -151,7 +151,7 @@ enum Conn {
     Pool,
     Barrier,
     Lock,
-    Stranger(ReaderId),
+    OtherProcess(ReaderId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -412,7 +412,7 @@ impl State {
         match conn {
             Conn::App => Some(&mut self.app_checkpoints),
             Conn::Pool => Some(&mut self.pool_checkpoints),
-            Conn::Ours | Conn::Barrier | Conn::Lock | Conn::Stranger(_) => None,
+            Conn::Ours | Conn::Barrier | Conn::Lock | Conn::OtherProcess(_) => None,
         }
     }
 
@@ -619,14 +619,14 @@ impl State {
     }
 
     /// `sqlite3WalCheckpoint` on connection `by`, which holds no read transaction.
-    fn checkpoint(&mut self, by: Conn, mode: StrangerMode) -> CheckpointNumbers {
-        let degraded = mode != StrangerMode::Passive && self.writer.is_some_and(|w| w != by);
+    fn checkpoint(&mut self, by: Conn, mode: OtherProcessMode) -> CheckpointNumbers {
+        let degraded = mode != OtherProcessMode::Passive && self.writer.is_some_and(|w| w != by);
         let mut busy = degraded;
         self.backfill();
-        if !degraded && mode != StrangerMode::Passive {
+        if !degraded && mode != OtherProcessMode::Passive {
             if self.index.backfilled < self.index.mx_frame || self.slot_held_by_other(by) {
                 busy = true;
-            } else if mode == StrangerMode::Truncate {
+            } else if mode == OtherProcessMode::Truncate {
                 self.restart(by);
                 // SQLite resets the wal-index before it truncates the file
                 // (`walCheckpoint`): when the truncate fails, the file keeps
@@ -677,7 +677,7 @@ impl State {
             return;
         }
         let before = self.index.backfilled;
-        self.checkpoint(Conn::App, StrangerMode::Passive);
+        self.checkpoint(Conn::App, OtherProcessMode::Passive);
         let tally = &mut self.app_auto;
         tally.attempts = tally.attempts.saturating_add(1);
         if self.index.backfilled > before {
@@ -1010,24 +1010,24 @@ impl SimSqlite {
         })
     }
 
-    /// A stranger begins a read transaction under the mark-choice rule.
-    pub fn stranger_reader_begin(&self) -> ReaderId {
+    /// Another process begins a read transaction under the mark-choice rule.
+    pub fn other_process_reader_begin(&self) -> ReaderId {
         self.with(|state| {
             let id = ReaderId(state.next_reader);
             state.next_reader = state.next_reader.saturating_add(1);
-            state.begin(Conn::Stranger(id));
+            state.begin(Conn::OtherProcess(id));
             id
         })
     }
 
-    /// The stranger's read transaction ends; false if it was not held.
-    pub fn stranger_reader_end(&self, id: ReaderId) -> bool {
-        self.with(|state| state.end(Conn::Stranger(id)))
+    /// The another process's read transaction ends; false if it was not held.
+    pub fn other_process_reader_end(&self, id: ReaderId) -> bool {
+        self.with(|state| state.end(Conn::OtherProcess(id)))
     }
 
     /// `PRAGMA wal_checkpoint(mode)` on the app's connection; `None` while the
     /// app is in a transaction (SQLite says LOCKED).
-    pub fn stranger_checkpoint(&self, mode: StrangerMode) -> Option<CheckpointNumbers> {
+    pub fn other_process_checkpoint(&self, mode: OtherProcessMode) -> Option<CheckpointNumbers> {
         self.with(|state| {
             let in_tx = state.writer == Some(Conn::App) || state.readers.contains_key(&Conn::App);
             (!in_tx).then(|| state.checkpoint(Conn::App, mode))
@@ -1248,7 +1248,7 @@ impl SimSqlite {
         })
     }
 
-    /// The next TRUNCATE checkpoint that finishes, ours or a stranger's, resets
+    /// The next TRUNCATE checkpoint that finishes, ours or another process's, resets
     /// the wal-index and then fails to truncate the file (`ftruncate` failing):
     /// the file keeps the old header and frames until the next commit writes a
     /// header. Our own checkpoint call reports the I/O error. The real-SQLite

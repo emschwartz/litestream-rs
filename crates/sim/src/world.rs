@@ -21,7 +21,7 @@ use crate::exec::{Polls, RunEnd, run_until};
 use crate::model::{CommitId, Model, PageImage};
 use crate::oracle::{Acked, Checked, Violation, check};
 use crate::seed::Seed;
-use crate::sqlite::{AppCommit, CrashKind, SimSqlite, StrangerMode};
+use crate::sqlite::{AppCommit, CrashKind, OtherProcessMode, SimSqlite};
 use crate::store::{FaultHandle, Faults, Lost, Stage, StageHandle, Tap, TapLog, Yield};
 
 /// The staging store the actor sees.
@@ -413,8 +413,8 @@ impl World {
     /// A checkpoint from outside the engine. One that copied frames fsynced the
     /// WAL first, so every commit so far survives a power loss; one held off by
     /// a reader copied nothing and did not.
-    pub fn stranger_checkpoint(&mut self, mode: StrangerMode) -> bool {
-        let ran = self.sqlite.stranger_checkpoint(mode).is_some();
+    pub fn other_process_checkpoint(&mut self, mode: OtherProcessMode) -> bool {
+        let ran = self.sqlite.other_process_checkpoint(mode).is_some();
         if ran && self.sqlite.wal_synced() {
             self.model.on_checkpoint();
         }
@@ -569,7 +569,7 @@ impl World {
     ///
     /// # Errors
     /// The store's error when it cannot list or write.
-    pub fn remote_put_foreign(&self) -> Result<bool, StoreError> {
+    pub fn remote_put_unrecognized(&self) -> Result<bool, StoreError> {
         use lsr_core::{Level, ObjectStore};
         use lsr_ltx::TxidRange;
         let Some(newest) = self.remote_level_zero()?.last().map(|f| f.key) else {

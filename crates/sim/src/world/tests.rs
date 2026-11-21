@@ -75,7 +75,7 @@ fn a_vacuum_to_a_new_page_size_restarts_the_model_on_the_new_image() {
 fn a_power_loss_leaves_the_model_where_the_rules_are() {
     let mut w = world();
     commit(&mut w, 1);
-    assert!(w.stranger_checkpoint(StrangerMode::Passive));
+    assert!(w.other_process_checkpoint(OtherProcessMode::Passive));
     commit(&mut w, 2);
     commit(&mut w, 3);
     w.crash(CrashKind::Power);

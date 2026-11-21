@@ -244,7 +244,7 @@ fn anchor_files(inventory: &Inventory) -> Vec<FileInfo> {
 
 fn gate(inventory: &Inventory, published: Option<Txid>, state: &MaintainState) -> Option<Hold> {
     distrusted(inventory, state)
-        .or_else(|| foreign_names(inventory))
+        .or_else(|| unrecognized_names(inventory))
         .or_else(|| {
             inventory
                 .malformed_snapshots()
@@ -268,10 +268,10 @@ fn distrusted(inventory: &Inventory, state: &MaintainState) -> Option<Hold> {
     })
 }
 
-fn foreign_names(inventory: &Inventory) -> Option<Hold> {
+fn unrecognized_names(inventory: &Inventory) -> Option<Hold> {
     Level::ALL.iter().find_map(|level| {
         let count = inventory.skipped(*level);
-        (count > 0).then_some(Hold::ForeignNames {
+        (count > 0).then_some(Hold::UnrecognizedNames {
             level: *level,
             count,
         })

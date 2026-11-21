@@ -23,7 +23,7 @@ use lsr_ltx::PageSize;
 use crate::generate::{EnvFault, MetaOp, Op, WalOp};
 use crate::run::{Opts, RunReport, Seen, run_ops};
 use crate::seed::Seed;
-use crate::sqlite::StrangerMode;
+use crate::sqlite::OtherProcessMode;
 
 /// A [`SnapshotCause`] without its payload.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -413,7 +413,7 @@ fn last_boot_continues(report: &RunReport) -> Result<(), String> {
 pub fn meta_wiped_wal_restarted() -> Scenario {
     let restarted = vec![
         Op::OurReader { begin: false },
-        Op::StrangerCheckpoint(StrangerMode::Truncate),
+        Op::OtherProcessCheckpoint(OtherProcessMode::Truncate),
         commit(2, false),
         Op::EnvFault(EnvFault::WipeStaging),
     ];
@@ -529,7 +529,7 @@ pub fn restored_with_no_wal() -> Scenario {
             synced(),
             vec![
                 Op::OurReader { begin: false },
-                Op::StrangerCheckpoint(StrangerMode::Truncate),
+                Op::OtherProcessCheckpoint(OtherProcessMode::Truncate),
                 Op::EnvFault(EnvFault::DriverWritesNothing),
                 Op::EnvFault(EnvFault::WipeStaging),
             ],
@@ -565,7 +565,7 @@ pub fn wal_header_torn() -> Scenario {
     let torn = vec![Op::Wal(WalOp::TearHeader)];
     let heal = vec![
         Op::OurReader { begin: false },
-        Op::StrangerCheckpoint(StrangerMode::Truncate),
+        Op::OtherProcessCheckpoint(OtherProcessMode::Truncate),
         commit(1, false),
     ];
     after_restart_then("wal_header_torn", torn, heal, CauseKind::WalMissing)
@@ -640,7 +640,7 @@ pub fn vacuum_page_size_change_and_back() -> Scenario {
 pub fn app_checkpoint_while_down() -> Scenario {
     let restarted = vec![
         Op::OurReader { begin: false },
-        Op::StrangerCheckpoint(StrangerMode::Truncate),
+        Op::OtherProcessCheckpoint(OtherProcessMode::Truncate),
         commit(2, false),
     ];
     after_restart(
@@ -661,7 +661,7 @@ pub fn restart_during_read_lock_lapse() -> Scenario {
             ticks(SETTLE),
             vec![
                 Op::OurReader { begin: false },
-                Op::StrangerCheckpoint(StrangerMode::Restart),
+                Op::OtherProcessCheckpoint(OtherProcessMode::Restart),
                 commit(2, false),
                 Op::Restart,
             ],
@@ -683,7 +683,7 @@ pub fn pinned_on_zero_single_restart() -> Scenario {
             ticks(4),
             vec![
                 Op::OurReader { begin: false },
-                Op::StrangerCheckpoint(StrangerMode::Truncate),
+                Op::OtherProcessCheckpoint(OtherProcessMode::Truncate),
                 commit(2, false),
             ],
             ticks(SETTLE),
@@ -711,7 +711,7 @@ pub fn truncate_failed_after_the_index_reset() -> Scenario {
             vec![
                 Op::OurReader { begin: false },
                 Op::EnvFault(EnvFault::TruncateFails),
-                Op::StrangerCheckpoint(StrangerMode::Truncate),
+                Op::OtherProcessCheckpoint(OtherProcessMode::Truncate),
                 Op::OurReader { begin: true },
             ],
             ticks(SETTLE),
@@ -784,10 +784,10 @@ pub fn truncate_threshold_crossed() -> Scenario {
         vec![
             vec![commit(3, false)],
             ticks(4),
-            vec![Op::StrangerReader { begin: true }],
+            vec![Op::OtherProcessReader { begin: true }],
             (0..12).map(|_| commit(30, true)).collect(),
             ticks(SETTLE),
-            vec![Op::StrangerReader { begin: false }],
+            vec![Op::OtherProcessReader { begin: false }],
             ticks(SETTLE * 2),
             vec![Op::Restore],
         ],

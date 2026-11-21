@@ -43,7 +43,7 @@ use lsr_core::{
     recover_traced, sync_step,
 };
 use lsr_ltx::{PageNo, PageSize, Timestamp};
-use lsr_sim::{ReaderId, SimCheckpointer, SimPages, SimSource, SimSqlite, StrangerMode};
+use lsr_sim::{OtherProcessMode, ReaderId, SimCheckpointer, SimPages, SimSource, SimSqlite};
 use lsr_sqlite::Sqlite as LiveSqlite;
 use lsr_wal::{Salts, WalReader};
 use proptest::prelude::*;
@@ -493,7 +493,7 @@ enum Op {
     /// Our checkpoint protocol.
     Checkpoint(Ours),
     /// An application's own `PRAGMA wal_checkpoint`.
-    Outside(StrangerMode),
+    Outside(OtherProcessMode),
     /// Another connection starts (true) or ends (false) a read transaction.
     Reader(bool),
 }
@@ -586,11 +586,11 @@ impl World {
         self.mirror_commits();
     }
 
-    fn outside(&self, mode: StrangerMode) {
+    fn outside(&self, mode: OtherProcessMode) {
         let pragma = match mode {
-            StrangerMode::Passive => "PRAGMA wal_checkpoint(PASSIVE)",
-            StrangerMode::Restart => "PRAGMA wal_checkpoint(RESTART)",
-            StrangerMode::Truncate => "PRAGMA wal_checkpoint(TRUNCATE)",
+            OtherProcessMode::Passive => "PRAGMA wal_checkpoint(PASSIVE)",
+            OtherProcessMode::Restart => "PRAGMA wal_checkpoint(RESTART)",
+            OtherProcessMode::Truncate => "PRAGMA wal_checkpoint(TRUNCATE)",
         };
         let real: (i64, i64, i64) = self
             .app
@@ -599,7 +599,10 @@ impl World {
             })
             .expect(pragma);
         self.sim.force_random_salts(Some(real_salts(&self.live)));
-        let model = self.sim.stranger_checkpoint(mode).expect("the app is idle");
+        let model = self
+            .sim
+            .other_process_checkpoint(mode)
+            .expect("the app is idle");
         assert_eq!(
             real,
             (
@@ -619,11 +622,11 @@ impl World {
                 conn.execute_batch("BEGIN").expect("begin");
                 conn.query_row("SELECT COUNT(1) FROM t", [], |_row| Ok(()))
                     .expect("read mark");
-                self.reader = Some((conn, self.sim.stranger_reader_begin()));
+                self.reader = Some((conn, self.sim.other_process_reader_begin()));
             }
             (false, Some((conn, id))) => {
                 conn.execute_batch("ROLLBACK").expect("rollback");
-                assert!(self.sim.stranger_reader_end(id));
+                assert!(self.sim.other_process_reader_end(id));
             }
             (_, held) => self.reader = held,
         }
@@ -723,9 +726,9 @@ fn op() -> impl Strategy<Value = Op> {
         4 => Just(Op::Sync),
         1 => Just(Op::Checkpoint(Ours::Passive)),
         2 => Just(Op::Checkpoint(Ours::Truncate)),
-        1 => Just(Op::Outside(StrangerMode::Passive)),
-        1 => Just(Op::Outside(StrangerMode::Restart)),
-        1 => Just(Op::Outside(StrangerMode::Truncate)),
+        1 => Just(Op::Outside(OtherProcessMode::Passive)),
+        1 => Just(Op::Outside(OtherProcessMode::Restart)),
+        1 => Just(Op::Outside(OtherProcessMode::Truncate)),
         1 => any::<bool>().prop_map(Op::Reader),
     ]
 }
@@ -814,9 +817,9 @@ fn outside_checkpoints_and_restarts() {
                 bytes: 2000,
             },
             Op::Sync,
-            Op::Outside(StrangerMode::Passive),
+            Op::Outside(OtherProcessMode::Passive),
             Op::Sync,
-            Op::Outside(StrangerMode::Restart),
+            Op::Outside(OtherProcessMode::Restart),
             Op::Insert {
                 rows: 2,
                 bytes: 500,
@@ -828,14 +831,14 @@ fn outside_checkpoints_and_restarts() {
                 bytes: 500,
             },
             Op::Sync,
-            Op::Outside(StrangerMode::Truncate),
+            Op::Outside(OtherProcessMode::Truncate),
             Op::Insert { rows: 1, bytes: 10 },
             Op::Sync,
             Op::Reader(true),
             Op::Insert { rows: 1, bytes: 10 },
-            Op::Outside(StrangerMode::Restart),
+            Op::Outside(OtherProcessMode::Restart),
             Op::Reader(false),
-            Op::Outside(StrangerMode::Truncate),
+            Op::Outside(OtherProcessMode::Truncate),
             Op::Sync,
             Op::Checkpoint(Ours::Passive),
         ],
@@ -850,7 +853,7 @@ fn partial_backfill_skips_pages_rewritten_above_the_mark() {
         1024,
         &[
             Op::Shrink,
-            Op::Outside(StrangerMode::Passive),
+            Op::Outside(OtherProcessMode::Passive),
             Op::Sync,
             Op::Checkpoint(Ours::Passive),
             Op::Sync,

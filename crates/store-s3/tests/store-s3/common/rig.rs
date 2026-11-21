@@ -47,7 +47,7 @@ impl Harness for FakeHarness {
         &self.store
     }
 
-    fn plant_foreign(&self, level: Level, name: &str) -> Result<(), Failure> {
+    fn plant_unrecognized(&self, level: Level, name: &str) -> Result<(), Failure> {
         let object = format!("{}{name}", level_prefix(config().prefix(), level));
         self.wire.inner().put_raw(&object, b"stray".to_vec(), &[]);
         Ok(())

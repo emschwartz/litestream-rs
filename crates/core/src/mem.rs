@@ -42,7 +42,7 @@ struct State {
     clock: i64,
     created_at_calls: u64,
     objects: BTreeMap<FileKey, Object>,
-    foreign: BTreeMap<Level, BTreeSet<String>>,
+    unrecognized: BTreeMap<Level, BTreeSet<String>>,
     faults: VecDeque<(StoreOp, StoreError)>,
     /// Errors for commits that publish first and then fail.
     late_commit_faults: VecDeque<StoreError>,
@@ -105,9 +105,9 @@ impl MemStore {
 
     /// Puts a name that is not an LTX key into a level, as a stray file would
     /// be in a directory.
-    pub fn plant_foreign(&self, level: Level, name: &str) {
+    pub fn plant_unrecognized(&self, level: Level, name: &str) {
         self.lock()
-            .foreign
+            .unrecognized
             .entry(level)
             .or_default()
             .insert(name.to_owned());
@@ -143,12 +143,12 @@ impl MemStore {
                 listed: object.listed(lazy),
             })
             .collect();
-        let foreign: Vec<String> = state
-            .foreign
+        let unrecognized: Vec<String> = state
+            .unrecognized
             .get(&level)
             .map(|names| names.iter().cloned().collect())
             .unwrap_or_default();
-        Ok(build_listing(files, &foreign, after, limit))
+        Ok(build_listing(files, &unrecognized, after, limit))
     }
 
     fn read_now(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {

@@ -36,9 +36,9 @@ use std::io::Read as _;
 use std::path::Path;
 
 pub use config::{
-    AppReaders, DbConfig, DbSource, DirSource, ForeignWriterSetting, GoConfig, LogFormat, LogLevel,
-    Logging, ReplicaConfig, ReplicaKind, ResponseSetting, ResponseSettings, RustSettings,
-    S3Settings, Secret, Snapshot, SnapshotOverride, defaults,
+    AppReaders, DbConfig, DbSource, DirSource, GoConfig, LogFormat, LogLevel, Logging,
+    OtherWriterSetting, ReplicaConfig, ReplicaKind, ResponseSetting, ResponseSettings,
+    RustSettings, S3Settings, Secret, Snapshot, SnapshotOverride, defaults,
 };
 pub use duration::{DurationError, GoDuration};
 pub use error::{

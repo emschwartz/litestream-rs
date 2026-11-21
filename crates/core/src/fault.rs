@@ -10,7 +10,7 @@
 //! state machine hands it a [`Next`].
 //!
 //! A [`Policy::Persistent`] fault is one that waiting alone is not expected to
-//! fix: credentials refused, a corrupt object, a damaged WAL, a second writer.
+//! fix: credentials refused, a corrupt object, a damaged WAL, another writer.
 //! What happens then is configuration, one field of [`Responses`] per
 //! [`PersistentCause`] (`docs/PLAN.md`, the degraded-state section). [`Response::KeepTrying`]
 //! puts the lane that failed in a degraded state: it retries with the doubling
@@ -18,7 +18,7 @@
 //! running, and every retry that fails is reported. [`Response::Stop`] stops
 //! the whole engine for a person, as every persistent fault did before.
 //! [`Responses::GO_LIKE`] (the default) keeps trying everywhere except on a
-//! second writer; [`Responses::STRICT`] stops on every cause.
+//! other writer; [`Responses::STRICT`] stops on every cause.
 //!
 //! What keeping trying never does, whatever the configuration, follows from
 //! the code rather than from a check of the response: the engine has one
@@ -214,7 +214,7 @@ pub enum HaltCause {
     /// A replica object is corrupt.
     RemoteCorrupt,
     /// Another writer replicates into this replica.
-    ForeignWriter,
+    OtherWriter,
     /// The replica went backwards.
     RemoteRegressed,
     /// A committed WAL frame is corrupt.
@@ -256,7 +256,7 @@ pub enum PersistentCause {
     /// A replica object is corrupt.
     RemoteCorrupt,
     /// Another writer replicates into this replica.
-    ForeignWriter,
+    OtherWriter,
     /// The replica went backwards.
     RemoteRegressed,
     /// A committed WAL frame is corrupt.
@@ -290,7 +290,7 @@ impl PersistentCause {
             HaltCause::Credentials => Some(Self::Credentials),
             HaltCause::StoreRefused => Some(Self::StoreRefused),
             HaltCause::RemoteCorrupt => Some(Self::RemoteCorrupt),
-            HaltCause::ForeignWriter => Some(Self::ForeignWriter),
+            HaltCause::OtherWriter => Some(Self::OtherWriter),
             HaltCause::RemoteRegressed => Some(Self::RemoteRegressed),
             HaltCause::WalCorrupt => Some(Self::WalCorrupt),
             HaltCause::WalTruncated => Some(Self::WalTruncated),
@@ -309,7 +309,7 @@ impl From<PersistentCause> for HaltCause {
             PersistentCause::Credentials => Self::Credentials,
             PersistentCause::StoreRefused => Self::StoreRefused,
             PersistentCause::RemoteCorrupt => Self::RemoteCorrupt,
-            PersistentCause::ForeignWriter => Self::ForeignWriter,
+            PersistentCause::OtherWriter => Self::OtherWriter,
             PersistentCause::RemoteRegressed => Self::RemoteRegressed,
             PersistentCause::WalCorrupt => Self::WalCorrupt,
             PersistentCause::WalTruncated => Self::WalTruncated,
@@ -335,7 +335,7 @@ pub enum Response {
 /// Its own type: continuing damages the history, so it cannot be set by
 /// copying another cause's [`Response`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ForeignWriter {
+pub enum OtherWriter {
     /// The engine stops: no upload, no compaction, no delete.
     Stop,
     /// The engine boots again and snapshots after the other writer's newest
@@ -377,12 +377,12 @@ pub struct Responses {
     /// state the failure left.
     pub bug: Response,
     /// Another writer replicates into this replica.
-    pub foreign_writer: ForeignWriter,
+    pub other_writer: OtherWriter,
 }
 
 impl Responses {
     /// Go's behaviour (the default): keep trying on every cause, stop on a
-    /// second writer.
+    /// other writer.
     pub const GO_LIKE: Self = Self {
         credentials: Response::KeepTrying,
         store_refused: Response::KeepTrying,
@@ -394,7 +394,7 @@ impl Responses {
         page_size_changed: Response::KeepTrying,
         database_page_mismatch: Response::KeepTrying,
         bug: Response::KeepTrying,
-        foreign_writer: ForeignWriter::Stop,
+        other_writer: OtherWriter::Stop,
     };
 
     /// Stop on every cause.
@@ -409,7 +409,7 @@ impl Responses {
         page_size_changed: Response::Stop,
         database_page_mismatch: Response::Stop,
         bug: Response::Stop,
-        foreign_writer: ForeignWriter::Stop,
+        other_writer: OtherWriter::Stop,
     };
 
     /// Whether `cause` stops the engine.
@@ -444,10 +444,10 @@ impl Responses {
                     Response::Stop => Action::Stop,
                 };
             }
-            PersistentCause::ForeignWriter => {
-                return match self.foreign_writer {
-                    ForeignWriter::ContinueAndInterleaveHistories => Action::Rebuild,
-                    ForeignWriter::Stop => Action::Stop,
+            PersistentCause::OtherWriter => {
+                return match self.other_writer {
+                    OtherWriter::ContinueAndInterleaveHistories => Action::Rebuild,
+                    OtherWriter::Stop => Action::Stop,
                 };
             }
         };
@@ -533,7 +533,7 @@ pub const fn policy(fault: &Fault) -> Policy {
         Fault::StoreAuth => Policy::Persistent(PersistentCause::Credentials),
         Fault::StoreRefused => Policy::Persistent(PersistentCause::StoreRefused),
         Fault::RemoteCorrupt => Policy::Persistent(PersistentCause::RemoteCorrupt),
-        Fault::RemoteAheadOfLocal => Policy::Persistent(PersistentCause::ForeignWriter),
+        Fault::RemoteAheadOfLocal => Policy::Persistent(PersistentCause::OtherWriter),
         Fault::RemoteRegressed => Policy::Persistent(PersistentCause::RemoteRegressed),
         Fault::WalCorruptBelowCommitted => Policy::Persistent(PersistentCause::WalCorrupt),
         Fault::WalTruncatedBelowCommitted => Policy::Persistent(PersistentCause::WalTruncated),

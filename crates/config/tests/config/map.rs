@@ -11,7 +11,7 @@ use lsr_config::{
     plan,
 };
 use lsr_core::{
-    ForeignWriter, Interval, L0Retention, Maintenance, Response, Responses, RetentionMode,
+    Interval, L0Retention, Maintenance, OtherWriter, Response, Responses, RetentionMode,
 };
 use lsr_replica::{NonZeroDuration, ReaderTracking};
 use lsr_store_s3::{Provider, UrlStyle};
@@ -295,15 +295,15 @@ fn validation_interval_is_the_scheduled_verify_s_and_zero_is_off() {
 #[test]
 fn responses_override_go_s_one_by_one() {
     let db = one(&format!(
-        "litestream-rs:\n  responses:\n    credentials: stop\n    foreign-writer: continue-and-interleave-histories\n{}",
+        "litestream-rs:\n  responses:\n    credentials: stop\n    other-writer: continue-and-interleave-histories\n{}",
         db_with("")
     ));
     let responses = db.config().responses;
     assert_eq!(responses.credentials, Response::Stop);
     assert_eq!(responses.store_refused, Response::KeepTrying);
     assert_eq!(
-        responses.foreign_writer,
-        ForeignWriter::ContinueAndInterleaveHistories
+        responses.other_writer,
+        OtherWriter::ContinueAndInterleaveHistories
     );
 }
 

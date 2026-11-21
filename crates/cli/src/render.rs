@@ -557,8 +557,8 @@ fn finding_parts(finding: &Finding) -> (&'static str, String) {
                 key_path(key)
             ),
         ),
-        Finding::ForeignNames { level, count } => (
-            "foreign_names",
+        Finding::UnrecognizedNames { level, count } => (
+            "unrecognized_names",
             format!("{count} names in level {level} are not LTX files"),
         ),
         Finding::Unreadable { key, error, .. } => (
@@ -652,7 +652,7 @@ const LEVEL_HEADERS: [&str; 6] = [
     "bytes",
     "first transaction",
     "last transaction",
-    "foreign",
+    "unrecognized",
 ];
 
 /// Columns padded to the widest of header and values, two spaces apart; the
@@ -777,7 +777,7 @@ fn level_json(level: Level, summary: &LevelSummary) -> String {
         ("bytes", summary.bytes().to_string()),
         ("first", hex_or_null(range.map(TxidRange::min))),
         ("last", hex_or_null(range.map(TxidRange::max))),
-        ("foreign_names", summary.skipped().to_string()),
+        ("unrecognized_names", summary.skipped().to_string()),
     ])
 }
 
@@ -836,7 +836,11 @@ fn files_text(inventory: &Inventory, created_at_fallbacks: Option<u64>) -> Strin
         putln!(out, "{} {} {time}{note}", key_path(&info.key), info.size);
     }
     if inventory.skipped_total() > 0 {
-        putln!(out, "foreign names skipped: {}", inventory.skipped_total());
+        putln!(
+            out,
+            "unrecognized names skipped: {}",
+            inventory.skipped_total()
+        );
     }
     if let Some(count) = created_at_fallbacks {
         putln!(out, "stored times taken from LastModified: {count}");
@@ -872,7 +876,7 @@ fn files_json(inventory: &Inventory, created_at_fallbacks: Option<u64>) -> Strin
     let files: Vec<String> = inventory.files().iter().map(file_json).collect();
     let mut fields = vec![
         ("files", array(&files)),
-        ("foreign_names", inventory.skipped_total().to_string()),
+        ("unrecognized_names", inventory.skipped_total().to_string()),
     ];
     if let Some(count) = created_at_fallbacks {
         fields.push(("created_at_from_last_modified", count.to_string()));
@@ -908,7 +912,7 @@ mod tests {
                 "bytes",
                 "first transaction",
                 "last transaction",
-                "foreign",
+                "unrecognized",
             ]))
             .chain(rows),
         ) {

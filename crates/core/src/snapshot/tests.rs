@@ -180,7 +180,7 @@ impl Rig {
         image
     }
 
-    /// A stranger copies every frame at or below the mark into the database file.
+    /// Another process copies every frame at or below the mark into the database file.
     fn backfill_to(&mut self, committed_txs: usize) {
         let mut frames = 0_u32;
         for tx in self.txs.iter().take(committed_txs) {
@@ -226,7 +226,7 @@ impl Rig {
     }
 }
 
-/// A database a stranger backfills into while it is read: before read `at`, page
+/// A database another process backfills into while it is read: before read `at`, page
 /// `pgno` is overwritten with garbage, as a torn page mid-copy would be.
 struct Racing {
     inner: FakeDb,
@@ -251,7 +251,7 @@ impl PageSource for Racing {
 }
 
 /// A history: the transactions (page lists), the sync points between them, the
-/// stranger's backfill point (a count of transactions) and its tear schedule.
+/// another process's backfill point (a count of transactions) and its tear schedule.
 #[derive(Clone, Debug)]
 struct History {
     base: u32,
@@ -308,7 +308,7 @@ proptest! {
     fn snapshot_ignores_concurrent_backfill(history in histories()) {
         let mut rig = build(&history);
         rig.backfill_to(history.backfill.min(rig.txs.len()));
-        // The stranger only touches pages the WAL holds: those are in the map.
+        // The other process only touches pages the WAL holds: those are in the map.
         let written: Vec<u32> = rig.txs.iter().flat_map(|tx| tx.pages.clone()).collect();
         let tears: Vec<(usize, u32)> = history
             .tears

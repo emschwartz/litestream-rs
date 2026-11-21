@@ -527,8 +527,8 @@ impl Harness for RetryingHarness {
         &self.store
     }
 
-    fn plant_foreign(&self, level: Level, name: &str) -> Result<(), conformance::Failure> {
-        self.mem.plant_foreign(level, name);
+    fn plant_unrecognized(&self, level: Level, name: &str) -> Result<(), conformance::Failure> {
+        self.mem.plant_unrecognized(level, name);
         Ok(())
     }
 

@@ -95,7 +95,7 @@ pub struct Config {
     /// Bytes per sync step and files per upload tick.
     pub sync_limits: SyncLimits,
     /// What each persistent failure does. Default [`Responses::GO_LIKE`]: keep trying,
-    /// stop on a second writer.
+    /// stop on another writer.
     pub responses: Responses,
     /// Whether the application signals long reads.
     pub readers: ReaderTracking,

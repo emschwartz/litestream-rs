@@ -10,7 +10,7 @@
 //! [`plan_pages`], the shared `stage`): frames of the current generation up to
 //! the synced end win, the database file supplies the rest, and the page count is
 //! the proof's last commit. The read transaction pins the WAL at our mark, so a
-//! stranger may copy frames at or below the mark into the database file while the
+//! other process may copy frames at or below the mark into the database file while the
 //! file is read. Every such frame is at or below the synced end, so it is in the
 //! page map and the map wins: a page torn by a concurrent backfill is never read.
 //! That argument needs the synced end to be at or above the wal-index's

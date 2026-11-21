@@ -1,6 +1,6 @@
 # Phase 3: the public API, draft
 
-Status: draft, revised 2026-11-20 after an independent review. It refines task 6 of `docs/plans/phase-3-syncing.md` into signatures; the "As built" section at the end says where the code departs from it. Rulings it follows: P0 (a SQLite read transaction holds the pin), P3 (TRUNCATE only on the application's word), P4 (1-second polling), D6 (copy Go; no new files or formats), D7 (keep trying; stop only for a second writer; configurable responses). "Engine change" marks what the core must gain for this API.
+Status: draft, revised 2026-11-20 after an independent review. It refines task 6 of `docs/plans/phase-3-syncing.md` into signatures; the "As built" section at the end says where the code departs from it. Rulings it follows: P0 (a SQLite read transaction holds the pin), P3 (TRUNCATE only on the application's word), P4 (1-second polling), D6 (copy Go; no new files or formats), D7 (keep trying; stop only for another writer; configurable responses). "Engine change" marks what the core must gain for this API.
 
 ## Shape in one paragraph
 
@@ -59,7 +59,7 @@ pub enum Stopped {
     /// Time ran out with work left. The wal-index gives a frame offset, not a
     /// txid, so what is left is measured in bytes and files.
     DeadlineReached { unsynced_wal_bytes: u64, staged_not_uploaded: u32 },
-    /// Already stopped by a cause (a second writer, or a configured stop).
+    /// Already stopped by a cause (another writer, or a configured stop).
     Stopped(StopCause),
     /// The thread died (a panic that was not caught, under `panic = "abort"`
     /// nothing is caught at all), or this process is a fork of the one that
@@ -139,7 +139,7 @@ pub struct ReaderGuard { /* decrements on drop */ }
 
 `Config::readers` is `ReaderTracking::Untracked` by default, under which TRUNCATE never runs, as ruling P3 says for an application that gives no signal. `Tracked` means the application promises to hold a guard for every long read.
 
-The library also detects a broken obligation it cannot prevent: a backfill it did not run is an application checkpoint, counted in `Health::foreign_checkpoints` and sent as an event.
+The library also detects a broken obligation it cannot prevent: a backfill it did not run is an application checkpoint, counted in `Health::app_checkpoints_ran` and sent as an event.
 
 ## Configuration
 
@@ -178,11 +178,11 @@ pub struct Responses {
     /// `KeepTrying` rebuilds the engine and boots again, at most once per
     /// interval; it never resumes state a panic unwound through.
     pub bug: Response,
-    /// Its own type: continuing past a second writer damages the history.
-    pub foreign_writer: ForeignWriter,
+    /// Its own type: continuing past another writer damages the history.
+    pub other_writer: OtherWriter,
 }
 pub enum Response { KeepTrying, Stop }
-pub enum ForeignWriter { Stop, ContinueAndInterleaveHistories }
+pub enum OtherWriter { Stop, ContinueAndInterleaveHistories }
 impl Responses { pub const GO_LIKE: Self; pub const STRICT: Self; }
 ```
 
@@ -209,7 +209,7 @@ pub struct Health {
     pub wal_bytes: u64,
     pub db_bytes: u64,
     pub resnapshot: Option<SnapshotCause>,
-    pub foreign_checkpoints: u64,
+    pub app_checkpoints_ran: u64,
     /// Go's metrics: per-operation counts, errors and durations for sync,
     /// checkpoint and each store call; bytes uploaded; retries; events dropped.
     pub counters: Counters,
@@ -267,7 +267,7 @@ pub enum StartError {
 
 ## The review's answers to the open questions
 
-- **Refuse to start when a Go process uses the same meta directory?** No. `start` makes no store call, and Go leaves no reliable local sign. A second writer is caught when the replica shows files above the local tip (the default stop). Document it.
+- **Refuse to start when a Go process uses the same meta directory?** No. `start` makes no store call, and Go leaves no reliable local sign. Another writer is caught when the replica shows files above the local tip (the default stop). Document it.
 - **`Readers`, or "pinned until a time"?** Neither: counted guards. A time is a guess, and with busy timeouts at zero a wrong answer costs a busy result, not a stall.
 - **WAL size and the age of the oldest unreplicated commit in `Health`?** Yes, both.
 - **Where do `restore` and `verify` live?** In `lsr-core`, re-exported here as free functions.
@@ -295,7 +295,7 @@ Where the code (`crates/replica`, and the engine changes in `crates/core/src/act
 - **`lsr replicate <db> <replica>`** takes a directory (created if missing) or an `s3://` URL whose query carries the S3 settings. It installs its handlers before the replicator starts, prints `replicating <db>` once it runs, stops with a final sync within the 30 s grace on SIGINT, SIGTERM or SIGHUP (a second signal shortens the drain to nothing), prints the outcome, and exits 0 only when drained. Signals come through `signal-hook` 0.3 (MIT or Apache-2.0): a handler needs `unsafe`, which the CLI may not contain.
 - **The scheduled verify** (`docs/PLAN.md` section 7; `crates/replica/src/scheduled.rs`, `crates/core/src/verify/against.rs`). What Go does at 041a8c3 (`store.go:267-273`, `:885-968`; `replica.go:1956-2028`; `cmd/litestream/replicate.go:360`): with `validation.interval` above zero (unset by default, so off), a ticker on the store lists every compaction level of every database (snapshots excluded) and checks the files are sorted and contiguous, logs one warning per gap, overlap or misordering, counts `litestream_validation_checks_total{db,level,result}` and the two `litestream_last_validation_success*` gauges, and changes nothing else: no file is read, nothing is restored, nothing is compared with the database, replication never stops. Its cost is one listing per level per database per interval. The replica-level `validation-interval` key is parsed, copied down, and never read. What v1 does, and where it departs:
   - `Config::verify_interval: Option<NonZeroDuration>`, `None` by default; the daemon maps Go's `validation.interval` to it for every database (zero or less is off, as in Go), and `validation-interval` is accepted with a no-effect warning. The first run is one interval after the start, each later one an interval after the previous ended (Go's ticker counts from the start and drops ticks while busy; they differ by at most one run's length). Time is the injected `Runtime`'s.
-  - A run checks the listing as `verify` does at `Depth::Names` (holes, malformed snapshots, foreign names: Go's checks, and Rust's overlap rule) and, the departure Go lacks and section 7 requires, restores the transaction the replica holds and compares it with the live database at that transaction, page for page. Without it a stale page in a chain of `NoChecksum` files is found by nothing.
+  - A run checks the listing as `verify` does at `Depth::Names` (holes, malformed snapshots, unrecognized names: Go's checks, and Rust's overlap rule) and, the departure Go lacks and section 7 requires, restores the transaction the replica holds and compares it with the live database at that transaction, page for page. Without it a stale page in a chain of `NoChecksum` files is found by nothing.
   - Where it runs. The live side needs the read transaction's view, so the engine reads it on the replicator's thread (`Actor::read_live_pages`, `take_live_pages`): in a sync tick once the replica holds everything staged, under that tick's `SyncedThrough` proof, with the level-9 snapshot's reads and checks (`snapshot::read_live`): WAL pages up to the synced end from the scan's verified checksums, every other page from the database through the replicator's own connection, checked against the page checksum table. No descriptor is opened. This costs one read of the pages the database file supplies, once per interval, the same work a snapshot does on the same thread. The replica side (listing, then the restore's reads into a one-checksum-a-page sink) runs on a thread of its own, `lsr-verify`, started on the first run and fed through a slot of one, so a slow or stuck store call never delays a sync and runs never overlap. Memory: 8 bytes a page on each side.
   - A failing run (a page differs, the lengths differ, the restore of that transaction fails, or the listing says the newest state does not restore) is a degraded state, not a stop: `Event::Verified { txid, outcome: VerifyOutcome::Failed(Mismatch) }` names the lowest differing page and how many, `Health::verification.failing` holds it (`Health::is_degraded` is true), and retention pins the last transaction a run found good (or the failing one when none did) through `Actor::pin_for_verify`, beside any degraded lane's pin (the older wins). The next run that passes clears both. A transaction compaction merged before the run read it is `Merged` (nothing to compare), and a failed listing or read is `Incomplete`; neither is degraded.
   - `Health::verification: Verification { last_run, last_good, failing: Option<VerifyFailure { since, txid, found }>, pinned, worst_finding, runs: VerifyRuns { passed, failed, merged, incomplete } }`. The sidecar's `/metrics` adds `lsr_verify_runs_total{db,result}`, `lsr_verify_failing{db}`, `lsr_verify_failing_txid{db}`, `lsr_verify_failing_page{db}` and `lsr_verify_last_success_timestamp_seconds{db}`; Go's per-level validation series are not emitted, since the check is not per level. Its log lines: a failing run at error, an incomplete one at warning.

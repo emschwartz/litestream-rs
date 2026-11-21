@@ -308,7 +308,7 @@ impl Manifest {
 /// The keys of every file under a replica directory; a file that is not an LTX key is an error.
 fn list_replica_files(replica: &Path) -> Result<BTreeSet<String>, CompatError> {
     let listing = crate::replica::list(replica)?;
-    if let Some(stray) = listing.foreign.first() {
+    if let Some(stray) = listing.unrecognized.first() {
         return Err(CompatError::BadKey(stray.clone()));
     }
     Ok(listing.files.into_iter().map(|f| f.rel).collect())

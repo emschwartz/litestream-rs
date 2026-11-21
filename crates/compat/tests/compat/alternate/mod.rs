@@ -457,7 +457,7 @@ fn compaction_view(fixture: &AppFixture) -> Result<(Vec<String>, bool), CompatEr
         .map(|f| f.rel.clone())
         .collect();
     let scratch = listing
-        .foreign
+        .unrecognized
         .iter()
         .any(|n| n.ends_with(".tmp") && !n.starts_with("ltx/0/"));
     Ok((higher, scratch))
@@ -466,7 +466,7 @@ fn compaction_view(fixture: &AppFixture) -> Result<(Vec<String>, bool), CompatEr
 /// Whether an upload is in flight in the replica's level 0.
 fn uploading(fixture: &AppFixture) -> Result<bool, CompatError> {
     Ok(list(&fixture.replica)?
-        .foreign
+        .unrecognized
         .iter()
         .any(|n| n.ends_with(".tmp") && n.starts_with("ltx/0/")))
 }

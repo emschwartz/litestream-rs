@@ -574,8 +574,8 @@ fn a_app_checkpoint_is_counted_and_reported() {
         .unwrap();
     site.commit(1);
     clock.advance(POLL);
-    let health = wait(&replicator, |h| h.foreign_checkpoints == 1 && caught_up(h));
-    assert_eq!(health.foreign_checkpoints, 1);
+    let health = wait(&replicator, |h| h.app_checkpoints_ran == 1 && caught_up(h));
+    assert_eq!(health.app_checkpoints_ran, 1);
     assert_eq!(health.app_checkpoints.backfilled, 1);
     assert_eq!(
         health.app_notice(),

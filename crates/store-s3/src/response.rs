@@ -72,13 +72,13 @@ pub struct ListedFile {
     pub last_modified: Timestamp,
 }
 
-/// One page of a level, split into LTX files and foreign names.
+/// One page of a level, split into LTX files and unrecognized names.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ListPage {
     /// LTX files, ascending.
     pub files: Vec<ListedFile>,
     /// Names under the level that are not LTX keys (scratch names excluded).
-    pub foreign: Vec<String>,
+    pub unrecognized: Vec<String>,
     /// The token for the next page when the listing is truncated.
     pub next_token: Option<String>,
 }
@@ -98,7 +98,7 @@ pub fn parse_list(
     let lead = level_prefix(prefix, level);
     let mut page = ListPage {
         files: Vec::new(),
-        foreign: Vec::new(),
+        unrecognized: Vec::new(),
         next_token: parsed.next_continuation_token,
     };
     let mut previous: Option<&str> = None;
@@ -124,7 +124,7 @@ pub fn parse_list(
                     .and_then(|text| Timestamp::parse_rfc3339(text).ok())
                     .ok_or(ResponseError::Malformed)?,
             }),
-            Err(_foreign) => page.foreign.push(name.to_owned()),
+            Err(_unrecognized) => page.unrecognized.push(name.to_owned()),
         }
     }
     Ok(page)
@@ -290,13 +290,13 @@ mod tests {
     }
 
     #[test]
-    fn list_splits_files_foreign_and_scratch() {
+    fn list_splits_files_unrecognized_and_scratch() {
         let a = name(1);
         let scratch = format!("{}.tmp", name(2));
-        let foreign = "p/0000/README".to_owned();
+        let unrecognized = "p/0000/README".to_owned();
         let c = name(3);
         let r = listing(
-            &[&a, &scratch, &c, &foreign.replace("README", "zzz")],
+            &[&a, &scratch, &c, &unrecognized.replace("README", "zzz")],
             "<IsTruncated>false</IsTruncated>",
         );
         let page = parse_list(&r, &prefix(), Level::ZERO).unwrap();
@@ -316,7 +316,7 @@ mod tests {
                 .as_deref(),
             Some("2026-11-20T13:49:45.000Z")
         );
-        assert_eq!(page.foreign, vec!["zzz".to_owned()]);
+        assert_eq!(page.unrecognized, vec!["zzz".to_owned()]);
         assert_eq!(page.next_token, None);
     }
 

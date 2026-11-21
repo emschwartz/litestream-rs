@@ -220,37 +220,37 @@ fn a_bug_stops_under_strict() {
     assert_eq!(tick, Tick::Halted(HaltCause::Bug));
 }
 
-/// A second writer stops uploads and maintenance under the default
+/// Another writer stops uploads and maintenance under the default
 /// responses, and the cause stays.
 #[test]
 fn a_second_writer_stops_the_engine_by_default() {
     let (mut rig, mut actor) = caught_up_go_like();
     let tick = actor.fault(Lane::Upload, Fault::RemoteAheadOfLocal, ts(T0 + 10));
-    assert_eq!(tick, Tick::Halted(HaltCause::ForeignWriter));
+    assert_eq!(tick, Tick::Halted(HaltCause::OtherWriter));
     let io = rig.io();
     rig.commit(2);
     for at in [T0 + 10, T0 + 600_000] {
         assert_eq!(
             rig.tick(&mut actor, at),
-            Tick::Halted(HaltCause::ForeignWriter)
+            Tick::Halted(HaltCause::OtherWriter)
         );
     }
     assert_eq!(rig.io(), io, "no upload, no maintenance, no sync");
 }
 
-/// Continuing past a second writer is a rebuild: the next boot takes the
+/// Continuing past another writer is a rebuild: the next boot takes the
 /// replica as it is.
 #[test]
 fn continuing_past_a_second_writer_boots_again() {
     let mut rig = Rig::new();
     let mut config = go_like();
-    config.responses.foreign_writer = crate::ForeignWriter::ContinueAndInterleaveHistories;
+    config.responses.other_writer = crate::OtherWriter::ContinueAndInterleaveHistories;
     let mut actor = Actor::new(config);
     rig.settle(&mut actor, T0);
     let tick = actor.fault(Lane::Upload, Fault::RemoteAheadOfLocal, ts(T0 + 10));
     assert_eq!(
         degraded(&tick).map(|(lane, cause, _)| (lane, cause)),
-        Some((Lane::Sync, PersistentCause::ForeignWriter))
+        Some((Lane::Sync, PersistentCause::OtherWriter))
     );
     let seen = rig.follow(&mut actor, T0 + 10, 20);
     assert!(
@@ -512,7 +512,7 @@ fn a_rebuilt_actor_keeps_what_was_asked_and_reported_and_boots_again() {
         fresh.pending_snapshot(),
         Some(SnapshotCause::OperatorRequested)
     );
-    assert_eq!(fresh.foreign_checkpoints(), actor.foreign_checkpoints());
+    assert_eq!(fresh.app_checkpoints_ran(), actor.app_checkpoints_ran());
 
     let seen = rig.follow(&mut fresh, T0 + 20, 50);
     assert!(fresh.booted(), "{seen:?}");

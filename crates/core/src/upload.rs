@@ -153,7 +153,7 @@ pub fn plan_upload(state: &UploadState, local_tip: Option<Txid>) -> UploadPlan {
 /// [`UploadFailed`] with the state to continue from and the fault. A listing
 /// that shows the replica ahead of `local_tip` or behind what was confirmed, a
 /// staged file that is missing or fails verification: persistent faults
-/// (a second writer, a replica that went backwards) and `StagedLost`.
+/// (another writer, a replica that went backwards) and `StagedLost`.
 pub async fn upload_next<L: ObjectStore, S: ObjectStore>(
     state: UploadState,
     staging: &L,

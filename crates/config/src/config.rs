@@ -477,7 +477,7 @@ pub enum ResponseSetting {
 
 /// The response to another writer in the replica.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ForeignWriterSetting {
+pub enum OtherWriterSetting {
     /// `stop`.
     Stop,
     /// `continue-and-interleave-histories`.
@@ -505,8 +505,8 @@ pub struct ResponseSettings {
     pub page_size_changed: Option<ResponseSetting>,
     /// `bug`.
     pub bug: Option<ResponseSetting>,
-    /// `foreign-writer`.
-    pub foreign_writer: Option<ForeignWriterSetting>,
+    /// `other-writer`.
+    pub other_writer: Option<OtherWriterSetting>,
 }
 
 /// The `litestream-rs` section, which Go ignores.

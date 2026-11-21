@@ -40,7 +40,7 @@
 //! clears it. A failed retention delete degrades maintenance; sync and upload
 //! go on. While any lane is degraded, retention pins the newest transaction
 //! the replica held when the first one began (`maintain::retain`), and the
-//! pin goes once every lane has recovered. A bug, and a second writer whose
+//! pin goes once every lane has recovered. A bug, and another writer whose
 //! response is to continue, rebuild the actor and boot again after the wait;
 //! a replica that went backwards is listed again. Under `Stop` the actor
 //! halts, as every persistent fault did before.
@@ -494,7 +494,7 @@ impl Actor {
 
     /// Checkpoints someone else ran on the database since this actor began.
     #[must_use]
-    pub const fn foreign_checkpoints(&self) -> u64 {
+    pub const fn app_checkpoints_ran(&self) -> u64 {
         self.kept.app.counts().ran()
     }
 

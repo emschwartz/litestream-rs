@@ -92,9 +92,9 @@ policy_is!(
     persistent(PersistentCause::RemoteCorrupt)
 );
 policy_is!(
-    remote_ahead_of_local_is_a_foreign_writer,
+    remote_ahead_of_local_is_another_writer,
     Fault::RemoteAheadOfLocal,
-    persistent(PersistentCause::ForeignWriter)
+    persistent(PersistentCause::OtherWriter)
 );
 policy_is!(
     remote_regressed_is_persistent,
@@ -215,7 +215,7 @@ fn every_persistent_cause() -> [PersistentCause; 11] {
         PersistentCause::Credentials,
         PersistentCause::StoreRefused,
         PersistentCause::RemoteCorrupt,
-        PersistentCause::ForeignWriter,
+        PersistentCause::OtherWriter,
         PersistentCause::RemoteRegressed,
         PersistentCause::WalCorrupt,
         PersistentCause::WalTruncated,
@@ -236,7 +236,7 @@ fn every_persistent_cause_is_listed() {
         PersistentCause::Credentials
         | PersistentCause::StoreRefused
         | PersistentCause::RemoteCorrupt
-        | PersistentCause::ForeignWriter
+        | PersistentCause::OtherWriter
         | PersistentCause::RemoteRegressed
         | PersistentCause::WalCorrupt
         | PersistentCause::WalTruncated
@@ -253,7 +253,7 @@ fn go_like_keeps_trying_on_every_cause_but_a_second_writer() {
     for cause in every_persistent_cause() {
         assert_eq!(
             Responses::GO_LIKE.stops(cause),
-            cause == PersistentCause::ForeignWriter,
+            cause == PersistentCause::OtherWriter,
             "{cause:?}"
         );
     }
@@ -267,18 +267,18 @@ fn strict_stops_on_every_cause() {
     }
 }
 
-/// Keeping trying on a bug, or past a second writer, never resumes the state
+/// Keeping trying on a bug, or past another writer, never resumes the state
 /// the failure left: both rebuild. A replica that went backwards is listed
 /// again; every other cause retries the same step.
 #[test]
 fn keeping_trying_rebuilds_where_the_state_cannot_be_trusted() {
     let all = Responses {
-        foreign_writer: ForeignWriter::ContinueAndInterleaveHistories,
+        other_writer: OtherWriter::ContinueAndInterleaveHistories,
         ..Responses::GO_LIKE
     };
     for cause in every_persistent_cause() {
         let want = match cause {
-            PersistentCause::Bug | PersistentCause::ForeignWriter => Action::Rebuild,
+            PersistentCause::Bug | PersistentCause::OtherWriter => Action::Rebuild,
             PersistentCause::RemoteRegressed => Action::Relist,
             PersistentCause::Credentials
             | PersistentCause::StoreRefused
@@ -302,8 +302,8 @@ fn each_field_names_one_cause() {
             PersistentCause::Credentials => one.credentials = Response::Stop,
             PersistentCause::StoreRefused => one.store_refused = Response::Stop,
             PersistentCause::RemoteCorrupt => one.remote_corrupt = Response::Stop,
-            PersistentCause::ForeignWriter => {
-                one.foreign_writer = ForeignWriter::ContinueAndInterleaveHistories;
+            PersistentCause::OtherWriter => {
+                one.other_writer = OtherWriter::ContinueAndInterleaveHistories;
             }
             PersistentCause::RemoteRegressed => one.remote_regressed = Response::Stop,
             PersistentCause::WalCorrupt => one.wal_corrupt = Response::Stop,

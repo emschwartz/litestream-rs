@@ -60,7 +60,7 @@ pub fn is_snapshot_start(info: &FileInfo) -> bool {
     info.key.range().min() == Txid::MIN
 }
 
-/// Every file of a replica, ascending by key, plus the count of foreign names
+/// Every file of a replica, ascending by key, plus the count of unrecognized names
 /// each level held.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Inventory {
@@ -125,7 +125,7 @@ impl Inventory {
         Self::from_parts(files.into_iter().collect(), BTreeMap::new())
     }
 
-    /// Records the foreign names a level held, as a store's listings counted them.
+    /// Records the unrecognized names a level held, as a store's listings counted them.
     #[must_use]
     pub fn with_skipped(mut self, level: Level, count: usize) -> Self {
         self.skipped.insert(level, count);
@@ -198,13 +198,13 @@ impl Inventory {
         self.files.iter().map(|info| info.key.range().max()).max()
     }
 
-    /// Foreign names seen in one level.
+    /// Unrecognized names seen in one level.
     #[must_use]
     pub fn skipped(&self, level: Level) -> usize {
         self.skipped.get(&level).copied().unwrap_or(0)
     }
 
-    /// Foreign names seen in every level together.
+    /// Unrecognized names seen in every level together.
     #[must_use]
     pub fn skipped_total(&self) -> usize {
         self.skipped
@@ -329,7 +329,7 @@ mod tests {
     }
 
     #[test]
-    fn load_reads_every_level_across_pages_and_counts_foreign_names() {
+    fn load_reads_every_level_across_pages_and_counts_unrecognized_names() {
         let store = MemStore::new();
         block_on(async {
             for n in 1..=1005u64 {
@@ -338,8 +338,8 @@ mod tests {
             put(&store, key(9, 1, 3)).await;
             put(&store, key(4, 1, 8)).await;
         });
-        store.plant_foreign(Level::ZERO, "zzz.tmp");
-        store.plant_foreign(Level::SNAPSHOT, "lock.json");
+        store.plant_unrecognized(Level::ZERO, "zzz.tmp");
+        store.plant_unrecognized(Level::SNAPSHOT, "lock.json");
         let inv = block_on(Inventory::load(&store)).unwrap();
         assert_eq!(inv.files().len(), 1007);
         assert_eq!(inv.skipped(Level::ZERO), 1);

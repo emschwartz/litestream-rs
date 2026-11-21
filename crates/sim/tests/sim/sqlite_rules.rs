@@ -2,7 +2,7 @@
 //!
 //! The same history runs on real files in a tempdir, through one rusqlite
 //! connection per SQLite connection the model has (the app, our reader, our
-//! pool, three strangers; busy timeout 0, no autocheckpoint,
+//! pool, three other processes; busy timeout 0, no autocheckpoint,
 //! `synchronous=NORMAL`), and on the model. After every step the WAL file's
 //! length, its header's checkpoint sequence, how each salt moved since the
 //! side's previous header, and a checkpoint's three numbers must agree.
@@ -22,7 +22,7 @@ mod rules {
 
     use lsr_core::{CheckpointMode, Checkpointer};
     use lsr_ltx::{PageNo, PageSize};
-    use lsr_sim::{ReaderId, SimSqlite, StrangerMode};
+    use lsr_sim::{OtherProcessMode, ReaderId, SimSqlite};
     use lsr_wal::{HEADER_LEN, ScanLimit, TxOutcome, WalHeader, WalReader};
     use proptest::prelude::*;
     use rusqlite::Connection;
@@ -33,16 +33,16 @@ mod rules {
     /// A checkpoint's busy flag, log frames and checkpointed frames.
     type Numbers = (bool, u32, u32);
     const TABLES: u32 = 4;
-    const STRANGERS: usize = 3;
+    const OTHER_PROCESSES: usize = 3;
 
     #[derive(Clone, Copy, Debug)]
     enum Op {
         Commit(u8),
-        StrangerBegin(usize),
-        StrangerEnd(usize),
+        OtherProcessBegin(usize),
+        OtherProcessEnd(usize),
         OursBegin,
         OursEnd,
-        AppCheckpoint(StrangerMode),
+        AppCheckpoint(OtherProcessMode),
         OurCheckpoint(CheckpointMode),
         BumpSeq,
     }
@@ -125,11 +125,11 @@ mod rules {
             .unwrap();
     }
 
-    fn pragma(conn: &Connection, mode: StrangerMode) -> (bool, u32, u32) {
+    fn pragma(conn: &Connection, mode: OtherProcessMode) -> (bool, u32, u32) {
         let name = match mode {
-            StrangerMode::Passive => "PASSIVE",
-            StrangerMode::Restart => "RESTART",
-            StrangerMode::Truncate => "TRUNCATE",
+            OtherProcessMode::Passive => "PASSIVE",
+            OtherProcessMode::Restart => "RESTART",
+            OtherProcessMode::Truncate => "TRUNCATE",
         };
         conn.query_row(&format!("PRAGMA wal_checkpoint({name})"), [], |row| {
             Ok((
@@ -162,12 +162,12 @@ mod rules {
         app: Connection,
         ours: Connection,
         pool: Connection,
-        strangers: Vec<Connection>,
-        real_in: [bool; STRANGERS],
+        other_processes: Vec<Connection>,
+        real_in: [bool; OTHER_PROCESSES],
         real_ours: bool,
         real_last: Last,
         sim: SimSqlite,
-        sim_in: [Option<ReaderId>; STRANGERS],
+        sim_in: [Option<ReaderId>; OTHER_PROCESSES],
         sim_last: Last,
         fill: u8,
     }
@@ -197,20 +197,20 @@ mod rules {
             let mut pair = Self {
                 ours: open(&path),
                 pool: open(&path),
-                strangers: (0..STRANGERS).map(|_| open(&path)).collect(),
+                other_processes: (0..OTHER_PROCESSES).map(|_| open(&path)).collect(),
                 _dir: dir,
                 wal_path,
                 app,
-                real_in: [false; STRANGERS],
+                real_in: [false; OTHER_PROCESSES],
                 real_ours: false,
                 real_last: Last::default(),
                 sim,
-                sim_in: [None; STRANGERS],
+                sim_in: [None; OTHER_PROCESSES],
                 sim_last: Last::default(),
                 fill: 0,
             };
             pair.compare(None, None);
-            pair.apply(Op::AppCheckpoint(StrangerMode::Truncate));
+            pair.apply(Op::AppCheckpoint(OtherProcessMode::Truncate));
             pair
         }
 
@@ -234,21 +234,21 @@ mod rules {
                     self.commit(mask);
                     (None, None)
                 }
-                Op::StrangerBegin(at) => {
+                Op::OtherProcessBegin(at) => {
                     if !self.real_in[at] {
-                        begin_read(&self.strangers[at]);
+                        begin_read(&self.other_processes[at]);
                         self.real_in[at] = true;
-                        self.sim_in[at] = Some(self.sim.stranger_reader_begin());
+                        self.sim_in[at] = Some(self.sim.other_process_reader_begin());
                     }
                     (None, None)
                 }
-                Op::StrangerEnd(at) => {
+                Op::OtherProcessEnd(at) => {
                     if self.real_in[at] {
-                        self.strangers[at].execute_batch("COMMIT").unwrap();
+                        self.other_processes[at].execute_batch("COMMIT").unwrap();
                         self.real_in[at] = false;
                         assert!(
                             self.sim
-                                .stranger_reader_end(self.sim_in[at].take().unwrap())
+                                .other_process_reader_end(self.sim_in[at].take().unwrap())
                         );
                     }
                     (None, None)
@@ -270,7 +270,7 @@ mod rules {
                     (None, None)
                 }
                 Op::AppCheckpoint(mode) => {
-                    let sim = self.sim.stranger_checkpoint(mode).unwrap();
+                    let sim = self.sim.other_process_checkpoint(mode).unwrap();
                     (
                         Some(pragma(&self.app, mode)),
                         Some((sim.busy, sim.log, sim.checkpointed)),
@@ -315,22 +315,22 @@ mod rules {
             self.apply(Op::Commit(mask)).header.unwrap().salt1
         }
 
-        fn checkpoint(&mut self, mode: StrangerMode) -> (bool, u32, u32) {
+        fn checkpoint(&mut self, mode: OtherProcessMode) -> (bool, u32, u32) {
             self.apply(Op::AppCheckpoint(mode)).numbers.unwrap()
         }
     }
 
     fn op() -> impl Strategy<Value = Op> {
-        let reader = 0..STRANGERS;
+        let reader = 0..OTHER_PROCESSES;
         prop_oneof![
             4 => (1_u8..16).prop_map(Op::Commit),
-            2 => reader.clone().prop_map(Op::StrangerBegin),
-            2 => reader.prop_map(Op::StrangerEnd),
+            2 => reader.clone().prop_map(Op::OtherProcessBegin),
+            2 => reader.prop_map(Op::OtherProcessEnd),
             1 => Just(Op::OursBegin),
             1 => Just(Op::OursEnd),
-            1 => Just(Op::AppCheckpoint(StrangerMode::Passive)),
-            1 => Just(Op::AppCheckpoint(StrangerMode::Restart)),
-            1 => Just(Op::AppCheckpoint(StrangerMode::Truncate)),
+            1 => Just(Op::AppCheckpoint(OtherProcessMode::Passive)),
+            1 => Just(Op::AppCheckpoint(OtherProcessMode::Restart)),
+            1 => Just(Op::AppCheckpoint(OtherProcessMode::Truncate)),
             1 => Just(Op::OurCheckpoint(CheckpointMode::Passive)),
             1 => Just(Op::OurCheckpoint(CheckpointMode::Truncate)),
             1 => Just(Op::BumpSeq),
@@ -426,7 +426,7 @@ mod rules {
              CREATE TABLE a (v BLOB); INSERT INTO a VALUES (randomblob(8));"
         ))
         .unwrap();
-        pragma(&app, StrangerMode::Truncate);
+        pragma(&app, OtherProcessMode::Truncate);
         app.execute_batch(
             "PRAGMA cache_size = 1;
              BEGIN; CREATE TABLE b (v BLOB); INSERT INTO b VALUES (randomblob(2500));
@@ -469,7 +469,7 @@ mod rules {
              CREATE TABLE a (v BLOB); INSERT INTO a VALUES (randomblob(8));"
         ))
         .unwrap();
-        pragma(&app, StrangerMode::Truncate);
+        pragma(&app, OtherProcessMode::Truncate);
         let old: u32 = app
             .query_row("PRAGMA page_count", [], |row| row.get(0))
             .unwrap();
@@ -489,15 +489,15 @@ mod rules {
     fn pinned_above_zero_blocks_all_modes() {
         let mut pair = Pair::new(1);
         pair.apply(Op::Commit(0b0001));
-        pair.apply(Op::StrangerBegin(0));
+        pair.apply(Op::OtherProcessBegin(0));
         pair.apply(Op::Commit(0b0010));
-        let (busy, log, checkpointed) = pair.checkpoint(StrangerMode::Passive);
+        let (busy, log, checkpointed) = pair.checkpoint(OtherProcessMode::Passive);
         assert!(
             !busy && checkpointed == 1 && log == 2,
             "partial progress, not busy"
         );
-        assert!(pair.checkpoint(StrangerMode::Restart).0);
-        assert!(pair.checkpoint(StrangerMode::Truncate).0);
+        assert!(pair.checkpoint(OtherProcessMode::Restart).0);
+        assert!(pair.checkpoint(OtherProcessMode::Truncate).0);
         assert_eq!(
             pair.commit_moved(0b0100),
             Moved::Same,
@@ -509,12 +509,12 @@ mod rules {
     fn pinned_on_zero_restarts_once() {
         let mut pair = Pair::new(2);
         pair.apply(Op::Commit(0b0001));
-        let (_, log, checkpointed) = pair.checkpoint(StrangerMode::Passive);
+        let (_, log, checkpointed) = pair.checkpoint(OtherProcessMode::Passive);
         assert_eq!(checkpointed, log);
-        pair.apply(Op::StrangerBegin(0));
+        pair.apply(Op::OtherProcessBegin(0));
         assert_eq!(pair.commit_moved(0b0010), Moved::PlusOne, "the one restart");
         assert_eq!(pair.commit_moved(0b0100), Moved::Same);
-        let (busy, log, checkpointed) = pair.checkpoint(StrangerMode::Passive);
+        let (busy, log, checkpointed) = pair.checkpoint(OtherProcessMode::Passive);
         assert!(
             !busy && checkpointed == 0 && log == 2,
             "nothing backfilled past the pin"
@@ -526,28 +526,28 @@ mod rules {
     fn two_readers_grow_old_generation() {
         let mut pair = Pair::new(3);
         pair.apply(Op::Commit(0b0001));
-        pair.apply(Op::StrangerBegin(1));
-        let (_, log, checkpointed) = pair.checkpoint(StrangerMode::Passive);
+        pair.apply(Op::OtherProcessBegin(1));
+        let (_, log, checkpointed) = pair.checkpoint(OtherProcessMode::Passive);
         assert_eq!(checkpointed, log);
-        pair.apply(Op::StrangerBegin(0));
+        pair.apply(Op::OtherProcessBegin(0));
         assert_eq!(
             pair.commit_moved(0b0010),
             Moved::Same,
             "the mark above 0 blocks the restart"
         );
-        pair.apply(Op::StrangerEnd(1));
+        pair.apply(Op::OtherProcessEnd(1));
         assert_eq!(
             pair.commit_moved(0b0100),
             Moved::Same,
             "the old generation grows"
         );
-        let (_, log, checkpointed) = pair.checkpoint(StrangerMode::Passive);
+        let (_, log, checkpointed) = pair.checkpoint(OtherProcessMode::Passive);
         assert!(
             checkpointed == 1 && log == 3,
             "the read-mark-0 reader blocks backfill"
         );
-        pair.apply(Op::StrangerEnd(0));
-        let (_, log, checkpointed) = pair.checkpoint(StrangerMode::Passive);
+        pair.apply(Op::OtherProcessEnd(0));
+        let (_, log, checkpointed) = pair.checkpoint(OtherProcessMode::Passive);
         assert_eq!(checkpointed, log);
         assert_eq!(
             pair.commit_moved(0b1000),

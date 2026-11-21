@@ -408,12 +408,12 @@ fn a_hole_after_the_newest_snapshot_holds() {
 // The trust gate, one variant each.
 
 #[test]
-fn foreign_names_hold() {
+fn unrecognized_names_hold() {
     let inventory = inv(ladder()).with_skipped(level(1), 2);
     let got = retention(&inventory, at(T0 + 200 * HOUR), &defaults(), None);
     assert_eq!(
         got,
-        Retention::Held(Hold::ForeignNames {
+        Retention::Held(Hold::UnrecognizedNames {
             level: level(1),
             count: 2
         })
@@ -624,7 +624,7 @@ fn the_gate_reports_the_first_failure_in_its_order() {
     let got = retention(&inventory, at(T0 + 200 * HOUR), &defaults(), None);
     assert_eq!(
         got,
-        Retention::Held(Hold::ForeignNames {
+        Retention::Held(Hold::UnrecognizedNames {
             level: level(0),
             count: 1
         })
@@ -667,7 +667,7 @@ fn a_hold_shows_in_the_wait_and_compaction_still_runs_while_held() {
         due(&held_inv, now, &cfg, None),
         Due::Wait {
             until: None,
-            held: Some(Hold::ForeignNames {
+            held: Some(Hold::UnrecognizedNames {
                 level: level(2),
                 count: 1
             })
@@ -1054,7 +1054,7 @@ fn build(data: &[u8], weird: bool) -> Listing {
     listing
 }
 
-/// Holes, overlaps, backwards or zero created-at times, foreign names, a listing behind.
+/// Holes, overlaps, backwards or zero created-at times, unrecognized names, a listing behind.
 fn roughen(b: &mut Bytes, listing: &mut Listing, n: u64, created_at: &dyn Fn(u64) -> i64) {
     for _ in 0..=b.below(3) {
         match b.below(7) {

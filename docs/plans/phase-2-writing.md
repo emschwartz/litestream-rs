@@ -113,7 +113,7 @@ Order: 4a alone; then 4b and 4d in parallel; 4c after 4b. A blind review of the 
 - **F2, same salts but the committed end or file is before the tip's end: snapshot, not halt.** This overrides recover rule 5. The result is `Snapshot { after: tip.txid, cause: SnapshotCause::LocalRewound { synced, committed } }` plus a loud `LocalRewound` event carrying both offsets. `HaltCause::LocalLostReplicatedTx` and `Fault::LocalLostReplicatedTx` are not created.
   - Why: with `synchronous=NORMAL` a power loss legitimately drops a WAL tail that was already replicated, so this is an expected event. If the WAL regrows past the cursor before the next look, rule 9 (`LastPageMismatch`) already snapshots; halting only when the rewind is caught early gives one event two outcomes by timing. A halt also leaves every later write unreplicated until a person acts. The replicated transactions the database lost stay restorable by txid or time until retention ages them out.
   - Call: snapshot on a local rewind (why: above; the designer recommended halt, so this disagreement goes to the owner in the report; cost if wrong: one match arm in `recover`).
-- **F3, remote ahead of local at boot:** `Snapshot { after: remote newest, cause: BehindRemote { local } }`, as Go does. Mid-run it is `Halt(ForeignWriter)`. A `node_id` check joins later.
+- **F3, remote ahead of local at boot:** `Snapshot { after: remote newest, cause: BehindRemote { local } }`, as Go does. Mid-run it is `Halt(OtherWriter)`. A `node_id` check joins later.
 - **F4:** staging is an `FsStore` at Go's meta path. **F5:** after any failed staged write, encode again; never trust or re-fsync the old file. **F6:** database-file pages are unverified in phase 2; phase 3's page checksum table closes it. **F7:** a busy TRUNCATE that left the header unchanged takes no boundary snapshot (Go does). **F8:** the `bump_seq` frame ships as an ordinary L0 file.
 - **4d, what confirms an upload:** after a commit error (including `CommitSizeMismatch`, whether or not the store removed the object) the state is `ListFirst`, and a listing confirms the key only when the listed bytes equal the staged file's (size first, then a streamed comparison; with no staged file the object must decode and its header must name the key; only the newest key is read back). Anything else is deleted and uploaded again (task 5c, R1). This overrides 4d rule 7's "if the listing finds the key".
 - **Which store failed:** `Fault::from_remote(&StoreError)` for the replica, `Fault::from_staging(&StoreError)` for the staging directory (they replace `from_store`). A staging error is never a remote fault: missing is `StagedLost`, a size-mismatched write is `LocalFsyncFailed` (encode again), anything else corrupt is `StagedCorrupt`, the rest is `LocalIo` or `LocalDiskFull`. Both matches are exhaustive over `StoreError` and `CorruptCause`.
@@ -673,13 +673,13 @@ Order: 5a, then 5b. 5a is independent of task 4. Retention deletes get a blind r
 
 **Produces** (in `maintain.rs`, the rules in `retain.rs`):
 - `Due::Wait { until: Option<Timestamp>, held: Option<Hold> }`: `held` names why deletions are refused right now; compaction and snapshots still run when held.
-- `pub enum Hold { ForeignNames { level: Level, count: usize }, MalformedSnapshot { key: FileKey }, ListingBehind { listed: Option<Txid>, published: Txid }, Hole { after: Txid, next: Option<Txid> }, LatestUnplannable { outcome: PlanOutcome }, NoCreatedAt { key: FileKey }, SnapshotCreatedAtBackwards { earlier: FileKey, later: FileKey }, SelfCheck { outcome: PlanOutcome } }`. `LatestUnplannable` and `SelfCheck` never carry `PlanOutcome::Plan`.
+- `pub enum Hold { UnrecognizedNames { level: Level, count: usize }, MalformedSnapshot { key: FileKey }, ListingBehind { listed: Option<Txid>, published: Txid }, Hole { after: Txid, next: Option<Txid> }, LatestUnplannable { outcome: PlanOutcome }, NoCreatedAt { key: FileKey }, SnapshotCreatedAtBackwards { earlier: FileKey, later: FileKey }, SelfCheck { outcome: PlanOutcome } }`. `LatestUnplannable` and `SelfCheck` never carry `PlanOutcome::Plan`.
 - No new public function: retention is reached through `due`. `retain.rs` exposes `pub(super) fn retention(inventory: &Inventory, now: Timestamp, config: &Maintenance, published: Option<Txid>) -> Retention` with `pub(super) enum Retention { Delete(DeleteJob), Wait { until: Option<Timestamp> }, Held(Hold) }`.
 
 **Semantics:**
 1. `due` calls retention only when no compaction or snapshot job is ready, so deletes are planned against a listing that already holds the newest coverage. One delete job per call, like every job.
 2. Trust gate, checked first; the first failure is the `Hold` and no file is deleted:
-   - `inventory.skipped(level) > 0` for any level: `ForeignNames`. A name this code cannot parse may be a file that covers something.
+   - `inventory.skipped(level) > 0` for any level: `UnrecognizedNames`. A name this code cannot parse may be a file that covers something.
    - any `malformed_snapshots()`: `MalformedSnapshot`.
    - `published` above `inventory.newest()`: `ListingBehind`. The listing misses a file this process knows it wrote, so it is stale or partial.
    - `plan(inventory, Latest)` not a `Plan` reaching `inventory.newest()`: `LatestUnplannable`.
@@ -698,7 +698,7 @@ Order: 5a, then 5b. 5a is independent of task 4. Retention deletes get a blind r
     - Clock skew or a jumping clock: the anchor (rule 3).
     - A backend that rewrites mtime: created-at times rewritten later delete nothing early; created-at times rewritten earlier are caught by `SnapshotCreatedAtBackwards` or `NoCreatedAt` when they break the order; a uniform shift into the past that keeps the order is a non-goal (the store contract says a store returns the created-at time it was given).
     - An eventually consistent listing: a file missing from the listing is never deleted and covers nothing, so it only shrinks the delete set; a missing tail is `ListingBehind`. A listing that still shows a file already deleted (a ghost) could make L0 look covered: non-goal, stated as "the store lists after a delete consistently", which S3, GCS, Azure Blob, R2 and the file backend all do.
-    - A second writer at the same time: non-goal (Litestream's single-writer rule). Taking turns with Go is supported: every rule reads only names, ranges and created-at times, which both write the same way.
+    - Another writer at the same time: non-goal (Litestream's single-writer rule). Taking turns with Go is supported: every rule reads only names, ranges and created-at times, which both write the same way.
     - A snapshot of bad pages: retention still trusts it (Go does too). Non-goal here; the fix is a verified-snapshot floor once task 4 can verify one.
 11. A restore that races a delete loses a file and re-plans (`restore`'s `MAX_ATTEMPTS`); the floor of rule 4 keeps the previous snapshot's chain for exactly that window.
 
@@ -791,14 +791,14 @@ Critical path: 4b, 6b, 6c, 6f, 6g1/6g2. 6a can start today. 6d can start the day
 1. The file is `FileKey { level: 9, range: 1..=proof.through().txid }`, header `min_txid = 1`, `pre_apply_checksum = 0`, no WAL origin, `timestamp = now` clamped to the proof's timestamp.
 2. Page sources follow 4b's snapshot step exactly (one helper, not a copy): frames in `[32, synced]` of the current generation win, the database file supplies the rest, page count from the proof's last commit frame.
 3. `SyncedThrough` is borrowed, not consumed: the checkpoint that follows needs it. Holding it is the proof that no checkpoint runs (the Go `chkMu` equivalent is the actor's single thread of control).
-4. The read transaction pins the WAL at our mark, so a stranger can backfill frames at or below the mark into the database file while we read it. Those frames are also in the page map (synced is at or above the mark, which `SyncedThrough` guarantees), so the map wins and a page torn by a concurrent backfill is never read. A debug-free check: if `proof.through()` is below `epoch`'s mark the call returns `Fault::Bug`.
+4. The read transaction pins the WAL at our mark, so another process can backfill frames at or below the mark into the database file while we read it. Those frames are also in the page map (synced is at or above the mark, which `SyncedThrough` guarantees), so the map wins and a page torn by a concurrent backfill is never read. A debug-free check: if `proof.through()` is below `epoch`'s mark the call returns `Fault::Bug`.
 5. Streamed: pages are encoded as read, never buffered whole. Memory is one page plus the encoder's block.
 6. Uploads through `ObjectStore::put`, so the caller's `Retrying` wrapper applies. Errors map by `Fault::from_remote` (the replica is the only store here), `from_source`, `from_read_page`.
 7. No local copy is staged: level 9 lives only in the replica, as in Go.
 
 **Tests:**
 - property `snapshot_equals_model`: random histories on `FakeWal`/`FakeDb`, random backfill point at or below our mark; the written file restores to the model's image at `proof.through()`.
-- property `snapshot_ignores_concurrent_backfill`: a stranger backfills up to the mark between pages (injected through `FakeDb`); the output does not change.
+- property `snapshot_ignores_concurrent_backfill`: another process backfills up to the mark between pages (injected through `FakeDb`); the output does not change.
 - cases `snapshot_header_has_no_wal_origin`, `snapshot_key_is_level_9_from_1`, `snapshot_mark_above_synced_is_bug`, `snapshot_store_error_maps_by_from_remote`.
 - case `go_decoder_accepts_snapshot` lives in 7b (needs the Go helper).
 
@@ -848,7 +848,7 @@ The sequential driver phase 3 reuses. Sans-IO: it owns no thread, no timer, no c
 
 ### Task 6d: the SQLite model (branch `sim-sqlite`)
 
-The 4a fakes are scripted: a test says what a checkpoint does. The simulator needs SQLite's rules, so a stranger's checkpoint, a writer's restart and a reader's mark interact as they do in 3.47.1.
+The 4a fakes are scripted: a test says what a checkpoint does. The simulator needs SQLite's rules, so another process's checkpoint, a writer's restart and a reader's mark interact as they do in 3.47.1.
 
 **Files:** create the crate `crates/sim` (package `lsr-sim`, `publish = false`, used only as a dev-dependency): `Cargo.toml`, `src/lib.rs`, `src/sqlite.rs`, `src/sqlite/tests.rs`, `tests/sqlite_rules.rs` (the differential test). Add it to the workspace members. Touch no other file.
 
@@ -863,7 +863,7 @@ The 4a fakes are scripted: a test says what a checkpoint does. The simulator nee
 **Produces:**
 - `pub struct SimSqlite` (cheap clone, shared state): WAL bytes (built with `WalBuilder`'s checksum rules), wal-index (`mxFrame`, `nBackfill`, salts, header copies), database file pages, readers `BTreeMap<ReaderId, u32>`, `durable_frames: u32` (frames fsynced: set at each checkpoint, `synchronous=NORMAL`), the epoch counter.
 - Handles: `fn source(&self) -> SimSource` (`WalSource`), `fn pages(&self) -> SimPages` (`PageSource`), `fn checkpointer(&self) -> SimCheckpointer` (`Checkpointer`). Our own connection is one reader id; its read tx follows R3.
-- App operations, each a method returning what it changed: `commit(pages, db_size) -> AppCommit { salts, end: WalOffset }`, `spill(pages)` (uncommitted frames), `rollback()` (drops spilled frames past `mxFrame`), `shrink(db_size)`, `rewrite_page_size(new)` (VACUUM to a new page size: full backfill, truncate, new header), `stranger_reader_begin() -> ReaderId`, `stranger_reader_end(id)`, `stranger_checkpoint(mode) -> (busy, log, ckpt)`.
+- App operations, each a method returning what it changed: `commit(pages, db_size) -> AppCommit { salts, end: WalOffset }`, `spill(pages)` (uncommitted frames), `rollback()` (drops spilled frames past `mxFrame`), `shrink(db_size)`, `rewrite_page_size(new)` (VACUUM to a new page size: full backfill, truncate, new header), `other_process_reader_begin() -> ReaderId`, `other_process_reader_end(id)`, `other_process_checkpoint(mode) -> (busy, log, ckpt)`.
 - Environment faults: `delete_wal()`, `tear_wal_header()`, `truncate_wal_at(bytes)`, `flip_bit(offset)`, `rewrite_same_length(seed)`, `regrow_same_salts(seed)`, `shm_mid_update()`, `shm_end_inside_tx()`, `overwrite_frame_between_scan_and_read(frame)`, `unlink_wal()`, `inject(SourceOp, SourceError)`.
 - Crash: `fn crash(&self, kind: CrashKind)`, `pub enum CrashKind { Process, Power }`. Process: our readers and locks vanish, files and wal-index stay. Power: as Process, then WAL frames past `durable_frames` are dropped, the wal-index is rebuilt from the file (SQLite's recovery), database pages written by a checkpoint since the last fsync are kept (checkpoints fsync the database before `nBackfill` moves).
 
@@ -875,7 +875,7 @@ The 4a fakes are scripted: a test says what a checkpoint does. The simulator nee
 5. Determinism: no clock, no randomness inside; byte content comes from the caller's seed.
 
 **Tests:**
-- differential `rules_match_sqlite` (proptest, 64 cases, real files in a tempdir): random sequences over {commit, stranger reader begin/end, our reader begin/end, PASSIVE, RESTART, TRUNCATE}, applied to both rusqlite (`wal_autocheckpoint=0`, `timeout=0`) and `SimSqlite`; after each op the WAL header (salts, seq), file length, the three checkpoint numbers and busy agree.
+- differential `rules_match_sqlite` (proptest, 64 cases, real files in a tempdir): random sequences over {commit, other process reader begin/end, our reader begin/end, PASSIVE, RESTART, TRUNCATE}, applied to both rusqlite (`wal_autocheckpoint=0`, `timeout=0`) and `SimSqlite`; after each op the WAL header (salts, seq), file length, the three checkpoint numbers and busy agree.
 - cases `pinned_above_zero_blocks_all_modes`, `pinned_on_zero_restarts_once`, `two_readers_grow_old_generation` (the three `walpin.py` cases, asserted on both).
 - property `power_crash_keeps_checkpointed_pages`: after any history, a Power crash keeps every page as of the last checkpoint and some prefix of later commits, never a partial transaction.
 - property `sources_pass_conformance`: `SimSource`, `SimPages`, `SimCheckpointer` pass 4a's trait conformance suite.
@@ -923,7 +923,7 @@ The 4a fakes are scripted: a test says what a checkpoint does. The simulator nee
 **Consumes:** `Actor`, `ActorConfig`, `Tick`, `Event` (6c); everything in 6d and 6e.
 
 **Produces:**
-- `pub enum Op { Commit { pages: u8, grow: bool }, Spill, Rollback, Vacuum { page_size: Option<PageSize> }, StrangerReader { begin: bool }, StrangerCheckpoint(CheckpointMode), Crash(CrashKind), StoreFault(Target, FaultShape), EnvFault(EnvFault), ClockJump(i64), Tick, Shutdown, RequestSnapshot, Restore(RestoreTarget) }` and `pub fn history(seed: Seed, steps: u32, weights: &Weights) -> Vec<Op>`. `Weights::default()` favours `Tick` and `Commit`; faults are rare so histories make progress.
+- `pub enum Op { Commit { pages: u8, grow: bool }, Spill, Rollback, Vacuum { page_size: Option<PageSize> }, OtherProcessReader { begin: bool }, OtherProcessCheckpoint(CheckpointMode), Crash(CrashKind), StoreFault(Target, FaultShape), EnvFault(EnvFault), ClockJump(i64), Tick, Shutdown, RequestSnapshot, Restore(RestoreTarget) }` and `pub fn history(seed: Seed, steps: u32, weights: &Weights) -> Vec<Op>`. `Weights::default()` favours `Tick` and `Commit`; faults are rare so histories make progress.
 - `pub fn run(seed: Seed, steps: u32, weights: &Weights) -> Result<RunReport, Failure>`; `pub struct Failure { seed: Seed, step: u32, violation: Violation, replay: String }`, whose `Display` starts with the replay line.
 - `pub fn shrink(seed, steps) -> u32`: the smallest step count of the same seed that still fails (binary search on the prefix; histories are prefix-stable by construction).
 
@@ -934,7 +934,7 @@ The 4a fakes are scripted: a test says what a checkpoint does. The simulator nee
    - idle: 100 ticks with no app op after a drain write 0 LTX files, run 0 checkpoints, issue 0 list calls;
    - at most 1 PASSIVE per tick;
    - bytes staged per tick at most `SyncConfig.cap` plus one transaction (the cap is checked at transaction boundaries);
-   - WAL length bounded when no stranger reader holds a mark: below `truncate_threshold` pages plus one tick's commits;
+   - WAL length bounded when no other process reader holds a mark: below `truncate_threshold` pages plus one tick's commits;
    - list calls: only at boot, after an `UploadAmbiguous`/`RemoteObjectMissing`, and in maintenance when `due` can change;
    - memory: the largest live `MemUpload` buffer is at most one part (the in-memory store holds whole objects, so this checks the writer streams; the parts-times-concurrency bound is phase 3's, against a real store).
 4. Failure output: the panic message's first line is `seed 0x<16 hex> failed at step <k>: <violation>`, the second `replay: just sim-replay 0x<seed> <shrunk k>`.
@@ -944,7 +944,7 @@ The 4a fakes are scripted: a test says what a checkpoint does. The simulator nee
 **Tests:** the fixed set; `history_is_prefix_stable`; `shrink_finds_planted_step` (an oracle mutation planted at step 117 shrinks to 117); `failure_prints_replay_line`; `idle_resource_property` on its own as a fast case.
 
 **As built:** `generate.rs` (the plan's `gen` is a reserved word), `run.rs`, `resources.rs`, `tests/{fixed_seeds,replay,soak}.rs`; `just sim-replay <seed> [steps]` and `just sim-soak <seconds> [base]`. Differences from the plan:
-- The harness is the driver: `World::start_driver` runs at the start of a run and on every reboot (`ensureWALExists` at `db.go:1673`, then the long read pin). Without it a stranger checkpoint plus a restart lost unsynced frames. `SimSqlite::wal_synced` gates what a stranger checkpoint marks durable, and `retire_generation` marks a retired generation's commits durable when the WAL restarts.
+- The harness is the driver: `World::start_driver` runs at the start of a run and on every reboot (`ensureWALExists` at `db.go:1673`, then the long read pin). Without it another process checkpoint plus a restart lost unsynced frames. `SimSqlite::wal_synced` gates what another process checkpoint marks durable, and `retire_generation` marks a retired generation's commits durable when the WAL restarts.
 - The model has a genesis commit 0, learns the engine's own bump commit (`sync_model_at`), and keeps `StageNote`s for staged positions that fit two branches. `CoversNotIncreasing` is non-decreasing: a requested snapshot is a new id for the same commit. `TapResult` is gone.
 - Generated faults are retry-class only (tampering is 6g2's). A halt other than a drain is a finding. 
 - Idle ticks that ask to run again at once (`spins`) advance the clock by `SPIN_STEP` (50 ms); the settle loop ignores them. The app lets go (rolls back, closes readers) before the idle bounds, and the WAL-length bound is waived when it had held a spill or reader.
@@ -996,7 +996,7 @@ Plus `pinned_on_zero_single_restart`: our read tx on read mark 0, one app write 
 | RemoteObjectMissing | `remote_file_deleted_externally` |
 | UploadAmbiguous | `commit_fails_after_publish`, `size_mismatch_on_commit` |
 | RemoteCorrupt | `remote_bitrot_on_list_read` |
-| RemoteAheadOfLocal | `second_writer_mid_run` (`MemStore::plant_foreign`) |
+| RemoteAheadOfLocal | `second_writer_mid_run` (`MemStore::plant_unrecognized`) |
 | RemoteRegressed | `bucket_rolled_back` |
 | StagedCorrupt | `staged_byte_flip_before_upload` |
 | StagedLost | `meta_dir_deleted_mid_run` |
@@ -1138,7 +1138,7 @@ Task 6i, P1 ruled after the investigation (`c7c9325`): the halt stands. Facts fo
 - **P1b, wrong pages first.** Before building the halt, establish on the scratch tree why seeds 13, 30 and 38 restored wrong pages. If restore can emit a database from a listing whose files disagree on page size without a typed refusal, that is a restore defect whatever the writer does (a Go-written replica can hold such a listing): fix it at the root, test first, its own commit, with the listing as a unit test. If it was the model miscounting after a resize, say so.
 - **P1c, the simulator models SQLite.** A resize succeeds only while the engine is down and is refused while it runs; a real-SQLite test pins that refusal with the engine's connection open. After a resize the model expects the halt at the next boot, no file of the new size in staging or at the replica, and every state acknowledged before the change still restoring. The wrong doc comment on `vacuum_resizes` goes.
 
-Task 6i, P1 as built: P1b found no restore defect; the wrong pages were a scratch-patch artifact (a refused resize still cleared the runner's spilled frames, so the model lost a rollback). P1a halts at boot and in the step as ruled. P1c: the runner's resize stops the engine (a process crash), ends the strangers' readers, vacuums and boots again; with the app's writer held the vacuum is refused. `sqlite_rules::our_reader_blocks_leaving_wal_mode` pins against SQLite that an open read transaction keeps the database in WAL mode. The runner expects `PageSizeChanged` only when the database's size differs from the one page size every staged and remote file carries, and a second size in those files is a harness violation. The scenario `vacuum_page_size_change` asserts the halt and that every old state restores. A soak found a separate defect: before the boot, `ready_work` counted the upload lane, so a boot failing on a retryable store fault spun `Next::Now` for its backoff (fixed, `a_failed_boot_waits_without_spinning`).
+Task 6i, P1 as built: P1b found no restore defect; the wrong pages were a scratch-patch artifact (a refused resize still cleared the runner's spilled frames, so the model lost a rollback). P1a halts at boot and in the step as ruled. P1c: the runner's resize stops the engine (a process crash), ends the other processes' readers, vacuums and boots again; with the app's writer held the vacuum is refused. `sqlite_rules::our_reader_blocks_leaving_wal_mode` pins against SQLite that an open read transaction keeps the database in WAL mode. The runner expects `PageSizeChanged` only when the database's size differs from the one page size every staged and remote file carries, and a second size in those files is a harness violation. The scenario `vacuum_page_size_change` asserts the halt and that every old state restores. A soak found a separate defect: before the boot, `ready_work` counted the upload lane, so a boot failing on a retryable store fault spun `Next::Now` for its backoff (fixed, `a_failed_boot_waits_without_spinning`).
 
 Task 6i, T1 as built: `Fault::StagedCorrupt` and `HaltCause::{StagedCorrupt, StagedLost}` are gone. A staged level-0 file that is missing, does not decode, names another key, or carries a bad created-at time is `Fault::StagedLost`, whose policy is a doubling retry. At boot, `upload::sweep_staged` verifies every staged file from the replica's newest transaction on; the first that fails is deleted with every staged file after it (`drop_staged_from`, newest first, so a crash part way leaves a prefix), and the first sync is a `LocalTipUnreadable` snapshot after `max(position, staged, confirmed)`: the first transaction the replica lacks, or the one after the torn file when the replica holds it. The boot listing's `tail_is_sound` judges the replica's object alone when the staged copy differs and does not verify. In the upload lane, a `StagedLost` on the file it was about to upload deletes from that file on, resets the position and resnapshots at that transaction (`Event::Resnapshot`). The soak no longer filters `StagedCorrupt`, seeds 37 and 45 are back in the fixed set, the replays are named tests, and `tip_byte_flip`/`tip_truncated` expect no halt and a snapshot at transaction 3.
 

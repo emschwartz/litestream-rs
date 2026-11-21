@@ -74,7 +74,7 @@ fn under_strict_every_persistent_scenario_stops_with_its_cause() {
     }
 }
 
-/// Under the default responses every persistent fault but a second writer
+/// Under the default responses every persistent fault but another writer
 /// (and the end of a drain) degrades a lane instead, the oracle holds, and
 /// no engine halts (a drain may end at its deadline while the lane is
 /// degraded). A scenario whose fault clears expects the lane to
@@ -131,14 +131,14 @@ fn under_go_like_every_persistent_scenario_degrades_and_the_oracle_holds() {
     }
 }
 
-/// A second writer stops the engine under the default responses too, and
+/// Another writer stops the engine under the default responses too, and
 /// the cause stays: no later tick uploads or maintains.
 #[test]
 fn under_go_like_a_second_writer_stops_uploads_and_maintenance() {
     let scenario = scenario::second_writer_mid_run().under(Responses::GO_LIKE);
     assert!(!scenario.keeps_trying());
     let report = run_scenario(&scenario).unwrap_or_else(|why| panic!("{why}"));
-    assert!(report.seen.contains(&Seen::Halt(HaltCause::ForeignWriter)));
+    assert!(report.seen.contains(&Seen::Halt(HaltCause::OtherWriter)));
 }
 
 #[test]

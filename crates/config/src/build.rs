@@ -18,9 +18,9 @@
 use std::num::NonZeroU32;
 
 use crate::config::{
-    AppReaders, DbConfig, DbSource, DirSource, ForeignWriterSetting, GoConfig, LogFormat, LogLevel,
-    Logging, ReplicaConfig, ReplicaKind, ResponseSetting, ResponseSettings, RustSettings,
-    S3Settings, Secret, Snapshot, SnapshotOverride, defaults,
+    AppReaders, DbConfig, DbSource, DirSource, GoConfig, LogFormat, LogLevel, Logging,
+    OtherWriterSetting, ReplicaConfig, ReplicaKind, ResponseSetting, ResponseSettings,
+    RustSettings, S3Settings, Secret, Snapshot, SnapshotOverride, defaults,
 };
 use crate::duration::GoDuration;
 use crate::error::{KeyPath, ProblemKind, WarningKind};
@@ -590,17 +590,17 @@ fn responses(fields: &Fields, walk: &mut Walk) -> ResponseSettings {
         wal_unlinked: one("wal-unlinked"),
         page_size_changed: one("page-size-changed"),
         bug: one("bug"),
-        foreign_writer: None,
+        other_writer: None,
     };
-    settings.foreign_writer = match fields.string("foreign-writer").as_deref() {
+    settings.other_writer = match fields.string("other-writer").as_deref() {
         None => None,
-        Some("stop") => Some(ForeignWriterSetting::Stop),
+        Some("stop") => Some(OtherWriterSetting::Stop),
         Some("continue-and-interleave-histories") => {
-            Some(ForeignWriterSetting::ContinueAndInterleaveHistories)
+            Some(OtherWriterSetting::ContinueAndInterleaveHistories)
         }
         Some(other) => {
             let (value, allowed) = (other.to_owned(), "stop, continue-and-interleave-histories");
-            let name = "foreign-writer";
+            let name = "other-writer";
             walk.problem(
                 fields.path.key(name),
                 fields.line(name),

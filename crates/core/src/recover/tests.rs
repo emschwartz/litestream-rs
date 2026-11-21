@@ -172,7 +172,7 @@ fn rule_2_running_behind_the_remote_halts() {
     let pos = position(&wal, 2, Continuity::Unpinned);
     assert_eq!(
         run_running(&wal, &pos, Some(3)).recovered,
-        Recovered::Halt(HaltCause::ForeignWriter)
+        Recovered::Halt(HaltCause::OtherWriter)
     );
 }
 
@@ -1015,7 +1015,7 @@ fn generated_triples_cover_every_outcome_recover_can_produce() {
         "PrevFrameMismatch",
         "LastPageMismatch",
         "LocalRewound",
-        "Halt(ForeignWriter)",
+        "Halt(OtherWriter)",
     ] {
         assert!(seen.contains(want), "never produced {want}: {seen:?}");
     }

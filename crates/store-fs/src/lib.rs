@@ -17,7 +17,7 @@
 //! a crashed upload's leftover. `begin_upload` then tries the next counter
 //! value, a bounded number of times, and gives up with
 //! [`StoreError::ScratchExhausted`]. A scratch file (this store's, or Go's
-//! `<name>.tmp`) is neither an object nor a foreign name: `list` neither
+//! `<name>.tmp`) is neither an object nor an unrecognized name: `list` neither
 //! returns nor counts it. Nothing removes one automatically, because a scratch
 //! file may belong to an upload still running in another process; an operator
 //! clears them.
@@ -141,17 +141,17 @@ impl FsStore {
             Err(err) => return Err(StoreError::from_io(StoreOp::List, None, &err)),
         };
         let mut files = Vec::new();
-        let mut foreign = Vec::new();
+        let mut unrecognized = Vec::new();
         for entry in entries {
             let entry = entry.map_err(|err| StoreError::from_io(StoreOp::List, None, &err))?;
             let name = entry.file_name().to_string_lossy().into_owned();
             match classify(level, &entry, &name)? {
                 Entry::File(info) => files.push(info),
-                Entry::Foreign => foreign.push(name),
+                Entry::Unrecognized => unrecognized.push(name),
                 Entry::Gone => {}
             }
         }
-        Ok(build_listing(files, &foreign, after, limit))
+        Ok(build_listing(files, &unrecognized, after, limit))
     }
 
     fn read_now(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
@@ -275,7 +275,7 @@ impl FsStore {
 
 enum Entry {
     File(FileInfo),
-    Foreign,
+    Unrecognized,
     /// Deleted between the directory read and the stat; a concurrent
     /// compaction does this, and the file is simply no longer there.
     Gone,
@@ -283,7 +283,7 @@ enum Entry {
 
 fn classify(level: Level, entry: &DirEntry, name: &str) -> Result<Entry, StoreError> {
     let Ok(range) = parse_file_name(name) else {
-        return Ok(Entry::Foreign);
+        return Ok(Entry::Unrecognized);
     };
     let key = FileKey::new(level, range);
     let not_a_file = StoreError::Corrupt {
@@ -524,7 +524,7 @@ mod tests {
             &self.store
         }
 
-        fn plant_foreign(&self, level: Level, name: &str) -> Result<(), Failure> {
+        fn plant_unrecognized(&self, level: Level, name: &str) -> Result<(), Failure> {
             let dir = self.store.level_dir(level);
             fs::create_dir_all(&dir).map_err(|e| Failure(e.to_string()))?;
             fs::write(dir.join(name), b"stray").map_err(|e| Failure(e.to_string()))
@@ -663,7 +663,10 @@ mod tests {
 
         let listing = all(&h.store, 0);
         assert!(listing.files.is_empty());
-        assert_eq!(listing.skipped, 0, "scratch files are not foreign names");
+        assert_eq!(
+            listing.skipped, 0,
+            "scratch files are not unrecognized names"
+        );
         assert_eq!(
             block_on(h.store.read(&target, 0, ReadLen::new(8).unwrap())),
             Err(StoreError::NotFound { key: target })

@@ -739,7 +739,7 @@ impl Runner {
     fn resize(&mut self, new: PageSize) {
         self.w.crash(CrashKind::Process);
         for id in std::mem::take(&mut self.readers) {
-            self.w.sqlite.stranger_reader_end(id);
+            self.w.sqlite.other_process_reader_end(id);
         }
         if self.w.app_vacuum(new).is_some() {
             self.spilled.clear();
@@ -801,10 +801,11 @@ impl Runner {
 
     fn reader(&mut self, begin: bool) {
         if begin {
-            self.readers.push(self.w.sqlite.stranger_reader_begin());
+            self.readers
+                .push(self.w.sqlite.other_process_reader_begin());
         } else if !self.readers.is_empty() {
             let id = self.readers.remove(0);
-            self.w.sqlite.stranger_reader_end(id);
+            self.w.sqlite.other_process_reader_end(id);
         }
     }
 
@@ -829,8 +830,8 @@ impl Runner {
     fn remote(&mut self, op: RemoteOp) -> Result<(), Violation> {
         let w = &self.w;
         let done = match op {
-            RemoteOp::PutForeign => w.remote_put_foreign(),
-            RemoteOp::RemoveForeign => w.remote_level_zero().and_then(|files| {
+            RemoteOp::PutUnrecognized => w.remote_put_unrecognized(),
+            RemoteOp::RemoveUnrecognized => w.remote_level_zero().and_then(|files| {
                 files.last().map_or(Ok(false), |newest| {
                     w.remote_delete(&[newest.key]).map(|()| true)
                 })
@@ -979,9 +980,9 @@ impl Runner {
                 }
             }
             Op::Vacuum { page_size } => self.vacuum(*page_size),
-            Op::StrangerReader { begin } => self.reader(*begin),
-            Op::StrangerCheckpoint(mode) => {
-                self.w.stranger_checkpoint(*mode);
+            Op::OtherProcessReader { begin } => self.reader(*begin),
+            Op::OtherProcessCheckpoint(mode) => {
+                self.w.other_process_checkpoint(*mode);
             }
             Op::Crash(kind) => self.crash_tick(*kind)?,
             Op::StoreFault {

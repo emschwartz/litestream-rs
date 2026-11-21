@@ -331,7 +331,7 @@ pub(crate) const RESPONSE_KEYS: &[&str] = &[
     "wal-unlinked",
     "page-size-changed",
     "bug",
-    "foreign-writer",
+    "other-writer",
 ];
 
 const RESPONSES: &[Key] = &[
@@ -344,7 +344,7 @@ const RESPONSES: &[Key] = &[
     key("wal-unlinked", Str, Implemented),
     key("page-size-changed", Str, Implemented),
     key("bug", Str, Implemented),
-    key("foreign-writer", Str, Implemented),
+    key("other-writer", Str, Implemented),
 ];
 
 /// The tables a section's keys come from, searched in order.

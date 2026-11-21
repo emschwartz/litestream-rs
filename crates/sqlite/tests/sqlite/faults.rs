@@ -335,11 +335,11 @@ fn no_synced_frame_is_overwritten<B: Backend>(placement: Placement) {
 /// SQLite belief: TRUNCATE needs every reader gone; against the pin it reports busy and leaves
 /// the WAL whole.
 #[test]
-fn a_stranger_truncate_reports_busy_and_the_wal_keeps_its_length() {
-    both(stranger_truncate::<Sqlite>);
+fn a_other_process_truncate_reports_busy_and_the_wal_keeps_its_length() {
+    both(other_process_truncate::<Sqlite>);
 }
 
-fn stranger_truncate<B: Backend>(placement: Placement) {
+fn other_process_truncate<B: Backend>(placement: Placement) {
     let dir = TempDir::new().unwrap();
     let mut s = stepper::<B>(&dir, placement);
     s.sync().unwrap();

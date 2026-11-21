@@ -1,6 +1,6 @@
 //! The actor's two halves: what a rebuild keeps, and the engine it replaces.
 //!
-//! A rebuild (after a bug, or past a second writer the operator chose to
+//! A rebuild (after a bug, or past another writer the operator chose to
 //! continue past) must forget everything the engine believed about the WAL,
 //! the staging directory and the replica, and nothing anyone asked of it.
 //! [`Kept`] is the second kind, [`Engine`] the first. A rebuild builds the

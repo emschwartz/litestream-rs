@@ -245,7 +245,7 @@ pub enum Hold {
     /// A name in the listing could not be parsed; it may be a file that
     /// covers something.
     #[error("{count} unparsable names at {level}")]
-    ForeignNames {
+    UnrecognizedNames {
         /// The level.
         level: Level,
         /// How many.
