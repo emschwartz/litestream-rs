@@ -35,8 +35,8 @@ pub use oracle::{Acked, Bound, Checked, Violation, bug_fault, check, within};
 pub use run::{Failure, Opts, RunReport, run, run_with, shrink};
 pub use seed::{ParseDayError, ParseSeedError, SEEDS_PER_NIGHT, Seed, nightly_base, replay_line};
 pub use sqlite::{
-    AppCommit, CheckpointNumbers, CrashKind, ReaderId, SimCheckpointer, SimPages, SimSource,
-    SimSqlite, SimWal, StrangerMode,
+    AppCommit, AutoTally, CheckpointNumbers, CrashKind, ReaderId, SimCheckpointer, SimPages,
+    SimSource, SimSqlite, SimWal, StrangerMode,
 };
 pub use store::{
     FaultHandle, FaultShape, Faults, Lost, Stage, StageHandle, Tap, TapCounts, TapEvent, TapLog,

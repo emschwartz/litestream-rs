@@ -273,6 +273,12 @@ pub fn clock_scenarios() -> &'static [fn() -> Scenario] {
     &[clock_steps_back_10s]
 }
 
+/// Scenarios that are not tied to one fault: the host checkpoints on its own.
+#[must_use]
+pub fn host_scenarios() -> &'static [fn() -> Scenario] {
+    &[host_autocheckpoints]
+}
+
 /// The crash windows of a compaction's output: the scenarios that are not tied
 /// to one fault.
 #[must_use]
@@ -1401,4 +1407,66 @@ fn uploaded_again(report: &RunReport) -> Result<(), String> {
     } else {
         Err(format!("{key} was uploaded {puts} times, want 2"))
     }
+}
+
+/// The app's automatic checkpoint threshold in [`host_autocheckpoints`], in frames: small,
+/// so a few commits cross it, and below the engine's own PASSIVE threshold.
+const HOST_THRESHOLD: u32 = 4;
+
+/// The app runs SQLite's automatic checkpoint (at [`HOST_THRESHOLD`] frames) and the engine is
+/// told so. With the pin above mark 0 (the driver's first frame), the app's first checkpoint
+/// past the threshold copies the frames below the pin and its next attempts copy nothing; a
+/// stranger's read stops the engine's own checkpoint short, so the pin is retaken above mark 0
+/// and the app backfills once more; after the engine's full checkpoints the pin is on mark 0
+/// and every attempt copies nothing. The engine counts each backfill the app made and none of
+/// its own, infers the attempts that copied nothing on both marks, and the replica restores
+/// every commit.
+#[must_use]
+pub fn host_autocheckpoints() -> Scenario {
+    let step = |pages| vec![commit(pages, false), Op::Tick];
+    let ones = |n| (0..n).flat_map(|_| step(1)).collect::<Vec<_>>();
+    let mut s = build(
+        "host_autocheckpoints",
+        vec![
+            vec![Op::HostAutocheckpoint(Some(HOST_THRESHOLD))],
+            ticks(4),
+            step(3),
+            step(1),
+            step(1),
+            step(1),
+            vec![Op::StrangerReader { begin: true }],
+            step(4),
+            ticks(2),
+            vec![Op::StrangerReader { begin: false }],
+            ones(6),
+            ticks(SETTLE),
+            ones(8),
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        vec![
+            Expect::Event(EventMatch::Checkpointed(lsr_core::CheckpointMode::Passive)),
+            Expect::Oracle,
+        ],
+    );
+    s.check = Some(host_counted);
+    s
+}
+
+/// Every backfill the app's automatic checkpoints made was counted, nothing else was counted
+/// as a checkpoint that ran, and the attempts that copied nothing were inferred.
+fn host_counted(report: &RunReport) -> Result<(), String> {
+    let (seen, app) = (report.host_checkpoints, report.app_autocheckpoints);
+    if app.backfilled < 2 || app.attempts <= app.backfilled {
+        return Err(format!("the scenario did not run both halves: {app:?}"));
+    }
+    if seen.backfilled != app.backfilled || seen.restarted != 0 {
+        return Err(format!("counted {seen:?}, the app ran {app:?}"));
+    }
+    if seen.stalled < 2 {
+        return Err(format!(
+            "a stall not inferred: {seen:?}, the app ran {app:?}"
+        ));
+    }
+    Ok(())
 }

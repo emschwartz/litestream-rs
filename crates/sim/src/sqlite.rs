@@ -33,6 +33,12 @@
 //! freed ones included (`a_growing_commit_writes_every_page_it_adds`), so callers that
 //! grow the database must write the added pages too.
 //!
+//! - **R4, automatic checkpoint:** with a threshold set
+//!   ([`SimSqlite::set_app_autocheckpoint`]), every app commit that leaves `mxFrame` at or
+//!   past it runs a PASSIVE on the app's connection under R1 (`sqlite3WalDefaultHook`).
+//!   SQLite reports none of them to the app, so the model counts them
+//!   ([`SimSqlite::app_autocheckpoints`]).
+//!
 //! The connections are the app (commits, spills, a stranger's checkpoints), our
 //! read connection, our pool connection (checkpoints and `bump_seq`), the
 //! barrier and write-lock transactions, and stranger readers. Only the app and the
@@ -107,6 +113,15 @@ pub struct CheckpointNumbers {
     pub log: u32,
     /// `nBackfill` afterwards.
     pub checkpointed: u32,
+}
+
+/// The app's automatic checkpoints so far (R4).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AutoTally {
+    /// Checkpoints run after a commit at or past the threshold.
+    pub attempts: u64,
+    /// Those that raised `nBackfill`.
+    pub backfilled: u64,
 }
 
 /// What an app commit wrote: the generation and the committed end.
@@ -232,6 +247,8 @@ struct State {
     barrier: Option<u64>,
     write_lock: Option<u64>,
     faults: Faults,
+    app_autocheckpoint: Option<u32>,
+    app_auto: AutoTally,
 }
 
 fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
@@ -583,6 +600,23 @@ impl State {
         )
     }
 
+    /// R4, right after an app commit.
+    fn autocheckpoint(&mut self) {
+        let Some(at) = self.app_autocheckpoint else {
+            return;
+        };
+        if self.index.mx_frame < at {
+            return;
+        }
+        let before = self.index.backfilled;
+        self.checkpoint(Conn::App, StrangerMode::Passive);
+        let tally = &mut self.app_auto;
+        tally.attempts = tally.attempts.saturating_add(1);
+        if self.index.backfilled > before {
+            tally.backfilled = tally.backfilled.saturating_add(1);
+        }
+    }
+
     /// SQLite's `walIndexRecover` over the file, by the app's connection.
     fn recover(&mut self) {
         let mut index = Index::empty(self.index.salts, self.db_pages());
@@ -747,6 +781,8 @@ impl SimSqlite {
             barrier: None,
             write_lock: None,
             faults: Faults::default(),
+            app_autocheckpoint: None,
+            app_auto: AutoTally::default(),
         };
         Self {
             state: Arc::new(Mutex::new(state)),
@@ -824,11 +860,24 @@ impl SimSqlite {
             if db_size == 0 || !state.write(Conn::App, pages, Some(db_size)) {
                 return None;
             }
-            Some(AppCommit {
+            let commit = AppCommit {
                 salts: state.index.salts,
                 end: WalOffset::from_frame_index(state.index.mx_frame, state.page_size),
-            })
+            };
+            state.autocheckpoint();
+            Some(commit)
         })
+    }
+
+    /// The app's `wal_autocheckpoint` in frames (R4); `None`, the model's default, is 0.
+    pub fn set_app_autocheckpoint(&self, frames: Option<u32>) {
+        self.with(|state| state.app_autocheckpoint = frames.filter(|n| *n > 0));
+    }
+
+    /// The app's automatic checkpoints so far.
+    #[must_use]
+    pub fn app_autocheckpoints(&self) -> AutoTally {
+        self.with(|state| state.app_auto)
     }
 
     /// The app writes frames of a transaction it has not committed (a cache

@@ -6,7 +6,7 @@ use lsr_sim::Op;
 use lsr_sim::run::Seen;
 use lsr_sim::scenario::{
     self, FaultKind, Scenario, clock_scenarios, fault_reason, fault_scenarios, halt_of,
-    names_fault, persistent_of, run_scenario, window_scenarios,
+    host_scenarios, names_fault, persistent_of, run_scenario, window_scenarios,
 };
 
 fn run(make: fn() -> Scenario) {
@@ -160,6 +160,7 @@ fn every_scenario_is_tested_here() {
     let source = include_str!("faults.rs");
     let mut all: Vec<fn() -> Scenario> = clock_scenarios().to_vec();
     all.extend_from_slice(window_scenarios());
+    all.extend_from_slice(host_scenarios());
     for kind in FaultKind::ALL {
         all.extend_from_slice(fault_scenarios(kind));
     }
@@ -320,6 +321,11 @@ fn sigterm_during_upload() {
 #[test]
 fn clock_steps_back_10s() {
     run(scenario::clock_steps_back_10s);
+}
+
+#[test]
+fn host_autocheckpoints() {
+    run(scenario::host_autocheckpoints);
 }
 
 #[test]

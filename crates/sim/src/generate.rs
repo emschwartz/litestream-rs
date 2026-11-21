@@ -126,6 +126,9 @@ pub enum Op {
     },
     /// A step on the replica from outside the engine. Scenarios only.
     Remote(RemoteOp),
+    /// The app's `wal_autocheckpoint` becomes this many frames (`None`: 0, the model's
+    /// default), and the engine is told so. Scenarios only.
+    HostAutocheckpoint(Option<u32>),
 }
 
 /// What a scenario does to the staging directory, the engine's own memory of

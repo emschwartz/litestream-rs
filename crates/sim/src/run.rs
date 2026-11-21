@@ -13,9 +13,9 @@ use std::num::{NonZeroU32, NonZeroU64};
 use std::time::Duration;
 
 use lsr_core::{
-    Actor, ActorConfig, CheckpointConfig, Clock, Entropy, Env, Event, Fault, HaltCause, Lane,
-    MAX_BACKOFF, Maintenance, Next, PersistentCause, Responses, RetentionMode, SeededEntropy,
-    SyncConfig, Tick, UploadConfig,
+    Actor, ActorConfig, CheckpointConfig, Clock, Entropy, Env, Event, Fault, HaltCause,
+    HostCheckpoints, Lane, MAX_BACKOFF, Maintenance, Next, PersistentCause, Responses,
+    RetentionMode, SeededEntropy, SyncConfig, Tick, UploadConfig,
 };
 use lsr_ltx::{PageNo, PageSize, Timestamp, Txid};
 use lsr_wal::{Salts, WalOffset};
@@ -26,7 +26,7 @@ use crate::resources::{
     CheckpointTally, CountingCheckpointer, IdleWindow, Limits, TickStats, delta, memory, per_tick,
 };
 use crate::seed::{Seed, replay_line};
-use crate::sqlite::{CrashKind, ReaderId};
+use crate::sqlite::{AutoTally, CrashKind, ReaderId};
 use crate::world::{CrashPlan, StagedCopy, StagedEditError, TickEnd, World};
 
 /// Ticks a drain may take before it counts as stuck.
@@ -149,6 +149,10 @@ pub struct RunReport {
     /// The replica's objects a corrupt publish changed, when the run was
     /// asked to record.
     pub remote_damaged: Vec<lsr_core::FileKey>,
+    /// What every engine of the run saw of the app's checkpoints.
+    pub host_checkpoints: HostCheckpoints,
+    /// The app's automatic checkpoints, as the model counted them.
+    pub app_autocheckpoints: AutoTally,
 }
 
 /// What a run may be told besides its seed.
@@ -233,6 +237,10 @@ struct Runner {
     /// measured from it, since an earlier reading is clamped.
     latest: Option<Timestamp>,
     saved: Option<StagedCopy>,
+    /// The app's automatic checkpoint threshold each engine is told.
+    host_autocheckpoint: Option<NonZeroU32>,
+    /// What engines replaced so far saw of the app's checkpoints.
+    host_before: HostCheckpoints,
 }
 
 fn below(rng: &SeededEntropy, upper: u64) -> u64 {
@@ -269,6 +277,8 @@ impl Runner {
             degraded: [false; 5],
             latest: None,
             saved: None,
+            host_autocheckpoint: Some(lsr_core::SQLITE_AUTOCHECKPOINT),
+            host_before: HostCheckpoints::NONE,
         }
     }
 
@@ -279,14 +289,20 @@ impl Runner {
     fn reboot(&mut self) {
         self.w.start_driver();
         let base = actor_config();
+        self.host_before = self.host_seen();
         self.actor = Actor::new(ActorConfig {
             responses: self.responses,
             maintenance: base.maintenance.clone().with_retention(self.retention),
             ..base
         });
+        self.actor.set_host_autocheckpoint(self.host_autocheckpoint);
         self.unwatched = true;
         self.degraded = [false; 5];
         self.latest = None;
+    }
+
+    fn host_seen(&self) -> HostCheckpoints {
+        self.host_before.then(self.actor.host_checkpoints())
     }
 
     fn limits(&self) -> Limits {
@@ -929,6 +945,11 @@ impl Runner {
             Op::Meta(op) => self.meta(*op)?,
             Op::Wal(op) => self.wal_damage(*op)?,
             Op::Remote(op) => self.remote(*op)?,
+            Op::HostAutocheckpoint(frames) => {
+                self.w.sqlite.set_app_autocheckpoint(*frames);
+                self.host_autocheckpoint = frames.and_then(NonZeroU32::new);
+                self.actor.set_host_autocheckpoint(self.host_autocheckpoint);
+            }
             Op::OurReader { begin } => {
                 let done = if *begin {
                     self.w.sqlite.our_reader_begin()
@@ -1130,6 +1151,8 @@ pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure
         violation,
         trace: std::mem::take(&mut runner.report.trace),
     })?;
+    runner.report.host_checkpoints = runner.host_seen();
+    runner.report.app_autocheckpoints = runner.w.sqlite.app_autocheckpoints();
     if opts.record {
         runner.report.remote_events = runner.w.remote_tap.events();
         runner.report.staging_events = runner.w.staging_tap.events();
