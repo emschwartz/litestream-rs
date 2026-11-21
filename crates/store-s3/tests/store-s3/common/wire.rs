@@ -14,14 +14,19 @@ pub fn text(response: &HttpResponse) -> String {
     String::from_utf8_lossy(response.body()).into_owned()
 }
 
-/// PUTs `body` at `key` with stamp `stamp` through `transport`.
-pub fn put(transport: &impl Transport, key: &FileKey, body: &[u8], stamp: i64) -> HttpResponse {
+/// PUTs `body` at `key` with created-at time `created_at` through `transport`.
+pub fn put(
+    transport: &impl Transport,
+    key: &FileKey,
+    body: &[u8],
+    created_at: i64,
+) -> HttpResponse {
     let request = builder()
         .put_object(
             now(),
             key,
             body.to_vec(),
-            Timestamp::from_unix_millis(stamp),
+            Timestamp::from_unix_millis(created_at),
         )
         .unwrap();
     transport.send(request.into_request()).unwrap()

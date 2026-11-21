@@ -21,7 +21,7 @@ use lsr_store_s3::{
     UreqTransport, classify, level_prefix, object_key,
 };
 
-pub const STAMP_HEADER: &str = "x-amz-meta-litestream-timestamp";
+pub const CREATED_AT_HEADER: &str = "x-amz-meta-litestream-timestamp";
 pub const PART: usize = 5 * 1024 * 1024;
 
 /// Tigris starts a multipart upload at 16 MiB, so a 5 MiB body there is one PUT and proves nothing.
@@ -360,9 +360,9 @@ impl RealHarness {
         object_key(&self.prefix, key)
     }
 
-    pub fn put(&self, key: &FileKey, stamp: Timestamp, bytes: &[u8]) {
+    pub fn put(&self, key: &FileKey, created_at: Timestamp, bytes: &[u8]) {
         block_on(async {
-            let mut upload = self.store.begin_upload(key, stamp).await.unwrap();
+            let mut upload = self.store.begin_upload(key, created_at).await.unwrap();
             upload.write(bytes).await.unwrap();
             upload.commit().await.unwrap();
         });
@@ -373,9 +373,9 @@ impl RealHarness {
         block_on(self.store.list(level, None, PageLimit::new(limit).unwrap())).unwrap()
     }
 
-    pub fn write_all(&self, key: &FileKey, stamp: Timestamp, bytes: &[u8], chunk: usize) {
+    pub fn write_all(&self, key: &FileKey, created_at: Timestamp, bytes: &[u8], chunk: usize) {
         block_on(async {
-            let mut upload = self.store.begin_upload(key, stamp).await.unwrap();
+            let mut upload = self.store.begin_upload(key, created_at).await.unwrap();
             for piece in bytes.chunks(chunk) {
                 upload.write(piece).await.unwrap();
             }
@@ -456,68 +456,71 @@ pub fn conformance_names_in_core() -> Vec<&'static str> {
 
 // The cases below hold on every provider; each provider's file runs them.
 
-pub fn stamp_survives_round_trip(h: &RealHarness) {
-    let stamps = [
+pub fn created_at_survives_round_trip(h: &RealHarness) {
+    let resolved = [
         Timestamp::from_unix_millis(0),
         Timestamp::from_unix_millis(1),
         at("2024-02-29T12:34:56.789Z"),
         at("9999-12-31T23:59:59.999Z"),
     ];
-    for (n, stamp) in (1_u64..).zip(stamps.iter()) {
-        h.put(&h.key(0, n, n), *stamp, b"x");
+    for (n, created_at) in (1_u64..).zip(resolved.iter()) {
+        h.put(&h.key(0, n, n), *created_at, b"x");
     }
     let listing = h.list_all(0, 10);
     let got: Vec<Timestamp> = listing
         .files
         .iter()
-        .map(|f| block_on(h.store.stamp(f)).unwrap().at())
+        .map(|f| block_on(h.store.created_at(f)).unwrap().at())
         .collect();
-    assert_eq!(got, stamps);
+    assert_eq!(got, resolved);
 }
 
-pub fn go_stamp_parses(h: &RealHarness) {
+pub fn go_created_at_parses(h: &RealHarness) {
     let key = h.key(0, 5, 5);
     h.raw_put(
         &h.object(&key),
         b"go wrote this",
-        &[(STAMP_HEADER, "2025-01-02T03:04:05.123456789Z")],
+        &[(CREATED_AT_HEADER, "2025-01-02T03:04:05.123456789Z")],
     );
     let listing = h.list_all(0, 10);
-    let stamps: Vec<Timestamp> = listing
+    let resolved: Vec<Timestamp> = listing
         .files
         .iter()
-        .map(|f| block_on(h.store.stamp(f)).unwrap().at())
+        .map(|f| block_on(h.store.created_at(f)).unwrap().at())
         .collect();
-    assert_eq!(stamps, [at("2025-01-02T03:04:05.123Z")]);
-    assert_eq!(h.store.stamp_stats().stamped, 1);
+    assert_eq!(resolved, [at("2025-01-02T03:04:05.123Z")]);
+    assert_eq!(h.store.created_at_stats().from_metadata, 1);
 }
 
 pub fn object_without_metadata_falls_back(h: &RealHarness) {
     let key = h.key(0, 7, 7);
-    h.raw_put(&h.object(&key), b"no stamp", &[]);
+    h.raw_put(&h.object(&key), b"no created-at time", &[]);
     let listing = h.list_all(0, 10);
     let [file] = listing.files.as_slice() else {
         panic!("one file expected, got {listing:?}");
     };
     let now = WallClock.now().unix_millis();
-    let stamped = block_on(h.store.stamp(file)).unwrap().at().unix_millis();
-    assert!(now.abs_diff(stamped) < 600_000);
-    let stats = h.store.stamp_stats();
-    assert_eq!((stats.stamped, stats.fell_back), (0, 1));
+    let recorded = block_on(h.store.created_at(file))
+        .unwrap()
+        .at()
+        .unix_millis();
+    assert!(now.abs_diff(recorded) < 600_000);
+    let stats = h.store.created_at_stats();
+    assert_eq!((stats.from_metadata, stats.fell_back), (0, 1));
 }
 
-pub fn unparseable_stamp_fails_the_reader_not_the_listing(h: &RealHarness) {
+pub fn unparseable_created_at_fails_the_reader_not_the_listing(h: &RealHarness) {
     let key = h.key(0, 9, 9);
-    h.raw_put(&h.object(&key), b"bad", &[(STAMP_HEADER, "yesterday")]);
+    h.raw_put(&h.object(&key), b"bad", &[(CREATED_AT_HEADER, "yesterday")]);
     let listing = h.list_all(0, 10);
     let [file] = listing.files.as_slice() else {
         panic!("the listing keeps the file: {listing:?}");
     };
     assert_eq!(
-        block_on(h.store.stamp(file)),
+        block_on(h.store.created_at(file)),
         Err(StoreError::Corrupt {
             key: Some(key),
-            cause: CorruptCause::BadStamp
+            cause: CorruptCause::BadCreatedAt
         })
     );
 }
@@ -550,7 +553,7 @@ pub fn multipart_round_trip(h: &RealHarness) {
     };
     assert_eq!(file.size, u64::try_from(len).unwrap());
     assert_eq!(
-        block_on(h.store.stamp(file)).unwrap().at(),
+        block_on(h.store.created_at(file)).unwrap().at(),
         at("2024-05-01T12:00:00.123Z")
     );
     assert_eq!(h.open_uploads(), 0);
@@ -675,15 +678,15 @@ macro_rules! shared_cases {
                 read_of_missing_key_is_not_found,
                 delete_is_idempotent,
                 two_uploads_to_one_key,
-                chunks_concatenate_and_stamp_survives,
-                stamp_returns_the_committed_stamp,
-                listed_stamp_is_exact_or_marked,
-                stamp_of_a_vanished_file_is_not_found,
-                stamp_of_an_overwritten_file_is_refused,
-                read_with_stamp_agrees_with_read_and_stamp,
+                chunks_concatenate_and_created_at_survives,
+                created_at_returns_the_committed_created_at,
+                listed_created_at_is_exact_or_marked,
+                created_at_of_a_vanished_file_is_not_found,
+                created_at_of_an_overwritten_file_is_refused,
+                read_with_created_at_agrees_with_read_and_created_at,
                 read_many_agrees_with_read,
                 list_many_agrees_with_list,
-                stamp_many_agrees_with_stamp,
+                created_at_many_agrees_with_created_at,
             );
 
             /// A case added to core's suite and missing from the list above would
@@ -696,10 +699,10 @@ macro_rules! shared_cases {
             }
 
             $crate::real::plain_cases!($connect, $ignored;
-                stamp_survives_round_trip,
-                go_stamp_parses,
+                created_at_survives_round_trip,
+                go_created_at_parses,
                 object_without_metadata_falls_back,
-                unparseable_stamp_fails_the_reader_not_the_listing,
+                unparseable_created_at_fails_the_reader_not_the_listing,
                 listing_makes_no_head_requests,
                 multipart_round_trip,
                 part_size_boundary,

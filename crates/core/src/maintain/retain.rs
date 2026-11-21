@@ -10,29 +10,29 @@
 //! failure is a [`Hold`] and nothing is deleted. A name this code cannot
 //! parse, a malformed snapshot, a listing missing a file this process knows it
 //! wrote, a hole after the newest snapshot, a history that does not plan, a
-//! snapshot or level-0 file without a real stamp, and snapshots whose stamps
+//! snapshot or level-0 file without a non-zero created-at time, and snapshots whose created-at times
 //! run backwards all mean the listing cannot be read as a history. The first
-//! group is judged on names alone; the stamp holds look only at the files whose
-//! stamps were read (see "Time base"). A hole
+//! group is judged on names alone; the created-at time holds look only at the files whose
+//! created-at times were read (see "Time base"). A hole
 //! further back than the newest snapshot does not hold: it is history already
 //! lost, the rules never widen it, and holding on it would pin every delete
 //! after one Go-era loss.
 //!
-//! Time base. Ages come from exact stamps (the header stamp, never a listed
+//! Time base. Ages come from exact created-at times (the header created-at time, never a listed
 //! last-modified time, which can precede it by any writer clock lead), and are
 //! measured from the anchor, computed afresh on every call. The anchor is
-//! `min(now, newest stamp among the last file of each non-empty level and
-//! every snapshot start)`: a listing that carries no exact stamps costs a
+//! `min(now, newest created-at time among the last file of each non-empty level and
+//! every snapshot start)`: a listing that carries no exact created-at times costs a
 //! request per file asked for, so only those files are read, plus the level 0
 //! files a rule would delete, in key order up to and including the first young
 //! one (at most [`MAX_DELETE`], past which the job is full anyway). On a store
 //! that runs batches the anchors are read side by side, and the level 0 scan
 //! reads ahead of its position, never more files than it has already found
 //! old, so past the first young one it reads at most that many for nothing. On a
-//! writer's listing a file's stamp rises with its range, so the anchor equals
-//! the newest stamp anywhere; on any listing it is never above it, and a lower
+//! writer's listing a file's created-at time rises with its range, so the anchor equals
+//! the newest created-at time anywhere; on any listing it is never above it, and a lower
 //! anchor only keeps more. A clock that jumps ahead deletes nothing the
-//! replica's own newest stamp would not, and a clock behind only makes files
+//! replica's own newest created-at time would not, and a clock behind only makes files
 //! look young. The anchor is deliberately not remembered: a remembered high one
 //! would keep deleting on the strength of one bad clock reading. What holds
 //! instead:
@@ -53,7 +53,7 @@
 //!
 //! The cost of a clock that steps back is a snapshot kept after an earlier job
 //! cut the level-0 chain behind it; a restore goes through the newer snapshot
-//! and loses nothing. Go on S3 uses the upload time (`LastModified`), never earlier than the header stamp, so Go keeps
+//! and loses nothing. Go on S3 uses the upload time (`LastModified`), never earlier than the header created-at time, so Go keeps
 //! these files at least as long as this code does.
 //!
 //! Rules, in the order they are computed:
@@ -74,7 +74,7 @@
 //!    level 1 file that covered such a file, so without it the file would
 //!    stay forever. Nothing under the floor is needed by a retained snapshot
 //!    or by a restore planned on the floor's. The age test still stops the
-//!    scan: stamps follow transactions, so the files after a young one are
+//!    scan: created-at times follow transactions, so the files after a young one are
 //!    young.
 //!
 //! The pin. While a lane of the actor is degraded, [`MaintainState::pin`]
@@ -102,10 +102,10 @@ use std::time::Duration;
 use lsr_ltx::{Timestamp, Txid};
 
 use super::{DeleteJob, Hold, L0Retention, MAX_DELETE, MaintainState, Maintenance};
+use crate::created_at::{Need, Resolve, ResolvedCreatedAt};
 use crate::inventory::{Inventory, is_snapshot_start};
-use crate::layout::{FileInfo, FileKey, Level, RealStamp, StoredStamp};
+use crate::layout::{CreatedAt, FileInfo, FileKey, Level, NonZeroCreatedAt};
 use crate::plan::{KeyTarget, PlanOutcome, plan};
-use crate::stamps::{Need, Resolve, Stamps};
 
 #[cfg(test)]
 #[expect(
@@ -119,7 +119,7 @@ thread_local! {
     /// Test hook: level 0 deletes ignore coverage, so the self-check has
     /// something to catch.
     static BREAK_L0_COVERAGE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Test hook: every file anchors the clock, as main's exact stamp over
+    /// Test hook: every file anchors the clock, as main's exact created-at time over
     /// the whole listing did, so R' can be compared with it.
     static ANCHOR_FROM_EVERY_FILE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -136,11 +136,11 @@ pub(super) enum Retention {
     Held(Hold),
 }
 
-/// A decision step that may need one more stamp: `Err` names the file, and
+/// A decision step that may need one more created-at time: `Err` names the file, and
 /// the files it expects to need next.
 type Needs<T> = Result<T, Need>;
 
-/// The next delete job, or why there is none, or the one stamp needed before
+/// The next delete job, or why there is none, or the one created-at time needed before
 /// either is known. See the module docs.
 pub(super) fn retention(
     inventory: &Inventory,
@@ -148,9 +148,9 @@ pub(super) fn retention(
     config: &Maintenance,
     published: Option<Txid>,
     state: &MaintainState,
-    stamps: &Stamps,
+    resolved: &ResolvedCreatedAt,
 ) -> Resolve<Retention> {
-    match decide(inventory, now, config, published, state, stamps) {
+    match decide(inventory, now, config, published, state, resolved) {
         Ok(retention) => Resolve::Done(retention),
         Err(file) => Resolve::Need(file),
     }
@@ -162,7 +162,7 @@ fn decide(
     config: &Maintenance,
     published: Option<Txid>,
     state: &MaintainState,
-    stamps: &Stamps,
+    resolved: &ResolvedCreatedAt,
 ) -> Needs<Retention> {
     if let Some(hold) = gate(inventory, published, state) {
         return Ok(Retention::Held(hold));
@@ -171,29 +171,30 @@ fn decide(
     if anchors.is_empty() {
         return Ok(Retention::Wait { until: None });
     }
-    // Every anchor's stamp is needed below, so ask for all that are missing at once.
-    let mut missing = anchors.iter().filter(|info| stamps.exact(info).is_none());
+    // Every anchor's created-at time is needed below, so ask for all that are missing at once.
+    let mut missing = anchors.iter().filter(|info| resolved.exact(info).is_none());
     if let Some(first) = missing.next() {
         return Err(Need::with_ahead(*first, missing.copied()));
     }
-    // A file with no real stamp sets no anchor: it has no age to measure.
-    let mut newest_stamp: Option<Timestamp> = None;
+    // A file with no non-zero created-at time sets no anchor: it has no age to measure.
+    let mut newest_created_at: Option<Timestamp> = None;
     for info in &anchors {
-        if let Some(stamp) = stamp_of(stamps, info)? {
-            let at = stamp.at();
-            newest_stamp = Some(newest_stamp.map_or(at, |newest| newest.max(at)));
+        if let Some(created_at) = created_at_of(resolved, info)? {
+            let at = created_at.at();
+            newest_created_at = Some(newest_created_at.map_or(at, |newest| newest.max(at)));
         }
     }
-    if let Some(hold) = unstamped(anchors.iter(), stamps)?.or(stamps_backwards(inventory, stamps)?)
+    if let Some(hold) =
+        without_created_at(anchors.iter(), resolved)?.or(created_at_backwards(inventory, resolved)?)
     {
         return Ok(Retention::Held(hold));
     }
-    // Every anchor unstamped and none held: no snapshot, so nothing to age.
-    let Some(newest_stamp) = newest_stamp else {
+    // Every anchor without a created-at time and none held: no snapshot, so nothing to age.
+    let Some(newest_created_at) = newest_created_at else {
         return Ok(Retention::Wait { until: None });
     };
-    let anchor = now.min(newest_stamp);
-    let found = match candidates(inventory, anchor, newest_stamp, config, stamps)? {
+    let anchor = now.min(newest_created_at);
+    let found = match candidates(inventory, anchor, newest_created_at, config, resolved)? {
         Ok(found) => found,
         Err(hold) => return Ok(Retention::Held(hold)),
     };
@@ -224,7 +225,7 @@ fn decide(
     })
 }
 
-/// The files whose stamps set the anchor and the snapshot rule: the last file
+/// The files whose created-at times set the anchor and the snapshot rule: the last file
 /// of each non-empty level and every snapshot start, in key order.
 fn anchor_files(inventory: &Inventory) -> Vec<FileInfo> {
     #[cfg(test)]
@@ -343,39 +344,42 @@ fn latest_unplannable(inventory: &Inventory) -> Option<Hold> {
     }
 }
 
-/// The file's exact stamp when it is a real one (`None` for a writer that
-/// stamped nothing), or the request for it.
-fn stamp_of(stamps: &Stamps, info: &FileInfo) -> Needs<Option<RealStamp>> {
-    stamps
+/// The file's exact created-at time when it is a real one (`None` for a writer that
+/// recorded no created-at time), or the request for it.
+fn created_at_of(resolved: &ResolvedCreatedAt, info: &FileInfo) -> Needs<Option<NonZeroCreatedAt>> {
+    resolved
         .exact(info)
-        .map(StoredStamp::real)
+        .map(CreatedAt::non_zero)
         .ok_or_else(|| Need::one(*info))
 }
 
-/// Whether a stamp at or before the epoch is no stamp at all for this file:
+/// Whether a created-at time at or before the epoch is no created-at time at all for this file:
 /// it ages a level 0 file or a snapshot.
 fn aged(info: &FileInfo) -> bool {
     info.key.level() == Level::ZERO || info.key.level().is_snapshot()
 }
 
-fn unstamped<'a>(
+fn without_created_at<'a>(
     files: impl Iterator<Item = &'a FileInfo>,
-    stamps: &Stamps,
+    resolved: &ResolvedCreatedAt,
 ) -> Needs<Option<Hold>> {
     for info in files.filter(|info| aged(info)) {
-        if stamp_of(stamps, info)?.is_none() {
-            return Ok(Some(Hold::Unstamped { key: info.key }));
+        if created_at_of(resolved, info)?.is_none() {
+            return Ok(Some(Hold::NoCreatedAt { key: info.key }));
         }
     }
     Ok(None)
 }
 
-fn stamps_backwards(inventory: &Inventory, stamps: &Stamps) -> Needs<Option<Hold>> {
+fn created_at_backwards(
+    inventory: &Inventory,
+    resolved: &ResolvedCreatedAt,
+) -> Needs<Option<Hold>> {
     for pair in snapshots(inventory).windows(2) {
         if let [earlier, later] = pair
-            && stamp_of(stamps, earlier)? > stamp_of(stamps, later)?
+            && created_at_of(resolved, earlier)? > created_at_of(resolved, later)?
         {
-            return Ok(Some(Hold::SnapshotStampsBackwards {
+            return Ok(Some(Hold::SnapshotCreatedAtBackwards {
                 earlier: earlier.key,
                 later: later.key,
             }));
@@ -393,43 +397,43 @@ struct Found {
 }
 
 impl Found {
-    fn wake_at(&mut self, at: Timestamp, newest_stamp: Timestamp) {
-        // The anchor never passes the newest stamp, so a later instant is
+    fn wake_at(&mut self, at: Timestamp, newest_created_at: Timestamp) {
+        // The anchor never passes the newest created-at time, so a later instant is
         // never reached without a new write.
-        if at <= newest_stamp {
+        if at <= newest_created_at {
             self.wake = Some(self.wake.map_or(at, |soonest| soonest.min(at)));
         }
     }
 }
 
-/// `stamp` plus `age`: the instant it ages out. Past the last instant a
+/// `created_at` plus `age`: the instant it ages out. Past the last instant a
 /// timestamp holds it is that last instant, which the anchor never passes.
-fn aged_at(stamp: RealStamp, age: Duration) -> Timestamp {
-    stamp.at().checked_add(age).unwrap_or(Timestamp::MAX)
+fn aged_at(created_at: NonZeroCreatedAt, age: Duration) -> Timestamp {
+    created_at.at().checked_add(age).unwrap_or(Timestamp::MAX)
 }
 
-/// Whether `stamp` is at or after `anchor - age`. Every stamp is when that
+/// Whether `created_at` is at or after `anchor - age`. Every created-at time is when that
 /// instant is before the first one a timestamp holds.
-fn not_before(stamp: RealStamp, anchor: Timestamp, age: Duration) -> bool {
+fn not_before(created_at: NonZeroCreatedAt, anchor: Timestamp, age: Duration) -> bool {
     anchor
         .checked_sub(age)
-        .is_none_or(|cutoff| stamp.at() >= cutoff)
+        .is_none_or(|cutoff| created_at.at() >= cutoff)
 }
 
-/// Whether `stamp` is after `anchor - age`: too young to age out.
-fn after(stamp: RealStamp, anchor: Timestamp, age: Duration) -> bool {
+/// Whether `created_at` is after `anchor - age`: too young to age out.
+fn after(created_at: NonZeroCreatedAt, anchor: Timestamp, age: Duration) -> bool {
     anchor
         .checked_sub(age)
-        .is_none_or(|cutoff| stamp.at() > cutoff)
+        .is_none_or(|cutoff| created_at.at() > cutoff)
 }
 
-/// What the rules chose, or the hold a level 0 file's stamp calls for.
+/// What the rules chose, or the hold a level 0 file's created-at time calls for.
 fn candidates(
     inventory: &Inventory,
     anchor: Timestamp,
-    newest_stamp: Timestamp,
+    newest_created_at: Timestamp,
     config: &Maintenance,
-    stamps: &Stamps,
+    resolved: &ResolvedCreatedAt,
 ) -> Needs<Result<Found, Hold>> {
     let mut found = Found::default();
     let snaps = snapshots(inventory);
@@ -439,23 +443,23 @@ fn candidates(
     let retention = config.snapshot_retention();
     let mut first = last;
     for (position, info) in snaps.iter().enumerate() {
-        // The gate held on any unstamped snapshot; this is its fail-closed twin.
-        let Some(stamp) = stamp_of(stamps, info)? else {
-            return Ok(Err(Hold::Unstamped { key: info.key }));
+        // The gate held on any without a created-at time snapshot; this is its fail-closed twin.
+        let Some(created_at) = created_at_of(resolved, info)? else {
+            return Ok(Err(Hold::NoCreatedAt { key: info.key }));
         };
-        if not_before(stamp, anchor, retention) {
+        if not_before(created_at, anchor, retention) {
             first = position;
             break;
         }
     }
     if let Some(retained) = snaps.get(first).filter(|_| first < last) {
-        let Some(stamp) = stamp_of(stamps, retained)? else {
-            return Ok(Err(Hold::Unstamped { key: retained.key }));
+        let Some(created_at) = created_at_of(resolved, retained)? else {
+            return Ok(Err(Hold::NoCreatedAt { key: retained.key }));
         };
-        let aged_out = aged_at(stamp, retention)
+        let aged_out = aged_at(created_at, retention)
             .checked_add(Duration::from_millis(1))
             .unwrap_or(Timestamp::MAX);
-        found.wake_at(aged_out, newest_stamp);
+        found.wake_at(aged_out, newest_created_at);
     }
     let floor = first
         .checked_sub(1)
@@ -466,10 +470,10 @@ fn candidates(
         let scan = LevelZero {
             floor,
             anchor,
-            newest_stamp,
+            newest_created_at,
             age,
         };
-        if let Some(hold) = level_zero(inventory, &scan, &kept, stamps, &mut found)? {
+        if let Some(hold) = level_zero(inventory, &scan, &kept, resolved, &mut found)? {
             return Ok(Err(hold));
         }
     }
@@ -505,18 +509,18 @@ fn levels_one_to_eight(
 struct LevelZero {
     floor: Option<Txid>,
     anchor: Timestamp,
-    newest_stamp: Timestamp,
+    newest_created_at: Timestamp,
     age: Duration,
 }
 
-/// Level 0: a prefix, covered and aged, never the last file. Reads the stamp
+/// Level 0: a prefix, covered and aged, never the last file. Reads the created-at time
 /// of each file only once keys alone would delete it, and stops at the first
-/// young one or when the job is full. A file with no usable stamp is a hold.
+/// young one or when the job is full. A file with no usable created-at time is a hold.
 fn level_zero(
     inventory: &Inventory,
     scan: &LevelZero,
     kept: &[FileInfo],
-    stamps: &Stamps,
+    resolved: &ResolvedCreatedAt,
     found: &mut Found,
 ) -> Needs<Option<Hold>> {
     let cover = merged_ranges(kept);
@@ -532,14 +536,14 @@ fn level_zero(
         if chosen == MAX_DELETE {
             return Ok(None);
         }
-        if stamps.exact(info).is_none() {
-            return Err(level_zero_need(files, scan, &cover, stamps, info, chosen));
+        if resolved.exact(info).is_none() {
+            return Err(level_zero_need(files, scan, &cover, resolved, info, chosen));
         }
-        let Some(created) = stamp_of(stamps, info)? else {
-            return Ok(Some(Hold::Unstamped { key: info.key }));
+        let Some(created) = created_at_of(resolved, info)? else {
+            return Ok(Some(Hold::NoCreatedAt { key: info.key }));
         };
         if after(created, scan.anchor, scan.age) {
-            found.wake_at(aged_at(created, scan.age), scan.newest_stamp);
+            found.wake_at(aged_at(created, scan.age), scan.newest_created_at);
             return Ok(None);
         }
         found.keys.push(info.key);
@@ -548,7 +552,7 @@ fn level_zero(
     Ok(None)
 }
 
-/// The level 0 file whose stamp the scan needs, and after it the files the
+/// The level 0 file whose created-at time the scan needs, and after it the files the
 /// scan would read next if each turns out old enough to delete. The scan
 /// stops at the first young one, so these are a guess: no more are named than
 /// files this scan already found old (`chosen`), which keeps an idle tick,
@@ -558,7 +562,7 @@ fn level_zero_need(
     files: &[FileInfo],
     scan: &LevelZero,
     cover: &[(Txid, Txid)],
-    stamps: &Stamps,
+    resolved: &ResolvedCreatedAt,
     need: &FileInfo,
     chosen: usize,
 ) -> Need {
@@ -573,7 +577,7 @@ fn level_zero_need(
                 || covered(cover, info)
         })
         .take(chosen.min(MAX_DELETE.saturating_sub(chosen).saturating_sub(1)))
-        .filter(|info| stamps.exact(info).is_none())
+        .filter(|info| resolved.exact(info).is_none())
         .copied();
     Need::with_ahead(*need, ahead)
 }

@@ -400,7 +400,7 @@
 "TestNewS3ReplicaClientFromConfig_SuggestedHintExample" = { counterpart = "lsr-config::config::map::an_s3_url_names_the_bucket_and_prefix" }
 "TestRestoreCommand_FollowIntervalFlag" = { reason = "Restore -follow (a continuously updated local read replica and its TXID file) is a read replica, which is not in v1 (docs/PLAN.md section 1: the Go VFS stays in use for reading)." }
 "TestRestoreCommand_ParallelismDeprecated" = { reason = "Go-only: a deprecated -parallelism flag kept for old scripts. Rust's restore reads sequentially and never had the flag." }
-"TestRestoreCommand_RestoreReportsAdvancedTXID" = { reason = "Rust deliberately differs: a restore plans from one listing snapshot (docs/PLAN.md phase 1, restore planner) and reports the txid it planned (lsr-core restore::tests::restore_reports_stamps_read), so a replica that advances mid-restore does not change the answer." }
+"TestRestoreCommand_RestoreReportsAdvancedTXID" = { reason = "Rust deliberately differs: a restore plans from one listing snapshot (docs/PLAN.md phase 1, restore planner) and reports the txid it planned (lsr-core restore::tests::restore_reports_created_at_read), so a replica that advances mid-restore does not change the answer." }
 "TestRestoreCommand_RunAllowsEmptyOutput" = { reason = "Rust deliberately differs: restore refuses any existing target, even an empty file (lsr-local tests::create_refuses_a_target_that_exists), because publish never overwrites (docs/PLAN.md phase 1, restore executor)." }
 "TestRestoreCommand_RunDryRunJSONOutput" = { counterpart = ["lsr-cli::cli::cli::dry_run_json_lists_the_chain_the_restore_applies", "lsr-cli::cli::cli::dry_run_prints_the_plan_and_writes_nothing", "lsr-cli::bin/lsr::run::tests::dry_run_over_s3_plans_what_the_restore_applies"] }
 "TestRestoreCommand_RunForceOverwritesExistingOutput" = { reason = "Rust deliberately differs: there is no -force; restore never overwrites an existing target (lsr-cli::cli an_existing_output_exits_3_and_stays_byte_identical) and the caller removes it first." }
@@ -816,8 +816,8 @@
 "TestReplicaClient_SFTP_HostKeyValidation/InvalidHostKey" = { reason = "SFTP backend: backends other than S3 and a local directory are not in v1 (docs/PLAN.md section 1)." }
 "TestReplicaClient_SFTP_HostKeyValidation/ValidHostKey" = { reason = "SFTP backend: backends other than S3 and a local directory are not in v1 (docs/PLAN.md section 1)." }
 "TestReplicaClient_SFTP_WriteLTXFileAtomic" = { reason = "SFTP backend: backends other than S3 and a local directory are not in v1 (docs/PLAN.md section 1)." }
-"TestReplicaClient_TimestampPreservation" = { counterpart = ["lsr-store-fs::tests::conformance_cases::stamp_returns_the_committed_stamp", "lsr-store-s3::store-s3::store::cases::conformance_cases::stamp_returns_the_committed_stamp"] }
-"TestReplicaClient_WriteLTXFile" = { counterpart = ["lsr-store-fs::tests::commit_lands_where_go_looks_with_the_stamp_as_mtime", "lsr-store-s3::store-s3::store::cases::conformance_cases::chunks_concatenate_and_stamp_survives"] }
+"TestReplicaClient_TimestampPreservation" = { counterpart = ["lsr-store-fs::tests::conformance_cases::created_at_returns_the_committed_created_at", "lsr-store-s3::store-s3::store::cases::conformance_cases::created_at_returns_the_committed_created_at"] }
+"TestReplicaClient_WriteLTXFile" = { counterpart = ["lsr-store-fs::tests::commit_lands_where_go_looks_with_the_created_at_as_mtime", "lsr-store-s3::store-s3::store::cases::conformance_cases::chunks_concatenate_and_created_at_survives"] }
 
 ["litestream/replica_internal_test.go"]
 "TestApplyLTXFile_ChangeCounter" = { reason = "Restore -follow (a continuously updated local read replica and its TXID file) is a read replica, which is not in v1 (docs/PLAN.md section 1: the Go VFS stays in use for reading)." }
@@ -911,13 +911,13 @@
 "TestReplica_Restore_OpensPlanConcurrently" = { reason = "Go-only: opening every planned file concurrently. Rust restores read files one bounded range at a time (docs/PLAN.md phase 1, restore executor; AGENTS.md: no parallelism without a measurement)." }
 "TestReplica_Restore_RemovesTempFileOnFailure" = { counterpart = "lsr-local::tests::a_failed_restore_leaves_no_target_and_no_scratch" }
 "TestReplica_Sync" = { counterpart = "lsr-compat::compat::live_source::live_sync_chain_restores" }
-"TestReplica_TimeBounds" = { reason = "Go-only helper: Replica.TimeBounds computes a replica's oldest and newest stamps for restore -timestamp. Rust's as-of planner answers the restore question directly (lsr-core::plan_lazy plan_as_of_equals_the_exact_planner)." }
-"TestReplica_TimeBounds/ErrorOnLevel" = { reason = "Go-only helper: Replica.TimeBounds computes a replica's oldest and newest stamps for restore -timestamp. Rust's as-of planner answers the restore question directly (lsr-core::plan_lazy plan_as_of_equals_the_exact_planner)." }
-"TestReplica_TimeBounds/Level0Only" = { reason = "Go-only helper: Replica.TimeBounds computes a replica's oldest and newest stamps for restore -timestamp. Rust's as-of planner answers the restore question directly (lsr-core::plan_lazy plan_as_of_equals_the_exact_planner)." }
-"TestReplica_TimeBounds/MultipleCompactionLevels" = { reason = "Go-only helper: Replica.TimeBounds computes a replica's oldest and newest stamps for restore -timestamp. Rust's as-of planner answers the restore question directly (lsr-core::plan_lazy plan_as_of_equals_the_exact_planner)." }
-"TestReplica_TimeBounds/NoFiles" = { reason = "Go-only helper: Replica.TimeBounds computes a replica's oldest and newest stamps for restore -timestamp. Rust's as-of planner answers the restore question directly (lsr-core::plan_lazy plan_as_of_equals_the_exact_planner)." }
-"TestReplica_TimeBounds/SnapshotAndLevel0" = { reason = "Go-only helper: Replica.TimeBounds computes a replica's oldest and newest stamps for restore -timestamp. Rust's as-of planner answers the restore question directly (lsr-core::plan_lazy plan_as_of_equals_the_exact_planner)." }
-"TestReplica_TimeBounds/SnapshotOnly" = { reason = "Go-only helper: Replica.TimeBounds computes a replica's oldest and newest stamps for restore -timestamp. Rust's as-of planner answers the restore question directly (lsr-core::plan_lazy plan_as_of_equals_the_exact_planner)." }
+"TestReplica_TimeBounds" = { reason = "Go-only helper: Replica.TimeBounds computes a replica's oldest and newest created-at times for restore -timestamp. Rust's as-of planner answers the restore question directly (lsr-core::plan_lazy plan_as_of_equals_the_exact_planner)." }
+"TestReplica_TimeBounds/ErrorOnLevel" = { reason = "Go-only helper: Replica.TimeBounds computes a replica's oldest and newest created-at times for restore -timestamp. Rust's as-of planner answers the restore question directly (lsr-core::plan_lazy plan_as_of_equals_the_exact_planner)." }
+"TestReplica_TimeBounds/Level0Only" = { reason = "Go-only helper: Replica.TimeBounds computes a replica's oldest and newest created-at times for restore -timestamp. Rust's as-of planner answers the restore question directly (lsr-core::plan_lazy plan_as_of_equals_the_exact_planner)." }
+"TestReplica_TimeBounds/MultipleCompactionLevels" = { reason = "Go-only helper: Replica.TimeBounds computes a replica's oldest and newest created-at times for restore -timestamp. Rust's as-of planner answers the restore question directly (lsr-core::plan_lazy plan_as_of_equals_the_exact_planner)." }
+"TestReplica_TimeBounds/NoFiles" = { reason = "Go-only helper: Replica.TimeBounds computes a replica's oldest and newest created-at times for restore -timestamp. Rust's as-of planner answers the restore question directly (lsr-core::plan_lazy plan_as_of_equals_the_exact_planner)." }
+"TestReplica_TimeBounds/SnapshotAndLevel0" = { reason = "Go-only helper: Replica.TimeBounds computes a replica's oldest and newest created-at times for restore -timestamp. Rust's as-of planner answers the restore question directly (lsr-core::plan_lazy plan_as_of_equals_the_exact_planner)." }
+"TestReplica_TimeBounds/SnapshotOnly" = { reason = "Go-only helper: Replica.TimeBounds computes a replica's oldest and newest created-at times for restore -timestamp. Rust's as-of planner answers the restore question directly (lsr-core::plan_lazy plan_as_of_equals_the_exact_planner)." }
 "TestReplica_ValidateLevel" = { counterpart = "lsr-core::verify::tests::a_clean_replica_has_no_findings_at_either_depth" }
 "TestReplica_ValidateLevel/EmptyLevel" = { counterpart = "lsr-core::verify::tests::an_empty_replica_has_no_finding_but_is_not_restorable" }
 "TestReplica_ValidateLevel/GapDetected" = { counterpart = "lsr-core::verify::tests::a_hole_after_the_newest_snapshot_is_a_gap_at_the_tip" }
@@ -1005,7 +1005,7 @@
 "TestS3ProviderDefaults" = { counterpart = ["lsr-store-s3::config::tests::tigris_gets_its_part_size", "lsr-store-s3::request::tests::provider_headers_and_no_checksum_headers"] }
 "TestS3ProviderDefaults_QueryParamOverrides" = { counterpart = "lsr-cli::bin/lsr::args::tests::a_flag_overrides_the_url_query" }
 "TestS3ProviderDefaults_QueryParamOverrides/ForcePathStyle_ExplicitFalse" = { counterpart = "lsr-config::config::s3url::reads_the_documented_form" }
-"TestS3ProviderDefaults_QueryParamOverrides/RequireMD5_ExplicitTrue_Tigris" = { counterpart = "lsr-store-s3::request::tests::put_carries_length_md5_and_stamp" }
+"TestS3ProviderDefaults_QueryParamOverrides/RequireMD5_ExplicitTrue_Tigris" = { counterpart = "lsr-store-s3::request::tests::put_carries_length_md5_and_created_at" }
 "TestS3ProviderDefaults_QueryParamOverrides/SignPayload_ExplicitFalse" = { counterpart = "lsr-config::config::map::no_effect_query_keys_are_noted" }
 
 ["litestream/s3/leaser_test.go"]
@@ -1108,19 +1108,19 @@
 "TestReplicaClient_SignedPayload_CustomEndpoint_NoChunkedEncoding" = { counterpart = "lsr-store-s3::request::tests::provider_headers_and_no_checksum_headers" }
 "TestReplicaClient_StorageClassHeader" = { reason = "A storage class header is a Go store option v1 does not offer: lsr-store-s3's configuration is endpoint, region, path style and part size (crates/store-s3/src/config.rs)." }
 "TestReplicaClient_TigrisConsistentHeader" = { counterpart = "lsr-store-s3::request::tests::provider_headers_and_no_checksum_headers" }
-"TestReplicaClient_UnsignedPayload_NoChunkedEncoding" = { counterpart = "lsr-store-s3::request::tests::put_carries_length_md5_and_stamp" }
+"TestReplicaClient_UnsignedPayload_NoChunkedEncoding" = { counterpart = "lsr-store-s3::request::tests::put_carries_length_md5_and_created_at" }
 "TestReplicaClient_UploaderConfiguration" = { reason = "Go-only: configuration of the AWS SDK for Go (its retryer, uploader manager, checksum middleware or HTTP client). lsr-store-s3 signs its own requests with rusty-s3 over ureq or reqwest and has no SDK to configure." }
 "TestReplicaClient_UploaderConfiguration/CustomPartSize" = { counterpart = "lsr-config::config::s3url::reads_the_documented_form" }
 "TestReplicaClient_UploaderConfiguration/DefaultConfiguration" = { reason = "Go-only: configuration of the AWS SDK for Go (its retryer, uploader manager, checksum middleware or HTTP client). lsr-store-s3 signs its own requests with rusty-s3 over ureq or reqwest and has no SDK to configure." }
-"TestReplicaClient_WriteLTXFile_MultipartParamParity" = { counterpart = "lsr-store-s3::store-s3::store::cases::multipart_stamp_is_the_commit_stamp" }
+"TestReplicaClient_WriteLTXFile_MultipartParamParity" = { counterpart = "lsr-store-s3::store-s3::store::cases::multipart_created_at_is_the_commit_created_at" }
 "TestReplicaClient_WriteLTXFile_PartSizeBelowMinimum" = { counterpart = "lsr-store-s3::config::tests::part_size_has_a_floor" }
-"TestReplicaClient_WriteLTXFile_PutObjectContentMD5" = { counterpart = ["lsr-store-s3::request::tests::put_carries_length_md5_and_stamp", "lsr-store-s3::store-s3::minio::wrong_content_md5_is_refused_by_minio"] }
-"TestReplicaClient_WriteLTXFile_SinglePutKnownSize" = { counterpart = "lsr-store-s3::request::tests::put_carries_length_md5_and_stamp" }
+"TestReplicaClient_WriteLTXFile_PutObjectContentMD5" = { counterpart = ["lsr-store-s3::request::tests::put_carries_length_md5_and_created_at", "lsr-store-s3::store-s3::minio::wrong_content_md5_is_refused_by_minio"] }
+"TestReplicaClient_WriteLTXFile_SinglePutKnownSize" = { counterpart = "lsr-store-s3::request::tests::put_carries_length_md5_and_created_at" }
 "TestReplicaClient_WriteLTXFile_SinglePutRetries" = { counterpart = "lsr-store-s3::store-s3::store::cases::throttle_then_success_under_retrying" }
 "TestReplicaClient_WriteLTXFile_SmallUploadAllocations" = { counterpart = "lsr-store-s3::store-s3::store::cases::memory_is_at_most_the_concurrency_in_parts" }
 "TestReplicaClient_WriteLTXFile_SmallUploadAllocations/KnownSizeFile" = { counterpart = "lsr-store-s3::store-s3::store::cases::memory_is_at_most_the_concurrency_in_parts" }
 "TestReplicaClient_WriteLTXFile_SmallUploadAllocations/UnknownSizeStream" = { counterpart = "lsr-store-s3::store-s3::store::cases::memory_is_at_most_the_concurrency_in_parts" }
-"TestReplicaClient_WriteLTXFile_StreamLargeMultipartRoundTrip" = { counterpart = "lsr-store-s3::store-s3::store::cases::multipart_round_trip_keeps_bytes_and_stamp" }
+"TestReplicaClient_WriteLTXFile_StreamLargeMultipartRoundTrip" = { counterpart = "lsr-store-s3::store-s3::store::cases::multipart_round_trip_keeps_bytes_and_created_at" }
 "TestReplicaClient_WriteLTXFile_StreamSmallSinglePut" = { counterpart = "lsr-store-s3::store-s3::store::cases::one_below_part_size_uses_put" }
 "TestTransportRetryer_RetriesProviderThrottleResponses" = { counterpart = ["lsr-store-s3::store-s3::faults::cases::status_408_is_transient", "lsr-store-s3::classify::tests::classify_success_retry_and_throttle"] }
 "TestTransportRetryer_SurvivesSustainedFailures" = { counterpart = ["lsr-core::retry::tests::bounds_double_then_stop_at_the_cap", "lsr-core::actor::tests::retry_backs_off_per_lane"] }

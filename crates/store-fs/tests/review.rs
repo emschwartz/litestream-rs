@@ -90,20 +90,20 @@ mod review {
         let store = FsStore::new(dir.path());
         let target = key(0, 1, 1);
         put(&store, target, b"x");
-        let stamp = UNIX_EPOCH
+        let created_at = UNIX_EPOCH
             .checked_sub(Duration::from_micros(1_500))
             .unwrap();
         File::options()
             .write(true)
             .open(store.file_path(&target))
             .unwrap()
-            .set_modified(stamp)
+            .set_modified(created_at)
             .unwrap();
         let listing = block_on(store.list(Level::ZERO, None, PageLimit::MAX)).unwrap();
         let created = listing
             .files
             .first()
-            .map(|f| f.exact_stamp().unwrap().at().unix_millis());
+            .map(|f| f.created_at().unwrap().at().unix_millis());
         assert_eq!(created, Some(-2));
     }
 

@@ -35,19 +35,19 @@ pub enum StagedEditError {
     /// The store refused.
     #[error(transparent)]
     Store(#[from] StoreError),
-    /// The listing gave no exact stamp, so a rewrite would lose the file's
+    /// The listing gave no exact created-at time, so a rewrite would lose the file's
     /// creation time. The sim's stores always give one: this is the harness
     /// broken, not a fault to tolerate.
-    #[error("{0} was listed without an exact stamp")]
-    NoStamp(FileKey),
+    #[error("{0} was listed without an exact created-at time")]
+    NoCreatedAt(FileKey),
 }
 
-/// The exact stamp the listing carried, so a rewrite keeps the file's
+/// The exact created-at time the listing carried, so a rewrite keeps the file's
 /// creation time.
 fn listed_at(info: &FileInfo) -> Result<Timestamp, StagedEditError> {
-    info.exact_stamp()
-        .map(|stamp| stamp.at())
-        .ok_or(StagedEditError::NoStamp(info.key))
+    info.created_at()
+        .map(|created_at| created_at.at())
+        .ok_or(StagedEditError::NoCreatedAt(info.key))
 }
 
 fn is_full_image(bytes: &[u8]) -> bool {
@@ -286,8 +286,8 @@ impl World {
     /// rules after the tick, when the engine may have changed them.
     pub fn arm_commit_in_tick(&self, pages: Vec<(PageNo, Vec<u8>)>, db_size: u32) {
         let (remote, staging) = (self.remote_tap.clone(), self.staging_tap.clone());
-        let stamp = Box::new(move || (remote.len(), staging.len()));
-        self.sqlite.arm_commit_in_tick(pages, db_size, stamp);
+        let created_at = Box::new(move || (remote.len(), staging.len()));
+        self.sqlite.arm_commit_in_tick(pages, db_size, created_at);
     }
 
     /// The app's commit inside the last tick, once: see [`World::arm_commit_in_tick`].
@@ -299,7 +299,7 @@ impl World {
     /// disarms it.
     fn record_commit_in_tick(&mut self) -> Option<CommittedInTick> {
         let done = self.sqlite.take_commit_in_tick()?;
-        let (remote_at, staged_from) = done.stamp;
+        let (remote_at, staged_from) = done.created_at;
         self.retire_generation(done.app.salts);
         let id = self
             .model
@@ -501,8 +501,8 @@ impl World {
     /// Replaces the staging directory with `copy`, as a restored backup would.
     ///
     /// # Errors
-    /// The store's error when it cannot delete or write; [`StagedEditError::NoStamp`]
-    /// when a saved file has no exact stamp.
+    /// The store's error when it cannot delete or write; [`StagedEditError::NoCreatedAt`]
+    /// when a saved file has no exact created-at time.
     pub fn replace_staging(&self, copy: &StagedCopy) -> Result<(), StagedEditError> {
         self.wipe_staging()?;
         for (info, bytes) in &copy.0 {
@@ -611,7 +611,7 @@ impl World {
     ///
     /// # Errors
     /// The store's error when it cannot list, read or write;
-    /// [`StagedEditError::NoStamp`] when the file has no exact stamp.
+    /// [`StagedEditError::NoCreatedAt`] when the file has no exact created-at time.
     pub fn edit_newest_staged(
         &self,
         edit: impl FnOnce(&mut Vec<u8>),

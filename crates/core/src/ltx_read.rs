@@ -149,7 +149,7 @@ impl LtxRead {
     }
 
     /// A read whose first chunk, from offset 0 and asked as `len` bytes, the
-    /// caller already holds (a read that also returned the object's stamp, or
+    /// caller already holds (a read that also returned the object's created-at time, or
     /// a header probe).
     pub(crate) fn with_first(key: FileKey, len: ReadLen, first: Vec<u8>) -> Self {
         let mut read = Self::new(key, len);

@@ -10,7 +10,7 @@
 //!
 //! What is here:
 //! - the replica's layout and the store contract (`layout`, `store`,
-//!   `inventory`, `stamps`);
+//!   `inventory`, `resolved`);
 //! - reading a replica: the restore planner and executor and the verifier
 //!   (`plan`, `restore`, `verify`);
 //! - writing one: position recovery, the sync step, the checkpoint policy
@@ -26,6 +26,7 @@ mod checkpoint;
 mod compact;
 #[cfg(any(test, feature = "testing"))]
 pub mod conformance;
+mod created_at;
 mod env;
 mod fault;
 mod host;
@@ -42,7 +43,6 @@ mod restore;
 mod retry;
 mod snapshot;
 mod source;
-mod stamps;
 mod store;
 mod sync;
 mod upload;
@@ -58,6 +58,10 @@ pub use checkpoint::{
 pub use compact::{
     CompactError, Compacted, CompactionInputs, InputFault, InputsError, MAX_INPUTS, compact,
 };
+pub use created_at::{
+    MAX_AHEAD, Need, Resolve, ResolveError, Resolved, ResolvedCreatedAt, Step as CreatedAtStep,
+    resolve, resolve_counted,
+};
 pub use env::{Clock, Entropy, Sleeper};
 #[cfg(any(test, feature = "testing"))]
 pub use env::{FakeClock, RecordingSleeper, SeededEntropy};
@@ -70,8 +74,8 @@ pub use host::{
 };
 pub use inventory::{Inventory, InventoryError, is_snapshot_start};
 pub use layout::{
-    FileInfo, FileKey, Level, ListedStamp, ParseKeyError, RangeSide, RealStamp, StampOrigin,
-    StoredStamp, cmp_range, file_name, is_scratch_name, parse_file_name,
+    CreatedAt, CreatedAtSource, FileInfo, FileKey, Level, ListedTime, NonZeroCreatedAt,
+    ParseKeyError, RangeSide, cmp_range, file_name, is_scratch_name, parse_file_name,
 };
 pub use maintain::{
     CompactJob, ConfigError, DeleteJob, Due, Hold, Interval, IntervalError, Job, JobError,
@@ -106,10 +110,6 @@ pub use source::{
 #[cfg(any(test, feature = "testing"))]
 pub use source::{
     CheckpointCall, CheckpointEffect, CheckpointScript, FakeCheckpointer, FakeDb, FakeWal, SourceOp,
-};
-pub use stamps::{
-    MAX_AHEAD, Need, Resolve, ResolveError, Resolved, Stamps, Step as StampStep, resolve,
-    resolve_counted,
 };
 pub use store::{
     BatchKind, CorruptCause, ListAt, Listing, ObjectStore, PageLimit, PartNumber, ReadAt, ReadLen,

@@ -1,10 +1,10 @@
 //! Request counts over a writer-shaped replica of 10^4 files.
 //!
 //! The fixture is committed through the store into FakeS3, which lists
-//! LastModified only, so every exact stamp an operation needs is a HEAD and the
+//! LastModified only, so every exact created-at time an operation needs is a HEAD and the
 //! wire shows it. Layout: 9000 transactions, one per second; level 1 holds one
 //! file per transaction, level 2 files of 15, level 3 files of 100, level 0 the
-//! newest 300, and eight snapshots (every 1000 transactions, stamped 5 s after
+//! newest 300, and eight snapshots (every 1000 transactions, recorded as created 5 s after
 //! their last). Nothing here asserts a wall-clock time. The table that
 //! [request_count_table] prints is the record: LIST, HEAD and GET per
 //! operation, and what a listing that read a HEAD per file would have sent.
@@ -27,8 +27,8 @@ mod cases {
     use lsr_core::conformance::block_on;
     use lsr_core::{
         ContiguousChain, Depth, Did, Due, FakeClock, FileKey, Inventory, Job, L0Retention, Level,
-        MaintainState, Maintenance, MemSink, MemStore, ObjectStore, PlanOutcome, RestoreError,
-        RestoreTarget, Restored, Stamps, TipView, Upload, UploadState, due, plan_reference,
+        MaintainState, Maintenance, MemSink, MemStore, ObjectStore, PlanOutcome, ResolvedCreatedAt,
+        RestoreError, RestoreTarget, Restored, TipView, Upload, UploadState, due, plan_reference,
         resolve, restore, upload_next, verify,
     };
     use lsr_ltx::{Encoder, Header, HeaderFields, PageNo, PageSize, Timestamp, Txid, TxidRange};
@@ -46,13 +46,13 @@ mod cases {
     const FILES: usize = 9998;
     const PAGE_BYTES: u32 = 512;
 
-    /// Transaction n's stamp: one second apart.
-    fn stamp(n: u64) -> Timestamp {
+    /// Transaction n's created-at time: one second apart.
+    fn created_at(n: u64) -> Timestamp {
         Timestamp::from_unix_millis(EPOCH_MS + i64::try_from(n).unwrap() * 1000)
     }
 
-    fn snapshot_stamp(max: u64) -> Timestamp {
-        Timestamp::from_unix_millis(stamp(max).unix_millis() + SNAPSHOT_LAG_MS)
+    fn snapshot_created_at(max: u64) -> Timestamp {
+        Timestamp::from_unix_millis(created_at(max).unix_millis() + SNAPSHOT_LAG_MS)
     }
 
     /// The page every file ends with: its last transaction's seed repeated.
@@ -64,32 +64,32 @@ mod cases {
         Txid::new(n).unwrap()
     }
 
-    /// One writer-shaped replica file: level, first and last transaction, stored stamp.
+    /// One writer-shaped replica file: level, first and last transaction, stored created-at time.
     type Planned = (u8, u64, u64, Timestamp);
 
     fn layout() -> Vec<Planned> {
         let mut files = Vec::new();
         for n in TXNS - LEVEL_ZERO_FILES + 1..=TXNS {
-            files.push((0, n, n, stamp(n)));
+            files.push((0, n, n, created_at(n)));
         }
         for n in 1..=TXNS {
-            files.push((1, n, n, stamp(n)));
+            files.push((1, n, n, created_at(n)));
         }
         for j in 0..TXNS / 15 {
-            files.push((2, 15 * j + 1, 15 * j + 15, stamp(15 * j + 15)));
+            files.push((2, 15 * j + 1, 15 * j + 15, created_at(15 * j + 15)));
         }
         for j in 0..TXNS / 100 {
-            files.push((3, 100 * j + 1, 100 * j + 100, stamp(100 * j + 100)));
+            files.push((3, 100 * j + 1, 100 * j + 100, created_at(100 * j + 100)));
         }
         for k in 1..=TXNS / SNAPSHOT_EVERY - 1 {
             let max = k * SNAPSHOT_EVERY;
-            files.push((9, 1, max, snapshot_stamp(max)));
+            files.push((9, 1, max, snapshot_created_at(max)));
         }
         files
     }
 
     /// A one-page database whose only page ends as seed(max). Untracked, so no
-    /// checksum chain; the header stamp equals the stored one, as the writer's does.
+    /// checksum chain; the header created-at time equals the stored one, as the writer's does.
     fn ltx_bytes(min: u64, max: u64, at: Timestamp) -> Vec<u8> {
         let page_size = PageSize::new(PAGE_BYTES).unwrap();
         let header = Header::new(HeaderFields {
@@ -143,7 +143,7 @@ mod cases {
             rig
         }
 
-        /// A store with clean stamp stats over the same bucket.
+        /// A store with clean created-at time stats over the same bucket.
         fn store(&self) -> Store {
             S3Store::with_transport(
                 config(),
@@ -161,11 +161,17 @@ mod cases {
             (out, Counts::of(seen.get(mark..).unwrap_or_default()))
         }
 
-        /// Every file stamped, for the reference planner: 10^4 HEADs, uncounted.
-        fn stamped_inventory(&self) -> Inventory {
+        /// Every file with its created-at time, for the reference planner: 10^4 HEADs, uncounted.
+        fn inventory_with_created_at(&self) -> Inventory {
             let store = self.store();
-            block_on(async { Inventory::load(&store).await.unwrap().stamped(&store).await })
-                .unwrap()
+            block_on(async {
+                Inventory::load(&store)
+                    .await
+                    .unwrap()
+                    .with_created_at(&store)
+                    .await
+            })
+            .unwrap()
         }
     }
 
@@ -239,7 +245,7 @@ mod cases {
         assert_page(&sink, restored.reached());
         assert_eq!(
             counts.head,
-            usize::try_from(restored.stamps_read()).unwrap(),
+            usize::try_from(restored.created_at_read()).unwrap(),
             "{what}"
         );
         Row {
@@ -251,7 +257,7 @@ mod cases {
     }
 
     fn now_ms() -> i64 {
-        stamp(TXNS).unix_millis() + 500
+        created_at(TXNS).unix_millis() + 500
     }
 
     fn instant_back(age: Duration) -> Timestamp {
@@ -298,7 +304,7 @@ mod cases {
 
     /// The as-of rows: back by each age, then the oldest snapshot's instant.
     fn as_of_rows(rig: &Rig) -> Vec<Row> {
-        let inventory = rig.stamped_inventory();
+        let inventory = rig.inventory_with_created_at();
         let s = starts_at_one(&inventory);
         let minute = Duration::from_secs(60);
         let cases = [
@@ -319,7 +325,7 @@ mod cases {
             ),
             (
                 "restore AsOf at the oldest snapshot",
-                Timestamp::from_unix_millis(snapshot_stamp(SNAPSHOT_EVERY).unix_millis() + 1),
+                Timestamp::from_unix_millis(snapshot_created_at(SNAPSHOT_EVERY).unix_millis() + 1),
                 SNAPSHOT_EVERY + 5,
             ),
         ];
@@ -421,27 +427,27 @@ mod cases {
         let store = rig.store();
         let (inventory, plain) = rig.counted(|| block_on(Inventory::load(&store)).unwrap());
         assert_eq!(inventory.files().len(), FILES);
-        let (stamped, counts) = rig.counted(|| {
+        let (with_created_at, counts) = rig.counted(|| {
             block_on(async {
                 Inventory::load(&store)
                     .await
                     .unwrap()
-                    .stamped(&store)
+                    .with_created_at(&store)
                     .await
                     .unwrap()
             })
         });
-        assert_eq!(stamped.files().len(), FILES);
-        assert_eq!(store.stamp_stats().fell_back, 0);
+        assert_eq!(with_created_at.files().len(), FILES);
+        assert_eq!(store.created_at_stats().fell_back, 0);
         vec![
             Row {
                 what: "lsr files".to_owned(),
                 counts: plain,
                 per_file_heads: FILES,
-                note: "listed times, no stamp read".to_owned(),
+                note: "listed times, no created-at time read".to_owned(),
             },
             Row {
-                what: "lsr files --stamps".to_owned(),
+                what: "lsr files --created-at".to_owned(),
                 counts,
                 per_file_heads: FILES,
                 note: "one HEAD per file, by request".to_owned(),
@@ -464,14 +470,14 @@ mod cases {
             block_on(async {
                 let inventory = Inventory::load(&store).await.unwrap();
                 let mut state = MaintainState::default();
-                let mut step = |stamps: &Stamps| {
+                let mut step = |resolved: &ResolvedCreatedAt| {
                     due(
                         &inventory,
                         now,
                         config,
                         Some(txid(TXNS)),
                         &mut state,
-                        stamps,
+                        resolved,
                     )
                 };
                 resolve(&store, &mut step).await.unwrap()
@@ -479,14 +485,14 @@ mod cases {
         });
         assert_eq!(
             counts.head,
-            usize::try_from(resolved.stamps_read).unwrap(),
+            usize::try_from(resolved.created_at_read).unwrap(),
             "{what}"
         );
         let row = Row {
             what: what.to_owned(),
             counts,
             per_file_heads: FILES,
-            note: format!("{} stamps read", resolved.stamps_read),
+            note: format!("{} created-at times read", resolved.created_at_read),
         };
         (row, resolved.value)
     }
@@ -670,7 +676,7 @@ mod cases {
     }
 
     #[test]
-    fn files_reads_no_stamp_unless_asked() {
+    fn files_reads_no_created_at_unless_asked() {
         let rig = Rig::build();
         let rows = files_rows(&rig);
         rows.iter().for_each(Row::print);

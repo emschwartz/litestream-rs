@@ -10,7 +10,7 @@ use lsr_ltx::{Timestamp, TxidRange};
 
 use super::*;
 use crate::MemStore;
-use crate::layout::StoredStamp;
+use crate::layout::CreatedAt;
 use crate::store::Listing;
 
 /// The one promise a [`Flawed`] store breaks.
@@ -19,9 +19,9 @@ enum Flaw {
     /// Lists what it holds but reads back no bytes, as a store reading from a
     /// copy that lags its listing would.
     ReadsEmpty,
-    /// Lists every file as exact with a stamp one millisecond off the
+    /// Lists every file as exact with a created-at time one millisecond off the
     /// committed one.
-    ListsAnotherStamp,
+    ListsAnotherCreatedAt,
 }
 
 /// A [`MemStore`] with one [`Flaw`]; everything else is the model's.
@@ -35,19 +35,19 @@ impl Flawed {
     fn shown(&self, bytes: Vec<u8>) -> Vec<u8> {
         match self.flaw {
             Flaw::ReadsEmpty => Vec::new(),
-            Flaw::ListsAnotherStamp => bytes,
+            Flaw::ListsAnotherCreatedAt => bytes,
         }
     }
 
     fn relist(&self, listing: Listing) -> Listing {
         match self.flaw {
             Flaw::ReadsEmpty => listing,
-            Flaw::ListsAnotherStamp => Listing {
+            Flaw::ListsAnotherCreatedAt => Listing {
                 files: listing
                     .files
                     .into_iter()
                     .map(|file| FileInfo {
-                        listed: ListedStamp::Stored(StoredStamp::mtime(at(STAMP + 1))),
+                        listed: ListedTime::Created(CreatedAt::mtime(at(CREATED_AT + 1))),
                         ..file
                     })
                     .collect(),
@@ -73,17 +73,17 @@ impl ObjectStore for Flawed {
         Ok(self.shown(self.inner.read(key, offset, len).await?))
     }
 
-    async fn stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
-        self.inner.stamp(file).await
+    async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
+        self.inner.created_at(file).await
     }
 
-    async fn read_with_stamp(
+    async fn read_with_created_at(
         &self,
         file: &FileInfo,
         len: ReadLen,
-    ) -> Result<(Vec<u8>, StoredStamp), StoreError> {
-        let (bytes, stamp) = self.inner.read_with_stamp(file, len).await?;
-        Ok((self.shown(bytes), stamp))
+    ) -> Result<(Vec<u8>, CreatedAt), StoreError> {
+        let (bytes, created_at) = self.inner.read_with_created_at(file, len).await?;
+        Ok((self.shown(bytes), created_at))
     }
 
     async fn begin_upload(
@@ -171,10 +171,10 @@ fn a_store_that_reads_back_nothing_after_a_late_failed_commit_fails_the_suite() 
 }
 
 #[test]
-fn a_store_that_lists_another_exact_stamp_fails_the_suite() {
-    let harness = FlawedHarness::new(Flaw::ListsAnotherStamp);
-    let message = failed(block_on(listed_stamp_is_exact_or_marked(&harness)));
-    assert!(message.contains("listed with Stored"), "{message}");
+fn a_store_that_lists_another_exact_created_at_fails_the_suite() {
+    let harness = FlawedHarness::new(Flaw::ListsAnotherCreatedAt);
+    let message = failed(block_on(listed_created_at_is_exact_or_marked(&harness)));
+    assert!(message.contains("listed with Created"), "{message}");
 }
 
 #[test]
@@ -191,7 +191,7 @@ fn the_mem_harness_injects_a_late_commit_failure() {
     block_on(async {
         let mut upload = harness
             .store()
-            .begin_upload(&key(0, 1, 1)?, at(STAMP))
+            .begin_upload(&key(0, 1, 1)?, at(CREATED_AT))
             .await?;
         upload.write(b"x").await?;
         upload.commit().await.unwrap_err();
@@ -209,7 +209,7 @@ fn the_last_modified_harness_lists_last_modified() {
     })
     .unwrap();
     assert!(
-        matches!(listed.listed, ListedStamp::LastModified(_)),
+        matches!(listed.listed, ListedTime::LastModified(_)),
         "{:?}",
         listed.listed
     );

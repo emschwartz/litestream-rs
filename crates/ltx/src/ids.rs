@@ -850,8 +850,8 @@ mod tests {
     proptest::proptest! {
         #[test]
         fn every_millisecond_round_trips(millis in -62_167_219_200_000_i64..=253_402_300_799_999) {
-            let stamp = Timestamp::from_unix_millis(millis);
-            proptest::prop_assert_eq!(Timestamp::parse_rfc3339(&stamp.to_string()), Ok(stamp));
+            let created_at = Timestamp::from_unix_millis(millis);
+            proptest::prop_assert_eq!(Timestamp::parse_rfc3339(&created_at.to_string()), Ok(created_at));
         }
 
         #[test]
@@ -931,7 +931,7 @@ mod tests {
         assert_eq!(
             t.checked_sub(Duration::from_micros(1_999)),
             Some(Timestamp::from_unix_millis(9_999)),
-            "a part millisecond is dropped, as the stored stamps are whole"
+            "a part millisecond is dropped, as the stored created-at times are whole"
         );
         assert_eq!(
             t.checked_sub(ms(20_000)).map(Timestamp::unix_millis),

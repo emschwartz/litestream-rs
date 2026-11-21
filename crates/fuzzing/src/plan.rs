@@ -1,13 +1,13 @@
 //! The `plan` target: the planner's answer must be a valid chain or a reason.
 
 use lsr_core::{
-    AsOfPlanner, ContiguousChain, FileInfo, FileKey, Inventory, Level, PlanOutcome, Resolve,
-    RestoreTarget, StampStep, Stamps, plan_reference as plan_restore,
+    AsOfPlanner, ContiguousChain, CreatedAtStep, FileInfo, FileKey, Inventory, Level, PlanOutcome,
+    Resolve, ResolvedCreatedAt, RestoreTarget, plan_reference as plan_restore,
 };
 use lsr_ltx::{Timestamp, Txid, TxidRange};
 
 use crate::bytes::{Reader, violation};
-use lsr_core::{ListedStamp, StoredStamp};
+use lsr_core::{CreatedAt, ListedTime};
 
 /// Bytes of one file record in the input.
 pub const PLAN_RECORD_LEN: usize = 4;
@@ -57,9 +57,9 @@ pub fn plan_input(data: &[u8]) -> Option<(Inventory, RestoreTarget)> {
         files.push(FileInfo {
             key: FileKey::new(level, range),
             size: 0,
-            listed: ListedStamp::Stored(StoredStamp::mtime(Timestamp::from_unix_millis(
-                i64::from(created),
-            ))),
+            listed: ListedTime::Created(CreatedAt::mtime(Timestamp::from_unix_millis(i64::from(
+                created,
+            )))),
         });
     }
     // A key listed twice with different details is not an inventory (see
@@ -73,9 +73,9 @@ fn eligible(info: &FileInfo, target: RestoreTarget) -> bool {
     match target {
         RestoreTarget::Latest => true,
         RestoreTarget::Txid(wanted) => info.key.range().max() <= wanted,
-        RestoreTarget::AsOf(instant) => {
-            info.exact_stamp().is_some_and(|stamp| stamp.at() < instant)
-        }
+        RestoreTarget::AsOf(instant) => info
+            .created_at()
+            .is_some_and(|created_at| created_at.at() < instant),
     }
 }
 
@@ -174,7 +174,9 @@ fn check_inside_file(
     let past = reach
         .next()
         .is_some_and(|one_past| file.range().max() > one_past);
-    if info.exact_stamp().is_none_or(|stamp| stamp.at() < instant)
+    if info
+        .created_at()
+        .is_none_or(|created_at| created_at.at() < instant)
         || !links
         || !past
         || chain.files().iter().any(|f| f.key == file)
@@ -241,16 +243,16 @@ pub fn plan(data: &[u8]) {
     check_lazy(&inventory, target, &outcome);
 }
 
-/// Every stamp here is exact, so the as-of planner in query form decides on
+/// Every created-at time here is exact, so the as-of planner in query form decides on
 /// its first advance, and decides what the exact planner did.
 fn check_lazy(inventory: &Inventory, target: RestoreTarget, outcome: &PlanOutcome) {
     let RestoreTarget::AsOf(instant) = target else {
         return;
     };
-    match AsOfPlanner::new(inventory, instant).advance(&Stamps::default()) {
+    match AsOfPlanner::new(inventory, instant).advance(&ResolvedCreatedAt::default()) {
         Resolve::Done(lazy) if lazy == *outcome => {}
         Resolve::Done(_) => violation("the as-of planner disagrees with plan"),
-        Resolve::Need(_) => violation("the as-of planner asked for an exact stamp"),
+        Resolve::Need(_) => violation("the as-of planner asked for an exact created-at time"),
     }
 }
 

@@ -49,8 +49,8 @@ fn staged_fixtures() -> Vec<Staged> {
         .collect()
 }
 
-/// The fixture's files in a bucket, each with its stored stamp unless `stamped` is false.
-fn bucket_of(staged: &Staged, stamped: bool) -> (FakeS3, Vec<FileInfo>) {
+/// The fixture's files in a bucket, each with its stored created-at time unless `with_created_at` is false.
+fn bucket_of(staged: &Staged, with_created_at: bool) -> (FakeS3, Vec<FileInfo>) {
     let dir = FsStore::new(staged.replica());
     let infos = block_on(Inventory::load(&dir)).unwrap().files().to_vec();
     let config = config();
@@ -61,9 +61,9 @@ fn bucket_of(staged: &Staged, stamped: bool) -> (FakeS3, Vec<FileInfo>) {
             .join("ltx")
             .join(info.key.level().to_string())
             .join(info.key.file_name());
-        let stamp = info.exact_stamp().unwrap().at().to_string();
-        let meta: &[(&str, &str)] = if stamped {
-            &[("x-amz-meta-litestream-timestamp", stamp.as_str())]
+        let created_at = info.created_at().unwrap().at().to_string();
+        let meta: &[(&str, &str)] = if with_created_at {
+            &[("x-amz-meta-litestream-timestamp", created_at.as_str())]
         } else {
             &[]
         };
@@ -76,11 +76,11 @@ fn bucket_of(staged: &Staged, stamped: bool) -> (FakeS3, Vec<FileInfo>) {
     (fake, infos)
 }
 
-/// The files by key, size and time: the origin of a stamp differs by store.
+/// The files by key, size and time: the origin of a created-at time differs by store.
 fn by_time(files: &[FileInfo]) -> Vec<(lsr_core::FileKey, u64, Option<Timestamp>)> {
     files
         .iter()
-        .map(|f| (f.key, f.size, f.exact_stamp().map(|s| s.at())))
+        .map(|f| (f.key, f.size, f.created_at().map(|s| s.at())))
         .collect()
 }
 
@@ -106,32 +106,36 @@ fn files_over_s3_list_what_the_directory_lists() {
         let (fake, infos) = bucket_of(&staged, true);
         let Done::Files {
             inventory,
-            stamp_fallbacks,
+            created_at_fallbacks,
             ..
         } = block_on(files_on_s3(&s3_store(fake), false, true)).unwrap()
         else {
             panic!("not files");
         };
         assert_eq!(by_time(inventory.files()), by_time(&infos));
-        assert_eq!(stamp_fallbacks, Some(0));
+        assert_eq!(created_at_fallbacks, Some(0));
     }
 }
 
 #[test]
-fn files_over_s3_count_every_stamp_taken_from_last_modified() {
+fn files_over_s3_count_every_created_at_taken_from_last_modified() {
     let staged = staged_fixtures().remove(0);
     let (fake, infos) = bucket_of(&staged, false);
     let Done::Files {
-        stamp_fallbacks, ..
+        created_at_fallbacks,
+        ..
     } = block_on(files_on_s3(&s3_store(fake), false, true)).unwrap()
     else {
         panic!("not files");
     };
-    assert_eq!(stamp_fallbacks, Some(u64::try_from(infos.len()).unwrap()));
+    assert_eq!(
+        created_at_fallbacks,
+        Some(u64::try_from(infos.len()).unwrap())
+    );
 }
 
 #[test]
-fn files_prints_listed_stamps_without_heads() {
+fn files_prints_listed_created_at_without_heads() {
     let staged = staged_fixtures().remove(0);
     let (fake, infos) = bucket_of(&staged, true);
     let wire = Arc::new(FaultTransport::new(fake));
@@ -148,19 +152,20 @@ fn files_prints_listed_stamps_without_heads() {
         .count();
     assert_eq!(heads, 0);
     let Done::Files {
-        stamp_fallbacks, ..
+        created_at_fallbacks,
+        ..
     } = &done
     else {
         panic!("not files");
     };
-    assert_eq!(*stamp_fallbacks, None);
+    assert_eq!(*created_at_fallbacks, None);
     let text = crate::render::done(&done);
     assert_eq!(text.matches("(listed)").count(), infos.len(), "{text}");
     assert!(!text.contains("LastModified"), "{text}");
 }
 
 #[test]
-fn files_with_stamps_sends_one_head_per_file() {
+fn files_with_created_at_sends_one_head_per_file() {
     let staged = staged_fixtures().remove(0);
     let (fake, infos) = bucket_of(&staged, true);
     let wire = Arc::new(FaultTransport::new(fake));
@@ -272,12 +277,12 @@ fn a_throttled_listing_is_retried() {
     assert_eq!(by_time(inventory.files()), by_time(&infos));
 }
 
-/// A dry run over a bucket without stored stamps reads the exact stamps an
+/// A dry run over a bucket without stored created-at times reads the exact created-at times an
 /// as-of plan needs, as the restore does, and names the chain the restore
 /// applies; it writes nothing.
 #[test]
 fn dry_run_over_s3_plans_what_the_restore_applies() {
-    let mut stamped = 0_u64;
+    let mut read_total = 0_u64;
     for fixture in all_fixtures().unwrap() {
         let manifest = Manifest::load(&fixture).unwrap();
         let staged = stage(&fixture, &manifest).unwrap();
@@ -294,14 +299,16 @@ fn dry_run_over_s3_plans_what_the_restore_applies() {
             match (planned, restored) {
                 (
                     Ok(Finished::Planned {
-                        chain, stamps_read, ..
+                        chain,
+                        created_at_read,
+                        ..
                     }),
                     Ok(Finished::Restored { restored, .. }),
                 ) => {
                     assert_eq!(chain.reaches(), restored.reached(), "{target:?}");
                     assert_eq!(chain.files().len(), restored.files(), "{target:?}");
-                    assert_eq!(stamps_read, restored.stamps_read(), "{target:?}");
-                    stamped += stamps_read;
+                    assert_eq!(created_at_read, restored.created_at_read(), "{target:?}");
+                    read_total += created_at_read;
                 }
                 (Err(plan), Err(done)) => assert_eq!(plan.to_string(), done.to_string()),
                 (plan, done) => panic!("{target:?}: dry run {plan:?}, restore {done:?}"),
@@ -311,7 +318,7 @@ fn dry_run_over_s3_plans_what_the_restore_applies() {
             }
         }
     }
-    assert!(stamped > 0, "an as-of target read stamps");
+    assert!(read_total > 0, "an as-of target read created-at times");
 }
 
 /// A publish that failed says whether the database is at the output: before the link it

@@ -95,10 +95,10 @@ pub struct OpCounters {
 pub struct StoreCounters {
     /// Listing pages.
     pub list: OpCounters,
-    /// Reads, with or without the stamp.
+    /// Reads, with or without the created-at time.
     pub read: OpCounters,
-    /// Stamp reads.
-    pub stamp: OpCounters,
+    /// Created-at time reads.
+    pub created_at: OpCounters,
     /// Uploads begun.
     pub begin_upload: OpCounters,
     /// Upload chunks written.
@@ -278,7 +278,7 @@ impl Health {
                 store: StoreCounters {
                     list: OpCounters::ZERO,
                     read: OpCounters::ZERO,
-                    stamp: OpCounters::ZERO,
+                    created_at: OpCounters::ZERO,
                     begin_upload: OpCounters::ZERO,
                     write: OpCounters::ZERO,
                     commit: OpCounters::ZERO,

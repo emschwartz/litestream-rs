@@ -82,7 +82,7 @@ fn the_database_before_any_commit_is_commit_zero() {
 }
 
 #[test]
-fn find_picks_the_newest_commit_made_by_the_stamp() {
+fn find_picks_the_newest_commit_made_by_the_created_at() {
     let mut model = Model::new(PageImage::from_bytes(ps(), &[]));
     let early = model.commit(&[(pgno(1), page(1))], 1, app(1), 2);
     model.on_power_loss(SALTS, 0);

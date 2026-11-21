@@ -229,7 +229,7 @@ pub const fn header_fields(
     }
 }
 
-/// The timestamp to stamp: `now`, but never before `prev`. Go uses `time.Now()`
+/// The timestamp to record as created: `now`, but never before `prev`. Go uses `time.Now()`
 /// unclamped (`db.go:2294`).
 #[must_use]
 pub fn clamp(prev: Option<Timestamp>, now: Timestamp) -> (Timestamp, Option<Clamped>) {
@@ -590,7 +590,7 @@ async fn run<R: Read + Seek, P: PageSource, L: ObjectStore>(
     let page_size = wal.header().page_size();
     let commit = commit_of(&scanned.map, db)?;
     let plan = plan_pages(&scanned.map, start.prev_commit, commit, page_size);
-    let header = stamp(&start, &scanned, wal, commit, cfg.node_id, now)?;
+    let header = created_at(&start, &scanned, wal, commit, cfg.node_id, now)?;
     let key = FileKey::new(Level::ZERO, TxidRange::single(start.txid));
     let (file, last_written) = stage(
         staging,
@@ -679,7 +679,7 @@ fn commit_of<P: PageSource>(map: &PageMap, db: &mut P) -> Result<NonZeroU32, Fau
 }
 
 /// The header of the file a scan calls for, with its clamped timestamp.
-fn stamp<R: Read + Seek>(
+fn created_at<R: Read + Seek>(
     start: &Start,
     scanned: &Scanned,
     wal: &WalReader<R>,

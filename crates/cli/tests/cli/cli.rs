@@ -453,12 +453,12 @@ fn files_json_agrees_with_the_inventory_and_text_lists_the_same() {
             assert_eq!(got["size"], json!(want.size), "{label}");
             assert_eq!(
                 got["created_at_ms"],
-                json!(want.exact_stamp().unwrap().at().unix_millis()),
+                json!(want.created_at().unwrap().at().unix_millis()),
                 "{label}"
             );
             assert_eq!(
                 got["created_at"],
-                json!(want.exact_stamp().unwrap().at().to_string()),
+                json!(want.created_at().unwrap().at().to_string()),
                 "{label}"
             );
         }
@@ -472,7 +472,7 @@ fn files_json_agrees_with_the_inventory_and_text_lists_the_same() {
                 first.key.level(),
                 first.key.file_name(),
                 first.size,
-                first.exact_stamp().unwrap().at()
+                first.created_at().unwrap().at()
             )),
             "{label}:\n{}",
             text.stdout

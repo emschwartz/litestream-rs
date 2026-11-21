@@ -16,7 +16,7 @@ use lsr_store_s3::{
     EtagCheck, S3Code, UploadId, check_etag, parse_complete, parse_create, parse_head, quoted_md5,
 };
 
-use crate::real::{self, RealHarness, STAMP_HEADER, Server, WallClock, at, body};
+use crate::real::{self, CREATED_AT_HEADER, RealHarness, Server, WallClock, at, body};
 
 fn server() -> Server {
     let var = |name: &str| {
@@ -60,7 +60,7 @@ fn obs_response(what: &str, r: &lsr_store_s3::HttpResponse) {
         "etag",
         "content-range",
         "content-length",
-        STAMP_HEADER,
+        CREATED_AT_HEADER,
         "date",
         "last-modified",
     ] {
@@ -79,10 +79,10 @@ fn obs_response(what: &str, r: &lsr_store_s3::HttpResponse) {
 fn item1_unsigned_payload_with_signed_meta_and_consistent_headers() {
     let h = h();
     let key = h.key(0, 1, 1);
-    let stamp = at("2024-05-01T12:00:00.123Z");
+    let created_at = at("2024-05-01T12:00:00.123Z");
     let put = h
         .builder()
-        .put_object(WallClock.now(), &key, b"hello".to_vec(), stamp)
+        .put_object(WallClock.now(), &key, b"hello".to_vec(), created_at)
         .unwrap();
     expect(
         "item1 signed put (UNSIGNED-PAYLOAD, meta + consistent signed)",
@@ -95,7 +95,7 @@ fn item1_unsigned_payload_with_signed_meta_and_consistent_headers() {
     // A header sent but not signed, and a signed one not sent.
     let unsigned = h
         .builder()
-        .put_object(WallClock.now(), &h.key(0, 2, 2), b"hi".to_vec(), stamp)
+        .put_object(WallClock.now(), &h.key(0, 2, 2), b"hi".to_vec(), created_at)
         .unwrap()
         .tamper_header("x-amz-meta-extra", Some("1".to_owned()));
     expect(
@@ -106,9 +106,9 @@ fn item1_unsigned_payload_with_signed_meta_and_consistent_headers() {
     );
     let missing = h
         .builder()
-        .put_object(WallClock.now(), &h.key(0, 3, 3), b"hi".to_vec(), stamp)
+        .put_object(WallClock.now(), &h.key(0, 3, 3), b"hi".to_vec(), created_at)
         .unwrap()
-        .tamper_header(STAMP_HEADER, None);
+        .tamper_header(CREATED_AT_HEADER, None);
     expect(
         "item1 signed meta header not sent",
         &h.send(missing),
@@ -167,10 +167,10 @@ fn item2_item3_content_md5_and_etag_shapes() {
     let _ = (check_etag, EtagCheck::Matches);
 }
 
-fn start_multipart(h: &RealHarness, key: &lsr_core::FileKey, stamp: Timestamp) -> UploadId {
+fn start_multipart(h: &RealHarness, key: &lsr_core::FileKey, created_at: Timestamp) -> UploadId {
     let created = h.send(
         h.builder()
-            .create_multipart(WallClock.now(), key, stamp)
+            .create_multipart(WallClock.now(), key, created_at)
             .unwrap(),
     );
     obs_response("create multipart", &created);
@@ -261,7 +261,7 @@ fn item4_listing_pages_encoding_and_metadata() {
         h.raw_put(
             &format!("{}/{name}", h.prefix.as_str()),
             b"x",
-            &[(STAMP_HEADER, "2024-05-01T12:00:00.123Z")],
+            &[(CREATED_AT_HEADER, "2024-05-01T12:00:00.123Z")],
         );
     }
     let raw = list(&[("encoding-type", "url")]);
@@ -415,7 +415,7 @@ fn q2_q5_metadata_on_ranged_get_and_copy() {
     );
     obs_response("Q2 ranged GET", &r);
     assert_eq!(
-        r.header(STAMP_HEADER),
+        r.header(CREATED_AT_HEADER),
         Some("2024-05-01T12:00:00.123Z"),
         "Q2: metadata rides on a 206"
     );
@@ -432,7 +432,7 @@ fn q2_q5_metadata_on_ranged_get_and_copy() {
     let head = h.send(h.builder().head(WallClock.now(), &h.key(0, 2, 2)).unwrap());
     obs_response("Q5 head of the copy", &head);
     assert_eq!(
-        head.header(STAMP_HEADER),
+        head.header(CREATED_AT_HEADER),
         Some("2024-05-01T12:00:00.123Z"),
         "Q5: a copy keeps metadata"
     );
@@ -450,7 +450,7 @@ fn q2_q5_metadata_on_ranged_get_and_copy() {
     obs(&h, "Q5 copy (REPLACE)", &copy);
     let head = h.send(h.builder().head(WallClock.now(), &h.key(0, 3, 3)).unwrap());
     obs_response("Q5 head of the REPLACE copy", &head);
-    assert_eq!(head.header(STAMP_HEADER), None, "Q5: REPLACE drops it");
+    assert_eq!(head.header(CREATED_AT_HEADER), None, "Q5: REPLACE drops it");
 }
 
 #[test]

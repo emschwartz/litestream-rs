@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use lsr_ltx::{Timestamp, TxidRange};
 
-use crate::layout::{FileInfo, FileKey, Level, ListedStamp, StoredStamp};
+use crate::layout::{CreatedAt, FileInfo, FileKey, Level, ListedTime};
 use crate::store::{
     Listing, ObjectStore, PageLimit, ReadLen, StoreError, StoreOp, Upload, build_listing,
 };
@@ -25,11 +25,11 @@ struct Object {
 }
 
 impl Object {
-    fn listed(&self, lazy: bool) -> ListedStamp {
+    fn listed(&self, lazy: bool) -> ListedTime {
         if lazy {
-            ListedStamp::LastModified(self.last_modified)
+            ListedTime::LastModified(self.last_modified)
         } else {
-            ListedStamp::Stored(StoredStamp::mtime(self.created_at))
+            ListedTime::Created(CreatedAt::mtime(self.created_at))
         }
     }
 }
@@ -40,7 +40,7 @@ struct State {
     lazy: bool,
     /// Logical milliseconds, advanced by one at each commit.
     clock: i64,
-    stamp_calls: u64,
+    created_at_calls: u64,
     objects: BTreeMap<FileKey, Object>,
     foreign: BTreeMap<Level, BTreeSet<String>>,
     faults: VecDeque<(StoreOp, StoreError)>,
@@ -80,8 +80,8 @@ impl MemStore {
     }
 
     /// A store whose listings carry `LastModified`, as S3's do, so a reader
-    /// must ask for the exact stamp. The last-modified time is the store's
-    /// clock (one logical millisecond per commit), which is not the stamp.
+    /// must ask for the exact created-at time. The last-modified time is the store's
+    /// clock (one logical millisecond per commit), which is not the created-at time.
     #[must_use]
     pub fn with_listed_last_modified() -> Self {
         let store = Self::default();
@@ -97,10 +97,10 @@ impl MemStore {
         }
     }
 
-    /// How many times [`ObjectStore::stamp`] was called.
+    /// How many times [`ObjectStore::created_at`] was called.
     #[must_use]
-    pub fn stamp_calls(&self) -> u64 {
-        self.lock().stamp_calls
+    pub fn created_at_calls(&self) -> u64 {
+        self.lock().created_at_calls
     }
 
     /// Puts a name that is not an LTX key into a level, as a stray file would
@@ -172,9 +172,9 @@ impl MemStore {
 }
 
 impl MemStore {
-    fn stamp_now(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
+    fn created_at_now(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
         let mut state = self.lock();
-        state.stamp_calls = state.stamp_calls.saturating_add(1);
+        state.created_at_calls = state.created_at_calls.saturating_add(1);
         state.take_fault(StoreOp::Read)?;
         let object = state
             .objects
@@ -186,22 +186,22 @@ impl MemStore {
                 kind: std::io::ErrorKind::InvalidData,
             });
         }
-        Ok(StoredStamp::mtime(object.created_at))
+        Ok(CreatedAt::mtime(object.created_at))
     }
 
-    fn read_with_stamp_now(
+    fn read_with_created_at_now(
         &self,
         file: &FileInfo,
         len: ReadLen,
-    ) -> Result<(Vec<u8>, StoredStamp), StoreError> {
+    ) -> Result<(Vec<u8>, CreatedAt), StoreError> {
         let bytes = self.read_now(&file.key, 0, len)?;
-        let stamp = self
+        let created_at = self
             .lock()
             .objects
             .get(&file.key)
-            .map(|object| StoredStamp::mtime(object.created_at))
+            .map(|object| CreatedAt::mtime(object.created_at))
             .ok_or(StoreError::NotFound { key: file.key })?;
-        Ok((bytes, stamp))
+        Ok((bytes, created_at))
     }
 }
 
@@ -226,19 +226,19 @@ impl ObjectStore for MemStore {
         std::future::ready(self.read_now(key, offset, len))
     }
 
-    fn stamp(
+    fn created_at(
         &self,
         file: &FileInfo,
-    ) -> impl Future<Output = Result<StoredStamp, StoreError>> + Send {
-        std::future::ready(self.stamp_now(file))
+    ) -> impl Future<Output = Result<CreatedAt, StoreError>> + Send {
+        std::future::ready(self.created_at_now(file))
     }
 
-    fn read_with_stamp(
+    fn read_with_created_at(
         &self,
         file: &FileInfo,
         len: ReadLen,
-    ) -> impl Future<Output = Result<(Vec<u8>, StoredStamp), StoreError>> + Send {
-        std::future::ready(self.read_with_stamp_now(file, len))
+    ) -> impl Future<Output = Result<(Vec<u8>, CreatedAt), StoreError>> + Send {
+        std::future::ready(self.read_with_created_at_now(file, len))
     }
 
     fn begin_upload(
@@ -339,22 +339,22 @@ mod tests {
             let info = up.commit().await.unwrap();
             let listed = store.list(Level::ZERO, None, limit).await.unwrap().files;
             assert_eq!(listed, vec![info]);
-            let ListedStamp::LastModified(clock) = info.listed else {
+            let ListedTime::LastModified(clock) = info.listed else {
                 panic!("lazy mode listed {:?}", info.listed);
             };
             assert_ne!(clock, committed);
-            assert_eq!(info.exact_stamp(), None);
+            assert_eq!(info.created_at(), None);
             let moved = Timestamp::from_unix_millis(77);
             store.set_last_modified(&key(), moved);
             let listed = store.list(Level::ZERO, None, limit).await.unwrap().files;
             assert_eq!(
                 listed.first().map(|f| f.listed),
-                Some(ListedStamp::LastModified(moved))
+                Some(ListedTime::LastModified(moved))
             );
-            let stamp = store.stamp(&info).await.unwrap();
-            assert_eq!(stamp.at(), committed);
+            let created_at = store.created_at(&info).await.unwrap();
+            assert_eq!(created_at.at(), committed);
         });
-        assert_eq!(store.stamp_calls(), 1);
+        assert_eq!(store.created_at_calls(), 1);
     }
 
     fn key() -> FileKey {

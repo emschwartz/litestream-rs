@@ -58,15 +58,15 @@ fn judge_part(
 }
 
 impl<T: Transport> Inner<T> {
-    /// CreateMultipartUpload; the stamp rides on the request so the completed
+    /// CreateMultipartUpload; the created-at time rides on the request so the completed
     /// object carries it.
     pub(crate) fn create_upload(
         &self,
         key: &FileKey,
-        stamp: Timestamp,
+        created_at: Timestamp,
     ) -> Result<UploadId, StoreError> {
         let op = StoreOp::Upload;
-        let request = self.request(op, |b, now| b.create_multipart(now, key, stamp))?;
+        let request = self.request(op, |b, now| b.create_multipart(now, key, created_at))?;
         let response = self.exec(op, Some(key), request)?;
         parse_create(&response).map_err(|err| err.into_store(op, Some(*key)))
     }

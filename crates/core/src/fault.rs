@@ -159,8 +159,8 @@ pub enum BugSite {
     DecoderStalled,
     /// Compaction was planned with inputs it cannot take.
     CompactionInputs,
-    /// A file's stamp was asked for twice in one resolve.
-    StampRepeated,
+    /// A file's created-at time was asked for twice in one resolve.
+    CreatedAtRepeated,
     /// The WAL reader was resumed from a cursor its own scan did not give.
     WalResume,
     /// A WAL page was read back into a buffer of the wrong size.
@@ -590,7 +590,7 @@ impl Fault {
                 CorruptCause::ChecksumMismatch { .. } => Self::UploadChecksumMismatch,
                 CorruptCause::NotARegularFile
                 | CorruptCause::TimestampOutOfRange
-                | CorruptCause::BadStamp => Self::RemoteCorrupt,
+                | CorruptCause::BadCreatedAt => Self::RemoteCorrupt,
             },
         }
     }
@@ -616,7 +616,7 @@ impl Fault {
                 }
                 CorruptCause::NotARegularFile
                 | CorruptCause::TimestampOutOfRange
-                | CorruptCause::BadStamp => Self::StagedLost,
+                | CorruptCause::BadCreatedAt => Self::StagedLost,
             },
         }
     }

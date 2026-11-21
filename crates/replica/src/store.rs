@@ -16,8 +16,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use lsr_core::{
-    BatchKind, Clock, FileInfo, FileKey, Level, ListAt, Listing, ObjectStore, PageLimit, ReadAt,
-    ReadLen, StoreError, StoredStamp, Upload,
+    BatchKind, Clock, CreatedAt, FileInfo, FileKey, Level, ListAt, Listing, ObjectStore, PageLimit,
+    ReadAt, ReadLen, StoreError, Upload,
 };
 use lsr_ltx::{Timestamp, TxidRange};
 
@@ -46,18 +46,18 @@ pub trait DynStore: Send + Sync {
         len: ReadLen,
     ) -> BoxFuture<'a, Result<Vec<u8>, StoreError>>;
 
-    /// [`ObjectStore::stamp`].
-    fn stamp_boxed<'a>(
+    /// [`ObjectStore::created_at`].
+    fn created_at_boxed<'a>(
         &'a self,
         file: &'a FileInfo,
-    ) -> BoxFuture<'a, Result<StoredStamp, StoreError>>;
+    ) -> BoxFuture<'a, Result<CreatedAt, StoreError>>;
 
-    /// [`ObjectStore::read_with_stamp`].
-    fn read_with_stamp_boxed<'a>(
+    /// [`ObjectStore::read_with_created_at`].
+    fn read_with_created_at_boxed<'a>(
         &'a self,
         file: &'a FileInfo,
         len: ReadLen,
-    ) -> BoxFuture<'a, Result<(Vec<u8>, StoredStamp), StoreError>>;
+    ) -> BoxFuture<'a, Result<(Vec<u8>, CreatedAt), StoreError>>;
 
     /// [`ObjectStore::begin_upload`].
     fn begin_upload_boxed<'a>(
@@ -78,11 +78,11 @@ pub trait DynStore: Send + Sync {
         reads: &'a [ReadAt],
     ) -> BoxFuture<'a, Vec<Result<Vec<u8>, StoreError>>>;
 
-    /// [`ObjectStore::stamp_many`].
-    fn stamp_many_boxed<'a>(
+    /// [`ObjectStore::created_at_many`].
+    fn created_at_many_boxed<'a>(
         &'a self,
         files: &'a [FileInfo],
-    ) -> BoxFuture<'a, Vec<Result<StoredStamp, StoreError>>>;
+    ) -> BoxFuture<'a, Vec<Result<CreatedAt, StoreError>>>;
 
     /// [`ObjectStore::list_many`].
     fn list_many_boxed<'a>(
@@ -139,19 +139,19 @@ where
         Box::pin(self.read(key, offset, len))
     }
 
-    fn stamp_boxed<'a>(
+    fn created_at_boxed<'a>(
         &'a self,
         file: &'a FileInfo,
-    ) -> BoxFuture<'a, Result<StoredStamp, StoreError>> {
-        Box::pin(self.stamp(file))
+    ) -> BoxFuture<'a, Result<CreatedAt, StoreError>> {
+        Box::pin(self.created_at(file))
     }
 
-    fn read_with_stamp_boxed<'a>(
+    fn read_with_created_at_boxed<'a>(
         &'a self,
         file: &'a FileInfo,
         len: ReadLen,
-    ) -> BoxFuture<'a, Result<(Vec<u8>, StoredStamp), StoreError>> {
-        Box::pin(self.read_with_stamp(file, len))
+    ) -> BoxFuture<'a, Result<(Vec<u8>, CreatedAt), StoreError>> {
+        Box::pin(self.read_with_created_at(file, len))
     }
 
     fn begin_upload_boxed<'a>(
@@ -189,11 +189,11 @@ where
         Box::pin(self.list_many(pages, limit))
     }
 
-    fn stamp_many_boxed<'a>(
+    fn created_at_many_boxed<'a>(
         &'a self,
         files: &'a [FileInfo],
-    ) -> BoxFuture<'a, Vec<Result<StoredStamp, StoreError>>> {
-        Box::pin(self.stamp_many(files))
+    ) -> BoxFuture<'a, Vec<Result<CreatedAt, StoreError>>> {
+        Box::pin(self.created_at_many(files))
     }
 }
 
@@ -238,16 +238,16 @@ impl ObjectStore for Erased<'_> {
         self.0.read_boxed(key, offset, len).await
     }
 
-    async fn stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
-        self.0.stamp_boxed(file).await
+    async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
+        self.0.created_at_boxed(file).await
     }
 
-    async fn read_with_stamp(
+    async fn read_with_created_at(
         &self,
         file: &FileInfo,
         len: ReadLen,
-    ) -> Result<(Vec<u8>, StoredStamp), StoreError> {
-        self.0.read_with_stamp_boxed(file, len).await
+    ) -> Result<(Vec<u8>, CreatedAt), StoreError> {
+        self.0.read_with_created_at_boxed(file, len).await
     }
 
     async fn begin_upload(
@@ -278,8 +278,8 @@ impl ObjectStore for Erased<'_> {
         self.0.list_many_boxed(pages, limit).await
     }
 
-    async fn stamp_many(&self, files: &[FileInfo]) -> Vec<Result<StoredStamp, StoreError>> {
-        self.0.stamp_many_boxed(files).await
+    async fn created_at_many(&self, files: &[FileInfo]) -> Vec<Result<CreatedAt, StoreError>> {
+        self.0.created_at_many_boxed(files).await
     }
 }
 
@@ -315,7 +315,7 @@ impl OpMeter {
 pub(crate) struct Meters {
     list: OpMeter,
     read: OpMeter,
-    stamp: OpMeter,
+    created_at: OpMeter,
     begin_upload: OpMeter,
     write: OpMeter,
     commit: OpMeter,
@@ -329,7 +329,7 @@ impl Meters {
         StoreCounters {
             list: self.list.read(),
             read: self.read.read(),
-            stamp: self.stamp.read(),
+            created_at: self.created_at.read(),
             begin_upload: self.begin_upload.read(),
             write: self.write.read(),
             commit: self.commit.read(),
@@ -441,17 +441,17 @@ impl ObjectStore for Metered {
         metered(&*self.clock, &self.meters.read, call).await
     }
 
-    async fn stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
-        let call = self.store.stamp_boxed(file);
-        metered(&*self.clock, &self.meters.stamp, call).await
+    async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
+        let call = self.store.created_at_boxed(file);
+        metered(&*self.clock, &self.meters.created_at, call).await
     }
 
-    async fn read_with_stamp(
+    async fn read_with_created_at(
         &self,
         file: &FileInfo,
         len: ReadLen,
-    ) -> Result<(Vec<u8>, StoredStamp), StoreError> {
-        let call = self.store.read_with_stamp_boxed(file, len);
+    ) -> Result<(Vec<u8>, CreatedAt), StoreError> {
+        let call = self.store.read_with_created_at_boxed(file, len);
         metered(&*self.clock, &self.meters.read, call).await
     }
 
@@ -506,13 +506,13 @@ impl ObjectStore for Metered {
         results
     }
 
-    /// Each stamp of the batch counts as one call, timed as the whole batch.
-    async fn stamp_many(&self, files: &[FileInfo]) -> Vec<Result<StoredStamp, StoreError>> {
+    /// Each created-at time of the batch counts as one call, timed as the whole batch.
+    async fn created_at_many(&self, files: &[FileInfo]) -> Vec<Result<CreatedAt, StoreError>> {
         let began = self.clock.now();
-        let results = self.store.stamp_many_boxed(files).await;
+        let results = self.store.created_at_many_boxed(files).await;
         let ended = self.clock.now();
         for result in &results {
-            self.meters.stamp.note(result, began, ended);
+            self.meters.created_at.note(result, began, ended);
         }
         results
     }

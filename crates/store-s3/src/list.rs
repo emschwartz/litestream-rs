@@ -11,16 +11,16 @@
 //! a repeated token, or an entry with no readable `LastModified`. Never a
 //! shorter listing.
 //!
-//! A listed file carries its `LastModified`, which is not a stamp. The stored
-//! stamp comes from [`Inner::stamp`](crate::store), one HEAD for the file a
+//! A listed file carries its `LastModified`, which is not a created-at time. The stored
+//! created-at time comes from [`Inner::created_at`](crate::store), one HEAD for the file a
 //! reader's decision turns on, and the HEAD's rules (size check, fallback,
-//! `BadStamp`) live there with it.
+//! `BadCreatedAt`) live there with it.
 
 use std::collections::VecDeque;
 use std::io;
 
 use lsr_core::{
-    FileInfo, Level, ListAt, ListedStamp, Listing, PageLimit, StoreError, StoreOp, build_listing,
+    FileInfo, Level, ListAt, ListedTime, Listing, PageLimit, StoreError, StoreOp, build_listing,
     file_name,
 };
 use lsr_ltx::{Timestamp, TxidRange};
@@ -139,7 +139,7 @@ impl<'a, T: Transport> Run<'a, T> {
             .map(|listed| FileInfo {
                 key: listed.key,
                 size: listed.size,
-                listed: ListedStamp::LastModified(listed.last_modified),
+                listed: ListedTime::LastModified(listed.last_modified),
             })
             .collect();
         build_listing(files, &self.foreign, after, limit)

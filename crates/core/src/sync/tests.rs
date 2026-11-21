@@ -920,14 +920,14 @@ proptest! {
         prev in prop::option::of(0_i64..1000),
         now in 0_i64..1000,
     ) {
-        let (stamped, clamped) = clamp(prev.map(ts), ts(now));
+        let (recorded, clamped) = clamp(prev.map(ts), ts(now));
         match prev {
             Some(prev) if prev > now => {
-                prop_assert_eq!(stamped, ts(prev));
+                prop_assert_eq!(recorded, ts(prev));
                 prop_assert_eq!(clamped, Some(Clamped { prev: ts(prev), now: ts(now) }));
             }
             Some(_) | None => {
-                prop_assert_eq!(stamped, ts(now));
+                prop_assert_eq!(recorded, ts(now));
                 prop_assert_eq!(clamped, None);
             }
         }

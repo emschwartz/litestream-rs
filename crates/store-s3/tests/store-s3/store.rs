@@ -16,8 +16,8 @@ mod cases {
     use super::rig::*;
     use lsr_core::conformance::{Harness, block_on};
     use lsr_core::{
-        CorruptCause, FileKey, Level, ListedStamp, ObjectStore, PartNumber, ReadLen,
-        RecordingSleeper, RetryPolicy, Retrying, SeededEntropy, StampOrigin, StoreError, StoreOp,
+        CorruptCause, CreatedAtSource, FileKey, Level, ListedTime, ObjectStore, PartNumber,
+        ReadLen, RecordingSleeper, RetryPolicy, Retrying, SeededEntropy, StoreError, StoreOp,
         Upload,
     };
     use lsr_ltx::Timestamp;
@@ -84,8 +84,8 @@ mod cases {
         let page = block_on(h.store.list(Level::ZERO, None, limit(3))).unwrap();
         assert_eq!(page.files.len(), 3);
         assert_eq!(count(&h.wire, Shape::Head), before);
-        assert!(page.files.iter().all(|f| f.exact_stamp().is_none()));
-        assert_eq!(h.store.stamp_stats(), ListStats::default());
+        assert!(page.files.iter().all(|f| f.created_at().is_none()));
+        assert_eq!(h.store.created_at_stats(), ListStats::default());
     }
 
     #[test]
@@ -144,7 +144,7 @@ mod cases {
     }
 
     #[test]
-    fn head_404_between_list_and_stamp() {
+    fn head_404_between_list_and_created_at() {
         let h = FakeHarness::new();
         let k = key(0, 1, 1);
         put_through(&h.store, &k, b"x").unwrap();
@@ -156,31 +156,31 @@ mod cases {
             retry_after: None,
         });
         assert_eq!(
-            block_on(h.store.stamp(&file)),
+            block_on(h.store.created_at(&file)),
             Err(StoreError::NotFound { key: k })
         );
-        assert_eq!(h.store.stamp_stats().vanished, 1);
+        assert_eq!(h.store.created_at_stats().vanished, 1);
     }
 
     #[test]
-    fn metadata_less_object_falls_back_on_stamp() {
+    fn metadata_less_object_falls_back_on_created_at() {
         let h = FakeHarness::new();
         let k = key(0, 1, 1);
         h.wire
             .inner()
             .put_raw(&object_key(config().prefix(), &k), b"abc".to_vec(), &[]);
         let file = list_all(&h.store).unwrap().files[0];
-        let stamp = block_on(h.store.stamp(&file)).unwrap();
-        assert_eq!(stamp.origin(), StampOrigin::Fallback);
-        let ListedStamp::LastModified(listed) = file.listed else {
+        let created_at = block_on(h.store.created_at(&file)).unwrap();
+        assert_eq!(created_at.origin(), CreatedAtSource::Fallback);
+        let ListedTime::LastModified(listed) = file.listed else {
             panic!("a listed file carries LastModified: {file:?}");
         };
-        assert_eq!(stamp.at(), listed);
-        assert_eq!(h.store.stamp_stats().fell_back, 1);
+        assert_eq!(created_at.at(), listed);
+        assert_eq!(h.store.created_at_stats().fell_back, 1);
     }
 
     #[test]
-    fn bad_stamp_fails_the_reader_not_the_listing() {
+    fn bad_created_at_fails_the_reader_not_the_listing() {
         let h = FakeHarness::new();
         let k = key(0, 1, 1);
         h.wire.inner().put_raw(
@@ -194,37 +194,40 @@ mod cases {
         };
         let bad = StoreError::Corrupt {
             key: Some(k),
-            cause: CorruptCause::BadStamp,
+            cause: CorruptCause::BadCreatedAt,
         };
-        assert_eq!(block_on(h.store.stamp(file)), Err(bad.clone()));
-        let read = block_on(h.store.read_with_stamp(file, ReadLen::new(8).unwrap()));
+        assert_eq!(block_on(h.store.created_at(file)), Err(bad.clone()));
+        let read = block_on(h.store.read_with_created_at(file, ReadLen::new(8).unwrap()));
         assert_eq!(read, Err(bad));
     }
 
     #[test]
-    fn read_with_stamp_is_one_get() {
+    fn read_with_created_at_is_one_get() {
         let h = FakeHarness::new();
         let k = key(0, 1, 1);
         put_through(&h.store, &k, b"abc").unwrap();
         let file = list_all(&h.store).unwrap().files[0];
         let before = shapes(&h.wire).len();
-        let (bytes, stamp) =
-            block_on(h.store.read_with_stamp(&file, ReadLen::new(8).unwrap())).unwrap();
+        let (bytes, created_at) = block_on(
+            h.store
+                .read_with_created_at(&file, ReadLen::new(8).unwrap()),
+        )
+        .unwrap();
         assert_eq!(bytes, b"abc");
-        assert_eq!(stamp.at(), Timestamp::from_unix_millis(5));
+        assert_eq!(created_at.at(), Timestamp::from_unix_millis(5));
         let sent = shapes(&h.wire).split_off(before);
         assert_eq!(sent, [Some(Shape::Get)]);
     }
 
     #[test]
-    fn multipart_stamp_is_the_commit_stamp() {
+    fn multipart_created_at_is_the_commit_created_at() {
         let h = FakeHarness::new();
         let k = key(0, 1, 1);
         write_all(&h.store, &k, &body(PART * 2), PART).unwrap();
         let file = list_all(&h.store).unwrap().files[0];
-        let stamp = block_on(h.store.stamp(&file)).unwrap();
-        assert_eq!(stamp.at(), Timestamp::from_unix_millis(5));
-        assert_eq!(stamp.origin(), StampOrigin::Metadata);
+        let created_at = block_on(h.store.created_at(&file)).unwrap();
+        assert_eq!(created_at.at(), Timestamp::from_unix_millis(5));
+        assert_eq!(created_at.origin(), CreatedAtSource::Metadata);
     }
 
     #[test]
@@ -239,16 +242,20 @@ mod cases {
         let file = list_all(&h.store).unwrap().files[0];
         assert_eq!(
             file.listed,
-            ListedStamp::LastModified(Timestamp::from_unix_millis(86_400_000))
+            ListedTime::LastModified(Timestamp::from_unix_millis(86_400_000))
         );
-        let stamp = block_on(h.store.stamp(&file)).unwrap();
-        assert_eq!(stamp.at(), Timestamp::from_unix_millis(5));
-        let (_, read) = block_on(h.store.read_with_stamp(&file, ReadLen::new(8).unwrap())).unwrap();
-        assert_eq!(read.at(), stamp.at());
+        let created_at = block_on(h.store.created_at(&file)).unwrap();
+        assert_eq!(created_at.at(), Timestamp::from_unix_millis(5));
+        let (_, read) = block_on(
+            h.store
+                .read_with_created_at(&file, ReadLen::new(8).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(read.at(), created_at.at());
     }
 
     #[test]
-    fn stamp_is_one_head_and_a_stamped_read_is_one_get() {
+    fn created_at_is_one_head_and_a_read_with_created_at_is_one_get() {
         let h = FakeHarness::new();
         let k = key(0, 1, 1);
         put_through(&h.store, &k, b"abc").unwrap();
@@ -256,24 +263,27 @@ mod cases {
         let file = listed.files[0];
         let heads = count(&h.wire, Shape::Head);
 
-        let stamp = block_on(h.store.stamp(&file)).unwrap();
+        let created_at = block_on(h.store.created_at(&file)).unwrap();
         assert_eq!(count(&h.wire, Shape::Head), heads + 1);
 
         let gets = count(&h.wire, Shape::Get);
-        let (bytes, read_stamp) =
-            block_on(h.store.read_with_stamp(&file, ReadLen::new(8).unwrap())).unwrap();
+        let (bytes, read_created_at) = block_on(
+            h.store
+                .read_with_created_at(&file, ReadLen::new(8).unwrap()),
+        )
+        .unwrap();
         assert_eq!(bytes, b"abc");
-        assert_eq!(read_stamp.at(), stamp.at());
+        assert_eq!(read_created_at.at(), created_at.at());
         assert_eq!(count(&h.wire, Shape::Get), gets + 1);
         assert_eq!(
             count(&h.wire, Shape::Head),
             heads + 1,
-            "the GET carried the stamp"
+            "the GET carried the created-at time"
         );
     }
 
     #[test]
-    fn a_stamped_read_of_an_unstamped_object_falls_back_to_a_head() {
+    fn a_read_with_created_at_of_an_object_with_no_created_at_falls_back_to_a_head() {
         let h = FakeHarness::new();
         let k = key(0, 1, 1);
         put_through(&h.store, &k, b"abc").unwrap();
@@ -284,9 +294,12 @@ mod cases {
             &[],
         );
         let heads = count(&h.wire, Shape::Head);
-        let (_, stamp) =
-            block_on(h.store.read_with_stamp(&file, ReadLen::new(8).unwrap())).unwrap();
-        assert_eq!(stamp.origin(), lsr_core::StampOrigin::Fallback);
+        let (_, created_at) = block_on(
+            h.store
+                .read_with_created_at(&file, ReadLen::new(8).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(created_at.origin(), lsr_core::CreatedAtSource::Fallback);
         assert_eq!(count(&h.wire, Shape::Head), heads + 1);
     }
 
@@ -312,7 +325,7 @@ mod cases {
     }
 
     #[test]
-    fn five_hundred_after_publish_leaves_object_visible_with_stamp() {
+    fn five_hundred_after_publish_leaves_object_visible_with_created_at() {
         let h = FakeHarness::new();
         assert!(h.fail_next_commit_after_publish());
         let k = key(0, 1, 1);
@@ -330,7 +343,7 @@ mod cases {
         };
         assert_eq!((file.key, file.size), (k, 3));
         assert_eq!(
-            block_on(h.store.stamp(file)).unwrap().at(),
+            block_on(h.store.created_at(file)).unwrap().at(),
             Timestamp::from_unix_millis(5)
         );
         let read = block_on(h.store.read(&k, 0, ReadLen::new(16).unwrap())).unwrap();
@@ -395,7 +408,7 @@ mod cases {
     }
 
     #[test]
-    fn multipart_round_trip_keeps_bytes_and_stamp() {
+    fn multipart_round_trip_keeps_bytes_and_created_at() {
         let h = FakeHarness::new();
         let k = key(0, 1, 1);
         let len = PART * 5 / 2;
@@ -418,7 +431,7 @@ mod cases {
         };
         assert_eq!(file.size, u64::try_from(len).unwrap());
         assert_eq!(
-            block_on(h.store.stamp(file)).unwrap().at(),
+            block_on(h.store.created_at(file)).unwrap().at(),
             Timestamp::from_unix_millis(5)
         );
         assert_eq!(h.wire.inner().open_uploads(), 0);
@@ -519,7 +532,7 @@ mod cases {
             panic!("one visible file expected: {listed:?}");
         };
         assert_eq!(
-            block_on(h.store.stamp(file)).unwrap().at(),
+            block_on(h.store.created_at(file)).unwrap().at(),
             Timestamp::from_unix_millis(5)
         );
         assert!(read_back(&h.store, &k, PART) == bytes);

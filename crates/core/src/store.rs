@@ -19,7 +19,7 @@
 //! - Retrying is the caller's decision, made from the [`StoreError`] variant.
 //! - Every method returns within a deadline the implementation enforces, failing as
 //!   `Transient`; core holds no timer.
-//! - The batch methods (`read_many`, `list_many`, `stamp_many`) answer
+//! - The batch methods (`read_many`, `list_many`, `created_at_many`) answer
 //!   each item exactly as the single method would, one result per item in
 //!   order. Their defaults call the single method item by item, so a store
 //!   that is not concurrent (the simulator's, a directory) needs nothing.
@@ -37,7 +37,7 @@ use std::time::Duration;
 use lsr_ltx::{Timestamp, TxidRange};
 use thiserror::Error;
 
-use crate::layout::{FileInfo, FileKey, Level, StoredStamp, cmp_range, file_name, is_scratch_name};
+use crate::layout::{CreatedAt, FileInfo, FileKey, Level, cmp_range, file_name, is_scratch_name};
 
 /// How many entries one listing page may hold: 1 to 1000, S3's own cap, so
 /// every backend can return exactly the page asked for.
@@ -235,7 +235,7 @@ pub enum CorruptCause {
     },
     /// The `litestream-timestamp` metadata is present but does not parse.
     #[error("unparseable timestamp metadata")]
-    BadStamp,
+    BadCreatedAt,
 }
 
 /// A multipart part number: 1 to 10000, S3's part cap.
@@ -362,8 +362,8 @@ pub enum BatchKind {
     Reads,
     /// [`ObjectStore::list_many`].
     Lists,
-    /// [`ObjectStore::stamp_many`].
-    Stamps,
+    /// [`ObjectStore::created_at_many`].
+    ResolvedCreatedAt,
 }
 
 /// A backend holding a replica's LTX objects, keyed by [`FileKey`].
@@ -391,24 +391,24 @@ pub trait ObjectStore: Send + Sync {
         len: ReadLen,
     ) -> impl Future<Output = Result<Vec<u8>, StoreError>> + Send;
 
-    /// The stored stamp of a listed file. `NotFound` when it is gone;
+    /// The stored created-at time of a listed file. `NotFound` when it is gone;
     /// `Transient { InvalidData }` when its size is no longer `file.size`
-    /// (another writer replaced it). With no stored stamp the answer is
-    /// [`StoredStamp::fallback`] of the listed last-modified time.
-    fn stamp(
+    /// (another writer replaced it). With no stored created-at time the answer is
+    /// [`CreatedAt::fallback`] of the listed last-modified time.
+    fn created_at(
         &self,
         file: &FileInfo,
-    ) -> impl Future<Output = Result<StoredStamp, StoreError>> + Send;
+    ) -> impl Future<Output = Result<CreatedAt, StoreError>> + Send;
 
-    /// `read(key, 0, len)` plus the stored stamp, in one request where the
+    /// `read(key, 0, len)` plus the stored created-at time, in one request where the
     /// backend allows. Both come from the same object version.
-    fn read_with_stamp(
+    fn read_with_created_at(
         &self,
         file: &FileInfo,
         len: ReadLen,
-    ) -> impl Future<Output = Result<(Vec<u8>, StoredStamp), StoreError>> + Send;
+    ) -> impl Future<Output = Result<(Vec<u8>, CreatedAt), StoreError>> + Send;
 
-    /// Starts writing `key`, stamped `created_at`. Nothing is visible yet.
+    /// Starts writing `key` with `created_at` as its created-at time. Nothing is visible yet.
     fn begin_upload(
         &self,
         key: &FileKey,
@@ -441,15 +441,15 @@ pub trait ObjectStore: Send + Sync {
         }
     }
 
-    /// [`Self::stamp`] for each file, one result per file, in order.
-    fn stamp_many(
+    /// [`Self::created_at`] for each file, one result per file, in order.
+    fn created_at_many(
         &self,
         files: &[FileInfo],
-    ) -> impl Future<Output = Vec<Result<StoredStamp, StoreError>>> + Send {
+    ) -> impl Future<Output = Vec<Result<CreatedAt, StoreError>>> + Send {
         async move {
             let mut out = Vec::with_capacity(files.len());
             for file in files {
-                out.push(self.stamp(file).await);
+                out.push(self.created_at(file).await);
             }
             out
         }
@@ -489,7 +489,7 @@ pub trait Upload: Send {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::ListedStamp;
+    use crate::layout::ListedTime;
     use lsr_ltx::Txid;
     use proptest::prelude::*;
 
@@ -506,7 +506,7 @@ mod tests {
         FileInfo {
             key: FileKey::new(Level::ZERO, range(min, max)),
             size: 1,
-            listed: ListedStamp::Stored(StoredStamp::mtime(Timestamp::from_unix_millis(0))),
+            listed: ListedTime::Created(CreatedAt::mtime(Timestamp::from_unix_millis(0))),
         }
     }
 
@@ -530,7 +530,7 @@ mod tests {
             "object stored with a different checksum than was sent"
         );
         assert_eq!(
-            CorruptCause::BadStamp.to_string(),
+            CorruptCause::BadCreatedAt.to_string(),
             "unparseable timestamp metadata"
         );
         let refused = StoreError::Refused {

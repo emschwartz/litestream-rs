@@ -2,7 +2,7 @@
 //!
 //! Writes accumulate in one buffer of at most one part (the memory bound). An
 //! object that ends below the part size is sent as one PUT, as Go does (rc.go:814).
-//! The write that fills the buffer starts a multipart upload (the stamp rides on
+//! The write that fills the buffer starts a multipart upload (the created-at time rides on
 //! CreateMultipartUpload), and each full buffer becomes the next part. Full
 //! parts wait until the `concurrency` setting's worth of them is ready (the buffer
 //! filling counts as one), then go out as one batch, so memory is at most
@@ -29,8 +29,7 @@ use std::io;
 use std::sync::Arc;
 
 use lsr_core::{
-    CorruptCause, FileInfo, FileKey, ListedStamp, PartNumber, StoreError, StoreOp, StoredStamp,
-    Upload,
+    CorruptCause, CreatedAt, FileInfo, FileKey, ListedTime, PartNumber, StoreError, StoreOp, Upload,
 };
 use lsr_ltx::Timestamp;
 
@@ -59,7 +58,7 @@ enum UploadState {
 pub struct S3Upload<T> {
     inner: Arc<Inner<T>>,
     key: FileKey,
-    stamp: Timestamp,
+    created_at: Timestamp,
     written: u64,
     state: UploadState,
 }
@@ -80,11 +79,11 @@ impl<T> std::fmt::Debug for S3Upload<T> {
 }
 
 impl<T> S3Upload<T> {
-    pub(crate) fn new(inner: Arc<Inner<T>>, key: FileKey, stamp: Timestamp) -> Self {
+    pub(crate) fn new(inner: Arc<Inner<T>>, key: FileKey, created_at: Timestamp) -> Self {
         Self {
             inner,
             key,
-            stamp,
+            created_at,
             written: 0,
             state: UploadState::Buffering(Vec::new()),
         }
@@ -148,19 +147,19 @@ impl<T: Transport> Inner<T> {
     pub(crate) fn put(
         &self,
         key: &FileKey,
-        stamp: Timestamp,
+        created_at: Timestamp,
         body: Vec<u8>,
     ) -> Result<FileInfo, StoreError> {
         let op = StoreOp::Upload;
         let wrote = u64::try_from(body.len()).unwrap_or(u64::MAX);
-        let request = self.request(op, |b, now| b.put_object(now, key, body, stamp))?;
+        let request = self.request(op, |b, now| b.put_object(now, key, body, created_at))?;
         let sent = request.md5();
         let response = self.exec(op, Some(key), request.into_request())?;
         match check_etag(&response, sent) {
             EtagCheck::Matches | EtagCheck::NotMd5 => Ok(FileInfo {
                 key: *key,
                 size: wrote,
-                listed: ListedStamp::Stored(StoredStamp::metadata(stamp)),
+                listed: ListedTime::Created(CreatedAt::metadata(created_at)),
             }),
             EtagCheck::Missing => Err(StoreError::Transient {
                 op,
@@ -222,7 +221,7 @@ impl<T: Transport> S3Upload<T> {
         else {
             return Err(ended());
         };
-        let id = self.inner.create_upload(&self.key, self.stamp)?;
+        let id = self.inner.create_upload(&self.key, self.created_at)?;
         self.state = UploadState::Multipart {
             id,
             etags: Vec::new(),
@@ -309,7 +308,7 @@ impl<T: Transport> S3Upload<T> {
         Ok(FileInfo {
             key: self.key,
             size: self.written,
-            listed: ListedStamp::Stored(StoredStamp::metadata(self.stamp)),
+            listed: ListedTime::Created(CreatedAt::metadata(self.created_at)),
         })
     }
 }
@@ -323,7 +322,7 @@ impl<T: Transport> Upload for S3Upload<T> {
         if let UploadState::Buffering(buf) = &mut self.state {
             let body = std::mem::take(buf);
             self.state = UploadState::Done;
-            return self.inner.put(&self.key, self.stamp, body);
+            return self.inner.put(&self.key, self.created_at, body);
         }
         self.finish_multipart()
     }

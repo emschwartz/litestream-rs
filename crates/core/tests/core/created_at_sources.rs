@@ -1,5 +1,5 @@
-//! Source guards for the stamp types (no reader decides on a last-modified time): who may make a
-//! [`StoredStamp`] and who may look at a bare last-modified time. A walk of
+//! Source guards for the created-at time types (no reader decides on a last-modified time): who may make a
+//! [`CreatedAt`] and who may look at a bare last-modified time. A walk of
 //! `crates/` with std only.
 
 use std::fs;
@@ -52,7 +52,7 @@ fn offenders(needles: &[&str], allowed: &[&str]) -> Vec<String> {
     workspace_files()
         .into_iter()
         .filter(|(rel, _)| !allowed.iter().any(|ok| rel.starts_with(ok) || rel == ok))
-        .filter(|(rel, _)| !rel.ends_with("stamp_sources.rs"))
+        .filter(|(rel, _)| !rel.ends_with("created_at_sources.rs"))
         .filter_map(|(rel, text)| {
             let code = production_part(&rel, &text)?;
             needles
@@ -64,12 +64,12 @@ fn offenders(needles: &[&str], allowed: &[&str]) -> Vec<String> {
 }
 
 #[test]
-fn stored_stamp_constructors_only_in_stores() {
+fn stored_created_at_constructors_only_in_stores() {
     let found = offenders(
         &[
-            "StoredStamp::metadata(",
-            "StoredStamp::mtime(",
-            "StoredStamp::fallback(",
+            "CreatedAt::metadata(",
+            "CreatedAt::mtime(",
+            "CreatedAt::fallback(",
         ],
         &[
             "crates/store-",
@@ -80,18 +80,18 @@ fn stored_stamp_constructors_only_in_stores() {
     );
     assert!(
         found.is_empty(),
-        "StoredStamp built outside a store: {found:?}"
+        "CreatedAt built outside a store: {found:?}"
     );
 }
 
 #[test]
 fn last_modified_matched_only_in_allowed_sites() {
     let found = offenders(
-        &["ListedStamp::LastModified"],
+        &["ListedTime::LastModified"],
         &[
             "crates/store-s3/",
             "crates/core/src/mem.rs",
-            "crates/core/src/stamps.rs",
+            "crates/core/src/created_at.rs",
             "crates/core/src/layout.rs",
             "crates/cli/src/render.rs",
         ],
@@ -101,7 +101,7 @@ fn last_modified_matched_only_in_allowed_sites() {
         "LastModified read outside its sites: {found:?}"
     );
 }
-/// The exact planner takes an `AsOf` only over a listing whose stamps are all
+/// The exact planner takes an `AsOf` only over a listing whose created-at times are all
 /// exact; production code asks `AsOfPlanner` through `resolve` instead.
 #[test]
 fn plan_reference_only_in_oracles() {

@@ -4,6 +4,8 @@
 // `cfg(test)` is always set here; it marks the helpers as test code, so clippy.toml's
 // allow-*-in-tests cover them as they cover #[test] fns.
 #[cfg(test)]
+mod created_at_sources;
+#[cfg(test)]
 mod plan_adversarial;
 #[cfg(test)]
 mod plan_exhaustive;
@@ -11,5 +13,3 @@ mod plan_exhaustive;
 mod plan_lazy;
 #[cfg(test)]
 mod secret_shapes;
-#[cfg(test)]
-mod stamp_sources;

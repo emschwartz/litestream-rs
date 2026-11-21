@@ -20,7 +20,7 @@ use std::thread::{self, Thread};
 
 use lsr_ltx::{Timestamp, Txid, TxidRange};
 
-use crate::layout::{FileInfo, FileKey, Level, ListedStamp, StampOrigin};
+use crate::layout::{CreatedAtSource, FileInfo, FileKey, Level, ListedTime};
 use crate::store::{ListAt, ObjectStore, PageLimit, ReadAt, ReadLen, StoreError, StoreOp, Upload};
 
 /// Why a conformance case failed.
@@ -163,10 +163,10 @@ fn at(millis: i64) -> Timestamp {
     Timestamp::from_unix_millis(millis)
 }
 
-const STAMP: i64 = 1_700_000_000_123;
+const CREATED_AT: i64 = 1_700_000_000_123;
 
 async fn put<S: ObjectStore>(store: &S, key: FileKey, bytes: &[u8]) -> Result<FileInfo, Failure> {
-    let mut upload = store.begin_upload(&key, at(STAMP)).await?;
+    let mut upload = store.begin_upload(&key, at(CREATED_AT)).await?;
     upload.write(bytes).await?;
     Ok(upload.commit().await?)
 }
@@ -365,7 +365,7 @@ pub async fn scratch_names_are_not_foreign<H: Harness>(h: &H) -> Check {
     let target = key(0, 1, 1)?;
     let name = format!("{}.tmp", target.file_name());
     h.plant_foreign(target.level(), &name)?;
-    let mut upload = store.begin_upload(&target, at(STAMP)).await?;
+    let mut upload = store.begin_upload(&target, at(CREATED_AT)).await?;
     upload.write(b"half").await?;
     drop(upload);
     let got = page_through(store, target.level(), 10, None).await?;
@@ -385,7 +385,7 @@ pub async fn commit_error_may_leave_the_object_visible<H: Harness>(h: &H) -> Che
     }
     let store = h.store();
     let target = key(0, 1, 1)?;
-    let mut upload = store.begin_upload(&target, at(STAMP)).await?;
+    let mut upload = store.begin_upload(&target, at(CREATED_AT)).await?;
     upload.write(b"landed").await?;
     ensure!(
         upload.commit().await.is_err(),
@@ -412,7 +412,7 @@ pub async fn commit_error_may_leave_the_object_visible<H: Harness>(h: &H) -> Che
 pub async fn abort_publishes_nothing<H: Harness>(h: &H) -> Check {
     let store = h.store();
     let fresh = key(1, 1, 1)?;
-    let mut upload = store.begin_upload(&fresh, at(STAMP)).await?;
+    let mut upload = store.begin_upload(&fresh, at(CREATED_AT)).await?;
     upload.write(b"never seen").await?;
     upload.abort().await?;
     ensure!(
@@ -429,7 +429,7 @@ pub async fn abort_publishes_nothing<H: Harness>(h: &H) -> Check {
     );
 
     put(store, fresh, b"old").await?;
-    let mut upload = store.begin_upload(&fresh, at(STAMP)).await?;
+    let mut upload = store.begin_upload(&fresh, at(CREATED_AT)).await?;
     upload.write(b"newer").await?;
     upload.abort().await?;
     ensure_eq!(
@@ -447,7 +447,7 @@ pub async fn abort_publishes_nothing<H: Harness>(h: &H) -> Check {
 pub async fn pending_and_dropped_uploads_are_invisible<H: Harness>(h: &H) -> Check {
     let store = h.store();
     let target = key(0, 1, 1)?;
-    let mut upload = store.begin_upload(&target, at(STAMP)).await?;
+    let mut upload = store.begin_upload(&target, at(CREATED_AT)).await?;
     upload.write(b"half").await?;
     ensure!(
         store
@@ -474,7 +474,7 @@ pub async fn pending_and_dropped_uploads_are_invisible<H: Harness>(h: &H) -> Che
     );
 
     put(store, target, b"kept").await?;
-    let mut upload = store.begin_upload(&target, at(STAMP)).await?;
+    let mut upload = store.begin_upload(&target, at(CREATED_AT)).await?;
     upload.write(b"lost").await?;
     drop(upload);
     ensure_eq!(
@@ -592,30 +592,30 @@ pub async fn two_uploads_to_one_key<H: Harness>(h: &H) -> Check {
         .first()
         .ok_or_else(|| Failure("no surviving object listed".to_owned()))?;
     ensure_eq!(
-        store.stamp(survivor).await?.at(),
+        store.created_at(survivor).await?.at(),
         at(1_000),
-        "the surviving object's stamp"
+        "the surviving object's created-at time"
     );
     Ok(())
 }
 
 /// Chunks concatenate (empty ones included) and the commit and the listing
-/// report the size and the stamp that were given.
+/// report the size and the created-at time that were given.
 ///
 /// # Errors
 /// A [`Failure`] naming the rule that broke.
-pub async fn chunks_concatenate_and_stamp_survives<H: Harness>(h: &H) -> Check {
+pub async fn chunks_concatenate_and_created_at_survives<H: Harness>(h: &H) -> Check {
     let store = h.store();
     let target = key(5, 1, 1)?;
-    let mut upload = store.begin_upload(&target, at(STAMP)).await?;
+    let mut upload = store.begin_upload(&target, at(CREATED_AT)).await?;
     for chunk in [&b"ab"[..], b"", b"cde"] {
         upload.write(chunk).await?;
     }
     let info = upload.commit().await?;
     ensure_eq!((info.key, info.size), (target, 5), "commit info");
     ensure!(
-        exact_or_marked(&info, at(STAMP)),
-        "the commit reports a stamp other than the one given"
+        exact_or_marked(&info, at(CREATED_AT)),
+        "the commit reports a created-at time other than the one given"
     );
     let listing = store.list(target.level(), None, limit(10)?).await?;
     let listed: Vec<_> = listing.files.iter().map(|f| (f.key, f.size)).collect();
@@ -624,9 +624,9 @@ pub async fn chunks_concatenate_and_stamp_survives<H: Harness>(h: &H) -> Check {
         return Err(Failure("one file expected in the listing".to_owned()));
     };
     ensure_eq!(
-        store.stamp(file).await?.at(),
-        at(STAMP),
-        "stamp after listing"
+        store.created_at(file).await?.at(),
+        at(CREATED_AT),
+        "created-at time after listing"
     );
     ensure_eq!(read_all(store, &target).await?, b"abcde".to_vec(), "bytes");
     Ok(())
@@ -636,8 +636,8 @@ pub async fn chunks_concatenate_and_stamp_survives<H: Harness>(h: &H) -> Check {
 /// last-modified time.
 fn exact_or_marked(info: &FileInfo, expected: Timestamp) -> bool {
     match info.listed {
-        ListedStamp::Stored(stamp) => stamp.at() == expected,
-        ListedStamp::LastModified(_) => true,
+        ListedTime::Created(created_at) => created_at.at() == expected,
+        ListedTime::LastModified(_) => true,
     }
 }
 
@@ -645,13 +645,13 @@ fn instant(text: &str) -> Result<Timestamp, Failure> {
     Timestamp::parse_rfc3339(text).map_err(|_bad| Failure(format!("bad instant {text} in a case")))
 }
 
-async fn put_stamped<S: ObjectStore>(
+async fn put_with_created_at<S: ObjectStore>(
     store: &S,
     key: FileKey,
     bytes: &[u8],
-    stamp: Timestamp,
+    created_at: Timestamp,
 ) -> Result<FileInfo, Failure> {
-    let mut upload = store.begin_upload(&key, stamp).await?;
+    let mut upload = store.begin_upload(&key, created_at).await?;
     upload.write(bytes).await?;
     Ok(upload.commit().await?)
 }
@@ -665,112 +665,116 @@ async fn listed_one<S: ObjectStore>(store: &S, key: FileKey) -> Result<FileInfo,
         .ok_or_else(|| Failure(format!("{key} missing from its listing")))
 }
 
-/// `stamp` returns the stamp the writer gave, never a stand-in, across the
+/// `created_at` returns the created-at time the writer gave, never a stand-in, across the
 /// edge instants.
 ///
 /// # Errors
 /// A [`Failure`] naming the rule that broke.
-pub async fn stamp_returns_the_committed_stamp<H: Harness>(h: &H) -> Check {
+pub async fn created_at_returns_the_committed_created_at<H: Harness>(h: &H) -> Check {
     let store = h.store();
-    let stamps = [
+    let resolved = [
         at(0),
         at(1),
         instant("2024-02-29T12:34:56.789Z")?,
         instant("2200-01-01T00:00:00.001Z")?,
     ];
-    for (n, stamp) in (1_u64..).zip(stamps) {
+    for (n, created_at) in (1_u64..).zip(resolved) {
         let target = key(1, n, n)?;
-        put_stamped(store, target, b"abc", stamp).await?;
+        put_with_created_at(store, target, b"abc", created_at).await?;
         let file = listed_one(store, target).await?;
-        let got = store.stamp(&file).await?;
-        ensure_eq!(got.at(), stamp, format!("stamp of {target}"));
+        let got = store.created_at(&file).await?;
+        ensure_eq!(got.at(), created_at, format!("created-at time of {target}"));
         ensure!(
-            got.origin() != StampOrigin::Fallback,
-            "stamp of {target} came from the fallback"
+            got.origin() != CreatedAtSource::Fallback,
+            "created-at time of {target} came from the fallback"
         );
     }
     Ok(())
 }
 
-/// A listed file is `Stored` and equal to the committed stamp, or it is marked
+/// A listed file is `Stored` and equal to the committed created-at time, or it is marked
 /// `LastModified`; nothing in between.
 ///
 /// # Errors
 /// A [`Failure`] naming the rule that broke.
-pub async fn listed_stamp_is_exact_or_marked<H: Harness>(h: &H) -> Check {
+pub async fn listed_created_at_is_exact_or_marked<H: Harness>(h: &H) -> Check {
     let store = h.store();
     let target = key(2, 1, 1)?;
-    put_stamped(store, target, b"abc", at(STAMP)).await?;
+    put_with_created_at(store, target, b"abc", at(CREATED_AT)).await?;
     let file = listed_one(store, target).await?;
     ensure!(
-        exact_or_marked(&file, at(STAMP)),
+        exact_or_marked(&file, at(CREATED_AT)),
         "{target} listed with {:?}",
         file.listed
     );
     Ok(())
 }
 
-/// A file that was deleted after it was listed has no stamp: `NotFound`.
+/// A file that was deleted after it was listed has no created-at time: `NotFound`.
 ///
 /// # Errors
 /// A [`Failure`] naming the rule that broke.
-pub async fn stamp_of_a_vanished_file_is_not_found<H: Harness>(h: &H) -> Check {
+pub async fn created_at_of_a_vanished_file_is_not_found<H: Harness>(h: &H) -> Check {
     let store = h.store();
     let target = key(3, 1, 1)?;
-    put_stamped(store, target, b"abc", at(STAMP)).await?;
+    put_with_created_at(store, target, b"abc", at(CREATED_AT)).await?;
     let file = listed_one(store, target).await?;
     store.delete(&[target]).await?;
     ensure_eq!(
-        store.stamp(&file).await,
+        store.created_at(&file).await,
         Err(StoreError::NotFound { key: target }),
-        "stamp of a deleted file"
+        "created-at time of a deleted file"
     );
     Ok(())
 }
 
 /// A file re-committed with another size after it was listed is refused, not
-/// stamped as if it were the listed one.
+/// treated as the listed one.
 ///
 /// # Errors
 /// A [`Failure`] naming the rule that broke.
-pub async fn stamp_of_an_overwritten_file_is_refused<H: Harness>(h: &H) -> Check {
+pub async fn created_at_of_an_overwritten_file_is_refused<H: Harness>(h: &H) -> Check {
     let store = h.store();
     let target = key(4, 1, 1)?;
-    put_stamped(store, target, b"abc", at(STAMP)).await?;
+    put_with_created_at(store, target, b"abc", at(CREATED_AT)).await?;
     let file = listed_one(store, target).await?;
-    put_stamped(store, target, b"abcdef", at(STAMP)).await?;
+    put_with_created_at(store, target, b"abcdef", at(CREATED_AT)).await?;
     ensure_eq!(
-        store.stamp(&file).await,
+        store.created_at(&file).await,
         Err(StoreError::Transient {
             op: StoreOp::Read,
             kind: std::io::ErrorKind::InvalidData
         }),
-        "stamp after an overwrite with another size"
+        "created-at time after an overwrite with another size"
     );
     Ok(())
 }
 
-/// `read_with_stamp` returns what `read` and `stamp` return separately.
+/// `read_with_created_at` returns what `read` and `created_at` return separately.
 ///
 /// # Errors
 /// A [`Failure`] naming the rule that broke.
-pub async fn read_with_stamp_agrees_with_read_and_stamp<H: Harness>(h: &H) -> Check {
+pub async fn read_with_created_at_agrees_with_read_and_created_at<H: Harness>(h: &H) -> Check {
     let store = h.store();
     let target = key(5, 2, 2)?;
-    put_stamped(store, target, b"abcde", at(STAMP)).await?;
+    put_with_created_at(store, target, b"abcde", at(CREATED_AT)).await?;
     let file = listed_one(store, target).await?;
-    let (bytes, stamp) = store.read_with_stamp(&file, read_len(3)?).await?;
+    let (bytes, created_at) = store.read_with_created_at(&file, read_len(3)?).await?;
     ensure_eq!(
         bytes,
         store.read(&target, 0, read_len(3)?).await?,
-        "bytes of read_with_stamp"
+        "bytes of read_with_created_at"
     );
     ensure_eq!(
-        Ok(stamp),
-        store.stamp(&file).await,
-        "stamp of read_with_stamp"
+        Ok(created_at),
+        store.created_at(&file).await,
+        "created-at time of read_with_created_at"
     );
-    ensure_eq!(stamp.at(), at(STAMP), "the committed stamp");
+    ensure_eq!(
+        created_at.at(),
+        at(CREATED_AT),
+        "the committed created-at time"
+    );
     Ok(())
 }
 
@@ -783,7 +787,7 @@ pub async fn read_many_agrees_with_read<H: Harness>(h: &H) -> Check {
     let store = h.store();
     let target = key(6, 3, 3)?;
     let absent = key(6, 4, 4)?;
-    put_stamped(store, target, b"abcdefgh", at(STAMP)).await?;
+    put_with_created_at(store, target, b"abcdefgh", at(CREATED_AT)).await?;
     let reads = [
         ReadAt {
             key: target,
@@ -835,9 +839,9 @@ pub async fn read_many_agrees_with_read<H: Harness>(h: &H) -> Check {
 pub async fn list_many_agrees_with_list<H: Harness>(h: &H) -> Check {
     let store = h.store();
     for n in 1..=5 {
-        put_stamped(store, key(0, n, n)?, b"x", at(STAMP)).await?;
+        put_with_created_at(store, key(0, n, n)?, b"x", at(CREATED_AT)).await?;
     }
-    put_stamped(store, key(2, 1, 4)?, b"y", at(STAMP)).await?;
+    put_with_created_at(store, key(2, 1, 4)?, b"y", at(CREATED_AT)).await?;
     let limit = limit(2)?;
     let first = store.list(Level::ZERO, None, limit).await?;
     let pages = [
@@ -870,17 +874,17 @@ pub async fn list_many_agrees_with_list<H: Harness>(h: &H) -> Check {
     Ok(())
 }
 
-/// `stamp_many` answers each file as `stamp` does, in order: a file deleted
+/// `created_at_many` answers each file as `created_at` does, in order: a file deleted
 /// since it was listed fails only its own slot.
 ///
 /// # Errors
 /// A [`Failure`] naming the rule that broke.
-pub async fn stamp_many_agrees_with_stamp<H: Harness>(h: &H) -> Check {
+pub async fn created_at_many_agrees_with_created_at<H: Harness>(h: &H) -> Check {
     let store = h.store();
     let (a, b, gone) = (key(7, 1, 1)?, key(7, 2, 2)?, key(7, 3, 3)?);
-    put_stamped(store, a, b"a", at(STAMP)).await?;
-    put_stamped(store, b, b"bb", at(STAMP + 1)).await?;
-    put_stamped(store, gone, b"c", at(STAMP + 2)).await?;
+    put_with_created_at(store, a, b"a", at(CREATED_AT)).await?;
+    put_with_created_at(store, b, b"bb", at(CREATED_AT + 1)).await?;
+    put_with_created_at(store, gone, b"c", at(CREATED_AT + 2)).await?;
     let files = [
         listed_one(store, a).await?,
         listed_one(store, gone).await?,
@@ -889,12 +893,12 @@ pub async fn stamp_many_agrees_with_stamp<H: Harness>(h: &H) -> Check {
     store.delete(&[gone]).await?;
     let mut want = Vec::new();
     for file in &files {
-        want.push(store.stamp(file).await);
+        want.push(store.created_at(file).await);
     }
     ensure_eq!(
-        store.stamp_many(&files).await,
+        store.created_at_many(&files).await,
         want,
-        "stamp_many against stamp"
+        "created_at_many against created-at time"
     );
     ensure_eq!(
         want.get(1).cloned(),
@@ -924,15 +928,15 @@ macro_rules! conformance_suite {
             read_of_missing_key_is_not_found,
             delete_is_idempotent,
             two_uploads_to_one_key,
-            chunks_concatenate_and_stamp_survives,
-            stamp_returns_the_committed_stamp,
-            listed_stamp_is_exact_or_marked,
-            stamp_of_a_vanished_file_is_not_found,
-            stamp_of_an_overwritten_file_is_refused,
-            read_with_stamp_agrees_with_read_and_stamp,
+            chunks_concatenate_and_created_at_survives,
+            created_at_returns_the_committed_created_at,
+            listed_created_at_is_exact_or_marked,
+            created_at_of_a_vanished_file_is_not_found,
+            created_at_of_an_overwritten_file_is_refused,
+            read_with_created_at_agrees_with_read_and_created_at,
             read_many_agrees_with_read,
             list_many_agrees_with_list,
-            stamp_many_agrees_with_stamp,
+            created_at_many_agrees_with_created_at,
         );
     };
     (@each $make:expr; $($case:ident,)+) => {

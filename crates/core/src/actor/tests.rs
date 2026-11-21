@@ -8,7 +8,7 @@ use lsr_wal::Salts;
 
 use super::*;
 use crate::conformance::block_on;
-use crate::layout::StoredStamp;
+use crate::layout::CreatedAt;
 use crate::layout::{FileKey, Level};
 use crate::mem::MemStore;
 use crate::plan::RestoreTarget;
@@ -112,22 +112,22 @@ impl ObjectStore for Counting {
         self.inner.read(key, offset, len)
     }
 
-    fn stamp(
+    fn created_at(
         &self,
         file: &FileInfo,
-    ) -> impl Future<Output = Result<StoredStamp, StoreError>> + Send {
+    ) -> impl Future<Output = Result<CreatedAt, StoreError>> + Send {
         self.count();
-        self.inner.stamp(file)
+        self.inner.created_at(file)
     }
 
-    fn read_with_stamp(
+    fn read_with_created_at(
         &self,
         file: &FileInfo,
         len: ReadLen,
-    ) -> impl Future<Output = Result<(Vec<u8>, StoredStamp), StoreError>> + Send {
+    ) -> impl Future<Output = Result<(Vec<u8>, CreatedAt), StoreError>> + Send {
         self.count();
         self.reads.lock().unwrap().push(file.key);
-        self.inner.read_with_stamp(file, len)
+        self.inner.read_with_created_at(file, len)
     }
 
     fn begin_upload(
@@ -1296,7 +1296,7 @@ fn a_throttled_retention_delete_waits_the_later_of_both() {
 }
 
 impl Rig {
-    /// A rig whose replica lists last-modified times, so every stamp a
+    /// A rig whose replica lists last-modified times, so every created-at time a
     /// decision needs is a request.
     fn lazy() -> Self {
         let mut rig = Self::new();
@@ -1331,7 +1331,7 @@ fn stage_and_upload(rig: &mut Rig, actor: &mut Actor, n: u8, now: i64) {
 }
 
 #[test]
-fn stamp_failure_is_a_maintain_fault() {
+fn created_at_failure_is_a_maintain_fault() {
     let mut rig = Rig::lazy();
     let mut actor = Actor::new(cfg());
     rig.settle(&mut actor, T0);
@@ -1351,7 +1351,7 @@ fn stamp_failure_is_a_maintain_fault() {
         "{tick:?}"
     );
     assert_eq!(Rig::files(&rig.remote, Level::ZERO), before, "a job ran");
-    // Before its wait the lane neither relists nor reads a stamp.
+    // Before its wait the lane neither relists nor reads a created-at time.
     let io = rig.io();
     let idle = rig.tick(&mut actor, at + 29_000);
     assert_eq!(event(&idle), Some(&Event::Idle), "{idle:?}");
@@ -1365,13 +1365,13 @@ fn stamp_failure_is_a_maintain_fault() {
     // Faults spent, the same tick succeeds: the listing was still owed.
     let again = rig.tick(&mut actor, until.unix_millis() + 2_000);
     assert!(
-        matches!(event(&again), Some(Event::Maintained { stamps_read, .. }) if *stamps_read > 0),
+        matches!(event(&again), Some(Event::Maintained { created_at_read, .. }) if *created_at_read > 0),
         "{again:?}"
     );
 }
 
 #[test]
-fn the_maintenance_event_counts_the_stamps_it_read() {
+fn the_maintenance_event_counts_the_created_at_it_read() {
     let run = |mut rig: Rig| {
         let mut actor = Actor::new(cfg());
         let mut ticks = rig.settle(&mut actor, T0);
@@ -1382,11 +1382,13 @@ fn the_maintenance_event_counts_the_stamps_it_read() {
         let waits: Vec<u64> = ticks
             .iter()
             .filter_map(|tick| match event(tick) {
-                Some(Event::Maintained { stamps_read, .. }) => Some(*stamps_read),
+                Some(Event::Maintained {
+                    created_at_read, ..
+                }) => Some(*created_at_read),
                 Some(_) | None => None,
             })
             .collect();
-        (waits, rig.remote.inner.stamp_calls())
+        (waits, rig.remote.inner.created_at_calls())
     };
     let (stored, stored_calls) = run(Rig::new());
     assert!(stored.iter().all(|read| *read == 0), "{stored:?}");

@@ -9,7 +9,7 @@ use lsr_ltx::{DbChecksum, DbPages, PageChecksum, PageNo, PageRef, PageSize, Time
 
 use super::VerifyError;
 use crate::inventory::Inventory;
-use crate::layout::{FileInfo, StoredStamp};
+use crate::layout::{CreatedAt, FileInfo};
 use crate::layout::{FileKey, Level};
 use crate::plan::RestoreTarget;
 use crate::restore::{DatabaseSink, RestoreError, RestoreOptions, Restored, restore_from};
@@ -92,20 +92,20 @@ impl<S: ObjectStore> ObjectStore for Counting<'_, S> {
         Ok(chunk)
     }
 
-    async fn stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
-        self.inner.stamp(file).await
+    async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
+        self.inner.created_at(file).await
     }
 
-    async fn read_with_stamp(
+    async fn read_with_created_at(
         &self,
         file: &FileInfo,
         len: ReadLen,
-    ) -> Result<(Vec<u8>, StoredStamp), StoreError> {
-        let (chunk, stamp) = self.inner.read_with_stamp(file, len).await?;
+    ) -> Result<(Vec<u8>, CreatedAt), StoreError> {
+        let (chunk, created_at) = self.inner.read_with_created_at(file, len).await?;
         self.files.fetch_add(1, Ordering::Relaxed);
         let got = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
         self.bytes.fetch_add(got, Ordering::Relaxed);
-        Ok((chunk, stamp))
+        Ok((chunk, created_at))
     }
 
     async fn begin_upload(
@@ -187,7 +187,7 @@ fn named_file(error: &RestoreError, last: FileKey) -> Option<FileKey> {
         RestoreError::File { key, .. } => Some(*key),
         RestoreError::Unstable { missing, .. } => Some(*missing),
         RestoreError::DatabaseChecksum { .. } => Some(last),
-        RestoreError::StampRepeated { key } => Some(*key),
+        RestoreError::CreatedAtRepeated { key } => Some(*key),
         RestoreError::Inventory(_)
         | RestoreError::NoPlan(_)
         | RestoreError::Store(_)

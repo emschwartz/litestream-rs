@@ -9,20 +9,20 @@ use lsr_ltx::{Timestamp, Txid};
 use proptest::prelude::*;
 
 use super::*;
+use crate::created_at::{Resolve, ResolvedCreatedAt, resolve};
 use crate::inventory::Inventory;
-use crate::layout::ListedStamp;
+use crate::layout::ListedTime;
 use crate::maintain::tests::{
     Model, T0, at, defaults, due, file, inv, key, level, secs, small, txid,
 };
 use crate::maintain::{Due, Job};
 use crate::mem::MemStore;
 use crate::plan::RestoreTarget;
-use crate::stamps::{Resolve, Stamps, resolve};
 use crate::store::{ObjectStore, Upload};
 
 /// `retention` from a fresh state.
-fn restamp(file: &mut FileInfo, at: Timestamp) {
-    file.listed = ListedStamp::Stored(StoredStamp::mtime(at));
+fn set_created_at(file: &mut FileInfo, at: Timestamp) {
+    file.listed = ListedTime::Created(CreatedAt::mtime(at));
 }
 
 fn retention(
@@ -34,7 +34,7 @@ fn retention(
     retention_state(inventory, now, config, published, &MaintainState::default())
 }
 
-/// `super::retention` on a listing that carries every stamp.
+/// `super::retention` on a listing that carries every created-at time.
 fn retention_state(
     inventory: &Inventory,
     now: Timestamp,
@@ -42,9 +42,16 @@ fn retention_state(
     published: Option<Txid>,
     state: &MaintainState,
 ) -> Retention {
-    match super::retention(inventory, now, config, published, state, &Stamps::default()) {
+    match super::retention(
+        inventory,
+        now,
+        config,
+        published,
+        state,
+        &ResolvedCreatedAt::default(),
+    ) {
         Resolve::Done(retention) => retention,
-        Resolve::Need(file) => panic!("a stored listing asked for a stamp: {file:?}"),
+        Resolve::Need(file) => panic!("a stored listing asked for a created-at time: {file:?}"),
     }
 }
 
@@ -52,31 +59,31 @@ const HOUR: i64 = 3_600_000;
 const DAY: i64 = 24 * HOUR;
 
 /// One transaction every four hours.
-fn stamp_of(n: u64) -> i64 {
+fn created_at_of(n: u64) -> i64 {
     T0 + i64::try_from(n).unwrap() * 4 * HOUR
 }
 
 /// Snapshots at 10, 20 and 30, L1 over each tenth, L0 for 25 to 30: the
-/// newest stamp is 120 h after T0, so with 24 h retention the first two
+/// newest created-at time is 120 h after T0, so with 24 h retention the first two
 /// snapshots are old and the floor is 20.
 fn ladder() -> Vec<FileInfo> {
     let mut files = Vec::new();
     for n in [10, 20, 30] {
-        files.push(file(9, 1, n, stamp_of(n)));
+        files.push(file(9, 1, n, created_at_of(n)));
     }
     for (a, b) in [(1, 10), (11, 20), (21, 30)] {
-        files.push(file(1, a, b, stamp_of(b)));
+        files.push(file(1, a, b, created_at_of(b)));
     }
     for n in 25..=30 {
-        files.push(file(0, n, n, stamp_of(n)));
+        files.push(file(0, n, n, created_at_of(n)));
     }
     files
 }
 
-fn newest_stamp(files: &[FileInfo]) -> i64 {
+fn newest_created_at(files: &[FileInfo]) -> i64 {
     files
         .iter()
-        .map(|f| f.exact_stamp().unwrap().at().unix_millis())
+        .map(|f| f.created_at().unwrap().at().unix_millis())
         .max()
         .unwrap()
 }
@@ -93,7 +100,7 @@ fn one_level() -> Maintenance {
 }
 
 fn run(files: Vec<FileInfo>) -> Retention {
-    let now = newest_stamp(&files);
+    let now = newest_created_at(&files);
     retention(&inv(files), at(now), &defaults(), None)
 }
 
@@ -131,7 +138,7 @@ fn pinned(pin: u64) -> MaintainState {
 }
 
 fn pinned_run(files: Vec<FileInfo>, pin: u64) -> Retention {
-    let now = newest_stamp(&files);
+    let now = newest_created_at(&files);
     retention_state(&inv(files), at(now), &defaults(), None, &pinned(pin))
 }
 
@@ -239,7 +246,7 @@ fn level_zero_files_the_levels_do_not_cover_stay() {
     // L1 covers 21 to 30 only up to 27.
     let mut files = ladder();
     files.retain(|f| f.key != key(1, 21, 30));
-    files.push(file(1, 21, 27, stamp_of(27)));
+    files.push(file(1, 21, 27, created_at_of(27)));
     let got = keys(&run(files));
     assert!(got.contains(&key(0, 25, 25)) && got.contains(&key(0, 27, 27)));
     assert!(!got.contains(&key(0, 28, 28)), "{got:?}");
@@ -251,8 +258,8 @@ fn level_zero_skips_an_uncovered_file_and_deletes_the_covered_ones_above_it() {
     // scan used to stop at 27 and keep them).
     let mut files = ladder();
     files.retain(|f| f.key != key(1, 21, 30));
-    files.push(file(1, 21, 26, stamp_of(26)));
-    files.push(file(1, 28, 30, stamp_of(30)));
+    files.push(file(1, 21, 26, created_at_of(26)));
+    files.push(file(1, 28, 30, created_at_of(30)));
     let got = keys(&run(files));
     assert!(got.contains(&key(0, 26, 26)));
     assert!(!got.contains(&key(0, 27, 27)));
@@ -262,7 +269,7 @@ fn level_zero_skips_an_uncovered_file_and_deletes_the_covered_ones_above_it() {
 
 #[test]
 fn a_clock_that_steps_back_deletes_less_and_one_that_returns_deletes_the_same() {
-    // Two snapshots a day apart, retention a day. At the newest stamp the first
+    // Two snapshots a day apart, retention a day. At the newest created-at time the first
     // is old. A clock far in the past keeps it (less is deleted, never more),
     // and nothing is remembered: the clock's return plans the first job again.
     let files = vec![
@@ -287,7 +294,10 @@ fn a_clock_that_steps_back_deletes_less_and_one_that_returns_deletes_the_same() 
     assert!(matches!(back, Retention::Wait { .. }), "{back:?}");
     // A clock that jumped ahead and came back leaves no mark either.
     let ahead = retention_state(&inventory, at(T0 + 400 * DAY), &cfg, None, &state);
-    assert_eq!(first, ahead, "the newest stamp caps a clock that is ahead");
+    assert_eq!(
+        first, ahead,
+        "the newest created-at time caps a clock that is ahead"
+    );
     let again = retention_state(&inventory, newest, &cfg, None, &state);
     assert_eq!(first, again);
 }
@@ -297,7 +307,7 @@ fn level_zero_below_the_floor_goes_when_aged_though_nothing_covers_it() {
     // Left over from before L0 retention was switched on: L1 under it is
     // being deleted, and without this clause it would block every L0 delete.
     let mut files = ladder();
-    files.push(file(0, 3, 3, stamp_of(3)));
+    files.push(file(0, 3, 3, created_at_of(3)));
     let got = keys(&run(files));
     assert!(got.contains(&key(0, 3, 3)));
 }
@@ -312,7 +322,7 @@ fn keep_never_deletes_level_zero() {
     )
     .unwrap();
     let mut inventory = inv(ladder());
-    let now = at(newest_stamp(inventory.files()));
+    let now = at(newest_created_at(inventory.files()));
     let mut deleted = BTreeSet::new();
     while let Retention::Delete(job) = retention(&inventory, now, &keep, None) {
         deleted.extend(job.keys().iter().copied());
@@ -353,20 +363,20 @@ fn the_files_after_the_previous_snapshot_survive() {
 /// history, not a reason to hold.
 fn go_hole() -> Vec<FileInfo> {
     let mut files = vec![
-        file(9, 1, 10, stamp_of(10)),
-        file(9, 1, 30, stamp_of(30)),
-        file(1, 1, 5, stamp_of(5)),
-        file(1, 11, 20, stamp_of(20)),
-        file(1, 21, 30, stamp_of(30)),
+        file(9, 1, 10, created_at_of(10)),
+        file(9, 1, 30, created_at_of(30)),
+        file(1, 1, 5, created_at_of(5)),
+        file(1, 11, 20, created_at_of(20)),
+        file(1, 21, 30, created_at_of(30)),
     ];
-    files.extend((21..=30).map(|n| file(0, n, n, stamp_of(n))));
+    files.extend((21..=30).map(|n| file(0, n, n, created_at_of(n))));
     files
 }
 
 #[test]
 fn a_hole_behind_the_newest_snapshot_does_not_hold() {
     let files = go_hole();
-    let now = at(newest_stamp(&files));
+    let now = at(newest_created_at(&files));
     let before = inv(files);
     let Retention::Delete(job) = retention(&before, now, &defaults(), None) else {
         panic!("held on a hole behind the newest snapshot");
@@ -376,12 +386,15 @@ fn a_hole_behind_the_newest_snapshot_does_not_hold() {
 
 #[test]
 fn a_hole_after_the_newest_snapshot_holds() {
-    let mut files = vec![file(9, 1, 10, stamp_of(10)), file(9, 1, 20, stamp_of(20))];
-    files.extend([(1, 10), (11, 20)].map(|(a, b)| file(1, a, b, stamp_of(b))));
+    let mut files = vec![
+        file(9, 1, 10, created_at_of(10)),
+        file(9, 1, 20, created_at_of(20)),
+    ];
+    files.extend([(1, 10), (11, 20)].map(|(a, b)| file(1, a, b, created_at_of(b))));
     files.extend(
         (21..=30)
             .filter(|n| *n != 25)
-            .map(|n| file(0, n, n, stamp_of(n))),
+            .map(|n| file(0, n, n, created_at_of(n))),
     );
     assert_eq!(
         held(files),
@@ -410,14 +423,14 @@ fn foreign_names_hold() {
 #[test]
 fn a_malformed_snapshot_holds() {
     let mut files = ladder();
-    files.push(file(9, 5, 30, stamp_of(30)));
+    files.push(file(9, 5, 30, created_at_of(30)));
     assert_eq!(held(files), Hold::MalformedSnapshot { key: key(9, 5, 30) });
 }
 
 #[test]
 fn a_listing_behind_what_was_published_holds() {
     let files = ladder();
-    let now = at(newest_stamp(&files));
+    let now = at(newest_created_at(&files));
     let got = retention(&inv(files), now, &defaults(), Some(txid(31)));
     assert_eq!(
         got,
@@ -443,7 +456,7 @@ fn a_listing_behind_what_was_published_holds() {
 
 #[test]
 fn a_latest_that_does_not_plan_holds() {
-    let files: Vec<FileInfo> = (5..=8).map(|n| file(0, n, n, stamp_of(n))).collect();
+    let files: Vec<FileInfo> = (5..=8).map(|n| file(0, n, n, created_at_of(n))).collect();
     assert_eq!(
         held(files),
         Hold::LatestUnplannable {
@@ -456,20 +469,20 @@ fn a_latest_that_does_not_plan_holds() {
 }
 
 #[test]
-fn an_unstamped_snapshot_or_level_zero_file_holds_and_other_levels_do_not() {
+fn a_snapshot_or_level_zero_file_without_created_at_holds_and_other_levels_do_not() {
     let mut l0 = ladder();
     l0.retain(|f| f.key != key(0, 26, 26));
     l0.push(file(0, 26, 26, 0));
     assert_eq!(
         held(l0),
-        Hold::Unstamped {
+        Hold::NoCreatedAt {
             key: key(0, 26, 26)
         }
     );
     let mut snap = ladder();
     snap.retain(|f| f.key != key(9, 1, 10));
     snap.push(file(9, 1, 10, -5));
-    assert_eq!(held(snap), Hold::Unstamped { key: key(9, 1, 10) });
+    assert_eq!(held(snap), Hold::NoCreatedAt { key: key(9, 1, 10) });
     let mut l1 = ladder();
     l1.retain(|f| f.key != key(1, 1, 10));
     l1.push(file(1, 1, 10, 0));
@@ -482,24 +495,24 @@ fn an_unstamped_snapshot_or_level_zero_file_holds_and_other_levels_do_not() {
 fn a_level_zero_file_ending_at_the_floor_is_not_below_it() {
     let mut files = ladder();
     files.retain(|f| f.key != key(1, 11, 20));
-    files.push(file(1, 11, 19, stamp_of(19)));
-    files.push(file(0, 20, 20, stamp_of(20)));
+    files.push(file(1, 11, 19, created_at_of(19)));
+    files.push(file(0, 20, 20, created_at_of(20)));
     let deleted = keys(&run(files));
     assert!(deleted.contains(&key(1, 11, 19)), "{deleted:?}");
     assert!(!deleted.contains(&key(0, 20, 20)), "{deleted:?}");
 }
 
 /// The same rule for the files that set the anchor: the last file of each
-/// level. An unstamped last level-0 file holds; an unstamped last level-1
+/// level. An without a created-at time last level-0 file holds; an without a created-at time last level-1
 /// file does not.
 #[test]
-fn an_unstamped_last_file_holds_only_at_level_zero_or_nine() {
+fn a_last_file_without_created_at_holds_only_at_level_zero_or_nine() {
     let mut l0 = ladder();
     l0.retain(|f| f.key != key(0, 30, 30));
     l0.push(file(0, 30, 30, 0));
     assert_eq!(
         held(l0),
-        Hold::Unstamped {
+        Hold::NoCreatedAt {
             key: key(0, 30, 30)
         }
     );
@@ -509,11 +522,11 @@ fn an_unstamped_last_file_holds_only_at_level_zero_or_nine() {
     assert!(matches!(run(l1), Retention::Delete(_)));
 }
 
-/// A stamp at or before the epoch is a writer that stamped nothing. Read as
+/// A created-at time at or before the epoch is a writer that recorded no created-at time. Read as
 /// an instant it would be a file from 1970, older than any retention, and go
 /// first; it is a hold instead, however far ahead the clock is.
 #[test]
-fn a_zero_stamped_file_is_never_aged_as_from_1970() {
+fn a_file_with_a_zero_created_at_is_never_aged_as_from_1970() {
     for unset in [0, -1, i64::MIN] {
         let mut files = ladder();
         files.retain(|f| f.key != key(0, 25, 25));
@@ -521,7 +534,7 @@ fn a_zero_stamped_file_is_never_aged_as_from_1970() {
         match retention(&inv(files), Timestamp::MAX, &one_level(), None) {
             Retention::Held(hold) => assert_eq!(
                 hold,
-                Hold::Unstamped {
+                Hold::NoCreatedAt {
                     key: key(0, 25, 25)
                 },
                 "{unset}"
@@ -531,7 +544,7 @@ fn a_zero_stamped_file_is_never_aged_as_from_1970() {
             }
         }
     }
-    // The same ladder with a real stamp ages that file as usual.
+    // The same ladder with a non-zero created-at time ages that file as usual.
     let deleted = keys(&retention(
         &inv(ladder()),
         Timestamp::MAX,
@@ -542,14 +555,14 @@ fn a_zero_stamped_file_is_never_aged_as_from_1970() {
 }
 
 #[test]
-fn snapshots_whose_stamps_run_backwards_hold_with_a_text_about_stored_times() {
+fn snapshots_whose_created_at_run_backwards_hold_with_a_text_about_stored_times() {
     let mut files = ladder();
     files.retain(|f| f.key != key(9, 1, 20));
-    files.push(file(9, 1, 20, stamp_of(5)));
+    files.push(file(9, 1, 20, created_at_of(5)));
     let hold = held(files);
     assert_eq!(
         hold,
-        Hold::SnapshotStampsBackwards {
+        Hold::SnapshotCreatedAtBackwards {
             earlier: key(9, 1, 10),
             later: key(9, 1, 20)
         }
@@ -561,10 +574,10 @@ fn snapshots_whose_stamps_run_backwards_hold_with_a_text_about_stored_times() {
 }
 
 #[test]
-fn equal_snapshot_stamps_are_not_backwards() {
+fn equal_snapshot_created_at_are_not_backwards() {
     let mut files = ladder();
     files.retain(|f| f.key != key(9, 1, 20));
-    files.push(file(9, 1, 20, stamp_of(10)));
+    files.push(file(9, 1, 20, created_at_of(10)));
     assert!(matches!(run(files), Retention::Delete(_)));
 }
 
@@ -587,8 +600,8 @@ impl Drop for Broken {
 #[test]
 fn a_rule_that_breaks_the_newest_restore_is_caught_by_the_self_check() {
     // Level 0 only, uncovered: honest rules delete nothing.
-    let mut files = vec![file(9, 1, 10, stamp_of(10))];
-    files.extend((11..=14).map(|n| file(0, n, n, stamp_of(n))));
+    let mut files = vec![file(9, 1, 10, created_at_of(10))];
+    files.extend((11..=14).map(|n| file(0, n, n, created_at_of(n))));
     assert!(matches!(run(files.clone()), Retention::Wait { .. }));
     let _hook = Broken::on();
     let got = run(files);
@@ -606,7 +619,7 @@ fn a_rule_that_breaks_the_newest_restore_is_caught_by_the_self_check() {
 #[test]
 fn the_gate_reports_the_first_failure_in_its_order() {
     let mut files = ladder();
-    files.push(file(9, 5, 30, stamp_of(30)));
+    files.push(file(9, 5, 30, created_at_of(30)));
     let inventory = inv(files).with_skipped(level(0), 1);
     let got = retention(&inventory, at(T0 + 200 * HOUR), &defaults(), None);
     assert_eq!(
@@ -623,7 +636,7 @@ fn the_gate_reports_the_first_failure_in_its_order() {
 #[test]
 fn due_hands_out_the_delete_job_and_then_waits_with_nothing_left() {
     let files = ladder();
-    let now = at(newest_stamp(&files));
+    let now = at(newest_created_at(&files));
     let cfg = one_level();
     let mut inventory = inv(files);
     let Due::Run(Job::Delete(job)) = due(&inventory, now, &cfg, None) else {
@@ -648,7 +661,7 @@ fn due_hands_out_the_delete_job_and_then_waits_with_nothing_left() {
 #[test]
 fn a_hold_shows_in_the_wait_and_compaction_still_runs_while_held() {
     let cfg = one_level();
-    let now = at(newest_stamp(&ladder()));
+    let now = at(newest_created_at(&ladder()));
     let held_inv = inv(ladder()).with_skipped(level(2), 1);
     assert_eq!(
         due(&held_inv, now, &cfg, None),
@@ -661,7 +674,7 @@ fn a_hold_shows_in_the_wait_and_compaction_still_runs_while_held() {
         }
     );
     let mut files = ladder();
-    files.push(file(0, 31, 31, stamp_of(30)));
+    files.push(file(0, 31, 31, created_at_of(30)));
     let behind = inv(files).with_skipped(level(2), 1);
     let got = due(&behind, now, &cfg, None);
     assert!(matches!(got, Due::Run(Job::Compact(_))), "{got:?}");
@@ -670,9 +683,9 @@ fn a_hold_shows_in_the_wait_and_compaction_still_runs_while_held() {
 #[test]
 fn a_ready_snapshot_goes_before_any_delete() {
     let mut files = ladder();
-    files.push(file(0, 31, 31, stamp_of(31)));
-    files.push(file(1, 31, 31, stamp_of(31)));
-    let now = at(stamp_of(31));
+    files.push(file(0, 31, 31, created_at_of(31)));
+    files.push(file(1, 31, 31, created_at_of(31)));
+    let now = at(created_at_of(31));
     let got = due(&inv(files), now, &one_level(), None);
     assert!(matches!(got, Due::Run(Job::Snapshot(_))), "{got:?}");
 }
@@ -681,7 +694,7 @@ fn a_ready_snapshot_goes_before_any_delete() {
 fn the_wake_times_are_when_the_next_file_ages_out() {
     let cfg = one_level();
     let files = ladder();
-    // 60 h after T0: the first snapshot (stamped 40 h) is inside retention.
+    // 60 h after T0: the first snapshot (recorded as created 40 h) is inside retention.
     let before = at(T0 + 60 * HOUR);
     let inventory = inv(files);
     let wake = T0 + 40 * HOUR + DAY + 1;
@@ -706,14 +719,14 @@ fn the_wake_times_are_when_the_next_file_ages_out() {
 fn a_covered_level_zero_file_wakes_when_it_is_old_enough() {
     let cfg = one_level();
     let files = vec![
-        file(9, 1, 30, stamp_of(30)),
-        file(1, 21, 30, stamp_of(30)),
-        file(0, 25, 25, stamp_of(25)),
-        file(0, 30, 30, stamp_of(30)),
+        file(9, 1, 30, created_at_of(30)),
+        file(1, 21, 30, created_at_of(30)),
+        file(0, 25, 25, created_at_of(25)),
+        file(0, 30, 30, created_at_of(30)),
     ];
     let inventory = inv(files);
-    let wake = stamp_of(25) + 300_000;
-    let early = at(stamp_of(25) + 60_000);
+    let wake = created_at_of(25) + 300_000;
+    let early = at(created_at_of(25) + 60_000);
     assert_eq!(
         due(&inventory, early, &cfg, None),
         Due::Wait {
@@ -728,9 +741,9 @@ fn a_covered_level_zero_file_wakes_when_it_is_old_enough() {
 }
 
 #[test]
-fn a_clock_far_ahead_deletes_what_the_newest_stamp_deletes_and_one_far_behind_nothing() {
+fn a_clock_far_ahead_deletes_what_the_newest_created_at_deletes_and_one_far_behind_nothing() {
     let files = ladder();
-    let newest = at(newest_stamp(&files));
+    let newest = at(newest_created_at(&files));
     let inventory = inv(files);
     let at_newest = retention(&inventory, newest, &defaults(), None);
     assert_eq!(
@@ -817,14 +830,14 @@ fn retained_from(before: &Inventory, now: Timestamp, cfg: &Maintenance) -> Optio
     let newest = before
         .files()
         .iter()
-        .map(|f| f.exact_stamp().unwrap().at())
+        .map(|f| f.created_at().unwrap().at())
         .max()?;
     let anchor = now.min(newest).unix_millis();
     let cutoff =
         anchor.saturating_sub(i64::try_from(cfg.snapshot_retention().as_millis()).unwrap());
     let first = snaps
         .iter()
-        .position(|s| s.exact_stamp().unwrap().at().unix_millis() >= cutoff)
+        .position(|s| s.created_at().unwrap().at().unix_millis() >= cutoff)
         .unwrap_or(snaps.len().checked_sub(1)?);
     let floor = first
         .checked_sub(1)
@@ -848,7 +861,7 @@ fn inside_a_kept_file(after: &Inventory, t: Txid) -> bool {
     })
 }
 
-/// Invariants 1 to 4 for one delete job. `consistent`: stamps follow the
+/// Invariants 1 to 4 for one delete job. `consistent`: created-at times follow the
 /// transactions, so instants can be checked too.
 fn check_delete(
     before: &Inventory,
@@ -909,24 +922,21 @@ fn check_delete(
     }
 }
 
-/// The same for `AsOf`: at each kept file's stamp plus a millisecond, an
+/// The same for `AsOf`: at each kept file's created-at time plus a millisecond, an
 /// instant that planned still plans to the same state, or says the instant is
 /// inside a compacted file.
 fn check_instants(before: &Inventory, after: &Inventory, lo: Txid) {
-    let base_stamp = before
+    let base_created_at = before
         .level(Level::SNAPSHOT)
         .iter()
         .find(|s| s.key.range().max() == lo && is_snapshot_start(s))
-        .map(|s| s.exact_stamp().unwrap().at().unix_millis());
+        .map(|s| s.created_at().unwrap().at().unix_millis());
     for f in after.files() {
-        let instant = at(f
-            .exact_stamp()
-            .unwrap()
-            .at()
-            .unix_millis()
-            .saturating_add(1));
-        let Some(base) = base_stamp else { continue };
-        if f.exact_stamp().unwrap().at().unix_millis() < base {
+        let instant = at(f.created_at().unwrap().at().unix_millis().saturating_add(1));
+        let Some(base) = base_created_at else {
+            continue;
+        };
+        if f.created_at().unwrap().at().unix_millis() < base {
             continue;
         }
         let target = RestoreTarget::AsOf(instant);
@@ -977,7 +987,7 @@ struct Listing {
     files: Vec<FileInfo>,
     skipped: Option<(Level, usize)>,
     published: Option<Txid>,
-    /// No overlaps, no holes after the last snapshot, stamps follow the
+    /// No overlaps, no holes after the last snapshot, created-at times follow the
     /// transactions: the shape a Rust or Go writer leaves.
     sane: bool,
 }
@@ -998,13 +1008,13 @@ fn build(data: &[u8], weird: bool) -> Listing {
     let mut b = Bytes { data, at: 0 };
     let n = 4 + b.below(36);
     let gaps = [1_000, 60_000, HOUR, 4 * HOUR, DAY];
-    let mut stamps = vec![0i64];
+    let mut resolved = vec![0i64];
     let mut t = T0;
     for _ in 1..=n {
         t += gaps[b.index(gaps.len())];
-        stamps.push(t);
+        resolved.push(t);
     }
-    let stamp = |i: u64| stamps[usize::try_from(i).unwrap()];
+    let created_at = |i: u64| resolved[usize::try_from(i).unwrap()];
     let mut files = Vec::new();
     let snaps: BTreeSet<u64> = if b.percent(8) {
         BTreeSet::new()
@@ -1012,20 +1022,20 @@ fn build(data: &[u8], weird: bool) -> Listing {
         (0..=b.below(4)).map(|_| 2 + b.below(n - 1)).collect()
     };
     let last_snap = snaps.last().copied().unwrap_or(0);
-    files.extend(snaps.iter().map(|m| file(9, 1, *m, stamp(*m))));
+    files.extend(snaps.iter().map(|m| file(9, 1, *m, created_at(*m))));
     for i in 1..=n {
         if i > last_snap || b.percent(70) {
-            files.push(file(0, i, i, stamp(i)));
+            files.push(file(0, i, i, created_at(i)));
         }
     }
     let covered_to = if b.percent(15) { 0 } else { 1 + b.below(n) };
     let l1 = chunks(&mut b, 1, covered_to, 6);
-    files.extend(l1.iter().map(|(a, z)| file(1, *a, *z, stamp(*z))));
+    files.extend(l1.iter().map(|(a, z)| file(1, *a, *z, created_at(*z))));
     let l2_count = b.index(l1.len() + 1);
     let mut at = 0;
     while at < l2_count {
         let end = (at + b.index(3)).min(l2_count - 1);
-        files.push(file(2, l1[at].0, l1[end].1, stamp(l1[end].1)));
+        files.push(file(2, l1[at].0, l1[end].1, created_at(l1[end].1)));
         at = end + 1;
     }
     let mut listing = Listing {
@@ -1035,8 +1045,8 @@ fn build(data: &[u8], weird: bool) -> Listing {
         sane: !weird,
     };
     if weird {
-        roughen(&mut b, &mut listing, n, &stamp);
-        // A store lists a key once; a roughened stamp on one copy of a key
+        roughen(&mut b, &mut listing, n, &created_at);
+        // A store lists a key once; a roughened created-at time on one copy of a key
         // pushed twice is not a listing.
         let mut seen = BTreeSet::new();
         listing.files.retain(|f| seen.insert(f.key));
@@ -1044,8 +1054,8 @@ fn build(data: &[u8], weird: bool) -> Listing {
     listing
 }
 
-/// Holes, overlaps, backwards or zero stamps, foreign names, a listing behind.
-fn roughen(b: &mut Bytes, listing: &mut Listing, n: u64, stamp: &dyn Fn(u64) -> i64) {
+/// Holes, overlaps, backwards or zero created-at times, foreign names, a listing behind.
+fn roughen(b: &mut Bytes, listing: &mut Listing, n: u64, created_at: &dyn Fn(u64) -> i64) {
     for _ in 0..=b.below(3) {
         match b.below(7) {
             0 if !listing.files.is_empty() => {
@@ -1056,20 +1066,20 @@ fn roughen(b: &mut Bytes, listing: &mut Listing, n: u64, stamp: &dyn Fn(u64) -> 
                 let lo = 1 + b.below(n);
                 let hi = lo + b.below(n - lo + 1);
                 let l = u8::try_from(1 + b.below(3)).unwrap();
-                listing.files.push(file(l, lo, hi, stamp(hi)));
+                listing.files.push(file(l, lo, hi, created_at(hi)));
             }
             2 if !listing.files.is_empty() => {
                 let at = b.index(listing.files.len());
                 let f = &mut listing.files[at];
-                restamp(f, at_stamp(stamp(1 + b.below(n))));
+                set_created_at(f, at_created_at(created_at(1 + b.below(n))));
             }
             3 if !listing.files.is_empty() => {
                 let at = b.index(listing.files.len());
-                restamp(&mut listing.files[at], Timestamp::from_unix_millis(0));
+                set_created_at(&mut listing.files[at], Timestamp::from_unix_millis(0));
             }
             4 => {
                 let lo = 2 + b.below(n - 1);
-                listing.files.push(file(9, lo, n, stamp(n)));
+                listing.files.push(file(9, lo, n, created_at(n)));
             }
             5 => listing.skipped = Some((level(u8::try_from(b.below(10)).unwrap()), 1)),
             6 => listing.published = Txid::new(n + 1 + b.below(2)),
@@ -1078,7 +1088,7 @@ fn roughen(b: &mut Bytes, listing: &mut Listing, n: u64, stamp: &dyn Fn(u64) -> 
     }
 }
 
-fn at_stamp(ms: i64) -> Timestamp {
+fn at_created_at(ms: i64) -> Timestamp {
     Timestamp::from_unix_millis(ms)
 }
 
@@ -1101,7 +1111,7 @@ fn configs() -> [Maintenance; 4] {
 }
 
 fn pick_now(b: &mut Bytes, files: &[FileInfo]) -> i64 {
-    let newest = newest_stamp(files);
+    let newest = newest_created_at(files);
     match b.below(5) {
         0 => newest,
         1 => newest + DAY,
@@ -1109,7 +1119,7 @@ fn pick_now(b: &mut Bytes, files: &[FileInfo]) -> i64 {
         3 => newest - i64::try_from(b.below(120)).unwrap() * HOUR,
         _ => {
             files[b.index(files.len())]
-                .exact_stamp()
+                .created_at()
                 .unwrap()
                 .at()
                 .unix_millis()
@@ -1137,7 +1147,7 @@ fn check_listing(
     let Some(newest) = inventory
         .files()
         .iter()
-        .map(|f| f.exact_stamp().unwrap().at())
+        .map(|f| f.created_at().unwrap().at())
         .max()
     else {
         return;
@@ -1165,23 +1175,23 @@ fn check_listing(
     }
     // The level 0 scan stops at the first young file on the promise that
     // the files after it are young (see "Rules" in the module docs). Later
-    // snapshot stamps move the floor, which changes which files the scan
-    // reads at all, so with level 0 stamps running backwards the rewrite can
-    // unblock a delete the true stamps never reached. That is not a promise
+    // snapshot created-at times move the floor, which changes which files the scan
+    // reads at all, so with level 0 created-at times running backwards the rewrite can
+    // unblock a delete the true created-at times never reached. That is not a promise
     // of the design.
-    if !matches!(first, Retention::Held(_)) && level_zero_stamps_follow_keys(inventory) {
-        later_stamps(inventory, now, cfg, published, &first, noise);
+    if !matches!(first, Retention::Held(_)) && level_zero_created_at_follow_keys(inventory) {
+        later_created_at(inventory, now, cfg, published, &first, noise);
     }
 }
 
-/// Whether the level 0 files' stamps never decrease in key order.
-fn level_zero_stamps_follow_keys(inventory: &Inventory) -> bool {
-    let stamps: Vec<i64> = inventory
+/// Whether the level 0 files' created-at times never decrease in key order.
+fn level_zero_created_at_follow_keys(inventory: &Inventory) -> bool {
+    let resolved: Vec<i64> = inventory
         .level(Level::ZERO)
         .iter()
-        .map(|f| f.exact_stamp().unwrap().at().unix_millis())
+        .map(|f| f.created_at().unwrap().at().unix_millis())
         .collect();
-    stamps.is_sorted()
+    resolved.is_sorted()
 }
 
 fn wake(
@@ -1195,20 +1205,20 @@ fn wake(
         Some(wake) => {
             let at_wake = retention(inv, wake, cfg, published);
             // The level-0 scan stops at the first young file, so a level-0
-            // file with no stamp behind it is not read until that file
+            // file with no created-at time behind it is not read until that file
             // ages out. The wake is honest, and the hold it meets then
             // carries no wake time, so the lane sleeps instead of spinning.
-            let unstamped_behind = matches!(
+            let without_created_at_behind = matches!(
                 &at_wake,
-                Retention::Held(Hold::Unstamped { key })
+                Retention::Held(Hold::NoCreatedAt { key })
                     if key.level() == Level::ZERO
                         && inv
                             .files()
                             .iter()
-                            .any(|f| f.key == *key && f.exact_stamp().unwrap().at().unix_millis() <= 0)
+                            .any(|f| f.key == *key && f.created_at().unwrap().at().unix_millis() <= 0)
             );
             assert!(
-                matches!(at_wake, Retention::Delete(_)) || unstamped_behind,
+                matches!(at_wake, Retention::Delete(_)) || without_created_at_behind,
                 "nothing at the wake time: {at_wake:?}"
             );
             if wake > now {
@@ -1256,10 +1266,10 @@ fn omission(
     }
 }
 
-/// 8: stamps rewritten later (all older ones to one instant, then everything
-/// by a constant) delete nothing that the true stamps keep. Stretching the
-/// gaps between stamps is a different fault and a non-goal.
-fn later_stamps(
+/// 8: created-at times rewritten later (all older ones to one instant, then everything
+/// by a constant) delete nothing that the true created-at times keep. Stretching the
+/// gaps between created-at times is a different fault and a non-goal.
+fn later_created_at(
     inventory: &Inventory,
     now: Timestamp,
     cfg: &Maintenance,
@@ -1269,7 +1279,7 @@ fn later_stamps(
 ) {
     let files = inventory.files();
     let floor = files[noise.index(files.len())]
-        .exact_stamp()
+        .created_at()
         .unwrap()
         .at()
         .unix_millis();
@@ -1277,8 +1287,8 @@ fn later_stamps(
     let moved: Vec<FileInfo> = files
         .iter()
         .map(|f| FileInfo {
-            listed: ListedStamp::Stored(StoredStamp::mtime(at(f
-                .exact_stamp()
+            listed: ListedTime::Created(CreatedAt::mtime(at(f
+                .created_at()
                 .unwrap()
                 .at()
                 .unix_millis()
@@ -1295,7 +1305,7 @@ fn later_stamps(
         for k in job.keys() {
             assert!(
                 allowed.contains(k),
-                "later stamps delete {k}, the true stamps keep it"
+                "later created-at times delete {k}, the true created-at times keep it"
             );
         }
     }
@@ -1338,12 +1348,12 @@ fn check_generated(data: &[u8], weird: bool, which: usize) {
     );
 }
 
-/// A shrunk failure of the property: a level 0 file with a young stamp sorts
-/// before an old one, and later snapshot stamps move the floor so that the
-/// young file stops blocking the old one's delete. Stamps like that are not
-/// a writer's, so the later-stamps rule does not apply to them.
+/// A shrunk failure of the property: a level 0 file with a young created-at time sorts
+/// before an old one, and later snapshot created-at times move the floor so that the
+/// young file stops blocking the old one's delete. Created-at times like that are not
+/// a writer's, so the later-created-at times rule does not apply to them.
 #[test]
-fn a_level_zero_file_stamped_out_of_order_is_outside_the_later_stamps_rule() {
+fn a_level_zero_file_created_out_of_order_is_outside_the_later_created_at_rule() {
     let data = [
         107, 0, 0, 0, 0, 0, 0, 63, 209, 174, 13, 0, 0, 0, 0, 0, 0, 0, 0, 85, 10, 40, 73, 0, 38, 0,
         132, 128, 0, 92, 39, 24, 178, 233, 155, 133, 85, 227, 108, 64, 8, 106, 247, 0, 1, 0, 0, 70,
@@ -1420,21 +1430,21 @@ impl Xs {
     }
 }
 
-/// Stamp shapes for the generated listings.
+/// Created-at time shapes for the generated listings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Shape {
     /// One writer: L0 in single transactions, L1 and L2 compacted from whole
-    /// L0 files, stamps of the last transaction, snapshots at an L0 end.
+    /// L0 files, created-at times of the last transaction, snapshots at an L0 end.
     Writer,
     /// As Writer, but L0 files hold several transactions and L1 boundaries
     /// are drawn independently (a handoff or a Go-era replica): an L0 file can
-    /// straddle a snapshot's end or an L1 boundary. Stamps still follow
+    /// straddle a snapshot's end or an L1 boundary. Created-at times still follow
     /// transactions.
     Misaligned,
-    /// Misaligned plus overlapping L0 files (same stamp rule: the last
+    /// Misaligned plus overlapping L0 files (same created-at time rule: the last
     /// transaction's).
     Overlapping,
-    /// Misaligned with some stamps moved earlier or later (a clock that
+    /// Misaligned with some created-at times moved earlier or later (a clock that
     /// stepped across a handoff).
     Backwards,
 }
@@ -1474,7 +1484,7 @@ fn gen_listing(x: &mut Xs, shape: Shape) -> Vec<FileInfo> {
         }
     }
     for &m in &snaps {
-        // A snapshot is stamped when taken: after its last transaction, before
+        // A snapshot is recorded as created when taken: after its last transaction, before
         // the next one.
         let lag = if x.below(2) == 0 {
             0
@@ -1506,7 +1516,7 @@ fn gen_listing(x: &mut Xs, shape: Shape) -> Vec<FileInfo> {
         for _ in 0..=x.below(3) {
             let i = x.index(files.len());
             let j = 1 + x.below(n);
-            restamp(&mut files[i], at(st(j)));
+            set_created_at(&mut files[i], at(st(j)));
         }
     }
     let mut seen = BTreeSet::new();
@@ -1529,7 +1539,7 @@ fn millis(d: Duration) -> i64 {
     i64::try_from(d.as_millis()).unwrap()
 }
 
-/// The instants at which some rule changes: every stamp plus each retention,
+/// The instants at which some rule changes: every created-at time plus each retention,
 /// and one millisecond either side.
 fn anchors(files: &[FileInfo], cfg: &Maintenance) -> Vec<i64> {
     let mut out = BTreeSet::new();
@@ -1539,7 +1549,7 @@ fn anchors(files: &[FileInfo], cfg: &Maintenance) -> Vec<i64> {
         L0Retention::Keep => 0,
     };
     for f in files {
-        let s = f.exact_stamp().unwrap().at().unix_millis();
+        let s = f.created_at().unwrap().at().unix_millis();
         for base in [s, s + snap, s + l0] {
             out.extend([base - 1, base, base + 1]);
         }
@@ -1592,7 +1602,7 @@ fn a_lower_anchor_can_delete_a_level_zero_file_a_higher_one_keeps() {
 /// restores, and every transaction at or above the highest first-retained
 /// snapshot seen so far that restored at the start still restores, or is
 /// inside a kept file whose end restores. Instants are checked per tick
-/// (`check_instants`) on sane stamps.
+/// (`check_instants`) on sane created-at times.
 #[test]
 fn retention_r_prime_jobs_are_restore_safe() {
     let mut x = Xs(0x7a11_c10c);
@@ -1610,7 +1620,7 @@ fn retention_r_prime_jobs_are_restore_safe() {
         let Some(newest) = start.newest() else {
             continue;
         };
-        let newest_ms = newest_stamp(&files);
+        let newest_ms = newest_created_at(&files);
         let mut lo_max = Txid::MIN;
         let mut current = start.clone();
         let nows = anchors(&files, cfg);
@@ -1647,7 +1657,7 @@ fn retention_r_prime_jobs_are_restore_safe() {
                         start
                             .files()
                             .iter()
-                            .map(|f| (f.key, f.exact_stamp().unwrap().at().unix_millis() - T0))
+                            .map(|f| (f.key, f.created_at().unwrap().at().unix_millis() - T0))
                             .collect::<Vec<_>>()
                     );
                 }
@@ -1658,9 +1668,9 @@ fn retention_r_prime_jobs_are_restore_safe() {
     assert!(deleted_total > 1000);
 }
 
-// The clock from stamps read on demand (R').
+// The clock from created-at times read on demand (R').
 
-/// A lazy store holding `files` (each stamped as listed, one byte each) and
+/// A lazy store holding `files` (each recorded as created as listed, one byte each) and
 /// the retention run over its listing.
 struct Lazy {
     store: MemStore,
@@ -1671,8 +1681,8 @@ impl Lazy {
         let store = MemStore::with_listed_last_modified();
         crate::conformance::block_on(async {
             for f in files {
-                let stamp = f.exact_stamp().unwrap().at();
-                let mut up = store.begin_upload(&f.key, stamp).await.unwrap();
+                let created_at = f.created_at().unwrap().at();
+                let mut up = store.begin_upload(&f.key, created_at).await.unwrap();
                 up.write(b"x").await.unwrap();
                 up.commit().await.unwrap();
             }
@@ -1680,18 +1690,18 @@ impl Lazy {
         Self { store }
     }
 
-    /// The decision and the keys whose stamps it asked for, in order.
+    /// The decision and the keys whose created-at times it asked for, in order.
     fn run(&self, now: i64, cfg: &Maintenance) -> (Retention, Vec<FileKey>) {
         let inventory = crate::conformance::block_on(Inventory::load(&self.store)).unwrap();
         let mut asked = Vec::new();
-        let mut step = |stamps: &Stamps| {
+        let mut step = |resolved: &ResolvedCreatedAt| {
             let got = super::retention(
                 &inventory,
                 at(now),
                 cfg,
                 None,
                 &MaintainState::default(),
-                stamps,
+                resolved,
             );
             if let Resolve::Need(file) = &got {
                 asked.push(file.first().key);
@@ -1699,7 +1709,7 @@ impl Lazy {
             got
         };
         let done = crate::conformance::block_on(resolve(&self.store, &mut step)).unwrap();
-        assert_eq!(done.stamps_read, u64::try_from(asked.len()).unwrap());
+        assert_eq!(done.created_at_read, u64::try_from(asked.len()).unwrap());
         (done.value, asked)
     }
 }
@@ -1708,7 +1718,7 @@ fn key_set(keys: &[FileKey]) -> BTreeSet<FileKey> {
     keys.iter().copied().collect()
 }
 
-/// On one writer's listing the newest stamp is on a last file or a snapshot
+/// On one writer's listing the newest created-at time is on a last file or a snapshot
 /// start, so the clock from them is main's, and so is every decision.
 #[test]
 fn retention_equals_exact_on_writer_listings() {
@@ -1719,7 +1729,7 @@ fn retention_equals_exact_on_writer_listings() {
         let cfg = &configs()[usize::try_from(case % 4).unwrap()];
         let lazy = Lazy::new(&files);
         for now in anchors(&files, cfg) {
-            let now = now.min(newest_stamp(&files) + DAY);
+            let now = now.min(newest_created_at(&files) + DAY);
             let (got, _) = lazy.run(now, cfg);
             ANCHOR_FROM_EVERY_FILE.set(true);
             let want = retention(&inv(files.clone()), at(now), cfg, None);
@@ -1732,7 +1742,7 @@ fn retention_equals_exact_on_writer_listings() {
 }
 
 /// The clock from the lasts and snapshot starts is never ahead of the clock
-/// from every file, whatever the stamps do.
+/// from every file, whatever the created-at times do.
 #[test]
 fn retention_r_prime_anchor_is_at_most_the_exact_anchor() {
     let mut x = Xs(0xa4c4_0123);
@@ -1748,7 +1758,7 @@ fn retention_r_prime_anchor_is_at_most_the_exact_anchor() {
         let newest_of = |files: &[FileInfo]| {
             files
                 .iter()
-                .map(|f| f.exact_stamp().unwrap().at().unix_millis())
+                .map(|f| f.created_at().unwrap().at().unix_millis())
                 .max()
         };
         let r_prime = newest_of(&anchor_files(&inventory));
@@ -1762,7 +1772,7 @@ fn retention_r_prime_anchor_is_at_most_the_exact_anchor() {
 #[test]
 fn retention_reads_only_lasts_snaps_and_scanned_level_zero() {
     let files = ladder();
-    let now = newest_stamp(&files);
+    let now = newest_created_at(&files);
     let (got, asked) = Lazy::new(&files).run(now, &defaults());
     assert_eq!(keys(&got), expected_ladder_deletes());
     let mut want = vec![key(0, 30, 30), key(1, 21, 30)];
@@ -1772,7 +1782,7 @@ fn retention_reads_only_lasts_snaps_and_scanned_level_zero() {
     assert_eq!(
         asked.len(),
         want.len(),
-        "a stamp was asked twice: {asked:?}"
+        "a created-at time was asked twice: {asked:?}"
     );
 }
 
@@ -1780,10 +1790,10 @@ fn retention_reads_only_lasts_snaps_and_scanned_level_zero() {
 #[test]
 fn level_zero_reading_stops_at_the_first_young_file() {
     let mut files = ladder();
-    let now = newest_stamp(&files);
+    let now = newest_created_at(&files);
     for f in &mut files {
         if (27..=29).contains(&f.key.range().max().get()) && f.key.level() == Level::ZERO {
-            restamp(f, at(now - 1_000));
+            set_created_at(f, at(now - 1_000));
         }
     }
     let (got, asked) = Lazy::new(&files).run(now, &defaults());
@@ -1804,7 +1814,7 @@ fn level_zero_reading_stops_at_the_first_young_file() {
 #[test]
 fn retention_ignores_last_modified() {
     let files = ladder();
-    let now = newest_stamp(&files);
+    let now = newest_created_at(&files);
     let lazy = Lazy::new(&files);
     let base = lazy.run(now, &defaults());
     for moved in [0, i64::MAX / 2] {
@@ -1815,14 +1825,14 @@ fn retention_ignores_last_modified() {
     }
 }
 
-/// Stored stamps all young while last-modified says everything is ancient:
+/// Stored created-at times all young while last-modified says everything is ancient:
 /// nothing may be deleted.
 #[test]
 fn retention_never_deletes_on_last_modified() {
     let mut files = ladder();
-    let now = newest_stamp(&files);
+    let now = newest_created_at(&files);
     for f in &mut files {
-        restamp(f, at(now));
+        set_created_at(f, at(now));
     }
     let lazy = Lazy::new(&files);
     for f in &files {
@@ -1832,23 +1842,23 @@ fn retention_never_deletes_on_last_modified() {
     assert!(!matches!(got, Retention::Delete(_)), "{got:?}");
 }
 
-/// A young level-0 file ahead of an unstamped one: the unstamped file is
+/// A young level-0 file ahead of an without a created-at time one: the without a created-at time file is
 /// behind the scan's stop, so the wake time is promised, and at it the hold
 /// has no wake time of its own (the lane sleeps, it does not spin).
 #[test]
-fn an_unstamped_file_behind_a_young_one_is_a_hold_at_the_wake_not_a_spin() {
+fn a_file_without_created_at_behind_a_young_one_is_a_hold_at_the_wake_not_a_spin() {
     let mut files = ladder();
     files.retain(|f| f.key != key(1, 1, 10) && f.key != key(9, 1, 10) && f.key != key(9, 1, 20));
     for f in &mut files {
         if f.key.level() == Level::ZERO {
-            restamp(f, at(stamp_of(30) - 4 * HOUR));
+            set_created_at(f, at(created_at_of(30) - 4 * HOUR));
         }
     }
-    let now = newest_stamp(&files) - HOUR;
+    let now = newest_created_at(&files) - HOUR;
     for f in &mut files {
         match (f.key.level() == Level::ZERO).then(|| f.key.range().max().get()) {
-            Some(25) => restamp(f, at(now - 1_000)),
-            Some(26) => restamp(f, at(0)),
+            Some(25) => set_created_at(f, at(now - 1_000)),
+            Some(26) => set_created_at(f, at(0)),
             _ => {}
         }
     }
@@ -1864,7 +1874,7 @@ fn an_unstamped_file_behind_a_young_one_is_a_hold_at_the_wake_not_a_spin() {
     let at_wake = retention(&inv(files.clone()), wake, &cfg, None);
     assert_eq!(
         at_wake,
-        Retention::Held(Hold::Unstamped {
+        Retention::Held(Hold::NoCreatedAt {
             key: key(0, 26, 26)
         })
     );

@@ -1,15 +1,15 @@
-//! Stamps resolved one at a time, for decisions that need few of them.
+//! Created-at times resolved one at a time, for decisions that need few of them.
 //!
 //! A listing may carry only a last-modified time, which no reader decides by
-//! (see [`ListedStamp`]). A decision is written as a [`Step`]: it is advanced
-//! with the stamps known so far and either finishes or names the one file whose
-//! exact stamp it needs next ([`Need`]), optionally followed by the files it
-//! expects to need after it. [`resolve`] reads the needed stamp, plus as many
+//! (see [`ListedTime`]). A decision is written as a [`Step`]: it is advanced
+//! with the created-at times known so far and either finishes or names the one file whose
+//! exact created-at time it needs next ([`Need`]), optionally followed by the files it
+//! expects to need after it. [`resolve`] reads the needed created-at time, plus as many
 //! of those expected ones as the store runs at once
-//! ([`ObjectStore::batch_width`] of [`BatchKind::Stamps`]) in one [`ObjectStore::stamp_many`], and drops
-//! the collected [`Stamps`] with the decision: nothing is kept across
+//! ([`ObjectStore::batch_width`] of [`BatchKind::ResolvedCreatedAt`]) in one [`ObjectStore::created_at_many`], and drops
+//! the collected [`ResolvedCreatedAt`] with the decision: nothing is kept across
 //! listings, attempts or ticks, so this is a ledger and not a cache. At width
-//! one only the needed stamp is read, one call per request, as before. A read
+//! one only the needed created-at time is read, one call per request, as before. A read
 //! ahead that fails is dropped: if the step does need that file, it asks, and
 //! the single read reports the failure then.
 //!
@@ -21,27 +21,27 @@ use std::collections::btree_map::Entry;
 
 use thiserror::Error;
 
-use crate::layout::{FileInfo, FileKey, ListedStamp, StoredStamp};
+use crate::layout::{CreatedAt, FileInfo, FileKey, ListedTime};
 use crate::store::{BatchKind, ObjectStore, StoreError};
 
-/// The exact stamps resolved during one decision.
+/// The exact created-at times resolved during one decision.
 #[derive(Clone, Debug, Default)]
-pub struct Stamps {
-    resolved: BTreeMap<FileKey, StoredStamp>,
+pub struct ResolvedCreatedAt {
+    resolved: BTreeMap<FileKey, CreatedAt>,
 }
 
-impl Stamps {
-    /// The file's exact stamp: the listing's own when it is exact, else the
+impl ResolvedCreatedAt {
+    /// The file's exact created-at time: the listing's own when it is exact, else the
     /// one resolved for it, else none yet.
     #[must_use]
-    pub fn exact(&self, info: &FileInfo) -> Option<StoredStamp> {
+    pub fn exact(&self, info: &FileInfo) -> Option<CreatedAt> {
         match info.listed {
-            ListedStamp::Stored(stamp) => Some(stamp),
-            ListedStamp::LastModified(_) => self.resolved.get(&info.key).copied(),
+            ListedTime::Created(created_at) => Some(created_at),
+            ListedTime::LastModified(_) => self.resolved.get(&info.key).copied(),
         }
     }
 
-    /// How many stamps were resolved through the store.
+    /// How many created-at times were resolved through the store.
     #[must_use]
     pub fn len(&self) -> usize {
         self.resolved.len()
@@ -57,7 +57,7 @@ impl Stamps {
 /// The most files a [`Need`] names ahead; a batch is never wider anyway.
 pub const MAX_AHEAD: usize = 64;
 
-/// The stamp a step needs now, and those it expects to need next.
+/// The created-at time a step needs now, and those it expects to need next.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Need {
     first: FileInfo,
@@ -88,7 +88,7 @@ impl Need {
         }
     }
 
-    /// The file whose stamp the step needs now.
+    /// The file whose created-at time the step needs now.
     #[must_use]
     pub const fn first(&self) -> &FileInfo {
         &self.first
@@ -112,25 +112,25 @@ impl From<FileInfo> for Need {
 pub enum Resolve<T> {
     /// The decision is made.
     Done(T),
-    /// The decision needs this stamp first.
+    /// The decision needs this created-at time first.
     Need(Need),
 }
 
-/// A decision that asks for stamps as it goes.
+/// A decision that asks for created-at times as it goes.
 pub trait Step {
     /// What the decision produces.
     type Output;
 
-    /// Decides with the stamps known so far, or names the next one needed. It
+    /// Decides with the created-at times known so far, or names the next one needed. It
     /// is called again after each answer, so it must be restartable.
-    fn advance(&mut self, stamps: &Stamps) -> Resolve<Self::Output>;
+    fn advance(&mut self, resolved: &ResolvedCreatedAt) -> Resolve<Self::Output>;
 }
 
-impl<T, F: FnMut(&Stamps) -> Resolve<T>> Step for F {
+impl<T, F: FnMut(&ResolvedCreatedAt) -> Resolve<T>> Step for F {
     type Output = T;
 
-    fn advance(&mut self, stamps: &Stamps) -> Resolve<T> {
-        self(stamps)
+    fn advance(&mut self, resolved: &ResolvedCreatedAt) -> Resolve<T> {
+        self(resolved)
     }
 }
 
@@ -139,40 +139,43 @@ impl<T, F: FnMut(&Stamps) -> Resolve<T>> Step for F {
 pub struct Resolved<T> {
     /// The decision.
     pub value: T,
-    /// How many stamps it read from the store, ahead reads included.
-    pub stamps_read: u64,
+    /// How many created-at times it read from the store, ahead reads included.
+    pub created_at_read: u64,
 }
 
 /// Why a decision could not be resolved.
 #[derive(Clone, PartialEq, Eq, Debug, Error)]
 pub enum ResolveError {
-    /// The store failed to answer a stamp request.
-    #[error("reading a stamp failed: {0}")]
+    /// The store failed to answer a created-at time request.
+    #[error("reading a file's created-at time failed: {0}")]
     Store(#[from] StoreError),
     /// The step asked for a file it was already given.
-    #[error("the step asked twice for the stamp of {key}")]
+    #[error("the step asked twice for the created-at time of {key}")]
     Repeated {
         /// The file asked for twice.
         key: FileKey,
     },
 }
 
-/// Drives `step` to completion, answering each request with the needed stamp
-/// and up to the stamps width minus one of the ones it names ahead (see the module docs).
+/// Drives `step` to completion, answering each request with the needed created-at time
+/// and up to the created-at times width minus one of the ones it names ahead (see the module docs).
 ///
 /// # Errors
-/// The store's error from the first failed read of a needed stamp, or
+/// The store's error from the first failed read of a needed created-at time, or
 /// [`ResolveError::Repeated`] when the step asks for the same file twice.
 pub async fn resolve<S: ObjectStore, P: Step>(
     store: &S,
     step: &mut P,
 ) -> Result<Resolved<P::Output>, ResolveError> {
-    let mut stamps_read = 0_u64;
-    let value = resolve_counted(store, step, &mut stamps_read).await?;
-    Ok(Resolved { value, stamps_read })
+    let mut created_at_read = 0_u64;
+    let value = resolve_counted(store, step, &mut created_at_read).await?;
+    Ok(Resolved {
+        value,
+        created_at_read,
+    })
 }
 
-/// [`resolve`], adding every stamp read to `stamps_read` as it goes, so a
+/// [`resolve`], adding every created-at time read to `created_at_read` as it goes, so a
 /// caller that retries after an error still counts the reads that failed.
 ///
 /// # Errors
@@ -180,17 +183,17 @@ pub async fn resolve<S: ObjectStore, P: Step>(
 pub async fn resolve_counted<S: ObjectStore, P: Step>(
     store: &S,
     step: &mut P,
-    stamps_read: &mut u64,
+    created_at_read: &mut u64,
 ) -> Result<P::Output, ResolveError> {
-    let mut stamps = Stamps::default();
-    let width = store.batch_width(BatchKind::Stamps).get();
+    let mut resolved = ResolvedCreatedAt::default();
+    let width = store.batch_width(BatchKind::ResolvedCreatedAt).get();
     loop {
-        let need = match step.advance(&stamps) {
+        let need = match step.advance(&resolved) {
             Resolve::Done(value) => return Ok(value),
             Resolve::Need(need) => need,
         };
         let first = need.first;
-        if stamps.resolved.contains_key(&first.key) {
+        if resolved.resolved.contains_key(&first.key) {
             return Err(ResolveError::Repeated { key: first.key });
         }
         let mut batch = vec![first];
@@ -198,29 +201,29 @@ pub async fn resolve_counted<S: ObjectStore, P: Step>(
             if batch.len() >= width {
                 break;
             }
-            if stamps.exact(&info).is_none() && batch.iter().all(|held| held.key != info.key) {
+            if resolved.exact(&info).is_none() && batch.iter().all(|held| held.key != info.key) {
                 batch.push(info);
             }
         }
-        read_batch(store, &batch, &mut stamps, stamps_read).await?;
+        read_batch(store, &batch, &mut resolved, created_at_read).await?;
     }
 }
 
-/// Reads the stamps of `batch`, whose first file is needed and the rest
+/// Reads the created-at times of `batch`, whose first file is needed and the rest
 /// ahead, adding each read to `read`. Only the needed one's failure counts.
 async fn read_batch<S: ObjectStore>(
     store: &S,
     batch: &[FileInfo],
-    stamps: &mut Stamps,
+    resolved: &mut ResolvedCreatedAt,
     read: &mut u64,
 ) -> Result<(), ResolveError> {
     if batch.len() > 1 {
-        let answers = store.stamp_many(batch).await;
+        let answers = store.created_at_many(batch).await;
         *read = read.saturating_add(u64::try_from(answers.len()).unwrap_or(u64::MAX));
         for (at, (info, result)) in batch.iter().zip(answers).enumerate() {
             match result {
-                Ok(stamp) => {
-                    stamps.resolved.insert(info.key, stamp);
+                Ok(created_at) => {
+                    resolved.resolved.insert(info.key, created_at);
                 }
                 Err(err) if at == 0 => return Err(err.into()),
                 Err(_) => {}
@@ -228,11 +231,11 @@ async fn read_batch<S: ObjectStore>(
         }
     }
     if let Some(first) = batch.first()
-        && let Entry::Vacant(slot) = stamps.resolved.entry(first.key)
+        && let Entry::Vacant(slot) = resolved.resolved.entry(first.key)
     {
-        // Width one, or a store that answered fewer stamps than asked.
+        // Width one, or a store that answered fewer created-at times than asked.
         *read = read.saturating_add(1);
-        slot.insert(store.stamp(first).await?);
+        slot.insert(store.created_at(first).await?);
     }
     Ok(())
 }
@@ -251,7 +254,7 @@ mod tests {
         FileKey::new(Level::ZERO, TxidRange::single(id))
     }
 
-    /// Commits files 1..=count stamped 100 * n and lists them back.
+    /// Commits files 1..=count recorded as created 100 * n and lists them back.
     fn filled(store: &MemStore, count: u64) -> Vec<FileInfo> {
         block_on(async {
             for n in 1..=count {
@@ -270,42 +273,45 @@ mod tests {
         let store = MemStore::with_listed_last_modified();
         let files = filled(&store, 1);
         let file = files[0];
-        let mut step = |_: &Stamps| Resolve::<()>::Need(file.into());
+        let mut step = |_: &ResolvedCreatedAt| Resolve::<()>::Need(file.into());
         let got = block_on(resolve(&store, &mut step));
         assert_eq!(got, Err(ResolveError::Repeated { key: file.key }));
-        assert_eq!(store.stamp_calls(), 1);
+        assert_eq!(store.created_at_calls(), 1);
     }
 
     #[test]
-    fn resolve_counts_stamps_read() {
+    fn resolve_counts_created_at_read() {
         let store = MemStore::with_listed_last_modified();
         let files = filled(&store, 3);
-        let mut step =
-            |stamps: &Stamps| match files.iter().take(2).find(|f| stamps.exact(f).is_none()) {
-                Some(next) => Resolve::Need((*next).into()),
-                None => Resolve::Done(
-                    files
-                        .iter()
-                        .take(2)
-                        .filter_map(|f| stamps.exact(f))
-                        .map(|s| s.at().unix_millis())
-                        .collect::<Vec<_>>(),
-                ),
-            };
+        let mut step = |resolved: &ResolvedCreatedAt| match files
+            .iter()
+            .take(2)
+            .find(|f| resolved.exact(f).is_none())
+        {
+            Some(next) => Resolve::Need((*next).into()),
+            None => Resolve::Done(
+                files
+                    .iter()
+                    .take(2)
+                    .filter_map(|f| resolved.exact(f))
+                    .map(|s| s.at().unix_millis())
+                    .collect::<Vec<_>>(),
+            ),
+        };
         let got = block_on(resolve(&store, &mut step)).unwrap();
         assert_eq!(got.value, vec![100, 200]);
-        assert_eq!(got.stamps_read, 2);
-        assert_eq!(store.stamp_calls(), 2);
+        assert_eq!(got.created_at_read, 2);
+        assert_eq!(store.created_at_calls(), 2);
     }
 
     #[test]
-    fn the_ledger_counts_each_stamp_resolved_through_the_store() {
+    fn the_ledger_counts_each_created_at_resolved_through_the_store() {
         let store = MemStore::with_listed_last_modified();
         let files = filled(&store, 2);
         let mut seen = Vec::new();
-        let mut step = |stamps: &Stamps| {
-            seen.push((stamps.len(), stamps.is_empty()));
-            match files.iter().find(|f| stamps.exact(f).is_none()) {
+        let mut step = |resolved: &ResolvedCreatedAt| {
+            seen.push((resolved.len(), resolved.is_empty()));
+            match files.iter().find(|f| resolved.exact(f).is_none()) {
                 Some(next) => Resolve::Need((*next).into()),
                 None => Resolve::Done(()),
             }
@@ -318,21 +324,21 @@ mod tests {
     fn stored_listing_resolves_with_no_calls() {
         let store = MemStore::new();
         let files = filled(&store, 2);
-        let mut step = |stamps: &Stamps| match files
+        let mut step = |resolved: &ResolvedCreatedAt| match files
             .iter()
-            .map(|f| stamps.exact(f))
+            .map(|f| resolved.exact(f))
             .collect::<Option<Vec<_>>>()
         {
             Some(all) => Resolve::Done(all.len()),
             None => Resolve::Need(files[0].into()),
         };
         let got = block_on(resolve(&store, &mut step)).unwrap();
-        assert_eq!((got.value, got.stamps_read), (2, 0));
-        assert_eq!(store.stamp_calls(), 0);
+        assert_eq!((got.value, got.created_at_read), (2, 0));
+        assert_eq!(store.created_at_calls(), 0);
     }
 
-    /// MemStore run `width` wide, recording each stamp batch, failing the
-    /// stamp of `fails`.
+    /// MemStore run `width` wide, recording each created-at time batch, failing the
+    /// created-at time of `fails`.
     struct Wide {
         inner: MemStore,
         width: usize,
@@ -361,22 +367,22 @@ mod tests {
             self.inner.read(key, offset, len).await
         }
 
-        async fn stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
+        async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
             if self.fails == Some(file.key) {
                 return Err(StoreError::Transient {
                     op: crate::store::StoreOp::Read,
                     kind: std::io::ErrorKind::ConnectionReset,
                 });
             }
-            self.inner.stamp(file).await
+            self.inner.created_at(file).await
         }
 
-        async fn read_with_stamp(
+        async fn read_with_created_at(
             &self,
             file: &FileInfo,
             len: crate::store::ReadLen,
-        ) -> Result<(Vec<u8>, StoredStamp), StoreError> {
-            self.inner.read_with_stamp(file, len).await
+        ) -> Result<(Vec<u8>, CreatedAt), StoreError> {
+            self.inner.read_with_created_at(file, len).await
         }
 
         async fn begin_upload(
@@ -395,12 +401,12 @@ mod tests {
             std::num::NonZeroUsize::new(self.width).unwrap()
         }
 
-        async fn stamp_many(&self, files: &[FileInfo]) -> Vec<Result<StoredStamp, StoreError>> {
+        async fn created_at_many(&self, files: &[FileInfo]) -> Vec<Result<CreatedAt, StoreError>> {
             assert!(files.len() <= self.width, "a batch wider than the store");
             self.batches.lock().unwrap().push(files.len());
             let mut out = Vec::new();
             for file in files {
-                out.push(self.stamp(file).await);
+                out.push(self.created_at(file).await);
             }
             out
         }
@@ -418,10 +424,10 @@ mod tests {
         (store, files)
     }
 
-    /// Asks for the first unstamped file, naming every later one ahead.
-    fn all_of(files: &[FileInfo]) -> impl FnMut(&Stamps) -> Resolve<usize> + '_ {
-        move |stamps: &Stamps| {
-            let mut missing = files.iter().filter(|f| stamps.exact(f).is_none());
+    /// Asks for the first without a created-at time file, naming every later one ahead.
+    fn all_of(files: &[FileInfo]) -> impl FnMut(&ResolvedCreatedAt) -> Resolve<usize> + '_ {
+        move |resolved: &ResolvedCreatedAt| {
+            let mut missing = files.iter().filter(|f| resolved.exact(f).is_none());
             match missing.next() {
                 Some(first) => Resolve::Need(Need::with_ahead(*first, missing.copied())),
                 None => Resolve::Done(files.len()),
@@ -433,9 +439,9 @@ mod tests {
     fn needs_named_ahead_are_read_a_store_width_at_a_time() {
         let (store, files) = wide(10, 4, None);
         let got = block_on(resolve(&store, &mut all_of(&files))).unwrap();
-        assert_eq!((got.value, got.stamps_read), (10, 10));
+        assert_eq!((got.value, got.created_at_read), (10, 10));
         assert_eq!(*store.batches.lock().unwrap(), vec![4, 4, 2]);
-        assert_eq!(store.inner.stamp_calls(), 10);
+        assert_eq!(store.inner.created_at_calls(), 10);
     }
 
     #[test]
@@ -450,10 +456,10 @@ mod tests {
     }
 
     #[test]
-    fn at_width_one_only_the_needed_stamp_is_read() {
+    fn at_width_one_only_the_needed_created_at_is_read() {
         let (store, files) = wide(3, 1, None);
         let got = block_on(resolve(&store, &mut all_of(&files))).unwrap();
-        assert_eq!(got.stamps_read, 3);
+        assert_eq!(got.created_at_read, 3);
         assert!(store.batches.lock().unwrap().is_empty());
     }
 }

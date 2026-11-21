@@ -243,19 +243,19 @@ impl ObjectStore for Wide {
         self.inner.read(key, offset, len).await
     }
 
-    async fn stamp(
+    async fn created_at(
         &self,
         file: &crate::layout::FileInfo,
-    ) -> Result<crate::layout::StoredStamp, StoreError> {
-        self.inner.stamp(file).await
+    ) -> Result<crate::layout::CreatedAt, StoreError> {
+        self.inner.created_at(file).await
     }
 
-    async fn read_with_stamp(
+    async fn read_with_created_at(
         &self,
         file: &crate::layout::FileInfo,
         len: ReadLen,
-    ) -> Result<(Vec<u8>, crate::layout::StoredStamp), StoreError> {
-        self.inner.read_with_stamp(file, len).await
+    ) -> Result<(Vec<u8>, crate::layout::CreatedAt), StoreError> {
+        self.inner.read_with_created_at(file, len).await
     }
 
     async fn begin_upload(

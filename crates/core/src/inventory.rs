@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use lsr_ltx::{Txid, TxidRange};
 use thiserror::Error;
 
-use crate::layout::{FileInfo, FileKey, Level, ListedStamp, cmp_range};
+use crate::layout::{FileInfo, FileKey, Level, ListedTime, cmp_range};
 use crate::store::{BatchKind, ListAt, ObjectStore, PageLimit, StoreError};
 
 /// The page size a full scan asks for. A backend that proves "more follows"
@@ -132,24 +132,24 @@ impl Inventory {
         self
     }
 
-    /// The same inventory with every file's stamp read from the store, one
-    /// stamp (a HEAD on S3) per file, so each is `Stored` afterwards. Reads go
-    /// out [`BatchKind::Stamps`] width at a time through [`ObjectStore::stamp_many`].
+    /// The same inventory with every file's created-at time read from the store, one
+    /// created-at time (a HEAD on S3) per file, so each is `Stored` afterwards. Reads go
+    /// out [`BatchKind::ResolvedCreatedAt`] width at a time through [`ObjectStore::created_at_many`].
     ///
     /// # Errors
-    /// The first failed read in key order; never a partly stamped inventory.
-    pub async fn stamped<S: ObjectStore>(mut self, store: &S) -> Result<Self, StoreError> {
-        let width = store.batch_width(BatchKind::Stamps).get();
+    /// The first failed read in key order; never an inventory with some created-at times missing.
+    pub async fn with_created_at<S: ObjectStore>(mut self, store: &S) -> Result<Self, StoreError> {
+        let width = store.batch_width(BatchKind::ResolvedCreatedAt).get();
         for files in self.files.chunks_mut(width) {
-            let read = store.stamp_many(files).await;
+            let read = store.created_at_many(files).await;
             if read.len() != files.len() {
                 return Err(StoreError::Transient {
                     op: crate::store::StoreOp::Read,
                     kind: std::io::ErrorKind::InvalidData,
                 });
             }
-            for (info, stamp) in files.iter_mut().zip(read) {
-                info.listed = ListedStamp::Stored(stamp?);
+            for (info, created_at) in files.iter_mut().zip(read) {
+                info.listed = ListedTime::Created(created_at?);
             }
         }
         Ok(self)
@@ -228,8 +228,8 @@ impl Inventory {
 mod tests {
     use super::*;
     use crate::conformance::block_on;
-    use crate::layout::ListedStamp;
-    use crate::layout::StoredStamp;
+    use crate::layout::CreatedAt;
+    use crate::layout::ListedTime;
     use crate::mem::{MemStore, MemUpload};
     use crate::store::{Listing, ReadLen, StoreOp, Upload};
     use lsr_ltx::Timestamp;
@@ -244,7 +244,7 @@ mod tests {
         FileInfo {
             key: key(level, min, max),
             size: 1,
-            listed: ListedStamp::Stored(StoredStamp::mtime(Timestamp::from_unix_millis(0))),
+            listed: ListedTime::Created(CreatedAt::mtime(Timestamp::from_unix_millis(0))),
         }
     }
 
@@ -268,7 +268,7 @@ mod tests {
     fn a_key_given_twice_with_different_details_is_an_error_in_any_order() {
         let early = info(0, 4, 4);
         let late = FileInfo {
-            listed: ListedStamp::Stored(StoredStamp::mtime(Timestamp::from_unix_millis(900))),
+            listed: ListedTime::Created(CreatedAt::mtime(Timestamp::from_unix_millis(900))),
             ..early
         };
         let bigger = FileInfo { size: 9, ..early };
@@ -349,7 +349,7 @@ mod tests {
     }
 
     #[test]
-    fn stamped_keeps_every_file_and_gives_each_its_stored_stamp() {
+    fn with_created_at_keeps_every_file_and_gives_each_its_stored_created_at() {
         let store = MemStore::with_listed_last_modified();
         block_on(async {
             for n in 1..=3u64 {
@@ -358,18 +358,27 @@ mod tests {
             put(&store, key(9, 1, 3)).await;
         });
         let listed = block_on(Inventory::load(&store)).unwrap();
-        assert!(listed.files().iter().all(|f| f.exact_stamp().is_none()));
+        assert!(listed.files().iter().all(|f| f.created_at().is_none()));
         let keys: Vec<FileKey> = listed.files().iter().map(|f| f.key).collect();
-        let stamped = block_on(listed.stamped(&store)).unwrap();
+        let with_created_at = block_on(listed.with_created_at(&store)).unwrap();
         assert_eq!(
-            stamped.files().iter().map(|f| f.key).collect::<Vec<_>>(),
+            with_created_at
+                .files()
+                .iter()
+                .map(|f| f.key)
+                .collect::<Vec<_>>(),
             keys
         );
-        for file in stamped.files() {
-            let stamp = file.exact_stamp().unwrap();
-            assert_eq!(stamp.at(), Timestamp::from_unix_millis(7), "{}", file.key);
+        for file in with_created_at.files() {
+            let created_at = file.created_at().unwrap();
+            assert_eq!(
+                created_at.at(),
+                Timestamp::from_unix_millis(7),
+                "{}",
+                file.key
+            );
         }
-        assert_eq!(store.stamp_calls(), 4);
+        assert_eq!(store.created_at_calls(), 4);
     }
 
     #[test]
@@ -414,18 +423,18 @@ mod tests {
             ready(Err(StoreError::NotFound { key: *key }))
         }
 
-        fn stamp(
+        fn created_at(
             &self,
             file: &FileInfo,
-        ) -> impl Future<Output = Result<StoredStamp, StoreError>> + Send {
+        ) -> impl Future<Output = Result<CreatedAt, StoreError>> + Send {
             ready(Err(StoreError::NotFound { key: file.key }))
         }
 
-        fn read_with_stamp(
+        fn read_with_created_at(
             &self,
             file: &FileInfo,
             _len: ReadLen,
-        ) -> impl Future<Output = Result<(Vec<u8>, StoredStamp), StoreError>> + Send {
+        ) -> impl Future<Output = Result<(Vec<u8>, CreatedAt), StoreError>> + Send {
             ready(Err(StoreError::NotFound { key: file.key }))
         }
 

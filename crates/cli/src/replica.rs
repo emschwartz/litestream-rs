@@ -3,8 +3,8 @@
 //!
 //! The store is wrapped once, in [`Retrying`] with the default policy; its sleeper
 //! blocks the thread, which is all a one-shot command needs and what the
-//! no-reactor `block_on` can drive. How many stamps fell back to the object's
-//! `LastModified` is the store's own count (`S3Store::stamp_stats`), which counts a
+//! no-reactor `block_on` can drive. How many created-at times fell back to the object's
+//! `LastModified` is the store's own count (`S3Store::created_at_stats`), which counts a
 //! file once however many times a read of it was retried.
 
 use std::thread;

@@ -4,10 +4,10 @@
 mod review {
 
     use lsr_core::{
-        AsOfPlanner, FileInfo, FileKey, Inventory, InventoryError, Level, PlanOutcome, Resolve,
-        RestoreTarget, StampStep, Stamps, plan_reference,
+        AsOfPlanner, CreatedAtStep, FileInfo, FileKey, Inventory, InventoryError, Level,
+        PlanOutcome, Resolve, ResolvedCreatedAt, RestoreTarget, plan_reference,
     };
-    use lsr_core::{ListedStamp, StoredStamp};
+    use lsr_core::{CreatedAt, ListedTime};
     use lsr_ltx::{Timestamp, Txid, TxidRange};
     use proptest::prelude::*;
 
@@ -24,7 +24,7 @@ mod review {
         FileInfo {
             key: FileKey::new(Level::new(f.level).unwrap(), r),
             size: 1,
-            listed: ListedStamp::Stored(StoredStamp::mtime(Timestamp::from_unix_millis(f.created))),
+            listed: ListedTime::Created(CreatedAt::mtime(Timestamp::from_unix_millis(f.created))),
         }
     }
 
@@ -75,7 +75,7 @@ mod review {
     /// Files later than the instant that cut through the state at `end`: usable,
     /// linking, two or more transactions past it, and with no file dating the
     /// transaction right after `end`. Only a level 0-8 file ending there dates
-    /// it: a snapshot is stamped when written, any time after its newest
+    /// it: a snapshot is recorded as created when written, any time after its newest
     /// transaction. Written from the reachability argument, not from the
     /// planner.
     fn straddlers(files: &[F], g: G, end: u64) -> Vec<F> {
@@ -139,7 +139,7 @@ mod review {
         #![proptest_config(ProptestConfig::with_cases(20_000))]
         #[test]
         fn plan_matches_the_reachable_set((files, g) in case()) {
-            // The generator may repeat a key with another stamp; a real listing
+            // The generator may repeat a key with another created-at time; a real listing
             // cannot, and the inventory refuses it, so keep the first of each.
             let mut seen = std::collections::HashSet::new();
             let kept: Vec<F> = files
@@ -155,7 +155,7 @@ mod review {
             };
             let out = plan_reference(&inv, target);
             if let RestoreTarget::AsOf(instant) = target {
-                let lazy = AsOfPlanner::new(&inv, instant).advance(&Stamps::default());
+                let lazy = AsOfPlanner::new(&inv, instant).advance(&ResolvedCreatedAt::default());
                 prop_assert_eq!(lazy, Resolve::Done(out.clone()));
             }
             let ends = reachable_ends(&kept, g);
@@ -163,7 +163,7 @@ mod review {
                 G::AsOf(_) => ends.iter().max().copied(),
                 G::Latest | G::Txid(_) => want_end(&kept, g),
             };
-            // An instant before a hole: files of any stamp lie past the end and
+            // An instant before a hole: files of any created-at time lie past the end and
             // none of them starts at or before one past it.
             let before_a_hole = |w: u64| {
                 matches!(g, G::AsOf(_))
@@ -236,7 +236,7 @@ mod review {
         })
     }
 
-    /// Go stamps a compacted file with its newest input's time, so an L1 4-10 made
+    /// Go records a compacted file's created-at time as its newest input's time, so an L1 4-10 made
     /// from L0 files created at 400..=1000 is created at 1000. With those L0 files
     /// gone, the state as of 950 lies somewhere in 4..=9 and nothing in the
     /// replica can say where. Planning to 3 claims no transaction happened between

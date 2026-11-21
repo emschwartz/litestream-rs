@@ -86,7 +86,7 @@ Wave 1, in parallel: 1, 2, 3 (2 landed as e9e408a). Then 4 (needs 2), 5 (needs 1
 - `Inventory`: every level's files from one complete paging of the store. `Inventory::load(&store) -> Result<Inventory, StoreError>` is the only async code in this task; `Inventory::from_files` builds one for tests and refuses a key given twice with different details. Foreign-name counts are kept so `verify` can report them.
 - `RestoreTarget { Latest, Txid(Txid), AsOf(Timestamp) }`.
 - `ContiguousChain`: the files to apply, in order. Private fields, no public constructor; only the planner makes one. Invariants: the first file's range starts at 1, at any level (LTX defines a snapshot as a file that starts at transaction 1, and the decoder proves it holds every page; a young replica has level-0 files from transaction 1 and no level-9 file); each later file has `min <= previous max + 1` and `max > previous max`. Accessors: the files, `reaches() -> Txid`.
-- `fn plan(inventory: &Inventory, target: KeyTarget) -> PlanOutcome` for `Latest` and `Txid`, pure, no I/O, no clock. `AsOf` goes through `AsOfPlanner`, which reads stamps lazily (task 8g).
+- `fn plan(inventory: &Inventory, target: KeyTarget) -> PlanOutcome` for `Latest` and `Txid`, pure, no I/O, no clock. `AsOf` goes through `AsOfPlanner`, which reads created-at times lazily (task 8g).
 - `PlanOutcome`: a closed enum. `Plan(ContiguousChain)` plus one variant per distinct reason there is no exact answer, each carrying what an operator needs: nothing in the replica; no usable snapshot at or below the target; `Gap { have_through, next_starts }`; a `Txid` target beyond the newest transaction; a `Txid` target that falls strictly inside the only files covering it (finer files were compacted away), naming the file; an `AsOf` instant that falls inside a compacted file (`AsOfInsideFile { chain, file }`, below). Name them as reads best.
 
 **Semantics (decided; where Go differs, Go is wrong or looser):**
@@ -95,7 +95,7 @@ Wave 1, in parallel: 1, 2, 3 (2 landed as e9e408a). Then 4 (needs 2), 5 (needs 1
 - Extend with the eligible file, from any level, that satisfies the chain invariant and reaches furthest; ties go to the higher level (fewer, larger files). An overlapping file is valid: it holds the newest version of every page it touches.
 - A plan must end exactly where the target says: `Txid(n)` at `n`; `Latest` at the largest `max` of any file. If history exists beyond what the chain reaches, the outcome is `Gap` for `Latest` and `Txid`; for `AsOf` the chain ends where the eligible chain ends (ruling A1 below). This is the upstream bug this port exists to prevent (`restore -timestamp` stops at a gap and exits 0): the test for it comes first.
 - `AsOf(t)` later than every file is `Latest`'s plan, not an error: the replica's newest state is the state as of `t`.
-- `AsOf(t)` inside a compacted file is `AsOfInsideFile { chain, file }`, never `Plan`. Go stamps a compacted file with its newest input's time, so once the finer files are gone, the transactions after the chain's end up to `t` cannot be separated from the rest of the file; stopping at the last file boundary (as Go does) is inherent to compaction, and refusing would make `AsOf` useless past L0 retention. `chain` is the newest state restorable at or before `t`; `file` is the nearest-ending usable file created at or after `t` that links to the chain (`min <= reaches + 1`) and holds two or more transactions past it. A level 0-8 file ending exactly at `reaches + 1` dates that transaction (its stamp is that of the level-0 file that first carried it), so it removes the doubt; a snapshot ending there does not, since it is stamped when written. A restore refuses it unless `RestoreOptions::as_of_inside` is `AsOfInside::TakeEarlier` (the CLI's `--allow-earlier`), which applies `chain` and records `file` in `Restored::inside_file`. `Gap` (eligible history beyond the chain) wins over it.
+- `AsOf(t)` inside a compacted file is `AsOfInsideFile { chain, file }`, never `Plan`. Go records a compacted file's created-at time as its newest input's time, so once the finer files are gone, the transactions after the chain's end up to `t` cannot be separated from the rest of the file; stopping at the last file boundary (as Go does) is inherent to compaction, and refusing would make `AsOf` useless past L0 retention. `chain` is the newest state restorable at or before `t`; `file` is the nearest-ending usable file created at or after `t` that links to the chain (`min <= reaches + 1`) and holds two or more transactions past it. A level 0-8 file ending exactly at `reaches + 1` dates that transaction (its created-at time is that of the level-0 file that first carried it), so it removes the doubt; a snapshot ending there does not, since it is recorded as created when written. A restore refuses it unless `RestoreOptions::as_of_inside` is `AsOfInside::TakeEarlier` (the CLI's `--allow-earlier`), which applies `chain` and records `file` in `Restored::inside_file`. `Gap` (eligible history beyond the chain) wins over it.
 
 **Tests (write first):**
 - The gap table: one file removed mid-chain, at L0 and at a higher level, for each of the three targets: `Gap` with the exact `have_through` and `next_starts`.
@@ -191,15 +191,15 @@ A mismatch between Rust and Go on a valid replica is a defect in Rust until show
 - Added after the task, from the upstream-test ledger: Go's restore switches under Go's names (`.upstream/litestream/cmd/litestream/restore.go`), each exit 0 when it applies, no new exit code and no new usage error (every combination has a meaning).
   - `--if-db-not-exists`: anything at the output (as `FileSink::create` judges it, a dangling symlink included) ends the command before the replica is opened, as in Go. Departure: an output that cannot be inspected is an environment error, where Go's `os.Stat` check skips the restore.
   - `--if-replica-exists`: a replica that holds no LTX file (`PlanOutcome::EmptyReplica`) ends with 0 and no file, for every target. A directory with no `ltx/` folder, or a path that does not exist, is such a replica, as Go's file replica lists a missing level directory as empty (`file/replica_client.go:98-100`, Go's `TestRestoreCommand_RunIfReplicaExists`): with the flag it ends with 0 and a skip that names the missing folder (`skipped`: `no_ltx_folder` in JSON); without it the restore is refused (exit 2, "no ltx/ folder inside it"), as an empty replica is and as Go returns "no matching backup files available" (exit 1 there). `verify` and `files` still refuse such a path as "not a file replica" (exit 3). As in Go (`cmd/litestream/restore.go:119-122`) `--dry-run` ignores the flag: an empty replica is refused there (owner's decision of 2026-11-21, issue #28). Departure: Go exits 0 on every "transaction not available", so a replica with files that cannot reach a requested txid or instant restores nothing and succeeds; here that stays a refusal (exit 2).
-  - `--dry-run`: Go's "Restore plan:" text (source, target, replica kind, txid range, then level, file, min and max txid, size and time per file) or Go's `RestorePlan` JSON keys. The plan is made exactly as the restore makes its first attempt, reading the exact stamps an as-of target needs; a target with no exact plan is the restore's own refusal. Departure: Go never looks at the output in a dry run; here `lsr_local::preflight` checks it read-only, so an existing output or a stale sidecar is the restore's own error, and with `--clear-sidecars` the sidecars it would remove are listed and kept.
-  - `--json` on restore: Go's `RestoreResult` keys (`db_path`, `replica`, `txid`, `duration_ms`, `integrity_check`) plus pages, page size, files, bytes and stamps read, whether the database checksum was verified, and the sidecars removed. A skip prints one object (`skipped`: `output_exists`, `empty_replica` or `no_ltx_folder`) where Go prints only a log line. JSON is one line, as for verify and files. An S3 source prints as `s3://<bucket>/<prefix>`, never the typed URL, which may carry a query.
+  - `--dry-run`: Go's "Restore plan:" text (source, target, replica kind, txid range, then level, file, min and max txid, size and time per file) or Go's `RestorePlan` JSON keys. The plan is made exactly as the restore makes its first attempt, reading the exact created-at times an as-of target needs; a target with no exact plan is the restore's own refusal. Departure: Go never looks at the output in a dry run; here `lsr_local::preflight` checks it read-only, so an existing output or a stale sidecar is the restore's own error, and with `--clear-sidecars` the sidecars it would remove are listed and kept.
+  - `--json` on restore: Go's `RestoreResult` keys (`db_path`, `replica`, `txid`, `duration_ms`, `integrity_check`) plus pages, page size, files, bytes and created-at times read, whether the database checksum was verified, and the sidecars removed. A skip prints one object (`skipped`: `output_exists`, `empty_replica` or `no_ltx_folder`) where Go prints only a log line. JSON is one line, as for verify and files. An S3 source prints as `s3://<bucket>/<prefix>`, never the typed URL, which may carry a query.
 
 **Tests:** table tests for `parse`, one per `UsageError` variant and per command; `tests/cli.rs` runs the binary (`env!("CARGO_BIN_EXE_lsr")`) over `crates/compat/fixtures` (read the manifest shapes from `lsr-compat` as a dev-dependency): restore of Latest for every fixture equals the manifest's page hashes; `--txid` and `--timestamp` targets from the manifest; a gap target exits 2 and leaves no file at the output or beside it; an existing output exits 3 and is byte-identical afterwards; a planted `-journal` refuses, then succeeds with `--clear-sidecars`; `verify` exits 0 on a clean fixture and 2 on each `mid-chain-gap` fixture at its newest gap... (use what `crates/compat/tests/compat/verify.rs` established about those fixtures); `verify --json` and `files --json` parse and agree with the library's `Report` and `Inventory`; `--help` lists every flag the parser accepts (generated from one table so they cannot drift).
 
 ### Task 8: `lsr-store-s3`
 
 **Rulings** (they override the blocks below where they differ):
-- **F1, stamps (superseded by G1, landed in 8g4; kept for history):** `list` did one sequential HEAD per listed LTX file to read the stored stamp. The contract and the conformance suite stay as they are. Cost, stated: a listing cost one HEAD per file, so a restore, a verify or a boot inventory over 10^4 files was minutes where Go (50 HEADs in flight, and only when a timestamp restore asks) took seconds. Task 8g (ruling G1) replaced this: `list` is LIST pages only, and `stamp` / `read_with_stamp` read the stored stamp.
+- **F1, created-at times (superseded by G1, landed in 8g4; kept for history):** `list` did one sequential HEAD per listed LTX file to read the stored created-at time. The contract and the conformance suite stay as they are. Cost, stated: a listing cost one HEAD per file, so a restore, a verify or a boot inventory over 10^4 files was minutes where Go (50 HEADs in flight, and only when a timestamp restore asks) took seconds. Task 8g (ruling G1) replaced this: `list` is LIST pages only, and `created_at` / `read_with_created_at` read the stored created-at time.
 - **Test server:** MinIO as built by Chainguard (`cgr.dev/chainguard/minio`), pinned by digest in `scripts/minio.sh`; MinIO no longer publishes `quay.io/minio/minio`. Wherever a block names that image, read this one. A digest that stops resolving is re-pinned and the 8s questions re-run.
 - **F2, HTTP:** blocking `ureq` 3 with rustls behind the `Transport` trait; no runtime in the workspace. `rusty-s3` (features `rustcrypto`, `full`: 8s found `DeleteObjects` behind `full`) signs. `aws-sdk-s3`, `object_store` and `reqwest` are rejected (package count, tokio, SDK checksum defaults). **Amended 2026-11-20 (owner):** the HTTP client is a feature choice. `ureq` stays the default (`UreqTransport`, no runtime); feature `reqwest` adds `ReqwestTransport` for hosts that already build reqwest and Tokio, with three constructors (`new`: its own client and single-threaded runtime; `with_client`: the host's client on its own runtime; `with_client_on`: the host's client on the host's runtime). `S3Store::over` builds a store on either. rusty-s3 stays the signer: the alternatives were re-read on crates.io that day (`aws-sdk-s3` 1.161, `object_store` 0.14, `rust-s3` 0.38, `opendal` 0.59) and each owns a retry or integrity policy this crate sets itself. The SDK and `object_store` stay rejected. `just check` builds each client alone and together and runs reqwest's tests; `just test-s3` and `just test-tigris` run the real-server suites over either (`LSR_S3_TRANSPORT=reqwest`).
 - **F3, multipart cleanup:** drop does no I/O. A dropped or failed multipart upload's id goes on a bounded orphan list, aborted on the next `begin_upload` or by `abort_orphans`; the bucket's `AbortIncompleteMultipartUpload` rule is the backstop.
@@ -208,9 +208,9 @@ A mismatch between Rust and Go on a valid replica is a defect in Rust until show
 - **F5:** parts upload one at a time; a failed part fails the upload and the caller restarts it.
 - **F6:** `StoreError::Refused { op, status }`, Permanent, for a refusal that is neither auth nor transient.
 - **F7:** Content-MD5 on every single PUT and every part (Go: opt-in).
-- **A mismatch after the PUT:** when the returned ETag differs from the local MD5 the object is already visible, so the store deletes the key (best effort) before returning `ChecksumMismatch`, as the file store does for a size mismatch. The uploader writes the same key again without listing (`Fault::UploadChecksumMismatch`). Open hole: a crash between the bad PUT and the delete leaves a same-size wrong object that a boot listing confirms by size; `verify` finds it, and 8g's exact stamps do not. A boot-time read-back of the newest L0 file would close it; 6g2 gets the scenario and decides.
+- **A mismatch after the PUT:** when the returned ETag differs from the local MD5 the object is already visible, so the store deletes the key (best effort) before returning `ChecksumMismatch`, as the file store does for a size mismatch. The uploader writes the same key again without listing (`Fault::UploadChecksumMismatch`). Open hole: a crash between the bad PUT and the delete leaves a same-size wrong object that a boot listing confirms by size; `verify` finds it, and 8g's exact created-at times do not. A boot-time read-back of the newest L0 file would close it; 6g2 gets the scenario and decides.
 - **F8:** listing seeks with `start-after` (Go: filters client-side).
-- **F9:** a stored stamp that does not parse is `Corrupt { BadStamp }`; a missing one falls back to `LastModified` and is counted.
+- **F9:** a stored created-at time that does not parse is `Corrupt { BadCreatedAt }`; a missing one falls back to `LastModified` and is counted.
 - **F10:** an empty prefix is refused.
 
 **Order and parallelism**
@@ -261,7 +261,7 @@ Each block is one branch, green on `just check` alone. MinIO tests skip with a m
 
 **Produces:**
 - `CorruptCause::ChecksumMismatch { part: Option<PartNumber> }`: the store acknowledged bytes whose digest is not the one sent. `None` is a single PUT.
-- `CorruptCause::BadStamp`: the object's `litestream-timestamp` metadata is present but does not parse.
+- `CorruptCause::BadCreatedAt`: the object's `litestream-timestamp` metadata is present but does not parse.
 - `pub struct PartNumber(NonZeroU16)` with `new(u16) -> Option<Self>`, 1..=10000 (S3's part cap).
 - `StoreError::Refused { op: StoreOp, status: u16 }`: the backend refused a request that retrying cannot fix and that is not an authorization failure (a 4xx outside the mapped codes, 501 NotImplemented, an object too large for the store's mode). `classify` maps it to Permanent.
 
@@ -299,7 +299,7 @@ Each block is one branch, green on `just check` alone. MinIO tests skip with a m
 2. Every request is presigned with an expiry of 300 s from `Clock::now` (rusty-s3 `sign_with_time`). Headers sent are exactly those inserted through `headers_mut`, so every `x-amz-*` header is signed (rusty-s3 src/actions/mod.rs:88-109 states AWS rejects unsigned ones).
 3. Every request carries `User-Agent: litestream-rs/<version>` (Go: "litestream", rc.go:956-976). On `Provider::Tigris`, every request carries `X-Tigris-Consistent: true` (rc.go:978-995, Go issue #905), signed.
 4. No `x-amz-checksum-*` and no aws-chunked encoding on any request (Go removes the trailer: rc.go:1039-1041, :470-481).
-5. `put_object(key, body, stamp)`: headers `Content-Length` (also when 0: rusty-s3 src/actions/put_object.rs doc), `Content-MD5: base64(md5(body))` and `x-amz-meta-litestream-timestamp: <RFC 3339, millisecond, Z>`. Go writes RFC3339Nano (rc.go:892-898) from the header's UnixMilli (rc.go:802-806); the millisecond form is the same instant and parses with Go's `time.Parse(time.RFC3339Nano)`. Departure: Content-MD5 always; Go sends it only with the opt-in `PutObjectContentMD5` (rc.go:870-888, Go #1610).
+5. `put_object(key, body, created_at)`: headers `Content-Length` (also when 0: rusty-s3 src/actions/put_object.rs doc), `Content-MD5: base64(md5(body))` and `x-amz-meta-litestream-timestamp: <RFC 3339, millisecond, Z>`. Go writes RFC3339Nano (rc.go:892-898) from the header's UnixMilli (rc.go:802-806); the millisecond form is the same instant and parses with Go's `time.Parse(time.RFC3339Nano)`. Departure: Content-MD5 always; Go sends it only with the opt-in `PutObjectContentMD5` (rc.go:870-888, Go #1610).
 6. `get_range(key, offset, len)`: `Range: bytes=<offset>-<end>` where `end = offset.checked_add(len - 1)`; on overflow, `end = u64::MAX`, which is valid HTTP (Go rc.go:693-707 computes off+size-1 unchecked).
 7. `list_page(level, start_after, max_keys)`: ListObjectsV2, `prefix=<prefix>/<%04x>/`, `delimiter` unset, `max-keys=1000` (rc.go:58). `start-after` is the full key of the cursor. Departure: Go lists from the start of the prefix and filters `minTXID < seek` client-side (rc.go:1572-1771).
 8. `delete_objects(keys)`: at most 1000 keys (rc.go:1240-1313), quiet mode, Content-MD5 over the XML body (rusty-s3 delete_objects.rs:26; Go adds it by middleware, rc.go:921-954, :1066-1105).
@@ -338,7 +338,7 @@ Each block is one branch, green on `just check` alone. MinIO tests skip with a m
 - `pub struct S3Store<T: Transport = UreqTransport>`, `S3Store::new(S3Config, S3Credentials) -> Result<S3Store, ConfigError>`, `S3Store::with_transport(S3Config, S3Credentials, T, impl Clock) -> Self`.
 - `impl ObjectStore for S3Store<T>` with `type Upload = S3Upload<T>`.
 - `pub struct UreqTransport`: one `ureq::Agent`, `timeout_global = config.deadline`, redirects off, HTTP/1.1, no ureq retries.
-- `pub struct ListStats { stamped: u64, fell_back: u64, vanished: u64 }` returned by `S3Store::last_list_stats()` for the event layer (no event emission in this crate).
+- `pub struct ListStats { with_created_at: u64, fell_back: u64, vanished: u64 }` returned by `S3Store::last_list_stats()` for the event layer (no event emission in this crate).
 - justfile: `minio-up`, `minio-down`, `test-s3`.
 
 **Semantics:**
@@ -348,11 +348,11 @@ Each block is one branch, green on `just check` alone. MinIO tests skip with a m
    - Loop ListObjectsV2 pages with `start-after` = the cursor's key, then `continuation-token`, collecting LTX names (parse via `FileKey`'s name parser; scratch names via `is_scratch_name` are neither files nor foreign) until `limit + 1` files or the listing ends.
    - Foreign names are kept and handed to `build_listing`, which owns the paging and foreign-count rule; the S3 store never counts on its own.
    - A page with `IsTruncated=true` and no `NextContinuationToken`, a page that does not parse, a page whose first key is not after the previous page's last, or a key outside the requested prefix: `Transient { InvalidData }`. Never a short listing (PLAN: "failed LIST page an error"; Go's fileIterator also surfaces the page error, rc.go:1572-1771).
-   - For each LTX file kept on the page (at most `limit`), one HEAD, sequential, to read `x-amz-meta-litestream-timestamp` (ruling F1). Missing metadata falls back to `LastModified` as Go does (rc.go:1755-1765) and counts `fell_back`. Unparseable metadata: `Corrupt { BadStamp }` (Go silently falls back; departure, rc.go:1757). A HEAD 404: the file vanished between LIST and HEAD, so it is dropped and counted `vanished`; the loop refills the page. Other HEAD errors fail the call.
+   - For each LTX file kept on the page (at most `limit`), one HEAD, sequential, to read `x-amz-meta-litestream-timestamp` (ruling F1). Missing metadata falls back to `LastModified` as Go does (rc.go:1755-1765) and counts `fell_back`. Unparseable metadata: `Corrupt { BadCreatedAt }` (Go silently falls back; departure, rc.go:1757). A HEAD 404: the file vanished between LIST and HEAD, so it is dropped and counted `vanished`; the loop refills the page. Other HEAD errors fail the call.
    - `size` is the LIST `Size`; a HEAD `Content-Length` that differs is `Transient { InvalidData }` (overwritten between calls; a retry re-reads).
 4. `read`: ranged GET (8b.6). 206 or 200: body, truncated to `len`; a body shorter than its `Content-Length` is `Transient { UnexpectedEof }`. 416: `Ok(vec![])` (offset at or past the end, including a zero-byte object, spike 8s.6). 404: `NotFound`.
-5. `begin_upload`: no request. `S3Upload` holds the key, stamp and a `Vec<u8>` buffer bounded by `part_size`. Until 8e, a write that would make the buffer reach `part_size` returns `Refused { op: Upload, status: 413 }` (ruling F6); 8e replaces this with multipart.
-6. `commit`: single PUT (8b.5). Success needs an `ETag` equal to the quoted hex MD5 of the body (Go errors when no ETag comes back, rc.go:760-763). A non-MD5-shaped ETag (SSE-KMS on AWS, length not 34) skips the comparison; Content-MD5 already made the server check the bytes. A mismatching MD5-shaped ETag is `Corrupt { ChecksumMismatch { part: None } }`. Returns `FileInfo { key, size: wrote, created_at: stamp }`.
+5. `begin_upload`: no request. `S3Upload` holds the key, created-at time and a `Vec<u8>` buffer bounded by `part_size`. Until 8e, a write that would make the buffer reach `part_size` returns `Refused { op: Upload, status: 413 }` (ruling F6); 8e replaces this with multipart.
+6. `commit`: single PUT (8b.5). Success needs an `ETag` equal to the quoted hex MD5 of the body (Go errors when no ETag comes back, rc.go:760-763). A non-MD5-shaped ETag (SSE-KMS on AWS, length not 34) skips the comparison; Content-MD5 already made the server check the bytes. A mismatching MD5-shaped ETag is `Corrupt { ChecksumMismatch { part: None } }`. Returns `FileInfo { key, size: wrote, created_at: created_at }`.
 7. `abort` and drop of a buffered upload: no request; the buffer is freed.
 8. `delete`: empty slice sends nothing. Batches of 1000 in key order. A response `<Error>` entry with code NoSuchKey is ignored; any other fails the call as `Transient` (Go treats every entry as failure, rc.go:1890; departure for idempotence).
 9. justfile `minio-up` runs `scripts/minio.sh up`: `docker run -d --name lsr-minio -p 127.0.0.1:9000:9000 quay.io/minio/minio@sha256:<digest> server /data`, waits for `/minio/health/ready`, creates bucket `lsr-test`. The digest is recorded once in 8s and pinned in the script. If `docker info` fails: prints "minio: Docker is not running; S3 tests skipped" and exits 0.
@@ -360,8 +360,8 @@ Each block is one branch, green on `just check` alone. MinIO tests skip with a m
 
 **Tests:**
 - `conformance_suite!(minio, MinioHarness)`: all cases. `plant_foreign` PUTs an object with no metadata. `fail_next_commit_after_publish` returns false (MinIO cannot; 8d covers it).
-- `stamp_survives_round_trip_on_minio`: stamps at 0 ms, 1 ms, a leap-day instant and the header's maximum come back equal.
-- `go_stamp_parses`: metadata written as Go's RFC3339Nano with nanoseconds "2025-01-02T03:04:05.123456789Z" lists as the millisecond-truncated instant the header holds.
+- `created_at_survives_round_trip_on_minio`: created-at times at 0 ms, 1 ms, a leap-day instant and the header's maximum come back equal.
+- `go_created_at_parses`: metadata written as Go's RFC3339Nano with nanoseconds "2025-01-02T03:04:05.123456789Z" lists as the millisecond-truncated instant the header holds.
 - `object_without_metadata_falls_back`: a planted LTX key with no metadata lists with `LastModified` and `fell_back == 1`.
 - `listing_requests_are_bounded`: with 2500 objects and limit 1000, a page costs at most 2 LIST and 1000 HEAD requests (counted by a recording transport wrapper).
 - `wrong_content_md5_is_refused_by_minio`: a hand-built request with a wrong digest classifies as `ChecksumMismatch`.
@@ -392,7 +392,7 @@ Each block is one branch, green on `just check` alone. MinIO tests skip with a m
 - `throttle_then_success_under_retrying`: 503 SlowDown with Retry-After "1", then 200; `Retrying` sleeps 1 s (`RecordingSleeper`) and succeeds; 429 likewise.
 - `retry_after_past_cap_returns_at_once`: Retry-After "60" with the 5 s cap: one attempt, `Throttled` returned (retry.rs rule).
 - `408_is_transient`, `connection_reset_is_transient`, `tls_failure_is_auth`.
-- `500_after_publish_leaves_object_visible`: commit errs, a later list shows the object with the commit's stamp.
+- `500_after_publish_leaves_object_visible`: commit errs, a later list shows the object with the commit's created-at time.
 - `truncated_get_is_transient_not_short`: `read` of 4096 bytes truncated at 100 is `Transient { UnexpectedEof }`, never 100 bytes.
 - `truncated_list_page_is_an_error`: a LIST body cut mid-XML fails; so does `IsTruncated=true` without a token.
 - `list_page_failure_mid_listing`: page 1 ok, page 2 500: the call fails; no `Listing` with page 1's files alone.
@@ -405,7 +405,7 @@ Each block is one branch, green on `just check` alone. MinIO tests skip with a m
 
 **As built (8d), on 8b only (8c's store was not on main):** the fake and the fault layer sit behind the `testing` feature (an integration test enables it through a self dev-dependency). `FakeS3::new(&S3Config, impl Clock)` takes the config for the bucket name and URL style and the clock for `LastModified`; it also has `put_raw`, `body_of`, `keys`, `open_uploads` and `deny_delete` for harnesses. Its signing check is MinIO's own rule from spike 8s finding 1, both ways (a header sent but unsigned, or signed but not sent, is 400 AccessDenied), wider than "names every x-amz-* header". It also refuses a non-final part under 5 MiB (EntityTooSmall). `Shape::of`, `RequestShape { shape, path, body_len }` and `FaultTransport::{new, inner, push, pending, requests}` are public. `HttpRequest::tamper_header`, `tamper_query` and `tamper_body` (feature `testing`) build the wrong-digest and unsigned-header requests; 8c's `wrong_content_md5_is_refused_by_minio` can use them. `HttpResponse`'s header, body and completeness fields are `pub(crate)` for the fault layer. `tests/faults.rs` and `tests/fake.rs` run at the `Transport` level. **Wired after 8c (`tests/store.rs`; the macro takes a constructor, so `conformance_suite!(FakeHarness::new)`):** `conformance_suite!(fake, FakeHarness)` with `fail_next_commit_after_publish` pushing `AfterPublish { on: Put, status: 500 }`, and the cases that need `Retrying` or the store (`throttle_then_success_under_retrying`, `retry_after_past_cap_returns_at_once` against the cap, `head_404_between_list_and_head` with `vanished == 1`, the commit-level `wrong_etag_on_put_is_corrupt`); their Transport-level halves are in `faults.rs`.
 
-**As built (8e):** a write that fills the buffer starts the multipart upload (CreateMultipartUpload carries the stamp) and uploads that part at once, so an object of exactly one part is multipart with no empty last part and one byte less is a single PUT. `PartSize` stays the landed `u64` wrapper, and the upload keeps part ETags as `Vec<String>`, not `PartEtag`. A failed part, a failed Complete or a wrong-shaped completed ETag ends the upload (later calls are `Refused` with status 0); the first two put the id on the orphan list, which holds `(FileKey, UploadId)`, at most 64, and is aborted by the next `begin_upload` or `S3Store::abort_orphans`; `pending_orphans` counts it. A completed ETag must be 32 hex digits, a dash and the part count; otherwise the object is deleted best effort and the error is `ChecksumMismatch { part: None }`. A wrong part ETag is `ChecksumMismatch { part: Some(n) }`. A 200 on Complete with an S3 error body is `Transient InvalidData`. More than 10000 parts is `Refused` 413. MinIO answers 204 to an abort of an unknown id; the store also accepts 404 NoSuchUpload (`S3Code::NoSuchUpload`). The fault layer gained `Fault::Pass` (forward and consume one request, to aim a fault at part 2) and `Fault::ErrorInOkBody`; `S3Upload::buffer_capacity` (feature `testing`) proves the one-part memory bound. The FakeS3 cases are in `tests/store.rs` over `tests/common/rig.rs`; the MinIO ones count open uploads with a hand-signed ListMultipartUploads, because MinIO ignores its `prefix`.
+**As built (8e):** a write that fills the buffer starts the multipart upload (CreateMultipartUpload carries the created-at time) and uploads that part at once, so an object of exactly one part is multipart with no empty last part and one byte less is a single PUT. `PartSize` stays the landed `u64` wrapper, and the upload keeps part ETags as `Vec<String>`, not `PartEtag`. A failed part, a failed Complete or a wrong-shaped completed ETag ends the upload (later calls are `Refused` with status 0); the first two put the id on the orphan list, which holds `(FileKey, UploadId)`, at most 64, and is aborted by the next `begin_upload` or `S3Store::abort_orphans`; `pending_orphans` counts it. A completed ETag must be 32 hex digits, a dash and the part count; otherwise the object is deleted best effort and the error is `ChecksumMismatch { part: None }`. A wrong part ETag is `ChecksumMismatch { part: Some(n) }`. A 200 on Complete with an S3 error body is `Transient InvalidData`. More than 10000 parts is `Refused` 413. MinIO answers 204 to an abort of an unknown id; the store also accepts 404 NoSuchUpload (`S3Code::NoSuchUpload`). The fault layer gained `Fault::Pass` (forward and consume one request, to aim a fault at part 2) and `Fault::ErrorInOkBody`; `S3Upload::buffer_capacity` (feature `testing`) proves the one-part memory bound. The FakeS3 cases are in `tests/store.rs` over `tests/common/rig.rs`; the MinIO ones count open uploads with a hand-signed ListMultipartUploads, because MinIO ignores its `prefix`.
 
 #### Task 8e: multipart upload
 
@@ -420,7 +420,7 @@ Each block is one branch, green on `just check` alone. MinIO tests skip with a m
 
 **Semantics:**
 1. Below `part_size` at commit: single PUT (8c.6). Go uses a single PUT when size < partSize (rc.go:814); same rule.
-2. The first write that makes the buffer reach `part_size` sends CreateMultipartUpload (with the metadata header, so the completed object carries the stamp) and uploads full parts as they fill, sequentially (ruling F5). Memory is at most one part per upload (PLAN resource property).
+2. The first write that makes the buffer reach `part_size` sends CreateMultipartUpload (with the metadata header, so the completed object carries the created-at time) and uploads full parts as they fill, sequentially (ruling F5). Memory is at most one part per upload (PLAN resource property).
 3. Each UploadPart sends Content-MD5 of the part. The returned ETag must equal the quoted hex MD5 of the part; a mismatch or a missing ETag is `Corrupt { ChecksumMismatch { part: Some(n) } }`. This is PLAN's "per-part ETag compared with a local MD5".
 4. `commit` uploads the remainder as the last part and sends CompleteMultipartUpload; the response body must parse and carry an ETag even on 200 (rusty-s3 complete.rs:136: errors can arrive in a 200 body). The completed ETag (`<hex>-<n>`) is checked for shape and part count only.
 5. `write` and `commit` are never retried by `Retrying` (retry.rs). Retrying one failed UploadPart inside the upload is not done: the caller restarts the upload (ruling F5).
@@ -428,7 +428,7 @@ Each block is one branch, green on `just check` alone. MinIO tests skip with a m
 7. Drop of a multipart upload does no I/O (store.rs contract). It pushes the upload id onto `Orphans`; when full, the oldest is dropped and the bucket lifecycle rule `AbortIncompleteMultipartUpload` is the backstop (ruling F3). This resolves PLAN's "abort guard" against "drop does no I/O".
 
 **Tests:**
-- `multipart_round_trip_on_minio`: an object of 2.5 parts lists with the commit's stamp and reads back byte-identical.
+- `multipart_round_trip_on_minio`: an object of 2.5 parts lists with the commit's created-at time and reads back byte-identical.
 - `exactly_part_size_uses_multipart` and `one_below_part_size_uses_put` (shape count from a recording transport).
 - `wrong_part_etag_is_corrupt`: `WrongEtag { on: UploadPart }` fails commit with `part: Some(2)` and leaves the id in `Orphans`.
 - `complete_error_in_200_body`, `complete_after_publish_500` (object visible, error returned).
@@ -453,7 +453,7 @@ Each block is one branch, green on `just check` alone. MinIO tests skip with a m
 1. `s3://bucket/path` with Go's host rules (rc.go:1785-1871: MinIO `bucket.host:port`, AWS, Tigris `fly.storage.tigris.dev` and `t3.storage.dev`, R2, others with `--endpoint`).
 2. The command runs against `Retrying<S3Store>` with `RetryPolicy::DEFAULT`; `block_on` unchanged.
 3. `Auth` maps to exit 3 (environment); usage errors exit 64; nothing printed holds the URL's query or the credentials.
-4. `files` prints how many stamps fell back to LastModified, so an operator sees a v0.5.0-era replica (metadata exists since Go v0.5.1, commit f236f50, #778).
+4. `files` prints how many created-at times fell back to LastModified, so an operator sees a v0.5.0-era replica (metadata exists since Go v0.5.1, commit f236f50, #778).
 
 **Tests:**
 - `parse_s3_forms`: the URL table from Go's ParseURL tests (.upstream/litestream/s3/replica_client_test.go) parses to the same bucket, prefix, endpoint and style.
@@ -482,41 +482,41 @@ Run 8c and 8e's MinIO suites and the spike questions against a throwaway Tigris 
 
 ---
 
-Task 8g (stamps without a HEAD per file) is its own section, after ruling A1 below.
+Task 8g (created-at times without a HEAD per file) is its own section, after ruling A1 below.
 
 The optional SQLite check on the scratch file before publish is in: `FileSink::with_integrity_check` (`lsr_local::IntegrityCheck`: off, `PRAGMA quick_check` or `PRAGMA integrity_check`) and `lsr restore --integrity-check none|quick|full`, Go's flag and values with its default of none. It uses `rusqlite` directly on the immutable scratch rather than the phase 3 SQLite crate; a database SQLite finds invalid exits 2 and nothing is published.
 
 
 ### As-of ruling A1: a stray file before the instant is not a gap
 
-Found by 7b's Go comparison on a healthy, writer-shaped replica. L0 retention deleted transactions 0x125 to 0x12b; the level-1 file that covers them (0x125-0x12f) is stamped after the instant; the surviving L0 0x12c is stamped before it. The planner took the largest eligible transaction (0x12c) as the target, could not reach it, and refused with `Gap { have_through: 0x124, next_starts: 0x12c }`. Go restores 0x124. Nothing is missing from the replica: the state at 0x12c is simply no longer restorable on its own. This happens for any instant between the L0 retention cutoff and the stamp of the covering level-1 file, so it is ordinary, not an edge.
+Found by 7b's Go comparison on a healthy, writer-shaped replica. L0 retention deleted transactions 0x125 to 0x12b; the level-1 file that covers them (0x125-0x12f) is recorded as created after the instant; the surviving L0 0x12c is recorded as created before it. The planner took the largest eligible transaction (0x12c) as the target, could not reach it, and refused with `Gap { have_through: 0x124, next_starts: 0x12c }`. Go restores 0x124. Nothing is missing from the replica: the state at 0x12c is simply no longer restorable on its own. This happens for any instant between the L0 retention cutoff and the created-at time of the covering level-1 file, so it is ordinary, not an edge.
 
 Rule, replacing "the chain must end at the largest eligible transaction" for `AsOf` only:
-1. Base and extension run over the eligible files (stamped before the instant), as before. The reach is where that chain ends.
+1. Base and extension run over the eligible files (recorded as created before the instant), as before. The reach is where that chain ends.
 2. An eligible file past the reach that does not connect is ignored. It is never a reason to refuse.
-3. What is past the reach is then judged by keys over the whole inventory, stamps not consulted: a usable file that touches the reach and passes it means the replica continues, and the outcome is the plan at the reach; no such file while usable files exist past the reach is `Gap` (the hole rule from the skeptic fix); only refused level-9 files past the reach is `MalformedSnapshot`.
+3. What is past the reach is then judged by keys over the whole inventory, created-at times not consulted: a usable file that touches the reach and passes it means the replica continues, and the outcome is the plan at the reach; no such file while usable files exist past the reach is `Gap` (the hole rule from the skeptic fix); only refused level-9 files past the reach is `MalformedSnapshot`.
 4. No eligible base keeps its present outcome. `Latest` and `Txid` are unchanged.
 
-The plan never applies a file stamped at or after the instant, and its reach is the newest state the replica can still produce from before it. As-of granularity therefore coarsens with age to the interval of the level that still covers the instant, as it does in Go.
+The plan never applies a file recorded as created at or after the instant, and its reach is the newest state the replica can still produce from before it. As-of granularity therefore coarsens with age to the interval of the level that still covers the instant, as it does in Go.
 
-Consequence for Task 8g: step 3 needs no stamps, so the lazy planner reads stamps only for base candidates and for files touching the chain's end.
+Consequence for Task 8g: step 3 needs no created-at times, so the lazy planner reads created-at times only for base candidates and for files touching the chain's end.
 
 A1, corrected after the first build: "the plan at the reach" in step 3 means whatever the planner reports for the same listing without the stray, which is `AsOfInsideFile` when a later file straddles the instant (a restore must be told to accept it) and a plain plan otherwise. A stray never upgrades `AsOfInsideFile` to a plain plan: it proves transactions committed before the instant are left out, which is exactly what that outcome warns of.
 
-### Task 8g: stamps without a HEAD per file (before the phase-1 exit)
+### Task 8g: created-at times without a HEAD per file (before the phase-1 exit)
 
-Today (ruling F1) S3's `list` sends one HEAD per listed file to read its stored stamp, so a listing of 10^4 files costs 10^4 sequential HEADs. After 8g a listing sends none, and each reader asks for the few exact stamps its answer depends on. The design was reviewed with a skeptic pass (branch `skeptic-8g` @38c01f0, `crates/core/tests/skeptic_8g_as_of.rs`) and rests on ruling A1 above; this section is its buildable form and replaces the 8g stub under Task 8.
+Today (ruling F1) S3's `list` sends one HEAD per listed file to read its stored created-at time, so a listing of 10^4 files costs 10^4 sequential HEADs. After 8g a listing sends none, and each reader asks for the few exact created-at times its answer depends on. The design was reviewed with a skeptic pass (branch `skeptic-8g` @38c01f0, `crates/core/tests/skeptic_8g_as_of.rs`) and rests on ruling A1 above; this section is its buildable form and replaces the 8g stub under Task 8.
 
 **Rulings** (they override the Task 8 blocks where they differ):
-- **G1, listings:** `list` never sends a HEAD. A listed file carries a `ListedStamp`: `Stored` (exact, read with the listing at no extra request: file mtime, `MemStore`) or `LastModified` (S3 LIST's `LastModified`, not a stamp). G1 supersedes F1 (landed in 8g4).
-- **G2, no decision on LastModified:** no reader compares, ages or orders by a `LastModified` value. Exact stamps come only as a `StoredStamp`, which a listing hands out when it is exact and `ObjectStore::stamp` returns otherwise. Removing `FileInfo::created_at` makes every reader choose at compile time. Sites allowed to match `ListedStamp::LastModified` (source guard): `stamp`'s fallback in store-s3, `Stamps::exact`, the CLI renderer.
-- **G3, laziness is unobservable:** the as-of planner returns exactly the `PlanOutcome` the exact planner returns with every stamp known, on every listing, not only writer-shaped ones. The reference is `plan_reference(inventory, RestoreTarget::AsOf(t))`, the test-only exact planner, with the hole fix (d062655, `bridges_nothing_past`) and ruling A1 (branch `asof-strays`). 8g2 starts from that planner once A1 is on main and reads it rather than this summary. No other new as-of rule: an earlier proposal (stop at the first touching file stamped at or after the instant) changed outcomes under monotone stamps and is rejected.
-- **G4, no cap on as-of reads:** an as-of restore resolves every stamp the exact answer needs and reports how many as `stamps_read`. Under A1 that is the base candidates plus the files touching the chain's end (bound in 8g2 item 4), far below N on writer-shaped listings, so a cap would only add an outcome that makes laziness observable.
-- **G5, retention:** never deletes on `LastModified` (it can precede the stored stamp by any writer clock lead; Go deletes on it, db.go:3141 and :3239: a deliberate departure). Main's rules stay, including the level-0 coverage rule. The anchor is read from the last file of each non-empty level and every level-9 snapshot-start (R'), not from every file. Safe because each job is computed against its own listing and passes the self-check, and any subset of a job is as safe as the whole; R' reads a subset of the stamps, so its anchor is never above the all-exact anchor. R' does not claim its deletes are a subset of all-exact retention's on non-writer listings.
-- **G6, BadStamp moves:** an unparseable `x-amz-meta-litestream-timestamp` is `Corrupt { BadStamp }` from `stamp` and `read_with_stamp`, no longer from `list` (which cannot see metadata). Missing metadata falls back to the listed `LastModified` inside `stamp` (F9's rule, same counter).
-- **G7, verify:** `TimestampsDiffer` takes each file's stored stamp from its first chunk's GET (`read_with_stamp`); zero HEADs.
-- **G8, not a cache:** `Stamps` holds the stamps resolved during one decision and is dropped with it; nothing is kept across listings, attempts or ticks.
-- **G9, no parallelism:** stamps resolve one request at a time. If 8t's HEAD latency makes a deep as-of too slow, the lever is Q4 below (metadata in the listing), measured first.
+- **G1, listings:** `list` never sends a HEAD. A listed file carries a `ListedTime`: `Stored` (exact, read with the listing at no extra request: file mtime, `MemStore`) or `LastModified` (S3 LIST's `LastModified`, not a created-at time). G1 supersedes F1 (landed in 8g4).
+- **G2, no decision on LastModified:** no reader compares, ages or orders by a `LastModified` value. Exact created-at times come only as a `CreatedAt`, which a listing hands out when it is exact and `ObjectStore::created_at` returns otherwise. Removing `FileInfo::created_at` makes every reader choose at compile time. Sites allowed to match `ListedTime::LastModified` (source guard): `created_at`'s fallback in store-s3, `ResolvedCreatedAt::exact`, the CLI renderer.
+- **G3, laziness is unobservable:** the as-of planner returns exactly the `PlanOutcome` the exact planner returns with every created-at time known, on every listing, not only writer-shaped ones. The reference is `plan_reference(inventory, RestoreTarget::AsOf(t))`, the test-only exact planner, with the hole fix (d062655, `bridges_nothing_past`) and ruling A1 (branch `asof-strays`). 8g2 starts from that planner once A1 is on main and reads it rather than this summary. No other new as-of rule: an earlier proposal (stop at the first touching file recorded as created at or after the instant) changed outcomes under monotone created-at times and is rejected.
+- **G4, no cap on as-of reads:** an as-of restore resolves every created-at time the exact answer needs and reports how many as `created_at_read`. Under A1 that is the base candidates plus the files touching the chain's end (bound in 8g2 item 4), far below N on writer-shaped listings, so a cap would only add an outcome that makes laziness observable.
+- **G5, retention:** never deletes on `LastModified` (it can precede the stored created-at time by any writer clock lead; Go deletes on it, db.go:3141 and :3239: a deliberate departure). Main's rules stay, including the level-0 coverage rule. The anchor is read from the last file of each non-empty level and every level-9 snapshot-start (R'), not from every file. Safe because each job is computed against its own listing and passes the self-check, and any subset of a job is as safe as the whole; R' reads a subset of the created-at times, so its anchor is never above the all-exact anchor. R' does not claim its deletes are a subset of all-exact retention's on non-writer listings.
+- **G6, BadCreatedAt moves:** an unparseable `x-amz-meta-litestream-timestamp` is `Corrupt { BadCreatedAt }` from `created_at` and `read_with_created_at`, no longer from `list` (which cannot see metadata). Missing metadata falls back to the listed `LastModified` inside `created_at` (F9's rule, same counter).
+- **G7, verify:** `TimestampsDiffer` takes each file's stored created-at time from its first chunk's GET (`read_with_created_at`); zero HEADs.
+- **G8, not a cache:** `ResolvedCreatedAt` holds the created-at times resolved during one decision and is dropped with it; nothing is kept across listings, attempts or ticks.
+- **G9, no parallelism:** created-at times resolve one request at a time. If 8t's HEAD latency makes a deep as-of too slow, the lever is Q4 below (metadata in the listing), measured first.
 
 **Order and parallelism**
 
@@ -525,51 +525,51 @@ Today (ruling F1) S3's `list` sends one HEAD per listed file to read its stored 
                                   └─> 8g3 maintenance ────┘
 ```
 
-- 8g2 and 8g3 run in parallel: 8g2 owns plan.rs, restore.rs, compat and fuzzing; 8g3 owns maintain.rs, retain.rs and actor.rs. The shared pieces (`Stamps`, `Resolve`, `resolve`, `MemStore`'s lazy mode) land in 8g1 so neither waits on the other.
+- 8g2 and 8g3 run in parallel: 8g2 owns plan.rs, restore.rs, compat and fuzzing; 8g3 owns maintain.rs, retain.rs and actor.rs. The shared pieces (`ResolvedCreatedAt`, `Resolve`, `resolve`, `MemStore`'s lazy mode) land in 8g1 so neither waits on the other.
 - 8g2 also waits for A1 (`asof-strays`) on main.
 - 8g4 needs 8g2 and 8g3: once S3 lists `LastModified`, every reader must already resolve.
 - Each block is one branch, green on `just check` alone.
 
-Notation for the bounds: N files; S files that begin at transaction 1, at every level (base candidates); E the level 0-8 files that touch and pass the reach at some step of the chain's extension (`min <= reach + 1`, `max > reach`), which includes the chain's own C files. Writer-shaped: a level 0-8 file's stamp is a non-decreasing function of its max (compaction stamps its output with the last input's stamp, compact.rs:754); a snapshot is stamped some time after its max.
+Notation for the bounds: N files; S files that begin at transaction 1, at every level (base candidates); E the level 0-8 files that touch and pass the reach at some step of the chain's extension (`min <= reach + 1`, `max > reach`), which includes the chain's own C files. Writer-shaped: a level 0-8 file's created-at time is a non-decreasing function of its max (compaction gives its output the last input's created-at time, compact.rs:754); a snapshot is recorded as created some time after its max.
 
 ---
 
-#### Task 8g1: stamp types, the two store methods, the resolve driver
+#### Task 8g1: created-at time types, the two store methods, the resolve driver
 
-**Files:** `crates/core/src/{layout.rs,store.rs,stamps.rs (new),lib.rs,mem.rs,retry.rs,inventory.rs,plan.rs,maintain.rs,maintain/retain.rs,verify.rs,verify/dry_run.rs,conformance.rs}`; the test stores `Counting` (actor/tests.rs), `Spy` (compact/tests.rs), `Stuck` (inventory.rs), `Wrapped` (restore/tests.rs, verify/tests.rs), `SizeLiar` and `DeleteRefuser` (retry/tests.rs), `Probe` (upload/tests.rs); `crates/core/tests/core/stamp_sources.rs` (new); `crates/store-fs/src/lib.rs` (`FsStore`); `crates/store-s3/src/{store.rs,list.rs,upload.rs}` (`S3Store`); `crates/sim/src/store.rs` (`Faults`, `Yield`, `Tap`, `Stage`, over core's `MemStore`); `crates/cli/src/{replica.rs,render.rs}` (`Counted`); `crates/compat/src/{replica.rs,chain.rs,replicator.rs}` wherever they build a `FileInfo`; `crates/fuzzing/src/plan.rs`; every test that builds a `FileInfo`.
+**Files:** `crates/core/src/{layout.rs,store.rs,created_at.rs (new),lib.rs,mem.rs,retry.rs,inventory.rs,plan.rs,maintain.rs,maintain/retain.rs,verify.rs,verify/dry_run.rs,conformance.rs}`; the test stores `Counting` (actor/tests.rs), `Spy` (compact/tests.rs), `Stuck` (inventory.rs), `Wrapped` (restore/tests.rs, verify/tests.rs), `SizeLiar` and `DeleteRefuser` (retry/tests.rs), `Probe` (upload/tests.rs); `crates/core/tests/core/created_at_sources.rs` (new); `crates/store-fs/src/lib.rs` (`FsStore`); `crates/store-s3/src/{store.rs,list.rs,upload.rs}` (`S3Store`); `crates/sim/src/store.rs` (`Faults`, `Yield`, `Tap`, `Stage`, over core's `MemStore`); `crates/cli/src/{replica.rs,render.rs}` (`Counted`); `crates/compat/src/{replica.rs,chain.rs,replicator.rs}` wherever they build a `FileInfo`; `crates/fuzzing/src/plan.rs`; every test that builds a `FileInfo`.
 
-**Consumes:** `FileInfo` (layout.rs), `ObjectStore` (store.rs), `ReadLen`, `StoreError`, `CorruptCause::BadStamp`, `ListStats` (store-s3 store.rs), `Inventory`.
+**Consumes:** `FileInfo` (layout.rs), `ObjectStore` (store.rs), `ReadLen`, `StoreError`, `CorruptCause::BadCreatedAt`, `ListStats` (store-s3 store.rs), `Inventory`.
 
-**Produces** (layout.rs and stamps.rs, re-exported from lsr-core):
-- `pub struct FileInfo { pub key: FileKey, pub size: u64, pub listed: ListedStamp }`; `created_at` removed. `impl FileInfo { pub const fn exact_stamp(&self) -> Option<StoredStamp> }`: `Some` for `Stored`. Transitional: 8g2 and 8g3 remove its non-store callers.
-- `pub enum ListedStamp { Stored(StoredStamp), LastModified(Timestamp) }`.
-- `pub struct StoredStamp { at: Timestamp, origin: StampOrigin }` (private fields; `Clone, Copy, PartialEq, Eq, Debug`) with `pub const fn metadata(at: Timestamp) -> Self`, `pub const fn mtime(at: Timestamp) -> Self`, `pub const fn fallback(last_modified: Timestamp) -> Self`, `pub const fn at(self) -> Timestamp`, `pub const fn origin(self) -> StampOrigin`.
-- `pub enum StampOrigin { Metadata, Mtime, Fallback }`.
+**Produces** (layout.rs and created_at.rs, re-exported from lsr-core):
+- `pub struct FileInfo { pub key: FileKey, pub size: u64, pub listed: ListedTime }`; `created_at` removed. `impl FileInfo { pub const fn created_at(&self) -> Option<CreatedAt> }`: `Some` for `Stored`. Transitional: 8g2 and 8g3 remove its non-store callers.
+- `pub enum ListedTime { Stored(CreatedAt), LastModified(Timestamp) }`.
+- `pub struct CreatedAt { at: Timestamp, origin: CreatedAtSource }` (private fields; `Clone, Copy, PartialEq, Eq, Debug`) with `pub const fn metadata(at: Timestamp) -> Self`, `pub const fn mtime(at: Timestamp) -> Self`, `pub const fn fallback(last_modified: Timestamp) -> Self`, `pub const fn at(self) -> Timestamp`, `pub const fn origin(self) -> CreatedAtSource`.
+- `pub enum CreatedAtSource { Metadata, Mtime, Fallback }`.
 - On `ObjectStore`:
-  - `fn stamp(&self, file: &FileInfo) -> impl Future<Output = Result<StoredStamp, StoreError>> + Send;` The stored stamp of a listed file. `Err(NotFound { key })` when it is gone; `Transient { InvalidData }` when its size is no longer `file.size`; no metadata: `StoredStamp::fallback` of the listed `LastModified`.
-  - `fn read_with_stamp(&self, file: &FileInfo, len: ReadLen) -> impl Future<Output = Result<(Vec<u8>, StoredStamp), StoreError>> + Send;` `read(key, 0, len)` plus the stored stamp, in one request where the backend allows.
+  - `fn created_at(&self, file: &FileInfo) -> impl Future<Output = Result<CreatedAt, StoreError>> + Send;` The stored created-at time of a listed file. `Err(NotFound { key })` when it is gone; `Transient { InvalidData }` when its size is no longer `file.size`; no metadata: `CreatedAt::fallback` of the listed `LastModified`.
+  - `fn read_with_created_at(&self, file: &FileInfo, len: ReadLen) -> impl Future<Output = Result<(Vec<u8>, CreatedAt), StoreError>> + Send;` `read(key, 0, len)` plus the stored created-at time, in one request where the backend allows.
   - No batch method (S3 has no batch HEAD; a batch signature would hide N requests).
-- stamps.rs:
-  - `pub struct Stamps` (private `BTreeMap<FileKey, StoredStamp>`) with `pub fn exact(&self, info: &FileInfo) -> Option<StoredStamp>` (the listing's own when `Stored`, else the resolved one) and `pub fn len(&self) -> usize`.
+- created_at.rs:
+  - `pub struct ResolvedCreatedAt` (private `BTreeMap<FileKey, CreatedAt>`) with `pub fn exact(&self, info: &FileInfo) -> Option<CreatedAt>` (the listing's own when `Stored`, else the resolved one) and `pub fn len(&self) -> usize`.
   - `pub enum Resolve<T> { Done(T), Need(FileInfo) }`.
-  - `pub trait Step { type Output; fn advance(&mut self, stamps: &Stamps) -> Resolve<Self::Output>; }`, with a blanket impl for `FnMut(&Stamps) -> Resolve<T>`.
-  - `pub async fn resolve<S: ObjectStore, P: Step>(store: &S, step: &mut P) -> Result<Resolved<P::Output>, ResolveError>`; `pub struct Resolved<T> { pub value: T, pub stamps_read: u64 }`; `pub enum ResolveError { Store(StoreError), Repeated { key: FileKey } }`.
-- `MemStore::with_listed_last_modified() -> Self`: `list` returns `LastModified` (the store's clock at commit, moved by a per-key value a test sets with `set_last_modified(&self, key: &FileKey, at: Timestamp)`); `stamp` returns the committed stamp. `MemStore::stamp_calls(&self) -> u64`. `MemStore::new()` lists `Stored` as today.
+  - `pub trait Step { type Output; fn advance(&mut self, resolved: &ResolvedCreatedAt) -> Resolve<Self::Output>; }`, with a blanket impl for `FnMut(&ResolvedCreatedAt) -> Resolve<T>`.
+  - `pub async fn resolve<S: ObjectStore, P: Step>(store: &S, step: &mut P) -> Result<Resolved<P::Output>, ResolveError>`; `pub struct Resolved<T> { pub value: T, pub created_at_read: u64 }`; `pub enum ResolveError { Store(StoreError), Repeated { key: FileKey } }`.
+- `MemStore::with_listed_last_modified() -> Self`: `list` returns `LastModified` (the store's clock at commit, moved by a per-key value a test sets with `set_last_modified(&self, key: &FileKey, at: Timestamp)`); `created_at` returns the committed created-at time. `MemStore::created_at_calls(&self) -> u64`. `MemStore::new()` lists `Stored` as today.
 
 **Semantics:**
 1. Behaviour unchanged: every store still lists `Stored`. FsStore and MemStore: `Stored(mtime(..))`. S3Store: `list` still HEADs per file (F1) and returns `Stored(metadata(..))` or `Stored(fallback(..))`; the extra key that proves a next page stays a placeholder cut by `build_listing`.
-2. `stamp` and `read_with_stamp` per store: FsStore re-stats (and reads); MemStore answers from its map; S3Store `stamp` is one HEAD, with list.rs's size check and fallback rule moved into a shared function (counted in `ListStats`: `stamped`, `fell_back`, `vanished` on NotFound). S3Store `read_with_stamp` is one ranged GET reading `x-amz-meta-litestream-timestamp` from the 200/206 headers; if the GET carries no metadata header, or answers 416 (zero-byte object), one HEAD follows (Q2's default).
+2. `created_at` and `read_with_created_at` per store: FsStore re-stats (and reads); MemStore answers from its map; S3Store `created_at` is one HEAD, with list.rs's size check and fallback rule moved into a shared function (counted in `ListStats`: `with_created_at`, `fell_back`, `vanished` on NotFound). S3Store `read_with_created_at` is one ranged GET reading `x-amz-meta-litestream-timestamp` from the 200/206 headers; if the GET carries no metadata header, or answers 416 (zero-byte object), one HEAD follows (Q2's default).
 3. Wrappers forward both methods unchanged: `Retrying` (idempotent, retried like `read`), `Counting` (verify/dry_run.rs, counts each as a request), CLI `Counted`, sim's `Faults` (fault points as for `read`), `Yield`, `Tap`, `Stage`, every test store.
-4. Readers move off `created_at` through `exact_stamp()`, each with a fail-closed answer for `None` (unreachable until 8g4): plan.rs `eligible` for AsOf: ineligible; maintain.rs `plan_level` and `plan_snapshot`: wait; retain.rs: `Hold::Unstamped`; inventory's duplicate check compares `listed` whole; CLI `files`: prints the stamp, or the LastModified marked "listed"; compat builds `Stored(mtime(..))`.
-5. Verify moves to `read_with_stamp` for each file's first chunk (`check_header` compares the header with that stamp). The read loop is otherwise unchanged.
-6. `resolve` calls `step.advance`; on `Need(file)` it calls `store.stamp(&file)` once, inserts the answer, and repeats. A key asked twice is `Repeated` (fail closed: a bug in the step). `stamps_read` counts `stamp` calls.
+4. Readers move off `created_at` through `created_at()`, each with a fail-closed answer for `None` (unreachable until 8g4): plan.rs `eligible` for AsOf: ineligible; maintain.rs `plan_level` and `plan_snapshot`: wait; retain.rs: `Hold::NoCreatedAt`; inventory's duplicate check compares `listed` whole; CLI `files`: prints the created-at time, or the LastModified marked "listed"; compat builds `Stored(mtime(..))`.
+5. Verify moves to `read_with_created_at` for each file's first chunk (`check_header` compares the header with that created-at time). The read loop is otherwise unchanged.
+6. `resolve` calls `step.advance`; on `Need(file)` it calls `store.created_at(&file)` once, inserts the answer, and repeats. A key asked twice is `Repeated` (fail closed: a bug in the step). `created_at_read` counts `created_at` calls.
 7. Writer side unchanged: `begin_upload(key, created_at: Timestamp)` keeps its name and type.
 
 **Tests:**
-- Conformance (conformance.rs, every harness: mem in both modes, fs, FakeS3, MinIO): `stamp_returns_the_committed_stamp` (commits at 0 ms, 1 ms, a leap-day instant and the header maximum; `stamp` of each listed file returns it, origin not `Fallback`); `listed_stamp_is_exact_or_marked` (a listed file is `Stored` equal to the committed stamp, or `LastModified`); `stamp_of_a_vanished_file_is_not_found`; `stamp_of_an_overwritten_file_is_refused` (re-commit the key with another size: `Transient { InvalidData }`); `read_with_stamp_agrees_with_read_and_stamp`.
-- stamps.rs: `resolve_asks_each_key_once` (a step that asks the same key twice gets `Repeated`); `resolve_counts_stamps_read`; `stored_listing_resolves_with_no_calls` (`MemStore::new`: `stamp_calls() == 0`).
-- mem.rs: `lazy_mode_lists_last_modified` (listed `LastModified` equals the clock at commit, or the value set; `stamp` returns the commit's stamp).
-- Source guards (`crates/core/tests/core/stamp_sources.rs`, a std::fs walk of `crates/`, no new dependency): `stored_stamp_constructors_only_in_stores` (`StoredStamp::{metadata,mtime,fallback}` only in `crates/store-*`, `crates/core/src/mem.rs`, `crates/compat` and test files); `last_modified_matched_only_in_allowed_sites` (G2's list plus test files).
+- Conformance (conformance.rs, every harness: mem in both modes, fs, FakeS3, MinIO): `created_at_returns_the_committed_created_at` (commits at 0 ms, 1 ms, a leap-day instant and the header maximum; `created_at` of each listed file returns it, origin not `Fallback`); `listed_created_at_is_exact_or_marked` (a listed file is `Stored` equal to the committed created-at time, or `LastModified`); `created_at_of_a_vanished_file_is_not_found`; `created_at_of_an_overwritten_file_is_refused` (re-commit the key with another size: `Transient { InvalidData }`); `read_with_created_at_agrees_with_read_and_created_at`.
+- created_at.rs: `resolve_asks_each_key_once` (a step that asks the same key twice gets `Repeated`); `resolve_counts_created_at_read`; `stored_listing_resolves_with_no_calls` (`MemStore::new`: `created_at_calls() == 0`).
+- mem.rs: `lazy_mode_lists_last_modified` (listed `LastModified` equals the clock at commit, or the value set; `created_at` returns the commit's created-at time).
+- Source guards (`crates/core/tests/core/created_at_sources.rs`, a std::fs walk of `crates/`, no new dependency): `stored_created_at_constructors_only_in_stores` (`CreatedAt::{metadata,mtime,fallback}` only in `crates/store-*`, `crates/core/src/mem.rs`, `crates/compat` and test files); `last_modified_matched_only_in_allowed_sites` (G2's list plus test files).
 - Every existing suite stays green with unchanged outcomes (fixtures move from `created_at` to `listed`).
 
 **Must not touch:** planner, retention or schedule logic (only the accessor change in item 4); S3 list's request pattern; CLI flags.
@@ -583,59 +583,59 @@ Notation for the bounds: N files; S files that begin at transaction 1, at every 
 **Consumes:** 8g1; main's planner with the hole fix and A1 (G3); `Restored` (restore.rs).
 
 **Produces:**
-- `pub enum KeyTarget { Latest, Txid(Txid) }`; `pub fn plan(inventory: &Inventory, target: KeyTarget) -> PlanOutcome`: today's logic for those targets; reads no stamp. Callers: verify (Latest, Txid), compat, fuzzing.
+- `pub enum KeyTarget { Latest, Txid(Txid) }`; `pub fn plan(inventory: &Inventory, target: KeyTarget) -> PlanOutcome`: today's logic for those targets; reads no created-at time. Callers: verify (Latest, Txid), compat, fuzzing.
 - `pub struct AsOfPlanner<'a>` (private: inventory, instant, phase, cursor into an order sorted once) with `pub fn new(inventory: &'a Inventory, instant: Timestamp) -> Self` and `impl Step for AsOfPlanner<'_> { type Output = PlanOutcome; }`.
 - `RestoreTarget { Latest, Txid, AsOf }` stays the public restore input; restore.rs dispatches (Latest and Txid to `plan`, AsOf through `resolve`; `ResolveError::Store` is the attempt's store error, `Repeated` is a bug surfaced as an error, never a plan).
-- `Restored::stamps_read(&self) -> u64` (summed over attempts); the CLI restore output prints it.
-- Test-only `plan_reference(inventory: &Inventory, target: RestoreTarget) -> PlanOutcome`: main's planner kept verbatim, reading every stamp from `Stored` listings, as the oracle for the differential.
+- `Restored::created_at_read(&self) -> u64` (summed over attempts); the CLI restore output prints it.
+- Test-only `plan_reference(inventory: &Inventory, target: RestoreTarget) -> PlanOutcome`: main's planner kept verbatim, reading every created-at time from `Stored` listings, as the oracle for the differential.
 
 **Semantics** (each phase computes the reference's decision; only the order of reads inside a phase is new, and the first decisive read ends the phase):
 1. Base. Reference: the eligible snapshot-start (any level, begins at 1) with the largest `(max, level, Reverse(key))`. Query: walk snapshot-starts in that order, descending; the first eligible one is the base. Keys are unique, so the order is total. None eligible: the reference's no-snapshot outcome (keys only).
 2. Extend. Reference: repeatedly push the eligible level 0-8 file touching the reach and passing it with the largest preference. The reference's single sweep discards passed-over files for good; that equals asking again over all touching files at each step (a discarded eligible file ends at or before the file chosen over it). Query: walk touching, passing files in preference order; the first eligible one is pushed. Stop when all are ineligible: that is the reach.
 3. Past the reach (A1): keys only over the whole inventory (A1 item 3: plan at the reach, `Gap` or `MalformedSnapshot`), then the straddle rule (`straddling_file`), whose candidates touch and pass the reach and so were all read in phase 2. Eligible files that do not connect are never read. If the planner on main reads eligibility anywhere else when 8g2 starts, add that read to the phase that makes the decision; the differential test decides.
-4. Cost: H <= S + E on every listing, each key read at most once. On writer-shaped listings phase 1 reads the snapshot-starts stamped at or after the instant plus one, and phase 2 reads the chain plus, at each step, the touching files stamped at or after the instant (at most one per level at the last step, since stamps rise with max). A deep as-of (instant near the retention horizon) therefore costs about the chain's length plus the newer snapshots plus a few per level: tens to hundreds of HEADs for 10^4 files, not N. The costly shape is a chain of many small files (an instant inside a long uncompacted level-0 run): one HEAD per file it applies, as the restore GETs each of them anyway. A `Stored` listing reads nothing. No cap (G4).
+4. Cost: H <= S + E on every listing, each key read at most once. On writer-shaped listings phase 1 reads the snapshot-starts recorded as created at or after the instant plus one, and phase 2 reads the chain plus, at each step, the touching files recorded as created at or after the instant (at most one per level at the last step, since created-at times rise with max). A deep as-of (instant near the retention horizon) therefore costs about the chain's length plus the newer snapshots plus a few per level: tens to hundreds of HEADs for 10^4 files, not N. The costly shape is a chain of many small files (an instant inside a long uncompacted level-0 run): one HEAD per file it applies, as the restore GETs each of them anyway. A `Stored` listing reads nothing. No cap (G4).
 5. Work: the planner sorts once and resumes from its cursor, O(N log N) per plan; it never re-scans on each `advance`.
-6. A restore retry re-lists and re-plans with a fresh `Stamps` (G8).
+6. A restore retry re-lists and re-plans with a fresh `ResolvedCreatedAt` (G8).
 7. plan.rs's module doc gains one paragraph: as-of eligibility is learned lazily and never changes the answer.
 
 **Tests:**
-- `plan_as_of_equals_the_exact_planner` (the acceptance test; plan_lazy.rs): listings from the skeptic generator (`skeptic_8g_as_of.rs`'s `listing`, levels 0, 1, 2 and 9, moved into plan_lazy.rs) in all three stamp modes (0: arbitrary; 1: non-decreasing in max across levels; 2: writer-shaped); instants at each stamp - 1, stamp and stamp + 1, plus -1 and 10^6. `AsOfPlanner` driven by `resolve` over `MemStore::with_listed_last_modified` returns a `PlanOutcome` equal (every field) to `plan_reference` (the A1 planner) over the same files listed `Stored`. A proptest at the default case count in the gate; 200k cases per mode in the soak run.
-- `unread_stamps_cannot_change_the_outcome`: for every file the planner did not read, the reference's outcome is unchanged with that stamp set to `i64::MIN` and to `i64::MAX` ms.
+- `plan_as_of_equals_the_exact_planner` (the acceptance test; plan_lazy.rs): listings from the skeptic generator (`skeptic_8g_as_of.rs`'s `listing`, levels 0, 1, 2 and 9, moved into plan_lazy.rs) in all three created-at time modes (0: arbitrary; 1: non-decreasing in max across levels; 2: writer-shaped); instants at each created-at time - 1, created-at time and created-at time + 1, plus -1 and 10^6. `AsOfPlanner` driven by `resolve` over `MemStore::with_listed_last_modified` returns a `PlanOutcome` equal (every field) to `plan_reference` (the A1 planner) over the same files listed `Stored`. A proptest at the default case count in the gate; 200k cases per mode in the soak run.
+- `unread_created_at_cannot_change_the_outcome`: for every file the planner did not read, the reference's outcome is unchanged with that created-at time set to `i64::MIN` and to `i64::MAX` ms.
 - `plan_as_of_reads_within_the_bound`: H <= S + E in every mode; every unread file is outside the base candidates and E.
-- `plan_as_of_reads_each_stamp_once`; `plan_as_of_ignores_last_modified` (listed LastModified at 0, at the far future, just before and after the stamp: same outcome, same reads); `as_of_on_a_stored_listing_reads_nothing`.
+- `plan_as_of_reads_each_created_at_once`; `plan_as_of_ignores_last_modified` (listed LastModified at 0, at the far future, just before and after the created-at time: same outcome, same reads); `as_of_on_a_stored_listing_reads_nothing`.
 - `plan_as_of_is_linear`: 10^4 writer-shaped files, instant at the oldest snapshot: comparisons, counted, under 40 N log2 N; H under 2 C + S + 10.
-- Regressions (equal to the reference): `an_older_snapshot_with_a_later_one_beyond_plans` ([L9 1-1 @100, L9 1-2 @300], t = 101: Plan reaching 1); `an_instant_inside_a_file_before_a_later_snapshot` ([L0 1-1 @100, L9 1-5 @600, L0 5-5 @500], t = 101: AsOfInsideFile); A1's stray case (an L0 file stamped before the instant past an L1 file stamped after it: Plan at the reach, the L0 file unread); the hole-fix tests from d062655 and A1's tests from `asof-strays`, run again through the lazy path.
+- Regressions (equal to the reference): `an_older_snapshot_with_a_later_one_beyond_plans` ([L9 1-1 @100, L9 1-2 @300], t = 101: Plan reaching 1); `an_instant_inside_a_file_before_a_later_snapshot` ([L0 1-1 @100, L9 1-5 @600, L0 5-5 @500], t = 101: AsOfInsideFile); A1's stray case (an L0 file recorded as created before the instant past an L1 file recorded as created after it: Plan at the reach, the L0 file unread); the hole-fix tests from d062655 and A1's tests from `asof-strays`, run again through the lazy path.
 - The fuzz target (`crates/fuzzing/src/plan.rs`) adds the lazy planner as a differential leg; `plan_adversarial.rs`'s oracle checks both planners.
-- `restore_reports_stamps_read`: an as-of restore over the lazy MemStore reports the planner's H; Latest reports 0.
+- `restore_reports_created_at_read`: an as-of restore over the lazy MemStore reports the planner's H; Latest reports 0.
 
 **Must not touch:** maintain.rs, retain.rs, actor.rs (8g3); store crates; the planner's outcomes (a test whose expected outcome changes is a defect in 8g2).
 
 ---
 
-#### Task 8g3: retention and the maintenance tick on resolved stamps
+#### Task 8g3: retention and the maintenance tick on resolved created-at times
 
 **Files:** `crates/core/src/{maintain.rs,maintain/retain.rs,actor.rs}` and their tests; `crates/sim` call sites of `due`, if any.
 
 **Consumes:** 8g1; `due` (maintain.rs), `retention` (retain.rs), the actor's maintain lane (it loads the inventory and calls `due` inside the async tick).
 
 **Produces:**
-- `pub fn due(inventory: &Inventory, now: Timestamp, config: &Maintenance, published: Option<Txid>, state: &mut MaintainState, stamps: &Stamps) -> Resolve<Due>`.
-- `pub(super) fn retention(..., stamps: &Stamps) -> Resolve<Retention>`: today's parameters plus `stamps`.
-- The maintain lane's event gains `stamps_read: u64`.
+- `pub fn due(inventory: &Inventory, now: Timestamp, config: &Maintenance, published: Option<Txid>, state: &mut MaintainState, resolved: &ResolvedCreatedAt) -> Resolve<Due>`.
+- `pub(super) fn retention(..., resolved: &ResolvedCreatedAt) -> Resolve<Retention>`: today's parameters plus `resolved`.
+- The maintain lane's event gains `created_at_read: u64`.
 
 **Semantics:**
 1. Schedule: `plan_level` asks for the destination level's last file only when the source level has files above it; `plan_snapshot` asks for the newest snapshot only when a snapshot is otherwise due. Both exact, so the job sequence is unchanged.
-2. Retention reads, all exact: the Lasts (the last file in key order of each non-empty level), every level-9 snapshot-start, and the level-0 files the rule would delete, in key order, up to and including the first young one, at most `MAX_DELETE` + 1. Anchor = min(now, max stamp over the Lasts and snapshot-starts) (G5). Then main's snapshot rule, levels 1-8 by keys, main's level-0 rule. The `Unstamped` and `SnapshotStampsBackwards` holds look only at the files read.
-3. `due` re-runs from the start after each resolved stamp; its `state` mutations (`forget_unlisted`) are idempotent, so a re-run is the same pass. The actor drives it with `resolve` against the remote store; a `stamp` error is a maintain-lane fault like an inventory fault (no job; list again next tick). `Repeated` is a fault too.
-4. After this block no `exact_stamp()` call remains in maintain.rs or retain.rs.
+2. Retention reads, all exact: the Lasts (the last file in key order of each non-empty level), every level-9 snapshot-start, and the level-0 files the rule would delete, in key order, up to and including the first young one, at most `MAX_DELETE` + 1. Anchor = min(now, max created-at time over the Lasts and snapshot-starts) (G5). Then main's snapshot rule, levels 1-8 by keys, main's level-0 rule. The `NoCreatedAt` and `SnapshotCreatedAtBackwards` holds look only at the files read.
+3. `due` re-runs from the start after each resolved created-at time; its `state` mutations (`forget_unlisted`) are idempotent, so a re-run is the same pass. The actor drives it with `resolve` against the remote store; a `created_at` error is a maintain-lane fault like an inventory fault (no job; list again next tick). `Repeated` is a fault too.
+4. After this block no `created_at()` call remains in maintain.rs or retain.rs.
 
 **Tests:**
 - `retention_equals_exact_on_writer_listings` (proptest: R' and main's retention over the same files listed `Stored` give the same `Retention`).
-- `retention_r_prime_jobs_are_restore_safe` (proptest over all stamp shapes, including overlapping level-0 files and backward stamps; each job applied whole and as a random subset: Latest restores and every txid at or above the first retained snapshot restores; reuse the harness of `skeptic_8g_wobbling_clock_and_partial_deletes_lose_nothing_retained` on `skeptic-8g`).
+- `retention_r_prime_jobs_are_restore_safe` (proptest over all created-at time shapes, including overlapping level-0 files and backward created-at times; each job applied whole and as a random subset: Latest restores and every txid at or above the first retained snapshot restores; reuse the harness of `skeptic_8g_wobbling_clock_and_partial_deletes_lose_nothing_retained` on `skeptic-8g`).
 - `retention_r_prime_anchor_is_at_most_the_exact_anchor`.
-- `retention_reads_only_lasts_snaps_and_scanned_level_zero` (the resolved key set equals exactly that set); `retention_ignores_last_modified`; `retention_never_deletes_on_last_modified` (LastModified at 0 for every file, stored stamps young: no delete).
+- `retention_reads_only_lasts_snaps_and_scanned_level_zero` (the resolved key set equals exactly that set); `retention_ignores_last_modified`; `retention_never_deletes_on_last_modified` (LastModified at 0 for every file, stored created-at times young: no delete).
 - `schedule_reads_only_lasts_with_work`; `due_matches_main_on_stored_listings` (every existing maintain and actor test gives the same jobs over `MemStore::new` and over the lazy mode).
-- `stamp_failure_is_a_maintain_fault` (actor: `stamp` returns `Transient`; no job runs; the lane backs off as for a list fault).
+- `created_at_failure_is_a_maintain_fault` (actor: `created_at` returns `Transient`; no job runs; the lane backs off as for a list fault).
 
 **Must not touch:** plan.rs, restore.rs (8g2); retention's level-0 rule (main's stays, G5); store crates.
 
@@ -648,24 +648,24 @@ Notation for the bounds: N files; S files that begin at transaction 1, at every 
 **Consumes:** 8g1, 8g2, 8g3.
 
 **Produces:**
-- S3 `list`: LIST pages only; each file `ListedStamp::LastModified(<LastModified>)`. The page's extra key needs no placeholder.
-- `ListStats` counts on `stamp` and `read_with_stamp` (`S3Store::stamp_stats(&self) -> ListStats`, cumulative); `last_list_stats` removed. `Counted` sums it.
-- `lsr files` reads no stamp by default and prints unresolved files' LastModified marked "listed"; `lsr files --stamps` resolves every file (N HEADs, said in its help line) and prints the fallback count. Call: the default stays cheap (cost if wrong: an operator reads listed times and must ask for exact ones).
+- S3 `list`: LIST pages only; each file `ListedTime::LastModified(<LastModified>)`. The page's extra key needs no placeholder.
+- `ListStats` counts on `created_at` and `read_with_created_at` (`S3Store::created_at_stats(&self) -> ListStats`, cumulative); `last_list_stats` removed. `Counted` sums it.
+- `lsr files` reads no created-at time by default and prints unresolved files' LastModified marked "listed"; `lsr files --created-at` resolves every file (N HEADs, said in its help line) and prints the fallback count. Call: the default stays cheap (cost if wrong: an operator reads listed times and must ask for exact ones).
 - FakeS3: `<LastModified>` in LIST as whole seconds (`.000Z`); HEAD `Last-Modified` as an HTTP-date; a multipart object's LastModified is its CreateMultipartUpload time (Q3); `pub fn set_last_modified(&self, key: &str, at: Timestamp)`; metadata headers on 200 and 206 GET, none on 416.
 
 **Semantics:**
-1. F9's counting moves to `stamp` (G6): a v0.5.0-era object counts `fell_back` when its stamp is read, not when it is listed.
+1. F9's counting moves to `created_at` (G6): a v0.5.0-era object counts `fell_back` when its created-at time is read, not when it is listed.
 2. Verify, Latest and Txid restores, boot and recover send no HEAD; as-of and maintenance send what 8g2 and 8g3 ask for.
 
 **Tests:**
 - `listing_makes_no_head_requests` (FakeS3, 2500 objects, limit 1000: 3 LISTs, 0 HEADs; replaces `listing_requests_are_bounded`).
-- `metadata_less_object_falls_back_on_stamp` (`put_raw` without metadata: listed `LastModified`; `stamp` origin `Fallback` equal to it; `fell_back == 1`).
-- `bad_stamp_fails_the_reader_not_the_listing` (bad metadata: `list` succeeds, `stamp` is `Corrupt { BadStamp }`); the Go-stamp parse test moves from list to stamp.
-- `read_with_stamp_is_one_get` (one GET, 0 HEADs; a zero-byte object: one GET, then one HEAD).
-- `multipart_stamp_is_the_commit_stamp` (LastModified at initiation; `stamp` unaffected).
-- `head_404_between_list_and_stamp` (replaces the list-then-HEAD 404 test: `stamp` is NotFound, `vanished == 1`).
+- `metadata_less_object_falls_back_on_created_at` (`put_raw` without metadata: listed `LastModified`; `created_at` origin `Fallback` equal to it; `fell_back == 1`).
+- `bad_created_at_fails_the_reader_not_the_listing` (bad metadata: `list` succeeds, `created_at` is `Corrupt { BadCreatedAt }`); the Go-created-at time parse test moves from list to created-at time.
+- `read_with_created_at_is_one_get` (one GET, 0 HEADs; a zero-byte object: one GET, then one HEAD).
+- `multipart_created_at_is_the_commit_created_at` (LastModified at initiation; `created_at` unaffected).
+- `head_404_between_list_and_created_at` (replaces the list-then-HEAD 404 test: `created_at` is NotFound, `vanished == 1`).
 - `last_modified_never_moves_an_answer` (FakeS3: `set_last_modified` to 0 and to the far future on every object; as-of restore, verify and one maintenance tick give the same results).
-- `files_prints_listed_stamps_without_heads` (cli).
+- `files_prints_listed_created_at_without_heads` (cli).
 - MinIO (under the S3 test recipe): the conformance suite and `listing_makes_no_head_requests`.
 
 **Must not touch:** core readers (8g2 and 8g3 settled them); the planner.
@@ -678,13 +678,13 @@ Notation for the bounds: N files; S files that begin at transaction 1, at every 
 
 **Consumes:** 8g1 to 8g4; FakeS3's per-method request counts.
 
-**Fixture:** 10^4 writer-shaped files committed through the store (about 9000 at level 1, 300 at level 0, 600 at level 2, 90 at level 3, 8 snapshots at level 9), stamps 1 s apart per transaction.
+**Fixture:** 10^4 writer-shaped files committed through the store (about 9000 at level 1, 300 at level 0, 600 at level 2, 90 at level 3, 8 snapshots at level 9), created-at times 1 s apart per transaction.
 
 **Tests** (HEAD counts asserted; LIST and GET counts recorded alongside):
 - `latest_and_txid_restore_send_no_head`: 0.
 - `verify_sends_no_head`: 0 for both depths (GETs unchanged).
 - `boot_and_recover_send_no_head`: the uploader's boot inventory and recover's level-0 listing: 0.
-- `as_of_heads_are_bounded`: instants one minute back, one day back and at the oldest snapshot: HEADs equal the planner's `stamps_read` and are <= S + E; at the oldest snapshot, under 2 C + S + 10.
+- `as_of_heads_are_bounded`: instants one minute back, one day back and at the oldest snapshot: HEADs equal the planner's `created_at_read` and are <= S + E; at the oldest snapshot, under 2 C + S + 10.
 - `maintenance_tick_heads_are_bounded`: one `due` pass: HEADs <= (non-empty levels) + S + (level-0 files deleted) + 1.
 - The test prints a before/after table for the record; no wall-clock assertion.
 
@@ -697,9 +697,9 @@ Notation for the bounds: N files; S files that begin at transaction 1, at every 
 - **Q2, metadata on a ranged GET (206) on Tigris:** default: read it when present, else one HEAD (8g1 item 2). If Tigris omits it, verify's Contents depth costs N HEADs again; correctness is unchanged.
 - **Q3, multipart LastModified (initiation or completion):** default initiation (AWS documents it); no reader uses it, so it only shapes FakeS3.
 - **Q4, user metadata in ListObjectsV2** (MinIO's `metadata=true` extension): default absent. If Tigris has it, a follow-up lets S3 list `Stored` at 0 HEADs, behind its own conformance case.
-- **Q5, whether CopyObject keeps `x-amz-meta-*`:** default no: a copied replica is all-fallback (stamps become the copy time; as-of before the copy finds no snapshot, retention waits, verify reports TimestampsDiffer). Nothing to build.
+- **Q5, whether CopyObject keeps `x-amz-meta-*`:** default no: a copied replica is all-fallback (created-at times become the copy time; as-of before the copy finds no snapshot, retention waits, verify reports TimestampsDiffer). Nothing to build.
 
-**Rejected:** concurrent HEADs (still N requests, needs parallelism); a stamps manifest object (a second truth Go never reads); the stamp in the key (changes the layout); remembering this process's own commits (a cache); as-of eligibility from LastModified within a skew bound (no bound holds); a binary search per level (correct only on monotone stamps); a new as-of rule that stops early (changed outcomes); a hard cap on as-of reads (G4); per-transaction level-0 coverage (fixes a monotonicity nothing relies on, and is not monotone itself with nested level-0 files); a 100-byte header GET instead of HEAD (same count, and not the stored stamp on fallback objects); retention on LastModified (G5).
+**Rejected:** concurrent HEADs (still N requests, needs parallelism); a created-at times manifest object (a second truth Go never reads); the created-at time in the key (changes the layout); remembering this process's own commits (a cache); as-of eligibility from LastModified within a skew bound (no bound holds); a binary search per level (correct only on monotone created-at times); a new as-of rule that stops early (changed outcomes); a hard cap on as-of reads (G4); per-transaction level-0 coverage (fixes a monotonicity nothing relies on, and is not monotone itself with nested level-0 files); a 100-byte header GET instead of HEAD (same count, and not the stored created-at time on fallback objects); retention on LastModified (G5).
 
 
 ### Task 8g6: verify reads each file once (branch `verify-gets`)

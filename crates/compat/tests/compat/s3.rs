@@ -4,7 +4,7 @@
 //! also cover request signing, key encoding (the run prefix holds a space, `+` and `=`),
 //! listing across pages (the harness lists two files a page), multipart uploads (a database
 //! of about 8 MB makes every writer's boot snapshot larger than the 5 MiB part size) and the
-//! stamps a point-in-time restore reads (Rust's and Go's `litestream-timestamp` metadata, or
+//! created-at times a point-in-time restore reads (Rust's and Go's `litestream-timestamp` metadata, or
 //! the object's `LastModified` for Go before v0.5.16).
 //!
 //! `just compat-s3` starts MinIO, sets `LSR_COMPAT_S3_*` and runs these; unset, they skip.
@@ -108,7 +108,7 @@ struct Mark {
 /// The writer comes up and uploads the database; the application commits three rounds of three
 /// transactions, each staged before the next, and each round is uploaded before its mark
 /// is taken. The next round starts only once the clock has passed the mark, so every file
-/// of a later round is stamped after it. Stops the writer with SIGINT.
+/// of a later round is recorded as created after it. Stops the writer with SIGINT.
 fn write_rounds(mut process: Replicator, site: &mut Site) -> Vec<Mark> {
     let kind = process.kind();
     process.wait_up(UP).expect("the writer comes up");

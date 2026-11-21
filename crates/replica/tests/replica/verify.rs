@@ -12,7 +12,7 @@ use std::time::Duration;
 use common::{PATIENCE, Site, config, fake, wait};
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    FileInfo, FileKey, Level, Listing, ObjectStore, PageLimit, ReadLen, StoreError, StoredStamp,
+    CreatedAt, FileInfo, FileKey, Level, Listing, ObjectStore, PageLimit, ReadLen, StoreError,
     Upload,
 };
 use lsr_ltx::{Encoder, Event as LtxEvent, ReadDecoder, TxidRange};
@@ -315,16 +315,16 @@ impl ObjectStore for Gated {
         self.inner.read(key, offset, len).await
     }
 
-    async fn stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
-        self.inner.stamp(file).await
+    async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
+        self.inner.created_at(file).await
     }
 
-    async fn read_with_stamp(
+    async fn read_with_created_at(
         &self,
         file: &FileInfo,
         len: ReadLen,
-    ) -> Result<(Vec<u8>, StoredStamp), StoreError> {
-        self.inner.read_with_stamp(file, len).await
+    ) -> Result<(Vec<u8>, CreatedAt), StoreError> {
+        self.inner.read_with_created_at(file, len).await
     }
 
     async fn begin_upload(

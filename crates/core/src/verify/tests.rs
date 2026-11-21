@@ -210,17 +210,17 @@ impl ObjectStore for Wrapped {
         self.inner.read(key, offset, len).await
     }
 
-    async fn stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
-        self.inner.stamp(file).await
+    async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
+        self.inner.created_at(file).await
     }
 
-    async fn read_with_stamp(
+    async fn read_with_created_at(
         &self,
         file: &FileInfo,
         len: ReadLen,
-    ) -> Result<(Vec<u8>, StoredStamp), StoreError> {
+    ) -> Result<(Vec<u8>, CreatedAt), StoreError> {
         self.before_read(&file.key).await?;
-        self.inner.read_with_stamp(file, len).await
+        self.inner.read_with_created_at(file, len).await
     }
 
     async fn begin_upload(

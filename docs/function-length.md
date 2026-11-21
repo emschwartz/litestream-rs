@@ -59,7 +59,7 @@ Pasting any of these into its caller would take the caller over 70 lines. Length
 | `crates/core/src/maintain/retain.rs:373` `candidates` | 41 | `decide` | 35 | 76 |
 | `crates/sim/src/run.rs:727` `meta` | 31 | `apply` | 45 | 76 |
 | `crates/sim/src/scenario/faults.rs:387` `throttle_waits` | 53 | `store_429_retry_after` | 23 | 76 |
-| `crates/core/src/sync.rs:582` `stamp` | 14 | `run` | 63 | 77 |
+| `crates/core/src/sync.rs:582` `created_at` | 14 | `run` | 63 | 77 |
 | `crates/core/src/verify.rs:718` `read` | 46 | `file` | 31 | 77 |
 | `crates/compat/src/replicator.rs:45` `start` | 14 | `attempt` | 64 | 78 |
 | `crates/core/src/verify.rs:504` `name_findings` | 49 | `verify` | 29 | 78 |
@@ -93,7 +93,7 @@ What they are:
 - **Methods and public functions.** `Manifest::save`, `resources::per_tick`, the
   `verify` renderers: they would be separate functions at any limit.
 - **None is a fragment with no name of its own** (a `part_two`, or a helper that takes half the
-  caller's locals as arguments). The longest parameter list in the table is `sync.rs` `stamp`
+  caller's locals as arguments). The longest parameter list in the table is `sync.rs` `created_at`
   with six, which builds one LTX header from its inputs.
 
 ## When to look again

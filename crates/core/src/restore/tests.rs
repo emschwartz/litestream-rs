@@ -14,8 +14,8 @@ use proptest::prelude::*;
 
 use super::*;
 use crate::conformance::block_on;
+use crate::layout::CreatedAt;
 use crate::layout::Level;
-use crate::layout::StoredStamp;
 use crate::mem::MemStore;
 use crate::store::{Listing, PageLimit, StoreOp, Upload};
 
@@ -595,21 +595,21 @@ impl ObjectStore for Wrapped {
         self.inner.read(key, offset, len).await
     }
 
-    async fn stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
+    async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
         let doomed = self.vanish.lock().unwrap().remove(&file.key);
         if doomed {
             self.inner.delete(&[file.key]).await?;
         }
-        self.inner.stamp(file).await
+        self.inner.created_at(file).await
     }
 
-    async fn read_with_stamp(
+    async fn read_with_created_at(
         &self,
         file: &FileInfo,
         len: ReadLen,
-    ) -> Result<(Vec<u8>, StoredStamp), StoreError> {
+    ) -> Result<(Vec<u8>, CreatedAt), StoreError> {
         self.before_read(&file.key).await?;
-        self.inner.read_with_stamp(file, len).await
+        self.inner.read_with_created_at(file, len).await
     }
 
     async fn begin_upload(
@@ -640,21 +640,21 @@ fn a_file_deleted_between_plan_and_read_is_replanned_once() {
 }
 
 #[test]
-fn restore_reports_stamps_read() {
+fn restore_reports_created_at_read() {
     let store = fill_four(MemStore::with_listed_last_modified());
-    // Stamped at max * 1000: the snapshot, transactions 2 and 3, then 4 refused.
+    // Recorded as created at max * 1000: the snapshot, transactions 2 and 3, then 4 refused.
     let (result, sink) = run(
         &store,
         RestoreTarget::AsOf(Timestamp::from_unix_millis(3500)),
     );
     let restored = result.unwrap();
     assert_eq!((restored.reached(), restored.files()), (txid(3), 3));
-    assert_eq!(restored.stamps_read(), 4);
-    assert_eq!(store.stamp_calls(), 4);
+    assert_eq!(restored.created_at_read(), 4);
+    assert_eq!(store.created_at_calls(), 4);
     assert_eq!(seeds(&sink.published().unwrap()), [5, 9]);
     let (latest, _) = run(&store, RestoreTarget::Latest);
-    assert_eq!(latest.unwrap().stamps_read(), 0);
-    assert_eq!(store.stamp_calls(), 4);
+    assert_eq!(latest.unwrap().created_at_read(), 0);
+    assert_eq!(store.created_at_calls(), 4);
 }
 
 /// Transactions 1 and 2, then a compacted file for 3 to 5 whose finer files
@@ -733,7 +733,7 @@ fn take_earlier_leaves_exact_restores_and_gaps_alone() {
 }
 
 #[test]
-fn a_file_gone_before_its_stamp_is_read_is_replanned() {
+fn a_file_gone_before_its_created_at_is_read_is_replanned() {
     let inner = fill_four(MemStore::with_listed_last_modified());
     put_spec(&inner, 1, &Spec::plain(512, 2, 2, 3, &[(1, 5), (2, 9)]));
     let store = Wrapped::vanishing(inner, &[key(1, 2, 3)]);
@@ -744,15 +744,15 @@ fn a_file_gone_before_its_stamp_is_read_is_replanned() {
     let restored = result.unwrap();
     assert_eq!((restored.attempts(), restored.files()), (2, 3));
     // The snapshot and the vanished file, then the snapshot and three L0 files.
-    assert_eq!(restored.stamps_read(), 6);
+    assert_eq!(restored.created_at_read(), 6);
     assert_eq!(sink.calls(SinkOp::Reset), 1);
     assert_eq!(seeds(&sink.published().unwrap()), [5, 9]);
 }
 
 #[test]
-fn a_stamp_error_other_than_not_found_ends_the_restore() {
+fn a_created_at_error_other_than_not_found_ends_the_restore() {
     let store = fill_four(MemStore::with_listed_last_modified());
-    // A stamp is a read; planning reads before any file is applied.
+    // A created-at time is a read; planning reads before any file is applied.
     let fault = StoreError::Transient {
         op: StoreOp::Read,
         kind: io::ErrorKind::TimedOut,
@@ -766,7 +766,7 @@ fn a_stamp_error_other_than_not_found_ends_the_restore() {
         matches!(result, Err(RestoreError::Store(ref e)) if *e == fault),
         "{result:?}"
     );
-    assert_eq!((store.stamp_calls(), sink.published()), (1, None));
+    assert_eq!((store.created_at_calls(), sink.published()), (1, None));
 }
 
 fn three_snapshots() -> MemStore {

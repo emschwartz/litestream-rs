@@ -83,7 +83,7 @@ impl fmt::Debug for FakeS3 {
 }
 
 impl FakeS3 {
-    /// An empty bucket named and addressed as `config` says. `clock` stamps
+    /// An empty bucket named and addressed as `config` says. `clock` created-at times
     /// each object's `LastModified`.
     #[must_use]
     pub fn new(config: &S3Config, clock: impl Clock + 'static) -> Self {
@@ -116,7 +116,7 @@ impl FakeS3 {
     }
 
     /// Sets what LIST and HEAD report as an object's last-modified time, which
-    /// is not the stored stamp and may be anything.
+    /// is not the stored created-at time and may be anything.
     pub fn set_last_modified(&self, key: &str, at: Timestamp) {
         if let Some(object) = self.state().objects.get_mut(key) {
             object.modified = at;
@@ -350,7 +350,7 @@ fn check_md5(request: &HttpRequest, optional: bool) -> Result<(), HttpResponse> 
     }
 }
 
-/// S3 lists `LastModified` to the second, so it never equals a millisecond stamp.
+/// S3 lists `LastModified` to the second, so it never equals a millisecond created-at time.
 fn whole_seconds(at: Timestamp) -> Timestamp {
     Timestamp::from_unix_millis(at.unix_millis().div_euclid(1000).saturating_mul(1000))
 }

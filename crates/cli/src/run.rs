@@ -196,8 +196,8 @@ pub enum Finished {
     Planned {
         /// The chain, in the order it would be applied.
         chain: ContiguousChain,
-        /// Exact stamps read to plan an as-of target.
-        stamps_read: u64,
+        /// Exact created-at times read to plan an as-of target.
+        created_at_read: u64,
         /// Stale sidecars `--clear-sidecars` would remove first.
         sidecars_to_remove: Vec<PathBuf>,
     },
@@ -241,10 +241,10 @@ pub enum Done {
     Files {
         /// Every file.
         inventory: Inventory,
-        /// For an S3 replica listed with `--stamps`, how many files had no stored
-        /// stamp and show the object's `LastModified` instead (replicas from Go
-        /// v0.5.0 have no stamps).
-        stamp_fallbacks: Option<u64>,
+        /// For an S3 replica listed with `--created-at`, how many files had no stored
+        /// created-at time and show the object's `LastModified` instead (replicas from Go
+        /// v0.5.0 have no created-at times).
+        created_at_fallbacks: Option<u64>,
         /// Whether to print JSON.
         json: bool,
     },
@@ -351,7 +351,7 @@ impl From<RestoreError> for CliError {
             | RestoreError::File { .. }
             | RestoreError::Unstable { .. }
             | RestoreError::DatabaseChecksum { .. }
-            | RestoreError::StampRepeated { .. }
+            | RestoreError::CreatedAtRepeated { .. }
             | RestoreError::Sink { .. }) => Self::Restore(other),
         }
     }
@@ -444,7 +444,7 @@ pub fn exit_for_error(error: &CliError) -> Exit {
             RestoreError::Inventory(_)
             | RestoreError::Store(_)
             | RestoreError::Unstable { .. }
-            | RestoreError::StampRepeated { .. }
+            | RestoreError::CreatedAtRepeated { .. }
             | RestoreError::Sink { .. }
             | RestoreError::Publish { .. } => Exit::Environment,
         },
@@ -684,20 +684,20 @@ async fn plan_on<S: ObjectStore>(store: &S, output: &Path, how: How) -> Result<F
         return Err(CliError::Sidecar { path: path.clone() });
     }
     let inventory = Inventory::load(store).await?;
-    let (outcome, stamps_read) = plan_target(store, &inventory, how.target).await?;
+    let (outcome, created_at_read) = plan_target(store, &inventory, how.target).await?;
     match outcome {
         PlanOutcome::AsOfInsideFile { chain, .. }
             if how.as_of_inside == AsOfInside::TakeEarlier =>
         {
             Ok(Finished::Planned {
                 chain,
-                stamps_read,
+                created_at_read,
                 sidecars_to_remove,
             })
         }
         PlanOutcome::Plan(chain) => Ok(Finished::Planned {
             chain,
-            stamps_read,
+            created_at_read,
             sidecars_to_remove,
         }),
         other @ (PlanOutcome::EmptyReplica
@@ -710,7 +710,7 @@ async fn plan_on<S: ObjectStore>(store: &S, output: &Path, how: How) -> Result<F
     }
 }
 
-/// The planner the restore uses for [target], and the stamps it read. A store
+/// The planner the restore uses for [target], and the created-at times it read. A store
 /// failure is the restore's own error for it, so the two exit alike.
 async fn plan_target<S: ObjectStore>(
     store: &S,
@@ -724,10 +724,10 @@ async fn plan_target<S: ObjectStore>(
     };
     let mut planner = AsOfPlanner::new(inventory, instant);
     match resolve(store, &mut planner).await {
-        Ok(resolved) => Ok((resolved.value, resolved.stamps_read)),
+        Ok(resolved) => Ok((resolved.value, resolved.created_at_read)),
         Err(ResolveError::Store(err)) => Err(CliError::Restore(RestoreError::Store(err))),
         Err(ResolveError::Repeated { key }) => {
-            Err(CliError::Restore(RestoreError::StampRepeated { key }))
+            Err(CliError::Restore(RestoreError::CreatedAtRepeated { key }))
         }
     }
 }
@@ -748,33 +748,33 @@ async fn files_command(args: FilesArgs) -> Result<Done, CliError> {
     match open(&args.replica)? {
         Opened::Dir(store) => Ok(Done::Files {
             inventory: Inventory::load(&store).await?,
-            stamp_fallbacks: None,
+            created_at_fallbacks: None,
             json: args.json,
         }),
-        Opened::S3(store) => files_on_s3(&store, args.json, args.stamps).await,
+        Opened::S3(store) => files_on_s3(&store, args.json, args.resolved).await,
     }
 }
 
 async fn files_on_s3<T: lsr_store_s3::Transport>(
     store: &Remote<T>,
     json: bool,
-    stamps: bool,
+    resolved: bool,
 ) -> Result<Done, CliError> {
     let inventory = Inventory::load(store).await?;
-    if !stamps {
+    if !resolved {
         return Ok(Done::Files {
             inventory,
-            stamp_fallbacks: None,
+            created_at_fallbacks: None,
             json,
         });
     }
     let inventory = inventory
-        .stamped(store)
+        .with_created_at(store)
         .await
         .map_err(InventoryError::Store)?;
     Ok(Done::Files {
         inventory,
-        stamp_fallbacks: Some(store.inner().stamp_stats().fell_back),
+        created_at_fallbacks: Some(store.inner().created_at_stats().fell_back),
         json,
     })
 }
