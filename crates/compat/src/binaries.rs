@@ -80,6 +80,16 @@ const FIRST_FILE_VFS_PATCH: u32 = 3;
 /// waiting a whole snapshot interval (upstream feb65fb, #888).
 const FIRST_SNAPSHOT_RETRY_PATCH: u32 = 4;
 
+/// The first release tag that stops reading the WAL at the wal-index's committed end
+/// (upstream [`WAL_INDEX_END_COMMIT`], #1581), or `None` while no release contains that
+/// commit. When upstream tags one, this becomes `Some(N)`: `wal_index_end_follows_the_clone`
+/// in `tests/releases.rs` fails until it does.
+pub const FIRST_WAL_INDEX_END_PATCH: Option<u32> = None;
+
+/// The upstream commit that made Go read the committed WAL end from the wal-index:
+/// "fix(db): do not replicate WAL frames past the wal-index mxFrame (#1581)", 2026-11-19.
+pub const WAL_INDEX_END_COMMIT: &str = "bcd69ae";
+
 /// A Go build the live tests run: its binary name (a tag, a short commit or `main`) and
 /// the era derived from it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -132,6 +142,23 @@ impl GoBuild {
     /// fixed upstream in feb65fb), so a short run may never see a snapshot from it.
     pub fn snapshots_soon_after_start(&self) -> bool {
         release_patch(&self.name).is_none_or(|n| n >= FIRST_SNAPSHOT_RETRY_PATCH)
+    }
+
+    /// Whether this build replicates only WAL frames SQLite committed. A frame is committed
+    /// once the wal-index's `mxFrame` covers it; a writer stopped after writing its frames but
+    /// before updating the wal-index leaves valid frames past that end, which the next commit
+    /// overwrites. Releases through v0.5.18 read the WAL file to its last valid frame, so one
+    /// that boots on such a tail while the application keeps its connection open can replicate
+    /// a transaction that never happened (#38). Upstream [`WAL_INDEX_END_COMMIT`] reads
+    /// `mxFrame` first (`walIndexMaxFrame`, `db.go`); no release contains it yet
+    /// ([`FIRST_WAL_INDEX_END_PATCH`]).
+    ///
+    /// A commit or `main` counts as containing it: the pinned 041a8c3 and upstream's tip both
+    /// do. A commit older than the fix is then held to the strict expectation, so it can fail
+    /// loudly on the bug but never pass by an exception it should not get.
+    pub fn reads_wal_index_end(&self) -> bool {
+        release_patch(&self.name)
+            .is_none_or(|n| FIRST_WAL_INDEX_END_PATCH.is_some_and(|first| n >= first))
     }
 
     /// Where the built VFS extension lives; an error naming the build script when absent.
@@ -304,6 +331,19 @@ mod tests {
             ("main", true),
         ] {
             assert_eq!(GoBuild::new(name).vfs_reads_files(), files, "{name}");
+        }
+    }
+
+    #[test]
+    fn only_builds_with_the_upstream_fix_read_the_wal_index_end() {
+        for (name, fixed) in [
+            ("v0.5.0", false),
+            ("v0.5.16", false),
+            ("v0.5.18", false),
+            ("041a8c3", true),
+            ("main", true),
+        ] {
+            assert_eq!(GoBuild::new(name).reads_wal_index_end(), fixed, "{name}");
         }
     }
 

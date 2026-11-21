@@ -101,6 +101,7 @@ lsr-cli::bin/lsr run::tests::restore_and_verify_over_s3_equal_the_directory
 lsr-compat binaries::tests::era_follows_the_name
 lsr-compat binaries::tests::frame_writers_are_the_first_two
 lsr-compat binaries::tests::names_round_trip
+lsr-compat binaries::tests::only_builds_with_the_upstream_fix_read_the_wal_index_end
 lsr-compat binaries::tests::pinned_versions_agree_with_their_era
 lsr-compat binaries::tests::the_known_table_is_ordered_and_complete
 lsr-compat binaries::tests::the_vfs_reads_files_from_v0_5_3
@@ -171,6 +172,7 @@ lsr-compat::ofd_pin the_ofd_pin_survives_another_descriptor_closing_and_the_posi
 lsr-compat::ofd_pin with_a_busy_timeout_the_checkpoint_still_reports_busy
 lsr-compat::releases every_release_tag_is_known
 lsr-compat::releases quirks_name_known_releases
+lsr-compat::releases wal_index_end_follows_the_clone
 lsr-compat::rust_chains go_compacts_and_prunes_a_rust_replica
 lsr-compat::rust_chains go_restores_rust_chain_as_of
 lsr-compat::rust_chains go_restores_rust_chain_each_txid
