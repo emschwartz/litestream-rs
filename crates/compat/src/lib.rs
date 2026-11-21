@@ -1,5 +1,5 @@
 //! The Go compatibility harness: pinned Go `litestream` binaries, a seeded workload
-//! generator, golden replica fixtures and the helpers later tasks read them with.
+//! generator, golden replica fixtures and the helpers the tests read them with.
 //!
 //! Mechanism. `scripts/build-go-litestream.sh` builds each pinned Go version once
 //! ([`GoVersion`]). [`generate`] runs a deterministic SQLite workload while a real
@@ -9,7 +9,7 @@
 //! stops Go, copies the replica into `fixtures/<version>/<scenario>/replica` and records, in
 //! `manifest.json`, what that version's own `litestream restore` produced for each target.
 //!
-//! The fixtures are the contract between Go and Rust: later tasks restore them with Rust and
+//! The fixtures are the contract between Go and Rust: the compat tests restore them with Rust and
 //! compare per-page hashes with the manifest. Equality is on pages, never on LTX bytes.
 //!
 //! Three sets of Go builds. Pinned: [`GoVersion`]'s five, with committed fixtures and live

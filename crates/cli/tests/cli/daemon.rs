@@ -239,7 +239,7 @@ fn restore_if_db_not_exists_restores_or_starts_fresh() {
 
 /// A database the daemon restored, with no write from the application: the WAL has no header,
 /// and the first sync is a snapshot that writes one itself. It is staged at once, with no
-/// retry; before, the sync lane logged `retrying` some 70,000 times in four seconds.
+/// retry; before, the sync task logged `retrying` some 70,000 times in four seconds.
 #[test]
 fn a_restored_database_snapshots_with_no_write_and_no_retry() {
     let dir = TempDir::new().unwrap();

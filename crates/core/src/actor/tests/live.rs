@@ -65,7 +65,7 @@ fn a_drain_reads_no_live_pages() {
     assert_eq!(actor.take_live_pages(), None);
 }
 
-/// A verify's pin is the restore point retention keeps; a degraded lane's
+/// A verify's pin is the restore point retention keeps; a degraded task's
 /// older one wins while both stand, and each goes on its own.
 #[test]
 fn a_verify_pin_is_kept_beside_a_lane_pin_and_the_older_wins() {

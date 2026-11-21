@@ -26,7 +26,7 @@ fn with_staging_gone_boot_continues_from_the_replicas_newest_staged_file() {
     let before = rig.remote.calls();
     let boot = rig.tick(&mut actor, T0 + 2);
     assert_eq!(event(&boot), Some(&Event::Booted { cause: None }));
-    // The upload lane's listing (one page per level) and its read-back of the
+    // The upload task's listing (one page per level) and its read-back of the
     // newest file, then one read of that file as the newest staged file, from byte 0.
     let levels = u32::try_from(Level::ALL.len()).unwrap();
     assert_eq!(rig.remote.calls() - before, levels + 2);
@@ -74,7 +74,7 @@ fn with_staging_gone_a_wal_that_restarted_snapshots_as_a_staged_newest_staged_fi
 #[test]
 fn with_staging_gone_a_replica_newest_staged_file_naming_another_transaction_halts_corrupt() {
     let (mut rig, mut actor) = wiped();
-    // The newest staged file whose header names transaction 1 under key 2. The upload lane's
+    // The newest staged file whose header names transaction 1 under key 2. The upload task's
     // read-back judges the newest key first, as it did before the newest staged file was read.
     let all = ReadLen::new(ReadLen::MAX_RAW).unwrap();
     let one = FileKey::new(Level::ZERO, TxidRange::single(Txid::MIN));

@@ -616,17 +616,17 @@ Notation for the bounds: N files; S files that begin at transaction 1, at every 
 
 **Files:** `crates/core/src/{maintain.rs,maintain/retain.rs,actor.rs}` and their tests; `crates/sim` call sites of `due`, if any.
 
-**Consumes:** 8g1; `due` (maintain.rs), `retention` (retain.rs), the actor's maintain lane (it loads the inventory and calls `due` inside the async tick).
+**Consumes:** 8g1; `due` (maintain.rs), `retention` (retain.rs), the actor's maintain task (it loads the inventory and calls `due` inside the async tick).
 
 **Produces:**
 - `pub fn due(inventory: &Inventory, now: Timestamp, config: &Maintenance, published: Option<Txid>, state: &mut MaintainState, resolved: &ResolvedCreatedAt) -> Resolve<Due>`.
 - `pub(super) fn retention(..., resolved: &ResolvedCreatedAt) -> Resolve<Retention>`: today's parameters plus `resolved`.
-- The maintain lane's event gains `created_at_read: u64`.
+- The maintain task's event gains `created_at_read: u64`.
 
 **Semantics:**
 1. Schedule: `plan_level` asks for the destination level's last file only when the source level has files above it; `plan_snapshot` asks for the newest snapshot only when a snapshot is otherwise due. Both exact, so the job sequence is unchanged.
 2. Retention reads, all exact: the Lasts (the last file in key order of each non-empty level), every level-9 snapshot-start, and the level-0 files the rule would delete, in key order, up to and including the first young one, at most `MAX_DELETE` + 1. Anchor = min(now, max created-at time over the Lasts and snapshot-starts) (G5). Then main's snapshot rule, levels 1-8 by keys, main's level-0 rule. The `NoCreatedAt` and `SnapshotCreatedAtBackwards` holds look only at the files read.
-3. `due` re-runs from the start after each resolved created-at time; its `state` mutations (`forget_unlisted`) are idempotent, so a re-run is the same pass. The actor drives it with `resolve` against the remote store; a `created_at` error is a maintain-lane fault like an inventory fault (no job; list again next tick). `Repeated` is a fault too.
+3. `due` re-runs from the start after each resolved created-at time; its `state` mutations (`forget_unlisted`) are idempotent, so a re-run is the same pass. The actor drives it with `resolve` against the remote store; a `created_at` error is a maintain-task fault like an inventory fault (no job; list again next tick). `Repeated` is a fault too.
 4. After this block no `created_at()` call remains in maintain.rs or retain.rs.
 
 **Tests:**
@@ -635,7 +635,7 @@ Notation for the bounds: N files; S files that begin at transaction 1, at every 
 - `retention_r_prime_anchor_is_at_most_the_exact_anchor`.
 - `retention_reads_only_lasts_snaps_and_scanned_level_zero` (the resolved key set equals exactly that set); `retention_ignores_last_modified`; `retention_never_deletes_on_last_modified` (LastModified at 0 for every file, stored created-at times young: no delete).
 - `schedule_reads_only_lasts_with_work`; `due_matches_main_on_stored_listings` (every existing maintain and actor test gives the same jobs over `MemStore::new` and over the lazy mode).
-- `created_at_failure_is_a_maintain_fault` (actor: `created_at` returns `Transient`; no job runs; the lane backs off as for a list fault).
+- `created_at_failure_is_a_maintain_fault` (actor: `created_at` returns `Transient`; no job runs; the task backs off as for a list fault).
 
 **Must not touch:** plan.rs, restore.rs (8g2); retention's level-0 rule (main's stays, G5); store crates.
 

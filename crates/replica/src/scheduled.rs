@@ -17,7 +17,7 @@
 //! 2. The pages go to a thread of its own (`lsr-verify`, started on the first run), which runs
 //!    `lsr_core::verify_against`: the listing checks of `verify` at `Depth::Names`, then the
 //!    real restore of that transaction into a sink that keeps one checksum a page. Every store
-//!    call, however slow, happens there, so the sync lane never waits on one. One run at a
+//!    call, however slow, happens there, so the sync task never waits on one. One run at a
 //!    time: the hand-off is a slot of one.
 //! 3. The result comes back to the replicator's thread (the verify thread unparks it), which
 //!    updates `Health::verification`, emits `Event::Verified`, and pins retention.

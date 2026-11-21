@@ -10,8 +10,8 @@
 //! A scenario runs under one set of [`Responses`], the default unless
 //! [`Scenario::under`] says otherwise. [`Expect::Stopped`] reads that set: a
 //! cause whose response is to stop must halt the engine, one whose response
-//! is to keep trying must degrade a lane, and [`Expect::Recovered`] then asks
-//! for that lane to recover once the fault clears (it is skipped where the
+//! is to keep trying must degrade a task, and [`Expect::Recovered`] then asks
+//! for that task to recover once the fault clears (it is skipped where the
 //! engine stops). So one list of expectations states both behaviours, and the
 //! fault tests run each persistent fault's scenarios under both presets.
 
@@ -101,10 +101,10 @@ pub enum Expect {
     /// An event.
     Event(EventMatch),
     /// The engine met this cause: it halted for it where the scenario's
-    /// responses stop on it, and a lane is degraded by it where they keep
+    /// responses stop on it, and a task is degraded by it where they keep
     /// trying.
     Stopped(HaltCause),
-    /// A lane that a kept-trying cause degraded recovered on the same
+    /// A task that a kept-trying cause degraded recovered on the same
     /// engine. Skipped where the scenario's responses stop.
     Recovered,
     /// The oracle restored and judged the replica and found nothing wrong.
@@ -181,7 +181,7 @@ impl Scenario {
         self
     }
 
-    /// Whether the scenario's persistent fault keeps a lane trying under its
+    /// Whether the scenario's persistent fault keeps a task trying under its
     /// responses.
     #[must_use]
     pub fn keeps_trying(&self) -> bool {
@@ -375,7 +375,7 @@ pub fn meta_wiped_remote_kept() -> Scenario {
 
 /// The boot after the wipe (the last before the oracle judged) took no
 /// snapshot and staged none before the oracle, and asked the replica for one
-/// listing per level (the upload lane's), the upload lane's read-back of the
+/// listing per level (the upload task's), the upload task's read-back of the
 /// newest file, and one read of that file as the newest staged file.
 fn last_boot_continues(report: &RunReport) -> Result<(), String> {
     use lsr_core::Event;

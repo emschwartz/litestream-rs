@@ -14,8 +14,8 @@ use std::time::Duration;
 
 use lsr_core::{
     Actor, ActorConfig, AppCheckpoints, CheckpointConfig, Clock, Entropy, Env, Event, Fault,
-    HaltCause, Lane, MAX_BACKOFF, Maintenance, Next, PersistentCause, Responses, RetentionMode,
-    SeededEntropy, SyncConfig, Tick, UploadConfig,
+    HaltCause, MAX_BACKOFF, Maintenance, Next, PersistentCause, Responses, RetentionMode,
+    SeededEntropy, SyncConfig, Task, Tick, UploadConfig,
 };
 use lsr_ltx::{PageNo, PageSize, Timestamp, Txid};
 use lsr_wal::{Salts, WalOffset};
@@ -96,9 +96,9 @@ pub enum Seen {
     Event(Event),
     /// A tick that halted the engine.
     Halt(HaltCause),
-    /// A lane that was degraded is not any more: its work succeeded on the
+    /// A task that was degraded is not any more: its work succeeded on the
     /// same engine, with no restart between.
-    Recovered(Lane),
+    Recovered(Task),
     /// A snapshot file was staged, taking this transaction.
     Snapshot(Txid),
     /// The oracle judged the replica and found nothing wrong.
@@ -167,7 +167,7 @@ pub struct Opts {
     /// Record what the engine and the oracle did in [`RunReport::seen`].
     pub record: bool,
     /// The scenario's persistent fault is expected: a halt for it ends the
-    /// run's ticks, and a lane it keeps degraded ends a drain or the idle
+    /// run's ticks, and a task it keeps degraded ends a drain or the idle
     /// check, without being a bug.
     pub allow_halt: bool,
     /// What each persistent fault does; the default keeps trying.
@@ -204,7 +204,7 @@ pub fn actor_config() -> ActorConfig {
 /// What one actor step came to.
 enum Step {
     Ran,
-    /// A lane kept trying a persistent fault.
+    /// A task kept trying a persistent fault.
     Degraded(PersistentCause),
     /// A drain finished, naming the newest transaction on the replica.
     Drained(Option<Txid>),
@@ -234,7 +234,7 @@ struct Runner {
     responses: Responses,
     /// Whether retention deletes, for the running engine and the next boot.
     retention: RetentionMode,
-    /// Which lanes the current engine reported degraded after its last tick.
+    /// Which tasks the current engine reported degraded after its last tick.
     degraded: [bool; 5],
     /// The latest time the current engine has been told: its retry waits are
     /// measured from it, since an earlier reading is clamped.
@@ -545,22 +545,22 @@ impl Runner {
         }
     }
 
-    /// A lane degraded by a persistent fault the run does not expect is a
+    /// A task degraded by a persistent fault the run does not expect is a
     /// bug, as a halt for it would be. `Bug` is never expected.
     fn degraded_expected(&self, cause: PersistentCause) -> Result<(), Violation> {
         if cause != PersistentCause::Bug && self.halt_expected(HaltCause::from(cause)) {
             Ok(())
         } else {
-            Err(bug_fault(format!("a lane is degraded: {cause:?}")))
+            Err(bug_fault(format!("a task is degraded: {cause:?}")))
         }
     }
 
-    /// Records each lane the tick took out of its degraded state.
+    /// Records each task the tick took out of its degraded state.
     fn note_recovered(&mut self) {
-        for (was, lane) in self.degraded.iter_mut().zip(Lane::ALL) {
-            let now = self.actor.degraded(lane).is_some();
+        for (was, task) in self.degraded.iter_mut().zip(Task::ALL) {
+            let now = self.actor.degraded(task).is_some();
             if *was && !now && self.record {
-                self.report.seen.push(Seen::Recovered(lane));
+                self.report.seen.push(Seen::Recovered(task));
             }
             *was = now;
         }
@@ -585,7 +585,7 @@ impl Runner {
 
     /// Stops the engine and runs it until it says it is drained.
     ///
-    /// A lane the scenario's fault keeps degraded may outlast the grace: the
+    /// A task the scenario's fault keeps degraded may outlast the grace: the
     /// drain then ends at its deadline, as a halt for that fault would end it.
     fn drain(&mut self) -> Result<(), Violation> {
         self.actor
@@ -1076,7 +1076,7 @@ impl Runner {
         window.check()
     }
 
-    /// Whether a step ends the idle check: an expected halt, or a lane the
+    /// Whether a step ends the idle check: an expected halt, or a task the
     /// scenario's fault keeps degraded (an engine retrying is not idle).
     fn ends_idle(&self, step: &Step) -> Result<bool, Violation> {
         match step {

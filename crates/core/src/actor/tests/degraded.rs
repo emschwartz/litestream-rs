@@ -1,13 +1,13 @@
-//! Persistent faults under each configured response: a degraded lane keeps
+//! Persistent faults under each configured response: a degraded task keeps
 //! trying with the capped backoff and the others run, or the actor stops.
 
 use super::*;
 
-fn degraded(tick: &Tick) -> Option<(Lane, PersistentCause, Timestamp)> {
+fn degraded(tick: &Tick) -> Option<(Task, PersistentCause, Timestamp)> {
     match event(tick) {
         Some(Event::Degraded {
-            lane, cause, until, ..
-        }) => Some((*lane, *cause, *until)),
+            task, cause, until, ..
+        }) => Some((*task, *cause, *until)),
         Some(_) | None => None,
     }
 }
@@ -37,10 +37,10 @@ fn newest_replica_file(rig: &Rig) -> Option<u64> {
 }
 
 /// The counterpart of `halt_is_terminal`: under the default responses the
-/// upload lane is degraded, sync goes on, and the next upload that succeeds
+/// upload task is degraded, sync goes on, and the next upload that succeeds
 /// clears it.
 #[test]
-fn revoked_credentials_degrade_the_upload_lane_until_an_upload_succeeds() {
+fn revoked_credentials_degrade_the_upload_task_until_an_upload_succeeds() {
     let (mut rig, mut actor) = caught_up_go_like();
     rig.remote.inner.inject_failure(StoreOp::Upload, auth());
     rig.commit(2);
@@ -49,16 +49,16 @@ fn revoked_credentials_degrade_the_upload_lane_until_an_upload_succeeds() {
         Some(&Event::Synced { files: 1 })
     );
     let failed = rig.tick(&mut actor, T0 + 10);
-    let Some((lane, cause, until)) = degraded(&failed) else {
+    let Some((task, cause, until)) = degraded(&failed) else {
         panic!("{failed:?}");
     };
-    assert_eq!((lane, cause), (Lane::Upload, PersistentCause::Credentials));
+    assert_eq!((task, cause), (Task::Upload, PersistentCause::Credentials));
     assert_eq!(until, ts(T0 + 1_010));
     assert_eq!(actor.phase(), Phase::Running);
-    let state = actor.degraded(Lane::Upload).unwrap();
+    let state = actor.degraded(Task::Upload).unwrap();
     assert_eq!((state.since, state.retries), (ts(T0 + 10), 1));
-    assert_eq!(actor.degraded(Lane::Sync), None);
-    // The sync lane does not wait on the degraded upload lane.
+    assert_eq!(actor.degraded(Task::Sync), None);
+    // The sync task does not wait on the degraded upload task.
     rig.commit(3);
     assert_eq!(
         event(&rig.tick(&mut actor, T0 + 20)),
@@ -70,7 +70,7 @@ fn revoked_credentials_degrade_the_upload_lane_until_an_upload_succeeds() {
             .any(|t| matches!(event(t), Some(Event::Uploaded(_)))),
         "{seen:?}"
     );
-    assert_eq!(actor.degraded(Lane::Upload), None, "{seen:?}");
+    assert_eq!(actor.degraded(Task::Upload), None, "{seen:?}");
     assert_eq!(newest_replica_file(&rig), Some(3));
 }
 
@@ -89,8 +89,8 @@ fn the_degraded_backoff_doubles_to_the_cap_and_no_further() {
     let mut waits = Vec::new();
     for _ in 0..200 {
         let tick = rig.tick(&mut actor, now);
-        if let Some((lane, cause, until)) = degraded(&tick) {
-            assert_eq!((lane, cause), (Lane::Upload, PersistentCause::StoreRefused));
+        if let Some((task, cause, until)) = degraded(&tick) {
+            assert_eq!((task, cause), (Task::Upload, PersistentCause::StoreRefused));
             waits.push(until.unix_millis() - now);
         }
         match next_of(&tick) {
@@ -102,8 +102,8 @@ fn the_degraded_backoff_doubles_to_the_cap_and_no_further() {
     let cap = i64::try_from(crate::MAX_BACKOFF.as_millis()).unwrap();
     let want: Vec<i64> = (0..16).map(|n| (1_000_i64 << n).min(cap)).collect();
     assert_eq!(waits, want);
-    // The seventeenth attempt succeeded and cleared the lane.
-    assert_eq!(actor.degraded(Lane::Upload), None);
+    // The seventeenth attempt succeeded and cleared the task.
+    assert_eq!(actor.degraded(Task::Upload), None);
     assert_eq!(newest_replica_file(&rig), Some(2));
 }
 
@@ -123,10 +123,10 @@ fn a_refused_retention_delete_leaves_sync_and_upload_running() {
     let mut now = T0 + 60_000;
     let failed_at = loop {
         let tick = rig.tick(&mut actor, now);
-        if let Some((lane, cause, _)) = degraded(&tick) {
+        if let Some((task, cause, _)) = degraded(&tick) {
             assert_eq!(
-                (lane, cause),
-                (Lane::Maintenance, PersistentCause::StoreRefused)
+                (task, cause),
+                (Task::Maintenance, PersistentCause::StoreRefused)
             );
             break now;
         }
@@ -137,7 +137,7 @@ fn a_refused_retention_delete_leaves_sync_and_upload_running() {
             next => panic!("no retention delete ran: {tick:?} {next:?}"),
         }
     };
-    assert!(actor.degraded(Lane::Maintenance).is_some());
+    assert!(actor.degraded(Task::Maintenance).is_some());
     rig.commit(5);
     let seen = rig.settle(&mut actor, failed_at);
     assert!(
@@ -151,13 +151,13 @@ fn a_refused_retention_delete_leaves_sync_and_upload_running() {
         "{seen:?}"
     );
     assert_eq!(newest_replica_file(&rig), Some(5));
-    assert_eq!(actor.degraded(Lane::Sync), None);
-    assert_eq!(actor.degraded(Lane::Upload), None);
-    assert!(actor.degraded(Lane::Maintenance).is_some());
+    assert_eq!(actor.degraded(Task::Sync), None);
+    assert_eq!(actor.degraded(Task::Upload), None);
+    assert!(actor.degraded(Task::Maintenance).is_some());
 }
 
-/// While a lane is degraded, retention pins the newest transaction the
-/// replica held when it began; the pin goes once every lane has recovered.
+/// While a task is degraded, retention pins the newest transaction the
+/// replica held when it began; the pin goes once every task has recovered.
 #[test]
 fn a_degraded_lane_pins_the_replicas_newest_transaction_until_it_recovers() {
     let (mut rig, mut actor) = caught_up_go_like();
@@ -168,20 +168,20 @@ fn a_degraded_lane_pins_the_replicas_newest_transaction_until_it_recovers() {
     let failed = rig.tick(&mut actor, T0 + 10);
     assert!(degraded(&failed).is_some(), "{failed:?}");
     assert_eq!(actor.retention_pin(), held);
-    // A second lane degrading later keeps the first pin.
-    actor.fault(Lane::Checkpoint, Fault::WalUnlinked, ts(T0 + 20));
+    // A second task degrading later keeps the first pin.
+    actor.fault(Task::Checkpoint, Fault::WalUnlinked, ts(T0 + 20));
     assert_eq!(actor.retention_pin(), held);
     rig.follow(&mut actor, T0 + 1_010, 50);
-    assert_eq!(actor.degraded(Lane::Upload), None);
+    assert_eq!(actor.degraded(Task::Upload), None);
     assert_eq!(
         actor.retention_pin(),
         held,
-        "the checkpoint lane is still degraded"
+        "the checkpoint task is still degraded"
     );
-    actor.kept.lanes.get_mut(Lane::Checkpoint).succeed();
+    actor.kept.tasks.get_mut(Task::Checkpoint).succeed();
     let tick = rig.tick(&mut actor, T0 + 100_000_000);
-    let lanes: Vec<_> = Lane::ALL.iter().map(|l| actor.degraded(*l)).collect();
-    assert_eq!(actor.retention_pin(), None, "{tick:?} {lanes:?}");
+    let tasks: Vec<_> = Task::ALL.iter().map(|l| actor.degraded(*l)).collect();
+    assert_eq!(actor.retention_pin(), None, "{tick:?} {tasks:?}");
 }
 
 /// `Bug` never continues from the state it left: the actor is rebuilt and
@@ -189,11 +189,11 @@ fn a_degraded_lane_pins_the_replicas_newest_transaction_until_it_recovers() {
 #[test]
 fn a_bug_rebuilds_the_actor_and_boots_again_after_the_wait() {
     let (mut rig, mut actor) = caught_up_go_like();
-    let failed = actor.fault(Lane::Upload, Fault::Bug(BugSite::PageMap), ts(T0 + 10));
-    let Some((lane, cause, until)) = degraded(&failed) else {
+    let failed = actor.fault(Task::Upload, Fault::Bug(BugSite::PageMap), ts(T0 + 10));
+    let Some((task, cause, until)) = degraded(&failed) else {
         panic!("{failed:?}");
     };
-    assert_eq!((lane, cause), (Lane::Sync, PersistentCause::Bug));
+    assert_eq!((task, cause), (Task::Sync, PersistentCause::Bug));
     assert_eq!(actor.phase(), Phase::Boot);
     assert_eq!(actor.position(), None, "nothing of the old state is kept");
     let io = rig.io();
@@ -206,7 +206,7 @@ fn a_bug_rebuilds_the_actor_and_boots_again_after_the_wait() {
         matches!(event(&boot), Some(Event::Booted { .. })),
         "{boot:?}"
     );
-    assert_eq!(actor.degraded(Lane::Sync), None);
+    assert_eq!(actor.degraded(Task::Sync), None);
     assert_eq!(actor.phase(), Phase::Running);
     rig.commit(2);
     rig.settle(&mut actor, until.unix_millis() + 1);
@@ -216,7 +216,7 @@ fn a_bug_rebuilds_the_actor_and_boots_again_after_the_wait() {
 #[test]
 fn a_bug_stops_under_strict() {
     let (_rig, mut actor) = caught_up();
-    let tick = actor.fault(Lane::Upload, Fault::Bug(BugSite::PageMap), ts(T0 + 10));
+    let tick = actor.fault(Task::Upload, Fault::Bug(BugSite::PageMap), ts(T0 + 10));
     assert_eq!(tick, Tick::Halted(HaltCause::Bug));
 }
 
@@ -225,7 +225,7 @@ fn a_bug_stops_under_strict() {
 #[test]
 fn a_second_writer_stops_the_engine_by_default() {
     let (mut rig, mut actor) = caught_up_go_like();
-    let tick = actor.fault(Lane::Upload, Fault::RemoteAheadOfLocal, ts(T0 + 10));
+    let tick = actor.fault(Task::Upload, Fault::RemoteAheadOfLocal, ts(T0 + 10));
     assert_eq!(tick, Tick::Halted(HaltCause::OtherWriter));
     let io = rig.io();
     rig.commit(2);
@@ -247,10 +247,10 @@ fn continuing_past_a_second_writer_boots_again() {
     config.responses.other_writer = crate::OtherWriter::ContinueAndInterleaveHistories;
     let mut actor = Actor::new(config);
     rig.settle(&mut actor, T0);
-    let tick = actor.fault(Lane::Upload, Fault::RemoteAheadOfLocal, ts(T0 + 10));
+    let tick = actor.fault(Task::Upload, Fault::RemoteAheadOfLocal, ts(T0 + 10));
     assert_eq!(
-        degraded(&tick).map(|(lane, cause, _)| (lane, cause)),
-        Some((Lane::Sync, PersistentCause::OtherWriter))
+        degraded(&tick).map(|(task, cause, _)| (task, cause)),
+        Some((Task::Sync, PersistentCause::OtherWriter))
     );
     let seen = rig.follow(&mut actor, T0 + 10, 20);
     assert!(
@@ -258,7 +258,7 @@ fn continuing_past_a_second_writer_boots_again() {
             .any(|t| matches!(event(t), Some(Event::Booted { .. }))),
         "{seen:?}"
     );
-    assert_eq!(actor.degraded(Lane::Sync), None);
+    assert_eq!(actor.degraded(Task::Sync), None);
 }
 
 /// A replica that went backwards is listed again and taken as it now is:
@@ -269,10 +269,10 @@ fn a_regressed_replica_is_listed_again_and_uploads_go_on() {
     rig.commit(2);
     rig.settle(&mut actor, T0 + 10);
     let newest_staged = newest_replica_file(&rig).unwrap();
-    let tick = actor.fault(Lane::Upload, Fault::RemoteRegressed, ts(T0 + 20));
+    let tick = actor.fault(Task::Upload, Fault::RemoteRegressed, ts(T0 + 20));
     assert_eq!(
-        degraded(&tick).map(|(lane, cause, _)| (lane, cause)),
-        Some((Lane::Upload, PersistentCause::RemoteRegressed))
+        degraded(&tick).map(|(task, cause, _)| (task, cause)),
+        Some((Task::Upload, PersistentCause::RemoteRegressed))
     );
     assert_eq!(
         actor.engine.upload,
@@ -283,7 +283,7 @@ fn a_regressed_replica_is_listed_again_and_uploads_go_on() {
     rig.follow(&mut actor, T0 + 20, 50);
     assert!(rig.remote.calls() > lists);
     assert_eq!(newest_replica_file(&rig), Some(newest_staged + 1));
-    assert_eq!(actor.degraded(Lane::Upload), None);
+    assert_eq!(actor.degraded(Task::Upload), None);
 }
 
 /// Under the default responses a page-size change keeps the boot degraded:
@@ -304,12 +304,12 @@ fn a_page_size_change_keeps_the_boot_degraded_and_stages_nothing() {
     assert!(
         seen.iter()
             .filter_map(degraded)
-            .all(|(lane, cause, _)| lane == Lane::Sync && cause == changed),
+            .all(|(task, cause, _)| task == Task::Sync && cause == changed),
         "{seen:?}"
     );
     assert!(seen.iter().all(|t| !matches!(t, Tick::Halted(_))));
     assert_eq!(everything(&rig), before);
-    assert_eq!(actor.degraded(Lane::Sync).map(|d| d.cause), Some(changed));
+    assert_eq!(actor.degraded(Task::Sync).map(|d| d.cause), Some(changed));
 }
 
 /// The offset of a byte in the page of the WAL's last frame.
@@ -319,7 +319,7 @@ fn last_page_byte(rig: &Rig) -> usize {
 
 /// A committed frame that fails its checksum is never shipped, and an
 /// operator's snapshot waits: a snapshot reads the whole WAL first. Once the
-/// frame verifies again the lane recovers and the snapshot runs.
+/// frame verifies again the task recovers and the snapshot runs.
 #[test]
 fn a_corrupt_committed_frame_is_never_staged_nor_snapshotted_past() {
     let (mut rig, mut actor) = caught_up_go_like();
@@ -332,7 +332,7 @@ fn a_corrupt_committed_frame_is_never_staged_nor_snapshotted_past() {
     assert!(
         seen.iter()
             .filter_map(degraded)
-            .all(|(lane, cause, _)| lane == Lane::Sync && cause == PersistentCause::WalCorrupt),
+            .all(|(task, cause, _)| task == Task::Sync && cause == PersistentCause::WalCorrupt),
         "{seen:?}"
     );
     assert!(seen.iter().filter_map(degraded).count() > 3, "{seen:?}");
@@ -343,7 +343,7 @@ fn a_corrupt_committed_frame_is_never_staged_nor_snapshotted_past() {
     };
     rig.wal.corrupt_byte(at);
     let healed = rig.follow(&mut actor, now, 20);
-    assert_eq!(actor.degraded(Lane::Sync), None, "{healed:?}");
+    assert_eq!(actor.degraded(Task::Sync), None, "{healed:?}");
     assert_eq!(newest_replica_file(&rig), Some(2), "{healed:?}");
     assert!(snapshots(&rig).contains(&2), "the operator's snapshot ran");
 }
@@ -389,7 +389,7 @@ fn a_rebuild_reads_again_the_live_pages_nobody_took() {
     actor.read_live_pages();
     rig.settle(&mut actor, T0 + 1);
     // Read, and waiting to be taken, as the rebuild comes.
-    actor.fault(Lane::Upload, Fault::Bug(BugSite::PageMap), ts(T0 + 10));
+    actor.fault(Task::Upload, Fault::Bug(BugSite::PageMap), ts(T0 + 10));
     let now = boot_again(&mut rig, &mut actor, T0 + 10);
     rig.settle(&mut actor, now + 1);
     let live = actor.take_live_pages();
@@ -405,7 +405,7 @@ fn a_rebuild_reads_again_the_live_pages_nobody_took() {
 fn a_rebuild_keeps_a_request_for_live_pages() {
     let (mut rig, mut actor) = caught_up_go_like();
     actor.read_live_pages();
-    actor.fault(Lane::Upload, Fault::Bug(BugSite::PageMap), ts(T0 + 10));
+    actor.fault(Task::Upload, Fault::Bug(BugSite::PageMap), ts(T0 + 10));
     let now = boot_again(&mut rig, &mut actor, T0 + 10);
     rig.settle(&mut actor, now + 1);
     assert!(actor.take_live_pages().is_some());
@@ -417,7 +417,7 @@ fn a_rebuild_keeps_a_request_for_live_pages() {
 fn a_rebuild_keeps_an_operators_snapshot_request() {
     let (mut rig, mut actor) = caught_up_go_like();
     actor.request_snapshot();
-    actor.fault(Lane::Upload, Fault::Bug(BugSite::PageMap), ts(T0 + 10));
+    actor.fault(Task::Upload, Fault::Bug(BugSite::PageMap), ts(T0 + 10));
     assert_eq!(
         actor.pending_snapshot(),
         Some(SnapshotCause::OperatorRequested)
@@ -446,7 +446,7 @@ fn a_rebuild_keeps_a_snapshot_request_made_behind_another_cause() {
     );
     actor.request_snapshot();
     assert_eq!(actor.pending_snapshot(), was);
-    actor.fault(Lane::Upload, Fault::Bug(BugSite::PageMap), ts(T0 + 10));
+    actor.fault(Task::Upload, Fault::Bug(BugSite::PageMap), ts(T0 + 10));
     assert_eq!(
         actor.pending_snapshot(),
         Some(SnapshotCause::OperatorRequested)
@@ -454,7 +454,7 @@ fn a_rebuild_keeps_a_snapshot_request_made_behind_another_cause() {
 }
 
 /// A maintenance job that keeps failing persistently waits on its level's
-/// backoff, not the lane's, and its degraded state still counts every
+/// backoff, not the task's, and its degraded state still counts every
 /// failure.
 #[test]
 fn a_degraded_maintenance_job_counts_its_retries() {
@@ -470,9 +470,9 @@ fn a_degraded_maintenance_job_counts_its_retries() {
     let mut counted = Vec::new();
     for _ in 0..200 {
         let tick = rig.tick(&mut actor, now);
-        if let Some((lane, _, _)) = degraded(&tick) {
-            assert_eq!(lane, Lane::Maintenance, "{tick:?}");
-            counted.push(actor.degraded(Lane::Maintenance).map(|d| d.retries));
+        if let Some((task, _, _)) = degraded(&tick) {
+            assert_eq!(task, Task::Maintenance, "{tick:?}");
+            counted.push(actor.degraded(Task::Maintenance).map(|d| d.retries));
         }
         match next_of(&tick) {
             Some(Next::Now) => {}
@@ -513,7 +513,7 @@ fn a_rebuilt_actor_keeps_what_was_asked_and_reported_and_boots_again() {
             deadline: ts(T0 + 60_000)
         }
     );
-    assert_eq!(fresh.degraded(Lane::Upload), actor.degraded(Lane::Upload));
+    assert_eq!(fresh.degraded(Task::Upload), actor.degraded(Task::Upload));
     assert_eq!(fresh.retention_pin(), held);
     assert_eq!(
         fresh.pending_snapshot(),
@@ -527,7 +527,7 @@ fn a_rebuilt_actor_keeps_what_was_asked_and_reported_and_boots_again() {
         matches!(seen.last(), Some(Tick::Drained { .. })),
         "{seen:?}"
     );
-    assert_eq!(fresh.degraded(Lane::Upload), None);
+    assert_eq!(fresh.degraded(Task::Upload), None);
     assert_eq!(fresh.pending_snapshot(), None);
 }
 
@@ -536,7 +536,7 @@ fn a_rebuilt_actor_keeps_what_was_asked_and_reported_and_boots_again() {
 fn booted_follows_the_engines_own_rebuild() {
     let (mut rig, mut actor) = caught_up_go_like();
     assert!(actor.booted());
-    actor.fault(Lane::Upload, Fault::Bug(BugSite::PageMap), ts(T0 + 10));
+    actor.fault(Task::Upload, Fault::Bug(BugSite::PageMap), ts(T0 + 10));
     assert!(!actor.booted());
     boot_again(&mut rig, &mut actor, T0 + 10);
     assert!(actor.booted());

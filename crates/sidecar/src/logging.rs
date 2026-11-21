@@ -366,12 +366,12 @@ fn engine_line(event: &EngineEvent) -> Option<Line> {
             vec![("event", debug(event))],
         ),
         EngineEvent::Degraded {
-            lane, cause, until, ..
+            task, cause, until, ..
         } => (
             LogLevel::Warn,
             "replication degraded",
             vec![
-                ("lane", debug(lane)),
+                ("task", debug(task)),
                 ("cause", debug(cause)),
                 ("retry_at", until.to_string().into()),
             ],

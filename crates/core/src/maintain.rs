@@ -304,7 +304,7 @@ pub enum Hold {
         /// The snapshot with the higher transactions and the older created-at time.
         later: FileKey,
     },
-    /// The restore point pinned while a lane is degraded does not plan, on
+    /// The restore point pinned while a task is degraded does not plan, on
     /// the listing or without the planned delete.
     #[error("the pinned restore point {pin} does not plan: {outcome:?}")]
     PinUnplannable {

@@ -3,7 +3,7 @@
 //!
 //! A persistent fault's scenarios hold under every set of responses: each
 //! names its cause with [`Expect::Stopped`], which is a halt where the
-//! responses stop and a degraded lane where they keep trying, and the ones
+//! responses stop and a degraded task where they keep trying, and the ones
 //! whose fault clears also expect [`Expect::Recovered`].
 
 use std::time::Duration;
@@ -496,13 +496,13 @@ fn throttle_waits(report: &RunReport) -> Result<(), String> {
 }
 
 /// A halt for the scenario's fault, not the end of a drain whose deadline a
-/// degraded lane outlasted.
+/// degraded task outlasted.
 fn stopped(seen: &Seen) -> bool {
     matches!(seen, Seen::Halt(cause) if *cause != HaltCause::Shutdown)
 }
 
 /// No later tick calls the replica: the halt is final until a restart. Where
-/// the responses keep trying there is no halt to be quiet after: a lane was
+/// the responses keep trying there is no halt to be quiet after: a task was
 /// degraded instead, which the expectations check.
 fn quiet_after_halt(report: &RunReport) -> Result<(), String> {
     let degraded = report
@@ -995,7 +995,7 @@ pub fn restart_between_steps() -> Scenario {
 /// The WAL header is zeroed under a running engine. The snapshot that follows
 /// writes a frame to get a header, but SQLite writes a header only at the
 /// start of a log, so the header stays torn and the step retries as the WAL
-/// having moved, on the lane's backoff, until a TRUNCATE and a commit heal it.
+/// having moved, on the task's backoff, until a TRUNCATE and a commit heal it.
 #[must_use]
 pub fn wal_header_torn_while_running() -> Scenario {
     build(
@@ -1073,7 +1073,7 @@ pub fn reacquire_fails_after_checkpoint() -> Scenario {
 }
 
 /// One bit of a committed frame that is not yet synced flips on disk, and
-/// stays flipped. Where the responses keep trying, the sync lane stays
+/// stays flipped. Where the responses keep trying, the sync task stays
 /// degraded to the end: nothing past the frame is staged, and no snapshot is.
 #[must_use]
 pub fn bit_flip_in_committed_frame() -> Scenario {
@@ -1091,7 +1091,7 @@ pub fn bit_flip_in_committed_frame() -> Scenario {
 }
 
 /// As [`bit_flip_in_committed_frame`], and the bit flips back before the
-/// next commit: the frame verifies again and the lane recovers.
+/// next commit: the frame verifies again and the task recovers.
 #[must_use]
 pub fn bit_flip_in_committed_frame_healed() -> Scenario {
     let mut s = injected(
@@ -1131,8 +1131,8 @@ fn nothing_staged_past_the_corrupt_frame(report: &RunReport) -> Result<(), Strin
                     "a snapshot at {txid} was staged past the corrupt frame"
                 ));
             }
-            Seen::Recovered(lane) if degraded => {
-                return Err(format!("{lane:?} recovered while the frame is corrupt"));
+            Seen::Recovered(task) if degraded => {
+                return Err(format!("{task:?} recovered while the frame is corrupt"));
             }
             Seen::Event(_)
             | Seen::Halt(_)
@@ -1145,7 +1145,7 @@ fn nothing_staged_past_the_corrupt_frame(report: &RunReport) -> Result<(), Strin
     if degraded {
         Ok(())
     } else {
-        Err("the sync lane was never degraded".to_owned())
+        Err("the sync task was never degraded".to_owned())
     }
 }
 
@@ -1192,7 +1192,7 @@ const FLIPPED: u32 = 3;
 /// operator's snapshot then reads the page from the file. The page checksum
 /// table recorded it at the first snapshot, so the read is a mismatch naming
 /// the page: a stop under strict responses, before the page is shipped; under
-/// the default a degraded sync lane that ships the page as the file holds it
+/// the default a degraded sync task that ships the page as the file holds it
 /// (the database the application serves, which the oracle then judges by), keeps
 /// syncing and pins retention.
 #[must_use]

@@ -28,19 +28,19 @@
 //!    an older one.
 //!
 //! Every failure becomes a [`Fault`] and goes through [`policy`] once, in
-//! [`Actor::fault`]. A retry waits on its own lane; the others keep running.
+//! [`Actor::fault`]. A retry waits on its own task; the others keep running.
 //! Every store call is an await point, and a future dropped at any of them is
 //! a crash that the next boot recovers from.
 //!
 //! A persistent fault, and a recovery verdict that names a stop cause, goes
 //! to the configured [`Responses`] (`crate::fault` has the rules). Under
-//! `KeepTrying` the lane that failed is degraded: each retry that fails ends
+//! `KeepTrying` the task that failed is degraded: each retry that fails ends
 //! its tick with [`Event::Degraded`], the wait doubles up to
-//! [`crate::MAX_BACKOFF`], the other lanes run, and the lane's next success
+//! [`crate::MAX_BACKOFF`], the other tasks run, and the task's next success
 //! clears it. A failed retention delete degrades maintenance; sync and upload
-//! go on. While any lane is degraded, retention pins the newest transaction
+//! go on. While any task is degraded, retention pins the newest transaction
 //! the replica held when the first one began (`maintain::retain`), and the
-//! pin goes once every lane has recovered. A bug, and another writer whose
+//! pin goes once every task has recovered. A bug, and another writer whose
 //! response is to continue, rebuild the actor and boot again after the wait;
 //! a replica that went backwards is listed again. Under `Stop` the actor
 //! halts, as every persistent fault did before.
@@ -72,7 +72,7 @@ use lsr_ltx::{PageSize, Timestamp, Txid};
 use lsr_wal::{CommittedEnd, OpenError, WalReader};
 
 use parts::{Course, Engine, Kept, LanePin, Stop, Tail};
-pub use state::{Degraded, Lane, Phase};
+pub use state::{Degraded, Phase, Task};
 use state::{Gate, Live};
 
 use crate::app::AppCheckpoints;
@@ -200,23 +200,23 @@ pub enum Event {
     /// Nothing was ready.
     Idle,
     /// A persistent fault whose configured response is to keep trying: the
-    /// lane is degraded and waits, the others run.
+    /// task is degraded and waits, the others run.
     Degraded {
-        /// The lane that failed.
-        lane: Lane,
+        /// The task that failed.
+        task: Task,
         /// Why.
         cause: PersistentCause,
-        /// When the lane first failed this way without a success between.
+        /// When the task first failed this way without a success between.
         since: Timestamp,
         /// When the retry is due.
         until: Timestamp,
     },
-    /// A fault whose policy is to retry; its lane waits.
+    /// A fault whose policy is to retry; its task waits.
     Retrying {
         /// What went wrong.
         fault: Fault,
         /// When the retry is due, read from where the wait is kept: the
-        /// level's backoff for a maintenance job, the lane's for the rest.
+        /// level's backoff for a maintenance job, the task's for the rest.
         until: Timestamp,
     },
     /// The next sync is a snapshot.
@@ -285,15 +285,15 @@ pub struct Actor {
 /// Where a retry's wait is kept.
 #[derive(Clone, Copy, Debug)]
 enum Waiter {
-    /// The lane counts the failures and keeps the wait.
-    Lane(Lane),
+    /// The task counts the failures and keeps the wait.
+    Task(Task),
     /// Kept elsewhere (a maintenance level's backoff); this is when it ends.
     Kept(Timestamp),
 }
 
-impl From<Lane> for Waiter {
-    fn from(lane: Lane) -> Self {
-        Self::Lane(lane)
+impl From<Task> for Waiter {
+    fn from(task: Task) -> Self {
+        Self::Task(task)
     }
 }
 
@@ -407,7 +407,7 @@ impl Actor {
     /// trusted (a panic unwound through a tick): a fresh engine that boots
     /// from the replica and the WAL again, beside everything that is not the
     /// engine's to forget. Kept: the configuration, a drain's deadline or a
-    /// halt, each lane's wait and degraded state and the retention pin they
+    /// halt, each task's wait and degraded state and the retention pin they
     /// hold, a scheduled verify's pin and its request for live pages (pages
     /// read and not yet taken are read again), an operator's snapshot request
     /// not yet staged, the clock's last reading and the application-checkpoint
@@ -434,10 +434,10 @@ impl Actor {
         self.kept.stop.phase(self.booted())
     }
 
-    /// The lane's degraded state, if a persistent failure left it in one.
+    /// The task's degraded state, if a persistent failure left it in one.
     #[must_use]
-    pub fn degraded(&self, lane: Lane) -> Option<Degraded> {
-        self.kept.lanes.get(lane).degraded()
+    pub fn degraded(&self, task: Task) -> Option<Degraded> {
+        self.kept.tasks.get(task).degraded()
     }
 
     /// An operator accepts the database file as it is: every page the page
@@ -541,7 +541,7 @@ impl Actor {
     }
 
     /// Keeps the restore chain of `txid` from retention, for a scheduled verify
-    /// that found a later restore wrong (`None` lets it go). A degraded lane's
+    /// that found a later restore wrong (`None` lets it go). A degraded task's
     /// pin, if older, still wins.
     pub fn pin_for_verify(&mut self, txid: Option<Txid>) {
         let released = self.kept.verify_pin.is_some() && txid.is_none();
@@ -607,7 +607,7 @@ impl Actor {
         };
         self.expire(now);
         if self.engine.pages.mismatch().is_none() {
-            self.kept.lanes.page_matches_again();
+            self.kept.tasks.page_matches_again();
         }
         self.release_pin();
         // A boot that keeps failing must not outlast a drain's deadline.
@@ -662,9 +662,9 @@ impl Actor {
     fn wait(&mut self, waiter: Waiter, backoff: Backoff, now: Timestamp) -> Timestamp {
         match waiter {
             Waiter::Kept(until) => until,
-            Waiter::Lane(lane) => {
+            Waiter::Task(task) => {
                 let interval = self.kept.cfg.retry_interval;
-                self.kept.lanes.get_mut(lane).fail(|attempt| {
+                self.kept.tasks.get_mut(task).fail(|attempt| {
                     let wait = backoff_wait(backoff, attempt, interval);
                     now.saturating_add(wait)
                 })
@@ -674,15 +674,15 @@ impl Actor {
 
     /// A recovery verdict that names a stop cause: a persistent one goes to
     /// the configured response, the end of a drain stops.
-    fn verdict(&mut self, lane: Lane, cause: HaltCause, now: Timestamp) -> Tick {
+    fn verdict(&mut self, task: Task, cause: HaltCause, now: Timestamp) -> Tick {
         match PersistentCause::of(cause) {
-            Some(cause) => self.persistent(Waiter::Lane(lane), cause, now),
+            Some(cause) => self.persistent(Waiter::Task(task), cause, now),
             None => self.halt(cause),
         }
     }
 
     /// What the configured response makes of a persistent cause: a stop, or
-    /// a degraded lane that waits the doubling backoff. The only place
+    /// a degraded task that waits the doubling backoff. The only place
     /// `Responses` is read.
     fn persistent(&mut self, waiter: Waiter, cause: PersistentCause, now: Timestamp) -> Tick {
         let action = self.kept.cfg.responses.action(cause);
@@ -700,17 +700,17 @@ impl Actor {
             }
             Action::Rebuild => {
                 self.rebuild();
-                Waiter::Lane(Lane::Sync)
+                Waiter::Task(Task::Sync)
             }
         };
-        let lane = match waiter {
-            Waiter::Lane(lane) => lane,
-            Waiter::Kept(_) => Lane::Maintenance,
+        let task = match waiter {
+            Waiter::Task(task) => task,
+            Waiter::Kept(_) => Task::Maintenance,
         };
         let until = self.wait(waiter, Backoff::Doubling, now);
-        let since = self.kept.lanes.get_mut(lane).degrade(cause, now);
+        let since = self.kept.tasks.get_mut(task).degrade(cause, now);
         let event = Event::Degraded {
-            lane,
+            task,
             cause,
             since,
             until,
@@ -726,10 +726,10 @@ impl Actor {
         }
     }
 
-    /// Lets the pin go once no lane is degraded; the next listing may then
+    /// Lets the pin go once no task is degraded; the next listing may then
     /// delete what it kept.
     fn release_pin(&mut self) {
-        if self.kept.lane_pin != LanePin::Free && !self.kept.lanes.any_degraded() {
+        if self.kept.lane_pin != LanePin::Free && !self.kept.tasks.any_degraded() {
             self.kept.lane_pin = LanePin::Free;
             self.engine.maintain.stale = true;
         }
@@ -745,10 +745,10 @@ impl Actor {
         };
     }
 
-    /// Lets every passed deadline go, so the tick runs its lane and `next`
+    /// Lets every passed deadline go, so the tick runs its task and `next`
     /// never names a time already past (W1).
     fn expire(&mut self, now: Timestamp) {
-        self.kept.lanes.expire(now);
+        self.kept.tasks.expire(now);
         self.engine.gate = self.engine.gate.expire(now);
         self.engine.maintain.expire(now);
     }
@@ -772,7 +772,7 @@ impl Actor {
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
     ) -> Tick {
-        if !self.kept.lanes.ready(Lane::Sync, now) {
+        if !self.kept.tasks.ready(Task::Sync, now) {
             return self.ran(Event::Idle, now);
         }
         // At boot a replica ahead of the local newest staged file is `recover`'s to judge (a
@@ -780,11 +780,11 @@ impl Actor {
         let start = UploadState::ListFirst { confirmed: None };
         let upload = match upload_next(start, env.staging, env.remote, Some(Txid::MAX)).await {
             Ok(listed) => listed.state,
-            Err(failed) => return self.fault(Lane::Sync, failed.fault, now),
+            Err(failed) => return self.fault(Task::Sync, failed.fault, now),
         };
         let lost = match sweep_staged(env.staging, upload.confirmed()).await {
             Ok(lost) => lost,
-            Err(fault) => return self.fault(Lane::Sync, fault, now),
+            Err(fault) => return self.fault(Task::Sync, fault, now),
         };
         let booted = boot_recover(env.wal, env.staging, env.remote, upload.confirmed()).await;
         let Booted {
@@ -793,12 +793,12 @@ impl Actor {
             page_size,
         } = match booted {
             Ok(found) => found,
-            Err(fault) => return self.fault(Lane::Sync, fault, now),
+            Err(fault) => return self.fault(Task::Sync, fault, now),
         };
         let from = match recovered {
             Recovered::Continue(position) | Recovered::WalRestarted(position) => Ok(position),
             Recovered::Snapshot { cause, .. } => Err(cause),
-            Recovered::Halt(cause) => return self.verdict(Lane::Sync, cause, now),
+            Recovered::Halt(cause) => return self.verdict(Task::Sync, cause, now),
         };
         // A staged file that did not verify was deleted with all after it:
         // the next file is a snapshot even when the WAL could continue.
@@ -827,7 +827,7 @@ impl Actor {
                 ..
             } => match seeded(env.staging, position.commit()).await {
                 Ok(pages) => pages,
-                Err(fault) => return self.fault(Lane::Sync, fault, now),
+                Err(fault) => return self.fault(Task::Sync, fault, now),
             },
             Course::At {
                 snapshot: Some(_), ..
@@ -844,7 +844,7 @@ impl Actor {
             checkpoint: CheckpointState::boot(now),
             ..Engine::fresh()
         };
-        self.kept.lanes.get_mut(Lane::Sync).succeed();
+        self.kept.tasks.get_mut(Task::Sync).succeed();
         self.ran(Event::Booted { cause }, now)
     }
 
@@ -915,7 +915,7 @@ impl Actor {
         now: Timestamp,
     ) -> Tick {
         let unfinished = self.unfinished(env).await;
-        match self.fault(Lane::Sync, Fault::ShutdownDeadline, now) {
+        match self.fault(Task::Sync, Fault::ShutdownDeadline, now) {
             Tick::Halted(HaltCause::Shutdown) => Tick::DeadlineReached(unfinished),
             other @ (Tick::Ran { .. }
             | Tick::Halted(_)
@@ -986,13 +986,13 @@ impl Actor {
         self.staged().max(self.engine.upload.confirmed())
     }
 
-    /// The checkpoint the policy wants now, when its lane and the sync lane
+    /// The checkpoint the policy wants now, when its task and the sync task
     /// that must prove it first may both run.
     fn checkpoint_decision(&self, now: Timestamp) -> Option<(Decision, CheckpointMode)> {
         let position = self.position().filter(|_| self.reset().is_none())?;
         let free = self.engine.gate.open(now)
-            && self.kept.lanes.ready(Lane::Checkpoint, now)
-            && self.kept.lanes.ready(Lane::Sync, now);
+            && self.kept.tasks.ready(Task::Checkpoint, now)
+            && self.kept.tasks.ready(Task::Sync, now);
         if !free {
             return None;
         }
@@ -1018,12 +1018,12 @@ impl Actor {
         now: Timestamp,
         may_checkpoint: bool,
     ) -> Option<Tick> {
-        if !self.kept.lanes.ready(Lane::Sync, now) {
+        if !self.kept.tasks.ready(Task::Sync, now) {
             return None;
         }
         let committed = match env.wal.committed() {
             Ok(committed) => committed,
-            Err(err) => return Some(self.fault(Lane::Sync, Fault::from_source(err), now)),
+            Err(err) => return Some(self.fault(Task::Sync, Fault::from_source(err), now)),
         };
         self.kept.app.poll(committed);
         let wants_live = may_checkpoint && self.kept.live.wanted() && self.caught_up();
@@ -1041,7 +1041,7 @@ impl Actor {
             && let Some(proof) = &proof
             && let Err(fault) = self.live_read(env, proof)
         {
-            return Some(self.fault(Lane::Sync, fault, now));
+            return Some(self.fault(Task::Sync, fault, now));
         }
         let decision = self.checkpoint_decision(now).filter(|_| may_checkpoint);
         if let (Some(proof), Some((decision, mode))) = (proof, decision) {
@@ -1083,15 +1083,15 @@ impl Actor {
     ) -> Result<(u32, Option<SyncedThrough>), Tick> {
         match stepped {
             Ok(Stepped::Synced { files, proof }) => {
-                self.kept.lanes.get_mut(Lane::Sync).succeed();
+                self.kept.tasks.get_mut(Task::Sync).succeed();
                 Ok((files, proof))
             }
             Ok(Stepped::Resnapshot(cause)) => {
                 self.engine.course.snapshot_for(cause, false);
                 Err(self.ran(Event::Resnapshot(cause), now))
             }
-            Ok(Stepped::Halt(cause)) => Err(self.verdict(Lane::Sync, cause, now)),
-            Err(fault) => Err(self.fault(Lane::Sync, fault, now)),
+            Ok(Stepped::Halt(cause)) => Err(self.verdict(Task::Sync, cause, now)),
+            Err(fault) => Err(self.fault(Task::Sync, fault, now)),
         }
     }
 
@@ -1167,7 +1167,7 @@ impl Actor {
     /// and the snapshot is what puts the database file's pages on the replica:
     /// waiting for the application's next write would leave them off it, and a drain
     /// could never finish. A WAL still without a header after the bump is
-    /// `WalMoved`, retried on the sync lane's backoff.
+    /// `WalMoved`, retried on the sync task's backoff.
     #[expect(
         clippy::type_complexity,
         reason = "a private step's two exits: the opened WAL, or the verdict that ends it"
@@ -1302,7 +1302,7 @@ impl Actor {
             Ok(done) => done,
             Err(CheckpointFailed { fault, staged, .. }) => {
                 self.took(staged);
-                return self.fault(Lane::Checkpoint, fault, now);
+                return self.fault(Task::Checkpoint, fault, now);
             }
         };
         let position = self.took(done.staged);
@@ -1316,7 +1316,7 @@ impl Actor {
         );
         self.engine.checkpoint = state;
         self.engine.gate = Gate::of(next);
-        self.kept.lanes.get_mut(Lane::Checkpoint).succeed();
+        self.kept.tasks.get_mut(Task::Checkpoint).succeed();
         let busy = done.outcome == CheckpointOutcome::Busy;
         self.ran(Event::Checkpointed { mode, busy }, now)
     }
@@ -1365,7 +1365,7 @@ impl Actor {
                     if let (Fault::StagedLost, UploadPlan::Upload(key)) = (failed.fault, plan) {
                         return Some(self.lose_staged(env, key.range().min(), now).await);
                     }
-                    return Some(self.fault(Lane::Upload, failed.fault, now));
+                    return Some(self.fault(Task::Upload, failed.fault, now));
                 }
             }
             match last {
@@ -1380,13 +1380,13 @@ impl Actor {
                 break;
             }
         }
-        self.kept.lanes.get_mut(Lane::Upload).succeed();
+        self.kept.tasks.get_mut(Task::Upload).succeed();
         Some(self.ran(Event::Uploaded(last), now))
     }
 
     /// The staged file `from` is missing or does not verify. It and every
     /// staged file after it are deleted, and the next sync is a snapshot at
-    /// `from`: the replica holds everything before it (the upload lane only
+    /// `from`: the replica holds everything before it (the upload task only
     /// uploads the confirmed transaction plus one), so the chain has no hole.
     async fn lose_staged<
         W: WalSource,
@@ -1401,7 +1401,7 @@ impl Actor {
         now: Timestamp,
     ) -> Tick {
         if let Err(fault) = drop_staged_from(env.staging, from).await {
-            return self.fault(Lane::Upload, fault, now);
+            return self.fault(Task::Upload, fault, now);
         }
         // The position is past `from`; a snapshot after it would leave a hole.
         let cause = SnapshotCause::NewestStagedFileUnreadable;
@@ -1409,13 +1409,13 @@ impl Actor {
             staged: from.prev(),
             cause,
         };
-        self.kept.lanes.get_mut(Lane::Upload).succeed();
+        self.kept.tasks.get_mut(Task::Upload).succeed();
         self.ran(Event::Resnapshot(cause), now)
     }
 
     /// Deletes staged level-0 files the replica no longer needs from staging,
     /// oldest first, at most `MAX_DELETE` (W3). A failure waits on its own
-    /// lane and holds nothing else.
+    /// task and holds nothing else.
     async fn prune_unit<
         W: WalSource,
         P: PageSource,
@@ -1430,7 +1430,7 @@ impl Actor {
         let bound = self.prune_ready(now)?;
         let listing = match env.staging.list(Level::ZERO, None, PageLimit::MAX).await {
             Ok(listing) => listing,
-            Err(err) => return Some(self.fault(Lane::Prune, Fault::from_staging(&err), now)),
+            Err(err) => return Some(self.fault(Task::Prune, Fault::from_staging(&err), now)),
         };
         let keys: Vec<FileKey> = listing
             .files
@@ -1449,9 +1449,9 @@ impl Actor {
         if !keys.is_empty()
             && let Err(err) = env.staging.delete(&keys).await
         {
-            return Some(self.fault(Lane::Prune, Fault::from_staging(&err), now));
+            return Some(self.fault(Task::Prune, Fault::from_staging(&err), now));
         }
-        self.kept.lanes.get_mut(Lane::Prune).succeed();
+        self.kept.tasks.get_mut(Task::Prune).succeed();
         self.engine.pruned = Some(through);
         if keys.is_empty() {
             return None;
@@ -1498,7 +1498,7 @@ impl Actor {
         }
         let inventory = match Inventory::load(env.remote).await {
             Ok(inventory) => inventory,
-            Err(err) => return Some(self.fault(Lane::Maintenance, inventory_fault(&err), now)),
+            Err(err) => return Some(self.fault(Task::Maintenance, inventory_fault(&err), now)),
         };
         if self.engine.maintain.read_back_owed
             && let Some(tick) = self.read_back_unit(env.remote, &inventory, now).await
@@ -1522,7 +1522,7 @@ impl Actor {
         // A failed created-at time read leaves the listing owed: the next tick lists again.
         let decided = match decided {
             Ok(decided) => decided,
-            Err(err) => return Some(self.fault(Lane::Maintenance, created_at_fault(&err), now)),
+            Err(err) => return Some(self.fault(Task::Maintenance, created_at_fault(&err), now)),
         };
         self.engine.maintain.stale = false;
         self.engine.maintain.level_one = Level::new(1)
@@ -1562,12 +1562,12 @@ impl Actor {
             }
             Ok(ReadBack::Rotten { key, covered: true }) => key,
             Ok(ReadBack::Rotten { covered: false, .. }) => {
-                return Some(self.fault(Lane::Maintenance, Fault::RemoteCorrupt, now));
+                return Some(self.fault(Task::Maintenance, Fault::RemoteCorrupt, now));
             }
-            Err(fault) => return Some(self.fault(Lane::Maintenance, fault, now)),
+            Err(fault) => return Some(self.fault(Task::Maintenance, fault, now)),
         };
         if let Err(err) = remote.delete(&[key]).await {
-            return Some(self.fault(Lane::Maintenance, Fault::from_remote(&err), now));
+            return Some(self.fault(Task::Maintenance, Fault::from_remote(&err), now));
         }
         // The listing no longer holds: the next tick lists and reads back again.
         self.engine.maintain.stale = true;
@@ -1617,31 +1617,31 @@ impl Actor {
         )
     }
 
-    /// A maintenance step went well. The lane's degraded state goes unless a
+    /// A maintenance step went well. The task's degraded state goes unless a
     /// job's level is still waiting out its own backoff: that job has not
     /// succeeded, whatever else did, and the listing that finds it waiting
     /// (or another level's job) is not its success.
     fn maintained(&mut self, now: Timestamp) {
-        let lane = self.kept.lanes.get_mut(Lane::Maintenance);
+        let task = self.kept.tasks.get_mut(Task::Maintenance);
         if self.engine.maintain.state.backing_off(now) {
-            lane.clear_wait();
+            task.clear_wait();
         } else {
-            lane.succeed();
+            task.succeed();
         }
     }
 
     /// Where a failed job waits: its level's backoff when `MaintainState`
     /// keeps one (the other levels keep running), else the maintenance
-    /// lane, so a failing retention delete backs off instead of relisting
-    /// at once. A level's wait is not the lane's failure, so the lane's wait
+    /// task, so a failing retention delete backs off instead of relisting
+    /// at once. A level's wait is not the task's failure, so the task's wait
     /// resets; a degraded state stays.
     fn job_waiter(&mut self, job: &Job, now: Timestamp) -> Waiter {
         match self.engine.maintain.state.retry_at(job, now) {
             Some(until) => {
-                self.kept.lanes.get_mut(Lane::Maintenance).clear_wait();
+                self.kept.tasks.get_mut(Task::Maintenance).clear_wait();
                 Waiter::Kept(until)
             }
-            None => Waiter::Lane(Lane::Maintenance),
+            None => Waiter::Task(Task::Maintenance),
         }
     }
 
@@ -1660,8 +1660,8 @@ impl Actor {
         now: Timestamp,
         created_at_read: u64,
     ) -> Tick {
-        // The snapshot's step is the sync lane's work and waits on its wait.
-        if !self.kept.lanes.ready(Lane::Sync, now) {
+        // The snapshot's step is the sync task's work and waits on its wait.
+        if !self.kept.tasks.ready(Task::Sync, now) {
             self.wait_for_sync();
             let event = MaintainedEvent::Waiting { held: None };
             return self.ran(
@@ -1691,7 +1691,7 @@ impl Actor {
                 );
             }
             Ok((files, _)) => return self.ran(Event::Synced { files }, now),
-            // A failed step waits on the sync lane, and the listing with it:
+            // A failed step waits on the sync task, and the listing with it:
             // the next is due when the step may run again, not at once.
             Err(Tick::Ran { event, .. }) => {
                 self.wait_for_sync();
@@ -1739,26 +1739,26 @@ impl Actor {
         }
     }
 
-    /// Maintenance lists again when the sync lane's wait ends, or after the
+    /// Maintenance lists again when the sync task's wait ends, or after the
     /// next upload when it holds none (a recovery verdict made the next sync a
     /// snapshot, whose upload makes a listing due).
     fn wait_for_sync(&mut self) {
         self.engine.maintain.stale = false;
-        self.engine.maintain.until = self.kept.lanes.get(Lane::Sync).until();
+        self.engine.maintain.until = self.kept.tasks.get(Task::Sync).until();
     }
 
     fn running(&self) -> bool {
         self.kept.stop == Stop::No && self.booted()
     }
 
-    /// Whether some lane could run now on work it already knows of. A WAL
+    /// Whether some task could run now on work it already knows of. A WAL
     /// change it does not know of is the caller's to wake on.
     fn ready_work(&self, now: Timestamp) -> bool {
-        // Before the boot only the boot runs, on the sync lane.
+        // Before the boot only the boot runs, on the sync task.
         if !self.booted() {
-            return self.kept.lanes.ready(Lane::Sync, now);
+            return self.kept.tasks.ready(Task::Sync, now);
         }
-        let sync = self.kept.lanes.ready(Lane::Sync, now)
+        let sync = self.kept.tasks.ready(Task::Sync, now)
             && (self.pending().is_some()
                 || self.more_wal()
                 || (self.running() && self.checkpoint_decision(now).is_some()));
@@ -1767,45 +1767,45 @@ impl Actor {
             || self.maintain_ready(now)
     }
 
-    /// Whether the upload lane has a staged file to send and may run. The
-    /// one statement of it: the lane's unit and the next wake both ask here.
+    /// Whether the upload task has a staged file to send and may run. The
+    /// one statement of it: the task's unit and the next wake both ask here.
     fn upload_ready(&self, now: Timestamp) -> bool {
-        self.kept.lanes.ready(Lane::Upload, now) && !self.uploads_idle()
+        self.kept.tasks.ready(Task::Upload, now) && !self.uploads_idle()
     }
 
-    /// The transaction the prune lane may delete through, when it may run.
+    /// The transaction the prune task may delete through, when it may run.
     fn prune_ready(&self, now: Timestamp) -> Option<Txid> {
         self.prune_bound()
-            .filter(|_| self.running() && self.kept.lanes.ready(Lane::Prune, now))
+            .filter(|_| self.running() && self.kept.tasks.ready(Task::Prune, now))
     }
 
     /// Whether maintenance may list the replica now: only once uploads are
     /// idle, and only when a listing could change what is due.
     fn maintain_ready(&self, now: Timestamp) -> bool {
         self.running()
-            && self.kept.lanes.ready(Lane::Maintenance, now)
+            && self.kept.tasks.ready(Task::Maintenance, now)
             && self.uploads_idle()
             && self.engine.maintain.wants_listing(now)
     }
 
-    /// Every deadline a lane holds: retry waits, the checkpoint gate, the
+    /// Every deadline a task holds: retry waits, the checkpoint gate, the
     /// maintenance schedule (whose `Due::Wait` includes each level's backoff)
-    /// and the drain's end. Lanes a draining actor does not run hold none.
+    /// and the drain's end. Tasks a draining actor does not run hold none.
     fn deadlines(&self) -> impl Iterator<Item = Timestamp> {
         let running = self.running();
-        let lane = |lane: Lane| self.kept.lanes.get(lane).until();
+        let task = |task: Task| self.kept.tasks.get(task).until();
         let deadline = match self.kept.stop {
             Stop::Draining { deadline } => Some(deadline),
             Stop::No | Stop::Halted(_) => None,
         };
         let only_running = [
-            lane(Lane::Checkpoint),
-            lane(Lane::Prune),
-            lane(Lane::Maintenance),
+            task(Task::Checkpoint),
+            task(Task::Prune),
+            task(Task::Maintenance),
             self.engine.gate.until(),
             self.engine.maintain.until,
         ];
-        [lane(Lane::Sync), lane(Lane::Upload), deadline]
+        [task(Task::Sync), task(Task::Upload), deadline]
             .into_iter()
             .chain(only_running.into_iter().filter(move |_| running))
             .flatten()

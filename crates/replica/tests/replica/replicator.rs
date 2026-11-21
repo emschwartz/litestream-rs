@@ -18,8 +18,8 @@ use common::{PATIENCE, Site, assert_same, config, fake, truncate_is_busy, wait};
 use lsr_core::{CheckpointMode, Event as EngineEvent, Fault};
 use lsr_replica::{
     AppCheckpoint, AppCheckpoints, AppNotice, Booted, ChannelSink, CheckpointConfig, Config,
-    DegradedCause, Depth, DynStore, Event, EventSink, Gone, Lane, Phase, ReaderTracking,
-    Replicator, Responses, SetupError, StartError, StopCause, Stopped, restore_if_missing, verify,
+    DegradedCause, Depth, DynStore, Event, EventSink, Gone, Phase, ReaderTracking, Replicator,
+    Responses, SetupError, StartError, StopCause, Stopped, Task, restore_if_missing, verify,
 };
 use rusqlite::Connection;
 
@@ -190,7 +190,7 @@ fn a_refused_boot_is_degraded_and_recovers() {
         Booted::Degraded(DegradedCause::Credentials)
     );
     assert_eq!(
-        replicator.health().lane(Lane::Sync).map(|d| d.cause),
+        replicator.health().task(Task::Sync).map(|d| d.cause),
         Some(DegradedCause::Credentials)
     );
     faulty.refuse.store(false, Ordering::SeqCst);
@@ -387,7 +387,7 @@ fn request_snapshot_stages_a_snapshot_and_events_report_it() {
     // An operator's acceptance of the database pages changes nothing on a healthy database.
     replicator.accept_database_pages();
     let health = wait(&replicator, caught_up);
-    assert_eq!(health.lane(Lane::Sync), None);
+    assert_eq!(health.task(Task::Sync), None);
     assert!(matches!(
         replicator.stop(PATIENCE).wait(),
         Stopped::Drained { .. }
@@ -519,7 +519,7 @@ fn a_panic_rebuilds_the_engine_and_replication_continues() {
     let replicator = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
     let rebuilt = wait(&replicator, |h| h.counters.panics == 1);
     assert_eq!(
-        rebuilt.lane(Lane::Sync).map(|d| d.cause),
+        rebuilt.task(Task::Sync).map(|d| d.cause),
         Some(DegradedCause::Bug)
     );
     clock.advance(POLL);

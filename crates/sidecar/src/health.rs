@@ -7,7 +7,7 @@
 //! replicator's own short lock. No lock is held across a socket write.
 //!
 //! **Status.** 200 while every database is booting, running, draining, degraded or waiting
-//! for its file to appear: a degraded lane keeps retrying and recovers on its own, and an
+//! for its file to appear: a degraded task keeps retrying and recovers on its own, and an
 //! orchestrator that restarted on it would only repeat the boot. 503 once any database has
 //! stopped (a stop cause, or the drain's end), its thread is gone, or it failed to start;
 //! the body's `down` lists which.
@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use lsr_replica::{
-    AppNotice, DegradedCause, Gone, Health, Lane, Phase, Replicator, SnapshotCause, StopCause,
+    AppNotice, DegradedCause, Gone, Health, Phase, Replicator, SnapshotCause, StopCause, Task,
     Timestamp,
 };
 
@@ -147,15 +147,15 @@ pub const fn phase_name(phase: Phase) -> &'static str {
     }
 }
 
-/// A lane's name.
+/// A task's name.
 #[must_use]
-pub const fn lane_name(lane: Lane) -> &'static str {
-    match lane {
-        Lane::Sync => "sync",
-        Lane::Checkpoint => "checkpoint",
-        Lane::Upload => "upload",
-        Lane::Prune => "prune",
-        Lane::Maintenance => "maintenance",
+pub const fn task_name(task: Task) -> &'static str {
+    match task {
+        Task::Sync => "sync",
+        Task::Checkpoint => "checkpoint",
+        Task::Upload => "upload",
+        Task::Prune => "prune",
+        Task::Maintenance => "maintenance",
     }
 }
 
@@ -251,12 +251,12 @@ impl Object {
 }
 
 fn degraded_json(health: &Health) -> String {
-    let lanes: Vec<String> = Lane::ALL
+    let tasks: Vec<String> = Task::ALL
         .iter()
-        .filter_map(|lane| {
-            let degraded = health.lane(*lane)?;
+        .filter_map(|task| {
+            let degraded = health.task(*task)?;
             let mut o = Object::new();
-            o.text("lane", lane_name(*lane));
+            o.text("task", task_name(*task));
             o.text("cause", cause_name(degraded.cause));
             o.text("detail", &format!("{:?}", degraded.cause));
             o.text("since", &degraded.since.to_string());
@@ -264,7 +264,7 @@ fn degraded_json(health: &Health) -> String {
             Some(o.end())
         })
         .collect();
-    format!("[{}]", lanes.join(","))
+    format!("[{}]", tasks.join(","))
 }
 
 fn running_json(o: &mut Object, health: &Health) {

@@ -77,7 +77,7 @@
 //!    scan: created-at times follow transactions, so the files after a young one are
 //!    young.
 //!
-//! The pin. While a lane of the actor is degraded, [`MaintainState::pin`]
+//! The pin. While a task of the actor is degraded, [`MaintainState::pin`]
 //! names the newest transaction the replica held when it began. Before the
 //! cut, every file of that transaction's restore chain (`plan` at it) leaves
 //! the candidates, and the self-check also asks that the pin still plans

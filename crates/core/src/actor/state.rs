@@ -1,8 +1,8 @@
-//! What the actor is doing, and what each lane remembers between ticks.
+//! What the actor is doing, and what each task remembers between ticks.
 //!
-//! [`Phase`] is the one closed answer to "what is the actor doing". The lanes
+//! [`Phase`] is the one closed answer to "what is the actor doing". The tasks
 //! keep only what a later tick needs: a retry wait, whether the run of
-//! failures behind it is a persistent one (the lane's [`Degraded`] state), the
+//! failures behind it is a persistent one (the task's [`Degraded`] state), the
 //! checkpoint gate, and when maintenance must list the replica again. None of
 //! it holds a borrow of the environment.
 
@@ -33,9 +33,9 @@ pub enum Phase {
 }
 
 /// The five kinds of work, each with its own retry wait and its own degraded
-/// state: a failure in one lane holds no other.
+/// state: a failure in one task holds no other.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Lane {
+pub enum Task {
     /// Reading the WAL into staged files (and booting).
     Sync,
     /// The checkpoint protocol.
@@ -47,12 +47,12 @@ pub enum Lane {
     /// Listing the replica for maintenance, and a failed job whose level
     /// keeps no wait of its own (a retention delete). A job whose level does
     /// keep one waits there, not here, so one failing level starves no other, but its persistent failure is
-    /// still this lane's degraded state.
+    /// still this task's degraded state.
     Maintenance,
 }
 
-impl Lane {
-    /// Every lane, in priority order.
+impl Task {
+    /// Every task, in priority order.
     pub const ALL: [Self; 5] = [
         Self::Sync,
         Self::Checkpoint,
@@ -62,19 +62,19 @@ impl Lane {
     ];
 }
 
-/// A lane that met a persistent failure and keeps trying.
+/// A task that met a persistent failure and keeps trying.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Degraded {
     /// The newest failure's cause.
     pub cause: PersistentCause,
-    /// When the lane first failed this way without a success between.
+    /// When the task first failed this way without a success between.
     pub since: Timestamp,
     /// Failures in a row, the first included.
     pub retries: u32,
 }
 
 /// Whether the cause is a database page that did not match: the one
-/// degradation a lane's success does not end.
+/// degradation a task's success does not end.
 const fn is_page_mismatch(cause: PersistentCause) -> bool {
     match cause {
         PersistentCause::DatabasePageMismatch { .. } => true,
@@ -91,7 +91,7 @@ const fn is_page_mismatch(cause: PersistentCause) -> bool {
     }
 }
 
-/// One lane's retry memory: how many failures in a row, until when it waits,
+/// One task's retry memory: how many failures in a row, until when it waits,
 /// and whether the run of failures is a persistent one.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Retry {
@@ -103,17 +103,17 @@ pub(super) struct Retry {
 }
 
 impl Retry {
-    /// Whether the lane may run at `now`.
+    /// Whether the task may run at `now`.
     pub(super) fn ready(&self, now: Timestamp) -> bool {
         self.until.is_none_or(|until| now >= until)
     }
 
-    /// When the lane may run again, until a tick at or after it lets it go.
+    /// When the task may run again, until a tick at or after it lets it go.
     pub(super) const fn until(&self) -> Option<Timestamp> {
         self.until
     }
 
-    /// Lets a passed wait go: the lane is ready, and its deadline is no
+    /// Lets a passed wait go: the task is ready, and its deadline is no
     /// longer one the actor holds. The failure count stays for the doubling.
     pub(super) fn expire(&mut self, now: Timestamp) {
         self.until = self.until.filter(|until| *until > now);
@@ -131,7 +131,7 @@ impl Retry {
         until
     }
 
-    /// Marks the lane degraded by `cause`; returns when the degradation began,
+    /// Marks the task degraded by `cause`; returns when the degradation began,
     /// which a later failure of the same run keeps.
     pub(super) fn degrade(&mut self, cause: PersistentCause, now: Timestamp) -> Timestamp {
         let since = self.degraded.map_or(now, |was| was.since);
@@ -144,8 +144,8 @@ impl Retry {
         since
     }
 
-    /// The lane's degraded state, if it has one. Its count is never below
-    /// the lane's own: a failure that only retries counts too.
+    /// The task's degraded state, if it has one. Its count is never below
+    /// the task's own: a failure that only retries counts too.
     pub(super) fn degraded(&self) -> Option<Degraded> {
         self.degraded.map(|was| Degraded {
             retries: was.retries.max(self.attempts.map_or(1, NonZeroU32::get)),
@@ -161,10 +161,10 @@ impl Retry {
     }
 
     /// A success: the next failure starts from the first attempt, and the
-    /// lane is no longer degraded, unless by a database page that did not
+    /// task is no longer degraded, unless by a database page that did not
     /// match: shipping the file's bytes is the success, and the page stays
     /// reported until the table no longer holds it as mismatched
-    /// ([`Lanes::page_matches_again`]).
+    /// ([`Tasks::page_matches_again`]).
     pub(super) fn succeed(&mut self) {
         let kept = self
             .degraded
@@ -177,9 +177,9 @@ impl Retry {
     }
 }
 
-/// Every lane's retry memory.
+/// Every task's retry memory.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) struct Lanes {
+pub(super) struct Tasks {
     sync: Retry,
     checkpoint: Retry,
     upload: Retry,
@@ -187,44 +187,44 @@ pub(super) struct Lanes {
     maintain: Retry,
 }
 
-impl Lanes {
-    pub(super) const fn get(&self, lane: Lane) -> &Retry {
-        match lane {
-            Lane::Sync => &self.sync,
-            Lane::Checkpoint => &self.checkpoint,
-            Lane::Upload => &self.upload,
-            Lane::Prune => &self.prune,
-            Lane::Maintenance => &self.maintain,
+impl Tasks {
+    pub(super) const fn get(&self, task: Task) -> &Retry {
+        match task {
+            Task::Sync => &self.sync,
+            Task::Checkpoint => &self.checkpoint,
+            Task::Upload => &self.upload,
+            Task::Prune => &self.prune,
+            Task::Maintenance => &self.maintain,
         }
     }
 
-    pub(super) const fn get_mut(&mut self, lane: Lane) -> &mut Retry {
-        match lane {
-            Lane::Sync => &mut self.sync,
-            Lane::Checkpoint => &mut self.checkpoint,
-            Lane::Upload => &mut self.upload,
-            Lane::Prune => &mut self.prune,
-            Lane::Maintenance => &mut self.maintain,
+    pub(super) const fn get_mut(&mut self, task: Task) -> &mut Retry {
+        match task {
+            Task::Sync => &mut self.sync,
+            Task::Checkpoint => &mut self.checkpoint,
+            Task::Upload => &mut self.upload,
+            Task::Prune => &mut self.prune,
+            Task::Maintenance => &mut self.maintain,
         }
     }
 
-    pub(super) fn ready(&self, lane: Lane, now: Timestamp) -> bool {
-        self.get(lane).ready(now)
+    pub(super) fn ready(&self, task: Task, now: Timestamp) -> bool {
+        self.get(task).ready(now)
     }
 
-    /// Whether any lane is degraded.
+    /// Whether any task is degraded.
     pub(super) fn any_degraded(&self) -> bool {
-        Lane::ALL
+        Task::ALL
             .iter()
-            .any(|lane| self.get(*lane).degraded().is_some())
+            .any(|task| self.get(*task).degraded().is_some())
     }
 
     /// The page checksum table holds no mismatched page any more (a WAL frame
-    /// rewrote it, the table was emptied, or an operator accepted it): no lane
+    /// rewrote it, the table was emptied, or an operator accepted it): no task
     /// is degraded by one.
     pub(super) fn page_matches_again(&mut self) {
-        for lane in Lane::ALL {
-            let retry = self.get_mut(lane);
+        for task in Task::ALL {
+            let retry = self.get_mut(task);
             if retry
                 .degraded
                 .is_some_and(|was| is_page_mismatch(was.cause))
@@ -236,8 +236,8 @@ impl Lanes {
 
     /// Lets every passed wait go (W1: a passed deadline is work, not a wait).
     pub(super) fn expire(&mut self, now: Timestamp) {
-        for lane in Lane::ALL {
-            self.get_mut(lane).expire(now);
+        for task in Task::ALL {
+            self.get_mut(task).expire(now);
         }
     }
 }

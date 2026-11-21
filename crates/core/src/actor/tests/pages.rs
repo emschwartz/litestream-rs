@@ -46,7 +46,7 @@ fn staged_page(rig: &Rig, pgno: PageNo) -> Vec<Vec<u8>> {
 }
 
 #[test]
-fn a_flipped_database_page_degrades_the_sync_lane_ships_the_file_and_keeps_syncing() {
+fn a_flipped_database_page_degrades_the_sync_task_ships_the_file_and_keeps_syncing() {
     let (mut rig, mut actor) = caught_up_with(go_like());
     let held = Rig::files(&rig.remote, Level::ZERO)
         .iter()
@@ -58,7 +58,7 @@ fn a_flipped_database_page_degrades_the_sync_lane_ships_the_file_and_keeps_synci
     assert!(
         seen.iter().any(|tick| matches!(
             event(tick),
-            Some(Event::Degraded { lane: Lane::Sync, cause, .. }) if *cause == mismatch()
+            Some(Event::Degraded { task: Task::Sync, cause, .. }) if *cause == mismatch()
         )),
         "{seen:?}"
     );
@@ -76,7 +76,7 @@ fn a_flipped_database_page_degrades_the_sync_lane_ships_the_file_and_keeps_synci
         "{seen:?}"
     );
     assert_eq!(
-        actor.degraded(Lane::Sync).map(|d| d.cause),
+        actor.degraded(Task::Sync).map(|d| d.cause),
         Some(mismatch())
     );
     assert_eq!(actor.retention_pin(), held);
@@ -88,11 +88,11 @@ fn a_frame_that_rewrites_the_page_clears_the_degraded_state_and_the_pin() {
     flip(&mut rig);
     actor.request_snapshot();
     rig.follow(&mut actor, T0 + 10, 50);
-    assert!(actor.degraded(Lane::Sync).is_some());
+    assert!(actor.degraded(Task::Sync).is_some());
     rig.wal.append_tx(&[(three(), vec![7; PS.bytes()])], nz(3));
     rig.follow(&mut actor, T0 + 10_000, 50);
     rig.tick(&mut actor, T0 + 20_000);
-    assert_eq!(actor.degraded(Lane::Sync), None);
+    assert_eq!(actor.degraded(Task::Sync), None);
     assert_eq!(actor.retention_pin(), None);
 }
 
@@ -102,10 +102,10 @@ fn an_operator_accepting_the_file_clears_the_degraded_state() {
     flip(&mut rig);
     actor.request_snapshot();
     rig.follow(&mut actor, T0 + 10, 50);
-    assert!(actor.degraded(Lane::Sync).is_some());
+    assert!(actor.degraded(Task::Sync).is_some());
     actor.accept_database_pages();
     let tick = rig.tick(&mut actor, T0 + 100_000_000);
-    assert_eq!(actor.degraded(Lane::Sync), None, "{tick:?}");
+    assert_eq!(actor.degraded(Task::Sync), None, "{tick:?}");
 }
 
 #[test]

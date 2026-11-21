@@ -44,7 +44,7 @@ fn every_fault_has_a_scenario_or_a_reason() {
 }
 
 /// The scenarios of every fault whose policy can stop the engine or degrade
-/// a lane, the end of a drain included (it stops under every response).
+/// a task, the end of a drain included (it stops under every response).
 fn persistent_scenarios() -> Vec<(FaultKind, fn() -> Scenario)> {
     FaultKind::ALL
         .into_iter()
@@ -75,9 +75,9 @@ fn under_strict_every_persistent_scenario_stops_with_its_cause() {
 }
 
 /// Under the default responses every persistent fault but another writer
-/// (and the end of a drain) degrades a lane instead, the oracle holds, and
-/// no engine halts (a drain may end at its deadline while the lane is
-/// degraded). A scenario whose fault clears expects the lane to
+/// (and the end of a drain) degrades a task instead, the oracle holds, and
+/// no engine halts (a drain may end at its deadline while the task is
+/// degraded). A scenario whose fault clears expects the task to
 /// recover; each such fault has at least one that does, except the ones the
 /// simulator cannot undo (a WAL cut short or unlinked stays so, and a page
 /// size change clears only through a restart).
@@ -105,7 +105,7 @@ fn under_go_like_every_persistent_scenario_degrades_and_the_oracle_holds() {
                 Seen::Event(Event::Degraded { cause: got, .. })
                     if std::mem::discriminant(got) == std::mem::discriminant(&cause)
             )),
-            "{} degraded no lane by {cause:?}",
+            "{} degraded no task by {cause:?}",
             scenario.name
         );
         assert!(report.seen.contains(&Seen::Oracle), "{}", scenario.name);

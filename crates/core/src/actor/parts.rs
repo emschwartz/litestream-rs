@@ -19,7 +19,7 @@ use lsr_ltx::{PageSize, Timestamp, Txid};
 use lsr_wal::CommittedEnd;
 
 use super::ActorConfig;
-use super::state::{Gate, Lanes, Live, Maintain, Phase};
+use super::state::{Gate, Live, Maintain, Phase, Tasks};
 use crate::app::AppCheckpointObserver;
 use crate::checkpoint::CheckpointState;
 use crate::fault::{HaltCause, SnapshotCause};
@@ -66,12 +66,12 @@ impl Stop {
     }
 }
 
-/// The restore point retention keeps while a lane is degraded.
+/// The restore point retention keeps while a task is degraded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum LanePin {
-    /// No lane is degraded, or none has been since the last release.
+    /// No task is degraded, or none has been since the last release.
     Free,
-    /// The newest transaction the replica held when the first lane degraded
+    /// The newest transaction the replica held when the first task degraded
     /// (`None`: it held nothing).
     Held(Option<Txid>),
 }
@@ -91,8 +91,8 @@ impl LanePin {
 pub(super) struct Kept {
     pub(super) cfg: ActorConfig,
     pub(super) stop: Stop,
-    /// Each lane's wait and degraded state: reports, not engine state.
-    pub(super) lanes: Lanes,
+    /// Each task's wait and degraded state: reports, not engine state.
+    pub(super) tasks: Tasks,
     /// The clock's last reading.
     pub(super) last: Option<Timestamp>,
     pub(super) clamp_reported: bool,
@@ -112,7 +112,7 @@ impl Kept {
         Self {
             cfg,
             stop: Stop::No,
-            lanes: Lanes::default(),
+            tasks: Tasks::default(),
             last: None,
             clamp_reported: false,
             lane_pin: LanePin::Free,
@@ -131,7 +131,7 @@ impl Kept {
         let Self {
             cfg,
             stop,
-            lanes,
+            tasks,
             last,
             clamp_reported,
             lane_pin,
@@ -143,7 +143,7 @@ impl Kept {
         Self {
             cfg: cfg.clone(),
             stop: *stop,
-            lanes: *lanes,
+            tasks: *tasks,
             last: *last,
             clamp_reported: *clamp_reported,
             lane_pin: *lane_pin,
@@ -155,12 +155,12 @@ impl Kept {
     }
 
     /// The restore point retention keeps: the older of the two asked for, a
-    /// degraded lane's and a scheduled verify's. Derived on every read, so
+    /// degraded task's and a scheduled verify's. Derived on every read, so
     /// there is no copy to fall behind.
     pub(super) fn retention_pin(&self) -> Option<Txid> {
         match (self.lane_pin.txid(), self.verify_pin) {
-            (Some(lane), Some(verify)) => Some(lane.min(verify)),
-            (lane, verify) => lane.or(verify),
+            (Some(task), Some(verify)) => Some(task.min(verify)),
+            (task, verify) => task.or(verify),
         }
     }
 

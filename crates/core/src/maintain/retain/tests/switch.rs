@@ -73,7 +73,7 @@ fn with_retention_off_no_created_at_is_read_for_retention() {
 /// off and back on: the pinned chain stays and the rest goes. Off, the pin
 /// changes nothing, and even a pin that does not plan holds nothing.
 #[test]
-fn a_degraded_lanes_pin_behaves_the_same_once_retention_is_back_on() {
+fn a_degraded_tasks_pin_behaves_the_same_once_retention_is_back_on() {
     for pin in [10, 20, 27] {
         let always = due_on(ladder(), &one_level(), &mut pinned(pin));
         let mut config = off(one_level());

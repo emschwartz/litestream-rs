@@ -13,8 +13,8 @@
 //! fix: credentials refused, a corrupt object, a damaged WAL, another writer.
 //! What happens then is configuration, one field of [`Responses`] per
 //! [`PersistentCause`] (`docs/PLAN.md`, the degraded-state section). [`Response::KeepTrying`]
-//! puts the lane that failed in a degraded state: it retries with the doubling
-//! wait, capped at [`MAX_BACKOFF`] as Go's sync loop is, the other lanes keep
+//! puts the task that failed in a degraded state: it retries with the doubling
+//! wait, capped at [`MAX_BACKOFF`] as Go's sync loop is, the other tasks keep
 //! running, and every retry that fails is reported. [`Response::Stop`] stops
 //! the whole engine for a person, as every persistent fault did before.
 //! [`Responses::GO_LIKE`] (the default) keeps trying everywhere except on a
@@ -80,7 +80,7 @@ pub enum Fault {
     /// are derived state: the engine deletes that file and every staged file
     /// after it, and the next file is a snapshot taking the first transaction
     /// the replica lacks, so the chain has no hole (`upload::sweep_staged` at
-    /// boot, the upload lane mid-run; elsewhere the lane retries and the next
+    /// boot, the upload task mid-run; elsewhere the task retries and the next
     /// boot sweeps).
     ///
     /// A file that tears this way was never acknowledged as staged: its
@@ -324,8 +324,8 @@ impl From<PersistentCause> for HaltCause {
 /// What the engine does about one [`PersistentCause`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Response {
-    /// The lane that failed is degraded and retries with the capped doubling
-    /// wait; the other lanes keep running.
+    /// The task that failed is degraded and retries with the capped doubling
+    /// wait; the other tasks keep running.
     KeepTrying,
     /// The engine stops until a person restarts it.
     Stop,
@@ -369,7 +369,7 @@ pub struct Responses {
     pub page_size_changed: Response,
     /// A database-file page differs from the page checksum table. Keeping
     /// trying ships the page as the file holds it (the database the application
-    /// serves), keeps the lane degraded and retention pinned until a verified
+    /// serves), keeps the task degraded and retention pinned until a verified
     /// WAL frame rewrites the page or an operator accepts it.
     pub database_page_mismatch: Response,
     /// A condition the code rules out happened. Keeping trying rebuilds the
@@ -467,12 +467,12 @@ impl Default for Responses {
 /// What the actor does about a persistent cause, from its [`Response`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Action {
-    /// Degrade the lane and retry the same step after the wait.
+    /// Degrade the task and retry the same step after the wait.
     Retry,
-    /// Degrade the upload lane, forget what the replica was known to hold,
+    /// Degrade the upload task, forget what the replica was known to hold,
     /// and list it again after the wait.
     Relist,
-    /// Degrade the sync lane, drop every piece of engine state, and boot
+    /// Degrade the sync task, drop every piece of engine state, and boot
     /// again after the wait.
     Rebuild,
     /// Stop the engine.
@@ -558,7 +558,7 @@ pub fn retry_wait(attempt: NonZeroU32, interval: Duration) -> Duration {
 
 /// The wait before retry `attempt`: the later of the doubling
 /// [`retry_wait`] and the store's named wait, never shorter than either. The
-/// one throttle rule: every actor lane and every `MaintainState` level waits
+/// one throttle rule: every actor task and every `MaintainState` level waits
 /// this long. The count, not the last wait, drives the doubling.
 #[must_use]
 pub fn backoff_wait(backoff: Backoff, attempt: NonZeroU32, interval: Duration) -> Duration {

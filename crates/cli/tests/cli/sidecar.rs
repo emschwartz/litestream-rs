@@ -564,8 +564,8 @@ fn an_empty_host_binds_every_interface_and_the_log_says_which() {
     assert!(stderr.contains("must specify port"), "{stderr}");
 }
 
-/// The WAL deleted under the daemon: a lane degrades (200, in both outputs with its cause
-/// and lane), or, with the response set to stop, the database stops (503, `lsr_stopped`).
+/// The WAL deleted under the daemon: a task degrades (200, in both outputs with its cause
+/// and task), or, with the response set to stop, the database stops (503, `lsr_stopped`).
 #[test]
 fn health_is_200_while_degraded_and_503_once_stopped() {
     for stop in [false, true] {
@@ -606,12 +606,12 @@ fn health_is_200_while_degraded_and_503_once_stopped() {
             let health: serde_json::Value = serde_json::from_str(&body).unwrap();
             let degraded = &health["dbs"][0]["degraded"][0];
             assert_eq!(degraded["cause"], "wal_unlinked");
-            let lane = degraded["lane"].as_str().unwrap().to_owned();
+            let task = degraded["task"].as_str().unwrap().to_owned();
             let (_, text) = fetch(addr, "/metrics");
             let (_, samples) = parse_metrics(&text);
             let labels = [
                 ("db", db.as_str()),
-                ("lane", &lane),
+                ("task", &task),
                 ("cause", "wal_unlinked"),
             ];
             assert!((one(&samples, "lsr_degraded", &labels).value - 1.0).abs() < f64::EPSILON);

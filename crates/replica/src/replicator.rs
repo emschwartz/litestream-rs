@@ -27,7 +27,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 use std::{fmt, io};
 
-use lsr_core::{Clock, HaltCause, Lane, Unfinished};
+use lsr_core::{Clock, HaltCause, Task, Unfinished};
 use lsr_ltx::Timestamp;
 use lsr_sqlite::{DatabaseFile, Sqlite};
 
@@ -530,7 +530,7 @@ fn boot_answer(state: &State, died: bool) -> Option<Booted> {
     }
     state
         .health
-        .lane(Lane::Sync)
+        .task(Task::Sync)
         .map(|degraded| Booted::Degraded(degraded.cause))
 }
 

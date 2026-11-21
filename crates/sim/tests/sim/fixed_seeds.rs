@@ -73,7 +73,7 @@ mod fixed {
 
     // Finding 2: a power loss tore a staged level-0 file whose commit never
     // returned. Boot snapshotted past it and left it in staging, and the upload
-    // lane halted on it. The torn file, and all staged after it, is now lost.
+    // task halted on it. The torn file, and all staged after it, is now lost.
 
     #[test]
     fn a_torn_staged_file_is_dropped_seed_0x25() {

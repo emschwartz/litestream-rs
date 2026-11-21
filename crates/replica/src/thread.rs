@@ -13,7 +13,7 @@
 //!
 //! What a fresh engine must not forget is the engine's own to keep: the fresh one is built
 //! from the dropped one (`Actor::rebuilt`), which carries over a stop's deadline, an
-//! operator's snapshot request not yet staged, each lane's degraded state and the restore
+//! operator's snapshot request not yet staged, each task's degraded state and the restore
 //! point retention keeps for them, the scheduled verify's pending read, and the application
 //! checkpoint counts. This thread keeps only the stop's deadline, to cap its own waits, and
 //! hands the scheduled verify's pin over after every tick.
@@ -40,9 +40,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use lsr_core::{
-    Actor, AppCheckpoints, Degraded, Did, Env, Event as EngineEvent, HaltCause, Lane, Level,
-    ObjectStore, PageLimit, PersistentCause, Phase as EnginePhase, Response, Tick, Unfinished,
-    WalSource, retry_wait,
+    Actor, AppCheckpoints, Degraded, Did, Env, Event as EngineEvent, HaltCause, Level, ObjectStore,
+    PageLimit, PersistentCause, Phase as EnginePhase, Response, Task, Tick, Unfinished, WalSource,
+    retry_wait,
 };
 use lsr_ltx::{Timestamp, Txid};
 use lsr_sqlite::{DatabaseFile, Sqlite};
@@ -561,7 +561,7 @@ impl Worker {
         };
         if let Some(rebuilt) = self.rebuilt.filter(|_| replaced) {
             let event = EngineEvent::Degraded {
-                lane: Lane::Sync,
+                task: Task::Sync,
                 cause,
                 since: rebuilt.since,
                 until,
@@ -683,15 +683,15 @@ impl Worker {
     }
 
     fn degraded(&self) -> [Option<Degraded>; 5] {
-        let mut lanes = Lane::ALL.map(|lane| self.actor.degraded(lane));
-        if let (Some(rebuilt), Some(sync)) = (self.rebuilt, lanes.first_mut()) {
+        let mut tasks = Task::ALL.map(|task| self.actor.degraded(task));
+        if let (Some(rebuilt), Some(sync)) = (self.rebuilt, tasks.first_mut()) {
             *sync = Some(Degraded {
                 cause: rebuilt.cause,
                 since: rebuilt.since,
                 retries: rebuilt.attempts.get(),
             });
         }
-        lanes
+        tasks
     }
 
     /// `until`, or the next scheduled verify when that is earlier.

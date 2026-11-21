@@ -341,7 +341,7 @@ impl ObjectStore for Gated {
 }
 
 /// While a run waits inside a store call, commits are still synced and uploaded at each
-/// poll: the run's store calls happen on its own thread, never the sync lane's.
+/// poll: the run's store calls happen on its own thread, never the sync task's.
 #[test]
 fn a_verify_stuck_in_the_store_does_not_delay_syncs() {
     let site = Site::new();
