@@ -206,9 +206,9 @@
 "TestConfig_Validate_SyncIntervals/ValidMultipleReplicas" = { counterpart = "lsr-config::config::go::two_replicas_are_refused_and_each_sync_interval_is_checked" }
 "TestConfig_Validate_SyncIntervals/ValidSyncInterval" = { counterpart = "lsr-config::config::go::sync_interval_rules" }
 "TestConfig_Validate_SyncIntervals/ZeroSyncInterval" = { counterpart = "lsr-config::config::go::sync_interval_rules" }
-"TestConfig_Validate_ValidationInterval" = { counterpart = "lsr-config::config::go::a_validation_interval_is_refused_and_its_absence_accepted" }
-"TestConfig_Validate_ValidationInterval/NotSpecified" = { counterpart = "lsr-config::config::go::a_validation_interval_is_refused_and_its_absence_accepted" }
-"TestConfig_Validate_ValidationInterval/ValidInterval" = { counterpart = "lsr-config::config::go::a_validation_interval_is_refused_and_its_absence_accepted" }
+"TestConfig_Validate_ValidationInterval" = { counterpart = ["lsr-config::config::go::a_validation_interval_is_read_and_its_absence_is_none", "lsr-config::config::map::validation_interval_is_the_scheduled_verify_s_and_zero_is_off"] }
+"TestConfig_Validate_ValidationInterval/NotSpecified" = { counterpart = "lsr-config::config::go::a_validation_interval_is_read_and_its_absence_is_none" }
+"TestConfig_Validate_ValidationInterval/ValidInterval" = { counterpart = "lsr-config::config::go::a_validation_interval_is_read_and_its_absence_is_none" }
 "TestDBConfigValidation" = { counterpart = ["lsr-config::config::go::database_entry_validation", "lsr-config::config::go::distinct_paths_and_directories_are_valid"] }
 "TestDBConfigValidation/both path and dir specified" = { counterpart = "lsr-config::config::go::database_entry_validation" }
 "TestDBConfigValidation/dir without pattern" = { counterpart = "lsr-config::config::go::database_entry_validation" }
@@ -1192,11 +1192,11 @@
 "TestStore_Validate" = { counterpart = "lsr-core::verify::tests::a_clean_replica_has_no_findings_at_either_depth" }
 "TestStore_Validate/AllLevelsValid" = { counterpart = "lsr-core::verify::tests::a_clean_replica_has_no_findings_at_either_depth" }
 "TestStore_Validate/ErrorAtMultipleLevels" = { counterpart = "lsr-core::verify::tests::holes_in_front_of_and_behind_a_snapshot_are_both_reported" }
-"TestStore_Validate/MultipleDBs" = { reason = "Validating every database of a running daemon is Go's periodic validation, which is not in v1 (`validation.interval` is refused at load: lsr-config::config::go::a_validation_interval_is_refused_and_its_absence_accepted); each replica is verified on its own by `lsr verify` (lsr-core::verify::tests::holes_in_front_of_and_behind_a_snapshot_are_both_reported)." }
+"TestStore_Validate/MultipleDBs" = { reason = "Covered differently: Go's Store validates every database in one pass; in v1 each database's replicator runs its own scheduled verify, and the daemon gives `validation.interval` to every database it starts (lsr-config::config::map::validation_interval_is_the_scheduled_verify_s_and_zero_is_off, lsr-replica::verify::the_scheduled_verify_runs_on_its_interval_and_a_clean_replica_passes)." }
 "TestStore_Validate/NilReplica" = { reason = "Go-only: a DB with no replica attached. A Rust replicator cannot be built without its store, so the state does not exist." }
-"TestStore_ValidationMonitor" = { missing = "A periodic verify of the replica on a configured interval, off unless configured (Go's validation-interval). docs/PLAN.md section 7 makes scheduled verify-restores a v1 requirement; lsr-core verify exists, the schedule does not." }
-"TestStore_ValidationMonitor/DisabledByDefault" = { missing = "A periodic verify of the replica on a configured interval, off unless configured (Go's validation-interval). docs/PLAN.md section 7 makes scheduled verify-restores a v1 requirement; lsr-core verify exists, the schedule does not." }
-"TestStore_ValidationMonitor/RunsPeriodically" = { missing = "A periodic verify of the replica on a configured interval, off unless configured (Go's validation-interval). docs/PLAN.md section 7 makes scheduled verify-restores a v1 requirement; lsr-core verify exists, the schedule does not." }
+"TestStore_ValidationMonitor" = { counterpart = ["lsr-replica::verify::the_scheduled_verify_runs_on_its_interval_and_a_clean_replica_passes", "lsr-replica::verify::a_wrong_page_in_the_replica_is_degraded_with_the_page_and_txid_and_pins_the_last_good_point", "lsr-replica::verify::a_verify_stuck_in_the_store_does_not_delay_syncs"] }
+"TestStore_ValidationMonitor/DisabledByDefault" = { counterpart = "lsr-replica::verify::the_scheduled_verify_is_off_by_default" }
+"TestStore_ValidationMonitor/RunsPeriodically" = { counterpart = "lsr-replica::verify::the_scheduled_verify_runs_on_its_interval_and_a_clean_replica_passes" }
 
 ["litestream/tests/integration/boundary_test.go"]
 "Test1GBBoundary" = { counterpart = "lsr-sqlite::big::a_16k_page_database_past_1_gib_crosses_the_lock_page" }

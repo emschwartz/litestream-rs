@@ -373,18 +373,19 @@ fn snapshot_defaults_apply_when_absent_or_empty() {
     }
 }
 
-// TestConfig_Validate_ValidationInterval: periodic validation is not in v1.
+// TestConfig_Validate_ValidationInterval: the scheduled verify's interval.
 
 #[test]
-fn a_validation_interval_is_refused_and_its_absence_accepted() {
-    let problems = refused("validation:\n  interval: 5m\n");
+fn a_validation_interval_is_read_and_its_absence_is_none() {
     assert_eq!(
-        problem_at(&problems, "validation.interval"),
-        ProblemKind::NotInV1 {
-            feature: "periodic validation"
-        }
+        config("validation:\n  interval: 5m\n").validation_interval(),
+        Some(secs(5 * 60))
     );
-    config("dbs:\n  - path: /tmp/test.db\n");
+    assert_eq!(
+        config("dbs:\n  - path: /tmp/test.db\n").validation_interval(),
+        None
+    );
+    assert_eq!(config("validation: {}\n").validation_interval(), None);
 }
 
 // TestConfig_Validate_L0Retention

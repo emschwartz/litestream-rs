@@ -18,6 +18,9 @@
 //!   URL, which are refused.
 //! - Top-level `part-size` has no effect: Go's `SetDefaults` does not copy it
 //!   into replicas, so it does nothing in Go either.
+//! - `validation-interval` (in `ReplicaSettings`, top level and per replica) has
+//!   no effect: Go copies it down and never reads it. The scheduled verify runs
+//!   on `validation.interval`, as Go's validation monitor does (`replicate.go:360`).
 
 use crate::error::KeyClass;
 
@@ -63,8 +66,6 @@ pub(crate) enum Inert {
     False,
     /// Empty or null.
     Empty,
-    /// Null only.
-    Null,
     /// An empty list or null.
     EmptyList,
     /// Any value: the key matters only with something else that is refused.
@@ -130,11 +131,12 @@ const SSE: &str = "server-side encryption";
 /// Go's `ReplicaSettings`, inlined at the top level and in every replica.
 const SETTINGS: &[Key] = &[
     key("sync-interval", Duration, Implemented),
-    inert(
+    key(
         "validation-interval",
         Duration,
-        Inert::Null,
-        "periodic validation",
+        NoEffect(
+            "Go parses it and never reads it; the scheduled verify's interval is validation.interval",
+        ),
     ),
     key("max-sync-ltx-files", Int, Implemented),
     inert("auto-recover", Bool, Inert::False, "auto-recover"),
@@ -204,12 +206,7 @@ const TOP: &[Key] = &[
     ),
     key("levels", Maps(Section::Level), Implemented),
     key("snapshot", Map(Section::Snapshot), Implemented),
-    inert(
-        "validation",
-        Map(Section::Validation),
-        Inert::Any,
-        "periodic validation",
-    ),
+    key("validation", Map(Section::Validation), Implemented),
     key("l0-retention", Duration, Implemented),
     key("l0-retention-check-interval", Duration, Implemented),
     inert(
@@ -257,12 +254,7 @@ const SOCKET: &[Key] = &[
     inert("permissions", Uint32, Inert::Any, "the control socket"),
 ];
 
-const VALIDATION: &[Key] = &[inert(
-    "interval",
-    Duration,
-    Inert::Null,
-    "periodic validation",
-)];
+const VALIDATION: &[Key] = &[key("interval", Duration, Implemented)];
 
 const LOGGING: &[Key] = &[
     key("level", Str, Implemented),

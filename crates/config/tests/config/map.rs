@@ -105,6 +105,10 @@ fn an_entry_with_no_settings_gets_go_s_defaults() {
     assert_eq!(config.sync_limits.files_per_upload, NonZeroU32::new(256));
     assert_eq!(config.responses, Responses::GO_LIKE);
     assert_eq!(config.shutdown_grace, Duration::from_secs(30));
+    assert_eq!(
+        config.verify_interval, None,
+        "Go runs no validation unless asked"
+    );
     assert!(matches!(db.replica(), ReplicaPlan::File(p) if p == Path::new("/backup")));
     assert!(!db.restore_if_missing());
 }
@@ -241,6 +245,22 @@ fn shutdown_sync_timeout_is_the_drain_grace_and_the_shared_deadline() {
         plan.dbs().first().unwrap().config().shutdown_grace,
         Duration::from_secs(5)
     );
+}
+
+/// Go's `validation.interval` is the scheduled verify's interval for every database; at zero
+/// or less Go starts no validation monitor (`store.go:268`), and neither does v1. The
+/// replica-level `validation-interval` Go parses and never reads, so it changes nothing.
+#[test]
+fn validation_interval_is_the_scheduled_verify_s_and_zero_is_off() {
+    let every = |text: &str| {
+        one(&format!("{text}\n{}", db_with("")))
+            .config()
+            .verify_interval
+    };
+    assert_eq!(every("validation:\n  interval: 10m"), Some(secs(600)));
+    assert_eq!(every("validation:\n  interval: 0s"), None);
+    assert_eq!(every("validation:\n  interval: -1s"), None);
+    assert_eq!(every("validation-interval: 10m"), None);
 }
 
 #[test]

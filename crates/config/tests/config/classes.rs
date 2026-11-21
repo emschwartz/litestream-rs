@@ -97,12 +97,6 @@ const OUT_OF_SCOPE: &[(Place, &str, &str, &str)] = &[
     ),
     (
         top,
-        "validation.interval",
-        "validation: {}",
-        "validation:\n  interval: 5m",
-    ),
-    (
-        top,
         "verify-compaction",
         "verify-compaction: false",
         "verify-compaction: true",
@@ -112,12 +106,6 @@ const OUT_OF_SCOPE: &[(Place, &str, &str, &str)] = &[
         "auto-recover",
         "auto-recover: false",
         "auto-recover: true",
-    ),
-    (
-        top,
-        "validation-interval",
-        "validation-interval:",
-        "validation-interval: 1h",
     ),
     (
         top,
@@ -136,12 +124,6 @@ const OUT_OF_SCOPE: &[(Place, &str, &str, &str)] = &[
         "dbs[0].replica.auto-recover",
         "auto-recover: no",
         "auto-recover: yes",
-    ),
-    (
-        in_replica,
-        "dbs[0].replica.validation-interval",
-        "validation-interval: ~",
-        "validation-interval: 10m",
     ),
     (
         in_replica,
@@ -246,15 +228,17 @@ fn every_other_replica_type_is_refused_by_type_and_by_url() {
 
 #[test]
 fn no_effect_knobs_warn_once_each() {
-    let text = "shutdown-sync-interval: 1s\nshutdown-timeout: 10s\npart-size: 5MB\nlogging:\n  source: true\ndbs:\n  - path: /db\n    busy-timeout: 5s\n    replica:\n      url: s3://bucket/db\n      name: primary\n      sign-payload: true\n      sign-accept-encoding: false\n      require-content-md5: false\n      put-object-content-md5: true\n      skip-verify: true\n      concurrency: 5\n";
+    let text = "shutdown-sync-interval: 1s\nshutdown-timeout: 10s\npart-size: 5MB\nvalidation-interval: 1h\nlogging:\n  source: true\ndbs:\n  - path: /db\n    busy-timeout: 5s\n    replica:\n      url: s3://bucket/db\n      name: primary\n      validation-interval: 10m\n      sign-payload: true\n      sign-accept-encoding: false\n      require-content-md5: false\n      put-object-content-md5: true\n      skip-verify: true\n      concurrency: 5\n";
     let loaded = parse(text);
     let paths = [
         "shutdown-sync-interval",
         "shutdown-timeout",
         "part-size",
+        "validation-interval",
         "logging.source",
         "dbs[0].busy-timeout",
         "dbs[0].replica.name",
+        "dbs[0].replica.validation-interval",
         "dbs[0].replica.sign-payload",
         "dbs[0].replica.sign-accept-encoding",
         "dbs[0].replica.require-content-md5",

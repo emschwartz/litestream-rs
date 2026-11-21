@@ -225,7 +225,7 @@ lsr-config::config fidelity::strings_keep_their_text
 lsr-config::config go::a_database_snapshot_is_promoted_when_no_global_one_is_set
 lsr-config::config go::a_duplicate_key_is_refused_where_go_warns
 lsr-config::config go::a_missing_file_is_not_found
-lsr-config::config go::a_validation_interval_is_refused_and_its_absence_accepted
+lsr-config::config go::a_validation_interval_is_read_and_its_absence_is_none
 lsr-config::config go::age_settings_are_refused_and_an_empty_age_is_accepted
 lsr-config::config go::an_empty_file_has_go_defaults
 lsr-config::config go::checkpoint_fields
@@ -293,6 +293,7 @@ lsr-config::config map::sync_interval_is_the_first_retry_wait
 lsr-config::config map::sync_limits_follow_go_with_zero_as_no_limit
 lsr-config::config map::the_positional_form_is_one_database
 lsr-config::config map::truncate_page_n_acts_as_go_only_under_the_claim
+lsr-config::config map::validation_interval_is_the_scheduled_verify_s_and_zero_is_off
 lsr-config::config map::watching_a_dir_is_refused_at_load
 lsr-config::config upstream::the_credentials_uncommented_load
 lsr-config::config upstream::the_database_examples_name_backends_v1_refuses
@@ -361,6 +362,10 @@ lsr-core actor::tests::lanes::a_restarted_wal_with_nothing_new_is_not_reported_a
 lsr-core actor::tests::lanes::a_sync_whose_epoch_moved_does_not_checkpoint_and_asks_for_the_next_tick
 lsr-core actor::tests::lanes::an_idle_tick_does_not_open_the_wal
 lsr-core actor::tests::lanes::an_interval_due_with_nothing_to_checkpoint_does_not_spin
+lsr-core actor::tests::live::a_drain_reads_no_live_pages
+lsr-core actor::tests::live::a_verify_pin_is_kept_beside_a_lane_pin_and_the_older_wins
+lsr-core actor::tests::live::live_pages_are_read_once_asked_at_the_replica_s_transaction
+lsr-core actor::tests::live::live_pages_wait_for_the_upload_of_a_new_commit
 lsr-core actor::tests::maintenance_waits_for_idle_uploads
 lsr-core actor::tests::next_is_never_after_a_held_deadline
 lsr-core actor::tests::no_wal_yet::a_drain_of_a_restored_database_with_no_wal_header_finishes
@@ -1042,6 +1047,12 @@ lsr-core verify::tests::a_stored_time_that_differs_from_the_header_is_reported_w
 lsr-core verify::tests::a_stray_level_zero_base_beside_a_newer_snapshot_reports_nothing
 lsr-core verify::tests::a_truncated_file_is_unreadable_and_names_where
 lsr-core verify::tests::a_young_replica_of_level_zero_files_from_one_has_no_findings
+lsr-core verify::tests::against::a_different_length_differs_even_when_the_common_pages_agree
+lsr-core verify::tests::against::a_restore_equal_to_the_live_database_is_the_same
+lsr-core verify::tests::against::a_stale_page_names_the_page_and_the_transaction
+lsr-core verify::tests::against::a_transaction_merged_into_a_larger_file_is_merged_not_a_failure
+lsr-core verify::tests::against::a_transaction_the_replica_does_not_hold_fails_to_restore
+lsr-core verify::tests::against::an_older_transaction_is_compared_with_its_own_restore
 lsr-core verify::tests::an_empty_replica_has_no_finding_but_is_not_restorable
 lsr-core verify::tests::bytes_after_the_trailer_are_unreadable
 lsr-core verify::tests::files_without_a_snapshot_are_no_snapshot
@@ -1251,6 +1262,7 @@ lsr-replica runtime::tests::a_passed_deadline_returns_at_once
 lsr-replica runtime::tests::a_released_fake_park_moves_the_clock_to_its_wake
 lsr-replica runtime::tests::an_unpark_before_the_park_is_not_lost
 lsr-replica runtime::tests::os_entropy_stays_below_the_bound
+lsr-replica scheduled::tests::a_run_that_could_not_finish_is_incomplete_not_failed
 lsr-replica store::tests::conformance_cases::abort_publishes_nothing
 lsr-replica store::tests::conformance_cases::chunks_concatenate_and_stamp_survives
 lsr-replica store::tests::conformance_cases::commit_error_may_leave_the_object_visible
@@ -1295,6 +1307,10 @@ lsr-replica::replicator start_returns_with_the_pin_held_and_stop_drains_every_co
 lsr-replica::replicator verify_and_restore_if_missing_use_the_shared_store
 lsr-replica::replicator wait_booted_reports_the_first_boot
 lsr-replica::restored a_restored_database_with_no_write_ticks_by_the_poll_and_snapshots_at_once
+lsr-replica::verify a_verify_stuck_in_the_store_does_not_delay_syncs
+lsr-replica::verify a_wrong_page_in_the_replica_is_degraded_with_the_page_and_txid_and_pins_the_last_good_point
+lsr-replica::verify the_scheduled_verify_is_off_by_default
+lsr-replica::verify the_scheduled_verify_runs_on_its_interval_and_a_clean_replica_passes
 lsr-sidecar exec::tests::a_child_end_is_clean_as_go_counts_it
 lsr-sidecar exec::tests::a_command_go_would_run_differently_is_refused
 lsr-sidecar exec::tests::split_matches_go_shellwords

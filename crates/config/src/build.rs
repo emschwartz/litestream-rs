@@ -79,6 +79,7 @@ pub(crate) fn build(top: &Fields, env: &dyn Env, walk: &mut Walk) -> GoConfig {
         shutdown_sync_timeout: top
             .duration("shutdown-sync-timeout")
             .unwrap_or(defaults::SHUTDOWN_SYNC_TIMEOUT),
+        validation_interval: top.map("validation").and_then(|v| v.duration("interval")),
         logging: logging(top.map("logging"), env, walk),
         dbs: dbs.into_iter().map(|(_, _, db)| db).collect(),
         rust,

@@ -46,6 +46,7 @@ pub struct GoConfig {
     pub(crate) l0_retention_check_interval: GoDuration,
     pub(crate) retention_enabled: bool,
     pub(crate) shutdown_sync_timeout: GoDuration,
+    pub(crate) validation_interval: Option<GoDuration>,
     pub(crate) logging: Logging,
     pub(crate) dbs: Vec<DbConfig>,
     pub(crate) rust: RustSettings,
@@ -91,6 +92,12 @@ impl GoConfig {
     #[must_use]
     pub fn shutdown_sync_timeout(&self) -> GoDuration {
         self.shutdown_sync_timeout
+    }
+    /// `validation.interval`: how often the scheduled verify runs. `None` when unset, as Go
+    /// leaves it; Go runs no validation at zero or less either.
+    #[must_use]
+    pub fn validation_interval(&self) -> Option<GoDuration> {
+        self.validation_interval
     }
     /// `logging`, with `LOG_LEVEL` applied.
     #[must_use]

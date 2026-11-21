@@ -264,7 +264,6 @@ impl Walk {
 fn is_inert(at: Inert, value: &Value) -> bool {
     match at {
         Inert::Any => true,
-        Inert::Null => matches!(value, Value::Null),
         Inert::False => matches!(value, Value::Null | Value::Bool(false)),
         Inert::Empty => matches!(value, Value::Null),
         Inert::EmptyList => match value {

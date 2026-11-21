@@ -24,6 +24,8 @@
 //!   below the interval); each refusal names the setting.
 //! - `shutdown-sync-timeout` (Go 30 s) is each replicator's drain grace, and the
 //!   daemon's one shutdown deadline.
+//! - `validation.interval` (Go unset: off) is the scheduled verify's interval for every
+//!   database; zero or less is off, as Go starts its monitor only above zero (`store.go:268`).
 //! - `litestream-rs.responses` over `Responses::GO_LIKE`, and
 //!   `litestream-rs.host-autocheckpoint` (SQLite's 1000 unless stated; `0` or `off` for a
 //!   host at `wal_autocheckpoint = 0`), which only lets health infer host checkpoint
@@ -453,6 +455,7 @@ fn settings(
         },
         shutdown_grace,
         host_autocheckpoint: config.rust().host_autocheckpoint(),
+        verify_interval: config.validation_interval().and_then(positive),
     })
 }
 
