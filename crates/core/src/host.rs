@@ -275,6 +275,18 @@ impl HostObserver {
         self.watch = after.map(|read| Watch::after_ours(read, run));
     }
 
+    /// The observer for an engine whose connections were reopened: the
+    /// counts and the threshold, without the last read, which was the closed
+    /// connections' and proves nothing about what happened since.
+    #[must_use]
+    pub const fn reopened(self) -> Self {
+        Self {
+            autocheckpoint: self.autocheckpoint,
+            watch: None,
+            counts: self.counts,
+        }
+    }
+
     /// Everything seen so far.
     #[must_use]
     pub const fn counts(&self) -> HostCheckpoints {

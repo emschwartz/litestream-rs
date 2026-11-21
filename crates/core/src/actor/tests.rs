@@ -1055,13 +1055,13 @@ fn held(actor: &Actor) -> Vec<Timestamp> {
     let mut held: Vec<Timestamp> = LANES
         .iter()
         .filter(|lane| running || matches!(lane, Lane::Sync | Lane::Upload))
-        .filter_map(|lane| actor.lanes.get(*lane).until())
+        .filter_map(|lane| actor.kept.lanes.get(*lane).until())
         .collect();
     if running {
-        if let Gate::Until(at) = actor.gate {
+        if let Gate::Until(at) = actor.engine.gate {
             held.push(at);
         }
-        held.extend(actor.maintain.until);
+        held.extend(actor.engine.maintain.until);
     }
     if let Phase::Draining { deadline } = actor.phase() {
         held.push(deadline);
@@ -1083,15 +1083,15 @@ proptest::proptest! {
         let at = |offset: i64| ts(now.saturating_add(offset));
         for (lane, wait) in LANES.iter().zip(waits) {
             if let Some(wait) = wait {
-                actor.lanes.get_mut(*lane).fail(|_| at(wait));
+                actor.kept.lanes.get_mut(*lane).fail(|_| at(wait));
             }
         }
-        actor.gate = match gate {
+        actor.engine.gate = match gate {
             0 => Gate::Open,
             1 => Gate::Until(at(gate_at)),
             _ => Gate::NextWrite,
         };
-        actor.maintain.until = maintain.map(at);
+        actor.engine.maintain.until = maintain.map(at);
         if draining {
             actor.begin_shutdown(actor.shutdown_deadline(ts(now)));
         }

@@ -32,29 +32,6 @@ pub enum Phase {
     Halted(HaltCause),
 }
 
-impl Phase {
-    /// The phase after `begin_shutdown`. A halt stays a halt, and a second
-    /// shutdown keeps the earlier of the two deadlines: a later call can
-    /// shorten a drain, never lengthen it.
-    pub(super) fn drain(self, deadline: Timestamp) -> Self {
-        match self {
-            Self::Boot | Self::Running => Self::Draining { deadline },
-            Self::Draining { deadline: was } => Self::Draining {
-                deadline: was.min(deadline),
-            },
-            Self::Halted(_) => self,
-        }
-    }
-
-    /// The phase once booted: a drain that began before boot stays a drain.
-    pub(super) const fn booted(self) -> Self {
-        match self {
-            Self::Boot => Self::Running,
-            Self::Running | Self::Draining { .. } | Self::Halted(_) => self,
-        }
-    }
-}
-
 /// The five kinds of work, each with its own retry wait and its own degraded
 /// state: a failure in one lane holds no other.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -400,13 +377,13 @@ impl Actor {
     /// rather than at the last wait's end. A restart takes the setting from
     /// the [`super::ActorConfig`] it is given.
     pub fn set_retention(&mut self, retention: RetentionMode) {
-        self.cfg.maintenance.set_retention(retention);
-        self.maintain.stale = true;
+        self.kept.cfg.maintenance.set_retention(retention);
+        self.engine.maintain.stale = true;
     }
 
     /// Whether retention deletes anything right now.
     #[must_use]
     pub const fn retention(&self) -> RetentionMode {
-        self.cfg.maintenance.retention()
+        self.kept.cfg.maintenance.retention()
     }
 }

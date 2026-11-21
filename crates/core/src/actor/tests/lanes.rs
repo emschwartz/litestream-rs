@@ -260,9 +260,9 @@ fn a_passed_wait_with_no_work_left_is_not_a_deadline() {
         }
         rig.settle(&mut actor, T0);
         let waiting = if gate {
-            actor.gate.until()
+            actor.engine.gate.until()
         } else {
-            actor.lanes.get(Lane::Checkpoint).until()
+            actor.kept.lanes.get(Lane::Checkpoint).until()
         };
         let until = waiting.unwrap_or_else(|| panic!("no wait is held: {:?}", rig.ck.calls()));
         rig.wal.force_restart();

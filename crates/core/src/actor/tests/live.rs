@@ -78,16 +78,13 @@ fn a_verify_pin_is_kept_beside_a_lane_pin_and_the_older_wins() {
     assert!(second > first);
     actor.pin_for_verify(Some(second));
     assert_eq!(actor.retention_pin(), Some(second));
-    actor.lane_pin = Some(first);
-    actor.pinned = true;
-    actor.apply_pin();
+    actor.kept.lane_pin = LanePin::Held(Some(first));
     assert_eq!(actor.retention_pin(), Some(first));
-    actor.maintain.stale = false;
+    actor.engine.maintain.stale = false;
     actor.pin_for_verify(None);
     assert_eq!(actor.retention_pin(), Some(first));
-    assert!(actor.maintain.stale, "a released pin lists again");
+    assert!(actor.engine.maintain.stale, "a released pin lists again");
     actor.pin_for_verify(Some(second));
-    actor.pinned = false;
-    actor.apply_pin();
+    actor.kept.lane_pin = LanePin::Free;
     assert_eq!(actor.retention_pin(), Some(second));
 }

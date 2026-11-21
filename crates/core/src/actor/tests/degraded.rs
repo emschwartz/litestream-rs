@@ -167,21 +167,21 @@ fn a_degraded_lane_pins_the_replicas_newest_transaction_until_it_recovers() {
     rig.tick(&mut actor, T0 + 10);
     let failed = rig.tick(&mut actor, T0 + 10);
     assert!(degraded(&failed).is_some(), "{failed:?}");
-    assert_eq!(actor.maintain.state.pin(), held);
+    assert_eq!(actor.retention_pin(), held);
     // A second lane degrading later keeps the first pin.
     actor.fault(Lane::Checkpoint, Fault::WalUnlinked, ts(T0 + 20));
-    assert_eq!(actor.maintain.state.pin(), held);
+    assert_eq!(actor.retention_pin(), held);
     rig.follow(&mut actor, T0 + 1_010, 50);
     assert_eq!(actor.degraded(Lane::Upload), None);
     assert_eq!(
-        actor.maintain.state.pin(),
+        actor.retention_pin(),
         held,
         "the checkpoint lane is still degraded"
     );
-    actor.lanes.get_mut(Lane::Checkpoint).succeed();
+    actor.kept.lanes.get_mut(Lane::Checkpoint).succeed();
     let tick = rig.tick(&mut actor, T0 + 100_000_000);
     let lanes: Vec<_> = Lane::ALL.iter().map(|l| actor.degraded(*l)).collect();
-    assert_eq!(actor.maintain.state.pin(), None, "{tick:?} {lanes:?}");
+    assert_eq!(actor.retention_pin(), None, "{tick:?} {lanes:?}");
 }
 
 /// `Bug` never continues from the state it left: the actor is rebuilt and
@@ -274,7 +274,10 @@ fn a_regressed_replica_is_listed_again_and_uploads_go_on() {
         degraded(&tick).map(|(lane, cause, _)| (lane, cause)),
         Some((Lane::Upload, PersistentCause::RemoteRegressed))
     );
-    assert_eq!(actor.upload, UploadState::ListFirst { confirmed: None });
+    assert_eq!(
+        actor.engine.upload,
+        UploadState::ListFirst { confirmed: None }
+    );
     rig.commit(3);
     let lists = rig.remote.calls();
     rig.follow(&mut actor, T0 + 20, 50);
@@ -474,4 +477,60 @@ fn a_degraded_maintenance_job_counts_its_retries() {
         }
     }
     assert_eq!(counted, [Some(1), Some(2), Some(3)]);
+}
+
+/// The actor built to replace one whose engine is distrusted knows nothing
+/// of the WAL or the replica and keeps everything asked of the old one and
+/// everything it reported.
+#[test]
+fn a_rebuilt_actor_keeps_what_was_asked_and_reported_and_boots_again() {
+    let (mut rig, mut actor) = caught_up_go_like();
+    let held = replica_tip(&rig).map(|n| lsr_ltx::Txid::new(n).unwrap());
+    rig.remote.inner.inject_failure(StoreOp::Upload, auth());
+    rig.commit(2);
+    rig.tick(&mut actor, T0 + 10);
+    let failed = rig.tick(&mut actor, T0 + 10);
+    assert!(degraded(&failed).is_some(), "{failed:?}");
+    actor.request_snapshot();
+    actor.read_live_pages();
+    actor.begin_shutdown(ts(T0 + 60_000));
+    assert!(actor.booted());
+
+    let mut fresh = actor.rebuilt();
+    assert!(!fresh.booted());
+    assert_eq!(fresh.staged(), None);
+    assert_eq!(fresh.replicated(), None);
+    assert_eq!(
+        fresh.phase(),
+        Phase::Draining {
+            deadline: ts(T0 + 60_000)
+        }
+    );
+    assert_eq!(fresh.degraded(Lane::Upload), actor.degraded(Lane::Upload));
+    assert_eq!(fresh.retention_pin(), held);
+    assert_eq!(
+        fresh.pending_snapshot(),
+        Some(SnapshotCause::OperatorRequested)
+    );
+    assert_eq!(fresh.foreign_checkpoints(), actor.foreign_checkpoints());
+
+    let seen = rig.follow(&mut fresh, T0 + 20, 50);
+    assert!(fresh.booted(), "{seen:?}");
+    assert!(
+        matches!(seen.last(), Some(Tick::Drained { .. })),
+        "{seen:?}"
+    );
+    assert_eq!(fresh.degraded(Lane::Upload), None);
+    assert_eq!(fresh.pending_snapshot(), None);
+}
+
+/// The engine's own rebuild shows in `booted`, so a driver need not track it.
+#[test]
+fn booted_follows_the_engines_own_rebuild() {
+    let (mut rig, mut actor) = caught_up_go_like();
+    assert!(actor.booted());
+    actor.fault(Lane::Upload, Fault::Bug, ts(T0 + 10));
+    assert!(!actor.booted());
+    boot_again(&mut rig, &mut actor, T0 + 10);
+    assert!(actor.booted());
 }

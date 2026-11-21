@@ -45,6 +45,12 @@
 //! a replica that went backwards is listed again. Under `Stop` the actor
 //! halts, as every persistent fault did before.
 //!
+//! The actor is two halves (`parts`): what a rebuild keeps (the
+//! configuration, what was asked of it, what it reports) and the engine a
+//! rebuild replaces whole (what it believes about the WAL, the staging
+//! directory and the replica). A driver that drops an actor after a panic
+//! builds the next one from it with [`Actor::rebuilt`].
+//!
 //! A drain ends in one of two ticks: [`Tick::Drained`] with the newest
 //! transaction the replica holds, or, at its deadline, [`Tick::DeadlineReached`]
 //! with what was left ([`Unfinished`]); every tick after that one is
@@ -56,6 +62,7 @@
 //! checkpoints it did not run and infers the host's automatic checkpoints that
 //! cannot run ([`Actor::host_checkpoints`]). The count changes no decision.
 
+mod parts;
 mod state;
 
 use std::num::NonZeroU32;
@@ -64,8 +71,9 @@ use std::time::Duration;
 use lsr_ltx::{PageSize, Timestamp, Txid};
 use lsr_wal::{CommittedEnd, OpenError, WalReader};
 
+use parts::{Course, Engine, Kept, LanePin, Stop, Tail};
 pub use state::{Degraded, Lane, Phase};
-use state::{Gate, Lanes, Live, Maintain};
+use state::{Gate, Live};
 
 use crate::checkpoint::{
     CheckpointConfig, CheckpointFailed, CheckpointOutcome, CheckpointState, Decision, Observed,
@@ -76,7 +84,7 @@ use crate::fault::{
     Action, Backoff, Clamped, Fault, HaltCause, Next, PersistentCause, Policy, Responses,
     SnapshotCause, backoff_wait, policy,
 };
-use crate::host::{HostCheckpoints, HostObserver};
+use crate::host::HostCheckpoints;
 use crate::inventory::Inventory;
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::maintain::{
@@ -263,83 +271,14 @@ enum Stepped {
     Halt(HaltCause),
 }
 
-/// Where the next sync step resumes, which also names the newest staged
-/// transaction.
-///
-/// One value, not a position beside a staged transaction id: every staged
-/// level-0 file comes from a step whose position names it, so a position's
-/// transaction is the newest staged one, and the two cannot disagree.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Resume {
-    /// The last synced position; its transaction is the newest staged.
-    From(Position),
-    /// No position: a boot that found nothing to continue, or a staged file
-    /// lost. The next sync is a snapshot; this is the newest transaction
-    /// still staged (or, with nothing staged, the replica's newest level-0
-    /// file), if any.
-    Snapshot(Option<Txid>),
-}
-
-impl Resume {
-    const fn position(self) -> Option<Position> {
-        match self {
-            Self::From(position) => Some(position),
-            Self::Snapshot(_) => None,
-        }
-    }
-
-    const fn staged(self) -> Option<Txid> {
-        match self {
-            Self::From(position) => Some(position.txid()),
-            Self::Snapshot(staged) => staged,
-        }
-    }
-}
-
 /// The replication engine for one database.
-#[derive(Clone, Debug)]
+///
+/// Two halves (`parts`): what a rebuild keeps, and the engine a rebuild
+/// replaces whole.
+#[derive(Debug)]
 pub struct Actor {
-    cfg: ActorConfig,
-    phase: Phase,
-    booted: bool,
-    /// Where the next sync resumes, and so the newest staged transaction.
-    resume: Resume,
-    /// Set when the next sync is a snapshot.
-    pending: Option<SnapshotCause>,
-    /// The replica's page size, one per prefix; `None` while the replica and
-    /// staging are both empty.
-    page_size: Option<PageSize>,
-    /// The last sync stopped at the cap: more is committed.
-    more_wal: bool,
-    /// What each database-file page should hold (`crate::pages`).
-    pages: PageTable,
-    /// The wal-index read at which the last step found the index reset ahead
-    /// of the WAL header with nothing to stage: nothing to sync, and no proof
-    /// to checkpoint on, until the index changes.
-    reset: Option<CommittedEnd>,
-    checkpoint: CheckpointState,
-    gate: Gate,
-    upload: UploadState,
-    lanes: Lanes,
-    maintain: Maintain,
-    /// Staged level-0 files through this transaction were pruned (W3).
-    pruned: Option<Txid>,
-    last: Option<Timestamp>,
-    clamp_reported: bool,
-    /// A lane is degraded and retention holds its pin (which is `None` when
-    /// the replica held nothing as the degradation began).
-    pinned: bool,
-    /// The newest transaction the replica held when the first lane degraded.
-    lane_pin: Option<Txid>,
-    /// The restore point a scheduled verify asked retention to keep.
-    verify_pin: Option<Txid>,
-    /// The live database's pages a scheduled verify asked for.
-    live: Live,
-    /// An operator asked for a snapshot that has not been staged yet. Kept
-    /// beside `pending`, which a rebuild resets and another cause may hold.
-    snapshot_asked: bool,
-    /// What the host's checkpoints did between reads.
-    host: HostObserver,
+    kept: Kept,
+    engine: Engine,
 }
 
 fn later(at: Timestamp, wait: Duration) -> Timestamp {
@@ -437,93 +376,118 @@ impl Actor {
     #[must_use]
     pub fn new(cfg: ActorConfig) -> Self {
         Self {
-            cfg,
-            phase: Phase::Boot,
-            booted: false,
-            resume: Resume::Snapshot(None),
-            pending: None,
-            page_size: None,
-            more_wal: false,
-            pages: PageTable::new(),
-            reset: None,
-            // Replaced at boot, when the time is known.
-            checkpoint: CheckpointState::boot(Timestamp::from_unix_millis(0)),
-            gate: Gate::Open,
-            upload: UploadState::Unknown,
-            lanes: Lanes::default(),
-            maintain: Maintain::default(),
-            pruned: None,
-            last: None,
-            clamp_reported: false,
-            pinned: false,
-            lane_pin: None,
-            verify_pin: None,
-            live: Live::Idle,
-            snapshot_asked: false,
-            host: HostObserver::default(),
+            kept: Kept::new(cfg),
+            engine: Engine::fresh(),
         }
+    }
+
+    /// The actor to go on with after this one's engine can no longer be
+    /// trusted (a panic unwound through a tick): a fresh engine that boots
+    /// from the replica and the WAL again, beside everything that is not the
+    /// engine's to forget. Kept: the configuration, a drain's deadline or a
+    /// halt, each lane's wait and degraded state and the retention pin they
+    /// hold, a scheduled verify's pin and its request for live pages (pages
+    /// read and not yet taken are read again), an operator's snapshot request
+    /// not yet staged, the clock's last reading and the host-checkpoint
+    /// counts (not the wal-index read they were counted from: the caller
+    /// may have reopened the connections since).
+    #[must_use]
+    pub fn rebuilt(&self) -> Self {
+        Self {
+            kept: self.kept.rebuilt(self.kept.host.reopened()),
+            engine: Engine::fresh(),
+        }
+    }
+
+    /// Whether the engine has booted: listed the replica and recovered its
+    /// position. False again after a rebuild, until the next boot.
+    #[must_use]
+    pub const fn booted(&self) -> bool {
+        self.engine.course.booted()
     }
 
     /// What the actor is doing.
     #[must_use]
     pub const fn phase(&self) -> Phase {
-        self.phase
+        self.kept.stop.phase(self.booted())
     }
 
     /// The lane's degraded state, if a persistent failure left it in one.
     #[must_use]
     pub fn degraded(&self, lane: Lane) -> Option<Degraded> {
-        self.lanes.get(lane).degraded()
+        self.kept.lanes.get(lane).degraded()
     }
 
     /// An operator accepts the database file as it is: every page the page
     /// checksum table reported as mismatched is trusted with the bytes it now
     /// holds, and the degraded state and retention pin it held go.
     pub fn accept_database_pages(&mut self) {
-        self.pages.accept();
+        self.engine.pages.accept();
     }
 
     /// The newest transaction staged locally.
     #[must_use]
     pub const fn staged(&self) -> Option<Txid> {
-        self.resume.staged()
+        self.engine.course.staged()
     }
 
     /// The last synced position, `None` until the first sync after a boot
     /// that found nothing to continue.
     const fn position(&self) -> Option<Position> {
-        self.resume.position()
+        self.engine.course.position()
     }
 
     /// The newest transaction the replica was confirmed to hold.
     #[must_use]
     pub const fn replicated(&self) -> Option<Txid> {
-        self.upload.confirmed()
+        self.engine.upload.confirmed()
     }
 
     /// Why the next sync is a snapshot, when it is one.
     #[must_use]
-    pub const fn pending_snapshot(&self) -> Option<SnapshotCause> {
-        self.pending
+    pub fn pending_snapshot(&self) -> Option<SnapshotCause> {
+        self.pending()
+    }
+
+    /// Why the next sync is a snapshot. Before the boot, which knows no
+    /// cause of its own yet, only an operator's request is one.
+    fn pending(&self) -> Option<SnapshotCause> {
+        match self.engine.course {
+            Course::Unbooted => self.kept.asked(),
+            Course::Snapshot { .. } | Course::At { .. } => self.engine.course.pending(),
+        }
+    }
+
+    /// The last sync stopped at the cap: more is committed.
+    fn more_wal(&self) -> bool {
+        self.engine.course.tail() == Tail::More
+    }
+
+    /// The wal-index read at which the last step found the index reset.
+    const fn reset(&self) -> Option<CommittedEnd> {
+        match self.engine.course.tail() {
+            Tail::Reset(at) => Some(at),
+            Tail::Synced | Tail::More => None,
+        }
     }
 
     /// Checkpoints someone else ran on the database since this actor began.
     #[must_use]
     pub const fn foreign_checkpoints(&self) -> u64 {
-        self.host.counts().ran()
+        self.kept.host.counts().ran()
     }
 
     /// What the host's checkpoints did since this actor began.
     #[must_use]
     pub const fn host_checkpoints(&self) -> HostCheckpoints {
-        self.host.counts()
+        self.kept.host.counts()
     }
 
     /// The host's `wal_autocheckpoint`, in frames (`None`: it runs none). The
     /// default is SQLite's, 1000; it only changes what the host-checkpoint
     /// notice infers.
     pub const fn set_host_autocheckpoint(&mut self, frames: Option<NonZeroU32>) {
-        self.host.set_autocheckpoint(frames);
+        self.kept.host.set_autocheckpoint(frames);
     }
 
     /// Committed WAL bytes past the synced position: all of `committed` when
@@ -546,51 +510,52 @@ impl Actor {
     /// once uploads have caught up, under that tick's proof, as a level-9
     /// snapshot reads the database; [`Self::take_live_pages`] hands them over.
     pub fn read_live_pages(&mut self) {
-        self.live.ask();
+        self.kept.live.ask();
     }
 
     /// The live pages read since the last call, if any.
     pub fn take_live_pages(&mut self) -> Option<LivePages> {
-        self.live.take()
+        self.kept.live.take()
     }
 
     /// Keeps the restore chain of `txid` from retention, for a scheduled verify
     /// that found a later restore wrong (`None` lets it go). A degraded lane's
     /// pin, if older, still wins.
     pub fn pin_for_verify(&mut self, txid: Option<Txid>) {
-        let released = self.verify_pin.is_some() && txid.is_none();
-        self.verify_pin = txid;
-        self.apply_pin();
+        let released = self.kept.verify_pin.is_some() && txid.is_none();
+        self.kept.verify_pin = txid;
         if released {
-            self.maintain.stale = true;
+            self.engine.maintain.stale = true;
         }
     }
 
     /// The restore point retention keeps, if one is pinned.
     #[must_use]
-    pub const fn retention_pin(&self) -> Option<Txid> {
-        self.maintain.state.pin()
+    pub fn retention_pin(&self) -> Option<Txid> {
+        self.kept.retention_pin()
     }
 
     /// Makes the next sync a snapshot (an operator asked). A cause already
     /// pending is kept.
     pub fn request_snapshot(&mut self) {
-        self.snapshot_asked = true;
-        self.pending.get_or_insert(SnapshotCause::OperatorRequested);
+        self.kept.snapshot_asked = true;
+        self.engine
+            .course
+            .snapshot_for(SnapshotCause::OperatorRequested, true);
     }
 
     /// The deadline of a drain begun at `now` by a caller with none of its
     /// own: `now` plus the configured shutdown grace.
     #[must_use]
     pub fn shutdown_deadline(&self, now: Timestamp) -> Timestamp {
-        later(now, self.cfg.shutdown_grace)
+        later(now, self.kept.cfg.shutdown_grace)
     }
 
     /// Starts a drain that must finish by `deadline`. A drain already begun
     /// keeps the earlier of the two deadlines, so a second call can shorten
     /// it and never lengthen it.
     pub fn begin_shutdown(&mut self, deadline: Timestamp) {
-        self.phase = self.phase.drain(deadline);
+        self.kept.stop = self.kept.stop.drain(deadline);
     }
 
     /// Runs at most one unit of work.
@@ -606,7 +571,7 @@ impl Actor {
         L: ObjectStore,
         R: ObjectStore,
     {
-        if let Phase::Halted(cause) = self.phase {
+        if let Stop::Halted(cause) = self.kept.stop {
             return Tick::Halted(cause);
         }
         let now = match self.clock(now) {
@@ -619,41 +584,41 @@ impl Actor {
             }
         };
         self.expire(now);
-        if self.pages.mismatch().is_none() {
-            self.lanes.page_matches_again();
+        if self.engine.pages.mismatch().is_none() {
+            self.kept.lanes.page_matches_again();
         }
         self.release_pin();
         // A boot that keeps failing must not outlast a drain's deadline.
-        if let (false, Phase::Draining { deadline }) = (self.booted, self.phase)
+        if let (false, Stop::Draining { deadline }) = (self.booted(), self.kept.stop)
             && now >= deadline
         {
             return self.missed(&mut env, now).await;
         }
-        if !self.booted {
+        if !self.booted() {
             return self.boot(&mut env, now).await;
         }
-        match self.phase {
-            Phase::Boot | Phase::Running => self.run(&mut env, now).await,
-            Phase::Draining { deadline } => self.drain(&mut env, now, deadline).await,
-            Phase::Halted(cause) => Tick::Halted(cause),
+        match self.kept.stop {
+            Stop::No => self.run(&mut env, now).await,
+            Stop::Draining { deadline } => self.drain(&mut env, now, deadline).await,
+            Stop::Halted(cause) => Tick::Halted(cause),
         }
     }
 
     /// The time to use: never earlier than the last. The first earlier read
     /// of a run of them is reported and ends the tick.
     fn clock(&mut self, now: Timestamp) -> Result<Timestamp, Clamped> {
-        match self.last {
+        match self.kept.last {
             Some(prev) if now < prev => {
-                if self.clamp_reported {
+                if self.kept.clamp_reported {
                     Ok(prev)
                 } else {
-                    self.clamp_reported = true;
+                    self.kept.clamp_reported = true;
                     Err(Clamped { prev, now })
                 }
             }
             Some(_) | None => {
-                self.clamp_reported = false;
-                self.last = Some(now);
+                self.kept.clamp_reported = false;
+                self.kept.last = Some(now);
                 Ok(now)
             }
         }
@@ -676,8 +641,8 @@ impl Actor {
         match waiter {
             Waiter::Kept(until) => until,
             Waiter::Lane(lane) => {
-                let interval = self.cfg.retry_interval;
-                self.lanes.get_mut(lane).fail(|attempt| {
+                let interval = self.kept.cfg.retry_interval;
+                self.kept.lanes.get_mut(lane).fail(|attempt| {
                     let wait = backoff_wait(backoff, attempt, interval);
                     later(now, wait)
                 })
@@ -698,7 +663,7 @@ impl Actor {
     /// a degraded lane that waits the doubling backoff. The only place
     /// `Responses` is read.
     fn persistent(&mut self, waiter: Waiter, cause: PersistentCause, now: Timestamp) -> Tick {
-        let action = self.cfg.responses.action(cause);
+        let action = self.kept.cfg.responses.action(cause);
         if action == Action::Stop {
             return self.halt(HaltCause::from(cause));
         }
@@ -708,7 +673,7 @@ impl Actor {
             Action::Relist => {
                 // What the replica was known to hold is gone from it: the
                 // retry lists it and continues from what it holds now.
-                self.upload = UploadState::ListFirst { confirmed: None };
+                self.engine.upload = UploadState::ListFirst { confirmed: None };
                 waiter
             }
             Action::Rebuild => {
@@ -721,7 +686,7 @@ impl Actor {
             Waiter::Kept(_) => Lane::Maintenance,
         };
         let until = self.wait(waiter, Backoff::Doubling, now);
-        let since = self.lanes.get_mut(lane).degrade(cause, now);
+        let since = self.kept.lanes.get_mut(lane).degrade(cause, now);
         let event = Event::Degraded {
             lane,
             cause,
@@ -734,71 +699,40 @@ impl Actor {
     /// Pins the newest transaction the replica holds for retention, unless a
     /// degradation already pinned one.
     fn pin_retention(&mut self) {
-        if !self.pinned {
-            self.pinned = true;
-            self.lane_pin = self.upload.confirmed();
-            self.apply_pin();
+        if self.kept.lane_pin == LanePin::Free {
+            self.kept.lane_pin = LanePin::Held(self.engine.upload.confirmed());
         }
     }
 
     /// Lets the pin go once no lane is degraded; the next listing may then
     /// delete what it kept.
     fn release_pin(&mut self) {
-        if self.pinned && !self.lanes.any_degraded() {
-            self.pinned = false;
-            self.lane_pin = None;
-            self.apply_pin();
-            self.maintain.stale = true;
+        if self.kept.lane_pin != LanePin::Free && !self.kept.lanes.any_degraded() {
+            self.kept.lane_pin = LanePin::Free;
+            self.engine.maintain.stale = true;
         }
     }
 
-    /// Retention keeps the older of the two restore points asked for: a
-    /// degraded lane's and a scheduled verify's.
-    fn apply_pin(&mut self) {
-        let lane = self.lane_pin.filter(|_| self.pinned);
-        let pin = match (lane, self.verify_pin) {
-            (Some(lane), Some(verify)) => Some(lane.min(verify)),
-            (lane, verify) => lane.or(verify),
-        };
-        self.maintain.state.set_pin(pin);
-    }
-
-    /// Replaces every piece of engine state with a fresh actor's, so the next
-    /// tick boots from the replica and the WAL again. Kept: the phase, the
-    /// clock's last reading, the lanes (their waits and degraded states are
-    /// reports, not engine state) and the retention pin.
+    /// Replaces the engine with a fresh one, so the next tick boots from the
+    /// replica and the WAL again ([`Self::rebuilt`] says what is kept). The
+    /// connections are the same, so the host observer's last read stands.
     fn rebuild(&mut self) {
-        let mut fresh = Self::new(self.cfg.clone());
-        fresh.phase = match self.phase {
-            Phase::Running => Phase::Boot,
-            phase @ (Phase::Boot | Phase::Draining { .. } | Phase::Halted(_)) => phase,
+        *self = Self {
+            kept: self.kept.rebuilt(self.kept.host),
+            engine: Engine::fresh(),
         };
-        fresh.lanes = self.lanes;
-        fresh.last = self.last;
-        fresh.clamp_reported = self.clamp_reported;
-        fresh.pinned = self.pinned;
-        fresh.lane_pin = self.lane_pin;
-        fresh.verify_pin = self.verify_pin;
-        fresh.live = self.live.rebuilt();
-        fresh.snapshot_asked = self.snapshot_asked;
-        if self.snapshot_asked {
-            fresh.pending = Some(SnapshotCause::OperatorRequested);
-        }
-        fresh.maintain.state.set_pin(self.maintain.state.pin());
-        fresh.host = self.host;
-        *self = fresh;
     }
 
     /// Lets every passed deadline go, so the tick runs its lane and `next`
     /// never names a time already past (W1).
     fn expire(&mut self, now: Timestamp) {
-        self.lanes.expire(now);
-        self.gate = self.gate.expire(now);
-        self.maintain.expire(now);
+        self.kept.lanes.expire(now);
+        self.engine.gate = self.engine.gate.expire(now);
+        self.engine.maintain.expire(now);
     }
 
-    const fn halt(&mut self, cause: HaltCause) -> Tick {
-        self.phase = Phase::Halted(cause);
+    fn halt(&mut self, cause: HaltCause) -> Tick {
+        self.kept.stop = Stop::Halted(cause);
         Tick::Halted(cause)
     }
 
@@ -816,7 +750,7 @@ impl Actor {
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
     ) -> Tick {
-        if !self.lanes.ready(Lane::Sync, now) {
+        if !self.kept.lanes.ready(Lane::Sync, now) {
             return self.ran(Event::Idle, now);
         }
         // At boot a replica ahead of the local tip is `recover`'s to judge (a
@@ -839,37 +773,56 @@ impl Actor {
             Ok(found) => found,
             Err(fault) => return self.fault(Lane::Sync, fault, now),
         };
-        self.page_size = page_size;
-        let cause = match recovered {
-            Recovered::Continue(position) | Recovered::WalRestarted(position) => {
-                self.resume = Resume::From(position);
-                None
-            }
-            Recovered::Snapshot { cause, .. } => {
-                self.resume = Resume::Snapshot(tip.map(|tip| tip.txid()));
-                Some(cause)
-            }
+        let from = match recovered {
+            Recovered::Continue(position) | Recovered::WalRestarted(position) => Ok(position),
+            Recovered::Snapshot { cause, .. } => Err(cause),
             Recovered::Halt(cause) => return self.verdict(Lane::Sync, cause, now),
         };
         // A staged file that did not verify was deleted with all after it:
         // the next file is a snapshot even when the WAL could continue.
-        let cause = lost.map(|_| SnapshotCause::LocalTipUnreadable).or(cause);
-        if let Some(cause) = cause {
-            self.pending.get_or_insert(cause);
-        }
+        let cause = lost
+            .map(|_| SnapshotCause::LocalTipUnreadable)
+            .or(from.err());
+        // An operator's request made before the boot comes first.
+        let pending = self.kept.asked().or(cause);
+        let course = match (from, pending) {
+            (Ok(position), snapshot) => Course::At {
+                position,
+                tail: Tail::Synced,
+                snapshot,
+            },
+            (Err(found), pending) => Course::Snapshot {
+                staged: tip.map(|tip| tip.txid()),
+                cause: pending.unwrap_or(found),
+            },
+        };
         // Only a boot that continues seeds the table (ruling P5): a snapshot
         // records every page it reads.
-        if let (None, Some(position)) = (self.pending, self.position()) {
-            match seeded(env.staging, position.commit()).await {
-                Ok(pages) => self.pages = pages,
+        let pages = match course {
+            Course::At {
+                position,
+                snapshot: None,
+                ..
+            } => match seeded(env.staging, position.commit()).await {
+                Ok(pages) => pages,
                 Err(fault) => return self.fault(Lane::Sync, fault, now),
+            },
+            Course::At {
+                snapshot: Some(_), ..
             }
-        }
-        self.upload = upload;
-        self.checkpoint = CheckpointState::boot(now);
-        self.lanes.get_mut(Lane::Sync).succeed();
-        self.booted = true;
-        self.phase = self.phase.booted();
+            | Course::Snapshot { .. }
+            | Course::Unbooted => PageTable::new(),
+        };
+        // Every step succeeded: the engine is assigned whole.
+        self.engine = Engine {
+            course,
+            page_size,
+            pages,
+            upload,
+            checkpoint: CheckpointState::boot(now),
+            ..Engine::fresh()
+        };
+        self.kept.lanes.get_mut(Lane::Sync).succeed();
         self.ran(Event::Booted { cause }, now)
     }
 
@@ -922,7 +875,7 @@ impl Actor {
 
     const fn drained(&self) -> Tick {
         Tick::Drained {
-            txid: self.upload.confirmed(),
+            txid: self.engine.upload.confirmed(),
         }
     }
 
@@ -966,7 +919,7 @@ impl Actor {
             Ok(committed) => self.unsynced_bytes(committed),
             Err(_) => env.wal.len().ok().flatten().map_or(0, WalFileLen::bytes),
         };
-        let confirmed = self.upload.confirmed();
+        let confirmed = self.engine.upload.confirmed();
         let count = match env.staging.list(Level::ZERO, None, PageLimit::MAX).await {
             Ok(listing) => listing
                 .files
@@ -990,39 +943,43 @@ impl Actor {
         let synced = wal
             .committed()
             .is_ok_and(|committed| !self.wal_moved(committed));
-        synced && self.pending.is_none() && !self.more_wal && self.uploads_idle()
+        synced && self.pending().is_none() && !self.more_wal() && self.uploads_idle()
     }
 
     fn wal_moved(&self, committed: CommittedRead) -> bool {
         let end = committed.end();
         self.position().is_none_or(|position| {
-            self.reset != Some(end)
+            self.reset() != Some(end)
                 && (end.salts() != position.cursor().salts()
                     || end.offset() != position.synced().offset())
         })
     }
 
     fn uploads_idle(&self) -> bool {
-        plan_upload(&self.upload, self.staged()) == UploadPlan::Idle
+        plan_upload(&self.engine.upload, self.staged()) == UploadPlan::Idle
     }
 
     /// The newest transaction anything has: a snapshot follows it.
     fn snapshot_after(&self) -> Option<Txid> {
-        self.staged().max(self.upload.confirmed())
+        self.staged().max(self.engine.upload.confirmed())
     }
 
     /// The checkpoint the policy wants now, when its lane and the sync lane
     /// that must prove it first may both run.
     fn checkpoint_decision(&self, now: Timestamp) -> Option<(Decision, CheckpointMode)> {
-        let position = self.position().filter(|_| self.reset.is_none())?;
-        let free = self.gate.open(now)
-            && self.lanes.ready(Lane::Checkpoint, now)
-            && self.lanes.ready(Lane::Sync, now);
+        let position = self.position().filter(|_| self.reset().is_none())?;
+        let free = self.engine.gate.open(now)
+            && self.kept.lanes.ready(Lane::Checkpoint, now)
+            && self.kept.lanes.ready(Lane::Sync, now);
         if !free {
             return None;
         }
-        let observed = Observed::of(now, &position, !self.more_wal);
-        let decision = decide(&self.checkpoint, &observed, &self.cfg.checkpoint);
+        let observed = Observed::of(now, &position, !self.more_wal());
+        let decision = decide(
+            &self.engine.checkpoint,
+            &observed,
+            &self.kept.cfg.checkpoint,
+        );
         mode_of(decision).map(|mode| (decision, mode))
     }
 
@@ -1039,17 +996,17 @@ impl Actor {
         now: Timestamp,
         may_checkpoint: bool,
     ) -> Option<Tick> {
-        if !self.lanes.ready(Lane::Sync, now) {
+        if !self.kept.lanes.ready(Lane::Sync, now) {
             return None;
         }
         let committed = match env.wal.committed() {
             Ok(committed) => committed,
             Err(err) => return Some(self.fault(Lane::Sync, Fault::from_source(err), now)),
         };
-        self.host.poll(committed);
-        let wants_live = may_checkpoint && self.live.wanted() && self.caught_up();
+        self.kept.host.poll(committed);
+        let wants_live = may_checkpoint && self.kept.live.wanted() && self.caught_up();
         let wants_proof = may_checkpoint && (self.checkpoint_decision(now).is_some() || wants_live);
-        let quiet = !self.wal_moved(committed) && self.pending.is_none() && !self.more_wal;
+        let quiet = !self.wal_moved(committed) && self.pending().is_none() && !self.more_wal();
         if quiet && !wants_proof {
             return None;
         }
@@ -1073,7 +1030,7 @@ impl Actor {
 
     /// Whether everything staged is on the replica.
     fn caught_up(&self) -> bool {
-        self.staged().is_some() && self.staged() == self.upload.confirmed()
+        self.staged().is_some() && self.staged() == self.engine.upload.confirmed()
     }
 
     /// Reads the live pages when `proof` is at the transaction the replica
@@ -1083,11 +1040,11 @@ impl Actor {
         env: &mut Env<'_, W, P, C, L, R>,
         proof: &SyncedThrough,
     ) -> Result<(), Fault> {
-        if Some(proof.position().txid()) != self.upload.confirmed() {
+        if Some(proof.position().txid()) != self.engine.upload.confirmed() {
             return Ok(());
         }
-        let live = read_live(proof, env.wal, env.db, &mut self.pages)?;
-        self.live = Live::Read(live);
+        let live = read_live(proof, env.wal, env.db, &mut self.engine.pages)?;
+        self.kept.live = Live::Read(live);
         Ok(())
     }
 
@@ -1104,11 +1061,11 @@ impl Actor {
     ) -> Result<(u32, Option<SyncedThrough>), Tick> {
         match stepped {
             Ok(Stepped::Synced { files, proof }) => {
-                self.lanes.get_mut(Lane::Sync).succeed();
+                self.kept.lanes.get_mut(Lane::Sync).succeed();
                 Ok((files, proof))
             }
             Ok(Stepped::Resnapshot(cause)) => {
-                self.pending = Some(cause);
+                self.engine.course.snapshot_for(cause, false);
                 Err(self.ran(Event::Resnapshot(cause), now))
             }
             Ok(Stepped::Halt(cause)) => Err(self.verdict(Lane::Sync, cause, now)),
@@ -1127,10 +1084,10 @@ impl Actor {
             Err(verdict) => return Ok(verdict),
         };
         let size = reader.header().page_size();
-        if let Some(was) = self.page_size.filter(|was| *was != size) {
+        if let Some(was) = self.engine.page_size.filter(|was| *was != size) {
             return Err(Fault::PageSizeChanged { was, now: size });
         }
-        self.page_size = Some(size);
+        self.engine.page_size = Some(size);
         let step = match self.plan_step(env.wal, &mut reader, committed)? {
             Ok(step) => step,
             Err(verdict) => return Ok(verdict),
@@ -1141,9 +1098,9 @@ impl Actor {
             committed,
             epoch,
             &mut *env.db,
-            &mut self.pages,
+            &mut self.engine.pages,
             env.staging,
-            &self.cfg.sync,
+            &self.kept.cfg.sync,
             now,
         )
         .await
@@ -1157,7 +1114,7 @@ impl Actor {
         reader: &mut WalReader<W::Wal>,
         committed: CommittedRead,
     ) -> Result<Result<Step, Stepped>, Fault> {
-        match (self.pending, self.position()) {
+        match (self.pending(), self.position()) {
             (Some(cause), position) => Ok(Ok(Step::Snapshot {
                 after: self.snapshot_after(),
                 prev_timestamp: position.map(|position| position.timestamp()),
@@ -1167,9 +1124,15 @@ impl Actor {
                 let probes = Probes::read_against(reader, &position, &committed)?;
                 let view = wal_view(wal, Some(&*reader), committed)?;
                 let tip = Tip::Running(&position, probes);
-                Ok(step_of(recover(Some(tip), &view, self.upload.confirmed())))
+                Ok(step_of(recover(
+                    Some(tip),
+                    &view,
+                    self.engine.upload.confirmed(),
+                )))
             }
-            (None, None) => Err(Fault::Bug),
+            // Unreachable by construction: no position means a `Course`
+            // that names a snapshot's cause. Retried as the WAL having moved.
+            (None, None) => Err(Fault::WalMoved),
         }
     }
 
@@ -1197,7 +1160,7 @@ impl Actor {
         if let Some(reader) = open_reader(env.wal)? {
             return Ok(Ok((reader, committed, epoch)));
         }
-        if self.pending.is_none() {
+        if self.pending().is_none() {
             return self.without_wal(env.wal, committed).map(Err);
         }
         env.ck.bump_seq().map_err(Fault::from_source)?;
@@ -1213,7 +1176,7 @@ impl Actor {
         wal: &mut W,
         committed: CommittedRead,
     ) -> Result<Stepped, Fault> {
-        let (None, Some(position)) = (self.pending, self.position()) else {
+        let (None, Some(position)) = (self.pending(), self.position()) else {
             return Err(Fault::WalMoved);
         };
         let view = wal_view::<W, W::Wal>(wal, None, committed)?;
@@ -1224,7 +1187,7 @@ impl Actor {
         };
         let tip = Tip::Running(&position, probes);
         Ok(
-            match step_of(recover(Some(tip), &view, self.upload.confirmed())) {
+            match step_of(recover(Some(tip), &view, self.engine.upload.confirmed())) {
                 Ok(_) => Stepped::Resnapshot(SnapshotCause::WalMissing),
                 Err(verdict) => verdict,
             },
@@ -1243,12 +1206,10 @@ impl Actor {
         epoch_moved: bool,
         now: Timestamp,
     ) -> Stepped {
-        self.reset = None;
         let (files, txs, end) = match synced {
             Synced::Idle(through) => (0, 0, StepEnd::Through(through)),
             Synced::IndexReset => {
-                self.reset = Some(committed);
-                self.more_wal = false;
+                self.engine.course.set_tail(Tail::Reset(committed));
                 return Stepped::Synced {
                     files: 0,
                     proof: None,
@@ -1256,33 +1217,36 @@ impl Actor {
             }
             Synced::Wrote { end, txs, .. } => {
                 // With a cause pending, the step that wrote was the snapshot.
-                if self.pending.take().is_some() {
-                    self.snapshot_asked = false;
+                if self.pending().is_some() {
+                    self.kept.snapshot_asked = false;
                 }
-                if self.gate == Gate::NextWrite {
-                    self.gate = Gate::Open;
+                if self.engine.gate == Gate::NextWrite {
+                    self.engine.gate = Gate::Open;
                 }
                 (1, txs, end)
             }
         };
-        self.more_wal = matches!(end, StepEnd::Limited(_));
-        let (position, proof) = match end {
-            StepEnd::Through(through) if !epoch_moved => (*through.position(), Some(through)),
-            StepEnd::Through(through) => (through.into_position(), None),
-            StepEnd::Limited(position) => (position, None),
-            StepEnd::Unproven(position) => {
-                self.reset = Some(committed);
-                (position, None)
+        let (position, proof, tail) = match end {
+            StepEnd::Through(through) if !epoch_moved => {
+                (*through.position(), Some(through), Tail::Synced)
             }
+            StepEnd::Through(through) => (through.into_position(), None, Tail::Synced),
+            StepEnd::Limited(position) => (position, None, Tail::More),
+            StepEnd::Unproven(position) => (position, None, Tail::Reset(committed)),
         };
         let position = if epoch_moved {
             position.with_continuity(Continuity::Unpinned)
         } else {
             position
         };
-        self.resume = Resume::From(position);
-        let observed = Observed::of(now, &position, !self.more_wal);
-        self.checkpoint = after_sync(self.checkpoint, txs, &observed, &self.cfg.checkpoint);
+        self.engine.course.moved(position, tail, files == 1);
+        let observed = Observed::of(now, &position, !self.more_wal());
+        self.engine.checkpoint = after_sync(
+            self.engine.checkpoint,
+            txs,
+            &observed,
+            &self.kept.cfg.checkpoint,
+        );
         Stepped::Synced { files, proof }
     }
 
@@ -1306,10 +1270,10 @@ impl Actor {
             mode,
             &mut *env.wal,
             &mut *env.db,
-            &mut self.pages,
+            &mut self.engine.pages,
             &mut *env.ck,
             env.staging,
-            &self.cfg.sync,
+            &self.kept.cfg.sync,
             now,
         )
         .await;
@@ -1317,7 +1281,7 @@ impl Actor {
             Ok(done) => done.run,
             Err(failed) => failed.run,
         };
-        self.host.ours(env.wal.committed().ok(), run);
+        self.kept.host.ours(env.wal.committed().ok(), run);
         let done = match done {
             Ok(done) => done,
             Err(CheckpointFailed { fault, staged, .. }) => {
@@ -1328,15 +1292,15 @@ impl Actor {
         let position = self.took(done.staged);
         let observed = Observed::of(now, &position, true);
         let (state, next) = after_checkpoint(
-            self.checkpoint,
+            self.engine.checkpoint,
             decision,
             &done.outcome,
             &observed,
-            &self.cfg.checkpoint,
+            &self.kept.cfg.checkpoint,
         );
-        self.checkpoint = state;
-        self.gate = Gate::of(next);
-        self.lanes.get_mut(Lane::Checkpoint).succeed();
+        self.engine.checkpoint = state;
+        self.engine.gate = Gate::of(next);
+        self.kept.lanes.get_mut(Lane::Checkpoint).succeed();
         let busy = done.outcome == CheckpointOutcome::Busy;
         self.ran(Event::Checkpointed { mode, busy }, now)
     }
@@ -1346,7 +1310,8 @@ impl Actor {
     /// newest of them, so a fault after the seal cannot leave one behind.
     fn took(&mut self, staged: Staged) -> Position {
         let position = staged.position();
-        self.resume = Resume::From(position);
+        let tail = self.engine.course.tail();
+        self.engine.course.moved(position, tail, false);
         position
     }
 
@@ -1362,24 +1327,25 @@ impl Actor {
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
     ) -> Option<Tick> {
-        if !self.lanes.ready(Lane::Upload, now) || self.uploads_idle() {
+        if !self.kept.lanes.ready(Lane::Upload, now) || self.uploads_idle() {
             return None;
         }
         let limit = self
+            .kept
             .cfg
             .upload
             .files_per_tick
             .map_or(u32::MAX, NonZeroU32::get);
         let mut last = Did::Nothing;
         for _ in 0..limit {
-            let plan = plan_upload(&self.upload, self.staged());
-            match upload_next(self.upload, env.staging, env.remote, self.staged()).await {
+            let plan = plan_upload(&self.engine.upload, self.staged());
+            match upload_next(self.engine.upload, env.staging, env.remote, self.staged()).await {
                 Ok(uploaded) => {
-                    self.upload = uploaded.state;
+                    self.engine.upload = uploaded.state;
                     last = uploaded.did;
                 }
                 Err(failed) => {
-                    self.upload = failed.state;
+                    self.engine.upload = failed.state;
                     if let (Fault::StagedLost, UploadPlan::Upload(key)) = (failed.fault, plan) {
                         return Some(self.lose_staged(env, key.range().min(), now).await);
                     }
@@ -1388,17 +1354,17 @@ impl Actor {
             }
             match last {
                 Did::Nothing => break,
-                Did::Listed { .. } => self.maintain.stale = true,
+                Did::Listed { .. } => self.engine.maintain.stale = true,
                 Did::Put(_) => {
-                    let at = listing_after_upload(now, &self.cfg.maintenance);
-                    self.maintain.list_by(at);
+                    let at = listing_after_upload(now, &self.kept.cfg.maintenance);
+                    self.engine.maintain.list_by(at);
                 }
             }
             if self.uploads_idle() {
                 break;
             }
         }
-        self.lanes.get_mut(Lane::Upload).succeed();
+        self.kept.lanes.get_mut(Lane::Upload).succeed();
         Some(self.ran(Event::Uploaded(last), now))
     }
 
@@ -1422,10 +1388,12 @@ impl Actor {
             return self.fault(Lane::Upload, fault, now);
         }
         // The position is past `from`; a snapshot after it would leave a hole.
-        self.resume = Resume::Snapshot(from.prev());
         let cause = SnapshotCause::LocalTipUnreadable;
-        self.pending = Some(cause);
-        self.lanes.get_mut(Lane::Upload).succeed();
+        self.engine.course = Course::Snapshot {
+            staged: from.prev(),
+            cause,
+        };
+        self.kept.lanes.get_mut(Lane::Upload).succeed();
         self.ran(Event::Resnapshot(cause), now)
     }
 
@@ -1445,7 +1413,7 @@ impl Actor {
     ) -> Option<Tick> {
         let bound = self
             .prune_bound()
-            .filter(|_| self.running() && self.lanes.ready(Lane::Prune, now))?;
+            .filter(|_| self.running() && self.kept.lanes.ready(Lane::Prune, now))?;
         let listing = match env.staging.list(Level::ZERO, None, PageLimit::MAX).await {
             Ok(listing) => listing,
             Err(err) => return Some(self.fault(Lane::Prune, Fault::from_staging(&err), now)),
@@ -1469,8 +1437,8 @@ impl Actor {
         {
             return Some(self.fault(Lane::Prune, Fault::from_staging(&err), now));
         }
-        self.lanes.get_mut(Lane::Prune).succeed();
-        self.pruned = Some(through);
+        self.kept.lanes.get_mut(Lane::Prune).succeed();
+        self.engine.pruned = Some(through);
         if keys.is_empty() {
             return None;
         }
@@ -1489,11 +1457,12 @@ impl Actor {
     fn prune_bound(&self) -> Option<Txid> {
         let below_tip = self.staged()?.prev()?;
         let bound = self
+            .engine
             .upload
             .confirmed()?
-            .min(self.maintain.level_one?)
+            .min(self.engine.maintain.level_one?)
             .min(below_tip);
-        Some(bound).filter(|bound| self.pruned < Some(*bound))
+        Some(bound).filter(|bound| self.engine.pruned < Some(*bound))
     }
 
     /// Lists the replica and runs what maintenance says is due (S4: only once
@@ -1510,9 +1479,9 @@ impl Actor {
         now: Timestamp,
     ) -> Option<Tick> {
         let ready = self.running()
-            && self.lanes.ready(Lane::Maintenance, now)
+            && self.kept.lanes.ready(Lane::Maintenance, now)
             && self.uploads_idle()
-            && self.maintain.wants_listing(now);
+            && self.engine.maintain.wants_listing(now);
         if !ready {
             return None;
         }
@@ -1520,14 +1489,20 @@ impl Actor {
             Ok(inventory) => inventory,
             Err(err) => return Some(self.fault(Lane::Maintenance, inventory_fault(&err), now)),
         };
-        if self.maintain.read_back_owed
+        if self.engine.maintain.read_back_owed
             && let Some(tick) = self.read_back_unit(env.remote, &inventory, now).await
         {
             return Some(tick);
         }
-        let published = self.upload.confirmed();
+        let published = self.engine.upload.confirmed();
+        // The planner reads the pin from its state: handed over here, where
+        // it is read, and stored nowhere else.
+        self.engine
+            .maintain
+            .state
+            .set_pin(self.kept.retention_pin());
         let decided = {
-            let (cfg, state) = (&self.cfg.maintenance, &mut self.maintain.state);
+            let (cfg, state) = (&self.kept.cfg.maintenance, &mut self.engine.maintain.state);
             let mut step = |stamps: &Stamps| due(&inventory, now, cfg, published, state, stamps);
             resolve(env.remote, &mut step).await
         };
@@ -1536,15 +1511,15 @@ impl Actor {
             Ok(decided) => decided,
             Err(err) => return Some(self.fault(Lane::Maintenance, stamp_fault(&err), now)),
         };
-        self.maintain.stale = false;
-        self.maintain.level_one = Level::new(1)
+        self.engine.maintain.stale = false;
+        self.engine.maintain.level_one = Level::new(1)
             .and_then(|level| inventory.level(level).last())
             .map(|info| info.key.range().max());
         let stamps_read = decided.stamps_read;
         match decided.value {
             Due::Wait { until, held } => {
                 self.maintained(now);
-                self.maintain.until = until;
+                self.engine.maintain.until = until;
                 let event = Event::Maintained {
                     event: MaintainedEvent::Waiting { held },
                     stamps_read,
@@ -1553,7 +1528,7 @@ impl Actor {
             }
             Due::Run(job) => {
                 // Whatever the job does, the next listing is what to plan from.
-                self.maintain.stale = true;
+                self.engine.maintain.stale = true;
                 Some(self.run_job(env, &job, now, stamps_read).await)
             }
         }
@@ -1569,7 +1544,7 @@ impl Actor {
     ) -> Option<Tick> {
         let key = match read_back(remote, inventory).await {
             Ok(ReadBack::Sound) => {
-                self.maintain.read_back_owed = false;
+                self.engine.maintain.read_back_owed = false;
                 return None;
             }
             Ok(ReadBack::Rotten { key, covered: true }) => key,
@@ -1582,7 +1557,7 @@ impl Actor {
             return Some(self.fault(Lane::Maintenance, Fault::from_remote(&err), now));
         }
         // The listing no longer holds: the next tick lists and reads back again.
-        self.maintain.stale = true;
+        self.engine.maintain.stale = true;
         self.maintained(now);
         let event = Event::Maintained {
             event: MaintainedEvent::Repaired(key),
@@ -1609,7 +1584,7 @@ impl Actor {
             Job::Delete(delete) => run_delete(delete, env.remote).await,
             Job::Snapshot(_) => return self.snapshot_job(env, job, now, stamps_read).await,
         };
-        self.maintain.state.record(now, job, &outcome);
+        self.engine.maintain.state.record(now, job, &outcome);
         let event = match outcome {
             Outcome::Compacted { info, .. } => MaintainedEvent::Compacted(info),
             Outcome::Deleted { count } => MaintainedEvent::Deleted(count),
@@ -1628,8 +1603,8 @@ impl Actor {
     /// succeeded, whatever else did, and the listing that finds it waiting
     /// (or another level's job) is not its success.
     fn maintained(&mut self, now: Timestamp) {
-        let lane = self.lanes.get_mut(Lane::Maintenance);
-        if self.maintain.state.backing_off(now) {
+        let lane = self.kept.lanes.get_mut(Lane::Maintenance);
+        if self.engine.maintain.state.backing_off(now) {
             lane.clear_wait();
         } else {
             lane.succeed();
@@ -1642,9 +1617,9 @@ impl Actor {
     /// at once. A level's wait is not the lane's failure, so the lane's wait
     /// resets; a degraded state stays.
     fn job_waiter(&mut self, job: &Job, now: Timestamp) -> Waiter {
-        match self.maintain.state.retry_at(job, now) {
+        match self.engine.maintain.state.retry_at(job, now) {
             Some(until) => {
-                self.lanes.get_mut(Lane::Maintenance).clear_wait();
+                self.kept.lanes.get_mut(Lane::Maintenance).clear_wait();
                 Waiter::Kept(until)
             }
             None => Waiter::Lane(Lane::Maintenance),
@@ -1667,7 +1642,7 @@ impl Actor {
         stamps_read: u64,
     ) -> Tick {
         // The snapshot's step is the sync lane's work and waits on its wait.
-        if !self.lanes.ready(Lane::Sync, now) {
+        if !self.kept.lanes.ready(Lane::Sync, now) {
             self.wait_for_sync();
             let event = MaintainedEvent::Waiting { held: None };
             return self.ran(Event::Maintained { event, stamps_read }, now);
@@ -1678,9 +1653,9 @@ impl Actor {
             // A reset wal-index gives no proof until the next commit, and
             // nothing new is committed until then: the listing after that
             // commit's upload plans the snapshot again.
-            Ok((0, None)) if self.reset.is_some() => {
-                self.maintain.stale = false;
-                self.maintain.until = None;
+            Ok((0, None)) if self.reset().is_some() => {
+                self.engine.maintain.stale = false;
+                self.engine.maintain.until = None;
                 let event = MaintainedEvent::Waiting { held: None };
                 return self.ran(Event::Maintained { event, stamps_read }, now);
             }
@@ -1699,12 +1674,13 @@ impl Actor {
             &proof,
             &mut *env.wal,
             &mut *env.db,
-            &mut self.pages,
+            &mut self.engine.pages,
             env.remote,
             now,
         )
         .await;
-        self.maintain
+        self.engine
+            .maintain
             .state
             .record_snapshot(now, written.as_ref().err().map(|failed| &failed.fault));
         match written {
@@ -1718,7 +1694,7 @@ impl Actor {
                 // what was sent: it is listed, so it goes, as a rejected
                 // compaction output does (R2).
                 if leaves_bad_snapshot(fault) && env.remote.delete(&[key]).await.is_err() {
-                    self.maintain.state.distrust_snapshot(key);
+                    self.engine.maintain.state.distrust_snapshot(key);
                 }
                 let waiter = self.job_waiter(job, now);
                 self.fault(waiter, fault, now)
@@ -1730,36 +1706,34 @@ impl Actor {
     /// next upload when it holds none (a recovery verdict made the next sync a
     /// snapshot, whose upload makes a listing due).
     fn wait_for_sync(&mut self) {
-        self.maintain.stale = false;
-        self.maintain.until = self.lanes.get(Lane::Sync).until();
+        self.engine.maintain.stale = false;
+        self.engine.maintain.until = self.kept.lanes.get(Lane::Sync).until();
     }
 
-    const fn running(&self) -> bool {
-        match self.phase {
-            Phase::Running => true,
-            Phase::Boot | Phase::Draining { .. } | Phase::Halted(_) => false,
-        }
+    fn running(&self) -> bool {
+        self.kept.stop == Stop::No && self.booted()
     }
 
     /// Whether some lane could run now on work it already knows of. A WAL
     /// change it does not know of is the caller's to wake on.
     fn ready_work(&self, now: Timestamp) -> bool {
         // Before the boot only the boot runs, on the sync lane.
-        if !self.booted {
-            return self.lanes.ready(Lane::Sync, now);
+        if !self.booted() {
+            return self.kept.lanes.ready(Lane::Sync, now);
         }
         let running = self.running();
-        let sync = self.lanes.ready(Lane::Sync, now)
-            && (!self.booted
-                || self.pending.is_some()
-                || self.more_wal
+        let sync = self.kept.lanes.ready(Lane::Sync, now)
+            && (!self.booted()
+                || self.pending().is_some()
+                || self.more_wal()
                 || (running && self.checkpoint_decision(now).is_some()));
-        let upload = self.lanes.ready(Lane::Upload, now) && !self.uploads_idle();
-        let prune = running && self.lanes.ready(Lane::Prune, now) && self.prune_bound().is_some();
+        let upload = self.kept.lanes.ready(Lane::Upload, now) && !self.uploads_idle();
+        let prune =
+            running && self.kept.lanes.ready(Lane::Prune, now) && self.prune_bound().is_some();
         let maintain = running
-            && self.lanes.ready(Lane::Maintenance, now)
+            && self.kept.lanes.ready(Lane::Maintenance, now)
             && self.uploads_idle()
-            && self.maintain.wants_listing(now);
+            && self.engine.maintain.wants_listing(now);
         sync || upload || prune || maintain
     }
 
@@ -1768,17 +1742,17 @@ impl Actor {
     /// and the drain's end. Lanes a draining actor does not run hold none.
     fn deadlines(&self) -> impl Iterator<Item = Timestamp> {
         let running = self.running();
-        let lane = |lane: Lane| self.lanes.get(lane).until();
-        let deadline = match self.phase {
-            Phase::Draining { deadline } => Some(deadline),
-            Phase::Boot | Phase::Running | Phase::Halted(_) => None,
+        let lane = |lane: Lane| self.kept.lanes.get(lane).until();
+        let deadline = match self.kept.stop {
+            Stop::Draining { deadline } => Some(deadline),
+            Stop::No | Stop::Halted(_) => None,
         };
         let only_running = [
             lane(Lane::Checkpoint),
             lane(Lane::Prune),
             lane(Lane::Maintenance),
-            self.gate.until(),
-            self.maintain.until,
+            self.engine.gate.until(),
+            self.engine.maintain.until,
         ];
         [lane(Lane::Sync), lane(Lane::Upload), deadline]
             .into_iter()
@@ -1793,7 +1767,7 @@ impl Actor {
         if self.ready_work(now) {
             return Next::Now;
         }
-        let schedule = next_wake(&self.checkpoint, &self.cfg.checkpoint)
+        let schedule = next_wake(&self.engine.checkpoint, &self.kept.cfg.checkpoint)
             .filter(|at| self.running() && *at > now);
         match self.deadlines().chain(schedule).min() {
             Some(at) if at <= now => Next::Now,
