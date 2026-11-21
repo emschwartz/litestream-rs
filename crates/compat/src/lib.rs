@@ -24,7 +24,9 @@
 //! `lsr-core`'s executor over `FsStore` and `FileSink`, so tests compare Rust's pages with
 //! the pages Go wrote into the manifest. The live half (`just compat`) re-encodes every
 //! fixture file with `lsr_ltx::Encoder` and has the pinned Go versions restore and
-//! `ltx.Decoder.Verify` it (`go/verify`).
+//! `ltx.Decoder.Verify` it (`go/verify`). [`read_with_vfs`] opens a replica through upstream's
+//! read-replica VFS extension, from a small C host (`c/vfs-read.c`), for the direction where
+//! the Go VFS reads what Rust wrote.
 
 mod binaries;
 mod chain;
@@ -37,6 +39,7 @@ mod replica;
 mod replicator;
 mod rsrestore;
 mod scenario;
+mod vfs;
 mod workload;
 
 pub use binaries::{
@@ -61,4 +64,5 @@ pub use replica::{Listing, ReplicaFile, list, newest_l0, parse_rel, rel_of};
 pub use replicator::{Replicator, wait_until};
 pub use rsrestore::{Staged, chain_files, copy_tree, restore_replica, stage};
 pub use scenario::{Scenario, Step};
+pub use vfs::{VfsRead, VfsView, build_vfs_reader, read_plain, read_with_vfs};
 pub use workload::Workload;

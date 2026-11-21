@@ -73,6 +73,9 @@ pub enum Era {
 /// The last release tag on the frame encoding.
 const LAST_FRAMES_PATCH: u32 = 15;
 
+/// The first release tag whose VFS takes `LITESTREAM_REPLICA_URL`, so reads a file replica.
+const FIRST_FILE_VFS_PATCH: u32 = 3;
+
 /// A Go build the live tests run: its binary name (a tag, a short commit or `main`) and
 /// the era derived from it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -110,6 +113,19 @@ impl GoBuild {
     pub fn binary(&self) -> Result<PathBuf, CompatError> {
         binary_named(&self.name)
     }
+
+    /// Whether this build's read-replica VFS can open a file replica. Every 0.5 release
+    /// ships the VFS; before v0.5.3 it builds an S3 client from `LITESTREAM_S3_*` variables
+    /// and nothing else (`cmd/litestream-vfs/litestream-vfs.go` at v0.5.0), so the build
+    /// script does not build it.
+    pub fn vfs_reads_files(&self) -> bool {
+        release_patch(&self.name).is_none_or(|n| n >= FIRST_FILE_VFS_PATCH)
+    }
+
+    /// Where the built VFS extension lives; an error naming the build script when absent.
+    pub fn vfs_library(&self) -> Result<PathBuf, CompatError> {
+        file_in_bin(&format!("litestream-vfs-{}.so", self.name))
+    }
 }
 
 impl From<GoVersion> for GoBuild {
@@ -118,12 +134,15 @@ impl From<GoVersion> for GoBuild {
     }
 }
 
-fn era_of(name: &str) -> Era {
-    let patch = name
-        .strip_prefix("v0.5.")
+/// N of a release tag `v0.5.N`; `None` for anything else (a commit, `main`, a pre-release).
+fn release_patch(name: &str) -> Option<u32> {
+    name.strip_prefix("v0.5.")
         .filter(|n| !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()))
-        .and_then(|n| n.parse::<u32>().ok());
-    match patch {
+        .and_then(|n| n.parse::<u32>().ok())
+}
+
+fn era_of(name: &str) -> Era {
+    match release_patch(name) {
         Some(n) if n <= LAST_FRAMES_PATCH => Era::Frames,
         Some(_) | None => Era::Blocks,
     }
@@ -221,8 +240,11 @@ pub fn go_binary(version: GoVersion) -> Result<PathBuf, CompatError> {
 }
 
 fn binary_named(name: &str) -> Result<PathBuf, CompatError> {
-    let file = format!("litestream-{name}");
-    let path = upstream_bin_dir().map_or_else(|| PathBuf::from(&file), |d| d.join(&file));
+    file_in_bin(&format!("litestream-{name}"))
+}
+
+fn file_in_bin(file: &str) -> Result<PathBuf, CompatError> {
+    let path = upstream_bin_dir().map_or_else(|| PathBuf::from(file), |d| d.join(file));
     if path.is_file() {
         Ok(path)
     } else {
@@ -255,6 +277,21 @@ mod tests {
             ("v0.5.3-beta3", Era::Blocks),
         ] {
             assert_eq!(GoBuild::new(name).era(), era, "{name}");
+        }
+    }
+
+    #[test]
+    fn the_vfs_reads_files_from_v0_5_3() {
+        for (name, files) in [
+            ("v0.5.0", false),
+            ("v0.5.2", false),
+            ("v0.5.3", true),
+            ("v0.5.15", true),
+            ("v0.5.18", true),
+            ("041a8c3", true),
+            ("main", true),
+        ] {
+            assert_eq!(GoBuild::new(name).vfs_reads_files(), files, "{name}");
         }
     }
 
