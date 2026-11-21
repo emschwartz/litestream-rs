@@ -59,6 +59,10 @@ doctest:
 sim-replay seed steps="300":
     LSR_SIM_SEED={{seed}} LSR_SIM_STEPS={{steps}} cargo nextest run -p lsr-sim --test sim -E 'test(/^replay::/)' --no-capture --locked
 
+# Sums what random simulator histories reach over `seeds` seeds from `base`: one count per state.
+sim-tally seeds="200" base="1":
+    LSR_SIM_TALLY_SEEDS={{seeds}} LSR_SIM_BASE_SEED={{base}} cargo nextest run -p lsr-sim --test sim -E 'test(/^tally::/)' --run-ignored only --no-capture --locked
+
 # Runs rotating simulator seeds for the given seconds from a base seed (default: now).
 sim-soak seconds base=`date +%s`:
     LSR_SIM_BASE_SEED={{base}} LSR_SIM_SECONDS={{seconds}} cargo nextest run -p lsr-sim --test sim -E 'test(/^soak::/)' --run-ignored only --no-capture --locked

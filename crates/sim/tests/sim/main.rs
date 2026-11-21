@@ -17,3 +17,5 @@ mod snapshot_causes;
 mod soak;
 #[cfg(test)]
 mod sqlite_rules;
+#[cfg(test)]
+mod tally;

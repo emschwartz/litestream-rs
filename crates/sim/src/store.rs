@@ -116,6 +116,9 @@ struct Entry {
     nth: u32,
     shape: FaultShape,
     fired: bool,
+    /// Calls it failed or changed: once for a one-shot fault, any number for
+    /// a rate.
+    hits: u32,
 }
 
 #[derive(Debug)]
@@ -179,6 +182,7 @@ impl FaultState {
             };
             if let Some(verdict) = hit {
                 entry.fired = !matches!(entry.shape, FaultShape::Rate { .. });
+                entry.hits = entry.hits.saturating_add(1);
                 return verdict;
             }
         }
@@ -201,6 +205,7 @@ impl FaultHandle {
             nth,
             shape,
             fired: false,
+            hits: 0,
         });
     }
 
@@ -221,6 +226,7 @@ impl FaultHandle {
             nth: base.saturating_add(ahead),
             shape,
             fired: false,
+            hits: 0,
         });
     }
 
@@ -235,6 +241,18 @@ impl FaultHandle {
     #[must_use]
     pub fn damaged(&self) -> Vec<FileKey> {
         lock(&self.state).damaged.clone()
+    }
+
+    /// Every scheduled fault that failed or changed at least one call, with
+    /// how many it did.
+    #[must_use]
+    pub fn hits(&self) -> Vec<(StoreOp, FaultShape, u32)> {
+        lock(&self.state)
+            .schedule
+            .iter()
+            .filter(|e| e.hits > 0)
+            .map(|e| (e.op, e.shape.clone(), e.hits))
+            .collect()
     }
 
     /// One-shot faults that have not fired yet.
@@ -268,6 +286,7 @@ impl<S> Faults<S> {
                 nth,
                 shape,
                 fired: false,
+                hits: 0,
             })
             .collect();
         let state = FaultState {

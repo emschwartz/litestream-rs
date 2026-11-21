@@ -22,9 +22,11 @@ use lsr_wal::{Salts, WalOffset};
 
 use crate::generate::{EnvFault, MetaOp, Op, RemoteOp, Target, WalOp, Weights, history};
 use crate::oracle::{Bound, Violation, bug_fault, within};
+use crate::reach::{Reach, variant};
 use crate::resources::{
     CheckpointTally, CountingCheckpointer, IdleWindow, Limits, TickStats, delta, memory, per_tick,
 };
+use crate::scenario::{CauseKind, FaultKind};
 use crate::seed::{Seed, replay_line};
 use crate::sqlite::{AutoTally, CrashKind, ReaderId};
 use crate::world::{CrashPlan, StagedCopy, StagedEditError, TickEnd, World};
@@ -155,6 +157,8 @@ pub struct RunReport {
     pub app_checkpoints: AppCheckpoints,
     /// The app's automatic checkpoints, as the model counted them.
     pub app_autocheckpoints: AutoTally,
+    /// What the run reached, by name; see [`crate::reach`].
+    pub reach: Reach,
 }
 
 /// What a run may be told besides its seed.
@@ -413,6 +417,7 @@ impl Runner {
 
     fn crashed(&mut self, kind: CrashKind) {
         self.reboot();
+        self.report.reach.bump(format!("crash.{}", variant(&kind)));
         self.report.crashes = self.report.crashes.saturating_add(1);
         if kind == CrashKind::Power {
             self.report.power_losses = self.report.power_losses.saturating_add(1);
@@ -460,6 +465,7 @@ impl Runner {
                 (step, Some(event))
             }
             TickEnd::Done(Tick::Stopped(cause)) => {
+                self.report.reach.bump(format!("stop.{}", variant(&cause)));
                 if self.record {
                     self.report.seen.push(Seen::Stop(cause));
                 }
@@ -473,7 +479,10 @@ impl Runner {
                 }
                 (Step::Stopped(cause), None)
             }
-            TickEnd::Crashed { polls, kind, .. } => {
+            TickEnd::Crashed {
+                polls, kind, lost, ..
+            } => {
+                self.note_lost(&lost);
                 self.last_polls = polls.max(1);
                 self.crashed(kind);
                 (Step::Crashed, None)
@@ -500,6 +509,7 @@ impl Runner {
         if self.record {
             self.report.seen.push(Seen::Event(event.clone()));
         }
+        self.note_event(event);
         let began = self.latest.map_or(began, |latest| latest.max(began));
         self.latest = Some(began);
         capped(event, began)?;
@@ -533,6 +543,35 @@ impl Runner {
             | Event::Retrying { .. }
             | Event::Resnapshot(_)
             | Event::Clamped(_) => Ok(Step::Ran),
+        }
+    }
+
+    /// Counts what an event shows: its kind, and the fault, cause or
+    /// snapshot it names.
+    fn note_event(&mut self, event: &Event) {
+        let reach = &mut self.report.reach;
+        reach.bump(format!("event.{}", variant(event)));
+        match event {
+            Event::Retrying { fault, .. } => {
+                reach.bump(format!("retrying.{}", variant(&FaultKind::from(fault))));
+            }
+            Event::Degraded { cause, .. } => reach.bump(format!("degraded.{}", variant(cause))),
+            Event::Booted { cause: Some(cause) } | Event::Resnapshot(cause) => {
+                reach.bump(format!("snapshot.{}", variant(&CauseKind::from(cause))));
+            }
+            Event::Booted { cause: None }
+            | Event::Synced { .. }
+            | Event::Checkpointed { .. }
+            | Event::Uploaded(_)
+            | Event::Maintained { .. }
+            | Event::Idle
+            | Event::Clamped(_) => {}
+        }
+    }
+
+    fn note_lost(&mut self, lost: &[(lsr_core::FileKey, crate::store::Lost)]) {
+        for (_, how) in lost {
+            self.report.reach.bump(format!("staged.{}", variant(how)));
         }
     }
 
@@ -574,6 +613,7 @@ impl Runner {
         }
         // The tick ended first: the machine fails right after it instead.
         let lost = self.w.crash(kind);
+        self.note_lost(&lost);
         if self.trace {
             self.report
                 .trace
@@ -704,7 +744,11 @@ impl Runner {
     fn app_commit(&mut self, mut pages: Vec<(PageNo, Vec<u8>)>, db_size: u32) {
         let mut all = std::mem::take(&mut self.spilled);
         all.append(&mut pages);
+        let before = self.w.sqlite.db_size();
         if self.w.app_commit(&all, db_size).is_some() {
+            if db_size < before {
+                self.report.reach.bump("commit.shrinks");
+            }
             let n = u64::try_from(all.len()).unwrap_or(u64::MAX);
             self.max_tx_pages = self.max_tx_pages.max(n);
         } else {
@@ -889,7 +933,8 @@ impl Runner {
 
     fn restore_all(&mut self) -> Result<(), Violation> {
         self.report.checks = self.report.checks.saturating_add(1);
-        self.w.check()?;
+        let checked = self.w.check()?;
+        checked.tally(&mut self.report.reach);
         self.replica_page_size()?;
         if self.record {
             self.report.seen.push(Seen::Oracle);
@@ -1102,6 +1147,34 @@ impl Runner {
     }
 }
 
+impl Runner {
+    /// Counts, at the end of a run, what the stores really did: puts per
+    /// level, deletes, and every scheduled fault that hit a call.
+    fn tally_stores(&mut self) {
+        let reach = &mut self.report.reach;
+        for event in self.w.remote_recorder.events() {
+            match event {
+                crate::RecorderEvent::Put { key, .. } => {
+                    reach.bump(format!("put.level.{}", key.level().get()));
+                }
+                crate::RecorderEvent::Delete { keys } => {
+                    reach.bump("delete.calls");
+                    reach.add("delete.keys", u64::try_from(keys.len()).unwrap_or(u64::MAX));
+                }
+            }
+        }
+        for (target, faults) in [
+            ("staging", &self.w.staging_faults),
+            ("remote", &self.w.remote_faults),
+        ] {
+            for (op, shape, hits) in faults.hits() {
+                let name = format!("fault.{target}.{op:?}.{}", variant(&shape));
+                reach.add(name, u64::from(hits));
+            }
+        }
+    }
+}
+
 /// Every retry wait is capped: a persistent fault's at [`MAX_BACKOFF`], a
 /// retried one's at the later of that and the wait the store named.
 fn capped(event: &Event, began: Timestamp) -> Result<(), Violation> {
@@ -1215,6 +1288,7 @@ pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure
         violation,
         trace: std::mem::take(&mut runner.report.trace),
     })?;
+    runner.tally_stores();
     runner.report.app_checkpoints = runner.app_seen();
     runner.report.app_autocheckpoints = runner.w.sqlite.app_autocheckpoints();
     if opts.record {
