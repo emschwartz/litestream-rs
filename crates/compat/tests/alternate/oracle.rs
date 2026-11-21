@@ -34,7 +34,8 @@
 //! or truncate the WAL, and frames it backfills into the database file are still in the WAL
 //! the copy recovers from. A copy taken without it can tear across a checkpoint.
 
-use std::fs;
+use std::fs::{self, File};
+use std::io::{self, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use lsr_compat::{Site, hash_pages, integrity_check};
@@ -82,26 +83,86 @@ pub fn seq_root(site: &Site) -> u32 {
     root
 }
 
-fn scratch(site: &Site) -> PathBuf {
+fn scratch(site: &Site, name: &str) -> PathBuf {
     let dir = site.dir().join("capture");
     fs::create_dir_all(&dir).expect("capture dir");
     for suffix in ["", "-wal", "-shm"] {
-        drop(fs::remove_file(dir.join(format!("copy.db{suffix}"))));
+        drop(fs::remove_file(dir.join(format!("{name}{suffix}"))));
     }
-    dir.join("copy.db")
+    dir.join(name)
+}
+
+/// The database file and its wal-index, each opened once and kept open while the
+/// application's connection lives, so every copy and wal-index read goes through them.
+/// Closing any descriptor of a file drops every POSIX lock this process holds on it, the
+/// application's SQLite locks included: its shared lock on the database file is what stops
+/// another process's last connection from checkpointing and deleting the WAL and wal-index
+/// on close, and its lock on the wal-index's dead-man-switch byte is what stops the next
+/// process to open the database from taking the wal-index for new and rebuilding it from the
+/// WAL alone. Seen once while copies opened and closed their own descriptors: a final Go turn
+/// left the application with no WAL.
+pub struct Held {
+    db: File,
+    shm: File,
+}
+
+impl Held {
+    /// Opens the site's database file and wal-index, which the application created.
+    pub fn open(site: &Site) -> Self {
+        let open = |path: PathBuf| {
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .expect("open a file the application created")
+        };
+        Self {
+            db: open(site.db.clone()),
+            shm: open(PathBuf::from(format!("{}-shm", site.db.display()))),
+        }
+    }
+
+    /// The wal-index, for `uncommitted.rs`.
+    pub const fn shm(&self) -> &File {
+        &self.shm
+    }
+
+    fn copy_db(&self, to: &Path) {
+        let mut from = &self.db;
+        from.seek(SeekFrom::Start(0)).expect("seek the database");
+        let mut out = File::create(to).expect("create the copy");
+        io::copy(&mut from, &mut out).expect("copy the database");
+    }
 }
 
 /// The database as of now, copied inside a read transaction (see the module doc).
-pub fn capture(site: &Site) -> State {
-    let copy = scratch(site);
+pub fn capture(site: &Site, held: &Held) -> State {
+    capture_wal(site, held, "copy.db", None)
+}
+
+/// The state SQLite recovers from the database file and the first `wal_len` bytes of the WAL
+/// (all of it for `None`), copied inside a read transaction to `name` in the capture
+/// directory. With no wal-index beside the copy, SQLite rebuilds one from the WAL alone, so
+/// the copy holds every valid transaction in those bytes, committed in the live wal-index or
+/// not (`uncommitted.rs` relies on this).
+pub fn capture_wal(site: &Site, held: &Held, name: &str, wal_len: Option<u64>) -> State {
+    let copy = scratch(site, name);
     let wal = PathBuf::from(format!("{}-wal", site.db.display()));
+    let copy_wal = format!("{}-wal", copy.display());
     site.app.execute_batch("BEGIN").expect("begin");
     let _: i64 = site
         .app
         .query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))
         .expect("take the read lock");
-    fs::copy(&site.db, &copy).expect("copy the database");
-    fs::copy(&wal, format!("{}-wal", copy.display())).expect("copy the wal");
+    held.copy_db(&copy);
+    fs::copy(&wal, &copy_wal).expect("copy the wal");
+    if let Some(len) = wal_len {
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&copy_wal)
+            .and_then(|f| f.set_len(len))
+            .expect("cut the copied wal");
+    }
     site.app.execute_batch("COMMIT").expect("end the read");
     let conn = Connection::open(&copy).expect("open the copy");
     conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
@@ -188,39 +249,40 @@ impl Oracle {
     }
 
     /// Checks one restore, in transaction order, against the states at or after the previous
-    /// match; `live` is the database's `seq` now (no replicator runs). Panics with `at` and
-    /// what differs.
-    pub fn check(&mut self, got: &State, live: i64, at: &str) {
+    /// match; `live` is the database's `seq` now (no replicator runs). The error says what
+    /// differs. A restore that fails leaves the oracle as it was, so the next restore is
+    /// judged against the same match.
+    pub fn verdict(&mut self, got: &State, live: i64) -> Result<(), String> {
         let found = (self.matched..self.states.len())
             .find(|&k| self.same_but_seq(&self.states[k].pages, &got.pages));
         let Some(k) = found else {
             let earlier = (0..self.states.len())
                 .find(|&k| self.same_but_seq(&self.states[k].pages, &got.pages));
-            panic!(
-                "{at}: the restore is no state at or after commit {} on the application's pages: {}",
+            return Err(format!(
+                "the restore is no state at or after commit {} on the application's pages: {}",
                 self.matched,
                 earlier.map_or("no recorded state at all".to_owned(), |k| format!(
                     "it is the state after commit {k}"
                 ))
-            );
+            ));
         };
         let low = self.floors[k];
         let high = self.states.get(k + 1).map_or(live, |s| s.seq);
-        assert!(
-            (low..=high).contains(&got.seq) && got.seq >= self.seq,
-            "{at}: the restore is commit {k}'s state with _litestream_seq {}, outside {low}..={high} \
-             or below the previous restore's {}",
-            got.seq,
-            self.seq
-        );
-        if got.seq == self.states[k].seq {
-            assert_eq!(
-                got.pages, self.states[k].pages,
-                "{at}: commit {k}'s state with its own seq {} differs on _litestream_seq's page",
+        if !((low..=high).contains(&got.seq) && got.seq >= self.seq) {
+            return Err(format!(
+                "the restore is commit {k}'s state with _litestream_seq {}, outside \
+                 {low}..={high} or below the previous restore's {}",
+                got.seq, self.seq
+            ));
+        }
+        if got.seq == self.states[k].seq && got.pages != self.states[k].pages {
+            return Err(format!(
+                "commit {k}'s state with its own seq {} differs on _litestream_seq's page",
                 got.seq
-            );
+            ));
         }
         self.matched = k;
         self.seq = got.seq;
+        Ok(())
     }
 }

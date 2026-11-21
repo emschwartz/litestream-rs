@@ -20,19 +20,26 @@ mod alternate;
 use alternate::{Launch, alternate, seed};
 use lsr_compat::{Era, builds_in, lsr_binary};
 
+/// The evidence the exception for #38 rests on is found when a writer leaves a whole
+/// transaction past the wal-index's end, in a continued WAL and as the first frame of a
+/// restarted one, its state is the one SQLite recovers with that transaction, and it is gone
+/// once the application's next commit overwrites it. No Go binary needed.
+#[test]
+fn a_tail_past_the_wal_index_is_recognised() {
+    alternate::uncommitted::a_tail_past_the_wal_index_is_recognised();
+}
+
 /// Go and Rust take turns on one prefix, each turn ended by SIGKILL at a seeded point, and
 /// every switch is a plain restart with no snapshot (or the snapshot the engines' rules give
 /// after an unseen WAL restart, with its cause); every acknowledged transaction restores to a
 /// state the database had, across checkpoints.
 ///
-/// Under review (#32): with v0.5.18, seed 1 once restored transaction 0x42 to commit 103's
-/// application pages with a `_litestream_seq` value the database never committed. Rust had
-/// been stopped mid-bump (its WAL frame written, the wal-index not yet updated); Go booted,
-/// read that unpublished frame as a transaction (v0.5.18 reads the WAL file to its last valid
-/// frame; `main` reads the committed end from the wal-index first), and its next sync started
-/// past the frame the application's next commit then overwrote. A snapshot healed it there.
+/// For a Go build without upstream bcd69ae (every release through v0.5.18), one outcome is
+/// accepted and asserted exactly (#38): Go's boot transaction holds a WAL tail SQLite never
+/// committed, left by Rust stopped mid-commit, and restores to precisely that tail's state
+/// (`alternate/uncommitted.rs`). The run prints how often it was seen.
 #[test]
-#[ignore = "review: Go v0.5.18 can stage a WAL frame SQLite never committed (#32); just compat"]
+#[ignore = "runs the pinned Go binaries; just compat"]
 fn go_and_rust_alternate_on_one_prefix() {
     let builds = builds_in(Era::Blocks);
     if builds.is_empty() {

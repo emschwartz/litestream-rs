@@ -56,6 +56,16 @@
 //! same pages. The last process stops with SIGINT, and a restore at the newest transaction, by
 //! both, equals the database exactly.
 //!
+//! One exception, for Go builds without upstream bcd69ae only (`GoBuild::reads_wal_index_end`;
+//! #38): such a build reads the WAL file to its last valid frame, so when Rust was stopped
+//! mid-commit (frames written, the wal-index not updated) Go's boot transaction can hold that
+//! uncommitted tail. Before every Go boot the test reads the wal-index end and the WAL, and
+//! records the state SQLite recovers from the whole file when valid transactions follow the
+//! end (`uncommitted.rs`). A restore the oracle refuses is accepted only if it is at Go's boot
+//! transaction and equals that state on every page; it does not advance the oracle, so every
+//! later restore is judged as before. The run prints how often a Go boot found such a tail and
+//! how often Go took it. For a build with the fix, the rule holds with no exception.
+//!
 //! Snapshot windows. Both replicators snapshot at once when the replica has none, so the first
 //! turn waits for one. After that a day-long window (Go's config here, Rust's default) means a
 //! new level-9 file is a forced snapshot, unless the run crosses midnight UTC, which the test
@@ -78,6 +88,7 @@
 
 mod generation;
 mod oracle;
+pub mod uncommitted;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -91,7 +102,7 @@ use lsr_compat::{
 };
 use lsr_core::{Level, RestoreTarget};
 use lsr_ltx::Txid;
-use oracle::{Oracle, State, capture, live_seq, restored, seq_root};
+use oracle::{Held, Oracle, State, capture, live_seq, restored, seq_root};
 use rusqlite::Connection;
 
 /// Killed turns; each is followed by a start of the other program, so this many switches.
@@ -224,6 +235,16 @@ struct Run {
     expect: Expect,
     /// Application commits SQLite refused busy and the run tried again.
     busy: u32,
+    /// The database file and wal-index, open for the whole run (`oracle.rs`).
+    held: Held,
+    /// Whether the Go build reads the committed WAL end from the wal-index (upstream
+    /// bcd69ae); without it, the one known mismatch of `uncommitted.rs` is accepted.
+    fixed: bool,
+    /// The uncommitted WAL tail the running Go process booted on, if any.
+    tail: Option<uncommitted::Tail>,
+    /// Go boots that found such a tail, and restores at which Go was seen to have taken it.
+    tails: u32,
+    taken: u32,
 }
 
 fn kind_key(kind: Kind) -> &'static str {
@@ -249,7 +270,8 @@ impl Run {
             .expect("wide");
         let config = site.dir().join("go.yml");
         write_config(&config, &site.db, &site.replica);
-        let oracle = Oracle::new(capture(&site), seq_root(&site));
+        let held = Held::open(&site);
+        let oracle = Oracle::new(capture(&site, &held), seq_root(&site));
         let mut rng = SplitMix::new(seed);
         let mut schedule = BTreeMap::new();
         for kind in [Kind::Go, Kind::Rust] {
@@ -280,6 +302,11 @@ impl Run {
             schedule,
             expect: Expect::First,
             busy: 0,
+            held,
+            fixed: build.reads_wal_index_end(),
+            tail: None,
+            tails: 0,
+            taken: 0,
             site,
         }
     }
@@ -315,7 +342,7 @@ impl Run {
         };
         let floor = live_seq(&self.site);
         self.busy_retry("commit", |site| site.commit(Shape::Insert { bytes }));
-        self.oracle.record(capture(&self.site), floor);
+        self.oracle.record(capture(&self.site, &self.held), floor);
     }
 
     /// Runs one application commit, again while SQLite refuses it busy. A replicator that
@@ -355,7 +382,7 @@ impl Run {
             )?;
             Ok(())
         });
-        self.oracle.record(capture(&self.site), floor);
+        self.oracle.record(capture(&self.site, &self.held), floor);
     }
 
     fn next_point(&mut self, kind: Kind) -> KillAt {
@@ -744,7 +771,7 @@ impl Run {
             )?;
             Ok(())
         });
-        self.oracle.record(capture(&self.site), floor);
+        self.oracle.record(capture(&self.site, &self.held), floor);
         // Two bumps past the threshold: the first may come from a sync that measured the WAL
         // just before it (a plain PASSIVE, which leaves no failed attempt behind, so the next
         // sync would PASSIVE again and restart the WAL instead of truncating it).
@@ -795,8 +822,18 @@ impl Run {
                 "{at}: Rust cannot restore {txid:#x}: {result:?}"
             );
             let got = restored(&out, self.oracle.root());
-            self.oracle
-                .check(&got, live, &format!("{at}: at {txid:#x}"));
+            if let Err(why) = self.oracle.verdict(&got, live) {
+                assert!(
+                    self.took_tail(txid, &got),
+                    "{at}: at {txid:#x}: {why}{}",
+                    self.tail_note(txid)
+                );
+                println!(
+                    "{at}: at {txid:#x}: Go took the uncommitted WAL tail (#38): {why}; \
+                     accepted, it is exactly the tail's state ({:?})",
+                    self.tail.as_ref().map(|t| (t.mx_frame, t.frames, &t.pages))
+                );
+            }
             self.checked = txid;
             last = Some(got);
         }
@@ -812,10 +849,59 @@ impl Run {
         newest.get() - from
     }
 
+    /// Before a Go boot: the uncommitted WAL tail it may take, if the files hold one.
+    fn look_for_tail(&mut self, kind: Kind, previous: Option<Txid>, at: &str) {
+        self.tail = match (kind, previous) {
+            (Kind::Go, Some(prev)) => uncommitted::read(&self.site, &self.held, &self.oracle, prev),
+            (Kind::Go | Kind::Rust, _) => None,
+        };
+        if let Some(tail) = &self.tail {
+            self.tails += 1;
+            println!(
+                "{at}: Go boots on {} uncommitted WAL frames past the wal-index's {} \
+                 (pages {:?}); Go reads the wal-index end: {}",
+                tail.frames, tail.mx_frame, tail.pages, self.fixed
+            );
+        }
+    }
+
+    /// Whether `got`, a restore the oracle refused at `txid`, is the one known Go mismatch:
+    /// a build without the fix, at its boot transaction, restoring exactly the state of the
+    /// uncommitted tail it booted on (`uncommitted.rs`).
+    fn took_tail(&mut self, txid: u64, got: &State) -> bool {
+        let took = !self.fixed
+            && self
+                .tail
+                .as_ref()
+                .is_some_and(|t| t.boot.get() == txid && t.taken == *got);
+        if took {
+            self.taken += 1;
+        }
+        took
+    }
+
+    /// Why a refused restore is not the known mismatch, when a tail was found.
+    fn tail_note(&self, txid: u64) -> String {
+        self.tail.as_ref().map_or_else(String::new, |t| {
+            format!(
+                " (Go booted on an uncommitted WAL tail, boot transaction {}, fixed build {}, \
+                 the tail's state {})",
+                t.boot,
+                self.fixed,
+                if t.boot.get() != txid {
+                    "not at this transaction"
+                } else {
+                    "differs from this restore"
+                }
+            )
+        })
+    }
+
     /// One killed turn: start, boot, work, the kill point, SIGKILL, then the oracle.
     fn killed_turn(&mut self, turn: u32, kind: Kind) {
         let previous = tip(&self.site).expect("tip");
         let (seq, salts) = (live_seq(&self.site), wal_salts(&self.site));
+        self.look_for_tail(kind, previous, &self.at(turn, kind));
         let mut process = self.start(turn, kind);
         let at = self.at(turn, kind);
         process.wait_up(UP).unwrap_or_else(|e| panic!("{at}: {e}"));
@@ -874,6 +960,7 @@ impl Run {
     /// replica, and both restore the newest transaction to the database as it is.
     fn final_turn(&mut self, turn: u32, kind: Kind) {
         let previous = tip(&self.site).expect("tip");
+        self.look_for_tail(kind, previous, &self.at(turn, kind));
         let mut process = self.start(turn, kind);
         let at = self.at(turn, kind);
         process.wait_up(UP).unwrap_or_else(|e| panic!("{at}: {e}"));
@@ -886,7 +973,7 @@ impl Run {
         process.stop().unwrap_or_else(|e| panic!("{at}: {e}"));
         self.check_snapshots(&at);
         self.check_acknowledged(&at);
-        let want = capture(&self.site);
+        let want = capture(&self.site, &self.held);
         let recorded = self.oracle.states.last().expect("states");
         assert!(
             self.oracle.same_but_seq(&recorded.pages, &want.pages),
@@ -982,11 +1069,15 @@ pub fn alternate(build: &GoBuild, lsr: &Path, seed: u64, launch: Launch) {
     run.final_turn(KILLED_TURNS, kind_of(KILLED_TURNS));
     println!(
         "{}: seed {seed}: {KILLED_TURNS} switches, {} transactions restored, {} commits \
-         ({} retried busy); {}",
+         ({} retried busy); Go booted on an uncommitted WAL tail {} times and took it {} \
+         times (#38; reads the wal-index end: {}); {}",
         run.name,
         run.checked,
         run.oracle.states.len() - 1,
         run.busy,
+        run.tails,
+        run.taken,
+        run.fixed,
         run.summary()
     );
     run.assert_crossed();

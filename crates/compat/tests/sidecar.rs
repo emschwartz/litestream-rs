@@ -360,7 +360,9 @@ fn go_config_and_meta_start_the_rust_sidecar_with_no_snapshot() {
 /// The alternation run with Rust as the daemon on Go's own config file: Go and `lsr
 /// replicate -config` take turns on one prefix, each turn ended by SIGKILL at a seeded point,
 /// every switch a plain restart with no snapshot, every acknowledged transaction restoring to
-/// a state the database had.
+/// a state the database had. A Go build without upstream bcd69ae may take a WAL tail SQLite
+/// never committed at its boot; that one outcome is accepted, asserted exactly and counted
+/// (#38, `alternate/uncommitted.rs`).
 #[test]
 #[ignore = "runs the pinned Go binaries; just compat"]
 fn go_and_rust_sidecars_alternate_on_one_config_file() {

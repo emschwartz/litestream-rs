@@ -118,6 +118,7 @@ lsr-compat vfs::tests::refuses_an_unknown_record
 lsr-compat vfs::tests::the_environment_names_the_sqlite_when_either_variable_is_set
 lsr-compat workload::tests::splitmix_matches_its_reference_vector
 lsr-compat workload::tests::the_same_seed_writes_the_same_pages
+lsr-compat::alternation a_tail_past_the_wal_index_is_recognised
 lsr-compat::alternation go_and_rust_alternate_on_one_prefix
 lsr-compat::compaction go_compacted_files_equal_ours_on_header_and_pages
 lsr-compat::fixtures every_version_and_scenario_has_a_fixture
