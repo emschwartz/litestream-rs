@@ -18,6 +18,7 @@ pub mod exec;
 pub mod generate;
 pub mod model;
 pub mod oracle;
+pub mod reach;
 pub mod resources;
 pub mod run;
 pub mod scenario;
@@ -32,6 +33,7 @@ pub use exec::{Polls, RunEnd, count_polls, run_until};
 pub use generate::{EnvFault, Generator, Op, Target, Weights, frozen_history, history};
 pub use model::{CommitId, CommitRec, Model, PageImage};
 pub use oracle::{Acked, Bound, Checked, Violation, bug_fault, check, within};
+pub use reach::Reach;
 pub use run::{Failure, Opts, RunReport, run, run_with, shrink};
 pub use seed::{ParseDayError, ParseSeedError, SEEDS_PER_NIGHT, Seed, nightly_base, replay_line};
 pub use sqlite::{

@@ -222,6 +222,18 @@ pub struct Checked {
     pub latest: Option<Txid>,
 }
 
+impl Checked {
+    /// Counts what the check judged into `reach`.
+    pub fn tally(&self, reach: &mut crate::reach::Reach) {
+        reach.bump("check.runs");
+        reach.add("check.txid.restored", u64::from(self.restored));
+        reach.add("check.txid.inside", u64::from(self.inside_file));
+        if self.latest.is_some() {
+            reach.bump("check.latest");
+        }
+    }
+}
+
 fn range_str(range: TxidRange) -> String {
     format!("{}-{}", range.min().get(), range.max().get())
 }
