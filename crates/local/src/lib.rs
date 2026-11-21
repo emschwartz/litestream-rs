@@ -16,7 +16,10 @@
 //! caller clears them first with [clear_sidecars] (the normal path: a database
 //! deleted under SQLITE_FCNTL_PERSIST_WAL leaves its `-wal` behind).
 //!
-//! [FileSink::publish] makes the database visible, in this order: fsync the
+//! [FileSink::publish] makes the database visible, in this order: run the
+//! SQLite check the sink was given ([FileSink::with_integrity_check], none by
+//! default; see the [integrity] module), so a database SQLite finds invalid
+//! is refused with an [IntegrityFailure] and its scratch removed; fsync the
 //! scratch; check the target and all three sidecars are still absent (else
 //! `AlreadyExists` naming the path, nothing touched); hard-link the scratch to
 //! the target, which fails when the target exists, so a database a rival
@@ -39,6 +42,10 @@ use std::path::{Path, PathBuf};
 use lsr_core::DatabaseSink;
 use lsr_ltx::{Checksum, PageNo, PageSize};
 use thiserror::Error;
+
+pub mod integrity;
+
+pub use integrity::{IntegrityCheck, IntegrityFailure};
 
 /// The files SQLite keeps beside a database that must not outlive it.
 const SIDECAR_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
@@ -100,6 +107,7 @@ pub struct FileSink {
     file: File,
     scratch: PathBuf,
     target: PathBuf,
+    integrity: IntegrityCheck,
     published: bool,
 }
 
@@ -209,8 +217,17 @@ impl FileSink {
             file,
             scratch,
             target: target.to_path_buf(),
+            integrity: IntegrityCheck::Off,
             published: false,
         })
+    }
+
+    /// Runs [check] on the scratch at [DatabaseSink::publish], before
+    /// anything is made visible.
+    #[must_use]
+    pub const fn with_integrity_check(mut self, check: IntegrityCheck) -> Self {
+        self.integrity = check;
+        self
     }
 
     /// The scratch file's path, for diagnostics.
@@ -274,6 +291,7 @@ impl DatabaseSink for FileSink {
     }
 
     fn publish(mut self) -> io::Result<()> {
+        integrity::check(&self.scratch, self.integrity)?;
         self.file.sync_all()?;
         if let Some(path) = first_present(&self.target)? {
             return Err(io::Error::new(
@@ -601,6 +619,200 @@ mod tests {
         assert_eq!(restored.commit(), 3);
         assert_eq!(fs::read(&target).unwrap(), vec![7; 1536]);
         assert_eq!(names(&dir), BTreeSet::from(["db".to_owned()]));
+    }
+
+    /// A real SQLite database in WAL mode (its header says so, as a
+    /// replicated one does), 512-byte pages, a table and an index over it.
+    fn sqlite_pages() -> Vec<u8> {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("source.db");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "PRAGMA page_size = 512; PRAGMA journal_mode = WAL;
+             CREATE TABLE t (x TEXT); CREATE INDEX t_x ON t (x);",
+        )
+        .unwrap();
+        for n in 0..200 {
+            conn.execute("INSERT INTO t VALUES (?1)", [format!("{n:0>40}")])
+                .unwrap();
+        }
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        drop(conn);
+        let bytes = fs::read(&path).unwrap();
+        assert_eq!(bytes.get(18..20), Some(&[2, 2][..]), "WAL-mode header");
+        bytes
+    }
+
+    /// A snapshot holding exactly [db]'s pages: valid LTX whatever they say.
+    fn snapshot_of(db: &[u8]) -> Vec<u8> {
+        let commit = u32::try_from(db.len() / 512).unwrap();
+        let header = Header::new(HeaderFields {
+            tracked: false,
+            page_size: ps(512),
+            commit,
+            txids: TxidRange::single(txid(1)),
+            timestamp: Timestamp::from_unix_millis(1000),
+            pre_apply: None,
+            wal: None,
+            node_id: 0,
+        })
+        .unwrap();
+        let mut encoder = Encoder::new(Vec::new(), header).unwrap();
+        for (n, page) in (1..=commit).zip(db.as_chunks::<512>().0) {
+            encoder.write_page(pgno(n), page).unwrap();
+        }
+        encoder.finish(None).unwrap().0
+    }
+
+    /// Page 2, the table's root, overwritten: every LTX check passes, the
+    /// b-tree is not one.
+    fn corrupt_b_tree() -> Vec<u8> {
+        let mut db = sqlite_pages();
+        db[512..1024].fill(0xDE);
+        db
+    }
+
+    fn checked_sink(target: &Path, check: IntegrityCheck) -> FileSink {
+        FileSink::create(target)
+            .unwrap()
+            .with_integrity_check(check)
+    }
+
+    fn restore_with(db: &[u8], check: IntegrityCheck, target: &Path) -> Result<(), RestoreError> {
+        let store = replica(&snapshot_of(db));
+        let sink = checked_sink(target, check);
+        block_on(restore(&store, RestoreTarget::Latest, sink)).map(drop)
+    }
+
+    fn integrity_failure(result: Result<(), RestoreError>) -> IntegrityFailure {
+        match result {
+            Err(RestoreError::Sink {
+                op: lsr_core::SinkOp::Publish,
+                source,
+            }) => IntegrityFailure::in_io(&source)
+                .unwrap_or_else(|| panic!("not an integrity failure: {source}"))
+                .clone(),
+            other => panic!("expected a refused publish, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_check_publishes_a_valid_database_and_nothing_beside_it() {
+        let db = sqlite_pages();
+        for check in [
+            IntegrityCheck::Off,
+            IntegrityCheck::Quick,
+            IntegrityCheck::Full,
+        ] {
+            let dir = TempDir::new().unwrap();
+            let target = dir.path().join("db");
+            restore_with(&db, check, &target).unwrap();
+            assert_eq!(fs::read(&target).unwrap(), db, "{check:?}");
+            // No -wal or -shm beside the scratch or the target, though the
+            // header says WAL mode: the check opened it immutable.
+            assert_eq!(names(&dir), BTreeSet::from(["db".to_owned()]), "{check:?}");
+        }
+    }
+
+    #[test]
+    fn quick_and_full_refuse_a_corrupt_b_tree_and_leave_nothing() {
+        let db = corrupt_b_tree();
+        for (check, pragma) in [
+            (IntegrityCheck::Quick, "quick_check"),
+            (IntegrityCheck::Full, "integrity_check"),
+        ] {
+            let dir = TempDir::new().unwrap();
+            let target = dir.path().join("db");
+            let failure = integrity_failure(restore_with(&db, check, &target));
+            assert_eq!(failure.pragma(), pragma);
+            assert!(
+                failure.messages().iter().any(|m| m.contains("page 2")),
+                "{failure}"
+            );
+            assert!(failure.to_string().contains(pragma), "{failure}");
+            assert!(names(&dir).is_empty(), "{check:?}: {:?}", names(&dir));
+        }
+    }
+
+    #[test]
+    fn off_publishes_the_corrupt_b_tree_as_restored() {
+        let db = corrupt_b_tree();
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("db");
+        restore_with(&db, IntegrityCheck::Off, &target).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), db);
+        assert_eq!(names(&dir), BTreeSet::from(["db".to_owned()]));
+    }
+
+    /// Pages that are no database at all: SQLite refuses to open them, which
+    /// is a verdict on the file, so the restore is refused, not failed.
+    #[test]
+    fn a_file_that_is_not_a_database_is_refused_like_a_failed_check() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("db");
+        let failure = integrity_failure(restore_with(&[7; 1536], IntegrityCheck::Quick, &target));
+        assert_eq!(failure.messages().len(), 1);
+        assert!(!failure.more());
+        assert!(names(&dir).is_empty());
+    }
+
+    /// Only the first problems are kept, and a cut list says so.
+    #[test]
+    fn a_long_list_of_problems_keeps_the_first_few() {
+        let mut db = sqlite_pages();
+        let len = db.len();
+        db[512..len].fill(0xDE);
+        let dir = TempDir::new().unwrap();
+        let failure = integrity_failure(restore_with(
+            &db,
+            IntegrityCheck::Full,
+            &dir.path().join("db"),
+        ));
+        assert_eq!(failure.messages().len(), integrity::KEPT_MESSAGES);
+        assert!(failure.more());
+        assert!(failure.to_string().ends_with("; and more"), "{failure}");
+    }
+
+    /// The check opens the scratch by URI; a name with URI syntax in it is
+    /// still that file.
+    #[test]
+    fn a_target_name_with_uri_syntax_is_checked_as_named() {
+        let dir = TempDir::new().unwrap();
+        let name = "a?mode=rwc#b%41 c";
+        restore_with(
+            &sqlite_pages(),
+            IntegrityCheck::Quick,
+            &dir.path().join(name),
+        )
+        .unwrap();
+        let failure = integrity_failure(restore_with(
+            &corrupt_b_tree(),
+            IntegrityCheck::Quick,
+            &dir.path().join("x?y"),
+        ));
+        assert!(!failure.messages().is_empty());
+        assert_eq!(names(&dir), BTreeSet::from([name.to_owned()]));
+    }
+
+    /// The check runs on the bytes in the scratch at publish, whatever wrote
+    /// them: a page changed after the restore's own writes is caught.
+    #[test]
+    fn the_check_reads_the_scratch_as_it_is_at_publish() {
+        let db = sqlite_pages();
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("db");
+        let mut sink = FileSink::create(&target)
+            .unwrap()
+            .with_integrity_check(IntegrityCheck::Full);
+        for (n, page) in (1..).zip(db.as_chunks::<512>().0) {
+            sink.write_page(pgno(n), page).unwrap();
+        }
+        sink.write_page(pgno(2), &[0xDE; 512]).unwrap();
+        let err = sink.publish().unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(IntegrityFailure::in_io(&err).is_some(), "{err}");
+        assert!(names(&dir).is_empty());
     }
 
     #[test]
