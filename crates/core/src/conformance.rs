@@ -21,7 +21,7 @@ use std::thread::{self, Thread};
 use lsr_ltx::{Timestamp, Txid, TxidRange};
 
 use crate::layout::{FileInfo, FileKey, Level, ListedStamp, StampOrigin};
-use crate::store::{ObjectStore, PageLimit, ReadLen, StoreError, StoreOp, Upload};
+use crate::store::{ListAt, ObjectStore, PageLimit, ReadAt, ReadLen, StoreError, StoreOp, Upload};
 
 /// Why a conformance case failed.
 #[derive(Debug)]
@@ -774,6 +774,136 @@ pub async fn read_with_stamp_agrees_with_read_and_stamp<H: Harness>(h: &H) -> Ch
     Ok(())
 }
 
+/// `read_many` answers each read as `read` does, in order: a missing key
+/// fails only its own slot.
+///
+/// # Errors
+/// A [`Failure`] naming the rule that broke.
+pub async fn read_many_agrees_with_read<H: Harness>(h: &H) -> Check {
+    let store = h.store();
+    let target = key(6, 3, 3)?;
+    let absent = key(6, 4, 4)?;
+    put_stamped(store, target, b"abcdefgh", at(STAMP)).await?;
+    let reads = [
+        ReadAt {
+            key: target,
+            offset: 0,
+            len: read_len(3)?,
+        },
+        ReadAt {
+            key: absent,
+            offset: 0,
+            len: read_len(3)?,
+        },
+        ReadAt {
+            key: target,
+            offset: 6,
+            len: read_len(3)?,
+        },
+        ReadAt {
+            key: target,
+            offset: 8,
+            len: read_len(3)?,
+        },
+        ReadAt {
+            key: target,
+            offset: 3,
+            len: read_len(3)?,
+        },
+    ];
+    let mut want = Vec::new();
+    for at in &reads {
+        want.push(store.read(&at.key, at.offset, at.len).await);
+    }
+    ensure_eq!(
+        store.read_many(&reads).await,
+        want,
+        "read_many against read"
+    );
+    ensure_eq!(
+        want.get(1).cloned(),
+        Some(Err(StoreError::NotFound { key: absent })),
+        "the missing key's slot"
+    );
+    Ok(())
+}
+
+/// `list_many` answers each listing as `list` does, in order.
+///
+/// # Errors
+/// A [`Failure`] naming the rule that broke.
+pub async fn list_many_agrees_with_list<H: Harness>(h: &H) -> Check {
+    let store = h.store();
+    for n in 1..=5 {
+        put_stamped(store, key(0, n, n)?, b"x", at(STAMP)).await?;
+    }
+    put_stamped(store, key(2, 1, 4)?, b"y", at(STAMP)).await?;
+    let limit = limit(2)?;
+    let first = store.list(Level::ZERO, None, limit).await?;
+    let pages = [
+        ListAt {
+            level: Level::ZERO,
+            after: None,
+        },
+        ListAt {
+            level: Level::ZERO,
+            after: first.next,
+        },
+        ListAt {
+            level: key(2, 1, 1)?.level(),
+            after: None,
+        },
+        ListAt {
+            level: key(5, 1, 1)?.level(),
+            after: None,
+        },
+    ];
+    let mut want = Vec::new();
+    for page in &pages {
+        want.push(store.list(page.level, page.after, limit).await);
+    }
+    ensure_eq!(
+        store.list_many(&pages, limit).await,
+        want,
+        "list_many against list"
+    );
+    Ok(())
+}
+
+/// `stamp_many` answers each file as `stamp` does, in order: a file deleted
+/// since it was listed fails only its own slot.
+///
+/// # Errors
+/// A [`Failure`] naming the rule that broke.
+pub async fn stamp_many_agrees_with_stamp<H: Harness>(h: &H) -> Check {
+    let store = h.store();
+    let (a, b, gone) = (key(7, 1, 1)?, key(7, 2, 2)?, key(7, 3, 3)?);
+    put_stamped(store, a, b"a", at(STAMP)).await?;
+    put_stamped(store, b, b"bb", at(STAMP + 1)).await?;
+    put_stamped(store, gone, b"c", at(STAMP + 2)).await?;
+    let files = [
+        listed_one(store, a).await?,
+        listed_one(store, gone).await?,
+        listed_one(store, b).await?,
+    ];
+    store.delete(&[gone]).await?;
+    let mut want = Vec::new();
+    for file in &files {
+        want.push(store.stamp(file).await);
+    }
+    ensure_eq!(
+        store.stamp_many(&files).await,
+        want,
+        "stamp_many against stamp"
+    );
+    ensure_eq!(
+        want.get(1).cloned(),
+        Some(Err(StoreError::NotFound { key: gone })),
+        "the deleted file's slot"
+    );
+    Ok(())
+}
+
 /// Hands the suite to a backend: one test per case, each on a fresh harness.
 ///
 /// `make` is an expression that builds the harness, called once per test.
@@ -800,6 +930,9 @@ macro_rules! conformance_suite {
             stamp_of_a_vanished_file_is_not_found,
             stamp_of_an_overwritten_file_is_refused,
             read_with_stamp_agrees_with_read_and_stamp,
+            read_many_agrees_with_read,
+            list_many_agrees_with_list,
+            stamp_many_agrees_with_stamp,
         );
     };
     (@each $make:expr; $($case:ident,)+) => {

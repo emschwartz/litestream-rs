@@ -408,6 +408,7 @@ pub struct S3Settings {
     pub(crate) endpoint: Option<String>,
     pub(crate) force_path_style: Option<bool>,
     pub(crate) part_size: Option<u64>,
+    pub(crate) concurrency: Option<u64>,
 }
 
 impl S3Settings {
@@ -445,6 +446,12 @@ impl S3Settings {
     #[must_use]
     pub fn part_size(&self) -> Option<u64> {
         self.part_size
+    }
+    /// `concurrency`: multipart parts in flight, as in Go. Zero or less is
+    /// unset, as Go then keeps its default.
+    #[must_use]
+    pub fn concurrency(&self) -> Option<u64> {
+        self.concurrency
     }
 }
 

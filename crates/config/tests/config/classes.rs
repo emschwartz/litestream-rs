@@ -228,7 +228,7 @@ fn every_other_replica_type_is_refused_by_type_and_by_url() {
 
 #[test]
 fn no_effect_knobs_warn_once_each() {
-    let text = "shutdown-sync-interval: 1s\nshutdown-timeout: 10s\npart-size: 5MB\nvalidation-interval: 1h\nlogging:\n  source: true\ndbs:\n  - path: /db\n    busy-timeout: 5s\n    replica:\n      url: s3://bucket/db\n      name: primary\n      validation-interval: 10m\n      sign-payload: true\n      sign-accept-encoding: false\n      require-content-md5: false\n      put-object-content-md5: true\n      skip-verify: true\n      concurrency: 5\n";
+    let text = "shutdown-sync-interval: 1s\nshutdown-timeout: 10s\npart-size: 5MB\nvalidation-interval: 1h\nlogging:\n  source: true\ndbs:\n  - path: /db\n    busy-timeout: 5s\n    replica:\n      url: s3://bucket/db\n      name: primary\n      validation-interval: 10m\n      sign-payload: true\n      sign-accept-encoding: false\n      require-content-md5: false\n      put-object-content-md5: true\n      skip-verify: true\n";
     let loaded = parse(text);
     let paths = [
         "shutdown-sync-interval",
@@ -244,7 +244,6 @@ fn no_effect_knobs_warn_once_each() {
         "dbs[0].replica.require-content-md5",
         "dbs[0].replica.put-object-content-md5",
         "dbs[0].replica.skip-verify",
-        "dbs[0].replica.concurrency",
     ];
     for path in paths {
         let warnings = warnings_at(&loaded.report.warnings, path);

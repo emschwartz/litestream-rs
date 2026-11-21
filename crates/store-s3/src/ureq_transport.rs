@@ -9,11 +9,15 @@
 //! with `SSL_CERT_FILE` and `SSL_CERT_DIR` on Linux; see the `trust` module);
 //! ureq speaks HTTP/1.1 only.
 //!
+//! A batch runs on scoped threads ([`send_on_threads`]) over the one agent, so
+//! its requests share the connection pool and each keeps the deadline.
+//!
 //! Response bodies are read whole but bounded: a body over `MAX_BODY` is an
 //! error, so a server that ignores a Range header cannot make a read allocate
 //! an object's size.
 
 use std::io;
+use std::num::NonZeroUsize;
 use std::time::Duration;
 
 #[cfg(all(unix, not(target_vendor = "apple")))]
@@ -25,7 +29,9 @@ use ureq::tls::Certificate;
 use ureq::tls::RootCerts;
 
 use crate::request::{HttpRequest, Method};
-use crate::transport::{HttpResponse, MAX_BODY, Transport, TransportError, map_io};
+use crate::transport::{
+    HttpResponse, MAX_BODY, Transport, TransportError, map_io, send_on_threads,
+};
 use crate::trust::{self, Roots};
 
 /// A [`Transport`] over one shared connection pool.
@@ -140,6 +146,14 @@ impl Transport for UreqTransport {
         let complete = head_only || declared.is_none_or(|n| u64::try_from(body.len()) == Ok(n));
         Ok(HttpResponse::new(status, headers, body, complete))
     }
+
+    fn send_many(
+        &self,
+        requests: Vec<HttpRequest>,
+        limit: NonZeroUsize,
+    ) -> Vec<Result<HttpResponse, TransportError>> {
+        send_on_threads(self, requests, limit)
+    }
 }
 
 /// Maps a ureq failure to a kind; the error's own text can carry the URL.
@@ -210,6 +224,45 @@ mod tests {
             b"HTTP/1.1 302 Found\r\nlocation: http://127.0.0.1:1/\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
         );
         assert_eq!(status_of(&url), Ok(302));
+    }
+
+    /// Accepts one connection and holds it open without answering.
+    fn serve_silence() -> (String, std::sync::mpsc::Sender<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let (done, wait) = std::sync::mpsc::channel::<()>();
+        thread::spawn(move || {
+            let (_stream, _) = listener.accept().expect("accept");
+            let _released = wait.recv();
+        });
+        (format!("http://{addr}/"), done)
+    }
+
+    fn get(url: &str) -> HttpRequest {
+        HttpRequest::for_test(Method::Get, url::Url::parse(url).expect("url"), Vec::new())
+    }
+
+    const OK: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok";
+
+    #[test]
+    fn a_batch_answers_in_order_and_each_request_keeps_its_deadline() {
+        let (silent, release) = serve_silence();
+        let transport = UreqTransport::new(Duration::from_millis(300));
+        let batch = vec![get(&serve_once(OK)), get(&silent), get(&serve_once(OK))];
+        let got: Vec<Result<Vec<u8>, TransportError>> = transport
+            .send_many(batch, NonZeroUsize::new(3).expect("limit"))
+            .into_iter()
+            .map(|r| r.map(|resp| resp.body().to_vec()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                Ok(b"ok".to_vec()),
+                Err(TransportError::Timeout),
+                Ok(b"ok".to_vec())
+            ]
+        );
+        let _released = release.send(());
     }
 
     #[test]

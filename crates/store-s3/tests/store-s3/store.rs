@@ -89,6 +89,61 @@ mod cases {
     }
 
     #[test]
+    fn a_failed_read_in_a_batch_is_retried_alone() {
+        let (wire, sleeper, store) = retried(FakeHarness::new());
+        let k = key(0, 1, 1);
+        put_through(&store, &k, b"abcdefghi").unwrap();
+        wire.push(Fault::Status {
+            on: Shape::Get,
+            status: 503,
+            code: Some("SlowDown"),
+            retry_after: Some("1"),
+        });
+        let len = ReadLen::new(3).unwrap();
+        let reads: Vec<lsr_core::ReadAt> = [0, 3, 6]
+            .map(|offset| lsr_core::ReadAt {
+                key: k,
+                offset,
+                len,
+            })
+            .to_vec();
+        let got = block_on(store.read_many(&reads));
+        assert_eq!(
+            got,
+            vec![
+                Ok(b"abc".to_vec()),
+                Ok(b"def".to_vec()),
+                Ok(b"ghi".to_vec())
+            ]
+        );
+        assert_eq!(sleeper.waits(), [Duration::from_secs(1)]);
+        assert_eq!(count(&wire, Shape::Get), 4);
+    }
+
+    #[test]
+    fn a_failed_listing_in_a_batch_fails_only_its_own_slot() {
+        let (wire, store) = store_with(4);
+        put_through(&store, &key(0, 1, 1), b"x").unwrap();
+        put_through(&store, &key(1, 1, 1), b"y").unwrap();
+        wire.push(Fault::Status {
+            on: Shape::List,
+            status: 500,
+            code: Some("InternalError"),
+            retry_after: None,
+        });
+        let pages = [Level::ZERO, Level::new(1).unwrap(), Level::new(2).unwrap()]
+            .map(|level| lsr_core::ListAt { level, after: None });
+        let got = block_on(store.list_many(&pages, limit(10)));
+        assert!(
+            matches!(got[0], Err(StoreError::Transient { .. })),
+            "{got:?}"
+        );
+        assert_eq!(got[1].as_ref().unwrap().files.len(), 1);
+        assert!(got[2].as_ref().unwrap().files.is_empty());
+        assert_eq!(count(&wire, Shape::List), 3);
+    }
+
+    #[test]
     fn head_404_between_list_and_stamp() {
         let h = FakeHarness::new();
         let k = key(0, 1, 1);
@@ -388,7 +443,11 @@ mod cases {
                 cause: CorruptCause::ChecksumMismatch { part: part(2) }
             }
         );
-        assert_eq!(count(&wire, Shape::UploadPart), 2, "the third never goes");
+        assert_eq!(
+            count(&wire, Shape::UploadPart),
+            3,
+            "the third went in the same batch; no fourth follows"
+        );
         assert_eq!(count(&wire, Shape::Complete), 0);
         assert!(sleeper.waits().is_empty());
         assert!(list_all(&store).unwrap().files.is_empty());
@@ -533,27 +592,85 @@ mod cases {
         assert_eq!(h.store.pending_orphans(), 0);
     }
 
+    /// A store over a fresh fake with this many requests per batch.
+    fn store_with(concurrency: usize) -> (Arc<FaultTransport<FakeS3>>, S3Store<Shared>) {
+        let wire = Arc::new(FaultTransport::new(fake()));
+        let config = config().with_concurrency(std::num::NonZeroUsize::new(concurrency).unwrap());
+        let store = S3Store::with_transport(
+            config,
+            credentials(),
+            Shared(Arc::clone(&wire)),
+            lsr_core::FakeClock::new(now()),
+        )
+        .unwrap();
+        (wire, store)
+    }
+
     #[test]
-    fn memory_is_one_part() {
-        let h = FakeHarness::new();
+    fn memory_is_at_most_the_concurrency_in_parts() {
+        for concurrency in [1, 3] {
+            let (wire, store) = store_with(concurrency);
+            let k = key(0, 1, 1);
+            let bytes = body(PART * 4);
+            block_on(async {
+                let mut up = store
+                    .begin_upload(&k, Timestamp::from_unix_millis(5))
+                    .await
+                    .unwrap();
+                let mut high = 0;
+                for piece in bytes.chunks(1_500_003) {
+                    up.write(piece).await.unwrap();
+                    high = high.max(up.buffer_capacity());
+                    assert!(up.buffer_capacity() <= PART * concurrency);
+                }
+                assert!(high > PART * (concurrency - 1), "{concurrency}: {high}");
+                up.commit().await.unwrap();
+            });
+            assert_eq!(count(&wire, Shape::UploadPart), 4);
+            assert!(read_back(&store, &k, PART * 2)[..] == bytes[..PART * 2]);
+        }
+    }
+
+    #[test]
+    fn parts_in_a_batch_still_assemble_the_same_object_in_order() {
+        let (wire, store) = store_with(3);
         let k = key(0, 1, 1);
-        let bytes = body(PART * 4);
-        block_on(async {
-            let mut up = h
-                .store
-                .begin_upload(&k, Timestamp::from_unix_millis(5))
-                .await
-                .unwrap();
-            let mut high = 0;
-            for piece in bytes.chunks(1_500_003) {
-                up.write(piece).await.unwrap();
-                high = high.max(up.buffer_capacity());
-                assert!(up.buffer_capacity() <= PART);
-            }
-            assert!(high > 0);
-            up.commit().await.unwrap();
+        let bytes = body(PART * 7 + 11);
+        write_all(&store, &k, &bytes, 1_500_003).unwrap();
+        assert_eq!(count(&wire, Shape::UploadPart), 8);
+        assert!(read_back(&store, &k, PART * 3)[..] == bytes[..PART * 3]);
+        let tail = block_on(store.read(
+            &k,
+            u64::try_from(PART * 7).unwrap(),
+            ReadLen::new(64).unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(tail[..], bytes[PART * 7..]);
+        assert_eq!(wire.inner().open_uploads(), 0);
+    }
+
+    #[test]
+    fn a_failed_part_in_a_batch_fails_the_upload_and_orphans_its_id() {
+        let (wire, store) = store_with(3);
+        wire.push(Fault::Pass {
+            on: Shape::UploadPart,
         });
-        assert_eq!(count(&h.wire, Shape::UploadPart), 4);
-        assert!(read_back(&h.store, &k, PART * 2)[..] == bytes[..PART * 2]);
+        wire.push(Fault::Status {
+            on: Shape::UploadPart,
+            status: 500,
+            code: Some("InternalError"),
+            retry_after: None,
+        });
+        let err = write_all(&store, &key(0, 1, 1), &body(PART * 5), PART).unwrap_err();
+        assert!(matches!(err, StoreError::Transient { .. }), "{err:?}");
+        assert_eq!(
+            count(&wire, Shape::UploadPart),
+            3,
+            "one batch, then nothing"
+        );
+        assert_eq!(count(&wire, Shape::Complete), 0);
+        assert_eq!(store.pending_orphans(), 1);
+        assert_eq!(store.abort_orphans().unwrap(), 1);
+        assert_eq!(wire.inner().open_uploads(), 0);
     }
 }

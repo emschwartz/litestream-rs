@@ -184,6 +184,15 @@ impl Transport for Counting {
         counter.fetch_add(1, Ordering::Relaxed);
         self.inner.send(request)
     }
+
+    /// Batches run concurrently against the real server, each request counted.
+    fn send_many(
+        &self,
+        requests: Vec<HttpRequest>,
+        limit: std::num::NonZeroUsize,
+    ) -> Vec<Result<HttpResponse, TransportError>> {
+        lsr_store_s3::send_on_threads(self, requests, limit)
+    }
 }
 
 impl Bucket {

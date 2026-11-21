@@ -5,22 +5,34 @@
 //! `RequestBuilder`, sent, then judged by `classify`, so what a status or code
 //! means is decided in one place. The store never retries.
 //!
+//! Batches: a call that needs several independent requests (the parts of an
+//! upload, reads ahead, the levels of a listing, a set of stamps) builds them
+//! all, hands them to [`Transport::send_many`] with the limit of their kind,
+//! and judges each response alone, exactly as a single request. The kinds are
+//! limited apart, as Go does: multipart parts by the `concurrency` setting
+//! (provider defaults in [`S3Config::concurrency`]), HEADs by
+//! `CREATION_TIME_CONCURRENCY`, ranged reads and listing pages by
+//! `READ_CONCURRENCY`.
+//!
 //! Deadlines: the transport bounds one request. A call that sends several (a
 //! listing, a large delete) also checks the `Clock` between them against four
 //! times the configured deadline and fails as `Transient` `TimedOut` past it.
 
 use std::io;
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lsr_core::{
-    Clock, FileInfo, FileKey, Level, ListedStamp, Listing, ObjectStore, PageLimit, ReadLen,
-    StampOrigin, StoreError, StoreOp, StoredStamp,
+    BatchKind, Clock, FileInfo, FileKey, Level, ListAt, ListedStamp, Listing, ObjectStore,
+    PageLimit, ReadAt, ReadLen, StampOrigin, StoreError, StoreOp, StoredStamp,
 };
 use lsr_ltx::{Timestamp, TxidRange};
 
 use crate::classify::{classify, classify_transport, is_range_past_end};
-use crate::config::{ConfigError, PartSize, Prefix, S3Config};
+use crate::config::{
+    CREATION_TIME_CONCURRENCY, ConfigError, PartSize, Prefix, READ_CONCURRENCY, S3Config,
+};
 use crate::credentials::S3Credentials;
 use crate::orphans::Orphans;
 use crate::request::{HttpRequest, MAX_DELETE_KEYS, RequestBuilder, RequestError};
@@ -67,6 +79,7 @@ pub(crate) struct Inner<T> {
     transport: T,
     clock: Arc<dyn Clock>,
     pub(crate) part_size: PartSize,
+    pub(crate) concurrency: NonZeroUsize,
     prefix: Prefix,
     deadline: Duration,
     stats: Mutex<ListStats>,
@@ -139,6 +152,7 @@ impl<T: Transport> S3Store<T> {
                 transport,
                 clock: Arc::new(clock),
                 part_size: config.part_size(),
+                concurrency: config.concurrency(),
                 prefix: config.prefix().clone(),
                 deadline: config.deadline(),
                 stats: Mutex::new(ListStats::default()),
@@ -217,6 +231,29 @@ impl<T: Transport> ObjectStore for S3Store<T> {
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
         self.inner.delete(keys)
     }
+
+    fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {
+        match kind {
+            BatchKind::Reads | BatchKind::Lists => READ_CONCURRENCY,
+            BatchKind::Stamps => CREATION_TIME_CONCURRENCY,
+        }
+    }
+
+    async fn read_many(&self, reads: &[ReadAt]) -> Vec<Result<Vec<u8>, StoreError>> {
+        self.inner.read_many(reads)
+    }
+
+    async fn list_many(
+        &self,
+        pages: &[ListAt],
+        limit: PageLimit,
+    ) -> Vec<Result<Listing, StoreError>> {
+        self.inner.list_many(pages, limit)
+    }
+
+    async fn stamp_many(&self, files: &[FileInfo]) -> Vec<Result<StoredStamp, StoreError>> {
+        self.inner.stamp_many(files)
+    }
 }
 
 /// The stamp a HEAD settles: the object's metadata when it has one, else the
@@ -290,6 +327,21 @@ impl<T: Transport> Inner<T> {
             .map_err(|err| classify_transport(op, &err))
     }
 
+    /// Sends a batch with at most `limit` requests in flight; one result per
+    /// request, in order, whatever each status.
+    pub(crate) fn send_many(
+        &self,
+        op: StoreOp,
+        limit: NonZeroUsize,
+        requests: Vec<HttpRequest>,
+    ) -> Vec<Result<HttpResponse, StoreError>> {
+        self.transport
+            .send_many(requests, limit)
+            .into_iter()
+            .map(|sent| sent.map_err(|err| classify_transport(op, &err)))
+            .collect()
+    }
+
     /// Sends, and turns a failure status into its [`StoreError`].
     pub(crate) fn exec(
         &self,
@@ -335,6 +387,60 @@ impl<T: Transport> Inner<T> {
         });
     }
 
+    /// Builds every request, sends the batch, and judges each response
+    /// as [`Self::read`] does. A request that cannot be built fails its slot.
+    fn read_many(&self, reads: &[ReadAt]) -> Vec<Result<Vec<u8>, StoreError>> {
+        let op = StoreOp::Read;
+        self.batch(
+            op,
+            READ_CONCURRENCY,
+            reads.iter().copied(),
+            |at| {
+                let request =
+                    self.request(op, |b, now| b.get_range(now, &at.key, at.offset, at.len))?;
+                Ok((request, at))
+            },
+            |at, response| Self::range_body(&at.key, at.offset, at.len, response),
+        )
+    }
+
+    /// One request per item, sent as one batch. `build` makes an item's
+    /// request and what judging its answer needs; `judge` turns each response
+    /// into the item's result. An item whose request could not be built keeps
+    /// that error and is not sent.
+    pub(crate) fn batch<I, J, R>(
+        &self,
+        op: StoreOp,
+        limit: NonZeroUsize,
+        items: impl IntoIterator<Item = I>,
+        mut build: impl FnMut(I) -> Result<(HttpRequest, J), StoreError>,
+        judge: impl Fn(J, &HttpResponse) -> Result<R, StoreError>,
+    ) -> Vec<Result<R, StoreError>> {
+        let mut requests = Vec::new();
+        let mut contexts = Vec::new();
+        for item in items {
+            match build(item) {
+                Ok((request, context)) => {
+                    requests.push(request);
+                    contexts.push(Ok(context));
+                }
+                Err(err) => contexts.push(Err(err)),
+            }
+        }
+        let mut sent = self.send_many(op, limit, requests).into_iter();
+        contexts
+            .into_iter()
+            .map(|context| {
+                let context = context?;
+                let response = sent.next().unwrap_or(Err(StoreError::Transient {
+                    op,
+                    kind: io::ErrorKind::Other,
+                }))?;
+                judge(context, &response)
+            })
+            .collect()
+    }
+
     fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
         let op = StoreOp::Read;
         let request = self.request(op, |b, now| b.get_range(now, key, offset, len))?;
@@ -355,13 +461,38 @@ impl<T: Transport> Inner<T> {
         let op = StoreOp::Read;
         let key = file.key;
         let request = self.request(op, |b, now| b.head(now, &key))?;
-        let response = self.exec(op, Some(&key), request)?;
-        let head = parse_head(&response).map_err(|err| err.into_store(op, Some(key)))?;
+        let response = self.send(op, request)?;
+        Self::judge_head(file, &response)
+    }
+
+    /// What one HEAD's answer says about `file`'s stamp.
+    fn judge_head(file: &FileInfo, response: &HttpResponse) -> Result<StoredStamp, StoreError> {
+        let op = StoreOp::Read;
+        let key = file.key;
+        classify(op, Some(&key), None, response)?;
+        let head = parse_head(response).map_err(|err| err.into_store(op, Some(key)))?;
         let listed = match file.listed {
             ListedStamp::Stored(stamp) => stamp.at(),
             ListedStamp::LastModified(at) => at,
         };
         stamp_from_head(op, &head, file.size, listed)
+    }
+
+    /// One HEAD per file as one batch, each judged and counted as
+    /// [`Self::stamp`] does.
+    fn stamp_many(&self, files: &[FileInfo]) -> Vec<Result<StoredStamp, StoreError>> {
+        let op = StoreOp::Read;
+        let results = self.batch(
+            op,
+            CREATION_TIME_CONCURRENCY,
+            files.iter(),
+            |file| Ok((self.request(op, |b, now| b.head(now, &file.key))?, file)),
+            |file, response| Self::judge_head(file, response),
+        );
+        for result in &results {
+            self.tally_stamp(result);
+        }
+        results
     }
 
     /// The first bytes and the stamp from one ranged GET, which carries the

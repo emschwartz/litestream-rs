@@ -19,11 +19,19 @@
 //! - Retrying is the caller's decision, made from the [`StoreError`] variant.
 //! - Every method returns within a deadline the implementation enforces, failing as
 //!   `Transient`; core holds no timer.
+//! - The batch methods (`read_many`, `list_many`, `stamp_many`) answer
+//!   each item exactly as the single method would, one result per item in
+//!   order. Their defaults call the single method item by item, so a store
+//!   that is not concurrent (the simulator's, a directory) needs nothing.
+//!   [`ObjectStore::batch_width`] says how many items of a [`BatchKind`] a
+//!   store runs at once (a store may allow more HEADs than ranged reads);
+//!   callers size their batches by it, so at width one nothing is fetched
+//!   ahead of need and the call sequence is the one sequential code makes.
 
 use std::fmt;
 use std::future::Future;
 use std::io;
-use std::num::{NonZeroU16, NonZeroU32};
+use std::num::{NonZeroU16, NonZeroU32, NonZeroUsize};
 use std::time::Duration;
 
 use lsr_ltx::{Timestamp, TxidRange};
@@ -326,6 +334,38 @@ impl StoreError {
     }
 }
 
+/// One ranged read of a batch: up to `len` bytes of `key` from `offset`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ReadAt {
+    /// The object.
+    pub key: FileKey,
+    /// The first byte.
+    pub offset: u64,
+    /// How many bytes, at most.
+    pub len: ReadLen,
+}
+
+/// One listing of a batch: the page of `level` strictly after `after`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ListAt {
+    /// The level.
+    pub level: Level,
+    /// The cursor, as for [`ObjectStore::list`].
+    pub after: Option<TxidRange>,
+}
+
+/// Which batch method a width is asked for. A store limits each kind apart
+/// because a backend's limits differ per kind of request.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BatchKind {
+    /// [`ObjectStore::read_many`].
+    Reads,
+    /// [`ObjectStore::list_many`].
+    Lists,
+    /// [`ObjectStore::stamp_many`].
+    Stamps,
+}
+
 /// A backend holding a replica's LTX objects, keyed by [`FileKey`].
 ///
 /// Futures are `Send` and name no runtime; a backend may complete them
@@ -378,6 +418,58 @@ pub trait ObjectStore: Send + Sync {
     /// Removes the keys. A key that is already gone is not an error, so a
     /// retried delete converges.
     fn delete(&self, keys: &[FileKey]) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// How many items of a batch of `kind` this store runs at once. A caller
+    /// asks for at most this many at a time, so its memory is this many
+    /// responses. One, the default, means the batch methods are sequential.
+    fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {
+        let _ = kind;
+        NonZeroUsize::MIN
+    }
+
+    /// [`Self::read`] for each item, one result per item, in order.
+    fn read_many(
+        &self,
+        reads: &[ReadAt],
+    ) -> impl Future<Output = Vec<Result<Vec<u8>, StoreError>>> + Send {
+        async move {
+            let mut out = Vec::with_capacity(reads.len());
+            for at in reads {
+                out.push(self.read(&at.key, at.offset, at.len).await);
+            }
+            out
+        }
+    }
+
+    /// [`Self::stamp`] for each file, one result per file, in order.
+    fn stamp_many(
+        &self,
+        files: &[FileInfo],
+    ) -> impl Future<Output = Vec<Result<StoredStamp, StoreError>>> + Send {
+        async move {
+            let mut out = Vec::with_capacity(files.len());
+            for file in files {
+                out.push(self.stamp(file).await);
+            }
+            out
+        }
+    }
+
+    /// [`Self::list`] for each item with the same `limit`, one result per
+    /// item, in order.
+    fn list_many(
+        &self,
+        pages: &[ListAt],
+        limit: PageLimit,
+    ) -> impl Future<Output = Vec<Result<Listing, StoreError>>> + Send {
+        async move {
+            let mut out = Vec::with_capacity(pages.len());
+            for at in pages {
+                out.push(self.list(at.level, at.after, limit).await);
+            }
+            out
+        }
+    }
 }
 
 /// One object being written. See the module docs for visibility.

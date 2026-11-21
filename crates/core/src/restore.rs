@@ -40,7 +40,7 @@ use crate::inventory::{Inventory, InventoryError};
 use crate::layout::{FileInfo, FileKey};
 use crate::ltx_read::{BrokenLink, LinkEnd, LtxRead, ReadFault, check_link};
 use crate::plan::{AsOfPlanner, ContiguousChain, KeyTarget, PlanOutcome, RestoreTarget, plan};
-use crate::stamps::{Resolve, ResolveError, Stamps, Step, resolve};
+use crate::stamps::{ResolveError, resolve_counted};
 use crate::store::{ObjectStore, ReadLen, StoreError};
 
 #[cfg(any(test, feature = "testing"))]
@@ -539,15 +539,8 @@ async fn plan_target<S: ObjectStore>(
         RestoreTarget::AsOf(instant) => instant,
     };
     let mut planner = AsOfPlanner::new(inventory, instant);
-    let mut counted = |stamps: &Stamps| {
-        let next = planner.advance(stamps);
-        if let Resolve::Need(_) = next {
-            *stamps_read = stamps_read.saturating_add(1);
-        }
-        next
-    };
-    match resolve(store, &mut counted).await {
-        Ok(resolved) => Ok(resolved.value),
+    match resolve_counted(store, &mut planner, stamps_read).await {
+        Ok(outcome) => Ok(outcome),
         Err(ResolveError::Store(StoreError::NotFound { key })) => Err(Abort::Vanished(key)),
         Err(ResolveError::Store(err)) => Err(RestoreError::Store(err).into()),
         Err(ResolveError::Repeated { key }) => Err(RestoreError::StampRepeated { key }.into()),
@@ -600,7 +593,7 @@ async fn apply_file<S: ObjectStore, K: DatabaseSink>(
     bytes_read: &mut u64,
 ) -> Result<Verified, Abort> {
     let key = info.key;
-    let mut read = LtxRead::new(key, chunk_len());
+    let mut read = LtxRead::new(key, chunk_len()).sized(info.size);
     let applied = read
         .read_verified(store, |event| match event {
             Event::Header(header) => check_header(key, &header, previous)

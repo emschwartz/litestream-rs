@@ -10,6 +10,8 @@ mod fake;
 #[cfg(test)]
 mod faults;
 #[cfg(test)]
+mod limits;
+#[cfg(test)]
 mod minio;
 #[cfg(test)]
 #[path = "common/real.rs"]

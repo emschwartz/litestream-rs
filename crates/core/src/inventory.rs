@@ -12,7 +12,16 @@ use lsr_ltx::{Txid, TxidRange};
 use thiserror::Error;
 
 use crate::layout::{FileInfo, FileKey, Level, ListedStamp, cmp_range};
-use crate::store::{ObjectStore, PageLimit, StoreError};
+use crate::store::{BatchKind, ListAt, ObjectStore, PageLimit, StoreError};
+
+/// The page size a full scan asks for. A backend that proves "more follows"
+/// with one key past the page (S3 caps a request at [`PageLimit::MAX`] keys)
+/// needs a second request for a page of exactly that size, and the next page
+/// then fetches the same keys again. One short of the cap fills a request.
+const SCAN_PAGE: PageLimit = match PageLimit::new(PageLimit::MAX_RAW - 1) {
+    Some(limit) => limit,
+    None => PageLimit::MAX,
+};
 
 /// Why an inventory could not be built.
 #[derive(Clone, PartialEq, Eq, Debug, Error)]
@@ -62,25 +71,45 @@ pub struct Inventory {
 impl Inventory {
     /// Lists every level to the end. The only async code in the planner.
     ///
+    /// Up to the store's [`BatchKind::Lists`] width of levels are listed at
+    /// once: each round asks for the next page of the first that many levels
+    /// still going, in level order, so at width one this is level 0 to the
+    /// end, then level 1, as one loop would do it.
+    ///
     /// # Errors
-    /// The first failed page, or a cursor that does not advance. Never a
-    /// partial inventory.
+    /// The first failed page in level order, or a cursor that does not
+    /// advance. Never a partial inventory.
     pub async fn load<S: ObjectStore>(store: &S) -> Result<Self, InventoryError> {
         let mut files = Vec::new();
         let mut skipped = BTreeMap::new();
-        for level in Level::ALL {
-            let mut after: Option<TxidRange> = None;
-            loop {
-                let page = store.list(level, after, PageLimit::MAX).await?;
-                let seen: &mut usize = skipped.entry(level).or_default();
+        let width = store.batch_width(BatchKind::Lists).get();
+        let mut going: Vec<ListAt> = Level::ALL
+            .iter()
+            .map(|&level| ListAt { level, after: None })
+            .collect();
+        while !going.is_empty() {
+            let round: Vec<ListAt> = going.iter().take(width).copied().collect();
+            let pages = store.list_many(&round, SCAN_PAGE).await;
+            let mut next = Vec::with_capacity(going.len());
+            for (at, page) in round.iter().zip(pages) {
+                let page = page?;
+                let seen: &mut usize = skipped.entry(at.level).or_default();
                 *seen = seen.saturating_add(page.skipped);
                 files.extend(page.files);
-                let Some(cursor) = page.next else { break };
-                if after.is_some_and(|prev| cmp_range(cursor, prev).is_le()) {
-                    return Err(InventoryError::ListingStalled { level, cursor });
+                let Some(cursor) = page.next else { continue };
+                if at.after.is_some_and(|prev| cmp_range(cursor, prev).is_le()) {
+                    return Err(InventoryError::ListingStalled {
+                        level: at.level,
+                        cursor,
+                    });
                 }
-                after = Some(cursor);
+                next.push(ListAt {
+                    level: at.level,
+                    after: Some(cursor),
+                });
             }
+            next.extend(going.into_iter().skip(round.len()));
+            going = next;
         }
         Self::from_parts(files, skipped)
     }
@@ -104,13 +133,24 @@ impl Inventory {
     }
 
     /// The same inventory with every file's stamp read from the store, one
-    /// `stamp` call (a HEAD on S3) per file, so each is `Stored` afterwards.
+    /// stamp (a HEAD on S3) per file, so each is `Stored` afterwards. Reads go
+    /// out [`BatchKind::Stamps`] width at a time through [`ObjectStore::stamp_many`].
     ///
     /// # Errors
-    /// The first failed read; never a partly stamped inventory.
+    /// The first failed read in key order; never a partly stamped inventory.
     pub async fn stamped<S: ObjectStore>(mut self, store: &S) -> Result<Self, StoreError> {
-        for info in &mut self.files {
-            info.listed = ListedStamp::Stored(store.stamp(info).await?);
+        let width = store.batch_width(BatchKind::Stamps).get();
+        for files in self.files.chunks_mut(width) {
+            let read = store.stamp_many(files).await;
+            if read.len() != files.len() {
+                return Err(StoreError::Transient {
+                    op: crate::store::StoreOp::Read,
+                    kind: std::io::ErrorKind::InvalidData,
+                });
+            }
+            for (info, stamp) in files.iter_mut().zip(read) {
+                info.listed = ListedStamp::Stored(stamp?);
+            }
         }
         Ok(self)
     }

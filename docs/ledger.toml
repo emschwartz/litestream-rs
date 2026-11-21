@@ -287,7 +287,7 @@
 "TestNewS3ReplicaClientFromConfig/QuerySignAcceptEncodingAliases" = { counterpart = "lsr-config::config::map::no_effect_query_keys_are_noted" }
 "TestNewS3ReplicaClientFromConfig/QuerySigningOptions" = { counterpart = "lsr-config::config::map::no_effect_query_keys_are_noted" }
 "TestNewS3ReplicaClientFromConfig/R2ConfigExplicitOverride" = { reason = "Request signing options have no effect in v1, whose S3 client signs requests one fixed way: the keys are accepted with one warning each (lsr-config::config::classes::no_effect_knobs_warn_once_each) and as URL query keys are noted (lsr-config::config::map::no_effect_query_keys_are_noted), so which spelling wins changes nothing." }
-"TestNewS3ReplicaClientFromConfig/R2QueryConcurrencyOverride" = { reason = "Upload concurrency has no effect in v1, which uploads one part at a time: `concurrency` is accepted with a warning in the file and noted as a URL query key (lsr-config::config::map::no_effect_query_keys_are_noted)." }
+"TestNewS3ReplicaClientFromConfig/R2QueryConcurrencyOverride" = { counterpart = "lsr-config::config::map::concurrency_reaches_the_store_config" }
 "TestNewS3ReplicaClientFromConfig/TigrisConfigEndpoint" = { counterpart = "lsr-config::config::map::bucket_path_and_endpoint_keys_without_a_url" }
 "TestNewS3ReplicaClientFromConfig/TigrisExample" = { counterpart = ["lsr-config::config::map::bucket_path_and_endpoint_keys_without_a_url", "lsr-config::config::map::query_settings_apply_and_the_file_s_keys_win", "lsr-store-s3::config::tests::tigris_gets_its_part_size"] }
 "TestNewS3ReplicaClientFromConfig/TigrisManualOverride" = { reason = "Request signing options have no effect in v1, whose S3 client signs requests one fixed way: the keys are accepted with one warning each (lsr-config::config::classes::no_effect_knobs_warn_once_each) and as URL query keys are noted (lsr-config::config::map::no_effect_query_keys_are_noted), so which spelling wins changes nothing. Content-MD5 settings have no effect in v1, which always sends Content-MD5 on uploads: the keys are accepted with one warning each (lsr-config::config::classes::no_effect_knobs_warn_once_each) and as URL query keys are noted (lsr-config::config::map::no_effect_query_keys_are_noted), so which spelling wins changes nothing." }
@@ -342,12 +342,12 @@
 "TestReplicaConfig_MaxSyncLTXFiles/GlobalDefault" = { counterpart = "lsr-config::config::go::max_sync_ltx_files_is_read_and_inherited" }
 "TestReplicaConfig_MaxSyncLTXFiles/NotSpecified" = { counterpart = "lsr-config::config::go::max_sync_ltx_files_is_read_and_inherited" }
 "TestReplicaConfig_MaxSyncLTXFiles/Specified" = { counterpart = "lsr-config::config::go::max_sync_ltx_files_is_read_and_inherited" }
-"TestS3ReplicaConfig_PartSizeAndConcurrency" = { counterpart = "lsr-config::config::go::part_size_in_iec_and_si_units_and_concurrency_has_no_effect" }
-"TestS3ReplicaConfig_PartSizeAndConcurrency/NotSpecified" = { counterpart = "lsr-config::config::go::part_size_in_iec_and_si_units_and_concurrency_has_no_effect" }
-"TestS3ReplicaConfig_PartSizeAndConcurrency/WithBoth" = { counterpart = "lsr-config::config::go::part_size_in_iec_and_si_units_and_concurrency_has_no_effect" }
-"TestS3ReplicaConfig_PartSizeAndConcurrency/WithConcurrency" = { counterpart = "lsr-config::config::go::part_size_in_iec_and_si_units_and_concurrency_has_no_effect" }
-"TestS3ReplicaConfig_PartSizeAndConcurrency/WithPartSize_IEC" = { counterpart = "lsr-config::config::go::part_size_in_iec_and_si_units_and_concurrency_has_no_effect" }
-"TestS3ReplicaConfig_PartSizeAndConcurrency/WithPartSize_SI" = { counterpart = "lsr-config::config::go::part_size_in_iec_and_si_units_and_concurrency_has_no_effect" }
+"TestS3ReplicaConfig_PartSizeAndConcurrency" = { counterpart = "lsr-config::config::go::part_size_in_iec_and_si_units_and_concurrency" }
+"TestS3ReplicaConfig_PartSizeAndConcurrency/NotSpecified" = { counterpart = "lsr-config::config::go::part_size_in_iec_and_si_units_and_concurrency" }
+"TestS3ReplicaConfig_PartSizeAndConcurrency/WithBoth" = { counterpart = "lsr-config::config::go::part_size_in_iec_and_si_units_and_concurrency" }
+"TestS3ReplicaConfig_PartSizeAndConcurrency/WithConcurrency" = { counterpart = "lsr-config::config::go::part_size_in_iec_and_si_units_and_concurrency" }
+"TestS3ReplicaConfig_PartSizeAndConcurrency/WithPartSize_IEC" = { counterpart = "lsr-config::config::go::part_size_in_iec_and_si_units_and_concurrency" }
+"TestS3ReplicaConfig_PartSizeAndConcurrency/WithPartSize_SI" = { counterpart = "lsr-config::config::go::part_size_in_iec_and_si_units_and_concurrency" }
 "TestStripSQLitePrefix" = { counterpart = "lsr-config::expand::tests::go_strip_sqlite_prefix_table" }
 "TestX509FallbackRoots" = { counterpart = "lsr-store-s3::trust::tests::go_unix::nothing_found_falls_back_to_mozilla_roots" }
 
@@ -806,7 +806,7 @@
 "TestReplicaClient_PITR_ManyLTXFiles" = { counterpart = "lsr-store-s3::store-s3::request_counts::cases::as_of_heads_are_bounded" }
 "TestReplicaClient_PITR_TimestampFiltering" = { counterpart = "lsr-core::core::plan_lazy::lazy::plan_as_of_equals_the_exact_planner" }
 "TestReplicaClient_S3_BucketValidation" = { counterpart = "lsr-config::config::s3url::each_bad_shape_is_refused" }
-"TestReplicaClient_S3_ConcurrencyLimits" = { counterpart = "lsr-store-s3::store-s3::store::cases::memory_is_one_part" }
+"TestReplicaClient_S3_ConcurrencyLimits" = { counterpart = "lsr-store-s3::store-s3::store::cases::memory_is_at_most_the_concurrency_in_parts" }
 "TestReplicaClient_S3_ErrorContext" = { counterpart = "lsr-store-s3::response::tests::response_faults_map_to_store_errors" }
 "TestReplicaClient_S3_MultipartThresholds" = { counterpart = ["lsr-store-s3::store-s3::store::cases::exactly_part_size_uses_multipart", "lsr-store-s3::store-s3::store::cases::one_below_part_size_uses_put"] }
 "TestReplicaClient_S3_UnsignedPayloadRoundTrip" = { counterpart = "lsr-store-s3::store-s3::fake::cases::signing_rule_is_enforced_both_ways" }
@@ -1082,7 +1082,7 @@
 "TestReplicaClient_PutObjectContentMD5OtherOperations/Region" = { reason = "Go-only: configuration of the AWS SDK for Go (its retryer, uploader manager, checksum middleware or HTTP client). lsr-store-s3 signs its own requests with rusty-s3 over ureq or reqwest and has no SDK to configure." }
 "TestReplicaClient_PutObjectContentMD5OtherOperations/Snapshots" = { reason = "The v0.3 generations/ layout (snapshots and WAL segments under generations/) is not in v1 (docs/PLAN.md section 1); Rust reads and writes the v0.5 LTX layout only." }
 "TestReplicaClient_PutObjectContentMD5OtherOperations/WALSegments" = { reason = "The v0.3 generations/ layout (snapshots and WAL segments under generations/) is not in v1 (docs/PLAN.md section 1); Rust reads and writes the v0.5 LTX layout only." }
-"TestReplicaClient_R2ConcurrencyDefault" = { counterpart = "lsr-store-s3::store-s3::store::cases::memory_is_one_part" }
+"TestReplicaClient_R2ConcurrencyDefault" = { counterpart = "lsr-store-s3::store-s3::store::cases::memory_is_at_most_the_concurrency_in_parts" }
 "TestReplicaClient_RetriesThrottledList" = { counterpart = "lsr-cli::bin/lsr::run::tests::a_throttled_listing_is_retried" }
 "TestReplicaClient_RetryerSurvivesSustainedFailures" = { counterpart = ["lsr-core::retry::tests::calls_and_waits_stay_within_the_policy", "lsr-core::actor::tests::retry_backs_off_per_lane"] }
 "TestReplicaClient_S3DebugEnvVar" = { reason = "Go-only: an environment variable that turns on the AWS SDK's request logging. lsr-store-s3's errors and debug output never carry secrets (lsr-store-s3 secrets::credentials_never_print) and there is no SDK log." }
@@ -1117,9 +1117,9 @@
 "TestReplicaClient_WriteLTXFile_PutObjectContentMD5" = { counterpart = ["lsr-store-s3::request::tests::put_carries_length_md5_and_stamp", "lsr-store-s3::store-s3::minio::wrong_content_md5_is_refused_by_minio"] }
 "TestReplicaClient_WriteLTXFile_SinglePutKnownSize" = { counterpart = "lsr-store-s3::request::tests::put_carries_length_md5_and_stamp" }
 "TestReplicaClient_WriteLTXFile_SinglePutRetries" = { counterpart = "lsr-store-s3::store-s3::store::cases::throttle_then_success_under_retrying" }
-"TestReplicaClient_WriteLTXFile_SmallUploadAllocations" = { counterpart = "lsr-store-s3::store-s3::store::cases::memory_is_one_part" }
-"TestReplicaClient_WriteLTXFile_SmallUploadAllocations/KnownSizeFile" = { counterpart = "lsr-store-s3::store-s3::store::cases::memory_is_one_part" }
-"TestReplicaClient_WriteLTXFile_SmallUploadAllocations/UnknownSizeStream" = { counterpart = "lsr-store-s3::store-s3::store::cases::memory_is_one_part" }
+"TestReplicaClient_WriteLTXFile_SmallUploadAllocations" = { counterpart = "lsr-store-s3::store-s3::store::cases::memory_is_at_most_the_concurrency_in_parts" }
+"TestReplicaClient_WriteLTXFile_SmallUploadAllocations/KnownSizeFile" = { counterpart = "lsr-store-s3::store-s3::store::cases::memory_is_at_most_the_concurrency_in_parts" }
+"TestReplicaClient_WriteLTXFile_SmallUploadAllocations/UnknownSizeStream" = { counterpart = "lsr-store-s3::store-s3::store::cases::memory_is_at_most_the_concurrency_in_parts" }
 "TestReplicaClient_WriteLTXFile_StreamLargeMultipartRoundTrip" = { counterpart = "lsr-store-s3::store-s3::store::cases::multipart_round_trip_keeps_bytes_and_stamp" }
 "TestReplicaClient_WriteLTXFile_StreamSmallSinglePut" = { counterpart = "lsr-store-s3::store-s3::store::cases::one_below_part_size_uses_put" }
 "TestTransportRetryer_RetriesProviderThrottleResponses" = { counterpart = ["lsr-store-s3::store-s3::faults::cases::status_408_is_transient", "lsr-store-s3::classify::tests::classify_success_retry_and_throttle"] }

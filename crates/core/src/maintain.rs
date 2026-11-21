@@ -65,7 +65,7 @@ use crate::compact::{CompactError, CompactionInputs, MAX_INPUTS, compact};
 use crate::inventory::{Inventory, is_snapshot_start};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::plan::PlanOutcome;
-use crate::stamps::{Resolve, Stamps};
+use crate::stamps::{Need, Resolve, Stamps};
 use crate::store::{CorruptCause, ObjectStore, StoreError};
 use retain::{Retention, retention};
 
@@ -427,7 +427,7 @@ fn decide(
     published: Option<Txid>,
     state: &mut MaintainState,
     stamps: &Stamps,
-) -> Result<Due, FileInfo> {
+) -> Result<Due, Need> {
     state.forget_unlisted(|key| inventory.level(key.level()).iter().any(|f| f.key == *key));
     let mut until: Option<Timestamp> = None;
     let levels = Level::ALL
@@ -498,7 +498,7 @@ fn plan_level(
     dst: Level,
     state: &MaintainState,
     stamps: &Stamps,
-) -> Result<Step, FileInfo> {
+) -> Result<Step, Need> {
     let (Some(src_level), Some(interval)) = (
         Level::new(dst.get().saturating_sub(1)),
         config.interval(dst),
@@ -573,7 +573,7 @@ fn plan_snapshot(
     config: &Maintenance,
     published: Option<Txid>,
     stamps: &Stamps,
-) -> Result<Step, FileInfo> {
+) -> Result<Step, Need> {
     let Some(pos) = inventory.newest().max(published) else {
         return Ok(Step::Idle);
     };
@@ -603,11 +603,11 @@ fn plan_snapshot(
 }
 
 /// Whether the file was stamped after `start`, or the request for its stamp.
-fn stamped_after(stamps: &Stamps, info: &FileInfo, start: Timestamp) -> Result<bool, FileInfo> {
+fn stamped_after(stamps: &Stamps, info: &FileInfo, start: Timestamp) -> Result<bool, Need> {
     stamps
         .exact(info)
         .map(|stamp| stamp.at() > start)
-        .ok_or(*info)
+        .ok_or_else(|| Need::one(*info))
 }
 
 /// Why a job did not finish.

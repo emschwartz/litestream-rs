@@ -25,7 +25,10 @@
 //! every snapshot start)`: a listing that carries no exact stamps costs a
 //! request per file asked for, so only those files are read, plus the level 0
 //! files a rule would delete, in key order up to and including the first young
-//! one (at most [`MAX_DELETE`], past which the job is full anyway). On a
+//! one (at most [`MAX_DELETE`], past which the job is full anyway). On a store
+//! that runs batches the anchors are read side by side, and the level 0 scan
+//! reads ahead of its position, never more files than it has already found
+//! old, so past the first young one it reads at most that many for nothing. On a
 //! writer's listing a file's stamp rises with its range, so the anchor equals
 //! the newest stamp anywhere; on any listing it is never above it, and a lower
 //! anchor only keeps more. A clock that jumps ahead deletes nothing the
@@ -102,7 +105,7 @@ use super::{DeleteJob, Hold, L0Retention, MAX_DELETE, MaintainState, Maintenance
 use crate::inventory::{Inventory, is_snapshot_start};
 use crate::layout::{FileInfo, FileKey, Level, RealStamp, StoredStamp};
 use crate::plan::{KeyTarget, PlanOutcome, plan};
-use crate::stamps::{Resolve, Stamps};
+use crate::stamps::{Need, Resolve, Stamps};
 
 #[cfg(test)]
 #[expect(
@@ -133,8 +136,9 @@ pub(super) enum Retention {
     Held(Hold),
 }
 
-/// A decision step that may need one more stamp: `Err` names the file.
-type Needs<T> = Result<T, FileInfo>;
+/// A decision step that may need one more stamp: `Err` names the file, and
+/// the files it expects to need next.
+type Needs<T> = Result<T, Need>;
 
 /// The next delete job, or why there is none, or the one stamp needed before
 /// either is known. See the module docs.
@@ -166,6 +170,11 @@ fn decide(
     let anchors = anchor_files(inventory);
     if anchors.is_empty() {
         return Ok(Retention::Wait { until: None });
+    }
+    // Every anchor's stamp is needed below, so ask for all that are missing at once.
+    let mut missing = anchors.iter().filter(|info| stamps.exact(info).is_none());
+    if let Some(first) = missing.next() {
+        return Err(Need::with_ahead(*first, missing.copied()));
     }
     // A file with no real stamp sets no anchor: it has no age to measure.
     let mut newest_stamp: Option<Timestamp> = None;
@@ -337,7 +346,10 @@ fn latest_unplannable(inventory: &Inventory) -> Option<Hold> {
 /// The file's exact stamp when it is a real one (`None` for a writer that
 /// stamped nothing), or the request for it.
 fn stamp_of(stamps: &Stamps, info: &FileInfo) -> Needs<Option<RealStamp>> {
-    stamps.exact(info).map(StoredStamp::real).ok_or(*info)
+    stamps
+        .exact(info)
+        .map(StoredStamp::real)
+        .ok_or_else(|| Need::one(*info))
 }
 
 /// Whether a stamp at or before the epoch is no stamp at all for this file:
@@ -520,6 +532,9 @@ fn level_zero(
         if chosen == MAX_DELETE {
             return Ok(None);
         }
+        if stamps.exact(info).is_none() {
+            return Err(level_zero_need(files, scan, &cover, stamps, info, chosen));
+        }
         let Some(created) = stamp_of(stamps, info)? else {
             return Ok(Some(Hold::Unstamped { key: info.key }));
         };
@@ -531,6 +546,36 @@ fn level_zero(
         chosen = chosen.saturating_add(1);
     }
     Ok(None)
+}
+
+/// The level 0 file whose stamp the scan needs, and after it the files the
+/// scan would read next if each turns out old enough to delete. The scan
+/// stops at the first young one, so these are a guess: no more are named than
+/// files this scan already found old (`chosen`), which keeps an idle tick,
+/// whose first candidate is young, at one read, and wastes at most as many
+/// reads as were needed.
+fn level_zero_need(
+    files: &[FileInfo],
+    scan: &LevelZero,
+    cover: &[(Txid, Txid)],
+    stamps: &Stamps,
+    need: &FileInfo,
+    chosen: usize,
+) -> Need {
+    let ahead = files
+        .iter()
+        .take(files.len().saturating_sub(1))
+        .skip_while(|info| info.key != need.key)
+        .skip(1)
+        .filter(|info| {
+            scan.floor
+                .is_some_and(|floor| info.key.range().max() < floor)
+                || covered(cover, info)
+        })
+        .take(chosen.min(MAX_DELETE.saturating_sub(chosen).saturating_sub(1)))
+        .filter(|info| stamps.exact(info).is_none())
+        .copied();
+    Need::with_ahead(*need, ahead)
 }
 
 /// The union of the files' ranges as sorted, disjoint, non-adjacent spans.

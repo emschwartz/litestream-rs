@@ -3,9 +3,13 @@
 //! Writes accumulate in one buffer of at most one part (the memory bound). An
 //! object that ends below the part size is sent as one PUT, as Go does (rc.go:814).
 //! The write that fills the buffer starts a multipart upload (the stamp rides on
-//! CreateMultipartUpload), and each full buffer is uploaded as the next part,
-//! sequentially (ruling F5). A failed part fails the upload and the caller
-//! restarts it; nothing is retried here.
+//! CreateMultipartUpload), and each full buffer becomes the next part. Full
+//! parts wait until the `concurrency` setting's worth of them is ready (the buffer
+//! filling counts as one), then go out as one batch, so memory is at most
+//! that many parts. With a concurrency of one each part is sent by the write
+//! that filled it, as before. A failed part fails the upload (at the write or
+//! commit that sent its batch) and the caller restarts it; nothing is retried
+//! here.
 //!
 //! A single PUT is judged by the status, and then by the `ETag`: for a PUT
 //! without server-side encryption the ETag is the object's MD5, so a different
@@ -16,8 +20,10 @@
 //! treated the same way; a wrong part ETag leaves nothing visible, so the upload
 //! id goes on the orphan list instead.
 //!
-//! Dropping a multipart upload does no I/O: its id goes on the orphan list
-//! (`orphans.rs`).
+//! Dropping a multipart upload does no I/O: parts not yet sent are dropped
+//! and its id goes on the orphan list (`orphans.rs`). A batch has finished
+//! (every request answered or timed out) before its call returns, so no part
+//! is ever in flight when an id is orphaned or aborted.
 
 use std::io;
 use std::sync::Arc;
@@ -34,10 +40,6 @@ use crate::response::{EtagCheck, check_etag};
 use crate::store::Inner;
 use crate::transport::Transport;
 
-/// The HTTP status a store-side "too large" is reported as: an upload that
-/// would need more than 10000 parts.
-const PAYLOAD_TOO_LARGE: u16 = 413;
-
 /// Where an upload is. `Done` is after a commit, an abort or a failure: the
 /// upload id, if there was one, is already with the caller or on the orphan list.
 enum UploadState {
@@ -47,6 +49,8 @@ enum UploadState {
         /// The ETag of part n is the (n - 1)th entry.
         etags: Vec<String>,
         buf: Vec<u8>,
+        /// Full parts not yet sent; they follow `etags` in order.
+        ready: Vec<Vec<u8>>,
     },
     Done,
 }
@@ -86,12 +90,17 @@ impl<T> S3Upload<T> {
         }
     }
 
-    /// The buffer's capacity, so a test can prove the memory bound.
+    /// The capacity of every buffer held (parts waiting and the one
+    /// filling), so a test can prove the memory bound.
     #[cfg(feature = "testing")]
     #[must_use]
     pub fn buffer_capacity(&self) -> usize {
         match &self.state {
-            UploadState::Buffering(buf) | UploadState::Multipart { buf, .. } => buf.capacity(),
+            UploadState::Buffering(buf) => buf.capacity(),
+            UploadState::Multipart { buf, ready, .. } => ready
+                .iter()
+                .map(Vec::capacity)
+                .fold(buf.capacity(), usize::saturating_add),
             UploadState::Done => 0,
         }
     }
@@ -198,7 +207,7 @@ impl<T: Transport> S3Upload<T> {
             chunk = rest;
             if buf.len() >= part {
                 self.start_multipart()?;
-                self.send_part(start)?;
+                self.queue_part(start)?;
             }
         }
         Ok(())
@@ -218,29 +227,46 @@ impl<T: Transport> S3Upload<T> {
             id,
             etags: Vec::new(),
             buf,
+            ready: Vec::new(),
         };
         Ok(())
     }
 
-    /// Uploads the buffer as the next part. Any failure ends the upload and
-    /// hands its id to the orphan list.
-    fn send_part(&mut self, start: Timestamp) -> Result<(), StoreError> {
-        let UploadState::Multipart { id, etags, buf } = &mut self.state else {
+    /// Moves the full buffer to the parts waiting, and sends them once the
+    /// store's concurrency of them is ready.
+    fn queue_part(&mut self, start: Timestamp) -> Result<(), StoreError> {
+        let width = self.inner.concurrency.get();
+        let UploadState::Multipart { buf, ready, .. } = &mut self.state else {
             return Ok(());
         };
-        let outcome = PartNumber::new(u16::try_from(etags.len().saturating_add(1)).unwrap_or(0))
-            .ok_or(StoreError::Refused {
-                op: StoreOp::Upload,
-                status: PAYLOAD_TOO_LARGE,
-            })
-            .and_then(|number| {
-                self.inner.within_budget(StoreOp::Upload, start)?;
-                self.inner
-                    .put_part(&self.key, id, number, std::mem::take(buf))
-            });
+        ready.push(std::mem::take(buf));
+        if ready.len() >= width {
+            return self.send_parts(start);
+        }
+        Ok(())
+    }
+
+    /// Uploads every waiting part as one batch. Any failure ends the upload
+    /// and hands its id to the orphan list.
+    fn send_parts(&mut self, start: Timestamp) -> Result<(), StoreError> {
+        let UploadState::Multipart {
+            id, etags, ready, ..
+        } = &mut self.state
+        else {
+            return Ok(());
+        };
+        if ready.is_empty() {
+            return Ok(());
+        }
+        let bodies = std::mem::take(ready);
+        let first = etags.len().saturating_add(1);
+        let outcome = self
+            .inner
+            .within_budget(StoreOp::Upload, start)
+            .and_then(|()| self.inner.put_parts(&self.key, id, first, bodies));
         match outcome {
-            Ok(etag) => {
-                etags.push(etag);
+            Ok(sent) => {
+                etags.extend(sent);
                 Ok(())
             }
             Err(err) => {
@@ -254,9 +280,12 @@ impl<T: Transport> S3Upload<T> {
     /// the ETag check on the finished object.
     fn finish_multipart(&mut self) -> Result<FileInfo, StoreError> {
         let start = self.inner.now();
-        if matches!(&self.state, UploadState::Multipart { buf, .. } if !buf.is_empty()) {
-            self.send_part(start)?;
+        if let UploadState::Multipart { buf, ready, .. } = &mut self.state
+            && !buf.is_empty()
+        {
+            ready.push(std::mem::take(buf));
         }
+        self.send_parts(start)?;
         let UploadState::Multipart { id, etags, .. } = &self.state else {
             return Err(ended());
         };

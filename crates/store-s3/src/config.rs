@@ -1,12 +1,13 @@
 //! What identifies a replica on an S3-compatible service: endpoint, bucket,
-//! prefix, region, addressing style, provider and part size, each a type that
-//! holds only a usable value.
+//! prefix, region, addressing style, provider, part size and multipart
+//! concurrency, each a type that holds only a usable value.
 //!
 //! Reading an `s3://` URL is not here: `lsr-config`'s `S3Url` is the one parser,
 //! Go's grammar, for the daemon's config and the command line alike. No error
 //! here carries any part of a URL.
 
 use std::fmt;
+use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use thiserror::Error;
@@ -289,11 +290,35 @@ pub struct S3Config {
     style: UrlStyle,
     provider: Provider,
     part_size: PartSize,
+    concurrency: Option<NonZeroUsize>,
     deadline: Duration,
 }
 
 /// How long one request may take end to end unless told otherwise.
 const DEFAULT_DEADLINE: Duration = Duration::from_secs(60);
+
+/// Multipart parts in flight unless told otherwise (Go: `DefaultConcurrency`).
+pub const DEFAULT_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(4);
+
+/// Multipart parts in flight on Cloudflare R2 unless told otherwise. Go forces
+/// 2 there; here a configured value wins, because the cap behind it (about 2
+/// parts per upload ID, acknowledged by Cloudflare in 2022 and never documented
+/// as lifted) is a default's worth of caution, not a rule the user may not test.
+/// Tigris has no special case: it documents no limit and its own docs use 8
+/// concurrent parts, so it gets [`DEFAULT_CONCURRENCY`] (Go's 2 there was a
+/// conservative default with no measured limit).
+pub const R2_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(1);
+
+/// Creation-time HEADs in flight at once. Go allows 50 (`MetadataConcurrency`),
+/// a figure taken from AWS's 5,500 HEAD/s per prefix and never measured on R2
+/// or Tigris, so this is lower. Not configurable, as in Go. Memory is this many
+/// small responses.
+pub const CREATION_TIME_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(15);
+
+/// Ranged reads (a restore reading ahead) and listing pages (the levels of an
+/// inventory) in flight at once. Go does neither side by side, so there is no
+/// Go value; not configurable. Memory is this many read lengths for reads.
+pub const READ_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(7);
 
 impl S3Config {
     /// A configuration with the defaults the endpoint's provider gets:
@@ -323,6 +348,7 @@ impl S3Config {
             } else {
                 PartSize::MIN
             },
+            concurrency: None,
             deadline: DEFAULT_DEADLINE,
         }
     }
@@ -353,6 +379,17 @@ impl S3Config {
     #[must_use]
     pub fn with_part_size(mut self, part_size: PartSize) -> Self {
         self.part_size = part_size;
+        self
+    }
+
+    /// Replaces how many parts of one multipart upload may be in flight at
+    /// once, Go's `concurrency`. It governs nothing else: reads, listings and
+    /// HEADs have their own fixed limits. Memory held by an upload is at most
+    /// this many parts (`concurrency` times the part size). One sends every
+    /// part after the one before it.
+    #[must_use]
+    pub fn with_concurrency(mut self, concurrency: NonZeroUsize) -> Self {
+        self.concurrency = Some(concurrency);
         self
     }
 
@@ -403,6 +440,19 @@ impl S3Config {
     #[must_use]
     pub fn part_size(&self) -> PartSize {
         self.part_size
+    }
+
+    /// How many parts of one multipart upload may be in flight: the
+    /// configured value, else [`R2_CONCURRENCY`] on R2, else
+    /// [`DEFAULT_CONCURRENCY`]. Decided here, not when set, so the provider
+    /// may change after.
+    #[must_use]
+    pub fn concurrency(&self) -> NonZeroUsize {
+        match (self.concurrency, self.provider) {
+            (Some(set), _) => set,
+            (None, Provider::R2) => R2_CONCURRENCY,
+            (None, _) => DEFAULT_CONCURRENCY,
+        }
     }
 
     /// The per-request deadline the transport enforces.
@@ -474,5 +524,39 @@ mod tests {
             })
         );
         assert_eq!(PartSize::new(5 * 1024 * 1024), Ok(PartSize::MIN));
+    }
+
+    fn config_at(host: &str) -> S3Config {
+        let endpoint = Endpoint::new(&format!("https://{host}")).unwrap();
+        S3Config::new(
+            endpoint,
+            BucketName::new("b").unwrap(),
+            Prefix::new("p").unwrap(),
+        )
+    }
+
+    fn n(value: usize) -> NonZeroUsize {
+        NonZeroUsize::new(value).unwrap()
+    }
+
+    /// Multipart parts in flight: 5, R2 2 unless set, a set value always wins.
+    #[test]
+    fn multipart_concurrency_defaults_per_provider() {
+        let generic = config_at("s3.us-east-1.amazonaws.com");
+        let tigris = config_at("fly.storage.tigris.dev");
+        let r2 = config_at("acct.r2.cloudflarestorage.com");
+        assert_eq!(generic.concurrency().get(), 5);
+        assert_eq!(tigris.concurrency().get(), 5);
+        assert_eq!(r2.concurrency().get(), 2);
+        assert_eq!(generic.with_concurrency(n(9)).concurrency().get(), 9);
+        assert_eq!(tigris.with_concurrency(n(9)).concurrency().get(), 9);
+        assert_eq!(r2.with_concurrency(n(9)).concurrency().get(), 9);
+    }
+
+    /// The fixed limits of the other kinds of request.
+    #[test]
+    fn other_kinds_have_fixed_limits() {
+        assert_eq!(CREATION_TIME_CONCURRENCY.get(), 16);
+        assert_eq!(READ_CONCURRENCY.get(), 8);
     }
 }

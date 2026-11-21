@@ -10,13 +10,14 @@
 //! errors and time on the injected clock, and the bytes uploaded (Go's store metrics).
 
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use lsr_core::{
-    Clock, FileInfo, FileKey, Level, Listing, ObjectStore, PageLimit, ReadLen, StoreError,
-    StoredStamp, Upload,
+    BatchKind, Clock, FileInfo, FileKey, Level, ListAt, Listing, ObjectStore, PageLimit, ReadAt,
+    ReadLen, StoreError, StoredStamp, Upload,
 };
 use lsr_ltx::{Timestamp, TxidRange};
 
@@ -67,6 +68,28 @@ pub trait DynStore: Send + Sync {
 
     /// [`ObjectStore::delete`].
     fn delete_boxed<'a>(&'a self, keys: &'a [FileKey]) -> BoxFuture<'a, Result<(), StoreError>>;
+
+    /// [`ObjectStore::batch_width`].
+    fn batch_width_dyn(&self, kind: BatchKind) -> NonZeroUsize;
+
+    /// [`ObjectStore::read_many`].
+    fn read_many_boxed<'a>(
+        &'a self,
+        reads: &'a [ReadAt],
+    ) -> BoxFuture<'a, Vec<Result<Vec<u8>, StoreError>>>;
+
+    /// [`ObjectStore::stamp_many`].
+    fn stamp_many_boxed<'a>(
+        &'a self,
+        files: &'a [FileInfo],
+    ) -> BoxFuture<'a, Vec<Result<StoredStamp, StoreError>>>;
+
+    /// [`ObjectStore::list_many`].
+    fn list_many_boxed<'a>(
+        &'a self,
+        pages: &'a [ListAt],
+        limit: PageLimit,
+    ) -> BoxFuture<'a, Vec<Result<Listing, StoreError>>>;
 }
 
 /// [`Upload`] with boxed futures.
@@ -146,6 +169,32 @@ where
     fn delete_boxed<'a>(&'a self, keys: &'a [FileKey]) -> BoxFuture<'a, Result<(), StoreError>> {
         Box::pin(self.delete(keys))
     }
+
+    fn batch_width_dyn(&self, kind: BatchKind) -> NonZeroUsize {
+        self.batch_width(kind)
+    }
+
+    fn read_many_boxed<'a>(
+        &'a self,
+        reads: &'a [ReadAt],
+    ) -> BoxFuture<'a, Vec<Result<Vec<u8>, StoreError>>> {
+        Box::pin(self.read_many(reads))
+    }
+
+    fn list_many_boxed<'a>(
+        &'a self,
+        pages: &'a [ListAt],
+        limit: PageLimit,
+    ) -> BoxFuture<'a, Vec<Result<Listing, StoreError>>> {
+        Box::pin(self.list_many(pages, limit))
+    }
+
+    fn stamp_many_boxed<'a>(
+        &'a self,
+        files: &'a [FileInfo],
+    ) -> BoxFuture<'a, Vec<Result<StoredStamp, StoreError>>> {
+        Box::pin(self.stamp_many(files))
+    }
 }
 
 /// A type-erased upload as an [`Upload`] again. Each call names the trait object's method:
@@ -211,6 +260,26 @@ impl ObjectStore for Erased<'_> {
 
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
         self.0.delete_boxed(keys).await
+    }
+
+    fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {
+        self.0.batch_width_dyn(kind)
+    }
+
+    async fn read_many(&self, reads: &[ReadAt]) -> Vec<Result<Vec<u8>, StoreError>> {
+        self.0.read_many_boxed(reads).await
+    }
+
+    async fn list_many(
+        &self,
+        pages: &[ListAt],
+        limit: PageLimit,
+    ) -> Vec<Result<Listing, StoreError>> {
+        self.0.list_many_boxed(pages, limit).await
+    }
+
+    async fn stamp_many(&self, files: &[FileInfo]) -> Vec<Result<StoredStamp, StoreError>> {
+        self.0.stamp_many_boxed(files).await
     }
 }
 
@@ -404,6 +473,48 @@ impl ObjectStore for Metered {
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
         let call = self.store.delete_boxed(keys);
         metered(&*self.clock, &self.meters.delete, call).await
+    }
+
+    fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {
+        self.store.batch_width_dyn(kind)
+    }
+
+    /// Each read of the batch counts as one call, timed as the whole batch:
+    /// the reads ran side by side, so each took about that long.
+    async fn read_many(&self, reads: &[ReadAt]) -> Vec<Result<Vec<u8>, StoreError>> {
+        let began = self.clock.now();
+        let results = self.store.read_many_boxed(reads).await;
+        let ended = self.clock.now();
+        for result in &results {
+            self.meters.read.note(result, began, ended);
+        }
+        results
+    }
+
+    /// Each listing of the batch counts as one call, timed as the whole batch.
+    async fn list_many(
+        &self,
+        pages: &[ListAt],
+        limit: PageLimit,
+    ) -> Vec<Result<Listing, StoreError>> {
+        let began = self.clock.now();
+        let results = self.store.list_many_boxed(pages, limit).await;
+        let ended = self.clock.now();
+        for result in &results {
+            self.meters.list.note(result, began, ended);
+        }
+        results
+    }
+
+    /// Each stamp of the batch counts as one call, timed as the whole batch.
+    async fn stamp_many(&self, files: &[FileInfo]) -> Vec<Result<StoredStamp, StoreError>> {
+        let began = self.clock.now();
+        let results = self.store.stamp_many_boxed(files).await;
+        let ended = self.clock.now();
+        for result in &results {
+            self.meters.stamp.note(result, began, ended);
+        }
+        results
     }
 }
 

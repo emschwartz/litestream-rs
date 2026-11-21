@@ -116,7 +116,7 @@ mod lazy {
             let mut step = |stamps: &Stamps| {
                 let next = planner.advance(stamps);
                 if let Resolve::Need(info) = &next {
-                    asked.push(info.key);
+                    asked.push(info.first().key);
                 }
                 next
             };

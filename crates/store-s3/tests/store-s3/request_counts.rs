@@ -701,4 +701,46 @@ mod cases {
         rows.extend(files_rows(&rig));
         print_table(&rows);
     }
+
+    /// A full scan sends one LIST per page of keys: 9000 level-1 files are ten
+    /// requests, not the nineteen a page of exactly 1000 cost (one more key
+    /// proved the page was not the last, and the next page fetched it again).
+    #[test]
+    fn a_full_scan_sends_one_list_per_page() {
+        let rig = Rig::build();
+        let store = rig.store();
+        let (loaded, counts) = rig.counted(|| block_on(Inventory::load(&store)));
+        assert_eq!(loaded.unwrap().files().len(), FILES);
+        // Levels 0, 2, 3, 9 and the five empty ones take one request each.
+        assert_eq!(counts.list, 9 + 10);
+    }
+
+    /// A transport that sends every batch one request at a time (the trait's
+    /// default), the baseline side-by-side sending is compared with.
+    struct OneByOne(Shared);
+
+    impl Transport for OneByOne {
+        fn send(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
+            self.0.send(request)
+        }
+    }
+
+    /// Listing the levels side by side changes nothing but the wall time: the
+    /// same inventory from the same requests as one at a time.
+    #[test]
+    fn levels_listed_at_once_give_the_same_inventory() {
+        let rig = Rig::build();
+        let (eight, eight_counts) =
+            rig.counted(|| block_on(Inventory::load(&rig.store())).unwrap());
+        let sequential = S3Store::with_transport(
+            config(),
+            credentials(),
+            OneByOne(Shared(Arc::clone(&rig.wire))),
+            FakeClock::new(now()),
+        )
+        .unwrap();
+        let (one, one_counts) = rig.counted(|| block_on(Inventory::load(&sequential)).unwrap());
+        assert_eq!(one, eight);
+        assert_eq!(one_counts, eight_counts);
+    }
 }

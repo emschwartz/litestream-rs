@@ -157,6 +157,15 @@ impl Transport for Counting {
         self.counts.note(&response);
         Ok(response)
     }
+
+    /// Batches run concurrently against the real server, each request counted.
+    fn send_many(
+        &self,
+        requests: Vec<HttpRequest>,
+        limit: std::num::NonZeroUsize,
+    ) -> Vec<Result<HttpResponse, TransportError>> {
+        lsr_store_s3::send_on_threads(self, requests, limit)
+    }
 }
 
 impl Counts {
@@ -672,6 +681,9 @@ macro_rules! shared_cases {
                 stamp_of_a_vanished_file_is_not_found,
                 stamp_of_an_overwritten_file_is_refused,
                 read_with_stamp_agrees_with_read_and_stamp,
+                read_many_agrees_with_read,
+                list_many_agrees_with_list,
+                stamp_many_agrees_with_stamp,
             );
 
             /// A case added to core's suite and missing from the list above would

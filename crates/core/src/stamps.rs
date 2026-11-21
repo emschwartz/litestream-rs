@@ -3,20 +3,26 @@
 //! A listing may carry only a last-modified time, which no reader decides by
 //! (see [`ListedStamp`]). A decision is written as a [`Step`]: it is advanced
 //! with the stamps known so far and either finishes or names the one file whose
-//! exact stamp it needs next. [`resolve`] answers each such request with one
-//! [`ObjectStore::stamp`] call, strictly one at a time, and drops the
-//! collected [`Stamps`] with the decision: nothing is kept across listings,
-//! attempts or ticks, so this is a ledger and not a cache.
+//! exact stamp it needs next ([`Need`]), optionally followed by the files it
+//! expects to need after it. [`resolve`] reads the needed stamp, plus as many
+//! of those expected ones as the store runs at once
+//! ([`ObjectStore::batch_width`] of [`BatchKind::Stamps`]) in one [`ObjectStore::stamp_many`], and drops
+//! the collected [`Stamps`] with the decision: nothing is kept across
+//! listings, attempts or ticks, so this is a ledger and not a cache. At width
+//! one only the needed stamp is read, one call per request, as before. A read
+//! ahead that fails is dropped: if the step does need that file, it asks, and
+//! the single read reports the failure then.
 //!
 //! A step that asks for the same file twice is a bug in the step, and
 //! [`resolve`] fails closed with [`ResolveError::Repeated`] instead of looping.
 
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 
 use thiserror::Error;
 
 use crate::layout::{FileInfo, FileKey, ListedStamp, StoredStamp};
-use crate::store::{ObjectStore, StoreError};
+use crate::store::{BatchKind, ObjectStore, StoreError};
 
 /// The exact stamps resolved during one decision.
 #[derive(Clone, Debug, Default)]
@@ -48,13 +54,66 @@ impl Stamps {
     }
 }
 
+/// The most files a [`Need`] names ahead; a batch is never wider anyway.
+pub const MAX_AHEAD: usize = 64;
+
+/// The stamp a step needs now, and those it expects to need next.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Need {
+    first: FileInfo,
+    ahead: Vec<FileInfo>,
+}
+
+impl Need {
+    /// Only `first`.
+    #[must_use]
+    pub fn one(first: FileInfo) -> Self {
+        Self {
+            first,
+            ahead: Vec::new(),
+        }
+    }
+
+    /// `first`, then the files the step expects to ask for after it, in the
+    /// order it would ask; at most [`MAX_AHEAD`] are kept.
+    #[must_use]
+    pub fn with_ahead(first: FileInfo, ahead: impl IntoIterator<Item = FileInfo>) -> Self {
+        Self {
+            first,
+            ahead: ahead
+                .into_iter()
+                .filter(|info| info.key != first.key)
+                .take(MAX_AHEAD)
+                .collect(),
+        }
+    }
+
+    /// The file whose stamp the step needs now.
+    #[must_use]
+    pub const fn first(&self) -> &FileInfo {
+        &self.first
+    }
+
+    /// The files the step expects to need next.
+    #[must_use]
+    pub fn ahead(&self) -> &[FileInfo] {
+        &self.ahead
+    }
+}
+
+impl From<FileInfo> for Need {
+    fn from(first: FileInfo) -> Self {
+        Self::one(first)
+    }
+}
+
 /// One advance of a [`Step`].
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Resolve<T> {
     /// The decision is made.
     Done(T),
-    /// The decision needs this file's exact stamp first.
-    Need(FileInfo),
+    /// The decision needs this stamp first.
+    Need(Need),
 }
 
 /// A decision that asks for stamps as it goes.
@@ -80,7 +139,7 @@ impl<T, F: FnMut(&Stamps) -> Resolve<T>> Step for F {
 pub struct Resolved<T> {
     /// The decision.
     pub value: T,
-    /// How many [`ObjectStore::stamp`] calls it took.
+    /// How many stamps it read from the store, ahead reads included.
     pub stamps_read: u64,
 }
 
@@ -98,34 +157,86 @@ pub enum ResolveError {
     },
 }
 
-/// Drives `step` to completion, answering each request with one
-/// [`ObjectStore::stamp`] call.
+/// Drives `step` to completion, answering each request with the needed stamp
+/// and up to the stamps width minus one of the ones it names ahead (see the module docs).
 ///
 /// # Errors
-/// The store's error from the first failed `stamp`, or [`ResolveError::Repeated`]
-/// when the step asks for the same file twice.
+/// The store's error from the first failed read of a needed stamp, or
+/// [`ResolveError::Repeated`] when the step asks for the same file twice.
 pub async fn resolve<S: ObjectStore, P: Step>(
     store: &S,
     step: &mut P,
 ) -> Result<Resolved<P::Output>, ResolveError> {
-    let mut stamps = Stamps::default();
     let mut stamps_read = 0_u64;
+    let value = resolve_counted(store, step, &mut stamps_read).await?;
+    Ok(Resolved { value, stamps_read })
+}
+
+/// [`resolve`], adding every stamp read to `stamps_read` as it goes, so a
+/// caller that retries after an error still counts the reads that failed.
+///
+/// # Errors
+/// As [`resolve`].
+pub async fn resolve_counted<S: ObjectStore, P: Step>(
+    store: &S,
+    step: &mut P,
+    stamps_read: &mut u64,
+) -> Result<P::Output, ResolveError> {
+    let mut stamps = Stamps::default();
+    let width = store.batch_width(BatchKind::Stamps).get();
     loop {
-        match step.advance(&stamps) {
-            Resolve::Done(value) => {
-                return Ok(Resolved { value, stamps_read });
+        let need = match step.advance(&stamps) {
+            Resolve::Done(value) => return Ok(value),
+            Resolve::Need(need) => need,
+        };
+        let first = need.first;
+        if stamps.resolved.contains_key(&first.key) {
+            return Err(ResolveError::Repeated { key: first.key });
+        }
+        let mut batch = vec![first];
+        for info in need.ahead {
+            if batch.len() >= width {
+                break;
             }
-            Resolve::Need(file) => {
-                if stamps.resolved.contains_key(&file.key) {
-                    return Err(ResolveError::Repeated { key: file.key });
+            if stamps.exact(&info).is_none() && batch.iter().all(|held| held.key != info.key) {
+                batch.push(info);
+            }
+        }
+        read_batch(store, &batch, &mut stamps, stamps_read).await?;
+    }
+}
+
+/// Reads the stamps of `batch`, whose first file is needed and the rest
+/// ahead, adding each read to `read`. Only the needed one's failure counts.
+async fn read_batch<S: ObjectStore>(
+    store: &S,
+    batch: &[FileInfo],
+    stamps: &mut Stamps,
+    read: &mut u64,
+) -> Result<(), ResolveError> {
+    if batch.len() > 1 {
+        let answers = store.stamp_many(batch).await;
+        *read = read.saturating_add(u64::try_from(answers.len()).unwrap_or(u64::MAX));
+        for (at, (info, result)) in batch.iter().zip(answers).enumerate() {
+            match result {
+                Ok(stamp) => {
+                    stamps.resolved.insert(info.key, stamp);
                 }
-                let stamp = store.stamp(&file).await?;
-                stamps_read = stamps_read.saturating_add(1);
-                stamps.resolved.insert(file.key, stamp);
+                Err(err) if at == 0 => return Err(err.into()),
+                Err(_) => {}
             }
         }
     }
+    if let Some(first) = batch.first()
+        && let Entry::Vacant(slot) = stamps.resolved.entry(first.key)
+    {
+        // Width one, or a store that answered fewer stamps than asked.
+        *read = read.saturating_add(1);
+        slot.insert(store.stamp(first).await?);
+    }
+    Ok(())
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,7 +270,7 @@ mod tests {
         let store = MemStore::with_listed_last_modified();
         let files = filled(&store, 1);
         let file = files[0];
-        let mut step = |_: &Stamps| Resolve::<()>::Need(file);
+        let mut step = |_: &Stamps| Resolve::<()>::Need(file.into());
         let got = block_on(resolve(&store, &mut step));
         assert_eq!(got, Err(ResolveError::Repeated { key: file.key }));
         assert_eq!(store.stamp_calls(), 1);
@@ -171,7 +282,7 @@ mod tests {
         let files = filled(&store, 3);
         let mut step =
             |stamps: &Stamps| match files.iter().take(2).find(|f| stamps.exact(f).is_none()) {
-                Some(next) => Resolve::Need(*next),
+                Some(next) => Resolve::Need((*next).into()),
                 None => Resolve::Done(
                     files
                         .iter()
@@ -195,7 +306,7 @@ mod tests {
         let mut step = |stamps: &Stamps| {
             seen.push((stamps.len(), stamps.is_empty()));
             match files.iter().find(|f| stamps.exact(f).is_none()) {
-                Some(next) => Resolve::Need(*next),
+                Some(next) => Resolve::Need((*next).into()),
                 None => Resolve::Done(()),
             }
         };
@@ -213,10 +324,136 @@ mod tests {
             .collect::<Option<Vec<_>>>()
         {
             Some(all) => Resolve::Done(all.len()),
-            None => Resolve::Need(files[0]),
+            None => Resolve::Need(files[0].into()),
         };
         let got = block_on(resolve(&store, &mut step)).unwrap();
         assert_eq!((got.value, got.stamps_read), (2, 0));
         assert_eq!(store.stamp_calls(), 0);
+    }
+
+    /// MemStore run `width` wide, recording each stamp batch, failing the
+    /// stamp of `fails`.
+    struct Wide {
+        inner: MemStore,
+        width: usize,
+        fails: Option<FileKey>,
+        batches: std::sync::Mutex<Vec<usize>>,
+    }
+
+    impl ObjectStore for Wide {
+        type Upload = <MemStore as ObjectStore>::Upload;
+
+        async fn list(
+            &self,
+            level: Level,
+            after: Option<TxidRange>,
+            limit: PageLimit,
+        ) -> Result<crate::store::Listing, StoreError> {
+            self.inner.list(level, after, limit).await
+        }
+
+        async fn read(
+            &self,
+            key: &FileKey,
+            offset: u64,
+            len: crate::store::ReadLen,
+        ) -> Result<Vec<u8>, StoreError> {
+            self.inner.read(key, offset, len).await
+        }
+
+        async fn stamp(&self, file: &FileInfo) -> Result<StoredStamp, StoreError> {
+            if self.fails == Some(file.key) {
+                return Err(StoreError::Transient {
+                    op: crate::store::StoreOp::Read,
+                    kind: std::io::ErrorKind::ConnectionReset,
+                });
+            }
+            self.inner.stamp(file).await
+        }
+
+        async fn read_with_stamp(
+            &self,
+            file: &FileInfo,
+            len: crate::store::ReadLen,
+        ) -> Result<(Vec<u8>, StoredStamp), StoreError> {
+            self.inner.read_with_stamp(file, len).await
+        }
+
+        async fn begin_upload(
+            &self,
+            key: &FileKey,
+            created_at: Timestamp,
+        ) -> Result<Self::Upload, StoreError> {
+            self.inner.begin_upload(key, created_at).await
+        }
+
+        async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
+            self.inner.delete(keys).await
+        }
+
+        fn batch_width(&self, _: BatchKind) -> std::num::NonZeroUsize {
+            std::num::NonZeroUsize::new(self.width).unwrap()
+        }
+
+        async fn stamp_many(&self, files: &[FileInfo]) -> Vec<Result<StoredStamp, StoreError>> {
+            assert!(files.len() <= self.width, "a batch wider than the store");
+            self.batches.lock().unwrap().push(files.len());
+            let mut out = Vec::new();
+            for file in files {
+                out.push(self.stamp(file).await);
+            }
+            out
+        }
+    }
+
+    fn wide(count: u64, width: usize, fails: Option<u64>) -> (Wide, Vec<FileInfo>) {
+        let inner = MemStore::with_listed_last_modified();
+        let files = filled(&inner, count);
+        let store = Wide {
+            inner,
+            width,
+            fails: fails.map(key),
+            batches: std::sync::Mutex::new(Vec::new()),
+        };
+        (store, files)
+    }
+
+    /// Asks for the first unstamped file, naming every later one ahead.
+    fn all_of(files: &[FileInfo]) -> impl FnMut(&Stamps) -> Resolve<usize> + '_ {
+        move |stamps: &Stamps| {
+            let mut missing = files.iter().filter(|f| stamps.exact(f).is_none());
+            match missing.next() {
+                Some(first) => Resolve::Need(Need::with_ahead(*first, missing.copied())),
+                None => Resolve::Done(files.len()),
+            }
+        }
+    }
+
+    #[test]
+    fn needs_named_ahead_are_read_a_store_width_at_a_time() {
+        let (store, files) = wide(10, 4, None);
+        let got = block_on(resolve(&store, &mut all_of(&files))).unwrap();
+        assert_eq!((got.value, got.stamps_read), (10, 10));
+        assert_eq!(*store.batches.lock().unwrap(), vec![4, 4, 2]);
+        assert_eq!(store.inner.stamp_calls(), 10);
+    }
+
+    #[test]
+    fn a_failed_read_ahead_is_dropped_and_asked_again_alone() {
+        let (store, files) = wide(4, 4, Some(3));
+        let got = block_on(resolve(&store, &mut all_of(&files)));
+        assert!(matches!(
+            got,
+            Err(ResolveError::Store(StoreError::Transient { .. }))
+        ));
+        assert_eq!(*store.batches.lock().unwrap(), vec![4], "then file 3 alone");
+    }
+
+    #[test]
+    fn at_width_one_only_the_needed_stamp_is_read() {
+        let (store, files) = wide(3, 1, None);
+        let got = block_on(resolve(&store, &mut all_of(&files))).unwrap();
+        assert_eq!(got.stamps_read, 3);
+        assert!(store.batches.lock().unwrap().is_empty());
     }
 }

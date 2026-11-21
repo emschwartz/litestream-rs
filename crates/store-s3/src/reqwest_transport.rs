@@ -13,6 +13,9 @@
 //! where `block_on` panics, the request runs on a scoped thread instead: slower,
 //! never a panic.
 //!
+//! A batch is one `block_on` over a Tokio `JoinSet` on the same runtime, with
+//! at most `limit` requests spawned at a time; each keeps its own timeout.
+//!
 //! The policy matches [`UreqTransport`](crate::UreqTransport): a non-2xx status
 //! is a response, nothing is retried, each request is bounded by the deadline
 //! end to end (reqwest's per-request timeout, which covers the body), and a
@@ -35,9 +38,11 @@
 //! TLS failures to be [`TransportError::Tls`] rather than a connection error.
 
 use std::io;
+use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use tokio::runtime::{Builder, Handle, Runtime};
+use tokio::task::JoinSet;
 
 use crate::request::{HttpRequest, Method};
 use crate::transport::{HttpResponse, Transport, TransportError};
@@ -179,22 +184,96 @@ fn method(method: Method) -> reqwest::Method {
     }
 }
 
+impl ReqwestTransport {
+    /// Drives `future` to completion. Inside a runtime, where `block_on`
+    /// panics, it runs on a fresh thread, which is outside every runtime.
+    fn drive<F>(&self, future: F, failed: F::Output) -> F::Output
+    where
+        F: std::future::Future + Send,
+        F::Output: Send,
+    {
+        if Handle::try_current().is_ok() {
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| self.driver.block_on(future))
+                    .join()
+                    .unwrap_or(failed)
+            })
+        } else {
+            self.driver.block_on(future)
+        }
+    }
+}
+
 impl Transport for ReqwestTransport {
     fn send(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
         let head_only = request.method() == Method::Head;
         let exchange = exchange(self.build(&request), head_only);
-        if Handle::try_current().is_ok() {
-            // `block_on` inside a runtime panics; a fresh thread is outside every runtime.
-            std::thread::scope(|scope| {
-                scope
-                    .spawn(|| self.driver.block_on(exchange))
-                    .join()
-                    .unwrap_or(Err(TransportError::Io(io::ErrorKind::Other)))
-            })
-        } else {
-            self.driver.block_on(exchange)
+        self.drive(exchange, Err(TransportError::Io(io::ErrorKind::Other)))
+    }
+
+    fn send_many(
+        &self,
+        requests: Vec<HttpRequest>,
+        limit: NonZeroUsize,
+    ) -> Vec<Result<HttpResponse, TransportError>> {
+        let count = requests.len();
+        let builders: Vec<_> = requests
+            .iter()
+            .map(|request| (self.build(request), request.method() == Method::Head))
+            .collect();
+        let failed = (0..count)
+            .map(|_| Err(TransportError::Io(io::ErrorKind::Other)))
+            .collect();
+        self.drive(exchange_many(builders, limit), failed)
+    }
+}
+
+/// Runs every exchange with at most `limit` spawned at once and returns the
+/// results in request order.
+async fn exchange_many(
+    builders: Vec<(reqwest::RequestBuilder, bool)>,
+    limit: NonZeroUsize,
+) -> Vec<Result<HttpResponse, TransportError>> {
+    let tasks = builders
+        .into_iter()
+        .map(|(builder, head_only)| exchange(builder, head_only))
+        .collect();
+    bounded(tasks, limit)
+        .await
+        .into_iter()
+        .map(|slot| slot.unwrap_or(Err(TransportError::Io(io::ErrorKind::Other))))
+        .collect()
+}
+
+/// Runs `tasks` on the current runtime with at most `limit` spawned at once.
+/// Each output lands in its task's slot; a task that panicked leaves `None`.
+async fn bounded<F>(tasks: Vec<F>, limit: NonZeroUsize) -> Vec<Option<F::Output>>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let mut slots: Vec<Option<F::Output>> = (0..tasks.len()).map(|_| None).collect();
+    let mut queue = tasks.into_iter().enumerate();
+    let mut running = JoinSet::new();
+    loop {
+        while running.len() < limit.get() {
+            let Some((at, task)) = queue.next() else {
+                break;
+            };
+            running.spawn(async move { (at, task.await) });
+        }
+        match running.join_next().await {
+            Some(Ok((at, output))) => {
+                if let Some(slot) = slots.get_mut(at) {
+                    *slot = Some(output);
+                }
+            }
+            Some(Err(_panicked)) => {}
+            None => break,
         }
     }
+    slots
 }
 
 async fn exchange(
@@ -439,6 +518,62 @@ mod tests {
             Some(TransportError::Timeout)
         );
         let _released = release.send(());
+    }
+
+    #[test]
+    fn a_batch_answers_in_order_and_each_request_keeps_its_deadline() {
+        let (silent, release) = serve_silence();
+        let transport = ReqwestTransport::new(Duration::from_millis(300)).expect("transport");
+        let batch = vec![
+            request(Method::Get, &serve_once(OK)),
+            request(Method::Get, &silent),
+            request(Method::Get, &serve_once(OK)),
+        ];
+        let got = transport.send_many(batch, NonZeroUsize::new(3).expect("limit"));
+        let kinds: Vec<Result<Vec<u8>, TransportError>> = got
+            .into_iter()
+            .map(|r| r.map(|resp| resp.body().to_vec()))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                Ok(b"hello".to_vec()),
+                Err(TransportError::Timeout),
+                Ok(b"hello".to_vec())
+            ]
+        );
+        let _released = release.send(());
+    }
+
+    #[test]
+    fn bounded_tasks_reach_the_limit_and_never_pass_it() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let runtime = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        for limit in [1_usize, 3, 8] {
+            let in_flight = Arc::new(AtomicUsize::new(0));
+            let peak = Arc::new(AtomicUsize::new(0));
+            let tasks: Vec<_> = (0..20_usize)
+                .map(|n| {
+                    let (in_flight, peak) = (Arc::clone(&in_flight), Arc::clone(&peak));
+                    async move {
+                        let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(now, Ordering::SeqCst);
+                        for _ in 0..4 {
+                            tokio::task::yield_now().await;
+                        }
+                        in_flight.fetch_sub(1, Ordering::SeqCst);
+                        n
+                    }
+                })
+                .collect();
+            let got = runtime.block_on(bounded(tasks, NonZeroUsize::new(limit).expect("limit")));
+            assert_eq!(got, (0..20).map(Some).collect::<Vec<_>>());
+            assert_eq!(peak.load(Ordering::SeqCst), limit, "limit {limit}");
+        }
     }
 
     #[test]

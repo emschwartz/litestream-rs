@@ -6,6 +6,10 @@
 //! part number, F7). The completed object's ETag is `<32 hex>-<parts>` on S3
 //! and MinIO; it is checked for that shape and the part count only, because
 //! the part digests it is made of were each verified already.
+//!
+//! Parts go out as batches of up to the `concurrency` setting
+//! ([`Transport::send_many`]); each part is judged alone, exactly as when
+//! parts went one at a time, and the ETags are kept in part order.
 
 use lsr_core::{CorruptCause, FileKey, PartNumber, StoreError, StoreOp};
 use lsr_ltx::Timestamp;
@@ -14,7 +18,7 @@ use crate::classify::classify;
 use crate::request::UploadId;
 use crate::response::{EtagCheck, check_etag, parse_complete, parse_create};
 use crate::store::Inner;
-use crate::transport::Transport;
+use crate::transport::{HttpResponse, Transport};
 
 /// Whether a completed object's ETag has the multipart shape for `parts` parts.
 pub(crate) fn completed_etag_fits(etag: &str, parts: usize) -> bool {
@@ -25,6 +29,32 @@ pub(crate) fn completed_etag_fits(etag: &str, parts: usize) -> bool {
     digest.len() == 32
         && digest.bytes().all(|b| b.is_ascii_hexdigit())
         && count.parse::<usize>().is_ok_and(|n| n == parts)
+}
+
+/// The HTTP status a store-side "too large" is reported as: an upload that
+/// would need more than 10000 parts.
+pub(crate) const PAYLOAD_TOO_LARGE: u16 = 413;
+
+/// What one UploadPart's answer must prove: a success status, and an ETag
+/// that is the quoted MD5 of the part sent.
+fn judge_part(
+    key: &FileKey,
+    number: PartNumber,
+    sent: [u8; 16],
+    response: &HttpResponse,
+) -> Result<String, StoreError> {
+    classify(StoreOp::Upload, Some(key), Some(number), response)?;
+    let mismatch = || StoreError::Corrupt {
+        key: Some(*key),
+        cause: CorruptCause::ChecksumMismatch { part: Some(number) },
+    };
+    match check_etag(response, sent) {
+        EtagCheck::Matches | EtagCheck::NotMd5 => response
+            .header("etag")
+            .map(str::to_owned)
+            .ok_or_else(mismatch),
+        EtagCheck::Missing | EtagCheck::Mismatch => Err(mismatch()),
+    }
 }
 
 impl<T: Transport> Inner<T> {
@@ -41,30 +71,46 @@ impl<T: Transport> Inner<T> {
         parse_create(&response).map_err(|err| err.into_store(op, Some(*key)))
     }
 
-    /// One UploadPart; returns the ETag to list at completion.
-    pub(crate) fn put_part(
+    /// UploadPart for each body, numbered from `first`, as one batch;
+    /// returns the ETags to list at completion, in part order. Every part is
+    /// judged alone (status, then its ETag against its MD5); the first failure
+    /// in part order is the result. A number past the part cap fails before
+    /// anything is sent.
+    pub(crate) fn put_parts(
         &self,
         key: &FileKey,
         id: &UploadId,
-        number: PartNumber,
-        body: Vec<u8>,
-    ) -> Result<String, StoreError> {
+        first: usize,
+        bodies: Vec<Vec<u8>>,
+    ) -> Result<Vec<String>, StoreError> {
         let op = StoreOp::Upload;
-        let request = self.request(op, |b, now| b.upload_part(now, key, id, number, body))?;
-        let sent = request.md5();
-        let response = self.send(op, request.into_request())?;
-        classify(op, Some(key), Some(number), &response)?;
-        let mismatch = || StoreError::Corrupt {
-            key: Some(*key),
-            cause: CorruptCause::ChecksumMismatch { part: Some(number) },
+        let last = first.saturating_add(bodies.len()).saturating_sub(1);
+        let number = |n: usize| {
+            PartNumber::new(u16::try_from(n).unwrap_or(0)).ok_or(StoreError::Refused {
+                op,
+                status: PAYLOAD_TOO_LARGE,
+            })
         };
-        match check_etag(&response, sent) {
-            EtagCheck::Matches | EtagCheck::NotMd5 => response
-                .header("etag")
-                .map(str::to_owned)
-                .ok_or_else(mismatch),
-            EtagCheck::Missing | EtagCheck::Mismatch => Err(mismatch()),
-        }
+        number(last)?;
+        let numbered = bodies
+            .into_iter()
+            .enumerate()
+            .map(|(at, body)| (first.saturating_add(at), body));
+        self.batch(
+            op,
+            self.concurrency,
+            numbered,
+            |(n, body)| {
+                let number = number(n)?;
+                let request =
+                    self.request(op, |b, now| b.upload_part(now, key, id, number, body))?;
+                let sent = request.md5();
+                Ok((request.into_request(), (number, sent)))
+            },
+            |(number, sent), response| judge_part(key, number, sent, response),
+        )
+        .into_iter()
+        .collect()
     }
 
     /// CompleteMultipartUpload; returns the completed object's ETag. S3 can
