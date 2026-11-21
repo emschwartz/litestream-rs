@@ -1346,7 +1346,7 @@ impl Actor {
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
     ) -> Option<Tick> {
-        if !self.kept.lanes.ready(Lane::Upload, now) || self.uploads_idle() {
+        if !self.upload_ready(now) {
             return None;
         }
         let limit = self
@@ -1430,9 +1430,7 @@ impl Actor {
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
     ) -> Option<Tick> {
-        let bound = self
-            .prune_bound()
-            .filter(|_| self.running() && self.kept.lanes.ready(Lane::Prune, now))?;
+        let bound = self.prune_ready(now)?;
         let listing = match env.staging.list(Level::ZERO, None, PageLimit::MAX).await {
             Ok(listing) => listing,
             Err(err) => return Some(self.fault(Lane::Prune, Fault::from_staging(&err), now)),
@@ -1497,11 +1495,7 @@ impl Actor {
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
     ) -> Option<Tick> {
-        let ready = self.running()
-            && self.kept.lanes.ready(Lane::Maintenance, now)
-            && self.uploads_idle()
-            && self.engine.maintain.wants_listing(now);
-        if !ready {
+        if !self.maintain_ready(now) {
             return None;
         }
         let inventory = match Inventory::load(env.remote).await {
@@ -1740,20 +1734,34 @@ impl Actor {
         if !self.booted() {
             return self.kept.lanes.ready(Lane::Sync, now);
         }
-        let running = self.running();
         let sync = self.kept.lanes.ready(Lane::Sync, now)
-            && (!self.booted()
-                || self.pending().is_some()
+            && (self.pending().is_some()
                 || self.more_wal()
-                || (running && self.checkpoint_decision(now).is_some()));
-        let upload = self.kept.lanes.ready(Lane::Upload, now) && !self.uploads_idle();
-        let prune =
-            running && self.kept.lanes.ready(Lane::Prune, now) && self.prune_bound().is_some();
-        let maintain = running
+                || (self.running() && self.checkpoint_decision(now).is_some()));
+        sync || self.upload_ready(now)
+            || self.prune_ready(now).is_some()
+            || self.maintain_ready(now)
+    }
+
+    /// Whether the upload lane has a staged file to send and may run. The
+    /// one statement of it: the lane's unit and the next wake both ask here.
+    fn upload_ready(&self, now: Timestamp) -> bool {
+        self.kept.lanes.ready(Lane::Upload, now) && !self.uploads_idle()
+    }
+
+    /// The transaction the prune lane may delete through, when it may run.
+    fn prune_ready(&self, now: Timestamp) -> Option<Txid> {
+        self.prune_bound()
+            .filter(|_| self.running() && self.kept.lanes.ready(Lane::Prune, now))
+    }
+
+    /// Whether maintenance may list the replica now: only once uploads are
+    /// idle, and only when a listing could change what is due.
+    fn maintain_ready(&self, now: Timestamp) -> bool {
+        self.running()
             && self.kept.lanes.ready(Lane::Maintenance, now)
             && self.uploads_idle()
-            && self.engine.maintain.wants_listing(now);
-        sync || upload || prune || maintain
+            && self.engine.maintain.wants_listing(now)
     }
 
     /// Every deadline a lane holds: retry waits, the checkpoint gate, the
