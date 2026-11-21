@@ -1351,6 +1351,7 @@ lsr-sim oracle::tests::oracle_catches_a_reused_transaction_id
 lsr-sim oracle::tests::oracle_catches_lost_ack
 lsr-sim oracle::tests::oracle_catches_planted_mid_tx_file
 lsr-sim oracle::tests::oracle_catches_planted_wrong_page
+lsr-sim oracle::tests::oracle_pairs_a_reissued_snapshot_with_its_newest_note
 lsr-sim oracle::tests::oracle_passes_a_faithful_replica
 lsr-sim oracle::tests::oracle_refuses_a_hole_that_is_not_a_compacted_file
 lsr-sim oracle::tests::within_flags_only_what_is_over
@@ -1451,6 +1452,7 @@ lsr-sim::faults vacuum_page_size_change_and_back
 lsr-sim::faults wal_header_torn_while_running
 lsr-sim::faults wal_truncated_externally_under_lock
 lsr-sim::faults wal_unlinked_mid_run
+lsr-sim::fixed_seeds fixed::a_snapshot_id_taken_again_after_a_lost_staged_snapshot
 lsr-sim::fixed_seeds fixed::a_torn_staged_file_is_dropped_seed_0x25
 lsr-sim::fixed_seeds fixed::a_torn_staged_file_is_dropped_seed_0x2d
 lsr-sim::fixed_seeds fixed::a_torn_staged_file_is_dropped_seed_0x46

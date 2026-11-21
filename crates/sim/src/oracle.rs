@@ -253,11 +253,16 @@ fn covers(model: &Model, tap: &TapLog) -> Result<BTreeMap<Txid, CommitId>, Viola
                     key: format!("{} {}", key.level().get(), range_str(key.range())),
                 })?)
             }
+            // A staged snapshot lost before upload (torn by a power loss, or
+            // its staging directory wiped) leaves its note behind, and the
+            // engine takes the same id again from a later commit. Staging holds
+            // one file per id, so the file put is the newest noted by then.
             None => cover.get(&max).copied().or_else(|| {
                 let _ = header;
                 model
                     .snapshot_notes()
                     .iter()
+                    .rev()
                     .find(|n| n.txid == max && n.at <= at)
                     .map(|n| n.commit)
             }),

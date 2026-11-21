@@ -140,6 +140,38 @@ fn oracle_catches_a_reused_transaction_id() {
     );
 }
 
+/// A snapshot staged for transaction 1 was lost before it reached the replica
+/// (a power loss tore it, or the staging directory was wiped), and the engine
+/// took transaction 1 again from a later commit with an empty WAL, as after a
+/// VACUUM. The replica holds only the second snapshot, so transaction 1 is
+/// the later commit, not the first one noted.
+#[test]
+fn oracle_pairs_a_reissued_snapshot_with_its_newest_note() {
+    let raw = MemStore::new();
+    let store = Tap::new(raw.clone());
+    let tap = store.log();
+    let mut model = Model::new(PageImage::from_bytes(ps(), &[]));
+    let mut commit = |fill: u8, frames: u32| {
+        model.commit(
+            &[(pgno(1), page(fill))],
+            1,
+            AppCommit {
+                salts: SALTS,
+                end: wal_end(frames),
+            },
+            tap.len(),
+        )
+    };
+    let lost = commit(10, 1);
+    let kept = commit(20, 2);
+    model.note_snapshot(txid(1), lost, false, tap.len());
+    model.note_snapshot(txid(1), kept, false, tap.len());
+    put(&store, 0, 1, 1, &ltx(1, 1, 1, 20, None));
+    let done = check(&model, &tap, &raw, &Acked::new()).unwrap();
+    assert_eq!(done.restored, 1);
+    assert_eq!(done.latest, Some(txid(1)));
+}
+
 #[test]
 fn within_flags_only_what_is_over() {
     within(Bound::WalLength, 4, 4).unwrap();

@@ -92,25 +92,51 @@ mod fixed {
         replay(0x46, 252);
     }
 
-    // Issue #39: after a VACUUM that changes the page size, a staging wipe and a
-    // resnapshot, a restore at an early TXID differs from the oracle's commit.
-    // Which side is wrong is not settled yet.
+    // Issue #39: a snapshot staged for some id never reached the replica (a
+    // power loss tore it, or the staging directory was wiped), and the engine
+    // took the same id again from a later commit against an empty WAL (after a
+    // VACUUM, or a rewind to the database file). The replica held only the
+    // second snapshot, but the oracle paired the id with the first note's
+    // commit. The restore was right; the oracle now takes the newest note.
 
     #[test]
-    #[ignore = "review: #39, restore differs from the oracle after a page-size VACUUM and a staging wipe"]
     fn page_size_vacuum_and_staging_wipe_seed_0x126d68ef1c07() {
         replay(0x0000_126d_68ef_1c07, 52);
     }
 
     #[test]
-    #[ignore = "review: #39, restore differs from the oracle after a page-size VACUUM and a staging wipe"]
     fn page_size_vacuum_and_staging_wipe_seed_0x126d68ed250e() {
         replay(0x0000_126d_68ed_250e, 215);
     }
 
     #[test]
-    #[ignore = "review: #39, restore differs from the oracle after a page-size VACUUM and a staging wipe"]
     fn page_size_vacuum_and_staging_wipe_seed_0x126d68ef545f() {
         replay(0x0000_126d_68ef_545f, 176);
+    }
+
+    /// The smallest history behind the three seeds above, shrunk from
+    /// 0x126d68ed250e: the first boot stages a snapshot as transaction 1, the
+    /// database is vacuumed into another page size, the staging directory is
+    /// wiped, and the next boot (into a still empty replica) snapshots the
+    /// vacuumed database as transaction 1 again. Only that file is uploaded.
+    #[test]
+    fn a_snapshot_id_taken_again_after_a_lost_staged_snapshot() {
+        use lsr_ltx::PageSize;
+        use lsr_sim::run::run_ops;
+        use lsr_sim::{CrashKind, EnvFault, Op, Opts};
+        let ops = [
+            Op::Crash(CrashKind::Power),
+            Op::Tick,
+            Op::Tick,
+            Op::Vacuum {
+                page_size: PageSize::new(2048),
+            },
+            Op::EnvFault(EnvFault::WipeStaging),
+            Op::Crash(CrashKind::Power),
+        ];
+        let seed = Seed::new(0x0000_126d_68ed_250e);
+        if let Err(failure) = run_ops(seed, &ops, &Opts::default()) {
+            panic!("{}", failure.violation);
+        }
     }
 }
