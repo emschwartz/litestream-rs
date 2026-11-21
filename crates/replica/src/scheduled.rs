@@ -159,13 +159,18 @@ impl Scheduled {
         }
         let (txid, result) = self.job.lock().done.take()?;
         self.stage = Stage::Due(later(now, self.interval));
-        let outcome = self.record(actor, txid, result, now);
+        let outcome = self.record(txid, result, now);
         Some(Event::Verified { txid, outcome })
     }
 
-    /// A fresh engine after a panic: the pin and a pending read are asked for again.
+    /// The restore point a failing run keeps from retention. The replicator's thread hands
+    /// it to the engine, with any other pin it holds, after every tick.
+    pub(crate) const fn pinned(&self) -> Option<Txid> {
+        self.health.pinned
+    }
+
+    /// A fresh engine after a panic: a pending read is asked for again.
     pub(crate) fn rebuilt(&self, actor: &mut Actor) {
-        actor.pin_for_verify(self.health.pinned);
         if let Stage::Reading = self.stage {
             actor.read_live_pages();
         }
@@ -193,7 +198,6 @@ impl Scheduled {
 
     fn record(
         &mut self,
-        actor: &mut Actor,
         txid: Txid,
         result: Option<Result<Verified, VerifyError>>,
         now: Timestamp,
@@ -208,7 +212,6 @@ impl Scheduled {
                 health.last_good = Some((txid, now));
                 health.failing = None;
                 health.pinned = None;
-                actor.pin_for_verify(None);
             }
             VerifyOutcome::Failed(found) => {
                 bump(&mut runs.failed);
@@ -216,7 +219,6 @@ impl Scheduled {
                 health.failing = Some(VerifyFailure { since, txid, found });
                 if health.pinned.is_none() {
                     health.pinned = Some(health.last_good.map_or(txid, |(good, _)| good));
-                    actor.pin_for_verify(health.pinned);
                 }
             }
             VerifyOutcome::Merged => bump(&mut runs.merged),

@@ -166,6 +166,8 @@ pub struct Faulty {
     pub refuse: AtomicBool,
     /// The next this many listings panic.
     pub panics: AtomicU32,
+    /// Every call panics, before any other fault.
+    pub panic_always: AtomicBool,
 }
 
 impl Faulty {
@@ -175,14 +177,23 @@ impl Faulty {
             fail_uploads: AtomicBool::new(false),
             refuse: AtomicBool::new(false),
             panics: AtomicU32::new(0),
+            panic_always: AtomicBool::new(false),
         }
     }
 
     fn gate(&self, op: StoreOp) -> Result<(), StoreError> {
+        self.panic_if_always();
         if self.refuse.load(Ordering::SeqCst) {
             return Err(StoreError::Auth { op });
         }
         Ok(())
+    }
+
+    #[expect(clippy::panic, reason = "the fault this store injects is a panic")]
+    fn panic_if_always(&self) {
+        if self.panic_always.load(Ordering::SeqCst) {
+            panic!("an injected panic on every store call");
+        }
     }
 
     #[expect(clippy::panic, reason = "the fault this store injects is a panic")]
