@@ -119,6 +119,12 @@ pub(crate) fn page_size(bytes: u32) -> Result<PageSize, OpenError> {
     PageSize::new(bytes).ok_or(OpenError::PageSize { bytes })
 }
 
+/// `SQLITE_FCNTL_PERSIST_WAL` on: the connection's close, when it is the last, keeps the WAL file.
+fn persist_wal(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let mut on: c_int = 1;
+    conn.file_control(Some(rusqlite::MAIN_DB), FileControl::PersistWal(&mut on))
+}
+
 /// `BEGIN; SELECT COUNT(1) FROM _litestream_seq` (Go `db.go:1288`): the select takes the read mark.
 fn begin_read(reader: &Connection) -> Result<(), rusqlite::Error> {
     reader.execute_batch("BEGIN")?;
@@ -142,7 +148,8 @@ impl Sqlite {
     }
 
     /// Opens the database at `path`, which must already exist, puts it in WAL mode with
-    /// autocheckpoint off on both connections, creates `_litestream_seq` and `_litestream_lock`
+    /// autocheckpoint off and `SQLITE_FCNTL_PERSIST_WAL` on for both connections (so the
+    /// replicator closing after the host keeps the WAL), creates `_litestream_seq` and `_litestream_lock`
     /// (`db.go:1174`, `1180`, so Go and Rust leave the same schema), takes the first read
     /// transaction (epoch 1) and maps the wal-index. It returns once the read transaction is
     /// held, so nothing can checkpoint past it.
@@ -161,6 +168,11 @@ impl Sqlite {
             .map_err(sqlite)?;
         if mode != "wal" {
             return Err(OpenError::NotWal { mode });
+        }
+        // When the replicator closes last, SQLite checkpoints; without this it also deletes the
+        // WAL, and the next start finds nothing to continue.
+        for conn in [&reader, &writer] {
+            persist_wal(conn).map_err(sqlite)?;
         }
         writer
             .execute_batch(
@@ -376,9 +388,7 @@ impl WalSource for Sqlite {
 /// [`SetupError::PersistWal`] when the connection's database has no file; [`SetupError::Sqlite`]
 /// when the pragma fails.
 pub fn app_connection(conn: &Connection) -> Result<(), SetupError> {
-    let mut on: c_int = 1;
-    conn.file_control(Some(rusqlite::MAIN_DB), FileControl::PersistWal(&mut on))
-        .map_err(SetupError::PersistWal)?;
+    persist_wal(conn).map_err(SetupError::PersistWal)?;
     conn.pragma_update(None, "wal_autocheckpoint", 0)
         .map_err(SetupError::Sqlite)
 }
