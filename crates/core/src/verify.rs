@@ -54,7 +54,10 @@ use crate::plan::{KeyTarget, PlanOutcome, plan};
 use crate::restore::RestoreError;
 use crate::store::{ObjectStore, ReadLen, StoreError};
 
+mod against;
 mod dry_run;
+
+pub use against::{Compared, LivePages, Verified, verify_against};
 
 #[cfg(test)]
 #[expect(
@@ -455,15 +458,30 @@ pub async fn verify<S: ObjectStore>(store: &S, depth: Depth) -> Result<Report, V
         let reads = contents_pass(store, &inventory, plan, &mut findings).await?;
         (files_read, bytes_read) = reads;
     }
+    Ok(report(
+        &inventory,
+        findings,
+        latest,
+        (files_read, bytes_read),
+    ))
+}
+
+/// The report of a walk over `inventory`, with the files and bytes it read.
+fn report(
+    inventory: &Inventory,
+    findings: Findings,
+    latest: PlanOutcome,
+    (files_read, bytes_read): (usize, u64),
+) -> Report {
     let (findings, worst) = findings.finish();
-    Ok(Report {
-        levels: Level::ALL.map(|level| LevelSummary::of(&inventory, level)),
+    Report {
+        levels: Level::ALL.map(|level| LevelSummary::of(inventory, level)),
         findings,
         worst,
         latest,
         files_read,
         bytes_read,
-    })
+    }
 }
 
 /// Reads every file, then dry-runs the latest restore when there is a plan

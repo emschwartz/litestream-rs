@@ -104,5 +104,6 @@ pub use upload::{
     upload_next, upload_tick,
 };
 pub use verify::{
-    Depth, Finding, LevelSummary, MAX_FINDINGS, Report, Severity, VerifyError, verify,
+    Compared, Depth, Finding, LevelSummary, LivePages, MAX_FINDINGS, Report, Severity, Verified,
+    VerifyError, verify, verify_against,
 };

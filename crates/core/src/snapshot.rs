@@ -21,7 +21,10 @@
 //! caller's store so its retry wrapper applies. The header carries no WAL origin,
 //! no pre-apply checksum and `min_txid = 1`, as Go's does.
 
-use lsr_ltx::{Header, HeaderFields, Timestamp, Txid, TxidRange};
+use std::collections::BTreeMap;
+use std::num::NonZeroU32;
+
+use lsr_ltx::{Checksum, Header, HeaderFields, PageSize, Timestamp, Txid, TxidRange};
 use lsr_wal::{CommittedEnd, OpenError, WalReader};
 use thiserror::Error;
 
@@ -31,7 +34,8 @@ use crate::pages::PageTable;
 use crate::position::{Continuity, SyncedThrough};
 use crate::source::{CommittedRead, PageSource, WalSource};
 use crate::store::ObjectStore;
-use crate::sync::{clamp, plan_pages, scan_whole, stage};
+use crate::sync::{PageFrom, clamp, plan_pages, scan_whole, stage};
+use crate::verify::LivePages;
 
 /// A snapshot that was not written. Nothing is visible under `key`, unless
 /// the fault says the store rejected its own commit (`UploadAmbiguous`,
@@ -76,15 +80,19 @@ pub async fn write_snapshot<W: WalSource, P: PageSource, S: ObjectStore>(
         .map_err(|fault| SnapshotFailed { fault, key })
 }
 
-async fn run<W: WalSource, P: PageSource, S: ObjectStore>(
-    proof: &SyncedThrough,
-    key: &FileKey,
-    wal: &mut W,
-    db: &mut P,
-    pages: &mut PageTable,
-    remote: &S,
-    now: Timestamp,
-) -> Result<FileInfo, Fault> {
+/// Everything a whole-database read at a proof's transaction reads: the WAL reader, and
+/// where each page comes from.
+struct Whole<R> {
+    reader: WalReader<R>,
+    plan: Vec<PageFrom>,
+    commit: NonZeroU32,
+    page_size: PageSize,
+}
+
+/// The checks a whole-database read makes before it reads a page, and its plan: the WAL
+/// frames of the current generation up to the synced end win, the database file supplies
+/// the rest, and the page count is the proof's last commit.
+fn whole<W: WalSource>(proof: &SyncedThrough, wal: &mut W) -> Result<Whole<W::Wal>, Fault> {
     let position = proof.position();
     let file = wal
         .open()
@@ -114,6 +122,30 @@ async fn run<W: WalSource, P: PageSource, S: ObjectStore>(
         return Err(Fault::Bug);
     }
     let plan = plan_pages(&map, None, commit, page_size);
+    Ok(Whole {
+        reader,
+        plan,
+        commit,
+        page_size,
+    })
+}
+
+async fn run<W: WalSource, P: PageSource, S: ObjectStore>(
+    proof: &SyncedThrough,
+    key: &FileKey,
+    wal: &mut W,
+    db: &mut P,
+    pages: &mut PageTable,
+    remote: &S,
+    now: Timestamp,
+) -> Result<FileInfo, Fault> {
+    let position = proof.position();
+    let Whole {
+        mut reader,
+        plan,
+        commit,
+        page_size,
+    } = whole(proof, wal)?;
     let (timestamp, _clamped) = clamp(Some(position.timestamp()), now);
     let header = Header::new(HeaderFields {
         tracked: false,
@@ -138,6 +170,53 @@ async fn run<W: WalSource, P: PageSource, S: ObjectStore>(
     )
     .await?;
     Ok(file)
+}
+
+/// The live database at `proof`'s transaction, one checksum a page: what a restore of that
+/// transaction must produce (the scheduled verify, `crate::verify`).
+///
+/// It reads what [`write_snapshot`] reads, under the same proof and the same argument, and
+/// opens nothing: a WAL page's checksum is the one its frame was verified with on the scan,
+/// so only the pages the database file supplies are read, each checked against `pages`
+/// first, as a snapshot checks them.
+///
+/// # Errors
+/// The [`Fault`] a snapshot would meet on the same read.
+pub(crate) fn read_live<W: WalSource, P: PageSource>(
+    proof: &SyncedThrough,
+    wal: &mut W,
+    db: &mut P,
+    pages: &mut PageTable,
+) -> Result<LivePages, Fault> {
+    let Whole {
+        plan,
+        commit,
+        page_size,
+        ..
+    } = whole(proof, wal)?;
+    let mut buf = vec![0_u8; page_size.bytes()];
+    let mut digests = BTreeMap::new();
+    for page in &plan {
+        let digest = match page {
+            PageFrom::Wal(frame) => frame.digest(),
+            PageFrom::Db(pgno) => {
+                db.read_page(*pgno, &mut buf).map_err(Fault::from_source)?;
+                pages
+                    .check(*pgno, &buf)
+                    .map_err(|mismatch| Fault::DatabasePageMismatch {
+                        pgno: mismatch.pgno,
+                    })?;
+                Checksum::of_page(*pgno, &buf)
+            }
+        };
+        digests.insert(page.pgno().get(), digest);
+    }
+    Ok(LivePages::new(
+        proof.position().txid(),
+        page_size,
+        commit,
+        digests,
+    ))
 }
 
 /// A WAL whose header cannot be read: a torn header is a restart in progress, so

@@ -12,17 +12,16 @@ use crate::inventory::Inventory;
 use crate::layout::{FileInfo, StoredStamp};
 use crate::layout::{FileKey, Level};
 use crate::plan::RestoreTarget;
-use crate::restore::{DatabaseSink, RestoreError, restore_from};
+use crate::restore::{DatabaseSink, RestoreError, Restored, restore_from};
 use crate::store::{Listing, ObjectStore, PageLimit, ReadLen, StoreError};
 
 /// A [DatabaseSink] that keeps each page's checksum and nothing else: 8 bytes
 /// a page, no page bytes, and nothing is ever published.
-#[derive(Default)]
-struct DigestSink {
-    pages: BTreeMap<u32, Checksum>,
+struct DigestSink<'a> {
+    pages: &'a mut BTreeMap<u32, Checksum>,
 }
 
-impl DatabaseSink for DigestSink {
+impl DatabaseSink for DigestSink<'_> {
     fn write_page(&mut self, pgno: PageNo, data: &[u8]) -> io::Result<()> {
         self.pages.insert(pgno.get(), Checksum::of_page(pgno, data));
         Ok(())
@@ -136,18 +135,9 @@ pub(super) async fn latest_restore<S: ObjectStore>(
     listed: Inventory,
     last: FileKey,
 ) -> Result<DryRun, VerifyError> {
-    let counting = Counting {
-        inner: store,
-        files: AtomicUsize::new(0),
-        bytes: AtomicU64::new(0),
-    };
-    let result = restore_from(
-        &counting,
-        Some(listed),
-        RestoreTarget::Latest,
-        DigestSink::default(),
-    )
-    .await;
+    let mut pages = BTreeMap::new();
+    let (result, files_read, bytes_read) =
+        digest_restore(store, listed, RestoreTarget::Latest, &mut pages).await;
     let fault = match result {
         Ok(_) => None,
         Err(RestoreError::Inventory(err)) => return Err(VerifyError::Inventory(err)),
@@ -156,9 +146,30 @@ pub(super) async fn latest_restore<S: ObjectStore>(
     };
     Ok(DryRun {
         fault,
-        files_read: counting.files.load(Ordering::Relaxed),
-        bytes_read: counting.bytes.load(Ordering::Relaxed),
+        files_read,
+        bytes_read,
     })
+}
+
+/// The real restore of `target`, planned over `listed`, into `pages` (one checksum a page,
+/// nothing published), with the files and bytes it read.
+pub(super) async fn digest_restore<S: ObjectStore>(
+    store: &S,
+    listed: Inventory,
+    target: RestoreTarget,
+    pages: &mut BTreeMap<u32, Checksum>,
+) -> (Result<Restored, RestoreError>, usize, u64) {
+    let counting = Counting {
+        inner: store,
+        files: AtomicUsize::new(0),
+        bytes: AtomicU64::new(0),
+    };
+    let result = restore_from(&counting, Some(listed), target, DigestSink { pages }).await;
+    (
+        result,
+        counting.files.load(Ordering::Relaxed),
+        counting.bytes.load(Ordering::Relaxed),
+    )
 }
 
 fn named_file(error: &RestoreError, last: FileKey) -> Option<FileKey> {

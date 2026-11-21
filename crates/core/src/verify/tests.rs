@@ -1054,3 +1054,107 @@ fn verify_is_unrestorable_exactly_when_the_latest_restore_fails() {
         }
     }
 }
+
+/// The scheduled verify's comparison of a restore with the live database.
+mod against {
+    use std::num::NonZeroU32;
+
+    use super::*;
+    use crate::verify::{Compared, LivePages, verify_against};
+
+    /// The live database as page seeds, at transaction `at`.
+    fn live(at: u64, state: &[(u32, u8)]) -> LivePages {
+        let ps = size(512);
+        let pages = state
+            .iter()
+            .map(|(pgno, seed)| {
+                let page = PageNo::new(*pgno, ps).unwrap();
+                (*pgno, Checksum::of_page(page, &page_of(ps, *seed)))
+            })
+            .collect();
+        let commit = NonZeroU32::new(u32::try_from(state.len()).unwrap()).unwrap();
+        LivePages::new(txid(at), ps, commit, pages)
+    }
+
+    fn compared(store: &MemStore, live: &LivePages) -> Compared {
+        let verified = block_on(verify_against(store, live)).unwrap();
+        assert!(verified.report().findings().is_empty(), "{verified:?}");
+        verified.into_parts().1
+    }
+
+    /// The clean replica at 3: the snapshot's pages, page 2 rewritten by 2 and 3.
+    const AT_3: [(u32, u8); 4] = [(1, 1), (2, 9), (3, 3), (4, 4)];
+
+    #[test]
+    fn a_restore_equal_to_the_live_database_is_the_same() {
+        let got = compared(&clean(), &live(3, &AT_3));
+        assert!(
+            matches!(got, Compared::Same { txid: t, pages: 4 } if t == txid(3)),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn an_older_transaction_is_compared_with_its_own_restore() {
+        let got = compared(&clean(), &live(1, &[(1, 1), (2, 2), (3, 3), (4, 4)]));
+        assert!(matches!(got, Compared::Same { .. }), "{got:?}");
+    }
+
+    /// The replica holds a page the live database never had at that
+    /// transaction: the page and the transaction are named.
+    #[test]
+    fn a_stale_page_names_the_page_and_the_transaction() {
+        let got = compared(&clean(), &live(3, &[(1, 1), (2, 9), (3, 7), (4, 4)]));
+        assert!(
+            matches!(
+                got,
+                Compared::Differs { txid: t, first: 3, pages: 1, live_commit: 4, restored_commit: 4 }
+                    if t == txid(3)
+            ),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn a_different_length_differs_even_when_the_common_pages_agree() {
+        let mut longer = AT_3.to_vec();
+        longer.push((5, 5));
+        let got = compared(&clean(), &live(3, &longer));
+        assert!(
+            matches!(
+                got,
+                Compared::Differs {
+                    first: 5,
+                    pages: 1,
+                    live_commit: 5,
+                    restored_commit: 4,
+                    ..
+                }
+            ),
+            "{got:?}"
+        );
+    }
+
+    /// Compaction merged transaction 2 into a file that also holds 3, and its
+    /// level-0 file is gone: nothing is wrong, the next run reads a newer one.
+    #[test]
+    fn a_transaction_merged_into_a_larger_file_is_merged_not_a_failure() {
+        let store = MemStore::new();
+        snapshot(&store, 1);
+        put(&store, 1, 2, 3, &Spec::plain(512, 2, 3, &[(2, 9)]).encode());
+        let got = compared(&store, &live(2, &AT_3));
+        assert!(
+            matches!(got, Compared::Merged { txid: t } if t == txid(2)),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn a_transaction_the_replica_does_not_hold_fails_to_restore() {
+        let got = compared(&clean(), &live(5, &AT_3));
+        assert!(
+            matches!(got, Compared::RestoreFails { txid: t, error: RestoreError::NoPlan(_) } if t == txid(5)),
+            "{got:?}"
+        );
+    }
+}

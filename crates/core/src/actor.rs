@@ -81,7 +81,7 @@ use crate::position::{Continuity, Position, ReadEpoch, SyncedThrough, WalFileLen
 use crate::recover::{
     FrameCheck, Miss, Probes, Recovered, Tip, TipView, WalView, read_header, recover,
 };
-use crate::snapshot::{SnapshotFailed, write_snapshot};
+use crate::snapshot::{SnapshotFailed, read_live, write_snapshot};
 use crate::source::{CheckpointMode, Checkpointer, CommittedRead, PageSource, WalSource};
 use crate::stamps::{ResolveError, Stamps, resolve};
 use crate::store::{ObjectStore, PageLimit};
@@ -90,6 +90,7 @@ use crate::upload::{
     Did, UploadConfig, UploadPlan, UploadState, drop_staged_from, inventory_fault, plan_upload,
     sweep_staged, upload_next,
 };
+use crate::verify::LivePages;
 
 /// What one tick may touch, lent for that tick only.
 #[derive(Debug)]
@@ -291,6 +292,14 @@ pub struct Actor {
     /// A lane is degraded and retention holds its pin (which is `None` when
     /// the replica held nothing as the degradation began).
     pinned: bool,
+    /// The newest transaction the replica held when the first lane degraded.
+    lane_pin: Option<Txid>,
+    /// The restore point a scheduled verify asked retention to keep.
+    verify_pin: Option<Txid>,
+    /// A scheduled verify waits for the live database's pages.
+    live_wanted: bool,
+    /// The live database's pages, read for a scheduled verify and not yet taken.
+    live: Option<LivePages>,
     /// What the host's checkpoints did between reads.
     host: HostObserver,
 }
@@ -410,6 +419,10 @@ impl Actor {
             last: None,
             clamp_reported: false,
             pinned: false,
+            lane_pin: None,
+            verify_pin: None,
+            live_wanted: false,
+            live: None,
             host: HostObserver::default(),
         }
     }
@@ -482,6 +495,38 @@ impl Actor {
             }
             Some(_) | None => total,
         }
+    }
+
+    /// Asks for the live database's pages, one checksum each, at the next
+    /// transaction the replica is confirmed to hold, for a scheduled verify
+    /// ([`crate::verify_against`]). A running engine reads them in a sync tick
+    /// once uploads have caught up, under that tick's proof, as a level-9
+    /// snapshot reads the database; [`Self::take_live_pages`] hands them over.
+    pub const fn read_live_pages(&mut self) {
+        self.live_wanted = true;
+    }
+
+    /// The live pages read since the last call, if any.
+    pub const fn take_live_pages(&mut self) -> Option<LivePages> {
+        self.live.take()
+    }
+
+    /// Keeps the restore chain of `txid` from retention, for a scheduled verify
+    /// that found a later restore wrong (`None` lets it go). A degraded lane's
+    /// pin, if older, still wins.
+    pub fn pin_for_verify(&mut self, txid: Option<Txid>) {
+        let released = self.verify_pin.is_some() && txid.is_none();
+        self.verify_pin = txid;
+        self.apply_pin();
+        if released {
+            self.maintain.stale = true;
+        }
+    }
+
+    /// The restore point retention keeps, if one is pinned.
+    #[must_use]
+    pub const fn retention_pin(&self) -> Option<Txid> {
+        self.maintain.state.pin()
     }
 
     /// Makes the next sync a snapshot (an operator asked). A cause already
@@ -647,7 +692,8 @@ impl Actor {
     fn pin_retention(&mut self) {
         if !self.pinned {
             self.pinned = true;
-            self.maintain.state.set_pin(self.upload.confirmed());
+            self.lane_pin = self.upload.confirmed();
+            self.apply_pin();
         }
     }
 
@@ -656,9 +702,21 @@ impl Actor {
     fn release_pin(&mut self) {
         if self.pinned && !self.lanes.any_degraded() {
             self.pinned = false;
-            self.maintain.state.set_pin(None);
+            self.lane_pin = None;
+            self.apply_pin();
             self.maintain.stale = true;
         }
+    }
+
+    /// Retention keeps the older of the two restore points asked for: a
+    /// degraded lane's and a scheduled verify's.
+    fn apply_pin(&mut self) {
+        let lane = self.lane_pin.filter(|_| self.pinned);
+        let pin = match (lane, self.verify_pin) {
+            (Some(lane), Some(verify)) => Some(lane.min(verify)),
+            (lane, verify) => lane.or(verify),
+        };
+        self.maintain.state.set_pin(pin);
     }
 
     /// Replaces every piece of engine state with a fresh actor's, so the next
@@ -675,6 +733,9 @@ impl Actor {
         fresh.last = self.last;
         fresh.clamp_reported = self.clamp_reported;
         fresh.pinned = self.pinned;
+        fresh.lane_pin = self.lane_pin;
+        fresh.verify_pin = self.verify_pin;
+        fresh.live_wanted = self.live_wanted;
         fresh.maintain.state.set_pin(self.maintain.state.pin());
         fresh.host = self.host;
         *self = fresh;
@@ -939,7 +1000,8 @@ impl Actor {
             Err(err) => return Some(self.fault(Lane::Sync, Fault::from_source(err), now)),
         };
         self.host.poll(committed);
-        let wants_proof = may_checkpoint && self.checkpoint_decision(now).is_some();
+        let wants_live = may_checkpoint && self.live_wanted && self.caught_up();
+        let wants_proof = may_checkpoint && (self.checkpoint_decision(now).is_some() || wants_live);
         let quiet = !self.wal_moved(committed) && self.pending.is_none() && !self.more_wal;
         if quiet && !wants_proof {
             return None;
@@ -949,11 +1011,38 @@ impl Actor {
             Ok(synced) => synced,
             Err(tick) => return Some(tick),
         };
+        if wants_live
+            && let Some(proof) = &proof
+            && let Err(fault) = self.live_read(env, proof)
+        {
+            return Some(self.fault(Lane::Sync, fault, now));
+        }
         let decision = self.checkpoint_decision(now).filter(|_| may_checkpoint);
         if let (Some(proof), Some((decision, mode))) = (proof, decision) {
             return Some(self.checkpoint_unit(env, proof, decision, mode, now).await);
         }
         (files > 0).then(|| self.ran(Event::Synced { files }, now))
+    }
+
+    /// Whether everything staged is on the replica.
+    fn caught_up(&self) -> bool {
+        self.staged.is_some() && self.staged == self.upload.confirmed()
+    }
+
+    /// Reads the live pages when `proof` is at the transaction the replica
+    /// holds; a proof past it (this tick staged more) waits for its upload.
+    fn live_read<W: WalSource, P: PageSource, C, L, R>(
+        &mut self,
+        env: &mut Env<'_, W, P, C, L, R>,
+        proof: &SyncedThrough,
+    ) -> Result<(), Fault> {
+        if Some(proof.position().txid()) != self.upload.confirmed() {
+            return Ok(());
+        }
+        let live = read_live(proof, env.wal, env.db, &mut self.pages)?;
+        self.live = Some(live);
+        self.live_wanted = false;
+        Ok(())
     }
 
     /// A step's result as what was staged, or as the tick a fault or a
