@@ -91,4 +91,26 @@ mod fixed {
     fn a_torn_staged_file_is_dropped_seed_0x46() {
         replay(0x46, 252);
     }
+
+    // Issue #39: after a VACUUM that changes the page size, a staging wipe and a
+    // resnapshot, a restore at an early TXID differs from the oracle's commit.
+    // Which side is wrong is not settled yet.
+
+    #[test]
+    #[ignore = "review: #39, restore differs from the oracle after a page-size VACUUM and a staging wipe"]
+    fn page_size_vacuum_and_staging_wipe_seed_0x126d68ef1c07() {
+        replay(0x0000_126d_68ef_1c07, 52);
+    }
+
+    #[test]
+    #[ignore = "review: #39, restore differs from the oracle after a page-size VACUUM and a staging wipe"]
+    fn page_size_vacuum_and_staging_wipe_seed_0x126d68ed250e() {
+        replay(0x0000_126d_68ed_250e, 215);
+    }
+
+    #[test]
+    #[ignore = "review: #39, restore differs from the oracle after a page-size VACUUM and a staging wipe"]
+    fn page_size_vacuum_and_staging_wipe_seed_0x126d68ef545f() {
+        replay(0x0000_126d_68ef_545f, 176);
+    }
 }
