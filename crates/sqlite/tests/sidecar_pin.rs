@@ -15,8 +15,9 @@
 //!   write restarts the WAL once, and every checkpoint after it backfills nothing: a
 //!   checkpoint needs read lock 0 exclusively before it writes a page.
 //!
-//! Which read mark the pin holds is read from `/proc/locks` (read lock `i` is byte `123 + i`
-//! of `-shm`), so the file is Linux only; nothing here opens the database or `-shm`.
+//! Which read mark the pin holds is read from the kernel's list of this process's locks on
+//! `-shm` in `/proc/self/fdinfo` (read lock `i` is byte `123 + i` of `-shm`), so the file is
+//! Linux only; nothing here opens the database or `-shm`.
 //!
 //! The last two tests run core's host-checkpoint observer over the same reads, in both
 //! placements of the pin, with the host at SQLite's defaults and at `wal_autocheckpoint = 0`.
@@ -184,20 +185,33 @@ fn run_application(role: &str, db: &Path) -> Vec<Seen> {
     seen
 }
 
-/// The read locks this process holds on `-shm`, as read-lock numbers, from `/proc/locks`.
+/// The read locks this process holds on `-shm`, as read-lock numbers.
+///
+/// Read from `/proc/self/fdinfo` of a descriptor this process has open on `-shm`, not from
+/// `/proc/locks`: the kernel prints a file's locks into fdinfo in one pass under the file's
+/// lock list lock, while `/proc/locks` lists every lock on the machine a page per read, so
+/// locks other processes take or drop between two reads shift the listing and one of ours
+/// shows twice or not at all (seen with tests running in parallel).
 fn read_marks_held(db: &Path) -> Vec<u64> {
-    let inode = format!(
-        ":{}",
-        std::fs::metadata(suffixed(db, "-shm")).unwrap().ino()
-    );
-    let pid = std::process::id().to_string();
+    let shm = std::fs::metadata(suffixed(db, "-shm")).unwrap();
+    let fd = std::fs::read_dir("/proc/self/fd")
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|fd| {
+            std::fs::metadata(fd.path())
+                .is_ok_and(|m| m.is_file() && m.dev() == shm.dev() && m.ino() == shm.ino())
+        })
+        .unwrap()
+        .file_name();
+    let info = Path::new("/proc/self/fdinfo").join(fd);
     let mut marks = Vec::new();
-    for line in std::fs::read_to_string("/proc/locks").unwrap().lines() {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        let ours = fields.get(1) == Some(&"POSIX")
-            && fields.get(4) == Some(&pid.as_str())
-            && fields.get(5).is_some_and(|f| f.ends_with(&inode));
-        if !ours {
+    for line in std::fs::read_to_string(info).unwrap().lines() {
+        // `lock:\t1: POSIX  ADVISORY  READ <pid> <dev>:<inode> <start> <end>`
+        let Some(lock) = line.strip_prefix("lock:") else {
+            continue;
+        };
+        let fields: Vec<&str> = lock.split_whitespace().collect();
+        if fields.get(1) != Some(&"POSIX") {
             continue;
         }
         let start: u64 = fields[6].parse().unwrap();
