@@ -28,7 +28,7 @@ fn restore_latest_is_the_default_target() {
             output: "o".into(),
             target: RestoreTarget::Latest,
             as_of_inside: AsOfInside::Refuse,
-            clear_sidecars: false,
+            clear_journal_files: false,
             integrity_check: IntegrityCheck::Off,
             if_db_not_exists: false,
             if_replica_exists: false,
@@ -72,12 +72,12 @@ fn restore_takes_the_skip_dry_run_and_json_switches() {
 #[test]
 fn restore_reads_every_flag_in_any_order() {
     let Ok(Command::Restore(args)) =
-        parsed("restore --clear-sidecars --txid 000000000000002a --output o --replica r")
+        parsed("restore --clear-journal-files --txid 000000000000002a --output o --replica r")
     else {
         panic!("did not parse");
     };
     assert_eq!(args.target, RestoreTarget::Txid(txid(42)));
-    assert!(args.clear_sidecars);
+    assert!(args.clear_journal_files);
     let Ok(Command::Restore(args)) =
         parsed("restore --replica r --output o --timestamp 2026-11-20T10:00:00.5+01:00")
     else {

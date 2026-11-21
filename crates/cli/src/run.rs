@@ -2,8 +2,8 @@
 //! place that maps either to an [`Exit`] code.
 //!
 //! A restore never touches an existing target: [`FileSink::create`] refuses it
-//! and any stale sidecar, and the executor publishes by hard link. With
-//! `--clear-sidecars` the stale files are removed first and a failure after that
+//! and any stale journal file, and the executor publishes by hard link. With
+//! `--clear-journal-files` the stale files are removed first and a failure after that
 //! still reports what was removed. With `--integrity-check` the sink runs
 //! SQLite's check on the scratch before publishing; a database SQLite finds
 //! invalid is a refused restore ([`CliError::Integrity`]), and nothing is left
@@ -34,7 +34,7 @@ use lsr_core::{
 };
 use lsr_local::{
     ClearError, CreateError, FileSink, IntegrityCheck, IntegrityFailure, PublishError,
-    clear_sidecars, preflight,
+    clear_journal_files, preflight,
 };
 use lsr_store_fs::FsStore;
 use lsr_store_s3::{ConfigError, CredentialError};
@@ -185,7 +185,7 @@ pub enum Finished {
     Restored {
         /// What the executor did.
         restored: Restored,
-        /// Stale sidecars removed first.
+        /// Stale journal files removed first.
         cleared: Vec<PathBuf>,
         /// The SQLite check the database passed before it was published.
         integrity_check: IntegrityCheck,
@@ -198,14 +198,14 @@ pub enum Finished {
         chain: ContiguousChain,
         /// Exact created-at times read to plan an as-of target.
         created_at_read: u64,
-        /// Stale sidecars `--clear-sidecars` would remove first.
-        sidecars_to_remove: Vec<PathBuf>,
+        /// Stale journal files `--clear-journal-files` would remove first.
+        journal_files_to_remove: Vec<PathBuf>,
     },
     /// Nothing was restored, by request.
     Skipped {
         /// Why.
         skip: Skip,
-        /// Stale sidecars removed before the replica turned out empty.
+        /// Stale journal files removed before the replica turned out empty.
         cleared: Vec<PathBuf>,
     },
 }
@@ -306,19 +306,19 @@ pub enum CliError {
     /// The verify walk stopped.
     #[error("{0}")]
     Verify(#[from] VerifyError),
-    /// A stale SQLite sidecar sits beside the output.
-    #[error("{} exists beside the output and SQLite would replay it over the restored database; remove it or pass --clear-sidecars", .path.display())]
-    Sidecar {
-        /// The sidecar.
+    /// A stale SQLite journal file sits beside the output.
+    #[error("{} exists beside the output and SQLite would replay it over the restored database; remove it or pass --clear-journal-files", .path.display())]
+    JournalFile {
+        /// The journal file.
         path: PathBuf,
     },
     /// The destination cannot take a restore.
     #[error("{0}")]
     Create(CreateError),
-    /// Stale sidecars could not be removed.
+    /// Stale journal files could not be removed.
     #[error("{0}")]
     Clear(#[from] ClearError),
-    /// Something failed after stale sidecars were already removed.
+    /// Something failed after stale journal files were already removed.
     #[error("{source}; the stale files {} were removed first", render::paths(.cleared))]
     AfterClearing {
         /// What was removed.
@@ -360,7 +360,7 @@ impl From<RestoreError> for CliError {
 impl From<CreateError> for CliError {
     fn from(err: CreateError) -> Self {
         match err {
-            CreateError::Sidecar { path } => Self::Sidecar { path },
+            CreateError::JournalFile { path } => Self::JournalFile { path },
             other @ (CreateError::TargetExists(_)
             | CreateError::RestoreInProgress(_)
             | CreateError::Inspect { .. }
@@ -455,7 +455,7 @@ pub fn exit_for_error(error: &CliError) -> Exit {
         | CliError::S3Config(_)
         | CliError::Inventory(_)
         | CliError::Verify(_)
-        | CliError::Sidecar { .. }
+        | CliError::JournalFile { .. }
         | CliError::Create(_)
         | CliError::Clear(_)
         | CliError::Publish(_)
@@ -502,7 +502,7 @@ async fn restore_command(args: RestoreArgs) -> Result<Done, CliError> {
         output,
         target,
         as_of_inside,
-        clear_sidecars,
+        clear_journal_files,
         integrity_check,
         if_db_not_exists,
         if_replica_exists,
@@ -513,7 +513,7 @@ async fn restore_command(args: RestoreArgs) -> Result<Done, CliError> {
     let how = How {
         target,
         as_of_inside,
-        clear_sidecars_first: clear_sidecars,
+        clear_journal_files_first: clear_journal_files,
         integrity_check,
         if_replica_exists,
     };
@@ -591,7 +591,7 @@ fn no_ltx_folder(error: CliError, path: PathBuf) -> CliError {
         | CliError::Publish(_)
         | CliError::Restore(_)
         | CliError::Verify(_)
-        | CliError::Sidecar { .. }
+        | CliError::JournalFile { .. }
         | CliError::Create(_)
         | CliError::Clear(_)
         | CliError::Output(_)
@@ -613,7 +613,7 @@ fn output_exists(output: &Path) -> Result<bool, CliError> {
 struct How {
     target: RestoreTarget,
     as_of_inside: AsOfInside,
-    clear_sidecars_first: bool,
+    clear_journal_files_first: bool,
     integrity_check: IntegrityCheck,
     if_replica_exists: bool,
 }
@@ -634,13 +634,13 @@ async fn restore_on<S: ObjectStore>(
     let How {
         target,
         as_of_inside,
-        clear_sidecars_first,
+        clear_journal_files_first,
         integrity_check,
         if_replica_exists,
     } = how;
     let start = started();
-    let cleared = if clear_sidecars_first {
-        clear_sidecars(output)?
+    let cleared = if clear_journal_files_first {
+        clear_journal_files(output)?
     } else {
         Vec::new()
     };
@@ -673,15 +673,15 @@ async fn restore_on<S: ObjectStore>(
 }
 
 /// The restore's checks and plan, without its writes: the output is checked
-/// as [`FileSink::create`] would, sidecars are listed instead of removed, and
+/// as [`FileSink::create`] would, journal files are listed instead of removed, and
 /// the replica is listed and planned as [`restore`] plans its first attempt.
 async fn plan_on<S: ObjectStore>(store: &S, output: &Path, how: How) -> Result<Finished, CliError> {
-    let sidecars_to_remove = preflight(output)?;
-    if let Some(path) = sidecars_to_remove
+    let journal_files_to_remove = preflight(output)?;
+    if let Some(path) = journal_files_to_remove
         .first()
-        .filter(|_| !how.clear_sidecars_first)
+        .filter(|_| !how.clear_journal_files_first)
     {
-        return Err(CliError::Sidecar { path: path.clone() });
+        return Err(CliError::JournalFile { path: path.clone() });
     }
     let inventory = Inventory::load(store).await?;
     let (outcome, created_at_read) = plan_target(store, &inventory, how.target).await?;
@@ -692,13 +692,13 @@ async fn plan_on<S: ObjectStore>(store: &S, output: &Path, how: How) -> Result<F
             Ok(Finished::Planned {
                 chain,
                 created_at_read,
-                sidecars_to_remove,
+                journal_files_to_remove,
             })
         }
         PlanOutcome::Plan(chain) => Ok(Finished::Planned {
             chain,
             created_at_read,
-            sidecars_to_remove,
+            journal_files_to_remove,
         }),
         other @ (PlanOutcome::EmptyReplica
         | PlanOutcome::NoSnapshot { .. }

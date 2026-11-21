@@ -201,7 +201,7 @@ fn how(target: RestoreTarget) -> How {
     How {
         target,
         as_of_inside: AsOfInside::Refuse,
-        clear_sidecars_first: false,
+        clear_journal_files_first: false,
         integrity_check: IntegrityCheck::Off,
         if_replica_exists: false,
     }
