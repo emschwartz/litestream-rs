@@ -33,9 +33,10 @@ use std::time::Duration;
 
 use alternate::{Launch, alternate, seed};
 use lsr_compat::{
-    AppFixture, Era, GoBuild, GoRestore, Kind, Replicator, Shape, Summary, Target, builds_in,
-    builds_under_test, hash_pages, integrity_check, lsr_binary, position, restore_replica,
-    restore_with_go, snapshots, wait_boot_file, wait_staged_past, wait_until, wait_uploaded,
+    AppFixture, GoBuild, GoRestore, Kind, PageEncoding, Replicator, Shape, Summary, Target,
+    builds_in, builds_under_test, hash_pages, integrity_check, lsr_binary, position,
+    restore_replica, restore_with_go, snapshots, wait_boot_file, wait_staged_past, wait_until,
+    wait_uploaded,
 };
 use lsr_core::RestoreTarget;
 use lsr_ltx::Txid;
@@ -331,7 +332,7 @@ fn sidecar_handover(build: &GoBuild, lsr: &Path) {
         );
     }
     println!("{name}: lsr continued every database at Go's position plus one");
-    if build.era() == Era::Frames {
+    if build.page_encoding() == PageEncoding::Frame {
         println!("{name}: reads only frame-encoded files, so cannot resume from lsr's");
         return;
     }
@@ -395,9 +396,11 @@ mod live {
     #[test]
     #[ignore = "runs the pinned Go binaries; just compat"]
     fn go_and_rust_sidecars_alternate_on_one_config_file() {
-        let builds = builds_in(Era::Blocks);
+        let builds = builds_in(PageEncoding::Block);
         if builds.is_empty() {
-            println!("no block-era build under test: a frame-era Go cannot read Rust's files");
+            println!(
+                "no block-encoding build under test: a frame-encoding Go cannot read Rust's files"
+            );
             return;
         }
         let lsr = lsr_binary().expect("lsr builds");

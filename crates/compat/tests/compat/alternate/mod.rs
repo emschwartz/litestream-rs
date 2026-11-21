@@ -76,7 +76,7 @@
 //! `lsr-alternation-<seed>-<build><launch>`, and prints where.
 //!
 //! Seeds: `LSR_ALTERNATION_SEED` (decimal) replays a run; without it the seed is the clock.
-//! The Go builds are those under test in the block era (`just compat-live`); a frame-era build
+//! The Go builds are those under test in the block page encoding (`just compat-live`); a frame-encoding build
 //! cannot read Rust's files, so it has nothing to alternate with.
 
 #![expect(

@@ -3,7 +3,7 @@
 //!
 //! [`GoVersion`] is the closed pinned set (committed fixtures need static names). The live
 //! tests take a [`GoBuild`] instead: any release tag, a commit or `main`, with the
-//! [`Era`] its name implies. [`builds_under_test`] is the one place that chooses the set.
+//! [`PageEncoding`] its name implies. [`builds_under_test`] is the one place that chooses the set.
 
 use std::path::{Path, PathBuf};
 
@@ -62,12 +62,12 @@ impl GoVersion {
 /// Which page encoding a Go build writes and reads, the one fact every live expectation
 /// depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Era {
+pub enum PageEncoding {
     /// LZ4 frame pages (`v0.5.N`, N up to 15): reads only frame-encoded files, so it refuses
     /// a replica Rust wrote.
-    Frames,
+    Frame,
     /// LZ4 block pages (v0.5.16 and later, any commit, `main`).
-    Blocks,
+    Block,
 }
 
 /// The last release tag on the frame encoding.
@@ -91,20 +91,20 @@ pub const FIRST_WAL_INDEX_END_PATCH: Option<u32> = None;
 pub const WAL_INDEX_END_COMMIT: &str = "bcd69ae";
 
 /// A Go build the live tests run: its binary name (a tag, a short commit or `main`) and
-/// the era derived from it.
+/// the page encoding derived from it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GoBuild {
     name: String,
-    era: Era,
+    page_encoding: PageEncoding,
 }
 
 impl GoBuild {
-    /// The build named `name`. A release tag `v0.5.N` with N up to 15 is [`Era::Frames`];
-    /// anything else (a later tag, a commit, `main`) is [`Era::Blocks`].
+    /// The build named `name`. A release tag `v0.5.N` with N up to 15 is [`PageEncoding::Frame`];
+    /// anything else (a later tag, a commit, `main`) is [`PageEncoding::Block`].
     pub fn new(name: &str) -> Self {
         Self {
             name: name.to_owned(),
-            era: era_of(name),
+            page_encoding: page_encoding_of(name),
         }
     }
 
@@ -114,8 +114,8 @@ impl GoBuild {
     }
 
     /// The page encoding this build writes and reads.
-    pub const fn era(&self) -> Era {
-        self.era
+    pub const fn page_encoding(&self) -> PageEncoding {
+        self.page_encoding
     }
 
     /// The release quirk recorded for this build, if any.
@@ -180,14 +180,14 @@ fn release_patch(name: &str) -> Option<u32> {
         .and_then(|n| n.parse::<u32>().ok())
 }
 
-fn era_of(name: &str) -> Era {
+fn page_encoding_of(name: &str) -> PageEncoding {
     match release_patch(name) {
-        Some(n) if n <= LAST_FRAMES_PATCH => Era::Frames,
-        Some(_) | None => Era::Blocks,
+        Some(n) if n <= LAST_FRAMES_PATCH => PageEncoding::Frame,
+        Some(_) | None => PageEncoding::Block,
     }
 }
 
-/// How a release differs from its era in a way a test sees. Tests assert the behaviour, they
+/// How a release differs from its page encoding in a way a test sees. Tests assert the behaviour, they
 /// never skip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Quirk {
@@ -207,13 +207,13 @@ pub struct QuirkEntry {
     pub reason: &'static str,
 }
 
-/// Every release that differs from its era, or cannot be built. Empty means every release
-/// behaves as its era says.
+/// Every release that differs from its page encoding, or cannot be built. Empty means every release
+/// behaves as its page encoding says.
 pub const QUIRKS: &[QuirkEntry] = &[];
 
 /// Every upstream release tag `v0.5.N` (no pre-release suffix) the table knows. A tag in the
 /// clone that is not here fails `every_release_tag_is_known`, so a new upstream release
-/// needs an era decision here, never a silent drop.
+/// needs a page-encoding decision here, never a silent drop.
 pub const KNOWN_RELEASES: [&str; 19] = [
     "v0.5.0", "v0.5.1", "v0.5.2", "v0.5.3", "v0.5.4", "v0.5.5", "v0.5.6", "v0.5.7", "v0.5.8",
     "v0.5.9", "v0.5.10", "v0.5.11", "v0.5.12", "v0.5.13", "v0.5.14", "v0.5.15", "v0.5.16",
@@ -281,11 +281,11 @@ pub fn builds_under_test() -> Vec<GoBuild> {
     }
 }
 
-/// The builds of `builds_under_test` in `era`, with its guard.
-pub fn builds_in(era: Era) -> Vec<GoBuild> {
+/// The builds of `builds_under_test` in `page_encoding`, with its guard.
+pub fn builds_in(page_encoding: PageEncoding) -> Vec<GoBuild> {
     builds_under_test()
         .into_iter()
-        .filter(|b| b.era() == era)
+        .filter(|b| b.page_encoding() == page_encoding)
         .collect()
 }
 
@@ -372,17 +372,17 @@ mod tests {
 
     #[test]
     fn era_follows_the_name() {
-        for (name, era) in [
-            ("v0.5.0", Era::Frames),
-            ("v0.5.9", Era::Frames),
-            ("v0.5.15", Era::Frames),
-            ("v0.5.16", Era::Blocks),
-            ("v0.5.100", Era::Blocks),
-            ("041a8c3", Era::Blocks),
-            ("main", Era::Blocks),
-            ("v0.5.3-beta3", Era::Blocks),
+        for (name, page_encoding) in [
+            ("v0.5.0", PageEncoding::Frame),
+            ("v0.5.9", PageEncoding::Frame),
+            ("v0.5.15", PageEncoding::Frame),
+            ("v0.5.16", PageEncoding::Block),
+            ("v0.5.100", PageEncoding::Block),
+            ("041a8c3", PageEncoding::Block),
+            ("main", PageEncoding::Block),
+            ("v0.5.3-beta3", PageEncoding::Block),
         ] {
-            assert_eq!(GoBuild::new(name).era(), era, "{name}");
+            assert_eq!(GoBuild::new(name).page_encoding(), page_encoding, "{name}");
         }
     }
 
@@ -417,7 +417,7 @@ mod tests {
     #[test]
     fn pinned_versions_agree_with_their_era() {
         for v in GoVersion::ALL {
-            let frames = GoBuild::from(v).era() == Era::Frames;
+            let frames = GoBuild::from(v).page_encoding() == PageEncoding::Frame;
             assert_eq!(frames, v.writes_lz4_frames(), "{}", v.name());
         }
     }

@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use lsr_compat::{
-    AppFixture, ENDPOINT_VAR, Era, GoBuild, GoRestore, Kind, MinioEnv, Remote, Replicator,
+    AppFixture, ENDPOINT_VAR, GoBuild, GoRestore, Kind, MinioEnv, PageEncoding, Remote, Replicator,
     S3Replica, Schedule, Shape, Summary, Target, builds_in, builds_under_test, hash_pages,
     integrity_check, lsr_binary, position, real_now_ms, restore_with_go, uploaded, wait_boot_file,
     wait_staged_past, wait_until, wait_uploaded, write_config_for,
@@ -222,8 +222,8 @@ fn over_s3_rust_restores_go_replica() {
 }
 
 /// `lsr replicate` writes a replica to MinIO from a live database (its boot snapshot a
-/// multipart upload); every block-era build under test restores it at Latest, at a txid
-/// and at an instant between two uploads, as Rust does. A frame-era build refuses it.
+/// multipart upload); every block-encoding build under test restores it at Latest, at a txid
+/// and at an instant between two uploads, as Rust does. A frame-encoding build refuses it.
 #[test]
 #[ignore = "needs MinIO and the pinned Go binaries; just compat-s3"]
 fn over_s3_go_restores_rust_replica() {
@@ -235,10 +235,10 @@ fn over_s3_go_restores_rust_replica() {
     let rust = start(Kind::Rust, &lsr, &config, &fixture.dir().join("lsr.log"));
     let marks = write_rounds(rust, &mut fixture);
     rust_reads(&fixture, &marks, "lsr wrote");
-    for build in builds_in(Era::Blocks) {
+    for build in builds_in(PageEncoding::Block) {
         go_reads(&build, &config, &fixture, &marks, "lsr wrote");
     }
-    for build in builds_in(Era::Frames) {
+    for build in builds_in(PageEncoding::Frame) {
         let bin = build.binary().expect("the build under test is present");
         let out = fresh(&fixture, &format!("go-{}-refused.db", build.name()));
         let result =
@@ -328,7 +328,7 @@ fn go_restore(
 
 /// Go replicates to a MinIO prefix and stops; `lsr replicate -config` starts on the same
 /// database, meta directory and prefix, and its first file is the next transaction,
-/// incremental, with no new snapshot. Then, for a block-era build, the reverse: Go
+/// incremental, with no new snapshot. Then, for a block-encoding build, the reverse: Go
 /// resumes from what `lsr` left, with no snapshot either. Both restore the combined chain
 /// at each handover point.
 #[test]
@@ -376,7 +376,7 @@ fn hand_over(env: &MinioEnv, build: &GoBuild, lsr: &Path) {
         at_go_stop,
         "{name}: Rust at the txid where Go stopped"
     );
-    if build.era() == Era::Frames {
+    if build.page_encoding() == PageEncoding::Frame {
         println!("{name}: reads only frame-encoded files, so cannot resume from lsr's");
         s3_of(&fixture).delete_all().expect("clean up");
         return;

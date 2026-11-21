@@ -1,5 +1,5 @@
 //! The release table covers upstream: every `v0.5.N` tag in the clone is known (so a new
-//! upstream release needs an era decision here instead of dropping out unnoticed), no known
+//! upstream release needs a page-encoding decision here instead of dropping out unnoticed), no known
 //! release has vanished, and the releases said to read the wal-index's committed end are
 //! exactly the tags that contain the upstream fix. Needs only the clone (`just upstream`), no
 //! Go toolchain.
@@ -53,7 +53,7 @@ fn every_release_tag_is_known() {
     let unlisted: Vec<_> = tags.difference(&known).collect();
     assert!(
         unlisted.is_empty(),
-        "upstream release(s) {unlisted:?} are not in KNOWN_RELEASES: add them (check the era; `just compat-live <tag>`)"
+        "upstream release(s) {unlisted:?} are not in KNOWN_RELEASES: add them (check the page encoding; `just compat-live <tag>`)"
     );
     let missing: Vec<_> = known.difference(&tags).collect();
     assert!(
