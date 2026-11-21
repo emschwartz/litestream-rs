@@ -2,7 +2,7 @@
 //! database really was.
 //!
 //! Ground truth comes from two places, never from the code under test: the
-//! [`TapLog`](crate::store::TapLog), which records every file the store really
+//! [`RecorderLog`](crate::store::RecorderLog), which records every file the store really
 //! took with its WAL origin, and the [`Model`], which holds every commit's page
 //! image. A file's WAL origin names the commit that ended it, so the oracle maps
 //! a transaction id to a commit without reading a single page of a file.
@@ -28,7 +28,7 @@ use lsr_wal::Salts;
 use thiserror::Error;
 
 use crate::model::{CommitId, Model, PageImage};
-use crate::store::{TapEvent, TapLog};
+use crate::store::{RecorderEvent, RecorderLog};
 
 /// A resource the engine must keep bounded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -226,12 +226,12 @@ fn range_str(range: TxidRange) -> String {
     format!("{}-{}", range.min().get(), range.max().get())
 }
 
-/// Which commit each transaction id covers, from the tap and the model.
-fn covers(model: &Model, tap: &TapLog) -> Result<BTreeMap<Txid, CommitId>, Violation> {
+/// Which commit each transaction id covers, from the recorder and the model.
+fn covers(model: &Model, recorder: &RecorderLog) -> Result<BTreeMap<Txid, CommitId>, Violation> {
     let rewound = model.snapshot_notes().iter().any(|n| n.rewound) || model.rewound();
     let mut cover: BTreeMap<Txid, CommitId> = BTreeMap::new();
-    for (at, event) in tap.events().iter().enumerate() {
-        let TapEvent::Put {
+    for (at, event) in recorder.events().iter().enumerate() {
+        let RecorderEvent::Put {
             key,
             header: Some(header),
             origin,
@@ -374,11 +374,11 @@ fn restore_and_compare(
 /// The first [`Violation`] found.
 pub fn check(
     model: &Model,
-    tap: &TapLog,
+    recorder: &RecorderLog,
     remote: &MemStore,
     acked: &Acked,
 ) -> Result<Checked, Violation> {
-    let cover = covers(model, tap)?;
+    let cover = covers(model, recorder)?;
     let inventory = block_on(Inventory::load(remote))
         .map_err(|err| bug_fault(format!("listing the replica: {err}")))?;
     let files = inventory.files();

@@ -7,8 +7,8 @@ use crate::testkit::ps;
 fn stats(event: Option<Event>) -> TickStats {
     TickStats {
         event,
-        remote: TapCounts::default(),
-        staging: TapCounts::default(),
+        remote: RecorderCounts::default(),
+        staging: RecorderCounts::default(),
         passive: 0,
         checkpoints: 0,
     }
@@ -106,26 +106,26 @@ fn an_idle_window_wants_no_staged_file_no_checkpoint_and_no_unexplained_listing(
 
 #[test]
 fn memory_bounds_one_write() {
-    let mut big = TapCounts::default();
+    let mut big = RecorderCounts::default();
     memory(big, big).unwrap();
     big.max_write_bytes = WRITE_CHUNK_LIMIT + 1;
-    assert!(memory(big, TapCounts::default()).is_err());
-    assert!(memory(TapCounts::default(), big).is_err());
+    assert!(memory(big, RecorderCounts::default()).is_err());
+    assert!(memory(RecorderCounts::default(), big).is_err());
 }
 
 #[test]
 fn delta_subtracts_counters_and_keeps_maxima() {
-    let a = TapCounts {
+    let a = RecorderCounts {
         lists: 2,
         written_bytes: 10,
         max_write_bytes: 5,
-        ..TapCounts::default()
+        ..RecorderCounts::default()
     };
-    let b = TapCounts {
+    let b = RecorderCounts {
         lists: 5,
         written_bytes: 40,
         max_write_bytes: 9,
-        ..TapCounts::default()
+        ..RecorderCounts::default()
     };
     let d = delta(a, b);
     assert_eq!((d.lists, d.written_bytes, d.max_write_bytes), (3, 30, 9));

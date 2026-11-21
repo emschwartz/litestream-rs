@@ -33,7 +33,7 @@ async fn upload<S: ObjectStore>(store: &S, n: u64) -> Result<(), StoreError> {
 
 #[test]
 fn yield_makes_every_store_call_a_crash_point() {
-    let store = Yield::new(MemStore::new());
+    let store = YieldEachCall::new(MemStore::new());
     let (done, polls) = count_polls(upload(&store, 1));
     done.unwrap();
     assert_eq!(polls, 3, "begin, write and commit are one await point each");
@@ -49,7 +49,7 @@ fn yield_makes_every_store_call_a_crash_point() {
 #[test]
 fn a_crash_before_the_commit_publishes_nothing() {
     let raw = MemStore::new();
-    let store = Yield::new(raw.clone());
+    let store = YieldEachCall::new(raw.clone());
     assert!(matches!(
         run_until(upload(&store, 1), Polls::new(2)),
         RunEnd::Crashed { polls: 2 }
@@ -87,26 +87,26 @@ fn faults_wrapper_leaves_raw_store_clean() {
 #[test]
 fn err_before_publish_is_invisible() {
     let raw = MemStore::new();
-    let tap = Tap::new(raw.clone());
-    let log = tap.log();
+    let recorder = Recorder::new(raw.clone());
+    let log = recorder.log();
     // Upload calls count begin (0), write (1), commit (2).
     let faults = Faults::new(
-        tap,
+        recorder,
         vec![(StoreOp::Upload, 2, FaultShape::Error(boom()))],
         1,
     );
     assert_eq!(block_on(upload(&faults, 1)), Err(boom()));
     assert_eq!(listed(&raw), 0);
-    assert!(log.is_empty(), "the tap saw no commit");
+    assert!(log.is_empty(), "the recorder saw no commit");
 }
 
 #[test]
-fn tap_records_err_after_publish() {
+fn recorder_records_err_after_publish() {
     let raw = MemStore::new();
-    let tap = Tap::new(raw.clone());
-    let log = tap.log();
+    let recorder = Recorder::new(raw.clone());
+    let log = recorder.log();
     let faults = Faults::new(
-        tap,
+        recorder,
         vec![(StoreOp::Upload, 0, FaultShape::ErrorAfterPublish(boom()))],
         1,
     );
@@ -123,7 +123,7 @@ fn tap_records_err_after_publish() {
     assert_eq!(listed(&raw), 1, "yet the object is published");
     let events = log.events();
     assert_eq!(events.len(), 1);
-    let TapEvent::Put {
+    let RecorderEvent::Put {
         key, origin: got, ..
     } = &events[0]
     else {
@@ -185,12 +185,12 @@ fn stage_power_loss_drops_or_tears_only_volatile() {
     let mut torn = 0;
     for seed in 0..40 {
         let raw = MemStore::new();
-        let stage = Stage::new(raw.clone());
-        let handle = stage.handle();
+        let volatile = Volatile::new(raw.clone());
+        let handle = volatile.handle();
         let durable = ltx(1, 1, 1, 1, None);
         let fresh = ltx(2, 2, 1, 2, None);
         block_on(async {
-            let mut up = stage
+            let mut up = volatile
                 .begin_upload(&fkey(0, 1, 1), Timestamp::from_unix_millis(5))
                 .await
                 .unwrap();
@@ -229,10 +229,10 @@ fn stage_power_loss_drops_or_tears_only_volatile() {
 #[test]
 fn a_late_error_leaves_the_key_volatile_until_a_later_commit_syncs() {
     let raw = MemStore::new();
-    let stage = Stage::new(raw.clone());
-    let handle = stage.handle();
+    let volatile = Volatile::new(raw.clone());
+    let handle = volatile.handle();
     let faults = Faults::new(
-        stage,
+        volatile,
         vec![(StoreOp::Upload, 0, FaultShape::ErrorAfterPublish(boom()))],
         1,
     )

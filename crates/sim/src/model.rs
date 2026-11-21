@@ -154,7 +154,7 @@ pub struct CommitRec {
     pub durable: bool,
     /// The local branch it started on: 0 until the first power loss.
     pub branch: u32,
-    /// How many tap events existed when it was made, so a file put earlier
+    /// How many recorder events existed when it was made, so a file put earlier
     /// cannot be taken to cover it.
     pub at: usize,
 }
@@ -168,7 +168,7 @@ pub struct SnapshotNote {
     pub commit: CommitId,
     /// A `LocalRewound` snapshot, which may re-issue a transaction id.
     pub rewound: bool,
-    /// Tap events at the time.
+    /// Recorder events at the time.
     pub at: usize,
 }
 
@@ -185,7 +185,7 @@ pub struct StageNote {
     pub end: u64,
     /// The commit it holds.
     pub commit: CommitId,
-    /// Replica tap events at the time.
+    /// Replica recorder events at the time.
     pub at: usize,
 }
 
@@ -257,7 +257,7 @@ impl Model {
     }
 
     /// Records the app's commit of `pages` leaving `db_size` pages. `at` is the
-    /// tap's length now. A shrink is a commit with no pages.
+    /// recorder's length now. A shrink is a commit with no pages.
     pub fn commit(
         &mut self,
         pages: &[(PageNo, Vec<u8>)],
@@ -308,7 +308,7 @@ impl Model {
     }
 
     /// The commit written in generation `salts` that ends at byte `end`, as of
-    /// tap length `at`. After a power loss the WAL regrows over the same offsets
+    /// recorder length `at`. After a power loss the WAL regrows over the same offsets
     /// with other commits, so several can match; the newest one made by `at`
     /// wins.
     #[must_use]

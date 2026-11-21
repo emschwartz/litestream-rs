@@ -164,10 +164,10 @@ fn a_power_loss_tick_drops_unsynced_staged_files() {
         None,
     );
     assert!(matches!(end, TickEnd::Done(Err(_))));
-    assert_eq!(w.stage.volatile(), vec![key]);
+    assert_eq!(w.volatile.volatile(), vec![key]);
     let lost = w.crash(CrashKind::Power);
     assert_eq!(lost.len(), 1);
-    assert!(w.stage.volatile().is_empty());
+    assert!(w.volatile.volatile().is_empty());
 }
 
 #[test]

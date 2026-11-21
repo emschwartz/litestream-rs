@@ -144,10 +144,10 @@ pub struct RunReport {
     pub seen: Vec<Seen>,
     /// Every commit and delete the replica accepted, when the run was asked to
     /// record.
-    pub remote_events: Vec<crate::store::TapEvent>,
+    pub remote_events: Vec<crate::store::RecorderEvent>,
     /// Every commit and delete staging accepted, when the run was asked to
     /// record.
-    pub staging_events: Vec<crate::store::TapEvent>,
+    pub staging_events: Vec<crate::store::RecorderEvent>,
     /// The replica's objects a corrupt publish changed, when the run was
     /// asked to record.
     pub remote_damaged: Vec<lsr_core::FileKey>,
@@ -348,13 +348,13 @@ impl Runner {
         in_tick: Option<(crate::CommitId, usize)>,
         at: usize,
     ) {
-        let events = self.w.staging_tap.events();
+        let events = self.w.staging_recorder.events();
         for (index, event) in events.iter().enumerate().skip(self.staging_seen) {
             let newest_commit = match in_tick {
                 Some((commit, from)) if index >= from => Some(commit),
                 Some(_) | None => began,
             };
-            if let crate::TapEvent::Put {
+            if let crate::RecorderEvent::Put {
                 key,
                 header: Some(_),
                 origin: Some(origin),
@@ -368,7 +368,7 @@ impl Runner {
                     .model
                     .note_stage(key.range().max(), Salts { salt1, salt2 }, end, at);
             }
-            if let crate::TapEvent::Put {
+            if let crate::RecorderEvent::Put {
                 key,
                 header: Some(_),
                 origin,
@@ -385,7 +385,7 @@ impl Runner {
                     self.report.seen.push(Seen::Snapshot(key.range().max()));
                 }
             } else if self.record
-                && let crate::TapEvent::Put {
+                && let crate::RecorderEvent::Put {
                     key,
                     header: Some(_),
                     ..
@@ -421,16 +421,16 @@ impl Runner {
         }
     }
 
-    fn note_tick(&mut self, began: Timestamp, remote0: crate::store::TapCounts) {
+    fn note_tick(&mut self, began: Timestamp, remote0: crate::store::RecorderCounts) {
         if !self.record {
             return;
         }
-        let spent = |c: crate::store::TapCounts| {
+        let spent = |c: crate::store::RecorderCounts| {
             [c.lists, c.reads, c.begins, c.commits, c.deletes]
                 .into_iter()
                 .fold(0_u64, u64::saturating_add)
         };
-        let now = self.w.remote_tap.counts();
+        let now = self.w.remote_recorder.counts();
         self.report.seen.push(Seen::Tick {
             at: began,
             remote_calls: spent(now).saturating_sub(spent(remote0)),
@@ -439,10 +439,10 @@ impl Runner {
     }
 
     fn step(&mut self, plan: Option<CrashPlan>) -> Result<(Step, TickStats), Violation> {
-        let at = self.w.remote_tap.len();
+        let at = self.w.remote_recorder.len();
         let newest_commit = self.w.model.newest_commit();
-        let remote0 = self.w.remote_tap.counts();
-        let staging0 = self.w.staging_tap.counts();
+        let remote0 = self.w.remote_recorder.counts();
+        let staging0 = self.w.staging_recorder.counts();
         let passive0 = self.tally.count(lsr_core::CheckpointMode::Passive);
         let total0 = self.tally.total();
         let began = self.now();
@@ -481,8 +481,8 @@ impl Runner {
         };
         let stats = TickStats {
             event,
-            remote: delta(remote0, self.w.remote_tap.counts()),
-            staging: delta(staging0, self.w.staging_tap.counts()),
+            remote: delta(remote0, self.w.remote_recorder.counts()),
+            staging: delta(staging0, self.w.staging_recorder.counts()),
             passive: self
                 .tally
                 .count(lsr_core::CheckpointMode::Passive)
@@ -1093,7 +1093,10 @@ impl Runner {
     fn finish(&mut self) -> Result<(), Violation> {
         self.drain()?;
         self.restore_all()?;
-        memory(self.w.remote_tap.counts(), self.w.staging_tap.counts())?;
+        memory(
+            self.w.remote_recorder.counts(),
+            self.w.staging_recorder.counts(),
+        )?;
         self.idle()?;
         self.replica_page_size().map(drop)
     }
@@ -1215,8 +1218,8 @@ pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure
     runner.report.app_checkpoints = runner.app_seen();
     runner.report.app_autocheckpoints = runner.w.sqlite.app_autocheckpoints();
     if opts.record {
-        runner.report.remote_events = runner.w.remote_tap.events();
-        runner.report.staging_events = runner.w.staging_tap.events();
+        runner.report.remote_events = runner.w.remote_recorder.events();
+        runner.report.staging_events = runner.w.staging_recorder.events();
         runner.report.remote_damaged = runner.w.remote_faults.damaged();
     }
     Ok(runner.report)

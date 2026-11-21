@@ -2,7 +2,7 @@
 //!
 //! Each is a bound on something the simulator can count: checkpoints by mode,
 //! bytes staged, listing calls, the WAL's length, the size of one write. The
-//! counts come from the taps (ground truth) and from [`CountingCheckpointer`],
+//! counts come from the recorders (ground truth) and from [`CountingCheckpointer`],
 //! never from the engine's own reports.
 
 use std::cell::Cell;
@@ -13,7 +13,7 @@ use lsr_core::{
 };
 
 use crate::oracle::{Bound, Violation, within};
-use crate::store::TapCounts;
+use crate::store::RecorderCounts;
 
 /// The largest piece the engine hands a store at once: its flush threshold
 /// (1 MiB) and a page of slack.
@@ -98,9 +98,9 @@ pub struct TickStats {
     /// What the tick reported; `None` when it was cut short.
     pub event: Option<Event>,
     /// The replica's calls during the tick.
-    pub remote: TapCounts,
+    pub remote: RecorderCounts,
     /// Staging's calls during the tick.
-    pub staging: TapCounts,
+    pub staging: RecorderCounts,
     /// Passive checkpoints asked.
     pub passive: u32,
     /// All checkpoints asked.
@@ -116,8 +116,8 @@ pub struct Limits {
 
 /// `after - before`, field by field, for the counters (the maxima stay).
 #[must_use]
-pub fn delta(before: TapCounts, after: TapCounts) -> TapCounts {
-    TapCounts {
+pub fn delta(before: RecorderCounts, after: RecorderCounts) -> RecorderCounts {
+    RecorderCounts {
         lists: after.lists.saturating_sub(before.lists),
         reads: after.reads.saturating_sub(before.reads),
         begins: after.begins.saturating_sub(before.begins),
@@ -142,7 +142,7 @@ const fn lists_allowed(event: &Event) -> bool {
     }
 }
 
-fn calls(counts: &TapCounts) -> u64 {
+fn calls(counts: &RecorderCounts) -> u64 {
     [
         counts.lists,
         counts.reads,
@@ -210,7 +210,7 @@ impl IdleWindow {
 /// # Errors
 /// [`Violation::ResourceBound`] when one write held more than the engine's flush
 /// size.
-pub fn memory(remote: TapCounts, staging: TapCounts) -> Result<(), Violation> {
+pub fn memory(remote: RecorderCounts, staging: RecorderCounts) -> Result<(), Violation> {
     within(
         Bound::UploadBuffer,
         remote.max_write_bytes,

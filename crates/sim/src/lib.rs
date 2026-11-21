@@ -3,7 +3,7 @@
 //! [`sqlite`] is SQLite in WAL mode as rules: the source, page source and
 //! checkpointer the sync engine runs against in the simulator, checked against
 //! real SQLite by `tests/sim/sqlite_rules.rs`. The harness around it: [`store`]
-//! wraps a store with faults, crash points, a ground-truth tap and power-loss
+//! wraps a store with faults, crash points, a ground-truth recorder and power-loss
 //! bookkeeping; [`exec`] crashes a future; [`model`] and [`oracle`] hold what
 //! the database really was and judge the replica against it; [`world`] builds
 //! all of it for one run; [`seed`] names a run. [`generate`] draws a history from
@@ -39,8 +39,8 @@ pub use sqlite::{
     ReaderId, SimCheckpointer, SimPages, SimSource, SimSqlite, SimWal,
 };
 pub use store::{
-    FaultHandle, FaultShape, Faults, Lost, Stage, StageHandle, Tap, TapCounts, TapEvent, TapLog,
-    Yield,
+    FaultHandle, FaultShape, Faults, Lost, Recorder, RecorderCounts, RecorderEvent, RecorderLog,
+    Volatile, VolatileHandle, YieldEachCall,
 };
 pub use world::{
     CommittedInTick, CrashPlan, RemoteStore, StagedEditError, StagingStore, TickEnd, World,

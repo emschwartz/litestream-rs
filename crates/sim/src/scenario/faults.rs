@@ -22,7 +22,7 @@ use crate::generate::{EnvFault, MetaOp, Op, RemoteOp, Target, WalOp};
 use crate::run::{RunReport, Seen};
 use crate::seed::Seed;
 use crate::sqlite::OtherProcessMode;
-use crate::store::{FaultShape, TapEvent};
+use crate::store::{FaultShape, RecorderEvent};
 
 /// A [`Fault`] without its payload: one variant per fault, so a new fault
 /// does not compile until [`fault_scenarios`] names its scenarios.
@@ -662,12 +662,12 @@ fn deleted_then_put_again(report: &RunReport) -> Result<(), String> {
     let mut written_again = false;
     for event in &report.remote_events {
         match event {
-            TapEvent::Put { key, .. } if deleted == Some(*key) => {
+            RecorderEvent::Put { key, .. } if deleted == Some(*key) => {
                 written_again = true;
                 break;
             }
-            TapEvent::Delete { keys } if keys.len() == 1 => deleted = keys.first().copied(),
-            TapEvent::Put { .. } | TapEvent::Delete { .. } => {}
+            RecorderEvent::Delete { keys } if keys.len() == 1 => deleted = keys.first().copied(),
+            RecorderEvent::Put { .. } | RecorderEvent::Delete { .. } => {}
         }
     }
     if !written_again {
@@ -1351,18 +1351,18 @@ fn rebuilt_at(report: &RunReport, level: u8) -> Result<(), String> {
     }
     let events = &report.remote_events;
     let through = key.range().max();
-    let builds = |event: &TapEvent| match event {
-        TapEvent::Put { key: put, .. } => {
+    let builds = |event: &RecorderEvent| match event {
+        RecorderEvent::Put { key: put, .. } => {
             put.level() == key.level() && put.range().max() >= through
         }
-        TapEvent::Delete { .. } => false,
+        RecorderEvent::Delete { .. } => false,
     };
     let published = events
         .iter()
-        .position(|event| matches!(event, TapEvent::Put { key: put, .. } if *put == key))
+        .position(|event| matches!(event, RecorderEvent::Put { key: put, .. } if *put == key))
         .ok_or_else(|| format!("{key} was never published"))?;
     let mut later = events.iter().skip(published.saturating_add(1));
-    if !later.any(|event| *event == TapEvent::Delete { keys: vec![key] }) {
+    if !later.any(|event| *event == RecorderEvent::Delete { keys: vec![key] }) {
         return Err(format!("{key} was never deleted alone"));
     }
     // `later` now starts after the delete.
@@ -1478,7 +1478,7 @@ fn uploaded_again(report: &RunReport) -> Result<(), String> {
     let puts = report
         .remote_events
         .iter()
-        .filter(|event| matches!(event, TapEvent::Put { key: put, .. } if *put == key))
+        .filter(|event| matches!(event, RecorderEvent::Put { key: put, .. } if *put == key))
         .count();
     if puts == 2 {
         Ok(())
