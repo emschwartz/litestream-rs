@@ -73,18 +73,18 @@ impl Control {
     }
 }
 
-/// The child, if `-exec` asked for one.
-enum Kid {
+/// The `-exec` child process, if one was asked for.
+enum ChildProcess {
     None,
     Running(Child),
     DidNotStart,
 }
 
-fn spawn(daemon: &Daemon, control: &Control, command: &ExecCommand) -> Kid {
+fn spawn(daemon: &Daemon, control: &Control, command: &ExecCommand) -> ChildProcess {
     match Child::spawn(command, control.wake.clone()) {
         Ok(child) => {
             *lock(&control.child) = Some(child.clone());
-            Kid::Running(child)
+            ChildProcess::Running(child)
         }
         Err(error) => {
             let fields = [
@@ -92,7 +92,7 @@ fn spawn(daemon: &Daemon, control: &Control, command: &ExecCommand) -> Kid {
                 ("error", error.to_string().into()),
             ];
             daemon.log().error("cannot start exec command", &fields);
-            Kid::DidNotStart
+            ChildProcess::DidNotStart
         }
     }
 }
@@ -107,27 +107,27 @@ pub fn supervise(
 ) -> Finished {
     let waiter = daemon.wait_for_files();
     let early = wake.try_recv().ok();
-    let kid = match (exec, early) {
+    let child_process = match (exec, early) {
         (Some(command), None) => spawn(daemon, control, command),
-        (Some(_) | None, _) => Kid::None,
+        (Some(_) | None, _) => ChildProcess::None,
     };
-    let first = match (&kid, early) {
+    let first = match (&child_process, early) {
         (_, Some(wake)) => Some(wake),
-        (Kid::DidNotStart, None) => Some(Wake::ChildExited),
-        (Kid::None | Kid::Running(_), None) => wake.recv().ok(),
+        (ChildProcess::DidNotStart, None) => Some(Wake::ChildExited),
+        (ChildProcess::None | ChildProcess::Running(_), None) => wake.recv().ok(),
     };
     let begun = daemon.now();
     match first {
         Some(Wake::Signal(signal)) => {
             daemon.signalled(signal);
-            if let Kid::Running(child) = &kid {
+            if let ChildProcess::Running(child) = &child_process {
                 child.forward(signal);
                 wait_for_child(daemon, child, wake, begun);
             }
         }
         Some(Wake::ChildExited) => {
             control.begin();
-            if let Kid::Running(_) = kid {
+            if let ChildProcess::Running(_) = child_process {
                 daemon
                     .log()
                     .info("subprocess exited, litestream shutting down", &[]);
@@ -135,10 +135,10 @@ pub fn supervise(
         }
         None => {}
     }
-    let end = match &kid {
-        Kid::None => None,
-        Kid::Running(child) => child.end(),
-        Kid::DidNotStart => Some(ChildEnd::DidNotStart),
+    let end = match &child_process {
+        ChildProcess::None => None,
+        ChildProcess::Running(child) => child.end(),
+        ChildProcess::DidNotStart => Some(ChildEnd::DidNotStart),
     };
     if let Some(end) = end {
         ended(daemon, end);
