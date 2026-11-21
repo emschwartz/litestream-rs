@@ -1083,6 +1083,30 @@ impl SimSqlite {
         });
     }
 
+    /// Flips one byte of page `pgno` in the database file, as a stray write
+    /// would; false when the page is past the file or the current generation's
+    /// committed frames hold it (a reader would never see the damage).
+    pub fn flip_db_page(&self, pgno: u32) -> bool {
+        self.with(|state| {
+            let committed = state
+                .index
+                .pgnos
+                .iter()
+                .take(byte_pos(u64::from(state.index.mx_frame)));
+            if pgno == 0 || pgno > state.db_pages() || committed.clone().any(|p| *p == pgno) {
+                return false;
+            }
+            let at = state.page_at(pgno).saturating_add(100);
+            match state.db.get_mut(at) {
+                Some(byte) => {
+                    *byte ^= 0x5a;
+                    true
+                }
+                None => false,
+            }
+        })
+    }
+
     /// The next TRUNCATE checkpoint that finishes, ours or a stranger's, resets
     /// the wal-index and then fails to truncate the file (`ftruncate` failing):
     /// the file keeps the old header and frames until the next commit writes a

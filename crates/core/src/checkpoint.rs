@@ -36,6 +36,7 @@ use lsr_wal::{OpenError, WalHeader, WalReader};
 
 use crate::fault::{Clamped, Fault, Next, SnapshotCause};
 use crate::layout::FileInfo;
+use crate::pages::PageTable;
 use crate::position::{Continuity, Position, ReadEpoch, SyncedThrough};
 use crate::source::{CheckpointMode, Checkpointer, PageSource, WalSource};
 use crate::store::ObjectStore;
@@ -358,6 +359,7 @@ const fn open_fault(err: &OpenError) -> Fault {
 struct Protocol<'a, W, P, C, L> {
     wal: &'a mut W,
     db: &'a mut P,
+    pages: &'a mut PageTable,
     ck: &'a mut C,
     staging: &'a L,
     cfg: SyncConfig,
@@ -407,6 +409,7 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_, 
             committed,
             epoch,
             &mut *self.db,
+            &mut *self.pages,
             self.staging,
             &cfg,
             self.now,
@@ -534,6 +537,7 @@ pub async fn checkpoint<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectS
     mode: CheckpointMode,
     wal: &mut W,
     db: &mut P,
+    pages: &mut PageTable,
     ck: &mut C,
     staging: &L,
     cfg: &SyncConfig,
@@ -542,6 +546,7 @@ pub async fn checkpoint<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectS
     let mut protocol = Protocol {
         wal,
         db,
+        pages,
         ck,
         staging,
         cfg: *cfg,

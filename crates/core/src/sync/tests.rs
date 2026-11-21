@@ -55,6 +55,7 @@ struct Rig {
     wal: FakeWal,
     db: FakeDb,
     store: MemStore,
+    pages: PageTable,
 }
 
 impl Rig {
@@ -69,6 +70,7 @@ impl Rig {
             ),
             db: FakeDb::new(PS),
             store: MemStore::new(),
+            pages: PageTable::new(),
         }
     }
 
@@ -82,10 +84,16 @@ impl Rig {
             committed,
             self.wal.epoch(),
             &mut self.db,
+            &mut self.pages,
             &self.store,
             cfg,
             ts(now),
         ))
+    }
+
+    /// A step under the WAL's own wal-index read.
+    fn step_at(&mut self, step: Step) -> Result<Synced, StepFailed> {
+        self.step(step, &SyncConfig::default(), 3000)
     }
 
     /// A step under a wal-index read the test chooses, over the WAL file as it is.
@@ -97,6 +105,7 @@ impl Rig {
             committed,
             self.wal.epoch(),
             &mut self.db,
+            &mut self.pages,
             &self.store,
             &SyncConfig::default(),
             ts(5000),
@@ -311,6 +320,145 @@ fn a_new_generation_step_scans_from_the_start_and_keeps_the_txid() {
         rig.wal.salts().salt1
     );
     assert_eq!(fills(pages), [(2, 2)]);
+}
+
+// The page checksum table.
+fn operator_snapshot(after: &Position) -> Step {
+    Step::Snapshot {
+        after: Some(after.txid()),
+        prev_timestamp: Some(after.timestamp()),
+        cause: SnapshotCause::OperatorRequested,
+    }
+}
+
+/// A database with pages 1 to 3 in the file and page 2 in the WAL, snapshotted:
+/// pages 1 and 3 are recorded from their first read, page 2 from its frame.
+fn recorded() -> (Rig, Position) {
+    let mut rig = Rig::new();
+    for n in 1..=3 {
+        rig.db.write_page(pg(n), &[db_fill(n); 512]);
+    }
+    commit(&rig.wal, &[2], 3);
+    let position = position_of(rig.snapshot(1000));
+    (rig, position)
+}
+
+#[test]
+fn a_snapshot_records_every_page_it_ships() {
+    let (rig, _) = recorded();
+    assert_eq!(rig.pages.len(), 3);
+    let files = rig.files();
+    for (pgno, data) in &files[0].2 {
+        assert_eq!(rig.pages.get(*pgno), Some(Checksum::of_page(*pgno, data)));
+    }
+}
+
+#[test]
+fn a_database_page_flipped_between_two_syncs_is_a_mismatch_naming_it_and_stages_nothing() {
+    let (mut rig, position) = recorded();
+    rig.db.write_page(pg(3), &[0x33; 512]);
+    let failed = rig.step_at(operator_snapshot(&position)).unwrap_err();
+    assert_eq!(failed.fault, Fault::DatabasePageMismatch { pgno: pg(3) });
+    assert_eq!(rig.files().len(), 1);
+    assert_eq!(rig.pages.mismatch(), Some(pg(3)));
+    // The retry ships the file's bytes: the database the host serves.
+    rig.step_at(operator_snapshot(&position)).unwrap();
+    let files = rig.files();
+    assert_eq!(fills(&files[1].2), [(1, db_fill(1)), (2, 2), (3, 0x33)]);
+}
+
+/// A walgrowth page is above every commit the table knows, so its read is a
+/// first read; it records the page, and a later snapshot checks it.
+#[test]
+fn a_walgrowth_page_is_recorded_by_its_read_and_a_later_snapshot_checks_it() {
+    let mut rig = Rig::new();
+    commit(&rig.wal, &[1], 1);
+    let first = position_of(rig.snapshot(1000));
+    rig.db.write_page(pg(2), &[db_fill(2); 512]);
+    rig.db.write_page(pg(3), &[db_fill(3); 512]);
+    commit(&rig.wal, &[1], 3);
+    let grown = position_of(rig.step_at(Step::Incremental(first)).unwrap());
+    assert_eq!(
+        rig.pages.get(pg(3)),
+        Some(Checksum::of_page(pg(3), &[db_fill(3); 512]))
+    );
+    rig.db.write_page(pg(3), &[0x44; 512]);
+    let failed = rig.step_at(operator_snapshot(&grown)).unwrap_err();
+    assert_eq!(failed.fault, Fault::DatabasePageMismatch { pgno: pg(3) });
+}
+
+#[test]
+fn a_local_rewind_empties_the_table_and_raises_no_mismatch() {
+    let (mut rig, position) = recorded();
+    rig.db.write_page(pg(3), &[0x33; 512]);
+    let rewound = Step::Snapshot {
+        after: Some(position.txid()),
+        prev_timestamp: Some(position.timestamp()),
+        cause: SnapshotCause::LocalRewound {
+            synced: position.synced().offset(),
+            committed: position.synced().offset(),
+        },
+    };
+    rig.step_at(rewound).unwrap();
+    assert_eq!(rig.pages.mismatch(), None);
+    assert_eq!(
+        rig.pages.get(pg(3)),
+        Some(Checksum::of_page(pg(3), &[0x33; 512]))
+    );
+}
+
+#[test]
+fn the_checkpoint_boundary_keeps_the_table() {
+    let (mut rig, position) = recorded();
+    rig.db.write_page(pg(3), &[0x33; 512]);
+    let boundary = Step::Snapshot {
+        after: Some(position.txid()),
+        prev_timestamp: Some(position.timestamp()),
+        cause: SnapshotCause::CheckpointBoundary,
+    };
+    let failed = rig.step_at(boundary).unwrap_err();
+    assert_eq!(failed.fault, Fault::DatabasePageMismatch { pgno: pg(3) });
+}
+
+#[test]
+fn a_shrink_keeps_the_table_within_the_database() {
+    let mut rig = Rig::new();
+    commit(&rig.wal, &[1, 2, 3, 4], 4);
+    let first = position_of(rig.snapshot(1000));
+    assert_eq!(rig.pages.len(), 4);
+    commit(&rig.wal, &[1], 2);
+    rig.step_at(Step::Incremental(first)).unwrap();
+    assert_eq!(rig.pages.len(), 2);
+}
+
+/// Seeding from the staged files gives the table the steps built.
+#[test]
+fn a_boot_seed_from_the_staged_files_is_the_table_the_steps_built() {
+    let (mut rig, position) = recorded();
+    commit(&rig.wal, &[1, 3], 3);
+    let next = position_of(rig.step_at(Step::Incremental(position)).unwrap());
+    let seeded = block_on(crate::pages::seeded(&rig.store, next.commit())).unwrap();
+    assert_eq!(seeded, rig.pages);
+}
+
+#[test]
+fn a_staged_file_that_does_not_verify_empties_the_seed_up_to_it() {
+    let (mut rig, position) = recorded();
+    commit(&rig.wal, &[1], 3);
+    let next = position_of(rig.step_at(Step::Incremental(position)).unwrap());
+    let first = rig.files()[0].0.key;
+    let len = ReadLen::new(ReadLen::MAX_RAW).unwrap();
+    let mut bytes = block_on(rig.store.read(&first, 0, len)).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xff;
+    block_on(async {
+        let mut up = rig.store.begin_upload(&first, ts(1)).await.unwrap();
+        up.write(&bytes).await.unwrap();
+        up.commit().await.unwrap();
+    });
+    let seeded = block_on(crate::pages::seeded(&rig.store, next.commit())).unwrap();
+    assert_eq!(seeded.len(), 1);
+    assert_eq!(seeded.get(pg(1)), rig.pages.get(pg(1)));
 }
 
 // A wal-index reset ahead of the WAL header (#26).
@@ -548,6 +696,7 @@ fn a_page_that_changes_between_scan_and_read_is_a_retry_and_stages_nothing() {
         committed,
         rig.wal.epoch(),
         &mut rig.db,
+        &mut PageTable::new(),
         &rig.store,
         &SyncConfig::default(),
         ts(1),
@@ -683,6 +832,7 @@ fn a_small_file_reaches_the_upload_in_one_write() {
         &plan,
         &mut wal,
         &mut db,
+        &mut PageTable::new(),
         Fault::from_staging,
     ))
     .unwrap();
@@ -882,6 +1032,9 @@ fn oracle(copy: &Copy) -> Vec<u8> {
 
 struct Chain {
     store: MemStore,
+    /// Kept across every step: a database page that a step reads and that
+    /// does not match is the table's false alarm, and fails the run.
+    pages: PageTable,
     position: Option<Position>,
     clock: i64,
     spilled: bool,
@@ -923,6 +1076,7 @@ fn sync_copy(chain: &mut Chain, copy: &Copy, ps: PageSize, cap: Option<NonZeroU6
             committed,
             ReadEpoch::new(1),
             &mut db,
+            &mut chain.pages,
             &chain.store,
             &cfg,
             ts(chain.clock),
@@ -1012,6 +1166,7 @@ fn workload(ps: u32, cap: Option<u64>, ops: &[Op]) -> bool {
     let db = Db::new(ps);
     let mut chain = Chain {
         store: MemStore::new(),
+        pages: PageTable::new(),
         position: None,
         clock: 0,
         spilled: false,
@@ -1205,6 +1360,7 @@ fn snapshot_under_mark_zero(mutate: impl FnOnce(&Rig, &SharedWal)) -> Result<Syn
         zero.committed,
         zero.rig.wal.epoch(),
         &mut zero.rig.db,
+        &mut PageTable::new(),
         &zero.rig.store,
         &SyncConfig::default(),
         ts(1),
@@ -1301,6 +1457,7 @@ fn fill_under_mark_zero(file: impl FnOnce(&Rig) -> Vec<u8>) -> Result<Synced, St
         zero.committed,
         zero.rig.wal.epoch(),
         &mut zero.rig.db,
+        &mut PageTable::new(),
         &zero.rig.store,
         &SyncConfig::default(),
         ts(1),

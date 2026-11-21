@@ -123,6 +123,7 @@ impl Rig {
             committed,
             self.wal.epoch(),
             &mut self.db,
+            &mut PageTable::new(),
             &self.staging,
             &SyncConfig::default(),
             ts(now),
@@ -150,6 +151,7 @@ impl Rig {
             proof,
             &mut self.wal,
             db,
+            &mut PageTable::new(),
             &self.remote,
             ts(now),
         ))

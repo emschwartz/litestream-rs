@@ -154,9 +154,18 @@ impl Retry {
     }
 
     /// A success: the next failure starts from the first attempt, and the
-    /// lane is no longer degraded.
+    /// lane is no longer degraded, unless by a database page that did not
+    /// match: shipping the file's bytes is the success, and the page stays
+    /// reported until the table no longer holds it as mismatched
+    /// ([`Lanes::page_matches_again`]).
     pub(super) fn succeed(&mut self) {
-        *self = Self::default();
+        let kept = self
+            .degraded
+            .filter(|(cause, _)| matches!(cause, PersistentCause::DatabasePageMismatch { .. }));
+        *self = Self {
+            degraded: kept,
+            ..Self::default()
+        };
     }
 }
 
@@ -200,6 +209,21 @@ impl Lanes {
         Lane::ALL
             .iter()
             .any(|lane| self.get(*lane).degraded().is_some())
+    }
+
+    /// The page checksum table holds no mismatched page any more (a WAL frame
+    /// rewrote it, the table was emptied, or an operator accepted it): no lane
+    /// is degraded by one.
+    pub(super) fn page_matches_again(&mut self) {
+        for lane in Lane::ALL {
+            let retry = self.get_mut(lane);
+            if matches!(
+                retry.degraded,
+                Some((PersistentCause::DatabasePageMismatch { .. }, _))
+            ) {
+                retry.degraded = None;
+            }
+        }
     }
 
     /// Lets every passed wait go (W1: a passed deadline is work, not a wait).

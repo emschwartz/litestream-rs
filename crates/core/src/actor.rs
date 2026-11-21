@@ -64,6 +64,7 @@ use crate::maintain::{
     Due, Hold, Job, MAX_DELETE, MaintainError, Maintenance, Outcome, ReadBack, due, read_back,
     run_compact, run_delete,
 };
+use crate::pages::{PageTable, seeded};
 use crate::position::{Continuity, Position, SyncedThrough};
 use crate::recover::{
     FrameCheck, Miss, Probes, Recovered, Tip, TipView, WalView, read_header, recover,
@@ -241,6 +242,8 @@ pub struct Actor {
     page_size: Option<PageSize>,
     /// The last sync stopped at the cap: more is committed.
     more_wal: bool,
+    /// What each database-file page should hold (`crate::pages`).
+    pages: PageTable,
     /// The wal-index read at which the last step found the index reset ahead
     /// of the WAL header with nothing to stage: nothing to sync, and no proof
     /// to checkpoint on, until the index changes.
@@ -362,6 +365,7 @@ impl Actor {
             pending: None,
             page_size: None,
             more_wal: false,
+            pages: PageTable::new(),
             reset: None,
             // Replaced at boot, when the time is known.
             checkpoint: CheckpointState::boot(Timestamp::from_unix_millis(0)),
@@ -386,6 +390,13 @@ impl Actor {
     #[must_use]
     pub fn degraded(&self, lane: Lane) -> Option<Degraded> {
         self.lanes.get(lane).degraded()
+    }
+
+    /// An operator accepts the database file as it is: every page the page
+    /// checksum table reported as mismatched is trusted with the bytes it now
+    /// holds, and the degraded state and retention pin it held go.
+    pub fn accept_database_pages(&mut self) {
+        self.pages.accept();
     }
 
     /// Makes the next sync a snapshot (an operator asked). A cause already
@@ -425,6 +436,9 @@ impl Actor {
             }
         };
         self.expire(now);
+        if self.pages.mismatch().is_none() {
+            self.lanes.page_matches_again();
+        }
         self.release_pin();
         // A boot that keeps failing must not outlast a drain's deadline.
         if let (false, Phase::Draining { deadline }) = (self.booted, self.phase)
@@ -636,6 +650,14 @@ impl Actor {
         if let Some(cause) = cause {
             self.pending.get_or_insert(cause);
         }
+        // Only a boot that continues seeds the table (ruling P5): a snapshot
+        // records every page it reads.
+        if let (None, Some(position)) = (self.pending, self.position) {
+            match seeded(env.staging, position.commit()).await {
+                Ok(pages) => self.pages = pages,
+                Err(fault) => return self.fault(Lane::Sync, fault, now),
+            }
+        }
         self.upload = upload;
         self.staged = tip.map(|tip| tip.txid());
         self.checkpoint = CheckpointState::boot(now);
@@ -824,6 +846,7 @@ impl Actor {
             committed,
             epoch,
             &mut *env.db,
+            &mut self.pages,
             env.staging,
             &self.cfg.sync,
             now,
@@ -953,6 +976,7 @@ impl Actor {
             mode,
             &mut *env.wal,
             &mut *env.db,
+            &mut self.pages,
             &mut *env.ck,
             env.staging,
             &self.cfg.sync,
@@ -1301,7 +1325,15 @@ impl Actor {
             Ok((files, _)) => return self.ran(Event::Synced { files }, now),
             Err(tick) => return tick,
         };
-        let written = write_snapshot(&proof, &mut *env.wal, &mut *env.db, env.remote, now).await;
+        let written = write_snapshot(
+            &proof,
+            &mut *env.wal,
+            &mut *env.db,
+            &mut self.pages,
+            env.remote,
+            now,
+        )
+        .await;
         self.maintain
             .state
             .record_snapshot(now, written.as_ref().err().map(|failed| &failed.fault));

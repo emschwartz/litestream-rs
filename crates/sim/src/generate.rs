@@ -52,6 +52,9 @@ pub enum EnvFault {
     /// The next TRUNCATE checkpoint that finishes resets the wal-index and
     /// fails to truncate the file, which keeps its old header. Scenarios only.
     TruncateFails,
+    /// One byte of this page of the database file flips, outside SQLite; the
+    /// database the host serves has it from then on. Scenarios only.
+    FlipDatabasePage(u32),
 }
 
 /// One step of a history.

@@ -788,6 +788,11 @@ impl Runner {
             EnvFault::UnlinkWal => self.scenario_bool("UnlinkWal", self.w.sqlite.unlink_wal())?,
             EnvFault::EmptyDatabase => self.w.sqlite.empty_database_once(),
             EnvFault::TruncateFails => self.w.sqlite.fail_next_truncate(),
+            EnvFault::FlipDatabasePage(pgno) => {
+                let flipped = self.w.sqlite.flip_db_page(pgno);
+                self.scenario_bool("FlipDatabasePage", flipped)?;
+                self.w.adopt_local_state();
+            }
         }
         Ok(())
     }

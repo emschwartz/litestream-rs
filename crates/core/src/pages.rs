@@ -1,0 +1,277 @@
+//! The page checksum table: what each database-file page should hold.
+//!
+//! SQLite writes a page to the WAL and later copies it into the database file;
+//! nothing in the file says it was copied right, or that nothing else wrote it
+//! since. The engine reads database-file pages for a snapshot (every page the WAL
+//! does not hold) and for "walgrowth" (pages above the previous commit that the
+//! scanned frames lack, `plan_pages` in `sync.rs`). [`PageTable`] is checked
+//! before every such page is used, so a page that changed since the engine last
+//! knew it is caught instead of shipped silently (`docs/plans/phase-3-syncing.md`,
+//! rulings P1 and P5).
+//!
+//! What feeds it:
+//! - Every WAL page a sync step staged is recorded with the digest the scan
+//!   already computed on its checked read ([`lsr_wal::FrameRef::digest`]); the
+//!   database file holds that page once SQLite backfills it.
+//! - At a boot that continues (`Continue` or `WalRestarted`, no snapshot), every
+//!   page of the staged level-0 files, oldest first so the newest wins
+//!   ([`seeded`]). Boot reads them from local staging; no replica call. A file that
+//!   does not verify empties the table and seeding starts again after it.
+//! - A page not recorded yet is recorded by its first read from the database
+//!   file: trust on first use, as Go trusts every read (`db.go:1562`).
+//!
+//! When it is emptied: at every snapshot whose cause is not the checkpoint
+//! boundary or an operator's request (after a rewind it holds digests of frames
+//! a power loss removed; after an unproven restart, of frames the database may
+//! never have got), and when the page size changes. [`PageTable::truncate`]
+//! drops pages above the commit when the database shrinks.
+//!
+//! What it cannot check:
+//! - A database page above the previous commit that no scanned frame holds
+//!   (`plan_pages`' walgrowth pages in `sync.rs`). The table holds no page above
+//!   the last commit it saw, since a shrink forgets them, so every such read is
+//!   a first read and is trusted; a later snapshot checks the page.
+//! - Any page at its first read after the table was emptied.
+//! - The page count, `PageSource::page_count`: a file cut short or grown is read
+//!   as the size it has.
+//!
+//! So a database-file page reaches an LTX file unchecked only on its first read
+//! since the table last forgot it; a page any frame has shown is always checked.
+//!
+//! A page that does not match is [`Mismatch`], which the step turns into
+//! `Fault::DatabasePageMismatch`. The table remembers the bytes it found: under
+//! the response that keeps trying, the retry finds those same bytes and ships
+//! them (that is the database the host serves), while the page stays reported
+//! until a verified WAL frame records it again, the table is emptied, or an
+//! operator accepts it ([`PageTable::accept`]).
+//!
+//! Memory: one entry per recorded page, a 4-byte page number and an 8-byte
+//! digest in a `BTreeMap`, about 13 to 29 bytes a page with the map's nodes:
+//! 3.4 to 7.6 MiB for a 1 GiB database of 4 KiB pages (262,144 pages). Entries
+//! never exceed the database's page count: every staged step truncates to its
+//! commit.
+
+use std::collections::BTreeMap;
+use std::num::NonZeroU32;
+
+use lsr_ltx::{Checksum, Decoder, Event, PageNo, PageSize};
+
+use crate::fault::{Fault, SnapshotCause};
+use crate::layout::{FileKey, Level};
+use crate::store::{ObjectStore, PageLimit, ReadLen};
+
+/// How much of a staged file one read asks for while seeding.
+const SEED_READ: u32 = 1 << 20;
+
+/// A database-file page whose bytes are not the ones the table holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Mismatch {
+    /// The page.
+    pub pgno: PageNo,
+    /// The digest the table held.
+    pub recorded: Checksum,
+    /// The digest of the bytes read.
+    pub found: Checksum,
+}
+
+/// Page number to the checksum of the bytes the database file should hold.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PageTable {
+    page_size: Option<PageSize>,
+    pages: BTreeMap<PageNo, Checksum>,
+    /// Pages found different from `pages`, with the digest found: reported,
+    /// and accepted as the file's bytes until a frame records the page again.
+    mismatched: BTreeMap<PageNo, Checksum>,
+}
+
+impl PageTable {
+    /// An empty table: every page is recorded on its first read.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            page_size: None,
+            pages: BTreeMap::new(),
+            mismatched: BTreeMap::new(),
+        }
+    }
+
+    /// Empties the table when `page_size` is not the size it holds pages of.
+    pub fn fit(&mut self, page_size: PageSize) {
+        if self.page_size != Some(page_size) {
+            self.clear();
+            self.page_size = Some(page_size);
+        }
+    }
+
+    /// Records a page from a verified WAL frame; a mismatch on it is over.
+    pub fn record(&mut self, pgno: PageNo, digest: Checksum) {
+        self.pages.insert(pgno, digest);
+        self.mismatched.remove(&pgno);
+    }
+
+    /// Checks a page read from the database file, recording it when the table
+    /// has none. A page already reported as mismatched passes when it still has
+    /// the bytes it was reported with.
+    ///
+    /// # Errors
+    /// [`Mismatch`] when the bytes differ from both.
+    pub fn check(&mut self, pgno: PageNo, page: &[u8]) -> Result<(), Mismatch> {
+        let found = Checksum::of_page(pgno, page);
+        let Some(recorded) = self.pages.get(&pgno).copied() else {
+            self.pages.insert(pgno, found);
+            return Ok(());
+        };
+        if recorded == found || self.mismatched.get(&pgno) == Some(&found) {
+            return Ok(());
+        }
+        self.mismatched.insert(pgno, found);
+        Err(Mismatch {
+            pgno,
+            recorded,
+            found,
+        })
+    }
+
+    /// Forgets every page above `commit`, the database's size in pages.
+    pub fn truncate(&mut self, commit: NonZeroU32) {
+        self.pages.retain(|pgno, _| pgno.get() <= commit.get());
+        self.mismatched.retain(|pgno, _| pgno.get() <= commit.get());
+    }
+
+    /// Forgets every page.
+    pub fn clear(&mut self) {
+        self.pages.clear();
+        self.mismatched.clear();
+    }
+
+    /// An operator accepts the database file as it is: every mismatched page's
+    /// bytes become the ones the table holds.
+    pub fn accept(&mut self) {
+        let accepted = std::mem::take(&mut self.mismatched);
+        self.pages.extend(accepted);
+    }
+
+    /// The lowest page still reported as mismatched.
+    #[must_use]
+    pub fn mismatch(&self) -> Option<PageNo> {
+        self.mismatched.keys().next().copied()
+    }
+
+    /// The digest the table holds for `pgno`.
+    #[must_use]
+    pub fn get(&self, pgno: PageNo) -> Option<Checksum> {
+        self.pages.get(&pgno).copied()
+    }
+
+    /// How many pages are recorded.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.pages.len()
+    }
+
+    /// Whether no page is recorded.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.pages.is_empty()
+    }
+}
+
+/// Whether a snapshot for `cause` empties the table first. The checkpoint
+/// boundary and an operator's request take a snapshot of a database whose
+/// pages the table still describes; every other cause follows a WAL whose
+/// frames the table may hold and the database never got.
+#[must_use]
+pub const fn snapshot_clears(cause: &SnapshotCause) -> bool {
+    match cause {
+        SnapshotCause::CheckpointBoundary | SnapshotCause::OperatorRequested => false,
+        SnapshotCause::FirstSync
+        | SnapshotCause::BehindRemote { .. }
+        | SnapshotCause::LocalTipUnreadable
+        | SnapshotCause::WalMissing
+        | SnapshotCause::GenerationChanged
+        | SnapshotCause::PrevFrameMismatch
+        | SnapshotCause::LastPageMismatch
+        | SnapshotCause::LocalRewound { .. } => true,
+    }
+}
+
+/// The table a boot that continues starts from: every page of every staged
+/// level-0 file, oldest first, then truncated to `commit`, the tip's size.
+///
+/// # Errors
+/// The staging store's fault when a list or read fails.
+pub(crate) async fn seeded<L: ObjectStore>(
+    staging: &L,
+    commit: NonZeroU32,
+) -> Result<PageTable, Fault> {
+    let mut table = PageTable::new();
+    let mut after = None;
+    loop {
+        let page = staging
+            .list(Level::ZERO, after, PageLimit::MAX)
+            .await
+            .map_err(|err| Fault::from_staging(&err))?;
+        for info in &page.files {
+            seed_file(staging, &info.key, &mut table).await?;
+        }
+        match page.next {
+            Some(next) => after = Some(next),
+            None => break,
+        }
+    }
+    table.truncate(commit);
+    Ok(table)
+}
+
+/// Records every page of one staged file. A file that does not decode and
+/// verify whole empties the table: what it rewrote is unknown.
+async fn seed_file<L: ObjectStore>(
+    staging: &L,
+    key: &FileKey,
+    table: &mut PageTable,
+) -> Result<(), Fault> {
+    let chunk = ReadLen::new(SEED_READ).ok_or(Fault::Bug)?;
+    let mut decoder = Decoder::new();
+    let mut pages = Vec::new();
+    let mut size = None;
+    let mut offset = 0_u64;
+    loop {
+        let bytes = staging
+            .read(key, offset, chunk)
+            .await
+            .map_err(|err| Fault::from_staging(&err))?;
+        let read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        offset = offset.saturating_add(read);
+        let mut input = bytes.as_slice();
+        while !input.is_empty() {
+            let Ok((used, event)) = decoder.feed(input) else {
+                table.clear();
+                return Ok(());
+            };
+            match event {
+                Some(Event::Header(header)) => size = Some(header.page_size()),
+                Some(Event::Page { pgno, data }) => {
+                    pages.push((pgno, Checksum::of_page(pgno, data)));
+                }
+                None => {}
+            }
+            input = input.get(used..).unwrap_or_default();
+        }
+        if read < chunk.get() {
+            break;
+        }
+    }
+    match (decoder.finish(), size) {
+        (Ok(_), Some(size)) => {
+            table.fit(size);
+            for (pgno, digest) in pages {
+                table.record(pgno, digest);
+            }
+        }
+        (Ok(_) | Err(_), _) => table.clear(),
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests;

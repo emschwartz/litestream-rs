@@ -27,6 +27,7 @@ use thiserror::Error;
 
 use crate::fault::Fault;
 use crate::layout::{FileInfo, FileKey, Level};
+use crate::pages::PageTable;
 use crate::position::{Continuity, SyncedThrough};
 use crate::source::{CommittedRead, PageSource, WalSource};
 use crate::store::ObjectStore;
@@ -48,6 +49,7 @@ pub struct SnapshotFailed {
 ///
 /// `proof` is borrowed: the checkpoint that follows needs it. `now` is clamped
 /// to the proof's timestamp so a snapshot never predates the file it covers.
+/// Every page taken from the database file is checked against `pages` first.
 ///
 /// # Errors
 /// [`SnapshotFailed`]. Retrying the same call is safe: the key is the same and
@@ -56,6 +58,7 @@ pub async fn write_snapshot<W: WalSource, P: PageSource, S: ObjectStore>(
     proof: &SyncedThrough,
     wal: &mut W,
     db: &mut P,
+    pages: &mut PageTable,
     remote: &S,
     now: Timestamp,
 ) -> Result<FileInfo, SnapshotFailed> {
@@ -68,7 +71,7 @@ pub async fn write_snapshot<W: WalSource, P: PageSource, S: ObjectStore>(
         });
     };
     let key = FileKey::new(Level::SNAPSHOT, range);
-    run(proof, &key, wal, db, remote, now)
+    run(proof, &key, wal, db, pages, remote, now)
         .await
         .map_err(|fault| SnapshotFailed { fault, key })
 }
@@ -78,6 +81,7 @@ async fn run<W: WalSource, P: PageSource, S: ObjectStore>(
     key: &FileKey,
     wal: &mut W,
     db: &mut P,
+    pages: &mut PageTable,
     remote: &S,
     now: Timestamp,
 ) -> Result<FileInfo, Fault> {
@@ -129,6 +133,7 @@ async fn run<W: WalSource, P: PageSource, S: ObjectStore>(
         &plan,
         &mut reader,
         db,
+        pages,
         Fault::from_remote,
     )
     .await?;

@@ -34,6 +34,7 @@ use std::io::{Read, Seek};
 
 use crate::fault::{Clamped, Fault, HaltCause, SnapshotCause};
 use crate::layout::{FileInfo, FileKey, Level};
+use crate::pages::{PageTable, snapshot_clears};
 use crate::position::{Continuity, LastPage, Position, ReadEpoch, SyncedThrough};
 use crate::recover::Recovered;
 use crate::source::{CommittedRead, PageSource};
@@ -451,6 +452,7 @@ async fn fill<R: Read + Seek, P: PageSource, U: Upload>(
     plan: &[PageFrom],
     wal: &mut WalReader<R>,
     db: &mut P,
+    pages: &mut PageTable,
     map_store: fn(&StoreError) -> Fault,
 ) -> Result<Option<LastPage>, Fault> {
     let mut encoder = Encoder::new(Vec::new(), header).map_err(|_err| Fault::Bug)?;
@@ -461,7 +463,14 @@ async fn fill<R: Read + Seek, P: PageSource, U: Upload>(
             PageFrom::Wal(frame) => wal
                 .read_page(frame, &mut buf)
                 .map_err(|err| page_fault(wal, err))?,
-            PageFrom::Db(pgno) => db.read_page(*pgno, &mut buf).map_err(Fault::from_source)?,
+            PageFrom::Db(pgno) => {
+                db.read_page(*pgno, &mut buf).map_err(Fault::from_source)?;
+                pages
+                    .check(*pgno, &buf)
+                    .map_err(|mismatch| Fault::DatabasePageMismatch {
+                        pgno: mismatch.pgno,
+                    })?;
+            }
         }
         encoder
             .write_page(page.pgno(), &buf)
@@ -483,9 +492,14 @@ async fn fill<R: Read + Seek, P: PageSource, U: Upload>(
 }
 
 /// Writes one file into `store`; the upload is aborted when anything before the
-/// commit fails. `map_store` says which store it is: the staging directory and
+/// commit fails. Every database-file page is checked against `pages` before it
+/// is encoded. `map_store` says which store it is: the staging directory and
 /// the replica read the same error differently (`Fault::from_staging`,
 /// `Fault::from_remote`).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is a distinct source or sink of the file"
+)]
 pub(crate) async fn stage<R: Read + Seek, P: PageSource, L: ObjectStore>(
     store: &L,
     key: &FileKey,
@@ -493,13 +507,14 @@ pub(crate) async fn stage<R: Read + Seek, P: PageSource, L: ObjectStore>(
     plan: &[PageFrom],
     wal: &mut WalReader<R>,
     db: &mut P,
+    pages: &mut PageTable,
     map_store: fn(&StoreError) -> Fault,
 ) -> Result<(FileInfo, Option<LastPage>), Fault> {
     let mut upload = store
         .begin_upload(key, header.fields().timestamp)
         .await
         .map_err(|err| map_store(&err))?;
-    match fill(&mut upload, header, plan, wal, db, map_store).await {
+    match fill(&mut upload, header, plan, wal, db, pages, map_store).await {
         Ok(last) => {
             let file = upload.commit().await.map_err(|err| map_store(&err))?;
             Ok((file, last))
@@ -517,6 +532,8 @@ pub(crate) async fn stage<R: Read + Seek, P: PageSource, L: ObjectStore>(
 /// `committed` and `epoch` come from one read of the same WAL source. A
 /// position pinned to another epoch fails with `ReadTxLost`: the checkpoint
 /// protocol retook the read transaction, and `recover` must prove the new one.
+/// `pages` is the page checksum table (`crate::pages`): every database-file page
+/// is checked against it, every staged WAL page recorded in it.
 ///
 /// # Errors
 /// [`StepFailed`], carrying the same step to run again.
@@ -530,11 +547,13 @@ pub async fn sync_step<R: Read + Seek, P: PageSource, L: ObjectStore>(
     committed: CommittedRead,
     epoch: ReadEpoch,
     db: &mut P,
+    pages: &mut PageTable,
     staging: &L,
     cfg: &SyncConfig,
     now: Timestamp,
 ) -> Result<Synced, StepFailed> {
-    match run(&step, wal, committed, epoch, db, staging, cfg, now).await {
+    let source = Source { db, pages };
+    match run(&step, wal, committed, epoch, source, staging, cfg, now).await {
         Ok(synced) => Ok(synced),
         Err(fault) => Err(StepFailed { fault, retry: step }),
     }
@@ -549,12 +568,14 @@ async fn run<R: Read + Seek, P: PageSource, L: ObjectStore>(
     wal: &mut WalReader<R>,
     committed: CommittedRead,
     epoch: ReadEpoch,
-    db: &mut P,
+    source: Source<'_, P>,
     staging: &L,
     cfg: &SyncConfig,
     now: Timestamp,
 ) -> Result<Synced, Fault> {
+    let Source { db, pages } = source;
     let start = Start::of(step, wal)?;
+    forget(pages, step, wal.header().page_size());
     if let Some(Continuity::Pinned(pin)) = start.held.map(|held| held.continuity())
         && pin != epoch
     {
@@ -584,15 +605,23 @@ async fn run<R: Read + Seek, P: PageSource, L: ObjectStore>(
     let plan = plan_pages(&scanned.map, start.prev_commit, commit, page_size);
     let (header, clamped) = stamp(&start, &scanned, wal, commit, cfg.node_id, now)?;
     let key = FileKey::new(Level::ZERO, TxidRange::single(start.txid));
-    let (file, last_written) =
-        stage(staging, &key, header, &plan, wal, db, Fault::from_staging).await?;
+    let (file, last_written) = stage(
+        staging,
+        &key,
+        header,
+        &plan,
+        wal,
+        db,
+        pages,
+        Fault::from_staging,
+    )
+    .await?;
+    record(pages, &plan, commit);
     let last_page = match (scanned.last_frame, last_written) {
         (Some(frame), _) => LastPage::of_frame(&frame),
         (None, Some(page)) => page,
         (None, None) => return Err(Fault::Bug),
     };
-    let stopped_short =
-        scanned.limited && scanned.cursor.next().get() != committed.end().offset().get();
     let position = Position::new(
         start.txid,
         scanned.cursor,
@@ -601,7 +630,27 @@ async fn run<R: Read + Seek, P: PageSource, L: ObjectStore>(
         header.fields().timestamp,
         Continuity::Unpinned,
     );
-    let end = if reset {
+    let stopped_short =
+        scanned.limited && scanned.cursor.next().get() != committed.end().offset().get();
+    let end = ended(position, reset, stopped_short, epoch);
+    Ok(Synced::Wrote {
+        file,
+        end,
+        clamped,
+        txs: scanned.txs,
+    })
+}
+
+/// The database file and its page checksum table, as one argument.
+struct Source<'a, P> {
+    db: &'a mut P,
+    pages: &'a mut PageTable,
+}
+
+/// How far a staged position can be trusted: not at all under a reset
+/// wal-index, unpinned when the cap stopped it short, otherwise the proof.
+fn ended(position: Position, reset: bool, stopped_short: bool, epoch: ReadEpoch) -> StepEnd {
+    if reset {
         StepEnd::Unproven(position)
     } else if stopped_short {
         StepEnd::Limited(position)
@@ -609,13 +658,30 @@ async fn run<R: Read + Seek, P: PageSource, L: ObjectStore>(
         StepEnd::Through(SyncedThrough::new(
             position.with_continuity(Continuity::Pinned(epoch)),
         ))
-    };
-    Ok(Synced::Wrote {
-        file,
-        end,
-        clamped,
-        txs: scanned.txs,
-    })
+    }
+}
+
+/// Empties the table on a page-size change and before a snapshot whose cause
+/// says the WAL may hold frames the database never got.
+fn forget(pages: &mut PageTable, step: &Step, page_size: PageSize) {
+    pages.fit(page_size);
+    if let Step::Snapshot { cause, .. } = step
+        && snapshot_clears(cause)
+    {
+        pages.clear();
+    }
+}
+
+/// Records the staged WAL pages, the newest copy of each, and forgets pages the
+/// database no longer has.
+fn record(pages: &mut PageTable, plan: &[PageFrom], commit: NonZeroU32) {
+    for page in plan {
+        match page {
+            PageFrom::Wal(frame) => pages.record(frame.pgno(), frame.digest()),
+            PageFrom::Db(_) => {}
+        }
+    }
+    pages.truncate(commit);
 }
 
 /// The database size after the scanned transactions, or the database file's

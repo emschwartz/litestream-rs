@@ -76,6 +76,8 @@ pub enum FaultKind {
     WalTruncatedBelowCommitted,
     /// [`Fault::WalUnlinked`].
     WalUnlinked,
+    /// [`Fault::DatabasePageMismatch`].
+    DatabasePageMismatch,
     /// [`Fault::ShutdownDeadline`].
     ShutdownDeadline,
     /// [`Fault::Bug`].
@@ -84,7 +86,7 @@ pub enum FaultKind {
 
 impl FaultKind {
     /// Every fault, in the order of [`Fault`].
-    pub const ALL: [Self; 26] = [
+    pub const ALL: [Self; 27] = [
         Self::StoreTransient,
         Self::StoreThrottled,
         Self::StoreAuth,
@@ -109,6 +111,7 @@ impl FaultKind {
         Self::WalCorruptBelowCommitted,
         Self::WalTruncatedBelowCommitted,
         Self::WalUnlinked,
+        Self::DatabasePageMismatch,
         Self::ShutdownDeadline,
         Self::Bug,
     ];
@@ -141,6 +144,7 @@ impl From<&Fault> for FaultKind {
             Fault::WalCorruptBelowCommitted => Self::WalCorruptBelowCommitted,
             Fault::WalTruncatedBelowCommitted => Self::WalTruncatedBelowCommitted,
             Fault::WalUnlinked => Self::WalUnlinked,
+            Fault::DatabasePageMismatch { .. } => Self::DatabasePageMismatch,
             Fault::ShutdownDeadline => Self::ShutdownDeadline,
             Fault::Bug => Self::Bug,
         }
@@ -170,6 +174,9 @@ pub fn halt_of(kind: FaultKind) -> Option<HaltCause> {
         FaultKind::WalCorruptBelowCommitted => Some(HaltCause::WalCorrupt),
         FaultKind::WalTruncatedBelowCommitted => Some(HaltCause::WalTruncated),
         FaultKind::WalUnlinked => Some(HaltCause::WalUnlinked),
+        FaultKind::DatabasePageMismatch => {
+            lsr_ltx::PageNo::new(1, page).map(|pgno| HaltCause::DatabasePageMismatch { pgno })
+        }
         FaultKind::ShutdownDeadline => Some(HaltCause::Shutdown),
         FaultKind::Bug => Some(HaltCause::Bug),
         FaultKind::StoreTransient
@@ -242,6 +249,7 @@ pub fn fault_scenarios(kind: FaultKind) -> &'static [fn() -> Scenario] {
         ],
         FaultKind::WalTruncatedBelowCommitted => &[wal_truncated_externally_under_lock],
         FaultKind::WalUnlinked => &[wal_unlinked_mid_run],
+        FaultKind::DatabasePageMismatch => &[db_page_flipped_under_sync],
         FaultKind::ShutdownDeadline => &[sigterm_during_upload],
         FaultKind::Bug => &[],
     }
@@ -1090,6 +1098,33 @@ pub fn wal_unlinked_mid_run() -> Scenario {
     );
     s.check = Some(quiet_after_halt);
     s
+}
+
+/// The database page a stray write flips in [`db_page_flipped_under_sync`]:
+/// one the database file alone holds after the scenario's first commit.
+const FLIPPED: u32 = 3;
+
+/// A byte of a database page flips between two syncs, outside SQLite, and an
+/// operator's snapshot then reads the page from the file. The page checksum
+/// table recorded it at the first snapshot, so the read is a mismatch naming
+/// the page: a stop under strict responses, before the page is shipped; under
+/// the default a degraded sync lane that ships the page as the file holds it
+/// (the database the host serves, which the oracle then judges by), keeps
+/// syncing and pins retention.
+#[must_use]
+pub fn db_page_flipped_under_sync() -> Scenario {
+    let pgno = lsr_ltx::PageNo::new(FLIPPED, PageSize::MIN);
+    let flipped = pgno.map_or(HaltCause::Bug, |pgno| HaltCause::DatabasePageMismatch {
+        pgno,
+    });
+    injected(
+        "db_page_flipped_under_sync",
+        vec![
+            Op::EnvFault(EnvFault::FlipDatabasePage(FLIPPED)),
+            Op::RequestSnapshot,
+        ],
+        vec![Expect::Stopped(flipped)],
+    )
 }
 
 /// SIGTERM while the replica keeps failing: the retries outlast the grace.

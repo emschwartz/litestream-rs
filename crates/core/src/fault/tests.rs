@@ -159,6 +159,11 @@ policy_is!(
     Policy::Shutdown
 );
 policy_is!(
+    a_database_page_mismatch_is_persistent,
+    Fault::DatabasePageMismatch { pgno: page_two() },
+    persistent(PersistentCause::DatabasePageMismatch { pgno: page_two() })
+);
+policy_is!(
     bug_is_persistent,
     Fault::Bug,
     persistent(PersistentCause::Bug)
@@ -192,13 +197,18 @@ fn every_fault_has_a_named_policy_test() {
         | Fault::WalCorruptBelowCommitted
         | Fault::WalTruncatedBelowCommitted
         | Fault::WalUnlinked
+        | Fault::DatabasePageMismatch { .. }
         | Fault::ShutdownDeadline
         | Fault::Bug => true,
     };
     assert!(tested(&Fault::Bug));
 }
 
-fn every_persistent_cause() -> [PersistentCause; 10] {
+fn page_two() -> PageNo {
+    PageNo::new(2, PageSize::MIN).unwrap()
+}
+
+fn every_persistent_cause() -> [PersistentCause; 11] {
     [
         PersistentCause::Credentials,
         PersistentCause::StoreRefused,
@@ -212,6 +222,7 @@ fn every_persistent_cause() -> [PersistentCause; 10] {
             was: PageSize::MIN,
             now: ps(),
         },
+        PersistentCause::DatabasePageMismatch { pgno: page_two() },
         PersistentCause::Bug,
     ]
 }
@@ -229,6 +240,7 @@ fn every_persistent_cause_is_listed() {
         | PersistentCause::WalTruncated
         | PersistentCause::WalUnlinked
         | PersistentCause::PageSizeChanged { .. }
+        | PersistentCause::DatabasePageMismatch { .. }
         | PersistentCause::Bug => true,
     };
     assert!(every_persistent_cause().into_iter().all(listed));
@@ -272,7 +284,8 @@ fn keeping_trying_rebuilds_where_the_state_cannot_be_trusted() {
             | PersistentCause::WalCorrupt
             | PersistentCause::WalTruncated
             | PersistentCause::WalUnlinked
-            | PersistentCause::PageSizeChanged { .. } => Action::Retry,
+            | PersistentCause::PageSizeChanged { .. }
+            | PersistentCause::DatabasePageMismatch { .. } => Action::Retry,
         };
         assert_eq!(all.action(cause), want, "{cause:?}");
     }
@@ -295,6 +308,9 @@ fn each_field_names_one_cause() {
             PersistentCause::WalTruncated => one.wal_truncated = Response::Stop,
             PersistentCause::WalUnlinked => one.wal_unlinked = Response::Stop,
             PersistentCause::PageSizeChanged { .. } => one.page_size_changed = Response::Stop,
+            PersistentCause::DatabasePageMismatch { .. } => {
+                one.database_page_mismatch = Response::Stop;
+            }
             PersistentCause::Bug => one.bug = Response::Stop,
         }
         for other in every_persistent_cause() {

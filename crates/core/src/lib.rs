@@ -17,6 +17,7 @@ mod inventory;
 mod layout;
 mod maintain;
 mod mem;
+mod pages;
 mod plan;
 mod position;
 mod recover;
@@ -56,6 +57,7 @@ pub use maintain::{
     Setting, SnapshotJob, due, go_truncate, run_compact, run_delete,
 };
 pub use mem::{MemStore, MemUpload};
+pub use pages::{Mismatch, PageTable, snapshot_clears};
 #[cfg(feature = "testing")]
 #[doc(hidden)]
 pub use plan::plan_reference;

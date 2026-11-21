@@ -37,7 +37,7 @@
 use std::num::NonZeroU32;
 use std::time::Duration;
 
-use lsr_ltx::{PageSize, Timestamp, Txid};
+use lsr_ltx::{PageNo, PageSize, Timestamp, Txid};
 use lsr_wal::{PageMapError, ReadPageError, ResumeError, WalError, WalOffset};
 
 use crate::source::SourceError;
@@ -121,6 +121,12 @@ pub enum Fault {
     WalTruncatedBelowCommitted,
     /// The WAL file was deleted under us.
     WalUnlinked,
+    /// A database-file page is not what the page checksum table holds for it
+    /// (`crate::pages`): something other than SQLite's backfill changed it.
+    DatabasePageMismatch {
+        /// The page.
+        pgno: PageNo,
+    },
     /// The shutdown deadline arrived mid-work.
     ShutdownDeadline,
     /// A condition the code rules out. A property test asserts it never fires.
@@ -192,6 +198,11 @@ pub enum HaltCause {
         /// The database's page size now.
         now: PageSize,
     },
+    /// A database-file page is not what the page checksum table holds.
+    DatabasePageMismatch {
+        /// The page.
+        pgno: PageNo,
+    },
     /// The shutdown deadline arrived.
     Shutdown,
     /// A bug in this program.
@@ -225,6 +236,11 @@ pub enum PersistentCause {
         /// The database's page size now.
         now: PageSize,
     },
+    /// A database-file page is not what the page checksum table holds.
+    DatabasePageMismatch {
+        /// The page.
+        pgno: PageNo,
+    },
     /// A bug in this program.
     Bug,
 }
@@ -244,6 +260,7 @@ impl PersistentCause {
             HaltCause::WalTruncated => Some(Self::WalTruncated),
             HaltCause::WalUnlinked => Some(Self::WalUnlinked),
             HaltCause::PageSizeChanged { was, now } => Some(Self::PageSizeChanged { was, now }),
+            HaltCause::DatabasePageMismatch { pgno } => Some(Self::DatabasePageMismatch { pgno }),
             HaltCause::Bug => Some(Self::Bug),
             HaltCause::Shutdown => None,
         }
@@ -262,6 +279,7 @@ impl From<PersistentCause> for HaltCause {
             PersistentCause::WalTruncated => Self::WalTruncated,
             PersistentCause::WalUnlinked => Self::WalUnlinked,
             PersistentCause::PageSizeChanged { was, now } => Self::PageSizeChanged { was, now },
+            PersistentCause::DatabasePageMismatch { pgno } => Self::DatabasePageMismatch { pgno },
             PersistentCause::Bug => Self::Bug,
         }
     }
@@ -313,6 +331,11 @@ pub struct Responses {
     /// The database's page size is not the replica's. Keeping trying never
     /// writes the new size: the way out is a restart onto a new prefix.
     pub page_size_changed: Response,
+    /// A database-file page differs from the page checksum table. Keeping
+    /// trying ships the page as the file holds it (the database the host
+    /// serves), keeps the lane degraded and retention pinned until a verified
+    /// WAL frame rewrites the page or an operator accepts it.
+    pub database_page_mismatch: Response,
     /// A condition the code rules out happened. Keeping trying rebuilds the
     /// engine and boots again after the wait; it never continues from the
     /// state the failure left.
@@ -333,6 +356,7 @@ impl Responses {
         wal_truncated: Response::KeepTrying,
         wal_unlinked: Response::KeepTrying,
         page_size_changed: Response::KeepTrying,
+        database_page_mismatch: Response::KeepTrying,
         bug: Response::KeepTrying,
         foreign_writer: ForeignWriter::Stop,
     };
@@ -347,6 +371,7 @@ impl Responses {
         wal_truncated: Response::Stop,
         wal_unlinked: Response::Stop,
         page_size_changed: Response::Stop,
+        database_page_mismatch: Response::Stop,
         bug: Response::Stop,
         foreign_writer: ForeignWriter::Stop,
     };
@@ -367,6 +392,7 @@ impl Responses {
             PersistentCause::WalTruncated => self.wal_truncated,
             PersistentCause::WalUnlinked => self.wal_unlinked,
             PersistentCause::PageSizeChanged { .. } => self.page_size_changed,
+            PersistentCause::DatabasePageMismatch { .. } => self.database_page_mismatch,
             PersistentCause::RemoteRegressed => {
                 return match self.remote_regressed {
                     Response::KeepTrying => Action::Relist,
@@ -472,6 +498,9 @@ pub const fn policy(fault: &Fault) -> Policy {
         Fault::WalCorruptBelowCommitted => Policy::Persistent(PersistentCause::WalCorrupt),
         Fault::WalTruncatedBelowCommitted => Policy::Persistent(PersistentCause::WalTruncated),
         Fault::WalUnlinked => Policy::Persistent(PersistentCause::WalUnlinked),
+        Fault::DatabasePageMismatch { pgno } => {
+            Policy::Persistent(PersistentCause::DatabasePageMismatch { pgno: *pgno })
+        }
         Fault::ShutdownDeadline => Policy::Shutdown,
         Fault::Bug => Policy::Persistent(PersistentCause::Bug),
     }

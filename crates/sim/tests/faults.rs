@@ -308,6 +308,11 @@ fn wal_unlinked_mid_run() {
 }
 
 #[test]
+fn db_page_flipped_under_sync() {
+    run(scenario::db_page_flipped_under_sync);
+}
+
+#[test]
 fn sigterm_during_upload() {
     run(scenario::sigterm_during_upload);
 }
