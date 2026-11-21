@@ -4,7 +4,7 @@
 
 **Spec:** `docs/PLAN.md` (section 1 "Not in v1"; section 3; section 6 application integration; phase 4; D4, D6, D7). Rules: `AGENTS.md`. Research: `docs/notes/pure-rust-read-lock.md` section 4B (deployment B, a separate process). Parked work: `docs/proposals/beyond-go.md`. Go behaviour below is cited from a recent upstream checkout at `/home/user/litestream`, **not the pinned 041a8c3**; each citation is rechecked against `.upstream/litestream` in the task that relies on it, and a line that moved is corrected in the PR.
 
-Status: draft. Starts after phase 3's public API (task 6, `lsr-replica`) lands; tasks 8 and 9 also need phase 3 tasks 4 and 7. Its decisions are ruled (see "Rulings").
+Status: done. Starts after phase 3's public API (task 6, `lsr-replica`) lands; tasks 8 and 9 also need phase 3 tasks 4 and 7. Its decisions are ruled (see "Rulings").
 
 ## What Go's sidecar does (recent checkout)
 

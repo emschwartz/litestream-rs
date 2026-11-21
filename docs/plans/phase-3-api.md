@@ -1,6 +1,6 @@
 # Phase 3: the public API, draft
 
-Status: draft, revised 2026-11-20 after an independent review. It refines task 6 of `docs/plans/phase-3-syncing.md` into signatures; the "As built" section at the end says where the code departs from it. Rulings it follows: P0 (a SQLite read transaction holds the read lock), P3 (TRUNCATE only on the application's word), P4 (1-second polling), D6 (copy Go; no new files or formats), D7 (keep trying; stop only for another writer; configurable responses). "Engine change" marks what the core must gain for this API.
+Status: done (as built, see the last section), revised 2026-11-20 after an independent review. It refines task 6 of `docs/plans/phase-3-syncing.md` into signatures; the "As built" section at the end says where the code departs from it. Rulings it follows: P0 (a SQLite read transaction holds the read lock), P3 (TRUNCATE only on the application's word), P4 (1-second polling), D6 (copy Go; no new files or formats), D7 (keep trying; stop only for another writer; configurable responses). "Engine change" marks what the core must gain for this API.
 
 ## Shape in one paragraph
 

@@ -4,7 +4,7 @@
 
 **Spec:** `docs/PLAN.md` (phase 3; section 3 types; section 6 application integration). Rules: `AGENTS.md`. Research: `docs/notes/pure-rust-read-lock.md` (the read lock and the checkpoint against C SQLite). Upstream (read-only): `.upstream/litestream` (`db.go`, `wal_reader.go`, `replica.go`, `store.go`), and SQLite 3.54.1's `sqlite3.c` from the bundled `libsqlite3-sys` (line numbers below are from that file, as in the research note).
 
-Status: draft. Folds in the parts of the parallel draft (#8) that this one lacked: what phase 2 hands over, the shared suite's cases, and the position file (O3, since ruled out for v1). Phase 2's exit items (handoff issue #1: the level 1 crash window, the level 9 scenario, the nightly seeds, `core` mutants) land first. Section "Open decisions" is the owner's; no task that depends on one starts before it is ruled. Decisions already ruled are listed under "Rulings".
+Status: done. Folds in the parts of the parallel draft (#8) that this one lacked: what phase 2 hands over, the shared suite's cases, and the position file (O3, since ruled out for v1). Phase 2's exit items (handoff issue #1: the level 1 crash window, the level 9 scenario, the nightly seeds, `core` mutants) land first. Section "Open decisions" is the owner's; no task that depends on one starts before it is ruled. Decisions already ruled are listed under "Rulings".
 
 ## What phase 2 hands over
 

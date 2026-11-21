@@ -6,7 +6,7 @@ Evidence base: upstream read at benbjohnson/litestream 041a8c3 (v0.5.18-21) and 
 
 ## Status (2026-11-20)
 
-Scope for now is the library itself, phases 0 to 3, then a sidecar (phase 4), built to the quality bar in sections 2 and 4. Integration into an application application (a shadow run, then a cutover) is out of scope for this repository; section 6 lists what an application must provide. Decisions D1 to D5 are taken; see section 8.
+Scope for now is the library itself, phases 0 to 3, then a sidecar (phase 4), built to the quality bar in sections 2 and 4. Integration into an application application (a shadow run, then a cutover) is out of scope for this repository; section 6 lists what an application must provide. Decisions D1 to D7 are taken; see section 8.
 
 ## 1. Goal and contract
 

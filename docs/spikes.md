@@ -3,7 +3,7 @@
 | Spike | Status | Answer |
 |---|---|---|
 | Prior art: rustyriver | answered | Not usable as a code source: the repository states no licence (GitHub reports none). Its method is adopted: pinned upstream, golden fixtures, differential tests. |
-| `rusty-s3` signing of `x-amz-meta-*` headers; multipart against Tigris | open | Needs bucket credentials. Folded into the `store-s3` task (docs/plans/phase-1-reading.md, task 8); until then `store-s3` is tested against a local fake only. |
+| `rusty-s3` signing of `x-amz-meta-*` headers; multipart against Tigris | answered | Task 8s (MinIO) and task 8t (Tigris) below answer it. |
 | sqlx fork: raw handle in `after_connect` | deferred | An application-integration question (PLAN.md section 6), not needed by the library. |
 
 ## Task 8s: rusty-s3 against MinIO
