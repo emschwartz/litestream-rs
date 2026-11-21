@@ -89,6 +89,38 @@ mod cases {
     }
 
     #[test]
+    fn a_failed_read_in_a_batch_is_retried_alone() {
+        let (wire, sleeper, store) = retried(FakeHarness::new());
+        let k = key(0, 1, 1);
+        put_through(&store, &k, b"abcdefghi").unwrap();
+        wire.push(Fault::Status {
+            on: Shape::Get,
+            status: 503,
+            code: Some("SlowDown"),
+            retry_after: Some("1"),
+        });
+        let len = ReadLen::new(3).unwrap();
+        let reads: Vec<lsr_core::ReadAt> = [0, 3, 6]
+            .map(|offset| lsr_core::ReadAt {
+                key: k,
+                offset,
+                len,
+            })
+            .to_vec();
+        let got = block_on(store.read_many(&reads));
+        assert_eq!(
+            got,
+            vec![
+                Ok(b"abc".to_vec()),
+                Ok(b"def".to_vec()),
+                Ok(b"ghi".to_vec())
+            ]
+        );
+        assert_eq!(sleeper.waits(), [Duration::from_secs(1)]);
+        assert_eq!(count(&wire, Shape::Get), 4);
+    }
+
+    #[test]
     fn head_404_between_list_and_stamp() {
         let h = FakeHarness::new();
         let k = key(0, 1, 1);

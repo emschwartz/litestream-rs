@@ -10,12 +10,13 @@
 //! errors and time on the injected clock, and the bytes uploaded (Go's store metrics).
 
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use lsr_core::{
-    Clock, FileInfo, FileKey, Level, Listing, ObjectStore, PageLimit, ReadLen, StoreError,
+    Clock, FileInfo, FileKey, Level, Listing, ObjectStore, PageLimit, ReadAt, ReadLen, StoreError,
     StoredStamp, Upload,
 };
 use lsr_ltx::{Timestamp, TxidRange};
@@ -67,6 +68,15 @@ pub trait DynStore: Send + Sync {
 
     /// [`ObjectStore::delete`].
     fn delete_boxed<'a>(&'a self, keys: &'a [FileKey]) -> BoxFuture<'a, Result<(), StoreError>>;
+
+    /// [`ObjectStore::batch_width`].
+    fn batch_width_dyn(&self) -> NonZeroUsize;
+
+    /// [`ObjectStore::read_many`].
+    fn read_many_boxed<'a>(
+        &'a self,
+        reads: &'a [ReadAt],
+    ) -> BoxFuture<'a, Vec<Result<Vec<u8>, StoreError>>>;
 }
 
 /// [`Upload`] with boxed futures.
@@ -146,6 +156,17 @@ where
     fn delete_boxed<'a>(&'a self, keys: &'a [FileKey]) -> BoxFuture<'a, Result<(), StoreError>> {
         Box::pin(self.delete(keys))
     }
+
+    fn batch_width_dyn(&self) -> NonZeroUsize {
+        self.batch_width()
+    }
+
+    fn read_many_boxed<'a>(
+        &'a self,
+        reads: &'a [ReadAt],
+    ) -> BoxFuture<'a, Vec<Result<Vec<u8>, StoreError>>> {
+        Box::pin(self.read_many(reads))
+    }
 }
 
 /// A type-erased upload as an [`Upload`] again. Each call names the trait object's method:
@@ -211,6 +232,14 @@ impl ObjectStore for Erased<'_> {
 
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
         self.0.delete_boxed(keys).await
+    }
+
+    fn batch_width(&self) -> NonZeroUsize {
+        self.0.batch_width_dyn()
+    }
+
+    async fn read_many(&self, reads: &[ReadAt]) -> Vec<Result<Vec<u8>, StoreError>> {
+        self.0.read_many_boxed(reads).await
     }
 }
 
@@ -404,6 +433,22 @@ impl ObjectStore for Metered {
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
         let call = self.store.delete_boxed(keys);
         metered(&*self.clock, &self.meters.delete, call).await
+    }
+
+    fn batch_width(&self) -> NonZeroUsize {
+        self.store.batch_width_dyn()
+    }
+
+    /// Each read of the batch counts as one call, timed as the whole batch:
+    /// the reads ran side by side, so each took about that long.
+    async fn read_many(&self, reads: &[ReadAt]) -> Vec<Result<Vec<u8>, StoreError>> {
+        let began = self.clock.now();
+        let results = self.store.read_many_boxed(reads).await;
+        let ended = self.clock.now();
+        for result in &results {
+            self.meters.read.note(result, began, ended);
+        }
+        results
     }
 }
 

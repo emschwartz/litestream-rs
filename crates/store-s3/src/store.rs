@@ -5,16 +5,22 @@
 //! `RequestBuilder`, sent, then judged by `classify`, so what a status or code
 //! means is decided in one place. The store never retries.
 //!
+//! Batches: a call that needs several independent requests (the parts of an
+//! upload, reads ahead, the levels of a listing, a set of stamps) builds them
+//! all, hands them to [`Transport::send_many`] with the configured
+//! concurrency, and judges each response alone, exactly as a single request.
+//!
 //! Deadlines: the transport bounds one request. A call that sends several (a
 //! listing, a large delete) also checks the `Clock` between them against four
 //! times the configured deadline and fails as `Transient` `TimedOut` past it.
 
 use std::io;
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lsr_core::{
-    Clock, FileInfo, FileKey, Level, ListedStamp, Listing, ObjectStore, PageLimit, ReadLen,
+    Clock, FileInfo, FileKey, Level, ListedStamp, Listing, ObjectStore, PageLimit, ReadAt, ReadLen,
     StampOrigin, StoreError, StoreOp, StoredStamp,
 };
 use lsr_ltx::{Timestamp, TxidRange};
@@ -67,6 +73,7 @@ pub(crate) struct Inner<T> {
     transport: T,
     clock: Arc<dyn Clock>,
     pub(crate) part_size: PartSize,
+    pub(crate) concurrency: NonZeroUsize,
     prefix: Prefix,
     deadline: Duration,
     stats: Mutex<ListStats>,
@@ -139,6 +146,7 @@ impl<T: Transport> S3Store<T> {
                 transport,
                 clock: Arc::new(clock),
                 part_size: config.part_size(),
+                concurrency: config.concurrency(),
                 prefix: config.prefix().clone(),
                 deadline: config.deadline(),
                 stats: Mutex::new(ListStats::default()),
@@ -217,6 +225,14 @@ impl<T: Transport> ObjectStore for S3Store<T> {
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
         self.inner.delete(keys)
     }
+
+    fn batch_width(&self) -> NonZeroUsize {
+        self.inner.concurrency
+    }
+
+    async fn read_many(&self, reads: &[ReadAt]) -> Vec<Result<Vec<u8>, StoreError>> {
+        self.inner.read_many(reads)
+    }
 }
 
 /// The stamp a HEAD settles: the object's metadata when it has one, else the
@@ -290,6 +306,20 @@ impl<T: Transport> Inner<T> {
             .map_err(|err| classify_transport(op, &err))
     }
 
+    /// Sends a batch with the configured concurrency; one result per request,
+    /// in order, whatever each status.
+    pub(crate) fn send_many(
+        &self,
+        op: StoreOp,
+        requests: Vec<HttpRequest>,
+    ) -> Vec<Result<HttpResponse, StoreError>> {
+        self.transport
+            .send_many(requests, self.concurrency)
+            .into_iter()
+            .map(|sent| sent.map_err(|err| classify_transport(op, &err)))
+            .collect()
+    }
+
     /// Sends, and turns a failure status into its [`StoreError`].
     pub(crate) fn exec(
         &self,
@@ -333,6 +363,56 @@ impl<T: Transport> Inner<T> {
             }
             Err(_) => {}
         });
+    }
+
+    /// Builds every request, sends the batch, and judges each response
+    /// as [`Self::read`] does. A request that cannot be built fails its slot.
+    fn read_many(&self, reads: &[ReadAt]) -> Vec<Result<Vec<u8>, StoreError>> {
+        let op = StoreOp::Read;
+        self.batch(
+            op,
+            reads,
+            |at| self.request(op, |b, now| b.get_range(now, &at.key, at.offset, at.len)),
+            |at, response| Self::range_body(&at.key, at.offset, at.len, response),
+        )
+    }
+
+    /// One request per item, sent as one batch; `judge` turns each response
+    /// into its item's result. Items whose request could not be built keep
+    /// that error and are not sent.
+    pub(crate) fn batch<I, R>(
+        &self,
+        op: StoreOp,
+        items: &[I],
+        build: impl Fn(&I) -> Result<HttpRequest, StoreError>,
+        judge: impl Fn(&I, &HttpResponse) -> Result<R, StoreError>,
+    ) -> Vec<Result<R, StoreError>> {
+        let mut requests = Vec::with_capacity(items.len());
+        let mut unbuilt = Vec::with_capacity(items.len());
+        for item in items {
+            match build(item) {
+                Ok(request) => {
+                    requests.push(request);
+                    unbuilt.push(None);
+                }
+                Err(err) => unbuilt.push(Some(err)),
+            }
+        }
+        let mut sent = self.send_many(op, requests).into_iter();
+        items
+            .iter()
+            .zip(unbuilt)
+            .map(|(item, unbuilt)| {
+                if let Some(err) = unbuilt {
+                    return Err(err);
+                }
+                let response = sent.next().unwrap_or(Err(StoreError::Transient {
+                    op,
+                    kind: io::ErrorKind::Other,
+                }))?;
+                judge(item, &response)
+            })
+            .collect()
     }
 
     fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {

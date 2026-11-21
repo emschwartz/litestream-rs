@@ -109,8 +109,8 @@ pub use source::{
 };
 pub use stamps::{Resolve, ResolveError, Resolved, Stamps, Step as StampStep, resolve};
 pub use store::{
-    CorruptCause, Listing, ObjectStore, PageLimit, PartNumber, ReadLen, StoreError, StoreOp,
-    Upload, build_listing,
+    CorruptCause, Listing, ObjectStore, PageLimit, PartNumber, ReadAt, ReadLen, StoreError,
+    StoreOp, Upload, build_listing,
 };
 pub use sync::{
     PageFrom, Step, StepEnd, StepFailed, SyncConfig, Synced, clamp, header_fields, plan_pages,

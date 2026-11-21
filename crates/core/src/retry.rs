@@ -21,7 +21,7 @@
 //!   error, so a listing never shows a file the wrapper called corrupt.
 
 use std::future::Future;
-use std::num::NonZeroU8;
+use std::num::{NonZeroU8, NonZeroUsize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -31,7 +31,9 @@ use lsr_ltx::{Timestamp, TxidRange};
 use crate::env::{Entropy, Sleeper};
 use crate::layout::StoredStamp;
 use crate::layout::{FileInfo, FileKey, Level};
-use crate::store::{CorruptCause, Listing, ObjectStore, PageLimit, ReadLen, StoreError, Upload};
+use crate::store::{
+    CorruptCause, Listing, ObjectStore, PageLimit, ReadAt, ReadLen, StoreError, Upload,
+};
 
 /// How a [`StoreError`] should be handled.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -220,10 +222,27 @@ impl<S, P: Sleeper, E: Entropy> Core<S, P, E> {
         F: FnMut() -> Fut + Send,
         Fut: Future<Output = Result<T, StoreError>> + Send,
     {
+        Counters::bump(&self.counters.calls);
+        let first = op().await;
+        self.settle(first, op).await
+    }
+
+    /// Carries on an operation whose first attempt (already counted as a
+    /// call) returned `first`, under the same policy as [`Self::run`]: an
+    /// item of a batch is retried exactly as a single call would be.
+    async fn settle<T, F, Fut>(
+        &self,
+        first: Result<T, StoreError>,
+        mut op: F,
+    ) -> Result<T, StoreError>
+    where
+        F: FnMut() -> Fut + Send,
+        Fut: Future<Output = Result<T, StoreError>> + Send,
+    {
         let mut failures = 0_u32;
+        let mut outcome = first;
         loop {
-            Counters::bump(&self.counters.calls);
-            let err = match op().await {
+            let err = match outcome {
                 Ok(done) => return Ok(done),
                 Err(err) => err,
             };
@@ -234,6 +253,8 @@ impl<S, P: Sleeper, E: Entropy> Core<S, P, E> {
             self.counters.add_wait(wait);
             Counters::bump(&self.counters.retries);
             self.sleeper.sleep(wait).await;
+            Counters::bump(&self.counters.calls);
+            outcome = op().await;
         }
     }
 }
@@ -290,6 +311,26 @@ impl<S: ObjectStore, P: Sleeper, E: Entropy> ObjectStore for Retrying<S, P, E> {
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
         let core = &*self.core;
         core.run(|| core.inner.delete(keys)).await
+    }
+
+    fn batch_width(&self) -> NonZeroUsize {
+        self.core.inner.batch_width()
+    }
+
+    /// One batch through the inner store, then each failed read retried
+    /// alone under the policy, in order.
+    async fn read_many(&self, reads: &[ReadAt]) -> Vec<Result<Vec<u8>, StoreError>> {
+        let core = &*self.core;
+        let firsts = core.inner.read_many(reads).await;
+        let mut out = Vec::with_capacity(firsts.len());
+        for (at, first) in reads.iter().zip(firsts) {
+            Counters::bump(&core.counters.calls);
+            let settled = core
+                .settle(first, || core.inner.read(&at.key, at.offset, at.len))
+                .await;
+            out.push(settled);
+        }
+        out
     }
 }
 

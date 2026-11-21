@@ -21,7 +21,7 @@ use std::thread::{self, Thread};
 use lsr_ltx::{Timestamp, Txid, TxidRange};
 
 use crate::layout::{FileInfo, FileKey, Level, ListedStamp, StampOrigin};
-use crate::store::{ObjectStore, PageLimit, ReadLen, StoreError, StoreOp, Upload};
+use crate::store::{ObjectStore, PageLimit, ReadAt, ReadLen, StoreError, StoreOp, Upload};
 
 /// Why a conformance case failed.
 #[derive(Debug)]
@@ -774,6 +774,60 @@ pub async fn read_with_stamp_agrees_with_read_and_stamp<H: Harness>(h: &H) -> Ch
     Ok(())
 }
 
+/// `read_many` answers each read as `read` does, in order: a missing key
+/// fails only its own slot.
+///
+/// # Errors
+/// A [`Failure`] naming the rule that broke.
+pub async fn read_many_agrees_with_read<H: Harness>(h: &H) -> Check {
+    let store = h.store();
+    let target = key(6, 3, 3)?;
+    let absent = key(6, 4, 4)?;
+    put_stamped(store, target, b"abcdefgh", at(STAMP)).await?;
+    let reads = [
+        ReadAt {
+            key: target,
+            offset: 0,
+            len: read_len(3)?,
+        },
+        ReadAt {
+            key: absent,
+            offset: 0,
+            len: read_len(3)?,
+        },
+        ReadAt {
+            key: target,
+            offset: 6,
+            len: read_len(3)?,
+        },
+        ReadAt {
+            key: target,
+            offset: 8,
+            len: read_len(3)?,
+        },
+        ReadAt {
+            key: target,
+            offset: 3,
+            len: read_len(3)?,
+        },
+    ];
+    let mut want = Vec::new();
+    for at in &reads {
+        want.push(store.read(&at.key, at.offset, at.len).await);
+    }
+    ensure_eq!(
+        store.read_many(&reads).await,
+        want,
+        "read_many against read"
+    );
+    ensure_eq!(
+        want.get(1).cloned(),
+        Some(Err(StoreError::NotFound { key: absent })),
+        "the missing key's slot"
+    );
+    Ok(())
+}
+
 /// Hands the suite to a backend: one test per case, each on a fresh harness.
 ///
 /// `make` is an expression that builds the harness, called once per test.
@@ -800,6 +854,7 @@ macro_rules! conformance_suite {
             stamp_of_a_vanished_file_is_not_found,
             stamp_of_an_overwritten_file_is_refused,
             read_with_stamp_agrees_with_read_and_stamp,
+            read_many_agrees_with_read,
         );
     };
     (@each $make:expr; $($case:ident,)+) => {

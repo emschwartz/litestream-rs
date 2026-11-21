@@ -600,7 +600,7 @@ async fn apply_file<S: ObjectStore, K: DatabaseSink>(
     bytes_read: &mut u64,
 ) -> Result<Verified, Abort> {
     let key = info.key;
-    let mut read = LtxRead::new(key, chunk_len());
+    let mut read = LtxRead::new(key, chunk_len()).sized(info.size);
     let applied = read
         .read_verified(store, |event| match event {
             Event::Header(header) => check_header(key, &header, previous)
