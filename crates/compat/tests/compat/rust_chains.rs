@@ -115,10 +115,9 @@ fn go_restore(
 fn go_verifies_every_rust_file() {
     let written = write_chain(COMMITS, 4096, 11);
     let tmp = tempfile::tempdir().expect("tmp");
-    let Ok(helper) = build_verify_helper(tmp.path()) else {
-        println!("skipped: the Go toolchain is not available");
-        return;
-    };
+    // A missing Go toolchain or a failed helper build fails the test: this one only runs under
+    // `just compat`, which needs Go, and a skip there would pass with nothing verified.
+    let helper = build_verify_helper(tmp.path()).expect("build the Go verify helper (needs Go)");
     assert!(
         written.archive.len() > 10,
         "only {} files",
