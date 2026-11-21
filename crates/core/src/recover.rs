@@ -13,7 +13,16 @@
 //! Rules, first match wins: 1 no tip, 2 replica ahead, 3 tip unreadable,
 //! 4 no WAL header, 5 page size changed, 6 salts changed, 7 same salts but the
 //! WAL is shorter than the tip's end, 8 the frame before the end is not a
-//! commit frame, 9 the last page differs, 10 continue.
+//! commit frame, 9 the last page differs, 9a the wal-index was reset ahead of
+//! the header past a commit the position never covered, 10 continue.
+//!
+//! Rule 9a is a running position's (#26). SQLite can reset the wal-index to a
+//! generation with no frame while the WAL file keeps the old header (see
+//! [`CommittedRead::reset_ahead_of`]). The reset needed every frame backfilled,
+//! so a commit that chains on from the position is in the database file and in
+//! no file this engine staged, and no WAL read will show it again: a snapshot.
+//! When none follows, nothing is lost and the position continues; the sync step
+//! then has nothing to stage and no proof to give.
 //!
 //! Rule 6 proves one restart with the read-transaction pin and `salt1 + 1`; it
 //! does not check `checkpoint_seq`, which real SQLite takes from the restarting
@@ -520,8 +529,10 @@ pub struct Probes {
     /// The commit frame before the position's end.
     pub prev: FrameCheck,
     /// Whether a whole committed transaction of the position's own generation still
-    /// chains from its end, asked only when the WAL's header names another generation.
-    /// Frames with no commit after them are a rolled-back spill and do not count (ruling V2).
+    /// chains from its end, asked only when the WAL's header names another generation,
+    /// or (through [`Self::read_against`]) when the wal-index was reset ahead of a header
+    /// that names the position's. Frames with no commit after them are a rolled-back
+    /// spill and do not count (ruling V2).
     pub stale_next: bool,
 }
 
@@ -531,13 +542,36 @@ impl Probes {
     /// # Errors
     /// [`Fault::LocalIo`] when a read fails.
     pub fn read<R: Read + Seek>(wal: &mut WalReader<R>, at: &Position) -> Result<Self, Fault> {
+        Self::probe(wal, at, false)
+    }
+
+    /// As [`Self::read`], and also asks `stale_next` when `committed` shows the
+    /// wal-index reset ahead of the header ([`CommittedRead::reset_ahead_of`]): the
+    /// commits it finds were backfilled and are now only in the database file.
+    ///
+    /// # Errors
+    /// [`Fault::LocalIo`] when a read fails.
+    pub fn read_against<R: Read + Seek>(
+        wal: &mut WalReader<R>,
+        at: &Position,
+        committed: &CommittedRead,
+    ) -> Result<Self, Fault> {
+        let reset = committed.reset_ahead_of(wal.header().salts());
+        Self::probe(wal, at, reset)
+    }
+
+    fn probe<R: Read + Seek>(
+        wal: &mut WalReader<R>,
+        at: &Position,
+        reset: bool,
+    ) -> Result<Self, Fault> {
         let cursor = at.cursor();
         let prev = if cursor.next().frame_index() == 0 {
             FrameCheck::Miss(Miss::NotACommit)
         } else {
             FrameCheck::of(wal.frame_before(cursor.next(), cursor.salts()))?
         };
-        let stale_next = wal.header().salts() != cursor.salts()
+        let stale_next = (reset || wal.header().salts() != cursor.salts())
             && wal.commit_follows(&cursor).map_err(|_err| Fault::LocalIo)?;
         Ok(Self { prev, stale_next })
     }
@@ -787,10 +821,33 @@ fn same_generation(
         FrameState::Miss(Miss::Moved) => Err(refuse(SnapshotCause::GenerationChanged)),
         FrameState::Mismatch => Err(refuse(SnapshotCause::LastPageMismatch)),
         FrameState::Miss(Miss::Truncated) | FrameState::Rewritten | FrameState::Fresh => {
+            if let Some(refusal) = reset_past(tip, seen, header, wal) {
+                return Err(refusal);
+            }
             let cursor_at_end = committed.is_some_and(|end| end.get() == seen.end.get());
             continued(tip, wal, cursor_at_end)
         }
     }
+}
+
+/// Rule 9a: the wal-index was reset ahead of the header and a commit follows the
+/// position. A position pinned at this epoch cannot have one after it (the reset
+/// needed a backfill its read lock blocks), so finding one is F1's tripwire.
+fn reset_past(tip: &Tip<'_>, seen: &Seen, header: &WalHeader, wal: &WalView) -> Option<Refusal> {
+    let Tip::Running(position, probes) = tip else {
+        return None;
+    };
+    let reset = wal
+        .committed
+        .is_some_and(|read| read.reset_ahead_of(header.salts()));
+    if !reset || !probes.stale_next {
+        return None;
+    }
+    let pinned = position.continuity() == Continuity::Pinned(wal.epoch);
+    Some(Refusal {
+        cause: SnapshotCause::GenerationChanged,
+        event: pinned.then_some(RecoverEvent::PinViolated { synced: seen.end }),
+    })
 }
 
 /// What the frame before the end says, whichever way the tip carries it.

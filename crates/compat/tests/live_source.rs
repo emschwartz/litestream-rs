@@ -185,6 +185,11 @@ impl Rig {
                 end: StepEnd::Limited(_),
                 ..
             } => panic!("a test chain never reaches the WAL cap"),
+            Synced::IndexReset
+            | Synced::Wrote {
+                end: StepEnd::Unproven(_),
+                ..
+            } => panic!("a test chain never meets a wal-index reset ahead of its header"),
         }
     }
 

@@ -8,6 +8,14 @@
 //! [`Step`] in [`StepFailed`], and the retry encodes the file again over the
 //! same key.
 //!
+//! A wal-index reset ahead of the WAL header
+//! ([`CommittedRead::reset_ahead_of`]) is not the WAL moving: the index counts
+//! no frame. A step from a position then has nothing to stage and answers
+//! [`Synced::IndexReset`], with no proof; a snapshot takes every page from the
+//! database file and ends [`StepEnd::Unproven`]. Neither pins, since the
+//! position is in the header's generation and not the index's, so the header
+//! the next commit writes goes through `recover` as any restart does.
+//!
 //! The step sees one epoch. A driver that wants the second half of the F1
 //! condition (the epoch unchanged after the staging commit) compares
 //! `WalSource::epoch` again and demotes the returned position with
@@ -114,6 +122,11 @@ pub enum StepEnd {
     Through(SyncedThrough),
     /// The cap stopped the scan on a commit boundary.
     Limited(Position),
+    /// A snapshot staged while the wal-index was reset ahead of the WAL header
+    /// ([`CommittedRead::reset_ahead_of`]): it holds every committed page, from
+    /// the database file, but its position is in the header's generation and
+    /// not the one the index counts, so it is unpinned and proves nothing.
+    Unproven(Position),
 }
 
 /// What a step did.
@@ -121,6 +134,12 @@ pub enum StepEnd {
 pub enum Synced {
     /// Nothing new: the position is the committed end.
     Idle(SyncedThrough),
+    /// Nothing to stage, and no proof: the wal-index was reset ahead of the WAL
+    /// header ([`CommittedRead::reset_ahead_of`]) and no commit follows the
+    /// position, so everything committed is already staged. The position is
+    /// the step's own, unchanged; the next commit writes a header and goes
+    /// through `recover` as a restart.
+    IndexReset,
     /// One file was staged.
     Wrote {
         /// The staged file.
@@ -403,6 +422,28 @@ fn scan<R: Read + Seek>(
     })
 }
 
+/// What a step under a reset wal-index scans: nothing, since the index counts no
+/// frame. A commit that chains on from a held position was backfilled before the
+/// reset and is in no staged file; `recover`'s rule 9a snapshots for it, and a
+/// step that meets one anyway retries as the WAL having moved rather than call
+/// itself done.
+fn unscanned<R: Read + Seek>(wal: &mut WalReader<R>, start: &Start) -> Result<Scanned, Fault> {
+    if start.held.is_some()
+        && wal
+            .commit_follows(&start.cursor)
+            .map_err(|_err| Fault::LocalIo)?
+    {
+        return Err(Fault::WalMoved);
+    }
+    Ok(Scanned {
+        map: PageMap::new(wal.header().page_size()),
+        cursor: start.cursor,
+        last_frame: None,
+        limited: false,
+        txs: 0,
+    })
+}
+
 /// Encodes `plan` into `upload` in bounded chunks; returns the last page written.
 async fn fill<R: Read + Seek, P: PageSource, U: Upload>(
     upload: &mut U,
@@ -519,28 +560,27 @@ async fn run<R: Read + Seek, P: PageSource, L: ObjectStore>(
     {
         return Err(Fault::ReadTxLost);
     }
-    if committed.end().salts() != wal.header().salts() {
+    let reset = committed.end().salts() != wal.header().salts();
+    if reset && !committed.reset_ahead_of(wal.header().salts()) {
         return Err(Fault::WalMoved);
     }
-    let scanned = scan(wal, &start, committed, cfg.cap)?;
+    let scanned = if reset {
+        unscanned(wal, &start)?
+    } else {
+        scan(wal, &start, committed, cfg.cap)?
+    };
     let nothing = scanned.last_frame.is_none();
+    if reset && nothing && start.held.is_some() {
+        return Ok(Synced::IndexReset);
+    }
     if nothing && let Some(held) = start.held {
-        let cursor = scanned.cursor;
-        return Ok(Synced::Idle(SyncedThrough::new(Position::new(
-            held.txid(),
-            cursor,
-            held.commit(),
-            held.last_page(),
-            held.timestamp(),
-            Continuity::Pinned(epoch),
-        ))));
+        return Ok(Synced::Idle(SyncedThrough::new(
+            held.with_cursor(scanned.cursor)
+                .with_continuity(Continuity::Pinned(epoch)),
+        )));
     }
     let page_size = wal.header().page_size();
-    let commit = match NonZeroU32::new(scanned.map.commit()) {
-        Some(commit) => commit,
-        None => NonZeroU32::new(db.page_count().map_err(Fault::from_source)?)
-            .ok_or(Fault::NothingToSnapshot)?,
-    };
+    let commit = commit_of(&scanned.map, db)?;
     let plan = plan_pages(&scanned.map, start.prev_commit, commit, page_size);
     let (header, clamped) = stamp(&start, &scanned, wal, commit, cfg.node_id, now)?;
     let key = FileKey::new(Level::ZERO, TxidRange::single(start.txid));
@@ -559,16 +599,16 @@ async fn run<R: Read + Seek, P: PageSource, L: ObjectStore>(
         commit,
         last_page,
         header.fields().timestamp,
-        if stopped_short {
-            Continuity::Unpinned
-        } else {
-            Continuity::Pinned(epoch)
-        },
+        Continuity::Unpinned,
     );
-    let end = if stopped_short {
+    let end = if reset {
+        StepEnd::Unproven(position)
+    } else if stopped_short {
         StepEnd::Limited(position)
     } else {
-        StepEnd::Through(SyncedThrough::new(position))
+        StepEnd::Through(SyncedThrough::new(
+            position.with_continuity(Continuity::Pinned(epoch)),
+        ))
     };
     Ok(Synced::Wrote {
         file,
@@ -576,6 +616,16 @@ async fn run<R: Read + Seek, P: PageSource, L: ObjectStore>(
         clamped,
         txs: scanned.txs,
     })
+}
+
+/// The database size after the scanned transactions, or the database file's
+/// when the scan found none (a snapshot of a WAL that holds nothing).
+fn commit_of<P: PageSource>(map: &PageMap, db: &mut P) -> Result<NonZeroU32, Fault> {
+    match NonZeroU32::new(map.commit()) {
+        Some(commit) => Ok(commit),
+        None => NonZeroU32::new(db.page_count().map_err(Fault::from_source)?)
+            .ok_or(Fault::NothingToSnapshot),
+    }
 }
 
 /// The header of the file a scan calls for, with its clamped timestamp.

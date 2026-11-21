@@ -88,6 +88,32 @@ impl Rig {
         ))
     }
 
+    /// A step under a wal-index read the test chooses, over the WAL file as it is.
+    fn step_under(&mut self, step: Step, committed: CommittedRead) -> Result<Synced, StepFailed> {
+        let mut wal = reader(self.wal.file_bytes());
+        block_on(sync_step(
+            step,
+            &mut wal,
+            committed,
+            self.wal.epoch(),
+            &mut self.db,
+            &self.store,
+            &SyncConfig::default(),
+            ts(5000),
+        ))
+    }
+
+    /// The wal-index as SQLite leaves it after restarting the log in the index
+    /// only: the next generation, no frame, and the file's header unchanged.
+    fn reset(&self) -> CommittedRead {
+        let salts = self.wal.salts();
+        let next = Salts {
+            salt1: salts.salt1.wrapping_add(1),
+            salt2: 77,
+        };
+        CommittedRead::new(CommittedEnd::new(0, next, PS), 0).unwrap()
+    }
+
     fn snapshot(&mut self, now: i64) -> Synced {
         let step = Step::Snapshot {
             after: None,
@@ -143,9 +169,10 @@ fn position_of(synced: Synced) -> Position {
             ..
         } => through.into_position(),
         Synced::Wrote {
-            end: StepEnd::Limited(position),
+            end: StepEnd::Limited(position) | StepEnd::Unproven(position),
             ..
         } => position,
+        Synced::IndexReset => panic!("no position: the wal-index was reset"),
     }
 }
 
@@ -286,6 +313,101 @@ fn a_new_generation_step_scans_from_the_start_and_keeps_the_txid() {
     assert_eq!(fills(pages), [(2, 2)]);
 }
 
+// A wal-index reset ahead of the WAL header (#26).
+#[test]
+fn a_reset_index_with_nothing_after_the_position_has_nothing_to_stage_and_no_proof() {
+    let mut rig = Rig::new();
+    commit(&rig.wal, &[1, 2], 2);
+    let position = position_of(rig.snapshot(1000));
+    let reset = rig.reset();
+    assert_eq!(
+        rig.step_under(Step::Incremental(position), reset),
+        Ok(Synced::IndexReset)
+    );
+    // From the start of the header's generation its frames come after the
+    // position: backfilled and never staged, so not done.
+    let failed = rig
+        .step_under(Step::NewGeneration(position), reset)
+        .unwrap_err();
+    assert_eq!(failed.fault, Fault::WalMoved);
+    assert_eq!(rig.files().len(), 1);
+}
+
+#[test]
+fn a_header_only_wal_under_an_index_of_zero_salts_is_the_same_reset() {
+    let mut rig = Rig::new();
+    let zero = Salts { salt1: 0, salt2: 0 };
+    rig.db.write_page(pg(1), &[db_fill(1); 512]);
+    let synced = rig.snapshot(1000);
+    let position = position_of(synced);
+    let index = CommittedRead::new(CommittedEnd::new(0, zero, PS), 0).unwrap();
+    assert_eq!(
+        rig.step_under(Step::Incremental(position), index),
+        Ok(Synced::IndexReset)
+    );
+}
+
+#[test]
+fn a_commit_after_the_position_under_a_reset_index_is_never_called_done() {
+    let mut rig = Rig::new();
+    commit(&rig.wal, &[1, 2], 2);
+    let position = position_of(rig.snapshot(1000));
+    commit(&rig.wal, &[2], 2);
+    let reset = rig.reset();
+    let failed = rig
+        .step_under(Step::Incremental(position), reset)
+        .unwrap_err();
+    assert_eq!(failed.fault, Fault::WalMoved);
+    assert_eq!(rig.files().len(), 1);
+}
+
+#[test]
+fn an_index_with_frames_of_another_generation_is_still_the_wal_moving() {
+    let mut rig = Rig::new();
+    commit(&rig.wal, &[1], 1);
+    let position = position_of(rig.snapshot(1000));
+    let other = Salts {
+        salt1: 50,
+        salt2: 60,
+    };
+    let moved = CommittedRead::new(CommittedEnd::new(1, other, PS), 0).unwrap();
+    let failed = rig
+        .step_under(Step::Incremental(position), moved)
+        .unwrap_err();
+    assert_eq!(failed.fault, Fault::WalMoved);
+}
+
+#[test]
+fn a_snapshot_under_a_reset_index_takes_every_page_from_the_database_and_proves_nothing() {
+    let mut rig = Rig::new();
+    // Frames the index no longer counts: SQLite backfilled them before the reset.
+    commit(&rig.wal, &[2], 3);
+    for n in 1..=3 {
+        rig.db.write_page(pg(n), &[db_fill(n); 512]);
+    }
+    let reset = rig.reset();
+    let synced = rig.step_under(snapshot_step(), reset).unwrap();
+    let Synced::Wrote {
+        end: StepEnd::Unproven(position),
+        txs: 0,
+        ..
+    } = synced
+    else {
+        panic!("{synced:?}");
+    };
+    assert_eq!(position.continuity(), Continuity::Unpinned);
+    assert_eq!(position.synced().offset().frame_index(), 0);
+    assert_eq!(position.cursor().salts(), rig.wal.salts());
+    let files = rig.files();
+    let (_, header, pages) = &files[0];
+    assert!(header.is_snapshot());
+    assert_eq!(header.fields().wal.unwrap().size(), 0);
+    assert_eq!(
+        fills(pages),
+        [(1, db_fill(1)), (2, db_fill(2)), (3, db_fill(3))]
+    );
+}
+
 // Caps.
 fn capped(cap: u64) -> SyncConfig {
     SyncConfig {
@@ -325,6 +447,11 @@ fn run_capped(cap: u64, txs: &[(&[u32], u32)]) -> (Rig, Vec<Position>) {
                 break;
             }
             Synced::Idle(_) => break,
+            other @ (Synced::IndexReset
+            | Synced::Wrote {
+                end: StepEnd::Unproven(_),
+                ..
+            }) => panic!("{other:?}"),
         }
     }
     (rig, ends)

@@ -134,7 +134,7 @@ impl Rig {
                 end: StepEnd::Through(through),
                 ..
             } => through,
-            other @ Synced::Wrote { .. } => panic!("{other:?}"),
+            other @ (Synced::IndexReset | Synced::Wrote { .. }) => panic!("{other:?}"),
         };
         self.position = Some(*through.position());
         self.through = Some(through);

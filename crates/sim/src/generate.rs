@@ -49,6 +49,9 @@ pub enum EnvFault {
     /// The next page count of the database reads zero: the file exists and
     /// holds no page yet. Scenarios only.
     EmptyDatabase,
+    /// The next TRUNCATE checkpoint that finishes resets the wal-index and
+    /// fails to truncate the file, which keeps its old header. Scenarios only.
+    TruncateFails,
 }
 
 /// One step of a history.

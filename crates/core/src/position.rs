@@ -189,6 +189,13 @@ impl Position {
         }
     }
 
+    /// The same position with its cursor replaced: a scan that found nothing
+    /// new ends at the cursor it read up to.
+    #[must_use]
+    pub(crate) const fn with_cursor(self, cursor: FrameCursor) -> Self {
+        Self { cursor, ..self }
+    }
+
     /// The same position with its continuity replaced.
     #[must_use]
     pub(crate) const fn with_continuity(self, continuity: Continuity) -> Self {

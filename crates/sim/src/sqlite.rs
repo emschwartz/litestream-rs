@@ -196,6 +196,8 @@ struct Faults {
     shm_forced: Option<(CommittedRead, u8)>,
     overwrite: Option<Overwrite>,
     empty_db: bool,
+    // The next TRUNCATE that finishes fails to truncate the file.
+    truncate_fails: bool,
 }
 
 impl Faults {
@@ -541,8 +543,13 @@ impl State {
                 busy = true;
             } else if mode == StrangerMode::Truncate {
                 self.restart(by);
-                self.wal.clear();
-                self.durable.clear();
+                // SQLite resets the wal-index before it truncates the file
+                // (`walCheckpoint`): when the truncate fails, the file keeps
+                // its old header and frames under a reset index.
+                if !mem::take(&mut self.faults.truncate_fails) {
+                    self.wal.clear();
+                    self.durable.clear();
+                }
             }
         }
         CheckpointNumbers {
@@ -1076,6 +1083,15 @@ impl SimSqlite {
         });
     }
 
+    /// The next TRUNCATE checkpoint that finishes, ours or a stranger's, resets
+    /// the wal-index and then fails to truncate the file (`ftruncate` failing):
+    /// the file keeps the old header and frames until the next commit writes a
+    /// header. Our own checkpoint call reports the I/O error. The real-SQLite
+    /// fault suite found this state (`crates/sqlite/tests/faults.rs`).
+    pub fn fail_next_truncate(&self) {
+        self.with(|state| state.faults.truncate_fails = true);
+    }
+
     /// The next call of `op` fails with `err`.
     pub fn inject(&self, op: SourceOp, err: SourceError) {
         self.with(|state| state.faults.injections.push((op, err)));
@@ -1334,8 +1350,12 @@ impl Checkpointer for SimCheckpointer {
         let mut state = lock(&self.state);
         state.faults.take(SourceOp::Checkpoint)?;
         state.end(Conn::Ours);
+        let failing = state.faults.truncate_fails;
         let numbers = state.checkpoint(Conn::Pool, mode.into());
         state.begin(Conn::Ours);
+        if failing && !state.faults.truncate_fails {
+            return Err(SourceError::Io(io::ErrorKind::Other));
+        }
         Ok(CheckpointRun {
             busy: numbers.busy,
             log: numbers.log,

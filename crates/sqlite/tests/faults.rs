@@ -241,7 +241,6 @@ fn lock_error_at_open<B: Backend>() {
 /// is lost. (A RESTART that succeeds leaves the header for the next writer to reset, and a
 /// TRUNCATE that succeeds empties the file, so neither reaches this state.)
 #[test]
-#[ignore = "review: core's sync_step reads a reset wal-index with zero frames as WalMoved, not idle"]
 fn an_idle_database_settles_after_a_checkpoint_reset_the_wal_index() {
     let outcomes = each_step::<Sqlite>(
         FileKind::Wal,

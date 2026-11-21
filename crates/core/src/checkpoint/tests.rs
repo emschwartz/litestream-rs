@@ -370,7 +370,7 @@ impl Rig {
                 end: StepEnd::Through(through),
                 ..
             } => through,
-            other @ (Synced::Idle(_) | Synced::Wrote { .. }) => {
+            other @ (Synced::Idle(_) | Synced::IndexReset | Synced::Wrote { .. }) => {
                 panic!("expected a snapshot through the end, got {other:?}")
             }
         }

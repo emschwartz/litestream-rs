@@ -516,6 +516,73 @@ fn rule_9_at_boot_a_tip_ending_at_the_wal_start_has_no_frame_to_miss() {
     }
 }
 
+// Rule 9a (#26): the wal-index reset ahead of the header.
+fn reset_view(wal: &FakeWal) -> WalView {
+    let mut seen = view(wal);
+    let next = Salts {
+        salt1: wal.salts().salt1.wrapping_add(1),
+        salt2: 77,
+    };
+    seen.committed = CommittedRead::new(lsr_wal::CommittedEnd::new(0, next, PS), 0);
+    seen
+}
+
+fn under_reset(wal: &FakeWal, pos: &Position) -> Verdict {
+    let seen = reset_view(wal);
+    let index = seen.committed.unwrap();
+    let probes = Probes::read_against(&mut reader(wal.file_bytes()), pos, &index).unwrap();
+    recover_traced(Some(Tip::Running(pos, probes)), &seen, None)
+}
+
+#[test]
+fn rule_9a_a_reset_index_with_nothing_after_the_position_continues_as_it_was() {
+    let wal = fresh();
+    for continuity in [Continuity::Pinned(wal.epoch()), Continuity::Unpinned] {
+        let pos = position(&wal, 2, continuity);
+        assert_eq!(under_reset(&wal, &pos), plain(Recovered::Continue(pos)));
+    }
+}
+
+#[test]
+fn rule_9a_a_commit_the_position_never_covered_under_a_reset_index_is_a_snapshot() {
+    let wal = FakeWal::new(PS, salts(10));
+    commit(&wal, &[1, 2], 2);
+    let pos = position(&wal, 1, Continuity::Unpinned);
+    commit(&wal, &[2, 3], 3);
+    assert_eq!(
+        under_reset(&wal, &pos),
+        plain(snapshot(Some(1), SnapshotCause::GenerationChanged))
+    );
+}
+
+#[test]
+fn rule_9a_a_pinned_position_with_a_commit_after_it_under_a_reset_index_is_the_tripwire() {
+    let wal = FakeWal::new(PS, salts(10));
+    commit(&wal, &[1, 2], 2);
+    let pos = position(&wal, 1, Continuity::Pinned(wal.epoch()));
+    commit(&wal, &[2, 3], 3);
+    let verdict = under_reset(&wal, &pos);
+    assert_eq!(
+        verdict.recovered,
+        snapshot(Some(1), SnapshotCause::GenerationChanged)
+    );
+    assert_eq!(
+        verdict.event,
+        Some(RecoverEvent::PinViolated {
+            synced: pos.synced().offset()
+        })
+    );
+}
+
+#[test]
+fn rule_9a_a_rolled_back_spill_after_the_position_is_no_commit() {
+    let wal = FakeWal::new(PS, salts(10));
+    commit(&wal, &[1, 2], 2);
+    let pos = position(&wal, 1, Continuity::Unpinned);
+    wal.append_uncommitted(&[(pg(3), vec![3; PS.bytes()])]);
+    assert_eq!(under_reset(&wal, &pos), plain(Recovered::Continue(pos)));
+}
+
 // Rule 10.
 #[test]
 fn rule_10_a_running_position_continues_as_it_is() {

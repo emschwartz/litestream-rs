@@ -166,12 +166,12 @@ impl<B: Backend> Stepper<B> {
     /// # Errors
     /// The backend's, as [`RigError::Store`].
     pub fn verdict(&mut self) -> Result<Verdict, RigError> {
-        let (mut wal, view, _) = self.view()?;
+        let (mut wal, view, committed) = self.view()?;
         let Some(position) = self.through.as_ref().map(SyncedThrough::position) else {
             return Ok(recover_traced(None, &view, None));
         };
-        let probes =
-            Probes::read(&mut wal, position).map_err(|err| RigError::Store(format!("{err:?}")))?;
+        let probes = Probes::read_against(&mut wal, position, &committed)
+            .map_err(|err| RigError::Store(format!("{err:?}")))?;
         Ok(recover_traced(
             Some(Tip::Running(position, probes)),
             &view,
@@ -220,6 +220,13 @@ impl<B: Backend> Stepper<B> {
                 end: StepEnd::Limited(_),
                 ..
             } => Err(RigError::State("sync past the default cap")),
+            Synced::IndexReset
+            | Synced::Wrote {
+                end: StepEnd::Unproven(_),
+                ..
+            } => Err(RigError::State(
+                "prove a position under a wal-index reset ahead of its header",
+            )),
         }
     }
 

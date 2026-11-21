@@ -162,7 +162,6 @@ fn power_loss_at_each_wal_sync_loses_no_acknowledged_transaction() {
 /// the file names the new ones. The boot's pending snapshot then retries "WAL moved" until the
 /// host commits again; an idle database never settles after such a loss, though nothing is lost.
 #[test]
-#[ignore = "review: core retries WalMoved while the wal-index and the WAL header disagree with no frames committed"]
 fn a_boot_after_a_loss_that_left_a_header_only_wal_settles() {
     each_wal_sync::<Sqlite>(true);
 }

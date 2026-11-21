@@ -130,6 +130,11 @@ impl Engine {
                 end: StepEnd::Limited(_),
                 ..
             } => panic!("the test never reaches the WAL cap"),
+            Synced::IndexReset
+            | Synced::Wrote {
+                end: StepEnd::Unproven(_),
+                ..
+            } => panic!("the test never meets a wal-index reset ahead of its header"),
         });
     }
 

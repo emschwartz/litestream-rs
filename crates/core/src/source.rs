@@ -13,7 +13,7 @@
 use std::io::{self, Read, Seek};
 
 use lsr_ltx::PageNo;
-use lsr_wal::CommittedEnd;
+use lsr_wal::{CommittedEnd, Salts};
 use thiserror::Error;
 
 use crate::position::{ReadEpoch, WalFileLen};
@@ -95,6 +95,21 @@ impl CommittedRead {
     #[must_use]
     pub const fn fully_backfilled(&self) -> bool {
         self.backfilled == self.end.frame_count()
+    }
+
+    /// Whether the wal-index names a generation with no frame in it that the
+    /// WAL file's header, whose salts are `header`, does not name.
+    ///
+    /// SQLite resets the wal-index before it writes the new header: a log
+    /// restart whose header write failed, a truncating checkpoint whose
+    /// truncate failed, and its recovery of a header-only WAL (which leaves the
+    /// salts at zero) all stop here until the next commit writes a header.
+    /// Either way the database file holds everything the index counted: a
+    /// restart or a truncate needs every frame backfilled first, and a recovery
+    /// that read no header found no frame.
+    #[must_use]
+    pub fn reset_ahead_of(&self, header: Salts) -> bool {
+        self.end.frame_count() == 0 && self.end.salts() != header
     }
 }
 

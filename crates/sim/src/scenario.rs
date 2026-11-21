@@ -251,6 +251,7 @@ pub fn scenario_of(cause: SnapshotCause) -> &'static [fn() -> Scenario] {
             meta_wiped_wal_restarted,
             restart_during_read_lock_lapse,
             pinned_on_zero_single_restart,
+            truncate_failed_after_the_index_reset,
         ],
         SnapshotCause::PrevFrameMismatch => &[wal_rewritten_same_length],
         SnapshotCause::LastPageMismatch => {
@@ -644,6 +645,62 @@ pub fn pinned_on_zero_single_restart() -> Scenario {
             Expect::Oracle,
         ],
     )
+}
+
+/// An outside TRUNCATE resets the wal-index and then fails to truncate the
+/// file, which keeps its old header (#26). With nothing committed past the
+/// position the idle engine settles, a drain finishes and the next boot
+/// continues; the commit that writes a new header is a restart the lapsed read
+/// transaction cannot prove, so a snapshot.
+#[must_use]
+pub fn truncate_failed_after_the_index_reset() -> Scenario {
+    let mut s = build(
+        "truncate_failed_after_the_index_reset",
+        vec![
+            vec![commit(3, false)],
+            ticks(4),
+            vec![
+                Op::OurReader { begin: false },
+                Op::EnvFault(EnvFault::TruncateFails),
+                Op::StrangerCheckpoint(StrangerMode::Truncate),
+                Op::OurReader { begin: true },
+            ],
+            ticks(SETTLE),
+            vec![Op::Shutdown, Op::Tick],
+            ticks(SETTLE),
+            vec![commit(2, false)],
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        vec![
+            Expect::Event(EventMatch::Booted(None)),
+            Expect::Event(EventMatch::Resnapshot(CauseKind::GenerationChanged)),
+            Expect::Oracle,
+        ],
+    );
+    s.check = Some(settled_under_the_reset_index);
+    s
+}
+
+/// Until the commit, no step retried a moved WAL and no drain ran out of time.
+fn settled_under_the_reset_index(report: &RunReport) -> Result<(), String> {
+    use lsr_core::{Event, Fault};
+    for seen in &report.seen {
+        match seen {
+            Seen::Event(Event::Resnapshot(_)) => return Ok(()),
+            Seen::Event(Event::Retrying {
+                fault: Fault::WalMoved,
+                ..
+            }) => return Err("a step retried a moved WAL under the reset index".to_owned()),
+            Seen::Halt(cause) => return Err(format!("halted: {cause:?}")),
+            Seen::Event(_)
+            | Seen::Recovered(_)
+            | Seen::Snapshot(_)
+            | Seen::Oracle
+            | Seen::Tick { .. } => {}
+        }
+    }
+    Err("the commit after the reset never resnapshotted".to_owned())
 }
 
 /// The generation's frames are rewritten with valid checksums but none of

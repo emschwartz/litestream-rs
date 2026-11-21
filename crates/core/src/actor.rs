@@ -44,7 +44,7 @@ use std::num::NonZeroU32;
 use std::time::Duration;
 
 use lsr_ltx::{PageSize, Timestamp, Txid};
-use lsr_wal::{OpenError, WalReader};
+use lsr_wal::{CommittedEnd, OpenError, WalReader};
 
 pub use state::{Degraded, Lane, Phase};
 use state::{Gate, Lanes, Maintain};
@@ -241,6 +241,10 @@ pub struct Actor {
     page_size: Option<PageSize>,
     /// The last sync stopped at the cap: more is committed.
     more_wal: bool,
+    /// The wal-index read at which the last step found the index reset ahead
+    /// of the WAL header with nothing to stage: nothing to sync, and no proof
+    /// to checkpoint on, until the index changes.
+    reset: Option<CommittedEnd>,
     checkpoint: CheckpointState,
     gate: Gate,
     upload: UploadState,
@@ -358,6 +362,7 @@ impl Actor {
             pending: None,
             page_size: None,
             more_wal: false,
+            reset: None,
             // Replaced at boot, when the time is known.
             checkpoint: CheckpointState::boot(Timestamp::from_unix_millis(0)),
             gate: Gate::Open,
@@ -698,7 +703,9 @@ impl Actor {
     fn wal_moved(&self, committed: CommittedRead) -> bool {
         let end = committed.end();
         self.position.is_none_or(|position| {
-            end.salts() != position.cursor().salts() || end.offset() != position.synced().offset()
+            self.reset != Some(end)
+                && (end.salts() != position.cursor().salts()
+                    || end.offset() != position.synced().offset())
         })
     }
 
@@ -717,7 +724,7 @@ impl Actor {
     /// The checkpoint the policy wants now, when its lane and the sync lane
     /// that must prove it first may both run.
     fn checkpoint_decision(&self, now: Timestamp) -> Option<(Decision, CheckpointMode)> {
-        let position = self.position?;
+        let position = self.position.filter(|_| self.reset.is_none())?;
         let free = self.gate.open(now)
             && self.lanes.ready(Lane::Checkpoint, now)
             && self.lanes.ready(Lane::Sync, now);
@@ -823,7 +830,7 @@ impl Actor {
         )
         .await
         .map_err(|failed| failed.fault)?;
-        Ok(self.absorb(synced, env.wal.epoch() != epoch, now))
+        Ok(self.absorb(synced, committed.end(), env.wal.epoch() != epoch, now))
     }
 
     fn plan_step<W: WalSource>(
@@ -839,7 +846,7 @@ impl Actor {
                 cause,
             })),
             (None, Some(position)) => {
-                let probes = Probes::read(reader, &position)?;
+                let probes = Probes::read_against(reader, &position, &committed)?;
                 let view = wal_view(wal, Some(&*reader), committed)?;
                 let tip = Tip::Running(&position, probes);
                 Ok(step_of(recover(Some(tip), &view, self.upload.confirmed())))
@@ -875,10 +882,27 @@ impl Actor {
 
     /// Takes in a step's result. `epoch_moved`: the read epoch changed
     /// between the step's start and its staging commit, so (F1) the position
-    /// is not pinned and there is no proof.
-    fn absorb(&mut self, synced: Synced, epoch_moved: bool, now: Timestamp) -> Stepped {
+    /// is not pinned and there is no proof. `committed` is the wal-index read
+    /// the step ran under: a reset at it is remembered, so the actor waits for
+    /// the index to change instead of stepping again.
+    fn absorb(
+        &mut self,
+        synced: Synced,
+        committed: CommittedEnd,
+        epoch_moved: bool,
+        now: Timestamp,
+    ) -> Stepped {
+        self.reset = None;
         let (files, txs, end) = match synced {
             Synced::Idle(through) => (0, 0, StepEnd::Through(through)),
+            Synced::IndexReset => {
+                self.reset = Some(committed);
+                self.more_wal = false;
+                return Stepped::Synced {
+                    files: 0,
+                    proof: None,
+                };
+            }
             Synced::Wrote { file, end, txs, .. } => {
                 self.staged = self.staged.max(Some(file.key.range().max()));
                 self.pending = None;
@@ -893,6 +917,10 @@ impl Actor {
             StepEnd::Through(through) if !epoch_moved => (*through.position(), Some(through)),
             StepEnd::Through(through) => (through.into_position(), None),
             StepEnd::Limited(position) => (position, None),
+            StepEnd::Unproven(position) => {
+                self.reset = Some(committed);
+                (position, None)
+            }
         };
         let position = if epoch_moved {
             position.with_continuity(Continuity::Unpinned)
@@ -1261,6 +1289,15 @@ impl Actor {
         let stepped = self.step(env, now).await;
         let proof = match self.stepped(stepped, now) {
             Ok((0, Some(proof))) => proof,
+            // A reset wal-index gives no proof until the next commit, and
+            // nothing new is committed until then: the listing after that
+            // commit's upload plans the snapshot again.
+            Ok((0, None)) if self.reset.is_some() => {
+                self.maintain.stale = false;
+                self.maintain.until = None;
+                let event = MaintainedEvent::Waiting { held: None };
+                return self.ran(Event::Maintained { event, stamps_read }, now);
+            }
             Ok((files, _)) => return self.ran(Event::Synced { files }, now),
             Err(tick) => return tick,
         };

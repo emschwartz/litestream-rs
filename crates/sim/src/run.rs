@@ -787,6 +787,7 @@ impl Runner {
             }
             EnvFault::UnlinkWal => self.scenario_bool("UnlinkWal", self.w.sqlite.unlink_wal())?,
             EnvFault::EmptyDatabase => self.w.sqlite.empty_database_once(),
+            EnvFault::TruncateFails => self.w.sqlite.fail_next_truncate(),
         }
         Ok(())
     }

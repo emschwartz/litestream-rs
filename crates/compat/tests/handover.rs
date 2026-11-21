@@ -313,17 +313,19 @@ fn a_go_tip_whose_wal_was_truncated_is_a_snapshot_not_a_continue() {
 }
 
 fn resume_from(synced: Synced) -> lsr_core::Position {
-    match synced {
+    let position = match synced {
         Synced::Idle(t)
         | Synced::Wrote {
             end: StepEnd::Through(t),
             ..
-        } => t.into_position(),
+        } => Some(t.into_position()),
         Synced::Wrote {
-            end: StepEnd::Limited(p),
+            end: StepEnd::Limited(p) | StepEnd::Unproven(p),
             ..
-        } => p,
-    }
+        } => Some(p),
+        Synced::IndexReset => None,
+    };
+    position.expect("a chain never meets a wal-index reset ahead of its header")
 }
 
 /// A chain Rust wrote over `ps`-byte pages: a snapshot, then one step per `cap`.

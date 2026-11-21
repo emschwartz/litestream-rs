@@ -23,7 +23,10 @@
 //! replaces the fault that came first. The checkpoint releases and retakes the read transaction, so
 //! from the moment it is called the position is demoted to [`Continuity::Unpinned`] and is
 //! pinned again only by a step that proves `synced == committed` at the new epoch (or by step 6,
-//! which the barrier makes sound). A fault returns the last position that is true.
+//! which the barrier makes sound). A fault returns the last position that is true. A step that
+//! finds the wal-index reset ahead of the WAL header proves nothing, so the protocol stops there
+//! with `WalMoved` and the position it had; a snapshot such a step staged is written again over
+//! the same key by the next step from that position.
 
 use std::num::NonZeroU32;
 use std::time::Duration;
@@ -412,6 +415,13 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_, 
         .map_err(|failed| failed.fault)?;
         let through = match synced {
             Synced::Idle(through) => through,
+            // A wal-index reset ahead of the header proves no end: nothing may
+            // be checkpointed on it, and the position stays as it was.
+            Synced::IndexReset
+            | Synced::Wrote {
+                end: StepEnd::Unproven(_),
+                ..
+            } => return Err(Fault::WalMoved),
             Synced::Wrote {
                 file,
                 end: StepEnd::Through(through),
