@@ -38,23 +38,28 @@ Build an in-process Rust library that replicates a WAL-mode SQLite database to S
 
 ## 3. Architecture
 
-A Cargo workspace (decision D1: its own repository). Crate names below are roles; the project name is a working name.
+A Cargo workspace (decision D1: its own repository). Each crate is `crates/<name>`, package `lsr-<name>` (a working prefix); the README has the same map in short.
 
 | Crate | Owns | Rules |
 |---|---|---|
 | `ltx` | Header, page frame, index, trailer; checksums; streaming decoder and encoder; both LZ4 read paths | `forbid(unsafe_code)`, no I/O beyond `Read`/`Write`, fuzzed, Kani on checksum math |
-| `core` | Position recovery, sync planning, checkpoint decision, upload sequencing, compaction, retention, restore planning | Sans-IO; depends only on `ltx` and the traits |
+| `wal` | The SQLite WAL reader: header and frame checksums, committed transactions only, page maps | No I/O beyond `Read`; fuzzed |
+| `core` | Position recovery, sync planning, checkpoint decision, upload sequencing, compaction, retention, restore planning | Sans-IO; depends only on `ltx`, `wal` and the traits |
 | `store-s3` | `ObjectStore` on `rusty-s3` behind a `Transport` trait: blocking `ureq` by default (no runtime), `reqwest` as a feature for hosts that already have it: PUT, multipart (an abandoned upload's id goes on a bounded list and is aborted on next use; the bucket's lifecycle rule is the backstop), ranged GET, paged LIST, batch DELETE | Own retry classifier (408, 429, 5xx, connection reset retryable; jittered backoff); payload checksum policy explicit, never an SDK default; a failed LIST page is an error, never a short listing |
 | `store-fs` | `ObjectStore` on a directory | Used by tests and by the Go cross-restore harness |
+| `local` | The restore sink: a scratch file beside the target, the SQLite check, publish by hard link | Never overwrites or deletes a file it does not own; a failed publish says whether the target is visible |
 | `sqlite` | `WalSource`, `PageSource`, `Checkpointer` on `rusqlite` plus raw FFI; the per-database actor thread | The only crate with `unsafe`; each site carries `#[expect(unsafe_code, reason = …)]` |
 | `replica` | Public API: `Replicator::start`, `final_sync(deadline)`, `health()`, `restore()`, `verify()` | Async facade over the actor; drop does no I/O |
+| `config` | Go's `litestream.yml` read as Go 041a8c3 reads it, mapped onto replicators; the one `s3://` URL parser | A key Go reads either works, is refused, or warns; unknown keys refused |
+| `sidecar` | The `replicate` daemon (phase 4): Go's command line and config, many databases in one process, signals, `-exec`, `/metrics`, `/healthz` | Opens no database file itself; refuses what it would run differently from Go |
 | `sim` | In-memory store with a fault schedule, synthetic WAL source, model oracle, seeded scenario generator | Dev only |
 | `compat` | Go fixture generator, pinned Go binaries, cross-restore tests, golden fixtures | Dev only |
-| `cli` | `verify` and `restore` commands | Thin |
+| `cli` | The `lsr` binary: `restore`, `verify`, `files`, `config check`; `replicate` is the sidecar | Stdout carries only the result; one closed exit-code table |
+| `fuzzing` | Fuzz targets as plain functions over bytes, replayed over the committed corpus in the test suite (`fuzz/` drives them with cargo-fuzz) | Dev only |
 
 Traits at the core boundary: `Clock`, `Rng`, `ObjectStore`, `LocalStore` (the local L0 staging directory), `WalSource`, `PageSource`, `Checkpointer`, `EventSink`.
 
-**Concurrency.** One OS thread per database owns both SQLite connections (the long-lived read transaction and the writer used for the sequence bump and barrier) and takes commands over a bounded channel; that removes upstream's `execSem` and `chkMu`. Uploads, compaction and retention run in one sequential actor, in priority order; concurrent tasks wait for a measurement that shows the sequential actor falling behind. Snapshots stream page chunks through a bounded channel into a multipart upload. Shutdown is a state with a deadline, not a cancellation race.
+**Concurrency.** One OS thread per database owns both SQLite connections (the long-lived read transaction and the writer used for the sequence bump and barrier) and takes commands over a bounded channel; that removes upstream's `execSem` and `chkMu`. Uploads, compaction and retention run in one sequential actor, in priority order; concurrent tasks wait for a measurement that shows the sequential actor falling behind. Snapshots stream page chunks through a bounded channel into a multipart upload. Shutdown is a state with a deadline, not a cancellation race. Every thread gets an explicit stack (512 KiB for one that runs the engine, 64 KiB for one that only waits); `crates/replica/src/stack.rs` says how they were measured and how many threads a database costs. Issue #17 tracks a shared pool for hosts with many databases.
 
 **Local state.** The staging directory uses Go's meta-directory layout (`<meta>/ltx/0/<txid>-<txid>.ltx`), so either implementation can resume from the other's state without a snapshot (decision D4).
 
@@ -177,6 +182,7 @@ Out of scope for this repository. A host that adopts the library provides:
 - No `std::fs` open of the database files anywhere in the process: closing any descriptor on the file drops every POSIX lock SQLite holds.
 - `final_sync` called after its writers close, inside its shutdown budget.
 - A signal for long-lived readers, so the library stays PASSIVE while one runs.
+- One SQLite in the process, and it is ours: `lsr-sqlite` builds SQLite 3.54.1 through `rusqlite`'s `bundled` feature (`libsqlite3-sys` 0.40), and the `wal-index` and pin code depend on that build. `libsqlite3-sys` declares `links = "sqlite3"`, so Cargo allows one copy per build: the host's own `rusqlite`, `sqlx` or other SQLite crate must resolve to the same `libsqlite3-sys` 0.40 (a compatible `rusqlite` 0.43), or the build fails at resolution, never at run time. Cargo features unify, so the host's connections then run on the same bundled build.
 
 ## 7. What this design does not prevent
 

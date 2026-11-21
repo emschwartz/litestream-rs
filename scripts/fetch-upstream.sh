@@ -1,8 +1,14 @@
 #!/bin/sh
 # Clones the upstream sources the port is checked against into .upstream/ (gitignored).
 # Pins: the commit the research read, and the LTX library version that commit uses.
+# Run from a worktree, it uses the main checkout's .upstream (as the build script and the
+# compat harness read it), so a worktree never clones its own copy.
 set -eu
 cd "$(dirname "$0")/.."
+if [ ! -d .upstream ]; then
+    common=$(git rev-parse --path-format=absolute --git-common-dir)
+    cd "$(dirname "$common")"
+fi
 mkdir -p .upstream
 fetch() {
     name=$1 url=$2 rev=$3

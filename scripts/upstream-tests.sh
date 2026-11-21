@@ -9,6 +9,11 @@
 # names exist only at run time, and the enclosing top-level test's entry covers them.
 set -eu
 cd "$(dirname "$0")/.."
+# A worktree has no .upstream of its own; the main checkout's is shared.
+if [ ! -d .upstream ]; then
+    common=$(git rev-parse --path-format=absolute --git-common-dir)
+    cd "$(dirname "$common")"
+fi
 for repo in litestream ltx; do
     if [ ! -d ".upstream/$repo/.git" ]; then
         echo "upstream-tests: .upstream/$repo is missing; run \`just upstream\`" >&2

@@ -14,9 +14,14 @@ test:
     cargo nextest run --workspace --locked --no-tests=warn
 
 # Commit subjects on this branch since `base` follow Conventional Commits (AGENTS.md).
-commit-check base="origin/main":
+# The default base is local `main`, which `just spawn` branches from; without one, `origin/main`.
+commit-check base="":
     #!/usr/bin/env bash
     set -euo pipefail
+    base="{{base}}"
+    if [ -z "$base" ]; then
+        if git rev-parse --verify --quiet main >/dev/null; then base=main; else base=origin/main; fi
+    fi
     pattern='^(feat|fix|perf|refactor|test|docs|build|ci|chore|revert)(\([a-z0-9-]+\))?!?: [^A-Z].{0,70}[^.]$'
     bad=0
     while IFS= read -r line; do
@@ -26,7 +31,7 @@ commit-check base="origin/main":
             echo "commit-check: ${line%% *}: $subject" >&2
             bad=1
         fi
-    done < <(git log --format='%h %s' "{{base}}..HEAD")
+    done < <(git log --format='%h %s' "$base..HEAD")
     if [ "$bad" -ne 0 ]; then
         echo "commit-check: subjects must be 'type(scope): summary' (see AGENTS.md)" >&2
         exit 1

@@ -33,21 +33,22 @@
 
 ## Build and commands
 - Development runs on Linux and macOS; CI runs on Linux. `just check` passes on both (on macOS it skips `ledger-fresh`, whose committed test list is generated on Linux).
-- `just check` is the land gate: format, clippy, tests. Scope while iterating: `cargo clippy -p <crate> --all-targets -- -D warnings`, `cargo nextest run -p <crate> <test name>`.
+- `just check` is the land gate: format, clippy, tests. Scope while iterating: `cargo clippy -p <crate> --all-targets -- -D warnings`, `cargo nextest run -p <crate> <test name>`. The README lists which tests need nothing, Docker, Go or Tigris.
 - `just upstream` clones the pinned upstream sources into `.upstream/` (read-only reference: `litestream` at 041a8c3, `ltx` at v0.5.3).
 - Crates live in `crates/<name>` and are named `lsr-<name>` (working prefix).
 - New dependencies: prefer none. Each one is named in the report with why and its license. Every dependency, external or `lsr-*`, is declared once in the root `[workspace.dependencies]` and referenced as `name.workspace = true`; a crate may add features, never a version or path. (The `fuzz/` crate is outside the workspace and keeps its own.)
 
 ## Branches and landing
-- `main` stays green. Work happens on a branch in a worktree under `.worktrees/<name>` (`just spawn <name>`, from the main checkout), with its own `CARGO_TARGET_DIR` left at the default inside the worktree.
-- A branch is squashed to a few logical commits and handed over with `ready to land: <branch> @<sha>`. The parent session runs `just check` and fast-forwards `main`. Never merge commits.
-- No remote is configured yet. Never add one or push.
+- The repository lives on GitHub (`origin`, github.com/emschwartz/litestream-rs); work lands on its `main`, which stays green.
+- Work happens on a branch in a worktree under `.worktrees/<name>` (`just spawn <name>`, from the main checkout), with its own `CARGO_TARGET_DIR` left at the default inside the worktree. A worktree shares the main checkout's `.upstream/` (the scripts and the compat harness find it there).
+- A branch is squashed to a few logical commits and handed over with `ready to land: <branch> @<sha>`. The parent session runs `just check`, fast-forwards `main` and pushes it to `origin`. Never merge commits.
+- A session working on a branch commits there and does not push, open pull requests or comment on GitHub unless asked; landing and pushing are the parent session's.
 - Commit messages follow Conventional Commits (commitizen's default format): a subject `type(scope): summary`, imperative, lower-case after the colon, at most 72 characters, no trailing period; a blank line; a body that says why; optional footers.
   - Types: `feat` (new behaviour), `fix` (a bug), `perf`, `refactor` (no behaviour change), `test`, `docs`, `build` (dependencies, Cargo, the justfile), `ci`, `chore`, `revert`.
-  - Scope: the crate without its `lsr-` prefix (`ltx`, `wal`, `core`, `store-s3`, `store-fs`, `local`, `sqlite`, `replica`, `sim`, `compat`, `cli`, `fuzzing`), or `plan` for `docs/PLAN.md` and `docs/plans/`, or `deps`, `ci`, `lint`. Omit it only when a change spans the whole workspace.
+  - Scope: the crate without its `lsr-` prefix (`ltx`, `wal`, `core`, `store-s3`, `store-fs`, `local`, `sqlite`, `replica`, `config`, `sidecar`, `sim`, `compat`, `cli`, `fuzzing`), or `plan` for `docs/PLAN.md` and `docs/plans/`, or `deps`, `ci`, `lint`. Omit it only when a change spans the whole workspace.
   - A change that breaks a public API or the replica format takes `!` after the scope and a `BREAKING CHANGE:` footer saying what breaks.
   - Decisions made mid-task are `Call: <what> (why; cost if wrong)` footers.
-  - `just commit-check` checks the subjects of the commits on the branch.
+  - `just commit-check` checks the subjects of the commits on the branch since local `main` (or `origin/main` when there is none; `just commit-check <base>` names another).
 - Write every commit message for an outsider who has not read the plans: say what the change does to the code or the behaviour, in plain words. No plan shorthand in the subject or body (task numbers like "task 8t" or "item 10", ruling and decision codes like P5, D7 or F1, spike or gap ids like S1 or G4, "phase 2 exit"). When the plan's reasoning matters, explain it in a sentence and point at the document by path, for example "see docs/plans/phase-3-syncing.md". Example: `fix(store-s3): send the signed content length on empty uploads`.
 
 ## Done
