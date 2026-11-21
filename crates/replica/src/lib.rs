@@ -23,6 +23,11 @@
 //! thread catches its own (see the `thread` module), and a thread that ends without saying
 //! why, or a process forked from the one that started it, reports [`Gone`].
 //!
+//! A scheduled verify (`Config::verify_interval`, off by default as in Go) restores the
+//! transaction the replica holds and compares it with the live database at that transaction;
+//! its store calls run on a thread of their own, and a mismatch is a degraded state in
+//! [`Health::verification`], never a stop (see the `scheduled` module).
+//!
 //! [`restore`], [`verify`] and [`restore_if_missing`] are free functions over the same
 //! `Arc<dyn DynStore>`, never methods on the replicator: restoring over a live database must
 //! not look easy.
@@ -43,6 +48,7 @@ mod readers;
 mod replicator;
 mod restore;
 mod runtime;
+mod scheduled;
 mod store;
 mod thread;
 
@@ -50,7 +56,8 @@ pub use config::{Config, NonZeroDuration, ReaderTracking, SyncLimits};
 pub use error::{RestoreError, StartError};
 pub use events::{ChannelSink, Event, EventReceiver, EventSink};
 pub use health::{
-    Booted, Counters, Gone, Health, HostNotice, OpCounters, Phase, Stopped, StoreCounters,
+    Booted, Counters, Gone, Health, HostNotice, Mismatch, OpCounters, Phase, Stopped,
+    StoreCounters, Verification, VerifyFailure, VerifyOutcome, VerifyRuns,
 };
 pub use readers::ReaderGuard;
 pub use replicator::{FinalSync, Replicator};
@@ -64,7 +71,7 @@ pub use lsr_core::{
     CheckpointConfig, Clock, Degraded, Depth, Entropy, ForeignWriter, HaltCause as StopCause,
     HostCheckpoint, HostCheckpoints, L0Retention, Lane, Maintenance,
     PersistentCause as DegradedCause, Report, Response, Responses, RestoreTarget, Restored,
-    SnapshotCause,
+    Severity, SnapshotCause,
 };
 pub use lsr_ltx::{Timestamp, Txid};
 pub use lsr_sqlite::{DatabaseFile, SetupError, app_connection_raw, ffi};

@@ -9,6 +9,9 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 use lsr_core::{HaltCause, HostCheckpoint};
+use lsr_ltx::Txid;
+
+use crate::health::VerifyOutcome;
 
 /// Something the replicator did or found.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,6 +41,14 @@ pub enum Event {
     },
     /// The engine stopped by a cause and waits for a person.
     Stopped(HaltCause),
+    /// A scheduled verify ended: the restore of `txid` compared with the live database at
+    /// `txid`. A failure is a degraded state (`Health::verification`) that names what differed.
+    Verified {
+        /// The transaction compared.
+        txid: Txid,
+        /// How it ended.
+        outcome: VerifyOutcome,
+    },
 }
 
 /// Takes every event but `Idle`, on the replicator's thread; must not block.

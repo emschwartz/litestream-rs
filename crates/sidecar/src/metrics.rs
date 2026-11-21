@@ -26,8 +26,9 @@
 //! `litestream_disk_full` is not a cause the replicator distinguishes.
 //! `litestream_replica_operation_errors_total` needs the store's error `code`
 //! (`lsr_replica_operation_errors_total` has the rest). `litestream_l0_retention_files_total`
-//! has no per-pass counts, `litestream_compaction_verify_error_count` no verification pass,
-//! and the `litestream_validation_*` series belong to periodic validation, not in v1.
+//! has no per-pass counts, `litestream_compaction_verify_error_count` no verification pass.
+//! The `litestream_validation_*` series are per compaction level, and the scheduled verify
+//! that replaces Go's validation checks the replica as a whole (`lsr_verify_*` below).
 //!
 //! **New series** under `lsr_`, for what Go has no series for:
 //! - `lsr_db_state{db,state}` 1, the state `/healthz` names (`booting`, `running`,
@@ -47,10 +48,17 @@
 //! - `lsr_replica_operation_errors_total{replica_type,operation}`.
 //! - `lsr_observed_age_seconds{db}`: how old the replicator's last health write is; a large
 //!   value means its thread is stuck in a store call.
+//! - The scheduled verify (`validation.interval`): `lsr_verify_runs_total{db,result}`
+//!   (`passed`, `failed`, `merged`, `incomplete`), `lsr_verify_failing{db}` 1 while a run
+//!   found the replica restores something the database never held (a degraded state), with
+//!   `lsr_verify_failing_txid{db}` and `lsr_verify_failing_page{db}` (the lowest page that
+//!   differs) while it stands, and `lsr_verify_last_success_timestamp_seconds{db}`.
 
 use std::fmt::Display;
 
-use lsr_replica::{Health, Lane, OpCounters, Phase, StoreCounters, Timestamp};
+use lsr_replica::{
+    Health, Lane, Mismatch, OpCounters, Phase, StoreCounters, Timestamp, VerifyFailure,
+};
 
 use crate::health::{
     DbState, DbView, cause_name, lane_name, notice_name, snapshot_name, stop_name,
@@ -412,6 +420,62 @@ fn counter_series(out: &mut Out, dbs: &[(String, &Health)]) {
     }
 }
 
+fn verify_series(out: &mut Out, dbs: &[(String, &Health)]) {
+    let name = "lsr_verify_runs_total";
+    out.family(name, "counter", "Scheduled verify runs, by how they ended");
+    for (db, health) in dbs {
+        let runs = health.verification.runs;
+        for (result, n) in [
+            ("passed", runs.passed),
+            ("failed", runs.failed),
+            ("merged", runs.merged),
+            ("incomplete", runs.incomplete),
+        ] {
+            out.sample(name, &[("db", db), ("result", result)], n);
+        }
+    }
+    per_db(
+        out,
+        dbs,
+        (
+            "lsr_verify_failing",
+            "gauge",
+            "1 while the scheduled verify finds the replica restores something the database never held",
+        ),
+        |h| u8::from(h.verification.failing.is_some()).to_string(),
+    );
+    let failing = |h: &Health| h.verification.failing;
+    let name = "lsr_verify_failing_txid";
+    out.family(name, "gauge", "The transaction the failing verify compared");
+    for (db, health) in dbs {
+        if let Some(failure) = failing(health) {
+            out.sample(name, &[("db", db)], failure.txid.get());
+        }
+    }
+    let name = "lsr_verify_failing_page";
+    out.family(
+        name,
+        "gauge",
+        "The lowest page the failing verify found different",
+    );
+    for (db, health) in dbs {
+        if let Some(VerifyFailure {
+            found: Mismatch::Pages { first, .. },
+            ..
+        }) = failing(health)
+        {
+            out.sample(name, &[("db", db)], first);
+        }
+    }
+    let name = "lsr_verify_last_success_timestamp_seconds";
+    out.family(name, "gauge", "When a scheduled verify last passed");
+    for (db, health) in dbs {
+        if let Some((_, at)) = health.verification.last_good {
+            out.sample(name, &[("db", db)], unix_seconds(at));
+        }
+    }
+}
+
 /// The `/metrics` body.
 #[must_use]
 pub fn render(views: &[DbView], now: Timestamp) -> String {
@@ -423,5 +487,6 @@ pub fn render(views: &[DbView], now: Timestamp) -> String {
     lag_series(&mut out, &dbs, now);
     host_series(&mut out, &dbs);
     counter_series(&mut out, &dbs);
+    verify_series(&mut out, &dbs);
     out.0
 }

@@ -107,6 +107,13 @@ pub struct Config {
     /// lets [`crate::Health::host_notice`] infer the host's checkpoint attempts that cannot
     /// run, which the wal-index alone cannot tell from a host that runs none.
     pub host_autocheckpoint: Option<NonZeroU32>,
+    /// How often the scheduled verify runs, or `None` (the default, as in Go) for never: Go's
+    /// `validation.interval`. Each run waits for the replica to hold everything staged, reads
+    /// the live database's pages at that transaction on the replicator's thread (one read of
+    /// the database file, as a level-9 snapshot reads it), then lists the replica and restores
+    /// that transaction on a thread of its own, one run at a time, and compares the two. A
+    /// mismatch is a degraded state in [`crate::Health::verification`], never a stop.
+    pub verify_interval: Option<NonZeroDuration>,
 }
 
 impl Default for Config {
@@ -122,6 +129,7 @@ impl Default for Config {
             readers: ReaderTracking::Untracked,
             shutdown_grace: Duration::from_secs(30),
             host_autocheckpoint: Some(SQLITE_AUTOCHECKPOINT),
+            verify_interval: None,
         }
     }
 }

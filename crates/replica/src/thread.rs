@@ -31,6 +31,7 @@ use crate::health::{Counters, Gone, Phase, Stopped};
 use crate::readers::Guarded;
 use crate::replicator::Shared;
 use crate::runtime::{Runtime, later};
+use crate::scheduled::Scheduled;
 use crate::store::{DynStore, Metered};
 
 /// What a turn decided.
@@ -93,6 +94,8 @@ pub(crate) struct Worker {
     /// A panic stopped the engine (`Responses::bug = Stop`).
     bug_stop: bool,
     seen: Seen,
+    /// The scheduled verify, when `Config::verify_interval` is set.
+    scheduled: Option<Scheduled>,
 }
 
 /// Owns the worker for the thread's life, so that however the thread ends, the worker and
@@ -123,6 +126,14 @@ impl Worker {
     ) -> Self {
         let actor_cfg = config.actor();
         let now = runtime.clock.now();
+        let scheduled = config.verify_interval.map(|every| {
+            let store = Metered::new(
+                Arc::clone(&store),
+                Arc::clone(&shared.meters),
+                Arc::clone(&runtime.clock),
+            );
+            Scheduled::new(every.get(), store, Arc::clone(&runtime.park), now)
+        });
         let remote = Metered::new(
             store,
             Arc::clone(&shared.meters),
@@ -144,6 +155,7 @@ impl Worker {
             rebuilt: None,
             bug_stop: false,
             seen: Seen::default(),
+            scheduled,
         }
     }
 
@@ -170,7 +182,7 @@ impl Worker {
             let now = self.runtime.clock.now();
             match self.turn(now) {
                 Turn::Again => {}
-                Turn::Wait(until) => self.runtime.park.park(until),
+                Turn::Wait(until) => self.runtime.park.park(self.verify_wake(until)),
                 Turn::Done(outcome) => return outcome,
             }
         }
@@ -200,6 +212,9 @@ impl Worker {
         }
         if let Some(rebuilt) = self.rebuilt.filter(|rebuilt| rebuilt.until > now) {
             return self.waiting_to_rebuild(rebuilt, now);
+        }
+        if let Some(scheduled) = self.scheduled.as_mut() {
+            scheduled.before_tick(&mut self.actor, now);
         }
         self.shared.update(|state| state.tick_began = Some(now));
         let ticked = catch_unwind(AssertUnwindSafe(|| self.tick(now)));
@@ -243,9 +258,16 @@ impl Worker {
                 self.shared.update(|state| state.booted = true);
             }
         }
+        let verified = self
+            .scheduled
+            .as_mut()
+            .and_then(|scheduled| scheduled.after_tick(&mut self.actor, now));
         // The snapshot is written before the event goes out, so a sink that reads health on an
         // event sees the state after it.
         self.observe(now);
+        if let Some(event) = verified {
+            self.emit(&event);
+        }
         match tick {
             Tick::Ran { event, next } => self.ran(event, next, now),
             Tick::Drained { txid } => Turn::Done(Stopped::Drained { txid }),
@@ -374,6 +396,9 @@ impl Worker {
             return self.halted(HaltCause::Bug);
         }
         self.actor = engine(&self.actor_cfg, &self.config);
+        if let Some(scheduled) = &self.scheduled {
+            scheduled.rebuilt(&mut self.actor);
+        }
         self.seen.foreign_reported = self.seen.foreign_reported.max(self.foreign_total());
         self.seen.host_reported = self.seen.host_reported.max(self.host_total().total());
         if let Some(deadline) = self.stop {
@@ -451,6 +476,11 @@ impl Worker {
         let resnapshot = self.actor.pending_snapshot();
         let foreign = self.foreign_total();
         let host = self.host_total();
+        let verification = self
+            .scheduled
+            .as_ref()
+            .map(Scheduled::health)
+            .unwrap_or_default();
         let seen = &self.seen;
         self.shared.update(|state| {
             let health = &mut state.health;
@@ -466,6 +496,7 @@ impl Worker {
             health.foreign_checkpoints = foreign;
             health.host_checkpoints = host;
             health.counters = seen.counters;
+            health.verification = verification;
             state.left = parts.left;
         });
     }
@@ -507,6 +538,15 @@ impl Worker {
             });
         }
         lanes
+    }
+
+    /// `until`, or the next scheduled verify when that is earlier.
+    fn verify_wake(&self, until: Option<Timestamp>) -> Option<Timestamp> {
+        let due = self.scheduled.as_ref().and_then(Scheduled::wake);
+        match (until, due) {
+            (Some(until), Some(due)) => Some(until.min(due)),
+            (until, due) => until.or(due),
+        }
     }
 
     fn phase(&self) -> Phase {

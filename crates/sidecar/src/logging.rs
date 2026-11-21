@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use lsr_config::{LogFormat, LogLevel};
 use lsr_core::{Clock, Event as EngineEvent};
-use lsr_replica::{Event, EventSink};
+use lsr_replica::{Event, EventSink, Txid, VerifyOutcome};
 
 /// One field's value.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -309,6 +309,7 @@ impl EventSink for DbEvents {
                 "replication stopped",
                 vec![("cause", debug(cause))],
             ),
+            Event::Verified { txid, outcome } => verified_line(*txid, *outcome),
         };
         let mut all = vec![db];
         all.extend(fields);
@@ -317,6 +318,30 @@ impl EventSink for DbEvents {
 }
 
 type Line = (LogLevel, &'static str, Vec<(&'static str, Value)>);
+
+/// A scheduled verify's line; Go logs its validation problems as warnings and a check that
+/// could not run as an error, and a restore that differs from the database is worse than both.
+fn verified_line(txid: Txid, outcome: VerifyOutcome) -> Line {
+    let txid = ("txid", Value::from(txid.get()));
+    match outcome {
+        VerifyOutcome::Passed { pages } => (
+            LogLevel::Debug,
+            "replica verified against the database",
+            vec![txid, ("pages", u64::from(pages).into())],
+        ),
+        VerifyOutcome::Failed(found) => (
+            LogLevel::Error,
+            "replica does not restore the database",
+            vec![txid, ("found", debug(&found))],
+        ),
+        VerifyOutcome::Merged => (
+            LogLevel::Debug,
+            "verify skipped: transaction already compacted",
+            vec![txid],
+        ),
+        VerifyOutcome::Incomplete => (LogLevel::Warn, "verify could not finish", vec![txid]),
+    }
+}
 
 fn engine_line(event: &EngineEvent) -> Option<Line> {
     Some(match event {

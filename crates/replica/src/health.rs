@@ -10,7 +10,8 @@
 use std::fmt;
 
 use lsr_core::{
-    Degraded, HaltCause, HostCheckpoint, HostCheckpoints, Lane, PersistentCause, SnapshotCause,
+    Degraded, HaltCause, HostCheckpoint, HostCheckpoints, Lane, PersistentCause, Severity,
+    SnapshotCause,
 };
 use lsr_ltx::{Timestamp, Txid};
 
@@ -166,6 +167,88 @@ pub struct Health {
     pub host_checkpoints: HostCheckpoints,
     /// Running totals.
     pub counters: Counters,
+    /// What the scheduled verify found (`Config::verify_interval`); all empty while it is off.
+    pub verification: Verification,
+}
+
+/// What the scheduled verify found: the replica's listing checked, and a restore of the
+/// transaction the replica holds compared with the live database at that transaction.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Verification {
+    /// When the last run ended; `None` before the first, and always while the verify is off.
+    pub last_run: Option<Timestamp>,
+    /// The newest transaction a run restored exactly as the live database held it, and when.
+    pub last_good: Option<(Txid, Timestamp)>,
+    /// The replica restores something the live database never held, or does not restore:
+    /// a degraded state, which the next run that passes clears. Replication goes on.
+    pub failing: Option<VerifyFailure>,
+    /// The restore point retention keeps while `failing` stands: the last good transaction,
+    /// or the failing one when no run passed before it.
+    pub pinned: Option<Txid>,
+    /// The most severe finding of the last run's listing check, if it found any.
+    pub worst_finding: Option<Severity>,
+    /// Runs, by how they ended.
+    pub runs: VerifyRuns,
+}
+
+/// Scheduled verify runs, by how they ended.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VerifyRuns {
+    /// The restore equalled the live database.
+    pub passed: u64,
+    /// The restore differed, or failed.
+    pub failed: u64,
+    /// The transaction was merged into a compacted file before the run read it: nothing to
+    /// compare, nothing wrong.
+    pub merged: u64,
+    /// A listing or a read failed (or the run panicked): it says nothing about the replica.
+    pub incomplete: u64,
+}
+
+/// A scheduled verify that did not pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VerifyFailure {
+    /// The first failing run of this stretch.
+    pub since: Timestamp,
+    /// The transaction the newest failing run compared.
+    pub txid: Txid,
+    /// What it found.
+    pub found: Mismatch,
+}
+
+/// What a failing scheduled verify found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mismatch {
+    /// The restore holds other pages than the live database at the same transaction.
+    Pages {
+        /// The lowest page that differs.
+        first: u32,
+        /// How many pages differ.
+        pages: u32,
+        /// The live database's length in pages.
+        live_commit: u32,
+        /// The restored database's.
+        restored_commit: u32,
+    },
+    /// The restore of the transaction fails, or the listing shows the newest state cannot
+    /// be restored.
+    Unrestorable,
+}
+
+/// How one scheduled verify ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VerifyOutcome {
+    /// Page for page the same.
+    Passed {
+        /// Pages compared.
+        pages: u32,
+    },
+    /// A degraded state: see [`Mismatch`].
+    Failed(Mismatch),
+    /// The transaction was merged into a compacted file before the run read it.
+    Merged,
+    /// A listing or a read failed, or the run panicked.
+    Incomplete,
 }
 
 impl Health {
@@ -204,6 +287,19 @@ impl Health {
                     bytes_uploaded: 0,
                 },
             },
+            verification: Verification {
+                last_run: None,
+                last_good: None,
+                failing: None,
+                pinned: None,
+                worst_finding: None,
+                runs: VerifyRuns {
+                    passed: 0,
+                    failed: 0,
+                    merged: 0,
+                    incomplete: 0,
+                },
+            },
         }
     }
 
@@ -214,10 +310,10 @@ impl Health {
         self.degraded.get(index).copied().flatten()
     }
 
-    /// Whether any lane is degraded.
+    /// Whether any lane is degraded, or the scheduled verify is failing.
     #[must_use]
     pub fn is_degraded(&self) -> bool {
-        self.degraded.iter().any(Option::is_some)
+        self.degraded.iter().any(Option::is_some) || self.verification.failing.is_some()
     }
 
     /// What the host's checkpoints cost, from the newest one seen; `None` while none was.
