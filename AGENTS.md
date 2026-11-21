@@ -32,6 +32,7 @@
 - Property tests (`proptest`) for every codec and every pure planner. Keep each test under a second where possible.
 
 ## Build and commands
+- Development runs on Linux and macOS; CI runs on Linux. `just check` passes on both (on macOS it skips `ledger-fresh`, whose committed test list is generated on Linux).
 - `just check` is the land gate: format, clippy, tests. Scope while iterating: `cargo clippy -p <crate> --all-targets -- -D warnings`, `cargo nextest run -p <crate> <test name>`.
 - `just upstream` clones the pinned upstream sources into `.upstream/` (read-only reference: `litestream` at 041a8c3, `ltx` at v0.5.3).
 - Crates live in `crates/<name>` and are named `lsr-<name>` (working prefix).

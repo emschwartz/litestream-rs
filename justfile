@@ -79,6 +79,9 @@ sqlite-big:
 
 # Build the pinned Go binaries and their VFS extensions, then run the live checks against them
 # (not part of check; the VFS test also needs a C compiler and the SQLite headers).
+# The VFS test's C host needs a SQLite with sqlite3_load_extension. It takes SQLITE3_CFLAGS and
+# SQLITE3_LIBS when set, then on macOS Homebrew's (`brew install sqlite`; the system one lacks
+# the function), then `pkg-config sqlite3`, then plain -lsqlite3 (crates/compat/src/vfs.rs).
 compat:
     ./scripts/build-go-litestream.sh
     cargo nextest run -p lsr-compat --run-ignored all --locked
@@ -162,10 +165,15 @@ upstream:
 
 # The committed list of Rust tests the ledger checks against matches the workspace, so a
 # renamed or deleted counterpart fails the gate instead of passing on a stale list. The list is
-# generated on Linux (some tests are Linux-only), so on another OS this step reports a difference.
+# generated on Linux (some tests are Linux-only), so on another OS the step is skipped; CI, on
+# Linux, still enforces it.
 ledger-fresh:
     #!/usr/bin/env bash
     set -euo pipefail
+    if [ "$(uname)" != Linux ]; then
+        echo "ledger-fresh: skipped: the committed test list is generated on Linux"
+        exit 0
+    fi
     fresh="$(cargo nextest list --workspace --all-features --locked --run-ignored all --message-format oneline)"
     if ! diff -q <(printf '%s\n' "$fresh") docs/ledger/rust-tests.txt >/dev/null; then
         diff <(printf '%s\n' "$fresh") docs/ledger/rust-tests.txt | head -20 >&2 || true
