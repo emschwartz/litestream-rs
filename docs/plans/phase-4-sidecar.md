@@ -181,6 +181,8 @@ Kept free for O6 option B (reload) if ruled; otherwise unused, so task numbers s
 
 ### Task 7: the host-checkpoint observer (branch `host-checkpoints`; pure core)
 
+**Measured first (spike S7, `docs/spikes.md`):** a host checkpoint is visible as a rise in `nBackfill` only while the pin is on a read mark above 0. On read mark 0, SQLite's checkpoint needs that mark exclusively, fails, and reports OK to a PASSIVE caller, leaving no trace in the WAL index. So the observer cannot rely on `nBackfill` alone. Either accept that it sees only the mark-above-0 half and say so in the notice, or detect the other half another way (for example, WAL growth past `wal_autocheckpoint` pages with no backfill, which means the host is attempting checkpoints that cannot run). The notice should also say what the cost is: past 1,000 frames every host commit runs a checkpoint attempt that does nothing until the replicator checkpoints, and the WAL keeps growing until then.
+
 **Files:** `crates/core/src/host.rs` and its tests; `actor.rs` (calls it each poll); `crates/replica/src/health.rs` (the notice); a scenario in `crates/sim/src/scenario/faults.rs`.
 
 **Produces:** `fn observe(prev: CommittedRead, now: CommittedRead, ours: Option<Checkpointed>) -> Option<HostCheckpoint>`: `Backfilled { from, to }` when `backfilled` rose with no checkpoint of ours between the reads; `Restarted` when the salts changed with no checkpoint of ours. An event per observation and `Health::host_checkpoints { count, last }`. The notice is not a `Fault` and not a degraded state (see "The host's connection settings"); it changes no decision.
