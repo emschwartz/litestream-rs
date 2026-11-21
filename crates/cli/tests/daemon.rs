@@ -544,4 +544,52 @@ mod daemon {
         let out = lsr().args(["config", "check"]).output().unwrap();
         assert_eq!(out.status.code(), Some(64));
     }
+
+    /// Every config the daemon refuses before it opens a database, `config check` refuses
+    /// too, with the same reason and exit code: the schedule core refuses (issue #37), an
+    /// `exec` line Go would run differently, an `addr` Go cannot bind, and an entry with no
+    /// replica.
+    #[test]
+    fn config_check_refuses_what_the_daemon_refuses() {
+        let dir = TempDir::new().unwrap();
+        let db = "dbs:\n  - path: /a.db\n    replica:\n      path: /r\n";
+        let cases = [
+            (
+                "levels:\n  - interval: 30s\n  - interval: 5m\n  - interval: 1h\nsnapshot:\n  interval: 1h\n",
+                "snapshot interval 3600s is not above the top level's (3600s)",
+            ),
+            (
+                "exec: \"myapp; rm -rf /\"\n",
+                "exec command \"myapp; rm -rf /\"",
+            ),
+            (
+                "addr: \"localhost\"\n",
+                "must specify port for bind address",
+            ),
+        ];
+        for (head, reason) in cases {
+            let cfg = config(dir.path(), &format!("{head}{db}"));
+            let check = lsr().args(["config", "check"]).arg(&cfg).output().unwrap();
+            let start = lsr()
+                .args(["replicate", "-config"])
+                .arg(&cfg)
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8(check.stdout).unwrap();
+            let stderr = String::from_utf8(start.stderr).unwrap();
+            assert_eq!(start.status.code(), Some(2), "{head}: {stderr}");
+            assert!(stderr.contains(reason), "{head}: {stderr}");
+            assert_eq!(check.status.code(), Some(2), "{head}: {stdout}");
+            assert!(stdout.contains(reason), "{head}: {stdout}");
+            assert!(stdout.contains("refused: "), "{head}: {stdout}");
+        }
+        let cfg = config(dir.path(), "dbs:\n  - path: /a.db\n");
+        let check = lsr().args(["config", "check"]).arg(&cfg).output().unwrap();
+        let stdout = String::from_utf8(check.stdout).unwrap();
+        assert_eq!(check.status.code(), Some(2), "{stdout}");
+        assert!(
+            stdout.contains("error: dbs[0]: must specify replica"),
+            "{stdout}"
+        );
+    }
 }

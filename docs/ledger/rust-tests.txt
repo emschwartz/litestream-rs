@@ -26,6 +26,7 @@ lsr-cli::daemon daemon::a_missing_or_refused_config_does_not_start
 lsr-cli::daemon daemon::a_restored_database_snapshots_with_no_write_and_no_retry
 lsr-cli::daemon daemon::a_second_signal_cuts_the_drain
 lsr-cli::daemon daemon::config_check_reads_go_s_example_file
+lsr-cli::daemon daemon::config_check_refuses_what_the_daemon_refuses
 lsr-cli::daemon daemon::go_s_flag_refusals_are_usage_errors
 lsr-cli::daemon daemon::json_logs_parse_with_go_s_keys
 lsr-cli::daemon daemon::once_replicates_everything_committed_and_exits

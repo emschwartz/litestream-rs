@@ -70,7 +70,7 @@ pub fn done(done: &Done) -> String {
         Done::Replicated { database, stopped } => replicated(database, stopped),
         Done::Daemon(_) => String::new(),
         Done::DaemonHelp(text) => (*text).to_owned(),
-        Done::ConfigChecked(report) => report.to_string(),
+        Done::ConfigChecked(checked) => checked.to_string(),
         Done::Help => help(),
         Done::Version => format!("lsr {}\n", env!("CARGO_PKG_VERSION")),
     }

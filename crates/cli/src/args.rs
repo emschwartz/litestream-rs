@@ -261,7 +261,7 @@ pub const DAEMON_SUMMARY: &str = "Go's replicate daemon: every database in lites
 pub const CONFIG_CHECK_USAGE: &str = "lsr config check <file>";
 
 /// One line for the help text.
-pub const CONFIG_CHECK_SUMMARY: &str = "read a Go litestream.yml as the daemon would and print every refusal and warning; touches no database or bucket";
+pub const CONFIG_CHECK_SUMMARY: &str = "read a Go litestream.yml as the daemon would and print every refusal and warning a start would; writes nothing and touches no bucket, but scans a dir entry as a start does";
 
 /// `lsr replicate`: two plain arguments are the one-database form; anything else, flags or
 /// no arguments, is the daemon.

@@ -258,8 +258,9 @@ pub enum Done {
     Daemon(lsr_sidecar::Finished),
     /// The daemon's own usage text.
     DaemonHelp(&'static str),
-    /// A config file was read; the report says whether it loads.
-    ConfigChecked(Box<lsr_config::Report>),
+    /// A config file was read and put through the daemon's checks; the result says
+    /// whether it would start.
+    ConfigChecked(Box<lsr_sidecar::Checked>),
     /// The help text.
     Help,
     /// The version.
@@ -394,7 +395,7 @@ pub fn exit_for_done(done: &Done) -> Exit {
             (false, true) => Exit::ExecFailed,
             (false, false) => Exit::Environment,
         },
-        Done::ConfigChecked(report) => config_exit(report),
+        Done::ConfigChecked(checked) => config_exit(checked),
         Done::Restore(_)
         | Done::Files { .. }
         | Done::DaemonHelp(_)
@@ -403,9 +404,10 @@ pub fn exit_for_done(done: &Done) -> Exit {
     }
 }
 
-/// A config that loads is success; one that is refused is a refusal, unless the file could
-/// not be read at all.
-fn config_exit(report: &lsr_config::Report) -> Exit {
+/// A config that would start is success. One the load refuses is a refusal, unless the file
+/// could not be read at all; one the daemon's checks refuse exits as the daemon would.
+fn config_exit(checked: &lsr_sidecar::Checked) -> Exit {
+    let report = checked.report();
     use lsr_config::ProblemKind;
     let unreadable = report.errors.iter().any(|problem| {
         matches!(
@@ -413,7 +415,9 @@ fn config_exit(report: &lsr_config::Report) -> Exit {
             ProblemKind::NotFound { .. } | ProblemKind::Unreadable { .. }
         )
     });
-    if report.is_ok() {
+    if let Some(first) = checked.refusals().first() {
+        daemon_exit(first)
+    } else if report.is_ok() {
         Exit::Success
     } else if unreadable {
         Exit::Environment
@@ -485,7 +489,7 @@ pub async fn run(command: Command) -> Result<Done, CliError> {
             lsr_sidecar::Outcome::Help(text) => Ok(Done::DaemonHelp(text)),
             lsr_sidecar::Outcome::Ran(finished) => Ok(Done::Daemon(finished)),
         },
-        Command::ConfigCheck(path) => Ok(Done::ConfigChecked(Box::new(lsr_config::check(&path)))),
+        Command::ConfigCheck(path) => Ok(Done::ConfigChecked(Box::new(lsr_sidecar::check(&path)))),
         Command::Help => Ok(Done::Help),
         Command::Version => Ok(Done::Version),
     }

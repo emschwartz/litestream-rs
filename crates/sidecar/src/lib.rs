@@ -11,6 +11,10 @@
 //! [`exec`]), or, with `-once`, until every database has synced and uploaded what
 //! it had.
 //!
+//! Everything decided from the loaded config before a database is opened (the `exec`
+//! line, the `addr`, the plan) is one function, which [`check`] (`lsr config check`)
+//! runs too, so the check refuses exactly what a start refuses.
+//!
 //! `-once` starts every database and drains it at once: everything committed is
 //! synced and uploaded, as Go's `runOnce` syncs the database and then the replica.
 //!
@@ -25,6 +29,7 @@
 //! opens a database file: replicators open theirs through SQLite, and the
 //! directory scan's header read happens in `lsr-config`, before any starts.
 
+mod check;
 pub mod daemon;
 mod error;
 pub mod exec;
@@ -37,12 +42,14 @@ pub mod signals;
 pub mod supervise;
 
 use std::io::Read as _;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc;
 
-use lsr_config::{Expand, GoConfig, Loaded, LogLevel, ProcessEnv, expand_path};
+use lsr_config::{Expand, GoConfig, Loaded, LogLevel, Plan, ProcessEnv, expand_path};
 use lsr_replica::Runtime;
 
+pub use check::{Checked, check};
 pub use daemon::{End, Finished};
 pub use error::SidecarError;
 pub use exec::{ChildEnd, During, ExecCommand, ExecError};
@@ -91,9 +98,12 @@ pub fn run(args: &[String]) -> Result<Outcome, SidecarError> {
         Runtime::system().clock,
     ));
     refuse_unbuilt(&flags)?;
-    let command = exec_command(&flags, config)?;
-    let addr = config.addr().map(http::target).transpose()?;
-    let plan = lsr_config::plan(config, &ProcessEnv)?;
+    // The daemon stops at the first refusal; the plan's lists every problem of its own.
+    let Prepared {
+        command,
+        addr,
+        plan,
+    } = prepare(flags.exec.as_deref(), flags.once, config).map_err(|refused| refused.first)?;
     announce(&log, level, &loaded, &plan);
     let board = Board::default();
     if let Some(target) = &addr {
@@ -122,7 +132,6 @@ pub fn run(args: &[String]) -> Result<Outcome, SidecarError> {
 
 /// The config file, or Go's one-database config.
 fn load(flags: &Flags) -> Result<Loaded, SidecarError> {
-    let env = ProcessEnv;
     let expand = if flags.no_expand_env {
         Expand::Off
     } else {
@@ -130,20 +139,68 @@ fn load(flags: &Flags) -> Result<Loaded, SidecarError> {
     };
     match &flags.source {
         Source::OneDatabase { database, replica } => {
-            GoConfig::for_one_database(database, replica, &env).map_err(SidecarError::Config)
+            GoConfig::for_one_database(database, replica, &ProcessEnv).map_err(SidecarError::Config)
         }
         Source::Config(flag) => {
             let path = flags::config_path(flag.as_deref(), |name| std::env::var(name).ok());
-            if path.as_os_str() == "-" {
-                let mut text = String::new();
-                std::io::stdin()
-                    .read_to_string(&mut text)
-                    .map_err(SidecarError::Stdin)?;
-                return GoConfig::parse(&text, expand, &env).map_err(SidecarError::Config);
-            }
-            let path = expand_path(&path.to_string_lossy(), &env).unwrap_or(path);
-            GoConfig::load(&path, expand, &env).map_err(SidecarError::Config)
+            load_file(&path, expand)
         }
+    }
+}
+
+/// A config file, `-` for standard input, as `-config` names it.
+fn load_file(path: &Path, expand: Expand) -> Result<Loaded, SidecarError> {
+    let env = ProcessEnv;
+    if path.as_os_str() == "-" {
+        let mut text = String::new();
+        std::io::stdin()
+            .read_to_string(&mut text)
+            .map_err(SidecarError::Stdin)?;
+        return GoConfig::parse(&text, expand, &env).map_err(SidecarError::Config);
+    }
+    let path = expand_path(&path.to_string_lossy(), &env).unwrap_or_else(|_| path.to_owned());
+    GoConfig::load(&path, expand, &env).map_err(SidecarError::Config)
+}
+
+/// What the daemon decides from a loaded config before it opens a database.
+struct Prepared {
+    command: Option<ExecCommand>,
+    addr: Option<http::Target>,
+    plan: Plan,
+}
+
+/// Why a loaded config cannot start: at least one refusal, in the order the daemon checks.
+#[derive(Debug)]
+struct Refused {
+    first: SidecarError,
+    rest: Vec<SidecarError>,
+}
+
+/// Every check the daemon makes on a loaded config before it opens a database: the
+/// `exec` line, the `addr` and the plan. `lsr config check` runs this same function, so
+/// the two cannot disagree on what starts. Each check runs even when an earlier one
+/// refuses, so a check can list them all.
+fn prepare(exec_flag: Option<&str>, once: bool, config: &GoConfig) -> Result<Prepared, Refused> {
+    let command = exec_command(exec_flag, once, config);
+    let addr = config
+        .addr()
+        .map(http::target)
+        .transpose()
+        .map_err(SidecarError::from);
+    let plan = lsr_config::plan(config, &ProcessEnv).map_err(SidecarError::from);
+    let refused = |first, rest: [Option<SidecarError>; 2]| Refused {
+        first,
+        rest: rest.into_iter().flatten().collect(),
+    };
+    match (command, addr, plan) {
+        (Ok(command), Ok(addr), Ok(plan)) => Ok(Prepared {
+            command,
+            addr,
+            plan,
+        }),
+        (Err(first), addr, plan) => Err(refused(first, [addr.err(), plan.err()])),
+        (Ok(_), Err(first), plan) => Err(refused(first, [plan.err(), None])),
+        (Ok(_), Ok(_), Err(first)) => Err(refused(first, [None, None])),
     }
 }
 
@@ -165,15 +222,16 @@ fn refuse_unbuilt(flags: &Flags) -> Result<(), SidecarError> {
 
 /// `-exec`, else the `exec` key (Go: the flag overrides the key when set, `replicate.go:242`),
 /// split as Go splits it. Go refuses `-once` with either (`replicate.go:260`).
-fn exec_command(flags: &Flags, config: &GoConfig) -> Result<Option<ExecCommand>, SidecarError> {
-    let line = flags
-        .exec
-        .as_deref()
-        .or_else(|| config.exec().filter(|line| !line.is_empty()));
+fn exec_command(
+    flag: Option<&str>,
+    once: bool,
+    config: &GoConfig,
+) -> Result<Option<ExecCommand>, SidecarError> {
+    let line = flag.or_else(|| config.exec().filter(|line| !line.is_empty()));
     let Some(line) = line else {
         return Ok(None);
     };
-    if flags.once {
+    if once {
         return Err(UsageError::OnceWithExec.into());
     }
     Ok(Some(ExecCommand::parse(line)?))
@@ -196,7 +254,7 @@ fn listen(log: &Logger, target: &http::Target, board: &Board) {
     }
 }
 
-fn announce(log: &Logger, level: LogLevel, loaded: &Loaded, plan: &lsr_config::Plan) {
+fn announce(log: &Logger, level: LogLevel, loaded: &Loaded, plan: &Plan) {
     let fields = [
         ("version", env!("CARGO_PKG_VERSION").into()),
         ("level", format!("{level:?}").to_ascii_uppercase().into()),
