@@ -31,7 +31,7 @@ use lsr_local::{
     ClearError, CreateError, FileSink, IntegrityCheck, IntegrityFailure, clear_sidecars, preflight,
 };
 use lsr_store_fs::FsStore;
-use lsr_store_s3::ConfigError;
+use lsr_store_s3::{ConfigError, CredentialError};
 use thiserror::Error;
 
 use crate::args::{Command, FilesArgs, Replica, RestoreArgs, UsageError, VerifyArgs};
@@ -245,14 +245,10 @@ pub enum CliError {
         /// The path given.
         path: PathBuf,
     },
-    /// An S3 replica needs credentials and the environment has none.
-    #[error(
-        "S3 credentials missing: {var} is not set (credentials come from AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and optionally AWS_SESSION_TOKEN)"
-    )]
-    MissingCredentials {
-        /// The variable that is unset or empty.
-        var: &'static str,
-    },
+    /// An S3 replica needs credentials and no source had them, or a shared
+    /// credentials or config file could not be used.
+    #[error("S3 credentials: {0}")]
+    Credentials(CredentialError),
     /// The S3 endpoint cannot address the bucket.
     #[error("S3 replica: {0}")]
     S3Config(ConfigError),
@@ -364,7 +360,7 @@ pub fn exit_for_error(error: &CliError) -> Exit {
         },
         CliError::AfterClearing { source, .. } => exit_for_error(source),
         CliError::NoReplica { .. }
-        | CliError::MissingCredentials { .. }
+        | CliError::Credentials(_)
         | CliError::S3Config(_)
         | CliError::Inventory(_)
         | CliError::Verify(_)

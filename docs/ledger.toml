@@ -1043,7 +1043,7 @@
 "TestNewReplicaClientFromURL_InvalidUploadParams" = { counterpart = "lsr-store-s3::config::tests::from_url_refuses_each_bad_shape" }
 "TestNewReplicaClientFromURL_NeonExplicitEndpoint" = { reason = "Rust tells apart only Tigris, AWS, R2 and MinIO-like hosts (crates/store-s3/src/config.rs, Provider); any other provider gets the generic S3 behaviour. Go's per-provider host detection and defaults for this provider have no counterpart (v1 targets Tigris, docs/spikes.md)." }
 "TestNewReplicaClientFromURL_QueryParamAliases" = { reason = "Rust's S3 replica URL is deliberately narrower than Go's (crates/store-s3/src/config.rs module doc): the host is the bucket verbatim, provider hostnames are not split, unknown query keys are refused and credentials never come from a URL. This Go parsing behaviour has no counterpart by design." }
-"TestNewReplicaClientFromURL_SessionToken" = { counterpart = "lsr-cli::bin/lsr::replica::tests::a_session_token_is_optional_and_never_printed" }
+"TestNewReplicaClientFromURL_SessionToken" = { counterpart = ["lsr-store-s3::chain::tests::environment_alone", "lsr-store-s3::chain::tests::values_never_print"] }
 "TestNewReplicaClientFromURL_SignAcceptEncoding" = { reason = "Rust's S3 replica URL is deliberately narrower than Go's (crates/store-s3/src/config.rs module doc): the host is the bucket verbatim, provider hostnames are not split, unknown query keys are refused and credentials never come from a URL. This Go parsing behaviour has no counterpart by design." }
 "TestParseHost" = { reason = "Rust's S3 replica URL is deliberately narrower than Go's (crates/store-s3/src/config.rs module doc): the host is the bucket verbatim, provider hostnames are not split, unknown query keys are refused and credentials never come from a URL. This Go parsing behaviour has no counterpart by design." }
 "TestParseURL" = { counterpart = "lsr-store-s3::config::tests::from_url_reads_the_documented_form" }
@@ -1058,9 +1058,9 @@
 "TestReplicaClient_AccessPointARN/ARNRejectsPathStyle" = { reason = "S3 access point ARNs are a Go store option v1 does not offer: lsr-store-s3 names a bucket only (crates/store-s3/src/config.rs module doc)." }
 "TestReplicaClient_AccessPointARN/ARNWithPath" = { reason = "S3 access point ARNs are a Go store option v1 does not offer: lsr-store-s3 names a bucket only (crates/store-s3/src/config.rs module doc)." }
 "TestReplicaClient_ConfigureEndpoint" = { counterpart = "lsr-store-s3::config::tests::from_url_reads_the_documented_form" }
-"TestReplicaClient_CredentialConfiguration" = { counterpart = "lsr-cli::bin/lsr::replica::tests::credentials_need_the_key_id_and_the_secret" }
-"TestReplicaClient_CredentialConfiguration/WithDefaultCredentialChain" = { missing = "S3 credentials from the AWS default chain (shared config profile, instance or container metadata) when no AWS_* variables are set; Rust reads the variables only (lsr-cli::s3 missing_credentials_exit_3_and_name_the_variable)." }
-"TestReplicaClient_CredentialConfiguration/WithStaticCredentials" = { counterpart = "lsr-cli::bin/lsr::replica::tests::credentials_need_the_key_id_and_the_secret" }
+"TestReplicaClient_CredentialConfiguration" = { counterpart = "lsr-store-s3::chain::tests::precedence_is_explicit_environment_credentials_file_config_file" }
+"TestReplicaClient_CredentialConfiguration/WithDefaultCredentialChain" = { counterpart = ["lsr-store-s3::chain::tests::shared_credentials_file_alone", "lsr-store-s3::chain::tests::shared_config_file_alone", "lsr-store-s3::chain::tests::the_missing_error_names_every_source_tried", "lsr-cli::s3::s3::credentials_come_from_a_shared_credentials_file"] }
+"TestReplicaClient_CredentialConfiguration/WithStaticCredentials" = { counterpart = ["lsr-store-s3::chain::tests::explicit_values_alone", "lsr-store-s3::chain::tests::environment_alone"] }
 "TestReplicaClient_CustomEndpoint_DisablesChecksumFeatures" = { counterpart = "lsr-store-s3::request::tests::provider_headers_and_no_checksum_headers" }
 "TestReplicaClient_DefaultRegionUsage" = { counterpart = "lsr-store-s3::config::tests::from_url_defaults_to_aws_virtual_host" }
 "TestReplicaClient_DefaultRegionUsage/ParseHost_MinIO" = { counterpart = "lsr-store-s3::config::tests::provider_comes_from_the_host" }

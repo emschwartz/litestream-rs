@@ -1,5 +1,5 @@
-//! The S3 half of opening a replica: credentials from the environment, the
-//! store, and the retry layer around it.
+//! The S3 half of opening a replica: credentials from the AWS environment
+//! variables and shared files, the store, and the retry layer around it.
 //!
 //! The store is wrapped twice. [`Counted`] sits directly on the S3 store and
 //! adds up how many listed files had no stored stamp (the store reports that per
@@ -19,9 +19,7 @@ use lsr_core::{
     Sleeper, StoreError,
 };
 use lsr_ltx::{Timestamp, TxidRange};
-use lsr_store_s3::{
-    S3Config, S3Credentials, S3Store, S3Upload, SecretString, Transport, UreqTransport,
-};
+use lsr_store_s3::{CredentialChain, S3Config, S3Store, S3Upload, Transport, UreqTransport};
 
 use crate::run::CliError;
 use lsr_core::{FileInfo, StoredStamp};
@@ -132,43 +130,17 @@ pub fn remote<T: Transport>(store: S3Store<T>) -> Remote<T> {
     )
 }
 
-/// The variable holding the access key id.
-pub const ACCESS_KEY_VAR: &str = "AWS_ACCESS_KEY_ID";
-/// The variable holding the secret access key.
-pub const SECRET_KEY_VAR: &str = "AWS_SECRET_ACCESS_KEY";
-/// The optional variable holding a session token.
-pub const SESSION_TOKEN_VAR: &str = "AWS_SESSION_TOKEN";
-
-/// Credentials from `env` (the process environment in production). An unset
-/// or empty variable is missing; the error names the variable, never a value.
+/// The store for an S3 replica over HTTP(S), credentials from the AWS
+/// environment variables or shared files ([`CredentialChain`]).
 ///
 /// # Errors
-/// [`CliError::MissingCredentials`] for the key id or the secret.
-pub fn credentials(env: impl Fn(&str) -> Option<String>) -> Result<S3Credentials, CliError> {
-    let need = |var: &'static str| {
-        env(var)
-            .filter(|value| !value.is_empty())
-            .ok_or(CliError::MissingCredentials { var })
-    };
-    let credentials = S3Credentials::new(
-        need(ACCESS_KEY_VAR)?,
-        SecretString::new(need(SECRET_KEY_VAR)?),
-    );
-    Ok(
-        match env(SESSION_TOKEN_VAR).filter(|token| !token.is_empty()) {
-            Some(token) => credentials.with_session_token(SecretString::new(token)),
-            None => credentials,
-        },
-    )
-}
-
-/// The store for an S3 replica over HTTP(S), credentials from the environment.
-///
-/// # Errors
-/// [`CliError::MissingCredentials`], or [`CliError::S3Config`] when the
-/// endpoint cannot address the bucket.
+/// [`CliError::Credentials`], or [`CliError::S3Config`] when the endpoint
+/// cannot address the bucket.
 pub fn open_s3(config: S3Config) -> Result<Remote, CliError> {
-    let credentials = credentials(|var| std::env::var(var).ok())?;
+    let credentials = CredentialChain::from_process()
+        .resolve()
+        .map_err(CliError::Credentials)?
+        .into_credentials();
     let store = S3Store::new(config, credentials).map_err(CliError::S3Config)?;
     Ok(remote(store))
 }

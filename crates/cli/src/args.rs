@@ -12,7 +12,7 @@
 //! own query and parsed once by `S3Config::from_url`, so a flag overrides the
 //! query and the provider defaults follow the final endpoint. Credentials are
 //! not parsed here (this module reads no environment); `replica.rs` takes them
-//! from `AWS_*` variables.
+//! from the AWS variables and shared files.
 
 use std::path::PathBuf;
 
@@ -205,7 +205,8 @@ pub const FLAGS: &[FlagSpec] = &[
 pub enum Replica {
     /// A directory that holds `ltx/`.
     Dir(PathBuf),
-    /// A bucket prefix; credentials come from the environment at run time.
+    /// A bucket prefix; credentials come from the AWS environment variables or
+    /// shared files at run time.
     S3(Box<S3Config>),
 }
 

@@ -963,6 +963,7 @@ dependencies = [
  "reqwest",
  "rustls",
  "rusty-s3",
+ "tempfile",
  "thiserror",
  "tokio",
  "ureq",

@@ -33,13 +33,34 @@ mod s3 {
         stderr: String,
     }
 
+    /// Every variable the credential chain reads, so the developer's own
+    /// keys and `~/.aws` files never reach a test.
+    const CHAIN_VARS: [&str; 12] = [
+        "AWS_ACCESS_KEY_ID",
+        "LITESTREAM_ACCESS_KEY_ID",
+        "AWS_ACCESS_KEY",
+        "AWS_SECRET_ACCESS_KEY",
+        "LITESTREAM_SECRET_ACCESS_KEY",
+        "AWS_SECRET_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_PROFILE",
+        "AWS_DEFAULT_PROFILE",
+        "AWS_SHARED_CREDENTIALS_FILE",
+        "AWS_CONFIG_FILE",
+        "HOME",
+    ];
+
     fn lsr_with(args: &[&str], env: &[(&str, &str)]) -> Run {
         let mut command = Command::new(env!("CARGO_BIN_EXE_lsr"));
+        command.args(args);
+        for var in CHAIN_VARS {
+            command.env_remove(var);
+        }
+        // An empty directory stands in for the home directory.
+        let home = tempfile::TempDir::new().expect("home");
         command
-            .args(args)
-            .env_remove("AWS_ACCESS_KEY_ID")
-            .env_remove("AWS_SECRET_ACCESS_KEY")
-            .env_remove("AWS_SESSION_TOKEN");
+            .env("HOME", home.path())
+            .env("USERPROFILE", home.path());
         for (name, value) in env {
             command.env(name, value);
         }
@@ -85,6 +106,34 @@ mod s3 {
             assert_eq!(run.stderr.lines().count(), 1, "{}", run.stderr);
             assert!(run.stderr.contains(missing), "{}", run.stderr);
         }
+    }
+
+    #[test]
+    fn credentials_come_from_a_shared_credentials_file() {
+        let dir = tempfile::TempDir::new().expect("dir");
+        let path = dir.path().join("credentials");
+        fs::write(
+            &path,
+            format!(
+                "[ci]\naws_access_key_id = {CANARY_KEY}\naws_secret_access_key = {CANARY_SECRET}\n"
+            ),
+        )
+        .expect("write");
+        let path = path.to_str().expect("UTF-8 path");
+        // Past the credentials, the unreachable endpoint is what fails.
+        let run = lsr_with(
+            &[
+                "files",
+                "--replica",
+                "s3://bucket/path",
+                "--endpoint",
+                "http://127.0.0.1:1",
+            ],
+            &[("AWS_SHARED_CREDENTIALS_FILE", path), ("AWS_PROFILE", "ci")],
+        );
+        assert_eq!((run.code, run.stdout.as_str()), (3, ""), "{}", run.stderr);
+        assert!(!run.stderr.contains("credentials"), "{}", run.stderr);
+        assert_no_canary(&run);
     }
 
     #[test]

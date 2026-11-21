@@ -1,8 +1,11 @@
 //! ObjectStore on an S3-compatible bucket, sans-IO half: configuration,
-//! credentials that cannot print, signed requests as data, response parsers and
+//! credentials that cannot print, the credential chain that finds them (explicit
+//! values, the environment, the AWS shared files; see the `chain` module for
+//! what it does not cover), signed requests as data, response parsers and
 //! the error classification. The blocking HTTP client and the store itself come
 //! after this layer; everything here is pure and testable without a network.
 
+mod chain;
 mod classify;
 mod config;
 mod credentials;
@@ -25,6 +28,12 @@ mod upload;
 #[cfg(feature = "ureq")]
 mod ureq_transport;
 
+pub use chain::{
+    ACCESS_KEY_ID_VARS, CONFIG_FILE_VAR, CredentialChain, CredentialError, DEFAULT_PROFILE,
+    DEFAULT_PROFILE_VAR, EnvGap, FileLook, FileOutcome, HOME_VAR, MAX_SHARED_FILE_BYTES,
+    PROFILE_VAR, Resolved, SECRET_ACCESS_KEY_VARS, SESSION_TOKEN_VAR, SHARED_CREDENTIALS_FILE_VAR,
+    Source, Tried,
+};
 pub use classify::{S3Code, classify, classify_transport, is_range_past_end};
 pub use config::{
     BucketName, ConfigError, DEFAULT_REGION, Endpoint, PartSize, Prefix, Provider, Region,

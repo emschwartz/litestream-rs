@@ -41,6 +41,8 @@ lsr-core = { workspace = true, features = ["testing"] }
 # Integration tests need FakeS3 and the fault layer, which sit behind the feature.
 lsr-store-s3 = { workspace = true, features = ["testing"] }
 proptest = { workspace = true, features = ["default"] }
+# Shared credential files for the credential chain tests.
+tempfile.workspace = true
 # The recover count names the WAL reader type its None argument needs.
 lsr-wal.workspace = true
 
