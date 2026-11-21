@@ -144,6 +144,11 @@ pub enum NewestStagedFile {
     Unreadable {
         /// Its transaction id.
         txid: Txid,
+        /// The page size its header names, when the header decodes: unusable
+        /// as a position, the file may still be uploaded, so a database whose
+        /// page size has changed since must stop before staging a file of the
+        /// new size beside it.
+        page_size: Option<PageSize>,
     },
 }
 
@@ -152,7 +157,7 @@ impl NewestStagedFile {
     #[must_use]
     pub const fn txid(&self) -> Txid {
         match self {
-            Self::Readable { txid, .. } | Self::Unreadable { txid } => *txid,
+            Self::Readable { txid, .. } | Self::Unreadable { txid, .. } => *txid,
         }
     }
 
@@ -172,11 +177,15 @@ impl NewestStagedFile {
         };
         let txid = newest.key.range().max();
         let header = read_header(staging, &newest.key, Fault::from_staging).await?;
+        let unreadable = Self::Unreadable {
+            txid,
+            page_size: header.map(|header| header.page_size()),
+        };
         let Some(header) = header.filter(|_| newest.key.range().min() == txid) else {
-            return Ok(Some(Self::Unreadable { txid }));
+            return Ok(Some(unreadable));
         };
         let Some(origin) = Origin::of(&header) else {
-            return Ok(Some(Self::Unreadable { txid }));
+            return Ok(Some(unreadable));
         };
         let file = NewestStagedFileSource {
             store: staging,
@@ -184,7 +193,7 @@ impl NewestStagedFile {
             fault: Fault::from_staging,
         };
         let view = Self::checked(&file, None, &header, origin, wal).await?;
-        Ok(Some(view.unwrap_or(Self::Unreadable { txid })))
+        Ok(Some(view.unwrap_or(unreadable)))
     }
 
     /// Checks the newest staged file whose header names a WAL origin against `wal`: the frame

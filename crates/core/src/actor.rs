@@ -1803,7 +1803,13 @@ async fn boot_recover<W: WalSource, L: ObjectStore, R: ObjectStore>(
     };
     let view = wal_view(wal, reader.as_ref(), committed)?;
     let page_size = match newest_staged {
-        Some(NewestStagedFile::Readable { page_size, .. }) => Some(page_size),
+        Some(
+            NewestStagedFile::Readable { page_size, .. }
+            | NewestStagedFile::Unreadable {
+                page_size: Some(page_size),
+                ..
+            },
+        ) => Some(page_size),
         Some(NewestStagedFile::Unreadable { .. }) | None if confirmed.is_some() => {
             replica_page_size(remote).await?
         }

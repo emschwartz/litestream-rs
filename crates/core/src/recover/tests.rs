@@ -189,7 +189,10 @@ fn rule_2_running_behind_the_remote_stops() {
 fn rule_3_an_unreadable_newest_staged_file_snapshots_after_the_newer_of_newest_staged_file_and_remote()
  {
     let wal = fresh();
-    let newest_staged = NewestStagedFile::Unreadable { txid: txid(4) };
+    let newest_staged = NewestStagedFile::Unreadable {
+        txid: txid(4),
+        page_size: None,
+    };
     assert_eq!(
         recover(
             Some(PositionSource::Boot(&newest_staged)),
@@ -861,7 +864,10 @@ fn the_loader_calls_garbage_unreadable_and_an_empty_directory_none() {
         let mut r = reader(wal.file_bytes());
         assert_eq!(
             NewestStagedFile::load(&store, Some(&mut r)).await.unwrap(),
-            Some(NewestStagedFile::Unreadable { txid: txid(3) })
+            Some(NewestStagedFile::Unreadable {
+                txid: txid(3),
+                page_size: None,
+            })
         );
     });
 }
@@ -990,7 +996,10 @@ fn boot_view(kind: NewestStagedFileKind, pos: &Position) -> NewestStagedFile {
         },
     };
     match kind {
-        NewestStagedFileKind::BootUnreadable => NewestStagedFile::Unreadable { txid: pos.txid() },
+        NewestStagedFileKind::BootUnreadable => NewestStagedFile::Unreadable {
+            txid: pos.txid(),
+            page_size: None,
+        },
         NewestStagedFileKind::Boot
         | NewestStagedFileKind::BootMismatch
         | NewestStagedFileKind::BootNotInNewestStagedFile
