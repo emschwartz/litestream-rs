@@ -24,9 +24,9 @@ pub fn put(transport: &impl Transport, key: &FileKey, body: &[u8], stamp: i64) -
             Timestamp::from_unix_millis(stamp),
         )
         .unwrap();
-    transport.send(request).unwrap()
+    transport.send(request.into_request()).unwrap()
 }
 
-pub fn send(transport: &impl Transport, request: HttpRequest) -> HttpResponse {
-    transport.send(request).unwrap()
+pub fn send(transport: &impl Transport, request: impl Into<HttpRequest>) -> HttpResponse {
+    transport.send(request.into()).unwrap()
 }

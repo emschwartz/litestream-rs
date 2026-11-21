@@ -259,7 +259,7 @@ mod cases {
         let request = builder()
             .put_object(now(), &k, b"data".to_vec(), now())
             .unwrap();
-        let md5 = request.content_md5().unwrap();
+        let md5 = request.md5();
         let response = send(&t, request);
         assert_eq!(response.status(), 200);
         assert_eq!(check_etag(&response, md5), EtagCheck::Mismatch);
@@ -363,13 +363,16 @@ mod cases {
                 b.get_range(now(), &k, 0, ReadLen::new(1).unwrap()).unwrap(),
                 Shape::Get,
             ),
-            (b.put_object(now(), &k, vec![], now()).unwrap(), Shape::Put),
+            (
+                b.put_object(now(), &k, vec![], now()).unwrap().into(),
+                Shape::Put,
+            ),
             (
                 b.create_multipart(now(), &k, now()).unwrap(),
                 Shape::CreateMultipart,
             ),
             (
-                b.upload_part(now(), &k, &id, part, vec![]).unwrap(),
+                b.upload_part(now(), &k, &id, part, vec![]).unwrap().into(),
                 Shape::UploadPart,
             ),
             (

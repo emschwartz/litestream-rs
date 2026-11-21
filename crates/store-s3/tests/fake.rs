@@ -33,10 +33,7 @@ mod cases {
         let request = builder()
             .put_object(now(), &k, b"hello".to_vec(), now())
             .unwrap();
-        assert_eq!(
-            check_etag(&put, request.content_md5().unwrap()),
-            EtagCheck::Matches
-        );
+        assert_eq!(check_etag(&put, request.md5()), EtagCheck::Matches);
 
         let head = send(&fake, builder().head(now(), &k).unwrap());
         let parsed = parse_head(&head).unwrap();

@@ -54,7 +54,7 @@ fn credentials_never_print() {
             .list_page(now, Level::ZERO, None, PageLimit::MAX)
             .unwrap(),
         builder.head(now, &key).unwrap(),
-        builder.put_object(now, &key, vec![1], now).unwrap(),
+        builder.put_object(now, &key, vec![1], now).unwrap().into(),
         builder.delete_objects(now, &[key]).unwrap(),
     ];
     for request in &requests {

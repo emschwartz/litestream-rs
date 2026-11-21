@@ -261,7 +261,8 @@ impl RealHarness {
     }
 
     /// A request built by the store's builder, sent through a plain client, counted.
-    pub fn send(&self, request: HttpRequest) -> HttpResponse {
+    pub fn send(&self, request: impl Into<HttpRequest>) -> HttpResponse {
+        let request = request.into();
         let transport = Counting::new(
             store_transport(self.config.deadline()),
             Arc::clone(&self.counts),

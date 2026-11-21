@@ -271,11 +271,11 @@ impl<T: Transport> Inner<T> {
     }
 
     /// Builds a request stamped with the current time.
-    pub(crate) fn request(
+    pub(crate) fn request<R>(
         &self,
         op: StoreOp,
-        build: impl FnOnce(&RequestBuilder, Timestamp) -> Result<HttpRequest, RequestError>,
-    ) -> Result<HttpRequest, StoreError> {
+        build: impl FnOnce(&RequestBuilder, Timestamp) -> Result<R, RequestError>,
+    ) -> Result<R, StoreError> {
         build(&self.builder, self.now()).map_err(|err| request_error(op, err))
     }
 

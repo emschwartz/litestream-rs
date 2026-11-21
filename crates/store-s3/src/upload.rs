@@ -145,9 +145,9 @@ impl<T: Transport> Inner<T> {
         let op = StoreOp::Upload;
         let wrote = u64::try_from(body.len()).unwrap_or(u64::MAX);
         let request = self.request(op, |b, now| b.put_object(now, key, body, stamp))?;
-        let sent = request.content_md5();
-        let response = self.exec(op, Some(key), request)?;
-        match sent.map_or(EtagCheck::NotMd5, |md5| check_etag(&response, md5)) {
+        let sent = request.md5();
+        let response = self.exec(op, Some(key), request.into_request())?;
+        match check_etag(&response, sent) {
             EtagCheck::Matches | EtagCheck::NotMd5 => Ok(FileInfo {
                 key: *key,
                 size: wrote,

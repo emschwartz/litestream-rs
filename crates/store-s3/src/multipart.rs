@@ -51,14 +51,14 @@ impl<T: Transport> Inner<T> {
     ) -> Result<String, StoreError> {
         let op = StoreOp::Upload;
         let request = self.request(op, |b, now| b.upload_part(now, key, id, number, body))?;
-        let sent = request.content_md5();
-        let response = self.send(op, request)?;
+        let sent = request.md5();
+        let response = self.send(op, request.into_request())?;
         classify(op, Some(key), Some(number), &response)?;
         let mismatch = || StoreError::Corrupt {
             key: Some(*key),
             cause: CorruptCause::ChecksumMismatch { part: Some(number) },
         };
-        match sent.map_or(EtagCheck::NotMd5, |md5| check_etag(&response, md5)) {
+        match check_etag(&response, sent) {
             EtagCheck::Matches | EtagCheck::NotMd5 => response
                 .header("etag")
                 .map(str::to_owned)

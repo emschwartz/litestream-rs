@@ -8,6 +8,11 @@
 //! tests check that for every builder. No `x-amz-checksum-*` header and no
 //! aws-chunked encoding is ever sent (Go removes the trailer: rc.go:1039-1041).
 //!
+//! A write (a PUT or one part of a multipart upload) is a [`WriteRequest`]: the
+//! request plus the MD5 its `Content-MD5` header promises. The store's `ETag`
+//! is checked against that digest, and a write request cannot exist without
+//! one, so "no digest was sent" cannot pass as "the `ETag` is not an MD5".
+//!
 //! Nothing here prints a URL, a header value or a body: [`HttpRequest`]'s
 //! `Debug` is the method and the path, because the query holds the signature
 //! and, for temporary credentials, the session token.
@@ -64,7 +69,6 @@ pub struct HttpRequest {
     url: Url,
     headers: Vec<(&'static str, String)>,
     body: Vec<u8>,
-    md5: Option<[u8; 16]>,
 }
 
 impl HttpRequest {
@@ -76,7 +80,6 @@ impl HttpRequest {
             url,
             headers,
             body: Vec::new(),
-            md5: None,
         }
     }
 
@@ -112,14 +115,6 @@ impl HttpRequest {
     pub fn body(&self) -> &[u8] {
         &self.body
     }
-
-    /// The MD5 of the body this request promises in `Content-MD5`, for writes.
-    /// Read it before the request is sent: it is what the store's ETag is
-    /// checked against.
-    #[must_use]
-    pub fn content_md5(&self) -> Option<[u8; 16]> {
-        self.md5
-    }
 }
 
 impl fmt::Debug for HttpRequest {
@@ -130,6 +125,52 @@ impl fmt::Debug for HttpRequest {
             self.method,
             self.url.path()
         )
+    }
+}
+
+/// A write: the request and the MD5 of its body that its `Content-MD5` header
+/// carries. Only the builders of writes make one, and a plain request has no
+/// digest to offer in its place:
+///
+/// ```compile_fail
+/// # use lsr_store_s3::HttpRequest;
+/// fn sent(request: &HttpRequest) -> Option<[u8; 16]> {
+///     request.content_md5()
+/// }
+/// ```
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct WriteRequest {
+    request: HttpRequest,
+    md5: [u8; 16],
+}
+
+impl WriteRequest {
+    /// The MD5 of the body the request promises. Read it before the request
+    /// is sent: it is what the store's `ETag` is checked against.
+    #[must_use]
+    pub const fn md5(&self) -> [u8; 16] {
+        self.md5
+    }
+
+    /// The request, to send.
+    #[must_use]
+    pub fn into_request(self) -> HttpRequest {
+        self.request
+    }
+}
+
+/// A write is a request with a digest: everything a request shows, it shows.
+impl std::ops::Deref for WriteRequest {
+    type Target = HttpRequest;
+
+    fn deref(&self) -> &HttpRequest {
+        &self.request
+    }
+}
+
+impl From<WriteRequest> for HttpRequest {
+    fn from(write: WriteRequest) -> Self {
+        write.request
     }
 }
 
@@ -270,19 +311,36 @@ impl RequestBuilder {
         Ok((action.sign_with_time(EXPIRES_IN, &at), headers))
     }
 
-    fn finish(
-        method: Method,
-        (url, headers): (Url, Headers),
-        body: Vec<u8>,
-        md5: Option<[u8; 16]>,
-    ) -> HttpRequest {
+    fn finish(method: Method, (url, headers): (Url, Headers), body: Vec<u8>) -> HttpRequest {
         HttpRequest {
             method,
             url,
             headers,
             body,
-            md5,
         }
+    }
+
+    /// A PUT of `body` with `Content-Length` and `Content-MD5` added to `extra`.
+    fn write<'a, A: S3Action<'a>>(
+        &self,
+        action: &mut A,
+        now: Timestamp,
+        body: Vec<u8>,
+        mut extra: Headers,
+    ) -> Result<WriteRequest, RequestError> {
+        let md5 = md5_of(&body);
+        extra.splice(
+            0..0,
+            [
+                ("content-length", body.len().to_string()),
+                ("content-md5", STANDARD.encode(md5)),
+            ],
+        );
+        let signed = self.sign(action, now, extra)?;
+        Ok(WriteRequest {
+            request: Self::finish(Method::Put, signed, body),
+            md5,
+        })
     }
 
     fn object(&self, key: &FileKey) -> String {
@@ -309,7 +367,7 @@ impl RequestBuilder {
             action.with_start_after(start_after(&self.prefix, level, cursor));
         }
         let signed = self.sign(&mut action, now, Vec::new())?;
-        Ok(Self::finish(Method::Get, signed, Vec::new(), None))
+        Ok(Self::finish(Method::Get, signed, Vec::new()))
     }
 
     /// The next page of a listing: `token` is the previous page's
@@ -330,7 +388,7 @@ impl RequestBuilder {
         action.with_max_keys(max_keys.get());
         action.with_continuation_token(token);
         let signed = self.sign(&mut action, now, Vec::new())?;
-        Ok(Self::finish(Method::Get, signed, Vec::new(), None))
+        Ok(Self::finish(Method::Get, signed, Vec::new()))
     }
 
     /// HEAD of one object: its size and stored stamp.
@@ -341,7 +399,7 @@ impl RequestBuilder {
         let object = self.object(key);
         let mut action = self.bucket.head_object(Some(&self.credentials), &object);
         let signed = self.sign(&mut action, now, Vec::new())?;
-        Ok(Self::finish(Method::Head, signed, Vec::new(), None))
+        Ok(Self::finish(Method::Head, signed, Vec::new()))
     }
 
     /// A ranged GET of `len` bytes from `offset`.
@@ -359,7 +417,7 @@ impl RequestBuilder {
         let mut action = self.bucket.get_object(Some(&self.credentials), &object);
         let extra = vec![("range", range_header(offset, len))];
         let signed = self.sign(&mut action, now, extra)?;
-        Ok(Self::finish(Method::Get, signed, Vec::new(), None))
+        Ok(Self::finish(Method::Get, signed, Vec::new()))
     }
 
     /// A single PUT with `Content-Length` (also when 0), `Content-MD5` and the
@@ -374,17 +432,15 @@ impl RequestBuilder {
         key: &FileKey,
         body: Vec<u8>,
         stamp: Timestamp,
-    ) -> Result<HttpRequest, RequestError> {
+    ) -> Result<WriteRequest, RequestError> {
         let object = self.object(key);
         let mut action = self.bucket.put_object(Some(&self.credentials), &object);
-        let md5 = md5_of(&body);
-        let extra = vec![
-            ("content-length", body.len().to_string()),
-            ("content-md5", STANDARD.encode(md5)),
-            (STAMP_HEADER, stamp.to_string()),
-        ];
-        let signed = self.sign(&mut action, now, extra)?;
-        Ok(Self::finish(Method::Put, signed, body, Some(md5)))
+        self.write(
+            &mut action,
+            now,
+            body,
+            vec![(STAMP_HEADER, stamp.to_string())],
+        )
     }
 
     /// Starts a multipart upload; the stamp is set here, on the object.
@@ -402,7 +458,7 @@ impl RequestBuilder {
             .bucket
             .create_multipart_upload(Some(&self.credentials), &object);
         let signed = self.sign(&mut action, now, vec![(STAMP_HEADER, stamp.to_string())])?;
-        Ok(Self::finish(Method::Post, signed, Vec::new(), None))
+        Ok(Self::finish(Method::Post, signed, Vec::new()))
     }
 
     /// One part, with `Content-Length` and `Content-MD5`.
@@ -416,7 +472,7 @@ impl RequestBuilder {
         upload: &UploadId,
         part: PartNumber,
         body: Vec<u8>,
-    ) -> Result<HttpRequest, RequestError> {
+    ) -> Result<WriteRequest, RequestError> {
         let object = self.object(key);
         let mut action = self.bucket.upload_part(
             Some(&self.credentials),
@@ -424,13 +480,7 @@ impl RequestBuilder {
             part.get(),
             upload.as_str(),
         );
-        let md5 = md5_of(&body);
-        let extra = vec![
-            ("content-length", body.len().to_string()),
-            ("content-md5", STANDARD.encode(md5)),
-        ];
-        let signed = self.sign(&mut action, now, extra)?;
-        Ok(Self::finish(Method::Put, signed, body, Some(md5)))
+        self.write(&mut action, now, body, Vec::new())
     }
 
     /// Completes an upload from its parts' ETags, in part order (the n-th is part n).
@@ -467,7 +517,6 @@ impl RequestBuilder {
             Method::Post,
             signed,
             action.body().into_bytes(),
-            None,
         ))
     }
 
@@ -486,7 +535,7 @@ impl RequestBuilder {
             self.bucket
                 .abort_multipart_upload(Some(&self.credentials), &object, upload.as_str());
         let signed = self.sign(&mut action, now, Vec::new())?;
-        Ok(Self::finish(Method::Delete, signed, Vec::new(), None))
+        Ok(Self::finish(Method::Delete, signed, Vec::new()))
     }
 
     /// Deletes up to [`MAX_DELETE_KEYS`] objects in quiet mode, `Content-MD5`
@@ -520,7 +569,7 @@ impl RequestBuilder {
             ("content-md5", content_md5),
         ];
         let signed = self.sign(&mut action, now, extra)?;
-        Ok(Self::finish(Method::Post, signed, body.into_bytes(), None))
+        Ok(Self::finish(Method::Post, signed, body.into_bytes()))
     }
 }
 
@@ -577,7 +626,9 @@ mod tests {
             b.head(now(), &k).unwrap(),
             b.get_range(now(), &k, 10, ReadLen::new(100).unwrap())
                 .unwrap(),
-            b.put_object(now(), &k, b"hello".to_vec(), now()).unwrap(),
+            b.put_object(now(), &k, b"hello".to_vec(), now())
+                .unwrap()
+                .into(),
             b.create_multipart(now(), &k, now()).unwrap(),
             b.upload_part(
                 now(),
@@ -586,7 +637,8 @@ mod tests {
                 PartNumber::new(1).unwrap(),
                 vec![1, 2, 3],
             )
-            .unwrap(),
+            .unwrap()
+            .into(),
             b.complete_multipart(now(), &k, &upload(), &etags).unwrap(),
             b.abort_multipart(now(), &k, &upload()).unwrap(),
             b.delete_objects(now(), &[k]).unwrap(),
@@ -719,6 +771,34 @@ mod tests {
         }
     }
 
+    /// The digest an `ETag` is checked against is the MD5 of the body that
+    /// goes out, and the `Content-MD5` header the store checks says the same.
+    #[test]
+    fn every_write_carries_the_digest_of_its_own_body() {
+        let b = minio();
+        let k = key(1, 1, 5);
+        for body in [Vec::new(), b"hello".to_vec(), vec![7; 70_000]] {
+            let put = b.put_object(now(), &k, body.clone(), now()).unwrap();
+            let part = b
+                .upload_part(
+                    now(),
+                    &k,
+                    &upload(),
+                    PartNumber::new(2).unwrap(),
+                    body.clone(),
+                )
+                .unwrap();
+            for write in [put, part] {
+                assert_eq!(write.md5(), md5_of(&body));
+                assert_eq!(write.body(), &body[..]);
+                let header = STANDARD.encode(write.md5());
+                assert_eq!(write.header("content-md5"), Some(header.as_str()));
+                let sent: HttpRequest = write.clone().into();
+                assert_eq!(sent, write.into_request());
+            }
+        }
+    }
+
     #[test]
     fn put_carries_length_md5_and_stamp() {
         let k = key(0, 1, 1);
@@ -731,10 +811,8 @@ mod tests {
         assert_eq!(req.header("content-md5"), Some("XUFAKrxLKna5cZ2REBfFkg=="));
         assert_eq!(req.header(STAMP_HEADER), Some("2026-11-20T13:49:45.566Z"));
         assert_eq!(
-            req.content_md5()
-                .map(|d| crate::response::hex(&d))
-                .as_deref(),
-            Some("5d41402abc4b2a76b9719d911017c592")
+            crate::response::hex(&req.md5()),
+            "5d41402abc4b2a76b9719d911017c592"
         );
         assert_eq!(req.body(), b"hello");
         let empty = minio().put_object(now(), &k, Vec::new(), stamp).unwrap();

@@ -1,7 +1,7 @@
 //! Test-only edits to a built request, for the cases a correct builder never
 //! produces: a wrong digest, a header sent without being signed.
 
-use super::HttpRequest;
+use super::{HttpRequest, WriteRequest};
 
 impl HttpRequest {
     /// Sets (or with `None` removes) a header, leaving the signature as it was.
@@ -26,5 +26,25 @@ impl HttpRequest {
     pub fn tamper_body(mut self, body: Vec<u8>) -> Self {
         self.body = body;
         self
+    }
+}
+
+impl WriteRequest {
+    /// [`HttpRequest::tamper_header`] on the request, keeping its digest.
+    #[must_use]
+    pub fn tamper_header(self, name: &'static str, value: Option<String>) -> Self {
+        Self {
+            request: self.request.tamper_header(name, value),
+            md5: self.md5,
+        }
+    }
+
+    /// [`HttpRequest::tamper_body`] on the request, keeping its digest.
+    #[must_use]
+    pub fn tamper_body(self, body: Vec<u8>) -> Self {
+        Self {
+            request: self.request.tamper_body(body),
+            md5: self.md5,
+        }
     }
 }
