@@ -344,36 +344,42 @@ fn go_resumes(name: &str, bin: &Path, config: &Path, sites: &mut [Site], at_rust
     println!("{name}: Go continued every database at lsr's tip plus one");
 }
 
-/// Go's `litestream replicate -config` runs three databases and stops; `lsr replicate
-/// -config` starts on the same file and meta directories and each database continues at Go's
-/// tip plus one with no snapshot; then Go continues from what `lsr` left. Restores by both
-/// match the databases at every handover point.
-#[test]
-#[ignore = "runs the pinned Go binaries; just compat"]
-fn go_config_and_meta_start_the_rust_sidecar_with_no_snapshot() {
-    let lsr = lsr_binary().expect("lsr builds");
-    for build in builds_under_test() {
-        sidecar_handover(&build, &lsr);
-    }
-}
+/// The tests that run the Go builds under test (`LSR_COMPAT_VERSIONS`).
+/// `just compat-live` selects the tests by this module (`test(/(^|::)live::/)`).
+mod live {
+    use super::*;
 
-/// The alternation run with Rust as the daemon on Go's own config file: Go and `lsr
-/// replicate -config` take turns on one prefix, each turn ended by SIGKILL at a seeded point,
-/// every switch a plain restart with no snapshot, every acknowledged transaction restoring to
-/// a state the database had. A Go build without upstream bcd69ae may take a WAL tail SQLite
-/// never committed at its boot; that one outcome is accepted, asserted exactly and counted
-/// (#38, `alternate/uncommitted.rs`).
-#[test]
-#[ignore = "runs the pinned Go binaries; just compat"]
-fn go_and_rust_sidecars_alternate_on_one_config_file() {
-    let builds = builds_in(Era::Blocks);
-    if builds.is_empty() {
-        println!("no block-era build under test: a frame-era Go cannot read Rust's files");
-        return;
+    /// Go's `litestream replicate -config` runs three databases and stops; `lsr replicate
+    /// -config` starts on the same file and meta directories and each database continues at Go's
+    /// tip plus one with no snapshot; then Go continues from what `lsr` left. Restores by both
+    /// match the databases at every handover point.
+    #[test]
+    #[ignore = "runs the pinned Go binaries; just compat"]
+    fn go_config_and_meta_start_the_rust_sidecar_with_no_snapshot() {
+        let lsr = lsr_binary().expect("lsr builds");
+        for build in builds_under_test() {
+            sidecar_handover(&build, &lsr);
+        }
     }
-    let lsr = lsr_binary().expect("lsr builds");
-    let seed = seed();
-    for build in &builds {
-        alternate(build, &lsr, seed, Launch::ConfigFile);
+
+    /// The alternation run with Rust as the daemon on Go's own config file: Go and `lsr
+    /// replicate -config` take turns on one prefix, each turn ended by SIGKILL at a seeded point,
+    /// every switch a plain restart with no snapshot, every acknowledged transaction restoring to
+    /// a state the database had. A Go build without upstream bcd69ae may take a WAL tail SQLite
+    /// never committed at its boot; that one outcome is accepted, asserted exactly and counted
+    /// (#38, `alternate/uncommitted.rs`).
+    #[test]
+    #[ignore = "runs the pinned Go binaries; just compat"]
+    fn go_and_rust_sidecars_alternate_on_one_config_file() {
+        let builds = builds_in(Era::Blocks);
+        if builds.is_empty() {
+            println!("no block-era build under test: a frame-era Go cannot read Rust's files");
+            return;
+        }
+        let lsr = lsr_binary().expect("lsr builds");
+        let seed = seed();
+        for build in &builds {
+            alternate(build, &lsr, seed, Launch::ConfigFile);
+        }
     }
 }

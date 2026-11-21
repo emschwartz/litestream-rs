@@ -29,26 +29,32 @@ fn a_tail_past_the_wal_index_is_recognised() {
     alternate::uncommitted::a_tail_past_the_wal_index_is_recognised();
 }
 
-/// Go and Rust take turns on one prefix, each turn ended by SIGKILL at a seeded point, and
-/// every switch is a plain restart with no snapshot (or the snapshot the engines' rules give
-/// after an unseen WAL restart, with its cause); every acknowledged transaction restores to a
-/// state the database had, across checkpoints.
-///
-/// For a Go build without upstream bcd69ae (every release through v0.5.18), one outcome is
-/// accepted and asserted exactly (#38): Go's boot transaction holds a WAL tail SQLite never
-/// committed, left by Rust stopped mid-commit, and restores to precisely that tail's state
-/// (`alternate/uncommitted.rs`). The run prints how often it was seen.
-#[test]
-#[ignore = "runs the pinned Go binaries; just compat"]
-fn go_and_rust_alternate_on_one_prefix() {
-    let builds = builds_in(Era::Blocks);
-    if builds.is_empty() {
-        println!("no block-era build under test: a frame-era Go cannot read Rust's files");
-        return;
-    }
-    let lsr = lsr_binary().expect("lsr builds");
-    let seed = seed();
-    for build in &builds {
-        alternate(build, &lsr, seed, Launch::Arguments);
+/// The tests that run the Go builds under test (`LSR_COMPAT_VERSIONS`).
+/// `just compat-live` selects the tests by this module (`test(/(^|::)live::/)`).
+mod live {
+    use super::*;
+
+    /// Go and Rust take turns on one prefix, each turn ended by SIGKILL at a seeded point, and
+    /// every switch is a plain restart with no snapshot (or the snapshot the engines' rules give
+    /// after an unseen WAL restart, with its cause); every acknowledged transaction restores to a
+    /// state the database had, across checkpoints.
+    ///
+    /// For a Go build without upstream bcd69ae (every release through v0.5.18), one outcome is
+    /// accepted and asserted exactly (#38): Go's boot transaction holds a WAL tail SQLite never
+    /// committed, left by Rust stopped mid-commit, and restores to precisely that tail's state
+    /// (`alternate/uncommitted.rs`). The run prints how often it was seen.
+    #[test]
+    #[ignore = "runs the pinned Go binaries; just compat"]
+    fn go_and_rust_alternate_on_one_prefix() {
+        let builds = builds_in(Era::Blocks);
+        if builds.is_empty() {
+            println!("no block-era build under test: a frame-era Go cannot read Rust's files");
+            return;
+        }
+        let lsr = lsr_binary().expect("lsr builds");
+        let seed = seed();
+        for build in &builds {
+            alternate(build, &lsr, seed, Launch::Arguments);
+        }
     }
 }

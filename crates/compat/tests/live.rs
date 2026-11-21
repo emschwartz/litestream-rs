@@ -91,66 +91,6 @@ fn go_still_answers_what_the_manifests_say() {
     }
 }
 
-/// Every replica file of every fixture, rewritten by `lsr_ltx::Encoder`, restores under each
-/// block-era Go build under test to the pages the manifest records; the frame era refuses.
-#[test]
-#[ignore = "runs the pinned Go binaries; just compat"]
-fn go_restores_what_rust_encoded() {
-    for source in all_fixtures().expect("list") {
-        let manifest = Manifest::load(&source).expect("load");
-        let staged = stage(&source, &manifest).expect("stage");
-        staged.reencode(&manifest).expect("re-encode");
-        let (config, db_path) = (staged.output("restore.yml"), staged.output("from.db"));
-        write_config(&config, &db_path, &staged.replica()).expect("config");
-        let mut n = 0_u32;
-        let mut run = |build: &GoBuild, target: Target| {
-            n = n.saturating_add(1);
-            let out = staged.output(&format!("go-{n}.db"));
-            let binary = build.binary().expect("the build under test is present");
-            let got = restore_with_go(&binary, &config, &db_path, &out, target).expect("restore");
-            (got, out)
-        };
-        for entry in &manifest.targets {
-            let Outcome::Restored { page_hashes, .. } = &entry.outcome else {
-                continue;
-            };
-            for build in builds_in(Era::Blocks) {
-                let label = format!(
-                    "{} reading {} {} {:?}",
-                    build.name(),
-                    manifest.go_version,
-                    manifest.scenario,
-                    entry.target
-                );
-                let (got, out) = run(&build, entry.target);
-                assert_eq!(got, GoRestore::Restored, "{label}");
-                integrity_check(&out).expect("integrity");
-                assert_eq!(
-                    &hash_pages(&out).expect("hash").page_hashes,
-                    page_hashes,
-                    "{label}"
-                );
-            }
-        }
-        if manifest
-            .targets
-            .iter()
-            .any(|t| matches!(t.outcome, Outcome::Restored { .. }))
-        {
-            for build in builds_in(Era::Frames) {
-                let (got, _) = run(&build, Target::Latest);
-                assert!(
-                    matches!(got, GoRestore::Refused { .. }),
-                    "{} unexpectedly read a block-encoded replica of {} {}",
-                    build.name(),
-                    manifest.go_version,
-                    manifest.scenario
-                );
-            }
-        }
-    }
-}
-
 /// The reference reader, `ltx.Decoder.Verify` from the pinned library, accepts every file
 /// Rust re-encoded.
 #[test]
@@ -231,6 +171,73 @@ fn go_and_rust_agree_on_instants_between_files() {
                     hash_pages(&want).expect("hash").page_hashes,
                     "{label}"
                 );
+            }
+        }
+    }
+}
+
+/// The tests that run the Go builds under test (`LSR_COMPAT_VERSIONS`).
+/// `just compat-live` selects the tests by this module (`test(/(^|::)live::/)`).
+mod live {
+    use super::*;
+
+    /// Every replica file of every fixture, rewritten by `lsr_ltx::Encoder`, restores under each
+    /// block-era Go build under test to the pages the manifest records; the frame era refuses.
+    #[test]
+    #[ignore = "runs the pinned Go binaries; just compat"]
+    fn go_restores_what_rust_encoded() {
+        for source in all_fixtures().expect("list") {
+            let manifest = Manifest::load(&source).expect("load");
+            let staged = stage(&source, &manifest).expect("stage");
+            staged.reencode(&manifest).expect("re-encode");
+            let (config, db_path) = (staged.output("restore.yml"), staged.output("from.db"));
+            write_config(&config, &db_path, &staged.replica()).expect("config");
+            let mut n = 0_u32;
+            let mut run = |build: &GoBuild, target: Target| {
+                n = n.saturating_add(1);
+                let out = staged.output(&format!("go-{n}.db"));
+                let binary = build.binary().expect("the build under test is present");
+                let got =
+                    restore_with_go(&binary, &config, &db_path, &out, target).expect("restore");
+                (got, out)
+            };
+            for entry in &manifest.targets {
+                let Outcome::Restored { page_hashes, .. } = &entry.outcome else {
+                    continue;
+                };
+                for build in builds_in(Era::Blocks) {
+                    let label = format!(
+                        "{} reading {} {} {:?}",
+                        build.name(),
+                        manifest.go_version,
+                        manifest.scenario,
+                        entry.target
+                    );
+                    let (got, out) = run(&build, entry.target);
+                    assert_eq!(got, GoRestore::Restored, "{label}");
+                    integrity_check(&out).expect("integrity");
+                    assert_eq!(
+                        &hash_pages(&out).expect("hash").page_hashes,
+                        page_hashes,
+                        "{label}"
+                    );
+                }
+            }
+            if manifest
+                .targets
+                .iter()
+                .any(|t| matches!(t.outcome, Outcome::Restored { .. }))
+            {
+                for build in builds_in(Era::Frames) {
+                    let (got, _) = run(&build, Target::Latest);
+                    assert!(
+                        matches!(got, GoRestore::Refused { .. }),
+                        "{} unexpectedly read a block-encoded replica of {} {}",
+                        build.name(),
+                        manifest.go_version,
+                        manifest.scenario
+                    );
+                }
             }
         }
     }

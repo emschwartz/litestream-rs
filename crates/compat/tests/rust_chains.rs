@@ -183,154 +183,6 @@ fn level_of(path: &Path) -> Option<u8> {
     path.file_name()?.to_str()?.split('-').next()?.parse().ok()
 }
 
-/// Every build in the block era restores the latest state; the frame era reads only frames
-/// and refuses, and the refusal is asserted rather than skipped.
-#[test]
-#[ignore = "runs the Go binaries; just compat"]
-fn go_restores_rust_chain_latest() {
-    let written = write_chain(COMMITS, 4096, 11);
-    let config = go_config(&written);
-    let want = &written.points.last().expect("points").page_hashes;
-    for build in builds_under_test() {
-        let name = build.name();
-        let (result, out) = go_restore(&build, &written, &config, "latest.db", Target::Latest);
-        match build.era() {
-            Era::Blocks => {
-                assert_eq!(result, GoRestore::Restored, "{name}");
-                assert_eq!(&restored_pages(&out), want, "{name}");
-            }
-            Era::Frames => {
-                println!("{name} on a Rust chain: {result:?}");
-                assert!(
-                    matches!(result, GoRestore::Refused { .. }),
-                    "{name} read a block file"
-                );
-            }
-        }
-    }
-}
-
-/// Every transaction Rust can restore, Go restores to the same pages: the recorded points
-/// (their hashes are the source's) and the last transaction of every file the replica holds
-/// at the end (retention has removed most older points, so these are what is left to restore).
-#[test]
-#[ignore = "runs the pinned Go binary many times; just compat"]
-fn go_restores_rust_chain_each_txid() {
-    let written = write_chain(COMMITS, 4096, 11);
-    let config = go_config(&written);
-    let mut targets: Vec<Txid> = written.points.iter().map(|p| p.txid).collect();
-    targets.extend(
-        list(&written.site.replica)
-            .expect("list")
-            .files
-            .iter()
-            .map(|f| f.key.range().max()),
-    );
-    targets.sort();
-    targets.dedup();
-    for build in builds_in(Era::Blocks) {
-        let version = build.name();
-        let mut checked = 0;
-        for txid in &targets {
-            let rs = written.site.dir().join("rs.db");
-            clear(&rs);
-            let Some(rust) = rust_restore(&written.site.replica, RestoreTarget::Txid(*txid), &rs)
-            else {
-                continue;
-            };
-            let (go, out) = go_restore(
-                &build,
-                &written,
-                &config,
-                "go.db",
-                Target::Txid { txid: txid.get() },
-            );
-            match rust {
-                Ok(()) => {
-                    assert_eq!(go, GoRestore::Restored, "{version} txid {txid}");
-                    let want = written
-                        .points
-                        .iter()
-                        .find(|p| p.txid == *txid)
-                        .map_or_else(|| restored_pages(&rs), |p| p.page_hashes.clone());
-                    assert_eq!(restored_pages(&out), want, "{version} txid {txid}");
-                    checked += 1;
-                }
-                Err(_) => assert!(
-                    matches!(go, GoRestore::Refused { .. }),
-                    "{version} restored txid {txid} that Rust has no chain for"
-                ),
-            }
-        }
-        assert!(
-            checked > 3,
-            "{version} checked {checked} of {}",
-            targets.len()
-        );
-    }
-}
-
-/// Each instant between commits: Rust and Go name the same state, or both refuse.
-#[test]
-#[ignore = "runs the pinned Go binary many times; just compat"]
-fn go_restores_rust_chain_as_of() {
-    let written = write_chain(COMMITS, 4096, 11);
-    let config = go_config(&written);
-    let stride = (written.points.len() / 30).max(1);
-    for build in builds_in(Era::Blocks) {
-        for point in written.points.iter().step_by(stride) {
-            let at = point.at_ms + 40;
-            let rs = written.site.dir().join("rs.db");
-            clear(&rs);
-            let rust = restore_replica(
-                &written.site.replica,
-                RestoreTarget::AsOf(Timestamp::from_unix_millis(at)),
-                &rs,
-            )
-            .expect("sink");
-            let (go, go_out) = go_restore(
-                &build,
-                &written,
-                &config,
-                "go.db",
-                Target::AsOf { unix_ms: at },
-            );
-            let label = format!("{} as of {at}", build.name());
-            match (&rust, &go) {
-                (Ok(_), GoRestore::Restored) => {
-                    assert_eq!(restored_pages(&go_out), restored_pages(&rs), "{label}");
-                }
-                (Err(RestoreError::NoPlan(no)), GoRestore::Restored)
-                    if let PlanOutcome::AsOfInsideFile { chain, .. } = no.outcome() =>
-                {
-                    let end = written.site.dir().join("end.db");
-                    clear(&end);
-                    restore_replica(
-                        &written.site.replica,
-                        RestoreTarget::Txid(chain.reaches()),
-                        &end,
-                    )
-                    .expect("sink")
-                    .expect("the chain's own end restores");
-                    assert_eq!(restored_pages(&go_out), restored_pages(&end), "{label}");
-                }
-                (Err(RestoreError::NoPlan(no)), GoRestore::Refused { .. })
-                    if matches!(no.outcome(), PlanOutcome::NoSnapshot { .. }) => {}
-                other => panic!("{label}: Rust and Go disagree: {other:?}"),
-            }
-        }
-    }
-}
-
-/// Go's compaction and retention run over a Rust replica; it still restores to the source.
-#[test]
-#[ignore = "runs the pinned Go binary for several seconds; just compat"]
-fn go_compacts_and_prunes_a_rust_replica() {
-    for build in builds_in(Era::Blocks) {
-        compacts_and_prunes(&build);
-    }
-}
-
 #[expect(
     clippy::disallowed_methods,
     reason = "measures a real Go process's uptime against its own intervals"
@@ -401,4 +253,159 @@ fn compacts_and_prunes(build: &GoBuild) {
         .expect("sink")
         .expect("Rust restores after Go");
     assert_eq!(&restored_pages(&rs), want);
+}
+
+/// The tests that run the Go builds under test (`LSR_COMPAT_VERSIONS`).
+/// `just compat-live` selects the tests by this module (`test(/(^|::)live::/)`).
+mod live {
+    use super::*;
+
+    /// Every build in the block era restores the latest state; the frame era reads only frames
+    /// and refuses, and the refusal is asserted rather than skipped.
+    #[test]
+    #[ignore = "runs the Go binaries; just compat"]
+    fn go_restores_rust_chain_latest() {
+        let written = write_chain(COMMITS, 4096, 11);
+        let config = go_config(&written);
+        let want = &written.points.last().expect("points").page_hashes;
+        for build in builds_under_test() {
+            let name = build.name();
+            let (result, out) = go_restore(&build, &written, &config, "latest.db", Target::Latest);
+            match build.era() {
+                Era::Blocks => {
+                    assert_eq!(result, GoRestore::Restored, "{name}");
+                    assert_eq!(&restored_pages(&out), want, "{name}");
+                }
+                Era::Frames => {
+                    println!("{name} on a Rust chain: {result:?}");
+                    assert!(
+                        matches!(result, GoRestore::Refused { .. }),
+                        "{name} read a block file"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every transaction Rust can restore, Go restores to the same pages: the recorded points
+    /// (their hashes are the source's) and the last transaction of every file the replica holds
+    /// at the end (retention has removed most older points, so these are what is left to restore).
+    #[test]
+    #[ignore = "runs the pinned Go binary many times; just compat"]
+    fn go_restores_rust_chain_each_txid() {
+        let written = write_chain(COMMITS, 4096, 11);
+        let config = go_config(&written);
+        let mut targets: Vec<Txid> = written.points.iter().map(|p| p.txid).collect();
+        targets.extend(
+            list(&written.site.replica)
+                .expect("list")
+                .files
+                .iter()
+                .map(|f| f.key.range().max()),
+        );
+        targets.sort();
+        targets.dedup();
+        for build in builds_in(Era::Blocks) {
+            let version = build.name();
+            let mut checked = 0;
+            for txid in &targets {
+                let rs = written.site.dir().join("rs.db");
+                clear(&rs);
+                let Some(rust) =
+                    rust_restore(&written.site.replica, RestoreTarget::Txid(*txid), &rs)
+                else {
+                    continue;
+                };
+                let (go, out) = go_restore(
+                    &build,
+                    &written,
+                    &config,
+                    "go.db",
+                    Target::Txid { txid: txid.get() },
+                );
+                match rust {
+                    Ok(()) => {
+                        assert_eq!(go, GoRestore::Restored, "{version} txid {txid}");
+                        let want = written
+                            .points
+                            .iter()
+                            .find(|p| p.txid == *txid)
+                            .map_or_else(|| restored_pages(&rs), |p| p.page_hashes.clone());
+                        assert_eq!(restored_pages(&out), want, "{version} txid {txid}");
+                        checked += 1;
+                    }
+                    Err(_) => assert!(
+                        matches!(go, GoRestore::Refused { .. }),
+                        "{version} restored txid {txid} that Rust has no chain for"
+                    ),
+                }
+            }
+            assert!(
+                checked > 3,
+                "{version} checked {checked} of {}",
+                targets.len()
+            );
+        }
+    }
+
+    /// Each instant between commits: Rust and Go name the same state, or both refuse.
+    #[test]
+    #[ignore = "runs the pinned Go binary many times; just compat"]
+    fn go_restores_rust_chain_as_of() {
+        let written = write_chain(COMMITS, 4096, 11);
+        let config = go_config(&written);
+        let stride = (written.points.len() / 30).max(1);
+        for build in builds_in(Era::Blocks) {
+            for point in written.points.iter().step_by(stride) {
+                let at = point.at_ms + 40;
+                let rs = written.site.dir().join("rs.db");
+                clear(&rs);
+                let rust = restore_replica(
+                    &written.site.replica,
+                    RestoreTarget::AsOf(Timestamp::from_unix_millis(at)),
+                    &rs,
+                )
+                .expect("sink");
+                let (go, go_out) = go_restore(
+                    &build,
+                    &written,
+                    &config,
+                    "go.db",
+                    Target::AsOf { unix_ms: at },
+                );
+                let label = format!("{} as of {at}", build.name());
+                match (&rust, &go) {
+                    (Ok(_), GoRestore::Restored) => {
+                        assert_eq!(restored_pages(&go_out), restored_pages(&rs), "{label}");
+                    }
+                    (Err(RestoreError::NoPlan(no)), GoRestore::Restored)
+                        if let PlanOutcome::AsOfInsideFile { chain, .. } = no.outcome() =>
+                    {
+                        let end = written.site.dir().join("end.db");
+                        clear(&end);
+                        restore_replica(
+                            &written.site.replica,
+                            RestoreTarget::Txid(chain.reaches()),
+                            &end,
+                        )
+                        .expect("sink")
+                        .expect("the chain's own end restores");
+                        assert_eq!(restored_pages(&go_out), restored_pages(&end), "{label}");
+                    }
+                    (Err(RestoreError::NoPlan(no)), GoRestore::Refused { .. })
+                        if matches!(no.outcome(), PlanOutcome::NoSnapshot { .. }) => {}
+                    other => panic!("{label}: Rust and Go disagree: {other:?}"),
+                }
+            }
+        }
+    }
+
+    /// Go's compaction and retention run over a Rust replica; it still restores to the source.
+    #[test]
+    #[ignore = "runs the pinned Go binary for several seconds; just compat"]
+    fn go_compacts_and_prunes_a_rust_replica() {
+        for build in builds_in(Era::Blocks) {
+            compacts_and_prunes(&build);
+        }
+    }
 }

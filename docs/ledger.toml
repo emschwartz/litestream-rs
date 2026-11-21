@@ -58,7 +58,7 @@
 "TestVFS_PooledWriteStress" = { reason = "The Go VFS read replica (its hydration, polling, write mode and config) is not in v1 (docs/PLAN.md section 1, 'Not in v1'): the Go VFS stays in use, and the four-direction compat suite checks that it reads Rust replicas." }
 "TestVFS_RapidUpdateCoalescing" = { reason = "The Go VFS read replica (its hydration, polling, write mode and config) is not in v1 (docs/PLAN.md section 1, 'Not in v1'): the Go VFS stays in use, and the four-direction compat suite checks that it reads Rust replicas." }
 "TestVFS_S3EventualConsistency" = { reason = "The Go VFS read replica (its hydration, polling, write mode and config) is not in v1 (docs/PLAN.md section 1, 'Not in v1'): the Go VFS stays in use, and the four-direction compat suite checks that it reads Rust replicas." }
-"TestVFS_Simple" = { counterpart = "lsr-compat::vfs::go_vfs_reads_rust_replica" }
+"TestVFS_Simple" = { counterpart = "lsr-compat::vfs::live::go_vfs_reads_rust_replica" }
 "TestVFS_SortingLargeResultSet" = { reason = "The Go VFS read replica (its hydration, polling, write mode and config) is not in v1 (docs/PLAN.md section 1, 'Not in v1'): the Go VFS stays in use, and the four-direction compat suite checks that it reads Rust replicas." }
 "TestVFS_StorageFailureInjection" = { reason = "The Go VFS read replica (its hydration, polling, write mode and config) is not in v1 (docs/PLAN.md section 1, 'Not in v1'): the Go VFS stays in use, and the four-direction compat suite checks that it reads Rust replicas." }
 "TestVFS_URIReplicaURL" = { reason = "The Go VFS read replica (its hydration, polling, write mode and config) is not in v1 (docs/PLAN.md section 1, 'Not in v1'): the Go VFS stays in use, and the four-direction compat suite checks that it reads Rust replicas." }
@@ -602,8 +602,8 @@
 "TestDB_EnsureExists/NoBackup" = { reason = "Go library API (DB.EnsureExists) with no caller in cmd/ at 041a8c3. A Rust replicator never restores implicitly: restore is the caller's explicit call (lsr-core restore), and starting on a missing database is the caller's choice." }
 "TestDB_EnsureExists/NoReplica" = { reason = "Go library API (DB.EnsureExists) with no caller in cmd/ at 041a8c3. A Rust replicator never restores implicitly: restore is the caller's explicit call (lsr-core restore), and starting on a missing database is the caller's choice." }
 "TestDB_EnsureExists/RestoreFromBackup" = { reason = "Go library API (DB.EnsureExists) with no caller in cmd/ at 041a8c3. A Rust replicator never restores implicitly: restore is the caller's explicit call (lsr-core restore), and starting on a missing database is the caller's choice." }
-"TestDB_MetaPath" = { counterpart = ["lsr-compat::handover::live_go::go_resumes_from_rust_meta", "lsr-compat::handover::live_go::rust_resumes_from_go_meta", "lsr-compat::handover::process::rust_resumes_from_go_meta_as_a_process"] }
-"TestDB_MetaPath/Absolute" = { counterpart = ["lsr-compat::handover::live_go::go_resumes_from_rust_meta", "lsr-compat::handover::process::rust_resumes_from_go_meta_as_a_process"] }
+"TestDB_MetaPath" = { counterpart = ["lsr-compat::handover::live::go::go_resumes_from_rust_meta", "lsr-compat::handover::live::go::rust_resumes_from_go_meta", "lsr-compat::handover::live::process::rust_resumes_from_go_meta_as_a_process"] }
+"TestDB_MetaPath/Absolute" = { counterpart = ["lsr-compat::handover::live::go::go_resumes_from_rust_meta", "lsr-compat::handover::live::process::rust_resumes_from_go_meta_as_a_process"] }
 "TestDB_MetaPath/Relative" = { reason = "Go-only: the meta path of a relative database path is relative. Rust is given its staging directory by the caller; the Go layout inside it is covered by lsr-compat::handover go_resumes_from_rust_meta." }
 "TestDB_Monitor_LogsContextErrorFromReplicaClient" = { reason = "Go-only: context.Context cancellation. The Rust core is sans-IO and advances one tick at a time (docs/PLAN.md section 2, goal 5); there is no context to cancel, and shutdown is final_sync with a deadline." }
 "TestDB_NoLTXFilesOnIdleSync" = { counterpart = ["lsr-core::actor::tests::idle_tick_does_no_io", "lsr-sim::resources::tests::an_idle_window_wants_no_staged_file_no_checkpoint_and_no_unexplained_listing"] }
@@ -1204,7 +1204,7 @@
 
 ["litestream/tests/integration/compatibility_test.go"]
 "TestBinaryCompatibility_CLIRestore" = { counterpart = "lsr-cli::cli::cli::every_target_matches_the_manifest" }
-"TestCompaction_Compatibility" = { counterpart = ["lsr-compat::compaction::go_compacted_files_equal_ours_on_header_and_pages", "lsr-compat::rust_chains::go_compacts_and_prunes_a_rust_replica"] }
+"TestCompaction_Compatibility" = { counterpart = ["lsr-compat::compaction::go_compacted_files_equal_ours_on_header_and_pages", "lsr-compat::rust_chains::live::go_compacts_and_prunes_a_rust_replica"] }
 "TestRestore_CrossPlatformPaths" = { reason = "Go-only: Windows and Unix path spellings of a file replica. The Rust port targets Unix only." }
 "TestRestore_FormatConsistency" = { counterpart = "lsr-compat::rust_chains::rust_restores_its_own_chain_at_every_point" }
 "TestRestore_LTXFileValidation" = { counterpart = "lsr-compat::matrix::matrix::a_flipped_byte_in_any_chain_file_fails_naming_it" }

@@ -223,10 +223,38 @@ pub const KNOWN_RELEASES: [&str; 19] = [
 /// The environment variable naming the builds to test, space separated.
 pub const VERSIONS_ENV: &str = "LSR_COMPAT_VERSIONS";
 
+/// The module every live test sits in, which `just compat-live` selects by
+/// (`test(/(^|::)live::/)`).
+pub const LIVE_MODULE: &str = "live";
+
+/// Whether a test path (`handover`'s `live::go::rust_restores_what_go_wrote`) is in a
+/// [`LIVE_MODULE`], so `just compat-live` runs it.
+#[must_use]
+pub fn is_live_test(path: &str) -> bool {
+    let modules = path
+        .rsplit_once("::")
+        .map_or("", |(modules, _test)| modules);
+    modules.split("::").any(|module| module == LIVE_MODULE)
+}
+
 /// The builds the live tests run against: the names in `LSR_COMPAT_VERSIONS` when set
 /// (`releases` stands for [`KNOWN_RELEASES`]; minus any the quirk table lists as unbuildable),
 /// else the pinned five.
+///
+/// Only a test in a [`LIVE_MODULE`] may ask (the test harness names the thread after the
+/// test). A live test moved or renamed out of one would drop out of `just compat-live`
+/// unnoticed; this fails it instead, the first time `just compat` runs it.
+#[expect(
+    clippy::panic,
+    reason = "the guard fails the misplaced test itself; returning no builds would pass it"
+)]
 pub fn builds_under_test() -> Vec<GoBuild> {
+    let caller = std::thread::current().name().unwrap_or_default().to_owned();
+    if !is_live_test(&caller) {
+        panic!(
+            "{caller:?} runs the Go builds under test but is not in a `mod {LIVE_MODULE}`, so `just compat-live` would skip it"
+        );
+    }
     match std::env::var(VERSIONS_ENV) {
         Ok(names) if !names.trim().is_empty() => names
             .split_whitespace()
@@ -244,7 +272,7 @@ pub fn builds_under_test() -> Vec<GoBuild> {
     }
 }
 
-/// The builds of `builds_under_test` in `era`.
+/// The builds of `builds_under_test` in `era`, with its guard.
 pub fn builds_in(era: Era) -> Vec<GoBuild> {
     builds_under_test()
         .into_iter()
@@ -294,6 +322,34 @@ fn file_in_bin(file: &str) -> Result<PathBuf, CompatError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_live_test_is_one_in_a_live_module() {
+        assert!(is_live_test("live::go_vfs_reads_rust_replica"));
+        assert!(is_live_test("live::go::rust_restores_what_go_wrote"));
+        assert!(is_live_test("tests::live::x"));
+        assert!(!is_live_test("live"));
+        assert!(!is_live_test("live_go::go_resumes_from_rust_meta"));
+        assert!(!is_live_test("process::live"));
+        assert!(!is_live_test("go_vfs_reads_rust_replica"));
+    }
+
+    /// The guard: a test outside a live module that asks for the builds fails, so moving
+    /// one out of `just compat-live`'s filter cannot pass unnoticed.
+    #[test]
+    #[should_panic(expected = "is not in a `mod live`")]
+    fn the_builds_are_refused_outside_a_live_module() {
+        drop(builds_under_test());
+    }
+
+    mod live {
+        use super::super::builds_under_test;
+
+        #[test]
+        fn a_live_module_gets_the_builds() {
+            assert!(!builds_under_test().is_empty());
+        }
+    }
 
     #[test]
     fn names_round_trip() {
