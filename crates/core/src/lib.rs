@@ -47,8 +47,8 @@ pub use env::{Clock, Entropy, Sleeper};
 #[cfg(any(test, feature = "testing"))]
 pub use env::{FakeClock, RecordingSleeper, SeededEntropy};
 pub use fault::{
-    Backoff, Clamped, Fault, ForeignWriter, HaltCause, MAX_BACKOFF, Next, PersistentCause, Policy,
-    Response, Responses, SnapshotCause, backoff_wait, policy, retry_wait,
+    Backoff, BugSite, Clamped, Fault, ForeignWriter, HaltCause, MAX_BACKOFF, Next, PersistentCause,
+    Policy, Response, Responses, SnapshotCause, backoff_wait, policy, retry_wait,
 };
 pub use host::{
     HostCheckpoint, HostCheckpoints, HostObserver, SQLITE_AUTOCHECKPOINT, Watch, observe,

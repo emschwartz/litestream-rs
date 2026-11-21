@@ -38,7 +38,7 @@ use std::time::Duration;
 use lsr_ltx::Timestamp;
 use lsr_wal::{OpenError, WalHeader, WalReader};
 
-use crate::fault::{Fault, Next, SnapshotCause};
+use crate::fault::{BugSite, Fault, Next, SnapshotCause};
 use crate::layout::FileInfo;
 use crate::pages::PageTable;
 use crate::position::{Continuity, Position, ReadEpoch, SyncedThrough};
@@ -189,7 +189,10 @@ pub fn decide(state: &CheckpointState, observed: &Observed, cfg: &CheckpointConf
     if !observed.through {
         return Decision::Nothing;
     }
-    let armed = !matches!(state, CheckpointState::Idle { .. });
+    let armed = match state {
+        CheckpointState::Idle { .. } => false,
+        CheckpointState::Pending { .. } | CheckpointState::PassiveFailedAtTruncate { .. } => true,
+    };
     if armed
         && cfg
             .min_pages
@@ -513,7 +516,7 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_, 
             Synced::Wrote {
                 end: StepEnd::Limited(_),
                 ..
-            } => return Err(Fault::Bug),
+            } => return Err(Fault::Bug(BugSite::CappedCheckpointStep)),
         };
         self.good = match through.confirm(&*self.wal) {
             Ok(through) => Reached::Through(through),

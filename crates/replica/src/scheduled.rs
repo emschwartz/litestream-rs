@@ -217,8 +217,11 @@ impl Scheduled {
             VerifyOutcome::Merged => bump(&mut runs.merged),
             VerifyOutcome::Incomplete => bump(&mut runs.incomplete),
         }
-        if !matches!(outcome, VerifyOutcome::Incomplete) {
-            health.worst_finding = worst;
+        match outcome {
+            VerifyOutcome::Passed { .. } | VerifyOutcome::Failed(_) | VerifyOutcome::Merged => {
+                health.worst_finding = worst;
+            }
+            VerifyOutcome::Incomplete => {}
         }
         health.last_run = Some(now);
         outcome

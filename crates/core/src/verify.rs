@@ -391,7 +391,16 @@ impl Report {
     /// does not plan is [Severity::Unrestorable] whatever the findings say.
     #[must_use]
     pub fn worst(&self) -> Option<Severity> {
-        let planless = !matches!(self.latest, PlanOutcome::Plan(_));
+        let planless = match self.latest {
+            PlanOutcome::Plan(_) => false,
+            PlanOutcome::EmptyReplica
+            | PlanOutcome::NoSnapshot { .. }
+            | PlanOutcome::BeyondNewest { .. }
+            | PlanOutcome::AsOfInsideFile { .. }
+            | PlanOutcome::Gap { .. }
+            | PlanOutcome::InsideFile { .. }
+            | PlanOutcome::MalformedSnapshot { .. } => true,
+        };
         planless
             .then_some(Severity::Unrestorable)
             .into_iter()

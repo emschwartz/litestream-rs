@@ -158,7 +158,7 @@ pub async fn verify_against<S: ObjectStore>(
         Ok(done) => compare(live, &restored, done.commit().get()),
         Err(RestoreError::Inventory(err)) => return Err(VerifyError::Inventory(err)),
         Err(RestoreError::Store(err)) => return Err(VerifyError::Store(err)),
-        Err(RestoreError::NoPlan(no)) if matches!(no.outcome(), PlanOutcome::InsideFile { .. }) => {
+        Err(RestoreError::NoPlan(no)) if inside_file(no.outcome()) => {
             Compared::Merged { txid: live.txid }
         }
         Err(error) => Compared::RestoreFails {
@@ -168,6 +168,21 @@ pub async fn verify_against<S: ObjectStore>(
     };
     let report = report(&inventory, findings, latest, (files_read, bytes_read));
     Ok(Verified { report, compared })
+}
+
+/// Whether the transaction sits inside a compacted file and cannot be
+/// restored exactly.
+const fn inside_file(outcome: &PlanOutcome) -> bool {
+    match outcome {
+        PlanOutcome::InsideFile { .. } => true,
+        PlanOutcome::Plan(_)
+        | PlanOutcome::EmptyReplica
+        | PlanOutcome::NoSnapshot { .. }
+        | PlanOutcome::BeyondNewest { .. }
+        | PlanOutcome::AsOfInsideFile { .. }
+        | PlanOutcome::Gap { .. }
+        | PlanOutcome::MalformedSnapshot { .. } => false,
+    }
 }
 
 fn compare(live: &LivePages, restored: &BTreeMap<u32, PageChecksum>, commit: u32) -> Compared {

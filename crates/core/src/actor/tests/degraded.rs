@@ -189,7 +189,7 @@ fn a_degraded_lane_pins_the_replicas_newest_transaction_until_it_recovers() {
 #[test]
 fn a_bug_rebuilds_the_actor_and_boots_again_after_the_wait() {
     let (mut rig, mut actor) = caught_up_go_like();
-    let failed = actor.fault(Lane::Upload, Fault::Bug, ts(T0 + 10));
+    let failed = actor.fault(Lane::Upload, Fault::Bug(BugSite::PageMap), ts(T0 + 10));
     let Some((lane, cause, until)) = degraded(&failed) else {
         panic!("{failed:?}");
     };
@@ -216,7 +216,7 @@ fn a_bug_rebuilds_the_actor_and_boots_again_after_the_wait() {
 #[test]
 fn a_bug_stops_under_strict() {
     let (_rig, mut actor) = caught_up();
-    let tick = actor.fault(Lane::Upload, Fault::Bug, ts(T0 + 10));
+    let tick = actor.fault(Lane::Upload, Fault::Bug(BugSite::PageMap), ts(T0 + 10));
     assert_eq!(tick, Tick::Halted(HaltCause::Bug));
 }
 
@@ -389,7 +389,7 @@ fn a_rebuild_reads_again_the_live_pages_nobody_took() {
     actor.read_live_pages();
     rig.settle(&mut actor, T0 + 1);
     // Read, and waiting to be taken, as the rebuild comes.
-    actor.fault(Lane::Upload, Fault::Bug, ts(T0 + 10));
+    actor.fault(Lane::Upload, Fault::Bug(BugSite::PageMap), ts(T0 + 10));
     let now = boot_again(&mut rig, &mut actor, T0 + 10);
     rig.settle(&mut actor, now + 1);
     let live = actor.take_live_pages();
@@ -402,7 +402,7 @@ fn a_rebuild_reads_again_the_live_pages_nobody_took() {
 fn a_rebuild_keeps_a_request_for_live_pages() {
     let (mut rig, mut actor) = caught_up_go_like();
     actor.read_live_pages();
-    actor.fault(Lane::Upload, Fault::Bug, ts(T0 + 10));
+    actor.fault(Lane::Upload, Fault::Bug(BugSite::PageMap), ts(T0 + 10));
     let now = boot_again(&mut rig, &mut actor, T0 + 10);
     rig.settle(&mut actor, now + 1);
     assert!(actor.take_live_pages().is_some());
@@ -414,7 +414,7 @@ fn a_rebuild_keeps_a_request_for_live_pages() {
 fn a_rebuild_keeps_an_operators_snapshot_request() {
     let (mut rig, mut actor) = caught_up_go_like();
     actor.request_snapshot();
-    actor.fault(Lane::Upload, Fault::Bug, ts(T0 + 10));
+    actor.fault(Lane::Upload, Fault::Bug(BugSite::PageMap), ts(T0 + 10));
     assert_eq!(
         actor.pending_snapshot(),
         Some(SnapshotCause::OperatorRequested)
@@ -439,7 +439,7 @@ fn a_rebuild_keeps_a_snapshot_request_made_behind_another_cause() {
     assert_eq!(was, Some(SnapshotCause::LocalTipUnreadable), "{lost:?}");
     actor.request_snapshot();
     assert_eq!(actor.pending_snapshot(), was);
-    actor.fault(Lane::Upload, Fault::Bug, ts(T0 + 10));
+    actor.fault(Lane::Upload, Fault::Bug(BugSite::PageMap), ts(T0 + 10));
     assert_eq!(
         actor.pending_snapshot(),
         Some(SnapshotCause::OperatorRequested)
@@ -529,7 +529,7 @@ fn a_rebuilt_actor_keeps_what_was_asked_and_reported_and_boots_again() {
 fn booted_follows_the_engines_own_rebuild() {
     let (mut rig, mut actor) = caught_up_go_like();
     assert!(actor.booted());
-    actor.fault(Lane::Upload, Fault::Bug, ts(T0 + 10));
+    actor.fault(Lane::Upload, Fault::Bug(BugSite::PageMap), ts(T0 + 10));
     assert!(!actor.booted());
     boot_again(&mut rig, &mut actor, T0 + 10);
     assert!(actor.booted());

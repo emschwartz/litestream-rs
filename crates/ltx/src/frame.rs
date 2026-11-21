@@ -202,7 +202,15 @@ impl FrameParser {
     /// Whether the next unit is covered by the file checksum as it stands,
     /// rather than through the decompressed page.
     pub(crate) const fn hashes_unit(&self) -> bool {
-        matches!(self.state, State::PageHeader | State::BlockSize)
+        match self.state {
+            State::PageHeader | State::BlockSize => true,
+            State::Block { .. }
+            | State::Descriptor
+            | State::DescriptorTail { .. }
+            | State::LegacyBlockSize
+            | State::LegacyBlock { .. }
+            | State::ContentChecksum => false,
+        }
     }
 
     /// The last page decompressed.

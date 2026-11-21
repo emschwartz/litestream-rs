@@ -150,7 +150,7 @@ impl From<&Fault> for FaultKind {
             Fault::WalUnlinked => Self::WalUnlinked,
             Fault::DatabasePageMismatch { .. } => Self::DatabasePageMismatch,
             Fault::ShutdownDeadline => Self::ShutdownDeadline,
-            Fault::Bug => Self::Bug,
+            Fault::Bug(_) => Self::Bug,
         }
     }
 }

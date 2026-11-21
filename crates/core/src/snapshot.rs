@@ -28,7 +28,7 @@ use lsr_ltx::{Header, HeaderFields, PageChecksum, PageSize, Timestamp};
 use lsr_wal::{CommittedEnd, OpenError, WalReader};
 use thiserror::Error;
 
-use crate::fault::Fault;
+use crate::fault::{BugSite, Fault};
 use crate::layout::{FileInfo, FileKey};
 use crate::pages::PageTable;
 use crate::position::{Continuity, SyncedThrough};
@@ -107,11 +107,12 @@ fn whole<W: WalSource>(proof: &SyncedThrough, wal: &mut W) -> Result<Whole<W::Wa
         return Err(Fault::WalMoved);
     }
     let synced = CommittedEnd::new(position.synced().offset().frame_index(), salts, page_size);
-    let upto = CommittedRead::new(synced, committed.backfilled()).ok_or(Fault::Bug)?;
+    let upto = CommittedRead::new(synced, committed.backfilled())
+        .ok_or(Fault::Bug(BugSite::SnapshotScan))?;
     let map = scan_whole(&mut reader, upto)?;
     let commit = position.commit();
     if map.commit() != 0 && map.commit() != commit.get() {
-        return Err(Fault::Bug);
+        return Err(Fault::Bug(BugSite::SnapshotScan));
     }
     let plan = plan_pages(&map, None, commit, page_size);
     Ok(Whole {
@@ -149,7 +150,7 @@ async fn run<W: WalSource, P: PageSource, S: ObjectStore>(
         wal: None,
         node_id: 0,
     })
-    .map_err(|_err| Fault::Bug)?;
+    .map_err(|_err| Fault::Bug(BugSite::Encode))?;
     let (file, _last) = stage(
         remote,
         key,

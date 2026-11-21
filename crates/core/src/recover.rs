@@ -233,9 +233,14 @@ impl TipView {
             None => LastPageCheck::NoFrame(Miss::Truncated),
             Some((wal, check, range)) => {
                 let checked = match_last_page(wal, check, end, salts, &pages)?;
-                if matches!(checked, LastPageCheck::Match { .. })
-                    && !range.agrees(&pages, commit.get())
-                {
+                let matched = match checked {
+                    LastPageCheck::Match { .. } => true,
+                    LastPageCheck::Mismatch
+                    | LastPageCheck::NotInTip
+                    | LastPageCheck::NoFrame(_)
+                    | LastPageCheck::Rewritten => false,
+                };
+                if matched && !range.agrees(&pages, commit.get()) {
                     LastPageCheck::Rewritten
                 } else {
                     checked
@@ -738,8 +743,11 @@ fn restarted(
     let Tip::Running(position, probes) = tip else {
         return plain(changed);
     };
-    let proven = matches!(position.continuity(), Continuity::Pinned(epoch) if epoch == wal.epoch)
-        && header.salts().salt1 == seen.salts.salt1.wrapping_add(1);
+    let pinned = match position.continuity() {
+        Continuity::Pinned(epoch) => epoch == wal.epoch,
+        Continuity::Unpinned => false,
+    };
+    let proven = pinned && header.salts().salt1 == seen.salts.salt1.wrapping_add(1);
     if !proven {
         return plain(changed);
     }
@@ -790,13 +798,13 @@ fn same_generation(
         .len
         .is_some_and(|len| !len.covers(crate::SyncedOffset::new(seen.end)));
     let frame = frame_state(tip, seen);
-    if committed.is_some_and(|end| end.get() < seen.end.get())
-        || short_file
-        || matches!(
-            frame,
-            FrameState::Miss(Miss::Truncated) | FrameState::Rewritten
-        )
-    {
+    let frame_gone = match frame {
+        FrameState::Miss(Miss::Truncated) | FrameState::Rewritten => true,
+        FrameState::Fresh
+        | FrameState::Mismatch
+        | FrameState::Miss(Miss::NotACommit | Miss::Moved) => false,
+    };
+    if committed.is_some_and(|end| end.get() < seen.end.get()) || short_file || frame_gone {
         let committed = committed.unwrap_or(WalOffset::start(seen.page_size));
         return Err(Refusal {
             cause: SnapshotCause::LocalRewound {

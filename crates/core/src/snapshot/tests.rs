@@ -384,7 +384,7 @@ fn snapshot_mark_above_synced_is_bug() {
     // nBackfill passed the synced end: this is not a proof from this read transaction.
     rig.wal.backfill(2);
     let failed = rig.snapshot(2000).unwrap_err();
-    assert_eq!(failed.fault, Fault::Bug);
+    assert_eq!(failed.fault, Fault::Bug(BugSite::SnapshotScan));
     assert_eq!(rig.remote_files(), 0);
 }
 

@@ -81,7 +81,7 @@ use crate::checkpoint::{
 };
 use crate::compact::CompactError;
 use crate::fault::{
-    Action, Backoff, Clamped, Fault, HaltCause, Next, PersistentCause, Policy, Responses,
+    Action, Backoff, BugSite, Clamped, Fault, HaltCause, Next, PersistentCause, Policy, Responses,
     SnapshotCause, backoff_wait, policy,
 };
 use crate::host::HostCheckpoints;
@@ -337,23 +337,50 @@ fn compact_fault(err: &CompactError) -> Fault {
         CompactError::InputVanished { .. } => Fault::RemoteObjectMissing,
         CompactError::Source(err) | CompactError::Dest(err) => Fault::from_remote(err),
         CompactError::Input { .. } | CompactError::Encode(_) => Fault::RemoteCorrupt,
-        CompactError::Inputs(_) | CompactError::SnapshotLevel { .. } => Fault::Bug,
+        CompactError::Inputs(_) | CompactError::SnapshotLevel { .. } => {
+            Fault::Bug(BugSite::CompactionInputs)
+        }
     }
 }
 
 /// Whether a failed snapshot may have left an object under its key: the store
 /// answered the commit with a size or a checksum that is not the one sent.
 const fn leaves_bad_snapshot(fault: Fault) -> bool {
-    matches!(
-        fault,
-        Fault::UploadAmbiguous | Fault::UploadChecksumMismatch
-    )
+    match fault {
+        Fault::UploadAmbiguous | Fault::UploadChecksumMismatch => true,
+        Fault::StoreTransient
+        | Fault::StoreThrottled { .. }
+        | Fault::StoreAuth
+        | Fault::RemoteObjectMissing
+        | Fault::StoreRefused
+        | Fault::RemoteCorrupt
+        | Fault::RemoteAheadOfLocal
+        | Fault::RemoteRegressed
+        | Fault::StagedLost
+        | Fault::LocalDiskFull
+        | Fault::LocalIo
+        | Fault::LocalFsyncFailed
+        | Fault::SqliteBusy
+        | Fault::ReadersHeld
+        | Fault::WalMoved
+        | Fault::WalIndexInconsistent
+        | Fault::WalChangedUnderRead
+        | Fault::NothingToSnapshot
+        | Fault::ReadTxLost
+        | Fault::PageSizeChanged { .. }
+        | Fault::WalCorruptBelowCommitted
+        | Fault::WalTruncatedBelowCommitted
+        | Fault::WalUnlinked
+        | Fault::DatabasePageMismatch { .. }
+        | Fault::ShutdownDeadline
+        | Fault::Bug(_) => false,
+    }
 }
 
 fn stamp_fault(err: &ResolveError) -> Fault {
     match err {
         ResolveError::Store(err) => Fault::from_remote(err),
-        ResolveError::Repeated { .. } => Fault::Bug,
+        ResolveError::Repeated { .. } => Fault::Bug(BugSite::StampRepeated),
     }
 }
 

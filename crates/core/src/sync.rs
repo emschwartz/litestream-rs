@@ -33,7 +33,7 @@ use lsr_wal::{
 };
 use std::io::{Read, Seek};
 
-use crate::fault::{Clamped, Fault, HaltCause, SnapshotCause};
+use crate::fault::{BugSite, Clamped, Fault, HaltCause, SnapshotCause};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::pages::{PageTable, snapshot_clears};
 use crate::position::{Continuity, LastPage, Position, ReachedEnd, ReadEpoch};
@@ -252,7 +252,10 @@ struct Start {
 impl Start {
     fn of<R: Read + Seek>(step: &Step, wal: &WalReader<R>) -> Result<Self, Fault> {
         let from_start = wal.cursor_at_start();
-        let next = |txid: Option<Txid>| txid.and_then(Txid::next).ok_or(Fault::Bug);
+        let next = |txid: Option<Txid>| {
+            txid.and_then(Txid::next)
+                .ok_or(Fault::Bug(BugSite::TxidExhausted))
+        };
         match step {
             Step::Incremental(position) => Ok(Self {
                 cursor: position.cursor(),
@@ -440,7 +443,8 @@ async fn fill<R: Read + Seek, P: PageSource, U: Upload>(
     pages: &mut PageTable,
     map_store: fn(&StoreError) -> Fault,
 ) -> Result<Option<LastPage>, Fault> {
-    let mut encoder = Encoder::new(Vec::new(), header).map_err(|_err| Fault::Bug)?;
+    let mut encoder =
+        Encoder::new(Vec::new(), header).map_err(|_err| Fault::Bug(BugSite::Encode))?;
     let mut buf = vec![0_u8; header.page_size().bytes()];
     let mut last = None;
     for (index, page) in plan.iter().enumerate() {
@@ -459,7 +463,7 @@ async fn fill<R: Read + Seek, P: PageSource, U: Upload>(
         }
         encoder
             .write_page(page.pgno(), &buf)
-            .map_err(|_err| Fault::Bug)?;
+            .map_err(|_err| Fault::Bug(BugSite::Encode))?;
         if index.saturating_add(1) == plan.len() {
             last = Some(LastPage::new(
                 page.pgno(),
@@ -471,7 +475,9 @@ async fn fill<R: Read + Seek, P: PageSource, U: Upload>(
             upload.write(&chunk).await.map_err(|err| map_store(&err))?;
         }
     }
-    let (rest, _trailer) = encoder.finish(None).map_err(|_err| Fault::Bug)?;
+    let (rest, _trailer) = encoder
+        .finish(None)
+        .map_err(|_err| Fault::Bug(BugSite::Encode))?;
     upload.write(&rest).await.map_err(|err| map_store(&err))?;
     Ok(last)
 }
@@ -605,7 +611,7 @@ async fn run<R: Read + Seek, P: PageSource, L: ObjectStore>(
     let last_page = match (scanned.last_frame, last_written) {
         (Some(frame), _) => LastPage::of_frame(&frame),
         (None, Some(page)) => page,
-        (None, None) => return Err(Fault::Bug),
+        (None, None) => return Err(Fault::Bug(BugSite::StepWithoutPages)),
     };
     let position = Position::new(
         start.txid,
@@ -687,7 +693,8 @@ fn stamp<R: Read + Seek>(
 ) -> Result<Header, Fault> {
     let salts = wal.header().salts();
     let size = scanned.cursor.next().get().saturating_sub(start.begin);
-    let origin = WalOrigin::new(start.begin, size, salts.salt1, salts.salt2).ok_or(Fault::Bug)?;
+    let origin = WalOrigin::new(start.begin, size, salts.salt1, salts.salt2)
+        .ok_or(Fault::Bug(BugSite::Encode))?;
     let (timestamp, _clamped) = clamp(start.prev_timestamp, now);
     let fields = header_fields(
         start.txid,
@@ -697,7 +704,7 @@ fn stamp<R: Read + Seek>(
         timestamp,
         node_id,
     );
-    Header::new(fields).map_err(|_err| Fault::Bug)
+    Header::new(fields).map_err(|_err| Fault::Bug(BugSite::Encode))
 }
 
 #[cfg(test)]

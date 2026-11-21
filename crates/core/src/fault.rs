@@ -133,8 +133,40 @@ pub enum Fault {
     },
     /// The shutdown deadline arrived mid-work.
     ShutdownDeadline,
-    /// A condition the code rules out. A property test asserts it never fires.
-    Bug,
+    /// A condition the code rules out, and where it was met. A property test
+    /// asserts it never fires.
+    Bug(BugSite),
+}
+
+/// Where a condition the code rules out was met: the invariant to look at
+/// when [`Fault::Bug`] is ever reported.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BugSite {
+    /// The transaction after the newest has no successor.
+    TxidExhausted,
+    /// The encoder refused a header or a page the writer laid out itself.
+    Encode,
+    /// A staged file had neither a WAL frame nor a page to name its end.
+    StepWithoutPages,
+    /// A snapshot's scan of the WAL disagrees with the position it was
+    /// proven for.
+    SnapshotScan,
+    /// The checkpoint's uncapped sync step stopped at a cap.
+    CappedCheckpointStep,
+    /// An upload had bytes to send and no open upload to send them to.
+    UploadNeverOpened,
+    /// The decoder took no byte of a non-empty chunk.
+    DecoderStalled,
+    /// Compaction was planned with inputs it cannot take.
+    CompactionInputs,
+    /// A file's stamp was asked for twice in one resolve.
+    StampRepeated,
+    /// The WAL reader was resumed from a cursor its own scan did not give.
+    WalResume,
+    /// A WAL page was read back into a buffer of the wrong size.
+    WalPageRead,
+    /// The page map was fed out of the order one scan produces.
+    PageMap,
 }
 
 /// Why a snapshot is taken instead of continuing.
@@ -383,7 +415,10 @@ impl Responses {
     /// Whether `cause` stops the engine.
     #[must_use]
     pub const fn stops(&self, cause: PersistentCause) -> bool {
-        matches!(self.action(cause), Action::Stop)
+        match self.action(cause) {
+            Action::Stop => true,
+            Action::Retry | Action::Relist | Action::Rebuild => false,
+        }
     }
 
     /// What the actor does about `cause`.
@@ -507,7 +542,7 @@ pub const fn policy(fault: &Fault) -> Policy {
             Policy::Persistent(PersistentCause::DatabasePageMismatch { pgno: *pgno })
         }
         Fault::ShutdownDeadline => Policy::Shutdown,
-        Fault::Bug => Policy::Persistent(PersistentCause::Bug),
+        Fault::Bug(_) => Policy::Persistent(PersistentCause::Bug),
     }
 }
 
@@ -617,7 +652,9 @@ impl Fault {
                 now: expected,
             },
             ResumeError::Truncated { .. } | ResumeError::Restarted { .. } => Self::WalMoved,
-            ResumeError::PrevFrame { .. } | ResumeError::NotAtCommit { .. } => Self::Bug,
+            ResumeError::PrevFrame { .. } | ResumeError::NotAtCommit { .. } => {
+                Self::Bug(BugSite::WalResume)
+            }
         }
     }
 
@@ -628,7 +665,9 @@ impl Fault {
             ReadPageError::Io(_) => Self::LocalIo,
             ReadPageError::ChangedSinceScan { .. } => Self::WalChangedUnderRead,
             ReadPageError::Truncated { .. } => Self::WalTruncatedBelowCommitted,
-            ReadPageError::BufferSize { .. } | ReadPageError::PageSizeMismatch { .. } => Self::Bug,
+            ReadPageError::BufferSize { .. } | ReadPageError::PageSizeMismatch { .. } => {
+                Self::Bug(BugSite::WalPageRead)
+            }
         }
     }
 
@@ -639,7 +678,7 @@ impl Fault {
             PageMapError::PageSizeMismatch { .. }
             | PageMapError::NotAfterEnd { .. }
             | PageMapError::Gap { .. }
-            | PageMapError::Generation { .. } => Self::Bug,
+            | PageMapError::Generation { .. } => Self::Bug(BugSite::PageMap),
         }
     }
 

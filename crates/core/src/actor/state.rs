@@ -73,6 +73,24 @@ pub struct Degraded {
     pub retries: u32,
 }
 
+/// Whether the cause is a database page that did not match: the one
+/// degradation a lane's success does not end.
+const fn is_page_mismatch(cause: PersistentCause) -> bool {
+    match cause {
+        PersistentCause::DatabasePageMismatch { .. } => true,
+        PersistentCause::Credentials
+        | PersistentCause::StoreRefused
+        | PersistentCause::RemoteCorrupt
+        | PersistentCause::ForeignWriter
+        | PersistentCause::RemoteRegressed
+        | PersistentCause::WalCorrupt
+        | PersistentCause::WalTruncated
+        | PersistentCause::WalUnlinked
+        | PersistentCause::PageSizeChanged { .. }
+        | PersistentCause::Bug => false,
+    }
+}
+
 /// One lane's retry memory: how many failures in a row, until when it waits,
 /// and whether the run of failures is a persistent one.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -150,7 +168,7 @@ impl Retry {
     pub(super) fn succeed(&mut self) {
         let kept = self
             .degraded
-            .filter(|was| matches!(was.cause, PersistentCause::DatabasePageMismatch { .. }))
+            .filter(|was| is_page_mismatch(was.cause))
             .map(|was| Degraded { retries: 1, ..was });
         *self = Self {
             degraded: kept,
@@ -207,10 +225,10 @@ impl Lanes {
     pub(super) fn page_matches_again(&mut self) {
         for lane in Lane::ALL {
             let retry = self.get_mut(lane);
-            if matches!(
-                retry.degraded.map(|was| was.cause),
-                Some(PersistentCause::DatabasePageMismatch { .. })
-            ) {
+            if retry
+                .degraded
+                .is_some_and(|was| is_page_mismatch(was.cause))
+            {
                 retry.degraded = None;
             }
         }

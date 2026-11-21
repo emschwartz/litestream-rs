@@ -40,7 +40,7 @@ use std::num::NonZeroU32;
 
 use lsr_ltx::{Decoder, Header, Txid, TxidRange};
 
-use crate::fault::Fault;
+use crate::fault::{BugSite, Fault};
 use crate::inventory::{Inventory, InventoryError};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::store::{ObjectStore, PageLimit, ReadLen, StoreError, Upload};
@@ -465,7 +465,7 @@ async fn put_staged<L: ObjectStore, S: ObjectStore>(
         }
     };
     let Some(open) = upload else {
-        return Err(PutError::Before(Fault::Bug));
+        return Err(PutError::Before(Fault::Bug(BugSite::UploadNeverOpened)));
     };
     match open.commit().await {
         Ok(info) if info.key == *key && info.size == wrote => Ok(info),
@@ -490,7 +490,7 @@ fn feed_all(decoder: &mut Decoder, chunk: &[u8]) -> Result<bool, Fault> {
             return Ok(false);
         };
         if used == 0 {
-            return Err(Fault::Bug);
+            return Err(Fault::Bug(BugSite::DecoderStalled));
         }
         rest = rest.get(used..).unwrap_or_default();
     }

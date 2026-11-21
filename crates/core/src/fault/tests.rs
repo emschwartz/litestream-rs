@@ -166,7 +166,7 @@ policy_is!(
 );
 policy_is!(
     bug_is_persistent,
-    Fault::Bug,
+    Fault::Bug(BugSite::PageMap),
     persistent(PersistentCause::Bug)
 );
 
@@ -201,9 +201,9 @@ fn every_fault_has_a_named_policy_test() {
         | Fault::WalUnlinked
         | Fault::DatabasePageMismatch { .. }
         | Fault::ShutdownDeadline
-        | Fault::Bug => true,
+        | Fault::Bug(_) => true,
     };
-    assert!(tested(&Fault::Bug));
+    assert!(tested(&Fault::Bug(BugSite::PageMap)));
 }
 
 fn page_two() -> PageNo {
@@ -614,9 +614,12 @@ fn from_resume_maps_every_variant() {
                 at: at(),
                 fault: FrameFault::ChecksumMismatch,
             },
-            Fault::Bug,
+            Fault::Bug(BugSite::WalResume),
         ),
-        (ResumeError::NotAtCommit { at: at() }, Fault::Bug),
+        (
+            ResumeError::NotAtCommit { at: at() },
+            Fault::Bug(BugSite::WalResume),
+        ),
     ];
     for (err, fault) in cases {
         let shown = format!("{err:?}");
@@ -633,14 +636,14 @@ fn from_read_page_maps_every_variant() {
                 expected: 4096,
                 found: 1,
             },
-            Fault::Bug,
+            Fault::Bug(BugSite::WalPageRead),
         ),
         (
             ReadPageError::PageSizeMismatch {
                 expected: ps(),
                 found: PageSize::MIN,
             },
-            Fault::Bug,
+            Fault::Bug(BugSite::WalPageRead),
         ),
         (
             ReadPageError::Truncated {
@@ -684,7 +687,11 @@ fn from_page_map_is_always_a_bug() {
         },
     ];
     for err in cases {
-        assert_eq!(Fault::from_page_map(err), Fault::Bug, "{err:?}");
+        assert_eq!(
+            Fault::from_page_map(err),
+            Fault::Bug(BugSite::PageMap),
+            "{err:?}"
+        );
     }
 }
 

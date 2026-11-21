@@ -401,13 +401,18 @@ impl Worker {
         // A drain that made progress ticks again at once: the engine reports `Drained` only on
         // the tick after its last upload, and would otherwise name the drain's deadline (or the
         // next poll) as its wake. A retry is not progress: it waits its backoff.
-        let progress = matches!(
-            event,
+        let progress = match event {
             EngineEvent::Booted { .. }
-                | EngineEvent::Synced { .. }
-                | EngineEvent::Uploaded(_)
-                | EngineEvent::Resnapshot(_)
-        );
+            | EngineEvent::Synced { .. }
+            | EngineEvent::Uploaded(_)
+            | EngineEvent::Resnapshot(_) => true,
+            EngineEvent::Checkpointed { .. }
+            | EngineEvent::Maintained { .. }
+            | EngineEvent::Idle
+            | EngineEvent::Degraded { .. }
+            | EngineEvent::Retrying { .. }
+            | EngineEvent::Clamped(_) => false,
+        };
         if !idle {
             self.emit(&Event::Engine(event));
         }
@@ -553,7 +558,11 @@ impl Worker {
             return self.halted(cause);
         }
         let until = self.schedule_rebuild(cause, now);
-        if let Some(rebuilt) = self.rebuilt.filter(|_| matches!(reopen, Reopen::Replaced)) {
+        let replaced = match reopen {
+            Reopen::Replaced => true,
+            Reopen::Failed => false,
+        };
+        if let Some(rebuilt) = self.rebuilt.filter(|_| replaced) {
             let event = EngineEvent::Degraded {
                 lane: Lane::Sync,
                 cause,
