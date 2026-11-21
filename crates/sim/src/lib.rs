@@ -29,7 +29,7 @@ mod testkit;
 pub mod world;
 
 pub use exec::{Polls, RunEnd, count_polls, run_until};
-pub use generate::{EnvFault, Op, Target, Weights, history};
+pub use generate::{EnvFault, Generator, Op, Target, Weights, frozen_history, history};
 pub use model::{CommitId, CommitRec, Model, PageImage};
 pub use oracle::{Acked, Bound, Checked, Violation, bug_fault, check, within};
 pub use run::{Failure, Opts, RunReport, run, run_with, shrink};
