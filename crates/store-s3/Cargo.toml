@@ -25,6 +25,10 @@ reqwest = [
     "dep:tokio",
     "dep:webpki-roots",
 ]
+# For a host that hands `ReqwestTransport` a reqwest client on native-tls: its TLS
+# failures are classified as such (they are not rustls errors). Enables reqwest's own
+# `native-tls`, which such a host has on already.
+native-tls = ["reqwest", "dep:native-tls", "reqwest/native-tls"]
 
 [dependencies]
 lsr-core.workspace = true
@@ -42,6 +46,7 @@ reqwest = { workspace = true, optional = true }
 # and recognising a TLS failure inside reqwest's error chain.
 rustls = { workspace = true, optional = true, features = ["std"] }
 tokio = { workspace = true, optional = true }
+native-tls = { workspace = true, optional = true }
 url.workspace = true
 zeroize.workspace = true
 

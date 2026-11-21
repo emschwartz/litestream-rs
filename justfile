@@ -38,12 +38,14 @@ commit-check base="":
     fi
 
 # The S3 store's HTTP clients (docs/plans/phase-1-reading.md, ruling F2 as amended):
-# each builds alone, all build together, and reqwest's own tests run (ureq's run in `test`).
+# each builds alone, all build together, and reqwest's own tests run (ureq's run in `test`),
+# then the test of a host's native-tls client, which needs the `native-tls` feature.
 features:
     cargo clippy -p lsr-store-s3 --no-default-features --lib --locked -- -D warnings
     cargo clippy -p lsr-store-s3 --no-default-features --features reqwest --lib --locked -- -D warnings
     cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
     cargo nextest run -p lsr-store-s3 --features reqwest --lib --locked
+    cargo nextest run -p lsr-store-s3 --features native-tls --lib --locked native_tls
 
 # nextest does not run doctests, and the compile-fail proofs (a proof token is not Clone) live there.
 doctest:

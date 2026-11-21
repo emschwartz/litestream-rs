@@ -279,5 +279,20 @@ fn the_default_clients_read_the_process_environment() {
     run_child(&url, Some(&pki.ca()), with_file);
 }
 
+/// A host's reqwest client on native-tls, which refuses the private CA: the
+/// failure is a native-tls error, not a rustls one, and is still `Tls` (a
+/// certificate problem the operator fixes, never a connection to retry).
+#[cfg(feature = "native-tls")]
+#[test]
+fn a_native_tls_host_client_refusing_the_certificate_is_tls() {
+    let pki = Pki::new();
+    let client = reqwest::Client::builder()
+        .tls_backend_native()
+        .build()
+        .expect("client");
+    let transport = crate::ReqwestTransport::with_client(client, DEADLINE).expect("transport");
+    assert_eq!(get(&transport, &pki.serve()), Err(TransportError::Tls));
+}
+
 #[cfg(all(unix, not(target_vendor = "apple")))]
 mod go_unix;

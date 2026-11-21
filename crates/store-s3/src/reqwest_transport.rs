@@ -30,7 +30,9 @@
 //! crypto provider (reqwest's default is aws-lc-rs, a C build). A host client
 //! keeps its own TLS and its own roots; it needs a provider from the host's
 //! reqwest features (reqwest's default `rustls` feature has one) or one the
-//! host installed as the process default, or reqwest panics building it.
+//! host installed as the process default, or reqwest panics building it. A
+//! host client on native-tls needs this crate's `native-tls` feature for its
+//! TLS failures to be [`TransportError::Tls`] rather than a connection error.
 
 use std::io;
 use std::time::Duration;
@@ -248,17 +250,29 @@ fn below<'a>(
     }
 }
 
-/// Whether a rustls error is anywhere in the chain (hyper-rustls nests it in two
-/// `io::Error`s), so a certificate failure is `Tls` here as it is under ureq.
+/// Whether a TLS library's error is anywhere in the chain, so a certificate
+/// failure is `Tls` here as it is under ureq: rustls's (hyper-rustls nests it in
+/// two `io::Error`s), and with the `native-tls` feature, native-tls's, from a
+/// host client built on it. reqwest has no TLS kind of its own to ask for, so
+/// the chain is matched by type.
 fn is_tls(err: &reqwest::Error) -> bool {
     let mut current: Option<&(dyn std::error::Error + 'static)> = Some(err);
     while let Some(here) = current {
-        if here.downcast_ref::<rustls::Error>().is_some() {
+        if is_tls_library_error(here) {
             return true;
         }
         current = below(here);
     }
     false
+}
+
+/// One link of the chain is a TLS library's own error.
+fn is_tls_library_error(err: &(dyn std::error::Error + 'static)) -> bool {
+    #[cfg(feature = "native-tls")]
+    if err.downcast_ref::<native_tls::Error>().is_some() {
+        return true;
+    }
+    err.downcast_ref::<rustls::Error>().is_some()
 }
 
 /// The kind of the innermost `io::Error` in the chain.
