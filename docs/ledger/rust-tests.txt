@@ -181,6 +181,10 @@ lsr-core actor::tests::prune_keeps_exactly_the_uncompacted_and_the_tip
 lsr-core actor::tests::rejected_snapshot::a_rejected_snapshot_is_deleted_at_once
 lsr-core actor::tests::rejected_snapshot::a_rejected_snapshot_that_cannot_be_deleted_goes_first_and_holds_retention
 lsr-core actor::tests::rejected_snapshot::a_snapshot_that_fails_before_its_commit_deletes_nothing
+lsr-core actor::tests::remote_tip::with_staging_gone_a_replica_tip_naming_another_transaction_halts_corrupt
+lsr-core actor::tests::remote_tip::with_staging_gone_a_wal_that_restarted_snapshots_as_a_staged_tip_would
+lsr-core actor::tests::remote_tip::with_staging_gone_and_level_zero_retained_away_boot_is_a_first_sync
+lsr-core actor::tests::remote_tip::with_staging_gone_boot_continues_from_the_replicas_tip
 lsr-core actor::tests::retry_backs_off_per_lane
 lsr-core actor::tests::snapshot_job_writes_level_9
 lsr-core actor::tests::stamp_failure_is_a_maintain_fault
@@ -514,6 +518,14 @@ lsr-core position::tests::a_position_takes_its_synced_end_and_page_size_from_its
 lsr-core position::tests::a_through_proof_gives_back_its_position
 lsr-core position::tests::epochs_count_up
 lsr-core position::tests::replacing_continuity_changes_nothing_else
+lsr-core recover::remote::tests::a_replica_tip_over_one_read_is_checked_whole
+lsr-core recover::remote::tests::a_replica_tip_that_does_not_verify_is_corrupt
+lsr-core recover::remote::tests::a_replica_tip_whose_header_names_another_transaction_is_corrupt
+lsr-core recover::remote::tests::a_replica_tip_without_a_wal_origin_is_no_tip
+lsr-core recover::remote::tests::a_wiped_meta_continues_from_the_replicas_tip
+lsr-core recover::remote::tests::no_level_zero_file_at_the_newest_transaction_is_no_tip
+lsr-core recover::remote::tests::review_a_rewind_of_two_transactions_regrowing_an_identical_tip_is_caught
+lsr-core recover::remote::tests::the_replicas_tip_decides_as_the_same_file_staged_would
 lsr-core recover::tests::a_range_missing_from_this_wal_does_not_veto
 lsr-core recover::tests::a_range_regrown_with_another_commit_size_is_a_rewind
 lsr-core recover::tests::a_rewound_tail_rewritten_with_the_same_last_page_is_not_continued
@@ -1094,6 +1106,7 @@ lsr-sim::fixed_seeds fixed::seeds_57_to_64
 lsr-sim::fixed_seeds fixed::seeds_9_to_16
 lsr-sim::replay replay::replay_the_named_run
 lsr-sim::snapshot_causes a_page_size_change_halts_and_the_old_states_restore
+lsr-sim::snapshot_causes a_wiped_meta_continues_from_the_replicas_tip
 lsr-sim::snapshot_causes every_cause_has_a_scenario
 lsr-sim::snapshot_causes every_scenario_runs
 lsr-sim::soak soak::rotating_seeds

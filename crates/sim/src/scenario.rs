@@ -188,17 +188,20 @@ pub fn run_scenario(scenario: &Scenario) -> Result<RunReport, String> {
 #[must_use]
 pub fn scenario_of(cause: SnapshotCause) -> &'static [fn() -> Scenario] {
     match cause {
-        SnapshotCause::FirstSync => &[empty_meta_boot, meta_wiped_remote_kept],
+        SnapshotCause::FirstSync => &[empty_meta_boot],
         SnapshotCause::BehindRemote { .. } => &[newest_staged_file_lost, restored_old_meta],
         SnapshotCause::LocalTipUnreadable => &[tip_byte_flip, tip_truncated, tip_no_wal_origin],
         SnapshotCause::WalMissing => &[wal_deleted_while_down, wal_header_torn],
         SnapshotCause::GenerationChanged => &[
             app_checkpoint_while_down,
+            meta_wiped_wal_restarted,
             restart_during_read_lock_lapse,
             pinned_on_zero_single_restart,
         ],
         SnapshotCause::PrevFrameMismatch => &[wal_rewritten_same_length],
-        SnapshotCause::LastPageMismatch => &[wal_regrown_same_salts_diff_bytes],
+        SnapshotCause::LastPageMismatch => {
+            &[wal_regrown_same_salts_diff_bytes, meta_wiped_wal_regrown]
+        }
         SnapshotCause::LocalRewound { .. } => &[power_loss_wal_rewind],
         SnapshotCause::CheckpointBoundary => &[truncate_threshold_crossed],
         SnapshotCause::OperatorRequested => &[cli_snapshot],
@@ -282,13 +285,98 @@ pub fn empty_meta_boot() -> Scenario {
     )
 }
 
-/// The staging directory is wiped while the replica keeps its files: with no
-/// tip there is no position to compare, so this is a first sync, not a replica
-/// ahead of us.
+/// The staging directory is wiped while the replica keeps its files: boot
+/// reads the replica's newest level-0 file as the tip, the WAL still matches
+/// it, and the engine continues with no snapshot.
 #[must_use]
 pub fn meta_wiped_remote_kept() -> Scenario {
-    let wipe = vec![Op::EnvFault(EnvFault::WipeStaging)];
-    after_restart("meta_wiped_remote_kept", wipe, CauseKind::FirstSync)
+    let mut s = build(
+        "meta_wiped_remote_kept",
+        vec![
+            synced(),
+            vec![
+                Op::EnvFault(EnvFault::WipeStaging),
+                Op::Tick,
+                commit(2, false),
+            ],
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        vec![Expect::Event(EventMatch::Booted(None)), Expect::Oracle],
+    );
+    s.check = Some(last_boot_continues);
+    s
+}
+
+/// The boot after the wipe (the last before the oracle judged) took no
+/// snapshot and staged none before the oracle, and asked the replica for one
+/// listing per level (the upload lane's), the upload lane's read-back of the
+/// newest file, and one read of that file as the tip.
+fn last_boot_continues(report: &RunReport) -> Result<(), String> {
+    use lsr_core::Event;
+    let judged = report
+        .seen
+        .iter()
+        .position(|seen| matches!(seen, Seen::Oracle))
+        .ok_or("the oracle never judged")?;
+    let seen = report.seen.get(..judged).unwrap_or_default();
+    let boot = seen
+        .iter()
+        .rposition(|seen| matches!(seen, Seen::Event(Event::Booted { .. })))
+        .ok_or("no boot")?;
+    let (before, after) = seen.split_at(boot);
+    if !matches!(
+        after.first(),
+        Some(Seen::Event(Event::Booted { cause: None }))
+    ) {
+        return Err(format!("the boot after the wipe was {:?}", after.first()));
+    }
+    if after.iter().any(|seen| matches!(seen, Seen::Snapshot(_))) {
+        return Err("a snapshot was staged after the wipe".to_owned());
+    }
+    let levels = u64::try_from(Level::ALL.len()).map_err(|err| err.to_string())?;
+    match before.last() {
+        Some(Seen::Tick {
+            remote_calls,
+            remote_lists,
+            ..
+        }) if *remote_lists == levels && remote_calls.checked_sub(levels) == Some(2) => Ok(()),
+        other => Err(format!("the boot's replica calls were {other:?}")),
+    }
+}
+
+/// The staging directory is wiped and, while the engine is down, an outside
+/// TRUNCATE and a commit restart the WAL: the replica's tip gives the same
+/// snapshot a staged tip would.
+#[must_use]
+pub fn meta_wiped_wal_restarted() -> Scenario {
+    let restarted = vec![
+        Op::OurReader { begin: false },
+        Op::StrangerCheckpoint(StrangerMode::Truncate),
+        commit(2, false),
+        Op::EnvFault(EnvFault::WipeStaging),
+    ];
+    after_restart(
+        "meta_wiped_wal_restarted",
+        restarted,
+        CauseKind::GenerationChanged,
+    )
+}
+
+/// The staging directory is wiped and the WAL's frames are regrown in the
+/// same generation with other bytes: only the tip's page bytes, read back from
+/// the replica, show it.
+#[must_use]
+pub fn meta_wiped_wal_regrown() -> Scenario {
+    let regrown = vec![
+        Op::Wal(WalOp::RegrowSameSalts(3)),
+        Op::EnvFault(EnvFault::WipeStaging),
+    ];
+    after_restart(
+        "meta_wiped_wal_regrown",
+        regrown,
+        CauseKind::LastPageMismatch,
+    )
 }
 
 /// The newest staged file is gone but an older one remains: the replica is ahead.

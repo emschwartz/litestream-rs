@@ -3,7 +3,9 @@
 
 use lsr_core::SnapshotCause;
 use lsr_ltx::{PageSize, Txid};
-use lsr_sim::scenario::{Scenario, run_scenario, scenario_of, vacuum_page_size_change};
+use lsr_sim::scenario::{
+    Scenario, meta_wiped_remote_kept, run_scenario, scenario_of, vacuum_page_size_change,
+};
 use lsr_wal::WalOffset;
 
 fn local() -> Txid {
@@ -74,4 +76,11 @@ fn every_scenario_runs() {
 #[test]
 fn a_page_size_change_halts_and_the_old_states_restore() {
     run(vacuum_page_size_change);
+}
+
+/// With the staging directory wiped and the replica kept, boot continues from
+/// the replica's tip: no snapshot, and the oracle holds.
+#[test]
+fn a_wiped_meta_continues_from_the_replicas_tip() {
+    run(meta_wiped_remote_kept);
 }
