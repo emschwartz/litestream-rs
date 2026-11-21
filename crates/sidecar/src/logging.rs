@@ -218,7 +218,7 @@ pub fn text_line(time: &str, level: LogLevel, msg: &str, fields: &[(&str, Value)
 }
 
 /// A JSON string literal.
-fn json_string(text: &str) -> String {
+pub(crate) fn json_string(text: &str) -> String {
     let mut out = String::with_capacity(text.len().saturating_add(2));
     out.push('"');
     for c in text.chars() {

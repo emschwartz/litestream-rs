@@ -297,7 +297,9 @@ Arguments:
 \t    Defaults to $LITESTREAM_CONFIG, else /etc/litestream.yml
 
 \t-exec CMD
-\t    Not in this build yet: refused.
+\t    Executes a subcommand once every database is pinned. Litestream will exit
+\t    when the child process exits, with its exit status; signals are forwarded
+\t    to it. Overrides the config file's exec. Cannot be used with -once.
 
 \t-once
 \t    Replicate once and exit: sync and upload every database, then stop.
@@ -321,6 +323,10 @@ Arguments:
 
 SIGINT, SIGTERM and SIGHUP stop replication after a final sync, bounded by
 shutdown-sync-timeout for all databases together; a second signal cuts it short.
+With -exec the signal goes to the child first, and the drain waits for it.
+
+The config's addr serves /metrics (Prometheus) and /healthz (JSON) on exactly
+the address given; an empty host is every interface.
 ";
 
 #[cfg(test)]

@@ -960,6 +960,7 @@ dependencies = [
  "lsr-replica",
  "lsr-store-fs",
  "lsr-store-s3",
+ "rustix",
  "signal-hook",
  "thiserror",
 ]

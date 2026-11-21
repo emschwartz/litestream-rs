@@ -23,7 +23,7 @@ use crate::args::{
     CONFIG_CHECK_SUMMARY, CONFIG_CHECK_USAGE, CommandName, DAEMON_SUMMARY, DAEMON_USAGE, FLAGS,
     REPLICATE_SUMMARY, REPLICATE_USAGE,
 };
-use crate::run::{CliError, Done, Exit, Finished, RestoreDone, Skip, Source};
+use crate::run::{CHILD_EXIT_MEANING, CliError, Done, Exit, Finished, RestoreDone, Skip, Source};
 use lsr_core::ListedStamp;
 use lsr_local::IntegrityCheck;
 use lsr_replica::Stopped;
@@ -117,6 +117,7 @@ pub fn help() -> String {
     for exit in Exit::ALL {
         putln!(out, "  {:<3}{}", exit.code(), exit.meaning());
     }
+    putln!(out, "  {CHILD_EXIT_MEANING}");
     out
 }
 

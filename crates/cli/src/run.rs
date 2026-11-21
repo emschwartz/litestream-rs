@@ -52,7 +52,14 @@ pub enum Exit {
     Environment,
     /// The command line is wrong.
     Usage,
+    /// `replicate -exec`: the child's own failing exit status, passed on (128 + the signal
+    /// for a child a signal the daemon did not forward ended). Never 0.
+    Child(u8),
 }
+
+/// The help line for [`Exit::Child`], which has no one code.
+pub const CHILD_EXIT_MEANING: &str =
+    "N  replicate -exec: the child's own failing exit status, or 128 + the signal that ended it";
 
 impl Exit {
     /// Every code, for the help text.
@@ -73,6 +80,7 @@ impl Exit {
             Self::Refused => 2,
             Self::Environment => 3,
             Self::Usage => 64,
+            Self::Child(code) => code,
         }
     }
 
@@ -89,6 +97,7 @@ impl Exit {
                 "store, destination or I/O failure; for replicate, a database that did not start or drain"
             }
             Self::Usage => "usage error",
+            Self::Child(_) => CHILD_EXIT_MEANING,
         }
     }
 }
@@ -366,8 +375,11 @@ pub fn exit_for_done(done: &Done) -> Exit {
         },
         Done::Replicated { stopped, .. } if crate::replicate::drained(stopped) => Exit::Success,
         Done::Replicated { .. } => Exit::Environment,
-        Done::Daemon(finished) if finished.clean() => Exit::Success,
-        Done::Daemon(_) => Exit::Environment,
+        Done::Daemon(finished) => match finished.child_code() {
+            Some(code) => Exit::Child(code),
+            None if finished.clean() => Exit::Success,
+            None => Exit::Environment,
+        },
         Done::ConfigChecked(report) => config_exit(report),
         Done::Restore(_)
         | Done::Files { .. }
@@ -402,9 +414,11 @@ fn daemon_exit(error: &lsr_sidecar::SidecarError) -> Exit {
     match error {
         SidecarError::Usage(_) => Exit::Usage,
         SidecarError::Config(_) if error.is_missing_config() => Exit::Environment,
-        SidecarError::Config(_) | SidecarError::Map(_) | SidecarError::NotBuilt { .. } => {
-            Exit::Refused
-        }
+        SidecarError::Config(_)
+        | SidecarError::Map(_)
+        | SidecarError::NotBuilt { .. }
+        | SidecarError::Exec(_)
+        | SidecarError::Addr(_) => Exit::Refused,
         SidecarError::Stdin(_) | SidecarError::Signals(_) => Exit::Environment,
     }
 }

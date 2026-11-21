@@ -4,7 +4,9 @@ use std::io;
 
 use lsr_config::{ConfigError, MapError};
 
+use crate::exec::ExecError;
 use crate::flags::UsageError;
+use crate::http::AddrError;
 
 /// Why the daemon stopped before replicating anything. Every variant is decided before any
 /// database is opened; a database that fails after that is reported in
@@ -28,6 +30,12 @@ pub enum SidecarError {
         /// What to do instead.
         instead: &'static str,
     },
+    /// The `-exec` command line (or the `exec` key) cannot run as Go would read it.
+    #[error("{0}")]
+    Exec(#[from] ExecError),
+    /// The `addr` key cannot be bound as Go reads it.
+    #[error("addr: {0}")]
+    Addr(#[from] AddrError),
     /// Standard input could not be read for `-config -`.
     #[error("reading the config from standard input: {0}")]
     Stdin(#[source] io::Error),

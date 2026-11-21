@@ -12,12 +12,16 @@
 //! `monitor-interval` by one waiter thread, which starts it once the file appears
 //! (Go `db.go:611-614`). It looks with `metadata`, which opens no descriptor.
 //!
-//! **Stop.** The first SIGINT, SIGTERM or SIGHUP (or, with `-once`, the start
-//! finishing) ends the waiter and asks every replicator to stop within what is
-//! left of one deadline, `shutdown-sync-timeout` from the signal: all drain at
-//! once, so N databases take the budget once, not N times (Go closes them in
-//! turn). A second signal cuts every drain to nothing. Each database's outcome is
-//! one log line.
+//! **Stop.** The first SIGINT, SIGTERM or SIGHUP, the `-exec` child's exit (see
+//! [`crate::supervise`]), or with `-once` the start finishing, ends the waiter and
+//! asks every replicator to stop within what is left of one deadline,
+//! `shutdown-sync-timeout` from that moment: all drain at once, so N databases take
+//! the budget once, not N times (Go closes them in turn). A second signal cuts every
+//! drain to nothing. Each database's outcome is one log line.
+//!
+//! **Health.** Every database is on the [`Board`] from its first start attempt, so
+//! `/healthz` and `/metrics` see it waiting, failed or running, and still see each
+//! replicator's final state while the drain runs.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -32,6 +36,8 @@ use lsr_replica::{DynStore, Replicator, RestoreError, Runtime, Stopped, restore_
 use lsr_store_fs::FsStore;
 use lsr_store_s3::{CredentialChain, S3Store};
 
+use crate::exec::ChildEnd;
+use crate::health::{Board, Entry};
 use crate::logging::{DbEvents, Logger, Value};
 use crate::signals;
 
@@ -46,25 +52,35 @@ pub enum End {
     NeverAppeared,
 }
 
-/// Every database's end, in config order.
+/// Every database's end, in config order, and the `-exec` child's.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Finished {
     /// Each database and how it ended.
     pub dbs: Vec<(PathBuf, End)>,
+    /// How the `-exec` child ended, when there was one.
+    pub child: Option<ChildEnd>,
 }
 
 impl Finished {
-    /// Whether everything committed reached its replica: every replicator drained, none
-    /// failed to start. A database that never appeared had nothing to replicate.
+    /// Whether everything committed reached its replica (every replicator drained, none
+    /// failed to start; a database that never appeared had nothing to replicate) and the
+    /// child, if any, ended cleanly.
     #[must_use]
     pub fn clean(&self) -> bool {
-        self.dbs.iter().all(|(_, end)| match end {
+        let dbs = self.dbs.iter().all(|(_, end)| match end {
             End::Stopped(Stopped::Drained { .. }) | End::NeverAppeared => true,
             End::Stopped(
                 Stopped::DeadlineReached { .. } | Stopped::Stopped(_) | Stopped::Gone(_),
             )
             | End::DidNotStart => false,
-        })
+        });
+        dbs && self.child.is_none_or(ChildEnd::clean)
+    }
+
+    /// The child's own failing exit status, to pass on (see [`ChildEnd::code`]).
+    #[must_use]
+    pub fn child_code(&self) -> Option<u8> {
+        self.child.and_then(ChildEnd::code)
     }
 }
 
@@ -73,6 +89,16 @@ enum State {
     Waiting,
     Running(Replicator),
     Failed,
+}
+
+impl State {
+    fn entry(&self) -> Entry {
+        match self {
+            Self::Waiting => Entry::Waiting,
+            Self::Running(replicator) => Entry::Running(replicator.clone()),
+            Self::Failed => Entry::Failed,
+        }
+    }
 }
 
 struct Slot {
@@ -117,6 +143,7 @@ pub struct Daemon {
     log: Arc<Logger>,
     clock: Arc<dyn Clock>,
     started: Started,
+    board: Board,
     grace: Duration,
     slots: Arc<Mutex<Vec<Slot>>>,
 }
@@ -130,13 +157,21 @@ impl std::fmt::Debug for Daemon {
 }
 
 impl Daemon {
-    /// Opens every store and starts every database that exists.
+    /// Opens every store and starts every database that exists; each appears on `board`.
+    /// When this returns, every database that exists has its read transaction held.
     #[must_use]
-    pub fn start(plan: &Plan, restore_all: bool, log: Arc<Logger>, started: Started) -> Self {
+    pub fn start(
+        plan: &Plan,
+        restore_all: bool,
+        log: Arc<Logger>,
+        started: Started,
+        board: Board,
+    ) -> Self {
         let daemon = Self {
             log,
             clock: Runtime::system().clock,
             started,
+            board,
             grace: plan.shutdown_sync_timeout(),
             slots: Arc::new(Mutex::new(Vec::new())),
         };
@@ -148,6 +183,8 @@ impl Daemon {
         for db in plan.dbs() {
             let restore = db.restore_if_missing() || (restore_all && !db.from_dir());
             let slot = daemon.open(db.clone(), restore);
+            let (path, kind) = (db.path().to_owned(), db.replica().kind());
+            daemon.board.push(path, kind, slot.state.entry());
             lock(&daemon.slots).push(slot);
         }
         daemon
@@ -308,13 +345,14 @@ impl Daemon {
             }
             let mut slots = lock(&self.slots);
             let mut left = false;
-            for slot in slots.iter_mut() {
+            for (index, slot) in slots.iter_mut().enumerate() {
                 if matches!(slot.state, State::Waiting) {
                     // A file that appears mid-creation may not open yet: retry, as Go does.
                     match self.try_start(slot, false) {
                         Ok(state) => slot.state = state,
                         Err(failure) => self.failed(slot, failure, true),
                     }
+                    self.board.set(index, slot.state.entry());
                     left |= matches!(slot.state, State::Waiting);
                 }
             }
@@ -324,13 +362,13 @@ impl Daemon {
         }
     }
 
-    /// Drains every running database within one deadline, and reports each.
+    /// Drains every running database within what is left of the one deadline begun at
+    /// `begun` (the signal, the child's exit, or now), and reports each.
     #[must_use]
-    pub fn stop(&self, waiter: Option<Waiter>) -> Finished {
+    pub fn stop(&self, waiter: Option<Waiter>, begun: lsr_ltx::Timestamp) -> Finished {
         if let Some(waiter) = waiter {
             waiter.end();
         }
-        let begun = self.clock.now();
         let slots = std::mem::take(&mut *lock(&self.slots));
         let syncs: Vec<_> = slots
             .iter()
@@ -350,11 +388,18 @@ impl Daemon {
             self.ended(&path, &end);
             dbs.push((path, end));
         }
-        Finished { dbs }
+        Finished { dbs, child: None }
+    }
+
+    /// The daemon's clock, read now.
+    #[must_use]
+    pub fn now(&self) -> lsr_ltx::Timestamp {
+        self.clock.now()
     }
 
     /// What is left of the shutdown budget begun at `begun`.
-    fn left(&self, begun: lsr_ltx::Timestamp) -> Duration {
+    #[must_use]
+    pub fn left(&self, begun: lsr_ltx::Timestamp) -> Duration {
         let spent = self
             .clock
             .now()

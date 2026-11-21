@@ -6,19 +6,20 @@
 //! handlers ([`signals`]), loads the config (`-config`, `LITESTREAM_CONFIG`, else
 //! `/etc/litestream.yml`; `-` is standard input) or builds Go's one-database
 //! config from `DB_PATH REPLICA_URL`, maps it onto replicators (`lsr_config::plan`,
-//! which scans `dir` entries once), and runs the [`daemon`] until a signal (or,
-//! with `-once`, until every database has synced and uploaded what it had).
+//! which scans `dir` entries once), starts the listener on `addr` ([`http`]), and
+//! runs the [`daemon`] until a signal or the `-exec` child's exit ([`supervise`],
+//! [`exec`]), or, with `-once`, until every database has synced and uploaded what
+//! it had.
 //!
 //! `-once` starts every database and drains it at once: everything committed is
 //! synced and uploaded, as Go's `runOnce` syncs the database and then the replica.
 //!
 //! What this build refuses rather than ignores, since ignoring would change what
-//! runs: `-exec` and the `exec` key (the child is the host; starting without it
-//! is not the daemon the operator configured), `-force-snapshot` (Go writes a
-//! level-9 snapshot; the replicator's API can only make the next sync start from
-//! page 1 at level 0) and `-enforce-retention` (no one-off retention pass exists
-//! in the replicator's API). `addr` is accepted and warned about: the metrics
-//! listener is not served yet, and nothing replicated depends on it.
+//! runs: `-force-snapshot` (Go writes a level-9 snapshot; the replicator's API can
+//! only make the next sync start from page 1 at level 0) and `-enforce-retention`
+//! (no one-off retention pass exists in the replicator's API). An `exec` line Go
+//! would run differently from what it says, and an `addr` Go cannot bind, are
+//! refused before any database is touched.
 //!
 //! Lines are logged in Go's slog formats ([`logging`]). Nothing in this crate
 //! opens a database file: replicators open theirs through SQLite, and the
@@ -26,23 +27,34 @@
 
 pub mod daemon;
 mod error;
+pub mod exec;
 pub mod flags;
+pub mod health;
+pub mod http;
 pub mod logging;
+pub mod metrics;
 pub mod signals;
+pub mod supervise;
 
 use std::io::Read as _;
 use std::sync::Arc;
+use std::sync::mpsc;
 
 use lsr_config::{Expand, GoConfig, Loaded, LogLevel, ProcessEnv, expand_path};
 use lsr_replica::Runtime;
 
 pub use daemon::{End, Finished};
 pub use error::SidecarError;
+pub use exec::{ChildEnd, ExecCommand, ExecError};
 pub use flags::{Parsed, UsageError};
+pub use http::AddrError;
 
-use crate::daemon::{Daemon, Started};
+use crate::daemon::Daemon;
+use crate::exec::Wake;
 use crate::flags::{Flags, Source};
+use crate::health::Board;
 use crate::logging::Logger;
+use crate::supervise::Control;
 
 /// What a `replicate` run produced.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,9 +75,12 @@ pub fn run(args: &[String]) -> Result<Outcome, SidecarError> {
         Parsed::Help => return Ok(Outcome::Help(flags::USAGE)),
         Parsed::Run(flags) => flags,
     };
-    let started = Started::default();
-    let cut = started.clone();
-    let watch = signals::Watch::install(move |_signal| cut.cut()).map_err(SidecarError::Signals)?;
+    // One wake for the first signal and one for the child's exit: never full.
+    let (send, wake) = mpsc::sync_channel(2);
+    let control = Arc::new(Control::new(send));
+    let on_signal = Arc::clone(&control);
+    let _watch = signals::Watch::install(move |signal| on_signal.on_signal(signal))
+        .map_err(SidecarError::Signals)?;
     let loaded = load(&flags)?;
     let config = &loaded.config;
     let level = flags.log_level.unwrap_or(config.logging().level());
@@ -75,25 +90,29 @@ pub fn run(args: &[String]) -> Result<Outcome, SidecarError> {
         config.logging().stderr(),
         Runtime::system().clock,
     ));
-    refuse_unbuilt(&flags, config)?;
+    refuse_unbuilt(&flags)?;
+    let command = exec_command(&flags, config)?;
+    let addr = config.addr().map(http::target).transpose()?;
     let plan = lsr_config::plan(config, &ProcessEnv)?;
     announce(&log, level, &loaded, &plan);
+    let board = Board::default();
+    if let Some(target) = &addr {
+        listen(&log, target, &board);
+    }
+    let restore = flags.restore_if_db_not_exists;
     let daemon = Arc::new(Daemon::start(
         &plan,
-        flags.restore_if_db_not_exists,
+        restore,
         Arc::clone(&log),
-        started,
+        control.started(),
+        board,
     ));
     let finished = if flags.once {
-        daemon.stop(None)
+        daemon.stop(None, daemon.now())
     } else {
-        let waiter = daemon.wait_for_files();
-        if let Some(signal) = watch.first() {
-            daemon.signalled(signal);
-        }
-        daemon.stop(waiter)
+        supervise::supervise(&daemon, command.as_ref(), &control, &wake)
     };
-    if let Some(signal) = watch.try_first() {
+    if let Ok(Wake::Signal(signal)) = wake.try_recv() {
         daemon.signalled(signal);
     }
     let fields = [("clean", finished.clean().into())];
@@ -128,13 +147,7 @@ fn load(flags: &Flags) -> Result<Loaded, SidecarError> {
     }
 }
 
-fn refuse_unbuilt(flags: &Flags, config: &GoConfig) -> Result<(), SidecarError> {
-    if flags.exec.is_some() || config.exec().is_some() {
-        return Err(SidecarError::NotBuilt {
-            what: "-exec (and the exec key)",
-            instead: "run the application separately, after the daemon logs \"initialized db\"",
-        });
-    }
+fn refuse_unbuilt(flags: &Flags) -> Result<(), SidecarError> {
     if flags.force_snapshot {
         return Err(SidecarError::NotBuilt {
             what: "-force-snapshot",
@@ -150,6 +163,39 @@ fn refuse_unbuilt(flags: &Flags, config: &GoConfig) -> Result<(), SidecarError> 
     Ok(())
 }
 
+/// `-exec`, else the `exec` key (Go: the flag overrides the key when set, `replicate.go:242`),
+/// split as Go splits it. Go refuses `-once` with either (`replicate.go:260`).
+fn exec_command(flags: &Flags, config: &GoConfig) -> Result<Option<ExecCommand>, SidecarError> {
+    let line = flags
+        .exec
+        .as_deref()
+        .or_else(|| config.exec().filter(|line| !line.is_empty()));
+    let Some(line) = line else {
+        return Ok(None);
+    };
+    if flags.once {
+        return Err(UsageError::OnceWithExec.into());
+    }
+    Ok(Some(ExecCommand::parse(line)?))
+}
+
+fn listen(log: &Logger, target: &http::Target, board: &Board) {
+    match http::serve(target, board.clone(), Runtime::system().clock) {
+        Ok(local) => {
+            let fields = [
+                ("addr", local.to_string().into()),
+                ("url", format!("http://{local}/metrics").into()),
+                ("health", format!("http://{local}/healthz").into()),
+            ];
+            log.info("serving metrics on", &fields);
+        }
+        Err(error) => {
+            let fields = [("error", error.to_string().into())];
+            log.error("cannot start metrics server", &fields);
+        }
+    }
+}
+
 fn announce(log: &Logger, level: LogLevel, loaded: &Loaded, plan: &lsr_config::Plan) {
     let fields = [
         ("version", env!("CARGO_PKG_VERSION").into()),
@@ -161,12 +207,5 @@ fn announce(log: &Logger, level: LogLevel, loaded: &Loaded, plan: &lsr_config::P
     }
     for note in plan.notes() {
         log.warn("config", &[("warning", note.to_string().into())]);
-    }
-    if let Some(addr) = loaded.config.addr() {
-        let fields = [("addr", addr.into())];
-        log.warn(
-            "metrics listener (addr) is not served in this build",
-            &fields,
-        );
     }
 }

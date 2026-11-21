@@ -430,7 +430,7 @@ mod daemon {
         assert!(stderr.contains("dbs[0].replica.type"), "{stderr}");
         let cfg = config(
             dir.path(),
-            "exec: myapp\ndbs:\n  - path: /a.db\n    replica:\n      path: /r\n",
+            "exec: \"myapp; rm -rf /\"\ndbs:\n  - path: /a.db\n    replica:\n      path: /r\n",
         );
         let out = lsr()
             .args(["replicate", "-config", cfg.to_str().unwrap()])
