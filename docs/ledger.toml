@@ -470,14 +470,14 @@
 "TestCompactor_EnforceL0Retention" = { counterpart = "lsr-core::maintain::retain::tests::a_covered_level_zero_file_wakes_when_it_is_old_enough" }
 "TestCompactor_EnforceL0Retention/DeletesCompactedFiles" = { counterpart = "lsr-core::maintain::retain::tests::a_covered_level_zero_file_wakes_when_it_is_old_enough" }
 "TestCompactor_EnforceL0Retention/SkipsIfNoL1" = { counterpart = "lsr-core::maintain::retain::tests::level_zero_files_the_levels_do_not_cover_stay" }
-"TestCompactor_EnforceL0Retention_RetentionDisabled" = { counterpart = "lsr-core::maintain::retain::tests::keep_never_deletes_level_zero" }
+"TestCompactor_EnforceL0Retention_RetentionDisabled" = { counterpart = ["lsr-core::maintain::retain::tests::switch::with_retention_off_no_snapshot_compacted_or_level_zero_file_is_deleted", "lsr-core::maintain::retain::tests::keep_never_deletes_level_zero"] }
 "TestCompactor_EnforceRetentionByTXID" = { counterpart = "lsr-core::maintain::retain::tests::a_level_one_file_at_the_floor_is_kept_below_it_goes" }
 "TestCompactor_EnforceRetentionByTXID/DeletesOldFiles" = { counterpart = "lsr-core::maintain::retain::tests::a_level_one_file_at_the_floor_is_kept_below_it_goes" }
 "TestCompactor_EnforceRetentionByTXID/KeepsLastFile" = { counterpart = "lsr-core::maintain::retain::tests::the_last_file_of_every_level_stays_even_when_all_are_old" }
-"TestCompactor_EnforceRetentionByTXID_RetentionDisabled" = { missing = "Go's retention switch (retention.enabled: false, for buckets whose lifecycle rules delete instead): with it off, maintenance still compacts and snapshots but deletes no snapshot, compacted or level 0 file. Rust has only L0Retention::Keep, which keeps level 0 alone." }
+"TestCompactor_EnforceRetentionByTXID_RetentionDisabled" = { counterpart = ["lsr-core::maintain::retain::tests::switch::with_retention_off_no_snapshot_compacted_or_level_zero_file_is_deleted", "lsr-core::maintain::retain::tests::switch::six_hours_with_retention_off_compact_and_snapshot_and_delete_nothing"] }
 "TestCompactor_EnforceSnapshotRetention" = { counterpart = "lsr-core::maintain::retain::tests::the_ladder_deletes_old_snapshots_what_they_floor_and_covered_level_zero" }
 "TestCompactor_EnforceSnapshotRetention/DeletesOldSnapshots" = { counterpart = "lsr-core::maintain::retain::tests::the_ladder_deletes_old_snapshots_what_they_floor_and_covered_level_zero" }
-"TestCompactor_EnforceSnapshotRetention_RetentionDisabled" = { missing = "Go's retention switch (retention.enabled: false, for buckets whose lifecycle rules delete instead): with it off, maintenance still compacts and snapshots but deletes no snapshot, compacted or level 0 file. Rust has only L0Retention::Keep, which keeps level 0 alone." }
+"TestCompactor_EnforceSnapshotRetention_RetentionDisabled" = { counterpart = ["lsr-core::maintain::retain::tests::switch::with_retention_off_no_snapshot_compacted_or_level_zero_file_is_deleted", "lsr-core::maintain::retain::tests::switch::six_hours_with_retention_off_compact_and_snapshot_and_delete_nothing"] }
 "TestCompactor_MaxLTXFileInfo" = { counterpart = "lsr-core::inventory::tests::level_is_the_slice_of_that_level_in_key_order" }
 "TestCompactor_MaxLTXFileInfo/NoFiles" = { counterpart = "lsr-core::maintain::tests::an_empty_replica_with_nothing_published_has_nothing_to_do" }
 "TestCompactor_MaxLTXFileInfo/WithCache" = { reason = "Go-only: an in-memory cache of a file or page Go read before. Rust caches nothing without a measurement (AGENTS.md design rules) and reads what each decision needs." }
@@ -591,10 +591,10 @@
 "TestDB_ConcurrentMapWrite" = { reason = "Go-only: a data race on a map shared between goroutines (run under -race). The Rust actor owns its state on one thread, and the compiler refuses shared mutation without a lock." }
 "TestDB_DelayedCheckpointAfterWrite" = { counterpart = "lsr-core::checkpoint::tests::the_interval_counts_from_last_and_is_inclusive" }
 "TestDB_EnforceL0RetentionByTime" = { counterpart = ["lsr-core::maintain::retain::tests::a_covered_level_zero_file_wakes_when_it_is_old_enough", "lsr-core::maintain::retain::tests::level_zero_files_the_levels_do_not_cover_stay"] }
-"TestDB_EnforceL0RetentionByTime_RetentionDisabled" = { counterpart = "lsr-core::maintain::retain::tests::keep_never_deletes_level_zero" }
+"TestDB_EnforceL0RetentionByTime_RetentionDisabled" = { counterpart = ["lsr-core::maintain::retain::tests::switch::with_retention_off_no_snapshot_compacted_or_level_zero_file_is_deleted", "lsr-core::maintain::retain::tests::keep_never_deletes_level_zero"] }
 "TestDB_EnforceRetention" = { counterpart = "lsr-core::maintain::retain::tests::the_ladder_deletes_old_snapshots_what_they_floor_and_covered_level_zero" }
 "TestDB_EnforceRetentionByTXID_LocalCleanup" = { counterpart = "lsr-core::actor::tests::prune_keeps_exactly_the_uncompacted_and_the_tip" }
-"TestDB_EnforceSnapshotRetention_RetentionDisabled" = { missing = "Go's retention switch (retention.enabled: false, for buckets whose lifecycle rules delete instead): with it off, maintenance still compacts and snapshots but deletes no snapshot, compacted or level 0 file. Rust has only L0Retention::Keep, which keeps level 0 alone." }
+"TestDB_EnforceSnapshotRetention_RetentionDisabled" = { counterpart = ["lsr-core::maintain::retain::tests::switch::with_retention_off_no_snapshot_compacted_or_level_zero_file_is_deleted", "lsr-sim::retention::retention::with_retention_off_a_long_run_deletes_nothing_and_still_compacts_and_snapshots"] }
 "TestDB_EnforceSnapshotRetention_ReturnsZeroWithoutPriorSnapshot" = { counterpart = "lsr-core::maintain::retain::tests::the_last_file_of_every_level_stays_even_when_all_are_old" }
 "TestDB_EnsureExists" = { reason = "Go library API (DB.EnsureExists) with no caller in cmd/ at 041a8c3. A Rust replicator never restores implicitly: restore is the caller's explicit call (lsr-core restore), and starting on a missing database is the caller's choice." }
 "TestDB_EnsureExists/DBAlreadyExists" = { reason = "Go library API (DB.EnsureExists) with no caller in cmd/ at 041a8c3. A Rust replicator never restores implicitly: restore is the caller's explicit call (lsr-core restore), and starting on a missing database is the caller's choice." }
@@ -1187,7 +1187,7 @@
 "TestStore_Integration" = { counterpart = ["lsr-sim::fixed_seeds::fixed::seeds_1_to_8", "lsr-compat::live_source::live_sync_chain_restores"] }
 "TestStore_Open_InitError" = { reason = "Go's Store runs many databases in one process; that is the daemon of the separate-process mode, phase 4 (docs/PLAN.md section 1). The library replicates one database per replicator." }
 "TestStore_Open_InitErrorDoesNotOpenDBs" = { reason = "Go's Store runs many databases in one process; that is the daemon of the separate-process mode, phase 4 (docs/PLAN.md section 1). The library replicates one database per replicator." }
-"TestStore_SetRetentionEnabled" = { missing = "Go's retention switch (retention.enabled: false, for buckets whose lifecycle rules delete instead): with it off, maintenance still compacts and snapshots but deletes no snapshot, compacted or level 0 file. Rust has only L0Retention::Keep, which keeps level 0 alone." }
+"TestStore_SetRetentionEnabled" = { counterpart = ["lsr-core::maintain::retain::tests::switch::retention_is_enforced_by_default_as_in_go", "lsr-core::maintain::retain::tests::switch::switching_retention_back_on_resumes_deletes_under_the_usual_rules", "lsr-sim::retention::retention::switching_retention_on_in_a_running_engine_resumes_deletes"] }
 "TestStore_SnapshotInterval_Default" = { counterpart = "lsr-core::maintain::tests::go_defaults_run_through_new_and_match_go" }
 "TestStore_Validate" = { counterpart = "lsr-core::verify::tests::a_clean_replica_has_no_findings_at_either_depth" }
 "TestStore_Validate/AllLevelsValid" = { counterpart = "lsr-core::verify::tests::a_clean_replica_has_no_findings_at_either_depth" }

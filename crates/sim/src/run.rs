@@ -14,8 +14,8 @@ use std::time::Duration;
 
 use lsr_core::{
     Actor, ActorConfig, CheckpointConfig, Clock, Entropy, Env, Event, Fault, HaltCause, Lane,
-    MAX_BACKOFF, Maintenance, Next, PersistentCause, Responses, SeededEntropy, SyncConfig, Tick,
-    UploadConfig,
+    MAX_BACKOFF, Maintenance, Next, PersistentCause, Responses, RetentionMode, SeededEntropy,
+    SyncConfig, Tick, UploadConfig,
 };
 use lsr_ltx::{PageNo, PageSize, Timestamp, Txid};
 use lsr_wal::{Salts, WalOffset};
@@ -166,6 +166,12 @@ pub struct Opts {
     pub allow_halt: bool,
     /// What each persistent fault does; the default keeps trying.
     pub responses: Responses,
+    /// Whether the engine's retention deletes, from the first boot; the
+    /// default enforces it, as Go does.
+    pub retention: RetentionMode,
+    /// Switches retention just before this step: on the running engine, as
+    /// an operator would, and for every engine booted after it.
+    pub switch_retention: Option<(u32, RetentionMode)>,
 }
 
 /// The configuration every run gives the actor.
@@ -219,6 +225,8 @@ struct Runner {
     record: bool,
     allow_halt: bool,
     responses: Responses,
+    /// Whether retention deletes, for the running engine and the next boot.
+    retention: RetentionMode,
     /// Which lanes the current engine reported degraded after its last tick.
     degraded: [bool; 5],
     /// The latest time the current engine has been told: its retry waits are
@@ -257,6 +265,7 @@ impl Runner {
             record: false,
             allow_halt: false,
             responses: Responses::GO_LIKE,
+            retention: RetentionMode::Enforce,
             degraded: [false; 5],
             latest: None,
             saved: None,
@@ -269,9 +278,11 @@ impl Runner {
 
     fn reboot(&mut self) {
         self.w.start_driver();
+        let base = actor_config();
         self.actor = Actor::new(ActorConfig {
             responses: self.responses,
-            ..actor_config()
+            maintenance: base.maintenance.clone().with_retention(self.retention),
+            ..base
         });
         self.unwatched = true;
         self.degraded = [false; 5];
@@ -1064,6 +1075,7 @@ pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure
     runner.record = opts.record;
     runner.allow_halt = opts.allow_halt;
     runner.responses = opts.responses;
+    runner.retention = opts.retention;
     runner.reboot();
     for (index, op) in ops.iter().enumerate() {
         let step = u32::try_from(index).unwrap_or(u32::MAX);
@@ -1078,6 +1090,12 @@ pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure
             && *at == step
         {
             return Err(fail(violation.clone()));
+        }
+        if let Some((at, retention)) = opts.switch_retention
+            && at == step
+        {
+            runner.retention = retention;
+            runner.actor.set_retention(retention);
         }
         if opts.trace {
             runner.report.trace.push(format!("{step}: {op:?}"));

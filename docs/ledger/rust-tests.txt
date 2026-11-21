@@ -399,6 +399,12 @@ lsr-core maintain::retain::tests::retention_r_prime_anchor_is_at_most_the_exact_
 lsr-core maintain::retain::tests::retention_r_prime_jobs_are_restore_safe
 lsr-core maintain::retain::tests::retention_reads_only_lasts_snaps_and_scanned_level_zero
 lsr-core maintain::retain::tests::snapshots_whose_stamps_run_backwards_hold_with_a_text_about_stored_times
+lsr-core maintain::retain::tests::switch::a_degraded_lanes_pin_behaves_the_same_once_retention_is_back_on
+lsr-core maintain::retain::tests::switch::retention_is_enforced_by_default_as_in_go
+lsr-core maintain::retain::tests::switch::six_hours_with_retention_off_compact_and_snapshot_and_delete_nothing
+lsr-core maintain::retain::tests::switch::switching_retention_back_on_resumes_deletes_under_the_usual_rules
+lsr-core maintain::retain::tests::switch::with_retention_off_no_snapshot_compacted_or_level_zero_file_is_deleted
+lsr-core maintain::retain::tests::switch::with_retention_off_no_stamp_is_read_for_retention
 lsr-core maintain::retain::tests::the_files_after_the_previous_snapshot_survive
 lsr-core maintain::retain::tests::the_gate_reports_the_first_failure_in_its_order
 lsr-core maintain::retain::tests::the_ladder_deletes_old_snapshots_what_they_floor_and_covered_level_zero
@@ -1146,6 +1152,8 @@ lsr-sim::fixed_seeds fixed::seeds_49_to_56
 lsr-sim::fixed_seeds fixed::seeds_57_to_64
 lsr-sim::fixed_seeds fixed::seeds_9_to_16
 lsr-sim::replay replay::replay_the_named_run
+lsr-sim::retention retention::switching_retention_on_in_a_running_engine_resumes_deletes
+lsr-sim::retention retention::with_retention_off_a_long_run_deletes_nothing_and_still_compacts_and_snapshots
 lsr-sim::snapshot_causes a_page_size_change_halts_and_the_old_states_restore
 lsr-sim::snapshot_causes a_wiped_meta_continues_from_the_replicas_tip
 lsr-sim::snapshot_causes every_cause_has_a_scenario
