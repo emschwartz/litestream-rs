@@ -492,8 +492,11 @@ mod cli {
         assert!(run.stderr.contains("UTF-8"), "{}", run.stderr);
     }
 
+    /// `verify` and `files` read a replica's contents, so a path with no `ltx/` is a wrong
+    /// path, never an empty replica (a restore treats it as Go does; see
+    /// `if_replica_exists_skips_a_path_without_ltx_as_go_does`).
     #[test]
-    fn a_directory_without_ltx_is_an_environment_error_not_an_empty_replica() {
+    fn verify_and_files_refuse_a_directory_without_ltx() {
         let dir = tempfile::tempdir().expect("tempdir");
         for command in ["verify", "files"] {
             let run = lsr(&[command, "--replica", path_str(dir.path())]);
@@ -732,7 +735,6 @@ mod cli {
             &["--if-replica-exists"][..],
             &["--if-replica-exists", "--txid", "0000000000000005"],
             &["--if-replica-exists", "--timestamp", "2026-01-01T00:00:00Z"],
-            &["--if-replica-exists", "--dry-run"],
         ] {
             let run = restore_from(&replica, &output, extra);
             assert_eq!((run.code, run.stderr.as_str()), (0, ""), "{extra:?}");
@@ -752,9 +754,77 @@ mod cli {
         assert!(dir_is_empty(dir.path()));
     }
 
+    /// Go's file replica lists a missing level directory as empty
+    /// (`file/replica_client.go:98-100`), so a path with no `ltx/` folder, or no
+    /// directory at all, is an empty replica: `--if-replica-exists` skips it with exit 0
+    /// and says why (Go's `TestRestoreCommand_RunIfReplicaExists`); without the flag it is
+    /// refused as an empty replica is, and nothing is written either way.
+    #[test]
+    fn if_replica_exists_skips_a_path_without_ltx_as_go_does() {
+        let work = tempfile::tempdir().expect("tempdir");
+        let bare = work.path().join("bare");
+        fs::create_dir(&bare).expect("bare dir");
+        let missing = work.path().join("no-such-replica");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = dir.path().join("out.db");
+        for replica in [&bare, &missing] {
+            let skipped = restore_from(replica, &output, &["--if-replica-exists"]);
+            assert_eq!(
+                (skipped.code, skipped.stderr.as_str()),
+                (0, ""),
+                "{replica:?}"
+            );
+            assert!(
+                skipped.stdout.contains("no ltx/ folder"),
+                "{replica:?}: {}",
+                skipped.stdout
+            );
+            let json = json_of(&restore_from(
+                replica,
+                &output,
+                &["--if-replica-exists", "--json"],
+            ));
+            assert_eq!(json["skipped"], json!("no_ltx_folder"), "{json}");
+            let refused = restore_from(replica, &output, &[]);
+            assert_eq!(
+                (refused.code, refused.stdout.as_str()),
+                (2, ""),
+                "{replica:?}"
+            );
+            assert!(
+                refused.stderr.contains("no ltx/ folder"),
+                "{replica:?}: {}",
+                refused.stderr
+            );
+            assert!(dir_is_empty(dir.path()), "{replica:?}");
+        }
+        assert!(!missing.exists());
+    }
+
+    /// Go's `-dry-run` returns before `-if-replica-exists` is looked at
+    /// (`cmd/litestream/restore.go:119-122`): an empty replica, or a path with no `ltx/`,
+    /// is refused with or without the flag.
+    #[test]
+    fn dry_run_refuses_an_empty_replica_even_with_if_replica_exists() {
+        let work = tempfile::tempdir().expect("tempdir");
+        let empty = empty_replica(work.path());
+        let bare = work.path().join("bare");
+        fs::create_dir(&bare).expect("bare dir");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = dir.path().join("out.db");
+        for (replica, says) in [(&empty, "no LTX file"), (&bare, "no ltx/ folder")] {
+            for extra in [&["--dry-run"][..], &["--dry-run", "--if-replica-exists"]] {
+                let run = restore_from(replica, &output, extra);
+                assert_eq!((run.code, run.stdout.as_str()), (2, ""), "{extra:?}");
+                assert!(run.stderr.contains(says), "{extra:?}: {}", run.stderr);
+            }
+        }
+        assert!(dir_is_empty(dir.path()));
+    }
+
     /// Stricter than Go, which exits 0 on every "transaction not available": the
     /// flag covers an empty replica only. A replica with files that cannot meet the
-    /// target is still refused, and a directory without ltx/ is still not a replica.
+    /// target is still refused.
     #[test]
     fn if_replica_exists_still_refuses_what_a_non_empty_replica_cannot_meet() {
         let (staged, _) = small_fixture();
@@ -782,10 +852,6 @@ mod cli {
             gaps += 1;
         }
         assert!(gaps > 0);
-        let bare = tempfile::tempdir().expect("tempdir");
-        let run = restore_from(bare.path(), &output, &["--if-replica-exists"]);
-        assert_eq!((run.code, run.stdout.as_str()), (3, ""));
-        assert!(run.stderr.contains("not a file replica"), "{}", run.stderr);
         assert!(dir_is_empty(dir.path()));
     }
 

@@ -13,9 +13,14 @@
 //! output before the replica is opened and ends with [`Skip::OutputExists`];
 //! `--if-replica-exists` turns [`PlanOutcome::EmptyReplica`], and only that, into
 //! [`Skip::EmptyReplica`], because a replica with files that cannot meet the
-//! target is a refusal, never a quiet success; `--dry-run` runs the restore's
-//! own checks of the output read-only (`preflight`), lists and plans exactly as
-//! the restore does, and stops before the first write. Every way a restore ends
+//! target is a refusal, never a quiet success. A directory with no `ltx/` folder,
+//! or none at all, is an empty replica to a restore, as Go's file replica lists it
+//! (it ends as [`Skip::NoLtxFolder`] or [`CliError::NoLtxFolder`], so the reason is
+//! named); `verify` and `files` still refuse it as a wrong path. `--dry-run` runs
+//! the restore's own checks of the output read-only (`preflight`), lists and plans
+//! exactly as the restore does, and stops before the first write; as in Go
+//! (`cmd/litestream/restore.go:119-122`) it ignores `--if-replica-exists`, so an
+//! empty replica is refused there. Every way a restore ends
 //! is one [`Finished`] value, so the text and the JSON describe the same thing.
 
 use std::io;
@@ -168,6 +173,9 @@ pub enum Skip {
     OutputExists,
     /// `--if-replica-exists`: the replica holds no LTX file.
     EmptyReplica,
+    /// `--if-replica-exists`: the directory has no `ltx/` folder, or does not exist, which
+    /// Go lists as an empty replica.
+    NoLtxFolder,
 }
 
 /// How a restore that did not fail ended.
@@ -284,6 +292,13 @@ pub enum CliError {
     /// The replica has no exact answer for the target.
     #[error("no exact restore: {}", render::plan_outcome(.0))]
     NoPlan(PlanOutcome),
+    /// A restore from a directory with no `ltx/` folder (or no directory at all), which Go
+    /// reads as an empty replica, without `--if-replica-exists` or with `--dry-run`.
+    #[error("no exact restore: {} holds no backup: no ltx/ folder inside it", .path.display())]
+    NoLtxFolder {
+        /// The path given.
+        path: PathBuf,
+    },
     /// SQLite found the restored database invalid; nothing was published.
     #[error("{0}; nothing was published")]
     Integrity(IntegrityFailure),
@@ -428,7 +443,9 @@ fn daemon_exit(error: &lsr_sidecar::SidecarError) -> Exit {
 pub fn exit_for_error(error: &CliError) -> Exit {
     match error {
         CliError::Usage(_) => Exit::Usage,
-        CliError::NoPlan(_) | CliError::Integrity(_) => Exit::Refused,
+        CliError::NoPlan(_) | CliError::NoLtxFolder { .. } | CliError::Integrity(_) => {
+            Exit::Refused
+        }
         CliError::Restore(err) => match err {
             RestoreError::NoPlan(_)
             | RestoreError::File { .. }
@@ -514,12 +531,7 @@ async fn restore_command(args: RestoreArgs) -> Result<Done, CliError> {
             cleared: Vec::new(),
         }
     } else {
-        match (open(&replica)?, dry_run) {
-            (Opened::Dir(store), false) => restore_on(&store, &output, how).await?,
-            (Opened::Dir(store), true) => plan_on(&store, &output, how).await?,
-            (Opened::S3(store), false) => restore_on(&store, &output, how).await?,
-            (Opened::S3(store), true) => plan_on(&store, &output, how).await?,
-        }
+        restore_or_plan(&replica, &output, how, dry_run).await?
     };
     Ok(Done::Restore(Box::new(RestoreDone {
         output,
@@ -527,6 +539,73 @@ async fn restore_command(args: RestoreArgs) -> Result<Done, CliError> {
         json,
         finished,
     })))
+}
+
+/// The restore, or with `dry_run` its plan. A directory with no `ltx/` folder is opened
+/// all the same, because Go's file replica lists a missing level directory as empty
+/// (`file/replica_client.go:98-100`): the output is checked as for any replica, and the
+/// empty-replica ending then names the missing folder.
+async fn restore_or_plan(
+    replica: &Replica,
+    output: &Path,
+    how: How,
+    dry_run: bool,
+) -> Result<Finished, CliError> {
+    let (opened, bare) = match replica {
+        Replica::Dir(path) => {
+            let bare = (!path.join("ltx").is_dir()).then(|| path.clone());
+            (Opened::Dir(FsStore::new(path)), bare)
+        }
+        Replica::S3(_) => (open(replica)?, None),
+    };
+    let finished = match (opened, dry_run) {
+        (Opened::Dir(store), false) => restore_on(&store, output, how).await,
+        (Opened::Dir(store), true) => plan_on(&store, output, how).await,
+        (Opened::S3(store), false) => restore_on(&store, output, how).await,
+        (Opened::S3(store), true) => plan_on(&store, output, how).await,
+    };
+    let Some(path) = bare else {
+        return finished;
+    };
+    match finished {
+        Ok(Finished::Skipped {
+            skip: Skip::EmptyReplica,
+            cleared,
+        }) => Ok(Finished::Skipped {
+            skip: Skip::NoLtxFolder,
+            cleared,
+        }),
+        Ok(other) => Ok(other),
+        Err(error) => Err(no_ltx_folder(error, path)),
+    }
+}
+
+/// An empty-replica refusal from a directory without `ltx/`, named as that.
+fn no_ltx_folder(error: CliError, path: PathBuf) -> CliError {
+    match error {
+        CliError::NoPlan(PlanOutcome::EmptyReplica) => CliError::NoLtxFolder { path },
+        CliError::AfterClearing { cleared, source } => CliError::AfterClearing {
+            cleared,
+            source: Box::new(no_ltx_folder(*source, path)),
+        },
+        other @ (CliError::NoPlan(_)
+        | CliError::Usage(_)
+        | CliError::NoReplica { .. }
+        | CliError::Credentials(_)
+        | CliError::S3Config(_)
+        | CliError::Inventory(_)
+        | CliError::NoLtxFolder { .. }
+        | CliError::Integrity(_)
+        | CliError::Restore(_)
+        | CliError::Verify(_)
+        | CliError::Sidecar { .. }
+        | CliError::Create(_)
+        | CliError::Clear(_)
+        | CliError::Output(_)
+        | CliError::Start(_)
+        | CliError::Signals(_)
+        | CliError::Daemon(_)) => other,
+    }
 }
 
 /// Whether anything is at the output, as the sink judges it: a path that
@@ -617,10 +696,6 @@ async fn plan_on<S: ObjectStore>(store: &S, output: &Path, how: How) -> Result<F
             chain,
             stamps_read,
             sidecars_to_remove,
-        }),
-        PlanOutcome::EmptyReplica if how.if_replica_exists => Ok(Finished::Skipped {
-            skip: Skip::EmptyReplica,
-            cleared: Vec::new(),
         }),
         other @ (PlanOutcome::EmptyReplica
         | PlanOutcome::NoSnapshot { .. }

@@ -1,4 +1,3 @@
-lsr-cli::cli cli::a_directory_without_ltx_is_an_environment_error_not_an_empty_replica
 lsr-cli::cli cli::a_gap_target_exits_2_names_the_hole_and_leaves_no_file
 lsr-cli::cli cli::a_stale_sidecar_refuses_until_clear_sidecars
 lsr-cli::cli cli::an_argument_that_is_not_utf8_is_a_usage_error
@@ -7,16 +6,19 @@ lsr-cli::cli cli::clear_sidecars_never_touches_an_existing_target
 lsr-cli::cli cli::dry_run_checks_the_output_as_a_restore_would
 lsr-cli::cli cli::dry_run_json_lists_the_chain_the_restore_applies
 lsr-cli::cli cli::dry_run_prints_the_plan_and_writes_nothing
+lsr-cli::cli cli::dry_run_refuses_an_empty_replica_even_with_if_replica_exists
 lsr-cli::cli cli::every_target_matches_the_manifest
 lsr-cli::cli cli::files_json_agrees_with_the_inventory_and_text_lists_the_same
 lsr-cli::cli cli::help_and_version_print_to_stdout_and_exit_0
 lsr-cli::cli cli::if_db_not_exists_skips_an_existing_output_without_reading_the_replica
 lsr-cli::cli cli::if_replica_exists_exits_0_on_an_empty_replica_and_writes_nothing
+lsr-cli::cli cli::if_replica_exists_skips_a_path_without_ltx_as_go_does
 lsr-cli::cli cli::if_replica_exists_still_refuses_what_a_non_empty_replica_cannot_meet
 lsr-cli::cli cli::integrity_check_publishes_a_valid_database_in_every_mode
 lsr-cli::cli cli::integrity_check_refuses_a_corrupt_b_tree_with_exit_2
 lsr-cli::cli cli::restore_json_reports_go_s_fields
 lsr-cli::cli cli::usage_errors_exit_64_with_one_stderr_line_and_no_stdout
+lsr-cli::cli cli::verify_and_files_refuse_a_directory_without_ltx
 lsr-cli::cli cli::verify_exit_codes_follow_the_latest_outcome
 lsr-cli::cli cli::verify_json_agrees_with_the_library_report
 lsr-cli::daemon daemon::a_database_created_after_start_is_picked_up

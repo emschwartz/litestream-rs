@@ -149,7 +149,7 @@
 "TestListCommand_Run/TooManyArguments" = { reason = "A CLI command that talks to the running daemon over the control socket; the control socket is not in v1 (docs/PLAN.md section 1)." }
 
 ["litestream/cmd/litestream/ltx_test.go"]
-"TestLTXCommand_Run_EmptyJSONOutput" = { reason = "Rust deliberately differs: `lsr files` on a directory with no LTX files is an environment error, not an empty listing (lsr-cli::cli a_directory_without_ltx_is_an_environment_error_not_an_empty_replica), so a wrong path is never read as an empty replica." }
+"TestLTXCommand_Run_EmptyJSONOutput" = { reason = "Rust deliberately differs: `lsr files` on a directory with no LTX files is an environment error, not an empty listing (lsr-cli::cli verify_and_files_refuse_a_directory_without_ltx), so a wrong path is never read as an empty replica. `lsr restore` reads such a path as an empty replica, as Go does." }
 "TestLTXCommand_Run_JSONOutput" = { counterpart = "lsr-cli::cli::cli::files_json_agrees_with_the_inventory_and_text_lists_the_same" }
 "TestLTXCommand_UsageOmitsReplicaFlag" = { counterpart = "lsr-cli::bin/lsr::args::tests::help_documents_every_flag_command_and_exit_code" }
 "TestLevelVarParsing" = { counterpart = "lsr-cli::bin/lsr::args::tests::files_takes_replica_and_json" }
@@ -403,7 +403,7 @@
 "TestRestoreCommand_RunAllowsEmptyOutput" = { reason = "Rust deliberately differs: restore refuses any existing target, even an empty file (lsr-local tests::create_refuses_a_target_that_exists), because publish never overwrites (docs/PLAN.md phase 1, restore executor)." }
 "TestRestoreCommand_RunDryRunJSONOutput" = { counterpart = ["lsr-cli::cli::cli::dry_run_json_lists_the_chain_the_restore_applies", "lsr-cli::cli::cli::dry_run_prints_the_plan_and_writes_nothing", "lsr-cli::bin/lsr::run::tests::dry_run_over_s3_plans_what_the_restore_applies"] }
 "TestRestoreCommand_RunForceOverwritesExistingOutput" = { reason = "Rust deliberately differs: there is no -force; restore never overwrites an existing target (lsr-cli::cli an_existing_output_exits_3_and_stays_byte_identical) and the caller removes it first." }
-"TestRestoreCommand_RunIfReplicaExists" = { counterpart = ["lsr-cli::cli::cli::if_replica_exists_exits_0_on_an_empty_replica_and_writes_nothing", "lsr-cli::cli::cli::if_replica_exists_still_refuses_what_a_non_empty_replica_cannot_meet"] }
+"TestRestoreCommand_RunIfReplicaExists" = { counterpart = ["lsr-cli::cli::cli::if_replica_exists_exits_0_on_an_empty_replica_and_writes_nothing", "lsr-cli::cli::cli::if_replica_exists_still_refuses_what_a_non_empty_replica_cannot_meet", "lsr-cli::cli::cli::if_replica_exists_skips_a_path_without_ltx_as_go_does", "lsr-cli::cli::cli::dry_run_refuses_an_empty_replica_even_with_if_replica_exists"] }
 "TestRestoreCommand_RunJSONOutput" = { counterpart = "lsr-cli::cli::cli::restore_json_reports_go_s_fields" }
 "TestRestoreCommand_RunMissingOutputPathForReplicaURL" = { counterpart = "lsr-cli::bin/lsr::args::tests::missing_required_flag_for_every_required_flag" }
 "TestRestoreCommand_RunOrphanedSidecars" = { counterpart = ["lsr-cli::cli::cli::a_stale_sidecar_refuses_until_clear_sidecars", "lsr-local::tests::create_refuses_each_sidecar_and_removes_nothing"] }

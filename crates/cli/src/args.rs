@@ -164,7 +164,7 @@ pub const FLAGS: &[FlagSpec] = &[
         value: None,
         required: false,
         commands: &[CommandName::Restore],
-        help: "exit 0 without restoring when the replica holds no LTX file; a target a replica with files cannot meet is still refused",
+        help: "exit 0 without restoring when the replica holds no LTX file (a directory with no ltx/ included, as in Go); a target a replica with files cannot meet is still refused; --dry-run ignores it, as Go's does",
     },
     FlagSpec {
         name: "--dry-run",

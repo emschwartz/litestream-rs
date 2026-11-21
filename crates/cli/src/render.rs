@@ -259,7 +259,9 @@ fn restore(done: &RestoreDone) -> String {
             },
             true,
         ) => plan_json(output, source, chain, *stamps_read, sidecars_to_remove),
-        (Finished::Skipped { skip, cleared }, false) => skipped_text(output, *skip, cleared),
+        (Finished::Skipped { skip, cleared }, false) => {
+            skipped_text(output, source, *skip, cleared)
+        }
         (Finished::Skipped { skip, cleared }, true) => skipped_json(output, source, *skip, cleared),
     }
 }
@@ -277,6 +279,7 @@ const fn skip_word(skip: Skip) -> &'static str {
     match skip {
         Skip::OutputExists => "output_exists",
         Skip::EmptyReplica => "empty_replica",
+        Skip::NoLtxFolder => "no_ltx_folder",
     }
 }
 
@@ -317,7 +320,7 @@ fn restored_json(
     out
 }
 
-fn skipped_text(output: &Path, skip: Skip, cleared: &[PathBuf]) -> String {
+fn skipped_text(output: &Path, source: &Source, skip: Skip, cleared: &[PathBuf]) -> String {
     let mut out = String::new();
     for path in cleared {
         putln!(out, "removed stale {}", path.display());
@@ -331,6 +334,12 @@ fn skipped_text(output: &Path, skip: Skip, cleared: &[PathBuf]) -> String {
         Skip::EmptyReplica => putln!(
             out,
             "skipped: the replica holds no backup (--if-replica-exists); nothing written to {}",
+            output.display()
+        ),
+        Skip::NoLtxFolder => putln!(
+            out,
+            "skipped: {} holds no backup, it has no ltx/ folder (--if-replica-exists); nothing written to {}",
+            source.name(),
             output.display()
         ),
     }
