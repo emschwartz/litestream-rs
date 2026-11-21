@@ -154,12 +154,11 @@ test-s3: minio-up
         echo "test-s3: MinIO is not running; S3 tests skipped"
         exit 0
     fi
-    LSR_MINIO_ENDPOINT="http://127.0.0.1:${LSR_MINIO_PORT:-9000}" \
-        cargo nextest run -p lsr-store-s3 --test store-s3 -E 'test(/^minio::/)' --locked --no-fail-fast
-    LSR_MINIO_ENDPOINT="http://127.0.0.1:${LSR_MINIO_PORT:-9000}" LSR_S3_TRANSPORT=reqwest \
+    eval "$(./scripts/minio.sh env)"
+    cargo nextest run -p lsr-store-s3 --test store-s3 -E 'test(/^minio::/)' --locked --no-fail-fast
+    LSR_S3_TRANSPORT=reqwest \
         cargo nextest run -p lsr-store-s3 --features reqwest --test store-s3 -E 'test(/^minio::/)' --locked --no-fail-fast
-    LSR_MINIO_ENDPOINT="http://127.0.0.1:${LSR_MINIO_PORT:-9000}" \
-        cargo nextest run -p lsr-cli --test cli -E 'test(/^s3::/)' --locked --no-fail-fast
+    cargo nextest run -p lsr-cli --test cli -E 'test(/^s3::/)' --locked --no-fail-fast
 
 # Each restores what the other wrote at Latest, a txid and an instant, and they hand one prefix
 # over both ways, over the pinned builds (crates/compat/tests/compat/s3.rs). Needs Docker; fails, never
@@ -178,11 +177,8 @@ compat-s3: minio-up
         case "$var" in AWS_* | LITESTREAM_*) unset "$var" ;; esac
     done
     ./scripts/build-go-litestream.sh
-    LSR_COMPAT_S3_ENDPOINT="http://127.0.0.1:${LSR_MINIO_PORT:-9000}" \
-        LSR_COMPAT_S3_BUCKET=lsr-test \
-        LSR_COMPAT_S3_ACCESS_KEY=lsrtestroot \
-        LSR_COMPAT_S3_SECRET_KEY=lsrtest-throwaway-0000 \
-        cargo nextest run -p lsr-compat --test compat -E 'test(/^s3::/)' --run-ignored all --locked --no-fail-fast
+    eval "$(./scripts/minio.sh env)"
+    cargo nextest run -p lsr-compat --test compat -E 'test(/^s3::/)' --run-ignored all --locked --no-fail-fast
 
 # The two alternation runs (Go and Rust taking turns on one prefix, each turn killed at a
 # seeded point) over the pinned builds; compat-releases.yml prints the seed of a nightly run.
