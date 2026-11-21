@@ -36,7 +36,7 @@ Each crate is `crates/<name>`, package `lsr-<name>`. Listed from the bottom of t
 |---|---|---|
 | Nothing | `just check` | Format, clippy, every test that is not ignored, doctests, the S3 client feature builds, and the ledger's counterparts against a fresh test list (Linux). The land gate. |
 | Nothing, minutes | `just sqlite-big`, `just sim-soak <secs>`, `just sim-nightly`, `just fuzz-seed`, `just mutants <crate>` | The large real-SQLite cases (several GB of disk), rotating simulator seeds, the fuzz seed corpus, mutation testing. |
-| Docker | `just test-s3` | The S3 store and `lsr` against a throwaway MinIO; skipped when Docker is down. |
+| Docker | `just test-s3` | The S3 store and `lsr` against a throwaway MinIO; skipped when Docker is down (a failure under CI). |
 | Go | `just upstream`, then `just compat`, `just compat-live <names>`, `just compat-releases`, `just compat-tags`, `just compat-regen` | Pinned Go builds from `.upstream/` (a worktree shares the main checkout's): Go writes and Rust restores, the reverse, handovers and alternation, the Go VFS (which also needs a C compiler and SQLite headers). `compat-tags` needs only the clone. |
 | Tigris | `just test-tigris`, `just tigris-restore`, `just soak-tigris <hours>` | The real bucket, with credentials from a file outside the repo or `AWS_*`; `tigris-restore` also builds Go v0.5.18. Never in CI. |
 | Nightly Rust | `just fuzz <target> <secs>`, `just fuzz-cmin <target>` | cargo-fuzz over `fuzz/`. |

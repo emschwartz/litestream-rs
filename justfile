@@ -141,19 +141,25 @@ minio-down:
     ./scripts/minio.sh down
 
 # The S3 store against a real server; not part of check, which never needs Docker.
+# Locally it skips (exit 0) when Docker is down. Under CI (the CI variable, which GitHub sets) or
+# with LSR_REQUIRE_MINIO set, the tests are told a server is required: they fail, never skip,
+# when MinIO is missing or unreachable, so a green run means they ran against it.
 test-s3: minio-up
     #!/usr/bin/env bash
     set -euo pipefail
-    if ./scripts/minio.sh running; then
-        LSR_MINIO_ENDPOINT="http://127.0.0.1:${LSR_MINIO_PORT:-9000}" \
-            cargo nextest run -p lsr-store-s3 --test store-s3 -E 'test(/^minio::/)' --locked --no-fail-fast
-        LSR_MINIO_ENDPOINT="http://127.0.0.1:${LSR_MINIO_PORT:-9000}" LSR_S3_TRANSPORT=reqwest \
-            cargo nextest run -p lsr-store-s3 --features reqwest --test store-s3 -E 'test(/^minio::/)' --locked --no-fail-fast
-        LSR_MINIO_ENDPOINT="http://127.0.0.1:${LSR_MINIO_PORT:-9000}" \
-            cargo nextest run -p lsr-cli --test cli -E 'test(/^s3::/)' --locked --no-fail-fast
-    else
-        echo "test-s3: MinIO is not running; S3 tests skipped"
+    if [ -n "${CI:-}" ] && [ -z "${LSR_REQUIRE_MINIO:-}" ]; then
+        export LSR_REQUIRE_MINIO=1
     fi
+    if [ -z "${LSR_REQUIRE_MINIO:-}" ] && ! ./scripts/minio.sh running; then
+        echo "test-s3: MinIO is not running; S3 tests skipped"
+        exit 0
+    fi
+    LSR_MINIO_ENDPOINT="http://127.0.0.1:${LSR_MINIO_PORT:-9000}" \
+        cargo nextest run -p lsr-store-s3 --test store-s3 -E 'test(/^minio::/)' --locked --no-fail-fast
+    LSR_MINIO_ENDPOINT="http://127.0.0.1:${LSR_MINIO_PORT:-9000}" LSR_S3_TRANSPORT=reqwest \
+        cargo nextest run -p lsr-store-s3 --features reqwest --test store-s3 -E 'test(/^minio::/)' --locked --no-fail-fast
+    LSR_MINIO_ENDPOINT="http://127.0.0.1:${LSR_MINIO_PORT:-9000}" \
+        cargo nextest run -p lsr-cli --test cli -E 'test(/^s3::/)' --locked --no-fail-fast
 
 # Each restores what the other wrote at Latest, a txid and an instant, and they hand one prefix
 # over both ways, over the pinned builds (crates/compat/tests/compat/s3.rs). Needs Docker; fails, never

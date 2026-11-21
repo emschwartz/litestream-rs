@@ -1,7 +1,8 @@
 //! The built `lsr` against S3 replicas: what needs no server (credentials,
 //! an unreachable endpoint, a server that refuses) runs in `just check`; the
 //! restore through a real MinIO skips unless `LSR_MINIO_ENDPOINT` is set
-//! (`just test-s3`).
+//! (`just test-s3`); with `LSR_REQUIRE_MINIO` set (the recipe does under CI) it fails instead
+//! when the server is missing or unreachable.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -283,6 +284,29 @@ impl Minio {
         })
     }
 
+    /// Panics unless the endpoint accepts a TCP connection, so no step below can pass on an
+    /// absent server.
+    fn require_reachable(&self) {
+        let authority = self
+            .endpoint
+            .split_once("://")
+            .map_or(self.endpoint.as_str(), |(_, rest)| rest)
+            .split('/')
+            .next()
+            .unwrap_or_default();
+        let addr = std::net::ToSocketAddrs::to_socket_addrs(authority)
+            .ok()
+            .and_then(|mut addrs| addrs.next());
+        let reached = addr.is_some_and(|addr| {
+            TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(5)).is_ok()
+        });
+        assert!(
+            reached,
+            "LSR_REQUIRE_MINIO is set but MinIO is unreachable at {}; refusing to pass without running",
+            self.endpoint
+        );
+    }
+
     /// Puts every file of a directory replica under `prefix`.
     fn seed(&self, replica: &Path, prefix: &str) {
         let escaped = self.endpoint.replace(':', "%3A").replace('/', "%2F");
@@ -328,10 +352,18 @@ impl Minio {
 
 #[test]
 fn restore_from_minio_matches_dir() {
+    let required = std::env::var_os("LSR_REQUIRE_MINIO").is_some_and(|v| !v.is_empty());
     let Some(minio) = Minio::from_env() else {
+        assert!(
+            !required,
+            "LSR_REQUIRE_MINIO is set but LSR_MINIO_ENDPOINT is not; refusing to skip (just minio-up)"
+        );
         eprintln!("skipped: set LSR_MINIO_ENDPOINT (just minio-up)");
         return;
     };
+    if required {
+        minio.require_reachable();
+    }
     for fixture in all_fixtures().expect("fixtures") {
         let manifest = Manifest::load(&fixture).expect("manifest");
         let staged = stage(&fixture, &manifest).expect("stage");
