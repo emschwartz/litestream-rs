@@ -696,7 +696,7 @@ impl<B: Backend> Rig<B> {
         };
         let (mut wal, mut db, mut ck) = (backend.clone(), backend.clone(), backend.clone());
         let at = self.remote_log.len();
-        let tip = self.model.as_ref().and_then(Model::tip);
+        let newest_commit = self.model.as_ref().and_then(Model::newest_commit);
         let now = self.clock.now();
         self.vfs.set_window(true);
         let env = Env {
@@ -710,7 +710,7 @@ impl<B: Backend> Rig<B> {
         self.vfs.set_window(self.everywhere);
         // After a power loss in the tick only its syncs count: what it wrote after them is gone.
         self.observe()?;
-        self.note_staged(tip, at);
+        self.note_staged(newest_commit, at);
         self.follow(&tick);
         self.ticks.push(tick.clone());
         self.calls.push(self.vfs.all_calls());
@@ -746,9 +746,9 @@ impl<B: Backend> Rig<B> {
     }
 
     /// Tells the model which commit each staged file holds (as the simulator's run loop does):
-    /// a file with WAL frames by their position, a snapshot of an empty WAL by the tip as the
+    /// a file with WAL frames by their position, a snapshot of an empty WAL by the newest commit as the
     /// tick began, since nothing else wrote during the tick.
-    fn note_staged(&mut self, tip: Option<CommitId>, at: usize) {
+    fn note_staged(&mut self, newest_commit: Option<CommitId>, at: usize) {
         let events = self.staging_log.events();
         for event in events.iter().skip(self.staging_seen) {
             let TapEvent::Put {
@@ -774,7 +774,7 @@ impl<B: Backend> Rig<B> {
                     model.note_stage(max, Salts { salt1, salt2 }, end, at);
                 }
                 None => {
-                    if let Some(commit) = tip {
+                    if let Some(commit) = newest_commit {
                         let rewound = model.rewound();
                         model.note_snapshot(max, commit, rewound, at);
                     }
@@ -1034,7 +1034,7 @@ impl<B: Backend> Rig<B> {
     /// Replaces the local database with `bytes`, as an application that lost its disk and restored the
     /// replica into a fresh one: every connection closes, the database, its WAL and `-shm` and
     /// the staging directory are deleted, `bytes` become the database file, and the application and a
-    /// new replicator open it. The model continues from its tip, which is what `bytes` must hold.
+    /// new replicator open it. The model continues from its newest commit, which is what `bytes` must hold.
     ///
     /// # Errors
     /// [`RigError`].

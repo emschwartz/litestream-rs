@@ -1,45 +1,45 @@
-//! The tip read back from the replica, for a boot whose staging directory
+//! The newest staged file read back from the replica, for a boot whose staging directory
 //! holds no level-0 file (a meta directory wiped, lost or new).
 //!
-//! With no staged tip there is nothing to compare the WAL with, so boot used
+//! With no staged newest staged file there is nothing to compare the WAL with, so boot used
 //! to take a first-sync snapshot. But the replica's newest level-0 file is the
-//! tip the staging directory last held: its header names the WAL range it came
+//! newest staged file the staging directory last held: its header names the WAL range it came
 //! from (offset, size, salts) and the commit size, and its pages are what the
-//! WAL held there. [`TipView::load_remote`] reads that file and runs it through
-//! the same checks a staged tip gets (the frame before its end, and the
+//! WAL held there. [`NewestStagedFile::load_remote`] reads that file and runs it through
+//! the same checks a staged newest file gets (the frame before its end, and the
 //! whole-range compare), so `recover` continues without a snapshot
 //! exactly when it would have with the file still staged.
 //!
 //! The read is one GET of the key the boot's listing named newest, from byte
-//! 0 for up to [`TIP_READ`] bytes. A level-0 file holds one transaction, so for
+//! 0 for up to [`NEWEST_STAGED_READ`] bytes. A level-0 file holds one transaction, so for
 //! any file under 1 MiB this is the whole object (header, pages, page index and
 //! trailer), and the decoder verifies its checksum on that read. The header and
 //! the index alone would not do: they sit at the two ends of the file, and the
 //! index names pages without their bytes, which the compare needs. A larger
 //! file takes one more read per MiB, in the same bounded memory.
 //!
-//! There is no tip, as before, when the key is gone (the replica's newest file
+//! There is no newest staged file, as before, when the key is gone (the replica's newest file
 //! is above level 0, its level-0 files retained away) or its header names no
 //! usable WAL origin. A file that does not decode, or whose header names
 //! another range than its key, is a corrupt replica. Go reaches the same
 //! position another way: `checkDatabaseBehindReplica` (`db.go`) downloads the
 //! replica's newest level-0 file into the empty meta directory, and `verify`
-//! then reads it as its local tip.
+//! then reads it as its local newest staged file.
 
 use std::io::{Read, Seek};
 
 use lsr_ltx::{HEADER_LEN, Header, Txid, TxidRange};
 use lsr_wal::WalReader;
 
-use super::{Origin, TIP_READ, TipFile, TipView};
+use super::{NEWEST_STAGED_READ, NewestStagedFile, NewestStagedFileSource, Origin};
 use crate::fault::Fault;
 use crate::layout::{FileKey, Level};
 use crate::store::{ObjectStore, StoreError};
 
-impl TipView {
+impl NewestStagedFile {
     /// Reads the replica's level-0 file for `newest`, the replica's newest
-    /// transaction, and checks it against `wal` as [`TipView::load`] checks a
-    /// staged tip. `None` when the replica holds no such file or its header
+    /// transaction, and checks it against `wal` as [`NewestStagedFile::load`] checks a
+    /// staged newest staged file. `None` when the replica holds no such file or its header
     /// names no WAL origin: there is no position to continue from.
     ///
     /// # Errors
@@ -52,7 +52,7 @@ impl TipView {
         newest: Txid,
     ) -> Result<Option<Self>, Fault> {
         let key = FileKey::new(Level::ZERO, TxidRange::single(newest));
-        let len = TIP_READ;
+        let len = NEWEST_STAGED_READ;
         let first = match remote.read(&key, 0, len).await {
             Ok(first) => first,
             Err(StoreError::NotFound { .. }) => return Ok(None),
@@ -66,7 +66,7 @@ impl TipView {
         let Some(origin) = Origin::of(&header) else {
             return Ok(None);
         };
-        let file = TipFile {
+        let file = NewestStagedFileSource {
             store: remote,
             key,
             fault: Fault::from_remote,

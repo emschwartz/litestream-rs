@@ -8,7 +8,7 @@
 //! snapshot's last transaction (with the newer snapshots hidden, so the older
 //! one is the base), and for the newest snapshot it is asked for the latest
 //! state; each [PlanOutcome::Gap] is one finding, so a hole in older history
-//! is reported, not only the one at the tip.
+//! is reported, not only the one at the newest staged file.
 //!
 //! [Depth::Names] never reads contents, so a clean report there cannot vouch
 //! that a restore would succeed; only [Depth::Contents] can.
@@ -111,7 +111,7 @@ pub enum Finding {
         next_starts: Txid,
         /// Whether this is the newest snapshot, so the latest state is cut
         /// off, rather than a hole in older history.
-        at_tip: bool,
+        at_newest: bool,
     },
     /// A level-9 file that does not start at transaction 1, so it is never a
     /// base.
@@ -224,7 +224,9 @@ impl Finding {
         match self {
             Self::NoSnapshot
             | Self::LatestRestoreFails { .. }
-            | Self::Gap { at_tip: true, .. }
+            | Self::Gap {
+                at_newest: true, ..
+            }
             | Self::Unreadable {
                 in_latest_plan: true,
                 ..
@@ -245,7 +247,9 @@ impl Finding {
                 in_latest_plan: true,
                 ..
             } => Severity::Unrestorable,
-            Self::Gap { at_tip: false, .. }
+            Self::Gap {
+                at_newest: false, ..
+            }
             | Self::MalformedSnapshot { .. }
             | Self::SizeDiffers { .. }
             | Self::Unreadable { .. }
@@ -571,7 +575,7 @@ fn name_findings(inventory: &Inventory, findings: &mut Findings) -> PlanOutcome 
                     snapshot: newest.key,
                     have_through: *have_through,
                     next_starts: *next_starts,
-                    at_tip: true,
+                    at_newest: true,
                 });
             }
         }
@@ -610,7 +614,7 @@ fn older_history(inventory: &Inventory, base: &FileInfo, next: &FileInfo, findin
             snapshot: base.key,
             have_through,
             next_starts,
-            at_tip: false,
+            at_newest: false,
         });
     }
 }

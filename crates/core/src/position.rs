@@ -136,7 +136,7 @@ impl ReadEpoch {
 /// followed by another, so nothing past the position can be discarded.
 ///
 /// It is assigned in exactly three places:
-/// 1. `recover` returning `Continue` when the tip's end equals the committed
+/// 1. `recover` returning `Continue` when the newest staged file's end equals the committed
 ///    end of the same `WalView`.
 /// 2. A sync step ending `Idle` or `Through` whose epoch is the same before the
 ///    scan and after the staging commit.

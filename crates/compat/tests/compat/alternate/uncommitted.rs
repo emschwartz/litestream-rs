@@ -46,7 +46,7 @@ const INDEX_HEADER: usize = 48;
 /// Valid frames past the wal-index's end, found before a Go boot.
 #[derive(Debug)]
 pub struct Tail {
-    /// The transaction Go's boot writes: the tip before it, plus one.
+    /// The transaction Go's boot writes: the position before it, plus one.
     pub boot: Txid,
     /// The wal-index's `mxFrame`.
     pub mx_frame: u32,

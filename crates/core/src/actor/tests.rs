@@ -1113,15 +1113,15 @@ proptest::proptest! {
 }
 
 #[test]
-fn prune_keeps_exactly_the_uncompacted_and_the_tip() {
+fn prune_keeps_exactly_the_uncompacted_and_the_newest_staged_file() {
     let (mut rig, mut actor) = caught_up();
     assert_eq!(level_one_max(&rig), Some(1));
     for n in 2..=4 {
         commit_and_settle(&mut rig, &mut actor, n, T0 + 1);
     }
-    // Confirmed through 4, level 1 through 1, tip 4: only 1 goes.
+    // Confirmed through 4, level 1 through 1, newest staged file 4: only 1 goes.
     assert_eq!(staged(&rig), vec![2, 3, 4]);
-    // A new level-1 window compacts 2..=4; the tip stays although compacted.
+    // A new level-1 window compacts 2..=4; the newest staged file stays although compacted.
     let later = T0 + 60_000;
     rig.settle(&mut actor, later);
     assert_eq!(level_one_max(&rig), Some(4));
@@ -1130,7 +1130,7 @@ fn prune_keeps_exactly_the_uncompacted_and_the_tip() {
 }
 
 #[test]
-fn the_tip_stays_even_when_compacted() {
+fn the_newest_staged_file_stays_even_when_compacted() {
     let (rig, _actor) = caught_up();
     assert_eq!(level_one_max(&rig), Some(1));
     assert_eq!(staged(&rig), vec![1]);
@@ -1499,7 +1499,7 @@ fn a_torn_staged_file_the_replica_lacks_is_dropped_with_all_after_it() {
         assert_eq!(
             event(&boot),
             Some(&Event::Booted {
-                cause: Some(SnapshotCause::LocalTipUnreadable)
+                cause: Some(SnapshotCause::NewestStagedFileUnreadable)
             })
         );
         assert_eq!(staged(&rig), vec![2]);
@@ -1528,7 +1528,7 @@ fn a_torn_staged_file_the_replica_holds_is_dropped_and_the_snapshot_takes_the_ne
         assert_eq!(
             event(&boot),
             Some(&Event::Booted {
-                cause: Some(SnapshotCause::LocalTipUnreadable)
+                cause: Some(SnapshotCause::NewestStagedFileUnreadable)
             })
         );
         assert_eq!(staged(&rig), vec![2]);
@@ -1553,7 +1553,9 @@ fn the_upload_lane_drops_a_staged_file_that_turned_unreadable_and_snapshots() {
         let lost = rig.tick(&mut actor, T0 + 1);
         assert_eq!(
             event(&lost),
-            Some(&Event::Resnapshot(SnapshotCause::LocalTipUnreadable))
+            Some(&Event::Resnapshot(
+                SnapshotCause::NewestStagedFileUnreadable
+            ))
         );
         assert_eq!(staged(&rig), vec![1]);
         let seen = rig.settle(&mut actor, T0 + 1);
@@ -1573,7 +1575,9 @@ fn a_crash_between_the_drop_and_the_snapshot_boots_clean() {
     let lost = rig.tick(&mut actor, T0 + 1);
     assert_eq!(
         event(&lost),
-        Some(&Event::Resnapshot(SnapshotCause::LocalTipUnreadable))
+        Some(&Event::Resnapshot(
+            SnapshotCause::NewestStagedFileUnreadable
+        ))
     );
     let mut actor = Actor::new(cfg());
     let boot = rig.tick(&mut actor, T0 + 2);
@@ -1591,7 +1595,7 @@ mod index_reset;
 mod lanes;
 mod listing;
 mod live;
+mod newest_replica_file;
 mod no_wal_yet;
 mod pages;
 mod rejected_snapshot;
-mod remote_tip;

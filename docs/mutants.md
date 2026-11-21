@@ -210,7 +210,7 @@ Each was run again with `--file <file> --re '<file>:<line>:<col>'` and both test
 | `plan.rs:563:9` | replace AsOfPlanner::comparisons -> u64 with 0 | `comparisons_count_both_sorts_and_every_heap_step` (`tests/core/plan_lazy.rs`) |
 | `plan.rs:563:9` | replace AsOfPlanner::comparisons -> u64 with 1 | same |
 | `plan.rs:733:5` | replace depth -> u64 with 0 | same |
-| `recover.rs:756:42` | replace match guard at_start with false in frame_state | `rule_9_at_boot_a_tip_ending_at_the_wal_start_has_no_frame_to_miss` (`recover/tests.rs`) |
+| `recover.rs:756:42` | replace match guard at_start with false in frame_state | `rule_9_at_boot_a_newest_staged_file_ending_at_the_wal_start_has_no_frame_to_miss` (`recover/tests.rs`) |
 | `sync.rs:35:29` | replace << with >> (`DEFAULT_CAP`) | `the_default_cap_is_go_s_64_mib` (`sync/tests.rs`) |
 | `sync.rs:38:27` | replace << with >> (`FLUSH_AT`) | `a_small_file_reaches_the_upload_in_one_write` (`sync/tests.rs`) |
 | `sync.rs:231:28` | replace > with >= in clamp | `an_equal_clock_is_not_a_clamp` (`sync/tests.rs`); the existing proptest draws equal created-at times about once in a thousand cases |
@@ -257,7 +257,7 @@ connection's checkpoint would in the middle of a sync step; it also logs the key
 
 | Where | Mutation | Why |
 | --- | --- | --- |
-| `actor.rs:931:54` | `Actor::prune_unit`: `keys.len() == listing.files.len() && listing.next.is_some()` becomes `\|\|` | The two differ only when the page holds a key past the bound and another page follows. `through` is then the last prunable key's end instead of the bound, which costs one more staging listing on the next tick (it finds nothing left at or below the bound and records the bound); no file is deleted or kept differently. They cannot differ at all while each prune bound is the end of a staged level-0 file (the confirmed transaction, the level-1 end compacted from those files) or one below the tip (the tip is then the page's last key and no page follows). A bound that is not a staged end needs staging and the replica to disagree on key boundaries, a state no test builds; the cost if wrong is one listing. |
+| `actor.rs:931:54` | `Actor::prune_unit`: `keys.len() == listing.files.len() && listing.next.is_some()` becomes `\|\|` | The two differ only when the page holds a key past the bound and another page follows. `through` is then the last prunable key's end instead of the bound, which costs one more staging listing on the next tick (it finds nothing left at or below the bound and records the bound); no file is deleted or kept differently. They cannot differ at all while each prune bound is the end of a staged level-0 file (the confirmed transaction, the level-1 end compacted from those files) or one below the newest staged file (the newest staged file is then the page's last key and no page follows). A bound that is not a staged end needs staging and the replica to disagree on key boundaries, a state no test builds; the cost if wrong is one listing. |
 
 #### Harness (7)
 

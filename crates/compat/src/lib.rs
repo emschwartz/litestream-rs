@@ -30,7 +30,7 @@
 //!
 //! The process half: [`Replicator`] runs Go's `litestream replicate` or Rust's `lsr replicate`
 //! on one [`AppFixture`], stopped by SIGINT or killed by SIGKILL, and the watchers re-exported from
-//! the handover module ([`tip`], [`wait_boot_file`], [`snapshots`]) read what each process
+//! the handover module ([`position`], [`wait_boot_file`], [`snapshots`]) read what each process
 //! staged and uploaded, so a test can tell a boot that continued from one that snapshotted.
 //!
 //! The replica of a [`AppFixture`] is a directory or a prefix of a local MinIO bucket ([`Remote`],
@@ -71,7 +71,7 @@ pub use golive::{
     write_config, write_config_daily_snapshots, write_config_for, write_config_snapshotting,
 };
 pub use handover::{
-    PROCESS_STEP, snapshots, tip, uploaded, wait_boot_file, wait_staged_past, wait_uploaded,
+    PROCESS_STEP, position, snapshots, uploaded, wait_boot_file, wait_staged_past, wait_uploaded,
 };
 pub use manifest::{
     FIXTURE_FORMAT, FileEntry, MANIFEST_FILE, Manifest, Outcome, Target, TargetEntry, all_fixtures,

@@ -6,7 +6,7 @@
 //!
 //! - `go_config_and_meta_start_the_rust_sidecar_with_no_snapshot`: Go runs three databases from
 //!   one file, stops; `lsr replicate -config` starts on the file unchanged and each database's
-//!   next file is Go's tip plus one, incremental, with no snapshot cause logged; then Go starts
+//!   next file is Go's position plus one, incremental, with no snapshot cause logged; then Go starts
 //!   again on what `lsr` left, the same way. The file carries Go keys v1 accepts only at their
 //!   off value, Go tuning knobs v1 warns about, and the `litestream-rs` section Go does not
 //!   define, so it shows both programs start on such a file.
@@ -34,8 +34,8 @@ use std::time::Duration;
 use alternate::{Launch, alternate, seed};
 use lsr_compat::{
     AppFixture, Era, GoBuild, GoRestore, Kind, Replicator, Shape, Summary, Target, builds_in,
-    builds_under_test, hash_pages, integrity_check, lsr_binary, restore_replica, restore_with_go,
-    snapshots, tip, wait_boot_file, wait_staged_past, wait_until, wait_uploaded,
+    builds_under_test, hash_pages, integrity_check, lsr_binary, position, restore_replica,
+    restore_with_go, snapshots, wait_boot_file, wait_staged_past, wait_until, wait_uploaded,
 };
 use lsr_core::RestoreTarget;
 use lsr_ltx::Txid;
@@ -147,7 +147,7 @@ fn go_restore(
 /// One daemon's turn over every fixture: it comes up with every database, each database commits
 /// [`COMMITS`] transactions, each staged before the next, and the replicas end holding them
 /// all, and a snapshot when `snapshot` says the daemon writes one this soon. Returns each
-/// database's boot file when it had a previous tip.
+/// database's boot file when it had a previous position.
 fn turn(
     process: &mut Replicator,
     fixtures: &mut [AppFixture],
@@ -188,7 +188,9 @@ fn turn(
 /// holds only what the commits wrote.
 fn assert_continued(name: &str, kind: Kind, boots: &[Option<Summary>], prev: &[Txid]) {
     for (k, (boot, prev)) in boots.iter().zip(prev).enumerate() {
-        let boot = boot.as_ref().expect("a boot file after a previous tip");
+        let boot = boot
+            .as_ref()
+            .expect("a boot file after a previous position");
         let fields = boot.header.fields();
         assert_eq!(
             fields.txids.min().get(),
@@ -204,18 +206,18 @@ fn assert_continued(name: &str, kind: Kind, boots: &[Option<Summary>], prev: &[T
     }
 }
 
-/// What a stopped daemon left: each database's tip, pages and level-9 files.
+/// What a stopped daemon left: each database's position, pages and level-9 files.
 struct Left {
-    tips: Vec<Txid>,
+    positions: Vec<Txid>,
     pages: Vec<Vec<String>>,
     l9: Vec<BTreeSet<String>>,
 }
 
 fn left(fixtures: &[AppFixture]) -> Left {
     Left {
-        tips: fixtures
+        positions: fixtures
             .iter()
-            .map(|s| tip(s).expect("tip").expect("staged"))
+            .map(|s| position(s).expect("position").expect("staged"))
             .collect(),
         pages: fixtures
             .iter()
@@ -295,11 +297,11 @@ fn sidecar_handover(build: &GoBuild, lsr: &Path) {
 
     let log = fixture_log(&fixtures, "lsr.log");
     let mut rs = Replicator::start_lsr_config(lsr, &config, &log).expect("lsr");
-    let previous: Vec<Option<Txid>> = at_go.tips.iter().copied().map(Some).collect();
+    let previous: Vec<Option<Txid>> = at_go.positions.iter().copied().map(Some).collect();
     let boots = turn(&mut rs, &mut fixtures, &previous, snapshot);
     let rs_log = rs.log_text();
     rs.stop().expect("lsr drains and exits 0");
-    assert_continued(name, Kind::Rust, &boots, &at_go.tips);
+    assert_continued(name, Kind::Rust, &boots, &at_go.positions);
     if snapshot {
         assert_no_new_snapshot(name, &fixtures, &at_go);
     } else {
@@ -318,10 +320,17 @@ fn sidecar_handover(build: &GoBuild, lsr: &Path) {
     for (k, fixture) in fixtures.iter().enumerate() {
         let latest = rust_restore(fixture, RestoreTarget::Latest, "rs-1.db");
         assert_eq!(latest, at_rust.pages[k], "{name}: database {k}");
-        let go_tip = rust_restore(fixture, RestoreTarget::Txid(at_go.tips[k]), "rs-go-tip.db");
-        assert_eq!(go_tip, at_go.pages[k], "{name}: database {k} at Go's tip");
+        let go_newest = rust_restore(
+            fixture,
+            RestoreTarget::Txid(at_go.positions[k]),
+            "rs-go-position.db",
+        );
+        assert_eq!(
+            go_newest, at_go.pages[k],
+            "{name}: database {k} at Go's position"
+        );
     }
-    println!("{name}: lsr continued every database at Go's tip plus one");
+    println!("{name}: lsr continued every database at Go's position plus one");
     if build.era() == Era::Frames {
         println!("{name}: reads only frame-encoded files, so cannot resume from lsr's");
         return;
@@ -332,10 +341,10 @@ fn sidecar_handover(build: &GoBuild, lsr: &Path) {
 /// Go starts again on what `lsr` left.
 fn go_resumes(name: &str, bin: &Path, config: &Path, fixtures: &mut [AppFixture], at_rust: &Left) {
     let mut go = Replicator::start(bin, config, &fixture_log(fixtures, "go-2.log")).expect("Go");
-    let previous: Vec<Option<Txid>> = at_rust.tips.iter().copied().map(Some).collect();
+    let previous: Vec<Option<Txid>> = at_rust.positions.iter().copied().map(Some).collect();
     let boots = turn(&mut go, fixtures, &previous, true);
     go.stop().expect("Go stops");
-    assert_continued(name, Kind::Go, &boots, &at_rust.tips);
+    assert_continued(name, Kind::Go, &boots, &at_rust.positions);
     assert_no_new_snapshot(name, fixtures, at_rust);
     for (k, fixture) in fixtures.iter().enumerate() {
         let now = fixture.hash_now().expect("hash");
@@ -343,11 +352,20 @@ fn go_resumes(name: &str, bin: &Path, config: &Path, fixtures: &mut [AppFixture]
         assert_eq!(latest, now, "{name}: database {k}: Go at Latest");
         let rust = rust_restore(fixture, RestoreTarget::Latest, "rs-2.db");
         assert_eq!(rust, now, "{name}: database {k}: Rust at Latest");
-        let txid = at_rust.tips[k].get();
-        let mid = go_restore(bin, config, fixture, Target::Txid { txid }, "go-rs-tip.db");
-        assert_eq!(mid, at_rust.pages[k], "{name}: database {k} at lsr's tip");
+        let txid = at_rust.positions[k].get();
+        let mid = go_restore(
+            bin,
+            config,
+            fixture,
+            Target::Txid { txid },
+            "go-rs-position.db",
+        );
+        assert_eq!(
+            mid, at_rust.pages[k],
+            "{name}: database {k} at lsr's position"
+        );
     }
-    println!("{name}: Go continued every database at lsr's tip plus one");
+    println!("{name}: Go continued every database at lsr's position plus one");
 }
 
 /// The tests that run the Go builds under test (`LSR_COMPAT_VERSIONS`).
@@ -357,7 +375,7 @@ mod live {
 
     /// Go's `litestream replicate -config` runs three databases and stops; `lsr replicate
     /// -config` starts on the same file and meta directories and each database continues at Go's
-    /// tip plus one with no snapshot; then Go continues from what `lsr` left. Restores by both
+    /// position plus one with no snapshot; then Go continues from what `lsr` left. Restores by both
     /// match the databases at every handover point.
     #[test]
     #[ignore = "runs the pinned Go binaries; just compat"]

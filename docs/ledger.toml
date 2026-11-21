@@ -486,7 +486,7 @@
 "TestCompactor_VerifyLevelConsistency" = { counterpart = "lsr-core::verify::tests::a_clean_replica_has_no_findings_at_either_depth" }
 "TestCompactor_VerifyLevelConsistency/ContiguousFiles" = { counterpart = "lsr-core::verify::tests::a_clean_replica_has_no_findings_at_either_depth" }
 "TestCompactor_VerifyLevelConsistency/EmptyLevel" = { counterpart = "lsr-core::verify::tests::an_empty_replica_has_no_finding_but_is_not_restorable" }
-"TestCompactor_VerifyLevelConsistency/GapDetected" = { counterpart = "lsr-core::verify::tests::a_hole_after_the_newest_snapshot_is_a_gap_at_the_tip" }
+"TestCompactor_VerifyLevelConsistency/GapDetected" = { counterpart = "lsr-core::verify::tests::a_hole_after_the_newest_snapshot_is_a_gap_at_the_newest_staged_file" }
 "TestCompactor_VerifyLevelConsistency/OverlapDetected" = { reason = "Rust deliberately differs: Go's level check calls two overlapping files in one level an error, while Rust's planner treats an overlap as legal and lets the further-reaching file win (lsr-core plan::tests::an_overlapping_higher_file_replaces_the_small_ones), as Go's own restore planner does since #847." }
 "TestCompactor_VerifyLevelConsistency/SingleFile" = { counterpart = "lsr-core::verify::tests::a_young_replica_of_level_zero_files_from_one_has_no_findings" }
 
@@ -517,14 +517,14 @@
 "TestDB_DiskFullGaugeResetsOnOtherSyncErrors" = { reason = "The library reports through EventSink events and the health() handle; the sidecar's /metrics renders that handle on each scrape, so there is no collector to keep, reset or delete, and litestream_disk_full is not emitted: a full disk is not a cause the replicator distinguishes (the lsr-sidecar metrics module doc lists every Go series and why)." }
 "TestDB_ExceedsTruncateThreshold" = { counterpart = "lsr-core::checkpoint::tests::decide_follows_the_ladder" }
 "TestDB_IdleCheckpointSnapshotLoop" = { counterpart = ["lsr-core::checkpoint::tests::our_own_bump_frame_does_not_arm_the_time_trigger", "lsr-core::checkpoint::tests::an_idle_database_never_checkpoints_again"] }
-"TestDB_Issue994_RunawayDiskUsage" = { counterpart = ["lsr-core::actor::tests::prune_keeps_exactly_the_uncompacted_and_the_tip", "lsr-sim::resources::tests::an_idle_window_wants_no_staged_file_no_checkpoint_and_no_unexplained_listing"] }
+"TestDB_Issue994_RunawayDiskUsage" = { counterpart = ["lsr-core::actor::tests::prune_keeps_exactly_the_uncompacted_and_the_newest_staged_file", "lsr-sim::resources::tests::an_idle_window_wants_no_staged_file_no_checkpoint_and_no_unexplained_listing"] }
 "TestDB_L0RetentionMetrics" = { reason = "The library reports through EventSink events and the health() handle; the sidecar's /metrics renders that handle on each scrape, so there is no collector to keep, reset or delete, and litestream_l0_retention_files_total is not emitted: retention keeps no per-pass counts (the lsr-sidecar metrics module doc lists every Go series and why)." }
 "TestDB_LastPageMatch_RejectsChangedWAL" = { counterpart = "lsr-core::recover::tests::rule_9_a_last_page_that_differs_snapshots" }
 "TestDB_LastPageMatch_ReusesVerifiedPage" = { reason = "Go-only: an in-memory cache of a file or page Go read before. Rust caches nothing without a measurement (AGENTS.md design rules) and reads what each decision needs." }
 "TestDB_LockExecDoesNotStarveQueuedWaiter" = { reason = "Go-only: fairness and context handling of Go mutexes shared between goroutines (the exec, sync and checkpoint locks). The Rust engine is one actor driven tick by tick with no shared locks (docs/PLAN.md section 3)." }
 "TestDB_MonitorRetriesAndRecoversFromLTXStagingDiskFull" = { counterpart = "lsr-sim::sim::faults::disk_full_on_staging" }
 "TestDB_MultipleCheckpointsWithWrites" = { counterpart = ["lsr-core::checkpoint::tests::a_passive_that_restarts_the_wal_starts_a_new_generation_file", "lsr-compat::compat::live_matches_sim::outside_checkpoints_and_restarts"] }
-"TestDB_Pos_OpenErrorReturnsLTXError" = { counterpart = "lsr-core::recover::tests::rule_3_an_unreadable_tip_snapshots_after_the_newer_of_tip_and_remote" }
+"TestDB_Pos_OpenErrorReturnsLTXError" = { counterpart = "lsr-core::recover::tests::rule_3_an_unreadable_newest_staged_file_snapshots_after_the_newer_of_newest_staged_file_and_remote" }
 "TestDB_Pos_VerifyErrorReturnsLTXError" = { counterpart = "lsr-core::recover::tests::the_loader_calls_garbage_unreadable_and_an_empty_directory_none" }
 "TestDB_ReadLockSurvivesContextCancel" = { reason = "Go-only: context.Context cancellation. The Rust core is sans-IO and advances one tick at a time (docs/PLAN.md section 2, goal 5); there is no context to cancel, and shutdown is final_sync with a deadline." }
 "TestDB_ReadLockSurvivesContextCancel/Checkpoint" = { reason = "Go-only: context.Context cancellation. The Rust core is sans-IO and advances one tick at a time (docs/PLAN.md section 2, goal 5); there is no context to cancel, and shutdown is final_sync with a deadline." }
@@ -594,7 +594,7 @@
 "TestDB_EnforceL0RetentionByTime" = { counterpart = ["lsr-core::maintain::retain::tests::a_covered_level_zero_file_wakes_when_it_is_old_enough", "lsr-core::maintain::retain::tests::level_zero_files_the_levels_do_not_cover_stay"] }
 "TestDB_EnforceL0RetentionByTime_RetentionDisabled" = { counterpart = ["lsr-core::maintain::retain::tests::switch::with_retention_off_no_snapshot_compacted_or_level_zero_file_is_deleted", "lsr-core::maintain::retain::tests::keep_never_deletes_level_zero"] }
 "TestDB_EnforceRetention" = { counterpart = "lsr-core::maintain::retain::tests::the_ladder_deletes_old_snapshots_what_they_floor_and_covered_level_zero" }
-"TestDB_EnforceRetentionByTXID_LocalCleanup" = { counterpart = "lsr-core::actor::tests::prune_keeps_exactly_the_uncompacted_and_the_tip" }
+"TestDB_EnforceRetentionByTXID_LocalCleanup" = { counterpart = "lsr-core::actor::tests::prune_keeps_exactly_the_uncompacted_and_the_newest_staged_file" }
 "TestDB_EnforceSnapshotRetention_RetentionDisabled" = { counterpart = ["lsr-core::maintain::retain::tests::switch::with_retention_off_no_snapshot_compacted_or_level_zero_file_is_deleted", "lsr-sim::sim::retention::with_retention_off_a_long_run_deletes_nothing_and_still_compacts_and_snapshots"] }
 "TestDB_EnforceSnapshotRetention_ReturnsZeroWithoutPriorSnapshot" = { counterpart = "lsr-core::maintain::retain::tests::the_last_file_of_every_level_stays_even_when_all_are_old" }
 "TestDB_EnsureExists" = { reason = "Go library API (DB.EnsureExists) with no caller in cmd/ at 041a8c3. A Rust replicator never restores implicitly: restore is the caller's explicit call (lsr-core restore), and starting on a missing database is the caller's choice." }
@@ -615,7 +615,7 @@
 "TestDB_SnapshotExcludesUnsyncedWALFrames" = { counterpart = ["lsr-core::snapshot::tests::snapshot_mark_above_synced_is_bug", "lsr-core::snapshot::tests::snapshot_ignores_concurrent_backfill"] }
 "TestDB_Sync" = { counterpart = "lsr-compat::compat::live_source::live_sync_chain_restores" }
 "TestDB_Sync/CheckpointInterval" = { counterpart = "lsr-core::checkpoint::tests::the_interval_counts_from_last_and_is_inclusive" }
-"TestDB_Sync/Initial" = { counterpart = ["lsr-core::recover::tests::rule_1_no_tip_is_a_first_sync", "lsr-core::upload::tests::a_listing_of_an_empty_replica_then_uploads_from_one"] }
+"TestDB_Sync/Initial" = { counterpart = ["lsr-core::recover::tests::rule_1_no_newest_staged_file_is_a_first_sync", "lsr-core::upload::tests::a_listing_of_an_empty_replica_then_uploads_from_one"] }
 "TestDB_Sync/MinCheckpointPageN" = { counterpart = "lsr-core::checkpoint::tests::decide_follows_the_ladder" }
 "TestDB_Sync/MultiSync" = { counterpart = "lsr-compat::compat::live_source::live_sync_chain_restores" }
 "TestDB_Sync/NoDB" = { counterpart = ["lsr-core::sync::tests::an_empty_wal_and_an_empty_database_have_nothing_to_snapshot", "lsr-sim::sim::faults::db_created_no_pages"] }
@@ -637,7 +637,7 @@
 "TestStore_EnforceSnapshotRetention_RetainsInFlightRestorePlanFiles" = { reason = "Covered by lsr-core restore::tests::a_file_deleted_between_plan_and_read_is_replanned_once differently: Go's store pins the files of a restore in flight in the same process; a Rust restore re-plans, bounded, when a planned file vanishes (docs/PLAN.md phase 1, restore planner), and level 0 is kept longer than a restore takes." }
 
 ["litestream/db_wal_rewind_test.go"]
-"TestDB_SnapshotAfterWALRewind" = { counterpart = ["lsr-core::recover::tests::a_committed_end_before_the_tip_is_a_rewind", "lsr-core::sync::tests::a_snapshot_takes_the_wal_pages_and_fills_the_rest_from_the_database"] }
+"TestDB_SnapshotAfterWALRewind" = { counterpart = ["lsr-core::recover::tests::a_committed_end_before_the_newest_staged_file_is_a_rewind", "lsr-core::sync::tests::a_snapshot_takes_the_wal_pages_and_fills_the_rest_from_the_database"] }
 
 ["litestream/file/replica_client_test.go"]
 "TestReplicaClient_GenerationsV3" = { reason = "The v0.3 generations/ layout (snapshots and WAL segments under generations/) is not in v1 (docs/PLAN.md section 1); Rust reads and writes the v0.5 LTX layout only." }
@@ -920,7 +920,7 @@
 "TestReplica_TimeBounds/SnapshotOnly" = { reason = "Go-only helper: Replica.TimeBounds computes a replica's oldest and newest created-at times for restore -timestamp. Rust's as-of planner answers the restore question directly (lsr-core::plan_lazy plan_as_of_equals_the_exact_planner)." }
 "TestReplica_ValidateLevel" = { counterpart = "lsr-core::verify::tests::a_clean_replica_has_no_findings_at_either_depth" }
 "TestReplica_ValidateLevel/EmptyLevel" = { counterpart = "lsr-core::verify::tests::an_empty_replica_has_no_finding_but_is_not_restorable" }
-"TestReplica_ValidateLevel/GapDetected" = { counterpart = "lsr-core::verify::tests::a_hole_after_the_newest_snapshot_is_a_gap_at_the_tip" }
+"TestReplica_ValidateLevel/GapDetected" = { counterpart = "lsr-core::verify::tests::a_hole_after_the_newest_snapshot_is_a_gap_at_the_newest_staged_file" }
 "TestReplica_ValidateLevel/MultipleErrors" = { counterpart = "lsr-core::verify::tests::holes_in_front_of_and_behind_a_snapshot_are_both_reported" }
 "TestReplica_ValidateLevel/OverlapDetected" = { reason = "Rust deliberately differs: an overlap inside one level is legal to Rust's planner, which lets the further-reaching file win (lsr-core plan::tests::an_overlapping_higher_file_replaces_the_small_ones), so verify reports no finding for it." }
 "TestReplica_ValidateLevel/SingleFile" = { counterpart = "lsr-core::verify::tests::a_young_replica_of_level_zero_files_from_one_has_no_findings" }
@@ -1274,7 +1274,7 @@
 ["litestream/tests/integration/scenario_test.go"]
 "TestDatabaseDeletion" = { counterpart = ["lsr-sqlite::sqlite::faults::a_deleted_database_halts_and_the_replica_keeps_its_history", "lsr-sqlite::sqlite::faults::a_wal_deleted_by_another_process_while_pinned_halts_the_engine"] }
 "TestDatabaseIntegrity" = { counterpart = "lsr-compat::compat::live_source::live_sync_chain_restores" }
-"TestFreshStart" = { counterpart = "lsr-core::recover::tests::rule_1_no_tip_is_a_first_sync" }
+"TestFreshStart" = { counterpart = "lsr-core::recover::tests::rule_1_no_newest_staged_file_is_a_first_sync" }
 
 ["litestream/tests/integration/shutdown_retry_test.go"]
 "TestShutdownSyncRetry_429Errors" = { counterpart = "lsr-core::actor::tests::a_drain_waits_out_a_throttled_upload_and_drains" }

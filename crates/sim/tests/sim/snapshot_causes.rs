@@ -18,7 +18,7 @@ fn all() -> [SnapshotCause; 10] {
     let causes = [
         SnapshotCause::FirstSync,
         SnapshotCause::BehindRemote { local: local() },
-        SnapshotCause::LocalTipUnreadable,
+        SnapshotCause::NewestStagedFileUnreadable,
         SnapshotCause::WalMissing,
         SnapshotCause::GenerationChanged,
         SnapshotCause::PrevFrameMismatch,
@@ -34,7 +34,7 @@ fn all() -> [SnapshotCause; 10] {
         match cause {
             SnapshotCause::FirstSync
             | SnapshotCause::BehindRemote { .. }
-            | SnapshotCause::LocalTipUnreadable
+            | SnapshotCause::NewestStagedFileUnreadable
             | SnapshotCause::WalMissing
             | SnapshotCause::GenerationChanged
             | SnapshotCause::PrevFrameMismatch
@@ -80,9 +80,9 @@ fn a_page_size_change_halts_and_the_old_states_restore() {
 }
 
 /// With the staging directory wiped and the replica kept, boot continues from
-/// the replica's tip: no snapshot, and the oracle holds.
+/// the replica's newest staged file: no snapshot, and the oracle holds.
 #[test]
-fn a_wiped_meta_continues_from_the_replicas_tip() {
+fn a_wiped_meta_continues_from_the_replicas_newest_staged_file() {
     run(meta_wiped_remote_kept);
 }
 

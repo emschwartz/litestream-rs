@@ -213,7 +213,7 @@ pub fn names_fault(scenario: &Scenario, kind: FaultKind) -> bool {
             (Expect::Event(EventMatch::Retrying(got)), _) => *got == kind,
             // The lost file's policy is a snapshot at the first transaction the
             // replica lacks, announced as this resnapshot.
-            (Expect::Event(EventMatch::Resnapshot(CauseKind::LocalTipUnreadable)), _) => {
+            (Expect::Event(EventMatch::Resnapshot(CauseKind::NewestStagedFileUnreadable)), _) => {
                 kind == FaultKind::StagedLost
             }
             (Expect::Stopped(got), Some(halt)) => {
@@ -810,7 +810,9 @@ pub fn staged_byte_flip_before_upload() -> Scenario {
             vec![Op::Restore],
         ],
         vec![
-            Expect::Event(EventMatch::Resnapshot(CauseKind::LocalTipUnreadable)),
+            Expect::Event(EventMatch::Resnapshot(
+                CauseKind::NewestStagedFileUnreadable,
+            )),
             Expect::Event(EventMatch::Snapshotted),
             Expect::Oracle,
         ],
@@ -842,7 +844,9 @@ pub fn meta_dir_deleted_mid_run() -> Scenario {
             vec![Op::Restore],
         ],
         vec![
-            Expect::Event(EventMatch::Resnapshot(CauseKind::LocalTipUnreadable)),
+            Expect::Event(EventMatch::Resnapshot(
+                CauseKind::NewestStagedFileUnreadable,
+            )),
             Expect::Event(EventMatch::Snapshotted),
             Expect::Oracle,
         ],
@@ -859,7 +863,9 @@ fn staged_files_dropped(report: &RunReport) -> Result<(), String> {
             Seen::Event(Event::Degraded { cause, .. }) => {
                 return Err(format!("degraded: {cause:?}"));
             }
-            Seen::Event(Event::Resnapshot(SnapshotCause::LocalTipUnreadable)) => lost = true,
+            Seen::Event(Event::Resnapshot(SnapshotCause::NewestStagedFileUnreadable)) => {
+                lost = true
+            }
             Seen::Event(_)
             | Seen::Recovered(_)
             | Seen::Snapshot(_)

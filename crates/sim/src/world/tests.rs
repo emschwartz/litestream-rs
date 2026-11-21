@@ -68,7 +68,7 @@ fn a_vacuum_to_a_new_page_size_restarts_the_model_on_the_new_image() {
     let big = lsr_ltx::PageSize::new(1024).unwrap();
     assert!(w.app_vacuum(big).is_some());
     assert!(w.model_matches_sqlite());
-    assert_eq!(w.model.tip_image().page_size(), big);
+    assert_eq!(w.model.newest_image().page_size(), big);
 }
 
 #[test]

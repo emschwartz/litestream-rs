@@ -1,6 +1,6 @@
 //! A database a restore just published, replicated again with no write from the application.
 //!
-//! The replica holds the restored tip, and the WAL SQLite creates has no header: the
+//! The replica holds the restored newest staged file, and the WAL SQLite creates has no header: the
 //! replicator's open writes nothing once `_litestream_seq` exists. The first sync is a
 //! snapshot that writes the header itself, so over a simulated minute the thread runs about
 //! one tick per poll, retries nothing and ends caught up. Every wait is on the health snapshot.

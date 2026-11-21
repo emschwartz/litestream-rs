@@ -29,7 +29,7 @@ fn caught_up_go_like() -> (Rig, Actor) {
     (rig, actor)
 }
 
-fn replica_tip(rig: &Rig) -> Option<u64> {
+fn newest_replica_file(rig: &Rig) -> Option<u64> {
     Rig::files(&rig.remote, Level::ZERO)
         .iter()
         .map(|f| f.key.range().max().get())
@@ -71,7 +71,7 @@ fn revoked_credentials_degrade_the_upload_lane_until_an_upload_succeeds() {
         "{seen:?}"
     );
     assert_eq!(actor.degraded(Lane::Upload), None, "{seen:?}");
-    assert_eq!(replica_tip(&rig), Some(3));
+    assert_eq!(newest_replica_file(&rig), Some(3));
 }
 
 /// A persistent failure retried for an hour: the waits double from the
@@ -104,7 +104,7 @@ fn the_degraded_backoff_doubles_to_the_cap_and_no_further() {
     assert_eq!(waits, want);
     // The seventeenth attempt succeeded and cleared the lane.
     assert_eq!(actor.degraded(Lane::Upload), None);
-    assert_eq!(replica_tip(&rig), Some(2));
+    assert_eq!(newest_replica_file(&rig), Some(2));
 }
 
 /// A retention delete the store refuses degrades maintenance only: commits
@@ -150,7 +150,7 @@ fn a_refused_retention_delete_leaves_sync_and_upload_running() {
             .any(|t| matches!(event(t), Some(Event::Uploaded(Did::Put(_))))),
         "{seen:?}"
     );
-    assert_eq!(replica_tip(&rig), Some(5));
+    assert_eq!(newest_replica_file(&rig), Some(5));
     assert_eq!(actor.degraded(Lane::Sync), None);
     assert_eq!(actor.degraded(Lane::Upload), None);
     assert!(actor.degraded(Lane::Maintenance).is_some());
@@ -161,7 +161,7 @@ fn a_refused_retention_delete_leaves_sync_and_upload_running() {
 #[test]
 fn a_degraded_lane_pins_the_replicas_newest_transaction_until_it_recovers() {
     let (mut rig, mut actor) = caught_up_go_like();
-    let held = replica_tip(&rig).map(|n| lsr_ltx::Txid::new(n).unwrap());
+    let held = newest_replica_file(&rig).map(|n| lsr_ltx::Txid::new(n).unwrap());
     rig.remote.inner.inject_failure(StoreOp::Upload, auth());
     rig.commit(2);
     rig.tick(&mut actor, T0 + 10);
@@ -210,7 +210,7 @@ fn a_bug_rebuilds_the_actor_and_boots_again_after_the_wait() {
     assert_eq!(actor.phase(), Phase::Running);
     rig.commit(2);
     rig.settle(&mut actor, until.unix_millis() + 1);
-    assert_eq!(replica_tip(&rig), Some(2));
+    assert_eq!(newest_replica_file(&rig), Some(2));
 }
 
 #[test]
@@ -268,7 +268,7 @@ fn a_regressed_replica_is_listed_again_and_uploads_go_on() {
     let (mut rig, mut actor) = caught_up_go_like();
     rig.commit(2);
     rig.settle(&mut actor, T0 + 10);
-    let tip = replica_tip(&rig).unwrap();
+    let newest_staged = newest_replica_file(&rig).unwrap();
     let tick = actor.fault(Lane::Upload, Fault::RemoteRegressed, ts(T0 + 20));
     assert_eq!(
         degraded(&tick).map(|(lane, cause, _)| (lane, cause)),
@@ -282,7 +282,7 @@ fn a_regressed_replica_is_listed_again_and_uploads_go_on() {
     let lists = rig.remote.calls();
     rig.follow(&mut actor, T0 + 20, 50);
     assert!(rig.remote.calls() > lists);
-    assert_eq!(replica_tip(&rig), Some(tip + 1));
+    assert_eq!(newest_replica_file(&rig), Some(newest_staged + 1));
     assert_eq!(actor.degraded(Lane::Upload), None);
 }
 
@@ -344,7 +344,7 @@ fn a_corrupt_committed_frame_is_never_staged_nor_snapshotted_past() {
     rig.wal.corrupt_byte(at);
     let healed = rig.follow(&mut actor, now, 20);
     assert_eq!(actor.degraded(Lane::Sync), None, "{healed:?}");
-    assert_eq!(replica_tip(&rig), Some(2), "{healed:?}");
+    assert_eq!(newest_replica_file(&rig), Some(2), "{healed:?}");
     assert!(snapshots(&rig).contains(&2), "the operator's snapshot ran");
 }
 
@@ -394,7 +394,10 @@ fn a_rebuild_reads_again_the_live_pages_nobody_took() {
     rig.settle(&mut actor, now + 1);
     let live = actor.take_live_pages();
     assert!(live.is_some(), "the verify would wait forever");
-    assert_eq!(live.map(|live| live.txid().get()), replica_tip(&rig));
+    assert_eq!(
+        live.map(|live| live.txid().get()),
+        newest_replica_file(&rig)
+    );
 }
 
 /// A request not yet served survives a rebuild too.
@@ -436,7 +439,11 @@ fn a_rebuild_keeps_a_snapshot_request_made_behind_another_cause() {
     tear(&rig, 2, truncated);
     let lost = rig.tick(&mut actor, T0 + 1);
     let was = actor.pending_snapshot();
-    assert_eq!(was, Some(SnapshotCause::LocalTipUnreadable), "{lost:?}");
+    assert_eq!(
+        was,
+        Some(SnapshotCause::NewestStagedFileUnreadable),
+        "{lost:?}"
+    );
     actor.request_snapshot();
     assert_eq!(actor.pending_snapshot(), was);
     actor.fault(Lane::Upload, Fault::Bug(BugSite::PageMap), ts(T0 + 10));
@@ -485,7 +492,7 @@ fn a_degraded_maintenance_job_counts_its_retries() {
 #[test]
 fn a_rebuilt_actor_keeps_what_was_asked_and_reported_and_boots_again() {
     let (mut rig, mut actor) = caught_up_go_like();
-    let held = replica_tip(&rig).map(|n| lsr_ltx::Txid::new(n).unwrap());
+    let held = newest_replica_file(&rig).map(|n| lsr_ltx::Txid::new(n).unwrap());
     rig.remote.inner.inject_failure(StoreOp::Upload, auth());
     rig.commit(2);
     rig.tick(&mut actor, T0 + 10);

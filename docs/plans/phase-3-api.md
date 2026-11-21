@@ -267,7 +267,7 @@ pub enum StartError {
 
 ## The review's answers to the open questions
 
-- **Refuse to start when a Go process uses the same meta directory?** No. `start` makes no store call, and Go leaves no reliable local sign. Another writer is caught when the replica shows files above the local tip (the default stop). Document it.
+- **Refuse to start when a Go process uses the same meta directory?** No. `start` makes no store call, and Go leaves no reliable local sign. Another writer is caught when the replica shows files above the local newest staged file (the default stop). Document it.
 - **`Readers`, or "pinned until a time"?** Neither: counted guards. A time is a guess, and with busy timeouts at zero a wrong answer costs a busy result, not a stall.
 - **WAL size and the age of the oldest unreplicated commit in `Health`?** Yes, both.
 - **Where do `restore` and `verify` live?** In `lsr-core`, re-exported here as free functions.

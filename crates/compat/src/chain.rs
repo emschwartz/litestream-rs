@@ -444,7 +444,7 @@ impl Chain {
     }
 
     /// The newest staged transaction.
-    fn staged_tip(&self) -> Result<Txid, CompatError> {
+    fn newest_staged(&self) -> Result<Txid, CompatError> {
         replica::list(&self.fixture.meta)?
             .files
             .iter()
@@ -494,7 +494,7 @@ impl Chain {
         self.clock = self.clock.saturating_add(STEP_MS);
         self.settle()?;
         self.archive_new()?;
-        let txid = self.staged_tip()?;
+        let txid = self.newest_staged()?;
         if self.points.last().is_none_or(|last| last.txid != txid) {
             let page_hashes = self.fixture.hash_now()?;
             self.points.push(Point {

@@ -17,7 +17,7 @@
 //! checkpoint, a WAL restart or a TRUNCATE, and the database stays under 10 MB.
 //!
 //! A turn starts a process, waits until it says it runs, and commits. When there was a
-//! previous turn, the new process's first level-0 file must start at the previous tip plus one
+//! previous turn, the new process's first level-0 file must start at the previous position plus one
 //! and hold only the pages the commits wrote, and no new level-9 file may appear during the
 //! turn. The one exception is a boot after the previous process restarted or truncated the WAL
 //! and died before it staged anything in the new generation: then both engines' rules take a
@@ -92,11 +92,11 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use generation::{Expect, tip_origin, wal_len, wal_salts};
+use generation::{Expect, newest_staged_origin, wal_len, wal_salts};
 use lsr_compat::{
     AppFixture, CompatError, GoBuild, GoRestore, Kind, Replicator, Shape, SplitMix, Target,
-    l0_starting_at, list, real_now_ms, restore_replica, restore_with_go, snapshots, tip, uploaded,
-    wait_boot_file, wait_staged_past, wait_until, wait_uploaded,
+    l0_starting_at, list, position, real_now_ms, restore_replica, restore_with_go, snapshots,
+    uploaded, wait_boot_file, wait_staged_past, wait_until, wait_uploaded,
 };
 use lsr_core::{Level, RestoreTarget};
 use lsr_ltx::Txid;
@@ -528,13 +528,13 @@ fn pause(process: &Replicator) {
 }
 
 /// Whether the newest staged file is in the WAL generation with these salts.
-fn tip_in(fixture: &AppFixture, salts: Option<(u32, u32)>) -> bool {
-    let origin = tip_origin(fixture).and_then(|(_, origin)| origin);
+fn newest_staged_in(fixture: &AppFixture, salts: Option<(u32, u32)>) -> bool {
+    let origin = newest_staged_origin(fixture).and_then(|(_, origin)| origin);
     origin.map(lsr_ltx::WalOrigin::salts) == salts
 }
 
 impl Run {
-    /// The new process's boot: its first file continues the previous tip, or (first turn)
+    /// The new process's boot: its first file continues the previous position, or (first turn)
     /// the replica gets its first snapshot and everything staged. Returns the cause a boot
     /// snapshot logged.
     fn boot(
@@ -568,7 +568,7 @@ impl Run {
         assert!(
             expect.may_snapshot(),
             "{at}: the boot snapshotted after {prev} ({cause:?}): its first file {}-{} holds {} \
-             of {} pages, and the tip was in the WAL's generation",
+             of {} pages, and the position was in the WAL's generation",
             fields.txids.min(),
             fields.txids.max(),
             boot.pages,
@@ -649,7 +649,7 @@ impl Run {
     /// A few commits, about half of them each waited on until staged, and in about half the
     /// turns a churn commit or two, so the WAL keeps growing toward a checkpoint.
     fn work(&mut self, process: &mut Replicator) {
-        let mut at = tip(&self.fixture).expect("tip");
+        let mut at = position(&self.fixture).expect("position");
         for _ in 0..1 + self.rng.below(4) {
             self.commit(false);
             if self.rng.below(2) == 0 {
@@ -752,7 +752,7 @@ impl Run {
             return false;
         }
         pause(process);
-        tip_in(&self.fixture, before)
+        newest_staged_in(&self.fixture, before)
     }
 
     /// Hold a read so the PASSIVE cannot restart the WAL past `truncate-page-n`, wait for the
@@ -918,7 +918,7 @@ impl Run {
 
     /// One killed turn: start, boot, work, the kill point, SIGKILL, then the oracle.
     fn killed_turn(&mut self, turn: u32, kind: Kind) {
-        let previous = tip(&self.fixture).expect("tip");
+        let previous = position(&self.fixture).expect("position");
         let (seq, salts) = (live_seq(&self.fixture), wal_salts(&self.fixture));
         self.look_for_tail(kind, previous, &self.at(turn, kind));
         let mut process = self.start(turn, kind);
@@ -978,7 +978,7 @@ impl Run {
     /// The last switch, stopped the way an operator stops it: everything committed is on the
     /// replica, and both restore the newest transaction to the database as it is.
     fn final_turn(&mut self, turn: u32, kind: Kind) {
-        let previous = tip(&self.fixture).expect("tip");
+        let previous = position(&self.fixture).expect("position");
         self.look_for_tail(kind, previous, &self.at(turn, kind));
         let mut process = self.start(turn, kind);
         let at = self.at(turn, kind);

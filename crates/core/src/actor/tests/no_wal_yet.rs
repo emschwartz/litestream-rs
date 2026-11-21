@@ -1,4 +1,4 @@
-//! A database a restore just published: the replica holds its tip, the WAL
+//! A database a restore just published: the replica holds its newest staged file, the WAL
 //! file SQLite created has no header yet, and nothing is staged. Boot makes
 //! the first sync a `WalMissing` snapshot, which writes the header itself (one
 //! `_litestream_seq` bump, Go's `ensureWALExists`) rather than wait for the
@@ -89,7 +89,7 @@ fn a_restored_database_with_no_wal_header_ticks_by_the_poll_not_the_cpu() {
         no_halt(&seen);
         assert_eq!(retries(&seen), 0, "{snapshot_due}: {seen:?}");
         // The pending snapshot ran on the header the bump wrote, and reached
-        // the replica after the restored tip.
+        // the replica after the restored newest staged file.
         assert_eq!(bumps(&rig), 1, "{snapshot_due}: {:?}", rig.ck.calls());
         assert_eq!(actor.pending_snapshot(), None, "{snapshot_due}");
         assert_eq!(snapshots(&rig), vec![1, 2], "{snapshot_due}");

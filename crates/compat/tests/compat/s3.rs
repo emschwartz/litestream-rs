@@ -24,7 +24,7 @@ use std::time::Duration;
 use lsr_compat::{
     AppFixture, ENDPOINT_VAR, Era, GoBuild, GoRestore, Kind, MinioEnv, Remote, Replicator,
     S3Replica, Schedule, Shape, Summary, Target, builds_in, builds_under_test, hash_pages,
-    integrity_check, lsr_binary, real_now_ms, restore_with_go, tip, uploaded, wait_boot_file,
+    integrity_check, lsr_binary, position, real_now_ms, restore_with_go, uploaded, wait_boot_file,
     wait_staged_past, wait_until, wait_uploaded, write_config_for,
 };
 use lsr_core::RestoreTarget;
@@ -119,7 +119,7 @@ fn write_rounds(mut process: Replicator, fixture: &mut AppFixture) -> Vec<Mark> 
         Ok(uploaded(fixture)?.is_some())
     })
     .expect("a first upload");
-    let mut at = tip(fixture).expect("tip");
+    let mut at = position(fixture).expect("position");
     let mut marks = Vec::new();
     for _ in 0..3 {
         for _ in 0..3 {
@@ -255,7 +255,7 @@ fn over_s3_go_restores_rust_replica() {
 /// One process's turn on an S3 fixture: it comes up on what the previous one left, the
 /// application commits [`COMMITS`] transactions, each staged before the next, and the
 /// process stops with SIGINT once MinIO holds them all and a snapshot. Returns the boot's
-/// first file when there was a previous tip.
+/// first file when there was a previous position.
 fn turn(
     mut process: Replicator,
     fixture: &mut AppFixture,
@@ -288,7 +288,7 @@ fn turn(
 /// The switch to `kind` continued: its first file is the next transaction and holds only
 /// what the commits wrote.
 fn assert_continued(name: &str, kind: Kind, boot: Option<&Summary>, prev: Txid) {
-    let boot = boot.expect("a boot file after a previous tip");
+    let boot = boot.expect("a boot file after a previous position");
     let fields = boot.header.fields();
     assert_eq!(
         fields.txids.min().get(),
@@ -352,15 +352,15 @@ fn hand_over(env: &MinioEnv, build: &GoBuild, lsr: &Path) {
     let daily = config(&fixture, "daily.yml", Schedule::DAILY_SNAPSHOTS);
     let go = start(Kind::Go, &bin, &first, &fixture.dir().join("go-1.log"));
     assert!(turn(go, &mut fixture, None).is_none());
-    let go_tip = tip(&fixture).expect("tip").expect("Go staged");
+    let go_newest = position(&fixture).expect("position").expect("Go staged");
     let at_go_stop = fixture.hash_now().expect("hash");
     let l9 = snapshots(&fixture);
 
     let rs = start(Kind::Rust, lsr, &daily, &fixture.dir().join("lsr.log"));
-    let boot = turn(rs, &mut fixture, Some(go_tip));
-    assert_continued(name, Kind::Rust, boot.as_ref(), go_tip);
+    let boot = turn(rs, &mut fixture, Some(go_newest));
+    assert_continued(name, Kind::Rust, boot.as_ref(), go_newest);
     assert_eq!(snapshots(&fixture), l9, "{name}: Rust took a snapshot");
-    let rust_tip = tip(&fixture).expect("tip").expect("Rust staged");
+    let rust_newest = position(&fixture).expect("position").expect("Rust staged");
     let at_rust_stop = fixture.hash_now().expect("hash");
     assert_eq!(
         rust_restore(&fixture, RestoreTarget::Latest, "rs-1.db"),
@@ -368,7 +368,11 @@ fn hand_over(env: &MinioEnv, build: &GoBuild, lsr: &Path) {
         "{name}"
     );
     assert_eq!(
-        rust_restore(&fixture, RestoreTarget::Txid(go_tip), "rs-go-tip.db"),
+        rust_restore(
+            &fixture,
+            RestoreTarget::Txid(go_newest),
+            "rs-go-position.db"
+        ),
         at_go_stop,
         "{name}: Rust at the txid where Go stopped"
     );
@@ -381,8 +385,8 @@ fn hand_over(env: &MinioEnv, build: &GoBuild, lsr: &Path) {
     assert_eq!(latest, at_rust_stop, "{name}: Go on the Go-then-Rust chain");
 
     let go = start(Kind::Go, &bin, &daily, &fixture.dir().join("go-2.log"));
-    let boot = turn(go, &mut fixture, Some(rust_tip));
-    assert_continued(name, Kind::Go, boot.as_ref(), rust_tip);
+    let boot = turn(go, &mut fixture, Some(rust_newest));
+    assert_continued(name, Kind::Go, boot.as_ref(), rust_newest);
     assert_eq!(snapshots(&fixture), l9, "{name}: Go took a snapshot");
     let at_end = fixture.hash_now().expect("hash");
     assert_eq!(
@@ -396,13 +400,13 @@ fn hand_over(env: &MinioEnv, build: &GoBuild, lsr: &Path) {
         "{name}"
     );
     let at_rust = Target::Txid {
-        txid: rust_tip.get(),
+        txid: rust_newest.get(),
     };
     assert_eq!(
-        go_restore(&bin, &daily, &fixture, at_rust, "go-rs-tip.db"),
+        go_restore(&bin, &daily, &fixture, at_rust, "go-rs-position.db"),
         at_rust_stop,
         "{name}: Go at the txid where lsr stopped"
     );
-    println!("{name}: Go -> lsr at {go_tip}, lsr -> Go at {rust_tip}, over S3");
+    println!("{name}: Go -> lsr at {go_newest}, lsr -> Go at {rust_newest}, over S3");
     s3_of(&fixture).delete_all().expect("clean up");
 }

@@ -196,19 +196,19 @@ fn compacts_and_prunes(build: &GoBuild) {
             .max())
     };
     let rust_l9 = newest_l9(&written.fixture.replica).expect("l9");
-    let tip = newest_l0(&written.fixture.meta)
+    let position = newest_l0(&written.fixture.meta)
         .expect("l0")
         .map(|h| h.fields().txids.max());
     // Go's store snapshots only when its position (the newest L0, which it reads from the
     // meta dir) is past the newest snapshot. Whether the Rust run's last snapshot reached the
-    // tip depends on the run's timing, so the test decides what to wait for from what the
+    // position depends on the run's timing, so the test decides what to wait for from what the
     // replica holds before Go starts, never from how long Go takes.
-    let go_snapshots = tip.is_some_and(|t| rust_l9.is_none_or(|l9| t.get() > l9));
-    println!("Rust's newest L9 {rust_l9:?}, tip {tip:?}: Go snapshots {go_snapshots}");
+    let go_snapshots = position.is_some_and(|t| rust_l9.is_none_or(|l9| t.get() > l9));
+    println!("Rust's newest L9 {rust_l9:?}, position {position:?}: Go snapshots {go_snapshots}");
     let go_log = written.fixture.dir().join("go.log");
     let mut go = Replicator::start(&bin, &config, &go_log).expect("start");
     // Either Go takes its own snapshot of the unchanged database, or the Rust snapshot is
-    // already at the tip and Go declines. A declining Go logs nothing at its default level
+    // already at the position and Go declines. A declining Go logs nothing at its default level
     // and may write nothing, so that branch waits for Go to say it is up and then keeps it
     // running past its longest monitor interval (4s in the config), so every monitor has run.
     let mut up_since: Option<Instant> = None;
@@ -228,10 +228,10 @@ fn compacts_and_prunes(build: &GoBuild) {
         },
     )
     .map_err(|e| {
-        let tip = newest_l0(&written.fixture.meta).ok().flatten().map(|h| h.fields().txids.max());
+        let position = newest_l0(&written.fixture.meta).ok().flatten().map(|h| h.fields().txids.max());
         let log = std::fs::read_to_string(written.fixture.dir().join("go.log")).unwrap_or_default();
         let tail: Vec<&str> = log.lines().rev().take(25).collect();
-        format!("{e:?}: Rust's newest L9 ends at {rust_l9:?}, Go's meta tip {tip:?}; Go log tail {tail:#?}")
+        format!("{e:?}: Rust's newest L9 ends at {rust_l9:?}, Go's meta position {position:?}; Go log tail {tail:#?}")
     })
     .expect("Go replicates");
     go.stop().expect("stop");

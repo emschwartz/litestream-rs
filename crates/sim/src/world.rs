@@ -267,7 +267,7 @@ impl World {
     /// holds whatever the rules' file still has, so the model takes it from
     /// their image instead of assuming the app wrote it.
     pub fn app_commit(&mut self, pages: &[(PageNo, Vec<u8>)], db_size: u32) -> Option<CommitId> {
-        let before = self.model.tip_image().db_size();
+        let before = self.model.newest_image().db_size();
         let app = self.sqlite.commit(pages, db_size)?;
         self.retire_generation(app.salts);
         let mut written = pages.to_vec();
@@ -316,7 +316,7 @@ impl World {
     fn retire_generation(&mut self, salts: Salts) {
         let old = self
             .model
-            .tip()
+            .newest_commit()
             .and_then(|id| self.model.rec(id))
             .map(|rec| rec.salts);
         if old.is_some_and(|old| old != salts) {
@@ -380,7 +380,7 @@ impl World {
     /// Records a commit the engine made itself: a checkpoint's bump of page 1
     /// (`db.go:1668`) puts a one-page commit into the WAL that the app never
     /// made, and a file of the sync that follows ends on it. Its pages are the
-    /// tip's, so the model keeps the tip's image under the new end. `at` is the
+    /// newest commit's, so the model keeps the newest commit's image under the new end. `at` is the
     /// replica tap's length when the tick started, so no earlier put can be
     /// taken to cover it.
     pub fn sync_model_at(&mut self, at: usize) {
@@ -393,7 +393,7 @@ impl World {
         let end = WalOffset::from_frame_index(frames, self.sqlite.page_size());
         let known = self
             .model
-            .tip()
+            .newest_commit()
             .and_then(|id| self.model.rec(id))
             .is_some_and(|rec| rec.salts == salts && rec.end.get() == end.get());
         if !known {
@@ -720,15 +720,15 @@ impl World {
     /// of the harness against itself.
     #[must_use]
     pub fn model_matches_sqlite(&self) -> bool {
-        let tip = self.model.tip_image();
+        let newest = self.model.newest_image();
         let real = self.sqlite.image();
-        let size = tip.page_size().bytes();
-        real.len() == size.saturating_mul(usize::try_from(tip.db_size()).unwrap_or(usize::MAX))
+        let size = newest.page_size().bytes();
+        real.len() == size.saturating_mul(usize::try_from(newest.db_size()).unwrap_or(usize::MAX))
             && real.chunks_exact(size).enumerate().all(|(i, page)| {
                 u32::try_from(i)
                     .ok()
                     .and_then(|i| i.checked_add(1))
-                    .and_then(|pgno| tip.page(pgno))
+                    .and_then(|pgno| newest.page(pgno))
                     .is_some_and(|want| want.as_slice() == page)
             })
     }

@@ -1,18 +1,18 @@
 //! Deciding where to resume: the pure half of a sync step.
 //!
-//! [`recover`] looks at the newest staged file (the tip), at the WAL as one read
+//! [`recover`] looks at the newest staged file, at the WAL as one read
 //! of the wal-index and the WAL header saw it, and at the replica's newest
-//! transaction, and says whether to continue where the tip ended, continue in a
+//! transaction, and says whether to continue where the newest staged file ended, continue in a
 //! restarted WAL, snapshot, or halt. It reads nothing: the reads are done by
-//! [`TipView::load`] (or, with nothing staged, [`TipView::load_remote`], which
-//! reads the same tip back from the replica) and [`Probes::read`], so every rule
+//! [`NewestStagedFile::load`] (or, with nothing staged, [`NewestStagedFile::load_remote`], which
+//! reads the same newest staged file back from the replica) and [`Probes::read`], so every rule
 //! below can be driven from a table of inputs. Go answers the same question in
 //! `verifyWithExecutor` (`db.go:1782-1925`) with a heuristic per branch; the rules here replace two
 //! of those heuristics with the read-transaction proof of [`Continuity`].
 //!
-//! Rules, first match wins: 1 no tip, 2 replica ahead, 3 tip unreadable,
+//! Rules, first match wins: 1 no newest staged file, 2 replica ahead, 3 newest staged file unreadable,
 //! 4 no WAL header, 5 page size changed, 6 salts changed, 7 same salts but the
-//! WAL is shorter than the tip's end, 8 the frame before the end is not a
+//! WAL is shorter than the newest staged file's end, 8 the frame before the end is not a
 //! commit frame, 9 the last page differs, 9a the wal-index was reset ahead of
 //! the header past a commit the position never covered, 10 continue.
 //!
@@ -26,12 +26,12 @@
 //!
 //! Rule 6 proves one restart with the read-transaction pin and `salt1 + 1`; it
 //! does not check `checkpoint_seq`, which real SQLite takes from the restarting
-//! connection's own count. At boot, rule 9 compares the whole tip with
+//! connection's own count. At boot, rule 9 compares the whole newest staged file with
 //! the WAL range it covers (page bytes and commit size), not only the last page,
 //! so a tail dropped by power loss and regrown differently is a rewind.
 //!
 //! Rule 5 is a halt, not a snapshot: a replica prefix holds one page size. At
-//! boot the actor also halts when the tip is not readable but the replica's
+//! boot the actor also halts when the newest staged file is not readable but the replica's
 //! newest file names another size than the WAL, before `recover` runs.
 
 use std::collections::BTreeMap;
@@ -53,8 +53,8 @@ use crate::position::{Continuity, LastPage, Position, ReadEpoch, WalFileLen};
 use crate::source::CommittedRead;
 use crate::store::{ObjectStore, PageLimit, ReadLen, StoreError};
 
-/// How much of the tip one store read asks for while it is verified.
-const TIP_READ: ReadLen = ReadLen::CHUNK;
+/// How much of the newest staged file one store read asks for while it is verified.
+const NEWEST_STAGED_READ: ReadLen = ReadLen::CHUNK;
 
 /// A read of exactly one LTX header ([`HEADER_LEN`], pinned by a test).
 const HEADER_READ: ReadLen = ReadLen::or_chunk(100);
@@ -99,31 +99,31 @@ impl FrameCheck {
     }
 }
 
-/// Go's `lastPageMatch` for a tip read at boot (`db.go:1963-2007`).
+/// Go's `lastPageMatch` for the newest staged file read at boot (`db.go:1963-2007`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LastPageCheck {
-    /// The WAL's frame before the end has the page and bytes the tip holds.
+    /// The WAL's frame before the end has the page and bytes the newest staged file holds.
     Match {
         /// That page.
         last_page: LastPage,
         /// The cursor the next scan continues from.
         cursor: FrameCursor,
     },
-    /// The tip's copy of that page has other bytes.
+    /// The newest staged file's copy of that page has other bytes.
     Mismatch,
-    /// The tip does not hold that page at all.
-    NotInTip,
+    /// The newest staged file does not hold that page at all.
+    NotInNewestStagedFile,
     /// There is no such frame.
     NoFrame(Miss),
-    /// The WAL holds a last page like the tip's, but what it holds in the tip's range
-    /// is not what the tip staged: another page set, other bytes or another commit
+    /// The WAL holds a last page like the newest staged file's, but what it holds in the newest staged file's range
+    /// is not what the newest staged file staged: another page set, other bytes or another commit
     /// size (a rewound tail regrown with a different transaction).
     Rewritten,
 }
 
 /// The newest staged file, as a boot reads it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TipView {
+pub enum NewestStagedFile {
     /// A file that decodes and says where in the WAL it came from.
     Readable {
         /// Its transaction id.
@@ -147,8 +147,8 @@ pub enum TipView {
     },
 }
 
-impl TipView {
-    /// The tip's transaction id.
+impl NewestStagedFile {
+    /// The newest staged file's transaction id.
     #[must_use]
     pub const fn txid(&self) -> Txid {
         match self {
@@ -178,7 +178,7 @@ impl TipView {
         let Some(origin) = Origin::of(&header) else {
             return Ok(Some(Self::Unreadable { txid }));
         };
-        let file = TipFile {
+        let file = NewestStagedFileSource {
             store: staging,
             key: newest.key,
             fault: Fault::from_staging,
@@ -187,12 +187,12 @@ impl TipView {
         Ok(Some(view.unwrap_or(Self::Unreadable { txid })))
     }
 
-    /// Checks a tip whose header names a WAL origin against `wal`: the frame
+    /// Checks the newest staged file whose header names a WAL origin against `wal`: the frame
     /// before its end and the whole range it covers. `first`, when
-    /// given, is the file's first [`TIP_READ`] bytes, already read. `None` when
+    /// given, is the file's first [`NEWEST_STAGED_READ`] bytes, already read. `None` when
     /// the file does not decode and verify whole.
     async fn checked<S: ObjectStore, R: Read + Seek>(
-        file: &TipFile<'_, S>,
+        file: &NewestStagedFileSource<'_, S>,
         first: Option<Vec<u8>>,
         header: &Header,
         at: Origin,
@@ -212,7 +212,7 @@ impl TipView {
                 } else {
                     FrameCheck::Miss(Miss::NotACommit)
                 };
-                let range = tip_range(wal, &origin, end, salts)?;
+                let range = newest_staged_file_range(wal, &origin, end, salts)?;
                 Some((wal, check, range))
             }
             None => None,
@@ -236,7 +236,7 @@ impl TipView {
                 let matched = match checked {
                     LastPageCheck::Match { .. } => true,
                     LastPageCheck::Mismatch
-                    | LastPageCheck::NotInTip
+                    | LastPageCheck::NotInNewestStagedFile
                     | LastPageCheck::NoFrame(_)
                     | LastPageCheck::Rewritten => false,
                 };
@@ -259,7 +259,7 @@ impl TipView {
     }
 }
 
-/// Where in the WAL a tip's header says it came from, when it says so usably.
+/// Where in the WAL the newest staged file's header says it came from, when it says so usably.
 #[derive(Clone, Copy)]
 struct Origin {
     origin: WalOrigin,
@@ -285,24 +285,24 @@ impl Origin {
     }
 }
 
-/// A tip file and the store it is read from. `fault` names a store error as
+/// The newest staged file and the store it is read from. `fault` names a store error as
 /// staging's or the replica's.
-struct TipFile<'a, S> {
+struct NewestStagedFileSource<'a, S> {
     store: &'a S,
     key: FileKey,
     fault: fn(&StoreError) -> Fault,
 }
 
-/// What a decode of the tip saw of the pages it was asked about.
-struct TipPages {
+/// What a decode of the newest staged file saw of the pages it was asked about.
+struct NewestStagedPages {
     wanted: Option<PageChecksum>,
     last: Option<LastPage>,
-    /// Every page the WAL holds in the tip's range is in the tip with the same bytes.
-    /// The tip may hold more: pages the database file supplied (grown pages, a snapshot's).
+    /// Every page the WAL holds in the newest staged file's range is in the newest staged file with the same bytes.
+    /// The newest staged file may hold more: pages the database file supplied (grown pages, a snapshot's).
     holds_wal_pages: bool,
 }
 
-/// What the WAL holds in the tip's range of frames.
+/// What the WAL holds in the newest staged file's range of frames.
 enum Range {
     /// The newest version of each page, and the commit size of the range's last
     /// transaction (`None` for an empty range).
@@ -312,16 +312,21 @@ enum Range {
     },
     /// The range does not start or end on a transaction boundary of this WAL.
     Rewritten,
-    /// The range is not in this WAL (a tip from an earlier generation): nothing to
+    /// The range is not in this WAL (the newest staged file from an earlier generation): nothing to
     /// compare, so nothing to veto.
     NotInThisWal,
 }
 
 impl Range {
-    fn agrees(&self, tip: &TipPages, tip_commit: NonZeroU32) -> bool {
+    fn agrees(
+        &self,
+        newest_staged: &NewestStagedPages,
+        newest_staged_file_commit: NonZeroU32,
+    ) -> bool {
         match self {
             Self::Pages { commit, .. } => {
-                tip.holds_wal_pages && commit.is_none_or(|commit| commit == tip_commit)
+                newest_staged.holds_wal_pages
+                    && commit.is_none_or(|commit| commit == newest_staged_file_commit)
             }
             Self::Rewritten => false,
             Self::NotInThisWal => true,
@@ -329,14 +334,14 @@ impl Range {
     }
 }
 
-/// Re-derives the tip from the WAL frames in `[origin.offset, end)`.
+/// Re-derives the newest staged file from the WAL frames in `[origin.offset, end)`.
 ///
-/// Rule 9's last-page match cannot see an earlier page of the tip that differs: a
+/// Rule 9's last-page match cannot see an earlier page of the newest staged file that differs: a
 /// power loss with `synchronous=NORMAL` drops the tail, and the application commits
 /// another transaction over the same frames. Comparing the newest version of every
 /// page the range holds, and the commit size, closes that. It reads the range once,
 /// at boot, in the bounded memory of one file's page map.
-fn tip_range<R: Read + Seek>(
+fn newest_staged_file_range<R: Read + Seek>(
     wal: &mut WalReader<R>,
     origin: &WalOrigin,
     end: WalOffset,
@@ -392,7 +397,7 @@ fn tip_range<R: Read + Seek>(
     })
 }
 
-/// The scan from the origin stopped short of the tip's end. If the header still names
+/// The scan from the origin stopped short of the newest staged file's end. If the header still names
 /// the scanned generation the range was rewritten; if not, the WAL moved under the
 /// read and the caller retries (`generation_unchanged` tells the two apart).
 fn unreached<R: Read + Seek>(wal: &mut WalReader<R>) -> Result<Range, Fault> {
@@ -408,11 +413,11 @@ fn match_last_page<R: Read + Seek>(
     check: FrameCheck,
     end: WalOffset,
     salts: Salts,
-    pages: &TipPages,
+    pages: &NewestStagedPages,
 ) -> Result<LastPageCheck, Fault> {
     let last_page = match (check, pages.last) {
         (FrameCheck::Frame(frame), _) => match pages.wanted {
-            None => return Ok(LastPageCheck::NotInTip),
+            None => return Ok(LastPageCheck::NotInNewestStagedFile),
             Some(digest) if digest != frame.digest() => return Ok(LastPageCheck::Mismatch),
             Some(_) => LastPage::of_frame(&frame),
         },
@@ -461,15 +466,15 @@ pub(crate) async fn read_header<S: ObjectStore>(
 
 /// Decodes and verifies the whole file; `None` when it fails to. A read
 /// shorter than asked is the file's end (the store's contract), so a file under
-/// [`TIP_READ`] bytes takes one read, or none when `first` holds it.
+/// [`NEWEST_STAGED_READ`] bytes takes one read, or none when `first` holds it.
 async fn scan_pages<S: ObjectStore>(
-    file: &TipFile<'_, S>,
+    file: &NewestStagedFileSource<'_, S>,
     first: Option<Vec<u8>>,
     wanted: Option<PageNo>,
     expected: &BTreeMap<PageNo, PageChecksum>,
-) -> Result<Option<TipPages>, Fault> {
-    let chunk = TIP_READ;
-    let mut seen = TipPages {
+) -> Result<Option<NewestStagedPages>, Fault> {
+    let chunk = NEWEST_STAGED_READ;
+    let mut seen = NewestStagedPages {
         wanted: None,
         last: None,
         holds_wal_pages: false,
@@ -577,9 +582,9 @@ impl Probes {
 
 /// What the position comes from.
 #[derive(Clone, Copy, Debug)]
-pub enum Tip<'a> {
+pub enum PositionSource<'a> {
     /// The newest staged file, read at boot.
-    Boot(&'a TipView),
+    Boot(&'a NewestStagedFile),
     /// The position the last step left, and the reads of the WAL it needs.
     Running(&'a Position, Probes),
 }
@@ -587,7 +592,7 @@ pub enum Tip<'a> {
 /// What to do next.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Recovered {
-    /// Scan on from the tip's end.
+    /// Scan on from the newest staged file's end.
     Continue(Position),
     /// The WAL restarted and nothing was lost: scan the new generation from its start.
     WalRestarted(Position),
@@ -609,7 +614,7 @@ pub enum RecoverEvent {
     /// under `synchronous=NORMAL`. Loud, because the replica keeps transactions
     /// the database lost.
     LocalRewound {
-        /// The tip's end.
+        /// The newest staged file's end.
         synced: WalOffset,
         /// The WAL's committed end now.
         committed: WalOffset,
@@ -633,37 +638,44 @@ pub struct Verdict {
 
 /// [`recover_traced] without the event.
 #[must_use]
-pub fn recover(tip: Option<Tip<'_>>, wal: &WalView, remote: Option<Txid>) -> Recovered {
-    recover_traced(tip, wal, remote).recovered
+pub fn recover(
+    source: Option<PositionSource<'_>>,
+    wal: &WalView,
+    remote: Option<Txid>,
+) -> Recovered {
+    recover_traced(source, wal, remote).recovered
 }
 
 /// Decides, and names the event the decision calls for.
 #[must_use]
-pub fn recover_traced(tip: Option<Tip<'_>>, wal: &WalView, remote: Option<Txid>) -> Verdict {
-    let Some(tip) = tip else {
+pub fn recover_traced(
+    source: Option<PositionSource<'_>>,
+    wal: &WalView,
+    remote: Option<Txid>,
+) -> Verdict {
+    let Some(source) = source else {
         return plain(Recovered::Snapshot {
             after: remote,
             cause: SnapshotCause::FirstSync,
         });
     };
-    let txid = tip_txid(&tip);
+    let txid = source_txid(&source);
     if let Some(ahead) = remote.filter(|remote| *remote > txid) {
-        return plain(match tip {
-            Tip::Boot(_) => Recovered::Snapshot {
+        return plain(match source {
+            PositionSource::Boot(_) => Recovered::Snapshot {
                 after: Some(ahead),
                 cause: SnapshotCause::BehindRemote { local: txid },
             },
-            Tip::Running(..) => Recovered::Halt(HaltCause::OtherWriter),
+            PositionSource::Running(..) => Recovered::Halt(HaltCause::OtherWriter),
         });
     }
     let after = Some(remote.map_or(txid, |remote| remote.max(txid)));
     let snapshot = |cause| plain(Recovered::Snapshot { after, cause });
-    let (Some(header), Some(seen)) = (wal.header, Seen::of(&tip)) else {
-        return snapshot(match (&tip, wal.header) {
-            (Tip::Boot(TipView::Unreadable { .. }), _) | (Tip::Boot(_), Some(_)) => {
-                SnapshotCause::LocalTipUnreadable
-            }
-            (Tip::Boot(_) | Tip::Running(..), _) => SnapshotCause::WalMissing,
+    let (Some(header), Some(seen)) = (wal.header, Seen::of(&source)) else {
+        return snapshot(match (&source, wal.header) {
+            (PositionSource::Boot(NewestStagedFile::Unreadable { .. }), _)
+            | (PositionSource::Boot(_), Some(_)) => SnapshotCause::NewestStagedFileUnreadable,
+            (PositionSource::Boot(_) | PositionSource::Running(..), _) => SnapshotCause::WalMissing,
         });
     };
     if seen.page_size != header.page_size() {
@@ -673,9 +685,9 @@ pub fn recover_traced(tip: Option<Tip<'_>>, wal: &WalView, remote: Option<Txid>)
         }));
     }
     if seen.salts != header.salts() {
-        return restarted(&tip, &seen, &header, wal, after);
+        return restarted(&source, &seen, &header, wal, after);
     }
-    match same_generation(&tip, &seen, &header, wal) {
+    match same_generation(&source, &seen, &header, wal) {
         Ok(position) => plain(Recovered::Continue(position)),
         Err(Refusal { cause, event }) => Verdict {
             recovered: Recovered::Snapshot { after, cause },
@@ -691,14 +703,14 @@ const fn plain(recovered: Recovered) -> Verdict {
     }
 }
 
-const fn tip_txid(tip: &Tip<'_>) -> Txid {
-    match tip {
-        Tip::Boot(view) => view.txid(),
-        Tip::Running(position, _) => position.txid(),
+const fn source_txid(source: &PositionSource<'_>) -> Txid {
+    match source {
+        PositionSource::Boot(view) => view.txid(),
+        PositionSource::Running(position, _) => position.txid(),
     }
 }
 
-/// What both kinds of tip agree on.
+/// What both kinds of newest staged file agree on.
 struct Seen {
     page_size: PageSize,
     salts: Salts,
@@ -706,9 +718,9 @@ struct Seen {
 }
 
 impl Seen {
-    fn of(tip: &Tip<'_>) -> Option<Self> {
-        match tip {
-            Tip::Boot(TipView::Readable {
+    fn of(source: &PositionSource<'_>) -> Option<Self> {
+        match source {
+            PositionSource::Boot(NewestStagedFile::Readable {
                 origin, page_size, ..
             }) => {
                 let (salt1, salt2) = origin.salts();
@@ -718,8 +730,8 @@ impl Seen {
                     end: WalOffset::new(origin.offset().saturating_add(origin.size()), *page_size)?,
                 })
             }
-            Tip::Boot(TipView::Unreadable { .. }) => None,
-            Tip::Running(position, _) => Some(Self {
+            PositionSource::Boot(NewestStagedFile::Unreadable { .. }) => None,
+            PositionSource::Running(position, _) => Some(Self {
                 page_size: position.page_size(),
                 salts: position.cursor().salts(),
                 end: position.synced().offset(),
@@ -730,7 +742,7 @@ impl Seen {
 
 /// Rule 6: the generation changed.
 fn restarted(
-    tip: &Tip<'_>,
+    source: &PositionSource<'_>,
     seen: &Seen,
     header: &WalHeader,
     wal: &WalView,
@@ -740,7 +752,7 @@ fn restarted(
         after,
         cause: SnapshotCause::GenerationChanged,
     };
-    let Tip::Running(position, probes) = tip else {
+    let PositionSource::Running(position, probes) = source else {
         return plain(changed);
     };
     let pinned = match position.continuity() {
@@ -776,7 +788,7 @@ fn committed_offset(header: &WalHeader, wal: &WalView) -> Option<WalOffset> {
         .map(|end| end.offset())
 }
 
-/// Why the tip cannot be continued in the generation it was made in.
+/// Why the newest staged file cannot be continued in the generation it was made in.
 struct Refusal {
     cause: SnapshotCause,
     event: Option<RecoverEvent>,
@@ -788,7 +800,7 @@ const fn refuse(cause: SnapshotCause) -> Refusal {
 
 /// Rules 7 to 10.
 fn same_generation(
-    tip: &Tip<'_>,
+    source: &PositionSource<'_>,
     seen: &Seen,
     header: &WalHeader,
     wal: &WalView,
@@ -797,7 +809,7 @@ fn same_generation(
     let short_file = wal
         .len
         .is_some_and(|len| !len.covers(crate::SyncedOffset::new(seen.end)));
-    let frame = frame_state(tip, seen);
+    let frame = frame_state(source, seen);
     let frame_gone = match frame {
         FrameState::Miss(Miss::Truncated) | FrameState::Rewritten => true,
         FrameState::Fresh
@@ -822,11 +834,11 @@ fn same_generation(
         FrameState::Miss(Miss::Moved) => Err(refuse(SnapshotCause::GenerationChanged)),
         FrameState::Mismatch => Err(refuse(SnapshotCause::LastPageMismatch)),
         FrameState::Miss(Miss::Truncated) | FrameState::Rewritten | FrameState::Fresh => {
-            if let Some(refusal) = reset_past(tip, seen, header, wal) {
+            if let Some(refusal) = reset_past(source, seen, header, wal) {
                 return Err(refusal);
             }
             let cursor_at_end = committed.is_some_and(|end| end.get() == seen.end.get());
-            continued(tip, wal, cursor_at_end)
+            continued(source, wal, cursor_at_end)
         }
     }
 }
@@ -834,8 +846,13 @@ fn same_generation(
 /// Rule 9a: the wal-index was reset ahead of the header and a commit follows the
 /// position. A position pinned at this epoch cannot have one after it (the reset
 /// needed a backfill its read lock blocks), so finding one is what the check that catches frames abandoned after the read lock was taken exists for.
-fn reset_past(tip: &Tip<'_>, seen: &Seen, header: &WalHeader, wal: &WalView) -> Option<Refusal> {
-    let Tip::Running(position, probes) = tip else {
+fn reset_past(
+    source: &PositionSource<'_>,
+    seen: &Seen,
+    header: &WalHeader,
+    wal: &WalView,
+) -> Option<Refusal> {
+    let PositionSource::Running(position, probes) = source else {
         return None;
     };
     let reset = wal
@@ -851,32 +868,32 @@ fn reset_past(tip: &Tip<'_>, seen: &Seen, header: &WalHeader, wal: &WalView) -> 
     })
 }
 
-/// What the frame before the end says, whichever way the tip carries it.
+/// What the frame before the end says, whichever way the newest staged file carries it.
 #[derive(Clone, Copy)]
 enum FrameState {
     /// The page matches, or there is nothing to match (the end is the start).
     Fresh,
-    /// The page differs or the tip lacks it.
+    /// The page differs or the newest staged file lacks it.
     Mismatch,
     /// No frame to compare.
     Miss(Miss),
-    /// The last page matches but the range before it is not what the tip staged.
+    /// The last page matches but the range before it is not what the newest staged file staged.
     Rewritten,
 }
 
-fn frame_state(tip: &Tip<'_>, seen: &Seen) -> FrameState {
+fn frame_state(source: &PositionSource<'_>, seen: &Seen) -> FrameState {
     let at_start = seen.end.frame_index() == 0;
-    match tip {
-        Tip::Boot(TipView::Readable { last_page, .. }) => match last_page {
+    match source {
+        PositionSource::Boot(NewestStagedFile::Readable { last_page, .. }) => match last_page {
             LastPageCheck::Match { .. } => FrameState::Fresh,
-            LastPageCheck::Mismatch | LastPageCheck::NotInTip => FrameState::Mismatch,
+            LastPageCheck::Mismatch | LastPageCheck::NotInNewestStagedFile => FrameState::Mismatch,
             LastPageCheck::NoFrame(_) if at_start => FrameState::Fresh,
             LastPageCheck::NoFrame(miss) => FrameState::Miss(*miss),
             LastPageCheck::Rewritten => FrameState::Rewritten,
         },
-        Tip::Boot(TipView::Unreadable { .. }) => FrameState::Fresh,
-        Tip::Running(_, _) if at_start => FrameState::Fresh,
-        Tip::Running(position, probes) => match probes.prev {
+        PositionSource::Boot(NewestStagedFile::Unreadable { .. }) => FrameState::Fresh,
+        PositionSource::Running(_, _) if at_start => FrameState::Fresh,
+        PositionSource::Running(position, probes) => match probes.prev {
             FrameCheck::Miss(miss) => FrameState::Miss(miss),
             FrameCheck::Frame(frame)
                 if frame.pgno() == position.last_page().pgno()
@@ -890,19 +907,23 @@ fn frame_state(tip: &Tip<'_>, seen: &Seen) -> FrameState {
 }
 
 /// Rule 10: the position to scan on from.
-fn continued(tip: &Tip<'_>, wal: &WalView, at_committed_end: bool) -> Result<Position, Refusal> {
-    let prior = match tip {
-        Tip::Running(position, _) => Some(position.continuity()),
-        Tip::Boot(_) => None,
+fn continued(
+    source: &PositionSource<'_>,
+    wal: &WalView,
+    at_committed_end: bool,
+) -> Result<Position, Refusal> {
+    let prior = match source {
+        PositionSource::Running(position, _) => Some(position.continuity()),
+        PositionSource::Boot(_) => None,
     };
     let continuity = match prior {
         Some(Continuity::Pinned(epoch)) if epoch == wal.epoch => Continuity::Pinned(epoch),
         Some(_) | None if at_committed_end => Continuity::Pinned(wal.epoch),
         Some(_) | None => Continuity::Unpinned,
     };
-    match tip {
-        Tip::Running(position, _) => Ok(position.with_continuity(continuity)),
-        Tip::Boot(TipView::Readable {
+    match source {
+        PositionSource::Running(position, _) => Ok(position.with_continuity(continuity)),
+        PositionSource::Boot(NewestStagedFile::Readable {
             txid,
             commit,
             timestamp,
@@ -911,8 +932,8 @@ fn continued(tip: &Tip<'_>, wal: &WalView, at_committed_end: bool) -> Result<Pos
         }) => Ok(Position::new(
             *txid, *cursor, *commit, *last_page, *timestamp, continuity,
         )),
-        // Rules 3 and 9 already refused every boot tip that is not a match.
-        Tip::Boot(_) => Err(refuse(SnapshotCause::LastPageMismatch)),
+        // Rules 3 and 9 already refused every newest staged file read at boot that is not a match.
+        PositionSource::Boot(_) => Err(refuse(SnapshotCause::LastPageMismatch)),
     }
 }
 

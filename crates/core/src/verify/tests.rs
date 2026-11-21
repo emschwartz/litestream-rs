@@ -423,7 +423,7 @@ fn a_hole_in_a_young_replica_is_named_against_its_level_zero_base() {
     let report = names(&store);
     assert!(matches!(
         only(&report),
-        Finding::Gap { snapshot, at_tip: true, .. } if *snapshot == key(0, 1, 1)
+        Finding::Gap { snapshot, at_newest: true, .. } if *snapshot == key(0, 1, 1)
     ));
 }
 
@@ -437,14 +437,14 @@ fn files_without_a_snapshot_are_no_snapshot() {
 }
 
 #[test]
-fn a_hole_after_the_newest_snapshot_is_a_gap_at_the_tip() {
+fn a_hole_after_the_newest_snapshot_is_a_gap_at_the_newest_staged_file() {
     let store = MemStore::new();
     snapshot(&store, 1);
     l0(&store, 3);
     let report = names(&store);
     let finding = only(&report);
     assert!(
-        matches!(finding, Finding::Gap { snapshot, have_through, next_starts, at_tip: true }
+        matches!(finding, Finding::Gap { snapshot, have_through, next_starts, at_newest: true }
             if *snapshot == key(9, 1, 1) && *have_through == txid(1) && *next_starts == txid(3)),
         "{finding:?}"
     );
@@ -452,7 +452,7 @@ fn a_hole_after_the_newest_snapshot_is_a_gap_at_the_tip() {
 }
 
 #[test]
-fn a_hole_behind_the_newest_snapshot_is_older_history_and_the_tip_is_fine() {
+fn a_hole_behind_the_newest_snapshot_is_older_history_and_the_newest_staged_file_is_fine() {
     let store = MemStore::new();
     snapshot(&store, 1);
     l0(&store, 3);
@@ -461,7 +461,7 @@ fn a_hole_behind_the_newest_snapshot_is_older_history_and_the_tip_is_fine() {
     let report = names(&store);
     let finding = only(&report);
     assert!(
-        matches!(finding, Finding::Gap { snapshot, have_through, next_starts, at_tip: false }
+        matches!(finding, Finding::Gap { snapshot, have_through, next_starts, at_newest: false }
             if *snapshot == key(9, 1, 1) && *have_through == txid(1) && *next_starts == txid(3)),
         "{finding:?}"
     );
@@ -486,12 +486,12 @@ fn holes_in_front_of_and_behind_a_snapshot_are_both_reported() {
                 snapshot,
                 have_through,
                 next_starts,
-                at_tip,
+                at_newest,
             } = finding
             else {
                 return None;
             };
-            Some((*snapshot, *have_through, *next_starts, *at_tip))
+            Some((*snapshot, *have_through, *next_starts, *at_newest))
         })
         .collect();
     assert_eq!(gaps.len(), report.findings().len());

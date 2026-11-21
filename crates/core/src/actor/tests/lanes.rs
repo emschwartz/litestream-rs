@@ -163,7 +163,9 @@ fn a_pending_snapshot_asks_for_the_next_tick_at_once() {
     let lost = rig.tick(&mut actor, T0 + 1);
     assert_eq!(
         event(&lost),
-        Some(&Event::Resnapshot(SnapshotCause::LocalTipUnreadable))
+        Some(&Event::Resnapshot(
+            SnapshotCause::NewestStagedFileUnreadable
+        ))
     );
     assert_eq!(next_of(&lost), Some(Next::Now));
 }

@@ -17,9 +17,9 @@ use std::io::Cursor;
 use lsr_compat::{Manifest, all_fixtures, parse_rel};
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    CommittedRead, FakeDb, FakeWal, FileKey, Level, MemStore, ObjectStore, Recovered,
-    SnapshotCause, Step, StepEnd, SyncConfig, Synced, Tip, TipView, Upload, WalFileLen, WalView,
-    recover, sync_step,
+    CommittedRead, FakeDb, FakeWal, FileKey, Level, MemStore, NewestStagedFile, ObjectStore,
+    PositionSource, Recovered, SnapshotCause, Step, StepEnd, SyncConfig, Synced, Upload,
+    WalFileLen, WalView, recover, sync_step,
 };
 use lsr_core::{PageLimit, ReadLen};
 use lsr_ltx::{Event, Header, PageNo, PageSize, ReadDecoder, Timestamp};
@@ -83,8 +83,8 @@ fn be32(bytes: &[u8], at: usize) -> Option<u32> {
 ///
 /// A salt reset after a matching last page runs Go's `detectFullCheckpoint`,
 /// which is not transcribed; that case answers `false`.
-fn go_would_continue(tip: &Header, tip_pages: &[(PageNo, Vec<u8>)], wal: &[u8]) -> bool {
-    let fields = tip.fields();
+fn go_would_continue(newest: &Header, newest_pages: &[(PageNo, Vec<u8>)], wal: &[u8]) -> bool {
+    let fields = newest.fields();
     let Some(origin) = fields.wal else {
         return false;
     };
@@ -127,13 +127,13 @@ fn go_would_continue(tip: &Header, tip_pages: &[(PageNo, Vec<u8>)], wal: &[u8]) 
     let data = bytes
         .get(usize::try_from(FRAME_HEADER).unwrap_or(0)..)
         .unwrap_or_default();
-    let last_page_match = tip_pages
+    let last_page_match = newest_pages
         .iter()
         .any(|(p, page)| p.get() == pgno && page.as_slice() == data);
     last_page_match && salt_match
 }
 
-struct GoTip {
+struct GoNewestFile {
     fixture: String,
     key: FileKey,
     bytes: Vec<u8>,
@@ -142,11 +142,11 @@ struct GoTip {
 }
 
 /// The newest L0 file of each fixture that records a WAL origin with frames.
-fn go_tips() -> Vec<GoTip> {
-    let mut tips = Vec::new();
+fn go_newest_files() -> Vec<GoNewestFile> {
+    let mut newest_files = Vec::new();
     for dir in all_fixtures().expect("list") {
         let manifest = Manifest::load(&dir).expect("load");
-        let mut best: Option<GoTip> = None;
+        let mut best: Option<GoNewestFile> = None;
         for file in &manifest.files {
             let Some(key) = parse_rel(&file.key) else {
                 continue;
@@ -163,7 +163,7 @@ fn go_tips() -> Vec<GoTip> {
                 .as_ref()
                 .is_none_or(|b| key.range().max() > b.key.range().max())
             {
-                best = Some(GoTip {
+                best = Some(GoNewestFile {
                     fixture: format!("{}/{}", manifest.go_version, manifest.scenario),
                     key,
                     bytes,
@@ -172,23 +172,28 @@ fn go_tips() -> Vec<GoTip> {
                 });
             }
         }
-        tips.extend(best);
+        newest_files.extend(best);
     }
-    tips
+    newest_files
 }
 
 fn page_one(ps: PageSize) -> PageNo {
     PageNo::new(1, ps).expect("page 1")
 }
 
-/// The WAL a Go process left beside `tip`: its salts, its frame count, its last page last.
-fn wal_beside(tip: &GoTip) -> FakeWal {
-    let fields = tip.header.fields();
+/// The WAL a Go process left beside `go_file`: its salts, its frame count, its last page last.
+fn wal_beside(go_file: &GoNewestFile) -> FakeWal {
+    let fields = go_file.header.fields();
     let origin = fields.wal.expect("origin");
     let end = origin.offset().saturating_add(origin.size());
     let span = end.saturating_sub(WAL_HEADER);
     let frame = frame_len(fields.page_size);
-    assert_eq!(span % frame, 0, "{}: a whole number of frames", tip.fixture);
+    assert_eq!(
+        span % frame,
+        0,
+        "{}: a whole number of frames",
+        go_file.fixture
+    );
     let (salt1, salt2) = origin.salts();
     let wal = FakeWal::new(fields.page_size, Salts { salt1, salt2 });
     let commit = std::num::NonZeroU32::new(fields.commit).expect("commit");
@@ -196,7 +201,7 @@ fn wal_beside(tip: &GoTip) -> FakeWal {
     for _ in 1..(span / frame) {
         wal.append_tx(&[(page_one(fields.page_size), filler.clone())], commit);
     }
-    let (pgno, data) = tip.pages.last().expect("a page");
+    let (pgno, data) = go_file.pages.last().expect("a page");
     wal.append_tx(&[(*pgno, data.clone())], commit);
     wal
 }
@@ -239,29 +244,33 @@ fn staged(store: &MemStore) -> Vec<Vec<u8>> {
 }
 
 #[test]
-fn rust_continues_from_every_go_written_tip_and_its_next_file_passes_go_rules() {
-    let tips = go_tips();
+fn rust_continues_from_every_go_written_newest_file_and_its_next_file_passes_go_rules() {
+    let newest_files = go_newest_files();
     assert!(
-        tips.len() >= 15,
+        newest_files.len() >= 15,
         "only {} fixtures record a WAL origin (20 measured)",
-        tips.len()
+        newest_files.len()
     );
-    for tip in tips {
-        let wal = wal_beside(&tip);
+    for go_file in newest_files {
+        let wal = wal_beside(&go_file);
         let store = MemStore::new();
-        put(&store, &tip.key, &tip.bytes);
+        put(&store, &go_file.key, &go_file.bytes);
         let mut reader = WalReader::open(Cursor::new(wal.file_bytes())).expect("wal");
-        let loaded = block_on(TipView::load(&store, Some(&mut reader)))
+        let loaded = block_on(NewestStagedFile::load(&store, Some(&mut reader)))
             .expect("load")
-            .expect("a tip");
-        let recovered = recover(Some(Tip::Boot(&loaded)), &view_of(&wal, &reader), None);
+            .expect("a newest file");
+        let recovered = recover(
+            Some(PositionSource::Boot(&loaded)),
+            &view_of(&wal, &reader),
+            None,
+        );
         let Recovered::Continue(position) = recovered else {
-            panic!("{}: {recovered:?}", tip.fixture);
+            panic!("{}: {recovered:?}", go_file.fixture);
         };
-        let ps = tip.header.fields().page_size;
-        assert_eq!(position.txid(), tip.header.fields().txids.max());
+        let ps = go_file.header.fields().page_size;
+        assert_eq!(position.txid(), go_file.header.fields().txids.max());
 
-        let commit = std::num::NonZeroU32::new(tip.header.fields().commit).expect("commit");
+        let commit = std::num::NonZeroU32::new(go_file.header.fields().commit).expect("commit");
         wal.append_tx(&[(page_one(ps), vec![7; ps.bytes()])], commit);
         let mut next_reader = WalReader::open(Cursor::new(wal.file_bytes())).expect("wal");
         let committed =
@@ -277,27 +286,35 @@ fn rust_continues_from_every_go_written_tip_and_its_next_file_passes_go_rules() 
             &SyncConfig::default(),
             Timestamp::from_unix_millis(now),
         ))
-        .unwrap_or_else(|failed| panic!("{}: {failed:?}", tip.fixture));
-        assert!(matches!(synced, Synced::Wrote { .. }), "{}", tip.fixture);
+        .unwrap_or_else(|failed| panic!("{}: {failed:?}", go_file.fixture));
+        assert!(
+            matches!(synced, Synced::Wrote { .. }),
+            "{}",
+            go_file.fixture
+        );
         let files = staged(&store);
         let (next, _) = decode(files.last().expect("the new file"));
-        go_next_header_rules(&tip.header, &next)
-            .unwrap_or_else(|rule| panic!("{}: breaks Go's rule: {rule}", tip.fixture));
+        go_next_header_rules(&go_file.header, &next)
+            .unwrap_or_else(|rule| panic!("{}: breaks Go's rule: {rule}", go_file.fixture));
     }
 }
 
 #[test]
-fn a_go_tip_whose_wal_was_truncated_is_a_snapshot_not_a_continue() {
-    for tip in go_tips() {
-        let wal = wal_beside(&tip);
+fn a_go_newest_file_whose_wal_was_truncated_is_a_snapshot_not_a_continue() {
+    for go_file in go_newest_files() {
+        let wal = wal_beside(&go_file);
         let store = MemStore::new();
-        put(&store, &tip.key, &tip.bytes);
+        put(&store, &go_file.key, &go_file.bytes);
         let mut reader = WalReader::open(Cursor::new(wal.file_bytes())).expect("wal");
-        let loaded = block_on(TipView::load(&store, Some(&mut reader)))
+        let loaded = block_on(NewestStagedFile::load(&store, Some(&mut reader)))
             .expect("load")
-            .expect("a tip");
+            .expect("a newest file");
         wal.truncate_file(usize::try_from(WAL_HEADER).expect("small"));
-        let recovered = recover(Some(Tip::Boot(&loaded)), &view_of(&wal, &reader), None);
+        let recovered = recover(
+            Some(PositionSource::Boot(&loaded)),
+            &view_of(&wal, &reader),
+            None,
+        );
         assert!(
             matches!(
                 recovered,
@@ -307,7 +324,7 @@ fn a_go_tip_whose_wal_was_truncated_is_a_snapshot_not_a_continue() {
                 }
             ),
             "{}: {recovered:?}",
-            tip.fixture
+            go_file.fixture
         );
     }
 }
@@ -395,7 +412,7 @@ fn rust_chain(ps: u32, cap: Option<u64>) -> (Vec<Vec<u8>>, Vec<u8>) {
 }
 
 #[test]
-fn go_would_continue_at_every_tip_of_a_chain_rust_wrote() {
+fn go_would_continue_at_every_position_of_a_chain_rust_wrote() {
     for ps in [512, 4096] {
         for cap in [None, Some(1), Some(3000)] {
             let (files, wal) = rust_chain(ps, cap);
@@ -446,7 +463,7 @@ mod live {
         use lsr_compat::{
             AppFixture, Chain, Era, GoBuild, GoRestore, Replicator, Shape, Target, Written,
             builds_in, builds_under_test, clock_ending_now, hash_pages, integrity_check, list,
-            newest_l0, real_now_ms, restore_replica, restore_with_go, tip, wait_staged_past,
+            newest_l0, position, real_now_ms, restore_replica, restore_with_go, wait_staged_past,
             wait_until, write_config, write_config_snapshotting,
         };
         use lsr_core::{Event, Level, RestoreTarget};
@@ -515,12 +532,12 @@ mod live {
                 Duration::from_secs(30),
                 || {
                     go.ensure_running()?;
-                    let tip = newest_l0(meta)?.map(|h| h.fields().txids.max().get());
-                    if tip != last {
-                        last = tip;
+                    let position = newest_l0(meta)?.map(|h| h.fields().txids.max().get());
+                    if position != last {
+                        last = position;
                         since = Instant::now();
                     }
-                    Ok(tip.is_some_and(|t| t > above)
+                    Ok(position.is_some_and(|t| t > above)
                         && since.elapsed() >= Duration::from_millis(700))
                 },
             )
@@ -562,11 +579,11 @@ mod live {
             let version = build.name();
             let bin = build.binary().expect("the build under test is present");
             let mut written = rust_run(60, truncate);
-            let tip = written.points.last().expect("points").txid;
-            let tip_head = newest_l0(&written.fixture.meta)
+            let position = written.points.last().expect("points").txid;
+            let position_head = newest_l0(&written.fixture.meta)
                 .expect("l0")
                 .expect("a staged file");
-            let tip_salts = tip_head.fields().wal.expect("origin").salts();
+            let position_salts = position_head.fields().wal.expect("origin").salts();
             let snapshots = l9(&written.fixture.replica);
             let config = written.fixture.dir().join("go.yml");
             write_config_snapshotting(&config, &written.fixture.db, &written.fixture.replica, "1h")
@@ -579,13 +596,13 @@ mod live {
                     .commit(Shape::Insert { bytes: 300 })
                     .expect("commit");
             }
-            wait_quiet(&mut go, &written.fixture.meta, tip.get()).expect("Go resumes");
+            wait_quiet(&mut go, &written.fixture.meta, position.get()).expect("Go resumes");
             go.stop().expect("stop");
-            let new = l0_after(&written.fixture.meta, tip.get());
+            let new = l0_after(&written.fixture.meta, position.get());
             let first = new.first().expect("a new file").fields();
             assert_eq!(
                 first.txids.min().get(),
-                tip.get() + 1,
+                position.get() + 1,
                 "{version}: Go's next file"
             );
             let origin = first.wal.expect("origin");
@@ -596,7 +613,7 @@ mod live {
             );
             assert_eq!(
                 origin.salts(),
-                tip_salts,
+                position_salts,
                 "{version}: Go read another WAL generation"
             );
             assert!(
@@ -696,7 +713,7 @@ mod live {
             write_config(config, &fixture.db, &fixture.replica).expect("config");
             let mut go =
                 Replicator::start(&bin, config, &fixture.dir().join("go.log")).expect("start");
-            let mut staged = tip(&fixture).expect("tip");
+            let mut staged = position(&fixture).expect("position");
             for i in 0..40 {
                 fixture
                     .commit(if i % 7 == 6 {
@@ -712,7 +729,7 @@ mod live {
             }
             wait_quiet(&mut go, &fixture.meta, 0).expect("Go catches up");
             go.stop().expect("stop");
-            let go_tip = newest_l0(&fixture.meta)
+            let go_newest = newest_l0(&fixture.meta)
                 .expect("l0")
                 .expect("file")
                 .fields()
@@ -720,7 +737,7 @@ mod live {
                 .max()
                 .get();
             let at_stop = fixture.hash_now().expect("hash");
-            (fixture, go_tip, at_stop)
+            (fixture, go_newest, at_stop)
         }
 
         /// Rust restores `target` from the combined chain and the pages equal `want`.
@@ -747,7 +764,7 @@ mod live {
             let bin = build.binary().expect("the build under test is present");
             let config =
                 std::env::temp_dir().join(format!("lsr-go-{name}-{}.yml", std::process::id()));
-            let (fixture, go_tip, at_stop) = go_writes_and_stops(build, &config);
+            let (fixture, go_newest, at_stop) = go_writes_and_stops(build, &config);
             let fixture_config = fixture.dir().join("go-restore.yml");
             write_config(&fixture_config, &fixture.db, &fixture.replica).expect("config");
             drop(fs::remove_file(&config));
@@ -767,13 +784,13 @@ mod live {
             rust_restores_combined(&written, RestoreTarget::Latest, want, "latest");
             rust_restores_combined(
                 &written,
-                RestoreTarget::Txid(Txid::new(go_tip).expect("txid")),
+                RestoreTarget::Txid(Txid::new(go_newest).expect("txid")),
                 &at_stop,
                 "mid",
             );
             match build.era() {
                 Era::Blocks => {
-                    go_reads_combined(&bin, &fixture_config, &written, go_tip, &at_stop, "Go")
+                    go_reads_combined(&bin, &fixture_config, &written, go_newest, &at_stop, "Go")
                 }
                 Era::Frames => {
                     let out = written.fixture.dir().join("refused.db");
@@ -797,7 +814,7 @@ mod live {
                                 &newest_bin,
                                 &fixture_config,
                                 &written,
-                                go_tip,
+                                go_newest,
                                 &at_stop,
                                 newest.name(),
                             );
@@ -815,7 +832,7 @@ mod live {
             bin: &Path,
             config: &Path,
             written: &Written,
-            go_tip: u64,
+            go_newest: u64,
             at_stop: &[String],
             who: &str,
         ) {
@@ -827,7 +844,7 @@ mod live {
                 config,
                 &written.fixture,
                 "mid.db",
-                Target::Txid { txid: go_tip },
+                Target::Txid { txid: go_newest },
             );
             assert_eq!(
                 pages_of(&mid),
@@ -846,8 +863,8 @@ mod live {
 
         use lsr_compat::{
             AppFixture, Era, GoBuild, GoRestore, Kind, Replicator, Shape, Summary, Target,
-            builds_under_test, hash_pages, integrity_check, lsr_binary, restore_replica,
-            restore_with_go, snapshots, tip, wait_boot_file, wait_staged_past, wait_until,
+            builds_under_test, hash_pages, integrity_check, lsr_binary, position, restore_replica,
+            restore_with_go, snapshots, wait_boot_file, wait_staged_past, wait_until,
             wait_uploaded, write_config, write_config_daily_snapshots,
         };
         use lsr_core::RestoreTarget;
@@ -897,7 +914,7 @@ mod live {
         /// One process's turn: it comes up on what the previous one left, the application commits
         /// [`COMMITS`] transactions, each staged before the next, and the process stops with
         /// SIGINT once the replica holds them all and a snapshot. Returns the boot's first file
-        /// when there was a previous tip.
+        /// when there was a previous position.
         fn turn(
             mut process: Replicator,
             fixture: &mut AppFixture,
@@ -934,7 +951,7 @@ mod live {
         /// The switch to `kind` continued: its first file is the next transaction and holds only
         /// what the commits wrote.
         fn assert_continued(name: &str, kind: Kind, boot: Option<&Summary>, prev: Txid) {
-            let boot = boot.expect("a boot file after a previous tip");
+            let boot = boot.expect("a boot file after a previous position");
             let fields = boot.header.fields();
             assert_eq!(
                 fields.txids.min().get(),
@@ -978,7 +995,7 @@ mod live {
             write_config(&first, &fixture.db, &fixture.replica).expect("config");
             let go = Replicator::start(&bin, &first, &log(&fixture, "go-1.log")).expect("start Go");
             assert_eq!(turn(go, &mut fixture, None), None);
-            let go_tip = tip(&fixture).expect("tip").expect("Go staged");
+            let go_newest = position(&fixture).expect("position").expect("Go staged");
             let at_go_stop = fixture.hash_now().expect("hash");
             let l9 = snapshots(&fixture.replica).expect("l9");
 
@@ -989,14 +1006,14 @@ mod live {
                 &log(&fixture, "lsr.log"),
             )
             .expect("start lsr");
-            let boot = turn(rs, &mut fixture, Some(go_tip));
-            assert_continued(name, Kind::Rust, boot.as_ref(), go_tip);
+            let boot = turn(rs, &mut fixture, Some(go_newest));
+            assert_continued(name, Kind::Rust, boot.as_ref(), go_newest);
             assert_eq!(
                 snapshots(&fixture.replica).expect("l9"),
                 l9,
                 "{name}: Rust took a snapshot"
             );
-            let rust_tip = tip(&fixture).expect("tip").expect("Rust staged");
+            let rust_newest = position(&fixture).expect("position").expect("Rust staged");
             let at_rust_stop = fixture.hash_now().expect("hash");
             assert_eq!(
                 rust_restore(&fixture, RestoreTarget::Latest, "rs-1.db"),
@@ -1004,13 +1021,17 @@ mod live {
                 "{name}"
             );
             assert_eq!(
-                rust_restore(&fixture, RestoreTarget::Txid(go_tip), "rs-go-tip.db"),
+                rust_restore(
+                    &fixture,
+                    RestoreTarget::Txid(go_newest),
+                    "rs-go-position.db"
+                ),
                 at_go_stop,
                 "{name}: Rust at the txid where Go stopped"
             );
             println!(
-                "{name}: Go stopped at {go_tip}, lsr continued at {:016x}",
-                go_tip.get() + 1
+                "{name}: Go stopped at {go_newest}, lsr continued at {:016x}",
+                go_newest.get() + 1
             );
             if build.era() == Era::Frames {
                 println!("{name}: reads only frame-encoded files, so cannot resume from lsr's");
@@ -1023,24 +1044,24 @@ mod live {
                 &bin,
                 &config,
                 &mut fixture,
-                (rust_tip, &at_rust_stop),
+                (rust_newest, &at_rust_stop),
                 &l9,
             );
         }
 
-        /// Go starts on what `lsr` left at `rust_tip`, whose pages were `at_rust_stop`.
+        /// Go starts on what `lsr` left at `rust_newest`, whose pages were `at_rust_stop`.
         fn go_resumes_from_lsr(
             name: &str,
             bin: &Path,
             config: &Path,
             fixture: &mut AppFixture,
-            (rust_tip, at_rust_stop): (Txid, &[String]),
+            (rust_newest, at_rust_stop): (Txid, &[String]),
             l9: &BTreeSet<String>,
         ) {
             let log = fixture.dir().join("go-2.log");
             let go = Replicator::start(bin, config, &log).expect("start Go");
-            let boot = turn(go, fixture, Some(rust_tip));
-            assert_continued(name, Kind::Go, boot.as_ref(), rust_tip);
+            let boot = turn(go, fixture, Some(rust_newest));
+            assert_continued(name, Kind::Go, boot.as_ref(), rust_newest);
             assert_eq!(
                 snapshots(&fixture.replica).expect("l9"),
                 *l9,
@@ -1058,16 +1079,16 @@ mod live {
                 "{name}"
             );
             let at_rust = Target::Txid {
-                txid: rust_tip.get(),
+                txid: rust_newest.get(),
             };
             assert_eq!(
-                go_restore(bin, config, fixture, at_rust, "go-rs-tip.db"),
+                go_restore(bin, config, fixture, at_rust, "go-rs-position.db"),
                 at_rust_stop,
                 "{name}: Go at the txid where lsr stopped"
             );
             println!(
-                "{name}: lsr stopped at {rust_tip}, Go continued at {:016x}",
-                rust_tip.get() + 1
+                "{name}: lsr stopped at {rust_newest}, Go continued at {:016x}",
+                rust_newest.get() + 1
             );
         }
     }

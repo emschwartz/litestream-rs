@@ -25,10 +25,10 @@ fn an_image_reads_through_its_parents_and_survives_flattening() {
     for n in 2..100_u32 {
         model.commit(&[(pgno(1), page(u8::try_from(n).unwrap()))], 2, app(n), 0);
     }
-    let tip = model.tip_image();
-    assert_eq!(byte(&tip, 1), Some(99));
-    assert_eq!(byte(&tip, 2), Some(5));
-    assert_eq!(byte(&tip, 3), None);
+    let newest = model.newest_image();
+    assert_eq!(byte(&newest, 1), Some(99));
+    assert_eq!(byte(&newest, 2), Some(5));
+    assert_eq!(byte(&newest, 3), None);
     let first = model.rec(CommitId(1)).unwrap();
     assert_eq!(byte(&first.image, 1), Some(1));
 }
@@ -39,9 +39,9 @@ fn a_shrink_forgets_pages_and_growing_again_reads_zeros() {
     model.commit(&[(pgno(1), page(1)), (pgno(2), page(2))], 2, app(1), 0);
     model.commit(&[], 1, app(2), 0);
     model.commit(&[(pgno(1), page(3))], 2, app(3), 0);
-    let tip = model.tip_image();
-    assert_eq!(byte(&tip, 2), Some(0));
-    assert_eq!(byte(&tip, 1), Some(3));
+    let newest = model.newest_image();
+    assert_eq!(byte(&newest, 2), Some(0));
+    assert_eq!(byte(&newest, 1), Some(3));
 }
 
 #[test]
@@ -54,8 +54,8 @@ fn a_power_loss_keeps_durable_commits_and_the_synced_prefix() {
     assert!(!model.rewound());
     model.on_power_loss(SALTS, 2);
     assert!(model.rewound());
-    assert_eq!(model.tip(), Some(c1));
-    assert_eq!(byte(&model.tip_image(), 1), Some(2));
+    assert_eq!(model.newest_commit(), Some(c1));
+    assert_eq!(byte(&model.newest_image(), 1), Some(2));
     // The lost commit stays on record: a file may already cover it.
     assert!(model.rec(c2).is_some());
     assert!(model.rec(c0).unwrap().durable);
@@ -70,14 +70,14 @@ fn a_power_loss_drops_commits_of_an_older_generation_that_were_never_synced() {
         salt2: 3,
     };
     model.on_power_loss(other, 10);
-    assert_eq!(model.tip(), Some(CommitId(0)));
+    assert_eq!(model.newest_commit(), Some(CommitId(0)));
     assert!(model.rec(c0).is_some());
 }
 
 #[test]
 fn the_database_before_any_commit_is_commit_zero() {
     let model = Model::new(PageImage::from_bytes(ps(), &[]));
-    assert_eq!(model.tip(), Some(CommitId(0)));
+    assert_eq!(model.newest_commit(), Some(CommitId(0)));
     assert_eq!(model.find(SALTS, wal_end(0).get(), usize::MAX), None);
 }
 

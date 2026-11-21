@@ -1,7 +1,7 @@
 //! Reading one LTX object from a store, in bounded chunks, through one decoder.
 //!
 //! Every reader of whole files goes through [`LtxRead`]: restore, compaction,
-//! verify, the recovery check of the staged tip and the page table's seeding.
+//! verify, the recovery check of the staged newest staged file and the page table's seeding.
 //! It owns the three rules each of them used to repeat by hand:
 //! - The listed size is advisory: only the decoder knows where a file ends.
 //! - A chunk shorter than asked is the end of the object (the read contract

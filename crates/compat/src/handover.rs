@@ -2,11 +2,11 @@
 //! staged and uploaded, read from the meta directory and the replica, never from timing.
 //!
 //! A process's position is the newest transaction any file covers in the meta directory or
-//! the replica, a directory or a MinIO prefix ([`crate::Remote`]) ([`tip`]): a process stages a level-0 file in the meta directory before it
+//! the replica, a directory or a MinIO prefix ([`crate::Remote`]) ([`position`]): a process stages a level-0 file in the meta directory before it
 //! uploads it, so a file staged by a process killed before its upload still counts, and the
-//! next process uploads it. A boot that continues writes its first file at `tip + 1`, holding
+//! next process uploads it. A boot that continues writes its first file at `position + 1`, holding
 //! only the pages its transactions wrote; a boot that snapshots writes every page of the
-//! database at `tip + 1` (Go's `writeLTXFromDB`, Rust's snapshot step), or at transaction 1.
+//! database at `position + 1` (Go's `writeLTXFromDB`, Rust's snapshot step), or at transaction 1.
 //! [`wait_boot_file`] finds that file and [`crate::Summary::holds_every_page`] tells the two
 //! apart. A new level-9 file ([`snapshots`]) is the other kind of snapshot a boot can take.
 
@@ -30,7 +30,7 @@ pub const PROCESS_STEP: Duration = Duration::from_secs(30);
 ///
 /// # Errors
 /// [`CompatError`] when a listing fails.
-pub fn tip(fixture: &AppFixture) -> Result<Option<Txid>, CompatError> {
+pub fn position(fixture: &AppFixture) -> Result<Option<Txid>, CompatError> {
     Ok(newest_txid(&[fixture.meta.as_path()])?.max(fixture.remote().newest_txid()?))
 }
 
@@ -55,7 +55,7 @@ pub fn snapshots(replica: &Path) -> Result<BTreeSet<String>, CompatError> {
         .collect())
 }
 
-/// Waits until `process` staged a transaction past `after`; returns the new tip.
+/// Waits until `process` staged a transaction past `after`; returns the new position.
 ///
 /// # Errors
 /// [`CompatError`] when the process exits or stages nothing within [`PROCESS_STEP`].
@@ -67,7 +67,7 @@ pub fn wait_staged_past(
     let mut now = None;
     wait_until("a newer staged transaction", PROCESS_STEP, || {
         process.ensure_running()?;
-        now = tip(fixture)?;
+        now = position(fixture)?;
         Ok(now > after)
     })?;
     now.ok_or_else(|| CompatError::Fixture("nothing was staged".to_owned()))
@@ -84,7 +84,7 @@ pub fn wait_uploaded(process: &mut Replicator, fixture: &AppFixture) -> Result<T
         PROCESS_STEP,
         || {
             process.ensure_running()?;
-            let staged = tip(fixture)?;
+            let staged = position(fixture)?;
             now = uploaded(fixture)?;
             Ok(staged.is_some() && now == staged)
         },

@@ -153,7 +153,7 @@ impl GoBuild {
     /// `mxFrame` first (`walIndexMaxFrame`, `db.go`); no release contains it yet
     /// ([`FIRST_WAL_INDEX_END_PATCH`]).
     ///
-    /// A commit or `main` counts as containing it: the pinned 041a8c3 and upstream's tip both
+    /// A commit or `main` counts as containing it: the pinned 041a8c3 and upstream's newest commit both
     /// do. A commit older than the fix is then held to the strict expectation, so it can fail
     /// loudly on the bug but never pass by an exception it should not get.
     pub fn reads_wal_index_end(&self) -> bool {
