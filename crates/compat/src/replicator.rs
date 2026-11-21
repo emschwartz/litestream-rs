@@ -3,7 +3,11 @@
 //!
 //! Both kinds write their output to one log file. A test knows a process is up when its log
 //! says so ([`Replicator::wait_up`]: Go logs `replicating to` once its store runs, `lsr` prints
-//! `replicating <db>` once its read transaction is held). [`Replicator::stop`] is the
+//! `replicating <db>` once its read transaction is held, and `lsr replicate -config` logs
+//! Go's `replicating to` once each database's is; [`Replicator::wait_up_all`] waits for one
+//! line per database). Both programs run from a config file ([`Replicator::start`],
+//! [`Replicator::start_lsr_config`]), or Rust from Go's two-argument form
+//! ([`Replicator::start_lsr`]). [`Replicator::stop`] is the
 //! operator's SIGINT, after which both drain and exit; [`Replicator::kill`] is SIGKILL, the
 //! crash the alternation test ends each turn with.
 //!
@@ -52,7 +56,7 @@ pub fn wait_until(
 pub enum Kind {
     /// Go's `litestream replicate -config <file>`.
     Go,
-    /// Rust's `lsr replicate <db> <replica>`.
+    /// Rust's `lsr replicate <db> <replica>` or `lsr replicate -config <file>`.
     Rust,
 }
 
@@ -162,6 +166,26 @@ impl Replicator {
         })
     }
 
+    /// Starts Rust's daemon, `binary replicate -config config` (from [`lsr_binary`]), output
+    /// to `log`: the same command line Go's [`Replicator::start`] runs.
+    ///
+    /// # Errors
+    /// [`CompatError`] when the log or the process cannot be created.
+    pub fn start_lsr_config(binary: &Path, config: &Path, log: &Path) -> Result<Self, CompatError> {
+        let mut command = Command::new(binary);
+        command.arg("replicate").arg("-config").arg(config);
+        Ok(Self {
+            child: spawn(&mut command, binary, log)?,
+            log: log.to_path_buf(),
+            kind: Kind::Rust,
+        })
+    }
+
+    /// The process's whole output so far.
+    pub fn log_text(&self) -> String {
+        fs::read_to_string(&self.log).unwrap_or_default()
+    }
+
     /// Which program runs.
     pub const fn kind(&self) -> Kind {
         self.kind
@@ -199,6 +223,21 @@ impl Replicator {
         wait_until(&format!("{} to run", self.kind.command()), timeout, || {
             self.ensure_running()?;
             Ok(fs::read_to_string(&log).is_ok_and(|text| text.contains(line)))
+        })
+    }
+
+    /// Waits until the log says the process runs `databases` databases: one up line each.
+    ///
+    /// # Errors
+    /// As [`Replicator::wait_up`].
+    pub fn wait_up_all(&mut self, databases: usize, timeout: Duration) -> Result<(), CompatError> {
+        let line = self.kind.up_line();
+        let log = self.log.clone();
+        let what = format!("{} to run {databases} databases", self.kind.command());
+        wait_until(&what, timeout, || {
+            self.ensure_running()?;
+            let text = fs::read_to_string(&log).unwrap_or_default();
+            Ok(text.lines().filter(|l| l.contains(line)).count() >= databases)
         })
     }
 
