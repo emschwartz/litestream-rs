@@ -226,9 +226,9 @@ impl Model {
         }
     }
 
-    /// The image the next commit builds on: the local branch's tip.
+    /// The image the next commit builds on: the local branch's newest commit.
     #[must_use]
-    pub fn tip_image(&self) -> Rc<PageImage> {
+    pub fn newest_image(&self) -> Rc<PageImage> {
         self.lineage
             .last()
             .and_then(|id| self.commits.get(id.index()))
@@ -237,7 +237,7 @@ impl Model {
 
     /// The local branch's newest commit.
     #[must_use]
-    pub fn tip(&self) -> Option<CommitId> {
+    pub fn newest_commit(&self) -> Option<CommitId> {
         self.lineage.last().copied()
     }
 
@@ -265,7 +265,7 @@ impl Model {
         app: AppCommit,
         at: usize,
     ) -> CommitId {
-        let image = self.tip_image().child(pages, db_size);
+        let image = self.newest_image().child(pages, db_size);
         self.push(image, app, at, false)
     }
 

@@ -339,9 +339,9 @@ impl Runner {
     }
 
     /// Tells the model about each snapshot the tick staged: the database it was
-    /// cut from is the tip as the tick began, since the app does nothing during
+    /// cut from is the newest commit as the tick began, since the app does nothing during
     /// a tick, unless the app committed inside it (`in_tick`, with the staging
-    /// event it came before): from that event on, the tip is that commit.
+    /// event it came before): from that event on, it is that commit.
     fn note_snapshots(
         &mut self,
         began: Option<crate::CommitId>,
@@ -350,7 +350,7 @@ impl Runner {
     ) {
         let events = self.w.staging_tap.events();
         for (index, event) in events.iter().enumerate().skip(self.staging_seen) {
-            let tip = match in_tick {
+            let newest_commit = match in_tick {
                 Some((commit, from)) if index >= from => Some(commit),
                 Some(_) | None => began,
             };
@@ -375,7 +375,7 @@ impl Runner {
             } = event
                 && origin.is_none_or(|origin| origin.size() == 0)
                 && key.level().get() == 0
-                && let Some(commit) = tip
+                && let Some(commit) = newest_commit
             {
                 let rewound = self.w.model.rewound();
                 self.w
@@ -440,7 +440,7 @@ impl Runner {
 
     fn step(&mut self, plan: Option<CrashPlan>) -> Result<(Step, TickStats), Violation> {
         let at = self.w.remote_tap.len();
-        let tip = self.w.model.tip();
+        let newest_commit = self.w.model.newest_commit();
         let remote0 = self.w.remote_tap.counts();
         let staging0 = self.w.staging_tap.counts();
         let passive0 = self.tally.count(lsr_core::CheckpointMode::Passive);
@@ -449,7 +449,7 @@ impl Runner {
         let ended = self.run_one(plan);
         self.report.ticks = self.report.ticks.saturating_add(1);
         let in_tick = self.took_commit_in_tick();
-        self.note_snapshots(tip, in_tick, at);
+        self.note_snapshots(newest_commit, in_tick, at);
         self.note_tick(began, remote0);
         if self.trace {
             self.report.trace.push(format!("    tick: {ended:?}"));

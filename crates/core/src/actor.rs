@@ -15,7 +15,7 @@
 //!    checkpoint runs without one, and a proof never outlives its tick).
 //! 2. Upload while staged files are not on the replica.
 //! 3. Prune staged level-0 files the replica's level 1 covers, keeping the
-//!    tip.
+//!    newest staged file.
 //! 4. Maintenance, only once uploads are idle, so a snapshot's last
 //!    transaction is at most what was published. Its first listing after a
 //!    boot is read back first: the newest file of each level must verify.
@@ -95,7 +95,8 @@ use crate::maintain::{
 use crate::pages::{PageTable, seeded};
 use crate::position::{Position, SyncedThrough, WalFileLen};
 use crate::recover::{
-    FrameCheck, Miss, Probes, Recovered, Tip, TipView, WalView, read_header, recover,
+    FrameCheck, Miss, NewestStagedFile, PositionSource, Probes, Recovered, WalView, read_header,
+    recover,
 };
 use crate::snapshot::{SnapshotFailed, read_live, write_snapshot};
 use crate::source::{CheckpointMode, Checkpointer, CommittedRead, PageSource, WalSource};
@@ -774,8 +775,8 @@ impl Actor {
         if !self.kept.lanes.ready(Lane::Sync, now) {
             return self.ran(Event::Idle, now);
         }
-        // At boot a replica ahead of the local tip is `recover`'s to judge (a
-        // snapshot after it), not the uploader's (a halt), so the listing names no tip.
+        // At boot a replica ahead of the local newest staged file is `recover`'s to judge (a
+        // snapshot after it), not the uploader's (a halt), so the listing names no newest staged file.
         let start = UploadState::ListFirst { confirmed: None };
         let upload = match upload_next(start, env.staging, env.remote, Some(Txid::MAX)).await {
             Ok(listed) => listed.state,
@@ -787,7 +788,7 @@ impl Actor {
         };
         let booted = boot_recover(env.wal, env.staging, env.remote, upload.confirmed()).await;
         let Booted {
-            tip,
+            newest_staged,
             recovered,
             page_size,
         } = match booted {
@@ -802,7 +803,7 @@ impl Actor {
         // A staged file that did not verify was deleted with all after it:
         // the next file is a snapshot even when the WAL could continue.
         let cause = lost
-            .map(|_| SnapshotCause::LocalTipUnreadable)
+            .map(|_| SnapshotCause::NewestStagedFileUnreadable)
             .or(from.err());
         // An operator's request made before the boot comes first.
         let pending = self.kept.asked().or(cause);
@@ -813,7 +814,7 @@ impl Actor {
                 snapshot,
             },
             (Err(found), pending) => Course::Snapshot {
-                staged: tip.map(|tip| tip.txid()),
+                staged: newest_staged.map(|newest_staged| newest_staged.txid()),
                 cause: pending.unwrap_or(found),
             },
         };
@@ -1143,9 +1144,9 @@ impl Actor {
             (None, Some(position)) => {
                 let probes = Probes::read_against(reader, &position, &committed)?;
                 let view = wal_view(wal, Some(&*reader), committed)?;
-                let tip = Tip::Running(&position, probes);
+                let source = PositionSource::Running(&position, probes);
                 Ok(step_of(recover(
-                    Some(tip),
+                    Some(source),
                     &view,
                     self.engine.upload.confirmed(),
                 )))
@@ -1203,9 +1204,9 @@ impl Actor {
             prev: FrameCheck::Miss(Miss::Truncated),
             stale_next: false,
         };
-        let tip = Tip::Running(&position, probes);
+        let source = PositionSource::Running(&position, probes);
         Ok(
-            match step_of(recover(Some(tip), &view, self.engine.upload.confirmed())) {
+            match step_of(recover(Some(source), &view, self.engine.upload.confirmed())) {
                 Ok(_) => Stepped::Resnapshot(SnapshotCause::WalMissing),
                 Err(verdict) => verdict,
             },
@@ -1403,7 +1404,7 @@ impl Actor {
             return self.fault(Lane::Upload, fault, now);
         }
         // The position is past `from`; a snapshot after it would leave a hole.
-        let cause = SnapshotCause::LocalTipUnreadable;
+        let cause = SnapshotCause::NewestStagedFileUnreadable;
         self.engine.course = Course::Snapshot {
             staged: from.prev(),
             cause,
@@ -1464,17 +1465,17 @@ impl Actor {
 
     /// The newest staged transaction a prune may delete through, when it is
     /// past what was pruned: confirmed at the replica, compacted into its
-    /// level 1 (compaction reads staged inputs first), and below the tip
-    /// (boot's rule 9 compares the whole tip with the WAL). `None` before the
+    /// level 1 (compaction reads staged inputs first), and below the newest staged file
+    /// (boot's rule 9 compares the whole newest staged file with the WAL). `None` before the
     /// first maintenance listing.
     fn prune_bound(&self) -> Option<Txid> {
-        let below_tip = self.staged()?.prev()?;
+        let below_newest_staged_file = self.staged()?.prev()?;
         let bound = self
             .engine
             .upload
             .confirmed()?
             .min(self.engine.maintain.level_one?)
-            .min(below_tip);
+            .min(below_newest_staged_file);
         Some(bound).filter(|bound| self.engine.pruned < Some(*bound))
     }
 
@@ -1830,7 +1831,7 @@ impl Actor {
 /// What a boot found.
 struct Booted {
     /// The newest staged file, or the replica's newest level-0 file.
-    tip: Option<TipView>,
+    newest_staged: Option<NewestStagedFile>,
     /// What recovery makes of it.
     recovered: Recovered,
     /// The replica's page size, as far as boot could tell.
@@ -1849,26 +1850,35 @@ async fn boot_recover<W: WalSource, L: ObjectStore, R: ObjectStore>(
 ) -> Result<Booted, Fault> {
     let committed = wal.committed().map_err(Fault::from_source)?;
     let mut reader = open_reader(wal)?;
-    let tip = match (TipView::load(staging, reader.as_mut()).await?, confirmed) {
-        // Nothing staged: the replica's newest level-0 file is the tip.
-        (None, Some(newest)) => TipView::load_remote(remote, reader.as_mut(), newest).await?,
+    let newest_staged = match (
+        NewestStagedFile::load(staging, reader.as_mut()).await?,
+        confirmed,
+    ) {
+        // Nothing staged: the replica's newest level-0 file is the newest staged file.
+        (None, Some(newest)) => {
+            NewestStagedFile::load_remote(remote, reader.as_mut(), newest).await?
+        }
         (staged, _) => staged,
     };
     let view = wal_view(wal, reader.as_ref(), committed)?;
-    let page_size = match tip {
-        Some(TipView::Readable { page_size, .. }) => Some(page_size),
-        Some(TipView::Unreadable { .. }) | None if confirmed.is_some() => {
+    let page_size = match newest_staged {
+        Some(NewestStagedFile::Readable { page_size, .. }) => Some(page_size),
+        Some(NewestStagedFile::Unreadable { .. }) | None if confirmed.is_some() => {
             replica_page_size(remote).await?
         }
-        Some(TipView::Unreadable { .. }) | None => None,
+        Some(NewestStagedFile::Unreadable { .. }) | None => None,
     };
     let now = view.header.map(|header| header.page_size());
     let recovered = match page_size.zip(now).filter(|(was, now)| was != now) {
         Some((was, now)) => Recovered::Halt(HaltCause::PageSizeChanged { was, now }),
-        None => recover(tip.as_ref().map(Tip::Boot), &view, confirmed),
+        None => recover(
+            newest_staged.as_ref().map(PositionSource::Boot),
+            &view,
+            confirmed,
+        ),
     };
     Ok(Booted {
-        tip,
+        newest_staged,
         recovered,
         page_size,
     })

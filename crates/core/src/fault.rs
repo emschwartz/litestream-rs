@@ -180,7 +180,7 @@ pub enum SnapshotCause {
         local: Txid,
     },
     /// The newest staged file cannot be read.
-    LocalTipUnreadable,
+    NewestStagedFileUnreadable,
     /// The WAL file is missing or its header is torn.
     WalMissing,
     /// The WAL restarted and continuity does not prove nothing was lost.

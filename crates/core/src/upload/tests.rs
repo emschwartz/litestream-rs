@@ -40,19 +40,19 @@ async fn upload_tick<L: ObjectStore, S: ObjectStore>(
     config: UploadConfig,
     staging: &L,
     remote: &S,
-    local_tip: Option<Txid>,
+    newest_staged: Option<Txid>,
 ) -> Result<Ticked, UploadFailed> {
     let mut put = 0_u32;
     loop {
         let full = config.files_per_tick.is_some_and(|cap| put >= cap.get());
-        if full && plan_upload(&state, local_tip) != UploadPlan::Idle {
+        if full && plan_upload(&state, newest_staged) != UploadPlan::Idle {
             return Ok(Ticked {
                 state,
                 put,
                 next: Next::Now,
             });
         }
-        let step = upload_next(state, staging, remote, local_tip).await?;
+        let step = upload_next(state, staging, remote, newest_staged).await?;
         state = step.state;
         match step.did {
             Did::Nothing => {
@@ -311,9 +311,9 @@ fn next<L: ObjectStore, S: ObjectStore>(
     state: UploadState,
     staging: &L,
     remote: &S,
-    tip: u64,
+    position: u64,
 ) -> Result<Uploaded, UploadFailed> {
-    block_on(upload_next(state, staging, remote, Txid::new(tip)))
+    block_on(upload_next(state, staging, remote, Txid::new(position)))
 }
 
 fn failure(result: Result<Uploaded, UploadFailed>) -> UploadFailed {
@@ -322,16 +322,19 @@ fn failure(result: Result<Uploaded, UploadFailed>) -> UploadFailed {
 
 #[test]
 fn plan_lists_before_anything_when_the_replica_is_not_known() {
-    let tip = Some(txid(5));
-    assert_eq!(plan_upload(&UploadState::Unknown, tip), UploadPlan::List);
+    let position = Some(txid(5));
+    assert_eq!(
+        plan_upload(&UploadState::Unknown, position),
+        UploadPlan::List
+    );
     let after_error = UploadState::ListFirst {
         confirmed: Some(txid(2)),
     };
-    assert_eq!(plan_upload(&after_error, tip), UploadPlan::List);
+    assert_eq!(plan_upload(&after_error, position), UploadPlan::List);
 }
 
 #[test]
-fn plan_uploads_the_next_transaction_until_the_tip() {
+fn plan_uploads_the_next_transaction_until_the_position() {
     let at = |c| UploadState::At(c);
     assert_eq!(
         plan_upload(&at(None), Some(txid(3))),
@@ -790,14 +793,14 @@ fn failure_of_tick(
     state: UploadState,
     staging: &MemStore,
     remote: &MemStore,
-    tip: u64,
+    position: u64,
 ) -> UploadFailed {
     block_on(upload_tick(
         state,
         UploadConfig::default(),
         staging,
         remote,
-        Txid::new(tip),
+        Txid::new(position),
     ))
     .expect_err("the tick should fail")
 }
@@ -828,12 +831,12 @@ proptest! {
     ) {
         let (staging, remote) = (MemStore::new(), Probe::default());
         let mut state = UploadState::Unknown;
-        let (mut tip, mut staged) = (0_u64, 0_u64);
+        let (mut position, mut staged) = (0_u64, 0_u64);
         let mut confirmed_before = None;
         let spent = script.len();
         for (grow, hiccup) in script {
-            tip = tip.saturating_add(grow);
-            while staged < tip {
+            position = position.saturating_add(grow);
+            while staged < position {
                 staged = staged.saturating_add(1);
                 stage(&staging, staged);
             }
@@ -850,7 +853,7 @@ proptest! {
                 Hiccup::List => {}
             }
             let begins_before = remote.log().begins.len();
-            let result = next(state, &staging, &remote, tip);
+            let result = next(state, &staging, &remote, position);
             let after = match &result {
                 Ok(done) => done.state,
                 Err(failed) => failed.state,
@@ -859,9 +862,9 @@ proptest! {
             // Nothing is written while the replica is unknown.
             prop_assert!(!must_list || begun.is_empty());
             for at in &begun {
-                // Always the next transaction after what is confirmed, never above the tip.
+                // Always the next transaction after what is confirmed, never above the position.
                 prop_assert_eq!(Some(at.range().max()), state.confirmed().map_or(Some(Txid::MIN), Txid::next));
-                prop_assert!(at.range().max().get() <= tip);
+                prop_assert!(at.range().max().get() <= position);
             }
             // The position never decreases.
             prop_assert!(after.confirmed() >= confirmed_before);
@@ -876,15 +879,15 @@ proptest! {
         }
         // With the faults gone, everything staged arrives.
         remote.inner.inject_failure(StoreOp::Upload, transient());
-        drop(next(state, &staging, &remote, tip));
+        drop(next(state, &staging, &remote, position));
         // Faults still queued each cost one more step.
-        for _ in 0..tip.saturating_add(u64::try_from(spent).unwrap().saturating_mul(3)).saturating_add(4) {
-            match next(state, &staging, &remote, tip) {
+        for _ in 0..position.saturating_add(u64::try_from(spent).unwrap().saturating_mul(3)).saturating_add(4) {
+            match next(state, &staging, &remote, position) {
                 Ok(done) => state = done.state,
                 Err(failed) => state = failed.state,
             }
         }
-        prop_assert_eq!(u64::try_from(files(&remote.inner).len()).unwrap(), tip);
+        prop_assert_eq!(u64::try_from(files(&remote.inner).len()).unwrap(), position);
     }
 }
 

@@ -10,7 +10,7 @@
 # environment ones (the toolchain's own Go version, CGO for the mattn sqlite driver).
 #
 # Names: a tag or commit; `releases` is every tag v0.5.N with no pre-release suffix;
-# `main` is origin/main's tip, always rebuilt, named litestream-main (the checkout stays on
+# `main` is origin/main's newest staged file, always rebuilt, named litestream-main (the checkout stays on
 # the pin). Every name is tried; the exit status is 1 if any failed, with the last error line
 # of each failure printed as "<name>: FAILED <line>" (or "<name>: vfs FAILED <line>").
 set -eu

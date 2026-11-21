@@ -17,7 +17,7 @@
 //! file is confirmed) must decode and verify as LTX naming that key, else the
 //! replica is corrupt. The read-back runs at boot and after an ambiguous commit
 //! only, so steady state makes no list and no read call. A listing is also
-//! never trusted to move the position backwards or past the local tip: either
+//! never trusted to move the position backwards or past the local position: either
 //! is a persistent fault for the actor's configured response, not a guess.
 //!
 //! Each staged file is streamed through the LTX decoder while it is copied. The
@@ -33,7 +33,7 @@
 //! published). A failure of the commit itself gives [`UploadState::ListFirst`],
 //! except a checksum mismatch: the store may hold wrong bytes under the key, so
 //! the state stays, the key is deleted (best effort, so readers do not see the
-//! bad tip while the retry is pending) and the same key is written again.
+//! bad position while the retry is pending) and the same key is written again.
 //! Core runs no timer: the actor steps [`upload_next`] up to its per-tick limit.
 
 use std::num::NonZeroU32;
@@ -132,13 +132,15 @@ fn staged_key(txid: Txid) -> FileKey {
 
 /// The next step from a state, given the newest staged transaction. Pure.
 #[must_use]
-pub fn plan_upload(state: &UploadState, local_tip: Option<Txid>) -> UploadPlan {
+pub fn plan_upload(state: &UploadState, newest_staged: Option<Txid>) -> UploadPlan {
     match state {
         UploadState::Unknown | UploadState::ListFirst { .. } => UploadPlan::List,
         UploadState::At(confirmed) => {
             let next = confirmed.map_or(Some(Txid::MIN), Txid::next);
-            match (next, local_tip) {
-                (Some(next), Some(tip)) if next <= tip => UploadPlan::Upload(staged_key(next)),
+            match (next, newest_staged) {
+                (Some(next), Some(position)) if next <= position => {
+                    UploadPlan::Upload(staged_key(next))
+                }
                 _ => UploadPlan::Idle,
             }
         }
@@ -151,21 +153,21 @@ pub fn plan_upload(state: &UploadState, local_tip: Option<Txid>) -> UploadPlan {
 ///
 /// # Errors
 /// [`UploadFailed`] with the state to continue from and the fault. A listing
-/// that shows the replica ahead of `local_tip` or behind what was confirmed, a
+/// that shows the replica ahead of `newest_staged` or behind what was confirmed, a
 /// staged file that is missing or fails verification: persistent faults
 /// (another writer, a replica that went backwards) and `StagedLost`.
 pub async fn upload_next<L: ObjectStore, S: ObjectStore>(
     state: UploadState,
     staging: &L,
     remote: &S,
-    local_tip: Option<Txid>,
+    newest_staged: Option<Txid>,
 ) -> Result<Uploaded, UploadFailed> {
-    match plan_upload(&state, local_tip) {
+    match plan_upload(&state, newest_staged) {
         UploadPlan::Idle => Ok(Uploaded {
             state,
             did: Did::Nothing,
         }),
-        UploadPlan::List => list_step(state, staging, remote, local_tip).await,
+        UploadPlan::List => list_step(state, staging, remote, newest_staged).await,
         UploadPlan::Upload(key) => put_step(state, staging, remote, key).await,
     }
 }
@@ -188,14 +190,14 @@ async fn list_step<L: ObjectStore, S: ObjectStore>(
     state: UploadState,
     staging: &L,
     remote: &S,
-    local_tip: Option<Txid>,
+    newest_staged: Option<Txid>,
 ) -> Result<Uploaded, UploadFailed> {
     let inventory = Inventory::load(remote)
         .await
         .map_err(|err| fail(state, inventory_fault(&err)))?;
     let newest = inventory.newest();
     let confirmed = state.confirmed();
-    if newest > local_tip {
+    if newest > newest_staged {
         return Err(fail(state, Fault::RemoteAheadOfLocal));
     }
     if newest < confirmed {

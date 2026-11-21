@@ -80,11 +80,11 @@ Pasting any of these into its caller would take the caller over 70 lines. Length
 | `crates/sim/src/oracle.rs:227` `covers` | 62 | `check` | 43 | 105 |
 | `crates/sim/src/run.rs:286` `note_snapshots` | 45 | `step` | 60 | 105 |
 | `crates/core/src/recover.rs:394` `scan_pages` | 42 | `load` | 67 | 109 |
-| `crates/core/src/recover.rs:269` `tip_range` | 46 | `load` | 67 | 113 |
+| `crates/core/src/recover.rs:269` `newest_staged_file_range` | 46 | `load` | 67 | 113 |
 
 What they are:
 
-- **A long sequence cut at its steps.** `recover.rs` `load` (67 lines) calls `tip_range`,
+- **A long sequence cut at its steps.** `recover.rs` `load` (67 lines) calls `newest_staged_file_range`,
   `scan_pages`, `match_last_page`, `newest_level_zero` and `Range::agrees`; compat's `attempt`
   (64) calls `start`, `stop`, `tail`, `steps`, `save` and the snapshot waits; the simulator's
   `step` (60) and `apply` (45) dispatch to one function per operation. Each piece has its own name,

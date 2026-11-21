@@ -187,7 +187,7 @@ pub const fn snapshot_clears(cause: &SnapshotCause) -> bool {
         SnapshotCause::CheckpointBoundary | SnapshotCause::OperatorRequested => false,
         SnapshotCause::FirstSync
         | SnapshotCause::BehindRemote { .. }
-        | SnapshotCause::LocalTipUnreadable
+        | SnapshotCause::NewestStagedFileUnreadable
         | SnapshotCause::WalMissing
         | SnapshotCause::GenerationChanged
         | SnapshotCause::PrevFrameMismatch
@@ -197,7 +197,7 @@ pub const fn snapshot_clears(cause: &SnapshotCause) -> bool {
 }
 
 /// The table a boot that continues starts from: every page of every staged
-/// level-0 file, oldest first, then truncated to `commit`, the tip's size.
+/// level-0 file, oldest first, then truncated to `commit`, the newest staged file's size.
 ///
 /// # Errors
 /// The staging store's fault when a list or read fails.

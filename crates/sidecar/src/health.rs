@@ -192,7 +192,7 @@ pub const fn snapshot_name(cause: SnapshotCause) -> &'static str {
     match cause {
         SnapshotCause::FirstSync => "first_sync",
         SnapshotCause::BehindRemote { .. } => "behind_remote",
-        SnapshotCause::LocalTipUnreadable => "local_tip_unreadable",
+        SnapshotCause::NewestStagedFileUnreadable => "newest_staged_file_unreadable",
         SnapshotCause::WalMissing => "wal_missing",
         SnapshotCause::GenerationChanged => "generation_changed",
         SnapshotCause::PrevFrameMismatch => "prev_frame_mismatch",

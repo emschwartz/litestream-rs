@@ -113,7 +113,7 @@ fn only_the_checkpoint_boundary_and_an_operator_keep_the_table_at_a_snapshot() {
             },
             true,
         ),
-        (SnapshotCause::LocalTipUnreadable, true),
+        (SnapshotCause::NewestStagedFileUnreadable, true),
         (SnapshotCause::WalMissing, true),
         (SnapshotCause::GenerationChanged, true),
         (SnapshotCause::PrevFrameMismatch, true),

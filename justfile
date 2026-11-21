@@ -78,7 +78,7 @@ mutants crate *args:
     mkdir -p target/mutants
     cargo mutants -p lsr-{{crate}} --test-tool nextest --jobs 4 --copy-vcs true --output target/mutants {{args}}
 
-# A branch in its own worktree under the main checkout's .worktrees/, off main's tip.
+# A branch in its own worktree under the main checkout's .worktrees/, off main's newest staged file.
 spawn name:
     git -C "{{justfile_directory()}}" worktree add ".worktrees/{{name}}" -b "{{name}}" main
 
@@ -99,7 +99,7 @@ compat:
     cargo nextest run -p lsr-compat --run-ignored all --locked -E 'not test(=ledger::every_counterpart_exists)'
 
 # Build the named Go versions (tags, commits, `releases` for every v0.5.N tag, `main` for
-# upstream's tip) and run the live tests over exactly those: just compat-live v0.5.3 main.
+# upstream's newest staged file) and run the live tests over exactly those: just compat-live v0.5.3 main.
 # A live test is one in a `mod live` (lsr_compat::LIVE_MODULE); asking for the builds from
 # anywhere else fails the test, so one moved out of the filter cannot drop out unnoticed.
 compat-live +names:

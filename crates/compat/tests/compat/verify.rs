@@ -72,7 +72,7 @@ fn assert_latest(fixture: &std::path::Path, manifest: &Manifest, report: &Report
             assert!(
                 matches!(
                     unrestorable(report).as_slice(),
-                    [Finding::Gap { have_through: through, next_starts: starts, at_tip: true, .. }]
+                    [Finding::Gap { have_through: through, next_starts: starts, at_newest: true, .. }]
                         if (through.get(), starts.get()) == (*have_through, *next_starts)
                 ),
                 "{}: {:?}",

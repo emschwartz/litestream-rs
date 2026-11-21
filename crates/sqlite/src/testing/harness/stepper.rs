@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    CheckpointMode, CheckpointOutcome, FileInfo, MemStore, PageTable, Position, Probes, ReachedEnd,
-    Step, StepEnd, SyncConfig, Synced, SyncedThrough, Tip, Verdict, WalView, checkpoint,
-    recover_traced, sync_step,
+    CheckpointMode, CheckpointOutcome, FileInfo, MemStore, PageTable, Position, PositionSource,
+    Probes, ReachedEnd, Step, StepEnd, SyncConfig, Synced, SyncedThrough, Verdict, WalView,
+    checkpoint, recover_traced, sync_step,
 };
 use lsr_ltx::{Timestamp, Txid};
 use lsr_wal::{Salts, WalReader};
@@ -232,7 +232,7 @@ impl<B: Backend> Stepper<B> {
         let probes = Probes::read_against(&mut wal, position, &committed)
             .map_err(|err| RigError::Store(format!("{err:?}")))?;
         Ok(recover_traced(
-            Some(Tip::Running(position, probes)),
+            Some(PositionSource::Running(position, probes)),
             &view,
             None,
         ))

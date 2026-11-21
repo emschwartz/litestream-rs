@@ -34,7 +34,7 @@
 //!
 //! What a second Go process on the same meta directory or bucket prefix does is not refused
 //! at start (Go leaves no reliable local sign, and `start` makes no store call); it is caught
-//! when the replica shows files above the local tip, which stops the replicator by default
+//! when the replica shows files above the local newest staged file, which stops the replicator by default
 //! (`Responses::GO_LIKE`, `other_writer: Stop`).
 
 #![forbid(unsafe_code)]

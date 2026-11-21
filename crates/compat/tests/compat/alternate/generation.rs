@@ -1,16 +1,16 @@
 //! Which WAL generation the newest staged file and the WAL itself are in, read from files with
 //! no process running, and what that says a boot must do.
 //!
-//! A boot continues from the newest staged level-0 file (the tip). When the tip was made in
+//! A boot continues from the newest staged level-0 file (the newest staged file). When the newest staged file was made in
 //! the WAL generation the WAL file still holds (same salts, file long enough), both engines
 //! must continue it: no snapshot. When the previous process checkpointed and restarted or
 //! truncated the WAL and died before it staged anything in the new generation, nothing at boot
-//! can prove that every frame between the tip and the restart reached a file, so both engines'
+//! can prove that every frame between the newest staged file and the restart reached a file, so both engines'
 //! rules take a snapshot:
-//! - Rust, `crates/core/src/recover.rs`: rule 6, salts changed, with a tip read at boot (no
+//! - Rust, `crates/core/src/recover.rs`: rule 6, salts changed, with a newest staged file read at boot (no
 //!   read-transaction pin to prove the restart) is `GenerationChanged`; rule 4, no WAL header
 //!   at all (a TRUNCATE left the file empty), is `WalMissing`.
-//! - Go, `verifyWithExecutor` (`db.go:1782-1925`): a WAL shorter than the tip's end is "wal
+//! - Go, `verifyWithExecutor` (`db.go:1782-1925`): a WAL shorter than the newest staged file's end is "wal
 //!   truncated by another process" (the in-memory `syncedToWALEnd` that excuses it is gone
 //!   after a restart); otherwise salts that changed are "wal header salt reset, snapshotting",
 //!   "last page does not exist in last ltx file, wal overwritten by another process", or "full
@@ -59,7 +59,7 @@ fn newest_in(dir: &Path) -> Option<(Txid, Header)> {
 }
 
 /// The WAL range of the newest level-0 file staged or uploaded.
-pub fn tip_origin(fixture: &AppFixture) -> Option<(Txid, Option<WalOrigin>)> {
+pub fn newest_staged_origin(fixture: &AppFixture) -> Option<(Txid, Option<WalOrigin>)> {
     let staged = newest_in(&fixture.meta);
     let uploaded = newest_in(&fixture.replica);
     let newest = match (staged, uploaded) {
@@ -74,11 +74,11 @@ pub fn tip_origin(fixture: &AppFixture) -> Option<(Txid, Option<WalOrigin>)> {
 pub enum Expect {
     /// Nothing staged yet: the first sync is a snapshot.
     First,
-    /// The tip is in the WAL's generation: continue, no snapshot.
+    /// The newest staged file is in the WAL's generation: continue, no snapshot.
     Continue,
-    /// The WAL restarted (salts changed) after the tip.
+    /// The WAL restarted (salts changed) after the newest staged file.
     Restarted,
-    /// The WAL is shorter than the tip's end, or holds no header (a TRUNCATE).
+    /// The WAL is shorter than the newest staged file's end, or holds no header (a TRUNCATE).
     Truncated,
 }
 
@@ -119,12 +119,13 @@ impl Expect {
     }
 }
 
-/// What the next boot must do, from the tip and the WAL as they are now.
+/// What the next boot must do, from the newest staged file and the WAL as they are now.
 pub fn expect(fixture: &AppFixture) -> Expect {
-    let Some((txid, origin)) = tip_origin(fixture) else {
+    let Some((txid, origin)) = newest_staged_origin(fixture) else {
         return Expect::First;
     };
-    let origin = origin.unwrap_or_else(|| panic!("the tip {txid} names no WAL range"));
+    let origin =
+        origin.unwrap_or_else(|| panic!("the newest staged file {txid} names no WAL range"));
     let Some(salts) = wal_salts(fixture) else {
         return Expect::Truncated;
     };

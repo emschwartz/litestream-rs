@@ -69,13 +69,13 @@ fn position(wal: &FakeWal, id: u64, continuity: Continuity) -> Position {
     )
 }
 
-fn boot(wal: &FakeWal, id: u64) -> TipView {
+fn boot(wal: &FakeWal, id: u64) -> NewestStagedFile {
     let bytes = wal.file_bytes();
     let (cursor, frame, size) = end_of(bytes.clone()).unwrap();
     let head = *reader(bytes).header();
     let end = cursor.next().get();
     let salts = head.salts();
-    TipView::Readable {
+    NewestStagedFile::Readable {
         txid: txid(id),
         origin: WalOrigin::new(32, end.saturating_sub(32), salts.salt1, salts.salt2).unwrap(),
         commit: nz(size),
@@ -120,7 +120,7 @@ pub(super) fn fresh() -> FakeWal {
 
 fn run_running(wal: &FakeWal, pos: &Position, remote: Option<u64>) -> Verdict {
     recover_traced(
-        Some(Tip::Running(pos, probes(wal, pos))),
+        Some(PositionSource::Running(pos, probes(wal, pos))),
         &view(wal),
         remote.map(txid),
     )
@@ -128,7 +128,7 @@ fn run_running(wal: &FakeWal, pos: &Position, remote: Option<u64>) -> Verdict {
 
 // Rule 1.
 #[test]
-fn rule_1_no_tip_is_a_first_sync() {
+fn rule_1_no_newest_staged_file_is_a_first_sync() {
     let wal = fresh();
     assert_eq!(
         recover(None, &view(&wal), None),
@@ -137,7 +137,7 @@ fn rule_1_no_tip_is_a_first_sync() {
 }
 
 #[test]
-fn rule_1_no_tip_follows_the_remote() {
+fn rule_1_no_newest_staged_file_follows_the_remote() {
     let wal = fresh();
     assert_eq!(
         recover(None, &view(&wal), Some(txid(4))),
@@ -149,19 +149,27 @@ fn rule_1_no_tip_follows_the_remote() {
 #[test]
 fn rule_2_boot_behind_the_remote_snapshots_after_it() {
     let wal = fresh();
-    let tip = boot(&wal, 2);
+    let newest_staged = boot(&wal, 2);
     assert_eq!(
-        recover(Some(Tip::Boot(&tip)), &view(&wal), Some(txid(5))),
+        recover(
+            Some(PositionSource::Boot(&newest_staged)),
+            &view(&wal),
+            Some(txid(5))
+        ),
         snapshot(Some(5), SnapshotCause::BehindRemote { local: txid(2) })
     );
 }
 
 #[test]
-fn rule_2_a_remote_below_the_tip_is_pending_uploads() {
+fn rule_2_a_remote_below_the_newest_staged_file_is_pending_uploads() {
     let wal = fresh();
-    let tip = boot(&wal, 5);
+    let newest_staged = boot(&wal, 5);
     assert!(matches!(
-        recover(Some(Tip::Boot(&tip)), &view(&wal), Some(txid(3))),
+        recover(
+            Some(PositionSource::Boot(&newest_staged)),
+            &view(&wal),
+            Some(txid(3))
+        ),
         Recovered::Continue(_)
     ));
 }
@@ -178,16 +186,25 @@ fn rule_2_running_behind_the_remote_halts() {
 
 // Rule 3.
 #[test]
-fn rule_3_an_unreadable_tip_snapshots_after_the_newer_of_tip_and_remote() {
+fn rule_3_an_unreadable_newest_staged_file_snapshots_after_the_newer_of_newest_staged_file_and_remote()
+ {
     let wal = fresh();
-    let tip = TipView::Unreadable { txid: txid(4) };
+    let newest_staged = NewestStagedFile::Unreadable { txid: txid(4) };
     assert_eq!(
-        recover(Some(Tip::Boot(&tip)), &view(&wal), Some(txid(2))),
-        snapshot(Some(4), SnapshotCause::LocalTipUnreadable)
+        recover(
+            Some(PositionSource::Boot(&newest_staged)),
+            &view(&wal),
+            Some(txid(2))
+        ),
+        snapshot(Some(4), SnapshotCause::NewestStagedFileUnreadable)
     );
     assert_eq!(
-        recover(Some(Tip::Boot(&tip)), &view(&wal), None),
-        snapshot(Some(4), SnapshotCause::LocalTipUnreadable)
+        recover(
+            Some(PositionSource::Boot(&newest_staged)),
+            &view(&wal),
+            None
+        ),
+        snapshot(Some(4), SnapshotCause::NewestStagedFileUnreadable)
     );
 }
 
@@ -200,12 +217,16 @@ fn rule_4_no_wal_file_is_wal_missing() {
     gone.header = None;
     gone.len = None;
     assert_eq!(
-        recover(Some(Tip::Running(&pos, probes(&wal, &pos))), &gone, None),
+        recover(
+            Some(PositionSource::Running(&pos, probes(&wal, &pos))),
+            &gone,
+            None
+        ),
         snapshot(Some(2), SnapshotCause::WalMissing)
     );
-    let tip = boot(&wal, 2);
+    let newest_staged = boot(&wal, 2);
     assert_eq!(
-        recover(Some(Tip::Boot(&tip)), &gone, None),
+        recover(Some(PositionSource::Boot(&newest_staged)), &gone, None),
         snapshot(Some(2), SnapshotCause::WalMissing)
     );
 }
@@ -213,11 +234,15 @@ fn rule_4_no_wal_file_is_wal_missing() {
 #[test]
 fn rule_4_a_torn_header_is_wal_missing() {
     let wal = fresh();
-    let tip = boot(&wal, 2);
+    let newest_staged = boot(&wal, 2);
     wal.corrupt_byte(9);
     assert_eq!(view(&wal).header, None);
     assert_eq!(
-        recover(Some(Tip::Boot(&tip)), &view(&wal), None),
+        recover(
+            Some(PositionSource::Boot(&newest_staged)),
+            &view(&wal),
+            None
+        ),
         snapshot(Some(2), SnapshotCause::WalMissing)
     );
 }
@@ -230,7 +255,7 @@ fn rule_5_a_new_page_size_halts() {
     let other = FakeWal::new(PageSize::new(1024).unwrap(), salts(10));
     assert_eq!(
         recover(
-            Some(Tip::Running(&pos, probes(&wal, &pos))),
+            Some(PositionSource::Running(&pos, probes(&wal, &pos))),
             &view(&other),
             None
         ),
@@ -339,11 +364,15 @@ fn a_restart_that_has_grown_past_the_old_end_is_followed() {
 #[test]
 fn go_parity_an_unknown_salt_snapshots() {
     let wal = fresh();
-    let tip = boot(&wal, 2);
+    let newest_staged = boot(&wal, 2);
     let other = FakeWal::new(PS, salts(99));
     commit(&other, &[1], 1);
     assert_eq!(
-        recover(Some(Tip::Boot(&tip)), &view(&other), None),
+        recover(
+            Some(PositionSource::Boot(&newest_staged)),
+            &view(&other),
+            None
+        ),
         snapshot(Some(2), SnapshotCause::GenerationChanged)
     );
 }
@@ -351,23 +380,31 @@ fn go_parity_an_unknown_salt_snapshots() {
 #[test]
 fn go_parity_a_salt_reset_at_boot_snapshots() {
     let wal = fresh();
-    let tip = boot(&wal, 2);
+    let newest_staged = boot(&wal, 2);
     restarted(&wal);
     assert_eq!(
-        recover(Some(Tip::Boot(&tip)), &view(&wal), None),
+        recover(
+            Some(PositionSource::Boot(&newest_staged)),
+            &view(&wal),
+            None
+        ),
         snapshot(Some(2), SnapshotCause::GenerationChanged)
     );
 }
 
-// Rule 7: a committed end before the tip's end is a rewind.
+// Rule 7: a committed end before the newest staged file's end is a rewind.
 #[test]
-fn a_committed_end_before_the_tip_is_a_rewind() {
+fn a_committed_end_before_the_newest_staged_file_is_a_rewind() {
     let wal = fresh();
     let pos = position(&wal, 2, Continuity::Unpinned);
     let mut seen = view(&wal);
     let end = lsr_wal::CommittedEnd::new(1, wal.salts(), PS);
     seen.committed = CommittedRead::new(end, 0, wal.epoch());
-    let verdict = recover_traced(Some(Tip::Running(&pos, probes(&wal, &pos))), &seen, None);
+    let verdict = recover_traced(
+        Some(PositionSource::Running(&pos, probes(&wal, &pos))),
+        &seen,
+        None,
+    );
     let synced = pos.synced().offset();
     let committed = end.offset();
     assert_eq!(
@@ -383,10 +420,14 @@ fn a_committed_end_before_the_tip_is_a_rewind() {
 #[test]
 fn go_parity_a_wal_truncated_after_synced_to_end_is_now_a_snapshot() {
     let wal = fresh();
-    let tip = boot(&wal, 2);
+    let newest_staged = boot(&wal, 2);
     let bytes = wal.file_bytes();
     wal.truncate_file(bytes.len() - 100);
-    let verdict = recover_traced(Some(Tip::Boot(&tip)), &view(&wal), None);
+    let verdict = recover_traced(
+        Some(PositionSource::Boot(&newest_staged)),
+        &view(&wal),
+        None,
+    );
     assert!(matches!(
         verdict.recovered,
         Recovered::Snapshot {
@@ -451,9 +492,9 @@ fn rule_9_a_last_page_that_differs_snapshots() {
 }
 
 #[test]
-fn rule_9_at_boot_a_mismatch_or_a_page_the_tip_lacks_snapshots() {
+fn rule_9_at_boot_a_mismatch_or_a_page_the_newest_staged_file_lacks_snapshots() {
     let wal = fresh();
-    let TipView::Readable {
+    let NewestStagedFile::Readable {
         txid,
         origin,
         commit,
@@ -464,8 +505,11 @@ fn rule_9_at_boot_a_mismatch_or_a_page_the_tip_lacks_snapshots() {
     else {
         panic!("readable");
     };
-    for last_page in [LastPageCheck::Mismatch, LastPageCheck::NotInTip] {
-        let tip = TipView::Readable {
+    for last_page in [
+        LastPageCheck::Mismatch,
+        LastPageCheck::NotInNewestStagedFile,
+    ] {
+        let newest_staged = NewestStagedFile::Readable {
             txid,
             origin,
             commit,
@@ -474,19 +518,23 @@ fn rule_9_at_boot_a_mismatch_or_a_page_the_tip_lacks_snapshots() {
             last_page,
         };
         assert_eq!(
-            recover(Some(Tip::Boot(&tip)), &view(&wal), None),
+            recover(
+                Some(PositionSource::Boot(&newest_staged)),
+                &view(&wal),
+                None
+            ),
             snapshot(Some(2), SnapshotCause::LastPageMismatch)
         );
     }
 }
 
-/// With the tip's end at the WAL's start there is no frame before it, so the
-/// miss a boot read reports names nothing rules 7 and 8 could judge: a boot tip
+/// With the newest staged file's end at the WAL's start there is no frame before it, so the
+/// miss a boot read reports names nothing rules 7 and 8 could judge: a boot newest staged file
 /// that did not match is rule 9 whatever the miss.
 #[test]
-fn rule_9_at_boot_a_tip_ending_at_the_wal_start_has_no_frame_to_miss() {
+fn rule_9_at_boot_a_newest_staged_file_ending_at_the_wal_start_has_no_frame_to_miss() {
     let wal = fresh();
-    let TipView::Readable {
+    let NewestStagedFile::Readable {
         txid,
         origin,
         commit,
@@ -500,7 +548,7 @@ fn rule_9_at_boot_a_tip_ending_at_the_wal_start_has_no_frame_to_miss() {
     let (salt1, salt2) = origin.salts();
     let origin = WalOrigin::new(32, 0, salt1, salt2).unwrap();
     for miss in [Miss::Truncated, Miss::NotACommit, Miss::Moved] {
-        let tip = TipView::Readable {
+        let newest_staged = NewestStagedFile::Readable {
             txid,
             origin,
             commit,
@@ -509,7 +557,11 @@ fn rule_9_at_boot_a_tip_ending_at_the_wal_start_has_no_frame_to_miss() {
             last_page: LastPageCheck::NoFrame(miss),
         };
         assert_eq!(
-            recover(Some(Tip::Boot(&tip)), &view(&wal), None),
+            recover(
+                Some(PositionSource::Boot(&newest_staged)),
+                &view(&wal),
+                None
+            ),
             snapshot(Some(2), SnapshotCause::LastPageMismatch),
             "{miss:?}"
         );
@@ -531,7 +583,7 @@ fn under_reset(wal: &FakeWal, pos: &Position) -> Verdict {
     let seen = reset_view(wal);
     let index = seen.committed.unwrap();
     let probes = Probes::read_against(&mut reader(wal.file_bytes()), pos, &index).unwrap();
-    recover_traced(Some(Tip::Running(pos, probes)), &seen, None)
+    recover_traced(Some(PositionSource::Running(pos, probes)), &seen, None)
 }
 
 #[test]
@@ -597,8 +649,12 @@ fn rule_10_a_running_position_continues_as_it_is() {
 #[test]
 fn a_boot_continue_at_the_committed_end_is_pinned() {
     let wal = fresh();
-    let tip = boot(&wal, 2);
-    let Recovered::Continue(next) = recover(Some(Tip::Boot(&tip)), &view(&wal), None) else {
+    let newest_staged = boot(&wal, 2);
+    let Recovered::Continue(next) = recover(
+        Some(PositionSource::Boot(&newest_staged)),
+        &view(&wal),
+        None,
+    ) else {
         panic!("continue");
     };
     assert_eq!(next.continuity(), Continuity::Pinned(wal.epoch()));
@@ -608,9 +664,13 @@ fn a_boot_continue_at_the_committed_end_is_pinned() {
 #[test]
 fn a_boot_continue_below_the_committed_end_is_unpinned() {
     let wal = fresh();
-    let tip = boot(&wal, 2);
+    let newest_staged = boot(&wal, 2);
     commit(&wal, &[3], 3);
-    let Recovered::Continue(next) = recover(Some(Tip::Boot(&tip)), &view(&wal), None) else {
+    let Recovered::Continue(next) = recover(
+        Some(PositionSource::Boot(&newest_staged)),
+        &view(&wal),
+        None,
+    ) else {
         panic!("continue");
     };
     assert_eq!(next.continuity(), Continuity::Unpinned);
@@ -645,7 +705,7 @@ fn go_parity_an_end_at_offset_32_continues() {
     let head = *reader(bytes.clone()).header();
     let cursor = reader(bytes).cursor_at_start();
     let last = LastPage::new(pg(1), lsr_ltx::PageChecksum::of(pg(1), &[0; 512]));
-    let tip = TipView::Readable {
+    let newest_staged = NewestStagedFile::Readable {
         txid: txid(3),
         origin: WalOrigin::new(32, 0, head.salts().salt1, head.salts().salt2).unwrap(),
         commit: nz(1),
@@ -656,7 +716,11 @@ fn go_parity_an_end_at_offset_32_continues() {
             cursor,
         },
     };
-    let Recovered::Continue(next) = recover(Some(Tip::Boot(&tip)), &view(&wal), None) else {
+    let Recovered::Continue(next) = recover(
+        Some(PositionSource::Boot(&newest_staged)),
+        &view(&wal),
+        None,
+    ) else {
         panic!("continue");
     };
     assert_eq!(next.cursor().next().get(), 32);
@@ -691,7 +755,7 @@ fn go_parity_an_end_one_frame_past_32_is_checked_not_skipped() {
 }
 
 // The loader.
-pub(super) fn encode_tip(
+pub(super) fn encode_newest_staged(
     wal: &FakeWal,
     id: u64,
     page_bytes: &[(u32, u8)],
@@ -726,16 +790,19 @@ pub(super) async fn put(store: &crate::MemStore, id: u64, bytes: &[u8]) {
 fn the_loader_reads_the_newest_file_and_matches_the_last_page() {
     let wal = fresh();
     let store = crate::MemStore::new();
-    let good = encode_tip(&wal, 2, &[(1, 1), (2, 2), (3, 3)], 3);
+    let good = encode_newest_staged(&wal, 2, &[(1, 1), (2, 2), (3, 3)], 3);
     crate::conformance::block_on(async {
         put(&store, 1, &good).await;
         put(&store, 2, &good).await;
         let mut r = reader(wal.file_bytes());
-        let tip = TipView::load(&store, Some(&mut r)).await.unwrap().unwrap();
-        assert_eq!(tip.txid(), txid(2));
+        let newest_staged = NewestStagedFile::load(&store, Some(&mut r))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(newest_staged.txid(), txid(2));
         assert!(matches!(
-            tip,
-            TipView::Readable {
+            newest_staged,
+            NewestStagedFile::Readable {
                 last_page: LastPageCheck::Match { .. },
                 ..
             }
@@ -744,29 +811,36 @@ fn the_loader_reads_the_newest_file_and_matches_the_last_page() {
 }
 
 #[test]
-fn the_loader_calls_a_page_with_other_bytes_a_mismatch_and_a_missing_one_not_in_tip() {
+fn the_loader_calls_a_page_with_other_bytes_a_mismatch_and_a_missing_one_not_in_newest_staged_file()
+{
     let wal = fresh();
     let store = crate::MemStore::new();
-    let other = encode_tip(&wal, 1, &[(1, 1), (2, 2), (3, 9)], 3);
-    let lacking = encode_tip(&wal, 2, &[(1, 1), (2, 2)], 3);
+    let other = encode_newest_staged(&wal, 1, &[(1, 1), (2, 2), (3, 9)], 3);
+    let lacking = encode_newest_staged(&wal, 2, &[(1, 1), (2, 2)], 3);
     crate::conformance::block_on(async {
         put(&store, 1, &other).await;
         let mut r = reader(wal.file_bytes());
-        let tip = TipView::load(&store, Some(&mut r)).await.unwrap().unwrap();
+        let newest_staged = NewestStagedFile::load(&store, Some(&mut r))
+            .await
+            .unwrap()
+            .unwrap();
         assert!(matches!(
-            tip,
-            TipView::Readable {
+            newest_staged,
+            NewestStagedFile::Readable {
                 last_page: LastPageCheck::Mismatch,
                 ..
             }
         ));
         put(&store, 2, &lacking).await;
         let mut r = reader(wal.file_bytes());
-        let tip = TipView::load(&store, Some(&mut r)).await.unwrap().unwrap();
+        let newest_staged = NewestStagedFile::load(&store, Some(&mut r))
+            .await
+            .unwrap()
+            .unwrap();
         assert!(matches!(
-            tip,
-            TipView::Readable {
-                last_page: LastPageCheck::NotInTip,
+            newest_staged,
+            NewestStagedFile::Readable {
+                last_page: LastPageCheck::NotInNewestStagedFile,
                 ..
             }
         ));
@@ -779,12 +853,15 @@ fn the_loader_calls_garbage_unreadable_and_an_empty_directory_none() {
     let store = crate::MemStore::new();
     crate::conformance::block_on(async {
         let mut r = reader(wal.file_bytes());
-        assert_eq!(TipView::load(&store, Some(&mut r)).await.unwrap(), None);
+        assert_eq!(
+            NewestStagedFile::load(&store, Some(&mut r)).await.unwrap(),
+            None
+        );
         put(&store, 3, b"not an ltx file").await;
         let mut r = reader(wal.file_bytes());
         assert_eq!(
-            TipView::load(&store, Some(&mut r)).await.unwrap(),
-            Some(TipView::Unreadable { txid: txid(3) })
+            NewestStagedFile::load(&store, Some(&mut r)).await.unwrap(),
+            Some(NewestStagedFile::Unreadable { txid: txid(3) })
         );
     });
 }
@@ -826,20 +903,20 @@ fn apply(wal: &FakeWal, op: &Op) {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum TipKind {
+enum NewestStagedFileKind {
     Boot,
     BootUnreadable,
     BootMismatch,
-    BootNotInTip,
+    BootNotInNewestStagedFile,
     Pinned,
     Unpinned,
-    NoTip,
+    NoNewestStagedFile,
 }
 
 #[derive(Debug)]
 struct Triple {
     before: Vec<Op>,
-    kind: TipKind,
+    kind: NewestStagedFileKind,
     after: Vec<Op>,
     remote: Option<i8>,
     other_page_size: bool,
@@ -849,13 +926,13 @@ fn triple() -> impl Strategy<Value = Triple> {
     (
         prop::collection::vec(op(), 1..4),
         prop_oneof![
-            Just(TipKind::Boot),
-            Just(TipKind::BootUnreadable),
-            Just(TipKind::BootMismatch),
-            Just(TipKind::BootNotInTip),
-            Just(TipKind::Pinned),
-            Just(TipKind::Unpinned),
-            Just(TipKind::NoTip),
+            Just(NewestStagedFileKind::Boot),
+            Just(NewestStagedFileKind::BootUnreadable),
+            Just(NewestStagedFileKind::BootMismatch),
+            Just(NewestStagedFileKind::BootNotInNewestStagedFile),
+            Just(NewestStagedFileKind::Pinned),
+            Just(NewestStagedFileKind::Unpinned),
+            Just(NewestStagedFileKind::NoNewestStagedFile),
         ],
         prop::collection::vec(op(), 0..3),
         prop::option::of(-2_i8..3),
@@ -881,7 +958,7 @@ fn shape(recovered: &Recovered) -> String {
             SnapshotCause::BehindRemote { .. } => "BehindRemote".into(),
             SnapshotCause::LocalRewound { .. } => "LocalRewound".into(),
             SnapshotCause::FirstSync
-            | SnapshotCause::LocalTipUnreadable
+            | SnapshotCause::NewestStagedFileUnreadable
             | SnapshotCause::WalMissing
             | SnapshotCause::GenerationChanged
             | SnapshotCause::PrevFrameMismatch
@@ -896,30 +973,30 @@ fn other_size() -> PageSize {
     PageSize::new(1024).unwrap()
 }
 
-/// The tip a restarted process would load for `pos`, as `kind` says it reads.
-fn boot_view(kind: TipKind, pos: &Position) -> TipView {
+/// The newest staged file a restarted process would load for `pos`, as `kind` says it reads.
+fn boot_view(kind: NewestStagedFileKind, pos: &Position) -> NewestStagedFile {
     let head = salts(10);
     let end = pos.cursor().next().get();
     let last_page = match kind {
-        TipKind::BootMismatch => LastPageCheck::Mismatch,
-        TipKind::BootNotInTip => LastPageCheck::NotInTip,
-        TipKind::Boot
-        | TipKind::BootUnreadable
-        | TipKind::Pinned
-        | TipKind::Unpinned
-        | TipKind::NoTip => LastPageCheck::Match {
+        NewestStagedFileKind::BootMismatch => LastPageCheck::Mismatch,
+        NewestStagedFileKind::BootNotInNewestStagedFile => LastPageCheck::NotInNewestStagedFile,
+        NewestStagedFileKind::Boot
+        | NewestStagedFileKind::BootUnreadable
+        | NewestStagedFileKind::Pinned
+        | NewestStagedFileKind::Unpinned
+        | NewestStagedFileKind::NoNewestStagedFile => LastPageCheck::Match {
             last_page: pos.last_page(),
             cursor: pos.cursor(),
         },
     };
     match kind {
-        TipKind::BootUnreadable => TipView::Unreadable { txid: pos.txid() },
-        TipKind::Boot
-        | TipKind::BootMismatch
-        | TipKind::BootNotInTip
-        | TipKind::Pinned
-        | TipKind::Unpinned
-        | TipKind::NoTip => TipView::Readable {
+        NewestStagedFileKind::BootUnreadable => NewestStagedFile::Unreadable { txid: pos.txid() },
+        NewestStagedFileKind::Boot
+        | NewestStagedFileKind::BootMismatch
+        | NewestStagedFileKind::BootNotInNewestStagedFile
+        | NewestStagedFileKind::Pinned
+        | NewestStagedFileKind::Unpinned
+        | NewestStagedFileKind::NoNewestStagedFile => NewestStagedFile::Readable {
             txid: pos.txid(),
             origin: WalOrigin::new(32, end.saturating_sub(32), head.salt1, head.salt2).unwrap(),
             commit: pos.commit(),
@@ -941,13 +1018,13 @@ fn evaluate(triple: &Triple) -> Option<Recovered> {
     let epoch = wal.epoch();
     let held_pos = held.map(|(cursor, frame, size)| {
         let continuity = match triple.kind {
-            TipKind::Pinned => Continuity::Pinned(epoch),
-            TipKind::Boot
-            | TipKind::BootUnreadable
-            | TipKind::BootMismatch
-            | TipKind::BootNotInTip
-            | TipKind::Unpinned
-            | TipKind::NoTip => Continuity::Unpinned,
+            NewestStagedFileKind::Pinned => Continuity::Pinned(epoch),
+            NewestStagedFileKind::Boot
+            | NewestStagedFileKind::BootUnreadable
+            | NewestStagedFileKind::BootMismatch
+            | NewestStagedFileKind::BootNotInNewestStagedFile
+            | NewestStagedFileKind::Unpinned
+            | NewestStagedFileKind::NoNewestStagedFile => Continuity::Unpinned,
         };
         Position::new(
             txid(id),
@@ -969,19 +1046,19 @@ fn evaluate(triple: &Triple) -> Option<Recovered> {
         .remote
         .and_then(|d| u64::try_from(i64::from(d).saturating_add(5)).ok())
         .and_then(Txid::new);
-    let tip_view = held_pos.as_ref().map(|pos| boot_view(triple.kind, pos));
-    let tip = match (triple.kind, held_pos.as_ref(), tip_view.as_ref()) {
-        (TipKind::NoTip, ..) | (_, None, _) => None,
-        (TipKind::Pinned | TipKind::Unpinned, Some(pos), _) => {
+    let newest_staged = held_pos.as_ref().map(|pos| boot_view(triple.kind, pos));
+    let source = match (triple.kind, held_pos.as_ref(), newest_staged.as_ref()) {
+        (NewestStagedFileKind::NoNewestStagedFile, ..) | (_, None, _) => None,
+        (NewestStagedFileKind::Pinned | NewestStagedFileKind::Unpinned, Some(pos), _) => {
             let probes = WalReader::open(Cursor::new(wal.file_bytes()))
                 .ok()
                 .and_then(|mut r| Probes::read(&mut r, pos).ok())?;
-            Some(Tip::Running(pos, probes))
+            Some(PositionSource::Running(pos, probes))
         }
-        (_, Some(_), Some(view)) => Some(Tip::Boot(view)),
+        (_, Some(_), Some(view)) => Some(PositionSource::Boot(view)),
         (_, Some(_), None) => None,
     };
-    Some(recover(tip, &seen, remote))
+    Some(recover(source, &seen, remote))
 }
 
 #[test]
@@ -1008,7 +1085,7 @@ fn generated_triples_cover_every_outcome_recover_can_produce() {
         "WalRestarted",
         "FirstSync",
         "BehindRemote",
-        "LocalTipUnreadable",
+        "NewestStagedFileUnreadable",
         "WalMissing",
         "Halt(PageSizeChanged)",
         "GenerationChanged",
@@ -1097,28 +1174,31 @@ fn rule_6_a_restart_with_an_unrelated_checkpoint_seq_is_still_one_restart() {
         stale_next: false,
     };
     assert!(matches!(
-        recover(Some(Tip::Running(&pos, probes)), &view, None),
+        recover(Some(PositionSource::Running(&pos, probes)), &view, None),
         Recovered::WalRestarted(_)
     ));
 }
 
-// Boot compares the whole tip with the WAL range it covers, not only its last page.
-/// Loads the tip staged from `staged` (pages `tip_pages`, database size `commit_size`)
+// Boot compares the whole newest staged file with the WAL range it covers, not only its last page.
+/// Loads the newest staged file staged from `staged` (pages `newest_staged_file_pages`, database size `commit_size`)
 /// against the WAL as it is now.
 fn load_against(
     staged: &FakeWal,
     now: &FakeWal,
-    tip_pages: &[(u32, u8)],
+    newest_staged_file_pages: &[(u32, u8)],
     commit_size: u32,
 ) -> Recovered {
     let store = crate::MemStore::new();
-    let bytes = encode_tip(staged, 2, tip_pages, commit_size);
-    let tip = crate::conformance::block_on(async {
+    let bytes = encode_newest_staged(staged, 2, newest_staged_file_pages, commit_size);
+    let newest_staged = crate::conformance::block_on(async {
         put(&store, 2, &bytes).await;
         let mut r = reader(now.file_bytes());
-        TipView::load(&store, Some(&mut r)).await.unwrap().unwrap()
+        NewestStagedFile::load(&store, Some(&mut r))
+            .await
+            .unwrap()
+            .unwrap()
     });
-    recover(Some(Tip::Boot(&tip)), &view(now), None)
+    recover(Some(PositionSource::Boot(&newest_staged)), &view(now), None)
 }
 
 /// A WAL whose second transaction was dropped by power loss and regrown with the
@@ -1162,14 +1242,14 @@ fn a_range_regrown_with_another_commit_size_is_a_rewind() {
 }
 
 #[test]
-fn a_tip_lacking_a_page_the_range_holds_is_a_rewind() {
+fn a_newest_staged_file_lacking_a_page_the_range_holds_is_a_rewind() {
     let wal = fresh();
     let recovered = load_against(&wal, &wal, &[(2, 2), (3, 3)], 3);
     assert!(is_rewound(recovered), "{recovered:?}");
 }
 
 #[test]
-fn a_tip_with_a_page_from_the_database_file_still_continues() {
+fn a_newest_staged_file_with_a_page_from_the_database_file_still_continues() {
     // The grown-pages or snapshot step supplies page 1 from the database file.
     let wal = FakeWal::new(PS, salts(10));
     commit(&wal, &[2, 3], 3);
@@ -1202,11 +1282,14 @@ fn load_over_bytes(
     committed: Option<CommittedRead>,
 ) -> Recovered {
     let store = crate::MemStore::new();
-    let tip_bytes = encode_tip(staged, 2, &[(1, 1), (2, 2), (3, 3)], 3);
-    let tip = crate::conformance::block_on(async {
-        put(&store, 2, &tip_bytes).await;
+    let newest_staged_file_bytes = encode_newest_staged(staged, 2, &[(1, 1), (2, 2), (3, 3)], 3);
+    let newest_staged = crate::conformance::block_on(async {
+        put(&store, 2, &newest_staged_file_bytes).await;
         let mut r = reader(bytes.clone());
-        TipView::load(&store, Some(&mut r)).await.unwrap().unwrap()
+        NewestStagedFile::load(&store, Some(&mut r))
+            .await
+            .unwrap()
+            .unwrap()
     });
     let seen = WalView {
         header: Some(*reader(bytes.clone()).header()),
@@ -1214,7 +1297,7 @@ fn load_over_bytes(
         committed,
         epoch: staged.epoch(),
     };
-    recover(Some(Tip::Boot(&tip)), &seen, None)
+    recover(Some(PositionSource::Boot(&newest_staged)), &seen, None)
 }
 
 #[test]
@@ -1237,7 +1320,7 @@ fn the_same_schedule_with_the_wal_index_is_caught_by_rule_7() {
 }
 
 #[test]
-fn a_tip_ending_at_frame_zero_continues_over_a_wal_that_has_since_grown() {
+fn a_newest_staged_file_ending_at_frame_zero_continues_over_a_wal_that_has_since_grown() {
     // The range is empty (origin at the start of the WAL, size 0): nothing to compare.
     let wal = fresh();
     let head = *reader(wal.file_bytes()).header();
@@ -1247,17 +1330,24 @@ fn a_tip_ending_at_frame_zero_continues_over_a_wal_that_has_since_grown() {
     enc.write_page(pg(1), &vec![0x42; PS.bytes()]).unwrap();
     let bytes = enc.finish(None).unwrap().0;
     let store = crate::MemStore::new();
-    let tip = crate::conformance::block_on(async {
+    let newest_staged = crate::conformance::block_on(async {
         put(&store, 2, &bytes).await;
         let mut r = reader(wal.file_bytes());
-        TipView::load(&store, Some(&mut r)).await.unwrap().unwrap()
+        NewestStagedFile::load(&store, Some(&mut r))
+            .await
+            .unwrap()
+            .unwrap()
     });
     assert!(
         matches!(
-            recover(Some(Tip::Boot(&tip)), &view(&wal), None),
+            recover(
+                Some(PositionSource::Boot(&newest_staged)),
+                &view(&wal),
+                None
+            ),
             Recovered::Continue(_)
         ),
-        "{tip:?}"
+        "{newest_staged:?}"
     );
 }
 
@@ -1265,29 +1355,32 @@ fn a_tip_ending_at_frame_zero_continues_over_a_wal_that_has_since_grown() {
 fn a_range_missing_from_this_wal_does_not_veto() {
     let wal = fresh();
     let store = crate::MemStore::new();
-    let bytes = encode_tip(&wal, 2, &[(1, 1), (2, 2), (3, 3)], 3);
+    let bytes = encode_newest_staged(&wal, 2, &[(1, 1), (2, 2), (3, 3)], 3);
     let other = FakeWal::new(PS, salts(10));
     commit(&other, &[1, 2], 2);
-    let tip = crate::conformance::block_on(async {
+    let newest_staged = crate::conformance::block_on(async {
         put(&store, 2, &bytes).await;
         let mut r = reader(other.file_bytes());
-        TipView::load(&store, Some(&mut r)).await.unwrap().unwrap()
+        NewestStagedFile::load(&store, Some(&mut r))
+            .await
+            .unwrap()
+            .unwrap()
     });
-    // The WAL ends before the tip's end: rule 7 or the frame check speaks, not the range.
+    // The WAL ends before the newest staged file's end: rule 7 or the frame check speaks, not the range.
     assert!(
         !matches!(
-            tip,
-            TipView::Readable {
+            newest_staged,
+            NewestStagedFile::Readable {
                 last_page: LastPageCheck::Rewritten,
                 ..
             }
         ),
-        "{tip:?}"
+        "{newest_staged:?}"
     );
 }
 
 #[test]
 fn the_header_read_is_one_header_long() {
     assert_eq!(HEADER_READ.get(), u64::try_from(HEADER_LEN).unwrap());
-    assert_eq!(TIP_READ.get(), 1 << 20);
+    assert_eq!(NEWEST_STAGED_READ.get(), 1 << 20);
 }

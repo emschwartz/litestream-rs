@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    CheckpointMode, MemStore, Position, Probes, Step, StepEnd, SyncConfig, Synced, SyncedThrough,
-    Tip, WalSource, WalView, checkpoint, recover_traced, sync_step,
+    CheckpointMode, MemStore, Position, PositionSource, Probes, Step, StepEnd, SyncConfig, Synced,
+    SyncedThrough, WalSource, WalView, checkpoint, recover_traced, sync_step,
 };
 use lsr_ltx::Timestamp;
 use lsr_sqlite::Sqlite;
@@ -143,11 +143,10 @@ impl Engine {
             committed: Some(committed),
             epoch: committed.epoch(),
         };
-        let tip = self
-            .position
-            .as_ref()
-            .map(|position| Tip::Running(position, Probes::read(&mut wal, position).unwrap()));
-        let step = Step::try_from(recover_traced(tip, &view, None).recovered).unwrap();
+        let source = self.position.as_ref().map(|position| {
+            PositionSource::Running(position, Probes::read(&mut wal, position).unwrap())
+        });
+        let step = Step::try_from(recover_traced(source, &view, None).recovered).unwrap();
         self.now = self.now.saturating_add(10);
         let mut db = self.live.clone();
         let synced = block_on(sync_step(

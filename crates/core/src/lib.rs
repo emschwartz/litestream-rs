@@ -92,8 +92,8 @@ pub use position::{
     Continuity, LastPage, Position, ReachedEnd, ReadEpoch, SyncedOffset, SyncedThrough, WalFileLen,
 };
 pub use recover::{
-    FrameCheck, LastPageCheck, Miss, Probes, RecoverEvent, Recovered, Tip, TipView, Verdict,
-    WalView, recover, recover_traced,
+    FrameCheck, LastPageCheck, Miss, NewestStagedFile, PositionSource, Probes, RecoverEvent,
+    Recovered, Verdict, WalView, recover, recover_traced,
 };
 pub use restore::{
     AsOfInside, DatabaseSink, FileFault, MAX_ATTEMPTS, NoPlan, PublishFailure, PublishLeft,

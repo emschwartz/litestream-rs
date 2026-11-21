@@ -32,8 +32,8 @@ pub enum CauseKind {
     FirstSync,
     /// [`SnapshotCause::BehindRemote`].
     BehindRemote,
-    /// [`SnapshotCause::LocalTipUnreadable`].
-    LocalTipUnreadable,
+    /// [`SnapshotCause::NewestStagedFileUnreadable`].
+    NewestStagedFileUnreadable,
     /// [`SnapshotCause::WalMissing`].
     WalMissing,
     /// [`SnapshotCause::GenerationChanged`].
@@ -55,7 +55,7 @@ impl From<&SnapshotCause> for CauseKind {
         match cause {
             SnapshotCause::FirstSync => Self::FirstSync,
             SnapshotCause::BehindRemote { .. } => Self::BehindRemote,
-            SnapshotCause::LocalTipUnreadable => Self::LocalTipUnreadable,
+            SnapshotCause::NewestStagedFileUnreadable => Self::NewestStagedFileUnreadable,
             SnapshotCause::WalMissing => Self::WalMissing,
             SnapshotCause::GenerationChanged => Self::GenerationChanged,
             SnapshotCause::PrevFrameMismatch => Self::PrevFrameMismatch,
@@ -244,7 +244,11 @@ pub fn scenario_of(cause: SnapshotCause) -> &'static [fn() -> Scenario] {
     match cause {
         SnapshotCause::FirstSync => &[empty_meta_boot],
         SnapshotCause::BehindRemote { .. } => &[newest_staged_file_lost, restored_old_meta],
-        SnapshotCause::LocalTipUnreadable => &[tip_byte_flip, tip_truncated, tip_no_wal_origin],
+        SnapshotCause::NewestStagedFileUnreadable => &[
+            newest_staged_file_byte_flip,
+            newest_staged_file_truncated,
+            newest_staged_file_no_wal_origin,
+        ],
         SnapshotCause::WalMissing => &[
             wal_deleted_while_down,
             wal_header_torn,
@@ -347,7 +351,7 @@ pub fn empty_meta_boot() -> Scenario {
 }
 
 /// The staging directory is wiped while the replica keeps its files: boot
-/// reads the replica's newest level-0 file as the tip, the WAL still matches
+/// reads the replica's newest level-0 file as the newest staged file, the WAL still matches
 /// it, and the engine continues with no snapshot.
 #[must_use]
 pub fn meta_wiped_remote_kept() -> Scenario {
@@ -372,7 +376,7 @@ pub fn meta_wiped_remote_kept() -> Scenario {
 /// The boot after the wipe (the last before the oracle judged) took no
 /// snapshot and staged none before the oracle, and asked the replica for one
 /// listing per level (the upload lane's), the upload lane's read-back of the
-/// newest file, and one read of that file as the tip.
+/// newest file, and one read of that file as the newest staged file.
 fn last_boot_continues(report: &RunReport) -> Result<(), String> {
     use lsr_core::Event;
     let judged = report
@@ -407,8 +411,8 @@ fn last_boot_continues(report: &RunReport) -> Result<(), String> {
 }
 
 /// The staging directory is wiped and, while the engine is down, an outside
-/// TRUNCATE and a commit restart the WAL: the replica's tip gives the same
-/// snapshot a staged tip would.
+/// TRUNCATE and a commit restart the WAL: the replica's newest staged file gives the same
+/// snapshot a staged newest file would.
 #[must_use]
 pub fn meta_wiped_wal_restarted() -> Scenario {
     let restarted = vec![
@@ -425,7 +429,7 @@ pub fn meta_wiped_wal_restarted() -> Scenario {
 }
 
 /// The staging directory is wiped and the WAL's frames are regrown in the
-/// same generation with other bytes: only the tip's page bytes, read back from
+/// same generation with other bytes: only the newest staged file's page bytes, read back from
 /// the replica, show it.
 #[must_use]
 pub fn meta_wiped_wal_regrown() -> Scenario {
@@ -463,41 +467,47 @@ pub fn restored_old_meta() -> Scenario {
     )
 }
 
-/// One byte of the tip changed on disk. The replica already holds the tip, so
+/// One byte of the newest staged file changed on disk. The replica already holds the newest staged file, so
 /// the torn copy is deleted and the snapshot takes the transaction after it.
 #[must_use]
-pub fn tip_byte_flip() -> Scenario {
+pub fn newest_staged_file_byte_flip() -> Scenario {
     let flip = vec![Op::Meta(MetaOp::FlipNewestByte)];
-    torn_tip("tip_byte_flip", flip)
+    torn_newest_staged_file("newest_staged_file_byte_flip", flip)
 }
 
-/// The tip file ends early, cut directly; otherwise as [`tip_byte_flip`].
+/// The newest staged file ends early, cut directly; otherwise as [`newest_staged_file_byte_flip`].
 #[must_use]
-pub fn tip_truncated() -> Scenario {
+pub fn newest_staged_file_truncated() -> Scenario {
     let cut = vec![Op::Meta(MetaOp::TruncateNewest)];
-    torn_tip("tip_truncated", cut)
+    torn_newest_staged_file("newest_staged_file_truncated", cut)
 }
 
-/// The tip of [`synced`] is damaged while the engine is down. [`synced`]
-/// stages and uploads transactions 1 and 2, so the torn tip is 2, which the
+/// The newest staged file of [`synced`] is damaged while the engine is down. [`synced`]
+/// stages and uploads transactions 1 and 2, so the torn newest staged file is 2, which the
 /// replica holds: the snapshot must take 3.
-fn torn_tip(name: &'static str, damage: Vec<Op>) -> Scenario {
+fn torn_newest_staged_file(name: &'static str, damage: Vec<Op>) -> Scenario {
     build(
         name,
         vec![synced(), damage, ticks(SETTLE), vec![Op::Restore]],
         vec![
-            Expect::Event(EventMatch::Booted(Some(CauseKind::LocalTipUnreadable))),
+            Expect::Event(EventMatch::Booted(Some(
+                CauseKind::NewestStagedFileUnreadable,
+            ))),
             Expect::Event(EventMatch::SnapshotAt(3)),
             Expect::Oracle,
         ],
     )
 }
 
-/// The tip's header names no WAL range, so there is no position to resume from.
+/// The newest staged file's header names no WAL range, so there is no position to resume from.
 #[must_use]
-pub fn tip_no_wal_origin() -> Scenario {
+pub fn newest_staged_file_no_wal_origin() -> Scenario {
     let stripped = vec![Op::Meta(MetaOp::StripNewestOrigin)];
-    after_restart("tip_no_wal_origin", stripped, CauseKind::LocalTipUnreadable)
+    after_restart(
+        "newest_staged_file_no_wal_origin",
+        stripped,
+        CauseKind::NewestStagedFileUnreadable,
+    )
 }
 
 /// The WAL file was deleted while the engine was down.
@@ -517,7 +527,7 @@ pub fn wal_deleted_while_down() -> Scenario {
 
 /// A database a restore just published: the database file holds every
 /// transaction, the WAL is empty with no header, the staging directory is gone
-/// and the replica holds the tip. The real driver writes nothing at open once
+/// and the replica holds the newest staged file. The real driver writes nothing at open once
 /// `_litestream_seq` exists, so the boot finds no header and the first sync is a
 /// `WalMissing` snapshot. It writes the header itself and runs at once, with no
 /// write from the app and no retry.
@@ -753,7 +763,7 @@ fn settled_under_the_reset_index(report: &RunReport) -> Result<(), String> {
 }
 
 /// The generation's frames are rewritten with valid checksums but none of
-/// them is a commit: the frame before the tip's end is not one.
+/// them is a commit: the frame before the newest staged file's end is not one.
 #[must_use]
 pub fn wal_rewritten_same_length() -> Scenario {
     let rewritten = vec![Op::Wal(WalOp::RegrowWithoutCommitMarks(3))];

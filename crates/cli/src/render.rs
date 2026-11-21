@@ -537,13 +537,13 @@ fn finding_parts(finding: &Finding) -> (&'static str, String) {
             snapshot,
             have_through,
             next_starts,
-            at_tip,
+            at_newest,
         } => (
             "gap",
             format!(
                 "from {} the history reaches transaction {have_through} and resumes at {next_starts}{}",
                 key_path(snapshot),
-                if *at_tip {
+                if *at_newest {
                     " (the newest state is cut off)"
                 } else {
                     " (older history)"

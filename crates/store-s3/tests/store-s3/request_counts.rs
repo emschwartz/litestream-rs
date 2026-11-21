@@ -27,9 +27,9 @@ mod cases {
     use lsr_core::conformance::block_on;
     use lsr_core::{
         ContiguousChain, Depth, Did, Due, FakeClock, FileKey, Inventory, Job, L0Retention, Level,
-        MaintainState, Maintenance, MemSink, MemStore, ObjectStore, PlanOutcome, ResolvedCreatedAt,
-        RestoreError, RestoreTarget, Restored, TipView, Upload, UploadState, due, plan_reference,
-        resolve, restore, upload_next, verify,
+        MaintainState, Maintenance, MemSink, MemStore, NewestStagedFile, ObjectStore, PlanOutcome,
+        ResolvedCreatedAt, RestoreError, RestoreTarget, Restored, Upload, UploadState, due,
+        plan_reference, resolve, restore, upload_next, verify,
     };
     use lsr_ltx::{Encoder, Header, HeaderFields, PageNo, PageSize, Timestamp, Txid, TxidRange};
     use lsr_store_s3::{
@@ -408,13 +408,13 @@ mod cases {
 
     fn recover_row(rig: &Rig) -> Row {
         let store = rig.store();
-        let (tip, counts) = rig.counted(|| {
-            block_on(TipView::load(
+        let (newest_staged, counts) = rig.counted(|| {
+            block_on(NewestStagedFile::load(
                 &store,
                 None::<&mut WalReader<Cursor<Vec<u8>>>>,
             ))
         });
-        assert!(tip.unwrap().is_some());
+        assert!(newest_staged.unwrap().is_some());
         Row {
             what: "recover level-0 listing".to_owned(),
             counts,

@@ -11,8 +11,8 @@ use lsr_compat::{hash_pages, integrity_check};
 use lsr_core::conformance::block_on;
 use lsr_core::{
     CheckpointMode, Checkpointer, CommittedRead, FileInfo, MemSink, MemStore, PageSource, Position,
-    Probes, RecoverEvent, Recovered, RestoreTarget, SnapshotCause, SourceError, Step, StepEnd,
-    SyncConfig, Synced, SyncedThrough, Tip, Verdict, WalSource, WalView, checkpoint,
+    PositionSource, Probes, RecoverEvent, Recovered, RestoreTarget, SnapshotCause, SourceError,
+    Step, StepEnd, SyncConfig, Synced, SyncedThrough, Verdict, WalSource, WalView, checkpoint,
     recover_traced, restore, sync_step,
 };
 use lsr_ltx::{PageNo, PageSize, Timestamp, Txid};
@@ -153,7 +153,7 @@ impl Rig {
             None => recover_traced(None, &view, None),
             Some(position) => {
                 let probes = Probes::read(&mut wal, position).expect("probes");
-                recover_traced(Some(Tip::Running(position, probes)), &view, None)
+                recover_traced(Some(PositionSource::Running(position, probes)), &view, None)
             }
         }
     }
@@ -252,7 +252,7 @@ fn outside_checkpoint_against_pin(pragma: &str) {
     rig.write(500);
     assert!(matches!(rig.sync(), Did::Wrote { .. }));
     let (header, len) = (rig.wal_header(), rig.wal_len());
-    let tip = rig.txid();
+    let position = rig.txid();
 
     let (busy, _, _) = rig.app_checkpoint(pragma);
     assert_eq!(busy, 1, "the pin blocks the restart");
@@ -272,7 +272,7 @@ fn outside_checkpoint_against_pin(pragma: &str) {
     assert_eq!(txs, 1);
     assert_eq!(
         Some(file.key.range().min()),
-        tip.next(),
+        position.next(),
         "incremental, no snapshot"
     );
 }
