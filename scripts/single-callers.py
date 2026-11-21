@@ -3,7 +3,7 @@
 
 usage:
     rust-analyzer lsif . > /tmp/lsif.json
-    python3 -I scripts/single-callers.py /tmp/lsif.json . > docs/function-length/single-callers.tsv
+    python3 -I scripts/single-callers.py /tmp/lsif.json . > /tmp/single-callers.tsv
 
 Callers come from rust-analyzer's reference index, so a method call, a path call and a function
 passed by name all count. Not counted: references from test code (tests/ and benches/ trees,
