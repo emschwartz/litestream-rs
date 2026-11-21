@@ -470,6 +470,12 @@ lsr-core compact::tests::the_lock_page_never_appears_and_growth_across_it_is_one
 lsr-core compact::tests::the_output_header_takes_the_first_and_last_inputs_as_go_does
 lsr-core compact::tests::the_snapshot_level_takes_only_files_that_start_at_transaction_one
 lsr-core compact::tests::thirty_two_inputs_of_two_thousand_pages_stay_under_the_stated_bound
+lsr-core conformance::tests::a_harness_that_cannot_inject_skips_the_late_commit_case
+lsr-core conformance::tests::a_store_that_lists_another_exact_stamp_fails_the_suite
+lsr-core conformance::tests::a_store_that_reads_back_nothing_after_a_late_failed_commit_fails_the_suite
+lsr-core conformance::tests::block_on_resumes_a_future_that_was_woken
+lsr-core conformance::tests::the_last_modified_harness_lists_last_modified
+lsr-core conformance::tests::the_mem_harness_injects_a_late_commit_failure
 lsr-core env::fakes::tests::below_scales_the_whole_output
 lsr-core env::fakes::tests::clock_moves_only_when_told
 lsr-core env::fakes::tests::entropy_is_below_the_bound_and_repeats_per_seed
