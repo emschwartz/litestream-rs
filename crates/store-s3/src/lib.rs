@@ -1,9 +1,12 @@
-//! ObjectStore on an S3-compatible bucket, sans-IO half: configuration,
-//! credentials that cannot print, the credential chain that finds them (explicit
-//! values, the environment, the AWS shared files; see the `chain` module for
-//! what it does not cover), signed requests as data, response parsers and
-//! the error classification. The blocking HTTP client and the store itself come
-//! after this layer; everything here is pure and testable without a network.
+//! ObjectStore on an S3-compatible bucket.
+//!
+//! Two halves. The sans-IO half is configuration, credentials that cannot print, the
+//! credential chain that finds them (explicit values, the environment, the AWS shared files;
+//! see the `chain` module for what it does not cover), signed requests as data, response
+//! parsers and the error classification: pure and testable without a network. The I/O half is
+//! the [`S3Store`] itself (the `store`, `list`, `upload` and `multipart` modules) over a
+//! [`Transport`], the blocking HTTP clients (`ureq_transport`, `reqwest_transport`) and
+//! [`send_on_threads`], which runs a batch of independent requests at once.
 //!
 //! The HTTP client is a feature: `ureq` (the default, no async runtime) or
 //! `reqwest`. An application that already builds reqwest depends on this crate with
