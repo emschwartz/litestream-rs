@@ -61,6 +61,12 @@ Second run, 2026-11-20, from a cloud session on the `litestream-rs-test` bucket:
 
 Third run, 2026-11-20, same cloud session setup: item 10 (above). Two environment facts: Go's AWS SDK refuses `AWS_CA_BUNDLE` when litestream passes its own HTTP client ("unable to add custom RootCAs HTTPClient"), so the recipe unsets it and Go takes the same roots from `SSL_CERT_FILE`; and Go's S3 layout is `<path>/<level as 4 hex digits>/<file>` with `litestream-timestamp` metadata, which our store reads unchanged.
 
+Fourth run, 2026-11-21, from a laptop (macOS, Apple Silicon) at commit `2170497`, three run prefixes, each deleted afterwards (objects and multipart uploads) and listed empty with the aws CLI:
+
+- `just test-tigris` over ureq: 44 passed, 1 skipped (264 s). Item 9 from this connection: p50 101.9 ms, p95 168.8 ms, 1,000 HEADs in 113.7 s.
+- `LSR_S3_TRANSPORT=reqwest just test-tigris`: 44 passed, 1 skipped (367 s). Item 9 over reqwest: p50 166.8 ms, p95 269.5 ms, 181.4 s; one run each, so the gap between the clients is not established.
+- `just tigris-restore`: pass (387 s). Go v0.5.18 wrote 304 files, 99.5 MB (L0 63, L1 177, L2 46, L3 11, L9 7) over 433 commits; live database 2363 pages of 4096. `lsr verify`: exit 0, no findings, reaches 0x1c5, 313 files and 105.0 MB read in 59.2 s (in process: 10 LIST, 315 GET, 0 HEAD). All 13 targets agree as in the third run: 9 equal pages in Rust, `lsr` and Go; as-of a quarter in and halfway are `AsOfInsideFile` and the chain ends (0xa3, 0x109) equal Go's as-of restore; before Go started both refuse. Latest: Rust 2.03 s (9 files, 5.6 MB, 10 LIST + 9 GET), `lsr` 2.01 s, Go 2.35 s.
+
 Left: item 8 (the key still cannot set bucket lifecycle) and 11 (no 429, 503 or `Retry-After` seen in any run).
 
 # Phase 3 spikes
