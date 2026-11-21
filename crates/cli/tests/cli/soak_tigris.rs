@@ -400,17 +400,29 @@ dbs:
             self.commit(None);
         }
 
-        fn compare(&mut self, label: &str, txid: Option<u64>, want: (u64, u32)) {
+        /// Restores at `txid` (Latest when `None`) and compares it with `want`; returns how long
+        /// `lsr restore` took, so the hourly line can show restore speed against the bucket.
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the soak measures real restore time against a real bucket"
+        )]
+        fn compare(&mut self, label: &str, txid: Option<u64>, want: (u64, u32)) -> Duration {
             let out = self.scratch.join("restored.db");
             remove(&out);
+            let started = Instant::now();
             let (code, stderr) = self.bucket.restore(&out, txid);
+            let took = started.elapsed();
             let got = (code == 0)
                 .then(|| hash_pages(&out).ok())
                 .flatten()
                 .filter(|_| integrity_check(&out).is_ok());
             match got {
                 Some(got) if digest(&got) == want.0 => {
-                    eprintln!("CHECK {label}: same pages ({} pages)", got.page_count)
+                    eprintln!(
+                        "CHECK {label}: same pages ({} pages) in {:.2} s",
+                        got.page_count,
+                        took.as_secs_f64()
+                    )
                 }
                 Some(got) => self.findings.push(format!(
                     "{label}: {} pages restored, {} expected, pages differ",
@@ -422,6 +434,7 @@ dbs:
                 )),
             }
             remove(&out);
+            took
         }
 
         /// TXIDs a replica promises to restore exactly: the ends of the files on the compacted
@@ -450,7 +463,8 @@ dbs:
                 .get(&self.last)
                 .map(|a| (a.digest, a.pages))
                 .expect("the head");
-            self.compare(&format!("hour {hour} latest {:x}", self.last), None, latest);
+            let latest_took =
+                self.compare(&format!("hour {hour} latest {:x}", self.last), None, latest);
             let window = Duration::from_secs((RETENTION_HOURS - 1) * 3600);
             self.acked.retain(|_, a| a.at.elapsed() < window);
             let pool: Vec<u64> = self
@@ -458,6 +472,7 @@ dbs:
                 .into_iter()
                 .filter(|t| self.acked.contains_key(t) && *t != self.last)
                 .collect();
+            let mut target_took = None;
             if let Some(len) = u64::try_from(pool.len()).ok().filter(|&n| n > 0) {
                 let txid = pool[usize::try_from(self.rng.below(len)).unwrap()];
                 let want = self
@@ -465,11 +480,11 @@ dbs:
                     .get(&txid)
                     .map(|a| (a.digest, a.pages))
                     .expect("acked");
-                self.compare(
+                target_took = Some(self.compare(
                     &format!("hour {hour} txid {txid:x} of {len}"),
                     Some(txid),
                     want,
-                );
+                ));
             } else {
                 eprintln!("CHECK hour {hour}: no compacted boundary acknowledged yet");
             }
@@ -484,10 +499,15 @@ dbs:
             }
             self.warned = warnings;
             eprintln!(
-                "HOUR {hour}: commits {} head {:x} acked {} | lsr {} | log warnings {warnings} | findings {}",
+                "HOUR {hour}: commits {} head {:x} acked {} | restore latest {:.2} s target {} | lsr {} | log warnings {warnings} | findings {}",
                 self.commits,
                 self.last,
                 self.acked.len(),
+                latest_took.as_secs_f64(),
+                target_took.map_or_else(
+                    || "none".to_owned(),
+                    |t| format!("{:.2} s", t.as_secs_f64())
+                ),
                 resources(self.child.id()),
                 self.findings.len()
             );
