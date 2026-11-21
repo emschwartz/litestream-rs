@@ -2,8 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use lsr_ltx::{
@@ -14,10 +13,10 @@ use proptest::prelude::*;
 
 use super::*;
 use crate::conformance::block_on;
-use crate::layout::CreatedAt;
 use crate::layout::Level;
 use crate::mem::MemStore;
-use crate::store::{Listing, PageLimit, StoreOp, Upload};
+use crate::mem::wrapped::Wrapped;
+use crate::store::{StoreOp, Upload};
 
 fn txid(n: u64) -> Txid {
     Txid::new(n).unwrap()
@@ -535,94 +534,6 @@ fn a_store_error_other_than_not_found_ends_the_restore_without_retry() {
     assert!(matches!(result, Err(RestoreError::Store(err)) if err == fault));
     assert_eq!(sink.calls(SinkOp::Reset), 0);
     assert_eq!(sink.published(), None);
-}
-
-/// A store whose files can vanish at the moment they are read, lie about
-/// their size, and whose reads are counted.
-struct Wrapped {
-    inner: MemStore,
-    vanish: Mutex<BTreeSet<FileKey>>,
-    zero_sizes: bool,
-    reads: AtomicUsize,
-}
-
-impl Wrapped {
-    async fn before_read(&self, key: &FileKey) -> Result<(), StoreError> {
-        self.reads.fetch_add(1, Ordering::Relaxed);
-        let doomed = self.vanish.lock().unwrap().remove(key);
-        if doomed {
-            self.inner.delete(&[*key]).await?;
-        }
-        Ok(())
-    }
-
-    fn new(inner: MemStore) -> Self {
-        Self {
-            inner,
-            vanish: Mutex::new(BTreeSet::new()),
-            zero_sizes: false,
-            reads: AtomicUsize::new(0),
-        }
-    }
-
-    fn vanishing(inner: MemStore, keys: &[FileKey]) -> Self {
-        let wrapped = Self::new(inner);
-        wrapped.vanish.lock().unwrap().extend(keys.iter().copied());
-        wrapped
-    }
-}
-
-impl ObjectStore for Wrapped {
-    type Upload = <MemStore as ObjectStore>::Upload;
-
-    async fn list(
-        &self,
-        level: Level,
-        after: Option<TxidRange>,
-        limit: PageLimit,
-    ) -> Result<Listing, StoreError> {
-        let mut listing = self.inner.list(level, after, limit).await?;
-        if self.zero_sizes {
-            for file in &mut listing.files {
-                file.size = 0;
-            }
-        }
-        Ok(listing)
-    }
-
-    async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
-        self.before_read(key).await?;
-        self.inner.read(key, offset, len).await
-    }
-
-    async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
-        let doomed = self.vanish.lock().unwrap().remove(&file.key);
-        if doomed {
-            self.inner.delete(&[file.key]).await?;
-        }
-        self.inner.created_at(file).await
-    }
-
-    async fn read_with_created_at(
-        &self,
-        file: &FileInfo,
-        len: ReadLen,
-    ) -> Result<(Vec<u8>, CreatedAt), StoreError> {
-        self.before_read(&file.key).await?;
-        self.inner.read_with_created_at(file, len).await
-    }
-
-    async fn begin_upload(
-        &self,
-        key: &FileKey,
-        created_at: Timestamp,
-    ) -> Result<Self::Upload, StoreError> {
-        self.inner.begin_upload(key, created_at).await
-    }
-
-    async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
-        self.inner.delete(keys).await
-    }
 }
 
 #[test]

@@ -314,6 +314,9 @@ impl Upload for MemUpload {
 }
 
 #[cfg(test)]
+pub(crate) mod wrapped;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::conformance;
