@@ -241,6 +241,10 @@ impl<T: Transport> ObjectStore for S3Store<T> {
     ) -> Vec<Result<Listing, StoreError>> {
         self.inner.list_many(pages, limit)
     }
+
+    async fn stamp_many(&self, files: &[FileInfo]) -> Vec<Result<StoredStamp, StoreError>> {
+        self.inner.stamp_many(files)
+    }
 }
 
 /// The stamp a HEAD settles: the object's metadata when it has one, else the
@@ -445,13 +449,37 @@ impl<T: Transport> Inner<T> {
         let op = StoreOp::Read;
         let key = file.key;
         let request = self.request(op, |b, now| b.head(now, &key))?;
-        let response = self.exec(op, Some(&key), request)?;
-        let head = parse_head(&response).map_err(|err| err.into_store(op, Some(key)))?;
+        let response = self.send(op, request)?;
+        Self::judge_head(file, &response)
+    }
+
+    /// What one HEAD's answer says about `file`'s stamp.
+    fn judge_head(file: &FileInfo, response: &HttpResponse) -> Result<StoredStamp, StoreError> {
+        let op = StoreOp::Read;
+        let key = file.key;
+        classify(op, Some(&key), None, response)?;
+        let head = parse_head(response).map_err(|err| err.into_store(op, Some(key)))?;
         let listed = match file.listed {
             ListedStamp::Stored(stamp) => stamp.at(),
             ListedStamp::LastModified(at) => at,
         };
         stamp_from_head(op, &head, file.size, listed)
+    }
+
+    /// One HEAD per file as one batch, each judged and counted as
+    /// [`Self::stamp`] does.
+    fn stamp_many(&self, files: &[FileInfo]) -> Vec<Result<StoredStamp, StoreError>> {
+        let op = StoreOp::Read;
+        let results = self.batch(
+            op,
+            files.iter(),
+            |file| Ok((self.request(op, |b, now| b.head(now, &file.key))?, file)),
+            |file, response| Self::judge_head(file, response),
+        );
+        for result in &results {
+            self.tally_stamp(result);
+        }
+        results
     }
 
     /// The first bytes and the stamp from one ranged GET, which carries the

@@ -317,6 +317,19 @@ impl<S: ObjectStore, P: Sleeper, E: Entropy> ObjectStore for Retrying<S, P, E> {
         self.core.inner.batch_width()
     }
 
+    /// One batch through the inner store, then each failed stamp read retried
+    /// alone under the policy, in order.
+    async fn stamp_many(&self, files: &[FileInfo]) -> Vec<Result<StoredStamp, StoreError>> {
+        let core = &*self.core;
+        let firsts = core.inner.stamp_many(files).await;
+        let mut out = Vec::with_capacity(firsts.len());
+        for (file, first) in files.iter().zip(firsts) {
+            Counters::bump(&core.counters.calls);
+            out.push(core.settle(first, || core.inner.stamp(file)).await);
+        }
+        out
+    }
+
     /// One batch through the inner store, then each failed listing retried
     /// alone under the policy, in order.
     async fn list_many(

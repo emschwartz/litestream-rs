@@ -133,13 +133,24 @@ impl Inventory {
     }
 
     /// The same inventory with every file's stamp read from the store, one
-    /// `stamp` call (a HEAD on S3) per file, so each is `Stored` afterwards.
+    /// stamp (a HEAD on S3) per file, so each is `Stored` afterwards. Reads go
+    /// out `batch_width` at a time through [`ObjectStore::stamp_many`].
     ///
     /// # Errors
-    /// The first failed read; never a partly stamped inventory.
+    /// The first failed read in key order; never a partly stamped inventory.
     pub async fn stamped<S: ObjectStore>(mut self, store: &S) -> Result<Self, StoreError> {
-        for info in &mut self.files {
-            info.listed = ListedStamp::Stored(store.stamp(info).await?);
+        let width = store.batch_width().get();
+        for files in self.files.chunks_mut(width) {
+            let read = store.stamp_many(files).await;
+            if read.len() != files.len() {
+                return Err(StoreError::Transient {
+                    op: crate::store::StoreOp::Read,
+                    kind: std::io::ErrorKind::InvalidData,
+                });
+            }
+            for (info, stamp) in files.iter_mut().zip(read) {
+                info.listed = ListedStamp::Stored(stamp?);
+            }
         }
         Ok(self)
     }

@@ -683,6 +683,7 @@ macro_rules! shared_cases {
                 read_with_stamp_agrees_with_read_and_stamp,
                 read_many_agrees_with_read,
                 list_many_agrees_with_list,
+                stamp_many_agrees_with_stamp,
             );
 
             /// A case added to core's suite and missing from the list above would

@@ -870,6 +870,40 @@ pub async fn list_many_agrees_with_list<H: Harness>(h: &H) -> Check {
     Ok(())
 }
 
+/// `stamp_many` answers each file as `stamp` does, in order: a file deleted
+/// since it was listed fails only its own slot.
+///
+/// # Errors
+/// A [`Failure`] naming the rule that broke.
+pub async fn stamp_many_agrees_with_stamp<H: Harness>(h: &H) -> Check {
+    let store = h.store();
+    let (a, b, gone) = (key(7, 1, 1)?, key(7, 2, 2)?, key(7, 3, 3)?);
+    put_stamped(store, a, b"a", at(STAMP)).await?;
+    put_stamped(store, b, b"bb", at(STAMP + 1)).await?;
+    put_stamped(store, gone, b"c", at(STAMP + 2)).await?;
+    let files = [
+        listed_one(store, a).await?,
+        listed_one(store, gone).await?,
+        listed_one(store, b).await?,
+    ];
+    store.delete(&[gone]).await?;
+    let mut want = Vec::new();
+    for file in &files {
+        want.push(store.stamp(file).await);
+    }
+    ensure_eq!(
+        store.stamp_many(&files).await,
+        want,
+        "stamp_many against stamp"
+    );
+    ensure_eq!(
+        want.get(1).cloned(),
+        Some(Err(StoreError::NotFound { key: gone })),
+        "the deleted file's slot"
+    );
+    Ok(())
+}
+
 /// Hands the suite to a backend: one test per case, each on a fresh harness.
 ///
 /// `make` is an expression that builds the harness, called once per test.
@@ -898,6 +932,7 @@ macro_rules! conformance_suite {
             read_with_stamp_agrees_with_read_and_stamp,
             read_many_agrees_with_read,
             list_many_agrees_with_list,
+            stamp_many_agrees_with_stamp,
         );
     };
     (@each $make:expr; $($case:ident,)+) => {

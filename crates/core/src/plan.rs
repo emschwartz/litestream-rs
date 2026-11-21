@@ -102,7 +102,11 @@
 //! order, until the first eligible one. What lies past the end is judged by
 //! keys, and the straddle rule looks only at files the last step already
 //! read. Each phase makes the decision [`plan`] makes with every stamp known,
-//! so the order of the reads never changes the answer. [`plan`] is the planner
+//! so the order of the reads never changes the answer. When it asks for a
+//! base's stamp it names the later bases ahead, and when it judges the
+//! straddlers it names all of them, so a store that runs batches reads those
+//! side by side; the bases ahead are a guess, and a few may be read for
+//! nothing once an earlier one is eligible. [`plan`] is the planner
 //! for [`KeyTarget`] (`Latest` and `Txid`), which read no stamp; `plan_reference`
 //! is the exact `AsOf` planner over a listing whose stamps are all exact, kept
 //! as the test oracle.
@@ -114,7 +118,7 @@ use lsr_ltx::{Timestamp, Txid};
 
 use crate::inventory::{Inventory, is_snapshot_start};
 use crate::layout::{FileInfo, FileKey, Level};
-use crate::stamps::{Resolve, Stamps, Step};
+use crate::stamps::{Need, Resolve, Stamps, Step};
 /// The state of the database to rebuild.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RestoreTarget {
@@ -661,7 +665,13 @@ impl<'a> AsOfPlanner<'a> {
     fn find_base(&mut self, stamps: &Stamps) -> Resolve<()> {
         while let Some(info) = self.starts.get(self.next_start).copied() {
             match eligible_at(&info, self.instant, stamps) {
-                None => return Resolve::Need(info),
+                None => {
+                    // The bases after it, in the order they would be tried:
+                    // read ahead, a few may go unused once one is eligible.
+                    let rest = self.starts.iter().skip(self.next_start.saturating_add(1));
+                    let ahead = rest.filter(|later| stamps.exact(later).is_none()).copied();
+                    return Resolve::Need(Need::with_ahead(info, ahead));
+                }
                 Some(true) => {
                     self.chain = ContiguousChain::start(info);
                     self.phase = match self.chain {
@@ -712,7 +722,7 @@ impl<'a> AsOfPlanner<'a> {
                 break;
             }
             let Some(admitted) = eligible_at(&info, self.instant, stamps) else {
-                return Resolve::Need(info);
+                return Resolve::Need(Need::one(info));
             };
             let pop = depth(self.touching.len()).saturating_mul(2);
             self.comparisons = self.comparisons.saturating_add(pop);
@@ -799,7 +809,14 @@ fn lazy_straddler(
     let mut best: Option<&FileInfo> = None;
     for info in files.iter().filter(|info| straddles(info, one_past)) {
         match eligible_at(info, instant, stamps) {
-            None => return Resolve::Need(*info),
+            None => {
+                // Every straddler is judged, so every missing stamp is needed.
+                let ahead = files
+                    .iter()
+                    .filter(|other| straddles(other, one_past) && stamps.exact(other).is_none())
+                    .copied();
+                return Resolve::Need(Need::with_ahead(*info, ahead));
+            }
             Some(true) => {}
             Some(false) => {
                 if best.is_none_or(|held| straddler_order(info) < straddler_order(held)) {

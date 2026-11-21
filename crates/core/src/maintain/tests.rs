@@ -999,7 +999,7 @@ pub(super) fn lazy_due(
     let mut step = |stamps: &Stamps| {
         let got = super::due(&listing, at(now), cfg, published, &mut state, stamps);
         if let Resolve::Need(file) = &got {
-            asked.push(file.key);
+            asked.push(file.first().key);
         }
         got
     };

@@ -78,6 +78,12 @@ pub trait DynStore: Send + Sync {
         reads: &'a [ReadAt],
     ) -> BoxFuture<'a, Vec<Result<Vec<u8>, StoreError>>>;
 
+    /// [`ObjectStore::stamp_many`].
+    fn stamp_many_boxed<'a>(
+        &'a self,
+        files: &'a [FileInfo],
+    ) -> BoxFuture<'a, Vec<Result<StoredStamp, StoreError>>>;
+
     /// [`ObjectStore::list_many`].
     fn list_many_boxed<'a>(
         &'a self,
@@ -182,6 +188,13 @@ where
     ) -> BoxFuture<'a, Vec<Result<Listing, StoreError>>> {
         Box::pin(self.list_many(pages, limit))
     }
+
+    fn stamp_many_boxed<'a>(
+        &'a self,
+        files: &'a [FileInfo],
+    ) -> BoxFuture<'a, Vec<Result<StoredStamp, StoreError>>> {
+        Box::pin(self.stamp_many(files))
+    }
 }
 
 /// A type-erased upload as an [`Upload`] again. Each call names the trait object's method:
@@ -263,6 +276,10 @@ impl ObjectStore for Erased<'_> {
         limit: PageLimit,
     ) -> Vec<Result<Listing, StoreError>> {
         self.0.list_many_boxed(pages, limit).await
+    }
+
+    async fn stamp_many(&self, files: &[FileInfo]) -> Vec<Result<StoredStamp, StoreError>> {
+        self.0.stamp_many_boxed(files).await
     }
 }
 
@@ -485,6 +502,17 @@ impl ObjectStore for Metered {
         let ended = self.clock.now();
         for result in &results {
             self.meters.list.note(result, began, ended);
+        }
+        results
+    }
+
+    /// Each stamp of the batch counts as one call, timed as the whole batch.
+    async fn stamp_many(&self, files: &[FileInfo]) -> Vec<Result<StoredStamp, StoreError>> {
+        let began = self.clock.now();
+        let results = self.store.stamp_many_boxed(files).await;
+        let ended = self.clock.now();
+        for result in &results {
+            self.meters.stamp.note(result, began, ended);
         }
         results
     }

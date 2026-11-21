@@ -1694,7 +1694,7 @@ impl Lazy {
                 stamps,
             );
             if let Resolve::Need(file) = &got {
-                asked.push(file.key);
+                asked.push(file.first().key);
             }
             got
         };

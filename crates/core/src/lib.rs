@@ -107,7 +107,10 @@ pub use source::{
 pub use source::{
     CheckpointCall, CheckpointEffect, CheckpointScript, FakeCheckpointer, FakeDb, FakeWal, SourceOp,
 };
-pub use stamps::{Resolve, ResolveError, Resolved, Stamps, Step as StampStep, resolve};
+pub use stamps::{
+    MAX_AHEAD, Need, Resolve, ResolveError, Resolved, Stamps, Step as StampStep, resolve,
+    resolve_counted,
+};
 pub use store::{
     CorruptCause, ListAt, Listing, ObjectStore, PageLimit, PartNumber, ReadAt, ReadLen, StoreError,
     StoreOp, Upload, build_listing,
