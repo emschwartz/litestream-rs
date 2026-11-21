@@ -55,11 +55,13 @@ fn open_with_an_unknown_vfs_is_a_sqlite_error() {
     let (_dir, path, _app) = fresh();
     let config = SqliteConfig {
         vfs: Some("no-such-vfs".to_owned()),
+        ..SqliteConfig::default()
     };
     let err = Sqlite::open_with(&path, &config).unwrap_err();
     assert!(matches!(err, OpenError::Sqlite { .. }), "{err:?}");
     let named = SqliteConfig {
         vfs: Some("unix".to_owned()),
+        ..SqliteConfig::default()
     };
     Sqlite::open_with(&path, &named).unwrap();
 }

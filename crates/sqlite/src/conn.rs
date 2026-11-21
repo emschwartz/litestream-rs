@@ -3,6 +3,7 @@
 use std::ffi::{OsString, c_int};
 use std::fs::{File, Metadata};
 use std::io;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -16,12 +17,44 @@ use crate::error::{OpenError, SetupError};
 use crate::pages::{FileHandle, file_pointer};
 use crate::shm::{self, Region};
 
+/// [`SqliteConfig::journal_size_limit`]'s default: 64 MiB.
+///
+/// Above the WAL a database reaches between two of the replicator's PASSIVE checkpoints at their
+/// default threshold (1,000 frames: under 64 MiB at every page size up to 64 KiB), so a WAL in
+/// steady state is not cut and regrown on every restart; low enough that one burst of writes
+/// does not keep its peak size on disk for good.
+pub const DEFAULT_JOURNAL_SIZE_LIMIT: NonZeroU64 = match NonZeroU64::new(64 * 1024 * 1024) {
+    Some(bytes) => bytes,
+    None => NonZeroU64::MIN,
+};
+
 /// How [`Sqlite::open_with`] opens its two connections.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SqliteConfig {
     /// The registered SQLite VFS to open both connections with; `None` is SQLite's default.
     /// A fault-injecting VFS for tests goes here.
     pub vfs: Option<String>,
+    /// `PRAGMA journal_size_limit` on the writer connection, in bytes: the size SQLite cuts the
+    /// WAL file back to when that connection's write restarts the log. After the replicator's
+    /// own checkpoint that write is its sequence bump on this connection, and SQLite cuts the
+    /// file only on the connection that restarts it, so without a limit the WAL file keeps its
+    /// largest size for good. `None` is SQLite's own default, no limit. Default
+    /// [`DEFAULT_JOURNAL_SIZE_LIMIT`].
+    pub journal_size_limit: Option<NonZeroU64>,
+}
+
+impl Default for SqliteConfig {
+    fn default() -> Self {
+        Self {
+            vfs: None,
+            journal_size_limit: Some(DEFAULT_JOURNAL_SIZE_LIMIT),
+        }
+    }
+}
+
+/// The pragma's value for `limit`: -1 is no limit, and so is a limit past `i64::MAX`.
+fn journal_size_limit(limit: Option<NonZeroU64>) -> i64 {
+    limit.map_or(-1, |bytes| i64::try_from(bytes.get()).unwrap_or(-1))
 }
 
 /// A live SQLite database, as the three doors of the sync engine (`WalSource`, `PageSource`,
@@ -174,6 +207,17 @@ impl Sqlite {
         for conn in [&reader, &writer] {
             persist_wal(conn).map_err(sqlite)?;
         }
+        // The writer only: its sequence bump is the write that restarts the log after the
+        // replicator's checkpoints, and SQLite cuts the file on the restarting connection alone.
+        // Should a later step fail, the writer closes before the reader (declaration order), so
+        // a last close is the reader's, which has no limit and keeps the WAL (see `Inner`'s drop).
+        writer
+            .pragma_update(
+                None,
+                "journal_size_limit",
+                journal_size_limit(config.journal_size_limit),
+            )
+            .map_err(sqlite)?;
         writer
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS _litestream_seq (id INTEGER PRIMARY KEY, seq INTEGER);
@@ -222,6 +266,20 @@ impl Sqlite {
         self.inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        // The writer closes last of the two (field order). When it is the database's last
+        // connection, SQLite checkpoints on close and, with a size limit set, truncates the WAL
+        // to zero bytes, so the next start would find no WAL to continue and snapshot. With the
+        // limit off the close keeps the WAL, as `PERSIST_WAL` intends. A failure only leaves
+        // that truncation possible, and a drop has no one to report it to.
+        drop(
+            self.writer
+                .pragma_update(None, "journal_size_limit", journal_size_limit(None)),
+        );
     }
 }
 

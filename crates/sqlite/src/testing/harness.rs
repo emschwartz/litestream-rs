@@ -49,7 +49,7 @@ use lsr_wal::{Salts, WalOffset};
 use rusqlite::{Connection, OpenFlags};
 
 use crate::testing::vfs::{FaultVfs, FileKind, Op, VfsError, seed_prng};
-use crate::{OpenError, Sqlite, SqliteConfig};
+use crate::{DEFAULT_JOURNAL_SIZE_LIMIT, OpenError, Sqlite, SqliteConfig};
 
 mod host;
 mod stepper;
@@ -72,11 +72,25 @@ pub trait Backend: WalSource + PageSource + Checkpointer + Clone {
     /// block a WAL restart (walformat.html). The cases whose answer depends on it state both.
     const PIN_ON_MARK_ZERO: bool;
 
-    /// Opens the database at `path` through the VFS named `vfs`, holding the pin.
+    /// Opens the database at `path` through the VFS named `vfs`, holding the pin, with the
+    /// default WAL size limit.
     ///
     /// # Errors
     /// [`Backend::OpenError`].
-    fn open_backend(path: &Path, vfs: &str) -> Result<Self, Self::OpenError>;
+    fn open_backend(path: &Path, vfs: &str) -> Result<Self, Self::OpenError> {
+        Self::open_limited(path, vfs, Some(DEFAULT_JOURNAL_SIZE_LIMIT))
+    }
+
+    /// [`Backend::open_backend`] with `journal_size_limit` as
+    /// [`SqliteConfig::journal_size_limit`].
+    ///
+    /// # Errors
+    /// [`Backend::OpenError`].
+    fn open_limited(
+        path: &Path,
+        vfs: &str,
+        journal_size_limit: Option<NonZeroU64>,
+    ) -> Result<Self, Self::OpenError>;
 }
 
 impl Backend for Sqlite {
@@ -84,11 +98,16 @@ impl Backend for Sqlite {
     const NAME: &'static str = "rusqlite read transaction";
     const PIN_ON_MARK_ZERO: bool = true;
 
-    fn open_backend(path: &Path, vfs: &str) -> Result<Self, OpenError> {
+    fn open_limited(
+        path: &Path,
+        vfs: &str,
+        journal_size_limit: Option<NonZeroU64>,
+    ) -> Result<Self, OpenError> {
         Self::open_with(
             path,
             &SqliteConfig {
                 vfs: Some(vfs.to_owned()),
+                journal_size_limit,
             },
         )
     }
@@ -151,6 +170,8 @@ pub struct RigConfig {
     pub power: bool,
     /// Where the host application runs.
     pub placement: Placement,
+    /// The backend's WAL size limit ([`SqliteConfig::journal_size_limit`]).
+    pub journal_size_limit: Option<NonZeroU64>,
 }
 
 impl Default for RigConfig {
@@ -163,6 +184,7 @@ impl Default for RigConfig {
             oracle: true,
             power: false,
             placement: Placement::InProcess,
+            journal_size_limit: Some(DEFAULT_JOURNAL_SIZE_LIMIT),
         }
     }
 }
@@ -416,8 +438,8 @@ impl<B: Backend> Rig<B> {
         }
         let mut host = Host::new(cfg.placement, &db, vfs, cfg.synchronous)?;
         host.open(APP)?;
-        let backend =
-            B::open_backend(&db, vfs.name()).map_err(|err| RigError::Open(Box::new(err)))?;
+        let backend = B::open_limited(&db, vfs.name(), cfg.journal_size_limit)
+            .map_err(|err| RigError::Open(Box::new(err)))?;
         let staging = Tap::new(FsStore::new(root.join("meta")));
         let remote_root = root.join("replica");
         let remote = Tap::new(FsStore::new(&remote_root));
@@ -942,7 +964,8 @@ impl<B: Backend> Rig<B> {
     pub fn restart(&mut self) -> Result<(), RigError> {
         self.backend = None;
         self.backend = Some(
-            B::open_backend(&self.db, self.vfs.name()).map_err(|e| RigError::Open(Box::new(e)))?,
+            B::open_limited(&self.db, self.vfs.name(), self.cfg.journal_size_limit)
+                .map_err(|e| RigError::Open(Box::new(e)))?,
         );
         self.actor = Actor::new(self.cfg.actor.clone());
         self.observe()

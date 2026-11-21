@@ -8,6 +8,15 @@
 //! the sequence bump. Both connections have a zero busy timeout: a contended lock is
 //! `SourceError::Busy` at once, and the caller's policy decides what waits.
 //!
+//! The writer also carries `PRAGMA journal_size_limit` ([`SqliteConfig::journal_size_limit`],
+//! 64 MiB by default). SQLite cuts the WAL file back to that size only on the connection whose
+//! commit restarts the log, and after the replicator's own checkpoint that commit is the
+//! sequence bump; without it the file keeps its largest size for good (upstream Litestream
+//! #1605). The cut drops only bytes past the new generation's first transaction, which hold
+//! frames of the generation the restart just ended, every one of them already backfilled into
+//! the database file. The limit is turned off again before the connections close, because a
+//! last close with a limit set truncates the WAL to zero bytes and the next start would snapshot.
+//!
 //! The one rule this crate exists to keep: **no descriptor on the database file or its `-shm`
 //! is ever opened and closed here.** Closing any descriptor on a file drops every POSIX lock the
 //! process holds on it, the host's SQLite locks included. So the committed end comes from the
@@ -44,8 +53,8 @@ mod shm;
 pub mod testing;
 
 pub use conn::{
-    DatabaseFile, Sqlite, SqliteConfig, app_connection, app_connection_for, app_connection_raw,
-    check_app_connection,
+    DEFAULT_JOURNAL_SIZE_LIMIT, DatabaseFile, Sqlite, SqliteConfig, app_connection,
+    app_connection_for, app_connection_raw, check_app_connection,
 };
 pub use error::{OpenError, Refusal, SetupError};
 /// SQLite's C interface, for the raw handle [`app_connection_raw`] takes.
