@@ -208,7 +208,7 @@ fn view_of(wal: &FakeWal, reader: &WalReader<Cursor<Vec<u8>>>) -> WalView {
         len: Some(WalFileLen::new(
             u64::try_from(wal.file_bytes().len()).expect("len"),
         )),
-        committed: CommittedRead::new(wal.committed_end(), wal.backfilled()),
+        committed: CommittedRead::new(wal.committed_end(), wal.backfilled(), wal.epoch()),
         epoch: wal.epoch(),
     }
 }
@@ -265,13 +265,13 @@ fn rust_continues_from_every_go_written_tip_and_its_next_file_passes_go_rules() 
         let commit = std::num::NonZeroU32::new(tip.header.fields().commit).expect("commit");
         wal.append_tx(&[(page_one(ps), vec![7; ps.bytes()])], commit);
         let mut next_reader = WalReader::open(Cursor::new(wal.file_bytes())).expect("wal");
-        let committed = CommittedRead::new(wal.committed_end(), wal.backfilled()).expect("read");
+        let committed =
+            CommittedRead::new(wal.committed_end(), wal.backfilled(), wal.epoch()).expect("read");
         let now = position.timestamp().unix_millis().saturating_add(1000);
         let synced = block_on(sync_step(
             Step::Incremental(position),
             &mut next_reader,
             committed,
-            wal.epoch(),
             &mut FakeDb::new(ps),
             &mut lsr_core::PageTable::new(),
             &store,
@@ -352,12 +352,12 @@ fn rust_chain(ps: u32, cap: Option<u64>) -> (Vec<Vec<u8>>, Vec<u8>) {
     };
     let mut run = |step: Step, wal: &FakeWal, now: i64| {
         let mut reader = WalReader::open(Cursor::new(wal.file_bytes())).expect("wal");
-        let committed = CommittedRead::new(wal.committed_end(), wal.backfilled()).expect("read");
+        let committed =
+            CommittedRead::new(wal.committed_end(), wal.backfilled(), wal.epoch()).expect("read");
         block_on(sync_step(
             step,
             &mut reader,
             committed,
-            wal.epoch(),
             &mut db,
             &mut lsr_core::PageTable::new(),
             &store,

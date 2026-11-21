@@ -95,7 +95,7 @@ pub(super) fn view(wal: &FakeWal) -> WalView {
             .ok()
             .map(|r| *r.header()),
         len: Some(WalFileLen::new(u64::try_from(bytes.len()).unwrap())),
-        committed: CommittedRead::new(wal.committed_end(), wal.backfilled()),
+        committed: CommittedRead::new(wal.committed_end(), wal.backfilled(), wal.epoch()),
         epoch: wal.epoch(),
     }
 }
@@ -366,7 +366,7 @@ fn f2_a_committed_end_before_the_tip_is_a_rewind() {
     let pos = position(&wal, 2, Continuity::Unpinned);
     let mut seen = view(&wal);
     let end = lsr_wal::CommittedEnd::new(1, wal.salts(), PS);
-    seen.committed = CommittedRead::new(end, 0);
+    seen.committed = CommittedRead::new(end, 0, wal.epoch());
     let verdict = recover_traced(Some(Tip::Running(&pos, probes(&wal, &pos))), &seen, None);
     let synced = pos.synced().offset();
     let committed = end.offset();
@@ -523,7 +523,7 @@ fn reset_view(wal: &FakeWal) -> WalView {
         salt1: wal.salts().salt1.wrapping_add(1),
         salt2: 77,
     };
-    seen.committed = CommittedRead::new(lsr_wal::CommittedEnd::new(0, next, PS), 0);
+    seen.committed = CommittedRead::new(lsr_wal::CommittedEnd::new(0, next, PS), 0, wal.epoch());
     seen
 }
 
@@ -1225,7 +1225,11 @@ fn a_shorter_chain_regrown_in_front_of_residue_is_a_rewind_without_the_wal_index
 #[test]
 fn the_same_schedule_with_the_wal_index_is_caught_by_rule_7() {
     let (bytes, regrown) = residue_after_a_shorter_regrown_chain();
-    let committed = CommittedRead::new(regrown.committed_end(), regrown.backfilled());
+    let committed = CommittedRead::new(
+        regrown.committed_end(),
+        regrown.backfilled(),
+        regrown.epoch(),
+    );
     let recovered = load_over_bytes(&fresh(), bytes, committed);
     assert!(is_rewound(recovered), "{recovered:?}");
 }

@@ -262,7 +262,7 @@ impl FakeWal {
             backfilled: 0,
             db_size: 1,
             read_mark: None,
-            epoch: ReadEpoch::new(1),
+            epoch: ReadEpoch::first(),
             restarts: 0,
             forced: None,
             injections: Injections::default(),
@@ -476,7 +476,7 @@ impl WalSource for FakeWal {
         if let Some(read) = state.forced {
             return Ok(read);
         }
-        CommittedRead::new(state.end(), state.backfilled).ok_or(SourceError::Busy)
+        CommittedRead::new(state.end(), state.backfilled, state.epoch).ok_or(SourceError::Busy)
     }
 
     fn epoch(&self) -> ReadEpoch {

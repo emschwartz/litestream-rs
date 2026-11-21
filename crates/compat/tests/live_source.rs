@@ -18,8 +18,8 @@ use lsr_compat::{hash_pages, integrity_check};
 use lsr_core::conformance::block_on;
 use lsr_core::{
     CheckpointMode, Checkpointer, CommittedRead, FileInfo, MemSink, MemStore, PageSource, Position,
-    Probes, ReadEpoch, RecoverEvent, Recovered, RestoreTarget, SnapshotCause, SourceError, Step,
-    StepEnd, SyncConfig, Synced, SyncedThrough, Tip, Verdict, WalSource, WalView, checkpoint,
+    Probes, RecoverEvent, Recovered, RestoreTarget, SnapshotCause, SourceError, Step, StepEnd,
+    SyncConfig, Synced, SyncedThrough, Tip, Verdict, WalSource, WalView, checkpoint,
     recover_traced, restore, sync_step,
 };
 use lsr_ltx::{PageNo, PageSize, Timestamp, Txid};
@@ -148,7 +148,7 @@ impl Rig {
             header: Some(*wal.header()),
             len: self.live.len().expect("len"),
             committed: Some(committed),
-            epoch: self.live.epoch(),
+            epoch: committed.epoch(),
         };
         (wal, view, committed)
     }
@@ -168,13 +168,11 @@ impl Rig {
     fn run(&mut self, step: Step) -> Did {
         let (mut wal, _, committed) = self.view();
         self.now = self.now.saturating_add(10);
-        let epoch = self.live.epoch();
         let mut db = self.live.clone();
         let synced = block_on(sync_step(
             step,
             &mut wal,
             committed,
-            epoch,
             &mut db,
             &mut lsr_core::PageTable::new(),
             &self.staging,
@@ -309,11 +307,7 @@ fn restart_under_mark_zero(repin: bool) -> Rig {
         .checkpoint(CheckpointMode::Passive)
         .expect("passive");
     assert!(!run.busy && run.checkpointed == run.log, "{run:?}");
-    assert_eq!(
-        run.epoch,
-        ReadEpoch::new(2),
-        "the read transaction was retaken"
-    );
+    assert_eq!(run.epoch.count(), 2, "the read transaction was retaken");
     assert!(
         rig.live.committed().expect("committed").fully_backfilled(),
         "mark 0"

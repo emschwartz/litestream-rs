@@ -35,10 +35,12 @@ fn a_longer_file_than_synced_is_not_the_synced_offset() {
 }
 
 #[test]
-fn epochs_count_up() {
-    assert_eq!(ReadEpoch::new(4).next(), ReadEpoch::new(5));
-    assert_eq!(ReadEpoch::new(u64::MAX).next().get(), u64::MAX);
-    assert!(ReadEpoch::new(1) < ReadEpoch::new(2));
+fn epochs_count_up_within_one_holder() {
+    let first = ReadEpoch::first();
+    assert_eq!(first.count(), 1);
+    assert_eq!(first.next().count(), 2);
+    assert_ne!(first.next(), first);
+    assert_eq!(first.next(), first.next());
 }
 
 fn position(continuity: Continuity) -> Position {
@@ -57,6 +59,24 @@ fn position(continuity: Continuity) -> Position {
     )
 }
 
+/// Two opens each start at their first hold, and the two are never equal: a
+/// pin from one cannot pass for a pin under the other.
+#[test]
+fn the_first_epochs_of_two_holders_differ() {
+    let (one, two) = (ReadEpoch::first(), ReadEpoch::first());
+    assert_eq!(one.count(), two.count());
+    assert_ne!(one, two);
+    assert_ne!(one.next(), two.next());
+}
+
+/// Two fakes standing in for two opens of one database.
+#[test]
+fn two_sources_never_report_the_same_epoch() {
+    let salts = Salts { salt1: 1, salt2: 2 };
+    let (one, two) = (FakeWal::new(ps(), salts), FakeWal::new(ps(), salts));
+    assert_ne!(one.epoch(), two.epoch());
+}
+
 #[test]
 fn a_position_takes_its_synced_end_and_page_size_from_its_cursor() {
     let at = position(Continuity::Unpinned);
@@ -67,7 +87,7 @@ fn a_position_takes_its_synced_end_and_page_size_from_its_cursor() {
 
 #[test]
 fn replacing_continuity_changes_nothing_else() {
-    let epoch = ReadEpoch::new(3);
+    let epoch = ReadEpoch::first().next().next();
     let pinned = position(Continuity::Unpinned).with_continuity(Continuity::Pinned(epoch));
     assert_eq!(pinned.continuity(), Continuity::Pinned(epoch));
     assert_eq!(
@@ -80,13 +100,13 @@ fn replacing_continuity_changes_nothing_else() {
 /// then the position is pinned to it.
 #[test]
 fn a_reached_end_is_proven_only_at_the_epoch_it_was_reached_in() {
-    let epoch = ReadEpoch::new(1);
+    let epoch = ReadEpoch::first();
     let wal = crate::source::FakeWal::new(
         lsr_ltx::PageSize::MIN,
         lsr_wal::Salts { salt1: 1, salt2: 2 },
     );
     wal.set_epoch(epoch);
-    let at = position(Continuity::Pinned(ReadEpoch::new(9)));
+    let at = position(Continuity::Pinned(ReadEpoch::first()));
     let reached = ReachedEnd::new(at, epoch);
     let unpinned = at.with_continuity(Continuity::Unpinned);
     assert_eq!(
@@ -104,7 +124,7 @@ fn a_reached_end_is_proven_only_at_the_epoch_it_was_reached_in() {
 /// proof, and the position comes back unpinned.
 #[test]
 fn a_reached_end_whose_epoch_moved_is_no_proof() {
-    let epoch = ReadEpoch::new(1);
+    let epoch = ReadEpoch::first();
     let wal = crate::source::FakeWal::new(
         lsr_ltx::PageSize::MIN,
         lsr_wal::Salts { salt1: 1, salt2: 2 },

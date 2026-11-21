@@ -76,13 +76,16 @@ impl Rig {
 
     fn step(&mut self, step: Step, cfg: &SyncConfig, now: i64) -> Result<Synced, StepFailed> {
         let mut wal = reader(self.wal.file_bytes());
-        let committed =
-            CommittedRead::new(self.wal.committed_end(), self.wal.backfilled()).unwrap();
+        let committed = CommittedRead::new(
+            self.wal.committed_end(),
+            self.wal.backfilled(),
+            self.wal.epoch(),
+        )
+        .unwrap();
         block_on(sync_step(
             step,
             &mut wal,
             committed,
-            self.wal.epoch(),
             &mut self.db,
             &mut self.pages,
             &self.store,
@@ -103,7 +106,6 @@ impl Rig {
             step,
             &mut wal,
             committed,
-            self.wal.epoch(),
             &mut self.db,
             &mut self.pages,
             &self.store,
@@ -120,7 +122,7 @@ impl Rig {
             salt1: salts.salt1.wrapping_add(1),
             salt2: 77,
         };
-        CommittedRead::new(CommittedEnd::new(0, next, PS), 0).unwrap()
+        CommittedRead::new(CommittedEnd::new(0, next, PS), 0, self.wal.epoch()).unwrap()
     }
 
     fn snapshot(&mut self, now: i64) -> Synced {
@@ -497,7 +499,7 @@ fn a_header_only_wal_under_an_index_of_zero_salts_is_the_same_reset() {
     rig.db.write_page(pg(1), &[db_fill(1); 512]);
     let synced = rig.snapshot(1000);
     let position = position_of(synced);
-    let index = CommittedRead::new(CommittedEnd::new(0, zero, PS), 0).unwrap();
+    let index = CommittedRead::new(CommittedEnd::new(0, zero, PS), 0, rig.wal.epoch()).unwrap();
     assert_eq!(
         rig.step_under(Step::Incremental(position), index),
         Ok(Synced::IndexReset)
@@ -527,7 +529,7 @@ fn an_index_with_frames_of_another_generation_is_still_the_wal_moving() {
         salt1: 50,
         salt2: 60,
     };
-    let moved = CommittedRead::new(CommittedEnd::new(1, other, PS), 0).unwrap();
+    let moved = CommittedRead::new(CommittedEnd::new(1, other, PS), 0, rig.wal.epoch()).unwrap();
     let failed = rig
         .step_under(Step::Incremental(position), moved)
         .unwrap_err();
@@ -698,12 +700,11 @@ fn a_page_that_changes_between_scan_and_read_is_a_retry_and_stages_nothing() {
         prev_timestamp: None,
         cause: SnapshotCause::FirstSync,
     };
-    let committed = CommittedRead::new(rig.wal.committed_end(), 0).unwrap();
+    let committed = CommittedRead::new(rig.wal.committed_end(), 0, rig.wal.epoch()).unwrap();
     let failed = block_on(sync_step(
         step,
         &mut wal,
         committed,
-        rig.wal.epoch(),
         &mut rig.db,
         &mut PageTable::new(),
         &rig.store,
@@ -1038,6 +1039,8 @@ struct Chain {
     position: Option<Position>,
     clock: i64,
     spilled: bool,
+    /// The one hold every copy is read under, as one unbroken pin would see them.
+    epoch: ReadEpoch,
 }
 
 /// Runs steps over a copy until the committed end is staged.
@@ -1054,7 +1057,7 @@ fn sync_copy(chain: &mut Chain, copy: &Copy, ps: PageSize, cap: Option<NonZeroU6
     if committed_end.frame_count() == 0 && chain.position.is_none() {
         return;
     }
-    let committed = CommittedRead::new(committed_end, 0).unwrap();
+    let committed = CommittedRead::new(committed_end, 0, chain.epoch).unwrap();
     let mut db = BytesDb {
         bytes: copy.db.clone(),
         page_size: ps,
@@ -1074,7 +1077,6 @@ fn sync_copy(chain: &mut Chain, copy: &Copy, ps: PageSize, cap: Option<NonZeroU6
             step,
             &mut wal,
             committed,
-            ReadEpoch::new(1),
             &mut db,
             &mut chain.pages,
             &chain.store,
@@ -1170,6 +1172,7 @@ fn workload(ps: u32, cap: Option<u64>, ops: &[Op]) -> bool {
         position: None,
         clock: 0,
         spilled: false,
+        epoch: ReadEpoch::first(),
     };
     sync_copy(&mut chain, &db.copy(), size, cap);
     for op in ops {
@@ -1330,7 +1333,12 @@ fn mark_zero() -> MarkZero {
     for n in 1..=3 {
         rig.db.write_page(pg(n), &[u8::try_from(n).unwrap(); 512]);
     }
-    let committed = CommittedRead::new(rig.wal.committed_end(), rig.wal.backfilled()).unwrap();
+    let committed = CommittedRead::new(
+        rig.wal.committed_end(),
+        rig.wal.backfilled(),
+        rig.wal.epoch(),
+    )
+    .unwrap();
     let shared = SharedWal::new(rig.wal.file_bytes());
     let wal = WalReader::open(shared.clone()).unwrap();
     MarkZero {
@@ -1358,7 +1366,6 @@ fn snapshot_under_mark_zero(mutate: impl FnOnce(&Rig, &SharedWal)) -> Result<Syn
         snapshot_step(),
         &mut zero.wal,
         zero.committed,
-        zero.rig.wal.epoch(),
         &mut zero.rig.db,
         &mut PageTable::new(),
         &zero.rig.store,
@@ -1455,7 +1462,6 @@ fn fill_under_mark_zero(file: impl FnOnce(&Rig) -> Vec<u8>) -> Result<Synced, St
         snapshot_step(),
         &mut zero.wal,
         zero.committed,
-        zero.rig.wal.epoch(),
         &mut zero.rig.db,
         &mut PageTable::new(),
         &zero.rig.store,

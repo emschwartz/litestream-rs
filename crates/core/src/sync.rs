@@ -520,8 +520,8 @@ pub(crate) async fn stage<R: Read + Seek, P: PageSource, L: ObjectStore>(
 
 /// Scans the WAL from `step`'s start and stages one file, or none when nothing is new.
 ///
-/// `committed` and `epoch` come from one read of the same WAL source. A
-/// position pinned to another epoch fails with `ReadTxLost`: the checkpoint
+/// `committed` carries the read epoch it was taken under. A position pinned
+/// to another epoch fails with `ReadTxLost`: the checkpoint
 /// protocol retook the read transaction, and `recover` must prove the new one.
 /// `pages` is the page checksum table (`crate::pages`): every database-file page
 /// is checked against it, every staged WAL page recorded in it.
@@ -536,7 +536,6 @@ pub async fn sync_step<R: Read + Seek, P: PageSource, L: ObjectStore>(
     step: Step,
     wal: &mut WalReader<R>,
     committed: CommittedRead,
-    epoch: ReadEpoch,
     db: &mut P,
     pages: &mut PageTable,
     staging: &L,
@@ -544,27 +543,23 @@ pub async fn sync_step<R: Read + Seek, P: PageSource, L: ObjectStore>(
     now: Timestamp,
 ) -> Result<Synced, StepFailed> {
     let source = Source { db, pages };
-    match run(&step, wal, committed, epoch, source, staging, cfg, now).await {
+    match run(&step, wal, committed, source, staging, cfg, now).await {
         Ok(synced) => Ok(synced),
         Err(fault) => Err(StepFailed { fault, retry: step }),
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "sync_step's arguments, passed through"
-)]
 async fn run<R: Read + Seek, P: PageSource, L: ObjectStore>(
     step: &Step,
     wal: &mut WalReader<R>,
     committed: CommittedRead,
-    epoch: ReadEpoch,
     source: Source<'_, P>,
     staging: &L,
     cfg: &SyncConfig,
     now: Timestamp,
 ) -> Result<Synced, Fault> {
     let Source { db, pages } = source;
+    let epoch = committed.epoch();
     let start = Start::of(step, wal)?;
     forget(pages, step, wal.header().page_size());
     if let Some(Continuity::Pinned(pin)) = start.held.map(|held| held.continuity())

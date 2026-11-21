@@ -234,7 +234,8 @@ fn a_removed_wal_has_no_file_and_no_length() {
 #[test]
 fn a_scripted_committed_read_overrides_the_file() {
     let mut fake = wal();
-    let odd = CommittedRead::new(CommittedEnd::new(5, fake.salts(), ps()), 2).unwrap();
+    let odd =
+        CommittedRead::new(CommittedEnd::new(5, fake.salts(), ps()), 2, fake.epoch()).unwrap();
     fake.script_committed(Some(odd));
     assert_eq!(committed(&mut fake), odd);
     fake.script_committed(None);
@@ -244,9 +245,18 @@ fn a_scripted_committed_read_overrides_the_file() {
 #[test]
 fn a_committed_read_never_backfills_past_its_frames() {
     let end = CommittedEnd::new(3, Salts { salt1: 1, salt2: 2 }, ps());
-    assert!(CommittedRead::new(end, 4).is_none());
-    assert!(CommittedRead::new(end, 3).unwrap().fully_backfilled());
-    assert!(!CommittedRead::new(end, 2).unwrap().fully_backfilled());
+    let epoch = ReadEpoch::first();
+    assert!(CommittedRead::new(end, 4, epoch).is_none());
+    assert!(
+        CommittedRead::new(end, 3, epoch)
+            .unwrap()
+            .fully_backfilled()
+    );
+    assert!(
+        !CommittedRead::new(end, 2, epoch)
+            .unwrap()
+            .fully_backfilled()
+    );
 }
 
 #[test]

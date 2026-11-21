@@ -10,7 +10,9 @@
 //! equal the committed end, which is the only thing that makes a WAL restart
 //! harmless (see [`Continuity`]).
 
+use std::fmt;
 use std::num::NonZeroU32;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use lsr_ltx::{PageChecksum, PageNo, PageSize, Timestamp, Txid};
 use lsr_wal::{FrameCursor, FrameRef, WalOffset};
@@ -73,30 +75,56 @@ impl WalFileLen {
     }
 }
 
-/// How many times the read transaction has been taken, counting from the first.
+/// One hold of the read transaction: which holder took it, and how many
+/// times that holder has taken it, counting from the first.
 ///
 /// The checkpoint protocol releases and retakes the transaction, so a position
-/// pinned to an epoch is pinned to one unbroken hold.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ReadEpoch(u64);
+/// pinned to an epoch is pinned to one unbroken hold. The holder is drawn from
+/// a process-wide counter when a source opens, so the first hold of a reopened
+/// source is never equal to the first hold of the source it replaces: a pin
+/// taken under one open cannot pass for a pin under the next.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ReadEpoch {
+    holder: u64,
+    count: u64,
+}
+
+impl fmt::Debug for ReadEpoch {
+    /// The count only. The holder is whatever the process counter had reached,
+    /// so printing it would make one scenario print differently from run to
+    /// run (simulator traces, the live-against-model comparisons).
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("ReadEpoch").field(&self.count).finish()
+    }
+}
+
+/// The holders handed out so far in this process.
+static HOLDERS: AtomicU64 = AtomicU64::new(0);
 
 impl ReadEpoch {
-    /// An epoch from its count; only a `WalSource` or a `Checkpointer` mints one.
+    /// The first hold of a new holder, equal to no epoch minted before it.
+    /// Only a `WalSource` (or a test standing in for one) mints one, once per open.
     #[must_use]
-    pub const fn new(count: u64) -> Self {
-        Self(count)
+    pub fn first() -> Self {
+        Self {
+            holder: HOLDERS.fetch_add(1, Ordering::Relaxed),
+            count: 1,
+        }
     }
 
-    /// The count.
+    /// How many times this holder has taken the read transaction.
     #[must_use]
-    pub const fn get(self) -> u64 {
-        self.0
+    pub const fn count(self) -> u64 {
+        self.count
     }
 
-    /// The epoch after a release and a retake.
+    /// The same holder's epoch after a release and a retake.
     #[must_use]
     pub const fn next(self) -> Self {
-        Self(self.0.saturating_add(1))
+        Self {
+            holder: self.holder,
+            count: self.count.saturating_add(1),
+        }
     }
 }
 

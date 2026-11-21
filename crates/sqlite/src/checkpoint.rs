@@ -11,9 +11,7 @@
 use std::ffi::c_int;
 use std::io;
 
-use lsr_core::{
-    Barrier, CheckpointMode, CheckpointRun, Checkpointer, ReadEpoch, SourceError, WriteLock,
-};
+use lsr_core::{Barrier, CheckpointMode, CheckpointRun, Checkpointer, SourceError, WriteLock};
 use rusqlite::{Connection, ffi};
 
 use crate::Sqlite;
@@ -88,7 +86,7 @@ impl Checkpointer for Sqlite {
             busy,
             log,
             checkpointed,
-            epoch: ReadEpoch::new(inner.epoch),
+            epoch: inner.epoch,
         })
     }
 

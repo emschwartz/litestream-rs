@@ -478,7 +478,6 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_, 
     async fn step(&mut self, step: Step) -> Result<(), Fault> {
         let mut reader = self.reader()?;
         let committed = self.wal.committed().map_err(Fault::from_source)?;
-        let epoch = self.wal.epoch();
         let cfg = SyncConfig {
             cap: None,
             ..self.cfg
@@ -487,7 +486,6 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_, 
             step,
             &mut reader,
             committed,
-            epoch,
             &mut *self.db,
             &mut *self.pages,
             self.staging,

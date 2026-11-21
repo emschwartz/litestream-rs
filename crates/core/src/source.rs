@@ -69,17 +69,31 @@ pub enum SourceError {
 pub struct CommittedRead {
     end: CommittedEnd,
     backfilled: u32,
+    epoch: ReadEpoch,
 }
 
 impl CommittedRead {
-    /// `None` when `backfilled` exceeds the frame count, which no wal-index holds.
+    /// A read taken under the hold `epoch`; `None` when `backfilled` exceeds
+    /// the frame count, which no wal-index holds.
     #[must_use]
-    pub const fn new(end: CommittedEnd, backfilled: u32) -> Option<Self> {
+    pub const fn new(end: CommittedEnd, backfilled: u32, epoch: ReadEpoch) -> Option<Self> {
         if backfilled > end.frame_count() {
             None
         } else {
-            Some(Self { end, backfilled })
+            Some(Self {
+                end,
+                backfilled,
+                epoch,
+            })
         }
+    }
+
+    /// The hold of the read transaction this read was taken under. It comes
+    /// with the read, not from a second call, so nothing can retake the
+    /// transaction between the two.
+    #[must_use]
+    pub const fn epoch(&self) -> ReadEpoch {
+        self.epoch
     }
 
     /// The committed end and the generation it counts frames of.
@@ -144,7 +158,8 @@ pub trait WalSource {
     /// [`SourceError::Busy`] while a writer is mid-update; others when the read fails.
     fn committed(&mut self) -> Result<CommittedRead, SourceError>;
 
-    /// Which hold of the read transaction the answers above belong to.
+    /// Which hold of the read transaction the answers above belong to now;
+    /// [`CommittedRead::epoch`] is the one a given read was taken under.
     fn epoch(&self) -> ReadEpoch;
 }
 

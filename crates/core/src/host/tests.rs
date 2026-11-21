@@ -21,6 +21,7 @@ fn read(generation: u32, frames: u32, backfilled: u32) -> CommittedRead {
     CommittedRead::new(
         CommittedEnd::new(frames, salts(generation), PageSize::MIN),
         backfilled,
+        ReadEpoch::first(),
     )
     .unwrap()
 }
@@ -32,7 +33,7 @@ fn ran(log: u32, checkpointed: u32) -> Option<CheckpointRun> {
         busy: false,
         log,
         checkpointed,
-        epoch: ReadEpoch::new(2),
+        epoch: ReadEpoch::first().next(),
     })
 }
 

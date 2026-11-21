@@ -11,7 +11,7 @@ use crate::conformance::block_on;
 use crate::fault::SnapshotCause;
 use crate::layout::Level;
 use crate::mem::MemStore;
-use crate::position::{Position, ReadEpoch};
+use crate::position::Position;
 use crate::source::{FakeDb, FakeWal, SourceError, SourceOp};
 use crate::store::{PageLimit, ReadLen, StoreError, StoreOp};
 use crate::sync::{Step, StepEnd, SyncConfig, Synced, sync_step};
@@ -116,13 +116,16 @@ impl Rig {
             Step::Incremental,
         );
         let mut wal = WalReader::open(Cursor::new(self.wal.file_bytes())).unwrap();
-        let committed =
-            CommittedRead::new(self.wal.committed_end(), self.wal.backfilled()).unwrap();
+        let committed = CommittedRead::new(
+            self.wal.committed_end(),
+            self.wal.backfilled(),
+            self.wal.epoch(),
+        )
+        .unwrap();
         let synced = block_on(sync_step(
             step,
             &mut wal,
             committed,
-            self.wal.epoch(),
             &mut self.db,
             &mut PageTable::new(),
             &self.staging,
@@ -427,7 +430,7 @@ fn a_wal_restarted_since_the_proof_is_wal_moved() {
 #[test]
 fn a_retaken_read_transaction_is_read_tx_lost() {
     let mut rig = two_commits();
-    rig.wal.set_epoch(ReadEpoch::new(rig.wal.epoch().get() + 1));
+    rig.wal.set_epoch(rig.wal.epoch().next());
     let failed = rig.snapshot(5000).unwrap_err();
     assert_eq!(failed.fault, Fault::ReadTxLost);
 }

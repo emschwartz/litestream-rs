@@ -842,7 +842,7 @@ impl SimSqlite {
             pool_checkpoints: 0,
             rng: seed,
             forced: None,
-            epoch: ReadEpoch::new(1),
+            epoch: ReadEpoch::first(),
             next_reader: 0,
             next_token: 0,
             barrier: None,
@@ -1175,7 +1175,8 @@ impl SimSqlite {
             };
             let end = CommittedEnd::new(frames, index.salts, state.page_size);
             state.faults.shm_forced =
-                CommittedRead::new(end, index.backfilled.min(frames)).map(|read| (read, 2));
+                CommittedRead::new(end, index.backfilled.min(frames), state.epoch)
+                    .map(|read| (read, 2));
             state.faults.shm_forced.is_some()
         })
     }
@@ -1395,15 +1396,17 @@ impl WalSource for SimSource {
             if let Some(left) = left.checked_sub(1).filter(|left| *left > 0) {
                 state.faults.shm_forced = Some((read, left));
             }
-            return Ok(read);
+            // The forced numbers, under the hold the read is taken in now.
+            return CommittedRead::new(read.end(), read.backfilled(), state.epoch)
+                .ok_or(SourceError::Busy);
         }
         let index = &state.index;
         if state.faults.empty_db {
             let end = CommittedEnd::new(0, index.salts, state.page_size);
-            return CommittedRead::new(end, 0).ok_or(SourceError::Busy);
+            return CommittedRead::new(end, 0, state.epoch).ok_or(SourceError::Busy);
         }
         let end = CommittedEnd::new(index.mx_frame, index.salts, state.page_size);
-        CommittedRead::new(end, index.backfilled).ok_or(SourceError::Busy)
+        CommittedRead::new(end, index.backfilled, state.epoch).ok_or(SourceError::Busy)
     }
 
     fn epoch(&self) -> ReadEpoch {

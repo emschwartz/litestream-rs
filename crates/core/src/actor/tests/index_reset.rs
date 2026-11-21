@@ -12,7 +12,7 @@ fn reset(wal: &FakeWal) -> CommittedRead {
         salt1: salts.salt1.wrapping_add(1),
         salt2: 77,
     };
-    CommittedRead::new(lsr_wal::CommittedEnd::new(0, next, PS), 0).unwrap()
+    CommittedRead::new(lsr_wal::CommittedEnd::new(0, next, PS), 0, wal.epoch()).unwrap()
 }
 
 /// Checkpoints that a reset would make due were it to give a proof.

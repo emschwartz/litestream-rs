@@ -215,7 +215,7 @@ impl<B: Backend> Stepper<B> {
             header: Some(*wal.header()),
             len: self.backend.len().map_err(source)?,
             committed: Some(committed),
-            epoch: self.backend.epoch(),
+            epoch: committed.epoch(),
         };
         Ok((wal, view, committed))
     }
@@ -248,13 +248,11 @@ impl<B: Backend> Stepper<B> {
             .map_err(|halt| RigError::Store(format!("the verdict halts: {halt:?}")))?;
         let (mut wal, _, committed) = self.view()?;
         self.now = self.now.saturating_add(10);
-        let epoch = self.backend.epoch();
         let mut db = self.backend.clone();
         let synced = block_on(sync_step(
             step,
             &mut wal,
             committed,
-            epoch,
             &mut db,
             &mut self.pages,
             &self.staging,

@@ -92,7 +92,7 @@ use crate::maintain::{
     listing_after_upload, read_back, run_compact, run_delete,
 };
 use crate::pages::{PageTable, seeded};
-use crate::position::{Position, ReadEpoch, SyncedThrough, WalFileLen};
+use crate::position::{Position, SyncedThrough, WalFileLen};
 use crate::recover::{
     FrameCheck, Miss, Probes, Recovered, Tip, TipView, WalView, read_header, recover,
 };
@@ -323,12 +323,11 @@ fn wal_view<W: WalSource, R: std::io::Read + std::io::Seek>(
     reader: Option<&WalReader<R>>,
     committed: CommittedRead,
 ) -> Result<WalView, Fault> {
-    let epoch = wal.epoch();
     Ok(WalView {
         header: reader.map(|reader| *reader.header()),
         len: wal.len().map_err(Fault::from_source)?,
         committed: Some(committed),
-        epoch,
+        epoch: committed.epoch(),
     })
 }
 
@@ -1101,7 +1100,7 @@ impl Actor {
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
     ) -> Result<Stepped, Fault> {
-        let (mut reader, committed, epoch) = match self.open_wal(env)? {
+        let (mut reader, committed) = match self.open_wal(env)? {
             Ok(opened) => opened,
             Err(verdict) => return Ok(verdict),
         };
@@ -1118,7 +1117,6 @@ impl Actor {
             step,
             &mut reader,
             committed,
-            epoch,
             &mut *env.db,
             &mut self.engine.pages,
             env.staging,
@@ -1176,20 +1174,18 @@ impl Actor {
     fn open_wal<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore, R: ObjectStore>(
         &self,
         env: &mut Env<'_, W, P, C, L, R>,
-    ) -> Result<Result<(WalReader<W::Wal>, CommittedRead, ReadEpoch), Stepped>, Fault> {
-        let epoch = env.wal.epoch();
+    ) -> Result<Result<(WalReader<W::Wal>, CommittedRead), Stepped>, Fault> {
         let committed = env.wal.committed().map_err(Fault::from_source)?;
         if let Some(reader) = open_reader(env.wal)? {
-            return Ok(Ok((reader, committed, epoch)));
+            return Ok(Ok((reader, committed)));
         }
         if self.pending().is_none() {
             return self.without_wal(env.wal, committed).map(Err);
         }
         env.ck.bump_seq().map_err(Fault::from_source)?;
-        let epoch = env.wal.epoch();
         let committed = env.wal.committed().map_err(Fault::from_source)?;
         let reader = open_reader(env.wal)?.ok_or(Fault::WalMoved)?;
-        Ok(Ok((reader, committed, epoch)))
+        Ok(Ok((reader, committed)))
     }
 
     /// No readable WAL and no snapshot pending: recovery classifies the loss.

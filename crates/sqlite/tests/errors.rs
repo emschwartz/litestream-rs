@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use lsr_core::{CheckpointMode, Checkpointer, PageSource, ReadEpoch, SourceError, WalSource};
+use lsr_core::{CheckpointMode, Checkpointer, PageSource, SourceError, WalSource};
 use lsr_ltx::{PageNo, PageSize};
 use lsr_sqlite::{
     DatabaseFile, OpenError, SetupError, Sqlite, SqliteConfig, app_connection, app_connection_for,
@@ -192,7 +192,7 @@ fn ending_a_lock_that_is_not_held_is_invalid_input() {
 fn a_read_transaction_that_cannot_be_retaken_is_lost_until_it_can() {
     let (_dir, path, app) = fresh();
     let mut live = Sqlite::open(&path).unwrap();
-    assert_eq!(live.epoch(), ReadEpoch::new(1));
+    let first = live.epoch();
     app.execute_batch("DROP TABLE _litestream_seq").unwrap();
     assert_eq!(
         live.checkpoint(CheckpointMode::Passive).err(),
@@ -203,7 +203,20 @@ fn a_read_transaction_that_cannot_be_retaken_is_lost_until_it_can() {
     app.execute_batch("CREATE TABLE _litestream_seq (id INTEGER PRIMARY KEY, seq INTEGER)")
         .unwrap();
     live.committed().unwrap();
-    assert_eq!(live.epoch(), ReadEpoch::new(2), "a new hold of the pin");
+    assert_eq!(live.epoch(), first.next(), "a new hold of the pin");
+}
+
+/// A reopen's first hold of the read transaction is not the closed one's first hold: a position
+/// pinned under the old open must never count as pinned under the new one.
+#[test]
+fn a_reopen_never_repeats_an_epoch_of_the_open_before() {
+    let (_dir, path, _app) = fresh();
+    let mut before = Sqlite::open(&path).unwrap();
+    let old = before.committed().unwrap().epoch();
+    drop(before);
+    let mut after = Sqlite::open(&path).unwrap();
+    assert_ne!(after.committed().unwrap().epoch(), old);
+    assert_ne!(after.epoch(), old);
 }
 
 /// A TRUNCATE that ran but could not finish under another reader is a run with `busy` set and
@@ -212,6 +225,7 @@ fn a_read_transaction_that_cannot_be_retaken_is_lost_until_it_can() {
 fn a_checkpoint_blocked_by_readers_reports_busy_in_the_run() {
     let (_dir, path, app) = fresh();
     let mut live = Sqlite::open(&path).unwrap();
+    let first = live.epoch();
     app.execute("INSERT INTO t(v) VALUES (zeroblob(5000))", [])
         .unwrap();
     let reader = Connection::open(&path).unwrap();
@@ -221,7 +235,7 @@ fn a_checkpoint_blocked_by_readers_reports_busy_in_the_run() {
         .unwrap();
     let run = live.checkpoint(CheckpointMode::Truncate).unwrap();
     assert!(run.busy, "{run:?}");
-    assert_eq!(run.epoch, ReadEpoch::new(2));
+    assert_eq!(run.epoch, first.next());
 }
 
 /// A connection is set up only for the database it names: an in-memory one has no file, one on

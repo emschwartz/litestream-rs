@@ -146,7 +146,7 @@ impl Engine {
             header: Some(*wal.header()),
             len: self.live.len().unwrap(),
             committed: Some(committed),
-            epoch: self.live.epoch(),
+            epoch: committed.epoch(),
         };
         let tip = self
             .position
@@ -159,7 +159,6 @@ impl Engine {
             step,
             &mut wal,
             committed,
-            self.live.epoch(),
             &mut db,
             &mut lsr_core::PageTable::new(),
             &self.staging,

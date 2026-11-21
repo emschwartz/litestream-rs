@@ -357,7 +357,7 @@ impl<S: WalSource, P: PageSource, C: Checkpointer> Engine<S, P, C> {
             header: Some(*wal.header()),
             len: self.src.len().expect("len"),
             committed: Some(committed),
-            epoch: self.src.epoch(),
+            epoch: committed.epoch(),
         };
         Some((wal, view, committed))
     }
@@ -383,12 +383,10 @@ impl<S: WalSource, P: PageSource, C: Checkpointer> Engine<S, P, C> {
             return format!("halt {seen}");
         };
         self.now += 10;
-        let epoch = self.src.epoch();
         let synced = block_on(sync_step(
             step,
             &mut wal,
             committed,
-            epoch,
             &mut self.pg,
             &mut lsr_core::PageTable::new(),
             &self.staging,

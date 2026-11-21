@@ -96,8 +96,9 @@ pub(crate) struct Inner {
     /// was deleted under the pin; `None` when it could not be told.
     wal_id: Option<FileId>,
     page_size: PageSize,
-    /// How many read transactions have been taken; the current one is this many.
-    pub(crate) epoch: u64,
+    /// The current hold of the read transaction: a holder of this open's own, and how many
+    /// times it has been taken.
+    pub(crate) epoch: ReadEpoch,
     /// The id of the last barrier or write lock handed out, and of the last one handed back:
     /// a lock is outstanding while they differ. Whether the reader is pinned and whether the
     /// writer is in its transaction are not stored: they are whether SQLite has the
@@ -186,8 +187,8 @@ impl Sqlite {
     /// autocheckpoint off and `SQLITE_FCNTL_PERSIST_WAL` on for both connections (so the
     /// replicator closing after the host keeps the WAL), creates `_litestream_seq` and `_litestream_lock`
     /// (`db.go:1174`, `1180`, so Go and Rust leave the same schema), takes the first read
-    /// transaction (epoch 1) and maps the wal-index. It returns once the read transaction is
-    /// held, so nothing can checkpoint past it.
+    /// transaction (the first epoch of a holder no earlier open had) and maps the wal-index. It
+    /// returns once the read transaction is held, so nothing can checkpoint past it.
     ///
     /// # Errors
     /// [`OpenError`]; nothing stays open or pinned.
@@ -246,7 +247,7 @@ impl Sqlite {
             wal_path,
             wal_id,
             page_size,
-            epoch: 1,
+            epoch: ReadEpoch::first(),
             issued: 0,
             returned: 0,
         };
@@ -331,7 +332,7 @@ impl Inner {
     /// Takes the read transaction again (a new epoch).
     pub(crate) fn begin_read(&mut self) -> Result<(), rusqlite::Error> {
         begin_read(&self.reader)?;
-        self.epoch = self.epoch.saturating_add(1);
+        self.epoch = self.epoch.next();
         Ok(())
     }
 
@@ -449,11 +450,11 @@ impl WalSource for Sqlite {
         let end = CommittedEnd::new(header.mx_frame, salts, inner.page_size);
         // nBackfill is outside the copies the checksum covers: a value above mxFrame is a read
         // racing a restart, which a retry resolves.
-        CommittedRead::new(end, header.backfilled).ok_or(SourceError::Busy)
+        CommittedRead::new(end, header.backfilled, inner.epoch).ok_or(SourceError::Busy)
     }
 
     fn epoch(&self) -> ReadEpoch {
-        ReadEpoch::new(self.lock().epoch)
+        self.lock().epoch
     }
 }
 
@@ -637,7 +638,7 @@ mod tests {
         inner.reader.execute_batch("ROLLBACK").unwrap();
         inner.ensure_pinned().unwrap();
         assert!(inner.pinned());
-        assert_eq!(inner.epoch, epoch.saturating_add(1));
+        assert_eq!(inner.epoch, epoch.next());
         inner.end_read().unwrap();
         assert!(!inner.pinned());
         inner.end_read().unwrap();

@@ -94,7 +94,7 @@ fn whole<W: WalSource>(proof: &SyncedThrough, wal: &mut W) -> Result<Whole<W::Wa
     let committed = wal.committed().map_err(Fault::from_source)?;
     let salts = reader.header().salts();
     let page_size = position.page_size();
-    if position.continuity() != Continuity::Pinned(wal.epoch()) {
+    if position.continuity() != Continuity::Pinned(committed.epoch()) {
         return Err(Fault::ReadTxLost);
     }
     if reader.header().page_size() != page_size {
@@ -107,7 +107,7 @@ fn whole<W: WalSource>(proof: &SyncedThrough, wal: &mut W) -> Result<Whole<W::Wa
         return Err(Fault::WalMoved);
     }
     let synced = CommittedEnd::new(position.synced().offset().frame_index(), salts, page_size);
-    let upto = CommittedRead::new(synced, committed.backfilled())
+    let upto = CommittedRead::new(synced, committed.backfilled(), committed.epoch())
         .ok_or(Fault::Bug(BugSite::SnapshotScan))?;
     let map = scan_whole(&mut reader, upto)?;
     let commit = position.commit();

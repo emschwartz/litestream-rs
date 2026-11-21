@@ -342,13 +342,16 @@ impl Rig {
 
     fn step(&mut self, step: Step, now: i64) -> Synced {
         let mut wal = WalReader::open(Cursor::new(self.wal.file_bytes())).unwrap();
-        let committed =
-            CommittedRead::new(self.wal.committed_end(), self.wal.backfilled()).unwrap();
+        let committed = CommittedRead::new(
+            self.wal.committed_end(),
+            self.wal.backfilled(),
+            self.wal.epoch(),
+        )
+        .unwrap();
         block_on(sync_step(
             step,
             &mut wal,
             committed,
-            self.wal.epoch(),
             &mut self.db,
             &mut PageTable::new(),
             &self.store,
