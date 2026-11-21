@@ -25,7 +25,7 @@ use crate::signals;
 
 /// What the signal thread and the main thread share.
 #[derive(Debug)]
-pub struct Control {
+pub(crate) struct Control {
     started: Started,
     child: Mutex<Option<Child>>,
     begun: AtomicBool,
@@ -40,7 +40,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 impl Control {
     /// Wakes the main thread through `wake`.
     #[must_use]
-    pub fn new(wake: SyncSender<Wake>) -> Self {
+    pub(crate) fn new(wake: SyncSender<Wake>) -> Self {
         Self {
             started: Started::default(),
             child: Mutex::new(None),
@@ -51,12 +51,12 @@ impl Control {
 
     /// The replicators a further signal cuts.
     #[must_use]
-    pub fn started(&self) -> Started {
+    pub(crate) fn started(&self) -> Started {
         self.started.clone()
     }
 
     /// One signal: the first wakes the main thread, any after shutdown began cuts it short.
-    pub fn on_signal(&self, signal: i32) {
+    pub(crate) fn on_signal(&self, signal: i32) {
         if self.begun.swap(true, Ordering::SeqCst) {
             self.started.cut();
             if let Some(child) = &*lock(&self.child) {
@@ -99,7 +99,7 @@ fn spawn(daemon: &Daemon, control: &Control, command: &ExecCommand) -> ChildProc
 
 /// Runs until a signal or the child's exit, then drains every database.
 #[must_use]
-pub fn supervise(
+pub(crate) fn supervise(
     daemon: &Arc<Daemon>,
     exec: Option<&ExecCommand>,
     control: &Control,

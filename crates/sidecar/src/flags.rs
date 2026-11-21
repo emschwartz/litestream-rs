@@ -136,7 +136,7 @@ fn parse_bool(name: &'static str, value: &str) -> Result<bool, UsageError> {
 }
 
 /// Go's level names, any case.
-pub fn parse_level(value: &str) -> Option<LogLevel> {
+pub(crate) fn parse_level(value: &str) -> Option<LogLevel> {
     match value.to_ascii_uppercase().as_str() {
         "TRACE" => Some(LogLevel::Trace),
         "DEBUG" => Some(LogLevel::Debug),
@@ -195,7 +195,7 @@ fn scan(args: &[String]) -> Result<Option<Scanned>, UsageError> {
 ///
 /// # Errors
 /// [`UsageError`], the first Go would report.
-pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
+pub(crate) fn parse(args: &[String]) -> Result<Parsed, UsageError> {
     let Some((set, positional)) = scan(args)? else {
         return Ok(Parsed::Help);
     };
@@ -265,18 +265,18 @@ fn check(flags: &Flags) -> Result<(), UsageError> {
 }
 
 /// Go's default config path when neither `-config` nor `LITESTREAM_CONFIG` is set.
-pub const DEFAULT_CONFIG: &str = "/etc/litestream.yml";
+pub(crate) const DEFAULT_CONFIG: &str = "/etc/litestream.yml";
 
 /// Go's `resolveConfigPath`: the flag, else `LITESTREAM_CONFIG`, else the default.
 #[must_use]
-pub fn config_path(flag: Option<&str>, env: impl Fn(&str) -> Option<String>) -> PathBuf {
+pub(crate) fn config_path(flag: Option<&str>, env: impl Fn(&str) -> Option<String>) -> PathBuf {
     flag.map(str::to_owned)
         .or_else(|| env("LITESTREAM_CONFIG").filter(|v| !v.is_empty()))
         .map_or_else(|| PathBuf::from(DEFAULT_CONFIG), PathBuf::from)
 }
 
 /// The usage text, after Go's.
-pub const USAGE: &str = "\
+pub(crate) const USAGE: &str = "\
 The replicate command starts a server to monitor & replicate databases.
 You can specify your database & replicas in a configuration file or you can
 replicate a single database file by specifying its path and its replicas in the

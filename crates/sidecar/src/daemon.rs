@@ -127,7 +127,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// Every replicator started so far, and whether a second signal has cut the drains.
 #[derive(Clone, Debug, Default)]
-pub struct Started(Arc<Mutex<Drains>>);
+pub(crate) struct Started(Arc<Mutex<Drains>>);
 
 #[derive(Debug, Default)]
 struct Drains {
@@ -146,7 +146,7 @@ impl Started {
     }
 
     /// Cuts every drain to nothing, now and from now on.
-    pub fn cut(&self) {
+    pub(crate) fn cut(&self) {
         let mut drains = lock(&self.0);
         drains.cut = true;
         for replicator in &drains.replicators {
@@ -156,7 +156,7 @@ impl Started {
 
     /// The time a drain gets: `left`, or nothing once cut.
     #[must_use]
-    pub fn budget(&self, left: Duration) -> Duration {
+    pub(crate) fn budget(&self, left: Duration) -> Duration {
         if lock(&self.0).cut {
             Duration::ZERO
         } else {
@@ -166,7 +166,7 @@ impl Started {
 }
 
 /// The daemon over a plan.
-pub struct Daemon {
+pub(crate) struct Daemon {
     log: Arc<Logger>,
     clock: Arc<dyn Clock>,
     started: Started,
@@ -187,7 +187,7 @@ impl Daemon {
     /// Opens every store and starts every database that exists; each appears on `board`.
     /// When this returns, every database that exists has its read transaction held.
     #[must_use]
-    pub fn start(
+    pub(crate) fn start(
         plan: &Plan,
         restore_all: bool,
         log: Arc<Logger>,
@@ -346,7 +346,7 @@ impl Daemon {
 
     /// Starts the waiter for databases whose file does not exist yet, if there are any.
     #[must_use]
-    pub fn wait_for_files(self: &Arc<Self>) -> Option<Waiter> {
+    pub(crate) fn wait_for_files(self: &Arc<Self>) -> Option<Waiter> {
         let interval = {
             let slots = lock(&self.slots);
             slots
@@ -400,7 +400,7 @@ impl Daemon {
     /// Drains every running database within what is left of the one deadline begun at
     /// `begun` (the signal, the child's exit, or now), and reports each.
     #[must_use]
-    pub fn stop(&self, waiter: Option<Waiter>, begun: lsr_ltx::Timestamp) -> Finished {
+    pub(crate) fn stop(&self, waiter: Option<Waiter>, begun: lsr_ltx::Timestamp) -> Finished {
         if let Some(waiter) = waiter {
             waiter.end();
         }
@@ -428,14 +428,14 @@ impl Daemon {
 
     /// The daemon's clock, read now.
     #[must_use]
-    pub fn now(&self) -> lsr_ltx::Timestamp {
+    pub(crate) fn now(&self) -> lsr_ltx::Timestamp {
         self.clock.now()
     }
 
     /// What is left of the shutdown budget begun at `begun`; nothing once a second signal
     /// has cut the drains.
     #[must_use]
-    pub fn left(&self, begun: lsr_ltx::Timestamp) -> Duration {
+    pub(crate) fn left(&self, begun: lsr_ltx::Timestamp) -> Duration {
         let spent = self
             .clock
             .now()
@@ -484,12 +484,12 @@ impl Daemon {
 
     /// The log.
     #[must_use]
-    pub fn log(&self) -> &Logger {
+    pub(crate) fn log(&self) -> &Logger {
         &self.log
     }
 
     /// Logs the signal that began the shutdown.
-    pub fn signalled(&self, signal: i32) {
+    pub(crate) fn signalled(&self, signal: i32) {
         let fields = [("signal", signals::name(signal).into())];
         self.log
             .info("signal received, litestream shutting down", &fields);
@@ -498,7 +498,7 @@ impl Daemon {
 
 /// The waiter thread and its stop.
 #[derive(Debug)]
-pub struct Waiter {
+pub(crate) struct Waiter {
     stop: SyncSender<()>,
     thread: JoinHandle<()>,
 }

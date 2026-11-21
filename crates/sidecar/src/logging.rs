@@ -25,7 +25,7 @@ use lsr_replica::{Event, EventSink, Txid, VerifyOutcome};
 
 /// One field's value.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Value {
+pub(crate) enum Value {
     /// A string.
     Text(String),
     /// A number.
@@ -85,7 +85,7 @@ const fn name(level: LogLevel) -> &'static str {
 }
 
 /// Where lines go, at what level, in what format.
-pub struct Logger {
+pub(crate) struct Logger {
     level: LogLevel,
     format: LogFormat,
     clock: Arc<dyn Clock>,
@@ -104,7 +104,12 @@ impl std::fmt::Debug for Logger {
 impl Logger {
     /// A logger to stdout or stderr.
     #[must_use]
-    pub fn new(level: LogLevel, format: LogFormat, stderr: bool, clock: Arc<dyn Clock>) -> Self {
+    pub(crate) fn new(
+        level: LogLevel,
+        format: LogFormat,
+        stderr: bool,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
         let out: Box<dyn Write + Send> = if stderr {
             Box::new(io::stderr())
         } else {
@@ -115,7 +120,7 @@ impl Logger {
 
     /// A logger to any writer.
     #[must_use]
-    pub fn to(
+    pub(crate) fn to(
         level: LogLevel,
         format: LogFormat,
         clock: Arc<dyn Clock>,
@@ -131,7 +136,7 @@ impl Logger {
 
     /// Writes one line if `level` is enabled. A write that fails is dropped: there
     /// is nowhere else to say so, and replication must not stop for it.
-    pub fn log(&self, level: LogLevel, msg: &str, fields: &[(&str, Value)]) {
+    pub(crate) fn log(&self, level: LogLevel, msg: &str, fields: &[(&str, Value)]) {
         if rank(level) < rank(self.level) {
             return;
         }
@@ -151,17 +156,17 @@ impl Logger {
     }
 
     /// [`Logger::log`] at info.
-    pub fn info(&self, msg: &str, fields: &[(&str, Value)]) {
+    pub(crate) fn info(&self, msg: &str, fields: &[(&str, Value)]) {
         self.log(LogLevel::Info, msg, fields);
     }
 
     /// [`Logger::log`] at warn.
-    pub fn warn(&self, msg: &str, fields: &[(&str, Value)]) {
+    pub(crate) fn warn(&self, msg: &str, fields: &[(&str, Value)]) {
         self.log(LogLevel::Warn, msg, fields);
     }
 
     /// [`Logger::log`] at error.
-    pub fn error(&self, msg: &str, fields: &[(&str, Value)]) {
+    pub(crate) fn error(&self, msg: &str, fields: &[(&str, Value)]) {
         self.log(LogLevel::Error, msg, fields);
     }
 }
@@ -204,7 +209,12 @@ fn text_value(value: &Value) -> String {
 }
 
 /// slog's `TextHandler` line.
-pub fn text_line(time: &str, level: LogLevel, msg: &str, fields: &[(&str, Value)]) -> String {
+pub(crate) fn text_line(
+    time: &str,
+    level: LogLevel,
+    msg: &str,
+    fields: &[(&str, Value)],
+) -> String {
     let mut line = format!(
         "time={time} level={} msg={}",
         name(level),
@@ -239,7 +249,12 @@ pub(crate) fn json_string(text: &str) -> String {
 }
 
 /// slog's `JSONHandler` line.
-pub fn json_line(time: &str, level: LogLevel, msg: &str, fields: &[(&str, Value)]) -> String {
+pub(crate) fn json_line(
+    time: &str,
+    level: LogLevel,
+    msg: &str,
+    fields: &[(&str, Value)],
+) -> String {
     let mut line = format!(
         "{{\"time\":{},\"level\":\"{}\",\"msg\":{}",
         json_string(time),
@@ -260,7 +275,7 @@ pub fn json_line(time: &str, level: LogLevel, msg: &str, fields: &[(&str, Value)
 
 /// One database's events, as log lines.
 #[derive(Debug)]
-pub struct DbEvents {
+pub(crate) struct DbEvents {
     log: Arc<Logger>,
     db: String,
 }
@@ -268,7 +283,7 @@ pub struct DbEvents {
 impl DbEvents {
     /// The sink for the database at `path`.
     #[must_use]
-    pub fn new(log: Arc<Logger>, path: &Path) -> Self {
+    pub(crate) fn new(log: Arc<Logger>, path: &Path) -> Self {
         let db = path.file_name().map_or_else(
             || path.display().to_string(),
             |n| n.to_string_lossy().into_owned(),

@@ -30,16 +30,16 @@
 //! directory scan's header read happens in `lsr-config`, before any starts.
 
 mod check;
-pub mod daemon;
+mod daemon;
 mod error;
-pub mod exec;
-pub mod flags;
-pub mod health;
-pub mod http;
-pub mod logging;
-pub mod metrics;
-pub mod signals;
-pub mod supervise;
+mod exec;
+mod flags;
+mod health;
+mod http;
+mod logging;
+mod metrics;
+mod signals;
+mod supervise;
 
 use std::io::Read as _;
 use std::path::Path;
@@ -54,7 +54,7 @@ pub use daemon::{End, Finished};
 pub use error::SidecarError;
 pub use exec::{ChildEnd, During, ExecCommand, ExecError};
 pub use flags::{Parsed, UsageError};
-pub use http::AddrError;
+pub use http::{AddrError, MAX_CONNECTIONS, MAX_REQUEST};
 
 use crate::daemon::Daemon;
 use crate::exec::Wake;

@@ -17,7 +17,7 @@ use signal_hook::iterator::{Handle, Signals};
 
 /// Go's `os.Signal` names, for the log.
 #[must_use]
-pub fn name(signal: i32) -> &'static str {
+pub(crate) fn name(signal: i32) -> &'static str {
     match signal {
         SIGINT => "interrupt",
         SIGTERM => "terminated",
@@ -28,7 +28,7 @@ pub fn name(signal: i32) -> &'static str {
 
 /// The installed handlers and the thread reading them.
 #[derive(Debug)]
-pub struct Watch {
+pub(crate) struct Watch {
     handle: Handle,
     thread: Option<JoinHandle<()>>,
 }
@@ -38,7 +38,7 @@ impl Watch {
     ///
     /// # Errors
     /// The OS refused a handler or the thread.
-    pub fn install(on_signal: impl Fn(i32) + Send + 'static) -> io::Result<Self> {
+    pub(crate) fn install(on_signal: impl Fn(i32) + Send + 'static) -> io::Result<Self> {
         let mut signals = Signals::new([SIGINT, SIGTERM, SIGHUP])?;
         let handle = signals.handle();
         let thread = stack::spawn("lsr-signals", stack::WAIT_STACK, move || {
