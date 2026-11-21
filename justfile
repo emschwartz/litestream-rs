@@ -164,6 +164,13 @@ compat-s3: minio-up
         LSR_COMPAT_S3_SECRET_KEY=lsrtest-throwaway-0000 \
         cargo nextest run -p lsr-compat --test s3 --run-ignored all --locked --no-fail-fast
 
+# The two alternation runs (Go and Rust taking turns on one prefix, each turn killed at a
+# seeded point) over the pinned builds; compat-releases.yml prints the seed of a nightly run.
+# Both alternation runs with one seed: just compat-alternation <seed> replays a nightly failure.
+compat-alternation $LSR_ALTERNATION_SEED:
+    ./scripts/build-go-litestream.sh
+    cargo nextest run -p lsr-compat --test alternation --test sidecar --run-ignored all --locked --no-fail-fast --no-capture -E 'test(go_and_rust_alternate_on_one_prefix) | test(go_and_rust_sidecars_alternate_on_one_config_file)'
+
 # The store and the conformance suite against the real Tigris bucket of task 8t.
 # Never part of check or CI: it needs credentials (a file outside the repo, or
 # AWS_* variables) and spends real requests (docs/spikes.md, Task 8t).

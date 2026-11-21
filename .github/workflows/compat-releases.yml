@@ -6,6 +6,10 @@ on:
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
+    inputs:
+      alternation_seed:
+        description: The alternation seed to replay, decimal (empty for this run's id)
+        default: ""
 
 permissions:
   contents: read
@@ -60,3 +64,49 @@ jobs:
         with:
           tool: cargo-nextest,just
       - run: just compat-tags
+
+  # Fresh alternation seeds over the pinned builds. Pushes and pull requests run one fixed seed
+  # (ci.yml); this run takes its own id as the seed, so every night tries new kill points, and
+  # rerunning the job keeps the id, so a rerun replays the same seed. The seed is printed first
+  # and, on a failure, is in the job summary with the line that replays it.
+  alternation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,just
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsqlite3-dev
+      - run: just upstream
+      - uses: actions/cache@v4
+        with:
+          path: .upstream/bin
+          key: go-bin-${{ runner.os }}-${{ hashFiles('scripts/build-go-litestream.sh') }}-v0.5.0-v0.5.15-v0.5.16-v0.5.18-041a8c3
+      # The input goes through the environment and is checked to be a number; never shell text.
+      - id: seed
+        env:
+          SEED_INPUT: ${{ inputs.alternation_seed }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -eu
+          seed="${SEED_INPUT:-$RUN_ID}"
+          case "$seed" in
+            '' | *[!0-9]*) echo "the alternation seed must be a decimal number" >&2; exit 1 ;;
+          esac
+          echo "seed=$seed" >> "$GITHUB_OUTPUT"
+          echo "::notice title=Alternation seed::LSR_ALTERNATION_SEED=$seed (replay: just compat-alternation $seed)"
+          printf '### Alternation seed\n\n`LSR_ALTERNATION_SEED=%s`\n' "$seed" >> "$GITHUB_STEP_SUMMARY"
+      - run: just compat-alternation "$SEED"
+        env:
+          SEED: ${{ steps.seed.outputs.seed }}
+      - if: failure() && steps.seed.outputs.seed != ''
+        env:
+          SEED: ${{ steps.seed.outputs.seed }}
+        run: |
+          printf '\n**The alternation failed with seed %s.** Replay it with `just compat-alternation %s`.\n' "$SEED" "$SEED" >> "$GITHUB_STEP_SUMMARY"
+          echo "::error title=Alternation failed::LSR_ALTERNATION_SEED=$SEED (replay: just compat-alternation $SEED)"

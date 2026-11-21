@@ -32,6 +32,14 @@ Checked with cargo-fuzz 0.13.2. The fuzz crate has its own `fuzz/Cargo.lock`, wh
 updates without `--locked`; a diff there after a run means a workspace dependency changed and the
 lockfile should be committed.
 
+## The nightly run
+
+`.github/workflows/nightly.yml` runs `just fuzz <target> 600` for `decode`, `index` and `wal` (the
+LTX and WAL decoders) every night and on demand, one job per target, from the committed corpus,
+on nightly Rust. A target that finds a crash, leak, timeout or out-of-memory input fails its job
+and uploads `fuzz/artifacts/<target>/` as the artifact `fuzz-<target>-<run id>`. The new inputs it
+writes stay on the runner; the corpus only grows by the minimised commits below.
+
 ## The 24-hour run
 
 Five processes, one per target, each on its own core (`just fuzz` caps each at 2 GiB RSS, so five need
