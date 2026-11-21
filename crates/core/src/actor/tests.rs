@@ -221,7 +221,7 @@ impl Rig {
         panic!("never settled: {seen:?}");
     }
 
-    /// Ticks, following the actor's own wake times, until it halts, drains,
+    /// Ticks, following the actor's own wake times, until it stops, drains,
     /// waits on the WAL, or `limit` ticks have run.
     fn follow(&mut self, actor: &mut Actor, mut now: i64, limit: usize) -> Vec<Tick> {
         let mut seen = Vec::new();
@@ -229,7 +229,7 @@ impl Rig {
             let tick = self.tick(actor, now);
             let next = match &tick {
                 Tick::Ran { next, .. } => *next,
-                Tick::Halted(_) | Tick::Drained { .. } | Tick::DeadlineReached(_) => {
+                Tick::Stopped(_) | Tick::Drained { .. } | Tick::DeadlineReached(_) => {
                     Next::OnWalChange
                 }
             };
@@ -287,14 +287,14 @@ fn go_like() -> ActorConfig {
 fn event(tick: &Tick) -> Option<&Event> {
     match tick {
         Tick::Ran { event, .. } => Some(event),
-        Tick::Halted(_) | Tick::Drained { .. } | Tick::DeadlineReached(_) => None,
+        Tick::Stopped(_) | Tick::Drained { .. } | Tick::DeadlineReached(_) => None,
     }
 }
 
 fn next_of(tick: &Tick) -> Option<Next> {
     match tick {
         Tick::Ran { next, .. } => Some(*next),
-        Tick::Halted(_) | Tick::Drained { .. } | Tick::DeadlineReached(_) => None,
+        Tick::Stopped(_) | Tick::Drained { .. } | Tick::DeadlineReached(_) => None,
     }
 }
 
@@ -487,7 +487,7 @@ fn throttle_retry_after_honored() {
 }
 
 #[test]
-fn halt_is_terminal() {
+fn stop_is_terminal() {
     let (mut rig, mut actor) = caught_up();
     rig.remote.inner.inject_failure(
         StoreOp::Upload,
@@ -499,18 +499,18 @@ fn halt_is_terminal() {
     rig.tick(&mut actor, T0 + 10);
     assert_eq!(
         rig.tick(&mut actor, T0 + 10),
-        Tick::Halted(HaltCause::Credentials)
+        Tick::Stopped(StopCause::Credentials)
     );
     let io = rig.io();
     rig.commit(3);
     for at in [T0 + 10, T0 + 100_000] {
         assert_eq!(
             rig.tick(&mut actor, at),
-            Tick::Halted(HaltCause::Credentials)
+            Tick::Stopped(StopCause::Credentials)
         );
     }
-    assert_eq!(rig.io(), io, "a halted actor does no I/O");
-    assert_eq!(actor.phase(), Phase::Halted(HaltCause::Credentials));
+    assert_eq!(rig.io(), io, "a stopped actor does no I/O");
+    assert_eq!(actor.phase(), Phase::Stopped(StopCause::Credentials));
 }
 
 fn big() -> PageSize {
@@ -539,7 +539,7 @@ fn resize(rig: &mut Rig, size: PageSize) {
 }
 
 fn page_size_changed() -> Tick {
-    Tick::Halted(HaltCause::PageSizeChanged {
+    Tick::Stopped(StopCause::PageSizeChanged {
         was: PS,
         now: big(),
     })
@@ -573,7 +573,7 @@ fn a_failed_boot_waits_without_spinning() {
 }
 
 #[test]
-fn a_page_size_change_halts_at_boot_before_anything_is_staged() {
+fn a_page_size_change_stops_at_boot_before_anything_is_staged() {
     let (mut rig, _) = caught_up();
     let before = everything(&rig);
     resize(&mut rig, big());
@@ -600,7 +600,7 @@ fn an_empty_replica_takes_any_page_size() {
     let mut actor = Actor::new(cfg());
     let ticks = rig.settle(&mut actor, T0);
     assert!(
-        ticks.iter().all(|tick| !matches!(tick, Tick::Halted(_))),
+        ticks.iter().all(|tick| !matches!(tick, Tick::Stopped(_))),
         "{ticks:?}"
     );
     let (_, remote) = everything(&rig);
@@ -608,7 +608,7 @@ fn an_empty_replica_takes_any_page_size() {
 }
 
 #[test]
-fn a_wal_that_returns_at_another_page_size_halts_before_staging() {
+fn a_wal_that_returns_at_another_page_size_stops_before_staging() {
     let (mut rig, _) = caught_up();
     rig.wal.remove_file();
     let mut actor = Actor::new(cfg());
@@ -667,7 +667,7 @@ fn drain_finishes_uploads() {
 }
 
 #[test]
-fn drain_deadline_halts() {
+fn drain_deadline_stops() {
     let (mut rig, mut actor) = caught_up();
     for _ in 0..20 {
         rig.remote
@@ -689,7 +689,7 @@ fn drain_deadline_halts() {
     );
     assert_eq!(
         rig.tick(&mut actor, T0 + 60_000),
-        Tick::Halted(HaltCause::Shutdown)
+        Tick::Stopped(StopCause::Shutdown)
     );
 }
 
@@ -847,7 +847,7 @@ fn a_drain_waits_out_a_throttled_upload_and_drains() {
 fn routed(seen: &[Tick]) -> usize {
     seen.iter()
         .filter(|t| {
-            matches!(t, Tick::Halted(_))
+            matches!(t, Tick::Stopped(_))
                 || matches!(
                     event(t),
                     Some(Event::Retrying { .. } | Event::Resnapshot(_))
@@ -1186,7 +1186,7 @@ fn a_crash_between_prunes_boots_clean() {
     assert_eq!(event(&boot), Some(&Event::Booted { cause: None }));
     let seen = rig.settle(&mut actor, later + 1);
     assert!(
-        seen.iter().all(|t| !matches!(t, Tick::Halted(_))),
+        seen.iter().all(|t| !matches!(t, Tick::Stopped(_))),
         "{seen:?}"
     );
     assert_eq!(staged(&rig), vec![6]);
@@ -1465,9 +1465,9 @@ fn snapshots(rig: &Rig) -> Vec<u64> {
         .collect()
 }
 
-fn no_halt(seen: &[Tick]) {
+fn no_stop(seen: &[Tick]) {
     assert!(
-        seen.iter().all(|t| !matches!(t, Tick::Halted(_))),
+        seen.iter().all(|t| !matches!(t, Tick::Stopped(_))),
         "{seen:?}"
     );
 }
@@ -1504,7 +1504,7 @@ fn a_torn_staged_file_the_replica_lacks_is_dropped_with_all_after_it() {
         );
         assert_eq!(staged(&rig), vec![2]);
         let seen = rig.settle(&mut actor, T0 + 2);
-        no_halt(&seen);
+        no_stop(&seen);
         assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2), (3, 3)]);
         assert_eq!(snapshots(&rig), vec![1, 3]);
         assert_eq!(restored(&rig), 4);
@@ -1533,7 +1533,7 @@ fn a_torn_staged_file_the_replica_holds_is_dropped_and_the_snapshot_takes_the_ne
         );
         assert_eq!(staged(&rig), vec![2]);
         let seen = rig.settle(&mut actor, T0 + 2);
-        no_halt(&seen);
+        no_stop(&seen);
         assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2), (3, 3), (4, 4)]);
         assert_eq!(snapshots(&rig), vec![1, 4]);
         assert_eq!(restored(&rig), 4);
@@ -1559,7 +1559,7 @@ fn the_upload_task_drops_a_staged_file_that_turned_unreadable_and_snapshots() {
         );
         assert_eq!(staged(&rig), vec![1]);
         let seen = rig.settle(&mut actor, T0 + 1);
-        no_halt(&seen);
+        no_stop(&seen);
         assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2)]);
         assert_eq!(snapshots(&rig), vec![1, 2]);
         assert_eq!(restored(&rig), 2);
@@ -1584,7 +1584,7 @@ fn a_crash_between_the_drop_and_the_snapshot_boots_clean() {
     // Nothing staged was lost this time: the WAL carries on from staged 1.
     assert_eq!(event(&boot), Some(&Event::Booted { cause: None }));
     let seen = rig.settle(&mut actor, T0 + 2);
-    no_halt(&seen);
+    no_stop(&seen);
     assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2)]);
     assert_eq!(restored(&rig), 2);
 }

@@ -36,9 +36,9 @@ use std::time::Duration;
 use lsr_core::conformance::block_on;
 use lsr_core::{
     Actor, ActorConfig, CheckpointConfig, CheckpointMode, Checkpointer, Clock, Env, Event,
-    FakeClock, Fault, FileInfo, HaltCause, Inventory, L0Retention, Maintenance, MemStore, Next,
-    ObjectStore, PageSource, ReadLen, Responses, StoreError, SyncConfig, Tick, Upload,
-    UploadConfig, WalSource,
+    FakeClock, Fault, FileInfo, Inventory, L0Retention, Maintenance, MemStore, Next, ObjectStore,
+    PageSource, ReadLen, Responses, StopCause, StoreError, SyncConfig, Tick, Upload, UploadConfig,
+    WalSource,
 };
 use lsr_ltx::{PageNo, PageSize, Timestamp, Txid};
 use lsr_sim::{
@@ -137,8 +137,8 @@ pub enum RigError {
     #[error("a store: {0}")]
     Store(String),
     /// The actor stopped.
-    #[error("the actor halted: {0:?}")]
-    Halted(HaltCause),
+    #[error("the actor stopped: {0:?}")]
+    Stopped(StopCause),
     /// The actor was still busy after this many ticks.
     #[error("the actor did not settle in {0} ticks")]
     Unsettled(u32),
@@ -787,13 +787,13 @@ impl<B: Backend> Rig<B> {
     /// Ticks until the actor is idle with everything staged on the replica.
     ///
     /// # Errors
-    /// [`RigError::Halted`], [`RigError::Unsettled`], or the rig's own.
+    /// [`RigError::Stopped`], [`RigError::Unsettled`], or the rig's own.
     pub fn settle(&mut self) -> Result<(), RigError> {
         for _ in 0..SETTLE_TICKS {
             match self.tick()? {
-                Tick::Halted(cause) => return Err(RigError::Halted(cause)),
+                Tick::Stopped(cause) => return Err(RigError::Stopped(cause)),
                 Tick::Drained { .. } => return Ok(()),
-                Tick::DeadlineReached(_) => return Err(RigError::Halted(HaltCause::Shutdown)),
+                Tick::DeadlineReached(_) => return Err(RigError::Stopped(StopCause::Shutdown)),
                 Tick::Ran {
                     event: Event::Idle,
                     next,
@@ -875,23 +875,23 @@ impl<B: Backend> Rig<B> {
         self.cycle_with(Self::settle)
     }
 
-    /// Ticks until the actor halts, and returns why.
+    /// Ticks until the actor stops, and returns why.
     ///
     /// # Errors
     /// [`RigError::Unsettled`] when it settles or keeps running instead.
-    pub fn until_halt(&mut self) -> Result<HaltCause, RigError> {
+    pub fn until_stop(&mut self) -> Result<StopCause, RigError> {
         for _ in 0..SETTLE_TICKS {
-            if let Tick::Halted(cause) = self.tick()? {
+            if let Tick::Stopped(cause) = self.tick()? {
                 return Ok(cause);
             }
         }
         Err(RigError::Unsettled(SETTLE_TICKS))
     }
 
-    /// One tick that must not halt.
-    fn tick_unhalted(&mut self) -> Result<(), RigError> {
+    /// One tick that must not stop.
+    fn tick_not_stopped(&mut self) -> Result<(), RigError> {
         match self.tick()? {
-            Tick::Halted(cause) => Err(RigError::Halted(cause)),
+            Tick::Stopped(cause) => Err(RigError::Stopped(cause)),
             Tick::Ran { .. } | Tick::Drained { .. } | Tick::DeadlineReached(_) => Ok(()),
         }
     }
@@ -900,14 +900,14 @@ impl<B: Backend> Rig<B> {
     /// `rows` rows each at once while the actor ticks; returns once every writer is done.
     ///
     /// # Errors
-    /// [`RigError::Halted`] when a tick halts, a writer's error, or the rig's own.
+    /// [`RigError::Stopped`] when a tick stops, a writer's error, or the rig's own.
     pub fn writers_while_ticking(&mut self, writers: u32, rows: u32) -> Result<(), RigError> {
         let Some(child) = self.app.child_mut() else {
             return self.local_writers(writers, rows);
         };
         child.start_writers(writers, rows)?;
         loop {
-            self.tick_unhalted()?;
+            self.tick_not_stopped()?;
             let child = self
                 .app
                 .child_mut()
@@ -931,7 +931,7 @@ impl<B: Backend> Rig<B> {
                 .iter()
                 .all(std::thread::ScopedJoinHandle::is_finished)
             {
-                self.tick_unhalted()?;
+                self.tick_not_stopped()?;
             }
             for handle in handles {
                 handle

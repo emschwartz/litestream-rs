@@ -116,7 +116,7 @@ fn a_flipped_database_page_stops_a_strict_engine_before_it_is_shipped() {
     let seen = rig.follow(&mut actor, T0 + 10, 50);
     assert_eq!(
         seen.last(),
-        Some(&Tick::Halted(HaltCause::DatabasePageMismatch {
+        Some(&Tick::Stopped(StopCause::DatabasePageMismatch {
             pgno: three()
         })),
         "{seen:?}"
@@ -140,7 +140,7 @@ fn a_boot_that_continues_checks_pages_the_last_run_recorded() {
     let seen = rig.follow(&mut actor, T0 + 20, 50);
     assert_eq!(
         seen.last(),
-        Some(&Tick::Halted(HaltCause::DatabasePageMismatch {
+        Some(&Tick::Stopped(StopCause::DatabasePageMismatch {
             pgno: three()
         })),
         "{seen:?}"
@@ -158,7 +158,7 @@ fn a_boot_that_snapshots_does_not_seed() {
     let mut actor = Actor::new(cfg());
     let seen = rig.follow(&mut actor, T0 + 10, 50);
     assert!(
-        !seen.iter().any(|tick| matches!(tick, Tick::Halted(_))),
+        !seen.iter().any(|tick| matches!(tick, Tick::Stopped(_))),
         "{seen:?}"
     );
 }

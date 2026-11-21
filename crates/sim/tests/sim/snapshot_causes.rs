@@ -73,9 +73,9 @@ fn every_scenario_runs() {
 }
 
 /// A page-size change is no snapshot cause: a replica prefix holds one page
-/// size, so the engine halts at boot and the old states still restore.
+/// size, so the engine stops at boot and the old states still restore.
 #[test]
-fn a_page_size_change_halts_and_the_old_states_restore() {
+fn a_page_size_change_stops_and_the_old_states_restore() {
     run(vacuum_page_size_change);
 }
 

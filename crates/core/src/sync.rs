@@ -33,7 +33,7 @@ use lsr_wal::{
 };
 use std::io::{Read, Seek};
 
-use crate::fault::{BugSite, Clamped, Fault, HaltCause, SnapshotCause};
+use crate::fault::{BugSite, Clamped, Fault, SnapshotCause, StopCause};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::pages::{PageTable, snapshot_clears};
 use crate::position::{Continuity, LastPage, Position, ReachedEnd, ReadLockHold};
@@ -86,9 +86,9 @@ pub enum Step {
 }
 
 impl TryFrom<Recovered> for Step {
-    type Error = HaltCause;
+    type Error = StopCause;
 
-    fn try_from(recovered: Recovered) -> Result<Self, HaltCause> {
+    fn try_from(recovered: Recovered) -> Result<Self, StopCause> {
         match recovered {
             Recovered::Continue(position) => Ok(Self::Incremental(position)),
             Recovered::WalRestarted(position) => Ok(Self::NewGeneration(position)),
@@ -97,7 +97,7 @@ impl TryFrom<Recovered> for Step {
                 prev_timestamp: None,
                 cause,
             }),
-            Recovered::Halt(cause) => Err(cause),
+            Recovered::Stop(cause) => Err(cause),
         }
     }
 }
@@ -317,19 +317,19 @@ pub(crate) fn scan_whole<R: Read + Seek>(
     scan(wal, &start, upto, None).map(|scanned| scanned.map)
 }
 
-/// The fault for a failed WAL read, `halt` when the failure means damage below
+/// The fault for a failed WAL read, `stop` when the failure means damage below
 /// the committed end: a WAL that changes under a scan is moved, not corrupt.
 ///
 /// A read on read mark 0 holds no lock against an application TRUNCATE checkpoint or
 /// a restart in place, so a short or non-verifying frame can be the WAL moving
 /// under the read. The header is read again, after the failed read: other salts,
 /// a short file or no header is `WalMoved` (`recover` classifies what happened),
-/// and the halt stands only when the header still names the scanned generation.
+/// and the stop stands only when the header still names the scanned generation.
 /// Every read below the committed end (the scan, the page fill, a snapshot's
 /// whole scan, each step of the checkpoint protocol) goes through here.
-fn below_committed<R: Read + Seek>(wal: &mut WalReader<R>, halt: Fault) -> Fault {
+fn below_committed<R: Read + Seek>(wal: &mut WalReader<R>, stop: Fault) -> Fault {
     match wal.generation_unchanged() {
-        Ok(true) => halt,
+        Ok(true) => stop,
         Ok(false) => Fault::WalMoved,
         Err(_err) => Fault::LocalIo,
     }

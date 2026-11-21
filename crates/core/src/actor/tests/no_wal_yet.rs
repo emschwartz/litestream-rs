@@ -56,7 +56,7 @@ fn run_like_the_thread(rig: &mut Rig, actor: &mut Actor, start: i64, span: i64) 
                 next: Next::At(at), ..
             } => at.unix_millis().min(poll).max(now),
             Tick::Ran { .. } => poll,
-            Tick::Halted(_) | Tick::Drained { .. } | Tick::DeadlineReached(_) => {
+            Tick::Stopped(_) | Tick::Drained { .. } | Tick::DeadlineReached(_) => {
                 seen.push(tick);
                 break;
             }
@@ -86,7 +86,7 @@ fn a_restored_database_with_no_wal_header_ticks_by_the_poll_not_the_cpu() {
         let (mut rig, mut actor) = restored_with_no_wal(snapshot_due);
         let seen = run_like_the_thread(&mut rig, &mut actor, T0 + 10, MINUTE);
         assert!(seen.len() <= BOUND, "{snapshot_due}: {} ticks", seen.len());
-        no_halt(&seen);
+        no_stop(&seen);
         assert_eq!(retries(&seen), 0, "{snapshot_due}: {seen:?}");
         // The pending snapshot ran on the header the bump wrote, and reached
         // the replica after the restored newest staged file.

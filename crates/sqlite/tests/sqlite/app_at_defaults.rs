@@ -41,7 +41,7 @@ fn boots_and_snapshots(rig: &Rig<Sqlite>, from: usize) -> Vec<Option<SnapshotCau
                 ..
             } => Some(*cause),
             Tick::Ran { .. }
-            | Tick::Halted(_)
+            | Tick::Stopped(_)
             | Tick::Drained { .. }
             | Tick::DeadlineReached(_) => None,
         })

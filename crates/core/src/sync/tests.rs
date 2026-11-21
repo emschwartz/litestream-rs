@@ -752,7 +752,7 @@ fn a_position_pinned_to_another_epoch_is_read_tx_lost() {
 }
 
 #[test]
-fn a_corrupt_committed_frame_halts() {
+fn a_corrupt_committed_frame_stops() {
     let mut rig = Rig::new();
     commit(&rig.wal, &[1, 2], 2);
     rig.wal.corrupt_byte(100);
@@ -1395,7 +1395,7 @@ fn fault_of(result: Result<Synced, StepFailed>) -> Option<Fault> {
     }
 }
 
-fn assert_not_halted(result: Result<Synced, StepFailed>) {
+fn assert_not_stopped(result: Result<Synced, StepFailed>) {
     if let Err(failed) = result {
         let policy = crate::fault::policy(&failed.fault);
         assert!(
@@ -1407,17 +1407,17 @@ fn assert_not_halted(result: Result<Synced, StepFailed>) {
 }
 
 #[test]
-fn an_app_truncate_checkpoint_during_a_snapshot_scan_is_not_a_halt() {
+fn an_app_truncate_checkpoint_during_a_snapshot_scan_is_not_a_stop() {
     // SQLite lets wal_checkpoint(TRUNCATE) finish against a read-mark-0 reader once the
     // WAL is fully backfilled: it waits only on READ_LOCK(1..N).
-    assert_not_halted(snapshot_under_read_mark_zero(truncate_file));
+    assert_not_stopped(snapshot_under_read_mark_zero(truncate_file));
 }
 
 #[test]
-fn an_app_write_that_restarts_the_wal_during_a_snapshot_scan_is_not_a_halt() {
+fn an_app_write_that_restarts_the_wal_during_a_snapshot_scan_is_not_a_stop() {
     // Under read mark 0 the next write restarts the WAL in place (so the read lock does not stop it),
     // overwriting the header and frame 1 the open reader is about to scan.
-    assert_not_halted(snapshot_under_read_mark_zero(restart_file));
+    assert_not_stopped(snapshot_under_read_mark_zero(restart_file));
 }
 
 const WAL_HEADER: usize = 32;
@@ -1438,7 +1438,7 @@ fn a_scan_over_a_restarted_wal_is_wal_moved() {
 }
 
 #[test]
-fn a_corrupt_frame_under_an_unchanged_header_still_halts() {
+fn a_corrupt_frame_under_an_unchanged_header_still_stops() {
     let result = snapshot_under_read_mark_zero(|rig, shared| {
         let mut bytes = rig.wal.file_bytes();
         bytes[WAL_HEADER + 24 + 5] ^= 0xFF;
@@ -1448,7 +1448,7 @@ fn a_corrupt_frame_under_an_unchanged_header_still_halts() {
 }
 
 #[test]
-fn a_short_file_under_an_unchanged_header_still_halts() {
+fn a_short_file_under_an_unchanged_header_still_stops() {
     let result = snapshot_under_read_mark_zero(|rig, shared| {
         let mut bytes = rig.wal.file_bytes();
         bytes.truncate(WAL_HEADER + FRAME_BYTES + 100);
@@ -1483,7 +1483,7 @@ fn a_fill_over_a_truncated_wal_is_wal_moved() {
 }
 
 #[test]
-fn a_fill_over_a_restarted_wal_is_a_retry_not_a_halt() {
+fn a_fill_over_a_restarted_wal_is_a_retry_not_a_stop() {
     let result = fill_under_read_mark_zero(|rig| {
         // Frame 1 is overwritten with another page 1: the scan's digest no longer holds.
         rig.wal.append_tx(&[(pg(1), vec![0x77; PS.bytes()])], nz(3));
@@ -1493,7 +1493,7 @@ fn a_fill_over_a_restarted_wal_is_a_retry_not_a_halt() {
 }
 
 #[test]
-fn a_fill_over_a_short_file_under_an_unchanged_header_still_halts() {
+fn a_fill_over_a_short_file_under_an_unchanged_header_still_stops() {
     let result = fill_under_read_mark_zero(|rig| {
         let mut bytes = rig.wal.file_bytes();
         bytes.truncate(WAL_HEADER + FRAME_BYTES + 100);

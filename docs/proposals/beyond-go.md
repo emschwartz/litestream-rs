@@ -53,5 +53,5 @@ D2 already decides the first: turn on tracked checksums once rollback to Go is n
 
 1. Spike S5, which is cheap and decides whether part 1 is possible.
 2. Part 1, the state file, because it closes the only silent gap v1 has (G1).
-3. Part 2, writer identity, because it is safe with Go and makes the second-writer halt fire earlier.
+3. Part 2, writer identity, because it is safe with Go and makes the second-writer stop fire earlier.
 4. Parts 3 and 4 after cutover, or when a finding calls for them.

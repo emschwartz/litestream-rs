@@ -1,12 +1,12 @@
 //! One scenario per fault: each drives the engine into that fault and checks
 //! what was seen, with the oracle judging the replica.
 
-use lsr_core::{Event, HaltCause, Responses};
+use lsr_core::{Event, Responses, StopCause};
 use lsr_sim::Op;
 use lsr_sim::run::Seen;
 use lsr_sim::scenario::{
     self, FaultKind, Scenario, app_scenarios, clock_scenarios, fault_reason, fault_scenarios,
-    halt_of, names_fault, persistent_of, run_scenario, seal_scenarios, window_scenarios,
+    names_fault, persistent_of, run_scenario, seal_scenarios, stop_of, window_scenarios,
 };
 
 fn run(make: fn() -> Scenario) {
@@ -48,7 +48,7 @@ fn every_fault_has_a_scenario_or_a_reason() {
 fn persistent_scenarios() -> Vec<(FaultKind, fn() -> Scenario)> {
     FaultKind::ALL
         .into_iter()
-        .filter(|kind| halt_of(*kind).is_some())
+        .filter(|kind| stop_of(*kind).is_some())
         .flat_map(|kind| fault_scenarios(kind).iter().map(move |make| (kind, *make)))
         .collect()
 }
@@ -62,11 +62,11 @@ fn under_strict_every_persistent_scenario_stops_with_its_cause() {
         assert!(!scenario.keeps_trying(), "{}", scenario.name);
         let report = run_scenario(&scenario);
         let report = report.unwrap_or_else(|why| panic!("{why}"));
-        let want = halt_of(kind).unwrap();
+        let want = stop_of(kind).unwrap();
         assert!(
             report.seen.iter().any(|seen| matches!(
                 seen,
-                Seen::Halt(cause) if std::mem::discriminant(cause) == std::mem::discriminant(&want)
+                Seen::Stop(cause) if std::mem::discriminant(cause) == std::mem::discriminant(&want)
             )),
             "{} did not stop with {want:?}",
             scenario.name
@@ -76,7 +76,7 @@ fn under_strict_every_persistent_scenario_stops_with_its_cause() {
 
 /// Under the default responses every persistent fault but another writer
 /// (and the end of a drain) degrades a task instead, the oracle holds, and
-/// no engine halts (a drain may end at its deadline while the task is
+/// no engine stops (a drain may end at its deadline while the task is
 /// degraded). A scenario whose fault clears expects the task to
 /// recover; each such fault has at least one that does, except the ones the
 /// simulator cannot undo (a WAL cut short or unlinked stays so, and a page
@@ -95,8 +95,8 @@ fn under_go_like_every_persistent_scenario_degrades_and_the_oracle_holds() {
             !report
                 .seen
                 .iter()
-                .any(|seen| matches!(seen, Seen::Halt(cause) if *cause != HaltCause::Shutdown)),
-            "{} halted",
+                .any(|seen| matches!(seen, Seen::Stop(cause) if *cause != StopCause::Shutdown)),
+            "{} stopped",
             scenario.name
         );
         assert!(
@@ -138,7 +138,7 @@ fn under_go_like_a_second_writer_stops_uploads_and_maintenance() {
     let scenario = scenario::second_writer_mid_run().under(Responses::GO_LIKE);
     assert!(!scenario.keeps_trying());
     let report = run_scenario(&scenario).unwrap_or_else(|why| panic!("{why}"));
-    assert!(report.seen.contains(&Seen::Halt(HaltCause::OtherWriter)));
+    assert!(report.seen.contains(&Seen::Stop(StopCause::OtherWriter)));
 }
 
 #[test]

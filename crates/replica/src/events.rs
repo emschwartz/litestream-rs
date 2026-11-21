@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
-use lsr_core::{AppCheckpoint, HaltCause};
+use lsr_core::{AppCheckpoint, StopCause};
 use lsr_ltx::Txid;
 
 use crate::health::VerifyOutcome;
@@ -34,7 +34,7 @@ pub enum Event {
         rebuilt: bool,
     },
     /// The engine stopped by a cause and waits for a person.
-    Stopped(HaltCause),
+    Stopped(StopCause),
     /// A scheduled verify ended: the restore of `txid` compared with the live database at
     /// `txid`. A failure is a degraded state (`Health::verification`) that names what differed.
     Verified {

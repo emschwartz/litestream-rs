@@ -27,7 +27,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 use std::{fmt, io};
 
-use lsr_core::{Clock, HaltCause, Task, Unfinished};
+use lsr_core::{Clock, StopCause, Task, Unfinished};
 use lsr_ltx::Timestamp;
 use lsr_sqlite::{DatabaseFile, Sqlite};
 
@@ -202,7 +202,7 @@ impl Shared {
             let outcome = *state.outcome.get_or_insert(outcome);
             state.health.phase = match outcome {
                 Stopped::Drained { .. } | Stopped::DeadlineReached { .. } => {
-                    Phase::Stopped(HaltCause::Shutdown)
+                    Phase::Stopped(StopCause::Shutdown)
                 }
                 Stopped::Stopped(cause) => Phase::Stopped(cause),
                 Stopped::Gone(gone) => Phase::Gone(gone),
@@ -518,7 +518,7 @@ fn boot_answer(state: &State, died: bool) -> Option<Booted> {
         Some(Stopped::Gone(gone)) => return Some(Booted::Gone(gone)),
         Some(Stopped::Stopped(cause)) => return Some(Booted::Stopped(cause)),
         Some(Stopped::Drained { .. } | Stopped::DeadlineReached { .. }) if !state.booted => {
-            return Some(Booted::Stopped(HaltCause::Shutdown));
+            return Some(Booted::Stopped(StopCause::Shutdown));
         }
         Some(Stopped::Drained { .. } | Stopped::DeadlineReached { .. }) | None => {}
     }

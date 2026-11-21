@@ -10,7 +10,7 @@
 use std::fmt;
 
 use lsr_core::{
-    AppCheckpoint, AppCheckpoints, Degraded, HaltCause, PersistentCause, Severity, SnapshotCause,
+    AppCheckpoint, AppCheckpoints, Degraded, PersistentCause, Severity, SnapshotCause, StopCause,
     Task,
 };
 use lsr_ltx::{Timestamp, Txid};
@@ -25,7 +25,7 @@ pub enum Phase {
     /// A stop was asked for: only sync and upload run, until the deadline.
     Draining,
     /// Stopped by a cause, or by a drain that ended. Nothing runs.
-    Stopped(HaltCause),
+    Stopped(StopCause),
     /// The thread is not there.
     Gone(Gone),
 }
@@ -51,7 +51,7 @@ pub enum Booted {
     /// The wait ran out first.
     TimedOut,
     /// The replicator stopped before it booted.
-    Stopped(HaltCause),
+    Stopped(StopCause),
     /// The thread is not there.
     Gone(Gone),
 }
@@ -74,7 +74,7 @@ pub enum Stopped {
         staged_not_uploaded: u32,
     },
     /// Already stopped by a cause (another writer, or a configured stop) before the drain.
-    Stopped(HaltCause),
+    Stopped(StopCause),
     /// The thread is not there.
     Gone(Gone),
 }

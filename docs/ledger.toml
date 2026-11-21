@@ -574,7 +574,7 @@
 "TestDB_Close_SyncRetry" = { counterpart = "lsr-core::actor::tests::drain_finishes_uploads" }
 "TestDB_Close_SyncRetry/AlreadyClosedDoneSkipsSync" = { reason = "Go-only: Close's done-channel plumbing between goroutines. Rust's shutdown is one begin_shutdown on the actor (lsr-core actor::tests::drain_finishes_uploads)." }
 "TestDB_Close_SyncRetry/DoneChannelInterruptsRetryLoop" = { reason = "Go-only: Close's done-channel plumbing; see AlreadyClosedDoneSkipsSync." }
-"TestDB_Close_SyncRetry/FailsAfterTimeout" = { counterpart = "lsr-core::actor::tests::drain_deadline_halts" }
+"TestDB_Close_SyncRetry/FailsAfterTimeout" = { counterpart = "lsr-core::actor::tests::drain_deadline_stops" }
 "TestDB_Close_SyncRetry/NilDoneBehavesLikeClose" = { reason = "Go-only: Close's done-channel plumbing; see AlreadyClosedDoneSkipsSync." }
 "TestDB_Close_SyncRetry/RespectsContextCancellation" = { reason = "Go-only: context.Context cancellation. The Rust core is sans-IO and advances one tick at a time (docs/PLAN.md section 2, goal 5); there is no context to cancel, and shutdown is final_sync with a deadline." }
 "TestDB_Close_SyncRetry/SucceedsAfterTransientFailure" = { counterpart = "lsr-core::actor::tests::a_drain_retries_a_transient_upload_and_drains" }
@@ -1178,7 +1178,7 @@
 "TestStore_SyncDB_ConcurrentCapture" = { reason = "Go-only: fairness and context handling of Go mutexes shared between goroutines (the exec, sync and checkpoint locks). The Rust engine is one actor driven tick by tick with no shared locks (docs/PLAN.md section 3)." }
 
 ["litestream/store_test.go"]
-"TestStore_Close_StopsMonitorsBeforeClosingDBs" = { reason = "v1's shutdown drains what is in flight up to `shutdown-sync-timeout` instead of cancelling it (docs/plans/phase-4-sidecar.md, the daemon): a drain past its deadline stops (lsr-core::actor::tests::drain_deadline_halts) and a second signal cuts it at once (lsr-cli::cli::daemon::a_second_signal_cuts_the_drain)." }
+"TestStore_Close_StopsMonitorsBeforeClosingDBs" = { reason = "v1's shutdown drains what is in flight up to `shutdown-sync-timeout` instead of cancelling it (docs/plans/phase-4-sidecar.md, the daemon): a drain past its deadline stops (lsr-core::actor::tests::drain_deadline_stops) and a second signal cuts it at once (lsr-cli::cli::daemon::a_second_signal_cuts_the_drain)." }
 "TestStore_CompactDB" = { counterpart = "lsr-core::maintain::tests::level_one_goes_before_level_two_and_both_before_the_snapshot" }
 "TestStore_CompactDB/DBNotReady" = { counterpart = "lsr-core::maintain::tests::an_empty_replica_with_nothing_published_has_nothing_to_do" }
 "TestStore_CompactDB/L1" = { counterpart = "lsr-core::maintain::tests::level_one_compacts_the_whole_source_when_the_destination_is_empty" }
@@ -1272,7 +1272,7 @@
 "TestRestore_S3ConnectionDrop" = { counterpart = ["lsr-store-s3::store-s3::faults::cases::a_truncated_get_is_transient_never_a_short_read", "lsr-store-s3::store-s3::faults::cases::connection_reset_is_transient_and_tls_failure_is_auth"] }
 
 ["litestream/tests/integration/scenario_test.go"]
-"TestDatabaseDeletion" = { counterpart = ["lsr-sqlite::sqlite::faults::a_deleted_database_halts_and_the_replica_keeps_its_history", "lsr-sqlite::sqlite::faults::a_wal_deleted_by_another_process_while_pinned_halts_the_engine"] }
+"TestDatabaseDeletion" = { counterpart = ["lsr-sqlite::sqlite::faults::a_deleted_database_stops_and_the_replica_keeps_its_history", "lsr-sqlite::sqlite::faults::a_wal_deleted_by_another_process_while_pinned_stops_the_engine"] }
 "TestDatabaseIntegrity" = { counterpart = "lsr-compat::compat::live_source::live_sync_chain_restores" }
 "TestFreshStart" = { counterpart = "lsr-core::recover::tests::rule_1_no_newest_staged_file_is_a_first_sync" }
 

@@ -26,8 +26,8 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use lsr_core::{
-    CheckpointMode, Event, Fault, HaltCause, Policy, RecoverEvent, Recovered, SnapshotCause,
-    SourceError, Tick, policy,
+    CheckpointMode, Event, Fault, Policy, RecoverEvent, Recovered, SnapshotCause, SourceError,
+    StopCause, Tick, policy,
 };
 use lsr_sqlite::Sqlite;
 use lsr_sqlite::testing::{
@@ -61,7 +61,7 @@ fn both(case: impl Fn(Placement)) {
 
 // ----------------------------------------------------------------- the fault matrix
 
-/// The faults an injected I/O error may become: each retries (`policy`), none halts.
+/// The faults an injected I/O error may become: each retries (`policy`), none stops.
 const RETRYABLE: [Fault; 5] = [
     Fault::LocalIo,
     Fault::LocalDiskFull,
@@ -95,7 +95,7 @@ fn settle_or_write<B: Backend>(rig: &mut Rig<B>, needed: &mut bool) -> Result<()
 
 /// Fails the first `op` on a `kind` file of each tick of a clean cycle in turn (each step of a
 /// sync, a PASSIVE and a TRUNCATE), runs the cycle, and checks: the fault fired, every fault
-/// the actor reported retries and is one an I/O error may become, the actor never halted, the
+/// the actor reported retries and is one an I/O error may become, the actor never stopped, the
 /// cycle completed, and the oracle restores every transaction on the replica.
 fn each_step<B: Backend>(
     placement: Placement,
@@ -131,8 +131,8 @@ fn each_step<B: Backend>(
             assert!(matches!(policy(fault), Policy::Retry(_)), "{at}: {fault:?}");
         }
         assert!(
-            !rig.ticks().iter().any(|t| matches!(t, Tick::Halted(_))),
-            "{at}: no halt"
+            !rig.ticks().iter().any(|t| matches!(t, Tick::Stopped(_))),
+            "{at}: no stop"
         );
         rig.check().unwrap_or_else(|err| panic!("{at}: {err}"));
         outcomes.push(Outcome {
@@ -750,10 +750,10 @@ fn vacuum<B: Backend>(placement: Placement) {
 /// SQLite belief: a page size cannot change while the database is in WAL mode; `PRAGMA
 /// page_size` then VACUUM keeps the old size. A change needs the application to leave WAL mode, which
 /// it can only do with the replicator stopped; once SQLite writes the first WAL header in the
-/// new size the engine halts with the page size the replica holds and the one the database has
+/// new size the engine stops with the page size the replica holds and the one the database has
 /// (a replica prefix holds one page size, as Go's), and the replica keeps what it had.
 #[test]
-fn a_vacuum_cannot_change_the_page_size_in_wal_mode_and_a_change_halts_at_boot() {
+fn a_vacuum_cannot_change_the_page_size_in_wal_mode_and_a_change_stops_at_boot() {
     both(page_size_change::<Sqlite>);
 }
 
@@ -781,9 +781,9 @@ fn page_size_change<B: Backend>(placement: Placement) {
     // The new page size shows in the first WAL header SQLite writes; until then the WAL is
     // empty and the boot waits for it.
     rig.insert(3000).unwrap();
-    let cause = rig.until_halt().unwrap();
+    let cause = rig.until_stop().unwrap();
     assert!(
-        matches!(cause, HaltCause::PageSizeChanged { was, now } if was.get() == 4096 && now.get() == 8192),
+        matches!(cause, StopCause::PageSizeChanged { was, now } if was.get() == 4096 && now.get() == 8192),
         "{cause:?}"
     );
     rig.check().unwrap();
@@ -824,10 +824,10 @@ fn persist_wal_keeps_a_wal_a_page_size_change_makes_stale() {
 
 /// A WAL deleted by another process while the read lock holds it: SQLite keeps writing the unlinked
 /// file through its open descriptors, so every later commit is invisible to anything that opens
-/// the path. The backend must say so (`SourceError::Unlinked`), and the engine halts
+/// the path. The backend must say so (`SourceError::Unlinked`), and the engine stops
 /// (`WalUnlinked`) rather than snapshot a database it can no longer follow.
 #[test]
-fn a_wal_deleted_by_another_process_while_pinned_halts_the_engine() {
+fn a_wal_deleted_by_another_process_while_pinned_stops_the_engine() {
     both(wal_deleted::<Sqlite>);
 }
 
@@ -848,15 +848,15 @@ fn wal_deleted<B: Backend>(placement: Placement) {
         rig.backend().unwrap().committed().err(),
         Some(SourceError::Unlinked)
     );
-    assert_eq!(rig.until_halt().unwrap(), HaltCause::WalUnlinked);
+    assert_eq!(rig.until_stop().unwrap(), StopCause::WalUnlinked);
     rig.check().unwrap();
 }
 
 /// Upstream `TestDatabaseDeletion`: the database, its WAL and `-shm` deleted while replicating.
-/// The engine halts with a typed cause instead of replicating from what its descriptors still
+/// The engine stops with a typed cause instead of replicating from what its descriptors still
 /// see, and the replica keeps every transaction it had.
 #[test]
-fn a_deleted_database_halts_and_the_replica_keeps_its_history() {
+fn a_deleted_database_stops_and_the_replica_keeps_its_history() {
     both(database_deleted::<Sqlite>);
 }
 
@@ -874,7 +874,7 @@ fn database_deleted<B: Backend>(placement: Placement) {
     }
     rig.exec_unseen("INSERT INTO t(v) VALUES (randomblob(700))")
         .unwrap();
-    assert_eq!(rig.until_halt().unwrap(), HaltCause::WalUnlinked);
+    assert_eq!(rig.until_stop().unwrap(), StopCause::WalUnlinked);
     let after = rig.check().unwrap();
     assert_eq!(after.latest, before.latest);
     assert_eq!(after.restored, before.restored);

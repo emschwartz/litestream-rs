@@ -98,7 +98,7 @@ fn a_rejected_snapshot_that_cannot_be_deleted_goes_first_and_holds_retention() {
     // delete removes the rejected one.
     rig.commit(2);
     let seen = rig.follow(&mut actor, T0 + 1, 200);
-    no_halt(&seen);
+    no_stop(&seen);
     let held = seen.iter().any(|tick| {
         matches!(
             event(tick),

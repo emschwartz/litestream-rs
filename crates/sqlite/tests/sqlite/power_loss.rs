@@ -51,7 +51,7 @@ fn boot_cause(tick: &Tick) -> Option<Option<SnapshotCause>> {
             event: Event::Booted { cause },
             ..
         } => Some(*cause),
-        Tick::Ran { .. } | Tick::Halted(_) | Tick::Drained { .. } | Tick::DeadlineReached(_) => {
+        Tick::Ran { .. } | Tick::Stopped(_) | Tick::Drained { .. } | Tick::DeadlineReached(_) => {
             None
         }
     }

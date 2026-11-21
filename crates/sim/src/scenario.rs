@@ -9,14 +9,14 @@
 //!
 //! A scenario runs under one set of [`Responses`], the default unless
 //! [`Scenario::under`] says otherwise. [`Expect::Stopped`] reads that set: a
-//! cause whose response is to stop must halt the engine, one whose response
+//! cause whose response is to stop must stop the engine, one whose response
 //! is to keep trying must degrade a task, and [`Expect::Recovered`] then asks
 //! for that task to recover once the fault clears (it is skipped where the
 //! engine stops). So one list of expectations states both behaviours, and the
 //! fault tests run each persistent fault's scenarios under both presets.
 
 use lsr_core::{
-    CheckpointMode, HaltCause, Level, MaintainedEvent, PersistentCause, Responses, SnapshotCause,
+    CheckpointMode, Level, MaintainedEvent, PersistentCause, Responses, SnapshotCause, StopCause,
 };
 use lsr_ltx::PageSize;
 
@@ -100,10 +100,10 @@ pub type Check = fn(&RunReport) -> Result<(), String>;
 pub enum Expect {
     /// An event.
     Event(EventMatch),
-    /// The engine met this cause: it halted for it where the scenario's
+    /// The engine met this cause: it stopped for it where the scenario's
     /// responses stop on it, and a task is degraded by it where they keep
     /// trying.
-    Stopped(HaltCause),
+    Stopped(StopCause),
     /// A task that a kept-trying cause degraded recovered on the same
     /// engine. Skipped where the scenario's responses stop.
     Recovered,
@@ -113,7 +113,7 @@ pub enum Expect {
 
 /// Whether `responses` stop the engine on `cause`; the end of a drain always does.
 #[must_use]
-pub fn stops(responses: &Responses, cause: HaltCause) -> bool {
+pub fn stops(responses: &Responses, cause: StopCause) -> bool {
     PersistentCause::of(cause).is_none_or(|cause| responses.stops(cause))
 }
 
@@ -145,9 +145,9 @@ impl Expect {
                     ..
                 }),
             ) => key.level() == *want,
-            (Self::Stopped(want), Seen::Halt(got)) => stops(responses, *want) && want == got,
+            (Self::Stopped(want), Seen::Stop(got)) => stops(responses, *want) && want == got,
             (Self::Stopped(want), Seen::Event(Event::Degraded { cause, .. })) => {
-                !stops(responses, *want) && *want == HaltCause::from(*cause)
+                !stops(responses, *want) && *want == StopCause::from(*cause)
             }
             (Self::Recovered, Seen::Recovered(_)) | (Self::Oracle, Seen::Oracle) => true,
             (Self::Event(_) | Self::Stopped(_) | Self::Recovered | Self::Oracle, _) => false,
@@ -199,7 +199,7 @@ impl Scenario {
 pub fn run_scenario(scenario: &Scenario) -> Result<RunReport, String> {
     let opts = Opts {
         record: true,
-        allow_halt: scenario
+        allow_stop: scenario
             .expect
             .iter()
             .any(|e| matches!(e, Expect::Stopped(_))),
@@ -588,7 +588,7 @@ pub fn wal_header_torn() -> Scenario {
 /// restores.
 #[must_use]
 pub fn vacuum_page_size_change() -> Scenario {
-    let changed = HaltCause::PageSizeChanged {
+    let changed = StopCause::PageSizeChanged {
         was: PageSize::MIN,
         now: PageSize::new(2048).unwrap_or(PageSize::MIN),
     };
@@ -613,7 +613,7 @@ pub fn vacuum_page_size_change() -> Scenario {
 /// replica's page size: the restart that takes boots and replicates again.
 #[must_use]
 pub fn vacuum_page_size_change_and_back() -> Scenario {
-    let changed = HaltCause::PageSizeChanged {
+    let changed = StopCause::PageSizeChanged {
         was: PageSize::MIN,
         now: PageSize::new(2048).unwrap_or(PageSize::MIN),
     };
@@ -751,7 +751,7 @@ fn settled_under_the_reset_index(report: &RunReport) -> Result<(), String> {
                 fault: Fault::WalMoved,
                 ..
             }) => return Err("a step retried a moved WAL under the reset index".to_owned()),
-            Seen::Halt(cause) => return Err(format!("halted: {cause:?}")),
+            Seen::Stop(cause) => return Err(format!("stopped: {cause:?}")),
             Seen::Event(_)
             | Seen::Recovered(_)
             | Seen::Snapshot(_)

@@ -155,7 +155,7 @@ policy_is!(
     persistent(PersistentCause::WalUnlinked)
 );
 policy_is!(
-    shutdown_deadline_halts,
+    shutdown_deadline_stops,
     Fault::ShutdownDeadline,
     Policy::Shutdown
 );
@@ -325,9 +325,9 @@ fn each_field_names_one_cause() {
 #[test]
 fn a_persistent_cause_and_its_stop_cause_round_trip() {
     for cause in every_persistent_cause() {
-        assert_eq!(PersistentCause::of(HaltCause::from(cause)), Some(cause));
+        assert_eq!(PersistentCause::of(StopCause::from(cause)), Some(cause));
     }
-    assert_eq!(PersistentCause::of(HaltCause::Shutdown), None);
+    assert_eq!(PersistentCause::of(StopCause::Shutdown), None);
 }
 
 fn store_fault(err: &StoreError) -> Fault {

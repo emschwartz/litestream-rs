@@ -14,8 +14,8 @@ use std::time::Duration;
 
 use lsr_core::{
     Actor, ActorConfig, AppCheckpoints, CheckpointConfig, Clock, Entropy, Env, Event, Fault,
-    HaltCause, MAX_BACKOFF, Maintenance, Next, PersistentCause, Responses, RetentionMode,
-    SeededEntropy, SyncConfig, Task, Tick, UploadConfig,
+    MAX_BACKOFF, Maintenance, Next, PersistentCause, Responses, RetentionMode, SeededEntropy,
+    StopCause, SyncConfig, Task, Tick, UploadConfig,
 };
 use lsr_ltx::{PageNo, PageSize, Timestamp, Txid};
 use lsr_wal::{Salts, WalOffset};
@@ -94,8 +94,8 @@ impl fmt::Display for Failure {
 pub enum Seen {
     /// A tick's event.
     Event(Event),
-    /// A tick that halted the engine.
-    Halt(HaltCause),
+    /// A tick that stopped the engine.
+    Stop(StopCause),
     /// A task that was degraded is not any more: its work succeeded on the
     /// same engine, with no restart between.
     Recovered(Task),
@@ -139,7 +139,7 @@ pub struct RunReport {
     pub spins: u32,
     /// Each operation, when the run was asked to trace.
     pub trace: Vec<String>,
-    /// Each event, halt and oracle verdict in order, when the run was asked to
+    /// Each event, stop and oracle verdict in order, when the run was asked to
     /// record them.
     pub seen: Vec<Seen>,
     /// Every commit and delete the replica accepted, when the run was asked to
@@ -166,10 +166,10 @@ pub struct Opts {
     pub trace: bool,
     /// Record what the engine and the oracle did in [`RunReport::seen`].
     pub record: bool,
-    /// The scenario's persistent fault is expected: a halt for it ends the
+    /// The scenario's persistent fault is expected: a stop for it ends the
     /// run's ticks, and a task it keeps degraded ends a drain or the idle
     /// check, without being a bug.
-    pub allow_halt: bool,
+    pub allow_stop: bool,
     /// What each persistent fault does; the default keeps trying.
     pub responses: Responses,
     /// Whether the engine's retention deletes, from the first boot; the
@@ -208,7 +208,7 @@ enum Step {
     Degraded(PersistentCause),
     /// A drain finished, naming the newest transaction on the replica.
     Drained(Option<Txid>),
-    Halted(HaltCause),
+    Stopped(StopCause),
     Crashed,
 }
 
@@ -230,7 +230,7 @@ struct Runner {
     /// The last tick waits on a WAL change alone: no timer is pending.
     quiet: bool,
     record: bool,
-    allow_halt: bool,
+    allow_stop: bool,
     responses: Responses,
     /// Whether retention deletes, for the running engine and the next boot.
     retention: RetentionMode,
@@ -274,7 +274,7 @@ impl Runner {
             trace: false,
             quiet: false,
             record: false,
-            allow_halt: false,
+            allow_stop: false,
             responses: Responses::GO_LIKE,
             retention: RetentionMode::Enforce,
             degraded: [false; 5],
@@ -459,19 +459,19 @@ impl Runner {
                 let step = self.ran(&event, next, began)?;
                 (step, Some(event))
             }
-            TickEnd::Done(Tick::Halted(cause)) => {
+            TickEnd::Done(Tick::Stopped(cause)) => {
                 if self.record {
-                    self.report.seen.push(Seen::Halt(cause));
+                    self.report.seen.push(Seen::Stop(cause));
                 }
-                (Step::Halted(cause), None)
+                (Step::Stopped(cause), None)
             }
             TickEnd::Done(Tick::Drained { txid }) => (Step::Drained(txid), None),
             TickEnd::Done(Tick::DeadlineReached(_)) => {
-                let cause = HaltCause::Shutdown;
+                let cause = StopCause::Shutdown;
                 if self.record {
-                    self.report.seen.push(Seen::Halt(cause));
+                    self.report.seen.push(Seen::Stop(cause));
                 }
-                (Step::Halted(cause), None)
+                (Step::Stopped(cause), None)
             }
             TickEnd::Crashed { polls, kind, .. } => {
                 self.last_polls = polls.max(1);
@@ -538,17 +538,17 @@ impl Runner {
 
     fn tick(&mut self) -> Result<(), Violation> {
         match self.step(None)?.0 {
-            Step::Halted(cause) if self.halt_expected(cause) => Ok(()),
-            Step::Halted(cause) => Err(bug_fault(format!("the engine halted: {cause:?}"))),
+            Step::Stopped(cause) if self.stop_expected(cause) => Ok(()),
+            Step::Stopped(cause) => Err(bug_fault(format!("the engine stopped: {cause:?}"))),
             Step::Degraded(cause) => self.degraded_expected(cause),
             Step::Ran | Step::Drained(_) | Step::Crashed => Ok(()),
         }
     }
 
     /// A task degraded by a persistent fault the run does not expect is a
-    /// bug, as a halt for it would be. `Bug` is never expected.
+    /// bug, as a stop for it would be. `Bug` is never expected.
     fn degraded_expected(&self, cause: PersistentCause) -> Result<(), Violation> {
-        if cause != PersistentCause::Bug && self.halt_expected(HaltCause::from(cause)) {
+        if cause != PersistentCause::Bug && self.stop_expected(StopCause::from(cause)) {
             Ok(())
         } else {
             Err(bug_fault(format!("a task is degraded: {cause:?}")))
@@ -586,7 +586,7 @@ impl Runner {
     /// Stops the engine and runs it until it says it is drained.
     ///
     /// A task the scenario's fault keeps degraded may outlast the grace: the
-    /// drain then ends at its deadline, as a halt for that fault would end it.
+    /// drain then ends at its deadline, as a stop for that fault would end it.
     fn drain(&mut self) -> Result<(), Violation> {
         self.actor
             .begin_shutdown(self.actor.shutdown_deadline(self.now()));
@@ -594,8 +594,8 @@ impl Runner {
         for _ in 0..DRAIN_TICKS {
             match self.step(None)?.0 {
                 Step::Drained(txid) => return self.drained(txid),
-                Step::Halted(HaltCause::Shutdown) if degraded => return Ok(()),
-                Step::Halted(HaltCause::Shutdown) => {
+                Step::Stopped(StopCause::Shutdown) if degraded => return Ok(()),
+                Step::Stopped(StopCause::Shutdown) => {
                     self.reboot();
                     self.actor
                         .begin_shutdown(self.actor.shutdown_deadline(self.now()));
@@ -604,10 +604,10 @@ impl Runner {
                     self.degraded_expected(cause)?;
                     degraded = true;
                 }
-                Step::Halted(cause) if self.halt_expected(cause) => return Ok(()),
-                Step::Halted(cause) => {
+                Step::Stopped(cause) if self.stop_expected(cause) => return Ok(()),
+                Step::Stopped(cause) => {
                     return Err(bug_fault(format!(
-                        "the engine halted in a drain: {cause:?}"
+                        "the engine stopped in a drain: {cause:?}"
                     )));
                 }
                 Step::Ran | Step::Crashed => {}
@@ -748,7 +748,7 @@ impl Runner {
     }
 
     /// The one page size of every file staged or published: a replica prefix
-    /// holds one, so a change the replica did not follow halts the engine
+    /// holds one, so a change the replica did not follow stops the engine
     /// before it stages anything. `None` while there is no file.
     fn replica_page_size(&self) -> Result<Option<PageSize>, Violation> {
         let sizes = self.w.page_sizes().map_err(bug_fault)?;
@@ -763,14 +763,14 @@ impl Runner {
         Ok(Some(*first))
     }
 
-    /// Whether a halt is one the run expects: a scenario's, or a page-size
+    /// Whether a stop is one the run expects: a scenario's, or a page-size
     /// change between the files staged or published and the database.
-    fn halt_expected(&self, cause: HaltCause) -> bool {
-        if let HaltCause::PageSizeChanged { was, now } = cause {
+    fn stop_expected(&self, cause: StopCause) -> bool {
+        if let StopCause::PageSizeChanged { was, now } = cause {
             return now == self.w.sqlite.page_size()
                 && self.replica_page_size().ok().flatten() == Some(was);
         }
-        self.allow_halt
+        self.allow_stop
     }
 
     fn vacuum(&mut self, to: Option<PageSize>) {
@@ -1076,13 +1076,13 @@ impl Runner {
         window.check()
     }
 
-    /// Whether a step ends the idle check: an expected halt, or a task the
+    /// Whether a step ends the idle check: an expected stop, or a task the
     /// scenario's fault keeps degraded (an engine retrying is not idle).
     fn ends_idle(&self, step: &Step) -> Result<bool, Violation> {
         match step {
-            Step::Halted(cause) if self.halt_expected(*cause) => Ok(true),
-            Step::Halted(cause) => Err(bug_fault(format!(
-                "the engine halted while idle: {cause:?}"
+            Step::Stopped(cause) if self.stop_expected(*cause) => Ok(true),
+            Step::Stopped(cause) => Err(bug_fault(format!(
+                "the engine stopped while idle: {cause:?}"
             ))),
             Step::Degraded(cause) => self.degraded_expected(*cause).map(|()| true),
             Step::Ran | Step::Drained(_) | Step::Crashed => Ok(false),
@@ -1170,7 +1170,7 @@ pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure
     let mut runner = Runner::new(seed);
     runner.trace = opts.trace;
     runner.record = opts.record;
-    runner.allow_halt = opts.allow_halt;
+    runner.allow_stop = opts.allow_stop;
     runner.responses = opts.responses;
     runner.retention = opts.retention;
     runner.reboot();
