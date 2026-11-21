@@ -43,10 +43,16 @@
 //!   after the chain's end up to the instant cannot be told from the rest of
 //!   the file. That is [`PlanOutcome::AsOfInsideFile`], never a plain
 //!   [`PlanOutcome::Plan`]: the chain is the newest state restorable at or
-//!   before the instant, and the caller must choose to accept it. A file that
-//!   ends right after the chain does not count: its newest transaction is
-//!   stamped at or after the instant, so that transaction is placed, and so is
-//!   everything after it.
+//!   before the instant, and the caller must choose to accept it. A level 0-8
+//!   file that ends right after the chain removes the doubt (`dates_next`):
+//!   it is ineligible (else the chain would have taken it), and its stamp is
+//!   the stamp of the level-0 file that first carried its newest transaction,
+//!   because a level-0 file is that carrier and compaction stamps its output
+//!   with its newest input's stamp (here and in Go). So that transaction was
+//!   created at or after the instant, and so was everything after it. A
+//!   snapshot proves nothing of the kind: it is stamped when it is written,
+//!   which can be long after its newest transaction committed, so a later
+//!   snapshot that ends right after the chain leaves the straddle standing.
 //!
 //! An `AsOf` restore learns eligibility lazily. A listing may carry only a
 //! last-modified time, so [`AsOfPlanner`] is a [`Step`] that asks for one exact
@@ -337,16 +343,15 @@ fn bridges_nothing_past(inventory: &Inventory, reach: Txid) -> bool {
 
 /// The file that makes an `AsOf` chain ambiguous, if any: usable, created at
 /// or after the instant, linking to the chain and holding at least two
-/// transactions past it. When some file ends exactly one past the chain, that
-/// transaction is stamped at or after the instant (otherwise the chain would
-/// have taken the file), so nothing is ambiguous.
+/// transactions past it. Nothing is ambiguous when a file dates the next
+/// transaction ([`dates_next`]).
 fn straddling_file(inventory: &Inventory, target: RestoreTarget, reach: Txid) -> Option<FileKey> {
     let RestoreTarget::AsOf(_) = target else {
         return None;
     };
     let one_past = reach.next()?;
     let files = inventory.files();
-    if files.iter().any(|info| info.key.range().max() == one_past) {
+    if files.iter().any(|info| dates_next(info, one_past)) {
         return None;
     }
     files
@@ -354,6 +359,19 @@ fn straddling_file(inventory: &Inventory, target: RestoreTarget, reach: Txid) ->
         .filter(|info| !eligible(info, target) && straddles(info, one_past))
         .min_by_key(|info| straddler_order(info))
         .map(|info| info.key)
+}
+
+/// Whether a file proves that transaction [`one_past`] was created at or after
+/// an `AsOf` instant, by keys alone. It must end at [`one_past`] and be
+/// ineligible, which it is whenever it touches the chain: an eligible one
+/// would have extended it. Its stamp then bounds the stamp of the level-0 file
+/// that first carried [`one_past`] only on levels 0 to 8: a level-0 file is
+/// that carrier, and a compacted file takes its newest input's stamp, which
+/// recurses down to it. A level-9 file is stamped when the snapshot is
+/// written (`snapshot.rs`), any time after [`one_past`] committed, and a
+/// refused one is level 9 too, so neither dates anything.
+fn dates_next(info: &FileInfo, one_past: Txid) -> bool {
+    !info.key.level().is_snapshot() && info.key.range().max() == one_past
 }
 
 /// Whether a usable file links to a chain whose next transaction is
@@ -700,7 +718,7 @@ fn lazy_straddler(
         return Resolve::Done(None);
     };
     let files = inventory.files();
-    if files.iter().any(|info| info.key.range().max() == one_past) {
+    if files.iter().any(|info| dates_next(info, one_past)) {
         return Resolve::Done(None);
     }
     let mut best: Option<&FileInfo> = None;
@@ -1311,6 +1329,24 @@ mod tests {
     }
 
     #[test]
+    fn a_later_snapshot_ending_right_after_the_chain_does_not_date_that_transaction() {
+        // L9 1-2 ends one past the chain, but a snapshot is stamped when it is
+        // written, long after transaction 2 committed, so it says nothing about
+        // when 2 committed. L1 2-5 still straddles the instant: the answer is
+        // the one the listing gives without the snapshot, never a plan.
+        let files = [file(0, 1, 1, 100), file(9, 1, 2, 1000), file(1, 2, 5, 500)];
+        let target = RestoreTarget::AsOf(Timestamp::from_unix_millis(300));
+        let without = plan_reference(&inv(&[files[0], files[2]]), target);
+        let outcome = plan_reference(&inv(&files), target);
+        assert_eq!(outcome, without);
+        let PlanOutcome::AsOfInsideFile { chain, file } = outcome else {
+            panic!("expected AsOfInsideFile, got {outcome:?}");
+        };
+        assert_eq!(chain.reaches(), txid(1));
+        assert_eq!(file, key(1, 2, 5));
+    }
+
+    #[test]
     fn a_stray_past_a_straddling_file_is_still_inside_file() {
         // L0 20 is stamped before the instant but does not connect (ruling A1:
         // ignored, full stop), and L1 4-9 links, so the replica continues. The
@@ -1444,7 +1480,8 @@ mod tests {
 
     /// Whether an instant cuts through a file: some usable file later than the
     /// instant links to the end and holds two or more transactions past it, no
-    /// file ends right after the end (which would date that transaction).
+    /// level 0-8 file ends right after the end (which would date that
+    /// transaction; a snapshot is stamped when written, so it dates nothing).
     fn model_straddlers(files: &[Spec], goal: Goal, end: u64) -> Vec<Spec> {
         let Goal::AsOf(_) = goal else {
             return Vec::new();
@@ -1452,7 +1489,7 @@ mod tests {
         let Some(one_past) = end.checked_add(1) else {
             return Vec::new();
         };
-        if files.iter().any(|s| s.max == one_past) {
+        if files.iter().any(|s| s.level < 9 && s.max == one_past) {
             return Vec::new();
         }
         files

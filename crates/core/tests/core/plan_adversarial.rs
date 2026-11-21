@@ -74,13 +74,15 @@ mod review {
 
     /// Files later than the instant that cut through the state at `end`: usable,
     /// linking, two or more transactions past it, and with no file dating the
-    /// transaction right after `end`. Written from the reachability argument,
-    /// not from the planner.
+    /// transaction right after `end`. Only a level 0-8 file ending there dates
+    /// it: a snapshot is stamped when written, any time after its newest
+    /// transaction. Written from the reachability argument, not from the
+    /// planner.
     fn straddlers(files: &[F], g: G, end: u64) -> Vec<F> {
         let Some(one_past) = end.checked_add(1) else {
             return Vec::new();
         };
-        if files.iter().any(|f| f.max == one_past) {
+        if files.iter().any(|f| f.level < 9 && f.max == one_past) {
             return Vec::new();
         }
         files

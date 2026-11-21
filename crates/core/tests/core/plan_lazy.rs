@@ -399,6 +399,17 @@ mod lazy {
         assert_eq!(run.outcome, O::Inside(vec![key(&files[0])], key(&files[2])));
     }
 
+    /// A snapshot ending one past the chain is stamped when written, not when
+    /// that transaction committed, so it does not lift the straddle: the lazy
+    /// planner names the compacted file, as it does without the snapshot.
+    #[test]
+    fn a_later_snapshot_ending_right_after_the_chain_does_not_hide_a_straddle() {
+        let files = [f(0, 1, 1, 100), f(9, 1, 2, 1000), f(1, 2, 5, 500)];
+        let run = check(&files, 300);
+        assert_eq!(run.outcome, O::Inside(vec![key(&files[0])], key(&files[2])));
+        assert_eq!(check(&[files[0], files[2]], 300).outcome, run.outcome);
+    }
+
     /// Ruling A1: an eligible file past the end that does not connect is a
     /// stray; it neither extends the chain nor removes the straddle.
     #[test]
