@@ -182,7 +182,7 @@ impl PageChecksumTable {
 /// pages the table still describes; every other cause follows a WAL whose
 /// frames the table may hold and the database never got.
 #[must_use]
-pub const fn snapshot_clears(cause: &SnapshotCause) -> bool {
+pub(crate) const fn snapshot_clears(cause: &SnapshotCause) -> bool {
     match cause {
         SnapshotCause::CheckpointBoundary | SnapshotCause::OperatorRequested => false,
         SnapshotCause::FirstSync

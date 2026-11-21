@@ -58,8 +58,7 @@ pub use app::{
 };
 pub use checkpoint::{
     CheckpointConfig, CheckpointFailed, CheckpointOutcome, CheckpointState, CheckpointTrigger,
-    Checkpointed, Decision, Observed, Staged, after_checkpoint, after_sync, checkpoint, decide,
-    next_wake,
+    Checkpointed, Decision, Observed, Staged, checkpoint, decide,
 };
 pub use compact::{
     CompactError, Compacted, CompactionInputs, InputFault, InputsError, MAX_INPUTS, compact,
@@ -83,10 +82,10 @@ pub use layout::{
 pub use maintain::{
     CompactJob, ConfigError, DeleteJob, Due, Interval, IntervalError, Job, JobError, L0Retention,
     MAX_DELETE, MaintainError, MaintainState, Maintenance, Outcome, RetentionHold, RetentionMode,
-    Setting, SnapshotJob, due, go_truncate, listing_after_upload, run_compact, run_delete,
+    Setting, SnapshotJob, due, run_delete,
 };
 pub use mem::{MemStore, MemUpload};
-pub use pages::{Mismatch, PageChecksumTable, snapshot_clears};
+pub use pages::{Mismatch, PageChecksumTable};
 #[cfg(feature = "testing")]
 #[doc(hidden)]
 pub use plan::plan_reference;
@@ -106,7 +105,7 @@ pub use restore::{
 #[cfg(any(test, feature = "testing"))]
 pub use restore::{Database, MemPublishError, MemSink};
 pub use retry::{Class, RetryPolicy, RetryStats, Retrying, RetryingUpload, classify};
-pub use snapshot::{SnapshotFailed, write_snapshot};
+pub use snapshot::SnapshotFailed;
 pub use source::{
     Barrier, CheckpointMode, CheckpointRun, Checkpointer, CommittedRead, PageSource, SourceError,
     WalSource, WriteLock,
@@ -119,13 +118,8 @@ pub use store::{
     BatchKind, CorruptCause, ListAt, Listing, ListingStalled, ObjectStore, PageLimit, PartNumber,
     ReadAt, ReadLen, StoreError, StoreOp, Upload, build_listing,
 };
-pub use sync::{
-    PageFrom, Step, StepEnd, StepFailed, SyncConfig, Synced, clamp, header_fields, plan_pages,
-    sync_step,
-};
-pub use upload::{
-    Did, UploadConfig, UploadFailed, UploadPlan, UploadState, Uploaded, plan_upload, upload_next,
-};
+pub use sync::{PageFrom, Step, StepEnd, StepFailed, SyncConfig, Synced, clamp, sync_step};
+pub use upload::{Did, UploadConfig, UploadFailed, UploadPlan, UploadState, Uploaded, upload_next};
 pub use verify::{
     Compared, Depth, Finding, LevelSummary, LivePages, MAX_FINDINGS, Report, Severity, Verified,
     VerifyError, verify, verify_against,

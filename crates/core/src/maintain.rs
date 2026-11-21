@@ -346,7 +346,7 @@ pub enum Due {
 /// dividing a day. Rounds toward the past for every input and saturates at the
 /// smallest instant.
 #[must_use]
-pub fn go_truncate(now: Timestamp, interval: Interval) -> Timestamp {
+pub(crate) fn go_truncate(now: Timestamp, interval: Interval) -> Timestamp {
     let now = i128::from(now.unix_millis());
     let since_zero = now.saturating_sub(GO_ZERO_UNIX_MILLIS);
     // The interval is at least 1 by construction.
@@ -374,7 +374,7 @@ fn next_window(now: Timestamp, interval: Interval) -> (Timestamp, Timestamp) {
 /// (`store.go:591-656`). Listing at once after every upload instead lists the
 /// whole replica once a second for a database that writes once a second.
 #[must_use]
-pub fn listing_after_upload(now: Timestamp, config: &Maintenance) -> Timestamp {
+pub(crate) fn listing_after_upload(now: Timestamp, config: &Maintenance) -> Timestamp {
     let check = match (config.retention(), config.l0_retention()) {
         (RetentionMode::Enforce, L0Retention::After(_)) => {
             let step = i64::try_from(config.l0_check_interval().millis()).unwrap_or(i64::MAX);
@@ -673,7 +673,7 @@ pub enum Outcome {
 ///
 /// When the store rejected the output's commit, the output key is deleted
 /// before returning: a listing would otherwise show it as coverage.
-pub async fn run_compact<L: ObjectStore, R: ObjectStore>(
+pub(crate) async fn run_compact<L: ObjectStore, R: ObjectStore>(
     job: &CompactJob,
     local: &L,
     replica: &R,

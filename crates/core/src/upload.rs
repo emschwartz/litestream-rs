@@ -133,7 +133,7 @@ fn staged_key(txid: Txid) -> FileKey {
 
 /// The next step from a state, given the newest staged transaction. Pure.
 #[must_use]
-pub fn plan_upload(state: &UploadState, newest_staged: Option<Txid>) -> UploadPlan {
+pub(crate) fn plan_upload(state: &UploadState, newest_staged: Option<Txid>) -> UploadPlan {
     match state {
         UploadState::Unknown | UploadState::ListFirst { .. } => UploadPlan::List,
         UploadState::At(confirmed) => {
