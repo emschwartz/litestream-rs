@@ -44,15 +44,15 @@ impl NonZeroDuration {
     }
 }
 
-/// Whether the host says when it holds a long read (TRUNCATE needs the host's word;
+/// Whether the application says when it holds a long read (TRUNCATE needs the application's word;
 /// see `docs/plans/phase-3-syncing.md`, the reader-tracking section).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ReaderTracking {
-    /// The host gives no signal, so a reader may always be running: the replicator never
+    /// The application gives no signal, so a reader may always be running: the replicator never
     /// runs a TRUNCATE checkpoint, only PASSIVE ones.
     #[default]
     Untracked,
-    /// The host holds a [`crate::ReaderGuard`] for every long read. TRUNCATE runs only while
+    /// The application holds a [`crate::ReaderGuard`] for every long read. TRUNCATE runs only while
     /// none is held; while one is, the checkpoint reports busy and waits its backoff.
     Tracked,
 }
@@ -97,16 +97,16 @@ pub struct Config {
     /// What each persistent failure does. Default [`Responses::GO_LIKE`]: keep trying,
     /// stop on a second writer.
     pub responses: Responses,
-    /// Whether the host signals long reads.
+    /// Whether the application signals long reads.
     pub readers: ReaderTracking,
     /// How long a drop may drain (Go's shutdown sync timeout, 30 s, `db.go:36`).
     pub shutdown_grace: Duration,
-    /// The `wal_autocheckpoint` the host's connections run, in frames, or `None` when every
+    /// The `wal_autocheckpoint` the application's connections run, in frames, or `None` when every
     /// one of them sets it to 0 (`app_connection` does). Default: SQLite's own, 1000, since
     /// the replicator cannot read another connection's setting. It decides nothing; it only
-    /// lets [`crate::Health::host_notice`] infer the host's checkpoint attempts that cannot
-    /// run, which the wal-index alone cannot tell from a host that runs none.
-    pub host_autocheckpoint: Option<NonZeroU32>,
+    /// lets [`crate::Health::app_notice`] infer the application's checkpoint attempts that cannot
+    /// run, which the wal-index alone cannot tell from an application that runs none.
+    pub app_autocheckpoint: Option<NonZeroU32>,
     /// How often the scheduled verify runs, or `None` (the default, as in Go) for never: Go's
     /// `validation.interval`. Each run waits for the replica to hold everything staged, reads
     /// the live database's pages at that transaction on the replicator's thread (one read of
@@ -128,7 +128,7 @@ impl Default for Config {
             responses: Responses::GO_LIKE,
             readers: ReaderTracking::Untracked,
             shutdown_grace: Duration::from_secs(30),
-            host_autocheckpoint: Some(SQLITE_AUTOCHECKPOINT),
+            app_autocheckpoint: Some(SQLITE_AUTOCHECKPOINT),
             verify_interval: None,
         }
     }

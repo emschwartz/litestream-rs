@@ -33,7 +33,7 @@ use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::os::unix::fs::FileExt;
 
-use lsr_compat::{Outside, Shape, Site};
+use lsr_compat::{AppFixture, Outside, Shape};
 use lsr_ltx::Txid;
 use lsr_wal::{CommittedEnd, FrameCursor, Salts, ScanLimit, TxOutcome, WalReader};
 
@@ -86,8 +86,8 @@ fn wal_index(held: &Held) -> Option<(u32, Salts)> {
 /// The cursor at `mx_frame` after verifying every transaction below it, and the frames of the
 /// whole transactions that follow it. (SQLite takes no POSIX lock on the WAL file, so this
 /// descriptor may close.)
-fn scan(site: &Site, mx_frame: u32, salts: Salts) -> Option<(FrameCursor, Vec<u32>)> {
-    let mut wal = WalReader::open(File::open(wal_path(site)).ok()?).ok()?;
+fn scan(fixture: &AppFixture, mx_frame: u32, salts: Salts) -> Option<(FrameCursor, Vec<u32>)> {
+    let mut wal = WalReader::open(File::open(wal_path(fixture)).ok()?).ok()?;
     if wal.header().salts() != salts {
         return None;
     }
@@ -115,17 +115,17 @@ fn scan(site: &Site, mx_frame: u32, salts: Salts) -> Option<(FrameCursor, Vec<u3
 }
 
 /// The tail Go's boot after `previous` may take, if the files hold one (see the module doc).
-pub fn read(site: &Site, held: &Held, oracle: &Oracle, previous: Txid) -> Option<Tail> {
+pub fn read(fixture: &AppFixture, held: &Held, oracle: &Oracle, previous: Txid) -> Option<Tail> {
     let (mx_frame, salts) = wal_index(held)?;
-    let (end, frames) = scan(site, mx_frame, salts)?;
+    let (end, frames) = scan(fixture, mx_frame, salts)?;
     if frames.is_empty() {
         return None;
     }
-    let committed = capture_wal(site, held, "committed.db", Some(end.next().get()));
-    let taken = capture_wal(site, held, "taken.db", None);
+    let committed = capture_wal(fixture, held, "committed.db", Some(end.next().get()));
+    let taken = capture_wal(fixture, held, "taken.db", None);
     let last = oracle.states.last()?;
     assert!(
-        oracle.same_but_seq(&committed.pages, &last.pages) && committed.seq == live_seq(site),
+        oracle.same_but_seq(&committed.pages, &last.pages) && committed.seq == live_seq(fixture),
         "the WAL cut at the wal-index's end ({mx_frame} frames) is not the database as recorded"
     );
     let pages: BTreeSet<u32> = frames.iter().copied().collect();
@@ -178,11 +178,11 @@ fn set_index_header(held: &Held, mut header: [u8; INDEX_HEADER]) {
 /// and was stopped before the index update leaves it: to `before` when the bump continued the
 /// WAL, or to an empty new generation when it restarted it (`None`): `mxFrame` 0, and the
 /// running checksum the next frame continues from is the WAL header's.
-fn bump_unindexed(site: &Site, held: &Held, before: Option<[u8; INDEX_HEADER]>) {
-    site.app.execute(BUMP, []).expect("bump");
+fn bump_unindexed(fixture: &AppFixture, held: &Held, before: Option<[u8; INDEX_HEADER]>) {
+    fixture.app.execute(BUMP, []).expect("bump");
     let header = before.unwrap_or_else(|| {
         let mut header = index_header(held);
-        let wal = fs::read(wal_path(site)).expect("wal");
+        let wal = fs::read(wal_path(fixture)).expect("wal");
         header[16..20].copy_from_slice(&0_u32.to_ne_bytes());
         for at in [24, 28] {
             let word = u32::from_be_bytes(wal[at..at + 4].try_into().expect("4"));
@@ -197,39 +197,46 @@ fn bump_unindexed(site: &Site, held: &Held, before: Option<[u8; INDEX_HEADER]>) 
 /// then: a bump past committed frames, and a bump that restarted the WAL and wrote its first
 /// frame (the case #38 found). The tail's state holds the bump the application never saw.
 pub fn a_tail_past_the_wal_index_is_recognised() {
-    let mut site = Site::create(4096, 38).expect("site");
-    site.prepare_for_processes(20).expect("prepare");
-    site.app.execute(BUMP, []).expect("a first bump");
-    let held = Held::open(&site);
-    let root = super::oracle::seq_root(&site);
-    let mut oracle = Oracle::new(capture(&site, &held), root);
+    let mut fixture = AppFixture::create(4096, 38).expect("fixture");
+    fixture.prepare_for_processes(20).expect("prepare");
+    fixture.app.execute(BUMP, []).expect("a first bump");
+    let held = Held::open(&fixture);
+    let root = super::oracle::seq_root(&fixture);
+    let mut oracle = Oracle::new(capture(&fixture, &held), root);
     for restart in [false, true] {
-        site.commit(Shape::Insert { bytes: 300 }).expect("commit");
-        let floor = live_seq(&site);
-        oracle.record(capture(&site, &held), floor);
-        let none = read(&site, &held, &oracle, Txid::MIN);
+        fixture
+            .commit(Shape::Insert { bytes: 300 })
+            .expect("commit");
+        let floor = live_seq(&fixture);
+        oracle.record(capture(&fixture, &held), floor);
+        let none = read(&fixture, &held, &oracle, Txid::MIN);
         assert!(none.is_none(), "nothing past the end");
         let before = index_header(&held);
         let frames = u32::from_ne_bytes(before[16..20].try_into().expect("4"));
         if restart {
-            site.checkpoint(Outside::Restart).expect("restart");
+            fixture.checkpoint(Outside::Restart).expect("restart");
         }
-        bump_unindexed(&site, &held, (!restart).then_some(before));
-        let tail = read(&site, &held, &oracle, Txid::MIN).expect("a tail past the end");
+        bump_unindexed(&fixture, &held, (!restart).then_some(before));
+        let tail = read(&fixture, &held, &oracle, Txid::MIN).expect("a tail past the end");
         let at = if restart { 0 } else { frames };
         assert_eq!((tail.mx_frame, tail.frames), (at, 1), "restart {restart}");
         assert_eq!(tail.pages, BTreeSet::from([root]), "restart {restart}");
         assert_eq!(tail.taken.seq, floor + 1, "restart {restart}: the bump");
-        assert_eq!(live_seq(&site), floor, "restart {restart}: never committed");
-        let now = capture(&site, &held);
+        assert_eq!(
+            live_seq(&fixture),
+            floor,
+            "restart {restart}: never committed"
+        );
+        let now = capture(&fixture, &held);
         assert!(oracle.same_but_seq(&tail.taken.pages, &now.pages));
-        site.commit(Shape::Insert { bytes: 300 })
+        fixture
+            .commit(Shape::Insert { bytes: 300 })
             .expect("overwrite");
-        oracle.record(capture(&site, &held), floor);
-        let none = read(&site, &held, &oracle, Txid::MIN);
+        oracle.record(capture(&fixture, &held), floor);
+        let none = read(&fixture, &held, &oracle, Txid::MIN);
         assert!(none.is_none(), "restart {restart}: overwritten");
         assert_eq!(
-            live_seq(&site),
+            live_seq(&fixture),
             floor,
             "restart {restart}: the bump is gone"
         );

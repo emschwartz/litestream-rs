@@ -48,7 +48,7 @@ struct Counting {
     /// A WAL whose read epoch the next upload begun moves, as a checkpoint
     /// by another connection would mid-step.
     moves_epoch: Arc<std::sync::Mutex<Option<FakeWal>>>,
-    /// A WAL the host commits a transaction to (page 1 filled with the byte)
+    /// A WAL the application commits a transaction to (page 1 filled with the byte)
     /// as the next upload begins: a commit that lands after a sync step read
     /// the committed end.
     commits_on_upload: Arc<std::sync::Mutex<Option<(FakeWal, u8)>>>,
@@ -738,7 +738,7 @@ fn a_second_shutdown_keeps_the_earlier_deadline() {
 
 /// A backfill the actor did not run is counted; its own checkpoints are not.
 #[test]
-fn a_host_checkpoint_is_counted_and_its_own_is_not() {
+fn a_app_checkpoint_is_counted_and_its_own_is_not() {
     let (mut rig, mut actor) = caught_up();
     rig.commit(2);
     rig.settle(&mut actor, T0 + 10);

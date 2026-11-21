@@ -373,7 +373,7 @@ fn a_database_page_flipped_between_two_syncs_is_a_mismatch_naming_it_and_stages_
     assert_eq!(failed.fault, Fault::DatabasePageMismatch { pgno: pg(3) });
     assert_eq!(rig.files().len(), 1);
     assert_eq!(rig.pages.mismatch(), Some(pg(3)));
-    // The retry ships the file's bytes: the database the host serves.
+    // The retry ships the file's bytes: the database the application serves.
     rig.step_at(operator_snapshot(&position)).unwrap();
     let files = rig.files();
     assert_eq!(fills(&files[1].2), [(1, db_fill(1)), (2, 2), (3, 0x33)]);

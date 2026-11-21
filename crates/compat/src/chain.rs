@@ -1,8 +1,8 @@
 //! A chain the Rust actor writes from a live SQLite database, for the Go compatibility checks.
 //!
-//! Test support, over the production backend [`Sqlite`]. A [`Site`] is the application's side
+//! Test support, over the production backend [`Sqlite`]. A [`AppFixture`] is the application's side
 //! (the database, an open application connection, the meta directory Go would use and the
-//! replica directory); a [`Chain`] is the actor over a [`Sqlite`] of that site, staging L0 files
+//! replica directory); a [`Chain`] is the actor over a [`Sqlite`] of that fixture, staging L0 files
 //! in `<meta>/ltx/0` (Go's own layout, `db.go:600`) and publishing to the replica.
 //!
 //! The clock is virtual and ends near the real time (`clock_ending_now`): the maintenance
@@ -92,10 +92,10 @@ impl Outside {
 
 /// The application's side: a database in WAL mode with autocheckpoint off, an open connection
 /// that stays open across replicator restarts, and the directories a replicator uses. Its
-/// replica is the directory `replica` ([`Site::create`]) or a prefix of a local MinIO bucket
-/// ([`Site::create_on_s3`]); [`Site::remote`] reads either.
+/// replica is the directory `replica` ([`AppFixture::create`]) or a prefix of a local MinIO bucket
+/// ([`AppFixture::create_on_s3`]); [`AppFixture::remote`] reads either.
 #[derive(Debug)]
-pub struct Site {
+pub struct AppFixture {
     dir: TempDir,
     /// The database file; its name fixes the meta directory.
     pub db: PathBuf,
@@ -110,7 +110,7 @@ pub struct Site {
     remote: Remote,
 }
 
-impl Site {
+impl AppFixture {
     /// A new database at `page_size` with two tables and one committed row.
     ///
     /// # Errors
@@ -119,10 +119,10 @@ impl Site {
         Self::create_with(page_size, seed, None)
     }
 
-    /// [`Site::create`] whose replica is `s3`, a prefix of a local MinIO bucket.
+    /// [`AppFixture::create`] whose replica is `s3`, a prefix of a local MinIO bucket.
     ///
     /// # Errors
-    /// As [`Site::create`].
+    /// As [`AppFixture::create`].
     pub fn create_on_s3(page_size: u32, seed: u64, s3: S3Replica) -> Result<Self, CompatError> {
         Self::create_with(page_size, seed, Some(s3))
     }
@@ -163,7 +163,7 @@ impl Site {
         &self.remote
     }
 
-    /// The directory holding everything of this site.
+    /// The directory holding everything of this fixture.
     pub fn dir(&self) -> &Path {
         self.dir.path()
     }
@@ -201,7 +201,7 @@ impl Site {
         Ok(())
     }
 
-    /// Readies the site for replicator processes: `rows` rows of 3000 bytes in one
+    /// Readies the fixture for replicator processes: `rows` rows of 3000 bytes in one
     /// transaction (about one 4096-byte page each, so a snapshot holds many more pages than
     /// a few commits write), the two tables both replicators create on their first boot
     /// (Go's statements, `db.go:1172-1182`), so no replicator ever commits a transaction of
@@ -287,7 +287,7 @@ pub struct Point {
 #[derive(Debug)]
 pub struct Written {
     /// The application's side, with its connection still open.
-    pub site: Site,
+    pub fixture: AppFixture,
     /// One point per transaction the run reached.
     pub points: Vec<Point>,
     /// Every non-idle event the actor reported.
@@ -300,7 +300,7 @@ pub struct Written {
 #[derive(Debug)]
 pub struct Chain {
     /// The application's side.
-    pub site: Site,
+    pub fixture: AppFixture,
     live: Sqlite,
     staging: FsStore,
     remote: FsStore,
@@ -370,24 +370,24 @@ fn pct(n: u32, p: u32) -> u32 {
 }
 
 impl Chain {
-    /// An actor for `site` whose virtual clock starts at `clock_ms`. The actor boots on its first
-    /// tick, so a site that already has a replica and meta directory is continued.
+    /// An actor for `fixture` whose virtual clock starts at `clock_ms`. The actor boots on its first
+    /// tick, so a fixture that already has a replica and meta directory is continued.
     ///
     /// # Errors
     /// [`CompatError`] when SQLite or the schedule refuses, and [`CompatError::Fixture`] for a
-    /// site whose replica is on S3: the in-process chain writes a directory replica only.
-    pub fn start(site: Site, clock_ms: i64) -> Result<Self, CompatError> {
-        if matches!(site.remote(), Remote::S3(_)) {
+    /// fixture whose replica is on S3: the in-process chain writes a directory replica only.
+    pub fn start(fixture: AppFixture, clock_ms: i64) -> Result<Self, CompatError> {
+        if matches!(fixture.remote(), Remote::S3(_)) {
             return Err(CompatError::Fixture(
                 "the in-process chain writes a directory replica, not S3".to_owned(),
             ));
         }
-        let live = Sqlite::open(&site.db)?;
+        let live = Sqlite::open(&fixture.db)?;
         Ok(Self {
-            staging: FsStore::new(&site.meta),
-            remote: FsStore::new(&site.replica),
+            staging: FsStore::new(&fixture.meta),
+            remote: FsStore::new(&fixture.replica),
             actor: Actor::new(config()?),
-            site,
+            fixture,
             live,
             clock: clock_ms,
             points: Vec::new(),
@@ -445,7 +445,7 @@ impl Chain {
 
     /// The newest staged transaction.
     fn staged_tip(&self) -> Result<Txid, CompatError> {
-        replica::list(&self.site.meta)?
+        replica::list(&self.fixture.meta)?
             .files
             .iter()
             .filter(|file| file.key.level() == Level::ZERO)
@@ -457,13 +457,13 @@ impl Chain {
     /// Keeps a copy of every file not seen before: compaction and retention delete files that
     /// Go must still be shown to accept.
     fn archive_new(&mut self) -> Result<(), CompatError> {
-        for root in [&self.site.meta, &self.site.replica] {
+        for root in [&self.fixture.meta, &self.fixture.replica] {
             for file in replica::list(root)?.files {
                 let name = format!("{}-{}", file.key.level(), file.key.file_name());
                 if !self.seen.insert(name.clone()) {
                     continue;
                 }
-                let dir = self.site.dir().join("archive");
+                let dir = self.fixture.dir().join("archive");
                 fs::create_dir_all(&dir).map_err(CompatError::io(&dir))?;
                 let to = dir.join(name);
                 match fs::copy(root.join(&file.rel), &to) {
@@ -481,7 +481,7 @@ impl Chain {
     /// # Errors
     /// [`CompatError`] from SQLite, the actor or the copy.
     pub fn commit(&mut self, shape: Shape) -> Result<(), CompatError> {
-        self.site.commit(shape)?;
+        self.fixture.commit(shape)?;
         self.catch_up()
     }
 
@@ -496,7 +496,7 @@ impl Chain {
         self.archive_new()?;
         let txid = self.staged_tip()?;
         if self.points.last().is_none_or(|last| last.txid != txid) {
-            let page_hashes = self.site.hash_now()?;
+            let page_hashes = self.fixture.hash_now()?;
             self.points.push(Point {
                 txid,
                 at_ms: self.clock,
@@ -515,8 +515,8 @@ impl Chain {
     /// [`CompatError`] when SQLite refuses or no truncate happened within the bound.
     pub fn grow_until_truncate(&mut self) -> Result<(), CompatError> {
         let from = self.events.len();
-        let bytes = self.site.page_size().saturating_mul(8);
-        let reader = Connection::open(&self.site.db)?;
+        let bytes = self.fixture.page_size().saturating_mul(8);
+        let reader = Connection::open(&self.fixture.db)?;
         reader.execute_batch("BEGIN; SELECT count(*) FROM t;")?;
         let mut reader = Some(reader);
         for _ in 0..80 {
@@ -547,7 +547,7 @@ impl Chain {
     /// # Errors
     /// [`CompatError`] from any commit.
     pub fn run(&mut self, commits: u32) -> Result<(), CompatError> {
-        let page = u64::from(self.site.page_size());
+        let page = u64::from(self.fixture.page_size());
         let outside = [
             (pct(commits, 12), Outside::Passive),
             (pct(commits, 37), Outside::Restart),
@@ -556,31 +556,32 @@ impl Chain {
         ];
         let (delete_at, vacuum_at) = (pct(commits, 40), pct(commits, 45));
         for i in 0..commits {
-            let bytes =
-                |site: &mut Site, bound: u64| u32::try_from(site.rng.below(bound)).unwrap_or(0);
+            let bytes = |fixture: &mut AppFixture, bound: u64| {
+                u32::try_from(fixture.rng.below(bound)).unwrap_or(0)
+            };
             let shape = if i == delete_at {
                 Shape::DeleteMost
             } else if i == vacuum_at {
                 Shape::Vacuum
             } else {
-                match self.site.rng.below(10) {
+                match self.fixture.rng.below(10) {
                     0 | 1 => Shape::Tiny,
                     2 | 3 => Shape::UpdateTail {
-                        bytes: bytes(&mut self.site, page.saturating_mul(3)),
+                        bytes: bytes(&mut self.fixture, page.saturating_mul(3)),
                     },
                     4 => Shape::Insert {
-                        bytes: bytes(&mut self.site, page.saturating_mul(5))
+                        bytes: bytes(&mut self.fixture, page.saturating_mul(5))
                             .saturating_add(u32::try_from(page).unwrap_or(0)),
                     },
                     _ => Shape::Insert {
-                        bytes: bytes(&mut self.site, page).saturating_add(16),
+                        bytes: bytes(&mut self.fixture, page).saturating_add(16),
                     },
                 }
             };
-            self.site.commit(shape)?;
+            self.fixture.commit(shape)?;
             for (at, mode) in outside {
                 if at == i {
-                    self.site.checkpoint(mode)?;
+                    self.fixture.checkpoint(mode)?;
                 }
             }
             self.catch_up()?;
@@ -613,14 +614,14 @@ impl Chain {
                 Tick::Drained { .. } => {
                     self.archive_new()?;
                     let Self {
-                        site,
+                        fixture,
                         points,
                         events,
                         archive,
                         ..
                     } = self;
                     return Ok(Written {
-                        site,
+                        fixture,
                         points,
                         events,
                         archive,

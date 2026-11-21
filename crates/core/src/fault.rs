@@ -98,7 +98,7 @@ pub enum Fault {
     LocalFsyncFailed,
     /// SQLite is busy, or the wal-index is mid-update.
     SqliteBusy,
-    /// A TRUNCATE checkpoint was refused before SQLite was asked: the host
+    /// A TRUNCATE checkpoint was refused before SQLite was asked: the application
     /// said its readers hold the WAL (or tracks none). Not `SqliteBusy`:
     /// no lock was contended, and it lasts as long as the readers do.
     ReadersHeld,
@@ -368,7 +368,7 @@ pub struct Responses {
     /// writes the new size: the way out is a restart onto a new prefix.
     pub page_size_changed: Response,
     /// A database-file page differs from the page checksum table. Keeping
-    /// trying ships the page as the file holds it (the database the host
+    /// trying ships the page as the file holds it (the database the application
     /// serves), keeps the lane degraded and retention pinned until a verified
     /// WAL frame rewrites the page or an operator accepts it.
     pub database_page_mismatch: Response,

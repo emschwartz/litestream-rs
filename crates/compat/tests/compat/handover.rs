@@ -444,10 +444,10 @@ mod live {
         use std::time::{Duration, Instant};
 
         use lsr_compat::{
-            Chain, Era, GoBuild, GoRestore, Replicator, Shape, Site, Target, Written, builds_in,
-            builds_under_test, clock_ending_now, hash_pages, integrity_check, list, newest_l0,
-            real_now_ms, restore_replica, restore_with_go, tip, wait_staged_past, wait_until,
-            write_config, write_config_snapshotting,
+            AppFixture, Chain, Era, GoBuild, GoRestore, Replicator, Shape, Target, Written,
+            builds_in, builds_under_test, clock_ending_now, hash_pages, integrity_check, list,
+            newest_l0, real_now_ms, restore_replica, restore_with_go, tip, wait_staged_past,
+            wait_until, write_config, write_config_snapshotting,
         };
         use lsr_core::{Event, Level, RestoreTarget};
         use lsr_ltx::{Header, Txid};
@@ -529,24 +529,25 @@ mod live {
         fn restore_go(
             binary: &Path,
             config: &Path,
-            site: &Site,
+            fixture: &AppFixture,
             name: &str,
             target: Target,
         ) -> PathBuf {
-            let out = site.dir().join(name);
+            let out = fixture.dir().join(name);
             for suffix in ["", "-wal", "-shm"] {
                 drop(fs::remove_file(format!("{}{suffix}", out.display())));
             }
-            let result = restore_with_go(binary, config, &site.db, &out, target).expect("go runs");
+            let result =
+                restore_with_go(binary, config, &fixture.db, &out, target).expect("go runs");
             assert_eq!(result, GoRestore::Restored, "go restore {name}");
             out
         }
 
         /// A Rust run of `commits` commits, optionally ended by a TRUNCATE checkpoint.
         fn rust_run(commits: u32, truncate: bool) -> Written {
-            let site = Site::create(4096, 21).expect("site");
-            let mut chain =
-                Chain::start(site, clock_ending_now(commits + 20).expect("clock")).expect("start");
+            let fixture = AppFixture::create(4096, 21).expect("fixture");
+            let mut chain = Chain::start(fixture, clock_ending_now(commits + 20).expect("clock"))
+                .expect("start");
             chain.run(commits).expect("run");
             if truncate {
                 chain.grow_until_truncate().expect("truncate");
@@ -562,25 +563,25 @@ mod live {
             let bin = build.binary().expect("the build under test is present");
             let mut written = rust_run(60, truncate);
             let tip = written.points.last().expect("points").txid;
-            let tip_head = newest_l0(&written.site.meta)
+            let tip_head = newest_l0(&written.fixture.meta)
                 .expect("l0")
                 .expect("a staged file");
             let tip_salts = tip_head.fields().wal.expect("origin").salts();
-            let snapshots = l9(&written.site.replica);
-            let config = written.site.dir().join("go.yml");
-            write_config_snapshotting(&config, &written.site.db, &written.site.replica, "1h")
+            let snapshots = l9(&written.fixture.replica);
+            let config = written.fixture.dir().join("go.yml");
+            write_config_snapshotting(&config, &written.fixture.db, &written.fixture.replica, "1h")
                 .expect("config");
-            let mut go = Replicator::start(&bin, &config, &written.site.dir().join("go.log"))
+            let mut go = Replicator::start(&bin, &config, &written.fixture.dir().join("go.log"))
                 .expect("start");
             for _ in 0..3 {
                 written
-                    .site
+                    .fixture
                     .commit(Shape::Insert { bytes: 300 })
                     .expect("commit");
             }
-            wait_quiet(&mut go, &written.site.meta, tip.get()).expect("Go resumes");
+            wait_quiet(&mut go, &written.fixture.meta, tip.get()).expect("Go resumes");
             go.stop().expect("stop");
-            let new = l0_after(&written.site.meta, tip.get());
+            let new = l0_after(&written.fixture.meta, tip.get());
             let first = new.first().expect("a new file").fields();
             assert_eq!(
                 first.txids.min().get(),
@@ -603,15 +604,21 @@ mod live {
                 "{version}: Go wrote a snapshot"
             );
             assert_eq!(
-                l9(&written.site.replica),
+                l9(&written.fixture.replica),
                 snapshots,
                 "{version}: a new snapshot appeared"
             );
-            let want = written.site.hash_now().expect("hash");
-            let out = restore_go(&bin, &config, &written.site, "after-go.db", Target::Latest);
+            let want = written.fixture.hash_now().expect("hash");
+            let out = restore_go(
+                &bin,
+                &config,
+                &written.fixture,
+                "after-go.db",
+                Target::Latest,
+            );
             assert_eq!(pages_of(&out), want, "{version}");
-            let rs = written.site.dir().join("rs-after-go.db");
-            restore_replica(&written.site.replica, RestoreTarget::Latest, &rs)
+            let rs = written.fixture.dir().join("rs-after-go.db");
+            restore_replica(&written.fixture.replica, RestoreTarget::Latest, &rs)
                 .expect("sink")
                 .expect("Rust restores the handed-over chain");
             assert_eq!(pages_of(&rs), want, "{version}: Rust on the combined chain");
@@ -637,29 +644,30 @@ mod live {
             for build in builds_under_test() {
                 let name = build.name();
                 let bin = build.binary().expect("the build under test is present");
-                let mut site = Site::create(4096, 41).expect("site");
-                let config = site.dir().join("go.yml");
-                write_config(&config, &site.db, &site.replica).expect("config");
+                let mut fixture = AppFixture::create(4096, 41).expect("fixture");
+                let config = fixture.dir().join("go.yml");
+                write_config(&config, &fixture.db, &fixture.replica).expect("config");
                 let mut go =
-                    Replicator::start(&bin, &config, &site.dir().join("go.log")).expect("start");
+                    Replicator::start(&bin, &config, &fixture.dir().join("go.log")).expect("start");
                 for i in 0..40 {
-                    site.commit(if i % 7 == 6 {
-                        Shape::Tiny
-                    } else {
-                        Shape::Insert { bytes: 900 }
-                    })
-                    .expect("commit");
+                    fixture
+                        .commit(if i % 7 == 6 {
+                            Shape::Tiny
+                        } else {
+                            Shape::Insert { bytes: 900 }
+                        })
+                        .expect("commit");
                     go.ensure_running().expect("Go runs");
                 }
-                wait_quiet(&mut go, &site.meta, 0).expect("Go catches up");
+                wait_quiet(&mut go, &fixture.meta, 0).expect("Go catches up");
                 go.stop().expect("stop");
-                let want = site.hash_now().expect("hash");
-                let rs = site.dir().join("rs.db");
-                restore_replica(&site.replica, RestoreTarget::Latest, &rs)
+                let want = fixture.hash_now().expect("hash");
+                let rs = fixture.dir().join("rs.db");
+                restore_replica(&fixture.replica, RestoreTarget::Latest, &rs)
                     .expect("sink")
                     .unwrap_or_else(|e| panic!("{name}: Rust cannot restore Go's replica: {e:?}"));
                 assert_eq!(pages_of(&rs), want, "{name}: Rust on Go's replica");
-                let go_out = restore_go(&bin, &config, &site, "go.db", Target::Latest);
+                let go_out = restore_go(&bin, &config, &fixture, "go.db", Target::Latest);
                 assert_eq!(pages_of(&go_out), want, "{name}: Go on its own replica");
             }
         }
@@ -678,40 +686,41 @@ mod live {
         /// several commits, as between two of Go's polls under a real workload.
         const COMMITS_PER_STAGE: usize = 5;
 
-        /// Go writes 40 commits and stops. Returns the site, the txid Go stopped at and the pages
+        /// Go writes 40 commits and stops. Returns the fixture, the txid Go stopped at and the pages
         /// the database held then. After every [`COMMITS_PER_STAGE`] commits the app waits until
         /// Go has staged a file past what it had staged before them, so Go's meta directory
         /// holds a run of level-0 files rather than one file for the whole burst.
-        fn go_writes_and_stops(build: &GoBuild, config: &Path) -> (Site, u64, Vec<String>) {
+        fn go_writes_and_stops(build: &GoBuild, config: &Path) -> (AppFixture, u64, Vec<String>) {
             let bin = build.binary().expect("the build under test is present");
-            let mut site = Site::create(4096, 33).expect("site");
-            write_config(config, &site.db, &site.replica).expect("config");
+            let mut fixture = AppFixture::create(4096, 33).expect("fixture");
+            write_config(config, &fixture.db, &fixture.replica).expect("config");
             let mut go =
-                Replicator::start(&bin, config, &site.dir().join("go.log")).expect("start");
-            let mut staged = tip(&site).expect("tip");
+                Replicator::start(&bin, config, &fixture.dir().join("go.log")).expect("start");
+            let mut staged = tip(&fixture).expect("tip");
             for i in 0..40 {
-                site.commit(if i % 7 == 6 {
-                    Shape::Tiny
-                } else {
-                    Shape::Insert { bytes: 900 }
-                })
-                .expect("commit");
+                fixture
+                    .commit(if i % 7 == 6 {
+                        Shape::Tiny
+                    } else {
+                        Shape::Insert { bytes: 900 }
+                    })
+                    .expect("commit");
                 go.ensure_running().expect("Go runs");
                 if (i + 1) % COMMITS_PER_STAGE == 0 {
-                    staged = Some(wait_staged_past(&mut go, &site, staged).expect("Go stages"));
+                    staged = Some(wait_staged_past(&mut go, &fixture, staged).expect("Go stages"));
                 }
             }
-            wait_quiet(&mut go, &site.meta, 0).expect("Go catches up");
+            wait_quiet(&mut go, &fixture.meta, 0).expect("Go catches up");
             go.stop().expect("stop");
-            let go_tip = newest_l0(&site.meta)
+            let go_tip = newest_l0(&fixture.meta)
                 .expect("l0")
                 .expect("file")
                 .fields()
                 .txids
                 .max()
                 .get();
-            let at_stop = site.hash_now().expect("hash");
-            (site, go_tip, at_stop)
+            let at_stop = fixture.hash_now().expect("hash");
+            (fixture, go_tip, at_stop)
         }
 
         /// Rust restores `target` from the combined chain and the pages equal `want`.
@@ -721,8 +730,8 @@ mod live {
             want: &[String],
             label: &str,
         ) {
-            let out = written.site.dir().join(format!("rs-{label}.db"));
-            restore_replica(&written.site.replica, target, &out)
+            let out = written.fixture.dir().join(format!("rs-{label}.db"));
+            restore_replica(&written.fixture.replica, target, &out)
                 .expect("sink")
                 .map_err(|e| format!("{label}: Rust cannot restore the combined chain: {e:?}"))
                 .expect("Rust restores a Go-then-Rust chain");
@@ -738,11 +747,11 @@ mod live {
             let bin = build.binary().expect("the build under test is present");
             let config =
                 std::env::temp_dir().join(format!("lsr-go-{name}-{}.yml", std::process::id()));
-            let (site, go_tip, at_stop) = go_writes_and_stops(build, &config);
-            let site_config = site.dir().join("go-restore.yml");
-            write_config(&site_config, &site.db, &site.replica).expect("config");
+            let (fixture, go_tip, at_stop) = go_writes_and_stops(build, &config);
+            let fixture_config = fixture.dir().join("go-restore.yml");
+            write_config(&fixture_config, &fixture.db, &fixture.replica).expect("config");
             drop(fs::remove_file(&config));
-            let mut chain = Chain::start(site, real_now_ms().expect("clock")).expect("start");
+            let mut chain = Chain::start(fixture, real_now_ms().expect("clock")).expect("start");
             for _ in 0..5 {
                 chain.commit(Shape::Insert { bytes: 700 }).expect("commit");
             }
@@ -764,13 +773,18 @@ mod live {
             );
             match build.era() {
                 Era::Blocks => {
-                    go_reads_combined(&bin, &site_config, &written, go_tip, &at_stop, "Go")
+                    go_reads_combined(&bin, &fixture_config, &written, go_tip, &at_stop, "Go")
                 }
                 Era::Frames => {
-                    let out = written.site.dir().join("refused.db");
-                    let result =
-                        restore_with_go(&bin, &site_config, &written.site.db, &out, Target::Latest)
-                            .expect("go runs");
+                    let out = written.fixture.dir().join("refused.db");
+                    let result = restore_with_go(
+                        &bin,
+                        &fixture_config,
+                        &written.fixture.db,
+                        &out,
+                        Target::Latest,
+                    )
+                    .expect("go runs");
                     assert!(
                         matches!(result, GoRestore::Refused { .. }),
                         "{name} read the combined chain: {result:?}"
@@ -781,7 +795,7 @@ mod live {
                                 newest.binary().expect("the build under test is present");
                             go_reads_combined(
                                 &newest_bin,
-                                &site_config,
+                                &fixture_config,
                                 &written,
                                 go_tip,
                                 &at_stop,
@@ -806,12 +820,12 @@ mod live {
             who: &str,
         ) {
             let want = &written.points.last().expect("points").page_hashes;
-            let latest = restore_go(bin, config, &written.site, "latest.db", Target::Latest);
+            let latest = restore_go(bin, config, &written.fixture, "latest.db", Target::Latest);
             assert_eq!(&pages_of(&latest), want, "{who} on the combined chain");
             let mid = restore_go(
                 bin,
                 config,
-                &written.site,
+                &written.fixture,
                 "mid.db",
                 Target::Txid { txid: go_tip },
             );
@@ -831,7 +845,7 @@ mod live {
         use std::time::Duration;
 
         use lsr_compat::{
-            Era, GoBuild, GoRestore, Kind, Replicator, Shape, Site, Summary, Target,
+            AppFixture, Era, GoBuild, GoRestore, Kind, Replicator, Shape, Summary, Target,
             builds_under_test, hash_pages, integrity_check, lsr_binary, restore_replica,
             restore_with_go, snapshots, tip, wait_boot_file, wait_staged_past, wait_until,
             wait_uploaded, write_config, write_config_daily_snapshots,
@@ -849,17 +863,17 @@ mod live {
             hash_pages(path).expect("hash").page_hashes
         }
 
-        fn fresh(site: &Site, name: &str) -> PathBuf {
-            let out = site.dir().join(name);
+        fn fresh(fixture: &AppFixture, name: &str) -> PathBuf {
+            let out = fixture.dir().join(name);
             for suffix in ["", "-wal", "-shm"] {
                 drop(fs::remove_file(format!("{}{suffix}", out.display())));
             }
             out
         }
 
-        fn rust_restore(site: &Site, target: RestoreTarget, name: &str) -> Vec<String> {
-            let out = fresh(site, name);
-            let restored = restore_replica(&site.replica, target, &out).expect("sink");
+        fn rust_restore(fixture: &AppFixture, target: RestoreTarget, name: &str) -> Vec<String> {
+            let out = fresh(fixture, name);
+            let restored = restore_replica(&fixture.replica, target, &out).expect("sink");
             assert!(
                 restored.is_ok(),
                 "{name}: Rust cannot restore: {restored:?}"
@@ -870,12 +884,12 @@ mod live {
         fn go_restore(
             bin: &Path,
             config: &Path,
-            site: &Site,
+            fixture: &AppFixture,
             target: Target,
             name: &str,
         ) -> Vec<String> {
-            let out = fresh(site, name);
-            let result = restore_with_go(bin, config, &site.db, &out, target).expect("go runs");
+            let out = fresh(fixture, name);
+            let result = restore_with_go(bin, config, &fixture.db, &out, target).expect("go runs");
             assert_eq!(result, GoRestore::Restored, "{name}: Go restore");
             pages_of(&out)
         }
@@ -886,7 +900,7 @@ mod live {
         /// when there was a previous tip.
         fn turn(
             mut process: Replicator,
-            site: &mut Site,
+            fixture: &mut AppFixture,
             previous: Option<Txid>,
         ) -> Option<Summary> {
             let kind = process.kind();
@@ -894,16 +908,19 @@ mod live {
             let mut at = previous;
             let mut boot = None;
             for i in 0..COMMITS {
-                site.commit(Shape::Insert { bytes: 300 }).expect("commit");
+                fixture
+                    .commit(Shape::Insert { bytes: 300 })
+                    .expect("commit");
                 if let (0, Some(prev)) = (i, previous) {
-                    boot = Some(wait_boot_file(&mut process, site, prev).expect("the boot's file"));
+                    boot =
+                        Some(wait_boot_file(&mut process, fixture, prev).expect("the boot's file"));
                 }
-                at = Some(wait_staged_past(&mut process, site, at).expect("staged"));
+                at = Some(wait_staged_past(&mut process, fixture, at).expect("staged"));
             }
-            wait_uploaded(&mut process, site).expect("uploaded");
+            wait_uploaded(&mut process, fixture).expect("uploaded");
             wait_until("a snapshot on the replica", UP, || {
                 process.ensure_running()?;
-                Ok(!snapshots(&site.replica)?.is_empty())
+                Ok(!snapshots(&fixture.replica)?.is_empty())
             })
             .expect("a snapshot exists");
             let stopped = process.stop();
@@ -934,7 +951,7 @@ mod live {
 
         /// Go replicates and stops; `lsr replicate` starts on the same database, meta directory
         /// and replica, and its first file is the next transaction, incremental, with no new
-        /// snapshot. Then the reverse on the same site: Go resumes from the meta directory `lsr`
+        /// snapshot. Then the reverse on the same fixture: Go resumes from the meta directory `lsr`
         /// left. Rust restores the combined chain at each handover point; Go restores it when it
         /// reads block-encoded files (a frame-era Go cannot, so the reverse half needs v0.5.16 or
         /// later).
@@ -950,39 +967,44 @@ mod live {
         fn process_handover(build: &GoBuild, lsr: &Path) {
             let name = build.name();
             let bin = build.binary().expect("the build under test is present");
-            let mut site = Site::create(4096, 51).expect("site");
-            site.prepare_for_processes(200).expect("prepare");
-            let config = site.dir().join("go.yml");
-            write_config_daily_snapshots(&config, &site.db, &site.replica).expect("config");
-            let log = |site: &Site, n: &str| site.dir().join(n);
+            let mut fixture = AppFixture::create(4096, 51).expect("fixture");
+            fixture.prepare_for_processes(200).expect("prepare");
+            let config = fixture.dir().join("go.yml");
+            write_config_daily_snapshots(&config, &fixture.db, &fixture.replica).expect("config");
+            let log = |fixture: &AppFixture, n: &str| fixture.dir().join(n);
             // Every Go version snapshots within seconds on this one; the daily window of `config`
             // keeps the later turns from taking a scheduled snapshot once one exists.
-            let first = site.dir().join("go-first.yml");
-            write_config(&first, &site.db, &site.replica).expect("config");
-            let go = Replicator::start(&bin, &first, &log(&site, "go-1.log")).expect("start Go");
-            assert_eq!(turn(go, &mut site, None), None);
-            let go_tip = tip(&site).expect("tip").expect("Go staged");
-            let at_go_stop = site.hash_now().expect("hash");
-            let l9 = snapshots(&site.replica).expect("l9");
+            let first = fixture.dir().join("go-first.yml");
+            write_config(&first, &fixture.db, &fixture.replica).expect("config");
+            let go = Replicator::start(&bin, &first, &log(&fixture, "go-1.log")).expect("start Go");
+            assert_eq!(turn(go, &mut fixture, None), None);
+            let go_tip = tip(&fixture).expect("tip").expect("Go staged");
+            let at_go_stop = fixture.hash_now().expect("hash");
+            let l9 = snapshots(&fixture.replica).expect("l9");
 
-            let rs = Replicator::start_lsr(lsr, &site.db, &site.replica, &log(&site, "lsr.log"))
-                .expect("start lsr");
-            let boot = turn(rs, &mut site, Some(go_tip));
+            let rs = Replicator::start_lsr(
+                lsr,
+                &fixture.db,
+                &fixture.replica,
+                &log(&fixture, "lsr.log"),
+            )
+            .expect("start lsr");
+            let boot = turn(rs, &mut fixture, Some(go_tip));
             assert_continued(name, Kind::Rust, boot.as_ref(), go_tip);
             assert_eq!(
-                snapshots(&site.replica).expect("l9"),
+                snapshots(&fixture.replica).expect("l9"),
                 l9,
                 "{name}: Rust took a snapshot"
             );
-            let rust_tip = tip(&site).expect("tip").expect("Rust staged");
-            let at_rust_stop = site.hash_now().expect("hash");
+            let rust_tip = tip(&fixture).expect("tip").expect("Rust staged");
+            let at_rust_stop = fixture.hash_now().expect("hash");
             assert_eq!(
-                rust_restore(&site, RestoreTarget::Latest, "rs-1.db"),
+                rust_restore(&fixture, RestoreTarget::Latest, "rs-1.db"),
                 at_rust_stop,
                 "{name}"
             );
             assert_eq!(
-                rust_restore(&site, RestoreTarget::Txid(go_tip), "rs-go-tip.db"),
+                rust_restore(&fixture, RestoreTarget::Txid(go_tip), "rs-go-tip.db"),
                 at_go_stop,
                 "{name}: Rust at the txid where Go stopped"
             );
@@ -994,13 +1016,13 @@ mod live {
                 println!("{name}: reads only frame-encoded files, so cannot resume from lsr's");
                 return;
             }
-            let latest = go_restore(&bin, &config, &site, Target::Latest, "go-1.db");
+            let latest = go_restore(&bin, &config, &fixture, Target::Latest, "go-1.db");
             assert_eq!(latest, at_rust_stop, "{name}: Go on the Go-then-Rust chain");
             go_resumes_from_lsr(
                 name,
                 &bin,
                 &config,
-                &mut site,
+                &mut fixture,
                 (rust_tip, &at_rust_stop),
                 &l9,
             );
@@ -1011,27 +1033,27 @@ mod live {
             name: &str,
             bin: &Path,
             config: &Path,
-            site: &mut Site,
+            fixture: &mut AppFixture,
             (rust_tip, at_rust_stop): (Txid, &[String]),
             l9: &BTreeSet<String>,
         ) {
-            let log = site.dir().join("go-2.log");
+            let log = fixture.dir().join("go-2.log");
             let go = Replicator::start(bin, config, &log).expect("start Go");
-            let boot = turn(go, site, Some(rust_tip));
+            let boot = turn(go, fixture, Some(rust_tip));
             assert_continued(name, Kind::Go, boot.as_ref(), rust_tip);
             assert_eq!(
-                snapshots(&site.replica).expect("l9"),
+                snapshots(&fixture.replica).expect("l9"),
                 *l9,
                 "{name}: Go took a snapshot"
             );
-            let at_end = site.hash_now().expect("hash");
+            let at_end = fixture.hash_now().expect("hash");
             assert_eq!(
-                go_restore(bin, config, site, Target::Latest, "go-2.db"),
+                go_restore(bin, config, fixture, Target::Latest, "go-2.db"),
                 at_end,
                 "{name}"
             );
             assert_eq!(
-                rust_restore(site, RestoreTarget::Latest, "rs-2.db"),
+                rust_restore(fixture, RestoreTarget::Latest, "rs-2.db"),
                 at_end,
                 "{name}"
             );
@@ -1039,7 +1061,7 @@ mod live {
                 txid: rust_tip.get(),
             };
             assert_eq!(
-                go_restore(bin, config, site, at_rust, "go-rs-tip.db"),
+                go_restore(bin, config, fixture, at_rust, "go-rs-tip.db"),
                 at_rust_stop,
                 "{name}: Go at the txid where lsr stopped"
             );

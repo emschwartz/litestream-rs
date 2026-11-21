@@ -1,27 +1,27 @@
-//! Where the host application runs: in the test process, or in a child process at SQLite's
+//! Where the application runs: in the test process, or in a child process at SQLite's
 //! defaults, as an application beside a sidecar runs.
 //!
-//! [`Placement::InProcess`] is the original form of the suite: the host's connections live in
+//! [`Placement::InProcess`] is the original form of the suite: the application's connections live in
 //! the test process, through the rig's fault VFS, set up as replication asks
 //! (`crate::app_connection`: `PERSIST_WAL` on, automatic checkpoints off).
 //!
-//! [`Placement::SeparateProcess`] moves only the host. The test binary runs itself again as
+//! [`Placement::SeparateProcess`] moves only the application. The test binary runs itself again as
 //! `<exe> child_process_entry --exact --nocapture --test-threads=1` with the database in
-//! [`HOST_DB`]; that test's first statement is `if lsr_sqlite::testing::serve_host() { return;
-//! }`, so the child serves the host and nothing else. Its connections keep SQLite's defaults
+//! [`APP_DB`]; that test's first statement is `if lsr_sqlite::testing::serve_app() { return;
+//! }`, so the child serves the application and nothing else. Its connections keep SQLite's defaults
 //! (automatic checkpoint every 1000 frames, no `PERSIST_WAL`, the default VFS, busy timeout
 //! zero, which is also SQLite's default) and only `synchronous` is set, as the rig's in-process
-//! host sets it. The pin, the engine, the stores and the oracle stay in the test process, so
-//! every lock the host takes or drops is another process's, as with a sidecar.
+//! application sets it. The pin, the engine, the stores and the oracle stay in the test process, so
+//! every lock the application takes or drops is another process's, as with a sidecar.
 //!
 //! The protocol is one request line on the child's stdin and one reply line on its stdout,
 //! marked with [`MARK`] so libtest's own lines are skipped: `<conn> open`, `<conn> close`,
 //! `<conn> exec <sql>`, `<conn> query <sql>` (the first row's integer columns),
-//! `<conn> persist-wal-off`, `0 touch` (the host process opens and closes the database and
+//! `<conn> persist-wal-off`, `0 touch` (the application process opens and closes the database and
 //! `-shm` with `std::fs`, dropping its own POSIX locks), `0 writers <n> <rows>` (concurrent
-//! writers on threads of their own, while the host keeps serving) and `0 exit`. A reply is
+//! writers on threads of their own, while the application keeps serving) and `0 exit`. A reply is
 //! `ok`, `row <ints>`, or `err <extended code> <message>`, which becomes the same `rusqlite`
-//! error the in-process host returns; the writers end with one more line, `done` and a reply.
+//! error the in-process application returns; the writers end with one more line, `done` and a reply.
 //! A thread forwards reply lines into bounded channels, so the test waits on a reply (a
 //! blocking receive), never on the clock.
 
@@ -37,7 +37,7 @@ use rusqlite::{Connection, OpenFlags, ffi};
 use super::{RigError, open_app, suffixed};
 use crate::testing::vfs::FaultVfs;
 
-/// Where the host application runs. See the module doc.
+/// Where the application runs. See the module doc.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Placement {
     /// In the test process, set up as replication asks, through the rig's fault VFS.
@@ -52,24 +52,24 @@ impl Placement {
     pub const ALL: [Self; 2] = [Self::InProcess, Self::SeparateProcess];
 }
 
-/// The environment variable that makes a test binary the host: the database's path.
-pub const HOST_DB: &str = "LSR_SQLITE_HOST_DB";
-const HOST_SYNCHRONOUS: &str = "LSR_SQLITE_HOST_SYNCHRONOUS";
-/// The marker every reply line of the host process starts with.
-pub const MARK: &str = "lsr-host ";
+/// The environment variable that makes a test binary the application: the database's path.
+pub const APP_DB: &str = "LSR_SQLITE_APP_DB";
+const APP_SYNCHRONOUS: &str = "LSR_SQLITE_APP_SYNCHRONOUS";
+/// The marker every reply line of the application process starts with.
+pub const MARK: &str = "lsr-app ";
 /// What the line that ends the writers starts with, after [`MARK`].
 const DONE: &str = "done ";
-/// The test a test binary runs as the host process.
+/// The test a test binary runs as the application process.
 pub const CHILD_ENTRY: &str = "child_process_entry";
 /// How long a concurrent writer waits on the others' write lock.
 const WRITER_BUSY: Duration = Duration::from_secs(30);
 
-/// The connection id of the host's own connection.
+/// The connection id of the application's own connection.
 pub(super) const APP: u32 = 0;
 
-/// The host's connections, wherever they live.
+/// The application's connections, wherever they live.
 #[derive(Debug)]
-pub(super) enum Host {
+pub(super) enum App {
     /// In this process.
     Local {
         db: PathBuf,
@@ -78,11 +78,11 @@ pub(super) enum Host {
         conns: BTreeMap<u32, Connection>,
     },
     /// In a child process.
-    Child(HostProcess),
+    Child(AppProcess),
 }
 
-impl Host {
-    /// A host with no connection open yet.
+impl App {
+    /// An application with no connection open yet.
     pub(super) fn new(
         placement: Placement,
         db: &Path,
@@ -96,7 +96,7 @@ impl Host {
                 synchronous,
                 conns: BTreeMap::new(),
             }),
-            Placement::SeparateProcess => Ok(Self::Child(HostProcess::spawn(db, synchronous)?)),
+            Placement::SeparateProcess => Ok(Self::Child(AppProcess::spawn(db, synchronous)?)),
         }
     }
 
@@ -166,8 +166,8 @@ impl Host {
         }
     }
 
-    /// The host process, when the host runs in one.
-    pub(super) const fn child_mut(&mut self) -> Option<&mut HostProcess> {
+    /// The application process, when the application runs in one.
+    pub(super) const fn child_mut(&mut self) -> Option<&mut AppProcess> {
         match self {
             Self::Local { .. } => None,
             Self::Child(child) => Some(child),
@@ -219,9 +219,9 @@ impl Host {
         }
     }
 
-    /// The host's process opens and closes the database and `-shm` with `std::fs`. In this
+    /// The application's process opens and closes the database and `-shm` with `std::fs`. In this
     /// process that would drop the pin's locks too, which is the hazard the descriptor rule
-    /// exists for, so only the separate host does it.
+    /// exists for, so only the separate application does it.
     pub(super) fn touch(&mut self) -> Result<(), RigError> {
         match self {
             Self::Local { .. } => Err(RigError::State(
@@ -233,9 +233,9 @@ impl Host {
 }
 
 fn local(conns: &BTreeMap<u32, Connection>, id: u32) -> Result<&Connection, RigError> {
-    conns
-        .get(&id)
-        .ok_or(RigError::State("use a host connection that is not open"))
+    conns.get(&id).ok_or(RigError::State(
+        "use an application connection that is not open",
+    ))
 }
 
 fn first_row(conn: &Connection, sql: &str) -> Result<Vec<i64>, rusqlite::Error> {
@@ -255,12 +255,12 @@ fn persist_wal_off(conn: &Connection) -> Result<(), rusqlite::Error> {
 }
 
 fn reply_error(reply: &str) -> RigError {
-    RigError::Host(format!("an unexpected reply: {reply:?}"))
+    RigError::App(format!("an unexpected reply: {reply:?}"))
 }
 
-/// The host in a child process: its pipes, the reply channels and which connections it holds.
+/// The application in a child process: its pipes, the reply channels and which connections it holds.
 #[derive(Debug)]
-pub(super) struct HostProcess {
+pub(super) struct AppProcess {
     child: Child,
     stdin: Option<ChildStdin>,
     replies: Receiver<String>,
@@ -268,20 +268,21 @@ pub(super) struct HostProcess {
     open: BTreeSet<u32>,
 }
 
-impl HostProcess {
+impl AppProcess {
     fn spawn(db: &Path, synchronous: &str) -> Result<Self, RigError> {
-        let spawn = |err: std::io::Error| RigError::Host(format!("cannot start the host: {err}"));
+        let spawn =
+            |err: std::io::Error| RigError::App(format!("cannot start the application: {err}"));
         let exe = std::env::current_exe().map_err(spawn)?;
         let mut child = Command::new(exe)
             .args([CHILD_ENTRY, "--exact", "--nocapture", "--test-threads=1"])
-            .env(HOST_DB, db)
-            .env(HOST_SYNCHRONOUS, synchronous)
+            .env(APP_DB, db)
+            .env(APP_SYNCHRONOUS, synchronous)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
             .map_err(spawn)?;
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
-            return Err(RigError::Host("the host's pipes".to_owned()));
+            return Err(RigError::App("the application's pipes".to_owned()));
         };
         let (tx, replies) = sync_channel(4);
         let (done_tx, done) = sync_channel(1);
@@ -296,22 +297,21 @@ impl HostProcess {
     }
 
     fn send(&mut self, id: u32, verb: &str, arg: &str) -> Result<(), RigError> {
-        let stdin = self
-            .stdin
-            .as_mut()
-            .ok_or(RigError::State("talk to a host that was told to exit"))?;
+        let stdin = self.stdin.as_mut().ok_or(RigError::State(
+            "talk to an application that was told to exit",
+        ))?;
         writeln!(stdin, "{id} {verb} {arg}")
             .and_then(|()| stdin.flush())
-            .map_err(|err| RigError::Host(format!("the host's stdin: {err}")))
+            .map_err(|err| RigError::App(format!("the application's stdin: {err}")))
     }
 
-    /// One request and its reply: what followed `ok` or `row`, or the host's error.
+    /// One request and its reply: what followed `ok` or `row`, or the application's error.
     fn request(&mut self, id: u32, verb: &str, arg: &str) -> Result<String, RigError> {
         self.send(id, verb, arg)?;
         let reply = self
             .replies
             .recv()
-            .map_err(|_gone| RigError::Host(format!("the host exited during {verb}")))?;
+            .map_err(|_gone| RigError::App(format!("the application exited during {verb}")))?;
         parse_reply(&reply)
     }
 
@@ -327,23 +327,23 @@ impl HostProcess {
         match self.done.try_recv() {
             Ok(reply) => parse_reply(&reply).map(|_row| true),
             Err(TryRecvError::Empty) => Ok(false),
-            Err(TryRecvError::Disconnected) => Err(RigError::Host(
-                "the host exited while its writers ran".to_owned(),
+            Err(TryRecvError::Disconnected) => Err(RigError::App(
+                "the application exited while its writers ran".to_owned(),
             )),
         }
     }
 }
 
-impl Drop for HostProcess {
+impl Drop for AppProcess {
     fn drop(&mut self) {
         drop(self.send(APP, "exit", ""));
-        // Its stdin closing ends the host's loop even if the exit line was lost.
+        // Its stdin closing ends the application's loop even if the exit line was lost.
         drop(self.stdin.take());
         drop(self.child.wait());
     }
 }
 
-/// Forwards the host's reply lines, without their marker, until it exits: the writers' end
+/// Forwards the application's reply lines, without their marker, until it exits: the writers' end
 /// to `done`, every other reply to `tx`.
 fn forward(stdout: ChildStdout, tx: &SyncSender<String>, done: &SyncSender<String>) {
     for line in BufReader::new(stdout).lines() {
@@ -378,17 +378,17 @@ fn parse_reply(reply: &str) -> Result<String, RigError> {
     }
 }
 
-/// Serves as the host when this process was started as one (see the module doc), and says
+/// Serves as the application when this process was started as one (see the module doc), and says
 /// whether it was. A test binary that uses [`Placement::SeparateProcess`] calls it first in
 /// its `child_process_entry` test.
 #[must_use]
-pub fn serve_host() -> bool {
-    let Some(db) = std::env::var_os(HOST_DB) else {
+pub fn serve_app() -> bool {
+    let Some(db) = std::env::var_os(APP_DB) else {
         return false;
     };
     let mut server = Server {
         db: PathBuf::from(db),
-        synchronous: std::env::var(HOST_SYNCHRONOUS).unwrap_or_else(|_unset| "NORMAL".to_owned()),
+        synchronous: std::env::var(APP_SYNCHRONOUS).unwrap_or_else(|_unset| "NORMAL".to_owned()),
         conns: BTreeMap::new(),
     };
     for line in std::io::stdin().lock().lines() {
@@ -421,7 +421,7 @@ fn reply_line(reply: Reply) -> String {
     })
 }
 
-/// The host process's side: its database and its connections.
+/// The application process's side: its database and its connections.
 struct Server {
     db: PathBuf,
     synchronous: String,
@@ -528,12 +528,12 @@ pub(super) fn writer_row_bytes(writer: u32, n: u32) -> u32 {
         .saturating_add(200)
 }
 
-/// Opens and closes the database and `-shm` with `std::fs` in the host's process.
+/// Opens and closes the database and `-shm` with `std::fs` in the application's process.
 fn touch(db: &Path) -> String {
     for path in [db.to_owned(), suffixed(db, "-shm")] {
         #[expect(
             clippy::disallowed_methods,
-            reason = "the host's own process drops its own locks on purpose; the pin is another process's"
+            reason = "the application's own process drops its own locks on purpose; the pin is another process's"
         )]
         let opened = std::fs::File::open(&path);
         if let Err(err) = opened {

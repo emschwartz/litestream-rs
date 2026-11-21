@@ -2,7 +2,7 @@
 //!
 //! [`run`] builds a [`World`] and an [`Actor`], applies each operation of the
 //! seed's history in order, and judges the replica at every `Restore`, after
-//! every drain and once at the end. The actor is driven the way a host would
+//! every drain and once at the end. The actor is driven the way an application would
 //! drive it: each tick's future goes through [`World::run_tick`], the clock
 //! follows the `Next` it returns, and a crash drops the actor and builds a new
 //! one. A failure names the seed and the step; [`shrink`] finds the shortest
@@ -13,9 +13,9 @@ use std::num::{NonZeroU32, NonZeroU64};
 use std::time::Duration;
 
 use lsr_core::{
-    Actor, ActorConfig, CheckpointConfig, Clock, Entropy, Env, Event, Fault, HaltCause,
-    HostCheckpoints, Lane, MAX_BACKOFF, Maintenance, Next, PersistentCause, Responses,
-    RetentionMode, SeededEntropy, SyncConfig, Tick, UploadConfig,
+    Actor, ActorConfig, AppCheckpoints, CheckpointConfig, Clock, Entropy, Env, Event, Fault,
+    HaltCause, Lane, MAX_BACKOFF, Maintenance, Next, PersistentCause, Responses, RetentionMode,
+    SeededEntropy, SyncConfig, Tick, UploadConfig,
 };
 use lsr_ltx::{PageNo, PageSize, Timestamp, Txid};
 use lsr_wal::{Salts, WalOffset};
@@ -152,7 +152,7 @@ pub struct RunReport {
     /// asked to record.
     pub remote_damaged: Vec<lsr_core::FileKey>,
     /// What every engine of the run saw of the app's checkpoints.
-    pub host_checkpoints: HostCheckpoints,
+    pub app_checkpoints: AppCheckpoints,
     /// The app's automatic checkpoints, as the model counted them.
     pub app_autocheckpoints: AutoTally,
 }
@@ -241,9 +241,9 @@ struct Runner {
     latest: Option<Timestamp>,
     saved: Option<StagedCopy>,
     /// The app's automatic checkpoint threshold each engine is told.
-    host_autocheckpoint: Option<NonZeroU32>,
+    app_autocheckpoint: Option<NonZeroU32>,
     /// What engines replaced so far saw of the app's checkpoints.
-    host_before: HostCheckpoints,
+    app_before: AppCheckpoints,
 }
 
 fn below(rng: &SeededEntropy, upper: u64) -> u64 {
@@ -280,8 +280,8 @@ impl Runner {
             degraded: [false; 5],
             latest: None,
             saved: None,
-            host_autocheckpoint: Some(lsr_core::SQLITE_AUTOCHECKPOINT),
-            host_before: HostCheckpoints::NONE,
+            app_autocheckpoint: Some(lsr_core::SQLITE_AUTOCHECKPOINT),
+            app_before: AppCheckpoints::NONE,
         }
     }
 
@@ -292,20 +292,20 @@ impl Runner {
     fn reboot(&mut self) {
         self.w.start_driver();
         let base = actor_config();
-        self.host_before = self.host_seen();
+        self.app_before = self.app_seen();
         self.actor = Actor::new(ActorConfig {
             responses: self.responses,
             maintenance: base.maintenance.clone().with_retention(self.retention),
             ..base
         });
-        self.actor.set_host_autocheckpoint(self.host_autocheckpoint);
+        self.actor.set_app_autocheckpoint(self.app_autocheckpoint);
         self.unwatched = true;
         self.degraded = [false; 5];
         self.latest = None;
     }
 
-    fn host_seen(&self) -> HostCheckpoints {
-        self.host_before.then(self.actor.host_checkpoints())
+    fn app_seen(&self) -> AppCheckpoints {
+        self.app_before.then(self.actor.app_checkpoints())
     }
 
     fn limits(&self) -> Limits {
@@ -1005,10 +1005,10 @@ impl Runner {
             Op::Meta(op) => self.meta(*op)?,
             Op::Wal(op) => self.wal_damage(*op)?,
             Op::Remote(op) => self.remote(*op)?,
-            Op::HostAutocheckpoint(frames) => {
+            Op::AppAutocheckpoint(frames) => {
                 self.w.sqlite.set_app_autocheckpoint(*frames);
-                self.host_autocheckpoint = frames.and_then(NonZeroU32::new);
-                self.actor.set_host_autocheckpoint(self.host_autocheckpoint);
+                self.app_autocheckpoint = frames.and_then(NonZeroU32::new);
+                self.actor.set_app_autocheckpoint(self.app_autocheckpoint);
             }
             Op::OurReader { begin } => {
                 let done = if *begin {
@@ -1211,7 +1211,7 @@ pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure
         violation,
         trace: std::mem::take(&mut runner.report.trace),
     })?;
-    runner.report.host_checkpoints = runner.host_seen();
+    runner.report.app_checkpoints = runner.app_seen();
     runner.report.app_autocheckpoints = runner.w.sqlite.app_autocheckpoints();
     if opts.record {
         runner.report.remote_events = runner.w.remote_tap.events();

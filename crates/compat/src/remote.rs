@@ -1,4 +1,4 @@
-//! Where a [`crate::Site`]'s replica lives: a directory, as the committed fixtures and most live
+//! Where a [`crate::AppFixture`]'s replica lives: a directory, as the committed fixtures and most live
 //! checks use, or a prefix of a local MinIO bucket ([`S3Replica`]). The watchers of the
 //! handover module, the restores and the config files go through this, so one test body runs
 //! against either, and what a check sees on S3 is read through the S3 store, never a copy.
@@ -15,7 +15,7 @@ use crate::replica::{Summary, l0_starting_at, newest_txid};
 use crate::rsrestore::restore_replica;
 use crate::s3::S3Replica;
 
-/// A site's replica.
+/// A fixture's replica.
 #[derive(Debug)]
 pub enum Remote {
     /// A file replica directory.

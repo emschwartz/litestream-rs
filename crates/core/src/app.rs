@@ -1,26 +1,26 @@
-//! What the host's own checkpoints look like from the replicator's side.
+//! What the application's own checkpoints look like from the replicator's side.
 //!
-//! A host that cannot be told to keep `wal_autocheckpoint = 0` (a sidecar's host, or an
-//! in-process host that did not use `app_connection`) runs SQLite's automatic PASSIVE
+//! An application that cannot be told to keep `wal_autocheckpoint = 0` (a sidecar's application, or an
+//! in-process application that did not use `app_connection`) runs SQLite's automatic PASSIVE
 //! checkpoint after every commit that leaves the WAL at or past its threshold, 1000 frames
 //! by default. None of it costs the replica anything (the pin stops it), but it costs the
-//! host, and the replicator should say so. The observer reads only what each poll already
+//! application, and the replicator should say so. The observer reads only what each poll already
 //! reads (the wal-index's frame count, backfill count and salts) and the replicator's own
 //! checkpoints, and reports three things:
 //!
-//! - [`HostCheckpoint::Backfilled`]: the backfill count rose within one generation with no
+//! - [`AppCheckpoint::Backfilled`]: the backfill count rose within one generation with no
 //!   checkpoint of ours since the last read. SQLite caps a checkpoint at the mark of the
 //!   pin, so this shows only while the pin is on a read mark above 0.
-//! - [`HostCheckpoint::Restarted`]: the generation changed although the last read was not
+//! - [`AppCheckpoint::Restarted`]: the generation changed although the last read was not
 //!   fully backfilled and no checkpoint of ours came between, so someone else finished the
 //!   backfill and restarted the log. A restart after a read that was fully backfilled is
 //!   just the next writer starting a new generation (`walRestartLog`), not a checkpoint.
-//! - [`HostCheckpoint::Stalled`]: the half the backfill count cannot show. With the pin on
+//! - [`AppCheckpoint::Stalled`]: the half the backfill count cannot show. With the pin on
 //!   read mark 0 a checkpoint needs that mark exclusively, fails, and reports OK to a
-//!   PASSIVE caller, so it leaves no trace in the wal-index (`docs/spikes.md`, the host's
+//!   PASSIVE caller, so it leaves no trace in the wal-index (`docs/spikes.md`, the application's
 //!   automatic checkpoints against a pin in another process). The observer infers it: the
-//!   WAL was already at or past the host's threshold at the last read, it grew since (a
-//!   host commit, so a host checkpoint attempt), nothing new was backfilled, and the
+//!   WAL was already at or past the application's threshold at the last read, it grew since (a
+//!   application commit, so an application checkpoint attempt), nothing new was backfilled, and the
 //!   backfill already stands where the pin stops any checkpoint (the *ceiling*). Every such
 //!   attempt does nothing until the replicator checkpoints, and the WAL grows until then.
 //!   Reported once per episode: an episode ends at a checkpoint of ours, a backfill or a
@@ -33,12 +33,12 @@
 //! retake). Without that report it is the frame count at the read after, or at the first
 //! read: an estimate from above, so that a wrong one can only miss a stall, never invent
 //! one. A new generation sets it to 0 (SQLite restarts the log under a held pin only when the
-//! pin is on read mark 0), and a host checkpoint that stopped short sets it to where it stopped.
+//! pin is on read mark 0), and an application checkpoint that stopped short sets it to where it stopped.
 //!
-//! The wal-index cannot tell a host at `wal_autocheckpoint = 0` from a host whose attempts
+//! The wal-index cannot tell an application at `wal_autocheckpoint = 0` from an application whose attempts
 //! fail on read mark 0: both leave the WAL growing with nothing backfilled. Where the pin is above
 //! read mark 0 the two differ (an attempt would have backfilled to the ceiling), and no stall is
-//! inferred. On read mark 0 only the threshold the observer is given tells them apart, so a host
+//! inferred. On read mark 0 only the threshold the observer is given tells them apart, so an application
 //! known to run at 0 should be stated as `None`.
 //!
 //! None of this is a [`crate::Fault`] or a degraded state, and none of it changes a decision.
@@ -50,12 +50,12 @@ use crate::source::{CheckpointRun, CommittedRead};
 #[cfg(test)]
 mod tests;
 
-/// SQLite's default `wal_autocheckpoint`, in frames: what a host that sets nothing runs.
+/// SQLite's default `wal_autocheckpoint`, in frames: what an application that sets nothing runs.
 pub const SQLITE_AUTOCHECKPOINT: NonZeroU32 = NonZeroU32::MIN.saturating_add(999);
 
-/// One checkpoint, or one checkpoint attempt, of the host's, seen between two reads.
+/// One checkpoint, or one checkpoint attempt, of the application's, seen between two reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HostCheckpoint {
+pub enum AppCheckpoint {
     /// Someone else copied frames into the database file: the backfill count rose from
     /// `from` to `to` within one generation.
     Backfilled {
@@ -66,8 +66,8 @@ pub enum HostCheckpoint {
     },
     /// Someone else finished the backfill and restarted the WAL.
     Restarted,
-    /// The WAL grew past the host's automatic checkpoint threshold with nothing new copied
-    /// into the database file: the host's attempts cannot run until the replicator
+    /// The WAL grew past the application's automatic checkpoint threshold with nothing new copied
+    /// into the database file: the application's attempts cannot run until the replicator
     /// checkpoints.
     Stalled {
         /// Frames in the WAL at the read that showed it.
@@ -75,20 +75,20 @@ pub enum HostCheckpoint {
     },
 }
 
-/// Every host checkpoint seen since the observer began.
+/// Every application checkpoint seen since the observer began.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct HostCheckpoints {
-    /// [`HostCheckpoint::Backfilled`] observations.
+pub struct AppCheckpoints {
+    /// [`AppCheckpoint::Backfilled`] observations.
     pub backfilled: u64,
-    /// [`HostCheckpoint::Restarted`] observations.
+    /// [`AppCheckpoint::Restarted`] observations.
     pub restarted: u64,
-    /// [`HostCheckpoint::Stalled`] episodes.
+    /// [`AppCheckpoint::Stalled`] episodes.
     pub stalled: u64,
     /// The newest observation.
-    pub last: Option<HostCheckpoint>,
+    pub last: Option<AppCheckpoint>,
 }
 
-impl HostCheckpoints {
+impl AppCheckpoints {
     /// Nothing seen.
     pub const NONE: Self = Self {
         backfilled: 0,
@@ -121,12 +121,12 @@ impl HostCheckpoints {
         }
     }
 
-    fn count(&mut self, seen: HostCheckpoint) {
+    fn count(&mut self, seen: AppCheckpoint) {
         let bump = |n: &mut u64| *n = n.saturating_add(1);
         match seen {
-            HostCheckpoint::Backfilled { .. } => bump(&mut self.backfilled),
-            HostCheckpoint::Restarted => bump(&mut self.restarted),
-            HostCheckpoint::Stalled { .. } => bump(&mut self.stalled),
+            AppCheckpoint::Backfilled { .. } => bump(&mut self.backfilled),
+            AppCheckpoint::Restarted => bump(&mut self.restarted),
+            AppCheckpoint::Stalled { .. } => bump(&mut self.stalled),
         }
         self.last = Some(seen);
     }
@@ -175,20 +175,20 @@ impl Watch {
     }
 }
 
-/// One read against the last: what the host did between them, and the new watch.
-/// `autocheckpoint` is the host's threshold, `None` for a host that runs none.
+/// One read against the last: what the application did between them, and the new watch.
+/// `autocheckpoint` is the application's threshold, `None` for an application that runs none.
 #[must_use]
 pub fn observe(
     prev: Option<Watch>,
     now: CommittedRead,
     autocheckpoint: Option<NonZeroU32>,
-) -> (Watch, Option<HostCheckpoint>) {
+) -> (Watch, Option<AppCheckpoint>) {
     let Some(prev) = prev else {
         return (Watch::baseline(now), None);
     };
     let before = prev.read;
     if before.end().salts() != now.end().salts() {
-        let seen = (!before.fully_backfilled()).then_some(HostCheckpoint::Restarted);
+        let seen = (!before.fully_backfilled()).then_some(AppCheckpoint::Restarted);
         let watch = Watch {
             read: now,
             ceiling: 0,
@@ -202,7 +202,7 @@ pub fn observe(
             ceiling: now.backfilled(),
             stalled: false,
         };
-        let seen = HostCheckpoint::Backfilled {
+        let seen = AppCheckpoint::Backfilled {
             from: before.backfilled(),
             to: now.backfilled(),
         };
@@ -218,48 +218,48 @@ pub fn observe(
         ceiling: prev.ceiling,
         stalled: prev.stalled || stalled,
     };
-    (watch, stalled.then_some(HostCheckpoint::Stalled { frames }))
+    (watch, stalled.then_some(AppCheckpoint::Stalled { frames }))
 }
 
-/// Watches the host's checkpoints across polls: [`observe`] with its state.
+/// Watches the application's checkpoints across polls: [`observe`] with its state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct HostObserver {
+pub struct AppCheckpointObserver {
     autocheckpoint: Option<NonZeroU32>,
     watch: Option<Watch>,
-    counts: HostCheckpoints,
+    counts: AppCheckpoints,
 }
 
-impl Default for HostObserver {
+impl Default for AppCheckpointObserver {
     fn default() -> Self {
         Self::new(Some(SQLITE_AUTOCHECKPOINT))
     }
 }
 
-impl HostObserver {
-    /// An observer of a host whose automatic checkpoint runs at `autocheckpoint` frames
-    /// (`None`: the host runs none).
+impl AppCheckpointObserver {
+    /// An observer of an application whose automatic checkpoint runs at `autocheckpoint` frames
+    /// (`None`: the application runs none).
     #[must_use]
     pub const fn new(autocheckpoint: Option<NonZeroU32>) -> Self {
         Self {
             autocheckpoint,
             watch: None,
-            counts: HostCheckpoints::NONE,
+            counts: AppCheckpoints::NONE,
         }
     }
 
-    /// The host's threshold the observer assumes.
+    /// The application's threshold the observer assumes.
     #[must_use]
     pub const fn autocheckpoint(&self) -> Option<NonZeroU32> {
         self.autocheckpoint
     }
 
-    /// Changes the host's threshold; what was seen stays.
+    /// Changes the application's threshold; what was seen stays.
     pub const fn set_autocheckpoint(&mut self, autocheckpoint: Option<NonZeroU32>) {
         self.autocheckpoint = autocheckpoint;
     }
 
-    /// One poll's read of the wal-index, and what it shows the host did since the last.
-    pub fn poll(&mut self, now: CommittedRead) -> Option<HostCheckpoint> {
+    /// One poll's read of the wal-index, and what it shows the application did since the last.
+    pub fn poll(&mut self, now: CommittedRead) -> Option<AppCheckpoint> {
         let (watch, seen) = observe(self.watch, now, self.autocheckpoint);
         self.watch = Some(watch);
         if let Some(seen) = seen {
@@ -289,7 +289,7 @@ impl HostObserver {
 
     /// Everything seen so far.
     #[must_use]
-    pub const fn counts(&self) -> HostCheckpoints {
+    pub const fn counts(&self) -> AppCheckpoints {
         self.counts
     }
 }

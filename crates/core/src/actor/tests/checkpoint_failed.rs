@@ -15,7 +15,7 @@ fn newest(rig: &Rig) -> (Option<u64>, Option<u64>) {
     (max(&rig.staging), max(&rig.remote))
 }
 
-/// A PASSIVE whose seal stages a commit the host made after the tick's sync
+/// A PASSIVE whose seal stages a commit the application made after the tick's sync
 /// read the committed end, and whose step `op` then fails with `err`.
 fn passive_failed_after_the_seal(op: SourceOp, err: SourceError) -> (Rig, Actor) {
     let mut config = cfg();
@@ -103,7 +103,7 @@ fn cases() -> Vec<Case> {
 }
 
 /// The file a failed checkpoint staged is uploaded without waiting for the
-/// host's next commit or the checkpoint's retry.
+/// application's next commit or the checkpoint's retry.
 #[test]
 fn a_file_a_failed_checkpoint_staged_is_uploaded() {
     for (name, case) in cases() {

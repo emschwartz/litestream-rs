@@ -12,7 +12,7 @@ default = ["ureq"]
 # The in-memory S3 (FakeS3), the recorded-fault layer and test-only request edits.
 testing = ["dep:percent-encoding"]
 # HTTP clients, any combination: `UreqTransport` (blocking, no runtime; the
-# default and what `S3Store::new` uses) and `ReqwestTransport` (for hosts that
+# default and what `S3Store::new` uses) and `ReqwestTransport` (for applications that
 # already build reqwest and Tokio). The clients the store builds itself trust
 # what Go's crypto/x509 trusts (the `trust` module).
 ureq = ["dep:ureq", "dep:rustls"]
@@ -25,9 +25,9 @@ reqwest = [
     "dep:tokio",
     "dep:webpki-roots",
 ]
-# For a host that hands `ReqwestTransport` a reqwest client on native-tls: its TLS
+# For an application that hands `ReqwestTransport` a reqwest client on native-tls: its TLS
 # failures are classified as such (they are not rustls errors). Enables reqwest's own
-# `native-tls`, which such a host has on already.
+# `native-tls`, which such an application has on already.
 native-tls = ["reqwest", "dep:native-tls", "reqwest/native-tls"]
 
 [dependencies]
@@ -61,7 +61,7 @@ ureq = { workspace = true, optional = true, features = ["platform-verifier"] }
 rustls-platform-verifier = { workspace = true, optional = true }
 
 [dev-dependencies]
-# A host runtime with worker threads, for the reqwest transport's tests.
+# An application runtime with worker threads, for the reqwest transport's tests.
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 # The TLS server under a private certificate authority in the trust tests.
 rustls = { workspace = true, features = ["ring", "std", "tls12"] }

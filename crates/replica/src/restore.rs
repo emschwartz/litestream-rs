@@ -1,4 +1,4 @@
-//! Restore and verify over the store the host also replicates with, as free functions: restoring
+//! Restore and verify over the store the application also replicates with, as free functions: restoring
 //! over a live database must not look as easy as a method on the replicator would make it.
 //!
 //! Each runs on the caller's thread and blocks until done. The restore writes a scratch file

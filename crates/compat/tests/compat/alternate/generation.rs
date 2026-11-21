@@ -21,13 +21,13 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use lsr_compat::{Site, list};
+use lsr_compat::{AppFixture, list};
 use lsr_core::Level;
 use lsr_ltx::{Header, Txid, WalOrigin};
 
 /// The WAL file's salts, or `None` when it holds no full header.
-pub fn wal_salts(site: &Site) -> Option<(u32, u32)> {
-    let bytes = fs::read(wal_path(site)).ok()?;
+pub fn wal_salts(fixture: &AppFixture) -> Option<(u32, u32)> {
+    let bytes = fs::read(wal_path(fixture)).ok()?;
     let word = |at: usize| {
         bytes
             .get(at..at + 4)
@@ -37,13 +37,13 @@ pub fn wal_salts(site: &Site) -> Option<(u32, u32)> {
     Some((word(16)?, word(20)?))
 }
 
-pub fn wal_path(site: &Site) -> PathBuf {
-    PathBuf::from(format!("{}-wal", site.db.display()))
+pub fn wal_path(fixture: &AppFixture) -> PathBuf {
+    PathBuf::from(format!("{}-wal", fixture.db.display()))
 }
 
 /// The WAL file's length in bytes (0 when missing).
-pub fn wal_len(site: &Site) -> u64 {
-    fs::metadata(wal_path(site)).map_or(0, |m| m.len())
+pub fn wal_len(fixture: &AppFixture) -> u64 {
+    fs::metadata(wal_path(fixture)).map_or(0, |m| m.len())
 }
 
 fn newest_in(dir: &Path) -> Option<(Txid, Header)> {
@@ -59,9 +59,9 @@ fn newest_in(dir: &Path) -> Option<(Txid, Header)> {
 }
 
 /// The WAL range of the newest level-0 file staged or uploaded.
-pub fn tip_origin(site: &Site) -> Option<(Txid, Option<WalOrigin>)> {
-    let staged = newest_in(&site.meta);
-    let uploaded = newest_in(&site.replica);
+pub fn tip_origin(fixture: &AppFixture) -> Option<(Txid, Option<WalOrigin>)> {
+    let staged = newest_in(&fixture.meta);
+    let uploaded = newest_in(&fixture.replica);
     let newest = match (staged, uploaded) {
         (Some(a), Some(b)) => Some(if b.0 > a.0 { b } else { a }),
         (a, b) => a.or(b),
@@ -120,16 +120,16 @@ impl Expect {
 }
 
 /// What the next boot must do, from the tip and the WAL as they are now.
-pub fn expect(site: &Site) -> Expect {
-    let Some((txid, origin)) = tip_origin(site) else {
+pub fn expect(fixture: &AppFixture) -> Expect {
+    let Some((txid, origin)) = tip_origin(fixture) else {
         return Expect::First;
     };
     let origin = origin.unwrap_or_else(|| panic!("the tip {txid} names no WAL range"));
-    let Some(salts) = wal_salts(site) else {
+    let Some(salts) = wal_salts(fixture) else {
         return Expect::Truncated;
     };
     if salts != origin.salts() {
-        if wal_len(site) < origin.offset() + origin.size() {
+        if wal_len(fixture) < origin.offset() + origin.size() {
             return Expect::Truncated;
         }
         return Expect::Restarted;

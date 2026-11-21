@@ -1,6 +1,6 @@
 //! The fault suite's harness: core's actor over a live database, judged by the simulator's oracle.
 //!
-//! A [`Rig`] owns one database in a directory of its own: the host's connection (`app`) and the
+//! A [`Rig`] owns one database in a directory of its own: the application's connection (`app`) and the
 //! backend, both opened through a fresh [`FaultVfs`]; an [`Actor`] ticked on a [`FakeClock`];
 //! staging and replica on `FsStore`s, each behind a `Tap` that records what it took.
 //!
@@ -16,10 +16,10 @@
 //! What the actor's ticks see is only what the backend shows them; faults fire only inside
 //! ticks unless a test opens the VFS window itself, so a schedule counts the engine's calls.
 //!
-//! The host's connections live where [`RigConfig::placement`] says ([`Placement`], module
-//! `host`): in this process, set up as replication asks, or in a child process at SQLite's
-//! defaults, as beside a sidecar, reached over a pipe. Either way the rig reads the host's
-//! frame count from the host's own connection and the frames from the WAL file, so the model
+//! The application's connections live where [`RigConfig::placement`] says ([`Placement`], module
+//! `app`): in this process, set up as replication asks, or in a child process at SQLite's
+//! defaults, as beside a sidecar, reached over a pipe. Either way the rig reads the application's
+//! frame count from the application's own connection and the frames from the WAL file, so the model
 //! and the oracle are the same in both.
 //!
 //! [`Stepper`] is the sync engine without the actor: `recover_traced`, `sync_step` and
@@ -51,15 +51,15 @@ use rusqlite::{Connection, OpenFlags};
 use crate::testing::vfs::{FaultVfs, FileKind, Op, VfsError, seed_prng};
 use crate::{DEFAULT_JOURNAL_SIZE_LIMIT, OpenError, Sqlite, SqliteConfig};
 
-mod host;
+mod app;
 mod stepper;
 
-pub use host::{CHILD_ENTRY, HOST_DB, MARK, Placement, serve_host};
+pub use app::{APP_DB, CHILD_ENTRY, MARK, Placement, serve_app};
 pub use stepper::{StepDid, Stepper};
 
-use host::{APP, Host};
+use app::{APP, App};
 
-/// The host connection a cycle's long reader uses.
+/// The application connection a cycle's long reader uses.
 const READER: u32 = 1;
 
 /// What the suite needs of a backend: the engine's three doors and a way to open them.
@@ -148,9 +148,9 @@ pub enum RigError {
     /// The rig's own state does not allow the step (a step after a crash, before the reboot).
     #[error("the rig cannot {0} now")]
     State(&'static str),
-    /// The host process (`Placement::SeparateProcess`) did not start, answer or stay up.
-    #[error("the host process: {0}")]
-    Host(String),
+    /// The application process (`Placement::SeparateProcess`) did not start, answer or stay up.
+    #[error("the application process: {0}")]
+    App(String),
 }
 
 /// How a rig is built.
@@ -168,7 +168,7 @@ pub struct RigConfig {
     pub oracle: bool,
     /// Record what writes replace, so a power loss can undo them.
     pub power: bool,
-    /// Where the host application runs.
+    /// Where the application runs.
     pub placement: Placement,
     /// The backend's WAL size limit ([`SqliteConfig::journal_size_limit`]).
     pub journal_size_limit: Option<NonZeroU64>,
@@ -190,7 +190,7 @@ impl Default for RigConfig {
 }
 
 impl RigConfig {
-    /// The default rig with the host in `placement`.
+    /// The default rig with the application in `placement`.
     #[must_use]
     pub fn placed(placement: Placement) -> Self {
         Self {
@@ -349,8 +349,8 @@ impl Mirror {
 }
 
 /// SQLite's frame count for the WAL, as the application connection sees it.
-fn wal_frames(host: &mut Host) -> Result<u32, RigError> {
-    let row = host.query(APP, "PRAGMA wal_checkpoint(NOOP)")?;
+fn wal_frames(app: &mut App) -> Result<u32, RigError> {
+    let row = app.query(APP, "PRAGMA wal_checkpoint(NOOP)")?;
     let log = row.get(1).copied().unwrap_or(0);
     Ok(u32::try_from(log).unwrap_or(0))
 }
@@ -361,7 +361,7 @@ fn suffixed(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// A host connection through `vfs`, set up as replication asks (`crate::app_connection`).
+/// An application connection through `vfs`, set up as replication asks (`crate::app_connection`).
 ///
 /// # Errors
 /// SQLite's.
@@ -394,7 +394,7 @@ pub struct Rig<B: Backend> {
     db: PathBuf,
     cfg: RigConfig,
     vfs: FaultVfs,
-    host: Host,
+    app: App,
     backend: Option<B>,
     actor: Actor,
     clock: FakeClock,
@@ -436,8 +436,8 @@ impl<B: Backend> Rig<B> {
         if cfg.power {
             vfs.track_durability();
         }
-        let mut host = Host::new(cfg.placement, &db, vfs, cfg.synchronous)?;
-        host.open(APP)?;
+        let mut app = App::new(cfg.placement, &db, vfs, cfg.synchronous)?;
+        app.open(APP)?;
         let backend = B::open_limited(&db, vfs.name(), cfg.journal_size_limit)
             .map_err(|err| RigError::Open(Box::new(err)))?;
         let staging = Tap::new(FsStore::new(root.join("meta")));
@@ -454,7 +454,7 @@ impl<B: Backend> Rig<B> {
             cfg,
             wal_syncs: vfs.syncs(FileKind::Wal),
             vfs,
-            host,
+            app,
             backend: Some(backend),
             clock: FakeClock::new(Timestamp::from_unix_millis(1_700_000_000_000)),
             staging_log: staging.log(),
@@ -499,56 +499,56 @@ impl<B: Backend> Rig<B> {
         &self.vfs
     }
 
-    /// The host's connection.
+    /// The application's connection.
     ///
     /// # Errors
-    /// [`RigError::State`] after a crash, before the reboot, or with the host in another
+    /// [`RigError::State`] after a crash, before the reboot, or with the application in another
     /// process.
     pub fn app(&self) -> Result<&Connection, RigError> {
-        self.host
+        self.app
             .local(APP)
             .ok_or(RigError::State("reach the app's connection"))
     }
 
-    /// Where the host runs.
+    /// Where the application runs.
     #[must_use]
     pub const fn placement(&self) -> Placement {
-        self.host.placement()
+        self.app.placement()
     }
 
-    /// The first row of `sql` on the host's connection, every column an integer.
+    /// The first row of `sql` on the application's connection, every column an integer.
     ///
     /// # Errors
     /// [`RigError`].
     pub fn query(&mut self, sql: &str) -> Result<Vec<i64>, RigError> {
-        self.host.query(APP, sql)
+        self.app.query(APP, sql)
     }
 
-    /// Runs `sql` on the host's connection without reading what it committed, for a commit
+    /// Runs `sql` on the application's connection without reading what it committed, for a commit
     /// the model cannot follow (a WAL deleted under it).
     ///
     /// # Errors
     /// [`RigError`].
     pub fn exec_unseen(&mut self, sql: &str) -> Result<(), RigError> {
-        self.host.exec(APP, sql)
+        self.app.exec(APP, sql)
     }
 
-    /// Turns `SQLITE_FCNTL_PERSIST_WAL` off on the host's connection (a host at SQLite's
+    /// Turns `SQLITE_FCNTL_PERSIST_WAL` off on the application's connection (an application at SQLite's
     /// defaults never had it on).
     ///
     /// # Errors
     /// [`RigError`].
-    pub fn host_persist_wal_off(&mut self) -> Result<(), RigError> {
-        self.host.persist_wal_off(APP)
+    pub fn app_persist_wal_off(&mut self) -> Result<(), RigError> {
+        self.app.persist_wal_off(APP)
     }
 
-    /// The host's process opens and closes the database and `-shm` with `std::fs`, dropping
-    /// its own POSIX locks on them. Only for a host in another process.
+    /// The application's process opens and closes the database and `-shm` with `std::fs`, dropping
+    /// its own POSIX locks on them. Only for an application in another process.
     ///
     /// # Errors
-    /// [`RigError::State`] in process; the host's error.
-    pub fn host_touches_the_files(&mut self) -> Result<(), RigError> {
-        self.host.touch()
+    /// [`RigError::State`] in process; the application's error.
+    pub fn app_touches_the_files(&mut self) -> Result<(), RigError> {
+        self.app.touch()
     }
 
     /// The backend.
@@ -624,16 +624,16 @@ impl<B: Backend> Rig<B> {
         self.everywhere = on;
     }
 
-    /// Runs `sql` on the host's connection, then reads what it committed.
+    /// Runs `sql` on the application's connection, then reads what it committed.
     ///
     /// # Errors
     /// [`RigError`].
     pub fn exec(&mut self, sql: &str) -> Result<(), RigError> {
-        if !self.host.is_open(APP) {
+        if !self.app.is_open(APP) {
             return Err(RigError::State("reach the app"));
         }
         self.vfs.set_window(self.everywhere);
-        let done = self.host.exec(APP, sql);
+        let done = self.app.exec(APP, sql);
         self.vfs.set_window(false);
         self.observe()?;
         done
@@ -666,10 +666,10 @@ impl<B: Backend> Rig<B> {
     /// [`RigError`].
     pub fn observe(&mut self) -> Result<(), RigError> {
         self.note_syncs();
-        if self.model.is_none() || !self.host.is_open(APP) || !self.vfs.powered() {
+        if self.model.is_none() || !self.app.is_open(APP) || !self.vfs.powered() {
             return Ok(());
         }
-        let frames = wal_frames(&mut self.host)?;
+        let frames = wal_frames(&mut self.app)?;
         let Some(model) = self.model.as_mut() else {
             return Ok(());
         };
@@ -819,7 +819,7 @@ impl<B: Backend> Rig<B> {
 
     /// The suite's cycle: commits, each followed by `settle`, until the actor has synced, run a
     /// PASSIVE that finished and a TRUNCATE that finished, then one more commit. The actor
-    /// truncates only after a PASSIVE at the truncate threshold could not finish, so a host
+    /// truncates only after a PASSIVE at the truncate threshold could not finish, so an application
     /// reader holds the log until a checkpoint reports busy, then lets go; when a PASSIVE
     /// finishes again instead (a fault moved the run off its course), the reader comes back.
     ///
@@ -834,7 +834,7 @@ impl<B: Backend> Rig<B> {
             settle(self)?;
         }
         let begin = self.ticks.len();
-        // When the host's long reader took its snapshot, by tick.
+        // When the application's long reader took its snapshot, by tick.
         let mut reader: Option<usize> = None;
         let mut released = Some(begin);
         for _ in 0..80 {
@@ -842,15 +842,15 @@ impl<B: Backend> Rig<B> {
                 at == begin || self.checkpointed_since(at, CheckpointMode::Passive, false)
             });
             if retake {
-                self.host.open(READER)?;
-                self.host.exec(READER, "BEGIN; SELECT count(*) FROM t;")?;
+                self.app.open(READER)?;
+                self.app.exec(READER, "BEGIN; SELECT count(*) FROM t;")?;
                 reader = Some(self.ticks.len());
                 released = None;
             }
             self.insert(3000)?;
             settle(self)?;
             if self.checkpointed_since(begin, CheckpointMode::Truncate, false) {
-                self.host.close(READER)?;
+                self.app.close(READER)?;
                 self.insert(3000)?;
                 return settle(self);
             }
@@ -859,7 +859,7 @@ impl<B: Backend> Rig<B> {
                     || self.checkpointed_since(taken, CheckpointMode::Truncate, true)
             });
             if blocked {
-                self.host.close(READER)?;
+                self.app.close(READER)?;
                 reader = None;
                 released = Some(self.ticks.len());
             }
@@ -896,22 +896,22 @@ impl<B: Backend> Rig<B> {
         }
     }
 
-    /// `writers` host connections, on threads of their own in the host's process, commit
+    /// `writers` application connections, on threads of their own in the application's process, commit
     /// `rows` rows each at once while the actor ticks; returns once every writer is done.
     ///
     /// # Errors
     /// [`RigError::Halted`] when a tick halts, a writer's error, or the rig's own.
     pub fn writers_while_ticking(&mut self, writers: u32, rows: u32) -> Result<(), RigError> {
-        let Some(child) = self.host.child_mut() else {
+        let Some(child) = self.app.child_mut() else {
             return self.local_writers(writers, rows);
         };
         child.start_writers(writers, rows)?;
         loop {
             self.tick_unhalted()?;
             let child = self
-                .host
+                .app
                 .child_mut()
-                .ok_or(RigError::State("lose the host process"))?;
+                .ok_or(RigError::State("lose the application process"))?;
             if child.writers_done()? {
                 return Ok(());
             }
@@ -957,7 +957,7 @@ impl<B: Backend> Rig<B> {
     }
 
     /// The replicator's process stops and starts again: the actor and backend are new, the
-    /// host's connection, the files and both stores stay.
+    /// application's connection, the files and both stores stay.
     ///
     /// # Errors
     /// [`RigError::Open`].
@@ -981,31 +981,31 @@ impl<B: Backend> Rig<B> {
     }
 
     /// Drops the backend, as a replicator that stops; [`Self::restart`] starts a new one. The
-    /// host stays.
+    /// application stays.
     pub fn stop_replicator(&mut self) {
         self.backend = None;
     }
 
-    /// Closes the host's connection.
+    /// Closes the application's connection.
     ///
     /// # Errors
     /// SQLite's close.
     pub fn close_app(&mut self) -> Result<(), RigError> {
-        self.host.close(APP)
+        self.app.close(APP)
     }
 
-    /// Opens the host's connection again.
+    /// Opens the application's connection again.
     ///
     /// # Errors
     /// [`RigError`].
     pub fn open_app(&mut self) -> Result<(), RigError> {
-        self.host.open(APP)?;
+        self.app.open(APP)?;
         self.observe()
     }
 }
 
 impl<B: Backend> Rig<B> {
-    /// After an `Effect::PowerLoss` fired: every connection dies, the power comes back, the host
+    /// After an `Effect::PowerLoss` fired: every connection dies, the power comes back, the application
     /// opens the database again (SQLite recovers the WAL), and a new replicator boots on the
     /// same staging directory and replica. The model drops what the loss took.
     ///
@@ -1013,10 +1013,10 @@ impl<B: Backend> Rig<B> {
     /// [`RigError`].
     pub fn reboot_after_power_loss(&mut self) -> Result<(), RigError> {
         self.backend = None;
-        self.host.discard_all()?;
+        self.app.discard_all()?;
         self.vfs.restore_power()?;
-        self.host.open(APP)?;
-        let frames = wal_frames(&mut self.host)?;
+        self.app.open(APP)?;
+        let frames = wal_frames(&mut self.app)?;
         let bytes = read_file(&self.wal())?;
         let salts = match (be32(&bytes, 16), be32(&bytes, 20)) {
             (Some(salt1), Some(salt2)) => Some(Salts { salt1, salt2 }),
@@ -1031,16 +1031,16 @@ impl<B: Backend> Rig<B> {
         self.restart()
     }
 
-    /// Replaces the local database with `bytes`, as a host that lost its disk and restored the
+    /// Replaces the local database with `bytes`, as an application that lost its disk and restored the
     /// replica into a fresh one: every connection closes, the database, its WAL and `-shm` and
-    /// the staging directory are deleted, `bytes` become the database file, and the host and a
+    /// the staging directory are deleted, `bytes` become the database file, and the application and a
     /// new replicator open it. The model continues from its tip, which is what `bytes` must hold.
     ///
     /// # Errors
     /// [`RigError`].
     pub fn replace_database(&mut self, bytes: &[u8], staging: &Path) -> Result<(), RigError> {
         self.backend = None;
-        self.host.discard_all()?;
+        self.app.discard_all()?;
         let io_at = |path: &Path| {
             let path = path.to_owned();
             move |source| RigError::Io { path, source }
@@ -1060,12 +1060,12 @@ impl<B: Backend> Rig<B> {
         std::fs::write(&self.db, bytes).map_err(io_at(&self.db))?;
         self.mirror.seen = None;
         self.staging_seen = self.staging_log.len();
-        self.host.open(APP)?;
+        self.app.open(APP)?;
         self.restart()
     }
 }
 
-/// One in-process concurrent writer: a host connection through the rig's VFS, set up as
+/// One in-process concurrent writer: an application connection through the rig's VFS, set up as
 /// replication asks, waiting on the others' write lock.
 fn local_writer(db: &Path, vfs: &str, writer: u32, rows: u32) -> Result<(), RigError> {
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE;
@@ -1075,7 +1075,7 @@ fn local_writer(db: &Path, vfs: &str, writer: u32, rows: u32) -> Result<(), RigE
     for n in 0..rows {
         conn.execute(
             "INSERT INTO t(v) VALUES (randomblob(?1))",
-            [host::writer_row_bytes(writer, n)],
+            [app::writer_row_bytes(writer, n)],
         )?;
     }
     Ok(())

@@ -1,10 +1,10 @@
 # Phase 3: the public API, draft
 
-Status: draft, revised 2026-11-20 after an independent review. It refines task 6 of `docs/plans/phase-3-syncing.md` into signatures; the "As built" section at the end says where the code departs from it. Rulings it follows: P0 (a SQLite read transaction holds the pin), P3 (TRUNCATE only on the host's word), P4 (1-second polling), D6 (copy Go; no new files or formats), D7 (keep trying; stop only for a second writer; configurable responses). "Engine change" marks what the core must gain for this API.
+Status: draft, revised 2026-11-20 after an independent review. It refines task 6 of `docs/plans/phase-3-syncing.md` into signatures; the "As built" section at the end says where the code departs from it. Rulings it follows: P0 (a SQLite read transaction holds the pin), P3 (TRUNCATE only on the application's word), P4 (1-second polling), D6 (copy Go; no new files or formats), D7 (keep trying; stop only for a second writer; configurable responses). "Engine change" marks what the core must gain for this API.
 
 ## Shape in one paragraph
 
-A host links `lsr-replica`, builds a store (`S3Store` over ureq or reqwest, `FsStore`, or a test store), wraps it once in an `Arc`, and calls `Replicator::start` once per database before its connection pool opens. The replicator owns one OS thread and two SQLite connections, and returns a handle. Each connection the host opens goes through `replicator.app_connection`; each long read the host starts holds a `ReaderGuard`; `health()` can be read at any time; `stop` runs at shutdown after the host's writers close. Nothing runs on the host's threads, no async runtime is required, and time, waiting and chance come in through `Runtime` so tests can drive all of them.
+An application links `lsr-replica`, builds a store (`S3Store` over ureq or reqwest, `FsStore`, or a test store), wraps it once in an `Arc`, and calls `Replicator::start` once per database before its connection pool opens. The replicator owns one OS thread and two SQLite connections, and returns a handle. Each connection the application opens goes through `replicator.app_connection`; each long read the application starts holds a `ReaderGuard`; `health()` can be read at any time; `stop` runs at shutdown after the application's writers close. Nothing runs on the application's threads, no async runtime is required, and time, waiting and chance come in through `Runtime` so tests can drive all of them.
 
 ## Lifecycle
 
@@ -44,7 +44,7 @@ impl Replicator {
 }
 
 /// Dropping the last handle is a best-effort `stop(config.shutdown_grace)` with
-/// no I/O and no wait on the caller's thread. A host whose `main` returns right
+/// no I/O and no wait on the caller's thread. A app whose `main` returns right
 /// after drop gets no drain: call `stop(..).wait()` instead.
 impl Drop for Replicator { /* ... */ }
 
@@ -101,33 +101,33 @@ Not covered by `Runtime`, and said so in the crate docs: the `S3Store` signs wit
 ```rust
 /// `ObjectStore` returns `impl Future`, so it cannot be a trait object. This
 /// adapter boxes each call's future (one allocation per HTTP call) so the
-/// engine is compiled once inside this crate, not once per host store type.
+/// engine is compiled once inside this crate, not once per app store type.
 pub trait DynStore: Send + Sync { /* boxed-future versions of the ObjectStore methods */ }
 impl<S: ObjectStore + Send + Sync> DynStore for S { /* ... */ }
 ```
 
-The host keeps its own `Arc` clone, so it can call `restore` or `verify` on the same store while replicating.
+The application keeps its own `Arc` clone, so it can call `restore` or `verify` on the same store while replicating.
 
-## The host's connections and readers
+## The application's connections and readers
 
 ```rust
 impl Replicator {
     /// Sets `SQLITE_FCNTL_PERSIST_WAL` on and `wal_autocheckpoint = 0` on one of
-    /// the host's connections, after checking it opens this replicator's database
+    /// the app's connections, after checking it opens this replicator's database
     /// (device and inode). A method, so a pool cannot be configured before the
-    /// replicator exists. Feature `rusqlite`, since the type pins the host to
+    /// replicator exists. Feature `rusqlite`, since the type pins the app to
     /// this crate's rusqlite version.
     #[cfg(feature = "rusqlite")]
     pub fn app_connection(&self, conn: &rusqlite::Connection) -> Result<(), SetupError>;
 
-    /// The same for a host on sqlx, diesel or raw FFI.
+    /// The same for a app on sqlx, diesel or raw FFI.
     ///
     /// # Safety
     /// `db` is an open connection on this replicator's database, used by no
     /// other thread during the call, and opened by the same SQLite library this
     /// crate links (a second copy of SQLite in the process breaks the lock
     /// sharing between connections, the hazard of PLAN.md section 6). Note that
-    /// `wal_autocheckpoint` replaces any `sqlite3_wal_hook` the host set.
+    /// `wal_autocheckpoint` replaces any `sqlite3_wal_hook` the app set.
     pub unsafe fn app_connection_raw(&self, db: *mut ffi::sqlite3) -> Result<(), SetupError>;
 
     /// Held for the length of a long read. While any guard lives, the replicator
@@ -137,9 +137,9 @@ impl Replicator {
 pub struct ReaderGuard { /* decrements on drop */ }
 ```
 
-`Config::readers` is `ReaderTracking::Untracked` by default, under which TRUNCATE never runs, as ruling P3 says for a host that gives no signal. `Tracked` means the host promises to hold a guard for every long read.
+`Config::readers` is `ReaderTracking::Untracked` by default, under which TRUNCATE never runs, as ruling P3 says for an application that gives no signal. `Tracked` means the application promises to hold a guard for every long read.
 
-The library also detects a broken obligation it cannot prevent: a backfill it did not run is a host checkpoint, counted in `Health::foreign_checkpoints` and sent as an event.
+The library also detects a broken obligation it cannot prevent: a backfill it did not run is an application checkpoint, counted in `Health::foreign_checkpoints` and sent as an event.
 
 ## Configuration
 
@@ -205,7 +205,7 @@ pub struct Health {
     /// falsely on an idle database).
     pub unreplicated_since: Option<Timestamp>,
     /// WAL and database size: a WAL held by the pin while uploads are degraded
-    /// fills the host's disk.
+    /// fills the app's disk.
     pub wal_bytes: u64,
     pub db_bytes: u64,
     pub resnapshot: Option<SnapshotCause>,
@@ -255,12 +255,12 @@ pub enum StartError {
 - `begin_shutdown(deadline)` takes the deadline per call, and a second call keeps the earlier one.
 - The drain reports its last txid; a missed deadline reports unsynced WAL bytes and staged files.
 - `Bug` under `KeepTrying` rebuilds the `Actor`.
-- Host checkpoints are counted.
+- Application checkpoints are counted.
 
 ## Decided, with the alternatives
 
-1. **The store is passed in built, type-erased.** The host chooses the HTTP client and credentials. The engine is compiled once. A `ReplicaUrl` in the config, as Go's `litestream.yml` has, belongs to the phase 4 sidecar.
-2. **`start` returns before the first boot,** with `wait_booted` for hosts that want to wait.
+1. **The store is passed in built, type-erased.** The application chooses the HTTP client and credentials. The engine is compiled once. A `ReplicaUrl` in the config, as Go's `litestream.yml` has, belongs to the phase 4 sidecar.
+2. **`start` returns before the first boot,** with `wait_booted` for applications that want to wait.
 3. **Deadlines are durations measured by the injected clock,** not `Instant`s.
 4. **Events by callback** (the right primitive), with a ready-made bounded `ChannelSink`.
 5. **One replicator and one thread per database,** as PLAN section 3.
@@ -279,7 +279,7 @@ Where the code (`crates/replica`, and the engine changes in `crates/core/src/act
 - **The wait.** The actor already said when it wants its next tick (`Next`), so the engine needed no change for it: the thread parks until the earliest of that, the next poll and a command, and only there. Commands are not a channel but idempotent slots (stop with the earliest deadline, a snapshot asked, accept the database pages, the newest sink), bounded by construction; setting one unparks the thread.
 - **A drain ticks again at once** after a tick that made progress (a boot, a sync, an upload, a resnapshot), because the engine reports `Drained` only on the tick after its last upload and names the drain's deadline as its wake until then; a retry still waits its backoff.
 - **The drain's report.** `Tick::Drained { txid }` and a new `Tick::DeadlineReached(Unfinished { unsynced_wal_bytes, staged_not_uploaded })`; every tick after the second is `Halted(Shutdown)`. `begin_shutdown(deadline)` keeps the earlier of two deadlines. `ActorConfig::shutdown_grace` stays, read through `Actor::shutdown_deadline(now)`, so code that builds the config elsewhere still compiles.
-- **Host checkpoints** are read from the wal-index on each sync tick: the backfill count grew within a generation, or the generation changed when no checkpoint of the actor's own had emptied the WAL. Two between polls count once.
+- **Application checkpoints** are read from the wal-index on each sync tick: the backfill count grew within a generation, or the generation changed when no checkpoint of the actor's own had emptied the WAL. Two between polls count once.
 - **`Bug`.** The engine's own rebuild covers a `Fault::Bug` it returns. A panic is caught by the thread, which drops the engine and both SQLite connections (the panic may have unwound through either) and, under `bug: KeepTrying`, builds a fresh actor and reopens the connections after `retry_wait` (doubling, so at most once per wait); health shows the sync lane degraded with `Bug` until the next boot. Under `bug: Stop` the replicator stops with `HaltCause::Bug`. What a fresh actor must not forget is one group in the thread (`Survivors` in `crates/replica/src/thread.rs`), handed whole to every actor it builds: the stop's deadline, an operator's snapshot request no actor has taken yet, and what the last booted actor reported that a fresh one starts without, its degraded lanes (reported until the fresh actor boots) and the retention pin they held (handed to the fresh actor through `Actor::pin_for_verify`, with the scheduled verify's own pin, and let go once the fresh actor has booted, has no lane degraded and has replicated past it). Health's synced, replicated and unreplicated-since values, and what a stop would leave, are written only from an actor that has booted; until one has, what is left is counted high, as the engine counts a failed read: the last booted actor's count raised to the WAL file's length and to the staged files past the newest transaction the replica held, so `Stopped::DeadlineReached` needs no new variant. Every wait the thread returns is capped at a stop's deadline, and a deadline that passes while a fresh actor waits to boot ends the stop there. The connections reopen by path, but the registry holds device and inode: a reopen that finds another file at the path, or none, opens nothing and is `WalUnlinked` at `responses.wal_unlinked` (degraded and retried at the doubling wait by default, a stop under `Stop`).
 - **`Gone`.** `ThreadDied`: an exit guard in the thread reports it when the thread unwinds past its catch, and a finished `JoinHandle` with no outcome is read the same way (tested with a sink whose panic payload panics again when dropped). `Forked`: the process id differs from the one that started the replicator. It is not tested: forking needs `unsafe`, which only `lsr-sqlite` may use.
 - **The store.** `DynStore` is implemented for every `ObjectStore`, but `dyn DynStore` is not itself an `ObjectStore`: core's functions take their store by a sized type, so a private `Erased(&dyn DynStore)` adapts it, and a `Metered` wrapper inside the thread counts every call for `Health::counters.store`.
@@ -288,10 +288,10 @@ Where the code (`crates/replica`, and the engine changes in `crates/core/src/act
 - **`Runtime::fake`** returns a held clock: it moves only by `FakeClockHandle::advance`, and the park waits for it; `release()` lets the park move the clock to each wake itself. A caller's wait (`wait_booted`, `FinalSync::wait`, `wait_until`) re-reads the injected clock at least every `CALLER_SLICE` (50 ms), since a fake clock signals nobody.
 - **`FinalSync`**'s caller-side deadline cuts off only a tick that began before the deadline and is still running (the thread is inside a request); a tick that begins at or after it does no store I/O and ends at once. The future starts one watcher thread on its first pending poll, so it wakes at the deadline with no runtime.
 - **The first sink goes in at the start.** `set_events` is a command the thread takes at the top of its next turn, and the thread starts booting as soon as it is spawned, so a sink set right after `start` can miss the first boot's event (the sidecar daemon lost its "replica position recovered" log line in about 3 of 66 boots that way). `Replicator::start_with_events(database, store, config, runtime, events: Box<dyn EventSink>)` gives the thread its sink before it runs, so it sees every event; the daemon starts every database with it. `set_events` stays, for replacing the sink later, and is documented as seeing only what comes after the thread takes it. The sink is not a `Config` field because `Config` is `Clone` and `PartialEq` and a sink is neither. Tested by `a_sink_given_at_start_sees_the_first_boot` (`crates/replica/tests/replica/replicator.rs`), which also shows a sink set after the boot missing it.
-- **Additions.** `Replicator::wait_until(within, done)` (a wait on a health condition; the tests use it and hosts may), `Replicator::database()`, and `Replicator::accept_database_pages()` (the operator's answer to the page checksum table's degraded state, `DegradedCause::DatabasePageMismatch`). `Event` is this crate's: the engine's events (never `Idle`) plus `ForeignCheckpoint { total }`, `Panicked { rebuilt }` and `Stopped(cause)`.
+- **Additions.** `Replicator::wait_until(within, done)` (a wait on a health condition; the tests use it and applications may), `Replicator::database()`, and `Replicator::accept_database_pages()` (the operator's answer to the page checksum table's degraded state, `DegradedCause::DatabasePageMismatch`). `Event` is this crate's: the engine's events (never `Idle`) plus `ForeignCheckpoint { total }`, `Panicked { rebuilt }` and `Stopped(cause)`.
 - **Errors.** `StartError` gained `Refused(Refusal)` and `PageSize { bytes }` from the backend; `Sqlite { code }` is -1 when the error was not SQLite's own. `restore` and `restore_if_missing` return this crate's `RestoreError { Destination(CreateError), Restore(lsr_core::RestoreError) }`, since the destination's refusal is not core's; neither runs SQLite's integrity check (Go's default).
 - **Config.** `maintenance` is core's `Maintenance`, which has no switch for Go's `verify-compaction`: the boot read-back of each level's newest file always runs. `Maintenance::l0_check_interval()` (set with `with_l0_check_interval(Interval)`; Go's `l0-retention-check-interval`, 15 s by default, `store.go:92`) bounds how long an upload waits for the next maintenance listing: an upload makes the next listing due at the earlier of the next compaction window of any level or the snapshot and, while retention deletes level 0, the upload's time plus this interval (`lsr_core::listing_after_upload`). Before it, every upload made the next tick list all ten levels, so a database committing once a second listed the replica about once a second (issue #52, the class of upstream Litestream #1633). Go lists on the same two clocks: each level's compaction monitor at its window (`store.go:591-656`) and the level-0 retention monitor on its ticker (`store.go:658-680`). A job, a boot, a released retention pin and a retention switch still list on the next tick, and every job, a delete included, is planned from a listing made in its own tick. The listing is not made incremental from the levels this process writes: that would keep an inventory across ticks (a cache, which section 2 of `AGENTS.md` refuses without a measurement), and a full listing is what notices another writer's files and an operator's deletes. Tests: `crates/core/src/actor/tests/listing.rs` (a writer committing every second for 600 s on the fake clock: 9450 listing calls before, 1030 after, under a bound of 1280; compaction in every window, level-0 retention deletes, each delete planned from a listing in its own tick), `an_upload_lists_at_the_next_window_or_the_check_interval` and its property test in `crates/core/src/maintain/tests.rs`, and `l0_retention_check_interval_maps_and_defaults_to_go_s_15s` in `crates/config/tests/config/map.rs`. `sync_limits` is `{ wal_bytes_per_step, files_per_upload }`. `Health::counters` holds ticks, syncs, checkpoints (and busy ones), uploads, retries (degraded ones included), caught panics, sink panics and per-operation store calls, errors and time; events dropped are counted by `ChannelSink`'s receiver.
-- **The WAL size limit** (upstream Litestream #1605, where a WAL kept its 1.7 GB peak). SQLite cuts the WAL file back to `PRAGMA journal_size_limit` only on the connection whose commit restarts the log, and after the replicator's own PASSIVE or TRUNCATE that commit is its `_litestream_seq` bump on the writer connection, which had no limit. `lsr_sqlite::SqliteConfig::journal_size_limit: Option<NonZeroU64>` (bytes) now sets it on the writer only; `None` is SQLite's own no-limit, and the default is `lsr_sqlite::DEFAULT_JOURNAL_SIZE_LIMIT`, 64 MiB: above the WAL reached between two PASSIVE checkpoints at the default 1,000-frame threshold at every page size up to 64 KiB, so a steady-state WAL is not cut and regrown on each restart. The writer turns the limit off before it closes: as the database's last connection, SQLite's close checkpoints and, with a limit set, truncates the WAL to zero bytes, which would make the next start snapshot (`faults::the_wal_survives_the_replicator_closing_last` catches it). `lsr-replica` opens its connections with `Sqlite::open`, so it and the sidecar use the default; `Config` gains no field (it sets no SQLite option today) and the daemon's file no key (if Go adds one, its name is taken then). The cut can never remove a frame not yet synced: SQLite makes it only on the first commit after a restart, which needs every frame of the ended generation backfilled, and it drops only bytes past that commit's frames, which belong to the ended generation and fail any reader's salt check from the restart on. So it removes nothing the restart had not already made unreadable, and the rules that make following a restart safe (`docs/plans/phase-3-syncing.md`: the seal sync under the barrier before PASSIVE, `Continuity::Pinned`, and a snapshot on any other salt change) are unchanged. Tests: `crates/sqlite/tests/sqlite/wal_size.rs` (the default limit after a library restart of a WAL past 80 MiB, failing before the fix; the actor continuing with no snapshot or fault across two shrinking restarts in both host placements, with the oracle restoring every transaction; the limit off and at another size; the last close keeping the WAL).
+- **The WAL size limit** (upstream Litestream #1605, where a WAL kept its 1.7 GB peak). SQLite cuts the WAL file back to `PRAGMA journal_size_limit` only on the connection whose commit restarts the log, and after the replicator's own PASSIVE or TRUNCATE that commit is its `_litestream_seq` bump on the writer connection, which had no limit. `lsr_sqlite::SqliteConfig::journal_size_limit: Option<NonZeroU64>` (bytes) now sets it on the writer only; `None` is SQLite's own no-limit, and the default is `lsr_sqlite::DEFAULT_JOURNAL_SIZE_LIMIT`, 64 MiB: above the WAL reached between two PASSIVE checkpoints at the default 1,000-frame threshold at every page size up to 64 KiB, so a steady-state WAL is not cut and regrown on each restart. The writer turns the limit off before it closes: as the database's last connection, SQLite's close checkpoints and, with a limit set, truncates the WAL to zero bytes, which would make the next start snapshot (`faults::the_wal_survives_the_replicator_closing_last` catches it). `lsr-replica` opens its connections with `Sqlite::open`, so it and the sidecar use the default; `Config` gains no field (it sets no SQLite option today) and the daemon's file no key (if Go adds one, its name is taken then). The cut can never remove a frame not yet synced: SQLite makes it only on the first commit after a restart, which needs every frame of the ended generation backfilled, and it drops only bytes past that commit's frames, which belong to the ended generation and fail any reader's salt check from the restart on. So it removes nothing the restart had not already made unreadable, and the rules that make following a restart safe (`docs/plans/phase-3-syncing.md`: the seal sync under the barrier before PASSIVE, `Continuity::Pinned`, and a snapshot on any other salt change) are unchanged. Tests: `crates/sqlite/tests/sqlite/wal_size.rs` (the default limit after a library restart of a WAL past 80 MiB, failing before the fix; the actor continuing with no snapshot or fault across two shrinking restarts in both application placements, with the oracle restoring every transaction; the limit off and at another size; the last close keeping the WAL).
 - **`lsr replicate <db> <replica>`** takes a directory (created if missing) or an `s3://` URL whose query carries the S3 settings. It installs its handlers before the replicator starts, prints `replicating <db>` once it runs, stops with a final sync within the 30 s grace on SIGINT, SIGTERM or SIGHUP (a second signal shortens the drain to nothing), prints the outcome, and exits 0 only when drained. Signals come through `signal-hook` 0.3 (MIT or Apache-2.0): a handler needs `unsafe`, which the CLI may not contain.
 - **The scheduled verify** (`docs/PLAN.md` section 7; `crates/replica/src/scheduled.rs`, `crates/core/src/verify/against.rs`). What Go does at 041a8c3 (`store.go:267-273`, `:885-968`; `replica.go:1956-2028`; `cmd/litestream/replicate.go:360`): with `validation.interval` above zero (unset by default, so off), a ticker on the store lists every compaction level of every database (snapshots excluded) and checks the files are sorted and contiguous, logs one warning per gap, overlap or misordering, counts `litestream_validation_checks_total{db,level,result}` and the two `litestream_last_validation_success*` gauges, and changes nothing else: no file is read, nothing is restored, nothing is compared with the database, replication never stops. Its cost is one listing per level per database per interval. The replica-level `validation-interval` key is parsed, copied down, and never read. What v1 does, and where it departs:
   - `Config::verify_interval: Option<NonZeroDuration>`, `None` by default; the daemon maps Go's `validation.interval` to it for every database (zero or less is off, as in Go), and `validation-interval` is accepted with a no-effect warning. The first run is one interval after the start, each later one an interval after the previous ended (Go's ticker counts from the start and drops ticks while busy; they differ by at most one run's length). Time is the injected `Runtime`'s.

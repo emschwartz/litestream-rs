@@ -13,7 +13,7 @@
 //! - `go_and_rust_sidecars_alternate_on_one_config_file`: the alternation run of
 //!   `alternation.rs` with Rust as the daemon on Go's config file, so both sides checkpoint
 //!   on the file's schedule (every 5 s, PASSIVE at 1,000 pages, TRUNCATE at 1,500 under the
-//!   `host-readers: none` claim) and the run crosses checkpoints, WAL restarts and TRUNCATEs
+//!   `app-readers: none` claim) and the run crosses checkpoints, WAL restarts and TRUNCATEs
 //!   on both.
 //!
 //! Metrics are not compared: the daemon does not serve `addr` yet (it warns that the listener
@@ -33,7 +33,7 @@ use std::time::Duration;
 
 use alternate::{Launch, alternate, seed};
 use lsr_compat::{
-    Era, GoBuild, GoRestore, Kind, Replicator, Shape, Site, Summary, Target, builds_in,
+    AppFixture, Era, GoBuild, GoRestore, Kind, Replicator, Shape, Summary, Target, builds_in,
     builds_under_test, hash_pages, integrity_check, lsr_binary, restore_replica, restore_with_go,
     snapshots, tip, wait_boot_file, wait_staged_past, wait_until, wait_uploaded,
 };
@@ -48,8 +48,8 @@ const UP: Duration = Duration::from_secs(30);
 /// v1 accepts only at their off value (`socket.enabled`, `mcp-addr`, `heartbeat-url`,
 /// `auto-recover`), Go tuning knobs v1 accepts with a warning (`shutdown-sync-interval`,
 /// `busy-timeout`), and the Rust-only section, which Go ignores. The application keeps
-/// `wal_autocheckpoint = 0` (`Site`), which the section says.
-fn write_sidecar_config(path: &Path, sites: &[Site]) {
+/// `wal_autocheckpoint = 0` (`AppFixture`), which the section says.
+fn write_sidecar_config(path: &Path, fixtures: &[AppFixture]) {
     let mut text = String::from(
         "levels:
   - interval: 1s
@@ -64,13 +64,13 @@ mcp-addr: \"\"
 heartbeat-url: \"\"
 shutdown-sync-interval: 500ms
 litestream-rs:
-  host-autocheckpoint: off
+  app-autocheckpoint: off
   responses:
     wal-unlinked: stop
 dbs:
 ",
     );
-    for site in sites {
+    for fixture in fixtures {
         text.push_str(&format!(
             "  - path: {db}
     monitor-interval: 100ms
@@ -82,8 +82,8 @@ dbs:
       sync-interval: 100ms
       auto-recover: false
 ",
-            db = site.db.display(),
-            replica = site.replica.display(),
+            db = fixture.db.display(),
+            replica = fixture.replica.display(),
         ));
     }
     std::fs::write(path, text).expect("write the config");
@@ -113,17 +113,17 @@ fn pages_of(path: &Path) -> Vec<String> {
     hash_pages(path).expect("hash").page_hashes
 }
 
-fn fresh(site: &Site, name: &str) -> PathBuf {
-    let out = site.dir().join(name);
+fn fresh(fixture: &AppFixture, name: &str) -> PathBuf {
+    let out = fixture.dir().join(name);
     for suffix in ["", "-wal", "-shm"] {
         drop(std::fs::remove_file(format!("{}{suffix}", out.display())));
     }
     out
 }
 
-fn rust_restore(site: &Site, target: RestoreTarget, name: &str) -> Vec<String> {
-    let out = fresh(site, name);
-    let restored = restore_replica(&site.replica, target, &out).expect("sink");
+fn rust_restore(fixture: &AppFixture, target: RestoreTarget, name: &str) -> Vec<String> {
+    let out = fresh(fixture, name);
+    let restored = restore_replica(&fixture.replica, target, &out).expect("sink");
     assert!(
         restored.is_ok(),
         "{name}: Rust cannot restore: {restored:?}"
@@ -131,45 +131,53 @@ fn rust_restore(site: &Site, target: RestoreTarget, name: &str) -> Vec<String> {
     pages_of(&out)
 }
 
-fn go_restore(bin: &Path, config: &Path, site: &Site, target: Target, name: &str) -> Vec<String> {
-    let out = fresh(site, name);
-    let result = restore_with_go(bin, config, &site.db, &out, target).expect("go runs");
+fn go_restore(
+    bin: &Path,
+    config: &Path,
+    fixture: &AppFixture,
+    target: Target,
+    name: &str,
+) -> Vec<String> {
+    let out = fresh(fixture, name);
+    let result = restore_with_go(bin, config, &fixture.db, &out, target).expect("go runs");
     assert_eq!(result, GoRestore::Restored, "{name}: Go restore");
     pages_of(&out)
 }
 
-/// One daemon's turn over every site: it comes up with every database, each database commits
+/// One daemon's turn over every fixture: it comes up with every database, each database commits
 /// [`COMMITS`] transactions, each staged before the next, and the replicas end holding them
 /// all, and a snapshot when `snapshot` says the daemon writes one this soon. Returns each
 /// database's boot file when it had a previous tip.
 fn turn(
     process: &mut Replicator,
-    sites: &mut [Site],
+    fixtures: &mut [AppFixture],
     previous: &[Option<Txid>],
     snapshot: bool,
 ) -> Vec<Option<Summary>> {
     process
-        .wait_up_all(sites.len(), UP)
+        .wait_up_all(fixtures.len(), UP)
         .expect("the daemon comes up with every database");
     let mut at = previous.to_vec();
-    let mut boots: Vec<Option<Summary>> = sites.iter().map(|_| None).collect();
+    let mut boots: Vec<Option<Summary>> = fixtures.iter().map(|_| None).collect();
     for i in 0..COMMITS {
-        for (k, site) in sites.iter_mut().enumerate() {
-            site.commit(Shape::Insert { bytes: 300 }).expect("commit");
+        for (k, fixture) in fixtures.iter_mut().enumerate() {
+            fixture
+                .commit(Shape::Insert { bytes: 300 })
+                .expect("commit");
             if let (0, Some(prev)) = (i, previous[k]) {
-                boots[k] = Some(wait_boot_file(process, site, prev).expect("the boot's file"));
+                boots[k] = Some(wait_boot_file(process, fixture, prev).expect("the boot's file"));
             }
-            at[k] = Some(wait_staged_past(process, site, at[k]).expect("staged"));
+            at[k] = Some(wait_staged_past(process, fixture, at[k]).expect("staged"));
         }
     }
-    for site in sites.iter() {
-        wait_uploaded(process, site).expect("uploaded");
+    for fixture in fixtures.iter() {
+        wait_uploaded(process, fixture).expect("uploaded");
         if !snapshot {
             continue;
         }
         wait_until("a snapshot on the replica", UP, || {
             process.ensure_running()?;
-            Ok(!snapshots(&site.replica)?.is_empty())
+            Ok(!snapshots(&fixture.replica)?.is_empty())
         })
         .expect("a snapshot exists");
     }
@@ -203,24 +211,27 @@ struct Left {
     l9: Vec<BTreeSet<String>>,
 }
 
-fn left(sites: &[Site]) -> Left {
+fn left(fixtures: &[AppFixture]) -> Left {
     Left {
-        tips: sites
+        tips: fixtures
             .iter()
             .map(|s| tip(s).expect("tip").expect("staged"))
             .collect(),
-        pages: sites.iter().map(|s| s.hash_now().expect("hash")).collect(),
-        l9: sites
+        pages: fixtures
+            .iter()
+            .map(|s| s.hash_now().expect("hash"))
+            .collect(),
+        l9: fixtures
             .iter()
             .map(|s| snapshots(&s.replica).expect("l9"))
             .collect(),
     }
 }
 
-fn assert_no_new_snapshot(name: &str, sites: &[Site], before: &Left) {
-    for (k, site) in sites.iter().enumerate() {
+fn assert_no_new_snapshot(name: &str, fixtures: &[AppFixture], before: &Left) {
+    for (k, fixture) in fixtures.iter().enumerate() {
         assert_eq!(
-            snapshots(&site.replica).expect("l9"),
+            snapshots(&fixture.replica).expect("l9"),
             before.l9[k],
             "{name}: database {k}: a new snapshot"
         );
@@ -230,9 +241,9 @@ fn assert_no_new_snapshot(name: &str, sites: &[Site], before: &Left) {
 /// Go left no snapshot, so lsr may write its scheduled first one, as Go from v0.5.4 does at
 /// start; that is not a snapshot forced by a lost position, which `assert_continued` and the
 /// absence of a logged cause already rule out. Anything more than that one file fails.
-fn assert_at_most_a_first_snapshot(name: &str, sites: &[Site], before: &Left) {
-    for (k, site) in sites.iter().enumerate() {
-        let now = snapshots(&site.replica).expect("l9");
+fn assert_at_most_a_first_snapshot(name: &str, fixtures: &[AppFixture], before: &Left) {
+    for (k, fixture) in fixtures.iter().enumerate() {
+        let now = snapshots(&fixture.replica).expect("l9");
         let new: Vec<_> = now.difference(&before.l9[k]).collect();
         assert!(
             before.l9[k].is_empty() && new.len() <= 1,
@@ -249,49 +260,50 @@ fn go_key_warnings(log: &str) -> Vec<&str> {
         .collect()
 }
 
-fn site_log(sites: &[Site], name: &str) -> PathBuf {
-    sites[0].dir().join(name)
+fn fixture_log(fixtures: &[AppFixture], name: &str) -> PathBuf {
+    fixtures[0].dir().join(name)
 }
 
 /// Go, then `lsr`, then Go again, on one config file over three databases.
 fn sidecar_handover(build: &GoBuild, lsr: &Path) {
     let name = build.name();
     let bin = build.binary().expect("the build under test is present");
-    let mut sites: Vec<Site> = (0..DATABASES)
+    let mut fixtures: Vec<AppFixture> = (0..DATABASES)
         .map(|k| {
-            let site = Site::create(4096, 71 + u64::try_from(k).expect("small")).expect("site");
-            site.prepare_for_processes(200).expect("prepare");
-            site
+            let fixture =
+                AppFixture::create(4096, 71 + u64::try_from(k).expect("small")).expect("fixture");
+            fixture.prepare_for_processes(200).expect("prepare");
+            fixture
         })
         .collect();
-    let config = site_log(&sites, "litestream.yml");
-    write_sidecar_config(&config, &sites);
+    let config = fixture_log(&fixtures, "litestream.yml");
+    write_sidecar_config(&config, &fixtures);
     check_config(lsr, &config);
 
-    let mut go = Replicator::start(&bin, &config, &site_log(&sites, "go-1.log")).expect("Go");
+    let mut go = Replicator::start(&bin, &config, &fixture_log(&fixtures, "go-1.log")).expect("Go");
     // Before v0.5.4 Go may write no snapshot in a run this short, so none is waited for, on
     // Go's turn or lsr's; lsr is then checked against whatever snapshots Go left, possibly
     // none, so a snapshot lsr wrote still fails the run.
     let snapshot = build.snapshots_soon_after_start();
-    turn(&mut go, &mut sites, &[None; DATABASES], snapshot);
+    turn(&mut go, &mut fixtures, &[None; DATABASES], snapshot);
     let go_log = go.log_text();
     go.stop().expect("Go stops");
     for warning in go_key_warnings(&go_log) {
         println!("{name}: Go warned: {warning}");
     }
-    let at_go = left(&sites);
+    let at_go = left(&fixtures);
 
-    let log = site_log(&sites, "lsr.log");
+    let log = fixture_log(&fixtures, "lsr.log");
     let mut rs = Replicator::start_lsr_config(lsr, &config, &log).expect("lsr");
     let previous: Vec<Option<Txid>> = at_go.tips.iter().copied().map(Some).collect();
-    let boots = turn(&mut rs, &mut sites, &previous, snapshot);
+    let boots = turn(&mut rs, &mut fixtures, &previous, snapshot);
     let rs_log = rs.log_text();
     rs.stop().expect("lsr drains and exits 0");
     assert_continued(name, Kind::Rust, &boots, &at_go.tips);
     if snapshot {
-        assert_no_new_snapshot(name, &sites, &at_go);
+        assert_no_new_snapshot(name, &fixtures, &at_go);
     } else {
-        assert_at_most_a_first_snapshot(name, &sites, &at_go);
+        assert_at_most_a_first_snapshot(name, &fixtures, &at_go);
     }
     assert_eq!(
         rs_log.matches("replica position recovered").count(),
@@ -302,11 +314,11 @@ fn sidecar_handover(build: &GoBuild, lsr: &Path) {
         !rs_log.contains("snapshot required"),
         "{name}: lsr logged a snapshot cause: {rs_log}"
     );
-    let at_rust = left(&sites);
-    for (k, site) in sites.iter().enumerate() {
-        let latest = rust_restore(site, RestoreTarget::Latest, "rs-1.db");
+    let at_rust = left(&fixtures);
+    for (k, fixture) in fixtures.iter().enumerate() {
+        let latest = rust_restore(fixture, RestoreTarget::Latest, "rs-1.db");
         assert_eq!(latest, at_rust.pages[k], "{name}: database {k}");
-        let go_tip = rust_restore(site, RestoreTarget::Txid(at_go.tips[k]), "rs-go-tip.db");
+        let go_tip = rust_restore(fixture, RestoreTarget::Txid(at_go.tips[k]), "rs-go-tip.db");
         assert_eq!(go_tip, at_go.pages[k], "{name}: database {k} at Go's tip");
     }
     println!("{name}: lsr continued every database at Go's tip plus one");
@@ -314,25 +326,25 @@ fn sidecar_handover(build: &GoBuild, lsr: &Path) {
         println!("{name}: reads only frame-encoded files, so cannot resume from lsr's");
         return;
     }
-    go_resumes(name, &bin, &config, &mut sites, &at_rust);
+    go_resumes(name, &bin, &config, &mut fixtures, &at_rust);
 }
 
 /// Go starts again on what `lsr` left.
-fn go_resumes(name: &str, bin: &Path, config: &Path, sites: &mut [Site], at_rust: &Left) {
-    let mut go = Replicator::start(bin, config, &site_log(sites, "go-2.log")).expect("Go");
+fn go_resumes(name: &str, bin: &Path, config: &Path, fixtures: &mut [AppFixture], at_rust: &Left) {
+    let mut go = Replicator::start(bin, config, &fixture_log(fixtures, "go-2.log")).expect("Go");
     let previous: Vec<Option<Txid>> = at_rust.tips.iter().copied().map(Some).collect();
-    let boots = turn(&mut go, sites, &previous, true);
+    let boots = turn(&mut go, fixtures, &previous, true);
     go.stop().expect("Go stops");
     assert_continued(name, Kind::Go, &boots, &at_rust.tips);
-    assert_no_new_snapshot(name, sites, at_rust);
-    for (k, site) in sites.iter().enumerate() {
-        let now = site.hash_now().expect("hash");
-        let latest = go_restore(bin, config, site, Target::Latest, "go-2.db");
+    assert_no_new_snapshot(name, fixtures, at_rust);
+    for (k, fixture) in fixtures.iter().enumerate() {
+        let now = fixture.hash_now().expect("hash");
+        let latest = go_restore(bin, config, fixture, Target::Latest, "go-2.db");
         assert_eq!(latest, now, "{name}: database {k}: Go at Latest");
-        let rust = rust_restore(site, RestoreTarget::Latest, "rs-2.db");
+        let rust = rust_restore(fixture, RestoreTarget::Latest, "rs-2.db");
         assert_eq!(rust, now, "{name}: database {k}: Rust at Latest");
         let txid = at_rust.tips[k].get();
-        let mid = go_restore(bin, config, site, Target::Txid { txid }, "go-rs-tip.db");
+        let mid = go_restore(bin, config, fixture, Target::Txid { txid }, "go-rs-tip.db");
         assert_eq!(mid, at_rust.pages[k], "{name}: database {k} at lsr's tip");
     }
     println!("{name}: Go continued every database at lsr's tip plus one");

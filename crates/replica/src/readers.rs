@@ -1,7 +1,7 @@
-//! The host's long readers, and the checkpointer that respects them.
+//! The application's long readers, and the checkpointer that respects them.
 //!
 //! A TRUNCATE checkpoint waits for every reader to finish, and SQLite cannot tell the
-//! replicator whether one is coming. So TRUNCATE runs only on the host's word
+//! replicator whether one is coming. So TRUNCATE runs only on the application's word
 //! (`docs/plans/phase-3-syncing.md`, the reader-tracking section): under [`ReaderTracking::Untracked`] it
 //! never runs, and under [`ReaderTracking::Tracked`] it runs only while no [`ReaderGuard`]
 //! lives. A TRUNCATE asked for while one does is refused without calling SQLite, as
@@ -40,7 +40,7 @@ impl Drop for ReaderGuard {
     }
 }
 
-/// The backend's checkpointer, refusing TRUNCATE unless the host said no reader runs.
+/// The backend's checkpointer, refusing TRUNCATE unless the application said no reader runs.
 #[derive(Clone, Debug)]
 pub(crate) struct Guarded {
     sqlite: Sqlite,

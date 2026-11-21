@@ -1,4 +1,4 @@
-//! The public API end to end: a real SQLite database (`lsr_sqlite`), the host's own
+//! The public API end to end: a real SQLite database (`lsr_sqlite`), the application's own
 //! connection writing to it, and a file replica. Each test ends, where the state allows, in a
 //! restore of the replica that equals the database.
 //!
@@ -17,8 +17,8 @@ use std::time::Duration;
 use common::{PATIENCE, Site, assert_same, config, fake, truncate_is_busy, wait};
 use lsr_core::{CheckpointMode, Event as EngineEvent, Fault};
 use lsr_replica::{
-    Booted, ChannelSink, CheckpointConfig, Config, DegradedCause, Depth, DynStore, Event,
-    EventSink, Gone, HostCheckpoint, HostCheckpoints, HostNotice, Lane, Phase, ReaderTracking,
+    AppCheckpoint, AppCheckpoints, AppNotice, Booted, ChannelSink, CheckpointConfig, Config,
+    DegradedCause, Depth, DynStore, Event, EventSink, Gone, Lane, Phase, ReaderTracking,
     Replicator, Responses, SetupError, StartError, StopCause, Stopped, restore_if_missing, verify,
 };
 use rusqlite::Connection;
@@ -423,7 +423,7 @@ fn a_reader_guard_holds_off_truncate() {
     let (sink, events) = ChannelSink::new(NonZeroUsize::new(1024).unwrap());
     replicator.set_events(Box::new(sink));
     wait(&replicator, caught_up);
-    // A host reader on an old snapshot keeps PASSIVE from emptying the WAL, so the policy
+    // An application reader on an old snapshot keeps PASSIVE from emptying the WAL, so the policy
     // goes on to TRUNCATE.
     let reader = Connection::open(&site.db).unwrap();
     reader.execute_batch("BEGIN").unwrap();
@@ -560,9 +560,9 @@ fn a_panic_under_strict_responses_stops_with_bug() {
     );
 }
 
-/// A checkpoint the host ran behind the replicator's back is counted and reported.
+/// A checkpoint the application ran behind the replicator's back is counted and reported.
 #[test]
-fn a_host_checkpoint_is_counted_and_reported() {
+fn a_app_checkpoint_is_counted_and_reported() {
     let site = Site::new();
     let (runtime, clock) = fake();
     let replicator = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
@@ -576,10 +576,10 @@ fn a_host_checkpoint_is_counted_and_reported() {
     clock.advance(POLL);
     let health = wait(&replicator, |h| h.foreign_checkpoints == 1 && caught_up(h));
     assert_eq!(health.foreign_checkpoints, 1);
-    assert_eq!(health.host_checkpoints.backfilled, 1);
+    assert_eq!(health.app_checkpoints.backfilled, 1);
     assert_eq!(
-        health.host_notice(),
-        Some(HostNotice::Checkpointing { ran: 1 })
+        health.app_notice(),
+        Some(AppNotice::Checkpointing { ran: 1 })
     );
     assert!(!health.is_degraded(), "a notice, not a degraded state");
     let seen = events.drain();
@@ -590,8 +590,8 @@ fn a_host_checkpoint_is_counted_and_reported() {
     assert!(
         seen.iter().any(|event| matches!(
             event,
-            Event::HostCheckpoint {
-                seen: HostCheckpoint::Backfilled { .. },
+            Event::AppCheckpoint {
+                seen: AppCheckpoint::Backfilled { .. },
                 total: 1
             }
         )),
@@ -604,11 +604,11 @@ fn a_host_checkpoint_is_counted_and_reported() {
     site.assert_restores(&*site.store());
 }
 
-/// The host's connections keep `wal_autocheckpoint = 0` (`app_connection` sets it), and the
+/// The application's connections keep `wal_autocheckpoint = 0` (`app_connection` sets it), and the
 /// WAL grows past SQLite's automatic checkpoint threshold until the replicator's own
-/// checkpoints run: no host checkpoint is seen, none is inferred, and no notice is raised.
+/// checkpoints run: no application checkpoint is seen, none is inferred, and no notice is raised.
 #[test]
-fn a_host_at_wal_autocheckpoint_0_raises_no_notice() {
+fn a_app_at_wal_autocheckpoint_0_raises_no_notice() {
     let site = Site::new();
     let (runtime, clock) = fake();
     let replicator = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
@@ -624,13 +624,13 @@ fn a_host_at_wal_autocheckpoint_0_raises_no_notice() {
         });
     }
     assert!(health.counters.checkpoints >= 1, "{health:?}");
-    assert_eq!(health.host_checkpoints, HostCheckpoints::NONE);
-    assert_eq!(health.host_notice(), None);
+    assert_eq!(health.app_checkpoints, AppCheckpoints::NONE);
+    assert_eq!(health.app_notice(), None);
     let seen = events.drain();
     assert!(
         !seen
             .iter()
-            .any(|event| matches!(event, Event::HostCheckpoint { .. })),
+            .any(|event| matches!(event, Event::AppCheckpoint { .. })),
         "{seen:?}"
     );
     assert!(matches!(
@@ -714,7 +714,7 @@ struct Panicking;
 
 impl EventSink for Panicking {
     fn event(&mut self, _event: &Event) {
-        panic!("a host sink that panics");
+        panic!("an application sink that panics");
     }
 }
 

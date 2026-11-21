@@ -22,7 +22,7 @@ struct Seen {
     deleted: usize,
 }
 
-/// A host that commits once a second for `seconds` and drives the actor as
+/// An application that commits once a second for `seconds` and drives the actor as
 /// a daemon does: again at once on `Next::Now`, at the asked time when that
 /// comes before the next commit, else at the next commit (the WAL poll).
 fn write_every_second(rig: &mut Rig, actor: &mut Actor, start: i64, seconds: i64) -> Vec<Seen> {

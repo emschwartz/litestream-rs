@@ -20,7 +20,7 @@
 //!   fallback never applies there.
 //!
 //! Go loads the roots once per process; the store loads them each time a
-//! client is built, which is once per store. A host that passes its own
+//! client is built, which is once per store. An application that passes its own
 //! `reqwest::Client` keeps whatever that client trusts.
 
 #[cfg(all(unix, not(target_vendor = "apple")))]

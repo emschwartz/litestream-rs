@@ -3,14 +3,14 @@
 //!
 //! A snapshot is a copy: reading it takes one lock for as long as a clone, never across I/O.
 //!
-//! The host's own checkpoints are a notice ([`HostNotice`]), never a degraded state: the pin
-//! keeps them from costing the replica anything, and what they cost the host is said in the
+//! The application's own checkpoints are a notice ([`AppNotice`]), never a degraded state: the pin
+//! keeps them from costing the replica anything, and what they cost the application is said in the
 //! notice's text.
 
 use std::fmt;
 
 use lsr_core::{
-    Degraded, HaltCause, HostCheckpoint, HostCheckpoints, Lane, PersistentCause, Severity,
+    AppCheckpoint, AppCheckpoints, Degraded, HaltCause, Lane, PersistentCause, Severity,
     SnapshotCause,
 };
 use lsr_ltx::{Timestamp, Txid};
@@ -130,7 +130,7 @@ pub struct Counters {
     pub retries: u64,
     /// Panics the thread caught, each of which rebuilt or stopped the engine.
     pub panics: u64,
-    /// Panics in the host's event sink, caught and dropped.
+    /// Panics in the application's event sink, caught and dropped.
     pub sink_panics: u64,
     /// The replica's store, operation by operation.
     pub store: StoreCounters,
@@ -160,11 +160,11 @@ pub struct Health {
     pub db_bytes: u64,
     /// Why the next sync is a snapshot, when it is one.
     pub resnapshot: Option<SnapshotCause>,
-    /// Checkpoints someone else ran: the host promised not to (PLAN section 6).
+    /// Checkpoints someone else ran: the application promised not to (PLAN section 6).
     pub foreign_checkpoints: u64,
-    /// What the host's checkpoints did, those that cannot run included; read it as text
-    /// through [`Health::host_notice`].
-    pub host_checkpoints: HostCheckpoints,
+    /// What the application's checkpoints did, those that cannot run included; read it as text
+    /// through [`Health::app_notice`].
+    pub app_checkpoints: AppCheckpoints,
     /// Running totals.
     pub counters: Counters,
     /// What the scheduled verify found (`Config::verify_interval`); all empty while it is off.
@@ -265,7 +265,7 @@ impl Health {
             db_bytes: 0,
             resnapshot: None,
             foreign_checkpoints: 0,
-            host_checkpoints: HostCheckpoints::NONE,
+            app_checkpoints: AppCheckpoints::NONE,
             counters: Counters {
                 ticks: 0,
                 syncs: 0,
@@ -316,58 +316,58 @@ impl Health {
         self.degraded.iter().any(Option::is_some) || self.verification.failing.is_some()
     }
 
-    /// What the host's checkpoints cost, from the newest one seen; `None` while none was.
+    /// What the application's checkpoints cost, from the newest one seen; `None` while none was.
     #[must_use]
-    pub const fn host_notice(&self) -> Option<HostNotice> {
-        let host = &self.host_checkpoints;
-        match host.last {
+    pub const fn app_notice(&self) -> Option<AppNotice> {
+        let app = &self.app_checkpoints;
+        match app.last {
             None => None,
-            Some(HostCheckpoint::Stalled { frames }) => Some(HostNotice::Stalled { frames }),
-            Some(HostCheckpoint::Backfilled { .. } | HostCheckpoint::Restarted) => {
-                Some(HostNotice::Checkpointing { ran: host.ran() })
+            Some(AppCheckpoint::Stalled { frames }) => Some(AppNotice::Stalled { frames }),
+            Some(AppCheckpoint::Backfilled { .. } | AppCheckpoint::Restarted) => {
+                Some(AppNotice::Checkpointing { ran: app.ran() })
             }
         }
     }
 }
 
-/// What the host's checkpoints cost. Not a degraded state: replication stays correct either
-/// way. Its text says what to change in the host.
+/// What the application's checkpoints cost. Not a degraded state: replication stays correct either
+/// way. Its text says what to change in the application.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HostNotice {
-    /// The host ran checkpoints the replicator did not, `ran` of them so far. They copy only
+pub enum AppNotice {
+    /// The application ran checkpoints the replicator did not, `ran` of them so far. They copy only
     /// frames below the replicator's pin into the database file and never restart the WAL
     /// under it.
     Checkpointing {
-        /// Host checkpoints that changed the wal-index.
+        /// Application checkpoints that changed the wal-index.
         ran: u64,
     },
-    /// The WAL grew past the host's automatic checkpoint threshold with nothing new copied:
-    /// each host commit runs a checkpoint attempt that does nothing.
+    /// The WAL grew past the application's automatic checkpoint threshold with nothing new copied:
+    /// each application commit runs a checkpoint attempt that does nothing.
     Stalled {
         /// Frames in the WAL when it was seen.
         frames: u32,
     },
 }
 
-/// What the host changes to stop both: its connections' settings, which a replicator in
+/// What the application changes to stop both: its connections' settings, which a replicator in
 /// another process cannot set.
 const ADVICE: &str = "set wal_autocheckpoint = 0 and SQLITE_FCNTL_PERSIST_WAL on every \
-     connection the host opens (app_connection does both), and tell the replicator \
-     (host_autocheckpoint: None)";
+     connection the application opens (app_connection does both), and tell the replicator \
+     (app_autocheckpoint: None)";
 
-impl fmt::Display for HostNotice {
+impl fmt::Display for AppNotice {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Checkpointing { ran } => write!(
                 f,
-                "the host ran {ran} checkpoint(s) of its own: they stop at the replicator's \
+                "the application ran {ran} checkpoint(s) of its own: they stop at the replicator's \
                  read transaction and cost the replica nothing, but past its automatic \
-                 checkpoint threshold every host commit runs one; {ADVICE}"
+                 checkpoint threshold every application commit runs one; {ADVICE}"
             ),
             Self::Stalled { frames } => write!(
                 f,
-                "the WAL holds {frames} frames, past the host's automatic checkpoint \
-                 threshold, with nothing new copied into the database: every host commit now \
+                "the WAL holds {frames} frames, past the application's automatic checkpoint \
+                 threshold, with nothing new copied into the database: every application commit now \
                  runs a checkpoint attempt that does nothing until the replicator \
                  checkpoints, and the WAL keeps growing until then; {ADVICE}"
             ),
@@ -387,9 +387,9 @@ impl OpCounters {
 mod tests {
     use super::*;
 
-    fn with(last: Option<HostCheckpoint>) -> Health {
+    fn with(last: Option<AppCheckpoint>) -> Health {
         let mut health = Health::new(Timestamp::from_unix_millis(0));
-        health.host_checkpoints = HostCheckpoints {
+        health.app_checkpoints = AppCheckpoints {
             backfilled: 2,
             restarted: 1,
             stalled: 1,
@@ -401,22 +401,19 @@ mod tests {
     /// The notice follows the newest observation, says what it costs and what to change,
     /// and is never a degraded state.
     #[test]
-    fn the_host_notice_says_what_it_costs() {
-        assert_eq!(with(None).host_notice(), None);
-        let ran = with(Some(HostCheckpoint::Restarted));
-        assert_eq!(
-            ran.host_notice(),
-            Some(HostNotice::Checkpointing { ran: 3 })
-        );
+    fn the_app_notice_says_what_it_costs() {
+        assert_eq!(with(None).app_notice(), None);
+        let ran = with(Some(AppCheckpoint::Restarted));
+        assert_eq!(ran.app_notice(), Some(AppNotice::Checkpointing { ran: 3 }));
         assert!(!ran.is_degraded());
-        let stalled = with(Some(HostCheckpoint::Stalled { frames: 1200 }));
-        let Some(notice) = stalled.host_notice() else {
+        let stalled = with(Some(AppCheckpoint::Stalled { frames: 1200 }));
+        let Some(notice) = stalled.app_notice() else {
             panic!("no notice");
         };
         let text = notice.to_string();
         for words in [
             "1200 frames",
-            "every host commit now runs a checkpoint attempt that does nothing",
+            "every application commit now runs a checkpoint attempt that does nothing",
             "until the replicator checkpoints",
             "the WAL keeps growing",
             "wal_autocheckpoint = 0",

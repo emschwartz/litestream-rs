@@ -387,7 +387,7 @@ dbs:
             self.acknowledge();
         }
 
-        /// A host checkpoint through its own connection, as an application would run one.
+        /// An application checkpoint through its own connection, as an application would run one.
         fn outside_checkpoint(&mut self) {
             let conn = rusqlite::Connection::open(&self.db).expect("open");
             let (busy, _, _): (i64, i64, i64) = conn

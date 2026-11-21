@@ -164,7 +164,7 @@ fn min_checkpoint_page_count_must_be_above_zero() {
 /// Go's `effectiveTruncatePageN` (`db.go:1599-1608`), under the operator's claim.
 #[test]
 fn truncate_page_n_acts_as_go_only_under_the_claim() {
-    let claim = "litestream-rs:\n  host-readers: none\n";
+    let claim = "litestream-rs:\n  app-readers: none\n";
     let db = one(&format!("{claim}{}", db_with("")));
     assert_eq!(db.config().readers, ReaderTracking::Tracked);
     assert_eq!(
@@ -307,29 +307,29 @@ fn responses_override_go_s_one_by_one() {
     );
 }
 
-/// A Rust-only setting: the host's `wal_autocheckpoint`, SQLite's 1000 unless stated.
+/// A Rust-only setting: the application's `wal_autocheckpoint`, SQLite's 1000 unless stated.
 #[test]
-fn host_autocheckpoint_defaults_to_sqlite_s_and_can_be_off() {
+fn app_autocheckpoint_defaults_to_sqlite_s_and_can_be_off() {
     let frames = |head: &str| {
         one(&format!("{head}{}", db_with("")))
             .config()
-            .host_autocheckpoint
+            .app_autocheckpoint
     };
     assert_eq!(frames(""), NonZeroU32::new(1000));
     assert_eq!(
-        frames("litestream-rs:\n  host-autocheckpoint: 500\n"),
+        frames("litestream-rs:\n  app-autocheckpoint: 500\n"),
         NonZeroU32::new(500)
     );
-    assert_eq!(frames("litestream-rs:\n  host-autocheckpoint: 0\n"), None);
-    assert_eq!(frames("litestream-rs:\n  host-autocheckpoint: off\n"), None);
+    assert_eq!(frames("litestream-rs:\n  app-autocheckpoint: 0\n"), None);
+    assert_eq!(frames("litestream-rs:\n  app-autocheckpoint: off\n"), None);
     let problems = refused(&format!(
-        "litestream-rs:\n  host-autocheckpoint: lots\n{}",
+        "litestream-rs:\n  app-autocheckpoint: lots\n{}",
         db_with("")
     ));
     assert!(
         problems
             .iter()
-            .any(|p| p.path.to_string() == "litestream-rs.host-autocheckpoint"),
+            .any(|p| p.path.to_string() == "litestream-rs.app-autocheckpoint"),
         "{problems:#?}"
     );
 }

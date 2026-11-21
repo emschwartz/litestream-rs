@@ -1,7 +1,7 @@
 /*
  * Reads a database the way an application on the Go read-replica VFS does, for the compat
  * harness (crates/compat/src/vfs.rs). Upstream ships the VFS as a SQLite loadable extension
- * and its own end-to-end test drives it from the sqlite3 shell; this is the same host with
+ * and its own end-to-end test drives it from the sqlite3 shell; this is the same application with
  * output the harness can compare.
  *
  *   vfs-read <uri> <pages-out> [extension]

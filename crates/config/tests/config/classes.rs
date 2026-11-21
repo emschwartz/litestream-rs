@@ -285,10 +285,10 @@ fn retention_enabled_is_honoured() {
 #[test]
 fn rust_settings_live_under_one_key() {
     let config = config(
-        "litestream-rs:\n  host-readers: none\n  responses:\n    credentials: stop\n    foreign-writer: continue-and-interleave-histories\n",
+        "litestream-rs:\n  app-readers: none\n  responses:\n    credentials: stop\n    foreign-writer: continue-and-interleave-histories\n",
     );
     let rust = config.rust();
-    assert_eq!(rust.host_readers(), lsr_config::HostReaders::None);
+    assert_eq!(rust.app_readers(), lsr_config::AppReaders::None);
     assert_eq!(
         rust.responses().credentials,
         Some(lsr_config::ResponseSetting::Stop)
@@ -298,11 +298,11 @@ fn rust_settings_live_under_one_key() {
         rust.responses().foreign_writer,
         Some(lsr_config::ForeignWriterSetting::ContinueAndInterleaveHistories)
     );
-    let problems = refused("litestream-rs:\n  host-reader: none\n  responses:\n    bug: maybe\n");
+    let problems = refused("litestream-rs:\n  app-reader: none\n  responses:\n    bug: maybe\n");
     assert_eq!(
-        problem_at(&problems, "litestream-rs.host-reader"),
+        problem_at(&problems, "litestream-rs.app-reader"),
         ProblemKind::Unknown {
-            suggestion: Some("host-readers")
+            suggestion: Some("app-readers")
         }
     );
     assert!(matches!(
@@ -312,13 +312,13 @@ fn rust_settings_live_under_one_key() {
 }
 
 #[test]
-fn without_the_host_readers_claim_the_truncate_divergence_is_reported() {
+fn without_the_app_readers_claim_the_truncate_divergence_is_reported() {
     let loaded = parse(DB);
     assert!(
         warnings_at(&loaded.report.warnings, "the file")
             .contains(&&WarningKind::NoTruncateWithoutClaim)
     );
-    let loaded = parse(&format!("{DB}litestream-rs:\n  host-readers: none\n"));
+    let loaded = parse(&format!("{DB}litestream-rs:\n  app-readers: none\n"));
     assert!(
         !loaded
             .report

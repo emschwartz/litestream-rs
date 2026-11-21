@@ -39,7 +39,7 @@ fn cycle_until_dark<B: Backend>(rig: &mut Rig<B>) -> Result<(), RigError> {
 struct Outcome {
     /// Why the next boot snapshots, if it does.
     cause: Option<SnapshotCause>,
-    /// The boot settled only after the host's next commit (see
+    /// The boot settled only after the application's next commit (see
     /// `a_boot_after_a_loss_that_left_a_header_only_wal_settles`).
     needed_a_write: bool,
 }
@@ -58,7 +58,7 @@ fn boot_cause(tick: &Tick) -> Option<Option<SnapshotCause>> {
 }
 
 /// The outcome of a loss at each WAL sync, keyed by sync number. `strict`: the boot must settle
-/// before the host writes again.
+/// before the application writes again.
 fn each_wal_sync<B: Backend>(strict: bool) -> BTreeMap<u32, Outcome> {
     let dir = TempDir::new().unwrap();
     let mut dry = Rig::<B>::new(dir.path(), config()).unwrap();
@@ -84,7 +84,7 @@ fn each_wal_sync<B: Backend>(strict: bool) -> BTreeMap<u32, Outcome> {
         let boots = rig.ticks().len();
         rig.reboot_after_power_loss()
             .unwrap_or_else(|err| panic!("{at}: reboot: {err}"));
-        // The boot sees the WAL as the loss left it; the host writes only after.
+        // The boot sees the WAL as the loss left it; the application writes only after.
         let needed_a_write = match rig.settle() {
             Err(RigError::Unsettled(_))
                 if !strict && rig.faults().last() == Some(&EngineFault::WalMoved) =>
@@ -147,7 +147,7 @@ fn power_loss_at_each_wal_sync_loses_no_acknowledged_transaction() {
         seen(|c| matches!(c, Some(SnapshotCause::GenerationChanged))),
         "{outcomes:?}"
     );
-    // Only a boot with a snapshot pending waits for the host's next commit.
+    // Only a boot with a snapshot pending waits for the application's next commit.
     assert!(
         outcomes
             .values()
@@ -161,7 +161,7 @@ fn power_loss_at_each_wal_sync_loses_no_acknowledged_transaction() {
 /// of exactly 32 bytes, and SQLite's recovery reads no header from a file that short
 /// (`walIndexRecover` only reads one past `WAL_HDRSIZE`), so the wal-index names salts 0 while
 /// the file names the new ones. The boot's pending snapshot then retries "WAL moved" until the
-/// host commits again; an idle database never settles after such a loss, though nothing is lost.
+/// application commits again; an idle database never settles after such a loss, though nothing is lost.
 #[test]
 fn a_boot_after_a_loss_that_left_a_header_only_wal_settles() {
     each_wal_sync::<Sqlite>(true);

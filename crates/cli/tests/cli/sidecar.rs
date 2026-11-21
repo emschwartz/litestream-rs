@@ -170,7 +170,7 @@ fn the_child_runs_after_the_pin_and_its_exit_drains_then_exits_0_or_1_as_go() {
 }
 
 /// SIGTERM and SIGHUP reach the child; the daemon drains only after the child exits
-/// (Go `main.go:140-153`), and the host's last writes are on the replica.
+/// (Go `main.go:140-153`), and the application's last writes are on the replica.
 #[test]
 fn a_signal_is_forwarded_and_the_drain_waits_for_the_child() {
     for (signal, number) in [("TERM", 15), ("HUP", 1)] {

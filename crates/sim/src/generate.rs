@@ -53,7 +53,7 @@ pub enum EnvFault {
     /// fails to truncate the file, which keeps its old header. Scenarios only.
     TruncateFails,
     /// One byte of this page of the database file flips, outside SQLite; the
-    /// database the host serves has it from then on. Scenarios only.
+    /// database the application serves has it from then on. Scenarios only.
     FlipDatabasePage(u32),
     /// The next driver start writes no WAL header, as the real driver's open
     /// does not once `_litestream_seq` exists. Scenarios only.
@@ -140,7 +140,7 @@ pub enum Op {
     Remote(RemoteOp),
     /// The app's `wal_autocheckpoint` becomes this many frames (`None`: 0, the model's
     /// default), and the engine is told so. Scenarios only.
-    HostAutocheckpoint(Option<u32>),
+    AppAutocheckpoint(Option<u32>),
 }
 
 /// What a scenario does to the staging directory, the engine's own memory of

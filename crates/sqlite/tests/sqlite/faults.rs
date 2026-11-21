@@ -6,15 +6,15 @@
 //! ([`Sqlite`]). A case whose answer depends on the backend states both answers in one table
 //! (`read_mark_zero_answers`), keyed by [`Backend::PIN_ON_MARK_ZERO`], never in a skip.
 //!
-//! Each case also runs in both [`Placement`]s (`both`): the host in this process, set up as
-//! replication asks, and the host in a child process at SQLite's defaults (automatic
+//! Each case also runs in both [`Placement`]s (`both`): the application in this process, set up as
+//! replication asks, and the application in a child process at SQLite's defaults (automatic
 //! checkpoints at 1000 frames, no `PERSIST_WAL`), with the pin, the engine and the oracle
 //! here, as beside a sidecar. One case's answer differs by placement and states both
 //! (`abandoned_frames_answers`; both are a snapshot). In this process only:
 //! `persist_wal_keeps_a_wal_a_page_size_change_makes_stale`, which is about the in-process
-//! host's own setting, and the power-loss file (`power_loss.rs`), whose loss undoes what the
-//! host wrote through this process's fault VFS. The killed-writer file (`kill.rs`) runs in
-//! both. The cases only a host at SQLite's defaults has are in `host_at_defaults.rs`.
+//! application's own setting, and the power-loss file (`power_loss.rs`), whose loss undoes what the
+//! application wrote through this process's fault VFS. The killed-writer file (`kill.rs`) runs in
+//! both. The cases only an application at SQLite's defaults has are in `app_at_defaults.rs`.
 
 #![expect(
     clippy::arithmetic_side_effects,
@@ -42,7 +42,7 @@ use crate::common;
 /// is one, after running it.
 pub fn child(role: &str, db: &Path) -> bool {
     match role {
-        "host-restarts-the-wal" => host_restarts_the_wal(db),
+        "application-restarts-the-wal" => app_restarts_the_wal(db),
         _ => return false,
     }
     true
@@ -52,7 +52,7 @@ fn rig<B: Backend>(dir: &TempDir, placement: Placement) -> Rig<B> {
     Rig::new(dir.path(), RigConfig::placed(placement)).unwrap()
 }
 
-/// Runs `case` with the host in each placement.
+/// Runs `case` with the application in each placement.
 fn both(case: impl Fn(Placement)) {
     for placement in Placement::ALL {
         case(placement);
@@ -261,7 +261,7 @@ fn lock_error_at_open<B: Backend>(placement: Placement) {
 /// Found by the matrix: a TRUNCATE whose `ftruncate` fails has already reset the wal-index
 /// (new salts, no frames) while the file keeps the old header, and so does a sequence bump
 /// whose header write fails after SQLite restarted the log (the write matrix, the first WAL
-/// write of a cycle). Until the host writes again the engine reads "WAL moved" on every tick and
+/// write of a cycle). Until the application writes again the engine reads "WAL moved" on every tick and
 /// retries for ever; an idle database never settles and a shutdown never drains, though nothing
 /// is lost. (A RESTART that succeeds leaves the header for the next writer to reset, and a
 /// TRUNCATE that succeeds empties the file, so neither reaches this state.)
@@ -352,23 +352,23 @@ fn stranger_truncate<B: Backend>(placement: Placement) {
     assert_continue(&s.verdict().unwrap());
 }
 
-/// SQLite belief: the host's last connection closing does not checkpoint or delete the WAL
+/// SQLite belief: the application's last connection closing does not checkpoint or delete the WAL
 /// while another connection (the pin) is open, since it cannot take the exclusive lock
 /// `sqlite3WalClose` needs. The engine continues where it was.
 #[test]
-fn the_pin_survives_the_hosts_last_connection_closing() {
-    both(pin_survives_host_close::<Sqlite>);
+fn the_pin_survives_the_apps_last_connection_closing() {
+    both(pin_survives_app_close::<Sqlite>);
 }
 
-fn pin_survives_host_close<B: Backend>(placement: Placement) {
+fn pin_survives_app_close<B: Backend>(placement: Placement) {
     let dir = TempDir::new().unwrap();
     let mut s = stepper::<B>(&dir, placement);
     s.sync().unwrap();
     s.write(800).unwrap();
     s.sync().unwrap();
     let before = s.wal_bytes().unwrap();
-    // Swap the host's connection for a fresh one, closing the only host connection there was.
-    s.host_open(0).unwrap();
+    // Swap the application's connection for a fresh one, closing the only application connection there was.
+    s.app_open(0).unwrap();
     assert_eq!(s.wal_bytes().unwrap(), before, "no checkpoint, no delete");
     assert_continue(&s.verdict().unwrap());
     s.write(800).unwrap();
@@ -436,7 +436,7 @@ fn unknown_wal_index_version<B: Backend>(placement: Placement) {
 
 /// A wal-index header that fails its checksum, or whose copies differ, is not ready: `Busy`.
 /// The engine never runs SQLite's recovery itself; the bytes it found are the bytes it leaves,
-/// and the host's next read is what rebuilds the index.
+/// and the application's next read is what rebuilds the index.
 #[test]
 fn an_invalid_wal_index_is_not_ready_never_recovered_by_us() {
     both(invalid_wal_index::<Sqlite>);
@@ -459,7 +459,7 @@ fn invalid_wal_index<B: Backend>(placement: Placement) {
     bad[40] = flipped[0];
     bad[88] = flipped[0];
     assert_eq!(peek(&shm, 136), bad, "nothing of ours rewrote the index");
-    // The host's next statement sees the bad header and rebuilds the index from the WAL.
+    // The application's next statement sees the bad header and rebuilds the index from the WAL.
     s.write(10).unwrap();
     let after = s.backend.committed().unwrap();
     assert_eq!(after.end().salts(), good.end().salts());
@@ -552,7 +552,7 @@ fn outside_passive_restart_and_truncate_while_pinned_and_on_read_mark_zero() {
 
 /// SQLite belief: a reader on read mark 0 holds `WAL_READ_LOCK(0)`, which every backfill needs
 /// exclusively (`walCheckpoint`), because such a reader reads the database file directly. So
-/// once a host writer that began on a mark above zero appends frames after a read-mark-0 pin, no
+/// once an application writer that began on a mark above zero appends frames after a read-mark-0 pin, no
 /// checkpoint can backfill them and no writer can restart the log over them while the pin
 /// holds: the frames the continuity proof cannot see are never abandoned, and the engine
 /// continues. (The plan, docs/plans/phase-3-syncing.md, worried that read mark 0 does
@@ -563,24 +563,24 @@ fn the_pin_on_read_mark_zero_blocks_every_backfill_past_it() {
     both(read_mark_zero_blocks_backfill::<Sqlite>);
 }
 
-/// A pin on read mark 0 at the synced end, then a host reader's write after it, in the same
+/// A pin on read mark 0 at the synced end, then an application reader's write after it, in the same
 /// generation (the reader began on a mark above zero, so its write does not restart the log).
-/// The reader is the host's connection 1, left open.
+/// The reader is the application's connection 1, left open.
 fn frames_after_a_read_mark_zero_pin<B: Backend>(s: &mut Stepper<B>) {
     s.sync().unwrap();
     for _ in 0..3 {
         s.write(500).unwrap();
     }
     s.sync().unwrap();
-    s.host_open(1).unwrap();
-    s.host_exec(1, "BEGIN; SELECT count(*) FROM t;").unwrap();
+    s.app_open(1).unwrap();
+    s.app_exec(1, "BEGIN; SELECT count(*) FROM t;").unwrap();
     let run = s.backend.checkpoint(CheckpointMode::Passive).unwrap();
     assert!(!run.busy && run.checkpointed == run.log, "{run:?}");
     assert!(
         matches!(s.sync().unwrap(), StepDid::Idle),
         "re-pinned on read mark 0"
     );
-    s.host_exec(1, "INSERT INTO t(v) VALUES (randomblob(500)); COMMIT;")
+    s.app_exec(1, "INSERT INTO t(v) VALUES (randomblob(500)); COMMIT;")
         .unwrap();
 }
 
@@ -625,7 +625,7 @@ fn the_abandoned_frames_check_fires_when_a_broken_lock_lets_frames_after_the_pin
 }
 
 /// The child's work for the abandoned-frames check: append, backfill, restart.
-fn host_restarts_the_wal(db: &Path) {
+fn app_restarts_the_wal(db: &Path) {
     let conn = rusqlite::Connection::open(db).unwrap();
     conn.busy_timeout(std::time::Duration::ZERO).unwrap();
     conn.execute_batch("INSERT INTO t(v) VALUES (randomblob(500));")
@@ -640,15 +640,15 @@ fn host_restarts_the_wal(db: &Path) {
         .unwrap();
 }
 
-/// How the abandoned-frames case ends, by where the host runs: how many times the child restarted the
+/// How the abandoned-frames case ends, by where the application runs: how many times the child restarted the
 /// log, and whether the proof alone would have followed it (so only the abandoned-frames check stops it).
 ///
-/// In process, the descriptor this process closes drops the host's locks on `-shm` too, its
+/// In process, the descriptor this process closes drops the application's locks on `-shm` too, its
 /// dead-man-switch lock included, so the child is the only process left holding the
 /// wal-index: it runs SQLite's recovery, which rebuilds the index with nothing backfilled.
 /// Its first write appends, its checkpoint backfills it, and its second write restarts the
-/// log once (`salt1 + 1`), which the proof would follow: `PinViolated`. With the host in
-/// another process, the host keeps the wal-index alive, the child sees the log fully
+/// log once (`salt1 + 1`), which the proof would follow: `PinViolated`. With the application in
+/// another process, the application keeps the wal-index alive, the child sees the log fully
 /// backfilled, and its first write restarts at once: two restarts (`salt1 + 2`), which no
 /// proof follows, so the snapshot needs no such check.
 const fn abandoned_frames_answers(placement: Placement) -> (u32, bool) {
@@ -678,7 +678,11 @@ fn abandoned_frames<B: Backend>(placement: Placement) {
         reason = "the test opens and closes -shm on purpose, to break the pin's locks"
     )]
     drop(std::fs::File::open(shm_path(s.db())).unwrap());
-    let child = common::spawn("child_process_entry", "host-restarts-the-wal", s.db());
+    let child = common::spawn(
+        "child_process_entry",
+        "application-restarts-the-wal",
+        s.db(),
+    );
     let out = child.wait_with_output().unwrap();
     assert!(
         out.status.success(),
@@ -743,7 +747,7 @@ fn vacuum<B: Backend>(placement: Placement) {
 }
 
 /// SQLite belief: a page size cannot change while the database is in WAL mode; `PRAGMA
-/// page_size` then VACUUM keeps the old size. A change needs the host to leave WAL mode, which
+/// page_size` then VACUUM keeps the old size. A change needs the application to leave WAL mode, which
 /// it can only do with the replicator stopped; once SQLite writes the first WAL header in the
 /// new size the engine halts with the page size the replica holds and the one the database has
 /// (a replica prefix holds one page size, as Go's), and the replica keeps what it had.
@@ -764,9 +768,9 @@ fn page_size_change<B: Backend>(placement: Placement) {
     rig.check().unwrap();
     rig.stop_replicator();
     // PERSIST_WAL would keep the old page size's WAL through the change
-    // (`persist_wal_keeps_a_wal_a_page_size_change_makes_stale`): the host turns it off first
-    // (a host at SQLite's defaults never had it on).
-    rig.host_persist_wal_off().unwrap();
+    // (`persist_wal_keeps_a_wal_a_page_size_change_makes_stale`): the application turns it off first
+    // (an application at SQLite's defaults never had it on).
+    rig.app_persist_wal_off().unwrap();
     rig.exec(
         "PRAGMA journal_mode = DELETE; PRAGMA page_size = 8192; VACUUM; PRAGMA journal_mode = WAL;",
     )
@@ -784,7 +788,7 @@ fn page_size_change<B: Backend>(placement: Placement) {
     rig.check().unwrap();
 }
 
-/// SQLite belief, and a hazard for hosts: `SQLITE_FCNTL_PERSIST_WAL` (which `app_connection`
+/// SQLite belief, and a hazard for applications: `SQLITE_FCNTL_PERSIST_WAL` (which `app_connection`
 /// turns on) keeps the WAL file when the database leaves WAL mode, frames and all, and SQLite
 /// does not discard a WAL whose page size differs from the database's when it comes back. A
 /// page-size change through `journal_mode = DELETE` and VACUUM with the setting on leaves the
@@ -875,7 +879,7 @@ fn database_deleted<B: Backend>(placement: Placement) {
     assert_eq!(after.restored, before.restored);
 }
 
-/// The replicator closing after the host: with `SQLITE_FCNTL_PERSIST_WAL` on its own two
+/// The replicator closing after the application: with `SQLITE_FCNTL_PERSIST_WAL` on its own two
 /// connections, the last close checkpoints but keeps the WAL file, so the next start continues
 /// the same generation with no snapshot. Without it, SQLite deletes the WAL and the next boot
 /// snapshots (`WalMissing`).
@@ -925,8 +929,8 @@ fn replicator_closes_last<B: Backend>(placement: Placement) {
     rig.check().unwrap();
 }
 
-/// Upstream `TestConcurrentOperations`: four host connections on four threads (of the host's
-/// process) commit at once while the actor ticks over them, then the host's outside checkpoints and the actor's own
+/// Upstream `TestConcurrentOperations`: four application connections on four threads (of the application's
+/// process) commit at once while the actor ticks over them, then the application's outside checkpoints and the actor's own
 /// PASSIVE and TRUNCATE run a full cycle; the oracle restores every transaction.
 #[test]
 fn concurrent_writers_and_outside_checkpoints_replicate() {
@@ -963,7 +967,7 @@ fn concurrent<B: Backend>(placement: Placement) {
     assert!(checked.restored > 20, "{checked:?}");
 }
 
-/// Upstream `TestReplica_RestoreAndReplicateAfterDataLoss` (Go issue #781): the host loses its
+/// Upstream `TestReplica_RestoreAndReplicateAfterDataLoss` (Go issue #781): the application loses its
 /// disk, restores the replica into a fresh database, and replication resumes into the same
 /// replica; a second restore holds the writes made after the first.
 #[test]

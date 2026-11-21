@@ -112,9 +112,9 @@ fn check_reports_each_setting_that_is_off() {
     ));
 }
 
-/// The host's pool: every connection set up and checked, and the WAL survives the last close.
+/// The application's pool: every connection set up and checked, and the WAL survives the last close.
 #[test]
-fn host_helpers_on_a_pooled_connection() {
+fn app_helpers_on_a_pooled_connection() {
     let (_dir, path, first) = fresh();
     let mut pool = vec![first];
     pool.extend((0..3).map(|_| app(&path)));
@@ -133,7 +133,7 @@ fn host_helpers_on_a_pooled_connection() {
     drop(pool);
     assert!(
         wal.exists(),
-        "PERSIST_WAL: the last host connection to close kept the WAL"
+        "PERSIST_WAL: the last application connection to close kept the WAL"
     );
 }
 
@@ -317,7 +317,7 @@ fn a_raw_handle_is_set_up_and_stays_open() {
     let handle = unsafe { conn.handle() };
     #[expect(
         unsafe_code,
-        reason = "the test hands over the raw handle a host would"
+        reason = "the test hands over the raw handle an application would"
     )]
     // SAFETY: `handle` is open on this crate's SQLite and used by no other thread during the call.
     let setup = unsafe { app_connection_raw(handle, &database) };

@@ -10,13 +10,13 @@
 //!   staging and replica on `FsStore`s, and the simulator's oracle judging the replica against
 //!   every transaction SQLite committed; and [`Stepper`], the sync engine's steps one at a time
 //!   over a backend, for the cases that need the engine's position and verdicts. Both put the
-//!   host in this process or in a child at SQLite's defaults ([`Placement`]); a test binary
-//!   that uses the child calls [`serve_host`] first in its `child_process_entry` test.
+//!   application in this process or in a child at SQLite's defaults ([`Placement`]); a test binary
+//!   that uses the child calls [`serve_app`] first in its `child_process_entry` test.
 
 pub mod harness;
 pub mod vfs;
 
 pub use harness::{
-    Backend, Placement, Rig, RigConfig, RigError, StepDid, Stepper, rig_actor_config, serve_host,
+    Backend, Placement, Rig, RigConfig, RigError, StepDid, Stepper, rig_actor_config, serve_app,
 };
 pub use vfs::{Effect, Fault, FaultVfs, FileKind, Fired, HANG_LINE, Op, VfsError, seed_prng};

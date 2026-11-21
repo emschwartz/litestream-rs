@@ -224,7 +224,7 @@ fn restore_if_db_not_exists_restores_or_starts_fresh() {
         }
     }
     std::fs::remove_dir_all(dir.path().join(".app.db-litestream")).unwrap();
-    // The host starts once the daemon has restored and pinned the database, and writes.
+    // The application starts once the daemon has restored and pinned the database, and writes.
     let mut daemon = start(&["-restore-if-db-not-exists", db_arg, replica_arg]);
     daemon.wait_for(&["msg=\"restore completed\""]);
     daemon.wait_for(&["msg=\"initialized db\""]);
@@ -237,7 +237,7 @@ fn restore_if_db_not_exists_restores_or_starts_fresh() {
     restores_to(dir.path(), &replica, &app);
 }
 
-/// A database the daemon restored, with no write from the host: the WAL has no header,
+/// A database the daemon restored, with no write from the application: the WAL has no header,
 /// and the first sync is a snapshot that writes one itself. It is staged at once, with no
 /// retry; before, the sync lane logged `retrying` some 70,000 times in four seconds.
 #[test]

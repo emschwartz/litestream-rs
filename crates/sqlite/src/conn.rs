@@ -185,7 +185,7 @@ impl Sqlite {
 
     /// Opens the database at `path`, which must already exist, puts it in WAL mode with
     /// autocheckpoint off and `SQLITE_FCNTL_PERSIST_WAL` on for both connections (so the
-    /// replicator closing after the host keeps the WAL), creates `_litestream_seq` and `_litestream_lock`
+    /// replicator closing after the application keeps the WAL), creates `_litestream_seq` and `_litestream_lock`
     /// (`db.go:1174`, `1180`, so Go and Rust leave the same schema), takes the first read
     /// transaction (the first epoch of a holder no earlier open had) and maps the wal-index. It
     /// returns once the read transaction is held, so nothing can checkpoint past it.
@@ -477,10 +477,10 @@ impl WalSource for Sqlite {
     }
 }
 
-/// Sets up one host connection as replication needs it (PLAN section 6): `SQLITE_FCNTL_PERSIST_WAL`
+/// Sets up one application connection as replication needs it (PLAN section 6): `SQLITE_FCNTL_PERSIST_WAL`
 /// on, so the last connection to close keeps the WAL the replica follows, and
 /// `wal_autocheckpoint = 0`, so only the replicator checkpoints. Call it on every connection a
-/// host opens, pooled ones included.
+/// application opens, pooled ones included.
 ///
 /// # Errors
 /// [`SetupError::PersistWal`] when the connection's database has no file; [`SetupError::Sqlite`]
@@ -533,7 +533,7 @@ impl DatabaseFile {
     }
 }
 
-/// [`app_connection`], after checking that `conn` opens `database`: a host that sets up a
+/// [`app_connection`], after checking that `conn` opens `database`: an application that sets up a
 /// connection to some other file gets an error, not a replicator that never sees its writes.
 ///
 /// # Errors
@@ -551,20 +551,20 @@ pub fn app_connection_for(conn: &Connection, database: &DatabaseFile) -> Result<
     app_connection(conn)
 }
 
-/// [`app_connection_for`] on a raw SQLite handle, for a host on sqlx, diesel or its own FFI.
-/// The handle stays the host's: nothing here closes it.
+/// [`app_connection_for`] on a raw SQLite handle, for an application on sqlx, diesel or its own FFI.
+/// The handle stays the application's: nothing here closes it.
 ///
 /// # Safety
 /// `db` is an open connection, used by no other thread during the call, and opened by the
 /// SQLite library this crate links: a second copy of SQLite in the process does not share its
 /// locks with this one (PLAN section 6). Note that `wal_autocheckpoint` replaces any
-/// `sqlite3_wal_hook` the host set on the connection.
+/// `sqlite3_wal_hook` the application set on the connection.
 ///
 /// # Errors
 /// As [`app_connection_for`]; [`SetupError::Sqlite`] when the handle cannot be wrapped.
 #[expect(
     unsafe_code,
-    reason = "a host's raw handle can only be borrowed through rusqlite's unsafe from_handle"
+    reason = "an application's raw handle can only be borrowed through rusqlite's unsafe from_handle"
 )]
 pub unsafe fn app_connection_raw(
     db: *mut rusqlite::ffi::sqlite3,

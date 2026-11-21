@@ -22,6 +22,7 @@
 #![forbid(unsafe_code)]
 
 mod actor;
+mod app;
 mod checkpoint;
 mod compact;
 #[cfg(any(test, feature = "testing"))]
@@ -29,7 +30,6 @@ pub mod conformance;
 mod created_at;
 mod env;
 mod fault;
-mod host;
 mod inventory;
 mod layout;
 mod ltx_read;
@@ -51,6 +51,9 @@ mod verify;
 pub use actor::{
     Actor, ActorConfig, Degraded, Env, Event, Lane, MaintainedEvent, Phase, Tick, Unfinished,
 };
+pub use app::{
+    AppCheckpoint, AppCheckpointObserver, AppCheckpoints, SQLITE_AUTOCHECKPOINT, Watch, observe,
+};
 pub use checkpoint::{
     CheckpointConfig, CheckpointFailed, CheckpointOutcome, CheckpointState, Checkpointed, Decision,
     Observed, Staged, Why, after_checkpoint, after_sync, checkpoint, decide, next_wake,
@@ -68,9 +71,6 @@ pub use env::{FakeClock, RecordingSleeper, SeededEntropy};
 pub use fault::{
     Backoff, BugSite, Clamped, Fault, ForeignWriter, HaltCause, MAX_BACKOFF, Next, PersistentCause,
     Policy, Response, Responses, SnapshotCause, backoff_wait, policy, retry_wait,
-};
-pub use host::{
-    HostCheckpoint, HostCheckpoints, HostObserver, SQLITE_AUTOCHECKPOINT, Watch, observe,
 };
 pub use inventory::{Inventory, InventoryError, is_snapshot_start};
 pub use layout::{

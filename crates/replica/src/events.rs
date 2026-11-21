@@ -1,5 +1,5 @@
-//! Events, by callback: the replicator thread calls the host's [`EventSink`] once per event,
-//! and [`ChannelSink`] is a ready-made bounded queue for a host that would rather poll.
+//! Events, by callback: the replicator thread calls the application's [`EventSink`] once per event,
+//! and [`ChannelSink`] is a ready-made bounded queue for an application that would rather poll.
 //!
 //! The sink runs on the replicator's thread, so it must not block: a slow sink is a slow
 //! replicator. A panic in it is caught and counted (`Counters::sink_panics`), never fatal.
@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
-use lsr_core::{HaltCause, HostCheckpoint};
+use lsr_core::{AppCheckpoint, HaltCause};
 use lsr_ltx::Txid;
 
 use crate::health::VerifyOutcome;
@@ -18,18 +18,18 @@ use crate::health::VerifyOutcome;
 pub enum Event {
     /// What one tick of the engine did (never `Idle`).
     Engine(lsr_core::Event),
-    /// Someone else checkpointed the database: the host promised not to. `total` counts every
+    /// Someone else checkpointed the database: the application promised not to. `total` counts every
     /// one seen since the start.
     ForeignCheckpoint {
         /// Every one seen so far.
         total: u64,
     },
-    /// The host checkpointed, or its automatic checkpoint is attempting checkpoints that
-    /// cannot run (`Health::host_notice` says what it costs). `total` counts every
+    /// The application checkpointed, or its automatic checkpoint is attempting checkpoints that
+    /// cannot run (`Health::app_notice` says what it costs). `total` counts every
     /// observation since the start.
-    HostCheckpoint {
+    AppCheckpoint {
         /// What was seen.
-        seen: HostCheckpoint,
+        seen: AppCheckpoint,
         /// Every observation so far.
         total: u64,
     },

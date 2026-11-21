@@ -12,14 +12,14 @@
 //!    Then what Go refuses only when it starts a database (`replica` with
 //!    `replicas`, two replicas, a URL in `path`, an unknown replica type) is
 //!    refused here too, before anything runs; and `truncate-page-n` without
-//!    the `host-readers: none` claim.
+//!    the `app-readers: none` claim.
 //! 5. `LOG_LEVEL` over `logging.level`; the snapshot-retention warning.
 
 use std::num::NonZeroU32;
 
 use crate::config::{
-    DbConfig, DbSource, DirSource, ForeignWriterSetting, GoConfig, HostReaders, LogFormat,
-    LogLevel, Logging, ReplicaConfig, ReplicaKind, ResponseSetting, ResponseSettings, RustSettings,
+    AppReaders, DbConfig, DbSource, DirSource, ForeignWriterSetting, GoConfig, LogFormat, LogLevel,
+    Logging, ReplicaConfig, ReplicaKind, ResponseSetting, ResponseSettings, RustSettings,
     S3Settings, Secret, Snapshot, SnapshotOverride, defaults,
 };
 use crate::duration::GoDuration;
@@ -58,7 +58,7 @@ pub(crate) fn build(top: &Fields, env: &dyn Env, walk: &mut Walk) -> GoConfig {
             .unwrap_or(defaults::SNAPSHOT_RETENTION),
     };
     snapshot_checks(snapshot, &KeyPath::root().key("snapshot"), global, walk);
-    if rust.host_readers != HostReaders::None && !dbs.is_empty() {
+    if rust.app_readers != AppReaders::None && !dbs.is_empty() {
         walk.warn(KeyPath::root(), None, WarningKind::NoTruncateWithoutClaim);
     }
     GoConfig {
@@ -244,7 +244,7 @@ fn db(
         );
     }
     let truncate_page_n = fields.int("truncate-page-n").filter(|&n| n != 0);
-    if truncate_page_n.is_some() && rust.host_readers != HostReaders::None {
+    if truncate_page_n.is_some() && rust.app_readers != AppReaders::None {
         walk.problem(
             at.key("truncate-page-n"),
             fields.line("truncate-page-n"),
@@ -514,15 +514,15 @@ fn parse_level(value: &str) -> Option<LogLevel> {
 }
 
 fn rust_settings(fields: Option<&Fields>, walk: &mut Walk) -> RustSettings {
-    let host_readers = match fields.and_then(|f| f.string("host-readers")).as_deref() {
-        None | Some("unknown") => HostReaders::Unknown,
-        Some("none") => HostReaders::None,
+    let app_readers = match fields.and_then(|f| f.string("app-readers")).as_deref() {
+        None | Some("unknown") => AppReaders::Unknown,
+        Some("none") => AppReaders::None,
         Some(other) => {
-            let path = KeyPath::root().key("litestream-rs").key("host-readers");
-            let line = fields.and_then(|f| f.line("host-readers"));
+            let path = KeyPath::root().key("litestream-rs").key("app-readers");
+            let line = fields.and_then(|f| f.line("app-readers"));
             let (value, allowed) = (other.to_owned(), "none, unknown");
             walk.problem(path, line, ProblemKind::UnsupportedValue { value, allowed });
-            HostReaders::Unknown
+            AppReaders::Unknown
         }
     };
     let responses = fields
@@ -530,15 +530,15 @@ fn rust_settings(fields: Option<&Fields>, walk: &mut Walk) -> RustSettings {
         .map(|r| responses(r, walk))
         .unwrap_or_default();
     RustSettings {
-        host_readers,
-        host_autocheckpoint: host_autocheckpoint(fields, walk),
+        app_readers,
+        app_autocheckpoint: app_autocheckpoint(fields, walk),
         responses,
     }
 }
 
-/// `host-autocheckpoint`: frames, or `0` and `off` for none; SQLite's 1000 when absent.
-fn host_autocheckpoint(fields: Option<&Fields>, walk: &mut Walk) -> Option<NonZeroU32> {
-    let Some(text) = fields.and_then(|f| f.string("host-autocheckpoint")) else {
+/// `app-autocheckpoint`: frames, or `0` and `off` for none; SQLite's 1000 when absent.
+fn app_autocheckpoint(fields: Option<&Fields>, walk: &mut Walk) -> Option<NonZeroU32> {
+    let Some(text) = fields.and_then(|f| f.string("app-autocheckpoint")) else {
         return NonZeroU32::new(SQLITE_AUTOCHECKPOINT);
     };
     if text == "off" {
@@ -549,8 +549,8 @@ fn host_autocheckpoint(fields: Option<&Fields>, walk: &mut Walk) -> Option<NonZe
         Err(_) => {
             let path = KeyPath::root()
                 .key("litestream-rs")
-                .key("host-autocheckpoint");
-            let line = fields.and_then(|f| f.line("host-autocheckpoint"));
+                .key("app-autocheckpoint");
+            let line = fields.and_then(|f| f.line("app-autocheckpoint"));
             let allowed = "a page count, 0 or off";
             walk.problem(
                 path,

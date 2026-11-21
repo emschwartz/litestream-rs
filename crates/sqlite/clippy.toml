@@ -14,7 +14,7 @@ too-many-lines-threshold = 70
 #
 # No descriptor on the database or its `-shm` may be opened and closed in this
 # crate: closing any descriptor on a file drops every POSIX lock the process
-# holds on it, the host's SQLite locks included. Pages and the wal-index go
+# holds on it, the application's SQLite locks included. Pages and the wal-index go
 # through SQLite's own file handle. The WAL open is the one reasoned exception
 # (SQLite holds no POSIX lock on `-wal`).
 disallowed-methods = [

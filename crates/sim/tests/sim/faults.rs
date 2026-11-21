@@ -5,8 +5,8 @@ use lsr_core::{Event, HaltCause, Responses};
 use lsr_sim::Op;
 use lsr_sim::run::Seen;
 use lsr_sim::scenario::{
-    self, FaultKind, Scenario, clock_scenarios, fault_reason, fault_scenarios, halt_of,
-    host_scenarios, names_fault, persistent_of, run_scenario, seal_scenarios, window_scenarios,
+    self, FaultKind, Scenario, app_scenarios, clock_scenarios, fault_reason, fault_scenarios,
+    halt_of, names_fault, persistent_of, run_scenario, seal_scenarios, window_scenarios,
 };
 
 fn run(make: fn() -> Scenario) {
@@ -160,7 +160,7 @@ fn every_scenario_is_tested_here() {
     let source = include_str!("faults.rs");
     let mut all: Vec<fn() -> Scenario> = clock_scenarios().to_vec();
     all.extend_from_slice(window_scenarios());
-    all.extend_from_slice(host_scenarios());
+    all.extend_from_slice(app_scenarios());
     all.extend_from_slice(seal_scenarios());
     for kind in FaultKind::ALL {
         all.extend_from_slice(fault_scenarios(kind));
@@ -335,8 +335,8 @@ fn clock_steps_back_10s() {
 }
 
 #[test]
-fn host_autocheckpoints() {
-    run(scenario::host_autocheckpoints);
+fn app_autocheckpoints() {
+    run(scenario::app_autocheckpoints);
 }
 
 #[test]

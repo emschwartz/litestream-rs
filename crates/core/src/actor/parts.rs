@@ -20,9 +20,9 @@ use lsr_wal::CommittedEnd;
 
 use super::ActorConfig;
 use super::state::{Gate, Lanes, Live, Maintain, Phase};
+use crate::app::AppCheckpointObserver;
 use crate::checkpoint::CheckpointState;
 use crate::fault::{HaltCause, SnapshotCause};
-use crate::host::HostObserver;
 use crate::pages::PageTable;
 use crate::position::Position;
 use crate::upload::UploadState;
@@ -103,8 +103,8 @@ pub(super) struct Kept {
     pub(super) live: Live,
     /// An operator asked for a snapshot that has not been staged yet.
     pub(super) snapshot_asked: bool,
-    /// What the host's checkpoints did between reads.
-    pub(super) host: HostObserver,
+    /// What the application's checkpoints did between reads.
+    pub(super) app: AppCheckpointObserver,
 }
 
 impl Kept {
@@ -119,15 +119,15 @@ impl Kept {
             verify_pin: None,
             live: Live::Idle,
             snapshot_asked: false,
-            host: HostObserver::default(),
+            app: AppCheckpointObserver::default(),
         }
     }
 
-    /// What the next engine starts beside, with `host` as its observer of
-    /// the host's checkpoints (whether its last read still stands is the
+    /// What the next engine starts beside, with `app` as its observer of
+    /// the application's checkpoints (whether its last read still stands is the
     /// caller's to say). Every field is named, so a new one does not compile
     /// until it says what a rebuild makes of it.
-    pub(super) fn rebuilt(&self, observer: HostObserver) -> Self {
+    pub(super) fn rebuilt(&self, observer: AppCheckpointObserver) -> Self {
         let Self {
             cfg,
             stop,
@@ -138,7 +138,7 @@ impl Kept {
             verify_pin,
             live,
             snapshot_asked,
-            host: _,
+            app: _,
         } = self;
         Self {
             cfg: cfg.clone(),
@@ -150,7 +150,7 @@ impl Kept {
             verify_pin: *verify_pin,
             live: live.rebuilt(),
             snapshot_asked: *snapshot_asked,
-            host: observer,
+            app: observer,
         }
     }
 

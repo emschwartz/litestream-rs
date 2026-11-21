@@ -14,7 +14,7 @@
 //! What a fresh engine must not forget is the engine's own to keep: the fresh one is built
 //! from the dropped one (`Actor::rebuilt`), which carries over a stop's deadline, an
 //! operator's snapshot request not yet staged, each lane's degraded state and the restore
-//! point retention keeps for them, the scheduled verify's pending read, and the host
+//! point retention keeps for them, the scheduled verify's pending read, and the application
 //! checkpoint counts. This thread keeps only the stop's deadline, to cap its own waits, and
 //! hands the scheduled verify's pin over after every tick.
 //!
@@ -40,7 +40,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use lsr_core::{
-    Actor, Degraded, Did, Env, Event as EngineEvent, HaltCause, HostCheckpoints, Lane, Level,
+    Actor, AppCheckpoints, Degraded, Did, Env, Event as EngineEvent, HaltCause, Lane, Level,
     ObjectStore, PageLimit, PersistentCause, Phase as EnginePhase, Response, Tick, Unfinished,
     WalSource, retry_wait,
 };
@@ -145,8 +145,8 @@ struct Seen {
     counters: Counters,
     /// The foreign checkpoint total last reported as an event.
     foreign_reported: u64,
-    /// The host checkpoint total last reported as an event.
-    host_reported: u64,
+    /// The application checkpoint total last reported as an event.
+    app_reported: u64,
     stopped_reported: bool,
 }
 
@@ -200,7 +200,7 @@ impl Worker {
         runtime: Runtime,
     ) -> Self {
         let mut actor = Actor::new(config.actor());
-        actor.set_host_autocheckpoint(config.host_autocheckpoint);
+        actor.set_app_autocheckpoint(config.app_autocheckpoint);
         let now = runtime.clock.now();
         let scheduled = config.verify_interval.map(|every| {
             let store = Metered::new(
@@ -241,7 +241,7 @@ impl Worker {
         self
     }
 
-    /// The thread's body. Its connections close before the outcome is published, so a host
+    /// The thread's body. Its connections close before the outcome is published, so an application
     /// that waits on the stop finds the database free of this replicator.
     pub(crate) fn run(self) {
         let shared = Arc::clone(&self.shared);
@@ -425,7 +425,7 @@ impl Worker {
             self.emit(&Event::Engine(event));
         }
         self.report_foreign();
-        self.report_host();
+        self.report_app();
         if self.stop.is_some() && progress {
             return Turn::Again;
         }
@@ -487,19 +487,19 @@ impl Worker {
         }
     }
 
-    const fn host_total(&self) -> HostCheckpoints {
-        self.actor.host_checkpoints()
+    const fn app_total(&self) -> AppCheckpoints {
+        self.actor.app_checkpoints()
     }
 
-    fn report_host(&mut self) {
-        let host = self.host_total();
-        if let Some(seen) = host.last
-            && host.total() > self.seen.host_reported
+    fn report_app(&mut self) {
+        let app = self.app_total();
+        if let Some(seen) = app.last
+            && app.total() > self.seen.app_reported
         {
-            self.seen.host_reported = host.total();
-            self.emit(&Event::HostCheckpoint {
+            self.seen.app_reported = app.total();
+            self.emit(&Event::AppCheckpoint {
                 seen,
-                total: host.total(),
+                total: app.total(),
             });
         }
     }
@@ -609,7 +609,7 @@ impl Worker {
     fn publish(&self, parts: &SnapshotParts) {
         let resnapshot = self.actor.pending_snapshot();
         let foreign = self.foreign_total();
-        let host = self.host_total();
+        let app = self.app_total();
         let verification = self
             .scheduled
             .as_ref()
@@ -628,7 +628,7 @@ impl Worker {
             health.db_bytes = parts.db_bytes;
             health.resnapshot = resnapshot;
             health.foreign_checkpoints = foreign;
-            health.host_checkpoints = host;
+            health.app_checkpoints = app;
             health.counters = seen.counters;
             health.verification = verification;
             state.left = parts.left;

@@ -31,8 +31,8 @@ jiff = { version = "1.0", default-features = false, features = ["std"] }
 libc = { version = "0.2.191", default-features = false }
 lz4_flex = { version = "0.14.2", default-features = false, features = ["std", "safe-decode", "safe-encode"] }
 md-5 = { version = "0.11", default-features = false }
-# Recognising a TLS failure from a host's native-tls reqwest client (the S3 store's optional
-# `native-tls` feature); reqwest names the same 0.2 line, so a host using it compiles it already.
+# Recognising a TLS failure from an application's native-tls reqwest client (the S3 store's optional
+# `native-tls` feature); reqwest names the same 0.2 line, so an application using it compiles it already.
 native-tls = { version = "0.2.16", default-features = false }
 percent-encoding = { version = "2", default-features = false, features = ["alloc"] }
 # `rustls-no-provider`: the store hands reqwest a finished rustls config on ring (the provider

@@ -6,7 +6,7 @@
 //! after this layer; everything here is pure and testable without a network.
 //!
 //! The HTTP client is a feature: `ureq` (the default, no async runtime) or
-//! `reqwest`. A host that already builds reqwest depends on this crate with
+//! `reqwest`. An application that already builds reqwest depends on this crate with
 //! `default-features = false, features = ["reqwest"]`, so ureq and its copy of
 //! the TLS stack stay out of its build. Either client, when the store builds
 //! it, trusts the certificate authorities Go's `crypto/x509` trusts (the

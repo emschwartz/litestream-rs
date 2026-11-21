@@ -1,5 +1,5 @@
 //! Child processes for the suite: the test binary runs itself again, with one test selected
-//! and its role in the environment, so a writer that is killed or a host that breaks a lock is
+//! and its role in the environment, so a writer that is killed or an application that breaks a lock is
 //! another process, as in production.
 
 use std::io::{BufRead, BufReader};
