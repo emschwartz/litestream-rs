@@ -91,7 +91,7 @@ use crate::maintain::{
     Due, Job, MAX_DELETE, Maintenance, Outcome, ReadBack, RetentionHold, due, listing_after_upload,
     read_back, run_compact, run_delete,
 };
-use crate::pages::{PageChecksumTable, seeded};
+use crate::pages::{PageChecksumTable, seeded, snapshot_clears};
 use crate::position::{Position, SyncedThrough, WalFileLen};
 use crate::recover::{
     FrameCheck, Miss, NewestStagedFile, PositionSource, Probes, Recovered, WalView, read_header,
@@ -1075,25 +1075,45 @@ impl Actor {
         committed: CommittedRead,
     ) -> Result<Result<Step, Stepped>, Fault> {
         match (self.pending(), self.position()) {
+            // A snapshot that keeps the page table trusts it to describe the
+            // database, which holds only while the WAL still follows the
+            // position: recovery first, and a verdict (a WAL that moved
+            // under the position) replaces the cause with one that clears it.
+            (Some(cause), Some(position)) if !snapshot_clears(&cause) => Ok(self
+                .recovered(wal, reader, committed, &position)?
+                .map(|_| Step::Snapshot {
+                    after: self.snapshot_after(),
+                    prev_timestamp: Some(position.timestamp()),
+                    cause,
+                })),
             (Some(cause), position) => Ok(Ok(Step::Snapshot {
                 after: self.snapshot_after(),
                 prev_timestamp: position.map(|position| position.timestamp()),
                 cause,
             })),
-            (None, Some(position)) => {
-                let probes = Probes::read_against(reader, &position, &committed)?;
-                let view = wal_view(wal, Some(&*reader), committed)?;
-                let source = PositionSource::Running(&position, probes);
-                Ok(step_of(recover(
-                    Some(source),
-                    &view,
-                    self.engine.upload.confirmed(),
-                )))
-            }
+            (None, Some(position)) => self.recovered(wal, reader, committed, &position),
             // Unreachable by construction: no position means a `Course`
             // that names a snapshot's cause. Retried as the WAL having moved.
             (None, None) => Err(Fault::WalMoved),
         }
+    }
+
+    /// What recovery makes of the WAL past a running position.
+    fn recovered<W: WalSource>(
+        &self,
+        wal: &mut W,
+        reader: &mut WalReader<W::Wal>,
+        committed: CommittedRead,
+        position: &Position,
+    ) -> Result<Result<Step, Stepped>, Fault> {
+        let probes = Probes::read_against(reader, position, &committed)?;
+        let view = wal_view(wal, Some(&*reader), committed)?;
+        let source = PositionSource::Running(position, probes);
+        Ok(step_of(recover(
+            Some(source),
+            &view,
+            self.engine.upload.confirmed(),
+        )))
     }
 
     /// The WAL a step reads, with the wal-index read and the read-lock hold it

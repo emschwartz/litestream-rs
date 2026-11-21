@@ -246,3 +246,39 @@ mod page_size {
         }
     }
 }
+
+#[cfg(test)]
+mod requested {
+    use lsr_sim::run::run_ops;
+    use lsr_sim::{Op, Opts, OtherProcessMode, Seed};
+
+    /// The engine's read transaction lapses; another process truncates the
+    /// WAL, the app commits, and another truncate copies that commit into
+    /// the database and resets the WAL again before the engine reads it.
+    /// Then the operator asks for a snapshot. The requested snapshot trusted
+    /// the engine's table of page checksums, which never saw the commit, so
+    /// it read the database page as changed from outside and degraded the
+    /// sync task on DatabasePageMismatch for ever.
+    #[test]
+    fn a_requested_snapshot_after_the_wal_moved_trusts_no_stale_page() {
+        let mut ops = vec![
+            Op::Tick,
+            Op::Tick,
+            Op::Tick,
+            Op::Tick,
+            Op::Tick,
+            Op::OurReader { begin: false },
+            Op::OtherProcessCheckpoint(OtherProcessMode::Truncate),
+            Op::Commit {
+                pages: 1,
+                grow: false,
+            },
+            Op::OtherProcessCheckpoint(OtherProcessMode::Truncate),
+            Op::RequestSnapshot,
+        ];
+        ops.extend(std::iter::repeat_n(Op::Tick, 20));
+        if let Err(failure) = run_ops(Seed::new(0x6ae), &ops, &Opts::default()) {
+            panic!("{}", failure.violation);
+        }
+    }
+}
