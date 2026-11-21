@@ -98,11 +98,13 @@ pub(crate) struct Inner {
     page_size: PageSize,
     /// How many read transactions have been taken; the current one is this many.
     pub(crate) epoch: u64,
-    /// Whether the reader holds its read transaction now.
-    pinned: bool,
-    /// The id of the barrier or write lock the writer connection holds.
-    held: Option<u64>,
-    next_token: u64,
+    /// The id of the last barrier or write lock handed out, and of the last one handed back:
+    /// a lock is outstanding while they differ. Whether the reader is pinned and whether the
+    /// writer is in its transaction are not stored: they are whether SQLite has the
+    /// connection in a transaction (`is_autocommit`), so a ROLLBACK that failed, or a
+    /// transaction SQLite ended itself on an error, cannot leave a flag saying otherwise.
+    issued: u64,
+    returned: u64,
 }
 
 /// Which file a path named: device and inode.
@@ -245,9 +247,8 @@ impl Sqlite {
             wal_id,
             page_size,
             epoch: 1,
-            pinned: true,
-            held: None,
-            next_token: 0,
+            issued: 0,
+            returned: 0,
         };
         Ok(Self {
             inner: Arc::new(Mutex::new(inner)),
@@ -317,21 +318,29 @@ impl Inner {
         Ok(found)
     }
 
+    /// Whether the reader holds its read transaction now.
+    pub(crate) fn pinned(&self) -> bool {
+        !self.reader.is_autocommit()
+    }
+
+    /// Whether the writer holds a barrier or write lock now.
+    fn held(&self) -> bool {
+        !self.writer.is_autocommit()
+    }
+
     /// Takes the read transaction again (a new epoch).
     pub(crate) fn begin_read(&mut self) -> Result<(), rusqlite::Error> {
         begin_read(&self.reader)?;
-        self.pinned = true;
         self.epoch = self.epoch.saturating_add(1);
         Ok(())
     }
 
     /// Ends the read transaction, if one is held.
     pub(crate) fn end_read(&mut self) -> Result<(), SourceError> {
-        if self.pinned {
+        if self.pinned() {
             self.reader
                 .execute_batch("ROLLBACK")
                 .map_err(|e| crate::error::source_error(&e))?;
-            self.pinned = false;
         }
         Ok(())
     }
@@ -339,19 +348,25 @@ impl Inner {
     /// After a retake failed, the next read takes the pin again first: its new epoch tells the
     /// engine the old one lapsed. Every answer is under a read transaction or an error.
     pub(crate) fn ensure_pinned(&mut self) -> Result<(), SourceError> {
-        if self.pinned {
+        if self.pinned() {
             return Ok(());
         }
         self.begin_read().map_err(|_lost| SourceError::ReadTxLost)
     }
 
-    fn take_token(&mut self) -> u64 {
-        self.next_token = self.next_token.saturating_add(1);
-        self.next_token
-    }
-
     /// `BEGIN` then the lock-table insert (Go `db.go:2660`, `2759`), which is rolled back.
+    /// One holder at a time: refused while a lock is outstanding. A transaction still open
+    /// with none outstanding (its ROLLBACK failed after the lock was handed back) is rolled
+    /// back first, since a `BEGIN` inside it would fail on every later call.
     pub(crate) fn begin_writer(&mut self) -> Result<u64, SourceError> {
+        if self.issued != self.returned {
+            return Err(SourceError::Io(io::ErrorKind::InvalidInput));
+        }
+        if self.held() {
+            self.writer
+                .execute_batch("ROLLBACK")
+                .map_err(|e| crate::error::source_error(&e))?;
+        }
         self.writer
             .execute_batch("BEGIN")
             .map_err(|e| crate::error::source_error(&e))?;
@@ -359,16 +374,21 @@ impl Inner {
             drop(self.writer.execute_batch("ROLLBACK"));
             return Err(crate::error::source_error(&err));
         }
-        let token = self.take_token();
-        self.held = Some(token);
-        Ok(token)
+        self.issued = self.issued.saturating_add(1);
+        Ok(self.issued)
     }
 
+    /// Releases the lock `token` names: only the outstanding one. The token is spent whether
+    /// or not the ROLLBACK succeeds; a transaction it leaves open is the next lock's to end.
     pub(crate) fn end_writer(&mut self, token: u64) -> Result<(), SourceError> {
-        if self.held != Some(token) {
+        if token != self.issued || token == self.returned {
             return Err(SourceError::Io(io::ErrorKind::InvalidInput));
         }
-        self.held = None;
+        self.returned = token;
+        if !self.held() {
+            // SQLite already ended the transaction (an error rolls it back).
+            return Ok(());
+        }
         self.writer
             .execute_batch("ROLLBACK")
             .map_err(|e| crate::error::source_error(&e))
@@ -559,6 +579,69 @@ pub fn check_app_connection(conn: &Connection) -> Result<(), SetupError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn opened(dir: &Path) -> Sqlite {
+        let db = dir.join("app.db");
+        let conn = Connection::open(&db).unwrap();
+        conn.query_row("PRAGMA journal_mode = wal", [], |_row| Ok(()))
+            .unwrap();
+        conn.execute_batch("CREATE TABLE t(x)").unwrap();
+        drop(conn);
+        Sqlite::open(&db).unwrap()
+    }
+
+    /// A ROLLBACK that fails leaves the writer inside its transaction. When that was tracked
+    /// by hand, the lock counted as released and every later `begin_writer` failed on `BEGIN`
+    /// inside the open transaction. The fault VFS cannot fail a ROLLBACK (its unlocks never
+    /// fail, and rolling back an unspilled WAL transaction does no other file I/O), so the
+    /// test opens the transaction directly: the state such a failure leaves.
+    #[test]
+    fn a_writer_left_in_a_transaction_does_not_wedge_later_locks() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let sqlite = opened(dir.path());
+        let mut inner = sqlite.lock();
+        inner.writer.execute_batch("BEGIN").unwrap();
+        let token = inner.begin_writer().unwrap();
+        assert!(inner.held());
+        assert_eq!(
+            inner.begin_writer(),
+            Err(SourceError::Io(io::ErrorKind::InvalidInput)),
+            "one holder at a time"
+        );
+        inner.end_writer(token).unwrap();
+        assert!(!inner.held());
+        let again = inner.begin_writer().unwrap();
+        assert_eq!(
+            inner.end_writer(token),
+            Err(SourceError::Io(io::ErrorKind::InvalidInput)),
+            "a stale token releases nothing"
+        );
+        inner.end_writer(again).unwrap();
+        assert_eq!(
+            inner.end_writer(again),
+            Err(SourceError::Io(io::ErrorKind::InvalidInput)),
+            "a lock is released once"
+        );
+    }
+
+    /// SQLite can end a read transaction itself (an I/O error rolls it back). The pin is
+    /// whatever SQLite says, so the next read takes it again, in a new epoch, instead of
+    /// answering outside any read transaction.
+    #[test]
+    fn a_read_transaction_sqlite_ended_is_taken_again() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let sqlite = opened(dir.path());
+        let mut inner = sqlite.lock();
+        assert!(inner.pinned());
+        let epoch = inner.epoch;
+        inner.reader.execute_batch("ROLLBACK").unwrap();
+        inner.ensure_pinned().unwrap();
+        assert!(inner.pinned());
+        assert_eq!(inner.epoch, epoch.saturating_add(1));
+        inner.end_read().unwrap();
+        assert!(!inner.pinned());
+        inner.end_read().unwrap();
+    }
 
     #[test]
     fn a_page_size_sqlite_does_not_allow_is_refused() {
