@@ -79,7 +79,7 @@ fn next_verified(events: &EventReceiver) -> (Txid, VerifyOutcome) {
 fn advance(replicator: &Replicator, clock: &lsr_replica::FakeClockHandle, by: Duration) {
     clock.advance(by);
     let now = clock.now();
-    wait(replicator, |h| h.observed_at >= now);
+    wait(replicator, |h| h.reported_at >= now);
 }
 
 /// Rewrites one page of the newest level-0 file on the replica, through the store, as a

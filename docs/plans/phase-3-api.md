@@ -195,7 +195,7 @@ Not configurable: the SQLite busy timeout (zero, so the engine's own policy deci
 pub struct Health {
     /// When the thread last wrote this; a stale value means the thread is stuck
     /// inside a blocking call.
-    pub observed_at: Timestamp,
+    pub reported_at: Timestamp,
     pub phase: Phase,                         // Booting, Running, Draining, Stopped(StopCause), Gone(Gone)
     pub degraded: [Option<Degraded>; 5],      // per task: sync, checkpoint, upload, prune, maintenance
     pub synced: Option<(Txid, Timestamp)>,    // newest staged locally

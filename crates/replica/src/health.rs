@@ -141,7 +141,7 @@ pub struct Counters {
 pub struct Health {
     /// When the thread last wrote this; a stale value means the thread is stuck inside a
     /// blocking call (one store request can take up to its own deadline).
-    pub observed_at: Timestamp,
+    pub reported_at: Timestamp,
     /// What it is doing.
     pub phase: Phase,
     /// Per task, in [`Task::ALL`] order (sync, checkpoint, upload, prune, maintenance): the
@@ -255,7 +255,7 @@ impl Health {
     /// The state before the thread has written anything.
     pub(crate) const fn new(at: Timestamp) -> Self {
         Self {
-            observed_at: at,
+            reported_at: at,
             phase: Phase::Booting,
             degraded: [None; 5],
             synced: None,

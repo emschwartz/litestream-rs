@@ -436,7 +436,7 @@ fn a_reader_guard_holds_off_truncate() {
     for _ in 0..5 {
         clock.advance(POLL);
         let now = clock.now();
-        wait(&replicator, |h| h.observed_at >= now);
+        wait(&replicator, |h| h.reported_at >= now);
         seen.extend(events.drain());
     }
     let busy = seen.iter().any(|event| {
@@ -646,7 +646,7 @@ fn an_idle_replicator_keeps_its_health_current() {
     for _ in 0..5 {
         clock.advance(POLL);
         let now = clock.now();
-        let health = wait(&replicator, |h| h.observed_at >= now);
+        let health = wait(&replicator, |h| h.reported_at >= now);
         assert_eq!(health.synced, settled.synced);
         assert_eq!(health.counters.uploads, settled.counters.uploads);
         assert_eq!(health.counters.syncs, settled.counters.syncs);
