@@ -305,7 +305,7 @@ pub(crate) const DEFAULT_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN.saturatin
 /// parts per upload ID, acknowledged by Cloudflare in 2022 and never documented
 /// as lifted) is a default's worth of caution, not a rule the user may not test.
 /// Tigris has no special case: it documents no limit and its own docs use 8
-/// concurrent parts, so it gets [`DEFAULT_CONCURRENCY`] (Go's 2 there was a
+/// concurrent parts, so it gets `DEFAULT_CONCURRENCY` (Go's 2 there was a
 /// conservative default with no measured limit).
 pub(crate) const R2_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(1);
 
@@ -477,8 +477,8 @@ impl S3Config {
     }
 
     /// How many parts of one multipart upload may be in flight: the
-    /// configured value, else [`R2_CONCURRENCY`] on R2, else
-    /// [`DEFAULT_CONCURRENCY`]. Decided here, not when set, so the provider
+    /// configured value, else `R2_CONCURRENCY` on R2, else
+    /// `DEFAULT_CONCURRENCY`. Decided here, not when set, so the provider
     /// may change after.
     #[must_use]
     pub fn concurrency(&self) -> NonZeroUsize {

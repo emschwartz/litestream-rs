@@ -549,7 +549,7 @@ pub enum CredentialError {
         /// The line, counting from 1.
         line: usize,
     },
-    /// A shared file is larger than [`MAX_SHARED_FILE_BYTES`].
+    /// A shared file is larger than `MAX_SHARED_FILE_BYTES`.
     #[error("{} is larger than {limit} bytes", path.display())]
     FileTooLarge {
         /// The file.

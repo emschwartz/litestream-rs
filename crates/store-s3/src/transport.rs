@@ -180,7 +180,7 @@ pub(crate) const BATCH_STACK: usize = 256 * 1024;
 type Slots = Vec<Option<Result<HttpResponse, TransportError>>>;
 
 /// [`Transport::send_many`] for a blocking transport: the calling thread and
-/// up to `limit - 1` scoped threads (named `s3-batch`, [`BATCH_STACK`] each)
+/// up to `limit - 1` scoped threads (named `s3-batch`, `BATCH_STACK` each)
 /// take requests from one queue in order, so at most `limit` are in flight.
 /// Every thread is joined before this returns. A thread the OS refuses only
 /// narrows the batch, since the calling thread works the queue too. A request

@@ -552,7 +552,7 @@ impl RequestBuilder {
         Ok(Self::finish(Method::Delete, signed, Vec::new()))
     }
 
-    /// Deletes up to [`MAX_DELETE_KEYS`] objects in quiet mode, `Content-MD5`
+    /// Deletes up to `MAX_DELETE_KEYS` objects in quiet mode, `Content-MD5`
     /// over the XML body (rc.go:921-954, :1066-1105).
     ///
     /// # Errors
