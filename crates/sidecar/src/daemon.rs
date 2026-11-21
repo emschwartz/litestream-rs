@@ -18,7 +18,9 @@
 //! asks every replicator to stop within what is left of one deadline,
 //! `shutdown-sync-timeout` from that moment: all drain at once, so N databases take
 //! the budget once, not N times (Go closes them in turn). A second signal cuts every
-//! drain to nothing. Each database's outcome is one log line.
+//! drain to nothing, and the cut is a state, not a one-off action: a database the waiter
+//! starts after it, and every drain the stop asks for after it, gets no time either.
+//! Each database's outcome is one log line.
 //!
 //! **Health.** Every database is on the [`Board`] from its first start attempt, so
 //! `/healthz` and `/metrics` see it waiting, failed or running, and still see each
@@ -123,19 +125,42 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Every replicator started so far, for a second signal to cut.
+/// Every replicator started so far, and whether a second signal has cut the drains.
 #[derive(Clone, Debug, Default)]
-pub struct Started(Arc<Mutex<Vec<Replicator>>>);
+pub struct Started(Arc<Mutex<Drains>>);
+
+#[derive(Debug, Default)]
+struct Drains {
+    replicators: Vec<Replicator>,
+    cut: bool,
+}
 
 impl Started {
+    /// Keeps `replicator` for a cut; one started after the cut is stopped with no time.
     fn add(&self, replicator: &Replicator) {
-        lock(&self.0).push(replicator.clone());
+        let mut drains = lock(&self.0);
+        if drains.cut {
+            drop(replicator.stop(Duration::ZERO));
+        }
+        drains.replicators.push(replicator.clone());
     }
 
-    /// Cuts every drain to nothing.
+    /// Cuts every drain to nothing, now and from now on.
     pub fn cut(&self) {
-        for replicator in lock(&self.0).iter() {
+        let mut drains = lock(&self.0);
+        drains.cut = true;
+        for replicator in &drains.replicators {
             drop(replicator.stop(Duration::ZERO));
+        }
+    }
+
+    /// The time a drain gets: `left`, or nothing once cut.
+    #[must_use]
+    pub fn budget(&self, left: Duration) -> Duration {
+        if lock(&self.0).cut {
+            Duration::ZERO
+        } else {
+            left
         }
     }
 }
@@ -406,7 +431,8 @@ impl Daemon {
         self.clock.now()
     }
 
-    /// What is left of the shutdown budget begun at `begun`.
+    /// What is left of the shutdown budget begun at `begun`; nothing once a second signal
+    /// has cut the drains.
     #[must_use]
     pub fn left(&self, begun: lsr_ltx::Timestamp) -> Duration {
         let spent = self
@@ -415,7 +441,7 @@ impl Daemon {
             .unix_millis()
             .saturating_sub(begun.unix_millis());
         let spent = Duration::from_millis(u64::try_from(spent).unwrap_or(0));
-        self.grace.saturating_sub(spent)
+        self.started.budget(self.grace.saturating_sub(spent))
     }
 
     fn ended(&self, path: &Path, end: &End) {
@@ -512,5 +538,40 @@ fn open_store(replica: &ReplicaPlan) -> Result<Arc<dyn DynStore>, String> {
                 .map_err(|e| e.to_string())?;
             Ok(Arc::new(store))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use lsr_config::{Expand, GoConfig, ProcessEnv};
+
+    use super::*;
+    use crate::logging::Logger;
+
+    fn daemon(started: &Started) -> Daemon {
+        let text = "shutdown-sync-timeout: 30s\ndbs: []\n";
+        let loaded = GoConfig::parse(text, Expand::Off, &ProcessEnv).unwrap();
+        let plan = lsr_config::plan(&loaded.config, &ProcessEnv).unwrap();
+        let log = Arc::new(Logger::to(
+            lsr_config::LogLevel::Error,
+            lsr_config::LogFormat::Text,
+            Runtime::system().clock,
+            Box::new(io::sink()),
+        ));
+        Daemon::start(&plan, false, log, started.clone(), Board::default())
+    }
+
+    /// A cut is a state: after a second signal, every drain the stop asks for gets nothing,
+    /// including one for a database started after the signal, not the whole deadline.
+    #[test]
+    fn a_cut_leaves_no_time_for_any_later_drain() {
+        let started = Started::default();
+        let daemon = daemon(&started);
+        let begun = daemon.now();
+        assert!(daemon.left(begun) > Duration::from_secs(29));
+        started.cut();
+        assert_eq!(daemon.left(begun), Duration::ZERO);
+        assert_eq!(started.budget(Duration::from_secs(30)), Duration::ZERO);
+        assert_eq!(daemon.left(daemon.now()), Duration::ZERO);
     }
 }
