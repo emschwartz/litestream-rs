@@ -1638,7 +1638,7 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestChecksum_UnmarshalJSON/Map" = { reason = "@go-json-methods" }
 "TestChecksum_UnmarshalJSON/Null" = { reason = "@go-json-methods" }
 "TestChecksum_UnmarshalJSON/OK" = { reason = "@go-json-methods" }
-"TestFormatTimestamp" = { counterpart = ["lsr-ltx::ids::tests::known_instants_parse_and_print", "lsr-ltx::ids::tests::every_millisecond_round_trips"] }
+"TestFormatTimestamp" = { counterpart = ["lsr-ltx::time::tests::known_instants_parse_and_print", "lsr-ltx::time::tests::every_millisecond_round_trips"] }
 "TestHeader_MarshalBinary" = { counterpart = "lsr-ltx::header::tests::header_round_trips" }
 "TestHeader_UnmarshalBinary" = { counterpart = "lsr-ltx::header::tests::header_round_trips" }
 "TestHeader_UnmarshalBinary/ErrInvalidFile" = { counterpart = "lsr-ltx::header::tests::bad_magic_is_rejected" }
@@ -1687,10 +1687,10 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestParsePos/OK" = { reason = "@go-ltx-pos" }
 "TestParseTXID" = { counterpart = "lsr-ltx::ids::tests::parse_round_trips_the_bounds" }
 "TestParseTXID/ErrInvalidFormat" = { counterpart = "lsr-ltx::ids::tests::parse_rejects_everything_go_never_writes" }
-"TestParseTXID/ErrTooLong" = { counterpart = "lsr-ltx::ids::tests::every_parse_error_is_produced" }
-"TestParseTXID/ErrTooShort" = { counterpart = "lsr-ltx::ids::tests::every_parse_error_is_produced" }
+"TestParseTXID/ErrTooLong" = { counterpart = "lsr-ltx::time::tests::every_parse_error_is_produced" }
+"TestParseTXID/ErrTooShort" = { counterpart = "lsr-ltx::time::tests::every_parse_error_is_produced" }
 "TestParseTXID/OK" = { counterpart = "lsr-ltx::ids::tests::parse_round_trips_the_bounds" }
-"TestParseTimestamp" = { counterpart = ["lsr-ltx::ids::tests::offsets_fractions_and_truncation", "lsr-ltx::ids::tests::known_instants_parse_and_print"] }
+"TestParseTimestamp" = { counterpart = ["lsr-ltx::time::tests::offsets_fractions_and_truncation", "lsr-ltx::time::tests::known_instants_parse_and_print"] }
 "TestPeekHeader" = { counterpart = "lsr-ltx::ltx::pins::decoder_header_appears_with_the_header_event_and_stays" }
 "TestPeekHeader/EOF" = { counterpart = "lsr-ltx::ltx::errors::truncated_in_every_section" }
 "TestPeekHeader/ErrUnexpectedEOF" = { counterpart = "lsr-ltx::ltx::errors::truncated_in_every_section" }
