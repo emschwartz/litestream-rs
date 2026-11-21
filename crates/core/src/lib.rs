@@ -71,9 +71,12 @@ pub use created_at::{
 pub use env::{Clock, Entropy, Sleeper};
 #[cfg(any(test, feature = "testing"))]
 pub use env::{FakeClock, RecordingSleeper, SeededEntropy};
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub use fault::reporting_bugs;
 pub use fault::{
     Backoff, BugSite, Clamped, Fault, MAX_BACKOFF, Next, OtherWriter, PersistentCause, Policy,
-    Response, Responses, SnapshotCause, StopCause, backoff_wait, policy, retry_wait,
+    Response, Responses, SnapshotCause, StopCause, VERIFY, backoff_wait, policy, retry_wait,
 };
 pub use inventory::{Inventory, InventoryError, is_snapshot_start};
 pub use layout::{

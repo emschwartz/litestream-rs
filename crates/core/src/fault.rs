@@ -172,6 +172,71 @@ pub enum BugSite {
     PageMap,
 }
 
+impl BugSite {
+    /// The fault to report for a condition the code rules out.
+    ///
+    /// Release builds never panic here: the result is [`Fault::Bug`], which
+    /// rebuilds the engine instead of killing the host (`panic = "abort"` hosts
+    /// included). Debug and test builds panic at the caller's line, so the
+    /// simulator and fuzzers stop on the first bad step rather than on a
+    /// restore diff many operations later.
+    #[must_use]
+    #[track_caller]
+    #[cfg_attr(
+        debug_assertions,
+        expect(clippy::panic, reason = "the debug half of the invariant tier")
+    )]
+    pub fn hit(self) -> Fault {
+        #[cfg(debug_assertions)]
+        if PANIC_ON_BUG.with(std::cell::Cell::get) {
+            panic!("invariant violated: {self:?}");
+        }
+        Fault::Bug(self)
+    }
+}
+
+#[cfg(debug_assertions)]
+thread_local! {
+    static PANIC_ON_BUG: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// Runs `f` with [`BugSite::hit`] reporting instead of panicking, on this
+/// thread, so a test can provoke a bug deliberately and read the fault.
+/// A no-op wrapper in release builds, where `hit` never panics.
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub fn reporting_bugs<R>(f: impl FnOnce() -> R) -> R {
+    #[cfg(debug_assertions)]
+    let before = PANIC_ON_BUG.with(|flag| flag.replace(false));
+    let out = f();
+    #[cfg(debug_assertions)]
+    PANIC_ON_BUG.with(|flag| flag.set(before));
+    out
+}
+
+/// Whether the `verify` feature is on: expensive checks run only when it is.
+/// A const rather than a `cfg` at each site, so the check always compiles.
+pub const VERIFY: bool = cfg!(feature = "verify");
+
+/// Returns `Err(BugSite::hit(site))` from the enclosing function when `cond`
+/// is false: a panic in debug and test builds, [`Fault::Bug`] in release.
+///
+/// For invariants whose violation release must report. A cheap pre or
+/// postcondition that release may ignore is a `debug_assert!`; a check too
+/// expensive for release goes behind [`VERIFY`].
+///
+/// ```ignore
+/// invariant!(map.commit() == Some(commit), BugSite::SnapshotScan);
+/// ```
+#[macro_export]
+macro_rules! invariant {
+    ($cond:expr, $site:expr $(,)?) => {
+        if !$cond {
+            return ::core::result::Result::Err($crate::BugSite::hit($site));
+        }
+    };
+}
+
 /// Why a snapshot is taken instead of continuing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SnapshotCause {

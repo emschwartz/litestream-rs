@@ -778,3 +778,41 @@ fn fault_rs_has_no_wildcard_arm() {
 fn the_longest_backoff_is_five_minutes() {
     assert_eq!(MAX_BACKOFF, Duration::from_secs(300));
 }
+
+/// Debug and test builds stop at the violated invariant's line.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "invariant violated: DecoderStalled")]
+fn violated_invariant_panics_in_debug() {
+    fn check(used: usize) -> Result<(), Fault> {
+        crate::invariant!(used != 0, BugSite::DecoderStalled);
+        Ok(())
+    }
+    check(0).unwrap();
+}
+
+/// A test that provokes a bug on purpose reads it as a fault instead.
+#[test]
+fn reporting_bugs_turns_the_panic_into_the_fault() {
+    fn check(used: usize) -> Result<(), Fault> {
+        crate::invariant!(used != 0, BugSite::DecoderStalled);
+        Ok(())
+    }
+    assert_eq!(check(1), Ok(()));
+    assert_eq!(
+        crate::reporting_bugs(|| check(0)),
+        Err(Fault::Bug(BugSite::DecoderStalled))
+    );
+}
+
+/// Run with `cargo test -p lsr-core --release`: release never panics, it reports.
+#[cfg(not(debug_assertions))]
+#[test]
+fn violated_invariant_is_a_bug_fault_in_release() {
+    fn check(used: usize) -> Result<(), Fault> {
+        crate::invariant!(used != 0, BugSite::DecoderStalled);
+        Ok(())
+    }
+    assert_eq!(check(0), Err(Fault::Bug(BugSite::DecoderStalled)));
+    assert_eq!(BugSite::Encode.hit(), Fault::Bug(BugSite::Encode));
+}

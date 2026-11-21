@@ -505,7 +505,7 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_, 
             Synced::Wrote {
                 end: StepEnd::Limited(_),
                 ..
-            } => return Err(Fault::Bug(BugSite::CappedCheckpointStep)),
+            } => return Err(BugSite::CappedCheckpointStep.hit()),
         };
         self.good = match through.confirm(&*self.wal) {
             Ok(through) => Reached::Through(through),
