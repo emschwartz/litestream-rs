@@ -207,6 +207,8 @@ fn spill_rollback_and_total_methods() {
     assert_eq!(scan_committed(&mut db.source()), 1);
     assert_eq!(db.shrink(4), None);
     db.shrink(2).unwrap();
+    // The committed read took our read transaction, which pins the backfill.
+    assert!(db.our_reader_end());
     db.other_process_checkpoint(OtherProcessMode::Passive)
         .unwrap();
     assert_eq!(db.pages().page_count(), Ok(lsr_ltx::DbPages::new(2)));

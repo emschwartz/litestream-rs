@@ -1395,6 +1395,10 @@ impl WalSource for SimSource {
     fn committed(&mut self) -> Result<CommittedRead, SourceError> {
         let mut state = lock(&self.state);
         state.faults.take(SourceOp::Committed)?;
+        // The real source retakes a lapsed read transaction before it reads
+        // (`ensure_read_lock_held`), so every answer belongs to a hold that is
+        // still held; the retake is a new hold.
+        state.begin(Conn::Ours);
         if mem::take(&mut state.faults.shm_busy) {
             return Err(SourceError::Busy);
         }
