@@ -38,7 +38,7 @@ Build an in-process Rust library that replicates a WAL-mode SQLite database to S
 
 ## 3. Architecture
 
-A Cargo workspace (decision D1: its own repository). Each crate is `crates/<name>`, package `lsr-<name>` (a working prefix); the README has the same map in short.
+A Cargo workspace (decision D1: its own repository). Each crate is `crates/<name>`, package `lsr-<name>` (a working prefix); this table is the one crate map (the README links here).
 
 | Crate | Owns | Rules |
 |---|---|---|
@@ -48,8 +48,8 @@ A Cargo workspace (decision D1: its own repository). Each crate is `crates/<name
 | `store-s3` | `ObjectStore` on `rusty-s3` behind a `Transport` trait: blocking `ureq` by default (no runtime), `reqwest` as a feature for applications that already have it: PUT, multipart (an abandoned upload's id goes on a bounded list and is aborted on next use; the bucket's lifecycle rule is the backstop), ranged GET, paged LIST, batch DELETE; independent requests go out as one batch with a limit per kind, per kind: multipart parts by `concurrency` (Go's key; default 5, R2 2 unless set), creation-time HEADs 16 (Go allows 50, an unmeasured figure), reads ahead and listing levels 8 (Go does neither side by side), on scoped threads under ureq | Own retry classifier (408, 429, 5xx, connection reset retryable; jittered backoff); payload checksum policy explicit, never an SDK default; a failed LIST page is an error, never a short listing |
 | `store-fs` | `ObjectStore` on a directory | Used by tests and by the Go cross-restore harness |
 | `local` | The restore sink: a scratch file beside the target, the SQLite check, publish by hard link | Never overwrites or deletes a file it does not own; a failed publish says whether the target is visible |
-| `sqlite` | `WalSource`, `PageSource`, `Checkpointer` on `rusqlite` plus raw FFI; the per-database actor thread | The only crate with `unsafe`; each site carries `#[expect(unsafe_code, reason = …)]` |
-| `replica` | Public API: `Replicator::start`, `final_sync(deadline)`, `health()`, `restore()`, `verify()` | Async facade over the actor; drop does no I/O |
+| `sqlite` | `WalSource`, `PageSource`, `Checkpointer` on `rusqlite` plus raw FFI | The only crate with `unsafe`; each site carries `#[expect(unsafe_code, reason = …)]` |
+| `replica` | Public API: `Replicator::start`, `final_sync(deadline)`, `health()`, `restore()`, `verify()` | Owns the per-database actor thread and the async facade over it; drop does no I/O |
 | `config` | Go's `litestream.yml` read as Go 041a8c3 reads it, mapped onto replicators; the one `s3://` URL parser | A key Go reads either works, is refused, or warns; unknown keys refused |
 | `sidecar` | The `replicate` daemon (phase 4): Go's command line and config, many databases in one process, signals, `-exec`, `/metrics`, `/healthz` | Opens no database file itself; refuses what it would run differently from Go |
 | `sim` | In-memory store with a fault schedule, synthetic WAL source, model oracle, seeded scenario generator | Dev only |
