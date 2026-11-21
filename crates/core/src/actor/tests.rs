@@ -738,7 +738,7 @@ fn a_second_shutdown_keeps_the_earlier_deadline() {
 
 /// A backfill the actor did not run is counted; its own checkpoints are not.
 #[test]
-fn a_app_checkpoint_is_counted_and_its_own_is_not() {
+fn an_app_checkpoint_is_counted_and_its_own_is_not() {
     let (mut rig, mut actor) = caught_up();
     rig.commit(2);
     rig.settle(&mut actor, T0 + 10);

@@ -497,7 +497,7 @@ fn app_writes(
 /// run), and its next attempts copy nothing more; on read mark 0 its attempts copy nothing at all
 /// and show only as the WAL growing past the threshold with nothing backfilled.
 #[test]
-fn a_app_at_the_defaults_raises_the_notice_on_either_read_mark() {
+fn an_app_at_the_defaults_raises_the_notice_on_either_read_mark() {
     let default = Some(SQLITE_AUTOCHECKPOINT);
     let dir = TempDir::new().unwrap();
     let (db, mut pin, mut observers) = pinned(&dir, Placement::AboveMarkZero, &[default]);
@@ -540,7 +540,7 @@ fn a_app_at_the_defaults_raises_the_notice_on_either_read_mark() {
 /// attempts fail, so only the threshold the observer is told tells them apart: told `None`,
 /// it raises nothing; left at SQLite's default, it infers the attempts it cannot see.
 #[test]
-fn a_app_at_wal_autocheckpoint_0_raises_none() {
+fn an_app_at_wal_autocheckpoint_0_raises_none() {
     let default = Some(SQLITE_AUTOCHECKPOINT);
     let dir = TempDir::new().unwrap();
     let (db, mut pin, mut observers) = pinned(&dir, Placement::AboveMarkZero, &[default, None]);

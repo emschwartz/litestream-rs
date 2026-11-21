@@ -289,11 +289,6 @@ impl EventSink for DbEvents {
                 Some(line) => line,
                 None => return,
             },
-            Event::ForeignCheckpoint { total } => (
-                LogLevel::Warn,
-                "database checkpointed by another process",
-                vec![("total", (*total).into())],
-            ),
             Event::AppCheckpoint { seen, total } => (
                 LogLevel::Warn,
                 "the application checkpointed the database",

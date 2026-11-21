@@ -143,8 +143,6 @@ impl Progress {
 #[derive(Debug, Default)]
 struct Seen {
     counters: Counters,
-    /// The application checkpoint total that ran, last reported as an event.
-    app_ran_reported: u64,
     /// The application checkpoint total last reported as an event.
     app_reported: u64,
     stopped_reported: bool,
@@ -424,7 +422,6 @@ impl Worker {
         if !idle {
             self.emit(&Event::Engine(event));
         }
-        self.report_app_ran();
         self.report_app();
         if self.stop.is_some() && progress {
             return Turn::Again;
@@ -477,14 +474,6 @@ impl Worker {
 
     const fn app_ran_total(&self) -> u64 {
         self.actor.app_checkpoints_ran()
-    }
-
-    fn report_app_ran(&mut self) {
-        let total = self.app_ran_total();
-        if total > self.seen.app_ran_reported {
-            self.seen.app_ran_reported = total;
-            self.emit(&Event::ForeignCheckpoint { total });
-        }
     }
 
     const fn app_total(&self) -> AppCheckpoints {
