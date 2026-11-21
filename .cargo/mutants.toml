@@ -1,0 +1,14 @@
+# cargo-mutants configuration (`just mutants <crate>`; see docs/mutants.md).
+#
+# Test-only helper code is mutated only where product correctness depends on it.
+# `mem.rs` (the in-memory store, public and the simulator's reference model) and
+# `conformance.rs` (the checks every real store must pass) stay in. The scripted
+# WAL and database fakes and the in-memory restore sink are left out: a mutant
+# there weakens a test rather than the engine, and they are checked another way
+# (crates/compat/tests/live_matches_sim.rs compares the simulator's SQLite model
+# with real SQLite).
+exclude_globs = [
+    "crates/core/src/source/fake.rs",
+    "crates/core/src/source/fake/**",
+    "crates/core/src/restore/mem_sink.rs",
+]
