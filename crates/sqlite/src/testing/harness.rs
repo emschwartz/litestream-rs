@@ -414,7 +414,9 @@ pub struct Rig<B: Backend> {
     acked: Acked,
     wal_syncs: u64,
     staging_seen: usize,
-    staged_max: Option<Txid>,
+    /// The level-0 files in staging now, by the transaction each ends at: a settle waits for
+    /// the replica to acknowledge the newest.
+    staged: std::collections::BTreeSet<Txid>,
     ticks: Vec<Tick>,
     /// Each tick's window calls, per kind of file and call, counted after it.
     calls: Vec<BTreeMap<(FileKind, Op), u32>>,
@@ -472,7 +474,7 @@ impl<B: Backend> Rig<B> {
             model,
             acked: Acked::new(),
             staging_seen: 0,
-            staged_max: None,
+            staged: std::collections::BTreeSet::new(),
             ticks: Vec::new(),
             calls: Vec::new(),
             faults: Vec::new(),
@@ -758,6 +760,11 @@ impl<B: Backend> Rig<B> {
     fn note_staged(&mut self, newest_commit: Option<CommitId>, at: usize) {
         let events = self.staging_log.events();
         for event in events.iter().skip(self.staging_seen) {
+            if let RecorderEvent::Delete { keys, .. } = event {
+                for key in keys.iter().filter(|key| key.level().get() == 0) {
+                    self.staged.remove(&key.range().max());
+                }
+            }
             let RecorderEvent::Put {
                 key,
                 header: Some(_),
@@ -771,7 +778,7 @@ impl<B: Backend> Rig<B> {
                 continue;
             }
             let max = key.range().max();
-            self.staged_max = self.staged_max.max(Some(max));
+            self.staged.insert(max);
             let Some(model) = self.model.as_mut() else {
                 continue;
             };
@@ -816,7 +823,7 @@ impl<B: Backend> Rig<B> {
                 Tick::Ran {
                     event: Event::Idle,
                     next,
-                } if !matches!(next, Next::Now) && self.acked.highest() >= self.staged_max => {
+                } if !matches!(next, Next::Now) && self.acked.highest() >= self.staged.last().copied() => {
                     return Ok(());
                 }
                 Tick::Ran {
@@ -1067,7 +1074,7 @@ impl<B: Backend> Rig<B> {
         // The acknowledgements start again, and so does what settling waits for: a boot that
         // continues (the WAL kept everything staged) has nothing new to upload.
         self.acked.note_rewound();
-        self.staged_max = None;
+        self.staged.clear();
         self.wal_syncs = self.vfs.syncs(FileKind::Wal);
         self.restart()
     }
