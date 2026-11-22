@@ -197,3 +197,8 @@ ledger-fresh:
 ledger:
     ./scripts/upstream-tests.sh > docs/ledger/upstream-tests.txt
     cargo nextest list --workspace --all-features --locked --run-ignored all --message-format oneline --color never > docs/ledger/rust-tests.txt
+
+# Bounded model checking of the key-target planner with Kani (cargo install --locked kani-verifier;
+# cargo kani setup). Proofs live in crates/core/src/kani_proofs.rs. Minutes; not part of check.
+kani:
+    cd crates/core && cargo kani --tests --harness plan_latest --harness plan_txid

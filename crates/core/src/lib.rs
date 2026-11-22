@@ -15,6 +15,8 @@ mod env;
 mod fault;
 mod host;
 mod inventory;
+#[cfg(kani)]
+mod kani_proofs;
 mod layout;
 mod ltx_read;
 mod maintain;

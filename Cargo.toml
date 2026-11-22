@@ -116,6 +116,8 @@ expect_used = "warn"
 unsafe_code = "deny"
 missing_docs = "warn"
 missing_debug_implementations = "warn"
+# `cfg(kani)` is set by `just kani` only (the Kani proofs in lsr-core); declared so `-D warnings` accepts it.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 
 [workspace.lints.cargo]
 unused_dependencies = "deny"
