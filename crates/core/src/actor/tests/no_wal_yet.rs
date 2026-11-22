@@ -1,5 +1,6 @@
 //! A database a restore just published: the replica holds its newest staged file, the WAL
-//! file SQLite created has no header yet, and nothing is staged. Boot makes
+//! file SQLite created has no header yet, nothing is staged, and the restore left a takeover
+//! record through what it restored (`crate::takeover`). Boot makes
 //! the first sync a `WalMissing` snapshot, which writes the header itself (one
 //! `_litestream_seq` bump, Go's `ensureWALExists`) rather than wait for the
 //! application to write. Ticks stay bounded by the poll and the backoff.
@@ -34,7 +35,9 @@ fn restored_with_no_wal(snapshot_due: bool) -> (Rig, Actor) {
             .collect();
         block_on(rig.remote.inner.delete(&keys)).unwrap();
     }
-    (rig, Actor::new(go_like()))
+    let mut actor = Actor::new(go_like());
+    actor.remember_takeover(crate::TakeoverRecord::through(Txid::MIN));
+    (rig, actor)
 }
 
 /// Ticks for `span` milliseconds from `start` as the replicator thread does:

@@ -128,6 +128,13 @@ pub trait Fs: Clone + Send + Sync + Debug {
     /// As `std::fs::rename`.
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()>;
 
+    /// Gives the file at `from` the second name `to`, failing with `AlreadyExists` when `to`
+    /// is taken.
+    ///
+    /// # Errors
+    /// As `std::fs::hard_link`; `Unsupported` where the filesystem has no hard links.
+    fn hard_link(&self, from: &Path, to: &Path) -> io::Result<()>;
+
     /// Removes the name `path`.
     ///
     /// # Errors
@@ -219,6 +226,10 @@ impl Fs for RealFs {
 
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         fs::rename(from, to)
+    }
+
+    fn hard_link(&self, from: &Path, to: &Path) -> io::Result<()> {
+        fs::hard_link(from, to)
     }
 
     fn remove_file(&self, path: &Path) -> io::Result<()> {

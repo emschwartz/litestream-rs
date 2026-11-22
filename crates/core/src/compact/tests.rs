@@ -128,7 +128,10 @@ impl Spec {
 
 fn put_bytes(store: &impl ObjectStore, at: FileKey, created: Timestamp, bytes: &[u8]) -> FileInfo {
     block_on(async {
-        let mut upload = store.begin_upload(&at, created).await.unwrap();
+        let mut upload = store
+            .begin_upload(&at, created, WriteMode::Replace)
+            .await
+            .unwrap();
         upload.write(bytes).await.unwrap();
         upload.commit().await.unwrap()
     })
@@ -318,11 +321,12 @@ impl ObjectStore for Spy {
         &self,
         at: &FileKey,
         created_at: Timestamp,
+        mode: WriteMode,
     ) -> impl Future<Output = Result<SpyUpload, StoreError>> + Send {
         let mut script = self.script();
         let result = match script.fail_begin.take() {
             Some(err) => Err(err),
-            None => block_on(self.inner.begin_upload(at, created_at)).map(|inner| {
+            None => block_on(self.inner.begin_upload(at, created_at, mode)).map(|inner| {
                 script.begins += 1;
                 SpyUpload {
                     inner,

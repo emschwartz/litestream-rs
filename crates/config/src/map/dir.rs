@@ -1,13 +1,23 @@
 //! A `dir` entry, scanned once at start (Go's `NewDBsFromDirectoryConfig`,
 //! `FindSQLiteDatabases`, `newDBFromDirectoryEntry`; `cmd/litestream/main.go:851-1104`).
 //!
-//! The walk is Go's `filepath.Walk`: names in lexical order, symbolic links not
-//! followed, subdirectories entered only with `recursive`. A file is a database
-//! when its name matches `pattern` (Go's `filepath.Match`, on the name alone) and
-//! its first 16 bytes are `SQLite format 3\0`. That header read is the one place
-//! a database file is opened outside SQLite, and it happens here, before any
-//! replicator holds the file (closing a descriptor drops every POSIX lock the
-//! process holds on that file).
+//! The walk is Go's `filepath.Walk` (Go 1.24), step for step, since its quirks decide which
+//! databases replicate:
+//! - Every path, the root included, is looked at with `lstat`. A `dir` that is a symbolic
+//!   link is therefore not a directory: it is matched as a file, its target's header read,
+//!   and a link to a directory finds nothing. A `dir` that is a database file is that one
+//!   database, at relative path `.`.
+//! - A directory's names are read, in byte order, before the walk decides to skip it, so
+//!   an unreadable subdirectory fails the scan even without `recursive`.
+//! - Links inside are never followed as directories; a link to a database is a database.
+//! - A name is matched with Go's `filepath.Match` (`pattern.rs`), whose errors depend on the
+//!   name: the scan fails at the first file whose match reaches a malformed part.
+//! - A file is a database when one `read` of its first 16 bytes gives SQLite's header,
+//!   bytes past a short read counting as zero, so a 15-byte `SQLite format 3` qualifies.
+//!
+//! That header read is the one place a database file is opened outside SQLite, and it
+//! happens here, before any replicator holds the file (closing a descriptor drops every
+//! POSIX lock the process holds on that file).
 //!
 //! For each database at relative path `rel`:
 //! - the replica's `url` path, else its `path`, gains `/rel` (a file replica with no
@@ -20,16 +30,35 @@
 //! (and `watch: true` was refused at load).
 
 use std::io::{self, Read as _};
-use std::iter::Peekable;
+use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
-use std::str::Chars;
 
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use url::Url;
 
+use super::pattern::{self, BadPattern};
 use super::{Found as Collected, MapProblemKind, ReplicaPlan, replica};
 use crate::config::{DbConfig, DirSource, ReplicaConfig, ReplicaKind};
 use crate::error::KeyPath;
 use crate::expand::{Env, clean, expand_path};
+
+/// What Go's `url.URL.String` escapes in a path (`shouldEscape` in `encodePath` mode): all
+/// but letters, digits, `-_.~` and `$&+,/:;=@`. The relative path is escaped this way before
+/// the `url` crate sees it, which would otherwise read `\` as `/` and keep `%41` as an escape.
+const GO_PATH_ESCAPES: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~')
+    .remove(b'$')
+    .remove(b'&')
+    .remove(b'+')
+    .remove(b',')
+    .remove(b'/')
+    .remove(b':')
+    .remove(b';')
+    .remove(b'=')
+    .remove(b'@');
 
 /// The header every SQLite database file starts with.
 const HEADER: &[u8; 16] = b"SQLite format 3\0";
@@ -37,11 +66,14 @@ const HEADER: &[u8; 16] = b"SQLite format 3\0";
 /// Why a `dir` entry gives no databases.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum DirProblem {
-    /// The pattern is not a valid `filepath.Match` pattern.
-    #[error("syntax error in pattern {pattern:?}")]
+    /// Matching a file's name reached a malformed part of the pattern (Go's
+    /// `filepath.ErrBadPattern`, which fails Go's walk at that file).
+    #[error("syntax error in pattern {pattern:?}, matching {}", .path.display())]
     BadPattern {
         /// The pattern.
         pattern: String,
+        /// The file whose name reached the malformed part.
+        path: PathBuf,
     },
     /// The walk failed.
     #[error("failed to scan directory {}: {kind:?}", .path.display())]
@@ -90,18 +122,15 @@ pub(super) fn scan(
             return Vec::new();
         }
     };
-    let Some(pattern) = Glob::new(source.pattern()) else {
-        let pattern = source.pattern().to_owned();
-        refuse(
-            &at.key("pattern"),
-            found,
-            DirProblem::BadPattern { pattern },
-        );
-        return Vec::new();
-    };
     let mut paths = Vec::new();
-    if let Err((path, kind)) = walk(&dir, source.recursive(), &pattern, &mut paths) {
-        refuse(&at.key("dir"), found, DirProblem::Scan { path, kind });
+    let pattern = source.pattern().as_bytes();
+    if let Err(problem) = walk(&dir, true, source.recursive(), pattern, &mut paths) {
+        let key = if matches!(problem, DirProblem::BadPattern { .. }) {
+            "pattern"
+        } else {
+            "dir"
+        };
+        refuse(&at.key(key), found, problem);
         return Vec::new();
     }
     if paths.is_empty() {
@@ -112,7 +141,7 @@ pub(super) fn scan(
     let mut out = Vec::new();
     for path in paths {
         let rel = relative(&dir, &path);
-        let meta = meta_for(at, source, db, &rel, env, found);
+        let meta = meta_for(at, source, db, &path, &rel, env, found);
         let replica = db
             .replica()
             .and_then(|written| with_relative(at, written, &rel, found))
@@ -126,54 +155,77 @@ pub(super) fn scan(
     out
 }
 
-type WalkError = (PathBuf, io::ErrorKind);
-
-/// Go's `filepath.Walk` over `dir`, keeping matching databases.
+/// Go's `filepath.Walk` from `path` with `FindSQLiteDatabases`' callback, keeping databases.
 fn walk(
-    dir: &Path,
+    path: &Path,
+    root: bool,
     recursive: bool,
-    pattern: &Glob,
+    pattern: &[u8],
     out: &mut Vec<PathBuf>,
-) -> Result<(), WalkError> {
-    fn fail(path: &Path) -> impl Fn(io::Error) -> WalkError + '_ {
-        move |error| (path.to_owned(), error.kind())
+) -> Result<(), DirProblem> {
+    let scan = |path: &Path| {
+        let path = path.to_owned();
+        move |error: io::Error| DirProblem::Scan {
+            path,
+            kind: error.kind(),
+        }
+    };
+    let meta = std::fs::symlink_metadata(path).map_err(scan(path))?;
+    if !meta.is_dir() {
+        return candidate(path, pattern, out);
     }
-    let mut names: Vec<PathBuf> = std::fs::read_dir(dir)
-        .map_err(fail(dir))?
+    // Go reads the names before its callback can skip the directory.
+    let mut names: Vec<PathBuf> = std::fs::read_dir(path)
+        .map_err(scan(path))?
         .map(|entry| entry.map(|e| e.path()))
         .collect::<Result<_, _>>()
-        .map_err(fail(dir))?;
-    names.sort();
-    for path in names {
-        let meta = std::fs::symlink_metadata(&path).map_err(fail(&path))?;
-        if meta.is_dir() {
-            if recursive {
-                walk(&path, recursive, pattern, out)?;
-            }
-            continue;
-        }
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if pattern.matches(name) && is_sqlite(&path) {
-            out.push(path);
-        }
+        .map_err(scan(path))?;
+    if !root && !recursive {
+        return Ok(());
+    }
+    names.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+    for name in names {
+        walk(&name, false, recursive, pattern, out)?;
     }
     Ok(())
 }
 
-/// Go's `IsSQLiteDatabase`: the first 16 bytes are SQLite's header.
+/// A file the walk reached: kept when its name matches and it has SQLite's header.
+fn candidate(path: &Path, pattern: &[u8], out: &mut Vec<PathBuf>) -> Result<(), DirProblem> {
+    let name = path.file_name().map(|n| n.as_bytes()).unwrap_or_default();
+    match pattern::matches(pattern, name) {
+        Err(BadPattern) => Err(DirProblem::BadPattern {
+            pattern: String::from_utf8_lossy(pattern).into_owned(),
+            path: path.to_owned(),
+        }),
+        Ok(false) => Ok(()),
+        Ok(true) => {
+            if is_sqlite(path) {
+                out.push(path.to_owned());
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Go's `IsSQLiteDatabase`: one `read` of up to 16 bytes into a zeroed buffer, compared
+/// with SQLite's header (an empty read is not a database).
 fn is_sqlite(path: &Path) -> bool {
     let Ok(mut file) = std::fs::File::open(path) else {
         return false;
     };
     let mut header = [0_u8; 16];
-    file.read_exact(&mut header).is_ok() && &header == HEADER
+    matches!(file.read(&mut header), Ok(n) if n > 0) && &header == HEADER
 }
 
-/// `path` relative to `root`, with `/` separators.
+/// Go's `filepath.Rel(root, path)` for a path the walk found under `root`: `.` for the
+/// root itself.
 fn relative(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
+    let rel = path
+        .strip_prefix(root)
         .map(|rel| rel.to_string_lossy().into_owned())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if rel.is_empty() { ".".to_owned() } else { rel }
 }
 
 /// Go's per-database meta path; `None` for Go's default beside the database.
@@ -181,6 +233,7 @@ fn meta_for(
     at: &KeyPath,
     source: &DirSource,
     db: &DbConfig,
+    path: &Path,
     rel: &str,
     env: &dyn Env,
     found: &mut Collected,
@@ -188,9 +241,7 @@ fn meta_for(
     let (key, base) = match (source.meta_dir(), db.meta_path()) {
         (Some(meta_dir), _) => ("meta-dir", meta_dir),
         (None, Some(meta_path)) => ("meta-path", meta_path),
-        (None, None) => {
-            return super::default_meta(&expand_path(source.dir(), env).ok()?.join(rel));
-        }
+        (None, None) => return super::default_meta(path),
     };
     let base = match expand_path(base, env) {
         Ok(base) => base,
@@ -235,8 +286,9 @@ fn with_relative(
             refuse(&at.key("replica").key("url"), found, DirProblem::ReplicaUrl);
             return None;
         };
+        let rel = utf8_percent_encode(rel, GO_PATH_ESCAPES).to_string();
         let joined = if url.path().is_empty() {
-            rel.to_owned()
+            rel
         } else {
             clean(&format!("{}/{rel}", url.path()))
         };
@@ -251,96 +303,4 @@ fn with_relative(
         (Some(_) | None, ReplicaKind::File | ReplicaKind::S3) => rel.to_owned(),
     });
     Some(copy)
-}
-
-/// One part of a `filepath.Match` pattern.
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum Part {
-    Star,
-    Any,
-    Char(char),
-    Class {
-        negated: bool,
-        ranges: Vec<(char, char)>,
-    },
-}
-
-/// A compiled `filepath.Match` pattern (Unix: `/` never matches a wildcard).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Glob(Vec<Part>);
-
-impl Glob {
-    /// `None` for Go's `ErrBadPattern`.
-    pub(crate) fn new(pattern: &str) -> Option<Self> {
-        let mut parts = Vec::new();
-        let mut chars = pattern.chars().peekable();
-        while let Some(c) = chars.next() {
-            parts.push(match c {
-                '*' => Part::Star,
-                '?' => Part::Any,
-                '\\' => Part::Char(chars.next()?),
-                '[' => class(&mut chars)?,
-                other => Part::Char(other),
-            });
-        }
-        Some(Self(parts))
-    }
-
-    /// Whether the whole name matches.
-    pub(crate) fn matches(&self, name: &str) -> bool {
-        let name: Vec<char> = name.chars().collect();
-        matches_from(&self.0, &name)
-    }
-}
-
-/// A `[...]` class after its `[`.
-fn class(chars: &mut Peekable<Chars<'_>>) -> Option<Part> {
-    let negated = chars.next_if_eq(&'^').is_some();
-    let mut ranges = Vec::new();
-    loop {
-        let lo = match chars.next()? {
-            ']' if !ranges.is_empty() => break,
-            ']' => return None,
-            '\\' => chars.next()?,
-            c => c,
-        };
-        let hi = if chars.next_if_eq(&'-').is_some() {
-            match chars.next()? {
-                '\\' => chars.next()?,
-                ']' => return None,
-                c => c,
-            }
-        } else {
-            lo
-        };
-        if lo > hi {
-            return None;
-        }
-        ranges.push((lo, hi));
-    }
-    Some(Part::Class { negated, ranges })
-}
-
-fn matches_from(parts: &[Part], name: &[char]) -> bool {
-    match parts.split_first() {
-        None => name.is_empty(),
-        Some((Part::Star, rest)) => (0..=name.len())
-            .take_while(|&n| name.iter().take(n).all(|&c| c != '/'))
-            .any(|n| matches_from(rest, name.get(n..).unwrap_or(&[]))),
-        Some((part, rest)) => match name.split_first() {
-            Some((&c, tail)) if one(part, c) => matches_from(rest, tail),
-            Some(_) | None => false,
-        },
-    }
-}
-
-fn one(part: &Part, c: char) -> bool {
-    match part {
-        Part::Star => true,
-        Part::Any => c != '/',
-        Part::Char(want) => *want == c,
-        Part::Class { negated, ranges } => {
-            c != '/' && ranges.iter().any(|&(lo, hi)| lo <= c && c <= hi) != *negated
-        }
-    }
 }

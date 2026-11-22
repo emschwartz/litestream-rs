@@ -332,6 +332,18 @@ struct Runner {
     // begins past the latest time seen before the step.
     slew: Option<(Timestamp, u64)>,
     saved: Option<StagedCopy>,
+    /// The takeover record an operator's take-over left in the meta
+    /// directory ([`lsr_core::TakeoverRecord`]), handed to every new actor.
+    takeover: Option<lsr_core::TakeoverRecord>,
+    /// The takeover record saved with [`Runner::saved`].
+    saved_takeover: Option<lsr_core::TakeoverRecord>,
+    /// Staging was damaged, wiped or put back since the engine last had
+    /// staged at least what it confirmed: until then, a boot may find the
+    /// replica ahead of staging with no other writer, and refuse.
+    staging_disturbed: bool,
+    /// The newest staged transaction after the last tick: one lower after a
+    /// tick means a newest staged file went (prune never deletes it).
+    staged_high: Option<Txid>,
     /// The commit each file in `saved` held when it was copied, noted again
     /// when the copy is put back.
     saved_notes: Vec<(Txid, Option<crate::model::WalEnd>, crate::CommitId)>,
@@ -371,6 +383,13 @@ struct Runner {
     /// A store fault fails calls at a rate and has not healed: a drain may
     /// end at its deadline.
     rate_active: bool,
+    /// Boots that listed the replica and failed (each is tried again, and
+    /// costs the replica a boot's reads).
+    failed_boots: u32,
+    /// Bucket rollbacks and removals of the newest file: each may cost the
+    /// engine a probe past a listing that ends before what it confirmed, and
+    /// a relist once it learns of the loss.
+    regressions: u32,
     /// Every injected store fault has healed and the run is judging
     /// liveness: a stall no longer imposed by the world ends nothing.
     settling: bool,
@@ -381,6 +400,7 @@ struct Runner {
     app: after_restart::App,
     /// The WAL's committed end, in frames, as the current operation began.
     op_began_at: u32,
+    marks: crate::marks::FaultMarks,
 }
 
 /// Whether a step on the WAL undoes an earlier one.
@@ -399,6 +419,10 @@ fn below(rng: &SeededEntropy, upper: u64) -> u64 {
 fn small(rng: &SeededEntropy, upper: u64) -> u32 {
     u32::try_from(below(rng, upper)).unwrap_or(u32::MAX)
 }
+
+/// Ticks a restarted engine gets to stop again for a recorded other writer:
+/// the stop comes at its first tick unless a fault delays the listing.
+const SETTLE_AFTER_RESTART: usize = 8;
 
 impl Runner {
     /// A runner for `seed` set up as `opts` says, booted.
@@ -458,6 +482,10 @@ impl Runner {
             latest: None,
             saved: None,
             saved_notes: Vec::new(),
+            takeover: None,
+            saved_takeover: None,
+            staging_disturbed: false,
+            staged_high: None,
             app_autocheckpoint: Some(lsr_core::SQLITE_AUTOCHECKPOINT),
             app_before: AppCheckpoints::NONE,
             expected: Vec::new(),
@@ -474,11 +502,14 @@ impl Runner {
             puts_judged: 0,
             put_back: 0,
             rate_active: false,
+            failed_boots: 0,
+            regressions: 0,
             settling: false,
             liveness: crate::liveness::Liveness::new(),
             judges: Judges::default(),
             app: after_restart::App::new(seed),
             op_began_at: 0,
+            marks: crate::marks::FaultMarks::new(),
         }
     }
 
@@ -502,6 +533,9 @@ impl Runner {
             ..base
         });
         self.actor.set_app_autocheckpoint(self.app_autocheckpoint);
+        if let Some(record) = self.takeover {
+            self.actor.remember_takeover(record);
+        }
         self.unwatched = true;
         self.degraded = [false; 5];
         self.latest = None;
@@ -531,6 +565,7 @@ impl Runner {
         // The tick's own reading is the first of its clock reads.
         let now = clock.now();
         self.w.high.note(now);
+        self.marks.ticked();
         let actor = &mut self.actor;
         let mut journal = self.w.journal.clone();
         let fut = async {
@@ -547,6 +582,7 @@ impl Runner {
         };
         let ended = self.w.run_tick(fut, plan);
         self.w.sim_clock.settle();
+        self.app_in_tick_seen();
         ended
     }
 
@@ -701,6 +737,25 @@ impl Runner {
         });
     }
 
+    /// After a tick that began unbooted: what the boot that succeeded saw (the WAL's salts
+    /// and the commits so far), or, for a boot that listed the replica whole and failed, one
+    /// more failed boot for the budget.
+    fn note_boot(&mut self, booting: bool, lists_before: u64, salts: Salts, commits: usize) {
+        if !booting {
+            return;
+        }
+        if self.actor.booted() {
+            self.life.boot_salts = Some(salts);
+            self.life.boot_commits = commits;
+            return;
+        }
+        let levels = u64::try_from(lsr_core::Level::ALL.len()).unwrap_or(u64::MAX);
+        let lists = self.w.remote_recorder.counts().lists;
+        if lists.saturating_sub(lists_before) >= levels {
+            self.failed_boots = self.failed_boots.saturating_add(1);
+        }
+    }
+
     fn step(&mut self, plan: Option<CrashPlan>) -> Result<(Step, TickStats), Violation> {
         let at = self.w.remote_recorder.len();
         let newest_commit = self.w.model.newest_commit();
@@ -714,12 +769,14 @@ impl Runner {
         self.liveness_before_tick(booting);
         let salts = self.w.sqlite.salts();
         let commits = self.w.model.commits().len();
+        self.staging_moved()?;
         let fired0 = (fired(&self.w.remote_faults), fired(&self.w.staging_faults));
         let ended = self.run_one(plan);
-        if booting && self.actor.booted() {
-            self.life.boot_salts = Some(salts);
-            self.life.boot_commits = commits;
+        if matches!(ended, TickEnd::Done(_)) {
+            self.keep_takeover();
         }
+        self.watch_staging()?;
+        self.note_boot(booting, remote0.lists, salts, commits);
         self.judge_stores()?;
         let crashed = matches!(ended, TickEnd::Crashed { .. });
         self.liveness_mid_tick(hits0, crashed)?;
@@ -738,13 +795,7 @@ impl Runner {
             }
             TickEnd::Done(Tick::Stopped(cause)) => (self.stopped(cause), None),
             TickEnd::Done(Tick::Drained { txid }) => (Step::Drained(txid), None),
-            TickEnd::Done(Tick::DeadlineReached(_)) => {
-                let cause = StopCause::Shutdown;
-                if self.record {
-                    self.report.seen.push(Seen::Stop(cause));
-                }
-                (Step::Stopped(cause), None)
-            }
+            TickEnd::Done(Tick::DeadlineReached(_)) => (self.stopped(StopCause::Shutdown), None),
             TickEnd::Crashed {
                 polls, kind, lost, ..
             } => {
@@ -766,8 +817,123 @@ impl Runner {
             checkpoints: self.tally.total().saturating_sub(total0),
         };
         per_tick(&stats, self.limits())?;
+        let step = self.after_refusal(step)?;
         self.report.max_wal_frames = self.report.max_wal_frames.max(self.w.sqlite.mx_frame());
+        self.verify_ready()?;
         Ok((step, stats))
+    }
+
+    /// A takeover the engine asked for is made durable before the next tick,
+    /// as the real driver writes it, and handed back. A tick a crash cut short
+    /// stored nothing, so the caller calls this only after one that ended.
+    fn keep_takeover(&mut self) {
+        let Some(wanted) = self.actor.takeover_wanted() else {
+            return;
+        };
+        self.report.reach.bump("takeover.wanted");
+        let held = self.takeover.filter(|held| held.txid() > wanted.txid());
+        self.takeover = Some(held.unwrap_or(wanted));
+        self.actor.remember_takeover(wanted);
+    }
+
+    /// Marks staging disturbed when something between two ticks (an
+    /// operation: a crash, a power loss, a fault) took its newest file. The
+    /// engine's own deletes inside a tick are not a disturbance: it records a
+    /// takeover through what they vouched for first.
+    fn staging_moved(&mut self) -> Result<(), Violation> {
+        let staged = self
+            .w
+            .newest_staged()
+            .map_err(|err| bug_fault(format!("listing staging failed: {err}")))?
+            .map(|info| info.key.range().max());
+        if staged < self.staged_high {
+            self.staging_disturbed = true;
+        }
+        Ok(())
+    }
+
+    /// Keeps [`Runner::staging_disturbed`] up to date after a tick: it notes
+    /// where staging's newest file stands, and clears the mark once the
+    /// staging directory holds again at least what the engine confirmed.
+    fn watch_staging(&mut self) -> Result<(), Violation> {
+        let staged = self
+            .w
+            .newest_staged()
+            .map_err(|err| bug_fault(format!("listing staging failed: {err}")))?
+            .map(|info| info.key.range().max());
+        self.staged_high = staged;
+        if self.staging_disturbed
+            && self.actor.booted()
+            && staged.is_some()
+            && staged >= self.actor.replicated()
+        {
+            self.staging_disturbed = false;
+        }
+        Ok(())
+    }
+
+    /// A boot refused replica files nothing vouched for
+    /// ([`lsr_core::TakeoverRecord`]). With another writer's file still
+    /// standing that is the stop the run expects. Otherwise the files are this
+    /// database's own, which staging no longer showed and the WAL could not
+    /// vouch for: the operator takes over, as `lsr take-over` does, and starts
+    /// the engine again.
+    fn after_refusal(&mut self, step: Step) -> Result<Step, Violation> {
+        let refused = self.actor.refused_through();
+        let Some(tip) = refused.filter(|_| step == Step::Stopped(StopCause::OtherWriter)) else {
+            return Ok(step);
+        };
+        if self.foreign_stands()? {
+            self.report.reach.bump("refusal.foreign");
+            return Ok(step);
+        }
+        // With staging intact, everything this engine put on the replica is at
+        // or below what staging holds, under the bytes staging holds: a
+        // refusal then has no cause. A staged copy that differs from the
+        // replica's object under the same key was edited or forged (an
+        // operation), and the boot refuses that divergence by design. So is
+        // a staged copy the engine never put: the boot may have read the
+        // replica's object before a rollback took it (a lagging listing), so
+        // the replica as it stands now need not show the divergence.
+        let key = lsr_core::FileKey::new(lsr_core::Level::ZERO, lsr_ltx::TxidRange::single(tip));
+        let read =
+            |err: lsr_core::StoreError| bug_fault(format!("reading the stores failed: {err}"));
+        let diverged = self.w.staged_differs_from_remote(key).map_err(read)?
+            || self.w.staged_not_the_engines(key).map_err(read)?;
+        if !self.staging_disturbed && !diverged {
+            return Err(bug_fault(format!(
+                "a boot refused replica files through {tip} with staging intact and no other writer"
+            )));
+        }
+        self.report.reach.bump("refusal.take_over");
+        self.takeover = Some(lsr_core::TakeoverRecord::through(tip));
+        self.restart(CrashKind::Process);
+        Ok(Step::Crashed)
+    }
+
+    /// Whether a file another writer put, and the operator has not removed,
+    /// is still listed under its transaction.
+    fn foreign_stands(&self) -> Result<bool, Violation> {
+        let listed = self
+            .w
+            .remote_level_zero()
+            .map_err(|err| bug_fault(format!("listing the replica failed: {err}")))?;
+        let removed = |index: usize| self.w.foreign_removed.iter().any(|(at, _)| *at == index);
+        Ok(self.w.foreign.iter().enumerate().any(|(index, (txid, _))| {
+            !removed(index) && listed.iter().any(|info| info.key.range().max() == *txid)
+        }))
+    }
+
+    /// The operator runs `lsr take-over`: a takeover record through the
+    /// replica's newest transaction, for the next process.
+    fn take_over(&mut self) -> Result<(), Violation> {
+        let held = lsr_core::conformance::block_on(lsr_core::Inventory::load(&self.w.remote_raw))
+            .map_err(|err| bug_fault(format!("listing the replica failed: {err}")))?
+            .newest();
+        let done = held.map(|tip| {
+            self.takeover = Some(lsr_core::TakeoverRecord::through(tip));
+        });
+        self.scenario_bool("TakeOver", done.is_some())
     }
 
     /// Notes a stop the engine chose: a stop that reports a loss is the engine's signal the
@@ -853,7 +1019,8 @@ impl Runner {
             | Event::Retrying { .. }
             | Event::Resnapshot(_)
             | Event::Clamped(_)
-            | Event::AheadOfWal(_) => Ok(Step::Ran),
+            | Event::AheadOfWal(_)
+            | Event::TakeoverWanted(_) => Ok(Step::Ran),
         }
     }
 
@@ -882,7 +1049,8 @@ impl Runner {
             | Event::Maintained { .. }
             | Event::Idle
             | Event::Clamped(_)
-            | Event::AheadOfWal(_) => return Ok(()),
+            | Event::AheadOfWal(_)
+            | Event::TakeoverWanted(_) => return Ok(()),
         };
         self.liveness
             .judge(CauseKind::from(cause), at_boot, &mut self.report.reach)?;
@@ -926,7 +1094,8 @@ impl Runner {
             | Event::Maintained { .. }
             | Event::Idle
             | Event::Clamped(_)
-            | Event::AheadOfWal(_) => {}
+            | Event::AheadOfWal(_)
+            | Event::TakeoverWanted(_) => {}
         }
     }
 
@@ -1097,7 +1266,13 @@ impl Runner {
                         "the engine stopped in a drain: {cause:?}"
                     )));
                 }
-                Step::Ran | Step::Crashed => {}
+                // A restart (an operator's take-over after a refusal) brings
+                // up an engine that was never asked to drain.
+                Step::Crashed => {
+                    self.actor
+                        .begin_shutdown(self.actor.shutdown_deadline(self.now()));
+                }
+                Step::Ran => {}
             }
         }
         within(
@@ -1291,6 +1466,16 @@ impl Runner {
                 .any(|want| std::mem::discriminant(want) == std::mem::discriminant(&cause))
     }
 
+    /// The replica's listings start to lag ([`Op::LaggingListings`]).
+    fn lag_listings(&mut self, writes: u8, window: u8) {
+        self.report.reach.bump("remote.lagging_listings");
+        // Nothing is expected: a lag alone is no reason to stop, to report a
+        // regression or to write a transaction twice.
+        self.w
+            .remote_faults
+            .lag_listings(u32::from(writes), u32::from(window));
+    }
+
     /// Makes `cause` legitimate for the rest of the run.
     fn expect(&mut self, cause: StopCause) {
         if !self.expected.contains(&cause) {
@@ -1344,10 +1529,25 @@ impl Runner {
     }
 
     fn second_writer_with(&mut self, ticks: u8, judged: bool) -> Result<(), Violation> {
-        // A file at or below what this engine has staged collides with one of
-        // its own transactions (after a bucket rollback, say): telling the two
-        // writers apart needs writer identity on the replica, which the engine
-        // does not have, so the step puts nothing then.
+        if !self.second_writer_has_room()? {
+            return Ok(());
+        }
+        let put = self
+            .w
+            .remote_put_foreign()
+            .map_err(|err| bug_fault(format!("the second writer's put failed: {err}")))?;
+        let Some((key, bytes)) = put else {
+            return Ok(());
+        };
+        self.second_writer_stands(key, bytes, ticks, judged)
+    }
+
+    /// Whether another writer's file can stand past everything this engine
+    /// and the replica hold. A file at or below what this engine has staged
+    /// collides with one of its own transactions (after a bucket rollback,
+    /// say): telling the two writers apart needs writer identity on the
+    /// replica, which the engine does not have, so the step puts nothing then.
+    fn second_writer_has_room(&self) -> Result<bool, Violation> {
         let ours = self
             .w
             .newest_staged()
@@ -1364,21 +1564,24 @@ impl Runner {
         let held = lsr_core::conformance::block_on(lsr_core::Inventory::load(&self.w.remote_raw))
             .map_err(|err| bug_fault(format!("listing the replica failed: {err}")))?
             .newest();
-        if theirs.is_none_or(|theirs| Some(theirs) <= ours.max(held)) {
-            return Ok(());
-        }
-        let put = self
-            .w
-            .remote_put_foreign()
-            .map_err(|err| bug_fault(format!("the second writer's put failed: {err}")))?;
-        let Some((key, bytes)) = put else {
-            return Ok(());
-        };
+        Ok(theirs.is_some_and(|theirs| Some(theirs) > ours.max(held)))
+    }
+
+    /// Runs `ticks` ticks while the other writer's file `key` stands, then
+    /// removes it.
+    fn second_writer_stands(
+        &mut self,
+        key: lsr_core::FileKey,
+        bytes: Vec<u8>,
+        ticks: u8,
+        judged: bool,
+    ) -> Result<(), Violation> {
         self.report.reach.bump("remote.second_writer");
         self.expect(StopCause::OtherWriter);
         // Only an engine that was running when the file appeared, and has not
         // booted since, owes the stop: a boot takes a replica ahead as history.
         let mut watching = self.actor.booted();
+        let mut stopped_here = false;
         for at in 0..ticks {
             // Once as the file appears, and again at the end: the engine may stop on it at the
             // first tick, which ends the loop.
@@ -1387,8 +1590,14 @@ impl Runner {
             }
             watching &= self.actor.booted();
             let lists = self.w.remote_recorder.counts().lists;
+            let read_faults = self.remote_read_faults();
             let step = self.step(None)?.0;
             let stopped = step == Step::Stopped(StopCause::OtherWriter);
+            // A tick that found files this engine confirmed gone forgot what it
+            // believed of the replica and relists before anything else, which
+            // judges the other writer's file then: it planned nothing from this
+            // listing.
+            let relisting = step == Step::Degraded(PersistentCause::RemoteRegressed);
             match step {
                 Step::Stopped(cause) if self.stop_expected(cause) => {}
                 Step::Stopped(cause) => {
@@ -1398,6 +1607,7 @@ impl Runner {
                 Step::Ran | Step::Drained(_) | Step::Crashed => {}
             }
             if stopped {
+                stopped_here = true;
                 break;
             }
             // A running engine that listed the replica in this tick while the
@@ -1406,9 +1616,13 @@ impl Runner {
             // judge, and an engine already at that transaction replaces the
             // file with its own upload (no writer identity can tell them apart).
             // A whole listing is one call per level at least; a listing cut
-            // short by a fault showed the engine nothing.
+            // short by a fault showed the engine nothing. A listing alone is
+            // no proof either (one that lags a delete shows a file that is
+            // gone): the engine reads the file before it stops, and a read a
+            // fault cut short proved nothing.
             let levels = u64::try_from(lsr_core::Level::ALL.len()).unwrap_or(u64::MAX);
-            let listed = self.w.remote_recorder.counts().lists.saturating_sub(lists) >= levels;
+            let listed = self.w.remote_recorder.counts().lists.saturating_sub(lists) >= levels
+                && self.remote_read_faults() == read_faults;
             let theirs = self.w.remote_holds(key, &bytes).map_err(|err| {
                 bug_fault(format!("reading the second writer's file failed: {err}"))
             })?;
@@ -1416,7 +1630,7 @@ impl Runner {
             // file of the same id) and snapshotting above it is not behind.
             let ours = self.actor.staged().max(self.actor.replicated());
             let behind = ours < Some(key.range().max());
-            if watching && listed && theirs && behind {
+            if watching && listed && theirs && behind && !relisting {
                 return Err(Violation::OtherWriterMissed {
                     key: key.to_string(),
                 });
@@ -1425,7 +1639,63 @@ impl Runner {
         if judged {
             self.judge_held(crate::generate::Hold::SecondWriter, None)?;
         }
+        if stopped_here {
+            self.restart_while_stopped(key, &bytes)?;
+        }
         self.remove_foreign(key, &bytes)
+    }
+
+    /// A supervisor restarts an engine that stopped for another writer while
+    /// that writer's file still stands: the boot refuses replica files nothing
+    /// vouches for, so it must stop again, never boot and snapshot above the
+    /// file.
+    fn restart_while_stopped(
+        &mut self,
+        key: lsr_core::FileKey,
+        bytes: &[u8],
+    ) -> Result<(), Violation> {
+        self.restart(CrashKind::Process);
+        for _ in 0..SETTLE_AFTER_RESTART {
+            let (step, stats) = self.step(None)?;
+            let theirs = self.w.remote_holds(key, bytes).map_err(|err| {
+                bug_fault(format!("reading the second writer's file failed: {err}"))
+            })?;
+            // As for a running engine: one whose boot staged that transaction
+            // itself replaces the file with its own (a torn object beside a
+            // staged copy that verifies), which is not building above it.
+            let ours = self.actor.staged().max(self.actor.replicated());
+            let behind = ours < Some(key.range().max());
+            if theirs && behind && matches!(stats.event, Some(Event::Booted { .. })) {
+                return Err(Violation::OtherWriterMissed {
+                    key: key.to_string(),
+                });
+            }
+            match step {
+                Step::Stopped(StopCause::OtherWriter) => {
+                    self.report
+                        .reach
+                        .bump("remote.second_writer_restart_stopped");
+                    return Ok(());
+                }
+                Step::Stopped(cause) if self.stop_expected(cause) => return Ok(()),
+                Step::Stopped(cause) => {
+                    return Err(bug_fault(format!("the engine stopped: {cause:?}")));
+                }
+                Step::Degraded(cause) => self.degraded_expected(cause)?,
+                Step::Ran | Step::Drained(_) | Step::Crashed => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// How many replica reads a scheduled fault has failed or changed so far.
+    fn remote_read_faults(&self) -> u32 {
+        self.w
+            .remote_faults
+            .hits()
+            .iter()
+            .filter(|(op, _, _)| *op == lsr_core::StoreOp::Read)
+            .fold(0, |sum, (_, _, hits)| sum.saturating_add(*hits))
     }
 
     /// The operator removes the other writer's newest file if it still holds
@@ -1508,7 +1778,10 @@ impl Runner {
     /// drawn history it is skipped.
     fn step_done(&self, what: &str, done: Result<bool, StagedEditError>) -> Result<(), Violation> {
         match done {
-            Ok(false) if self.lenient => Ok(()),
+            Ok(false) if self.lenient => {
+                self.marks.skip();
+                Ok(())
+            }
             other => Self::scenario_step(what, other),
         }
     }
@@ -1533,6 +1806,9 @@ impl Runner {
         };
         if matches!(op, RemoteOp::RollBack | RemoteOp::RemoveUnrecognized) {
             self.w.history.excuse_regression();
+            if matches!(done, Ok(true)) {
+                self.regressions = self.regressions.saturating_add(1);
+            }
         }
         if matches!(op, RemoteOp::RollBack) {
             if let Some(from) = rolled_from {
@@ -1551,6 +1827,7 @@ impl Runner {
                 }
             }
             EnvFault::WipeStaging => {
+                self.staging_disturbed = true;
                 if self.w.wipe_staging().is_ok() {
                     self.w.crash(CrashKind::Process);
                     self.crashed(CrashKind::Process);
@@ -1627,6 +1904,7 @@ impl Runner {
         if !self.judges.history {
             return Ok(());
         }
+        self.marks.judged();
         let damaged = self.w.remote_faults.damaged();
         let now = self.now();
         self.w.history.judge(&self.w.remote_raw, now, &damaged, ask)
@@ -1645,6 +1923,7 @@ impl Runner {
     /// Both judges over the whole replica; where one fails and the other passes, the
     /// disagreement is counted in reach, keyed by the failing judge and its violation.
     fn restore_all(&mut self) -> Result<(), Violation> {
+        self.marks.judged();
         self.report.checks = self.report.checks.saturating_add(1);
         let oracle = self
             .judges
@@ -1692,6 +1971,9 @@ impl Runner {
     }
 
     fn meta(&mut self, op: MetaOp) -> Result<(), Violation> {
+        if op != MetaOp::Save {
+            self.staging_disturbed = true;
+        }
         let w = &self.w;
         let done = match op {
             MetaOp::Save => w
@@ -1707,6 +1989,7 @@ impl Runner {
                         })
                         .collect();
                     self.saved = Some(copy);
+                    self.saved_takeover = self.takeover;
                     true
                 })
                 .map_err(StagedEditError::from),
@@ -1716,6 +1999,7 @@ impl Runner {
                     None => Ok(false),
                 };
                 if matches!(done, Ok(true)) {
+                    self.takeover = self.saved_takeover;
                     self.put_back = self.w.staging_recorder.len();
                     self.renote_saved();
                 }
@@ -1729,10 +2013,12 @@ impl Runner {
                 }
             }),
             MetaOp::StripNewestOrigin => w.strip_newest_origin(),
-            MetaOp::DeleteAll => w
-                .wipe_staging()
-                .map(|()| true)
-                .map_err(StagedEditError::from),
+            MetaOp::DeleteAll => {
+                self.takeover = None;
+                w.wipe_staging()
+                    .map(|()| true)
+                    .map_err(StagedEditError::from)
+            }
             MetaOp::TruncateNewest => w.edit_newest_staged(|bytes| {
                 let half = bytes.len() / 2;
                 bytes.truncate(half);
@@ -1870,7 +2156,9 @@ impl Runner {
             self.w.sqlite.wal_header_salts(),
             self.w.sqlite.our_reader_pins_wal(),
         );
+        self.marks.begin(op);
         self.apply_op(op)?;
+        self.marks.end(op);
         // An operation that runs ticks between its edits (another writer's
         // file put, then removed after the engine ran) edits again after them.
         self.liveness.note_op(op);
@@ -1881,10 +2169,18 @@ impl Runner {
         Ok(())
     }
 
+    /// Every scheduled store fault heals.
+    fn heal_faults(&mut self) {
+        self.rate_active = false;
+        self.w.remote_faults.heal();
+        self.w.staging_faults.heal();
+    }
+
     fn apply_op(&mut self, op: &Op) -> Result<(), Violation> {
         match op {
             Op::Commit { pages, grow } => self.commit(*pages, *grow),
             Op::CommitInTick { pages } => self.commit_in_tick(*pages)?,
+            Op::AppInTick { at, op } => self.app_in_tick(*at, *op)?,
             Op::Spill => self.spill(),
             Op::Rollback => {
                 if self.w.sqlite.rollback() {
@@ -1915,6 +2211,7 @@ impl Runner {
             Op::RequestSnapshot => self.actor.request_snapshot(),
             Op::Restore => self.restore_all()?,
             Op::Restart => self.restart(CrashKind::Process),
+            Op::TakeOver => self.take_over()?,
             Op::PowerLoss => self.restart(CrashKind::Power),
             Op::LyingWalSync => self.w.sqlite.lie_on_our_sync(),
             Op::Meta(op) => self.meta(*op)?,
@@ -1934,11 +2231,9 @@ impl Runner {
             }
             Op::WalDamage { op, ticks } => self.wal_damage_healed(*op, *ticks)?,
             Op::Hold { hold, ticks } => self.hold(*hold, *ticks)?,
-            Op::Heal => {
-                self.rate_active = false;
-                self.w.remote_faults.heal();
-                self.w.staging_faults.heal();
-            }
+            Op::Verify => self.verify()?,
+            Op::Heal => self.heal_faults(),
+            Op::LaggingListings { writes, window } => self.lag_listings(*writes, *window),
             Op::OurReader { begin } => {
                 let done = if *begin {
                     self.w.sqlite.our_reader_begin()
@@ -2109,12 +2404,17 @@ impl Runner {
 
         self.w.remote_faults.heal();
         self.w.staging_faults.heal();
+        self.w.remote_faults.end_lag();
         // Source failures injected and not yet met heal too: a queue of them
         // would otherwise keep a task failing, and its stall would be the
         // world's, not the engine's.
         self.w.sqlite.heal_injections();
         self.drain()?;
         self.restore_all()?;
+        self.report.reach.add(
+            "remote.stale_listings",
+            u64::from(self.w.remote_faults.stale_listings()),
+        );
         memory(
             self.w.remote_recorder.counts(),
             self.w.staging_recorder.counts(),
@@ -2128,8 +2428,13 @@ impl Runner {
         let spent = crate::budget::Spent {
             boots: u64::from(self.report.crashes)
                 .saturating_add(u64::from(self.report.shutdowns))
-                .saturating_add(u64::from(self.report.checks)),
-            fault_hits: hits(&self.w.remote_faults),
+                .saturating_add(u64::from(self.report.checks))
+                .saturating_add(u64::from(self.failed_boots))
+                .saturating_add(u64::from(self.regressions)),
+            // A listing a lag changed hid a write, which may be done again
+            // once: the cost of the stale listing, not amplification.
+            fault_hits: hits(&self.w.remote_faults)
+                .saturating_add(u64::from(self.w.remote_faults.stale_listings())),
             degraded_retries: self.report.reach.get("event.Degraded"),
         };
         crate::budget::check(
@@ -2207,6 +2512,7 @@ impl Runner {
                 reach.add(name, u64::from(hits));
             }
         }
+        self.tally_marks();
     }
 }
 
@@ -2228,7 +2534,8 @@ fn capped(event: &Event, began: Timestamp, slack: u64) -> Result<(), Violation> 
         | Event::Idle
         | Event::Resnapshot(_)
         | Event::Clamped(_)
-        | Event::AheadOfWal(_) => return Ok(()),
+        | Event::AheadOfWal(_)
+        | Event::TakeoverWanted(_) => return Ok(()),
     };
     let cap = named.map_or(MAX_BACKOFF, |named| named.max(MAX_BACKOFF));
     let millis = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
@@ -2372,6 +2679,9 @@ pub fn shrink(seed: Seed, steps: u32, weights: &Weights, opts: &Opts) -> Option<
 mod after_restart;
 mod fail_stop;
 mod hold;
+mod in_tick;
+mod marks;
+mod verify;
 
 /// Whether a snapshot with this cause is the engine saying the history it had replicated may
 /// not continue: the database, its WAL or the staging directory went back or cannot be

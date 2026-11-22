@@ -1,39 +1,44 @@
-//! The slice of the AWS shared-file INI dialect the credential chain needs:
-//! one profile's `aws_access_key_id`, `aws_secret_access_key` and
-//! `aws_session_token`, as the AWS SDK for Go v2 (`internal/ini`) reads them.
+//! The AWS shared-file INI dialect as the AWS SDK for Go v2 reads it
+//! (`internal/ini` v1.8.4, the version Go Litestream 041a8c3 links), line for line:
 //!
-//! Like Go: `#` and `;` start a comment line; a `[header]` may carry a trailing
-//! comment; a property is `key = value` or `key: value`, its key compared
-//! without case and its value trimmed, cut at a ` #` or ` ;` comment and
-//! stripped of one pair of matching quotes; repeated sections merge and the
-//! last value wins; an indented line is a nested property (ignored) unless the
-//! key before it already has a value, when it counts as a property of its own;
-//! properties before the first header are ignored.
+//! - lines are split at `\n` only; a blank line or one whose first non-blank
+//!   character is `#` or `;` is skipped;
+//! - a header is a line that, cut at its first `#` and then its first `;` and
+//!   trimmed, is `[...]`; its inside, trimmed, splits at the first run of blanks
+//!   into a type and a name, rejoined with one space (`[ profile   a ]` is
+//!   `profile a`); a header resets the current key and creates its section once,
+//!   so repeated sections merge;
+//! - a line that starts with neither a space nor a tab is a property: cut at the
+//!   first ` #`, ` ;`, tab-`#` or tab-`;`, right-trimmed, split at `=` or `:`,
+//!   whichever comes first, both sides trimmed, the key lower-cased and the value
+//!   stripped of one pair of matching quotes; it replaces an earlier value;
+//! - an indented line with a separator is a sub-property of the current key when
+//!   that key's value is empty (its comment is part of its value), and otherwise is
+//!   promoted to a property of its own, comment cut;
+//! - an indented line without one continues the current key's value with a
+//!   newline, when that value is a non-empty string;
+//! - properties before the first header, or under `[]`, are dropped.
 //!
-//! Unlike Go, a line that is none of those is refused rather than skipped. Go
-//! skips it, so a header missing its `]` silently files the keys below it under
-//! the profile above; the AWS CLI's parser refuses such a file too.
+//! Unlike Go, a line that is none of those is refused rather than skipped
+//! (`docs/decisions.md` D43). Go skips it, so a header missing its `]` silently
+//! files the keys below it under the profile above; the AWS CLI's parser refuses
+//! such a file too.
 //!
-//! The text is borrowed: values are slices of the caller's (zeroized) buffer,
-//! so no secret is copied here.
+//! Each section also records whether it holds exactly one of the key id and the
+//! secret: the SDK marks that "partial credentials" error on the section when it
+//! loads a file (`mergeSections` in `config/shared_config.go`).
 
-/// Which file the text came from; the two name their sections differently.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Flavor {
-    /// `~/.aws/credentials`: `[name]`; a `[profile name]` section is dropped.
-    Credentials,
-    /// `~/.aws/config`: `[profile name]`, and `[default]` for the default
-    /// profile unless a `[profile default]` exists.
-    Config,
-}
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
-/// The keys one profile holds, as written (possibly empty).
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(super) struct Keys<'a> {
-    pub(super) id: Option<&'a str>,
-    pub(super) secret: Option<&'a str>,
-    pub(super) token: Option<&'a str>,
-}
+use zeroize::Zeroizing;
+
+/// The key id's key.
+pub(super) const ACCESS_KEY_ID: &str = "aws_access_key_id";
+/// The secret's key.
+pub(super) const SECRET_ACCESS_KEY: &str = "aws_secret_access_key";
+/// The session token's key.
+pub(super) const SESSION_TOKEN: &str = "aws_session_token";
 
 /// A line that is not blank, a comment, a header or a property; 1-based. The
 /// line's text is never kept: it may hold a secret.
@@ -42,131 +47,193 @@ pub(super) struct Malformed {
     pub(super) line: usize,
 }
 
-/// Which accumulator a section's properties go to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Target {
-    /// `[profile name]` in the config file, `[name]` in the credentials file.
-    Named,
-    /// `[default]` in the config file, used only when no `[profile default]`.
-    BareDefault,
-    /// Any other section, or before the first header.
-    Other,
-}
-
-/// What the scan has seen of the wanted profile.
+/// One property's value: a string, or sub-properties (whose string is empty).
 #[derive(Debug, Default)]
-struct Found<'a> {
-    named: Option<Keys<'a>>,
-    bare: Option<Keys<'a>>,
+struct Value {
+    text: Zeroizing<String>,
+    map: bool,
 }
 
-impl<'a> Found<'a> {
-    fn slot(&mut self, target: Target) -> Option<&mut Keys<'a>> {
-        match target {
-            Target::Named => Some(self.named.get_or_insert_with(Keys::default)),
-            Target::BareDefault => Some(self.bare.get_or_insert_with(Keys::default)),
-            Target::Other => None,
-        }
+/// One section's properties, keys lower-cased.
+#[derive(Debug, Default)]
+pub(super) struct Section {
+    values: BTreeMap<String, Value>,
+    /// The file whose copy of this section holds only one of the key id and
+    /// secret, when the copy that counts does (the SDK's section error).
+    pub(super) partial: Option<PathBuf>,
+    /// The file the key id and secret were taken from.
+    pub(super) keys_from: Option<PathBuf>,
+}
+
+impl Section {
+    /// Whether the key is present, even with an empty value.
+    pub(super) fn has(&self, key: &str) -> bool {
+        self.values.contains_key(key)
+    }
+
+    /// The key's string value; empty when absent or holding sub-properties.
+    pub(super) fn string(&self, key: &str) -> &str {
+        self.values.get(key).map_or("", |value| value.text.as_str())
+    }
+
+    /// Sets a key to a string value, as the SDK's `UpdateValue`.
+    pub(super) fn set(&mut self, key: &str, text: &str) {
+        let value = Value {
+            text: Zeroizing::new(text.to_owned()),
+            map: false,
+        };
+        self.values.insert(key.to_owned(), value);
     }
 }
 
-/// The keys of `profile` in `text`, or `None` when no section names it.
-pub(super) fn lookup<'a>(
-    text: &'a str,
-    flavor: Flavor,
-    profile: &str,
-) -> Result<Option<Keys<'a>>, Malformed> {
-    let mut found = Found::default();
-    let mut target = Target::Other;
-    // Whether the last property had a value: `None` right after a header.
-    let mut last_filled: Option<bool> = None;
-    for (index, line) in text.lines().enumerate() {
-        let number = index.saturating_add(1);
-        let lead = line.trim_start_matches([' ', '\t']);
-        if lead.is_empty() || lead.starts_with(['#', ';']) {
+/// The sections of one file, by name.
+pub(super) type Sections = BTreeMap<String, Section>;
+
+/// The parser's state: Go's `csection` and `ckey`.
+#[derive(Default)]
+struct Parser {
+    sections: Sections,
+    section: Option<String>,
+    key: Option<String>,
+}
+
+/// Parses one file's text.
+pub(super) fn parse(text: &str, path: &Path) -> Result<Sections, Malformed> {
+    let mut parser = Parser::default();
+    for (index, line) in text.split('\n').enumerate() {
+        if line.trim().is_empty() || is_comment(line) {
             continue;
         }
-        if let Some(inner) = header(line) {
-            target = classify(inner, flavor, profile);
-            // A section that names the profile counts even with no keys.
-            found.slot(target);
-            last_filled = None;
-            continue;
-        }
-        if lead.len() != line.len() {
-            // Indented: a nested property or a continuation, unless orphaned.
-            if last_filled != Some(false)
-                && let Some((key, value)) = split_property(lead)
-            {
-                let value = cut_comment(value).trim();
-                last_filled = Some(!value.is_empty());
-                assign(found.slot(target), key, unquote(value));
+        if let Some(name) = as_profile(line) {
+            parser.profile(name);
+        } else if !starts_blank(line) {
+            let (key, value) = as_property(line).ok_or(Malformed {
+                line: index.saturating_add(1),
+            })?;
+            parser.property(key, value);
+        } else {
+            let lead = line.trim_start_matches([' ', '\t']);
+            match split_property(lead) {
+                Some((key, value)) => parser.sub_property(key, unquote(value)),
+                None => parser.continuation(lead),
             }
-            continue;
         }
-        let (key, value) = split_property(cut_comment(line)).ok_or(Malformed { line: number })?;
-        last_filled = Some(!value.is_empty());
-        assign(found.slot(target), key, unquote(value));
     }
-    Ok(found.named.or(found.bare))
+    for section in parser.sections.values_mut() {
+        if section.has(ACCESS_KEY_ID) != section.has(SECRET_ACCESS_KEY) {
+            section.partial = Some(path.to_owned());
+        }
+        if section.has(ACCESS_KEY_ID) && section.has(SECRET_ACCESS_KEY) {
+            section.keys_from = Some(path.to_owned());
+        }
+    }
+    Ok(parser.sections)
 }
 
-fn assign<'a>(slot: Option<&mut Keys<'a>>, key: &str, value: &'a str) {
-    let Some(keys) = slot else { return };
-    if key.eq_ignore_ascii_case("aws_access_key_id") {
-        keys.id = Some(value);
-    } else if key.eq_ignore_ascii_case("aws_secret_access_key") {
-        keys.secret = Some(value);
-    } else if key.eq_ignore_ascii_case("aws_session_token") {
-        keys.token = Some(value);
+impl Parser {
+    fn profile(&mut self, name: String) {
+        self.key = None;
+        self.sections.entry(name.clone()).or_default();
+        self.section = Some(name);
+    }
+
+    fn current(&mut self) -> Option<&mut Section> {
+        let name = self.section.as_ref().filter(|name| !name.is_empty())?;
+        self.sections.get_mut(name)
+    }
+
+    fn property(&mut self, key: String, value: &str) {
+        let Some(section) = self.current() else {
+            return;
+        };
+        section.set(&key, value);
+        // Go's empty `ckey` means no current key.
+        self.key = (!key.is_empty()).then_some(key);
+    }
+
+    fn sub_property(&mut self, key: String, value: &str) {
+        let current = self.key.clone();
+        let Some(section) = self.current() else {
+            return;
+        };
+        let parent = current
+            .as_deref()
+            .filter(|parent| section.string(parent).is_empty());
+        match parent.and_then(|parent| section.values.get_mut(parent)) {
+            Some(parent) => {
+                // The sub-property's own key and value are never read here.
+                parent.text = Zeroizing::new(String::new());
+                parent.map = true;
+            }
+            None => {
+                let promoted = trim_property_comment(value).trim().to_owned();
+                self.property(key, &promoted);
+            }
+        }
+    }
+
+    fn continuation(&mut self, text: &str) {
+        let Some(key) = self.key.clone() else {
+            return;
+        };
+        let Some(section) = self.current() else {
+            return;
+        };
+        if let Some(value) = section.values.get_mut(&key)
+            && !value.text.is_empty()
+            && !value.map
+        {
+            let joined = format!("{}\n{text}", value.text.as_str());
+            value.text = Zeroizing::new(joined);
+        }
     }
 }
 
-/// The trimmed inside of a `[header]` line, its trailing comment cut.
-fn header(line: &str) -> Option<&str> {
-    let line = line.split(['#', ';']).next().unwrap_or(line).trim();
-    Some(line.strip_prefix('[')?.strip_suffix(']')?.trim())
+fn starts_blank(line: &str) -> bool {
+    line.starts_with([' ', '\t'])
 }
 
-fn classify(inner: &str, flavor: Flavor, profile: &str) -> Target {
-    // Go splits a header at its first run of blanks into a type and a name.
-    let (kind, name) = match inner.split_once([' ', '\t']) {
-        Some((kind, rest)) => (Some(kind), rest.trim_start_matches([' ', '\t'])),
-        None => (None, inner),
+fn is_comment(line: &str) -> bool {
+    line.trim_start_matches([' ', '\t']).starts_with(['#', ';'])
+}
+
+/// Go's `asProfile`: the section name a header line gives.
+fn as_profile(line: &str) -> Option<String> {
+    let cut = line.split('#').next().unwrap_or(line);
+    let cut = cut.split(';').next().unwrap_or(cut).trim();
+    let inner = cut.strip_prefix('[')?.strip_suffix(']')?.trim();
+    Some(match inner.split_once([' ', '\t']) {
+        Some((kind, rest)) => format!("{kind} {}", rest.trim_start_matches([' ', '\t'])),
+        None => inner.to_owned(),
+    })
+}
+
+/// Go's `asProperty` on a line that does not start blank.
+fn as_property(line: &str) -> Option<(String, &str)> {
+    let trimmed = trim_property_comment(line).trim_end_matches([' ', '\t']);
+    let (key, value) = split_property(trimmed)?;
+    Some((key, unquote(value)))
+}
+
+/// Go's `splitProperty`: at `=`, or at `:` when it comes first; the key
+/// lower-cased.
+fn split_property(line: &str) -> Option<(String, &str)> {
+    let at = match (line.find('='), line.find(':')) {
+        (Some(equals), Some(colon)) => equals.min(colon),
+        (Some(at), None) | (None, Some(at)) => at,
+        (None, None) => return None,
     };
-    match (flavor, kind) {
-        (Flavor::Config, Some("profile")) if name == profile => Target::Named,
-        (Flavor::Config, None) if name == "default" && profile == "default" => Target::BareDefault,
-        (Flavor::Credentials, None) if name == profile => Target::Named,
-        (Flavor::Credentials, Some(kind)) if kind != "profile" => {
-            let joined = profile
-                .strip_prefix(kind)
-                .and_then(|rest| rest.strip_prefix(' '));
-            if joined == Some(name) {
-                Target::Named
-            } else {
-                Target::Other
-            }
-        }
-        (Flavor::Config | Flavor::Credentials, Some(_) | None) => Target::Other,
-    }
-}
-
-/// `key = value` or `key: value`, whichever separator comes first, both
-/// sides trimmed.
-fn split_property(line: &str) -> Option<(&str, &str)> {
-    let at = line.find(['=', ':'])?;
     let (key, rest) = line.split_at(at);
-    Some((key.trim(), rest.get(1..)?.trim()))
+    Some((key.trim().to_lowercase(), rest.get(1..)?.trim()))
 }
 
-/// The text before a comment that a blank introduces.
-fn cut_comment(text: &str) -> &str {
+fn trim_property_comment(text: &str) -> &str {
     [" #", " ;", "\t#", "\t;"]
         .iter()
         .fold(text, |text, mark| text.split(mark).next().unwrap_or(text))
 }
 
+/// Go's `legacyStrconv`: one pair of matching quotes removed.
 fn unquote(value: &str) -> &str {
     ['"', '\'']
         .iter()

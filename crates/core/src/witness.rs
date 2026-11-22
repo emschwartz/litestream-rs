@@ -403,6 +403,7 @@ where
         }
         match witness_one(staging, &mut live, info, prev, &mut framed).await? {
             Ok((token, next)) => {
+                mark!(Boot4);
                 tokens.push(token);
                 prev = Before {
                     txid: Some(next.txid),
@@ -629,6 +630,20 @@ fn framed_pages<R: Read + Seek>(
             ) => return Ok(None),
         }
     }
+}
+
+/// Whether the staging store still holds, under the token's key, exactly the
+/// bytes the token was minted for: read whole, verified, same length, digest
+/// and trailer checksum.
+///
+/// # Errors
+/// The staging store's fault when a read fails.
+pub(crate) async fn still_holds<L: ObjectStore>(
+    staging: &L,
+    token: &Witnessed,
+) -> Result<bool, Fault> {
+    let decoded = decode(staging, token.key(), Fault::from_staging).await?;
+    Ok(decoded.is_some_and(|file| token.matches(file.bytes, file.checksum)))
 }
 
 /// Reads `key` whole through the decoder, tallying its raw bytes; `None` when

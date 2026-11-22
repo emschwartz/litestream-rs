@@ -26,6 +26,17 @@
 # rules they guarded are planted below as the witness-* entries. page-size-after-vacuum (b352aba): its
 # arm (an unusable newest staged file still names its page size) decides only with an empty replica,
 # where every staged file is pending and the boot witness now deletes an unusable one first.
+# other-writer-stop-forgotten-sim (a9da6c6): since a boot refuses replica files that neither the
+# WAL nor a takeover record vouches for, a restart after a stop for another writer's file above
+# staging stops again with or without the stop record, so the scenario cannot tell; the record
+# still decides the case of another writer at the engine's next id, which the core entry plants.
+# replica-page-size-unread-sim (7bf9707): seed 0x13's run no longer reaches the boot it pinned
+# once the engine asks for a takeover record before deleting staged files (one more tick changes
+# the interleaving); the test stays as a regression run, and the core entry plants the defect.
+# other-writer-stop-forgotten (a9da6c6) and stop-record-not-kept (a939338): the stop record they
+# planted into is gone (68d2d90). A restart after a stop for another writer now stops by the
+# boot's refusal: of files above staging (boot-gate-refuses-nothing) or of a divergence under the
+# engine's next id (boot-divergence-snapshots-above-another-writer).
 
 [[bug]]
 name = "canary-no-op"
@@ -71,7 +82,10 @@ name = "recover-before-trusting-snapshot"
 fix = "b1b9b1e"
 package = "lsr-sim"
 test_bin = "sim"
-tests = ["a_requested_snapshot_after_the_wal_moved_trusts_no_stale_page"]
+tests = [
+    "a_requested_snapshot_after_the_wal_moved_trusts_no_stale_page",
+    "a_put_back_staged_file_never_sends_latest_back_seed_0x126d68fac4b6",
+]
 
 [[bug]]
 name = "boot-snapshot-cause"
@@ -152,6 +166,10 @@ package = "lsr-sim"
 test_bin = "sim"
 tests = [
     "maintenance_stops_on_another_writer_seed_0x50c",
+    "a_put_back_staged_file_never_sends_latest_back_seed_0x126d68fac789",
+    "a_put_back_staged_file_never_sends_latest_back_seed_0x126d68facf21",
+    "a_put_back_staged_file_never_sends_latest_back_seed_0x126d68fad061",
+    "another_writer_s_files_fit_the_level_bytes_budget_seed_0x126d68facf74",
 ]
 
 [[bug]]
@@ -205,7 +223,14 @@ name = "always-snapshot-at-boot"
 fix = "plant"
 package = "lsr-sim"
 test_bin = "sim"
-tests = ["liveness::restarts_with_nothing_damaged_never_snapshot"]
+tests = [
+    "liveness::restarts_with_nothing_damaged_never_snapshot",
+    "a_torn_staged_file_is_dropped_seed_0x25",
+    "a_torn_staged_file_is_dropped_seed_0x2d",
+    "a_torn_staged_file_is_dropped_seed_0x46",
+    "page_size_vacuum_and_staging_wipe_seed_0x126d68ef545f",
+    "a_put_back_staged_file_never_sends_latest_back_seed_0x126d68fae16b",
+]
 # A failed sync of the WAL taken as a success: the frames it covered are staged, though the
 # kernel may never write them. The simulator's lost writeback and its staged-durability check
 # see it too (`wal_fsync_fails`), as does the actor's unit test.
@@ -268,6 +293,107 @@ tests = [
     "a_staged_file_whose_bytes_differ_but_still_verify_is_refused",
 ]
 
+# The uploader asks the bucket to refuse a taken level-0 key (If-None-Match: *); the store stops
+# sending the header.
+[[bug]]
+name = "drop-if-none-match"
+fix = "92613ce"
+package = "lsr-store-s3"
+test_bin = "store-s3"
+tests = [
+    "a_create_only_put_into_a_taken_key_is_refused_and_changes_nothing",
+    "a_create_only_multipart_into_a_taken_key_is_refused_at_the_complete",
+    "store::cases::conformance_cases::a_new_upload_never_replaces",
+]
+
+# A refused upload is taken as the engine's own earlier commit without reading the object back.
+[[bug]]
+name = "refusal-without-read-back"
+fix = "92613ce"
+package = "lsr-core"
+tests = [
+    "a_refused_upload_of_other_verifying_bytes_is_never_written_over",
+    "a_refusal_behind_a_listing_too_stale_to_show_the_key_is_judged_by_reads",
+    "a_refused_upload_with_the_replica_ahead_is_another_writer",
+    "a_refused_upload_over_an_object_that_does_not_verify_replaces_it",
+]
+
+# Re-expressed: the relist after a refusal now reads the refused key and judges it from two
+# reads, which catches the original patch (dropping the staged copy's own verification) on its
+# own; the defect is a torn staged read confirming the replica's object, planted directly.
+[[bug]]
+name = "refusal-judged-from-one-read"
+fix = "af8ea2f"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["one_bad_staged_read_after_a_refusal_confirms_no_other_object_seed_0x4ef"]
+
+[[bug]]
+name = "spent-multipart-upload"
+fix = "ce35d57"
+package = "lsr-store-s3"
+test_bin = "store-s3"
+tests = ["a_retried_complete_finding_its_upload_spent_is_settled_by_a_head"]
+
+[[bug]]
+name = "completed-etag-form"
+fix = "ce35d57"
+package = "lsr-store-s3"
+test_bin = "store-s3"
+tests = ["a_completed_etag_in_another_form_is_not_taken_for_damage"]
+
+# A boot or relist takes a listing's newest as the replica's, with no reads past it: a listing
+# that lags hides the engine's own uploads.
+[[bug]]
+name = "listing-trusted-without-probe"
+fix = "8c7d8ce"
+package = "lsr-core"
+tests = [
+    "a_listing_that_hides_the_newest_uploads_is_corrected_by_reads",
+    "a_relist_that_hides_confirmed_uploads_is_no_regression",
+    "a_snapshot_a_listing_hides_is_found_by_a_read",
+    "the_probe_reads_through_the_newest_staged_transaction",
+]
+
+# The same plant, judged by the simulator's lagging listings.
+[[bug]]
+name = "boot-trusts-a-stale-listing"
+fix = "8c7d8ce"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "a_stale_boot_listing_does_not_stop_the_engine_on_its_own_files",
+    "a_lagging_relist_does_not_report_the_replica_gone_backwards_seed_0x440",
+    "a_lagging_boot_listing_does_not_send_an_upload_into_a_freed_key_seed_0x4c5",
+]
+
+# A file a listing shows past the engine's position stops it with no read to find the file.
+[[bug]]
+name = "other-writer-from-a-listing-alone"
+fix = "8c7d8ce"
+package = "lsr-core"
+tests = ["maintenance_stops_on_a_file_past_its_position_only_when_a_read_finds_it"]
+
+# Maintenance plans from a listing that ends before the engine's confirmed upload.
+[[bug]]
+name = "maintenance-plans-from-a-lagging-listing"
+fix = "8c7d8ce"
+package = "lsr-core"
+tests = ["maintenance_plans_nothing_from_a_listing_that_hides_a_confirmed_upload"]
+
+# One failed read of the staged copy takes it as torn and confirms the replica's differing object.
+[[bug]]
+name = "tail-judged-from-one-read"
+fix = "34f1694"
+package = "lsr-core"
+tests = ["one_torn_read_of_the_staged_copy_confirms_no_differing_replica_object"]
+
+# One failed read of the replica's copy takes it as torn and writes the staged file over it.
+[[bug]]
+name = "replica-replaced-on-one-read"
+fix = "34f1694"
+package = "lsr-core"
+tests = ["one_torn_read_of_the_replica_copy_does_not_write_over_it"]
 # The witness's page count compared with at least, not exactly: a pending file carrying one page
 # its range never wrote is proven and uploaded. Found by a blind recall pilot, which no layer caught.
 [[bug]]
@@ -446,6 +572,44 @@ package = "lsr-core"
 tests = [
     "a_commit_before_the_checkpoint_barrier_is_not_stamped_before_it_landed",
 ]
+
+[[bug]]
+name = "meta-dir-unlocked"
+fix = "a939338"
+package = "lsr-replica"
+test_bin = "replica"
+tests = [
+    "second_writer::a_second_engine_on_one_meta_directory_is_refused",
+    "second_writer::a_second_process_on_one_meta_directory_is_refused",
+]
+
+# A replica that lost files while the engine ran went unseen by maintenance.
+[[bug]]
+name = "regression-unwatched"
+fix = "5cf9f56"
+package = "lsr-core"
+tests = ["a_rollback_while_running_is_seen_by_the_next_maintenance_listing"]
+
+[[bug]]
+name = "regression-unwatched-sim"
+fix = "5cf9f56"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["faults::bucket_rolled_back_unseen"]
+
+# The sibling: a watched key missing from a listing taken as lost without the read.
+[[bug]]
+name = "regression-on-listing-alone"
+fix = "5cf9f56"
+package = "lsr-core"
+tests = ["a_lagging_listing_is_not_a_regression"]
+
+# A running engine's divergence from another writer's file snapshotted above it.
+[[bug]]
+name = "divergence-snapshots-above-another-writer"
+fix = "8ce228d"
+package = "lsr-core"
+tests = ["a_running_engine_stops_when_another_writer_took_its_next_id"]
 
 # The same defect against the simulator, killed by the swarm unaided under the each-read clock law.
 [[bug]]
@@ -632,14 +796,6 @@ fix = "7bf9707"
 package = "lsr-core"
 tests = ["a_newest_replica_header_that_does_not_decode_still_names_the_page_size"]
 
-# The same plant, judged by the simulator's lying-reads hold where it was found.
-[[bug]]
-name = "replica-page-size-unread-sim"
-fix = "7bf9707"
-package = "lsr-sim"
-test_bin = "sim"
-tests = ["a_boot_whose_replica_reads_lie_never_writes_a_new_page_size_seed_0x13"]
-
 # A stall threshold no outage reaches: a plain-retry fault never degrades, the defect 538bd84
 # fixed, judged by the simulator's health-truth check under a long outage hold.
 [[bug]]
@@ -666,6 +822,75 @@ name = "staging-dir-fsync"
 fix = "2bf9f99"
 package = "lsr-store-fs"
 tests = ["a_crash_at_any_step_of_a_commit_loses_nothing_committed_and_shows_nothing_torn"]
+
+# A boot that refused replica files the live WAL vouches for: a wiped staging directory in the
+# same WAL generation stopped instead of continuing.
+[[bug]]
+name = "boot-gate-wal-vouch-skipped"
+fix = "aa1165d"
+package = "lsr-core"
+tests = [
+    "vouch::a_wiped_staging_in_the_same_wal_generation_continues",
+    "vouch::staging_behind_a_replica_the_wal_vouches_for_continues",
+]
+
+[[bug]]
+name = "boot-gate-wal-vouch-skipped-sim"
+fix = "aa1165d"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["newest_staged_file_lost", "restored_old_meta"]
+
+# A takeover record that covers nothing: a take-over never clears a refusal or a stop record.
+[[bug]]
+name = "boot-gate-takeover-ignored"
+fix = "aa1165d"
+package = "lsr-core"
+tests = ["vouch::a_vm_restore_stops_until_a_takeover_covers_the_replica"]
+
+[[bug]]
+name = "boot-gate-takeover-ignored-sim"
+fix = "aa1165d"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["vm_restore_stops_until_a_take_over"]
+
+# A boot that refuses nothing: replica files nothing vouches for are snapshotted above, as before
+# the fix.
+[[bug]]
+name = "boot-gate-refuses-nothing"
+fix = "aa1165d"
+package = "lsr-core"
+tests = [
+    "vouch::a_foreign_file_put_while_the_engine_was_down_stops_the_boot",
+    "vouch::a_takeover_does_not_cover_a_foreign_file_above_it",
+]
+
+[[bug]]
+name = "boot-gate-refuses-nothing-sim"
+fix = "aa1165d"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "foreign_file_while_down_stops",
+    "vm_restore_stops_until_a_take_over",
+    "latest_never_goes_back_after_two_second_writers_seed_0xb9",
+]
+
+# A restore that leaves no takeover record: the replicator started on it refuses the replica.
+[[bug]]
+name = "restore-writes-no-takeover"
+fix = "0fcb1b6"
+package = "lsr-replica"
+test_bin = "replica"
+tests = ["second_writer::a_restored_database_replicates_without_a_refusal"]
+
+[[bug]]
+name = "restore-writes-no-takeover-cli"
+fix = "54e47f8"
+package = "lsr-cli"
+test_bin = "cli"
+tests = ["integrity_check_publishes_a_valid_database_in_every_mode"]
 
 # The engine journal's rules (docs/journal.md): each is a rule of the writer, the codec or the
 # model, not a fix of a shipped defect; `fix` is the commit that introduced it.
@@ -777,6 +1002,46 @@ tests = [
     "journal_model::the_writer_matches_the_model_under_the_block_law",
 ]
 
+# The engine deletes staged files the replica holds with no takeover record kept first: a crash
+# before the replacing snapshot leaves the next boot refusing the engine's own files.
+[[bug]]
+name = "takeover-before-drop-skipped"
+fix = "88577ff"
+package = "lsr-core"
+tests = ["vouch::a_crash_between_the_engines_own_drop_and_its_snapshot_is_not_a_refusal"]
+
+[[bug]]
+name = "takeover-before-drop-skipped-sim"
+fix = "88577ff"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_tail_judged_torn_and_dropped_from_staging_is_never_refused_seed_0x3ed"]
+
+# A running drop of an unreadable staged file records only through the confirmed transaction,
+# short of a file whose upload published with its answer lost.
+[[bug]]
+name = "running-drop-record-capped-at-confirmed"
+fix = "88577ff"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_running_drop_records_past_an_unconfirmed_upload_seed_0xf45b5"]
+
+# A boot drop records only through the confirmed transaction, short of a listed tail the
+# listing judged torn.
+[[bug]]
+name = "boot-drop-record-capped-at-confirmed"
+fix = "88577ff"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_tail_judged_torn_and_dropped_from_staging_is_never_refused_seed_0x3ed"]
+
+# An unanswered request for the record asks again at once, forever, instead of waiting.
+[[bug]]
+name = "takeover-ask-spins"
+fix = "88577ff"
+package = "lsr-core"
+tests = ["vouch::a_takeover_the_driver_cannot_write_keeps_the_staged_files_and_waits"]
+
 [[bug]]
 name = "dry-run-gap-not-relisted"
 fix = "3e344e6"
@@ -834,6 +1099,22 @@ fix = "af15d43"
 package = "lsr-replica"
 tests = ["a_park_returns_for_a_step_back_between_the_callers_reading_and_the_park"]
 
+# A boot divergence (the replica's newest file verifies and differs from the staged copy under
+# the same key) dropped the staged copy and snapshotted above another writer's file.
+[[bug]]
+name = "boot-divergence-snapshots-above-another-writer"
+fix = "68d2d90"
+package = "lsr-core"
+tests = ["a_running_engine_stops_when_another_writer_took_its_next_id"]
+
+# An unusable takeover record taken as covering everything instead of as absent.
+[[bug]]
+name = "unusable-takeover-taken-as-given"
+fix = "68d2d90"
+package = "lsr-replica"
+test_bin = "replica"
+tests = ["second_writer::an_unusable_takeover_record_is_reported_and_costs_no_stop"]
+
 [[bug]]
 name = "journal-first-run-reported"
 fix = "27ef518"
@@ -865,7 +1146,7 @@ name = "success-keeps-a-stall"
 fix = "checker-holes (stall liveness)"
 package = "lsr-sim"
 test_bin = "sim"
-tests = ["a_stall_ends_with_the_fault_that_caused_it_seed_0xa2"]
+tests = ["a_stall_ends_with_the_fault_that_caused_it_seed_0x31c"]
 
 [[bug]]
 name = "journal-debt-not-recorded"
@@ -883,6 +1164,7 @@ package = "lsr-sim"
 test_bin = "sim"
 tests = [
     "faults::wal_fsync_fails_then_restart",
+    "a_restart_after_a_failed_wal_sync_owes_the_truncate_seed_0xf",
 ]
 
 [[bug]]
@@ -924,6 +1206,67 @@ fix = "9a3ea61a"
 package = "lsr-core"
 tests = [
     "actor::tests::journal::an_unwritable_journal_stops_lagging_once_the_debt_is_paid",
+]
+# The recorded regression histories (crates/sim/tests/sim/histories.rs) whose own defect has no
+# plant: each is run against a plant on the path its history takes, so a history that stops
+# running that path goes red. The same defects as the entries they reuse, against the simulator.
+[[bug]]
+name = "wal-barrier-sim"
+fix = "plant"
+patch = "wal-barrier"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["page_size_vacuum_and_staging_wipe_seed_0x126d68ef1c07"]
+
+[[bug]]
+name = "inside-file-sole-base-sim"
+fix = "plant"
+patch = "inside-file-sole-base"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_restored_staging_backup_is_not_uploaded_seed_0x1919f"]
+
+[[bug]]
+name = "compact-local-read-as-remote-sim"
+fix = "plant"
+patch = "compact-local-read-as-remote"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["compaction_takes_a_staging_denial_as_staging_seed_0xb9e"]
+
+# The history judge remembers the previous latest restore as the nodes that held its content
+# then, so a redo that rebuilds that content on a new branch reads as an unreported step back.
+[[bug]]
+name = "latest-judged-against-old-nodes"
+fix = "5f49ebf"
+package = "lsr-history"
+test_bin = "history"
+tests = ["judge::a_restore_past_a_state_the_redo_rebuilt_went_forward"]
+
+[[bug]]
+name = "latest-judged-against-old-nodes-sim"
+fix = "plant"
+patch = "latest-judged-against-old-nodes"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["swarm_seed_0x753_a_redo_that_rebuilds_the_restored_state_is_not_a_loss"]
+
+# A rejected write deletes its key even when the write replaced an object the key held before.
+[[bug]]
+name = "rejected-replace-deletes"
+fix = "40f58942"
+package = "lsr-core"
+tests = ["a_rejected_write_over_an_object_that_was_there_deletes_nothing"]
+
+# A compaction writes over an output key that already holds an object, so its rejected commit
+# deletes what was there.
+[[bug]]
+name = "compaction-writes-over-its-output"
+fix = "40f58942"
+package = "lsr-core"
+tests = [
+    "a_rejected_compaction_never_deletes_an_output_that_was_already_there",
+    "running_a_job_twice_leaves_one_file_at_the_key",
 ]
 
 # Fail-stop (if-replication-stops, docs/proposals/fail-stop.md section 2): each entry is one of the
@@ -1350,3 +1693,151 @@ package = "lsr-core"
 tests = [
     "actor::tests::journal::the_restore_point_is_kept_for_the_window_across_a_restart",
 ]
+
+# `dir:` scanning made to agree with Go's walk (claude/dropin-dir): each was found by the Go
+# differential (compat `dropin_dir`), which needs the Go dumper and so is ignored; the config
+# tests below are its Go-free counterparts.
+[[bug]]
+name = "dir-root-link-followed"
+fix = "claude/dropin-dir"
+package = "lsr-config"
+test_bin = "config"
+tests = ["a_dir_that_is_a_symbolic_link_finds_nothing_as_go"]
+
+[[bug]]
+name = "dir-root-file-refused"
+fix = "claude/dropin-dir"
+package = "lsr-config"
+test_bin = "config"
+tests = ["a_dir_that_is_a_database_file_is_that_one_database"]
+
+[[bug]]
+name = "dir-header-read-exact"
+fix = "claude/dropin-dir"
+package = "lsr-config"
+test_bin = "config"
+tests = ["a_short_header_read_counts_the_missing_bytes_as_zero"]
+
+[[bug]]
+name = "dir-bad-pattern-ignored"
+fix = "claude/dropin-dir"
+package = "lsr-config"
+test_bin = "config"
+tests = ["a_malformed_pattern_fails_the_scan_only_when_a_name_reaches_it"]
+
+[[bug]]
+name = "dir-url-path-unescaped"
+fix = "claude/dropin-dir"
+package = "lsr-config"
+test_bin = "config"
+tests = ["odd_names_reach_a_url_replica_unchanged"]
+
+# S3 credentials made to resolve as Go's AWS SDK does (claude/dropin-creds): found by the Go
+# differential (compat `dropin_creds`), which needs the Go dumper and so is ignored; the
+# chain tests below are its Go-free counterparts.
+[[bug]]
+name = "creds-files-read-after-environment"
+fix = "claude/dropin-creds"
+package = "lsr-store-s3"
+tests = ["chain::tests::a_partial_profile_stops_the_chain_even_with_environment_keys"]
+
+[[bug]]
+name = "creds-empty-aws-var-ignored"
+fix = "claude/dropin-creds"
+package = "lsr-store-s3"
+tests = ["chain::tests::an_empty_aws_variable_blocks_the_litestream_copy"]
+
+[[bug]]
+name = "creds-merge-keeps-config-error"
+fix = "claude/dropin-creds"
+package = "lsr-store-s3"
+tests = ["chain::tests::the_credentials_file_is_merged_over_the_config_file_as_the_sdk_merges"]
+
+[[bug]]
+name = "creds-continuation-dropped"
+fix = "claude/dropin-creds"
+package = "lsr-store-s3"
+tests = ["chain::tests::an_indented_line_without_a_separator_continues_the_value"]
+
+[[bug]]
+name = "creds-unreadable-file-skipped"
+fix = "claude/dropin-creds"
+package = "lsr-store-s3"
+tests = ["chain::tests::a_file_that_opens_but_cannot_be_read_stops_the_chain_as_in_go"]
+
+# Config parsing made to agree with Go's (claude/dropin-config): found by the Go differential
+# (compat `dropin_config`), which needs the Go dumper and so is ignored; the tests below are
+# its Go-free counterparts.
+[[bug]]
+name = "config-large-count-refused"
+fix = "claude/dropin-config"
+package = "lsr-config"
+test_bin = "config"
+tests = ["min_checkpoint_page_count_must_be_above_zero"]
+
+[[bug]]
+name = "config-empty-meta-path-dropped"
+fix = "claude/dropin-config"
+package = "lsr-config"
+test_bin = "config"
+tests = ["an_empty_meta_path_is_the_current_directory_as_go"]
+
+[[bug]]
+name = "region-letters-digits-dashes-only"
+fix = "claude/dropin-config"
+package = "lsr-store-s3"
+tests = ["config::tests::a_region_is_refused_only_when_no_request_could_be_signed_with_it"]
+
+# `replicate`'s command line made to read as Go's (claude/dropin-cli): found by the Go
+# differential (compat `dropin_cli`), which needs the Go builds and so is ignored; the
+# tests below are its Go-free counterparts.
+[[bug]]
+name = "log-level-unknown-refused"
+fix = "claude/dropin-cli"
+package = "lsr-config"
+test_bin = "config"
+tests = ["log_level_from_the_environment_wins"]
+
+[[bug]]
+name = "bool-checked-after-help"
+fix = "claude/dropin-cli"
+package = "lsr-sidecar"
+tests = ["flags::tests::a_bad_boolean_before_help_is_the_error"]
+
+[[bug]]
+name = "help-exits-zero-without-literal"
+fix = "claude/dropin-cli"
+package = "lsr-sidecar"
+tests = ["flags::tests::help_succeeds_only_when_asked_for_literally"]
+
+[[bug]]
+name = "flag-combination-before-config"
+fix = "claude/dropin-cli"
+package = "lsr-cli"
+test_bin = "cli"
+tests = ["a_missing_config_is_reported_before_a_flag_combination"]
+
+[[bug]]
+name = "replicate-exit-codes-per-class"
+fix = "claude/dropin-cli"
+package = "lsr-cli"
+test_bin = "cli"
+tests = ["go_s_flag_refusals_are_usage_errors"]
+# The simulator finds it once the application acts inside a tick (`Op::AppInTick`,
+# crates/sim/src/sqlite/in_tick.rs); main's swarm kills it on none of seeds 1000001 to 1002000.
+[[bug]]
+name = "boundary-snapshot-keeps-page-table-sim"
+fix = "claude/boundary-snapshot-pages"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["swarm_seed_0xf488c_takes_no_commit_before_a_truncate_for_damage"]
+
+# The scheduled verify calls every transaction without an exact plan "merged by compaction,
+# nothing to compare", so a replica that lost the live transaction passes. The simulator's
+# verify judge (crates/sim/src/run/verify.rs) catches it unaided at its 20th swarm seed.
+[[bug]]
+name = "verify-no-plan-called-merged"
+fix = "plant"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["verify_reports_a_live_transaction_that_no_longer_restores_seed_0x14"]

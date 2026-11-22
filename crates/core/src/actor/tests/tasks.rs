@@ -125,6 +125,27 @@ fn upload_backing_off(rig: &mut Rig, actor: &mut Actor) {
     );
 }
 
+/// A sync stopped at its byte cap leaves committed transactions unstaged and
+/// asks for the next tick at once: an idle application changes the WAL no more,
+/// so waiting on a change would leave them unreplicated.
+#[test]
+fn a_sync_stopped_at_its_cap_asks_for_the_next_tick_at_once() {
+    let mut config = cfg();
+    config.sync.cap = std::num::NonZeroU64::new(1);
+    let mut rig = Rig::new();
+    let mut actor = Actor::new(config);
+    rig.settle(&mut actor, T0);
+    upload_backing_off(&mut rig, &mut actor);
+    rig.settle(&mut actor, T0 + 10);
+    rig.commit(3);
+    rig.commit(4);
+    let tick = rig.tick(&mut actor, T0 + 11);
+    assert_eq!(event(&tick), Some(&Event::Synced { files: 1 }));
+    assert_eq!(next_of(&tick), Some(Next::Now));
+    let rest = rig.tick(&mut actor, T0 + 11);
+    assert_eq!(event(&rest), Some(&Event::Synced { files: 1 }));
+}
+
 /// The read-lock hold moved while a sync staged its file: the sync proves
 /// nothing, so the checkpoint it would have allowed waits for the next tick,
 /// which is asked for at once.
@@ -273,4 +294,40 @@ fn a_passed_wait_with_no_work_left_is_not_a_deadline() {
         let seen = rig.settle(&mut actor, until.unix_millis());
         assert_ne!(seen.last().and_then(next_of), Some(Next::Now), "{seen:?}");
     }
+}
+
+/// A snapshot job whose step the witness cap holds stays due: the tick reports
+/// the empty sync and the snapshot runs once the cap has room, not after the
+/// next listing.
+#[test]
+fn a_snapshot_held_at_the_witness_cap_runs_once_there_is_room() {
+    let (mut rig, mut actor) = super::rejected_snapshot::before_first_snapshot();
+    let checksum = lsr_ltx::FileChecksum::from_raw(1 << 63).unwrap();
+    for n in 1_000..1_000 + crate::witness::MAX_WITNESSED {
+        let key = FileKey::new(
+            Level::ZERO,
+            TxidRange::single(Txid::new(u64::try_from(n).unwrap()).unwrap()),
+        );
+        let token = crate::witness::Witnessed::made_here(
+            key,
+            crate::witness::ByteTally::new(),
+            checksum,
+            ts(T0),
+        );
+        actor.engine.witnesses.insert(token);
+    }
+    let held = rig.tick(&mut actor, T0);
+    assert_eq!(event(&held), Some(&Event::Synced { files: 0 }), "{held:?}");
+    actor.engine.witnesses = crate::witness::Witnesses::new();
+    let ran = rig.tick(&mut actor, T0);
+    assert!(
+        matches!(
+            event(&ran),
+            Some(Event::Maintained {
+                event: MaintainedEvent::Snapshot(_),
+                ..
+            })
+        ),
+        "{ran:?}"
+    );
 }

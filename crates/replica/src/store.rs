@@ -24,6 +24,7 @@ use lsr_ltx::{Timestamp, TxidRange};
 
 use crate::health::{OpCounters, StoreCounters};
 use crate::runtime::millis_until;
+use lsr_core::WriteMode;
 
 /// A boxed future that may move between threads.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -65,6 +66,7 @@ pub trait DynStore: Send + Sync {
         &'a self,
         key: &'a FileKey,
         created_at: Timestamp,
+        mode: WriteMode,
     ) -> BoxFuture<'a, Result<Box<dyn DynUpload>, StoreError>>;
 
     /// [`ObjectStore::delete`].
@@ -162,8 +164,9 @@ where
         &'a self,
         key: &'a FileKey,
         created_at: Timestamp,
+        mode: WriteMode,
     ) -> BoxFuture<'a, Result<Box<dyn DynUpload>, StoreError>> {
-        let begun = self.begin_upload(key, created_at);
+        let begun = self.begin_upload(key, created_at, mode);
         Box::pin(async move {
             let upload: Box<dyn DynUpload> = Box::new(begun.await?);
             Ok(upload)
@@ -262,8 +265,9 @@ impl<'a, P: Deref<Target = dyn DynStore + 'a> + Send + Sync> ObjectStore for Era
         &self,
         key: &FileKey,
         created_at: Timestamp,
+        mode: WriteMode,
     ) -> Result<Self::Upload, StoreError> {
-        self.0.begin_upload_boxed(key, created_at).await
+        self.0.begin_upload_boxed(key, created_at, mode).await
     }
 
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
@@ -471,8 +475,9 @@ impl ObjectStore for Metered {
         &self,
         key: &FileKey,
         created_at: Timestamp,
+        mode: WriteMode,
     ) -> Result<Self::Upload, StoreError> {
-        let call = self.store.begin_upload_boxed(key, created_at);
+        let call = self.store.begin_upload_boxed(key, created_at, mode);
         let inner = metered(&*self.clock, &self.meters.begin_upload, call).await?;
         Ok(MeteredUpload {
             inner,
@@ -603,7 +608,7 @@ mod tests {
         let key = FileKey::new(Level::ZERO, TxidRange::new(Txid::MIN, Txid::MIN).unwrap());
         block_on(async {
             let mut upload = metered
-                .begin_upload(&key, Timestamp::from_unix_millis(0))
+                .begin_upload(&key, Timestamp::from_unix_millis(0), WriteMode::Replace)
                 .await
                 .unwrap();
             upload.write(b"abc").await.unwrap();

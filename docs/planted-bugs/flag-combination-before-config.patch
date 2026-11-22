@@ -1,0 +1,12 @@
+diff --git a/crates/sidecar/src/flags.rs b/crates/sidecar/src/flags.rs
+index 76af458..082cbec 100644
+--- a/crates/sidecar/src/flags.rs
++++ b/crates/sidecar/src/flags.rs
+@@ -257,6 +257,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Parsed, UsageError> {
+         force_snapshot: boolean("force-snapshot")?,
+         enforce_retention: boolean("enforce-retention")?,
+     };
++    check(&flags)?;
+     Ok(Parsed::Run(flags))
+ }
+ 

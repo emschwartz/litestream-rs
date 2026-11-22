@@ -24,6 +24,7 @@ pub(crate) mod cases {
     use std::time::Duration;
 
     use super::common::*;
+    use lsr_core::WriteMode;
     use lsr_core::conformance::block_on;
     use lsr_core::{
         ContiguousChain, Depth, Did, Due, FakeClock, FileKey, Inventory, Job, L0Retention, Level,
@@ -134,7 +135,10 @@ pub(crate) mod cases {
             for (level, min, max, at) in layout() {
                 let key = key(level, min, max);
                 block_on(async {
-                    let mut up = store.begin_upload(&key, at).await.unwrap();
+                    let mut up = store
+                        .begin_upload(&key, at, WriteMode::Replace)
+                        .await
+                        .unwrap();
                     up.write(&ltx_bytes(min, max, at)).await.unwrap();
                     up.commit().await.unwrap();
                 });

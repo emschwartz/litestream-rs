@@ -970,6 +970,9 @@ impl Fault {
             StoreError::Denied { why, .. } => Self::StoreDenied(*why),
             StoreError::Refused { .. } => Self::StoreRefused,
             StoreError::NotFound { .. } => Self::RemoteObjectMissing,
+            // The uploader reads the object back before it gets here; anywhere
+            // else the key holds something the caller did not expect: list.
+            StoreError::AlreadyExists { .. } => Self::UploadAmbiguous,
             StoreError::ScratchExhausted { .. } => Self::LocalDiskFull,
             StoreError::Corrupt { cause, .. } => match cause {
                 CorruptCause::CommitSizeMismatch { .. } => Self::UploadAmbiguous,
@@ -998,6 +1001,7 @@ impl Fault {
             StoreError::Transient { .. }
             | StoreError::Throttled { .. }
             | StoreError::Denied { .. }
+            | StoreError::AlreadyExists { .. }
             | StoreError::Refused { .. } => Self::LocalIo,
             StoreError::NotFound { .. } => Self::StagedLost,
             StoreError::ScratchExhausted { .. } => Self::LocalDiskFull,

@@ -68,6 +68,27 @@ fn report(error: &CliError) -> Exit {
     run::exit_for_error(error)
 }
 
+/// Go's `main` exits 1 on every error of `replicate` (`cmd/litestream/main.go:89-104`), so a
+/// script written for Go sees the same code (decision D47). Two codes stay: 0, and fail-stop's
+/// own 4, which Go never reaches (decision D84). `lsr`'s own commands keep a code per class.
+fn is_replicate() -> bool {
+    std::env::args_os()
+        .nth(1)
+        .is_some_and(|word| word == "replicate")
+}
+
 fn main() -> ExitCode {
-    ExitCode::from(finish().code())
+    let exit = finish();
+    let code = match exit {
+        Exit::Success | Exit::AppStopped => exit.code(),
+        Exit::Degraded | Exit::Refused | Exit::Environment | Exit::Usage | Exit::ExecFailed
+            if is_replicate() =>
+        {
+            1
+        }
+        Exit::Degraded | Exit::Refused | Exit::Environment | Exit::Usage | Exit::ExecFailed => {
+            exit.code()
+        }
+    };
+    ExitCode::from(code)
 }

@@ -34,6 +34,7 @@ use crate::layout::FileKey;
 use crate::pages::PageChecksumTable;
 use crate::position::Position;
 use crate::store::Denied;
+use crate::takeover::TakeoverRecord;
 use crate::upload::UploadState;
 use crate::witness::Witnesses;
 use lsr_journal::Journal;
@@ -127,6 +128,16 @@ pub(super) struct Kept {
     /// How far the engine is past a failed sync of the WAL (`unproven`). Kept across boots:
     /// a frame that sync covered is no truer after a rebuild.
     pub(super) unproven: Unproven,
+    /// The takeover the driver handed in (`crate::takeover`): an operator's,
+    /// a restore's, or one this engine asked for before dropping its own
+    /// staged files.
+    pub(super) takeover: Option<TakeoverRecord>,
+    /// A takeover the engine needs durable before it deletes staged files the
+    /// replica holds: the driver writes it and hands it back.
+    pub(super) wanted_takeover: Option<TakeoverRecord>,
+    /// The replica's newest transaction when a boot refused to build on files
+    /// nothing vouched for: what the stop reports.
+    pub(super) refused_through: Option<Txid>,
     /// The fail-stop clock (`crate::failstop`): reports, kept across boots so a rebuild does not
     /// restart it.
     pub(super) lag: Lag,
@@ -177,6 +188,9 @@ impl Kept {
             suspect_staged: None,
             snapshots: SnapshotCounts::default(),
             unproven: Unproven::No,
+            takeover: None,
+            wanted_takeover: None,
+            refused_through: None,
             lag: Lag::default(),
             listed: false,
             refused_at_boot: None,
@@ -211,6 +225,9 @@ impl Kept {
             suspect_staged,
             snapshots,
             unproven,
+            takeover,
+            wanted_takeover: _,
+            refused_through,
             lag,
             listed,
             refused_at_boot,
@@ -238,6 +255,10 @@ impl Kept {
             suspect_staged: *suspect_staged,
             snapshots: *snapshots,
             unproven: *unproven,
+            takeover: *takeover,
+            // A rebuilt engine boots again and asks again for what it needs.
+            wanted_takeover: None,
+            refused_through: *refused_through,
             lag: *lag,
             listed: *listed,
             refused_at_boot: *refused_at_boot,

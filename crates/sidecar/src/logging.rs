@@ -16,13 +16,14 @@
 //! so a grep for forced snapshots keeps working on `cause=`.
 
 use std::io::{self, Write};
+use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use lsr_config::{LogFormat, LogLevel};
 use lsr_core::AheadNotice;
 use lsr_core::{Clock, Event as EngineEvent};
-use lsr_replica::{DegradedCause, Event, EventSink, Txid, VerifyOutcome};
+use lsr_replica::{DegradedCause, Event, EventSink, Timestamp, Txid, VerifyOutcome};
 
 use crate::json::string as json_string;
 
@@ -301,12 +302,36 @@ impl EventSink for DbEvents {
                 "replication stopped",
                 vec![("cause", debug(cause))],
             ),
+            Event::Refused { through } => {
+                let msg = refused_message(*through);
+                let through = ("through", Value::from(through.get()));
+                self.log.log(LogLevel::Error, &msg, &[db, through]);
+                return;
+            }
+            Event::TakeoverRecordUnusable(unusable) => (
+                LogLevel::Warn,
+                "the takeover record in the meta directory (lsr-takeover) cannot be used and is ignored; the boot builds only on what the WAL vouches for",
+                vec![("problem", debug(unusable))],
+            ),
+            Event::TakeoverNotRecorded { kind } => (
+                LogLevel::Error,
+                "the takeover record could not be written; staged files are kept until it is",
+                vec![("kind", debug(kind))],
+            ),
             Event::Verified { txid, outcome } => verified_line(*txid, *outcome),
         };
         let mut all = vec![db];
         all.extend(fields);
         self.log.log(level, msg, &all);
     }
+}
+
+/// The approved text for a boot that refused the replica's newest transactions: nothing
+/// local vouched for them (`lsr_replica::Event::Refused`).
+fn refused_message(through: Txid) -> String {
+    format!(
+        "replicate refused: the replica holds transactions up to {through} that this database has no record of writing. Another replicator may be using this prefix. To replicate this database over them: `lsr take-over <db>`. To get them instead: `lsr restore`."
+    )
 }
 
 type Line = (LogLevel, &'static str, Vec<(&'static str, Value)>);
@@ -333,6 +358,20 @@ fn verified_line(txid: Txid, outcome: VerifyOutcome) -> Line {
         ),
         VerifyOutcome::Incomplete => (LogLevel::Warn, "verify could not finish", vec![txid]),
     }
+}
+
+/// The first report of a database file found ahead of its WAL: logged louder than a degraded
+/// task, since commits are lost and nothing will retry them back.
+fn found_ahead_line(pages: NonZeroU32, first: NonZeroU32, until: Timestamp) -> Line {
+    (
+        LogLevel::Error,
+        "database file holds pages from commits its WAL lost after a failed WAL sync; replicating it as served; the state before it stays restorable",
+        vec![
+            ("pages", u64::from(pages.get()).into()),
+            ("first_page", u64::from(first.get()).into()),
+            ("retry_at", until.to_string().into()),
+        ],
+    )
 }
 
 /// What an operator is told about a standing ahead-of-WAL verdict after its first report.
@@ -388,15 +427,7 @@ fn engine_line(event: &EngineEvent) -> Option<Line> {
             cause: DegradedCause::DatabaseAheadOfWal { pages, first },
             until,
             ..
-        } => (
-            LogLevel::Error,
-            "database file holds pages from commits its WAL lost after a failed WAL sync; replicating it as served; the state before it stays restorable",
-            vec![
-                ("pages", u64::from(pages.get()).into()),
-                ("first_page", u64::from(first.get()).into()),
-                ("retry_at", until.to_string().into()),
-            ],
-        ),
+        } => found_ahead_line(*pages, *first, *until),
         EngineEvent::Degraded {
             task, cause, until, ..
         } => (
@@ -427,6 +458,11 @@ fn engine_line(event: &EngineEvent) -> Option<Line> {
             vec![("clamped", debug(clamped))],
         ),
         EngineEvent::AheadOfWal(notice) => ahead_line(*notice),
+        EngineEvent::TakeoverWanted(record) => (
+            LogLevel::Info,
+            "takeover record kept before dropping staged files",
+            vec![("through", record.txid().get().into())],
+        ),
     })
 }
 
