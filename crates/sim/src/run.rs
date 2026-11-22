@@ -709,17 +709,8 @@ impl Runner {
                 self.liveness.note_in_tick(Justifier::PositionUnproven);
                 return Ok(());
             }
-            // A boot that continues under a wal-index reset ahead of the WAL
-            // header cannot pin its position: the header's generation may hold
-            // commits backfilled before the reset that no staged file has, so
-            // the header the next commit writes is one it cannot follow.
-            Event::Booted { cause: None } => {
-                if self.w.sqlite.index_reset_ahead() {
-                    self.liveness.note_in_tick(Justifier::PositionUnproven);
-                }
-                return Ok(());
-            }
-            Event::Synced { .. }
+            Event::Booted { cause: None }
+            | Event::Synced { .. }
             | Event::Checkpointed { .. }
             | Event::Uploaded(_)
             | Event::Maintained { .. }

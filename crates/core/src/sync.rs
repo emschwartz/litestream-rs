@@ -12,12 +12,9 @@
 //! ([`CommittedRead::reset_ahead_of`]) is not the WAL moving: the index counts
 //! no frame. A step from a position then has nothing to stage and answers
 //! [`Synced::IndexReset`], with no proof; a snapshot takes every page from the
-//! database file and ends [`StepEnd::Unproven`]. Neither proves an end to
-//! checkpoint on, since the position is in the header's generation and not the
-//! index's, so the header the next commit writes goes through `recover` as any
-//! restart does. The snapshot's position, at the first frame, is still pinned
-//! when the epoch held: the database file holds everything the index counted,
-//! and `recover` follows any header over a pinned position with no frames.
+//! database file and ends [`StepEnd::Unproven`]. Neither pins, since the
+//! position is in the header's generation and not the index's, so the header
+//! the next commit writes goes through `recover` as any restart does.
 //!
 //! The step sees one epoch, so what it returns at the committed end is a
 //! [`ReachedEnd`], not a proof. The second half of the condition (the epoch
@@ -117,10 +114,8 @@ pub enum StepEnd {
     /// A snapshot staged while the wal-index was reset ahead of the WAL header
     /// ([`CommittedRead::reset_ahead_of`]): it holds every committed page, from
     /// the database file, but its position is in the header's generation and
-    /// not the one the index counts, so it proves no end to checkpoint on.
-    /// [`ReachedEnd::confirm`] still pins its position, at the first frame of
-    /// that generation, for `recover`'s rule 6.
-    Unproven(ReachedEnd),
+    /// not the one the index counts, so it is unpinned and proves nothing.
+    Unproven(Position),
 }
 
 /// What a step did.
@@ -676,7 +671,7 @@ struct Source<'a, P> {
 /// wal-index, unpinned when the cap stopped it short, otherwise the proof.
 fn ended(position: Position, reset: bool, stopped_short: bool, epoch: ReadLockHold) -> StepEnd {
     if reset {
-        StepEnd::Unproven(ReachedEnd::new(position, epoch))
+        StepEnd::Unproven(position)
     } else if stopped_short {
         StepEnd::Limited(position)
     } else {

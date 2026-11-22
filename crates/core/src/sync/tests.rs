@@ -189,13 +189,9 @@ fn position_of(synced: Synced) -> Position {
             ..
         } => pinned(through),
         Synced::Wrote {
-            end: StepEnd::Limited(position),
+            end: StepEnd::Limited(position) | StepEnd::Unproven(position),
             ..
         } => position,
-        Synced::Wrote {
-            end: StepEnd::Unproven(reached),
-            ..
-        } => reached.into_position(),
         Synced::IndexReset => panic!("no position: the wal-index was reset"),
     }
 }
@@ -542,7 +538,7 @@ fn an_index_with_frames_of_another_generation_is_still_the_wal_moving() {
 }
 
 #[test]
-fn a_snapshot_under_a_reset_index_takes_every_page_from_the_database_and_proves_no_end() {
+fn a_snapshot_under_a_reset_index_takes_every_page_from_the_database_and_proves_nothing() {
     let mut rig = Rig::new();
     // Frames the index no longer counts: SQLite backfilled them before the reset.
     commit(&rig.wal, &[2], 3);
@@ -552,17 +548,14 @@ fn a_snapshot_under_a_reset_index_takes_every_page_from_the_database_and_proves_
     let reset = rig.reset();
     let synced = rig.step_under(snapshot_step(), reset).unwrap();
     let Synced::Wrote {
-        end: StepEnd::Unproven(reached),
+        end: StepEnd::Unproven(position),
         txs: 0,
         ..
     } = synced
     else {
         panic!("{synced:?}");
     };
-    // Pinned in the hold it ran under, for `recover`'s rule 6; the actor
-    // takes no proof to checkpoint on from it.
-    let position = *reached.confirm(&rig.wal).unwrap().position();
-    assert_eq!(position.continuity(), Continuity::Held(rig.wal.epoch()));
+    assert_eq!(position.continuity(), Continuity::Broken);
     assert_eq!(position.synced().offset().frame_index(), 0);
     assert_eq!(position.cursor().salts(), rig.wal.salts());
     let files = rig.files();

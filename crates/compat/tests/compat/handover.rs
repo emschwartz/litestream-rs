@@ -339,11 +339,11 @@ fn resume_from(synced: Synced) -> lsr_core::Position {
     let position = match synced {
         Synced::Idle(t)
         | Synced::Wrote {
-            end: StepEnd::Through(t) | StepEnd::Unproven(t),
+            end: StepEnd::Through(t),
             ..
         } => Some(t.into_position()),
         Synced::Wrote {
-            end: StepEnd::Limited(p),
+            end: StepEnd::Limited(p) | StepEnd::Unproven(p),
             ..
         } => Some(p),
         Synced::IndexReset => None,
