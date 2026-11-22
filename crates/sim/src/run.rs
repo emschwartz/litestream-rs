@@ -504,6 +504,7 @@ impl Runner {
         let now = clock.now();
         self.w.high.note(now);
         let actor = &mut self.actor;
+        let mut journal = self.w.journal.clone();
         let fut = async {
             let env = Env {
                 wal: &mut wal,
@@ -512,7 +513,7 @@ impl Runner {
                 staging: &staging,
                 remote: &remote,
                 clock: clock.as_ref(),
-                journal: None,
+                journal: Some(&mut journal),
             };
             actor.tick(env, now).await
         };
@@ -2008,6 +2009,10 @@ impl Runner {
             self.w.sqlite.crash_by_law(CrashLaw::drawn(seed.stream(17)));
             // The same disk holds the staging directory: its unsynced unlinks may come back.
             self.w.volatile.revert_unsynced_entries();
+            // And the journal: its own stream, so no earlier draw moves.
+            self.w
+                .journal
+                .crash_by_law(CrashLaw::drawn(seed.stream(23)));
         }
         if opts.lying_wal_sync {
             self.w.sqlite.lie_on_our_sync();
@@ -2031,7 +2036,7 @@ impl Runner {
     /// The end of a history: drain, judge the replica, check the resources.
     fn finish(&mut self) -> Result<(), Violation> {
         if self.lenient && !self.w.model_matches_sqlite() {
-            return Err(bug_fault("the model no longer matches SQLite's rules"));
+            return Err(bug_fault(crate::oracle::MODEL_DIVERGED));
         }
         // Liveness is judged once every fault has cleared.
         self.rate_active = false;
@@ -2243,7 +2248,7 @@ pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure
         if runner.lenient && !runner.w.model_matches_sqlite() {
             return Err(Failure {
                 trace: runner.report.trace,
-                ..fail(bug_fault("the model no longer matches SQLite's rules"))
+                ..fail(bug_fault(crate::oracle::MODEL_DIVERGED))
             });
         }
         if let Err(violation) = runner.apply_judged(op) {

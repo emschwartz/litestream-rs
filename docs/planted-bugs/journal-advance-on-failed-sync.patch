@@ -1,13 +1,13 @@
 diff --git a/crates/core/src/journal.rs b/crates/core/src/journal.rs
-index c6da180..c038ee7 100644
+index e782efe..aa501c5 100644
 --- a/crates/core/src/journal.rs
 +++ b/crates/core/src/journal.rs
-@@ -202,8 +202,9 @@ impl<F: JournalFile> JournalWriter<F> {
-         self.file
-             .write_at(next.offset(), &encode(journal, seq))
+@@ -240,8 +240,9 @@ impl JournalWriter {
+         let seq = following(seq).map_err(JournalWriteError::Bug)?;
+         file.write_at(next.offset(), &encode(journal, seq))
              .map_err(io)?;
--        self.file.sync().map_err(io)?;
-+        let synced = self.file.sync().map_err(io);
+-        file.sync().map_err(io)?;
++        let synced = file.sync().map_err(io);
          self.base = Base::Winner { slot: next, seq };
 +        synced?;
          self.durable = Some(*journal);
