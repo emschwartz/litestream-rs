@@ -38,11 +38,12 @@ use std::num::NonZeroU32;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use lsr_core::{
-    Actor, AppCheckpoints, Degraded, Did, Env, Event as EngineEvent, Level, ObjectStore, PageLimit,
-    PersistentCause, Phase as EnginePhase, Response, StopCause, Task, Tick, Unfinished, WalSource,
-    retry_wait,
+    Actor, AppCheckpoints, AppGate, Degraded, Did, Env, Event as EngineEvent, Gate, Level,
+    ObjectStore, PageLimit, PersistentCause, Phase as EnginePhase, Response, StopCause, Task, Tick,
+    Unfinished, WalSource, retry_wait,
 };
 use lsr_ltx::{Timestamp, Txid};
 use lsr_sqlite::{DatabaseFile, Sqlite};
@@ -51,7 +52,7 @@ use lsr_store_fs::FsStore;
 use crate::config::Config;
 use crate::events::{Event, EventSink};
 use crate::exec::block_on;
-use crate::health::{Counters, Gone, Phase, Stopped};
+use crate::health::{Counters, FailStop, Gone, Phase, Stopped};
 use crate::readers::Guarded;
 use crate::replicator::Shared;
 use crate::runtime::{Runtime, later};
@@ -177,6 +178,8 @@ pub(crate) struct Worker {
     seen: Seen,
     /// The scheduled verify, when `Config::verify_interval` is set.
     scheduled: Option<Scheduled>,
+    /// Whether fail-stop has let the application run yet (`lsr_core::AppGate`).
+    app_gate: AppGate,
     /// The clock's last reading, to notice it stepping back.
     last_reading: Option<Timestamp>,
 }
@@ -241,6 +244,7 @@ impl Worker {
             seen: Seen::default(),
             scheduled,
             last_reading: None,
+            app_gate: AppGate::default(),
         }
     }
 
@@ -628,6 +632,7 @@ impl Worker {
         let snapshot = SnapshotParts {
             now,
             phase: self.phase(),
+            fail_stop: self.fail_stop(),
             degraded: self.degraded(),
             wal_bytes,
             db_bytes,
@@ -647,6 +652,7 @@ impl Worker {
             .map(Scheduled::health)
             .unwrap_or_default();
         let (seen, progress) = (&self.seen, &self.progress);
+        let unreplicated = self.actor.unreplicated_since();
         self.shared.update(|state| {
             let health = &mut state.health;
             health.reported_at = parts.now;
@@ -654,7 +660,13 @@ impl Worker {
             health.degraded = parts.degraded;
             health.synced = progress.synced;
             health.replicated = progress.replicated;
-            health.unreplicated_since = progress.unreplicated_since;
+            // The engine's clock survives a restart (it dates from the oldest pending staged
+            // file); this thread's own reading covers what no booted engine has judged yet.
+            health.unreplicated_since = match (progress.unreplicated_since, unreplicated) {
+                (Some(seen), Some(engine)) => Some(seen.min(engine)),
+                (seen, engine) => seen.or(engine),
+            };
+            health.held_by = parts.fail_stop;
             health.wal_bytes = parts.wal_bytes;
             health.db_bytes = parts.db_bytes;
             health.resnapshot = resnapshot;
@@ -667,6 +679,26 @@ impl Worker {
             health.verification = verification;
             state.left = parts.left;
         });
+    }
+
+    /// Fail-stop's trip and gate now (`lsr_core::failstop`), and the flag the commit hook reads.
+    /// A stop this thread made itself (a panic or a replaced database under a stop response)
+    /// trips as an engine stop does.
+    fn fail_stop(&mut self) -> FailStop {
+        let trip = match self.stopped {
+            Some(cause) => lsr_core::trip(Some(cause), None, None),
+            None => self.actor.trip(),
+        };
+        let judged = self.actor.boot_judged() || trip.is_some();
+        let gate = self
+            .app_gate
+            .judge(self.config.if_replication_stops, trip, judged);
+        let held = match gate {
+            Gate::Held(_) => true,
+            Gate::Pending | Gate::Allowed => false,
+        };
+        self.shared.writes_refused.store(held, Ordering::Release);
+        FailStop { trip, gate }
     }
 
     /// What is not on the replica now, as the engine measures it; `None` when it cannot: no
@@ -765,6 +797,7 @@ impl Worker {
 struct SnapshotParts {
     now: Timestamp,
     phase: Phase,
+    fail_stop: FailStop,
     degraded: [Option<Degraded>; 5],
     wal_bytes: u64,
     db_bytes: u64,

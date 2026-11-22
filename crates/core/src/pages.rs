@@ -51,7 +51,7 @@
 //! never exceed the database's page count: every staged step truncates to its
 //! commit.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 
 use lsr_ltx::{Event, PageChecksum, PageNo, PageSize, Txid};
@@ -178,15 +178,20 @@ impl PageChecksumTable {
     }
 }
 
-/// Whether a snapshot for `cause` empties the table first. The checkpoint
-/// boundary and an operator's request take a snapshot of a database whose
-/// pages the table still describes; every other cause follows a WAL whose
-/// frames the table may hold and the database never got.
+/// Whether a snapshot for `cause` empties the table first. An operator's
+/// request takes a snapshot of a database whose pages the table still
+/// describes. Every other cause follows a WAL whose frames the table may hold
+/// and the database never got, or, at the checkpoint boundary, a database the
+/// TRUNCATE wrote frames into that the table never saw: the checkpoint ends the
+/// engine's read transaction, so a commit that landed after the last step is
+/// backfilled with the rest, and its pages would read as damage
+/// (docs/decisions.md D121).
 #[must_use]
 pub(crate) const fn snapshot_clears(cause: &SnapshotCause) -> bool {
     match cause {
-        SnapshotCause::CheckpointBoundary | SnapshotCause::OperatorRequested => false,
-        SnapshotCause::FirstSync
+        SnapshotCause::OperatorRequested => false,
+        SnapshotCause::CheckpointBoundary
+        | SnapshotCause::FirstSync
         | SnapshotCause::BehindRemote { .. }
         | SnapshotCause::NewestStagedFileUnreadable
         | SnapshotCause::WalMissing
@@ -216,8 +221,12 @@ pub(crate) async fn seeded<L: ObjectStore>(
     staging: &L,
     from: Option<Txid>,
     commit: NonZeroU32,
-) -> Result<PageChecksumTable, Fault> {
-    let mut table = PageChecksumTable::new();
+) -> Result<Seeded, Fault> {
+    let mut seeded = Seeded {
+        table: PageChecksumTable::new(),
+        quiet: BTreeSet::new(),
+    };
+    let mut prev_commit = None;
     let mut at = ListAt::first(Level::ZERO);
     loop {
         let page = staging
@@ -229,7 +238,12 @@ pub(crate) async fn seeded<L: ObjectStore>(
             .iter()
             .filter(|info| from.is_none_or(|from| info.key.range().max() >= from));
         for info in vouched {
-            seed_file(staging, &info.key, &mut table).await?;
+            let pending = from.is_none_or(|from| info.key.range().min() > from);
+            let read = seed_file(staging, &info.key, &mut seeded.table, prev_commit).await?;
+            if pending && read.is_some_and(|read| !read.changes) {
+                seeded.quiet.insert(info.key.range().max());
+            }
+            prev_commit = read.map(|read| read.commit);
         }
         match at
             .following(page.next)
@@ -239,17 +253,36 @@ pub(crate) async fn seeded<L: ObjectStore>(
             None => break,
         }
     }
-    table.truncate(commit);
-    Ok(table)
+    seeded.table.truncate(commit);
+    Ok(seeded)
+}
+
+/// What a boot's seeding found: the table, and the pending staged files that change no page of
+/// the state the files before them left (`crate::failstop`: they hold no commit of the
+/// application's, only the engine's own writes).
+#[derive(Debug)]
+pub(crate) struct Seeded {
+    /// The page checksum table.
+    pub(crate) table: PageChecksumTable,
+    /// The pending files that change nothing, by transaction.
+    pub(crate) quiet: BTreeSet<Txid>,
+}
+
+/// One seeded file: its database size, and whether it may change the database.
+#[derive(Clone, Copy)]
+struct SeedRead {
+    commit: u32,
+    changes: bool,
 }
 
 /// Records every page of one staged file. A file that does not decode and
-/// verify whole empties the table: what it rewrote is unknown.
+/// verify whole empties the table: what it rewrote is unknown, and `None` says so.
 async fn seed_file<L: ObjectStore>(
     staging: &L,
     key: &FileKey,
     table: &mut PageChecksumTable,
-) -> Result<(), Fault> {
+    prev_commit: Option<u32>,
+) -> Result<Option<SeedRead>, Fault> {
     let chunk = SEED_READ;
     let mut pages = Vec::new();
     let mut read = LtxRead::new(*key, chunk);
@@ -264,15 +297,23 @@ async fn seed_file<L: ObjectStore>(
     match verified {
         Ok(verified) => {
             table.fit(verified.header().page_size());
+            let commit = verified.header().fields().commit;
+            let changes = prev_commit != Some(commit)
+                || pages
+                    .iter()
+                    .any(|(pgno, digest)| table.get(*pgno) != Some(*digest));
             for (pgno, digest) in pages {
                 table.record(pgno, digest);
             }
+            Ok(Some(SeedRead { commit, changes }))
         }
-        Err(ReadFault::Store(err)) => return Err(Fault::from_staging(&err)),
-        Err(ReadFault::Decode(_)) => table.clear(),
+        Err(ReadFault::Store(err)) => Err(Fault::from_staging(&err)),
+        Err(ReadFault::Decode(_)) => {
+            table.clear();
+            Ok(None)
+        }
         Err(ReadFault::Rejected(never)) => match never {},
     }
-    Ok(())
 }
 
 #[cfg(test)]

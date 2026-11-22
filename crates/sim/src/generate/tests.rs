@@ -148,8 +148,10 @@ fn the_second_frozen_generator_draws_what_the_live_one_drew() {
             continue;
         }
         // Holds came after the second generator, from a stream of their own: with none drawn,
-        // every step is the step it was.
+        // every step is the step it was. The whole error domain came after too, and changes
+        // only which error a fault draws.
         weights.hold = 0;
+        weights.error_domain = false;
         // The scheduled verify came after it too, drawn last: with its weight at 0, the table
         // the other kinds are picked from is the one the second generator had.
         weights.verify = 0;

@@ -22,6 +22,7 @@ use lsr_wal::{Salts, WalOffset};
 
 use crate::clock::ClockLaw;
 use crate::crash_law::CrashLaw;
+use crate::failstop::{FailStopJudge, fired};
 use crate::generate::{
     AfterRestart, EnvFault, MetaOp, Op, RemoteOp, Target, WalOp, Weights, history,
 };
@@ -168,6 +169,9 @@ pub struct RunReport {
     pub app_autocheckpoints: AutoTally,
     /// What the run reached, by name; see [`crate::reach`].
     pub reach: Reach,
+    /// Each change of the engine's fail-stop trip, with the time of the tick that made it
+    /// (`crate::failstop`).
+    pub trips: Vec<(Timestamp, Option<lsr_core::Trip>)>,
 }
 
 /// What a run may be told besides its seed.
@@ -250,6 +254,7 @@ pub fn actor_config() -> ActorConfig {
         retry_interval: Duration::from_secs(1),
         shutdown_grace: Duration::from_secs(10),
         responses: Responses::GO_LIKE,
+        max_unreplicated_age: lsr_core::MaxUnreplicatedAge::DEFAULT,
     }
 }
 
@@ -324,6 +329,19 @@ struct Runner {
     /// The engine incarnation running now: what its level-0 puts are judged
     /// against ([`judge_put`]).
     life: Incarnation,
+    /// The fail-stop judge (`crate::failstop`).
+    fail_stop: FailStopJudge,
+    /// The sum of every clock step so far: the simulator's time with them taken out is the
+    /// clock's reading less this.
+    jumped: i64,
+    /// The replica recorder's length when the fail-stop judge last restored `Latest`.
+    fail_stop_seen: usize,
+    /// The digest of the model's newest image as the fail-stop judge last took it.
+    fail_stop_image: lsr_history::Digest,
+    /// How many commits the model held when the fail-stop judge last looked.
+    fail_stop_commits: usize,
+    /// The clock when the operation being applied began: what the judge dates its commits by.
+    op_began: Timestamp,
     /// Replica recorder events already judged by [`judge_put`].
     puts_judged: usize,
     /// The staging recorder's length when a staging backup was last put
@@ -387,6 +405,9 @@ impl Runner {
         let page_size = PageSize::new(FIRST_PAGE_SIZE).unwrap_or(PageSize::MIN);
         let mut w = World::new(seed, page_size, FIRST_DB_PAGES);
         w.start_driver();
+        let start = w.clock.now();
+        let image = crate::history::image_digest(&w.model.newest_image());
+        let commits = w.model.commits().len();
         Self {
             w,
             actor: Actor::new(actor_config()),
@@ -416,6 +437,13 @@ impl Runner {
             lenient: false,
             expected_sizes: Vec::new(),
             life: Incarnation::default(),
+            // The database's first content is on no replica yet.
+            fail_stop: FailStopJudge::starting(start, image),
+            fail_stop_image: image,
+            fail_stop_commits: commits,
+            op_began: start,
+            jumped: 0,
+            fail_stop_seen: 0,
             puts_judged: 0,
             put_back: 0,
             rate_active: false,
@@ -433,6 +461,7 @@ impl Runner {
     }
 
     fn reboot(&mut self) {
+        self.fail_stop.started();
         self.life = Incarnation {
             staged_from: self.w.staging_recorder.len(),
             ..Incarnation::default()
@@ -442,6 +471,7 @@ impl Runner {
         self.app_before = self.app_seen();
         self.actor = Actor::new(ActorConfig {
             responses: self.responses,
+            max_unreplicated_age: lsr_core::MaxUnreplicatedAge::DEFAULT,
             maintenance: base.maintenance.clone().with_retention(self.retention),
             ..base
         });
@@ -658,6 +688,7 @@ impl Runner {
         self.liveness_before_tick(booting);
         let salts = self.w.sqlite.salts();
         let commits = self.w.model.commits().len();
+        let fired0 = (fired(&self.w.remote_faults), fired(&self.w.staging_faults));
         let ended = self.run_one(plan);
         if booting && self.actor.booted() {
             self.life.boot_salts = Some(salts);
@@ -669,6 +700,7 @@ impl Runner {
         self.report.ticks = self.report.ticks.saturating_add(1);
         let in_tick = self.took_commit_in_tick();
         self.note_snapshots(newest_commit, in_tick, at);
+        self.judge_fail_stop(began, fired0, &ended)?;
         self.note_tick(began, remote0);
         if self.trace {
             self.report.trace.push(format!("    tick: {ended:?}"));
@@ -821,7 +853,13 @@ impl Runner {
             | Event::Clamped(_) => return Ok(()),
         };
         self.liveness
-            .judge(CauseKind::from(cause), at_boot, &mut self.report.reach)
+            .judge(CauseKind::from(cause), at_boot, &mut self.report.reach)?;
+        if matches!(cause, lsr_core::SnapshotCause::BehindRemote { .. }) && at_boot {
+            let staged = self.w.staged_level_zero();
+            self.liveness
+                .passed_by_replica(&staged, &self.w, &mut self.report.reach)?;
+        }
+        Ok(())
     }
 
     /// Counts what an event shows: its kind, and the fault, cause or
@@ -954,7 +992,7 @@ impl Runner {
         if cause != PersistentCause::Bug && expected {
             Ok(())
         } else {
-            Err(bug_fault(format!("a task is degraded: {cause:?}")))
+            Err(Violation::UnexpectedDegraded { cause })
         }
     }
 
@@ -1397,6 +1435,11 @@ impl Runner {
         if matches!(shape, crate::FaultShape::Rate { .. }) {
             self.rate_active = true;
         }
+        if let Some(stop) =
+            shape_error(&shape).and_then(|err| crate::domain::store_stop(target, err))
+        {
+            self.expect(stop);
+        }
         let faults = match target {
             Target::Staging => &self.w.staging_faults,
             Target::Remote => &self.w.remote_faults,
@@ -1463,7 +1506,12 @@ impl Runner {
                     self.crashed(CrashKind::Process);
                 }
             }
-            EnvFault::Source(op, err) => self.w.sqlite.inject(op, err),
+            EnvFault::Source(op, err) => {
+                if let Some(stop) = crate::domain::source_stop(err) {
+                    self.expect(stop);
+                }
+                self.w.sqlite.inject(op, err);
+            }
             EnvFault::ShmMidUpdate => {
                 self.scenario_bool("ShmMidUpdate", self.w.sqlite.shm_mid_update())?;
             }
@@ -1475,7 +1523,13 @@ impl Runner {
                 let done = self.w.sqlite.overwrite_frame_between_scan_and_read(frame);
                 self.scenario_bool("OverwriteLastFrame", done)?;
             }
-            EnvFault::UnlinkWal => self.scenario_bool("UnlinkWal", self.w.sqlite.unlink_wal())?,
+            EnvFault::UnlinkWal => {
+                let done = self.w.sqlite.unlink_wal();
+                if done {
+                    self.expect(StopCause::WalUnlinked);
+                }
+                self.scenario_bool("UnlinkWal", done)?;
+            }
             EnvFault::EmptyDatabase => self.w.sqlite.empty_database_once(),
             EnvFault::TruncateFails => self.w.sqlite.fail_next_truncate(),
             EnvFault::DriverWritesNothing => self.w.sqlite.driver_writes_nothing_once(),
@@ -1489,6 +1543,7 @@ impl Runner {
     }
 
     fn clock_jump(&mut self, millis: i64) {
+        self.jumped = self.jumped.saturating_add(millis);
         let to = Timestamp::from_unix_millis(self.now().unix_millis().saturating_add(millis));
         self.w.clock.set(to);
         self.w.history.note_time(to);
@@ -1498,7 +1553,9 @@ impl Runner {
     /// by content at random (see [`crate::history`]).
     fn apply_judged(&mut self, op: &Op) -> Result<(), Violation> {
         self.op_began_at = self.w.sqlite.mx_frame();
+        self.op_began = self.now();
         self.apply(op)?;
+        self.fail_stop_commits();
         self.after_restart();
         self.recovery_agrees()?;
         if self.judges.history && self.w.history.draw() {
@@ -1703,6 +1760,14 @@ impl Runner {
         if regrows && self.w.sqlite.backfilled() > 0 {
             return Ok(());
         }
+        // Damage to a WAL whose writeback a failed sync lost: the model's record of the lost
+        // bytes is not rewritten by the damage, so it loses track of the database (seeds 0x80b,
+        // 0x563, 0x1d and 0x3aa of the mixed set, once failed syncs were drawn). A drawn history
+        // skips it and counts the skip; it is a listed gap in the checker.
+        if self.lenient && self.w.sqlite.writeback_lost() {
+            self.report.reach.bump("wal.damage_skipped.writeback_lost");
+            return Ok(());
+        }
         // A cut below the committed end leaves the wal-index naming frames the
         // file no longer holds, which no SQLite reader can make sense of; a
         // drawn cut takes only frames past it (a rolled-back or spilled tail).
@@ -1743,6 +1808,7 @@ impl Runner {
     /// Applies `op`, telling the liveness oracle what it did by itself and
     /// how it left the WAL's header.
     fn apply(&mut self, op: &Op) -> Result<(), Violation> {
+        self.fail_stop_outside(op);
         self.liveness.note_op(op);
         self.liveness.see_wal(
             self.w.sqlite.wal_header_salts(),
@@ -2242,6 +2308,7 @@ pub fn shrink(seed: Seed, steps: u32, weights: &Weights, opts: &Opts) -> Option<
 }
 
 mod after_restart;
+mod fail_stop;
 mod hold;
 mod marks;
 mod verify;
@@ -2339,3 +2406,16 @@ const fn still_imposed(stall: lsr_core::Stall) -> bool {
 mod staging_fs;
 #[cfg(test)]
 mod tests;
+
+/// The error a store fault's shape returns, if it returns one.
+pub(crate) const fn shape_error(shape: &crate::FaultShape) -> Option<&lsr_core::StoreError> {
+    match shape {
+        crate::FaultShape::Error(err)
+        | crate::FaultShape::ErrorAfterPublish(err)
+        | crate::FaultShape::Rate { err, .. } => Some(err),
+        crate::FaultShape::SizeMismatch
+        | crate::FaultShape::ChecksumMismatch
+        | crate::FaultShape::CorruptPublish
+        | crate::FaultShape::FlipByteOnRead { .. } => None,
+    }
+}
