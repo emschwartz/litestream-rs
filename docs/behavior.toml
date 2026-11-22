@@ -484,7 +484,7 @@ signal = "none of its own; the upload task's fault, and lag (`lsr_unreplicated_a
 at_risk = "None. The WAL grows while staging is held, as it does while any sync waits"
 recovery = "Automatic"
 detected_by = "core::`a_replica_outage_past_the_witness_cap_holds_the_position_and_costs_no_snapshot`, core::`room_runs_out_at_the_cap`; plant::`witness-cap-stages-past`"
-notes = "The core test drains an outage of 4096 + 6 commits and asserts no snapshot and the newest commit restored; a core test earns no R. Before, the 4097th file got no token and cost a snapshot (D13)"
+notes = "The core test drains an outage of 4096 + 6 commits and asserts no snapshot and the newest commit restored; a core test earns no R. Before, the 4097th file got no token and cost a snapshot (D13). Boot, its sweep and a drop read staging a listing page at a time and the witness pass lists no more than the cap's worth, so a staging directory of any size (Go's has no cap) is never held in memory whole (core `the_sweep_judges_the_first_staged_file_without_listing_them_all`, `the_witness_pass_refuses_from_the_first_pending_file_without_listing_them_all`, `a_drop_across_pages_deletes_newest_first`)"
 
 [[row]]
 table = "Running"
