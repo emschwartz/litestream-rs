@@ -636,7 +636,7 @@ macro_rules! conformance_cases {
         pub const NAMES: &[&str] = &[$(stringify!($case)),+];
         $(
             #[test]
-            #[cfg_attr($ignored, ignore = "needs a real bucket (just test-tigris)")]
+            #[cfg_attr($ignored, ignore = "needs a real server (just test-s3, just test-tigris)")]
             fn $case() {
                 let Some(h) = $connect() else { return };
                 lsr_core::conformance::block_on(lsr_core::conformance::$case(&h)).unwrap();
@@ -649,7 +649,7 @@ macro_rules! plain_cases {
     ($connect:path, $ignored:meta; $($case:ident),+ $(,)?) => {
         $(
             #[test]
-            #[cfg_attr($ignored, ignore = "needs a real bucket (just test-tigris)")]
+            #[cfg_attr($ignored, ignore = "needs a real server (just test-s3, just test-tigris)")]
             fn $case() {
                 let Some(h) = $connect() else { return };
                 $crate::real::$case(&h);

@@ -17,6 +17,7 @@ use lsr_compat::{
     clock_ending_now, hash_pages, integrity_check, read_plain, read_with_vfs, restore_replica,
 };
 use lsr_core::RestoreTarget;
+use lsr_core::needs::{Resource, need};
 
 const COMMITS: u32 = 300;
 
@@ -63,8 +64,12 @@ mod live {
         assert_shapes(&written);
         let newest = written.points.last().expect("points");
         let dir = written.fixture.dir();
-        let reader =
-            build_vfs_reader(dir).expect("the C application builds (cc and SQLite headers)");
+        // Fails without a C compiler and the SQLite headers; `LSR_SKIP=cc` opts out.
+        let Some(reader) = need(Resource::CCompiler, || {
+            build_vfs_reader(dir).map_err(|e| e.to_string())
+        }) else {
+            return;
+        };
         // The reference: the newest transaction restored by Rust, checked against the source.
         let reference = dir.join("reference.db");
         restore_replica(&written.fixture.replica, RestoreTarget::Latest, &reference)

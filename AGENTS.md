@@ -30,6 +30,7 @@
 - A bug fix starts with a test that fails on the old code.
 - Go compatibility is differential: generate with Go, read with Rust, and the reverse, comparing restored pages.
 - Tests wait on conditions, never on the clock. No sleeps.
+- A test that needs something outside the process (MinIO, Go builds, Tigris, a C compiler, disk) gets it through `lsr_core::needs` and fails without it; the only skip is the runner's `LSR_SKIP=<name>`, never under CI. A walk over files or fixtures asserts it found some. A hang is killed by nextest (`.config/nextest.toml`), not waited out.
 - Property tests (`proptest`) for every codec and every pure planner. Keep each test under a second where possible.
 - A crate's integration tests are one binary, `crates/<name>/tests/<name>/main.rs`, with a module per file: add a module there, not a new `tests/*.rs` file, which would link a binary of its own (lsr-compat's `layout` test refuses a second one). A test that starts the binary again as a child names its test by full path (`sidecar::exec_child`), or uses the crate root's `child_process_entry` (lsr-sqlite).
 
