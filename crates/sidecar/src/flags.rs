@@ -25,6 +25,16 @@ pub enum UsageError {
         /// The name.
         name: &'static str,
     },
+    /// A value Go's parse of the flag refuses (none of `replicate`'s flags has one yet).
+    #[error("invalid value {value:?} for flag -{name}: {why}")]
+    BadValue {
+        /// The name.
+        name: &'static str,
+        /// What was given.
+        value: String,
+        /// Go's reason.
+        why: &'static str,
+    },
     /// A boolean flag with a value that is not a boolean.
     #[error("invalid boolean value {value:?} for -{name}")]
     BadBool {
@@ -129,6 +139,7 @@ impl From<FlagError> for UsageError {
             FlagError::UnknownFlag { name } => Self::UnknownFlag { name },
             FlagError::MissingValue { name } => Self::MissingValue { name },
             FlagError::BadBool { name, value } => Self::BadBool { name, value },
+            FlagError::BadValue { name, value, why } => Self::BadValue { name, value, why },
         }
     }
 }

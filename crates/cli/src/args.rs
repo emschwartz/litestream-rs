@@ -20,11 +20,13 @@
 use std::path::PathBuf;
 
 use lsr_config::{ReplicaProblem, S3Overrides, S3Url, s3_config};
-use lsr_core::{AsOfInside, Depth, RestoreTarget};
-use lsr_local::IntegrityCheck;
-use lsr_ltx::{ParseTxidError, Timestamp, TimestampParseError, Txid};
+use lsr_core::Depth;
 use lsr_store_s3::{ConfigError, Endpoint, Region, S3Config};
 use thiserror::Error;
+
+mod restore;
+
+pub use restore::{Restore, RestoreArgs, RestoreFrom};
 
 /// The three subcommands.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -124,9 +126,9 @@ pub const FLAGS: &[FlagSpec] = &[
     FlagSpec {
         name: "--output",
         value: Some("<path>"),
-        required: true,
+        required: false,
         commands: &[CommandName::Restore],
-        help: "the database to create; must not exist",
+        help: "the database to create, as Go's -o; with a DB_PATH the default is DB_PATH itself; an existing empty file is replaced, any other refused without -force",
     },
     FlagSpec {
         name: "--txid",
@@ -185,6 +187,48 @@ pub const FLAGS: &[FlagSpec] = &[
         help: "check the output and print the files a restore would apply, writing and removing nothing",
     },
     FlagSpec {
+        name: "-o",
+        value: Some("<path>"),
+        required: false,
+        commands: &[CommandName::Restore],
+        help: "Go's spelling of --output",
+    },
+    FlagSpec {
+        name: "-config",
+        value: Some("<file>"),
+        required: false,
+        commands: &[CommandName::Restore],
+        help: "with a DB_PATH, the config that names it (default $LITESTREAM_CONFIG, else /etc/litestream.yml; - reads standard input); not with a REPLICA_URL",
+    },
+    FlagSpec {
+        name: "-no-expand-env",
+        value: None,
+        required: false,
+        commands: &[CommandName::Restore],
+        help: "read the config without expanding environment variables",
+    },
+    FlagSpec {
+        name: "-force",
+        value: None,
+        required: false,
+        commands: &[CommandName::Restore],
+        help: "replace an existing output and remove its -wal, -shm and -journal; the old file stays until the restored one is complete and checked, then is replaced in one rename",
+    },
+    FlagSpec {
+        name: "-parallelism",
+        value: Some("<n>"),
+        required: false,
+        commands: &[CommandName::Restore],
+        help: "accepted with a warning and no effect, as Go",
+    },
+    FlagSpec {
+        name: "-follow-interval",
+        value: Some("<duration>"),
+        required: false,
+        commands: &[CommandName::Restore],
+        help: "accepted for Go's -f, which is not built yet (#177); -f itself is refused",
+    },
+    FlagSpec {
         name: "--depth",
         value: Some("names|contents"),
         required: false,
@@ -222,13 +266,14 @@ pub enum Replica {
 }
 
 /// The flags that only mean something for an S3 replica.
+#[cfg(test)]
 const S3_ONLY_FLAGS: [&str; 3] = ["--endpoint", "--region", "--force-path-style"];
 
 /// A parsed command line.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
     /// Rebuild a database.
-    Restore(RestoreArgs),
+    Restore(Box<RestoreArgs>),
     /// Check a replica.
     Verify(VerifyArgs),
     /// List a replica's files.
@@ -272,31 +317,6 @@ fn parse_config(rest: &[String]) -> Result<Command, UsageError> {
             name: format!("config {other}"),
         }),
     }
-}
-
-/// `lsr restore`.
-#[derive(Debug, PartialEq, Eq)]
-pub struct RestoreArgs {
-    /// The replica.
-    pub replica: Replica,
-    /// The database to create.
-    pub output: PathBuf,
-    /// The state to rebuild.
-    pub target: RestoreTarget,
-    /// What to do when `--timestamp` falls inside a compacted file.
-    pub as_of_inside: AsOfInside,
-    /// Whether to remove stale journal files first.
-    pub clear_journal_files: bool,
-    /// SQLite's check of the result before it is published.
-    pub integrity_check: IntegrityCheck,
-    /// Succeed without restoring when the output exists.
-    pub if_db_not_exists: bool,
-    /// Succeed without restoring when the replica holds no LTX file.
-    pub if_replica_exists: bool,
-    /// Plan and check only; write nothing.
-    pub dry_run: bool,
-    /// JSON instead of text.
-    pub json: bool,
 }
 
 /// `lsr verify`.
@@ -361,9 +381,6 @@ pub enum UsageError {
         /// The flag.
         flag: &'static str,
     },
-    /// Both `--txid` and `--timestamp`.
-    #[error("give --txid or --timestamp, not both")]
-    ConflictingTargets,
     /// `--allow-earlier` without `--timestamp`.
     #[error("--allow-earlier needs --timestamp")]
     AllowEarlierWithoutTimestamp,
@@ -373,31 +390,9 @@ pub enum UsageError {
         /// What was typed.
         argument: String,
     },
-    /// `--txid` is not sixteen lowercase hex digits.
-    #[error("--txid {value:?}: {source}")]
-    BadTxid {
-        /// What was typed.
-        value: String,
-        /// Why.
-        source: ParseTxidError,
-    },
-    /// `--timestamp` is not an RFC 3339 instant.
-    #[error("--timestamp {value:?}: {source}")]
-    BadTimestamp {
-        /// What was typed.
-        value: String,
-        /// Why.
-        source: TimestampParseError,
-    },
     /// `--depth` is neither `names` nor `contents`.
     #[error("--depth {value:?}: expected names or contents")]
     BadDepth {
-        /// What was typed.
-        value: String,
-    },
-    /// `--integrity-check` is not `none`, `quick` or `full`.
-    #[error("--integrity-check {value:?}: expected none, quick or full")]
-    BadIntegrityCheck {
         /// What was typed.
         value: String,
     },
@@ -438,6 +433,42 @@ pub enum UsageError {
         /// How many were given.
         found: usize,
     },
+    /// Go's flag package refused a `restore` argument.
+    #[error("{0}")]
+    GoFlag(lsr_sidecar::goflag::FlagError),
+    /// `-help=<value>` or `--h`: help printed, and Go exits non-zero.
+    #[error("help requested")]
+    HelpNotLiteral,
+    /// `restore` with neither a positional argument nor `--replica`.
+    #[error("database path or replica URL required")]
+    GoSourceMissing,
+    /// More than one positional argument.
+    #[error("too many arguments")]
+    GoTooManyArguments,
+    /// A positional argument and `--replica`.
+    #[error("give a DB_PATH or REPLICA_URL, or --replica, not both")]
+    ReplicaAndPositional,
+    /// A replica URL and no `-o`.
+    #[error("-o is required when restoring from a replica URL")]
+    GoOutputRequired,
+    /// A replica URL and `-config`.
+    #[error("cannot specify a replica URL and the -config flag")]
+    GoUrlAndConfig,
+    /// Go's `-integrity-check` refusal.
+    #[error("invalid -integrity-check value: {value}")]
+    GoIntegrityCheck {
+        /// What was typed.
+        value: String,
+    },
+    /// Go's `-timestamp` refusal.
+    #[error("invalid -timestamp, must specify in ISO 8601 format (e.g. 2000-01-01T00:00:00Z)")]
+    GoTimestamp,
+    /// A non-zero `-txid` and a `-timestamp`.
+    #[error("cannot specify index & timestamp to restore")]
+    GoTxidAndTimestamp,
+    /// `-f`, Go's follow mode, which is not built.
+    #[error("-f (follow mode) is not built in litestream-rs yet (issue #177)")]
+    FollowNotBuilt,
     /// An argument that is not UTF-8, which a flag value cannot be.
     #[error("argument {position} is not valid UTF-8")]
     NotUtf8 {
@@ -519,79 +550,12 @@ impl Flags {
 
     fn replica(&self) -> Result<Replica, UsageError> {
         let value = self.require("--replica")?;
-        match value.split_once("://") {
-            None => {
-                if let Some(flag) = S3_ONLY_FLAGS.iter().find(|flag| self.has(flag)) {
-                    return Err(UsageError::S3FlagForDirectory { flag });
-                }
-                Ok(Replica::Dir(PathBuf::from(value)))
-            }
-            Some((scheme, _)) if scheme.eq_ignore_ascii_case("s3") => self.s3(value),
-            Some((scheme, _)) => Err(UsageError::UnsupportedReplica {
-                scheme: scheme.to_owned(),
-            }),
-        }
-    }
-
-    /// The URL as the daemon reads it, with the S3 flags in place of a replica
-    /// entry's keys, so a flag overrides the URL's host and query.
-    fn s3(&self, url: &str) -> Result<Replica, UsageError> {
-        let endpoint = self.value("--endpoint");
-        if let Some(endpoint) = endpoint {
-            Endpoint::new(endpoint).map_err(|reason| UsageError::BadS3Flag {
-                flag: "--endpoint",
-                reason,
-            })?;
-        }
-        let region = self.value("--region");
-        if let Some(region) = region {
-            Region::new(region).map_err(|reason| UsageError::BadS3Flag {
-                flag: "--region",
-                reason,
-            })?;
-        }
-        let over = S3Overrides {
-            region,
-            endpoint,
-            force_path_style: self.has("--force-path-style").then_some(true),
-            ..S3Overrides::default()
-        };
-        let bad = |reason| UsageError::BadReplicaUrl { reason };
-        let parsed = S3Url::parse(url).map_err(bad)?;
-        let config = s3_config(Some(parsed), &over).map_err(bad)?;
-        Ok(Replica::S3(Box::new(config)))
-    }
-
-    fn target(&self) -> Result<RestoreTarget, UsageError> {
-        match (self.value("--txid"), self.value("--timestamp")) {
-            (Some(_), Some(_)) => Err(UsageError::ConflictingTargets),
-            (Some(value), None) => {
-                value
-                    .parse::<Txid>()
-                    .map(RestoreTarget::Txid)
-                    .map_err(|source| UsageError::BadTxid {
-                        value: value.to_owned(),
-                        source,
-                    })
-            }
-            (None, Some(value)) => Timestamp::parse_rfc3339(value)
-                .map(RestoreTarget::AsOf)
-                .map_err(|source| UsageError::BadTimestamp {
-                    value: value.to_owned(),
-                    source,
-                }),
-            (None, None) => Ok(RestoreTarget::Latest),
-        }
-    }
-
-    fn as_of_inside(&self, target: RestoreTarget) -> Result<AsOfInside, UsageError> {
-        match (self.has("--allow-earlier"), target) {
-            (false, _) => Ok(AsOfInside::Refuse),
-            (true, RestoreTarget::AsOf(_)) => Ok(AsOfInside::TakeEarlier),
-            (true, RestoreTarget::Latest | RestoreTarget::Txid(_)) => {
-                Err(UsageError::AllowEarlierWithoutTimestamp)
-            }
-        }
+        replica_of(
+            value,
+            self.value("--endpoint").map(str::to_owned),
+            self.value("--region").map(str::to_owned),
+            self.has("--force-path-style"),
+        )
     }
 
     fn depth(&self) -> Result<Depth, UsageError> {
@@ -603,18 +567,68 @@ impl Flags {
             }),
         }
     }
+}
 
-    /// Go's `-integrity-check` words, exactly (cmd/litestream/restore.go).
-    fn integrity_check(&self) -> Result<IntegrityCheck, UsageError> {
-        match self.value("--integrity-check") {
-            None | Some("none") => Ok(IntegrityCheck::Off),
-            Some("quick") => Ok(IntegrityCheck::Quick),
-            Some("full") => Ok(IntegrityCheck::Full),
-            Some(other) => Err(UsageError::BadIntegrityCheck {
-                value: other.to_owned(),
-            }),
+/// A `--replica` value: a directory, or an `s3://` URL as the daemon reads it with the S3
+/// flags in place of a replica entry's keys, so a flag overrides the URL's host and query.
+fn replica_of(
+    value: &str,
+    endpoint: Option<String>,
+    region: Option<String>,
+    force_path_style: bool,
+) -> Result<Replica, UsageError> {
+    match value.split_once("://") {
+        None => {
+            let given = [
+                ("--endpoint", endpoint.is_some()),
+                ("--region", region.is_some()),
+                ("--force-path-style", force_path_style),
+            ];
+            if let Some((flag, _)) = given.iter().find(|(_, set)| *set) {
+                return Err(UsageError::S3FlagForDirectory { flag });
+            }
+            Ok(Replica::Dir(PathBuf::from(value)))
         }
+        Some((scheme, _)) if scheme.eq_ignore_ascii_case("s3") => s3_replica(
+            value,
+            endpoint.as_deref(),
+            region.as_deref(),
+            force_path_style,
+        ),
+        Some((scheme, _)) => Err(UsageError::UnsupportedReplica {
+            scheme: scheme.to_owned(),
+        }),
     }
+}
+
+fn s3_replica(
+    url: &str,
+    endpoint: Option<&str>,
+    region: Option<&str>,
+    force_path_style: bool,
+) -> Result<Replica, UsageError> {
+    if let Some(endpoint) = endpoint {
+        Endpoint::new(endpoint).map_err(|reason| UsageError::BadS3Flag {
+            flag: "--endpoint",
+            reason,
+        })?;
+    }
+    if let Some(region) = region {
+        Region::new(region).map_err(|reason| UsageError::BadS3Flag {
+            flag: "--region",
+            reason,
+        })?;
+    }
+    let over = S3Overrides {
+        region,
+        endpoint,
+        force_path_style: force_path_style.then_some(true),
+        ..S3Overrides::default()
+    };
+    let bad = |reason| UsageError::BadReplicaUrl { reason };
+    let parsed = S3Url::parse(url).map_err(bad)?;
+    let config = s3_config(Some(parsed), &over).map_err(bad)?;
+    Ok(Replica::S3(Box::new(config)))
 }
 
 /// Reads a command line (without the program name).
@@ -628,7 +642,12 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
     let command = match first.as_str() {
         "-h" | "--help" | "help" => return Ok(Command::Help),
         "-V" | "--version" => return Ok(Command::Version),
-        "restore" => CommandName::Restore,
+        "restore" => {
+            return match restore::parse(args.get(1..).unwrap_or_default())? {
+                Restore::Run(args) => Ok(Command::Restore(args)),
+                Restore::Help => Ok(Command::Help),
+            };
+        }
         "verify" => CommandName::Verify,
         "files" => CommandName::Files,
         "replicate" => {
@@ -647,21 +666,7 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
         Scan::Flags(seen) => Flags { command, seen },
     };
     Ok(match command {
-        CommandName::Restore => {
-            let target = flags.target()?;
-            Command::Restore(RestoreArgs {
-                replica: flags.replica()?,
-                output: PathBuf::from(flags.require("--output")?),
-                target,
-                as_of_inside: flags.as_of_inside(target)?,
-                clear_journal_files: flags.has("--clear-journal-files"),
-                integrity_check: flags.integrity_check()?,
-                if_db_not_exists: flags.has("--if-db-not-exists"),
-                if_replica_exists: flags.has("--if-replica-exists"),
-                dry_run: flags.has("--dry-run"),
-                json: flags.has("--json"),
-            })
-        }
+        CommandName::Restore => return Err(UsageError::NoCommand),
         CommandName::Verify => Command::Verify(VerifyArgs {
             replica: flags.replica()?,
             depth: flags.depth()?,

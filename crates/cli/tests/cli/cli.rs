@@ -152,7 +152,7 @@ fn every_target_matches_the_manifest() {
                 }
                 // An instant inside a compacted file has no exact plan; Go answered anyway.
                 Outcome::Restored { .. }
-                    if run.code == 2 && matches!(entry.target, Target::AsOf { .. }) =>
+                    if run.code == 1 && matches!(entry.target, Target::AsOf { .. }) =>
                 {
                     assert!(
                         run.stderr.contains("falls inside"),
@@ -167,7 +167,7 @@ fn every_target_matches_the_manifest() {
                     have_through,
                     next_starts,
                     ..
-                } if run.code == 2 => {
+                } if run.code == 1 => {
                     assert_eq!(run.stdout, "", "{label}");
                     assert_eq!(run.stderr.lines().count(), 1, "{label}: {}", run.stderr);
                     assert!(
@@ -197,7 +197,7 @@ fn every_target_matches_the_manifest() {
 }
 
 #[test]
-fn a_gap_target_exits_2_names_the_hole_and_leaves_no_file() {
+fn a_gap_target_exits_1_names_the_hole_and_leaves_no_file() {
     let mut seen = 0_usize;
     for (fixture, manifest) in fixtures() {
         let Some(entry) = manifest
@@ -211,7 +211,7 @@ fn a_gap_target_exits_2_names_the_hole_and_leaves_no_file() {
         let dir = tempfile::tempdir().expect("tempdir");
         let output = dir.path().join("out.db");
         let run = restore(&staged, &output, &[]);
-        assert_eq!((run.code, run.stdout.as_str()), (2, ""), "{}", run.stderr);
+        assert_eq!((run.code, run.stdout.as_str()), (1, ""), "{}", run.stderr);
         assert!(run.stderr.contains("gap"), "{}", run.stderr);
         assert!(
             !output.exists() && dir_is_empty(dir.path()),
@@ -241,13 +241,13 @@ fn latest_pages(manifest: &Manifest) -> &Outcome {
 }
 
 #[test]
-fn an_existing_output_exits_3_and_stays_byte_identical() {
+fn an_existing_output_exits_1_and_stays_byte_identical() {
     let (staged, _) = small_fixture();
     let dir = tempfile::tempdir().expect("tempdir");
     let output = dir.path().join("out.db");
     fs::write(&output, b"not a database").expect("plant");
     let run = restore(&staged, &output, &[]);
-    assert_eq!((run.code, run.stdout.as_str()), (3, ""));
+    assert_eq!((run.code, run.stdout.as_str()), (1, ""));
     assert!(run.stderr.contains("already exists"), "{}", run.stderr);
     assert_eq!(fs::read(&output).expect("read"), b"not a database");
     assert_eq!(fs::read_dir(dir.path()).expect("dir").count(), 1);
@@ -261,7 +261,7 @@ fn a_stale_journal_file_refuses_until_clear_journal_files() {
     let journal = dir.path().join("out.db-journal");
     fs::write(&journal, b"stale").expect("plant");
     let refused = restore(&staged, &output, &[]);
-    assert_eq!((refused.code, refused.stdout.as_str()), (3, ""));
+    assert_eq!((refused.code, refused.stdout.as_str()), (1, ""));
     assert!(
         refused.stderr.contains("out.db-journal"),
         "{}",
@@ -294,7 +294,7 @@ fn clear_journal_files_never_touches_an_existing_target() {
     fs::write(&output, b"live").expect("plant");
     fs::write(&wal, b"belongs to it").expect("plant");
     let run = restore(&staged, &output, &["--clear-journal-files".to_owned()]);
-    assert_eq!(run.code, 3, "{}", run.stderr);
+    assert_eq!(run.code, 1, "{}", run.stderr);
     assert_eq!(fs::read(&wal).expect("read"), b"belongs to it");
     assert_eq!(fs::read(&output).expect("read"), b"live");
 }
@@ -502,7 +502,13 @@ fn usage_errors_exit_64_with_one_stderr_line_and_no_stdout() {
     ];
     for args in cases {
         let run = lsr(args);
-        assert_eq!((run.code, run.stdout.as_str()), (64, ""), "{args:?}");
+        // restore exits 1 for every failure, as Go's commands do (D47).
+        let want = if args.first() == Some(&"restore") {
+            1
+        } else {
+            64
+        };
+        assert_eq!((run.code, run.stdout.as_str()), (want, ""), "{args:?}");
         assert_eq!(run.stderr.lines().count(), 1, "{args:?}: {}", run.stderr);
     }
     let url = lsr(&["verify", "--replica", "https://bucket/path"]);
@@ -648,7 +654,7 @@ fn integrity_check_publishes_a_valid_database_in_every_mode() {
 /// Valid LTX, broken b-tree: quick and full refuse with exit 2 (a refused
 /// restore) naming SQLite's problem and leave nothing; none publishes it.
 #[test]
-fn integrity_check_refuses_a_corrupt_b_tree_with_exit_2() {
+fn integrity_check_refuses_a_corrupt_b_tree_with_exit_1() {
     let mut db = sqlite_pages();
     db[512..1024].fill(0xDE);
     let work = tempfile::tempdir().expect("tempdir");
@@ -658,7 +664,7 @@ fn integrity_check_refuses_a_corrupt_b_tree_with_exit_2() {
         let dir = tempfile::tempdir().expect("tempdir");
         let output = dir.path().join("out.db");
         let run = restore_checked(&replica, &output, check);
-        assert_eq!((run.code, run.stdout.as_str()), (2, ""), "{check}");
+        assert_eq!((run.code, run.stdout.as_str()), (1, ""), "{check}");
         assert!(run.stderr.contains("page 2"), "{check}: {}", run.stderr);
         assert!(
             run.stderr.contains("nothing was published"),
@@ -754,7 +760,7 @@ fn if_replica_exists_exits_0_on_an_empty_replica_and_writes_nothing() {
     let dir = tempfile::tempdir().expect("tempdir");
     let output = dir.path().join("out.db");
     let refused = restore_from(&replica, &output, &[]);
-    assert_eq!((refused.code, refused.stdout.as_str()), (2, ""));
+    assert_eq!((refused.code, refused.stdout.as_str()), (1, ""));
     for extra in [
         &["--if-replica-exists"][..],
         &["--if-replica-exists", "--txid", "0000000000000005"],
@@ -812,7 +818,7 @@ fn if_replica_exists_skips_a_path_without_ltx_as_go_does() {
         let refused = restore_from(replica, &output, &[]);
         assert_eq!(
             (refused.code, refused.stdout.as_str()),
-            (2, ""),
+            (1, ""),
             "{replica:?}"
         );
         assert!(
@@ -839,7 +845,7 @@ fn dry_run_refuses_an_empty_replica_even_with_if_replica_exists() {
     for (replica, says) in [(&empty, "no LTX file"), (&bare, "no ltx/ folder")] {
         for extra in [&["--dry-run"][..], &["--dry-run", "--if-replica-exists"]] {
             let run = restore_from(replica, &output, extra);
-            assert_eq!((run.code, run.stdout.as_str()), (2, ""), "{extra:?}");
+            assert_eq!((run.code, run.stdout.as_str()), (1, ""), "{extra:?}");
             assert!(run.stderr.contains(says), "{extra:?}: {}", run.stderr);
         }
     }
@@ -859,7 +865,7 @@ fn if_replica_exists_still_refuses_what_a_non_empty_replica_cannot_meet() {
         &output,
         &strings(&["--if-replica-exists", "--txid", "7fffffffffffffff"]),
     );
-    assert_eq!((beyond.code, beyond.stdout.as_str()), (2, ""));
+    assert_eq!((beyond.code, beyond.stdout.as_str()), (1, ""));
     assert!(
         beyond.stderr.contains("beyond the newest"),
         "{}",
@@ -872,7 +878,7 @@ fn if_replica_exists_still_refuses_what_a_non_empty_replica_cannot_meet() {
         }
         let staged = stage(&fixture, &manifest).expect("stage");
         let gap = restore(&staged, &output, &strings(&["--if-replica-exists"]));
-        assert_eq!((gap.code, gap.stdout.as_str()), (2, ""), "{}", gap.stderr);
+        assert_eq!((gap.code, gap.stdout.as_str()), (1, ""), "{}", gap.stderr);
         gaps += 1;
     }
     assert!(gaps > 0);
@@ -989,7 +995,7 @@ fn dry_run_checks_the_output_as_a_restore_would() {
     let output = dir.path().join("out.db");
     fs::write(&output, b"live").expect("plant");
     let exists = restore(&staged, &output, &strings(&["--dry-run"]));
-    assert_eq!((exists.code, exists.stdout.as_str()), (3, ""));
+    assert_eq!((exists.code, exists.stdout.as_str()), (1, ""));
     assert!(
         exists.stderr.contains("already exists"),
         "{}",
@@ -1000,7 +1006,7 @@ fn dry_run_checks_the_output_as_a_restore_would() {
     let wal = dir.path().join("out.db-wal");
     fs::write(&wal, b"stale").expect("plant");
     let refused = restore(&staged, &output, &strings(&["--dry-run"]));
-    assert_eq!((refused.code, refused.stdout.as_str()), (3, ""));
+    assert_eq!((refused.code, refused.stdout.as_str()), (1, ""));
     assert!(
         refused.stderr.contains("--clear-journal-files"),
         "{}",

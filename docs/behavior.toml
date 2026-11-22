@@ -1087,7 +1087,7 @@ response = "refuse. Nothing is touched"
 signal = "exit 3; `AlreadyExists` naming the path"
 at_risk = "None"
 recovery = "Remove the file, or run `clear-journal-files`"
-detected_by = "cli::`an_existing_output_exits_3_and_stays_byte_identical`, cli::`a_stale_journal_file_refuses_until_clear_journal_files`"
+detected_by = "cli::`an_existing_output_exits_1_and_stays_byte_identical`, cli::`a_stale_journal_file_refuses_until_clear_journal_files`"
 
 [[row]]
 table = "Restore"
@@ -1097,7 +1097,7 @@ response = "refuse, naming the reason and the transaction or file. `AsOfInsideFi
 signal = "exit 2"
 at_risk = "None. No shorter history is ever returned silently"
 recovery = "Depends on the reason"
-detected_by = "cli::`a_gap_target_exits_2_names_the_hole_and_leaves_no_file`, core::`plan::tests::a_later_snapshot_ending_right_after_the_chain_does_not_date_that_transaction`, core::`a_target_inside_the_only_transaction_one_file_names_it`; plant::`asof-straddle`, plant::`inside-file-sole-base`"
+detected_by = "cli::`a_gap_target_exits_1_names_the_hole_and_leaves_no_file`, core::`plan::tests::a_later_snapshot_ending_right_after_the_chain_does_not_date_that_transaction`, core::`a_target_inside_the_only_transaction_one_file_names_it`; plant::`asof-straddle`, plant::`inside-file-sole-base`"
 notes = "fuzz targets on the planner against the spec"
 
 [[row]]
@@ -1142,7 +1142,7 @@ response = "refuse"
 signal = "exit 3, or 2 for the integrity check"
 at_risk = "None"
 recovery = "Run again"
-detected_by = "cli::`integrity_check_refuses_a_corrupt_b_tree_with_exit_2`, local::`each_failed_step_says_whether_the_target_is_visible`"
+detected_by = "cli::`integrity_check_refuses_a_corrupt_b_tree_with_exit_1`, local::`each_failed_step_says_whether_the_target_is_visible`"
 
 [[row]]
 table = "Restore"

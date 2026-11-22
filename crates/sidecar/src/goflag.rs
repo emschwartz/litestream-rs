@@ -9,6 +9,9 @@
 //! help, which Go's `main` then treats as success only when an argument is literally `-h`,
 //! `-help` or `--help` (`cmd/litestream/main.go:89-96`).
 
+/// A value check and the reason Go gives when it refuses.
+pub type Check = (fn(&str) -> bool, &'static str);
+
 /// One flag a command defines.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Def {
@@ -16,18 +19,39 @@ pub struct Def {
     pub name: &'static str,
     /// Whether it takes a value; `false` for a boolean.
     pub value: bool,
+    /// A value flag whose `flag.Value.Set` can refuse: the check, and the reason Go gives.
+    pub check: Option<Check>,
 }
 
 /// A value flag.
 #[must_use]
 pub const fn value(name: &'static str) -> Def {
-    Def { name, value: true }
+    Def {
+        name,
+        value: true,
+        check: None,
+    }
+}
+
+/// A value flag Go parses as it reads it (an int, a duration, a `flag.Value`), so a bad
+/// value stops the scan there with `why`.
+#[must_use]
+pub const fn checked(name: &'static str, check: fn(&str) -> bool, why: &'static str) -> Def {
+    Def {
+        name,
+        value: true,
+        check: Some((check, why)),
+    }
 }
 
 /// A boolean flag.
 #[must_use]
 pub const fn boolean(name: &'static str) -> Def {
-    Def { name, value: false }
+    Def {
+        name,
+        value: false,
+        check: None,
+    }
 }
 
 /// Why Go's `flag` package stops.
@@ -44,6 +68,16 @@ pub enum FlagError {
     MissingValue {
         /// The name.
         name: &'static str,
+    },
+    /// A value flag whose value Go's parse refuses.
+    #[error("invalid value {value:?} for flag -{name}: {why}")]
+    BadValue {
+        /// The name.
+        name: &'static str,
+        /// What was given.
+        value: String,
+        /// Go's reason.
+        why: &'static str,
     },
     /// A boolean flag with a value that is not a boolean.
     #[error("invalid boolean value {value:?} for -{name}")]
@@ -170,6 +204,11 @@ pub fn scan(defs: &[Def], args: &[String]) -> Result<Scan, FlagError> {
                 .ok_or(FlagError::MissingValue { name })?,
             (false, None) => "true".to_owned(),
         };
+        if let Some((check, why)) = def.check
+            && !check(&value)
+        {
+            return Err(FlagError::BadValue { name, value, why });
+        }
         flags.push((name, value));
     }
     Ok(Scan::Set(Set {

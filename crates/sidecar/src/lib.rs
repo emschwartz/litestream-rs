@@ -135,6 +135,16 @@ pub fn run(args: &[String]) -> Result<Outcome, SidecarError> {
     Ok(Outcome::Ran(finished))
 }
 
+/// A config file as Go's commands read `-config` (`registerConfigFlag`): the flag, else
+/// `LITESTREAM_CONFIG`, else `/etc/litestream.yml`; `-` reads standard input.
+///
+/// # Errors
+/// [`SidecarError::Config`] or [`SidecarError::Stdin`].
+pub fn load_config(flag: Option<&str>, expand: Expand) -> Result<Loaded, SidecarError> {
+    let path = flags::config_path(flag, |name| std::env::var(name).ok());
+    load_file(&path, expand)
+}
+
 /// The config file, or Go's one-database config.
 fn load(flags: &Flags) -> Result<Loaded, SidecarError> {
     let expand = if flags.no_expand_env {

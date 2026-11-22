@@ -204,6 +204,7 @@ fn how(target: RestoreTarget) -> How {
         clear_journal_files_first: false,
         integrity_check: IntegrityCheck::Off,
         if_replica_exists: false,
+        existing: lsr_local::Existing::Empty,
     }
 }
 
