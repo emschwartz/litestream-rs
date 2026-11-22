@@ -1479,3 +1479,23 @@ fn a_staging_listing_whose_cursor_never_advances_is_a_fault_not_a_loop() {
     let got = crate::conformance::block_on(newest_level_zero(&staging));
     assert_eq!(got, Err(Fault::LocalIo));
 }
+
+/// A range past the live WAL's committed end is not proof either way, but its
+/// generation names why: another generation's range is not in this WAL (the
+/// seam the witness's checksum-chain rung would use), while this generation's
+/// is residue past the commit, a rewrite.
+#[test]
+fn a_range_past_the_committed_end_is_named_by_its_generation() {
+    let wal = FakeWal::new(PS, salts(1));
+    commit(&wal, &[1], 1);
+    commit(&wal, &[2], 2);
+    let mut reader = reader(wal.file_bytes());
+    let mut boot = BootWal::recovered(&mut reader);
+    let start = lsr_wal::WalOffset::start(PS).get();
+    let frame = 24 + u64::try_from(PS.bytes()).unwrap();
+    let past = lsr_wal::WalOffset::new(start + 5 * frame, PS).unwrap();
+    let other = wal_range(&mut boot, start, past, salts(9)).unwrap();
+    assert!(matches!(other, Range::NotInThisWal), "another generation");
+    let same = wal_range(&mut boot, start, past, salts(1)).unwrap();
+    assert!(matches!(same, Range::Rewritten), "this generation");
+}

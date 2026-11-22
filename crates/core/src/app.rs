@@ -247,12 +247,6 @@ impl AppCheckpointObserver {
         }
     }
 
-    /// The application's threshold the observer assumes.
-    #[must_use]
-    pub const fn autocheckpoint(&self) -> Option<NonZeroU32> {
-        self.autocheckpoint
-    }
-
     /// Changes the application's threshold; what was seen stays.
     pub const fn set_autocheckpoint(&mut self, autocheckpoint: Option<NonZeroU32>) {
         self.autocheckpoint = autocheckpoint;

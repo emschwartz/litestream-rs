@@ -169,9 +169,9 @@ impl ContiguousChain {
     /// Adds a file if it keeps the invariants; reports whether it did.
     fn push(&mut self, next: FileInfo) -> bool {
         let range = next.key.range();
-        let fits = !next.key.level().is_snapshot()
-            && touches(range.min(), self.reaches)
-            && range.max() > self.reaches;
+        let fits = touches(range.min(), self.reaches)
+            && range.max() > self.reaches
+            && !next.key.level().is_snapshot();
         if fits {
             self.files.push(next);
             self.reaches = range.max();
@@ -524,20 +524,25 @@ fn inside_the_base(listed: Listed<'_>, target: RestoreTarget) -> Option<PlanOutc
     )
 }
 
-/// The nearest-ending usable file among [`linking`] ones that ends past
-/// [`requested`]: the file the target falls inside. The caller supplies the
-/// files that link to the chain, because the file must link: otherwise a hole
-/// lies between, and finer files would not help.
+/// The nearest-ending usable file among [`linking`] ones: the file the target
+/// falls inside. The caller supplies the files that link to the chain, because
+/// the file must link: otherwise a hole lies between, and finer files would
+/// not help. Every usable linking file ends past [`requested`]: one ending at or
+/// before it would be eligible, so it would be the base (the eligible start
+/// that ends last) or the sweep would have extended the chain with it.
 fn inside_file<'a>(
     linking: impl Iterator<Item = &'a FileInfo>,
     requested: Txid,
 ) -> Option<PlanOutcome> {
     linking
-        .filter(|i| is_usable_beyond(i) && i.key.range().max() > requested)
+        .filter(|i| is_usable_beyond(i))
         .min_by_key(|i| (i.key.range().max(), Reverse(i.key.level()), i.key))
-        .map(|file| PlanOutcome::InsideFile {
-            requested,
-            file: file.key,
+        .map(|file| {
+            debug_assert!(file.key.range().max() > requested, "{file:?}");
+            PlanOutcome::InsideFile {
+                requested,
+                file: file.key,
+            }
         })
 }
 
@@ -553,14 +558,15 @@ fn no_snapshot(listed: Listed<'_>) -> PlanOutcome {
 }
 
 /// Greedy interval cover over the eligible files of levels 0 to 8, one sweep
-/// in order of first transaction.
+/// in order of first transaction. The touching file that ends last wins (the
+/// preference leads with the end); when even it does not pass the reach,
+/// `push` refuses it and the cover is done.
 fn extend<'a>(chain: &mut ContiguousChain, sweep: impl Iterator<Item = &'a FileInfo>) {
     let mut sweep = sweep.peekable();
     loop {
         let mut best: Option<FileInfo> = None;
         while let Some(info) = sweep.next_if(|i| touches(i.key.range().min(), chain.reaches())) {
-            let beats = best.is_none_or(|held| preference(info) > preference(&held));
-            if info.key.range().max() > chain.reaches() && beats {
+            if best.is_none_or(|held| preference(info) > preference(&held)) {
                 best = Some(*info);
             }
         }

@@ -334,6 +334,27 @@ fn a_new_generation_step_scans_from_the_start_and_keeps_the_txid() {
     assert_eq!(fills(pages), [(2, 2)]);
 }
 
+/// A new generation with nothing committed yet is idle at its own start: the
+/// position takes the new generation's cursor, so the next step reads on from
+/// there instead of from the old generation.
+#[test]
+fn an_idle_new_generation_step_ends_at_the_new_generation() {
+    let mut rig = Rig::new();
+    commit(&rig.wal, &[1, 2], 2);
+    let first = position_of(rig.snapshot(1000));
+    rig.wal.force_restart();
+    let synced = rig
+        .step(Step::NewGeneration(first), &SyncConfig::default(), 2000)
+        .unwrap();
+    let Synced::Idle(reached) = synced else {
+        panic!("{synced:?}");
+    };
+    let cursor = reached.position().cursor();
+    assert_eq!(cursor.salts(), rig.wal.salts());
+    assert_ne!(cursor.salts(), first.cursor().salts());
+    assert_eq!(reached.position().txid(), first.txid());
+}
+
 // The page checksum table.
 fn operator_snapshot(after: &Position) -> Step {
     Step::Snapshot {

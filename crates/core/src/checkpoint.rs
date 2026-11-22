@@ -155,9 +155,9 @@ pub enum Decision {
     Truncate,
 }
 
-fn over_truncate(observed: &Observed, cfg: &CheckpointConfig) -> bool {
+fn over_truncate(synced_frames: u32, cfg: &CheckpointConfig) -> bool {
     cfg.truncate_pages
-        .is_some_and(|limit| observed.synced_frames >= limit.get())
+        .is_some_and(|limit| synced_frames >= limit.get())
 }
 
 /// Go's priority ladder (`checkpointIfNeeded`, `db.go:1507-1594`).
@@ -171,7 +171,7 @@ fn over_truncate(observed: &Observed, cfg: &CheckpointConfig) -> bool {
 /// 4. Pending, the interval passed since `last`, and more than one frame: PASSIVE.
 #[must_use]
 pub fn decide(state: &CheckpointState, observed: &Observed, cfg: &CheckpointConfig) -> Decision {
-    if over_truncate(observed, cfg) {
+    if over_truncate(observed.synced_frames, cfg) {
         return match state {
             CheckpointState::PassiveFailedAtTruncate { .. } => Decision::Truncate,
             CheckpointState::Idle { .. } | CheckpointState::Pending { .. } => {
@@ -214,11 +214,11 @@ pub fn decide(state: &CheckpointState, observed: &Observed, cfg: &CheckpointConf
 pub(crate) fn after_sync(
     state: CheckpointState,
     wrote_txs: u32,
-    observed: &Observed,
+    synced_frames: u32,
     cfg: &CheckpointConfig,
 ) -> CheckpointState {
     let state = match state {
-        CheckpointState::PassiveFailedAtTruncate { last } if !over_truncate(observed, cfg) => {
+        CheckpointState::PassiveFailedAtTruncate { last } if !over_truncate(synced_frames, cfg) => {
             CheckpointState::Pending { last }
         }
         CheckpointState::PassiveFailedAtTruncate { .. }

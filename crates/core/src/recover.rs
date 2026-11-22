@@ -209,11 +209,9 @@ impl NewestStagedFile {
         let salts = Salts { salt1, salt2 };
         let frame = match wal {
             Some(mut wal) => {
-                let check = if end.frame_index() > 0 {
-                    FrameCheck::of(wal.reader.frame_before(end, salts, wal.committed))?
-                } else {
-                    FrameCheck::Miss(Miss::NotACommit)
-                };
+                // At the WAL's start there is no frame before: `frame_before` answers a miss
+                // without reading, and `frame_state` takes any miss there as fresh.
+                let check = FrameCheck::of(wal.reader.frame_before(end, salts, wal.committed))?;
                 let range = wal_range(&mut wal, origin.offset(), end, salts)?;
                 Some((wal, check, range))
             }
@@ -458,7 +456,10 @@ fn match_last_page<R: Read + Seek>(
             Some(digest) if digest != frame.digest() => return Ok(LastPageCheck::Mismatch),
             Some(_) => LastPage::of_frame(&frame),
         },
-        (FrameCheck::Miss(Miss::NotACommit), Some(last)) if end.frame_index() == 0 => last,
+        // At the WAL's start there is no frame before: the newest staged file's last page
+        // stands, and `resume` accepts the start. Elsewhere `resume` fails as `frame_before`
+        // did (both read `verified_before`), so the miss is kept.
+        (FrameCheck::Miss(Miss::NotACommit), Some(last)) => last,
         (FrameCheck::Miss(miss), _) => return Ok(LastPageCheck::NoFrame(miss)),
     };
     match boot.reader.resume(end, salts, boot.committed) {
@@ -616,11 +617,9 @@ impl Probes {
             cursor.salts(),
             cursor.next().page_size(),
         );
-        let prev = if cursor.next().frame_index() == 0 {
-            FrameCheck::Miss(Miss::NotACommit)
-        } else {
-            FrameCheck::of(wal.frame_before(cursor.next(), cursor.salts(), proven))?
-        };
+        // At the WAL's start there is no frame before: `frame_before` answers a miss without
+        // reading, and `frame_state` takes a running position there as fresh.
+        let prev = FrameCheck::of(wal.frame_before(cursor.next(), cursor.salts(), proven))?;
         let stale_next = (reset || wal.header().salts() != cursor.salts())
             && wal.commit_follows(&cursor).map_err(|_err| Fault::LocalIo)?;
         Ok(Self { prev, stale_next })

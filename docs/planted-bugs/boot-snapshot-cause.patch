@@ -1,12 +1,12 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index 7555b2f..23c78aa 100644
+index 7cdd376..ad0d7b3 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -902,7 +902,7 @@ impl Actor {
-         // A boot that fails later reads the journal again.
-         self.adopt_journal(journal, newest_staged.as_ref(), &upload);
-         let cause = boot_cause(dropped, refused, from.err());
--        let pending = pending_at_boot(self.kept.asked(), cause);
+@@ -921,7 +921,7 @@ impl Actor {
+         // it: every cause a boot finds clears the table of page checksums
+         // (`snapshot_clears`), which a requested snapshot alone would trust.
+         debug_assert!(cause.as_ref().is_none_or(snapshot_clears), "{cause:?}");
+-        let pending = cause.or(self.kept.asked());
 +        let pending = self.kept.asked().or(cause);
          let course = match (from, pending) {
              (Ok(position), snapshot) => Course::At {

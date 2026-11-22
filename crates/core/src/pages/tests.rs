@@ -97,7 +97,7 @@ fn a_page_size_change_empties_the_table() {
     let mut table = table();
     table.record(pg(1), digest(1, 1));
     table.fit(PS);
-    assert_eq!(table.len(), 1);
+    assert_eq!((table.len(), table.is_empty()), (1, false));
     table.fit(PageSize::new(1024).unwrap());
     assert!(table.is_empty());
 }

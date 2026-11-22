@@ -884,7 +884,7 @@ pub async fn created_at_many_agrees_with_created_at<H: Harness>(h: &H) -> Check 
     let (a, b, gone) = (key(7, 1, 1)?, key(7, 2, 2)?, key(7, 3, 3)?);
     put_with_created_at(store, a, b"a", at(CREATED_AT)).await?;
     put_with_created_at(store, b, b"bb", at(CREATED_AT + 1)).await?;
-    put_with_created_at(store, gone, b"c", at(CREATED_AT + 2)).await?;
+    put_with_created_at(store, gone, b"c", at(CREATED_AT)).await?;
     let files = [
         listed_one(store, a).await?,
         listed_one(store, gone).await?,
@@ -904,6 +904,15 @@ pub async fn created_at_many_agrees_with_created_at<H: Harness>(h: &H) -> Check 
         want.get(1).cloned(),
         Some(Err(StoreError::NotFound { key: gone })),
         "the deleted file's slot"
+    );
+    let times: Vec<_> = want
+        .iter()
+        .map(|got| got.as_ref().ok().map(|created| created.at()))
+        .collect();
+    ensure_eq!(
+        times,
+        vec![Some(at(CREATED_AT)), None, Some(at(CREATED_AT + 1))],
+        "each slot holds its own file's created-at time"
     );
     Ok(())
 }
