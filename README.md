@@ -4,6 +4,8 @@ A Rust port of [Litestream](https://github.com/benbjohnson/litestream) 0.5.x. It
 
 It runs as a library inside a Rust application, or as a sidecar that reads Go's `litestream.yml` and refuses to start when the config asks for a feature it lacks. Both write the same files as Go Litestream: this port reads replicas written by Go 0.5.0 and later, and Go 0.5.16 and later reads replicas this port writes.
 
+It aims for two things at once: compatibility with Go Litestream (same files, same config, either can take over a replica the other wrote), and correctness beyond what Go checks. Where Go would continue from a state it cannot prove, this port refuses or takes a fresh snapshot instead. [Differences from Go Litestream](#differences-from-go-litestream) lists where that changes behaviour.
+
 Not affiliated with or endorsed by the Litestream project.
 
 **Status.** Early and not proven in production. The code was written by AI agents. The maintainer directs the design and the testing strategy but does not review the code line by line, so confidence has to come from testing, and the testing is built to check the system from the outside rather than trust its own view of itself.
