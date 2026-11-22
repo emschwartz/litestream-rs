@@ -98,6 +98,12 @@ HELD_RESTORE = 0.5
 HELD_STREAM = 0x5375727669766501
 
 
+# The pinned LazyFS fetches a toml library whose CMakeLists asks for CMake older than 3.5, which
+# CMake 4 refuses to configure. This is CMake's own switch for that: treat such a project as
+# asking for 3.5. CMake 3 ignores it.
+CMAKE_POLICY = "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+
+
 def default_lazyfs_dir() -> Path:
     base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
     return Path(os.environ.get("LSR_LAZYFS_DIR", Path(base) / "lsr-lazyfs"))
@@ -124,7 +130,9 @@ def build(d: Path) -> Path:
         )
     pc = src / "libs" / "libpcache" / "build"
     pc.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["cmake", f"-DFETCHCONTENT_SOURCE_DIR_SPDLOG={spd}", ".."], cwd=pc, check=True)
+    subprocess.run(
+        ["cmake", CMAKE_POLICY, f"-DFETCHCONTENT_SOURCE_DIR_SPDLOG={spd}", ".."], cwd=pc, check=True
+    )
     subprocess.run(["cmake", "--build", ".", "-j", str(os.cpu_count() or 2)], cwd=pc, check=True)
     # lazyfs's CMakeLists includes spdlog from where FetchContent would have unpacked it.
     link = pc / "_deps" / "spdlog-src"
@@ -132,7 +140,7 @@ def build(d: Path) -> Path:
         link.symlink_to(spd)
     lb = src / "lazyfs" / "build"
     lb.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["cmake", "-DLAZYFS_BUILD_TESTS=OFF", ".."], cwd=lb, check=True)
+    subprocess.run(["cmake", CMAKE_POLICY, "-DLAZYFS_BUILD_TESTS=OFF", ".."], cwd=lb, check=True)
     subprocess.run(["cmake", "--build", ".", "-j", str(os.cpu_count() or 2)], cwd=lb, check=True)
     return lazyfs_binary(d)
 
