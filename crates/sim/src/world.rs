@@ -238,9 +238,12 @@ pub struct World {
     pub lost: BTreeSet<Txid>,
     /// Files another writer put: its transaction, and the one it copied.
     pub foreign: Vec<(Txid, Txid)>,
-    /// Another writer's file the operator removed, with the replica
-    /// recorder's length then: a file compacted after it cannot hold its pages.
-    pub foreign_removed: Vec<(Txid, usize)>,
+    /// Another writer's file the operator removed, by its index in
+    /// [`Self::foreign`], with the replica recorder's length then: a file
+    /// compacted after it cannot hold its pages. The index, not the
+    /// transaction, names the file: one id can be put, removed and put again
+    /// with no recorder event between.
+    pub foreign_removed: Vec<(usize, usize)>,
     /// Another writer's files, with the replica recorder's length when each
     /// was put.
     pub foreign_put: Vec<(Txid, usize)>,
