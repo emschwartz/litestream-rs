@@ -890,7 +890,10 @@ name = "running-drop-record-capped-at-confirmed"
 fix = "88577ff"
 package = "lsr-sim"
 test_bin = "sim"
-tests = ["an_unconfirmed_upload_dropped_from_staging_is_never_refused_seed_0xd"]
+tests = [
+    "an_unconfirmed_upload_dropped_from_staging_is_never_refused_seed_0xd",
+    "a_running_drop_records_past_an_unconfirmed_upload_seed_0xf45b5",
+]
 
 # A boot drop records only through the confirmed transaction, short of a listed tail the
 # listing judged torn.

@@ -428,6 +428,18 @@ fn an_unconfirmed_upload_dropped_from_staging_is_never_refused_seed_0xd() {
     }
 }
 
+/// Unaided search seed 0xf45b5 under the error-domain generator, which moved seed 0xd off this
+/// path: a running drop of an unreadable staged copy whose upload published with its answer
+/// lost. With the takeover record capped at the confirmed transaction, a later snapshot took
+/// that transaction's id again ("transaction 21 covers commit 89 and then commit 90").
+#[test]
+fn a_running_drop_records_past_an_unconfirmed_upload_seed_0xf45b5() {
+    let seed = lsr_sim::Seed::new(0xf45b5);
+    if let Err(failure) = lsr_sim::run(seed, 300, &lsr_sim::Weights::mixed(seed)) {
+        panic!("{failure}");
+    }
+}
+
 /// Seed 0x3ed of the fixed set's mix, 279 operations. Under lying replica reads a boot judges
 /// the replica's newest level-0 file (the engine's own upload) torn, and drops the staged
 /// copy that a crash left unverifiable. With the takeover capped at the confirmed transaction
