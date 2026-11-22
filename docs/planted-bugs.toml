@@ -504,3 +504,27 @@ package = "lsr-core"
 tests = [
     "journal_model::the_writer_matches_the_model_under_the_block_law",
 ]
+
+[[bug]]
+name = "journal-first-run-reported"
+fix = "27ef518"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::a_missing_journal_on_a_first_run_reports_nothing",
+]
+
+[[bug]]
+name = "journal-verdict-costs-a-snapshot"
+fix = "27ef518"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::no_journal_a_boot_can_find_changes_what_the_engine_does",
+]
+
+[[bug]]
+name = "journal-slot-error-unreported"
+fix = "27ef518"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::boot_reports_what_it_read_of_the_journal",
+]
