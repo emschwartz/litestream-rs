@@ -103,6 +103,15 @@ pub enum Op {
     },
     /// A checkpoint from outside the engine.
     OtherProcessCheckpoint(OtherProcessMode),
+    /// The actor runs one tick, and the app does `op` inside it, right before one of
+    /// the tick's calls into SQLite (`sqlite/in_tick.rs`), or not at all when the tick
+    /// makes no such call.
+    AppInTick {
+        /// The call it comes before.
+        at: AppAt,
+        /// What the app does.
+        op: AppOp,
+    },
     /// The next tick is cut short, or the machine fails right after it.
     Crash(CrashKind),
     /// A store call fails `ahead` calls from now.
@@ -222,6 +231,37 @@ pub enum Hold {
     /// The disk lies about the engine's fsync of the WAL, and the power fails
     /// while it lies, in the middle of the hold.
     LyingDisk,
+}
+
+/// Where inside a tick the app acts ([`Op::AppInTick`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppAt {
+    /// Before the call with this many calls before it, modulo the calls the tick before
+    /// made, so that it falls inside a tick of that length.
+    Call(u8),
+    /// Before the tick's first call of this kind.
+    Before(SourceOp),
+}
+
+/// What the app does inside a tick ([`Op::AppInTick`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppOp {
+    /// It commits `pages` random pages, and the pages a growth adds.
+    Commit {
+        /// How many pages it writes, besides those it adds.
+        pages: u8,
+        /// The database grows by a few pages.
+        grow: bool,
+    },
+    /// Another process begins a read transaction.
+    ReaderBegin,
+    /// The oldest other process's read transaction ends.
+    ReaderEnd,
+    /// A checkpoint from outside the engine.
+    Checkpoint(OtherProcessMode),
+    /// The last connection closes and the WAL is deleted, when no connection, ours
+    /// included, holds a transaction.
+    DeleteWal,
 }
 
 /// What a scenario does to the staging directory, the engine's own memory of
@@ -387,6 +427,8 @@ pub struct Weights {
     /// ([`crate::domain::KnownWrong`]). Never drawn by a mix: the nightly and the campaigns set
     /// it, and count the defect's failures as known; the per-push fixed seeds leave it unset.
     pub known_wrong: bool,
+    /// [`Op::AppInTick`].
+    pub app_in_tick: u32,
 }
 
 /// What the application does when it comes back after a restart, before the
@@ -472,6 +514,9 @@ impl Default for Weights {
             staging_fs: false,
             error_domain: false,
             known_wrong: false,
+            // Off in the default mix so its recorded histories keep their
+            // shape; swarm mixes draw it.
+            app_in_tick: 0,
         }
     }
 }
@@ -501,10 +546,11 @@ enum Kind {
     StagingDamage,
     Heal,
     StagingReplaceRunning,
+    AppInTick,
 }
 
 impl Weights {
-    fn table(&self) -> [(Kind, u32); 23] {
+    fn table(&self) -> [(Kind, u32); 24] {
         [
             (Kind::Tick, self.tick),
             (Kind::Commit, self.commit),
@@ -529,6 +575,7 @@ impl Weights {
             (Kind::StagingDamage, self.staging_damage),
             (Kind::Heal, self.heal),
             (Kind::StagingReplaceRunning, self.staging_replace_running),
+            (Kind::AppInTick, self.app_in_tick),
         ]
     }
 
@@ -602,6 +649,7 @@ impl Weights {
             staging_fs: false,
             error_domain: false,
             known_wrong: false,
+            app_in_tick: 0,
         };
         // Drawn last, so every other kind keeps the weight it had before
         // second writers were drawn.
@@ -641,6 +689,8 @@ impl Weights {
         mix.staging_fs = below(&entropy, 2) == 0;
         // Drawn after that, for the same reason: half each.
         mix.error_domain = below(&entropy, 2) == 0;
+        // And after that, for the same reason.
+        mix.app_in_tick = weight(false);
         mix
     }
 
@@ -922,8 +972,58 @@ fn draw(weights: &Weights, entropy: &SeededEntropy) -> Op {
         Kind::StagingDamage => staging_damage(entropy),
         Kind::Heal => Op::Heal,
         Kind::StagingReplaceRunning => staging_replace_running(entropy),
+        Kind::AppInTick => app_in_tick(entropy),
     }
 }
+
+/// An [`Op::AppInTick`]: at one of the tick's first 24 calls into SQLite or before its
+/// first call of a kind, half each, a commit (a sixth of them growing), a reader
+/// beginning or ending, a checkpoint of each mode, or a deleted WAL.
+fn app_in_tick(entropy: &SeededEntropy) -> Op {
+    let at = if below(entropy, 2) == 0 {
+        AppAt::Call(small(entropy, 24))
+    } else {
+        AppAt::Before(choose(entropy, &SOURCE_OPS).unwrap_or(SourceOp::Committed))
+    };
+    let op = match below(entropy, 7) {
+        0 | 1 => AppOp::Commit {
+            pages: small(entropy, 4).saturating_add(1),
+            grow: below(entropy, 6) == 0,
+        },
+        2 => AppOp::ReaderBegin,
+        3 => AppOp::ReaderEnd,
+        4 => AppOp::Checkpoint(
+            choose(
+                entropy,
+                &[
+                    OtherProcessMode::Passive,
+                    OtherProcessMode::Restart,
+                    OtherProcessMode::Truncate,
+                ],
+            )
+            .unwrap_or(OtherProcessMode::Passive),
+        ),
+        5 => AppOp::Checkpoint(OtherProcessMode::Truncate),
+        _ => AppOp::DeleteWal,
+    };
+    Op::AppInTick { at, op }
+}
+
+/// Every call the engine makes into SQLite, by kind.
+const SOURCE_OPS: [SourceOp; 12] = [
+    SourceOp::Open,
+    SourceOp::Len,
+    SourceOp::Committed,
+    SourceOp::Sync,
+    SourceOp::PageCount,
+    SourceOp::ReadPage,
+    SourceOp::BeginBarrier,
+    SourceOp::EndBarrier,
+    SourceOp::Checkpoint,
+    SourceOp::BumpSeq,
+    SourceOp::BeginWriteLock,
+    SourceOp::EndWriteLock,
+];
 
 /// The history of `steps` operations that `seed` names.
 ///

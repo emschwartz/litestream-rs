@@ -25,6 +25,8 @@ fn still_fails(seed: u64, ops_digest: u64, defect: KnownWrong) {
     let seed = Seed::new(seed);
     let mut weights = Weights::mixed(seed);
     weights.known_wrong = true;
+    // Drawn after these seeds were found, so each run stays the one that reaches its defect.
+    weights.app_in_tick = 0;
     let ops = history(seed, STEPS, &weights);
     assert_eq!(
         digest(&format!("{ops:?}")),

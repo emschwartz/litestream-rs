@@ -295,6 +295,8 @@ pub struct World {
     in_tick: Option<CommittedInTick>,
     // When the app's armed in-tick commit landed, by the app's own clock read.
     in_tick_time: Arc<Mutex<Option<Timestamp>>>,
+    /// What the app's operation inside the last tick did (`in_tick`).
+    app_done: Option<crate::sqlite::InTickRan>,
 }
 
 /// The first instant of a run's clock.
@@ -372,6 +374,7 @@ impl World {
             crash_entropy: SeededEntropy::new(seed.stream(5)),
             in_tick: None,
             in_tick_time: Arc::default(),
+            app_done: None,
         }
     }
 
@@ -413,10 +416,9 @@ impl World {
     }
 
     /// Arms a commit of `pages`, leaving `db_size` pages, that the app makes
-    /// inside the next tick at `site`. It must not grow the database: the
-    /// pages a growth re-adds are read from the rules after the tick, when
-    /// the engine may have changed them. The app reads its clock as it
-    /// commits, and the history logs the commit at that time.
+    /// inside the next tick at `site`. A commit that grows the database must
+    /// carry every page it adds. The app reads its clock as it commits, and
+    /// the history logs the commit at that time.
     pub fn arm_commit_in_tick(
         &self,
         pages: Vec<(PageNo, Vec<u8>)>,
@@ -590,9 +592,11 @@ impl World {
     pub fn run_tick<F: Future>(&mut self, fut: F, plan: Option<CrashPlan>) -> TickEnd<F::Output> {
         let budget = plan.map_or(Polls::UNBOUNDED, |p| p.at_poll);
         let at = self.remote_recorder.len();
+        self.sqlite.app_tick_begins();
         let ran = run_until(fut, budget);
         // The app's commit inside the tick came before the engine's own frames
         // that followed it, so the model takes it up first.
+        self.app_done = self.record_app_in_tick();
         self.in_tick = self.record_commit_in_tick();
         // Before the crash takes anything: a power loss decides which of the
         // engine's own commits survive, so the model must know them first.
@@ -1159,6 +1163,7 @@ impl World {
     }
 }
 
+mod in_tick;
 #[cfg(test)]
 mod tests;
 

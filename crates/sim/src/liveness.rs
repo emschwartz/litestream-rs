@@ -289,6 +289,7 @@ pub const fn of_op(op: &Op) -> &'static [Justifier] {
         Op::LyingWalSync => &[Justifier::LyingDisk],
         Op::Commit { .. }
         | Op::CommitInTick { .. }
+        | Op::AppInTick { .. }
         | Op::Spill
         | Op::Rollback
         | Op::Vacuum { .. }

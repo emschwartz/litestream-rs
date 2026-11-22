@@ -488,6 +488,7 @@ impl Runner {
         };
         let ended = self.w.run_tick(fut, plan);
         self.w.sim_clock.settle();
+        self.app_in_tick_seen();
         ended
     }
 
@@ -1778,6 +1779,7 @@ impl Runner {
         match op {
             Op::Commit { pages, grow } => self.commit(*pages, *grow),
             Op::CommitInTick { pages } => self.commit_in_tick(*pages)?,
+            Op::AppInTick { at, op } => self.app_in_tick(*at, *op)?,
             Op::Spill => self.spill(),
             Op::Rollback => {
                 if self.w.sqlite.rollback() {
@@ -2254,6 +2256,7 @@ pub fn shrink(seed: Seed, steps: u32, weights: &Weights, opts: &Opts) -> Option<
 
 mod after_restart;
 mod hold;
+mod in_tick;
 
 /// Whether a snapshot with this cause is the engine saying the history it had replicated may
 /// not continue: the database, its WAL or the staging directory went back or cannot be

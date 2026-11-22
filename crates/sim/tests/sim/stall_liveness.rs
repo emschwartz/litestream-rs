@@ -13,7 +13,7 @@ use lsr_sim::{Seed, Weights, history, run};
 
 const SEED: u64 = 0xa2;
 const STEPS: u32 = 300;
-const DIGEST: u64 = 0xf7d4_df65_da08_fc8e;
+const DIGEST: u64 = 0x6707_8d5f_28b2_3637;
 
 fn digest(text: &str) -> u64 {
     text.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
@@ -24,7 +24,9 @@ fn digest(text: &str) -> u64 {
 #[test]
 fn a_stall_ends_with_the_fault_that_caused_it_seed_0xa2() {
     let seed = Seed::new(SEED);
-    let weights = Weights::mixed(seed);
+    let mut weights = Weights::mixed(seed);
+    // Drawn after this seed was found, so the run stays the one the plant fails on.
+    weights.app_in_tick = 0;
     let ops = history(seed, STEPS, &weights);
     assert_eq!(
         digest(&format!("{ops:?} {weights:?}")),
