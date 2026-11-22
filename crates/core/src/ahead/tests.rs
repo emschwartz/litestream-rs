@@ -198,3 +198,62 @@ fn a_failed_page_read_is_its_fault() {
         )))
     );
 }
+
+/// A replica holding a snapshot at `txid` of a three-page file whose pages hold their numbers.
+fn replica_at(txid: u64) -> MemStore {
+    use lsr_ltx::{Encoder, Header, HeaderFields, TxidRange};
+
+    use crate::layout::{FileKey, Level};
+    use crate::store::{ObjectStore, Upload, WriteMode};
+
+    let range = TxidRange::new(Txid::MIN, Txid::new(txid).unwrap()).unwrap();
+    let header = Header::new(HeaderFields {
+        tracked: false,
+        page_size: PS,
+        commit: 3,
+        txids: range,
+        timestamp: Timestamp::from_unix_millis(1_000),
+        pre_apply: None,
+        wal: None,
+        node_id: 0,
+    })
+    .unwrap();
+    let mut encoder = Encoder::new(Vec::new(), header).unwrap();
+    for n in 1..=3_u8 {
+        encoder.write_page(pg(u32::from(n)), &bytes(n)).unwrap();
+    }
+    let file = encoder.finish(None).unwrap().0;
+    let store = MemStore::new();
+    block_on(async {
+        let key = FileKey::new(Level::new(9).unwrap(), range);
+        let mut upload = store
+            .begin_upload(&key, Timestamp::from_unix_millis(1_000), WriteMode::Replace)
+            .await
+            .unwrap();
+        upload.write(&file).await.unwrap();
+        upload.commit().await.unwrap();
+    });
+    store
+}
+
+/// With nothing staged after the replica's newest transaction, the images come from the
+/// replica alone: a file that holds them is clean, one page that does not is counted.
+#[test]
+fn the_images_come_from_the_replica_when_nothing_is_pending() {
+    let (mut wal, mut db, _) = rig();
+    let position = staged(&wal);
+    let remote = replica_at(4);
+    let empty = PageChecksumTable::new();
+    let checked = |wal: &mut FakeWal, db: &mut FakeDb| {
+        block_on(check(&position, wal, db, &empty, &remote, Txid::new(4)))
+    };
+    assert_eq!(checked(&mut wal, &mut db), Ok(None));
+    db.write_page(pg(3), &bytes(9));
+    assert_eq!(
+        checked(&mut wal, &mut db),
+        Ok(Some(Found {
+            pages: NonZeroU32::MIN,
+            first: NonZeroU32::new(3).unwrap(),
+        }))
+    );
+}
