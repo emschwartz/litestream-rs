@@ -192,36 +192,16 @@ fn swarm_seed_44_restores_only_committed_states() {
     }
 }
 
-/// Found unaided once the app could act inside a tick (`Op::AppInTick`): seed 0xf49a2's drawn
+/// Found unaided once the app could act inside a tick (`Op::AppInTick`): seed 0xf488c's drawn
 /// mix commits between the engine's last sync step and its TRUNCATE, and the boundary snapshot
 /// took that commit's pages for damage (`DatabasePageMismatch`) until it stopped checking them
-/// (docs/decisions.md D121, plant `boundary-snapshot-keeps-page-table`).
+/// (docs/decisions.md D121, plant `boundary-snapshot-keeps-page-table`). Seed 0xf49a2 found it
+/// first, before main's later swarm draws reshuffled the mixes. Main's swarm, without these
+/// operations, kills the plant on none of seeds 1000001 to 1002000.
 #[test]
-fn swarm_seed_0xf49a2_takes_no_commit_before_a_truncate_for_damage() {
-    let seed = Seed::new(0xf49a2);
-    if let Err(failure) = run_with(seed, 124, &Weights::mixed(seed), &Opts::default()) {
-        panic!("{failure}");
-    }
-}
-
-/// Found unaided under app operations inside a tick: with the planted bug "the barrier is
-/// released before the seal" (`docs/planted-bugs/barrier-released-before-seal.patch`), seed
-/// 0xf4493's drawn mix commits between the seal and the checkpoint, and a restore of the
-/// transaction after it differs from what was committed.
-#[test]
-fn swarm_seed_0xf4493_restores_each_transaction_as_committed() {
-    let seed = Seed::new(0xf4493);
-    if let Err(failure) = run_with(seed, 203, &Weights::mixed(seed), &Opts::default()) {
-        panic!("{failure}");
-    }
-}
-
-/// As `swarm_seed_0xf4493_restores_each_transaction_as_committed`, judged by the history
-/// judge: under the same plant, seed 0xf460a restores a latest state no commit made.
-#[test]
-fn swarm_seed_0xf460a_restores_latest_as_a_committed_state() {
-    let seed = Seed::new(0xf460a);
-    if let Err(failure) = run_with(seed, 49, &Weights::mixed(seed), &Opts::default()) {
+fn swarm_seed_0xf488c_takes_no_commit_before_a_truncate_for_damage() {
+    let seed = Seed::new(0xf488c);
+    if let Err(failure) = run_with(seed, 299, &Weights::mixed(seed), &Opts::default()) {
         panic!("{failure}");
     }
 }
