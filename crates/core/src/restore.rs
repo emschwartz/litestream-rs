@@ -539,15 +539,14 @@ pub(crate) async fn restore_from<S: ObjectStore, K: DatabaseSink>(
             }
             Err(Abort::Fatal(err)) => return Err(err),
             Err(abort) => {
+                // A gap stops the plan before the first file: nothing to reset.
+                let applied_nothing = matches!(abort, Abort::Gap(_));
                 retries.after(abort, attempt)?;
-                sink.reset().map_err(sink_fault(SinkOp::Reset))?;
+                if !applied_nothing {
+                    sink.reset().map_err(sink_fault(SinkOp::Reset))?;
+                }
                 attempt = attempt.saturating_add(1);
             }
-            Err(Abort::Gap(outcome)) if attempt >= MAX_ATTEMPTS => {
-                return Err(RestoreError::NoPlan(NoPlan(outcome)));
-            }
-            // Nothing was applied: the plan stopped before the first file.
-            Err(Abort::Gap(_)) => attempt = attempt.saturating_add(1),
         }
     }
 }
@@ -560,6 +559,8 @@ const MAX_CHASE: u8 = 64;
 struct Retries {
     /// Attempts that found a planned file gone.
     vanished: u8,
+    /// Attempts whose listing planned a gap.
+    gaps: u8,
     /// Attempts whose listing did not show a file a read had found after an earlier
     /// listing: the store's listing lags.
     lagged: u8,
@@ -587,6 +588,13 @@ impl Retries {
                         attempts: attempt,
                         missing,
                     });
+                }
+                Ok(())
+            }
+            Abort::Gap(outcome) => {
+                self.gaps = self.gaps.saturating_add(1);
+                if self.gaps >= MAX_ATTEMPTS {
+                    return Err(RestoreError::NoPlan(NoPlan(outcome)));
                 }
                 Ok(())
             }
