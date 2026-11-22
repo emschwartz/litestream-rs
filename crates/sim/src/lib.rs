@@ -25,6 +25,7 @@ pub mod crash_law;
 pub mod exec;
 pub mod generate;
 pub mod history;
+pub mod journal;
 pub mod liveness;
 pub mod model;
 pub mod oracle;

@@ -46,7 +46,7 @@ use lsr_core::{
 };
 use lsr_ltx::{Timestamp, Txid};
 use lsr_sqlite::{DatabaseFile, Sqlite};
-use lsr_store_fs::FsStore;
+use lsr_store_fs::{FsJournalFile, FsStore};
 
 use crate::config::Config;
 use crate::events::{Event, EventSink};
@@ -161,6 +161,8 @@ pub(crate) struct Worker {
     sqlite: Option<Sqlite>,
     database: PathBuf,
     staging: FsStore,
+    /// The engine journal beside staging (`<meta>/lsr-journal`, docs/journal.md).
+    journal: FsJournalFile,
     remote: Metered,
     actor: Actor,
     config: Config,
@@ -228,6 +230,7 @@ impl Worker {
             sqlite: Some(sqlite),
             database: database.to_owned(),
             staging: FsStore::new(meta),
+            journal: FsJournalFile::new(meta),
             remote,
             actor,
             next_poll: later(now, config.poll_interval.get()),
@@ -398,7 +401,7 @@ impl Worker {
             staging: &self.staging,
             remote: &self.remote,
             clock: self.runtime.clock.as_ref(),
-            journal: None,
+            journal: Some(&mut self.journal),
         };
         Ok(block_on(self.actor.tick(env, now)))
     }

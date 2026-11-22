@@ -20,10 +20,8 @@ use crate::store::{Listing, PageLimit, ReadLen, StoreError, StoreOp, Upload};
 mod audit;
 #[expect(
     clippy::unwrap_in_result,
-    clippy::panic_in_result_fn,
     clippy::arithmetic_side_effects,
-    reason = "an in-memory journal file: slot offsets of at most 4096, and a write that panics \
-              because step 2 boot must never write"
+    reason = "an in-memory journal file: offsets and lengths within one 8192-byte file"
 )]
 mod journal;
 

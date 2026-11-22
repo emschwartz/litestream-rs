@@ -24,10 +24,17 @@
 //! 3. The snapshot. The debt is paid once the TRUNCATE completes: the WAL it emptied holds
 //!    nothing the failed sync covered, and the snapshot is an ordinary pending one.
 //!
-//! The debt lives in this process only (in `Kept`, so a rebuild keeps it). A restart between
-//! steps 1 and 2 forgets it, and the next process trusts the WAL again: that needs a durable
-//! engine-owned record, which waits on the engine journal decision (the ignored test
-//! `a_restart_after_a_failed_wal_sync_ships_no_unproven_frame` in the SQLite suite).
+//! The debt is kept in `Kept` (so a rebuild keeps it) and, when a journal is lent, in the
+//! engine journal (`docs/journal.md`): at the end of every tick the journal's debt is written
+//! when it differs from the debt here, and boot restores a recorded debt. A restart between
+//! steps 1 and 2 therefore still owes the TRUNCATE. The record lags the fault by the rest of
+//! one tick (a kill in that window forgets it, as without a journal), and a journal that cannot
+//! be written leaves the debt in this process only, retried every tick and reported as
+//! `JournalUnwritable`.
+//!
+//! After the TRUNCATE the debt is [`Unproven::Snapshot`] until the paying snapshot is staged:
+//! a restart then snapshots anyway (the WAL the TRUNCATE emptied is a new generation), and the
+//! journal records that the TRUNCATE ran, so a restart never owes a second one.
 //!
 //! What this cannot protect against:
 //! - The page cache losing the pages before the TRUNCATE copies them (a reboot, a power loss,
@@ -58,6 +65,28 @@ pub(super) enum Unproven {
     No,
     /// A sync failed: the next sync step is a TRUNCATE checkpoint.
     Truncate,
+    /// The TRUNCATE ran: the next file staged, the snapshot, pays the debt.
+    Snapshot,
+}
+
+impl Unproven {
+    /// The debt as the journal records it.
+    pub(super) const fn recorded(self) -> lsr_journal::Unproven {
+        match self {
+            Self::No => lsr_journal::Unproven::No,
+            Self::Truncate => lsr_journal::Unproven::Truncate,
+            Self::Snapshot => lsr_journal::Unproven::Snapshot,
+        }
+    }
+
+    /// The larger of this debt and one a journal recorded: a restart never forgives a debt.
+    pub(super) const fn with_recorded(self, recorded: lsr_journal::Unproven) -> Self {
+        match (self, recorded) {
+            (Self::Truncate, _) | (_, lsr_journal::Unproven::Truncate) => Self::Truncate,
+            (Self::Snapshot, _) | (_, lsr_journal::Unproven::Snapshot) => Self::Snapshot,
+            (Self::No, lsr_journal::Unproven::No) => Self::No,
+        }
+    }
 }
 
 impl Actor {
@@ -90,8 +119,15 @@ impl Actor {
             }
             Err(err) => return Err(Fault::from_source(err)),
         }
-        self.kept.unproven = Unproven::No;
+        self.kept.unproven = Unproven::Snapshot;
         Ok(Stepped::Resnapshot(SnapshotCause::WalSyncFailed))
+    }
+
+    /// Step 3 is done: a file was staged after the TRUNCATE, and the first one is the snapshot.
+    pub(super) fn staged_after_truncate(&mut self) {
+        if matches!(self.kept.unproven, Unproven::Snapshot) {
+            self.kept.unproven = Unproven::No;
+        }
     }
 
     /// Whether the engine owes a TRUNCATE before it may read the WAL for staging.

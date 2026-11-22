@@ -25,12 +25,14 @@ use super::unproven::Unproven;
 use crate::app::AppCheckpointObserver;
 use crate::checkpoint::CheckpointState;
 use crate::fault::{SnapshotCause, SnapshotCounts, StopCause};
-use crate::journal::JournalSignal;
+use crate::journal::{JournalSignal, JournalWriter};
 use crate::layout::FileKey;
 use crate::pages::PageChecksumTable;
 use crate::position::Position;
 use crate::upload::UploadState;
 use crate::witness::Witnesses;
+use lsr_journal::Journal;
+use std::io::ErrorKind;
 
 /// Whether the actor was asked to stop, which no rebuild forgets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -123,6 +125,12 @@ pub(super) struct Kept {
     /// What the last boot's read of the journal reported. A report, not engine state: nothing
     /// decides on it.
     pub(super) journal: Option<JournalSignal>,
+    /// The journal's writer, from the last boot that was lent a journal.
+    pub(super) writer: Option<JournalWriter>,
+    /// The record that boot read, if any: what is durable until this lifetime writes.
+    pub(super) journal_read: Option<Journal>,
+    /// How the last journal write ended: an error is `JournalUnwritable` until one succeeds.
+    pub(super) journal_write: Result<(), ErrorKind>,
 }
 
 impl Kept {
@@ -141,6 +149,9 @@ impl Kept {
             snapshots: SnapshotCounts::default(),
             unproven: Unproven::No,
             journal: None,
+            writer: None,
+            journal_read: None,
+            journal_write: Ok(()),
         }
     }
 
@@ -163,6 +174,9 @@ impl Kept {
             snapshots,
             unproven,
             journal,
+            writer,
+            journal_read,
+            journal_write,
         } = self;
         Self {
             cfg: cfg.clone(),
@@ -178,6 +192,9 @@ impl Kept {
             snapshots: *snapshots,
             unproven: *unproven,
             journal: *journal,
+            writer: writer.clone(),
+            journal_read: *journal_read,
+            journal_write: *journal_write,
         }
     }
 

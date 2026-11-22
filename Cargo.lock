@@ -1031,6 +1031,7 @@ version = "0.0.0"
 dependencies = [
  "lsr-core",
  "lsr-history",
+ "lsr-journal",
  "lsr-ltx",
  "lsr-wal",
  "proptest",

@@ -39,6 +39,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D29 | Where do the behaviour table's rows live? | `docs/behavior.toml`, rendered into `docs/BEHAVIOR.md` | parent session's request; layout by Claude (checker-holes) | 2026-11-22 | decided |
 | D30 | How is Toxiproxy provided to the tests? | Built from source with `go install` at a pinned version | Claude (checker-holes), **delegated** | 2026-11-22 | open to owner review |
 | D32 | How is an unusable KMS key reported? | As a permission refusal, `permission_denied` | Claude, **delegated** | 2026-11-22 | open to owner review |
+| D100 | How does the journal hold the unproven-WAL debt, and when is it written? | Written at the end of the tick that changes it; a new failure may raise it at any step; `JournalUnwritable` while the journal lags | Claude (journal), **delegated** | 2026-11-22 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -323,6 +324,15 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** the health name does not say "KMS"; the log's error text and the store's message do.
 - **Revisit if:** operators need to tell a KMS key from a bucket policy at a glance.
 - **Links:** `S3Code::KmsKeyUnusable` in `crates/store-s3/src/classify.rs`.
+
+## D100. The unproven-WAL debt in the engine journal
+
+- **Question:** a failed WAL fsync must survive a restart (open defect D2). When is it written, what may follow what, and what is reported when it cannot be written?
+- **Choice:** the journal's debt is a function of the engine's state, written at the end of every tick in which it differs from the last record made durable (or read at boot); boot restores a recorded debt and never forgives one. The debt is paid only through its cure (TRUNCATE owed, then snapshot owed, then none), and a new failure may raise it to TRUNCATE owed at any step: the writer refuses, as a bug, a record that forgives it. A failed write is tried again every tick; `JournalUnwritable` (approved name) is reported while the journal lags the engine and clears once nothing is left to record.
+- **Options considered:** write the debt inside `Actor::fault` (it has no file lent); write it before the next sync step (one more place to remember); the design's strict order No, Truncate, Snapshot, No (refuses a second failure during the paying snapshot).
+- **Cost accepted:** the record lags the failure by the rest of one tick, so a kill in that window forgets it, as without a journal. One `fdatasync` (two on the first write, which creates the file) per change of the debt; none otherwise, so a database that never fails a WAL fsync never creates the journal.
+- **Revisit if:** the window inside the tick is shown to matter, or later facts need ordering against the debt within a tick.
+- **Links:** `crates/core/src/actor/unproven.rs`, `docs/journal.md`, `docs/BEHAVIOR.md` RUN-3 and D2.
 
 ## Unverified, not recorded
 

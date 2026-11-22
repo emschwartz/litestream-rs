@@ -110,15 +110,17 @@ pub enum Unproven {
 }
 
 impl Unproven {
-    /// Whether a record holding `self` may follow one holding `old`: the debt moves only forward
-    /// through its cure.
+    /// Whether a record holding `self` may follow one holding `old`: a debt is never forgiven.
+    /// It is paid only through its cure (a TRUNCATE, then a snapshot), and a new WAL fsync
+    /// failure may raise it again at any step.
     #[must_use]
     pub const fn may_follow(self, old: Self) -> bool {
         matches!(
             (old, self),
-            (Self::No, Self::No | Self::Truncate)
-                | (Self::Truncate, Self::Truncate | Self::Snapshot)
-                | (Self::Snapshot, Self::Snapshot | Self::No)
+            (_, Self::Truncate)
+                | (Self::No, Self::No)
+                | (Self::Truncate | Self::Snapshot, Self::Snapshot)
+                | (Self::Snapshot, Self::No)
         )
     }
 }
