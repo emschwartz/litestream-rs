@@ -8,6 +8,8 @@
 #   package  the cargo package whose tests are run
 #   tests    nextest name substrings (`test(~x)`); each must fail when planted, one run apiece
 #   test_bin optional: restrict the run to one integration-test binary (cargo `--test`)
+#   patch    optional: the patch's name when it is not `name`, so one defect can be planted
+#            against the tests of a second package
 #   (an entry whose `fix` is "plant" is no fixed defect: it proves a checker catches a bug class
 #   it was built for, with the checker's own test named)
 #   canary   optional, on the two canary entries only: the verdict the runner must report,
@@ -347,6 +349,18 @@ tests = [
     "a_commit_after_the_tick_began_is_not_stamped_before_it_landed",
 ]
 
+# The same defect against the simulator: under the each-read clock law the swarm kills it with
+# nothing written for it (crates/sim/tests/sim/clock_reads.rs records the shortest such seed).
+[[bug]]
+name = "stamp-before-committed-read-sim"
+patch = "stamp-before-committed-read"
+fix = "847521a"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "a_commit_after_the_tick_read_its_clock_is_not_stamped_before_it_seed_0x681",
+]
+
 [[bug]]
 name = "seal-stamped-at-checkpoint-start"
 fix = "847521a"
@@ -355,6 +369,71 @@ tests = [
     "a_commit_before_the_checkpoint_barrier_is_not_stamped_before_it_landed",
 ]
 
+# The same defect against the simulator, killed by the swarm unaided under the each-read clock law.
+[[bug]]
+name = "seal-stamped-at-checkpoint-start-sim"
+patch = "seal-stamped-at-checkpoint-start"
+fix = "847521a"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "a_commit_before_the_barrier_is_not_stamped_before_it_seed_0x552",
+]
+
+# The simulator's own judges. A checker that cannot see a class of bug reads as green, so their
+# fixes are planted too: each puts back an exemption that switched a check off.
+[[bug]]
+name = "oracle-reuse-after-any-power-loss"
+fix = "checker-holes (oracle exemptions)"
+package = "lsr-sim"
+tests = ["oracle::tests::a_power_loss_that_cut_nothing_covered_does_not_excuse_a_reused_id"]
+
+[[bug]]
+name = "acks-forgotten-on-power-loss"
+fix = "checker-holes (oracle exemptions)"
+package = "lsr-sim"
+tests = ["world::tests::a_power_loss_keeps_the_acknowledgements"]
+
+[[bug]]
+name = "rewind-excused-without-report"
+fix = "checker-holes (oracle exemptions)"
+package = "lsr-history"
+test_bin = "history"
+tests = [
+    "judge::a_rewind_the_engine_did_not_report_does_not_excuse_going_back",
+    "judge::a_report_before_the_rewind_does_not_cover_it",
+]
+
+[[bug]]
+name = "unlink-durable-at-once"
+fix = "checker-holes (staged unlinks)"
+package = "lsr-sim"
+tests = ["store::tests::an_unsynced_unlink_comes_back_or_stays_done_under_the_block_law"]
+
+[[bug]]
+name = "keys-not-write-once"
+fix = "checker-holes (write-once keys)"
+package = "lsr-sim"
+tests = ["oracle::tests::a_key_put_again_with_other_bytes_is_a_rewrite"]
+
+[[bug]]
+name = "damage-adopted-as-commit"
+fix = "checker-holes (model adoption)"
+package = "lsr-sim"
+tests = ["history::tests::a_restore_of_a_state_adopted_from_damage_fails"]
+
+[[bug]]
+name = "rewind-report-only-after-the-latest"
+fix = "checker-holes (rewind reports)"
+package = "lsr-history"
+test_bin = "history"
+tests = ["judge::a_report_after_any_explaining_rewind_covers_the_step"]
+
+[[bug]]
+name = "first-sync-never-a-report"
+fix = "checker-holes (rewind reports)"
+package = "lsr-sim"
+tests = ["run::tests::a_first_sync_over_files_reports_a_loss"]
 [[bug]]
 name = "denial-classes"
 fix = "9224a25"
