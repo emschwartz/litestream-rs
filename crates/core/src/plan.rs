@@ -13,7 +13,10 @@
 //! most one past the previous end and ends beyond it. Its reach is its last
 //! transaction. Eligibility: [`RestoreTarget::Latest`] admits every file;
 //! [`Txid`] admits files whose last transaction is at or below the target;
-//! [`AsOf`] admits files created strictly before the instant. Go skips a file
+//! [`AsOf`] admits files created strictly before the instant (a created-at time is when the
+//! engine first staged the transaction, at or after its commit: [`crate::Dating::Commit`], so
+//! `AsOf` never applies a commit made after the instant, and may leave out commits made before
+//! it that the engine had not yet seen, such as those made while it was down). Go skips a file
 //! when [`!info.CreatedAt.Before(timestamp)`] in both the snapshot loop and
 //! [`restoreLevelCursor.refresh`] (replica.go), the same comparison.
 //!

@@ -418,6 +418,7 @@ impl Runner {
         let mut ck = CountingCheckpointer::new(self.w.sqlite.checkpointer(), self.tally.clone());
         let staging = self.w.staging.clone();
         let remote = self.w.remote.clone();
+        let clock = std::sync::Arc::clone(&self.w.clock);
         let now = self.now();
         self.w.high.note(now);
         let actor = &mut self.actor;
@@ -428,6 +429,7 @@ impl Runner {
                 ck: &mut ck,
                 staging: &staging,
                 remote: &remote,
+                clock: clock.as_ref(),
             };
             actor.tick(env, now).await
         };
