@@ -168,7 +168,7 @@ After a rewind the replica still holds the lost branch. Its transactions stay re
 
 **What is lost if the host is destroyed.** Every commit after `replicated_txid`.
 
-**How to see lag.** `lsr_unreplicated_age_seconds` is the intended measure, and it is wrong in two cases (N1): it reads 0 until the first boot of a process completes, and it restarts from "now" after every restart. A process that starts with the store unreachable shows `/healthz` 200, no degraded cause and zero lag while replicating nothing. Until N1 is fixed, alert on `lsr_replicated_txid` failing to advance while the application writes, and on `lsr_retries_total` rising.
+**How to see lag.** `lsr_unreplicated_age_seconds` is the intended measure. Until a booted engine shows the replica caught up (before a process's first boot, and while a rebuilt engine waits to boot) it counts from the start of that wait, never 0 (replica `the_lag_counts_from_the_start_while_the_first_boot_fails`). It still restarts from the process's start after every restart, so a crash loop understates lag (N1); alert also on `lsr_replicated_txid` failing to advance while the application writes.
 
 **When degraded or retrying.** Lag is unbounded. The staging directory grows when uploads fail; the WAL grows when sync fails. No bound is enforced on either. **code only.**
 
@@ -188,7 +188,7 @@ After a rewind the replica still holds the lost branch. Its transactions stay re
 
 **Counted against G7.**
 - D12: a fault whose policy is a plain retry never becomes degraded. A full disk, a failed WAL fsync or permanently held readers halt replication with `/healthz` 200 and no degraded cause.
-- N1: the age gauge reads 0 until a process's first boot completes, and restarts from "now" at every restart. Together with D12, a process that starts with the store unreachable shows all three signals clean.
+- N1: the age gauge restarts from the process's start at every restart, so a crash loop shorter than the alert threshold keeps it low. (Before its first boot a process now counts lag from its start, so the case of a process that starts with the store unreachable no longer shows all three signals clean.)
 - D2: the fsync failure itself is forgotten by a restart.
 
 **Evidence.** None. No test asserts any signal over a halted engine for longer than one retry. **untested.** Tracked in issue #99.
@@ -313,9 +313,9 @@ Five tasks keep separate retry waits and degraded states: sync, checkpoint, uplo
 |---|---|---|
 | `Health.degraded[task]`, `/healthz` `degraded[]`, `lsr_degraded{task,cause}` | `replica/src/health.rs`, `sidecar/src/health.rs` | A persistent cause the task keeps retrying. Cause names: `credentials`, `permission_denied`, `clock_skew`, `bucket_missing`, `tls`, `store_refused`, `remote_corrupt`, `other_writer`, `remote_regressed`, `wal_corrupt`, `wal_truncated`, `wal_unlinked`, `page_size_changed`, `database_page_mismatch`, `bug` |
 | `Health.phase`, `lsr_db_state`, `lsr_stopped`, `/healthz` status | `sidecar/src/health.rs` | 200 while booting, running, draining, degraded or waiting for a file. 503 once any database stopped, failed to start, or lost its thread |
-| `lsr_retries_total`, log line "retrying" | `sidecar/src/logging.rs` | A fault whose policy is a plain retry. It raises no degraded state and no stop, however long it lasts (D12). Its only other trace is lag, and the lag gauge is unreliable before the first boot (N1) |
+| `lsr_retries_total`, log line "retrying" | `sidecar/src/logging.rs` | A fault whose policy is a plain retry. It raises no degraded state and no stop, however long it lasts (D12). Its only other trace is lag; the lag gauge counts from a process's start, so it understates lag across restarts (N1) |
 | `lsr_resnapshot_pending{cause}`, log "snapshot required", boot log `cause=` | `sidecar/src/health.rs` | The next file is a snapshot, and why |
-| `lsr_unreplicated_age_seconds`, `lsr_replicated_txid`, `lsr_wal_bytes` | `Health` in `replica/src/health.rs` | Lag and local growth. The age gauge prints 0 for "unknown" as well as for "caught up" (N1) |
+| `lsr_unreplicated_age_seconds`, `lsr_replicated_txid`, `lsr_wal_bytes` | `Health` in `replica/src/health.rs` | Lag and local growth. The age gauge is 0 only when a booted engine shows the replica caught up; before that it counts from the process's start (N1) |
 | `lsr_verify_failing`, `lsr_verify_failing_txid`, `lsr_verify_failing_page` | `replica/src/health.rs` | The scheduled verify found the replica restores something the live database never held |
 | `lsr_app_notice`, `lsr_app_checkpoints_total` | `replica/src/health.rs` | The application ran checkpoints of its own. A notice, not a failure |
 | `lsr_panics_total` | `replica/src/health.rs` | Panics caught at the thread boundary |
@@ -687,7 +687,7 @@ Three other ways replication ends that are not a `StopCause`:
 
 | # | Defect | Basis | Rows | Tracking |
 |---|---|---|---|---|
-| N1 | `lsr_unreplicated_age_seconds` reads 0 until the first boot of a process completes, and restarts from "now" after every restart. `Progress::advance` runs only for a booted engine; `unreplicated_since` starts `None`; the gauge prints 0 for `None`. A process that starts with the store unreachable shows `/healthz` 200, no degraded cause (D12) and zero lag while replicating nothing. A crash loop understates lag | Read in `replica/src/thread.rs` and `sidecar/src/metrics.rs`, not run | G4 | Issue #99 |
+| N1 | **Half closed.** `lsr_unreplicated_age_seconds` read 0 until the first boot of a process completed; it now counts from the start of any wait no booted engine vouches for (`Progress::unproven`, `replica/src/thread.rs`). Open: it restarts from the process's start after every restart, so a crash loop understates lag | replica `the_lag_counts_from_the_start_while_the_first_boot_fails`; plant `lag-zero-before-boot`. The restart half is read in the code, not run | G4, G7 | Issue #99 for the restart half |
 | N2 | A backward clock step holds every timer for the size of the step: `Actor::clock` returns the old reading while the clock is behind, and retry waits, the checkpoint interval, compaction windows and retention all use it | Read in `Actor::clock`. The freeze is inferred, not observed | RUN-19, WORLD-14 | Issue #99 |
 | N3 | No cross-process exclusion on the staging directory, and the `OtherWriter` detector is probably blind when two writers share it | No lock found by search. Consequence inferred | WORLD-1, A4 | Issue #99 |
 | N4 | **Closed.** The `credentials` cause absorbed every 401 and 403, every S3 auth code including `RequestTimeTooSkewed`, a TLS failure and `NoSuchBucket`. Now five kinds (`StoreDenied`), an archived object is `store_refused`, and a batch delete refusing a key is `permission_denied` instead of transient. KMS codes are still classified by status | store-s3 `classify_denials_by_what_to_fix`; plant `denial-classes` | UP-4, WORLD-15, WORLD-22, WORLD-23 | Closed |

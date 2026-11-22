@@ -195,6 +195,26 @@ fn a_refused_boot_is_degraded_and_recovers() {
     site.assert_restores(&*site.store());
 }
 
+/// A replicator whose first boot the store refuses has replicated nothing: its lag counts
+/// from the start, never zero, so an alert on the lag fires while the store is unreachable.
+#[test]
+fn the_lag_counts_from_the_start_while_the_first_boot_fails() {
+    let site = Site::new();
+    let faulty = site.faulty();
+    faulty.refuse.store(true, Ordering::SeqCst);
+    let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
+    let (runtime, clock) = fake();
+    let started = clock.now();
+    let replicator = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
+    let refused = wait(&replicator, |h| h.task(Task::Sync).is_some());
+    assert_eq!(refused.phase, Phase::Booting, "{refused:?}");
+    assert_eq!(refused.unreplicated_since, Some(started), "{refused:?}");
+    faulty.refuse.store(false, Ordering::SeqCst);
+    clock.advance(POLL);
+    wait(&replicator, caught_up);
+    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
+}
+
 /// Go's `SyncStatus`: what is staged locally and what the replica holds, before the replica
 /// has anything, after a local sync whose upload failed, after the upload, and after new
 /// writes until they too are on the replica.
