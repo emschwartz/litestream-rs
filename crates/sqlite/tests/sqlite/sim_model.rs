@@ -11,11 +11,9 @@
 //! Page bytes are not compared (the model's pages are not b-tree pages); whether a page read
 //! succeeds is.
 //!
-//! Three differences are known, each held by a `pin_` test that fails once the model gives
-//! SQLite's answer (then the pin and its carve-out go): a second engine lock while one is held,
-//! a sequence bump while a lock is held, and the salts of the first frame after the engine's
-//! own TRUNCATE. The property leaves them out: one lock at a time, no bump under a lock, and
-//! salts not compared. The engine itself keeps the first two rules.
+//! One difference is known, held by a `pin_` test that fails once the model gives SQLite's
+//! answer (then the pin and its carve-out go): a sequence bump while a lock is held. The
+//! property leaves it out. The engine itself releases before it bumps.
 //!
 //! The schema puts tables `t0`..`t3` on pages 2..=5 and this crate's `_litestream_seq` and
 //! `_litestream_lock` on 6 and 7, so an app commit of tables in `mask` writes one frame per
@@ -79,8 +77,8 @@ mod diff {
     /// One side's memory between steps, to say how salts and the hold moved.
     #[derive(Default)]
     struct Last {
-        /// Leaves out the three known differences (module doc): only one lock at a time, no
-        /// sequence bump under a lock, and salts not compared. The pins turn it off.
+        /// Leaves out the known difference (module doc): no sequence bump under a lock. The
+        /// pin turns it off.
         known_out: bool,
         salts: Option<(u32, u32)>,
         epoch: Option<ReadLockHold>,
@@ -162,7 +160,6 @@ mod diff {
             Op::Committed => show(src.committed().map(|read| {
                 let salts = read.end().salts();
                 let moved = last.moved((salts.salt1, salts.salt2));
-                let moved = (!last.known_out).then_some(moved);
                 (read.end().frame_count(), read.backfilled(), moved)
             })),
             Op::Len => show(src.len().map(|len| len.map(|l| l.bytes()))),
@@ -185,9 +182,6 @@ mod diff {
             ),
             Op::BumpSeq if last.known_out && !last.held.is_empty() => "released first".to_owned(),
             Op::BumpSeq => show(cp.bump_seq()),
-            Op::BeginBarrier | Op::BeginWriteLock if last.known_out && !last.held.is_empty() => {
-                "one at a time".to_owned()
-            }
             Op::BeginBarrier => {
                 let got = cp.begin_barrier();
                 let out = show(got.as_ref().map(drop));
@@ -226,6 +220,7 @@ mod diff {
     /// This crate on real files.
     struct Real {
         _dir: TempDir,
+        path: std::path::PathBuf,
         app: Connection,
         others: Vec<Connection>,
         reading: [bool; OTHERS],
@@ -254,10 +249,11 @@ mod diff {
                 .query_row("PRAGMA page_count", [], |row| row.get(0))
                 .unwrap();
             assert_eq!(pages, PAGES);
-            pragma(&app, OtherProcessMode::Truncate);
+            pragma(&open(&path), OtherProcessMode::Truncate);
             let sqlite = Sqlite::open(&path).unwrap();
             Self {
                 others: (0..OTHERS).map(|_| open(&path)).collect(),
+                path,
                 _dir: dir,
                 app,
                 reading: [false; OTHERS],
@@ -298,7 +294,7 @@ mod diff {
                     String::new()
                 }
                 Op::OtherBegin(_) | Op::OtherEnd(_) => String::new(),
-                Op::AppCheckpoint(mode) => pragma(&self.app, mode),
+                Op::AppCheckpoint(mode) => pragma(&open(&self.path), mode),
                 Op::Committed
                 | Op::Len
                 | Op::Open
@@ -464,7 +460,7 @@ mod diff {
         #![proptest_config(ProptestConfig::with_cases(128))]
 
         /// Every answer the model gives the engine is the answer this crate gives it, but for
-        /// the three known differences the pins below hold.
+        /// the known difference the pin below holds.
         #[test]
         fn the_model_answers_the_engine_as_sqlite_does(
             seed in any::<u64>(),
@@ -482,17 +478,6 @@ mod diff {
         (got, want)
     }
 
-    /// Known difference: a second engine lock while one is held. The engine takes one at a
-    /// time. Fails once the model refuses as SQLite does; then remove the pin and the carve-out.
-    #[test]
-    fn pin_a_second_lock_is_busy_in_the_model_and_refused_by_sqlite() {
-        let (model, sqlite) = pinned(&[Op::BeginBarrier, Op::BeginWriteLock], 1);
-        assert_eq!(
-            (model.as_str(), sqlite.as_str()),
-            ("Err(Busy)", "Err(Io(InvalidInput))")
-        );
-    }
-
     /// Known difference: a sequence bump while a lock is held runs inside the lock's own
     /// transaction here (one writer connection), so the lock's release rolls it back; the
     /// model's pool connection is busy instead. The engine releases first, so only a release
@@ -501,23 +486,5 @@ mod diff {
     fn pin_a_bump_under_a_lock_is_busy_in_the_model_and_runs_inside_it_in_sqlite() {
         let (model, sqlite) = pinned(&[Op::BeginBarrier, Op::BumpSeq], 1);
         assert_eq!((model.as_str(), sqlite.as_str()), ("Err(Busy)", "Ok(())"));
-    }
-
-    /// Known difference: after the engine's own TRUNCATE, its sequence bump writes the first
-    /// frame. This crate checkpoints on its reader and bumps on its writer, whose checkpoint
-    /// count is 0, so SQLite draws both salts at random; the model runs both on one connection
-    /// and moves salt1 by one, the restart `recover`'s rule 6 can prove.
-    #[test]
-    fn pin_salts_after_our_truncate_move_by_one_in_the_model_and_at_random_in_sqlite() {
-        let ops = [
-            Op::Committed,
-            Op::Commit(1),
-            Op::Checkpoint(CheckpointMode::Truncate),
-            Op::BumpSeq,
-            Op::Committed,
-        ];
-        let (model, sqlite) = pinned(&ops, 4);
-        assert_eq!(model, "Ok((1, 0, Some((PlusOne, Other))))");
-        assert_eq!(sqlite, "Ok((1, 0, Some((Other, Other))))");
     }
 }
