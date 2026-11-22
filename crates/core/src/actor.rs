@@ -1226,9 +1226,17 @@ impl Actor {
                 Ok(through) => (*through.position(), Some(through), Tail::Synced),
                 Err(position) => (position, None, Tail::Synced),
             },
-            // Neither is pinned: the step never claimed the committed end.
+            // Not pinned: the step never claimed the committed end.
             StepEnd::Limited(position) => (position, None, Tail::More),
-            StepEnd::Unproven(position) => (position, None, Tail::Reset(committed)),
+            // Pinned when the epoch held, but no proof to checkpoint on: the
+            // position is in the header's generation, not the index's.
+            StepEnd::Unproven(reached) => {
+                let position = match reached.confirm(wal) {
+                    Ok(through) => *through.position(),
+                    Err(position) => position,
+                };
+                (position, None, Tail::Reset(committed))
+            }
         };
         self.engine.course.moved(position, tail, files == 1);
         let observed = Observed::of(now, &position, !self.more_wal());
