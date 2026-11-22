@@ -1739,12 +1739,14 @@ impl SimSqlite {
         })
     }
 
-    /// Whether our read transaction holds a read mark above zero, which keeps
-    /// any writer from restarting the WAL under it. Held on mark zero it lets
-    /// one restart through, and with none held nothing pins the WAL.
+    /// Whether our read transaction is held, on any read mark. A mark above
+    /// zero keeps any writer from restarting the WAL; mark zero lets one
+    /// generation change through and then blocks every backfill, so no commit
+    /// can go with a generation either way (`lsr_core::recover`, rule 6).
+    /// With none held nothing pins the WAL.
     #[must_use]
     pub fn our_reader_pins_wal(&self) -> bool {
-        self.with(|state| matches!(state.readers.get(&Conn::Ours), Some(Mark::Slot(_))))
+        self.with(|state| state.readers.contains_key(&Conn::Ours))
     }
 
     /// The wal-index salts.

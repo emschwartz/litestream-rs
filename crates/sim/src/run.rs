@@ -817,7 +817,13 @@ impl Runner {
             | Event::Clamped(_) => return Ok(()),
         };
         self.liveness
-            .judge(CauseKind::from(cause), at_boot, &mut self.report.reach)
+            .judge(CauseKind::from(cause), at_boot, &mut self.report.reach)?;
+        if matches!(cause, lsr_core::SnapshotCause::BehindRemote { .. }) && at_boot {
+            let staged = self.w.staged_level_zero();
+            self.liveness
+                .passed_by_replica(&staged, &self.w, &mut self.report.reach)?;
+        }
+        Ok(())
     }
 
     /// Counts what an event shows: its kind, and the fault, cause or
