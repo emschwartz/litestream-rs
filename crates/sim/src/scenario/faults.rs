@@ -240,7 +240,7 @@ pub fn fault_scenarios(kind: FaultKind) -> &'static [fn() -> Scenario] {
         FaultKind::UploadChecksumMismatch => &[etag_mismatch_on_put],
         FaultKind::StoreRefused => &[store_refuses_upload],
         FaultKind::RemoteCorrupt => &[remote_bitrot_on_list_read],
-        FaultKind::RemoteAheadOfLocal => &[second_writer_mid_run],
+        FaultKind::RemoteAheadOfLocal => &[second_writer_mid_run, second_writer_survives_restart],
         FaultKind::RemoteRegressed => &[bucket_rolled_back],
         FaultKind::StagedLost => &[staged_byte_flip_before_upload, meta_dir_deleted_mid_run],
         FaultKind::LocalDiskFull => &[disk_full_on_staging],
@@ -763,6 +763,90 @@ pub fn second_writer_mid_run() -> Scenario {
     );
     s.check = Some(quiet_after_stop);
     s
+}
+
+/// As [`second_writer_mid_run`], then a supervisor restarts the engine while
+/// the other writer's files still stand: the restart must stop again, not take
+/// them as history and snapshot above them. Once an operator removes them and
+/// restarts it once more, the engine replicates again.
+#[must_use]
+pub fn second_writer_survives_restart() -> Scenario {
+    let mut s = build(
+        "second_writer_survives_restart",
+        vec![
+            live(),
+            vec![
+                remote_fault(
+                    StoreOp::Upload,
+                    0,
+                    FaultShape::ErrorAfterPublish(transient(StoreOp::Upload)),
+                ),
+                commit(2, false),
+                Op::Remote(RemoteOp::PutUnrecognized),
+                Op::Remote(RemoteOp::PutUnrecognized),
+            ],
+            ticks(SETTLE),
+            vec![Op::Restart, commit(1, false)],
+            ticks(SETTLE),
+            vec![
+                Op::Remote(RemoteOp::RemoveUnrecognized),
+                Op::Remote(RemoteOp::RemoveUnrecognized),
+                Op::Restart,
+                commit(1, false),
+            ],
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        vec![Expect::Stopped(StopCause::OtherWriter), Expect::Oracle],
+    );
+    s.check = Some(stop_survives_restart);
+    s
+}
+
+/// The first stop for another writer is followed, at the restart's boot (the
+/// first tick after it that calls the replica), by another stop and nothing
+/// else: no boot, no snapshot above the other writer's files. Later a boot
+/// replicates and no stop follows it.
+fn stop_survives_restart(report: &RunReport) -> Result<(), String> {
+    let seen = &report.seen;
+    let other = |seen: &Seen| matches!(seen, Seen::Stop(StopCause::OtherWriter));
+    let first = seen
+        .iter()
+        .position(other)
+        .ok_or("the engine never stopped for another writer")?;
+    let calls = |seen: &Seen| matches!(seen, Seen::Tick { remote_calls, .. } if *remote_calls > 0);
+    let boot = seen
+        .iter()
+        .skip(first)
+        .position(calls)
+        .map(|at| at.saturating_add(first))
+        .ok_or("no tick after the stop called the replica")?;
+    let verdict = seen
+        .iter()
+        .skip(boot.saturating_add(1))
+        .find(|seen| !matches!(seen, Seen::Tick { .. }));
+    if !verdict.is_some_and(other) {
+        return Err(format!(
+            "the restart with the other writer's files still there did {verdict:?}, not stop"
+        ));
+    }
+    let booted = seen
+        .iter()
+        .rposition(|seen| matches!(seen, Seen::Event(Event::Booted { .. })))
+        .filter(|at| *at > boot)
+        .ok_or("the engine never booted once the other writer's files were gone")?;
+    let after = seen.get(booted..).unwrap_or_default();
+    if after.iter().any(other) {
+        return Err("the engine still stopped once the other writer's files were gone".to_owned());
+    }
+    let replicated = seen
+        .iter()
+        .skip(boot)
+        .any(|seen| matches!(seen, Seen::Event(Event::Uploaded(_))));
+    if !replicated {
+        return Err("the engine never replicated again after the operator's restart".to_owned());
+    }
+    Ok(())
 }
 
 /// The replica lost its newest files after the engine had confirmed them: the

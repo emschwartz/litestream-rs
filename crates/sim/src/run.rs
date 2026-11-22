@@ -296,6 +296,13 @@ struct Runner {
     /// measured from it, since an earlier reading is clamped.
     latest: Option<Timestamp>,
     saved: Option<StagedCopy>,
+    /// The stop record a driver keeps in the meta directory
+    /// ([`lsr_core::StopRecord`]): durable once a tick ends, handed to
+    /// every new actor, and copied, put back and deleted with the staging
+    /// directory by the meta operations.
+    stop_record: Option<lsr_core::StopRecord>,
+    /// The stop record saved with [`Runner::saved`].
+    saved_stop_record: Option<lsr_core::StopRecord>,
     /// The commit each file in `saved` held when it was copied, noted again
     /// when the copy is put back.
     saved_notes: Vec<(Txid, Option<crate::model::WalEnd>, crate::CommitId)>,
@@ -337,6 +344,10 @@ fn small(rng: &SeededEntropy, upper: u64) -> u32 {
     u32::try_from(below(rng, upper)).unwrap_or(u32::MAX)
 }
 
+/// Ticks a restarted engine gets to stop again for a recorded other writer:
+/// the stop comes at its first tick unless a fault delays the listing.
+const SETTLE_AFTER_RESTART: usize = 8;
+
 impl Runner {
     fn new(seed: Seed) -> Self {
         let page_size = PageSize::new(FIRST_PAGE_SIZE).unwrap_or(PageSize::MIN);
@@ -364,6 +375,8 @@ impl Runner {
             latest: None,
             saved: None,
             saved_notes: Vec::new(),
+            stop_record: None,
+            saved_stop_record: None,
             app_autocheckpoint: Some(lsr_core::SQLITE_AUTOCHECKPOINT),
             app_before: AppCheckpoints::NONE,
             expected: Vec::new(),
@@ -397,6 +410,9 @@ impl Runner {
             ..base
         });
         self.actor.set_app_autocheckpoint(self.app_autocheckpoint);
+        if let Some(record) = self.stop_record {
+            self.actor.remember_stop(record);
+        }
         self.unwatched = true;
         self.degraded = [false; 5];
         self.latest = None;
@@ -598,7 +614,13 @@ impl Runner {
         let booting = !self.actor.booted();
         let salts = self.w.sqlite.salts();
         let commits = self.w.model.commits().len();
+        let record0 = self.actor.stop_record();
         let ended = self.run_one(plan);
+        // The driver stores the record, or removes it, when a tick that ended
+        // changed it; a tick a crash cut short stored nothing.
+        if matches!(ended, TickEnd::Done(_)) && self.actor.stop_record() != record0 {
+            self.stop_record = self.actor.stop_record();
+        }
         if booting && self.actor.booted() {
             self.life.boot_salts = Some(salts);
             self.life.boot_commits = commits;
@@ -1078,6 +1100,7 @@ impl Runner {
         // Only an engine that was running when the file appeared, and has not
         // booted since, owes the stop: a boot takes a replica ahead as history.
         let mut watching = self.actor.booted();
+        let mut stopped_here = false;
         for _ in 0..ticks {
             watching &= self.actor.booted();
             let lists = self.w.remote_recorder.counts().lists;
@@ -1092,6 +1115,7 @@ impl Runner {
                 Step::Ran | Step::Drained(_) | Step::Crashed => {}
             }
             if stopped {
+                stopped_here = true;
                 break;
             }
             // A running engine that listed the replica in this tick while the
@@ -1116,7 +1140,62 @@ impl Runner {
                 });
             }
         }
+        if stopped_here {
+            self.restart_while_stopped(key, &bytes)?;
+        }
         self.remove_foreign(key, &bytes)
+    }
+
+    /// A supervisor restarts an engine that stopped for another writer while
+    /// that writer's file still stands: the stop is recorded, so the boot must
+    /// stop again, never boot and snapshot above the file.
+    fn restart_while_stopped(
+        &mut self,
+        key: lsr_core::FileKey,
+        bytes: &[u8],
+    ) -> Result<(), Violation> {
+        if self.actor.stop_record().is_none() {
+            return Err(bug_fault(
+                "a stop for another writer left no record".to_owned(),
+            ));
+        }
+        // The operator deleted the meta directory since: the next process
+        // starts with no memory of the stop, by the operator's choice.
+        if self.stop_record.is_none() {
+            return Ok(());
+        }
+        self.restart(CrashKind::Process);
+        for _ in 0..SETTLE_AFTER_RESTART {
+            let (step, stats) = self.step(None)?;
+            let theirs = self.w.remote_holds(key, bytes).map_err(|err| {
+                bug_fault(format!("reading the second writer's file failed: {err}"))
+            })?;
+            // As for a running engine: one whose boot staged that transaction
+            // itself replaces the file with its own (a torn object beside a
+            // staged copy that verifies), which is not building above it.
+            let ours = self.actor.staged().max(self.actor.replicated());
+            let behind = ours < Some(key.range().max());
+            if theirs && behind && matches!(stats.event, Some(Event::Booted { .. })) {
+                return Err(Violation::OtherWriterMissed {
+                    key: key.to_string(),
+                });
+            }
+            match step {
+                Step::Stopped(StopCause::OtherWriter) => {
+                    self.report
+                        .reach
+                        .bump("remote.second_writer_restart_stopped");
+                    return Ok(());
+                }
+                Step::Stopped(cause) if self.stop_expected(cause) => return Ok(()),
+                Step::Stopped(cause) => {
+                    return Err(bug_fault(format!("the engine stopped: {cause:?}")));
+                }
+                Step::Degraded(cause) => self.degraded_expected(cause)?,
+                Step::Ran | Step::Drained(_) | Step::Crashed => {}
+            }
+        }
+        Ok(())
     }
 
     /// The operator removes the other writer's newest file if it still holds
@@ -1365,6 +1444,7 @@ impl Runner {
                         })
                         .collect();
                     self.saved = Some(copy);
+                    self.saved_stop_record = self.stop_record;
                     true
                 })
                 .map_err(StagedEditError::from),
@@ -1374,6 +1454,7 @@ impl Runner {
                     None => Ok(false),
                 };
                 if matches!(done, Ok(true)) {
+                    self.stop_record = self.saved_stop_record;
                     self.put_back = self.w.staging_recorder.len();
                     self.renote_saved();
                 }
@@ -1387,10 +1468,12 @@ impl Runner {
                 }
             }),
             MetaOp::StripNewestOrigin => w.strip_newest_origin(),
-            MetaOp::DeleteAll => w
-                .wipe_staging()
-                .map(|()| true)
-                .map_err(StagedEditError::from),
+            MetaOp::DeleteAll => {
+                self.stop_record = None;
+                w.wipe_staging()
+                    .map(|()| true)
+                    .map_err(StagedEditError::from)
+            }
             MetaOp::TruncateNewest => w.edit_newest_staged(|bytes| {
                 let half = bytes.len() / 2;
                 bytes.truncate(half);

@@ -84,8 +84,8 @@ use crate::checkpoint::{
 use crate::created_at::{ResolvedCreatedAt, resolve};
 use crate::env::Clock;
 use crate::fault::{
-    Action, Backoff, Clamped, Fault, Next, PersistentCause, Policy, Responses, STALLED_AFTER,
-    SnapshotCause, Stall, StopCause, backoff_wait, policy,
+    Action, Backoff, Clamped, Fault, Next, OtherWriter, PersistentCause, Policy, Responses,
+    STALLED_AFTER, SnapshotCause, Stall, StopCause, backoff_wait, policy,
 };
 use crate::inventory::Inventory;
 use crate::layout::{FileInfo, FileKey, Level};
@@ -101,6 +101,7 @@ use crate::recover::{
 };
 use crate::snapshot::{SnapshotFailed, read_live, write_snapshot};
 use crate::source::{CheckpointMode, Checkpointer, CommittedRead, PageSource, WalSource};
+use crate::stop_record::StopRecord;
 use crate::store::{ObjectStore, PageLimit};
 use crate::sync::{Step, StepEnd, SyncConfig, Synced, sync_step, wal_barrier};
 use crate::upload::{
@@ -387,6 +388,22 @@ impl Actor {
             kept: self.kept.rebuilt(self.kept.app.reopened()),
             engine: Engine::fresh(),
         }
+    }
+
+    /// Hands the actor a stop for another writer that an earlier process
+    /// recorded (`crate::stop_record`), before its first tick. Its boot stops
+    /// again while the replica still holds a transaction past the record's.
+    pub fn remember_stop(&mut self, record: StopRecord) {
+        self.kept.stop_record = Some(record);
+    }
+
+    /// The stop for another writer the driver must keep for the next
+    /// process, or `None` when there is none to keep (none was made, or a
+    /// boot found the other writer's files gone). The driver stores it, or
+    /// removes what it stored, whenever this changes.
+    #[must_use]
+    pub const fn stop_record(&self) -> Option<StopRecord> {
+        self.kept.stop_record
     }
 
     /// Whether the engine has booted: listed the replica and recovered its
@@ -755,8 +772,25 @@ impl Actor {
     }
 
     fn stop(&mut self, cause: StopCause) -> Tick {
+        // A stop for another writer must outlive the process. The record names
+        // what this engine has staged or confirmed, the evidence the stop was
+        // judged on; not the ids it acknowledged before a rollback took them,
+        // which another writer's file may now hold. A doubt then keeps the
+        // stop, and an operator clears it.
+        if cause == StopCause::OtherWriter && self.kept.stop_record.is_none() {
+            let ours = self.staged().max(self.engine.upload.confirmed());
+            self.kept.stop_record = Some(StopRecord::other_writer(ours));
+        }
         self.kept.stop = Stop::Stopped(cause);
         Tick::Stopped(cause)
+    }
+
+    /// A configuration that continues past another writer drops a stop
+    /// record unread: the boot then takes the replica as it is.
+    fn drop_stop_record_if_continuing(&mut self) {
+        if self.kept.cfg.responses.other_writer == OtherWriter::ContinueAndInterleaveHistories {
+            self.kept.stop_record = None;
+        }
     }
 
     fn ran(&self, event: Event, now: Timestamp) -> Tick {
@@ -777,9 +811,11 @@ impl Actor {
         if !self.kept.tasks.ready(Task::Sync, now) {
             return self.ran(Event::Idle, now);
         }
-        let suspect = &mut self.kept.suspect_staged;
-        let (upload, lost) = match boot_listing(env.staging, env.remote, suspect).await {
-            Ok(listed) => listed,
+        self.drop_stop_record_if_continuing();
+        let (suspect, record) = (&mut self.kept.suspect_staged, &mut self.kept.stop_record);
+        let (upload, lost) = match boot_listing(env.staging, env.remote, suspect, record).await {
+            Ok(Some(listed)) => listed,
+            Ok(None) => return self.verdict(Task::Sync, StopCause::OtherWriter, now),
             Err(fault) => return self.fault(Task::Sync, fault, now),
         };
         let Judged {
@@ -1954,11 +1990,17 @@ struct Booted {
 /// when it is `suspect`, the file a read on an earlier tick failed on;
 /// otherwise it becomes the suspect and the boot fails with `StagedLost`, to
 /// read it again on the next try.
+///
+/// A stop for another writer recorded by an earlier process (`record`) is
+/// judged on the same listing, before staging is touched: `Ok(None)` while
+/// the replica still holds a transaction past the record's, and the record
+/// goes once it does not (`crate::stop_record`).
 async fn boot_listing<L: ObjectStore, R: ObjectStore>(
     staging: &L,
     remote: &R,
     suspect: &mut Option<FileKey>,
-) -> Result<(UploadState, Option<Txid>), Fault> {
+    record: &mut Option<StopRecord>,
+) -> Result<Option<(UploadState, Option<Txid>)>, Fault> {
     // At boot a replica ahead of the local newest staged file is `recover`'s to judge (a
     // snapshot after it), not the uploader's (a stop), so the listing names no newest staged file.
     let start = UploadState::ListFirst { confirmed: None };
@@ -1972,6 +2014,10 @@ async fn boot_listing<L: ObjectStore, R: ObjectStore>(
         Ok(listed) => (listed.state, None),
         Err(failed) => return Err(failed.fault),
     };
+    if record.is_some_and(|record| record.still_stopped(upload.confirmed())) {
+        return Ok(None);
+    }
+    *record = None;
     // The staged files from `from` on cannot continue the replica: they go,
     // and recovery snapshots above what the replica holds.
     if let Some(from) = diverged {
@@ -1986,7 +2032,7 @@ async fn boot_listing<L: ObjectStore, R: ObjectStore>(
         Swept::Dropped(from) => Some(from),
     };
     *suspect = None;
-    Ok((upload, lost.or(diverged)))
+    Ok(Some((upload, lost.or(diverged))))
 }
 
 /// Boot's witness pass over the pending staged files (`crate::witness`).

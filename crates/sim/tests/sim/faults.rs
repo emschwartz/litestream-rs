@@ -246,6 +246,11 @@ fn second_writer_mid_run() {
 }
 
 #[test]
+fn second_writer_survives_restart() {
+    run(scenario::second_writer_survives_restart);
+}
+
+#[test]
 fn bucket_rolled_back() {
     run(scenario::bucket_rolled_back);
 }

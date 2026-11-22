@@ -27,6 +27,7 @@ use crate::fault::{SnapshotCause, StopCause};
 use crate::layout::FileKey;
 use crate::pages::PageChecksumTable;
 use crate::position::Position;
+use crate::stop_record::StopRecord;
 use crate::upload::UploadState;
 use crate::witness::Witnesses;
 
@@ -116,6 +117,11 @@ pub(super) struct Kept {
     /// How far the engine is past a failed sync of the WAL (`unproven`). Kept across boots:
     /// a frame that sync covered is no truer after a rebuild.
     pub(super) unproven: Unproven,
+    /// A stop for another writer that must outlive this process
+    /// (`crate::stop_record`): set by that stop, or handed in by the driver
+    /// from the last process; a boot clears it once the replica no longer
+    /// holds a transaction past the record's.
+    pub(super) stop_record: Option<StopRecord>,
 }
 
 impl Kept {
@@ -133,6 +139,7 @@ impl Kept {
             app: AppCheckpointObserver::default(),
             suspect_staged: None,
             unproven: Unproven::No,
+            stop_record: None,
         }
     }
 
@@ -154,6 +161,7 @@ impl Kept {
             app: _,
             suspect_staged,
             unproven,
+            stop_record,
         } = self;
         Self {
             cfg: cfg.clone(),
@@ -168,6 +176,7 @@ impl Kept {
             app: observer,
             suspect_staged: *suspect_staged,
             unproven: *unproven,
+            stop_record: *stop_record,
         }
     }
 
