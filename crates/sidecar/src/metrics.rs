@@ -43,6 +43,10 @@
 //! - `lsr_app_checkpoints_total{db,kind}` (`backfilled`, `restarted`, `stalled`) and
 //!   `lsr_app_notice{db,kind}` 1 while the application-checkpoint notice stands.
 //! - `lsr_resnapshot_pending{db,cause}` 1 when the next sync is a snapshot.
+//! - `lsr_snapshots_total{db,cause}`: snapshots staged since the replicator started, every
+//!   cause listed, zeros included. Each uploads the whole database: a cause other than
+//!   `first_sync`, `checkpoint_boundary` or `operator_requested` that keeps counting up means
+//!   restarts or faults the replicator cannot see past.
 //! - `lsr_checkpoints_total{db}`, `lsr_checkpoints_busy_total{db}`, `lsr_uploads_total{db}`,
 //!   `lsr_retries_total{db}`, `lsr_panics_total{db}`.
 //! - `lsr_replica_operation_errors_total{replica_type,operation}`.
@@ -61,7 +65,8 @@ use lsr_replica::{
 };
 
 use crate::health::{
-    DbState, DbView, cause_name, notice_name, snapshot_name, stop_name, task_name,
+    DbState, DbView, cause_name, notice_name, snapshot_kind_name, snapshot_name, stop_name,
+    task_name,
 };
 
 /// The rendered text.
@@ -391,6 +396,13 @@ fn app_series(out: &mut Out, dbs: &[(String, &Health)]) {
     for (db, health) in dbs {
         if let Some(cause) = health.resnapshot {
             out.sample(name, &[("db", db), ("cause", snapshot_name(cause))], 1);
+        }
+    }
+    let name = "lsr_snapshots_total";
+    out.family(name, "counter", "Snapshots staged, by cause");
+    for (db, health) in dbs {
+        for (kind, n) in health.counters.snapshots.iter() {
+            out.sample(name, &[("db", db), ("cause", snapshot_kind_name(kind))], n);
         }
     }
 }

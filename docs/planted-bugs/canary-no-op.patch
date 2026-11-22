@@ -1,0 +1,12 @@
+diff --git a/crates/ltx/src/checksum.rs b/crates/ltx/src/checksum.rs
+index 3341aef..20767e6 100644
+--- a/crates/ltx/src/checksum.rs
++++ b/crates/ltx/src/checksum.rs
+@@ -51,6 +51,7 @@ const FLAG: u64 = 0x8000_0000_0000_0000;
+ /// The table set every LTX CRC uses; see the module docs for why sixteen.
+ type Tables = Table<16>;
+ 
++// Canary: this line changes nothing the tests can see.
+ static CRC64: Crc<u64, Tables> = Crc::<u64, Tables>::new(&CRC_64_GO_ISO);
+ 
+ /// `raw` when bit 63 is set, as on every checksum Go writes.
