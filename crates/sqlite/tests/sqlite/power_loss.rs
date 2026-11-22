@@ -6,7 +6,9 @@
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 
-use lsr_core::{Event, Fault as EngineFault, SnapshotCause, Tick};
+use lsr_core::{
+    Event, Fault as EngineFault, PersistentCause, Responses, SnapshotCause, Task, Tick,
+};
 use lsr_ltx::PageSize;
 use lsr_sim::RecorderEvent;
 use lsr_sqlite::Sqlite;
@@ -244,18 +246,41 @@ fn a_power_cut_after_a_settle_leaves_the_database_at_least_as_far_as_the_replica
     rig.check().unwrap();
 }
 
-/// Linux reports a failed writeback once, to each descriptor, then calls the pages clean, so the
-/// next fsync succeeds over bytes that never reached the disk. A failed sync of the WAL before
-/// staging stages nothing, and the backend keeps refusing afterwards instead of trusting a sync
-/// that succeeds: the frames written before the failure are not known to be durable.
-#[test]
-fn a_failed_wal_sync_stages_nothing_and_a_later_sync_does_not_clear_it() {
-    let dir = TempDir::new().unwrap();
-    let mut rig = Rig::<Sqlite>::new(dir.path(), config()).unwrap();
+/// [`config`] under the default responses, where a failed WAL sync degrades instead of stopping.
+fn go_like() -> RigConfig {
+    let mut cfg = config();
+    cfg.actor.responses = Responses::GO_LIKE;
+    cfg
+}
+
+/// Every WAL range a level-0 file was staged from: its generation's salts and the byte offset
+/// just past its frames.
+fn staged_ranges<B: Backend>(rig: &Rig<B>) -> Vec<((u32, u32), u64)> {
+    let (_remote, staging) = rig.store_events();
+    staging
+        .iter()
+        .filter_map(|event| match event {
+            RecorderEvent::Put {
+                key,
+                origin: Some(origin),
+                ..
+            } if key.level().get() == 0 && origin.size() > 0 => Some((
+                origin.salts(),
+                origin.offset().saturating_add(origin.size()),
+            )),
+            RecorderEvent::Put { .. } | RecorderEvent::Delete { .. } => None,
+        })
+        .collect()
+}
+
+/// A rig caught up under the default responses whose engine's next sync of the WAL fails, with
+/// one more transaction committed: the WAL range staged before.
+fn failing_wal_sync(dir: &TempDir) -> (Rig<Sqlite>, ((u32, u32), u64)) {
+    let mut rig = Rig::<Sqlite>::new(dir.path(), go_like()).unwrap();
     rig.settle().unwrap();
     rig.insert(2500).unwrap();
     rig.settle().unwrap();
-    let before = staged_end(&rig);
+    let before = staged_end(&rig).expect("the settles staged WAL frames");
     rig.vfs().arm(Fault {
         kind: FileKind::Wal,
         op: Op::Sync,
@@ -263,23 +288,86 @@ fn a_failed_wal_sync_stages_nothing_and_a_later_sync_does_not_clear_it() {
         effect: Effect::Error(Op::Sync.error()),
     });
     rig.insert(2500).unwrap();
-    let settled = rig.settle();
+    (rig, before)
+}
+
+/// Asserts no level-0 file was staged from the failed generation past what was staged before.
+fn nothing_unproven_staged<B: Backend>(rig: &Rig<B>, before: ((u32, u32), u64)) {
+    let (salts, end) = before;
+    let past: Vec<_> = staged_ranges(rig)
+        .into_iter()
+        .filter(|(s, e)| *s == salts && *e > end)
+        .collect();
     assert!(
-        matches!(settled, Err(RigError::Unsettled(_))),
-        "{settled:?}"
+        past.is_empty(),
+        "staged past the failed sync at {end}: {past:?}"
+    );
+}
+
+/// Linux reports a failed writeback once, to each descriptor, then calls the pages clean, so the
+/// next fsync succeeds over bytes that never reached the disk. A failed sync of the WAL before
+/// staging stages nothing from that WAL generation and shows in health as `WalSyncFailed`; the
+/// engine checkpoints with TRUNCATE (SQLite writes the pages into the database file again and
+/// syncs it) and snapshots, and the replica then survives a power loss.
+#[test]
+fn a_failed_wal_sync_stages_nothing_of_its_generation_and_snapshots_after_a_truncate() {
+    let dir = TempDir::new().unwrap();
+    let (mut rig, before) = failing_wal_sync(&dir);
+    let ticks = rig.ticks().len();
+    let failed = rig.tick().unwrap();
+    assert!(
+        matches!(
+            failed,
+            Tick::Ran {
+                event: Event::Degraded {
+                    task: Task::Sync,
+                    cause: PersistentCause::WalSyncFailed,
+                    ..
+                },
+                ..
+            }
+        ),
+        "{failed:?}"
     );
     assert_eq!(rig.vfs().fired().len(), 1, "the engine's sync failed once");
-    assert!(rig.faults().len() > 1, "it retried: {:?}", rig.faults());
-    assert!(
-        rig.faults()
-            .iter()
-            .all(|f| *f == EngineFault::LocalFsyncFailed),
-        "{:?}",
-        rig.faults()
-    );
     assert_eq!(
-        staged_end(&rig),
-        before,
-        "nothing staged past the failed sync"
+        rig.actor().degraded(Task::Sync).map(|d| d.cause),
+        Some(PersistentCause::WalSyncFailed),
+        "health shows it"
     );
+    nothing_unproven_staged(&rig, before);
+    rig.settle().unwrap();
+    nothing_unproven_staged(&rig, before);
+    assert!(
+        rig.ticks().iter().skip(ticks).any(|t| matches!(
+            t,
+            Tick::Ran {
+                event: Event::Resnapshot(SnapshotCause::WalSyncFailed),
+                ..
+            }
+        )),
+        "the TRUNCATE ran and a snapshot followed: {:?}",
+        &rig.ticks()[ticks..]
+    );
+    assert_eq!(rig.actor().degraded(Task::Sync), None);
+    rig.check().unwrap();
+    rig.vfs().cut_power();
+    rig.reboot_after_power_loss().unwrap();
+    rig.insert(2500).unwrap();
+    rig.settle().unwrap();
+    rig.check().unwrap();
+}
+
+/// A restart between the failed sync and the TRUNCATE: the new process must not stage the frames
+/// the failed sync covered. Today it does, since the debt lives in the failed process only.
+#[test]
+#[ignore = "needs a durable engine-owned record of the failed WAL sync: waits on the engine journal decision"]
+fn a_restart_after_a_failed_wal_sync_ships_no_unproven_frame() {
+    let dir = TempDir::new().unwrap();
+    let (mut rig, before) = failing_wal_sync(&dir);
+    rig.tick().unwrap();
+    assert_eq!(rig.vfs().fired().len(), 1, "the engine's sync failed once");
+    rig.restart().unwrap();
+    rig.settle().unwrap();
+    nothing_unproven_staged(&rig, before);
 }
