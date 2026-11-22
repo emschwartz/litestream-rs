@@ -265,6 +265,13 @@ test-tigris:
     # LSR_S3_TRANSPORT=reqwest runs the same tests over the reqwest client.
     ./scripts/tigris.sh cargo nextest run -p lsr-store-s3 --features reqwest --test store-s3 -E 'test(/^tigris::/)' --run-ignored only --no-capture --locked --no-fail-fast
 
+# The consistency probe against the Tigris bucket (crates/store-s3/tests/store-s3/common/real.rs):
+# one client writes and deletes keys, a second lists and reads right after, and every stale answer
+# is counted in an `OBS consistency` table. About six requests a round. Never part of check or CI,
+# which hold no store credentials; `just test-s3` runs the same probe against MinIO at 20 rounds.
+consistency-probe-tigris $LSR_PROBE_ROUNDS="10000":
+    ./scripts/tigris.sh cargo nextest run -p lsr-store-s3 --features reqwest --test store-s3 -E 'test(/^tigris::shared_cases::consistency_probe$/)' --run-ignored only --no-capture --locked
+
 # A production-shaped restore: Go v0.5.18 replicates the compat workload straight to Tigris
 # (a few hundred files, levels 0 to 3 and 9), then `lsr verify`, and `lsr restore`
 # and Go's restore at the same targets compared on pages. A few minutes and a few

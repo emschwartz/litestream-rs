@@ -257,6 +257,22 @@ impl RealHarness {
         }
     }
 
+    /// Another store on the same bucket and prefix, with a client and
+    /// connections of its own: what a reader in another process sees.
+    pub fn second_client(&self) -> S3Store<Counting> {
+        let transport = Counting::new(
+            store_transport(self.config.deadline()),
+            Arc::new(Counts::default()),
+        );
+        S3Store::with_transport(
+            self.config.clone(),
+            self_credentials(&self.server),
+            transport,
+            WallClock,
+        )
+        .unwrap()
+    }
+
     pub fn builder(&self) -> RequestBuilder {
         RequestBuilder::new(&self.config, &self_credentials(&self.server)).unwrap()
     }
@@ -569,6 +585,77 @@ pub fn multipart_round_trip(h: &RealHarness) {
     assert_eq!(h.store.pending_orphans(), 0);
 }
 
+/// Rounds of the consistency probe: `LSR_PROBE_ROUNDS`, else 20 (a nightly
+/// run sets more; each round is about six requests).
+fn probe_rounds() -> u64 {
+    std::env::var("LSR_PROBE_ROUNDS")
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(20)
+}
+
+/// How a second client saw one write or delete right after it returned.
+#[derive(Default, Debug)]
+struct Seen {
+    rounds: u64,
+    listed_late: u64,
+    read_late: u64,
+    delete_listed_late: u64,
+    delete_read_late: u64,
+}
+
+/// The consistency probe: one client writes a key and then deletes it, and
+/// a second client (its own connections) lists and reads right after each.
+/// Every stale answer is counted and printed as an `OBS consistency` table;
+/// nothing is asserted about the provider beyond the rounds running, since
+/// the table is the measurement (kk-review section 4e). A provider that
+/// keeps a listing stale shows here before the engine's boot meets it.
+pub fn consistency_probe(h: &RealHarness) {
+    let reader = h.second_client();
+    let one = ReadLen::new(1).unwrap();
+    let mut seen = Seen::default();
+    for n in 1..=probe_rounds() {
+        let key = h.key(0, n, n);
+        h.write_all(&key, Timestamp::from_unix_millis(1), b"x", 64);
+        let after = n.checked_sub(1).and_then(Txid::new).map(TxidRange::single);
+        let listed = |store: &S3Store<Counting>| {
+            block_on(store.list(Level::ZERO, after, PageLimit::ONE))
+                .unwrap()
+                .files
+                .iter()
+                .any(|f| f.key == key)
+        };
+        let readable = |store: &S3Store<Counting>| match block_on(store.read(&key, 0, one)) {
+            Ok(_) => true,
+            Err(StoreError::NotFound { .. }) => false,
+            Err(err) => panic!("probe read: {err}"),
+        };
+        seen.listed_late = seen.listed_late.saturating_add(u64::from(!listed(&reader)));
+        seen.read_late = seen.read_late.saturating_add(u64::from(!readable(&reader)));
+        block_on(h.store.delete(&[key])).unwrap();
+        seen.delete_listed_late = seen
+            .delete_listed_late
+            .saturating_add(u64::from(listed(&reader)));
+        seen.delete_read_late = seen
+            .delete_read_late
+            .saturating_add(u64::from(readable(&reader)));
+        seen.rounds = n;
+    }
+    eprintln!(
+        "OBS consistency | provider | rounds | write not listed | write not read | delete still listed | delete still read |"
+    );
+    eprintln!(
+        "OBS consistency | {} | {} | {} | {} | {} | {} |",
+        h.server.name,
+        seen.rounds,
+        seen.listed_late,
+        seen.read_late,
+        seen.delete_listed_late,
+        seen.delete_read_late
+    );
+    assert_eq!(seen.rounds, probe_rounds(), "every round ran");
+}
+
 /// A create-only multipart upload into a taken key: the server refuses the
 /// complete (`If-None-Match: *` is checked there), the object stays, and the
 /// refused upload is left open for the orphan list to abort.
@@ -750,6 +837,7 @@ macro_rules! shared_cases {
                 listing_makes_no_head_requests,
                 multipart_round_trip,
                 create_only_multipart_into_a_taken_key_is_refused,
+                consistency_probe,
                 part_size_boundary,
                 dropped_multipart_is_invisible_then_aborted,
                 abort_leaves_nothing,
