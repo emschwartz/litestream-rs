@@ -100,8 +100,10 @@ fn an_unsafe_stop_while_running_refuses_commits_only_under_stop_app() {
         let replicator = Replicator::start_with(&site.db, store, strict, runtime).unwrap();
         replicator.app_connection(&site.app).unwrap();
         wait(&replicator, |h| h.fail_stop.gate == Gate::Open);
-        faulty.refuse.store(true, Ordering::SeqCst);
+        // A commit to upload, made before the store refuses: once it does, a stop can hold
+        // the gate at any moment.
         insert(&site).unwrap();
+        faulty.refuse.store(true, Ordering::SeqCst);
         clock.advance(POLL);
         let stopped = wait(&replicator, |h| matches!(h.phase, Phase::Stopped(_)));
         assert_eq!(

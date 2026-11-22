@@ -1882,7 +1882,7 @@ signal = "as FS-2"
 at_risk = "as FS-2"
 recovery = "Automatic"
 detected_by = "core::`a_crash_loop_does_not_reset_the_clock`, sim::`a_crash_loop_trips_for_age`, replica::`a_restart_keeps_the_age_of_a_commit_off_the_replica`, plant::`failstop-clock-from-process-start`, plant::`failstop-health-lag-restarts`"
-notes = "A boot that deletes pending files it cannot vouch for stages a snapshot stamped at that boot, so the clock moves once, there; WAL frames no life staged count from the life that sees them (decision D32)"
+notes = "A boot that deletes pending files it cannot vouch for stages a snapshot stamped at that boot, so the clock moves once, there; WAL frames no life staged count from the life that sees them (decision D80)"
 
 [[row]]
 table = "Fail-stop"

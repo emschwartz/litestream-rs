@@ -162,10 +162,10 @@ Planted bugs (each must be caught unaided):
 What the implementation settled where this design left a choice, or departed from it; each is a decision entry open to review.
 
 - **The open question below is answered:** health's `unreplicated_since` did see WAL changes a sync fault hid (it reads the committed end on its own), but it restarted with the process, lived where the simulator could not judge it, and read zero while a snapshot was owed after a TRUNCATE. The clock now lives in the engine (`crates/core/src/actor/lag.rs`) and feeds health.
-- **Where the clock cannot survive a restart** (D32): a boot that deletes pending files, unstaged WAL frames, a process not yet booted. The row "Boot, staged files pending and the oldest is past the bound: held after one failed probe" is therefore only met once the boot has listed.
-- **What counts as lag** (D33): commits of the application; engine writes and doubt snapshots taken while caught up do not. Found by the false-trip judge.
-- **When the boot is judged** (D34): after the first listing and the boot's own snapshot; until then the gate is pending.
-- **Early trips and the probe** (D35): a trip needs a failure at or after the bound; a forward clock step with a failing store may trip early.
+- **Where the clock cannot survive a restart** (D80): a boot that deletes pending files, unstaged WAL frames, a process not yet booted. The row "Boot, staged files pending and the oldest is past the bound: held after one failed probe" is therefore only met once the boot has listed.
+- **What counts as lag** (D81): commits of the application; engine writes and doubt snapshots taken while caught up do not. Found by the false-trip judge.
+- **When the boot is judged** (D82): after the first listing and the boot's own snapshot; until then the gate is pending.
+- **Early trips and the probe** (D83): a trip needs a failure at or after the bound; a forward clock step with a failing store may trip early.
 - **The setting's place:** `if-replication-stops` and `max-unreplicated-age` sit under `litestream-rs:` with the other Rust-only keys (provisional).
 - **The `-exec` exit code:** 4 (provisional, #41).
 - **P2, P3 and P5** are judged in named simulator runs, not over every run: the judge's truth is an upper bound on age, exact enough to rule out a false trip and too lenient to demand a trip.

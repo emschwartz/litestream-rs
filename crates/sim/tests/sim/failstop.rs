@@ -130,7 +130,7 @@ fn a_store_down_past_the_bound_trips_in_time_and_clears_after() {
 /// the WAL on), deletes them and stages a snapshot of their end state, stamped at that boot.
 /// The clock keeps the deleted files' stamps for the life of that process; the next process
 /// can only read the snapshot's. So the clock's start moves once, to that boot, and never at
-/// a restart that deletes nothing (`docs/decisions.md` D32: a durable mark would close it).
+/// a restart that deletes nothing (`docs/decisions.md` D80: a durable mark would close it).
 #[test]
 fn a_crash_loop_trips_for_age() {
     let mut ops = vec![down(StoreOp::Upload, timeout(StoreOp::Upload)), commit()];
