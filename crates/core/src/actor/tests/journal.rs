@@ -481,6 +481,9 @@ fn page_after_failure() -> Vec<u8> {
 /// the rig and the frame count the WAL kept.
 fn lost_after_backfill(journal: &mut MemJournal, config: &ActorConfig, backfill: bool) -> Rig {
     let mut rig = Rig::new();
+    // Page 1 in the WAL differs from the file, which no checkpoint has written yet: a page the
+    // WAL covers is not the file's to answer for.
+    rig.commit(3);
     let mut actor = Actor::new(config.clone());
     settle(&mut rig, &mut actor, T0, Some(journal));
     let kept = rig.wal.committed_end().frame_count();
@@ -615,7 +618,8 @@ fn the_restore_point_is_kept_for_the_window_across_a_restart() {
     let mut restarted = Actor::new(go_like());
     settle(&mut rig, &mut restarted, T0 + 10_000, Some(&mut journal));
     let verdict = restarted.ahead().expect("a verdict");
-    let until = ahead::kept_until(verdict).unix_millis();
+    // Seven days, stated here rather than read from the code under test.
+    let until = verdict.made.unix_millis() + 7 * 24 * 60 * 60 * 1000;
     let mut later = Actor::new(go_like());
     settle(&mut rig, &mut later, until - 1, Some(&mut journal));
     assert_eq!(

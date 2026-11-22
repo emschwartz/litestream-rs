@@ -1,0 +1,14 @@
+diff --git a/crates/core/src/ahead.rs b/crates/core/src/ahead.rs
+index 0b2350c2..96c17239 100644
+--- a/crates/core/src/ahead.rs
++++ b/crates/core/src/ahead.rs
+@@ -92,9 +92,6 @@ pub(crate) async fn check<W: WalSource, P: PageSource, R: ObjectStore>(
+         let Some(pgno) = PageNo::new(n, page_size) else {
+             continue;
+         };
+-        if covered.get(pgno).is_some() {
+-            continue;
+-        }
+         db.read_page(pgno, &mut buf).map_err(Fault::from_source)?;
+         let want = table
+             .get(pgno)

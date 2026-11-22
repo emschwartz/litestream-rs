@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor/ahead.rs b/crates/core/src/actor/ahead.rs
+index fdb8bca2..39c6eae4 100644
+--- a/crates/core/src/actor/ahead.rs
++++ b/crates/core/src/actor/ahead.rs
+@@ -138,7 +138,7 @@ impl Actor {
+             self.kept.ahead = Some(Ahead { made: now, ..ahead });
+             return false;
+         }
+-        if now < kept_until(ahead) {
++        if now < kept_until(ahead) || true {
+             return false;
+         }
+         self.kept.ahead = None;

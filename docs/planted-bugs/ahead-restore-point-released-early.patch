@@ -1,0 +1,11 @@
+diff --git a/crates/core/src/actor/ahead.rs b/crates/core/src/actor/ahead.rs
+index fdb8bca2..f124bdfa 100644
+--- a/crates/core/src/actor/ahead.rs
++++ b/crates/core/src/actor/ahead.rs
+@@ -156,5 +156,5 @@ impl Actor {
+ /// When a verdict's restore point goes back to normal retention.
+ #[must_use]
+ pub fn kept_until(ahead: Ahead) -> Timestamp {
+-    ahead.made.saturating_add(KEPT_FOR)
++    ahead.made.saturating_add(Duration::from_secs(60))
+ }
