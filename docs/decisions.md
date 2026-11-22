@@ -51,6 +51,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D130 | How does the simulator run the real directory store, and who judges it? | A filesystem trait in store-fs, an in-memory filesystem under the crash law in the sim, half the swarm on it, a staging-contract judge | Claude (sim-real-store-fs), **delegated** | 2026-11-22 | open to owner review |
 | D70 | How do simulated runs draw a fault that reaches an open engine defect? | As a known-wrong cell: out of the per-push seeds, drawn by the nightly and campaigns with its failures counted as known, with a pinned seed that fails once the fix lands | parent session; mechanism by Claude (error-domain), **delegated** | 2026-11-22 | decided |
 | D71 | Which errors may a simulated history inject? | Those a shipped implementation returns from that call with the world unchanged; a world fact is drawn as the world change; a cell the model cannot follow is listed as unmodelled, never drawn | Claude (error-domain), **delegated** | 2026-11-22 | open to owner review |
+| D72 | How long may a simulated fault last, and what may happen inside it? | Up to 200 ticks, with a drawn sub-history; a restart inside it is drawn only where known defects are counted, since it reaches D9 | Claude (overlapping-faults), **delegated** | 2026-11-22 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -406,6 +407,15 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** the judge checks the store's contract, not the engine's behaviour, so it finds a store defect the engine would survive (the delete plant). Per-entry independence can split a rename (both names, or neither), which ext4 would not; it is the rule the WAL's fault VFS and `Volatile` already use, so the disk stays one law (#121). A fault the fault layer injects after publishing (`ErrorAfterPublish`) does not unsync anything on `MemFs`: the store did sync, so in this profile such a file always survives.
 - **Revisit if:** the shared directory-entry rule changes; or `MemFs` and the host disagree in `differential::the_doubles_answer_as_the_real_store_does`.
 - **Links:** #127 item I.
+
+## D72. Overlapping faults
+
+- **Options:** keep holds short and empty (at most 11 ticks of commits and ticks); let them last and run anything inside; let them last and run anything but what reaches an open defect.
+- **Choice:** under the overlap draw a hold lasts up to 200 ticks and runs a drawn sub-history (commits, ticks, one-shot store faults). A process crash, a power loss or a shutdown inside a hold is drawn only where known defects are counted (D70), because each reaches D9 (a halt across restarts goes unreported). A lying disk keeps its short length, since its own power loss is such a restart.
+- **Why:** the defects that live where faults overlap (D9, BOOT-21) were unreachable; reaching them without turning the per-push seeds red needs the known-wrong rule.
+- **Cost accepted:** the per-push seeds draw no restart inside a hold until D9 is fixed; a run is longer, so the read budget gains a term for a degraded task's retries and the retry-wait check gains the slew's slack after a clock step back.
+- **Revisit if:** D9 is fixed (then restarts inside holds are drawn everywhere), or holds longer than 200 ticks find more.
+- **Links:** issue #127 item E; BEHAVIOR CHK-9.
 
 ## D80. Where the fail-stop clock cannot survive a restart (delegated)
 
