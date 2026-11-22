@@ -10,6 +10,8 @@ mod crash_law;
 #[cfg(test)]
 mod dropped_created_at;
 #[cfg(test)]
+mod failstop;
+#[cfg(test)]
 mod faults;
 #[cfg(test)]
 mod fixed_seeds;

@@ -150,6 +150,14 @@ pub enum Violation {
         /// The other writer's file.
         key: String,
     },
+    /// Fail-stop tripped where nothing the simulator knows explains it (`crate::failstop`).
+    #[error("fail-stop tripped with no cause: {trip}: {detail}")]
+    FalseTrip {
+        /// The trip.
+        trip: String,
+        /// What the simulator found instead.
+        detail: String,
+    },
     /// A restore the replica should answer was refused.
     #[error("restoring {target:?} was refused: {outcome:?}")]
     RestoreRefused {

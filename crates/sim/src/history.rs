@@ -35,7 +35,7 @@ pub const ONE_IN: u64 = 8;
 pub const INSTANTS: u32 = 3;
 
 /// The digest of a model image.
-fn image_digest(image: &PageImage) -> Digest {
+pub(crate) fn image_digest(image: &PageImage) -> Digest {
     let pages: Vec<_> = (1..=image.db_size())
         .filter_map(|pgno| image.page(pgno))
         .collect();

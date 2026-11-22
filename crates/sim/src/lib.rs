@@ -21,6 +21,7 @@ pub mod budget;
 pub mod contract;
 pub mod crash_law;
 pub mod exec;
+pub mod failstop;
 pub mod generate;
 pub mod history;
 pub mod model;

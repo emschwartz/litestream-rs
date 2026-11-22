@@ -289,7 +289,7 @@ pub struct World {
 }
 
 /// The first instant of a run's clock.
-const EPOCH_MILLIS: i64 = 1_700_000_000_000;
+pub const EPOCH_MILLIS: i64 = 1_700_000_000_000;
 
 impl World {
     /// A world with a database of `db_pages` pages, empty stores and no faults.
