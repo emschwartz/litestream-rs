@@ -28,6 +28,7 @@ use crate::app::AppCheckpointObserver;
 use crate::checkpoint::CheckpointState;
 use crate::failstop::Lag;
 use crate::fault::{SnapshotCause, SnapshotCounts, StopCause};
+use crate::journal::JournalSignal;
 use crate::layout::FileKey;
 use crate::pages::PageChecksumTable;
 use crate::position::Position;
@@ -140,6 +141,9 @@ pub(super) struct Kept {
     /// page, or a snapshot for a doubt alone staged while nothing was off the replica. They are
     /// not lag (`actor::lag`). At most one per pending file, so bounded by the witness tokens.
     pub(super) quiet: BTreeSet<Txid>,
+    /// What the last boot's read of the journal reported. A report, not engine state: nothing
+    /// decides on it.
+    pub(super) journal: Option<JournalSignal>,
 }
 
 impl Kept {
@@ -163,6 +167,7 @@ impl Kept {
             boot_failed: false,
             sync_failed_after_listing: false,
             quiet: BTreeSet::new(),
+            journal: None,
         }
     }
 
@@ -190,6 +195,7 @@ impl Kept {
             boot_failed,
             sync_failed_after_listing,
             quiet: _,
+            journal,
         } = self;
         Self {
             cfg: cfg.clone(),
@@ -211,6 +217,7 @@ impl Kept {
             sync_failed_after_listing: *sync_failed_after_listing,
             // Beliefs about staged files: the rebuilt engine's boot judges them again.
             quiet: BTreeSet::new(),
+            journal: *journal,
         }
     }
 

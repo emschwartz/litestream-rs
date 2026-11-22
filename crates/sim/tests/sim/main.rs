@@ -10,6 +10,8 @@ mod clock_reads;
 #[cfg(test)]
 mod crash_law;
 #[cfg(test)]
+mod differential;
+#[cfg(test)]
 mod dropped_created_at;
 #[cfg(test)]
 mod failstop;
@@ -17,6 +19,8 @@ mod failstop;
 mod faults;
 #[cfg(test)]
 mod fixed_seeds;
+#[cfg(test)]
+mod known_wrong;
 #[cfg(test)]
 mod liveness;
 #[cfg(test)]

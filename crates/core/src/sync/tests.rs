@@ -419,8 +419,10 @@ fn a_local_rewind_empties_the_table_and_raises_no_mismatch() {
     );
 }
 
+/// The TRUNCATE before the boundary snapshot may have backfilled a commit no step staged: its
+/// pages are the database's, not damage, and the table takes them from the snapshot.
 #[test]
-fn the_checkpoint_boundary_keeps_the_table() {
+fn the_checkpoint_boundary_takes_the_database_file_as_it_is() {
     let (mut rig, position) = recorded();
     rig.db.write_page(pg(3), &[0x33; 512]);
     let boundary = Step::Snapshot {
@@ -428,8 +430,11 @@ fn the_checkpoint_boundary_keeps_the_table() {
         prev_timestamp: Some(position.timestamp()),
         cause: SnapshotCause::CheckpointBoundary,
     };
-    let failed = rig.step_at(boundary).unwrap_err();
-    assert_eq!(failed.fault, Fault::DatabasePageMismatch { pgno: pg(3) });
+    rig.step_at(boundary).unwrap();
+    assert_eq!(
+        rig.pages.get(pg(3)),
+        Some(PageChecksum::of(pg(3), &[0x33; 512]))
+    );
 }
 
 #[test]

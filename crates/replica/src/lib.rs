@@ -52,6 +52,8 @@ mod scheduled;
 pub mod stack;
 mod store;
 mod thread;
+#[cfg(feature = "testing")]
+pub mod waiting;
 
 pub use config::{Config, NonZeroDuration, ReaderTracking, SyncLimits};
 pub use error::{RestoreError, StartError};

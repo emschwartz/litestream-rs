@@ -47,7 +47,9 @@ const fn retry_after(err: &MaintainError) -> Option<Duration> {
         MaintainError::Compact(err) | MaintainError::OutputDistrusted { source: err, .. } => {
             match err {
                 CompactError::Source(err) | CompactError::Dest(err) => err,
-                CompactError::InputVanished { .. }
+                // A local store names no wait.
+                CompactError::Local(_)
+                | CompactError::InputVanished { .. }
                 | CompactError::Input { .. }
                 | CompactError::Encode(_)
                 | CompactError::Inputs(_)

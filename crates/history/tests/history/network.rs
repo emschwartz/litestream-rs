@@ -25,7 +25,7 @@ use lsr_store_s3::{
 };
 use tempfile::TempDir;
 
-use crate::replicator::{POLL, Run, wait};
+use crate::replicator::{POLL, Run, moved_until};
 
 /// One HTTP/1.1 request to the Toxiproxy API; its status and body.
 fn api(base: &str, method: &str, path: &str, body: &str) -> (u16, String) {
@@ -190,7 +190,7 @@ fn through(name: &str, seed: u64, toxics: &[Toxic], felt: Felt) {
         }
         run.clock.advance(POLL);
         // The engine tries an upload through the toxic: it completes, or it fails and waits.
-        let after = wait(run.replicator(), |h| {
+        let after = moved_until(run.replicator(), &run.clock, |h| {
             h.counters.retries > before.retries || h.counters.uploads > before.uploads
         })
         .counters;

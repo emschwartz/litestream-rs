@@ -165,7 +165,9 @@ fn an_operator_snapshot_request_survives_a_panic_before_the_boot() {
     wait(&replicator, |h| h.phase == Phase::Running);
     site.commit(1);
     clock.advance(POLL);
-    wait(&replicator, |h| caught_up(h) && h.resnapshot.is_none());
+    moved_until(&replicator, &clock, (POLL, 240), |h| {
+        caught_up(h) && h.resnapshot.is_none()
+    });
     assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
     site.assert_restores(&*site.store());
 }
@@ -202,7 +204,7 @@ fn a_degraded_task_is_still_reported_while_the_engine_is_rebuilt() {
     let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
     let (runtime, clock) = fake();
     let replicator = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
-    wait(&replicator, caught_up);
+    moved_until(&replicator, &clock, (POLL, 240), caught_up);
     faulty.refuse.store(true, Ordering::SeqCst);
     site.commit(1);
     clock.advance(POLL);
@@ -228,7 +230,9 @@ fn a_degraded_task_is_still_reported_while_the_engine_is_rebuilt() {
     faulty.panic_always.store(false, Ordering::SeqCst);
     faulty.refuse.store(false, Ordering::SeqCst);
     clock.release();
-    wait(&replicator, |h| caught_up(h) && !h.is_degraded());
+    moved_until(&replicator, &clock, (POLL, 240), |h| {
+        caught_up(h) && !h.is_degraded()
+    });
     assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
 }
 

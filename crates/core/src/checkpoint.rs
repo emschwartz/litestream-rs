@@ -590,7 +590,9 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_, 
     }
 
     /// Everything SQLite backfilled and truncated is in the database file or the new generation:
-    /// snapshot it under the write lock so no commit slips between the two.
+    /// snapshot it under the write lock so no commit slips between the two. The database file
+    /// may hold a commit no step staged (one that landed between the proof and the TRUNCATE),
+    /// so the snapshot does not check its pages against the page table (`pages::snapshot_clears`).
     async fn boundary_snapshot(&mut self) -> Result<(), Fault> {
         let lock = self.ck.begin_write_lock().map_err(Fault::from_source)?;
         let snapshot = Step::Snapshot {
