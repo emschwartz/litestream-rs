@@ -368,6 +368,8 @@ fn covers(
         || model.rewound()
         || !ground.lost.is_empty();
     let mut cover: BTreeMap<Txid, CommitId> = BTreeMap::new();
+    // The last level-0 put of each id, by recorder position.
+    let mut replaced: BTreeMap<Txid, usize> = BTreeMap::new();
     for (at, event) in recorder.events().iter().enumerate() {
         let RecorderEvent::Put {
             key,
@@ -406,10 +408,15 @@ fn covers(
                 if key.level().get() == 0 {
                     noted.or(known)
                 } else {
-                    known.or(noted)
+                    foreign_cover(ground, &cover, &replaced, max, at)
+                        .or(known)
+                        .or(noted)
                 }
             }
         };
+        if key.level().get() == 0 {
+            replaced.insert(max, at);
+        }
         let Some(commit) = commit else { continue };
         match cover.get(&max) {
             // A put the store reported failed or wrong may be put again from
@@ -437,6 +444,34 @@ fn covers(
         increasing(&cover)?;
     }
     Ok(cover)
+}
+
+/// The commit a file compacted through `txid` at recorder position `at`
+/// holds when another writer's file stood at `txid` then. Another writer's
+/// put bypasses the recorder; the simulator puts one only above everything
+/// the replica holds, so a compacted file inside its window (from its newest
+/// put until the operator removed it or the engine put its own level-0 file
+/// there) was built from it, whatever a rolled-back file once held there.
+fn foreign_cover(
+    ground: Ground<'_>,
+    cover: &BTreeMap<Txid, CommitId>,
+    replaced: &BTreeMap<Txid, usize>,
+    txid: Txid,
+    at: usize,
+) -> Option<CommitId> {
+    let ((_, copied), (_, put)) = ground
+        .foreign
+        .iter()
+        .zip(ground.foreign_put)
+        .rfind(|((theirs, _), (_, when))| *theirs == txid && *when <= at)?;
+    let removed = ground
+        .foreign_removed
+        .iter()
+        .any(|(theirs, when)| *theirs == txid && (*put..=at).contains(when));
+    if removed || replaced.get(&txid).is_some_and(|when| when >= put) {
+        return None;
+    }
+    cover.get(copied).copied()
 }
 
 /// A later transaction id never covers an earlier commit.
@@ -494,6 +529,12 @@ pub struct Ground<'a> {
     /// Objects the store damaged as it published them: a restore may stop on
     /// one with a typed error.
     pub damaged: &'a [FileKey],
+    /// Another writer's files the operator removed, with the replica
+    /// recorder's length at the removal.
+    pub foreign_removed: &'a [(Txid, usize)],
+    /// Another writer's files, with the replica recorder's length when each
+    /// was put.
+    pub foreign_put: &'a [(Txid, usize)],
 }
 
 /// Nothing lost.
@@ -509,6 +550,8 @@ impl Default for Ground<'_> {
             lost: &NONE_LOST,
             foreign: &[],
             damaged: &[],
+            foreign_removed: &[],
+            foreign_put: &[],
         }
     }
 }

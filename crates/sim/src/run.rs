@@ -930,6 +930,29 @@ impl Runner {
     /// the engine again. The engine may have listed it, so nothing it
     /// acknowledged before the removal is held against `Latest`.
     fn second_writer(&mut self, ticks: u8) -> Result<(), Violation> {
+        // A file at or below what this engine has staged collides with one of
+        // its own transactions (after a bucket rollback, say): telling the two
+        // writers apart needs writer identity on the replica, which the engine
+        // does not have, so the step puts nothing then.
+        let ours = self
+            .w
+            .newest_staged()
+            .map_err(|err| bug_fault(format!("listing staging failed: {err}")))?
+            .map(|info| info.key.range().max())
+            .max(self.actor.staged());
+        let theirs = self
+            .w
+            .remote_level_zero()
+            .map_err(|err| bug_fault(format!("listing the replica failed: {err}")))?
+            .last()
+            .and_then(|info| info.key.range().max().next());
+        // Likewise one at or below what any level of the replica already holds.
+        let held = lsr_core::conformance::block_on(lsr_core::Inventory::load(&self.w.remote_raw))
+            .map_err(|err| bug_fault(format!("listing the replica failed: {err}")))?
+            .newest();
+        if theirs.is_none_or(|theirs| Some(theirs) <= ours.max(held)) {
+            return Ok(());
+        }
         let put = self
             .w
             .remote_put_foreign()
@@ -939,9 +962,12 @@ impl Runner {
         };
         self.report.reach.bump("remote.second_writer");
         self.expect(StopCause::OtherWriter);
-        let lists = self.w.remote_recorder.counts().lists;
+        // Only an engine that was running when the file appeared, and has not
+        // booted since, owes the stop: a boot takes a replica ahead as history.
+        let mut watching = self.actor.booted();
         for _ in 0..ticks {
-            let booted = self.actor.booted();
+            watching &= self.actor.booted();
+            let lists = self.w.remote_recorder.counts().lists;
             let step = self.step(None)?.0;
             let stopped = step == Step::Stopped(StopCause::OtherWriter);
             match step {
@@ -955,25 +981,39 @@ impl Runner {
             if stopped {
                 break;
             }
-            // A running engine that listed the replica while the other
-            // writer's file stood past its own position holds the proof of
-            // another writer: it must stop. A boot's listing is recovery's to
+            // A running engine that listed the replica in this tick while the
+            // other writer's file stood past its own position holds the proof
+            // of another writer: it must stop. A boot's listing is recovery's to
             // judge, and an engine already at that transaction replaces the
             // file with its own upload (no writer identity can tell them apart).
-            let listed = self.w.remote_recorder.counts().lists > lists;
+            // A whole listing is one call per level at least; a listing cut
+            // short by a fault showed the engine nothing.
+            let levels = u64::try_from(lsr_core::Level::ALL.len()).unwrap_or(u64::MAX);
+            let listed = self.w.remote_recorder.counts().lists.saturating_sub(lists) >= levels;
             let theirs = self.w.remote_holds(key, &bytes).map_err(|err| {
                 bug_fault(format!("reading the second writer's file failed: {err}"))
             })?;
-            let behind = self.actor.staged() < Some(key.range().max());
-            if booted && listed && theirs && behind {
+            // Confirming the other writer's object (it stands over a staged
+            // file of the same id) and snapshotting above it is not behind.
+            let ours = self.actor.staged().max(self.actor.replicated());
+            let behind = ours < Some(key.range().max());
+            if watching && listed && theirs && behind {
                 return Err(Violation::OtherWriterMissed {
                     key: key.to_string(),
                 });
             }
         }
-        self.w
+        let removed = self
+            .w
             .remote_remove_if(key, &bytes)
             .map_err(|err| bug_fault(format!("removing the second writer's file failed: {err}")))?;
+        // A boot may have taken the file as history and built on it; the
+        // operator's removal then takes that transaction for good.
+        if removed {
+            self.w.lost.insert(key.range().max());
+            let at = self.w.remote_recorder.len();
+            self.w.foreign_removed.push((key.range().max(), at));
+        }
         self.w.acked.note_rewound();
         self.w.crash(CrashKind::Process);
         self.crashed(CrashKind::Process);
@@ -1424,6 +1464,7 @@ impl Runner {
             &self.w.remote_recorder.events(),
             self.w.remote_recorder.counts(),
             spent,
+            &self.w.lost,
         )?;
         self.idle()?;
         self.replica_page_size().map(drop)
