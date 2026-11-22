@@ -279,6 +279,9 @@ pub struct World {
     /// Another writer's files, with the replica recorder's length when each
     /// was put.
     pub foreign_put: Vec<(Txid, usize)>,
+    /// Another writer's files and their sizes: no recorder saw them, but the
+    /// engine may compact them.
+    pub foreign_sizes: Vec<(FileKey, u64)>,
     /// Files the engine deleted as a repair, after they failed to verify.
     pub repaired: Vec<FileKey>,
     crash_entropy: SeededEntropy,
@@ -348,6 +351,7 @@ impl World {
             foreign: Vec::new(),
             foreign_removed: Vec::new(),
             foreign_put: Vec::new(),
+            foreign_sizes: Vec::new(),
             repaired: Vec::new(),
             crash_entropy: SeededEntropy::new(seed.stream(5)),
             in_tick: None,
@@ -752,6 +756,8 @@ impl World {
         block_on(lsr_core::Upload::commit(up))?;
         self.foreign.push((next, newest.range().max()));
         self.foreign_put.push((next, self.remote_recorder.len()));
+        self.foreign_sizes
+            .push((key, u64::try_from(bytes.len()).unwrap_or(u64::MAX)));
         Ok(Some((key, bytes)))
     }
 
