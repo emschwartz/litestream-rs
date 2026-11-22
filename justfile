@@ -228,6 +228,7 @@ test-s3: minio-up
     LSR_S3_TRANSPORT=reqwest \
         cargo nextest run -p lsr-store-s3 --features reqwest --test store-s3 -E 'test(/^minio::/)' --run-ignored all --locked --no-fail-fast
     cargo nextest run -p lsr-cli --test cli -E 'test(/^s3::/)' --run-ignored all --locked --no-fail-fast
+    cargo nextest run -p lsr-history --test history -E 'test(/^replicator::/)' --run-ignored all --locked --no-fail-fast
 
 # Each restores what the other wrote at Latest, a txid and an instant, and they hand one prefix
 # over both ways, over the pinned builds (crates/compat/tests/compat/s3.rs). Needs Docker; fails, never
