@@ -614,6 +614,29 @@ fn with_staging_gone_the_replica_names_the_page_size() {
     assert_eq!(everything(&rig), before);
 }
 
+/// Staging holds an older file at the new page size (a staging backup put
+/// back) while the replica's newest transaction is later and at the old one.
+/// The boot judged the page size by the staged file alone and snapshotted the
+/// new size onto the replica's prefix: restores then stopped on the change
+/// (seed 0xdc8).
+#[test]
+fn a_replica_ahead_of_staging_names_the_page_size() {
+    let mut other = Rig::new();
+    resize(&mut other, big());
+    other.settle(&mut Actor::new(cfg()), T0);
+    let (mut rig, mut actor) = caught_up();
+    rig.commit(2);
+    rig.commit(3);
+    rig.follow(&mut actor, T0 + 10, 50);
+    rig.staging = other.staging;
+    let before = everything(&rig);
+    resize(&mut rig, big());
+    let mut actor = Actor::new(cfg());
+    let ticks = rig.follow(&mut actor, T0 + 20, 50);
+    assert_eq!(ticks.last(), Some(&page_size_changed()), "{ticks:?}");
+    assert_eq!(everything(&rig).1, before.1, "nothing reaches the replica");
+}
+
 #[test]
 fn an_empty_replica_takes_any_page_size() {
     let mut rig = Rig::new();
