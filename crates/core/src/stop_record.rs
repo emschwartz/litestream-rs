@@ -23,11 +23,9 @@
 //! record and replicates as before. This works whatever happened to the
 //! staging directory in between, which the boot's own judgement cannot.
 //!
-//! This is the first fact the engine keeps across processes. The engine
-//! journal (`docs/notes/2026-11-22/journal-design-v4.md` on the analysis
-//! branch) is designed to hold such facts in one file with one write
-//! discipline; when it lands, the record becomes one of its fields and this
-//! codec its migration source.
+//! The engine journal (`docs/journal.md`) is designed to hold such facts in
+//! one file with one write discipline; once it is wired in, this record can
+//! move into it. Nothing is released, so this format can then simply go.
 //!
 //! The stored form is one line of text, parsed strictly, so a torn or edited
 //! file is an error and never a missing stop:
