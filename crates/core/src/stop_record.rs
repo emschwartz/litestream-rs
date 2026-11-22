@@ -43,8 +43,9 @@ const MAGIC: &str = "lsr-stop";
 const VERSION: &str = "1";
 /// The one cause a record names.
 const OTHER_WRITER: &str = "other-writer";
-/// The longest stored form: the words, three spaces, 16 digits and a newline.
-const MAX_LEN: usize = 64;
+/// The longest stored form, exactly: the words, three spaces, 16 digits and a
+/// newline.
+const MAX_LEN: usize = 41;
 
 /// A stop for another writer, as the next process must see it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -176,14 +177,14 @@ mod tests {
         }
 
         #[test]
-        fn a_cut_record_never_decodes(raw in proptest::option::of(1..=u64::MAX), cut in 0usize..64) {
+        fn a_cut_record_never_decodes(raw in proptest::option::of(1..=u64::MAX), cut in 0usize..48) {
             let stored = StopRecord::other_writer(raw.and_then(Txid::new)).encode();
             let cut = cut.min(stored.len().saturating_sub(1));
             prop_assert!(StopRecord::decode(stored.as_bytes().get(..cut).unwrap_or_default()).is_err());
         }
 
         #[test]
-        fn arbitrary_bytes_decode_only_to_what_encodes_back(bytes in proptest::collection::vec(any::<u8>(), 0..80)) {
+        fn arbitrary_bytes_decode_only_to_what_encodes_back(bytes in proptest::collection::vec(any::<u8>(), 0..48)) {
             if let Ok(record) = StopRecord::decode(&bytes) {
                 let stored = record.encode();
                 prop_assert_eq!(stored.as_bytes(), bytes.as_slice());
@@ -194,7 +195,7 @@ mod tests {
     #[test]
     fn every_error_has_bytes_that_produce_it() {
         let cases: [(&[u8], StopRecordError); 8] = [
-            (&[b'x'; 65], StopRecordError::NotText),
+            (&[b'x'; 42], StopRecordError::NotText),
             (
                 b"lsr-stop 1 other-writer none\xff\n",
                 StopRecordError::NotText,
@@ -238,6 +239,27 @@ mod tests {
             StopRecord::other_writer(None).encode(),
             "lsr-stop 1 other-writer none\n"
         );
+    }
+
+    /// The length bound is exact: the longest record decodes, one byte more never reaches
+    /// the parser.
+    #[test]
+    fn the_longest_record_is_the_length_bound() {
+        let longest = StopRecord::other_writer(txid(u64::MAX)).encode();
+        assert_eq!(longest.len(), MAX_LEN);
+        assert_eq!(
+            StopRecord::decode(longest.as_bytes()),
+            Ok(StopRecord::other_writer(txid(u64::MAX)))
+        );
+        let mut longer = longest.into_bytes();
+        longer.insert(0, b' ');
+        assert_eq!(StopRecord::decode(&longer), Err(StopRecordError::NotText));
+    }
+
+    #[test]
+    fn a_record_names_the_transaction_it_was_taken_at() {
+        assert_eq!(StopRecord::other_writer(txid(5)).ours(), txid(5));
+        assert_eq!(StopRecord::other_writer(None).ours(), None);
     }
 
     #[test]

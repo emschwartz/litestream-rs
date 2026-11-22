@@ -298,6 +298,51 @@ fn a_running_engine_stops_when_another_writer_took_its_next_id() {
 /// The same divergence after the staged file changed under the engine (a
 /// staging backup put back while it ran) says nothing about writers: the
 /// staged file goes and a snapshot follows, as before.
+/// A configuration that continues past another writer keeps no stop record when a running
+/// engine finds one at its next id, not even for the tick before it reboots: the record exists
+/// only to make a restart stop again.
+#[test]
+fn continuing_past_another_writer_at_the_next_id_records_no_stop() {
+    let mut rig = Rig::new();
+    let mut config = go_like();
+    config.responses.other_writer = crate::OtherWriter::ContinueAndInterleaveHistories;
+    let mut actor = Actor::new(config);
+    rig.settle(&mut actor, T0);
+    rig.commit(2);
+    rig.tick(&mut actor, T0 + 10);
+    let next = actor.staged().unwrap();
+    rig.remote
+        .inner
+        .inject_failure_after_publish(StoreError::Transient {
+            op: StoreOp::Upload,
+            kind: ErrorKind::TimedOut,
+        });
+    rig.tick(&mut actor, T0 + 10);
+    put_foreign(&rig, next.get());
+    // The tick that meets the other writer's file: the driver stores whatever record it
+    // leaves, before the engine reboots.
+    let mut at = T0 + 10;
+    let met = (0..50).find_map(|_| {
+        let tick = rig.tick(&mut actor, at);
+        if let Tick::Ran {
+            next: Next::At(next),
+            ..
+        } = &tick
+        {
+            at = at.max(next.unix_millis());
+        }
+        matches!(
+            event(&tick),
+            Some(Event::Degraded {
+                cause: PersistentCause::OtherWriter,
+                ..
+            })
+        )
+        .then(|| actor.stop_record())
+    });
+    assert_eq!(met, Some(None));
+}
+
 #[test]
 fn a_divergence_from_a_replaced_staged_file_is_not_another_writer() {
     let mut rig = Rig::new();

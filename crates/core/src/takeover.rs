@@ -31,7 +31,7 @@ use crate::stop_record::txid_word;
 const MAGIC: &str = "lsr-takeover";
 const VERSION: &str = "1";
 /// The longest stored form: the words, two spaces, 16 digits and a newline.
-const MAX_LEN: usize = 48;
+const MAX_LEN: usize = 32;
 
 /// An operator's word that this database may replicate over the replica's
 /// files through `through`.
@@ -146,10 +146,26 @@ mod tests {
         }
     }
 
+    /// The length bound is exact: the longest record decodes, one byte more never reaches
+    /// the parser.
+    #[test]
+    fn the_longest_record_is_the_length_bound() {
+        let max = TakeoverRecord::through(Txid::new(u64::MAX).unwrap());
+        let longest = max.encode();
+        assert_eq!(longest.len(), MAX_LEN);
+        assert_eq!(TakeoverRecord::decode(longest.as_bytes()), Ok(max));
+        let mut longer = longest.into_bytes();
+        longer.insert(0, b' ');
+        assert_eq!(
+            TakeoverRecord::decode(&longer),
+            Err(TakeoverRecordError::NotText)
+        );
+    }
+
     #[test]
     fn every_error_has_bytes_that_produce_it() {
         let cases: [(&[u8], TakeoverRecordError); 8] = [
-            (&[b'x'; 49], TakeoverRecordError::NotText),
+            (&[b'x'; 33], TakeoverRecordError::NotText),
             (
                 b"lsr-takeover 1 000000000000000\xff\n",
                 TakeoverRecordError::NotText,

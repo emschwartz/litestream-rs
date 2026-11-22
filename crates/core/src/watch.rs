@@ -152,6 +152,29 @@ mod tests {
         Inventory::from_files(files).unwrap()
     }
 
+    /// Each clause of `forget`'s keep rule alone keeps the run of uploads, and each bound
+    /// is exact: only a single-transaction level-0 key from `first` to `last` drops it.
+    #[test]
+    fn forget_drops_the_uploads_only_for_one_of_their_own_keys() {
+        let watch = Watch {
+            anchor: None,
+            uploaded: Some((txid(3), txid(7))),
+        };
+        let cases = [
+            (key(1, 5, 5), true, "another level"),
+            (key(0, 4, 5), true, "a range of transactions"),
+            (key(0, 2, 2), true, "below the first"),
+            (key(0, 8, 8), true, "above the last"),
+            (key(0, 3, 3), false, "the first"),
+            (key(0, 7, 7), false, "the last"),
+            (key(0, 5, 5), false, "inside"),
+        ];
+        for (deleted, kept, why) in cases {
+            let left = Watch::forget(Some(watch), deleted);
+            assert_eq!(left, kept.then_some(watch), "{why}");
+        }
+    }
+
     #[test]
     fn the_anchor_is_the_lowest_level_whose_last_file_holds_the_published_transaction() {
         let listed = inventory(&[key(0, 3, 3), key(0, 4, 4), key(1, 1, 4), key(9, 1, 2)]);
