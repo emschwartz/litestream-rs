@@ -109,8 +109,8 @@ jobs:
       - run: just miri
 
   # Shuttle explores thousands of random thread schedules of the replicator's command handshake
-  # and the S3 batch's scoped threads (`just shuttle`); the short version runs in `just check`.
-  # A failure prints the schedule that replays it.
+  # and the S3 batch's scoped threads (`just shuttle`); pull requests that touch store-s3 or
+  # replica run the short version in ci.yml. A failure prints the schedule that replays it.
   shuttle:
     runs-on: ubuntu-latest
     timeout-minutes: 30
