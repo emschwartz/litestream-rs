@@ -1252,3 +1252,32 @@ name = "region-letters-digits-dashes-only"
 fix = "claude/dropin-config"
 package = "lsr-store-s3"
 tests = ["config::tests::a_region_is_refused_only_when_no_request_could_be_signed_with_it"]
+
+# `replicate`'s command line made to read as Go's (claude/dropin-cli): found by the Go
+# differential (compat `dropin_cli`), which needs the Go builds and so is ignored; the
+# tests below are its Go-free counterparts.
+[[bug]]
+name = "log-level-unknown-refused"
+fix = "claude/dropin-cli"
+package = "lsr-config"
+test_bin = "config"
+tests = ["log_level_from_the_environment_wins"]
+
+[[bug]]
+name = "bool-checked-after-help"
+fix = "claude/dropin-cli"
+package = "lsr-sidecar"
+tests = ["flags::tests::a_bad_boolean_before_help_is_the_error"]
+
+[[bug]]
+name = "help-exits-zero-without-literal"
+fix = "claude/dropin-cli"
+package = "lsr-sidecar"
+tests = ["flags::tests::help_succeeds_only_when_asked_for_literally"]
+
+[[bug]]
+name = "flag-combination-before-config"
+fix = "claude/dropin-cli"
+package = "lsr-cli"
+test_bin = "cli"
+tests = ["a_missing_config_is_reported_before_a_flag_combination"]

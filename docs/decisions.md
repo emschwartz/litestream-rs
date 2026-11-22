@@ -58,6 +58,8 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D154 | Credential sources that need a network call or a subprocess (instance roles, web identity, SSO, `credential_process`, assumed roles): build them under D33? | Not in this pass; the owner chooses | Claude (dropin-creds), **delegated** | 2026-11-22 | open to owner review |
 | D155 | Config Go accepts and litestream-rs refuses at load or start (unknown and duplicate keys, values no start could use, schedules core does not run): copy Go under D33? | No: keep refusing, naming the key | Claude (dropin-config), **delegated** | 2026-11-22 | open to owner review |
 | D156 | Two databases on one meta directory, replica or file, which Go starts: copy Go? | No: refuse, since Go loses data there | Claude (dropin-config), **delegated** | 2026-11-22 | open to owner review |
+| D157 | Exit codes: one code for every error, as Go, or one per class? | Keep one per class until the owner rules on #41 | Claude (dropin-cli), **delegated** | 2026-11-22 | open to owner review |
+| D158 | Go commands, `-once` options and `/metrics` series `lsr` lacks: build them under D33? | Not in this pass; the owner chooses | Claude (dropin-cli), **delegated** | 2026-11-22 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -532,6 +534,26 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Why:** this is a case where Go's behaviour loses data. Two replicators on one meta directory overwrite each other's staged files (Go's own comment on its `dir` check calls it "replication state corruption"); two on one prefix interleave two histories, and retention then deletes one's files.
 - **Revisit if:** never, unless the layout changes.
 - **Links:** `docs/BEHAVIOR.md` CFG-29; `crates/config/src/map.rs` (`distinct`).
+
+## D157. Exit codes (delegated)
+
+- **Question:** Go Litestream exits 1 on every error and 0 for literal help (`cmd/litestream/main.go:89-104`). `lsr` exits 1 (degraded, or an `-exec` run that did not end clean), 2 (refused), 3 (environment) or 64 (usage). D33 asks for Go's behaviour.
+- **Options:** exit 1 for every error on the commands Go has; keep the classes.
+- **Choice:** keep the classes until the owner rules on #41, which is open on exactly this.
+- **Cost accepted:** a script that tests for exactly 1 sees 2, 3 or 64.
+- **Why:** the convention is the owner's open question (#41, also named in D19), and a supervisor that treats any non-zero code as failure, which is how `replicate` is run, sees no difference.
+- **Revisit if:** the owner rules on #41.
+- **Links:** `docs/BEHAVIOR.md` CFG-34; `crates/cli/src/run.rs` (`Exit`).
+
+## D158. Command-line and endpoint surface Go has and `lsr` lacks (delegated)
+
+- **Question:** the drop-in work compared the commands, flags and endpoints of Go 041a8c3 with `lsr`. What `lsr` lacks: the commands `databases`, `reset`, `status`, `sync`, `list`, `info`, `ltx`, `wal` and the Windows service commands; `replicate -once -force-snapshot` and `-once -enforce-retention`; eleven Go `/metrics` series and pprof (CFG-35).
+- **Options:** build each now; refuse each by name and leave the choice to the owner.
+- **Choice:** refuse each by name. Not built in this pass: each is a feature, not a correction, and several (`sync`, `status`, the service commands) talk to a running daemon through Go's control socket, which is itself refused (CFG-2).
+- **Cost accepted:** a deployment that runs one of these commands, or graphs one of these series, needs Go Litestream for it.
+- **Why:** under D33 they are gaps to close, but closing them means designing each against the engine (a `sync` that waits for a real upload, a `reset` that respects the journal), which no task here covered.
+- **Revisit if:** the owner orders them. `databases` (one listing of the plan) and the missing series that the health handle already holds are the cheapest.
+- **Links:** `docs/BEHAVIOR.md` CFG-33, CFG-35; `docs/plans/phase-4-sidecar.md` (metrics).
 
 ## Unverified, not recorded
 
