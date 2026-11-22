@@ -369,3 +369,9 @@ name = "unlink-durable-at-once"
 fix = "checker-holes (staged unlinks)"
 package = "lsr-sim"
 tests = ["store::tests::an_unsynced_unlink_comes_back_or_stays_done_under_the_block_law"]
+
+[[bug]]
+name = "keys-not-write-once"
+fix = "checker-holes (write-once keys)"
+package = "lsr-sim"
+tests = ["oracle::tests::a_key_put_again_with_other_bytes_is_a_rewrite"]

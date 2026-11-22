@@ -62,6 +62,14 @@ test = "lsr-history::history::judge::a_report_before_the_rewind_does_not_cover_i
 plant = "rewind-excused-without-report"
 
 [[row]]
+id = "CHK-5"
+circumstance = "A replica key is put again with other bytes while every transaction id keeps its commit"
+detected = ["lsr-sim::oracle::tests::a_key_put_again_with_other_bytes_is_a_rewrite"]
+[[row.kill]]
+test = "lsr-sim::oracle::tests::a_key_put_again_with_other_bytes_is_a_rewrite"
+plant = "keys-not-write-once"
+
+[[row]]
 id = "CHK-4"
 circumstance = "A regression the driver excused (a bucket rollback) is never reported by the engine"
 none = "known wrong"

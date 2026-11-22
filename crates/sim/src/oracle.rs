@@ -112,6 +112,15 @@ pub enum Violation {
         /// The commit it covered later.
         second: CommitId,
     },
+    /// A replica key was put again with other bytes: an object is written
+    /// once (retention may delete it), unless the replica lost it from
+    /// outside, the store reported its first put failed, or a power loss cut
+    /// the commit it first held.
+    #[error("{key} was put again with other bytes")]
+    KeyRewritten {
+        /// The object.
+        key: String,
+    },
     /// A later transaction id covers an earlier commit. The same commit is
     /// allowed: a snapshot on request is a new id with nothing new in the WAL.
     #[error("transaction {lower} covers {low_commit} but {higher} covers {high_commit}")]
@@ -491,6 +500,53 @@ fn covers(
     Ok(cover)
 }
 
+/// Every replica key holds one byte string for good (TigerBeetle's grid
+/// checker): a put of a key that was put before, deleted or not, must carry
+/// the same bytes. The exceptions are the ones [`reusable`] grants an id, at
+/// the level of the object: a key the store reported failed or wrong, a key
+/// whose last transaction the replica lost from outside, and a level-0 key
+/// whose first put held a commit a power loss cut before the second put.
+fn write_once(model: &Model, recorder: &RecorderLog, ground: Ground<'_>) -> Result<(), Violation> {
+    let mut first: BTreeMap<FileKey, (u64, Option<CommitId>)> = BTreeMap::new();
+    for (at, event) in recorder.events().iter().enumerate() {
+        let RecorderEvent::Put {
+            key,
+            digest,
+            origin,
+            ..
+        } = event
+        else {
+            continue;
+        };
+        let max = key.range().max();
+        let commit = origin.filter(|o| o.size() > 0).and_then(|o| {
+            let (salt1, salt2) = o.salts();
+            let end = o.offset().saturating_add(o.size());
+            let salts = Salts { salt1, salt2 };
+            model
+                .staged_from(max, salts, end, at)
+                .or_else(|| model.find(salts, end, at))
+        });
+        match first.get(key) {
+            Some((was, held))
+                if was != digest
+                    && !ground.exempt.contains(key)
+                    && !ground.lost.contains(&max)
+                    && !held.is_some_and(|held| model.cut_by(held, at)) =>
+            {
+                return Err(Violation::KeyRewritten {
+                    key: format!("{} {}", key.level().get(), range_str(key.range())),
+                });
+            }
+            Some(_) => {}
+            None => {
+                first.insert(*key, (*digest, commit));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Whether `txid` may cover a commit other than `first` from recorder position `at`: only when
 /// the replica lost it from outside (a bucket rollback, a removed file) or the database lost
 /// `first` to a power loss before then, so nothing still holds what the id first named. Any
@@ -643,6 +699,7 @@ pub fn check_with(
     ground: Ground<'_>,
 ) -> Result<Checked, Violation> {
     let cover = covers(model, recorder, ground)?;
+    write_once(model, recorder, ground)?;
     let inventory = block_on(Inventory::load(remote))
         .map_err(|err| bug_fault(format!("listing the replica: {err}")))?;
     let files = inventory.files();

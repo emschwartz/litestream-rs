@@ -184,6 +184,27 @@ fn an_id_whose_commit_a_power_loss_cut_may_cover_its_replacement() {
     assert_eq!(done.latest, Some(txid(3)));
 }
 
+/// A compacted key put again with other pages: no transaction id changes commit, so only the
+/// write-once rule on keys sees it.
+#[test]
+fn a_key_put_again_with_other_bytes_is_a_rewrite() {
+    let f = fixture();
+    put(&f.store, 1, 1, 3, &ltx(1, 3, 1, 12, None));
+    run(&f, &Acked::new()).unwrap();
+    put(&f.store, 1, 1, 3, &ltx(1, 3, 1, 99, None));
+    let got = run(&f, &Acked::new()).unwrap_err();
+    assert!(matches!(got, Violation::KeyRewritten { .. }), "{got:?}");
+}
+
+/// The same bytes put again (an upload retried after an ambiguous commit) are no rewrite.
+#[test]
+fn a_key_put_again_with_the_same_bytes_is_not_a_rewrite() {
+    let f = fixture();
+    put(&f.store, 1, 1, 3, &ltx(1, 3, 1, 12, None));
+    put(&f.store, 1, 1, 3, &ltx(1, 3, 1, 12, None));
+    run(&f, &Acked::new()).unwrap();
+}
+
 /// A snapshot staged for transaction 1 was lost before it reached the replica
 /// (a power loss tore it, or the staging directory was wiped), and the engine
 /// took transaction 1 again from a later commit with an empty WAL, as after a
