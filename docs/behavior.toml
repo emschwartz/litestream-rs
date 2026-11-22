@@ -637,7 +637,7 @@ signal = "\"retrying\""
 at_risk = "**unknown.** The simulator's model keeps the barrier held, so the application never writes again; it has no scenario for this (`sim/src/scenario/faults.rs`)"
 recovery = "**unknown**"
 no_test = "unknown"
-notes = "core tests cover the reporting only"
+notes = "core tests cover the reporting only. On lsr-sqlite, the transaction a failed release leaves open is rolled back at the writer's next use (CKPT-9)"
 
 [[row]]
 table = "Checkpoint"
@@ -660,6 +660,17 @@ at_risk = "**unknown.** Whether pages SQLite believes checkpointed can be lost, 
 recovery = "**unknown**"
 no_test = "unknown"
 notes = "None for the consequence"
+
+[[row]]
+table = "Checkpoint"
+id = "CKPT-9"
+circumstance = "A barrier's or write lock's release whose ROLLBACK fails leaves the writer connection's transaction open with no lock outstanding; or the sequence bump is asked for while a lock is outstanding (`sqlite/src/conn.rs` `free_writer`)"
+response = "The next use of the writer (the bump, or the next barrier or write lock) rolls the leftover transaction back first, and fails if that rollback fails. A bump while a lock is outstanding is refused, `Io(InvalidInput)`. Before, the bump ran inside the open transaction and the next release undid it unseen"
+signal = "\"retrying\" when the rollback fails"
+at_risk = "None. The application's writers stay blocked by the open transaction until the engine's next use of the writer, at most one checkpoint interval"
+recovery = "Automatic"
+detected_by = "sqlite::`a_bump_after_a_release_that_failed_is_committed`, sqlite::`a_bump_under_a_lock_is_refused`; plant::`bump-inside-leftover-writer-transaction`"
+notes = "Found by the differential of the simulator's SQLite model against lsr-sqlite (sqlite::`the_model_answers_the_engine_as_sqlite_does`), which now agrees on this call. The failed ROLLBACK is injected with an SQLite authorizer on the writer connection"
 
 [[row]]
 table = "Upload"
