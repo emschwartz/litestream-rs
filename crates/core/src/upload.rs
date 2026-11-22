@@ -130,6 +130,22 @@ pub enum Did {
         /// The first staged transaction that cannot follow it.
         from: Txid,
     },
+    /// The replica was listed and the staged file after its newest is read
+    /// from the first frame of the replica's newest file's WAL generation and
+    /// ends short of it. That is either a snapshot this engine took after the
+    /// database lost the replica's tail (a power loss, a lying fsync, a cut
+    /// WAL), which follows, or an earlier state of the WAL (a staging backup
+    /// put back), which does not. Only the WAL tells them apart, and the
+    /// uploader does not read it: the caller judges
+    /// (`actor::rewound_base`) and continues from `confirmed` or drops the
+    /// staged files from `from` as for [`Did::Diverged`]. The state lists
+    /// again, so a caller that does neither uploads nothing.
+    Rewound {
+        /// The newest transaction the replica holds, now confirmed.
+        confirmed: Txid,
+        /// The staged snapshot after it.
+        from: Txid,
+    },
 }
 
 /// A step that went through.
@@ -245,11 +261,22 @@ async fn list_step<L: ObjectStore, S: ObjectStore>(
     };
     if let Some(confirmed) = known
         && let Some(from) = confirmed.next().filter(|next| Some(*next) <= newest_staged)
-        && !follows_replica(&inventory, staging, remote, confirmed)
-            .await
-            .map_err(|fault| fail(state, fault))?
     {
-        return Ok(diverged(confirmed, from));
+        let follows = follows_replica(&inventory, staging, remote, confirmed)
+            .await
+            .map_err(|fault| fail(state, fault))?;
+        match follows {
+            Follows::Yes => {}
+            Follows::No => return Ok(diverged(confirmed, from)),
+            Follows::IfRewound => {
+                return Ok(Uploaded {
+                    state: UploadState::ListFirst {
+                        confirmed: Some(confirmed),
+                    },
+                    did: Did::Rewound { confirmed, from },
+                });
+            }
+        }
     }
     Ok(Uploaded {
         state: UploadState::At(known),
@@ -276,7 +303,7 @@ async fn follows_replica<L: ObjectStore, S: ObjectStore>(
     staging: &L,
     remote: &S,
     confirmed: Txid,
-) -> Result<bool, Fault> {
+) -> Result<Follows, Fault> {
     let next = confirmed.next().map(staged_key);
     let page = staging
         .list(
@@ -287,7 +314,7 @@ async fn follows_replica<L: ObjectStore, S: ObjectStore>(
         .await
         .map_err(|err| Fault::from_staging(&err))?;
     let Some(ours) = page.files.first().filter(|info| Some(info.key) == next) else {
-        return Ok(true);
+        return Ok(Follows::Yes);
     };
     let theirs = inventory
         .files()
@@ -295,46 +322,67 @@ async fn follows_replica<L: ObjectStore, S: ObjectStore>(
         .filter(|info| info.key.range().max() == confirmed)
         .min_by_key(|info| info.key.level());
     let Some(theirs) = theirs else {
-        return Ok(true);
+        return Ok(Follows::Yes);
     };
-    // A no drops staged files, so it takes two reads that agree.
+    // Anything but a yes can drop staged files, so it takes two reads that agree.
+    let mut verdict = Follows::IfRewound;
     for _ in 0..2 {
         let ours = read_header(staging, &ours.key, Fault::from_staging).await?;
         let theirs = read_header(remote, &theirs.key, Fault::from_remote).await?;
-        if let (Some(theirs), Some(ours)) = (theirs, ours)
-            && continues(&theirs, &ours)
-        {
-            return Ok(true);
-        }
-        if theirs.is_none() || ours.is_none() {
-            return Ok(true);
+        let (Some(theirs), Some(ours)) = (theirs, ours) else {
+            return Ok(Follows::Yes);
+        };
+        match continues(&theirs, &ours) {
+            Follows::Yes => return Ok(Follows::Yes),
+            Follows::No => verdict = Follows::No,
+            Follows::IfRewound => {}
         }
     }
-    Ok(false)
+    Ok(verdict)
+}
+
+/// How a staged file stands to the replica's file before it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Follows {
+    /// It continues the replica's history.
+    Yes,
+    /// It belongs to another history.
+    No,
+    /// It is read from the first frame of the replica's file's generation and
+    /// ends short of it: [`Did::Rewound`].
+    IfRewound,
 }
 
 /// Whether a file with header `ours` can come right after one with `theirs`.
 /// In the same generation it starts where `theirs` ended, or it is read from
-/// the first frame (a snapshot) and reaches at least as far: one that stops
-/// short describes an earlier state of that WAL, such as a staged file from a
-/// backup put back after the WAL was rewritten under the same salts.
-fn continues(theirs: &Header, ours: &Header) -> bool {
+/// the first frame (a snapshot) and reaches at least as far. One read from the
+/// first frame that stops short follows only if the database lost the frames
+/// past its end, which the WAL must show ([`Follows::IfRewound`]).
+fn continues(theirs: &Header, ours: &Header) -> Follows {
+    let yes = |follows: bool| if follows { Follows::Yes } else { Follows::No };
     if theirs.page_size() != ours.page_size() {
-        return false;
+        return Follows::No;
     }
     match (theirs.fields().wal, ours.fields().wal) {
         (Some(theirs), Some(ours)) => {
             let first_frame = u64::try_from(lsr_wal::HEADER_LEN).unwrap_or(u64::MAX);
             let theirs_end = theirs.offset().checked_add(theirs.size());
             if ours.salts() != theirs.salts() {
-                return ours.offset() == first_frame;
+                return yes(ours.offset() == first_frame);
             }
-            Some(ours.offset()) == theirs_end
-                || (ours.offset() == first_frame
-                    && theirs_end
-                        .is_some_and(|end| ours.offset().checked_add(ours.size()) >= Some(end)))
+            if Some(ours.offset()) == theirs_end {
+                return Follows::Yes;
+            }
+            if ours.offset() != first_frame {
+                return Follows::No;
+            }
+            if theirs_end.is_some_and(|end| ours.offset().checked_add(ours.size()) >= Some(end)) {
+                Follows::Yes
+            } else {
+                Follows::IfRewound
+            }
         }
-        _ => true,
+        _ => Follows::Yes,
     }
 }
 

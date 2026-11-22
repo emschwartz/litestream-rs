@@ -62,7 +62,7 @@ async fn upload_tick<L: ObjectStore, S: ObjectStore>(
                     next: Next::OnWalChange,
                 });
             }
-            Did::Listed { .. } | Did::Diverged { .. } => {}
+            Did::Listed { .. } | Did::Diverged { .. } | Did::Rewound { .. } => {}
             Did::Put(_) => put = put.saturating_add(1),
         }
     }
@@ -1025,12 +1025,6 @@ fn a_staged_file_that_cannot_follow_the_replica_is_not_uploaded() {
             encode_file(1, 1, ps(), origin(32, 100, 5)),
             encode_file(2, 2, ps(), origin(132, 100, 6)),
         ),
-        // The same generation from its first frame, ending before the
-        // replica's file did: an earlier WAL state (seed 0x1919f).
-        (
-            encode_file(1, 1, ps(), origin(32, 100, 5)),
-            encode_file(2, 2, ps(), origin(32, 50, 5)),
-        ),
     ];
     for (theirs, ours) in cases {
         let (staging, remote) = (MemStore::new(), Probe::default());
@@ -1047,6 +1041,44 @@ fn a_staged_file_that_cannot_follow_the_replica_is_not_uploaded() {
         );
         assert!(remote.log().begins.is_empty());
     }
+}
+
+/// The staged file after the replica's newest is read from the first frame
+/// of the replica's generation and ends before the replica's file did: a
+/// snapshot of a database that lost the replica's tail, or an earlier WAL
+/// state (seed 0x1919f). The listing uploads nothing and leaves the call to
+/// the WAL's reader; a caller that ignores it lists again.
+#[test]
+fn a_short_snapshot_of_the_replicas_generation_waits_for_the_wal() {
+    let origin = |offset, size, salt| WalOrigin::new(offset, size, salt, 7);
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    put_bytes(
+        &remote.inner,
+        key(1),
+        &encode_file(1, 1, ps(), origin(32, 100, 5)),
+    );
+    put_bytes(
+        &staging,
+        key(2),
+        &encode_file(2, 2, ps(), origin(32, 50, 5)),
+    );
+    let listed = next(UploadState::Unknown, &staging, &remote, 2).unwrap();
+    assert_eq!(
+        listed.did,
+        Did::Rewound {
+            confirmed: txid(1),
+            from: txid(2)
+        }
+    );
+    assert_eq!(
+        listed.state,
+        UploadState::ListFirst {
+            confirmed: Some(txid(1))
+        }
+    );
+    let again = next(listed.state, &staging, &remote, 2).unwrap();
+    assert_eq!(again.did, listed.did);
+    assert!(remote.log().begins.is_empty());
 }
 
 /// The staged file follows the replica's newest: the same WAL generation

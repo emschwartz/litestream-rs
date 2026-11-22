@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index cbff418..96c37ca 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -1946,7 +1946,7 @@ async fn judge_rewound<W: WalSource, L: ObjectStore, R: ObjectStore>(
+         return Ok(uploaded);
+     };
+     let state = UploadState::At(Some(confirmed));
+-    let did = if rewound_base(wal, staging, remote, confirmed).await? {
++    let did = if false && rewound_base(wal, staging, remote, confirmed).await? {
+         Did::Listed {
+             newest: Some(confirmed),
+         }

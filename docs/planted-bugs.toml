@@ -220,3 +220,14 @@ fix = "plant"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["liveness::restarts_with_nothing_damaged_never_snapshot"]
+
+# A staged snapshot of a database that lost commits the replica holds, judged an earlier state of
+# the WAL at the next boot: deleted, its restore point given up, a second snapshot staged. The sim's
+# liveness::a_staged_snapshot_of_a_rewound_database_survives_a_restart fails on it too.
+[[bug]]
+name = "rewound-snapshot-dropped"
+fix = "0d77261"
+package = "lsr-core"
+tests = [
+    "actor::tests::rewound::a_staged_snapshot_of_a_rewound_database_is_uploaded_after_a_restart",
+]

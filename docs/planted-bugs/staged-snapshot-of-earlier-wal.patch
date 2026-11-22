@@ -1,15 +1,17 @@
 diff --git a/crates/core/src/upload.rs b/crates/core/src/upload.rs
-index 4252581..ff733bb 100644
+index a0250c2..413674f 100644
 --- a/crates/core/src/upload.rs
 +++ b/crates/core/src/upload.rs
-@@ -330,9 +330,7 @@ fn continues(theirs: &Header, ours: &Header) -> bool {
-                 return ours.offset() == first_frame;
+@@ -376,11 +376,7 @@ fn continues(theirs: &Header, ours: &Header) -> Follows {
+             if ours.offset() != first_frame {
+                 return Follows::No;
              }
-             Some(ours.offset()) == theirs_end
--                || (ours.offset() == first_frame
--                    && theirs_end
--                        .is_some_and(|end| ours.offset().checked_add(ours.size()) >= Some(end)))
-+                || ours.offset() == first_frame
+-            if theirs_end.is_some_and(|end| ours.offset().checked_add(ours.size()) >= Some(end)) {
+-                Follows::Yes
+-            } else {
+-                Follows::IfRewound
+-            }
++            Follows::Yes
          }
-         _ => true,
+         _ => Follows::Yes,
      }

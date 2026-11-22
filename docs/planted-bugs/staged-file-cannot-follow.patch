@@ -1,12 +1,12 @@
 diff --git a/crates/core/src/upload.rs b/crates/core/src/upload.rs
-index 4252581..92f2a19 100644
+index a0250c2..4367961 100644
 --- a/crates/core/src/upload.rs
 +++ b/crates/core/src/upload.rs
-@@ -245,6 +245,7 @@ async fn list_step<L: ObjectStore, S: ObjectStore>(
+@@ -261,6 +261,7 @@ async fn list_step<L: ObjectStore, S: ObjectStore>(
      };
      if let Some(confirmed) = known
          && let Some(from) = confirmed.next().filter(|next| Some(*next) <= newest_staged)
 +        && false
-         && !follows_replica(&inventory, staging, remote, confirmed)
+     {
+         let follows = follows_replica(&inventory, staging, remote, confirmed)
              .await
-             .map_err(|fault| fail(state, fault))?

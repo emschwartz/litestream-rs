@@ -102,8 +102,8 @@ use crate::source::{CheckpointMode, Checkpointer, CommittedRead, PageSource, Wal
 use crate::store::{ObjectStore, PageLimit};
 use crate::sync::{Step, StepEnd, SyncConfig, Synced, sync_step, wal_barrier};
 use crate::upload::{
-    Did, Swept, UploadConfig, UploadPlan, UploadState, Uploaded, drop_staged_from, inventory_fault,
-    plan_upload, sweep_staged, upload_next,
+    Did, Swept, UploadConfig, UploadFailed, UploadPlan, UploadState, Uploaded, drop_staged_from,
+    inventory_fault, plan_upload, sweep_staged, upload_next,
 };
 use crate::verify::LivePages;
 
@@ -727,7 +727,7 @@ impl Actor {
             return self.ran(Event::Idle, now);
         }
         let suspect = &mut self.kept.suspect_staged;
-        let (upload, lost) = match boot_listing(env.staging, env.remote, suspect).await {
+        let (upload, lost) = match boot_listing(env.wal, env.staging, env.remote, suspect).await {
             Ok(listed) => listed,
             Err(fault) => return self.fault(Task::Sync, fault, now),
         };
@@ -1336,7 +1336,18 @@ impl Actor {
         let mut last = Did::Nothing;
         for _ in 0..limit {
             let plan = plan_upload(&self.engine.upload, self.staged());
-            match upload_next(self.engine.upload, env.staging, env.remote, self.staged()).await {
+            let step = match upload_next(self.engine.upload, env.staging, env.remote, self.staged())
+                .await
+            {
+                Ok(uploaded) => judge_rewound(env.wal, env.staging, env.remote, uploaded)
+                    .await
+                    .map_err(|fault| UploadFailed {
+                        state: self.engine.upload,
+                        fault,
+                    }),
+                Err(failed) => Err(failed),
+            };
+            match step {
                 Ok(uploaded) => {
                     self.set_upload(uploaded.state);
                     if let Did::Diverged { from, .. } = uploaded.did {
@@ -1361,7 +1372,7 @@ impl Actor {
                 self.kept.suspect_staged = None;
             }
             match last {
-                Did::Nothing | Did::Diverged { .. } => break,
+                Did::Nothing | Did::Diverged { .. } | Did::Rewound { .. } => break,
                 Did::Listed { .. } => self.engine.maintain.stale = true,
                 Did::Put(_) => {
                     let at = listing_after_upload(now, &self.kept.cfg.maintenance);
@@ -1884,7 +1895,8 @@ struct Booted {
 /// when it is `suspect`, the file a read on an earlier tick failed on;
 /// otherwise it becomes the suspect and the boot fails with `StagedLost`, to
 /// read it again on the next try.
-async fn boot_listing<L: ObjectStore, R: ObjectStore>(
+async fn boot_listing<W: WalSource, L: ObjectStore, R: ObjectStore>(
+    wal: &mut W,
     staging: &L,
     remote: &R,
     suspect: &mut Option<FileKey>,
@@ -1892,13 +1904,16 @@ async fn boot_listing<L: ObjectStore, R: ObjectStore>(
     // At boot a replica ahead of the local newest staged file is `recover`'s to judge (a
     // snapshot after it), not the uploader's (a stop), so the listing names no newest staged file.
     let start = UploadState::ListFirst { confirmed: None };
-    let (upload, diverged) = match upload_next(start, staging, remote, Some(Txid::MAX)).await {
-        Ok(Uploaded {
+    let listed = match upload_next(start, staging, remote, Some(Txid::MAX)).await {
+        Ok(listed) => listed,
+        Err(failed) => return Err(failed.fault),
+    };
+    let (upload, diverged) = match judge_rewound(wal, staging, remote, listed).await? {
+        Uploaded {
             state,
             did: Did::Diverged { from, .. },
-        }) => (state, Some(from)),
-        Ok(listed) => (listed.state, None),
-        Err(failed) => return Err(failed.fault),
+        } => (state, Some(from)),
+        listed => (listed.state, None),
     };
     // The staged files from `from` on cannot continue the replica: they go,
     // and recovery snapshots above what the replica holds.
@@ -1915,6 +1930,82 @@ async fn boot_listing<L: ObjectStore, R: ObjectStore>(
     };
     *suspect = None;
     Ok((upload, lost.or(diverged)))
+}
+
+/// Settles a listing's [`Did::Rewound`] against the WAL: as a listing that
+/// confirmed the replica's newest transaction when the staged snapshot after it
+/// is a new base ([`rewound_base`]), else as [`Did::Diverged`]. Any other
+/// step passes through.
+async fn judge_rewound<W: WalSource, L: ObjectStore, R: ObjectStore>(
+    wal: &mut W,
+    staging: &L,
+    remote: &R,
+    uploaded: Uploaded,
+) -> Result<Uploaded, Fault> {
+    let Did::Rewound { confirmed, from } = uploaded.did else {
+        return Ok(uploaded);
+    };
+    let state = UploadState::At(Some(confirmed));
+    let did = if rewound_base(wal, staging, remote, confirmed).await? {
+        Did::Listed {
+            newest: Some(confirmed),
+        }
+    } else {
+        Did::Diverged { confirmed, from }
+    };
+    Ok(Uploaded { state, did })
+}
+
+/// Whether the staged files after `confirmed`, which start with a snapshot read
+/// from the first frame of the replica's newest file's WAL generation and
+/// ending short of it ([`Did::Rewound`]), are a new base for the replica.
+///
+/// The rule: they are when the WAL as it is now continues from the newest
+/// staged file and no longer continues from the replica's newest file. Then
+/// the database lost commits the replica holds (a power loss that kept less
+/// than was synced, a lying fsync, a cut WAL), and the staged snapshot is the
+/// database as it is since. Its transaction id was allocated above everything
+/// the replica held when it was staged (`recover` snapshots after the newer of
+/// the replica's and the staged newest), and the uploader takes it only right
+/// after `confirmed`, so no id the replica holds is reused and the chain has no
+/// hole: a restore past `confirmed` reads the rewound database, as the
+/// database itself does. Deleting it instead gives up its restore point and
+/// stages a second whole snapshot. Go uploads every local file above the
+/// replica's position with no such check (`replica.go:162-168`).
+///
+/// They are not when the WAL still continues from the replica's newest file
+/// (nothing was lost: a short snapshot there is an earlier state, such as a
+/// staging backup put back after a renumbering), or does not continue from the
+/// newest staged file (it describes a WAL that is gone: a backup put back after
+/// the WAL was rewritten under the same salts, seed 0x1919f). A replica file no
+/// longer at level 0 proves nothing either way, and no proof is a no.
+///
+/// Not told apart: a staging backup put back that the WAL as it is now still
+/// continues from, beside a replica tail the WAL lost. Both checks read the WAL
+/// as one boot does; this runs only on a listing's [`Did::Rewound`].
+async fn rewound_base<W: WalSource, L: ObjectStore, R: ObjectStore>(
+    wal: &mut W,
+    staging: &L,
+    remote: &R,
+    confirmed: Txid,
+) -> Result<bool, Fault> {
+    let committed = wal.committed().map_err(Fault::from_source)?;
+    let mut reader = open_reader(wal)?;
+    let Some(ours) = NewestStagedFile::load(staging, reader.as_mut()).await? else {
+        return Ok(false);
+    };
+    let Some(theirs) = NewestStagedFile::load_remote(remote, reader.as_mut(), confirmed).await?
+    else {
+        return Ok(false);
+    };
+    let view = wal_view(wal, reader.as_ref(), committed)?;
+    let continues = |file: &NewestStagedFile| {
+        matches!(
+            recover(Some(PositionSource::Boot(file)), &view, None),
+            Recovered::Continue(_)
+        )
+    };
+    Ok(continues(&ours) && !continues(&theirs))
 }
 
 async fn boot_recover<W: WalSource, L: ObjectStore, R: ObjectStore>(
