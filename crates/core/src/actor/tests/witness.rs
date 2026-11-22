@@ -194,6 +194,41 @@ fn a_refused_copy_of_a_torn_tail_leaves_the_listed_key_to_the_replica() {
     );
 }
 
+/// As above, behind a listing that lags the bucket and leaves the torn key out: a read past
+/// it finds the key, and when the witness refuses the staged copy, only a read can tell the
+/// key is still on the replica. A listing that left it out let new content take it (seed
+/// 0x3d5 in the simulator: "transaction 16 covers commit 45 and then commit 57").
+#[test]
+fn a_refused_copy_of_a_torn_tail_behind_a_lagging_listing_leaves_the_key_to_the_replica() {
+    let (mut rig, mut actor) = caught_up();
+    commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
+    commit_and_settle(&mut rig, &mut actor, 3, T0 + 1);
+    let key = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(3).unwrap()));
+    let all = ReadLen::new(ReadLen::MAX_RAW).unwrap();
+    let mut torn = block_on(rig.remote.inner.read(&key, 0, all)).unwrap();
+    torn.truncate(torn.len() / 2);
+    block_on(async {
+        let mut up = rig
+            .remote
+            .inner
+            .begin_upload(&key, ts(T0), crate::store::WriteMode::Replace)
+            .await
+            .unwrap();
+        up.write(&torn).await.unwrap();
+        up.commit().await.unwrap();
+    });
+    rig.remote.hidden.lock().unwrap().push(key);
+    let forged = forge(&rig, 3, 0xEE);
+    let mut actor = Actor::new(cfg());
+    rig.tick(&mut actor, T0 + 2);
+    rig.settle(&mut actor, T0 + 2);
+    assert!(!replica_holds(&rig, 3, &forged));
+    assert!(
+        replica_holds(&rig, 3, &torn),
+        "new content took the replica's key"
+    );
+}
+
 /// Every staged file's bytes, by transaction.
 fn staged_bytes(rig: &Rig) -> Vec<(u64, Vec<u8>)> {
     let all = ReadLen::new(ReadLen::MAX_RAW).unwrap();

@@ -120,6 +120,29 @@ mod fixed {
         }
     }
 
+    /// A key the replica holds, behind a lagging listing, whose reads both came back torn (a
+    /// hold of lying reads) beside a forged staged copy: the boot left the key unconfirmed for
+    /// the staged copy to go over it, then the witness refused that copy, and the boot's check
+    /// that the replica still holds the key asked the listing, which lagged. The engine went on
+    /// from the staged file before it and put new content under the replica's key ("transaction
+    /// 16 covers commit 45 and then commit 57", seed 0x3d5 under its mix, from the survival
+    /// campaign on main). The check is a read now.
+    #[test]
+    fn a_refused_staged_copy_does_not_reopen_a_key_the_replica_holds_seed_0x3d5() {
+        let opts = Opts {
+            drawn: true,
+            block_crash_law: true,
+            lying_wal_sync: true,
+            after_restart: lsr_sim::AfterRestart::Retry,
+            clock_law: lsr_sim::ClockLaw::EachRead,
+            error_domain: true,
+            ..Opts::default()
+        };
+        if let Err(failure) = run_ops(Seed::new(0x3d5), h::seed_0x3d5::OPS, &opts) {
+            panic!("{failure}");
+        }
+    }
+
     /// A regression the soak found: its recorded history, run as `run_with`
     /// ran it that night: drawn, under the crash law the seed's mix drew then.
     fn replay_drawn(seed: u64, ops: &[Op], block_crash_law: bool) {
