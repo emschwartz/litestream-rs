@@ -8,6 +8,8 @@ mod cli;
 #[cfg(test)]
 mod common;
 #[cfg(test)]
+mod crash_loop;
+#[cfg(test)]
 mod daemon;
 #[cfg(test)]
 mod s3;

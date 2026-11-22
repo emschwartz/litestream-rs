@@ -8,24 +8,13 @@ use lsr_core::Clock;
 use lsr_ltx::Timestamp;
 use thiserror::Error;
 
-use super::{EXPIRES_IN, HttpRequest, Method, RequestBuilder, RequestError, UploadId};
+use super::{HttpRequest, Method, RequestBuilder, RequestError, UploadId};
 use crate::response::parse_create;
+use crate::response::xml_text;
 use crate::transport::{HttpResponse, Transport, TransportError};
 
 /// The most pages of open uploads [`open_uploads`] follows before it gives up.
 pub(super) const MAX_UPLOAD_PAGES: usize = 100;
-
-impl Method {
-    const fn to_signer(self) -> rusty_s3::Method {
-        match self {
-            Self::Get => rusty_s3::Method::Get,
-            Self::Head => rusty_s3::Method::Head,
-            Self::Put => rusty_s3::Method::Put,
-            Self::Post => rusty_s3::Method::Post,
-            Self::Delete => rusty_s3::Method::Delete,
-        }
-    }
-}
 
 impl RequestBuilder {
     /// A signed request the builder has no call for: any method and query, `headers`
@@ -42,36 +31,7 @@ impl RequestBuilder {
         headers: Vec<(&'static str, String)>,
         body: Vec<u8>,
     ) -> Result<HttpRequest, RequestError> {
-        let at = jiff::Timestamp::from_millisecond(now.unix_millis())
-            .map_err(|_range| RequestError::ClockOutOfRange)?;
-        let base = match object {
-            Some(key) => self.bucket.object_url(key),
-            None => self.bucket.base_url().clone(),
-        };
-        let mut all = self.base_headers();
-        all.extend(headers);
-        // The signer merges the query with its own sorted `X-Amz-*` pairs and assumes both
-        // are sorted; an unsorted one signs a canonical request the server does not rebuild.
-        let mut query = query.to_vec();
-        query.sort_unstable();
-        let url = rusty_s3::signing::sign(
-            &at,
-            method.to_signer(),
-            base,
-            self.credentials.key(),
-            self.credentials.secret(),
-            self.credentials.token(),
-            self.bucket.region(),
-            EXPIRES_IN.as_secs(),
-            query.iter().copied(),
-            all.iter().map(|(name, value)| (*name, value.as_str())),
-        );
-        Ok(HttpRequest {
-            method,
-            url,
-            headers: all,
-            body,
-        })
+        self.sign_raw(now, method, object, query, headers, body)
     }
 }
 
@@ -242,23 +202,6 @@ pub fn abandon_upload(
         key: key.to_owned(),
         id,
     })
-}
-
-/// The text of each `<tag>` element in `xml`, unescaped; enough for S3's flat listings.
-#[must_use]
-pub(super) fn xml_text(xml: &str, tag: &str) -> Vec<String> {
-    let (open, close) = (format!("<{tag}>"), format!("</{tag}>"));
-    xml.split(open.as_str())
-        .skip(1)
-        .filter_map(|rest| rest.split_once(close.as_str()).map(|(text, _)| text))
-        .map(|text| {
-            text.replace("&lt;", "<")
-                .replace("&gt;", ">")
-                .replace("&quot;", "\"")
-                .replace("&apos;", "'")
-                .replace("&amp;", "&")
-        })
-        .collect()
 }
 
 #[cfg(test)]
