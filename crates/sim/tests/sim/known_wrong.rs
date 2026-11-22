@@ -46,12 +46,12 @@ fn still_fails(seed: u64, ops_digest: u64, defect: KnownWrong) {
 }
 
 /// A failed WAL sync, then a restart before the TRUNCATE: the new process stages frames the
-/// failed sync covered (D2). Seed 0x1d is the first of the mixed set to reach it.
+/// failed sync covered (D2). Seed 0x41 is the first of the mixed set to reach it.
 #[test]
-fn a_restart_after_a_failed_wal_sync_still_stages_frames_it_covered_seed_0x1d() {
+fn a_restart_after_a_failed_wal_sync_still_stages_frames_it_covered_seed_0x41() {
     still_fails(
-        0x1d,
-        0x6d26_783c_11d3_dfee,
+        0x41,
+        0xe6af_9677_a321_ed30,
         KnownWrong::WalSyncForgottenAtRestart,
     );
 }
