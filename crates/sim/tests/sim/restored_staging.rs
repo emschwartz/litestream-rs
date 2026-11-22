@@ -143,15 +143,18 @@ fn a_rolled_back_bucket_never_gets_a_transaction_id_reused_across_a_restart_seed
 /// reads lying (`Hold::LyingReads`) and an old staging backup put back, the engine snapshots the
 /// database as transaction 18 again and puts the same level-0 key with other bytes (266) holding
 /// another commit. The replica's object is overwritten: the class of BOOT-18 and BOOT-19
-/// (docs/BEHAVIOR.md), which conditional level-0 writes (#96) are meant to close. Run under the
-/// seed's own mix; the digest guards its operations.
+/// (docs/BEHAVIOR.md). The conditional level-0 write closes it: the bucket refuses the second
+/// put into the held key and the read-back reports the divergence. Run under the seed's own mix;
+/// the digest guards its operations.
 #[test]
-#[ignore = "known wrong: an id the replica holds is taken again (BOOT-18/19); pending conditional \
-            level-0 writes (#96)"]
 fn an_id_the_replica_holds_is_not_taken_again_after_a_lying_read_seed_0xb6b() {
     use lsr_sim::{Seed, Weights, history, run as run_drawn};
     let seed = Seed::new(0xb6b);
-    let weights = Weights::mixed(seed);
+    // The mix as drawn when the campaign found it, before the lagging-listings law.
+    let weights = Weights {
+        lagging_listings: 0,
+        ..Weights::mixed(seed)
+    };
     let ops = history(seed, 300, &weights);
     let digest = format!("{ops:?} {weights:?}")
         .bytes()
@@ -159,7 +162,7 @@ fn an_id_the_replica_holds_is_not_taken_again_after_a_lying_read_seed_0xb6b() {
             (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
         });
     assert_eq!(
-        digest, 0xbfbf_4dc3_341e_2a95,
+        digest, 0x3940_d9b0_1d42_c88a,
         "the live generator changed seed 0xb6b's run"
     );
     if let Err(failure) = run_drawn(seed, 300, &weights) {
