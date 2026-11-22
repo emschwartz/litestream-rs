@@ -581,3 +581,37 @@ fn a_relist_never_takes_an_acknowledged_transaction_again() {
     assert!(reput.is_empty(), "{reput:?}");
     assert_eq!(newest_replica_file(&rig), Some(3));
 }
+
+/// A retried fault that keeps failing one task becomes a stall at the [`STALLED_AFTER`]th
+/// failure in a row: the task is degraded with that cause, health shows it, the strict
+/// responses do not stop on it, and the task's next success clears it.
+#[test]
+fn a_retried_fault_that_persists_ends_degraded_as_a_stall() {
+    let mut rig = Rig::new();
+    let mut actor = Actor::new(cfg());
+    rig.settle(&mut actor, T0);
+    let mut now = T0;
+    for n in 1..STALLED_AFTER.get() {
+        let tick = actor.fault(Task::Upload, Fault::LocalDiskFull, ts(now));
+        assert!(
+            matches!(event(&tick), Some(Event::Retrying { .. })),
+            "failure {n}: {tick:?}"
+        );
+        assert_eq!(actor.degraded(Task::Upload), None);
+        now += 1;
+    }
+    let tick = actor.fault(Task::Upload, Fault::LocalDiskFull, ts(now));
+    let cause = PersistentCause::Stalled(Stall::LocalDiskFull);
+    assert_eq!(
+        degraded(&tick).map(|(t, c, _)| (t, c)),
+        Some((Task::Upload, cause))
+    );
+    assert_eq!(actor.degraded(Task::Upload).map(|d| d.cause), Some(cause));
+    rig.commit(2);
+    rig.settle(&mut actor, now + 1_000_000);
+    assert_eq!(
+        actor.degraded(Task::Upload),
+        None,
+        "the next upload clears it"
+    );
+}

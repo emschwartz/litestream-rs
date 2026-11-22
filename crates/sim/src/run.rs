@@ -539,6 +539,37 @@ impl Runner {
         Ok(())
     }
 
+    /// Every level-0 file this tick staged from the WAL holds frames that are durable: the
+    /// engine's sync before staging, which a disk only fails to honour when it lies (that
+    /// scenario says so) or after an earlier failed sync of the same generation.
+    fn judge_staged_durable(&self) -> Result<(), Violation> {
+        let events = self.w.staging_recorder.events();
+        for event in events.iter().skip(self.staging_seen) {
+            if let crate::RecorderEvent::Put {
+                key,
+                header: Some(_),
+                origin: Some(origin),
+                ..
+            } = event
+                && origin.size() > 0
+                && key.level().get() == 0
+            {
+                let (salt1, salt2) = origin.salts();
+                let end = origin.offset().saturating_add(origin.size());
+                if !self
+                    .w
+                    .sqlite
+                    .wal_range_durable(Salts { salt1, salt2 }, origin.offset(), end)
+                {
+                    return Err(Violation::StagedNotDurable {
+                        key: key.to_string(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn note_tick(&mut self, began: Timestamp, remote0: crate::store::RecorderCounts) {
         if !self.record {
             return;
@@ -573,6 +604,7 @@ impl Runner {
             self.life.boot_commits = commits;
         }
         self.judge_puts()?;
+        self.judge_staged_durable()?;
         self.report.ticks = self.report.ticks.saturating_add(1);
         let in_tick = self.took_commit_in_tick();
         self.note_snapshots(newest_commit, in_tick, at);
@@ -710,9 +742,12 @@ impl Runner {
     }
 
     /// A task degraded by a persistent fault the run does not expect is a
-    /// bug, as a stop for it would be. `Bug` is never expected.
+    /// bug, as a stop for it would be. `Bug` is never expected. A stall is a
+    /// retried fault that kept failing: as expected as the retries were before
+    /// they were reported as a stall.
     fn degraded_expected(&self, cause: PersistentCause) -> Result<(), Violation> {
-        if cause != PersistentCause::Bug && self.stop_expected(StopCause::from(cause)) {
+        let expected = cause.stop().is_none_or(|stop| self.stop_expected(stop));
+        if cause != PersistentCause::Bug && expected {
             Ok(())
         } else {
             Err(bug_fault(format!("a task is degraded: {cause:?}")))

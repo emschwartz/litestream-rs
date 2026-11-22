@@ -512,6 +512,8 @@ pub struct ResponseSettings {
     pub wal_truncated: Option<ResponseSetting>,
     /// `wal-unlinked`.
     pub wal_unlinked: Option<ResponseSetting>,
+    /// `wal-sync-failed`.
+    pub wal_sync_failed: Option<ResponseSetting>,
     /// `page-size-changed`.
     pub page_size_changed: Option<ResponseSetting>,
     /// `bug`.
