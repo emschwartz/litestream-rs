@@ -165,15 +165,19 @@ fn restore_through_the_public_entry_reads_side_by_side() {
     let restored = restore(&waves, RestoreTarget::Latest, &dir.path().join("db")).unwrap();
     assert_eq!(restored.files(), 1);
     let chunks = size.div_ceil(RESTORE_CHUNK);
-    // One-byte reads of the three keys named past the listing (the retry layer reads them
-    // one at a time), then
-    // one read per chunk.
+    // One-byte reads of the keys named past the listing for each transaction the walk
+    // looks at (the retry layer reads them one at a time), then one read per chunk.
+    let past = usize::try_from(lsr_core::fresh_probe_reads(
+        Txid::new(1),
+        &lsr_core::Starts::default(),
+    ))
+    .unwrap();
     assert_eq!(
         reads.load(Ordering::SeqCst),
-        chunks + 3,
+        chunks + past,
         "one read per chunk"
     );
-    let bound = chunks.div_ceil(WIDTH) + 3;
+    let bound = chunks.div_ceil(WIDTH) + past;
     let seen = rounds.load(Ordering::SeqCst);
     assert!(
         seen <= bound,

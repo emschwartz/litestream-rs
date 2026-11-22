@@ -102,17 +102,7 @@ use crate::witness::{ByteTally, Witnessed, Witnesses};
 /// How much of a staged file is read at once.
 const CHUNK: ReadLen = ReadLen::or_chunk(256 * 1024);
 
-/// The most transactions past a listing's newest that one probe looks for
-/// ([`probe_past`]). A listing that hides more uploads than this is far
-/// outside what an S3-compatible store does; past it, the bucket's refusal of
-/// a taken key ([`taken`]) still stops a second upload under the same key.
-pub const PROBE_CAP: u32 = 64;
-
-/// The most missing transactions in a row a probe reads past before it
-/// stops. Keys past a replica's newest are never taken, but one below it can
-/// be free: another writer's file an operator removed leaves a gap under the
-/// files uploaded after it.
-pub const PROBE_GAP: u32 = 3;
+pub use crate::probe::{PROBE_CAP, PROBE_GAP};
 
 /// What this engine knows about the replica's newest transaction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -438,22 +428,9 @@ pub(crate) async fn probe_past<S: ObjectStore>(
         (listed, Some(confirmed)) if listed < Some(confirmed) => Some(confirmed),
         (listed, _) => listed.map_or(Some(Txid::MIN), Txid::next),
     };
-    let mut found = Vec::new();
-    let (mut at, mut missed) = (first, 0_u32);
-    for _ in 0..PROBE_CAP {
-        let Some(txid) = at.filter(|txid| missed <= PROBE_GAP || Some(*txid) <= through) else {
-            break;
-        };
-        match holder(remote, txid, starts).await? {
-            Some(key) => {
-                found.push(key);
-                missed = 0;
-            }
-            None => missed = missed.saturating_add(1),
-        }
-        at = txid.next();
-    }
-    Ok(found)
+    probe::walk(remote, first, through, starts, false)
+        .await
+        .map_err(|err| Fault::from_remote(&err))
 }
 
 /// The reads a probe past a listing that ends at `listed` makes when it finds nothing: the
@@ -468,17 +445,6 @@ pub fn fresh_probe_reads(listed: Option<Txid>, starts: &Starts) -> u64 {
         at = txid.next();
     }
     reads
-}
-
-/// The first key named for `txid` that a read finds (`crate::probe`).
-async fn holder<S: ObjectStore>(
-    remote: &S,
-    txid: Txid,
-    starts: &Starts,
-) -> Result<Option<FileKey>, Fault> {
-    probe::holder(remote, txid, starts)
-        .await
-        .map_err(|err| Fault::from_remote(&err))
 }
 
 /// Whether the replica holds an object under `key`, by a read: a listing may
