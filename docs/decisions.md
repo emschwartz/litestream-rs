@@ -313,6 +313,15 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Revisit if:** the build breaks on a Go release.
 - **Links:** #111.
 
+## D111. What the soak must reach (delegated)
+
+- **Options:** keep reach keyed by state name and gated on 64 fixed seeds; key it by behaviour row and fault class and gate every night's soak on zeros.
+- **Choice:** both. `mark!(<Row>)` on the detecting branch in lsr-core, compiled only under `verify`; each `docs/behavior.toml` row says `mark = "site"` or `"none: <reason>"`. Every injector variant maps through a wildcard-free match to a fault class counted drawn, applied, skipped, hit, judged during and judged after. The nightly soak fails when a sited row or a required class count is zero; `canary.never` must be the only zero. A class the mixes never draw is `Undrawn` with its reason and must stay undrawn. A required count that cannot be earned is listed in `EXEMPT` (`crates/sim/src/marks.rs`) with its reason. "A weight set to 0 goes red" is an in-process test on every push (the second writer's weight), not a nightly scratch tree.
+- **Why:** a green soak said nothing about what it exercised (issue #127, section 4). A count per row turns "covered" from a reading of the generator into a number from a run.
+- **Cost accepted:** `hit` is exact only for store faults and injected SQLite failures; for every other class it means an engine tick ran with the fault in place or after it, which is not proof the damage was read. A row whose detection sits in a `const fn` mapping arm has no site yet ("not yet placed"). A rare class or row that a short night misses makes that night red until a floor or an exemption says otherwise.
+- **Revisit if:** a night goes red on a key that a longer soak reaches (add a floor per key), or the marks start deriving BEHAVIOR's D, S and R (section 7.3, item 2).
+- **Links:** #127.
+
 ## Unverified, not recorded
 
 - Who decided D1 to D5 and when: `docs/PLAN.md` says "Decided" with no name or date. Listed as owner, by 2026-11-20.

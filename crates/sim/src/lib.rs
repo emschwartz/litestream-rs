@@ -26,6 +26,7 @@ pub mod exec;
 pub mod generate;
 pub mod history;
 pub mod liveness;
+pub mod marks;
 pub mod model;
 pub mod oracle;
 pub mod reach;

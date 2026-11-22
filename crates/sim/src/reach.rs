@@ -9,7 +9,7 @@
 //! many seeds, so a zero shows a state nothing reaches.
 //!
 //! A key nothing bumps never appears in the map, so [`REQUIRED`] and
-//! [`WATCHED`] name the keys that must be printed even at zero. The required
+//! [`UNREQUIRED`] name the keys that must be printed even at zero. The required
 //! ones are asserted: `tests/sim/tally.rs` fails when the fixed seed set
 //! (seeds 1 to 64, the same histories `tests/sim/fixed_seeds.rs` runs) leaves
 //! one at zero, so a generator change that stops reaching a state the oracle
@@ -86,19 +86,34 @@ pub const REQUIRED: &[&str] = &[
     "event.Clamped",  // a clock that went back (ledger: time-provenance)
 ];
 
-/// States printed even at zero but not asserted: reached rarely or never by
-/// the fixed seed set today, each a listed generator gap.
-pub const WATCHED: &[&str] = &[
-    "check.asof.fallback",                // an as-of with no file at or before it
-    "check.damaged",                      // a restore stopped by a file a corrupt publish damaged
-    "snapshot.staged.CheckpointBoundary", // the engine's own TRUNCATE checkpoint, never judged
-    // The WAL is synced before staging, so a drawn history cannot rewind below what was staged;
-    // only a disk that lies about that sync can, and only scenarios draw one.
-    "snapshot.LocalRewound",
-    "staged.Dropped", // a staged file gone whole after a power loss
-    // A torn newest staged file at boot (ledger: boot-page-size-stale-staged, killed by its named
-    // test). Since main's block crash law, seeds 1..64 never tear one: 3 of seeds 1..400 do.
-    "staged.Torn",
+/// States printed even at zero but not required of the fixed seed set, each
+/// with the reason it is not: a key is required or it says why not. Each is a
+/// listed generator gap.
+pub const UNREQUIRED: &[(&str, &str)] = &[
+    (
+        "check.asof.fallback",
+        "an as-of with no file at or before it; needs a dropped created-at, weight 0 in the mixes",
+    ),
+    (
+        "check.damaged",
+        "a restore stopped by a file a corrupt publish damaged; rare in 64 seeds",
+    ),
+    (
+        "snapshot.staged.CheckpointBoundary",
+        "the engine's own TRUNCATE checkpoint, never judged",
+    ),
+    (
+        "snapshot.LocalRewound",
+        "the WAL is synced before staging, so only a disk that lies about that sync rewinds below it",
+    ),
+    (
+        "staged.Dropped",
+        "a staged file gone whole after a power loss; rare",
+    ),
+    (
+        "staged.Torn",
+        "a torn newest staged file at boot: seeds 1..64 never tear one, 3 of seeds 1..400 do",
+    ),
 ];
 
 /// Counts of the states one run, or many summed, reached.
@@ -135,12 +150,12 @@ impl Reach {
         self.0.iter().map(|(key, n)| (key.as_str(), *n))
     }
 
-    /// Every count, by name, with each [`REQUIRED`] and [`WATCHED`] key
+    /// Every count, by name, with each [`REQUIRED`] and [`UNREQUIRED`] key
     /// present: a state nothing reached prints as a zero, not as a missing line.
     #[must_use]
     pub fn listing(&self) -> Vec<(String, u64)> {
         let mut all = self.0.clone();
-        for key in REQUIRED.iter().chain(WATCHED) {
+        for key in REQUIRED.iter().chain(UNREQUIRED.iter().map(|(key, _)| key)) {
             all.entry((*key).to_owned()).or_insert(0);
         }
         all.into_iter().collect()
@@ -190,7 +205,7 @@ mod tests {
         }
         assert_eq!(reach.missing(), REQUIRED.get(..1).unwrap_or_default());
         let listing = reach.listing();
-        for key in REQUIRED.iter().chain(WATCHED) {
+        for key in REQUIRED.iter().chain(UNREQUIRED.iter().map(|(key, _)| key)) {
             assert!(
                 listing.iter().any(|(name, _)| name == key),
                 "{key} is not listed"
@@ -199,8 +214,12 @@ mod tests {
     }
 
     #[test]
-    fn no_key_is_both_required_and_watched() {
-        let mut all: Vec<&str> = REQUIRED.iter().chain(WATCHED).copied().collect();
+    fn no_key_is_both_required_and_unrequired() {
+        let mut all: Vec<&str> = REQUIRED
+            .iter()
+            .copied()
+            .chain(UNREQUIRED.iter().map(|(key, _)| *key))
+            .collect();
         let before = all.len();
         all.sort_unstable();
         all.dedup();

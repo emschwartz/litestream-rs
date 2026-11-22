@@ -72,9 +72,10 @@ sim-soak seconds base=`date +%s`:
 # The nightly rotating seed set: seeds follow from the UTC date (YYYYMMDD), a million per night,
 # so no two nights share one and a night is rerun with `just sim-nightly <seconds> <YYYYMMDD>`.
 # A failing seed is printed last as its replay line. The arguments reach the test as environment
-# variables only, never as shell text.
+# variables only, never as shell text. The summed reach goes to target/sim-reach.json, and a
+# row or fault class no seed reached fails the run (crates/sim/src/marks.rs).
 sim-nightly $LSR_SIM_SECONDS="900" $LSR_SIM_DAY=`date -u +%Y%m%d`:
-    env -u LSR_SIM_BASE_SEED cargo nextest run -p lsr-sim --test sim -E 'test(/^soak::/)' --run-ignored only --no-capture --locked
+    env -u LSR_SIM_BASE_SEED LSR_SIM_COMMIT="$(git rev-parse HEAD)" LSR_SIM_REACH_OUT="${LSR_SIM_REACH_OUT:-$PWD/target/sim-reach.json}" cargo nextest run -p lsr-sim --test sim -E 'test(/^soak::/)' --run-ignored only --no-capture --locked
 
 # The nightly toolchain for the sanitizer, Miri and fuzz recipes; override with LSR_NIGHTLY=nightly-YYYY-MM-DD.
 nightly := env("LSR_NIGHTLY", "nightly")

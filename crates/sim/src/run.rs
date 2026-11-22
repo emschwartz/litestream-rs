@@ -336,6 +336,7 @@ struct Runner {
     app: after_restart::App,
     /// The WAL's committed end, in frames, as the current operation began.
     op_began_at: u32,
+    marks: crate::marks::FaultMarks,
 }
 
 /// Whether a step on the WAL undoes an earlier one.
@@ -416,6 +417,7 @@ impl Runner {
             judges: Judges::default(),
             app: after_restart::App::new(seed),
             op_began_at: 0,
+            marks: crate::marks::FaultMarks::new(),
         }
     }
 
@@ -466,6 +468,7 @@ impl Runner {
         // The tick's own reading is the first of its clock reads.
         let now = clock.now();
         self.w.high.note(now);
+        self.marks.ticked();
         let actor = &mut self.actor;
         let fut = async {
             let env = Env {
@@ -1394,7 +1397,10 @@ impl Runner {
     /// drawn history it is skipped.
     fn step_done(&self, what: &str, done: Result<bool, StagedEditError>) -> Result<(), Violation> {
         match done {
-            Ok(false) if self.lenient => Ok(()),
+            Ok(false) if self.lenient => {
+                self.marks.skip();
+                Ok(())
+            }
             other => Self::scenario_step(what, other),
         }
     }
@@ -1491,6 +1497,7 @@ impl Runner {
         if !self.judges.history {
             return Ok(());
         }
+        self.marks.judged();
         let damaged = self.w.remote_faults.damaged();
         let now = self.now();
         self.w.history.judge(&self.w.remote_raw, now, &damaged, ask)
@@ -1509,6 +1516,7 @@ impl Runner {
     /// Both judges over the whole replica; where one fails and the other passes, the
     /// disagreement is counted in reach, keyed by the failing judge and its violation.
     fn restore_all(&mut self) -> Result<(), Violation> {
+        self.marks.judged();
         self.report.checks = self.report.checks.saturating_add(1);
         let oracle = self
             .judges
@@ -1725,7 +1733,9 @@ impl Runner {
             self.w.sqlite.wal_header_salts(),
             self.w.sqlite.our_reader_pins_wal(),
         );
+        self.marks.begin(op);
         self.apply_op(op)?;
+        self.marks.end(op);
         // An operation that runs ticks between its edits (another writer's
         // file put, then removed after the engine ran) edits again after them.
         self.liveness.note_op(op);
@@ -2000,6 +2010,7 @@ impl Runner {
                 reach.add(name, u64::from(hits));
             }
         }
+        self.tally_marks();
     }
 }
 
@@ -2159,6 +2170,7 @@ pub fn shrink(seed: Seed, steps: u32, weights: &Weights, opts: &Opts) -> Option<
 
 mod after_restart;
 mod hold;
+mod marks;
 
 /// Whether a snapshot with this cause is the engine saying the history it had replicated may
 /// not continue: the database, its WAL or the staging directory went back or cannot be

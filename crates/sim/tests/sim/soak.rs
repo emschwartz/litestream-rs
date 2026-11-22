@@ -9,10 +9,16 @@
 //! again at the end with its replay line. A failing seed belongs in the fixed
 //! set once the bug is fixed, as its list of operations: replayed by seed, it
 //! would stop reproducing the bug the next time the generator changes.
+//!
+//! The soak is also accountable for what it reached: every passing seed's
+//! reach is summed, written as JSON to `LSR_SIM_REACH_OUT` when it is set
+//! (the nightly workflow uploads it), and judged by [`lsr_sim::marks::gate`].
+//! A behaviour-table row with a mark site, or a fault class's required count,
+//! that no seed reached fails the soak as a failing seed does.
 
 use std::time::{Duration, Instant};
 
-use lsr_sim::{Seed, Weights, nightly_base, replay_line, run};
+use lsr_sim::{Reach, Seed, Weights, nightly_base, replay_line, run};
 
 const STEPS: u32 = 300;
 
@@ -43,15 +49,19 @@ fn rotating_seeds() {
     let until = Instant::now() + Duration::from_secs(seconds);
     let mut failed = Vec::new();
     let mut ran = 0_u64;
+    let mut reach = Reach::default();
     for n in base.. {
         if Instant::now() >= until {
             break;
         }
         let seed = Seed::new(n);
         println!("{}", replay_line(seed, Some(STEPS)));
-        if let Err(failure) = run(seed, STEPS, &Weights::mixed(seed)) {
-            println!("{failure}");
-            failed.push(failure);
+        match run(seed, STEPS, &Weights::mixed(seed)) {
+            Ok(report) => reach.merge(&report.reach),
+            Err(failure) => {
+                println!("{failure}");
+                failed.push(failure);
+            }
         }
         ran += 1;
     }
@@ -64,5 +74,50 @@ fn rotating_seeds() {
         .iter()
         .map(|failure| replay_line(failure.seed, Some(failure.steps)))
         .collect();
+    let gate = lsr_sim::marks::gate(&reach);
+    write_reach(base, ran, &reach, &gate);
     assert!(failed.is_empty(), "failing seeds:\n{}", lines.join("\n"));
+    assert!(
+        gate.passed(),
+        "the soak left required marks unreached: {gate:?}"
+    );
+}
+
+/// Prints the gate's verdict and writes the summed reach where
+/// `LSR_SIM_REACH_OUT` names: the commit (`LSR_SIM_COMMIT`), the seeds run
+/// and every key, so nights can be compared.
+fn write_reach(base: u64, ran: u64, reach: &Reach, gate: &lsr_sim::marks::Gate) {
+    println!("gate zeros: {:?}", gate.zeros);
+    println!("gate stale exemptions: {:?}", gate.stale);
+    println!("gate undrawn classes drawn: {:?}", gate.drawn_undrawn);
+    let Ok(path) = std::env::var("LSR_SIM_REACH_OUT") else {
+        return;
+    };
+    let keys: serde_json::Map<String, serde_json::Value> = reach
+        .listing()
+        .into_iter()
+        .chain(
+            lsr_sim::marks::required_keys()
+                .into_iter()
+                .map(|key| (key, 0)),
+        )
+        .map(|(key, n)| (key.clone(), reach.get(&key).max(n).into()))
+        .collect();
+    let out = serde_json::json!({
+        "commit": std::env::var("LSR_SIM_COMMIT").unwrap_or_default(),
+        "generator": "live",
+        "steps": STEPS,
+        "base_seed": base,
+        "seeds_run": ran,
+        "gate": {
+            "passed": gate.passed(),
+            "zeros": gate.zeros,
+            "stale_exemptions": gate.stale,
+            "undrawn_drawn": gate.drawn_undrawn,
+        },
+        "reach": keys,
+    });
+    let text = serde_json::to_string_pretty(&out).expect("the reach serializes");
+    std::fs::write(&path, text).expect("LSR_SIM_REACH_OUT is writable");
+    println!("reach written to {path}");
 }

@@ -1035,6 +1035,7 @@ dependencies = [
  "lsr-wal",
  "proptest",
  "rusqlite",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]
