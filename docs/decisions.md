@@ -32,7 +32,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D22 | The bound for "unreplicated too long"? | 10 minutes, minimum 5, no byte bound | Fable, **delegated** | 2026-11-22 | open to owner review |
 | D23 | A delete without a directory sync: fix or argue harmless? | Fix | project rule: found defects are fixed (#116) | 2026-11-22 | decided |
 | D24 | Names for store refusals and the error format | Four cause names, "{op} refused: {why}" | owner (#108) | 2026-11-22 | decided |
-| D35 | Find a merged file that a lagging listing hides, whose level-0 inputs are gone? | Read its level key from the starts the listing implies; the case with no start left stays known-wrong | Claude, **delegated** (route from the parent session) | 2026-11-22 | open to owner review |
+| D60 | Find a merged file that a lagging listing hides, whose level-0 inputs are gone? | Read its level key from the starts the listing implies; the case with no start left stays known-wrong | Claude, **delegated** (route from the parent session) | 2026-11-22 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -254,7 +254,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Revisit if:** a store returns a refusal that fits none of them.
 - **Links:** #108 (merged).
 
-## D35. Reading higher-level keys past a lagging listing
+## D60. Reading higher-level keys past a lagging listing
 
 - **The case:** another writer's level-0 file is merged into a level-1 file, and an operator then removes the level-0 file. A listing that lags hides the level-1 file. Before this change, the read past the listing named only level-0 keys and snapshots, so it could not find the level-1 file. The engine took the replica as ending below it and uploaded its own next transaction into the freed key: one transaction, two contents (seeds 0x4dc and 0x517).
 - **Options:** (a) for each transaction the probe reads, also read the level 1 to 8 keys that end at it, from each start the listing implies; (b) change the simulator so that the operator removes every file holding the transaction, or call a partial cleanup outside the contract; (c) accept it as known-wrong.
