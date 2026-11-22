@@ -385,9 +385,11 @@ fn the_two_argument_form_refuses_a_plain_directory_as_go_does() {
 
 #[test]
 fn go_s_flag_refusals_are_usage_errors() {
+    // The positional form needs no file: Go checks these combinations after the config is
+    // read, so a missing default config would be reported first.
     for args in [
-        &["-force-snapshot"][..],
-        &["-enforce-retention"],
+        &["-force-snapshot", "a.db", "s3://b/p"][..],
+        &["-enforce-retention", "a.db", "s3://b/p"],
         &["a.db", "s3://b/p", "-exec", "x"],
         &["only.db"],
         &["-bogus"],
@@ -512,4 +514,22 @@ fn config_check_refuses_what_the_daemon_refuses() {
         stdout.contains("error: dbs[0]: must specify replica"),
         "{stdout}"
     );
+}
+
+/// Go reads the config before it checks `-once`, `-force-snapshot` and
+/// `-enforce-retention` together, so a missing config is the error reported.
+#[test]
+fn a_missing_config_is_reported_before_a_flag_combination() {
+    let dir = TempDir::new().unwrap();
+    let missing = dir.path().join("missing.yml");
+    let out = lsr()
+        .args([
+            "replicate",
+            "-force-snapshot",
+            "-config",
+            missing.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
 }

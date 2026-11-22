@@ -293,12 +293,6 @@ pub enum ProblemKind {
         /// The values it may take.
         allowed: &'static str,
     },
-    /// `LOG_LEVEL` names no level.
-    #[error("LOG_LEVEL `{value}` is not one of: trace, debug, info, warn, error")]
-    LogLevelFromEnv {
-        /// The variable's value.
-        value: String,
-    },
     /// A duration Go requires to be above zero.
     #[error("must be greater than 0 (got {value})")]
     NotPositive {
@@ -398,6 +392,17 @@ impl fmt::Display for Problem {
 /// oddly. Never a refusal.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum WarningKind {
+    /// A log level or format Go does not know: Go's logger keeps its default, and so does
+    /// litestream-rs.
+    #[error("`{value}` is not a log {what} Go knows; it logs at {used}, as Go does")]
+    UnknownLogSetting {
+        /// What was given.
+        value: String,
+        /// `level` or `format`.
+        what: &'static str,
+        /// What is used instead.
+        used: &'static str,
+    },
     /// A Go tuning knob with no counterpart in litestream-rs.
     #[error("has no effect in litestream-rs: {why}")]
     NoEffect {

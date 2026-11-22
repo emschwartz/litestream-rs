@@ -10,7 +10,7 @@ use lsr_config::{
     WarningKind, defaults,
 };
 
-use crate::common::{TestEnv, config, parse, problem_at, refused, refused_with, warnings_at};
+use crate::common::{TestEnv, config, parse, problem_at, refused, warnings_at};
 
 fn secs(s: i64) -> GoDuration {
     GoDuration::from_secs(s)
@@ -711,11 +711,19 @@ fn log_level_from_the_environment_wins() {
     assert_eq!(logging.level(), lsr_config::LogLevel::Debug);
     assert_eq!(logging.format(), lsr_config::LogFormat::Json);
     assert!(logging.stderr());
-    let problems = refused_with("", Expand::Off, &TestEnv::with(&[("LOG_LEVEL", "loud")]));
-    assert_eq!(
-        problem_at(&problems, "logging.level"),
-        ProblemKind::LogLevelFromEnv {
-            value: "loud".to_owned()
-        }
-    );
+    // Go's logger keeps INFO for a level it does not know, and warns nothing; here a warning.
+    let loaded =
+        GoConfig::parse("", Expand::Off, &TestEnv::with(&[("LOG_LEVEL", "loud")])).unwrap();
+    assert_eq!(loaded.config.logging().level(), lsr_config::LogLevel::Info);
+    assert!(!warnings_at(&loaded.report.warnings, "logging.level").is_empty());
+    // `pretty` only colours Go's output, and any other type is Go's text handler.
+    for kind in ["pretty", "fancy"] {
+        let text = format!("logging:\n  type: {kind}\n");
+        let loaded = GoConfig::parse(&text, Expand::Off, &TestEnv::default()).unwrap();
+        assert_eq!(
+            loaded.config.logging().format(),
+            lsr_config::LogFormat::Text
+        );
+        assert!(!warnings_at(&loaded.report.warnings, "logging.type").is_empty());
+    }
 }

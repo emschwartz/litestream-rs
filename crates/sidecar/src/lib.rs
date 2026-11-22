@@ -92,6 +92,7 @@ pub fn run(args: &[String]) -> Result<Outcome, SidecarError> {
     let _watch = signals::Watch::install(move |signal| on_signal.on_signal(signal))
         .map_err(SidecarError::Signals)?;
     let loaded = load(&flags)?;
+    flags::check(&flags)?;
     let config = &loaded.config;
     let level = flags.log_level.unwrap_or(config.logging().level());
     let log = Arc::new(Logger::new(
