@@ -8,6 +8,8 @@
 #   package  the cargo package whose tests are run
 #   tests    nextest name substrings (`test(~x)`); each must fail when planted, one run apiece
 #   test_bin optional: restrict the run to one integration-test binary (cargo `--test`)
+#   (an entry whose `fix` is "plant" is no fixed defect: it proves a checker catches a bug class
+#   it was built for, with the checker's own test named)
 #   canary   optional, on the two canary entries only: the verdict the runner must report,
 #            `survived` (the no-op patch) or `killed` (the patch that breaks a test for certain).
 #            Any other verdict on a canary fails the run: the runner itself is broken.
@@ -207,3 +209,14 @@ tests = [
     "a_power_cut_after_a_settle_leaves_the_database_at_least_as_far_as_the_replica",
     "a_failed_wal_sync_stages_nothing_and_a_later_sync_does_not_clear_it",
 ]
+
+# The snapshot liveness oracle (crates/sim/src/liveness.rs): every boot snapshots. Every restore
+# still matches, so only an oracle that asks why a snapshot was taken can see it. lsr-core's
+# actor::tests::nothing_is_pruned_before_the_first_listing and
+# actor::tests::pages::a_boot_that_continues_checks_pages_the_last_run_recorded fail on it too.
+[[bug]]
+name = "always-snapshot-at-boot"
+fix = "plant"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["liveness::restarts_with_nothing_damaged_never_snapshot"]

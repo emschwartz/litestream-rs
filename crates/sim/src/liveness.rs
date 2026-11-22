@@ -1,0 +1,645 @@
+//! The snapshot liveness oracle: a snapshot needs a fault that justifies it.
+//!
+//! A snapshot is never wrong about content, so the other oracles pass a
+//! run whatever it snapshots. It is a cost: the whole database uploaded and
+//! kept for the retention window. An engine that snapshots on every boot, or
+//! on a rule that misfires, loses nothing a restore can see and pays on every
+//! restart. So each snapshot cause the engine announces (`Booted` with a
+//! cause, `Resnapshot`) or stages (an operator's request) is judged here
+//! against what happened to the world since the evidence it overturns:
+//! [`justifies`] maps every [`SnapshotCauseKind`] to the faults and steps
+//! that can make it necessary, and a cause with none of them in the window
+//! fails the run with [`Violation::UnjustifiedSnapshot`].
+//!
+//! The window. Each justifier is forgotten once the engine has moved past it
+//! ([`Justifier::forgotten_at`]): one about the WAL or a power loss once a
+//! level-0 file is staged after it, since the next boot or step compares the
+//! WAL with that file; one about the replica or the staged files themselves
+//! once an upload brings the replica up to the newest staged file, since an
+//! upload's read or a listing is what finds a damaged staged file or a
+//! divergence, and an upload that only repairs an older file proves nothing
+//! about the rest; a request once its snapshot is staged. What a tick noted itself
+//! (a fault that hit in it, staged files it dropped) outlives that tick's
+//! own staging and uploads, whose order inside the tick is not known.
+//!
+//! Restore points given up: staged level-0 files the engine deleted that the
+//! replica never took, or that lie past the newest transaction it holds now
+//! (it rolled back), so no restore can reach them. A prune of files the
+//! replica took, and since compacted or let go by retention, is not one.
+//! Each is counted (`liveness.given_up`) and judged like a snapshot: one with
+//! no fault in the window that could force it fails the run with
+//! [`Violation::UnjustifiedGiveUp`]. A give-up is then a
+//! [`Justifier::StagedDropped`] for what follows, since the newest staged
+//! file moved back.
+//!
+//! The engine's own per-cause counter ([`lsr_core::Actor::snapshots`]) is
+//! checked too: on a tick that ends with no staging fault, it grows by at
+//! least the staged files with no WAL range and at most the staged files that
+//! hold every page.
+
+use std::collections::BTreeSet;
+
+use lsr_core::{FileKey, SnapshotCauseKind, SnapshotCounts};
+
+use crate::generate::Op;
+use crate::oracle::Violation;
+use crate::reach::{Reach, variant};
+use crate::store::RecorderEvent;
+
+/// Something that happened to the world that can make a snapshot necessary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Justifier {
+    /// The run began: nothing is staged and nothing replicated.
+    RunStart,
+    /// The machine lost power: unsynced WAL frames and staged files may be gone.
+    PowerLoss,
+    /// A power loss took or tore staged files.
+    StagedLost,
+    /// The staging directory was changed outside the engine.
+    StagingEdited,
+    /// A scheduled staging fault hit a call.
+    StagingFault,
+    /// A fault failed a step, so the position it left proves no continuity
+    /// until the next step stages a file.
+    PositionUnproven,
+    /// The engine deleted staged files the replica never took.
+    StagedDropped,
+    /// The replica was changed outside the engine.
+    RemoteEdited,
+    /// A scheduled replica fault hit a call.
+    RemoteFault,
+    /// The WAL, the wal-index, the database file or our SQLite handles were
+    /// damaged or failed outside SQLite's own rules.
+    WalDamaged,
+    /// The WAL's header names a new generation.
+    WalRestarted,
+    /// The WAL file is gone or holds no whole header.
+    WalEmptied,
+    /// The WAL restarted while our read transaction did not pin it (it was
+    /// not held, or sat on read mark zero, which lets one restart through).
+    /// Whether the engine should follow the one restart a mark-zero hold
+    /// allows is an open question; until it is settled, such a restart
+    /// justifies the snapshot.
+    ReadLockLapsed,
+    /// The operator asked for a snapshot.
+    SnapshotRequested,
+}
+
+/// When a justifier stops counting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Forgotten {
+    /// Once a level-0 file is staged after it.
+    AtStaging,
+    /// Once the replica takes a level-0 file that reaches the newest staged
+    /// one: the replica holds everything staging does.
+    AtUpload,
+    /// Once an operator's snapshot is staged.
+    AtRequestedSnapshot,
+}
+
+impl Justifier {
+    /// When this justifier stops counting; see the module docs.
+    #[must_use]
+    pub const fn forgotten_at(self) -> Forgotten {
+        match self {
+            Self::RemoteEdited
+            | Self::RemoteFault
+            | Self::StagedLost
+            | Self::StagingEdited
+            | Self::StagingFault => Forgotten::AtUpload,
+            Self::SnapshotRequested => Forgotten::AtRequestedSnapshot,
+            Self::RunStart
+            | Self::PowerLoss
+            | Self::StagedDropped
+            | Self::WalDamaged
+            | Self::WalRestarted
+            | Self::WalEmptied
+            | Self::ReadLockLapsed
+            | Self::PositionUnproven => Forgotten::AtStaging,
+        }
+    }
+}
+
+/// What can force the engine to delete staged files the replica never took.
+const GIVE_UP: &[Justifier] = &[
+    Justifier::StagingEdited,
+    Justifier::StagingFault,
+    Justifier::StagedLost,
+    Justifier::PowerLoss,
+    Justifier::RemoteEdited,
+    Justifier::RemoteFault,
+];
+
+/// What can make a snapshot for `cause` necessary, announced at a boot
+/// (`at_boot`) or by a running engine; `None` for a cause that is the engine's
+/// own design rather than a response to the world (a TRUNCATE checkpoint
+/// always snapshots), which is counted but never judged.
+#[must_use]
+pub const fn justifies(cause: SnapshotCauseKind, at_boot: bool) -> Option<&'static [Justifier]> {
+    use Justifier::{
+        PositionUnproven, PowerLoss, ReadLockLapsed, RemoteEdited, RemoteFault, RunStart,
+        SnapshotRequested, StagedDropped, StagedLost, StagingEdited, StagingFault, WalDamaged,
+        WalEmptied, WalRestarted,
+    };
+    Some(match cause {
+        // Nothing staged and nothing on the replica to continue from.
+        SnapshotCauseKind::FirstSync => &[
+            RunStart,
+            StagingEdited,
+            StagedLost,
+            StagingFault,
+            StagedDropped,
+        ],
+        // The replica holds more than staging: staging lost files, or the
+        // replica took files staging never had.
+        SnapshotCauseKind::BehindRemote => &[
+            StagingEdited,
+            StagedLost,
+            StagingFault,
+            StagedDropped,
+            RemoteEdited,
+            RemoteFault,
+        ],
+        // The newest staged file does not read, or staged files were
+        // dropped because the replica diverged from them.
+        SnapshotCauseKind::NewestStagedFileUnreadable => &[
+            StagingEdited,
+            StagedLost,
+            StagingFault,
+            RemoteEdited,
+            RemoteFault,
+        ],
+        SnapshotCauseKind::WalMissing => &[WalDamaged, WalEmptied],
+        // The WAL restarted while no proof of continuity held: across a
+        // boot (a boot never holds one), after a fault left the position
+        // unproven, or against a newest staged file from an older generation
+        // (a backup put back, staged files dropped).
+        SnapshotCauseKind::GenerationChanged if at_boot => &[
+            WalRestarted,
+            WalEmptied,
+            WalDamaged,
+            StagingEdited,
+            StagingFault,
+            PositionUnproven,
+            StagedDropped,
+        ],
+        // A running engine holds its read lock and pins the restarts it sees
+        // follow it: a restart alone is no reason, one after the lock lapsed,
+        // a fault or damage is.
+        SnapshotCauseKind::GenerationChanged => &[
+            ReadLockLapsed,
+            WalEmptied,
+            WalDamaged,
+            StagingEdited,
+            StagingFault,
+            PositionUnproven,
+            StagedDropped,
+        ],
+        // The WAL at the position is not what the newest staged file says.
+        SnapshotCauseKind::PrevFrameMismatch | SnapshotCauseKind::LastPageMismatch => &[
+            WalDamaged,
+            WalRestarted,
+            PowerLoss,
+            StagingEdited,
+            StagedLost,
+            StagedDropped,
+        ],
+        SnapshotCauseKind::LocalRewound => &[PowerLoss, WalDamaged, StagingEdited],
+        SnapshotCauseKind::CheckpointBoundary => return None,
+        SnapshotCauseKind::OperatorRequested => &[SnapshotRequested],
+    })
+}
+
+/// What an operation, applied, says by itself. Crashes, store faults that
+/// hit and changes to the WAL's header are noted where they happen instead.
+#[must_use]
+pub const fn of_op(op: &Op) -> &'static [Justifier] {
+    match op {
+        Op::Meta(_) | Op::StagingDamage(_) | Op::EnvFault(crate::EnvFault::WipeStaging) => {
+            &[Justifier::StagingEdited]
+        }
+        Op::EnvFault(_) | Op::Wal(_) | Op::WalDamage { .. } => &[Justifier::WalDamaged],
+        Op::Remote(_) | Op::SecondWriter { .. } => &[Justifier::RemoteEdited],
+        Op::OurReader { begin: false } => &[Justifier::ReadLockLapsed],
+        Op::RequestSnapshot => &[Justifier::SnapshotRequested],
+        Op::Commit { .. }
+        | Op::CommitInTick { .. }
+        | Op::Spill
+        | Op::Rollback
+        | Op::Vacuum { .. }
+        | Op::OtherProcessReader { .. }
+        | Op::OtherProcessCheckpoint(_)
+        | Op::Crash(_)
+        | Op::StoreFault { .. }
+        | Op::ClockJump(_)
+        | Op::Tick
+        | Op::Shutdown
+        | Op::Restore
+        | Op::Restart
+        | Op::PowerLoss
+        | Op::OurReader { begin: true }
+        | Op::AppAutocheckpoint(_)
+        | Op::Shrink { .. }
+        | Op::Heal => &[],
+    }
+}
+
+/// The oracle's state over one run.
+#[derive(Clone, Debug)]
+pub struct Liveness {
+    window: BTreeSet<Justifier>,
+    /// What the tick under way noted itself: kept past its own staging.
+    in_tick: BTreeSet<Justifier>,
+    /// The engine's counter as the last tick of this incarnation left it.
+    counted: SnapshotCounts,
+    /// Level-0 keys the replica took.
+    uploaded: BTreeSet<FileKey>,
+    staging_seen: usize,
+    remote_seen: usize,
+    /// The WAL header's salts when last looked at.
+    wal: Option<(u32, u32)>,
+    /// Whether our read transaction pinned the WAL when last looked at.
+    pinned: bool,
+    /// A justified snapshot was announced and is not staged yet: a crash
+    /// before it is staged makes the next boot announce it again.
+    owed: bool,
+}
+
+impl Default for Liveness {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Liveness {
+    /// The state at the start of a run.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            window: BTreeSet::from([Justifier::RunStart]),
+            in_tick: BTreeSet::new(),
+            counted: SnapshotCounts::default(),
+            uploaded: BTreeSet::new(),
+            staging_seen: 0,
+            remote_seen: 0,
+            wal: None,
+            pinned: false,
+            owed: false,
+        }
+    }
+
+    /// Notes that `why` happened.
+    pub fn note(&mut self, why: Justifier) {
+        self.window.insert(why);
+    }
+
+    /// Notes that `why` happened inside the tick under way.
+    pub fn note_in_tick(&mut self, why: Justifier) {
+        self.window.insert(why);
+        self.in_tick.insert(why);
+    }
+
+    /// Notes what `op` says by itself.
+    pub fn note_op(&mut self, op: &Op) {
+        for why in of_op(op) {
+            self.note(*why);
+        }
+    }
+
+    /// Looks at the WAL's header (`crate::SimSqlite::wal_header_salts`) and
+    /// whether our read transaction pins it
+    /// (`crate::SimSqlite::our_reader_pins_wal`), and notes how the header
+    /// changed since the last look: a restart while nothing pinned the WAL
+    /// is one the engine could not follow.
+    pub fn see_wal(&mut self, now: Option<(u32, u32)>, pinned: bool) {
+        if !self.pinned && now.is_some() && now != self.wal {
+            self.note(Justifier::ReadLockLapsed);
+        }
+        self.note_wal(self.wal, now);
+        self.wal = now;
+        self.pinned = pinned;
+    }
+
+    /// As [`Self::see_wal`], after a tick: its order against what the tick
+    /// staged is not known, so the change outlives that staging.
+    pub fn see_wal_after_tick(&mut self, now: Option<(u32, u32)>, pinned: bool) {
+        let before = self.window.clone();
+        self.see_wal(now, pinned);
+        for why in self.window.difference(&before).copied().collect::<Vec<_>>() {
+            self.in_tick.insert(why);
+        }
+    }
+
+    /// Notes a change of the WAL's header across a step.
+    pub fn note_wal(&mut self, before: Option<(u32, u32)>, after: Option<(u32, u32)>) {
+        match (before, after) {
+            (Some(_), None) => self.note(Justifier::WalEmptied),
+            (was, Some(now)) if was != Some(now) => self.note(Justifier::WalRestarted),
+            (None | Some(_), Some(_)) | (None, None) => {}
+        }
+    }
+
+    /// A new engine: its counter starts again from zero.
+    pub fn rebooted(&mut self) {
+        self.counted = SnapshotCounts::default();
+    }
+
+    /// Judges a snapshot cause the engine announced.
+    ///
+    /// # Errors
+    /// [`Violation::UnjustifiedSnapshot`] when nothing in the window justifies it.
+    pub fn judge(
+        &mut self,
+        cause: SnapshotCauseKind,
+        at_boot: bool,
+        reach: &mut Reach,
+    ) -> Result<(), Violation> {
+        let Some(needs) = justifies(cause, at_boot) else {
+            return Ok(());
+        };
+        if needs.iter().any(|why| self.window.contains(why)) {
+            reach.bump(format!("liveness.justified.{}", variant(&cause)));
+            self.owed = true;
+            return Ok(());
+        }
+        if self.owed {
+            // The same debt, announced again after a restart, perhaps
+            // under the name of what the boot found first.
+            reach.bump("liveness.owed");
+            return Ok(());
+        }
+        Err(Violation::UnjustifiedSnapshot {
+            cause,
+            window: self.window.iter().copied().collect(),
+        })
+    }
+
+    /// Takes in what a tick did to the stores and the engine's counter:
+    /// counts restore points given up, checks the counter (when the tick
+    /// ended rather than crashed), judges an operator's snapshot when it is
+    /// staged, and moves the window past what was staged and uploaded.
+    /// `world` answers what the stores hold now.
+    ///
+    /// # Errors
+    /// [`Violation::UnjustifiedSnapshot`], or a `BugFault` when the counter
+    /// disagrees with the staging store.
+    pub fn after_tick(
+        &mut self,
+        stores: (&[RecorderEvent], &[RecorderEvent]),
+        world: &dyn TickWorld,
+        counts: SnapshotCounts,
+        ended: bool,
+        reach: &mut Reach,
+    ) -> Result<(), Violation> {
+        let (staging, remote) = stores;
+        let newest_staged = world.newest_staged();
+        let caught_up = self
+            .take_remote(remote)
+            .is_some_and(|took| newest_staged.is_none_or(|newest| took >= newest));
+        let staged = self.take_staging(staging, world, reach)?;
+        let grew = self.take_counts(counts, reach)?;
+        // A file with no WAL range is a snapshot for certain; one with a range
+        // that holds every page may be a snapshot or a transaction that wrote
+        // every page, so the counter is bounded, not matched, by the two.
+        // A staging fault in the tick can fail a step after its file was
+        // written: the engine counts only what it believes it staged.
+        let checkable = ended && !self.in_tick.contains(&Justifier::StagingFault);
+        if checkable && (grew < staged.bare || grew > staged.full.max(staged.bare)) {
+            return Err(crate::bug_fault(format!(
+                "the engine counted {grew} snapshots staged in a tick that staged {} without a \
+                 WAL range and {} holding every page",
+                staged.bare, staged.full
+            )));
+        }
+        let requested = counts
+            .get(SnapshotCauseKind::OperatorRequested)
+            .saturating_sub(self.counted.get(SnapshotCauseKind::OperatorRequested));
+        self.counted = counts;
+        let snapshots = if ended {
+            grew
+        } else {
+            staged.full.max(staged.bare)
+        };
+        if snapshots > 0 {
+            self.owed = false;
+        }
+        self.window.retain(|why| match why.forgotten_at() {
+            Forgotten::AtStaging => !staged.any,
+            Forgotten::AtUpload => !caught_up,
+            Forgotten::AtRequestedSnapshot => requested == 0,
+        });
+        self.window.append(&mut self.in_tick);
+        Ok(())
+    }
+
+    /// The newest transaction of the level-0 files the replica took, if any.
+    fn take_remote(&mut self, remote: &[RecorderEvent]) -> Option<u64> {
+        let mut took = None;
+        for event in remote.iter().skip(self.remote_seen) {
+            if let RecorderEvent::Put { key, .. } = event
+                && key.level().get() == 0
+            {
+                self.uploaded.insert(*key);
+                took = took.max(Some(key.range().max().get()));
+            }
+        }
+        self.remote_seen = remote.len();
+        took
+    }
+
+    /// How much the engine's counter grew; judges an operator's snapshot.
+    fn take_counts(&mut self, counts: SnapshotCounts, reach: &mut Reach) -> Result<u64, Violation> {
+        let mut grew = 0_u64;
+        let counted = self.counted;
+        for ((kind, now), (_, was)) in counts.iter().zip(counted.iter()) {
+            let more = now.saturating_sub(was);
+            grew = grew.saturating_add(more);
+            if more > 0 {
+                reach.add(format!("snapshot.staged.{}", variant(&kind)), more);
+                if kind == SnapshotCauseKind::OperatorRequested {
+                    self.judge(kind, false, reach)?;
+                }
+            }
+        }
+        Ok(grew)
+    }
+
+    /// What the tick staged at level 0; counts and notes the staged files
+    /// deleted before the replica took them.
+    fn take_staging(
+        &mut self,
+        staging: &[RecorderEvent],
+        world: &dyn TickWorld,
+        reach: &mut Reach,
+    ) -> Result<Staged, Violation> {
+        let mut staged = Staged::default();
+        for event in staging.iter().skip(self.staging_seen) {
+            match event {
+                RecorderEvent::Put {
+                    key,
+                    header: Some(_),
+                    origin,
+                    ..
+                } if key.level().get() == 0 => {
+                    staged.any = true;
+                    if origin.is_none_or(|origin| origin.size() == 0) {
+                        staged.bare = staged.bare.saturating_add(1);
+                    } else if world.full_image(key) {
+                        staged.full = staged.full.saturating_add(1);
+                    }
+                }
+                RecorderEvent::Put { .. } => {}
+                RecorderEvent::Delete { keys, .. } => {
+                    let newest = world.replica_newest();
+                    let lost = keys
+                        .iter()
+                        .filter(|key| {
+                            key.level().get() == 0
+                                && (!self.uploaded.contains(key)
+                                    || newest.is_none_or(|newest| key.range().max().get() > newest))
+                        })
+                        .count();
+                    self.given_up(u64::try_from(lost).unwrap_or(u64::MAX), reach)?;
+                }
+            }
+        }
+        self.staging_seen = staging.len();
+        Ok(staged)
+    }
+
+    /// Counts `lost` restore points given up; fails unless a fault in the
+    /// window could force it.
+    fn given_up(&mut self, lost: u64, reach: &mut Reach) -> Result<(), Violation> {
+        if lost == 0 {
+            return Ok(());
+        }
+        reach.add("liveness.given_up", lost);
+        if !GIVE_UP.iter().any(|why| self.window.contains(why)) {
+            return Err(Violation::UnjustifiedGiveUp {
+                lost,
+                window: self.window.iter().copied().collect(),
+            });
+        }
+        self.note_in_tick(Justifier::StagedDropped);
+        Ok(())
+    }
+}
+
+/// What the oracle asks of the stores after a tick.
+pub trait TickWorld {
+    /// Whether the staged level-0 file `key` holds every page of its database.
+    fn full_image(&self, key: &FileKey) -> bool;
+    /// The newest staged transaction.
+    fn newest_staged(&self) -> Option<u64>;
+    /// The newest transaction the replica holds, at any level.
+    fn replica_newest(&self) -> Option<u64>;
+}
+
+impl TickWorld for crate::World {
+    fn full_image(&self, key: &FileKey) -> bool {
+        self.staged_is_full_image(key)
+    }
+
+    fn newest_staged(&self) -> Option<u64> {
+        crate::World::newest_staged(self)
+            .ok()
+            .flatten()
+            .map(|info| info.key.range().max().get())
+    }
+
+    fn replica_newest(&self) -> Option<u64> {
+        self.remote_newest()
+    }
+}
+
+/// What one tick staged at level 0.
+#[derive(Clone, Copy, Debug, Default)]
+struct Staged {
+    /// Any file.
+    any: bool,
+    /// Files with no WAL range: snapshots of a WAL that held nothing.
+    bare: u64,
+    /// Files with a WAL range that hold every page of their database.
+    full: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_judged_cause_has_a_justifier() {
+        for kind in SnapshotCauseKind::ALL {
+            for at_boot in [true, false] {
+                if let Some(needs) = justifies(kind, at_boot) {
+                    assert!(!needs.is_empty(), "{kind:?} can never be justified");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_running_engine_needs_more_than_a_restart() {
+        let mut live = Liveness::new();
+        let mut reach = Reach::default();
+        live.window.clear();
+        live.note(Justifier::WalRestarted);
+        live.judge(SnapshotCauseKind::GenerationChanged, true, &mut reach)
+            .unwrap();
+        live.owed = false;
+        assert!(
+            live.judge(SnapshotCauseKind::GenerationChanged, false, &mut reach)
+                .is_err()
+        );
+        live.note(Justifier::ReadLockLapsed);
+        live.judge(SnapshotCauseKind::GenerationChanged, false, &mut reach)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_cause_with_nothing_in_the_window_fails() {
+        let mut live = Liveness::new();
+        let mut reach = Reach::default();
+        live.judge(SnapshotCauseKind::FirstSync, true, &mut reach)
+            .unwrap();
+        live.window.clear();
+        live.note(Justifier::WalRestarted);
+        live.judge(SnapshotCauseKind::GenerationChanged, true, &mut reach)
+            .unwrap();
+        live.owed = false;
+        assert!(matches!(
+            live.judge(SnapshotCauseKind::LocalRewound, true, &mut reach),
+            Err(Violation::UnjustifiedSnapshot { .. })
+        ));
+        live.judge(SnapshotCauseKind::CheckpointBoundary, true, &mut reach)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_justified_snapshot_announced_again_before_it_is_staged_passes() {
+        let mut live = Liveness::new();
+        let mut reach = Reach::default();
+        live.window.clear();
+        live.note(Justifier::PowerLoss);
+        live.judge(SnapshotCauseKind::LocalRewound, true, &mut reach)
+            .unwrap();
+        live.window.clear();
+        live.judge(SnapshotCauseKind::LastPageMismatch, true, &mut reach)
+            .unwrap();
+        assert_eq!(reach.get("liveness.owed"), 1);
+    }
+
+    #[test]
+    fn a_wal_header_change_is_noted() {
+        let mut live = Liveness::new();
+        live.window.clear();
+        live.note_wal(Some((1, 2)), Some((1, 2)));
+        assert!(live.window.is_empty());
+        live.note_wal(Some((1, 2)), Some((2, 7)));
+        live.note_wal(Some((2, 7)), None);
+        assert_eq!(
+            live.window,
+            BTreeSet::from([Justifier::WalRestarted, Justifier::WalEmptied])
+        );
+    }
+}

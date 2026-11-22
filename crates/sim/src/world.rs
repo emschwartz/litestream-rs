@@ -578,6 +578,19 @@ impl World {
         Ok(listing.files.last().copied())
     }
 
+    /// The newest transaction any replica file holds, at any level, read
+    /// around the wrappers; `None` when the replica is empty or cannot list.
+    #[must_use]
+    pub fn remote_newest(&self) -> Option<u64> {
+        use lsr_core::{Level, ObjectStore, PageLimit};
+        Level::ALL
+            .into_iter()
+            .filter_map(|level| block_on(self.remote_raw.list(level, None, PageLimit::MAX)).ok())
+            .flat_map(|listing| listing.files)
+            .map(|file| file.key.range().max().get())
+            .max()
+    }
+
     /// Every level-0 file on the replica, oldest first, read around the
     /// wrappers.
     ///

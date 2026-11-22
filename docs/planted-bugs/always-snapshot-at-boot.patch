@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -749,7 +749,8 @@
+         // the next file is a snapshot even when the WAL could continue.
+         let cause = lost
+             .map(|_| SnapshotCause::NewestStagedFileUnreadable)
+-            .or(from.err());
++            .or(from.err())
++            .or(Some(SnapshotCause::LastPageMismatch));
+         let pending = pending_at_boot(self.kept.asked(), cause);
+         let course = match (from, pending) {
+             (Ok(position), snapshot) => Course::At {

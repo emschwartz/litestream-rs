@@ -49,6 +49,10 @@ pub const REQUIRED: &[&str] = &[
     "snapshot.PrevFrameMismatch",
     "snapshot.LastPageMismatch",
     "snapshot.LocalRewound",
+    // The liveness oracle's other two judgments: an operator's snapshot is
+    // judged when staged, and every staged file given up is judged.
+    "snapshot.staged.OperatorRequested",
+    "liveness.given_up",
     // Another writer: OtherWriterMissed (ledger: maintenance-another-writer).
     "remote.second_writer",
     "stop.OtherWriter",
@@ -87,9 +91,10 @@ pub const REQUIRED: &[&str] = &[
 /// States printed even at zero but not asserted: reached rarely or never by
 /// the fixed seed set today, each a listed generator gap.
 pub const WATCHED: &[&str] = &[
-    "check.asof.fallback", // an as-of with no file at or before it
-    "check.damaged",       // a restore stopped by a file a corrupt publish damaged
-    "staged.Dropped",      // a staged file gone whole after a power loss
+    "check.asof.fallback",                // an as-of with no file at or before it
+    "check.damaged",                      // a restore stopped by a file a corrupt publish damaged
+    "snapshot.staged.CheckpointBoundary", // the engine's own TRUNCATE checkpoint, never judged
+    "staged.Dropped",                     // a staged file gone whole after a power loss
 ];
 
 /// Counts of the states one run, or many summed, reached.
