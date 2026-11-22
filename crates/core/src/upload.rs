@@ -328,8 +328,10 @@ async fn judge_tail<L: ObjectStore, S: ObjectStore>(
             if staged.size == listed.size && same_bytes(staging, remote, &key).await? {
                 return Ok(TailVerdict::Sound);
             }
-            if staged_verifies(staging, &key).await? {
-                if !remote_verifies(remote, &key).await? {
+            // One read never condemns a file: a staged copy that fails to
+            // verify is read again before it is taken as torn.
+            if staged_verifies(staging, &key).await? || staged_verifies(staging, &key).await? {
+                if remote_torn(remote, &key).await? {
                     return Ok(TailVerdict::Replace);
                 }
                 // Both copies verify on their own reads, so the first compare
@@ -341,7 +343,7 @@ async fn judge_tail<L: ObjectStore, S: ObjectStore>(
                     TailVerdict::Diverged
                 });
             }
-            // A torn staged copy says nothing about the replica's object.
+            // Torn on two reads: it says nothing about the replica's object.
             remote_decodes(remote, &key)
                 .await
                 .map(|()| TailVerdict::Sound)
@@ -399,6 +401,14 @@ pub(crate) async fn remote_verifies<S: ObjectStore>(
     key: &FileKey,
 ) -> Result<bool, Fault> {
     verifies(remote, key, CHUNK, Fault::from_remote).await
+}
+
+/// Whether the replica's object `key` fails verification on two reads in a
+/// row. Writing over it is decided by this, never by one read: a read that
+/// came back wrong says nothing about the stored bytes, and a verifying
+/// object with other bytes is never written over.
+async fn remote_torn<S: ObjectStore>(remote: &S, key: &FileKey) -> Result<bool, Fault> {
+    Ok(!remote_verifies(remote, key).await? && !remote_verifies(remote, key).await?)
 }
 
 /// Whether the staged file `key` verifies whole and names exactly `key`.
@@ -582,7 +592,7 @@ async fn taken<L: ObjectStore, S: ObjectStore>(
     if !staged_verifies(staging, &key).await.map_err(relist)? {
         return Err(fail(state, Fault::StagedLost));
     }
-    if !remote_verifies(remote, &key).await.map_err(relist)? {
+    if remote_torn(remote, &key).await.map_err(relist)? {
         let outcome = put_staged(staging, remote, token, WriteMode::Replace).await;
         return settle_put(state, remote, key, outcome).await;
     }

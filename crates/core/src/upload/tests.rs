@@ -176,6 +176,9 @@ struct Log {
     unlisted: Vec<FileKey>,
     /// The modes uploads were begun with.
     modes: Vec<WriteMode>,
+    /// A key whose whole reads from the start are let through this many
+    /// times, and then one comes back with a byte flipped.
+    flip_read: Option<(FileKey, u32)>,
 }
 
 /// A [MemStore] that counts calls and can fail a commit before it publishes
@@ -225,11 +228,30 @@ impl ObjectStore for Probe {
         offset: u64,
         len: ReadLen,
     ) -> impl Future<Output = Result<Vec<u8>, StoreError>> + Send {
-        {
+        let flip = {
             let mut log = self.log();
             log.reads = log.reads.saturating_add(1);
+            match log.flip_read {
+                Some((at, 0)) if at == *key && offset == 0 => {
+                    log.flip_read = None;
+                    true
+                }
+                Some((at, skip)) if at == *key && offset == 0 => {
+                    log.flip_read = Some((at, skip.saturating_sub(1)));
+                    false
+                }
+                Some(_) | None => false,
+            }
+        };
+        let read = self.inner.read(key, offset, len);
+        async move {
+            let mut bytes = read.await?;
+            let middle = bytes.len() / 2;
+            if flip && let Some(byte) = bytes.get_mut(middle) {
+                *byte ^= 0x40;
+            }
+            Ok(bytes)
         }
-        self.inner.read(key, offset, len)
     }
 
     fn created_at(
@@ -1310,4 +1332,50 @@ fn a_refused_upload_over_an_object_that_does_not_verify_replaces_it() {
     assert!(matches!(step.did, Did::Put(_)), "{:?}", step.did);
     assert_eq!(read_all(&remote.inner, &key(1)), bytes);
     assert_eq!(remote.log().modes, [WriteMode::New, WriteMode::Replace]);
+}
+
+/// The replica's object verifies and differs from the staged file, and the
+/// first whole read of the staged copy comes back torn. One read never
+/// condemns a file: a second read decides, and the replica's object is not
+/// confirmed as this engine's (the listing reports the divergence).
+#[test]
+fn one_torn_read_of_the_staged_copy_confirms_no_differing_replica_object() {
+    let (staging, remote) = (Probe::default(), MemStore::new());
+    put_bytes(&staging.inner, key(1), &encode(1));
+    put_bytes(&remote, key(1), &encode_pages(1, 200));
+    // The size check passes and the first compare reads the staged copy
+    // whole; the read after it (its own verification) is the torn one.
+    staging.log().flip_read = Some((key(1), 1));
+    let listed = next(UploadState::Unknown, &staging, &remote, 1).unwrap();
+    assert_eq!(
+        listed.did,
+        Did::Diverged {
+            confirmed: txid(1),
+            from: txid(1)
+        }
+    );
+}
+
+/// The same with the replica's copy: its first verifying read comes back
+/// torn. A verifying object with other bytes is never written over, so one
+/// failed read does not make it a torn object to replace: a second read
+/// decides, and the listing reports the divergence.
+#[test]
+fn one_torn_read_of_the_replica_copy_does_not_write_over_it() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    stage(&staging, 1);
+    let theirs = encode_pages(1, 200);
+    put_bytes(&remote.inner, key(1), &theirs);
+    // The first compare reads the replica's copy whole; the read after it
+    // (its own verification) is the torn one.
+    remote.log().flip_read = Some((key(1), 1));
+    let listed = next(UploadState::Unknown, &staging, &remote, 1).unwrap();
+    assert_eq!(
+        listed.did,
+        Did::Diverged {
+            confirmed: txid(1),
+            from: txid(1)
+        }
+    );
+    assert_eq!(read_all(&remote.inner, &key(1)), theirs);
 }
