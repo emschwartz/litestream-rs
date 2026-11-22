@@ -8,6 +8,8 @@
 #   package  the cargo package whose tests are run
 #   tests    nextest name substrings (`test(~x)`); each must fail when planted, one run apiece
 #   test_bin optional: restrict the run to one integration-test binary (cargo `--test`)
+#   bin      optional: run the unit tests of one binary target (cargo `--bin`), for a package
+#            with no library, such as lsr-cli
 #
 # Not here, with the reason: a6e3e38 (level-0 retention oracle: it fixed the test, retention code is
 # unchanged, so there is nothing to plant), the verify hang fix (test-only: no production code to plant)
@@ -316,6 +318,7 @@ tests = ["a_restore_through_a_lagging_listing_is_the_replica_s_answer_or_an_erro
 name = "dry-run-trusts-listing"
 fix = "32572b5"
 package = "lsr-cli"
+bin = "lsr"
 tests = ["a_dry_run_over_a_lagging_listing_fails_like_the_restore"]
 
 [[bug]]
@@ -329,6 +332,7 @@ tests = ["restore::tests::a_listing_that_shows_nothing_over_a_first_file_is_not_
 name = "empty-listing-is-empty-replica-cli"
 fix = "a5c7d57"
 package = "lsr-cli"
+bin = "lsr"
 tests = ["if_replica_exists_over_a_listing_that_shows_nothing_skips_nothing"]
 
 [[bug]]
