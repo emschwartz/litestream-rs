@@ -150,10 +150,11 @@ impl Judge<'_> {
     ///
     /// # Errors
     /// The first [`Violation`].
-    pub fn all(&self, out: &mut Checked) -> Result<(), Violation> {
+    pub fn all(&self, latest: Txid, out: &mut Checked) -> Result<(), Violation> {
         if self.files.is_empty() || self.files.iter().any(|f| f.created_at().is_none()) {
             return Ok(());
         }
+        self.after_every_file(latest)?;
         for instant in instants(self.files) {
             match self.one(instant)? {
                 Answer::Reached { inside: None, .. } => {
@@ -169,6 +170,30 @@ impl Judge<'_> {
             }
         }
         Ok(())
+    }
+
+    /// An instant later than every created-at time is `Latest` (the
+    /// `RestoreTarget::AsOf` doc): the same transaction, nothing straddled.
+    fn after_every_file(&self, latest: Txid) -> Result<(), Violation> {
+        let Some(last) = self
+            .files
+            .iter()
+            .filter_map(|f| f.created_at())
+            .map(|c| c.at().unix_millis())
+            .max()
+        else {
+            return Ok(());
+        };
+        let target = RestoreTarget::AsOf(Timestamp::from_unix_millis(last.saturating_add(1)));
+        match self.restore(target)? {
+            Answer::Reached { txid, inside: None } if txid == latest => Ok(()),
+            Answer::Unreadable(_) => Ok(()),
+            got @ (Answer::Reached { .. } | Answer::Refused(_)) => Err(Violation::NotLatest {
+                target,
+                got: Box::new(got),
+                latest: latest.get(),
+            }),
+        }
     }
 
     fn one(&self, instant: Timestamp) -> Result<Answer, Violation> {
@@ -246,6 +271,44 @@ impl Judge<'_> {
             Answer::Refused(outcome) => return Err(Violation::RestoreRefused { target, outcome }),
         }
         Ok(())
+    }
+
+    /// Restores `Latest`, which is `Txid(newest)`: the same contract, the
+    /// same answer. `None` when the answer is a refusal a rollback explains
+    /// or a stop on a damaged object (counted into `out`).
+    ///
+    /// # Errors
+    /// [`Violation::WrongAnswer`] or [`Violation::RestoreRefused`].
+    pub fn latest(
+        &self,
+        reach: &contract::Reach,
+        newest: Option<Txid>,
+        out: &mut Checked,
+    ) -> Result<Option<Txid>, Violation> {
+        let target = RestoreTarget::Latest;
+        match self.restore(target)? {
+            Answer::Reached { txid, inside } => {
+                let expected = contract::txid(self.files, reach, newest.unwrap_or(txid));
+                let got = Answer::Reached { txid, inside };
+                if !contract::allows(&expected, self.files, &got) {
+                    return Err(Violation::WrongAnswer {
+                        target,
+                        expected,
+                        got: Box::new(got),
+                    });
+                }
+                Ok(Some(txid))
+            }
+            Answer::Refused(outcome) if self.over_lost(&outcome) => {
+                out.lost = out.lost.saturating_add(1);
+                Ok(None)
+            }
+            Answer::Unreadable(_) => {
+                out.damaged = out.damaged.saturating_add(1);
+                Ok(None)
+            }
+            Answer::Refused(outcome) => Err(Violation::RestoreRefused { target, outcome }),
+        }
     }
 
     /// Whether `outcome` is explained by what a bucket rollback took: a gap

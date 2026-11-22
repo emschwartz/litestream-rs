@@ -181,6 +181,17 @@ pub enum Violation {
         /// When the first file ending at it was staged.
         staged: Timestamp,
     },
+    /// An `AsOf` instant later than every file's created-at time restored
+    /// something other than `Latest`.
+    #[error("restoring {target:?}, after every file, gave {got} where latest reached {latest}")]
+    NotLatest {
+        /// What was asked.
+        target: RestoreTarget,
+        /// What it gave.
+        got: Box<Answer>,
+        /// What `Latest` reached.
+        latest: u64,
+    },
     /// Retention deleted a file younger than its window.
     #[error(
         "{key:?}, created at {created_at:?}, was deleted when the engine had been told {latest:?}"
@@ -533,22 +544,8 @@ pub fn check_with(
             None => Ok(out),
         };
     }
-    let latest = match judge.restore(RestoreTarget::Latest)? {
-        Answer::Reached { txid, .. } => txid,
-        Answer::Refused(outcome) if judge.over_lost(&outcome) => {
-            out.lost = out.lost.saturating_add(1);
-            return Ok(out);
-        }
-        Answer::Unreadable(_) => {
-            out.damaged = out.damaged.saturating_add(1);
-            return Ok(out);
-        }
-        Answer::Refused(outcome) => {
-            return Err(Violation::RestoreRefused {
-                target: RestoreTarget::Latest,
-                outcome,
-            });
-        }
+    let Some(latest) = judge.latest(&reach, inventory.newest(), &mut out)? else {
+        return Ok(out);
     };
     if let Some(acked) = acked.highest().filter(|a| *a > latest) {
         return Err(Violation::LatestLostAck {
@@ -563,7 +560,7 @@ pub fn check_with(
     if let Some(windows) = ground.retention {
         out.deletes = retention::deletes(recorder, windows, ground.exempt)?;
     }
-    judge.all(&mut out)?;
+    judge.all(latest, &mut out)?;
     Ok(out)
 }
 
