@@ -1,0 +1,15 @@
+diff --git a/crates/replica/src/scheduled.rs b/crates/replica/src/scheduled.rs
+index 07fa95f..40df4ae 100644
+--- a/crates/replica/src/scheduled.rs
++++ b/crates/replica/src/scheduled.rs
+@@ -132,9 +132,7 @@ impl Scheduled {
+ 
+     /// Moves the next run's time by `back`, after the clock stepped back.
+     pub(crate) fn step_back(&mut self, back: impl FnOnce(Timestamp) -> Timestamp) {
+-        if let Stage::Due(at) = self.stage {
+-            self.stage = Stage::Due(back(at));
+-        }
++        let _ = back;
+     }
+ 
+     /// When the replicator's thread must wake for the next run.

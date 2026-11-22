@@ -585,3 +585,17 @@ name = "delete-without-dir-sync"
 fix = "93d0510"
 package = "lsr-store-fs"
 tests = ["a_crash_after_a_delete_never_brings_the_file_back"]
+
+[[bug]]
+name = "rebuild-wait-stretched-by-a-step-back"
+fix = "50b9040"
+package = "lsr-replica"
+test_bin = "replica"
+tests = ["a_clock_step_back_does_not_lengthen_the_wait_before_a_rebuild"]
+
+[[bug]]
+name = "verify-due-stretched-by-a-step-back"
+fix = "50b9040"
+package = "lsr-replica"
+test_bin = "replica"
+tests = ["a_clock_step_back_does_not_put_off_the_scheduled_verify"]
