@@ -1382,6 +1382,13 @@ impl Actor {
         now: Timestamp,
     ) -> Tick {
         if let Err(fault) = drop_staged_from(env.staging, from).await {
+            // The staged files from `from` on are still there, and the next
+            // upload would take the one after the confirmed transaction as
+            // following it. List first, from below `from`, so the listing
+            // judges the divergence again and this runs again before anything
+            // is uploaded; the acknowledged mark is kept apart.
+            let confirmed = self.engine.upload.confirmed().min(from.prev());
+            self.set_upload(UploadState::ListFirst { confirmed });
             return self.fault(Task::Upload, fault, now);
         }
         // Acknowledged ids from `from` on that the replica lost (a rollback)
