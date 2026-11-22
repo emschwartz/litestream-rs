@@ -133,6 +133,11 @@ journal-model:
 planted-bugs *args:
     uv run scripts/planted-bugs.py {{args}}
 
+# The swarm alone against each planted bug, no named test run: seeds to the first failure per
+# entry (`docs/planted-bugs.md`). Reports; a plant no seed finds is a listed generator gap.
+planted-bugs-unaided seeds="1000" *args:
+    uv run scripts/planted-bugs.py --unaided --seeds {{seeds}} {{args}}
+
 # Mutation-tests the lines this branch changed in core and ltx against `base`; fails on a missed
 # mutant not in docs/mutants-escapes.txt. Runs on pull requests in CI.
 mutants-diff base="origin/main":
