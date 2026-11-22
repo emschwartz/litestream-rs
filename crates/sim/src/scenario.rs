@@ -829,13 +829,17 @@ pub fn cli_snapshot() -> Scenario {
     )
 }
 
-/// Commits were acknowledged and replicated, then a power loss took the WAL's
-/// unsynced tail: the local WAL is behind the replica's position.
+/// Commits were acknowledged and replicated on a disk that lies about the
+/// engine's fsync of the WAL, then a power loss took the WAL's tail: the local
+/// WAL is behind the replica's position.
 #[must_use]
 pub fn power_loss_wal_rewind() -> Scenario {
     build(
         "power_loss_wal_rewind",
         vec![
+            // The engine syncs the WAL before it stages, so only a disk that lies about that
+            // sync can rewind the database below what was staged.
+            vec![Op::LyingWalSync],
             vec![commit(3, false), commit(3, false)],
             ticks(SETTLE),
             vec![commit(3, false), commit(3, false)],

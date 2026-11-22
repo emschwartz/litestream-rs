@@ -44,7 +44,7 @@ use crate::pages::PageChecksumTable;
 use crate::position::{Continuity, Position, ReadLockHold, SyncedThrough};
 use crate::source::{CheckpointMode, CheckpointRun, Checkpointer, PageSource, WalSource};
 use crate::store::ObjectStore;
-use crate::sync::{Step, StepEnd, SyncConfig, Synced, sync_step};
+use crate::sync::{Step, StepEnd, SyncConfig, Synced, sync_step, wal_barrier};
 
 /// When to checkpoint. `None` turns a trigger off.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -469,6 +469,7 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_, 
     async fn step(&mut self, step: Step) -> Result<(), Fault> {
         let mut reader = self.reader()?;
         let committed = self.wal.committed().map_err(Fault::from_source)?;
+        wal_barrier(&mut *self.wal, &committed)?;
         let cfg = SyncConfig {
             cap: None,
             ..self.cfg

@@ -1342,6 +1342,7 @@ impl Runner {
             Op::Restore => self.restore_all()?,
             Op::Restart => self.restart(CrashKind::Process),
             Op::PowerLoss => self.restart(CrashKind::Power),
+            Op::LyingWalSync => self.w.sqlite.lie_on_our_sync(),
             Op::Meta(op) => self.meta(*op)?,
             Op::Wal(op) => self.wal_damage(*op)?,
             Op::Remote(op) => self.remote(*op)?,

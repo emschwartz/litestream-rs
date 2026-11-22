@@ -132,6 +132,9 @@ pub enum Op {
     Restart,
     /// The machine loses power between ticks. Scenarios only.
     PowerLoss,
+    /// From now on the disk lies about the engine's own fsync of the WAL: it
+    /// succeeds and keeps nothing. Scenarios only.
+    LyingWalSync,
     /// A step on the staging directory, with the engine as it is: scenarios
     /// stop it first where they mean it down.
     Meta(MetaOp),

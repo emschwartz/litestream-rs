@@ -98,7 +98,9 @@ pub enum Fault {
     LocalDiskFull,
     /// A local read or write failed.
     LocalIo,
-    /// An fsync of a staged file failed; encode and write it again.
+    /// An fsync failed. Of a staged file: encode and write it again. Of the
+    /// WAL, before staging (`WalSource::sync`): nothing is staged, and the
+    /// source keeps refusing, so the retries end degraded.
     LocalFsyncFailed,
     /// SQLite is busy, or the wal-index is mid-update.
     SqliteBusy,

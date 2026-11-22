@@ -62,8 +62,9 @@ fn both(case: impl Fn(Placement)) {
 // ----------------------------------------------------------------- the fault matrix
 
 /// The faults an injected I/O error may become: each retries (`policy`), none stops.
-const RETRYABLE: [Fault; 5] = [
+const RETRYABLE: [Fault; 6] = [
     Fault::LocalIo,
+    Fault::LocalFsyncFailed,
     Fault::LocalDiskFull,
     Fault::ReadTxLost,
     Fault::SqliteBusy,
@@ -78,15 +79,32 @@ struct Outcome {
     /// The cycle settled only after the next application commit (see
     /// `an_idle_database_settles_after_a_checkpoint_reset_the_wal_index`).
     needed_a_write: bool,
+    /// The cycle settled only after the replicator restarted: the engine's own sync of the
+    /// WAL failed, and it stages nothing more until a new backend syncs it.
+    needed_a_restart: bool,
+}
+
+/// What a cycle needed beyond ticking to settle.
+#[derive(Debug, Default)]
+struct Needed {
+    write: bool,
+    restart: bool,
 }
 
 /// Settles, or, when the actor keeps retrying `WalMoved`, commits once more and settles again:
 /// the state a checkpoint that reset the wal-index leaves until SQLite writes a WAL header.
-fn settle_or_write<B: Backend>(rig: &mut Rig<B>, needed: &mut bool) -> Result<(), RigError> {
+/// When it keeps retrying `LocalFsyncFailed` (the engine's sync of the WAL failed, which it
+/// never retries past), the operator restarts the replicator and it settles again.
+fn settle_or_write<B: Backend>(rig: &mut Rig<B>, needed: &mut Needed) -> Result<(), RigError> {
     match rig.settle() {
         Err(RigError::Unsettled(_)) if rig.faults().last() == Some(&Fault::WalMoved) => {
-            *needed = true;
+            needed.write = true;
             rig.insert(100)?;
+            rig.settle()
+        }
+        Err(RigError::Unsettled(_)) if rig.faults().last() == Some(&Fault::LocalFsyncFailed) => {
+            needed.restart = true;
+            rig.restart()?;
             rig.settle()
         }
         other => other,
@@ -118,8 +136,8 @@ fn each_step<B: Backend>(
             nth: NonZeroU32::new(nth).unwrap(),
             effect,
         });
-        let mut needed_a_write = false;
-        let done = rig.cycle_with(|rig| settle_or_write(rig, &mut needed_a_write));
+        let mut needed = Needed::default();
+        let done = rig.cycle_with(|rig| settle_or_write(rig, &mut needed));
         let at = format!(
             "{} {placement:?} {kind:?} {op:?} {effect:?} at call {nth}",
             B::NAME
@@ -138,7 +156,8 @@ fn each_step<B: Backend>(
         outcomes.push(Outcome {
             nth,
             faults: rig.faults().to_vec(),
-            needed_a_write,
+            needed_a_write: needed.write,
+            needed_a_restart: needed.restart,
         });
     }
     assert!(
@@ -196,16 +215,27 @@ fn a_short_write_at_each_step_of_a_cycle_is_disk_full_and_loses_nothing() {
 
 /// A failed fsync of the WAL before a backfill, or of the database after one: the checkpoint
 /// fails and SQLite does not advance `nBackfill`, so nothing is lost and the next one redoes it.
+/// A failed fsync of the WAL by the engine itself, before it stages: nothing is staged, and the
+/// engine refuses to stage until the replicator restarts, since a later fsync that succeeds
+/// says nothing about the pages whose writeback failed.
 #[test]
 fn a_sync_error_at_each_step_of_a_cycle_is_retried_and_loses_nothing() {
     for kind in [FileKind::Main, FileKind::Wal] {
         let outcomes = each_step_both::<Sqlite>(kind, Op::Sync, Effect::Error(Op::Sync.error()));
         assert!(
-            outcomes
-                .iter()
-                .all(|o| o.faults.first() == Some(&Fault::LocalIo)),
+            outcomes.iter().all(|o| match o.faults.first() {
+                Some(Fault::LocalIo) => !o.needed_a_restart,
+                Some(Fault::LocalFsyncFailed) => kind == FileKind::Wal && o.needed_a_restart,
+                Some(_) | None => false,
+            }),
             "{outcomes:?}"
         );
+        if kind == FileKind::Wal {
+            assert!(
+                outcomes.iter().any(|o| o.needed_a_restart),
+                "the engine syncs the WAL in a cycle: {outcomes:?}"
+            );
+        }
     }
 }
 

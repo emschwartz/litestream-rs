@@ -100,7 +100,7 @@ use crate::recover::{
 use crate::snapshot::{SnapshotFailed, read_live, write_snapshot};
 use crate::source::{CheckpointMode, Checkpointer, CommittedRead, PageSource, WalSource};
 use crate::store::{ObjectStore, PageLimit};
-use crate::sync::{Step, StepEnd, SyncConfig, Synced, sync_step};
+use crate::sync::{Step, StepEnd, SyncConfig, Synced, sync_step, wal_barrier};
 use crate::upload::{
     Did, Swept, UploadConfig, UploadPlan, UploadState, Uploaded, drop_staged_from, inventory_fault,
     plan_upload, sweep_staged, upload_next,
@@ -1061,6 +1061,7 @@ impl Actor {
             Ok(step) => step,
             Err(verdict) => return Ok(verdict),
         };
+        wal_barrier(&mut *env.wal, &committed)?;
         let synced = sync_step(
             step,
             &mut reader,
