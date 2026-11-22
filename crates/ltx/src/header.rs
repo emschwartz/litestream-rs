@@ -131,7 +131,11 @@ pub struct HeaderFields {
     pub commit: u32,
     /// The transactions this file covers.
     pub txids: TxidRange,
-    /// When the last transaction committed.
+    /// When the writer stamped the file. For a level-0 file that is when its
+    /// last transaction was synced, and compaction copies its newest input's,
+    /// so on levels 0 to 8 it dates the last transaction. A snapshot is
+    /// stamped when it is written, which can be long after its last
+    /// transaction committed.
     pub timestamp: Timestamp,
     /// The database checksum before this file applies: present exactly when
     /// the file is tracked and not a snapshot.
