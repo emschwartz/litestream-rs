@@ -43,6 +43,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D33 | Narrow the Go drop-in surface to shrink unverified code? | No: full drop-in; bring config, CLI and sidecar under behaviour rows and Go differentials | owner | 2026-11-22 | decided |
 | D34 | A restore of the latest state that a writer keeps outpacing: fail or answer? | Answer the last listing, flagged | parent session (#126) | 2026-11-22 | open to owner review |
 | D35 | When may the simulator accept a task still stalled at the end of a run? | Only while the world still imposes the stall's fault; the excuse table is empty today | Claude (stall-liveness), **delegated** | 2026-11-22 | open to owner review |
+| D130 | How does the simulator run the real directory store, and who judges it? | A filesystem trait in store-fs, an in-memory filesystem under the crash law in the sim, half the swarm on it, a staging-contract judge | Claude (sim-real-store-fs), **delegated** | 2026-11-22 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -352,6 +353,15 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** a fault the world keeps imposing after the heal (none today) needs a table entry, or its runs fail.
 - **Revisit if:** a fault is added that the end of the run cannot heal.
 - **Links:** the stall-liveness PR; #104.
+
+## D130. The real directory store in the simulator (delegated)
+
+- **Options:** keep `MemStore` with its power-loss bookkeeping as the only staging double; run `FsStore` on a temporary directory of the host (no crash law, no determinism); a filesystem trait in `lsr-store-fs` with an in-memory filesystem in `lsr-sim`.
+- **Choice:** the trait (`Fs`, `FsFile`, `RealFs`; `FsStore<F: Fs = RealFs>`, so every existing user is unchanged) and `MemFs`. A file keeps its synced and current images under the block law the WAL uses; a directory entry changed since its directory's last sync follows the one directory-entry rule of `crash_law.rs` (`entry_kept`): under the block law each such entry keeps its change or goes back to what it durably held, on its own coin; under all-or-nothing a deletion stays done and any other change is undone. Half of the swarm mixes (drawn last, off in the default mix) put staging on `FsStore<MemFs>`. A judge in the runner fails a run when a staged file whose commit or delete returned success changed across a power loss (`Violation::StagedReverted`).
+- **Why:** `MemStore`'s power loss assumes the store syncs what it should; the three durability plants in `store-fs` could only be killed by their named crash-replay tests. With the store itself under the crash law the swarm finds all three unaided.
+- **Cost accepted:** the judge checks the store's contract, not the engine's behaviour, so it finds a store defect the engine would survive (the delete plant). Per-entry independence can split a rename (both names, or neither), which ext4 would not; it is the rule the WAL's fault VFS and `Volatile` already use, so the disk stays one law (#121). A fault the fault layer injects after publishing (`ErrorAfterPublish`) does not unsync anything on `MemFs`: the store did sync, so in this profile such a file always survives.
+- **Revisit if:** the shared directory-entry rule changes; or `MemFs` and the host disagree in `differential::the_doubles_answer_as_the_real_store_does`.
+- **Links:** #127 item I.
 
 ## Unverified, not recorded
 

@@ -207,6 +207,9 @@ pub struct Opts {
     /// How the clock moves between reads inside a tick
     /// ([`Weights::clock_law`]). [`run_with`] sets it.
     pub clock_law: ClockLaw,
+    /// Staging is the directory store on the in-memory filesystem ([`Weights::staging_fs`]).
+    /// [`run_with`] sets it.
+    pub staging_fs: bool,
     /// Which judges run: the oracle, the history judge, or both (the default).
     pub judges: Judges,
 }
@@ -361,7 +364,7 @@ fn small(rng: &SeededEntropy, upper: u64) -> u32 {
 impl Runner {
     /// A runner for `seed` set up as `opts` says, booted.
     fn configured(seed: Seed, opts: &Opts) -> Self {
-        let mut runner = Self::new(seed);
+        let mut runner = Self::new(seed).with_staging_fs(seed, opts);
         runner.lenient = opts.drawn;
         if opts.drawn {
             runner.draw_power_law(seed, opts);
@@ -721,6 +724,7 @@ impl Runner {
 
     /// Judges what the tick put on the replica and left staged.
     fn judge_stores(&mut self) -> Result<(), Violation> {
+        self.judge_staging_kept()?;
         self.judge_puts()?;
         self.judge_staged_durable()
     }
@@ -2130,6 +2134,7 @@ pub fn run_with(
         lying_wal_sync: weights.lying_wal_sync,
         after_restart: weights.after_restart,
         clock_law: weights.clock_law,
+        staging_fs: weights.staging_fs,
         ..opts.clone()
     };
     run_ops(seed, &history(seed, steps, weights), &opts)
@@ -2316,5 +2321,6 @@ const fn still_imposed(stall: lsr_core::Stall) -> bool {
     }
 }
 
+mod staging_fs;
 #[cfg(test)]
 mod tests;
