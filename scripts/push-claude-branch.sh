@@ -15,4 +15,9 @@ if ! [[ "$branch" =~ ^claude/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]]; then
   echo "push-claude-branch: '$branch' is not a claude/* branch" >&2
   exit 2
 fi
-exec git push -u origin "refs/heads/$branch:refs/heads/$branch"
+url=$(git config --get remote.origin.url)
+if ! [[ "$url" =~ ^(https://github\.com/|http://[^/]+/git/)emschwartz/litestream-rs(\.git)?$ ]]; then
+  echo "push-claude-branch: origin is not emschwartz/litestream-rs" >&2
+  exit 2
+fi
+exec git -c core.hooksPath=/dev/null push --no-verify -u origin "refs/heads/$branch:refs/heads/$branch"

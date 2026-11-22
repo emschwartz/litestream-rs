@@ -3,6 +3,12 @@
     "allow": [
       "Bash(scripts/push-claude-branch.sh)",
       "Bash(./scripts/push-claude-branch.sh)"
+    ],
+    "deny": [
+      "Edit(scripts/push-claude-branch.sh)",
+      "Write(scripts/push-claude-branch.sh)",
+      "Edit(.claude/settings.json)",
+      "Write(.claude/settings.json)"
     ]
   }
 }
