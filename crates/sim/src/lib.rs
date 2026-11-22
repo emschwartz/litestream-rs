@@ -29,6 +29,7 @@ pub mod exec;
 pub mod failstop;
 pub mod generate;
 pub mod history;
+pub mod journal;
 pub mod liveness;
 pub mod memfs;
 pub mod model;

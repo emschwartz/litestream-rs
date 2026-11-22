@@ -1,0 +1,15 @@
+diff --git a/crates/core/src/recover.rs b/crates/core/src/recover.rs
+index 868d7d0..796b7fe 100644
+--- a/crates/core/src/recover.rs
++++ b/crates/core/src/recover.rs
+@@ -810,8 +810,8 @@ fn restarted(
+     if !proven {
+         return plain(changed);
+     }
+-    // No end check: frames the restart wrote at the synced end carry new salts and never chain.
+-    if probes.stale_next {
++    let new_end = committed_offset(header, wal).unwrap_or(WalOffset::start(seen.page_size));
++    if new_end.get() < seen.end.get() && probes.stale_next {
+         return Verdict {
+             recovered: changed,
+             event: Some(RecoverEvent::ReadLockViolated { synced: seen.end }),

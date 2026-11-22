@@ -359,9 +359,8 @@ fn a_failed_wal_sync_stages_nothing_of_its_generation_and_snapshots_after_a_trun
 }
 
 /// A restart between the failed sync and the TRUNCATE: the new process must not stage the frames
-/// the failed sync covered. Today it does, since the debt lives in the failed process only.
+/// the failed sync covered. The engine journal beside staging holds the debt across the restart.
 #[test]
-#[ignore = "needs a durable engine-owned record of the failed WAL sync: waits on the engine journal decision"]
 fn a_restart_after_a_failed_wal_sync_ships_no_unproven_frame() {
     let dir = TempDir::new().unwrap();
     let (mut rig, before) = failing_wal_sync(&dir);
