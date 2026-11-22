@@ -1503,3 +1503,34 @@ fn one_torn_read_of_the_replica_copy_does_not_write_over_it() {
     );
     assert_eq!(read_all(&remote.inner, &key(1)), theirs);
 }
+
+/// A listed tail whose size matches the staged file is confirmed by one
+/// compare of the two copies: the verify-each-copy path is for copies that
+/// differ, and a matching tail never pays for it (one read of the replica's
+/// copy, besides the probe's misses past it).
+#[test]
+fn a_listed_tail_equal_to_the_staged_file_is_confirmed_by_one_compare() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    let bytes = stage(&staging, 1);
+    put_bytes(&remote.inner, key(1), &bytes);
+    let listed = next(UploadState::Unknown, &staging, &remote, 1).unwrap();
+    assert_eq!(listed.state, UploadState::At(Some(txid(1))));
+    assert_eq!(remote.log().reads, 1 + 2 * (1 + PROBE_GAP));
+}
+
+/// A refusal is the bucket saying this key is taken only when it names this
+/// key. One that names another key is an answer that cannot be believed: the
+/// commit is ambiguous and a listing decides, rather than a read-back of a key
+/// nothing says is taken.
+#[test]
+fn a_refusal_naming_another_key_is_an_ambiguous_commit() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    stage(&staging, 1);
+    remote
+        .log()
+        .commit_before
+        .push_back(StoreError::AlreadyExists { key: key(2) });
+    let failed = failure(next(UploadState::At(None), &staging, &remote, 1));
+    assert_eq!(failed.fault, Fault::UploadAmbiguous);
+    assert_eq!(failed.state, UploadState::ListFirst { confirmed: None });
+}
