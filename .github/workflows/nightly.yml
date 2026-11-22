@@ -100,3 +100,19 @@ jobs:
         with:
           tool: just
       - run: just shuttle 500000
+
+  # Every defect fixed on main is planted again in a scratch tree and the tests that caught it must
+  # fail (docs/planted-bugs.md). A survivor means a test no longer guards its fix; a patch that stops
+  # applying means the entry needs re-expressing against the current tree. About 25 minutes cold on
+  # a hosted runner (two test builds, eight entries).
+  planted-bugs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: astral-sh/setup-uv@v6
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,just
+      - run: just planted-bugs

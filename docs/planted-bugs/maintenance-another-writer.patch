@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index e247971..dc5130c 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -1501,7 +1501,7 @@ impl Actor {
+         // its position: a file past it is another writer's. In steady state
+         // this listing is the first to see one, and nothing may be planned
+         // from it (no compaction, snapshot or delete takes it as input).
+-        if inventory.newest() > self.snapshot_after() {
++        if false && inventory.newest() > self.snapshot_after() {
+             return Some(self.fault(Task::Maintenance, Fault::RemoteAheadOfLocal, now));
+         }
+         if self.engine.maintain.read_back_owed

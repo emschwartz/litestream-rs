@@ -1,7 +1,7 @@
 # Mutation testing
 
 `just mutants <crate>` runs cargo-mutants 27.1.0 over `lsr-<crate>` with nextest, four jobs, the tree copied with
-its `.git`, results in `target/mutants/mutants.out/`. It runs on demand, not in CI. Phase 2's exit criterion is that every
+its `.git`, results in `target/mutants/mutants.out/`. It runs on demand for a whole crate, and on pull requests for the changed lines only (`just mutants-diff`, docs/planted-bugs.md). Phase 2's exit criterion is that every
 survivor in `ltx` and `core` is killed by a test or listed here with a reason. `ltx` meets that; `core` is part way
 (see its section).
 

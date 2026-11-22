@@ -93,3 +93,24 @@ jobs:
           tool: cargo-nextest,just
       - uses: ./.github/actions/go-compat
       - run: just compat-s3
+
+
+  # Mutation-tests only the lines the pull request changed in lsr-core and lsr-ltx. Fails on a missed
+  # mutant that docs/mutants-escapes.txt does not list (docs/mutants.md). Bounded: 40 minutes of
+  # mutants (MUTANTS_DIFF_BUDGET) inside the job's 50.
+  mutants-diff:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,just,cargo-mutants@27.1.0
+      - run: just mutants-diff "origin/${BASE_REF}"
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          MUTANTS_JOBS: "4"

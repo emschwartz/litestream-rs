@@ -1,0 +1,20 @@
+diff --git a/crates/core/src/store.rs b/crates/core/src/store.rs
+index 6f92d12..b69a065 100644
+--- a/crates/core/src/store.rs
++++ b/crates/core/src/store.rs
+@@ -387,15 +387,6 @@ impl ListAt {
+     /// [`ListingStalled`] when `next` is not strictly after `self.after`.
+     pub fn following(self, next: Option<TxidRange>) -> Result<Option<Self>, ListingStalled> {
+         let Some(cursor) = next else { return Ok(None) };
+-        if self
+-            .after
+-            .is_some_and(|prev| cmp_range(cursor, prev).is_le())
+-        {
+-            return Err(ListingStalled {
+-                level: self.level,
+-                cursor,
+-            });
+-        }
+         Ok(Some(Self {
+             level: self.level,
+             after: Some(cursor),

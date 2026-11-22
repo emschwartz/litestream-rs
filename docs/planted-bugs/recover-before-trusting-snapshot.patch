@@ -1,0 +1,18 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index 2391357..592754d 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -1078,13 +1078,6 @@ impl Actor {
+             // database, which holds only while the WAL still follows the
+             // position: recovery first, and a verdict (a WAL that moved
+             // under the position) replaces the cause with one that clears it.
+-            (Some(cause), Some(position)) if !snapshot_clears(&cause) => Ok(self
+-                .recovered(wal, reader, committed, &position)?
+-                .map(|_| Step::Snapshot {
+-                    after: self.snapshot_after(),
+-                    prev_timestamp: Some(position.timestamp()),
+-                    cause,
+-                })),
+             (Some(cause), position) => Ok(Ok(Step::Snapshot {
+                 after: self.snapshot_after(),
+                 prev_timestamp: position.map(|position| position.timestamp()),

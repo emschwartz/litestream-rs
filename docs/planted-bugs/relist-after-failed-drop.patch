@@ -1,0 +1,12 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index e247971..aa4e7d0 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -1388,7 +1388,6 @@ impl Actor {
+             // judges the divergence again and this runs again before anything
+             // is uploaded; the acknowledged mark is kept apart.
+             let confirmed = self.engine.upload.confirmed().min(from.prev());
+-            self.set_upload(UploadState::ListFirst { confirmed });
+             return self.fault(Task::Upload, fault, now);
+         }
+         // Acknowledged ids from `from` on that the replica lost (a rollback)
