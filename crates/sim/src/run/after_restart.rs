@@ -3,10 +3,12 @@
 //!
 //! The app keeps its own log of the commits it made: the pages with their
 //! bytes and the database size each left, the last [`REDO_MAX`] of them. A
-//! redo replays the newest `K` of those verbatim; a busy app commits new work
-//! until the WAL's committed end passes the end it had before the restart.
-//! Both run from a random stream of their own, so a run with the behaviour off
-//! is the run it was before the behaviour existed.
+//! redo replays the newest `K` of those verbatim; a retry replays them too,
+//! each one verbatim or restamped as a stream of its own draws (so a retry
+//! that restamps nothing is the redo of the same seed); a busy app commits new
+//! work until the WAL's committed end passes the end it had before the
+//! restart. All run from random streams of their own, so a run with the
+//! behaviour off is the run it was before the behaviour existed.
 
 use std::collections::VecDeque;
 
@@ -32,6 +34,8 @@ pub(super) struct Logged {
 pub(super) struct App {
     behaviour: AfterRestart,
     rng: SeededEntropy,
+    /// Which of a retry's commits are restamped.
+    restamp: SeededEntropy,
     log: VecDeque<Logged>,
     /// The WAL's committed end, in frames, as the operation that restarted
     /// the process began.
@@ -43,6 +47,7 @@ impl App {
         Self {
             behaviour: AfterRestart::Nothing,
             rng: SeededEntropy::new(seed.stream(18)),
+            restamp: SeededEntropy::new(seed.stream(19)),
             log: VecDeque::new(),
             restarted: None,
         }
@@ -60,7 +65,7 @@ impl App {
         db_size: u32,
         page_size: PageSize,
     ) {
-        if self.behaviour != AfterRestart::Redo {
+        if !matches!(self.behaviour, AfterRestart::Redo | AfterRestart::Retry) {
             return;
         }
         if u64::try_from(self.log.len()).unwrap_or(u64::MAX) >= REDO_MAX {
@@ -91,7 +96,8 @@ impl Runner {
         };
         match self.app.behaviour {
             AfterRestart::Nothing => {}
-            AfterRestart::Redo => self.redo(),
+            AfterRestart::Redo => self.redo(false),
+            AfterRestart::Retry => self.redo(true),
             AfterRestart::Busy => self.busy(end),
         }
     }
@@ -99,8 +105,10 @@ impl Runner {
     /// Replays the newest `K` logged commits, oldest first, with their own
     /// bytes. A commit of another page size than the database's now (a
     /// vacuum resized it since) is skipped: the app's write would not lay
-    /// out the same pages.
-    fn redo(&mut self) {
+    /// out the same pages. With `retry`, each commit is drawn verbatim or
+    /// restamped: the same pages, every one with the restart's own stamp
+    /// over its first bytes.
+    fn redo(&mut self, retry: bool) {
         let k = self.app.rng.below(REDO_MAX).saturating_add(1);
         let newest = self.w.model.newest_commit();
         let lost = self
@@ -139,7 +147,20 @@ impl Runner {
                 self.app.log.len()
             ));
         }
+        if retry {
+            self.report.reach.bump("app.retry");
+        }
         for (mut pages, db_size) in replay {
+            if retry && self.app.restamp.below(2) == 0 {
+                self.report.reach.bump("app.retry_restamped");
+                let stamp = (1_u64 << 63) | u64::from(self.report.steps) << 16;
+                for (page, data) in &mut pages {
+                    let stamp = stamp | u64::from(page.get() & 0xffff);
+                    for (slot, byte) in data.iter_mut().zip(stamp.to_be_bytes()) {
+                        *slot = byte;
+                    }
+                }
+            }
             // SQLite writes every page a commit adds. A replay on a smaller
             // database than the original commit's (a shrink since) adds pages
             // the original did not, with bytes of their own.

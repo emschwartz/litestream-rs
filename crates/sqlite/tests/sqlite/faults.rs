@@ -26,8 +26,8 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use lsr_core::{
-    CheckpointMode, Event, Fault, Policy, RecoverEvent, Recovered, SnapshotCause, SourceError,
-    StopCause, Tick, policy,
+    CheckpointMode, Event, Fault, PersistentCause, Policy, RecoverEvent, Recovered, Responses,
+    SnapshotCause, SourceError, StopCause, Tick, policy,
 };
 use lsr_sqlite::Sqlite;
 use lsr_sqlite::testing::{
@@ -79,22 +79,21 @@ struct Outcome {
     /// The cycle settled only after the next application commit (see
     /// `an_idle_database_settles_after_a_checkpoint_reset_the_wal_index`).
     needed_a_write: bool,
-    /// The cycle settled only after the replicator restarted: the engine's own sync of the
-    /// WAL failed, and it stages nothing more until a new backend syncs it.
-    needed_a_restart: bool,
+    /// A task was degraded on the way: the engine's own sync of the WAL failed, which it never
+    /// retries past (it checkpoints with TRUNCATE and snapshots instead).
+    degraded: Vec<PersistentCause>,
 }
 
 /// What a cycle needed beyond ticking to settle.
 #[derive(Debug, Default)]
 struct Needed {
     write: bool,
-    restart: bool,
 }
 
 /// Settles, or, when the actor keeps retrying `WalMoved`, commits once more and settles again:
 /// the state a checkpoint that reset the wal-index leaves until SQLite writes a WAL header.
-/// When it keeps retrying `LocalFsyncFailed` (the engine's sync of the WAL failed, which it
-/// never retries past), the operator restarts the replicator and it settles again.
+/// When the engine stays degraded by `WalSyncFailed`, the TRUNCATE that pays for the failed
+/// sync waits on the application's long reader, which the cycle then ends.
 fn settle_or_write<B: Backend>(rig: &mut Rig<B>, needed: &mut Needed) -> Result<(), RigError> {
     match rig.settle() {
         Err(RigError::Unsettled(_)) if rig.faults().last() == Some(&Fault::WalMoved) => {
@@ -102,10 +101,20 @@ fn settle_or_write<B: Backend>(rig: &mut Rig<B>, needed: &mut Needed) -> Result<
             rig.insert(100)?;
             rig.settle()
         }
-        Err(RigError::Unsettled(_)) if rig.faults().last() == Some(&Fault::LocalFsyncFailed) => {
-            needed.restart = true;
-            rig.restart()?;
-            rig.settle()
+        // The cycle ends its long reader on seeing this, and the next settle goes on.
+        Err(RigError::Unsettled(_))
+            if matches!(
+                rig.ticks().last(),
+                Some(Tick::Ran {
+                    event: Event::Degraded {
+                        cause: PersistentCause::WalSyncFailed,
+                        ..
+                    },
+                    ..
+                })
+            ) =>
+        {
+            Ok(())
         }
         other => other,
     }
@@ -129,7 +138,9 @@ fn each_step<B: Backend>(
     let mut outcomes = Vec::new();
     for nth in steps {
         let dir = TempDir::new().unwrap();
-        let mut rig = rig::<B>(&dir, placement);
+        let mut cfg = RigConfig::placed(placement);
+        cfg.actor.responses = Responses::GO_LIKE;
+        let mut rig = Rig::<B>::new(dir.path(), cfg).unwrap();
         rig.vfs().arm(lsr_sqlite::testing::Fault {
             kind,
             op,
@@ -152,12 +163,15 @@ fn each_step<B: Backend>(
             !rig.ticks().iter().any(|t| matches!(t, Tick::Stopped(_))),
             "{at}: no stop"
         );
+        for cause in rig.degraded() {
+            assert_eq!(*cause, PersistentCause::WalSyncFailed, "{at}");
+        }
         rig.check().unwrap_or_else(|err| panic!("{at}: {err}"));
         outcomes.push(Outcome {
             nth,
             faults: rig.faults().to_vec(),
             needed_a_write: needed.write,
-            needed_a_restart: needed.restart,
+            degraded: rig.degraded().to_vec(),
         });
     }
     assert!(
@@ -215,24 +229,27 @@ fn a_short_write_at_each_step_of_a_cycle_is_disk_full_and_loses_nothing() {
 
 /// A failed fsync of the WAL before a backfill, or of the database after one: the checkpoint
 /// fails and SQLite does not advance `nBackfill`, so nothing is lost and the next one redoes it.
-/// A failed fsync of the WAL by the engine itself, before it stages: nothing is staged, and the
-/// engine refuses to stage until the replicator restarts, since a later fsync that succeeds
-/// says nothing about the pages whose writeback failed.
+/// A failed fsync of the WAL by the engine itself, before it stages: the sync task is degraded
+/// with `WalSyncFailed`, nothing of that WAL generation is staged, and the engine checkpoints
+/// with TRUNCATE and snapshots, since a later fsync that succeeds says nothing about the pages
+/// whose writeback failed. Under the strict responses it would stop.
 #[test]
 fn a_sync_error_at_each_step_of_a_cycle_is_retried_and_loses_nothing() {
     for kind in [FileKind::Main, FileKind::Wal] {
         let outcomes = each_step_both::<Sqlite>(kind, Op::Sync, Effect::Error(Op::Sync.error()));
         assert!(
-            outcomes.iter().all(|o| match o.faults.first() {
-                Some(Fault::LocalIo) => !o.needed_a_restart,
-                Some(Fault::LocalFsyncFailed) => kind == FileKind::Wal && o.needed_a_restart,
-                Some(_) | None => false,
-            }),
+            outcomes
+                .iter()
+                .all(|o| match (o.faults.first(), o.degraded.first()) {
+                    (Some(Fault::LocalIo), None) => true,
+                    (_, Some(PersistentCause::WalSyncFailed)) => kind == FileKind::Wal,
+                    (Some(_) | None, _) => false,
+                }),
             "{outcomes:?}"
         );
         if kind == FileKind::Wal {
             assert!(
-                outcomes.iter().any(|o| o.needed_a_restart),
+                outcomes.iter().any(|o| !o.degraded.is_empty()),
                 "the engine syncs the WAL in a cycle: {outcomes:?}"
             );
         }

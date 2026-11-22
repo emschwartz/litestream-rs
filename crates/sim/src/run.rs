@@ -196,6 +196,9 @@ pub struct Opts {
     /// With `drawn`, a power loss keeps the block law's draw instead of a
     /// drawn prefix ([`Weights::block_crash_law`]). [`run_with`] sets it.
     pub block_crash_law: bool,
+    /// With `drawn`, the disk lies about the engine's fsync of the WAL from
+    /// the start ([`Weights::lying_wal_sync`]). [`run_with`] sets it.
+    pub lying_wal_sync: bool,
     /// What the app does after each restart ([`Weights::after_restart`]).
     /// [`run_with`] sets it.
     pub after_restart: AfterRestart,
@@ -545,6 +548,37 @@ impl Runner {
         Ok(())
     }
 
+    /// Every level-0 file this tick staged from the WAL holds frames that are durable: the
+    /// engine's sync before staging, which a disk only fails to honour when it lies (that
+    /// scenario says so) or after an earlier failed sync of the same generation.
+    fn judge_staged_durable(&self) -> Result<(), Violation> {
+        let events = self.w.staging_recorder.events();
+        for event in events.iter().skip(self.staging_seen) {
+            if let crate::RecorderEvent::Put {
+                key,
+                header: Some(_),
+                origin: Some(origin),
+                ..
+            } = event
+                && origin.size() > 0
+                && key.level().get() == 0
+            {
+                let (salt1, salt2) = origin.salts();
+                let end = origin.offset().saturating_add(origin.size());
+                if !self
+                    .w
+                    .sqlite
+                    .wal_range_durable(Salts { salt1, salt2 }, origin.offset(), end)
+                {
+                    return Err(Violation::StagedNotDurable {
+                        key: key.to_string(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn note_tick(&mut self, began: Timestamp, remote0: crate::store::RecorderCounts) {
         if !self.record {
             return;
@@ -590,6 +624,7 @@ impl Runner {
             self.life.boot_commits = commits;
         }
         self.judge_puts()?;
+        self.judge_staged_durable()?;
         self.report.ticks = self.report.ticks.saturating_add(1);
         let in_tick = self.took_commit_in_tick();
         self.note_snapshots(newest_commit, in_tick, at);
@@ -727,9 +762,12 @@ impl Runner {
     }
 
     /// A task degraded by a persistent fault the run does not expect is a
-    /// bug, as a stop for it would be. `Bug` is never expected.
+    /// bug, as a stop for it would be. `Bug` is never expected. A stall is a
+    /// retried fault that kept failing: as expected as the retries were before
+    /// they were reported as a stall.
     fn degraded_expected(&self, cause: PersistentCause) -> Result<(), Violation> {
-        if cause != PersistentCause::Bug && self.stop_expected(StopCause::from(cause)) {
+        let expected = cause.stop().is_none_or(|stop| self.stop_expected(stop));
+        if cause != PersistentCause::Bug && expected {
             Ok(())
         } else {
             Err(bug_fault(format!("a task is degraded: {cause:?}")))
@@ -1627,11 +1665,15 @@ impl Runner {
     }
 
     /// What a drawn run's power losses keep of the unsynced WAL writes: a
-    /// drawn prefix, or the block law's draw.
-    fn draw_power_law(&self, seed: Seed, blocks: bool) {
+    /// drawn prefix, or the block law's draw; and whether the engine's own
+    /// sync of the WAL keeps anything.
+    fn draw_power_law(&self, seed: Seed, opts: &Opts) {
         self.w.sqlite.tear_on_power_loss(seed.stream(14));
-        if blocks {
+        if opts.block_crash_law {
             self.w.sqlite.crash_by_law(CrashLaw::drawn(seed.stream(17)));
+        }
+        if opts.lying_wal_sync {
+            self.w.sqlite.lie_on_our_sync();
         }
     }
 
@@ -1819,6 +1861,7 @@ pub fn run_with(
     let opts = Opts {
         drawn: true,
         block_crash_law: weights.block_crash_law,
+        lying_wal_sync: weights.lying_wal_sync,
         after_restart: weights.after_restart,
         ..opts.clone()
     };
@@ -1838,7 +1881,7 @@ pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure
     let mut runner = Runner::new(seed);
     runner.lenient = opts.drawn;
     if opts.drawn {
-        runner.draw_power_law(seed, opts.block_crash_law);
+        runner.draw_power_law(seed, opts);
         runner.draw_batch_widths(seed);
     }
     runner.trace = opts.trace;
