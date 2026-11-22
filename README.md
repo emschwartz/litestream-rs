@@ -18,7 +18,7 @@ Each crate is `crates/<name>`, package `lsr-<name>`. The crate map, with what ea
 | Needs | Command | What runs |
 |---|---|---|
 | Nothing | `just check` | Format, clippy, every test that is not ignored, doctests, the S3 client feature builds, and the test map's counterparts against a fresh test list (Linux). The land gate. |
-| Nothing, minutes | `just sqlite-big`, `just sim-soak <secs>`, `just sim-nightly`, `just fuzz-seed`, `just mutants <crate>` | The large real-SQLite cases (several GB of disk), rotating simulator seeds, the fuzz seed corpus, mutation testing. |
+| Nothing, minutes | `just sqlite-big`, `just mem-big`, `just sim-soak <secs>`, `just sim-nightly`, `just fuzz-seed`, `just mutants <crate>` | The large real-SQLite cases (several GB of disk), the memory gates at 1 to 4 GiB and a million files, rotating simulator seeds, the fuzz seed corpus, mutation testing. |
 | Docker | `just test-s3`, `just compat-s3` | The S3 store and `lsr` (and Go and Rust together) against a throwaway MinIO. Fails when Docker is down; `LSR_SKIP=minio just test-s3` opts out and runs nothing. |
 | Go | `just upstream`, then `just compat`, `just compat-live <names>`, `just compat-releases`, `just compat-tags`, `just compat-regen` | Pinned Go builds from `.upstream/` (a worktree shares the main checkout's): Go writes and Rust restores, the reverse, handovers and alternation, the Go VFS (which also needs a C compiler and SQLite headers). `compat-tags` needs only the clone. |
 | Tigris | `just test-tigris`, `just tigris-restore`, `just soak-tigris <hours>` | The real bucket, with credentials from a file outside the repo or `AWS_*`; `tigris-restore` also builds Go v0.5.18. Never in CI. |

@@ -312,3 +312,9 @@ upstream-test-map:
 # up to five files, and of four files over a wider range. Minutes; not part of check.
 plan-exhaustive:
     cargo nextest run -p lsr-core --test core --run-ignored only --no-capture --locked -E 'test(/^plan_exhaustive::/)'
+
+# The memory gates at scale (crates/core/tests/core/mem_big.rs): restore from 1 to 4 GiB of
+# database and from a million-file inventory, in release. The same laws run at small sizes in
+# `check` (crates/core/tests/core/mem.rs). Needs 5 GiB of temporary disk, one database at a time.
+mem-big:
+    cargo nextest run --release -p lsr-core --test core -E 'test(/^mem_big::/)' --run-ignored only --no-capture --locked

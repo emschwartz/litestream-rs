@@ -1,0 +1,11 @@
+[package]
+name = "lsr-heap"
+version = "0.0.0"
+description = "A counting global allocator, so a test can assert the peak heap of a code path."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
