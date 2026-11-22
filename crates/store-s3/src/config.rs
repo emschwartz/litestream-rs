@@ -211,7 +211,7 @@ impl Region {
     /// # Errors
     /// [`ConfigError::BadRegion`] for an empty name, or one holding whitespace, a `/`
     /// or a control character. Go accepts any string and signs with it; those are the
-    /// ones no request signed with them can succeed with (`docs/decisions.md` D155), so
+    /// ones no request signed with them can succeed with (`docs/decisions.md` D45), so
     /// providers' own names (`fr-par`, `auto`, `us_east`) all pass.
     pub fn new(name: &str) -> Result<Self, ConfigError> {
         name_is_clean(name, |c| !c.is_whitespace() && !c.is_control() && c != '/')

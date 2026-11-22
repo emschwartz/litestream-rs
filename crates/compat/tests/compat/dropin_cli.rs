@@ -11,9 +11,8 @@
 //! `-x=v`, `-x v`, booleans with and without values), an undefined flag, `--`, positional
 //! arguments and help.
 //!
-//! Go exits 1 on every error, so its outcome is read from its standard error; `lsr`'s from
-//! its exit code (64 usage, 3 missing file, 0 help). The exit codes themselves differ by
-//! design (D157).
+//! Both exit 1 on every error of `replicate` (D47), so the outcome is read from standard
+//! error on both sides, and the exit codes must also be equal.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -72,7 +71,7 @@ enum Outcome {
     Other,
 }
 
-fn go_outcome(code: Option<i32>, stderr: &str, stdout: &str) -> Outcome {
+fn outcome(code: Option<i32>, stderr: &str, stdout: &str) -> Outcome {
     const USAGE: &[&str] = &[
         "flag provided but not defined",
         "flag needs an argument",
@@ -83,6 +82,7 @@ fn go_outcome(code: Option<i32>, stderr: &str, stdout: &str) -> Outcome {
         "must specify at least one replica",
         "without -once",
         "with -exec",
+        "help requested",
     ];
     if code == Some(0) {
         return Outcome::Help;
@@ -104,16 +104,6 @@ fn go_outcome(code: Option<i32>, stderr: &str, stdout: &str) -> Outcome {
         return Outcome::Usage;
     }
     Outcome::Other
-}
-
-fn lsr_outcome(code: Option<i32>) -> Outcome {
-    match code {
-        Some(64) => Outcome::Usage,
-        Some(3) => Outcome::NoConfig,
-        Some(2) => Outcome::NoReplica,
-        Some(0) => Outcome::Help,
-        Some(_) | None => Outcome::Other,
-    }
 }
 
 fn line(tokens: &[&str], config: &Path, missing: &Path) -> Vec<String> {
@@ -169,11 +159,20 @@ fn answers(go: &Path, lsr: &Path, tokens: &[&str]) -> (Vec<String>, Ran, Ran) {
 }
 
 fn compare(go: &Path, lsr: &Path, tokens: &[&str]) -> Result<(), TestCaseError> {
-    let (args, (go_code, go_err, go_out), (lsr_code, lsr_err, _)) = answers(go, lsr, tokens);
-    let go_outcome = go_outcome(go_code, &go_err, &go_out);
-    let lsr_outcome = lsr_outcome(lsr_code);
+    let (args, (go_code, go_err, go_out), (lsr_code, lsr_err, lsr_out)) = answers(go, lsr, tokens);
+    let go_outcome = outcome(go_code, &go_err, &go_out);
+    let lsr_outcome = outcome(lsr_code, &lsr_err, &lsr_out);
+    // `-once -force-snapshot` and `-once -enforce-retention` are not built yet (D48, #177):
+    // refused by name where Go, having accepted the flags, goes on to build the database.
+    if lsr_err.contains("is not in this build yet") {
+        prop_assert!(
+            go_outcome == Outcome::NoReplica && go_code == lsr_code,
+            "args: {args:?}\nGo:  {go_outcome:?} ({go_code:?}) {go_err}\nlsr: {lsr_err}"
+        );
+        return Ok(());
+    }
     prop_assert!(
-        go_outcome == lsr_outcome && go_outcome != Outcome::Other,
+        go_outcome == lsr_outcome && go_outcome != Outcome::Other && go_code == lsr_code,
         "args: {args:?}\nGo:  {go_outcome:?} ({go_code:?}) {go_err}\nlsr: {lsr_outcome:?} ({lsr_code:?}) {lsr_err}"
     );
     Ok(())

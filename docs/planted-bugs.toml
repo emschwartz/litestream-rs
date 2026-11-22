@@ -1281,3 +1281,10 @@ fix = "claude/dropin-cli"
 package = "lsr-cli"
 test_bin = "cli"
 tests = ["a_missing_config_is_reported_before_a_flag_combination"]
+
+[[bug]]
+name = "replicate-exit-codes-per-class"
+fix = "claude/dropin-cli"
+package = "lsr-cli"
+test_bin = "cli"
+tests = ["go_s_flag_refusals_are_usage_errors"]

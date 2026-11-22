@@ -259,7 +259,7 @@ struct Case {
     duplicate: bool,
     misspelled: Option<&'static str>,
     document_marker: bool,
-    /// Leave a lone `access-key-id` or `secret-access-key` alone (D152); else the other
+    /// Leave a lone `access-key-id` or `secret-access-key` alone (D42); else the other
     /// is added.
     lone_key: bool,
     /// The Rust-only section, which Go ignores: `app-readers: none`, which
@@ -533,7 +533,7 @@ fn normalized(parsed: Parsed) -> Parsed {
         // Go's uploader takes a concurrency or part size only above zero
         // (s3/replica_client.go:503-512), so zero or less is its default, as unset is.
         // (On R2 and Tigris Go's explicit zero gives the generic default, not the
-        // provider's: upload parallelism only, noted in D155.)
+        // provider's: upload parallelism only, noted in D45.)
         if let Some(replica) = &mut db.replica {
             for value in [&mut replica.concurrency, &mut replica.part_size] {
                 if value.is_some_and(|n| n <= 0) {
@@ -583,27 +583,27 @@ fn refused(dump: &Dump) -> bool {
 /// departure: the text a refusal must contain, and the decision.
 const DEPARTURES: &[(&str, &str)] = &[
     // Core's schedule: levels increasing, snapshots above the top level, retention at
-    // least the snapshot interval (D155).
-    ("compaction and snapshot schedule", "D155"),
-    // `monitor-interval` zero or less: Go never polls the database and says nothing (D155).
-    ("would never poll the database", "D155"),
-    // A signing region with whitespace, `/` or a control character (D155).
-    ("bad region", "D155"),
-    // `truncate-page-n` without the `app-readers: none` claim (D155).
-    ("TRUNCATE checkpoints need", "D155"),
-    // A key set twice in one mapping: Go keeps the last and warns (D155, CFG-1).
-    ("key set twice", "D155"),
-    // A duration core cannot hold: below one millisecond, or negative (D155).
-    ("is not a usable duration here", "D155"),
-    // A part size under S3's 5 MiB minimum: Go's uploader refuses every upload (D155).
-    ("is below the 5 MiB minimum", "D155"),
+    // least the snapshot interval (D45).
+    ("compaction and snapshot schedule", "D45"),
+    // `monitor-interval` zero or less: Go never polls the database and says nothing (D45).
+    ("would never poll the database", "D45"),
+    // A signing region with whitespace, `/` or a control character (D45).
+    ("bad region", "D45"),
+    // `truncate-page-n` without the `app-readers: none` claim (D45).
+    ("TRUNCATE checkpoints need", "D45"),
+    // A key set twice in one mapping: Go keeps the last and warns (D45, CFG-1).
+    ("key set twice", "D45"),
+    // A duration core cannot hold: below one millisecond, or negative (D45).
+    ("is not a usable duration here", "D45"),
+    // A part size under S3's 5 MiB minimum: Go's uploader refuses every upload (D45).
+    ("is below the 5 MiB minimum", "D45"),
     // Two databases on one meta directory, one replica, or one file: Go starts both and
-    // they corrupt each other's state or history (D156).
-    ("shares meta directory", "D156"),
-    ("replicates to the same place as", "D156"),
-    ("is already replicated by", "D156"),
-    // One of the two config keys (D152).
-    ("must be given together", "D152"),
+    // they corrupt each other's state or history (D46).
+    ("shares meta directory", "D46"),
+    ("replicates to the same place as", "D46"),
+    ("is already replicated by", "D46"),
+    // One of the two config keys (D42).
+    ("must be given together", "D42"),
 ];
 
 /// How often each departure excused a case, by its index in [`DEPARTURES`].

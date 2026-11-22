@@ -114,6 +114,7 @@ pub fn help() -> String {
     for exit in Exit::ALL {
         putln!(out, "  {:<3}{}", exit.code(), exit.meaning());
     }
+    out.push_str("  replicate exits 1 on any failure but 4, as Go Litestream does\n");
     out
 }
 
