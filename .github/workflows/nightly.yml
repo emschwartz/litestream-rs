@@ -1,7 +1,7 @@
 name: nightly
-# What is too slow or too platform-specific for every push: the land gate on macOS, and a short
-# fuzz run of the decoders. Nightly and on demand, never on push: a failure here is a finding to
-# file, not a reason to block an unrelated change.
+# What is too slow or too platform-specific for every push: the land gate on macOS, a short fuzz
+# run of the decoders, the sanitizers, Miri and schedule exploration. Nightly and on demand,
+# never on push: a failure here is a finding to file, not a reason to block an unrelated change.
 on:
   schedule:
     - cron: "29 4 * * *"
@@ -50,3 +50,36 @@ jobs:
           name: fuzz-${{ matrix.target }}-${{ github.run_id }}
           path: fuzz/artifacts/${{ matrix.target }}
           if-no-files-found: ignore
+
+  # AddressSanitizer and ThreadSanitizer over the crate with `unsafe` FFI (sqlite) and the replica
+  # thread tests (`just asan`, `just tsan`). Nightly only: -Zsanitizer and -Zbuild-std, which
+  # needs rust-src. Any report is a defect to fix, with a regression test.
+  sanitizers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [asan, tsan]
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install nightly --profile minimal --component rust-src
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: just "$SANITIZER"
+        env:
+          SANITIZER: ${{ matrix.sanitizer }}
+
+  # Miri over the pure crates and the core's decision code (`just miri`): undefined behaviour
+  # and leaks in code that does no I/O. Tests that need files or FFI are skipped under cfg(miri).
+  miri:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install nightly --profile minimal --component miri,rust-src
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: just miri

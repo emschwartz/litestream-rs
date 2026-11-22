@@ -74,6 +74,43 @@ sim-soak seconds base=`date +%s`:
 sim-nightly $LSR_SIM_SECONDS="900" $LSR_SIM_DAY=`date -u +%Y%m%d`:
     env -u LSR_SIM_BASE_SEED cargo nextest run -p lsr-sim --test sim -E 'test(/^soak::/)' --run-ignored only --no-capture --locked
 
+# The nightly toolchain for the sanitizer, Miri and fuzz recipes; override with LSR_NIGHTLY=nightly-YYYY-MM-DD.
+nightly := env("LSR_NIGHTLY", "nightly")
+
+# AddressSanitizer over the crate with `unsafe` FFI (sqlite) and the replica thread tests.
+# Nightly only (-Zsanitizer, -Zbuild-std so the standard library is instrumented too); its own
+# target dir, since the flags rebuild everything. Bundled SQLite's C code is not instrumented,
+# but its allocations go through the sanitizer's allocator. Not part of check.
+# TEMPORARY: `verify::a_wrong_page_in_the_replica...` is skipped until its separate fix lands: it hangs now and then on any build (its
+# wait is on the fake clock, so a missed verify never times out), a defect of the test or the
+# scheduled verify that no sanitizer report is behind. Drop the skip once it is fixed.
+asan:
+    RUSTFLAGS="-Zsanitizer=address" RUSTDOCFLAGS="-Zsanitizer=address" CARGO_TARGET_DIR=target/asan \
+        cargo +{{nightly}} test -Zbuild-std --target x86_64-unknown-linux-gnu --locked \
+        -p lsr-sqlite -p lsr-replica --lib --tests -- --skip a_wrong_page_in_the_replica
+
+# ThreadSanitizer over the same crates. The standard library is rebuilt with it (-Zbuild-std),
+# or its mutexes and channels would look like unsynchronised memory.
+tsan:
+    RUSTFLAGS="-Zsanitizer=thread" CARGO_TARGET_DIR=target/tsan \
+        cargo +{{nightly}} test -Zbuild-std --target x86_64-unknown-linux-gnu --locked \
+        -p lsr-sqlite -p lsr-replica --lib --tests -- --skip a_wrong_page_in_the_replica
+
+# Miri over the pure crates (ltx, wal) and the core's decision code (plan, retry, position,
+# layout, checkpoint, compact): no I/O, no FFI. Miri runs about 1000 times slower than native,
+# so the core's engine-sized suites (actor, maintain, recover, sync and the rest, 500 tests) are
+# left to the native run, the few whole-database tests inside the chosen modules are ignored
+# under `cfg(miri)`, and the proptest case count is cut. Environment reaches the program only
+# through -Zmiri-env-forward. Not part of check.
+miri:
+    MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-env-forward=PROPTEST_CASES -Zmiri-env-forward=PROPTEST_DISABLE_FAILURE_PERSISTENCE" \
+        PROPTEST_CASES=4 PROPTEST_DISABLE_FAILURE_PERSISTENCE=true CARGO_TARGET_DIR=target/miri \
+        cargo +{{nightly}} miri test --locked -p lsr-ltx -p lsr-wal --lib
+    MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-env-forward=PROPTEST_CASES -Zmiri-env-forward=PROPTEST_DISABLE_FAILURE_PERSISTENCE" \
+        PROPTEST_CASES=4 PROPTEST_DISABLE_FAILURE_PERSISTENCE=true CARGO_TARGET_DIR=target/miri \
+        cargo +{{nightly}} miri test --locked -p lsr-core --lib -- \
+        plan:: retry:: position:: layout:: checkpoint:: compact::
+
 # Mutation testing for one crate (just mutants ltx); results in target/mutants/mutants.out.
 # Survivors are killed by a test or recorded in docs/mutants.md. Not part of check.
 # The tree is copied with its .git: a guard test in core lists the tracked files, and
