@@ -1111,9 +1111,7 @@ impl Actor {
         )
         .await
         .map_err(|failed| failed.fault)?;
-        let stepped = self.absorb(synced, committed.end(), &*env.wal, now);
-        self.proven();
-        Ok(stepped)
+        Ok(self.absorb(synced, committed.end(), &*env.wal, now))
     }
 
     fn plan_step<W: WalSource>(
