@@ -30,6 +30,9 @@
 # WAL nor a takeover record vouches for, a restart after a stop for another writer's file above
 # staging stops again with or without the stop record, so the scenario cannot tell; the record
 # still decides the case of another writer at the engine's next id, which the core entry plants.
+# replica-page-size-unread-sim (7bf9707): seed 0x13's run no longer reaches the boot it pinned
+# once the engine asks for a takeover record before deleting staged files (one more tick changes
+# the interleaving); the test stays as a regression run, and the core entry plants the defect.
 
 [[bug]]
 name = "canary-no-op"
@@ -613,14 +616,6 @@ name = "replica-page-size-unread"
 fix = "7bf9707"
 package = "lsr-core"
 tests = ["a_newest_replica_header_that_does_not_decode_still_names_the_page_size"]
-
-# The same plant, judged by the simulator's lying-reads hold where it was found.
-[[bug]]
-name = "replica-page-size-unread-sim"
-fix = "7bf9707"
-package = "lsr-sim"
-test_bin = "sim"
-tests = ["a_boot_whose_replica_reads_lie_never_writes_a_new_page_size_seed_0x13"]
 
 # A stall threshold no outage reaches: a plain-retry fault never degrades, the defect 538bd84
 # fixed, judged by the simulator's health-truth check under a long outage hold.

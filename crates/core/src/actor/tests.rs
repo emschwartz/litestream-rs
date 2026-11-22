@@ -1959,13 +1959,24 @@ fn l0(n: u64) -> FileKey {
 
 /// One read of a sound staged file returns a flipped byte during boot's
 /// sweep. A read that fails verification is evidence about the read: boot
-/// deletes nothing on it, and the file is uploaded as it is.
+/// deletes nothing on it, and the file is uploaded as it is. With and
+/// without a takeover record already covering staging: asking for one is
+/// itself a second read, so only a held record shows a first read deleting.
 #[test]
 fn one_bad_read_of_a_staged_file_at_boot_drops_nothing() {
+    for held in [false, true] {
+        one_bad_read_at_boot(held);
+    }
+}
+
+fn one_bad_read_at_boot(held: bool) {
     let (mut rig, mut actor) = caught_up();
     stage_held(&mut rig, &mut actor, &[2, 3, 4], T0 + 1);
     rig.staging.flip_next_read(l0(3));
     let mut actor = Actor::new(cfg());
+    if held {
+        actor.remember_takeover(crate::TakeoverRecord::through(Txid::new(4).unwrap()));
+    }
     let first = rig.tick(&mut actor, T0 + 2);
     // The bad read deletes nothing: when the WAL could stage the files again,
     // a deletion would not show as a snapshot, only as files gone.
@@ -1977,10 +1988,20 @@ fn one_bad_read_of_a_staged_file_at_boot_drops_nothing() {
 }
 
 /// One read of a sound staged file returns a flipped byte while the upload
-/// task copies it: nothing is dropped, and a later tick uploads it.
+/// task copies it: nothing is dropped, and a later tick uploads it. With and
+/// without a takeover record already covering staging, as at boot.
 #[test]
 fn one_bad_read_of_a_staged_file_while_uploading_drops_nothing() {
+    for held in [false, true] {
+        one_bad_read_while_uploading(held);
+    }
+}
+
+fn one_bad_read_while_uploading(held: bool) {
     let (mut rig, mut actor) = caught_up();
+    if held {
+        actor.remember_takeover(crate::TakeoverRecord::through(Txid::new(2).unwrap()));
+    }
     rig.commit(2);
     assert!(matches!(
         event(&rig.tick(&mut actor, T0 + 1)),
