@@ -1,0 +1,14 @@
+diff --git a/crates/replica/src/runtime.rs b/crates/replica/src/runtime.rs
+index 6a234fb..97ef992 100644
+--- a/crates/replica/src/runtime.rs
++++ b/crates/replica/src/runtime.rs
+@@ -262,7 +262,8 @@ mod fake {
+         /// As the system park: returns once the clock reads earlier than the last reading.
+         fn park_from(&self, until: Option<Timestamp>, read: Timestamp) {
+             let mut state = lock(&self.state);
+-            let mut seen = read;
++            let _ = read;
++            let mut seen = self.clock.now();
+             loop {
+                 if std::mem::take(&mut state.woken) {
+                     return;
