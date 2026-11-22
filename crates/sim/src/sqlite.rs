@@ -51,7 +51,7 @@
 //! WAL durable too. A power crash keeps the WAL as of its last fsync, or a drawn prefix of the
 //! later writes ([`SimSqlite::tear_on_power_loss`]), or the block law's draw
 //! over them ([`SimSqlite::crash_by_law`], [`crate::crash_law`]), and then
-//! SQLite's recovery runs. The recovery is real SQLite's (`recovery`): the
+//! SQLite's recovery runs. The recovery is real SQLite's ([`crate::recovery`]): the
 //! database and WAL bytes go to a temporary directory and SQLite recovers them;
 //! the engine's WAL parser, run on the same bytes, and the rules' image are
 //! checked against it.
@@ -74,12 +74,12 @@ use lsr_ltx::{DbPages, PageNo, PageSize};
 use lsr_wal::testing::{WalBuilder, page};
 
 use crate::crash_law::{self, BlockSize, CrashLaw, Rng};
+use crate::recovery;
 use lsr_wal::{
     ByteOrder, CommittedEnd, FRAME_HEADER_LEN, HEADER_LEN, Salts, ScanLimit, TxOutcome,
     WalChecksum, WalHeader, WalOffset, WalReader,
 };
 
-mod recovery;
 #[cfg(test)]
 mod tests;
 
@@ -714,7 +714,7 @@ impl State {
     }
 
     /// SQLite's `walIndexRecover` over the file, by the app's connection. Real
-    /// SQLite recovering the same bytes is the ground truth ([`recovery`]):
+    /// SQLite recovering the same bytes is the ground truth ([`crate::recovery`]):
     /// its `mxFrame`, size, salts and checksum make the wal-index, and the
     /// frames up to `mxFrame` give the page of each. The engine's WAL parser
     /// runs on the same bytes as a cross-check, and the rules' image of the
@@ -723,7 +723,7 @@ impl State {
     fn recover(&mut self) {
         let (parsed, seq) = self.parse_recovery();
         let wal = self.present.then_some(self.wal.as_slice());
-        let index = match recovery::recover(self.page_size, &self.db, wal) {
+        let index = match recovery::recover(self.page_size, &self.db, wal, recovery::Header::Fake) {
             Ok(truth) => {
                 let index = self.index_from(&truth);
                 self.cross_check(&parsed, &index);

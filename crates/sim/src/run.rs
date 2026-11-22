@@ -1538,6 +1538,7 @@ impl Runner {
         let (kept, holes) = self.w.sqlite.block_losses();
         reach.add("power.block_kept_unsynced", u64::from(kept));
         reach.add("power.block_hole", u64::from(holes));
+        reach.add("power.resurrected_commit", u64::from(self.w.resurrected));
         reach.add(
             "batch.remote_calls",
             u64::from(self.w.remote_faults.batched()),

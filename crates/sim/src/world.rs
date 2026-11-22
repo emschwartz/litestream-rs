@@ -21,7 +21,7 @@ use lsr_ltx::{PageNo, PageSize, Timestamp, Txid};
 use lsr_wal::{Salts, WalOffset};
 
 use crate::exec::{Polls, RunEnd, run_until};
-use crate::model::{CommitId, Model, PageImage};
+use crate::model::{CommitId, Model, PageImage, Recovery};
 use crate::oracle::{Acked, Checked, Ground, Violation, Windows, check_with};
 use crate::seed::Seed;
 use crate::sqlite::{AppCommit, CrashKind, OtherProcessMode, SimSqlite};
@@ -236,6 +236,8 @@ pub struct World {
     pub acked: Acked,
     /// Transactions a bucket rollback took from the replica for good.
     pub lost: BTreeSet<Txid>,
+    /// Power losses whose recovery brought back a commit an earlier loss took.
+    pub resurrected: u32,
     /// Files another writer put: its transaction, and the one it copied.
     pub foreign: Vec<(Txid, Txid)>,
     /// Another writer's file the operator removed, by its index in
@@ -304,6 +306,7 @@ impl World {
             model: Model::new(initial),
             acked: Acked::new(),
             lost: BTreeSet::new(),
+            resurrected: 0,
             foreign: Vec::new(),
             foreign_removed: Vec::new(),
             foreign_put: Vec::new(),
@@ -516,6 +519,7 @@ impl World {
                 .unwrap_or_default();
                 self.model
                     .on_power_loss(self.sqlite.salts(), self.sqlite.mx_frame());
+                self.adopt_recovered();
                 self.acked.note_rewound();
                 lost
             }
@@ -848,6 +852,23 @@ impl World {
             end: WalOffset::from_frame_index(self.sqlite.mx_frame(), page_size),
         };
         self.model.vacuum(image, app, self.remote_recorder.len());
+    }
+
+    /// The rules' database after a power loss is SQLite's own recovery of the
+    /// bytes the loss left, which may bring back a commit a previous loss took
+    /// ([`Model::adopt_recovered`]); one no commit made is left for the
+    /// model check to report.
+    fn adopt_recovered(&mut self) {
+        let page_size = self.sqlite.page_size();
+        let app = AppCommit {
+            salts: self.sqlite.salts(),
+            end: WalOffset::from_frame_index(self.sqlite.mx_frame(), page_size),
+        };
+        let image = self.sqlite.image();
+        let at = self.remote_recorder.len();
+        if let Recovery::Resurrected(_) = self.model.adopt_recovered(&image, false, app, at) {
+            self.resurrected = self.resurrected.saturating_add(1);
+        }
     }
 
     /// Whether the model's newest image is the database the rules hold: a check
