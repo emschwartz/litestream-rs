@@ -161,11 +161,12 @@ sqlite-big:
 # The VFS test's C application needs a SQLite with sqlite3_load_extension. It takes SQLITE3_CFLAGS and
 # SQLITE3_LIBS when set, then on macOS Homebrew's (`brew install sqlite`; the system one lacks
 # the function), then `pkg-config sqlite3`, then plain -lsqlite3 (crates/compat/src/vfs.rs).
-# The test map's counterpart check is ignored too, but it needs the listing upstream-test-map-fresh writes.
+# The test map's counterpart check and the evidence and behaviour citation checks are ignored too, but they
+# need the listings upstream-test-map-fresh and evidence-fresh write, and run there (both in check).
 # The s3:: tests need MinIO, so they belong to compat-s3, which starts it; here they would fail closed.
 compat:
     ./scripts/build-go-litestream.sh
-    cargo nextest run -p lsr-compat --run-ignored all --locked -E 'not test(=upstream_test_map::every_counterpart_exists) and not test(/^s3::/)'
+    cargo nextest run -p lsr-compat --run-ignored all --locked -E 'not test(=upstream_test_map::every_counterpart_exists) and not test(=evidence::every_cited_test_exists_and_runs_where_it_says) and not test(=behavior::every_behavior_citation_resolves) and not test(/^s3::/)'
 
 # Build the named Go versions (tags, commits, `releases` for every v0.5.N tag, `main` for
 # upstream's newest staged file) and run the live tests over exactly those: just compat-live v0.5.3 main.
