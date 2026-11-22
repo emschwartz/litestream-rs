@@ -36,6 +36,50 @@
 //! at start (Go leaves no reliable local sign, and `start` makes no store call); it is caught
 //! when the replica shows files above the local newest staged file, which stops the replicator by default
 //! (`Responses::GO_LIKE`, `other_writer: Stop`).
+//!
+//! # Example
+//!
+//! The whole life of a replicator, against a directory replica. An S3 replica differs only in
+//! the store: `Arc::new(lsr_store_s3::S3Store::new(config, credentials)?)`. The README's
+//! quick start is this example.
+//!
+//! ```
+//! use std::sync::Arc;
+//! use std::time::Duration;
+//!
+//! use lsr_replica::{Config, DynStore, Replicator, RestoreTarget, Stopped, restore};
+//! use lsr_store_fs::FsStore;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # let dir = tempfile::tempdir()?;
+//! # let db = dir.path().join("app.db");
+//! # let replica = dir.path().join("replica");
+//! // The database file exists before the replicator starts.
+//! let setup = rusqlite::Connection::open(&db)?;
+//! setup.query_row("PRAGMA journal_mode = wal", [], |_row| Ok(()))?;
+//! drop(setup);
+//!
+//! // One store, one replicator per database, started before the application's connections open.
+//! let store: Arc<dyn DynStore> = Arc::new(FsStore::new(&replica));
+//! let replicator = Replicator::start(&db, Arc::clone(&store), Config::default())?;
+//!
+//! // Every application connection: keep the WAL file, and leave checkpoints to the replicator.
+//! let app = rusqlite::Connection::open(&db)?;
+//! replicator.app_connection(&app)?;
+//! app.execute_batch("CREATE TABLE t(v); INSERT INTO t VALUES (1);")?;
+//!
+//! // At shutdown, after the writers finish: upload everything committed, or say what is left.
+//! let stopped = replicator.stop(Duration::from_secs(30)).wait();
+//! assert!(matches!(stopped, Stopped::Drained { txid: Some(_) }));
+//!
+//! // A restore is a free function. It builds a new file and never touches an existing one.
+//! let restored = dir.path().join("restored.db");
+//! restore(&*store, RestoreTarget::Latest, &restored)?;
+//! # let copy = rusqlite::Connection::open(&restored)?;
+//! # assert_eq!(copy.query_row("SELECT v FROM t", [], |row| row.get::<_, i64>(0))?, 1);
+//! # Ok(())
+//! # }
+//! ```
 
 #![forbid(unsafe_code)]
 
