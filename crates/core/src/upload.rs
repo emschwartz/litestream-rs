@@ -784,24 +784,33 @@ async fn put_step<L: ObjectStore, S: ObjectStore>(
     let key = token.key();
     match put_staged(staging, remote, token, WriteMode::New).await {
         Err(PutError::Taken) => taken(state, staging, remote, token, newest_staged).await,
-        outcome => settle_put(state, remote, key, outcome).await,
+        outcome => settle_put(state, remote, key, outcome, WriteMode::New).await,
     }
 }
 
-/// The state and step a put's outcome gives (a refusal is [`taken`]'s).
+/// The state and step a put's outcome gives (a refusal is [`taken`]'s);
+/// `mode` is the mode the put was written with.
 async fn settle_put<S: ObjectStore>(
     state: UploadState,
     remote: &S,
     key: FileKey,
     outcome: Result<FileInfo, PutError>,
+    mode: WriteMode,
 ) -> Result<Uploaded, UploadFailed> {
     match outcome {
         Ok(info) => Ok(put_done(key, info)),
         Err(PutError::Before(fault)) => Err(fail(state, fault)),
         Err(PutError::Rejected(fault)) => {
-            // Best effort: the retry replaces the key either way, and a boot
-            // listing reads it back, so a failed delete costs only visibility.
-            drop(remote.delete(&[key]).await);
+            // A rejected create-only write created the object it rejects (the
+            // bucket refuses a taken key before it takes any bytes), so the
+            // object is this attempt's and it goes. Best effort: the retry
+            // replaces the key either way, and a boot listing reads it back,
+            // so a failed delete costs only visibility. A write that may
+            // have replaced an object deletes nothing: a delete after a
+            // failed write never takes a key that held something before it.
+            if mode == WriteMode::New {
+                drop(remote.delete(&[key]).await);
+            }
             Err(fail(state, fault))
         }
         Err(PutError::Commit(fault)) => Err(fail(list_first(state), fault)),
@@ -849,7 +858,7 @@ async fn taken<L: ObjectStore, S: ObjectStore>(
     }
     if remote_torn(remote, &key).await.map_err(relist)? {
         let outcome = put_staged(staging, remote, token, WriteMode::Replace).await;
-        return settle_put(state, remote, key, outcome).await;
+        return settle_put(state, remote, key, outcome, WriteMode::Replace).await;
     }
     // Both verify: a second compare decides, as the listing's read-back does.
     if same_bytes(staging, remote, &key).await.map_err(relist)? {

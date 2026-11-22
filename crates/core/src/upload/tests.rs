@@ -1581,3 +1581,30 @@ fn a_put_that_lands_after_the_relist_found_nothing_is_confirmed_not_written_twic
 }
 
 mod endless;
+
+/// A rejected write deletes only an object it created. A create-only put
+/// creates its key or is refused, so its rejected object is its own; a put that
+/// replaces an object (here a torn one the replica held) deletes nothing when
+/// the store rejects it, and the retry writes the key again.
+#[test]
+fn a_rejected_write_over_an_object_that_was_there_deletes_nothing() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    stage(&staging, 1);
+    put_bytes(&remote.inner, key(1), b"torn");
+    // The create-only put is refused (its queued answer goes unused, since the
+    // refusal comes first); the replace over the torn object is taken and then
+    // rejected.
+    remote.log().commit_after.push_back(transient());
+    remote.log().commit_after.push_back(StoreError::Corrupt {
+        key: Some(key(1)),
+        cause: CorruptCause::ChecksumMismatch { part: None },
+    });
+    let failed = failure(next(UploadState::At(None), &staging, &remote, 1));
+    assert_eq!(failed.fault, Fault::UploadChecksumMismatch);
+    assert_eq!(remote.log().modes, [WriteMode::New, WriteMode::Replace]);
+    assert!(
+        remote.log().deletes.is_empty(),
+        "{:?}",
+        remote.log().deletes
+    );
+}
