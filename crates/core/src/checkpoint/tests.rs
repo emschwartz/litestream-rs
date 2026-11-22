@@ -500,6 +500,38 @@ fn a_busy_passive_reports_busy() {
     assert_eq!(done.outcome, CheckpointOutcome::Busy);
 }
 
+/// A file the seal stages that changes no page the table holds is reported quiet, so
+/// fail-stop does not count it as a commit; a file that changes a page is not.
+#[test]
+fn a_seal_that_changes_no_page_is_reported_quiet() {
+    let mut rig = Rig::new();
+    let proof = rig.proof();
+    // The same bytes again on page 2: a write that changes nothing.
+    rig.commit(&[2]);
+    let mut table = PageChecksumTable::new();
+    table.fit(PS);
+    table.record(pg(2), lsr_ltx::PageChecksum::of(pg(2), &[2; 512]));
+    let done = block_on(checkpoint(
+        proof,
+        CheckpointMode::Passive,
+        &mut rig.wal,
+        &mut rig.db,
+        &mut table,
+        &mut rig.ck,
+        &rig.store,
+        &SyncConfig::default(),
+        &crate::env::FakeClock::new(ts(5000)),
+    ))
+    .unwrap();
+    let files: Vec<FileKey> = done.staged.files().iter().map(|f| f.key).collect();
+    assert_eq!(files.len(), 2, "the seal and the new generation");
+    assert_eq!(
+        done.staged.quiet(),
+        &files[..1],
+        "only the seal: the bump writes a page the table does not hold"
+    );
+}
+
 #[test]
 fn a_passive_that_restarts_the_wal_starts_a_new_generation_file() {
     let mut rig = Rig::new();

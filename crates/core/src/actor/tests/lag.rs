@@ -588,3 +588,19 @@ fn a_commit_after_a_doubt_at_boot_is_lag() {
     assert!(actor.unreplicated_since().is_some());
     assert!(first_trip(&seen).is_some(), "{seen:?}");
 }
+
+/// A wal-index that cannot be read says nothing new: frames the clock dated stay dated, not
+/// forgotten, and not dated again from the next sighting.
+#[test]
+fn an_unreadable_wal_index_keeps_the_date_of_unstaged_frames() {
+    let (mut rig, mut actor) = caught_up();
+    rig.commit(9);
+    // The sync's read fails; the clock's own read after it sees the frames.
+    rig.wal.inject(SourceOp::Committed, SourceError::Busy);
+    rig.tick(&mut actor, T0 + 10);
+    let since = actor.unreplicated_since().expect("the frames are dated");
+    // Before the sync's retry: only the clock reads, and that read fails.
+    rig.wal.inject(SourceOp::Committed, SourceError::Busy);
+    rig.tick(&mut actor, T0 + 20);
+    assert_eq!(actor.unreplicated_since(), Some(since));
+}
