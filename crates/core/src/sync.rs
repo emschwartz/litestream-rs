@@ -38,7 +38,7 @@ use crate::layout::{FileInfo, FileKey, Level};
 use crate::pages::{PageChecksumTable, snapshot_clears};
 use crate::position::{Continuity, LastPage, Position, ReachedEnd, ReadLockHold};
 use crate::recover::Recovered;
-use crate::source::{CommittedRead, PageSource};
+use crate::source::{CommittedRead, PageSource, WalSource};
 use crate::store::{ObjectStore, StoreError, Upload};
 
 /// Go's default cap on the WAL bytes one file covers (`db.go:33-40`).
@@ -514,6 +514,23 @@ pub(crate) async fn stage<R: Read + Seek, P: PageSource, L: ObjectStore>(
             Err(fault)
         }
     }
+}
+
+/// The durability barrier: syncs the WAL after the committed read `_after`
+/// was taken and before any frame it counts is staged.
+///
+/// SQLite under `synchronous = NORMAL` leaves committed frames unsynced until
+/// its next checkpoint. Staging them unsynced would make the replica more
+/// durable than the database: a power loss rewinds the database below what
+/// the bucket holds, and the application's next commits fork history under
+/// the same salts. A frame is written before the commit that counts it lands
+/// in the wal-index, so one sync after the read covers every frame the read
+/// counts. The read is an argument so the order is the caller's to show.
+///
+/// # Errors
+/// [`Fault::LocalFsyncFailed`] when the sync failed; the step stages nothing.
+pub(crate) fn wal_barrier<W: WalSource>(wal: &mut W, _after: &CommittedRead) -> Result<(), Fault> {
+    wal.sync().map_err(Fault::from_source)
 }
 
 /// Scans the WAL from `step`'s start and stages one file, or none when nothing is new.

@@ -1697,6 +1697,7 @@ mod no_wal_yet;
 mod pages;
 mod rejected_snapshot;
 mod tasks;
+mod wal_barrier;
 
 /// Ticks at `now` onto a staged file that fails verification for the first
 /// time: one failed read deletes nothing and the task retries. Returns when

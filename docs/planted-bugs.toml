@@ -180,3 +180,13 @@ package = "lsr-core"
 tests = [
     "a_failed_drop_after_a_divergence_uploads_nothing_built_on_it",
 ]
+
+[[bug]]
+name = "wal-barrier"
+fix = "claude/wal-barrier"
+package = "lsr-sqlite"
+test_bin = "sqlite"
+tests = [
+    "a_power_cut_after_a_settle_leaves_the_database_at_least_as_far_as_the_replica",
+    "a_failed_wal_sync_stages_nothing_and_a_later_sync_does_not_clear_it",
+]

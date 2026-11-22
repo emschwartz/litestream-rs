@@ -46,8 +46,10 @@
 //!
 //! Durability follows `synchronous=NORMAL`: a commit is not fsynced; the WAL is
 //! fsynced when a header is written (frame 1 of a generation) and before a
-//! checkpoint copies frames, and a checkpoint's database writes are durable. A
-//! power crash keeps the WAL as of its last fsync and runs SQLite's recovery.
+//! checkpoint copies frames, and a checkpoint's database writes are durable. Our
+//! own `WalSource::sync` (the engine's barrier before staging) makes the whole
+//! WAL durable too. A power crash keeps the WAL as of its last fsync and runs
+//! SQLite's recovery.
 //!
 //! Every method is total: an operation that is impossible in the current state
 //! returns `false` or `None` and changes nothing. Nothing reads a clock; the
@@ -234,6 +236,8 @@ struct State {
     wal: Vec<u8>,
     // The WAL as of its last fsync.
     durable: Vec<u8>,
+    // Our sync of the WAL returns success and makes nothing durable: a disk that lies.
+    our_sync_lies: bool,
     present: bool,
     unlinked: bool,
     index: Index,
@@ -903,6 +907,7 @@ impl SimSqlite {
             write_lock: None,
             faults: Faults::default(),
             app_autocheckpoint: None,
+            our_sync_lies: false,
             app_auto: AutoTally::default(),
             in_tick: None,
             in_tick_done: None,
@@ -1013,6 +1018,12 @@ impl SimSqlite {
             state.in_tick = None;
             state.in_tick_done.take()
         })
+    }
+
+    /// From now on our sync of the WAL (the engine's barrier before staging) succeeds and makes
+    /// nothing durable, as on a disk that lies about fsync; SQLite's own syncs still hold.
+    pub fn lie_on_our_sync(&self) {
+        self.with(|state| state.our_sync_lies = true);
     }
 
     /// The app's `wal_autocheckpoint` in frames; `None`, the model's default, is 0.
@@ -1489,6 +1500,19 @@ impl WalSource for SimSource {
 
     fn epoch(&self) -> ReadLockHold {
         lock(&self.state).epoch
+    }
+
+    fn sync(&mut self) -> Result<(), SourceError> {
+        let mut state = lock(&self.state);
+        state.faults.take(SourceOp::Sync)?;
+        if state.unlinked {
+            return Err(SourceError::Unlinked);
+        }
+        let state = &mut *state;
+        if !state.our_sync_lies {
+            state.durable.clone_from(&state.wal);
+        }
+        Ok(())
     }
 }
 

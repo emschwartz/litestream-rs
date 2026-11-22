@@ -74,6 +74,68 @@ pub(crate) fn file_pointer(
     NonNull::new(file).ok_or(Refusal::FileNotOpen)
 }
 
+type XSync = unsafe extern "C" fn(*mut ffi::sqlite3_file, c_int) -> c_int;
+
+/// Why [`sync_wal`] did not make the WAL durable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WalSync {
+    /// The connection has no open WAL file to sync: nothing was asked of the disk.
+    NoWal,
+    /// The VFS's `xSync` answered this result code.
+    Failed(c_int),
+}
+
+/// Syncs `conn`'s own WAL descriptor through its VFS's `xSync`, with `SQLITE_SYNC_FULL`
+/// (`F_FULLFSYNC` on macOS, `fsync` elsewhere in the unix VFS).
+///
+/// `SQLITE_FCNTL_JOURNAL_POINTER` hands out the pager's WAL file in WAL mode. That descriptor
+/// is this connection's alone and open for its whole life, so the kernel reports to it every
+/// writeback error on the WAL since it was opened, once, whichever other descriptor saw it
+/// first; a descriptor opened per sync would miss an error an application's checkpoint had
+/// already been told of. Going through the VFS also means a test VFS sees the sync, as it sees
+/// SQLite's own.
+#[expect(
+    unsafe_code,
+    reason = "SQLITE_FCNTL_JOURNAL_POINTER has no safe wrapper, and xSync is a call through the VFS"
+)]
+pub(crate) fn sync_wal(conn: &Connection) -> Result<(), WalSync> {
+    let mut file: *mut ffi::sqlite3_file = ptr::null_mut();
+    let db = handle(conn);
+    // SAFETY: a live handle, a NUL-terminated name, and JOURNAL_POINTER writes exactly one
+    // `sqlite3_file*` through its argument.
+    let rc = unsafe {
+        ffi::sqlite3_file_control(
+            db,
+            rusqlite::MAIN_DB.as_ptr(),
+            ffi::SQLITE_FCNTL_JOURNAL_POINTER,
+            (&raw mut file).cast::<c_void>(),
+        )
+    };
+    let file = NonNull::new(file)
+        .filter(|_| rc == ffi::SQLITE_OK)
+        .ok_or(WalSync::NoWal)?;
+    // SAFETY: `file` points to a live `sqlite3_file`, whose first field is `pMethods`.
+    let methods = unsafe { (*file.as_ptr()).pMethods };
+    if methods.is_null() {
+        return Err(WalSync::NoWal);
+    }
+    // SAFETY: `xSync` is a version 1 field, present in every table.
+    let sync = unsafe {
+        methods
+            .wrapping_byte_add(offset_of!(ffi::sqlite3_io_methods, xSync))
+            .cast::<Option<XSync>>()
+            .read()
+    }
+    .ok_or(WalSync::NoWal)?;
+    // SAFETY: the method belongs to `file`, which is live while `conn` is borrowed.
+    let rc = unsafe { sync(file.as_ptr(), ffi::SQLITE_SYNC_FULL) };
+    if rc == ffi::SQLITE_OK {
+        Ok(())
+    } else {
+        Err(WalSync::Failed(rc))
+    }
+}
+
 impl FileHandle {
     /// The methods of `file`, refused when the table predates shared memory or lacks one.
     #[expect(
