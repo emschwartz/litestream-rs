@@ -32,7 +32,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D22 | The bound for "unreplicated too long"? | 10 minutes, minimum 5, no byte bound | Fable, **delegated** | 2026-11-22 | open to owner review |
 | D23 | A delete without a directory sync: fix or argue harmless? | Fix | project rule: found defects are fixed (#116) | 2026-11-22 | decided |
 | D24 | Names for store refusals and the error format | Four cause names, "{op} refused: {why}" | owner (#108) | 2026-11-22 | decided |
-| D25 | How is an unusable KMS key reported? | As a permission refusal, `permission_denied` | Claude, **delegated** | 2026-11-22 | open to owner review |
+| D32 | How is an unusable KMS key reported? | As a permission refusal, `permission_denied` | Claude, **delegated** | 2026-11-22 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -254,7 +254,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Revisit if:** a store returns a refusal that fits none of them.
 - **Links:** #108 (merged).
 
-## D25. An unusable KMS key is a permission refusal
+## D32. An unusable KMS key is a permission refusal
 
 - **Question:** S3 answers a request whose KMS key is disabled, missing, in the wrong state or of the wrong kind with a 400 and a `KMS.*` code (`KMS.DisabledException`, `KMS.InvalidKeyUsageException`, `KMS.KMSInvalidStateException`, `KMS.NotFoundException`, from S3's published error list). How is it reported?
 - **Choice:** `Denied::Permission`, health name `permission_denied`, the same kind as a KMS key policy that refuses (403 `AccessDenied`).
