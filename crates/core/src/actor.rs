@@ -632,8 +632,14 @@ impl Actor {
             Action::Stop | Action::Retry => waiter,
             Action::Relist => {
                 // What the replica was known to hold is gone from it: the
-                // retry lists it and continues from what it holds now.
+                // retry lists it and continues from what it holds now. Every
+                // fact taken from a listing goes with it (level 1's cover,
+                // which bounds the staged files a prune may delete, and the
+                // next maintenance listing is owed now); the acknowledged
+                // mark stays, so no snapshot takes an acknowledged id again.
                 self.engine.upload = UploadState::ListFirst { confirmed: None };
+                self.engine.maintain.level_one = None;
+                self.engine.maintain.stale = true;
                 waiter
             }
             Action::Rebuild => {
@@ -773,6 +779,7 @@ impl Actor {
             page_size,
             pages,
             upload,
+            acknowledged: upload.confirmed(),
             checkpoint: CheckpointState::boot(now),
             ..Engine::fresh()
         };
@@ -913,9 +920,17 @@ impl Actor {
         plan_upload(&self.engine.upload, self.staged()) == UploadPlan::Idle
     }
 
-    /// The newest transaction anything has: a snapshot follows it.
+    /// The newest transaction anything has, or had: a snapshot follows it.
     fn snapshot_after(&self) -> Option<Txid> {
-        self.staged().max(self.engine.upload.confirmed())
+        self.staged()
+            .max(self.engine.upload.confirmed())
+            .max(self.engine.acknowledged)
+    }
+
+    /// Takes the upload state a step left, raising the acknowledged mark.
+    fn set_upload(&mut self, state: UploadState) {
+        self.engine.upload = state;
+        self.engine.acknowledged = self.engine.acknowledged.max(state.confirmed());
     }
 
     /// The checkpoint the policy wants now, when its task and the sync task
@@ -1309,14 +1324,14 @@ impl Actor {
             let plan = plan_upload(&self.engine.upload, self.staged());
             match upload_next(self.engine.upload, env.staging, env.remote, self.staged()).await {
                 Ok(uploaded) => {
-                    self.engine.upload = uploaded.state;
+                    self.set_upload(uploaded.state);
                     if let Did::Diverged { from, .. } = uploaded.did {
                         return Some(self.lose_staged(env, from, now).await);
                     }
                     last = uploaded.did;
                 }
                 Err(failed) => {
-                    self.engine.upload = failed.state;
+                    self.set_upload(failed.state);
                     // One failed read says nothing about the staged bytes: the
                     // file is dropped only when a read on a later tick fails too.
                     if let (Fault::StagedLost, UploadPlan::Upload(key)) = (failed.fault, plan)
@@ -1368,6 +1383,15 @@ impl Actor {
     ) -> Tick {
         if let Err(fault) = drop_staged_from(env.staging, from).await {
             return self.fault(Task::Upload, fault, now);
+        }
+        // Acknowledged ids from `from` on that the replica lost (a rollback)
+        // are gone with their staged copies: they are never taken again, so
+        // the uploads resume with the snapshot above them.
+        let acknowledged = self.engine.acknowledged.filter(|ack| *ack >= from);
+        if let (Some(ack), UploadState::At(confirmed)) = (acknowledged, self.engine.upload)
+            && confirmed < Some(ack)
+        {
+            self.engine.upload = UploadState::At(Some(ack));
         }
         // The position is past `from`; a snapshot after it would leave a hole.
         let cause = SnapshotCause::NewestStagedFileUnreadable;
