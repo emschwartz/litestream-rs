@@ -58,15 +58,15 @@ mod config;
 mod retain;
 mod state;
 
-use lsr_ltx::{Timestamp, Txid};
+use lsr_ltx::{TRAILER_LEN, Timestamp, Txid};
 use thiserror::Error;
 
-use crate::compact::{CompactError, CompactionInputs, MAX_INPUTS, compact};
+use crate::compact::{CompactError, Compacted, CompactionInputs, MAX_INPUTS, compact};
 use crate::created_at::{Need, Resolve, ResolvedCreatedAt};
 use crate::inventory::{Inventory, is_snapshot_start};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::plan::PlanOutcome;
-use crate::store::{CorruptCause, ObjectStore, StoreError};
+use crate::store::{CorruptCause, ObjectStore, ReadLen, StoreError};
 use retain::{Retention, retention};
 
 pub use config::{
@@ -666,10 +666,12 @@ pub enum Outcome {
     Failed(MaintainError),
 }
 
-/// Runs one compaction. Level-1 jobs read `local` first and the replica once
-/// when an input is missing or does not decode there (the local copy may be
-/// gone after a restart, or rotten); every other level reads the replica. The
-/// output always goes to the replica. Inputs are never deleted.
+/// Runs one compaction. Level-1 jobs read `local` when every input's local
+/// copy is the replica's object ([`local_is_replica`]), and the replica
+/// otherwise or once when an input is missing or does not decode locally (the
+/// local copy may be gone after a restart, or rotten); every other level
+/// reads the replica. The output always goes to the replica. Inputs are never
+/// deleted.
 ///
 /// When the store rejected the output's commit, the output key is deleted
 /// before returning: a listing would otherwise show it as coverage.
@@ -679,12 +681,7 @@ pub(crate) async fn run_compact<L: ObjectStore, R: ObjectStore>(
     replica: &R,
 ) -> Outcome {
     let result = if job.level().get() == 1 {
-        match compact(local, replica, job.inputs(), job.level()).await {
-            Err(CompactError::InputVanished { .. } | CompactError::Input { .. }) => {
-                compact(replica, replica, job.inputs(), job.level()).await
-            }
-            other => other,
-        }
+        compact_level_one(job, local, replica).await
     } else {
         compact(replica, replica, job.inputs(), job.level()).await
     };
@@ -706,6 +703,70 @@ pub(crate) async fn run_compact<L: ObjectStore, R: ObjectStore>(
             | CompactError::Inputs(_)),
         ) => Outcome::Failed(MaintainError::Compact(err)),
     }
+}
+
+/// Level 1 from the local copies of level 0 when they are the replica's
+/// objects, from the replica otherwise.
+async fn compact_level_one<L: ObjectStore, R: ObjectStore>(
+    job: &CompactJob,
+    local: &L,
+    replica: &R,
+) -> Result<Compacted, CompactError> {
+    if !local_is_replica(local, replica, job.inputs()).await? {
+        return compact(replica, replica, job.inputs(), job.level()).await;
+    }
+    match compact(local, replica, job.inputs(), job.level()).await {
+        Err(CompactError::InputVanished { .. } | CompactError::Input { .. }) => {
+            compact(replica, replica, job.inputs(), job.level()).await
+        }
+        other => other,
+    }
+}
+
+/// Bytes read from the end of each copy: the trailer, and one more to see
+/// that the local copy ends where the replica's does.
+const TAIL: ReadLen = ReadLen::or_chunk(17);
+const _: () = assert!(matches!(TRAILER_LEN.checked_add(1), Some(17)));
+
+/// Whether every input's local copy is the replica's object under the same
+/// key: the same trailer (which holds the checksum of the whole file) at the
+/// listed size, and nothing after it. A staged file can verify and still
+/// differ (a staging backup put back, a file staged again after the replica
+/// took the first): building level 1 from it would leave the replica with two
+/// contents for one transaction, since restores read level 0 from the
+/// replica. One read of 17 bytes per input from each store; a local copy that
+/// is gone or differs answers false, and a replica object that is gone is
+/// [`CompactError::InputVanished`].
+async fn local_is_replica<L: ObjectStore, R: ObjectStore>(
+    local: &L,
+    replica: &R,
+    inputs: &CompactionInputs,
+) -> Result<bool, CompactError> {
+    let trailer = u64::try_from(TRAILER_LEN).unwrap_or(u64::MAX);
+    for info in inputs.files() {
+        let Some(at) = info.size.checked_sub(trailer) else {
+            return Ok(false);
+        };
+        let ours = match local.read(&info.key, at, TAIL).await {
+            Ok(bytes) => bytes,
+            Err(StoreError::NotFound { .. }) => return Ok(false),
+            Err(err) => return Err(CompactError::Source(err)),
+        };
+        if ours.len() != TRAILER_LEN {
+            return Ok(false);
+        }
+        let theirs = match replica.read(&info.key, at, TAIL).await {
+            Ok(bytes) => bytes,
+            Err(StoreError::NotFound { .. }) => {
+                return Err(CompactError::InputVanished { key: info.key });
+            }
+            Err(err) => return Err(CompactError::Source(err)),
+        };
+        if ours != theirs {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Whether a failed destination commit may have left an object under the output

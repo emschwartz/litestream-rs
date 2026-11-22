@@ -1190,25 +1190,30 @@ fn a_compact_job_publishes_its_output_key_and_is_not_planned_again() {
     no_level_one_job(&replica);
 }
 
+/// The replica's objects keep their trailers but have a page byte flipped,
+/// so they do not decode: the compaction succeeds only if it read the local
+/// copies, after comparing the trailers.
 #[test]
 fn level_one_reads_the_local_copy_first() {
     let (local, replica) = (MemStore::new(), MemStore::new());
     three_l0(&local, &MemStore::new());
     for n in 1..=3 {
-        // The replica's listing names the files; its bytes are never read.
-        put(&replica, 0, n, T0 - 100_000);
+        let created = T0 - 100_000 + i64::try_from(n).unwrap();
+        let mut bytes = ltx(n, n, created);
+        let middle = bytes.len() / 2;
+        bytes[middle] ^= 0xff;
+        block_on(async {
+            let mut up = replica
+                .begin_upload(&key(0, n, n), at(created))
+                .await
+                .unwrap();
+            up.write(&bytes).await.unwrap();
+            up.commit().await.unwrap();
+        });
     }
     let job = l1_job(&replica);
-    block_on(async {
-        replica
-            .delete(&[key(0, 1, 1), key(0, 2, 2), key(0, 3, 3)])
-            .await
-            .unwrap();
-    });
-    assert!(matches!(
-        block_on(run_compact(&job, &local, &replica)),
-        Outcome::Compacted { .. }
-    ));
+    let out = block_on(run_compact(&job, &local, &replica));
+    assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
 }
 
 #[test]
