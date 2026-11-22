@@ -27,6 +27,7 @@ use crate::history::History;
 use crate::model::{CommitId, Model, PageImage, Recovery};
 use crate::oracle::{Acked, Checked, Ground, Violation, Windows, check_with};
 use crate::seed::Seed;
+use crate::side::SqliteSide;
 use crate::sqlite::{AppCommit, CrashKind, InTickSite, OtherProcessMode, SimSqlite};
 use crate::staging::StagingRaw;
 use crate::store::{
@@ -233,8 +234,9 @@ pub struct CommittedInTick {
 pub struct World {
     /// The seed the run came from.
     pub seed: Seed,
-    /// SQLite's rules.
-    pub sqlite: SimSqlite,
+    /// The SQLite the engine runs against, through the seam (`crate::side`): the rule model,
+    /// for now the only backend.
+    pub sqlite: Arc<dyn SqliteSide>,
     /// The driver's clock: it moves between ticks, and the recorders read it.
     pub clock: Arc<FakeClock>,
     /// The clock the actor and the app read inside a tick, over [`Self::clock`]
@@ -347,7 +349,7 @@ impl World {
         ));
         Self {
             seed,
-            sqlite,
+            sqlite: Arc::new(sqlite),
             clock,
             sim_clock,
             high,
