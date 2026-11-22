@@ -290,7 +290,7 @@ fn config_text(base: &Path, root: &Path, case: &Case) -> String {
         }
         Replica::S3Url => text.push_str("      url: s3://bucket/some/prefix\n"),
         // Always with a prefix: an empty one is refused on purpose, `dir` or not, where Go
-        // writes keys with a leading slash (CFG-18, D150).
+        // writes keys with a leading slash (CFG-18, D40).
         Replica::S3Bucket => text.push_str(
             "      type: s3\n      bucket: bucket\n      path: pre\n      region: us-east-1\n",
         ),
