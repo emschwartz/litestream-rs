@@ -48,7 +48,6 @@ pub const REQUIRED: &[&str] = &[
     "snapshot.GenerationChanged",
     "snapshot.PrevFrameMismatch",
     "snapshot.LastPageMismatch",
-    "snapshot.LocalRewound",
     // The liveness oracle's other two judgments: an operator's snapshot is
     // judged when staged, and every staged file given up is judged.
     "snapshot.staged.OperatorRequested",
@@ -94,7 +93,10 @@ pub const WATCHED: &[&str] = &[
     "check.asof.fallback",                // an as-of with no file at or before it
     "check.damaged",                      // a restore stopped by a file a corrupt publish damaged
     "snapshot.staged.CheckpointBoundary", // the engine's own TRUNCATE checkpoint, never judged
-    "staged.Dropped",                     // a staged file gone whole after a power loss
+    // The WAL is synced before staging, so a drawn history cannot rewind below what was staged;
+    // only a disk that lies about that sync can, and only scenarios draw one.
+    "snapshot.LocalRewound",
+    "staged.Dropped", // a staged file gone whole after a power loss
 ];
 
 /// Counts of the states one run, or many summed, reached.

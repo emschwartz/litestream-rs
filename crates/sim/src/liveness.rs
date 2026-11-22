@@ -83,6 +83,9 @@ pub enum Justifier {
     ReadLockLapsed,
     /// The operator asked for a snapshot.
     SnapshotRequested,
+    /// The disk lies about the engine's own fsync of the WAL: a power loss
+    /// can then take what was staged from it. The lie lasts the run.
+    LyingDisk,
 }
 
 /// When a justifier stops counting.
@@ -95,6 +98,8 @@ pub enum Forgotten {
     AtUpload,
     /// Once an operator's snapshot is staged.
     AtRequestedSnapshot,
+    /// Never: the condition lasts the run.
+    Never,
 }
 
 impl Justifier {
@@ -108,6 +113,7 @@ impl Justifier {
             | Self::StagingEdited
             | Self::StagingFault => Forgotten::AtUpload,
             Self::SnapshotRequested => Forgotten::AtRequestedSnapshot,
+            Self::LyingDisk => Forgotten::Never,
             Self::RunStart
             | Self::PowerLoss
             | Self::StagedDropped
@@ -137,9 +143,9 @@ const GIVE_UP: &[Justifier] = &[
 #[must_use]
 pub const fn justifies(cause: SnapshotCauseKind, at_boot: bool) -> Option<&'static [Justifier]> {
     use Justifier::{
-        PositionUnproven, PowerLoss, ReadLockLapsed, RemoteEdited, RemoteFault, RunStart,
-        SnapshotRequested, StagedDropped, StagedLost, StagingEdited, StagingFault, WalDamaged,
-        WalEmptied, WalRestarted,
+        LyingDisk, PositionUnproven, PowerLoss, ReadLockLapsed, RemoteEdited, RemoteFault,
+        RunStart, SnapshotRequested, StagedDropped, StagedLost, StagingEdited, StagingFault,
+        WalDamaged, WalEmptied, WalRestarted,
     };
     Some(match cause {
         // Nothing staged and nothing on the replica to continue from.
@@ -204,7 +210,10 @@ pub const fn justifies(cause: SnapshotCauseKind, at_boot: bool) -> Option<&'stat
             StagedLost,
             StagedDropped,
         ],
-        SnapshotCauseKind::LocalRewound => &[PowerLoss, WalDamaged, StagingEdited],
+        // The engine syncs the WAL before it stages from it, so an honest
+        // power loss cannot take what was staged: only a disk that lies about
+        // that sync, damage, or a staging backup put back can.
+        SnapshotCauseKind::LocalRewound => &[LyingDisk, WalDamaged, StagingEdited],
         SnapshotCauseKind::CheckpointBoundary => return None,
         SnapshotCauseKind::OperatorRequested => &[SnapshotRequested],
     })
@@ -222,6 +231,7 @@ pub const fn of_op(op: &Op) -> &'static [Justifier] {
         Op::Remote(_) | Op::SecondWriter { .. } => &[Justifier::RemoteEdited],
         Op::OurReader { begin: false } => &[Justifier::ReadLockLapsed],
         Op::RequestSnapshot => &[Justifier::SnapshotRequested],
+        Op::LyingWalSync => &[Justifier::LyingDisk],
         Op::Commit { .. }
         | Op::CommitInTick { .. }
         | Op::Spill
@@ -427,6 +437,7 @@ impl Liveness {
             Forgotten::AtStaging => !staged.any,
             Forgotten::AtUpload => !caught_up,
             Forgotten::AtRequestedSnapshot => requested == 0,
+            Forgotten::Never => true,
         });
         self.window.append(&mut self.in_tick);
         Ok(())
@@ -620,7 +631,7 @@ mod tests {
         let mut live = Liveness::new();
         let mut reach = Reach::default();
         live.window.clear();
-        live.note(Justifier::PowerLoss);
+        live.note(Justifier::LyingDisk);
         live.judge(SnapshotCauseKind::LocalRewound, true, &mut reach)
             .unwrap();
         live.window.clear();
