@@ -433,6 +433,7 @@ impl Runner {
                 staging: &staging,
                 remote: &remote,
                 clock: clock.as_ref(),
+                journal: None,
             };
             actor.tick(env, now).await
         };

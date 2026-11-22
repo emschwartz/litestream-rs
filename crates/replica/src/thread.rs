@@ -364,6 +364,7 @@ impl Worker {
             staging: &self.staging,
             remote: &self.remote,
             clock: self.runtime.clock.as_ref(),
+            journal: None,
         };
         Ok(block_on(self.actor.tick(env, now)))
     }

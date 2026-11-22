@@ -20,7 +20,7 @@
 use std::io::ErrorKind;
 
 use lsr_journal::{
-    FILE, Journal, Opened, Parsed, SLOT, Seq, Slot, SlotRead, Verdict, encode, parse,
+    FILE, Journal, Opened, Parsed, SLOT, Seq, Slot, SlotRead, Verdict, Why, encode, parse,
 };
 
 use crate::fault::{BugSite, Fault};
@@ -69,6 +69,65 @@ pub trait JournalFile {
     ///
     /// The operating system's.
     fn sync_dir(&mut self) -> Result<(), ErrorKind>;
+}
+
+impl<T: JournalFile + ?Sized> JournalFile for &mut T {
+    fn open(&mut self) -> Result<(), ErrorKind> {
+        (**self).open()
+    }
+
+    fn read_slot(&mut self, slot: Slot) -> Result<Option<[u8; SLOT]>, ErrorKind> {
+        (**self).read_slot(slot)
+    }
+
+    fn create(&mut self) -> Result<(), ErrorKind> {
+        (**self).create()
+    }
+
+    fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<(), ErrorKind> {
+        (**self).write_at(offset, bytes)
+    }
+
+    fn sync(&mut self) -> Result<(), ErrorKind> {
+        (**self).sync()
+    }
+
+    fn sync_dir(&mut self) -> Result<(), ErrorKind> {
+        (**self).sync_dir()
+    }
+}
+
+/// What boot's read of the journal reports (health names `JournalMissing`, `JournalUnreadable`,
+/// `JournalNewer`, `JournalSlotUnreadable`). Each is an event, never a cost: the engine runs as
+/// it would with no journal at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JournalSignal {
+    /// No journal, while staging or the replica holds files: an upgrade, a meta directory
+    /// inherited from Go or not kept, or a deleted journal. No observation separates them.
+    Missing,
+    /// A journal that holds no record this binary can read.
+    Unreadable(Why),
+    /// The newest record is from a newer version.
+    Newer {
+        /// Its version.
+        version: u16,
+    },
+    /// A slot failed to read: the record read may be older than the newest one written.
+    SlotUnreadable,
+}
+
+/// Boot's judgement of the journal it read: `fresh` when staging and the replica are both
+/// empty, so a missing journal is a first run and reports nothing.
+#[must_use]
+pub fn judge(parsed: &Parsed, fresh: bool) -> Option<JournalSignal> {
+    match parsed.verdict {
+        Verdict::Missing if fresh => None,
+        Verdict::Missing => Some(JournalSignal::Missing),
+        Verdict::Unreadable(why) => Some(JournalSignal::Unreadable(why)),
+        Verdict::Newer { version, .. } => Some(JournalSignal::Newer { version }),
+        Verdict::Read { .. } if parsed.slot_failed => Some(JournalSignal::SlotUnreadable),
+        Verdict::Read { .. } => None,
+    }
 }
 
 /// Why a record was not made durable.
