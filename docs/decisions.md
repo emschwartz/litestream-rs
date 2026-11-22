@@ -41,6 +41,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D31 | Must a PR re-merge main and re-run CI before it lands? | No while churn is high: merge on the PR's own green; main's CI integrates; fix forward | owner | 2026-11-22 | decided |
 | D32 | How is an unusable KMS key reported? | As a permission refusal, `permission_denied` | Claude, **delegated** | 2026-11-22 | open to owner review |
 | D33 | Narrow the Go drop-in surface to shrink unverified code? | No: full drop-in; bring config, CLI and sidecar under behaviour rows and Go differentials | owner | 2026-11-22 | decided |
+| D35 | When may the simulator accept a task still stalled at the end of a run? | Only while the world still imposes the stall's fault; the excuse table is empty today | Claude (stall-liveness), **delegated** | 2026-11-22 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -341,6 +342,15 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** about 9,200 production lines stay, and need differential harnesses against Go.
 - **Revisit if:** a Go behaviour on this surface would lose data. Then ours differs, with its own entry here.
 - **Links:** #121 (cuts 2, 4 and 5 withdrawn), docs/release-bar.md.
+
+## D35. A stall at the end of a run
+
+- **Options:** accept any stall as a degraded state (before); fail any stall once every injected fault has healed; fail it unless the world still imposes its fault.
+- **Choice:** at the end of the final drain and after idle's settle window, a task still stalled fails the run (oracle `StuckRetrying`) unless an exhaustive table says the world still imposes that stall's fault. The table has no entry today. The run's end also heals the SQLite source failures still queued.
+- **Why:** an engine stuck retrying a fault nothing causes any more, or reporting degraded for nothing, passed before.
+- **Cost accepted:** a fault the world keeps imposing after the heal (none today) needs a table entry, or its runs fail.
+- **Revisit if:** a fault is added that the end of the run cannot heal.
+- **Links:** the stall-liveness PR; #104.
 
 ## Unverified, not recorded
 
