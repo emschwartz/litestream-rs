@@ -9,6 +9,13 @@
 //! reboot and at the end, the replica is restored for real (`lsr_replica::restore_with` into a
 //! file) and judged by `lsr_history` through SQLite alone.
 //!
+//! After each reboot, before the new engine runs, the application does what its run drew from a
+//! stream of its own ([`AfterReboot`], frozen in a commit of its own before its first campaign):
+//! nothing, as before it existed; a redo of its last `K` rows, the same rows with the same
+//! payloads written again as upserts, as a job runner replays work it cannot prove finished; or
+//! new rows until the chain is longer than it was before the loss. A run that draws nothing is
+//! the run it was.
+//!
 //! The rig's power loss is the VFS's disk law: undo every write since a file's last sync. A
 //! different law (a block-subset crash law, say) plugs in under the VFS with nothing here
 //! changing: the judge never learns what the disk did, only what the application saw and what
@@ -19,13 +26,58 @@ use lsr_history::{AheadMode, Counts, Judge, Log, chain};
 use lsr_sqlite::Sqlite;
 use lsr_sqlite::testing::{Effect, Fault, FileKind, Op, Rig, RigConfig, RigError};
 use lsr_store_fs::FsStore;
+use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 use tempfile::TempDir;
 
 use crate::real::{Rng, Scratch, judge};
 
+/// The rows a redo replays at most.
+const REDO_MAX: u64 = 16;
+
+/// What the application does after a reboot, drawn per run, a third each.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AfterReboot {
+    /// Nothing.
+    Nothing,
+    /// Writes its last `K` attempted rows again (1 to [`REDO_MAX`], drawn per reboot), oldest
+    /// first, as upserts with the same row and payload: rows the database still holds get the
+    /// bytes already there, and the chain regrows where the loss cut it. A row past a gap is not
+    /// written: the chain cannot hold it.
+    Redo,
+    /// Commits one row more than the loss took, and up to 7 more.
+    Busy,
+}
+
+struct App {
+    behaviour: AfterReboot,
+    rng: Rng,
+    /// The newest attempt at each row number: the row's chain and payload.
+    attempted: BTreeMap<u64, (chain::Chain, Vec<u8>)>,
+    /// Rows written again, rows that regrew the chain past the loss, and busy rows.
+    counts: [u64; 3],
+}
+
+impl App {
+    fn new(seed: u64) -> Self {
+        let mut rng = Rng::new(seed ^ 0x7265_646f_0b05_7902);
+        let behaviour = match rng.below(3) {
+            0 => AfterReboot::Nothing,
+            1 => AfterReboot::Redo,
+            _ => AfterReboot::Busy,
+        };
+        Self {
+            behaviour,
+            rng,
+            attempted: BTreeMap::new(),
+            counts: [0; 3],
+        }
+    }
+}
+
 struct Run {
     rig: Rig<Sqlite>,
+    app: App,
     log: Log,
     judge: Judge,
     tip: chain::Chain,
@@ -49,6 +101,7 @@ impl Run {
         let start = rig.clock().now().unix_millis();
         let tip = chain::Chain::new();
         Self {
+            app: App::new(seed),
             log: Log::new(tip.digest(), start),
             judge: Judge::new(AheadMode::Count),
             scratch: Scratch::new(&dir.path().join("restores")),
@@ -67,8 +120,25 @@ impl Run {
     /// One chain row. SQLite's answer decides what the log records: acknowledged, or unknown.
     fn commit(&mut self) {
         let payload = self.rng.payload();
-        let next = self.tip.next(&payload);
-        match self.rig.exec(&next.insert_sql(&payload)) {
+        self.write(&payload, false);
+    }
+
+    /// Writes the row after the tip with `payload`, as an upsert when `upsert`.
+    fn write(&mut self, payload: &[u8], upsert: bool) {
+        let next = self.tip.next(payload);
+        if self.app.behaviour == AfterReboot::Redo {
+            self.app
+                .attempted
+                .insert(next.k(), (next, payload.to_vec()));
+            while u64::try_from(self.app.attempted.len()).unwrap() > REDO_MAX {
+                self.app.attempted.pop_first();
+            }
+        }
+        let mut sql = next.insert_sql(payload);
+        if upsert {
+            sql = sql.replacen("INSERT INTO", "INSERT OR REPLACE INTO", 1);
+        }
+        match self.rig.exec(&sql) {
             Ok(()) => {
                 self.log.commit(next.digest(), self.now());
                 self.tip = next;
@@ -139,7 +209,51 @@ impl Run {
                 )
             });
         self.log.recover(node, self.now());
+        let lost = self.tip.k().saturating_sub(tip.k());
         self.tip = tip;
+        self.after_reboot(lost);
+    }
+
+    /// The application's behaviour after a reboot, with the power on and no fault armed.
+    fn after_reboot(&mut self, lost: u64) {
+        match self.app.behaviour {
+            AfterReboot::Nothing => {}
+            AfterReboot::Redo => {
+                let k = self.app.rng.below(REDO_MAX).saturating_add(1);
+                let replay: Vec<_> = self
+                    .app
+                    .attempted
+                    .values()
+                    .rev()
+                    .take(usize::try_from(k).unwrap())
+                    .rev()
+                    .cloned()
+                    .collect();
+                for (row, payload) in replay {
+                    if row.k() <= self.tip.k() {
+                        // The row the database holds, written again with its own bytes.
+                        let sql = row.insert_sql(&payload).replacen(
+                            "INSERT INTO",
+                            "INSERT OR REPLACE INTO",
+                            1,
+                        );
+                        self.rig.exec(&sql).unwrap();
+                        self.log.commit(self.tip.digest(), self.now());
+                        self.app.counts[0] = self.app.counts[0].saturating_add(1);
+                    } else if row == self.tip.next(&payload) {
+                        self.write(&payload, true);
+                        self.app.counts[1] = self.app.counts[1].saturating_add(1);
+                    }
+                }
+            }
+            AfterReboot::Busy => {
+                for _ in 0..lost.saturating_add(1).saturating_add(self.app.rng.below(8)) {
+                    let payload = self.app.rng.payload();
+                    self.write(&payload, false);
+                    self.app.counts[2] = self.app.counts[2].saturating_add(1);
+                }
+            }
+        }
     }
 
     fn cycle(&mut self) -> bool {
@@ -168,26 +282,27 @@ impl Run {
         lost
     }
 
-    fn finish(mut self) -> (Counts, Log) {
+    fn finish(mut self) -> (Counts, Log, [u64; 3]) {
         for _ in 0..3 {
             self.commit();
         }
         self.settle();
         self.judged(true, Some(0));
-        (self.judge.counts(), self.log)
+        (self.judge.counts(), self.log, self.app.counts)
     }
 }
 
 /// Runs `cycles` power-loss cycles from `seed`; returns how many losses fired, what the judge
-/// counted, and the log.
-fn run(seed: u64, cycles: u32) -> (u32, Counts, Log) {
+/// counted, the log, and what the application did after its reboots (rows written again, rows
+/// that regrew the chain, busy rows).
+fn run(seed: u64, cycles: u32) -> (u32, Counts, Log, [u64; 3]) {
     let mut run = Run::new(seed);
     let mut losses = 0;
     for _ in 0..cycles {
         losses = u32::from(run.cycle()).saturating_add(losses);
     }
-    let (counts, log) = run.finish();
-    (losses, counts, log)
+    let (counts, log, app) = run.finish();
+    (losses, counts, log, app)
 }
 
 /// Real SQLite, real engine, real restores: through power losses at WAL syncs, every restore
@@ -195,7 +310,7 @@ fn run(seed: u64, cycles: u32) -> (u32, Counts, Log) {
 /// a branch without a recorded rewind, and once settled with no fault, latest is the head.
 #[test]
 fn every_real_restore_through_power_losses_is_a_node_of_the_history() {
-    let (losses, counts, log) = run(1, 4);
+    let (losses, counts, log, _) = run(1, 4);
     eprintln!(
         "losses {losses}, rewinds {}, nodes {}, counts {counts:?}",
         log.rewinds().len(),
@@ -220,8 +335,13 @@ fn real_power_loss_trials() {
     };
     let (base, seeds) = (env("LSR_HISTORY_BASE", 1), env("LSR_HISTORY_SEEDS", 50));
     let mut total = (0, 0, 0, 0);
+    let mut total_app = [0_u64; 3];
     for seed in base..base + seeds {
-        let (losses, counts, log) = run(seed, 6);
+        let (losses, counts, log, app) = run(seed, 6);
+        eprintln!("seed {seed}: after reboot {app:?}");
+        for (sum, n) in total_app.iter_mut().zip(app) {
+            *sum += n;
+        }
         total.0 += losses;
         total.1 += log.rewinds().len();
         total.2 += counts.ahead_latest;
@@ -230,5 +350,9 @@ fn real_power_loss_trials() {
     eprintln!(
         "{seeds} seeds: {} losses, {} rewinds, ahead: {} latest, {} as-of",
         total.0, total.1, total.2, total.3
+    );
+    eprintln!(
+        "after reboot: {} rows written again, {} regrew the chain, {} busy rows",
+        total_app[0], total_app[1], total_app[2]
     );
 }

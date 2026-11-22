@@ -30,13 +30,19 @@
 //!
 //! The instants of the `AsOf` restores come from a random stream of their own, so the runs the
 //! frozen weights draw are unchanged.
+//!
+//! What the application does after each reboot, before the frozen workload's own commits, is
+//! drawn per run from a third stream ([`AfterReboot`], frozen in a commit of its own before its
+//! first campaign): nothing, as before it existed; a redo of its last `K` writes, the same rows
+//! with the same values, as a job runner replays work it cannot prove finished; or new work
+//! until it has committed more than the loss took. A run that draws nothing is the run it was.
 
 #![expect(
     clippy::arithmetic_side_effects,
     reason = "test code: an overflow panic is a test failure, which is what a test wants"
 )]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::num::{NonZeroI32, NonZeroU32};
 use std::path::Path;
 
@@ -76,6 +82,106 @@ const CRASH_AT: [(FileKind, Op, u64); 5] = [
     (FileKind::Main, Op::Sync, 1),
     (FileKind::Wal, Op::Truncate, 1),
 ];
+
+/// The writes a redo replays at most, and the length of the application's own log of them.
+const REDO_MAX: u64 = 16;
+
+/// The frozen weights of what the application does after a reboot.
+const AFTER_REBOOT: [(AfterReboot, u64); 3] = [
+    (AfterReboot::Nothing, 1),
+    (AfterReboot::Redo, 1),
+    (AfterReboot::Busy, 1),
+];
+
+/// What the application does after a reboot, before the frozen workload's own commits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AfterReboot {
+    /// Nothing.
+    Nothing,
+    /// Replays its last `K` writes (1 to [`REDO_MAX`], drawn per reboot), oldest first: each
+    /// one's rows with the values it wrote, as upserts and deletes, so a replay that reaches
+    /// back past the loss rewrites rows the database still holds with the bytes already there.
+    Redo,
+    /// Commits one new write more than the loss took acknowledged writes, and up to 7 more.
+    Busy,
+}
+
+/// One write in the application's log: what it does to each row it touches.
+struct Logged {
+    changes: Vec<(i64, Option<Vec<u8>>)>,
+}
+
+/// The application's after-reboot behaviour, its stream and its log.
+struct App {
+    behaviour: AfterReboot,
+    rng: Rng,
+    log: VecDeque<Logged>,
+    /// The digests of the states acknowledged since the last reboot, in order.
+    acked: Vec<Digest>,
+    /// Writes made by the busy behaviour, which name their own values.
+    busy_writes: u64,
+    /// Writes replayed, and reboots whose redo reached back past every write the loss took.
+    redone: u64,
+    past_lost: u64,
+}
+
+impl App {
+    fn new(seed: u64) -> Self {
+        let mut rng = Rng(seed ^ 0x7265_646f_0b05_7901);
+        let behaviour = rng.pick(&AFTER_REBOOT);
+        Self {
+            behaviour,
+            rng,
+            log: VecDeque::new(),
+            acked: Vec::new(),
+            busy_writes: 0,
+            redone: 0,
+            past_lost: 0,
+        }
+    }
+
+    /// A draw below `upper`.
+    fn draw(&mut self, upper: u64) -> usize {
+        usize::try_from(self.rng.below(upper)).unwrap()
+    }
+
+    /// The write from `before` to `after` is about to run.
+    fn logged(&mut self, before: &Rows, after: &Rows) {
+        if self.behaviour != AfterReboot::Redo {
+            return;
+        }
+        let mut changes: Vec<(i64, Option<Vec<u8>>)> = after
+            .iter()
+            .filter(|(id, v)| before.get(id) != Some(*v))
+            .map(|(id, v)| (*id, Some(v.clone())))
+            .collect();
+        changes.extend(
+            before
+                .keys()
+                .filter(|id| !after.contains_key(id))
+                .map(|id| (*id, None)),
+        );
+        if u64::try_from(self.log.len()).unwrap() >= REDO_MAX {
+            self.log.pop_front();
+        }
+        self.log.push_back(Logged { changes });
+    }
+}
+
+/// The SQL of a replayed write: an upsert or a delete per row, in one transaction.
+fn redo_sql(changes: &[(i64, Option<Vec<u8>>)]) -> String {
+    let body: String = changes
+        .iter()
+        .map(|(id, v)| match v {
+            Some(v) => format!(
+                "INSERT INTO t(id, v) VALUES ({id}, x'{}') ON CONFLICT(id) DO UPDATE SET v = excluded.v;",
+                hex(v)
+            ),
+            None => format!("DELETE FROM t WHERE id = {id};"),
+        })
+        .collect();
+    format!("BEGIN; {body} COMMIT;")
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Step {
@@ -219,6 +325,8 @@ struct Run {
     /// The `AsOf` instants' own stream.
     instants: Rng,
     start: i64,
+    /// What the application does after a reboot, from a stream of its own.
+    app: App,
 }
 
 /// The value of row `id` at `version`: the workload's own bytes.
@@ -258,6 +366,7 @@ impl Run {
         let start = rig.clock().now().unix_millis();
         let history = History::new(start);
         Self {
+            app: App::new(seed),
             instants: Rng(seed ^ 0x4a5f_0d1e_c0de_0001),
             start,
             rig,
@@ -328,10 +437,17 @@ impl Run {
             | Step::AppCheckpoint
             | Step::RestartEngine => self.write(&mut next),
         };
+        self.app.logged(&self.rows, &next);
+        self.exec(&sql, next)
+    }
+
+    /// Runs `sql`, which leaves `next`; the state is acknowledged when SQLite says so.
+    fn exec(&mut self, sql: &str, next: Rows) -> Result<(), RigError> {
         let now = self.rig.clock().now().unix_millis();
-        match self.rig.exec(&sql) {
+        match self.rig.exec(sql) {
             Ok(()) => {
                 self.history.committed(&next, now);
+                self.app.acked.push(digest(&next));
                 self.rows = next;
                 Ok(())
             }
@@ -460,11 +576,89 @@ impl Run {
         if !self.history.recovered(&recovered, now) {
             return Err(Anomaly::RecoveredUnknown);
         }
+        let lost = self.lost(&digest(&recovered));
         self.rows = recovered;
+        self.after_reboot(lost)?;
         for _ in 0..self.rng.below(4) {
             self.step(Step::Insert)?;
         }
         Ok(())
+    }
+
+    /// How many acknowledged writes since the last reboot the loss took: those after the last
+    /// one that left the recovered state (all of them when none did).
+    fn lost(&mut self, recovered: &Digest) -> usize {
+        let acked = std::mem::take(&mut self.app.acked);
+        acked
+            .iter()
+            .rposition(|d| d == recovered)
+            .map_or(acked.len(), |at| acked.len() - at - 1)
+    }
+
+    /// The application's behaviour after a reboot, before the frozen workload's commits.
+    fn after_reboot(&mut self, lost: usize) -> Result<(), Anomaly> {
+        match self.app.behaviour {
+            AfterReboot::Nothing => Ok(()),
+            AfterReboot::Redo => {
+                let k = 1 + self.app.draw(REDO_MAX);
+                let from = self.app.log.len().saturating_sub(k);
+                if lost > 0 && self.app.log.len() - from > lost {
+                    self.app.past_lost += 1;
+                }
+                let replay: Vec<_> = self
+                    .app
+                    .log
+                    .iter()
+                    .skip(from)
+                    .map(|l| l.changes.clone())
+                    .collect();
+                for changes in replay {
+                    let mut next = self.rows.clone();
+                    for (id, v) in &changes {
+                        match v {
+                            Some(v) => next.insert(*id, v.clone()),
+                            None => next.remove(id),
+                        };
+                    }
+                    self.app.logged(&self.rows, &next);
+                    self.app.redone += 1;
+                    self.replayed(redo_sql(&changes), next)?;
+                }
+                Ok(())
+            }
+            AfterReboot::Busy => {
+                let writes = lost + 1 + self.app.draw(8);
+                for _ in 0..writes {
+                    let (id, v) = self.busy_write();
+                    let mut next = self.rows.clone();
+                    next.insert(id, v.clone());
+                    self.replayed(redo_sql(&[(id, Some(v))]), next)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// A new write of the busy behaviour: a new row or an existing one, with a value of its own.
+    fn busy_write(&mut self) -> (i64, Vec<u8>) {
+        self.app.busy_writes += 1;
+        let version = (1 << 40) + self.app.busy_writes;
+        let len = 50 + self.app.rng.below(3500);
+        let id = if self.rows.is_empty() || self.app.rng.below(2) == 0 {
+            let id = self.next_id;
+            self.next_id += 1;
+            id
+        } else {
+            let at = self.app.draw(u64::try_from(self.rows.len()).unwrap());
+            *self.rows.keys().nth(at).unwrap()
+        };
+        (id, value(id, version, len))
+    }
+
+    /// One write of the after-reboot behaviour; the power stays on until the cycle's segment.
+    fn replayed(&mut self, sql: String, next: Rows) -> Result<(), Anomaly> {
+        self.exec(&sql, next)
+            .map_err(|err| self.engine("after reboot", &err))
     }
 
     /// Restores the replica's state at `target` into a file and reads it with plain SQLite.
@@ -575,7 +769,12 @@ pub type RunEnd = (
     Option<(u32, Anomaly)>,
     (u32, u32),
     (lsr_history::Counts, usize),
+    AppEnd,
 );
+
+/// What the application did after its reboots: its behaviour, the writes it replayed, the
+/// reboots whose redo reached back past every write the loss took, and the busy writes.
+pub type AppEnd = (&'static str, u64, u64, u64);
 
 /// The first anomaly of the run `seed` names, and the cycle it came in (`CYCLES` for the
 /// final judgments); the WAL losses that kept a block, and kept one after a lost one; and what
@@ -585,7 +784,14 @@ pub fn run(seed: u64, cycles: u32) -> RunEnd {
     let mut run = Run::new(seed, dir.path());
     let found = run.all(cycles);
     let judged = (run.history.judge.counts(), run.history.log.rewinds().len());
-    (found, run.rig.vfs().wal_block_losses(), judged)
+    let app = &run.app;
+    let behaviour = match app.behaviour {
+        AfterReboot::Nothing => "nothing",
+        AfterReboot::Redo => "redo",
+        AfterReboot::Busy => "busy",
+    };
+    let app = (behaviour, app.redone, app.past_lost, app.busy_writes);
+    (found, run.rig.vfs().wal_block_losses(), judged, app)
 }
 
 impl Run {
@@ -609,7 +815,7 @@ impl Run {
 #[test]
 fn crash_cycles_under_the_block_law_restore_committed_states() {
     for seed in 0..3 {
-        if let (Some((cycle, anomaly)), _, _) = run(seed, CYCLES) {
+        if let (Some((cycle, anomaly)), _, _, _) = run(seed, CYCLES) {
             panic!("seed {seed} cycle {cycle}: {anomaly:?}");
         }
     }
@@ -622,7 +828,7 @@ fn crash_cycles_under_the_block_law_restore_committed_states() {
 /// first at page 21"). The model now follows SQLite's own recovery of the bytes the loss left.
 #[test]
 fn a_recovery_that_brings_back_a_lost_commit_is_followed_seed_113() {
-    if let (Some((cycle, anomaly)), _, _) = run(113, 6) {
+    if let (Some((cycle, anomaly)), _, _, _) = run(113, 6) {
         panic!("cycle {cycle}: {anomaly:?}");
     }
 }
@@ -644,8 +850,12 @@ fn crash_cycle_campaign() {
     let mut found = Vec::new();
     let (mut kept, mut holes) = (0, 0);
     let (mut rewinds, mut ahead, mut latest, mut as_of, mut points) = (0, 0, 0, 0, 0);
+    let mut app = (0, 0, 0);
     for seed in base..base + seeds {
-        let (got, losses, (counts, forks)) = run(seed, cycles);
+        let (got, losses, (counts, forks), (behaviour, redone, past, busy)) = run(seed, cycles);
+        app.0 += redone;
+        app.1 += past;
+        app.2 += busy;
         kept += losses.0;
         holes += losses.1;
         rewinds += forks;
@@ -653,7 +863,7 @@ fn crash_cycle_campaign() {
         latest += counts.latest;
         as_of += counts.as_of;
         points += counts.points;
-        println!("crash-cycle seed {seed}: {got:?}");
+        println!("crash-cycle seed {seed} after reboot {behaviour}: {got:?}");
         if let Some(got) = got {
             found.push((seed, got));
         }
@@ -665,6 +875,11 @@ fn crash_cycle_campaign() {
     println!(
         "crash-cycle history judge: {latest} latest, {as_of} as-of, {points} restore points \
          judged; {rewinds} rewinds; {ahead} restores held commits the database lost"
+    );
+    println!(
+        "crash-cycle after reboot: {} writes replayed, {} redos reached back past the loss, {} \
+         busy writes",
+        app.0, app.1, app.2
     );
     assert!(found.is_empty(), "{found:#?}");
 }
