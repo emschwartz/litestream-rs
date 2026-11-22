@@ -12,7 +12,7 @@ use lsr_core::FakeClock;
 use lsr_ltx::Timestamp;
 use tempfile::TempDir;
 
-use super::{CredentialChain, CredentialError, Resolved, Source, SourceError};
+use super::{CredentialChain, CredentialError, MetadataLook, Resolved, Source, SourceError};
 use crate::request::{HttpRequest, Method};
 use crate::transport::{HttpResponse, Transport, TransportError};
 
@@ -99,11 +99,27 @@ fn key_id(resolved: &Resolved) -> String {
     resolved.credentials().to_signer().key().to_owned()
 }
 
+/// The source's error: as it is, or, for the instance metadata service (the last source,
+/// asked when nothing is configured), inside the list of every source tried.
 fn source_error(err: CredentialError) -> SourceError {
     match err {
         CredentialError::Source(source) => source,
-        other @ (CredentialError::Missing(_)
-        | CredentialError::ProfileNotFound(_)
+        CredentialError::Missing(tried) => match tried.instance_metadata() {
+            MetadataLook::Failed(error) => {
+                let shown = CredentialError::Missing(tried.clone()).to_string();
+                assert!(shown.contains("AWS_ACCESS_KEY_ID"), "{shown}");
+                assert!(
+                    shown.contains(&format!("instance metadata service ({error})")),
+                    "{shown}"
+                );
+                (**error).clone()
+            }
+            other
+            @ (MetadataLook::NotReached | MetadataLook::NoClient | MetadataLook::Disabled) => {
+                panic!("expected a source error, got {other:?}")
+            }
+        },
+        other @ (CredentialError::ProfileNotFound(_)
         | CredentialError::PartialProfile { .. }
         | CredentialError::MalformedLine { .. }
         | CredentialError::NotBuilt { .. }
@@ -214,7 +230,14 @@ fn instance_metadata_off_or_no_client_ends_the_chain() {
     vars.push(("AWS_EC2_METADATA_DISABLED", "TRUE"));
     let http = imds_service(|| token(true));
     let err = chain_over(&vars, Arc::clone(&http)).resolve().unwrap_err();
-    assert!(matches!(err, CredentialError::Missing(_)));
+    assert!(
+        matches!(&err, CredentialError::Missing(tried) if tried.instance_metadata() == &MetadataLook::Disabled),
+        "{err:?}"
+    );
+    assert!(
+        err.to_string().contains("off: AWS_EC2_METADATA_DISABLED"),
+        "{err}"
+    );
     assert!(http.sent.lock().unwrap().is_empty());
     let vars: HashMap<String, String> = imds_vars()
         .into_iter()
@@ -223,7 +246,10 @@ fn instance_metadata_off_or_no_client_ends_the_chain() {
     let err = CredentialChain::with_env(move |name| vars.get(name).cloned())
         .resolve()
         .unwrap_err();
-    assert!(matches!(err, CredentialError::Missing(_)));
+    assert!(
+        matches!(&err, CredentialError::Missing(tried) if tried.instance_metadata() == &MetadataLook::NoClient),
+        "{err:?}"
+    );
 }
 
 #[test]

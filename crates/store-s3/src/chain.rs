@@ -193,6 +193,7 @@ impl CredentialChain {
             profile: profile.clone(),
             credentials_file: files.credentials_look,
             config_file: files.config_look,
+            instance_metadata: MetadataLook::NotReached,
         };
         let section = match shared::choose(files.merged, &profile) {
             Profile::Absent if named => return Err(CredentialError::ProfileNotFound(tried)),
@@ -269,8 +270,11 @@ impl CredentialChain {
 
     /// The container credentials, then the instance metadata service, as Go tries them
     /// last; without an HTTP client, neither.
-    fn host_source(&self, tried: Tried) -> Result<Resolved, CredentialError> {
+    /// The last sources. The instance metadata service is the one the chain reaches when
+    /// nothing is configured, so its failure is reported with every other source tried.
+    fn host_source(&self, mut tried: Tried) -> Result<Resolved, CredentialError> {
         let Some(http) = self.http.clone() else {
+            tried.instance_metadata = MetadataLook::NoClient;
             return Err(CredentialError::Missing(tried));
         };
         let relative = self.var("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI");
@@ -287,6 +291,7 @@ impl CredentialChain {
             .var(IMDS_DISABLED_VAR)
             .is_some_and(|v| v.eq_ignore_ascii_case("true"))
         {
+            tried.instance_metadata = MetadataLook::Disabled;
             return Err(CredentialError::Missing(tried));
         }
         let endpoint = remote::InstanceMetadata::endpoint(
@@ -296,11 +301,17 @@ impl CredentialChain {
         let v1_disabled = self
             .var("AWS_EC2_METADATA_V1_DISABLED")
             .is_some_and(|v| v.eq_ignore_ascii_case("true"));
-        remote_resolved(Arc::new(remote::InstanceMetadata {
+        match remote_resolved(Arc::new(remote::InstanceMetadata {
             http,
             endpoint,
             v1_disabled,
-        }))
+        })) {
+            Err(CredentialError::Source(error)) => {
+                tried.instance_metadata = MetadataLook::Failed(Box::new(error));
+                Err(CredentialError::Missing(tried))
+            }
+            other => other,
+        }
     }
 
     fn web_identity(
@@ -713,9 +724,29 @@ pub struct Tried {
     profile: String,
     credentials_file: FileLook,
     config_file: FileLook,
+    instance_metadata: MetadataLook,
+}
+
+/// What the instance metadata service gave, the chain's last source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MetadataLook {
+    /// The chain stopped before it.
+    NotReached,
+    /// The chain was built without an HTTP client.
+    NoClient,
+    /// `AWS_EC2_METADATA_DISABLED` is `true`.
+    Disabled,
+    /// It was asked and gave no credentials.
+    Failed(Box<SourceError>),
 }
 
 impl Tried {
+    /// What the instance metadata service gave.
+    #[must_use]
+    pub fn instance_metadata(&self) -> &MetadataLook {
+        &self.instance_metadata
+    }
+
     /// What the environment lacked.
     #[must_use]
     pub fn environment(&self) -> EnvGap {
@@ -762,7 +793,15 @@ impl fmt::Display for Tried {
         write_look(f, credentials, &self.credentials_file, profile)?;
         f.write_str("; ")?;
         let config = ("shared config file", CONFIG_FILE_VAR);
-        write_look(f, config, &self.config_file, profile)
+        write_look(f, config, &self.config_file, profile)?;
+        match &self.instance_metadata {
+            MetadataLook::NotReached => Ok(()),
+            MetadataLook::NoClient => f.write_str("; instance metadata service (not asked)"),
+            MetadataLook::Disabled => {
+                write!(f, "; instance metadata service (off: {IMDS_DISABLED_VAR})")
+            }
+            MetadataLook::Failed(error) => write!(f, "; instance metadata service ({error})"),
+        }
     }
 }
 
@@ -853,7 +892,7 @@ pub enum CredentialError {
 }
 
 /// Why a source that fetches credentials gave none. No variant holds a credential.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum SourceError {
     /// The source did not answer.
     #[error("{provider} could not be reached: {why}")]

@@ -32,7 +32,7 @@ struct Run {
 
 /// Every variable the credential chain reads, so the developer's own
 /// keys and `~/.aws` files never reach a test.
-const CHAIN_VARS: [&str; 12] = [
+const CHAIN_VARS: [&str; 21] = [
     "AWS_ACCESS_KEY_ID",
     "LITESTREAM_ACCESS_KEY_ID",
     "AWS_ACCESS_KEY",
@@ -45,6 +45,15 @@ const CHAIN_VARS: [&str; 12] = [
     "AWS_SHARED_CREDENTIALS_FILE",
     "AWS_CONFIG_FILE",
     "HOME",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "AWS_ROLE_ARN",
+    "AWS_ROLE_SESSION_NAME",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+    "AWS_EC2_METADATA_SERVICE_ENDPOINT",
+    "AWS_EC2_METADATA_V1_DISABLED",
 ];
 
 fn lsr_with(args: &[&str], env: &[(&str, &str)]) -> Run {
@@ -53,6 +62,10 @@ fn lsr_with(args: &[&str], env: &[(&str, &str)]) -> Run {
     for var in CHAIN_VARS {
         command.env_remove(var);
     }
+    // The chain ends at the host's instance metadata service, which a test host may or may
+    // not answer (and a laptop without one makes wait out the connect deadline). A test
+    // that wants it names a fake.
+    command.env("AWS_EC2_METADATA_DISABLED", "true");
     // An empty directory stands in for the home directory.
     let home = tempfile::TempDir::new().expect("home");
     command

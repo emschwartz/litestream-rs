@@ -43,7 +43,8 @@ mod upload;
 mod ureq_transport;
 
 pub use chain::{
-    CredentialChain, CredentialError, EnvGap, FileOutcome, Resolved, Source, SourceError, Tried,
+    CredentialChain, CredentialError, EnvGap, FileOutcome, MetadataLook, Resolved, Source,
+    SourceError, Tried,
 };
 pub use classify::{
     S3Code, classify, classify_delete_failures, classify_transport, is_range_past_end,
