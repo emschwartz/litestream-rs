@@ -1116,7 +1116,7 @@ fix = "4b388f2"
 package = "lsr-sim"
 test_bin = "sim"
 tests = [
-    "failstop::a_crash_loop_trips_for_age",
+    "failstop::a_store_down_past_the_bound_trips_in_time_and_clears_after",
 ]
 
 [[bug]]
@@ -1164,3 +1164,63 @@ name = "restart-abandoned-at-synced-end"
 fix = "9b4a029"
 package = "lsr-core"
 tests = ["recover::tests::an_abandoned_commit_at_the_synced_end_of_a_restart_is_caught"]
+
+# Fail-stop false trips on lag the replica did not have: one plant per rule the fix added.
+
+[[bug]]
+name = "failstop-dates-the-run"
+fix = "87cd10d"
+package = "lsr-core"
+tests = [
+    "lag::a_steady_writer_whose_uploads_trail_by_a_tick_never_trips",
+]
+
+[[bug]]
+name = "failstop-carried-outlives-its-file"
+fix = "87cd10d"
+package = "lsr-core"
+tests = [
+    "failstop::tests::staged_frames_carry_their_date_until_the_replica_holds_them",
+]
+
+[[bug]]
+name = "failstop-carries-to-the-newest-file"
+fix = "87cd10d"
+package = "lsr-core"
+tests = [
+    "failstop::tests::staged_frames_never_date_a_newer_file",
+]
+
+[[bug]]
+name = "failstop-checkpoint-quiet-forgotten"
+fix = "87cd10d"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "failstop::seed_0xf4342::a_forged_staged_file_after_a_day_long_step_does_not_trip_seed_0xf4342",
+    "failstop::the_reported_false_trip_seeds_run_clean",
+]
+
+[[bug]]
+name = "failstop-trip-held-to-zero-age"
+fix = "87cd10d"
+package = "lsr-core"
+tests = [
+    "failstop::tests::a_trip_for_age_clears_once_its_commits_land",
+]
+
+[[bug]]
+name = "failstop-doubt-baseline-ignored"
+fix = "87cd10d"
+package = "lsr-core"
+tests = [
+    "lag::a_doubt_snapshot_at_boot_over_a_replicated_wal_is_not_lag",
+]
+
+[[bug]]
+name = "failstop-doubt-snapshot-is-lag"
+fix = "87cd10d"
+package = "lsr-core"
+tests = [
+    "lag::a_doubt_snapshot_at_boot_over_a_replicated_wal_is_not_lag",
+]

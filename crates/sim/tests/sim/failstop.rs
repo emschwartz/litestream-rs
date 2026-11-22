@@ -115,10 +115,14 @@ fn a_store_down_past_the_bound_trips_in_time_and_clears_after() {
         "tripped {at} ms in: {:?}",
         report.trips
     );
+    let in_history = report
+        .trips
+        .get(..report.trips_in_history)
+        .unwrap_or_default();
     assert_eq!(
-        report.trips.last().map(|(_, trip)| *trip),
+        in_history.last().map(|(_, trip)| *trip),
         Some(None),
-        "cleared: {:?}",
+        "cleared before the final drain: {:?}",
         report.trips
     );
 }

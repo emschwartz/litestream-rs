@@ -172,6 +172,9 @@ pub struct RunReport {
     /// Each change of the engine's fail-stop trip, with the time of the tick that made it
     /// (`crate::failstop`).
     pub trips: Vec<(Timestamp, Option<lsr_core::Trip>)>,
+    /// How many of [`Self::trips`] the history's own operations made, before the final drain:
+    /// a drain that rebuilds the engine clears its clock whatever the clock would have done.
+    pub trips_in_history: usize,
 }
 
 /// What a run may be told besides its seed.
@@ -2030,6 +2033,7 @@ impl Runner {
 
     /// The end of a history: drain, judge the replica, check the resources.
     fn finish(&mut self) -> Result<(), Violation> {
+        self.report.trips_in_history = self.report.trips.len();
         if self.lenient && !self.w.model_matches_sqlite() {
             return Err(bug_fault("the model no longer matches SQLite's rules"));
         }
