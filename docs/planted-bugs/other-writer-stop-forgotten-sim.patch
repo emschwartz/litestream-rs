@@ -1,12 +1,12 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index f48892f..9224c2d 100644
+index 5991223..f108bc2 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -2067,9 +2067,6 @@ async fn boot_listing<L: ObjectStore, R: ObjectStore>(
-         Ok(listed) => (listed.state, None),
-         Err(failed) => return Err(failed.fault),
-     };
--    if record.is_some_and(|record| record.still_stopped(upload.confirmed())) {
+@@ -2294,9 +2294,6 @@ async fn boot_listing<L: ObjectStore, R: ObjectStore>(
+     let taken_over = tip
+         .zip(takeover.record())
+         .is_some_and(|(tip, record)| record.covers(tip));
+-    if !taken_over && record.is_some_and(|record| record.still_stopped(tip)) {
 -        return Ok(None);
 -    }
      *record = None;

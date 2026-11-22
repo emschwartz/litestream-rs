@@ -641,3 +641,46 @@ package = "lsr-core"
 tests = [
     "journal_model::the_writer_matches_the_model_under_the_block_law",
 ]
+
+# The engine deletes staged files the replica holds with no takeover record kept first: a crash
+# before the replacing snapshot leaves the next boot refusing the engine's own files.
+[[bug]]
+name = "takeover-before-drop-skipped"
+fix = "88577ff"
+package = "lsr-core"
+tests = ["vouch::a_crash_between_the_engines_own_drop_and_its_snapshot_is_not_a_refusal"]
+
+[[bug]]
+name = "takeover-before-drop-skipped-sim"
+fix = "88577ff"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "an_unconfirmed_upload_dropped_from_staging_is_never_refused_seed_0xd",
+    "a_tail_judged_torn_and_dropped_from_staging_is_never_refused_seed_0x3ed",
+]
+
+# A running drop of an unreadable staged file records only through the confirmed transaction,
+# short of a file whose upload published with its answer lost.
+[[bug]]
+name = "running-drop-record-capped-at-confirmed"
+fix = "88577ff"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["an_unconfirmed_upload_dropped_from_staging_is_never_refused_seed_0xd"]
+
+# A boot drop records only through the confirmed transaction, short of a listed tail the
+# listing judged torn.
+[[bug]]
+name = "boot-drop-record-capped-at-confirmed"
+fix = "88577ff"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_tail_judged_torn_and_dropped_from_staging_is_never_refused_seed_0x3ed"]
+
+# An unanswered request for the record asks again at once, forever, instead of waiting.
+[[bug]]
+name = "takeover-ask-spins"
+fix = "88577ff"
+package = "lsr-core"
+tests = ["vouch::a_takeover_the_driver_cannot_write_keeps_the_staged_files_and_waits"]

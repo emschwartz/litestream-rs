@@ -1,9 +1,9 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index 1588fc9..b1e02ed 100644
+index 5991223..42cb9f8 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -747,7 +747,7 @@ impl Actor {
-             Recovered::Stop(cause) => return self.verdict(Task::Sync, cause, now),
+@@ -941,7 +941,7 @@ impl Actor {
+             }
          };
          let cause = boot_cause(lost, refused, from.err());
 -        let pending = pending_at_boot(self.kept.asked(), cause);
