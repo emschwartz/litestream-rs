@@ -823,7 +823,9 @@ impl<B: Backend> Rig<B> {
                 Tick::Ran {
                     event: Event::Idle,
                     next,
-                } if !matches!(next, Next::Now) && self.acked.highest() >= self.staged.last().copied() => {
+                } if !matches!(next, Next::Now)
+                    && self.acked.highest() >= self.staged.last().copied() =>
+                {
                     return Ok(());
                 }
                 Tick::Ran {
