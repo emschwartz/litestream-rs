@@ -132,7 +132,7 @@ fn pending_files_from_a_gone_generation_are_dropped_and_named() {
     assert_eq!(
         event(&boot),
         Some(&Event::Booted {
-            cause: Some(SnapshotCause::StagedUnwitnessed {
+            cause: Some(SnapshotCause::StagedUnverified {
                 from: Txid::new(2).unwrap()
             })
         })
@@ -169,7 +169,7 @@ fn a_refused_copy_of_a_torn_tail_leaves_the_listed_key_to_the_replica() {
     assert_eq!(
         event(&boot),
         Some(&Event::Booted {
-            cause: Some(SnapshotCause::StagedUnwitnessed {
+            cause: Some(SnapshotCause::StagedUnverified {
                 from: Txid::new(3).unwrap()
             })
         })

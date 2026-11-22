@@ -1475,7 +1475,7 @@ pub fn corrupt_l0_publish_then_power_loss() -> Scenario {
         corrupt_publish_then_power_loss("corrupt_l0_publish_then_power_loss", Some(93_600_000));
     s.expect = vec![
         retries(FaultKind::UploadChecksumMismatch),
-        Expect::Event(EventMatch::Booted(Some(CauseKind::StagedUnwitnessed))),
+        Expect::Event(EventMatch::Booted(Some(CauseKind::StagedUnverified))),
         Expect::Oracle,
     ];
     s.check = Some(left_as_listed);

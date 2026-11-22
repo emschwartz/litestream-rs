@@ -2071,7 +2071,7 @@ const fn boot_cause(
 ) -> Option<SnapshotCause> {
     match (lost, refused, recovered) {
         (Some(_), _, _) => Some(SnapshotCause::NewestStagedFileUnreadable),
-        (None, Some(from), Some(_)) => Some(SnapshotCause::StagedUnwitnessed { from }),
+        (None, Some(from), Some(_)) => Some(SnapshotCause::StagedUnverified { from }),
         (None, _, recovered) => recovered,
     }
 }
