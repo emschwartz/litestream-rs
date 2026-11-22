@@ -1783,3 +1783,39 @@ fix = "plant"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["verify_reports_a_live_transaction_that_no_longer_restores_seed_0x14"]
+
+# Blind plant 05 of the recall pilot (issue #127): the uploader took a commit's acknowledged size as
+# given. Its original form (upload.rs restamping the size it wrote) cannot be written any more: the
+# size is checked inside publish before a Published exists. Re-expressed at the check, skipped for
+# the uploader's create-only writes.
+[[bug]]
+name = "upload-commit-size-unchecked"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "upload::tests::a_commit_that_answers_with_a_wrong_size_is_ambiguous_not_confirmed",
+    "upload::tests::a_commit_that_answers_with_a_wrong_size_leaves_no_object",
+]
+
+[[bug]]
+name = "upload-commit-size-unchecked-sim"
+fix = "plant"
+package = "lsr-sim"
+patch = "upload-commit-size-unchecked"
+tests = ["short_write::an_upload_acknowledged_short_leaves_nothing_a_restore_meets"]
+
+# Blind plant 10 of the recall pilot (issue #127): a compaction output the store took and then
+# rejected (a digest that does not match) is not deleted, so a listing shows an object that does
+# not decode.
+[[bug]]
+name = "compact-rejected-output-kept"
+fix = "plant"
+package = "lsr-core"
+tests = ["maintain::tests::a_rejected_compaction_output_is_deleted_by_the_executor"]
+
+[[bug]]
+name = "compact-rejected-output-kept-sim"
+fix = "plant"
+package = "lsr-sim"
+patch = "compact-rejected-output-kept"
+tests = ["verify::verify_reports_a_live_transaction_that_no_longer_restores_seed_0x14"]
