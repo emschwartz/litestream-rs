@@ -753,6 +753,23 @@ impl Seen {
 }
 
 /// Rule 6: the generation changed.
+///
+/// A running position pinned in this read-lock hold follows the new
+/// generation from its first frame when no commit can have gone with the old
+/// one. While the hold lasts SQLite changes generation in two ways only. A
+/// restart (`walRestartLog`) needs every frame backfilled: a read mark above 0
+/// blocks it, and read mark 0 blocks every backfill (a checkpoint needs that
+/// mark exclusively), so under either it happens at most once, from the
+/// generation the position was pinned in, and gives `salt1 + 1`. The first
+/// frame written to a generation with no frames writes a new header
+/// (`sqlite3WalFrames`), with fresh random salts when the checkpoint sequence
+/// is 0 (a WAL that never restarted, as after a crash): nothing committed is
+/// lost when the pinned generation held no frame, and the new generation is
+/// then itself either empty (another such header can follow, losing nothing)
+/// or holds frames no backfill can reach (no restart can follow). So a
+/// position at the first frame of its generation follows whatever salts the
+/// new header names. Anything else (a `salt1` that skips, a hold that
+/// lapsed) is a snapshot.
 fn restarted(
     source: &PositionSource<'_>,
     seen: &Seen,
@@ -771,7 +788,8 @@ fn restarted(
         Continuity::Held(epoch) => epoch == wal.epoch,
         Continuity::Broken => false,
     };
-    let proven = pinned && header.salts().salt1 == seen.salts.salt1.wrapping_add(1);
+    let empty = seen.end == WalOffset::start(seen.page_size);
+    let proven = pinned && (empty || header.salts().salt1 == seen.salts.salt1.wrapping_add(1));
     if !proven {
         return plain(changed);
     }

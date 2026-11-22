@@ -231,3 +231,15 @@ package = "lsr-core"
 tests = [
     "actor::tests::rewound::a_staged_snapshot_of_a_rewound_database_is_uploaded_after_a_restart",
 ]
+
+# A running position pinned at the first frame of a generation with no frames does not follow the
+# new header SQLite writes with random salts (checkpoint sequence 0): a second whole snapshot. The
+# sim's liveness oracle catches it too, now that a change under a held read lock justifies nothing
+# (dropped_created_at::dropped::as_of_never_takes_an_upload_time_for_a_commit_time, seed 0xe).
+[[bug]]
+name = "mark-zero-empty-generation"
+fix = "d41487a"
+package = "lsr-core"
+tests = [
+    "recover::tests::rule_6_a_pinned_position_with_no_frames_follows_a_new_header_with_any_salts",
+]
