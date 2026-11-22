@@ -184,6 +184,20 @@ fn scalar(
     }
 }
 
+/// A Go `*string`: any scalar's text, empty included; `None` for null only, which
+/// leaves yaml.v2's pointer nil.
+pub(crate) fn read_str_ptr(node: &Node, secret: bool) -> Result<Option<String>, ProblemKind> {
+    let (text, resolved) = scalar(node, Expected::String, secret)?;
+    Ok(match resolved {
+        Resolved::Null => None,
+        Resolved::Bool(_)
+        | Resolved::Int(_)
+        | Resolved::BigUint(_)
+        | Resolved::Float(_)
+        | Resolved::Str(_) => Some(text.to_owned()),
+    })
+}
+
 /// A Go `string`: any scalar's text; `None` for null and for empty, which Go
 /// cannot tell apart.
 pub(crate) fn read_str(node: &Node, secret: bool) -> Result<Option<String>, ProblemKind> {

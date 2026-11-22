@@ -154,11 +154,10 @@ fn min_checkpoint_page_count_must_be_above_zero() {
         ),
         "{problems:#?}"
     );
-    let problems = unmapped(&db_with("    min-checkpoint-page-count: 9999999999\n"));
-    assert!(
-        matches!(problems.as_slice(), [(_, MapProblemKind::TooLarge { .. })]),
-        "{problems:#?}"
-    );
+    // Go holds it in an `int`; a WAL never holds more than `u32::MAX` frames, so a
+    // larger count is the same threshold.
+    let db = one(&db_with("    min-checkpoint-page-count: 9999999999\n"));
+    assert_eq!(db.config().checkpoint.min_pages, NonZeroU32::new(u32::MAX));
 }
 
 /// Go's `effectiveTruncatePageN` (`db.go:1599-1608`), under the operator's claim.
@@ -1042,4 +1041,14 @@ fn odd_names_reach_a_url_replica_unchanged() {
         .map(|(_, replica)| replica)
         .collect();
     assert_eq!(got, ["/backup/a%41.db", "/backup/a\\b.db"]);
+}
+
+/// Go's `meta-path` is a `*string`: `""` is a value, and `NewDBFromConfig` expands it with
+/// `filepath.Abs("")`, the current directory. Null leaves the default beside the database.
+#[test]
+fn an_empty_meta_path_is_the_current_directory_as_go() {
+    let db = one(&db_with("    meta-path: \"\"\n"));
+    assert_eq!(db.meta_dir(), Path::new("/work"));
+    let db = one(&db_with("    meta-path: ~\n"));
+    assert_eq!(db.meta_dir(), Path::new("/data/.app.db-litestream"));
 }

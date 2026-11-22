@@ -257,12 +257,6 @@ pub enum MapProblemKind {
         /// The value.
         value: i64,
     },
-    /// A count larger than the replicator can hold.
-    #[error("{value} is too large")]
-    TooLarge {
-        /// The value.
-        value: i64,
-    },
     /// A duration litestream-rs cannot represent (negative where it must not be).
     #[error("{value} is not a usable duration here")]
     Duration {
@@ -441,7 +435,7 @@ fn settings(
     let poll = poll_interval(db, entry, found);
     let retry = retry_interval(db, entry, found);
     let checkpoint = checkpoint(config, db, entry, found);
-    let sync_limits = sync_limits(db, entry, found);
+    let sync_limits = sync_limits(db);
     let shutdown_grace = config.shutdown_sync_timeout().to_std().unwrap_or_default();
     Some(Config {
         meta_dir: None,
@@ -510,19 +504,13 @@ fn checkpoint(
             found.problem(&at, MapProblemKind::MinCheckpointPages { value });
             return None;
         }
-        Some(value) => Some(count(
-            value,
-            &entry.key("min-checkpoint-page-count"),
-            found,
-        )?),
+        Some(value) => count(value),
     };
     let truncate_pages = match (config.rust().app_readers(), db.truncate_page_n()) {
         (AppReaders::Unknown, _) => None,
         (AppReaders::None, None) => NonZeroU32::new(go::TRUNCATE_PAGES),
         (AppReaders::None, Some(value)) if value < 0 => None,
-        (AppReaders::None, Some(value)) => {
-            Some(count(value, &entry.key("truncate-page-n"), found)?)
-        }
+        (AppReaders::None, Some(value)) => count(value),
     };
     Some(CheckpointConfig {
         interval,
@@ -531,16 +519,14 @@ fn checkpoint(
     })
 }
 
-/// A positive count as a `NonZeroU32`.
-fn count(value: i64, at: &KeyPath, found: &mut Found) -> Option<NonZeroU32> {
-    let fits = u32::try_from(value).ok().and_then(NonZeroU32::new);
-    if fits.is_none() {
-        found.problem(at, MapProblemKind::TooLarge { value });
-    }
-    fits
+/// A positive count as a `NonZeroU32`, saturating. Go holds these in an `int`; every
+/// count they bound (WAL frames, database pages, files per upload) is itself at most
+/// `u32::MAX`, so a larger threshold behaves exactly as `u32::MAX` does.
+fn count(value: i64) -> Option<NonZeroU32> {
+    NonZeroU32::new(u32::try_from(value).unwrap_or(u32::MAX))
 }
 
-fn sync_limits(db: &DbConfig, entry: &KeyPath, found: &mut Found) -> Option<SyncLimits> {
+fn sync_limits(db: &DbConfig) -> Option<SyncLimits> {
     let wal_bytes_per_step = match db.max_sync_wal_bytes() {
         None => NonZeroU64::new(go::MAX_SYNC_WAL_BYTES),
         Some(value) => u64::try_from(value).ok().and_then(NonZeroU64::new),
@@ -548,11 +534,7 @@ fn sync_limits(db: &DbConfig, entry: &KeyPath, found: &mut Found) -> Option<Sync
     let files_per_upload = match db.replica().and_then(|r| r.max_sync_ltx_files()) {
         None => NonZeroU32::new(go::MAX_SYNC_LTX_FILES),
         Some(value) if value <= 0 => None,
-        Some(value) => Some(count(
-            value,
-            &entry.key("replica").key("max-sync-ltx-files"),
-            found,
-        )?),
+        Some(value) => count(value),
     };
     Some(SyncLimits {
         wal_bytes_per_step,
