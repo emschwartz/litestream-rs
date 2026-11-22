@@ -745,11 +745,16 @@ impl State {
 
     /// Page `pgno` as a new reader sees it.
     fn image_page(&self, pgno: u32) -> Vec<u8> {
+        self.image_page_through(pgno, self.index.mx_frame)
+    }
+
+    /// Page `pgno` as a reader whose snapshot ends after `frames` frames sees it.
+    fn image_page_through(&self, pgno: u32, frames: u32) -> Vec<u8> {
         let newest = self
             .index
             .pgnos
             .iter()
-            .take(byte_pos(u64::from(self.index.mx_frame)))
+            .take(byte_pos(u64::from(frames.min(self.index.mx_frame))))
             .rposition(|frame| *frame == pgno)
             .and_then(|at| u32::try_from(at).ok());
         newest.map_or_else(
@@ -1645,6 +1650,26 @@ impl SimSqlite {
         self.with(|state| {
             (1..=state.index.db_size)
                 .flat_map(|pgno| state.image_page(pgno))
+                .collect()
+        })
+    }
+
+    /// The database at each commit mark of the WAL's generation, ascending: the frame count
+    /// the mark ends at, and the `db_size` pages a reader that stopped there sees.
+    #[must_use]
+    pub fn commit_images(&self) -> Vec<(u32, Vec<u8>)> {
+        self.with(|state| {
+            state
+                .index
+                .tx_ends
+                .iter()
+                .filter(|end| **end <= state.index.mx_frame)
+                .map(|end| {
+                    let image = (1..=state.index.db_size)
+                        .flat_map(|pgno| state.image_page_through(pgno, *end))
+                        .collect();
+                    (*end, image)
+                })
                 .collect()
         })
     }

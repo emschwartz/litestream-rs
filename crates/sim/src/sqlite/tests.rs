@@ -452,3 +452,29 @@ fn a_page_rewritten_above_the_safe_frame_is_not_copied() {
         "page 2's newest frame is above it, so SQLite leaves the page alone"
     );
 }
+
+/// Each commit mark of the generation gives the database a reader stopped there sees: the
+/// first mark's pages before the second commit overwrote them, the last the whole database.
+/// A regrowth keeps the marks, so it keeps one image per mark, each from the new bytes.
+#[test]
+fn commit_images_give_the_database_at_each_commit_mark() {
+    let db = sim();
+    db.commit(&tx(&[2], 1), 4).unwrap();
+    db.commit(&tx(&[2, 3], 2), 4).unwrap();
+    let images = db.commit_images();
+    let ends: Vec<u32> = images.iter().map(|(end, _)| *end).collect();
+    assert_eq!(ends, [1, 3]);
+    let page = |image: &[u8], n: usize| image[(n - 1) * 512..n * 512].to_vec();
+    assert_eq!(page(&images[0].1, 2), vec![1; 512]);
+    assert_eq!(page(&images[1].1, 2), vec![2; 512]);
+    assert_eq!(images[1].1, db.image());
+    assert!(db.regrow_same_salts(9));
+    let regrown = db.commit_images();
+    assert_eq!(
+        regrown.len(),
+        3,
+        "both old marks and the regrowth's own commit"
+    );
+    assert_ne!(page(&regrown[0].1, 2), vec![1; 512], "the regrown bytes");
+    assert_eq!(regrown[2].1, db.image());
+}
