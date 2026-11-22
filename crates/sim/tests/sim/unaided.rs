@@ -41,7 +41,8 @@
 //! (126, under the history configuration) had the boot witness accept a pending file on the
 //! anchor alone; a staging fault four steps later forced a snapshot over it.
 
-use lsr_sim::{AfterRestart, Judges, Opts, Seed, Weights, replay_line, run_with};
+use lsr_sim::run::run_ops;
+use lsr_sim::{AfterRestart, ClockLaw, Judges, Opts, Seed, Weights, replay_line, run_with};
 
 const STEPS: u32 = 300;
 
@@ -158,11 +159,20 @@ fn seeds_to_first_failure() {
 /// Found unaided by the swarm, with nothing written for it: under the planted bug "the boot
 /// anchor accepts any tail in the live generation" (`docs/planted-bugs/anchor-any-tail.patch`),
 /// seed 44's drawn mix, 8 steps in, restores a transaction to pages no commit had. (Found on
-/// the merged head with the boot witness; seed 15 found it before the witness landed.)
+/// the merged head with the boot witness; seed 15 found it before the witness landed.) The
+/// history is recorded and the settings its mix drew are written out, so no change to the
+/// generator or the mix gives it another run.
 #[test]
 fn swarm_seed_44_restores_only_committed_states() {
-    let seed = Seed::new(44);
-    if let Err(failure) = run_with(seed, 8, &Weights::mixed(seed), &Opts::default()) {
+    let opts = Opts {
+        drawn: true,
+        block_crash_law: false,
+        lying_wal_sync: true,
+        after_restart: AfterRestart::Busy,
+        clock_law: ClockLaw::EachRead,
+        ..Opts::default()
+    };
+    if let Err(failure) = run_ops(Seed::new(44), crate::histories::seed_0x2c::OPS, &opts) {
         panic!("{failure}");
     }
 }

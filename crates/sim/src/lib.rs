@@ -29,6 +29,7 @@ pub mod liveness;
 pub mod model;
 pub mod oracle;
 pub mod reach;
+pub mod record;
 pub mod recovery;
 pub mod resources;
 pub mod run;
@@ -42,9 +43,7 @@ pub mod world;
 
 pub use clock::{ClockLaw, SimClock};
 pub use exec::{Polls, RunEnd, count_polls, run_until};
-pub use generate::{
-    AfterRestart, EnvFault, Generator, Hold, Op, Target, Weights, frozen_history, history,
-};
+pub use generate::{AfterRestart, EnvFault, Hold, Op, Target, Weights, history};
 pub use model::{CommitId, CommitRec, Model, PageImage, Recovery};
 pub use oracle::{
     Acked, Bound, Checked, Ground, Violation, Windows, bug_fault, check, check_with, within,

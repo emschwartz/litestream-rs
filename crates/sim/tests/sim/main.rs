@@ -16,6 +16,8 @@ mod faults;
 #[cfg(test)]
 mod fixed_seeds;
 #[cfg(test)]
+mod histories;
+#[cfg(test)]
 mod liveness;
 #[cfg(test)]
 mod replay;

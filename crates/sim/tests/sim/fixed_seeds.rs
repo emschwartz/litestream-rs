@@ -6,8 +6,9 @@
 
 #[cfg(test)]
 mod fixed {
+    use crate::histories as h;
     use lsr_sim::run::run_ops;
-    use lsr_sim::{Generator, Op, Opts, Seed, Weights, frozen_history, run};
+    use lsr_sim::{Op, Opts, Seed, Weights, run};
 
     const STEPS: u32 = 300;
     /// Engine ticks a batch of eight seeds may run. The batches of seeds 1 to 64 take 1,500 to
@@ -93,62 +94,11 @@ mod fixed {
         batch(57);
     }
 
-    /// A regression: the history `seed` drew in `steps` operations under
-    /// the frozen generator it was found with, so a new draw in the live
-    /// generator never reshapes it.
-    fn replay(seed: u64, steps: u32) {
-        let seed = Seed::new(seed);
-        let ops = frozen_history(seed, steps, Generator::V1);
-        if let Err(failure) = run_ops(seed, &ops, &Opts::default()) {
+    /// A regression found under the first generator: its recorded history,
+    /// run with no drawn settings, as that generator's runs were.
+    fn replay(seed: u64, ops: &[Op]) {
+        if let Err(failure) = run_ops(Seed::new(seed), ops, &Opts::default()) {
             panic!("{failure}");
-        }
-    }
-
-    /// Every regression above, with a digest of its operations.
-    const DIGEST_0X1919F: u64 = 0xeee4_7404_1f2e_1424;
-
-    const REGRESSIONS: [(u64, u32, u64); 6] = [
-        (0x25, 44, 0xcc32_7036_14fd_e9c0),
-        (0x2d, 256, 0x09b3_c7db_4d3c_63f9),
-        (0x46, 252, 0x7d0a_3cb2_c84c_6298),
-        (0x0000_126d_68ef_1c07, 52, 0x44cb_38c0_6961_9272),
-        (0x0000_126d_68ed_250e, 215, 0xf04f_3f7b_7f9b_6425),
-        (0x0000_126d_68ef_545f, 176, 0xb236_1b18_218a_c8df),
-    ];
-
-    /// Every regression drawn by the second frozen generator, with a digest
-    /// of its operations.
-    const REGRESSIONS_V2: [(u64, u32, u64); 7] = [
-        (0x1919f, 300, DIGEST_0X1919F),
-        (0x0000_126d_68fa_c4b6, 300, 0x7bbd_6969_a8b2_5f6c),
-        (0x0000_126d_68fa_c789, 119, 0xb2ed_748b_dd72_6cc0),
-        (0x0000_126d_68fa_cf21, 273, 0xb9c6_f8fa_c632_d264),
-        (0x0000_126d_68fa_d061, 300, 0x165c_89ce_c59a_9e7c),
-        (0x0000_126d_68fa_e16b, 288, 0x3c92_f7ff_423f_1364),
-        (0x0000_126d_68fa_cf74, 300, 0xe625_6fd2_022e_9eed),
-    ];
-
-    /// FNV-1a over the operations' debug text: stable across builds, and any
-    /// change to an operation or its fields changes it.
-    fn digest(ops: &[Op]) -> u64 {
-        format!("{ops:?}")
-            .bytes()
-            .fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
-                (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
-            })
-    }
-
-    /// A frozen generator that drew something else would let every
-    /// regression above pass without reaching its bug.
-    #[test]
-    fn regression_histories_never_change() {
-        for (seed, steps, want) in REGRESSIONS {
-            let ops = frozen_history(Seed::new(seed), steps, Generator::V1);
-            assert_eq!(digest(&ops), want, "seed {seed:#x} at {steps} steps");
-        }
-        for (seed, steps, want) in REGRESSIONS_V2 {
-            let ops = frozen_history(Seed::new(seed), steps, Generator::V2);
-            assert_eq!(digest(&ops), want, "seed {seed:#x} at {steps} steps");
         }
     }
 
@@ -161,28 +111,24 @@ mod fixed {
 
     #[test]
     fn a_restored_staging_backup_is_not_uploaded_seed_0x1919f() {
-        let seed = Seed::new(0x1919f);
-        let ops = frozen_history(seed, 300, Generator::V2);
         let opts = Opts {
             drawn: true,
             ..Opts::default()
         };
-        if let Err(failure) = run_ops(seed, &ops, &opts) {
+        if let Err(failure) = run_ops(Seed::new(0x1919f), h::seed_0x1919f::OPS, &opts) {
             panic!("{failure}");
         }
     }
 
-    /// The history `seed` drew under the second frozen generator, run as
-    /// `run_with` ran it then: drawn, under the crash law the seed's mix drew.
-    fn replay_v2(seed: u64, steps: u32) {
-        let seed = Seed::new(seed);
-        let ops = frozen_history(seed, steps, Generator::V2);
+    /// A regression the soak found: its recorded history, run as `run_with`
+    /// ran it that night: drawn, under the crash law the seed's mix drew then.
+    fn replay_drawn(seed: u64, ops: &[Op], block_crash_law: bool) {
         let opts = Opts {
             drawn: true,
-            block_crash_law: Weights::mixed(seed).block_crash_law,
+            block_crash_law,
             ..Opts::default()
         };
-        if let Err(failure) = run_ops(seed, &ops, &opts) {
+        if let Err(failure) = run_ops(Seed::new(seed), ops, &opts) {
             panic!("{failure}");
         }
     }
@@ -191,32 +137,32 @@ mod fixed {
     // above and failed these five with "latest went back from node N to
     // node M, and no rewind cut node N off": a staging directory put back
     // from a backup, or a staged file another valid one replaced, was
-    // uploaded by name after a later state. The second frozen generator
-    // draws exactly the operations that night drew.
+    // uploaded by name after a later state. Each history is the operations
+    // that night drew, recorded.
 
     #[test]
     fn a_put_back_staged_file_never_sends_latest_back_seed_0x126d68fac4b6() {
-        replay_v2(0x0000_126d_68fa_c4b6, 300);
+        replay_drawn(0x0000_126d_68fa_c4b6, h::seed_0x126d68fac4b6::OPS, false);
     }
 
     #[test]
     fn a_put_back_staged_file_never_sends_latest_back_seed_0x126d68fac789() {
-        replay_v2(0x0000_126d_68fa_c789, 119);
+        replay_drawn(0x0000_126d_68fa_c789, h::seed_0x126d68fac789::OPS, false);
     }
 
     #[test]
     fn a_put_back_staged_file_never_sends_latest_back_seed_0x126d68facf21() {
-        replay_v2(0x0000_126d_68fa_cf21, 273);
+        replay_drawn(0x0000_126d_68fa_cf21, h::seed_0x126d68facf21::OPS, false);
     }
 
     #[test]
     fn a_put_back_staged_file_never_sends_latest_back_seed_0x126d68fad061() {
-        replay_v2(0x0000_126d_68fa_d061, 300);
+        replay_drawn(0x0000_126d_68fa_d061, h::seed_0x126d68fad061::OPS, true);
     }
 
     #[test]
     fn a_put_back_staged_file_never_sends_latest_back_seed_0x126d68fae16b() {
-        replay_v2(0x0000_126d_68fa_e16b, 288);
+        replay_drawn(0x0000_126d_68fa_e16b, h::seed_0x126d68fae16b::OPS, false);
     }
 
     // The same night: the level-bytes budget failed with "12050 is over the
@@ -226,7 +172,7 @@ mod fixed {
 
     #[test]
     fn another_writer_s_files_fit_the_level_bytes_budget_seed_0x126d68facf74() {
-        replay_v2(0x0000_126d_68fa_cf74, 300);
+        replay_drawn(0x0000_126d_68fa_cf74, h::seed_0x126d68facf74::OPS, false);
     }
 
     // Finding 2: a power loss tore a staged level-0 file whose commit never
@@ -235,19 +181,19 @@ mod fixed {
 
     #[test]
     fn a_torn_staged_file_is_dropped_seed_0x25() {
-        replay(0x25, 44);
+        replay(0x25, h::seed_0x25::OPS);
     }
 
     #[test]
     fn a_torn_staged_file_is_dropped_seed_0x2d() {
-        replay(0x2d, 256);
+        replay(0x2d, h::seed_0x2d::OPS);
     }
 
     /// Reached through `LocalRewound`: the torn file was an upload whose commit
     /// errored after publishing, torn by an earlier power loss.
     #[test]
     fn a_torn_staged_file_is_dropped_seed_0x46() {
-        replay(0x46, 252);
+        replay(0x46, h::seed_0x46::OPS);
     }
 
     // Issue #39: a snapshot staged for some id never reached the replica (a
@@ -259,17 +205,17 @@ mod fixed {
 
     #[test]
     fn page_size_vacuum_and_staging_wipe_seed_0x126d68ef1c07() {
-        replay(0x0000_126d_68ef_1c07, 52);
+        replay(0x0000_126d_68ef_1c07, h::seed_0x126d68ef1c07::OPS);
     }
 
     #[test]
     fn page_size_vacuum_and_staging_wipe_seed_0x126d68ed250e() {
-        replay(0x0000_126d_68ed_250e, 215);
+        replay(0x0000_126d_68ed_250e, h::seed_0x126d68ed250e::OPS);
     }
 
     #[test]
     fn page_size_vacuum_and_staging_wipe_seed_0x126d68ef545f() {
-        replay(0x0000_126d_68ef_545f, 176);
+        replay(0x0000_126d_68ef_545f, h::seed_0x126d68ef545f::OPS);
     }
 
     /// The smallest history behind the three seeds above, shrunk from

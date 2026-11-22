@@ -7,10 +7,9 @@
 //! is decided when the runner applies the operation, from the step number.
 //!
 //! A regression must keep reproducing its bug when the live generator gains a
-//! draw, so it never replays through [`history`]. One found before the
-//! generator changed is a seed, a length and the frozen [`Generator`] that drew
-//! it, replayed through [`frozen_history`]. One found later is kept as its
-//! (shrunk) list of operations and replayed through `run_ops`.
+//! draw, so it never replays through [`history`]: it is kept as its list of
+//! operations, recorded by [`crate::record`] or written by hand, and replayed
+//! through `run_ops`.
 
 use std::io::ErrorKind;
 use std::time::Duration;
@@ -909,30 +908,6 @@ pub fn history(seed: Seed, steps: u32, weights: &Weights) -> Vec<Op> {
         })
         .collect()
 }
-
-/// A frozen version of the generator, which regressions are recorded against.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Generator {
-    /// The generator before shrinking commits, delete faults and the other
-    /// scenario-only operations were drawn, with the weights of that time.
-    V1,
-    /// The generator before staging replaced under a running engine was
-    /// drawn, with the seed's own mix of that time ([`Weights::mixed`]).
-    V2,
-}
-
-/// The history of `steps` operations that `seed` named under `generator`.
-/// It never changes, whatever the live [`history`] draws.
-#[must_use]
-pub fn frozen_history(seed: Seed, steps: u32, generator: Generator) -> Vec<Op> {
-    match generator {
-        Generator::V1 => v1::history(seed, steps),
-        Generator::V2 => v2::history(seed, steps),
-    }
-}
-
-mod v1;
-mod v2;
 
 #[cfg(test)]
 mod tests;
