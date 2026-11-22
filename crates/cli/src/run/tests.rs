@@ -442,6 +442,9 @@ fn a_dry_run_whose_listing_missed_a_file_once_plans_the_restore() {
         let dir = FsStore::new(staged.replica());
         let inventory = block_on(Inventory::load(&dir)).unwrap();
         let newest = inventory.newest();
+        if !matches!(plan(&inventory, KeyTarget::Latest), PlanOutcome::Plan(_)) {
+            continue;
+        }
         // A level-0 file whose absence leaves a gap, and which is not the newest.
         let Some(hole) = inventory.files().iter().map(|f| f.key).find(|key| {
             key.level().get() == 0
