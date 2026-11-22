@@ -215,6 +215,64 @@ impl Inventory {
     }
 }
 
+/// An [`Inventory`] with some keys left out, borrowed rather than copied.
+///
+/// Retention and the audit ask "would a restore still plan if these files were
+/// gone". Building a second inventory without them copies and re-sorts every
+/// file; this view answers the same question by skipping the few keys as it
+/// reads, so a plan costs the inventory once, not once more per question.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Listed<'a> {
+    inventory: &'a Inventory,
+    /// Ascending, as [`FileKey`] sorts; searched, never scanned.
+    gone: &'a [FileKey],
+}
+
+impl<'a> Listed<'a> {
+    /// Every file of `inventory`.
+    pub(crate) const fn all(inventory: &'a Inventory) -> Self {
+        Self::without(inventory, &[])
+    }
+
+    /// Every file of `inventory` except the keys in `gone`, which must ascend.
+    pub(crate) const fn without(inventory: &'a Inventory, gone: &'a [FileKey]) -> Self {
+        Self { inventory, gone }
+    }
+
+    /// Whether `info` is still listed.
+    pub(crate) fn keeps(&self, info: &FileInfo) -> bool {
+        self.gone.binary_search(&info.key).is_err()
+    }
+
+    /// Every file still listed, ascending by key.
+    pub(crate) fn files(&self) -> impl Iterator<Item = &'a FileInfo> + Clone + use<'a> {
+        let gone = self.gone;
+        self.inventory
+            .files()
+            .iter()
+            .filter(move |info| gone.binary_search(&info.key).is_err())
+    }
+
+    /// The files of one level as the inventory holds them: a caller drops the
+    /// ones [`Self::keeps`] refuses.
+    pub(crate) fn level_slice(&self, level: Level) -> &'a [FileInfo] {
+        self.inventory.level(level)
+    }
+
+    /// The last transaction any listed file covers.
+    pub(crate) fn newest(&self) -> Option<Txid> {
+        self.files().map(|info| info.key.range().max()).max()
+    }
+
+    /// [`Inventory::malformed_snapshots`] over the files still listed.
+    pub(crate) fn malformed_snapshots(&self) -> Vec<FileKey> {
+        self.files()
+            .filter(|info| info.key.level().is_snapshot() && !is_snapshot_start(info))
+            .map(|info| info.key)
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -524,7 +524,7 @@ async fn contents_pass<S: ObjectStore>(
     walk.finish(findings);
     let (mut files_read, mut bytes_read) = (walk.files_read, walk.bytes_read);
     if let Some(last) = plan.last() {
-        let dry = latest_restore(store, inventory.clone(), last.key).await?;
+        let dry = latest_restore(store, inventory, last.key).await?;
         files_read = files_read.saturating_add(dry.files_read);
         bytes_read = bytes_read.saturating_add(dry.bytes_read);
         if let Some((key, error)) = dry.fault
