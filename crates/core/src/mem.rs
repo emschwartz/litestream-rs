@@ -357,6 +357,8 @@ impl Upload for MemUpload {
 }
 
 #[cfg(test)]
+pub(crate) mod short;
+#[cfg(test)]
 pub(crate) mod wrapped;
 
 #[cfg(test)]
