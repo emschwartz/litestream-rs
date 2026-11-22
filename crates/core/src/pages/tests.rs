@@ -173,12 +173,17 @@ fn a_staging_listing_whose_cursor_never_advances_is_a_fault_not_a_loop() {
 
 /// A level-0 file for transaction `n` holding `pages` filled with `fill`.
 fn staged_file(n: u64, pages: &[u32], fill: u8) -> (FileKey, Vec<u8>) {
+    staged_file_at(n, pages, fill, 4)
+}
+
+/// [`staged_file`] at a database size of `commit` pages.
+fn staged_file_at(n: u64, pages: &[u32], fill: u8, commit: u32) -> (FileKey, Vec<u8>) {
     use lsr_ltx::{Encoder, Header, HeaderFields, Timestamp, TxidRange};
     let txid = Txid::new(n).unwrap();
     let header = Header::new(HeaderFields {
         tracked: false,
         page_size: PageSize::MIN,
-        commit: 4,
+        commit,
         txids: TxidRange::single(txid),
         timestamp: Timestamp::from_unix_millis(1),
         pre_apply: None,
@@ -224,4 +229,36 @@ fn only_vouched_staged_files_seed_the_table() {
     // Page 2 was only in file 2: unknown, so any bytes pass and are recorded.
     assert_eq!(vouched.check(pg(2), &page(9)), Ok(()));
     assert!(vouched.check(pg(1), &page(1)).is_err());
+}
+
+/// Seeding finds the pending files that change nothing against the files before them: the
+/// same page with the same bytes at the same size. A new size, or other bytes, is a change
+/// (`crate::failstop`, the quiet files).
+#[test]
+fn seeding_finds_the_pending_files_that_change_nothing() {
+    use crate::store::Upload;
+    let staging = crate::MemStore::new();
+    let files = [
+        (1, &[1, 2, 3, 4][..], 1, 4),
+        // Pending from here: the same page 1 again, unchanged.
+        (2, &[1][..], 1, 4),
+        // The same bytes at another size.
+        (3, &[1][..], 1, 5),
+        // Other bytes.
+        (4, &[2][..], 7, 5),
+    ];
+    for (n, pages, fill, commit) in files {
+        let (key, bytes) = staged_file_at(n, pages, fill, commit);
+        crate::conformance::block_on(async {
+            let mut up = staging
+                .begin_upload(&key, lsr_ltx::Timestamp::from_unix_millis(1))
+                .await
+                .unwrap();
+            up.write(&bytes).await.unwrap();
+            up.commit().await.unwrap();
+        });
+    }
+    let seeded = crate::conformance::block_on(seeded(&staging, Txid::new(1), nz(5))).unwrap();
+    let quiet: Vec<u64> = seeded.quiet.iter().map(|txid| txid.get()).collect();
+    assert_eq!(quiet, vec![2]);
 }

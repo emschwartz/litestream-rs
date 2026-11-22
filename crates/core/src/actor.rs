@@ -1383,7 +1383,7 @@ impl Actor {
                 }
                 if let Some(cause) = self.pending() {
                     if changes {
-                        self.note_quiet_snapshot(cause, key);
+                        self.note_quiet_snapshot(cause, key, &end);
                     }
                     self.kept.snapshot_asked = false;
                     self.kept.snapshots.count(&cause);

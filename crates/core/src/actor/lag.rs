@@ -18,6 +18,7 @@ use crate::failstop::{Trip, trip};
 use crate::fault::{Fault, Next, SnapshotCause};
 use crate::layout::FileKey;
 use crate::source::WalSource;
+use crate::sync::StepEnd;
 
 /// Whether a snapshot for `cause` is a doubt about continuity, not a finding of commits the
 /// staged files lack.
@@ -42,7 +43,7 @@ const fn doubt_only(cause: SnapshotCause) -> bool {
 
 /// Whether a failure of the task can keep a commit off the replica: the tasks a commit passes
 /// through on its way there. A blocked checkpoint, a prune or maintenance never does.
-const fn carries_commits(task: Task) -> bool {
+pub(super) const fn carries_commits(task: Task) -> bool {
     match task {
         Task::Sync | Task::Upload => true,
         Task::Checkpoint | Task::Prune | Task::Maintenance => false,
@@ -59,10 +60,12 @@ impl Actor {
             return;
         }
         self.kept.lag.failed(now);
-        if self.kept.listed && task == Task::Sync {
-            self.kept.sync_failed_after_listing = true;
+        if task != Task::Sync {
+            return;
         }
-        if !self.kept.listed && task == Task::Sync {
+        if self.kept.listed {
+            self.kept.sync_failed_after_listing = true;
+        } else {
             self.kept.boot_failed = true;
             self.kept.refused_at_boot = if let Some(Fault::StoreDenied(why)) = fault {
                 Some(why)
@@ -133,14 +136,36 @@ impl Actor {
 
     /// Notes the snapshot a step just staged as `key` as quiet when it was staged while nothing
     /// was known off the replica, for a cause that is a doubt about the WAL's continuity rather
-    /// than a finding of unstaged frames: it holds what the replica already holds, as far as
-    /// the engine can tell. A commit the engine never saw (made and checkpointed away by
+    /// than a finding of unstaged frames, and the WAL held nothing past the synced position: it
+    /// holds what the replica already holds, as far as the engine can tell. A commit the engine never saw (made and checkpointed away by
     /// another process between two ticks) would be missed until the next commit starts the
     /// clock: a late trip, never a false one.
-    pub(super) fn note_quiet_snapshot(&mut self, cause: SnapshotCause, key: FileKey) {
+    pub(super) fn note_quiet_snapshot(
+        &mut self,
+        cause: SnapshotCause,
+        key: FileKey,
+        end: &StepEnd,
+    ) {
         let caught_up = self.kept.lag.since().is_none() && self.staged() == self.replicated();
-        if doubt_only(cause) && caught_up {
+        if doubt_only(cause) && caught_up && self.ended_where_synced(end) {
             self.kept.quiet.insert(key.range().max());
+        }
+    }
+
+    /// Whether a snapshot step ended where the WAL held nothing past the synced position: at
+    /// that position, or at the start of a new generation. A commit made since the last tick
+    /// is in the snapshot, and then the snapshot is lag.
+    fn ended_where_synced(&self, end: &StepEnd) -> bool {
+        let StepEnd::Through(reached) = end else {
+            return false;
+        };
+        let now = reached.position().synced().offset().frame_index();
+        let reached_salts = reached.position().cursor().salts();
+        match self.position() {
+            Some(was) if was.cursor().salts() == reached_salts => {
+                now == was.synced().offset().frame_index()
+            }
+            Some(_) | None => now == 0,
         }
     }
 

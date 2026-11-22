@@ -414,3 +414,88 @@ fn a_boot_is_judged_once_its_snapshot_is_tried() {
     rig.settle(&mut actor, T0);
     assert!(actor.boot_judged());
 }
+
+/// A boot that timed out once, then listed, still waits for its snapshot; a snapshot step
+/// that fails is a try, and judges the boot.
+#[test]
+fn a_failed_boot_snapshot_judges_the_boot_and_an_earlier_timeout_does_not() {
+    let mut rig = Rig::new();
+    let mut actor = Actor::new(go_like());
+    rig.remote
+        .inner
+        .inject_failure(StoreOp::List, transient(StoreOp::List));
+    rig.tick(&mut actor, T0);
+    assert!(actor.boot_judged(), "a timeout at boot judges it");
+    rig.staging.inner.inject_failure(
+        StoreOp::Upload,
+        StoreError::Transient {
+            op: StoreOp::Upload,
+            kind: ErrorKind::StorageFull,
+        },
+    );
+    let boot = rig.tick(&mut actor, T0 + 1_000);
+    assert!(
+        matches!(event(&boot), Some(Event::Booted { .. })),
+        "{boot:?}"
+    );
+    let failed = rig.tick(&mut actor, T0 + 1_000);
+    assert!(actor.pending_snapshot().is_some(), "{failed:?}");
+    assert!(actor.boot_judged(), "the snapshot was tried");
+}
+
+/// Only the tasks a commit passes through on its way to the replica count as failures for
+/// the clock: a blocked checkpoint, a prune or maintenance never trips (the design's table).
+#[test]
+fn only_sync_and_upload_failures_count_for_the_clock() {
+    let counts = Task::ALL.map(super::super::lag::carries_commits);
+    assert_eq!(counts, [true, false, true, false, false]);
+}
+
+/// WAL frames the engine could not stage are lag, in the generation it synced and in a new
+/// one after a restart.
+#[test]
+fn unstaged_wal_frames_are_lag_in_either_generation() {
+    for restart in [false, true] {
+        let mut rig = Rig::new();
+        let mut actor = Actor::new(go_like());
+        rig.settle(&mut actor, T0);
+        assert_eq!(actor.unreplicated_since(), None);
+        if restart {
+            rig.wal.force_restart();
+        }
+        rig.commit(2);
+        for _ in 0..100 {
+            rig.staging.inner.inject_failure(
+                StoreOp::Upload,
+                StoreError::Transient {
+                    op: StoreOp::Upload,
+                    kind: ErrorKind::StorageFull,
+                },
+            );
+        }
+        rig.tick(&mut actor, T0 + 10);
+        assert_eq!(actor.staged(), actor.replicated(), "nothing staged");
+        assert!(
+            actor.unreplicated_since().is_some(),
+            "restart={restart}: the commit is off the replica"
+        );
+    }
+}
+
+/// An operator's snapshot that takes in a commit made since the last tick is lag: the commit
+/// is in no other file.
+#[test]
+fn an_operator_snapshot_that_takes_a_new_commit_is_lag() {
+    let mut rig = Rig::new();
+    let mut actor = Actor::new(go_like());
+    rig.settle(&mut actor, T0);
+    remote_down(&rig, 10_000);
+    rig.commit(2);
+    actor.request_snapshot();
+    rig.tick(&mut actor, T0 + 10);
+    assert!(
+        actor.staged() > actor.replicated(),
+        "the snapshot is staged"
+    );
+    assert!(actor.unreplicated_since().is_some());
+}
