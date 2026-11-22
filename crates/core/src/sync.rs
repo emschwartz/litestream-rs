@@ -547,7 +547,8 @@ pub(crate) async fn stage<R: Read + Seek, P: PageSource, L: ObjectStore>(
 /// counts. The read is an argument so the order is the caller's to show.
 ///
 /// # Errors
-/// [`Fault::LocalFsyncFailed`] when the sync failed; the step stages nothing.
+/// [`Fault::WalSyncFailed`] when the sync failed; the step stages nothing, and no later sync
+/// of that WAL generation is trusted (`actor::unproven`).
 pub(crate) fn wal_barrier<W: WalSource>(wal: &mut W, _after: &CommittedRead) -> Result<(), Fault> {
     wal.sync().map_err(Fault::from_source)
 }
@@ -558,7 +559,9 @@ pub(crate) fn wal_barrier<W: WalSource>(wal: &mut W, _after: &CommittedRead) -> 
 /// to another epoch fails with `ReadTxLost`: the checkpoint
 /// protocol retook the read transaction, and `recover` must prove the new one.
 /// `pages` is the page checksum table (`crate::pages`): every database-file page
-/// is checked against it, every staged WAL page recorded in it.
+/// is checked against it, every staged WAL page recorded in it. `now` is the
+/// file's created-at time: a clock read taken after `committed` was read, so
+/// that no transaction the file carries committed after it (`Env::clock`).
 ///
 /// # Errors
 /// [`StepFailed`], carrying the same step to run again.

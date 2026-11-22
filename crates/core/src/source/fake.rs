@@ -366,6 +366,33 @@ impl FakeWal {
         lock(&self.state).bytes.truncate(len);
     }
 
+    /// A power loss that keeps the first `keep` frames of the generation,
+    /// which must end on a commit no checkpoint has passed: what SQLite's
+    /// recovery leaves when the frames after them never reached the disk.
+    /// The next transaction is written at frame `keep`, chained to it.
+    pub fn lose_frames_from(&self, keep: u32) {
+        let mut state = lock(&self.state);
+        let at = byte_pos(WalOffset::from_frame_index(keep, state.page_size));
+        state.bytes.truncate(at);
+        let frame = at.saturating_sub(FRAME_HEADER_LEN.saturating_add(state.page_size.bytes()));
+        let word = |bytes: &[u8], field: usize| {
+            let from = frame.saturating_add(field);
+            bytes
+                .get(from..from.saturating_add(4))
+                .and_then(|b| b.try_into().ok())
+                .map_or(0, u32::from_be_bytes)
+        };
+        if keep == 0 {
+            state.write_header();
+        } else {
+            state.running = WalChecksum::new(word(&state.bytes, 16), word(&state.bytes, 20));
+            state.db_size = word(&state.bytes, 4);
+        }
+        state.written = keep;
+        state.mx_frame = keep;
+        state.backfilled = state.backfilled.min(keep);
+    }
+
     /// Flips every bit of the byte at `at`.
     pub fn corrupt_byte(&self, at: usize) {
         if let Some(byte) = lock(&self.state).bytes.get_mut(at) {

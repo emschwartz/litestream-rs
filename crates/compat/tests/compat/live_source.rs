@@ -218,7 +218,7 @@ impl Rig {
             &mut ck,
             &self.staging,
             &self.cfg,
-            Timestamp::from_unix_millis(self.now),
+            &lsr_core::FakeClock::new(Timestamp::from_unix_millis(self.now)),
         ))
         .expect("checkpoint");
         self.position = Some(done.staged.position());

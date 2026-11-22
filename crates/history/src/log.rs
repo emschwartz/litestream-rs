@@ -40,6 +40,9 @@ impl NodeId {
 struct Node {
     parent: Option<NodeId>,
     digest: Digest,
+    /// When the driver began the statement that made it.
+    begun: i64,
+    /// When SQLite acknowledged it (or, unacknowledged, when the driver gave up on it).
     at: i64,
     depth: u32,
     acknowledged: bool,
@@ -77,6 +80,7 @@ impl Log {
         let node = Node {
             parent: None,
             digest: root,
+            begun: at,
             at,
             depth: 0,
             acknowledged: true,
@@ -92,7 +96,8 @@ impl Log {
         }
     }
 
-    fn push(&mut self, digest: Digest, at: i64, acknowledged: bool) -> NodeId {
+    fn push(&mut self, digest: Digest, begun: i64, at: i64, acknowledged: bool) -> NodeId {
+        self.note_time(begun);
         self.note_time(at);
         let id = NodeId(u32::try_from(self.nodes.len()).unwrap_or(u32::MAX));
         let depth = self
@@ -101,6 +106,7 @@ impl Log {
         self.nodes.push(Node {
             parent: Some(self.head),
             digest,
+            begun,
             at,
             depth,
             acknowledged,
@@ -114,17 +120,26 @@ impl Log {
         self.heads.push((at, to));
     }
 
-    /// SQLite acknowledged a commit on the local head that leaves the database at `digest`.
+    /// SQLite acknowledged a commit on the local head that leaves the database at `digest`, and
+    /// the driver read one time for it: [`Self::commit_between`] with both ends at `at`.
     pub fn commit(&mut self, digest: Digest, at: i64) -> NodeId {
-        let id = self.push(digest, at, true);
-        self.move_head(id, at);
+        self.commit_between(digest, at, at)
+    }
+
+    /// A commit is an interval: the driver began the statement at `begun` and SQLite
+    /// acknowledged it at `acknowledged`. Other connections may see it anywhere in between, so
+    /// `AsOf` judges presence by `begun` (no commit begun at or after the instant may be there)
+    /// and the head moves at `acknowledged` (a lag bound counts from there).
+    pub fn commit_between(&mut self, digest: Digest, begun: i64, acknowledged: i64) -> NodeId {
+        let id = self.push(digest, begun, acknowledged, true);
+        self.move_head(id, acknowledged);
         id
     }
 
     /// A commit on the local head whose outcome is unknown: the statement failed in a way that
     /// may or may not have committed. The head stays; [`Self::recover`] says which it was.
     pub fn pending(&mut self, digest: Digest, at: i64) -> NodeId {
-        self.push(digest, at, false)
+        self.push(digest, at, at, false)
     }
 
     /// After a crash the database holds `to`. A descendant of the head (a pending commit that
@@ -192,10 +207,17 @@ impl Log {
         self.node(id).map(|n| n.digest)
     }
 
-    /// When a node was committed.
+    /// When a node's commit was acknowledged.
     #[must_use]
     pub fn committed_at(&self, id: NodeId) -> Option<i64> {
         self.node(id).map(|n| n.at)
+    }
+
+    /// When the driver began the statement that made a node: the earliest instant any reader
+    /// could see it.
+    #[must_use]
+    pub fn begun_at(&self, id: NodeId) -> Option<i64> {
+        self.node(id).map(|n| n.begun)
     }
 
     /// Whether SQLite acknowledged the node's commit (the root counts as acknowledged).

@@ -8,6 +8,8 @@
 #   package  the cargo package whose tests are run
 #   tests    nextest name substrings (`test(~x)`); each must fail when planted, one run apiece
 #   test_bin optional: restrict the run to one integration-test binary (cargo `--test`)
+#   bin      optional: run the unit tests of one binary target (cargo `--bin`), for a package
+#            with no library, such as lsr-cli
 #
 # Not here, with the reason: a6e3e38 (level-0 retention oracle: it fixed the test, retention code is
 # unchanged, so there is nothing to plant), the verify hang fix (test-only: no production code to plant)
@@ -25,6 +27,7 @@ package = "lsr-core"
 tests = [
     "plan::tests::a_later_snapshot_ending_right_after_the_chain_does_not_date_that_transaction",
     "a_later_snapshot_ending_right_after_the_chain_does_not_hide_a_straddle",
+    "every_small_inventory_plans_as_of_the_same_lazily",
 ]
 
 [[bug]]
@@ -169,8 +172,29 @@ package = "lsr-sqlite"
 test_bin = "sqlite"
 tests = [
     "a_power_cut_after_a_settle_leaves_the_database_at_least_as_far_as_the_replica",
-    "a_failed_wal_sync_stages_nothing_and_a_later_sync_does_not_clear_it",
+    "a_failed_wal_sync_stages_nothing_of_its_generation_and_snapshots_after_a_truncate",
 ]
+
+# A failed sync of the WAL taken as a success: the frames it covered are staged, though the
+# kernel may never write them. The simulator's lost writeback and its staged-durability check
+# see it too (`wal_fsync_fails`), as does the actor's unit test.
+[[bug]]
+name = "wal-sync-error-as-success"
+fix = "claude/wal-sync-failed"
+package = "lsr-sqlite"
+test_bin = "sqlite"
+tests = ["a_failed_wal_sync_stages_nothing_of_its_generation_and_snapshots_after_a_truncate"]
+
+# After a failed sync of the WAL, the retry syncs again and trusts the success: the generation's
+# frames the failure covered are staged. Only the simulator models the lost writeback (the real
+# kernel's pages stay readable from the page cache), so it is the one that sees bytes a power
+# loss would take.
+[[bug]]
+name = "wal-trusted-after-failed-sync"
+fix = "claude/wal-sync-failed"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["faults::wal_fsync_fails"]
 
 [[bug]]
 name = "witness-trailer-compare"
@@ -250,9 +274,8 @@ tests = [
 ]
 
 # Killed unaided: no test was written for this defect. The swarm's own history (seed 44's drawn
-# mix) fails under it. The same plant at the witness's own anchor (`held || true` in witness.rs)
-# survives 3000 seeds in each of three mixes: the witness's page-by-page check of each pending file
-# against the live WAL refuses what the anchor wrongly accepts. It re-expresses on main the plant the history
+# mix) fails under it. The same plant at the witness's own anchor is witness-anchor-held below. It
+# re-expresses on main the plant the history
 # judge's work measured on the boot-witness branch: the boot accepts the newest staged file as
 # its position whenever the WAL holds a commit frame at its end in the same generation, without
 # comparing its last page or the range it covers.
@@ -312,3 +335,112 @@ package = "lsr-core"
 tests = [
     "a_hole_one_listing_showed_is_listed_again_and_not_reported",
 ]
+
+# The boot witness's anchor held for any tail it decodes. The page proof of each pending file does
+# not cover for it: only the anchor sees a tail range regrown with other bytes before a pending range
+# regrown verbatim. The engine's WAL barrier keeps a staged range from regrowing at all, so the
+# simulator reaches the window only on a lying disk with an app that retries jobs not all idempotent
+# (`unaided.rs`, the retry campaign), in 1 seed of 3000, where a later snapshot hid it; the plant
+# survives every simulator configuration and is killed by the unit tests.
+[[bug]]
+name = "witness-anchor-held"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "a_tail_whose_pages_the_wal_does_not_hold_anchors_nothing",
+    "a_pending_file_regrown_after_another_tail_is_not_uploaded_on_the_old_one",
+]
+
+[[bug]]
+name = "stamp-before-committed-read"
+fix = "847521a"
+package = "lsr-core"
+tests = [
+    "a_commit_after_the_tick_began_is_not_stamped_before_it_landed",
+]
+
+[[bug]]
+name = "seal-stamped-at-checkpoint-start"
+fix = "847521a"
+package = "lsr-core"
+tests = [
+    "a_commit_before_the_checkpoint_barrier_is_not_stamped_before_it_landed",
+]
+
+[[bug]]
+name = "restore-trusts-listing"
+fix = "32572b5"
+package = "lsr-core"
+tests = [
+    "restore::tests::a_newest_file_the_listing_hides_fails_the_restore_and_publishes_nothing",
+    "restore::tests::a_hidden_snapshot_past_the_listing_fails_an_as_of_restore",
+]
+
+# The same plant, judged by the simulator: a restore made through a lagging listing while the
+# hold lasts must be the raw replica's answer or an error.
+[[bug]]
+name = "restore-trusts-listing-sim"
+fix = "32572b5"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_restore_through_a_lagging_listing_is_the_replica_s_answer_or_an_error"]
+
+[[bug]]
+name = "dry-run-trusts-listing"
+fix = "32572b5"
+package = "lsr-cli"
+bin = "lsr"
+tests = ["a_dry_run_over_a_lagging_listing_fails_like_the_restore"]
+
+[[bug]]
+name = "empty-listing-is-empty-replica"
+fix = "a5c7d57"
+package = "lsr-core"
+tests = ["restore::tests::a_listing_that_shows_nothing_over_a_first_file_is_not_an_empty_replica"]
+
+# The same plant, judged where it does harm: `--if-replica-exists` skips the restore with success.
+[[bug]]
+name = "empty-listing-is-empty-replica-cli"
+fix = "a5c7d57"
+package = "lsr-cli"
+bin = "lsr"
+tests = ["if_replica_exists_over_a_listing_that_shows_nothing_skips_nothing"]
+
+[[bug]]
+name = "replica-page-size-unread"
+fix = "7bf9707"
+package = "lsr-core"
+tests = ["a_newest_replica_header_that_does_not_decode_still_names_the_page_size"]
+
+# The same plant, judged by the simulator's lying-reads hold where it was found.
+[[bug]]
+name = "replica-page-size-unread-sim"
+fix = "7bf9707"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_boot_whose_replica_reads_lie_never_writes_a_new_page_size_seed_0x13"]
+
+# A stall threshold no outage reaches: a plain-retry fault never degrades, the defect 538bd84
+# fixed, judged by the simulator's health-truth check under a long outage hold.
+[[bug]]
+name = "stall-never-reported-sim"
+fix = "538bd84"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_halt_long_enough_to_stall_is_reported_degraded"]
+
+# The two store-fs durability steps the LazyFS rig planted (`just lazyfs-plant <name>`) and never
+# saw fail, killed in process by the crash checker that replays a commit's steps and crashes at
+# every one of them (crates/store-fs/src/journal/tests.rs). The steps date from the store itself, so
+# `fix` names the commit that brought it.
+[[bug]]
+name = "staging-fsync-before-rename"
+fix = "2bf9f99"
+package = "lsr-store-fs"
+tests = ["a_crash_at_any_step_of_a_commit_loses_nothing_committed_and_shows_nothing_torn"]
+
+[[bug]]
+name = "staging-dir-fsync"
+fix = "2bf9f99"
+package = "lsr-store-fs"
+tests = ["a_crash_at_any_step_of_a_commit_loses_nothing_committed_and_shows_nothing_torn"]

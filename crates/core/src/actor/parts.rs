@@ -20,6 +20,7 @@ use lsr_wal::CommittedEnd;
 
 use super::ActorConfig;
 use super::state::{Gate, Live, Maintain, Phase, Tasks};
+use super::unproven::Unproven;
 use crate::app::AppCheckpointObserver;
 use crate::checkpoint::CheckpointState;
 use crate::fault::{SnapshotCause, StopCause};
@@ -112,6 +113,9 @@ pub(super) struct Kept {
     /// are deleted only when a read on a later tick fails too. Kept across
     /// boots, since boot's sweep is one of the readers.
     pub(super) suspect_staged: Option<FileKey>,
+    /// How far the engine is past a failed sync of the WAL (`unproven`). Kept across boots:
+    /// a frame that sync covered is no truer after a rebuild.
+    pub(super) unproven: Unproven,
 }
 
 impl Kept {
@@ -128,6 +132,7 @@ impl Kept {
             snapshot_asked: false,
             app: AppCheckpointObserver::default(),
             suspect_staged: None,
+            unproven: Unproven::No,
         }
     }
 
@@ -148,6 +153,7 @@ impl Kept {
             snapshot_asked,
             app: _,
             suspect_staged,
+            unproven,
         } = self;
         Self {
             cfg: cfg.clone(),
@@ -161,6 +167,7 @@ impl Kept {
             snapshot_asked: *snapshot_asked,
             app: observer,
             suspect_staged: *suspect_staged,
+            unproven: *unproven,
         }
     }
 

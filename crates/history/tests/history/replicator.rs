@@ -94,9 +94,10 @@ impl<'a, S: ObjectStore<Upload: 'static> + Send + Sync + 'static> Run<'a, S> {
     fn commit(&mut self) {
         let payload = self.rng.payload();
         let next = self.tip.next(&payload);
+        let begun = self.clock.now().unix_millis();
         next.insert(&self.app, &payload).unwrap();
         self.log
-            .commit(next.digest(), self.clock.now().unix_millis());
+            .commit_between(next.digest(), begun, self.clock.now().unix_millis());
         self.tip = next;
     }
 

@@ -3,7 +3,8 @@
 //! `just sim-replay 0x<seed> [steps]` sets `LSR_SIM_SEED` and `LSR_SIM_STEPS`
 //! and runs this test with output shown, under the seed's mix
 //! (`Weights::mixed`), as the fixed and rotating sets run it, with the overrides of
-//! `unaided::weights` (`LSR_SIM_BLOCK_LAW`, `LSR_SIM_AFTER_RESTART`). Without `LSR_SIM_SEED` the test does
+//! `unaided::weights` (`LSR_SIM_BLOCK_LAW`, `LSR_SIM_AFTER_RESTART`, `LSR_SIM_SWARM`,
+//! `LSR_SIM_HOLD`). Without `LSR_SIM_SEED` the test does
 //! nothing, so `just test` stays quiet.
 
 use lsr_sim::{Opts, Seed, run_with};

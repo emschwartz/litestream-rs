@@ -81,6 +81,11 @@ impl Checkpointer for Sqlite {
         // The read transaction comes back whether or not the checkpoint ran, as Go defers it.
         let retaken = inner.begin_read();
         let (busy, log, checkpointed) = sort_run(rc, log, checkpointed)?;
+        if mode == CheckpointMode::Truncate && !busy {
+            // SQLite wrote every committed page into the database file again and synced it,
+            // then emptied the WAL: nothing a failed sync of the WAL covered is left in it.
+            inner.wal_sync_failed = false;
+        }
         retaken.map_err(|_lost| SourceError::ReadTxLost)?;
         Ok(CheckpointRun {
             busy,

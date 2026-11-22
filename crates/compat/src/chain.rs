@@ -411,14 +411,16 @@ impl Chain {
         for _ in 0..MAX_TICKS {
             let (mut wal, mut db, mut ck) =
                 (self.live.clone(), self.live.clone(), self.live.clone());
+            let now = Timestamp::from_unix_millis(self.clock);
+            let clock = lsr_core::FakeClock::new(now);
             let env = Env {
                 wal: &mut wal,
                 db: &mut db,
                 ck: &mut ck,
                 staging: &self.staging,
                 remote: &self.remote,
+                clock: &clock,
             };
-            let now = Timestamp::from_unix_millis(self.clock);
             match block_on(self.actor.tick(env, now)) {
                 Tick::Ran {
                     event: Event::Idle, ..
@@ -604,14 +606,16 @@ impl Chain {
         for _ in 0..MAX_TICKS {
             let (mut wal, mut db, mut ck) =
                 (self.live.clone(), self.live.clone(), self.live.clone());
+            let now = Timestamp::from_unix_millis(self.clock);
+            let clock = lsr_core::FakeClock::new(now);
             let env = Env {
                 wal: &mut wal,
                 db: &mut db,
                 ck: &mut ck,
                 staging: &self.staging,
                 remote: &self.remote,
+                clock: &clock,
             };
-            let now = Timestamp::from_unix_millis(self.clock);
             match block_on(self.actor.tick(env, now)) {
                 Tick::Drained { .. } => {
                     self.archive_new()?;

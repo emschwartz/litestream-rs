@@ -183,15 +183,16 @@ fn restore_reads_chunks_side_by_side() {
     assert_eq!(restored.files(), 3);
     println!("restore {tally:?} chunks {chunks:?}");
     let total: usize = chunks.iter().sum();
-    assert_eq!(tally.get, total, "one GET per chunk");
+    // Two one-byte GETs past the listing, side by side, then one GET per chunk.
+    assert_eq!(tally.get, total + 2, "one GET per chunk");
     assert_eq!(tally.head, 0, "Latest reads no created-at time");
     let width = READ_WIDTH;
     let reads: usize = chunks.iter().map(|n| waves(*n, width)).sum();
     let listing = waves(LEVELS, width);
-    let depth = listing + reads;
+    let depth = listing + 1 + reads;
     assert!(
         tally.rounds <= depth,
-        "{} round trips, bound {depth} = {listing} listing + {reads} reads ({tally:?})",
+        "{} round trips, bound {depth} = {listing} listing + 1 past it + {reads} reads ({tally:?})",
         tally.rounds
     );
     assert!(tally.widest <= width, "{} in flight", tally.widest);

@@ -23,7 +23,11 @@ into this repository's code.
   3. a fault, chosen per cycle from a frozen menu (FAULTS): kill -9 both processes and drop
      LazyFS's unsynced data (clear-cache), or arm a torn-seq / torn-op fault on the WAL that
      persists a subset of one burst of writes (or part of one write) and then kills LazyFS;
-  4. unmount and remount.
+  4. sometimes restore and judge while the fault still holds (HELD_RESTORE): after a torn fault
+     killed LazyFS, with the application and the engine still running on a dead mount (every
+     call on the database and the WAL fails); and after the loss, with the power off and nothing
+     restarted, when the replica is all there is;
+  5. unmount and remount.
 
 Every restore goes to a fresh directory and is judged by `lsr-history` (crates/history: the
 tree-of-histories judge, which depends on no engine crate). It reduces the restored file to its
@@ -95,6 +99,12 @@ MIN_CHECKPOINT_PAGES = 200
 # Cycles per segment: a fresh disk, replica and log, ending in a clean stop judged like the run's
 # end. 100 cycles keep a segment under about 1 GB on disk.
 SEGMENT_CYCLES = 100
+# Restores while the fault holds (step 4), each place drawn with this chance per cycle from a
+# random stream of its own (HELD_STREAM xor the seed), so the frozen draws above are unchanged and
+# a run's cycles are the cycles it ran before. Added, with its first campaign's budget (300 cycles
+# of segment 100 from seed 1000), before that campaign ran.
+HELD_RESTORE = 0.5
+HELD_STREAM = 0x5375727669766501
 
 
 def default_lazyfs_dir() -> Path:
@@ -239,6 +249,8 @@ class Rig:
         self.anomalies: list[dict] = []
         self.restores_done = 0
         self.faults_fired: dict[str, int] = {}
+        self.held = random.Random(args.seed ^ HELD_STREAM)
+        self.held_restores: dict[str, int] = {}
 
     # -- setup
 
@@ -552,6 +564,10 @@ class Rig:
             self.restore_and_judge(n)
         time.sleep(max(0.0, run - (time.monotonic() - t0)))
         torn_fired = self.lazyfs is not None and self.lazyfs.poll() is not None
+        # Both draws are made every cycle, so one place's draw never shifts the other's.
+        dead_mount, power_off = (self.held.random() < HELD_RESTORE for _ in range(2))
+        if torn_fired and dead_mount:
+            self.held_restore(n, "dead-mount")
         self.kill_all()
         if fault == "clear" or not torn_fired:
             # A torn fault that never fired falls back to a plain loss; one that fired between
@@ -559,7 +575,14 @@ class Rig:
             torn_fired = not self.clear_cache() and fault != "clear"
         fired = fault if fault == "clear" or torn_fired else f"{fault}-unfired"
         self.faults_fired[fired] = self.faults_fired.get(fired, 0) + 1
+        if power_off:
+            self.held_restore(n, "power-off")
         self.unmount()
+
+    def held_restore(self, cycle: int, place: str) -> None:
+        """A restore judged while the fault holds, counted by where it was made."""
+        self.held_restores[place] = self.held_restores.get(place, 0) + 1
+        self.restore_and_judge(cycle)
 
     def finish(self, cycles: int) -> None:
         """A clean stop: the last epoch drains, and the restore must be its last commit."""
@@ -645,6 +668,7 @@ class Rig:
             "epochs": self.epoch,
             "restores": self.restores_done,
             "faults": self.faults_fired,
+            "held_restores": self.held_restores,
             **self.totals,
             "judge": self.judge_counts,
             "anomalies": len(self.anomalies),

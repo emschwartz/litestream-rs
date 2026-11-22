@@ -11,6 +11,13 @@
 //! the exact planner is held to the spec, and the lazy planner (over lazy,
 //! exact and mixed listings) to the exact planner's whole outcome.
 //!
+//! Two scopes. The gate (`just check`) runs the small one, a few CPU-seconds in debug; the
+//! large one (`just plan-exhaustive`, the nightly `plan-exhaustive` job) is a strict superset of it
+//! and takes minutes. Before the split the gate swept every inventory of up to four files over
+//! transactions 1..=5 with levels {0,1,8,9} (523,686 inventories, 3.67 million cases, about
+//! 50 CPU-seconds and 124 s of wall time under load) and the as-of sweep over D=4 (about 19
+//! CPU-seconds); under load they outran nextest's 180 s limit.
+//!
 //! The spec must decide every case (an empty judgement fails); the tally
 //! printed with `--no-capture` counts the cases per outcome and deciding
 //! clause, so an empty bucket shows.
@@ -139,11 +146,10 @@ mod exhaustive {
     }
 
     /// Holds one `plan` outcome to the spec.
-    fn verify(files: &[R], t: T, tally: &mut Tally) {
-        let inv = Inventory::from_files(files.iter().map(|r| info(r, 0))).unwrap();
-        let out = plan(&inv, t.key_target());
+    fn verify(inv: &Inventory, files: &[R], t: T, tally: &mut Tally) {
+        let out = plan(inv, t.key_target());
         let case = format!("{files:?} {t:?} -> {out:?}");
-        let judgement = judged(&inv, t.key_target().into(), &out, &case);
+        let judgement = judged(inv, t.key_target().into(), &out, &case);
         note(tally, format!("{} by {:?}", variant(&out), judgement.by));
     }
 
@@ -154,10 +160,11 @@ mod exhaustive {
         let (mut inventories, mut cases) = (0u64, 0u64);
         subsets(&keys, n, &mut |files| {
             inventories += 1;
-            verify(files, T::Latest, tally);
+            let inv = Inventory::from_files(files.iter().map(|r| info(r, 0))).unwrap();
+            verify(&inv, files, T::Latest, tally);
             cases += 1;
             for target in 1..=d + 1 {
-                verify(files, T::Txid(target), tally);
+                verify(&inv, files, T::Txid(target), tally);
                 cases += 1;
             }
         });
@@ -171,15 +178,22 @@ mod exhaustive {
         }
     }
 
-    /// The default-suite sweep: levels 0, 1, 8 and 9, up to four files over 1..=5.
+    /// The gate's sweeps: up to three files over 1..=5 with levels 0, 1, 8 and 9 (every shape of
+    /// chain, gap, overlap and snapshot of three files), and up to four files over 1..=4 with
+    /// levels 0, 1 and 9 (the four-file interactions: a snapshot, a compacted file, and two
+    /// level-0 files around it).
     #[test]
     fn every_small_inventory_plans_as_the_contract_says() {
         let mut tally = Tally::new();
-        let counts = sweep_keys(5, &[0, 1, 8, 9], 4, &mut tally);
-        report("key targets D=5 levels {0,1,8,9} N<=4", counts, &tally);
+        let counts = sweep_keys(5, &[0, 1, 8, 9], 3, &mut tally);
+        report("key targets D=5 levels {0,1,8,9} N<=3", counts, &tally);
+        let mut tally = Tally::new();
+        let counts = sweep_keys(4, &[0, 1, 9], 4, &mut tally);
+        report("key targets D=4 levels {0,1,9} N<=4", counts, &tally);
     }
 
-    /// The large sweep (`just plan-exhaustive`): five files, and a wider range.
+    /// The large sweep (`just plan-exhaustive`, nightly): five files, and a wider range. It
+    /// includes everything the gate runs and the old gate's four files over 1..=5.
     #[test]
     #[ignore = "the large sweep: minutes in debug; run with `just plan-exhaustive`"]
     fn every_larger_inventory_plans_as_the_contract_says() {
@@ -339,9 +353,16 @@ mod exhaustive {
     #[test]
     fn every_small_inventory_plans_as_of_the_same_lazily() {
         let mut tally = Tally::new();
-        let counts = sweep_as_of(4, &[0, 1, 9], 3, &[100, 200, 300], &mut tally);
+        let counts = sweep_as_of(3, &[0, 1, 9], 3, &[100, 200, 300], &mut tally);
         report(
-            "as-of D=4 levels {0,1,9} N<=3, 3 created-at times",
+            "as-of D=3 levels {0,1,9} N<=3, 3 created-at times",
+            counts,
+            &tally,
+        );
+        let mut tally = Tally::new();
+        let counts = sweep_as_of(4, &[0, 1, 9], 2, &[100, 200, 300], &mut tally);
+        report(
+            "as-of D=4 levels {0,1,9} N<=2, 3 created-at times",
             counts,
             &tally,
         );
@@ -354,6 +375,13 @@ mod exhaustive {
         let counts = sweep_as_of(5, &[0, 1, 8, 9], 3, &[100, 200, 300, 400], &mut tally);
         report(
             "as-of D=5 levels {0,1,8,9} N<=3, 4 created-at times",
+            counts,
+            &tally,
+        );
+        let mut tally = Tally::new();
+        let counts = sweep_as_of(4, &[0, 1, 9], 3, &[100, 200, 300], &mut tally);
+        report(
+            "as-of D=4 levels {0,1,9} N<=3, 3 created-at times",
             counts,
             &tally,
         );

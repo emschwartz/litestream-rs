@@ -19,6 +19,19 @@
 //! a gap every attempt planned is refused as [RestoreError::NoPlan]. Every other store error ends the restore; retry
 //! with backoff belongs to a store wrapper, and core holds no timer.
 //!
+//! A listing is not trusted to be whole for the newest state. Before a `Latest` or `AsOf`
+//! target's chain is applied, the restore reads one byte of each level-0 key that would hold the
+//! transaction after the listing's newest, the two a reader can name without a listing: that
+//! transaction's own file, and a snapshot ending at it (after planning, so an `AsOf` target's
+//! created-at reads come first). A store whose listings lag its writes
+//! would otherwise give an older state as the newest, with success. A key found that way is
+//! listed for again, as a vanished file is, and after [MAX_ATTEMPTS] the restore fails with
+//! [RestoreError::ListingBehind]. A `Txid` target needs no such read: its answer is fixed by
+//! the files that end at or below it, and a hole the lag leaves is a gap the planner refuses.
+//! An empty listing is read past for every target, at the first transaction's key: a replica
+//! that exists must never look like none (the command line's `--if-replica-exists` skips a
+//! restore, with success, only for an empty replica).
+//!
 //! An `AsOf` target plans through [AsOfPlanner], which asks the store for the
 //! exact created-at times it needs one at a time ([resolve]); a created-at time whose file is gone
 //! counts as a vanished file. [Restored::created_at_read] reports how many were
@@ -40,10 +53,10 @@ use thiserror::Error;
 
 use crate::created_at::{ResolveError, resolve_counted};
 use crate::inventory::{Inventory, InventoryError};
-use crate::layout::{FileInfo, FileKey};
+use crate::layout::{FileInfo, FileKey, Level};
 use crate::ltx_read::{BrokenLink, LinkEnd, LtxRead, ReadFault, check_link};
 use crate::plan::{AsOfPlanner, ContiguousChain, KeyTarget, PlanOutcome, RestoreTarget, plan};
-use crate::store::{ObjectStore, ReadLen, StoreError};
+use crate::store::{ObjectStore, ReadAt, ReadLen, StoreError};
 
 #[cfg(any(test, feature = "testing"))]
 mod mem_sink;
@@ -262,6 +275,18 @@ pub enum RestoreError {
         /// The file missing on the last attempt.
         missing: FileKey,
     },
+    /// Every listing ended below a level-0 file a read found past it: the
+    /// store's listings lag its writes, so the newest state it lists is not
+    /// the newest it holds.
+    #[error(
+        "{found} exists past the listed newest on each of {attempts} listings; the listing lags"
+    )]
+    ListingBehind {
+        /// Listings tried.
+        attempts: u8,
+        /// The file the last read found past the listing.
+        found: FileKey,
+    },
     /// Every file verified, but the database they built is not the one the
     /// last file's trailer says it is: the chain does not add up (overlapping
     /// files from diverged writers, or a compactor bug).
@@ -395,6 +420,8 @@ enum Abort {
     /// read that races a writer's rename may miss a file and see a later one. Plan again
     /// on a fresh listing; a gap every attempt shows is the replica's.
     Gap(PlanOutcome),
+    /// A file exists past the listing's newest: list again.
+    Behind(FileKey),
     Fatal(RestoreError),
 }
 
@@ -442,7 +469,8 @@ pub async fn restore_with<S: ObjectStore, K: DatabaseSink>(
 }
 
 /// [restore], whose first attempt plans over the borrowed `listed` when given instead of
-/// listing again. A retry after a vanished file always lists afresh.
+/// listing again. A retry after a vanished file always lists afresh. A caller that hands a
+/// listing is checking those files, so no read past it is made ([listed_past]).
 pub(crate) async fn restore_from<S: ObjectStore, K: DatabaseSink>(
     store: &S,
     mut listed: Option<&Inventory>,
@@ -453,10 +481,12 @@ pub(crate) async fn restore_from<S: ObjectStore, K: DatabaseSink>(
     let mut attempt = 1_u8;
     let mut bytes_read = 0_u64;
     let mut created_at_read = 0_u64;
+    let probe = listed.is_none();
     loop {
+        let source = listed.take().map_or(Source::List { probe }, Source::Given);
         let applied = attempt_once(
             store,
-            listed.take(),
+            source,
             target,
             options,
             &mut sink,
@@ -490,7 +520,13 @@ pub(crate) async fn restore_from<S: ObjectStore, K: DatabaseSink>(
                     missing,
                 });
             }
-            Err(Abort::Vanished(_)) => {
+            Err(Abort::Behind(found)) if attempt >= MAX_ATTEMPTS => {
+                return Err(RestoreError::ListingBehind {
+                    attempts: attempt,
+                    found,
+                });
+            }
+            Err(Abort::Vanished(_) | Abort::Behind(_)) => {
                 sink.reset().map_err(sink_fault(SinkOp::Reset))?;
                 attempt = attempt.saturating_add(1);
             }
@@ -503,10 +539,20 @@ pub(crate) async fn restore_from<S: ObjectStore, K: DatabaseSink>(
     }
 }
 
+/// Where an attempt's listing comes from.
+#[derive(Clone, Copy)]
+enum Source<'a> {
+    /// The caller's, checked as it is: no read past it.
+    Given(&'a Inventory),
+    /// A fresh listing, read past ([listed_past]) when `probe` is set: an empty one for
+    /// every target, any other for `Latest` and `AsOf`.
+    List { probe: bool },
+}
+
 /// One listing, one plan and the chain applied, or why not.
 async fn attempt_once<S: ObjectStore, K: DatabaseSink>(
     store: &S,
-    listed: Option<&Inventory>,
+    source: Source<'_>,
     target: RestoreTarget,
     options: RestoreOptions,
     sink: &mut K,
@@ -514,15 +560,22 @@ async fn attempt_once<S: ObjectStore, K: DatabaseSink>(
     created_at_read: &mut u64,
 ) -> Result<(ContiguousChain, Verified, Option<FileKey>), Abort> {
     let loaded;
-    let inventory = match listed {
-        Some(inventory) => inventory,
-        None => {
+    let (inventory, probe) = match source {
+        Source::Given(inventory) => (inventory, false),
+        Source::List { probe } => {
             loaded = Inventory::load(store)
                 .await
                 .map_err(RestoreError::Inventory)?;
-            &loaded
+            (&loaded, probe)
         }
     };
+    let empty = inventory.newest().is_none();
+    if probe
+        && empty
+        && let Some(found) = listed_past(store, inventory).await?
+    {
+        return Err(Abort::Behind(found));
+    }
     let (chain, inside_file) = match plan_target(store, inventory, target, created_at_read).await? {
         PlanOutcome::Plan(chain) => (chain, None),
         PlanOutcome::AsOfInsideFile { chain, file }
@@ -540,8 +593,49 @@ async fn attempt_once<S: ObjectStore, K: DatabaseSink>(
             return Err(RestoreError::NoPlan(NoPlan(other)).into());
         }
     };
+    if probe
+        && !empty
+        && !matches!(target, RestoreTarget::Txid(_))
+        && let Some(found) = listed_past(store, inventory).await?
+    {
+        return Err(Abort::Behind(found));
+    }
     let last = apply_chain(store, &chain, sink, bytes_read).await?;
     Ok((chain, last, inside_file))
+}
+
+/// A level-0 file a read finds past the newest transaction `inventory` lists, if any: the
+/// next transaction's own file, or a snapshot that ends at it (the first transaction's, for an
+/// empty listing). A listing that lags the
+/// store's writes is told from a whole one this way, as far as a reader can name keys.
+///
+/// # Errors
+/// [RestoreError::Store] for a read that fails other than as not found.
+pub async fn listed_past<S: ObjectStore>(
+    store: &S,
+    inventory: &Inventory,
+) -> Result<Option<FileKey>, RestoreError> {
+    let next = match inventory.newest() {
+        Some(newest) => newest.next(),
+        None => Txid::new(1),
+    };
+    let Some(next) = next else {
+        return Ok(None);
+    };
+    // Both keys in one batch: a store that reads side by side asks for them together.
+    let reads = [TxidRange::single(next), TxidRange::from_start(next)].map(|range| ReadAt {
+        key: FileKey::new(Level::ZERO, range),
+        offset: 0,
+        len: ReadLen::or_chunk(1),
+    });
+    for (at, read) in reads.iter().zip(store.read_many(&reads).await) {
+        match read {
+            Ok(_) => return Ok(Some(at.key)),
+            Err(StoreError::NotFound { .. }) => {}
+            Err(err) => return Err(RestoreError::Store(err)),
+        }
+    }
+    Ok(None)
 }
 
 /// The plan for [target]: an instant asks for the created-at times it needs, counted

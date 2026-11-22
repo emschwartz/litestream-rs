@@ -431,7 +431,7 @@ impl<S: WalSource, P: PageSource, C: Checkpointer> Engine<S, P, C> {
             &mut self.ck,
             &self.staging,
             &self.cfg,
-            Timestamp::from_unix_millis(self.now),
+            &lsr_core::FakeClock::new(Timestamp::from_unix_millis(self.now)),
         ))
         .expect("checkpoint");
         let did = format!("{:?} {:?}", done.outcome, done.staged.files());

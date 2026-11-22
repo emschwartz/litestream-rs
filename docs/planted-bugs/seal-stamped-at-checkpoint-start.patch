@@ -1,0 +1,27 @@
+--- a/crates/core/src/checkpoint.rs
++++ b/crates/core/src/checkpoint.rs
+@@ -439,6 +439,7 @@
+     cfg: SyncConfig,
+     /// Read after each step's committed read for that step's file.
+     clock: &'a dyn Clock,
++    started: Timestamp,
+     good: Reached,
+     files: Vec<FileInfo>,
+     witnesses: Vec<Witnessed>,
+@@ -482,7 +483,7 @@
+         let committed = self.wal.committed().map_err(Fault::from_source)?;
+         // After the committed read, so the file's created-at time follows every
+         // transaction it carries (see `Env::clock`).
+-        let stamp = self.clock.now();
++        let stamp = self.started;
+         wal_barrier(&mut *self.wal, &committed)?;
+         let cfg = SyncConfig {
+             cap: None,
+@@ -646,6 +647,7 @@
+         staging,
+         cfg: *cfg,
+         clock,
++        started: clock.now(),
+         good: Reached::Through(proof),
+         files: Vec::new(),
+         witnesses: Vec::new(),

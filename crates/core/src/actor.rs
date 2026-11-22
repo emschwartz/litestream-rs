@@ -74,6 +74,7 @@
 
 mod parts;
 mod state;
+mod unproven;
 
 use std::num::NonZeroU32;
 use std::time::Duration;
@@ -91,9 +92,10 @@ use crate::checkpoint::{
     Staged, after_checkpoint, after_sync, checkpoint, decide, next_wake,
 };
 use crate::created_at::{ResolvedCreatedAt, resolve};
+use crate::env::Clock;
 use crate::fault::{
-    Action, Backoff, Clamped, Fault, Next, PersistentCause, Policy, Responses, SnapshotCause,
-    StopCause, backoff_wait, policy,
+    Action, Backoff, Clamped, Fault, Next, PersistentCause, Policy, Responses, STALLED_AFTER,
+    SnapshotCause, Stall, StopCause, backoff_wait, policy,
 };
 use crate::inventory::Inventory;
 use crate::layout::{FileInfo, FileKey, Level};
@@ -119,7 +121,6 @@ use crate::verify::LivePages;
 use crate::witness::{LiveDb, Pending, Witnesses, witness_pending};
 
 /// What one tick may touch, lent for that tick only.
-#[derive(Debug)]
 pub struct Env<'a, W, P, C, L, R> {
     /// The WAL.
     pub wal: &'a mut W,
@@ -131,6 +132,34 @@ pub struct Env<'a, W, P, C, L, R> {
     pub staging: &'a L,
     /// The replica.
     pub remote: &'a R,
+    /// The clock a staged file's created-at time is read from. The tick's own
+    /// `now` is read before the tick looks at the WAL, so the application can
+    /// commit after it and before the committed end that commit lands under is
+    /// read. A file stamped with that `now` would be recorded as created
+    /// before a transaction it carries, and an `AsOf` restore for an instant
+    /// between the two would apply a transaction committed after the instant.
+    /// So a stamp is read here, after the committed read that bounds the
+    /// file: every transaction the file carries committed before it.
+    pub clock: &'a dyn Clock,
+}
+
+impl<
+    W: std::fmt::Debug,
+    P: std::fmt::Debug,
+    C: std::fmt::Debug,
+    L: std::fmt::Debug,
+    R: std::fmt::Debug,
+> std::fmt::Debug for Env<'_, W, P, C, L, R>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Env")
+            .field("wal", &self.wal)
+            .field("db", &self.db)
+            .field("ck", &self.ck)
+            .field("staging", &self.staging)
+            .field("remote", &self.remote)
+            .finish_non_exhaustive()
+    }
 }
 
 /// How the actor runs.
@@ -597,14 +626,34 @@ impl Actor {
 
     /// Routes a fault by its policy. The only place `policy` is called.
     fn fault(&mut self, waiter: impl Into<Waiter>, fault: Fault, now: Timestamp) -> Tick {
+        self.sync_failed(fault);
         match policy(&fault) {
             Policy::Retry(backoff) => {
-                let until = self.wait(waiter.into(), backoff, now);
+                let waiter = waiter.into();
+                if let Some(stall) = self.stalled(waiter, &fault) {
+                    return self.persistent(waiter, PersistentCause::Stalled(stall), backoff, now);
+                }
+                let until = self.wait(waiter, backoff, now);
                 self.ran(Event::Retrying { fault, until }, now)
             }
-            Policy::Persistent(cause) => self.persistent(waiter.into(), cause, now),
+            Policy::Persistent(cause) => {
+                self.persistent(waiter.into(), cause, Backoff::Doubling, now)
+            }
             Policy::Shutdown => self.stop(StopCause::Shutdown),
         }
+    }
+
+    /// The stall a retried fault makes of its task on this failure: the
+    /// [`STALLED_AFTER`]th in a row, or any later one. A wait a maintenance level
+    /// keeps never stalls: maintenance blocks no write's way to the replica.
+    fn stalled(&self, waiter: Waiter, fault: &Fault) -> Option<Stall> {
+        let Waiter::Task(task) = waiter else {
+            return None;
+        };
+        let failures = self.kept.tasks.get(task).failures();
+        (failures >= STALLED_AFTER.get().saturating_sub(1))
+            .then(|| Stall::of(fault))
+            .flatten()
     }
 
     /// Counts a failure where its wait is kept; returns when the wait ends.
@@ -625,18 +674,24 @@ impl Actor {
     /// the configured response, the end of a drain stops.
     fn verdict(&mut self, task: Task, cause: StopCause, now: Timestamp) -> Tick {
         match PersistentCause::of(cause) {
-            Some(cause) => self.persistent(Waiter::Task(task), cause, now),
+            Some(cause) => self.persistent(Waiter::Task(task), cause, Backoff::Doubling, now),
             None => self.stop(cause),
         }
     }
 
     /// What the configured response makes of a persistent cause: a stop, or
-    /// a degraded task that waits the doubling backoff. The only place
-    /// `Responses` is read.
-    fn persistent(&mut self, waiter: Waiter, cause: PersistentCause, now: Timestamp) -> Tick {
+    /// a degraded task that waits `backoff` (the doubling one, or a stalled
+    /// fault's own). The only place `Responses` is read.
+    fn persistent(
+        &mut self,
+        waiter: Waiter,
+        cause: PersistentCause,
+        backoff: Backoff,
+        now: Timestamp,
+    ) -> Tick {
         let action = self.kept.cfg.responses.action(cause);
-        if action == Action::Stop {
-            return self.stop(StopCause::from(cause));
+        if let (Action::Stop, Some(stop)) = (action, cause.stop()) {
+            return self.stop(stop);
         }
         self.keep_restore_point();
         let waiter = match action {
@@ -662,7 +717,7 @@ impl Actor {
             Waiter::Task(task) => task,
             Waiter::Kept(_) => Task::Maintenance,
         };
-        let until = self.wait(waiter, Backoff::Doubling, now);
+        let until = self.wait(waiter, backoff, now);
         let since = self.kept.tasks.get_mut(task).degrade(cause, now);
         let event = Event::Degraded {
             task,
@@ -1003,6 +1058,9 @@ impl Actor {
         if quiet && !wants_proof {
             return None;
         }
+        if self.owes_truncate() && !may_checkpoint {
+            return Some(self.owed_in_drain(now));
+        }
         let stepped = self.step(env, now).await;
         let (files, proof) = match self.stepped(stepped, now) {
             Ok(synced) => synced,
@@ -1072,10 +1130,15 @@ impl Actor {
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
     ) -> Result<Stepped, Fault> {
+        if self.owes_truncate() {
+            return self.unprove(env);
+        }
         let (mut reader, committed) = match self.open_wal(env)? {
             Ok(opened) => opened,
             Err(verdict) => return Ok(verdict),
         };
+        // After the committed read: see `Env::clock`.
+        let stamp = env.clock.now().max(now);
         let size = reader.header().page_size();
         if let Some(was) = self.engine.page_size.filter(|was| *was != size) {
             return Err(Fault::PageSizeChanged { was, now: size });
@@ -1094,7 +1157,7 @@ impl Actor {
             &mut self.engine.pages,
             env.staging,
             &self.kept.cfg.sync,
-            now,
+            stamp,
         )
         .await
         .map_err(|failed| failed.fault)?;
@@ -1285,7 +1348,7 @@ impl Actor {
             &mut *env.ck,
             env.staging,
             &self.kept.cfg.sync,
-            now,
+            env.clock,
         )
         .await;
         let run = match &done {
@@ -2119,8 +2182,7 @@ async fn boot_recover<W: WalSource, P, C, L: ObjectStore, R: ObjectStore>(
 /// The page size the next file must have: the newest staged file's, unless
 /// the replica holds a later transaction than that file (staging is behind
 /// it, or a staging backup was put back) or the staged file names none; then
-/// the replica's newest file's, since the next file goes on its prefix. The
-/// staged file's answers when the replica's header does not decode. A newest
+/// the replica's newest file's, since the next file goes on its prefix. A newest
 /// staged file unusable as a position names nothing: it can never be
 /// uploaded (it gets no witness), so its page size constrains no file.
 async fn prefix_page_size<R: ObjectStore>(
@@ -2139,22 +2201,31 @@ async fn prefix_page_size<R: ObjectStore>(
     Ok(staged)
 }
 
-/// The page size in the header of the replica's newest file; `None` when the
-/// replica is empty or that header does not decode. Every file of a prefix
-/// has one page size, so one header answers for all of them.
+/// Headers a boot reads, newest file first, for the replica's page size before it calls the
+/// replica corrupt.
+const PAGE_SIZE_HEADERS: usize = 8;
+
+/// The page size in the header of the replica's newest file whose header decodes; `None`
+/// when the replica is empty. Every file of a prefix has one page size, so any header answers
+/// for all of them. A header that does not decode (a rotten object, or a read that returned
+/// other bytes) says nothing, so the next newest file is read; when none of the newest
+/// [`PAGE_SIZE_HEADERS`] decodes, the replica is corrupt as far as a boot can tell. Taking no
+/// answer for no constraint let a boot snapshot a new page size onto the prefix.
 async fn replica_page_size<R: ObjectStore>(remote: &R) -> Result<Option<PageSize>, Fault> {
     let inventory = Inventory::load(remote)
         .await
         .map_err(|err| inventory_fault(&err))?;
-    let newest = inventory
-        .files()
-        .iter()
-        .max_by_key(|file| file.key.range().max());
-    let Some(newest) = newest else {
+    let mut files: Vec<&FileInfo> = inventory.files().iter().collect();
+    if files.is_empty() {
         return Ok(None);
-    };
-    let header = read_header(remote, &newest.key, Fault::from_remote).await?;
-    Ok(header.map(|header| header.page_size()))
+    }
+    files.sort_by_key(|file| std::cmp::Reverse(file.key.range().max()));
+    for file in files.into_iter().take(PAGE_SIZE_HEADERS) {
+        if let Some(header) = read_header(remote, &file.key, Fault::from_remote).await? {
+            return Ok(Some(header.page_size()));
+        }
+    }
+    Err(Fault::RemoteCorrupt)
 }
 
 /// Why a boot's first sync is a snapshot. A staged file that did not verify

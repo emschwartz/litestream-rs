@@ -81,7 +81,8 @@ pub use env::{FakeClock, RecordingSleeper, SeededEntropy};
 pub use fault::reporting_bugs;
 pub use fault::{
     Backoff, BugSite, Clamped, Fault, MAX_BACKOFF, Next, OtherWriter, PersistentCause, Policy,
-    Response, Responses, SnapshotCause, StopCause, VERIFY, backoff_wait, policy, retry_wait,
+    Response, Responses, STALLED_AFTER, SnapshotCause, Stall, StopCause, VERIFY, backoff_wait,
+    policy, retry_wait,
 };
 pub use inventory::{Inventory, InventoryError, is_snapshot_start};
 pub use layout::{
@@ -110,7 +111,7 @@ pub use recover::{
 };
 pub use restore::{
     AsOfInside, DatabaseSink, FileFault, MAX_ATTEMPTS, NoPlan, PublishFailure, PublishLeft,
-    RestoreError, RestoreOptions, Restored, SinkOp, restore, restore_with,
+    RestoreError, RestoreOptions, Restored, SinkOp, listed_past, restore, restore_with,
 };
 #[cfg(any(test, feature = "testing"))]
 pub use restore::{Database, MemPublishError, MemSink};
