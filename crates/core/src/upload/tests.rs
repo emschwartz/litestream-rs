@@ -1025,6 +1025,12 @@ fn a_staged_file_that_cannot_follow_the_replica_is_not_uploaded() {
             encode_file(1, 1, ps(), origin(32, 100, 5)),
             encode_file(2, 2, ps(), origin(132, 100, 6)),
         ),
+        // The same generation from its first frame, ending before the
+        // replica's file did: an earlier WAL state (seed 0x1919f).
+        (
+            encode_file(1, 1, ps(), origin(32, 100, 5)),
+            encode_file(2, 2, ps(), origin(32, 50, 5)),
+        ),
     ];
     for (theirs, ours) in cases {
         let (staging, remote) = (MemStore::new(), Probe::default());
@@ -1044,8 +1050,8 @@ fn a_staged_file_that_cannot_follow_the_replica_is_not_uploaded() {
 }
 
 /// The staged file follows the replica's newest: the same WAL generation
-/// from where it ended, another generation from its first frame, or no WAL
-/// range named on either side.
+/// from where it ended or from its first frame to at least as far, another
+/// generation from its first frame, or no WAL range named on either side.
 #[test]
 fn a_staged_file_that_follows_the_replica_is_uploaded() {
     let origin = |offset, size, salt| WalOrigin::new(offset, size, salt, 7);
@@ -1058,6 +1064,11 @@ fn a_staged_file_that_follows_the_replica_is_uploaded() {
         (
             encode_file(1, 1, ps(), origin(32, 100, 5)),
             encode_file(2, 2, ps(), origin(32, 100, 6)),
+        ),
+        // A snapshot of the same generation, reaching at least as far.
+        (
+            encode_file(1, 1, ps(), origin(32, 100, 5)),
+            encode_file(2, 2, ps(), origin(32, 150, 5)),
         ),
     ];
     for (theirs, ours) in cases {
