@@ -168,7 +168,11 @@ fn a_file_longer_than_one_read_is_decoded_whole() {
     let store = crate::mem::MemStore::new();
     crate::conformance::block_on(async {
         let mut up = store
-            .begin_upload(&key(1), Timestamp::from_unix_millis(1))
+            .begin_upload(
+                &key(1),
+                Timestamp::from_unix_millis(1),
+                crate::store::WriteMode::Replace,
+            )
             .await
             .unwrap();
         crate::store::Upload::write(&mut up, &bytes).await.unwrap();

@@ -20,6 +20,7 @@ pub mod seed_0x1919f;
 pub mod seed_0x25;
 pub mod seed_0x2c;
 pub mod seed_0x2d;
+pub mod seed_0x31c;
 pub mod seed_0x46;
 pub mod seed_0x585;
 pub mod seed_0x753;
@@ -28,7 +29,6 @@ pub mod seed_0xb6b;
 pub mod seed_0xb9e;
 pub mod seed_0xe9;
 pub mod seed_0xf;
-pub mod seed_0xf434c;
 pub mod seed_0xf488c;
 
 /// What guards a recorded history against passing for nothing.
@@ -121,16 +121,16 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
         Guard::Own("anchor-any-tail"),
     ),
     (
-        "seed_0xf434c",
-        "a_stall_ends_with_the_fault_that_caused_it_seed_0xf434c",
+        "seed_0x31c",
+        "a_stall_ends_with_the_fault_that_caused_it_seed_0x31c",
         Guard::Own("success-keeps-a-stall"),
     ),
     (
         "seed_0xb6b",
         "an_id_the_replica_holds_is_not_taken_again_after_a_lying_read_seed_0xb6b",
         Guard::Unguarded(
-            "it is known wrong and ignored until conditional level-0 writes (#96) land: it fails \
-             on main, so no plant can be judged by it",
+            "conditional level-0 writes (#96) fixed it, and no plant in the ledger lists it yet: \
+             their plants are judged by core tests",
         ),
     ),
     (

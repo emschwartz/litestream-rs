@@ -143,11 +143,10 @@ fn a_rolled_back_bucket_never_gets_a_transaction_id_reused_across_a_restart_seed
 /// reads lying (`Hold::LyingReads`) and an old staging backup put back, the engine snapshots the
 /// database as transaction 18 again and puts the same level-0 key with other bytes (266) holding
 /// another commit. The replica's object is overwritten: the class of BOOT-18 and BOOT-19
-/// (docs/BEHAVIOR.md), which conditional level-0 writes (#96) are meant to close. Its history
-/// is recorded and the settings its mix drew are written out.
+/// (docs/BEHAVIOR.md). The conditional level-0 write closes it: the bucket refuses the second
+/// put into the held key and the read-back reports the divergence. Its history is recorded and
+/// the settings its mix drew are written out.
 #[test]
-#[ignore = "known wrong: an id the replica holds is taken again (BOOT-18/19); pending conditional \
-            level-0 writes (#96)"]
 fn an_id_the_replica_holds_is_not_taken_again_after_a_lying_read_seed_0xb6b() {
     let opts = lsr_sim::Opts {
         drawn: true,

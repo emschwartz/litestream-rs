@@ -15,6 +15,7 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use lsr_compat::{Manifest, all_fixtures, stage};
+use lsr_core::WriteMode;
 use lsr_core::conformance::block_on;
 use lsr_core::{FileInfo, Inventory, ObjectStore, Upload};
 use lsr_store_fs::FsStore;
@@ -263,7 +264,11 @@ fn unique_prefix() -> String {
 fn upload(store: &S3Store, info: &FileInfo, body: &[u8]) {
     block_on(async {
         let mut up = store
-            .begin_upload(&info.key, info.created_at().unwrap().at())
+            .begin_upload(
+                &info.key,
+                info.created_at().unwrap().at(),
+                WriteMode::Replace,
+            )
             .await
             .expect("begin");
         up.write(body).await.expect("write");

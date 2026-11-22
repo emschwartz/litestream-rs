@@ -111,6 +111,9 @@ pub fn op(op: &Op) -> Result<String, Unprintable> {
         Op::RequestSnapshot => "Op::RequestSnapshot".to_owned(),
         Op::Restore => "Op::Restore".to_owned(),
         Op::Restart => "Op::Restart".to_owned(),
+        Op::LaggingListings { writes, window } => {
+            format!("Op::LaggingListings {{ writes: {writes}, window: {window} }}")
+        }
         Op::TakeOver => "Op::TakeOver".to_owned(),
         Op::PowerLoss => "Op::PowerLoss".to_owned(),
         Op::LyingWalSync => "Op::LyingWalSync".to_owned(),
@@ -235,6 +238,7 @@ fn store_error(err: &StoreError) -> Result<String, Unprintable> {
             store_op(*op)
         )),
         StoreError::NotFound { .. }
+        | StoreError::AlreadyExists { .. }
         | StoreError::ScratchExhausted { .. }
         | StoreError::Corrupt { .. } => Err(Unprintable(format!("{err:?}"))),
     }

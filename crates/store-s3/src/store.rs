@@ -25,7 +25,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lsr_core::{
     BatchKind, Clock, CreatedAt, CreatedAtSource, FileInfo, FileKey, Level, ListAt, ListedTime,
-    Listing, ObjectStore, PageLimit, ReadAt, ReadLen, StoreError, StoreOp,
+    Listing, ObjectStore, PageLimit, ReadAt, ReadLen, StoreError, StoreOp, WriteMode,
 };
 use lsr_ltx::{Timestamp, TxidRange};
 
@@ -35,7 +35,7 @@ use crate::config::{
 };
 use crate::credentials::S3Credentials;
 use crate::orphans::Orphans;
-use crate::request::{HttpRequest, MAX_DELETE_KEYS, RequestBuilder, RequestError};
+use crate::request::{HttpRequest, MAX_DELETE_KEYS, Precondition, RequestBuilder, RequestError};
 use crate::response::{Head, parse_created_at_header, parse_delete_failure_codes, parse_head};
 use crate::transport::{HttpResponse, Transport};
 use crate::upload::S3Upload;
@@ -53,6 +53,19 @@ pub struct ListStats {
     pub fell_back: u64,
     /// Files listed and gone by the time their created-at time or content was read.
     pub vanished: u64,
+}
+
+/// What the store's create-only writes ([`WriteMode::New`]) met, for the
+/// event layer (this crate emits no events).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct WriteStats {
+    /// The provider answered `If-None-Match: *` with `NotImplemented`: it has
+    /// no conditional writes, so create-only writes now replace, as Go's do.
+    pub conditional_unsupported: bool,
+    /// Create-only writes sent without the condition since then.
+    pub unconditional_new: u64,
+    /// Writes the bucket refused because the key was taken (412).
+    pub refused_taken: u64,
 }
 
 /// A replica on an S3-compatible bucket.
@@ -83,6 +96,7 @@ pub(crate) struct Inner<T> {
     prefix: Prefix,
     deadline: Duration,
     stats: Mutex<ListStats>,
+    writes: Mutex<WriteStats>,
     pub(crate) orphans: Orphans,
 }
 
@@ -156,6 +170,7 @@ impl<T: Transport> S3Store<T> {
                 prefix: config.prefix().clone(),
                 deadline: config.deadline(),
                 stats: Mutex::new(ListStats::default()),
+                writes: Mutex::new(WriteStats::default()),
                 orphans: Orphans::default(),
             }),
         })
@@ -175,6 +190,16 @@ impl<T: Transport> S3Store<T> {
     #[must_use]
     pub fn pending_orphans(&self) -> usize {
         self.inner.orphans.len()
+    }
+
+    /// What create-only writes met since the store was made.
+    #[must_use]
+    pub fn write_stats(&self) -> WriteStats {
+        *self
+            .inner
+            .writes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// The created-at time counts since the store was made (a listing reads none).
@@ -220,12 +245,18 @@ impl<T: Transport> ObjectStore for S3Store<T> {
         &self,
         key: &FileKey,
         created_at: Timestamp,
+        mode: WriteMode,
     ) -> Result<S3Upload<T>, StoreError> {
         // Best effort: a failed abort keeps its id listed for the next try.
         match self.inner.abort_orphans() {
             Ok(_) | Err(_) => {}
         }
-        Ok(S3Upload::new(Arc::clone(&self.inner), *key, created_at))
+        Ok(S3Upload::new(
+            Arc::clone(&self.inner),
+            *key,
+            created_at,
+            mode,
+        ))
     }
 
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
@@ -306,6 +337,40 @@ impl<T: Transport> Inner<T> {
 
     pub(crate) fn now(&self) -> Timestamp {
         self.clock.now()
+    }
+
+    fn writes(&self, change: impl FnOnce(&mut WriteStats)) {
+        change(&mut self.writes.lock().unwrap_or_else(PoisonError::into_inner));
+    }
+
+    /// The condition a write in `mode` carries: `If-None-Match: *` for a
+    /// create-only write, unless the provider refused it before, when the
+    /// write goes without and is counted.
+    pub(crate) fn precondition(&self, mode: WriteMode) -> Precondition {
+        match mode {
+            WriteMode::Replace => Precondition::None,
+            WriteMode::New => {
+                let mut precondition = Precondition::KeyIsFree;
+                self.writes(|stats| {
+                    if stats.conditional_unsupported {
+                        stats.unconditional_new = stats.unconditional_new.saturating_add(1);
+                        precondition = Precondition::None;
+                    }
+                });
+                precondition
+            }
+        }
+    }
+
+    /// The provider has no conditional writes: later create-only writes go
+    /// without the condition.
+    pub(crate) fn conditional_unsupported(&self) {
+        self.writes(|stats| stats.conditional_unsupported = true);
+    }
+
+    /// Counts a write the bucket refused because the key was taken.
+    pub(crate) fn tally_taken(&self) {
+        self.writes(|stats| stats.refused_taken = stats.refused_taken.saturating_add(1));
     }
 
     /// Builds a request signed with the current time.

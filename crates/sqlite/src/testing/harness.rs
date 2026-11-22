@@ -51,6 +51,7 @@ use rusqlite::{Connection, OpenFlags};
 
 use crate::testing::vfs::{CrashLaw, FaultVfs, FileKind, Op, VfsError, seed_prng};
 use crate::{DEFAULT_JOURNAL_SIZE_LIMIT, OpenError, Sqlite, SqliteConfig};
+use lsr_core::WriteMode;
 
 mod app;
 mod stepper;
@@ -1248,7 +1249,11 @@ async fn copy_file(
     chunk: ReadLen,
 ) -> Result<(), StoreError> {
     let mut upload = to
-        .begin_upload(&file.key, Timestamp::from_unix_millis(0))
+        .begin_upload(
+            &file.key,
+            Timestamp::from_unix_millis(0),
+            WriteMode::Replace,
+        )
         .await?;
     let mut offset = 0_u64;
     loop {

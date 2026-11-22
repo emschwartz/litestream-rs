@@ -1,12 +1,12 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -1925,7 +1925,7 @@
-         // its position: a file past it is another writer's. In steady state
-         // this listing is the first to see one, and nothing may be planned
-         // from it (no compaction, snapshot or delete takes it as input).
--        if inventory.newest() > self.snapshot_after() {
-+        if false && inventory.newest() > self.snapshot_after() {
-             mark!(Up10);
-             mark!(Maint10);
-             return Some(self.fault(Task::Maintenance, Fault::RemoteAheadOfLocal, now));
+@@ -2116,7 +2116,7 @@
+         now: Timestamp,
+     ) -> Option<Tick> {
+         let known = self.snapshot_after();
+-        if inventory.newest() > known {
++        if false && inventory.newest() > known {
+             return Some(match past_known(remote, inventory, known).await {
+                 Ok(true) => {
+                     mark!(Up10);

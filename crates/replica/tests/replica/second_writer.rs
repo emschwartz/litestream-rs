@@ -10,7 +10,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use common::{Site, config, fake, stopped, wait};
-use lsr_core::{FileKey, Level, ObjectStore, Upload};
+use lsr_core::{FileKey, Level, ObjectStore, Upload, WriteMode};
 use lsr_ltx::{Encoder, Header, HeaderFields, PageNo, PageSize, Timestamp, Txid, TxidRange};
 use lsr_replica::{Config, Phase, Replicator, StartError, StopCause, Stopped, block_on};
 use lsr_store_fs::FsStore;
@@ -165,7 +165,7 @@ fn put_foreign(site: &Site, txid: Txid) -> FileKey {
     let store = FsStore::new(&site.replica);
     block_on(async {
         let mut up = store
-            .begin_upload(&key, Timestamp::from_unix_millis(1))
+            .begin_upload(&key, Timestamp::from_unix_millis(1), WriteMode::Replace)
             .await
             .unwrap();
         up.write(&bytes).await.unwrap();

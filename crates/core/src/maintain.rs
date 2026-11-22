@@ -658,9 +658,10 @@ pub enum Outcome {
         /// How many keys the call named.
         count: usize,
     },
-    /// An input is gone from the replica: list again and plan again.
+    /// An input is gone from the replica, or the output's key already holds
+    /// an object the listing did not show: list again and plan again.
     Replan {
-        /// The missing input.
+        /// The missing input, or the output found already there.
         key: FileKey,
     },
     /// The job failed; nothing was retried here.
@@ -675,12 +676,22 @@ pub enum Outcome {
 /// deleted.
 ///
 /// When the store rejected the output's commit, the output key is deleted
-/// before returning: a listing would otherwise show it as coverage.
+/// before returning: a listing would otherwise show it as coverage. That
+/// delete may only take the object this attempt wrote, never one the key held
+/// before (an earlier run's output that retention may already count as
+/// cover): an output key a read finds taken before the write is not written
+/// over, and the job is planned again from a fresh listing.
 pub(crate) async fn run_compact<L: ObjectStore, R: ObjectStore>(
     job: &CompactJob,
     local: &L,
     replica: &R,
 ) -> Outcome {
+    let output = job.output_key();
+    match crate::probe::exists(replica, &output).await {
+        Ok(true) => return Outcome::Replan { key: output },
+        Ok(false) => {}
+        Err(err) => return Outcome::Failed(MaintainError::Compact(CompactError::Dest(err))),
+    }
     let result = if job.level().get() == 1 {
         compact_level_one(job, local, replica).await
     } else {
@@ -790,6 +801,7 @@ const fn leaves_bad_output(err: &StoreError) -> bool {
         | StoreError::Throttled { .. }
         | StoreError::Denied { .. }
         | StoreError::NotFound { .. }
+        | StoreError::AlreadyExists { .. }
         | StoreError::ScratchExhausted { .. }
         | StoreError::Refused { .. } => false,
     }

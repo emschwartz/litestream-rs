@@ -16,6 +16,7 @@ use crate::conformance::block_on;
 use crate::layout::Level;
 use crate::mem::MemStore;
 use crate::mem::wrapped::Wrapped;
+use crate::store::WriteMode;
 use crate::store::{StoreOp, Upload};
 
 fn txid(n: u64) -> Txid {
@@ -103,7 +104,10 @@ fn put(store: &MemStore, level: u8, min: u64, max: u64, bytes: &[u8]) {
     block_on(async {
         let key = key(level, min, max);
         let created = Timestamp::from_unix_millis(i64::try_from(max).unwrap() * 1000);
-        let mut upload = store.begin_upload(&key, created).await.unwrap();
+        let mut upload = store
+            .begin_upload(&key, created, WriteMode::Replace)
+            .await
+            .unwrap();
         upload.write(bytes).await.unwrap();
         upload.commit().await.unwrap();
     });
@@ -664,12 +668,17 @@ fn a_txid_restore_takes_no_read_past_the_listing() {
 }
 
 #[test]
-fn a_whole_listing_costs_two_one_byte_reads_past_it() {
+fn a_whole_listing_costs_one_read_per_named_key_past_it() {
     let store = lagging(&[]);
     let (result, sink) = run(&store, RestoreTarget::Latest);
     assert_eq!(result.unwrap().attempts(), 1);
     assert_eq!(seeds(&sink.published().unwrap()), [3]);
-    assert_eq!(store.reads.load(Ordering::Relaxed), 5);
+    // The three files of the chain, and the keys named for transaction 4.
+    let past = crate::probe::reads_per_transaction(txid(4));
+    assert_eq!(
+        u64::try_from(store.reads.load(Ordering::Relaxed)).unwrap(),
+        3 + past
+    );
 }
 
 #[test]
@@ -950,9 +959,13 @@ fn a_file_larger_than_one_chunk_is_read_in_several_reads() {
     let store = Wrapped::new(store);
     let (result, sink) = run(&store, RestoreTarget::Latest);
     let restored = result.unwrap();
-    // Two one-byte reads past the listing (nothing there), then one full chunk, then the
-    // short rest: no empty read follows.
-    assert_eq!(store.reads.load(Ordering::Relaxed), 4);
+    // One-byte reads of the keys named past the listing (nothing there), then one full
+    // chunk, then the short rest: no empty read follows.
+    let past = crate::probe::reads_per_transaction(txid(2));
+    assert_eq!(
+        u64::try_from(store.reads.load(Ordering::Relaxed)).unwrap(),
+        past + 2
+    );
     assert_eq!(restored.bytes_read(), u64::try_from(bytes.len()).unwrap());
     let db = sink.published().unwrap();
     for (index, page) in want.iter().enumerate() {

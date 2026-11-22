@@ -293,6 +293,107 @@ tests = [
     "a_staged_file_whose_bytes_differ_but_still_verify_is_refused",
 ]
 
+# The uploader asks the bucket to refuse a taken level-0 key (If-None-Match: *); the store stops
+# sending the header.
+[[bug]]
+name = "drop-if-none-match"
+fix = "92613ce"
+package = "lsr-store-s3"
+test_bin = "store-s3"
+tests = [
+    "a_create_only_put_into_a_taken_key_is_refused_and_changes_nothing",
+    "a_create_only_multipart_into_a_taken_key_is_refused_at_the_complete",
+    "store::cases::conformance_cases::a_new_upload_never_replaces",
+]
+
+# A refused upload is taken as the engine's own earlier commit without reading the object back.
+[[bug]]
+name = "refusal-without-read-back"
+fix = "92613ce"
+package = "lsr-core"
+tests = [
+    "a_refused_upload_of_other_verifying_bytes_is_never_written_over",
+    "a_refusal_behind_a_listing_too_stale_to_show_the_key_is_judged_by_reads",
+    "a_refused_upload_with_the_replica_ahead_is_another_writer",
+    "a_refused_upload_over_an_object_that_does_not_verify_replaces_it",
+]
+
+# Re-expressed: the relist after a refusal now reads the refused key and judges it from two
+# reads, which catches the original patch (dropping the staged copy's own verification) on its
+# own; the defect is a torn staged read confirming the replica's object, planted directly.
+[[bug]]
+name = "refusal-judged-from-one-read"
+fix = "af8ea2f"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["one_bad_staged_read_after_a_refusal_confirms_no_other_object_seed_0x4ef"]
+
+[[bug]]
+name = "spent-multipart-upload"
+fix = "ce35d57"
+package = "lsr-store-s3"
+test_bin = "store-s3"
+tests = ["a_retried_complete_finding_its_upload_spent_is_settled_by_a_head"]
+
+[[bug]]
+name = "completed-etag-form"
+fix = "ce35d57"
+package = "lsr-store-s3"
+test_bin = "store-s3"
+tests = ["a_completed_etag_in_another_form_is_not_taken_for_damage"]
+
+# A boot or relist takes a listing's newest as the replica's, with no reads past it: a listing
+# that lags hides the engine's own uploads.
+[[bug]]
+name = "listing-trusted-without-probe"
+fix = "8c7d8ce"
+package = "lsr-core"
+tests = [
+    "a_listing_that_hides_the_newest_uploads_is_corrected_by_reads",
+    "a_relist_that_hides_confirmed_uploads_is_no_regression",
+    "a_snapshot_a_listing_hides_is_found_by_a_read",
+    "the_probe_reads_through_the_newest_staged_transaction",
+]
+
+# The same plant, judged by the simulator's lagging listings.
+[[bug]]
+name = "boot-trusts-a-stale-listing"
+fix = "8c7d8ce"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "a_stale_boot_listing_does_not_stop_the_engine_on_its_own_files",
+    "a_lagging_relist_does_not_report_the_replica_gone_backwards_seed_0x440",
+    "a_lagging_boot_listing_does_not_send_an_upload_into_a_freed_key_seed_0x4c5",
+]
+
+# A file a listing shows past the engine's position stops it with no read to find the file.
+[[bug]]
+name = "other-writer-from-a-listing-alone"
+fix = "8c7d8ce"
+package = "lsr-core"
+tests = ["maintenance_stops_on_a_file_past_its_position_only_when_a_read_finds_it"]
+
+# Maintenance plans from a listing that ends before the engine's confirmed upload.
+[[bug]]
+name = "maintenance-plans-from-a-lagging-listing"
+fix = "8c7d8ce"
+package = "lsr-core"
+tests = ["maintenance_plans_nothing_from_a_listing_that_hides_a_confirmed_upload"]
+
+# One failed read of the staged copy takes it as torn and confirms the replica's differing object.
+[[bug]]
+name = "tail-judged-from-one-read"
+fix = "34f1694"
+package = "lsr-core"
+tests = ["one_torn_read_of_the_staged_copy_confirms_no_differing_replica_object"]
+
+# One failed read of the replica's copy takes it as torn and writes the staged file over it.
+[[bug]]
+name = "replica-replaced-on-one-read"
+fix = "34f1694"
+package = "lsr-core"
+tests = ["one_torn_read_of_the_replica_copy_does_not_write_over_it"]
 # The witness's page count compared with at least, not exactly: a pending file carrying one page
 # its range never wrote is proven and uploaded. Found by a blind recall pilot, which no layer caught.
 [[bug]]
@@ -1045,7 +1146,7 @@ name = "success-keeps-a-stall"
 fix = "checker-holes (stall liveness)"
 package = "lsr-sim"
 test_bin = "sim"
-tests = ["a_stall_ends_with_the_fault_that_caused_it_seed_0xf434c"]
+tests = ["a_stall_ends_with_the_fault_that_caused_it_seed_0x31c"]
 
 [[bug]]
 name = "journal-debt-not-recorded"
@@ -1149,6 +1250,24 @@ patch = "latest-judged-against-old-nodes"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["swarm_seed_0x753_a_redo_that_rebuilds_the_restored_state_is_not_a_loss"]
+
+# A rejected write deletes its key even when the write replaced an object the key held before.
+[[bug]]
+name = "rejected-replace-deletes"
+fix = "40f58942"
+package = "lsr-core"
+tests = ["a_rejected_write_over_an_object_that_was_there_deletes_nothing"]
+
+# A compaction writes over an output key that already holds an object, so its rejected commit
+# deletes what was there.
+[[bug]]
+name = "compaction-writes-over-its-output"
+fix = "40f58942"
+package = "lsr-core"
+tests = [
+    "a_rejected_compaction_never_deletes_an_output_that_was_already_there",
+    "running_a_job_twice_leaves_one_file_at_the_key",
+]
 
 # Fail-stop (if-replication-stops, docs/proposals/fail-stop.md section 2): each entry is one of the
 # design's planted bugs, re-planted against the feature as it landed.

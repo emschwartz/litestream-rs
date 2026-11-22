@@ -21,6 +21,7 @@ mod diff {
     use lsr_core::conformance::block_on;
     use lsr_core::{
         FileInfo, FileKey, Level, ListedTime, MemStore, ObjectStore, PageLimit, ReadLen, Upload,
+        WriteMode,
     };
     use lsr_ltx::{Timestamp, Txid, TxidRange};
     use lsr_sim::crash_law::CrashLaw;
@@ -124,7 +125,11 @@ mod diff {
                 abort,
             } => block_on(async {
                 let mut up = store
-                    .begin_upload(&key.key(), Timestamp::from_unix_millis(*created_ms))
+                    .begin_upload(
+                        &key.key(),
+                        Timestamp::from_unix_millis(*created_ms),
+                        WriteMode::Replace,
+                    )
                     .await?;
                 up.write(bytes).await?;
                 if *abort {

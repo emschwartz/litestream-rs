@@ -18,6 +18,7 @@ use crate::maintain::tests::{
 use crate::maintain::{Due, Job};
 use crate::mem::MemStore;
 use crate::plan::RestoreTarget;
+use crate::store::WriteMode;
 use crate::store::{ObjectStore, Upload};
 
 /// `retention` from a fresh state.
@@ -1717,7 +1718,10 @@ impl Lazy {
         crate::conformance::block_on(async {
             for f in files {
                 let created_at = f.created_at().unwrap().at();
-                let mut up = store.begin_upload(&f.key, created_at).await.unwrap();
+                let mut up = store
+                    .begin_upload(&f.key, created_at, WriteMode::Replace)
+                    .await
+                    .unwrap();
                 up.write(b"x").await.unwrap();
                 up.commit().await.unwrap();
             }

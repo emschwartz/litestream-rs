@@ -161,6 +161,7 @@ classes! {
     OurReader = "OurReader", Undrawn;
     AppAutocheckpoint = "AppAutocheckpoint", Undrawn;
     CrashProcess = "Crash.Process", Once;
+    LaggingListings = "LaggingListings", Once;
     CrashPower = "Crash.Power", Once;
     ClockJump = "ClockJump", Once;
     SecondWriter = "SecondWriter", Lasting;
@@ -336,6 +337,7 @@ impl Class {
             Op::Heal => Self::Heal,
             Op::Verify => Self::Verify,
             Op::Restart => Self::Restart,
+            Op::LaggingListings { .. } => Self::LaggingListings,
             Op::TakeOver => Self::TakeOver,
             Op::PowerLoss => Self::PowerLoss,
             Op::LyingWalSync => Self::LyingWalSync,

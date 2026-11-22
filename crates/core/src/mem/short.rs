@@ -5,7 +5,7 @@ use lsr_ltx::{Timestamp, TxidRange};
 
 use super::MemStore;
 use crate::layout::{CreatedAt, FileInfo, FileKey, Level};
-use crate::store::{Listing, ObjectStore, PageLimit, ReadLen, StoreError, Upload};
+use crate::store::{Listing, ObjectStore, PageLimit, ReadLen, StoreError, Upload, WriteMode};
 
 /// A store whose commits report a size other than the one written.
 #[derive(Debug)]
@@ -50,8 +50,9 @@ impl ObjectStore for SizeLiar {
         &self,
         key: &FileKey,
         created_at: Timestamp,
+        mode: WriteMode,
     ) -> Result<LyingUpload, StoreError> {
-        Ok(LyingUpload(self.0.begin_upload(key, created_at).await?))
+        Ok(LyingUpload(self.0.begin_upload(key, created_at, mode).await?))
     }
 
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {

@@ -374,6 +374,11 @@ pub(super) struct Maintain {
     /// What this process is sure stands on the replica until the next
     /// listing (`crate::watch`): checked by every maintenance listing.
     pub(super) watch: Option<RegressionWatch>,
+    /// A confirmed transaction whose keys reads found gone (the replica went
+    /// backwards): listings that end before it are the replica's, so they
+    /// are not read past again for it, which would cost every listing until
+    /// the upload lane lists.
+    pub(super) gone: Option<Txid>,
     /// Uploads run since prune or a maintenance listing last did work; at [`FAIR_SHARE`]
     /// they take the next unit ahead of uploads. Counted per process, so a boot with a
     /// backlog gets its first turn after that many uploads.
@@ -399,6 +404,7 @@ impl Default for Maintain {
             read_back_owed: true,
             suspect: None,
             watch: None,
+            gone: None,
             passed_over: 0,
             snapshot_waits: false,
         }

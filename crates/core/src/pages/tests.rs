@@ -210,7 +210,11 @@ fn only_vouched_staged_files_seed_the_table() {
         let (key, bytes) = staged_file(n, pages, fill);
         crate::conformance::block_on(async {
             let mut up = staging
-                .begin_upload(&key, lsr_ltx::Timestamp::from_unix_millis(1))
+                .begin_upload(
+                    &key,
+                    lsr_ltx::Timestamp::from_unix_millis(1),
+                    crate::store::WriteMode::Replace,
+                )
                 .await
                 .unwrap();
             up.write(&bytes).await.unwrap();
@@ -251,7 +255,11 @@ fn seeding_finds_the_pending_files_that_change_nothing() {
         let (key, bytes) = staged_file_at(n, pages, fill, commit);
         crate::conformance::block_on(async {
             let mut up = staging
-                .begin_upload(&key, lsr_ltx::Timestamp::from_unix_millis(1))
+                .begin_upload(
+                    &key,
+                    lsr_ltx::Timestamp::from_unix_millis(1),
+                    crate::store::WriteMode::Replace,
+                )
                 .await
                 .unwrap();
             up.write(&bytes).await.unwrap();

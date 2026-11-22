@@ -47,6 +47,7 @@ pub mod needs;
 mod pages;
 mod plan;
 mod position;
+mod probe;
 mod recover;
 mod regression_watch;
 mod restore;
@@ -137,11 +138,14 @@ pub use source::{
 };
 pub use store::{
     BatchKind, CorruptCause, Denied, ListAt, Listing, ListingStalled, ObjectStore, PageLimit,
-    PartNumber, ReadAt, ReadLen, StoreError, StoreOp, Upload, build_listing,
+    PartNumber, ReadAt, ReadLen, StoreError, StoreOp, Upload, WriteMode, build_listing,
 };
 pub use sync::{PageFrom, Step, StepEnd, StepFailed, SyncConfig, Synced, clamp, sync_step};
 pub use takeover::{TakeoverRecord, TakeoverRecordError};
-pub use upload::{Did, UploadConfig, UploadFailed, UploadPlan, UploadState, Uploaded, upload_next};
+pub use upload::{
+    Did, PROBE_CAP, PROBE_GAP, UploadConfig, UploadFailed, UploadPlan, UploadState, Uploaded,
+    fresh_probe_reads, upload_next,
+};
 pub use verify::{
     Compared, Depth, Finding, LevelSummary, LivePages, MAX_FINDINGS, Report, Severity, Verified,
     VerifyError, verify, verify_against,

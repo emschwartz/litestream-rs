@@ -125,7 +125,7 @@ use crate::sync::{Step, StepEnd, SyncConfig, Synced, sync_step, wal_barrier};
 use crate::takeover::TakeoverRecord;
 use crate::upload::{
     Did, Swept, UploadConfig, UploadPlan, UploadState, Uploaded, drop_staged_from, inventory_fault,
-    plan_upload, sweep_staged, upload_next,
+    past_known, plan_upload, probe_past, sweep_staged, upload_next,
 };
 use crate::verify::LivePages;
 use crate::witness::{LiveDb, Pending, Witnesses, still_holds, witness_pending};
@@ -1718,18 +1718,20 @@ impl Actor {
                     return Some(self.fault(Task::Upload, failed.fault, now));
                 }
             }
-            if matches!(last, Did::Put(_)) {
+            if matches!(last, Did::Put(_) | Did::AlreadyPut(_)) {
                 self.kept.suspect_staged = None;
             }
             match last {
                 Did::Nothing | Did::Diverged { .. } => break,
                 Did::Listed { .. } => self.engine.maintain.stale = true,
-                Did::Put(info) => {
-                    mark!(Up1);
+                Did::Put(FileInfo { key, .. }) | Did::AlreadyPut(key) => {
+                    if matches!(last, Did::Put(_)) {
+                        mark!(Up1);
+                    }
                     let at = listing_after_upload(now, &self.kept.cfg.maintenance);
                     self.engine.maintain.list_by(at);
                     let watch = self.engine.maintain.watch;
-                    self.engine.maintain.watch = RegressionWatch::put(watch, info.key);
+                    self.engine.maintain.watch = RegressionWatch::put(watch, key);
                 }
             }
             if self.uploads_idle() {
@@ -1925,10 +1927,8 @@ impl Actor {
         // its position: a file past it is another writer's. In steady state
         // this listing is the first to see one, and nothing may be planned
         // from it (no compaction, snapshot or delete takes it as input).
-        if inventory.newest() > self.snapshot_after() {
-            mark!(Up10);
-            mark!(Maint10);
-            return Some(self.fault(Task::Maintenance, Fault::RemoteAheadOfLocal, now));
+        if let Some(tick) = self.listing_untrusted(env.remote, &inventory, now).await {
+            return Some(tick);
         }
         if let Some(tick) = self.watch_unit(env.remote, &inventory, now).await {
             return Some(tick);
@@ -2042,15 +2042,7 @@ impl Actor {
         // One failed read says nothing about the bytes: act only when a read on
         // a later tick fails too.
         if self.engine.maintain.suspect.replace(key) != Some(key) {
-            let again = now.saturating_add(self.kept.cfg.retry_interval);
-            self.engine.maintain.stale = false;
-            self.engine.maintain.until = Some(again);
-            self.maintained(now);
-            let event = Event::Maintained {
-                event: MaintainedEvent::Waiting { held: None },
-                created_at_read: 0,
-            };
-            return Some(self.ran(event, now));
+            return Some(self.list_again_later(now));
         }
         self.engine.maintain.suspect = None;
         if !covered {
@@ -2109,6 +2101,75 @@ impl Actor {
             },
             now,
         )
+    }
+
+    /// What ends a maintenance tick before anything is planned from `inventory`: a file
+    /// past everything this engine staged or confirmed is another writer's, and nothing may
+    /// be planned from that listing (no compaction, snapshot or delete takes it as input).
+    /// In steady state this listing is the first to see one. A listing that lags a delete
+    /// shows a file that is gone, so a read must find one before the engine stops; a
+    /// listing a read contradicts plans nothing either, and is taken again later.
+    async fn listing_untrusted<R: ObjectStore>(
+        &mut self,
+        remote: &R,
+        inventory: &Inventory,
+        now: Timestamp,
+    ) -> Option<Tick> {
+        let known = self.snapshot_after();
+        if inventory.newest() > known {
+            return Some(match past_known(remote, inventory, known).await {
+                Ok(true) => {
+                    mark!(Up10);
+                    mark!(Maint10);
+                    self.fault(Task::Maintenance, Fault::RemoteAheadOfLocal, now)
+                }
+                Ok(false) => self.list_again_later(now),
+                Err(fault) => self.fault(Task::Maintenance, fault, now),
+            });
+        }
+        self.listing_lags(remote, inventory, now).await
+    }
+
+    /// A listing that ends before what this engine confirmed either lags its
+    /// uploads or shows a replica that lost them. Reads decide: when the
+    /// confirmed key (or a key past it) is there, nothing is planned from
+    /// the listing (a compaction would merge a shorter run and write it again
+    /// later) and maintenance lists again later; when it is gone, the listing
+    /// is the replica's and plans as before (retention holds on it), and the
+    /// upload lane learns of the loss at its next listing.
+    async fn listing_lags<R: ObjectStore>(
+        &mut self,
+        remote: &R,
+        inventory: &Inventory,
+        now: Timestamp,
+    ) -> Option<Tick> {
+        let published = self.engine.upload.confirmed();
+        if inventory.newest() >= published || self.engine.maintain.gone == published {
+            return None;
+        }
+        match probe_past(remote, inventory.newest(), published, None).await {
+            Ok(found) if found.is_empty() => {
+                self.engine.maintain.gone = published;
+                None
+            }
+            Ok(_) => Some(self.list_again_later(now)),
+            Err(fault) => Some(self.fault(Task::Maintenance, fault, now)),
+        }
+    }
+
+    /// Maintenance plans nothing from this listing and lists again after the
+    /// retry interval: a read contradicted it, or a failed read must fail
+    /// again on a later tick before anything acts on it.
+    fn list_again_later(&mut self, now: Timestamp) -> Tick {
+        let again = now.saturating_add(self.kept.cfg.retry_interval);
+        self.engine.maintain.stale = false;
+        self.engine.maintain.until = Some(again);
+        self.maintained(now);
+        let event = Event::Maintained {
+            event: MaintainedEvent::Waiting { held: None },
+            created_at_read: 0,
+        };
+        self.ran(event, now)
     }
 
     /// A maintenance step went well. The task's degraded state goes unless a

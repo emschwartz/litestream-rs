@@ -16,7 +16,7 @@ fn key() -> FileKey {
 
 fn put<S: ObjectStore>(store: &S, bytes: &[u8]) -> Result<FileInfo, StoreError> {
     block_on(async {
-        let mut up = Checked::begin(store, &key(), Timestamp::from_unix_millis(1)).await?;
+        let mut up = Checked::begin(store, &key(), Timestamp::from_unix_millis(1), WriteMode::Replace).await?;
         up.write(&bytes[..2]).await?;
         up.write(&bytes[2..]).await?;
         up.commit().await

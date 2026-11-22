@@ -1084,3 +1084,193 @@ mod replaced_staging {
         pending_then(Op::StagingDamage(MetaOp::ForgeNewest));
     }
 }
+
+#[cfg(test)]
+mod lagging_listings {
+    use lsr_core::{StopCause, StoreError, StoreOp};
+    use lsr_sim::generate::WalOp;
+    use lsr_sim::run::run_ops;
+    use lsr_sim::{EnvFault, FaultShape, Op, Opts, Seed, Target, Weights};
+
+    /// The replica's listings lag; the engine uploads transactions 4 and 5,
+    /// its staging directory is wiped and it boots again. The boot listing
+    /// does not show 5 yet, so the engine took the replica as ending at 4; the
+    /// next maintenance listing showed 5 past everything the engine knew, and
+    /// it stopped as if another writer had put it, though its own previous
+    /// process did (seed 0x39, shrunk from 183 operations). The boot now reads
+    /// the keys past its listing and finds 5.
+    #[test]
+    fn a_stale_boot_listing_does_not_stop_the_engine_on_its_own_files() {
+        let seed = Seed::new(0x39);
+        let ops = [
+            Op::WalDamage {
+                op: WalOp::FlipLastFrameBit,
+                ticks: 7,
+            },
+            Op::CommitInTick { pages: 1 },
+            Op::WalDamage {
+                op: WalOp::RegrowWithoutCommitMarks(14_437_992_231_631_771_069),
+                ticks: 7,
+            },
+            Op::Remote(lsr_sim::generate::RemoteOp::RollBack),
+            Op::WalDamage {
+                op: WalOp::RegrowWithoutCommitMarks(4_540_386_313_754_240_083),
+                ticks: 7,
+            },
+            Op::LaggingListings {
+                writes: 4,
+                window: 31,
+            },
+            Op::ClockJump(117_763),
+            Op::WalDamage {
+                op: WalOp::TearHeader,
+                ticks: 5,
+            },
+            Op::WalDamage {
+                op: WalOp::RegrowSameSalts(10_097_652_172_457_107_057),
+                ticks: 6,
+            },
+            Op::EnvFault(EnvFault::WipeStaging),
+            Op::WalDamage {
+                op: WalOp::RegrowSameSalts(8_779_680_044_016_711_231),
+                ticks: 4,
+            },
+        ];
+        let opts = Opts {
+            drawn: true,
+            trace: true,
+            block_crash_law: Weights::mixed(seed).block_crash_law,
+            ..Opts::default()
+        };
+        let report = match run_ops(seed, &ops, &opts) {
+            Ok(report) => report,
+            Err(failure) => panic!("{failure}"),
+        };
+        let stop = format!("Stopped({:?})", StopCause::OtherWriter);
+        assert!(
+            report.trace.iter().all(|line| !line.contains(&stop)),
+            "the engine stopped on its own files"
+        );
+    }
+
+    /// The replica's listings lag and a commit fails after it published, so
+    /// the engine lists before its next upload. The listing does not show the
+    /// transaction the engine had confirmed, and the engine reported the
+    /// replica as gone backwards, a degraded task until a person looks (seed
+    /// 0x440 under its swarm mix, shrunk from 170 operations). The relist now
+    /// reads the confirmed key before it reports a regression.
+    #[test]
+    fn a_lagging_relist_does_not_report_the_replica_gone_backwards_seed_0x440() {
+        let seed = Seed::new(0x440);
+        let ops = [
+            Op::WalDamage {
+                op: WalOp::FlipLastFrameBit,
+                ticks: 7,
+            },
+            Op::LaggingListings {
+                writes: 6,
+                window: 25,
+            },
+            Op::StoreFault {
+                target: Target::Remote,
+                op: StoreOp::Upload,
+                ahead: 1,
+                shape: FaultShape::ErrorAfterPublish(StoreError::Transient {
+                    op: StoreOp::Upload,
+                    kind: std::io::ErrorKind::ConnectionReset,
+                }),
+            },
+            Op::Commit {
+                pages: 3,
+                grow: false,
+            },
+            Op::Commit {
+                pages: 3,
+                grow: false,
+            },
+            Op::WalDamage {
+                op: WalOp::RegrowWithoutCommitMarks(5_374_048_325_351_388_651),
+                ticks: 4,
+            },
+        ];
+        swarm(seed, &ops);
+    }
+
+    /// The replica's listings lag. Another writer's file at transaction 2 is
+    /// merged into a level-1 file, the operator removes it, and the engine
+    /// boots behind a listing that shows neither that level-1 file nor the
+    /// engine's own transaction 3. It took the replica as ending at 1 and
+    /// uploaded its next transaction into the freed key 2, which the level-1
+    /// file still holds with other pages: one transaction, two contents
+    /// (seed 0x4c5 under its swarm mix). The boot now reads past the free key
+    /// and finds 3.
+    #[test]
+    fn a_lagging_boot_listing_does_not_send_an_upload_into_a_freed_key_seed_0x4c5() {
+        let seed = Seed::new(0x4c5);
+        let ops = [
+            Op::LaggingListings {
+                writes: 5,
+                window: 35,
+            },
+            Op::Shutdown,
+            Op::Vacuum { page_size: None },
+            Op::Tick,
+            Op::SecondWriter { ticks: 5 },
+            Op::Shutdown,
+        ];
+        swarm(seed, &ops);
+    }
+
+    /// Runs `ops` under `seed`'s swarm mix; any violation fails the test.
+    fn swarm(seed: Seed, ops: &[Op]) {
+        let opts = Opts {
+            drawn: true,
+            block_crash_law: Weights::swarm(seed).block_crash_law,
+            ..Opts::default()
+        };
+        if let Err(failure) = run_ops(seed, ops, &opts) {
+            panic!("{failure}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod refused_upload {
+    use lsr_core::StoreOp;
+    use lsr_sim::run::run_ops;
+    use lsr_sim::{FaultShape, Op, Opts, Seed, Target, Weights};
+
+    /// Another writer's file stands at the transaction the engine uploads
+    /// next, and the bucket refuses the engine's upload. One read of the
+    /// staged copy came back with a flipped byte, so the read-back judged the
+    /// staged copy torn and confirmed the other writer's object as the
+    /// engine's own transaction: a restore of it returned the other writer's
+    /// pages (seed 0x4ef under its swarm mix, shrunk from 23 operations).
+    #[test]
+    fn one_bad_staged_read_after_a_refusal_confirms_no_other_object_seed_0x4ef() {
+        let seed = Seed::new(0x4ef);
+        let ops = [
+            Op::CommitInTick { pages: 1 },
+            Op::CommitInTick { pages: 1 },
+            Op::Tick,
+            Op::StoreFault {
+                target: Target::Staging,
+                op: StoreOp::Read,
+                ahead: 2,
+                shape: FaultShape::FlipByteOnRead { at: 1140 },
+            },
+            Op::Shrink { pages: 1 },
+            Op::RequestSnapshot,
+            Op::SecondWriter { ticks: 7 },
+            Op::Restore,
+        ];
+        let opts = Opts {
+            drawn: true,
+            block_crash_law: Weights::swarm(seed).block_crash_law,
+            ..Opts::default()
+        };
+        if let Err(failure) = run_ops(seed, &ops, &opts) {
+            panic!("{failure}");
+        }
+    }
+}

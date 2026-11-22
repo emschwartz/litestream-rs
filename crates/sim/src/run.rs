@@ -383,6 +383,13 @@ struct Runner {
     /// A store fault fails calls at a rate and has not healed: a drain may
     /// end at its deadline.
     rate_active: bool,
+    /// Boots that listed the replica and failed (each is tried again, and
+    /// costs the replica a boot's reads).
+    failed_boots: u32,
+    /// Bucket rollbacks and removals of the newest file: each may cost the
+    /// engine a probe past a listing that ends before what it confirmed, and
+    /// a relist once it learns of the loss.
+    regressions: u32,
     /// Every injected store fault has healed and the run is judging
     /// liveness: a stall no longer imposed by the world ends nothing.
     settling: bool,
@@ -495,6 +502,8 @@ impl Runner {
             puts_judged: 0,
             put_back: 0,
             rate_active: false,
+            failed_boots: 0,
+            regressions: 0,
             settling: false,
             liveness: crate::liveness::Liveness::new(),
             judges: Judges::default(),
@@ -728,6 +737,25 @@ impl Runner {
         });
     }
 
+    /// After a tick that began unbooted: what the boot that succeeded saw (the WAL's salts
+    /// and the commits so far), or, for a boot that listed the replica whole and failed, one
+    /// more failed boot for the budget.
+    fn note_boot(&mut self, booting: bool, lists_before: u64, salts: Salts, commits: usize) {
+        if !booting {
+            return;
+        }
+        if self.actor.booted() {
+            self.life.boot_salts = Some(salts);
+            self.life.boot_commits = commits;
+            return;
+        }
+        let levels = u64::try_from(lsr_core::Level::ALL.len()).unwrap_or(u64::MAX);
+        let lists = self.w.remote_recorder.counts().lists;
+        if lists.saturating_sub(lists_before) >= levels {
+            self.failed_boots = self.failed_boots.saturating_add(1);
+        }
+    }
+
     fn step(&mut self, plan: Option<CrashPlan>) -> Result<(Step, TickStats), Violation> {
         let at = self.w.remote_recorder.len();
         let newest_commit = self.w.model.newest_commit();
@@ -748,10 +776,7 @@ impl Runner {
             self.keep_takeover();
         }
         self.watch_staging()?;
-        if booting && self.actor.booted() {
-            self.life.boot_salts = Some(salts);
-            self.life.boot_commits = commits;
-        }
+        self.note_boot(booting, remote0.lists, salts, commits);
         self.judge_stores()?;
         let crashed = matches!(ended, TickEnd::Crashed { .. });
         self.liveness_mid_tick(hits0, crashed)?;
@@ -1438,6 +1463,16 @@ impl Runner {
                 .any(|want| std::mem::discriminant(want) == std::mem::discriminant(&cause))
     }
 
+    /// The replica's listings start to lag ([`Op::LaggingListings`]).
+    fn lag_listings(&mut self, writes: u8, window: u8) {
+        self.report.reach.bump("remote.lagging_listings");
+        // Nothing is expected: a lag alone is no reason to stop, to report a
+        // regression or to write a transaction twice.
+        self.w
+            .remote_faults
+            .lag_listings(u32::from(writes), u32::from(window));
+    }
+
     /// Makes `cause` legitimate for the rest of the run.
     fn expect(&mut self, cause: StopCause) {
         if !self.expected.contains(&cause) {
@@ -1535,6 +1570,7 @@ impl Runner {
             }
             watching &= self.actor.booted();
             let lists = self.w.remote_recorder.counts().lists;
+            let read_faults = self.remote_read_faults();
             let step = self.step(None)?.0;
             let stopped = step == Step::Stopped(StopCause::OtherWriter);
             // A tick that found files this engine confirmed gone forgot what it
@@ -1560,9 +1596,13 @@ impl Runner {
             // judge, and an engine already at that transaction replaces the
             // file with its own upload (no writer identity can tell them apart).
             // A whole listing is one call per level at least; a listing cut
-            // short by a fault showed the engine nothing.
+            // short by a fault showed the engine nothing. A listing alone is
+            // no proof either (one that lags a delete shows a file that is
+            // gone): the engine reads the file before it stops, and a read a
+            // fault cut short proved nothing.
             let levels = u64::try_from(lsr_core::Level::ALL.len()).unwrap_or(u64::MAX);
-            let listed = self.w.remote_recorder.counts().lists.saturating_sub(lists) >= levels;
+            let listed = self.w.remote_recorder.counts().lists.saturating_sub(lists) >= levels
+                && self.remote_read_faults() == read_faults;
             let theirs = self.w.remote_holds(key, &bytes).map_err(|err| {
                 bug_fault(format!("reading the second writer's file failed: {err}"))
             })?;
@@ -1626,6 +1666,16 @@ impl Runner {
             }
         }
         Ok(())
+    }
+
+    /// How many replica reads a scheduled fault has failed or changed so far.
+    fn remote_read_faults(&self) -> u32 {
+        self.w
+            .remote_faults
+            .hits()
+            .iter()
+            .filter(|(op, _, _)| *op == lsr_core::StoreOp::Read)
+            .fold(0, |sum, (_, _, hits)| sum.saturating_add(*hits))
     }
 
     /// The operator removes the other writer's newest file if it still holds
@@ -1736,6 +1786,9 @@ impl Runner {
         };
         if matches!(op, RemoteOp::RollBack | RemoteOp::RemoveUnrecognized) {
             self.w.history.excuse_regression();
+            if matches!(done, Ok(true)) {
+                self.regressions = self.regressions.saturating_add(1);
+            }
         }
         if matches!(op, RemoteOp::RollBack) {
             if let Some(from) = rolled_from {
@@ -2157,6 +2210,7 @@ impl Runner {
                 self.w.remote_faults.heal();
                 self.w.staging_faults.heal();
             }
+            Op::LaggingListings { writes, window } => self.lag_listings(*writes, *window),
             Op::OurReader { begin } => {
                 let done = if *begin {
                     self.w.sqlite.our_reader_begin()
@@ -2326,12 +2380,17 @@ impl Runner {
 
         self.w.remote_faults.heal();
         self.w.staging_faults.heal();
+        self.w.remote_faults.end_lag();
         // Source failures injected and not yet met heal too: a queue of them
         // would otherwise keep a task failing, and its stall would be the
         // world's, not the engine's.
         self.w.sqlite.heal_injections();
         self.drain()?;
         self.restore_all()?;
+        self.report.reach.add(
+            "remote.stale_listings",
+            u64::from(self.w.remote_faults.stale_listings()),
+        );
         memory(
             self.w.remote_recorder.counts(),
             self.w.staging_recorder.counts(),
@@ -2345,8 +2404,13 @@ impl Runner {
         let spent = crate::budget::Spent {
             boots: u64::from(self.report.crashes)
                 .saturating_add(u64::from(self.report.shutdowns))
-                .saturating_add(u64::from(self.report.checks)),
-            fault_hits: hits(&self.w.remote_faults),
+                .saturating_add(u64::from(self.report.checks))
+                .saturating_add(u64::from(self.failed_boots))
+                .saturating_add(u64::from(self.regressions)),
+            // A listing a lag changed hid a write, which may be done again
+            // once: the cost of the stale listing, not amplification.
+            fault_hits: hits(&self.w.remote_faults)
+                .saturating_add(u64::from(self.w.remote_faults.stale_listings())),
             degraded_retries: self.report.reach.get("event.Degraded"),
         };
         crate::budget::check(

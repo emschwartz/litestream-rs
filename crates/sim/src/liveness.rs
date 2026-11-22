@@ -295,7 +295,9 @@ pub const fn of_op(op: &Op) -> &'static [Justifier] {
         Op::OurReader { begin: false } => &[Justifier::ReadLockLapsed],
         Op::RequestSnapshot => &[Justifier::SnapshotRequested],
         Op::LyingWalSync => &[Justifier::LyingDisk],
-        Op::Commit { .. }
+        // The engine reads past a lagging listing, so a lag alone justifies no snapshot.
+        Op::LaggingListings { .. }
+        | Op::Commit { .. }
         | Op::CommitInTick { .. }
         | Op::AppInTick { .. }
         | Op::Spill
@@ -524,6 +526,9 @@ impl Liveness {
         let (staging, remote) = stores;
         let newest_staged = world.newest_staged();
         let took = self.take_remote(remote);
+        // A key the bucket refused because it already held it (a commit whose answer was
+        // lost, confirmed by a read-back) leaves no put in the recorder: the replica holds it.
+        self.uploaded.extend(world.replica_level_zero());
         // The replica holds everything staging does only once no staged file is one it never
         // took: a file left behind it (a backup put back, a forged file) is still to be dropped,
         // and the fault that left it must be in the window when it is (seed 0xf42e9).
@@ -712,6 +717,10 @@ pub trait TickWorld {
     fn newest_staged(&self) -> Option<u64>;
     /// The newest transaction the replica holds, at any level.
     fn replica_newest(&self) -> Option<u64>;
+    /// The level-0 keys the replica holds now.
+    fn replica_level_zero(&self) -> Vec<FileKey> {
+        Vec::new()
+    }
     /// Whether a file on the replica, at any level, ends at `txid`.
     fn replica_ends_at(&self, txid: u64) -> bool;
     /// The level-0 files in staging.
@@ -732,6 +741,12 @@ impl TickWorld for crate::World {
 
     fn replica_newest(&self) -> Option<u64> {
         self.remote_newest()
+    }
+
+    fn replica_level_zero(&self) -> Vec<FileKey> {
+        self.remote_level_zero()
+            .map(|files| files.into_iter().map(|info| info.key).collect())
+            .unwrap_or_default()
     }
 
     fn replica_ends_at(&self, txid: u64) -> bool {
@@ -767,6 +782,10 @@ impl<W: TickWorld> TickWorld for WithEngine<'_, W> {
 
     fn replica_newest(&self) -> Option<u64> {
         self.world.replica_newest()
+    }
+
+    fn replica_level_zero(&self) -> Vec<FileKey> {
+        self.world.replica_level_zero()
     }
 
     fn replica_ends_at(&self, txid: u64) -> bool {

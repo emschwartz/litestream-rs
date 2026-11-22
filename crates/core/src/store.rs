@@ -12,6 +12,13 @@
 //! - An upload is invisible until `commit` is called and whole afterwards.
 //!   Dropping an [`Upload`] does no I/O and publishes nothing; the store may be
 //!   left holding scratch data that no listing or read can see.
+//! - An upload begun with [`WriteMode::New`] publishes only into a free key:
+//!   a commit that finds an object there fails with
+//!   [`StoreError::AlreadyExists`] and leaves that object as it was. The
+//!   bucket, not a listing, then says the key is taken, so a stale listing
+//!   cannot hide it. A store that cannot make the check (an S3 provider
+//!   without conditional writes) replaces instead, as [`WriteMode::Replace`]
+//!   does, and says so through its own reporting.
 //! - When `commit` returns an error the object may or may not be visible: a
 //!   response can be lost after the write landed, on S3 as on a disk whose
 //!   directory sync failed after the rename. The caller's only safe move is to
@@ -180,6 +187,17 @@ fn on_page(name: &str, lower: Option<&str>, upper: Option<&str>) -> bool {
     lower.is_none_or(|low| name > low) && upper.is_none_or(|high| name <= high)
 }
 
+/// Whether an upload may replace an object already under its key.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WriteMode {
+    /// The key must be free when the commit lands; otherwise the commit fails
+    /// with [`StoreError::AlreadyExists`] and changes nothing (S3's
+    /// `If-None-Match: *`).
+    New,
+    /// The commit replaces whatever the key holds, as Go's writes do.
+    Replace,
+}
+
 /// The operation a [`StoreError`] interrupted.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum StoreOp {
@@ -302,6 +320,14 @@ pub enum StoreError {
     #[error("object {key} not found")]
     NotFound {
         /// The key that was asked for.
+        key: FileKey,
+    },
+    /// A [`WriteMode::New`] commit found an object under its key, so it
+    /// published nothing. Only the bucket's answer; whose object it is, and
+    /// whether it holds the bytes this upload sent, is the caller's to read.
+    #[error("object {key} already exists")]
+    AlreadyExists {
+        /// The key that was taken.
         key: FileKey,
     },
     /// Every scratch name for this key is taken, so an upload cannot start.
@@ -495,11 +521,14 @@ pub trait ObjectStore: Send + Sync {
         len: ReadLen,
     ) -> impl Future<Output = Result<(Vec<u8>, CreatedAt), StoreError>> + Send;
 
-    /// Starts writing `key` with `created_at` as its created-at time. Nothing is visible yet.
+    /// Starts writing `key` with `created_at` as its created-at time; `mode`
+    /// says whether the commit may replace an object already there. Nothing is
+    /// visible yet.
     fn begin_upload(
         &self,
         key: &FileKey,
         created_at: Timestamp,
+        mode: WriteMode,
     ) -> impl Future<Output = Result<Self::Upload, StoreError>> + Send;
 
     /// Removes the keys. A key that is already gone is not an error, so a
@@ -572,8 +601,9 @@ pub trait Upload: Send {
     /// Appends a chunk.
     fn write(&mut self, chunk: &[u8]) -> impl Future<Output = Result<(), StoreError>> + Send;
 
-    /// Publishes the object, replacing any object under the key. The object is
-    /// whole and durable once this returns `Ok`. After an `Err` the object may
+    /// Publishes the object: under [`WriteMode::Replace`] over any object
+    /// under the key, under [`WriteMode::New`] only into a free key. The object
+    /// is whole and durable once this returns `Ok`. After an `Err` the object may
     /// or may not be visible (see the module docs): list again.
     fn commit(self) -> impl Future<Output = Result<FileInfo, StoreError>> + Send;
 

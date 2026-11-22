@@ -360,6 +360,12 @@ pub fn window_scenarios() -> &'static [fn() -> Scenario] {
     ]
 }
 
+/// The reads a boot's probe past its listing makes on a replica it lists
+/// whole, as a fault's count of calls ahead.
+fn probe_reads() -> u8 {
+    u8::try_from(lsr_core::fresh_probe_reads(Some(lsr_ltx::Txid::MIN))).unwrap_or(u8::MAX)
+}
+
 fn remote_fault(op: StoreOp, ahead: u8, shape: FaultShape) -> Op {
     Op::StoreFault {
         target: Target::Remote,
@@ -676,7 +682,7 @@ fn some_key() -> lsr_core::FileKey {
 }
 
 /// A file the listing named is gone when boot reads it back: another process
-/// deleted it. A compaction that loses an input replans instead, so boot is
+/// deleted it (the read after the probe past the listing, which finds nothing). A compaction that loses an input replans instead, so boot is
 /// where this fault reaches the engine.
 #[must_use]
 pub fn remote_file_deleted_externally() -> Scenario {
@@ -688,7 +694,7 @@ pub fn remote_file_deleted_externally() -> Scenario {
             vec![
                 remote_fault(
                     StoreOp::Read,
-                    0,
+                    probe_reads(),
                     FaultShape::Error(StoreError::NotFound { key: some_key() }),
                 ),
                 Op::Restart,
@@ -784,8 +790,9 @@ fn deleted_then_put_again(report: &RunReport) -> Result<(), String> {
     Ok(())
 }
 
-/// The staging directory is gone and the replica is read back at boot: one byte
-/// of the newest object has rotted, there is no staged copy to compare with, so
+/// The staging directory is gone and the replica is read back at boot (after
+/// the probe past the listing, which finds nothing): one byte of the newest
+/// object has rotted, there is no staged copy to compare with, so
 /// the object must decode, and it does not.
 #[must_use]
 pub fn remote_bitrot_on_list_read() -> Scenario {
@@ -794,7 +801,11 @@ pub fn remote_bitrot_on_list_read() -> Scenario {
         vec![
             live(),
             vec![
-                remote_fault(StoreOp::Read, 0, FaultShape::FlipByteOnRead { at: 100 }),
+                remote_fault(
+                    StoreOp::Read,
+                    probe_reads(),
+                    FaultShape::FlipByteOnRead { at: 100 },
+                ),
                 Op::EnvFault(EnvFault::WipeStaging),
             ],
             ticks(SETTLE),
