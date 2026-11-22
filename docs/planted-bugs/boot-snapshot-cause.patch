@@ -1,11 +1,11 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index 2391357..499904d 100644
+index 1588fc9..b1e02ed 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -744,7 +744,7 @@ impl Actor {
-         let cause = lost
-             .map(|_| SnapshotCause::NewestStagedFileUnreadable)
-             .or(from.err());
+@@ -747,7 +747,7 @@ impl Actor {
+             Recovered::Stop(cause) => return self.verdict(Task::Sync, cause, now),
+         };
+         let cause = boot_cause(lost, refused, from.err());
 -        let pending = pending_at_boot(self.kept.asked(), cause);
 +        let pending = self.kept.asked().or(cause);
          let course = match (from, pending) {
