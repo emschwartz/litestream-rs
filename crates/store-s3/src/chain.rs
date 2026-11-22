@@ -1,7 +1,6 @@
-//! Where S3 credentials come from when the caller does not hand them over:
-//! the parts of the AWS default credential chain that need no network and no
-//! subprocess, as Go Litestream (041a8c3, with the AWS SDK for Go v2, config
-//! v1.32.6) runs them.
+//! Where S3 credentials come from when the caller does not hand them over: the
+//! AWS default credential chain as Go Litestream (041a8c3, with the AWS SDK for Go
+//! v2, config v1.32.6) runs it, except the sources listed as not built below.
 //!
 //! 0. **The shared files, first, whatever source wins.** The SDK loads the shared
 //!    config file (`AWS_CONFIG_FILE`, else `~/.aws/config`) and credentials file
@@ -22,21 +21,31 @@
 //!    variable counts as unset. `LITESTREAM_ACCESS_KEY_ID` and
 //!    `LITESTREAM_SECRET_ACCESS_KEY` stand in for their `AWS_*` names only when those
 //!    are unset, as Go copies them; an empty `AWS_*` variable blocks the copy.
-//! 3. The chosen profile's static keys, when it holds a non-empty key id and secret,
-//!    with its session token.
+//! 3. Web identity from the environment: `AWS_WEB_IDENTITY_TOKEN_FILE`, with the role
+//!    from `AWS_ROLE_ARN` (refused when unset) and the session name from
+//!    `AWS_ROLE_SESSION_NAME`.
+//! 4. The chosen profile, as the SDK's `resolveCredsFromProfile` reads it: its static
+//!    keys when it holds a non-empty key id and secret; else `web_identity_token_file`
+//!    with `role_arn`; else `credential_process`. The SDK's load-time checks come
+//!    first and stop every resolution: one credential kind per profile, and `role_arn`
+//!    where the kind needs it ([`CredentialError::ProfileInvalid`]).
+//! 5. Container credentials (`AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`, else
+//!    `_FULL_URI`), then the EC2 instance metadata service unless
+//!    `AWS_EC2_METADATA_DISABLED` is `true`. Both need the HTTP client
+//!    ([`CredentialChain::with_transport`]); without one the chain ends before them.
 //!
-//! When none has them, [`CredentialError::Missing`] names every source and why it
-//! gave nothing; no error or `Debug` output holds a value. A line in a shared file
-//! that is not INI is refused, where Go skips it (see the `ini` module and
+//! Steps 3 to 5 fetch temporary credentials (the `remote` and `process` modules); the
+//! [`Resolved`] keeps the source so the store fetches again before they expire (the
+//! `signer` module). When no source has keys, [`CredentialError::Missing`] names every
+//! source and why it gave nothing; no error or `Debug` output holds a value. A line in a
+//! shared file that is not INI is refused, where Go skips it (see the `ini` module and
 //! `docs/decisions.md` D43).
 //!
-//! Not built, because each needs a network service or a subprocess: the EC2
-//! instance metadata service (IMDS), ECS and EKS container credentials
-//! (`AWS_CONTAINER_CREDENTIALS_*`), web-identity tokens
-//! (`AWS_WEB_IDENTITY_TOKEN_FILE`, `web_identity_token_file`), assumed roles
-//! (`role_arn`, `source_profile`, `credential_source`), IAM Identity Center
-//! (`sso_*`, `login_session`) and `credential_process`. A profile that holds
-//! only those settings reads as having no keys.
+//! Not built yet (#176): assumed roles (`role_arn` with `source_profile` or
+//! `credential_source`), IAM Identity Center (`sso_*`) and login sessions
+//! (`login_session`). The chosen profile holding one is refused as
+//! [`CredentialError::NotBuilt`] where the SDK would use it, rather than skipped, so the
+//! chain never signs with credentials Go would not have chosen.
 //!
 //! The process environment is read only by [`CredentialChain::from_process`];
 //! tests hand the resolver an environment of their own, so they never mutate
