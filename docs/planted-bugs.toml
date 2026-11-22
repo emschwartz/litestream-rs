@@ -499,7 +499,7 @@ tests = [
 
 [[bug]]
 name = "park-waits-out-a-step-back"
-fix = "df6f81d"
+fix = "af15d43"
 package = "lsr-replica"
 tests = ["a_park_keeps_its_remaining_wait_when_the_clock_steps_back"]
 
@@ -716,3 +716,9 @@ fix = "50b9040"
 package = "lsr-replica"
 test_bin = "replica"
 tests = ["a_clock_step_back_does_not_put_off_the_scheduled_verify"]
+
+[[bug]]
+name = "park-ignores-callers-reading"
+fix = "af15d43"
+package = "lsr-replica"
+tests = ["a_park_returns_for_a_step_back_between_the_callers_reading_and_the_park"]
