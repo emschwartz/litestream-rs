@@ -52,6 +52,13 @@ jobs:
       - run: just compat-live "$NAME"
         env:
           NAME: ${{ matrix.name }}
+      # A failed alternation keeps its fixture, logs included, under the temp directory.
+      - uses: actions/upload-artifact@v5
+        if: failure()
+        with:
+          name: compat-fixtures-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/lsr-alternation-*
+          if-no-files-found: ignore
 
   # A tag the compat table does not list needs an era decision there; it was still run by
   # name above, so this only names it.

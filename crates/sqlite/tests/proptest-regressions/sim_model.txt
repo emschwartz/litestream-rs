@@ -7,3 +7,4 @@
 cc 60c52e9e67dc438f4889764edcef3c5da1be8064faaf6c07630f6989783909ff # shrinks to seed = 0, ops = [BeginBarrier, BeginWriteLock]
 cc 70d7d8a9c59466641f9bd2df4d86fc79f7b9171d2ca7ca7eb964a1eb9c4fd51d # shrinks to seed = 0, ops = [Committed, Commit(1), Checkpoint(Truncate), BumpSeq, Committed]
 cc a340338138f6283dcef319b6cc2f18fc99946237047f1d9094adcd7e43ba421e # shrinks to seed = 0, ops = [Checkpoint(Truncate), Committed, BumpSeq, Committed]
+cc 9e42b83493709e324486206d4b3465eafdd699bc6404713a66be4f77bd5c98d8 # shrinks to seed = 0, ops = [Committed, Commit(1), Committed]

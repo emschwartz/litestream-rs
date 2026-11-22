@@ -36,7 +36,8 @@ outside the mount, in the line format crates/history/src/bin/lsr-history.rs docu
 restore on a branch the database rewound past (the replica holds commits the database lost) is
 an anomaly. Cycles run in segments (SEGMENT_CYCLES) that each start from an empty disk and
 replica and end with a clean stop (SIGTERM, drain) and a final restore that must be the last
-acknowledged commit. Only failed restores are kept, with the commit and engine logs beside them.
+acknowledged commit. Every anomaly keeps its evidence under <work>/restores/evidence-*: the replica,
+staging, the engine and commit logs, and for a failed restore the answers of restoring again.
 
 Exit status: 0 with no anomaly, 1 with any, 2 when the rig itself failed. The last line printed
 is a JSON summary. Needs Linux, /dev/fuse and fusermount3; run as root or with FUSE allowed.
@@ -66,6 +67,14 @@ SCHEMA = "CREATE TABLE IF NOT EXISTS chain(k INTEGER PRIMARY KEY, h BLOB NOT NUL
 
 def link(k: int, prev: bytes, payload: bytes) -> bytes:
     return hashlib.sha256(k.to_bytes(8, "big") + prev + payload).digest()
+
+
+def _copy_if_present(src: str, dst: str) -> None:
+    """shutil.copy2 that skips a file the live engine deleted mid-copy."""
+    try:
+        shutil.copy2(src, dst)
+    except FileNotFoundError:
+        pass
 
 
 def now_ms() -> int:
@@ -229,7 +238,7 @@ class Rig:
         self.disk = self.work / "disk"  # what survives a "power loss": LazyFS's backing dir
         self.mnt = self.work / "mnt"
         self.replica = self.work / "replica"  # never faulted
-        self.restores = self.root / "restores"  # only failed restores stay, with their evidence
+        self.restores = self.root / "restores"  # failed restores and every anomaly's evidence stay
         self.log = self.work / "commits.log"
         self.engine_log = self.work / "engine.log"
         self.lazyfs_log = self.work / "lazyfs.log"
@@ -430,7 +439,8 @@ class Rig:
         with open(self.engine_log, "a") as f:
             f.write(f"--- epoch {self.epoch}\n")
         self.engine = subprocess.Popen(
-            [str(self.args.lsr), "replicate", "-config", str(self.cfg), "-log-level", "info"],
+            [str(self.args.lsr), "replicate", "-config", str(self.cfg), "-log-level",
+             self.args.engine_log_level],
             stdout=open(self.engine_log, "a"),
             stderr=subprocess.STDOUT,
         )
@@ -449,7 +459,43 @@ class Rig:
     def anomaly(self, kind: str, detail: str, cycle: int | None = None) -> None:
         a = {"kind": kind, "detail": detail, "cycle": cycle, "epoch": self.epoch}
         self.anomalies.append(a)
+        a["evidence"] = str(self.keep_evidence(kind))
         print(json.dumps({"anomaly": a}), flush=True)
+
+    def keep_evidence(self, kind: str) -> Path:
+        """Copies what an anomaly can be explained from, at once and outside the segment (which
+        the next segment wipes): the replica, staging, the engine and commit logs. A detector
+        whose evidence is deleted goes quiet; copying races the live engine, so a failed restore
+        is also run again on the copy and on the live replica, and both answers are kept."""
+        out = self.restores / f"evidence-{len(self.anomalies):03d}-{kind.lower()}"
+        out.mkdir(parents=True, exist_ok=True)
+
+        def copy(src: Path, name: str) -> None:
+            try:
+                if src.is_dir():
+                    shutil.copytree(src, out / name, ignore_dangling_symlinks=True,
+                                    copy_function=_copy_if_present)
+                elif src.exists():
+                    shutil.copy(src, out / name)
+            except (OSError, shutil.Error) as err:
+                (out / f"{name}.error").write_text(f"{err}\n")
+
+        copy(self.replica, "replica")
+        staging = self.mnt / ".app.db-litestream" if self.mounted() else self.disk / ".app.db-litestream"
+        copy(staging, "staging")
+        copy(self.engine_log, "engine.log")
+        copy(self.log, "commits.log")
+        if kind == "RESTORE_FAILED":
+            lines = []
+            for label, replica in (("copy", out / "replica"), ("live", self.replica)):
+                r = subprocess.run(
+                    [str(self.args.lsr), "restore", "--replica", str(replica), "--output",
+                     str(out / f"again-{label}.db")],
+                    capture_output=True, text=True,
+                )
+                lines.append(f"{label}: exit {r.returncode} {(r.stderr or r.stdout).strip()[-300:]}")
+            (out / "restore-again.txt").write_text("\n".join(lines) + "\n")
+        return out
 
     def restore_and_judge(self, cycle: int, final: bool = False) -> None:
         """Restores the newest state, appends its digest to the commit log as an `L` (or `F`)
@@ -659,6 +705,7 @@ def main() -> int:
     r.add_argument("--seed", type=int, default=int.from_bytes(os.urandom(4), "big"))
     r.add_argument("--work", default=str(REPO / "target" / "lazyfs"))
     r.add_argument("--stop-on-anomaly", action="store_true")
+    r.add_argument("--engine-log-level", default="info", help="debug logs every upload and job")
     r.add_argument("--segment", type=int, default=SEGMENT_CYCLES, help="cycles per fresh world")
     w = sub.add_parser("workload", help="internal: the application process")
     w.add_argument("--db", required=True)

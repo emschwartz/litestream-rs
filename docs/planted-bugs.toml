@@ -317,6 +317,56 @@ package = "lsr-sim"
 test_bin = "sim"
 tests = ["unaided::swarm_seed_44_restores_only_committed_states"]
 
+[[bug]]
+name = "skip-boot-scratch-cleanup"
+fix = "31842f7"
+package = "lsr-cli"
+test_bin = "cli"
+tests = [
+    "a_crash_loop_of_short_boots_with_no_change_leaves_nothing_growing",
+]
+
+[[bug]]
+name = "skip-boot-scratch-cleanup-core"
+fix = "31842f7"
+package = "lsr-core"
+tests = [
+    "a_boot_removes_the_scratch_killed_uploads_left",
+]
+
+[[bug]]
+name = "maintenance-only-after-uptime"
+fix = "12fe38f"
+package = "lsr-core"
+tests = [
+    "maintenance_gets_its_share_while_a_backlog_uploads",
+]
+
+[[bug]]
+name = "s3-boot-forgets-killed-uploads"
+fix = "829eb8a"
+package = "lsr-store-s3"
+test_bin = "store-s3"
+tests = [
+    "a_killed_process_s_multipart_upload_is_aborted_at_the_next_boot",
+]
+
+[[bug]]
+name = "restore-gap-not-relisted"
+fix = "eec4cd5"
+package = "lsr-core"
+tests = [
+    "a_gap_from_a_listing_that_raced_a_writer_is_listed_again",
+]
+
+[[bug]]
+name = "verify-hole-not-relisted"
+fix = "2a4844a"
+package = "lsr-core"
+tests = [
+    "a_hole_one_listing_showed_is_listed_again_and_not_reported",
+]
+
 # The bounded WAL resume (witness, 18cf304) took a wal-index reset ahead of the header as a
 # restart even at the header's first frame: every boot from a file with an empty WAL range
 # snapshotted again. Found by the liveness oracle (seed 0xf85 among others).
@@ -574,7 +624,9 @@ tests = ["a_halt_long_enough_to_stall_is_reported_degraded"]
 # The two store-fs durability steps the LazyFS rig planted (`just lazyfs-plant <name>`) and never
 # saw fail, killed in process by the crash checker that replays a commit's steps and crashes at
 # every one of them (crates/store-fs/src/journal/tests.rs). The steps date from the store itself, so
-# `fix` names the commit that brought it.
+# `fix` names the commit that brought it. The swarm finds these and `delete-without-dir-sync` unaided
+# too, where staging is this store on the simulator's in-memory filesystem (crates/sim/src/staging.rs);
+# the patches are written against the store's filesystem trait.
 [[bug]]
 name = "staging-fsync-before-rename"
 fix = "2bf9f99"
@@ -698,10 +750,23 @@ tests = [
 ]
 
 [[bug]]
+name = "dry-run-gap-not-relisted"
+fix = "3e344e6"
+package = "lsr-cli"
+bin = "lsr"
+tests = ["a_dry_run_whose_listing_missed_a_file_once_plans_the_restore"]
+
+[[bug]]
 name = "delete-without-dir-sync"
 fix = "93d0510"
 package = "lsr-store-fs"
 tests = ["a_crash_after_a_delete_never_brings_the_file_back"]
+
+[[bug]]
+name = "restore-counts-a-writer-as-lag"
+fix = "c497e9e"
+package = "lsr-core"
+tests = ["restore::tests::a_restore_racing_a_writer_follows_it_and_never_calls_the_listing_behind"]
 
 [[bug]]
 name = "kms-codes-by-status"
@@ -740,6 +805,30 @@ name = "park-ignores-callers-reading"
 fix = "af15d43"
 package = "lsr-replica"
 tests = ["a_park_returns_for_a_step_back_between_the_callers_reading_and_the_park"]
+
+[[bug]]
+name = "journal-first-run-reported"
+fix = "27ef518"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::a_missing_journal_on_a_first_run_reports_nothing",
+]
+
+[[bug]]
+name = "journal-verdict-costs-a-snapshot"
+fix = "27ef518"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::no_journal_a_boot_can_find_changes_what_the_engine_does",
+]
+
+[[bug]]
+name = "journal-slot-error-unreported"
+fix = "27ef518"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::boot_reports_what_it_read_of_the_journal",
+]
 
 # The defect the end-of-run stall check exists for, killed by the swarm with nothing written for
 # it: a task's success leaves its stall in place, so health says degraded for nothing.
