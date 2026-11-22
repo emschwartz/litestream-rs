@@ -329,6 +329,14 @@ plan-exhaustive:
 mem-big:
     cargo nextest run --release -p lsr-core --test core -E 'test(/^mem_big::/)' --run-ignored only --no-capture --locked
 
+# The real-SQLite power-loss campaigns, each judged by restores against the workload's own record
+# (`lsr-history`): the history rig's 50 seeds of 6 cycles (`rig::real_power_loss_trials`) and the
+# crash-cycle rig's 100 seeds of 12 cycles (`crash_cycles::crash_cycle_campaign`), which also
+# restores while the loss still holds. About two minutes on 4 cores. Nightly in CI.
+power-loss-trials:
+    LSR_HISTORY_SEEDS=50 cargo nextest run -p lsr-history --all-features --locked --run-ignored only -E 'test(/^rig::real_power_loss_trials$/)' --no-capture
+    LSR_CRASH_SEEDS=100 cargo nextest run -p lsr-sqlite --all-features --locked --run-ignored only -E 'test(/^crash_cycles::crash_cycle_campaign$/)' --no-capture
+
 # Linux with /dev/fuse, fusermount3 and FUSE allowed (root, or user_allow_other); builds LazyFS once
 # into ~/.cache/lsr-lazyfs (cmake, g++, git, libfuse3-dev). Not in `check`: a cycle takes about 3 s.
 # Exit 1 on any anomaly; the last line printed is a JSON summary.
