@@ -26,7 +26,6 @@
 pub mod marks;
 mod actor;
 mod app;
-mod checked;
 mod checkpoint;
 mod compact;
 #[cfg(any(test, feature = "testing"))]
@@ -48,6 +47,7 @@ mod pages;
 mod plan;
 mod position;
 mod probe;
+mod publish;
 mod recover;
 mod regression_watch;
 mod restore;

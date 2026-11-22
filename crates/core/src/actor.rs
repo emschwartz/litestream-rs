@@ -113,6 +113,7 @@ use crate::maintain::{
 };
 use crate::pages::{PageChecksumTable, seeded, snapshot_clears};
 use crate::position::{Position, SyncedThrough, WalFileLen};
+use crate::publish::Why;
 use crate::recover::{
     BootWal, FrameCheck, Miss, NewestStagedFile, PositionSource, Probes, Recovered, WalView,
     newest_level_zero, newest_replica_level_zero, read_header, recover,
@@ -1854,7 +1855,7 @@ impl Actor {
             .filter(|_| more)
             .map_or(bound, |key| key.range().max());
         if !keys.is_empty()
-            && let Err(err) = env.staging.delete(&keys).await
+            && let Err(err) = crate::publish::remove_staged(env.staging, &keys).await
         {
             return Some(self.fault(Task::Prune, Fault::from_staging(&err), now));
         }
@@ -2038,7 +2039,7 @@ impl Actor {
         mark!(Maint4);
         // Watched no more, whether the delete goes through or not.
         self.engine.maintain.watch = RegressionWatch::forget(self.engine.maintain.watch, key);
-        if let Err(err) = remote.delete(&[key]).await {
+        if let Err(err) = crate::publish::remove_one(remote, key, Why::RottenCovered).await {
             return Some(self.fault(Task::Maintenance, Fault::from_remote(&err), now));
         }
         // The listing no longer holds: the next tick lists and reads back again.
@@ -2267,17 +2268,29 @@ impl Actor {
                     now,
                 )
             }
-            Err(SnapshotFailed { fault, key }) => {
-                // The store took the commit and then said the object is not
-                // what was sent: it is listed, so it goes, as a rejected
-                // compaction output does.
-                if fault.leaves_bad_snapshot() && env.remote.delete(&[key]).await.is_err() {
-                    self.engine.maintain.state.distrust_snapshot(key);
-                }
-                let waiter = self.job_waiter(job, now);
-                self.fault(waiter, fault, now)
-            }
+            Err(failed) => self.snapshot_failed(env.remote, job, failed, now).await,
         }
+    }
+
+    /// A snapshot that did not publish. When the store took the commit and
+    /// then said the object is not what was sent, it is listed, so it goes,
+    /// as a rejected compaction output does.
+    async fn snapshot_failed<R: ObjectStore>(
+        &mut self,
+        remote: &R,
+        job: &Job,
+        SnapshotFailed { fault, key }: SnapshotFailed,
+        now: Timestamp,
+    ) -> Tick {
+        if fault.leaves_bad_snapshot()
+            && crate::publish::remove_one(remote, key, Why::RejectedSnapshot)
+                .await
+                .is_err()
+        {
+            self.engine.maintain.state.distrust_snapshot(key);
+        }
+        let waiter = self.job_waiter(job, now);
+        self.fault(waiter, fault, now)
     }
 
     /// Maintenance lists again when the sync task's wait ends, or after the
