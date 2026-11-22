@@ -90,6 +90,11 @@ impl Counting {
 impl ObjectStore for Counting {
     type Upload = <MemStore as ObjectStore>::Upload;
 
+    /// Forwards to the store it wraps.
+    async fn remove_scratch(&self) -> Result<u64, StoreError> {
+        self.inner.remove_scratch().await
+    }
+
     fn list(
         &self,
         level: Level,
@@ -1871,4 +1876,21 @@ fn one_bad_read_of_a_staged_file_while_uploading_drops_nothing() {
     assert!(ranges(&rig.remote).contains(&(2, 2)));
     assert!(!snapshots(&rig).contains(&2));
     assert_eq!(restored(&rig), 2);
+}
+
+/// A boot removes what killed uploads left, in staging and in the replica, before it reads
+/// anything else; the stores' wrappers forward the call.
+#[test]
+fn a_boot_removes_the_scratch_killed_uploads_left() {
+    let mut rig = Rig::new();
+    rig.staging.inner.plant_scratch(2);
+    rig.remote.inner.plant_scratch(3);
+    let mut actor = Actor::new(cfg());
+    let boot = rig.tick(&mut actor, T0);
+    assert!(
+        matches!(event(&boot), Some(Event::Booted { .. })),
+        "{boot:?}"
+    );
+    assert_eq!(rig.staging.inner.scratch(), 0);
+    assert_eq!(rig.remote.inner.scratch(), 0);
 }

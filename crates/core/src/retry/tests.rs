@@ -351,6 +351,11 @@ struct LyingUpload(<MemStore as ObjectStore>::Upload);
 impl ObjectStore for SizeLiar {
     type Upload = LyingUpload;
 
+    /// Leaves no scratch.
+    async fn remove_scratch(&self) -> Result<u64, StoreError> {
+        Ok(0)
+    }
+
     async fn list(
         &self,
         level: Level,
@@ -579,6 +584,11 @@ struct DeleteRefuser(SizeLiar);
 impl ObjectStore for DeleteRefuser {
     type Upload = LyingUpload;
 
+    /// Leaves no scratch.
+    async fn remove_scratch(&self) -> Result<u64, StoreError> {
+        Ok(0)
+    }
+
     async fn list(
         &self,
         level: Level,
@@ -669,4 +679,13 @@ fn a_mismatch_on_an_object_already_gone_counts_as_removed() {
             ..
         })
     ));
+}
+
+/// The boot's scratch removal reaches the store under the retry wrapper and returns its count.
+#[test]
+fn remove_scratch_is_forwarded() {
+    let (mem, _sleeper, store) = rig(SeededEntropy::new(1), policy(3));
+    mem.plant_scratch(7);
+    assert_eq!(conformance::block_on(store.remove_scratch()), Ok(7));
+    assert_eq!(mem.scratch(), 0);
 }

@@ -207,6 +207,11 @@ impl Upload for NoUpload {
 impl ObjectStore for Spool {
     type Upload = NoUpload;
 
+    /// Leaves no scratch.
+    async fn remove_scratch(&self) -> Result<u64, StoreError> {
+        Ok(0)
+    }
+
     async fn list(
         &self,
         level: Level,
@@ -420,6 +425,11 @@ impl Upload for VoidUpload {
 
 impl ObjectStore for Void {
     type Upload = VoidUpload;
+
+    /// Leaves no scratch.
+    async fn remove_scratch(&self) -> Result<u64, StoreError> {
+        Ok(0)
+    }
 
     async fn list(
         &self,

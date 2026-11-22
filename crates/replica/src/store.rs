@@ -577,6 +577,23 @@ mod tests {
 
     lsr_core::conformance_suite!(ErasedHarness::new);
 
+    /// The boot's scratch removal reaches the application's store through each layer the
+    /// engine sees it by: the type erasure, its dyn view and the meters.
+    #[test]
+    fn remove_scratch_is_forwarded_by_every_layer() {
+        let mem = MemStore::new();
+        let store: Arc<dyn DynStore> = Arc::new(mem.clone());
+        mem.plant_scratch(7);
+        assert_eq!(block_on(store.remove_scratch_boxed()), Ok(7));
+        mem.plant_scratch(5);
+        assert_eq!(block_on(Erased(Arc::clone(&store)).remove_scratch()), Ok(5));
+        let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(Timestamp::from_unix_millis(0)));
+        let metered = Metered::new(store, Arc::new(Meters::default()), clock);
+        mem.plant_scratch(3);
+        assert_eq!(block_on(metered.remove_scratch()), Ok(3));
+        assert_eq!(mem.scratch(), 0);
+    }
+
     #[test]
     fn metered_calls_and_bytes_are_counted() {
         let store: Arc<dyn DynStore> = Arc::new(MemStore::new());

@@ -273,6 +273,14 @@ tests = [
 ]
 
 [[bug]]
+name = "skip-boot-scratch-cleanup-core"
+fix = "31842f7"
+package = "lsr-core"
+tests = [
+    "a_boot_removes_the_scratch_killed_uploads_left",
+]
+
+[[bug]]
 name = "maintenance-only-after-uptime"
 fix = "12fe38f"
 package = "lsr-core"
