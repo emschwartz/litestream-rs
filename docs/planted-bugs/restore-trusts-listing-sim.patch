@@ -1,13 +1,14 @@
 diff --git a/crates/core/src/restore.rs b/crates/core/src/restore.rs
-index 2ccc8c9..f0827b2 100644
+index 389c55f..a92858f 100644
 --- a/crates/core/src/restore.rs
 +++ b/crates/core/src/restore.rs
-@@ -472,7 +472,7 @@ pub(crate) async fn restore_from<S: ObjectStore, K: DatabaseSink>(
-     let mut attempt = 1_u8;
-     let mut bytes_read = 0_u64;
-     let mut created_at_read = 0_u64;
--    let probe = listed.is_none() && !matches!(target, RestoreTarget::Txid(_));
-+    let probe = false;
-     loop {
-         let source = listed.take().map_or(Source::List { probe }, Source::Given);
-         let applied = attempt_once(
+@@ -582,7 +582,8 @@ async fn attempt_once<S: ObjectStore, K: DatabaseSink>(
+             return Err(RestoreError::NoPlan(NoPlan(other)).into());
+         }
+     };
+-    if probe
++    if false
++        && probe
+         && !empty
+         && !matches!(target, RestoreTarget::Txid(_))
+         && let Some(found) = listed_past(store, inventory).await?

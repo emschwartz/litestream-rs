@@ -302,3 +302,16 @@ name = "dry-run-trusts-listing"
 fix = "32572b5"
 package = "lsr-cli"
 tests = ["a_dry_run_over_a_lagging_listing_fails_like_the_restore"]
+
+[[bug]]
+name = "empty-listing-is-empty-replica"
+fix = "a5c7d57"
+package = "lsr-core"
+tests = ["restore::tests::a_listing_that_shows_nothing_over_a_first_file_is_not_an_empty_replica"]
+
+# The same plant, judged where it does harm: `--if-replica-exists` skips the restore with success.
+[[bug]]
+name = "empty-listing-is-empty-replica-cli"
+fix = "a5c7d57"
+package = "lsr-cli"
+tests = ["if_replica_exists_over_a_listing_that_shows_nothing_skips_nothing"]
