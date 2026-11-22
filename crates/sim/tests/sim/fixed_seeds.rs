@@ -1092,57 +1092,42 @@ mod lagging_listings {
     use lsr_sim::run::run_ops;
     use lsr_sim::{EnvFault, FaultShape, Op, Opts, Seed, Target, Weights};
 
-    /// The replica's listings lag; the engine uploads transactions 4 and 5,
-    /// its staging directory is wiped and it boots again. The boot listing
-    /// does not show 5 yet, so the engine took the replica as ending at 4; the
-    /// next maintenance listing showed 5 past everything the engine knew, and
-    /// it stopped as if another writer had put it, though its own previous
-    /// process did (seed 0x39, shrunk from 183 operations). The boot now reads
-    /// the keys past its listing and finds 5.
+    /// The replica's listings lag; the engine uploads transactions 1 and 2,
+    /// its staging directory is wiped and it boots again with the WAL intact.
+    /// The boot listing does not show 2 yet, so the engine took the replica as
+    /// ending at 1, then found 2 past everything it knew and stopped as if
+    /// another writer had put it, though its own previous process did. The
+    /// boot now reads the keys past its listing and finds 2, which the WAL
+    /// vouches for. Written by hand: the swarm history first pinned here (seed
+    /// 0x39) also rolled the bucket back and regrew the WAL, and since boot
+    /// refuses replica files nothing local vouches for (docs/decisions.md D12)
+    /// that history stops on those grounds instead.
     #[test]
     fn a_stale_boot_listing_does_not_stop_the_engine_on_its_own_files() {
-        let seed = Seed::new(0x39);
+        let commit = || Op::Commit {
+            pages: 1,
+            grow: false,
+        };
         let ops = [
-            Op::WalDamage {
-                op: WalOp::FlipLastFrameBit,
-                ticks: 7,
-            },
-            Op::CommitInTick { pages: 1 },
-            Op::WalDamage {
-                op: WalOp::RegrowWithoutCommitMarks(14_437_992_231_631_771_069),
-                ticks: 7,
-            },
-            Op::Remote(lsr_sim::generate::RemoteOp::RollBack),
-            Op::WalDamage {
-                op: WalOp::RegrowWithoutCommitMarks(4_540_386_313_754_240_083),
-                ticks: 7,
-            },
             Op::LaggingListings {
-                writes: 4,
-                window: 31,
+                writes: 2,
+                window: 16,
             },
-            Op::ClockJump(117_763),
-            Op::WalDamage {
-                op: WalOp::TearHeader,
-                ticks: 5,
-            },
-            Op::WalDamage {
-                op: WalOp::RegrowSameSalts(10_097_652_172_457_107_057),
-                ticks: 6,
-            },
+            commit(),
+            Op::Tick,
+            Op::Tick,
+            commit(),
+            Op::Tick,
+            Op::Tick,
             Op::EnvFault(EnvFault::WipeStaging),
-            Op::WalDamage {
-                op: WalOp::RegrowSameSalts(8_779_680_044_016_711_231),
-                ticks: 4,
-            },
+            Op::Shutdown,
         ];
         let opts = Opts {
             drawn: true,
             trace: true,
-            block_crash_law: Weights::mixed(seed).block_crash_law,
             ..Opts::default()
         };
-        let report = match run_ops(seed, &ops, &opts) {
+        let report = match run_ops(Seed::new(1), &ops, &opts) {
             Ok(report) => report,
             Err(failure) => panic!("{failure}"),
         };
