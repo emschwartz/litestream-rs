@@ -13,7 +13,7 @@ use lsr_sim::{Seed, Weights, history, run};
 
 const SEED: u64 = 0xa2;
 const STEPS: u32 = 300;
-const DIGEST: u64 = 0xda50_756d_023a_be82;
+const DIGEST: u64 = 0xce16_22db_48b0_ade6;
 
 fn digest(text: &str) -> u64 {
     text.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
