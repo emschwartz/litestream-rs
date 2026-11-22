@@ -338,6 +338,7 @@ fn answers(go: &Path, case: &Case) -> (Dump, Dump, String) {
         vars: BTreeMap::new(),
         home: base.join("home"),
         cwd: base.clone(),
+        credentials: false,
     };
     let go_out = go_dump(go, &config, &env).unwrap();
     let rust_out = rust_dump(&config, &env);

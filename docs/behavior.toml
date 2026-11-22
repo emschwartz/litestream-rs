@@ -1386,9 +1386,9 @@ response = "The credential chain does not recognise these sources; it ignores th
 signal = "error"
 at_risk = "Nothing starts"
 recovery = "Static keys"
-detected_by = "store-s3::`a_profile_without_keys_gives_nothing`"
+detected_by = "store-s3::`a_profile_without_keys_gives_nothing`, compat::`go_resolves_what_rust_does_not_build`"
 no_test = "start refusal: code only"
-notes = "It gives a profile holding `role_arn` and `credential_process` and asserts the chain finds no keys. Instance roles, web identity and SSO, and a start that fails with a message a user can act on, are **code only**"
+notes = "A departure from Go, whose SDK builds every one of these sources (D154). The compat test shows Go running a `credential_process` and litestream-rs finding no keys for the same profile. The store-s3 test gives a profile holding `role_arn` and `credential_process` and asserts the chain finds no keys. Instance roles, web identity and SSO, and a start that fails with a message a user can act on, are **code only**"
 
 [[row]]
 table = "Config and startup"
@@ -1506,6 +1506,48 @@ at_risk = "Nothing starts"
 recovery = "Operator: give the replica a prefix"
 detected_by = "config::`each_bad_shape_is_refused`"
 notes = "Found again by the `dir` differential, with a `dir` naming a file (relative path `.`) under a replica with no `path`"
+
+[[row]]
+table = "Config and startup"
+id = "CFG-19"
+circumstance = "Which static S3 keys a replica signs with (`store-s3/src/chain.rs`): the config file's `access-key-id` and `secret-access-key` (a global value fills an empty replica value); else `AWS_ACCESS_KEY_ID` or `AWS_ACCESS_KEY` with `AWS_SECRET_ACCESS_KEY` or `AWS_SECRET_KEY` and `AWS_SESSION_TOKEN`, with `LITESTREAM_*` standing in only for an unset `AWS_*`; else the chosen profile (`AWS_PROFILE`, `AWS_DEFAULT_PROFILE`, `default`) of the shared config and credentials files, combined as the AWS SDK combines them (`chain/shared.rs`), each parsed as its INI parser parses it (`chain/ini.rs`)"
+response = "continue, signing with the keys Go would sign with"
+signal = "none"
+at_risk = "None"
+recovery = "n/a"
+detected_by = "compat::`go_and_rust_resolve_the_same_credentials`, store-s3::`an_empty_aws_variable_blocks_the_litestream_copy`, store-s3::`the_credentials_file_is_merged_over_the_config_file_as_the_sdk_merges`, store-s3::`an_indented_line_without_a_separator_continues_the_value`; plant::`creds-empty-aws-var-ignored`, plant::`creds-merge-keeps-config-error`, plant::`creds-continuation-dropped`"
+notes = "The compat test is a differential against Go's own resolution (the dumper runs `NewS3ReplicaClientFromConfig`, then `config.LoadDefaultConfig` as the client's `Init` calls it, with fake keys), over 1,024 generated cases per run: the seven key variables set, empty or unset, both profile variables, both file-path variables (unset, empty, moved, missing, a directory), and files with key spellings in any case, padding, comments, quotes, empty values, continuations, repeated sections and `[profile x]` in either file. 8,000 cases passed once. It found that the files were read lazily and merged differently, and that an empty `AWS_*` variable did not block the `LITESTREAM_*` copy; all fixed toward Go"
+
+[[row]]
+table = "Config and startup"
+id = "CFG-20"
+circumstance = "The shared files cannot be used: a non-empty `AWS_PROFILE` names a profile neither file has; the chosen profile holds only one of `aws_access_key_id` and `aws_secret_access_key` (after the credentials file's copy is laid over the config file's); a file opens but cannot be read. Go's SDK fails its load on each, before any source, so explicit and environment keys do not help"
+response = "refuse, as Go: that database does not start (`OpenStoreError::Credentials`), the others keep running. Go starts and fails every sync of that database instead"
+signal = "`/healthz` 503, `lsr_db_state` `failed`"
+at_risk = "That database is not replicated"
+recovery = "Operator: fix the file or the variable, restart"
+detected_by = "compat::`go_and_rust_resolve_the_same_credentials`, store-s3::`a_partial_profile_stops_the_chain_even_with_environment_keys`, store-s3::`a_profile_named_by_aws_profile_must_exist`, store-s3::`a_file_that_opens_but_cannot_be_read_stops_the_chain_as_in_go`; plant::`creds-files-read-after-environment`, plant::`creds-unreadable-file-skipped`"
+notes = "Before, environment and config keys won without the files being read, so litestream-rs started where Go does not. Go retries resolution on every sync, so fixing the file recovers Go without a restart; litestream-rs needs one"
+
+[[row]]
+table = "Config and startup"
+id = "CFG-21"
+circumstance = "The config file names only one of `access-key-id` and `secret-access-key` for a replica (a global value counts where the replica's is empty)"
+response = "refuse at load. A departure from Go, which ignores the lone key and signs with whatever the default chain finds (D152)"
+signal = "exit 2"
+at_risk = "Nothing starts"
+recovery = "Operator: give both keys or neither"
+detected_by = "compat::`go_and_rust_resolve_the_same_credentials`"
+
+[[row]]
+table = "Config and startup"
+id = "CFG-22"
+circumstance = "A line in a shared credentials or config file that is not blank, a comment, a header, a property or an indented continuation (a header missing its `]`)"
+response = "refuse: that database does not start. A departure from Go, whose INI parser skips the line (D153)"
+signal = "`/healthz` 503, `lsr_db_state` `failed`"
+at_risk = "That database is not replicated"
+recovery = "Operator: fix the file"
+detected_by = "store-s3::`a_malformed_line_is_refused_by_number_never_by_text`, compat::`go_and_rust_resolve_the_same_credentials`"
 
 [[row]]
 table = "Circumstances the code does not distinguish"

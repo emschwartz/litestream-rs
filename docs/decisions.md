@@ -53,6 +53,9 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D71 | Which errors may a simulated history inject? | Those a shipped implementation returns from that call with the world unchanged; a world fact is drawn as the world change; a cell the model cannot follow is listed as unmodelled, never drawn | Claude (error-domain), **delegated** | 2026-11-22 | open to owner review |
 | D150 | An S3 replica with an empty prefix (`s3://bucket`, or `bucket` with no `path`): copy Go? | No: refuse, as before | Claude (dropin-dir), **delegated** | 2026-11-22 | open to owner review |
 | D151 | `watch: true` on a `dir` entry, refused since the phase-4 plan: keep refusing under D33? | Keep refusing until built; the owner chooses | Claude (dropin-dir), **delegated** | 2026-11-22 | open to owner review |
+| D152 | The config file names only one of `access-key-id` and `secret-access-key`: ignore it as Go does? | No: refuse | Claude (dropin-creds), **delegated** | 2026-11-22 | open to owner review |
+| D153 | A shared AWS file holds a line that is not INI: skip it as Go does? | No: refuse | Claude (dropin-creds), **delegated** | 2026-11-22 | open to owner review |
+| D154 | Credential sources that need a network call or a subprocess (instance roles, web identity, SSO, `credential_process`, assumed roles): build them under D33? | Not in this pass; the owner chooses | Claude (dropin-creds), **delegated** | 2026-11-22 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -474,6 +477,35 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Dropped before review:** `Replicator::writes_refused` and the `lsr_app_held` metric; health and `/healthz` carry the same state.
 - **Revisit if:** operators misread any of them in practice.
 - **Links:** #115, #149, `crates/sidecar/src/failstop.rs`, `crates/cli/src/run.rs` (the exit table).
+## D152. A lone `access-key-id` or `secret-access-key` (delegated)
+
+- **Question:** Go builds static credentials only when the config file gives both keys; with one, it ignores it and signs with whatever the AWS SDK's default chain finds (environment, shared files, the instance role). litestream-rs refuses the file. D33 asks for Go's behaviour unless Go is wrong.
+- **Options:** copy Go; refuse.
+- **Choice:** refuse, as before.
+- **Cost accepted:** a Go config with one key does not start until it is fixed.
+- **Why:** AGENTS.md's contract: a request that cannot be met exactly is an error, never something else. Go signs with credentials the file did not name, possibly another account's, and says nothing. No data is lost either way, so this is a call on the contract, not on safety.
+- **Revisit if:** the owner prefers exact parity here.
+- **Links:** `docs/BEHAVIOR.md` CFG-21; `crates/config/src/map/replica.rs` (`HalfCredentials`); `compat::go_and_rust_resolve_the_same_credentials` asserts the refusal.
+
+## D153. A line in a shared AWS file that is not INI (delegated)
+
+- **Question:** the AWS SDK's INI parser skips a line that is not a header, a property or a continuation; litestream-rs refuses the file.
+- **Options:** skip, as Go; refuse.
+- **Choice:** refuse, as before.
+- **Cost accepted:** a file Go reads does not start litestream-rs.
+- **Why:** the usual such line is a header missing its `]`. Skipping it files the keys below it under the profile above, so Go signs with the wrong profile's keys and says nothing. The AWS CLI's parser refuses such a file too.
+- **Revisit if:** a real file with a harmless non-INI line turns up.
+- **Links:** `docs/BEHAVIOR.md` CFG-22; `crates/store-s3/src/chain/ini.rs`.
+
+## D154. Credential sources that need a network call or a subprocess (delegated)
+
+- **Question:** Go's SDK resolves EC2 instance roles, ECS and EKS container credentials, web-identity tokens, assumed roles (`role_arn` with `source_profile` or `credential_source`), SSO and `credential_process`. litestream-rs builds none of them (CFG-7). Under D33 this is the largest credential gap: an application on EC2, ECS or EKS with a role and no static keys does not start.
+- **Options:** build them (an IMDS client, STS AssumeRole and AssumeRoleWithWebIdentity, a subprocess runner, the SSO token cache); keep the static chain.
+- **Choice:** not in this pass. The static chain now matches Go's exactly (CFG-19, CFG-20), and the gap is asserted by `compat::go_resolves_what_rust_does_not_build`, so closing it shows.
+- **Cost accepted:** role-based deployments need static keys under litestream-rs.
+- **Why:** each source is a network client or a subprocess with its own failure modes, refresh and expiry, so each is a feature with its own plan, rows and fault rigs, not a correction to an existing path.
+- **Revisit if:** the owner wants role-based deployments supported; the instance role and web identity cover most of them.
+- **Links:** `docs/BEHAVIOR.md` CFG-7; `crates/store-s3/src/chain.rs`.
 
 ## Unverified, not recorded
 
