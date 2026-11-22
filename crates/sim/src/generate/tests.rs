@@ -142,7 +142,8 @@ fn the_scenario_only_steps_are_drawn_too() {
 #[test]
 fn the_second_frozen_generator_draws_what_the_live_one_drew() {
     let mut compared = 0;
-    for n in 0..200 {
+    // Over 300 seeds: the lag law leaves fewer seeds the second generator knew all of.
+    for n in 0..300 {
         let weights = Weights::mixed(seed(n));
         if weights.staging_replace_running != 0 || weights.lagging_listings != 0 {
             continue;
