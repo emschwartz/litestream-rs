@@ -11,6 +11,7 @@
 
 use std::future::Future;
 use std::num::NonZeroUsize;
+use std::ops::Deref;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -217,12 +218,12 @@ impl Upload for Box<dyn DynUpload> {
     }
 }
 
-/// A borrowed `dyn DynStore` as a sized [`ObjectStore`], for the engine's functions, which
-/// take their store by type.
+/// A `dyn DynStore` behind a pointer (a borrow, or an `Arc` in tests) as a sized
+/// [`ObjectStore`], for the engine's functions, which take their store by type.
 #[derive(Clone, Copy)]
-pub(crate) struct Erased<'a>(pub(crate) &'a dyn DynStore);
+pub(crate) struct Erased<P>(pub(crate) P);
 
-impl ObjectStore for Erased<'_> {
+impl<'a, P: Deref<Target = dyn DynStore + 'a> + Send + Sync> ObjectStore for Erased<P> {
     type Upload = Box<dyn DynUpload>;
 
     async fn list(
@@ -530,15 +531,15 @@ mod tests {
     /// nothing a caller can see.
     struct ErasedHarness {
         mem: Arc<MemStore>,
-        erased: Erased<'static>,
+        erased: Erased<Arc<dyn DynStore>>,
     }
 
     impl ErasedHarness {
         fn new() -> Self {
             let mem = Arc::new(MemStore::new());
-            // Leaked so the harness can lend a `'static` trait object; a test's few bytes.
-            let held: &'static Arc<MemStore> = Box::leak(Box::new(Arc::clone(&mem)));
-            let erased: &'static dyn DynStore = &**held;
+            // Owned by an `Arc`, not leaked: AddressSanitizer's leak check (`just asan`) runs
+            // over these tests and a leaked store per test fails it.
+            let erased: Arc<dyn DynStore> = mem.clone();
             Self {
                 mem,
                 erased: Erased(erased),
@@ -547,7 +548,7 @@ mod tests {
     }
 
     impl Harness for ErasedHarness {
-        type Store = Erased<'static>;
+        type Store = Erased<Arc<dyn DynStore>>;
 
         fn store(&self) -> &Self::Store {
             &self.erased
