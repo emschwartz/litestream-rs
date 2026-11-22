@@ -1505,6 +1505,9 @@ impl Actor {
         for token in staged.witnesses() {
             self.engine.witnesses.insert(*token);
         }
+        for key in staged.quiet() {
+            self.note_quiet_file(*key);
+        }
         let position = staged.position();
         let tail = self.engine.course.tail();
         self.engine.course.moved(position, tail, false);

@@ -282,16 +282,31 @@ fn trip_times_are_engine_times() {
     );
 }
 
-/// Known: seed 0x9f9 trips for age with every commit on the replica. Two clock steps of a
-/// day, a staging backup put back and a staged file damaged meet a pending file the engine
-/// cannot tell holds no commit; not resolved in #115. Pinned so the judge stays strict
-/// (`docs/decisions.md` D27).
+/// Seeds whose mixed histories tripped for age with every commit on the replica, each now
+/// run to the end clean: a run of lag dated from its start though its commits landed (0x330,
+/// 0x9f9, 0x56a), a checkpoint's file that changes no page counted as a commit (0x8ef), a
+/// trip that held after its commits landed because a newer frame kept the age above zero
+/// (0xa4d), and WAL frames the replica held counted while a doubt snapshot was owed (0x14b).
+/// The generator may move on and stop reaching these states; the named tests in
+/// `lsr-core`'s `actor::tests::lag` pin each mechanism without it.
 #[test]
-#[ignore = "known false trip: seed 0x9f9, a restored staging backup under day-long clock steps"]
-fn known_false_trip_seed_0x9f9() {
-    let seed = Seed::new(0x9f9);
-    let weights = crate::unaided::weights(seed);
-    if let Err(failure) = lsr_sim::run_with(seed, 43, &weights, &Opts::default()) {
-        panic!("{}", failure.violation);
+fn the_reported_false_trip_seeds_run_clean() {
+    for (seed, known_wrong) in [
+        (0x330, true),
+        (0x9f9, false),
+        (0x9f9, true),
+        (0x56a, true),
+        (0xa4d, true),
+        (0x8ef, true),
+        (0x14b, false),
+    ] {
+        let seed = Seed::new(seed);
+        let mut weights = lsr_sim::Weights::mixed(seed);
+        weights.known_wrong = known_wrong;
+        if let Err(failure) = lsr_sim::run_with(seed, 300, &weights, &Opts::default()) {
+            panic!("{}", failure.message(failure.steps));
+        }
     }
 }
+
+mod seed_0xf4342;
