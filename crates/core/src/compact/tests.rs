@@ -1236,3 +1236,25 @@ fn a_small_output_is_written_to_the_upload_once() {
     assert!(done.pages() > 1, "{}", done.pages());
     assert_eq!(dest.script().writes, 1);
 }
+
+/// A store that acknowledges the output one byte short holds a truncated file: the compactor
+/// deletes it and reports the mismatch, so nothing listable is left that does not decode.
+#[test]
+fn an_output_acknowledged_short_is_deleted_and_reported() {
+    let spec = Spec::plain(512, 3, 5, 5, &[(2, 9), (3, 4)]);
+    let source = MemStore::new();
+    let infos = put_all(&source, 0, std::slice::from_ref(&spec));
+    let dest = crate::mem::short::SizeLiar(MemStore::new());
+    let err = error_of(compact_infos(&source, &dest, &infos, 1));
+    assert!(
+        matches!(
+            err,
+            CompactError::Dest(StoreError::Corrupt {
+                cause: crate::store::CorruptCause::CommitSizeMismatch { removed: true, .. },
+                ..
+            })
+        ),
+        "{err:?}"
+    );
+    assert!(nothing_published(&dest.0));
+}

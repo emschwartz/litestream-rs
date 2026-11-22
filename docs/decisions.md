@@ -454,6 +454,15 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Revisit if:** operators misread any of them in practice.
 - **Links:** #115, #149, `crates/sidecar/src/failstop.rs`, `crates/cli/src/run.rs` (the exit table).
 
+## D74. Every engine commit checks the size the store acknowledged (delegated)
+
+- **Options:** keep the check in the uploader alone (which retried but left the short object listed) and in `Retrying`, which the engine never wraps its stores in; check in each engine call site; one upload type every engine commit goes through.
+- **Choice:** one type, `Checked` (`crates/core/src/checked.rs`). The uploader, the compactor and the staging writer open uploads only through it. It counts the bytes written; a commit acknowledging another size deletes the object, then reports `CommitSizeMismatch { removed }`. `Retrying` settles its own commits with the same function, so the rule is written once.
+- **Why:** the compactor took a short acknowledgement as a published output and maintenance then deleted its inputs, so `restore Latest` failed to decode the replica (simulator seed 0x46, once the simulator's size-mismatch fault published a short object). The uploader saw the mismatch but left the object listed until its retry, so restores failed in between.
+- **Cost accepted:** a delete after every mismatched commit. A store that misreports sizes on objects it holds whole loses them to the delete and they are written again; the caller still holds the bytes until a verified listing. The type does not stop a future engine function from calling `begin_upload` directly; the planted bugs `compact-commit-unchecked` and `short-commit-object-kept` catch the two paths that exist.
+- **Revisit if:** a new engine path writes to a store.
+- **Links:** #127 (the blind-plant pilot's second gap), `docs/planted-bugs.toml`.
+
 ## Unverified, not recorded
 
 - Who decided D1 to D5 and when: `docs/PLAN.md` says "Decided" with no name or date. Listed as owner, by 2026-11-20.
