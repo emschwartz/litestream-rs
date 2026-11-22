@@ -24,10 +24,12 @@ use super::state::{Gate, Live, Maintain, Phase, Tasks};
 use super::unproven::Unproven;
 use crate::app::AppCheckpointObserver;
 use crate::checkpoint::CheckpointState;
+use crate::failstop::Lag;
 use crate::fault::{SnapshotCause, StopCause};
 use crate::layout::FileKey;
 use crate::pages::PageChecksumTable;
 use crate::position::Position;
+use crate::store::Denied;
 use crate::upload::UploadState;
 use crate::witness::Witnesses;
 
@@ -117,6 +119,14 @@ pub(super) struct Kept {
     /// How far the engine is past a failed sync of the WAL (`unproven`). Kept across boots:
     /// a frame that sync covered is no truer after a rebuild.
     pub(super) unproven: Unproven,
+    /// The fail-stop clock (`crate::failstop`): reports, kept across boots so a rebuild does not
+    /// restart it.
+    pub(super) lag: Lag,
+    /// Whether any engine of this process has booted, so listed the replica once. A rebuild
+    /// keeps it: fail-stop's refusal at boot is about this process, not this engine.
+    pub(super) listed: bool,
+    /// The last boot failure before the first listing was the store refusing access.
+    pub(super) refused_at_boot: Option<Denied>,
 }
 
 impl Kept {
@@ -133,6 +143,9 @@ impl Kept {
             app: AppCheckpointObserver::default(),
             suspect_staged: None,
             unproven: Unproven::No,
+            lag: Lag::default(),
+            listed: false,
+            refused_at_boot: None,
         }
     }
 
@@ -153,6 +166,9 @@ impl Kept {
             app: _,
             suspect_staged,
             unproven,
+            lag,
+            listed,
+            refused_at_boot,
         } = self;
         Self {
             cfg: cfg.clone(),
@@ -166,6 +182,9 @@ impl Kept {
             app: observer,
             suspect_staged: *suspect_staged,
             unproven: *unproven,
+            lag: *lag,
+            listed: *listed,
+            refused_at_boot: *refused_at_boot,
         }
     }
 

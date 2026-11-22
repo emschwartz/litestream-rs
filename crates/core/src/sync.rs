@@ -524,7 +524,12 @@ pub(crate) async fn stage<R: Read + Seek, P: PageSource, L: ObjectStore>(
     match fill(&mut upload, header, plan, wal, db, pages, map_store).await {
         Ok(filled) => {
             let file = upload.commit().await.map_err(|err| map_store(&err))?;
-            let token = Witnessed::made_here(*key, filled.bytes, filled.checksum);
+            let token = Witnessed::made_here(
+                *key,
+                filled.bytes,
+                filled.checksum,
+                header.fields().timestamp,
+            );
             Ok((file, filled.last, token))
         }
         Err(fault) => {

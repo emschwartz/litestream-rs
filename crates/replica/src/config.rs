@@ -167,6 +167,7 @@ impl Config {
             retry_interval: self.retry_interval.get(),
             shutdown_grace: self.shutdown_grace,
             responses: self.responses,
+            max_unreplicated_age: lsr_core::MaxUnreplicatedAge::DEFAULT,
         }
     }
 }

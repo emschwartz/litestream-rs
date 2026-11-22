@@ -242,6 +242,7 @@ pub fn actor_config() -> ActorConfig {
         retry_interval: Duration::from_secs(1),
         shutdown_grace: Duration::from_secs(10),
         responses: Responses::GO_LIKE,
+        max_unreplicated_age: lsr_core::MaxUnreplicatedAge::DEFAULT,
     }
 }
 
@@ -393,6 +394,7 @@ impl Runner {
         self.app_before = self.app_seen();
         self.actor = Actor::new(ActorConfig {
             responses: self.responses,
+            max_unreplicated_age: lsr_core::MaxUnreplicatedAge::DEFAULT,
             maintenance: base.maintenance.clone().with_retention(self.retention),
             ..base
         });
