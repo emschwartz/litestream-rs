@@ -802,13 +802,13 @@ in_review = "#96"
 [[row]]
 table = "Upload"
 id = "UP-7"
-circumstance = "The store acknowledged a commit with another size than was written"
-response = "retry, `UploadAmbiguous`, then as UP-6"
+circumstance = "The store acknowledged a commit with another size than was written: a short write it took as whole"
+response = "The object is deleted before anything is reported (`CommitSizeMismatch`, whose `removed` says whether the delete took), for every engine commit: a level-0 upload, a compaction output, a staged file (`checked.rs`). An upload then retries, `UploadAmbiguous`, as UP-6; a compaction round fails with the same fault and maintenance retries it"
 signal = "\"retrying\""
 at_risk = "None"
 recovery = "Automatic"
-detected_by = "sim::`size_mismatch_on_commit`"
-recovered_by = "sim::`size_mismatch_on_commit`"
+detected_by = "sim::`size_mismatch_on_commit`, sim::`short_write::an_upload_acknowledged_short_leaves_nothing_a_restore_meets`, sim::`fixed_seeds::fixed::a_torn_staged_file_is_dropped_seed_0x46`, core::`a_commit_acknowledged_short_is_deleted_and_reported`, core::`an_output_acknowledged_short_is_deleted_and_reported`, core::`a_commit_that_answers_with_a_wrong_size_leaves_no_object`; plant::`compact-commit-unchecked`, plant::`short-commit-object-kept`"
+recovered_by = "sim::`size_mismatch_on_commit`, sim::`short_write::an_upload_acknowledged_short_leaves_nothing_a_restore_meets`"
 
 [[row]]
 table = "Upload"
