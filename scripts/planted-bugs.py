@@ -293,7 +293,7 @@ def unaided(bugs: list[dict], seeds: int, base: int) -> int:
         rows = []
         for bug in bugs:
             reset_tree(head)
-            patch = PATCHES / f"{bug['name']}.patch"
+            patch = PATCHES / f"{bug.get('patch', bug['name'])}.patch"
             applied = git("apply", "--whitespace=nowarn", str(patch), cwd=TREE, check=False)
             assert_tree_at(head)
             started = time.monotonic()

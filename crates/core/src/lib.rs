@@ -23,6 +23,7 @@
 
 mod actor;
 mod app;
+mod checked;
 mod checkpoint;
 mod compact;
 #[cfg(any(test, feature = "testing"))]

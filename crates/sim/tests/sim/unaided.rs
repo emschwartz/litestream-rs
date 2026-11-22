@@ -141,7 +141,7 @@ fn seeds_to_first_failure() {
             losses += u64::from(report.power_losses);
         }
         if let Err(failure) = ran {
-            let drawn = known_in(&history(seed, STEPS, &weights));
+            let drawn = known_in(&history(seed, STEPS, &weights), &weights);
             if let Some(defect) = KnownWrong::of(&failure.violation, &drawn) {
                 println!("KNOWN {defect:?}: {failure}");
                 known.entry(format!("{defect:?}")).or_default().push(n);

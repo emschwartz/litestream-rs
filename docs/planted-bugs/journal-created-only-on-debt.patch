@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index 6626f0e7..f088b868 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -2197,7 +2197,7 @@ impl Actor {
+         };
+         let held = writer.durable().copied().or(self.kept.journal_read);
+         let wanted = self.kept.unproven.recorded();
+-        if held.map(|held| held.unproven) == Some(wanted) {
++        if held.map_or(lsr_journal::Unproven::No, |held| held.unproven) == wanted {
+             // Nothing the engine holds is missing from the journal: nothing lags it.
+             self.kept.journal_write = Ok(());
+             return tick;

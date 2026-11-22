@@ -32,14 +32,16 @@ impl Unproven {
         }
     }
 
-    /// Whether `self` may follow `old` in consecutive records: the debt only moves forward
-    /// through its cure (review 5, J5).
+    /// Whether `self` may follow `old` in consecutive records (review 5, J5): the debt is
+    /// never forgiven, it is paid only through its cure, and a new failure may raise it again
+    /// at any step.
     const fn may_follow(self, old: Self) -> bool {
         matches!(
             (old, self),
-            (Self::No, Self::No | Self::Truncate)
-                | (Self::Truncate, Self::Truncate | Self::Snapshot)
-                | (Self::Snapshot, Self::Snapshot | Self::No)
+            (Self::No | Self::Truncate | Self::Snapshot, Self::Truncate)
+                | (Self::No, Self::No)
+                | (Self::Truncate | Self::Snapshot, Self::Snapshot)
+                | (Self::Snapshot, Self::No)
         )
     }
 }

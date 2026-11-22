@@ -282,6 +282,7 @@ pub const fn of_op(op: &Op) -> &'static [Justifier] {
         // A lasting fault, noted as it begins and again as it is lifted.
         Op::Hold { hold, .. } => match hold {
             crate::generate::Hold::StoreDown(_)
+            | crate::generate::Hold::StoreDownAll
             | crate::generate::Hold::CredentialsRevoked
             | crate::generate::Hold::LaggingListing
             | crate::generate::Hold::LyingReads => &[Justifier::RemoteFault],
@@ -289,6 +290,7 @@ pub const fn of_op(op: &Op) -> &'static [Justifier] {
             crate::generate::Hold::Wal(_) => &[Justifier::WalDamaged],
             crate::generate::Hold::LyingDisk => &[Justifier::LyingDisk],
             crate::generate::Hold::ReadersHeld => &[],
+            crate::generate::Hold::SecondWriter => &[Justifier::RemoteEdited],
         },
         Op::OurReader { begin: false } => &[Justifier::ReadLockLapsed],
         Op::RequestSnapshot => &[Justifier::SnapshotRequested],
@@ -339,6 +341,11 @@ pub const fn of_opts(opts: &crate::run::Opts) -> &'static [Justifier] {
         // The app's behaviour after a restart, and how the clock reads inside a tick.
         after_restart: _,
         clock_law: _,
+        // An overlapping hold's crashes, power losses and store faults are noted as they
+        // happen, as the same operations are outside a hold.
+        overlap: _,
+        error_domain: _,
+        known_wrong: _,
         // Staging on the directory store: what its power losses take is noted with
         // `StagedLost`, as on `MemStore`; a file it took that it reported durable fails the run.
         staging_fs: _,

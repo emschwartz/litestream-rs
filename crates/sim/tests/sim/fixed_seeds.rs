@@ -244,7 +244,11 @@ mod fixed {
     }
 
     /// Reached through `LocalRewound`: the torn file was an upload whose commit
-    /// errored after publishing, torn by an earlier power loss.
+    /// errored after publishing, torn by an earlier power loss. Since the
+    /// store's size-mismatch fault publishes a short object, it also holds a
+    /// level-2 compaction output acknowledged one byte short: an engine that
+    /// took that acknowledgement left a file `restore Latest` cannot decode
+    /// (step 89).
     #[test]
     fn a_torn_staged_file_is_dropped_seed_0x46() {
         replay(0x46, 252);

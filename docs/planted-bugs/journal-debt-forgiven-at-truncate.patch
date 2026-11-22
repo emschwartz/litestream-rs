@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor/unproven.rs b/crates/core/src/actor/unproven.rs
+index 4b37495..8d0222a 100644
+--- a/crates/core/src/actor/unproven.rs
++++ b/crates/core/src/actor/unproven.rs
+@@ -119,7 +119,7 @@ impl Actor {
+             }
+             Err(err) => return Err(Fault::from_source(err)),
+         }
+-        self.kept.unproven = Unproven::Snapshot;
++        self.kept.unproven = Unproven::No;
+         Ok(Stepped::Resnapshot(SnapshotCause::WalSyncFailed))
+     }
+ 
