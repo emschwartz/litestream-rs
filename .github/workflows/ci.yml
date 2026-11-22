@@ -128,6 +128,34 @@ jobs:
       - if: failure()
         run: ./scripts/print-kept-fixtures.sh
 
+  # TEMPORARY, dropped before landing: reruns the alternation that stalled on WalCorrupt
+  # (v0.5.18, seed 1) under CPU load until it fails, so the dump above captures the WAL.
+  alternation-repro:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,just
+      - uses: ./.github/actions/go-compat
+      - run: ./scripts/build-go-litestream.sh v0.5.18 main
+      - run: |
+          for _ in 1 2; do (while :; do :; done) & done
+          for attempt in $(seq 1 10); do
+            echo "attempt $attempt"
+            LSR_ALTERNATION_SEED=1 LSR_COMPAT_VERSIONS="v0.5.18 main" cargo nextest run -p lsr-compat \
+              --run-ignored all --locked --no-capture \
+              -E 'test(=alternation::live::go_and_rust_alternate_on_one_prefix)' || exit 1
+          done
+      - if: failure()
+        run: ./scripts/print-kept-fixtures.sh
+
   # Go and Rust on one S3 bucket: MinIO in Docker, as test-s3, with the throwaway credentials in
   # scripts/minio.sh. The recipe unsets every AWS_* and LITESTREAM_* variable and the tests
   # refuse any endpoint but loopback http, so no real store is reachable from them.
