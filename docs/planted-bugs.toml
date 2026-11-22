@@ -256,3 +256,13 @@ fix = "plant"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["unaided::swarm_seed_44_restores_only_committed_states"]
+
+# The bounded WAL resume (witness, 18cf304) took a wal-index reset ahead of the header as a
+# restart even at the header's first frame: every boot from a file with an empty WAL range
+# snapshotted again. Found by the liveness oracle (seed 0xf85 among others).
+[[bug]]
+name = "resume-index-reset-ahead"
+fix = "claude/checker-hygiene"
+package = "lsr-wal"
+test_bin = "wal"
+tests = ["synthetic::resume_at_the_first_frame_under_an_index_reset_ahead_starts_there"]
