@@ -1779,13 +1779,13 @@ tests = ["verify_reports_a_live_transaction_that_no_longer_restores_seed_0x14"]
 
 [[bug]]
 name = "probe-skips-higher-levels"
-fix = "fd5f8e1"
+fix = "7945943"
 package = "lsr-core"
 tests = ["a_hidden_level_one_file_past_the_listing_is_found_by_its_level_key"]
 
 [[bug]]
 name = "probe-skips-higher-levels-sim"
-fix = "fd5f8e1"
+fix = "7945943"
 package = "lsr-sim"
 test_bin = "sim"
 tests = [
@@ -1795,7 +1795,7 @@ tests = [
 
 [[bug]]
 name = "restore-reads-one-transaction-past"
-fix = "f0fe6f6"
+fix = "7945943"
 package = "lsr-core"
 tests = [
     "a_hole_right_after_a_lagging_listing_does_not_hide_the_files_past_it",
