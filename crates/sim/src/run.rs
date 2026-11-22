@@ -2036,7 +2036,7 @@ const fn persistent_reports_loss(cause: PersistentCause) -> bool {
         | PersistentCause::WalTruncated
         | PersistentCause::WalUnlinked
         | PersistentCause::WalSyncFailed => true,
-        PersistentCause::Credentials
+        PersistentCause::StoreDenied(_)
         | PersistentCause::StoreRefused
         | PersistentCause::RemoteCorrupt
         | PersistentCause::PageSizeChanged { .. }
@@ -2056,7 +2056,7 @@ const fn stop_reports_loss(cause: StopCause) -> bool {
         | StopCause::WalTruncated
         | StopCause::WalUnlinked
         | StopCause::WalSyncFailed => true,
-        StopCause::Credentials
+        StopCause::StoreDenied(_)
         | StopCause::StoreRefused
         | StopCause::RemoteCorrupt
         | StopCause::PageSizeChanged { .. }

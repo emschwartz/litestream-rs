@@ -136,7 +136,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
   - After boot drops an unreadable staged file, the engine stages again from the WAL when the WAL still holds the range (#108).
 - **Cost accepted:** one extra GET at boot in the first case.
 - **Revisit if:** the liveness oracle still shows snapshots with no real doubt behind them.
-- **Links:** #108 (open), D12.
+- **Links:** #108 (merged), D12.
 
 ## D12. Boot finds replica files it cannot vouch for
 
@@ -257,7 +257,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Why:** clock skew, a missing bucket and a failed certificate check each sent operators to rotate keys that were fine.
 - **Cost accepted:** four more causes to keep classified correctly per store.
 - **Revisit if:** a store returns a refusal that fits none of them.
-- **Links:** #108 (open).
+- **Links:** #108 (merged).
 
 ## D25. An excused regression the engine never reports
 

@@ -35,13 +35,13 @@ Evidence is cited as: a test name with its crate ("sim" is `sim/tests/sim`, "cor
 
 | Mark | Rows |
 |---|---|
-| D R | 50 |
-| D | 49 |
+| D R | 52 |
+| D | 50 |
 | D S | 7 |
 | D S R | 4 |
 | S | 1 |
-| untested | 20 |
-| code only | 9 |
+| untested | 18 |
+| code only | 8 |
 | unknown | 10 |
 | known wrong | 5 |
 | accepted, undetected | 2 |
@@ -152,7 +152,7 @@ After a rewind the replica still holds the lost branch. Its transactions stay re
 **Not bounded.**
 - A commit is dated by when it was staged. Commits made while the engine was down or degraded are stamped at catch-up, so a restore as of an instant inside the outage leaves them out (D10). Bound: the outage. **untested**.
 - An instant inside a merged file whose finer inputs are gone refuses with `AsOfInsideFile`; `--allow-earlier` returns the newest state provably before it.
-- The times are the host's wall clock, clamped within one process (RUN-19), not across a restart (WORLD-13). A forward jump is believed; restores as of instants in that window are off by up to the jump. **untested**.
+- The times are the host's wall clock, never below its highest reading within one process (RUN-19), not across a restart (WORLD-13). A forward jump is believed; restores as of instants in that window are off by up to the jump. **untested**.
 
 **Engine-level evidence.** oracle `AsOfTooNew`, `NotLatest`, `WrongCreatedAt` on the simulator runs listed under G1; sim `as_of_never_takes_an_upload_time_for_a_commit_time`; plants `time-provenance`, `time-provenance-sim`. The history rig restores at two instants per judged moment and applies judge `AsOfTooNew`.
 
@@ -168,7 +168,7 @@ After a rewind the replica still holds the lost branch. Its transactions stay re
 
 **What is lost if the host is destroyed.** Every commit after `replicated_txid`.
 
-**How to see lag.** `lsr_unreplicated_age_seconds` is the intended measure, and it is wrong in two cases (N1): it reads 0 until the first boot of a process completes, and it restarts from "now" after every restart. A process that starts with the store unreachable shows `/healthz` 200, no degraded cause and zero lag while replicating nothing. Until N1 is fixed, alert on `lsr_replicated_txid` failing to advance while the application writes, and on `lsr_retries_total` rising.
+**How to see lag.** `lsr_unreplicated_age_seconds` is the intended measure. Until a booted engine shows the replica caught up (before a process's first boot, and while a rebuilt engine waits to boot) it counts from the start of that wait, never 0 (replica `the_lag_counts_from_the_start_while_the_first_boot_fails`). It still restarts from the process's start after every restart, so a crash loop understates lag (N1); alert also on `lsr_replicated_txid` failing to advance while the application writes.
 
 **When degraded or retrying.** Lag is unbounded. The staging directory grows when uploads fail; the WAL grows when sync fails. No bound is enforced on either. **code only.**
 
@@ -187,7 +187,7 @@ After a rewind the replica still holds the lost branch. Its transactions stay re
 **Statement.** If the application has committed and no commit has reached the replica for longer than the retry cap (5 minutes) plus one poll interval, then at least one of these holds: `/healthz` is not 200; `Health.degraded` is not empty; `lsr_unreplicated_age_seconds` exceeds that time.
 
 **Counted against G7.**
-- N1: the age gauge reads 0 until a process's first boot completes, and restarts from "now" at every restart. A process that starts with the store unreachable shows a clean age gauge; since #104 its boot task (the sync task) is degraded as a stall from its 8th failed boot.
+- N1: the age gauge restarts from the process's start at every restart, so a crash loop shorter than the alert threshold keeps it low. Before its first boot a process counts lag from its start, so a process that starts with the store unreachable no longer shows a clean age gauge; since #104 its boot task (the sync task) is also degraded as a stall from its 8th failed boot.
 - D2: the WAL fsync failure itself is forgotten by a restart before the TRUNCATE.
 
 D12 is closed by #104: every fault whose policy is to retry degrades its task as `Stalled(<fault>)` at the 8th failure in a row (`STALLED_AFTER` in `core/src/fault.rs`). From a 1 s interval the waits before the 8th failure sum to 127 s, inside the statement's 5 minutes. A failed WAL fsync is degraded at once (`wal_sync_failed`). A wait a maintenance level keeps never stalls; maintenance blocks no commit's way to the replica.
@@ -272,8 +272,8 @@ The simulator can inject exactly these: `Op` (commit, spill, vacuum, shrink, oth
 | Fault | Scope | What the engine does | Rig |
 |---|---|---|---|
 | Steps back across a restart | **Gap** | The clamp is per process. Created-at times can run backwards across files (WORLD-13) | None. **untested** |
-| Steps back | In for seconds, **gap** for hours | Clamped to the last reading, reported once (RUN-19). Every timer is held for the size of the step (N2) | sim `clock_steps_back_10s`; core `clock_back_clamped_once` |
-| Steps forward | In for retention, out for as-of | Believed. Retention ages are measured from `min(now, newest created-at in the listing)`, so one bad reading deletes nothing the replica's own newest time would not (`core/src/maintain/retain.rs`). But files staged during the jump carry the future time, which raises that anchor | sim `clock_steps_back_10s`; oracle `RetentionTooEager` judges against the simulator's own clock, so it shares the premise. Early deletion by the size of a forward jump is **untested** |
+| Steps back | In | Engine time keeps its value, then runs at half the wall clock's rate until the wall clock catches up, after twice the step; each step back is reported once (RUN-19). Timers slow down for that window and never stop. Stamps stay on the wall clock, never below its highest reading | sim `clock_steps_back_10s`, `clock_steps_back_an_hour_mid_retry`; core `a_backward_clock_step_does_not_freeze_a_retry_wait`, `clock_back_clamped_once` |
+| Steps forward | In for retention, out for as-of | Believed. Retention ages are measured from `min(now, newest created-at in the listing)`, so one bad reading deletes nothing the replica's own newest time would not (`core/src/maintain/retain.rs`). But files staged during the jump carry the future time, which raises that anchor | sim `clock_jumps_forward_an_hour` (no fault, every acknowledged commit restores); oracle `RetentionTooEager` judges against the simulator's own clock, so it shares the premise. Early deletion by the size of a forward jump is **untested** |
 | The store's clock differs from the host's, as it affects retention | In, by construction | Ages never come from a listed last-modified time (`retain.rs`) | core `last_modified_matched_only_in_allowed_sites` |
 
 ### The object store
@@ -286,20 +286,20 @@ The simulator can inject exactly these: `Op` (commit, spill, vacuum, shrink, oth
 | A commit that fails after the object became visible | In | UP-6 | sim `commit_fails_after_publish` |
 | The store acknowledges other bytes than were sent | In | UP-7, UP-8 | sim `size_mismatch_on_commit`, `etag_mismatch_on_put` |
 | An object rots in the bucket | In, for the files the engine reads | BOOT-14, MAINT-3, MAINT-4, REST-5 | sim `remote_bitrot_on_list_read`, `corrupt_l0..l9_publish_then_power_loss` |
-| Credentials revoked | In | UP-4 | sim `creds_revoked_mid_run` |
+| Credentials revoked, a policy refusing, a missing bucket, a failed TLS check | In | UP-4 | sim `creds_revoked_mid_run`, `permission_revoked_mid_run`, `bucket_deleted_mid_run`, `tls_fails_mid_run` |
 | Objects deleted by someone else (an operator, a lifecycle rule) | In for the newest files, partly for the middle | UP-11, UP-12, MAINT-11 | sim `remote_file_deleted_externally`, `bucket_rolled_back` |
 | Bucket rolled back to an earlier version | Partly while running (seen only at an uploader listing). **known wrong** across a restart | UP-11, BOOT-19 | sim `Op::Remote(RollBack)` |
 | A second writer on the same prefix | In, detected late | UP-10, UP-14, BOOT-22 | sim `second_writer_mid_run`, `maintenance_stops_on_another_writer_seed_0x50c` |
 | Listings that lag the bucket | **Not modelled on main** | Trusted (BOOT-18, MAINT-12) | The lag law exists on #96 only. A consistency probe exists on #96 (`consistency_probe`); no result is in the repository |
 | Multipart quirks: 200 with an error body, a retried Complete answered `NoSuchUpload`, ETags not in MD5 form | Partly | UP-13 | store-s3 fault transport. Fixed on #96 |
 | Versioned buckets | **Gap.** Standard for backup buckets | A delete leaves a noncurrent version and a delete marker; the engine sees the key as gone, which is what it expects. A version restore by an operator is a rollback (BOOT-19, UP-11). Storage is not reclaimed by retention. All by reasoning | None. **unknown** (WORLD-24) |
-| Object lock, or a policy that denies delete | **Gap** | Retention deletes fail with 403 for good, reported as `credentials` on the maintenance task (WORLD-23) | None. **untested** |
-| Objects moved to an archive tier, or under a disabled KMS key | **Gap** | Reads fail with 403, reported as `credentials` (WORLD-22) | None. **untested** |
+| Object lock, or a policy that denies delete | **Gap** | Retention deletes fail for good, reported as `permission_denied` on the maintenance task (WORLD-23) | store-s3 `a_delete_refused_for_one_key_is_a_permission_denial` (the class only). **untested** in the engine |
+| Objects moved to an archive tier, or under a disabled KMS key | **Gap** | An archived object is `store_refused`; a KMS failure goes by status (WORLD-22) | store-s3 `classify_denials_by_what_to_fix` (the archive class only). **untested** in the engine |
 | AWS S3 | **Gap.** S3 is what the product is for; "never run" is not an exclusion | The S3 client is exercised against MinIO in CI and Tigris by hand (one 12-hour soak). Behaviour on AWS itself is **unknown** | None |
 | Cloudflare R2 | **Gap** | A default concurrency of 2 is set for it; nothing else is known | None. **unknown** |
 | A middlebox that returns a well-formed wrong body (captive portal, caching proxy) | **Gap** | A wrong body fails LTX decode, so a read is treated as a rotten object. MAINT-4 deletes a covered object after two failed reads; two reads through one bad proxy are not independent (WORLD-25) | None. **untested** |
 | The endpoint resolves to a different, empty store; DNS failure | **Gap** | DNS failure is a transient error (UP-2). An empty store at boot looks like a new replica with staging kept (WORLD-11) | None. **untested** |
-| Host clock skewed against the store | **Gap** | `RequestTimeTooSkewed` is classified as `credentials` (`S3Code::is_auth`) (WORLD-15) | None. **untested** |
+| Host clock skewed against the store | In, for one refusal | `RequestTimeTooSkewed` is `clock_skew` (WORLD-15) | sim `clock_skewed_against_the_store_mid_run` |
 | Store quota exhausted; cross-region replication failover | **Gap** | **unknown** | None |
 
 ---
@@ -314,11 +314,11 @@ Five tasks keep separate retry waits and degraded states: sync, checkpoint, uplo
 
 | Signal | Where | Meaning |
 |---|---|---|
-| `Health.degraded[task]`, `/healthz` `degraded[]`, `lsr_degraded{task,cause}` | `replica/src/health.rs`, `sidecar/src/health.rs` | A persistent cause the task keeps retrying. Cause names: `credentials`, `store_refused`, `remote_corrupt`, `other_writer`, `remote_regressed`, `wal_corrupt`, `wal_truncated`, `wal_unlinked`, `wal_sync_failed`, `page_size_changed`, `database_page_mismatch`, `bug`; and for a stall (a retried fault that failed 8 times in a row), the fault's name: `store_transient`, `store_throttled`, `remote_object_missing`, `upload_ambiguous`, `upload_checksum_mismatch`, `staged_lost`, `local_disk_full`, `local_io`, `local_fsync_failed`, `sqlite_busy`, `readers_held`, `wal_moved`, `wal_index_inconsistent`, `wal_changed_under_read`, `nothing_to_snapshot`, `read_tx_lost` (`cause_name`, `stall_name` in `sidecar/src/health.rs`) |
+| `Health.degraded[task]`, `/healthz` `degraded[]`, `lsr_degraded{task,cause}` | `replica/src/health.rs`, `sidecar/src/health.rs` | A persistent cause the task keeps retrying. Cause names: `credentials`, `permission_denied`, `clock_skew`, `bucket_missing`, `tls`, `store_refused`, `remote_corrupt`, `other_writer`, `remote_regressed`, `wal_corrupt`, `wal_truncated`, `wal_unlinked`, `wal_sync_failed`, `page_size_changed`, `database_page_mismatch`, `bug`; and for a stall (a retried fault that failed 8 times in a row), the fault's name: `store_transient`, `store_throttled`, `remote_object_missing`, `upload_ambiguous`, `upload_checksum_mismatch`, `staged_lost`, `local_disk_full`, `local_io`, `local_fsync_failed`, `sqlite_busy`, `readers_held`, `wal_moved`, `wal_index_inconsistent`, `wal_changed_under_read`, `nothing_to_snapshot`, `read_tx_lost` (`cause_name`, `stall_name` in `sidecar/src/health.rs`) |
 | `Health.phase`, `lsr_db_state`, `lsr_stopped`, `/healthz` status | `sidecar/src/health.rs` | 200 while booting, running, draining, degraded or waiting for a file. 503 once any database stopped, failed to start, or lost its thread |
 | `lsr_retries_total`, log line "retrying" | `sidecar/src/logging.rs` | A fault whose policy is to retry, for its first 7 failures in a row on one task. From the 8th the task is degraded as a stall (row above) and stays so until it succeeds. No retried fault stops the engine |
 | `lsr_resnapshot_pending{cause}`, log "snapshot required", boot log `cause=` | `sidecar/src/health.rs` | The next file is a snapshot, and why |
-| `lsr_unreplicated_age_seconds`, `lsr_replicated_txid`, `lsr_wal_bytes` | `Health` in `replica/src/health.rs` | Lag and local growth. The age gauge prints 0 for "unknown" as well as for "caught up" (N1) |
+| `lsr_unreplicated_age_seconds`, `lsr_replicated_txid`, `lsr_wal_bytes` | `Health` in `replica/src/health.rs` | Lag and local growth. The age gauge is 0 only when a booted engine shows the replica caught up; before that it counts from the process's start (N1) |
 | `lsr_verify_failing`, `lsr_verify_failing_txid`, `lsr_verify_failing_page` | `replica/src/health.rs` | The scheduled verify found the replica restores something the live database never held |
 | `lsr_app_notice`, `lsr_app_checkpoints_total` | `replica/src/health.rs` | The application ran checkpoints of its own. A notice, not a failure |
 | `lsr_panics_total` | `replica/src/health.rs` | Panics caught at the thread boundary |
@@ -337,7 +337,7 @@ Every policy written "retry" below also stalls: from the 8th failure in a row on
 |---|---|---|
 | `StoreTransient` | retry | UP-2, UP-6 |
 | `StoreThrottled` | retry, waiting at least what the store named | UP-3 |
-| `StoreAuth` | persistent: `Credentials` | UP-4 |
+| `StoreDenied(Denied)` | persistent: `StoreDenied` of the same kind | UP-4, WORLD-15, WORLD-23 |
 | `RemoteObjectMissing` | retry | UP-12, MAINT-2 |
 | `UploadAmbiguous` | retry | UP-7 |
 | `UploadChecksumMismatch` | retry | UP-8 |
@@ -373,7 +373,7 @@ Every policy written "retry" below also stalls: from the 8th failure in a row on
 
 | `PersistentCause` | Default | What "keep trying" does (`action`, `fault.rs`) | Clears when |
 |---|---|---|---|
-| `Credentials` | keep trying | Retries the same step. The name covers every 401 and 403, every S3 auth code including `RequestTimeTooSkewed`, a TLS failure and `NoSuchBucket` (N4) | The step succeeds |
+| `StoreDenied(Denied)` | keep trying | Retries the same step. One response per kind: `credentials`, `permission_denied`, `clock_skew`, `bucket_missing`, `tls` | The step succeeds |
 | `StoreRefused` | keep trying | Retries the same step | The step succeeds |
 | `RemoteCorrupt` | keep trying | Retries the same step | The object verifies, or is repaired (MAINT-4) |
 | `OtherWriter` | **stop** | With `ContinueAndInterleaveHistories`: drops all engine state, boots again, and snapshots after the other writer's newest transaction | n/a under the default |
@@ -443,13 +443,13 @@ These have no enum variant. WORLD-1 to WORLD-31 came from the first review and W
 
 | WORLD-32 | Two different databases are configured onto one replica prefix | Each sees the other as another writer once a listing shows the replica ahead (UP-10); before that, unconditional PUTs overwrite (UP-14). `AlreadyReplicated` does not apply: the files differ | `other_writer`, late | As WORLD-5 | Operator |  |  |  | untested |  | #96 |
 | WORLD-33 | `lsr` is upgraded or downgraded over its own staging directory and replica | Nothing versions the staging directory or the files beyond the LTX format. An older build reads what a newer one wrote only if the format and the witness rules did not change | none | **unknown** | **unknown** |  |  |  | unknown | The Go handover rows cover Go. Nothing tests this port against its own earlier commits |  |
-| WORLD-34 | A slow store: no errors, uploads slower than the write rate, or bodies that trickle inside the 60 s deadline | Staging grows. Past 4096 pending files the next file gets no token and costs a snapshot (RUN-18) | none until RUN-18 | Lag without bound; then restore points from the 4097th pending file | Automatic at the cost of a snapshot |  |  |  | untested |  |  |
+| WORLD-34 | A slow store: no errors, uploads slower than the write rate, or bodies that trickle inside the 60 s deadline | Staging grows to the witness cap, then holds; the WAL grows instead (RUN-18) | none | Lag without bound. No restore point is given up | Automatic once the store keeps up |  |  |  | untested |  |  |
 | WORLD-35 | The store returns the old bytes for a GET after an overwrite | BOOT-16 and UP-8 overwrite a key and later read it back. A stale read would compare the staged file with the old object. Guess: the tail is judged torn or diverged again | **unknown** | **unknown** | **unknown** |  |  |  | unknown | A5 does not cover staleness |  |
 | WORLD-36 | The restore target is on a filesystem with no hard links | Publish fails at the link step with nothing at the target (`NotVisible`) | exit 3 | None. The restore cannot complete there | Restore elsewhere | local::`each_failed_step_says_whether_the_target_is_visible` |  |  |  | The test injects the failing step; no linkless filesystem is used |  |
 | WORLD-37 | An application write transaction stays open for minutes | The engine cannot take its write barrier: checkpoints report busy (CKPT-2), the WAL grows. Sync and upload of committed frames go on | `lsr_checkpoints_busy_total` | None to the replica. WAL growth | The transaction ends | sim::`busy_on_barrier` |  | sim::`busy_on_barrier` |  | One injected busy, then recovery. A writer held for minutes is untested |  |
 | WORLD-38 | SQLite variants: SQLCipher, a non-default VFS, WAL2 | The engine reads WAL frames and database pages as bytes and checks SQLite's WAL checksums. A VFS without shared memory is refused at start (CFG-4). Encrypted pages would replicate as ciphertext. WAL2 has two WAL files and is not supported | start refusal, or none | **unknown** | n/a |  |  |  | unknown |  |  |
 | WORLD-39 | A multi-object delete succeeds for some keys and fails for others | The job fails; the next plan is made from a new listing. Any subset of a job is as safe as the whole (G5) | by fault | None | Automatic |  |  |  | code only | The partial-result path in the S3 store was not read |  |
-| WORLD-40 | The store's quota is exhausted; a cross-region replica is failed over | Quota: uploads are refused, as UP-5 or UP-4 by status code. Failover: an older or lagging copy of the bucket, as BOOT-18 or BOOT-19 | `store_refused` or `credentials`; none for failover | As those rows | Operator |  |  |  | unknown |  |  |
+| WORLD-40 | The store's quota is exhausted; a cross-region replica is failed over | Quota: uploads are refused, as UP-5 or UP-4 by status code. Failover: an older or lagging copy of the bucket, as BOOT-18 or BOOT-19 | `store_refused`, or `permission_denied` for a 403; none for failover | As those rows | Operator |  |  |  | unknown |  |  |
 ---
 
 ## 4. Snapshot causes
@@ -464,7 +464,7 @@ Every `SnapshotCause` variant (`core/src/fault.rs`). A snapshot reads every page
 |---|---|---|---|---|---|
 | `FirstSync` | No staged file and no replica level-0 file to continue from | There is nothing to build on | Yes | None | BOOT-1 |
 | `BehindRemote` | At boot, the replica's newest transaction is above the newest staged file's | The staged position is older than the replica | The doubt is real; the full upload is not needed | Read the replica's newest level-0 file and compare it with the live WAL, as boot already does when staging is empty. One small GET | BOOT-6, BOOT-22 |
-| `NewestStagedFileUnreadable` | A staged file failed verification twice, or diverged from the replica's object, or had no witness token | The chain from the replica to the WAL has a hole in staging | Sometimes. After a drop at boot the WAL often still holds the dropped range and recovery says continue, yet the snapshot is taken anyway (`actor.rs`) | Regenerate the dropped files from the WAL when recovery continues. The witness-cap case (RUN-18) needs no snapshot at all | BOOT-5, BOOT-13, RUN-16, RUN-17, RUN-18 |
+| `NewestStagedFileUnreadable` | A staged file failed verification twice, or diverged from the replica's object, or had no witness token (boot refuses no more than the cap: RUN-18 holds the position instead) | The chain from the replica to the WAL has a hole in staging | After a divergence, yes. After a drop for verification it is taken only when recovery cannot continue from the newest file left (BOOT-5); mid-run (RUN-16) it is always taken, since a checkpoint may have removed the dropped frames and nothing judges that before the drop | Mid-run, judge the WAL against the newest file left before dropping, as boot does. The boot drop and the witness-cap case (RUN-18) no longer snapshot | BOOT-5, BOOT-13, RUN-16, RUN-17 |
 | `WalMissing` | No WAL file, or a torn header | Commits after the position may have been checkpointed and are in no WAL | Yes. Not needed in one common case: a database just restored from this replica, which is snapshotted in full right after being downloaded | Compare the database's pages with per-page digests of the replica's tip and ship only the pages that differ. Needs local state that survives restarts | BOOT-7, RUN-9 |
 | `GenerationChanged` | At boot, any salt change. Running, a restart that the read lock and `salt1 + 1` do not prove, or frames abandoned after the position | Commits written after the position and overwritten by the restart are in no WAL | The doubt is real in the sidecar case. Not when the crash fell between the engine's own checkpoint and its first file of the new generation | The page-digest compare above. This is the cause behind the measured crash-loop storm (BOOT-20) | BOOT-8, RUN-8, RUN-10 |
 | `PrevFrameMismatch` | The frame before the position is not a commit frame, or the position is mid-transaction | The WAL is not the one the staged file came from | Yes | Page-digest compare | BOOT-10 |
@@ -491,7 +491,7 @@ Under the default responses only two causes stop the engine: `OtherWriter` and `
 |---|---|---|---|
 | `OtherWriter` | **Yes** | Two writers on one prefix give one transaction id two contents, and each one's retention can delete the other's files. Continuing would damage a history this engine does not own | Find the other replicator. Stop one. If the other's files should go, remove them. Restart. Note BOOT-22: a restart alone, with the other writer's files still there, continues above them |
 | `Shutdown` | **Yes**, not configurable | A drain's deadline passed. The caller asked for an end | Nothing. The next start replicates what was left; the stop reported how much |
-| `Credentials` | No | Not unsafe. Stopping makes an access failure loud for an orchestrator | Fix the credentials, the bucket name or the TLS trust; restart |
+| `StoreDenied(Denied)` | No | Not unsafe. Stopping makes an access failure loud for an orchestrator | Fix what the kind names (the keys, the policy, the host clock, the bucket name, the TLS trust); restart |
 | `StoreRefused` | No | Not unsafe | Read the status in the log; fix the request's cause; restart |
 | `RemoteCorrupt` | No | Building on a corrupt object would make files that depend on it | Remove or replace the object named in the log; restart. A snapshot follows if the chain is broken |
 | `RemoteRegressed` | No | The replica lost files it had acknowledged. Continuing accepts that loss and may reuse the vacated range | Decide whether the rollback was intended. Restart to continue from what the replica holds |
@@ -529,20 +529,20 @@ Three other ways replication ends that are not a `StopCause`:
 | D9 | **Confirmed by review.** Retry counts, waits, degraded states and stops reset on restart. The one stop the engine makes by default, `OtherWriter`, is undone by the default supervisor action: `boot_listing` names no newest staged file, so `recover_traced` returns `BehindRemote` for a boot and `Stop(OtherWriter)` only for a running position. The stop must be durable, or the boot must refuse | BOOT-21, BOOT-22 | Recorded as G3 in `docs/proposals/beyond-go.md`; issue #99. No branch |
 | D10 | A commit is dated by when it was staged. After an outage, a restore as of an instant inside the outage leaves out commits made before that instant. The contract "what the replica held at t" is not stated anywhere a user reads | G3 | None. None |
 | D12 | **Closed by #104.** A fault whose policy is a plain retry never became a degraded state. Now each degrades its task as `Stalled(<fault>)` at the 8th failure in a row, and a failed WAL fsync is its own persistent cause, `WalSyncFailed` | RUN-3, RUN-13, RUN-14, CKPT-3 | Merged |
-| D13 | Past 4096 pending files a staged file gets no token and is certain to be refused, which costs a snapshot and every restore point from there on | RUN-18 | None. Issue #99 |
-| D14 | A boot that drops an unreadable staged file snapshots even when the WAL could regenerate it | BOOT-5 | None. Issue #99 |
+| D13 | **Closed.** Past 4096 pending files a staged file got no token and was certain to be refused, which cost a snapshot and every restore point from there on. The engine now holds its position at the cap, and boot witnesses no more than the cap and stages the rest again from the WAL | RUN-18 | Closed |
+| D14 | **Closed.** A boot that dropped an unreadable staged file snapshotted even when the WAL could regenerate it. It now continues when recovery does. The running twin (RUN-16) still snapshots | BOOT-5 | Closed |
 | D15 | A staged snapshot of a rewound database is deleted by the next boot if the process died before uploading it, and taken again | BOOT-9 | #89 |
-| D16 | **Confirmed by review.** A missing bucket and a TLS failure are reported as `credentials`. Wider than first reported: see N4 | UP-4 | Issue #99 |
+| D16 | **Closed.** A missing bucket and a TLS failure were reported as `credentials`. Each is now its own kind (N4) | UP-4 | Closed |
 | D17 | **Confirmed by review.** A bucket rolled back while the engine runs is recognised as `remote_regressed` only if an ambiguous commit makes the uploader list. Otherwise the engine uploads above the hole and the only signal is a retention hold | UP-11, G2 | Issue #99 |
 
 ### Defects found by the review of version 1
 
 | # | Defect | Basis | Rows | Tracking |
 |---|---|---|---|---|
-| N1 | `lsr_unreplicated_age_seconds` reads 0 until the first boot of a process completes, and restarts from "now" after every restart. `Progress::advance` runs only for a booted engine; `unreplicated_since` starts `None`; the gauge prints 0 for `None`. A process that starts with the store unreachable shows `/healthz` 200, no degraded cause (D12) and zero lag while replicating nothing. A crash loop understates lag | Read in `replica/src/thread.rs` and `sidecar/src/metrics.rs`, not run | G4 | Issue #99 |
-| N2 | A backward clock step holds every timer for the size of the step: `Actor::clock` returns the old reading while the clock is behind, and retry waits, the checkpoint interval, compaction windows and retention all use it | Read in `Actor::clock`. The freeze is inferred, not observed | RUN-19, WORLD-14 | Issue #99 |
+| N1 | **Half closed.** `lsr_unreplicated_age_seconds` read 0 until the first boot of a process completed; it now counts from the start of any wait no booted engine vouches for (`Progress::unproven`, `replica/src/thread.rs`). Open: it restarts from the process's start after every restart, so a crash loop understates lag | replica `the_lag_counts_from_the_start_while_the_first_boot_fails`; plant `lag-zero-before-boot`. The restart half is read in the code, not run | G4, G7 | Issue #99 for the restart half |
+| N2 | **Closed.** A backward clock step held every timer for the size of the step: `Actor::clock` returned the old reading while the clock was behind. Observed before the fix (a one-second retry asked to wake an hour later after an hour's step back). Engine time now slews (`actor/clock.rs`) | core `a_backward_clock_step_does_not_freeze_a_retry_wait`, sim `clock_steps_back_an_hour_mid_retry`; plants `clock-step-back-freezes-timers`, `clock-step-back-freezes-timers-sim` | RUN-19, WORLD-14 | Closed. The thread's rebuild wait and the scheduled verify's due time remain (WORLD-14) |
 | N3 | No cross-process exclusion on the staging directory, and the `OtherWriter` detector is probably blind when two writers share it | No lock found by search. Consequence inferred | WORLD-1, A4 | Issue #99 |
-| N4 | The `credentials` cause absorbs every 401 and 403, every S3 auth code including `RequestTimeTooSkewed`, a TLS failure and `NoSuchBucket`: bad keys, clock skew, an archive-tier object, a KMS failure, an object-lock refusal of one delete, a missing bucket. One name, at least six different operator actions | Read in `classify` and `S3Code::is_auth` | UP-4, WORLD-15, WORLD-22, WORLD-23 | Issue #99 |
+| N4 | **Closed.** The `credentials` cause absorbed every 401 and 403, every S3 auth code including `RequestTimeTooSkewed`, a TLS failure and `NoSuchBucket`. Now five kinds (`StoreDenied`), an archived object is `store_refused`, and a batch delete refusing a key is `permission_denied` instead of transient. KMS codes are still classified by status | store-s3 `classify_denials_by_what_to_fix`; plant `denial-classes` | UP-4, WORLD-15, WORLD-22, WORLD-23 | Closed |
 
 ### Defects found by restores judged during a fault
 
