@@ -12,7 +12,7 @@
 //! 2. It is raised as [`StopCause::DatabaseAheadOfWal`] through the configured response: a stop
 //!    under `STRICT`, else the sync task degraded until the cure's next step succeeds.
 //! 3. It keeps the newest staged transaction at the check, the state before the damage,
-//!    restorable for [`KEPT_FOR`] from when it was made, and reports it ([`Actor::ahead`]) for as
+//!    restorable for [`AHEAD_KEPT_FOR`] from when it was made, and reports it ([`Actor::ahead`]) for as
 //!    long. Then the restore point goes back to normal retention. No operator action ends or
 //!    extends it, and a verdict already recorded is not raised again at a later boot.
 //!
@@ -34,7 +34,7 @@ use crate::store::ObjectStore;
 /// How long a verdict keeps the state before the damage restorable: long enough for an operator
 /// to notice the log line over a weekend and a few working days. The kept chain is about one
 /// copy of the database and does not grow.
-pub const KEPT_FOR: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+pub const AHEAD_KEPT_FOR: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// Whether the next sync step owes the check.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -156,5 +156,5 @@ impl Actor {
 /// When a verdict's restore point goes back to normal retention.
 #[must_use]
 pub fn kept_until(ahead: Ahead) -> Timestamp {
-    ahead.made.saturating_add(KEPT_FOR)
+    ahead.made.saturating_add(AHEAD_KEPT_FOR)
 }

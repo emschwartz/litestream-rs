@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use lsr_config::{LogFormat, LogLevel};
 use lsr_core::{Clock, Event as EngineEvent};
-use lsr_replica::{Event, EventSink, Txid, VerifyOutcome};
+use lsr_replica::{DegradedCause, Event, EventSink, Txid, VerifyOutcome};
 
 use crate::json::string as json_string;
 
@@ -360,6 +360,19 @@ fn engine_line(event: &EngineEvent) -> Option<Line> {
             LogLevel::Debug,
             "maintenance",
             vec![("event", debug(event))],
+        ),
+        EngineEvent::Degraded {
+            cause: DegradedCause::DatabaseAheadOfWal { pages, first },
+            until,
+            ..
+        } => (
+            LogLevel::Error,
+            "database file holds pages from commits its WAL lost after a failed WAL sync; replicating it as served; the state before it stays restorable",
+            vec![
+                ("pages", u64::from(pages.get()).into()),
+                ("first_page", u64::from(first.get()).into()),
+                ("retry_at", until.to_string().into()),
+            ],
         ),
         EngineEvent::Degraded {
             task, cause, until, ..

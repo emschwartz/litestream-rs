@@ -52,7 +52,7 @@ use lsr_store_fs::{FsJournalFile, FsStore};
 use crate::config::Config;
 use crate::events::{Event, EventSink};
 use crate::exec::block_on;
-use crate::health::{Counters, FailStop, Gone, Phase, Stopped};
+use crate::health::{AheadOfWal, Counters, FailStop, Gone, Phase, Stopped};
 use crate::readers::Guarded;
 use crate::replicator::Shared;
 use crate::runtime::{Runtime, later};
@@ -647,6 +647,7 @@ impl Worker {
     fn publish(&self, parts: &SnapshotParts) {
         let resnapshot = self.actor.pending_snapshot();
         let journal = self.actor.journal();
+        let ahead_of_wal = self.actor.ahead().map(AheadOfWal::of);
         let snapshots = self.actor.snapshots();
         let ran = self.app_ran_total();
         let app = self.app_total();
@@ -682,6 +683,7 @@ impl Worker {
             };
             health.verification = verification;
             health.journal = journal;
+            health.ahead_of_wal = ahead_of_wal;
             state.left = parts.left;
         });
     }

@@ -86,6 +86,7 @@ use std::time::Duration;
 use lsr_ltx::{PageSize, Timestamp, Txid, TxidRange};
 use lsr_wal::{CommittedEnd, OpenError, WalReader};
 
+pub use ahead::AHEAD_KEPT_FOR;
 use clock::EngineClock;
 use parts::{Course, Engine, Kept, Stop, Tail, TaskRestorePoint};
 pub use state::{Degraded, Phase, Task};

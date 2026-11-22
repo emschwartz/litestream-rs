@@ -60,7 +60,8 @@ mod verify;
 mod witness;
 
 pub use actor::{
-    Actor, ActorConfig, Degraded, Env, Event, MaintainedEvent, Phase, Task, Tick, Unfinished,
+    AHEAD_KEPT_FOR, Actor, ActorConfig, Degraded, Env, Event, MaintainedEvent, Phase, Task, Tick,
+    Unfinished,
 };
 pub use app::{
     AppCheckpoint, AppCheckpointObserver, AppCheckpoints, SQLITE_AUTOCHECKPOINT, Watch, observe,
@@ -94,6 +95,8 @@ pub use layout::{
     CreatedAt, CreatedAtSource, Dating, FileInfo, FileKey, Level, ListedTime, NonZeroCreatedAt,
     ParseKeyError, RangeSide, Stamp, cmp_range, file_name, is_scratch_name, parse_file_name,
 };
+/// The ahead-of-WAL verdict [`Actor::ahead`] returns.
+pub use lsr_journal::Ahead;
 pub use maintain::{
     CompactJob, ConfigError, DeleteJob, Due, Interval, IntervalError, Job, JobError, L0Retention,
     MAX_DELETE, MaintainError, MaintainState, Maintenance, Outcome, RetentionHold, RetentionMode,
