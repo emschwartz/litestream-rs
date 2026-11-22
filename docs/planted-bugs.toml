@@ -1286,3 +1286,21 @@ fix = "6f700f9a"
 package = "lsr-cli"
 test_bin = "cli"
 tests = ["sidecar::a_deleted_journal_is_reported_on_the_next_start"]
+
+# witness-extra-page against the simulator: the swarm missed it in the blind-plant pilot (issue
+# #127), since no simulator op gave a staged file a page more, until `MetaOp::GrowNewest`.
+[[bug]]
+name = "witness-extra-page-sim"
+fix = "plant"
+package = "lsr-sim"
+patch = "witness-extra-page"
+tests = ["blind_plants::a_staged_file_given_a_page_more_while_down_is_never_uploaded"]
+
+# witness-trailer-compare against the simulator: a running engine's upload compares the staged
+# file's trailer with the one it wrote, which refuses a file given a page more under it.
+[[bug]]
+name = "witness-trailer-compare-sim"
+fix = "39ac68b"
+package = "lsr-sim"
+patch = "witness-trailer-compare"
+tests = ["blind_plants::a_staged_file_given_a_page_more_while_running_is_never_uploaded"]

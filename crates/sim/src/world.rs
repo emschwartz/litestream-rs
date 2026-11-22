@@ -85,31 +85,52 @@ fn without_origin(bytes: &[u8]) -> Option<Vec<u8>> {
 
 /// The same pages under a header `edit` changed.
 fn rewritten(bytes: &[u8], edit: impl FnOnce(&mut lsr_ltx::HeaderFields)) -> Option<Vec<u8>> {
-    reencoded(bytes, edit, |_| {})
+    reencoded(bytes, edit, |_, _| Some(()))
 }
 
 /// The same file, header and all, with every byte of its first page
 /// inverted: a whole, valid file that holds what no commit held.
 fn forged(bytes: &[u8]) -> Option<Vec<u8>> {
-    let mut first = true;
     reencoded(
         bytes,
         |_| {},
-        |data| {
-            if first {
+        |_, pages| {
+            if let Some((_, data)) = pages.first_mut() {
                 data.iter_mut().for_each(|byte| *byte = !*byte);
-                first = false;
             }
+            Some(())
         },
     )
 }
 
-/// The file re-encoded, with its header through `edit` and each page's
-/// bytes, in order, through `page`.
+/// The same file, header and trailer, with one page more: the lowest page
+/// at or below the header's commit that it does not hold, carrying its first
+/// page's bytes inverted. A whole file that decodes, holding a page no
+/// commit of its range wrote; `None` when every such page is present.
+fn grown(bytes: &[u8]) -> Option<Vec<u8>> {
+    reencoded(
+        bytes,
+        |_| {},
+        |fields, pages| {
+            let held: BTreeSet<u32> = pages.iter().map(|(pgno, _)| pgno.get()).collect();
+            let extra = (1..=fields.commit)
+                .filter(|raw| !held.contains(raw))
+                .find_map(|raw| PageNo::new(raw, fields.page_size))?;
+            let mut data = pages.first()?.1.clone();
+            data.iter_mut().for_each(|byte| *byte = !*byte);
+            let at = pages.partition_point(|(pgno, _)| *pgno < extra);
+            pages.insert(at, (extra, data));
+            Some(())
+        },
+    )
+}
+
+/// The file re-encoded, with its header through `edit` and its pages, in
+/// order, through `pages_edit` (`None` from it: no file).
 fn reencoded(
     bytes: &[u8],
     edit: impl FnOnce(&mut lsr_ltx::HeaderFields),
-    mut page: impl FnMut(&mut Vec<u8>),
+    pages_edit: impl FnOnce(&lsr_ltx::HeaderFields, &mut Vec<(PageNo, Vec<u8>)>) -> Option<()>,
 ) -> Option<Vec<u8>> {
     use lsr_ltx::{Decoder, Encoder, Event, Header};
     let mut decoder = Decoder::new();
@@ -131,9 +152,9 @@ fn reencoded(
     let verified = decoder.finish().ok()?;
     let mut fields = header?.fields();
     edit(&mut fields);
+    pages_edit(&fields, &mut pages)?;
     let mut encoder = Encoder::new(Vec::new(), Header::new(fields).ok()?).ok()?;
-    for (pgno, data) in &mut pages {
-        page(data);
+    for (pgno, data) in &pages {
         encoder.write_page(*pgno, data).ok()?;
     }
     let (out, _) = encoder.finish(verified.trailer().post_apply()).ok()?;
@@ -989,9 +1010,26 @@ impl World {
     /// # Errors
     /// As [`Self::edit_newest_staged`].
     pub fn forge_newest_staged(&self) -> Result<bool, StagedEditError> {
+        self.replace_newest_staged(forged)
+    }
+
+    /// Rewrites the newest level-0 file as a whole, valid file under the same
+    /// key and header with one page more ([`grown`]); false when there is
+    /// none, it does not decode, or it already holds every page.
+    ///
+    /// # Errors
+    /// As [`Self::edit_newest_staged`].
+    pub fn grow_newest_staged(&self) -> Result<bool, StagedEditError> {
+        self.replace_newest_staged(grown)
+    }
+
+    fn replace_newest_staged(
+        &self,
+        with: fn(&[u8]) -> Option<Vec<u8>>,
+    ) -> Result<bool, StagedEditError> {
         let mut done = false;
         let found = self.edit_newest_staged(|bytes| {
-            if let Some(other) = forged(bytes) {
+            if let Some(other) = with(bytes) {
                 *bytes = other;
                 done = true;
             }

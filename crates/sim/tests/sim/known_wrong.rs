@@ -61,6 +61,8 @@ fn a_restart_after_a_failed_wal_sync_owes_the_truncate_seed_0xf() {
     let seed = Seed::new(0xf);
     let mut weights = Weights::mixed(seed);
     weights.known_wrong = true;
+    // Drawn after this seed was found; a zero weight leaves every other step as it was.
+    weights.staging_grow = 0;
     let ops = history(seed, STEPS, &weights);
     assert_eq!(
         digest(&format!("{ops:?}")),
@@ -81,6 +83,8 @@ fn compaction_takes_a_staging_denial_as_staging_seed_0xb9e() {
     let seed = Seed::new(0xb9e);
     let mut weights = Weights::mixed(seed);
     weights.known_wrong = true;
+    // Drawn after this seed was found; a zero weight leaves every other step as it was.
+    weights.staging_grow = 0;
     let ops = history(seed, STEPS, &weights);
     assert_eq!(
         digest(&format!("{ops:?}")),

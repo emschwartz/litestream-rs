@@ -255,6 +255,10 @@ pub enum MetaOp {
     /// the same key and header, with page bytes changed: a file replaced by
     /// one that verifies, which only a witness bound to its bytes refuses.
     ForgeNewest,
+    /// Rewrites the newest level-0 file as a whole, valid file under the
+    /// same key and header with one page more, a page its range never wrote:
+    /// only a witness that counts the file's pages refuses it.
+    GrowNewest,
 }
 
 /// A step on the replica from outside the engine. Scenarios only.
@@ -348,6 +352,10 @@ pub struct Weights {
     /// [`MetaOp::ForgeNewest`]), and [`Op::StagingDamage`] with
     /// [`MetaOp::ForgeNewest`].
     pub staging_replace_running: u32,
+    /// [`Op::Meta`] and [`Op::StagingDamage`] with [`MetaOp::GrowNewest`],
+    /// half each: a staged file given a page more under a running engine, or
+    /// while it is down.
+    pub staging_grow: u32,
     /// The chance in a thousand that a step is an [`Op::Hold`] instead of
     /// what the history drew there. Not a weight: holds come from a stream of
     /// their own and replace the drawn step, so a run that draws no hold is
@@ -474,6 +482,9 @@ impl Default for Weights {
             // shape; swarm mixes draw it.
             staging_replace_running: 0,
             // Off in the default mix so its recorded histories keep their
+            // shape; swarm mixes draw it.
+            staging_grow: 0,
+            // Off in the default mix so its recorded histories keep their
             // shape; swarm mixes draw it, and `tests/sim/survival.rs` turns
             // it on.
             hold: 0,
@@ -517,10 +528,11 @@ enum Kind {
     StagingDamage,
     Heal,
     StagingReplaceRunning,
+    StagingGrow,
 }
 
 impl Weights {
-    fn table(&self) -> [(Kind, u32); 23] {
+    fn table(&self) -> [(Kind, u32); 24] {
         [
             (Kind::Tick, self.tick),
             (Kind::Commit, self.commit),
@@ -545,6 +557,7 @@ impl Weights {
             (Kind::StagingDamage, self.staging_damage),
             (Kind::Heal, self.heal),
             (Kind::StagingReplaceRunning, self.staging_replace_running),
+            (Kind::StagingGrow, self.staging_grow),
         ]
     }
 
@@ -609,6 +622,7 @@ impl Weights {
             staging_damage: weight(false),
             heal: weight(false),
             staging_replace_running: 0,
+            staging_grow: 0,
             hold: 0,
             vacuum_resizes: below(&entropy, 2) == 0,
             block_crash_law: false,
@@ -660,6 +674,8 @@ impl Weights {
         mix.error_domain = below(&entropy, 2) == 0;
         // Drawn after that, for the same reason: half each.
         mix.overlap = below(&entropy, 2) == 0;
+        // And after that, for the same reason.
+        mix.staging_grow = weight(false);
         mix
     }
 
@@ -957,6 +973,13 @@ fn draw(weights: &Weights, entropy: &SeededEntropy) -> Op {
         Kind::StagingDamage => staging_damage(entropy),
         Kind::Heal => Op::Heal,
         Kind::StagingReplaceRunning => staging_replace_running(entropy),
+        Kind::StagingGrow => {
+            if below(entropy, 2) == 0 {
+                Op::Meta(MetaOp::GrowNewest)
+            } else {
+                Op::StagingDamage(MetaOp::GrowNewest)
+            }
+        }
     }
 }
 

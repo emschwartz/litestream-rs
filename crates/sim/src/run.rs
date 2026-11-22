@@ -1735,6 +1735,7 @@ impl Runner {
                 bytes.truncate(half);
             }),
             MetaOp::ForgeNewest => w.forge_newest_staged(),
+            MetaOp::GrowNewest => w.grow_newest_staged(),
         };
         self.step_done(&format!("{op:?}"), done)
     }

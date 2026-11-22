@@ -152,6 +152,8 @@ fn the_second_frozen_generator_draws_what_the_live_one_drew() {
         // only which error a fault draws.
         weights.hold = 0;
         weights.error_domain = false;
+        // A staged file given a page more came later still, as a weight of its own.
+        weights.staging_grow = 0;
         let live = history(seed(n), 300, &weights);
         assert_eq!(
             frozen_history(seed(n), 300, Generator::V2),

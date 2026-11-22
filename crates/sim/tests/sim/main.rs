@@ -6,6 +6,8 @@
 #[cfg(test)]
 mod after_restart;
 #[cfg(test)]
+mod blind_plants;
+#[cfg(test)]
 mod clock_reads;
 #[cfg(test)]
 mod crash_law;
