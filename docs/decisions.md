@@ -38,7 +38,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D28 | How does the simulator's clock move inside a tick? | A frozen law per run, drawn last in the swarm mix; the default mix keeps one reading per tick | Claude (checker-holes), **delegated** | 2026-11-22 | open to owner review |
 | D29 | Where do the behaviour table's rows live? | `docs/behavior.toml`, rendered into `docs/BEHAVIOR.md` | parent session's request; layout by Claude (checker-holes) | 2026-11-22 | decided |
 | D30 | How is Toxiproxy provided to the tests? | Built from source with `go install` at a pinned version | Claude (checker-holes), **delegated** | 2026-11-22 | open to owner review |
-| D31 | When may the simulator accept a task still stalled at the end of a run? | Only while the world still imposes the stall's fault; the excuse table is empty today | Claude (stall-liveness), **delegated** | 2026-11-22 | open to owner review |
+| D35 | When may the simulator accept a task still stalled at the end of a run? | Only while the world still imposes the stall's fault; the excuse table is empty today | Claude (stall-liveness), **delegated** | 2026-11-22 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -314,7 +314,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Revisit if:** the build breaks on a Go release.
 - **Links:** #111.
 
-## D31. A stall at the end of a run
+## D35. A stall at the end of a run
 
 - **Options:** accept any stall as a degraded state (before); fail any stall once every injected fault has healed; fail it unless the world still imposes its fault.
 - **Choice:** at the end of the final drain and after idle's settle window, a task still stalled fails the run (oracle `StuckRetrying`) unless an exhaustive table says the world still imposes that stall's fault. The table has no entry today. The run's end also heals the SQLite source failures still queued.
