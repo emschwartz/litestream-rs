@@ -960,3 +960,44 @@ mod second_writer {
         drawn(0x18efc, &ops);
     }
 }
+
+#[cfg(test)]
+mod refused_upload {
+    use lsr_core::StoreOp;
+    use lsr_sim::run::run_ops;
+    use lsr_sim::{FaultShape, Op, Opts, Seed, Target, Weights};
+
+    /// Another writer's file stands at the transaction the engine uploads
+    /// next, and the bucket refuses the engine's upload. One read of the
+    /// staged copy came back with a flipped byte, so the read-back judged the
+    /// staged copy torn and confirmed the other writer's object as the
+    /// engine's own transaction: a restore of it returned the other writer's
+    /// pages (seed 0x4ef under its swarm mix, shrunk from 23 operations).
+    #[test]
+    fn one_bad_staged_read_after_a_refusal_confirms_no_other_object_seed_0x4ef() {
+        let seed = Seed::new(0x4ef);
+        let ops = [
+            Op::CommitInTick { pages: 1 },
+            Op::CommitInTick { pages: 1 },
+            Op::Tick,
+            Op::StoreFault {
+                target: Target::Staging,
+                op: StoreOp::Read,
+                ahead: 2,
+                shape: FaultShape::FlipByteOnRead { at: 1140 },
+            },
+            Op::Shrink { pages: 1 },
+            Op::RequestSnapshot,
+            Op::SecondWriter { ticks: 7 },
+            Op::Restore,
+        ];
+        let opts = Opts {
+            drawn: true,
+            block_crash_law: Weights::swarm(seed).block_crash_law,
+            ..Opts::default()
+        };
+        if let Err(failure) = run_ops(seed, &ops, &opts) {
+            panic!("{failure}");
+        }
+    }
+}
