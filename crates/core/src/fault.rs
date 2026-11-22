@@ -272,6 +272,15 @@ pub enum SnapshotCause {
     CheckpointBoundary,
     /// An operator asked.
     OperatorRequested,
+    /// At boot, staged files the replica did not have yet were not vouched
+    /// for by the live WAL (a staging backup put back, a file replaced, or a
+    /// chain from a WAL generation that is gone), and the WAL could not
+    /// regenerate them: they were deleted unpublished, and the snapshot
+    /// holds their end state. Their restore points are given up.
+    StagedUnwitnessed {
+        /// The first transaction deleted.
+        from: Txid,
+    },
 }
 
 /// Why the engine stopped and waits for a person: a [`PersistentCause`]

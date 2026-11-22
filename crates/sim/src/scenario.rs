@@ -48,6 +48,8 @@ pub enum CauseKind {
     CheckpointBoundary,
     /// [`SnapshotCause::OperatorRequested`].
     OperatorRequested,
+    /// [`SnapshotCause::StagedUnwitnessed`].
+    StagedUnwitnessed,
 }
 
 impl From<&SnapshotCause> for CauseKind {
@@ -63,6 +65,7 @@ impl From<&SnapshotCause> for CauseKind {
             SnapshotCause::LocalRewound { .. } => Self::LocalRewound,
             SnapshotCause::CheckpointBoundary => Self::CheckpointBoundary,
             SnapshotCause::OperatorRequested => Self::OperatorRequested,
+            SnapshotCause::StagedUnwitnessed { .. } => Self::StagedUnwitnessed,
         }
     }
 }
@@ -269,6 +272,7 @@ pub fn scenario_of(cause: SnapshotCause) -> &'static [fn() -> Scenario] {
         SnapshotCause::LocalRewound { .. } => &[power_loss_wal_rewind],
         SnapshotCause::CheckpointBoundary => &[truncate_threshold_crossed],
         SnapshotCause::OperatorRequested => &[cli_snapshot],
+        SnapshotCause::StagedUnwitnessed { .. } => &[pending_from_a_gone_generation],
     }
 }
 
@@ -657,6 +661,40 @@ pub fn app_checkpoint_while_down() -> Scenario {
         "app_checkpoint_while_down",
         restarted,
         CauseKind::GenerationChanged,
+    )
+}
+
+/// A file is staged and its upload fails; the process dies, and while it is
+/// down the app checkpoints, the WAL restarts and the app commits. Neither
+/// the replica's tail nor the pending file is in the live WAL any more, so
+/// nothing vouches for the pending file: it is deleted unpublished, and the
+/// boot names it as what the snapshot replaces.
+#[must_use]
+pub fn pending_from_a_gone_generation() -> Scenario {
+    let failed_upload = Op::StoreFault {
+        target: crate::generate::Target::Remote,
+        op: lsr_core::StoreOp::Upload,
+        ahead: 0,
+        shape: crate::store::FaultShape::Error(lsr_core::StoreError::Transient {
+            op: lsr_core::StoreOp::Upload,
+            kind: std::io::ErrorKind::ConnectionReset,
+        }),
+    };
+    build(
+        "pending_from_a_gone_generation",
+        vec![
+            synced(),
+            vec![Op::Tick, failed_upload, commit(2, false), Op::Tick],
+            vec![
+                Op::Restart,
+                Op::OurReader { begin: false },
+                Op::OtherProcessCheckpoint(OtherProcessMode::Truncate),
+                commit(2, false),
+            ],
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        snapshot_after_boot(CauseKind::StagedUnwitnessed),
     )
 }
 

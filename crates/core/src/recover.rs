@@ -221,7 +221,7 @@ impl NewestStagedFile {
                 } else {
                     FrameCheck::Miss(Miss::NotACommit)
                 };
-                let range = newest_staged_file_range(wal, &origin, end, salts)?;
+                let range = wal_range(wal, origin.offset(), end, salts)?;
                 Some((wal, check, range))
             }
             None => None,
@@ -311,8 +311,8 @@ struct NewestStagedPages {
     holds_wal_pages: bool,
 }
 
-/// What the WAL holds in the newest staged file's range of frames.
-enum Range {
+/// What the WAL holds in a staged file's range of frames.
+pub(crate) enum Range {
     /// The newest version of each page, and the commit size of the range's last
     /// transaction (`None` for an empty range).
     Pages {
@@ -343,21 +343,22 @@ impl Range {
     }
 }
 
-/// Re-derives the newest staged file from the WAL frames in `[origin.offset, end)`.
+/// Re-derives a staged file from the WAL frames in `[start, end)`.
 ///
 /// Rule 9's last-page match cannot see an earlier page of the newest staged file that differs: a
 /// power loss with `synchronous=NORMAL` drops the tail, and the application commits
 /// another transaction over the same frames. Comparing the newest version of every
 /// page the range holds, and the commit size, closes that. It reads the range once,
-/// at boot, in the bounded memory of one file's page map.
-fn newest_staged_file_range<R: Read + Seek>(
+/// at boot, in the bounded memory of one file's page map. The boot witness
+/// (`crate::witness`) runs the same compare over every pending file.
+pub(crate) fn wal_range<R: Read + Seek>(
     wal: &mut WalReader<R>,
-    origin: &WalOrigin,
+    start: u64,
     end: WalOffset,
     salts: Salts,
 ) -> Result<Range, Fault> {
     let page_size = end.page_size();
-    let Some(start) = WalOffset::new(origin.offset(), page_size) else {
+    let Some(start) = WalOffset::new(start, page_size) else {
         return Ok(Range::Rewritten);
     };
     let mut cursor = match wal.resume(start, salts) {

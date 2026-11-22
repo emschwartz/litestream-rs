@@ -106,6 +106,7 @@ use crate::upload::{
     plan_upload, sweep_staged, upload_next,
 };
 use crate::verify::LivePages;
+use crate::witness::{LiveDb, Pending, Witnesses, witness_pending};
 
 /// What one tick may touch, lent for that tick only.
 #[derive(Debug)]
@@ -710,8 +711,9 @@ impl Actor {
         }
     }
 
-    /// Lists the replica, reads the newest staged file and recovers (in
-    /// that order). A failure anywhere boots again from the start.
+    /// Lists the replica, witnesses the pending staged files against the
+    /// live WAL (`crate::witness`), reads the newest staged file left and
+    /// recovers (in that order). A failure anywhere boots again from the start.
     async fn boot<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore, R: ObjectStore>(
         &mut self,
         env: &mut Env<'_, W, P, C, L, R>,
@@ -723,6 +725,11 @@ impl Actor {
         let suspect = &mut self.kept.suspect_staged;
         let (upload, lost) = match boot_listing(env.staging, env.remote, suspect).await {
             Ok(listed) => listed,
+            Err(fault) => return self.fault(Task::Sync, fault, now),
+        };
+        let witnessed = boot_witness(env, upload.confirmed()).await;
+        let Pending { tokens, refused } = match witnessed {
+            Ok(found) => found,
             Err(fault) => return self.fault(Task::Sync, fault, now),
         };
         let booted = boot_recover(env.wal, env.staging, env.remote, upload.confirmed()).await;
@@ -739,11 +746,7 @@ impl Actor {
             Recovered::Snapshot { cause, .. } => Err(cause),
             Recovered::Stop(cause) => return self.verdict(Task::Sync, cause, now),
         };
-        // A staged file that did not verify was deleted with all after it:
-        // the next file is a snapshot even when the WAL could continue.
-        let cause = lost
-            .map(|_| SnapshotCause::NewestStagedFileUnreadable)
-            .or(from.err());
+        let cause = boot_cause(lost, refused, from.err());
         let pending = pending_at_boot(self.kept.asked(), cause);
         let course = match (from, pending) {
             (Ok(position), snapshot) => Course::At {
@@ -781,6 +784,7 @@ impl Actor {
             upload,
             acknowledged: upload.confirmed(),
             checkpoint: CheckpointState::boot(now),
+            witnesses: tokens.into_iter().collect(),
             ..Engine::fresh()
         };
         self.kept.tasks.get_mut(Task::Sync).succeed();
@@ -931,6 +935,7 @@ impl Actor {
     fn set_upload(&mut self, state: UploadState) {
         self.engine.upload = state;
         self.engine.acknowledged = self.engine.acknowledged.max(state.confirmed());
+        self.engine.witnesses.confirmed(state.confirmed());
     }
 
     /// The checkpoint the policy wants now, when its task and the sync task
@@ -1203,7 +1208,10 @@ impl Actor {
                     proof: None,
                 };
             }
-            Synced::Wrote { end, txs, .. } => {
+            Synced::Wrote {
+                end, txs, witness, ..
+            } => {
+                self.engine.witnesses.insert(witness);
                 // With a cause pending, the step that wrote was the snapshot.
                 if self.pending().is_some() {
                     self.kept.snapshot_asked = false;
@@ -1293,6 +1301,9 @@ impl Actor {
     /// are uploaded from the position it left, whose transaction is the
     /// newest of them, so a fault after the seal cannot leave one behind.
     fn took(&mut self, staged: Staged) -> Position {
+        for token in staged.witnesses() {
+            self.engine.witnesses.insert(*token);
+        }
         let position = staged.position();
         let tail = self.engine.course.tail();
         self.engine.course.moved(position, tail, false);
@@ -1323,7 +1334,16 @@ impl Actor {
         let mut last = Did::Nothing;
         for _ in 0..limit {
             let plan = plan_upload(&self.engine.upload, self.staged());
-            match upload_next(self.engine.upload, env.staging, env.remote, self.staged()).await {
+            let witnesses = &self.engine.witnesses;
+            let uploaded = upload_next(
+                self.engine.upload,
+                env.staging,
+                env.remote,
+                self.staged(),
+                witnesses,
+            )
+            .await;
+            match uploaded {
                 Ok(uploaded) => {
                     self.set_upload(uploaded.state);
                     if let Did::Diverged { from, .. } = uploaded.did {
@@ -1382,6 +1402,7 @@ impl Actor {
         from: Txid,
         now: Timestamp,
     ) -> Tick {
+        self.engine.witnesses.drop_from(from);
         if let Err(fault) = drop_staged_from(env.staging, from).await {
             // The staged files from `from` on are still there, and the next
             // upload would take the one after the confirmed transaction as
@@ -1879,7 +1900,9 @@ async fn boot_listing<L: ObjectStore, R: ObjectStore>(
     // At boot a replica ahead of the local newest staged file is `recover`'s to judge (a
     // snapshot after it), not the uploader's (a stop), so the listing names no newest staged file.
     let start = UploadState::ListFirst { confirmed: None };
-    let (upload, diverged) = match upload_next(start, staging, remote, Some(Txid::MAX)).await {
+    let none = Witnesses::new();
+    let listed = upload_next(start, staging, remote, Some(Txid::MAX), &none).await;
+    let (upload, diverged) = match listed {
         Ok(Uploaded {
             state,
             did: Did::Diverged { from, .. },
@@ -1902,6 +1925,37 @@ async fn boot_listing<L: ObjectStore, R: ObjectStore>(
     };
     *suspect = None;
     Ok((upload, lost.or(diverged)))
+}
+
+/// Boot's witness pass over the pending staged files (`crate::witness`).
+/// The first file the WAL does not vouch for is deleted with every one
+/// after it, once a second pass agrees: one read never condemns a file. Two
+/// passes that disagree retry the boot.
+async fn boot_witness<W: WalSource, P: PageSource, C, L: ObjectStore, R: ObjectStore>(
+    env: &mut Env<'_, W, P, C, L, R>,
+    confirmed: Option<Txid>,
+) -> Result<Pending, Fault> {
+    let first = witness_once(env, confirmed).await?;
+    let Some(from) = first.refused else {
+        return Ok(first);
+    };
+    if witness_once(env, confirmed).await?.refused != Some(from) {
+        return Err(Fault::LocalIo);
+    }
+    drop_staged_from(env.staging, from).await?;
+    Ok(first)
+}
+
+async fn witness_once<W: WalSource, P: PageSource, C, L: ObjectStore, R: ObjectStore>(
+    env: &mut Env<'_, W, P, C, L, R>,
+    confirmed: Option<Txid>,
+) -> Result<Pending, Fault> {
+    let mut reader = open_reader(env.wal)?;
+    let live = reader.as_mut().map(|wal| LiveDb {
+        wal,
+        db: &mut *env.db,
+    });
+    witness_pending(env.staging, env.remote, live, confirmed).await
 }
 
 async fn boot_recover<W: WalSource, L: ObjectStore, R: ObjectStore>(
@@ -1983,6 +2037,23 @@ async fn replica_page_size<R: ObjectStore>(remote: &R) -> Result<Option<PageSize
     };
     let header = read_header(remote, &newest.key, Fault::from_remote).await?;
     Ok(header.map(|header| header.page_size()))
+}
+
+/// Why a boot's first sync is a snapshot. A staged file that did not verify
+/// was deleted with all after it: the next file is a snapshot even when the
+/// WAL could continue. One the WAL did not vouch for (`refused`) was
+/// regenerated from the WAL when the position continues, and otherwise is
+/// named as what the snapshot replaces.
+const fn boot_cause(
+    lost: Option<Txid>,
+    refused: Option<Txid>,
+    recovered: Option<SnapshotCause>,
+) -> Option<SnapshotCause> {
+    match (lost, refused, recovered) {
+        (Some(_), _, _) => Some(SnapshotCause::NewestStagedFileUnreadable),
+        (None, Some(from), Some(_)) => Some(SnapshotCause::StagedUnwitnessed { from }),
+        (None, _, recovered) => recovered,
+    }
 }
 
 /// A recovery verdict as the step to run, or as what ends the tick.
