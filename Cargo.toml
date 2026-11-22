@@ -21,6 +21,7 @@ lsr-replica = { path = "crates/replica" }
 lsr-sidecar = { path = "crates/sidecar" }
 lsr-ltx = { path = "crates/ltx" }
 lsr-sim = { path = "crates/sim" }
+lsr-spec = { path = "crates/spec" }
 lsr-sqlite = { path = "crates/sqlite" }
 lsr-store-fs = { path = "crates/store-fs" }
 lsr-store-s3 = { path = "crates/store-s3" }

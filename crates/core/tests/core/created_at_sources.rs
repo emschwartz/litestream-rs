@@ -116,6 +116,7 @@ fn bare_created_at_instants_only_in_allowed_sites() {
             "crates/core/src/maintain/retain.rs",
             "crates/core/src/maintain.rs",
             "crates/core/src/verify.rs",
+            "crates/core/src/spec_view.rs",
             "crates/sim/",
             "crates/fuzzing/",
             "crates/compat/",

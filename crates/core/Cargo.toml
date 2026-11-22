@@ -9,7 +9,8 @@ publish.workspace = true
 
 [features]
 # The shared store conformance suite, for the crates that implement ObjectStore.
-testing = ["verify"]
+# Also the adapter to the restore-plan spec (`spec_view`), so tests judge the planner by it.
+testing = ["verify", "dep:lsr-spec"]
 # Expensive self-checks (`lsr_core::VERIFY`): on in the sim, fuzz and tests through
 # `testing`, off in release builds of the cli and sidecar.
 verify = []
@@ -18,6 +19,8 @@ verify = []
 lsr-ltx.workspace = true
 lsr-wal.workspace = true
 thiserror.workspace = true
+# Test-only (the `testing` feature): the contract oracle the planner is judged by.
+lsr-spec = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true, features = ["default"] }
@@ -27,6 +30,8 @@ tempfile.workspace = true
 lsr-ltx = { workspace = true, features = ["testing"] }
 # The integration tests drive stores with `conformance::block_on`.
 lsr-core = { workspace = true, features = ["testing"] }
+# The planner tests name the spec's judgement; the adapter is `lsr_core::spec_view`.
+lsr-spec.workspace = true
 
 [lints]
 workspace = true

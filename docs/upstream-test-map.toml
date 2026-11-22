@@ -893,10 +893,10 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestReadTXIDFile/MalformedFile" = { reason = "@restore-follow" }
 "TestReadTXIDFile/MissingFile" = { reason = "@restore-follow" }
 "TestReadTXIDFile/ValidFile" = { reason = "@restore-follow" }
-"TestReplica_CalcRestorePlan" = { counterpart = ["lsr-core::plan::tests::plan_agrees_with_the_exhaustive_model", "lsr-core::core::plan_exhaustive::exhaustive::every_small_inventory_plans_as_the_contract_says"] }
+"TestReplica_CalcRestorePlan" = { counterpart = ["lsr-core::plan::tests::plan_is_what_the_contract_allows", "lsr-core::core::plan_exhaustive::exhaustive::every_small_inventory_plans_as_the_contract_says"] }
 "TestReplica_CalcRestorePlan/ErrNoFiles" = { counterpart = "lsr-core::plan::tests::an_empty_replica_is_its_own_outcome" }
 "TestReplica_CalcRestorePlan/ErrTxNotAvailable" = { counterpart = "lsr-core::plan::tests::a_transaction_beyond_the_newest_is_its_own_outcome" }
-"TestReplica_CalcRestorePlan/GapInLevelResolvedByLowerLevel" = { counterpart = ["lsr-core::core::plan_adversarial::review::plan_matches_the_reachable_set", "lsr-core::plan::tests::a_target_with_the_finer_files_present_plans_to_it"] }
+"TestReplica_CalcRestorePlan/GapInLevelResolvedByLowerLevel" = { counterpart = ["lsr-core::core::plan_adversarial::review::plan_is_what_the_contract_allows", "lsr-core::plan::tests::a_target_with_the_finer_files_present_plans_to_it"] }
 "TestReplica_CalcRestorePlan/OverlappingFilesWithinLevel" = { counterpart = "lsr-core::plan::tests::an_overlapping_higher_file_replaces_the_small_ones" }
 "TestReplica_CalcRestorePlan/SelectLongestAcrossLevels" = { counterpart = "lsr-core::plan::tests::the_further_reaching_base_wins_and_a_tie_goes_to_the_higher_level" }
 "TestReplica_CalcRestorePlan/SkipsDuplicateRangesAcrossLevels" = { counterpart = "lsr-core::plan::tests::equal_reach_prefers_the_higher_level_then_the_earlier_start" }

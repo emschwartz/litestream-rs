@@ -1,18 +1,19 @@
-//! Every small inventory, not a sample: the planner against brute-force oracles.
+//! Every small inventory, not a sample: the planner against the contract.
 //!
 //! Proptest samples; this enumerates. The key-target sweep builds every
 //! inventory of up to N files over transactions 1..=D and a few levels (the
 //! snapshot level 9 among them), plans each for `Latest` and for every `Txid`
-//! target up to one past the end, and holds the outcome to an oracle written
-//! from the contract in the `plan` module doc, not from the planner's code:
-//! the set of transactions some chain of eligible files can end at, found by
-//! fixpoint, and for a refusal the whole outcome, payloads included. The `AsOf` sweep enumerates smaller inventories under every
-//! assignment of distinct exact created-at times and every instant, and holds the lazy
-//! planner (over lazy, exact and mixed listings) to the exact one.
+//! target up to one past the end, and holds the whole outcome, payloads
+//! included, to the restore-plan spec (`lsr-spec`), which is written from the
+//! contract in the `plan` module doc and cannot reach the planner's code. The
+//! `AsOf` sweep enumerates smaller inventories under every assignment of
+//! distinct created-at times, stored or lost to a fallback, and every instant:
+//! the exact planner is held to the spec, and the lazy planner (over lazy,
+//! exact and mixed listings) to the exact planner's whole outcome.
 //!
-//! The contract decides every case, so the oracle demands exactly the one
-//! outcome it names; the tally printed with `--no-capture` counts the cases per
-//! outcome so an empty bucket shows.
+//! The spec must decide every case (an empty judgement fails); the tally
+//! printed with `--no-capture` counts the cases per outcome and deciding
+//! clause, so an empty bucket shows.
 
 #[cfg(test)]
 #[expect(
@@ -20,16 +21,16 @@
     reason = "the enumeration and oracle do arithmetic on tiny bounded transaction ids and indexes"
 )]
 mod exhaustive {
-    use std::cmp::Reverse;
     use std::collections::BTreeMap;
 
     use lsr_core::conformance::block_on;
     use lsr_core::{
-        AsOfPlanner, ContiguousChain, CreatedAt, CreatedAtStep, FileInfo, FileKey, Inventory,
-        KeyTarget, Level, ListedTime, MemStore, ObjectStore, PlanOutcome, Resolve,
-        ResolvedCreatedAt, RestoreTarget, Upload, plan, plan_reference, resolve,
+        AsOfPlanner, CreatedAt, CreatedAtStep, FileInfo, FileKey, Inventory, KeyTarget, Level,
+        ListedTime, MemStore, ObjectStore, PlanOutcome, Resolve, ResolvedCreatedAt, RestoreTarget,
+        Upload, plan, plan_reference, resolve, spec_view,
     };
     use lsr_ltx::{Timestamp, Txid, TxidRange};
+    use lsr_spec::restore_plan::Judgement;
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     struct R {
@@ -39,12 +40,6 @@ mod exhaustive {
     }
 
     impl R {
-        /// A level-9 file that does not start at transaction 1 is refused as a
-        /// snapshot and can never be applied.
-        fn usable(&self) -> bool {
-            self.level < 9 || self.min == 1
-        }
-
         fn key(&self) -> FileKey {
             let range =
                 TxidRange::new(Txid::new(self.min).unwrap(), Txid::new(self.max).unwrap()).unwrap();
@@ -93,7 +88,7 @@ mod exhaustive {
         go(keys, 0, n, &mut Vec::new(), f);
     }
 
-    // ---- the key-target oracle, from the module doc's contract ----
+    // ---- the key-target sweep, judged by the spec ----
 
     #[derive(Clone, Copy, Debug)]
     enum T {
@@ -108,45 +103,6 @@ mod exhaustive {
                 Self::Txid(n) => KeyTarget::Txid(Txid::new(n).unwrap()),
             }
         }
-
-        /// Latest admits every file; Txid admits a last transaction at or below it.
-        fn admits(self, f: &R) -> bool {
-            match self {
-                Self::Latest => true,
-                Self::Txid(n) => f.max <= n,
-            }
-        }
-    }
-
-    /// Every transaction some chain of admitted files can end at: a base is an
-    /// admitted file beginning at 1 (any level); a step is an admitted file of
-    /// levels 0 to 8 that starts at most one past an end and passes it.
-    fn chain_ends(files: &[R], t: T) -> [bool; 32] {
-        let mut ends = [false; 32];
-        for f in files.iter().filter(|f| t.admits(f) && f.min == 1) {
-            ends[usize::try_from(f.max).unwrap()] = true;
-        }
-        loop {
-            let mut grew = false;
-            for f in files.iter().filter(|f| t.admits(f) && f.level < 9) {
-                let reachable =
-                    (0..f.max).any(|e| ends[usize::try_from(e).unwrap()] && f.min <= e + 1);
-                let slot = &mut ends[usize::try_from(f.max).unwrap()];
-                if reachable && !*slot {
-                    *slot = true;
-                    grew = true;
-                }
-            }
-            if !grew {
-                return ends;
-            }
-        }
-    }
-
-    fn furthest(ends: &[bool; 32]) -> Option<u64> {
-        (0..32u64)
-            .rev()
-            .find(|e| ends[usize::try_from(*e).unwrap()])
     }
 
     type Tally = BTreeMap<String, u64>;
@@ -155,119 +111,40 @@ mod exhaustive {
         *tally.entry(what).or_default() += 1;
     }
 
-    fn assert_chain(chain: &ContiguousChain, files: &[R], t: T, goal: u64, inv: &Inventory) {
-        assert_eq!(chain.snapshot(), &chain.files()[0]);
-        assert_eq!(chain.reaches().get(), goal, "ends at the target");
-        let mut reach = 0u64;
-        for (i, applied) in chain.files().iter().enumerate() {
-            assert!(inv.files().contains(applied), "a file the replica holds");
-            let r = files.iter().find(|r| r.is(&applied.key)).unwrap();
-            assert!(t.admits(r), "eligible: {r:?} for {t:?}");
-            if i == 0 {
-                assert_eq!(r.min, 1, "the base begins at transaction 1");
-            } else {
-                assert!(r.level < 9, "no snapshot extends a chain");
-                assert!(r.min <= reach + 1, "contiguous: {r:?} after {reach}");
-                assert!(r.max > reach, "each step advances");
-            }
-            reach = r.max;
-        }
-        assert_eq!(reach, goal);
+    /// The outcome's variant, for the tally.
+    fn variant(outcome: &PlanOutcome) -> String {
+        format!("{outcome:?}")
+            .split([' ', '(', '{'])
+            .next()
+            .unwrap()
+            .to_owned()
     }
 
-    /// The outcome the contract demands when it is not a plan, computed from
-    /// the files alone: the first refusal in precedence order, with every
-    /// payload (requirement and design tier alike). `None` means a plan is due.
-    fn expected_refusal(files: &[R], t: T) -> Option<PlanOutcome> {
-        let txid = |n: u64| Txid::new(n).unwrap();
-        let Some(newest) = files.iter().map(|f| f.max).max() else {
-            return Some(PlanOutcome::EmptyReplica);
-        };
-        let goal = match t {
-            T::Latest => newest,
-            T::Txid(n) if n > newest => {
-                return Some(PlanOutcome::BeyondNewest {
-                    requested: txid(n),
-                    newest: txid(newest),
-                });
-            }
-            T::Txid(n) => n,
-        };
-        let ends = chain_ends(files, t);
-        if ends[usize::try_from(goal).unwrap()] {
-            return None;
-        }
-        // The reach: the furthest any chain gets, 0 when no chain starts.
-        let r = furthest(&ends).unwrap_or(0);
-        if let T::Txid(n) = t
-            && let Some(f) = files
-                .iter()
-                .filter(|f| f.usable() && f.min <= r + 1 && f.max > n)
-                .min_by_key(|f| (f.max, Reverse(f.level), f.min))
-        {
-            return Some(PlanOutcome::InsideFile {
-                requested: txid(n),
-                file: f.key(),
-            });
-        }
-        if !files.iter().any(|f| t.admits(f) && f.min == 1) {
-            let mut malformed: Vec<&R> = files.iter().filter(|f| !f.usable()).collect();
-            malformed.sort_by_key(|f| (f.level, f.min, f.max));
-            return Some(PlanOutcome::NoSnapshot {
-                oldest_snapshot: files
-                    .iter()
-                    .filter(|f| f.min == 1)
-                    .map(|f| txid(f.max))
-                    .min(),
-                malformed_snapshots: malformed.into_iter().map(R::key).collect(),
-            });
-        }
-        let past = || files.iter().filter(|f| f.max > r);
-        if let Some(next) = past()
-            .filter(|f| f.usable() && f.min > r + 1)
-            .map(|f| f.min)
-            .min()
-        {
-            return Some(PlanOutcome::Gap {
-                have_through: txid(r),
-                next_starts: txid(next),
-            });
-        }
-        let refused = past()
-            .filter(|f| !f.usable())
-            .min_by_key(|f| (f.level, f.min, f.max))
-            .unwrap_or_else(|| panic!("no refusal applies: {files:?} {t:?}"));
-        Some(PlanOutcome::MalformedSnapshot {
-            have_through: txid(r),
-            file: refused.key(),
-        })
+    /// Holds one outcome to the spec: the contract allows it, and decides the
+    /// case at all (an empty judgement is a hole in the text, never a pass).
+    fn judged(inv: &Inventory, target: RestoreTarget, out: &PlanOutcome, case: &str) -> Judgement {
+        let judgement = spec_view::judge(inv, target).expect("the spec takes every inventory");
+        assert!(
+            !judgement.allowed.is_empty(),
+            "the contract is silent ({:?}): {case}",
+            judgement.by
+        );
+        assert!(
+            judgement.admits(&spec_view::outcome(out)),
+            "the contract allows {:?} ({:?}): {case}",
+            judgement.allowed,
+            judgement.by
+        );
+        judgement
     }
 
-    /// Holds one `plan` outcome to the contract: a plan exactly when a chain
-    /// reaches the target, else the whole outcome the contract names.
+    /// Holds one `plan` outcome to the spec.
     fn verify(files: &[R], t: T, tally: &mut Tally) {
         let inv = Inventory::from_files(files.iter().map(|r| info(r, 0))).unwrap();
         let out = plan(&inv, t.key_target());
         let case = format!("{files:?} {t:?} -> {out:?}");
-        let name = if let Some(want) = expected_refusal(files, t) {
-            assert_eq!(out, want, "{case}");
-            format!("{out:?}")
-                .split([' ', '('])
-                .next()
-                .unwrap()
-                .to_owned()
-        } else {
-            let PlanOutcome::Plan(chain) = &out else {
-                panic!("a chain to the target exists but the outcome is not a plan: {case}");
-            };
-            let goal = match t {
-                T::Latest => files.iter().map(|f| f.max).max().unwrap(),
-                T::Txid(n) => n,
-            };
-            assert_chain(chain, files, t, goal, &inv);
-            "Plan".to_owned()
-        };
-        note(tally, name);
+        let judgement = judged(&inv, t.key_target().into(), &out, &case);
+        note(tally, format!("{} by {:?}", variant(&out), judgement.by));
     }
 
     /// One sweep: every inventory of up to `n` files over `1..=d` with `levels`.
@@ -314,29 +191,7 @@ mod exhaustive {
         report("key targets D=6 levels {0,1,8,9} N<=4", counts, &tally);
     }
 
-    // ---- AsOf: the lazy planner against the exact one ----
-
-    /// A listing's outcome reduced to keys, so a lazy listing's compares with an exact one's.
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    enum O {
-        Plan(Vec<FileKey>),
-        Inside(Vec<FileKey>, FileKey),
-        Other(String),
-    }
-
-    fn reduce(outcome: &PlanOutcome) -> O {
-        let keys = |chain: &ContiguousChain| chain.files().iter().map(|i| i.key).collect();
-        match outcome {
-            PlanOutcome::Plan(chain) => O::Plan(keys(chain)),
-            PlanOutcome::AsOfInsideFile { chain, file } => O::Inside(keys(chain), *file),
-            other @ (PlanOutcome::EmptyReplica
-            | PlanOutcome::NoSnapshot { .. }
-            | PlanOutcome::BeyondNewest { .. }
-            | PlanOutcome::Gap { .. }
-            | PlanOutcome::InsideFile { .. }
-            | PlanOutcome::MalformedSnapshot { .. }) => O::Other(format!("{other:?}")),
-        }
-    }
+    // ---- AsOf: the spec over exact listings, then lazy against eager ----
 
     /// Calls `f` with every injective assignment of `resolved` to `n` files.
     fn assignments(resolved: &[i64], n: usize, held: &mut Vec<i64>, f: &mut impl FnMut(&[i64])) {
@@ -353,77 +208,129 @@ mod exhaustive {
         }
     }
 
-    fn store_of(files: &[R], resolved: &[i64]) -> MemStore {
+    /// One file's created-at time as its store reports it: stored, or lost
+    /// (bit `i` of `fallback`) so the store falls back to the object's
+    /// last-modified time, set to the same instant. The two date a commit
+    /// differently (the provenance table), so both matter.
+    fn created_at(fallback: u32, i: usize, at: i64) -> CreatedAt {
+        let at = Timestamp::from_unix_millis(at);
+        if fallback >> i & 1 == 1 {
+            CreatedAt::fallback(at)
+        } else {
+            CreatedAt::mtime(at)
+        }
+    }
+
+    fn exact(r: &R, created_at: CreatedAt) -> FileInfo {
+        FileInfo {
+            key: r.key(),
+            size: 1,
+            listed: ListedTime::Created(created_at),
+        }
+    }
+
+    fn store_of(files: &[R], resolved: &[i64], fallback: u32) -> MemStore {
         let store = MemStore::with_listed_last_modified();
         block_on(async {
-            for (r, &created_at) in files.iter().zip(resolved) {
+            for (i, (r, &created_at)) in files.iter().zip(resolved).enumerate() {
                 let at = Timestamp::from_unix_millis(created_at);
                 let mut up = store.begin_upload(&r.key(), at).await.unwrap();
                 up.write(b"x").await.unwrap();
                 up.commit().await.unwrap();
+                store.set_last_modified(&r.key(), at);
+                if fallback >> i & 1 == 1 {
+                    store.drop_created_at(&r.key());
+                }
             }
         });
         store
     }
 
-    /// One inventory under one created-at time assignment: every instant, every mix of
-    /// exact and last-modified-only listings.
-    fn check_as_of(files: &[R], resolved: &[i64], instants: &[i64]) {
-        let exact =
-            Inventory::from_files(files.iter().zip(resolved).map(|(r, s)| info(r, *s))).unwrap();
-        let store = store_of(files, resolved);
+    /// One inventory under one created-at assignment and one choice of lost
+    /// metadata: for every instant the exact planner is held to the spec and,
+    /// when `lazily`, the lazy planner, over every mix of exact and
+    /// last-modified-only listings, to the exact planner's whole outcome.
+    fn check_as_of(
+        files: &[R],
+        resolved: &[i64],
+        (fallback, lazily): (u32, bool),
+        instants: &[i64],
+        tally: &mut Tally,
+    ) {
+        let times: Vec<CreatedAt> = (0..files.len())
+            .map(|i| created_at(fallback, i, resolved[i]))
+            .collect();
+        let exact_inv =
+            Inventory::from_files(files.iter().zip(&times).map(|(r, c)| exact(r, *c))).unwrap();
+        let store = store_of(files, resolved, fallback);
         let lazy = block_on(Inventory::load(&store)).unwrap();
-        for mask in 0u32..1 << files.len() {
-            // Bit i set: file i is listed exact; clear: last-modified only.
-            let listed: Vec<FileInfo> = lazy
-                .files()
-                .iter()
-                .map(|l| {
-                    let i = files.iter().position(|r| r.is(&l.key)).unwrap();
-                    if mask >> i & 1 == 1 {
-                        info(&files[i], resolved[i])
-                    } else {
-                        *l
-                    }
-                })
-                .collect();
-            let mixed = Inventory::from_files(listed).unwrap();
-            for &t in instants {
-                let instant = Timestamp::from_unix_millis(t);
-                let want = reduce(&plan_reference(&exact, RestoreTarget::AsOf(instant)));
-                let mut planner = AsOfPlanner::new(&mixed, instant);
+        for &t in instants {
+            let target = RestoreTarget::AsOf(Timestamp::from_unix_millis(t));
+            let eager = plan_reference(&exact_inv, target);
+            let case = format!("t={t} files={files:?} created-at times={times:?} -> {eager:?}");
+            let judgement = judged(&exact_inv, target, &eager, &case);
+            note(tally, format!("{} by {:?}", variant(&eager), judgement.by));
+            let direct = AsOfPlanner::new(&exact_inv, Timestamp::from_unix_millis(t))
+                .advance(&ResolvedCreatedAt::default());
+            assert_eq!(direct, Resolve::Done(eager.clone()), "{case}");
+            let want = spec_view::outcome(&eager);
+            let masks = if lazily { 1u32 << files.len() } else { 0 };
+            for mask in 0..masks {
+                // Bit i set: file i is listed exact; clear: last-modified only.
+                let listed: Vec<FileInfo> = lazy
+                    .files()
+                    .iter()
+                    .map(|l| {
+                        let i = files.iter().position(|r| r.is(&l.key)).unwrap();
+                        if mask >> i & 1 == 1 {
+                            exact(&files[i], times[i])
+                        } else {
+                            *l
+                        }
+                    })
+                    .collect();
+                let mixed = Inventory::from_files(listed).unwrap();
+                let mut planner = AsOfPlanner::new(&mixed, Timestamp::from_unix_millis(t));
                 let got = block_on(resolve(&store, &mut planner)).unwrap();
                 assert_eq!(
-                    reduce(&got.value),
+                    spec_view::outcome(&got.value),
                     want,
-                    "mask={mask:b} t={t} files={files:?} created-at times={resolved:?}"
+                    "lazy against eager, mask={mask:b}: {case}"
                 );
-                if mask == (1 << files.len()) - 1 {
-                    assert_eq!(
-                        got.created_at_read, 0,
-                        "an exact listing reads no created-at time"
-                    );
-                    let direct =
-                        AsOfPlanner::new(&mixed, instant).advance(&ResolvedCreatedAt::default());
-                    assert_eq!(
-                        direct.clone(),
-                        Resolve::Done(plan_reference(&mixed, RestoreTarget::AsOf(instant)))
-                    );
-                }
             }
         }
     }
 
-    fn sweep_as_of(d: u64, levels: &[u8], n: usize, resolved: &[i64]) -> (u64, u64) {
+    fn sweep_as_of(
+        d: u64,
+        levels: &[u8],
+        n: usize,
+        resolved: &[i64],
+        tally: &mut Tally,
+    ) -> (u64, u64) {
         let mut instants: Vec<i64> = resolved.to_vec();
         instants.push(resolved.iter().max().unwrap() + 100);
         let keys = universe(d, levels);
         let (mut inventories, mut cases) = (0u64, 0u64);
         subsets(&keys, n, &mut |files| {
             inventories += 1;
+            // Lost metadata only matters below level 9: a snapshot's time
+            // dates no commit either way. The lazy planner reads times through
+            // the store whatever their origin, so it runs with none lost and
+            // with all lost; the spec judges every mix.
+            let droppable: u32 = files
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.level < 9)
+                .map(|(i, _)| 1 << i)
+                .sum();
             assignments(resolved, files.len(), &mut Vec::new(), &mut |assigned| {
-                check_as_of(files, assigned, &instants);
-                cases += u64::try_from(instants.len()).unwrap() << files.len();
+                for fallback in (0..=droppable).filter(|m| m & !droppable == 0) {
+                    let lazily = fallback == 0 || fallback == droppable;
+                    check_as_of(files, assigned, (fallback, lazily), &instants, tally);
+                    let runs = if lazily { 1 + (1u64 << files.len()) } else { 1 };
+                    cases += u64::try_from(instants.len()).unwrap() * runs;
+                }
             });
         });
         (inventories, cases)
@@ -431,22 +338,24 @@ mod exhaustive {
 
     #[test]
     fn every_small_inventory_plans_as_of_the_same_lazily() {
-        let counts = sweep_as_of(4, &[0, 1, 9], 3, &[100, 200, 300]);
+        let mut tally = Tally::new();
+        let counts = sweep_as_of(4, &[0, 1, 9], 3, &[100, 200, 300], &mut tally);
         report(
             "as-of D=4 levels {0,1,9} N<=3, 3 created-at times",
             counts,
-            &Tally::new(),
+            &tally,
         );
     }
 
     #[test]
     #[ignore = "the large sweep: minutes in debug; run with `just plan-exhaustive`"]
     fn every_larger_inventory_plans_as_of_the_same_lazily() {
-        let counts = sweep_as_of(5, &[0, 1, 8, 9], 3, &[100, 200, 300, 400]);
+        let mut tally = Tally::new();
+        let counts = sweep_as_of(5, &[0, 1, 8, 9], 3, &[100, 200, 300, 400], &mut tally);
         report(
-            "as-of D=5 levels {0,1,8,9} N<=3, 3 created-at times",
+            "as-of D=5 levels {0,1,8,9} N<=3, 4 created-at times",
             counts,
-            &Tally::new(),
+            &tally,
         );
     }
 }
