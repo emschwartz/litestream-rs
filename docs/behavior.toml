@@ -364,7 +364,7 @@ recovery = "Automatic once the TRUNCATE completes. Under `STRICT`, or if the pro
 detected_by = "sqlite::`a_failed_wal_sync_stages_nothing_of_its_generation_and_snapshots_after_a_truncate`, core::`a_failed_wal_sync_stages_nothing_of_its_generation_and_ends_in_a_snapshot`, core::`a_busy_truncate_after_a_failed_wal_sync_stays_degraded_and_stages_nothing`, core::`a_wal_sync_failed_in_a_checkpoint_seal_is_never_retried_past`, core::`a_failed_wal_sync_stops_under_strict_responses`, core::`after_a_completed_truncate_staging_resumes_from_the_new_generation`, sim::`wal_fsync_fails`; oracle::`StagedNotDurable`, plant::`wal-barrier`, plant::`wal-sync-error-as-success`, plant::`wal-trusted-after-failed-sync`"
 recovered_by = "sqlite::`a_failed_wal_sync_stages_nothing_of_its_generation_and_snapshots_after_a_truncate`, sim::`wal_fsync_fails_then_snapshot`"
 no_test = "restart half: known wrong"
-notes = "The sqlite test judges restores after the snapshot and again after a power cut; the sim scenario after a power loss. No restore is judged while the task is degraded, so no S. The simulator keeps the bytes a failed sync covered off its disk for good, and oracle `StagedNotDurable` fails any level-0 file staged from them. The restart half has expected-fail tests, both ignored: sim::`wal_fsync_fails_then_restart`, sqlite::`a_restart_after_a_failed_wal_sync_ships_no_unproven_frame` (D2)"
+notes = "The sqlite test judges restores after the snapshot and again after a power cut; the sim scenario after a power loss. No restore is judged while the task is degraded, so no S. The simulator keeps the bytes a failed sync covered off its disk for good, and oracle `StagedNotDurable` fails any level-0 file staged from them. The restart half has expected-fail tests, both ignored: sim::`wal_fsync_fails_then_restart`, sqlite::`a_restart_after_a_failed_wal_sync_ships_no_unproven_frame` (D2). The swarm reaches it unaided since the error domain draws failed syncs (CHK-8): 85 of 3000 mixed seeds, counted as known in the nightly; sim::`known_wrong::a_restart_after_a_failed_wal_sync_still_stages_frames_it_covered_seed_0x21` fails once D2 is fixed, to flip the cell"
 
 [[row]]
 table = "Running"
@@ -462,7 +462,7 @@ notes = "The restore test for a page-size change vacuums while the engine is dow
 [[row]]
 table = "Running"
 id = "RUN-12"
-circumstance = "A database-file page read for a snapshot or for a grown page is not what the page table recorded for it (`pages.rs`)"
+circumstance = "A database-file page read for a snapshot or for a grown page is not what the page table recorded for it (`pages.rs`). Not checked at a checkpoint boundary (CKPT-4)"
 response = "degraded, `DatabasePageMismatch { pgno }`. On the retry the page is shipped as the file holds it. The task stays degraded and retention stays pinned"
 signal = "`database_page_mismatch`, with the page number in `/healthz`"
 at_risk = "The replica now holds bytes no commit wrote (G1 qualifier). The last good restore point is kept"
@@ -491,10 +491,10 @@ response = "retry, `LocalDiskFull` for ENOSPC, EDQUOT or no free scratch name (`
 signal = "\"retrying\", then `local_disk_full` or `local_io` in `Health.degraded`"
 at_risk = "Lag, without bound while the disk is full. The WAL keeps growing on what is often the same disk"
 recovery = "An operator frees space"
-detected_by = "sim::`disk_full_on_staging`, core::`a_full_staging_disk_is_disk_full`; plant::`staging-enospc-local-io`"
+detected_by = "sim::`disk_full_on_staging`, core::`a_full_staging_disk_is_disk_full`, core::`a_local_read_error_comparing_copies_is_a_staging_fault`, core::`a_local_read_error_while_compacting_is_a_staging_fault`; plant::`staging-enospc-local-io`, plant::`compact-local-read-as-remote`"
 survived_by = "sim::`a_full_staging_disk_leaves_the_replica_restorable_while_it_lasts`"
 recovered_by = "sim::`disk_full_on_staging`"
-notes = "The scenario injects one `ScratchExhausted` on one staging upload, then recovers. No disk is filled; lasting ENOSPC and the WAL growth are **untested**. The stall is shown for `LocalDiskFull` on the upload task by core::`a_retried_fault_that_persists_ends_degraded_as_a_stall` (eight injected failures), not on the sync task. The hold in `a_full_staging_disk_leaves_the_replica_restorable_while_it_lasts` fails every staging upload with ENOSPC (a transient `StorageFull`, as the directory store reports it) for 6 ticks while the app commits, and the replica is judged in the middle and at the end: S. ENOSPC and EDQUOT are `LocalDiskFull` (core::`a_full_staging_disk_is_disk_full`); they were `LocalIo`"
+notes = "The scenario injects one `ScratchExhausted` on one staging upload, then recovers. No disk is filled; lasting ENOSPC and the WAL growth are **untested**. The stall is shown for `LocalDiskFull` on the upload task by core::`a_retried_fault_that_persists_ends_degraded_as_a_stall` (eight injected failures), not on the sync task. The hold in `a_full_staging_disk_leaves_the_replica_restorable_while_it_lasts` fails every staging upload with ENOSPC (a transient `StorageFull`, as the directory store reports it) for 6 ticks while the app commits, and the replica is judged in the middle and at the end: S. ENOSPC and EDQUOT are `LocalDiskFull` (core::`a_full_staging_disk_is_disk_full`); they were `LocalIo`. Level-1 compaction reads level 0 from staging when its copies are the replica's; a failed staging read there is classified as a staging fault (`CompactError::Local`, `Fault::from_staging`), never as a replica one. Before, it went through the replica classifier: a full or unreadable staging disk read as a replica fault (a denied read as `credentials`)"
 
 [[row]]
 table = "Running"
@@ -665,11 +665,11 @@ notes = "The scenario injects the `ReadersHeld` result. The decision in `Guarded
 table = "Checkpoint"
 id = "CKPT-4"
 circumstance = "A TRUNCATE that changed the WAL (new header or shorter file)"
-response = "snapshot under the write lock, `CheckpointBoundary` (`checkpoint.rs`). A TRUNCATE that found the WAL unchanged takes none"
+response = "snapshot under the write lock, `CheckpointBoundary` (`checkpoint.rs`). A TRUNCATE that found the WAL unchanged takes none. The snapshot does not check database pages against the page table: the TRUNCATE ends the engine's read transaction, so a commit that landed after the last step is backfilled with the rest, and its pages are the application's (D121)"
 signal = "`checkpoint_boundary`"
-at_risk = "None"
+at_risk = "None. Damage to a page between its last check and the boundary is shipped (D121)"
 recovery = "Automatic"
-detected_by = "sim::`truncate_threshold_crossed`, core::`a_truncate_snapshots_the_new_generation_once_under_the_write_lock`, core::`a_busy_truncate_that_changed_nothing_takes_no_snapshot`"
+detected_by = "sim::`truncate_threshold_crossed`, core::`a_truncate_snapshots_the_new_generation_once_under_the_write_lock`, core::`a_busy_truncate_that_changed_nothing_takes_no_snapshot`, sqlite::`a_commit_between_the_proof_and_the_truncate_is_not_taken_for_damage`; plant::`boundary-snapshot-keeps-page-table`"
 recovered_by = "sim::`truncate_threshold_crossed`"
 
 [[row]]
@@ -1916,3 +1916,14 @@ at_risk = "None (a checker)"
 recovery = "None"
 detected_by = "sim::`stall_liveness::a_stall_ends_with_the_fault_that_caused_it_seed_0xa2`; oracle::`StuckRetrying`, plant::`success-keeps-a-stall`"
 notes = "Before, any stall ended a liveness judgment and excused an undrained shutdown, so an engine still retrying a fault nothing caused any more, or reporting degraded for nothing, passed. The run's end now also heals the SQLite source failures still queued"
+
+[[row]]
+table = "The checkers themselves"
+id = "CHK-8"
+circumstance = "An error the engine's SQLite seam or one of its stores can return, from some call, that no simulated history ever draws"
+response = "The simulator's error domain (`sim/src/domain.rs`) lists every SQLite-side operation against every source error, and every store operation on both stores against every store error and denial kind, in matches with no wildcard: each cell is drawn, a world fault, impossible with a reason checked against lsr-sqlite, store-fs and store-s3, unmodelled, or known wrong. A new operation or error variant breaks the build there"
+signal = "None (a checker)"
+at_risk = "None (a checker)"
+recovery = "None"
+detected_by = "sim::`domain::tests::every_cell_is_drawn_or_says_why_not`, sim::`domain::tests::the_source_draw_reaches_every_drawable_cell_and_no_other`, sim::`domain::tests::the_store_draw_reaches_every_drawable_class_and_no_other`, sim::`known_wrong::a_restart_after_a_failed_wal_sync_still_stages_frames_it_covered_seed_0x21`, sim::`known_wrong::compaction_still_reports_a_staging_denial_as_the_replicas_seed_0xb9e`"
+notes = "Before, histories drew two store errors and two SQLite errors on nine of twelve operations. The whole domain (21 source cells, 40 store cells, drawn last in the swarm mix) found D2 unaided in 85 of 3000 mixed seeds (first at seed 18) and a new defect, compaction classifying staging errors as the replica's (1 seed); both are known-wrong cells, left out of the per-push seeds and counted as known in the nightly. Four cells are unmodelled, gaps in the simulator listed in section 6 (C9): an unlinked WAL and a lost checkpoint retake. WAL damage while a failed sync's writeback is lost is skipped and counted (`wal.damage_skipped.writeback_lost`)"

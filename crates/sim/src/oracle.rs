@@ -338,6 +338,13 @@ pub enum Violation {
         /// Failures in a row.
         retries: u32,
     },
+    /// A task is degraded by a persistent cause no fault of the run explains (or by the
+    /// engine's own bug, which nothing explains).
+    #[error("bug fault: a task is degraded: {cause:?}")]
+    UnexpectedDegraded {
+        /// The cause the engine reported.
+        cause: lsr_core::PersistentCause,
+    },
     /// The engine reported its own bug, or the oracle could not decide.
     #[error("bug fault: {context}")]
     BugFault {

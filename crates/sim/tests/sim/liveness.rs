@@ -76,3 +76,43 @@ fn a_new_wal_header_over_an_empty_pinned_generation_is_followed() {
         panic!("{failure}");
     }
 }
+
+/// Staging can hold nothing while the replica holds the newest file: here a boot under lying
+/// replica reads takes the staged file for a divergence and drops it. A bucket then rolled back
+/// past its only transaction leaves nothing on either side, and a first sync is the only way on.
+/// The swarm found it (seed 0x7d, under crash points inside the SQLite seam that were later
+/// dropped: docs/decisions.md D120).
+#[test]
+fn a_rollback_that_empties_the_replica_justifies_a_first_sync() {
+    let ops = vec![
+        commit(),
+        Op::Tick,
+        Op::Tick,
+        Op::Tick,
+        Op::Tick,
+        Op::Restart,
+        Op::Hold {
+            hold: lsr_sim::Hold::LyingReads,
+            ticks: 5,
+        },
+        Op::Restart,
+        Op::Remote(lsr_sim::generate::RemoteOp::RollBack),
+        Op::Tick,
+        Op::Tick,
+        Op::Restore,
+    ];
+    let opts = Opts {
+        trace: true,
+        ..Opts::default()
+    };
+    match run_ops(Seed::new(0x7d), &ops, &opts) {
+        Ok(report) => {
+            assert!(
+                report.reach.get("liveness.justified.FirstSync") >= 2,
+                "{:#?}",
+                report.trace
+            );
+        }
+        Err(failure) => panic!("{failure}\n{:#?}", failure.trace),
+    }
+}

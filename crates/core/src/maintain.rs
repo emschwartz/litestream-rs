@@ -696,6 +696,7 @@ pub(crate) async fn run_compact<L: ObjectStore, R: ObjectStore>(
         }
         Err(
             err @ (CompactError::Source(_)
+            | CompactError::Local(_)
             | CompactError::Dest(_)
             | CompactError::Input { .. }
             | CompactError::Encode(_)
@@ -719,6 +720,8 @@ async fn compact_level_one<L: ObjectStore, R: ObjectStore>(
         Err(CompactError::InputVanished { .. } | CompactError::Input { .. }) => {
             compact(replica, replica, job.inputs(), job.level()).await
         }
+        // The source here is staging.
+        Err(CompactError::Source(err)) => Err(CompactError::Local(err)),
         other => other,
     }
 }
@@ -750,7 +753,7 @@ async fn local_is_replica<L: ObjectStore, R: ObjectStore>(
         let ours = match local.read(&info.key, at, TAIL).await {
             Ok(bytes) => bytes,
             Err(StoreError::NotFound { .. }) => return Ok(false),
-            Err(err) => return Err(CompactError::Source(err)),
+            Err(err) => return Err(CompactError::Local(err)),
         };
         if ours.len() != TRAILER_LEN {
             return Ok(false);
