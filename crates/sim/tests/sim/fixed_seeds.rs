@@ -644,4 +644,41 @@ mod second_writer {
         ];
         drawn(0x433, &ops);
     }
+
+    /// The other writer puts transaction 3 while the engine runs, the engine
+    /// stops, and the operator removes it; staging is wiped and the other
+    /// writer puts 3 again, with no replica call between the removal and the
+    /// second put. The boot takes the second file as history and compacts it
+    /// into levels 1 to 9. The oracle ordered the first removal after the
+    /// second put (both at one recorder length) and mapped the compacted file
+    /// to the engine's own staged note for 3 instead of the other writer's
+    /// pages (seed 0x18efc, shrunk).
+    #[test]
+    fn a_removal_before_a_second_put_of_the_same_id_seed_0x18efc() {
+        use lsr_core::{StoreError, StoreOp};
+        use lsr_sim::{EnvFault, FaultShape, Target};
+        let ops = [
+            Op::Shutdown,
+            Op::StoreFault {
+                target: Target::Remote,
+                op: StoreOp::Upload,
+                ahead: 1,
+                shape: FaultShape::Error(StoreError::Throttled {
+                    op: StoreOp::Upload,
+                    retry_after: None,
+                }),
+            },
+            Op::SecondWriter { ticks: 4 },
+            Op::Commit {
+                pages: 2,
+                grow: false,
+            },
+            Op::Shutdown,
+            Op::Tick,
+            Op::SecondWriter { ticks: 3 },
+            Op::EnvFault(EnvFault::WipeStaging),
+            Op::SecondWriter { ticks: 7 },
+        ];
+        drawn(0x18efc, &ops);
+    }
 }
