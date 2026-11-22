@@ -703,3 +703,12 @@ fn help_documents_every_flag_command_and_exit_code() {
         assert!(help.contains(&format!("{:<3}{}", exit.code(), exit.meaning())));
     }
 }
+
+/// Go's follow mode is not built: refused by name, never read as a one-shot restore.
+#[test]
+fn follow_mode_is_refused_as_not_built() {
+    for line in ["restore -f -o o s3://b/p", "restore --f=true /data/db"] {
+        assert_eq!(usage(line), UsageError::FollowNotBuilt, "{line}");
+    }
+    assert!(UsageError::FollowNotBuilt.to_string().contains("#177"));
+}

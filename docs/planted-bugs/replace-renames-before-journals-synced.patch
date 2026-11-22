@@ -1,0 +1,16 @@
+diff --git a/crates/local/src/lib.rs b/crates/local/src/lib.rs
+index 25ea01c9..082452c5 100644
+--- a/crates/local/src/lib.rs
++++ b/crates/local/src/lib.rs
+@@ -299,10 +299,10 @@ fn replace_steps(fs: &mut impl ReplaceFs, target: &Path) -> Result<(), PublishEr
+         );
+         return Err(at(check)(source));
+     }
++    fs.rename().map_err(at(PublishStep::Rename))?;
+     fs.remove_journals()
+         .map_err(at(PublishStep::RemoveJournals))?;
+     fs.sync_dir().map_err(at(PublishStep::SyncJournals))?;
+-    fs.rename().map_err(at(PublishStep::Rename))?;
+     fs.sync_dir().map_err(at(PublishStep::SyncName))
+ }
+ 
