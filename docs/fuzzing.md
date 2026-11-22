@@ -58,7 +58,7 @@ target's commit, run count and `stat::new_units_added` in the pull request that 
 
 ## After the run
 
-- A finding is replayed with `cargo +nightly fuzz run <target> --fuzz-dir fuzz fuzz/artifacts/<target>/<file>`.
+- A finding is replayed with `just fuzz-replay <target> fuzz/artifacts/<target>/<file>`.
   A crash in `crates/ltx` is fixed at the root, with the input as a named regression test in its own
   commit (phase 1 task 7). A crash anywhere else is reported with its reproducer first.
 - The run writes new inputs into `fuzz/corpus/<target>/`. Minimise each target with
