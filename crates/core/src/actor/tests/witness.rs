@@ -512,15 +512,16 @@ fn restored_page(rig: &Rig, pgno: u32) -> u8 {
     sink.published().unwrap().page(pgno).unwrap()[0]
 }
 
-/// A power loss under `synchronous=NORMAL` drops the frames of the replica's
-/// newest file (published from the page cache) and of the pending file after
-/// it. The application comes back and redoes both jobs: the first is not
-/// idempotent (it stamps the time) and writes its page with other bytes into
-/// the same frames, the second writes its page again verbatim. The live WAL
-/// now holds the pending file's range page for page, at the offset and
-/// commit size it names, after a range that is not the replica's newest
-/// file. Only the anchor sees it: the pending file is never uploaded on that
-/// file, and the replica restores what the database holds.
+/// A power loss on a disk that lies about the engine's WAL barrier drops the
+/// frames of the replica's newest file and of the pending file after it. The
+/// application comes back and retries both jobs: the first is not idempotent
+/// (it stamps the time) and writes its page with other bytes into the same
+/// frames, the second writes its page again verbatim. The live WAL now holds
+/// the pending file's range page for page, at the offset and commit size it
+/// names, after a range that is not the replica's newest file. Only the
+/// anchor sees it (an honest barrier keeps those frames, so nothing else
+/// needs to): the pending file is never uploaded on that file, and the
+/// replica restores what the database holds.
 #[test]
 fn a_pending_file_regrown_after_another_tail_is_not_uploaded_on_the_old_one() {
     let (mut rig, mut actor) = caught_up();

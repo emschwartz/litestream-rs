@@ -214,9 +214,8 @@ tests = [
 ]
 
 # Killed unaided: no test was written for this defect. The swarm's own history (seed 44's drawn
-# mix) fails under it. The same plant at the witness's own anchor (`held || true` in witness.rs)
-# survives 3000 seeds in each of three mixes: the witness's page-by-page check of each pending file
-# against the live WAL refuses what the anchor wrongly accepts. It re-expresses on main the plant the history
+# mix) fails under it. The same plant at the witness's own anchor is witness-anchor-held below. It
+# re-expresses on main the plant the history
 # judge's work measured on the boot-witness branch: the boot accepts the newest staged file as
 # its position whenever the WAL holds a commit frame at its end in the same generation, without
 # comparing its last page or the range it covers.
@@ -227,6 +226,12 @@ package = "lsr-sim"
 test_bin = "sim"
 tests = ["unaided::swarm_seed_44_restores_only_committed_states"]
 
+# The boot witness's anchor held for any tail it decodes. The page proof of each pending file does
+# not cover for it: only the anchor sees a tail range regrown with other bytes before a pending range
+# regrown verbatim. The engine's WAL barrier keeps a staged range from regrowing at all, so the
+# simulator reaches the window only on a lying disk with an app that retries jobs not all idempotent
+# (`unaided.rs`, the retry campaign), in 1 seed of 3000, where a later snapshot hid it; the plant
+# survives every simulator configuration and is killed by the unit tests.
 [[bug]]
 name = "witness-anchor-held"
 fix = "plant"
