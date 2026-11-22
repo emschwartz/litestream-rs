@@ -635,6 +635,31 @@ impl World {
         Ok(listing.files.last().copied())
     }
 
+    /// What the boot's witness cannot prove among the staged level-0 files
+    /// the replica does not hold yet: a snapshot (a file with every page) or a
+    /// hop (a file read from a WAL generation's first frame without every
+    /// page). `None` when there is neither.
+    #[must_use]
+    pub fn pending_unprovable(&self) -> Option<Unprovable> {
+        use lsr_core::{Level, ObjectStore, PageLimit};
+        let newest = self.remote_newest();
+        let listing = block_on(self.staging_raw.list(Level::ZERO, None, PageLimit::MAX)).ok()?;
+        let first_frame = u64::try_from(lsr_wal::HEADER_LEN).unwrap_or(u64::MAX);
+        listing
+            .files
+            .iter()
+            .filter(|file| newest.is_none_or(|newest| file.key.range().max().get() > newest))
+            .find_map(|file| {
+                let bytes = self.read_staged(&file.key).ok()?;
+                if is_full_image(&bytes) {
+                    return Some(Unprovable::Snapshot);
+                }
+                let raw = bytes.first_chunk::<{ lsr_ltx::HEADER_LEN }>()?;
+                let origin = lsr_ltx::Header::decode(raw).ok()?.fields().wal?;
+                (origin.offset() == first_frame).then_some(Unprovable::Hop)
+            })
+    }
+
     /// The newest transaction any replica file holds, at any level, read
     /// around the wrappers; `None` when the replica is empty or cannot list.
     #[must_use]
@@ -1047,3 +1072,12 @@ impl World {
 
 #[cfg(test)]
 mod tests;
+
+/// A pending staged file the boot's witness cannot prove from the live WAL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unprovable {
+    /// A file with every page.
+    Snapshot,
+    /// A file that starts a WAL generation without every page.
+    Hop,
+}

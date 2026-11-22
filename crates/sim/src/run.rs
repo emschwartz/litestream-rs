@@ -568,11 +568,8 @@ impl Runner {
         let total0 = self.tally.total();
         let began = self.now();
         let hits0 = self.fault_hits();
-        self.liveness.see_wal(
-            self.w.sqlite.wal_header_salts(),
-            self.w.sqlite.our_reader_pins_wal(),
-        );
         let booting = !self.actor.booted();
+        self.liveness_before_tick(booting);
         let salts = self.w.sqlite.salts();
         let commits = self.w.model.commits().len();
         let ended = self.run_one(plan);
@@ -635,6 +632,21 @@ impl Runner {
         Ok((step, stats))
     }
 
+    /// Shows the liveness oracle the WAL before a tick, and, before a boot,
+    /// what the boot's witness will find unprovable.
+    fn liveness_before_tick(&mut self, booting: bool) {
+        self.liveness.see_wal(
+            self.w.sqlite.wal_header_salts(),
+            self.w.sqlite.our_reader_pins_wal(),
+        );
+        if booting && let Some(what) = self.w.pending_unprovable() {
+            self.liveness.note(Justifier::PendingUnprovable);
+            self.report
+                .reach
+                .bump(format!("liveness.pending_unprovable.{}", variant(&what)));
+        }
+    }
+
     /// Takes in a tick that ran: records it, checks its retry wait, and
     /// moves the clock as a driver would.
     fn ran(&mut self, event: &Event, next: Next, began: Timestamp) -> Result<Step, Violation> {
@@ -682,6 +694,14 @@ impl Runner {
     /// Hands a snapshot the event announces to the liveness oracle, and
     /// tells it when a fault failed a step.
     fn judge_snapshot(&mut self, event: &Event) -> Result<(), Violation> {
+        // A boot or a step under a wal-index reset ahead of the WAL header
+        // leaves a position in the header's generation that proves nothing:
+        // the header the next commit writes is a change it cannot follow.
+        if matches!(event, Event::Booted { .. } | Event::Synced { .. })
+            && self.w.sqlite.index_reset_ahead()
+        {
+            self.liveness.note_in_tick(Justifier::PositionUnproven);
+        }
         let (cause, at_boot) = match event {
             Event::Booted { cause: Some(cause) } => (cause, true),
             Event::Resnapshot(cause) => (cause, false),
