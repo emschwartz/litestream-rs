@@ -315,3 +315,17 @@ name = "empty-listing-is-empty-replica-cli"
 fix = "a5c7d57"
 package = "lsr-cli"
 tests = ["if_replica_exists_over_a_listing_that_shows_nothing_skips_nothing"]
+
+[[bug]]
+name = "replica-page-size-unread"
+fix = "7bf9707"
+package = "lsr-core"
+tests = ["a_newest_replica_header_that_does_not_decode_still_names_the_page_size"]
+
+# The same plant, judged by the simulator's lying-reads hold where it was found.
+[[bug]]
+name = "replica-page-size-unread-sim"
+fix = "7bf9707"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_boot_whose_replica_reads_lie_never_writes_a_new_page_size_seed_0x13"]
