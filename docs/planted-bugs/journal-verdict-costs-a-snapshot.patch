@@ -1,13 +1,13 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index ae68e93..2b73cc0 100644
+index 3e3b657..ed0d300 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -816,7 +816,8 @@ impl Actor {
+@@ -891,7 +891,8 @@ impl Actor {
          };
          // A report only, and one a boot that fails later reads again.
          self.kept.journal = journal_signal(journal, newest_staged.as_ref(), &upload);
--        let cause = boot_cause(lost, refused, from.err());
-+        let cause = boot_cause(lost, refused, from.err())
+-        let cause = boot_cause(dropped, refused, from.err());
++        let cause = boot_cause(dropped, refused, from.err())
 +            .or(self.kept.journal.map(|_| SnapshotCause::FirstSync));
          let pending = pending_at_boot(self.kept.asked(), cause);
          let course = match (from, pending) {
