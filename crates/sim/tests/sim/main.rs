@@ -6,6 +6,8 @@
 #[cfg(test)]
 mod after_restart;
 #[cfg(test)]
+mod clock_reads;
+#[cfg(test)]
 mod crash_law;
 #[cfg(test)]
 mod dropped_created_at;
@@ -15,6 +17,8 @@ mod failstop;
 mod faults;
 #[cfg(test)]
 mod fixed_seeds;
+#[cfg(test)]
+mod liveness;
 #[cfg(test)]
 mod replay;
 #[cfg(test)]

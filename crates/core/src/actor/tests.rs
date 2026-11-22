@@ -1957,3 +1957,27 @@ fn one_bad_read_of_a_staged_file_while_uploading_drops_nothing() {
     assert!(!snapshots(&rig).contains(&2));
     assert_eq!(restored(&rig), 2);
 }
+
+/// A PASSIVE checkpoint stages no boundary snapshot, so the counter for one stays at
+/// zero; only a TRUNCATE that changed the WAL counts one.
+#[test]
+fn a_passive_checkpoint_counts_no_boundary_snapshot() {
+    let mut rig = Rig::new();
+    let mut config = cfg();
+    config.checkpoint.min_pages = Some(nz(1));
+    let mut actor = Actor::new(config);
+    rig.settle(&mut actor, T0);
+    assert!(
+        rig.ck
+            .calls()
+            .iter()
+            .any(|c| matches!(c, CheckpointCall::Checkpoint(CheckpointMode::Passive))),
+        "the rig ran no PASSIVE checkpoint"
+    );
+    assert_eq!(
+        actor
+            .snapshots()
+            .get(crate::fault::SnapshotCauseKind::CheckpointBoundary),
+        0
+    );
+}

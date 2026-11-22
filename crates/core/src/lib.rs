@@ -84,8 +84,8 @@ pub use failstop::{AppGate, Gate, IfReplicationStops, Lag, MaxUnreplicatedAge, T
 pub use fault::reporting_bugs;
 pub use fault::{
     Backoff, BugSite, Clamped, Fault, MAX_BACKOFF, Next, OtherWriter, PersistentCause, Policy,
-    Response, Responses, STALLED_AFTER, SnapshotCause, Stall, StopCause, VERIFY, backoff_wait,
-    policy, retry_wait,
+    Response, Responses, STALLED_AFTER, SnapshotCause, SnapshotCauseKind, SnapshotCounts, Stall,
+    StopCause, VERIFY, backoff_wait, policy, retry_wait,
 };
 pub use inventory::{Inventory, InventoryError, is_snapshot_start};
 pub use journal::{JournalFile, JournalWriteError, JournalWriter};

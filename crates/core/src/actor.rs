@@ -90,7 +90,7 @@ use crate::env::Clock;
 use crate::failstop::MaxUnreplicatedAge;
 use crate::fault::{
     Action, Backoff, Clamped, Fault, Next, PersistentCause, Policy, Responses, STALLED_AFTER,
-    SnapshotCause, Stall, StopCause, backoff_wait, policy,
+    SnapshotCause, SnapshotCounts, Stall, StopCause, backoff_wait, policy,
 };
 use crate::inventory::Inventory;
 use crate::layout::{FileInfo, FileKey, Level};
@@ -449,6 +449,12 @@ impl Actor {
     #[must_use]
     pub const fn replicated(&self) -> Option<Txid> {
         self.engine.upload.confirmed()
+    }
+
+    /// Snapshots staged since the actor began, per cause; kept across a rebuild.
+    #[must_use]
+    pub const fn snapshots(&self) -> SnapshotCounts {
+        self.kept.snapshots
     }
 
     /// Why the next sync is a snapshot, when it is one.
@@ -1380,6 +1386,7 @@ impl Actor {
                         self.note_quiet_snapshot(cause, key);
                     }
                     self.kept.snapshot_asked = false;
+                    self.kept.snapshots.count(&cause);
                 }
                 if self.engine.gate == Gate::NextWrite {
                     self.engine.gate = Gate::Open;
@@ -1447,6 +1454,12 @@ impl Actor {
             }
         };
         let position = self.took(done.staged);
+        if done.outcome == CheckpointOutcome::Truncated {
+            // A TRUNCATE that changed the WAL staged its boundary snapshot.
+            self.kept
+                .snapshots
+                .count(&SnapshotCause::CheckpointBoundary);
+        }
         let observed = Observed::of(now, &position, true);
         let (state, next) = after_checkpoint(
             self.engine.checkpoint,

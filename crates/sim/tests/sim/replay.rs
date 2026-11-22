@@ -4,10 +4,11 @@
 //! and runs this test with output shown, under the seed's mix
 //! (`Weights::mixed`), as the fixed and rotating sets run it, with the overrides of
 //! `unaided::weights` (`LSR_SIM_BLOCK_LAW`, `LSR_SIM_AFTER_RESTART`, `LSR_SIM_SWARM`,
-//! `LSR_SIM_HOLD`). Without `LSR_SIM_SEED` the test does
-//! nothing, so `just test` stays quiet.
+//! `LSR_SIM_HOLD`), or under the default mix with `LSR_SIM_WEIGHTS=default` (what the unit
+//! tests in `run` draw from). Without `LSR_SIM_SEED` the test does nothing, so `just test`
+//! stays quiet.
 
-use lsr_sim::{Opts, Seed, run_with};
+use lsr_sim::{Opts, Seed, Weights, run_with};
 
 const DEFAULT_STEPS: u32 = 300;
 
@@ -26,7 +27,12 @@ fn replay_the_named_run() {
         trace: true,
         ..Opts::default()
     };
-    match run_with(seed, steps, &crate::unaided::weights(seed), &opts) {
+    let weights = match std::env::var("LSR_SIM_WEIGHTS").as_deref() {
+        Ok("default") => Weights::default(),
+        Ok(other) => panic!("LSR_SIM_WEIGHTS is `default` or unset, not {other}"),
+        Err(_) => crate::unaided::weights(seed),
+    };
+    match run_with(seed, steps, &weights, &opts) {
         Ok(report) => {
             for line in &report.trace {
                 println!("{line}");
