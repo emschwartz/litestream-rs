@@ -28,7 +28,7 @@
 //! When none has them, [`CredentialError::Missing`] names every source and why it
 //! gave nothing; no error or `Debug` output holds a value. A line in a shared file
 //! that is not INI is refused, where Go skips it (see the `ini` module and
-//! `docs/decisions.md` D153).
+//! `docs/decisions.md` D43).
 //!
 //! Not built, because each needs a network service or a subprocess: the EC2
 //! instance metadata service (IMDS), ECS and EKS container credentials

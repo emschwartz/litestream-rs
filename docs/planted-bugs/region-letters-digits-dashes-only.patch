@@ -3,7 +3,7 @@ index 7b027f4..8c0ff45 100644
 --- a/crates/store-s3/src/config.rs
 +++ b/crates/store-s3/src/config.rs
 @@ -214,7 +214,7 @@ impl Region {
-     /// ones no request signed with them can succeed with (`docs/decisions.md` D155), so
+     /// ones no request signed with them can succeed with (`docs/decisions.md` D45), so
      /// providers' own names (`fr-par`, `auto`, `us_east`) all pass.
      pub fn new(name: &str) -> Result<Self, ConfigError> {
 -        name_is_clean(name, |c| !c.is_whitespace() && !c.is_control() && c != '/')
