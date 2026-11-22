@@ -355,9 +355,11 @@ fn survival_campaign_swarm() {
 /// a restore of the latest state goes back from a later node of the history to an earlier one
 /// on the same branch with no rewind recorded, while the oracle passes. The second hold is a
 /// lagging listing only for its commits, ticks and judgments; the engine never sees it. The
-/// same class as D9 in `docs/BEHAVIOR.md`: a boot snapshots after another writer's files.
+/// same class as D9 in `docs/BEHAVIOR.md`: the engine was down when the second writer's files
+/// appeared, so the boot took them for its own lost staging and snapshotted above them. The
+/// boot now refuses replica files that neither the live WAL nor a takeover record vouches for
+/// (BOOT-22).
 #[test]
-#[ignore = "known wrong, G2 with a second writer: latest goes back with no rewind recorded (D9 class); for the second-writer work"]
 fn latest_never_goes_back_after_two_second_writers_seed_0xb9() {
     use lsr_core::{StoreError, StoreOp};
     use lsr_sim::{CrashKind, FaultShape, Target};

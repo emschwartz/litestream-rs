@@ -28,6 +28,7 @@ use crate::layout::FileKey;
 use crate::pages::PageChecksumTable;
 use crate::position::Position;
 use crate::stop_record::StopRecord;
+use crate::takeover::TakeoverRecord;
 use crate::upload::UploadState;
 use crate::witness::Witnesses;
 
@@ -122,6 +123,11 @@ pub(super) struct Kept {
     /// from the last process; a boot clears it once the replica no longer
     /// holds a transaction past the record's.
     pub(super) stop_record: Option<StopRecord>,
+    /// An operator's takeover the driver handed in (`crate::takeover`).
+    pub(super) takeover: Option<TakeoverRecord>,
+    /// The replica's newest transaction when a boot refused to build on files
+    /// nothing vouched for: what the stop reports.
+    pub(super) refused_through: Option<Txid>,
 }
 
 impl Kept {
@@ -140,6 +146,8 @@ impl Kept {
             suspect_staged: None,
             unproven: Unproven::No,
             stop_record: None,
+            takeover: None,
+            refused_through: None,
         }
     }
 
@@ -162,6 +170,8 @@ impl Kept {
             suspect_staged,
             unproven,
             stop_record,
+            takeover,
+            refused_through,
         } = self;
         Self {
             cfg: cfg.clone(),
@@ -177,6 +187,8 @@ impl Kept {
             suspect_staged: *suspect_staged,
             unproven: *unproven,
             stop_record: *stop_record,
+            takeover: *takeover,
+            refused_through: *refused_through,
         }
     }
 

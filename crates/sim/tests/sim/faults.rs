@@ -251,6 +251,16 @@ fn second_writer_survives_restart() {
 }
 
 #[test]
+fn foreign_file_while_down_stops() {
+    run(scenario::foreign_file_while_down_stops);
+}
+
+#[test]
+fn newest_staged_file_lost() {
+    run(scenario::newest_staged_file_lost);
+}
+
+#[test]
 fn bucket_rolled_back() {
     run(scenario::bucket_rolled_back);
 }

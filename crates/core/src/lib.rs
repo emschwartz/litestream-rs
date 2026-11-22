@@ -53,6 +53,7 @@ mod store;
 #[cfg(test)]
 mod stuck;
 mod sync;
+mod takeover;
 mod upload;
 mod verify;
 mod watch;
@@ -133,6 +134,7 @@ pub use store::{
     ReadAt, ReadLen, StoreError, StoreOp, Upload, build_listing,
 };
 pub use sync::{PageFrom, Step, StepEnd, StepFailed, SyncConfig, Synced, clamp, sync_step};
+pub use takeover::{TakeoverRecord, TakeoverRecordError};
 pub use upload::{Did, UploadConfig, UploadFailed, UploadPlan, UploadState, Uploaded, upload_next};
 pub use verify::{
     Compared, Depth, Finding, LevelSummary, LivePages, MAX_FINDINGS, Report, Severity, Verified,

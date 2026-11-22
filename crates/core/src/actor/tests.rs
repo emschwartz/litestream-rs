@@ -1812,6 +1812,7 @@ mod rejected_snapshot;
 mod second_writer;
 mod stamp;
 mod tasks;
+mod vouch;
 mod wal_barrier;
 mod witness;
 

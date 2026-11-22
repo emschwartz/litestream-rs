@@ -12,7 +12,7 @@ fn go_like_actor() -> Actor {
 }
 
 /// A valid level-0 file for transaction `n` that this engine never staged.
-fn put_foreign(rig: &Rig, n: u64) -> FileKey {
+pub(super) fn put_foreign(rig: &Rig, n: u64) -> FileKey {
     let txid = Txid::new(n).unwrap();
     let header = Header::new(HeaderFields {
         tracked: false,

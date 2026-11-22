@@ -145,12 +145,17 @@ fn parse_ours(word: &str) -> Result<Option<Txid>, StopRecordError> {
     if word == "none" {
         return Ok(None);
     }
+    txid_word(word).map(Some).ok_or(StopRecordError::Txid)
+}
+
+/// A transaction id as the records store it: exactly 16 lower-case hex
+/// digits, not zero.
+pub(crate) fn txid_word(word: &str) -> Option<Txid> {
     let lower_hex = |c: char| c.is_ascii_digit() || ('a'..='f').contains(&c);
     if word.len() != 16 || !word.chars().all(lower_hex) {
-        return Err(StopRecordError::Txid);
+        return None;
     }
-    let raw = u64::from_str_radix(word, 16).map_err(|_digits| StopRecordError::Txid)?;
-    Txid::new(raw).map(Some).ok_or(StopRecordError::Txid)
+    Txid::new(u64::from_str_radix(word, 16).ok()?)
 }
 
 #[cfg(test)]

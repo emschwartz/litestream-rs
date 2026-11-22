@@ -303,6 +303,18 @@ struct Runner {
     stop_record: Option<lsr_core::StopRecord>,
     /// The stop record saved with [`Runner::saved`].
     saved_stop_record: Option<lsr_core::StopRecord>,
+    /// The takeover record an operator's take-over left in the meta
+    /// directory ([`lsr_core::TakeoverRecord`]), handed to every new actor.
+    takeover: Option<lsr_core::TakeoverRecord>,
+    /// The takeover record saved with [`Runner::saved`].
+    saved_takeover: Option<lsr_core::TakeoverRecord>,
+    /// Staging was damaged, wiped or put back since the engine last had
+    /// staged at least what it confirmed: until then, a boot may find the
+    /// replica ahead of staging with no other writer, and refuse.
+    staging_disturbed: bool,
+    /// The newest staged transaction after the last tick: one lower after a
+    /// tick means a newest staged file went (prune never deletes it).
+    staged_high: Option<Txid>,
     /// The commit each file in `saved` held when it was copied, noted again
     /// when the copy is put back.
     saved_notes: Vec<(Txid, Option<crate::model::WalEnd>, crate::CommitId)>,
@@ -377,6 +389,10 @@ impl Runner {
             saved_notes: Vec::new(),
             stop_record: None,
             saved_stop_record: None,
+            takeover: None,
+            saved_takeover: None,
+            staging_disturbed: false,
+            staged_high: None,
             app_autocheckpoint: Some(lsr_core::SQLITE_AUTOCHECKPOINT),
             app_before: AppCheckpoints::NONE,
             expected: Vec::new(),
@@ -412,6 +428,9 @@ impl Runner {
         self.actor.set_app_autocheckpoint(self.app_autocheckpoint);
         if let Some(record) = self.stop_record {
             self.actor.remember_stop(record);
+        }
+        if let Some(record) = self.takeover {
+            self.actor.remember_takeover(record);
         }
         self.unwatched = true;
         self.degraded = [false; 5];
@@ -603,6 +622,14 @@ impl Runner {
         });
     }
 
+    /// Records a stop the tick ended in.
+    fn stopped(&mut self, cause: StopCause) -> Step {
+        if self.record {
+            self.report.seen.push(Seen::Stop(cause));
+        }
+        Step::Stopped(cause)
+    }
+
     fn step(&mut self, plan: Option<CrashPlan>) -> Result<(Step, TickStats), Violation> {
         let at = self.w.remote_recorder.len();
         let newest_commit = self.w.model.newest_commit();
@@ -621,6 +648,7 @@ impl Runner {
         if matches!(ended, TickEnd::Done(_)) && self.actor.stop_record() != record0 {
             self.stop_record = self.actor.stop_record();
         }
+        self.watch_staging()?;
         if booting && self.actor.booted() {
             self.life.boot_salts = Some(salts);
             self.life.boot_commits = commits;
@@ -641,19 +669,10 @@ impl Runner {
             }
             TickEnd::Done(Tick::Stopped(cause)) => {
                 self.report.reach.bump(format!("stop.{}", variant(&cause)));
-                if self.record {
-                    self.report.seen.push(Seen::Stop(cause));
-                }
-                (Step::Stopped(cause), None)
+                (self.stopped(cause), None)
             }
             TickEnd::Done(Tick::Drained { txid }) => (Step::Drained(txid), None),
-            TickEnd::Done(Tick::DeadlineReached(_)) => {
-                let cause = StopCause::Shutdown;
-                if self.record {
-                    self.report.seen.push(Seen::Stop(cause));
-                }
-                (Step::Stopped(cause), None)
-            }
+            TickEnd::Done(Tick::DeadlineReached(_)) => (self.stopped(StopCause::Shutdown), None),
             TickEnd::Crashed {
                 polls, kind, lost, ..
             } => {
@@ -674,8 +693,85 @@ impl Runner {
             checkpoints: self.tally.total().saturating_sub(total0),
         };
         per_tick(&stats, self.limits())?;
+        let step = self.after_refusal(step)?;
         self.report.max_wal_frames = self.report.max_wal_frames.max(self.w.sqlite.mx_frame());
         Ok((step, stats))
+    }
+
+    /// Keeps [`Runner::staging_disturbed`]: set when the newest staged file
+    /// went, cleared once the staging directory holds again at least what the
+    /// engine confirmed.
+    fn watch_staging(&mut self) -> Result<(), Violation> {
+        let staged = self
+            .w
+            .newest_staged()
+            .map_err(|err| bug_fault(format!("listing staging failed: {err}")))?
+            .map(|info| info.key.range().max());
+        if staged < self.staged_high {
+            self.staging_disturbed = true;
+        }
+        self.staged_high = staged;
+        if self.staging_disturbed
+            && self.actor.booted()
+            && staged.is_some()
+            && staged >= self.actor.replicated()
+        {
+            self.staging_disturbed = false;
+        }
+        Ok(())
+    }
+
+    /// A boot refused replica files nothing vouched for
+    /// ([`lsr_core::TakeoverRecord`]). With another writer's file still
+    /// standing that is the stop the run expects. Otherwise the files are this
+    /// database's own, which staging no longer showed and the WAL could not
+    /// vouch for: the operator takes over, as `lsr take-over` does, and starts
+    /// the engine again.
+    fn after_refusal(&mut self, step: Step) -> Result<Step, Violation> {
+        let refused = self.actor.refused_through();
+        let Some(tip) = refused.filter(|_| step == Step::Stopped(StopCause::OtherWriter)) else {
+            return Ok(step);
+        };
+        if self.foreign_stands()? {
+            self.report.reach.bump("refusal.foreign");
+            return Ok(step);
+        }
+        // With staging intact, everything this engine put on the replica is at
+        // or below what staging holds: a refusal then has no cause.
+        if !self.staging_disturbed {
+            return Err(bug_fault(format!(
+                "a boot refused replica files through {tip} with staging intact and no other writer"
+            )));
+        }
+        self.report.reach.bump("refusal.take_over");
+        self.takeover = Some(lsr_core::TakeoverRecord::through(tip));
+        self.restart(CrashKind::Process);
+        Ok(Step::Crashed)
+    }
+
+    /// Whether a file another writer put, and the operator has not removed,
+    /// is still listed under its transaction.
+    fn foreign_stands(&self) -> Result<bool, Violation> {
+        let listed = self
+            .w
+            .remote_level_zero()
+            .map_err(|err| bug_fault(format!("listing the replica failed: {err}")))?;
+        let removed = |index: usize| self.w.foreign_removed.iter().any(|(at, _)| *at == index);
+        Ok(self.w.foreign.iter().enumerate().any(|(index, (txid, _))| {
+            !removed(index) && listed.iter().any(|info| info.key.range().max() == *txid)
+        }))
+    }
+
+    /// The operator runs `lsr take-over`: a takeover record through the
+    /// replica's newest transaction, for the next process.
+    fn take_over(&mut self) -> Result<(), Violation> {
+        let held = lsr_core::conformance::block_on(lsr_core::Inventory::load(&self.w.remote_raw))
+            .map_err(|err| bug_fault(format!("listing the replica failed: {err}")))?
+            .newest();
+        let done = held.map(|tip| {
+            self.takeover = Some(lsr_core::TakeoverRecord::through(tip));
+        });
+        self.scenario_bool("TakeOver", done.is_some())
     }
 
     /// Takes in a tick that ran: records it, checks its retry wait, and
@@ -733,6 +829,15 @@ impl Runner {
             Event::Degraded { cause, .. } => reach.bump(format!("degraded.{}", variant(cause))),
             Event::Booted { cause: Some(cause) } | Event::Resnapshot(cause) => {
                 reach.bump(format!("snapshot.{}", variant(&CauseKind::from(cause))));
+                // The engine deleted staged files of its own: until staging
+                // catches up, it may stand below what the replica holds.
+                if matches!(
+                    cause,
+                    lsr_core::SnapshotCause::NewestStagedFileUnreadable
+                        | lsr_core::SnapshotCause::StagedUnverified { .. }
+                ) {
+                    self.staging_disturbed = true;
+                }
             }
             Event::Maintained {
                 event: lsr_core::MaintainedEvent::Repaired(key),
@@ -837,7 +942,13 @@ impl Runner {
                         "the engine stopped in a drain: {cause:?}"
                     )));
                 }
-                Step::Ran | Step::Crashed => {}
+                // A restart (an operator's take-over after a refusal) brings
+                // up an engine that was never asked to drain.
+                Step::Crashed => {
+                    self.actor
+                        .begin_shutdown(self.actor.shutdown_deadline(self.now()));
+                }
+                Step::Ran => {}
             }
         }
         within(
@@ -1159,14 +1270,15 @@ impl Runner {
         key: lsr_core::FileKey,
         bytes: &[u8],
     ) -> Result<(), Violation> {
-        if self.actor.stop_record().is_none() {
+        // A boot's refusal records nothing: every boot judges again.
+        if self.actor.stop_record().is_none() && self.actor.refused_through().is_none() {
             return Err(bug_fault(
                 "a stop for another writer left no record".to_owned(),
             ));
         }
         // The operator deleted the meta directory since: the next process
         // starts with no memory of the stop, by the operator's choice.
-        if self.stop_record.is_none() {
+        if self.stop_record.is_none() && self.actor.refused_through().is_none() {
             return Ok(());
         }
         self.restart(CrashKind::Process);
@@ -1315,6 +1427,7 @@ impl Runner {
                 }
             }
             EnvFault::WipeStaging => {
+                self.staging_disturbed = true;
                 if self.w.wipe_staging().is_ok() {
                     self.w.crash(CrashKind::Process);
                     self.crashed(CrashKind::Process);
@@ -1434,6 +1547,9 @@ impl Runner {
     }
 
     fn meta(&mut self, op: MetaOp) -> Result<(), Violation> {
+        if op != MetaOp::Save {
+            self.staging_disturbed = true;
+        }
         let w = &self.w;
         let done = match op {
             MetaOp::Save => w
@@ -1450,6 +1566,7 @@ impl Runner {
                         .collect();
                     self.saved = Some(copy);
                     self.saved_stop_record = self.stop_record;
+                    self.saved_takeover = self.takeover;
                     true
                 })
                 .map_err(StagedEditError::from),
@@ -1460,6 +1577,7 @@ impl Runner {
                 };
                 if matches!(done, Ok(true)) {
                     self.stop_record = self.saved_stop_record;
+                    self.takeover = self.saved_takeover;
                     self.put_back = self.w.staging_recorder.len();
                     self.renote_saved();
                 }
@@ -1475,6 +1593,7 @@ impl Runner {
             MetaOp::StripNewestOrigin => w.strip_newest_origin(),
             MetaOp::DeleteAll => {
                 self.stop_record = None;
+                self.takeover = None;
                 w.wipe_staging()
                     .map(|()| true)
                     .map_err(StagedEditError::from)
@@ -1614,6 +1733,7 @@ impl Runner {
             Op::RequestSnapshot => self.actor.request_snapshot(),
             Op::Restore => self.restore_all()?,
             Op::Restart => self.restart(CrashKind::Process),
+            Op::TakeOver => self.take_over()?,
             Op::PowerLoss => self.restart(CrashKind::Power),
             Op::LyingWalSync => self.w.sqlite.lie_on_our_sync(),
             Op::Meta(op) => self.meta(*op)?,

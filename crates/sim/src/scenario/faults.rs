@@ -240,7 +240,11 @@ pub fn fault_scenarios(kind: FaultKind) -> &'static [fn() -> Scenario] {
         FaultKind::UploadChecksumMismatch => &[etag_mismatch_on_put],
         FaultKind::StoreRefused => &[store_refuses_upload],
         FaultKind::RemoteCorrupt => &[remote_bitrot_on_list_read],
-        FaultKind::RemoteAheadOfLocal => &[second_writer_mid_run, second_writer_survives_restart],
+        FaultKind::RemoteAheadOfLocal => &[
+            second_writer_mid_run,
+            second_writer_survives_restart,
+            super::foreign_file_while_down_stops,
+        ],
         FaultKind::RemoteRegressed => &[bucket_rolled_back, bucket_rolled_back_unseen],
         FaultKind::StagedLost => &[staged_byte_flip_before_upload, meta_dir_deleted_mid_run],
         FaultKind::LocalDiskFull => &[disk_full_on_staging],

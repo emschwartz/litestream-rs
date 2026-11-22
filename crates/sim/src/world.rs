@@ -744,9 +744,11 @@ impl World {
         };
         let key = FileKey::new(Level::ZERO, TxidRange::single(next));
         // Another writer's file is a sound one: the same pages under the next
-        // transaction.
+        // transaction, from a WAL that is not this database's, so it names no
+        // origin in it and the live WAL cannot vouch for it.
         let Some(bytes) = rewritten(&read_all(&self.remote_raw, &newest)?, |fields| {
             fields.txids = TxidRange::single(next);
+            fields.wal = None;
         }) else {
             return Ok(None);
         };

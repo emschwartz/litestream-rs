@@ -470,7 +470,9 @@ fn match_last_page<R: Read + Seek>(
     }
 }
 
-async fn newest_level_zero<L: ObjectStore>(staging: &L) -> Result<Option<FileInfo>, Fault> {
+pub(crate) async fn newest_level_zero<L: ObjectStore>(
+    staging: &L,
+) -> Result<Option<FileInfo>, Fault> {
     let (mut at, mut newest) = (ListAt::first(Level::ZERO), None);
     loop {
         let page = staging

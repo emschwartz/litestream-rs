@@ -47,8 +47,18 @@ fn with_staging_gone_and_level_zero_retained_away_boot_is_a_first_sync() {
     let newest_staged = FileKey::new(Level::ZERO, TxidRange::single(Txid::MIN));
     block_on(rig.remote.inner.delete(&[newest_staged])).unwrap();
     rig.staging = Counting::default();
+    // No level-0 file for the WAL to vouch for: nothing local tells these
+    // files from another writer's, so the boot stops.
     let mut actor = Actor::new(cfg());
-    let boot = rig.tick(&mut actor, T0 + 2);
+    assert_eq!(
+        rig.tick(&mut actor, T0 + 2),
+        Tick::Stopped(StopCause::OtherWriter)
+    );
+    assert_eq!(actor.refused_through(), Some(Txid::MIN));
+    // An operator's takeover through the replica's newest lets it snapshot.
+    let mut actor = Actor::new(cfg());
+    actor.remember_takeover(crate::TakeoverRecord::through(Txid::MIN));
+    let boot = rig.tick(&mut actor, T0 + 3);
     assert_eq!(
         event(&boot),
         Some(&Event::Booted {
@@ -62,7 +72,15 @@ fn with_staging_gone_a_wal_that_restarted_snapshots_as_a_staged_newest_staged_fi
     let (mut rig, mut actor) = wiped();
     rig.wal.force_restart();
     rig.commit(3);
-    let boot = rig.tick(&mut actor, T0 + 2);
+    // The WAL no longer holds the replica's newest file, so it cannot vouch
+    // for it: a stop, until a takeover covers it.
+    assert_eq!(
+        rig.tick(&mut actor, T0 + 2),
+        Tick::Stopped(StopCause::OtherWriter)
+    );
+    let mut actor = Actor::new(cfg());
+    actor.remember_takeover(crate::TakeoverRecord::through(Txid::new(2).unwrap()));
+    let boot = rig.tick(&mut actor, T0 + 3);
     assert_eq!(
         event(&boot),
         Some(&Event::Booted {
