@@ -1,6 +1,6 @@
 # AGENTS.md
 
-**litestream-rs** (working name): an in-process Rust port of Litestream 0.5.x. Read `docs/PLAN.md` before any work; it fixes decisions that task plans may not reopen.
+**litestream-rs** (working name): an in-process Rust port of Litestream 0.5.x. Read `docs/PLAN.md` and `docs/decisions.md` before any work; they fix decisions that task plans may not reopen. A change that settles a trade-off (a default, a stop or snapshot rule, a user-visible name, a cost accepted) adds its entry to `docs/decisions.md` in the same pull request, marked as delegated when an agent decided it for the owner.
 
 ## The contract
 - The replica is the contract: bucket layout plus LTX v3 files. Tolerant reader (everything Go v0.5.0 and later wrote), strict writer (Go v0.5.16 and later must read it).
