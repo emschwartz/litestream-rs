@@ -557,7 +557,12 @@ impl Upload for FsUpload {
     }
 }
 
+#[cfg(unix)]
+mod engine_journal;
 mod journal;
+
+#[cfg(unix)]
+pub use engine_journal::{FsJournalFile, JOURNAL_NAME};
 
 #[cfg(test)]
 mod tests;
