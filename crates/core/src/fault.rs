@@ -43,6 +43,7 @@
 //! with cause [`SnapshotCause::LocalRewound`]: it is expected under
 //! `synchronous=NORMAL`, and stopping would leave every later write unreplicated.
 
+use std::io;
 use std::num::NonZeroU32;
 use std::time::Duration;
 
@@ -836,10 +837,15 @@ impl Fault {
     /// The same error means something else here. A missing or unusable staged
     /// file is lost, not a relist. A write whose stored size differs is the
     /// torn write to encode again. A permission error retries, so an operator
-    /// can fix the directory without a restart.
+    /// can fix the directory without a restart. A write the disk or a quota
+    /// has no room for is a full disk, whatever the store calls it.
     #[must_use]
     pub const fn from_staging(err: &StoreError) -> Self {
         match err {
+            StoreError::Transient {
+                kind: io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded,
+                ..
+            } => Self::LocalDiskFull,
             StoreError::Transient { .. }
             | StoreError::Throttled { .. }
             | StoreError::Denied { .. }

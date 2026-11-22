@@ -561,6 +561,19 @@ fn from_staging_names_the_local_fault_for_every_store_error() {
     }
 }
 
+/// ENOSPC (and EDQUOT) on the staging directory is a full disk, not an
+/// unnamed local I/O error: the operator's fix is to free space.
+#[test]
+fn a_full_staging_disk_is_disk_full() {
+    for kind in [ErrorKind::StorageFull, ErrorKind::QuotaExceeded] {
+        let err = StoreError::Transient {
+            op: StoreOp::Upload,
+            kind,
+        };
+        assert_eq!(Fault::from_staging(&err), Fault::LocalDiskFull, "{kind:?}");
+    }
+}
+
 #[test]
 fn no_staging_error_is_blamed_on_the_replica() {
     let remote_only = [
