@@ -2027,6 +2027,7 @@ mod newest_replica_file;
 mod no_wal_yet;
 mod pages;
 mod rejected_snapshot;
+mod rewound;
 mod stamp;
 mod tasks;
 mod wal_barrier;
