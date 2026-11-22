@@ -44,6 +44,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D34 | A restore of the latest state that a writer keeps outpacing: fail or answer? | Answer the last listing, flagged | parent session (#126) | 2026-11-22 | open to owner review |
 | D35 | When may the simulator accept a task still stalled at the end of a run? | Only while the world still imposes the stall's fault; the excuse table is empty today | Claude (stall-liveness), **delegated** | 2026-11-22 | open to owner review |
 | D100 | How does the journal hold the unproven-WAL debt, and when is it written? | Written at the end of the tick that changes it; a new failure may raise it at any step; `JournalUnwritable` while the journal lags | Claude (journal), **delegated** | 2026-11-22 | open to owner review |
+| D101 | Does a run with nothing to record still create the journal? | Yes: a process that neither read nor wrote a record writes one, so `JournalMissing` means the journal was lost | Claude (journal), **delegated** | 2026-11-22 | open to owner review |
 | D130 | How does the simulator run the real directory store, and who judges it? | A filesystem trait in store-fs, an in-memory filesystem under the crash law in the sim, half the swarm on it, a staging-contract judge | Claude (sim-real-store-fs), **delegated** | 2026-11-22 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
@@ -360,9 +361,18 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Question:** a failed WAL fsync must survive a restart (open defect D2). When is it written, what may follow what, and what is reported when it cannot be written?
 - **Choice:** the journal's debt is a function of the engine's state, written at the end of every tick in which it differs from the last record made durable (or read at boot); boot restores a recorded debt and never forgives one. The debt is paid only through its cure (TRUNCATE owed, then snapshot owed, then none), and a new failure may raise it to TRUNCATE owed at any step: the writer refuses, as a bug, a record that forgives it. A failed write is tried again every tick; `JournalUnwritable` (approved name) is reported while the journal lags the engine and clears once nothing is left to record.
 - **Options considered:** write the debt inside `Actor::fault` (it has no file lent); write it before the next sync step (one more place to remember); the design's strict order No, Truncate, Snapshot, No (refuses a second failure during the paying snapshot).
-- **Cost accepted:** the record lags the failure by the rest of one tick, so a kill in that window forgets it, as without a journal. One `fdatasync` (two on the first write, which creates the file) per change of the debt; none otherwise, so a database that never fails a WAL fsync never creates the journal.
+- **Cost accepted:** the record lags the failure by the rest of one tick, so a kill in that window forgets it, as without a journal. One `fdatasync` (two on the first write, which creates the file) per change of the debt; none otherwise. (The journal is now created on every run, D101.)
 - **Revisit if:** the window inside the tick is shown to matter, or later facts need ordering against the debt within a tick.
 - **Links:** `crates/core/src/actor/unproven.rs`, `docs/journal.md`, `docs/BEHAVIOR.md` RUN-3 and D2.
+
+## D101. A run with nothing to record still creates the journal (delegated)
+
+- **Question:** under D100 the journal was written only when the debt changed, so a database that never failed a WAL fsync never had one, and every restart after its first sync reported `JournalMissing`. Should a run with nothing to record write anyway?
+- **Choice:** yes. At the end of a tick, a process that has neither read a record at boot nor made one durable writes the record of what it holds (no debt, today). After that, a boot reads the record and writes nothing until a fact changes. `JournalMissing` then means a journal that existed is gone (or an upgrade from a version without one), which is what an operator should be told; it is surfaced in health, `/healthz` and metrics.
+- **Options considered:** keep writing only on change and stop reporting `Missing` (loses the only sign of a deleted journal); create the journal at boot, before the first tick (a boot that fails later would have written for nothing, and the end-of-tick reconcile already retries).
+- **Cost accepted:** one creation per database (a write, two `fsync`s and a directory `fsync`) on the first tick of the first run, and again after a journal is lost or unreadable. A journal that cannot be created is reported as `JournalUnwritable` until a write succeeds, even while no debt is owed: the next failed WAL fsync could not be recorded either.
+- **Revisit if:** creating the file on a read-only or full meta directory is shown to be common enough that the report is noise.
+- **Links:** `crates/core/src/actor.rs` (`reconcile_journal`), `docs/journal.md`.
 
 ## D130. The real directory store in the simulator (delegated)
 

@@ -229,6 +229,20 @@ fn no_journal_a_boot_can_find_changes_what_the_engine_does() {
     }
 }
 
+/// A restart after a run that owed nothing reads the journal that run left: the first process
+/// creates it, so `JournalMissing` means the journal was lost, not that nothing went wrong.
+#[test]
+fn a_restart_after_a_run_with_no_debt_reports_nothing() {
+    let mut journal = MemJournal::default();
+    let mut rig = Rig::new();
+    settle(&mut rig, &mut Actor::new(cfg()), T0, Some(&mut journal));
+    rig.commit(2);
+    let mut actor = Actor::new(cfg());
+    settle(&mut rig, &mut actor, T0 + 10, Some(&mut journal));
+    assert_eq!(actor.journal(), None);
+    assert_eq!(recorded(&mut journal), Some(lsr_journal::Unproven::No));
+}
+
 /// A meta directory wiped while the replica keeps its files: staging is empty, the replica is
 /// not, so a missing journal is not a first run and is reported.
 #[test]
@@ -326,13 +340,16 @@ fn failed_sync(journal: &mut MemJournal) -> (Rig, Actor, i64) {
 }
 
 /// The failing tick itself records the debt, before any later tick can read the WAL; a run
-/// with no debt never creates the journal.
+/// with no debt writes one record, that nothing is owed, and then nothing more.
 #[test]
 fn a_failed_wal_sync_is_recorded_in_the_tick_that_met_it() {
     let mut journal = MemJournal::default();
     let mut rig = Rig::new();
     settle(&mut rig, &mut Actor::new(go_like()), T0, Some(&mut journal));
-    assert_eq!((journal.bytes.is_none(), journal.writes), (true, 0));
+    assert_eq!(recorded(&mut journal), Some(lsr_journal::Unproven::No));
+    let created = journal.writes;
+    settle(&mut rig, &mut Actor::new(go_like()), T0 + 10, Some(&mut journal));
+    assert_eq!(journal.writes, created, "a boot that read the record writes nothing");
     let (_, _, _) = failed_sync(&mut journal);
     assert_eq!(
         recorded(&mut journal),
@@ -400,8 +417,8 @@ fn a_recorded_truncate_already_run_is_not_run_again() {
 }
 
 /// A journal that cannot be written is reported while it lags the engine, and the engine pays
-/// the debt from memory as it does with no journal; once there is nothing left to record, the
-/// report clears.
+/// the debt from memory as it does with no journal. The report stands while the journal holds
+/// nothing this process knows, and clears at the first write that succeeds.
 #[test]
 fn an_unwritable_journal_is_reported_and_the_debt_is_paid_from_memory() {
     let mut journal = MemJournal {
@@ -415,5 +432,13 @@ fn an_unwritable_journal_is_reported_and_the_debt_is_paid_from_memory() {
     );
     let seen = settle(&mut rig, &mut actor, until, Some(&mut journal));
     assert_eq!(truncates(&rig), 1, "{seen:?}");
-    assert_eq!(actor.journal(), None, "nothing is owed, so nothing lags");
+    assert_eq!(
+        actor.journal(),
+        Some(JournalSignal::Unwritable(ErrorKind::StorageFull)),
+        "the journal still holds nothing"
+    );
+    journal.writes_fail = false;
+    tick(&mut rig, &mut actor, until + 1, Some(&mut journal));
+    assert_eq!(actor.journal(), None);
+    assert_eq!(recorded(&mut journal), Some(lsr_journal::Unproven::No));
 }

@@ -37,6 +37,10 @@ with absent facts (no floor, no debt known, a full budget, no proof).
 
 ## Writing
 
+A process writes a record when the facts it holds differ from the newest record it read at boot
+or made durable, and also when it has neither, so a journal exists after the first tick of every
+run and a missing one at boot means it was lost (D101 in `docs/decisions.md`).
+
 The writer keeps, per process: the slot holding the newest record it knows, its sequence
 number, whether creation is known finished, whether this lifetime has synced, and the newest
 record it has itself made durable (none at boot).
