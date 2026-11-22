@@ -41,7 +41,7 @@ use lsr_core::{
 use lsr_heap::{Counting, Peak, peak_of};
 use lsr_ltx::{
     DbChecksum, DbPages, Encoder, Header, HeaderFields, PageNo, PageRef, PageSize, Timestamp, Txid,
-    TxidRange,
+    TxidRange, lock_page,
 };
 use lsr_wal::{Salts, WalReader};
 
@@ -89,15 +89,22 @@ fn stamp() -> Timestamp {
     Timestamp::from_unix_millis(1_700_000_000_000)
 }
 
+/// The pages of `pgnos` a database file can hold: all but SQLite's lock page, which a
+/// database past 1 GiB skips and `PageNo` refuses, so a fixture that size never names it.
+pub fn stored_pages(pgnos: impl Iterator<Item = u32>) -> impl Iterator<Item = PageNo> {
+    pgnos.filter_map(|pgno| PageNo::new(pgno, page_size()))
+}
+
 /// Writes one LTX file with the real encoder, streaming to `path`, holding only the
-/// encoder's own state (its page index) until it returns.
+/// encoder's own state (its page index) until it returns. Also returns how many pages
+/// it wrote, which is how many a restore of it writes.
 fn write_file(
     path: &Path,
     key: FileKey,
     commit: u32,
     pgnos: impl Iterator<Item = u32>,
     rng: &mut Rng,
-) -> FileInfo {
+) -> (FileInfo, u64) {
     let size = page_size();
     let header = Header::new(HeaderFields {
         tracked: false,
@@ -113,19 +120,20 @@ fn write_file(
     let out = BufWriter::with_capacity(MIB, File::create(path).unwrap());
     let mut encoder = Encoder::new(out, header).unwrap();
     let mut page = vec![0_u8; size.bytes()];
-    for pgno in pgnos {
+    let mut written = 0;
+    for pgno in stored_pages(pgnos) {
         rng.fill(&mut page);
-        encoder
-            .write_page(PageNo::new(pgno, size).unwrap(), &page)
-            .unwrap();
+        encoder.write_page(pgno, &page).unwrap();
+        written += 1;
     }
     let (mut out, _trailer) = encoder.finish(None).unwrap();
     out.flush().unwrap();
-    FileInfo {
+    let info = FileInfo {
         key,
         size: std::fs::metadata(path).unwrap().len(),
         listed: ListedTime::Created(CreatedAt::mtime(stamp())),
-    }
+    };
+    (info, written)
 }
 
 /// A replica on disk that answers ranged reads without holding a byte of it: the
@@ -134,6 +142,7 @@ pub struct Spool {
     _dir: tempfile::TempDir,
     files: Vec<(FileInfo, File)>,
     width: usize,
+    pages: u64,
 }
 
 impl Spool {
@@ -145,8 +154,10 @@ impl Spool {
         let dir = tempfile::tempdir().unwrap();
         let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
         let mut files = Vec::new();
-        let mut put = |path: std::path::PathBuf, info: FileInfo| {
+        let mut written = 0;
+        let mut put = |path: std::path::PathBuf, (info, pages): (FileInfo, u64)| {
             files.push((info, File::open(path).unwrap()));
+            written += pages;
         };
         let key = FileKey::snapshot(txid(1));
         let path = dir.path().join("snapshot");
@@ -167,7 +178,13 @@ impl Spool {
             _dir: dir,
             files,
             width,
+            pages: written,
         }
+    }
+
+    /// Pages in every file together: what a restore of the whole chain writes.
+    pub fn pages(&self) -> u64 {
+        self.pages
     }
 
     /// Bytes on disk, every file together.
@@ -333,7 +350,7 @@ pub fn assert_restore_flat_in_size(small: u32, width: usize) {
             "the database must be larger than the window, or the gate cannot see a buffer"
         );
         let (peak, written) = restore_peak(&spool);
-        assert_eq!(written, u64::from(pages) + 3 * 16);
+        assert_eq!(written, spool.pages());
         eprintln!(
             "restore width {width}: {} MiB -> {} KiB",
             spool.bytes() >> 20,
@@ -374,7 +391,7 @@ fn restore_peak_heap_is_flat_in_chain_length() {
         one_peak.extra >> 10,
         long_peak.extra >> 10
     );
-    assert_eq!(long_pages, u64::from(pages) + 63 * 64);
+    assert_eq!(long_pages, long.pages());
     assert!(
         long_peak.extra <= one_peak.extra + FLAT_SLACK,
         "a longer chain held more: {} bytes for 1 file, {} for 64",
@@ -382,6 +399,15 @@ fn restore_peak_heap_is_flat_in_chain_length() {
         long_peak.extra
     );
     assert!(long_peak.extra <= restore_cap(2));
+}
+
+/// A database past 1 GiB has no lock page, so the fixtures past it must leave it out:
+/// naming it made the 4 GiB restore gate panic while building its replica.
+#[test]
+fn a_fixture_past_one_gib_never_names_the_lock_page() {
+    let lock = lock_page(page_size());
+    let stored: Vec<u32> = stored_pages(lock - 1..=lock + 1).map(PageNo::get).collect();
+    assert_eq!(stored, [lock - 1, lock + 1]);
 }
 
 /// A store that takes an upload and keeps only its length and its largest write.
