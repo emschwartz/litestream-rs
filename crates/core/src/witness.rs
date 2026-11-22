@@ -36,10 +36,14 @@
 //! the same bytes, and end at the same commit size. A grown page has no frame
 //! in its range; it is compared with the database file, and only when the WAL
 //! holds no frame for it anywhere, since checkpoints write the database file
-//! only from frames. A pending snapshot, or a file that starts a new
-//! generation, is never witnessed at boot: a hop between generations is
-//! proven only by a running position that held the read lock across it, and
-//! a snapshot is cheaper to take again than to check page by page.
+//! only from frames. A pending snapshot needs no anchor: it is read from the
+//! live generation's first frame and checked whole, every page against its
+//! frame or the database file by the same rule, and it must not stop short
+//! of a file before it in its generation; one the read cannot prove is taken
+//! again, so the replica gets one snapshot either way. A file that starts a
+//! new generation without holding every page is never witnessed at boot: a
+//! hop between generations is proven only by a running position that held
+//! the read lock across it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
@@ -235,6 +239,16 @@ enum Refused {
     Contradicted,
 }
 
+/// What the next pending file follows: the previous transaction, and where
+/// its file ended in the live WAL when that is known (the replica's tail is
+/// in the live WAL, or a pending file was witnessed). With no such end, only
+/// a snapshot can start the run.
+#[derive(Clone, Copy)]
+struct Before {
+    txid: Option<Txid>,
+    link: Option<Prev>,
+}
+
 /// Where the previous file of the run ended.
 #[derive(Clone, Copy)]
 struct Prev {
@@ -266,8 +280,8 @@ pub(crate) struct LiveDb<'a, R, P> {
 ///
 /// The tail is read from staging when its staged copy is there (boot's
 /// listing already found it byte-equal to the replica's), else from the
-/// replica. With no WAL, an empty replica or a tail not in the live WAL,
-/// nothing is witnessed.
+/// replica. With no WAL nothing is witnessed; with an empty replica or a
+/// tail not in the live WAL, only a run that starts with a snapshot is.
 ///
 /// # Errors
 /// A store or WAL read that failed; that says nothing about the bytes.
@@ -295,11 +309,15 @@ where
         tokens: Vec::new(),
         refused: Some(first.key.range().min()),
     };
-    let (Some(mut live), Some(tail)) = (live, confirmed) else {
+    let Some(mut live) = live else {
         return Ok(refuse_all);
     };
-    let Some(mut prev) = anchor(staging, remote, &mut live, tail).await? else {
-        return Ok(refuse_all);
+    let mut prev = Before {
+        txid: confirmed,
+        link: match confirmed {
+            Some(tail) => anchor(staging, remote, &mut live, tail).await?,
+            None => None,
+        },
     };
     let mut framed = None;
     let mut tokens = Vec::new();
@@ -307,7 +325,10 @@ where
         match witness_one(staging, &mut live, info, prev, &mut framed).await? {
             Ok((token, next)) => {
                 tokens.push(token);
-                prev = next;
+                prev = Before {
+                    txid: Some(next.txid),
+                    link: Some(next),
+                };
             }
             Err(_refused) => {
                 return Ok(Pending {
@@ -391,15 +412,26 @@ fn span<R: Read + Seek, P>(
 
 /// One pending file against the live WAL: its token and where it ends, or
 /// why it is refused.
+///
+/// A file that starts where the previous one ended is an incremental. One
+/// read from the live generation's first frame is a snapshot when it holds
+/// every page: it is checked page by page against the WAL range and, for
+/// each page the range does not hold, the database file (only where no
+/// frame exists anywhere in the WAL), and it must reach at least as far as
+/// a previous file in the same generation, since one that stops short is an
+/// earlier state. A snapshot the read cannot prove is refused and taken
+/// again; a file that starts a generation without holding every page (a
+/// hop) is refused, since only a running position can prove it lost nothing.
 async fn witness_one<L: ObjectStore, R: Read + Seek, P: PageSource>(
     staging: &L,
     live: &mut LiveDb<'_, R, P>,
     info: &FileInfo,
-    prev: Prev,
+    prev: Before,
     framed: &mut Option<Option<BTreeSet<PageNo>>>,
 ) -> Result<Result<(Witnessed, Prev), Refused>, Fault> {
     let txid = info.key.range().max();
-    if info.key.range().min() != txid || prev.txid.next() != Some(txid) {
+    let next = prev.txid.map_or(Some(Txid::MIN), Txid::next);
+    if info.key.range().min() != txid || next != Some(txid) {
         return Ok(Err(Refused::Unusable));
     }
     let Some(decoded) = decode(staging, info.key, Fault::from_staging).await? else {
@@ -408,9 +440,20 @@ async fn witness_one<L: ObjectStore, R: Read + Seek, P: PageSource>(
     let Some((salts, start, end, commit)) = span(&decoded.header, live) else {
         return Ok(Err(Refused::NotInLiveWal));
     };
-    if salts != prev.salts || start != prev.end {
-        return Ok(Err(Refused::NotInLiveWal));
-    }
+    let follows = prev
+        .link
+        .filter(|link| link.salts == salts && link.end == start);
+    let first_frame = WalOffset::start(decoded.header.page_size()).get();
+    let prev_commit = match (follows, prev.link) {
+        (Some(link), _) => link.commit.get(),
+        // A snapshot that stops short of a file before it in its generation
+        // describes an earlier state of that WAL.
+        (None, Some(link)) if link.salts == salts && end.get() < link.end => {
+            return Ok(Err(Refused::Contradicted));
+        }
+        (None, _) if start == first_frame => 0,
+        (None, _) => return Ok(Err(Refused::NotInLiveWal)),
+    };
     let wal_pages = match wal_range(live.wal, start, end, salts)? {
         Range::Pages {
             pages,
@@ -419,7 +462,7 @@ async fn witness_one<L: ObjectStore, R: Read + Seek, P: PageSource>(
         Range::Pages { .. } | Range::Rewritten => return Ok(Err(Refused::Contradicted)),
         Range::NotInThisWal => return Ok(Err(Refused::NotInLiveWal)),
     };
-    if !holds_exactly(&decoded, &wal_pages, prev.commit, commit, live, framed)? {
+    if !holds_exactly(&decoded, &wal_pages, prev_commit, commit, live, framed)? {
         return Ok(Err(Refused::Contradicted));
     }
     let token = Witnessed {
@@ -439,11 +482,12 @@ async fn witness_one<L: ObjectStore, R: Read + Seek, P: PageSource>(
 /// Whether the file holds exactly the pages a sync step stages for its range:
 /// every WAL page up to `commit` with the WAL's bytes, and every page grown
 /// above `prev_commit` the range does not hold, with the database file's
-/// bytes, and nothing else.
+/// bytes, and nothing else. A snapshot is the case `prev_commit` = 0: every
+/// page the range does not hold comes from the database file.
 fn holds_exactly<R: Read + Seek, P: PageSource>(
     decoded: &Decoded,
     wal_pages: &BTreeMap<PageNo, PageChecksum>,
-    prev_commit: NonZeroU32,
+    prev_commit: u32,
     commit: NonZeroU32,
     live: &mut LiveDb<'_, R, P>,
     framed: &mut Option<Option<BTreeSet<PageNo>>>,
@@ -459,7 +503,7 @@ fn holds_exactly<R: Read + Seek, P: PageSource>(
         }
         expected = expected.saturating_add(1);
     }
-    let grown = (prev_commit.get().saturating_add(1)..=commit.get())
+    let grown = (prev_commit.saturating_add(1)..=commit.get())
         .filter_map(|raw| PageNo::new(raw, page_size))
         .filter(|pgno| !wal_pages.contains_key(pgno));
     let mut buf = vec![0_u8; page_size.bytes()];
