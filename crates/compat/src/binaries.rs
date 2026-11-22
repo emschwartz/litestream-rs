@@ -75,6 +75,10 @@ pub enum PageEncoding {
 /// The last release tag on the frame encoding.
 const LAST_FRAMES_PATCH: u32 = 15;
 
+/// The first release tag that writes a `litestream-timestamp` metadata value on upload; earlier
+/// builds leave a reader only the object's `LastModified`.
+const FIRST_TIMESTAMP_METADATA_PATCH: u32 = 16;
+
 /// The first release tag whose VFS takes `LITESTREAM_REPLICA_URL`, so reads a file replica.
 const FIRST_FILE_VFS_PATCH: u32 = 3;
 
@@ -136,6 +140,14 @@ impl GoBuild {
     /// script does not build it.
     pub fn vfs_reads_files(&self) -> bool {
         release_patch(&self.name).is_none_or(|n| n >= FIRST_FILE_VFS_PATCH)
+    }
+
+    /// Whether the created-at times of this build's replica are commit-dated: it writes
+    /// `litestream-timestamp` metadata (v0.5.16 and later, any commit, `main`). Earlier builds
+    /// leave a reader the store's `LastModified`, which can postdate the commit, so an as-of
+    /// instant between two uploads cannot be proven to precede the later one's commit.
+    pub fn writes_created_at_metadata(&self) -> bool {
+        release_patch(&self.name).is_none_or(|n| n >= FIRST_TIMESTAMP_METADATA_PATCH)
     }
 
     /// Whether this build writes its first snapshot soon after it starts. Every 0.5 release
@@ -395,6 +407,24 @@ mod tests {
             ("v0.5.3-beta3", PageEncoding::Block),
         ] {
             assert_eq!(GoBuild::new(name).page_encoding(), page_encoding, "{name}");
+        }
+    }
+
+    #[test]
+    fn created_at_metadata_starts_at_v0_5_16() {
+        for (name, written) in [
+            ("v0.5.0", false),
+            ("v0.5.15", false),
+            ("v0.5.16", true),
+            ("v0.5.18", true),
+            ("041a8c3", true),
+            ("main", true),
+        ] {
+            assert_eq!(
+                GoBuild::new(name).writes_created_at_metadata(),
+                written,
+                "{name}"
+            );
         }
     }
 

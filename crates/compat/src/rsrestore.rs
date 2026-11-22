@@ -11,7 +11,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use lsr_core::{
-    FileKey, Inventory, PlanOutcome, RestoreError, RestoreTarget, Restored, plan_reference, restore,
+    FileKey, Inventory, PlanOutcome, RestoreError, RestoreOptions, RestoreTarget, Restored,
+    plan_reference, restore, restore_with,
 };
 use lsr_local::FileSink;
 use lsr_ltx::{Encoder, Event, ReadDecoder};
@@ -148,5 +149,24 @@ pub fn restore_replica(
     let store = FsStore::new(replica);
     Ok(lsr_core::conformance::block_on(restore(
         &store, target, sink,
+    )))
+}
+
+/// [`restore_replica`] with `options` for the cases the executor can either refuse or accept.
+///
+/// # Errors
+/// [`CompatError`] when the sink cannot be created; the executor's own refusal is the inner
+/// `Err`.
+pub fn restore_replica_with(
+    replica: &Path,
+    target: RestoreTarget,
+    options: RestoreOptions,
+    out: &Path,
+) -> Result<Result<Restored, RestoreError>, CompatError> {
+    let sink = FileSink::create(out)
+        .map_err(|e| CompatError::Fixture(format!("creating the restore sink: {e}")))?;
+    let store = FsStore::new(replica);
+    Ok(lsr_core::conformance::block_on(restore_with(
+        &store, target, options, sink,
     )))
 }
