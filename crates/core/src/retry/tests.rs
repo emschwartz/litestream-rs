@@ -685,7 +685,9 @@ fn a_mismatch_on_an_object_already_gone_counts_as_removed() {
 #[test]
 fn remove_scratch_is_forwarded() {
     let (mem, _sleeper, store) = rig(SeededEntropy::new(1), policy(3));
-    mem.plant_scratch(7);
+    mem.plant_scratch(3);
+    mem.plant_scratch(4);
+    assert_eq!(mem.scratch(), 7, "planted scratch is counted");
     assert_eq!(conformance::block_on(store.remove_scratch()), Ok(7));
     assert_eq!(mem.scratch(), 0);
 }

@@ -545,6 +545,21 @@ fn a_snapshot_due_during_a_backlog_waits_for_idle_uploads() {
         })
         .count();
     assert!(compactions > 0, "{seen:?}");
+    // Once the snapshot waits, maintenance does not list again until uploads go idle: one
+    // deferral, not one per fair turn.
+    let waits = seen
+        .iter()
+        .filter(|t| {
+            matches!(
+                event(t),
+                Some(Event::Maintained {
+                    event: MaintainedEvent::Waiting { held: None },
+                    ..
+                })
+            )
+        })
+        .count();
+    assert_eq!(waits, 1, "{seen:?}");
     let after = rig.settle(&mut actor, now);
     let newest = level9(&rig).last().copied();
     assert!(
@@ -1980,6 +1995,10 @@ fn a_boot_removes_the_scratch_killed_uploads_left() {
     let mut rig = Rig::new();
     rig.staging.inner.plant_scratch(2);
     rig.remote.inner.plant_scratch(3);
+    assert_eq!(
+        (rig.staging.inner.scratch(), rig.remote.inner.scratch()),
+        (2, 3)
+    );
     let mut actor = Actor::new(cfg());
     let boot = rig.tick(&mut actor, T0);
     assert!(
