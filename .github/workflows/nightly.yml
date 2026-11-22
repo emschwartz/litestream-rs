@@ -27,16 +27,22 @@ jobs:
           tool: cargo-nextest,just
       - run: just check
 
-  # About ten minutes per LTX and WAL decoder target from the committed corpus (docs/fuzzing.md);
-  # the 24-hour run stays a manual one. A crash, leak, timeout or out-of-memory input is
-  # uploaded; replay it with `cargo +nightly fuzz run <target> --fuzz-dir fuzz <file>`.
+  # From the committed corpus (docs/fuzzing.md): about ten minutes per LTX and WAL decoder
+  # target, five per restore-planner target judged by the contract spec; the 24-hour run stays a
+  # manual one. A crash, leak, timeout or out-of-memory input is uploaded; replay it with
+  # `cargo +nightly fuzz run <target> --fuzz-dir fuzz <file>`.
   fuzz:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        target: [decode, index, wal]
+        include:
+          - { target: decode, seconds: 600 }
+          - { target: index, seconds: 600 }
+          - { target: wal, seconds: 600 }
+          - { target: plan_contract, seconds: 300 }
+          - { target: plan_lazy, seconds: 300 }
     steps:
       - uses: actions/checkout@v5
       # cargo-fuzz needs nightly; the workspace's pinned toolchain is left as it is.
@@ -44,9 +50,10 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz,just
-      - run: just fuzz "$TARGET" 600
+      - run: just fuzz "$TARGET" "$DURATION"
         env:
           TARGET: ${{ matrix.target }}
+          DURATION: ${{ matrix.seconds }}
       - if: failure()
         uses: actions/upload-artifact@v5
         with:

@@ -49,3 +49,17 @@ path = "fuzz_targets/wal.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "plan_contract"
+path = "fuzz_targets/plan_contract.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "plan_lazy"
+path = "fuzz_targets/plan_lazy.rs"
+test = false
+doc = false
+bench = false
