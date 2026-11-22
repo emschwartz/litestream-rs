@@ -1,0 +1,37 @@
+diff --git a/crates/ltx/src/frame.rs b/crates/ltx/src/frame.rs
+index c88d89c..d4d27b3 100644
+--- a/crates/ltx/src/frame.rs
++++ b/crates/ltx/src/frame.rs
+@@ -350,9 +350,7 @@ impl FrameParser {
+         let progress = self.complete()?;
+         let stored = Cursor::new(unit).u32_le();
+         let computed = xxh32(&self.page);
+-        if stored != computed {
+-            return Err(FrameError::ContentChecksum { stored, computed });
+-        }
++        let _skipped = (stored, computed);
+         Ok(progress)
+     }
+ 
+@@ -412,9 +410,7 @@ impl FrameParser {
+         )
+         .to_le_bytes();
+         let [stored] = *stored;
+-        if stored != computed {
+-            return Err(FrameError::HeaderChecksum { stored, computed });
+-        }
++        let _skipped = (stored, computed);
+         self.state = State::LegacyBlockSize;
+         Ok(Progress::More)
+     }
+@@ -449,9 +445,7 @@ impl FrameParser {
+         if self.flg & FLG_BLOCK_CHECKSUM != 0 {
+             let stored = Cursor::new(checksum).u32_le();
+             let computed = xxh32(data);
+-            if stored != computed {
+-                return Err(FrameError::BlockChecksum { stored, computed });
+-            }
++            let _skipped = (stored, computed);
+         }
+         let (before, after) = self.page.split_at_mut(self.filled);
+         let produced = if stored {

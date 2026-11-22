@@ -1163,13 +1163,33 @@ fn a_staging_listing_whose_cursor_never_advances_is_a_fault_not_a_loop() {
 }
 
 /// The file checksum covers an LTX file's decompressed content, not its LZ4
-/// framing, so some single-byte changes still verify with the same checksum
-/// (a frame descriptor's own checksum byte, for one). A staged file read with
-/// such a change (a bad read, or bytes replaced) is not the file this engine
-/// staged: the upload refuses it rather than publish other bytes.
+/// framing, and an LZ4 block is one of many encodings of its page: a changed
+/// match offset can copy equal bytes from elsewhere and decode to the same
+/// page, so the decoder cannot see it (lsr_ltx's frame docs call it aliasing).
+/// A zero page with one other byte aliases: its second run of zeros may copy
+/// from many offsets in the first. A staged file read with such a change (a
+/// bad read, or bytes replaced) is not the file this engine staged: the upload
+/// refuses it rather than publish other bytes.
 #[test]
 fn a_staged_file_whose_bytes_differ_but_still_verify_is_refused() {
-    let bytes = encode_pages(1, 7);
+    let header = Header::new(HeaderFields {
+        tracked: false,
+        page_size: ps(),
+        commit: 1,
+        txids: TxidRange::single(txid(1)),
+        timestamp: created_at(1),
+        pre_apply: None,
+        wal: None,
+        node_id: 0,
+    })
+    .unwrap();
+    let mut page = vec![0; ps().bytes()];
+    page[100] = 0x55;
+    let mut encoder = Encoder::new(Vec::new(), header).unwrap();
+    encoder
+        .write_page(PageNo::new(1, ps()).unwrap(), &page)
+        .unwrap();
+    let bytes = encoder.finish(None).unwrap().0;
     let silent = (0..bytes.len()).find_map(|at| {
         let mut changed = bytes.clone();
         changed[at] ^= 1;
