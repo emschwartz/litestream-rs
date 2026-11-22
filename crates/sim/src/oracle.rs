@@ -459,15 +459,18 @@ fn foreign_cover(
     txid: Txid,
     at: usize,
 ) -> Option<CommitId> {
-    let ((_, copied), (_, put)) = ground
+    let (index, ((_, copied), (_, put))) = ground
         .foreign
         .iter()
         .zip(ground.foreign_put)
-        .rfind(|((theirs, _), (_, when))| *theirs == txid && *when <= at)?;
+        .enumerate()
+        .rfind(|(_, ((theirs, _), (_, when)))| *theirs == txid && *when <= at)?;
+    // Recorder lengths cannot order a removal against a later put of the same
+    // id when nothing was recorded between them; the put's index can.
     let removed = ground
         .foreign_removed
         .iter()
-        .any(|(theirs, when)| *theirs == txid && (*put..=at).contains(when));
+        .any(|(which, when)| *which == index && *when <= at);
     if removed || replaced.get(&txid).is_some_and(|when| when >= put) {
         return None;
     }
@@ -529,9 +532,9 @@ pub struct Ground<'a> {
     /// Objects the store damaged as it published them: a restore may stop on
     /// one with a typed error.
     pub damaged: &'a [FileKey],
-    /// Another writer's files the operator removed, with the replica
-    /// recorder's length at the removal.
-    pub foreign_removed: &'a [(Txid, usize)],
+    /// Another writer's files the operator removed, by index in
+    /// [`Self::foreign`], with the replica recorder's length at the removal.
+    pub foreign_removed: &'a [(usize, usize)],
     /// Another writer's files, with the replica recorder's length when each
     /// was put.
     pub foreign_put: &'a [(Txid, usize)],

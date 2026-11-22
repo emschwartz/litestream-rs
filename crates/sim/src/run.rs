@@ -1003,16 +1003,24 @@ impl Runner {
                 });
             }
         }
+        self.remove_foreign(key, &bytes)
+    }
+
+    /// The operator removes the other writer's newest file if it still holds
+    /// `bytes`, and restarts the engine.
+    fn remove_foreign(&mut self, key: lsr_core::FileKey, bytes: &[u8]) -> Result<(), Violation> {
         let removed = self
             .w
-            .remote_remove_if(key, &bytes)
+            .remote_remove_if(key, bytes)
             .map_err(|err| bug_fault(format!("removing the second writer's file failed: {err}")))?;
         // A boot may have taken the file as history and built on it; the
         // operator's removal then takes that transaction for good.
         if removed {
             self.w.lost.insert(key.range().max());
-            let at = self.w.remote_recorder.len();
-            self.w.foreign_removed.push((key.range().max(), at));
+            let index = self.w.foreign.len().saturating_sub(1);
+            self.w
+                .foreign_removed
+                .push((index, self.w.remote_recorder.len()));
         }
         self.w.acked.note_rewound();
         self.w.crash(CrashKind::Process);
