@@ -146,27 +146,27 @@ impl Actor {
         key: FileKey,
         end: &StepEnd,
     ) {
-        let caught_up = self.kept.lag.since().is_none() && self.staged() == self.replicated();
+        // No clock running: the last observation found every staged file on the replica, or
+        // only quiet ones.
+        let caught_up = self.kept.lag.since().is_none();
         if doubt_only(cause) && caught_up && self.ended_where_synced(end) {
             self.kept.quiet.insert(key.range().max());
         }
     }
 
-    /// Whether a snapshot step ended where the WAL held nothing past the synced position: at
-    /// that position, or at the start of a new generation. A commit made since the last tick
-    /// is in the snapshot, and then the snapshot is lag.
+    /// Whether a snapshot step ended where the WAL held nothing past the synced position: the
+    /// same generation and offset. A commit made since the last tick is in the snapshot, and
+    /// then the snapshot is lag; so is one over a new generation, which the engine sees only
+    /// once it holds a commit.
     fn ended_where_synced(&self, end: &StepEnd) -> bool {
         let StepEnd::Through(reached) = end else {
             return false;
         };
-        let now = reached.position().synced().offset().frame_index();
-        let reached_salts = reached.position().cursor().salts();
-        match self.position() {
-            Some(was) if was.cursor().salts() == reached_salts => {
-                now == was.synced().offset().frame_index()
-            }
-            Some(_) | None => now == 0,
-        }
+        let at = |position: &crate::position::Position| {
+            (position.cursor().salts(), position.synced().offset())
+        };
+        self.position()
+            .is_some_and(|was| at(&was) == at(reached.position()))
     }
 
     /// Notes a file a sync step just staged as `key` as quiet: it changes no page of the state
