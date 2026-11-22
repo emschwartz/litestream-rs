@@ -14,6 +14,7 @@
 //! builds the actor from [`World`]'s handles and passes each tick's future to
 //! [`World::run_tick`].
 
+pub mod budget;
 pub mod contract;
 pub mod exec;
 pub mod generate;
