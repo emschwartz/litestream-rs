@@ -332,6 +332,76 @@ mod asked_before_boot {
 }
 
 #[cfg(test)]
+mod diverged {
+    use lsr_sim::generate::{MetaOp, RemoteOp, WalOp};
+    use lsr_sim::run::run_ops;
+    use lsr_sim::{CrashKind, EnvFault, Op, Opts, OtherProcessMode, Seed};
+
+    fn drawn(seed: u64, ops: &[Op]) {
+        let opts = Opts {
+            drawn: true,
+            ..Opts::default()
+        };
+        if let Err(failure) = run_ops(Seed::new(seed), ops, &opts) {
+            panic!("{}", failure.violation);
+        }
+    }
+
+    /// A power loss rewinds the WAL after transaction 1 was uploaded and
+    /// compacted, and the staged file for 1 loses its WAL origin, so it differs
+    /// from the replica's object. The boot listing wrote the staged file over
+    /// the replica's level-0 key; the staging directory was then wiped and the
+    /// replacement snapshot took transaction 1 again from a later commit, while
+    /// level 1 still held the first.
+    #[test]
+    fn a_verifying_replica_object_is_not_written_over_seed_0xc6b2() {
+        let ops = [
+            Op::OtherProcessCheckpoint(OtherProcessMode::Passive),
+            Op::Tick,
+            Op::CommitInTick { pages: 1 },
+            Op::Crash(CrashKind::Power),
+            Op::Tick,
+            Op::Tick,
+            Op::Tick,
+            Op::StagingDamage(MetaOp::StripNewestOrigin),
+            Op::CommitInTick { pages: 1 },
+            Op::Meta(MetaOp::DeleteAll),
+            Op::Commit {
+                pages: 4,
+                grow: true,
+            },
+        ];
+        drawn(0xc6b2, &ops);
+    }
+
+    /// The bucket rolls back to empty and staging is wiped; the engine takes
+    /// transaction 1 again from a later commit and uploads it. Then an old
+    /// staging backup is put back, holding the first transaction 1: the boot
+    /// listing wrote it over the replica's level-0 key, under a level-1 file
+    /// built from the other.
+    #[test]
+    fn a_restored_staging_backup_is_not_written_over_the_replica_seed_0xd1b() {
+        let ops = [
+            Op::Shutdown,
+            Op::Commit {
+                pages: 1,
+                grow: false,
+            },
+            Op::Meta(MetaOp::Save),
+            Op::Remote(RemoteOp::RollBack),
+            Op::EnvFault(EnvFault::WipeStaging),
+            Op::Tick,
+            Op::WalDamage {
+                op: WalOp::TruncateAtFrame(4),
+                ticks: 3,
+            },
+            Op::StagingDamage(MetaOp::Restore),
+        ];
+        drawn(0xd1b, &ops);
+    }
+}
+
+#[cfg(test)]
 mod restored_backup {
     use lsr_sim::generate::MetaOp;
     use lsr_sim::run::run_ops;
