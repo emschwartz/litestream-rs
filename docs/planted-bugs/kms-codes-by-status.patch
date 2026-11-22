@@ -1,0 +1,15 @@
+diff --git a/crates/store-s3/src/classify.rs b/crates/store-s3/src/classify.rs
+index 25b018d..d1a5ab5 100644
+--- a/crates/store-s3/src/classify.rs
++++ b/crates/store-s3/src/classify.rs
+@@ -96,10 +96,6 @@ impl S3Code {
+             "TokenRefreshRequired" => Self::TokenRefreshRequired,
+             "AllAccessDisabled" => Self::AllAccessDisabled,
+             "RequestTimeTooSkewed" => Self::RequestTimeTooSkewed,
+-            "KMS.DisabledException"
+-            | "KMS.InvalidKeyUsageException"
+-            | "KMS.KMSInvalidStateException"
+-            | "KMS.NotFoundException" => Self::KmsKeyUnusable,
+             "InvalidObjectState" => Self::InvalidObjectState,
+             "BadDigest" => Self::BadDigest,
+             "InvalidDigest" => Self::InvalidDigest,
