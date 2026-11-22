@@ -593,6 +593,7 @@ fn a_restore_racing_a_writer_follows_it_and_never_calls_the_listing_behind() {
     let (result, sink) = run(&store, RestoreTarget::Latest);
     let restored = result.unwrap();
     assert!(restored.reached().get() >= 2, "{restored:?}");
+    assert!(!restored.writer_outpaced(), "{restored:?}");
     let reached = u8::try_from(restored.reached().get()).unwrap();
     assert_eq!(seeds(&sink.published().unwrap()), [reached]);
 }
@@ -619,15 +620,17 @@ fn a_put_that_lands_after_the_read_past_the_listing_is_concurrent_and_not_owed()
     );
 }
 
-/// A writer that never pauses: the restore follows it for a bounded number of listings, then
-/// fails with `ListingBehind` rather than chase it for ever.
+/// A writer that never pauses: the restore follows it for a bounded number of listings, all of
+/// which caught up, then takes the next listing as it stands and publishes its newest state,
+/// saying so, rather than chase for ever or fail: no restore could finish against a busy
+/// writer otherwise.
 #[test]
-fn a_restore_follows_a_writer_that_never_pauses_for_a_bounded_number_of_listings() {
+fn a_restore_outpaced_by_a_writer_publishes_the_last_listing_and_says_so() {
     let store = MemStore::new();
     put_spec(&store, 9, &Spec::plain(512, 1, 1, 1, &[(1, 1)]));
     let store = Wrapped::new(store);
     for n in 2..=200_u64 {
-        let spec = Spec::plain(512, 1, n, n, &[(1, 1)]);
+        let spec = Spec::plain(512, 1, n, n, &[(1, u8::try_from(n % 251).unwrap())]);
         store
             .put_after_list
             .lock()
@@ -635,14 +638,14 @@ fn a_restore_follows_a_writer_that_never_pauses_for_a_bounded_number_of_listings
             .push_back((key(0, n, n), spec.encode()));
     }
     let (result, sink) = run(&store, RestoreTarget::Latest);
+    let restored = result.unwrap();
+    assert!(restored.writer_outpaced(), "{restored:?}");
     assert!(
-        matches!(
-            result,
-            Err(RestoreError::ListingBehind { attempts: 64, .. })
-        ),
-        "{result:?}"
+        restored.reached().get() > u64::from(MAX_CHASE),
+        "{restored:?}"
     );
-    assert_eq!(sink.published(), None);
+    let reached = u8::try_from(restored.reached().get() % 251).unwrap();
+    assert_eq!(seeds(&sink.published().unwrap()), [reached]);
 }
 
 #[test]

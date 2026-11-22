@@ -26,9 +26,12 @@
 //! listed for again. A file found that way is either hidden by a lagging listing or put by a
 //! replicator after the listing, and one read cannot tell; the next listing can. A listing
 //! that shows the file found before it has caught up, and that round is the writer's progress:
-//! the restore follows it, up to [MAX_CHASE] listings. A listing that still ends below a file
-//! found before it began lags, and after [MAX_ATTEMPTS] such listings the restore fails with
-//! [RestoreError::ListingBehind]. A `Txid` target needs no such read: its answer is fixed by
+//! the restore follows it, up to [MAX_CHASE] listings, and then takes the next listing as it
+//! stands ([Restored::writer_outpaced]): restoring the latest state while a writer runs may
+//! answer any committed state, and one at least as new as every file a read found during the
+//! restore is a sound answer, where failing would mean no restore ever finishes against a busy
+//! writer. A listing that still ends below a file found before it began lags, and after
+//! [MAX_ATTEMPTS] such listings the restore fails with [RestoreError::ListingBehind]. A `Txid` target needs no such read: its answer is fixed by
 //! the files that end at or below it, and a hole the lag leaves is a gap the planner refuses.
 //! An empty listing is read past for every target, at the first transaction's key: a replica
 //! that exists must never look like none (the command line's `--if-replica-exists` skips a
@@ -277,13 +280,10 @@ pub enum RestoreError {
         /// The file missing on the last attempt.
         missing: FileKey,
     },
-    /// Listings kept ending below level-0 files that reads found past them: three that
-    /// did not show a file found before they began (the store's listings lag its writes,
-    /// so the newest state it lists is not the newest it holds), or a writer that put a new
-    /// file after each of 64 listings.
-    #[error(
-        "{found} exists past the listed newest after {attempts} listings; the listing lags or a writer outpaces it"
-    )]
+    /// Three listings did not show a level-0 file a read had found before they began: the
+    /// store's listings lag its writes, so the newest state it lists is not the newest it
+    /// holds.
+    #[error("{found} exists past the listed newest after {attempts} listings; the listing lags")]
     ListingBehind {
         /// Listings tried.
         attempts: u8,
@@ -352,6 +352,7 @@ pub struct Restored {
     created_at_read: u64,
     post_apply: Option<DbChecksum>,
     inside_file: Option<FileKey>,
+    writer_outpaced: bool,
 }
 
 impl Restored {
@@ -412,6 +413,16 @@ impl Restored {
     #[must_use]
     pub const fn inside_file(&self) -> Option<FileKey> {
         self.inside_file
+    }
+
+    /// Whether a writer kept putting a new file after each listing for [MAX_CHASE]
+    /// listings, and the restore then took the next listing as it stood: every listing
+    /// had shown the file found before it, so none lagged, and the database is a committed
+    /// state at least as new as every file a read found during the restore, though not
+    /// necessarily the writer's newest by the time it is published.
+    #[must_use]
+    pub const fn writer_outpaced(&self) -> bool {
+        self.writer_outpaced
     }
 }
 
@@ -488,6 +499,7 @@ pub(crate) async fn restore_from<S: ObjectStore, K: DatabaseSink>(
     let probe = listed.is_none();
     let mut retries = Retries::default();
     loop {
+        let probe = probe && !retries.trusting;
         let source = listed.take().map_or(Source::List { probe }, Source::Given);
         let applied = attempt_once(
             store,
@@ -516,6 +528,7 @@ pub(crate) async fn restore_from<S: ObjectStore, K: DatabaseSink>(
                     created_at_read,
                     post_apply: last.trailer().post_apply(),
                     inside_file,
+                    writer_outpaced: retries.trusting,
                 });
             }
             Err(Abort::Fatal(err)) => return Err(err),
@@ -541,6 +554,9 @@ struct Retries {
     lagged: u8,
     /// The file the last read past a listing found.
     chased: Option<FileKey>,
+    /// A writer outpaced [MAX_CHASE] listings that all caught up: the next listing is taken
+    /// as it stands, with no read past it.
+    trusting: bool,
 }
 
 impl Retries {
@@ -571,11 +587,18 @@ impl Retries {
                     self.lagged = self.lagged.saturating_add(1);
                 }
                 self.chased = Some(found);
-                if self.lagged >= MAX_ATTEMPTS || attempt >= MAX_CHASE {
+                // Lagging listings are counted on their own, so past the bound only a
+                // round that caught up remains, and the restore stops reading past the
+                // listing; the last term only bounds the loop if that reasoning is wrong.
+                let exhausted = attempt >= MAX_CHASE.saturating_add(MAX_ATTEMPTS);
+                if self.lagged >= MAX_ATTEMPTS || exhausted {
                     return Err(RestoreError::ListingBehind {
                         attempts: attempt,
                         found,
                     });
+                }
+                if caught_up && attempt >= MAX_CHASE {
+                    self.trusting = true;
                 }
                 Ok(())
             }
