@@ -31,6 +31,11 @@ const STEPS: u32 = 300;
 /// A written history: the app commits and the engine uploads, then `hold` lasts six ticks with
 /// commits under it, then the run heals and settles.
 fn under(hold: Hold) -> Vec<Op> {
+    under_for(hold, 6)
+}
+
+/// [`under`], with the hold lasting `ticks` ticks.
+fn under_for(hold: Hold, ticks: u8) -> Vec<Op> {
     let mut ops = Vec::new();
     for _ in 0..6 {
         ops.push(Op::Commit {
@@ -40,7 +45,7 @@ fn under(hold: Hold) -> Vec<Op> {
         ops.push(Op::Tick);
         ops.push(Op::Tick);
     }
-    ops.push(Op::Hold { hold, ticks: 6 });
+    ops.push(Op::Hold { hold, ticks });
     for _ in 0..6 {
         ops.push(Op::Commit {
             pages: 1,
@@ -187,6 +192,29 @@ fn a_boot_whose_replica_reads_lie_never_writes_a_new_page_size_seed_0x13() {
     };
     if let Err(failure) = run_ops(seed, &ops, &opts) {
         panic!("{failure}");
+    }
+}
+
+/// Health tells the truth about a halt: an outage that keeps every upload from landing, held
+/// long enough for the engine to retry past its stall threshold, leaves a task degraded at
+/// its end (oracle `HealthBlind` otherwise), for the replica store refusing uploads and for a
+/// full staging disk.
+#[test]
+fn a_halt_long_enough_to_stall_is_reported_degraded() {
+    for hold in [
+        Hold::StoreDown(lsr_core::StoreOp::Upload),
+        Hold::DiskFull,
+        Hold::CredentialsRevoked,
+    ] {
+        let report = match run_ops(Seed::new(7), &under_for(hold, 40), &Opts::default()) {
+            Ok(report) => report,
+            Err(failure) => panic!("{hold:?}: {failure}"),
+        };
+        assert_eq!(
+            report.reach.get(&format!("{}.halted", key(hold))),
+            1,
+            "{hold:?}: the hold never halted replication long enough to judge health"
+        );
     }
 }
 

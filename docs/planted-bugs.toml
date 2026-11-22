@@ -369,3 +369,12 @@ fix = "7bf9707"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["a_boot_whose_replica_reads_lie_never_writes_a_new_page_size_seed_0x13"]
+
+# A stall threshold no outage reaches: a plain-retry fault never degrades, the defect 538bd84
+# fixed, judged by the simulator's health-truth check under a long outage hold.
+[[bug]]
+name = "stall-never-reported-sim"
+fix = "538bd84"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_halt_long_enough_to_stall_is_reported_degraded"]
