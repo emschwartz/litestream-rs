@@ -29,7 +29,7 @@ fn all() -> [SnapshotCause; 11] {
         },
         SnapshotCause::CheckpointBoundary,
         SnapshotCause::OperatorRequested,
-        SnapshotCause::StagedUnwitnessed { from: local() },
+        SnapshotCause::StagedUnverified { from: local() },
     ];
     for cause in causes {
         match cause {
@@ -43,7 +43,7 @@ fn all() -> [SnapshotCause; 11] {
             | SnapshotCause::LocalRewound { .. }
             | SnapshotCause::CheckpointBoundary
             | SnapshotCause::OperatorRequested
-            | SnapshotCause::StagedUnwitnessed { .. } => {}
+            | SnapshotCause::StagedUnverified { .. } => {}
         }
     }
     causes

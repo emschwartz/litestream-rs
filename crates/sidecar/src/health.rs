@@ -200,7 +200,7 @@ pub(crate) const fn snapshot_name(cause: SnapshotCause) -> &'static str {
         SnapshotCause::LocalRewound { .. } => "local_rewound",
         SnapshotCause::CheckpointBoundary => "checkpoint_boundary",
         SnapshotCause::OperatorRequested => "operator_requested",
-        SnapshotCause::StagedUnwitnessed { .. } => "staged_unwitnessed",
+        SnapshotCause::StagedUnverified { .. } => "staged_unverified",
     }
 }
 

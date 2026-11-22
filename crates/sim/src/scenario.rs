@@ -48,8 +48,8 @@ pub enum CauseKind {
     CheckpointBoundary,
     /// [`SnapshotCause::OperatorRequested`].
     OperatorRequested,
-    /// [`SnapshotCause::StagedUnwitnessed`].
-    StagedUnwitnessed,
+    /// [`SnapshotCause::StagedUnverified`].
+    StagedUnverified,
 }
 
 impl From<&SnapshotCause> for CauseKind {
@@ -65,7 +65,7 @@ impl From<&SnapshotCause> for CauseKind {
             SnapshotCause::LocalRewound { .. } => Self::LocalRewound,
             SnapshotCause::CheckpointBoundary => Self::CheckpointBoundary,
             SnapshotCause::OperatorRequested => Self::OperatorRequested,
-            SnapshotCause::StagedUnwitnessed { .. } => Self::StagedUnwitnessed,
+            SnapshotCause::StagedUnverified { .. } => Self::StagedUnverified,
         }
     }
 }
@@ -272,7 +272,7 @@ pub fn scenario_of(cause: SnapshotCause) -> &'static [fn() -> Scenario] {
         SnapshotCause::LocalRewound { .. } => &[power_loss_wal_rewind],
         SnapshotCause::CheckpointBoundary => &[truncate_threshold_crossed],
         SnapshotCause::OperatorRequested => &[cli_snapshot],
-        SnapshotCause::StagedUnwitnessed { .. } => &[pending_from_a_gone_generation],
+        SnapshotCause::StagedUnverified { .. } => &[pending_from_a_gone_generation],
     }
 }
 
@@ -694,7 +694,7 @@ pub fn pending_from_a_gone_generation() -> Scenario {
             ticks(SETTLE),
             vec![Op::Restore],
         ],
-        snapshot_after_boot(CauseKind::StagedUnwitnessed),
+        snapshot_after_boot(CauseKind::StagedUnverified),
     )
 }
 

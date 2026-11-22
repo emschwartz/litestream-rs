@@ -118,7 +118,7 @@ fn each_wal_sync<B: Backend>(strict: bool) -> BTreeMap<u32, Outcome> {
                     SnapshotCause::FirstSync
                         | SnapshotCause::LocalRewound { .. }
                         | SnapshotCause::GenerationChanged
-                        | SnapshotCause::StagedUnwitnessed { .. }
+                        | SnapshotCause::StagedUnverified { .. }
                 )
             ),
             "{at}: the boot continues or snapshots what the loss took, got {cause:?}"
@@ -139,7 +139,7 @@ fn each_wal_sync<B: Backend>(strict: bool) -> BTreeMap<u32, Outcome> {
 /// after writing a restarted log's header, so a loss can take committed transactions. The engine
 /// syncs the WAL itself before it stages, so a loss never takes one it shipped: the boot
 /// continues (nothing it synced was lost), snapshots a restart it cannot prove (the restarted
-/// header was synced, the frames after it were not: `GenerationChanged`, or `StagedUnwitnessed`
+/// header was synced, the frames after it were not: `GenerationChanged`, or `StagedUnverified`
 /// when files staged in the old generation were still unpublished, which the boot then deletes
 /// rather than uploads, since nothing live vouches for them), or snapshots from
 /// scratch (the loss came before the first file was staged: `FirstSync`), and never finds the
@@ -153,7 +153,7 @@ fn power_loss_at_each_wal_sync_loses_no_acknowledged_transaction() {
     assert!(
         seen(|c| matches!(
             c,
-            Some(SnapshotCause::GenerationChanged | SnapshotCause::StagedUnwitnessed { .. })
+            Some(SnapshotCause::GenerationChanged | SnapshotCause::StagedUnverified { .. })
         )),
         "{outcomes:?}"
     );

@@ -277,7 +277,7 @@ pub enum SnapshotCause {
     /// chain from a WAL generation that is gone), and the WAL could not
     /// regenerate them: they were deleted unpublished, and the snapshot
     /// holds their end state. Their restore points are given up.
-    StagedUnwitnessed {
+    StagedUnverified {
         /// The first transaction deleted.
         from: Txid,
     },

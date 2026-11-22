@@ -193,7 +193,7 @@ pub(crate) const fn snapshot_clears(cause: &SnapshotCause) -> bool {
         | SnapshotCause::PrevFrameMismatch
         | SnapshotCause::LastPageMismatch
         | SnapshotCause::LocalRewound { .. }
-        | SnapshotCause::StagedUnwitnessed { .. } => true,
+        | SnapshotCause::StagedUnverified { .. } => true,
     }
 }
 
