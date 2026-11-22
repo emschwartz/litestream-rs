@@ -49,6 +49,8 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D83 | What may trip early, and what the probe needs | A forward clock step with a failing store; a trip needs a failure at or after the bound | Claude (fail-stop), **delegated** | 2026-11-22 | open to owner review |
 | D84 | Fail-stop's user-visible names | As approved, with `refused_at_start`, `held_by` and `allowed` | owner, after a Fable review | 2026-11-22 | decided |
 | D100 | How does the journal hold the unproven-WAL debt, and when is it written? | Written at the end of the tick that changes it; a new failure may raise it at any step; `JournalUnwritable` while the journal lags | Claude (journal), **delegated** | 2026-11-22 | open to owner review |
+| D101 | Does a run with nothing to record still create the journal? | Yes: a process that neither read nor wrote a record writes one, so `JournalMissing` means the journal was lost | Claude (journal), **delegated** | 2026-11-22 | open to owner review |
+| D102 | Are the journal's signals a degraded state? | No: a notice in `/healthz` and `lsr_journal_signal`, unwritable included; `/healthz` stays 200 | parent session, names reviewed for the owner | 2026-11-22 | decided |
 | D130 | How does the simulator run the real directory store, and who judges it? | A filesystem trait in store-fs, an in-memory filesystem under the crash law in the sim, half the swarm on it, a staging-contract judge | Claude (sim-real-store-fs), **delegated** | 2026-11-22 | open to owner review |
 | D70 | How do simulated runs draw a fault that reaches an open engine defect? | As a known-wrong cell: out of the per-push seeds, drawn by the nightly and campaigns with its failures counted as known, with a pinned seed that fails once the fix lands | parent session; mechanism by Claude (error-domain), **delegated** | 2026-11-22 | decided |
 | D71 | Which errors may a simulated history inject? | Those a shipped implementation returns from that call with the world unchanged; a world fact is drawn as the world change; a cell the model cannot follow is listed as unmodelled, never drawn | Claude (error-domain), **delegated** | 2026-11-22 | open to owner review |
@@ -405,9 +407,27 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Question:** a failed WAL fsync must survive a restart (open defect D2). When is it written, what may follow what, and what is reported when it cannot be written?
 - **Choice:** the journal's debt is a function of the engine's state, written at the end of every tick in which it differs from the last record made durable (or read at boot); boot restores a recorded debt and never forgives one. The debt is paid only through its cure (TRUNCATE owed, then snapshot owed, then none), and a new failure may raise it to TRUNCATE owed at any step: the writer refuses, as a bug, a record that forgives it. A failed write is tried again every tick; `JournalUnwritable` (approved name) is reported while the journal lags the engine and clears once nothing is left to record.
 - **Options considered:** write the debt inside `Actor::fault` (it has no file lent); write it before the next sync step (one more place to remember); the design's strict order No, Truncate, Snapshot, No (refuses a second failure during the paying snapshot).
-- **Cost accepted:** the record lags the failure by the rest of one tick, so a kill in that window forgets it, as without a journal. One `fdatasync` (two on the first write, which creates the file) per change of the debt; none otherwise, so a database that never fails a WAL fsync never creates the journal.
+- **Cost accepted:** the record lags the failure by the rest of one tick, so a kill in that window forgets it, as without a journal. One `fdatasync` (two on the first write, which creates the file) per change of the debt; none otherwise. (The journal is now created on every run, D101.)
 - **Revisit if:** the window inside the tick is shown to matter, or later facts need ordering against the debt within a tick.
 - **Links:** `crates/core/src/actor/unproven.rs`, `docs/journal.md`, `docs/BEHAVIOR.md` RUN-3 and D2.
+
+## D101. A run with nothing to record still creates the journal (delegated)
+
+- **Question:** under D100 the journal was written only when the debt changed, so a database that never failed a WAL fsync never had one, and every restart after its first sync reported `JournalMissing`. Should a run with nothing to record write anyway?
+- **Choice:** yes. At the end of a tick, a process that has neither read a record at boot nor made one durable writes the record of what it holds (no debt, today). After that, a boot reads the record and writes nothing until a fact changes. `JournalMissing` then means a journal that existed is gone (or an upgrade from a version without one), which is what an operator should be told; it is surfaced in health, `/healthz` and metrics.
+- **Options considered:** keep writing only on change and stop reporting `Missing` (loses the only sign of a deleted journal); create the journal at boot, before the first tick (a boot that fails later would have written for nothing, and the end-of-tick reconcile already retries).
+- **Cost accepted:** one creation per database (a write, two `fsync`s and a directory `fsync`) on the first tick of the first run, and again after a journal is lost or unreadable. A journal that cannot be created is reported as `JournalUnwritable` until a write succeeds, even while no debt is owed: the next failed WAL fsync could not be recorded either.
+- **Revisit if:** creating the file on a read-only or full meta directory is shown to be common enough that the report is noise.
+- **Links:** `crates/core/src/actor.rs` (`reconcile_journal`), `docs/journal.md`.
+
+## D102. The journal's signals are notices, not degraded states
+
+- **Question:** how does an operator see what the engine journal says, and does any of it count as degraded?
+- **Choice:** `Health.journal`, the `/healthz` fields `journal` (values `missing`, `unreadable`, `newer_version`, `slot_unreadable`, `unwritable`) and `journal_detail`, and the gauge `lsr_journal_signal{db,signal}`. Every signal is a notice: `Health::is_degraded` ignores it and `/healthz` stays 200, `unwritable` included, since the engine runs as it would with no journal. `newer_version` says a newer binary wrote the journal, which points at a downgrade.
+- **Options considered:** prefixed values (`journal_missing`; stutters after the field name); `unwritable` as a degraded task.
+- **Cost accepted:** while the journal is unwritable, a failed WAL sync met meanwhile is forgotten by a restart (and so will any fact a later step moves into the journal, a stop among them), and nothing marks the database degraded.
+- **Revisit if:** an unwritable journal proves common; then make it a degraded task that still answers 200.
+- **Links:** `crates/sidecar/src/health.rs`, `crates/sidecar/src/metrics.rs`, `docs/BEHAVIOR.md` BOOT-25 to BOOT-29 and RUN-27.
 
 ## D130. The real directory store in the simulator (delegated)
 

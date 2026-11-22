@@ -646,6 +646,7 @@ impl Worker {
 
     fn publish(&self, parts: &SnapshotParts) {
         let resnapshot = self.actor.pending_snapshot();
+        let journal = self.actor.journal();
         let snapshots = self.actor.snapshots();
         let ran = self.app_ran_total();
         let app = self.app_total();
@@ -680,6 +681,7 @@ impl Worker {
                 ..seen.counters
             };
             health.verification = verification;
+            health.journal = journal;
             state.left = parts.left;
         });
     }

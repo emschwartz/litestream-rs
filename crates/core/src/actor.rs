@@ -2191,7 +2191,9 @@ impl Actor {
 
     /// Writes the journal when what it holds differs from what the engine holds, at the end of
     /// every tick: the facts are a function of the engine's state, never a step to remember.
-    /// A failed write is tried again next tick; the engine proceeds as with no journal.
+    /// A process that neither read nor wrote a record writes one, so the next boot finds a
+    /// journal and a missing one means it was lost. A failed write is tried again next tick;
+    /// the engine proceeds as with no journal.
     fn reconcile_journal(
         &mut self,
         file: Option<&mut (dyn JournalFile + Send + '_)>,
@@ -2203,7 +2205,7 @@ impl Actor {
         };
         let held = writer.durable().copied().or(self.kept.journal_read);
         let wanted = self.kept.unproven.recorded();
-        if held.map_or(lsr_journal::Unproven::No, |held| held.unproven) == wanted {
+        if held.map(|held| held.unproven) == Some(wanted) {
             // Nothing the engine holds is missing from the journal: nothing lags it.
             self.kept.journal_write = Ok(());
             return tick;

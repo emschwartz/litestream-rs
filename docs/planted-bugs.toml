@@ -920,10 +920,10 @@ tests = [
 
 [[bug]]
 name = "journal-unwritable-sticky"
-fix = "8ef5a8f"
+fix = "9a3ea61a"
 package = "lsr-core"
 tests = [
-    "actor::tests::journal::an_unwritable_journal_is_reported_and_the_debt_is_paid_from_memory",
+    "actor::tests::journal::an_unwritable_journal_stops_lagging_once_the_debt_is_paid",
 ]
 
 # Fail-stop (if-replication-stops, docs/proposals/fail-stop.md section 2): each entry is one of the
@@ -1259,3 +1259,30 @@ name = "restart-abandoned-at-synced-end"
 fix = "9b4a029"
 package = "lsr-core"
 tests = ["recover::tests::an_abandoned_commit_at_the_synced_end_of_a_restart_is_caught"]
+
+# Writing the journal only when the debt changes leaves a database that never failed a WAL
+# fsync without one, so every restart reports it missing.
+[[bug]]
+name = "journal-created-only-on-debt"
+fix = "0389151f"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::a_restart_after_a_run_with_no_debt_reports_nothing",
+    "actor::tests::journal::a_failed_wal_sync_is_recorded_in_the_tick_that_met_it",
+]
+
+[[bug]]
+name = "journal-created-only-on-debt-cli"
+fix = "6f700f9a"
+package = "lsr-cli"
+test_bin = "cli"
+tests = ["sidecar::a_deleted_journal_is_reported_on_the_next_start"]
+
+# The replicator never copies the journal's signal into its health, so the daemon shows
+# nothing when a journal is lost.
+[[bug]]
+name = "journal-signal-not-published"
+fix = "6f700f9a"
+package = "lsr-cli"
+test_bin = "cli"
+tests = ["sidecar::a_deleted_journal_is_reported_on_the_next_start"]
