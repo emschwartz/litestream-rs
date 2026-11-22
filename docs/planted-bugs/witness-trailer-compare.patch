@@ -1,8 +1,8 @@
 diff --git a/crates/core/src/upload.rs b/crates/core/src/upload.rs
-index 7a2c60d..e218239 100644
+index 012f85be..a8a1882b 100644
 --- a/crates/core/src/upload.rs
 +++ b/crates/core/src/upload.rs
-@@ -617,7 +617,7 @@ async fn copy_verified<L: ObjectStore, S: ObjectStore>(
+@@ -672,7 +672,7 @@ async fn copy_verified<'s, L: ObjectStore, S: ObjectStore>(
          .finish()
          .map_err(|_undecodable| PutError::Before(Fault::StagedLost))?;
      names_key(verified.header(), key)?;
@@ -10,4 +10,4 @@ index 7a2c60d..e218239 100644
 +    if false && !token.matches(bytes, verified.trailer().file_checksum()) {
          return Err(PutError::Before(Fault::StagedLost));
      }
-     Ok(offset)
+     Ok(())

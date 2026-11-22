@@ -45,7 +45,7 @@ use lsr_sim::{
     Acked, AppCommit, Checked, CommitId, Model, PageImage, Recorder, RecorderEvent, RecorderLog,
     Recovery, Violation, bug_fault,
 };
-use lsr_store_fs::FsStore;
+use lsr_store_fs::{FsJournalFile, FsStore};
 use lsr_wal::{Salts, WalOffset};
 use rusqlite::{Connection, OpenFlags};
 
@@ -406,6 +406,9 @@ pub struct Rig<B: Backend> {
     actor: Actor,
     clock: FakeClock,
     staging: Recorder<FsStore>,
+    /// The engine journal beside staging, reopened by every restart as a new process would.
+    journal: FsJournalFile,
+    meta: PathBuf,
     remote: Recorder<FsStore>,
     staging_log: RecorderLog,
     remote_log: RecorderLog,
@@ -451,7 +454,8 @@ impl<B: Backend> Rig<B> {
         app.open(APP)?;
         let backend = B::open_limited(&db, vfs.name(), cfg.journal_size_limit)
             .map_err(|err| RigError::Open(Box::new(err)))?;
-        let staging = Recorder::new(FsStore::new(root.join("meta")));
+        let meta = root.join("meta");
+        let staging = Recorder::new(FsStore::new(&meta));
         let remote_root = root.join("replica");
         let remote = Recorder::new(FsStore::new(&remote_root));
         let mut rig = Self {
@@ -461,6 +465,8 @@ impl<B: Backend> Rig<B> {
                 seen: None,
             },
             db,
+            journal: FsJournalFile::new(&meta),
+            meta,
             actor: Actor::new(cfg.actor.clone()),
             cfg,
             wal_syncs: vfs.syncs(FileKind::Wal),
@@ -724,7 +730,7 @@ impl<B: Backend> Rig<B> {
             staging: &self.staging,
             remote: &self.remote,
             clock: &self.clock,
-            journal: None,
+            journal: Some(&mut self.journal),
         };
         let tick = block_on(self.actor.tick(env, now));
         self.vfs.set_window(self.everywhere);
@@ -1033,6 +1039,7 @@ impl<B: Backend> Rig<B> {
                 .map_err(|e| RigError::Open(Box::new(e)))?,
         );
         self.actor = Actor::new(self.cfg.actor.clone());
+        self.journal = FsJournalFile::new(&self.meta);
         self.observe()
     }
 

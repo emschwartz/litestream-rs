@@ -30,6 +30,8 @@ mod restored_staging;
 #[cfg(test)]
 mod retention;
 #[cfg(test)]
+mod short_write;
+#[cfg(test)]
 mod snapshot_causes;
 #[cfg(test)]
 mod soak;

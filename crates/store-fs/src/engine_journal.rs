@@ -112,10 +112,11 @@ mod tests {
     #[test]
     fn a_journal_is_created_on_the_first_write_and_read_at_the_next_boot() {
         let dir = tempfile::tempdir().unwrap();
-        let (mut writer, parsed) = JournalWriter::open(FsJournalFile::new(dir.path()));
+        let mut file = FsJournalFile::new(dir.path());
+        let (mut writer, parsed) = JournalWriter::open(&mut file);
         assert_eq!(parsed.verdict, Verdict::Missing);
-        writer.write(&debt(Unproven::Truncate)).unwrap();
-        let (_, parsed) = JournalWriter::open(FsJournalFile::new(dir.path()));
+        writer.write(&mut file, &debt(Unproven::Truncate)).unwrap();
+        let (_, parsed) = JournalWriter::open(&mut FsJournalFile::new(dir.path()));
         let Verdict::Read { seq, journal, .. } = parsed.verdict else {
             panic!("{parsed:?}");
         };
@@ -132,9 +133,10 @@ mod tests {
             Unproven::Truncate,
         ];
         for (at, unproven) in steps.into_iter().enumerate() {
-            let (mut writer, _) = JournalWriter::open(FsJournalFile::new(dir.path()));
-            writer.write(&debt(unproven)).unwrap();
-            let (_, parsed) = JournalWriter::open(FsJournalFile::new(dir.path()));
+            let mut file = FsJournalFile::new(dir.path());
+            let (mut writer, _) = JournalWriter::open(&mut file);
+            writer.write(&mut file, &debt(unproven)).unwrap();
+            let (_, parsed) = JournalWriter::open(&mut FsJournalFile::new(dir.path()));
             let Verdict::Read { seq, journal, .. } = parsed.verdict else {
                 panic!("{parsed:?}");
             };
@@ -148,14 +150,16 @@ mod tests {
     #[test]
     fn a_short_file_reads_its_short_slot_as_short_and_is_finished_before_record_2() {
         let dir = tempfile::tempdir().unwrap();
-        let (mut writer, _) = JournalWriter::open(FsJournalFile::new(dir.path()));
-        writer.write(&debt(Unproven::No)).unwrap();
+        let mut file = FsJournalFile::new(dir.path());
+        let (mut writer, _) = JournalWriter::open(&mut file);
+        writer.write(&mut file, &debt(Unproven::No)).unwrap();
         let path = dir.path().join(JOURNAL_NAME);
         let file = OpenOptions::new().write(true).open(&path).unwrap();
         file.set_len(4096).unwrap();
-        let (mut writer, parsed) = JournalWriter::open(FsJournalFile::new(dir.path()));
+        let mut file = FsJournalFile::new(dir.path());
+        let (mut writer, parsed) = JournalWriter::open(&mut file);
         assert!(matches!(parsed.verdict, Verdict::Read { seq, .. } if seq == Seq::FIRST));
-        writer.write(&debt(Unproven::Truncate)).unwrap();
+        writer.write(&mut file, &debt(Unproven::Truncate)).unwrap();
         assert_eq!(
             fs::metadata(&path).unwrap().len(),
             u64::try_from(FILE).unwrap()
@@ -168,12 +172,13 @@ mod tests {
         let path = dir.path().join(JOURNAL_NAME);
         fs::write(&path, [0xee; FILE]).unwrap();
         let inode = fs::metadata(&path).unwrap();
-        let (mut writer, parsed) = JournalWriter::open(FsJournalFile::new(dir.path()));
+        let mut file = FsJournalFile::new(dir.path());
+        let (mut writer, parsed) = JournalWriter::open(&mut file);
         assert!(
             matches!(parsed.verdict, Verdict::Unreadable(_)),
             "{parsed:?}"
         );
-        writer.write(&debt(Unproven::No)).unwrap();
+        writer.write(&mut file, &debt(Unproven::No)).unwrap();
         let after = fs::metadata(&path).unwrap();
         use std::os::unix::fs::MetadataExt;
         assert_eq!(
@@ -181,7 +186,7 @@ mod tests {
             after.ino(),
             "the journal was replaced, not rewritten"
         );
-        let (_, parsed) = JournalWriter::open(FsJournalFile::new(dir.path()));
+        let (_, parsed) = JournalWriter::open(&mut FsJournalFile::new(dir.path()));
         assert!(matches!(parsed.verdict, Verdict::Read { seq, .. } if seq == Seq::FIRST));
     }
 }

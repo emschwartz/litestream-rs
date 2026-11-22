@@ -452,3 +452,28 @@ fn a_page_rewritten_above_the_safe_frame_is_not_copied() {
         "page 2's newest frame is above it, so SQLite leaves the page alone"
     );
 }
+
+/// Linux reports a writeback error to every file description open when it happened: after our
+/// failed sync, the app's own connection's first WAL sync fails too, so its first checkpoint
+/// backfills nothing and only the next one does. A process that opens the WAL afterwards (the
+/// CLI) is told nothing.
+#[test]
+fn the_apps_first_checkpoint_after_our_failed_sync_backfills_nothing() {
+    let db = sim();
+    db.set_app_autocheckpoint(Some(1));
+    db.inject(SourceOp::Sync, SourceError::FsyncFailed);
+    assert_eq!(db.source().sync(), Err(SourceError::FsyncFailed));
+    db.commit(&tx(&[1], 1), 4).unwrap();
+    assert_eq!(db.app_autocheckpoints().backfilled, 0);
+    db.commit(&tx(&[2], 2), 4).unwrap();
+    assert_eq!(db.app_autocheckpoints().backfilled, 1);
+
+    let cli = sim();
+    cli.inject(SourceOp::Sync, SourceError::FsyncFailed);
+    assert_eq!(cli.source().sync(), Err(SourceError::FsyncFailed));
+    cli.commit(&tx(&[1], 1), 4).unwrap();
+    let run = cli
+        .other_process_checkpoint(OtherProcessMode::Passive)
+        .unwrap();
+    assert_eq!(run.checkpointed, run.log);
+}

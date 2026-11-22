@@ -828,8 +828,8 @@ fn restarted(
     if !proven {
         return plain(changed);
     }
-    let new_end = committed_offset(header, wal).unwrap_or(WalOffset::start(seen.page_size));
-    if new_end.get() < seen.end.get() && probes.stale_next {
+    // No end check: frames the restart wrote at the synced end carry new salts and never chain.
+    if probes.stale_next {
         return Verdict {
             recovered: changed,
             event: Some(RecoverEvent::ReadLockViolated { synced: seen.end }),

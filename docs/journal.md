@@ -2,14 +2,9 @@
 
 Status: the storage protocol is specified, machine-checked, and implemented. The engine reads the
 journal at boot and reports what it found (`Actor::journal`, `docs/BEHAVIOR.md` BOOT-25 to BOOT-29),
-but does not write it or decide on it yet. The record and its codec are `lsr-journal`; the writer is
-`lsr_core::JournalWriter`, run step for step against the model by
-`crates/core/tests/core/journal_model.rs`. This document is the contract both are built against.
-Its source is the fifth revision of the design and its five reviews (on the
-`claude/analysis-notes` branch, `docs/notes/2026-11-22/journal/`), amended where the exhaustive
-model found the prose wrong. It covers how four facts are stored and read back. What the engine
-does with them (the floor at boot, the pending proof's bindings, the snapshot budget) is the
-design's business and, for the budget, the scheduling note's; neither is restated here.
+and records one fact in it: the unproven-WAL debt after a failed WAL fsync, written at the end of the
+tick that changes it and restored at boot (`crates/core/src/actor/unproven.rs`, RUN-3, decision D100).
+The replica thread, the simulator and the real-SQLite rig each lend it.
 
 The model is `lsr_spec::journal` (`crates/spec/src/journal/`). It shares no code with the
 implementation. Its tests are `crates/spec/tests/spec/journal.rs` (exhaustive walks and plants)
@@ -42,6 +37,10 @@ with absent facts (no floor, no debt known, a full budget, no proof).
 
 ## Writing
 
+A process writes a record when the facts it holds differ from the newest record it read at boot
+or made durable, and also when it has neither, so a journal exists after the first tick of every
+run and a missing one at boot means it was lost (D101 in `docs/decisions.md`).
+
 The writer keeps, per process: the slot holding the newest record it knows, its sequence
 number, whether creation is known finished, whether this lifetime has synced, and the newest
 record it has itself made durable (none at boot).
@@ -62,7 +61,7 @@ record it has itself made durable (none at boot).
    the same sequence number. A failed `fdatasync` is never retried bare.
 5. **Monotonic.** Before a write the writer checks the new record against the last one it read
    or wrote: the same destination's bound does not fall, a floor is not dropped, the debt only
-   moves forward through its cure (none, TRUNCATE owed, snapshot owed, none). A record that fails
+   is never forgiven: it is paid only through its cure (TRUNCATE owed, then snapshot owed, then none), and a new WAL fsync failure may raise it again at any step. A record that fails
    is refused as a bug (`invariant!`), never written.
 
 Sequence 1 means "creation may not have finished"; sequence 2 or more proves a creation returned
@@ -229,5 +228,7 @@ costs that record (logged).
 
 ## Working names
 
-User-visible strings need the owner's approval. Working names so far: the verdicts `Missing`,
-`Unreadable`, `Newer`; the event for a slot that failed to read (`JournalSlotUnreadable`).
+User-visible strings need the owner's approval. Approved: `JournalMissing`, `JournalUnreadable`,
+`JournalNewer`, `JournalSlotUnreadable`, `JournalUnwritable`; the `/healthz` fields `journal` and
+`journal_detail`, the gauge `lsr_journal_signal{db,signal}`, and its values `missing`,
+`unreadable`, `newer_version`, `slot_unreadable`, `unwritable`.
