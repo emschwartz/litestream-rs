@@ -407,7 +407,7 @@ notes = "The restore test for a page-size change vacuums while the engine is dow
 [[row]]
 table = "Running"
 id = "RUN-12"
-circumstance = "A database-file page read for a snapshot or for a grown page is not what the page table recorded for it (`pages.rs`)"
+circumstance = "A database-file page read for a snapshot or for a grown page is not what the page table recorded for it (`pages.rs`). Not checked at a checkpoint boundary (CKPT-4)"
 response = "degraded, `DatabasePageMismatch { pgno }`. On the retry the page is shipped as the file holds it. The task stays degraded and retention stays pinned"
 signal = "`database_page_mismatch`, with the page number in `/healthz`"
 at_risk = "The replica now holds bytes no commit wrote (G1 qualifier). The last good restore point is kept"
@@ -610,11 +610,11 @@ notes = "The scenario injects the `ReadersHeld` result. The decision in `Guarded
 table = "Checkpoint"
 id = "CKPT-4"
 circumstance = "A TRUNCATE that changed the WAL (new header or shorter file)"
-response = "snapshot under the write lock, `CheckpointBoundary` (`checkpoint.rs`). A TRUNCATE that found the WAL unchanged takes none"
+response = "snapshot under the write lock, `CheckpointBoundary` (`checkpoint.rs`). A TRUNCATE that found the WAL unchanged takes none. The snapshot does not check database pages against the page table: the TRUNCATE ends the engine's read transaction, so a commit that landed after the last step is backfilled with the rest, and its pages are the application's (D121)"
 signal = "`checkpoint_boundary`"
-at_risk = "None"
+at_risk = "None. Damage to a page between its last check and the boundary is shipped (D121)"
 recovery = "Automatic"
-detected_by = "sim::`truncate_threshold_crossed`, core::`a_truncate_snapshots_the_new_generation_once_under_the_write_lock`, core::`a_busy_truncate_that_changed_nothing_takes_no_snapshot`"
+detected_by = "sim::`truncate_threshold_crossed`, core::`a_truncate_snapshots_the_new_generation_once_under_the_write_lock`, core::`a_busy_truncate_that_changed_nothing_takes_no_snapshot`, sqlite::`a_commit_between_the_proof_and_the_truncate_is_not_taken_for_damage`; plant::`boundary-snapshot-keeps-page-table`"
 recovered_by = "sim::`truncate_threshold_crossed`"
 
 [[row]]
