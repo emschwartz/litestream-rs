@@ -272,6 +272,43 @@ mod tests {
         must(Resource::CCompiler, || Err::<(), _>("no cc".to_owned()));
     }
 
+    /// What a probe must do in this environment: `None` only when the runner opted out, a
+    /// panic when the resource is required and its variable is unset, and never `None` when
+    /// the variable names it (found, or a panic that it is unreachable). A probe that returned
+    /// `None` on its own would let every test that needs the resource skip and pass.
+    fn fails_closed<T>(resource: Resource, var: &str, probe: fn() -> Option<T>) {
+        let opted = opted_out(
+            env_text(SKIP_VAR).as_deref(),
+            env_text("CI").is_some(),
+            resource,
+        );
+        let named = env_text(var).is_some();
+        let got = std::panic::catch_unwind(probe);
+        match (opted, named) {
+            (Ok(true), _) => assert!(matches!(got, Ok(None)), "an opt-out returns None"),
+            (Err(_), _) | (Ok(false), false) => assert!(
+                got.is_err(),
+                "a required {} that is missing must fail the test, not skip it",
+                resource.name()
+            ),
+            (Ok(false), true) => assert!(
+                !matches!(got, Ok(None)),
+                "a named {} is found or fails, never skipped",
+                resource.name()
+            ),
+        }
+    }
+
+    #[test]
+    fn the_toxiproxy_probe_fails_closed() {
+        fails_closed(Resource::Toxiproxy, "LSR_TOXIPROXY_API", toxiproxy);
+    }
+
+    #[test]
+    fn the_minio_probe_fails_closed() {
+        fails_closed(Resource::Minio, "LSR_MINIO_ENDPOINT", minio);
+    }
+
     #[test]
     fn a_refused_connection_is_unreachable() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
