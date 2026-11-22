@@ -617,6 +617,52 @@ mod staged_input {
 }
 
 #[cfg(test)]
+mod prefix_page_size {
+    use lsr_ltx::PageSize;
+    use lsr_sim::generate::{MetaOp, RemoteOp, WalOp};
+    use lsr_sim::run::run_ops;
+    use lsr_sim::{Op, Opts, Seed};
+
+    /// A staging backup holds a file at 1024-byte pages. The database moves
+    /// to 2048, the bucket rolls back and the replica goes on at 2048 up to
+    /// transaction 3. The backup is put back and the database moves to 1024
+    /// again: the boot judged the page size by the staged file alone and
+    /// snapshotted 1024-byte pages onto the 2048 prefix, so restores stopped
+    /// on the change (seed 0xdc8, shrunk).
+    #[test]
+    fn a_boot_behind_the_replica_keeps_its_page_size_seed_0xdc8() {
+        let ops = [
+            Op::Vacuum {
+                page_size: PageSize::new(1024),
+            },
+            Op::WalDamage {
+                op: WalOp::RegrowWithoutCommitMarks(587_138_737_148_633_869),
+                ticks: 6,
+            },
+            Op::Meta(MetaOp::Save),
+            Op::Vacuum {
+                page_size: PageSize::new(2048),
+            },
+            Op::Meta(MetaOp::DeleteAll),
+            Op::Remote(RemoteOp::RollBack),
+            Op::Shutdown,
+            Op::SecondWriter { ticks: 5 },
+            Op::StagingDamage(MetaOp::Restore),
+            Op::Vacuum {
+                page_size: PageSize::new(1024),
+            },
+        ];
+        let opts = Opts {
+            drawn: true,
+            ..Opts::default()
+        };
+        if let Err(failure) = run_ops(Seed::new(0xdc8), &ops, &opts) {
+            panic!("{}", failure.violation);
+        }
+    }
+}
+
+#[cfg(test)]
 mod one_bad_read {
     use lsr_core::StoreOp;
     use lsr_sim::generate::Target;
