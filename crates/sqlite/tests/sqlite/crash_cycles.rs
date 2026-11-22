@@ -524,6 +524,18 @@ fn crash_cycles_under_the_block_law_restore_committed_states() {
     }
 }
 
+/// Found by the first campaign (seed 113, the sixth cycle): a WAL frame a power loss tore is
+/// completed by a later write of the same bytes, and the next loss's recovery brings back the
+/// commit the first loss took. The model kept the commit it inferred from the frame count, and
+/// the simulator's oracle blamed the replica ("restoring Txid(0x1c) differs from commit 76
+/// first at page 21"). The model now follows SQLite's own recovery of the bytes the loss left.
+#[test]
+fn a_recovery_that_brings_back_a_lost_commit_is_followed_seed_113() {
+    if let (Some((cycle, anomaly)), _) = run(113, 6) {
+        panic!("cycle {cycle}: {anomaly:?}");
+    }
+}
+
 /// The campaign: `LSR_CRASH_SEEDS` seeds of `LSR_CRASH_CYCLES` cycles from `LSR_CRASH_BASE`,
 /// every anomaly printed with its seed and cycle, the first one failing the test after all
 /// seeds ran.

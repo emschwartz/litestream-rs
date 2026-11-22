@@ -43,7 +43,7 @@ use lsr_core::{
 use lsr_ltx::{PageNo, PageSize, Timestamp, Txid};
 use lsr_sim::{
     Acked, AppCommit, Checked, CommitId, Model, PageImage, Recorder, RecorderEvent, RecorderLog,
-    Violation,
+    Recovery, Violation, bug_fault,
 };
 use lsr_store_fs::FsStore;
 use lsr_wal::{Salts, WalOffset};
@@ -1051,6 +1051,8 @@ impl<B: Backend> Rig<B> {
         self.backend = None;
         self.app.discard_all()?;
         self.vfs.restore_power()?;
+        // Every connection is closed: what the loss left, for SQLite to recover on its own.
+        let left = (read_file(&self.db)?, read_file(&self.wal())?);
         self.app.open(APP)?;
         let frames = wal_frames(&mut self.app)?;
         let bytes = read_file(&self.wal())?;
@@ -1072,6 +1074,7 @@ impl<B: Backend> Rig<B> {
             }
             model.on_power_loss(salts.unwrap_or(Salts { salt1: 0, salt2: 0 }), frames);
         }
+        self.adopt_recovered(&left.0, &left.1, salts, frames)?;
         self.mirror.seen = salts.map(|salts| (salts, frames));
         // The acknowledgements start again, and so does what settling waits for: a boot that
         // continues (the WAL kept everything staged) has nothing new to upload.
@@ -1079,6 +1082,39 @@ impl<B: Backend> Rig<B> {
         self.staged.clear();
         self.wal_syncs = self.vfs.syncs(FileKind::Wal);
         self.restart()
+    }
+
+    /// The model after a loss follows what SQLite's own recovery of the bytes the loss left
+    /// made of them (`lsr_sim::recovery`), which may be a commit an earlier loss took
+    /// ([`Model::adopt_recovered`]).
+    ///
+    /// # Errors
+    /// [`RigError::Oracle`] when SQLite recovered a state no commit made, or the probe failed.
+    fn adopt_recovered(
+        &mut self,
+        db: &[u8],
+        wal: &[u8],
+        salts: Option<Salts>,
+        frames: u32,
+    ) -> Result<(), RigError> {
+        let Some(model) = self.model.as_mut() else {
+            return Ok(());
+        };
+        let page_size = self.mirror.page_size;
+        let wal = (!wal.is_empty()).then_some(wal);
+        let truth = lsr_sim::recovery::recover(page_size, db, wal, lsr_sim::recovery::Header::Real)
+            .map_err(|err| bug_fault(format!("SQLite's recovery probe: {err}")))?;
+        let app = AppCommit {
+            salts: salts.unwrap_or(Salts { salt1: 0, salt2: 0 }),
+            end: WalOffset::from_frame_index(frames, page_size),
+        };
+        let at = self.remote_log.len();
+        match model.adopt_recovered(&truth.image, false, app, at) {
+            Recovery::Expected | Recovery::Resurrected(_) => Ok(()),
+            Recovery::Unknown => Err(RigError::Oracle(bug_fault(
+                "SQLite recovered a database no commit made",
+            ))),
+        }
     }
 
     /// Replaces the local database with `bytes`, as an application that lost its disk and restored the

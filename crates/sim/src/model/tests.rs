@@ -93,3 +93,34 @@ fn find_picks_the_newest_commit_made_by_the_created_at() {
     assert_eq!(model.find(SALTS, end, 9), Some(late));
     assert_eq!(model.find(SALTS, end.saturating_add(1), 9), None);
 }
+
+/// A loss can bring back a commit an earlier loss took: the frame it ended in was torn, and a
+/// later write of the same bytes completed it. The model follows SQLite's recovered database
+/// to that commit, as a durable copy at the WAL position the recovery ended at; a database no
+/// commit made changes nothing.
+#[test]
+fn a_recovered_database_an_earlier_loss_took_is_adopted() {
+    let mut model = Model::new(PageImage::from_bytes(ps(), &[]));
+    model.commit(&[(pgno(1), page(1))], 1, app(1), 0);
+    let lost = model.commit(&[(pgno(1), page(2))], 1, app(2), 0);
+    model.on_power_loss(SALTS, 1);
+    model.commit(&[(pgno(1), page(3))], 1, app(2), 0);
+    model.on_power_loss(SALTS, 2);
+    assert_eq!(byte(&model.newest_image(), 1), Some(3));
+    let got = model.adopt_recovered(&page(2), false, app(2), 5);
+    let Recovery::Resurrected(copy) = got else {
+        panic!("{got:?}");
+    };
+    assert_ne!(copy, lost);
+    assert_eq!(byte(&model.newest_image(), 1), Some(2));
+    assert_eq!(model.find(SALTS, wal_end(2).get(), 5), Some(copy));
+    assert!(model.rec(copy).unwrap().durable);
+    assert_eq!(
+        model.adopt_recovered(&page(2), false, app(2), 5),
+        Recovery::Expected
+    );
+    assert_eq!(
+        model.adopt_recovered(&page(9), false, app(2), 5),
+        Recovery::Unknown
+    );
+}

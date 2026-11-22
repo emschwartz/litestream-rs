@@ -1,9 +1,11 @@
-//! SQLite's own WAL recovery over the rules' bytes: the ground truth of a power loss.
+//! SQLite's own WAL recovery over a database's and a WAL's bytes: the ground truth of a power
+//! loss, for the simulator's rules and for the real-SQLite fault suite alike.
 //!
 //! The rules' database pages are not a SQLite database (they are [`lsr_wal::testing::page`]s),
 //! so no SQL statement can read them. Recovery does not need one. The probe writes the database
-//! and the WAL into a temporary directory, with the database's first 100 bytes made a SQLite
-//! file header naming the rules' page size, so the pager opens at that size. A statement then
+//! and the WAL into a temporary directory; for the rules' bytes ([`Header::Fake`]) the
+//! database's first 100 bytes become a SQLite file header naming the page size, so the pager
+//! opens at that size. A statement then
 //! takes the shared lock, which opens the WAL (`pagerOpenWalIfPresent`) and runs
 //! `walIndexRecover` on the empty wal-index, before the B-tree layer reads page 1 and gives up.
 //! The probe reads the recovered wal-index header from the `-shm` file (its layout is SQLite's
@@ -18,6 +20,16 @@ use std::io;
 use lsr_ltx::PageSize;
 use lsr_wal::{Salts, WalChecksum};
 use rusqlite::{Connection, OpenFlags};
+
+/// The database file's header, as given or made up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Header {
+    /// The bytes are a SQLite database: its header stays.
+    Real,
+    /// The bytes are the rules' pages: page 1's first 100 bytes become a header naming the page
+    /// size, and stay in the result unless a recovered frame wrote page 1.
+    Fake,
+}
 
 /// What SQLite's recovery made of a database and its WAL.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -100,16 +112,19 @@ pub fn recover(
     page_size: PageSize,
     db: &[u8],
     wal: Option<&[u8]>,
+    header: Header,
 ) -> Result<Recovered, ProbeError> {
     let dir = tempfile::TempDir::new()?;
     let path = dir.path().join("probe.db");
     let mut probe = db.to_vec();
-    let head = file_header(page_size);
-    if probe.len() < page_size.bytes() {
-        probe.resize(page_size.bytes(), 0);
-    }
-    if let Some(first) = probe.get_mut(..head.len()) {
-        first.copy_from_slice(&head);
+    if header == Header::Fake {
+        let head = file_header(page_size);
+        if probe.len() < page_size.bytes() {
+            probe.resize(page_size.bytes(), 0);
+        }
+        if let Some(first) = probe.get_mut(..head.len()) {
+            first.copy_from_slice(&head);
+        }
     }
     std::fs::write(&path, &probe)?;
     if let Some(wal) = wal {
