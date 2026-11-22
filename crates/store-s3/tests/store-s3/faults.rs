@@ -378,12 +378,13 @@ mod cases {
             ),
             (b.abort_multipart(now(), &k, &id).unwrap(), Shape::Abort),
             (b.delete_objects(now(), &[k]).unwrap(), Shape::DeleteObjects),
+            (b.list_uploads(now(), None).unwrap(), Shape::ListUploads),
         ];
         for (request, want) in all {
             assert_eq!(Shape::of(&request), Some(want));
             drop(lsr_store_s3::Transport::send(&t, request));
         }
-        assert_eq!(t.requests().len(), 9);
+        assert_eq!(t.requests().len(), 10);
     }
 
     #[test]

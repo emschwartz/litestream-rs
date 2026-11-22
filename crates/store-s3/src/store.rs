@@ -232,6 +232,10 @@ impl<T: Transport> ObjectStore for S3Store<T> {
         self.inner.delete(keys)
     }
 
+    async fn remove_scratch(&self) -> Result<u64, StoreError> {
+        self.inner.remove_scratch()
+    }
+
     fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {
         Inner::<T>::width(kind)
     }

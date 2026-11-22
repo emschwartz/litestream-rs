@@ -18,7 +18,7 @@ use thiserror::Error;
 
 use crate::classify::S3Code;
 use crate::config::Prefix;
-use crate::request::{UploadId, level_prefix};
+use crate::request::{UploadId, level_prefix, object_key};
 use crate::transport::HttpResponse;
 
 /// The metadata header a file's created-at time is stored in.
@@ -467,4 +467,72 @@ mod tests {
             }
         );
     }
+}
+
+/// The text of each `<tag>` element in `xml`, unescaped; enough for S3's flat listings.
+#[must_use]
+pub(crate) fn xml_text(xml: &str, tag: &str) -> Vec<String> {
+    let (open, close) = (format!("<{tag}>"), format!("</{tag}>"));
+    xml.split(open.as_str())
+        .skip(1)
+        .filter_map(|rest| rest.split_once(close.as_str()).map(|(text, _)| text))
+        .map(|text| {
+            text.replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&quot;", "\"")
+                .replace("&apos;", "'")
+                .replace("&amp;", "&")
+        })
+        .collect()
+}
+
+/// One page of ListMultipartUploads: the uploads this store began (a full key that is
+/// `<prefix>/<level>/<file name>` for a level and a file name it parses), and where the
+/// next page starts when the listing is truncated.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct UploadPage {
+    /// The uploads whose key is one of this store's object keys.
+    pub ours: Vec<(FileKey, UploadId)>,
+    /// `key-marker` and `upload-id-marker` for the next page.
+    pub next: Option<(String, String)>,
+}
+
+/// Parses a ListMultipartUploads answer; a key that is not one of this store's object keys
+/// (another prefix, a stray name) is not ours and is left out.
+///
+/// # Errors
+/// [`ResponseError::Malformed`] for a body that is not the listing.
+pub fn parse_uploads(r: &HttpResponse, prefix: &Prefix) -> Result<UploadPage, ResponseError> {
+    let xml = std::str::from_utf8(r.body()).map_err(|_bytes| ResponseError::Malformed)?;
+    if !xml.contains("<ListMultipartUploadsResult") {
+        return Err(ResponseError::Malformed);
+    }
+    let mut page = UploadPage::default();
+    for upload in xml_text(xml, "Upload") {
+        let key = xml_text(&upload, "Key")
+            .pop()
+            .ok_or(ResponseError::Malformed)?;
+        let id = xml_text(&upload, "UploadId")
+            .pop()
+            .ok_or(ResponseError::Malformed)?;
+        if let Some(file) = own_key(prefix, &key) {
+            page.ours.push((file, UploadId::new(id)));
+        }
+    }
+    if xml_text(xml, "IsTruncated").first().map(String::as_str) == Some("true") {
+        let next = |tag: &str| xml_text(xml, tag).pop().ok_or(ResponseError::Malformed);
+        page.next = Some((next("NextKeyMarker")?, next("NextUploadIdMarker")?));
+    }
+    Ok(page)
+}
+
+/// The file key a full object key names, when it is exactly what [`object_key`] gives.
+fn own_key(prefix: &Prefix, key: &str) -> Option<FileKey> {
+    let rest = key.strip_prefix(prefix.as_str())?.strip_prefix('/')?;
+    let (level, name) = rest.split_once('/')?;
+    let level = Level::ALL
+        .into_iter()
+        .find(|l| format!("{:04x}", l.get()) == level)?;
+    let file = FileKey::new(level, parse_file_name(name).ok()?);
+    (object_key(prefix, &file) == key).then_some(file)
 }
