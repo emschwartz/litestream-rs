@@ -24,6 +24,7 @@ pub mod budget;
 pub mod clock;
 pub mod contract;
 pub mod crash_law;
+pub mod domain;
 pub mod exec;
 pub mod generate;
 pub mod history;

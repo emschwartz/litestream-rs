@@ -148,8 +148,10 @@ fn the_second_frozen_generator_draws_what_the_live_one_drew() {
             continue;
         }
         // Holds came after the second generator, from a stream of their own: with none drawn,
-        // every step is the step it was.
+        // every step is the step it was. The whole error domain came after too, and changes
+        // only which error a fault draws.
         weights.hold = 0;
+        weights.error_domain = false;
         let live = history(seed(n), 300, &weights);
         assert_eq!(
             frozen_history(seed(n), 300, Generator::V2),

@@ -44,6 +44,8 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D34 | A restore of the latest state that a writer keeps outpacing: fail or answer? | Answer the last listing, flagged | parent session (#126) | 2026-11-22 | open to owner review |
 | D35 | When may the simulator accept a task still stalled at the end of a run? | Only while the world still imposes the stall's fault; the excuse table is empty today | Claude (stall-liveness), **delegated** | 2026-11-22 | open to owner review |
 | D130 | How does the simulator run the real directory store, and who judges it? | A filesystem trait in store-fs, an in-memory filesystem under the crash law in the sim, half the swarm on it, a staging-contract judge | Claude (sim-real-store-fs), **delegated** | 2026-11-22 | open to owner review |
+| D70 | How do simulated runs draw a fault that reaches an open engine defect? | As a known-wrong cell: out of the per-push seeds, drawn by the nightly and campaigns with its failures counted as known, with a pinned seed that fails once the fix lands | parent session; mechanism by Claude (error-domain), **delegated** | 2026-11-22 | decided |
+| D71 | Which errors may a simulated history inject? | Those a shipped implementation returns from that call with the world unchanged; a world fact is drawn as the world change; a cell the model cannot follow is listed as unmodelled, never drawn | Claude (error-domain), **delegated** | 2026-11-22 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -353,6 +355,23 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** a fault the world keeps imposing after the heal (none today) needs a table entry, or its runs fail.
 - **Revisit if:** a fault is added that the end of the run cannot heal.
 - **Links:** the stall-liveness PR; #104.
+## D70. Known-wrong cells
+
+- **Options:** let the per-push seeds go red until each defect is fixed; leave the fault out of every draw; draw it where failures are classified.
+- **Choice:** a cell of the simulator's error domain that reaches an open engine defect is `Cell::KnownWrong`. The per-push fixed seeds leave it out. The nightly soak and the campaigns draw it and count a failure matching the defect's signature as known (printed, not failing the run), so every other failure in those seeds stays visible. Each defect names its tracking item and has a pinned seed in `tests/sim/known_wrong.rs` that must still fail: when the fix lands that test fails, and the cell becomes drawn.
+- **Why:** the defect stays exercised every night and cannot stay known-wrong after its fix, while a push stays green.
+- **Cost accepted:** a second failure with the same signature in a run that drew the cell is counted as known too; the per-push seeds do not reach the defect's code paths through these cells.
+- **Revisit if:** a known-wrong cell stays open for long, or a signature turns out to match an unrelated failure.
+- **Links:** issue #127 item D; `crates/sim/src/domain.rs`.
+
+## D71. What the error domain may inject
+
+- **Options:** inject any error into any call; inject only what an implementation returns.
+- **Choice:** a cell is drawn only when lsr-sqlite (SQLite seam), store-fs (staging) or store-s3 (replica) returns that error from that call with the world unchanged. An error that reports a world fact (the WAL file replaced) is drawn as that change, and the call then reports it. A cell the simulator's model cannot follow yet is unmodelled: listed and counted, never drawn. Every other cell is impossible, with the reason in the table.
+- **Why:** an injected lie (a NotFound for an object the store holds, a corrupt read of a sound object) tests a world that cannot happen, and its failures would be the simulator's, not the engine's.
+- **Cost accepted:** the unmodelled cells (an unlinked WAL, a lost checkpoint retake) stay untested by the swarm until the model follows them.
+- **Revisit if:** another implementation of a seam ships; its errors join the table.
+- **Links:** issue #127 item D; BEHAVIOR CHK-8 and C9.
 
 ## D130. The real directory store in the simulator (delegated)
 

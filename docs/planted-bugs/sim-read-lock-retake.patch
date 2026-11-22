@@ -1,8 +1,8 @@
 diff --git a/crates/sim/src/sqlite.rs b/crates/sim/src/sqlite.rs
-index 81ae0d0..7d2cd60 100644
+index b1ead7f..3e434fe 100644
 --- a/crates/sim/src/sqlite.rs
 +++ b/crates/sim/src/sqlite.rs
-@@ -1668,11 +1668,6 @@ impl WalSource for SimSource {
+@@ -1802,11 +1802,6 @@ impl WalSource for SimSource {
          // The application commits after the tick read its clock and before the engine reads
          // the committed end: the stamp of the file that carries it must come after it.
          state.commit_in_tick(InTickSite::BeforeCommittedRead);
@@ -14,3 +14,28 @@ index 81ae0d0..7d2cd60 100644
          if mem::take(&mut state.faults.shm_busy) {
              return Err(SourceError::Busy);
          }
+@@ -1858,7 +1853,6 @@ impl WalSource for SimSource {
+             }
+             return Err(err);
+         }
+-        state.begin(Conn::Ours);
+         if state.unlinked {
+             return Err(SourceError::Unlinked);
+         }
+@@ -1921,8 +1915,6 @@ impl PageSource for SimPages {
+     fn page_count(&mut self) -> Result<DbPages, SourceError> {
+         let mut state = lock(&self.state);
+         state.faults.take(SourceOp::PageCount)?;
+-        // As lsr-sqlite's `ensure_read_lock_held`: a lapsed read transaction is taken again.
+-        state.begin(Conn::Ours);
+         if std::mem::take(&mut state.faults.empty_db) {
+             return Ok(DbPages::EMPTY);
+         }
+@@ -1932,7 +1924,6 @@ impl PageSource for SimPages {
+     fn read_page(&mut self, pgno: PageNo, buf: &mut [u8]) -> Result<(), SourceError> {
+         let mut state = lock(&self.state);
+         state.faults.take(SourceOp::ReadPage)?;
+-        state.begin(Conn::Ours);
+         let at = state.page_at(pgno.get());
+         let src = state
+             .db

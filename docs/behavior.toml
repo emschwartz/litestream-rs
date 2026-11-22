@@ -364,7 +364,7 @@ recovery = "Automatic once the TRUNCATE completes. Under `STRICT`, or if the pro
 detected_by = "sqlite::`a_failed_wal_sync_stages_nothing_of_its_generation_and_snapshots_after_a_truncate`, core::`a_failed_wal_sync_stages_nothing_of_its_generation_and_ends_in_a_snapshot`, core::`a_busy_truncate_after_a_failed_wal_sync_stays_degraded_and_stages_nothing`, core::`a_wal_sync_failed_in_a_checkpoint_seal_is_never_retried_past`, core::`a_failed_wal_sync_stops_under_strict_responses`, core::`after_a_completed_truncate_staging_resumes_from_the_new_generation`, sim::`wal_fsync_fails`; oracle::`StagedNotDurable`, plant::`wal-barrier`, plant::`wal-sync-error-as-success`, plant::`wal-trusted-after-failed-sync`"
 recovered_by = "sqlite::`a_failed_wal_sync_stages_nothing_of_its_generation_and_snapshots_after_a_truncate`, sim::`wal_fsync_fails_then_snapshot`"
 no_test = "restart half: known wrong"
-notes = "The sqlite test judges restores after the snapshot and again after a power cut; the sim scenario after a power loss. No restore is judged while the task is degraded, so no S. The simulator keeps the bytes a failed sync covered off its disk for good, and oracle `StagedNotDurable` fails any level-0 file staged from them. The restart half has expected-fail tests, both ignored: sim::`wal_fsync_fails_then_restart`, sqlite::`a_restart_after_a_failed_wal_sync_ships_no_unproven_frame` (D2)"
+notes = "The sqlite test judges restores after the snapshot and again after a power cut; the sim scenario after a power loss. No restore is judged while the task is degraded, so no S. The simulator keeps the bytes a failed sync covered off its disk for good, and oracle `StagedNotDurable` fails any level-0 file staged from them. The restart half has expected-fail tests, both ignored: sim::`wal_fsync_fails_then_restart`, sqlite::`a_restart_after_a_failed_wal_sync_ships_no_unproven_frame` (D2). The swarm reaches it unaided since the error domain draws failed syncs (CHK-8): 85 of 3000 mixed seeds, counted as known in the nightly; sim::`known_wrong::a_restart_after_a_failed_wal_sync_still_stages_frames_it_covered_seed_0x21` fails once D2 is fixed, to flip the cell"
 
 [[row]]
 table = "Running"
@@ -1916,3 +1916,14 @@ at_risk = "None (a checker)"
 recovery = "None"
 detected_by = "sim::`stall_liveness::a_stall_ends_with_the_fault_that_caused_it_seed_0xa2`; oracle::`StuckRetrying`, plant::`success-keeps-a-stall`"
 notes = "Before, any stall ended a liveness judgment and excused an undrained shutdown, so an engine still retrying a fault nothing caused any more, or reporting degraded for nothing, passed. The run's end now also heals the SQLite source failures still queued"
+
+[[row]]
+table = "The checkers themselves"
+id = "CHK-8"
+circumstance = "An error the engine's SQLite seam or one of its stores can return, from some call, that no simulated history ever draws"
+response = "The simulator's error domain (`sim/src/domain.rs`) lists every SQLite-side operation against every source error, and every store operation on both stores against every store error and denial kind, in matches with no wildcard: each cell is drawn, a world fault, impossible with a reason checked against lsr-sqlite, store-fs and store-s3, unmodelled, or known wrong. A new operation or error variant breaks the build there"
+signal = "None (a checker)"
+at_risk = "None (a checker)"
+recovery = "None"
+detected_by = "sim::`domain::tests::every_cell_is_drawn_or_says_why_not`, sim::`domain::tests::the_source_draw_reaches_every_drawable_cell_and_no_other`, sim::`domain::tests::the_store_draw_reaches_every_drawable_class_and_no_other`, sim::`known_wrong::a_restart_after_a_failed_wal_sync_still_stages_frames_it_covered_seed_0x21`, sim::`known_wrong::compaction_still_reports_a_staging_denial_as_the_replicas_seed_0xb9e`"
+notes = "Before, histories drew two store errors and two SQLite errors on nine of twelve operations. The whole domain (21 source cells, 40 store cells, drawn last in the swarm mix) found D2 unaided in 85 of 3000 mixed seeds (first at seed 18) and a new defect, compaction classifying staging errors as the replica's (1 seed); both are known-wrong cells, left out of the per-push seeds and counted as known in the nightly. Four cells are unmodelled, gaps in the simulator listed in section 6 (C9): an unlinked WAL and a lost checkpoint retake. WAL damage while a failed sync's writeback is lost is skipped and counted (`wal.damage_skipped.writeback_lost`)"
