@@ -108,6 +108,8 @@ pub struct History {
     rng: SeededEntropy,
     first: i64,
     unjudged: u32,
+    // States the world adopted from damage, not from a commit: no restore may give one.
+    corrupt: std::collections::BTreeSet<Digest>,
 }
 
 impl History {
@@ -125,6 +127,7 @@ impl History {
             rng: SeededEntropy::new(seed),
             first: now.unix_millis(),
             unjudged: 0,
+            corrupt: std::collections::BTreeSet::new(),
         }
     }
 
@@ -149,6 +152,13 @@ impl History {
     /// The clock reads `now` (after a jump, say).
     pub fn note_time(&mut self, now: Timestamp) {
         self.log.note_time(now.unix_millis());
+    }
+
+    /// The model's newest image is a state the world adopted from damage (a flipped bit in a
+    /// committed frame), not a commit: the model must follow the database to go on, but a
+    /// restore that gives this state is a failure, not a node of the history.
+    pub fn adopted_corruption(&mut self, model: &Model) {
+        self.corrupt.insert(image_digest(&model.newest_image()));
     }
 
     /// The engine reported a loss of history: a snapshot cause that says so, or a stop on a
@@ -254,6 +264,11 @@ impl History {
         damaged: &[FileKey],
     ) -> Result<Restored, Violation> {
         let restored = restore(remote, target, damaged)?;
+        if let Restored::Content(digest) = restored
+            && self.corrupt.contains(&digest)
+        {
+            return Err(Violation::CorruptionRestored { target });
+        }
         if matches!(restored, Restored::Unjudged) {
             self.unjudged = self.unjudged.saturating_add(1);
         }
@@ -308,3 +323,6 @@ impl History {
         );
     }
 }
+
+#[cfg(test)]
+mod tests;

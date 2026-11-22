@@ -112,6 +112,14 @@ pub enum Violation {
         /// The commit it covered later.
         second: CommitId,
     },
+    /// A restore gave the database as damage to the WAL left it: a state the
+    /// world adopted as the database's truth so the run can go on, which no
+    /// commit of the application made.
+    #[error("restoring {target:?} gave the state WAL damage left, which no commit made")]
+    CorruptionRestored {
+        /// What was restored.
+        target: RestoreTarget,
+    },
     /// A replica key was put again with other bytes: an object is written
     /// once (retention may delete it), unless the replica lost it from
     /// outside, the store reported its first put failed, or a power loss cut

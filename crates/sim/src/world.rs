@@ -993,6 +993,17 @@ impl World {
         Ok(())
     }
 
+    /// [`World::adopt_local_state`] for damage that corrupted the database
+    /// (a flipped bit): the model follows it, and the history judge refuses
+    /// any restore that gives it.
+    pub fn adopt_corrupt_state(&mut self) {
+        if self.model_matches_sqlite() {
+            return;
+        }
+        self.adopt_local_state();
+        self.history.adopted_corruption(&self.model);
+    }
+
     /// Takes the database as the rules now read it as the model's newest
     /// commit, when damage to the WAL changed it: the damage is the database's
     /// new truth, and the replica is judged against that.

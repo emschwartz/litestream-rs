@@ -335,6 +335,15 @@ struct Runner {
     op_began_at: u32,
 }
 
+/// Whether a step on the WAL undoes an earlier one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Heal {
+    /// It damages.
+    No,
+    /// It puts back what an earlier step changed.
+    Yes,
+}
+
 fn below(rng: &SeededEntropy, upper: u64) -> u64 {
     rng.below(upper.max(1))
 }
@@ -1468,6 +1477,13 @@ impl Runner {
     }
 
     fn wal_damage(&mut self, op: WalOp) -> Result<(), Violation> {
+        self.wal_damage_as(op, Heal::No)
+    }
+
+    /// [`Self::wal_damage`]; `heal` says whether this application of `op`
+    /// undoes an earlier one (a flipped bit flipped back), which corrupts
+    /// nothing.
+    fn wal_damage_as(&mut self, op: WalOp, heal: Heal) -> Result<(), Violation> {
         let sqlite = &self.w.sqlite;
         let applied = match op {
             WalOp::TearHeader => sqlite.tear_wal_header(),
@@ -1488,7 +1504,19 @@ impl Runner {
         self.expect(StopCause::WalCorrupt);
         self.expect(StopCause::WalTruncated);
         self.step_done(&format!("{op:?}"), Ok(applied))?;
-        self.w.adopt_local_state();
+        match (op, heal) {
+            // A flipped bit is no commit: the model follows it, and no restore may give it.
+            (WalOp::FlipLastFrameBit, Heal::No) => self.w.adopt_corrupt_state(),
+            (WalOp::FlipLastFrameBit, Heal::Yes) => self.w.adopt_local_state(),
+            (
+                WalOp::TearHeader
+                | WalOp::TruncateAtFrame(_)
+                | WalOp::RewriteSameLength(_)
+                | WalOp::RegrowSameSalts(_)
+                | WalOp::RegrowWithoutCommitMarks(_),
+                _,
+            ) => self.w.adopt_local_state(),
+        }
         Ok(())
     }
 
@@ -1526,7 +1554,7 @@ impl Runner {
             self.tick()?;
         }
         if op == WalOp::FlipLastFrameBit {
-            self.wal_damage(op)?;
+            self.wal_damage_as(op, Heal::Yes)?;
         }
         self.app_lets_go();
         if self.w.sqlite.our_reader_end() {

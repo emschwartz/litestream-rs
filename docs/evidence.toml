@@ -70,6 +70,14 @@ test = "lsr-sim::oracle::tests::a_key_put_again_with_other_bytes_is_a_rewrite"
 plant = "keys-not-write-once"
 
 [[row]]
+id = "CHK-6"
+circumstance = "A restore gives the database as a flipped bit in the WAL left it, a state the world adopted and no commit made"
+detected = ["lsr-sim::history::tests::a_restore_of_a_state_adopted_from_damage_fails"]
+[[row.kill]]
+test = "lsr-sim::history::tests::a_restore_of_a_state_adopted_from_damage_fails"
+plant = "damage-adopted-as-commit"
+
+[[row]]
 id = "CHK-4"
 circumstance = "A regression the driver excused (a bucket rollback) is never reported by the engine"
 none = "known wrong"
