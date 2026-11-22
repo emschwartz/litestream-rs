@@ -22,8 +22,8 @@ use std::process::Command;
 
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    FileInfo, FileKey, Level, ObjectStore, PageLimit, ReadLen, RestoreError, RestoreTarget,
-    Restored, StoreError, cmp_range, restore,
+    FileInfo, FileKey, Level, ObjectStore, PageLimit, ReadLen, RestoreError, RestoreOptions,
+    RestoreTarget, Restored, StoreError, cmp_range, restore, restore_with,
 };
 use lsr_local::FileSink;
 use lsr_ltx::Txid;
@@ -299,6 +299,21 @@ impl S3Replica {
         let sink = FileSink::create(out)
             .map_err(|e| CompatError::Fixture(format!("creating the restore sink: {e}")))?;
         Ok(block_on(restore(&self.store, target, sink)))
+    }
+
+    /// [`S3Replica::restore`] with `options` for the cases the executor can either refuse or accept.
+    ///
+    /// # Errors
+    /// [`CompatError`] when the sink cannot be created; the executor's refusal is the inner `Err`.
+    pub fn restore_with(
+        &self,
+        target: RestoreTarget,
+        options: RestoreOptions,
+        out: &Path,
+    ) -> Result<Result<Restored, RestoreError>, CompatError> {
+        let sink = FileSink::create(out)
+            .map_err(|e| CompatError::Fixture(format!("creating the restore sink: {e}")))?;
+        Ok(block_on(restore_with(&self.store, target, options, sink)))
     }
 
     /// Deletes every file under the prefix, so a run leaves the bucket as it found it.
