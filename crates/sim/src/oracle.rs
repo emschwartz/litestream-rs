@@ -314,6 +314,20 @@ pub enum Violation {
         /// The file.
         key: String,
     },
+    /// After every injected fault healed and the app let go, a task was
+    /// still stalled on a retried fault the world no longer imposes: the
+    /// engine is stuck retrying, and health says degraded for nothing.
+    #[error(
+        "the {task} task is still stalled on {stall} after {retries} failures with nothing causing it"
+    )]
+    StuckRetrying {
+        /// The task.
+        task: String,
+        /// The stall's fault.
+        stall: String,
+        /// Failures in a row.
+        retries: u32,
+    },
     /// A task is degraded by a persistent cause no fault of the run explains (or by the
     /// engine's own bug, which nothing explains).
     #[error("bug fault: a task is degraded: {cause:?}")]

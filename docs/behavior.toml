@@ -1853,6 +1853,17 @@ notes = "Before, the adopted state counted as a commit, so a replica holding it 
 
 [[row]]
 table = "The checkers themselves"
+id = "CHK-7"
+circumstance = "A task stays stalled on a retried fault after every injected fault has healed"
+response = "The oracle fails the run at the end of the final drain or after idle's settle window, unless the world still imposes the stall's fault (an exhaustive excuse table, empty today)"
+signal = "oracle `StuckRetrying`"
+at_risk = "None (a checker)"
+recovery = "None"
+detected_by = "sim::`stall_liveness::a_stall_ends_with_the_fault_that_caused_it_seed_0xa2`; oracle::`StuckRetrying`, plant::`success-keeps-a-stall`"
+notes = "Before, any stall ended a liveness judgment and excused an undrained shutdown, so an engine still retrying a fault nothing caused any more, or reporting degraded for nothing, passed. The run's end now also heals the SQLite source failures still queued"
+
+[[row]]
+table = "The checkers themselves"
 id = "CHK-8"
 circumstance = "An error the engine's SQLite seam or one of its stores can return, from some call, that no simulated history ever draws"
 response = "The simulator's error domain (`sim/src/domain.rs`) lists every SQLite-side operation against every source error, and every store operation on both stores against every store error and denial kind, in matches with no wildcard: each cell is drawn, a world fault, impossible with a reason checked against lsr-sqlite, store-fs and store-s3, unmodelled, or known wrong. A new operation or error variant breaks the build there"

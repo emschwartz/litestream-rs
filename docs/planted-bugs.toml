@@ -740,3 +740,12 @@ name = "park-ignores-callers-reading"
 fix = "af15d43"
 package = "lsr-replica"
 tests = ["a_park_returns_for_a_step_back_between_the_callers_reading_and_the_park"]
+
+# The defect the end-of-run stall check exists for, killed by the swarm with nothing written for
+# it: a task's success leaves its stall in place, so health says degraded for nothing.
+[[bug]]
+name = "success-keeps-a-stall"
+fix = "checker-holes (stall liveness)"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_stall_ends_with_the_fault_that_caused_it_seed_0xa2"]
