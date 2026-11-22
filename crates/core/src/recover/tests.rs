@@ -8,6 +8,7 @@ use proptest::prelude::*;
 use super::*;
 use crate::recover::BootWal;
 use crate::source::{CommittedRead, FakeWal};
+use crate::store::WriteMode;
 
 const PS: PageSize = PageSize::MIN;
 
@@ -805,7 +806,10 @@ pub(super) fn encode_newest_staged(
 pub(super) async fn put(store: &crate::MemStore, id: u64, bytes: &[u8]) {
     use crate::{ObjectStore, Upload};
     let key = FileKey::new(Level::ZERO, lsr_ltx::TxidRange::single(txid(id)));
-    let mut up = store.begin_upload(&key, ts(7)).await.unwrap();
+    let mut up = store
+        .begin_upload(&key, ts(7), WriteMode::Replace)
+        .await
+        .unwrap();
     up.write(bytes).await.unwrap();
     up.commit().await.unwrap();
 }
@@ -1514,4 +1518,24 @@ fn frames_regrown_from_a_header_written_again_are_a_rewind() {
         verdict.event,
         Some(RecoverEvent::LocalRewound { .. })
     ));
+}
+
+/// A range past the live WAL's committed end is not proof either way, but its
+/// generation names why: another generation's range is not in this WAL (the
+/// seam the witness's checksum-chain rung would use), while this generation's
+/// is residue past the commit, a rewrite.
+#[test]
+fn a_range_past_the_committed_end_is_named_by_its_generation() {
+    let wal = FakeWal::new(PS, salts(1));
+    commit(&wal, &[1], 1);
+    commit(&wal, &[2], 2);
+    let mut reader = reader(wal.file_bytes());
+    let mut boot = BootWal::recovered(&mut reader);
+    let start = lsr_wal::WalOffset::start(PS).get();
+    let frame = 24 + u64::try_from(PS.bytes()).unwrap();
+    let past = lsr_wal::WalOffset::new(start + 5 * frame, PS).unwrap();
+    let other = wal_range(&mut boot, start, past, salts(9)).unwrap();
+    assert!(matches!(other, Range::NotInThisWal), "another generation");
+    let same = wal_range(&mut boot, start, past, salts(1)).unwrap();
+    assert!(matches!(same, Range::Rewritten), "this generation");
 }

@@ -1,7 +1,7 @@
 //! The open engine defects the error domain reaches (`lsr_sim::domain::KnownWrong`), each pinned
-//! to a seed that must still fail with the defect's signature when its known-wrong cells are
-//! drawn. The per-push fixed seeds leave those cells out; the nightly draws them and counts their
-//! failures as known.
+//! to a seed's recorded history (`tests/sim/histories/`, drawn under the seed's mix with the
+//! known-wrong cells drawn) that must still fail with the defect's signature. The per-push fixed
+//! seeds leave those cells out; the nightly draws them and counts their failures as known.
 //!
 //! When a defect's fix lands, its test here fails, on purpose: flip the defect's cells in
 //! `crates/sim/src/domain.rs` from `Cell::KnownWrong` to `Cell::Drawn`, remove the variant, and
@@ -9,35 +9,24 @@
 //! its fix would hide its regressions from the per-push seeds.
 
 use lsr_sim::domain::{KnownWrong, known_in};
-use lsr_sim::{Seed, Weights, history, run};
+use lsr_sim::run::run_ops;
+use lsr_sim::{AfterRestart, ClockLaw, Op, Opts, Seed, Weights};
 
-const STEPS: u32 = 300;
-
-fn digest(text: &str) -> u64 {
-    text.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
-        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
-    })
-}
-
-/// Runs `seed` under its mix with the known-wrong cells drawn and requires it to fail with
-/// `defect`'s signature; `ops_digest` guards the history against a generator change.
-fn still_fails(seed: u64, ops_digest: u64, defect: KnownWrong) {
+/// Runs `seed`'s recorded `ops` under `opts` and requires them to fail with `defect`'s
+/// signature.
+fn still_fails(seed: u64, ops: &[Op], opts: &Opts, defect: KnownWrong) {
     let seed = Seed::new(seed);
-    let mut weights = Weights::mixed(seed);
-    weights.known_wrong = true;
-    // Drawn after these seeds were pinned, last in the swarm: none, and the run is the one pinned.
-    weights.other_connection_commit = 0;
-    let ops = history(seed, STEPS, &weights);
-    assert_eq!(
-        digest(&format!("{ops:?}")),
-        ops_digest,
-        "the live generator changed seed {seed}'s run; find another seed that reaches {defect:?}"
-    );
+    // What `known_in` reads of a mix, from the settings the mix drew.
+    let weights = Weights {
+        overlap: opts.overlap,
+        known_wrong: opts.known_wrong,
+        ..Weights::default()
+    };
     assert!(
-        known_in(&ops).contains(&defect),
+        known_in(ops, &weights).contains(&defect),
         "{seed} draws no cell of {defect:?}"
     );
-    match run(seed, STEPS, &weights) {
+    match run_ops(seed, ops, opts) {
         Err(failure) if defect.matches(&failure.violation) => {}
         Err(failure) => panic!("{seed} fails another way: {failure}"),
         Ok(_) => panic!(
@@ -52,7 +41,21 @@ fn still_fails(seed: u64, ops_digest: u64, defect: KnownWrong) {
 /// once the restart half of the failed sync was fixed.
 #[test]
 fn a_power_loss_after_a_failed_wal_sync_leaves_a_database_ahead_of_its_wal_seed_0x585() {
-    still_fails(0x585, 0x8737_7bf1_27ac_4b30, KnownWrong::DatabaseAheadOfWal);
+    let opts = Opts {
+        drawn: true,
+        block_crash_law: false,
+        lying_wal_sync: true,
+        after_restart: AfterRestart::Nothing,
+        clock_law: ClockLaw::PerTick,
+        staging_fs: false,
+        ..Opts::default()
+    };
+    still_fails(
+        0x585,
+        crate::histories::seed_0x585::OPS,
+        &opts,
+        KnownWrong::DatabaseAheadOfWal,
+    );
 }
 
 /// Fixed: a failed WAL sync was remembered in memory only, so a restart before the TRUNCATE
@@ -60,19 +63,16 @@ fn a_power_loss_after_a_failed_wal_sync_leaves_a_database_ahead_of_its_wal_seed_
 /// the first of the mixed set to reach it, must pass now.
 #[test]
 fn a_restart_after_a_failed_wal_sync_owes_the_truncate_seed_0xf() {
-    let seed = Seed::new(0xf);
-    let mut weights = Weights::mixed(seed);
-    weights.known_wrong = true;
-    // Drawn after these seeds were pinned, last in the swarm: none, and the run is the one pinned.
-    weights.other_connection_commit = 0;
-    let ops = history(seed, STEPS, &weights);
-    assert_eq!(
-        digest(&format!("{ops:?}")),
-        0xe00e_589f_5b37_5395,
-        "the live generator changed seed 0xf's run; find another seed whose history draws a \
-         failed WAL sync followed by a restart"
-    );
-    if let Err(failure) = run(seed, STEPS, &weights) {
+    let opts = Opts {
+        drawn: true,
+        block_crash_law: false,
+        lying_wal_sync: false,
+        after_restart: AfterRestart::Retry,
+        clock_law: ClockLaw::EachRead,
+        staging_fs: true,
+        ..Opts::default()
+    };
+    if let Err(failure) = run_ops(Seed::new(0xf), crate::histories::seed_0xf::OPS, &opts) {
         panic!("{failure}");
     }
 }
@@ -82,19 +82,40 @@ fn a_restart_after_a_failed_wal_sync_owes_the_truncate_seed_0xf() {
 /// `Fault::from_staging`. Seed 0xb9e, the one that reached it, must pass now; its cell is drawn.
 #[test]
 fn compaction_takes_a_staging_denial_as_staging_seed_0xb9e() {
-    let seed = Seed::new(0xb9e);
-    let mut weights = Weights::mixed(seed);
-    weights.known_wrong = true;
-    // Drawn after these seeds were pinned, last in the swarm: none, and the run is the one pinned.
-    weights.other_connection_commit = 0;
-    let ops = history(seed, STEPS, &weights);
-    assert_eq!(
-        digest(&format!("{ops:?}")),
-        0x0f14_5395_bc1a_570e,
-        "the live generator changed seed 0xb9e's run; find another seed whose history draws a \
-         staging read denied for permission"
-    );
-    if let Err(failure) = run(seed, STEPS, &weights) {
+    let opts = Opts {
+        drawn: true,
+        block_crash_law: true,
+        lying_wal_sync: false,
+        after_restart: AfterRestart::Nothing,
+        clock_law: ClockLaw::PerTick,
+        staging_fs: true,
+        ..Opts::default()
+    };
+    if let Err(failure) = run_ops(Seed::new(0xb9e), crate::histories::seed_0xb9e::OPS, &opts) {
         panic!("{failure}");
     }
+}
+
+/// A halt that outlasts restarts inside an overlapping hold is never reported degraded: each
+/// boot starts its retry count again (D9).
+#[test]
+fn a_halt_across_restarts_still_goes_unreported_seed_0xe9() {
+    let opts = Opts {
+        drawn: true,
+        block_crash_law: true,
+        lying_wal_sync: false,
+        after_restart: AfterRestart::Nothing,
+        clock_law: ClockLaw::PerTick,
+        overlap: true,
+        error_domain: false,
+        known_wrong: true,
+        staging_fs: false,
+        ..Opts::default()
+    };
+    still_fails(
+        0xe9,
+        crate::histories::seed_0xe9::OPS,
+        &opts,
+        KnownWrong::HaltForgottenAtRestart,
+    );
 }

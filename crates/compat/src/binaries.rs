@@ -339,6 +339,12 @@ pub fn go_binary(version: GoVersion) -> Result<PathBuf, CompatError> {
     binary_named(version.name())
 }
 
+/// Where the effective-config dumper built from the pinned upstream commit lives
+/// (`go/dump/lsrdump.go` added to Go's `cmd/litestream`; see [`crate::go_dump`]).
+pub fn go_dump_binary() -> Result<PathBuf, CompatError> {
+    file_in_bin(&format!("litestream-dump-{}", GoVersion::Head.name()))
+}
+
 fn binary_named(name: &str) -> Result<PathBuf, CompatError> {
     file_in_bin(&format!("litestream-{name}"))
 }

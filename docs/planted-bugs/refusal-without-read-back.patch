@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/upload.rs b/crates/core/src/upload.rs
+index 878a440..42ae045 100644
+--- a/crates/core/src/upload.rs
++++ b/crates/core/src/upload.rs
+@@ -646,7 +646,7 @@ async fn taken<L: ObjectStore, S: ObjectStore>(
+         state: UploadState::At(Some(key.range().max())),
+         did: Did::AlreadyPut(key),
+     };
+-    if same_bytes(staging, remote, &key).await.map_err(relist)? {
++    if true {
+         return Ok(already);
+     }
+     // One read never condemns a file: the staged copy must verify on a read

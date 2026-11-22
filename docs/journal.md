@@ -37,6 +37,10 @@ with absent facts (no floor, no debt known, a full budget, no proof).
 
 ## Writing
 
+A process writes a record when the facts it holds differ from the newest record it read at boot
+or made durable, and also when it has neither, so a journal exists after the first tick of every
+run and a missing one at boot means it was lost (D101 in `docs/decisions.md`).
+
 The writer keeps, per process: the slot holding the newest record it knows, its sequence
 number, whether creation is known finished, whether this lifetime has synced, and the newest
 record it has itself made durable (none at boot).
@@ -224,5 +228,7 @@ costs that record (logged).
 
 ## Working names
 
-User-visible strings need the owner's approval. Working names so far: the verdicts `Missing`,
-`Unreadable`, `Newer`; the event for a slot that failed to read (`JournalSlotUnreadable`).
+User-visible strings need the owner's approval. Approved: `JournalMissing`, `JournalUnreadable`,
+`JournalNewer`, `JournalSlotUnreadable`, `JournalUnwritable`; the `/healthz` fields `journal` and
+`journal_detail`, the gauge `lsr_journal_signal{db,signal}`, and its values `missing`,
+`unreadable`, `newer_version`, `slot_unreadable`, `unwritable`.

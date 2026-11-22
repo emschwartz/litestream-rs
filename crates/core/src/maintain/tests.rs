@@ -15,6 +15,7 @@ use crate::fault::Fault;
 use crate::layout::{CreatedAt, ListedTime};
 use crate::mem::MemStore;
 use crate::plan::{KeyTarget, PlanOutcome, plan};
+use crate::store::WriteMode;
 use crate::store::{PageLimit, StoreOp, Upload};
 
 /// A day-aligned instant (2023-11-15), so every default window starts on it.
@@ -982,7 +983,10 @@ fn lazy_store(files: &[FileInfo]) -> MemStore {
     block_on(async {
         for f in files {
             let created_at = f.created_at().unwrap().at();
-            let mut up = store.begin_upload(&f.key, created_at).await.unwrap();
+            let mut up = store
+                .begin_upload(&f.key, created_at, WriteMode::Replace)
+                .await
+                .unwrap();
             up.write(b"x").await.unwrap();
             up.commit().await.unwrap();
         }
@@ -1137,7 +1141,10 @@ fn ltx_filled(min: u64, max: u64, created: i64, fill: u8) -> Vec<u8> {
 fn put(store: &MemStore, l: u8, n: u64, created: i64) {
     block_on(async {
         let k = key(l, n, n);
-        let mut up = store.begin_upload(&k, at(created)).await.unwrap();
+        let mut up = store
+            .begin_upload(&k, at(created), WriteMode::Replace)
+            .await
+            .unwrap();
         up.write(&ltx(n, n, created)).await.unwrap();
         up.commit().await.unwrap();
     });
@@ -1205,7 +1212,7 @@ fn level_one_reads_the_local_copy_first() {
         bytes[middle] ^= 0xff;
         block_on(async {
             let mut up = replica
-                .begin_upload(&key(0, n, n), at(created))
+                .begin_upload(&key(0, n, n), at(created), WriteMode::Replace)
                 .await
                 .unwrap();
             up.write(&bytes).await.unwrap();
@@ -1248,7 +1255,7 @@ fn level_one_is_built_from_the_replica_when_the_local_copy_differs() {
     let stale = ltx_filled(3, 3, created, 0xee);
     block_on(async {
         let mut up = local
-            .begin_upload(&key(0, 3, 3), at(created))
+            .begin_upload(&key(0, 3, 3), at(created), WriteMode::Replace)
             .await
             .unwrap();
         up.write(&stale).await.unwrap();
@@ -1350,11 +1357,41 @@ fn running_a_job_twice_leaves_one_file_at_the_key() {
     let (local, replica) = (MemStore::new(), MemStore::new());
     three_l0(&local, &replica);
     let job = l1_job(&replica);
-    for _ in 0..2 {
-        let out = block_on(run_compact(&job, &local, &replica));
-        assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
-    }
+    let out = block_on(run_compact(&job, &local, &replica));
+    assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
+    let first = block_on(replica.read(&job.output_key(), 0, ReadLen::CHUNK)).unwrap();
+    // The second run finds the output there and writes nothing over it.
+    let again = block_on(run_compact(&job, &local, &replica));
+    assert!(
+        matches!(again, Outcome::Replan { key } if key == job.output_key()),
+        "{again:?}"
+    );
     assert_eq!(listed(&replica, 1), vec![job.output_key()]);
+    let after = block_on(replica.read(&job.output_key(), 0, ReadLen::CHUNK)).unwrap();
+    assert_eq!(first, after);
+}
+
+/// A compaction whose output key already holds an object (an earlier run's
+/// output a listing did not show) writes nothing over it, so a rejected commit
+/// can never delete it: the delete after a failed write takes only what that
+/// write created.
+#[test]
+fn a_rejected_compaction_never_deletes_an_output_that_was_already_there() {
+    let (local, replica, _, job) = rejected_setup();
+    let first = block_on(run_compact(&job, &local, &replica));
+    assert!(matches!(first, Outcome::Compacted { .. }), "{first:?}");
+    let held = block_on(replica.read(&job.output_key(), 0, ReadLen::CHUNK)).unwrap();
+    replica.inject_failure_after_publish(StoreError::Corrupt {
+        key: None,
+        cause: crate::store::CorruptCause::ChecksumMismatch { part: None },
+    });
+    let again = block_on(run_compact(&job, &local, &replica));
+    assert!(
+        matches!(again, Outcome::Replan { key } if key == job.output_key()),
+        "{again:?}"
+    );
+    let after = block_on(replica.read(&job.output_key(), 0, ReadLen::CHUNK)).unwrap();
+    assert_eq!(after, held, "the output that was there is untouched");
 }
 
 #[test]
@@ -1403,7 +1440,10 @@ fn truncate_to_half(replica: &MemStore, out: &FileKey) {
             .await
             .unwrap();
         let created = load(replica).level(level(1))[0].created_at().unwrap().at();
-        let mut up = replica.begin_upload(out, created).await.unwrap();
+        let mut up = replica
+            .begin_upload(out, created, WriteMode::Replace)
+            .await
+            .unwrap();
         up.write(&whole[..whole.len() / 2]).await.unwrap();
         up.commit().await.unwrap();
     });
@@ -1498,7 +1538,10 @@ fn review_a_level_one_job_that_always_fails_does_not_starve_the_snapshot_forever
     for store in [&local, &replica] {
         block_on(async {
             let k = key(0, 2, 2);
-            let mut up = store.begin_upload(&k, at(T0 - 100_000)).await.unwrap();
+            let mut up = store
+                .begin_upload(&k, at(T0 - 100_000), WriteMode::Replace)
+                .await
+                .unwrap();
             up.write(&[0xAB; 200]).await.unwrap();
             up.commit().await.unwrap();
         });
@@ -1753,7 +1796,10 @@ fn a_corrupt_local_input_falls_back_to_the_replica_copy() {
     put(&replica, 0, 3, T0);
     put(&local, 0, 2, T0);
     block_on(async {
-        let mut up = local.begin_upload(&key(0, 3, 3), at(T0)).await.unwrap();
+        let mut up = local
+            .begin_upload(&key(0, 3, 3), at(T0), WriteMode::Replace)
+            .await
+            .unwrap();
         up.write(&[0xAB; 200]).await.unwrap();
         up.commit().await.unwrap();
     });
@@ -1877,8 +1923,9 @@ impl ObjectStore for FailsWholeReads {
         &self,
         key: &FileKey,
         created_at: Timestamp,
+        mode: WriteMode,
     ) -> impl std::future::Future<Output = Result<Self::Upload, StoreError>> + Send {
-        self.inner.begin_upload(key, created_at)
+        self.inner.begin_upload(key, created_at, mode)
     }
 
     fn delete(

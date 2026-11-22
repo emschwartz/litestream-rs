@@ -279,8 +279,58 @@ fn second_writer_mid_run() {
 }
 
 #[test]
+fn second_writer_survives_restart() {
+    run(scenario::second_writer_survives_restart);
+}
+
+#[test]
+fn foreign_file_while_down_stops() {
+    run(scenario::foreign_file_while_down_stops);
+}
+
+#[test]
+fn newest_staged_file_lost() {
+    run(scenario::newest_staged_file_lost);
+}
+
+#[test]
+fn restored_old_meta() {
+    run(scenario::restored_old_meta);
+}
+
+#[test]
+fn vm_restore_stops_until_a_take_over() {
+    run(scenario::vm_restore_stops_until_a_take_over);
+}
+
+#[test]
+fn deploy_cycle_after_sigterm() {
+    run(scenario::deploy_cycle_after_sigterm);
+}
+
+#[test]
+fn deploy_cycle_after_sigkill() {
+    run(scenario::deploy_cycle_after_sigkill);
+}
+
+#[test]
+fn deploy_cycle_sigkill_after_a_wal_restart_snapshots() {
+    run(scenario::deploy_cycle_sigkill_after_a_wal_restart_snapshots);
+}
+
+#[test]
+fn deploy_cycle_with_the_wal_deleted_at_close() {
+    run(scenario::deploy_cycle_with_the_wal_deleted_at_close);
+}
+
+#[test]
 fn bucket_rolled_back() {
     run(scenario::bucket_rolled_back);
+}
+
+#[test]
+fn bucket_rolled_back_unseen() {
+    run(scenario::bucket_rolled_back_unseen);
 }
 
 #[test]

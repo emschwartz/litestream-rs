@@ -11,6 +11,7 @@ mod lazy {
     use std::cmp::Reverse;
     use std::collections::BTreeSet;
 
+    use lsr_core::WriteMode;
     use lsr_core::conformance::block_on;
     use lsr_core::{
         AsOfPlanner, CreatedAt, CreatedAtStep, FileInfo, FileKey, Inventory, Level, ListedTime,
@@ -92,7 +93,10 @@ mod lazy {
         };
         block_on(async {
             for f in files {
-                let mut up = store.begin_upload(&key(f), at(f.created_at)).await.unwrap();
+                let mut up = store
+                    .begin_upload(&key(f), at(f.created_at), WriteMode::Replace)
+                    .await
+                    .unwrap();
                 up.write(b"x").await.unwrap();
                 up.commit().await.unwrap();
             }

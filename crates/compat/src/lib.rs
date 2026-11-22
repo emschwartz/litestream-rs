@@ -42,6 +42,7 @@
 mod binaries;
 mod chain;
 mod checks;
+mod dump;
 mod error;
 mod generate;
 mod golive;
@@ -60,12 +61,16 @@ mod workload;
 pub use binaries::{
     FIRST_WAL_INDEX_END_PATCH, GoBuild, GoVersion, KNOWN_RELEASES, LIVE_MODULE, PageEncoding,
     QUIRKS, Quirk, QuirkEntry, S3_MODULE, VERSIONS_ENV, WAL_INDEX_END_COMMIT, builds_in,
-    builds_under_test, go_binary, is_live_test, workspace_root,
+    builds_under_test, go_binary, go_dump_binary, is_live_test, workspace_root,
 };
 pub use chain::{
     AppFixture, Chain, Outside, Point, STEP_MS, Shape, Written, clock_ending_now, real_now_ms,
 };
 pub use checks::{fresh, go_restore, pages_of, rust_restore};
+pub use dump::{
+    Dump, DumpConfig, DumpCredentials, DumpDb, DumpDbConfig, DumpEnv, DumpReplica,
+    DumpReplicaConfig, Parsed, go_dump, go_parse, rust_dump, rust_parse,
+};
 pub use error::CompatError;
 pub use generate::generate;
 pub use golive::{

@@ -7,10 +7,9 @@
 //! is decided when the runner applies the operation, from the step number.
 //!
 //! A regression must keep reproducing its bug when the live generator gains a
-//! draw, so it never replays through [`history`]. One found before the
-//! generator changed is a seed, a length and the frozen [`Generator`] that drew
-//! it, replayed through [`frozen_history`]. One found later is kept as its
-//! (shrunk) list of operations and replayed through `run_ops`.
+//! draw, so it never replays through [`history`]: it is kept as its list of
+//! operations, recorded by [`crate::record`] or written by hand, and replayed
+//! through `run_ops`.
 
 use std::io::ErrorKind;
 use std::time::Duration;
@@ -111,6 +110,15 @@ pub enum Op {
     },
     /// A checkpoint from outside the engine.
     OtherProcessCheckpoint(OtherProcessMode),
+    /// The actor runs one tick, and the app does `op` inside it, right before one of
+    /// the tick's calls into SQLite (`sqlite/in_tick.rs`), or not at all when the tick
+    /// makes no such call.
+    AppInTick {
+        /// The call it comes before.
+        at: AppAt,
+        /// What the app does.
+        op: AppOp,
+    },
     /// The next tick is cut short, or the machine fails right after it.
     Crash(CrashKind),
     /// A store call fails `ahead` calls from now.
@@ -139,6 +147,10 @@ pub enum Op {
     /// The process dies between ticks and a new one starts. Scenarios only: a
     /// history never draws this.
     Restart,
+    /// The operator runs `lsr take-over`: a takeover record through the
+    /// replica's newest transaction, read by the next process. Scenarios
+    /// only.
+    TakeOver,
     /// The machine loses power between ticks. Scenarios only.
     PowerLoss,
     /// From now on the disk lies about the engine's own fsync of the WAL: it
@@ -179,6 +191,17 @@ pub enum Op {
     StagingDamage(MetaOp),
     /// Every store fault that fails at a rate stops failing.
     Heal,
+    /// The replica's listings start to lag behind the bucket: each of the
+    /// next `writes` commits and deletes on it stays out of listings (a
+    /// deleted key stays in, as it was) for 1 to `window` list calls. Reads
+    /// stay exact, as on S3 behind an eventually consistent listing or a
+    /// cache in front of one.
+    LaggingListings {
+        /// Writes and deletes the lag hides.
+        writes: u8,
+        /// The most list calls one stays hidden.
+        window: u8,
+    },
     /// The WAL is damaged, the engine runs this many ticks, and then the app
     /// heals it as an application would: its connections let go, another
     /// process truncates the WAL, and it commits again (a flipped bit is
@@ -199,6 +222,11 @@ pub enum Op {
         /// Ticks the engine runs under it.
         ticks: u8,
     },
+    /// The scheduled verify runs once: the engine reads the live pages in a
+    /// sync tick, the replica is checked at names depth and the live
+    /// transaction restored and compared with them, and the verdict is judged
+    /// against what the database really was.
+    Verify,
 }
 
 /// A fault that lasts across ticks, for [`Op::Hold`]. A restore judged while
@@ -230,6 +258,45 @@ pub enum Hold {
     /// The disk lies about the engine's fsync of the WAL, and the power fails
     /// while it lies, in the middle of the hold.
     LyingDisk,
+    /// Every operation on the replica fails as transient: the store is down
+    /// for all of them at once. Restores made meanwhile go through the same
+    /// fault. Drawn only with [`Weights::overlap`].
+    StoreDownAll,
+    /// Another writer's file stands on the replica past the engine's
+    /// position, and the replica is judged while it stands. Drawn only with
+    /// [`Weights::overlap`].
+    SecondWriter,
+}
+
+/// Where inside a tick the app acts ([`Op::AppInTick`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppAt {
+    /// Before the call with this many calls before it, modulo the calls the tick before
+    /// made, so that it falls inside a tick of that length.
+    Call(u8),
+    /// Before the tick's first call of this kind.
+    Before(SourceOp),
+}
+
+/// What the app does inside a tick ([`Op::AppInTick`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppOp {
+    /// It commits `pages` random pages, and the pages a growth adds.
+    Commit {
+        /// How many pages it writes, besides those it adds.
+        pages: u8,
+        /// The database grows by a few pages.
+        grow: bool,
+    },
+    /// Another process begins a read transaction.
+    ReaderBegin,
+    /// The oldest other process's read transaction ends.
+    ReaderEnd,
+    /// A checkpoint from outside the engine.
+    Checkpoint(OtherProcessMode),
+    /// The last connection closes and the WAL is deleted, when no connection, ours
+    /// included, holds a transaction.
+    DeleteWal,
 }
 
 /// What a scenario does to the staging directory, the engine's own memory of
@@ -355,6 +422,8 @@ pub struct Weights {
     /// their own and replace the drawn step, so a run that draws no hold is
     /// the run it was, and every other step of one that does is unchanged.
     pub hold: u32,
+    /// [`Op::LaggingListings`].
+    pub lagging_listings: u32,
     /// Whether a vacuum may change the page size. A replica prefix holds one
     /// page size, so after a resize the engine's next boot stops, or keeps
     /// retrying in a degraded state, on `PageSizeChanged`, and the states
@@ -397,6 +466,17 @@ pub struct Weights {
     /// ([`crate::domain::KnownWrong`]). Never drawn by a mix: the nightly and the campaigns set
     /// it, and count the defect's failures as known; the per-push fixed seeds leave it unset.
     pub known_wrong: bool,
+    /// Faults overlap: a hold runs a drawn sub-history (commits and ticks, a process crash, a
+    /// power loss, a shutdown, one-shot store faults) instead of committing and ticking, so it
+    /// spans restarts and other faults; holds last up to 200 ticks; and the hold kinds that
+    /// need it are drawn too (every store operation down at once, a second writer judged while
+    /// it stands, the WAL regrowths). Not an operation, for the same reason as
+    /// `block_crash_law`; drawn last in the swarm mix.
+    pub overlap: bool,
+    /// [`Op::AppInTick`].
+    pub app_in_tick: u32,
+    /// [`Op::Verify`].
+    pub verify: u32,
 }
 
 /// What the application does when it comes back after a restart, before the
@@ -473,6 +553,7 @@ impl Default for Weights {
             // shape; swarm mixes draw it, and `tests/sim/survival.rs` turns
             // it on.
             hold: 0,
+            lagging_listings: 0,
             vacuum_resizes: true,
             block_crash_law: false,
             lying_wal_sync: false,
@@ -483,6 +564,13 @@ impl Default for Weights {
             staging_fs: false,
             error_domain: false,
             known_wrong: false,
+            overlap: false,
+            // Off in the default mix so its recorded histories keep their
+            // shape; swarm mixes draw it.
+            app_in_tick: 0,
+            // Off in the default mix so its recorded histories keep their
+            // shape; swarm mixes draw it.
+            verify: 0,
         }
     }
 }
@@ -512,11 +600,14 @@ enum Kind {
     StagingDamage,
     Heal,
     StagingReplaceRunning,
+    AppInTick,
+    Verify,
+    LaggingListings,
     OtherConnectionCommit,
 }
 
 impl Weights {
-    fn table(&self) -> [(Kind, u32); 24] {
+    fn table(&self) -> [(Kind, u32); 27] {
         [
             (Kind::Tick, self.tick),
             (Kind::Commit, self.commit),
@@ -541,6 +632,9 @@ impl Weights {
             (Kind::StagingDamage, self.staging_damage),
             (Kind::Heal, self.heal),
             (Kind::StagingReplaceRunning, self.staging_replace_running),
+            (Kind::AppInTick, self.app_in_tick),
+            (Kind::Verify, self.verify),
+            (Kind::LaggingListings, self.lagging_listings),
             (Kind::OtherConnectionCommit, self.other_connection_commit),
         ]
     }
@@ -575,6 +669,10 @@ impl Weights {
     /// rarely overlap. Drawn from the seed's own stream, so the history's
     /// stream is untouched.
     #[must_use]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one draw per field in the order recorded mixes rely on; a split would hide it"
+    )]
     pub fn swarm(seed: Seed) -> Self {
         let entropy = SeededEntropy::new(seed.stream(12));
         let weight = |keep_always: bool| {
@@ -608,6 +706,7 @@ impl Weights {
             heal: weight(false),
             staging_replace_running: 0,
             hold: 0,
+            lagging_listings: 0,
             vacuum_resizes: below(&entropy, 2) == 0,
             block_crash_law: false,
             lying_wal_sync: false,
@@ -616,6 +715,9 @@ impl Weights {
             staging_fs: false,
             error_domain: false,
             known_wrong: false,
+            overlap: false,
+            app_in_tick: 0,
+            verify: 0,
         };
         // Drawn last, so every other kind keeps the weight it had before
         // second writers were drawn.
@@ -655,6 +757,14 @@ impl Weights {
         mix.staging_fs = below(&entropy, 2) == 0;
         // Drawn after that, for the same reason: half each.
         mix.error_domain = below(&entropy, 2) == 0;
+        // Drawn after that, for the same reason: half each.
+        mix.overlap = below(&entropy, 2) == 0;
+        // And after that, for the same reason.
+        mix.app_in_tick = weight(false);
+        // Drawn after that, for the same reason.
+        mix.verify = weight(false);
+        // And lagging listings after that.
+        mix.lagging_listings = weight(false);
         // And after that, for the same reason: a second application connection that commits,
         // with its own checkpoint count (a WAL header written again with the same salts).
         mix.other_connection_commit = weight(false);
@@ -798,8 +908,9 @@ fn staging_replace_running(entropy: &SeededEntropy) -> Op {
     }
 }
 
-/// A lasting fault, held for up to 11 ticks.
-fn hold(entropy: &SeededEntropy) -> Op {
+/// A lasting fault, held for up to 11 ticks, or up to 200 with `overlap`, when a third of the
+/// holds are of the kinds only overlapping faults draw.
+fn hold(entropy: &SeededEntropy, overlap: bool) -> Op {
     let hold = match below(entropy, 8) {
         0 => Hold::StoreDown(
             choose(
@@ -827,10 +938,25 @@ fn hold(entropy: &SeededEntropy) -> Op {
         },
         _ => Hold::LyingDisk,
     };
-    Op::Hold {
-        hold,
-        ticks: small(entropy, 10).saturating_add(2),
-    }
+    let hold = if overlap && below(entropy, 3) == 0 {
+        let seed = below(entropy, u64::MAX);
+        match below(entropy, 4) {
+            0 => Hold::StoreDownAll,
+            1 => Hold::SecondWriter,
+            2 => Hold::Wal(WalOp::RegrowSameSalts(seed)),
+            _ => Hold::Wal(WalOp::RegrowWithoutCommitMarks(seed)),
+        }
+    } else {
+        hold
+    };
+    // A lying disk loses power in the middle of its hold: a restart inside the hold, which
+    // overlapping holds draw only where known defects are counted (D9), so it keeps the short
+    // length; the draw is made either way, so the history keeps its shape.
+    let long = overlap
+        .then(|| u8::try_from(below(entropy, 199).saturating_add(2)).unwrap_or(u8::MAX))
+        .filter(|_| hold != Hold::LyingDisk);
+    let ticks = long.unwrap_or_else(|| small(entropy, 10).saturating_add(2));
+    Op::Hold { hold, ticks }
 }
 
 fn env_fault(entropy: &SeededEntropy, weights: &Weights) -> Op {
@@ -942,8 +1068,63 @@ fn draw(weights: &Weights, entropy: &SeededEntropy) -> Op {
         Kind::StagingDamage => staging_damage(entropy),
         Kind::Heal => Op::Heal,
         Kind::StagingReplaceRunning => staging_replace_running(entropy),
+        Kind::AppInTick => app_in_tick(entropy),
+        Kind::Verify => Op::Verify,
+        Kind::LaggingListings => Op::LaggingListings {
+            writes: small(entropy, 8).saturating_add(1),
+            window: small(entropy, 40).saturating_add(1),
+        },
     }
 }
+
+/// An [`Op::AppInTick`]: at one of the tick's first 24 calls into SQLite or before its
+/// first call of a kind, half each, a commit (a sixth of them growing), a reader
+/// beginning or ending, a checkpoint of each mode, or a deleted WAL.
+fn app_in_tick(entropy: &SeededEntropy) -> Op {
+    let at = if below(entropy, 2) == 0 {
+        AppAt::Call(small(entropy, 24))
+    } else {
+        AppAt::Before(choose(entropy, &SOURCE_OPS).unwrap_or(SourceOp::Committed))
+    };
+    let op = match below(entropy, 7) {
+        0 | 1 => AppOp::Commit {
+            pages: small(entropy, 4).saturating_add(1),
+            grow: below(entropy, 6) == 0,
+        },
+        2 => AppOp::ReaderBegin,
+        3 => AppOp::ReaderEnd,
+        4 => AppOp::Checkpoint(
+            choose(
+                entropy,
+                &[
+                    OtherProcessMode::Passive,
+                    OtherProcessMode::Restart,
+                    OtherProcessMode::Truncate,
+                ],
+            )
+            .unwrap_or(OtherProcessMode::Passive),
+        ),
+        5 => AppOp::Checkpoint(OtherProcessMode::Truncate),
+        _ => AppOp::DeleteWal,
+    };
+    Op::AppInTick { at, op }
+}
+
+/// Every call the engine makes into SQLite, by kind.
+const SOURCE_OPS: [SourceOp; 12] = [
+    SourceOp::Open,
+    SourceOp::Len,
+    SourceOp::Committed,
+    SourceOp::Sync,
+    SourceOp::PageCount,
+    SourceOp::ReadPage,
+    SourceOp::BeginBarrier,
+    SourceOp::EndBarrier,
+    SourceOp::Checkpoint,
+    SourceOp::BumpSeq,
+    SourceOp::BeginWriteLock,
+    SourceOp::EndWriteLock,
+];
 
 /// The history of `steps` operations that `seed` names.
 ///
@@ -959,37 +1140,13 @@ pub fn history(seed: Seed, steps: u32, weights: &Weights) -> Vec<Op> {
         .map(|_| {
             let drawn = draw(weights, &entropy);
             if weights.hold > 0 && below(&holds, 1000) < u64::from(weights.hold) {
-                hold(&holds)
+                hold(&holds, weights.overlap)
             } else {
                 drawn
             }
         })
         .collect()
 }
-
-/// A frozen version of the generator, which regressions are recorded against.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Generator {
-    /// The generator before shrinking commits, delete faults and the other
-    /// scenario-only operations were drawn, with the weights of that time.
-    V1,
-    /// The generator before staging replaced under a running engine was
-    /// drawn, with the seed's own mix of that time ([`Weights::mixed`]).
-    V2,
-}
-
-/// The history of `steps` operations that `seed` named under `generator`.
-/// It never changes, whatever the live [`history`] draws.
-#[must_use]
-pub fn frozen_history(seed: Seed, steps: u32, generator: Generator) -> Vec<Op> {
-    match generator {
-        Generator::V1 => v1::history(seed, steps),
-        Generator::V2 => v2::history(seed, steps),
-    }
-}
-
-mod v1;
-mod v2;
 
 #[cfg(test)]
 mod tests;

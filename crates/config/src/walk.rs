@@ -188,6 +188,7 @@ impl Walk {
         let line = Some(node.line);
         let read = match key.read {
             Read::Str | Read::Secret => value::read_str(node, secret).map(|v| v.map(Value::Str)),
+            Read::StrPtr => value::read_str_ptr(node, secret).map(|v| v.map(Value::Str)),
             Read::Bool => value::read_bool(node, secret).map(|v| v.map(Value::Bool)),
             Read::Int => value::read_int(node, secret).map(|v| v.map(Value::Int)),
             Read::Uint32 => value::read_u32(node, secret).map(|v| v.map(Value::Uint)),

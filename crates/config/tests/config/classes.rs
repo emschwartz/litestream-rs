@@ -114,12 +114,6 @@ const OUT_OF_SCOPE: &[(Place, &str, &str, &str)] = &[
         "storage-class: GLACIER_IR",
     ),
     (
-        top,
-        "logging.type",
-        "logging:\n  type: text",
-        "logging:\n  type: pretty",
-    ),
-    (
         in_replica,
         "dbs[0].replica.auto-recover",
         "auto-recover: no",

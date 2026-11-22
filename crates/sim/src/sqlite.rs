@@ -82,8 +82,11 @@ use lsr_wal::{
     WalChecksum, WalHeader, WalOffset, WalReader,
 };
 
+mod in_tick;
 #[cfg(test)]
 mod tests;
+
+pub use in_tick::{InTickAt, InTickDone, InTickOp, InTickRan, StagingLen};
 
 const MAGIC_LITTLE: u32 = 0x377f_0682;
 const FORMAT_VERSION: u32 = 3_007_000;
@@ -282,6 +285,11 @@ struct State {
     // generation. The kernel called the pages the failure covered clean, so no later sync
     // writes them (Linux's "fsyncgate"): until the generation ends they stay as they were.
     lost_writeback: Option<LostWriteback>,
+    // The app's own connection has not yet fsynced the WAL since our sync failed. Linux reports
+    // a writeback error to every file description open when it happened (errseq, since 4.13), so
+    // the app's first WAL sync after ours fails too, and that checkpoint backfills nothing. A
+    // process that opens the WAL after our sync saw the error (the CLI) is told nothing.
+    app_unsynced_error: bool,
     // Every WAL byte range a failed sync of ours lost, by generation, for the life of the
     // simulated machine: a level-0 file staged from one was never durable, whatever the WAL
     // holds by the time anyone looks.
@@ -326,6 +334,7 @@ struct State {
     block_kept: (u32, u32),
     // Where the engine's WAL parser and SQLite's own recovery disagreed.
     recovery_disagreements: Vec<String>,
+    app: in_tick::AppInTick,
 }
 
 /// Where the harness's logs stood: its own created-at times, opaque to the rules.
@@ -340,6 +349,8 @@ pub enum InTickSite {
     /// After the tick's sync read the committed end, right before a checkpoint takes its write
     /// barrier: the commit the checkpoint's seal must stage.
     BeforeBarrier,
+    /// Right before the call an [`InTickOp::Commit`] names (`in_tick`).
+    AtCall,
 }
 
 /// A commit armed by [`SimSqlite::arm_commit_in_tick`].
@@ -369,7 +380,8 @@ pub struct InTickCommit {
     pub db_size: u32,
     /// Where it sits in the WAL.
     pub app: AppCommit,
-    /// The armed created-at time's value at the moment of the commit.
+    /// The armed created-at time's value at the moment of the commit; for a commit armed
+    /// at a call (`in_tick`), the second value as of the engine's next committed read.
     pub created_at: (usize, usize),
 }
 
@@ -738,6 +750,15 @@ impl State {
 
     /// `sqlite3WalCheckpoint` on connection `by`, which holds no read transaction.
     fn checkpoint(&mut self, by: Conn, mode: OtherProcessMode) -> CheckpointNumbers {
+        // `walCheckpoint` syncs the WAL before it backfills; the error ends the checkpoint
+        // there, and SQLite's autocheckpoint drops it.
+        if by == Conn::App && mem::take(&mut self.app_unsynced_error) {
+            return CheckpointNumbers {
+                busy: true,
+                log: self.index.mx_frame,
+                checkpointed: self.index.backfilled,
+            };
+        }
         let degraded = mode != OtherProcessMode::Passive && self.writer.is_some_and(|w| w != by);
         let mut busy = degraded;
         self.backfill();
@@ -810,6 +831,8 @@ impl State {
     /// recovered database is checked against the database SQLite recovered;
     /// any disagreement is kept ([`SimSqlite::recovery_disagreements`]).
     fn recover(&mut self) {
+        // A connection opened now samples the error our sync already saw: it is told nothing.
+        self.app_unsynced_error = false;
         let (parsed, seq) = self.parse_recovery();
         let wal = self.present.then_some(self.wal.as_slice());
         let index = match recovery::recover(self.page_size, &self.db, wal, recovery::Header::Fake) {
@@ -1156,6 +1179,7 @@ impl SimSqlite {
             app_autocheckpoint: None,
             our_sync_lies: false,
             lost_writeback: None,
+            app_unsynced_error: false,
             lost_ranges: Vec::new(),
             app_auto: AutoTally::default(),
             in_tick: None,
@@ -1166,6 +1190,7 @@ impl SimSqlite {
             ghost: Vec::new(),
             block_kept: (0, 0),
             recovery_disagreements: Vec::new(),
+            app: in_tick::AppInTick::default(),
         };
         Self {
             state: Arc::new(Mutex::new(state)),
@@ -1279,6 +1304,7 @@ impl SimSqlite {
     /// the commit was refused), and disarms it either way.
     pub fn take_commit_in_tick(&self) -> Option<InTickCommit> {
         self.with(|state| {
+            state.app_commit_unseen();
             state.in_tick = None;
             state.in_tick_done.take()
         })
@@ -1622,6 +1648,11 @@ impl SimSqlite {
         self.with(|state| state.faults.injections.push((op, err)));
     }
 
+    /// Injected failures no call has taken yet.
+    pub fn queued_injections(&self) -> usize {
+        self.with(|state| state.faults.injections.len())
+    }
+
     /// From now on a power loss keeps a prefix of the unsynced WAL writes,
     /// drawn from `seed`, instead of none.
     pub fn tear_on_power_loss(&self, seed: u64) {
@@ -1826,6 +1857,7 @@ impl WalSource for SimSource {
 
     fn open(&mut self) -> Result<Option<Self::Wal>, SourceError> {
         let mut state = lock(&self.state);
+        state.app_call(Some(SourceOp::Open));
         state.faults.take(SourceOp::Open)?;
         if state.unlinked {
             return Err(SourceError::Unlinked);
@@ -1838,6 +1870,7 @@ impl WalSource for SimSource {
 
     fn len(&mut self) -> Result<Option<WalFileLen>, SourceError> {
         let mut state = lock(&self.state);
+        state.app_call(Some(SourceOp::Len));
         state.faults.take(SourceOp::Len)?;
         if state.unlinked {
             return Err(SourceError::Unlinked);
@@ -1848,9 +1881,11 @@ impl WalSource for SimSource {
 
     fn committed(&mut self) -> Result<CommittedRead, SourceError> {
         let mut state = lock(&self.state);
+        state.app_call(Some(SourceOp::Committed));
         // The application commits after the tick read its clock and before the engine reads
         // the committed end: the stamp of the file that carries it must come after it.
         state.commit_in_tick(InTickSite::BeforeCommittedRead);
+        state.app_committed_read();
         state.faults.take(SourceOp::Committed)?;
         // The real source retakes a lapsed read transaction before it reads
         // (`ensure_read_lock_held`), so every answer belongs to a hold that is
@@ -1882,7 +1917,11 @@ impl WalSource for SimSource {
 
     fn sync(&mut self) -> Result<(), SourceError> {
         let mut state = lock(&self.state);
+        state.app_call(Some(SourceOp::Sync));
         if let Err(err) = state.faults.take(SourceOp::Sync) {
+            if err == SourceError::FsyncFailed {
+                state.app_unsynced_error = true;
+            }
             let salts = state.index.salts;
             if err == SourceError::FsyncFailed
                 && state
@@ -1929,6 +1968,7 @@ pub struct SimWal {
 impl Read for SimWal {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let mut state = lock(&self.state);
+        state.app_call(None);
         let start = byte_pos(self.pos);
         let end = start.saturating_add(buf.len()).min(state.wal.len());
         if start >= end {
@@ -1969,6 +2009,7 @@ pub struct SimPages {
 impl PageSource for SimPages {
     fn page_count(&mut self) -> Result<DbPages, SourceError> {
         let mut state = lock(&self.state);
+        state.app_call(Some(SourceOp::PageCount));
         state.faults.take(SourceOp::PageCount)?;
         // As lsr-sqlite's `ensure_read_lock_held`: a lapsed read transaction is taken again.
         state.begin(Conn::Ours);
@@ -1980,6 +2021,7 @@ impl PageSource for SimPages {
 
     fn read_page(&mut self, pgno: PageNo, buf: &mut [u8]) -> Result<(), SourceError> {
         let mut state = lock(&self.state);
+        state.app_call(Some(SourceOp::ReadPage));
         state.faults.take(SourceOp::ReadPage)?;
         state.begin(Conn::Ours);
         let at = state.page_at(pgno.get());
@@ -2004,6 +2046,7 @@ pub struct SimCheckpointer {
 impl Checkpointer for SimCheckpointer {
     fn begin_barrier(&mut self) -> Result<Barrier, SourceError> {
         let mut state = lock(&self.state);
+        state.app_call(Some(SourceOp::BeginBarrier));
         // The application commits after the tick's sync read the committed end and before the
         // barrier keeps writers out: the commit the checkpoint's seal must stage.
         state.commit_in_tick(InTickSite::BeforeBarrier);
@@ -2015,6 +2058,7 @@ impl Checkpointer for SimCheckpointer {
 
     fn end_barrier(&mut self, barrier: Barrier) -> Result<(), SourceError> {
         let mut state = lock(&self.state);
+        state.app_call(Some(SourceOp::EndBarrier));
         // A ROLLBACK that fails with an I/O error still ends the transaction (SQLite rolls back
         // on the error), and lsr-sqlite spends the token either way: the barrier is gone and the
         // caller is told the release failed.
@@ -2028,6 +2072,7 @@ impl Checkpointer for SimCheckpointer {
 
     fn checkpoint(&mut self, mode: CheckpointMode) -> Result<CheckpointRun, SourceError> {
         let mut state = lock(&self.state);
+        state.app_call(Some(SourceOp::Checkpoint));
         // lsr-sqlite releases the read transaction before it asks SQLite and takes it again
         // after, whatever SQLite answered: a failed checkpoint still starts a new hold. A lost
         // retake ran the checkpoint and leaves the read transaction lapsed, for the next read
@@ -2061,6 +2106,7 @@ impl Checkpointer for SimCheckpointer {
 
     fn bump_seq(&mut self) -> Result<(), SourceError> {
         let mut state = lock(&self.state);
+        state.app_call(Some(SourceOp::BumpSeq));
         state.faults.take(SourceOp::BumpSeq)?;
         let first = PageNo::new(1, state.page_size).ok_or(SourceError::Busy)?;
         let data = state.image_page(1);
@@ -2078,6 +2124,7 @@ impl Checkpointer for SimCheckpointer {
 
     fn begin_write_lock(&mut self) -> Result<WriteLock, SourceError> {
         let mut state = lock(&self.state);
+        state.app_call(Some(SourceOp::BeginWriteLock));
         state.faults.take(SourceOp::BeginWriteLock)?;
         let id = state.take_writer(Conn::Writer)?;
         state.write_lock = Some(id);
@@ -2086,6 +2133,7 @@ impl Checkpointer for SimCheckpointer {
 
     fn end_write_lock(&mut self, lock_held: WriteLock) -> Result<(), SourceError> {
         let mut state = lock(&self.state);
+        state.app_call(Some(SourceOp::EndWriteLock));
         // As `end_barrier`: the lock is released and the token spent, whatever the error.
         let released = state.faults.take(SourceOp::EndWriteLock);
         if state.write_lock == Some(lock_held.id()) {

@@ -94,6 +94,7 @@ impl Actor {
     /// one place every fault passes, so no path can miss it.
     pub(super) fn sync_failed(&mut self, fault: Fault) {
         if fault == Fault::WalSyncFailed {
+            mark!(Run3);
             self.kept.unproven = Unproven::Truncate;
         }
     }

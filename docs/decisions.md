@@ -49,9 +49,22 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D83 | What may trip early, and what the probe needs | A forward clock step with a failing store; a trip needs a failure at or after the bound | Claude (fail-stop), **delegated** | 2026-11-22 | open to owner review |
 | D84 | Fail-stop's user-visible names | As approved, with `refused_at_start`, `held_by` and `allowed` | owner, after a Fable review | 2026-11-22 | decided |
 | D100 | How does the journal hold the unproven-WAL debt, and when is it written? | Written at the end of the tick that changes it; a new failure may raise it at any step; `JournalUnwritable` while the journal lags | Claude (journal), **delegated** | 2026-11-22 | open to owner review |
+| D101 | Does a run with nothing to record still create the journal? | Yes: a process that neither read nor wrote a record writes one, so `JournalMissing` means the journal was lost | Claude (journal), **delegated** | 2026-11-22 | open to owner review |
+| D102 | Are the journal's signals a degraded state? | No: a notice in `/healthz` and `lsr_journal_signal`, unwritable included; `/healthz` stays 200 | parent session, names reviewed for the owner | 2026-11-22 | decided |
 | D130 | How does the simulator run the real directory store, and who judges it? | A filesystem trait in store-fs, an in-memory filesystem under the crash law in the sim, half the swarm on it, a staging-contract judge | Claude (sim-real-store-fs), **delegated** | 2026-11-22 | open to owner review |
 | D70 | How do simulated runs draw a fault that reaches an open engine defect? | As a known-wrong cell: out of the per-push seeds, drawn by the nightly and campaigns with its failures counted as known, with a pinned seed that fails once the fix lands | parent session; mechanism by Claude (error-domain), **delegated** | 2026-11-22 | decided |
 | D71 | Which errors may a simulated history inject? | Those a shipped implementation returns from that call with the world unchanged; a world fact is drawn as the world change; a cell the model cannot follow is listed as unmodelled, never drawn | Claude (error-domain), **delegated** | 2026-11-22 | open to owner review |
+| D72 | How long may a simulated fault last, and what may happen inside it? | Up to 200 ticks, with a drawn sub-history; a restart inside it is drawn only where known defects are counted, since it reaches D9 | Claude (overlapping-faults), **delegated** | 2026-11-22 | open to owner review |
+| D40 | An S3 replica with an empty prefix (`s3://bucket`, or `bucket` with no `path`): copy Go? | No: refuse, as before | Claude (dropin-dir), **delegated** | 2026-11-22 | open to owner review |
+| D41 | `watch: true` on a `dir` entry, refused since the phase-4 plan: keep refusing under D33? | Keep refusing until built; the owner chooses | Claude (dropin-dir), **delegated** | 2026-11-22 | open to owner review |
+| D42 | The config file names only one of `access-key-id` and `secret-access-key`: ignore it as Go does? | No: refuse | Claude (dropin-creds), **delegated** | 2026-11-22 | open to owner review |
+| D43 | A shared AWS file holds a line that is not INI: skip it as Go does? | No: refuse | Claude (dropin-creds), **delegated** | 2026-11-22 | open to owner review |
+| D44 | Credential sources that need a network call or a subprocess (instance roles, web identity, SSO, `credential_process`, assumed roles) | A gap to build under D33, tracked in #176; refused by name until then | Claude (dropin-creds), from the parent session | 2026-11-22 | gap, open |
+| D45 | Config Go accepts and litestream-rs refuses at load or start (unknown and duplicate keys, values no start could use, schedules core does not run): copy Go under D33? | No: keep refusing, naming the key | Claude (dropin-config), **delegated** | 2026-11-22 | open to owner review |
+| D46 | Two databases on one meta directory, replica or file, which Go starts: copy Go? | No: refuse, since Go loses data there | Claude (dropin-config), **delegated** | 2026-11-22 | open to owner review |
+| D47 | Exit codes of `replicate`: one code for every error, as Go, or one per class? | One code, as Go: 1 for every failure; fail-stop keeps its own 4 | Claude (dropin-cli), from the parent session | 2026-11-22 | decided |
+| D48 | Go commands, `restore` arguments, `-once` options and `/metrics` series `lsr` lacks | A gap to build under D33, tracked in #177; refused by name until then | Claude (dropin-cli), from the parent session | 2026-11-22 | gap, open |
+| D50 | Boot finds the replica's newest file differing from the staged copy under the same key: snapshot or stop? Keep the stop record? | Stop unless a takeover covers it; delete the stop record | Claude, **delegated** | 2026-11-22 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -157,7 +170,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Question:** at boot the replica holds files above this database's position. They may be ours (staging wiped, a VM put back, a Go run) or another writer's. With no local record, which?
 - **Options:** (a) stop unless the WAL vouches; (c) snapshot on top, as Go does; a new generation or prefix.
 - **Choice (owner):** (a). Every replica id above the local position must be vouched for by the WAL (continue, no snapshot) or by a record (snapshot above). Otherwise the engine stops with `OtherWriter`. `lsr take-over <db>` writes the record. `lsr restore` writes it too, so a restore followed by a start never stops.
-- **Cost accepted:** a false stop when the proof is gone: the meta directory deleted after a WAL restart, a VM or volume put back from an older copy, a Go run with another meta directory followed by a WAL restart. All are operator actions, and the fix is one command. Go never stops here, so this departs from Go; `ContinueAndInterleaveHistories` keeps Go's behaviour.
+- **Cost accepted:** a false stop when the proof is gone: the meta directory deleted after a WAL restart, a VM or volume put back from an older copy, a Go run with another meta directory followed by a WAL restart. All are operator actions, and the fix is one command. The engine's own deletes of staged files the replica holds cannot cause one: before any such delete it has the driver keep a takeover record through what those files vouched for (BOOT-30), so a crash before the replacing snapshot boots clean. The deploy cycle of a host that keeps its volume (SIGTERM or SIGKILL each deploy, WORLD-41) never stops. Go never stops here, so this departs from Go; `ContinueAndInterleaveHistories` keeps Go's behaviour.
 - **Why:** in normal operation the replica is never ahead, so only damage, an operator or another writer reaches this case. Snapshotting on top lets an empty or foreign database become "latest", and retention then removes the real one.
 - **Revisit if:** false stops show up in unattended flows, or conditional writes (#96) plus a durable stop make "last to boot wins" safe enough.
 - **Links:** `docs/BEHAVIOR.md` BOOT-6, BOOT-22, WORLD-3; #110; `crates/core/src/actor.rs` (`boot_recover`), `recover.rs` (`recover_traced`).
@@ -245,7 +258,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** one more small file until the journal can hold it; a restart to apply.
 - **Why:** a held `-exec` daemon is the case where the operator needs the command most, and stopping it first may end the container.
 - **Revisit if:** the journal gains a safe second writer, or the command moves into the daemon.
-- **Links:** #110 (stop record, meta-directory lock), `docs/journal.md`.
+- **Links:** #110 (meta-directory lock, takeover record), `docs/journal.md`.
 
 ## D22. The bound: 10 minutes, no byte bound (delegated)
 
@@ -326,6 +339,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** a first run builds it (about a minute) and CI's `test-s3` job needs Go.
 - **Revisit if:** the build breaks on a Go release.
 - **Links:** #111.
+
 ## D31. Merging while many branches are in flight
 
 - **Options:** every PR merges the latest main and re-runs CI before it lands; or a PR lands on its own green CI when it has no textual conflict, and main's CI checks the combination.
@@ -353,6 +367,16 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Revisit if:** a Go behaviour on this surface would lose data. Then ours differs, with its own entry here.
 - **Links:** #121 (cuts 2, 4 and 5 withdrawn), docs/release-bar.md.
 
+## D50. A boot divergence is a refusal, and the stop record goes (delegated)
+
+- **Question:** at boot the replica's newest level-0 file verifies and differs from the staged copy under the same key (BOOT-13). It used to stand while the staged files went and a snapshot followed above it. With rule (a) (D12), is that still right, and is the stop record (`lsr-stop`) still needed?
+- **Choice:** refuse it with `OtherWriter` unless a takeover record covers the replica's newest key, and delete the stop record, its codec and its file. An unusable takeover record is ignored as absent and reported, never refusing the start.
+- **Options considered:** keep BOOT-13's snapshot and the stop record, which alone stopped a restart after another writer took this engine's next id; refuse the start on an unusable record.
+- **Why:** this engine uploads only from witnessed, synced staged copies and keeps a takeover record before deleting its own (BOOT-30), so without an operator's hand a boot divergence is another writer at this engine's next id. Refusing it covers that restart without a record, and rule (a) covers the other writer's files above staging, so the stop record kept nothing the boot does not now see. One fewer meta-directory file and crash-consistency surface. An unusable takeover record then costs only what no record costs.
+- **Cost accepted:** an operator who puts back a staging backup holding another copy of the replica's newest key stops instead of snapshotting; `lsr take-over` clears it, as for D12's other operator actions.
+- **Revisit if:** a world without an operator's hand produces a boot divergence.
+- **Links:** `docs/BEHAVIOR.md` BOOT-13, BOOT-21, BOOT-22, CFG-38, CFG-39; `crates/core/src/actor.rs` (`boot_listing`); #110.
+
 ## D35. A stall at the end of a run
 
 - **Options:** accept any stall as a degraded state (before); fail any stall once every injected fault has healed; fail it unless the world still imposes its fault.
@@ -361,6 +385,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** a fault the world keeps imposing after the heal (none today) needs a table entry, or its runs fail.
 - **Revisit if:** a fault is added that the end of the run cannot heal.
 - **Links:** the stall-liveness PR; #104.
+
 ## D70. Known-wrong cells
 
 - **Options:** let the per-push seeds go red until each defect is fixed; leave the fault out of every draw; draw it where failures are classified.
@@ -404,9 +429,27 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Question:** a failed WAL fsync must survive a restart (open defect D2). When is it written, what may follow what, and what is reported when it cannot be written?
 - **Choice:** the journal's debt is a function of the engine's state, written at the end of every tick in which it differs from the last record made durable (or read at boot); boot restores a recorded debt and never forgives one. The debt is paid only through its cure (TRUNCATE owed, then snapshot owed, then none), and a new failure may raise it to TRUNCATE owed at any step: the writer refuses, as a bug, a record that forgives it. A failed write is tried again every tick; `JournalUnwritable` (approved name) is reported while the journal lags the engine and clears once nothing is left to record.
 - **Options considered:** write the debt inside `Actor::fault` (it has no file lent); write it before the next sync step (one more place to remember); the design's strict order No, Truncate, Snapshot, No (refuses a second failure during the paying snapshot).
-- **Cost accepted:** the record lags the failure by the rest of one tick, so a kill in that window forgets it, as without a journal. One `fdatasync` (two on the first write, which creates the file) per change of the debt; none otherwise, so a database that never fails a WAL fsync never creates the journal.
+- **Cost accepted:** the record lags the failure by the rest of one tick, so a kill in that window forgets it, as without a journal. One `fdatasync` (two on the first write, which creates the file) per change of the debt; none otherwise. (The journal is now created on every run, D101.)
 - **Revisit if:** the window inside the tick is shown to matter, or later facts need ordering against the debt within a tick.
 - **Links:** `crates/core/src/actor/unproven.rs`, `docs/journal.md`, `docs/BEHAVIOR.md` RUN-3 and D2.
+
+## D101. A run with nothing to record still creates the journal (delegated)
+
+- **Question:** under D100 the journal was written only when the debt changed, so a database that never failed a WAL fsync never had one, and every restart after its first sync reported `JournalMissing`. Should a run with nothing to record write anyway?
+- **Choice:** yes. At the end of a tick, a process that has neither read a record at boot nor made one durable writes the record of what it holds (no debt, today). After that, a boot reads the record and writes nothing until a fact changes. `JournalMissing` then means a journal that existed is gone (or an upgrade from a version without one), which is what an operator should be told; it is surfaced in health, `/healthz` and metrics.
+- **Options considered:** keep writing only on change and stop reporting `Missing` (loses the only sign of a deleted journal); create the journal at boot, before the first tick (a boot that fails later would have written for nothing, and the end-of-tick reconcile already retries).
+- **Cost accepted:** one creation per database (a write, two `fsync`s and a directory `fsync`) on the first tick of the first run, and again after a journal is lost or unreadable. A journal that cannot be created is reported as `JournalUnwritable` until a write succeeds, even while no debt is owed: the next failed WAL fsync could not be recorded either.
+- **Revisit if:** creating the file on a read-only or full meta directory is shown to be common enough that the report is noise.
+- **Links:** `crates/core/src/actor.rs` (`reconcile_journal`), `docs/journal.md`.
+
+## D102. The journal's signals are notices, not degraded states
+
+- **Question:** how does an operator see what the engine journal says, and does any of it count as degraded?
+- **Choice:** `Health.journal`, the `/healthz` fields `journal` (values `missing`, `unreadable`, `newer_version`, `slot_unreadable`, `unwritable`) and `journal_detail`, and the gauge `lsr_journal_signal{db,signal}`. Every signal is a notice: `Health::is_degraded` ignores it and `/healthz` stays 200, `unwritable` included, since the engine runs as it would with no journal. `newer_version` says a newer binary wrote the journal, which points at a downgrade.
+- **Options considered:** prefixed values (`journal_missing`; stutters after the field name); `unwritable` as a degraded task.
+- **Cost accepted:** while the journal is unwritable, a failed WAL sync met meanwhile is forgotten by a restart (and so will any fact a later step moves into the journal, a stop among them), and nothing marks the database degraded.
+- **Revisit if:** an unwritable journal proves common; then make it a degraded task that still answers 200.
+- **Links:** `crates/sidecar/src/health.rs`, `crates/sidecar/src/metrics.rs`, `docs/BEHAVIOR.md` BOOT-25 to BOOT-29 and RUN-27.
 
 ## D130. The real directory store in the simulator (delegated)
 
@@ -416,6 +459,44 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** the judge checks the store's contract, not the engine's behaviour, so it finds a store defect the engine would survive (the delete plant). Per-entry independence can split a rename (both names, or neither), which ext4 would not; it is the rule the WAL's fault VFS and `Volatile` already use, so the disk stays one law (#121). A fault the fault layer injects after publishing (`ErrorAfterPublish`) does not unsync anything on `MemFs`: the store did sync, so in this profile such a file always survives.
 - **Revisit if:** the shared directory-entry rule changes; or `MemFs` and the host disagree in `differential::the_doubles_answer_as_the_real_store_does`.
 - **Links:** #127 item I.
+
+## D40. An S3 replica with an empty prefix (delegated)
+
+- **Question:** Go accepts an S3 replica with no prefix and writes keys with a leading slash (`/0000/...`, `rc.go` at 041a8c3). litestream-rs refuses it at load (ruling F10, `docs/plans/phase-1-reading.md`). D33 asks for Go's behaviour wherever Go is not wrong.
+- **Options:** copy Go (keys with a leading slash, in the S3 store); keep refusing.
+- **Choice:** keep refusing, for now.
+- **Cost accepted:** a Go config with a bare bucket does not start under litestream-rs, and a replica Go wrote that way cannot be read without a store change. The refusal names the key, so nothing replicates less than asked.
+- **Why:** copying Go is a change to the S3 store's key layout (an engine crate), not to the config, and a leading-slash key is a layout few S3 tools handle well. The `dir` differential (`compat::go_and_rust_scan_the_same_databases`) found it with a `dir` naming a database file, where the relative path is `.` and adds nothing to an empty `path`.
+- **Revisit if:** the owner wants exact parity here; then the store learns the leading-slash layout and a compat test writes and reads it both ways.
+- **Links:** `docs/BEHAVIOR.md` CFG-18, `crates/store-s3/src/config.rs` (`ConfigError::EmptyPrefix`).
+
+## D41. `watch: true` on a `dir` entry (delegated)
+
+- **Question:** Go's `watch` adds and removes databases at run time as files appear under a `dir` (`directory_watcher.go`). litestream-rs refuses the key at load (the phase-4 plan's ruling O5, option B). D33 makes litestream-rs a full drop-in, which reopens it.
+- **Options:** build it (start and stop replicators at run time, a rescan that never opens a file a replicator holds, an inotify equivalent); keep refusing.
+- **Choice:** keep refusing until the owner chooses to build it. The `dir` work on `claude/dropin-dir` brought the static scan to Go's behaviour and left `watch` alone.
+- **Cost accepted:** a Go config with `watch: true` does not start; a database added under a `dir` is replicated only after a restart (CFG-17).
+- **Why:** it is a feature of its own, with run-time actor lifecycles the simulator does not drive, not a correction. A refusal replicates nothing silently less than asked.
+- **Revisit if:** the owner wants it; it then needs its own plan and behaviour rows (a file created, renamed, removed and recreated under a watched directory, each against Go).
+- **Links:** `docs/BEHAVIOR.md` CFG-15, CFG-17; `docs/plans/phase-4-sidecar.md` O5.
+
+## D72. Overlapping faults
+
+- **Options:** keep holds short and empty (at most 11 ticks of commits and ticks); let them last and run anything inside; let them last and run anything but what reaches an open defect.
+- **Choice:** under the overlap draw a hold lasts up to 200 ticks and runs a drawn sub-history (commits, ticks, one-shot store faults). A process crash, a power loss or a shutdown inside a hold is drawn only where known defects are counted (D70), because each reaches D9 (a halt across restarts goes unreported). A lying disk keeps its short length, since its own power loss is such a restart.
+- **Why:** the defects that live where faults overlap (D9, BOOT-21) were unreachable; reaching them without turning the per-push seeds red needs the known-wrong rule.
+- **Cost accepted:** the per-push seeds draw no restart inside a hold until D9 is fixed; a run is longer, so the read budget gains a term for a degraded task's retries and the retry-wait check gains the slew's slack after a clock step back.
+- **Revisit if:** D9 is fixed (then restarts inside holds are drawn everywhere), or holds longer than 200 ticks find more.
+- **Links:** issue #127 item E; BEHAVIOR CHK-9.
+
+## D73. A database file no commit made, after a lost writeback (delegated, open to owner review)
+
+- **Options:** adopt the recovered database as the new truth (any restore of it passes); adopt it as damage, as a flipped WAL bit is (no restore may give that exact state); keep the world's model as SQLite's rules say it should be, so the model check fails the run where the mix appears.
+- **Choice:** the model check, counted as the known-wrong defect `DatabaseAheadOfWal` (D70) on the failed-sync cell, pinned to seed 0x585. Adopting it as damage was tried first and dropped.
+- **Why:** the state is real. A failed fsync leaves the kernel's pages clean but unwritten; a later checkpoint by another connection backfills the real pages into the database file and syncs it; a power loss then cuts the WAL at the first frame the kernel lost, and the file holds newer pages from the backfill and older ones from the recovered WAL. Adopting it as truth would let a silently wrong replica pass. Adopting it as damage refuses only a restore of that exact state: later commits build on the mixed pages, the model follows them, and the engine's replication of them passes. With the engine journal merged no seed of 4000 failed that way, so the defect was hidden. The model check fails every run that reaches the mix.
+- **Cost accepted:** every such run fails, whatever the engine does next, so it stays known-wrong until the engine detects the mix (the journal work's D103: a boot after a recorded failed sync compares the pages the WAL does not cover and replicates a mixed file loudly, `database_ahead_of_wal`). The cell flips then, with the world adopting the state and a judge allowance that requires the notice before the file is staged.
+- **Revisit if:** D103 lands, or the owner prefers adopting the mixed file as truth.
+- **Links:** issue #127 item E; D2, D103.
 
 ## D80. Where the fail-stop clock cannot survive a restart (delegated)
 
@@ -463,6 +544,92 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Dropped before review:** `Replicator::writes_refused` and the `lsr_app_held` metric; health and `/healthz` carry the same state.
 - **Revisit if:** operators misread any of them in practice.
 - **Links:** #115, #149, `crates/sidecar/src/failstop.rs`, `crates/cli/src/run.rs` (the exit table).
+
+## D42. A lone `access-key-id` or `secret-access-key` (delegated)
+
+- **Question:** Go builds static credentials only when the config file gives both keys; with one, it ignores it and signs with whatever the AWS SDK's default chain finds (environment, shared files, the instance role). litestream-rs refuses the file. D33 asks for Go's behaviour unless Go is wrong.
+- **Options:** copy Go; refuse.
+- **Choice:** refuse, as before.
+- **Cost accepted:** a Go config with one key does not start until it is fixed.
+- **Why:** AGENTS.md's contract: a request that cannot be met exactly is an error, never something else. Go signs with credentials the file did not name, possibly another account's, and says nothing. No data is lost either way, so this is a call on the contract, not on safety.
+- **Revisit if:** the owner prefers exact parity here.
+- **Links:** `docs/BEHAVIOR.md` CFG-21; `crates/config/src/map/replica.rs` (`HalfCredentials`); `compat::go_and_rust_resolve_the_same_credentials` asserts the refusal.
+
+## D43. A line in a shared AWS file that is not INI (delegated)
+
+- **Question:** the AWS SDK's INI parser skips a line that is not a header, a property or a continuation; litestream-rs refuses the file.
+- **Options:** skip, as Go; refuse.
+- **Choice:** refuse, as before.
+- **Cost accepted:** a file Go reads does not start litestream-rs.
+- **Why:** the usual such line is a header missing its `]`. Skipping it files the keys below it under the profile above, so Go signs with the wrong profile's keys and says nothing. The AWS CLI's parser refuses such a file too.
+- **Revisit if:** a real file with a harmless non-INI line turns up.
+- **Links:** `docs/BEHAVIOR.md` CFG-22; `crates/store-s3/src/chain/ini.rs`.
+
+## D44. Credential sources that need a network call or a subprocess: a gap to build
+
+- **Question:** Go's SDK resolves EC2 instance roles, ECS and EKS container credentials, web-identity tokens, assumed roles (`role_arn` with `source_profile` or `credential_source`), SSO and `credential_process`. litestream-rs builds none of them (CFG-7), so an application on EC2, ECS or EKS with a role and no static keys does not start under `lsr`.
+- **Choice:** not an accepted trade-off. D33 (full drop-in) requires these, and they are tracked as a gap to build in #176, which names the Go code to match and the differential that will prove it. Until then the chain finds no keys and the start fails naming the sources it tried.
+- **Cost until built:** role-based deployments need static keys under litestream-rs.
+- **Evidence of the gap:** `compat::go_resolves_what_rust_does_not_build` asserts it, so building any source shows there first.
+- **Links:** #176; `docs/BEHAVIOR.md` CFG-7; `crates/store-s3/src/chain.rs`.
+
+## D45. Config refusals stricter than Go (delegated)
+
+- **Question:** the config differential (`compat::go_and_rust_parse_the_same_config`) lists every file Go starts and litestream-rs refuses. D33 asks for Go's behaviour unless Go is wrong. Which refusals stay?
+- **Options:** copy Go for each; keep each refusal.
+- **Choice:** keep these, each named in the test so a new one fails it:
+  - an unknown key (CFG-1) and a key set twice (CFG-28): Go ignores the first and keeps the last value of the second, so a typo in `retention` or a pasted second block silently changes what is replicated;
+  - values no start could use (CFG-26): a signing region with whitespace, `/` or a control character, a `part-size` under 5 MiB, `monitor-interval` zero or less, a duration under a millisecond or negative where the engine counts milliseconds. Go starts and then fails every request, every upload or every poll, or (for a bare `10`, read as 10 ns) spins;
+  - schedules core does not run (CFG-27): levels not increasing, a snapshot interval not above the top level, a retention below the interval, and TRUNCATE without the `app-readers: none` claim (`docs/plans/phase-4-sidecar.md`).
+- **Cost accepted:** a file Go starts may not start litestream-rs until it is fixed. Each refusal names the key and line.
+- **Why:** AGENTS.md's contract: never silently wrong. None of Go's behaviours here replicates what the file says; each either ignores part of it or fails later and quietly.
+- **Also accepted:** on R2 and Tigris, an explicit `concurrency: 0` or `part-size: 0` gives Go the SDK's generic default rather than the provider's; litestream-rs uses the provider's. Upload parallelism only.
+- **Revisit if:** the owner wants a file that starts Go to start litestream-rs whatever it holds.
+- **Links:** `docs/BEHAVIOR.md` CFG-1, CFG-26 to CFG-28; `crates/compat/tests/compat/dropin_config.rs` (`DEPARTURES`).
+
+## D46. Two databases on one meta directory, replica or file (delegated)
+
+- **Question:** Go refuses a shared meta directory only between databases of one `dir` entry, and a repeated `path` only when spelled identically. Two `path` entries with one `meta-path`, two databases on one replica prefix, or a database named by a `path` and found by a `dir` all start under Go.
+- **Options:** copy Go; refuse.
+- **Choice:** refuse, as before.
+- **Cost accepted:** none known: no working setup has two replicators sharing staging or a prefix.
+- **Why:** this is a case where Go's behaviour loses data. Two replicators on one meta directory overwrite each other's staged files (Go's own comment on its `dir` check calls it "replication state corruption"); two on one prefix interleave two histories, and retention then deletes one's files.
+- **Revisit if:** never, unless the layout changes.
+- **Links:** `docs/BEHAVIOR.md` CFG-29; `crates/config/src/map.rs` (`distinct`).
+
+## D47. Exit codes of `replicate`: as Go
+
+- **Question:** Go Litestream exits 1 on every error and 0 for literal help (`cmd/litestream/main.go:89-104`). `lsr replicate` exited 1, 2, 3 or 64 by class.
+- **Choice:** `replicate` exits 1 on every failure, as Go, because a script that checks for Go's 1 would otherwise break. One exception stays: 4, when fail-stop holds or stops the application (D19, approved by the owner in D84), a state Go never reaches. `lsr`'s own commands (`verify`, `files`, `config check`) keep a code per class, since no Go script runs them.
+- **Cost accepted:** a supervisor can no longer tell a refused config from a missing one by the code; the error line says which.
+- **Not covered:** `lsr restore` does not take Go's `restore` arguments (`-config`, `-o`, a database path), so a Go script fails it before its code matters; tracked in #177. #41 stays open for the codes of `lsr`'s own commands.
+- **Links:** `docs/BEHAVIOR.md` CFG-34; `crates/cli/src/main.rs`.
+
+## D48. Command-line and endpoint surface Go has and `lsr` lacks: a gap to build
+
+- **Question:** comparing Go 041a8c3's commands, flags and endpoints with `lsr` found missing: the commands `databases`, `reset`, `status`, `sync`, `list`, `info`, `ltx`, `wal` and the Windows service commands; Go's `restore` arguments (`lsr restore` has its own); `replicate -once -force-snapshot` and `-once -enforce-retention`; eleven Go `/metrics` series and pprof (CFG-35).
+- **Choice:** not an accepted trade-off. D33 (full drop-in) requires them, and they are tracked as a gap to build in #177, which names the Go code to match and the differential that will prove each. Until then each is refused by name.
+- **Cost until built:** a deployment that runs one of these commands, or graphs one of these series, needs Go Litestream for it.
+- **Evidence of the gap:** `compat::go_and_lsr_read_the_same_replicate_command_lines` accepts the `-once` refusals only by their message, tied here.
+- **Links:** #177; `docs/BEHAVIOR.md` CFG-33, CFG-35.
+
+## D74. Every engine commit checks the size the store acknowledged (delegated)
+
+- **Options:** keep the check in the uploader alone (which retried but left the short object listed) and in `Retrying`, which the engine never wraps its stores in; check in each engine call site; one upload type every engine commit goes through.
+- **Choice:** one type, `Checked` (`crates/core/src/checked.rs`). The uploader, the compactor and the staging writer open uploads only through it. It counts the bytes written; a commit acknowledging another size deletes the object, then reports `CommitSizeMismatch { removed }`. `Retrying` settles its own commits with the same function, so the rule is written once.
+- **Why:** the compactor took a short acknowledgement as a published output and maintenance then deleted its inputs, so `restore Latest` failed to decode the replica (simulator seed 0x46, once the simulator's size-mismatch fault published a short object). The uploader saw the mismatch but left the object listed until its retry, so restores failed in between.
+- **Cost accepted:** a delete after every mismatched commit. A store that misreports sizes on objects it holds whole loses them to the delete and they are written again; the caller still holds the bytes until a verified listing. The type does not stop a future engine function from calling `begin_upload` directly; the planted bugs `compact-commit-unchecked` and `short-commit-object-kept` catch the two paths that exist.
+- **Revisit if:** a new engine path writes to a store.
+- **Links:** #127 (the blind-plant pilot's second gap), `docs/planted-bugs.toml`.
+
+## D111. What the soak must reach (delegated)
+
+- **Options:** keep reach keyed by state name and gated on 64 fixed seeds; key it by behaviour row and fault class and gate every night's soak on zeros.
+- **Choice:** both. `mark!(<Row>)` on the detecting branch in lsr-core, compiled only under `verify`; each `docs/behavior.toml` row says `mark = "site"` or `"none: <reason>"`. Every injector variant maps through a wildcard-free match to a fault class counted drawn, applied, skipped, hit, judged during and judged after. The nightly soak fails when a sited row or a required class count is zero; `canary.never` must be the only zero. A class the mixes never draw is `Undrawn` with its reason and must stay undrawn. A required count that cannot be earned is listed in `EXEMPT` (`crates/sim/src/marks.rs`) with its reason. "A weight set to 0 goes red" is an in-process test on every push (the second writer's weight), not a nightly scratch tree.
+- **Why:** a green soak said nothing about what it exercised (issue #127, section 4). A count per row turns "covered" from a reading of the generator into a number from a run.
+- **Cost accepted:** `hit` is exact only for store faults and injected SQLite failures; for every other class it means an engine tick ran with the fault in place or after it, which is not proof the damage was read. A row whose detection sits in a `const fn` mapping arm has no site yet ("not yet placed"). A rare class or row that a short night misses makes that night red until a floor or an exemption says otherwise.
+- **Revisit if:** a night goes red on a key that a longer soak reaches (add a floor per key), or the marks start deriving BEHAVIOR's D, S and R (section 7.3, item 2).
+- **Links:** #127.
 
 ## Unverified, not recorded
 

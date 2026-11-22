@@ -131,6 +131,8 @@ impl MaintainState {
     /// its delete is planned before the next snapshot, and retention holds
     /// until it is gone.
     pub fn distrust_snapshot(&mut self, key: FileKey) {
+        // Its one caller is the rejected snapshot whose delete failed.
+        mark!(Maint5);
         self.distrusted.insert(Level::SNAPSHOT, key);
     }
 
@@ -193,7 +195,9 @@ impl MaintainState {
 
     /// Whether any level's failed job is waiting out its backoff at `now`.
     pub(crate) fn backing_off(&self, now: Timestamp) -> bool {
-        self.retries.values().any(|retry| retry.until > now)
+        self.retries
+            .keys()
+            .any(|level| self.backing_off_until(*level, now).is_some())
     }
 
     /// When the level may be planned again, if it is backing off at `now`.

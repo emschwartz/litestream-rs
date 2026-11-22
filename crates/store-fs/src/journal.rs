@@ -27,6 +27,14 @@ pub(crate) enum Step {
         /// The new name.
         to: PathBuf,
     },
+    /// A second name for a file appeared in the same directory (a create-only commit links
+    /// its scratch file to the object's name, which fails if the name is taken).
+    Link {
+        /// The existing name.
+        from: PathBuf,
+        /// The new name.
+        to: PathBuf,
+    },
     /// A name was removed.
     Remove(PathBuf),
     /// A directory was created.

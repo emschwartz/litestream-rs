@@ -79,6 +79,8 @@ fn key(hold: Hold) -> String {
             format!("hold.wal.{name}")
         }
         Hold::LyingDisk => "hold.LyingDisk".into(),
+        Hold::StoreDownAll => "hold.StoreDownAll".into(),
+        Hold::SecondWriter => "hold.SecondWriter".into(),
     }
 }
 
@@ -244,6 +246,38 @@ fn wal_damage_leaves_the_replica_restorable_while_it_lasts() {
 }
 
 #[test]
+fn a_store_down_for_every_operation_at_once_leaves_restorable_files() {
+    let report = held(Hold::StoreDownAll);
+    assert_eq!(report.reach.get("hold.StoreDownAll.judged"), 2);
+}
+
+/// The WAL regrown under the engine, judged while the regrowth stands (the plain WAL damage
+/// operations judge only after it is healed).
+#[test]
+fn a_regrown_wal_leaves_the_replica_restorable_while_it_lasts() {
+    for op in [
+        WalOp::RegrowSameSalts(7),
+        WalOp::RegrowWithoutCommitMarks(7),
+    ] {
+        let hold = Hold::Wal(op);
+        let report = held(hold);
+        assert_eq!(
+            report.reach.get(&format!("{}.judged", key(hold))),
+            2,
+            "{op:?}"
+        );
+    }
+}
+
+/// Another writer's file past the engine's position, judged while it stands.
+#[test]
+fn a_second_writer_s_file_leaves_the_replica_restorable_while_it_stands() {
+    let report = held(Hold::SecondWriter);
+    assert_eq!(report.reach.get("remote.second_writer"), 1);
+    assert_eq!(report.reach.get("hold.SecondWriter.judged"), 2);
+}
+
+#[test]
 fn a_power_loss_on_a_lying_disk_leaves_the_replica_restorable_while_it_lies() {
     let report = held(Hold::LyingDisk);
     assert_eq!(report.reach.get("hold.LyingDisk.judged"), 2);
@@ -357,9 +391,11 @@ fn survival_campaign_swarm() {
 /// a restore of the latest state goes back from a later node of the history to an earlier one
 /// on the same branch with no rewind recorded, while the oracle passes. The second hold is a
 /// lagging listing only for its commits, ticks and judgments; the engine never sees it. The
-/// same class as D9 in `docs/BEHAVIOR.md`: a boot snapshots after another writer's files.
+/// same class as D9 in `docs/BEHAVIOR.md`: the engine was down when the second writer's files
+/// appeared, so the boot took them for its own lost staging and snapshotted above them. The
+/// boot now refuses replica files that neither the live WAL nor a takeover record vouches for
+/// (BOOT-22).
 #[test]
-#[ignore = "known wrong, G2 with a second writer: latest goes back with no rewind recorded (D9 class); for the second-writer work"]
 fn latest_never_goes_back_after_two_second_writers_seed_0xb9() {
     use lsr_core::{StoreError, StoreOp};
     use lsr_sim::{CrashKind, FaultShape, Target};
@@ -408,6 +444,59 @@ fn latest_never_goes_back_after_two_second_writers_seed_0xb9() {
         ..Opts::default()
     };
     if let Err(failure) = run_ops(Seed::new(0xb9), &ops, &opts) {
+        panic!("{failure}");
+    }
+}
+
+/// Seed 0xd of the fixed set's mix, 236 operations. A staged file whose upload published but
+/// whose answer was lost turns unreadable in staging; the engine drops it while it runs, and
+/// later boots find the replica one transaction past staging with a WAL that no longer holds
+/// it. The engine now keeps a takeover through its own staged position before that drop, so
+/// no boot refuses its own file. With the record capped at the confirmed transaction (the
+/// first cut) the judge failed it: a refusal with staging intact and no other writer.
+#[test]
+fn an_unconfirmed_upload_dropped_from_staging_is_never_refused_seed_0xd() {
+    let seed = lsr_sim::Seed::new(0xd);
+    if let Err(failure) = lsr_sim::run(seed, 236, &lsr_sim::Weights::mixed(seed)) {
+        panic!("{failure}");
+    }
+}
+
+/// Unaided search seed 0xf45b5 under the error-domain generator, which moved seed 0xd off this
+/// path: a running drop of an unreadable staged copy whose upload published with its answer
+/// lost. With the takeover record capped at the confirmed transaction, a later snapshot took
+/// that transaction's id again ("transaction 21 covers commit 89 and then commit 90").
+#[test]
+fn a_running_drop_records_past_an_unconfirmed_upload_seed_0xf45b5() {
+    let seed = lsr_sim::Seed::new(0xf45b5);
+    if let Err(failure) = lsr_sim::run(seed, 300, &lsr_sim::Weights::mixed(seed)) {
+        panic!("{failure}");
+    }
+}
+
+/// Seed 0x3ed of the fixed set's mix, 279 operations. Under lying replica reads a boot judges
+/// the replica's newest level-0 file (the engine's own upload) torn, and drops the staged
+/// copy that a crash left unverifiable. With the takeover capped at the confirmed transaction
+/// the record stopped one short of that file, and once reads were honest the next boot
+/// refused it. The record is now capped at the replica's newest listed level-0 key.
+#[test]
+fn a_tail_judged_torn_and_dropped_from_staging_is_never_refused_seed_0x3ed() {
+    let seed = lsr_sim::Seed::new(0x3ed);
+    if let Err(failure) = lsr_sim::run(seed, 279, &lsr_sim::Weights::mixed(seed)) {
+        panic!("{failure}");
+    }
+}
+
+/// Unaided search seed 0xf43e5: an operator forged the newest staged file, a power loss later let
+/// the judge take staging as whole again, and bucket rollbacks took the replica's copy of that
+/// key. The next boot still read the replica's old copy (a lagging listing) and refused the
+/// divergence, as it must over a forged staged file; the judge, reading the replica as it stood
+/// after the rollback, saw no divergence and called the refusal causeless. A staged copy the
+/// engine never put is the operator's for as long as it is staged.
+#[test]
+fn a_refusal_over_a_forged_staged_copy_is_expected_after_a_rollback_seed_0xf43e5() {
+    let seed = Seed::new(0xf43e5);
+    if let Err(failure) = run(seed, 300, &Weights::mixed(seed)) {
         panic!("{failure}");
     }
 }
