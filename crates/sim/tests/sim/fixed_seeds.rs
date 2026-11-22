@@ -1188,7 +1188,10 @@ mod lagging_listings {
     /// uploaded its next transaction into the freed key 2, which the level-1
     /// file still holds with other pages: one transaction, two contents
     /// (seed 0x4c5 under its swarm mix). The boot now reads past the free key
-    /// and finds 3.
+    /// and finds 3. Since boot stops on another writer's files, the engine
+    /// stops before it merges that file, so this history no longer frees a key
+    /// a level-1 file holds; it stays as a second writer under lagging
+    /// listings, and the operator case is open (#99).
     #[test]
     fn a_lagging_boot_listing_does_not_send_an_upload_into_a_freed_key_seed_0x4c5() {
         let seed = Seed::new(0x4c5);
