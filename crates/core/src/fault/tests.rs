@@ -961,3 +961,21 @@ fn violated_invariant_is_a_bug_fault_in_release() {
     assert_eq!(check(0), Err(Fault::Bug(BugSite::DecoderStalled)));
     assert_eq!(BugSite::Encode.hit(), Fault::Bug(BugSite::Encode));
 }
+
+/// Each snapshot lands in its own cause's slot, and the total sums them.
+#[test]
+fn snapshot_counts_keep_each_cause_apart() {
+    let mut counts = SnapshotCounts::ZERO;
+    assert_eq!(counts.total(), 0);
+    counts.count(&SnapshotCause::FirstSync);
+    counts.count(&SnapshotCause::CheckpointBoundary);
+    counts.count(&SnapshotCause::CheckpointBoundary);
+    assert_eq!(counts.get(SnapshotCauseKind::FirstSync), 1);
+    assert_eq!(counts.get(SnapshotCauseKind::CheckpointBoundary), 2);
+    assert_eq!(counts.get(SnapshotCauseKind::WalMissing), 0);
+    assert_eq!(counts.total(), 3);
+    let listed: Vec<_> = counts.iter().collect();
+    assert_eq!(listed.len(), SnapshotCauseKind::ALL.len());
+    assert!(listed.contains(&(SnapshotCauseKind::CheckpointBoundary, 2)));
+    assert!(listed.contains(&(SnapshotCauseKind::GenerationChanged, 0)));
+}
