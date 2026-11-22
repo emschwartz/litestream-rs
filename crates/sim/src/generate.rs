@@ -355,6 +355,12 @@ pub struct Weights {
     /// drawn prefix of them. Not an operation: it changes what every power
     /// loss of the run leaves, so the history's draws are the same either way.
     pub block_crash_law: bool,
+    /// Whether the disk lies about the engine's own fsync of the WAL (its
+    /// barrier before staging) for the whole run: the sync succeeds and
+    /// keeps nothing, while SQLite's own syncs hold. A power loss can then
+    /// take frames the engine staged and published. Not an operation, for
+    /// the same reason as `block_crash_law`.
+    pub lying_wal_sync: bool,
     /// What the app does right after every restart (a crash, a power loss, a
     /// stop), before the new engine's first tick. Not an operation, for the
     /// same reason as `block_crash_law`.
@@ -382,6 +388,13 @@ pub enum AfterRestart {
     /// had before the restart, so the regrown WAL climbs over every frame
     /// the restart left behind (at most [`BUSY_MAX`] commits).
     Busy,
+    /// It replays its last `K` commits as [`AfterRestart::Redo`] does, but
+    /// only some of its jobs are idempotent: each replayed commit, drawn
+    /// apiece, writes the same pages at the same database size either
+    /// verbatim or with a fresh stamp in every page (a job that records when
+    /// it ran). The one law here that regrows a lost commit's frames with
+    /// other bytes and the next lost commit's frames byte for byte.
+    Retry,
 }
 
 /// The most commits a [`AfterRestart::Redo`] replays, and the length of the
@@ -429,6 +442,7 @@ impl Default for Weights {
             hold: 0,
             vacuum_resizes: true,
             block_crash_law: false,
+            lying_wal_sync: false,
             after_restart: AfterRestart::Nothing,
         }
     }
@@ -554,6 +568,7 @@ impl Weights {
             hold: 0,
             vacuum_resizes: below(&entropy, 2) == 0,
             block_crash_law: false,
+            lying_wal_sync: false,
             after_restart: AfterRestart::Nothing,
         };
         // Drawn last, so every other kind keeps the weight it had before
@@ -569,6 +584,13 @@ impl Weights {
             1 => AfterRestart::Redo,
             _ => AfterRestart::Busy,
         };
+        // Drawn after that, for the same reason: half the redoing apps retry
+        // jobs that are not all idempotent.
+        if mix.after_restart == AfterRestart::Redo && below(&entropy, 2) == 0 {
+            mix.after_restart = AfterRestart::Retry;
+        }
+        // Drawn after that, for the same reason: a disk in four lies.
+        mix.lying_wal_sync = below(&entropy, 4) == 0;
         // And after that, for the same reason: a rate of 1 to 30 in a
         // thousand steps, left out a third of the time.
         mix.hold = if below(&entropy, 3) == 0 {
