@@ -38,6 +38,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D28 | How does the simulator's clock move inside a tick? | A frozen law per run, drawn last in the swarm mix; the default mix keeps one reading per tick | Claude (checker-holes), **delegated** | 2026-11-22 | open to owner review |
 | D29 | Where do the behaviour table's rows live? | `docs/behavior.toml`, rendered into `docs/BEHAVIOR.md` | parent session's request; layout by Claude (checker-holes) | 2026-11-22 | decided |
 | D30 | How is Toxiproxy provided to the tests? | Built from source with `go install` at a pinned version | Claude (checker-holes), **delegated** | 2026-11-22 | open to owner review |
+| D32 | How is an unusable KMS key reported? | As a permission refusal, `permission_denied` | Claude, **delegated** | 2026-11-22 | open to owner review |
 | D34 | A restore of the latest state that a writer keeps outpacing: fail or answer? | Answer the last listing, flagged | parent session (#126) | 2026-11-22 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
@@ -313,6 +314,16 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** a first run builds it (about a minute) and CI's `test-s3` job needs Go.
 - **Revisit if:** the build breaks on a Go release.
 - **Links:** #111.
+
+## D32. An unusable KMS key is a permission refusal
+
+- **Question:** S3 answers a request whose KMS key is disabled, missing, in the wrong state or of the wrong kind with a 400 and a `KMS.*` code (`KMS.DisabledException`, `KMS.InvalidKeyUsageException`, `KMS.KMSInvalidStateException`, `KMS.NotFoundException`, from S3's published error list). How is it reported?
+- **Choice:** `Denied::Permission`, health name `permission_denied`, the same kind as a KMS key policy that refuses (403 `AccessDenied`).
+- **Options considered:** a refused request (`store_refused`, what the status alone gave); a kind of its own (`kms_key`), which needs a new user-visible name.
+- **Why:** an operator fixes it where they fix a permission: the key's state or policy, not the request. No new name is needed.
+- **Cost accepted:** the health name does not say "KMS"; the log's error text and the store's message do.
+- **Revisit if:** operators need to tell a KMS key from a bucket policy at a glance.
+- **Links:** `S3Code::KmsKeyUnusable` in `crates/store-s3/src/classify.rs`.
 
 ## Unverified, not recorded
 

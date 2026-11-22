@@ -33,6 +33,15 @@ pub trait Park: Send + Sync {
     /// that comes before the park is not lost: the next park returns at once.
     fn park(&self, until: Option<Timestamp>);
 
+    /// As [`Park::park`], for a caller that planned `until` from the clock reading `read`: it
+    /// also returns once the clock reads earlier than `read`, so the caller plans its waits
+    /// again on the clock as it now reads instead of waiting out a step back. The provided
+    /// body ignores `read`.
+    fn park_from(&self, until: Option<Timestamp>, read: Timestamp) {
+        let _ = read;
+        self.park(until);
+    }
+
     /// Ends the current park, or the next one if none is running.
     fn unpark(&self);
 }
@@ -135,35 +144,44 @@ impl SystemPark {
     }
 }
 
+/// The longest the system park waits without reading the clock, so a step back is seen
+/// within it and the thread plans its waits again.
+const PARK_SLICE: Duration = Duration::from_secs(1);
+
 impl Park for SystemPark {
-    /// A clock that steps back mid-wait moves the wake back with it, so the wait keeps what
-    /// was left of it instead of adding the step (the engine's own timers do the same,
-    /// `lsr_core`'s actor clock); a step forward ends the wait early.
     fn park(&self, until: Option<Timestamp>) {
+        self.park_from(until, self.clock.now());
+    }
+
+    /// Returns once the clock reads earlier than the last reading, starting from `read`: the
+    /// caller then moves its own waits back by the step (the engine's timers follow the clock
+    /// themselves). The clock is read at least every [`PARK_SLICE`]; a step forward ends the
+    /// wait early.
+    fn park_from(&self, until: Option<Timestamp>, read: Timestamp) {
         let mut woken = lock(&self.woken);
-        let mut until = until;
-        let mut seen = self.clock.now();
+        let mut seen = read;
         loop {
             if std::mem::take(&mut *woken) {
                 return;
             }
+            let now = self.clock.now();
+            if now < seen {
+                return;
+            }
+            seen = now;
             woken = match until {
                 None => self
                     .signal
                     .wait(woken)
                     .unwrap_or_else(PoisonError::into_inner),
                 Some(at) => {
-                    let now = self.clock.now();
-                    let at = at
-                        .checked_sub(seen.saturating_duration_since(now))
-                        .unwrap_or(now);
-                    (until, seen) = (Some(at), now);
                     let left = millis_until(now, at);
                     if left == 0 {
                         return;
                     }
+                    let slice = Duration::from_millis(left).min(PARK_SLICE);
                     self.signal
-                        .wait_timeout(woken, Duration::from_millis(left))
+                        .wait_timeout(woken, slice)
                         .unwrap_or_else(PoisonError::into_inner)
                         .0
                 }
@@ -237,23 +255,25 @@ mod fake {
     }
 
     impl Park for FakeTime {
-        /// As the system park: a clock that steps back mid-wait moves the wake back with it.
         fn park(&self, until: Option<Timestamp>) {
+            self.park_from(until, self.clock.now());
+        }
+
+        /// As the system park: returns once the clock reads earlier than the last reading.
+        fn park_from(&self, until: Option<Timestamp>, read: Timestamp) {
             let mut state = lock(&self.state);
-            let mut until = until;
-            let mut seen = self.clock.now();
+            let mut seen = read;
             loop {
                 if std::mem::take(&mut state.woken) {
                     return;
                 }
                 let now = self.clock.now();
-                until = until.map(|at| {
-                    at.checked_sub(seen.saturating_duration_since(now))
-                        .unwrap_or(now)
-                });
+                if now < seen {
+                    return;
+                }
                 seen = now;
                 if let Some(until) = until {
-                    if self.clock.now() >= until {
+                    if now >= until {
                         return;
                     }
                     if state.free {
@@ -347,7 +367,7 @@ mod tests {
     }
 
     /// A clock that steps back while a park waits does not make the park wait the
-    /// step on top: the wait keeps what was left of it.
+    /// step on top: the park returns, for its caller to plan again.
     #[test]
     fn a_park_keeps_its_remaining_wait_when_the_clock_steps_back() {
         let clock = Arc::new(SteppedBack {
@@ -358,6 +378,27 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             park.park(Some(Timestamp::from_unix_millis(1_000_030)));
+            tx.send(()).unwrap();
+        });
+        assert!(
+            rx.recv_timeout(Duration::from_secs(10)).is_ok(),
+            "the park waited out the step"
+        );
+    }
+
+    /// A step back that comes after the caller read the clock and before its park began is not
+    /// lost: the park measures from the caller's reading and returns at once, so the caller
+    /// plans again on the clock as it now reads.
+    #[test]
+    fn a_park_returns_for_a_step_back_between_the_callers_reading_and_the_park() {
+        let start = Timestamp::from_unix_millis(10_000_000);
+        let (runtime, clock) = Runtime::fake(start, 1);
+        let read = clock.now();
+        clock.step_back(Duration::from_secs(3600));
+        let park = Arc::clone(&runtime.park);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            park.park_from(start.checked_add(Duration::from_secs(60)), read);
             tx.send(()).unwrap();
         });
         assert!(
