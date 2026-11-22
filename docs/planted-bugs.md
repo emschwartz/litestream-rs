@@ -13,6 +13,10 @@ that caught it must fail.
   kill (the table says "timeout"). Results: `killed`, `SURVIVED` (a defect in the tests), `STALE` (the
   patch no longer applies), `BUILD` (the planted tree does not compile), `BROKEN` (a named test is red
   or missing on the clean tree), `ERROR`. Anything but `killed` fails the run.
+- Two canary entries check the runner itself and always run, `--only` or not: `canary-no-op` (a
+  comment added) must report `SURVIVED` and `canary-fatal` (the wrong CRC table) must report
+  `killed`. Before every verdict the runner also checks that the scratch tree is at this checkout's
+  HEAD. A canary that misreports, or a tree at another commit, fails the run.
 - A new fix adds an entry and a patch in the same commit as the fix. A `STALE` patch is re-expressed
   against the current tree, or the entry is retired with a reason in the ledger's header.
 

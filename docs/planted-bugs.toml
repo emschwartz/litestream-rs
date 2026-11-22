@@ -8,10 +8,27 @@
 #   package  the cargo package whose tests are run
 #   tests    nextest name substrings (`test(~x)`); each must fail when planted, one run apiece
 #   test_bin optional: restrict the run to one integration-test binary (cargo `--test`)
+#   canary   optional, on the two canary entries only: the verdict the runner must report,
+#            `survived` (the no-op patch) or `killed` (the patch that breaks a test for certain).
+#            Any other verdict on a canary fails the run: the runner itself is broken.
 #
 # Not here, with the reason: a6e3e38 (level-0 retention oracle: it fixed the test, retention code is
 # unchanged, so there is nothing to plant), the verify hang fix (test-only: no production code to plant)
 # ab0021d (a feature: reverting it does not compile).
+
+[[bug]]
+name = "canary-no-op"
+fix = "none"
+package = "lsr-ltx"
+canary = "survived"
+tests = ["checksum::tests::the_crc_is_go_iso_on_its_check_string"]
+
+[[bug]]
+name = "canary-fatal"
+fix = "none"
+package = "lsr-ltx"
+canary = "killed"
+tests = ["checksum::tests::the_crc_is_go_iso_on_its_check_string"]
 
 [[bug]]
 name = "asof-straddle"
