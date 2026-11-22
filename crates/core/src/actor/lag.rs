@@ -76,12 +76,13 @@ impl Actor {
 
     /// Whether anything committed is off the replica: WAL frames past the synced position, a
     /// staged file not confirmed on the replica, or a snapshot owed while lag was already
-    /// running (its commits are in the database file only). A wal-index that cannot be read
+    /// running or for pending files a boot deleted (its commits are in the database file
+    /// only). A wal-index that cannot be read
     /// says nothing new: the lag stands as it was.
     fn behind(&self, end: Option<CommittedEnd>, was_behind: bool) -> bool {
         let wal_ahead = end.map_or(was_behind, |end| self.wal_ahead(end));
         let unconfirmed = self.staged() > self.replicated();
-        let owed = was_behind && self.pending().is_some();
+        let owed = (was_behind || self.kept.lag.has_floor()) && self.pending().is_some();
         wal_ahead || unconfirmed || owed
     }
 

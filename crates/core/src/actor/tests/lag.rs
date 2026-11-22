@@ -310,3 +310,27 @@ fn the_bound_is_at_least_the_backoff_cap() {
     assert_eq!(MaxUnreplicatedAge::new(Duration::from_secs(299)), None);
     assert!(MaxUnreplicatedAge::new(Duration::from_secs(300)).is_some());
 }
+
+/// A boot that cannot vouch for its pending staged files deletes them and snapshots their end
+/// state, stamped at that boot. The clock keeps the deleted files' stamps: those commits have
+/// been off the replica since then, and the snapshot's stamp would restart it.
+#[test]
+fn a_boot_that_deletes_pending_files_keeps_their_stamps() {
+    let (mut rig, actor) = lagging(10_000);
+    let since = actor.unreplicated_since().expect("the clock runs");
+    rig.wal.force_restart();
+    rig.commit(3);
+    let mut actor = Actor::new(go_like());
+    let boot = rig.tick(&mut actor, T0 + 120_000);
+    assert!(
+        matches!(
+            event(&boot),
+            Some(Event::Booted {
+                cause: Some(SnapshotCause::StagedUnverified { .. })
+            })
+        ),
+        "{boot:?}"
+    );
+    drive(&mut rig, &mut actor, T0 + 120_000, T0 + 180_000);
+    assert_eq!(actor.unreplicated_since(), Some(since));
+}

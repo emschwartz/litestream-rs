@@ -217,6 +217,10 @@ pub struct Lag {
     probed: Option<Timestamp>,
     /// The newest failure of the sync or upload task.
     failed: Option<Timestamp>,
+    /// The oldest stamp among the staged files pending when the engine last booted: a boot
+    /// that cannot vouch for them deletes them and snapshots their end state, and that
+    /// snapshot's own stamp would restart the clock.
+    floor: Option<Timestamp>,
     /// The age trip, latched until the age is zero.
     tripped: bool,
 }
@@ -236,6 +240,10 @@ impl Lag {
             return;
         }
         let seen = *self.seen.get_or_insert(now);
+        let oldest = match (oldest, self.floor) {
+            (Some(stamp), Some(floor)) => Some(stamp.min(floor)),
+            (stamp, floor) => stamp.or(floor),
+        };
         // A stamp ahead of now (a clock that stepped back) says nothing older than now.
         let since = oldest.map_or(seen, |stamp| stamp.min(seen)).min(now);
         self.since = Some(since);
@@ -243,6 +251,21 @@ impl Lag {
         if now >= at && self.failed.is_some_and(|failed| failed >= at) {
             self.tripped = true;
         }
+    }
+
+    /// The oldest stamp among the staged files pending at a boot, before the boot deletes any
+    /// it cannot vouch for. Kept until the replica holds everything.
+    pub fn floor(&mut self, stamp: Option<Timestamp>) {
+        self.floor = match (self.floor, stamp) {
+            (Some(was), Some(stamp)) => Some(was.min(stamp)),
+            (was, stamp) => was.or(stamp),
+        };
+    }
+
+    /// Whether a boot found pending staged files whose stamps the clock keeps.
+    #[must_use]
+    pub const fn has_floor(&self) -> bool {
+        self.floor.is_some()
     }
 
     /// The sync or upload task failed at `now`.

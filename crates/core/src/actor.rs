@@ -861,10 +861,12 @@ impl Actor {
             return self.ran(Event::Idle, now);
         }
         let suspect = &mut self.kept.suspect_staged;
-        let (upload, dropped) = match boot_listing(env.staging, env.remote, suspect).await {
-            Ok(listed) => listed,
-            Err(fault) => return self.fault(Task::Sync, fault, now),
-        };
+        let (upload, dropped, pending_stamp) =
+            match boot_listing(env.staging, env.remote, suspect).await {
+                Ok(listed) => listed,
+                Err(fault) => return self.fault(Task::Sync, fault, now),
+            };
+        self.kept.lag.floor(pending_stamp);
         let Judged {
             pending: Pending { tokens, refused },
             upload,
@@ -2058,7 +2060,7 @@ async fn boot_listing<L: ObjectStore, R: ObjectStore>(
     staging: &L,
     remote: &R,
     suspect: &mut Option<FileKey>,
-) -> Result<(UploadState, Dropped), Fault> {
+) -> Result<(UploadState, Dropped, Option<Timestamp>), Fault> {
     // At boot a replica ahead of the local newest staged file is `recover`'s to judge (a
     // snapshot after it), not the uploader's (a stop), so the listing names no newest staged file.
     let start = UploadState::ListFirst { confirmed: None };
@@ -2072,6 +2074,7 @@ async fn boot_listing<L: ObjectStore, R: ObjectStore>(
         Ok(listed) => (listed.state, None),
         Err(failed) => return Err(failed.fault),
     };
+    let pending_stamp = oldest_pending_stamp(staging, upload.confirmed()).await?;
     // The staged files from `from` on cannot continue the replica: they go,
     // and recovery snapshots above what the replica holds.
     if let Some(from) = diverged {
@@ -2091,7 +2094,21 @@ async fn boot_listing<L: ObjectStore, R: ObjectStore>(
         (None, Some(from)) => Dropped::Unreadable(from),
         (None, None) => Dropped::Nothing,
     };
-    Ok((upload, dropped))
+    Ok((upload, dropped, pending_stamp))
+}
+
+/// The oldest exact created-at time among the staged level-0 files above `confirmed`: the
+/// fail-stop clock's floor (`crate::failstop`), read before boot deletes any of them.
+async fn oldest_pending_stamp<L: ObjectStore>(
+    staging: &L,
+    confirmed: Option<Txid>,
+) -> Result<Option<Timestamp>, Fault> {
+    Ok(crate::upload::staged_from(staging, confirmed)
+        .await?
+        .iter()
+        .filter(|info| Some(info.key.range().min()) > confirmed)
+        .filter_map(|info| info.created_at().map(crate::layout::CreatedAt::at))
+        .min())
 }
 
 /// Boot's witness pass over the pending staged files (`crate::witness`).
