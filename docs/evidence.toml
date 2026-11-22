@@ -112,7 +112,7 @@ plant = "seal-stamped-at-checkpoint-start-sim"
 
 [[row]]
 id = "BOOT-UNLINK"
-circumstance = "A staged file the engine unlinked comes back after a power loss, the directory never synced"
+circumstance = "A staged file unlinked by a store that does not sync the directory after (the directory store has synced since #116) comes back after a power loss"
 detected = [
     "lsr-sim::store::tests::an_unsynced_unlink_comes_back_or_stays_done_under_the_block_law",
     "lsr-sim::store::tests::a_commit_after_an_unlink_makes_it_durable",

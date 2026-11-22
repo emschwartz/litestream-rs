@@ -247,7 +247,7 @@ fn a_late_error_leaves_the_key_volatile_until_a_later_commit_syncs() {
 /// A staged file the engine unlinked, with no commit (a directory sync) after it.
 fn unlinked_with_no_sync(revert: bool) -> (MemStore, VolatileHandle, Vec<u8>) {
     let raw = MemStore::new();
-    let volatile = Volatile::new(raw.clone());
+    let volatile = Volatile::new(raw.clone()).unsynced_deletes();
     let handle = volatile.handle();
     if revert {
         handle.revert_unsynced_entries();
@@ -314,7 +314,7 @@ fn an_unsynced_unlink_stays_done_without_the_block_law() {
 fn a_commit_after_an_unlink_makes_it_durable() {
     for seed in 0..8 {
         let raw = MemStore::new();
-        let volatile = Volatile::new(raw.clone());
+        let volatile = Volatile::new(raw.clone()).unsynced_deletes();
         let handle = volatile.handle();
         handle.revert_unsynced_entries();
         block_on(upload(&volatile, 1)).unwrap();
@@ -324,5 +324,23 @@ fn a_commit_after_an_unlink_makes_it_durable() {
         let lost = block_on(handle.power_loss(&raw, &SeededEntropy::new(seed))).unwrap();
         assert!(lost.is_empty());
         assert_eq!(listed(&raw), 1, "only the second file");
+    }
+}
+
+/// The directory store syncs each directory it deleted from, so a delete it returned from is
+/// durable: no power loss brings the file back.
+#[test]
+fn a_delete_syncs_the_directory_as_the_directory_store_does() {
+    for seed in 0..16 {
+        let raw = MemStore::new();
+        let volatile = Volatile::new(raw.clone());
+        let handle = volatile.handle();
+        handle.revert_unsynced_entries();
+        block_on(upload(&volatile, 1)).unwrap();
+        block_on(volatile.delete(&[fkey(0, 1, 1)])).unwrap();
+        assert!(handle.unsynced_unlinks().is_empty());
+        let lost = block_on(handle.power_loss(&raw, &SeededEntropy::new(seed))).unwrap();
+        assert!(lost.is_empty(), "{lost:?}");
+        assert_eq!(listed(&raw), 0);
     }
 }

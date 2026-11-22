@@ -1292,11 +1292,15 @@ async fn read_all<S: ObjectStore>(store: &S, key: &FileKey) -> Result<Vec<u8>, S
 /// failed": the key is visible and volatile. [`Faults`] reports such a commit
 /// through [`Faults::volatile_on_late_error`], because the wrapper that fails a
 /// commit sits above this one and this one saw it succeed. A later successful
-/// commit is a directory sync and makes every earlier rename durable.
+/// commit is a directory sync and makes every earlier rename durable. So is a
+/// successful delete, as the directory store syncs each directory it deleted
+/// from; [`Volatile::unsynced_deletes`] models a store that does not, whose
+/// unlinks a power loss may undo.
 #[derive(Clone, Debug)]
 pub struct Volatile<S> {
     inner: S,
     handle: VolatileHandle,
+    sync_after_delete: bool,
 }
 
 impl<S> Volatile<S> {
@@ -1306,7 +1310,16 @@ impl<S> Volatile<S> {
         Self {
             inner,
             handle: VolatileHandle::default(),
+            sync_after_delete: true,
         }
+    }
+
+    /// The same store, deleting without syncing the directory after: an unlink
+    /// stays undoable until a later commit syncs it.
+    #[must_use]
+    pub const fn unsynced_deletes(mut self) -> Self {
+        self.sync_after_delete = false;
+        self
     }
 
     /// The handle; clones share state.
@@ -1357,12 +1370,13 @@ impl<S: ObjectStore> ObjectStore for Volatile<S> {
         })
     }
 
-    /// An unlink with no directory sync after it: until the next commit syncs the directory,
-    /// a power loss may undo it ([`VolatileHandle::revert_unsynced_entries`]). A key whose own
-    /// rename was never synced durably held nothing.
+    /// An unlink, then a directory sync, as the directory store does; with
+    /// [`Volatile::unsynced_deletes`], no sync: until the next commit syncs the directory, a
+    /// power loss may undo the unlink ([`VolatileHandle::revert_unsynced_entries`]). A key
+    /// whose own rename was never synced durably held nothing.
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
         let mut before = Vec::new();
-        for key in keys {
+        for key in keys.iter().filter(|_| !self.sync_after_delete) {
             let (seen, volatile) = {
                 let state = lock(&self.handle.state);
                 (
@@ -1380,11 +1394,16 @@ impl<S: ObjectStore> ObjectStore for Volatile<S> {
             }
         }
         self.inner.delete(keys).await?;
-        let mut state = lock(&self.handle.state);
-        state.unlinked.extend(before);
-        for key in keys {
-            state.volatile.remove(key);
-            state.resolved.remove(key);
+        {
+            let mut state = lock(&self.handle.state);
+            state.unlinked.extend(before);
+            for key in keys {
+                state.volatile.remove(key);
+                state.resolved.remove(key);
+            }
+        }
+        if self.sync_after_delete {
+            self.handle.fsync_all();
         }
         Ok(())
     }
