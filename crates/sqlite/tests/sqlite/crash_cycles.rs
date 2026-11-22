@@ -489,36 +489,44 @@ impl Run {
 }
 
 /// The first anomaly of the run `seed` names, and the cycle it came in (`CYCLES` for the
-/// final oracle).
-pub fn run(seed: u64, cycles: u32) -> Option<(u32, Anomaly)> {
+/// final judgments); and the WAL losses that kept a block, and kept one after a lost one.
+pub fn run(seed: u64, cycles: u32) -> (Option<(u32, Anomaly)>, (u32, u32)) {
     let dir = TempDir::new().unwrap();
     let mut run = Run::new(seed, dir.path());
-    for cycle in 0..cycles {
-        if let Err(anomaly) = run.cycle() {
-            return Some((cycle, anomaly));
+    let found = run.all(cycles);
+    (found, run.rig.vfs().wal_block_losses())
+}
+
+impl Run {
+    fn all(&mut self, cycles: u32) -> Option<(u32, Anomaly)> {
+        for cycle in 0..cycles {
+            if let Err(anomaly) = self.cycle() {
+                return Some((cycle, anomaly));
+            }
         }
+        if let Err(found) = self.judge_every_txid() {
+            return Some(found);
+        }
+        self.rig
+            .check()
+            .err()
+            .map(|err| (cycles, Anomaly::Oracle(err.to_string())))
     }
-    if let Err(found) = run.judge_every_txid() {
-        return Some(found);
-    }
-    run.rig
-        .check()
-        .err()
-        .map(|err| (cycles, Anomaly::Oracle(err.to_string())))
 }
 
 /// A few frozen seeds in the gate.
 #[test]
 fn crash_cycles_under_the_block_law_restore_committed_states() {
     for seed in 0..3 {
-        if let Some((cycle, anomaly)) = run(seed, CYCLES) {
+        if let (Some((cycle, anomaly)), _) = run(seed, CYCLES) {
             panic!("seed {seed} cycle {cycle}: {anomaly:?}");
         }
     }
 }
 
-/// The campaign: `LSR_CRASH_SEEDS` seeds from `LSR_CRASH_BASE`, every anomaly printed with its
-/// seed and cycle, the first one failing the test after all seeds ran.
+/// The campaign: `LSR_CRASH_SEEDS` seeds of `LSR_CRASH_CYCLES` cycles from `LSR_CRASH_BASE`,
+/// every anomaly printed with its seed and cycle, the first one failing the test after all
+/// seeds ran.
 #[test]
 #[ignore = "a campaign; run by hand"]
 fn crash_cycle_campaign() {
@@ -529,13 +537,21 @@ fn crash_cycle_campaign() {
             .unwrap_or(default)
     };
     let (base, seeds) = (env("LSR_CRASH_BASE", 0), env("LSR_CRASH_SEEDS", 50));
+    let cycles = u32::try_from(env("LSR_CRASH_CYCLES", CYCLES.into())).unwrap();
     let mut found = Vec::new();
+    let (mut kept, mut holes) = (0, 0);
     for seed in base..base + seeds {
-        let got = run(seed, CYCLES);
+        let (got, losses) = run(seed, cycles);
+        kept += losses.0;
+        holes += losses.1;
         println!("crash-cycle seed {seed}: {got:?}");
         if let Some(got) = got {
             found.push((seed, got));
         }
     }
+    println!(
+        "crash-cycle: {seeds} seeds of {cycles} cycles from {base}; {kept} losses kept an \
+         unsynced WAL block, {holes} kept one after a lost one"
+    );
     assert!(found.is_empty(), "{found:#?}");
 }

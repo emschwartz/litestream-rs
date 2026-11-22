@@ -184,6 +184,11 @@ struct State {
     undo: BTreeMap<usize, Undo>,
     /// Paths of the database and WAL kinds, the ones durability tracks.
     tracked: BTreeSet<usize>,
+    /// The WAL paths among them.
+    wals: BTreeSet<usize>,
+    /// Losses under the block law that kept some unsynced WAL block, and those that kept one
+    /// after a block they lost.
+    wal_losses: (u32, u32),
     law: CrashLaw,
     rng: Rng,
     /// Per path, the bytes it last held at each offset before an overwrite, truncate or delete:
@@ -226,6 +231,9 @@ impl Shared {
         };
         if kind != FileKind::Other {
             state.tracked.insert(at);
+        }
+        if kind == FileKind::Wal {
+            state.wals.insert(at);
         }
         at
     }
@@ -408,6 +416,14 @@ impl State {
         match read_whole(path)? {
             Some(now) => {
                 let left = self.leave(id, &now, undo);
+                if let CrashLaw::Blocks { block, .. } = self.law
+                    && self.wals.contains(&id)
+                {
+                    let old = law::synced_image(&now, undo);
+                    let (kept, hole) = lsr_sim::crash_law::kept_and_holes(&old, &now, &left, block);
+                    self.wal_losses.0 = self.wal_losses.0.saturating_add(u32::from(kept));
+                    self.wal_losses.1 = self.wal_losses.1.saturating_add(u32::from(hole));
+                }
                 put(path, Some(&left))
             }
             None => Ok(()),
@@ -507,6 +523,8 @@ impl FaultVfs {
                 tracking: false,
                 undo: BTreeMap::new(),
                 tracked: BTreeSet::new(),
+                wals: BTreeSet::new(),
+                wal_losses: (0, 0),
                 law: CrashLaw::AllOrNothing,
                 rng: Rng(0),
                 ghost: BTreeMap::new(),
@@ -636,6 +654,13 @@ impl FaultVfs {
     /// when its call comes.
     pub fn cut_power(&self) {
         self.shared.cut();
+    }
+
+    /// Power losses under the block law that kept some unsynced WAL block, and those among
+    /// them that kept one after a block they lost.
+    #[must_use]
+    pub fn wal_block_losses(&self) -> (u32, u32) {
+        self.shared.lock().wal_losses
     }
 
     /// Whether the power is on.

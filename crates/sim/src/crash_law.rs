@@ -169,6 +169,24 @@ pub fn differing_blocks(old: &[u8], now: &[u8], block: BlockSize) -> Vec<(u64, u
     out
 }
 
+/// What a crash that left `out` of a file kept, over the blocks where `old` (the synced image)
+/// and `now` differ: whether it kept any, and whether it kept one after a block it lost (a
+/// hole, the shape a prefix law cannot make).
+#[must_use]
+pub fn kept_and_holes(old: &[u8], now: &[u8], out: &[u8], block: BlockSize) -> (bool, bool) {
+    let dirty = differing_blocks(old, now, block);
+    let kept = |(a, b): &(u64, u64)| {
+        let range = at(*a)..at(*b);
+        let got = out.get(range.clone());
+        got.is_some() && got == now.get(range.clone()) && got != old.get(range)
+    };
+    let first_lost = dirty.iter().position(|r| !kept(r));
+    (
+        dirty.iter().any(kept),
+        first_lost.is_some_and(|lost| dirty.iter().skip(lost).any(kept)),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
