@@ -31,7 +31,8 @@ use crate::store::{DynStore, Erased};
 /// # Errors
 /// [`RestoreError::Destination`] when `to` (or a sidecar beside it) exists or the scratch file
 /// cannot be made; [`RestoreError::Restore`] when the replica has no exact answer for the
-/// target or a file fails verification. Nothing is published on any error.
+/// target or a file fails verification; [`RestoreError::NoMetaDir`] when `to` names no file,
+/// so has no meta directory for the takeover record. Nothing is published on these errors.
 pub fn restore(
     store: &dyn DynStore,
     target: RestoreTarget,
@@ -51,6 +52,13 @@ pub fn restore_with(
     options: RestoreOptions,
     to: &Path,
 ) -> Result<Restored, RestoreError> {
+    // The takeover record goes in the meta directory beside `to`: a path that names no file
+    // has none, and is refused before anything is written rather than restored without one.
+    let meta = Config::default()
+        .meta_dir_for(to)
+        .ok_or_else(|| RestoreError::NoMetaDir {
+            path: to.to_owned(),
+        })?;
     let sink = FileSink::create(to)?;
     let restored = block_on(lsr_core::restore_with(
         &Erased(store),
@@ -58,11 +66,6 @@ pub fn restore_with(
         options,
         sink,
     ))?;
-    let meta = Config::default()
-        .meta_dir_for(to)
-        .ok_or(RestoreError::TakeoverRecord {
-            kind: io::ErrorKind::InvalidInput,
-        })?;
     write_takeover(&meta, TakeoverRecord::through(restored.reached()))
         .map_err(|err| RestoreError::TakeoverRecord { kind: err.kind() })?;
     Ok(restored)

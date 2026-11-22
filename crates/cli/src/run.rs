@@ -305,7 +305,7 @@ pub enum CliError {
         kind: std::io::ErrorKind,
     },
     /// The database path names no file, so it has no meta directory.
-    #[error("{} names no file, so it has no meta directory; pass --meta-dir", .path.display())]
+    #[error("{} names no file, so it has no meta directory for the takeover record (lsr take-over accepts --meta-dir)", .path.display())]
     NoMetaDir {
         /// The path given.
         path: PathBuf,
@@ -657,11 +657,13 @@ async fn restore_on<S: ObjectStore>(
         Vec::new()
     };
     let attempt = async {
+        // A replicator started on the restored database builds on the replica it came from,
+        // through the takeover record: an output with no meta directory is refused before
+        // anything is written, never restored without one.
+        let meta = meta_dir_of(output)?;
         let sink = FileSink::create(output)?.with_integrity_check(integrity_check);
         let options = RestoreOptions { as_of_inside };
         let restored = restore_with(store, target, options, sink).await?;
-        // A replicator started on the restored database builds on the replica it came from.
-        let meta = meta_dir_of(output)?;
         lsr_replica::record_takeover(&meta, restored.reached()).map_err(|err| {
             CliError::Takeover {
                 meta,

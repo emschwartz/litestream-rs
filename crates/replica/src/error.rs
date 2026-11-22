@@ -122,6 +122,13 @@ pub enum RestoreError {
         /// What the file system said.
         kind: io::ErrorKind,
     },
+    /// The destination names no file (`/`, or a path ending in `..`), so it has no meta
+    /// directory to hold the takeover record. Refused before anything is written.
+    #[error("{} names no file, so it has no meta directory for the takeover record", .path.display())]
+    NoMetaDir {
+        /// The destination given.
+        path: std::path::PathBuf,
+    },
 }
 
 /// Why [`crate::take_over`] recorded nothing.

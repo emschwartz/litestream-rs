@@ -1093,3 +1093,19 @@ fn take_over_records_the_replicas_newest_transaction_and_clears_a_stop() {
     lsr_core::TakeoverRecord::decode(&record).expect("a takeover record");
     assert!(!meta.join("lsr-stop").exists(), "the stop record went");
 }
+
+/// `lsr restore` to an output that names no file is refused with exit 3 before anything is
+/// written: it has no meta directory for the takeover record.
+#[test]
+fn restore_to_an_output_with_no_file_name_is_refused_before_writing() {
+    let db = sqlite_pages();
+    let work = tempfile::tempdir().expect("tempdir");
+    let replica = work.path().join("replica");
+    replica_of(&replica, &db);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let output = dir.path().join("sub").join("..");
+    let run = restore_checked(&replica, &output, "none");
+    assert_eq!(run.code, 3, "{}", run.stderr);
+    assert!(run.stderr.contains("no meta directory"), "{}", run.stderr);
+    assert_eq!(fs::read_dir(dir.path()).expect("dir").count(), 0);
+}
