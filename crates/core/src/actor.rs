@@ -1466,6 +1466,13 @@ impl Actor {
             Ok(inventory) => inventory,
             Err(err) => return Some(self.fault(Task::Maintenance, inventory_fault(&err), now)),
         };
+        // Uploads are idle, so everything this engine wrote is at or below
+        // its position: a file past it is another writer's. In steady state
+        // this listing is the first to see one, and nothing may be planned
+        // from it (no compaction, snapshot or delete takes it as input).
+        if inventory.newest() > self.snapshot_after() {
+            return Some(self.fault(Task::Maintenance, Fault::RemoteAheadOfLocal, now));
+        }
         if self.engine.maintain.read_back_owed
             && let Some(tick) = self.read_back_unit(env.remote, &inventory, now).await
         {
