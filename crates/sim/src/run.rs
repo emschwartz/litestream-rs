@@ -22,7 +22,7 @@ use lsr_wal::{Salts, WalOffset};
 
 use crate::crash_law::CrashLaw;
 use crate::generate::{EnvFault, MetaOp, Op, RemoteOp, Target, WalOp, Weights, history};
-use crate::oracle::{Bound, Violation, Windows, bug_fault, within};
+use crate::oracle::{Bound, Incarnation, Violation, Windows, bug_fault, judge_put, within};
 use crate::reach::{Reach, variant};
 use crate::resources::{
     CheckpointTally, CountingCheckpointer, IdleWindow, Limits, TickStats, delta, memory, per_tick,
@@ -303,8 +303,14 @@ struct Runner {
     /// Page sizes the database had before a drawn resize: an engine that
     /// remembers one may stop on the change.
     expected_sizes: Vec<PageSize>,
-    /// A drawn step put a staging backup back.
-    restored_staging: bool,
+    /// The engine incarnation running now: what its level-0 puts are judged
+    /// against ([`judge_put`]).
+    life: Incarnation,
+    /// Replica recorder events already judged by [`judge_put`].
+    puts_judged: usize,
+    /// The staging recorder's length when a staging backup was last put
+    /// back: staged files are the engine's only if it wrote them since.
+    put_back: usize,
     /// A store fault fails calls at a rate and has not healed: a drain may
     /// end at its deadline.
     rate_active: bool,
@@ -351,7 +357,9 @@ impl Runner {
             expected: Vec::new(),
             lenient: false,
             expected_sizes: Vec::new(),
-            restored_staging: false,
+            life: Incarnation::default(),
+            puts_judged: 0,
+            put_back: 0,
             rate_active: false,
             judges: Judges::default(),
         }
@@ -362,6 +370,10 @@ impl Runner {
     }
 
     fn reboot(&mut self) {
+        self.life = Incarnation {
+            staged_from: self.w.staging_recorder.len(),
+            ..Incarnation::default()
+        };
         self.w.start_driver();
         let base = actor_config();
         self.app_before = self.app_seen();
@@ -497,6 +509,19 @@ impl Runner {
         }
     }
 
+    /// Judges every level-0 put the replica took since the last call as
+    /// made by the incarnation running now ([`judge_put`]).
+    fn judge_puts(&mut self) -> Result<(), Violation> {
+        let remote = self.w.remote_recorder.events();
+        let staging = self.w.staging_recorder.events();
+        for put in remote.iter().skip(self.puts_judged) {
+            let judged = judge_put(&self.w.model, &staging, &self.w.remote_raw, put, self.life)?;
+            self.report.reach.bump(format!("witness.{judged:?}"));
+        }
+        self.puts_judged = remote.len();
+        Ok(())
+    }
+
     fn note_tick(&mut self, began: Timestamp, remote0: crate::store::RecorderCounts) {
         if !self.record {
             return;
@@ -522,7 +547,15 @@ impl Runner {
         let passive0 = self.tally.count(lsr_core::CheckpointMode::Passive);
         let total0 = self.tally.total();
         let began = self.now();
+        let booting = !self.actor.booted();
+        let salts = self.w.sqlite.salts();
+        let commits = self.w.model.commits().len();
         let ended = self.run_one(plan);
+        if booting && self.actor.booted() {
+            self.life.boot_salts = Some(salts);
+            self.life.boot_commits = commits;
+        }
+        self.judge_puts()?;
         self.report.ticks = self.report.ticks.saturating_add(1);
         let in_tick = self.took_commit_in_tick();
         self.note_snapshots(newest_commit, in_tick, at);
@@ -744,9 +777,11 @@ impl Runner {
     /// staged level-0 file and that the replica's newest level-0 file reaches:
     /// nothing staged was left behind.
     fn drained(&self, txid: Option<Txid>) -> Result<(), Violation> {
+        // A staging backup put back under a running engine holds files it
+        // never staged and does not upload.
         let staged = self
             .w
-            .newest_staged()
+            .newest_engine_staged(self.put_back)
             .map_err(|e| bug_fault(e.to_string()))?;
         let staged = staged.map(|file| file.key.range().max());
         let remote = self
@@ -882,12 +917,7 @@ impl Runner {
     /// holds one, so a change the replica did not follow stops the engine
     /// before it stages anything. `None` while there is no file.
     fn replica_page_size(&self) -> Result<Option<PageSize>, Violation> {
-        // A staging backup put back holds what an older engine staged, which
-        // the running engine refuses rather than uploads.
-        let sizes = self
-            .w
-            .page_sizes(!self.restored_staging)
-            .map_err(bug_fault)?;
+        let sizes = self.w.page_sizes(self.put_back).map_err(bug_fault)?;
         let Some((_, first)) = sizes.first() else {
             return Ok(None);
         };
@@ -1283,14 +1313,12 @@ impl Runner {
                 })
                 .map_err(StagedEditError::from),
             MetaOp::Restore => {
-                if self.lenient && self.saved.is_some() {
-                    self.restored_staging = true;
-                }
                 let done = match &self.saved {
                     Some(copy) => w.replace_staging(copy).map(|()| true),
                     None => Ok(false),
                 };
                 if matches!(done, Ok(true)) {
+                    self.put_back = self.w.staging_recorder.len();
                     self.renote_saved();
                 }
                 done
@@ -1311,6 +1339,7 @@ impl Runner {
                 let half = bytes.len() / 2;
                 bytes.truncate(half);
             }),
+            MetaOp::ForgeNewest => w.forge_newest_staged(),
         };
         self.step_done(&format!("{op:?}"), done)
     }

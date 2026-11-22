@@ -201,6 +201,10 @@ pub enum MetaOp {
     /// Deletes every staged file while the engine runs: the staging directory
     /// removed under it, with no restart.
     DeleteAll,
+    /// Rewrites the newest level-0 file as another whole, valid file under
+    /// the same key and header, with page bytes changed: a file replaced by
+    /// one that verifies, which only a witness bound to its bytes refuses.
+    ForgeNewest,
 }
 
 /// A step on the replica from outside the engine. Scenarios only.
@@ -289,6 +293,11 @@ pub struct Weights {
     pub staging_damage: u32,
     /// [`Op::Heal`].
     pub heal: u32,
+    /// [`Op::Meta`] with the steps that replace staged files under a running
+    /// engine ([`MetaOp::Save`], [`MetaOp::Restore`],
+    /// [`MetaOp::ForgeNewest`]), and [`Op::StagingDamage`] with
+    /// [`MetaOp::ForgeNewest`].
+    pub staging_replace_running: u32,
     /// Whether a vacuum may change the page size. A replica prefix holds one
     /// page size, so after a resize the engine's next boot stops, or keeps
     /// retrying in a degraded state, on `PageSizeChanged`, and the states
@@ -331,6 +340,9 @@ impl Default for Weights {
             wal_damage: 1,
             staging_damage: 1,
             heal: 1,
+            // Off in the default mix so its recorded histories keep their
+            // shape; swarm mixes draw it.
+            staging_replace_running: 0,
             vacuum_resizes: true,
             block_crash_law: false,
         }
@@ -361,10 +373,11 @@ enum Kind {
     WalDamage,
     StagingDamage,
     Heal,
+    StagingReplaceRunning,
 }
 
 impl Weights {
-    fn table(&self) -> [(Kind, u32); 22] {
+    fn table(&self) -> [(Kind, u32); 23] {
         [
             (Kind::Tick, self.tick),
             (Kind::Commit, self.commit),
@@ -388,6 +401,7 @@ impl Weights {
             (Kind::WalDamage, self.wal_damage),
             (Kind::StagingDamage, self.staging_damage),
             (Kind::Heal, self.heal),
+            (Kind::StagingReplaceRunning, self.staging_replace_running),
         ]
     }
 
@@ -451,6 +465,7 @@ impl Weights {
             wal_damage: weight(false),
             staging_damage: weight(false),
             heal: weight(false),
+            staging_replace_running: 0,
             vacuum_resizes: below(&entropy, 2) == 0,
             block_crash_law: false,
         };
@@ -459,6 +474,8 @@ impl Weights {
         mix.second_writer = weight(false);
         // Drawn after that, for the same reason.
         mix.block_crash_law = below(&entropy, 2) == 0;
+        // And after that, for the same reason.
+        mix.staging_replace_running = weight(false);
         mix
     }
 
@@ -582,6 +599,17 @@ fn staging_damage(entropy: &SeededEntropy) -> Op {
     }
 }
 
+/// A staged file replaced under a running engine, by a backup put back or by
+/// another valid file, and now and then the same while it is down.
+fn staging_replace_running(entropy: &SeededEntropy) -> Op {
+    match below(entropy, 5) {
+        0 => Op::Meta(MetaOp::Save),
+        1 => Op::Meta(MetaOp::Restore),
+        2 | 3 => Op::Meta(MetaOp::ForgeNewest),
+        _ => Op::StagingDamage(MetaOp::ForgeNewest),
+    }
+}
+
 fn env_fault(entropy: &SeededEntropy) -> Op {
     let fault = match below(entropy, 4) {
         0 => EnvFault::DeleteWal,
@@ -682,6 +710,7 @@ fn draw(weights: &Weights, entropy: &SeededEntropy) -> Op {
         Kind::WalDamage => wal_damage(entropy),
         Kind::StagingDamage => staging_damage(entropy),
         Kind::Heal => Op::Heal,
+        Kind::StagingReplaceRunning => staging_replace_running(entropy),
     }
 }
 
@@ -698,6 +727,9 @@ pub enum Generator {
     /// The generator before shrinking commits, delete faults and the other
     /// scenario-only operations were drawn, with the weights of that time.
     V1,
+    /// The generator before staging replaced under a running engine was
+    /// drawn, with the seed's own mix of that time ([`Weights::mixed`]).
+    V2,
 }
 
 /// The history of `steps` operations that `seed` named under `generator`.
@@ -706,10 +738,12 @@ pub enum Generator {
 pub fn frozen_history(seed: Seed, steps: u32, generator: Generator) -> Vec<Op> {
     match generator {
         Generator::V1 => v1::history(seed, steps),
+        Generator::V2 => v2::history(seed, steps),
     }
 }
 
 mod v1;
+mod v2;
 
 #[cfg(test)]
 mod tests;

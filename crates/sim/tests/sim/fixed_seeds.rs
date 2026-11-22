@@ -81,6 +81,8 @@ mod fixed {
     }
 
     /// Every regression above, with a digest of its operations.
+    const DIGEST_0X1919F: u64 = 0xeee4_7404_1f2e_1424;
+
     const REGRESSIONS: [(u64, u32, u64); 6] = [
         (0x25, 44, 0xcc32_7036_14fd_e9c0),
         (0x2d, 256, 0x09b3_c7db_4d3c_63f9),
@@ -89,6 +91,10 @@ mod fixed {
         (0x0000_126d_68ed_250e, 215, 0xf04f_3f7b_7f9b_6425),
         (0x0000_126d_68ef_545f, 176, 0xb236_1b18_218a_c8df),
     ];
+
+    /// Every regression drawn by the second frozen generator, with a digest
+    /// of its operations.
+    const REGRESSIONS_V2: [(u64, u32, u64); 1] = [(0x1919f, 300, DIGEST_0X1919F)];
 
     /// FNV-1a over the operations' debug text: stable across builds, and any
     /// change to an operation or its fields changes it.
@@ -107,6 +113,30 @@ mod fixed {
         for (seed, steps, want) in REGRESSIONS {
             let ops = frozen_history(Seed::new(seed), steps, Generator::V1);
             assert_eq!(digest(&ops), want, "seed {seed:#x} at {steps} steps");
+        }
+        for (seed, steps, want) in REGRESSIONS_V2 {
+            let ops = frozen_history(Seed::new(seed), steps, Generator::V2);
+            assert_eq!(digest(&ops), want, "seed {seed:#x} at {steps} steps");
+        }
+    }
+
+    // A staging backup from older WAL generations, put back while the
+    // engine was down, was uploaded after a replica file that held a later
+    // state: a listing accepted a staged file starting a new generation's
+    // first frame as following the replica, a hop the boot rules refuse to
+    // prove. Staged files now go up only with a witness bound to their
+    // bytes (`crates/core/src/witness.rs`).
+
+    #[test]
+    fn a_restored_staging_backup_is_not_uploaded_seed_0x1919f() {
+        let seed = Seed::new(0x1919f);
+        let ops = frozen_history(seed, 300, Generator::V2);
+        let opts = Opts {
+            drawn: true,
+            ..Opts::default()
+        };
+        if let Err(failure) = run_ops(seed, &ops, &opts) {
+            panic!("{failure}");
         }
     }
 
@@ -958,5 +988,60 @@ mod second_writer {
             Op::SecondWriter { ticks: 7 },
         ];
         drawn(0x18efc, &ops);
+    }
+}
+
+#[cfg(test)]
+mod replaced_staging {
+    use lsr_core::{StoreError, StoreOp};
+    use lsr_sim::generate::{MetaOp, Target};
+    use lsr_sim::run::run_ops;
+    use lsr_sim::store::FaultShape;
+    use lsr_sim::{Op, Opts, Seed};
+
+    fn failed_upload() -> Op {
+        Op::StoreFault {
+            target: Target::Remote,
+            op: StoreOp::Upload,
+            ahead: 0,
+            shape: FaultShape::Error(StoreError::Transient {
+                op: StoreOp::Upload,
+                kind: std::io::ErrorKind::ConnectionReset,
+            }),
+        }
+    }
+
+    fn commit() -> Op {
+        Op::Commit {
+            pages: 2,
+            grow: false,
+        }
+    }
+
+    /// `replace` happens to the newest staged file while its upload waits
+    /// on a failed attempt; the oracle judges every level-0 put against
+    /// what the engine staged and the WAL it booted on.
+    fn pending_then(replace: Op) {
+        let mut ops = vec![commit(), Op::Tick, Op::Tick, Op::Tick];
+        ops.extend([failed_upload(), commit(), Op::Tick, replace]);
+        ops.extend(std::iter::repeat_n(Op::Tick, 12));
+        ops.push(Op::Restore);
+        if let Err(failure) = run_ops(Seed::new(0x5717), &ops, &Opts::default()) {
+            panic!("{}", failure.violation);
+        }
+    }
+
+    /// Replaced under the running engine by another whole, valid file: the
+    /// upload's read does not match the file's witness, so it is refused.
+    #[test]
+    fn a_staged_file_forged_under_a_running_engine_is_refused() {
+        pending_then(Op::Meta(MetaOp::ForgeNewest));
+    }
+
+    /// Replaced while the engine is down: the boot's WAL pass refuses it,
+    /// and the WAL stages its transaction again.
+    #[test]
+    fn a_staged_file_forged_while_down_is_refused_at_boot() {
+        pending_then(Op::StagingDamage(MetaOp::ForgeNewest));
     }
 }

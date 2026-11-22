@@ -757,6 +757,9 @@ pub enum RecorderEvent {
         created_at: Timestamp,
         /// The bytes written.
         size: u64,
+        /// [`content_digest`] of the bytes written: what tells a file the
+        /// engine staged from one put in its place with the same name.
+        digest: u64,
         /// The simulator's clock when the store took it, read below the code
         /// under test: what the oracle judges created-at times against.
         at: Timestamp,
@@ -956,6 +959,7 @@ impl<S: ObjectStore> ObjectStore for Recorder<S> {
             created_at,
             head: Vec::new(),
             wrote: 0,
+            digest: DIGEST_SEED,
             log: self.log.clone(),
         })
     }
@@ -984,7 +988,22 @@ pub struct TapUpload<S: ObjectStore> {
     created_at: Timestamp,
     head: Vec<u8>,
     wrote: u64,
+    digest: u64,
     log: RecorderLog,
+}
+
+const DIGEST_SEED: u64 = 0xcbf2_9ce4_8422_2325;
+
+fn digest_more(hash: u64, bytes: &[u8]) -> u64 {
+    bytes.iter().fold(hash, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
+/// FNV-1a over an object's bytes, as [`RecorderEvent::Put`] records it.
+#[must_use]
+pub fn content_digest(bytes: &[u8]) -> u64 {
+    digest_more(DIGEST_SEED, bytes)
 }
 
 /// The WAL generation and end offset an LTX file's header names, when it
@@ -1009,6 +1028,7 @@ fn parse_header(head: &[u8]) -> Option<Header> {
 impl<S: ObjectStore> Upload for TapUpload<S> {
     async fn write(&mut self, chunk: &[u8]) -> Result<(), StoreError> {
         self.inner.write(chunk).await?;
+        self.digest = digest_more(self.digest, chunk);
         let room = HEADER_LEN.saturating_sub(self.head.len());
         self.head
             .extend_from_slice(chunk.get(..room.min(chunk.len())).unwrap_or_default());
@@ -1033,6 +1053,7 @@ impl<S: ObjectStore> Upload for TapUpload<S> {
             created_at,
             head,
             wrote,
+            digest,
             log,
         } = self;
         let header = parse_header(&head);
@@ -1049,6 +1070,7 @@ impl<S: ObjectStore> Upload for TapUpload<S> {
                     origin: header.and_then(|h| h.fields().wal),
                     created_at,
                     size: wrote,
+                    digest,
                     at,
                     high,
                 });
