@@ -11,21 +11,25 @@
 //! judged.
 //!
 //! The judge shares nothing with the engine. The workload keeps its own record of every state
-//! it committed (rows it chose, never read back from SQLite), and [`History`] holds a digest of
-//! each. A restored database must equal one of those states (a commit SQLite acknowledged, or
-//! one whose statement the loss interrupted, which SQLite may have made durable). After a settle
-//! with the power on, the restore must equal the database itself. SQLite's recovery must also
-//! leave one of those states. At the end of a run, every transaction a level-0 file on the
-//! replica ends at must restore to one of them (added after the first campaign, in which only
-//! the simulator's oracle, judging the same restores against its own model, flagged runs), and
-//! then the simulator's oracle judges every transaction.
+//! it committed (rows it chose, never read back from SQLite), and [`History`] logs a digest of
+//! each in `lsr_history`'s tree of histories: a commit SQLite acknowledged, or one whose
+//! statement the loss interrupted (SQLite may have made it durable), and after each reboot the
+//! state SQLite's recovery left, which must be one of those and forks the tree when it is an
+//! earlier one. `lsr_history::Judge` then holds every restore to the tree: `Latest` after each
+//! settle is a node, never goes back on a branch unless a recorded rewind explains it, and is the
+//! database itself (lag 0); two `AsOf` instants per cycle are nodes committed before the instant;
+//! at the end of a run, every transaction a level-0 file on the replica ends at restores to a
+//! node, in an order that climbs the tree (added after the first campaign, in which only the
+//! simulator's oracle, judging the same restores against its own model, flagged runs), and then
+//! the simulator's oracle judges every transaction. A `Latest` that holds commits the database
+//! lost is counted, not failed (`lsr_history::AheadMode::Count`).
 //!
 //! The law, the weights and the budget below were frozen before the first run against an engine
 //! with a known defect (see the commit that added this file). Change them only in a commit of
 //! their own, and report seeds to first failure again.
 //!
-//! [`History`] is where a history checker plugs in: it sees every state with its outcome and
-//! answers for each restore.
+//! The instants of the `AsOf` restores come from a random stream of their own, so the runs the
+//! frozen weights draw are unchanged.
 
 #![expect(
     clippy::arithmetic_side_effects,
@@ -33,12 +37,14 @@
 )]
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::num::{NonZeroI32, NonZeroU32};
 use std::path::Path;
 
 use lsr_core::conformance::block_on;
-use lsr_core::{Fault as EngineFault, RestoreTarget};
+use lsr_core::{
+    AsOfInside, Clock, Fault as EngineFault, RestoreError, RestoreOptions, RestoreTarget,
+};
+use lsr_history::{AheadMode, Digest, Judge, Log, Target};
 use lsr_sqlite::Sqlite;
 use lsr_sqlite::testing::{CrashLaw, Effect, Fault, FileKind, Op, Rig, RigConfig, RigError};
 use tempfile::TempDir;
@@ -114,15 +120,18 @@ impl Rng {
 
 type Rows = BTreeMap<i64, Vec<u8>>;
 
-/// A digest of a table's content.
-fn digest(rows: &Rows) -> (u64, u64) {
-    let mut a = DefaultHasher::new();
-    let mut b = DefaultHasher::new();
-    0_u8.hash(&mut a);
-    1_u8.hash(&mut b);
-    rows.hash(&mut a);
-    rows.hash(&mut b);
-    (a.finish(), b.finish())
+/// A digest of a table's content: each row's id and value, in id order.
+fn digest(rows: &Rows) -> Digest {
+    let parts: Vec<Vec<u8>> = rows
+        .iter()
+        .map(|(id, v)| {
+            let mut part = id.to_be_bytes().to_vec();
+            part.extend_from_slice(&u64::try_from(v.len()).unwrap().to_be_bytes());
+            part.extend_from_slice(v);
+            part
+        })
+        .collect();
+    Digest::of_pages(0, parts.iter().map(Vec::as_slice))
 }
 
 /// What went wrong, by kind: the report counts each kind on its own.
@@ -142,27 +151,59 @@ pub enum Anomaly {
     Engine(String),
     /// The simulator's oracle found the replica wrong.
     Oracle(String),
+    /// The history judge does not accept a restore: it went back on a branch, or an `AsOf`
+    /// restore is newer than its instant.
+    History(String),
 }
 
-/// Every state the workload committed, by outcome. The history checker's seat.
-#[derive(Default)]
+/// Every state the workload committed, by outcome, as a tree of histories, and the judge.
 struct History {
-    acked: BTreeSet<(u64, u64)>,
-    interrupted: BTreeSet<(u64, u64)>,
+    log: Log,
+    judge: Judge,
 }
 
 impl History {
-    fn committed(&mut self, rows: &Rows) {
-        self.acked.insert(digest(rows));
+    fn new(now: i64) -> Self {
+        Self {
+            log: Log::new(digest(&Rows::new()), now),
+            judge: Judge::new(AheadMode::Count),
+        }
     }
 
-    fn interrupted(&mut self, rows: &Rows) {
-        self.interrupted.insert(digest(rows));
+    fn committed(&mut self, rows: &Rows, now: i64) {
+        self.log.commit(digest(rows), now);
     }
 
-    fn knows(&self, rows: &Rows) -> bool {
+    fn interrupted(&mut self, rows: &Rows, now: i64) {
+        self.log.pending(digest(rows), now);
+    }
+
+    /// SQLite recovered `rows`: `false` when no commit left them so.
+    fn recovered(&mut self, rows: &Rows, now: i64) -> bool {
+        let Some(node) = self.log.find_from(&digest(rows), self.log.head()) else {
+            return false;
+        };
+        self.log.recover(node, now);
+        true
+    }
+
+    /// A restore of `target` gave `rows`.
+    fn judge(&mut self, target: Target, rows: &Rows) -> Result<(), Anomaly> {
         let d = digest(rows);
-        self.acked.contains(&d) || self.interrupted.contains(&d)
+        let judged = match target {
+            Target::Latest => self.judge.latest(&self.log, d).map(drop),
+            Target::AsOf(instant) => self.judge.as_of(&self.log, instant, d, None).map(drop),
+            Target::Point(_) => self.judge.sweep(&self.log, &[(0, d, false)]),
+        };
+        judged.map_err(|anomaly| match anomaly {
+            lsr_history::Anomaly::NotInHistory { .. } => Anomaly::RestoredUnknown,
+            other @ (lsr_history::Anomaly::Broken { .. }
+            | lsr_history::Anomaly::WentBackwards { .. }
+            | lsr_history::Anomaly::AsOfTooNew { .. }
+            | lsr_history::Anomaly::AsOfTooOld { .. }
+            | lsr_history::Anomaly::Lagging { .. }
+            | lsr_history::Anomaly::Ahead { .. }) => Anomaly::History(other.to_string()),
+        })
     }
 }
 
@@ -175,6 +216,9 @@ struct Run {
     version: u64,
     history: History,
     root: std::path::PathBuf,
+    /// The `AsOf` instants' own stream.
+    instants: Rng,
+    start: i64,
 }
 
 /// The value of row `id` at `version`: the workload's own bytes.
@@ -211,9 +255,11 @@ impl Run {
             ..RigConfig::default()
         };
         let rig = Rig::<Sqlite>::new(root, cfg).unwrap();
-        let mut history = History::default();
-        history.committed(&Rows::new());
+        let start = rig.clock().now().unix_millis();
+        let history = History::new(start);
         Self {
+            instants: Rng(seed ^ 0x4a5f_0d1e_c0de_0001),
+            start,
             rig,
             rng,
             rows: Rows::new(),
@@ -282,14 +328,15 @@ impl Run {
             | Step::AppCheckpoint
             | Step::RestartEngine => self.write(&mut next),
         };
+        let now = self.rig.clock().now().unix_millis();
         match self.rig.exec(&sql) {
             Ok(()) => {
-                self.history.committed(&next);
+                self.history.committed(&next, now);
                 self.rows = next;
                 Ok(())
             }
             Err(err) => {
-                self.history.interrupted(&next);
+                self.history.interrupted(&next, now);
                 Err(err)
             }
         }
@@ -409,7 +456,8 @@ impl Run {
             .map_err(|err| Anomaly::Engine(format!("app after recovery: {err}")))?;
         let recovered =
             read_rows(app).map_err(|err| Anomaly::Engine(format!("read after recovery: {err}")))?;
-        if !self.history.knows(&recovered) {
+        let now = self.rig.clock().now().unix_millis();
+        if !self.history.recovered(&recovered, now) {
             return Err(Anomaly::RecoveredUnknown);
         }
         self.rows = recovered;
@@ -421,17 +469,37 @@ impl Run {
 
     /// Restores the replica's state at `target` into a file and reads it with plain SQLite.
     fn restore(&self, name: &str, target: RestoreTarget) -> Result<Rows, Anomaly> {
+        self.restore_or_refused(name, target)?
+            .ok_or_else(|| Anomaly::RestoredCorrupt(format!("restoring {target:?} was refused")))
+    }
+
+    /// [`Self::restore`], with `None` where the planner refuses (an `AsOf` instant before
+    /// the first file).
+    fn restore_or_refused(
+        &self,
+        name: &str,
+        target: RestoreTarget,
+    ) -> Result<Option<Rows>, Anomaly> {
         let to = target;
         let target = self.root.join(name);
         drop(std::fs::remove_file(&target));
         let sink = lsr_local::FileSink::create(&target)
             .map_err(|err| Anomaly::RestoredCorrupt(format!("sink: {err}")))?;
-        block_on(lsr_core::restore(
+        let options = RestoreOptions {
+            as_of_inside: AsOfInside::TakeEarlier,
+        };
+        match block_on(lsr_core::restore_with(
             &lsr_store_fs::FsStore::new(self.rig.replica_root()),
             to,
+            options,
             sink,
-        ))
-        .map_err(|err| Anomaly::RestoredCorrupt(format!("restore: {err}")))?;
+        )) {
+            Ok(_) => {}
+            Err(RestoreError::NoPlan(_)) if matches!(to, RestoreTarget::AsOf(_)) => {
+                return Ok(None);
+            }
+            Err(err) => return Err(Anomaly::RestoredCorrupt(format!("restore: {err}"))),
+        }
         let conn = rusqlite::Connection::open(&target)
             .map_err(|err| Anomaly::RestoredCorrupt(err.to_string()))?;
         let check: String = conn
@@ -440,7 +508,9 @@ impl Run {
         if check != "ok" {
             return Err(Anomaly::RestoredCorrupt(check));
         }
-        read_rows(&conn).map_err(|err| Anomaly::RestoredCorrupt(err.to_string()))
+        read_rows(&conn)
+            .map(Some)
+            .map_err(|err| Anomaly::RestoredCorrupt(err.to_string()))
     }
 
     /// The cycle's judgment, after the reboot's settle.
@@ -449,18 +519,25 @@ impl Run {
             return Err(self.engine("settle", &err));
         }
         let restored = self.restore("restored.db", RestoreTarget::Latest)?;
-        if !self.history.knows(&restored) {
-            return Err(Anomaly::RestoredUnknown);
-        }
+        self.history.judge(Target::Latest, &restored)?;
         if restored != self.rows {
             return Err(Anomaly::RestoredNotLatest);
+        }
+        let now = self.rig.clock().now().unix_millis();
+        for _ in 0..2 {
+            let span = u64::try_from(now - self.start).unwrap_or(0);
+            let instant = self.start + i64::try_from(self.instants.below(span + 2)).unwrap_or(0);
+            let target = RestoreTarget::AsOf(lsr_ltx::Timestamp::from_unix_millis(instant));
+            if let Some(rows) = self.restore_or_refused("restored-as-of.db", target)? {
+                self.history.judge(Target::AsOf(instant), &rows)?;
+            }
         }
         Ok(())
     }
 
     /// Every transaction a level-0 file on the replica ends at restores to a state the
     /// application committed.
-    fn judge_every_txid(&self) -> Result<(), (u32, Anomaly)> {
+    fn judge_every_txid(&mut self) -> Result<(), (u32, Anomaly)> {
         let store = lsr_store_fs::FsStore::new(self.rig.replica_root());
         let inventory = block_on(lsr_core::Inventory::load(&store))
             .map_err(|err| (CYCLES, Anomaly::RestoredCorrupt(format!("list: {err}"))))?;
@@ -470,15 +547,20 @@ impl Run {
             .filter(|file| file.key.level().get() == 0)
             .map(|file| file.key.range().max())
             .collect();
+        let mut points = Vec::new();
         for txid in txids {
             let rows = self
                 .restore("restored-txid.db", RestoreTarget::Txid(txid))
                 .map_err(|anomaly| (CYCLES, anomaly))?;
-            if !self.history.knows(&rows) {
+            if self.history.log.find(&digest(&rows)).is_empty() {
                 return Err((CYCLES, Anomaly::TxidUnknown(format!("{txid:?}"))));
             }
+            points.push((txid.get(), digest(&rows), false));
         }
-        Ok(())
+        self.history
+            .judge
+            .sweep(&self.history.log, &points)
+            .map_err(|anomaly| (CYCLES, Anomaly::History(anomaly.to_string())))
     }
 
     fn cycle(&mut self) -> Result<(), Anomaly> {
@@ -488,13 +570,22 @@ impl Run {
     }
 }
 
+/// What a run came to: see [`run`].
+pub type RunEnd = (
+    Option<(u32, Anomaly)>,
+    (u32, u32),
+    (lsr_history::Counts, usize),
+);
+
 /// The first anomaly of the run `seed` names, and the cycle it came in (`CYCLES` for the
-/// final judgments); and the WAL losses that kept a block, and kept one after a lost one.
-pub fn run(seed: u64, cycles: u32) -> (Option<(u32, Anomaly)>, (u32, u32)) {
+/// final judgments); the WAL losses that kept a block, and kept one after a lost one; and what
+/// the history judge counted, with the rewinds the log recorded.
+pub fn run(seed: u64, cycles: u32) -> RunEnd {
     let dir = TempDir::new().unwrap();
     let mut run = Run::new(seed, dir.path());
     let found = run.all(cycles);
-    (found, run.rig.vfs().wal_block_losses())
+    let judged = (run.history.judge.counts(), run.history.log.rewinds().len());
+    (found, run.rig.vfs().wal_block_losses(), judged)
 }
 
 impl Run {
@@ -518,7 +609,7 @@ impl Run {
 #[test]
 fn crash_cycles_under_the_block_law_restore_committed_states() {
     for seed in 0..3 {
-        if let (Some((cycle, anomaly)), _) = run(seed, CYCLES) {
+        if let (Some((cycle, anomaly)), _, _) = run(seed, CYCLES) {
             panic!("seed {seed} cycle {cycle}: {anomaly:?}");
         }
     }
@@ -531,7 +622,7 @@ fn crash_cycles_under_the_block_law_restore_committed_states() {
 /// first at page 21"). The model now follows SQLite's own recovery of the bytes the loss left.
 #[test]
 fn a_recovery_that_brings_back_a_lost_commit_is_followed_seed_113() {
-    if let (Some((cycle, anomaly)), _) = run(113, 6) {
+    if let (Some((cycle, anomaly)), _, _) = run(113, 6) {
         panic!("cycle {cycle}: {anomaly:?}");
     }
 }
@@ -552,10 +643,16 @@ fn crash_cycle_campaign() {
     let cycles = u32::try_from(env("LSR_CRASH_CYCLES", CYCLES.into())).unwrap();
     let mut found = Vec::new();
     let (mut kept, mut holes) = (0, 0);
+    let (mut rewinds, mut ahead, mut latest, mut as_of, mut points) = (0, 0, 0, 0, 0);
     for seed in base..base + seeds {
-        let (got, losses) = run(seed, cycles);
+        let (got, losses, (counts, forks)) = run(seed, cycles);
         kept += losses.0;
         holes += losses.1;
+        rewinds += forks;
+        ahead += counts.ahead_latest + counts.ahead_as_of;
+        latest += counts.latest;
+        as_of += counts.as_of;
+        points += counts.points;
         println!("crash-cycle seed {seed}: {got:?}");
         if let Some(got) = got {
             found.push((seed, got));
@@ -564,6 +661,10 @@ fn crash_cycle_campaign() {
     println!(
         "crash-cycle: {seeds} seeds of {cycles} cycles from {base}; {kept} losses kept an \
          unsynced WAL block, {holes} kept one after a lost one"
+    );
+    println!(
+        "crash-cycle history judge: {latest} latest, {as_of} as-of, {points} restore points \
+         judged; {rewinds} rewinds; {ahead} restores held commits the database lost"
     );
     assert!(found.is_empty(), "{found:#?}");
 }
