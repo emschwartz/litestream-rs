@@ -296,3 +296,72 @@ fn a_name_with_a_nul_is_refused() {
         Some(VfsError::NameHasNul)
     );
 }
+
+/// The rows a reopened database holds after the power came back.
+fn rows_after_power_loss(vfs: &FaultVfs, db: &std::path::Path, conn: Connection) -> Vec<i64> {
+    vfs.cut_power();
+    drop(conn);
+    vfs.restore_power().unwrap();
+    let conn = open(db, vfs);
+    conn.prepare("SELECT v FROM t ORDER BY v")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// A database with row 1 checkpointed and rows 2 and 3 in the WAL, not synced.
+fn two_unsynced_rows(name: &str) -> (TempDir, std::path::PathBuf, FaultVfs, Connection) {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("a.db");
+    let vfs = vfs(name);
+    vfs.track_durability();
+    let conn = open(&db, &vfs);
+    conn.execute_batch(
+        "PRAGMA synchronous = NORMAL; CREATE TABLE t(v); INSERT INTO t VALUES (1);
+         PRAGMA wal_checkpoint(PASSIVE); INSERT INTO t VALUES (2); INSERT INTO t VALUES (3);",
+    )
+    .unwrap();
+    (dir, db, vfs, conn)
+}
+
+/// A sync made while the disk lies succeeds and keeps nothing; the same sync on an honest
+/// disk keeps every commit.
+#[test]
+fn a_sync_on_a_lying_disk_keeps_nothing() {
+    let (_dir, db, vfs, conn) = two_unsynced_rows("lying-sync");
+    vfs.lie_on_syncs(true);
+    crate::pages::sync_wal(&conn).unwrap();
+    vfs.lie_on_syncs(false);
+    assert_eq!(rows_after_power_loss(&vfs, &db, conn), [1]);
+
+    let (_dir, db, vfs, conn) = two_unsynced_rows("honest-sync");
+    crate::pages::sync_wal(&conn).unwrap();
+    assert_eq!(rows_after_power_loss(&vfs, &db, conn), [1, 2, 3]);
+}
+
+/// A failed sync of the WAL loses the writes it covered for good: a later sync that succeeds
+/// does not write them, so the commits they carried, and every commit chained after them, are
+/// gone after a power loss. Without the failure the later sync keeps them all.
+#[test]
+fn a_failed_wal_sync_loses_its_writes_through_a_later_good_sync() {
+    let (_dir, db, vfs, conn) = two_unsynced_rows("lost-writeback");
+    vfs.set_window(true);
+    vfs.arm(fault(
+        FileKind::Wal,
+        Op::Sync,
+        1,
+        Effect::Error(ffi::SQLITE_IOERR_FSYNC),
+    ));
+    assert!(crate::pages::sync_wal(&conn).is_err());
+    vfs.set_window(false);
+    conn.execute_batch("INSERT INTO t VALUES (4)").unwrap();
+    crate::pages::sync_wal(&conn).unwrap();
+    assert_eq!(rows_after_power_loss(&vfs, &db, conn), [1]);
+
+    let (_dir, db, vfs, conn) = two_unsynced_rows("kept-writeback");
+    conn.execute_batch("INSERT INTO t VALUES (4)").unwrap();
+    crate::pages::sync_wal(&conn).unwrap();
+    assert_eq!(rows_after_power_loss(&vfs, &db, conn), [1, 2, 3, 4]);
+}

@@ -38,6 +38,16 @@
 //! database, its WAL and `-shm`, so nothing else syncs it. The `-shm` file is not tracked: the
 //! first connection after the loss resets it and SQLite recovers the wal-index from the WAL.
 //!
+//! Disks that lie, while durability is tracked. [`FaultVfs::lie_on_syncs`] makes every sync
+//! succeed without making anything durable: a drive that acknowledges a flush it never did.
+//! A fault fired on a sync of the WAL loses that sync's writeback for good, as Linux does when
+//! `fsync` fails: the kernel marks the dirty pages clean, so a later sync that succeeds does not
+//! write them and a power loss puts back what the disk held before them. The lost ranges stay
+//! lost until SQLite starts a new WAL generation (a header rewrite at offset 0, or a truncate to
+//! 0), which overwrites them; a failed sync of the database file is not modelled this way, since
+//! a checkpoint whose sync fails does not advance its backfill mark, so the next one copies the
+//! same frames again.
+//!
 //! The suite's `SQLITE_TESTCTRL_PRNG_SEED` ([`seed_prng`]) pins SQLite's random numbers, so WAL
 //! salts and `randomblob` repeat from run to run and a failing schedule replays.
 //!
@@ -199,6 +209,11 @@ struct State {
     entries: BTreeMap<usize, Option<Vec<u8>>>,
     powered: bool,
     undo_failed: Option<io::ErrorKind>,
+    /// Syncs succeed and make nothing durable while this is set ([`FaultVfs::lie_on_syncs`]).
+    lying_sync: bool,
+    /// Per WAL path, the writes a failed sync covered: the kernel called those pages clean,
+    /// so no later sync writes them, until the WAL starts a new generation.
+    lost: BTreeMap<usize, Undo>,
 }
 
 #[derive(Debug)]
@@ -302,14 +317,53 @@ impl Shared {
                 state.entries.remove(&path);
             }
             if state.tracking {
+                // Writes a failed sync lost stay undoable: this sync does not write them.
+                let (replaced, dirty) = state
+                    .lost
+                    .get(&path)
+                    .map(|lost| (lost.replaced.clone(), lost.dirty.clone()))
+                    .unwrap_or_default();
                 state.undo.insert(
                     path,
                     Undo {
                         synced_len: len,
-                        ..Undo::default()
+                        replaced,
+                        dirty,
                     },
                 );
             }
+        }
+    }
+
+    /// A sync of WAL `path` failed: the writes it covered are lost for good (`lost`). Bytes it
+    /// covered past the synced length are lost as zeros, since nothing was there before.
+    fn lose_writeback(&self, path: Option<usize>) {
+        let mut state = self.lock();
+        let Some(path) = path.filter(|path| state.tracking && state.wals.contains(path)) else {
+            return;
+        };
+        let Some(undo) = state.undo.get(&path) else {
+            return;
+        };
+        let mut replaced = undo.replaced.clone();
+        for (from, to) in &undo.dirty {
+            let from = (*from).max(undo.synced_len);
+            if *to > from {
+                let zeros = vec![0; usize::try_from(to.saturating_sub(from)).unwrap_or(0)];
+                replaced.push((from, zeros));
+            }
+        }
+        let dirty = undo.dirty.clone();
+        let lost = state.lost.entry(path).or_default();
+        lost.replaced.extend(replaced);
+        lost.dirty.extend(dirty);
+    }
+
+    /// WAL `path` starts a new generation (its header is written again, or it is cut to
+    /// nothing): what a failed sync lost belongs to the old one.
+    fn new_generation(&self, path: Option<usize>) {
+        if let Some(path) = path {
+            self.lock().lost.remove(&path);
         }
     }
 
@@ -531,6 +585,8 @@ impl FaultVfs {
                 entries: BTreeMap::new(),
                 powered: true,
                 undo_failed: None,
+                lying_sync: false,
+                lost: BTreeMap::new(),
             }),
         }));
         let vfs = Self { shared };
@@ -650,6 +706,13 @@ impl FaultVfs {
         });
     }
 
+    /// While `on`, every sync returns success and makes nothing durable, as on a disk that lies
+    /// about fsync. The simulator's backend turns it on around the engine's own sync of the WAL
+    /// only, so SQLite's own syncs still hold.
+    pub fn lie_on_syncs(&self, on: bool) {
+        self.shared.lock().lying_sync = on;
+    }
+
     /// The power fails now, between calls (module doc): what an [`Effect::PowerLoss`] does
     /// when its call comes.
     pub fn cut_power(&self) {
@@ -679,6 +742,7 @@ impl FaultVfs {
         state.powered = true;
         state.undo.clear();
         state.entries.clear();
+        state.lost.clear();
         state
             .undo_failed
             .take()
@@ -1045,6 +1109,9 @@ extern "C" fn x_write(
         }
         Decision::Act(effect) => plain(effect, Op::Write),
         Decision::Proceed => {
+            if at == 0 && kind == FileKind::Wal {
+                shared.new_generation(path);
+            }
             remember(file, at, end);
             real_write(file, bytes, at)
         }
@@ -1065,6 +1132,9 @@ extern "C" fn x_truncate(file: *mut ffi::sqlite3_file, size: i64) -> c_int {
     let Some(truncate) = methods(file).and_then(|m| m.xTruncate) else {
         return ffi::SQLITE_IOERR_TRUNCATE;
     };
+    if size == 0 && kind == FileKind::Wal {
+        shared.new_generation(path);
+    }
     remember(file, u64::try_from(size).unwrap_or(0), u64::MAX);
     // SAFETY: SQLite's own argument, passed on to the unix file under the header.
     unsafe { truncate(real_of(file), size) }
@@ -1079,9 +1149,17 @@ extern "C" fn x_sync(file: *mut ffi::sqlite3_file, flags: c_int) -> c_int {
             return ffi::SQLITE_IOERR_FSYNC;
         }
         Decision::Act(Effect::Hang) => Some(Effect::Hang),
-        Decision::Act(effect) => return plain(effect, Op::Sync),
+        Decision::Act(effect) => {
+            if kind == FileKind::Wal {
+                shared.lose_writeback(path);
+            }
+            return plain(effect, Op::Sync);
+        }
         Decision::Proceed => None,
     };
+    if shared.lock().lying_sync {
+        return ffi::SQLITE_OK;
+    }
     let Some(sync) = methods(file).and_then(|m| m.xSync) else {
         return ffi::SQLITE_IOERR_FSYNC;
     };
