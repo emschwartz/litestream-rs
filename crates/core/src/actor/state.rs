@@ -14,8 +14,8 @@ use super::Actor;
 use crate::fault::{Next, PersistentCause, StopCause};
 use crate::layout::FileKey;
 use crate::maintain::{MaintainState, RetentionMode};
+use crate::regression_watch::RegressionWatch;
 use crate::verify::LivePages;
-use crate::watch::Watch;
 
 /// What the actor is doing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -367,7 +367,7 @@ pub(super) struct Maintain {
     pub(super) suspect: Option<FileKey>,
     /// What this process is sure stands on the replica until the next
     /// listing (`crate::watch`): checked by every maintenance listing.
-    pub(super) watch: Option<Watch>,
+    pub(super) watch: Option<RegressionWatch>,
 }
 
 impl Default for Maintain {

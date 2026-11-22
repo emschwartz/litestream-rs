@@ -6,16 +6,16 @@
 //! listed: the engine kept uploading above a hole, and `Latest` refused with a
 //! gap until the next snapshot, with no signal.
 //!
-//! A [`Watch`] names objects this process is sure stand on the replica: one
+//! A [`RegressionWatch`] names objects this process is sure stand on the replica: one
 //! anchor from the last maintenance listing (the last file of a level whose
 //! range holds the published transaction) and every level-0 file an upload
 //! confirmed since. Nothing this engine does deletes any of them before the
 //! next maintenance listing: deletes run only on the job planned from a
 //! listing, in that listing's tick, retention never deletes a level's last
 //! file, and a read-back repair that deletes the anchor forgets it
-//! ([`Watch::forget`]). So the next listing must show them all.
+//! ([`RegressionWatch::forget`]). So the next listing must show them all.
 //!
-//! One that is missing ([`Watch::missing`]) is read, because a listing may lag
+//! One that is missing ([`RegressionWatch::missing`]) is read, because a listing may lag
 //! the bucket and a read may not: `NotFound` is a regression
 //! (`Fault::RemoteRegressed`, whose configured response relists, or stops);
 //! a read that finds it says the listing lags, and nothing is decided. A
@@ -39,7 +39,7 @@ use crate::layout::{FileKey, Level};
 /// Objects this process is sure stand on the replica until its next
 /// maintenance listing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Watch {
+pub(crate) struct RegressionWatch {
     /// The last file of a level whose range held the published transaction
     /// at the last maintenance listing.
     anchor: Option<FileKey>,
@@ -48,8 +48,8 @@ pub(crate) struct Watch {
     uploaded: Option<(Txid, Txid)>,
 }
 
-impl Watch {
-    /// What a maintenance listing that passed [`Watch::missing`] lets the
+impl RegressionWatch {
+    /// What a maintenance listing that passed [`RegressionWatch::missing`] lets the
     /// engine watch until the next one: the first level, from 0 up, whose
     /// last file holds `published`. `None` with nothing to watch.
     pub(crate) fn after_listing(inventory: &Inventory, published: Option<Txid>) -> Option<Self> {
@@ -156,7 +156,7 @@ mod tests {
     /// is exact: only a single-transaction level-0 key from `first` to `last` drops it.
     #[test]
     fn forget_drops_the_uploads_only_for_one_of_their_own_keys() {
-        let watch = Watch {
+        let watch = RegressionWatch {
             anchor: None,
             uploaded: Some((txid(3), txid(7))),
         };
@@ -170,7 +170,7 @@ mod tests {
             (key(0, 5, 5), false, "inside"),
         ];
         for (deleted, kept, why) in cases {
-            let left = Watch::forget(Some(watch), deleted);
+            let left = RegressionWatch::forget(Some(watch), deleted);
             assert_eq!(left, kept.then_some(watch), "{why}");
         }
     }
@@ -178,21 +178,24 @@ mod tests {
     #[test]
     fn the_anchor_is_the_lowest_level_whose_last_file_holds_the_published_transaction() {
         let listed = inventory(&[key(0, 3, 3), key(0, 4, 4), key(1, 1, 4), key(9, 1, 2)]);
-        let watch = Watch::after_listing(&listed, Some(txid(4))).unwrap();
+        let watch = RegressionWatch::after_listing(&listed, Some(txid(4))).unwrap();
         assert_eq!(watch.anchor, Some(key(0, 4, 4)));
         let compacted = inventory(&[key(1, 1, 4), key(9, 1, 2)]);
-        let watch = Watch::after_listing(&compacted, Some(txid(4))).unwrap();
+        let watch = RegressionWatch::after_listing(&compacted, Some(txid(4))).unwrap();
         assert_eq!(watch.anchor, Some(key(1, 1, 4)));
-        assert_eq!(Watch::after_listing(&compacted, Some(txid(5))), None);
-        assert_eq!(Watch::after_listing(&compacted, None), None);
+        assert_eq!(
+            RegressionWatch::after_listing(&compacted, Some(txid(5))),
+            None
+        );
+        assert_eq!(RegressionWatch::after_listing(&compacted, None), None);
     }
 
     #[test]
     fn a_rolled_back_anchor_or_upload_is_missing() {
         let before = inventory(&[key(0, 3, 3), key(1, 1, 3)]);
-        let mut watch = Watch::after_listing(&before, Some(txid(3)));
+        let mut watch = RegressionWatch::after_listing(&before, Some(txid(3)));
         for n in 4..=6 {
-            watch = Watch::put(watch, key(0, n, n));
+            watch = RegressionWatch::put(watch, key(0, n, n));
         }
         let watch = watch.unwrap();
         let all = inventory(&[key(0, 3, 3), key(0, 4, 4), key(0, 5, 5), key(0, 6, 6)]);
@@ -207,25 +210,25 @@ mod tests {
 
     #[test]
     fn a_key_out_of_sequence_starts_the_run_again_and_others_are_ignored() {
-        let watch = Watch::put(None, key(0, 4, 4));
-        let watch = Watch::put(watch, key(0, 9, 9));
+        let watch = RegressionWatch::put(None, key(0, 4, 4));
+        let watch = RegressionWatch::put(watch, key(0, 9, 9));
         assert_eq!(watch.and_then(|w| w.uploaded), Some((txid(9), txid(9))));
-        assert_eq!(Watch::put(None, key(1, 4, 4)), None);
-        assert_eq!(Watch::put(None, key(0, 1, 4)), None);
+        assert_eq!(RegressionWatch::put(None, key(1, 4, 4)), None);
+        assert_eq!(RegressionWatch::put(None, key(0, 1, 4)), None);
     }
 
     #[test]
     fn a_key_this_engine_deleted_is_forgotten() {
         let listed = inventory(&[key(1, 1, 4)]);
-        let watch = Watch::after_listing(&listed, Some(txid(4)));
-        assert_eq!(Watch::forget(watch, key(1, 1, 4)), None);
-        let watch = Watch::put(watch, key(0, 5, 5));
-        let watch = Watch::forget(watch, key(0, 5, 5));
+        let watch = RegressionWatch::after_listing(&listed, Some(txid(4)));
+        assert_eq!(RegressionWatch::forget(watch, key(1, 1, 4)), None);
+        let watch = RegressionWatch::put(watch, key(0, 5, 5));
+        let watch = RegressionWatch::forget(watch, key(0, 5, 5));
         assert_eq!(
             watch.map(|w| (w.anchor, w.uploaded)),
             Some((Some(key(1, 1, 4)), None))
         );
-        assert_eq!(Watch::forget(None, key(0, 5, 5)), None);
+        assert_eq!(RegressionWatch::forget(None, key(0, 5, 5)), None);
     }
 
     proptest! {
@@ -239,12 +242,12 @@ mod tests {
             dropped in proptest::collection::vec(any::<bool>(), 41),
         ) {
             let anchor = key(0, anchor_max, anchor_max);
-            let mut watch = Watch::after_listing(&inventory(&[anchor]), Some(txid(anchor_max)));
+            let mut watch = RegressionWatch::after_listing(&inventory(&[anchor]), Some(txid(anchor_max)));
             let mut watched = vec![anchor];
             for n in 1..=uploads {
                 let at = anchor_max.saturating_add(n);
                 let k = key(0, at, at);
-                watch = Watch::put(watch, k);
+                watch = RegressionWatch::put(watch, k);
                 watched.push(k);
             }
             let kept: Vec<FileKey> = watched

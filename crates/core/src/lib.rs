@@ -43,6 +43,7 @@ mod pages;
 mod plan;
 mod position;
 mod recover;
+mod regression_watch;
 mod restore;
 mod retry;
 mod snapshot;
@@ -57,7 +58,6 @@ mod sync;
 mod takeover;
 mod upload;
 mod verify;
-mod watch;
 mod witness;
 
 pub use actor::{

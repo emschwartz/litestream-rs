@@ -103,6 +103,7 @@ use crate::recover::{
     BootWal, FrameCheck, Miss, NewestStagedFile, PositionSource, Probes, Recovered, WalView,
     newest_level_zero, newest_replica_level_zero, read_header, recover,
 };
+use crate::regression_watch::RegressionWatch;
 use crate::snapshot::{SnapshotFailed, read_live, write_snapshot};
 use crate::source::{CheckpointMode, Checkpointer, CommittedRead, PageSource, WalSource};
 use crate::stop_record::StopRecord;
@@ -114,7 +115,6 @@ use crate::upload::{
     plan_upload, sweep_staged, upload_next,
 };
 use crate::verify::LivePages;
-use crate::watch::Watch;
 use crate::witness::{LiveDb, Pending, Witnesses, still_holds, witness_pending};
 
 /// What one tick may touch, lent for that tick only.
@@ -1665,7 +1665,7 @@ impl Actor {
                     let at = listing_after_upload(now, &self.kept.cfg.maintenance);
                     self.engine.maintain.list_by(at);
                     let watch = self.engine.maintain.watch;
-                    self.engine.maintain.watch = Watch::put(watch, info.key);
+                    self.engine.maintain.watch = RegressionWatch::put(watch, info.key);
                 }
             }
             if self.uploads_idle() {
@@ -1937,7 +1937,7 @@ impl Actor {
         let watch = self.engine.maintain.watch;
         let Some(key) = watch.and_then(|watch| watch.missing(inventory)) else {
             let published = self.engine.upload.confirmed();
-            self.engine.maintain.watch = Watch::after_listing(inventory, published);
+            self.engine.maintain.watch = RegressionWatch::after_listing(inventory, published);
             return None;
         };
         match remote.read(&key, 0, ReadLen::or_chunk(1)).await {
@@ -1984,7 +1984,7 @@ impl Actor {
             return Some(self.fault(Task::Maintenance, Fault::RemoteCorrupt, now));
         }
         // Watched no more, whether the delete goes through or not.
-        self.engine.maintain.watch = Watch::forget(self.engine.maintain.watch, key);
+        self.engine.maintain.watch = RegressionWatch::forget(self.engine.maintain.watch, key);
         if let Err(err) = remote.delete(&[key]).await {
             return Some(self.fault(Task::Maintenance, Fault::from_remote(&err), now));
         }
