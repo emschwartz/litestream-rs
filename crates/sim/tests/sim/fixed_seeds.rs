@@ -501,3 +501,40 @@ mod unlinked {
         }
     }
 }
+
+#[cfg(test)]
+mod one_bad_read {
+    use lsr_core::StoreOp;
+    use lsr_sim::generate::Target;
+    use lsr_sim::run::run_ops;
+    use lsr_sim::{FaultShape, Op, Opts, Seed};
+
+    /// One read of the boot's read-back of a sound level-9 snapshot returns
+    /// a flipped byte, and the engine deleted the snapshot as rotten (seed
+    /// 0x487's path, written out).
+    #[test]
+    fn one_flipped_read_deletes_no_sound_snapshot() {
+        let mut ops = vec![Op::Commit {
+            pages: 3,
+            grow: false,
+        }];
+        ops.extend(std::iter::repeat_n(Op::Tick, 8));
+        ops.push(Op::Commit {
+            pages: 2,
+            grow: false,
+        });
+        ops.extend(std::iter::repeat_n(Op::Tick, 4));
+        ops.push(Op::Shutdown);
+        ops.push(Op::StoreFault {
+            target: Target::Remote,
+            op: StoreOp::Read,
+            ahead: 4,
+            shape: FaultShape::FlipByteOnRead { at: 600 },
+        });
+        ops.extend(std::iter::repeat_n(Op::Tick, 10));
+        ops.push(Op::Restore);
+        if let Err(failure) = run_ops(Seed::new(0x487), &ops, &Opts::default()) {
+            panic!("{}", failure.violation);
+        }
+    }
+}

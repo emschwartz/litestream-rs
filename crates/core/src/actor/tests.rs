@@ -52,6 +52,9 @@ struct Counting {
     /// as the next upload begins: a commit that lands after a sync step read
     /// the committed end.
     commits_on_upload: Arc<std::sync::Mutex<Option<(FakeWal, u8)>>>,
+    /// Keys whose next read returns its bytes with the middle one flipped,
+    /// the stored bytes untouched: one bad read.
+    flip_next_read: Arc<std::sync::Mutex<Vec<FileKey>>>,
 }
 
 impl Counting {
@@ -71,6 +74,11 @@ impl Counting {
     fn reads_of(&self, key: &FileKey) -> usize {
         let reads = self.reads.lock().unwrap();
         reads.iter().filter(|read| *read == key).count()
+    }
+
+    /// The next read of `key` returns one byte flipped.
+    fn flip_next_read(&self, key: FileKey) {
+        self.flip_next_read.lock().unwrap().push(key);
     }
 
     /// Every key a delete was asked for, in order.
@@ -109,7 +117,20 @@ impl ObjectStore for Counting {
         if offset == 0 {
             self.reads.lock().unwrap().push(*key);
         }
-        self.inner.read(key, offset, len)
+        let flip = {
+            let mut pending = self.flip_next_read.lock().unwrap();
+            let at = pending.iter().position(|k| k == key);
+            at.map(|at| pending.remove(at)).is_some()
+        };
+        let read = self.inner.read(key, offset, len);
+        async move {
+            let mut bytes = read.await?;
+            let middle = bytes.len() / 2;
+            if flip && let Some(byte) = bytes.get_mut(middle) {
+                *byte ^= 0x01;
+            }
+            Ok(bytes)
+        }
     }
 
     fn created_at(
@@ -1599,3 +1620,53 @@ mod no_wal_yet;
 mod pages;
 mod rejected_snapshot;
 mod tasks;
+
+fn l0(n: u64) -> FileKey {
+    FileKey::new(Level::ZERO, TxidRange::single(Txid::new(n).unwrap()))
+}
+
+/// One read of a sound staged file returns a flipped byte during boot's
+/// sweep. A read that fails verification is evidence about the read: boot
+/// deletes nothing on it, and the file is uploaded as it is.
+#[test]
+fn one_bad_read_of_a_staged_file_at_boot_drops_nothing() {
+    let (mut rig, mut actor) = caught_up();
+    stage_held(&mut rig, &mut actor, &[2, 3, 4], T0 + 1);
+    rig.staging.flip_next_read(l0(3));
+    let mut actor = Actor::new(cfg());
+    let seen = rig.follow(&mut actor, T0 + 2, 50);
+    no_stop(&seen);
+    assert!(
+        rig.staging
+            .deleted()
+            .iter()
+            .all(|key| key.range().max().get() < 3)
+    );
+    assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2), (3, 3), (4, 4)]);
+    assert_eq!(snapshots(&rig), vec![1]);
+    assert_eq!(restored(&rig), 4);
+}
+
+/// One read of a sound staged file returns a flipped byte while the upload
+/// task copies it: nothing is dropped, and a later tick uploads it.
+#[test]
+fn one_bad_read_of_a_staged_file_while_uploading_drops_nothing() {
+    let (mut rig, mut actor) = caught_up();
+    rig.commit(2);
+    assert!(matches!(
+        event(&rig.tick(&mut actor, T0 + 1)),
+        Some(Event::Synced { .. })
+    ));
+    rig.staging.flip_next_read(l0(2));
+    let seen = rig.follow(&mut actor, T0 + 1, 50);
+    no_stop(&seen);
+    assert!(
+        !seen
+            .iter()
+            .any(|tick| matches!(event(tick), Some(Event::Resnapshot(_)))),
+        "{seen:?}"
+    );
+    assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2)]);
+    assert_eq!(snapshots(&rig), vec![1]);
+    assert_eq!(restored(&rig), 2);
+}
