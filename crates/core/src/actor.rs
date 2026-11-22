@@ -197,6 +197,10 @@ pub enum MaintainedEvent {
     },
 }
 
+/// The most files one tick stages: a sync step's one, then a checkpoint's
+/// seal and the new generation it follows (a TRUNCATE stages one of its two).
+const MOST_STAGED_PER_TICK: usize = 3;
+
 /// What a tick did. Times in an event are engine time, which runs ahead of
 /// the wall clock for a while after it steps back (`clock`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -303,6 +307,10 @@ enum Stepped {
     Resnapshot(SnapshotCause),
     /// Recovery names a stop cause; the configured response decides.
     Stop(StopCause),
+    /// Nothing was staged: the pending files hold as many tokens as allowed
+    /// (`crate::witness::MAX_WITNESSED`). The position holds, the WAL keeps
+    /// the frames, and staging resumes once uploads let tokens go.
+    Held,
 }
 
 /// The replication engine for one database.
@@ -450,6 +458,12 @@ impl Actor {
             Course::Unbooted => self.kept.asked(),
             Course::Snapshot { .. } | Course::At { .. } => self.engine.course.pending(),
         }
+    }
+
+    /// Whether a tick may stage: every file it can stage (`MOST_STAGED_PER_TICK`)
+    /// would get a token.
+    fn staging_has_room(&self) -> bool {
+        self.engine.witnesses.has_room(MOST_STAGED_PER_TICK)
     }
 
     /// The last sync stopped at the cap: more is committed.
@@ -1160,6 +1174,7 @@ impl Actor {
                 self.engine.course.snapshot_for(cause, false);
                 Err(self.ran(Event::Resnapshot(cause), now))
             }
+            Ok(Stepped::Held) => Ok((0, None)),
             Ok(Stepped::Stop(cause)) => Err(self.verdict(Task::Sync, cause, now)),
             Err(fault) => Err(self.fault(Task::Sync, fault, now)),
         }
@@ -1173,6 +1188,12 @@ impl Actor {
     ) -> Result<Stepped, Fault> {
         if self.owes_truncate() {
             return self.unprove(env);
+        }
+        if !self.staging_has_room() {
+            // Marked as a step cut short, so the sync runs again when room
+            // frees up: no new WAL change may come to wake it.
+            self.engine.course.set_tail(Tail::More);
+            return Ok(Stepped::Held);
         }
         let (mut reader, committed) = match self.open_wal(env)? {
             Ok(opened) => opened,
@@ -1925,6 +1946,7 @@ impl Actor {
             return self.kept.tasks.ready(Task::Sync, now);
         }
         let sync = self.kept.tasks.ready(Task::Sync, now)
+            && self.staging_has_room()
             && (self.pending().is_some()
                 || self.more_wal()
                 || (self.running() && self.checkpoint_decision(now).is_some()));
