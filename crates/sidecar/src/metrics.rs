@@ -44,8 +44,8 @@
 //!   `lsr_app_notice{db,kind}` 1 while the application-checkpoint notice stands.
 //! - `lsr_resnapshot_pending{db,cause}` 1 when the next sync is a snapshot.
 //! - `lsr_journal_signal{db,signal}` 1 while the engine journal reports something
-//!   (`journal_missing`, `journal_unreadable`, `journal_newer`, `journal_slot_unreadable`,
-//!   `journal_unwritable`; `docs/journal.md`).
+//!   (`missing`, `unreadable`, `newer_version`, `slot_unreadable`,
+//!   `unwritable`; `docs/journal.md`).
 //! - `lsr_snapshots_total{db,cause}`: snapshots staged since the replicator started, every
 //!   cause listed, zeros included. Each uploads the whole database: a cause other than
 //!   `first_sync`, `checkpoint_boundary` or `operator_requested` that keeps counting up means
@@ -405,7 +405,7 @@ fn app_series(out: &mut Out, dbs: &[(String, &Health)]) {
     out.family(
         name,
         "gauge",
-        "1 while the engine journal reports something, by signal",
+        "1 while the engine journal is missing, unreadable, from a newer version or unwritable, by signal",
     );
     for (db, health) in dbs {
         if let Some(signal) = health.journal {

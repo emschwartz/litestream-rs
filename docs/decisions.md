@@ -45,6 +45,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D35 | When may the simulator accept a task still stalled at the end of a run? | Only while the world still imposes the stall's fault; the excuse table is empty today | Claude (stall-liveness), **delegated** | 2026-11-22 | open to owner review |
 | D100 | How does the journal hold the unproven-WAL debt, and when is it written? | Written at the end of the tick that changes it; a new failure may raise it at any step; `JournalUnwritable` while the journal lags | Claude (journal), **delegated** | 2026-11-22 | open to owner review |
 | D101 | Does a run with nothing to record still create the journal? | Yes: a process that neither read nor wrote a record writes one, so `JournalMissing` means the journal was lost | Claude (journal), **delegated** | 2026-11-22 | open to owner review |
+| D102 | Are the journal's signals a degraded state? | No: a notice in `/healthz` and `lsr_journal_signal`, unwritable included; `/healthz` stays 200 | parent session, names reviewed for the owner | 2026-11-22 | decided |
 | D130 | How does the simulator run the real directory store, and who judges it? | A filesystem trait in store-fs, an in-memory filesystem under the crash law in the sim, half the swarm on it, a staging-contract judge | Claude (sim-real-store-fs), **delegated** | 2026-11-22 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
@@ -373,6 +374,15 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** one creation per database (a write, two `fsync`s and a directory `fsync`) on the first tick of the first run, and again after a journal is lost or unreadable. A journal that cannot be created is reported as `JournalUnwritable` until a write succeeds, even while no debt is owed: the next failed WAL fsync could not be recorded either.
 - **Revisit if:** creating the file on a read-only or full meta directory is shown to be common enough that the report is noise.
 - **Links:** `crates/core/src/actor.rs` (`reconcile_journal`), `docs/journal.md`.
+
+## D102. The journal's signals are notices, not degraded states
+
+- **Question:** how does an operator see what the engine journal says, and does any of it count as degraded?
+- **Choice:** `Health.journal`, the `/healthz` fields `journal` (values `missing`, `unreadable`, `newer_version`, `slot_unreadable`, `unwritable`) and `journal_detail`, and the gauge `lsr_journal_signal{db,signal}`. Every signal is a notice: `Health::is_degraded` ignores it and `/healthz` stays 200, `unwritable` included, since the engine runs as it would with no journal. `newer_version` says a newer binary wrote the journal, which points at a downgrade.
+- **Options considered:** prefixed values (`journal_missing`; stutters after the field name); `unwritable` as a degraded task.
+- **Cost accepted:** while the journal is unwritable, a failed WAL sync met meanwhile is forgotten by a restart (and so will any fact a later step moves into the journal, a stop among them), and nothing marks the database degraded.
+- **Revisit if:** an unwritable journal proves common; then make it a degraded task that still answers 200.
+- **Links:** `crates/sidecar/src/health.rs`, `crates/sidecar/src/metrics.rs`, `docs/BEHAVIOR.md` BOOT-25 to BOOT-29 and RUN-27.
 
 ## D130. The real directory store in the simulator (delegated)
 

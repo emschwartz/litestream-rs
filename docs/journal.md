@@ -229,7 +229,6 @@ costs that record (logged).
 ## Working names
 
 User-visible strings need the owner's approval. Approved: `JournalMissing`, `JournalUnreadable`,
-`JournalNewer`, `JournalSlotUnreadable`, `JournalUnwritable`. Provisional, awaiting approval: the
-`/healthz` fields `journal` and `journal_detail`, the gauge `lsr_journal_signal{db,signal}`, and
-the values `journal_missing`, `journal_unreadable`, `journal_newer`, `journal_slot_unreadable`,
-`journal_unwritable`.
+`JournalNewer`, `JournalSlotUnreadable`, `JournalUnwritable`; the `/healthz` fields `journal` and
+`journal_detail`, the gauge `lsr_journal_signal{db,signal}`, and its values `missing`,
+`unreadable`, `newer_version`, `slot_unreadable`, `unwritable`.

@@ -608,7 +608,7 @@ fn run_until(setup: &Setup, ready: impl Fn(&serde_json::Value) -> bool) -> (Stri
 }
 
 /// The engine journal's signal in both outputs: none on a first run or a restart that reads
-/// the journal the last run left, `journal_missing` on the start after it was deleted.
+/// the journal the last run left, `missing` on the start after it was deleted.
 #[test]
 fn a_deleted_journal_is_reported_on_the_next_start() {
     let setup = setup("addr: 127.0.0.1:0\n", "    monitor-interval: 20ms\n");
@@ -646,10 +646,10 @@ fn a_deleted_journal_is_reported_on_the_next_start() {
         health["status"], "ok",
         "a lost journal costs nothing: {body}"
     );
-    assert_eq!(health["dbs"][0]["journal"], "journal_missing", "{body}");
+    assert_eq!(health["dbs"][0]["journal"], "missing", "{body}");
     assert_eq!(health["dbs"][0]["journal_detail"], "Missing", "{body}");
     let (_, samples) = parse_metrics(&text);
-    let labels = [("db", db.as_str()), ("signal", "journal_missing")];
+    let labels = [("db", db.as_str()), ("signal", "missing")];
     assert!((one(&samples, "lsr_journal_signal", &labels).value - 1.0).abs() < f64::EPSILON);
 }
 

@@ -229,15 +229,15 @@ pub(crate) fn snapshot_name(cause: SnapshotCause) -> &'static str {
     snapshot_kind_name(SnapshotCauseKind::from(&cause))
 }
 
-/// A journal signal's name: the owner-approved health name in snake case, without its payload.
+/// A journal signal's name in `/healthz` and metrics, without its payload.
 #[must_use]
 pub(crate) const fn journal_name(signal: JournalSignal) -> &'static str {
     match signal {
-        JournalSignal::Missing => "journal_missing",
-        JournalSignal::Unreadable(_) => "journal_unreadable",
-        JournalSignal::Newer { .. } => "journal_newer",
-        JournalSignal::SlotUnreadable => "journal_slot_unreadable",
-        JournalSignal::Unwritable(_) => "journal_unwritable",
+        JournalSignal::Missing => "missing",
+        JournalSignal::Unreadable(_) => "unreadable",
+        JournalSignal::Newer { .. } => "newer_version",
+        JournalSignal::SlotUnreadable => "slot_unreadable",
+        JournalSignal::Unwritable(_) => "unwritable",
     }
 }
 
@@ -422,16 +422,16 @@ mod tests {
     #[test]
     fn each_journal_signal_has_its_approved_name() {
         let named = [
-            (JournalSignal::Missing, "journal_missing"),
+            (JournalSignal::Missing, "missing"),
             (
                 JournalSignal::Unreadable(lsr_journal::Why::Tie),
-                "journal_unreadable",
+                "unreadable",
             ),
-            (JournalSignal::Newer { version: 2 }, "journal_newer"),
-            (JournalSignal::SlotUnreadable, "journal_slot_unreadable"),
+            (JournalSignal::Newer { version: 2 }, "newer_version"),
+            (JournalSignal::SlotUnreadable, "slot_unreadable"),
             (
                 JournalSignal::Unwritable(std::io::ErrorKind::StorageFull),
-                "journal_unwritable",
+                "unwritable",
             ),
         ];
         for (signal, name) in named {
