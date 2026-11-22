@@ -327,7 +327,7 @@ impl<B: Backend> Stepper<B> {
             &mut ck,
             &self.staging,
             &SyncConfig::default(),
-            Timestamp::from_unix_millis(self.now),
+            &lsr_core::FakeClock::new(Timestamp::from_unix_millis(self.now)),
         ))
         .map_err(|failed| RigError::Store(format!("{failed:?}")))?;
         self.position = Some(done.staged.position());

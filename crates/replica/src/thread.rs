@@ -363,6 +363,7 @@ impl Worker {
             ck: &mut ck,
             staging: &self.staging,
             remote: &self.remote,
+            clock: self.runtime.clock.as_ref(),
         };
         Ok(block_on(self.actor.tick(env, now)))
     }
@@ -551,8 +552,7 @@ impl Worker {
             Reopen::Failed => self.rebuilt.map_or(PersistentCause::Bug, |was| was.cause),
             Reopen::Replaced => PersistentCause::WalUnlinked,
         };
-        if self.config.responses.stops(cause) {
-            let cause = StopCause::from(cause);
+        if let Some(cause) = cause.stop().filter(|_| self.config.responses.stops(cause)) {
             self.stopped = Some(cause);
             self.observe(now);
             return self.stopped(cause);

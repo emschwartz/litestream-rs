@@ -73,7 +73,7 @@ pub use lsr_core::{
     AppCheckpoint, AppCheckpoints, AsOfInside, CheckpointConfig, Clock, Degraded, Depth, Entropy,
     L0Retention, Maintenance, OtherWriter, PersistentCause as DegradedCause, Report, Response,
     Responses, RestoreOptions, RestoreTarget, Restored, Severity, SnapshotCause, SnapshotCauseKind,
-    SnapshotCounts, StopCause, Task,
+    SnapshotCounts, Stall, StopCause, Task,
 };
 pub use lsr_ltx::{Timestamp, Txid};
 pub use lsr_sqlite::{DatabaseFile, SetupError, app_connection_raw, ffi};

@@ -125,7 +125,25 @@ fn as_of_is_never_newer_than_the_instant() {
     // Committed at 20, so not "strictly before 20".
     assert!(matches!(
         judge.as_of(&log, 20, d(2), None),
-        Err(Anomaly::AsOfTooNew { committed: 20, .. })
+        Err(Anomaly::AsOfTooNew { begun: 20, .. })
+    ));
+}
+
+/// A commit is an interval: begun at 22, acknowledged at 28. `AsOf(25)` may see it (another
+/// connection could have, and Fatal mode does not call it ahead), but `AsOf(22)` may not: it
+/// began at the instant. One time per commit read after the insert returned would call the
+/// first a state from the future.
+#[test]
+fn as_of_judges_a_commit_by_when_it_began() {
+    let mut log = Log::new(d(0), 0);
+    let a = log.commit(d(1), 10);
+    let b = log.commit_between(d(2), 22, 28);
+    let mut judge = Judge::new(AheadMode::Fatal);
+    assert_eq!(judge.as_of(&log, 25, d(2), None), Ok(b));
+    assert_eq!(judge.as_of(&log, 25, d(1), None), Ok(a));
+    assert!(matches!(
+        judge.as_of(&log, 22, d(2), None),
+        Err(Anomaly::AsOfTooNew { begun: 22, .. })
     ));
 }
 

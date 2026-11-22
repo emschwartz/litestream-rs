@@ -109,7 +109,7 @@ impl Expect {
             ) => key.level() == *want,
             (Self::Stopped(want), Seen::Stop(got)) => stops(responses, *want) && want == got,
             (Self::Stopped(want), Seen::Event(Event::Degraded { cause, .. })) => {
-                !stops(responses, *want) && *want == StopCause::from(*cause)
+                !stops(responses, *want) && Some(*want) == cause.stop()
             }
             (Self::Recovered, Seen::Recovered(_)) | (Self::Oracle, Seen::Oracle) => true,
             (Self::Event(_) | Self::Stopped(_) | Self::Recovered | Self::Oracle, _) => false,
@@ -232,6 +232,7 @@ pub fn scenario_of(cause: SnapshotCause) -> &'static [fn() -> Scenario] {
         SnapshotCause::CheckpointBoundary => &[truncate_threshold_crossed],
         SnapshotCause::OperatorRequested => &[cli_snapshot],
         SnapshotCause::StagedUnverified { .. } => &[pending_from_a_gone_generation],
+        SnapshotCause::WalSyncFailed => &[wal_fsync_fails_then_snapshot],
     }
 }
 

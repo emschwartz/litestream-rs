@@ -191,7 +191,7 @@ impl Engine {
             &mut ck,
             &self.staging,
             &SyncConfig::default(),
-            Timestamp::from_unix_millis(self.now),
+            &lsr_core::FakeClock::new(Timestamp::from_unix_millis(self.now)),
         ))
         .unwrap();
         self.position = Some(done.staged.position());

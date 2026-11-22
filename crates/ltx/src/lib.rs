@@ -23,8 +23,11 @@ mod ids;
 mod index;
 mod order;
 mod page;
+#[cfg(any(test, feature = "testing"))]
+mod spans;
 mod time;
 mod trailer;
+mod xxh32;
 
 pub use checksum::{DbChecksum, FileChecksum, PageChecksum};
 pub use decoder::{Decoder, Event, ReadDecoder, Verified};
@@ -35,6 +38,8 @@ pub use encoder::Encoder;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing {
     pub use crate::encoder::encode_commit_zero;
+    pub use crate::spans::compressed_block_spans;
+    pub use crate::xxh32::xxh32;
 }
 pub use error::{DecodeError, EncodeError, Section};
 pub use frame::FrameError;

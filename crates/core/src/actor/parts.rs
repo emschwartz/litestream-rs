@@ -20,6 +20,7 @@ use lsr_wal::CommittedEnd;
 
 use super::ActorConfig;
 use super::state::{Gate, Live, Maintain, Phase, Tasks};
+use super::unproven::Unproven;
 use crate::app::AppCheckpointObserver;
 use crate::checkpoint::CheckpointState;
 use crate::fault::{SnapshotCause, SnapshotCounts, StopCause};
@@ -114,6 +115,9 @@ pub(super) struct Kept {
     pub(super) suspect_staged: Option<FileKey>,
     /// Snapshots staged since the actor began, per cause: a report.
     pub(super) snapshots: SnapshotCounts,
+    /// How far the engine is past a failed sync of the WAL (`unproven`). Kept across boots:
+    /// a frame that sync covered is no truer after a rebuild.
+    pub(super) unproven: Unproven,
 }
 
 impl Kept {
@@ -131,6 +135,7 @@ impl Kept {
             app: AppCheckpointObserver::default(),
             suspect_staged: None,
             snapshots: SnapshotCounts::default(),
+            unproven: Unproven::No,
         }
     }
 
@@ -152,6 +157,7 @@ impl Kept {
             app: _,
             suspect_staged,
             snapshots,
+            unproven,
         } = self;
         Self {
             cfg: cfg.clone(),
@@ -166,6 +172,7 @@ impl Kept {
             app: observer,
             suspect_staged: *suspect_staged,
             snapshots: *snapshots,
+            unproven: *unproven,
         }
     }
 

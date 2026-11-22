@@ -41,7 +41,7 @@ pub mod world;
 
 pub use exec::{Polls, RunEnd, count_polls, run_until};
 pub use generate::{
-    AfterRestart, EnvFault, Generator, Op, Target, Weights, frozen_history, history,
+    AfterRestart, EnvFault, Generator, Hold, Op, Target, Weights, frozen_history, history,
 };
 pub use model::{CommitId, CommitRec, Model, PageImage, Recovery};
 pub use oracle::{
@@ -55,8 +55,8 @@ pub use sqlite::{
     ReaderId, SimCheckpointer, SimPages, SimSource, SimSqlite, SimWal,
 };
 pub use store::{
-    FaultHandle, FaultShape, Faults, HighWater, Lost, Recorder, RecorderCounts, RecorderEvent,
-    RecorderLog, Volatile, VolatileHandle, YieldEachCall,
+    FaultHandle, FaultShape, Faults, HeldFault, HighWater, Lost, Recorder, RecorderCounts,
+    RecorderEvent, RecorderLog, Volatile, VolatileHandle, YieldEachCall,
 };
 pub use world::{
     CommittedInTick, CrashPlan, RemoteStore, StagedEditError, StagingStore, TickEnd, World,

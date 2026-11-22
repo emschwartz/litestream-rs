@@ -249,6 +249,10 @@ pub const fn justifies(cause: SnapshotCauseKind, at_boot: bool) -> Option<&'stat
             WalRestarted,
             WalEmptied,
         ],
+        // The engine's fsync of the WAL failed (a fault failed the step), and
+        // a TRUNCATE checkpoint then moved the unstaged frames into the
+        // database file.
+        SnapshotCauseKind::WalSyncFailed => &[PositionUnproven, WalDamaged, LyingDisk],
         SnapshotCauseKind::CheckpointBoundary => return None,
         SnapshotCauseKind::OperatorRequested => &[SnapshotRequested],
     })
@@ -264,6 +268,17 @@ pub const fn of_op(op: &Op) -> &'static [Justifier] {
         }
         Op::EnvFault(_) | Op::Wal(_) | Op::WalDamage { .. } => &[Justifier::WalDamaged],
         Op::Remote(_) | Op::SecondWriter { .. } => &[Justifier::RemoteEdited],
+        // A lasting fault, noted as it begins and again as it is lifted.
+        Op::Hold { hold, .. } => match hold {
+            crate::generate::Hold::StoreDown(_)
+            | crate::generate::Hold::CredentialsRevoked
+            | crate::generate::Hold::LaggingListing
+            | crate::generate::Hold::LyingReads => &[Justifier::RemoteFault],
+            crate::generate::Hold::DiskFull => &[Justifier::StagingFault],
+            crate::generate::Hold::Wal(_) => &[Justifier::WalDamaged],
+            crate::generate::Hold::LyingDisk => &[Justifier::LyingDisk],
+            crate::generate::Hold::ReadersHeld => &[],
+        },
         Op::OurReader { begin: false } => &[Justifier::ReadLockLapsed],
         Op::RequestSnapshot => &[Justifier::SnapshotRequested],
         Op::LyingWalSync => &[Justifier::LyingDisk],

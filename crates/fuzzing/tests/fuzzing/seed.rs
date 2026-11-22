@@ -16,6 +16,9 @@ use lsr_ltx::{HEADER_LEN, Header, INDEX_TAIL_LEN, PageIndex, TRAILER_LEN};
 /// Fixture files above this size are not seeds: libFuzzer inputs stay small.
 const MAX_SEED: u64 = 20 * 1024;
 
+/// Fixture files above this size are not `flip` seeds, whose every run decodes twice.
+const MAX_FLIP_SEED: usize = 4 * 1024;
+
 #[cfg(test)]
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -120,6 +123,14 @@ fn write_seeds() {
         let mut decode_seed = vec![0_u8];
         decode_seed.extend(&bytes);
         put("decode", &format!("seed-{n:04}"), &decode_seed);
+        // Small files only, changed in the first frame's page header: the
+        // fuzzer moves the offset and mask from there.
+        if bytes.len() <= MAX_FLIP_SEED {
+            let mut flip_seed = 104_u16.to_be_bytes().to_vec();
+            flip_seed.push(0x01);
+            flip_seed.extend(&bytes);
+            put("flip", &format!("seed-{n:04}"), &flip_seed);
+        }
         if let Some(seed) = index_seed(&bytes) {
             put("index", &format!("seed-{n:04}"), &seed);
         }

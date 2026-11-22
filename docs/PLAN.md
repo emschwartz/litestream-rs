@@ -194,13 +194,4 @@ Out of scope for this repository. An application that adopts the library provide
 
 ## 8. Decisions
 
-| # | Decision | Outcome |
-|---|---|---|
-| D1 | Own repository or a crate in the application's workspace | **Decided: own repository.** Its own CI matrix (Go binaries, fuzz, Linux power-loss tests), no application dependency, usable by others |
-| D2 | Track rolling checksums in Rust-written files | **Decided: not until after cutover.** v1 writes `NoChecksum` as Go does. Go's level compactor forces `NoChecksum` on its output while copying the last input's post-apply checksum (compactor.go:165 at 041a8c3), so a tracked last input fails with "post-apply checksum not allowed" (read in code, not run), and Go restore reads tracked chains only from v0.5.18. Tracking would break rollback to Go. Turn it on once Go is no longer the fallback writer. With the page checksum table, tracking needs no prior page content and no extra scan, so rollback is the only remaining reason to wait |
-| D3 | Adopt the existing prefixes or start new ones | **Decided: adopt**, so tooling, the VFS and the retention window carry over |
-| D4 | Local staging layout | **Decided: Go's meta-directory layout.** Requirement: switching between Go and Rust in either direction, at any moment, is a restart (phase 3 alternation test) |
-| D5 | Function length limit | **Decided: start at 70 lines** (TigerStyle), with an `#[expect(…, reason)]` escape, and a checkpoint at phase 1 exit |
-| D6 | How far v1 departs from Go | **Decided (owner, 2026-11-20): v1 copies Go's behaviour unless a better behaviour is obvious, and adds no file, header, metadata or object Go does not speak.** Correctness checks that read more (verify before use, gap errors, the compare of the whole newest staged file, the boot read-back) stay, since they change nothing Go sees. Improvements that need new state are parked in `docs/proposals/beyond-go.md` and its issues |
-| D7 | When replication stops | **Decided (owner, 2026-11-20): as Go, keep trying.** Every persistent failure retries with Go's capped backoff (5 minutes) and shows as a typed degraded state in `health()` and events, scoped to the task that failed. The one default stop is another writer on the prefix (uploads and maintenance stop; continuing would interleave two databases into one history and delete the other writer's files). Each cause's response (keep trying or stop) is a config option, so an operator who prefers stopping can choose it. Phase 3 task 10 |
-
+Moved to [decisions.md](decisions.md), which keeps the ids D1 to D7 and logs every trade-off since, with the options, the cost accepted and what would reopen each one.

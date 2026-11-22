@@ -155,6 +155,11 @@ policy_is!(
     persistent(PersistentCause::WalUnlinked)
 );
 policy_is!(
+    wal_sync_failed_is_persistent,
+    Fault::WalSyncFailed,
+    persistent(PersistentCause::WalSyncFailed)
+);
+policy_is!(
     shutdown_deadline_stops,
     Fault::ShutdownDeadline,
     Policy::Shutdown
@@ -199,6 +204,7 @@ fn every_fault_has_a_named_policy_test() {
         | Fault::WalCorruptBelowCommitted
         | Fault::WalTruncatedBelowCommitted
         | Fault::WalUnlinked
+        | Fault::WalSyncFailed
         | Fault::DatabasePageMismatch { .. }
         | Fault::ShutdownDeadline
         | Fault::Bug(_) => true,
@@ -210,7 +216,7 @@ fn page_two() -> PageNo {
     PageNo::new(2, PageSize::MIN).unwrap()
 }
 
-fn every_persistent_cause() -> [PersistentCause; 11] {
+fn every_persistent_cause() -> [PersistentCause; 12] {
     [
         PersistentCause::Credentials,
         PersistentCause::StoreRefused,
@@ -220,6 +226,7 @@ fn every_persistent_cause() -> [PersistentCause; 11] {
         PersistentCause::WalCorrupt,
         PersistentCause::WalTruncated,
         PersistentCause::WalUnlinked,
+        PersistentCause::WalSyncFailed,
         PersistentCause::PageSizeChanged {
             was: PageSize::MIN,
             now: ps(),
@@ -241,9 +248,12 @@ fn every_persistent_cause_is_listed() {
         | PersistentCause::WalCorrupt
         | PersistentCause::WalTruncated
         | PersistentCause::WalUnlinked
+        | PersistentCause::WalSyncFailed
         | PersistentCause::PageSizeChanged { .. }
         | PersistentCause::DatabasePageMismatch { .. }
         | PersistentCause::Bug => true,
+        // Not configurable: `every_retried_fault_stalls_and_no_stall_stops` covers it.
+        PersistentCause::Stalled(_) => false,
     };
     assert!(every_persistent_cause().into_iter().all(listed));
 }
@@ -286,8 +296,10 @@ fn keeping_trying_rebuilds_where_the_state_cannot_be_trusted() {
             | PersistentCause::WalCorrupt
             | PersistentCause::WalTruncated
             | PersistentCause::WalUnlinked
+            | PersistentCause::WalSyncFailed
             | PersistentCause::PageSizeChanged { .. }
-            | PersistentCause::DatabasePageMismatch { .. } => Action::Retry,
+            | PersistentCause::DatabasePageMismatch { .. }
+            | PersistentCause::Stalled(_) => Action::Retry,
         };
         assert_eq!(all.action(cause), want, "{cause:?}");
     }
@@ -309,11 +321,13 @@ fn each_field_names_one_cause() {
             PersistentCause::WalCorrupt => one.wal_corrupt = Response::Stop,
             PersistentCause::WalTruncated => one.wal_truncated = Response::Stop,
             PersistentCause::WalUnlinked => one.wal_unlinked = Response::Stop,
+            PersistentCause::WalSyncFailed => one.wal_sync_failed = Response::Stop,
             PersistentCause::PageSizeChanged { .. } => one.page_size_changed = Response::Stop,
             PersistentCause::DatabasePageMismatch { .. } => {
                 one.database_page_mismatch = Response::Stop;
             }
             PersistentCause::Bug => one.bug = Response::Stop,
+            PersistentCause::Stalled(_) => {}
         }
         for other in every_persistent_cause() {
             let flipped = Responses::GO_LIKE.stops(other) != one.stops(other);
@@ -325,9 +339,70 @@ fn each_field_names_one_cause() {
 #[test]
 fn a_persistent_cause_and_its_stop_cause_round_trip() {
     for cause in every_persistent_cause() {
-        assert_eq!(PersistentCause::of(StopCause::from(cause)), Some(cause));
+        assert_eq!(cause.stop().and_then(PersistentCause::of), Some(cause));
     }
     assert_eq!(PersistentCause::of(StopCause::Shutdown), None);
+}
+
+/// Every fault, pinned by the match in [`every_fault_has_a_named_policy_test`]'s spirit: the
+/// array's length breaks when a variant is added.
+fn every_fault() -> [Fault; 29] {
+    [
+        Fault::StoreTransient,
+        Fault::StoreThrottled { retry_after: None },
+        Fault::StoreAuth,
+        Fault::RemoteObjectMissing,
+        Fault::UploadAmbiguous,
+        Fault::UploadChecksumMismatch,
+        Fault::StoreRefused,
+        Fault::RemoteCorrupt,
+        Fault::RemoteAheadOfLocal,
+        Fault::RemoteRegressed,
+        Fault::StagedLost,
+        Fault::LocalDiskFull,
+        Fault::LocalIo,
+        Fault::LocalFsyncFailed,
+        Fault::WalSyncFailed,
+        Fault::SqliteBusy,
+        Fault::ReadersHeld,
+        Fault::WalMoved,
+        Fault::WalIndexInconsistent,
+        Fault::WalChangedUnderRead,
+        Fault::NothingToSnapshot,
+        Fault::ReadTxLost,
+        Fault::PageSizeChanged {
+            was: PageSize::MIN,
+            now: ps(),
+        },
+        Fault::WalCorruptBelowCommitted,
+        Fault::WalTruncatedBelowCommitted,
+        Fault::WalUnlinked,
+        Fault::DatabasePageMismatch { pgno: page_two() },
+        Fault::ShutdownDeadline,
+        Fault::Bug(BugSite::PageMap),
+    ]
+}
+
+/// The class rule: a fault that can keep a task from progress ends in a typed degraded
+/// state that health reports. A persistent fault is one at once; a retried fault becomes
+/// a stall after [`STALLED_AFTER`] failures in a row; only the end of a drain stops instead.
+/// No retried fault is exempt: each can recur for as long as its cause lasts.
+#[test]
+fn every_retried_fault_stalls_and_no_stall_stops() {
+    for fault in every_fault() {
+        let ends_degraded = match policy(&fault) {
+            Policy::Retry(_) => Stall::of(&fault).is_some(),
+            Policy::Persistent(_) => Stall::of(&fault).is_none(),
+            Policy::Shutdown => fault == Fault::ShutdownDeadline,
+        };
+        assert!(ends_degraded, "{fault:?}");
+        if let Some(stall) = Stall::of(&fault) {
+            let cause = PersistentCause::Stalled(stall);
+            assert!(!Responses::STRICT.stops(cause), "{fault:?}");
+            assert_eq!(Responses::STRICT.action(cause), Action::Retry);
+            assert_eq!(cause.stop(), None);
+        }
+    }
 }
 
 fn store_fault(err: &StoreError) -> Fault {
@@ -700,7 +775,7 @@ fn from_source_maps_every_variant() {
     let cases = [
         (SourceError::Io(ErrorKind::BrokenPipe), Fault::LocalIo),
         (SourceError::DiskFull, Fault::LocalDiskFull),
-        (SourceError::FsyncFailed, Fault::LocalFsyncFailed),
+        (SourceError::FsyncFailed, Fault::WalSyncFailed),
         (SourceError::Busy, Fault::SqliteBusy),
         (SourceError::ReadersHeld, Fault::ReadersHeld),
         (SourceError::Short { pgno: page() }, Fault::LocalIo),

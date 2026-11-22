@@ -8,6 +8,7 @@ use lsr_wal::Salts;
 
 use super::*;
 use crate::conformance::block_on;
+use crate::env::FakeClock;
 use crate::layout::CreatedAt;
 use crate::layout::{FileKey, Level};
 use crate::mem::MemStore;
@@ -218,6 +219,7 @@ impl Rig {
             ck: &mut self.ck,
             staging: &self.staging,
             remote: &self.remote,
+            clock: &FakeClock::new(ts(now)),
         };
         block_on(actor.tick(env, ts(now)))
     }
@@ -614,6 +616,51 @@ fn with_staging_gone_the_replica_names_the_page_size() {
     assert_eq!(everything(&rig), before);
 }
 
+/// With staging gone and the replica's newest transaction held only above level 0, the boot
+/// reads the page size from the replica's newest file. When that header did not decode (a
+/// rotten object, or one read a proxy changed), the boot took no page size at all and
+/// snapshotted the new size onto the prefix, where every restore past it then stops. Found by
+/// a simulator hold whose reads lie (seed 0x13): any other file's header names the prefix's
+/// page size, and with none readable the boot must not guess.
+#[test]
+fn a_newest_replica_header_that_does_not_decode_still_names_the_page_size() {
+    let (mut rig, mut actor) = caught_up();
+    rig.commit(2);
+    rig.follow(&mut actor, T0 + 10, 50);
+    // Every file ending at the newest transaction is junk, and its level-0 file is gone.
+    let (_, files) = everything(&rig);
+    let newest = files.iter().map(|f| f.key.range().max()).max().unwrap();
+    block_on(async {
+        for file in files.iter().filter(|f| f.key.range().max() == newest) {
+            rig.remote.inner.delete(&[file.key]).await.unwrap();
+            if file.key.level() == Level::ZERO {
+                continue;
+            }
+            let mut up = rig
+                .remote
+                .inner
+                .begin_upload(&file.key, ts(T0))
+                .await
+                .unwrap();
+            up.write(&[0x5a; 200]).await.unwrap();
+            up.commit().await.unwrap();
+        }
+    });
+    rig.staging = Counting::default();
+    let before = everything(&rig);
+    resize(&mut rig, big());
+    let mut actor = Actor::new(cfg());
+    let ticks = rig.follow(&mut actor, T0 + 20, 50);
+    assert!(
+        ticks
+            .iter()
+            .all(|tick| !matches!(event(tick), Some(Event::Uploaded(_)))),
+        "{ticks:?}"
+    );
+    assert_eq!(ticks.last(), Some(&page_size_changed()), "{ticks:?}");
+    assert_eq!(everything(&rig).1, before.1, "nothing reaches the replica");
+}
+
 /// Staging holds an older file at the new page size (a staging backup put
 /// back) while the replica's newest transaction is later and at the old one.
 /// The boot judged the page size by the staged file alone and snapshotted the
@@ -683,6 +730,53 @@ fn a_failed_drop_after_a_divergence_uploads_nothing_built_on_it() {
         panic!("{ticks:?}");
     };
     assert!(resnapshot < put_three, "{ticks:?}");
+}
+
+/// Expected to fail until the engine keeps a durable record (BOOT-21, BOOT-22; D9 in
+/// `docs/BEHAVIOR.md`). A running engine whose ambiguous commit makes it list the replica finds
+/// another writer's file above its own newest staged file and stops on `OtherWriter`, the one
+/// stop the default responses make. A restart forgets the stop: the new boot takes the other
+/// writer's file as history it is behind (`behind_remote`), snapshots after it and uploads, so
+/// the replica's one history interleaves two databases. The restart must stop again, or refuse.
+#[test]
+#[ignore = "known wrong, BOOT-21 and BOOT-22: an OtherWriter stop is forgotten by a restart; needs a durable engine-owned record"]
+fn a_restart_after_an_other_writer_stop_stops_again() {
+    let (mut other, mut writer) = caught_up();
+    other.commit(9);
+    other.follow(&mut writer, T0 + 10, 20);
+    other.commit(10);
+    other.follow(&mut writer, T0 + 20, 20);
+    let three = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(3).unwrap()));
+    let theirs = block_on(other.remote.inner.read(&three, 0, ReadLen::CHUNK)).unwrap();
+    let (mut rig, mut actor) = caught_up();
+    block_on(async {
+        let mut up = rig.remote.inner.begin_upload(&three, ts(T0)).await.unwrap();
+        up.write(&theirs).await.unwrap();
+        up.commit().await.unwrap();
+    });
+    rig.remote
+        .inner
+        .inject_failure_after_publish(transient(StoreOp::Upload));
+    rig.commit(2);
+    let ticks = rig.follow(&mut actor, T0 + 30, 60);
+    assert_eq!(
+        ticks.last(),
+        Some(&Tick::Stopped(StopCause::OtherWriter)),
+        "the running engine stops first: {ticks:?}"
+    );
+    let before = everything(&rig).1;
+    let mut restarted = Actor::new(cfg());
+    let ticks = rig.follow(&mut restarted, T0 + 40, 60);
+    assert_eq!(
+        ticks.last(),
+        Some(&Tick::Stopped(StopCause::OtherWriter)),
+        "{ticks:?}"
+    );
+    assert_eq!(
+        everything(&rig).1,
+        before,
+        "nothing is put over the other writer"
+    );
 }
 
 #[test]
@@ -1696,6 +1790,7 @@ mod newest_replica_file;
 mod no_wal_yet;
 mod pages;
 mod rejected_snapshot;
+mod stamp;
 mod tasks;
 mod wal_barrier;
 mod witness;

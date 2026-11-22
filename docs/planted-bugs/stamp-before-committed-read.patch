@@ -1,0 +1,11 @@
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -1080,7 +1080,7 @@
+             Err(verdict) => return Ok(verdict),
+         };
+         // After the committed read: see `Env::clock`.
+-        let stamp = env.clock.now().max(now);
++        let stamp = now;
+         let size = reader.header().page_size();
+         if let Some(was) = self.engine.page_size.filter(|was| *was != size) {
+             return Err(Fault::PageSizeChanged { was, now: size });

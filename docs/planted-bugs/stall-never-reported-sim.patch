@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/fault.rs b/crates/core/src/fault.rs
+index 3cb61bb..1a5cd7a 100644
+--- a/crates/core/src/fault.rs
++++ b/crates/core/src/fault.rs
+@@ -388,7 +388,7 @@ pub enum PersistentCause {
+ /// How many failures in a row of a retried fault, on one task, make the task degraded
+ /// ([`PersistentCause::Stalled`]). With the doubling wait from Go's one-second interval the
+ /// eighth failure comes about two minutes after the first.
+-pub const STALLED_AFTER: NonZeroU32 = match NonZeroU32::new(8) {
++pub const STALLED_AFTER: NonZeroU32 = match NonZeroU32::new(8000) {
+     Some(n) => n,
+     None => NonZeroU32::MIN,
+ };

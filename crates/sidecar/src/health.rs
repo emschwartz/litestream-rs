@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use lsr_replica::{
     AppNotice, DegradedCause, Gone, Health, Phase, Replicator, SnapshotCause, SnapshotCauseKind,
-    StopCause, Task, Timestamp,
+    Stall, StopCause, Task, Timestamp,
 };
 
 use crate::json::string as json_string;
@@ -171,9 +171,34 @@ pub(crate) const fn cause_name(cause: DegradedCause) -> &'static str {
         DegradedCause::WalCorrupt => "wal_corrupt",
         DegradedCause::WalTruncated => "wal_truncated",
         DegradedCause::WalUnlinked => "wal_unlinked",
+        DegradedCause::WalSyncFailed => "wal_sync_failed",
         DegradedCause::PageSizeChanged { .. } => "page_size_changed",
         DegradedCause::DatabasePageMismatch { .. } => "database_page_mismatch",
         DegradedCause::Bug => "bug",
+        DegradedCause::Stalled(stall) => stall_name(stall),
+    }
+}
+
+/// A stalled task's cause: the retried fault that kept failing.
+#[must_use]
+pub(crate) const fn stall_name(stall: Stall) -> &'static str {
+    match stall {
+        Stall::StoreTransient => "store_transient",
+        Stall::StoreThrottled => "store_throttled",
+        Stall::RemoteObjectMissing => "remote_object_missing",
+        Stall::UploadAmbiguous => "upload_ambiguous",
+        Stall::UploadChecksumMismatch => "upload_checksum_mismatch",
+        Stall::StagedLost => "staged_lost",
+        Stall::LocalDiskFull => "local_disk_full",
+        Stall::LocalIo => "local_io",
+        Stall::LocalFsyncFailed => "local_fsync_failed",
+        Stall::SqliteBusy => "sqlite_busy",
+        Stall::ReadersHeld => "readers_held",
+        Stall::WalMoved => "wal_moved",
+        Stall::WalIndexInconsistent => "wal_index_inconsistent",
+        Stall::WalChangedUnderRead => "wal_changed_under_read",
+        Stall::NothingToSnapshot => "nothing_to_snapshot",
+        Stall::ReadTxLost => "read_tx_lost",
     }
 }
 
@@ -207,6 +232,7 @@ pub(crate) const fn snapshot_kind_name(kind: SnapshotCauseKind) -> &'static str 
         SnapshotCauseKind::CheckpointBoundary => "checkpoint_boundary",
         SnapshotCauseKind::OperatorRequested => "operator_requested",
         SnapshotCauseKind::StagedUnverified => "staged_unverified",
+        SnapshotCauseKind::WalSyncFailed => "wal_sync_failed",
     }
 }
 

@@ -38,6 +38,7 @@ use std::time::Duration;
 use lsr_ltx::Timestamp;
 use lsr_wal::{OpenError, WalHeader, WalReader};
 
+use crate::env::Clock;
 use crate::fault::{BugSite, Fault, Next, SnapshotCause};
 use crate::layout::FileInfo;
 use crate::pages::PageChecksumTable;
@@ -436,7 +437,8 @@ struct Protocol<'a, W, P, C, L> {
     ck: &'a mut C,
     staging: &'a L,
     cfg: SyncConfig,
-    now: Timestamp,
+    /// Read after each step's committed read for that step's file.
+    clock: &'a dyn Clock,
     good: Reached,
     files: Vec<FileInfo>,
     witnesses: Vec<Witnessed>,
@@ -478,6 +480,9 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_, 
     async fn step(&mut self, step: Step) -> Result<(), Fault> {
         let mut reader = self.reader()?;
         let committed = self.wal.committed().map_err(Fault::from_source)?;
+        // After the committed read, so the file's created-at time follows every
+        // transaction it carries (see `Env::clock`).
+        let stamp = self.clock.now();
         wal_barrier(&mut *self.wal, &committed)?;
         let cfg = SyncConfig {
             cap: None,
@@ -491,7 +496,7 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_, 
             &mut *self.pages,
             self.staging,
             &cfg,
-            self.now,
+            stamp,
         )
         .await
         .map_err(|failed| failed.fault)?;
@@ -608,6 +613,8 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_, 
 /// and follows a restarted WAL; a TRUNCATE checkpoints and, when the WAL
 /// changed, snapshots under the write lock. Every barrier or lock taken is
 /// released first on a fault, and a failed release never replaces that fault.
+/// Each staged file's created-at time is read from `clock` after that step's
+/// committed read (`Env::clock`).
 ///
 /// # Errors
 /// [`CheckpointFailed`], with what the completed steps staged and the last
@@ -629,7 +636,7 @@ pub async fn checkpoint<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectS
     ck: &mut C,
     staging: &L,
     cfg: &SyncConfig,
-    now: Timestamp,
+    clock: &dyn Clock,
 ) -> Result<Checkpointed, CheckpointFailed> {
     let mut protocol = Protocol {
         wal,
@@ -638,7 +645,7 @@ pub async fn checkpoint<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectS
         ck,
         staging,
         cfg: *cfg,
-        now,
+        clock,
         good: Reached::Through(proof),
         files: Vec::new(),
         witnesses: Vec::new(),

@@ -1,0 +1,14 @@
+diff --git a/crates/core/src/restore.rs b/crates/core/src/restore.rs
+index 389c55f..b50a8e2 100644
+--- a/crates/core/src/restore.rs
++++ b/crates/core/src/restore.rs
+@@ -559,7 +559,8 @@ async fn attempt_once<S: ObjectStore, K: DatabaseSink>(
+         }
+     };
+     let empty = inventory.newest().is_none();
+-    if probe
++    if false
++        && probe
+         && empty
+         && let Some(found) = listed_past(store, inventory).await?
+     {
