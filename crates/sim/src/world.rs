@@ -21,6 +21,7 @@ use lsr_ltx::{PageNo, PageSize, Timestamp, Txid};
 use lsr_wal::{Salts, WalOffset};
 
 use crate::exec::{Polls, RunEnd, run_until};
+use crate::history::History;
 use crate::model::{CommitId, Model, PageImage, Recovery};
 use crate::oracle::{Acked, Checked, Ground, Violation, Windows, check_with};
 use crate::seed::Seed;
@@ -234,6 +235,8 @@ pub struct World {
     pub model: Model,
     /// What the engine has acknowledged.
     pub acked: Acked,
+    /// The commit log and the content judge (`lsr-history`).
+    pub history: History,
     /// Transactions a bucket rollback took from the replica for good.
     pub lost: BTreeSet<Txid>,
     /// Power losses whose recovery brought back a commit an earlier loss took.
@@ -287,6 +290,13 @@ impl World {
         )
         .corrupting_through(remote_raw.clone());
         let initial = PageImage::from_bytes(page_size, &sqlite.image());
+        let model = Model::new(initial);
+        let history = History::new(
+            &model,
+            lsr_core::Clock::now(clock.as_ref()),
+            seed.stream(40),
+            lsr_history::AheadMode::Count,
+        );
         Self {
             seed,
             sqlite,
@@ -303,8 +313,9 @@ impl World {
             staging_recorder: staging_recorder_log,
             remote_recorder: remote_recorder_log,
             volatile: volatile_handle,
-            model: Model::new(initial),
+            model,
             acked: Acked::new(),
+            history,
             lost: BTreeSet::new(),
             resurrected: 0,
             foreign: Vec::new(),
@@ -330,10 +341,17 @@ impl World {
         if db_size > before {
             written.extend(self.re_added(pages, before, db_size));
         }
-        Some(
-            self.model
-                .commit(&written, db_size, app, self.remote_recorder.len()),
-        )
+        let id = self
+            .model
+            .commit(&written, db_size, app, self.remote_recorder.len());
+        self.log_history();
+        Some(id)
+    }
+
+    /// Logs the model's new commits in the history, at the clock's time.
+    fn log_history(&mut self) {
+        let now = lsr_core::Clock::now(self.clock.as_ref());
+        self.history.log_commits(&self.model, now);
     }
 
     /// Arms a commit of `pages`, leaving `db_size` pages, that the app makes
@@ -360,6 +378,7 @@ impl World {
         let id = self
             .model
             .commit(&done.pages, done.db_size, done.app, remote_at);
+        self.log_history();
         Some(CommittedInTick {
             id,
             staged_from,
@@ -412,10 +431,11 @@ impl World {
             .map(|one| (one, first))
             .into_iter()
             .collect();
-        Some(
-            self.model
-                .commit(&pages, db_size, app, self.remote_recorder.len()),
-        )
+        let id = self
+            .model
+            .commit(&pages, db_size, app, self.remote_recorder.len());
+        self.log_history();
+        Some(id)
     }
 
     /// VACUUM into pages of `new` with every connection closed: the whole
@@ -430,7 +450,9 @@ impl World {
             salts: self.sqlite.salts(),
             end: WalOffset::from_frame_index(0, new),
         };
-        Some(self.model.vacuum(image, app, self.remote_recorder.len()))
+        let id = self.model.vacuum(image, app, self.remote_recorder.len());
+        self.log_history();
+        Some(id)
     }
 
     /// Records a commit the engine made itself: a checkpoint's bump of page 1
@@ -455,6 +477,7 @@ impl World {
         if !known {
             self.model
                 .commit(&[], self.sqlite.db_size(), AppCommit { salts, end }, at);
+            self.log_history();
         }
     }
 
@@ -517,9 +540,12 @@ impl World {
                         .power_loss(&self.staging_raw, &self.crash_entropy),
                 )
                 .unwrap_or_default();
+                self.log_history();
                 self.model
                     .on_power_loss(self.sqlite.salts(), self.sqlite.mx_frame());
                 self.adopt_recovered();
+                let now = lsr_core::Clock::now(self.clock.as_ref());
+                self.history.power_loss(&self.model, now);
                 self.acked.note_rewound();
                 lost
             }
@@ -852,6 +878,7 @@ impl World {
             end: WalOffset::from_frame_index(self.sqlite.mx_frame(), page_size),
         };
         self.model.vacuum(image, app, self.remote_recorder.len());
+        self.log_history();
     }
 
     /// The rules' database after a power loss is SQLite's own recovery of the
