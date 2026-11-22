@@ -2,8 +2,10 @@
 
 Status: the storage protocol is specified, machine-checked, and implemented. The engine reads the
 journal at boot and reports what it found (`Actor::journal`, `docs/BEHAVIOR.md` BOOT-25 to BOOT-29),
-and records one fact in it: the unproven-WAL debt after a failed WAL fsync, written at the end of the
-tick that changes it and restored at boot (`crates/core/src/actor/unproven.rs`, RUN-3, decision D100).
+and records two facts in it: the unproven-WAL debt after a failed WAL fsync, written at the end of the
+tick that changes it and restored at boot (`crates/core/src/actor/unproven.rs`, RUN-3, decision D100),
+and a boot's verdict that the database file was ahead of its WAL, kept for seven days
+(`crates/core/src/actor/ahead.rs`, BOOT-31, decision D103).
 The replica thread, the simulator and the real-SQLite rig each lend it.
 
 The model is `lsr_spec::journal` (`crates/spec/src/journal/`). It shares no code with the

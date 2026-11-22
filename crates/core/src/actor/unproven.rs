@@ -40,7 +40,11 @@
 //! - The page cache losing the pages before the TRUNCATE copies them (a reboot, a power loss,
 //!   or eviction under memory pressure). SQLite then backfills whatever the disk holds. Nothing
 //!   was staged from the lost frames, so the replica is not ahead of the database, but the
-//!   database may be damaged.
+//!   database may be damaged. A checkpoint that copied some of those frames first (the
+//!   application's, another process's, or a TRUNCATE that went busy behind a reader after
+//!   copying, which SQLite does before it reports busy) leaves the database file ahead of its
+//!   WAL; the next boot finds it before its own TRUNCATE (`super::ahead`, `docs/decisions.md`
+//!   D103), and holding the read mark back cannot prevent it (D104).
 //! - A failed writeback this process's sync never reports: the kernel reports it to the
 //!   descriptors open when it happened, and to a new one only if no one has seen it yet.
 //! - A database page an earlier partial checkpoint wrote (it advances `nBackfill` without
