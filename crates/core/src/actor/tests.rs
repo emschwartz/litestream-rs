@@ -637,6 +637,54 @@ fn a_replica_ahead_of_staging_names_the_page_size() {
     assert_eq!(everything(&rig).1, before.1, "nothing reaches the replica");
 }
 
+/// An upload's commit is ambiguous, and before the listing that follows,
+/// another writer's verifying object replaces transaction 2 on the replica.
+/// The listing finds it unlike the staged file: the staged files from 2 on
+/// must go and the next file is a snapshot above 2. When that delete failed,
+/// the uploader had already taken 2 as confirmed and uploaded the staged 3,
+/// built on the staged 2, onto the other object (seed 0xd79).
+#[test]
+fn a_failed_drop_after_a_divergence_uploads_nothing_built_on_it() {
+    let (mut other, mut writer) = caught_up();
+    other.commit(9);
+    other.follow(&mut writer, T0 + 10, 20);
+    let two = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(2).unwrap()));
+    let theirs = block_on(other.remote.inner.read(&two, 0, ReadLen::CHUNK)).unwrap();
+    let (mut rig, mut actor) = caught_up();
+    rig.remote
+        .inner
+        .inject_failure_after_publish(transient(StoreOp::Upload));
+    rig.commit(2);
+    let mut now = T0 + 10;
+    for _ in 0..20 {
+        let tick = rig.tick(&mut actor, now);
+        if let Some(Event::Retrying { until, .. }) = event(&tick) {
+            now = until.unix_millis();
+            break;
+        }
+    }
+    block_on(async {
+        let mut up = rig.remote.inner.begin_upload(&two, ts(T0)).await.unwrap();
+        up.write(&theirs).await.unwrap();
+        up.commit().await.unwrap();
+    });
+    rig.staging
+        .inner
+        .inject_failure(StoreOp::Delete, transient(StoreOp::Delete));
+    rig.commit(3);
+    let ticks = rig.follow(&mut actor, now, 60);
+    let put_three = ticks.iter().position(|tick| {
+        matches!(event(tick), Some(Event::Uploaded(Did::Put(info))) if info.key.range().max() == Txid::new(3).unwrap())
+    });
+    let resnapshot = ticks
+        .iter()
+        .position(|tick| matches!(event(tick), Some(Event::Resnapshot(_))));
+    let (Some(put_three), Some(resnapshot)) = (put_three, resnapshot) else {
+        panic!("{ticks:?}");
+    };
+    assert!(resnapshot < put_three, "{ticks:?}");
+}
+
 #[test]
 fn an_empty_replica_takes_any_page_size() {
     let mut rig = Rig::new();
