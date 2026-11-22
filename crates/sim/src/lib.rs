@@ -12,7 +12,9 @@
 //! all of it for one run; [`seed`] names a run. [`generate`] draws a history from
 //! a seed, [`resources`] holds the resource bounds, [`liveness`] judges each
 //! snapshot against the faults that could justify it, and [`run`] applies a
-//! history to the actor, judges it, and shrinks a failure.
+//! history to the actor, judges it, and shrinks a failure. [`staging`] puts the real directory
+//! store (`lsr-store-fs`) under the staging wrappers in a share of runs, on [`memfs`], an
+//! in-memory filesystem under the same crash law, so a power loss acts on the store's own syncs.
 //!
 //! The actor (core's `actor`) plugs in through one seam, a future: [`run`]
 //! builds the actor from [`World`]'s handles and passes each tick's future to
@@ -27,6 +29,7 @@ pub mod exec;
 pub mod generate;
 pub mod history;
 pub mod liveness;
+pub mod memfs;
 pub mod model;
 pub mod oracle;
 pub mod reach;
@@ -36,6 +39,7 @@ pub mod run;
 pub mod scenario;
 pub mod seed;
 pub mod sqlite;
+pub mod staging;
 pub mod store;
 #[cfg(test)]
 mod testkit;

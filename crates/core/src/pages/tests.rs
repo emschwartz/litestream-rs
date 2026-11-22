@@ -125,7 +125,7 @@ fn only_the_checkpoint_boundary_and_an_operator_keep_the_table_at_a_snapshot() {
             },
             true,
         ),
-        (SnapshotCause::CheckpointBoundary, false),
+        (SnapshotCause::CheckpointBoundary, true),
         (SnapshotCause::OperatorRequested, false),
     ];
     for (cause, clears) in causes {
