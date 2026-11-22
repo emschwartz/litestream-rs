@@ -45,7 +45,10 @@
 //! anchor alone; a staging fault four steps later forced a snapshot over it.
 
 use lsr_sim::domain::{KnownWrong, known_in};
-use lsr_sim::{AfterRestart, Judges, Opts, Seed, Weights, history, replay_line, run_with};
+use lsr_sim::run::run_ops;
+use lsr_sim::{
+    AfterRestart, ClockLaw, Judges, Opts, Seed, Weights, history, replay_line, run_with,
+};
 
 const STEPS: u32 = 300;
 
@@ -180,40 +183,20 @@ fn seeds_to_first_failure() {
 /// Found unaided by the swarm, with nothing written for it: under the planted bug "the boot
 /// anchor accepts any tail in the live generation" (`docs/planted-bugs/anchor-any-tail.patch`),
 /// seed 44's drawn mix, 8 steps in, restores a transaction to pages no commit had. (Found on
-/// the merged head with the boot witness; seed 15 found it before the witness landed.) Kept as
-/// the operations and settings that mix drew then: replayed by seed, the history moved when
-/// the generator gained the scheduled verify.
+/// the merged head with the boot witness; seed 15 found it before the witness landed.) The
+/// history is recorded and the settings its mix drew are written out, so no change to the
+/// generator or the mix gives it another run.
 #[test]
 fn swarm_seed_44_restores_only_committed_states() {
-    use lsr_sim::generate::{MetaOp, WalOp};
-    use lsr_sim::{ClockLaw, Op};
-    let ops = [
-        Op::Meta(MetaOp::ForgeNewest),
-        Op::Tick,
-        Op::Spill,
-        Op::WalDamage {
-            op: WalOp::RegrowWithoutCommitMarks(8_063_039_911_997_408_971),
-            ticks: 2,
-        },
-        Op::Shutdown,
-        Op::Commit {
-            pages: 4,
-            grow: false,
-        },
-        Op::WalDamage {
-            op: WalOp::RegrowSameSalts(13_577_244_702_264_426_995),
-            ticks: 7,
-        },
-        Op::Restore,
-    ];
     let opts = Opts {
         drawn: true,
+        block_crash_law: false,
         lying_wal_sync: true,
         after_restart: AfterRestart::Busy,
         clock_law: ClockLaw::EachRead,
         ..Opts::default()
     };
-    if let Err(failure) = lsr_sim::run::run_ops(Seed::new(44), &ops, &opts) {
+    if let Err(failure) = run_ops(Seed::new(44), crate::histories::seed_0x2c::OPS, &opts) {
         panic!("{failure}");
     }
 }
@@ -246,10 +229,16 @@ fn swarm_seed_0xf488c_takes_no_commit_before_a_truncate_for_damage() {
 /// its content then, not the node the redo rebuilt with the same content later.
 #[test]
 fn swarm_seed_0x753_a_redo_that_rebuilds_the_restored_state_is_not_a_loss() {
-    let seed = Seed::new(0x753);
-    let mut weights = Weights::swarm(seed);
-    weights.block_crash_law = true;
-    if let Err(failure) = run_with(seed, 42, &weights, &Opts::default()) {
+    let opts = Opts {
+        drawn: true,
+        block_crash_law: true,
+        lying_wal_sync: true,
+        after_restart: AfterRestart::Redo,
+        clock_law: ClockLaw::EachRead,
+        staging_fs: false,
+        ..Opts::default()
+    };
+    if let Err(failure) = run_ops(Seed::new(0x753), crate::histories::seed_0x753::OPS, &opts) {
         panic!("{}", failure.message(failure.steps));
     }
 }
