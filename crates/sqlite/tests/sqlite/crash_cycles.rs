@@ -15,8 +15,10 @@
 //! each. A restored database must equal one of those states (a commit SQLite acknowledged, or
 //! one whose statement the loss interrupted, which SQLite may have made durable). After a settle
 //! with the power on, the restore must equal the database itself. SQLite's recovery must also
-//! leave one of those states, and the simulator's oracle judges every transaction on the
-//! replica at the end of a run.
+//! leave one of those states. At the end of a run, every transaction a level-0 file on the
+//! replica ends at must restore to one of them (added after the first campaign, in which only
+//! the simulator's oracle, judging the same restores against its own model, flagged runs), and
+//! then the simulator's oracle judges every transaction.
 //!
 //! The law, the weights and the budget below were frozen before the first run against an engine
 //! with a known defect (see the commit that added this file). Change them only in a commit of
@@ -128,6 +130,8 @@ fn digest(rows: &Rows) -> (u64, u64) {
 pub enum Anomaly {
     /// The restored database is no state the application committed.
     RestoredUnknown,
+    /// Restoring the replica at this transaction gives no state the application committed.
+    TxidUnknown(String),
     /// After a settle with the power on, the restore is not the database.
     RestoredNotLatest,
     /// The restored database fails `integrity_check`, or does not open.
@@ -311,7 +315,7 @@ impl Run {
         };
         match done {
             Err(_) if !self.rig.vfs().powered() => Ok(()),
-            Err(err) => Err(Anomaly::Engine(format!("{step:?}: {err}"))),
+            Err(err) => Err(self.engine(&format!("{step:?}"), &err)),
             Ok(()) => Ok(()),
         }
     }
@@ -328,6 +332,31 @@ impl Run {
             }
             other => other,
         }
+    }
+
+    /// An engine anomaly, with the last faults and the last ticks that were not idle.
+    fn engine(&self, what: &str, err: &RigError) -> Anomaly {
+        let faults = self.rig.faults();
+        let tail = &faults[faults.len().saturating_sub(3)..];
+        let ticks: Vec<_> = self
+            .rig
+            .ticks()
+            .iter()
+            .rev()
+            .filter(|tick| {
+                !matches!(
+                    tick,
+                    lsr_core::Tick::Ran {
+                        event: lsr_core::Event::Idle,
+                        ..
+                    }
+                )
+            })
+            .take(3)
+            .collect();
+        Anomaly::Engine(format!(
+            "{what}: {err}; last faults {tail:?}; last busy ticks {ticks:?}"
+        ))
     }
 
     /// Arms the cycle's loss inside a call, or returns `false` for a loss between steps.
@@ -390,15 +419,16 @@ impl Run {
         Ok(())
     }
 
-    /// Restores the replica's latest state into a file and reads it with plain SQLite.
-    fn restore(&self, name: &str) -> Result<Rows, Anomaly> {
+    /// Restores the replica's state at `target` into a file and reads it with plain SQLite.
+    fn restore(&self, name: &str, target: RestoreTarget) -> Result<Rows, Anomaly> {
+        let to = target;
         let target = self.root.join(name);
         drop(std::fs::remove_file(&target));
         let sink = lsr_local::FileSink::create(&target)
             .map_err(|err| Anomaly::RestoredCorrupt(format!("sink: {err}")))?;
         block_on(lsr_core::restore(
             &lsr_store_fs::FsStore::new(self.rig.replica_root()),
-            RestoreTarget::Latest,
+            to,
             sink,
         ))
         .map_err(|err| Anomaly::RestoredCorrupt(format!("restore: {err}")))?;
@@ -416,19 +446,37 @@ impl Run {
     /// The cycle's judgment, after the reboot's settle.
     fn judge(&mut self) -> Result<(), Anomaly> {
         if let Err(err) = self.settle() {
-            let faults = self.rig.faults();
-            let tail = &faults[faults.len().saturating_sub(3)..];
-            let tick = self.rig.ticks().last();
-            return Err(Anomaly::Engine(format!(
-                "settle: {err}; last faults {tail:?}; last tick {tick:?}"
-            )));
+            return Err(self.engine("settle", &err));
         }
-        let restored = self.restore("restored.db")?;
+        let restored = self.restore("restored.db", RestoreTarget::Latest)?;
         if !self.history.knows(&restored) {
             return Err(Anomaly::RestoredUnknown);
         }
         if restored != self.rows {
             return Err(Anomaly::RestoredNotLatest);
+        }
+        Ok(())
+    }
+
+    /// Every transaction a level-0 file on the replica ends at restores to a state the
+    /// application committed.
+    fn judge_every_txid(&self) -> Result<(), (u32, Anomaly)> {
+        let store = lsr_store_fs::FsStore::new(self.rig.replica_root());
+        let inventory = block_on(lsr_core::Inventory::load(&store))
+            .map_err(|err| (CYCLES, Anomaly::RestoredCorrupt(format!("list: {err}"))))?;
+        let txids: BTreeSet<_> = inventory
+            .files()
+            .iter()
+            .filter(|file| file.key.level().get() == 0)
+            .map(|file| file.key.range().max())
+            .collect();
+        for txid in txids {
+            let rows = self
+                .restore("restored-txid.db", RestoreTarget::Txid(txid))
+                .map_err(|anomaly| (CYCLES, anomaly))?;
+            if !self.history.knows(&rows) {
+                return Err((CYCLES, Anomaly::TxidUnknown(format!("{txid:?}"))));
+            }
         }
         Ok(())
     }
@@ -449,6 +497,9 @@ pub fn run(seed: u64, cycles: u32) -> Option<(u32, Anomaly)> {
         if let Err(anomaly) = run.cycle() {
             return Some((cycle, anomaly));
         }
+    }
+    if let Err(found) = run.judge_every_txid() {
+        return Some(found);
     }
     run.rig
         .check()
