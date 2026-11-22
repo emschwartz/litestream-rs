@@ -11,10 +11,6 @@
 //! Page bytes are not compared (the model's pages are not b-tree pages); whether a page read
 //! succeeds is.
 //!
-//! One difference is known, held by a `pin_` test that fails once the model gives SQLite's
-//! answer (then the pin and its carve-out go): a sequence bump while a lock is held. The
-//! property leaves it out. The engine itself releases before it bumps.
-//!
 //! The schema puts tables `t0`..`t3` on pages 2..=5 and this crate's `_litestream_seq` and
 //! `_litestream_lock` on 6 and 7, so an app commit of tables in `mask` writes one frame per
 //! table on both sides.
@@ -77,9 +73,6 @@ mod diff {
     /// One side's memory between steps, to say how salts and the hold moved.
     #[derive(Default)]
     struct Last {
-        /// Leaves out the known difference (module doc): no sequence bump under a lock. The
-        /// pin turns it off.
-        known_out: bool,
         salts: Option<(u32, u32)>,
         epoch: Option<ReadLockHold>,
         held: Vec<Held>,
@@ -180,7 +173,6 @@ mod diff {
                 cp.checkpoint(mode)
                     .map(|run| (run.busy, run.log, run.checkpointed)),
             ),
-            Op::BumpSeq if last.known_out && !last.held.is_empty() => "released first".to_owned(),
             Op::BumpSeq => show(cp.bump_seq()),
             Op::BeginBarrier => {
                 let got = cp.begin_barrier();
@@ -229,7 +221,7 @@ mod diff {
     }
 
     impl Real {
-        fn new(known_out: bool) -> Self {
+        fn new() -> Self {
             let dir = TempDir::new().unwrap();
             let path = dir.path().join("test.db");
             let app = open(&path);
@@ -258,10 +250,7 @@ mod diff {
                 app,
                 reading: [false; OTHERS],
                 sqlite,
-                last: Last {
-                    known_out,
-                    ..Last::default()
-                },
+                last: Last::default(),
             }
         }
 
@@ -335,7 +324,7 @@ mod diff {
     }
 
     impl Sim {
-        fn new(seed: u64, known_out: bool) -> Self {
+        fn new(seed: u64) -> Self {
             let sim = SimSqlite::new(page_size(), PAGES, seed);
             let all: Vec<_> = (1..=PAGES)
                 .map(|n| (PageNo::new(n, page_size()).unwrap(), vec![0; 512]))
@@ -351,10 +340,7 @@ mod diff {
                 sim,
                 readers: [None; OTHERS],
                 fill: 0,
-                last: Last {
-                    known_out,
-                    ..Last::default()
-                },
+                last: Last::default(),
             }
         }
 
@@ -445,9 +431,9 @@ mod diff {
     }
 
     /// Each op's answer from the model and from SQLite, and whether each side's hold moved.
-    fn answers(ops: &[Op], seed: u64, known_out: bool) -> Vec<((String, bool), (String, bool))> {
-        let mut real = Real::new(known_out);
-        let mut sim = Sim::new(seed, known_out);
+    fn answers(ops: &[Op], seed: u64) -> Vec<((String, bool), (String, bool))> {
+        let mut real = Real::new();
+        let mut sim = Sim::new(seed);
         ops.iter()
             .map(|op| {
                 let (got, want) = (sim.apply(*op), real.apply(*op));
@@ -459,32 +445,15 @@ mod diff {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(128))]
 
-        /// Every answer the model gives the engine is the answer this crate gives it, but for
-        /// the known difference the pin below holds.
+        /// Every answer the model gives the engine is the answer this crate gives it.
         #[test]
         fn the_model_answers_the_engine_as_sqlite_does(
             seed in any::<u64>(),
             ops in prop::collection::vec(op(), 1..40),
         ) {
-            for (step, (got, want)) in answers(&ops, seed, true).into_iter().enumerate() {
+            for (step, (got, want)) in answers(&ops, seed).into_iter().enumerate() {
                 prop_assert_eq!(got, want, "model (left), SQLite (right), step {}: {:?}", step, ops[step]);
             }
         }
-    }
-
-    /// The answer at `step` of `ops`, from the model and from SQLite, with nothing left out.
-    fn pinned(ops: &[Op], step: usize) -> (String, String) {
-        let ((got, _), (want, _)) = answers(ops, 0, false).swap_remove(step);
-        (got, want)
-    }
-
-    /// Known difference: a sequence bump while a lock is held runs inside the lock's own
-    /// transaction here (one writer connection), so the lock's release rolls it back; the
-    /// model's pool connection is busy instead. The engine releases first, so only a release
-    /// whose ROLLBACK failed leaves the transaction open for a bump to run in.
-    #[test]
-    fn pin_a_bump_under_a_lock_is_busy_in_the_model_and_runs_inside_it_in_sqlite() {
-        let (model, sqlite) = pinned(&[Op::BeginBarrier, Op::BumpSeq], 1);
-        assert_eq!((model.as_str(), sqlite.as_str()), ("Err(Busy)", "Ok(())"));
     }
 }

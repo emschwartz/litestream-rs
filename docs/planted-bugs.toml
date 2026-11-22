@@ -740,3 +740,16 @@ name = "park-ignores-callers-reading"
 fix = "af15d43"
 package = "lsr-replica"
 tests = ["a_park_returns_for_a_step_back_between_the_callers_reading_and_the_park"]
+
+# A sequence bump ran on the writer connection whatever state it was in: under a lock it ran
+# inside the lock's transaction, and after a release whose ROLLBACK failed it ran inside the
+# leftover one, so the next lock's release rolled it back unseen. Found by the differential of
+# the simulator's SQLite model against this crate (crates/sqlite/tests/sqlite/sim_model.rs).
+[[bug]]
+name = "bump-inside-leftover-writer-transaction"
+fix = "claude/sqlite-writer-reset"
+package = "lsr-sqlite"
+tests = [
+    "checkpoint::tests::a_bump_after_a_release_that_failed_is_committed",
+    "checkpoint::tests::a_bump_under_a_lock_is_refused",
+]
