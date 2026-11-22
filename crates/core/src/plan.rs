@@ -127,7 +127,7 @@ use std::collections::BinaryHeap;
 use lsr_ltx::{Timestamp, Txid};
 
 use crate::created_at::{Need, Resolve, ResolvedCreatedAt, Step};
-use crate::inventory::{Inventory, is_snapshot_start};
+use crate::inventory::{Inventory, Listed, is_snapshot_start};
 use crate::layout::{CreatedAt, FileInfo, FileKey, Level, Stamp};
 /// The state of the database to rebuild.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -180,7 +180,7 @@ impl ContiguousChain {
     /// file is in the listing: the greedy cover in `extend` is the only thing
     /// that built it, so nothing else would notice a gap. Expensive, so only
     /// under [`crate::VERIFY`].
-    fn is_contiguous(&self, inventory: &Inventory) -> bool {
+    fn is_contiguous_in(&self, listed: Listed<'_>) -> bool {
         let mut reaches = None;
         for info in &self.files {
             let range = info.key.range();
@@ -192,12 +192,18 @@ impl ContiguousChain {
                         && range.max() > end
                 }
             };
-            if !fits || !inventory.files().contains(info) {
+            if !fits || !listed.files().any(|file| file == info) {
                 return false;
             }
             reaches = Some(range.max());
         }
         reaches == Some(self.reaches) && self.files.first() == Some(&self.snapshot)
+    }
+
+    /// [`Self::is_contiguous_in`] over a whole inventory.
+    #[cfg(test)]
+    fn is_contiguous(&self, inventory: &Inventory) -> bool {
+        self.is_contiguous_in(Listed::all(inventory))
     }
 
     /// The files to apply, oldest state first: the base, then each extension.
@@ -333,7 +339,18 @@ impl From<KeyTarget> for RestoreTarget {
 /// Plans a restore of [`target`] from [`inventory`], by keys alone.
 #[must_use]
 pub fn plan(inventory: &Inventory, target: KeyTarget) -> PlanOutcome {
-    plan_exact(inventory, target.into())
+    plan_exact(Listed::all(inventory), target.into())
+}
+
+/// [`plan`] over the inventory without the keys in `gone` (ascending): what a
+/// restore would do if those files were deleted, answered without copying the
+/// inventory.
+pub(crate) fn plan_without(
+    inventory: &Inventory,
+    gone: &[FileKey],
+    target: KeyTarget,
+) -> PlanOutcome {
+    plan_exact(Listed::without(inventory, gone), target.into())
 }
 
 /// The exact planner for any [`RestoreTarget`], the oracle for [`AsOfPlanner`]
@@ -348,24 +365,24 @@ pub fn plan(inventory: &Inventory, target: KeyTarget) -> PlanOutcome {
 #[doc(hidden)]
 #[must_use]
 pub fn plan_reference(inventory: &Inventory, target: RestoreTarget) -> PlanOutcome {
-    plan_exact(inventory, target)
+    plan_exact(Listed::all(inventory), target)
 }
 
-fn plan_exact(inventory: &Inventory, target: RestoreTarget) -> PlanOutcome {
-    let outcome = plan_unchecked(inventory, target);
+fn plan_exact(listed: Listed<'_>, target: RestoreTarget) -> PlanOutcome {
+    let outcome = plan_unchecked(listed, target);
     if crate::VERIFY
         && let PlanOutcome::Plan(chain) | PlanOutcome::AsOfInsideFile { chain, .. } = &outcome
     {
         debug_assert!(
-            chain.is_contiguous(inventory),
+            chain.is_contiguous_in(listed),
             "the planner returned a chain that is not contiguous: {chain:?}"
         );
     }
     outcome
 }
 
-fn plan_unchecked(inventory: &Inventory, target: RestoreTarget) -> PlanOutcome {
-    let Some(newest) = inventory.newest() else {
+fn plan_unchecked(listed: Listed<'_>, target: RestoreTarget) -> PlanOutcome {
+    let Some(newest) = listed.newest() else {
         return PlanOutcome::EmptyReplica;
     };
     if let RestoreTarget::Txid(requested) = target
@@ -373,34 +390,30 @@ fn plan_unchecked(inventory: &Inventory, target: RestoreTarget) -> PlanOutcome {
     {
         return PlanOutcome::BeyondNewest { requested, newest };
     }
-    let pool: Vec<FileInfo> = inventory
-        .files()
-        .iter()
-        .filter(|info| eligible(info, target))
-        .copied()
-        .collect();
-    let base = pool
-        .iter()
+    // The eligible files are read in place, never copied: a million-file
+    // inventory is planned in the memory it already holds.
+    let pool = || listed.files().filter(|info| eligible(info, target));
+    let base = pool()
         .filter(|info| is_snapshot_start(info))
         .max_by_key(|info| base_order(info))
         .and_then(|info| ContiguousChain::start(*info));
     let Some(mut chain) = base else {
-        return inside_the_base(inventory, target).unwrap_or_else(|| no_snapshot(inventory));
+        return inside_the_base(listed, target).unwrap_or_else(|| no_snapshot(listed));
     };
-    extend(&mut chain, &pool);
+    extend(&mut chain, Sweep::new(listed, target));
     if let RestoreTarget::AsOf(_) = target {
-        return as_of_outcome(inventory, chain, target);
+        return as_of_outcome(listed, chain, target);
     }
     let want = match target {
         RestoreTarget::Txid(requested) => Some(requested),
         RestoreTarget::Latest | RestoreTarget::AsOf(_) => {
-            pool.iter().map(|info| info.key.range().max()).max()
+            pool().map(|info| info.key.range().max()).max()
         }
     };
     if want == Some(chain.reaches()) {
         return PlanOutcome::Plan(chain);
     }
-    explain_shortfall(inventory, &pool, target, chain.reaches())
+    explain_shortfall(listed, target, chain.reaches())
 }
 
 /// The outcome for an `AsOf` chain, which ends where the eligible files take
@@ -409,16 +422,12 @@ fn plan_unchecked(inventory: &Inventory, target: RestoreTarget) -> PlanOutcome {
 /// the whole inventory ([`bridges_nothing_past`]); a chain that passes is
 /// [`PlanOutcome::AsOfInsideFile`] when a later file straddles, else a plan. A
 /// stray never changes which.
-fn as_of_outcome(
-    inventory: &Inventory,
-    chain: ContiguousChain,
-    target: RestoreTarget,
-) -> PlanOutcome {
+fn as_of_outcome(listed: Listed<'_>, chain: ContiguousChain, target: RestoreTarget) -> PlanOutcome {
     let reach = chain.reaches();
-    if bridges_nothing_past(inventory, reach) {
-        return explain_shortfall(inventory, inventory.files(), RestoreTarget::Latest, reach);
+    if bridges_nothing_past(listed, reach) {
+        return explain_shortfall(listed, RestoreTarget::Latest, reach);
     }
-    match straddling_file(inventory, target, reach) {
+    match straddling_file(listed, target, reach) {
         Some(file) => PlanOutcome::AsOfInsideFile { chain, file },
         None => PlanOutcome::Plan(chain),
     }
@@ -432,10 +441,9 @@ fn as_of_outcome(
 /// reports for the same listing. A refused level-9 file cannot link: it cannot
 /// be applied. A usable file that does link means the replica continues, even
 /// when it is recorded as created at or after the instant.
-fn bridges_nothing_past(inventory: &Inventory, reach: Txid) -> bool {
-    let files = inventory.files();
-    files.iter().any(|info| info.key.range().max() > reach)
-        && !files.iter().any(|info| passes(info, reach))
+fn bridges_nothing_past(listed: Listed<'_>, reach: Txid) -> bool {
+    listed.files().any(|info| info.key.range().max() > reach)
+        && !listed.files().any(|info| passes(info, reach))
 }
 
 /// Whether a usable file links to a chain that ends at [`reach`] and passes it.
@@ -447,11 +455,11 @@ fn passes(info: &FileInfo, reach: Txid) -> bool {
 
 /// The file that makes an `AsOf` chain ambiguous, if any ([`straddler`]),
 /// over the listed created-at times.
-fn straddling_file(inventory: &Inventory, target: RestoreTarget, reach: Txid) -> Option<FileKey> {
+fn straddling_file(listed: Listed<'_>, target: RestoreTarget, reach: Txid) -> Option<FileKey> {
     let RestoreTarget::AsOf(instant) = target else {
         return None;
     };
-    straddler(inventory.files(), reach, instant, |info| {
+    straddler(listed.files(), reach, instant, |info| {
         stamp_of(info, info.created_at())
     })
 }
@@ -464,14 +472,14 @@ fn straddling_file(inventory: &Inventory, target: RestoreTarget, reach: Txid) ->
 /// transaction past the end straddles too when its time is a snapshot's
 /// write or an upload: that transaction may have committed before the
 /// instant.
-fn straddler(
-    files: &[FileInfo],
+fn straddler<'a>(
+    files: impl Iterator<Item = &'a FileInfo> + Clone,
     reach: Txid,
     instant: Timestamp,
     stamp: impl Fn(&FileInfo) -> Option<Stamp>,
 ) -> Option<FileKey> {
     let one_past = reach.next()?;
-    let passing = || files.iter().filter(|info| passes(info, reach));
+    let passing = || files.clone().filter(|info| passes(info, reach));
     if passing().any(|info| dates_next(info, one_past, instant, stamp(info))) {
         return None;
     }
@@ -503,15 +511,12 @@ fn straddler_order(info: &FileInfo) -> (Txid, Reverse<Level>, FileKey) {
 /// 0 and a file links when it begins at transaction 1. Such a file ends past
 /// the target (else it would be the base), so the transaction exists only
 /// inside it: the same cause as with an older base, and the same answer.
-fn inside_the_base(inventory: &Inventory, target: RestoreTarget) -> Option<PlanOutcome> {
+fn inside_the_base(listed: Listed<'_>, target: RestoreTarget) -> Option<PlanOutcome> {
     let RestoreTarget::Txid(requested) = target else {
         return None;
     };
     inside_file(
-        inventory
-            .files()
-            .iter()
-            .filter(|i| i.key.range().min().get() == 1),
+        listed.files().filter(|i| i.key.range().min().get() == 1),
         requested,
     )
 }
@@ -533,40 +538,89 @@ fn inside_file<'a>(
         })
 }
 
-fn no_snapshot(inventory: &Inventory) -> PlanOutcome {
+fn no_snapshot(listed: Listed<'_>) -> PlanOutcome {
     PlanOutcome::NoSnapshot {
-        oldest_snapshot: inventory
+        oldest_snapshot: listed
             .files()
-            .iter()
             .filter(|info| is_snapshot_start(info))
             .map(|info| info.key.range().max())
             .min(),
-        malformed_snapshots: inventory.malformed_snapshots(),
+        malformed_snapshots: listed.malformed_snapshots(),
     }
 }
 
 /// Greedy interval cover over the eligible files of levels 0 to 8, one sweep
 /// in order of first transaction.
-fn extend(chain: &mut ContiguousChain, pool: &[FileInfo]) {
-    let mut sweep: Vec<FileInfo> = pool
-        .iter()
-        .filter(|info| !info.key.level().is_snapshot())
-        .copied()
-        .collect();
-    sweep.sort_by_key(sweep_order);
-    let mut sweep = sweep.into_iter().peekable();
+fn extend<'a>(chain: &mut ContiguousChain, sweep: impl Iterator<Item = &'a FileInfo>) {
+    let mut sweep = sweep.peekable();
     loop {
         let mut best: Option<FileInfo> = None;
         while let Some(info) = sweep.next_if(|i| touches(i.key.range().min(), chain.reaches())) {
-            let beats = best.is_none_or(|held| preference(&info) > preference(&held));
+            let beats = best.is_none_or(|held| preference(info) > preference(&held));
             if info.key.range().max() > chain.reaches() && beats {
-                best = Some(info);
+                best = Some(*info);
             }
         }
         match best {
             Some(info) if chain.push(info) => {}
             Some(_) | None => break,
         }
+    }
+}
+
+/// The eligible files of levels 0 to 8 in [`sweep_order`], merged from the
+/// inventory's own per-level runs (each already ascending in that order, since
+/// a key sorts by first transaction within a level), so nothing is copied or
+/// sorted and the sweep holds nine slices however many files there are.
+struct Sweep<'a> {
+    listed: Listed<'a>,
+    target: RestoreTarget,
+    /// What is left of each level; the snapshot level stays empty.
+    runs: [&'a [FileInfo]; Level::ALL.len()],
+}
+
+impl<'a> Sweep<'a> {
+    fn new(listed: Listed<'a>, target: RestoreTarget) -> Self {
+        let runs = Level::ALL.map(|level| {
+            if level.is_snapshot() {
+                &[]
+            } else {
+                listed.level_slice(level)
+            }
+        });
+        Self {
+            listed,
+            target,
+            runs,
+        }
+    }
+}
+
+impl<'a> Iterator for Sweep<'a> {
+    type Item = &'a FileInfo;
+
+    fn next(&mut self) -> Option<&'a FileInfo> {
+        let mut best: Option<&mut &'a [FileInfo]> = None;
+        for run in &mut self.runs {
+            while let Some((head, rest)) = run.split_first() {
+                if self.listed.keeps(head) && eligible(head, self.target) {
+                    break;
+                }
+                *run = rest;
+            }
+            let Some(head) = run.first() else { continue };
+            let earlier = best
+                .as_ref()
+                .and_then(|held| held.first())
+                .is_none_or(|held| sweep_order(head) < sweep_order(held));
+            if earlier {
+                best = Some(run);
+            }
+        }
+        let run = best?;
+        let (head, rest) = run.split_first()?;
+        *run = rest;
+        Some(head)
     }
 }
 
@@ -580,17 +634,14 @@ fn preference(info: &FileInfo) -> (Txid, Level, Reverse<Txid>) {
 ///
 /// A [`Txid`] target looks at every file, not just eligible ones: the file
 /// that covers it is by definition ineligible.
-fn explain_shortfall(
-    inventory: &Inventory,
-    pool: &[FileInfo],
-    target: RestoreTarget,
-    reach: Txid,
-) -> PlanOutcome {
-    let candidates = match target {
-        RestoreTarget::Txid(_) => inventory.files(),
-        RestoreTarget::Latest | RestoreTarget::AsOf(_) => pool,
+fn explain_shortfall(listed: Listed<'_>, target: RestoreTarget, reach: Txid) -> PlanOutcome {
+    let candidates = || {
+        listed.files().filter(move |info| match target {
+            RestoreTarget::Txid(_) => true,
+            RestoreTarget::Latest | RestoreTarget::AsOf(_) => eligible(info, target),
+        })
     };
-    let ahead = || candidates.iter().filter(|i| i.key.range().max() > reach);
+    let ahead = || candidates().filter(|i| i.key.range().max() > reach);
     if let RestoreTarget::Txid(requested) = target
         && let Some(outcome) = inside_file(
             ahead().filter(|i| touches(i.key.range().min(), reach)),
@@ -660,11 +711,12 @@ enum Pass {
 pub struct AsOfPlanner<'a> {
     inventory: &'a Inventory,
     instant: Timestamp,
-    /// Transaction-1 files, most preferred base first.
-    starts: Vec<FileInfo>,
+    /// Transaction-1 files, most preferred base first. Borrowed from the
+    /// inventory: a pointer a file, not a second copy of it.
+    starts: Vec<&'a FileInfo>,
     next_start: usize,
-    /// Level 0-8 files by first transaction, then key.
-    sweep: Vec<FileInfo>,
+    /// Level 0-8 files by first transaction, then key; pointers, as `starts`.
+    sweep: Vec<&'a FileInfo>,
     /// How many of `sweep` have touched the chain's end so far.
     entered: usize,
     /// Indexes into `sweep` that touched the end and were not yet settled.
@@ -684,20 +736,18 @@ impl<'a> AsOfPlanner<'a> {
             comparisons = comparisons.saturating_add(1);
             order
         };
-        let mut starts: Vec<FileInfo> = inventory
+        let mut starts: Vec<&FileInfo> = inventory
             .files()
             .iter()
             .filter(|info| is_snapshot_start(info))
-            .copied()
             .collect();
-        starts.sort_by(|a, b| counted(base_order(b).cmp(&base_order(a))));
-        let mut sweep: Vec<FileInfo> = inventory
+        starts.sort_unstable_by(|a, b| counted(base_order(b).cmp(&base_order(a))));
+        let mut sweep: Vec<&FileInfo> = inventory
             .files()
             .iter()
             .filter(|info| !info.key.level().is_snapshot())
-            .copied()
             .collect();
-        sweep.sort_by(|a, b| counted(sweep_order(a).cmp(&sweep_order(b))));
+        sweep.sort_unstable_by(|a, b| counted(sweep_order(a).cmp(&sweep_order(b))));
         let pass = if inventory.is_empty() {
             Pass::Done(PlanOutcome::EmptyReplica)
         } else {
@@ -728,7 +778,7 @@ impl<'a> AsOfPlanner<'a> {
     /// Pass 1: the first eligible transaction-1 file in base order is the
     /// base, which is the one [`plan`] picks.
     fn find_base(&mut self, resolved: &ResolvedCreatedAt) -> Resolve<()> {
-        while let Some(info) = self.starts.get(self.next_start).copied() {
+        while let Some(info) = self.starts.get(self.next_start).map(|info| **info) {
             match eligible_at(&info, self.instant, resolved) {
                 None => {
                     // The bases after it, in the order they would be tried:
@@ -736,21 +786,21 @@ impl<'a> AsOfPlanner<'a> {
                     let rest = self.starts.iter().skip(self.next_start.saturating_add(1));
                     let ahead = rest
                         .filter(|later| resolved.exact(later).is_none())
-                        .copied();
+                        .map(|later| **later);
                     return Resolve::Need(Need::with_ahead(info, ahead));
                 }
                 Some(true) => {
                     self.chain = ContiguousChain::start(info);
                     self.pass = match self.chain {
                         Some(_) => Pass::Extend,
-                        None => Pass::Done(no_snapshot(self.inventory)),
+                        None => Pass::Done(no_snapshot(Listed::all(self.inventory))),
                     };
                     return Resolve::Done(());
                 }
                 Some(false) => self.next_start = self.next_start.saturating_add(1),
             }
         }
-        self.pass = Pass::Done(no_snapshot(self.inventory));
+        self.pass = Pass::Done(no_snapshot(Listed::all(self.inventory)));
         Resolve::Done(())
     }
 
@@ -761,7 +811,7 @@ impl<'a> AsOfPlanner<'a> {
     /// stays ineligible, and a file at or below the end stays there.
     fn extend(&mut self, resolved: &ResolvedCreatedAt) -> Resolve<()> {
         let Some(chain) = self.chain.as_mut() else {
-            self.pass = Pass::Done(no_snapshot(self.inventory));
+            self.pass = Pass::Done(no_snapshot(Listed::all(self.inventory)));
             return Resolve::Done(());
         };
         loop {
@@ -781,7 +831,7 @@ impl<'a> AsOfPlanner<'a> {
                 .touching
                 .peek()
                 .and_then(|(_, at)| self.sweep.get(*at))
-                .copied()
+                .map(|info| **info)
             else {
                 break;
             };
@@ -809,17 +859,13 @@ impl<'a> AsOfPlanner<'a> {
     /// and so were read by the last step.
     fn judge_past(&mut self, resolved: &ResolvedCreatedAt) -> Resolve<()> {
         let Some(chain) = self.chain.as_ref() else {
-            self.pass = Pass::Done(no_snapshot(self.inventory));
+            self.pass = Pass::Done(no_snapshot(Listed::all(self.inventory)));
             return Resolve::Done(());
         };
         let reach = chain.reaches();
-        let outcome = if bridges_nothing_past(self.inventory, reach) {
-            explain_shortfall(
-                self.inventory,
-                self.inventory.files(),
-                RestoreTarget::Latest,
-                reach,
-            )
+        let listed = Listed::all(self.inventory);
+        let outcome = if bridges_nothing_past(listed, reach) {
+            explain_shortfall(listed, RestoreTarget::Latest, reach)
         } else {
             match lazy_straddler(self.inventory, self.instant, reach, resolved) {
                 Resolve::Need(info) => return Resolve::Need(info),
@@ -869,9 +915,9 @@ fn lazy_straddler(
     reach: Txid,
     resolved: &ResolvedCreatedAt,
 ) -> Resolve<Option<FileKey>> {
-    let files = inventory.files();
+    let files = inventory.files().iter();
     let mut missing = files
-        .iter()
+        .clone()
         .filter(|info| passes(info, reach) && resolved.exact(info).is_none());
     if let Some(first) = missing.next() {
         return Resolve::Need(Need::with_ahead(*first, missing.copied()));

@@ -435,11 +435,11 @@ pub async fn restore_with<S: ObjectStore, K: DatabaseSink>(
     restore_from(store, None, target, options, sink).await
 }
 
-/// [restore], whose first attempt plans over `listed` when given instead of
+/// [restore], whose first attempt plans over the borrowed `listed` when given instead of
 /// listing again. A retry after a vanished file always lists afresh.
 pub(crate) async fn restore_from<S: ObjectStore, K: DatabaseSink>(
     store: &S,
-    mut listed: Option<Inventory>,
+    mut listed: Option<&Inventory>,
     target: RestoreTarget,
     options: RestoreOptions,
     mut sink: K,
@@ -495,21 +495,24 @@ pub(crate) async fn restore_from<S: ObjectStore, K: DatabaseSink>(
 /// One listing, one plan and the chain applied, or why not.
 async fn attempt_once<S: ObjectStore, K: DatabaseSink>(
     store: &S,
-    listed: Option<Inventory>,
+    listed: Option<&Inventory>,
     target: RestoreTarget,
     options: RestoreOptions,
     sink: &mut K,
     bytes_read: &mut u64,
     created_at_read: &mut u64,
 ) -> Result<(ContiguousChain, Verified, Option<FileKey>), Abort> {
+    let loaded;
     let inventory = match listed {
         Some(inventory) => inventory,
-        None => Inventory::load(store)
-            .await
-            .map_err(RestoreError::Inventory)?,
+        None => {
+            loaded = Inventory::load(store)
+                .await
+                .map_err(RestoreError::Inventory)?;
+            &loaded
+        }
     };
-    let (chain, inside_file) = match plan_target(store, &inventory, target, created_at_read).await?
-    {
+    let (chain, inside_file) = match plan_target(store, inventory, target, created_at_read).await? {
         PlanOutcome::Plan(chain) => (chain, None),
         PlanOutcome::AsOfInsideFile { chain, file }
             if options.as_of_inside == AsOfInside::TakeEarlier =>

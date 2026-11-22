@@ -135,7 +135,7 @@ pub(super) struct DryRun {
 /// mismatch of the whole database is blamed on.
 pub(super) async fn latest_restore<S: ObjectStore>(
     store: &S,
-    listed: Inventory,
+    listed: &Inventory,
     last: FileKey,
 ) -> Result<DryRun, VerifyError> {
     let mut pages = BTreeMap::new();
@@ -158,7 +158,7 @@ pub(super) async fn latest_restore<S: ObjectStore>(
 /// nothing published), with the files and bytes it read.
 pub(super) async fn digest_restore<S: ObjectStore>(
     store: &S,
-    listed: Inventory,
+    listed: &Inventory,
     target: RestoreTarget,
     pages: &mut BTreeMap<u32, PageChecksum>,
 ) -> (Result<Restored, RestoreError>, usize, u64) {
