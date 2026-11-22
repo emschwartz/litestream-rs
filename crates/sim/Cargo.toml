@@ -10,6 +10,7 @@ publish = false
 [dependencies]
 lsr-core = { workspace = true, features = ["testing"] }
 lsr-history.workspace = true
+lsr-journal.workspace = true
 lsr-ltx.workspace = true
 lsr-store-fs.workspace = true
 lsr-wal = { workspace = true, features = ["testing"] }

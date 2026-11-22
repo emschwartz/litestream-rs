@@ -45,15 +45,32 @@ fn still_fails(seed: u64, ops_digest: u64, defect: KnownWrong) {
     }
 }
 
-/// A failed WAL sync, then a restart before the TRUNCATE: the new process stages frames the
-/// failed sync covered (D2). Seed 0xf is the first of the mixed set to reach it.
+/// A failed WAL sync, checkpoints by another process, then a power loss: SQLite recovers a
+/// database file no commit made (D103). Seed 0x585 is the first of the mixed set to reach it
+/// once the restart half of the failed sync was fixed.
 #[test]
-fn a_restart_after_a_failed_wal_sync_still_stages_frames_it_covered_seed_0xf() {
-    still_fails(
-        0xf,
+fn a_power_loss_after_a_failed_wal_sync_leaves_a_database_ahead_of_its_wal_seed_0x585() {
+    still_fails(0x585, 0x8737_7bf1_27ac_4b30, KnownWrong::DatabaseAheadOfWal);
+}
+
+/// Fixed: a failed WAL sync was remembered in memory only, so a restart before the TRUNCATE
+/// staged frames the failed sync covered, until the engine journal recorded the debt. Seed 0xf,
+/// the first of the mixed set to reach it, must pass now.
+#[test]
+fn a_restart_after_a_failed_wal_sync_owes_the_truncate_seed_0xf() {
+    let seed = Seed::new(0xf);
+    let mut weights = Weights::mixed(seed);
+    weights.known_wrong = true;
+    let ops = history(seed, STEPS, &weights);
+    assert_eq!(
+        digest(&format!("{ops:?}")),
         0xe00e_589f_5b37_5395,
-        KnownWrong::WalSyncForgottenAtRestart,
+        "the live generator changed seed 0xf's run; find another seed whose history draws a \
+         failed WAL sync followed by a restart"
     );
+    if let Err(failure) = run(seed, STEPS, &weights) {
+        panic!("{failure}");
+    }
 }
 
 /// Fixed: a staging read refused for permission during level-1 compaction degraded maintenance
