@@ -33,6 +33,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D23 | A delete without a directory sync: fix or argue harmless? | Fix | project rule: found defects are fixed (#116) | 2026-11-22 | decided |
 | D24 | Names for store refusals and the error format | Four cause names, "{op} refused: {why}" | owner (#108) | 2026-11-22 | decided |
 | D31 | Must a PR re-merge main and re-run CI before it lands? | No while churn is high: merge on the PR's own green; main's CI integrates; fix forward | owner | 2026-11-22 | decided |
+| D33 | Narrow the Go drop-in surface to shrink unverified code? | No: full drop-in; bring config, CLI and sidecar under behaviour rows and Go differentials | owner | 2026-11-22 | decided |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -262,6 +263,14 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Why:** with six or more branches open, each merge cost every other branch a merge and a 20 minute CI run, for hours of serial waiting. The one real catch in that period (renamed causes) would have shown as a red main within one run.
 - **Revisit if:** before any release, or when main goes red more than once a day.
 - **Links:** the merge protocol in the session notes; AGENTS.md.
+
+## D33. Full drop-in replacement for Go
+
+- **Options:** narrow the drop-in surface (refuse `dir:` scanning, AWS shared credential files and yaml.v2 quirks) to remove about 900 lines of code no behaviour row covers; or keep full drop-in and bring that code under evidence.
+- **Choice:** full drop-in. The config, CLI and sidecar surface gets behaviour rows and generated differential tests against Go Litestream, with `dir:` scanning and credential resolution first, since they decide what is replicated and with which credentials.
+- **Cost accepted:** about 9,200 production lines stay, and need differential harnesses against Go.
+- **Revisit if:** a Go behaviour on this surface would lose data. Then ours differs, with its own entry here.
+- **Links:** #121 (cuts 2, 4 and 5 withdrawn), docs/release-bar.md.
 
 ## Unverified, not recorded
 
