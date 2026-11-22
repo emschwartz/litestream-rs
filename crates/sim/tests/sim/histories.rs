@@ -29,6 +29,7 @@ pub mod seed_0xb6b;
 pub mod seed_0xb9e;
 pub mod seed_0xe9;
 pub mod seed_0xf;
+pub mod seed_0xf488c;
 
 /// What guards a recorded history against passing for nothing.
 #[derive(Clone, Copy, Debug)]
@@ -157,6 +158,11 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
             "it pins an open defect (KnownWrong::HaltForgottenAtRestart) and passes only while \
              main fails with it, so no plant can be judged by it",
         ),
+    ),
+    (
+        "seed_0xf488c",
+        "swarm_seed_0xf488c_takes_no_commit_before_a_truncate_for_damage",
+        Guard::Own("boundary-snapshot-keeps-page-table-sim"),
     ),
     (
         "seed_0xb9e",

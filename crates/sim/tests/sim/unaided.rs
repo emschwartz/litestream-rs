@@ -206,17 +206,20 @@ fn swarm_seed_44_restores_only_committed_states() {
 /// took that commit's pages for damage (`DatabasePageMismatch`) until it stopped checking them
 /// (docs/decisions.md D121, plant `boundary-snapshot-keeps-page-table`). Seed 0xf49a2 found it
 /// first, before main's later swarm draws reshuffled the mixes. Main's swarm, without these
-/// operations, kills the plant on none of seeds 1000001 to 1002000.
+/// operations, kills the plant on none of seeds 1000001 to 1002000. The history is recorded as
+/// that mix drew it, since main's overlapping-fault draw has since moved the seed's mix.
 #[test]
 fn swarm_seed_0xf488c_takes_no_commit_before_a_truncate_for_damage() {
-    // BATCH-3: main's overlap draw, which precedes the in-tick draw, moved this seed's mix, so
-    // under plant boundary-snapshot-keeps-page-table the run now passes. Record the history
-    // drawn at fe9badf2 as an op list, or find a new seed.
-    let seed = Seed::new(0xf488c);
-    let mut weights = Weights::mixed(seed);
-    // The run as it was found: the scheduled verify, drawn last, came after it.
-    weights.verify = 0;
-    if let Err(failure) = run_with(seed, 299, &weights, &Opts::default()) {
+    let opts = Opts {
+        drawn: true,
+        block_crash_law: false,
+        lying_wal_sync: false,
+        after_restart: AfterRestart::Retry,
+        clock_law: ClockLaw::PerTick,
+        staging_fs: true,
+        ..Opts::default()
+    };
+    if let Err(failure) = run_ops(Seed::new(0xf488c), crate::histories::seed_0xf488c::OPS, &opts) {
         panic!("{failure}");
     }
 }
