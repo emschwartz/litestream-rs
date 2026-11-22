@@ -42,20 +42,22 @@ A Cargo workspace (decision D1: its own repository). Each crate is `crates/<name
 
 | Crate | Owns | Rules |
 |---|---|---|
-| `ltx` | Header, page frame, index, trailer; checksums; streaming decoder and encoder; both LZ4 read paths | `forbid(unsafe_code)`, no I/O beyond `Read`/`Write`, fuzzed, Kani on checksum math |
+| `ltx` | Header, page frame, index, trailer; checksums; streaming decoder and encoder; both LZ4 read paths | `forbid(unsafe_code)`, no I/O beyond `Read`/`Write`, fuzzed |
 | `wal` | The SQLite WAL reader: header and frame checksums, committed transactions only, page maps | No I/O beyond `Read`; fuzzed |
 | `core` | Position recovery, sync planning, checkpoint decision, upload sequencing, compaction, retention, restore planning | Sans-IO; depends only on `ltx`, `wal` and the traits |
-| `store-s3` | `ObjectStore` on `rusty-s3` behind a `Transport` trait: blocking `ureq` by default (no runtime), `reqwest` as a feature for applications that already have it: PUT, multipart (an abandoned upload's id goes on a bounded list and is aborted on next use; the bucket's lifecycle rule is the backstop), ranged GET, paged LIST, batch DELETE; independent requests go out as one batch with a limit per kind, per kind: multipart parts by `concurrency` (Go's key; default 5, R2 2 unless set), creation-time HEADs 16 (Go allows 50, an unmeasured figure), reads ahead and listing levels 8 (Go does neither side by side), on scoped threads under ureq | Own retry classifier (408, 429, 5xx, connection reset retryable; jittered backoff); payload checksum policy explicit, never an SDK default; a failed LIST page is an error, never a short listing |
+| `store-s3` | `ObjectStore` on `rusty-s3` behind a `Transport` trait: blocking `ureq` by default (no runtime), `reqwest` as a feature for applications that already have it: PUT, multipart (an abandoned upload's id goes on a bounded list and is aborted on next use; the bucket's lifecycle rule is the backstop), ranged GET, paged LIST, batch DELETE; independent requests go out as one batch with a limit per kind, per kind: multipart parts by `concurrency` (Go's key; default 5, R2 2 unless set), creation-time HEADs 16 (Go allows 50, an unmeasured figure), reads ahead and listing levels 8 (Go opens up to 32 of a restore's files at once, `replica.go:826`, and lists levels in turn), on scoped threads under ureq | Own retry classifier (408, 429, 5xx, connection reset retryable; jittered backoff); payload checksum policy explicit, never an SDK default; a failed LIST page is an error, never a short listing |
 | `store-fs` | `ObjectStore` on a directory | Used by tests and by the Go cross-restore harness |
 | `local` | The restore sink: a scratch file beside the target, the SQLite check, publish by hard link | Never overwrites or deletes a file it does not own; a failed publish says whether the target is visible |
 | `sqlite` | `WalSource`, `PageSource`, `Checkpointer` on `rusqlite` plus raw FFI | The only crate with `unsafe`; each site carries `#[expect(unsafe_code, reason = …)]` |
-| `replica` | Public API: `Replicator::start`, `final_sync(deadline)`, `health()`, `restore()`, `verify()` | Owns the per-database actor thread and the async facade over it; drop does no I/O |
+| `replica` | Public API: `Replicator::start`, `stop(deadline)`, `health()`, and the free functions `restore()` and `verify()` | Owns the per-database actor thread and the async facade over it; drop does no I/O |
 | `config` | Go's `litestream.yml` read as Go 041a8c3 reads it, mapped onto replicators; the one `s3://` URL parser | A key Go reads either works, is refused, or warns; unknown keys refused |
 | `sidecar` | The `replicate` daemon (phase 4): Go's command line and config, many databases in one process, signals, `-exec`, `/metrics`, `/healthz` | Opens no database file itself; refuses what it would run differently from Go |
 | `sim` | In-memory store with a fault schedule, synthetic WAL source, model oracle, seeded scenario generator | Dev only |
 | `compat` | Go fixture generator, pinned Go binaries, cross-restore tests, golden fixtures | Dev only |
 | `cli` | The `lsr` binary: `restore`, `verify`, `files`, `config check`; `replicate` is the sidecar | Stdout carries only the result; one closed exit-code table |
 | `fuzzing` | Fuzz targets as plain functions over bytes, replayed over the committed corpus in the test suite (`fuzz/` drives them with cargo-fuzz) | Dev only |
+| `spec` | The restore planner's contract restated as a brute-force oracle, for tests and fuzz targets to judge the planner by | Dev only; no dependencies, never `core` |
+| `heap` | A counting global allocator for the memory gates | Dev only; the one `unsafe` outside `sqlite` |
 
 Traits at the core boundary: `Clock`, `Sleeper`, `Entropy`, `ObjectStore` (the replica, and the local L0 staging directory through the same trait), `WalSource`, `PageSource`, `Checkpointer`, `DatabaseSink` (where a restore writes). `EventSink` is the replica crate's, for the application.
 
@@ -89,8 +91,8 @@ enum Recovered {
     Stop(StopCause),
 }
 enum SnapshotCause {
-    FirstSync, BehindRemote { local }, NewestStagedFileUnreadable, WalMissing, PageSizeChanged,
-    GenerationChanged, PrevFrameMismatch, LastPageMismatch, LocalRewound { synced, committed },
+    FirstSync, BehindRemote { local }, NewestStagedFileUnreadable, WalMissing, GenerationChanged,
+    PrevFrameMismatch, LastPageMismatch, LocalRewound { synced, committed },
     CheckpointBoundary, OperatorRequested,
 }
 ```
@@ -101,7 +103,7 @@ Exact signatures live in `docs/plans/phase-2-writing.md`, task 4.
 
 ### Faults
 
-One closed `Fault` enum covers what the library cannot prevent: store transient, throttled, auth, not found, corrupt object; local disk full or I/O error; SQLite busy; WAL changed under a read; external checkpoint; WAL deleted by another process; shutdown deadline reached. `fn policy(&Fault) -> Policy { Retry(Backoff) | Resnapshot(SnapshotCause) | Stop(StopCause) }` is exhaustive; `Backoff` is `Doubling` or `After(Duration)` so a store's `Retry-After` is honoured. Two things are deliberately not faults: a clock that steps backwards is clamped and reported as a `Clamped` event, and a power-loss WAL rewind is a snapshot with cause `LocalRewound` (it is expected under `synchronous=NORMAL`). Hard `assert!` exists only in the simulator's oracle.
+One closed `Fault` enum covers what the library cannot prevent: store transient, throttled, auth, not found, corrupt object; local disk full or I/O error; SQLite busy; WAL changed under a read; external checkpoint; WAL deleted by another process; shutdown deadline reached. `fn policy(&Fault) -> Policy { Retry(Backoff) | Persistent(PersistentCause) | Shutdown }` is exhaustive, and what a persistent cause does (keep trying in a degraded state, or stop) is one field of `Responses` per cause (D7); `Backoff` is `Doubling` or `After(Duration)` so a store's `Retry-After` is honoured. Two things are deliberately not faults: a clock that steps backwards is clamped and reported as a `Clamped` event, and a power-loss WAL rewind is a snapshot with cause `LocalRewound` (it is expected under `synchronous=NORMAL`). Hard `assert!` exists only in the simulator's oracle.
 
 ## 4. How correctness is established
 
@@ -119,7 +121,7 @@ One closed `Fault` enum covers what the library cannot prevent: store transient,
 - **Real SQLite.** A shim VFS delegating to the unix VFS injects faults on read, write, sync, truncate and lock. Separate tests SIGKILL a writer mid-transaction, run VACUUM, delete the WAL from a second process, and drop unsynced writes to model power loss (Linux CI). Fixed cases: a 16 KiB-page database larger than 1 GiB (lock page), a database larger than 4 GiB (32-bit offsets), a WAL larger than the sync cap. `SQLITE_TESTCTRL_PRNG_SEED` pins WAL salts.
 - **Go compatibility harness.** Pinned Go binaries built from source for v0.5.0, v0.5.15, v0.5.16, the newest release and upstream HEAD. Four directions: Go writes and Rust restores; Rust writes and Go restores; the Go VFS reads a Rust replica; Go, then Rust, then Go replicate one prefix in turn. Each case ends in page-hash equality plus `PRAGMA integrity_check`. A CI job adds each new upstream release to the matrix.
 - **Upstream's suite as a regression list.** About 900 relevant upstream test cases are ported by scenario, not by code, into the simulator or the real-SQLite layer. A test map maps every upstream test to its counterpart or to a stated reason it does not apply; a test fails on an unmapped entry.
-- **Also:** cargo-fuzz targets with a persisted corpus, Kani proofs for the rolling-checksum algebra, cargo-mutants on `ltx` and `core` with surviving mutants triaged, a soak against real Tigris (provider quirks are not simulable).
+- **Also:** cargo-fuzz targets with a persisted corpus, cargo-mutants on `ltx` and `core` with surviving mutants triaged, a soak against real Tigris (provider quirks are not simulable).
 - **Lints.** A strict `[workspace.lints]` set (`unsafe_code = "deny"`, `indexing_slicing`, `unwrap_used`, `panic`, `arithmetic_side_effects`, the `cast_*` family, `undocumented_unsafe_blocks`, `allow_attributes_without_reason`, cargo `unused_dependencies = "deny"`), with `too-many-lines-threshold = 70` (decision D5), plus `deny.toml`, nextest and a pinned toolchain. SQLite is pinned (3.54.1), after upstream's bundled 3.51.2 shipped a WAL-reset bug.
 
 ## 5. Phases
@@ -180,7 +182,7 @@ Out of scope for this repository. An application that adopts the library provide
 
 - The replicator started before any connection pool opens, with `PERSIST_WAL` and `wal_autocheckpoint = 0` on every connection, and no other checkpointer on the live file.
 - No `std::fs` open of the database files anywhere in the process: closing any descriptor on the file drops every POSIX lock SQLite holds.
-- `final_sync` called after its writers close, inside its shutdown budget.
+- `Replicator::stop` called after its writers close, inside its shutdown budget.
 - A signal for long-lived readers, so the library stays PASSIVE while one runs.
 - One SQLite in the process, and it is ours: `lsr-sqlite` builds SQLite 3.54.1 through `rusqlite`'s `bundled` feature (`libsqlite3-sys` 0.40), and the `wal-index` and read lock code depend on that build. `libsqlite3-sys` declares `links = "sqlite3"`, so Cargo allows one copy per build: the application's own `rusqlite`, `sqlx` or other SQLite crate must resolve to the same `libsqlite3-sys` 0.40 (a compatible `rusqlite` 0.43), or the build fails at resolution, never at run time. Cargo features unify, so the application's connections then run on the same bundled build.
 
