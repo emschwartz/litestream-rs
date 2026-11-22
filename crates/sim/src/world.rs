@@ -686,6 +686,18 @@ impl World {
         Ok(Some((key, bytes)))
     }
 
+    /// Whether replica `key` holds exactly `bytes`.
+    ///
+    /// # Errors
+    /// The store's error when it cannot read.
+    pub fn remote_holds(&self, key: FileKey, bytes: &[u8]) -> Result<bool, StoreError> {
+        match read_all(&self.remote_raw, &key) {
+            Ok(now) => Ok(now == bytes),
+            Err(StoreError::NotFound { .. }) => Ok(false),
+            Err(other) => Err(other),
+        }
+    }
+
     /// Deletes replica `key` if it still holds exactly `bytes`; whether it did.
     ///
     /// # Errors

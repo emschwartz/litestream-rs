@@ -225,6 +225,7 @@ fn windows(maintenance: &Maintenance) -> Windows {
 }
 
 /// What one actor step came to.
+#[derive(PartialEq, Eq)]
 enum Step {
     Ran,
     /// A task kept trying a persistent fault.
@@ -938,8 +939,37 @@ impl Runner {
         };
         self.report.reach.bump("remote.second_writer");
         self.expect(StopCause::OtherWriter);
+        let lists = self.w.remote_recorder.counts().lists;
         for _ in 0..ticks {
-            self.tick()?;
+            let booted = self.actor.booted();
+            let step = self.step(None)?.0;
+            let stopped = step == Step::Stopped(StopCause::OtherWriter);
+            match step {
+                Step::Stopped(cause) if self.stop_expected(cause) => {}
+                Step::Stopped(cause) => {
+                    return Err(bug_fault(format!("the engine stopped: {cause:?}")));
+                }
+                Step::Degraded(cause) => self.degraded_expected(cause)?,
+                Step::Ran | Step::Drained(_) | Step::Crashed => {}
+            }
+            if stopped {
+                break;
+            }
+            // A running engine that listed the replica while the other
+            // writer's file stood past its own position holds the proof of
+            // another writer: it must stop. A boot's listing is recovery's to
+            // judge, and an engine already at that transaction replaces the
+            // file with its own upload (no writer identity can tell them apart).
+            let listed = self.w.remote_recorder.counts().lists > lists;
+            let theirs = self.w.remote_holds(key, &bytes).map_err(|err| {
+                bug_fault(format!("reading the second writer's file failed: {err}"))
+            })?;
+            let behind = self.actor.staged() < Some(key.range().max());
+            if booted && listed && theirs && behind {
+                return Err(Violation::OtherWriterMissed {
+                    key: key.to_string(),
+                });
+            }
         }
         self.w
             .remote_remove_if(key, &bytes)
