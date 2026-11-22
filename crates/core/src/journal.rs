@@ -282,13 +282,6 @@ impl JournalWriter {
         self.durable.as_ref()
     }
 
-    /// The last record this writer read or was asked for: what the next record must be
-    /// monotonic over, and what a caller changing one fact keeps of the others.
-    #[must_use]
-    pub const fn last(&self) -> Option<&Journal> {
-        self.last.as_ref()
-    }
-
     /// For a differential test: whether the next write establishes, the newest record's slot
     /// and number, and whether creation is finished and this lifetime has synced.
     #[must_use]
