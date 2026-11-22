@@ -616,6 +616,51 @@ fn with_staging_gone_the_replica_names_the_page_size() {
     assert_eq!(everything(&rig), before);
 }
 
+/// With staging gone and the replica's newest transaction held only above level 0, the boot
+/// reads the page size from the replica's newest file. When that header did not decode (a
+/// rotten object, or one read a proxy changed), the boot took no page size at all and
+/// snapshotted the new size onto the prefix, where every restore past it then stops. Found by
+/// a simulator hold whose reads lie (seed 0x13): any other file's header names the prefix's
+/// page size, and with none readable the boot must not guess.
+#[test]
+fn a_newest_replica_header_that_does_not_decode_still_names_the_page_size() {
+    let (mut rig, mut actor) = caught_up();
+    rig.commit(2);
+    rig.follow(&mut actor, T0 + 10, 50);
+    // Every file ending at the newest transaction is junk, and its level-0 file is gone.
+    let (_, files) = everything(&rig);
+    let newest = files.iter().map(|f| f.key.range().max()).max().unwrap();
+    block_on(async {
+        for file in files.iter().filter(|f| f.key.range().max() == newest) {
+            rig.remote.inner.delete(&[file.key]).await.unwrap();
+            if file.key.level() == Level::ZERO {
+                continue;
+            }
+            let mut up = rig
+                .remote
+                .inner
+                .begin_upload(&file.key, ts(T0))
+                .await
+                .unwrap();
+            up.write(&[0x5a; 200]).await.unwrap();
+            up.commit().await.unwrap();
+        }
+    });
+    rig.staging = Counting::default();
+    let before = everything(&rig);
+    resize(&mut rig, big());
+    let mut actor = Actor::new(cfg());
+    let ticks = rig.follow(&mut actor, T0 + 20, 50);
+    assert!(
+        ticks
+            .iter()
+            .all(|tick| !matches!(event(tick), Some(Event::Uploaded(_)))),
+        "{ticks:?}"
+    );
+    assert_eq!(ticks.last(), Some(&page_size_changed()), "{ticks:?}");
+    assert_eq!(everything(&rig).1, before.1, "nothing reaches the replica");
+}
+
 /// Staging holds an older file at the new page size (a staging backup put
 /// back) while the replica's newest transaction is later and at the old one.
 /// The boot judged the page size by the staged file alone and snapshotted the

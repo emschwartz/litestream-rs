@@ -141,6 +141,55 @@ fn an_engine_booting_through_lying_reads_leaves_the_replica_restorable() {
     assert!(report.reach.get("hold.LyingReads.engine_reads_flipped") > 0);
 }
 
+/// Swarm seed 0x13, shrunk: the prefix holds 512-byte pages, the app vacuums to 2048, the
+/// operator removes another writer's level-0 file after it was compacted upward, and the
+/// engine boots while every read of the replica lies. The boot read the newest file's header,
+/// could not decode it, took that as no page size at all, and snapshotted 2048-byte pages onto
+/// the prefix; restores of the next transaction stopped on the change.
+#[test]
+fn a_boot_whose_replica_reads_lie_never_writes_a_new_page_size_seed_0x13() {
+    use lsr_core::{StoreError, StoreOp};
+    use lsr_sim::{EnvFault, FaultShape, Target};
+    let seed = Seed::new(0x13);
+    let ops = [
+        Op::Shutdown,
+        Op::Vacuum {
+            page_size: lsr_ltx::PageSize::new(2048),
+        },
+        Op::Hold {
+            hold: Hold::LyingReads,
+            ticks: 11,
+        },
+        Op::Shutdown,
+        Op::StoreFault {
+            target: Target::Remote,
+            op: StoreOp::Read,
+            ahead: 1,
+            shape: FaultShape::Error(StoreError::Transient {
+                op: StoreOp::Read,
+                kind: std::io::ErrorKind::ConnectionReset,
+            }),
+        },
+        Op::WalDamage {
+            op: WalOp::TearHeader,
+            ticks: 2,
+        },
+        Op::EnvFault(EnvFault::DeleteWal),
+        Op::SecondWriter { ticks: 7 },
+        Op::Hold {
+            hold: Hold::LyingReads,
+            ticks: 9,
+        },
+    ];
+    let opts = Opts {
+        drawn: true,
+        ..Opts::default()
+    };
+    if let Err(failure) = run_ops(seed, &ops, &opts) {
+        panic!("{failure}");
+    }
+}
+
 #[test]
 fn readers_holding_the_wal_leave_the_replica_restorable_while_they_hold() {
     let report = held(Hold::ReadersHeld);
