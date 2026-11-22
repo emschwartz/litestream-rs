@@ -459,3 +459,75 @@ name = "staging-dir-fsync"
 fix = "2bf9f99"
 package = "lsr-store-fs"
 tests = ["a_crash_at_any_step_of_a_commit_loses_nothing_committed_and_shows_nothing_torn"]
+
+# A boot that refused replica files the live WAL vouches for: a wiped staging directory in the
+# same WAL generation stopped instead of continuing.
+[[bug]]
+name = "boot-gate-wal-vouch-skipped"
+fix = "aa1165d"
+package = "lsr-core"
+tests = [
+    "vouch::a_wiped_staging_in_the_same_wal_generation_continues",
+    "vouch::staging_behind_a_replica_the_wal_vouches_for_continues",
+]
+
+[[bug]]
+name = "boot-gate-wal-vouch-skipped-sim"
+fix = "aa1165d"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["newest_staged_file_lost", "restored_old_meta"]
+
+# A takeover record that covers nothing: a take-over never clears a refusal or a stop record.
+[[bug]]
+name = "boot-gate-takeover-ignored"
+fix = "aa1165d"
+package = "lsr-core"
+tests = [
+    "vouch::a_vm_restore_stops_until_a_takeover_covers_the_replica",
+    "vouch::a_takeover_covering_the_replica_clears_a_stop_record",
+]
+
+[[bug]]
+name = "boot-gate-takeover-ignored-sim"
+fix = "aa1165d"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["vm_restore_stops_until_a_take_over"]
+
+# A boot that refuses nothing: replica files nothing vouches for are snapshotted above, as before
+# the fix.
+[[bug]]
+name = "boot-gate-refuses-nothing"
+fix = "aa1165d"
+package = "lsr-core"
+tests = [
+    "vouch::a_foreign_file_put_while_the_engine_was_down_stops_the_boot",
+    "vouch::a_takeover_does_not_cover_a_foreign_file_above_it",
+]
+
+[[bug]]
+name = "boot-gate-refuses-nothing-sim"
+fix = "aa1165d"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "foreign_file_while_down_stops",
+    "vm_restore_stops_until_a_take_over",
+    "latest_never_goes_back_after_two_second_writers_seed_0xb9",
+]
+
+# A restore that leaves no takeover record: the replicator started on it refuses the replica.
+[[bug]]
+name = "restore-writes-no-takeover"
+fix = "0fcb1b6"
+package = "lsr-replica"
+test_bin = "replica"
+tests = ["second_writer::a_restored_database_replicates_without_a_refusal"]
+
+[[bug]]
+name = "restore-writes-no-takeover-cli"
+fix = "54e47f8"
+package = "lsr-cli"
+test_bin = "cli"
+tests = ["integrity_check_publishes_a_valid_database_in_every_mode"]

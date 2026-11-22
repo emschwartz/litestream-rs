@@ -1,0 +1,13 @@
+diff --git a/crates/cli/src/run.rs b/crates/cli/src/run.rs
+index fa62c31..b4775f0 100644
+--- a/crates/cli/src/run.rs
++++ b/crates/cli/src/run.rs
+@@ -662,7 +662,7 @@ async fn restore_on<S: ObjectStore>(
+         let restored = restore_with(store, target, options, sink).await?;
+         // A replicator started on the restored database builds on the replica it came from.
+         let meta = meta_dir_of(output)?;
+-        lsr_replica::record_takeover(&meta, restored.reached()).map_err(|err| {
++        std::io::Result::Ok(()).map_err(|err: std::io::Error| {
+             CliError::Takeover {
+                 meta,
+                 kind: err.kind(),

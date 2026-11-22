@@ -261,6 +261,16 @@ fn newest_staged_file_lost() {
 }
 
 #[test]
+fn restored_old_meta() {
+    run(scenario::restored_old_meta);
+}
+
+#[test]
+fn vm_restore_stops_until_a_take_over() {
+    run(scenario::vm_restore_stops_until_a_take_over);
+}
+
+#[test]
 fn bucket_rolled_back() {
     run(scenario::bucket_rolled_back);
 }

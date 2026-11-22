@@ -1,0 +1,14 @@
+diff --git a/crates/replica/src/restore.rs b/crates/replica/src/restore.rs
+index 43cced8..7e3d369 100644
+--- a/crates/replica/src/restore.rs
++++ b/crates/replica/src/restore.rs
+@@ -63,8 +63,7 @@ pub fn restore_with(
+         .ok_or(RestoreError::TakeoverRecord {
+             kind: io::ErrorKind::InvalidInput,
+         })?;
+-    write_takeover(&meta, TakeoverRecord::through(restored.reached()))
+-        .map_err(|err| RestoreError::TakeoverRecord { kind: err.kind() })?;
++    let _ = (meta, TakeoverRecord::through(restored.reached()));
+     Ok(restored)
+ }
+ 
