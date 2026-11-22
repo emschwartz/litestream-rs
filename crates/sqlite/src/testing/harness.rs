@@ -423,6 +423,9 @@ pub struct Rig<B: Backend> {
     faults: Vec<Fault>,
     degraded: Vec<PersistentCause>,
     everywhere: bool,
+    /// The takeover record a restore left, handed to every new actor as the replica's driver
+    /// does.
+    takeover: Option<lsr_core::TakeoverRecord>,
 }
 
 impl<B: Backend> Rig<B> {
@@ -481,6 +484,7 @@ impl<B: Backend> Rig<B> {
             faults: Vec::new(),
             degraded: Vec::new(),
             everywhere: false,
+            takeover: None,
         };
         rig.observe()?;
         Ok(rig)
@@ -1031,6 +1035,9 @@ impl<B: Backend> Rig<B> {
                 .map_err(|e| RigError::Open(Box::new(e)))?,
         );
         self.actor = Actor::new(self.cfg.actor.clone());
+        if let Some(record) = self.takeover {
+            self.actor.remember_takeover(record);
+        }
         self.observe()
     }
 
@@ -1148,10 +1155,17 @@ impl<B: Backend> Rig<B> {
     /// replica into a fresh one: every connection closes, the database, its WAL and `-shm` and
     /// the staging directory are deleted, `bytes` become the database file, and the application and a
     /// new replicator open it. The model continues from its newest commit, which is what `bytes` must hold.
+    /// `restored` is the transaction the restore reached: like `lsr restore`, it leaves a takeover
+    /// record through it, so the new replicator builds on the replica it came from.
     ///
     /// # Errors
     /// [`RigError`].
-    pub fn replace_database(&mut self, bytes: &[u8], staging: &Path) -> Result<(), RigError> {
+    pub fn replace_database(
+        &mut self,
+        bytes: &[u8],
+        staging: &Path,
+        restored: Txid,
+    ) -> Result<(), RigError> {
         self.backend = None;
         self.app.discard_all()?;
         let io_at = |path: &Path| {
@@ -1171,6 +1185,7 @@ impl<B: Backend> Rig<B> {
             Err(err) => return Err(io_at(staging)(err)),
         }
         std::fs::write(&self.db, bytes).map_err(io_at(&self.db))?;
+        self.takeover = Some(lsr_core::TakeoverRecord::through(restored));
         self.mirror.seen = None;
         self.staging_seen = self.staging_log.len();
         self.app.open(APP)?;
