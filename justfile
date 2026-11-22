@@ -122,6 +122,11 @@ shuttle iterations="200":
     SHUTTLE_ITERATIONS={{iterations}} RUSTFLAGS="--cfg shuttle" CARGO_TARGET_DIR=target/shuttle \
         cargo test --locked -p lsr-replica --test replica shuttle::
 
+# The journal model's deep walk (docs/journal.md): every state within larger budgets than the
+# default suite's, at each block size, on the atomic and the tearing device. Minutes; not part of check.
+journal-model:
+    cargo nextest run -p lsr-spec -E 'test(/^journal::deep$/)' --run-ignored only --no-capture --locked
+
 # Every fixed defect is re-planted in a scratch tree and its named tests must fail
 # (docs/planted-bugs.md). A survivor is a defect in the tests; a stale patch needs re-expressing.
 # Nightly in CI; about 20 minutes cold. `just planted-bugs --only listing-cursor` runs one entry.
@@ -352,6 +357,14 @@ plan-exhaustive:
 # `check` (crates/core/tests/core/mem.rs). Needs 5 GiB of temporary disk, one database at a time.
 mem-big:
     cargo nextest run --release -p lsr-core --test core -E 'test(/^mem_big::/)' --run-ignored only --no-capture --locked
+
+# The real-SQLite power-loss campaigns, each judged by restores against the workload's own record
+# (`lsr-history`): the history rig's 50 seeds of 6 cycles (`rig::real_power_loss_trials`) and the
+# crash-cycle rig's 100 seeds of 12 cycles (`crash_cycles::crash_cycle_campaign`), which also
+# restores while the loss still holds. About two minutes on 4 cores. Nightly in CI.
+power-loss-trials:
+    LSR_HISTORY_SEEDS=50 cargo nextest run -p lsr-history --all-features --locked --run-ignored only -E 'test(/^rig::real_power_loss_trials$/)' --no-capture
+    LSR_CRASH_SEEDS=100 cargo nextest run -p lsr-sqlite --all-features --locked --run-ignored only -E 'test(/^crash_cycles::crash_cycle_campaign$/)' --no-capture
 
 # Linux with /dev/fuse, fusermount3 and FUSE allowed (root, or user_allow_other); builds LazyFS once
 # into ~/.cache/lsr-lazyfs (cmake, g++, git, libfuse3-dev). Not in `check`: a cycle takes about 3 s.

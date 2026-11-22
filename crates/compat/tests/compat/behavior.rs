@@ -8,7 +8,8 @@
 //!   `docs/BEHAVIOR.md` (`just behavior-doc` writes it), ids are unique, every row's table has a
 //!   marker and every marker rows, a row with no test in any evidence column carries a no-test
 //!   mark from the closed list (optionally after a scope and a colon), and every evidence cell
-//!   parses as citations `<kind>::`\``<name>`\`` with nothing else in between; every `plant::`
+//!   parses as citations `<kind>::`\``<name>`\``, or a backticked path in the tree with an
+//!   optional parenthetical scope, with nothing else in between; every path exists, every `plant::`
 //!   names a ledger entry, every `oracle::` a `Violation` variant, every `judge::` an `Anomaly`
 //!   variant; and an In review cell starts with a PR number, a branch tag or `None`;
 //! - with the Rust test listing (`every_behavior_citation_resolves`, run by `just
@@ -101,6 +102,11 @@ fn citations(cell: &str) -> Result<Vec<Citation>, String> {
     let mut out = Vec::new();
     let mut rest = cell.trim();
     while !rest.is_empty() {
+        if let Some((path, tail)) = path_citation(rest) {
+            out.push((PATH.to_owned(), path.to_owned()));
+            rest = separated(tail)?;
+            continue;
+        }
         let (kind, after) = rest
             .split_once("::`")
             .ok_or_else(|| format!("{rest:?} is not `kind::`name``"))?;
@@ -112,15 +118,36 @@ fn citations(cell: &str) -> Result<Vec<Citation>, String> {
             .split_once('`')
             .ok_or_else(|| format!("{after:?} has no closing backtick"))?;
         out.push((kind.to_owned(), name.to_owned()));
-        rest = tail.trim_start_matches([',', ';', ' ']);
-        let between = tail
-            .get(..tail.len().saturating_sub(rest.len()))
-            .unwrap_or_default();
-        if !rest.is_empty() && !between.contains([',', ';']) {
-            return Err(format!("{rest:?} follows a citation with no separator"));
-        }
+        rest = separated(tail)?;
     }
     Ok(out)
+}
+
+/// The kind of a citation that is a path in the tree (a rig script, say), as the document's
+/// section 7.3 allows: `` `scripts/lazyfs.py` (dead-mount restores) ``.
+const PATH: &str = "path";
+
+/// A backticked path with an optional parenthetical scope after it, and what follows.
+fn path_citation(text: &str) -> Option<(&str, &str)> {
+    let (path, tail) = text.strip_prefix('`')?.split_once('`')?;
+    let tail = tail.trim_start();
+    let tail = match tail.strip_prefix('(') {
+        Some(scoped) => scoped.split_once(')').map_or(tail, |(_, after)| after),
+        None => tail,
+    };
+    Some((path, tail))
+}
+
+/// What follows a citation, past the comma or semicolon that must separate it from the next.
+fn separated(tail: &str) -> Result<&str, String> {
+    let rest = tail.trim_start_matches([',', ';', ' ']);
+    let between = tail
+        .get(..tail.len().saturating_sub(rest.len()))
+        .unwrap_or_default();
+    if !rest.is_empty() && !between.contains([',', ';']) {
+        return Err(format!("{rest:?} follows a citation with no separator"));
+    }
+    Ok(rest)
 }
 
 fn read(path: &PathBuf) -> String {
@@ -238,6 +265,7 @@ fn problems(doc: &Doc) -> Vec<String> {
                             "plant" => plants.contains(&name),
                             "oracle" => oracle.contains(&head),
                             "judge" => judge.contains(&head),
+                            PATH => workspace_root().join(&name).exists(),
                             _ => true,
                         };
                         if !known {
@@ -336,7 +364,7 @@ fn every_behavior_citation_resolves() {
             .filter_map(|c| citations(c).ok())
             .flatten()
         {
-            if CHECKS.contains(&kind.as_str()) {
+            if CHECKS.contains(&kind.as_str()) || kind == PATH {
                 continue;
             }
             // The document cites a test by its name, or by a path ending in it.
@@ -370,4 +398,11 @@ fn a_citation_cell_parses_or_says_why_not() {
     citations("core `a`").unwrap_err();
     citations("core::`a` sim::`b`").unwrap_err();
     citations("Core::`a`").unwrap_err();
+    assert_eq!(
+        citations("`scripts/lazyfs.py` (dead-mount restores), sim::`b`"),
+        Ok(vec![
+            (PATH.into(), "scripts/lazyfs.py".into()),
+            ("sim".into(), "b".into())
+        ])
+    );
 }

@@ -101,7 +101,7 @@ signal = "`local_rewound`; `RecoverEvent::LocalRewound`"
 at_risk = "The replica holds commits the database lost. They stay restorable by id until retention removes them. The latest state becomes the rewound database (G2). If the regrown WAL is byte-identical in the staged range, nothing is detected and nothing differs"
 recovery = "Automatic"
 detected_by = "core::`a_committed_end_before_the_newest_staged_file_is_a_rewind`, core::`a_range_regrown_with_another_commit_size_is_a_rewind`, core::`a_shorter_chain_regrown_in_front_of_residue_is_a_rewind_without_the_wal_index`, sim::`power_loss_wal_rewind`, sim::`a_redo_replays_past_the_commits_a_power_loss_took`; plant::`anchor-any-tail`"
-recovered_by = "sim::`power_loss_wal_rewind`, sim::`a_redo_replays_past_the_commits_a_power_loss_took`"
+recovered_by = "sim::`power_loss_wal_rewind`, sim::`a_redo_replays_past_the_commits_a_power_loss_took`, sim::`a_power_loss_on_a_lying_disk_leaves_the_replica_restorable_while_it_lies`"
 in_review = "#89 keeps the staged snapshot if the process dies before uploading it. On main the next boot deletes it and takes a second one"
 
 [[row]]
@@ -169,8 +169,9 @@ response = "degraded, `PageSizeChanged`, before anything is staged"
 signal = "`page_size_changed`"
 at_risk = "Replication does not start. The old prefix keeps every state up to the change"
 recovery = "Restart onto a new replica prefix"
-detected_by = "core::`a_page_size_change_stops_at_boot_before_anything_is_staged`, sim::`a_page_size_change_stops_and_the_old_states_restore`"
+detected_by = "core::`a_page_size_change_stops_at_boot_before_anything_is_staged`, sim::`a_page_size_change_stops_and_the_old_states_restore`, core::`a_newest_replica_header_that_does_not_decode_still_names_the_page_size`, sim::`a_boot_whose_replica_reads_lie_never_writes_a_new_page_size_seed_0x13`; plant::`replica-page-size-unread`"
 survived_by = "sim::`a_page_size_change_stops_and_the_old_states_restore`"
+notes = "Fixed on this branch (`claude/survival-tests`): with staging gone and the replica's newest file's header unreadable (rot, or a read a proxy changed), the boot took no page size and snapshotted the new size onto the prefix. It now reads the newest headers in turn, up to eight, and fails `RemoteCorrupt` when none decodes"
 
 [[row]]
 table = "Boot"
@@ -240,8 +241,8 @@ response = "The new process knows none of it: retry counts, waits, degraded stat
 signal = "The new boot's own signals only"
 at_risk = "A stop for another writer becomes a boot that snapshots after the other writer's files (BOOT-22). A supervisor that restarts on `/healthz` 503 removes every backoff"
 recovery = "n/a"
-no_test = "known wrong (no failing test)"
-notes = "**known wrong.** Recorded as G3 in `docs/proposals/beyond-go.md`; the review of v1 confirmed it and rejects \"accepted\" as its status (D9)"
+no_test = "known wrong (expected-fail test, ignored)"
+notes = "**known wrong.** Recorded as G3 in `docs/proposals/beyond-go.md`; the review of v1 confirmed it and rejects \"accepted\" as its status (D9). Expected-fail test for its consequence on the one default stop: core::`a_restart_after_an_other_writer_stop_stops_again` (ignored). Retry waits and counts across a restart have no agreed expected behaviour and no test"
 
 [[row]]
 table = "Boot"
@@ -251,8 +252,8 @@ response = "Not recognised as another writer: this is BOOT-6. The engine snapsho
 signal = "`behind_remote`"
 at_risk = "The replica's one history now interleaves two databases. Retention may delete the other writer's files"
 recovery = "Operator"
-no_test = "known wrong (no failing test)"
-notes = "**known wrong** by reading `boot_listing` and `recover_traced`. No test: the simulator's second-writer operation removes the other writer's file before it restarts the engine. Confirmed by review: the one stop the engine makes by default is undone by a restart"
+no_test = "known wrong (expected-fail test, ignored)"
+notes = "**known wrong** by reading `boot_listing` and `recover_traced`, and shown by core::`a_restart_after_an_other_writer_stop_stops_again` (ignored, expected to fail): a running engine stops on `OtherWriter`, and the restarted engine snapshots after the other writer's file and uploads. The simulator's second-writer operation removes the other writer's file before it restarts the engine, so it cannot show it"
 
 [[row]]
 table = "Boot"
@@ -412,8 +413,9 @@ signal = "\"retrying\", then the fault's name in `Health.degraded`"
 at_risk = "Lag only"
 recovery = "Automatic"
 detected_by = "sim::`shm_header_mid_update`, sim::`shm_end_inside_tx`, sim::`frame_overwritten_between_scan_and_read`, sim::`db_created_no_pages`, sim::`eio_on_wal_read`"
+survived_by = "`scripts/lazyfs.py` (dead-mount restores)"
 recovered_by = "sim::`shm_header_mid_update`, sim::`shm_end_inside_tx`, sim::`frame_overwritten_between_scan_and_read`, sim::`db_created_no_pages`, sim::`eio_on_wal_read`"
-notes = "Each scenario injects one error and judges a restore after it clears. `eio_on_wal_read` fails the open of the WAL, not a read of a frame or page: a read error mid-scan is **untested**"
+notes = "Each scenario injects one error and judges a restore after it clears. `eio_on_wal_read` fails the open of the WAL, not a read of a frame or page: a read error mid-scan is **untested**. S for the read-error case on the real binary: after a torn fault kills LazyFS, the application and the engine keep running on a dead mount (every call on the database and the WAL fails) while the replica is restored and judged by `lsr-history`; 300 cycles from seed 1000 made 38 such restores, 0 anomalies"
 
 [[row]]
 table = "Running"
@@ -424,8 +426,9 @@ signal = "\"retrying\", then `local_disk_full` or `local_io` in `Health.degraded
 at_risk = "Lag, without bound while the disk is full. The WAL keeps growing on what is often the same disk"
 recovery = "An operator frees space"
 detected_by = "sim::`disk_full_on_staging`"
+survived_by = "sim::`a_full_staging_disk_leaves_the_replica_restorable_while_it_lasts`"
 recovered_by = "sim::`disk_full_on_staging`"
-notes = "The scenario injects one `ScratchExhausted` on one staging upload, then recovers. No disk is filled; lasting ENOSPC and the WAL growth are **untested**. The stall is shown for `LocalDiskFull` on the upload task by core::`a_retried_fault_that_persists_ends_degraded_as_a_stall` (eight injected failures), not on the sync task"
+notes = "The scenario injects one `ScratchExhausted` on one staging upload, then recovers. No disk is filled; lasting ENOSPC and the WAL growth are **untested**. The stall is shown for `LocalDiskFull` on the upload task by core::`a_retried_fault_that_persists_ends_degraded_as_a_stall` (eight injected failures), not on the sync task. The hold in `a_full_staging_disk_leaves_the_replica_restorable_while_it_lasts` fails every staging upload with ENOSPC (a transient `StorageFull`, as the directory store reports it) for 6 ticks while the app commits, and the replica is judged in the middle and at the end: S. Lasting ENOSPC is retried as `LocalIo`, not `LocalDiskFull`; only `ScratchExhausted` maps to `LocalDiskFull`"
 
 [[row]]
 table = "Running"
@@ -568,7 +571,7 @@ signal = "\"retrying\", then `readers_held` in `Health.degraded` (**code only**:
 at_risk = "None to the replica. The WAL grows without bound while long readers persist. **assumed**: no test measures the growth"
 recovery = "The application closes its readers"
 detected_by = "sim::`readers_hold_the_wal`, config::`without_the_app_readers_claim_the_truncate_divergence_is_reported`"
-notes = "The scenario injects the `ReadersHeld` result. The decision in `Guarded::checkpoint` that produces it is never reached by a test, and the config test checks a parse warning. The decision is **untested**"
+notes = "The scenario injects the `ReadersHeld` result. The decision in `Guarded::checkpoint` that produces it is never reached by a test, and the config test checks a parse warning. The decision is **untested**. Restores are judged while other processes hold readers for up to 11 ticks (sim::`readers_holding_the_wal_leave_the_replica_restorable_while_they_hold`), but the hold never reaches the TRUNCATE threshold, so that is no S for this row"
 
 [[row]]
 table = "Checkpoint"
@@ -645,8 +648,8 @@ signal = "\"retrying\"; `lsr_replica_operation_errors_total`"
 at_risk = "Lag"
 recovery = "Automatic"
 detected_by = "sim::`store_flaky_5pct`, core::`a_drain_retries_a_transient_upload_and_drains`"
-survived_by = "sim::`store_flaky_5pct`"
-notes = "S: the 5% rate fault on uploads and listings is still active at the judged restore. Nothing is shown about a store that is fully down"
+survived_by = "sim::`store_flaky_5pct`, sim::`a_store_down_for_each_operation_leaves_restorable_files_and_restores_fail_cleanly`"
+notes = "S: the 5% rate fault on uploads and listings is still active at the judged restore. A store fully down for one operation (list, read, upload or delete) for 2 to 11 ticks while the app commits: both judges restore the raw replica in the middle of the outage and at its end, and restores made through the down store fail with a store or listing error, never with another database (oracle `HeldRestore`). Campaign in `sim/tests/sim/survival.rs`: 2000 seeds of the default mix with holds, 0 failures"
 
 [[row]]
 table = "Upload"
@@ -668,8 +671,9 @@ signal = "`credentials`"
 at_risk = "Lag without bound; staging grows"
 recovery = "An operator fixes access. A missing bucket and a TLS failure are reported under this name too"
 detected_by = "sim::`creds_revoked_mid_run`"
+survived_by = "sim::`revoked_credentials_degrade_and_restores_meanwhile_are_refused_or_exact`"
 recovered_by = "sim::`creds_revoked_mid_run`"
-notes = "The scenario injects one `Auth` error on one upload, then recovers. Credentials that stay revoked, and the growth, are **untested**"
+notes = "`creds_revoked_mid_run` injects one `Auth` error on one upload, then recovers. The hold in `revoked_credentials_degrade_and_restores_meanwhile_are_refused_or_exact` refuses every call on the replica for 6 ticks while the app commits: the engine reports `credentials` (on the sync task when the boot meets it), the raw replica restores committed states in the middle and at the end, and restores through the revoked store are refused. Staging growth is **untested**"
 
 [[row]]
 table = "Upload"
@@ -1005,6 +1009,8 @@ signal = "exit 2"
 at_risk = "None from the restore. The state may be reachable another way and is not tried"
 recovery = "An operator removes the bad file and runs again"
 detected_by = "core::`nothing_is_published_unless_every_file_verified`, core::`a_header_range_that_disagrees_with_the_name_is_rejected`, ltx::`corruption::every_byte_change_to_a_small_rust_file_fails_or_aliases`"
+survived_by = "sim::`a_restore_whose_reads_return_other_bytes_fails_and_never_publishes`"
+notes = "S: every read the restore makes returns one byte flipped (a proxy or store returning wrong bodies) while the hold lasts; the restore fails with `RestoreError::File` and publishes nothing"
 
 [[row]]
 table = "Restore"
@@ -1015,6 +1021,8 @@ signal = "exit 3"
 at_risk = "None"
 recovery = "Run again"
 detected_by = "core::`a_store_error_other_than_not_found_ends_the_restore_without_retry`"
+survived_by = "sim::`a_store_down_for_each_operation_leaves_restorable_files_and_restores_fail_cleanly`"
+notes = "S: restores through a replica store that fails every read or listing fail with `RestoreError::Store` or `Inventory`; none publishes"
 
 [[row]]
 table = "Restore"
@@ -1340,12 +1348,13 @@ notes = "sim::`restored_old_meta`. puts back staging only. The whole-volume case
 table = "Circumstances the code does not distinguish"
 id = "WORLD-4"
 circumstance = "A restore lists the replica while the listing lags, or while files change under it"
-response = "`restore` lists once and plans from that listing. A listing that hides the newest files returns an older \"latest\" with exit 0. A file that vanishes is replanned (REST-4). A level-0 key overwritten mid-read (BOOT-16, BOOT-18) is read as whatever bytes arrive; a mixed read fails decode"
-signal = "None"
-at_risk = "An older state returned as the latest, silently. Bound: the store's listing lag"
+response = "`restore` lists, plans, and before applying a `Latest` or `AsOf` chain reads one byte of the two level-0 keys that would hold the next transaction (its own file, a snapshot ending at it); an empty listing is read past for every target at the first transaction's key. A key found sends the restore back to list, at most three times, then `RestoreError::ListingBehind` (exit 3). The dry run reads the same keys. A file that vanishes is replanned (REST-4). A level-0 key overwritten mid-read (BOOT-16, BOOT-18) is read as whatever bytes arrive; a mixed read fails decode"
+signal = "exit 3, `ListingBehind`"
+at_risk = "A lag that hides files past a real hole in the replica: no key past a hole can be named, so the older chain is returned as the latest. A replica whose first transaction's file was retained away still looks empty to a listing that hides everything"
 recovery = "Run again"
-no_test = "untested"
-notes = "None. The simulator's oracle restores over an unfaulted store handle"
+detected_by = "core::`a_newest_file_the_listing_hides_fails_the_restore_and_publishes_nothing`, core::`a_hidden_snapshot_past_the_listing_fails_an_as_of_restore`, core::`a_listing_that_shows_nothing_over_a_first_file_is_not_an_empty_replica`, cli::`a_dry_run_over_a_lagging_listing_fails_like_the_restore`, cli::`if_replica_exists_over_a_listing_that_shows_nothing_skips_nothing`; plant::`restore-trusts-listing`, plant::`empty-listing-is-empty-replica`, plant::`dry-run-trusts-listing`"
+survived_by = "sim::`a_restore_through_a_lagging_listing_is_the_replica_s_answer_or_an_error`"
+notes = "Was **known wrong** in effect: the simulator's lagging-listing hold showed a restore of `Latest` publishing an older database with success on its first written history, and `--if-replica-exists` skipping a restore with success over a listing that showed nothing. Both fixed on this branch. The hold restores through a listing frozen when it began, held to the raw replica's answer or an explained error; the hole case is accepted and counted (`hold.LaggingListing.past_hole`)"
 in_review = "#96 changes the engine's listings only"
 
 [[row]]
@@ -1579,8 +1588,8 @@ response = "The object fails decode on two reads, on two ticks. MAINT-4 then del
 signal = "Event `Repaired`"
 at_risk = "A sound, covered object is deleted. No restore is lost, because it was covered; the level is rebuilt"
 recovery = "Automatic"
-no_test = "untested"
-notes = "oracle::`DeletedOnOneRead`. only requires two reads"
+survived_by = "sim::`an_engine_booting_through_lying_reads_leaves_the_replica_restorable`, sim::`a_restore_whose_reads_return_other_bytes_fails_and_never_publishes`"
+notes = "S: the engine's own reads of the replica return a flipped header byte while restores are judged, and no restore is wrong. The deletion through MAINT-4 on two dependent bad reads is not reached by these tests and stays **untested**; oracle::`DeletedOnOneRead` only requires two reads"
 
 [[row]]
 table = "Circumstances the code does not distinguish"

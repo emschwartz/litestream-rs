@@ -111,7 +111,7 @@ pub use recover::{
 };
 pub use restore::{
     AsOfInside, DatabaseSink, FileFault, MAX_ATTEMPTS, NoPlan, PublishFailure, PublishLeft,
-    RestoreError, RestoreOptions, Restored, SinkOp, restore, restore_with,
+    RestoreError, RestoreOptions, Restored, SinkOp, listed_past, restore, restore_with,
 };
 #[cfg(any(test, feature = "testing"))]
 pub use restore::{Database, MemPublishError, MemSink};

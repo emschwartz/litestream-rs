@@ -16,7 +16,7 @@ Version 3. What changed from version 2 is listed at the end of section 7.
 | **S** survived | A restore is judged correct while the circumstance still holds |
 | **R** recovered | A restore is judged correct after the circumstance cleared, or after the engine's one-time decision (a snapshot, a continue) took effect |
 
-A row marked "D R" has no evidence about restores made during the fault. For a circumstance that is a single decision and not a lasting condition (most boot rows) S has no meaning and its absence is not a gap. For a lasting condition (credentials revoked, a full disk, a second writer) the absence of S is a gap: almost every simulator scenario injects one error at one call and judges the restore only after recovery (`injected` in `sim/src/scenario/faults.rs`). The random swarm does restore at arbitrary moments, including while rate faults are active, but no row can cite a swarm run as its evidence, so none earns S that way.
+A row marked "D R" has no evidence about restores made during the fault. For a circumstance that is a single decision and not a lasting condition (most boot rows) S has no meaning and its absence is not a gap. For a lasting condition (credentials revoked, a full disk, a second writer) the absence of S is a gap: almost every simulator scenario injects one error at one call and judges the restore only after recovery (`injected` in `sim/src/scenario/faults.rs`). The random swarm does restore at arbitrary moments, including while rate faults are active, but no row can cite a swarm run as its evidence, so none earns S that way. Lasting faults now have a rig: a hold (`Op::Hold`, `sim/src/run/hold.rs`) keeps a fault in place for 2 to 11 ticks while the app commits, judges the raw replica with both judges in the middle and at the end, and restores through the fault where a restore meets it. The written histories in `sim/tests/sim/survival.rs` are what the S marks cite. A hold of WAL damage is judged against a model that adopted the damage, so it earns no S for the WAL rows.
 
 Rows that earn none of the three carry one of these instead:
 
@@ -35,11 +35,12 @@ Evidence is cited as: a test name with its crate ("sim" is `sim/tests/sim`, "cor
 
 | Mark | Rows |
 |---|---|
-| D R | 53 |
-| D | 51 |
-| D S | 4 |
-| D S R | 1 |
-| untested | 22 |
+| D R | 50 |
+| D | 49 |
+| D S | 7 |
+| D S R | 4 |
+| S | 1 |
+| untested | 20 |
 | code only | 9 |
 | unknown | 10 |
 | known wrong | 5 |
@@ -193,6 +194,8 @@ D12 is closed by #104: every fault whose policy is to retry degrades its task as
 
 **Evidence.** core `every_retried_fault_stalls_and_no_stall_stops` (every `Fault` either is persistent, stalls, or is the end of a drain), core `a_retried_fault_that_persists_ends_degraded_as_a_stall` (eight injected `LocalDiskFull` on one task, then the degraded event and `Actor::degraded`). Both act on the policy and the actor; no test runs a halted engine for 5 minutes and reads `/healthz`. Mark: **D** for the routing, **untested** end to end. Tracked in issue #99.
 
+Also in the simulator, end to end over the engine: a hold that keeps the replica from moving while the app commits, through at least twice the stall threshold of failed attempts, must end with some task degraded (oracle `HealthBlind`); sim `a_halt_long_enough_to_stall_is_reported_degraded` holds an upload outage, a full staging disk and revoked credentials for 40 ticks each; plant `stall-never-reported-sim`. Drawn holds (at most 11 ticks) rarely reach the threshold. `/healthz` and the age gauge (N1) are not read.
+
 ### Two further properties
 
 **G5. Retention keeps a defined set of targets restorable.** Define the *retained set* of a listing at an anchor time as: the latest state; every transaction id from the last transaction of the first retained snapshot upward **that some retained file ends on**; and the restore point pinned while a task is degraded. Statement: after any delete job, or any subset of one, every target in the retained set that planned before still plans. What is *not* retained, by design: individual transactions older than the level-0 retention (5 minutes by default) once a merged file covers them. A restore to such an id refuses with `InsideFile`. So "point in time" inside the retention window means "to the granularity of the merged files that remain".
@@ -212,15 +215,15 @@ The simulator can inject exactly these: `Op` (commit, spill, vacuum, shrink, oth
 
 | Fault | Scope | What the engine does | Rig | Notes |
 |---|---|---|---|---|
-| Power loss, honest disk. Each block written since the last fsync of its file keeps its old or new bytes independently; the file length is drawn separately | In | Rows BOOT-3 to BOOT-11 | Block crash law at 512 and 4096 bytes: `sqlite/src/testing/vfs.rs`, sim `block_law_campaign`, sqlite `crash_cycle_campaign` | The law is taken from the ALICE model (Pillai et al., OSDI 2014). **assumed**: it has not been observed on real disks |
-| Power loss on the real binary | In | Same | LazyFS (`scripts/lazyfs.py`): clear-cache after kill, torn-seq and torn-op on the WAL | LazyFS passes metadata operations straight to the backing filesystem. A missing directory fsync cannot be seen |
-| A lost directory entry: a rename or unlink not followed by a directory fsync | Partly | Commit of a staged file fsyncs the file, renames, fsyncs the directory (`store-fs/src/lib.rs`). Deletes are not followed by a directory fsync (`store-fs/src/lib.rs`) | None. The simulator treats a delete as durable at once | A deleted staged file returning after power loss is **unknown** (section 6, D11) |
+| Power loss, honest disk. Each block written since the last fsync of its file keeps its old or new bytes independently; the file length is drawn separately | In | Rows BOOT-3 to BOOT-11 | Block crash law at 512 and 4096 bytes: `sqlite/src/testing/vfs.rs`, sim `block_law_campaign`, sqlite `crash_cycle_campaign`. The crash-cycle rig also judges restores while the loss holds: during the segment with the loss armed, with the power off before SQLite recovers, and after the reboot before the engine settles (sqlite `crash_cycles_under_the_block_law_restore_committed_states`; the campaign of 100 seeds of 12 cycles judged 1971, 568 and 568 such restores, 0 anomalies) | The law is taken from the ALICE model (Pillai et al., OSDI 2014). **assumed**: it has not been observed on real disks |
+| Power loss on the real binary | In | Same | LazyFS (`scripts/lazyfs.py`): clear-cache after kill, torn-seq and torn-op on the WAL. It also restores while the loss holds, with the power off and nothing restarted (300 cycles from seed 1000: 166 such restores, 0 anomalies) | LazyFS passes metadata operations straight to the backing filesystem. A missing directory fsync cannot be seen |
+| A lost directory entry: a rename or unlink not followed by a directory fsync | Partly | Commit of a staged file fsyncs the file, renames, fsyncs the directory (`store-fs/src/lib.rs`). Deletes are not followed by a directory fsync (`store-fs/src/lib.rs`) | store-fs `a_crash_at_any_step_of_a_commit_loses_nothing_committed_and_shows_nothing_torn` replays a commit's steps and crashes at every one (plants `staging-fsync-before-rename`, `staging-dir-fsync`). The simulator treats a delete as durable at once | The same checker over a delete fails: store-fs `a_crash_after_a_delete_never_brings_the_file_back` (ignored, expected to fail). Whether the engine handles a deleted staged file returning is **unknown** (section 6, D11) |
 | fsync of the WAL fails | In, within one process | RUN-3 | sqlite `a_failed_wal_sync_stages_nothing_of_its_generation_and_snapshots_after_a_truncate`; sim `wal_fsync_fails` with the simulator's lost writeback | Forgotten by a restart before the TRUNCATE. **known wrong** (D2), expected-fail tests ignored |
 | fsync of a staged file fails | In | RUN-15 | sim `fsync_fails_once` | |
 | fsync of the database file fails inside a checkpoint | Unclear | Retried as local I/O (CKPT-8) | None | **unknown** whether SQLite's next checkpoint copies the pages again (D8) |
 | Disk full | In | RUN-14 | sim `disk_full_on_staging` | Never escalates past "retrying" |
-| Read error (EIO) on the WAL or database | In | RUN-13 | sim `eio_on_wal_read` | |
-| A disk that reports fsync success and keeps nothing | Out for prevention (no software can make it durable), in for detection | BOOT-9: detected only while the regrown WAL differs from what was staged | sim `power_loss_wal_rewind` (`Op::LyingWalSync`); plant `wal-barrier` | No software can make such a disk durable. The replica is then ahead of the database (G2) |
+| Read error (EIO) on the WAL or database | In | RUN-13 | sim `eio_on_wal_read`; LazyFS dead-mount restores (`scripts/lazyfs.py`): a torn fault kills the filesystem under the running engine and the replica is restored meanwhile | |
+| A disk that reports fsync success and keeps nothing | Out for prevention (no software can make it durable), in for detection | BOOT-9: detected only while the regrown WAL differs from what was staged | sim `power_loss_wal_rewind` (`Op::LyingWalSync`); plant `wal-barrier`; sim `a_power_loss_on_a_lying_disk_leaves_the_replica_restorable_while_it_lies` (a power loss inside a lying-disk hold, restores judged while the disk still lies) | No software can make such a disk durable. The replica is then ahead of the database (G2) |
 | Bit rot in the database file | Partly | RUN-12 for a page the engine has seen. A page never seen is replicated as found | sim `db_page_flipped_under_sync` | A scrubber is not built |
 | Bit rot in a staged file | In | BOOT-5, RUN-16 | sim `staged_byte_flip_before_upload`, `newest_staged_file_byte_flip` | |
 | Torn write inside a block (old 512e disks) | Out. Reason: 4Kn and 512e-with-atomic-sector drives are the norm; SQLite's own WAL checksums catch a torn frame | n/a | n/a | The block law has no sub-block tear, so this is asserted, not shown |
@@ -540,6 +543,19 @@ Three other ways replication ends that are not a `StopCause`:
 | N2 | A backward clock step holds every timer for the size of the step: `Actor::clock` returns the old reading while the clock is behind, and retry waits, the checkpoint interval, compaction windows and retention all use it | Read in `Actor::clock`. The freeze is inferred, not observed | RUN-19, WORLD-14 | Issue #99 |
 | N3 | No cross-process exclusion on the staging directory, and the `OtherWriter` detector is probably blind when two writers share it | No lock found by search. Consequence inferred | WORLD-1, A4 | Issue #99 |
 | N4 | The `credentials` cause absorbs every 401 and 403, every S3 auth code including `RequestTimeTooSkewed`, a TLS failure and `NoSuchBucket`: bad keys, clock skew, an archive-tier object, a KMS failure, an object-lock refusal of one delete, a missing bucket. One name, at least six different operator actions | Read in `classify` and `S3Code::is_auth` | UP-4, WORLD-15, WORLD-22, WORLD-23 | Issue #99 |
+
+### Defects found by restores judged during a fault
+
+Found on branch `claude/survival-tests` by the simulator's holds (`Op::Hold`, `sim/src/run/hold.rs`), which judge restores while a fault still holds.
+
+| # | Defect | Rows | Tracking |
+|---|---|---|---|
+| S1 | **Fixed on the branch.** A restore of `Latest` or `AsOf` through a listing that lags published an older database and reported success | WORLD-4, G0, G2 | `claude/survival-tests`; plants `restore-trusts-listing`, `dry-run-trusts-listing` |
+| S2 | **Fixed on the branch.** A restore over a listing that shows nothing answered "empty replica", which `--if-replica-exists` turns into a skipped restore with success: an application could start on an empty database over a replica that holds its history | WORLD-4, G0 | `claude/survival-tests`; plant `empty-listing-is-empty-replica` |
+| S3 | **Fixed on the branch.** A boot with staging gone took a replica header that did not decode for no page size and snapshotted a new page size onto the prefix (swarm seed 0x13, under lying reads) | BOOT-15 | `claude/survival-tests`; plant `replica-page-size-unread` |
+| S4 | Open, not triaged to a fix. Swarm seed 0xb9, shrunk to 13 operations (two second writers, a corrupt publish, a checksum-mismatch upload, redone commits): `Latest` goes back from one node to an older one with no rewind recorded, while the oracle passes. Matches the class of D9 (a boot that snapshots over another writer's files) | BOOT-22, G2 | Handed to the second-writer work |
+| S5 | **A checker defect, fixed on `claude/survival-followup`.** Swarm seed 0x70f: the compaction byte budget counted a rolled-back level-1 file beside the file that replaced it at that level, 142 bytes over. No engine cost | MAINT | sim `a_rolled_back_output_replaced_at_its_level_counts_once` |
+| S6 | Lasting ENOSPC on staging (a transient `StorageFull`, as the directory store reports it) is retried as `LocalIo`, not `LocalDiskFull`; only `ScratchExhausted` maps to `LocalDiskFull` | RUN-14, D12 | Handed to the health and classification work |
 
 ### Blind spots in the checkers
 
