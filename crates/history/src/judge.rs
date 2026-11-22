@@ -165,7 +165,8 @@ enum Step {
     /// Onto a descendant (or the same node), or there was nothing before.
     Forward,
     /// Off a branch that a rewind recorded after the earlier node cut off, onto the rewind's
-    /// side: the place in the log's rewinds of the latest one that explains it.
+    /// side: the place in the log's rewinds of the earliest one that explains it, so a report
+    /// after any explaining rewind covers the step.
     Rewound(usize),
     /// Off a branch with nothing to explain it.
     Back { from: u32, to: u32 },
@@ -187,7 +188,7 @@ fn step(log: &Log, previous: &[NodeId], nodes: &[NodeId]) -> Step {
             })
         })
         .map(|(index, _)| index)
-        .max();
+        .min();
     if let Some(index) = explained {
         return Step::Rewound(index);
     }

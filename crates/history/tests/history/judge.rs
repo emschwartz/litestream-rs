@@ -84,6 +84,22 @@ fn an_excuse_covers_a_step_a_rewind_not_yet_reported_would_explain() {
     assert_eq!(judge.unreported(), 1);
 }
 
+/// Two rewinds explain the same step and the engine reported after the first: the step is
+/// covered, though the second rewind (a later power loss the engine has not looked at yet)
+/// has no report of its own.
+#[test]
+fn a_report_after_any_explaining_rewind_covers_the_step() {
+    let (mut log, [_, a, _, c]) = line();
+    let mut judge = Judge::new(AheadMode::Count).with_signals(Signals::Required);
+    judge.latest(&log, d(3)).unwrap();
+    log.recover(a, 40);
+    judge.signal(&log);
+    let x = log.commit(d(7), 50);
+    log.recover(a, 60);
+    log.commit(d(8), 70);
+    assert_eq!(judge.latest(&log, d(7)), Ok(x), "from {}", c.get());
+}
+
 /// A report that came before the rewind does not cover it.
 #[test]
 fn a_report_before_the_rewind_does_not_cover_it() {

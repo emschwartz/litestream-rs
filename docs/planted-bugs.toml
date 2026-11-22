@@ -381,3 +381,16 @@ name = "damage-adopted-as-commit"
 fix = "checker-holes (model adoption)"
 package = "lsr-sim"
 tests = ["history::tests::a_restore_of_a_state_adopted_from_damage_fails"]
+
+[[bug]]
+name = "rewind-report-only-after-the-latest"
+fix = "checker-holes (rewind reports)"
+package = "lsr-history"
+test_bin = "history"
+tests = ["judge::a_report_after_any_explaining_rewind_covers_the_step"]
+
+[[bug]]
+name = "first-sync-never-a-report"
+fix = "checker-holes (rewind reports)"
+package = "lsr-sim"
+tests = ["run::tests::a_first_sync_over_files_reports_a_loss"]

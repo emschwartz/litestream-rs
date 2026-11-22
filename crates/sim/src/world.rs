@@ -681,6 +681,20 @@ impl World {
         Ok(listing.files.last().copied())
     }
 
+    /// Whether the replica holds any file at any level, read around the
+    /// wrappers; `false` when it cannot be listed.
+    #[must_use]
+    pub fn replica_holds_files(&self) -> bool {
+        use lsr_core::{Level, ObjectStore, PageLimit};
+        Level::ALL.into_iter().any(|level| {
+            block_on(
+                self.remote_raw
+                    .list(level, None, PageLimit::new(1).unwrap_or(PageLimit::MAX)),
+            )
+            .is_ok_and(|listing| !listing.files.is_empty())
+        })
+    }
+
     /// Every level-0 file on the replica, oldest first, read around the
     /// wrappers.
     ///

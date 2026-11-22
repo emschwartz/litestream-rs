@@ -760,7 +760,7 @@ impl Runner {
             }
             Event::Booted { cause: Some(cause) } | Event::Resnapshot(cause) => {
                 reach.bump(format!("snapshot.{}", variant(&CauseKind::from(cause))));
-                if snapshot_reports_loss(cause) {
+                if snapshot_reports_loss(cause, self.w.replica_holds_files()) {
                     self.w.history.signal();
                 }
             }
@@ -1991,9 +1991,13 @@ mod after_restart;
 /// Whether a snapshot with this cause is the engine saying the history it had replicated may
 /// not continue: the database, its WAL or the staging directory went back or cannot be
 /// followed. The history judge excuses a `Latest` that went back only after such a report.
-const fn snapshot_reports_loss(cause: &lsr_core::SnapshotCause) -> bool {
+/// A first sync over a replica that already holds files (`over_files`) is one: the engine
+/// had no position to prove the database continues that history, and says so by starting
+/// over (staging gone and a database a lying disk rewound, say: accepted limit L4).
+const fn snapshot_reports_loss(cause: &lsr_core::SnapshotCause, over_files: bool) -> bool {
     use lsr_core::SnapshotCause as C;
     match cause {
+        C::FirstSync => over_files,
         C::BehindRemote { .. }
         | C::NewestStagedFileUnreadable
         | C::WalMissing
@@ -2003,7 +2007,7 @@ const fn snapshot_reports_loss(cause: &lsr_core::SnapshotCause) -> bool {
         | C::LocalRewound { .. }
         | C::StagedUnverified { .. }
         | C::WalSyncFailed => true,
-        C::FirstSync | C::CheckpointBoundary | C::OperatorRequested => false,
+        C::CheckpointBoundary | C::OperatorRequested => false,
     }
 }
 
