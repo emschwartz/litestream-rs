@@ -1463,29 +1463,38 @@ fn damaged_a_snapshot(report: &RunReport) -> Result<(), String> {
 /// the passive checkpoint stages one more file, and its upload is the next
 /// to the replica. The uploader's delete fails and power is lost. The next
 /// boot reads the replica's newest level 0 file back against the staged one
-/// (a listing confirms a file only by content) and uploads it again over the same key.
+/// (a listing confirms a file only by content) and would upload the staged
+/// copy over it, but nothing vouches for that copy: the level 0 file before
+/// it went with the day's retention, so no replica file anchors it in the
+/// live WAL. The torn object stays as listed, the boot names the dropped
+/// copy, and the snapshot takes the transaction after it rather than new
+/// content under a key a listing showed.
 #[must_use]
 pub fn corrupt_l0_publish_then_power_loss() -> Scenario {
     let mut s =
         corrupt_publish_then_power_loss("corrupt_l0_publish_then_power_loss", Some(93_600_000));
-    s.expect = vec![retries(FaultKind::UploadChecksumMismatch), Expect::Oracle];
-    s.check = Some(uploaded_again);
+    s.expect = vec![
+        retries(FaultKind::UploadChecksumMismatch),
+        Expect::Event(EventMatch::Booted(Some(CauseKind::StagedUnwitnessed))),
+        Expect::Oracle,
+    ];
+    s.check = Some(left_as_listed);
     s
 }
 
-/// The damaged object is a level 0 file and the replica accepted that key
-/// twice: the damaged upload, and the one after the read-back.
-fn uploaded_again(report: &RunReport) -> Result<(), String> {
+/// The damaged object is a level 0 file the replica accepted once: no
+/// upload, snapshot or repair wrote other bytes under its key.
+fn left_as_listed(report: &RunReport) -> Result<(), String> {
     let key = damaged_at(report, 0)?;
     let puts = report
         .remote_events
         .iter()
         .filter(|event| matches!(event, RecorderEvent::Put { key: put, .. } if *put == key))
         .count();
-    if puts == 2 {
+    if puts == 1 {
         Ok(())
     } else {
-        Err(format!("{key} was uploaded {puts} times, want 2"))
+        Err(format!("{key} was uploaded {puts} times, want 1"))
     }
 }
 

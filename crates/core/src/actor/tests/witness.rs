@@ -10,6 +10,11 @@ use super::*;
 /// header, with page 1 filled with `fill`: what a staging backup put back,
 /// or any replacement that verifies, leaves. Returns its bytes.
 fn forge(rig: &Rig, n: u64, fill: u8) -> Vec<u8> {
+    forge_page(rig, n, 1, fill)
+}
+
+/// As [`forge`], with page `pgno` filled instead.
+fn forge_page(rig: &Rig, n: u64, pgno: u32, fill: u8) -> Vec<u8> {
     let store = &rig.staging.inner;
     let key = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(n).unwrap()));
     let all = ReadLen::new(ReadLen::MAX_RAW).unwrap();
@@ -19,7 +24,7 @@ fn forge(rig: &Rig, n: u64, fill: u8) -> Vec<u8> {
     while let Some(event) = decoder.next_event().unwrap() {
         if let lsr_ltx::Event::Page(page) = event {
             let mut data = page.data().to_vec();
-            if page.pgno() == pg(1) {
+            if page.pgno() == pg(pgno) {
                 data.fill(fill);
             }
             pages.push((page.pgno(), data));
@@ -137,4 +142,46 @@ fn pending_files_from_a_gone_generation_are_dropped_and_named() {
     assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2)]);
     assert_eq!(snapshots(&rig), vec![1, 2]);
     assert_eq!(restored(&rig), 3);
+}
+
+/// The replica's newest level-0 object is torn and its staged copy, which
+/// boot's listing would upload over it, is not what the WAL holds: the
+/// object stays as listed and is confirmed, and the snapshot takes the
+/// transaction after it, never the listed one.
+#[test]
+fn a_refused_copy_of_a_torn_tail_leaves_the_listed_key_to_the_replica() {
+    let (mut rig, mut actor) = caught_up();
+    commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
+    commit_and_settle(&mut rig, &mut actor, 3, T0 + 1);
+    assert_eq!(staged(&rig), vec![2, 3]);
+    let key = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(3).unwrap()));
+    let all = ReadLen::new(ReadLen::MAX_RAW).unwrap();
+    let mut torn = block_on(rig.remote.inner.read(&key, 0, all)).unwrap();
+    torn.truncate(torn.len() / 2);
+    block_on(async {
+        let mut up = rig.remote.inner.begin_upload(&key, ts(T0)).await.unwrap();
+        up.write(&torn).await.unwrap();
+        up.commit().await.unwrap();
+    });
+    let forged = forge(&rig, 3, 0xEE);
+    let mut actor = Actor::new(cfg());
+    let boot = rig.tick(&mut actor, T0 + 2);
+    assert_eq!(
+        event(&boot),
+        Some(&Event::Booted {
+            cause: Some(SnapshotCause::StagedUnwitnessed {
+                from: Txid::new(3).unwrap()
+            })
+        })
+    );
+    rig.settle(&mut actor, T0 + 2);
+    assert!(!replica_holds(&rig, 3, &forged));
+    assert!(replica_holds(&rig, 3, &torn));
+    // The snapshot took 4 (the torn object keeps a full decode of every
+    // level-0 file from running here).
+    assert!(
+        ranges(&rig.remote).contains(&(4, 4)),
+        "{:?}",
+        ranges(&rig.remote)
+    );
 }
