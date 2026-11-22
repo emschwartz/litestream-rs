@@ -226,3 +226,19 @@ fix = "plant"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["unaided::swarm_seed_44_restores_only_committed_states"]
+
+[[bug]]
+name = "stamp-before-committed-read"
+fix = "847521a"
+package = "lsr-core"
+tests = [
+    "a_commit_after_the_tick_began_is_not_stamped_before_it_landed",
+]
+
+[[bug]]
+name = "seal-stamped-at-checkpoint-start"
+fix = "847521a"
+package = "lsr-core"
+tests = [
+    "a_commit_before_the_checkpoint_barrier_is_not_stamped_before_it_landed",
+]
