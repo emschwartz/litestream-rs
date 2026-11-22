@@ -1,0 +1,15 @@
+diff --git a/crates/core/src/fault.rs b/crates/core/src/fault.rs
+index fc4b0fc..831a524 100644
+--- a/crates/core/src/fault.rs
++++ b/crates/core/src/fault.rs
+@@ -842,10 +842,6 @@ impl Fault {
+     #[must_use]
+     pub const fn from_staging(err: &StoreError) -> Self {
+         match err {
+-            StoreError::Transient {
+-                kind: io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded,
+-                ..
+-            } => Self::LocalDiskFull,
+             StoreError::Transient { .. }
+             | StoreError::Throttled { .. }
+             | StoreError::Denied { .. }
