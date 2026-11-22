@@ -196,6 +196,9 @@ pub struct Opts {
     /// With `drawn`, a power loss keeps the block law's draw instead of a
     /// drawn prefix ([`Weights::block_crash_law`]). [`run_with`] sets it.
     pub block_crash_law: bool,
+    /// With `drawn`, the disk lies about the engine's fsync of the WAL from
+    /// the start ([`Weights::lying_wal_sync`]). [`run_with`] sets it.
+    pub lying_wal_sync: bool,
     /// What the app does after each restart ([`Weights::after_restart`]).
     /// [`run_with`] sets it.
     pub after_restart: AfterRestart,
@@ -1758,6 +1761,7 @@ pub fn run_with(
     let opts = Opts {
         drawn: true,
         block_crash_law: weights.block_crash_law,
+        lying_wal_sync: weights.lying_wal_sync,
         after_restart: weights.after_restart,
         ..opts.clone()
     };
@@ -1779,6 +1783,9 @@ pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure
     if opts.drawn {
         runner.draw_power_law(seed, opts.block_crash_law);
         runner.draw_batch_widths(seed);
+        if opts.lying_wal_sync {
+            runner.w.sqlite.lie_on_our_sync();
+        }
     }
     runner.trace = opts.trace;
     runner.record = opts.record;

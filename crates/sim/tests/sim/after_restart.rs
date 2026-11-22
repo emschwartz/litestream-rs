@@ -47,3 +47,12 @@ fn the_swarm_draws_every_behaviour_after_a_restart() {
     }
     assert_eq!(Weights::default().after_restart, AfterRestart::Nothing);
 }
+
+#[test]
+fn the_swarm_draws_lying_and_honest_disks() {
+    let drawn: Vec<_> = (0..300)
+        .map(|n| Weights::swarm(Seed::new(n)).lying_wal_sync)
+        .collect();
+    assert!(drawn.contains(&true) && drawn.contains(&false));
+    assert!(!Weights::default().lying_wal_sync);
+}

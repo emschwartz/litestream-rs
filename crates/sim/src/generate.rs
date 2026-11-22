@@ -309,6 +309,12 @@ pub struct Weights {
     /// drawn prefix of them. Not an operation: it changes what every power
     /// loss of the run leaves, so the history's draws are the same either way.
     pub block_crash_law: bool,
+    /// Whether the disk lies about the engine's own fsync of the WAL (its
+    /// barrier before staging) for the whole run: the sync succeeds and
+    /// keeps nothing, while SQLite's own syncs hold. A power loss can then
+    /// take frames the engine staged and published. Not an operation, for
+    /// the same reason as `block_crash_law`.
+    pub lying_wal_sync: bool,
     /// What the app does right after every restart (a crash, a power loss, a
     /// stop), before the new engine's first tick. Not an operation, for the
     /// same reason as `block_crash_law`.
@@ -386,6 +392,7 @@ impl Default for Weights {
             staging_replace_running: 0,
             vacuum_resizes: true,
             block_crash_law: false,
+            lying_wal_sync: false,
             after_restart: AfterRestart::Nothing,
         }
     }
@@ -510,6 +517,7 @@ impl Weights {
             staging_replace_running: 0,
             vacuum_resizes: below(&entropy, 2) == 0,
             block_crash_law: false,
+            lying_wal_sync: false,
             after_restart: AfterRestart::Nothing,
         };
         // Drawn last, so every other kind keeps the weight it had before
@@ -530,6 +538,8 @@ impl Weights {
         if mix.after_restart == AfterRestart::Redo && below(&entropy, 2) == 0 {
             mix.after_restart = AfterRestart::Retry;
         }
+        // Drawn after that, for the same reason: a disk in four lies.
+        mix.lying_wal_sync = below(&entropy, 4) == 0;
         mix
     }
 
