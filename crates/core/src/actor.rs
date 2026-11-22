@@ -1697,22 +1697,7 @@ impl Actor {
             Ok(inventory) => inventory,
             Err(err) => return Some(self.fault(Task::Maintenance, inventory_fault(&err), now)),
         };
-        // Uploads are idle, so everything this engine wrote is at or below
-        // its position: a file past it is another writer's. In steady state
-        // this listing is the first to see one, and nothing may be planned
-        // from it (no compaction, snapshot or delete takes it as input). A
-        // listing that lags a delete shows a file that is gone, so a read
-        // must find one before the engine stops; a listing a read
-        // contradicts plans nothing either, and is taken again later.
-        let known = self.snapshot_after();
-        if inventory.newest() > known {
-            return Some(match past_known(env.remote, &inventory, known).await {
-                Ok(true) => self.fault(Task::Maintenance, Fault::RemoteAheadOfLocal, now),
-                Ok(false) => self.list_again_later(now),
-                Err(fault) => self.fault(Task::Maintenance, fault, now),
-            });
-        }
-        if let Some(tick) = self.listing_lags(env.remote, &inventory, now).await {
+        if let Some(tick) = self.listing_untrusted(env.remote, &inventory, now).await {
             return Some(tick);
         }
         if self.engine.maintain.read_back_owed
@@ -1852,6 +1837,29 @@ impl Actor {
             },
             now,
         )
+    }
+
+    /// What ends a maintenance tick before anything is planned from `inventory`: a file
+    /// past everything this engine staged or confirmed is another writer's, and nothing may
+    /// be planned from that listing (no compaction, snapshot or delete takes it as input).
+    /// In steady state this listing is the first to see one. A listing that lags a delete
+    /// shows a file that is gone, so a read must find one before the engine stops; a
+    /// listing a read contradicts plans nothing either, and is taken again later.
+    async fn listing_untrusted<R: ObjectStore>(
+        &mut self,
+        remote: &R,
+        inventory: &Inventory,
+        now: Timestamp,
+    ) -> Option<Tick> {
+        let known = self.snapshot_after();
+        if inventory.newest() > known {
+            return Some(match past_known(remote, inventory, known).await {
+                Ok(true) => self.fault(Task::Maintenance, Fault::RemoteAheadOfLocal, now),
+                Ok(false) => self.list_again_later(now),
+                Err(fault) => self.fault(Task::Maintenance, fault, now),
+            });
+        }
+        self.listing_lags(remote, inventory, now).await
     }
 
     /// A listing that ends before what this engine confirmed either lags its
