@@ -725,3 +725,19 @@ name = "delete-without-dir-sync"
 fix = "93d0510"
 package = "lsr-store-fs"
 tests = ["a_crash_after_a_delete_never_brings_the_file_back"]
+
+[[bug]]
+name = "probe-skips-higher-levels"
+fix = "fd5f8e1"
+package = "lsr-core"
+tests = ["a_hidden_level_one_file_past_the_listing_is_found_by_its_level_key"]
+
+[[bug]]
+name = "probe-skips-higher-levels-sim"
+fix = "fd5f8e1"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "a_lagging_listing_that_hides_a_merged_file_sends_no_upload_into_its_key_seed_0x517",
+    "a_merged_file_hidden_from_a_lagging_listing_is_found_by_its_level_key_seed_0x4dc",
+]

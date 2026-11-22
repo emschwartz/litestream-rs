@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/probe.rs b/crates/core/src/probe.rs
+index 83a4fff..0192cfe 100644
+--- a/crates/core/src/probe.rs
++++ b/crates/core/src/probe.rs
+@@ -70,7 +70,7 @@ fn named(txid: Txid, starts: &Starts) -> Vec<FileKey> {
+     if from_start != single {
+         keys.push(from_start);
+     }
+-    for (level, start) in &starts.0 {
++    for (level, start) in starts.0.iter().take(0) {
+         if let Some(range) = TxidRange::new(*start, txid) {
+             keys.push(FileKey::new(*level, range));
+         }
