@@ -1,0 +1,12 @@
+diff --git a/crates/sim/src/model.rs b/crates/sim/src/model.rs
+index 094dca1..888e737 100644
+--- a/crates/sim/src/model.rs
++++ b/crates/sim/src/model.rs
+@@ -378,7 +378,6 @@ impl Model {
+         let snapshot = self
+             .notes
+             .iter()
+-            .rev()
+             .find(|n| n.txid == txid && n.at <= at)
+             .map(|n| (n.seq, n.commit));
+         stage.max(snapshot).map(|(_, commit)| commit)

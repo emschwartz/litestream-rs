@@ -119,6 +119,17 @@ shuttle iterations="200":
     SHUTTLE_ITERATIONS={{iterations}} RUSTFLAGS="--cfg shuttle" CARGO_TARGET_DIR=target/shuttle \
         cargo test --locked -p lsr-replica --test replica shuttle::
 
+# Every fixed defect is re-planted in a scratch tree and its named tests must fail
+# (docs/planted-bugs.md). A survivor is a defect in the tests; a stale patch needs re-expressing.
+# Nightly in CI; about 20 minutes cold. `just planted-bugs --only listing-cursor` runs one entry.
+planted-bugs *args:
+    uv run scripts/planted-bugs.py {{args}}
+
+# Mutation-tests the lines this branch changed in core and ltx against `base`; fails on a missed
+# mutant not in docs/mutants-escapes.txt. Runs on pull requests in CI.
+mutants-diff base="origin/main":
+    scripts/mutants-diff.sh {{base}}
+
 # Mutation testing for one crate (just mutants ltx); results in target/mutants/mutants.out.
 # Survivors are killed by a test or recorded in docs/mutants.md. Not part of check.
 # The tree is copied with its .git: a guard test in core lists the tracked files, and

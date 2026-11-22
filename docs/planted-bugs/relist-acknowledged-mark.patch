@@ -1,0 +1,12 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index e247971..235b279 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -930,7 +930,6 @@ impl Actor {
+     /// Takes the upload state a step left, raising the acknowledged mark.
+     fn set_upload(&mut self, state: UploadState) {
+         self.engine.upload = state;
+-        self.engine.acknowledged = self.engine.acknowledged.max(state.confirmed());
+     }
+ 
+     /// The checkpoint the policy wants now, when its task and the sync task

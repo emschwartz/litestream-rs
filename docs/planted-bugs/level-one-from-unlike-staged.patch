@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/maintain.rs b/crates/core/src/maintain.rs
+index 4845888..0dcdaae 100644
+--- a/crates/core/src/maintain.rs
++++ b/crates/core/src/maintain.rs
+@@ -712,7 +712,7 @@ async fn compact_level_one<L: ObjectStore, R: ObjectStore>(
+     local: &L,
+     replica: &R,
+ ) -> Result<Compacted, CompactError> {
+-    if !local_is_replica(local, replica, job.inputs()).await? {
++    if false && !local_is_replica(local, replica, job.inputs()).await? {
+         return compact(replica, replica, job.inputs(), job.level()).await;
+     }
+     match compact(local, replica, job.inputs(), job.level()).await {

@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index e247971..0301a26 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -1959,7 +1959,7 @@ async fn prefix_page_size<R: ObjectStore>(
+         ) => Some(*page_size),
+         Some(NewestStagedFile::Unreadable { .. }) | None => None,
+     };
+-    let behind = confirmed > newest_staged.map(NewestStagedFile::txid);
++    let behind = false;
+     if confirmed.is_some() && (behind || staged.is_none()) {
+         return Ok(replica_page_size(remote).await?.or(staged));
+     }

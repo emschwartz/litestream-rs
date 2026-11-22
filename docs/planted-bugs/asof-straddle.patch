@@ -1,0 +1,14 @@
+diff --git a/crates/core/src/plan.rs b/crates/core/src/plan.rs
+index d8722f9..8bba67d 100644
+--- a/crates/core/src/plan.rs
++++ b/crates/core/src/plan.rs
+@@ -488,8 +488,8 @@ fn straddler(
+ /// (`snapshot.rs`), and a time a store fell back to is the object's upload,
+ /// both any time after the commit, so neither dates anything.
+ fn dates_next(info: &FileInfo, one_past: Txid, instant: Timestamp, stamp: Option<Stamp>) -> bool {
++    let _ = (instant, stamp);
+     info.key.range().max() == one_past
+-        && stamp.and_then(|known| known.commit_at_or_after(instant)) == Some(true)
+ }
+ 
+ /// Smaller is named first: the nearest end, then the higher level, then the key.
