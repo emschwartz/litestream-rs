@@ -265,7 +265,7 @@ tests = ["unaided::swarm_seed_44_restores_only_committed_states"]
 
 [[bug]]
 name = "skip-boot-scratch-cleanup"
-fix = "e411fc0"
+fix = "31842f7"
 package = "lsr-cli"
 test_bin = "cli"
 tests = [
@@ -274,8 +274,17 @@ tests = [
 
 [[bug]]
 name = "maintenance-only-after-uptime"
-fix = "66563c2"
+fix = "12fe38f"
 package = "lsr-core"
 tests = [
     "maintenance_gets_its_share_while_a_backlog_uploads",
+]
+
+[[bug]]
+name = "s3-boot-forgets-killed-uploads"
+fix = "829eb8a"
+package = "lsr-store-s3"
+test_bin = "store-s3"
+tests = [
+    "a_killed_process_s_multipart_upload_is_aborted_at_the_next_boot",
 ]
