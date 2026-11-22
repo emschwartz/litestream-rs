@@ -130,6 +130,13 @@ impl Scheduled {
         }
     }
 
+    /// Moves the next run's time by `back`, after the clock stepped back.
+    pub(crate) fn step_back(&mut self, back: impl FnOnce(Timestamp) -> Timestamp) {
+        if let Stage::Due(at) = self.stage {
+            self.stage = Stage::Due(back(at));
+        }
+    }
+
     /// When the replicator's thread must wake for the next run.
     pub(crate) const fn wake(&self) -> Option<Timestamp> {
         match self.stage {

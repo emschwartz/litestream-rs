@@ -21,6 +21,8 @@ pub const SKIP_VAR: &str = "LSR_SKIP";
 pub enum Resource {
     /// A MinIO server (`just minio-up`).
     Minio,
+    /// A Toxiproxy server in front of MinIO (`scripts/toxiproxy.sh`).
+    Toxiproxy,
     /// The pinned Go builds (`scripts/build-go-litestream.sh`).
     GoBuilds,
     /// The Tigris bucket and its credentials (`scripts/tigris.sh`).
@@ -33,8 +35,9 @@ pub enum Resource {
 
 impl Resource {
     /// Every resource, for the parser of [`SKIP_VAR`].
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Minio,
+        Self::Toxiproxy,
         Self::GoBuilds,
         Self::Tigris,
         Self::CCompiler,
@@ -46,6 +49,7 @@ impl Resource {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Minio => "minio",
+            Self::Toxiproxy => "toxiproxy",
             Self::GoBuilds => "go",
             Self::Tigris => "tigris",
             Self::CCompiler => "cc",
@@ -57,6 +61,7 @@ impl Resource {
     const fn how(self) -> &'static str {
         match self {
             Self::Minio => "start MinIO and run through `just test-s3` or `just compat-s3`",
+            Self::Toxiproxy => "run through `just test-s3`, which starts Toxiproxy before MinIO",
             Self::GoBuilds => "build the Go binaries with `just compat`",
             Self::Tigris => {
                 "run through `just test-tigris` or `just tigris-restore` with credentials"
@@ -181,6 +186,23 @@ pub fn minio() -> Option<Minio> {
     })
 }
 
+/// A Toxiproxy server's HTTP API (`scripts/toxiproxy.sh`).
+#[derive(Clone, Debug)]
+pub struct Toxiproxy {
+    /// `http://127.0.0.1:8474`.
+    pub api: String,
+}
+
+/// The Toxiproxy whose API `LSR_TOXIPROXY_API` names, once it accepts a connection; see
+/// [`need`].
+pub fn toxiproxy() -> Option<Toxiproxy> {
+    need(Resource::Toxiproxy, || {
+        let api = env_text("LSR_TOXIPROXY_API").ok_or("LSR_TOXIPROXY_API is unset")?;
+        reachable(&api)?;
+        Ok(Toxiproxy { api })
+    })
+}
+
 /// Whether `endpoint` (`http://host:port`) accepts a TCP connection within five seconds, so a
 /// test that expects an error cannot pass on a server that is simply absent.
 ///
@@ -248,6 +270,70 @@ mod tests {
     #[should_panic(expected = "this test needs cc")]
     fn a_missing_resource_panics() {
         must(Resource::CCompiler, || Err::<(), _>("no cc".to_owned()));
+    }
+
+    /// What a probe must do in this environment: `None` only when the runner opted out, a
+    /// panic when the resource is required and its variable is unset, and never `None` when
+    /// the variable names it (found, or a panic that it is unreachable). A probe that returned
+    /// `None` on its own would let every test that needs the resource skip and pass.
+    fn fails_closed<T>(resource: Resource, var: &str, probe: fn() -> Option<T>) {
+        let opted = opted_out(
+            env_text(SKIP_VAR).as_deref(),
+            env_text("CI").is_some(),
+            resource,
+        );
+        let named = env_text(var).is_some();
+        let got = std::panic::catch_unwind(probe);
+        match (opted, named) {
+            (Ok(true), _) => assert!(matches!(got, Ok(None)), "an opt-out returns None"),
+            (Err(_), _) | (Ok(false), false) => assert!(
+                got.is_err(),
+                "a required {} that is missing must fail the test, not skip it",
+                resource.name()
+            ),
+            (Ok(false), true) => assert!(
+                !matches!(got, Ok(None)),
+                "a named {} is found or fails, never skipped",
+                resource.name()
+            ),
+        }
+    }
+
+    /// The failure tells the runner how to get the resource: for Toxiproxy, the recipe that
+    /// starts it.
+    #[test]
+    fn a_missing_toxiproxy_names_the_recipe_that_starts_it() {
+        let how = Resource::Toxiproxy.how();
+        assert!(how.contains("`just test-s3`"), "{how:?}");
+        assert!(how.contains("Toxiproxy"), "{how:?}");
+    }
+
+    /// `LSR_SKIP=toxiproxy` opts out of Toxiproxy and nothing else.
+    #[test]
+    fn toxiproxy_is_skipped_by_its_own_word_only() {
+        assert_eq!(Resource::Toxiproxy.name(), "toxiproxy");
+        assert_eq!(
+            opted_out(Some("toxiproxy"), false, Resource::Toxiproxy),
+            Ok(true)
+        );
+        assert_eq!(
+            opted_out(Some("toxiproxy"), false, Resource::Minio),
+            Ok(false)
+        );
+        assert_eq!(
+            opted_out(Some("minio"), false, Resource::Toxiproxy),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn the_toxiproxy_probe_fails_closed() {
+        fails_closed(Resource::Toxiproxy, "LSR_TOXIPROXY_API", toxiproxy);
+    }
+
+    #[test]
+    fn the_minio_probe_fails_closed() {
+        fails_closed(Resource::Minio, "LSR_MINIO_ENDPOINT", minio);
     }
 
     #[test]

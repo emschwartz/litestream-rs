@@ -2,7 +2,7 @@
 default: check
 
 # The land gate: format, lints, tests. A branch lands only when this is green.
-check: fmt-check clippy test doctest features upstream-test-map-fresh
+check: fmt-check clippy test doctest features upstream-test-map-fresh evidence-fresh
 
 fmt-check:
     cargo fmt --all -- --check
@@ -166,11 +166,12 @@ sqlite-big:
 # The VFS test's C application needs a SQLite with sqlite3_load_extension. It takes SQLITE3_CFLAGS and
 # SQLITE3_LIBS when set, then on macOS Homebrew's (`brew install sqlite`; the system one lacks
 # the function), then `pkg-config sqlite3`, then plain -lsqlite3 (crates/compat/src/vfs.rs).
-# The test map's counterpart check is ignored too, but it needs the listing upstream-test-map-fresh writes.
+# The test map's counterpart check and the behaviour citation check are ignored too, but they need
+# the listings upstream-test-map-fresh and evidence-fresh write, and run there (both in check).
 # The s3:: tests need MinIO, so they belong to compat-s3, which starts it; here they would fail closed.
 compat:
     ./scripts/build-go-litestream.sh
-    cargo nextest run -p lsr-compat --run-ignored all --locked -E 'not test(=upstream_test_map::every_counterpart_exists) and not test(/^s3::/)'
+    cargo nextest run -p lsr-compat --run-ignored all --locked -E 'not test(=upstream_test_map::every_counterpart_exists) and not test(=behavior::every_behavior_citation_resolves) and not test(/^s3::/)'
 
 # Build the named Go versions (tags, commits, `releases` for every v0.5.N tag, `main` for
 # upstream's newest staged file) and run the live tests over exactly those: just compat-live v0.5.3 main.
@@ -216,11 +217,20 @@ minio-up:
 minio-down:
     ./scripts/minio.sh down
 
+# Toxiproxy on loopback, between the engine and MinIO in the network-fault tests.
+toxiproxy-up:
+    ./scripts/toxiproxy.sh up
+
+toxiproxy-down:
+    ./scripts/toxiproxy.sh down
+
 # The S3 store against a real server; not part of check, which never needs Docker (these tests are
 # #[ignore]d there). Without MinIO the tests fail, so a green run means they ran against it. The
 # one opt-out is LSR_SKIP=minio (`LSR_SKIP=minio just test-s3` runs nothing and says so); under
-# CI, which GitHub marks with the CI variable, any LSR_SKIP is itself a failure.
-test-s3: minio-up
+# CI, which GitHub marks with the CI variable, any LSR_SKIP is itself a failure. The history
+# judge's network tests also need Toxiproxy in front of MinIO (scripts/toxiproxy.sh builds the
+# pinned server with Go once and starts it on loopback); LSR_SKIP=toxiproxy opts out of those.
+test-s3: minio-up toxiproxy-up
     #!/usr/bin/env bash
     set -euo pipefail
     case ",${LSR_SKIP:-}," in
@@ -238,7 +248,8 @@ test-s3: minio-up
     LSR_S3_TRANSPORT=reqwest \
         cargo nextest run -p lsr-store-s3 --features reqwest --test store-s3 -E 'test(/^minio::/)' --run-ignored all --locked --no-fail-fast
     cargo nextest run -p lsr-cli --test cli -E 'test(/^s3::/)' --run-ignored all --locked --no-fail-fast
-    cargo nextest run -p lsr-history --test history -E 'test(/^replicator::/)' --run-ignored all --locked --no-fail-fast
+    eval "$(./scripts/toxiproxy.sh env)"
+    cargo nextest run -p lsr-history --test history -E 'test(/^replicator::/) | test(/^network::/)' --run-ignored all --locked --no-fail-fast
 
 # Each restores what the other wrote at Latest, a txid and an instant, and they hand one prefix
 # over both ways, over the pinned builds (crates/compat/tests/compat/s3.rs). Needs Docker; fails, never
@@ -316,6 +327,25 @@ upstream-test-map-fresh:
     list="$(cd "${CARGO_TARGET_DIR:-target}/upstream-test-map" && pwd)/rust-tests.txt"
     cargo nextest list --workspace --all-features --locked --run-ignored all --message-format oneline --color never > "$list"
     LSR_UPSTREAM_TEST_MAP_RUST_TESTS="$list" cargo nextest run -p lsr-compat --test compat --locked --run-ignored only -E 'test(=upstream_test_map::every_counterpart_exists)'
+
+# Renders docs/BEHAVIOR.md from docs/behavior.toml (the behaviour table's rows) and
+# docs/behavior/template.md (the prose); `check` fails when the committed file differs.
+behavior-doc:
+    LSR_BEHAVIOR_WRITE=1 cargo nextest run -p lsr-compat --test compat --locked -E 'test(=behavior::the_behavior_doc_is_rendered_from_its_rows)'
+
+# Every test docs/behavior.toml cites is a test or a simulator scenario, and every planted bug a
+# row cites is backed by a cited test that is not ignored, since `planted-bugs` runs no ignored
+# test (crates/compat/tests/compat/behavior.rs).
+# The listings are generated into target/ and never committed, as for the upstream test map.
+evidence-fresh:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "${CARGO_TARGET_DIR:-target}/evidence"
+    dir="$(cd "${CARGO_TARGET_DIR:-target}/evidence" && pwd)"
+    cargo nextest list --workspace --all-features --locked --run-ignored all --message-format oneline --color never > "$dir/all.txt"
+    cargo nextest list --workspace --all-features --locked --run-ignored only --message-format oneline --color never > "$dir/ignored.txt"
+    LSR_EVIDENCE_ALL_TESTS="$dir/all.txt" LSR_EVIDENCE_IGNORED_TESTS="$dir/ignored.txt" \
+        cargo nextest run -p lsr-compat --test compat --locked --run-ignored only -E 'test(=behavior::every_behavior_citation_resolves)'
 
 # Regenerate the upstream test names in docs/upstream-test-map/upstream-tests.txt from the pinned clones
 # (`just upstream` first). The test map test in `check` reads this file, never the clone.
