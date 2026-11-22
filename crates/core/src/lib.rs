@@ -108,6 +108,7 @@ pub use position::{
     Continuity, LastPage, Position, ReachedEnd, ReadLockHold, SyncedOffset, SyncedThrough,
     WalFileLen,
 };
+pub use probe::Starts;
 pub use recover::{
     BootWal, FrameCheck, LastPageCheck, Miss, NewestStagedFile, PositionSource, Probes,
     RecoverEvent, Recovered, Verdict, WalView, recover, recover_traced,

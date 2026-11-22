@@ -612,7 +612,7 @@ pub async fn listed_past<S: ObjectStore>(
     let Some(next) = next else {
         return Ok(None);
     };
-    crate::probe::holder(store, next)
+    crate::probe::holder(store, next, &crate::probe::Starts::of(inventory))
         .await
         .map_err(RestoreError::Store)
 }

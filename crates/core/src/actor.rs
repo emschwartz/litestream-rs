@@ -97,6 +97,7 @@ use crate::maintain::{
 };
 use crate::pages::{PageChecksumTable, seeded, snapshot_clears};
 use crate::position::{Position, SyncedThrough, WalFileLen};
+use crate::probe::Starts;
 use crate::recover::{
     BootWal, FrameCheck, Miss, NewestStagedFile, PositionSource, Probes, Recovered, WalView,
     read_header, recover,
@@ -1837,7 +1838,15 @@ impl Actor {
         if inventory.newest() >= published || self.engine.maintain.gone == published {
             return None;
         }
-        match probe_past(remote, inventory.newest(), published, None).await {
+        match probe_past(
+            remote,
+            inventory.newest(),
+            published,
+            None,
+            &Starts::of(inventory),
+        )
+        .await
+        {
             Ok(found) if found.is_empty() => {
                 self.engine.maintain.gone = published;
                 None

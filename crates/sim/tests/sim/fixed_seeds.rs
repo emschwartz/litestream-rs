@@ -1072,8 +1072,8 @@ mod replaced_staging {
 
 #[cfg(test)]
 mod lagging_listings {
-    use lsr_core::{StopCause, StoreError, StoreOp};
-    use lsr_sim::generate::WalOp;
+    use lsr_core::{SourceError, SourceOp, StopCause, StoreError, StoreOp};
+    use lsr_sim::generate::{MetaOp, WalOp};
     use lsr_sim::run::run_ops;
     use lsr_sim::{EnvFault, FaultShape, Op, Opts, Seed, Target, Weights};
 
@@ -1206,11 +1206,73 @@ mod lagging_listings {
         swarm(seed, &ops);
     }
 
+    /// The replica's listings lag. Another writer puts the transaction after the engine's,
+    /// the engine's maintenance merges it into a level-1 file, and the operator removes the
+    /// other writer's level-0 file and restarts the engine. The boot listing hides the
+    /// level-1 file, and the read past the listing named only level-0 keys and snapshots,
+    /// so the engine took the replica as ending below it and uploaded its own transaction
+    /// into the freed key: a restore of the newest state gave pages no commit made (seed
+    /// 0x517 under its swarm mix, shrunk from 47 operations). The read past the listing now
+    /// names the level-1 key from where the listed level-1 files end.
+    #[test]
+    fn a_lagging_listing_that_hides_a_merged_file_sends_no_upload_into_its_key_seed_0x517() {
+        let seed = Seed::new(0x517);
+        let ops = [
+            Op::CommitInTick { pages: 3 },
+            Op::CommitInTick { pages: 4 },
+            Op::EnvFault(EnvFault::Source(SourceOp::ReadPage, SourceError::Busy)),
+            Op::CommitInTick { pages: 1 },
+            Op::CommitInTick { pages: 1 },
+            Op::Shutdown,
+            Op::LaggingListings {
+                writes: 6,
+                window: 22,
+            },
+            Op::Shutdown,
+            Op::SecondWriter { ticks: 4 },
+            Op::Shutdown,
+        ];
+        swarm(seed, &ops);
+    }
+
+    /// The same defect reached through a staging directory saved and put back: the other
+    /// writer's file is merged into level 1 and removed, the lagging listing hides the
+    /// level-1 file, and the engine's upload reuses the freed transaction, so a restore of
+    /// that transaction differs from what it committed (seed 0x4dc under its swarm mix,
+    /// shrunk to 11 operations).
+    #[test]
+    fn a_merged_file_hidden_from_a_lagging_listing_is_found_by_its_level_key_seed_0x4dc() {
+        let seed = Seed::new(0x4dc);
+        let ops = [
+            Op::LaggingListings {
+                writes: 3,
+                window: 31,
+            },
+            Op::Tick,
+            Op::Tick,
+            Op::WalDamage {
+                op: WalOp::TruncateAtFrame(19),
+                ticks: 1,
+            },
+            Op::Meta(MetaOp::Save),
+            Op::SecondWriter { ticks: 2 },
+            Op::EnvFault(EnvFault::Source(SourceOp::Open, SourceError::Busy)),
+            Op::Meta(MetaOp::Restore),
+            Op::EnvFault(EnvFault::Source(SourceOp::ReadPage, SourceError::Busy)),
+            Op::SecondWriter { ticks: 6 },
+            Op::Tick,
+        ];
+        swarm(seed, &ops);
+    }
+
     /// Runs `ops` under `seed`'s swarm mix; any violation fails the test.
     fn swarm(seed: Seed, ops: &[Op]) {
+        let weights = Weights::swarm(seed);
         let opts = Opts {
             drawn: true,
-            block_crash_law: Weights::swarm(seed).block_crash_law,
+            block_crash_law: weights.block_crash_law,
+            lying_wal_sync: weights.lying_wal_sync,
+            after_restart: weights.after_restart,
             ..Opts::default()
         };
         if let Err(failure) = run_ops(seed, ops, &opts) {

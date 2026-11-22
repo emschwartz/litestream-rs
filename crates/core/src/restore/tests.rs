@@ -591,12 +591,12 @@ fn a_whole_listing_costs_one_read_per_named_key_past_it() {
     let (result, sink) = run(&store, RestoreTarget::Latest);
     assert_eq!(result.unwrap().attempts(), 1);
     assert_eq!(seeds(&sink.published().unwrap()), [3]);
+    let reads = u64::try_from(store.reads.load(Ordering::Relaxed)).unwrap();
     // The three files of the chain, and the keys named for transaction 4.
-    let past = crate::probe::reads_per_transaction(txid(4));
-    assert_eq!(
-        u64::try_from(store.reads.load(Ordering::Relaxed)).unwrap(),
-        3 + past
-    );
+    let listed = block_on(Inventory::load(&store)).unwrap();
+    let starts = crate::probe::Starts::of(&listed);
+    let past = crate::probe::reads_per_transaction(txid(4), &starts);
+    assert_eq!(reads, 3 + past);
 }
 
 #[test]
@@ -850,7 +850,7 @@ fn a_file_larger_than_one_chunk_is_read_in_several_reads() {
     let restored = result.unwrap();
     // One-byte reads of the keys named past the listing (nothing there), then one full
     // chunk, then the short rest: no empty read follows.
-    let past = crate::probe::reads_per_transaction(txid(2));
+    let past = crate::probe::reads_per_transaction(txid(2), &crate::probe::Starts::default());
     assert_eq!(
         u64::try_from(store.reads.load(Ordering::Relaxed)).unwrap(),
         past + 2

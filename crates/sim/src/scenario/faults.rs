@@ -363,10 +363,17 @@ pub fn window_scenarios() -> &'static [fn() -> Scenario] {
     ]
 }
 
-/// The reads a boot's probe past its listing makes on a replica it lists
-/// whole, as a fault's count of calls ahead.
+/// The reads a boot's probe past its listing makes on a replica it lists whole, as a fault's
+/// count of calls ahead. These scenarios boot on a replica whose transaction 1 sits at levels
+/// 0, 1 and 9, so the probe also names a level-1 key from 2 and a level-2 key from 1.
 fn probe_reads() -> u8 {
-    u8::try_from(lsr_core::fresh_probe_reads(Some(lsr_ltx::Txid::MIN))).unwrap_or(u8::MAX)
+    use lsr_core::Level;
+    let levels = [
+        Level::ZERO,
+        Level::new(1).unwrap_or(Level::ZERO),
+        Level::SNAPSHOT,
+    ];
+    u8::try_from(super::probe_reads_past(&levels)).unwrap_or(u8::MAX)
 }
 
 fn remote_fault(op: StoreOp, ahead: u8, shape: FaultShape) -> Op {

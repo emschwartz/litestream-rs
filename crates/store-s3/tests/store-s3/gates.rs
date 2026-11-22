@@ -188,9 +188,10 @@ fn restore_reads_chunks_side_by_side() {
     assert_eq!(restored.files(), 3);
     println!("restore {tally:?} chunks {chunks:?}");
     let total: usize = chunks.iter().sum();
-    // One-byte GETs of the three keys named past the listing, side by side, then one GET per
-    // chunk.
-    assert_eq!(tally.get, total + 3, "one GET per chunk");
+    // One-byte GETs of the keys named past the listing, side by side (three, and the level-1
+    // key from 2, where a first compaction of the level-0 files would start), then one GET
+    // per chunk.
+    assert_eq!(tally.get, total + 4, "one GET per chunk");
     assert_eq!(tally.head, 0, "Latest reads no created-at time");
     let width = READ_WIDTH;
     let reads: usize = chunks.iter().map(|n| waves(*n, width)).sum();

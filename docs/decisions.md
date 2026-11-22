@@ -32,6 +32,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D22 | The bound for "unreplicated too long"? | 10 minutes, minimum 5, no byte bound | Fable, **delegated** | 2026-11-22 | open to owner review |
 | D23 | A delete without a directory sync: fix or argue harmless? | Fix | project rule: found defects are fixed (#116) | 2026-11-22 | decided |
 | D24 | Names for store refusals and the error format | Four cause names, "{op} refused: {why}" | owner (#108) | 2026-11-22 | decided |
+| D35 | Find a merged file that a lagging listing hides, whose level-0 inputs are gone? | Read its level key from the starts the listing implies; the case with no start left stays known-wrong | Claude, **delegated** (route from the parent session) | 2026-11-22 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -252,6 +253,16 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** four more causes to keep classified correctly per store.
 - **Revisit if:** a store returns a refusal that fits none of them.
 - **Links:** #108 (merged).
+
+## D35. Reading higher-level keys past a lagging listing
+
+- **The case:** another writer's level-0 file is merged into a level-1 file, and an operator then removes the level-0 file. A listing that lags hides the level-1 file. Before this change, the read past the listing named only level-0 keys and snapshots, so it could not find the level-1 file. The engine took the replica as ending below it and uploaded its own next transaction into the freed key: one transaction, two contents (seeds 0x4dc and 0x517).
+- **Options:** (a) for each transaction the probe reads, also read the level 1 to 8 keys that end at it, from each start the listing implies; (b) change the simulator so that the operator removes every file holding the transaction, or call a partial cleanup outside the contract; (c) accept it as known-wrong.
+- **Choice:** (a). The starts for level `k` are the transaction after level `k`'s newest listed file and the start of the first level `k - 1` file above it. A compaction into level `k` begins at one of them, ours and Go's alike. (b) was ruled out by the parent session: a partial cleanup is a plausible operator mistake, and the simulator must not get kinder.
+- **Cost accepted:** one more one-byte read per start for each probed transaction. A fresh boot listing with level 1 and 2 in use goes from 12 to 20 reads, at most 76 with every level in use. Steady state is unchanged: the probe runs only after a listing.
+- **Residue:** a lag that also hides level `k`'s previous file hides the start too, and the file stays unnamed (BOOT-25 in `docs/BEHAVIOR.md`, known wrong). It needs two compactions of one level inside the lag window and level-0 inputs removed by someone other than this engine.
+- **Revisit if:** a real store shows lag windows long enough for two compactions of one level, or a writer identity on the replica makes the second writer's files distinguishable.
+- **Links:** issue #99 (the item from #96), #96, `crates/core/src/probe.rs`.
 
 ## Unverified, not recorded
 
