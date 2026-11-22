@@ -575,6 +575,39 @@ impl Liveness {
         Ok(staged)
     }
 
+    /// A boot found the replica past the newest staged file and snapshots
+    /// above it (`BehindRemote`): every staged file at or below the replica's
+    /// newest transaction that it never took, and that no replica file ends
+    /// at, can never be uploaded, so its restore point is given up now, with
+    /// the window that justified the snapshot, not later when a prune deletes
+    /// it (seed 0xf4cf9).
+    ///
+    /// # Errors
+    /// [`Violation::UnjustifiedGiveUp`] when nothing in the window forces it.
+    pub fn passed_by_replica(
+        &mut self,
+        staged: &[FileKey],
+        world: &dyn TickWorld,
+        reach: &mut Reach,
+    ) -> Result<(), Violation> {
+        let Some(newest) = world.replica_newest() else {
+            return Ok(());
+        };
+        let lost: Vec<FileKey> = staged
+            .iter()
+            .filter(|key| {
+                key.level().get() == 0
+                    && key.range().max().get() <= newest
+                    && !self.uploaded.contains(key)
+                    && !self.lost.contains(key)
+                    && !world.replica_ends_at(key.range().max().get())
+            })
+            .copied()
+            .collect();
+        self.lost.extend(lost.iter().copied());
+        self.given_up(u64::try_from(lost.len()).unwrap_or(u64::MAX), reach)
+    }
+
     /// Counts `lost` restore points given up; fails unless a fault in the
     /// window could force it.
     fn given_up(&mut self, lost: u64, reach: &mut Reach) -> Result<(), Violation> {
@@ -712,6 +745,28 @@ mod tests {
         live.staging_seen = 0;
         live.take_staging(&[deleted(10)], &world, &mut reach)
             .unwrap_err();
+    }
+
+    /// A boot that snapshots above a replica that passed staging gives up
+    /// the staged files the replica never took then, once, with its window;
+    /// the prune that deletes them later loses nothing new (seed 0xf4cf9).
+    #[test]
+    fn a_replica_that_passed_staging_gives_up_its_files_at_the_boot() {
+        let mut live = Liveness::new();
+        let mut reach = Reach::default();
+        let world = Replica {
+            newest: 8,
+            ends: &[4, 8],
+        };
+        live.window.clear();
+        live.note(Justifier::RemoteEdited);
+        let staged = [staged_key(4), staged_key(5), staged_key(6), staged_key(9)];
+        live.passed_by_replica(&staged, &world, &mut reach).unwrap();
+        assert_eq!(reach.get("liveness.given_up"), 2);
+        live.window.clear();
+        let events = [deleted(5), deleted(6)];
+        live.take_staging(&events, &world, &mut reach).unwrap();
+        assert_eq!(reach.get("liveness.given_up"), 2);
     }
 
     #[test]

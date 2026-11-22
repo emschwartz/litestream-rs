@@ -625,6 +625,16 @@ impl World {
         Ok(())
     }
 
+    /// Every level-0 key in staging, read around the wrappers; empty when it
+    /// cannot list.
+    #[must_use]
+    pub fn staged_level_zero(&self) -> Vec<FileKey> {
+        use lsr_core::{Level, ObjectStore, PageLimit};
+        block_on(self.staging_raw.list(Level::ZERO, None, PageLimit::MAX))
+            .map(|listing| listing.files.iter().map(|file| file.key).collect())
+            .unwrap_or_default()
+    }
+
     /// The newest level-0 file in staging.
     ///
     /// # Errors
