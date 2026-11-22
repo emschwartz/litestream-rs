@@ -997,6 +997,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "lsr-spec"
+version = "0.0.0"
+
+[[package]]
 name = "lsr-sqlite"
 version = "0.0.0"
 dependencies = [
