@@ -97,3 +97,32 @@ fn plan_reference_only_in_oracles() {
         "the exact as-of planner called from production code: {found:?}"
     );
 }
+
+/// A bare created-at instant (`.at()`) means a commit, a snapshot's write or
+/// an upload depending on level and origin; a decision about when a
+/// transaction committed reads it through `Stamp`. Each allowed site reads
+/// the instant for something else: stores write and report it, the CLI
+/// prints it, retention and the snapshot interval age files by it (write
+/// time, as Go does with `LastModified`; neither needs it to date a commit),
+/// verify measures skew, and the oracles restate the contract on their own.
+#[test]
+fn bare_created_at_instants_only_in_allowed_sites() {
+    let found = offenders(
+        &[".at()"],
+        &[
+            "crates/core/src/layout.rs",
+            "crates/store-",
+            "crates/cli/src/render.rs",
+            "crates/core/src/maintain/retain.rs",
+            "crates/core/src/maintain.rs",
+            "crates/core/src/verify.rs",
+            "crates/sim/",
+            "crates/fuzzing/",
+            "crates/compat/",
+        ],
+    );
+    assert!(
+        found.is_empty(),
+        "a created-at instant read outside its sites: {found:?}"
+    );
+}
