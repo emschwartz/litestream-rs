@@ -27,7 +27,10 @@
 //!   the replica's newest level-0 file, a header first then the file. So
 //!   replica reads are at most two per compaction input, plus
 //!   [`READS_PER_BOOT`] per boot, plus one per fault that failed a call
-//!   (each such failure is retried).
+//!   (each such failure is retried), plus [`READS_PER_DEGRADED_RETRY`] per
+//!   retry of a degraded task (a retry of a persistent cause such as a page
+//!   size change compares the replica's newest file again; the doubling wait
+//!   bounds how often).
 //! - Each file needs one commit; a failed or ambiguous commit is retried. So
 //!   replica commits are at most two per distinct key put plus one per
 //!   fault hit and crash.
@@ -48,6 +51,10 @@ pub const PER_FILE: u64 = 1024;
 /// newest file of each of the ten levels, and the upload lane's read-back.
 pub const READS_PER_BOOT: u64 = 24;
 
+/// Reads one retry of a degraded task may make of the replica: a header and
+/// the newest file it names.
+pub const READS_PER_DEGRADED_RETRY: u64 = 2;
+
 /// What a run did besides its recorder's events.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Spent {
@@ -55,6 +62,8 @@ pub struct Spent {
     pub boots: u64,
     /// Calls a scheduled fault failed or changed.
     pub fault_hits: u64,
+    /// Ticks that reported a task degraded: each is one retry.
+    pub degraded_retries: u64,
 }
 
 /// Judges the run's replica costs.
@@ -89,7 +98,12 @@ pub fn check(
     let reads = inputs
         .saturating_mul(2)
         .saturating_add(spent.boots.saturating_add(1).saturating_mul(READS_PER_BOOT))
-        .saturating_add(spent.fault_hits);
+        .saturating_add(spent.fault_hits)
+        .saturating_add(
+            spent
+                .degraded_retries
+                .saturating_mul(READS_PER_DEGRADED_RETRY),
+        );
     within(Bound::ReadCalls, counts.reads, reads)?;
     let keys = u64::try_from(last.len()).unwrap_or(u64::MAX);
     let commits = keys

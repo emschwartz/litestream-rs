@@ -79,6 +79,8 @@ fn key(hold: Hold) -> String {
             format!("hold.wal.{name}")
         }
         Hold::LyingDisk => "hold.LyingDisk".into(),
+        Hold::StoreDownAll => "hold.StoreDownAll".into(),
+        Hold::SecondWriter => "hold.SecondWriter".into(),
     }
 }
 
@@ -241,6 +243,38 @@ fn wal_damage_leaves_the_replica_restorable_while_it_lasts() {
             "{op:?}"
         );
     }
+}
+
+#[test]
+fn a_store_down_for_every_operation_at_once_leaves_restorable_files() {
+    let report = held(Hold::StoreDownAll);
+    assert_eq!(report.reach.get("hold.StoreDownAll.judged"), 2);
+}
+
+/// The WAL regrown under the engine, judged while the regrowth stands (the plain WAL damage
+/// operations judge only after it is healed).
+#[test]
+fn a_regrown_wal_leaves_the_replica_restorable_while_it_lasts() {
+    for op in [
+        WalOp::RegrowSameSalts(7),
+        WalOp::RegrowWithoutCommitMarks(7),
+    ] {
+        let hold = Hold::Wal(op);
+        let report = held(hold);
+        assert_eq!(
+            report.reach.get(&format!("{}.judged", key(hold))),
+            2,
+            "{op:?}"
+        );
+    }
+}
+
+/// Another writer's file past the engine's position, judged while it stands.
+#[test]
+fn a_second_writer_s_file_leaves_the_replica_restorable_while_it_stands() {
+    let report = held(Hold::SecondWriter);
+    assert_eq!(report.reach.get("remote.second_writer"), 1);
+    assert_eq!(report.reach.get("hold.SecondWriter.judged"), 2);
 }
 
 #[test]

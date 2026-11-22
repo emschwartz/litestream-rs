@@ -33,6 +33,7 @@ use lsr_wal::{
 };
 use std::io::{Read, Seek};
 
+use crate::checked::Checked;
 use crate::fault::{BugSite, Clamped, Fault, SnapshotCause, StopCause};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::pages::{PageChecksumTable, snapshot_clears};
@@ -522,8 +523,7 @@ pub(crate) async fn stage<R: Read + Seek, P: PageSource, L: ObjectStore>(
     pages: &mut PageChecksumTable,
     map_store: fn(&StoreError) -> Fault,
 ) -> Result<(FileInfo, Option<LastPage>, Witnessed), Fault> {
-    let mut upload = store
-        .begin_upload(key, header.fields().timestamp)
+    let mut upload = Checked::begin(store, key, header.fields().timestamp)
         .await
         .map_err(|err| map_store(&err))?;
     match fill(&mut upload, header, plan, wal, db, pages, map_store).await {

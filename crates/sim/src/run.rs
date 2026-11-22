@@ -211,6 +211,15 @@ pub struct Opts {
     /// How the clock moves between reads inside a tick
     /// ([`Weights::clock_law`]). [`run_with`] sets it.
     pub clock_law: ClockLaw,
+    /// Holds run a drawn sub-history and span restarts ([`Weights::overlap`]). [`run_with`]
+    /// sets it.
+    pub overlap: bool,
+    /// One-shot store faults drawn inside an overlapping hold come from the whole error domain
+    /// ([`Weights::error_domain`]). [`run_with`] sets it.
+    pub error_domain: bool,
+    /// Draws that reach an open engine defect are made ([`Weights::known_wrong`]): inside an
+    /// overlapping hold, the restarts that reach D9. [`run_with`] sets it.
+    pub known_wrong: bool,
     /// Staging is the directory store on the in-memory filesystem ([`Weights::staging_fs`]).
     /// [`run_with`] sets it.
     pub staging_fs: bool,
@@ -287,6 +296,13 @@ struct Runner {
     rng: SeededEntropy,
     // Where an in-tick commit lands under the each-read clock law.
     sites: SeededEntropy,
+    // What each step of an overlapping hold does ([`Opts::overlap`]); its own stream, so the
+    // runner's other draws are the same with or without it.
+    overlap: Option<SeededEntropy>,
+    // Whether the one-shot store faults of an overlapping hold draw from the whole domain.
+    error_domain: bool,
+    // Whether an overlapping hold draws restarts, which reach the open defect D9.
+    known_wrong: bool,
     spilled: Vec<(PageNo, Vec<u8>)>,
     /// A freshly started driver has not seen the WAL yet, so it ticks once more
     /// before it believes a wait on a WAL change.
@@ -310,6 +326,11 @@ struct Runner {
     /// The latest time the current engine has been told: its retry waits are
     /// measured from it, since an earlier reading is clamped.
     latest: Option<Timestamp>,
+    // After the clock stepped back, the engine's own time holds and then slews at half speed
+    // until the wall clock rejoins it, so it may run ahead of the wall by half the step: a
+    // retry wait the engine sets from its own time is judged with that slack, until a tick
+    // begins past the latest time seen before the step.
+    slew: Option<(Timestamp, u64)>,
     saved: Option<StagedCopy>,
     /// The commit each file in `saved` held when it was copied, noted again
     /// when the copy is put back.
@@ -396,6 +417,9 @@ impl Runner {
         runner.judges = opts.judges;
         runner.app.set(opts.after_restart);
         runner.w.set_clock_law(opts.clock_law);
+        runner.overlap = opts.overlap.then(|| SeededEntropy::new(seed.stream(21)));
+        runner.error_domain = opts.error_domain;
+        runner.known_wrong = opts.known_wrong;
         runner.reboot();
         runner
     }
@@ -412,6 +436,10 @@ impl Runner {
             actor: Actor::new(actor_config()),
             rng: SeededEntropy::new(seed.stream(11)),
             sites: SeededEntropy::new(seed.stream(19)),
+            slew: None,
+            overlap: None,
+            error_domain: false,
+            known_wrong: false,
             spilled: Vec::new(),
             unwatched: true,
             readers: Vec::new(),
@@ -788,8 +816,13 @@ impl Runner {
         let began = self.latest.map_or(began, |latest| latest.max(began));
         self.latest = Some(began);
         // A wait runs from the engine's own last reading, which under
-        // `ClockLaw::EachRead` is later than the tick's first.
-        capped(event, self.w.high.at_least(began))?;
+        // `ClockLaw::EachRead` is later than the tick's first, and after a step
+        // back may be ahead of the wall by half the step.
+        if self.slew.is_some_and(|(held, _)| self.now() > held) {
+            self.slew = None;
+        }
+        let slack = self.slew.map_or(0, |(_, slack)| slack);
+        capped(event, self.w.high.at_least(began), slack)?;
         self.note_recovered();
         if let Event::Uploaded(did) = event {
             self.w.acked.on_did(did);
@@ -1034,10 +1067,12 @@ impl Runner {
             match self.step(None)?.0 {
                 Step::Drained(txid) => {
                     self.drained(txid)?;
-                    // A drain that finished after every fault healed ran each
-                    // task to the end: a stall left now is one nothing causes.
+                    // A drain that finished after every fault healed ran sync and
+                    // upload to the end: a stall of either left now is one nothing
+                    // causes. A drain runs no other task, so their stalls wait for
+                    // the settle window.
                     if self.settling {
-                        self.no_stall_left()?;
+                        self.no_stall_left(&[Task::Sync, Task::Upload])?;
                     }
                     return self.judge_drained();
                 }
@@ -1296,6 +1331,16 @@ impl Runner {
     /// the engine again. The engine may have listed it, so nothing it
     /// acknowledged before the removal is held against `Latest`.
     fn second_writer(&mut self, ticks: u8) -> Result<(), Violation> {
+        self.second_writer_with(ticks, false)
+    }
+
+    /// [`Self::second_writer`], with the replica judged as the other writer's file appears and
+    /// at the end of the ticks, while it stands ([`crate::generate::Hold::SecondWriter`]).
+    fn second_writer_judged(&mut self, ticks: u8) -> Result<(), Violation> {
+        self.second_writer_with(ticks, true)
+    }
+
+    fn second_writer_with(&mut self, ticks: u8, judged: bool) -> Result<(), Violation> {
         // A file at or below what this engine has staged collides with one of
         // its own transactions (after a bucket rollback, say): telling the two
         // writers apart needs writer identity on the replica, which the engine
@@ -1331,7 +1376,12 @@ impl Runner {
         // Only an engine that was running when the file appeared, and has not
         // booted since, owes the stop: a boot takes a replica ahead as history.
         let mut watching = self.actor.booted();
-        for _ in 0..ticks {
+        for at in 0..ticks {
+            // Once as the file appears, and again at the end: the engine may stop on it at the
+            // first tick, which ends the loop.
+            if judged && at == 0 {
+                self.judge_held(crate::generate::Hold::SecondWriter, None)?;
+            }
             watching &= self.actor.booted();
             let lists = self.w.remote_recorder.counts().lists;
             let step = self.step(None)?.0;
@@ -1368,6 +1418,9 @@ impl Runner {
                     key: key.to_string(),
                 });
             }
+        }
+        if judged {
+            self.judge_held(crate::generate::Hold::SecondWriter, None)?;
         }
         self.remove_foreign(key, &bytes)
     }
@@ -1537,6 +1590,14 @@ impl Runner {
     }
 
     fn clock_jump(&mut self, millis: i64) {
+        if millis < 0 {
+            let held = self
+                .latest
+                .map_or(self.now(), |latest| latest.max(self.now()));
+            let half = millis.unsigned_abs().div_ceil(2);
+            let slack = self.slew.map_or(half, |(_, before)| before.max(half));
+            self.slew = Some((held, slack));
+        }
         self.jumped = self.jumped.saturating_add(millis);
         let to = Timestamp::from_unix_millis(self.now().unix_millis().saturating_add(millis));
         self.w.clock.set(to);
@@ -1922,7 +1983,7 @@ impl Runner {
                 break;
             }
         }
-        self.no_stall_left()?;
+        self.no_stall_left(&Task::ALL)?;
         within(Bound::DrainTicks, u64::from(!settled), 0)?;
         let limit = u64::from(TRUNCATE_PAGES)
             .saturating_add(self.max_tx_pages)
@@ -1982,10 +2043,10 @@ impl Runner {
         }
     }
 
-    /// After the settle window: no task may still be stalled on a fault the
-    /// world no longer imposes.
-    fn no_stall_left(&self) -> Result<(), Violation> {
-        for task in Task::ALL {
+    /// No task of `tasks`, each of which has had its chance to run since every
+    /// fault healed, may still be stalled on a fault the world no longer imposes.
+    fn no_stall_left(&self, tasks: &[Task]) -> Result<(), Violation> {
+        for task in tasks.iter().copied() {
             if let Some(degraded) = self.actor.degraded(task)
                 && let PersistentCause::Stalled(stall) = degraded.cause
                 && !still_imposed(stall)
@@ -2066,6 +2127,7 @@ impl Runner {
                 .saturating_add(u64::from(self.report.shutdowns))
                 .saturating_add(u64::from(self.report.checks)),
             fault_hits: hits(&self.w.remote_faults),
+            degraded_retries: self.report.reach.get("event.Degraded"),
         };
         crate::budget::check(
             &self.w.remote_recorder.events(),
@@ -2147,7 +2209,7 @@ impl Runner {
 
 /// Every retry wait is capped: a persistent fault's at [`MAX_BACKOFF`], a
 /// retried one's at the later of that and the wait the store named.
-fn capped(event: &Event, began: Timestamp) -> Result<(), Violation> {
+fn capped(event: &Event, began: Timestamp, slack: u64) -> Result<(), Violation> {
     let (until, named) = match event {
         Event::Degraded { until, .. } => (*until, None),
         Event::Retrying {
@@ -2170,7 +2232,7 @@ fn capped(event: &Event, began: Timestamp) -> Result<(), Violation> {
     within(
         Bound::RetryWait,
         u64::try_from(wait).unwrap_or(0),
-        millis(cap),
+        millis(cap).saturating_add(slack),
     )
 }
 
@@ -2206,6 +2268,9 @@ pub fn run_with(
         lying_wal_sync: weights.lying_wal_sync,
         after_restart: weights.after_restart,
         clock_law: weights.clock_law,
+        overlap: weights.overlap,
+        error_domain: weights.error_domain,
+        known_wrong: weights.known_wrong,
         staging_fs: weights.staging_fs,
         ..opts.clone()
     };

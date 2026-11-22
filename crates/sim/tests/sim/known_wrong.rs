@@ -32,7 +32,7 @@ fn still_fails(seed: u64, ops_digest: u64, defect: KnownWrong) {
         "the live generator changed seed {seed}'s run; find another seed that reaches {defect:?}"
     );
     assert!(
-        known_in(&ops).contains(&defect),
+        known_in(&ops, &weights).contains(&defect),
         "{seed} draws no cell of {defect:?}"
     );
     match run(seed, STEPS, &weights) {
@@ -91,4 +91,15 @@ fn compaction_takes_a_staging_denial_as_staging_seed_0xb9e() {
     if let Err(failure) = run(seed, STEPS, &weights) {
         panic!("{failure}");
     }
+}
+
+/// A halt that outlasts restarts inside an overlapping hold is never reported degraded: each
+/// boot starts its retry count again (D9).
+#[test]
+fn a_halt_across_restarts_still_goes_unreported_seed_0xe9() {
+    still_fails(
+        0xe9,
+        0x7c57_5484_ebb9_02ca,
+        KnownWrong::HaltForgottenAtRestart,
+    );
 }

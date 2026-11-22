@@ -1218,6 +1218,42 @@ tests = [
     "checkpoint::tests::a_bump_under_a_lock_is_refused",
 ]
 
+# The compactor took its output's commit acknowledgement as given: a store that acknowledged
+# the output short left a truncated level-N file, maintenance reported it compacted, and a later
+# restore of the latest state could not decode it. Every engine commit is now checked
+# (crates/core/src/checked.rs); this patch opens the compactor's upload around the check.
+[[bug]]
+name = "compact-commit-unchecked"
+fix = "claude/commit-size"
+package = "lsr-core"
+tests = ["compact::tests::an_output_acknowledged_short_is_deleted_and_reported"]
+
+[[bug]]
+name = "compact-commit-unchecked-sim"
+fix = "claude/commit-size"
+package = "lsr-sim"
+patch = "compact-commit-unchecked"
+tests = ["fixed_seeds::fixed::a_torn_staged_file_is_dropped_seed_0x46"]
+
+# The uploader saw a short acknowledgement and retried, but left the short object listed until
+# the retry replaced it, so a restore in between failed to decode it. The checked commit now
+# deletes it first; this patch skips that delete.
+[[bug]]
+name = "short-commit-object-kept"
+fix = "claude/commit-size"
+package = "lsr-core"
+tests = [
+    "checked::tests::a_commit_acknowledged_short_is_deleted_and_reported",
+    "upload::tests::a_commit_that_answers_with_a_wrong_size_leaves_no_object",
+]
+
+[[bug]]
+name = "short-commit-object-kept-sim"
+fix = "claude/commit-size"
+package = "lsr-sim"
+patch = "short-commit-object-kept"
+tests = ["short_write::an_upload_acknowledged_short_leaves_nothing_a_restore_meets"]
+
 [[bug]]
 name = "restart-abandoned-at-synced-end"
 fix = "9b4a029"

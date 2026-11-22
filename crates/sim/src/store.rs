@@ -53,8 +53,11 @@ pub enum FaultShape {
     /// or the directory sync failed after the rename. Counted over commits, and
     /// meaningful for `StoreOp::Upload` only.
     ErrorAfterPublish(StoreError),
-    /// The commit publishes the object and reports a size one byte too large.
-    /// Counted over commits, `StoreOp::Upload` only.
+    /// The commit publishes the object one byte short, its last byte lost,
+    /// and acknowledges it with the size it holds: a short write the store
+    /// took as whole. Without [`Faults::corrupting_through`] the object stays
+    /// whole and only the reported size is short. Counted over commits,
+    /// `StoreOp::Upload` only.
     SizeMismatch,
     /// The commit publishes the object and then reports that the store holds
     /// other bytes than were sent (an ETag that does not match). The object
@@ -136,6 +139,8 @@ struct FaultState {
     rng: SeededEntropy,
     damaged: Vec<FileKey>,
     rejected: Vec<FileKey>,
+    // Objects a size mismatch left one byte short, while they are.
+    short: Vec<FileKey>,
     // Objects a flipped byte reached on a read, once per such read.
     flipped: Vec<FileKey>,
     // Reads, listings and created-at times one batch may hold.
@@ -247,8 +252,10 @@ impl FaultHandle {
         *lock(&self.state).count(op)
     }
 
-    /// The objects a [`FaultShape::CorruptPublish`] changed, in order: where
-    /// the damage really landed, whatever the scenario meant to hit.
+    /// The objects a [`FaultShape::CorruptPublish`] changed, and those a
+    /// [`FaultShape::SizeMismatch`] left short that a delete then failed to
+    /// remove, in order: where the damage really landed, whatever the
+    /// scenario meant to hit.
     #[must_use]
     pub fn damaged(&self) -> Vec<FileKey> {
         lock(&self.state).damaged.clone()
@@ -378,6 +385,7 @@ impl<S> Faults<S> {
             schedule,
             rng: SeededEntropy::new(seed),
             damaged: Vec::new(),
+            short: Vec::new(),
             flipped: Vec::new(),
             rejected: Vec::new(),
             widths: [NonZeroUsize::MIN; 3],
@@ -521,11 +529,22 @@ impl<S: ObjectStore> ObjectStore for Faults<S> {
         })
     }
 
+    /// A failed delete of an object a size mismatch left short makes it
+    /// damage the store keeps: the engine tried to remove it and could not.
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
         if let Verdict::Fail(err) = self.verdict(Call::Delete) {
+            let mut state = lock(&self.state);
+            let kept: Vec<FileKey> = keys
+                .iter()
+                .filter(|key| state.short.contains(key))
+                .copied()
+                .collect();
+            state.damaged.extend(kept);
             return Err(err);
         }
-        self.inner.delete(keys).await
+        self.inner.delete(keys).await?;
+        lock(&self.state).short.retain(|key| !keys.contains(key));
+        Ok(())
     }
 
     /// Forwarded without a verdict or a yield: the simulator's stores leave no scratch, and a
@@ -602,11 +621,32 @@ fn checksum_mismatch(key: FileKey) -> StoreError {
 /// Changes one byte in the middle of the published object, keeping its size
 /// and its created-at time.
 async fn damage(raw: &MemStore, info: &FileInfo) -> Result<(), StoreError> {
+    rewrite(raw, info, |bytes| {
+        let middle = bytes.len() / 2;
+        if let Some(byte) = bytes.get_mut(middle) {
+            *byte ^= 0xff;
+        }
+    })
+    .await
+}
+
+/// Drops the published object's last byte, keeping its created-at time.
+async fn truncate(raw: &MemStore, info: &FileInfo) -> Result<(), StoreError> {
+    rewrite(raw, info, |bytes| {
+        bytes.pop();
+    })
+    .await
+}
+
+/// Puts the published object back through `edit`, keeping its created-at
+/// time.
+async fn rewrite(
+    raw: &MemStore,
+    info: &FileInfo,
+    edit: impl FnOnce(&mut Vec<u8>),
+) -> Result<(), StoreError> {
     let mut bytes = read_all(raw, &info.key).await?;
-    let middle = bytes.len() / 2;
-    if let Some(byte) = bytes.get_mut(middle) {
-        *byte ^= 0xff;
-    }
+    edit(&mut bytes);
     let at = info
         .created_at()
         .map_or(Timestamp::from_unix_millis(0), |created_at| created_at.at());
@@ -650,7 +690,14 @@ impl<U: Upload> Upload for FaultsUpload<U> {
             }
             Verdict::SizeMismatch => {
                 let mut info = self.inner.commit().await?;
-                info.size = info.size.saturating_add(1);
+                // Not damage the store hid: it said the size, so the engine
+                // is told and must delete the object. A restore that meets it
+                // stays judged, unless the engine's delete of it failed.
+                if let Some(raw) = &self.raw {
+                    truncate(raw, &info).await?;
+                    lock(&self.state).short.push(info.key);
+                }
+                info.size = info.size.saturating_sub(1);
                 Ok(info)
             }
             Verdict::Checksum => {

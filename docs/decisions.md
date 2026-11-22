@@ -56,6 +56,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D130 | How does the simulator run the real directory store, and who judges it? | A filesystem trait in store-fs, an in-memory filesystem under the crash law in the sim, half the swarm on it, a staging-contract judge | Claude (sim-real-store-fs), **delegated** | 2026-11-22 | open to owner review |
 | D70 | How do simulated runs draw a fault that reaches an open engine defect? | As a known-wrong cell: out of the per-push seeds, drawn by the nightly and campaigns with its failures counted as known, with a pinned seed that fails once the fix lands | parent session; mechanism by Claude (error-domain), **delegated** | 2026-11-22 | decided |
 | D71 | Which errors may a simulated history inject? | Those a shipped implementation returns from that call with the world unchanged; a world fact is drawn as the world change; a cell the model cannot follow is listed as unmodelled, never drawn | Claude (error-domain), **delegated** | 2026-11-22 | open to owner review |
+| D72 | How long may a simulated fault last, and what may happen inside it? | Up to 200 ticks, with a drawn sub-history; a restart inside it is drawn only where known defects are counted, since it reaches D9 | Claude (overlapping-faults), **delegated** | 2026-11-22 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -457,6 +458,24 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Revisit if:** the shared directory-entry rule changes; or `MemFs` and the host disagree in `differential::the_doubles_answer_as_the_real_store_does`.
 - **Links:** #127 item I.
 
+## D72. Overlapping faults
+
+- **Options:** keep holds short and empty (at most 11 ticks of commits and ticks); let them last and run anything inside; let them last and run anything but what reaches an open defect.
+- **Choice:** under the overlap draw a hold lasts up to 200 ticks and runs a drawn sub-history (commits, ticks, one-shot store faults). A process crash, a power loss or a shutdown inside a hold is drawn only where known defects are counted (D70), because each reaches D9 (a halt across restarts goes unreported). A lying disk keeps its short length, since its own power loss is such a restart.
+- **Why:** the defects that live where faults overlap (D9, BOOT-21) were unreachable; reaching them without turning the per-push seeds red needs the known-wrong rule.
+- **Cost accepted:** the per-push seeds draw no restart inside a hold until D9 is fixed; a run is longer, so the read budget gains a term for a degraded task's retries and the retry-wait check gains the slew's slack after a clock step back.
+- **Revisit if:** D9 is fixed (then restarts inside holds are drawn everywhere), or holds longer than 200 ticks find more.
+- **Links:** issue #127 item E; BEHAVIOR CHK-9.
+
+## D73. A database file no commit made, after a lost writeback (delegated, open to owner review)
+
+- **Options:** adopt the recovered database as the new truth (any restore of it passes); adopt it as damage, as a flipped WAL bit is (no restore may give that exact state); keep the world's model as SQLite's rules say it should be, so the model check fails the run where the mix appears.
+- **Choice:** the model check, counted as the known-wrong defect `DatabaseAheadOfWal` (D70) on the failed-sync cell, pinned to seed 0x585. Adopting it as damage was tried first and dropped.
+- **Why:** the state is real. A failed fsync leaves the kernel's pages clean but unwritten; a later checkpoint by another connection backfills the real pages into the database file and syncs it; a power loss then cuts the WAL at the first frame the kernel lost, and the file holds newer pages from the backfill and older ones from the recovered WAL. Adopting it as truth would let a silently wrong replica pass. Adopting it as damage refuses only a restore of that exact state: later commits build on the mixed pages, the model follows them, and the engine's replication of them passes. With the engine journal merged no seed of 4000 failed that way, so the defect was hidden. The model check fails every run that reaches the mix.
+- **Cost accepted:** every such run fails, whatever the engine does next, so it stays known-wrong until the engine detects the mix (the journal work's D103: a boot after a recorded failed sync compares the pages the WAL does not cover and replicates a mixed file loudly, `database_ahead_of_wal`). The cell flips then, with the world adopting the state and a judge allowance that requires the notice before the file is staged.
+- **Revisit if:** D103 lands, or the owner prefers adopting the mixed file as truth.
+- **Links:** issue #127 item E; D2, D103.
+
 ## D80. Where the fail-stop clock cannot survive a restart (delegated)
 
 - **Question:** the clock of the oldest unreplicated commit must not restart with the process (#115), or a crash loop runs the application forever in slices shorter than the bound. What does it rest on?
@@ -503,6 +522,15 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Dropped before review:** `Replicator::writes_refused` and the `lsr_app_held` metric; health and `/healthz` carry the same state.
 - **Revisit if:** operators misread any of them in practice.
 - **Links:** #115, #149, `crates/sidecar/src/failstop.rs`, `crates/cli/src/run.rs` (the exit table).
+
+## D74. Every engine commit checks the size the store acknowledged (delegated)
+
+- **Options:** keep the check in the uploader alone (which retried but left the short object listed) and in `Retrying`, which the engine never wraps its stores in; check in each engine call site; one upload type every engine commit goes through.
+- **Choice:** one type, `Checked` (`crates/core/src/checked.rs`). The uploader, the compactor and the staging writer open uploads only through it. It counts the bytes written; a commit acknowledging another size deletes the object, then reports `CommitSizeMismatch { removed }`. `Retrying` settles its own commits with the same function, so the rule is written once.
+- **Why:** the compactor took a short acknowledgement as a published output and maintenance then deleted its inputs, so `restore Latest` failed to decode the replica (simulator seed 0x46, once the simulator's size-mismatch fault published a short object). The uploader saw the mismatch but left the object listed until its retry, so restores failed in between.
+- **Cost accepted:** a delete after every mismatched commit. A store that misreports sizes on objects it holds whole loses them to the delete and they are written again; the caller still holds the bytes until a verified listing. The type does not stop a future engine function from calling `begin_upload` directly; the planted bugs `compact-commit-unchecked` and `short-commit-object-kept` catch the two paths that exist.
+- **Revisit if:** a new engine path writes to a store.
+- **Links:** #127 (the blind-plant pilot's second gap), `docs/planted-bugs.toml`.
 
 ## Unverified, not recorded
 
