@@ -256,9 +256,12 @@ fn rust_continues_from_every_go_written_newest_file_and_its_next_file_passes_go_
         let store = MemStore::new();
         put(&store, &go_file.key, &go_file.bytes);
         let mut reader = WalReader::open(Cursor::new(wal.file_bytes())).expect("wal");
-        let loaded = block_on(NewestStagedFile::load(&store, Some(&mut reader)))
-            .expect("load")
-            .expect("a newest file");
+        let loaded = block_on(NewestStagedFile::load(
+            &store,
+            Some(lsr_core::BootWal::recovered(&mut reader)),
+        ))
+        .expect("load")
+        .expect("a newest file");
         let recovered = recover(
             Some(PositionSource::Boot(&loaded)),
             &view_of(&wal, &reader),
@@ -306,9 +309,12 @@ fn a_go_newest_file_whose_wal_was_truncated_is_a_snapshot_not_a_continue() {
         let store = MemStore::new();
         put(&store, &go_file.key, &go_file.bytes);
         let mut reader = WalReader::open(Cursor::new(wal.file_bytes())).expect("wal");
-        let loaded = block_on(NewestStagedFile::load(&store, Some(&mut reader)))
-            .expect("load")
-            .expect("a newest file");
+        let loaded = block_on(NewestStagedFile::load(
+            &store,
+            Some(lsr_core::BootWal::recovered(&mut reader)),
+        ))
+        .expect("load")
+        .expect("a newest file");
         wal.truncate_file(usize::try_from(WAL_HEADER).expect("small"));
         let recovered = recover(
             Some(PositionSource::Boot(&loaded)),

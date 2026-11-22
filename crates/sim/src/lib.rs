@@ -40,7 +40,9 @@ mod testkit;
 pub mod world;
 
 pub use exec::{Polls, RunEnd, count_polls, run_until};
-pub use generate::{EnvFault, Generator, Op, Target, Weights, frozen_history, history};
+pub use generate::{
+    AfterRestart, EnvFault, Generator, Op, Target, Weights, frozen_history, history,
+};
 pub use model::{CommitId, CommitRec, Model, PageImage, Recovery};
 pub use oracle::{
     Acked, Bound, Checked, Ground, Violation, Windows, bug_fault, check, check_with, within,

@@ -127,13 +127,20 @@ impl Justifier {
 }
 
 /// What can force the engine to delete staged files the replica never took.
+/// The WAL's own changes are here because the boot's witness deletes every
+/// pending staged file the live WAL cannot vouch for (`StagedUnverified`): one
+/// staged before a restart, an emptied WAL or damage can no longer be proved.
 const GIVE_UP: &[Justifier] = &[
     Justifier::StagingEdited,
     Justifier::StagingFault,
     Justifier::StagedLost,
     Justifier::PowerLoss,
+    Justifier::LyingDisk,
     Justifier::RemoteEdited,
     Justifier::RemoteFault,
+    Justifier::WalRestarted,
+    Justifier::WalEmptied,
+    Justifier::WalDamaged,
 ];
 
 /// What can make a snapshot for `cause` necessary, announced at a boot
@@ -214,6 +221,19 @@ pub const fn justifies(cause: SnapshotCauseKind, at_boot: bool) -> Option<&'stat
         // power loss cannot take what was staged: only a disk that lies about
         // that sync, damage, or a staging backup put back can.
         SnapshotCauseKind::LocalRewound => &[LyingDisk, WalDamaged, StagingEdited],
+        // Staged files the live WAL could not vouch for were deleted at
+        // boot: staging edited or torn, or the WAL they came from changed or
+        // lost what they hold.
+        SnapshotCauseKind::StagedUnverified => &[
+            StagingEdited,
+            StagedLost,
+            StagingFault,
+            PowerLoss,
+            LyingDisk,
+            WalDamaged,
+            WalRestarted,
+            WalEmptied,
+        ],
         SnapshotCauseKind::CheckpointBoundary => return None,
         SnapshotCauseKind::OperatorRequested => &[SnapshotRequested],
     })

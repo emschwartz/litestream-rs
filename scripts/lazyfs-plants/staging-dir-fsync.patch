@@ -1,0 +1,12 @@
+diff --git a/crates/store-fs/src/lib.rs b/crates/store-fs/src/lib.rs
+index 671dde0..f430ac5 100644
+--- a/crates/store-fs/src/lib.rs
++++ b/crates/store-fs/src/lib.rs
+@@ -440,7 +440,6 @@ impl FsUpload {
+             }
+             fs::rename(&self.scratch, &self.target)?;
+             // The rename is not durable until its directory entry is.
+-            File::open(&self.dir)?.sync_all()?;
+             Ok(Ok(size))
+         })();
+         match result {

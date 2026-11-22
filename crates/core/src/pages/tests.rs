@@ -167,6 +167,57 @@ proptest! {
 #[test]
 fn a_staging_listing_whose_cursor_never_advances_is_a_fault_not_a_loop() {
     let staging = crate::stuck::StuckListing::new(crate::MemStore::new());
-    let got = crate::conformance::block_on(seeded(&staging, nz(1)));
+    let got = crate::conformance::block_on(seeded(&staging, None, nz(1)));
     assert_eq!(got.err(), Some(Fault::LocalIo));
+}
+
+/// A level-0 file for transaction `n` holding `pages` filled with `fill`.
+fn staged_file(n: u64, pages: &[u32], fill: u8) -> (FileKey, Vec<u8>) {
+    use lsr_ltx::{Encoder, Header, HeaderFields, Timestamp, TxidRange};
+    let txid = Txid::new(n).unwrap();
+    let header = Header::new(HeaderFields {
+        tracked: false,
+        page_size: PageSize::MIN,
+        commit: 4,
+        txids: TxidRange::single(txid),
+        timestamp: Timestamp::from_unix_millis(1),
+        pre_apply: None,
+        wal: None,
+        node_id: 0,
+    })
+    .unwrap();
+    let mut encoder = Encoder::new(Vec::new(), header).unwrap();
+    for n in pages {
+        encoder.write_page(pg(*n), &page(fill)).unwrap();
+    }
+    let key = FileKey::new(Level::ZERO, TxidRange::single(txid));
+    (key, encoder.finish(None).unwrap().0)
+}
+
+/// Only staged files from the replica's newest on seed the table: an older
+/// one nothing vouched for at boot leaves its pages unknown, to be read
+/// afresh, rather than checked against bytes it may never have held.
+#[test]
+fn only_vouched_staged_files_seed_the_table() {
+    use crate::store::Upload;
+    let staging = crate::MemStore::new();
+    for (n, pages, fill) in [(2, &[1, 2][..], 1), (3, &[1][..], 2), (4, &[3][..], 3)] {
+        let (key, bytes) = staged_file(n, pages, fill);
+        crate::conformance::block_on(async {
+            let mut up = staging
+                .begin_upload(&key, lsr_ltx::Timestamp::from_unix_millis(1))
+                .await
+                .unwrap();
+            up.write(&bytes).await.unwrap();
+            up.commit().await.unwrap();
+        });
+    }
+    let all = crate::conformance::block_on(seeded(&staging, None, nz(4))).unwrap();
+    assert_eq!(all.len(), 3);
+    let vouched = crate::conformance::block_on(seeded(&staging, Txid::new(3), nz(4))).unwrap();
+    assert_eq!(vouched.len(), 2);
+    let mut vouched = vouched;
+    // Page 2 was only in file 2: unknown, so any bytes pass and are recorded.
+    assert_eq!(vouched.check(pg(2), &page(9)), Ok(()));
+    assert!(vouched.check(pg(1), &page(1)).is_err());
 }

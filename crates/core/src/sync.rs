@@ -25,8 +25,8 @@
 use std::num::{NonZeroU32, NonZeroU64};
 
 use lsr_ltx::{
-    Encoder, Header, HeaderFields, PageChecksum, PageNo, PageSize, Timestamp, Txid, TxidRange,
-    WalOrigin,
+    Encoder, FileChecksum, Header, HeaderFields, PageChecksum, PageNo, PageSize, Timestamp, Txid,
+    TxidRange, WalOrigin,
 };
 use lsr_wal::{
     FrameCursor, FrameRef, PageMap, ReadPageError, ScanLimit, TxOutcome, WalError, WalReader,
@@ -40,6 +40,7 @@ use crate::position::{Continuity, LastPage, Position, ReachedEnd, ReadLockHold};
 use crate::recover::Recovered;
 use crate::source::{CommittedRead, PageSource, WalSource};
 use crate::store::{ObjectStore, StoreError, Upload};
+use crate::witness::{ByteTally, Witnessed};
 
 /// Go's default cap on the WAL bytes one file covers (`db.go:33-40`).
 const DEFAULT_CAP: u64 = 64 << 20;
@@ -132,6 +133,8 @@ pub enum Synced {
     Wrote {
         /// The staged file.
         file: FileInfo,
+        /// Its token for the uploader: this process wrote those bytes.
+        witness: Witnessed,
         /// Where the step stopped.
         end: StepEnd,
         /// How many WAL transactions the file covers (0 for a snapshot of a
@@ -434,7 +437,14 @@ fn unscanned<R: Read + Seek>(wal: &mut WalReader<R>, start: &Start) -> Result<Sc
     })
 }
 
-/// Encodes `plan` into `upload` in bounded chunks; returns the last page written.
+/// What [`fill`] wrote: the last page, the bytes and the trailer's checksum.
+struct Filled {
+    last: Option<LastPage>,
+    bytes: ByteTally,
+    checksum: FileChecksum,
+}
+
+/// Encodes `plan` into `upload` in bounded chunks.
 async fn fill<R: Read + Seek, P: PageSource, U: Upload>(
     upload: &mut U,
     header: Header,
@@ -443,10 +453,11 @@ async fn fill<R: Read + Seek, P: PageSource, U: Upload>(
     db: &mut P,
     pages: &mut PageChecksumTable,
     map_store: fn(&StoreError) -> Fault,
-) -> Result<Option<LastPage>, Fault> {
+) -> Result<Filled, Fault> {
     let mut encoder = Encoder::new(Vec::new(), header).map_err(|_err| BugSite::Encode.hit())?;
     let mut buf = vec![0_u8; header.page_size().bytes()];
     let mut last = None;
+    let mut bytes = ByteTally::new();
     for (index, page) in plan.iter().enumerate() {
         match page {
             PageFrom::Wal(frame) => wal
@@ -473,18 +484,25 @@ async fn fill<R: Read + Seek, P: PageSource, U: Upload>(
         if encoder.writer_mut().len() >= FLUSH_AT {
             let chunk = std::mem::take(encoder.writer_mut());
             upload.write(&chunk).await.map_err(|err| map_store(&err))?;
+            bytes.add(&chunk);
         }
     }
-    let (rest, _trailer) = encoder.finish(None).map_err(|_err| BugSite::Encode.hit())?;
+    let (rest, trailer) = encoder.finish(None).map_err(|_err| BugSite::Encode.hit())?;
     upload.write(&rest).await.map_err(|err| map_store(&err))?;
-    Ok(last)
+    bytes.add(&rest);
+    Ok(Filled {
+        last,
+        bytes,
+        checksum: trailer.file_checksum(),
+    })
 }
 
 /// Writes one file into `store`; the upload is aborted when anything before the
 /// commit fails. Every database-file page is checked against `pages` before it
 /// is encoded. `map_store` says which store it is: the staging directory and
 /// the replica read the same error differently (`Fault::from_staging`,
-/// `Fault::from_remote`).
+/// `Fault::from_remote`). The [`Witnessed`] token is minted from the bytes
+/// written and the encoder's own trailer: this process made the file.
 #[expect(
     clippy::too_many_arguments,
     reason = "each argument is a distinct source or sink of the file"
@@ -498,15 +516,16 @@ pub(crate) async fn stage<R: Read + Seek, P: PageSource, L: ObjectStore>(
     db: &mut P,
     pages: &mut PageChecksumTable,
     map_store: fn(&StoreError) -> Fault,
-) -> Result<(FileInfo, Option<LastPage>), Fault> {
+) -> Result<(FileInfo, Option<LastPage>, Witnessed), Fault> {
     let mut upload = store
         .begin_upload(key, header.fields().timestamp)
         .await
         .map_err(|err| map_store(&err))?;
     match fill(&mut upload, header, plan, wal, db, pages, map_store).await {
-        Ok(last) => {
+        Ok(filled) => {
             let file = upload.commit().await.map_err(|err| map_store(&err))?;
-            Ok((file, last))
+            let token = Witnessed::made_here(*key, filled.bytes, filled.checksum);
+            Ok((file, filled.last, token))
         }
         Err(fault) => {
             // The write already failed; a failed abort changes nothing the retry relies on.
@@ -606,7 +625,7 @@ async fn run<R: Read + Seek, P: PageSource, L: ObjectStore>(
     let plan = plan_pages(&scanned.map, start.prev_commit, commit, page_size);
     let header = created_at(&start, &scanned, wal, commit, cfg.node_id, now)?;
     let key = FileKey::new(Level::ZERO, TxidRange::single(start.txid));
-    let (file, last_written) = stage(
+    let (file, last_written, witness) = stage(
         staging,
         &key,
         header,
@@ -636,6 +655,7 @@ async fn run<R: Read + Seek, P: PageSource, L: ObjectStore>(
     let end = ended(position, reset, stopped_short, epoch);
     Ok(Synced::Wrote {
         file,
+        witness,
         end,
         txs: scanned.txs,
     })

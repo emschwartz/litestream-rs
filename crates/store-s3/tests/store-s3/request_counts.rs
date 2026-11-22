@@ -28,15 +28,14 @@ pub(crate) mod cases {
     use lsr_core::{
         ContiguousChain, Depth, Did, Due, FakeClock, FileKey, Inventory, Job, L0Retention, Level,
         MaintainState, Maintenance, MemSink, MemStore, NewestStagedFile, ObjectStore, PlanOutcome,
-        ResolvedCreatedAt, RestoreError, RestoreTarget, Restored, Upload, UploadState, due,
-        plan_reference, resolve, restore, upload_next, verify,
+        ResolvedCreatedAt, RestoreError, RestoreTarget, Restored, Upload, UploadState, Witnesses,
+        due, plan_reference, resolve, restore, upload_next, verify,
     };
     use lsr_ltx::{Encoder, Header, HeaderFields, PageNo, PageSize, Timestamp, Txid, TxidRange};
     use lsr_store_s3::{
         FakeS3, FaultTransport, HttpRequest, HttpResponse, S3Store, Shape, Transport,
         TransportError,
     };
-    use lsr_wal::WalReader;
 
     pub(crate) const EPOCH_MS: i64 = 1_700_000_000_000;
     pub(crate) const TXNS: u64 = 9000;
@@ -394,6 +393,7 @@ pub(crate) mod cases {
                 &staging,
                 &store,
                 Some(txid(TXNS)),
+                &Witnesses::new(),
             ))
         });
         let done = done.unwrap();
@@ -416,7 +416,7 @@ pub(crate) mod cases {
         let (newest_staged, counts) = rig.counted(|| {
             block_on(NewestStagedFile::load(
                 &store,
-                None::<&mut WalReader<Cursor<Vec<u8>>>>,
+                None::<lsr_core::BootWal<'_, Cursor<Vec<u8>>>>,
             ))
         });
         assert!(newest_staged.unwrap().is_some());
