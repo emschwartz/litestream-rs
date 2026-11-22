@@ -22,6 +22,7 @@ pub mod seed_0x2c;
 pub mod seed_0x2d;
 pub mod seed_0x31c;
 pub mod seed_0x46;
+pub mod seed_0x4c;
 pub mod seed_0x585;
 pub mod seed_0x753;
 pub mod seed_0x9f9;
@@ -61,6 +62,11 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
         "seed_0x46",
         "a_torn_staged_file_is_dropped_seed_0x46",
         Guard::OnPath("always-snapshot-at-boot"),
+    ),
+    (
+        "seed_0x4c",
+        "a_short_object_a_delete_could_not_remove_is_damage_seed_0x4c",
+        Guard::Own("sim-short-object-damage"),
     ),
     (
         "seed_0x126d68ef1c07",

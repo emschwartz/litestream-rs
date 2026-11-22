@@ -1776,3 +1776,10 @@ fix = "plant"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["verify_reports_a_live_transaction_that_no_longer_restores_seed_0x14"]
+
+[[bug]]
+name = "sim-short-object-damage"
+fix = "claude/sim-remote-corrupt"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_short_object_a_delete_could_not_remove_is_damage_seed_0x4c"]
