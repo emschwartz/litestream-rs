@@ -202,8 +202,10 @@ fn a_stop_for_another_writer_survives_a_restart() {
         .replicated
         .map(|(txid, _)| txid)
         .unwrap();
-    // One id past the engine's next: its own next upload does not collide with it.
-    let foreign = put_foreign(&site, ours.next().and_then(Txid::next).unwrap());
+    // Well above any id this test commits. `caught_up` can hold while a commit is still
+    // unsynced, so `ours` may trail the engine: an id just past it could be the engine's own
+    // next upload, which replaces the file under the same key, and nothing is left to stop for.
+    let foreign = put_foreign(&site, Txid::new(ours.get().saturating_add(100)).unwrap());
     // An idle engine makes no listing. A commit's upload makes one due, which shows the
     // file, unless a maintenance listing still owed from the boot shows it first.
     site.commit(1);
@@ -296,11 +298,11 @@ fn a_refused_boot_names_the_tip_and_a_take_over_clears_it() {
     site.commit(2);
     let (runtime, _clock) = fake();
     let first = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
-    let ours = wait(&first, caught_up)
-        .replicated
-        .map(|(txid, _)| txid)
-        .unwrap();
-    assert!(matches!(stopped(&first), Stopped::Drained { .. }));
+    wait(&first, caught_up);
+    // The drain's txid, not the health's: `caught_up` can hold while a commit is unsynced.
+    let Stopped::Drained { txid: Some(ours) } = stopped(&first) else {
+        panic!("the first replicator drains");
+    };
     let foreign = put_foreign(&site, ours.next().unwrap());
 
     let (sink, events) = lsr_replica::ChannelSink::new(std::num::NonZeroUsize::new(64).unwrap());
