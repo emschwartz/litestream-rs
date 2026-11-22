@@ -52,7 +52,7 @@ use crate::inventory::{Inventory, InventoryError, is_snapshot_start};
 use crate::layout::{CreatedAt, FileInfo, FileKey, Level};
 use crate::ltx_read::{BrokenLink, LinkEnd, LtxRead, ReadFault, check_link};
 use crate::plan::{KeyTarget, PlanOutcome, plan};
-use crate::restore::RestoreError;
+use crate::restore::{MAX_ATTEMPTS, RestoreError};
 use crate::store::{ObjectStore, ReadLen, StoreError};
 
 mod against;
@@ -426,10 +426,15 @@ struct Findings {
     /// Files with an [Severity::Unrestorable] finding of their own, kept past
     /// the cap so the dry run's duplicate check never depends on it.
     blamed: Vec<FileKey>,
+    /// [Finding::Gap]s pushed, kept or dropped.
+    holes: usize,
 }
 
 impl Findings {
     fn push(&mut self, finding: Finding) {
+        if matches!(finding, Finding::Gap { .. }) {
+            self.holes = self.holes.saturating_add(1);
+        }
         self.worst = self.worst.max(Some(finding.severity()));
         if finding.severity() == Severity::Unrestorable
             && let Some(key) = finding.file()
@@ -456,11 +461,7 @@ impl Findings {
 /// # Errors
 /// [VerifyError] when the walk cannot go on; damage is in the [Report].
 pub async fn verify<S: ObjectStore>(store: &S, depth: Depth) -> Result<Report, VerifyError> {
-    let inventory = Inventory::load(store)
-        .await
-        .map_err(VerifyError::Inventory)?;
-    let mut findings = Findings::default();
-    let latest = name_findings(&inventory, &mut findings);
+    let (inventory, mut findings, latest) = listed_names(store).await?;
     let (mut files_read, mut bytes_read) = (0, 0);
     if depth == Depth::Contents {
         let plan = match &latest {
@@ -534,6 +535,29 @@ async fn contents_pass<S: ObjectStore>(
         }
     }
     Ok((files_read, bytes_read))
+}
+
+/// A listing and what its names alone show. A listing is not a snapshot of the store: on a
+/// file replica, a directory read that races the engine's rename may miss the new file and
+/// return a later one, a hole the replica never had. A listing that shows a hole is taken
+/// again, up to [MAX_ATTEMPTS] listings in all, and a hole is reported only when every
+/// listing showed one (the last listing's findings stand).
+async fn listed_names<S: ObjectStore>(
+    store: &S,
+) -> Result<(Inventory, Findings, PlanOutcome), VerifyError> {
+    let mut attempt = 1_u8;
+    loop {
+        let inventory = Inventory::load(store)
+            .await
+            .map_err(VerifyError::Inventory)?;
+        let mut findings = Findings::default();
+        let latest = name_findings(&inventory, &mut findings);
+        let holed = findings.holes > 0 || matches!(latest, PlanOutcome::Gap { .. });
+        if !holed || attempt >= MAX_ATTEMPTS {
+            return Ok((inventory, findings, latest));
+        }
+        attempt = attempt.saturating_add(1);
+    }
 }
 
 /// Everything the listing alone shows. Returns the plan for the latest state.

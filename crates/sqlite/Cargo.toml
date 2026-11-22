@@ -36,3 +36,5 @@ lsr-local.workspace = true
 # The crash cycles judge every restore against the tree of committed histories.
 lsr-history.workspace = true
 tempfile.workspace = true
+# The simulator's model is held to this crate's answers on drawn histories.
+proptest.workspace = true

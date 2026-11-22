@@ -620,6 +620,35 @@ fn a_store_error_other_than_not_found_ends_the_restore_without_retry() {
     assert_eq!(sink.published(), None);
 }
 
+/// A listing that misses a file a writer was putting in place (a directory read racing a
+/// rename on a file replica) shows a gap the replica does not have. Seen on the LazyFS rig:
+/// "gap: the history reaches 0bf8 and resumes at 0bfa" while 0bf9 was being uploaded; the
+/// same restore run again a moment later succeeded. A gap plans again on a fresh listing.
+#[test]
+fn a_gap_from_a_listing_that_raced_a_writer_is_listed_again() {
+    let store = Wrapped::new(four_file_replica());
+    store.hide_once.lock().unwrap().insert(key(0, 3, 3));
+    let (result, sink) = run(&store, RestoreTarget::Latest);
+    let restored = result.unwrap();
+    assert_eq!(restored.attempts(), 2);
+    assert_eq!(restored.reached(), txid(4));
+    assert!(sink.published().is_some());
+}
+
+/// A gap that every listing shows is the replica's: the restore refuses it as before.
+#[test]
+fn a_gap_every_listing_shows_is_refused() {
+    let inner = four_file_replica();
+    block_on(inner.delete(&[key(0, 3, 3)])).unwrap();
+    let store = Wrapped::new(inner);
+    let (result, sink) = run(&store, RestoreTarget::Latest);
+    assert!(
+        matches!(&result, Err(RestoreError::NoPlan(plan)) if matches!(plan.outcome(), PlanOutcome::Gap { .. })),
+        "{result:?}"
+    );
+    assert_eq!(sink.published(), None);
+}
+
 #[test]
 fn a_file_deleted_between_plan_and_read_is_replanned_once() {
     let inner = four_file_replica();

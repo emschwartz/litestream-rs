@@ -16,9 +16,19 @@
 //! 2. Upload while staged files are not on the replica.
 //! 3. Prune staged level-0 files the replica's level 1 covers, keeping the
 //!    newest staged file.
-//! 4. Maintenance, only once uploads are idle, so a snapshot's last
-//!    transaction is at most what was published. Its first listing after a
+//! 4. Maintenance. Its first listing after a
 //!    boot is read back first: the newest file of each level must verify.
+//!    A snapshot job runs only once uploads are idle, so its last
+//!    transaction is at most what was published; with uploads busy it waits,
+//!    and the next listing waits with it.
+//!
+//!    Fair share: after [`state::FAIR_SHARE`] uploads in a row, prune and
+//!    maintenance, when either has work, take the next unit ahead of uploads
+//!    (sync still comes first). Without it an engine whose uploads
+//!    never go idle (a backlog on a slow disk, a process killed every few
+//!    seconds) never compacts, never prunes staging and never deletes what
+//!    retention lets go: maintenance must progress across short-lived
+//!    processes, and its schedule is already the replica's, never uptime.
 //!    An upload does not make a listing due at once: the next one waits for
 //!    the next compaction window or the level-0 retention check interval,
 //!    whichever comes first ([`crate::listing_after_upload`]), as Go's
@@ -934,7 +944,17 @@ impl Actor {
         if let Some(tick) = self.wal_unit(env, now, true).await {
             return tick;
         }
+        if self.fair_turn() {
+            if let Some(tick) = self.prune_unit(env, now).await {
+                return tick;
+            }
+            if let Some(tick) = self.maintain_unit(env, now).await {
+                return tick;
+            }
+        }
         if let Some(tick) = self.upload_unit(env, now).await {
+            let maintain = &mut self.engine.maintain;
+            maintain.passed_over = maintain.passed_over.saturating_add(1);
             return tick;
         }
         if let Some(tick) = self.prune_unit(env, now).await {
@@ -1632,6 +1652,7 @@ impl Actor {
         if keys.is_empty() {
             return None;
         }
+        self.engine.maintain.passed_over = 0;
         let event = Event::Maintained {
             event: MaintainedEvent::Deleted(keys.len()),
             created_at_read: 0,
@@ -1710,6 +1731,8 @@ impl Actor {
             }
         };
         self.engine.maintain.stale = false;
+        self.engine.maintain.passed_over = 0;
+        self.engine.maintain.snapshot_waits = false;
         self.engine.maintain.level_one = Level::new(1)
             .and_then(|level| inventory.level(level).last())
             .map(|info| info.key.range().max());
@@ -1720,6 +1743,17 @@ impl Actor {
                 self.engine.maintain.until = until;
                 let event = Event::Maintained {
                     event: MaintainedEvent::Waiting { held },
+                    created_at_read,
+                };
+                Some(self.ran(event, now))
+            }
+            // A snapshot's last transaction must be at most what was published: with
+            // uploads busy it waits, and the next listing with them.
+            Due::Run(Job::Snapshot(_)) if !self.uploads_idle() => {
+                self.engine.maintain.stale = true;
+                self.engine.maintain.snapshot_waits = true;
+                let event = Event::Maintained {
+                    event: MaintainedEvent::Waiting { held: None },
                     created_at_read,
                 };
                 Some(self.ran(event, now))
@@ -1980,13 +2014,21 @@ impl Actor {
             .filter(|_| self.running() && self.kept.tasks.ready(Task::Prune, now))
     }
 
-    /// Whether maintenance may list the replica now: only once uploads are
-    /// idle, and only when a listing could change what is due.
+    /// Whether maintenance may list the replica now: when a listing could change what is
+    /// due, and uploads are idle or have had their [`state::FAIR_SHARE`] (unless the last
+    /// listing's snapshot waits for idle uploads).
     fn maintain_ready(&self, now: Timestamp) -> bool {
+        let maintain = &self.engine.maintain;
+        let turn = self.uploads_idle() || (self.fair_turn() && !maintain.snapshot_waits);
         self.running()
             && self.kept.tasks.ready(Task::Maintenance, now)
-            && self.uploads_idle()
-            && self.engine.maintain.wants_listing(now)
+            && turn
+            && maintain.wants_listing(now)
+    }
+
+    /// Whether prune and maintenance take the next unit ahead of uploads.
+    const fn fair_turn(&self) -> bool {
+        self.engine.maintain.passed_over >= state::FAIR_SHARE
     }
 
     /// Every deadline a task holds: retry waits, the checkpoint gate, the
@@ -2040,6 +2082,25 @@ struct Booted {
 /// level-0 file), the replica's page size, and what recovery makes of them.
 /// A WAL whose page size is not the replica's stops here, before
 /// anything is staged.
+/// Removes the scratch files a killed process's uploads left, in staging and in the replica.
+/// A crash loop otherwise leaves one per boot, each as large as the file it was writing; at
+/// boot nothing of this engine is uploading yet. A failure is the directory's, which every
+/// upload and prune needs too.
+async fn remove_scratch<L: ObjectStore, R: ObjectStore>(
+    staging: &L,
+    remote: &R,
+) -> Result<(), Fault> {
+    staging
+        .remove_scratch()
+        .await
+        .map_err(|err| Fault::from_staging(&err))?;
+    remote
+        .remove_scratch()
+        .await
+        .map_err(|err| Fault::from_remote(&err))?;
+    Ok(())
+}
+
 /// What boot's listing and sweep deleted from staging, from which transaction on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Dropped {
@@ -2052,7 +2113,7 @@ enum Dropped {
     Diverged(Txid),
 }
 
-/// Boot's listing and staging sweep: the upload state to start from, and
+/// Boot's scratch removal, listing and staging sweep: the upload state to start from, and
 /// what was deleted.
 ///
 /// A staged file that fails verification is deleted, with all after it, only
@@ -2064,6 +2125,7 @@ async fn boot_listing<L: ObjectStore, R: ObjectStore>(
     remote: &R,
     suspect: &mut Option<FileKey>,
 ) -> Result<(UploadState, Dropped), Fault> {
+    remove_scratch(staging, remote).await?;
     // At boot a replica ahead of the local newest staged file is `recover`'s to judge (a
     // snapshot after it), not the uploader's (a stop), so the listing names no newest staged file.
     let start = UploadState::ListFirst { confirmed: None };

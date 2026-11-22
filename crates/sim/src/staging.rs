@@ -282,6 +282,13 @@ impl ObjectStore for StagingRaw {
             Self::Fs(s) => s.store.delete(keys).await,
         }
     }
+
+    async fn remove_scratch(&self) -> Result<u64, StoreError> {
+        match self {
+            Self::Mem(s) => s.remove_scratch().await,
+            Self::Fs(s) => s.store.remove_scratch().await,
+        }
+    }
 }
 
 impl Upload for StagingUpload {

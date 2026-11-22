@@ -1,0 +1,15 @@
+diff --git a/crates/core/src/actor/state.rs b/crates/core/src/actor/state.rs
+index ece2fb4..b5d070b 100644
+--- a/crates/core/src/actor/state.rs
++++ b/crates/core/src/actor/state.rs
+@@ -176,7 +176,9 @@ impl Retry {
+     pub(super) fn succeed(&mut self) {
+         let kept = self
+             .degraded
+-            .filter(|was| is_page_mismatch(was.cause))
++            .filter(|was| {
++                is_page_mismatch(was.cause) || matches!(was.cause, PersistentCause::Stalled(_))
++            })
+             .map(|was| Degraded { retries: 1, ..was });
+         *self = Self {
+             degraded: kept,
