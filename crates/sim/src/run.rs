@@ -1016,6 +1016,7 @@ impl Runner {
                 })
             }
             RemoteOp::RollBack => self.w.remote_roll_back(),
+            RemoteOp::DropCreatedAt => self.w.remote_drop_created_at(),
         };
         if matches!(op, RemoteOp::RollBack) {
             self.w.acked.note_rewound();

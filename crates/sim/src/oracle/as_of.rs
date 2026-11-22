@@ -22,8 +22,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    AsOfInside, FileInfo, FileKey, MemSink, MemStore, PlanOutcome, RestoreError, RestoreOptions,
-    RestoreTarget, restore_with,
+    AsOfInside, CreatedAtSource, FileInfo, FileKey, MemSink, MemStore, PlanOutcome, RestoreError,
+    RestoreOptions, RestoreTarget, restore_with,
 };
 use lsr_ltx::{Timestamp, Txid};
 
@@ -155,6 +155,17 @@ impl Judge<'_> {
             return Ok(());
         }
         self.after_every_file(latest)?;
+        let fell_back = self
+            .files
+            .iter()
+            .filter(|f| {
+                f.created_at()
+                    .is_some_and(|c| c.origin() == CreatedAtSource::Fallback)
+            })
+            .count();
+        out.as_of_fallback = out
+            .as_of_fallback
+            .saturating_add(u32::try_from(fell_back).unwrap_or(u32::MAX));
         for instant in instants(self.files) {
             match self.one(instant)? {
                 Answer::Reached { inside: None, .. } => {

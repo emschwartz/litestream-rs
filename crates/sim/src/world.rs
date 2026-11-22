@@ -596,6 +596,37 @@ impl World {
         Ok(true)
     }
 
+    /// Makes the store forget the stored created-at time of the newest-ending
+    /// level 0-8 file (the higher level on a tie), as a bucket copy without
+    /// metadata does: it reports the copy's time from then on, the latest the
+    /// clock has read, which no transaction in the file follows. Returns
+    /// whether there was such a file.
+    ///
+    /// # Errors
+    /// The store's error when it cannot list.
+    pub fn remote_drop_created_at(&mut self) -> Result<bool, StoreError> {
+        use lsr_core::{CreatedAtSource, Level, ObjectStore, PageLimit};
+        let mut files = Vec::new();
+        for level in Level::ALL.into_iter().filter(|level| !level.is_snapshot()) {
+            files.extend(block_on(self.remote_raw.list(level, None, PageLimit::MAX))?.files);
+        }
+        let newest = files
+            .iter()
+            .filter_map(|f| f.created_at().map(|created_at| (f.key, created_at)))
+            .filter(|(_, created_at)| created_at.origin() != CreatedAtSource::Fallback)
+            .max_by_key(|(key, _)| (key.range().max(), key.level()));
+        let Some((key, created_at)) = newest else {
+            return Ok(false);
+        };
+        let copied = self
+            .high
+            .at_least(lsr_core::Clock::now(self.clock.as_ref()))
+            .max(created_at.at());
+        self.remote_raw.drop_created_at(&key);
+        self.remote_raw.set_last_modified(&key, copied);
+        Ok(true)
+    }
+
     /// Deletes these replica keys around the wrappers.
     ///
     /// # Errors

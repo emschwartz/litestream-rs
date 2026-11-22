@@ -302,6 +302,9 @@ pub struct Checked {
     pub as_of_inside: u32,
     /// `AsOf` restores the contract refuses.
     pub as_of_refused: u32,
+    /// Files in `AsOf`-judged listings whose created-at time the store fell
+    /// back to (no stored metadata), counted once per judged listing.
+    pub as_of_fallback: u32,
     /// Replica files whose created-at time was judged against the staging
     /// recorder.
     pub stamps: u32,
@@ -326,6 +329,7 @@ impl Checked {
         reach.add("check.asof.planned", u64::from(self.as_of_planned));
         reach.add("check.asof.inside", u64::from(self.as_of_inside));
         reach.add("check.asof.refused", u64::from(self.as_of_refused));
+        reach.add("check.asof.fallback", u64::from(self.as_of_fallback));
         reach.add("check.stamps", u64::from(self.stamps));
         reach.add("check.deletes", u64::from(self.deletes));
         reach.add("check.lost", u64::from(self.lost));
