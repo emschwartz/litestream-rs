@@ -208,3 +208,83 @@ fn a_crash_loop_of_short_boots_with_no_change_leaves_nothing_growing() {
         &Connection::open(&world.db).unwrap(),
     );
 }
+
+/// Boots that each die once they have uploaded something, with commits between them and,
+/// every third boot, a WAL restart while no engine runs (the application's checkpoint): what
+/// a process killed every few seconds under a writing application sees. Each restart costs one
+/// snapshot (nothing proves the restarted generation lost nothing), and nothing else may: a
+/// boot that continues takes none. A last process that lives long enough to compact and prune
+/// leaves staging within a few copies of the database, the replica within a copy per
+/// snapshot and level, and no scratch file; the restore is the database.
+#[test]
+fn a_crash_loop_with_writes_and_wal_restarts_stays_bounded() {
+    let world = World::new();
+    let app = database(&world.db);
+    let mut restarts = 0;
+    let mut snapshots = Vec::new();
+    for boot in 1..=BOOTS {
+        if boot % 3 == 0 {
+            app.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+                .unwrap();
+            restarts += 1;
+        }
+        write(&app, 30);
+        let planted = [
+            plant(&world.staging, 0, boot, world.size),
+            plant(&world.replica, 0, boot, world.size),
+        ];
+        let mut daemon = replicate(&world.config);
+        daemon.wait_for(&["msg=uploaded", "Put("]);
+        daemon.signal("KILL");
+        let (_status, lines) = daemon.finish();
+        snapshots.extend(
+            lines
+                .into_iter()
+                .filter(|l| l.contains("snapshot required")),
+        );
+        for path in &planted {
+            assert!(!path.exists(), "boot {boot} left {}", path.display());
+        }
+    }
+    // The first boot's first sync, and one per restart.
+    assert!(
+        snapshots.len() <= 1 + restarts,
+        "{} snapshots for {restarts} restarts: {snapshots:#?}",
+        snapshots.len()
+    );
+    let mut daemon = replicate(&world.config);
+    daemon.wait_for(&["msg=maintenance", "Compacted("]);
+    daemon.wait_for(&["msg=maintenance", "Deleted("]);
+    daemon.signal("TERM");
+    let (status, lines) = daemon.finish();
+    assert_eq!(status.code(), Some(0), "{lines:#?}");
+    let size = u64::try_from(
+        app.query_row("PRAGMA page_count", [], |r| r.get::<_, i64>(0))
+            .unwrap()
+            * app
+                .query_row("PRAGMA page_size", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+    )
+    .unwrap();
+    for root in [&world.replica, &world.staging] {
+        let (left, _) = files(root, &own_scratch);
+        assert_eq!(
+            left,
+            Vec::<PathBuf>::new(),
+            "scratch under {}",
+            root.display()
+        );
+    }
+    let (_, staged_bytes) = files(&world.staging, &objects);
+    assert!(
+        staged_bytes <= 3 * size,
+        "staging {staged_bytes} bytes, database {size}"
+    );
+    let copies = u64::try_from(snapshots.len()).unwrap() + 5;
+    let (_, replica_bytes) = files(&world.replica, &objects);
+    assert!(
+        replica_bytes <= copies * size,
+        "replica {replica_bytes} bytes, database {size}, {copies} copies"
+    );
+    restores_to(world.dir.path(), &world.replica, &app);
+}
