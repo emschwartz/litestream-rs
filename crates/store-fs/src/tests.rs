@@ -1,4 +1,5 @@
 use super::*;
+use lsr_core::WriteMode;
 use lsr_core::conformance::{Failure, Harness, block_on};
 use lsr_core::file_name;
 use lsr_ltx::Txid;
@@ -91,7 +92,11 @@ fn commit_lands_where_go_looks_with_the_created_at_as_mtime() {
     block_on(async {
         let mut up = h
             .store
-            .begin_upload(&target, Timestamp::from_unix_millis(5_000))
+            .begin_upload(
+                &target,
+                Timestamp::from_unix_millis(5_000),
+                WriteMode::Replace,
+            )
             .await
             .unwrap();
         up.write(b"data").await.unwrap();
@@ -118,7 +123,11 @@ fn fs_commit_size_mismatch_is_caught_before_rename() {
     let err = block_on(async {
         let mut up = h
             .store
-            .begin_upload(&target, Timestamp::from_unix_millis(5_000))
+            .begin_upload(
+                &target,
+                Timestamp::from_unix_millis(5_000),
+                WriteMode::Replace,
+            )
             .await
             .unwrap();
         up.write(b"data").await.unwrap();
@@ -152,7 +161,7 @@ fn a_crash_between_scratch_write_and_rename_is_invisible() {
     block_on(async {
         let mut up = h
             .store
-            .begin_upload(&target, Timestamp::from_unix_millis(1))
+            .begin_upload(&target, Timestamp::from_unix_millis(1), WriteMode::Replace)
             .await
             .unwrap();
         up.write(b"partial").await.unwrap();
@@ -176,7 +185,7 @@ fn a_crash_between_scratch_write_and_rename_is_invisible() {
     block_on(async {
         let mut up = h
             .store
-            .begin_upload(&target, Timestamp::from_unix_millis(2))
+            .begin_upload(&target, Timestamp::from_unix_millis(2), WriteMode::Replace)
             .await
             .unwrap();
         up.write(b"whole").await.unwrap();
@@ -217,7 +226,7 @@ fn a_symlink_to_a_regular_file_is_that_file() {
     block_on(async {
         let mut up = h
             .store
-            .begin_upload(&real, Timestamp::from_unix_millis(7))
+            .begin_upload(&real, Timestamp::from_unix_millis(7), WriteMode::Replace)
             .await
             .unwrap();
         up.write(b"bytes").await.unwrap();
@@ -286,16 +295,17 @@ fn an_upload_skips_scratch_names_a_crash_left_and_gives_up_when_all_are_taken() 
     fs::write(name(0), b"left by a crash").unwrap();
     block_on(
         h.store
-            .begin_upload(&target, Timestamp::from_unix_millis(1)),
+            .begin_upload(&target, Timestamp::from_unix_millis(1), WriteMode::Replace),
     )
     .unwrap();
     for serial in 0..200 {
         fs::write(name(serial), b"x").unwrap();
     }
-    let err = block_on(
-        h.store
-            .begin_upload(&target, Timestamp::from_unix_millis(1)),
-    );
+    let err = block_on(h.store.begin_upload(
+        &target,
+        Timestamp::from_unix_millis(1),
+        WriteMode::Replace,
+    ));
     assert_eq!(
         err.err(),
         Some(StoreError::ScratchExhausted { key: target })
@@ -353,10 +363,11 @@ fn timestamps_before_the_epoch_survive_and_absurd_ones_are_refused() {
 fn begin_upload_with_an_unrepresentable_created_at_is_corrupt_not_a_panic() {
     let h = FsHarness::new();
     let target = key(0, 1, 1);
-    let err = block_on(
-        h.store
-            .begin_upload(&target, Timestamp::from_unix_millis(i64::MIN)),
-    );
+    let err = block_on(h.store.begin_upload(
+        &target,
+        Timestamp::from_unix_millis(i64::MIN),
+        WriteMode::Replace,
+    ));
     // Representable on some platforms; where it is not, the error is typed.
     if let Err(err) = err {
         assert_eq!(
@@ -399,7 +410,7 @@ fn remove_scratch_removes_only_this_store_s_own_scratch_files() {
         for k in [target, snapshot] {
             let mut up = h
                 .store
-                .begin_upload(&k, Timestamp::from_unix_millis(1))
+                .begin_upload(&k, Timestamp::from_unix_millis(1), WriteMode::Replace)
                 .await
                 .unwrap();
             up.write(b"partial").await.unwrap();
@@ -437,7 +448,7 @@ fn remove_scratch_removes_only_this_store_s_own_scratch_files() {
     block_on(async {
         let mut up = h
             .store
-            .begin_upload(&target, Timestamp::from_unix_millis(1))
+            .begin_upload(&target, Timestamp::from_unix_millis(1), WriteMode::Replace)
             .await
             .unwrap();
         up.write(b"bytes").await.unwrap();

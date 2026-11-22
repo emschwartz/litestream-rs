@@ -294,7 +294,8 @@ impl LtxRead {
     }
 
     /// Fetches `count` chunks from `offset` in one batch and keeps them up to
-    /// the first short chunk (the end) or failure.
+    /// the first failure. Chunks after a short one (the end) are kept too: they
+    /// are empty reads past the end, and the read has ended before reaching them.
     async fn fetch_ahead<S: ObjectStore>(&mut self, store: &S, count: usize) {
         let mut reads = Vec::with_capacity(count);
         let mut at = self.offset;
@@ -307,11 +308,9 @@ impl LtxRead {
             at = at.saturating_add(self.len.get());
         }
         for result in store.read_many(&reads).await {
-            let last = result.as_ref().map_or(true, |chunk| {
-                u64::try_from(chunk.len()).map_or(true, |n| n < self.len.get())
-            });
+            let failed = result.is_err();
             self.ahead.push_back(result);
-            if last {
+            if failed {
                 break;
             }
         }

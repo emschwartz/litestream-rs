@@ -135,3 +135,13 @@ fn a_reached_end_whose_epoch_moved_is_no_proof() {
     assert_eq!(reached.confirm(&wal), Err(at));
     assert_eq!(ReachedEnd::new(at, epoch).into_position(), at);
 }
+
+/// A hold prints its count and never its holder, so one scenario prints the
+/// same however many sources the process opened before it.
+#[test]
+fn a_hold_prints_the_same_whoever_holds_it() {
+    let (one, other) = (ReadLockHold::first(), ReadLockHold::first());
+    assert_ne!(one, other);
+    assert_eq!(format!("{one:?}"), format!("{other:?}"));
+    assert_eq!(format!("{:?}", one.next()), "ReadLockHold(2)");
+}

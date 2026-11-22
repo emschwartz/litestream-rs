@@ -10,6 +10,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use lsr_core::WriteMode;
 use lsr_core::conformance::block_on;
 use lsr_core::{
     BatchKind, CreatedAt, FileInfo, FileKey, Level, Listing, MemStore, ObjectStore, PageLimit,
@@ -88,8 +89,9 @@ impl ObjectStore for Waves {
         &self,
         key: &FileKey,
         created_at: Timestamp,
+        mode: WriteMode,
     ) -> Result<Self::Upload, StoreError> {
-        self.inner.begin_upload(key, created_at).await
+        self.inner.begin_upload(key, created_at, mode).await
     }
 
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
@@ -146,7 +148,11 @@ fn snapshot_store() -> (MemStore, usize) {
     let store = MemStore::new();
     block_on(async {
         let mut up = store
-            .begin_upload(&key, Timestamp::from_unix_millis(1_700_000_000_000))
+            .begin_upload(
+                &key,
+                Timestamp::from_unix_millis(1_700_000_000_000),
+                WriteMode::Replace,
+            )
             .await
             .unwrap();
         up.write(&bytes).await.unwrap();
@@ -164,14 +170,15 @@ fn restore_through_the_public_entry_reads_side_by_side() {
     let restored = restore(&waves, RestoreTarget::Latest, &dir.path().join("db")).unwrap();
     assert_eq!(restored.files(), 1);
     let chunks = size.div_ceil(RESTORE_CHUNK);
-    // Two one-byte reads past the listing (the retry layer reads them one at a time), then
+    // One-byte reads of the three keys named past the listing (the retry layer reads them
+    // one at a time), then
     // one read per chunk.
     assert_eq!(
         reads.load(Ordering::SeqCst),
-        chunks + 2,
+        chunks + 3,
         "one read per chunk"
     );
-    let bound = chunks.div_ceil(WIDTH) + 2;
+    let bound = chunks.div_ceil(WIDTH) + 3;
     let seen = rounds.load(Ordering::SeqCst);
     assert!(
         seen <= bound,

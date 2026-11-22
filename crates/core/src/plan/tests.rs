@@ -953,19 +953,36 @@ proptest! {
     }
 }
 
-/// The `verify` re-check accepts what the planner builds and rejects a chain
-/// with a gap, which no other test could build through `plan`.
+/// The `verify` re-check accepts what the planner builds and rejects each way a
+/// chain can break, which no other test could build through `plan`: a gap, a
+/// file that ends no later than the reach, and a second snapshot. Each bad file
+/// is listed, so only the shape fails.
 #[test]
-fn verify_recheck_rejects_a_chain_with_a_gap() {
-    let listing = inv(&[at(9, 1, 3), at(0, 4, 6)]);
-    let PlanOutcome::Plan(chain) = plan(&listing, KeyTarget::Latest) else {
+fn verify_recheck_rejects_each_broken_chain_shape() {
+    let base = [at(9, 1, 3), at(0, 4, 6)];
+    let PlanOutcome::Plan(chain) = plan(&inv(&base), KeyTarget::Latest) else {
         panic!("expected a plan");
     };
-    assert!(chain.is_contiguous(&listing));
-    let mut broken = chain.clone();
-    broken.files.push(at(0, 9, 12));
-    broken.reaches = txid(12);
-    assert!(!broken.is_contiguous(&listing));
+    assert!(chain.is_contiguous(&inv(&base)));
+    for (bad, reaches) in [(at(0, 8, 12), 12), (at(0, 5, 6), 6), (at(9, 1, 9), 9)] {
+        let listing = inv(&[base[0], base[1], bad]);
+        let mut broken = chain.clone();
+        broken.files.push(bad);
+        broken.reaches = txid(reaches);
+        assert!(!broken.is_contiguous(&listing), "{bad:?}");
+    }
+    let mut short = chain.clone();
+    short.reaches = txid(5);
+    assert!(
+        !short.is_contiguous(&inv(&base)),
+        "a reach the files do not end at"
+    );
+    let mut renamed = chain.clone();
+    renamed.snapshot = base[1];
+    assert!(
+        !renamed.is_contiguous(&inv(&base)),
+        "a base that is not the first file"
+    );
 }
 
 /// The re-check also refuses a chain that is contiguous but names a file the
@@ -981,4 +998,23 @@ fn verify_recheck_rejects_a_contiguous_chain_with_an_unlisted_file() {
     extended.reaches = txid(9);
     assert!(!extended.is_contiguous(&listing));
     assert!(extended.is_contiguous(&inv(&[at(9, 1, 3), at(0, 4, 6), at(0, 7, 9)])));
+}
+
+/// A sift through a heap of `len` entries takes at most one comparison per
+/// level, the count the lazy planner's measured comparisons add per heap step.
+#[test]
+fn a_heap_sift_counts_one_comparison_per_level() {
+    let levels = [
+        (0, 0),
+        (1, 1),
+        (2, 2),
+        (3, 2),
+        (4, 3),
+        (7, 3),
+        (8, 4),
+        (1 << 20, 21),
+    ];
+    for (len, comparisons) in levels {
+        assert_eq!(depth(len), comparisons, "{len} entries");
+    }
 }

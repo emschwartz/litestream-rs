@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use lsr_core::conformance::block_on;
-use lsr_core::{FileKey, Level, ObjectStore, Upload};
+use lsr_core::{FileKey, Level, ObjectStore, Upload, WriteMode};
 use lsr_ltx::{Timestamp, Txid, TxidRange};
 use tempfile::TempDir;
 
@@ -70,6 +70,10 @@ impl Disk {
             Step::Rename { from, to } => {
                 let moved = self.now.insert(from.clone(), None).flatten();
                 self.now.insert(to.clone(), moved);
+            }
+            Step::Link { from, to } => {
+                let linked = self.now.get(from).copied().flatten();
+                self.now.insert(to.clone(), linked);
             }
             Step::Remove(path) => {
                 self.now.insert(path.clone(), None);
@@ -157,9 +161,13 @@ fn key(min: u64, max: u64) -> FileKey {
 }
 
 fn upload(store: &FsStore, key: FileKey, bytes: &[u8]) {
+    upload_as(store, key, bytes, WriteMode::Replace);
+}
+
+fn upload_as(store: &FsStore, key: FileKey, bytes: &[u8], mode: WriteMode) {
     block_on(async {
         let mut up = store
-            .begin_upload(&key, Timestamp::from_unix_millis(1_700_000_000_000))
+            .begin_upload(&key, Timestamp::from_unix_millis(1_700_000_000_000), mode)
             .await
             .unwrap();
         up.write(bytes).await.unwrap();
@@ -168,7 +176,7 @@ fn upload(store: &FsStore, key: FileKey, bytes: &[u8]) {
 }
 
 /// Two uploads, the first creating the level's directories, the second writing over the
-/// first's key, then a third key: every crash point leaves no torn object visible, keeps
+/// first's key, then a third key, then a create-only one (linked into place): every crash point leaves no torn object visible, keeps
 /// every committed object and every directory made for it.
 #[test]
 fn a_crash_at_any_step_of_a_commit_loses_nothing_committed_and_shows_nothing_torn() {
@@ -178,14 +186,16 @@ fn a_crash_at_any_step_of_a_commit_loses_nothing_committed_and_shows_nothing_tor
         upload(&store, key(1, 1), b"first");
         upload(&store, key(1, 1), b"first, again");
         upload(&store, key(2, 2), b"second");
+        upload_as(&store, key(3, 3), b"third, create-only", WriteMode::New);
     });
     assert!(steps.iter().any(|step| matches!(step, Step::CreateDir(_))));
+    assert!(steps.iter().any(|step| matches!(step, Step::Link { .. })));
     assert_eq!(
         steps
             .iter()
             .filter(|s| matches!(s, Step::Committed(_)))
             .count(),
-        3
+        4
     );
     if let Some(why) = first_broken(&steps, false) {
         panic!("{why}");

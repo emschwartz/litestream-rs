@@ -40,7 +40,7 @@ use crate::pages::{PageChecksumTable, snapshot_clears};
 use crate::position::{Continuity, LastPage, Position, ReachedEnd, ReadLockHold};
 use crate::recover::Recovered;
 use crate::source::{CommittedRead, PageSource, WalSource};
-use crate::store::{ObjectStore, StoreError, Upload};
+use crate::store::{ObjectStore, StoreError, Upload, WriteMode};
 use crate::witness::{ByteTally, Witnessed};
 
 /// Go's default cap on the WAL bytes one file covers (`db.go:33-40`).
@@ -348,9 +348,11 @@ fn below_committed<R: Read + Seek>(wal: &mut WalReader<R>, stop: Fault) -> Fault
 fn scan_fault<R: Read + Seek>(wal: &mut WalReader<R>, err: WalError) -> Fault {
     match err {
         WalError::CorruptBelowCommitted { .. } => {
+            mark!(Run4);
             below_committed(wal, Fault::WalCorruptBelowCommitted)
         }
         WalError::TruncatedBelowCommitted { .. } => {
+            mark!(Run5);
             below_committed(wal, Fault::WalTruncatedBelowCommitted)
         }
         WalError::Io(_)
@@ -523,7 +525,9 @@ pub(crate) async fn stage<R: Read + Seek, P: PageSource, L: ObjectStore>(
     pages: &mut PageChecksumTable,
     map_store: fn(&StoreError) -> Fault,
 ) -> Result<(FileInfo, Option<LastPage>, Witnessed), Fault> {
-    let mut upload = Checked::begin(store, key, header.fields().timestamp)
+    // A staged file replaces a torn one under its key, and a snapshot (level 9)
+    // shares its key with Go's snapshot of the same transaction: both replace.
+    let mut upload = Checked::begin(store, key, header.fields().timestamp, WriteMode::Replace)
         .await
         .map_err(|err| map_store(&err))?;
     match fill(&mut upload, header, plan, wal, db, pages, map_store).await {
@@ -628,6 +632,7 @@ async fn run<R: Read + Seek, P: PageSource, L: ObjectStore>(
         return Ok(Synced::IndexReset);
     }
     if nothing && let Some(held) = start.held {
+        mark!(Run2);
         return Ok(Synced::Idle(ReachedEnd::new(
             held.with_cursor(scanned.cursor),
             epoch,

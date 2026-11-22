@@ -1,0 +1,13 @@
+diff --git a/crates/store-s3/src/request.rs b/crates/store-s3/src/request.rs
+index 0a83dd7..ecb11b2 100644
+--- a/crates/store-s3/src/request.rs
++++ b/crates/store-s3/src/request.rs
+@@ -272,7 +272,7 @@ impl Precondition {
+     fn header(self) -> Option<(&'static str, String)> {
+         match self {
+             Self::None => None,
+-            Self::KeyIsFree => Some(("if-none-match", "*".to_owned())),
++            Self::KeyIsFree => None,
+         }
+     }
+ }

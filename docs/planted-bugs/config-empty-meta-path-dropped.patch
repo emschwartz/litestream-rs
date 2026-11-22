@@ -1,0 +1,13 @@
+diff --git a/crates/config/src/keys.rs b/crates/config/src/keys.rs
+index bd0bb2b..1daf482 100644
+--- a/crates/config/src/keys.rs
++++ b/crates/config/src/keys.rs
+@@ -280,7 +280,7 @@ const DB: &[Key] = &[
+         "watching a directory for new databases",
+     ),
+     key("snapshot", Map(Section::Snapshot), Implemented),
+-    key("meta-path", StrPtr, Implemented),
++    key("meta-path", Str, Implemented),
+     key("meta-dir", StrPtr, Implemented),
+     key("monitor-interval", Duration, Implemented),
+     key("checkpoint-interval", Duration, Implemented),

@@ -1,5 +1,6 @@
 //! Builders the unit tests share: small untracked LTX files and WAL origins.
 
+use lsr_core::WriteMode;
 use lsr_core::conformance::block_on;
 use lsr_core::{FileKey, Level, ObjectStore, Upload};
 use lsr_ltx::{
@@ -69,7 +70,7 @@ pub(crate) fn put<S: ObjectStore>(store: &S, level: u8, min: u64, max: u64, byte
         let created =
             Timestamp::from_unix_millis(1_000_i64.saturating_add(i64::try_from(max).unwrap()));
         let mut up = store
-            .begin_upload(&fkey(level, min, max), created)
+            .begin_upload(&fkey(level, min, max), created, WriteMode::Replace)
             .await
             .unwrap();
         up.write(bytes).await.unwrap();

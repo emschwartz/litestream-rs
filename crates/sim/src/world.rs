@@ -33,6 +33,7 @@ use crate::store::{
     FaultHandle, Faults, HighWater, Lost, Recorder, RecorderLog, Volatile, VolatileHandle,
     YieldEachCall,
 };
+use lsr_core::WriteMode;
 
 /// The staging store the actor sees.
 pub type StagingStore = Faults<YieldEachCall<Recorder<Volatile<StagingRaw>>>>;
@@ -416,10 +417,9 @@ impl World {
     }
 
     /// Arms a commit of `pages`, leaving `db_size` pages, that the app makes
-    /// inside the next tick at `site`. It must not grow the database: the
-    /// pages a growth re-adds are read from the rules after the tick, when
-    /// the engine may have changed them. The app reads its clock as it
-    /// commits, and the history logs the commit at that time.
+    /// inside the next tick at `site`. A commit that grows the database must
+    /// carry every page it adds. The app reads its clock as it commits, and
+    /// the history logs the commit at that time.
     pub fn arm_commit_in_tick(
         &self,
         pages: Vec<(PageNo, Vec<u8>)>,
@@ -593,9 +593,11 @@ impl World {
     pub fn run_tick<F: Future>(&mut self, fut: F, plan: Option<CrashPlan>) -> TickEnd<F::Output> {
         let budget = plan.map_or(Polls::UNBOUNDED, |p| p.at_poll);
         let at = self.remote_recorder.len();
+        self.sqlite.app_tick_begins();
         let ran = run_until(fut, budget);
         // The app's commit inside the tick came before the engine's own frames
         // that followed it, so the model takes it up first.
+        self.record_app_in_tick();
         self.in_tick = self.record_commit_in_tick();
         // Before the crash takes anything: a power loss decides which of the
         // engine's own commits survive, so the model must know them first.
@@ -882,14 +884,16 @@ impl World {
         };
         let key = FileKey::new(Level::ZERO, TxidRange::single(next));
         // Another writer's file is a sound one: the same pages under the next
-        // transaction.
+        // transaction, from a WAL that is not this database's, so it names no
+        // origin in it and the live WAL cannot vouch for it.
         let Some(bytes) = rewritten(&read_all(&self.remote_raw, &newest)?, |fields| {
             fields.txids = TxidRange::single(next);
+            fields.wal = None;
         }) else {
             return Ok(None);
         };
         let at = lsr_core::Clock::now(self.clock.as_ref());
-        let mut up = block_on(self.remote_raw.begin_upload(&key, at))?;
+        let mut up = block_on(self.remote_raw.begin_upload(&key, at, WriteMode::Replace))?;
         block_on(lsr_core::Upload::write(&mut up, &bytes))?;
         block_on(lsr_core::Upload::commit(up))?;
         self.foreign.push((next, newest.range().max()));
@@ -909,6 +913,25 @@ impl World {
             Err(StoreError::NotFound { .. }) => Ok(false),
             Err(other) => Err(other),
         }
+    }
+
+    /// Whether staging and the replica both hold `key` with different bytes:
+    /// a staged copy edited or forged under a key the replica took.
+    ///
+    /// # Errors
+    /// Either store's error other than a missing key.
+    pub fn staged_differs_from_remote(&self, key: FileKey) -> Result<bool, StoreError> {
+        let found = |read: Result<Vec<u8>, StoreError>| match read {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(StoreError::NotFound { .. }) => Ok(None),
+            Err(other) => Err(other),
+        };
+        let staged = found(read_all(&self.staging_raw, &key))?;
+        let remote = found(read_all(&self.remote_raw, &key))?;
+        Ok(match (staged, remote) {
+            (Some(staged), Some(remote)) => staged != remote,
+            (Some(_) | None, None) | (None, Some(_)) => false,
+        })
     }
 
     /// Deletes replica `key` if it still holds exactly `bytes`; whether it did.
@@ -1028,6 +1051,22 @@ impl World {
         Ok(None)
     }
 
+    /// Whether staging holds `key` under bytes the engine never put there: a
+    /// copy an operation forged or put back, which stays the operator's for as
+    /// long as it is staged, whatever the replica holds now.
+    ///
+    /// # Errors
+    /// The store's error other than a missing key.
+    pub fn staged_not_the_engines(&self, key: FileKey) -> Result<bool, StoreError> {
+        match read_all(&self.staging_raw, &key) {
+            Ok(bytes) => Ok(!self
+                .engine_puts(0)
+                .contains(&(key, crate::store::content_digest(&bytes)))),
+            Err(StoreError::NotFound { .. }) => Ok(false),
+            Err(other) => Err(other),
+        }
+    }
+
     /// Every (key, digest) the staging recorder took a put of since event `since`.
     fn engine_puts(&self, since: usize) -> BTreeSet<(FileKey, u64)> {
         self.staging_recorder
@@ -1083,7 +1122,11 @@ impl World {
 
     fn write_staged(&self, info: &FileInfo, bytes: &[u8]) -> Result<(), StagedEditError> {
         use lsr_core::{ObjectStore, Upload};
-        let mut up = block_on(self.staging_raw.begin_upload(&info.key, listed_at(info)?))?;
+        let mut up = block_on(self.staging_raw.begin_upload(
+            &info.key,
+            listed_at(info)?,
+            WriteMode::Replace,
+        ))?;
         block_on(up.write(bytes))?;
         block_on(up.commit())?;
         Ok(())
@@ -1188,6 +1231,7 @@ impl World {
     }
 }
 
+mod in_tick;
 #[cfg(test)]
 mod tests;
 

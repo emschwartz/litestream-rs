@@ -212,6 +212,7 @@ fn decide(
             return Ok(Retention::Wait { until });
         }
     }
+    mark!(Maint7);
     keys.sort();
     keys.truncate(MAX_DELETE);
     let Ok(job) = DeleteJob::new(keys) else {
@@ -310,13 +311,15 @@ fn hole(inventory: &Inventory) -> Option<RetentionHold> {
     let mut files: Vec<&FileInfo> = inventory
         .files()
         .iter()
-        .filter(|info| !info.key.level().is_snapshot() && info.key.range().max() > snapshot)
+        .filter(|info| past_snapshot(info, snapshot))
         .collect();
     files.sort_by_key(|info| info.key.range().min());
     let mut reach = snapshot;
     for info in files {
         let range = info.key.range();
         if reach.next().is_some_and(|one_past| range.min() > one_past) {
+            mark!(Maint8);
+            mark!(Maint11);
             return Some(RetentionHold::Hole {
                 after: reach,
                 next: Some(range.min()),
@@ -324,10 +327,19 @@ fn hole(inventory: &Inventory) -> Option<RetentionHold> {
         }
         reach = reach.max(range.max());
     }
-    (reach < newest).then_some(RetentionHold::Hole {
-        after: reach,
-        next: None,
-    })
+    // The newest file is a snapshot start (the snapshot reaches it) or a level 0-8
+    // file past the snapshot (the walk reaches it): a level-9 file that does not
+    // start at 1 is held as malformed before this runs.
+    debug_assert!(reach >= newest, "{reach:?} < {newest:?}");
+    None
+}
+
+/// Whether a level 0-8 file ends past the newest snapshot's end. Only those can
+/// open a hole or move the reach; one ending at the snapshot could be taken too
+/// and would change neither, so the bound could as well be inclusive. It keeps
+/// the walk to the few files past the snapshot.
+fn past_snapshot(info: &FileInfo, snapshot: Txid) -> bool {
+    !info.key.level().is_snapshot() && info.key.range().max() > snapshot
 }
 
 fn latest_unplannable(inventory: &Inventory) -> Option<RetentionHold> {
@@ -347,6 +359,7 @@ fn latest_unplannable(inventory: &Inventory) -> Option<RetentionHold> {
         | PlanOutcome::Gap { .. }
         | PlanOutcome::InsideFile { .. }
         | PlanOutcome::MalformedSnapshot { .. }) => {
+            mark!(Maint8);
             Some(RetentionHold::LatestUnplannable { outcome })
         }
     }
@@ -387,6 +400,8 @@ fn created_at_backwards(
         if let [earlier, later] = pair
             && created_at_of(resolved, earlier)? > created_at_of(resolved, later)?
         {
+            mark!(Maint8);
+            mark!(World13);
             return Ok(Some(RetentionHold::SnapshotCreatedAtBackwards {
                 earlier: earlier.key,
                 later: later.key,
@@ -535,18 +550,16 @@ fn level_zero(
     let cover = merged_ranges(kept);
     let files = inventory.level(Level::ZERO);
     let mut chosen = 0_usize;
-    for info in files.iter().take(files.len().saturating_sub(1)) {
-        let below = scan
-            .floor
-            .is_some_and(|floor| info.key.range().max() < floor);
-        if !below && !covered(&cover, info) {
+    for (at, info) in files.iter().enumerate().take(files.len().saturating_sub(1)) {
+        if !by_keys(scan, &cover, info) {
             continue;
         }
         if chosen == MAX_DELETE {
             return Ok(None);
         }
         if resolved.exact(info).is_none() {
-            return Err(level_zero_need(files, scan, &cover, resolved, info, chosen));
+            let later = files.get(at.saturating_add(1)..).unwrap_or_default();
+            return Err(level_zero_need(later, scan, &cover, resolved, info, chosen));
         }
         let Some(created) = created_at_of(resolved, info)? else {
             return Ok(Some(RetentionHold::NoCreatedAt { key: info.key }));
@@ -561,30 +574,32 @@ fn level_zero(
     Ok(None)
 }
 
+/// Whether keys alone would delete the level 0 file: it ends below the floor,
+/// or a file of levels 1 to 8 that stays covers it.
+fn by_keys(scan: &LevelZero, cover: &[(Txid, Txid)], info: &FileInfo) -> bool {
+    scan.floor
+        .is_some_and(|floor| info.key.range().max() < floor)
+        || covered(cover, info)
+}
+
 /// The level 0 file whose created-at time the scan needs, and after it the files the
-/// scan would read next if each turns out old enough to delete. The scan
+/// scan would read next (from `later`, the level's files after `need`) if each turns out old enough to delete. The scan
 /// stops at the first young one, so these are a guess: no more are named than
 /// files this scan already found old (`chosen`), which keeps an idle tick,
 /// whose first candidate is young, at one read, and wastes at most as many
 /// reads as were needed.
 fn level_zero_need(
-    files: &[FileInfo],
+    later: &[FileInfo],
     scan: &LevelZero,
     cover: &[(Txid, Txid)],
     resolved: &ResolvedCreatedAt,
     need: &FileInfo,
     chosen: usize,
 ) -> Need {
-    let ahead = files
+    let ahead = later
         .iter()
-        .take(files.len().saturating_sub(1))
-        .skip_while(|info| info.key != need.key)
-        .skip(1)
-        .filter(|info| {
-            scan.floor
-                .is_some_and(|floor| info.key.range().max() < floor)
-                || covered(cover, info)
-        })
+        .take(later.len().saturating_sub(1))
+        .filter(|info| by_keys(scan, cover, info))
         .take(chosen.min(MAX_DELETE.saturating_sub(chosen).saturating_sub(1)))
         .filter(|info| resolved.exact(info).is_none())
         .copied();
@@ -677,6 +692,7 @@ fn self_check(
     if let Some(restore_point) = restore_point
         && let Err(hold) = pinned_chain(inventory, job.keys(), restore_point)
     {
+        mark!(Maint8);
         return Some(hold);
     }
     match plan_without(inventory, job.keys(), KeyTarget::Latest) {
