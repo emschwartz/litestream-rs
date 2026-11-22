@@ -43,16 +43,18 @@ fn once_and_its_companions() {
         "-enforce-retention",
     ]));
     assert!(flags.once && flags.force_snapshot && flags.enforce_retention);
+    // Checked after the config is read, as Go does.
+    let combination = |args: &[&str]| check(&run(&with_positional(args))).unwrap_err();
     assert_eq!(
-        refused(&with_positional(&["-force-snapshot"])),
+        combination(&["-force-snapshot"]),
         UsageError::ForceSnapshotWithoutOnce
     );
     assert_eq!(
-        refused(&with_positional(&["-enforce-retention"])),
+        combination(&["-enforce-retention"]),
         UsageError::EnforceRetentionWithoutOnce
     );
     assert_eq!(
-        refused(&with_positional(&["-once", "-exec", "echo test"])),
+        combination(&["-once", "-exec", "echo test"]),
         UsageError::OnceWithExec
     );
 }
@@ -115,10 +117,9 @@ fn log_level_flag() {
             flag: "-log-level".to_owned()
         }
     );
-    assert!(matches!(
-        refused(&with_positional(&["-log-level", "loud"])),
-        UsageError::BadLogLevel { .. }
-    ));
+    // Go's logger keeps INFO for a level it does not know.
+    let flags = run(&with_positional(&["-log-level", "loud"]));
+    assert_eq!(flags.log_level, Some(LogLevel::Info));
 }
 
 #[test]
@@ -171,4 +172,33 @@ fn the_config_path_is_the_flag_then_the_environment_then_the_default() {
     );
     assert_eq!(config_path(None, env), PathBuf::from("/env.yml"));
     assert_eq!(config_path(None, |_| None), PathBuf::from(DEFAULT_CONFIG));
+}
+
+/// Go's `flag` package sets each flag as it reads it, so a bad boolean before `-help`
+/// is the error; help only stops the scan where it is reached.
+#[test]
+fn a_bad_boolean_before_help_is_the_error() {
+    assert!(matches!(
+        refused(&["-once=maybe", "-help"]),
+        UsageError::BadBool { name: "once", .. }
+    ));
+    assert!(matches!(
+        parse(&["-help".to_owned(), "-once=maybe".to_owned()]),
+        Ok(Parsed::Help)
+    ));
+}
+
+/// Go's `main` exits 0 for help only when an argument is literally `-h`, `-help` or
+/// `--help`; `-help=1` and `--h` print help and fail.
+#[test]
+fn help_succeeds_only_when_asked_for_literally() {
+    for literal in ["-h", "-help", "--help"] {
+        assert!(
+            matches!(parse(&[literal.to_owned()]), Ok(Parsed::Help)),
+            "{literal}"
+        );
+    }
+    for other in ["-help=1", "--h", "-h=x"] {
+        assert_eq!(refused(&[other]), UsageError::HelpNotLiteral, "{other}");
+    }
 }

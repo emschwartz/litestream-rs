@@ -47,6 +47,7 @@ fn missing(err: CredentialError) -> Tried {
         other @ (CredentialError::ProfileNotFound(_)
         | CredentialError::PartialProfile { .. }
         | CredentialError::MalformedLine { .. }
+        | CredentialError::ReadFailed { .. }
         | CredentialError::FileTooLarge { .. }) => panic!("expected Missing, got {other:?}"),
     }
 }
@@ -319,32 +320,20 @@ fn a_missing_file_gives_nothing() {
 }
 
 #[test]
-fn an_unreadable_file_is_skipped_as_go_skips_it() {
+fn a_file_that_opens_but_cannot_be_read_stops_the_chain_as_in_go() {
     let dir = TempDir::new().unwrap();
     let config = write(&dir, "config", CONFIG_FILE);
-    // A directory opens on Unix and fails on read; on Windows it fails to open.
-    let resolved = chain(&[
+    // A directory opens on Unix and fails on read: the SDK's load fails, so Go
+    // does not start, though the config file has keys.
+    let err = chain(&[
         ("AWS_SHARED_CREDENTIALS_FILE", s(dir.path())),
         ("AWS_CONFIG_FILE", s(&config)),
+        ("AWS_ACCESS_KEY_ID", "ENVID"),
+        ("AWS_SECRET_ACCESS_KEY", "e"),
     ])
     .resolve()
-    .unwrap();
-    assert_eq!(parts(&resolved).0, "CONFID");
-    let tried = missing(
-        chain(&[("AWS_SHARED_CREDENTIALS_FILE", s(dir.path()))])
-            .resolve()
-            .unwrap_err(),
-    );
-    assert!(
-        matches!(
-            tried.credentials_file(),
-            FileLook::At {
-                outcome: FileOutcome::Unreadable(_),
-                ..
-            }
-        ),
-        "{tried:?}"
-    );
+    .unwrap_err();
+    assert!(matches!(err, CredentialError::ReadFailed { .. }), "{err:?}");
 }
 
 #[test]
@@ -414,16 +403,26 @@ fn a_profile_named_by_aws_profile_must_exist() {
         .resolve()
         .unwrap_err();
     assert!(matches!(err, CredentialError::Missing(_)), "{err:?}");
-    // The files are not consulted when the environment has keys.
-    let resolved = chain(&[
+    // The SDK loads the profile before any source, so environment and explicit
+    // keys do not save a start from a missing named profile, as in Go.
+    let err = chain(&[
         vars[0],
         vars[1],
         ("AWS_ACCESS_KEY_ID", "ENVID"),
         ("AWS_SECRET_ACCESS_KEY", "e"),
     ])
     .resolve()
-    .unwrap();
-    assert_eq!(resolved.source(), &Source::Environment);
+    .unwrap_err();
+    assert!(
+        matches!(err, CredentialError::ProfileNotFound(_)),
+        "{err:?}"
+    );
+    let explicit = S3Credentials::new("X".to_owned(), SecretString::new("y".to_owned()));
+    let err = chain(&vars).with_explicit(explicit).resolve().unwrap_err();
+    assert!(
+        matches!(err, CredentialError::ProfileNotFound(_)),
+        "{err:?}"
+    );
 }
 
 #[test]
@@ -538,20 +537,103 @@ aws_session_token = elsewhere
 aws_session_token = tok
   aws_secret_access_key = promoted
 ";
-    let keys = ini::lookup(text, Flavor::Credentials, "default")
-        .unwrap()
-        .unwrap();
-    assert_eq!(keys.id, Some("QUOTED"));
-    assert_eq!(keys.secret, Some("promoted"));
-    assert_eq!(keys.token, Some("tok"));
-    assert_eq!(ini::lookup(text, Flavor::Credentials, "absent"), Ok(None));
-    // `[ default ]` is the bare default, which the config file honours too.
-    assert_eq!(
-        ini::lookup(text, Flavor::Config, "default")
-            .unwrap()
-            .unwrap()
-            .id,
-        Some("QUOTED")
+    let path = Path::new("/f");
+    let credentials = shared::credentials_file(text, path).unwrap();
+    let default = &credentials["default"];
+    assert_eq!(default.string(ini::ACCESS_KEY_ID), "QUOTED");
+    assert_eq!(default.string(ini::SECRET_ACCESS_KEY), "promoted");
+    assert_eq!(default.string(ini::SESSION_TOKEN), "tok");
+    assert!(!credentials.contains_key("absent"));
+    // `[ default ]` is the bare default, which the config file keeps; a bare
+    // `[other]` it drops.
+    let config = shared::config_file(text, path).unwrap();
+    assert_eq!(config["default"].string(ini::ACCESS_KEY_ID), "QUOTED");
+    assert!(!config.contains_key("other"));
+}
+
+/// The SDK loads the chosen profile before any source: a section with a key id and
+/// no secret stops Go's start even with complete environment keys.
+#[test]
+fn a_partial_profile_stops_the_chain_even_with_environment_keys() {
+    let dir = TempDir::new().unwrap();
+    let config = write(&dir, "config", "[default]\nAWS_ACCESS_KEY_ID = lonely\n");
+    let err = chain(&[
+        ("AWS_CONFIG_FILE", s(&config)),
+        ("AWS_ACCESS_KEY_ID", "ENVID"),
+        ("AWS_SECRET_ACCESS_KEY", "e"),
+    ])
+    .resolve()
+    .unwrap_err();
+    assert!(
+        matches!(err, CredentialError::PartialProfile { .. }),
+        "{err:?}"
     );
-    assert_eq!(ini::lookup(text, Flavor::Config, "other"), Ok(None));
+}
+
+/// Go copies `LITESTREAM_*` into an `AWS_*` variable only when that is unset: an
+/// empty `AWS_ACCESS_KEY_ID` blocks the copy, so the SDK reads `AWS_ACCESS_KEY`.
+#[test]
+fn an_empty_aws_variable_blocks_the_litestream_copy() {
+    let resolved = chain(&[
+        ("AWS_ACCESS_KEY_ID", ""),
+        ("LITESTREAM_ACCESS_KEY_ID", "LSID"),
+        ("AWS_ACCESS_KEY", "SHORTID"),
+        ("AWS_SECRET_ACCESS_KEY", "s"),
+    ])
+    .resolve()
+    .unwrap();
+    assert_eq!(parts(&resolved), keys("SHORTID", "s"));
+    let resolved = chain(&[
+        ("LITESTREAM_ACCESS_KEY_ID", "LSID"),
+        ("AWS_ACCESS_KEY", "SHORTID"),
+        ("AWS_SECRET_ACCESS_KEY", "s"),
+    ])
+    .resolve()
+    .unwrap();
+    assert_eq!(parts(&resolved), keys("LSID", "s"));
+}
+
+/// The SDK's merge: the credentials file's copy of a section replaces the config
+/// file's section error, and its keys replace the config file's only as a pair.
+#[test]
+fn the_credentials_file_is_merged_over_the_config_file_as_the_sdk_merges() {
+    let dir = TempDir::new().unwrap();
+    let config = write(&dir, "config", "[default]\naws_access_key_id = CONFID\n");
+    let creds = write(&dir, "creds", "[default]\nregion = x\n");
+    let resolved = chain(&[
+        ("AWS_CONFIG_FILE", s(&config)),
+        ("AWS_SHARED_CREDENTIALS_FILE", s(&creds)),
+        ("AWS_ACCESS_KEY_ID", "ENVID"),
+        ("AWS_SECRET_ACCESS_KEY", "e"),
+    ])
+    .resolve()
+    .unwrap();
+    assert_eq!(parts(&resolved), keys("ENVID", "e"));
+    let config = write(&dir, "config2", CONFIG_FILE);
+    let creds = write(&dir, "creds2", "[default]\naws_secret_access_key = only\n");
+    let err = chain(&[
+        ("AWS_CONFIG_FILE", s(&config)),
+        ("AWS_SHARED_CREDENTIALS_FILE", s(&creds)),
+    ])
+    .resolve()
+    .unwrap_err();
+    assert!(
+        matches!(err, CredentialError::PartialProfile { .. }),
+        "{err:?}"
+    );
+}
+
+/// An indented line with no separator continues the value above it with a newline.
+#[test]
+fn an_indented_line_without_a_separator_continues_the_value() {
+    let dir = TempDir::new().unwrap();
+    let creds = write(
+        &dir,
+        "creds",
+        "[default]\naws_access_key_id = ID\n  more\naws_secret_access_key = s\n",
+    );
+    let resolved = chain(&[("AWS_SHARED_CREDENTIALS_FILE", s(&creds))])
+        .resolve()
+        .unwrap();
+    assert_eq!(parts(&resolved), keys("ID\nmore", "s"));
 }

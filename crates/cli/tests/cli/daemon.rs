@@ -135,7 +135,7 @@ fn one_database_failing_to_start_leaves_the_other_replicating() {
     write(&app, 25);
     daemon.signal("TERM");
     let (status, out) = finish(daemon);
-    assert_eq!(status.code(), Some(3), "{out}");
+    assert_eq!(status.code(), Some(1), "{out}");
     assert!(out.contains("msg=\"database did not start\""), "{out}");
     assert_eq!(out.matches("msg=\"database drained\"").count(), 1, "{out}");
     restores_to(dir.path(), &rg, &app);
@@ -164,7 +164,7 @@ fn a_second_signal_cuts_the_drain() {
     daemon.wait_for(&["msg=\"signal received, litestream shutting down\""]);
     daemon.signal("HUP");
     let (status, out) = finish(daemon);
-    assert_eq!(status.code(), Some(3), "{out}");
+    assert_eq!(status.code(), Some(1), "{out}");
     assert!(
         out.contains("msg=\"database not drained: deadline reached\""),
         "{out}"
@@ -191,7 +191,7 @@ fn once_replicates_everything_committed_and_exits() {
             .args(["replicate", "-once", flag, "-config", cfg])
             .output()
             .unwrap();
-        assert_eq!(out.status.code(), Some(2), "{flag}");
+        assert_eq!(out.status.code(), Some(1), "{flag}");
     }
 }
 
@@ -378,22 +378,24 @@ fn the_two_argument_form_refuses_a_plain_directory_as_go_does() {
         .output()
         .unwrap();
     let stderr = String::from_utf8(out.stderr).unwrap();
-    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
     assert!(stderr.contains("file replica url required"), "{stderr}");
     assert!(!replica.exists() && !db.exists());
 }
 
 #[test]
 fn go_s_flag_refusals_are_usage_errors() {
+    // The positional form needs no file: Go checks these combinations after the config is
+    // read, so a missing default config would be reported first.
     for args in [
-        &["-force-snapshot"][..],
-        &["-enforce-retention"],
+        &["-force-snapshot", "a.db", "s3://b/p"][..],
+        &["-enforce-retention", "a.db", "s3://b/p"],
         &["a.db", "s3://b/p", "-exec", "x"],
         &["only.db"],
         &["-bogus"],
     ] {
         let out = lsr().arg("replicate").args(args).output().unwrap();
-        assert_eq!(out.status.code(), Some(64), "{args:?}");
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
     }
     let out = lsr().args(["replicate", "-h"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0));
@@ -412,7 +414,7 @@ fn a_missing_or_refused_config_does_not_start() {
         .args(["replicate", "-config", missing.to_str().unwrap()])
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(3));
+    assert_eq!(out.status.code(), Some(1));
     let cfg = config(
         dir.path(),
         "dbs:\n  - path: /a.db\n    replica:\n      type: gs\n      bucket: b\n",
@@ -421,7 +423,7 @@ fn a_missing_or_refused_config_does_not_start() {
         .args(["replicate", "-config", cfg.to_str().unwrap()])
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(out.status.code(), Some(1));
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("dbs[0].replica.type"), "{stderr}");
     let cfg = config(
@@ -432,7 +434,7 @@ fn a_missing_or_refused_config_does_not_start() {
         .args(["replicate", "-config", cfg.to_str().unwrap()])
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(out.status.code(), Some(1));
 }
 
 /// `lsr config check` on upstream's `etc/litestream.yml` (all comments: it loads).
@@ -498,7 +500,7 @@ fn config_check_refuses_what_the_daemon_refuses() {
             .unwrap();
         let stdout = String::from_utf8(check.stdout).unwrap();
         let stderr = String::from_utf8(start.stderr).unwrap();
-        assert_eq!(start.status.code(), Some(2), "{head}: {stderr}");
+        assert_eq!(start.status.code(), Some(1), "{head}: {stderr}");
         assert!(stderr.contains(reason), "{head}: {stderr}");
         assert_eq!(check.status.code(), Some(2), "{head}: {stdout}");
         assert!(stdout.contains(reason), "{head}: {stdout}");
@@ -512,4 +514,25 @@ fn config_check_refuses_what_the_daemon_refuses() {
         stdout.contains("error: dbs[0]: must specify replica"),
         "{stdout}"
     );
+}
+
+/// Go reads the config before it checks `-once`, `-force-snapshot` and
+/// `-enforce-retention` together, so a missing config is the error reported.
+#[test]
+fn a_missing_config_is_reported_before_a_flag_combination() {
+    let dir = TempDir::new().unwrap();
+    let missing = dir.path().join("missing.yml");
+    let out = lsr()
+        .args([
+            "replicate",
+            "-force-snapshot",
+            "-config",
+            missing.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("config file not found"), "{stderr}");
+    assert!(!stderr.contains("-force-snapshot"), "{stderr}");
 }

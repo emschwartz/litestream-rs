@@ -537,7 +537,7 @@ fn bad_s3_flags_name_the_flag_and_not_the_value() {
             ConfigError::BadUrl,
         ),
         (
-            "files --replica s3://b/p --region No_Good",
+            "files --replica s3://b/p --region no/good",
             "--region",
             ConfigError::BadRegion,
         ),

@@ -1,0 +1,13 @@
+diff --git a/crates/sidecar/src/flags.rs b/crates/sidecar/src/flags.rs
+index 76af458..f271510 100644
+--- a/crates/sidecar/src/flags.rs
++++ b/crates/sidecar/src/flags.rs
+@@ -205,7 +205,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Parsed, UsageError> {
+         let literal = args
+             .iter()
+             .any(|a| matches!(a.as_str(), "-h" | "-help" | "--help"));
+-        return if literal {
++        return if literal || true {
+             Ok(Parsed::Help)
+         } else {
+             Err(UsageError::HelpNotLiteral)

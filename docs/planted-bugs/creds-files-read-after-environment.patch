@@ -1,0 +1,31 @@
+diff --git a/crates/store-s3/src/chain.rs b/crates/store-s3/src/chain.rs
+index e57c26e..f155d5c 100644
+--- a/crates/store-s3/src/chain.rs
++++ b/crates/store-s3/src/chain.rs
+@@ -143,6 +143,12 @@ impl CredentialChain {
+     pub fn resolve(&self) -> Result<Resolved, CredentialError> {
+         let (profile, named) = self.profile();
+         let environment = self.env_keys();
++        if let Ok(credentials) = environment {
++            return Ok(Resolved {
++                credentials,
++                source: Source::Environment,
++            });
++        }
+         let files = self.shared_files(&profile)?;
+         let gap = match &environment {
+             Ok(_) => EnvGap::Both,
+@@ -168,12 +174,7 @@ impl CredentialChain {
+                 source: Source::Explicit,
+             });
+         }
+-        if let Ok(credentials) = environment {
+-            return Ok(Resolved {
+-                credentials,
+-                source: Source::Environment,
+-            });
+-        }
++
+         match section.and_then(|section| profile_keys(&section, &files.credentials_path)) {
+             Some((credentials, from_credentials, path)) => Ok(Resolved {
+                 credentials,
