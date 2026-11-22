@@ -1,5 +1,7 @@
 //! The fixed seed set: 64 histories of 300 operations, the whole thing inside
-//! ten seconds. A failure prints its replay line (`just sim-replay`).
+//! ten seconds, half under the default mix and half under a swarm mix of
+//! their own (`Weights::mixed`). A failure prints its replay line (`just
+//! sim-replay`).
 
 #[cfg(test)]
 mod fixed {
@@ -18,7 +20,8 @@ mod fixed {
     fn batch(first: u64) {
         let started = Instant::now();
         for n in (first..).take(8) {
-            let outcome = run(Seed::new(n), STEPS, &Weights::default());
+            let seed = Seed::new(n);
+            let outcome = run(seed, STEPS, &Weights::mixed(seed));
             if let Err(failure) = outcome {
                 panic!("{failure}");
             }

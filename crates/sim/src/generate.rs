@@ -394,6 +394,60 @@ impl Weights {
     }
 }
 
+impl Weights {
+    /// A mix of its own for `seed` (swarm testing): about a third of the
+    /// kinds besides ticks and commits are left out, the rest weigh 1 to
+    /// 100, and a vacuum may or may not resize. One fixed mix suppresses
+    /// states: interleaved crashes keep compaction shallow, a page-size
+    /// change leaves the second half of most histories degraded, faults
+    /// rarely overlap. Drawn from the seed's own stream, so the history's
+    /// stream is untouched.
+    #[must_use]
+    pub fn swarm(seed: Seed) -> Self {
+        let entropy = SeededEntropy::new(seed.stream(12));
+        let weight = |keep_always: bool| {
+            let left_out = !keep_always && below(&entropy, 3) == 0;
+            let drawn = u32::try_from(below(&entropy, 100).saturating_add(1)).unwrap_or(1);
+            if left_out { 0 } else { drawn }
+        };
+        Self {
+            tick: weight(true),
+            commit: weight(true),
+            commit_in_tick: weight(false),
+            spill: weight(false),
+            rollback: weight(false),
+            vacuum: weight(false),
+            other_process_reader: weight(false),
+            other_process_checkpoint: weight(false),
+            crash: weight(false),
+            store_fault: weight(false),
+            env_fault: weight(false),
+            clock_jump: weight(false),
+            shutdown: weight(false),
+            request_snapshot: weight(false),
+            restore: weight(false),
+            shrink: weight(false),
+            second_writer: 0,
+            roll_back: weight(false),
+            wal_damage: weight(false),
+            staging_damage: weight(false),
+            heal: weight(false),
+            vacuum_resizes: below(&entropy, 2) == 0,
+        }
+    }
+
+    /// What the rotating seed sets run: the default mix for half the seeds
+    /// and a swarm mix for the other half, chosen by the seed.
+    #[must_use]
+    pub fn mixed(seed: Seed) -> Self {
+        if seed.stream(13).is_multiple_of(2) {
+            Self::default()
+        } else {
+            Self::swarm(seed)
+        }
+    }
+}
+
 fn below(entropy: &SeededEntropy, upper: u64) -> u64 {
     entropy.below(upper.max(1))
 }
