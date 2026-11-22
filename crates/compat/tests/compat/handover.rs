@@ -15,6 +15,7 @@ use std::fs;
 use std::io::Cursor;
 
 use lsr_compat::{Manifest, all_fixtures, parse_rel};
+use lsr_core::WriteMode;
 use lsr_core::conformance::block_on;
 use lsr_core::{
     CommittedRead, FakeDb, FakeWal, FileKey, Level, MemStore, NewestStagedFile, ObjectStore,
@@ -220,7 +221,7 @@ fn view_of(wal: &FakeWal, reader: &WalReader<Cursor<Vec<u8>>>) -> WalView {
 fn put(store: &MemStore, key: &FileKey, bytes: &[u8]) {
     block_on(async {
         let mut upload = store
-            .begin_upload(key, Timestamp::from_unix_millis(1))
+            .begin_upload(key, Timestamp::from_unix_millis(1), WriteMode::Replace)
             .await
             .expect("begin");
         upload.write(bytes).await.expect("write");

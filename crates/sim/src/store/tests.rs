@@ -7,6 +7,7 @@ use lsr_ltx::Timestamp;
 use super::*;
 use crate::exec::{Polls, RunEnd, count_polls, run_until};
 use crate::testkit::{fkey, ltx, origin, put};
+use lsr_core::WriteMode;
 
 fn listed<S: ObjectStore>(store: &S) -> usize {
     block_on(store.list(Level::new(0).unwrap(), None, PageLimit::MAX))
@@ -24,7 +25,11 @@ fn boom() -> StoreError {
 
 async fn upload<S: ObjectStore>(store: &S, n: u64) -> Result<(), StoreError> {
     let mut up = store
-        .begin_upload(&fkey(0, n, n), Timestamp::from_unix_millis(5))
+        .begin_upload(
+            &fkey(0, n, n),
+            Timestamp::from_unix_millis(5),
+            WriteMode::Replace,
+        )
         .await?;
     up.write(&ltx(n, n, 1, 1, None)).await?;
     up.commit().await?;
@@ -114,7 +119,11 @@ fn recorder_records_err_after_publish() {
     let bytes = ltx(1, 1, 1, 1, wal);
     let result = block_on(async {
         let mut up = faults
-            .begin_upload(&fkey(0, 1, 1), Timestamp::from_unix_millis(5))
+            .begin_upload(
+                &fkey(0, 1, 1),
+                Timestamp::from_unix_millis(5),
+                WriteMode::Replace,
+            )
             .await?;
         up.write(&bytes).await?;
         up.commit().await
@@ -144,7 +153,11 @@ fn a_size_mismatch_publishes_and_overstates_the_size() {
     let bytes = ltx(1, 1, 1, 1, None);
     let info = block_on(async {
         let mut up = faults
-            .begin_upload(&fkey(0, 1, 1), Timestamp::from_unix_millis(5))
+            .begin_upload(
+                &fkey(0, 1, 1),
+                Timestamp::from_unix_millis(5),
+                WriteMode::Replace,
+            )
             .await?;
         up.write(&bytes).await?;
         up.commit().await
@@ -191,7 +204,11 @@ fn stage_power_loss_drops_or_tears_only_volatile() {
         let fresh = ltx(2, 2, 1, 2, None);
         block_on(async {
             let mut up = volatile
-                .begin_upload(&fkey(0, 1, 1), Timestamp::from_unix_millis(5))
+                .begin_upload(
+                    &fkey(0, 1, 1),
+                    Timestamp::from_unix_millis(5),
+                    WriteMode::Replace,
+                )
                 .await
                 .unwrap();
             up.write(&durable).await.unwrap();

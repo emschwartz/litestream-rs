@@ -125,7 +125,7 @@ pub use source::{
 };
 pub use store::{
     BatchKind, CorruptCause, ListAt, Listing, ListingStalled, ObjectStore, PageLimit, PartNumber,
-    ReadAt, ReadLen, StoreError, StoreOp, Upload, build_listing,
+    ReadAt, ReadLen, StoreError, StoreOp, Upload, WriteMode, build_listing,
 };
 pub use sync::{PageFrom, Step, StepEnd, StepFailed, SyncConfig, Synced, clamp, sync_step};
 pub use upload::{Did, UploadConfig, UploadFailed, UploadPlan, UploadState, Uploaded, upload_next};

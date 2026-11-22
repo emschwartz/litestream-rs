@@ -63,7 +63,7 @@ async fn upload_tick<L: ObjectStore, S: ObjectStore>(
                 });
             }
             Did::Listed { .. } | Did::Diverged { .. } => {}
-            Did::Put(_) => put = put.saturating_add(1),
+            Did::Put(_) | Did::AlreadyPut(_) => put = put.saturating_add(1),
         }
     }
 }
@@ -122,7 +122,10 @@ fn encode_file(n: u64, seed: u8, page_size: PageSize, wal: Option<WalOrigin>) ->
 
 fn put_bytes(store: &MemStore, at: FileKey, bytes: &[u8]) -> FileInfo {
     block_on(async {
-        let mut up = store.begin_upload(&at, created_at(1)).await.unwrap();
+        let mut up = store
+            .begin_upload(&at, created_at(1), WriteMode::Replace)
+            .await
+            .unwrap();
         up.write(bytes).await.unwrap();
         up.commit().await.unwrap()
     })
@@ -168,6 +171,10 @@ struct Log {
     commit_after: VecDeque<StoreError>,
     write_fail: VecDeque<StoreError>,
     lie_about_size: bool,
+    /// Keys a listing leaves out, as a lagging listing does.
+    unlisted: Vec<FileKey>,
+    /// The modes uploads were begun with.
+    modes: Vec<WriteMode>,
 }
 
 /// A [MemStore] that counts calls and can fail a commit before it publishes
@@ -198,11 +205,17 @@ impl ObjectStore for Probe {
         after: Option<TxidRange>,
         limit: PageLimit,
     ) -> impl Future<Output = Result<Listing, StoreError>> + Send {
-        {
+        let unlisted = {
             let mut log = self.log();
             log.lists = log.lists.saturating_add(1);
+            log.unlisted.clone()
+        };
+        let listed = self.inner.list(level, after, limit);
+        async move {
+            let mut page = listed.await?;
+            page.files.retain(|info| !unlisted.contains(&info.key));
+            Ok(page)
         }
-        self.inner.list(level, after, limit)
     }
 
     fn read(
@@ -241,10 +254,12 @@ impl ObjectStore for Probe {
         &self,
         key: &FileKey,
         created_at: Timestamp,
+        mode: WriteMode,
     ) -> impl Future<Output = Result<ProbeUpload, StoreError>> + Send {
         self.log().begins.push(*key);
+        self.log().modes.push(mode);
         let log = Arc::clone(&self.log);
-        let begun = self.inner.begin_upload(key, created_at);
+        let begun = self.inner.begin_upload(key, created_at, mode);
         async move {
             Ok(ProbeUpload {
                 inner: begun.await?,
@@ -1161,4 +1176,115 @@ fn a_staging_listing_whose_cursor_never_advances_is_a_fault_not_a_loop() {
     let staging = crate::stuck::StuckListing::new(MemStore::new());
     let got = block_on(drop_staged_from(&staging, txid(1)));
     assert_eq!(got, Err(Fault::LocalIo));
+}
+
+// ---------------------------------------------------------------- the bucket refuses
+
+/// Every upload the uploader makes is of a key it takes to be free, so it asks
+/// the bucket to refuse a taken one.
+#[test]
+fn every_upload_asks_the_bucket_to_refuse_a_taken_key() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    stage(&staging, 1);
+    stage(&staging, 2);
+    let mut state = UploadState::At(None);
+    for _ in 0..2 {
+        state = next(state, &staging, &remote, 2).unwrap().state;
+    }
+    assert_eq!(state, UploadState::At(Some(txid(2))));
+    assert_eq!(remote.log().modes, [WriteMode::New, WriteMode::New]);
+}
+
+/// The key already holds the staged bytes: an earlier commit of this engine
+/// whose answer was lost, or a listing too stale to show it. Read back, it is
+/// confirmed, and nothing is written over it.
+#[test]
+fn a_refused_upload_of_the_same_bytes_is_our_own_earlier_commit() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    let bytes = stage(&staging, 1);
+    put_bytes(&remote.inner, key(1), &bytes);
+    let step = next(UploadState::At(None), &staging, &remote, 1).unwrap();
+    assert_eq!(step.state, UploadState::At(Some(txid(1))));
+    assert_eq!(step.did, Did::AlreadyPut(key(1)));
+    assert_eq!(read_all(&remote.inner, &key(1)), bytes);
+    assert_eq!(
+        remote.log().lists,
+        0,
+        "a matching read-back needs no listing"
+    );
+}
+
+/// The key holds another verifying object (an earlier run's under the same
+/// id, or another writer's) and no listing shows the replica ahead: the
+/// bucket's refusal makes it the listing's divergence, so the object stands
+/// and the staged files from that id on must go.
+#[test]
+fn a_refused_upload_of_other_verifying_bytes_is_never_written_over() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    stage(&staging, 1);
+    stage(&staging, 2);
+    let theirs = encode_pages(2, 200);
+    put_bytes(&remote.inner, key(2), &theirs);
+    let state = next(UploadState::At(None), &staging, &remote, 2)
+        .unwrap()
+        .state;
+    let step = next(state, &staging, &remote, 2).unwrap();
+    assert_eq!(
+        step.did,
+        Did::Diverged {
+            confirmed: txid(2),
+            from: txid(2)
+        }
+    );
+    assert_eq!(step.state, UploadState::At(Some(txid(2))));
+    assert_eq!(read_all(&remote.inner, &key(2)), theirs);
+}
+
+/// The same, behind a listing that does not show the other object yet: the
+/// refusal overrules the listing, so the stale listing cannot send the
+/// uploader back to write the same key again.
+#[test]
+fn a_refusal_overrules_a_listing_too_stale_to_show_the_key() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    stage(&staging, 1);
+    let theirs = encode_pages(1, 200);
+    put_bytes(&remote.inner, key(1), &theirs);
+    remote.log().unlisted.push(key(1));
+    let listed = next(UploadState::Unknown, &staging, &remote, 1).unwrap();
+    assert_eq!(listed.state, UploadState::At(None), "the listing is stale");
+    let step = next(listed.state, &staging, &remote, 1).unwrap();
+    assert_eq!(
+        step.did,
+        Did::Diverged {
+            confirmed: txid(1),
+            from: txid(1)
+        }
+    );
+    assert_eq!(read_all(&remote.inner, &key(1)), theirs);
+}
+
+/// The other object stands past what this engine has staged: another writer.
+#[test]
+fn a_refused_upload_with_the_replica_ahead_is_another_writer() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    stage(&staging, 1);
+    put_bytes(&remote.inner, key(1), &encode_pages(1, 200));
+    put_bytes(&remote.inner, key(2), &encode_pages(2, 200));
+    let failed = next(UploadState::At(None), &staging, &remote, 1).unwrap_err();
+    assert_eq!(failed.fault, Fault::RemoteAheadOfLocal);
+    assert_eq!(read_all(&remote.inner, &key(1)), encode_pages(1, 200));
+}
+
+/// The key holds something that is not a whole LTX file naming it (a torn
+/// object a directory store left): nothing can have compacted it, so the
+/// staged file replaces it, as a listing's read-back would.
+#[test]
+fn a_refused_upload_over_an_object_that_does_not_verify_replaces_it() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    let bytes = stage(&staging, 1);
+    put_bytes(&remote.inner, key(1), b"torn");
+    let step = next(UploadState::At(None), &staging, &remote, 1).unwrap();
+    assert!(matches!(step.did, Did::Put(_)), "{:?}", step.did);
+    assert_eq!(read_all(&remote.inner, &key(1)), bytes);
+    assert_eq!(remote.log().modes, [WriteMode::New, WriteMode::Replace]);
 }

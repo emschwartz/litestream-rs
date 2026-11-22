@@ -38,6 +38,15 @@ pub enum S3Code {
     InvalidDigest,
     /// `InvalidRange`.
     InvalidRange,
+    /// `PreconditionFailed`: a conditional write found its condition false
+    /// (for `If-None-Match: *`, the key is taken).
+    PreconditionFailed,
+    /// `ConditionalRequestConflict`: another conditional write to the key is
+    /// in flight (AWS); worth trying again.
+    ConditionalRequestConflict,
+    /// `NotImplemented`: the provider does not support a header the request
+    /// sent, such as a conditional one.
+    NotImplemented,
     /// Any code not listed.
     Other,
 }
@@ -59,6 +68,9 @@ impl S3Code {
             "BadDigest" => Self::BadDigest,
             "InvalidDigest" => Self::InvalidDigest,
             "InvalidRange" => Self::InvalidRange,
+            "PreconditionFailed" => Self::PreconditionFailed,
+            "ConditionalRequestConflict" => Self::ConditionalRequestConflict,
+            "NotImplemented" => Self::NotImplemented,
             _ => Self::Other,
         }
     }
@@ -131,6 +143,14 @@ pub fn classify(
         401 | 403 => Err(StoreError::Auth { op }),
         _ if code.is_some_and(S3Code::is_auth) => Err(StoreError::Auth { op }),
         404 => Err(not_found(op, key, code, status)),
+        412 => Err(match key {
+            Some(key) => StoreError::AlreadyExists { key: *key },
+            None => StoreError::Refused { op, status },
+        }),
+        409 if code == Some(S3Code::ConditionalRequestConflict) => Err(StoreError::Transient {
+            op,
+            kind: io::ErrorKind::ResourceBusy,
+        }),
         400 if code == Some(S3Code::BadDigest) => Err(StoreError::Corrupt {
             key: key.copied(),
             cause: CorruptCause::ChecksumMismatch { part },
@@ -154,6 +174,52 @@ fn not_found(op: StoreOp, key: Option<&FileKey>, code: Option<S3Code>, status: u
         (Some(key), None | Some(S3Code::NoSuchKey)) => StoreError::NotFound { key: *key },
         _ => StoreError::Refused { op, status },
     }
+}
+
+/// Whether the provider refused a header it does not implement (501, or the
+/// `NotImplemented` code under any status): for a conditional write, a
+/// provider without conditional writes.
+#[must_use]
+pub fn is_not_implemented(r: &HttpResponse) -> bool {
+    r.status() == 501 || S3Code::from_body(r.body()) == Some(S3Code::NotImplemented)
+}
+
+/// The error a 2xx answer carries in its body, as S3 can send for a
+/// CompleteMultipartUpload that failed after the status line went out; `None`
+/// when the body is no error document. A taken key (`PreconditionFailed`)
+/// is [`StoreError::AlreadyExists`], `SlowDown` a throttle, `NoSuchUpload`
+/// what a 404 with that code is, and any other code is worth asking again.
+#[must_use]
+pub fn error_in_ok_body(op: StoreOp, key: &FileKey, r: &HttpResponse) -> Option<StoreError> {
+    if !(200..300).contains(&r.status()) {
+        return None;
+    }
+    let code = S3Code::from_body(r.body())?;
+    let err = match code {
+        S3Code::PreconditionFailed => StoreError::AlreadyExists { key: *key },
+        S3Code::SlowDown => StoreError::Throttled {
+            op,
+            retry_after: None,
+        },
+        S3Code::NoSuchUpload => not_found(op, Some(key), Some(code), 404),
+        S3Code::NoSuchKey
+        | S3Code::NoSuchBucket
+        | S3Code::AccessDenied
+        | S3Code::InvalidAccessKeyId
+        | S3Code::SignatureDoesNotMatch
+        | S3Code::ExpiredToken
+        | S3Code::RequestTimeTooSkewed
+        | S3Code::BadDigest
+        | S3Code::InvalidDigest
+        | S3Code::InvalidRange
+        | S3Code::ConditionalRequestConflict
+        | S3Code::NotImplemented
+        | S3Code::Other => StoreError::Transient {
+            op,
+            kind: io::ErrorKind::InvalidData,
+        },
+    };
+    Some(err)
 }
 
 /// Maps a failure to get any response.
@@ -367,6 +433,75 @@ mod tests {
                 }),
             ),
         ]);
+    }
+
+    #[test]
+    fn classify_conditional_write_answers() {
+        let k = key();
+        check(vec![
+            (
+                resp(412, Some("PreconditionFailed"), None),
+                Err(StoreError::AlreadyExists { key: k }),
+            ),
+            (
+                resp(409, Some("ConditionalRequestConflict"), None),
+                Err(StoreError::Transient {
+                    op: OP,
+                    kind: io::ErrorKind::ResourceBusy,
+                }),
+            ),
+            (
+                resp(409, Some("OperationAborted"), None),
+                Err(StoreError::Refused {
+                    op: OP,
+                    status: 409,
+                }),
+            ),
+        ]);
+        assert_eq!(
+            classify(OP, None, None, &resp(412, Some("PreconditionFailed"), None)),
+            Err(StoreError::Refused {
+                op: OP,
+                status: 412
+            })
+        );
+        assert!(is_not_implemented(&resp(501, None, None)));
+        assert!(is_not_implemented(&resp(400, Some("NotImplemented"), None)));
+        assert!(!is_not_implemented(&resp(
+            412,
+            Some("PreconditionFailed"),
+            None
+        )));
+    }
+
+    #[test]
+    fn an_error_inside_a_200_is_read_by_its_code() {
+        let k = key();
+        let op = StoreOp::Upload;
+        let ok = |code| error_in_ok_body(op, &k, &resp(200, Some(code), None));
+        assert_eq!(
+            ok("PreconditionFailed"),
+            Some(StoreError::AlreadyExists { key: k })
+        );
+        assert_eq!(
+            ok("SlowDown"),
+            Some(StoreError::Throttled {
+                op,
+                retry_after: None
+            })
+        );
+        assert_eq!(
+            ok("InternalError"),
+            Some(StoreError::Transient {
+                op,
+                kind: io::ErrorKind::InvalidData
+            })
+        );
+        assert_eq!(error_in_ok_body(op, &k, &resp(200, None, None)), None);
+        assert_eq!(
+            error_in_ok_body(op, &k, &resp(500, Some("InternalError"), None)),
+            None
+        );
     }
 
     #[test]

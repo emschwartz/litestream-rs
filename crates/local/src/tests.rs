@@ -7,6 +7,7 @@ use lsr_ltx::{Encoder, Header, HeaderFields, Timestamp, Txid, TxidRange};
 use tempfile::TempDir;
 
 use super::*;
+use lsr_core::WriteMode;
 
 fn ps(bytes: u32) -> PageSize {
     PageSize::new(bytes).unwrap()
@@ -330,7 +331,7 @@ fn replica(bytes: &[u8]) -> MemStore {
     block_on(async {
         let key = FileKey::new(Level::SNAPSHOT, TxidRange::single(txid(1)));
         let mut upload = store
-            .begin_upload(&key, Timestamp::from_unix_millis(1000))
+            .begin_upload(&key, Timestamp::from_unix_millis(1000), WriteMode::Replace)
             .await
             .unwrap();
         upload.write(bytes).await.unwrap();

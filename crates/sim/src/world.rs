@@ -30,6 +30,7 @@ use crate::store::{
     FaultHandle, Faults, HighWater, Lost, Recorder, RecorderLog, Volatile, VolatileHandle,
     YieldEachCall,
 };
+use lsr_core::WriteMode;
 
 /// The staging store the actor sees.
 pub type StagingStore = Faults<YieldEachCall<Recorder<Volatile<MemStore>>>>;
@@ -720,7 +721,7 @@ impl World {
             return Ok(None);
         };
         let at = lsr_core::Clock::now(self.clock.as_ref());
-        let mut up = block_on(self.remote_raw.begin_upload(&key, at))?;
+        let mut up = block_on(self.remote_raw.begin_upload(&key, at, WriteMode::Replace))?;
         block_on(lsr_core::Upload::write(&mut up, &bytes))?;
         block_on(lsr_core::Upload::commit(up))?;
         self.foreign.push((next, newest.range().max()));
@@ -858,7 +859,11 @@ impl World {
 
     fn write_staged(&self, info: &FileInfo, bytes: &[u8]) -> Result<(), StagedEditError> {
         use lsr_core::{ObjectStore, Upload};
-        let mut up = block_on(self.staging_raw.begin_upload(&info.key, listed_at(info)?))?;
+        let mut up = block_on(self.staging_raw.begin_upload(
+            &info.key,
+            listed_at(info)?,
+            WriteMode::Replace,
+        ))?;
         block_on(up.write(bytes))?;
         block_on(up.commit())?;
         Ok(())

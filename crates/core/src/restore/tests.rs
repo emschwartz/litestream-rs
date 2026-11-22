@@ -16,6 +16,7 @@ use crate::conformance::block_on;
 use crate::layout::Level;
 use crate::mem::MemStore;
 use crate::mem::wrapped::Wrapped;
+use crate::store::WriteMode;
 use crate::store::{StoreOp, Upload};
 
 fn txid(n: u64) -> Txid {
@@ -103,7 +104,10 @@ fn put(store: &MemStore, level: u8, min: u64, max: u64, bytes: &[u8]) {
     block_on(async {
         let key = key(level, min, max);
         let created = Timestamp::from_unix_millis(i64::try_from(max).unwrap() * 1000);
-        let mut upload = store.begin_upload(&key, created).await.unwrap();
+        let mut upload = store
+            .begin_upload(&key, created, WriteMode::Replace)
+            .await
+            .unwrap();
         upload.write(bytes).await.unwrap();
         upload.commit().await.unwrap();
     });

@@ -93,8 +93,8 @@ pub enum Fault {
         /// How many body bytes survive.
         keep: usize,
     },
-    /// Forward, then rewrite the ETag to the MD5 of other bytes: a store that
-    /// accepted a digest it did not verify.
+    /// Forward, then rewrite the ETag (header, and a complete's body) to the
+    /// MD5 of other bytes: a store that accepted a digest it did not verify.
     WrongEtag {
         /// The request shape it applies to.
         on: Shape,
@@ -248,6 +248,13 @@ impl<T: Transport> Transport for FaultTransport<T> {
                 response
                     .headers
                     .retain(|(name, _)| !name.eq_ignore_ascii_case("etag"));
+                // A complete names its ETag in the body as well.
+                if let Ok(text) = std::str::from_utf8(&response.body)
+                    && let Some((head, rest)) = text.split_once("<ETag>")
+                    && let Some((_, tail)) = rest.split_once("</ETag>")
+                {
+                    response.body = format!("{head}<ETag>{other}</ETag>{tail}").into_bytes();
+                }
                 response.headers.push(("etag".to_owned(), other));
                 Ok(response)
             }

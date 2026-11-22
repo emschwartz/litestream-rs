@@ -14,6 +14,7 @@ use crate::mem::MemStore;
 use crate::plan::RestoreTarget;
 use crate::restore::{MemSink, restore};
 use crate::source::{CheckpointCall, FakeCheckpointer, FakeDb, FakeWal, SourceError, SourceOp};
+use crate::store::WriteMode;
 use crate::store::{Listing, PageLimit, ReadLen, StoreError, StoreOp, Upload};
 
 mod audit;
@@ -155,6 +156,7 @@ impl ObjectStore for Counting {
         &self,
         key: &FileKey,
         created_at: Timestamp,
+        mode: WriteMode,
     ) -> impl Future<Output = Result<Self::Upload, StoreError>> + Send {
         self.count();
         if let Some(wal) = self.moves_epoch.lock().unwrap().take() {
@@ -163,7 +165,7 @@ impl ObjectStore for Counting {
         if let Some((wal, n)) = self.commits_on_upload.lock().unwrap().take() {
             wal.append_tx(&[(pg(1), vec![n; PS.bytes()])], nz(3));
         }
-        self.inner.begin_upload(key, created_at)
+        self.inner.begin_upload(key, created_at, mode)
     }
 
     fn delete(&self, keys: &[FileKey]) -> impl Future<Output = Result<(), StoreError>> + Send {
@@ -664,7 +666,12 @@ fn a_failed_drop_after_a_divergence_uploads_nothing_built_on_it() {
         }
     }
     block_on(async {
-        let mut up = rig.remote.inner.begin_upload(&two, ts(T0)).await.unwrap();
+        let mut up = rig
+            .remote
+            .inner
+            .begin_upload(&two, ts(T0), WriteMode::Replace)
+            .await
+            .unwrap();
         up.write(&theirs).await.unwrap();
         up.commit().await.unwrap();
     });
@@ -1511,7 +1518,10 @@ fn tear(rig: &Rig, n: u64, torn: fn(Vec<u8>) -> Vec<u8>) {
     block_on(store.delete(&[info.key])).unwrap();
     let bad = torn(bytes);
     block_on(async {
-        let mut up = store.begin_upload(&info.key, ts(T0)).await.unwrap();
+        let mut up = store
+            .begin_upload(&info.key, ts(T0), WriteMode::Replace)
+            .await
+            .unwrap();
         up.write(&bad).await.unwrap();
         up.commit().await.unwrap();
     });

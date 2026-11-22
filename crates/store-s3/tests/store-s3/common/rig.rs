@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use crate::common::*;
+use lsr_core::WriteMode;
 use lsr_core::conformance::{Failure, Harness, block_on};
 use lsr_core::{FakeClock, FileKey, Level, ObjectStore, PageLimit, StoreError, Upload};
 use lsr_ltx::Timestamp;
@@ -77,7 +78,7 @@ pub fn shapes(wire: &FaultTransport<FakeS3>) -> Vec<Option<Shape>> {
 pub fn put_through(store: &impl ObjectStore, key: &FileKey, body: &[u8]) -> Result<(), StoreError> {
     block_on(async {
         let mut up = store
-            .begin_upload(key, Timestamp::from_unix_millis(5))
+            .begin_upload(key, Timestamp::from_unix_millis(5), WriteMode::Replace)
             .await?;
         up.write(body).await?;
         up.commit().await.map(drop)

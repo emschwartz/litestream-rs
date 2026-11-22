@@ -14,6 +14,7 @@ mod cases {
 
     use super::common::*;
     use super::rig::*;
+    use lsr_core::WriteMode;
     use lsr_core::conformance::{Harness, block_on};
     use lsr_core::{
         CorruptCause, CreatedAtSource, FileKey, Level, ListedTime, ObjectStore, PartNumber,
@@ -21,7 +22,9 @@ mod cases {
         Upload,
     };
     use lsr_ltx::Timestamp;
-    use lsr_store_s3::{FakeS3, Fault, FaultTransport, ListStats, S3Store, Shape, object_key};
+    use lsr_store_s3::{
+        FakeS3, Fault, FaultTransport, ListStats, S3Store, Shape, WriteStats, object_key,
+    };
 
     lsr_core::conformance_suite!(FakeHarness::new);
 
@@ -365,7 +368,25 @@ mod cases {
     ) -> Result<(), StoreError> {
         block_on(async {
             let mut up = store
-                .begin_upload(k, Timestamp::from_unix_millis(5))
+                .begin_upload(k, Timestamp::from_unix_millis(5), WriteMode::Replace)
+                .await?;
+            for piece in bytes.chunks(chunk) {
+                up.write(piece).await?;
+            }
+            up.commit().await.map(drop)
+        })
+    }
+
+    /// `write_all` as a create-only write.
+    fn write_new(
+        store: &impl ObjectStore,
+        k: &FileKey,
+        bytes: &[u8],
+        chunk: usize,
+    ) -> Result<(), StoreError> {
+        block_on(async {
+            let mut up = store
+                .begin_upload(k, Timestamp::from_unix_millis(5), WriteMode::New)
                 .await?;
             for piece in bytes.chunks(chunk) {
                 up.write(piece).await?;
@@ -482,10 +503,11 @@ mod cases {
         assert!(matches!(err, StoreError::Transient { .. }), "{err:?}");
         assert_eq!(h.store.pending_orphans(), 1);
         assert_eq!(h.wire.inner().open_uploads(), 1);
-        block_on(
-            h.store
-                .begin_upload(&key(0, 2, 2), Timestamp::from_unix_millis(5)),
-        )
+        block_on(h.store.begin_upload(
+            &key(0, 2, 2),
+            Timestamp::from_unix_millis(5),
+            WriteMode::Replace,
+        ))
         .unwrap();
         assert_eq!(h.store.pending_orphans(), 0);
         assert_eq!(h.wire.inner().open_uploads(), 0);
@@ -546,7 +568,11 @@ mod cases {
         block_on(async {
             let mut up = h
                 .store
-                .begin_upload(&key(0, 1, 1), Timestamp::from_unix_millis(5))
+                .begin_upload(
+                    &key(0, 1, 1),
+                    Timestamp::from_unix_millis(5),
+                    WriteMode::Replace,
+                )
                 .await
                 .unwrap();
             up.write(&body(PART)).await.unwrap();
@@ -566,7 +592,11 @@ mod cases {
         block_on(async {
             let mut up = h
                 .store
-                .begin_upload(&key(0, 1, 1), Timestamp::from_unix_millis(5))
+                .begin_upload(
+                    &key(0, 1, 1),
+                    Timestamp::from_unix_millis(5),
+                    WriteMode::Replace,
+                )
                 .await
                 .unwrap();
             up.write(&body(PART)).await.unwrap();
@@ -588,7 +618,11 @@ mod cases {
         let result = block_on(async {
             let mut up = h
                 .store
-                .begin_upload(&key(0, 1, 1), Timestamp::from_unix_millis(5))
+                .begin_upload(
+                    &key(0, 1, 1),
+                    Timestamp::from_unix_millis(5),
+                    WriteMode::Replace,
+                )
                 .await
                 .unwrap();
             up.write(&body(PART)).await.unwrap();
@@ -627,7 +661,7 @@ mod cases {
             let bytes = body(PART * 4);
             block_on(async {
                 let mut up = store
-                    .begin_upload(&k, Timestamp::from_unix_millis(5))
+                    .begin_upload(&k, Timestamp::from_unix_millis(5), WriteMode::Replace)
                     .await
                     .unwrap();
                 let mut high = 0;
@@ -685,5 +719,98 @@ mod cases {
         assert_eq!(store.pending_orphans(), 1);
         assert_eq!(store.abort_orphans().unwrap(), 1);
         assert_eq!(wire.inner().open_uploads(), 0);
+    }
+
+    // ------------------------------------------------ create-only writes
+
+    #[test]
+    fn a_create_only_put_into_a_taken_key_is_refused_and_changes_nothing() {
+        let h = FakeHarness::new();
+        let k = key(0, 1, 1);
+        write_new(&h.store, &k, b"first", 64).unwrap();
+        let err = write_new(&h.store, &k, b"second", 64).unwrap_err();
+        assert_eq!(err, StoreError::AlreadyExists { key: k });
+        assert_eq!(read_back(&h.store, &k, 5), b"first");
+        assert_eq!(
+            h.store.write_stats(),
+            WriteStats {
+                refused_taken: 1,
+                ..WriteStats::default()
+            }
+        );
+    }
+
+    #[test]
+    fn a_create_only_multipart_into_a_taken_key_is_refused_at_the_complete() {
+        let h = FakeHarness::new();
+        let k = key(0, 1, 1);
+        write_new(&h.store, &k, b"first", 64).unwrap();
+        let err = write_new(&h.store, &k, &body(PART * 2), PART).unwrap_err();
+        assert_eq!(err, StoreError::AlreadyExists { key: k });
+        assert_eq!(read_back(&h.store, &k, 5), b"first");
+        // The refused upload stays open, as Tigris leaves it; the next begin aborts it.
+        assert_eq!(h.store.pending_orphans(), 1);
+        assert_eq!(h.store.abort_orphans().unwrap(), 1);
+        assert_eq!(h.wire.inner().open_uploads(), 0);
+    }
+
+    #[test]
+    fn a_taken_key_reported_inside_a_200_is_refused_too() {
+        let h = FakeHarness::new();
+        h.wire.push(Fault::ErrorInOkBody {
+            on: Shape::Complete,
+            code: "PreconditionFailed",
+        });
+        let k = key(0, 1, 1);
+        let err = write_new(&h.store, &k, &body(PART), PART).unwrap_err();
+        assert_eq!(err, StoreError::AlreadyExists { key: k });
+    }
+
+    /// A provider without conditional writes answers the header with 501. The
+    /// PUT fails retryably, nothing is published, and from then on create-only
+    /// writes go out without the condition, counted, as Go's do.
+    #[test]
+    fn a_provider_without_conditional_writes_falls_back_and_says_so() {
+        let h = FakeHarness::new();
+        h.wire.inner().refuse_conditional_writes();
+        let k = key(0, 1, 1);
+        let err = write_new(&h.store, &k, b"first", 64).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                StoreError::Transient {
+                    op: StoreOp::Upload,
+                    kind: io::ErrorKind::Unsupported
+                }
+            ),
+            "{err:?}"
+        );
+        assert!(list_all(&h.store).unwrap().files.is_empty());
+        write_new(&h.store, &k, b"first", 64).unwrap();
+        write_new(&h.store, &k, b"other", 64).unwrap();
+        assert_eq!(read_back(&h.store, &k, 5), b"other", "it replaces now");
+        assert_eq!(
+            h.store.write_stats(),
+            WriteStats {
+                conditional_unsupported: true,
+                unconditional_new: 2,
+                refused_taken: 0,
+            }
+        );
+    }
+
+    /// The same at a complete: the parts are still there, so the complete
+    /// goes again at once without the condition.
+    #[test]
+    fn a_complete_refused_as_not_implemented_is_sent_again_without_the_condition() {
+        let h = FakeHarness::new();
+        h.wire.inner().refuse_conditional_writes();
+        let k = key(0, 1, 1);
+        let bytes = body(PART * 2);
+        write_new(&h.store, &k, &bytes, PART).unwrap();
+        assert!(read_back(&h.store, &k, PART * 2) == bytes);
+        assert_eq!(count(&h.wire, Shape::Complete), 2);
+        assert!(h.store.write_stats().conditional_unsupported);
+        assert_eq!(h.wire.inner().open_uploads(), 0);
     }
 }

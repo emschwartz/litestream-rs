@@ -33,7 +33,7 @@ use crate::layout::CreatedAt;
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::store::{
     BatchKind, CorruptCause, ListAt, Listing, ObjectStore, PageLimit, ReadAt, ReadLen, StoreError,
-    Upload,
+    Upload, WriteMode,
 };
 
 /// How a [`StoreError`] should be handled.
@@ -61,6 +61,7 @@ pub fn classify(err: &StoreError) -> Class {
         },
         StoreError::NotFound { .. } => Class::Missing,
         StoreError::Auth { .. }
+        | StoreError::AlreadyExists { .. }
         | StoreError::ScratchExhausted { .. }
         | StoreError::Corrupt { .. }
         | StoreError::Refused { .. } => Class::Permanent,
@@ -297,10 +298,11 @@ impl<S: ObjectStore, P: Sleeper, E: Entropy> ObjectStore for Retrying<S, P, E> {
         &self,
         key: &FileKey,
         created_at: Timestamp,
+        mode: WriteMode,
     ) -> Result<Self::Upload, StoreError> {
         let core = &*self.core;
         let inner = core
-            .run(|| core.inner.begin_upload(key, created_at))
+            .run(|| core.inner.begin_upload(key, created_at, mode))
             .await?;
         Ok(RetryingUpload {
             inner,

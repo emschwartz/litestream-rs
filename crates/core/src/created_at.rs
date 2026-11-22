@@ -246,6 +246,7 @@ mod tests {
     use crate::conformance::block_on;
     use crate::layout::Level;
     use crate::mem::MemStore;
+    use crate::store::WriteMode;
     use crate::store::{PageLimit, Upload};
     use lsr_ltx::{Timestamp, Txid, TxidRange};
 
@@ -259,7 +260,10 @@ mod tests {
         block_on(async {
             for n in 1..=count {
                 let at = Timestamp::from_unix_millis(i64::try_from(n).unwrap().saturating_mul(100));
-                let mut up = store.begin_upload(&key(n), at).await.unwrap();
+                let mut up = store
+                    .begin_upload(&key(n), at, WriteMode::Replace)
+                    .await
+                    .unwrap();
                 up.write(b"x").await.unwrap();
                 up.commit().await.unwrap();
             }
@@ -389,8 +393,9 @@ mod tests {
             &self,
             key: &FileKey,
             created_at: Timestamp,
+            mode: WriteMode,
         ) -> Result<Self::Upload, StoreError> {
-            self.inner.begin_upload(key, created_at).await
+            self.inner.begin_upload(key, created_at, mode).await
         }
 
         async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {

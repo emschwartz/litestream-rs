@@ -23,6 +23,7 @@
 mod exhaustive {
     use std::collections::BTreeMap;
 
+    use lsr_core::WriteMode;
     use lsr_core::conformance::block_on;
     use lsr_core::{
         AsOfPlanner, CreatedAt, CreatedAtStep, FileInfo, FileKey, Inventory, KeyTarget, Level,
@@ -234,7 +235,10 @@ mod exhaustive {
         block_on(async {
             for (i, (r, &created_at)) in files.iter().zip(resolved).enumerate() {
                 let at = Timestamp::from_unix_millis(created_at);
-                let mut up = store.begin_upload(&r.key(), at).await.unwrap();
+                let mut up = store
+                    .begin_upload(&r.key(), at, WriteMode::Replace)
+                    .await
+                    .unwrap();
                 up.write(b"x").await.unwrap();
                 up.commit().await.unwrap();
                 store.set_last_modified(&r.key(), at);

@@ -12,7 +12,7 @@ use lsr_ltx::{Timestamp, TxidRange};
 
 use crate::layout::{CreatedAt, FileInfo, FileKey, Level, ListedTime};
 use crate::store::{
-    Listing, ObjectStore, PageLimit, ReadLen, StoreError, StoreOp, Upload, build_listing,
+    Listing, ObjectStore, PageLimit, ReadLen, StoreError, StoreOp, Upload, WriteMode, build_listing,
 };
 
 #[derive(Debug)]
@@ -266,11 +266,13 @@ impl ObjectStore for MemStore {
         &self,
         key: &FileKey,
         created_at: Timestamp,
+        mode: WriteMode,
     ) -> impl Future<Output = Result<MemUpload, StoreError>> + Send {
         let result = self.lock().take_fault(StoreOp::Upload).map(|()| MemUpload {
             store: self.clone(),
             key: *key,
             created_at,
+            mode,
             buf: Vec::new(),
         });
         std::future::ready(result)
@@ -293,6 +295,7 @@ pub struct MemUpload {
     store: MemStore,
     key: FileKey,
     created_at: Timestamp,
+    mode: WriteMode,
     buf: Vec<u8>,
 }
 
@@ -306,7 +309,11 @@ impl Upload for MemUpload {
 
     fn commit(self) -> impl Future<Output = Result<FileInfo, StoreError>> + Send {
         let mut state = self.store.lock();
-        let published = state.take_fault(StoreOp::Upload).map(|()| {
+        let taken = self.mode == WriteMode::New && state.objects.contains_key(&self.key);
+        let published = state.take_fault(StoreOp::Upload).and_then(|()| {
+            if taken {
+                return Err(StoreError::AlreadyExists { key: self.key });
+            }
             let size = u64::try_from(self.buf.len()).unwrap_or(u64::MAX);
             state.clock = state.clock.saturating_add(1);
             let object = Object {
@@ -317,11 +324,11 @@ impl Upload for MemUpload {
             };
             let listed = object.listed(state.lazy);
             state.objects.insert(self.key, object);
-            FileInfo {
+            Ok(FileInfo {
                 key: self.key,
                 size,
                 listed,
-            }
+            })
         });
         let result = match (published, state.late_commit_faults.pop_front()) {
             (Ok(_), Some(err)) => Err(err),
@@ -359,7 +366,10 @@ mod tests {
         let limit = PageLimit::new(10).unwrap();
         let committed = Timestamp::from_unix_millis(5_000);
         conformance::block_on(async {
-            let mut up = store.begin_upload(&key(), committed).await.unwrap();
+            let mut up = store
+                .begin_upload(&key(), committed, WriteMode::Replace)
+                .await
+                .unwrap();
             up.write(b"x").await.unwrap();
             let info = up.commit().await.unwrap();
             let listed = store.list(Level::ZERO, None, limit).await.unwrap().files;
@@ -414,7 +424,7 @@ mod tests {
         });
         conformance::block_on(async {
             let mut up = store
-                .begin_upload(&key(), Timestamp::from_unix_millis(1))
+                .begin_upload(&key(), Timestamp::from_unix_millis(1), WriteMode::Replace)
                 .await
                 .unwrap();
             up.write(b"x").await.unwrap();
@@ -432,7 +442,7 @@ mod tests {
         let store = MemStore::new();
         conformance::block_on(async {
             let mut up = store
-                .begin_upload(&key(), Timestamp::from_unix_millis(1))
+                .begin_upload(&key(), Timestamp::from_unix_millis(1), WriteMode::Replace)
                 .await
                 .unwrap();
             up.write(b"x").await.unwrap();

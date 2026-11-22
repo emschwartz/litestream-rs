@@ -14,6 +14,7 @@ use crate::created_at::{Resolve, ResolvedCreatedAt};
 use crate::layout::{CreatedAt, ListedTime};
 use crate::mem::MemStore;
 use crate::plan::{KeyTarget, PlanOutcome, plan};
+use crate::store::WriteMode;
 use crate::store::{PageLimit, StoreOp, Upload};
 
 /// A day-aligned instant (2023-11-15), so every default window starts on it.
@@ -981,7 +982,10 @@ fn lazy_store(files: &[FileInfo]) -> MemStore {
     block_on(async {
         for f in files {
             let created_at = f.created_at().unwrap().at();
-            let mut up = store.begin_upload(&f.key, created_at).await.unwrap();
+            let mut up = store
+                .begin_upload(&f.key, created_at, WriteMode::Replace)
+                .await
+                .unwrap();
             up.write(b"x").await.unwrap();
             up.commit().await.unwrap();
         }
@@ -1136,7 +1140,10 @@ fn ltx_filled(min: u64, max: u64, created: i64, fill: u8) -> Vec<u8> {
 fn put(store: &MemStore, l: u8, n: u64, created: i64) {
     block_on(async {
         let k = key(l, n, n);
-        let mut up = store.begin_upload(&k, at(created)).await.unwrap();
+        let mut up = store
+            .begin_upload(&k, at(created), WriteMode::Replace)
+            .await
+            .unwrap();
         up.write(&ltx(n, n, created)).await.unwrap();
         up.commit().await.unwrap();
     });
@@ -1204,7 +1211,7 @@ fn level_one_reads_the_local_copy_first() {
         bytes[middle] ^= 0xff;
         block_on(async {
             let mut up = replica
-                .begin_upload(&key(0, n, n), at(created))
+                .begin_upload(&key(0, n, n), at(created), WriteMode::Replace)
                 .await
                 .unwrap();
             up.write(&bytes).await.unwrap();
@@ -1247,7 +1254,7 @@ fn level_one_is_built_from_the_replica_when_the_local_copy_differs() {
     let stale = ltx_filled(3, 3, created, 0xee);
     block_on(async {
         let mut up = local
-            .begin_upload(&key(0, 3, 3), at(created))
+            .begin_upload(&key(0, 3, 3), at(created), WriteMode::Replace)
             .await
             .unwrap();
         up.write(&stale).await.unwrap();
@@ -1398,7 +1405,10 @@ fn truncate_to_half(replica: &MemStore, out: &FileKey) {
             .await
             .unwrap();
         let created = load(replica).level(level(1))[0].created_at().unwrap().at();
-        let mut up = replica.begin_upload(out, created).await.unwrap();
+        let mut up = replica
+            .begin_upload(out, created, WriteMode::Replace)
+            .await
+            .unwrap();
         up.write(&whole[..whole.len() / 2]).await.unwrap();
         up.commit().await.unwrap();
     });
@@ -1493,7 +1503,10 @@ fn review_a_level_one_job_that_always_fails_does_not_starve_the_snapshot_forever
     for store in [&local, &replica] {
         block_on(async {
             let k = key(0, 2, 2);
-            let mut up = store.begin_upload(&k, at(T0 - 100_000)).await.unwrap();
+            let mut up = store
+                .begin_upload(&k, at(T0 - 100_000), WriteMode::Replace)
+                .await
+                .unwrap();
             up.write(&[0xAB; 200]).await.unwrap();
             up.commit().await.unwrap();
         });
@@ -1748,7 +1761,10 @@ fn a_corrupt_local_input_falls_back_to_the_replica_copy() {
     put(&replica, 0, 3, T0);
     put(&local, 0, 2, T0);
     block_on(async {
-        let mut up = local.begin_upload(&key(0, 3, 3), at(T0)).await.unwrap();
+        let mut up = local
+            .begin_upload(&key(0, 3, 3), at(T0), WriteMode::Replace)
+            .await
+            .unwrap();
         up.write(&[0xAB; 200]).await.unwrap();
         up.commit().await.unwrap();
     });

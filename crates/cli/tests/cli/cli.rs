@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use lsr_compat::{Manifest, Outcome, Staged, Target, all_fixtures, hash_pages, stage};
+use lsr_core::WriteMode;
 use lsr_core::conformance::block_on;
 use lsr_core::{Depth, Inventory, PlanOutcome, Report, Severity, verify};
 use lsr_ltx::Timestamp;
@@ -601,7 +602,7 @@ fn replica_of(dir: &Path, db: &[u8]) {
     block_on(async {
         let key = FileKey::new(Level::SNAPSHOT, one);
         let mut upload = store
-            .begin_upload(&key, Timestamp::from_unix_millis(1000))
+            .begin_upload(&key, Timestamp::from_unix_millis(1000), WriteMode::Replace)
             .await
             .expect("begin");
         upload.write(&bytes).await.expect("write");

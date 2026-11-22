@@ -7,6 +7,7 @@ use proptest::prelude::*;
 
 use super::*;
 use crate::source::{CommittedRead, FakeWal};
+use crate::store::WriteMode;
 
 const PS: PageSize = PageSize::MIN;
 
@@ -784,7 +785,10 @@ pub(super) fn encode_newest_staged(
 pub(super) async fn put(store: &crate::MemStore, id: u64, bytes: &[u8]) {
     use crate::{ObjectStore, Upload};
     let key = FileKey::new(Level::ZERO, lsr_ltx::TxidRange::single(txid(id)));
-    let mut up = store.begin_upload(&key, ts(7)).await.unwrap();
+    let mut up = store
+        .begin_upload(&key, ts(7), WriteMode::Replace)
+        .await
+        .unwrap();
     up.write(bytes).await.unwrap();
     up.commit().await.unwrap();
 }

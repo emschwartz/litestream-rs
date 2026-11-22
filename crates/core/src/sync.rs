@@ -39,7 +39,7 @@ use crate::pages::{PageChecksumTable, snapshot_clears};
 use crate::position::{Continuity, LastPage, Position, ReachedEnd, ReadLockHold};
 use crate::recover::Recovered;
 use crate::source::{CommittedRead, PageSource, WalSource};
-use crate::store::{ObjectStore, StoreError, Upload};
+use crate::store::{ObjectStore, StoreError, Upload, WriteMode};
 
 /// Go's default cap on the WAL bytes one file covers (`db.go:33-40`).
 const DEFAULT_CAP: u64 = 64 << 20;
@@ -499,8 +499,10 @@ pub(crate) async fn stage<R: Read + Seek, P: PageSource, L: ObjectStore>(
     pages: &mut PageChecksumTable,
     map_store: fn(&StoreError) -> Fault,
 ) -> Result<(FileInfo, Option<LastPage>), Fault> {
+    // A staged file replaces a torn one under its key, and a snapshot (level 9)
+    // shares its key with Go's snapshot of the same transaction: both replace.
     let mut upload = store
-        .begin_upload(key, header.fields().timestamp)
+        .begin_upload(key, header.fields().timestamp, WriteMode::Replace)
         .await
         .map_err(|err| map_store(&err))?;
     match fill(&mut upload, header, plan, wal, db, pages, map_store).await {

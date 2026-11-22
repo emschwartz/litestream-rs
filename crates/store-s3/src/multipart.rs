@@ -7,15 +7,25 @@
 //! and MinIO; it is checked for that shape and the part count only, because
 //! the part digests it is made of were each verified already.
 //!
+//! A create-only upload sends `If-None-Match: *` on the complete, where S3
+//! checks it. The answers that are not plain:
+//! - 412 `PreconditionFailed`, as a status or inside a 200's error document:
+//!   the key is taken, [`StoreError::AlreadyExists`]; the upload stays open
+//!   and goes on the orphan list.
+//! - `NotImplemented` (501): the provider has no conditional writes. The
+//!   complete is sent again without the condition (the parts are still
+//!   there), and every later create-only write goes without it too
+//!   ([`crate::WriteStats`] says so).
+//!
 //! Parts go out as batches of up to the `concurrency` setting
 //! ([`Transport::send_many`]); each part is judged alone, exactly as when
 //! parts went one at a time, and the ETags are kept in part order.
 
-use lsr_core::{CorruptCause, FileKey, PartNumber, StoreError, StoreOp};
+use lsr_core::{CorruptCause, FileKey, PartNumber, StoreError, StoreOp, WriteMode};
 use lsr_ltx::Timestamp;
 
-use crate::classify::classify;
-use crate::request::UploadId;
+use crate::classify::{classify, error_in_ok_body, is_not_implemented};
+use crate::request::{Precondition, UploadId};
 use crate::response::{EtagCheck, check_etag, parse_complete, parse_create};
 use crate::store::Inner;
 use crate::transport::{HttpResponse, Transport};
@@ -113,17 +123,44 @@ impl<T: Transport> Inner<T> {
         .collect()
     }
 
-    /// CompleteMultipartUpload; returns the completed object's ETag. S3 can
-    /// answer 200 with an error document, which fails the parse here.
+    /// CompleteMultipartUpload; returns the completed object's ETag. See the
+    /// module docs for the answers that are not plain.
     pub(crate) fn complete_upload(
         &self,
         key: &FileKey,
         id: &UploadId,
         etags: &[String],
+        mode: WriteMode,
     ) -> Result<String, StoreError> {
         let op = StoreOp::Upload;
-        let request = self.request(op, |b, now| b.complete_multipart(now, key, id, etags))?;
-        let response = self.exec(op, Some(key), request)?;
+        let precondition = self.precondition(mode);
+        let mut response = self.send_complete(key, id, etags, precondition)?;
+        if precondition == Precondition::KeyIsFree && is_not_implemented(&response) {
+            self.conditional_unsupported();
+            response = self.send_complete(key, id, etags, self.precondition(mode))?;
+        }
+        classify(op, Some(key), None, &response)?;
+        if let Some(err) = error_in_ok_body(op, key, &response) {
+            return Err(err);
+        }
         parse_complete(&response).map_err(|err| err.into_store(op, Some(*key)))
+    }
+
+    fn send_complete(
+        &self,
+        key: &FileKey,
+        id: &UploadId,
+        etags: &[String],
+        precondition: Precondition,
+    ) -> Result<crate::transport::HttpResponse, StoreError> {
+        let op = StoreOp::Upload;
+        let request = self.request(op, |b, now| {
+            b.complete_multipart_if(now, key, id, etags, precondition)
+        })?;
+        let response = self.send(op, request)?;
+        if response.status() == 412 {
+            self.tally_taken();
+        }
+        Ok(response)
     }
 }
