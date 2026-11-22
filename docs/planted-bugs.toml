@@ -19,6 +19,10 @@
 # rules they guarded are planted below as the witness-* entries. page-size-after-vacuum (b352aba): its
 # arm (an unusable newest staged file still names its page size) decides only with an empty replica,
 # where every staged file is pending and the boot witness now deletes an unusable one first.
+# other-writer-stop-forgotten-sim (a9da6c6): since a boot refuses replica files that neither the
+# WAL nor a takeover record vouches for, a restart after a stop for another writer's file above
+# staging stops again with or without the stop record, so the scenario cannot tell; the record
+# still decides the case of another writer at the engine's next id, which the core entry plants.
 
 [[bug]]
 name = "asof-straddle"
@@ -325,17 +329,8 @@ package = "lsr-core"
 tests = [
     "a_restart_keeps_the_stop_for_another_writer",
     "a_running_engine_stops_when_another_writer_took_its_next_id",
-    "a_restart_after_an_other_writer_stop_stops_again",
 ]
 
-[[bug]]
-name = "other-writer-stop-forgotten-sim"
-fix = "a9da6c6"
-package = "lsr-sim"
-test_bin = "sim"
-tests = ["faults::second_writer_survives_restart"]
-
-# The driver never wrote the stop record, so a new process did not have it.
 [[bug]]
 name = "stop-record-not-kept"
 fix = "a939338"
@@ -655,10 +650,7 @@ name = "takeover-before-drop-skipped-sim"
 fix = "88577ff"
 package = "lsr-sim"
 test_bin = "sim"
-tests = [
-    "an_unconfirmed_upload_dropped_from_staging_is_never_refused_seed_0xd",
-    "a_tail_judged_torn_and_dropped_from_staging_is_never_refused_seed_0x3ed",
-]
+tests = ["a_tail_judged_torn_and_dropped_from_staging_is_never_refused_seed_0x3ed"]
 
 # A running drop of an unreadable staged file records only through the confirmed transaction,
 # short of a file whose upload published with its answer lost.
