@@ -228,6 +228,9 @@ mod fake {
         woken: bool,
         /// The park moves the clock to its wake time itself.
         free: bool,
+        /// The latest clock reading a park has looked at: a test that moves the clock waits
+        /// for the thread to have seen one move before it makes the next.
+        seen: Option<Timestamp>,
     }
 
     /// The fake clock and its park, one object so moving the clock wakes the park.
@@ -268,6 +271,7 @@ mod fake {
                     return;
                 }
                 let now = self.clock.now();
+                state.seen = Some(now);
                 if now < seen {
                     return;
                 }
@@ -315,6 +319,12 @@ mod fake {
             let _state = lock(&self.time.state);
             self.time.clock.advance(by);
             self.time.signal.notify_all();
+        }
+
+        /// The latest clock reading a park has looked at; `None` before the first park.
+        #[must_use]
+        pub fn seen_by_park(&self) -> Option<Timestamp> {
+            lock(&self.time.state).seen
         }
 
         /// Moves the clock back, as a wall clock that NTP corrects steps back, and wakes a park.

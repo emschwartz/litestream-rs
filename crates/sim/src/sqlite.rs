@@ -1537,6 +1537,12 @@ impl SimSqlite {
         })
     }
 
+    /// Drops every source failure injected and not yet met, as the store
+    /// faults' heal does for theirs: from here the world imposes none.
+    pub fn heal_injections(&self) {
+        self.with(|state| state.faults.injections.clear());
+    }
+
     /// The next TRUNCATE checkpoint that finishes, ours or another process's, resets
     /// the wal-index and then fails to truncate the file (`ftruncate` failing):
     /// the file keeps the old header and frames until the next commit writes a

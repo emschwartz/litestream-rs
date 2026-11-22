@@ -1,21 +1,22 @@
 diff --git a/crates/store-s3/src/classify.rs b/crates/store-s3/src/classify.rs
-index 7e95992..74c23e5 100644
+index 25b018d..8c6c2bc 100644
 --- a/crates/store-s3/src/classify.rs
 +++ b/crates/store-s3/src/classify.rs
-@@ -119,9 +119,9 @@ impl S3Code {
-             | Self::ExpiredToken
+@@ -128,10 +128,10 @@ impl S3Code {
              | Self::InvalidToken
              | Self::TokenRefreshRequired => Some(Denied::Credentials),
--            Self::AccessDenied | Self::AllAccessDisabled => Some(Denied::Permission),
+             Self::AccessDenied | Self::AllAccessDisabled | Self::KmsKeyUnusable => {
+-                Some(Denied::Permission)
++                Some(Denied::Credentials)
+             }
 -            Self::RequestTimeTooSkewed => Some(Denied::ClockSkew),
 -            Self::NoSuchBucket => Some(Denied::BucketMissing),
-+            Self::AccessDenied | Self::AllAccessDisabled => Some(Denied::Credentials),
 +            Self::RequestTimeTooSkewed => Some(Denied::Credentials),
 +            Self::NoSuchBucket => Some(Denied::Credentials),
              Self::NoSuchKey
              | Self::NoSuchUpload
              | Self::SlowDown
-@@ -190,7 +190,7 @@ pub fn classify(
+@@ -200,7 +200,7 @@ pub fn classify(
          // shows its own code on the next request that carries a body.
          403 => Err(StoreError::Denied {
              op,
@@ -24,7 +25,7 @@ index 7e95992..74c23e5 100644
          }),
          404 => Err(not_found(op, key, code, status)),
          400 if code == Some(S3Code::BadDigest) => Err(StoreError::Corrupt {
-@@ -264,7 +264,7 @@ pub fn classify_transport(op: StoreOp, err: &TransportError) -> StoreError {
+@@ -274,7 +274,7 @@ pub fn classify_transport(op: StoreOp, err: &TransportError) -> StoreError {
          },
          TransportError::Tls => StoreError::Denied {
              op,

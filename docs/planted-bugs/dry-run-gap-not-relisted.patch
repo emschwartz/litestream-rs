@@ -1,0 +1,13 @@
+diff --git a/crates/cli/src/run.rs b/crates/cli/src/run.rs
+index 69fba4e..fcf3f1d 100644
+--- a/crates/cli/src/run.rs
++++ b/crates/cli/src/run.rs
+@@ -674,7 +674,7 @@ async fn plan_on<S: ObjectStore>(store: &S, output: &Path, how: How) -> Result<F
+     let (inventory, outcome, created_at_read) = loop {
+         let inventory = Inventory::load(store).await?;
+         let (outcome, created_at_read) = plan_target(store, &inventory, how.target).await?;
+-        if !matches!(outcome, PlanOutcome::Gap { .. }) || attempt >= MAX_ATTEMPTS {
++        if !matches!(outcome, PlanOutcome::Gap { .. }) || attempt >= 1 {
+             break (inventory, outcome, created_at_read);
+         }
+         attempt = attempt.saturating_add(1);

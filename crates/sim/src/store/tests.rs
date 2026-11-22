@@ -244,6 +244,30 @@ fn a_late_error_leaves_the_key_volatile_until_a_later_commit_syncs() {
     assert!(handle.volatile().is_empty());
 }
 
+/// The boot's scratch removal reaches the store under every simulator wrapper, with its count
+/// and with no fault drawn.
+#[test]
+fn remove_scratch_is_forwarded_by_every_wrapper() {
+    let raw = MemStore::new();
+    raw.plant_scratch(1);
+    assert_eq!(
+        block_on(YieldEachCall::new(raw.clone()).remove_scratch()),
+        Ok(1)
+    );
+    raw.plant_scratch(2);
+    assert_eq!(block_on(Recorder::new(raw.clone()).remove_scratch()), Ok(2));
+    raw.plant_scratch(3);
+    assert_eq!(block_on(Volatile::new(raw.clone()).remove_scratch()), Ok(3));
+    raw.plant_scratch(4);
+    let faults = Faults::new(
+        raw.clone(),
+        vec![(StoreOp::Delete, 0, FaultShape::Error(boom()))],
+        1,
+    );
+    assert_eq!(block_on(faults.remove_scratch()), Ok(4));
+    assert_eq!(raw.scratch(), 0);
+}
+
 /// A staged file the engine unlinked, with no commit (a directory sync) after it.
 fn unlinked_with_no_sync(revert: bool) -> (MemStore, VolatileHandle, Vec<u8>) {
     let raw = MemStore::new();
