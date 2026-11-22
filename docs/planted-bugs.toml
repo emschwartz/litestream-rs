@@ -14,7 +14,9 @@
 # ab0021d (a feature: reverting it does not compile). Retired with the code they planted into:
 # staged-file-cannot-follow (bf78f6d) and staged-snapshot-of-earlier-wal (be104a7), the listing's header
 # link between a staged file and the replica's newest, which the boot witness replaced (2fb603f); the
-# rules they guarded are planted below as the witness-* entries.
+# rules they guarded are planted below as the witness-* entries. page-size-after-vacuum (b352aba): its
+# arm (an unusable newest staged file still names its page size) decides only with an empty replica,
+# where every staged file is pending and the boot witness now deletes an unusable one first.
 
 [[bug]]
 name = "asof-straddle"
@@ -39,13 +41,6 @@ tests = [
     "pages::tests::a_staging_listing_whose_cursor_never_advances_is_a_fault_not_a_loop",
     "recover::tests::a_staging_listing_whose_cursor_never_advances_is_a_fault_not_a_loop",
 ]
-
-[[bug]]
-name = "page-size-after-vacuum"
-fix = "b352aba"
-package = "lsr-sim"
-test_bin = "sim"
-tests = ["an_unusable_staged_file_still_names_its_page_size"]
 
 [[bug]]
 name = "recover-before-trusting-snapshot"
