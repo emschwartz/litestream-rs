@@ -17,7 +17,9 @@
 //!   key ending at a transaction a bucket rollback took is left out at every
 //!   level: the history rebuilt past the loss re-merges what the lost files
 //!   held under other keys (`1-1` after `1-2` was rolled back), which is the
-//!   cost of the loss, not amplification.
+//!   cost of the loss, not amplification. Such a key still counts when a
+//!   counted file one level up was merged from it (level-1 `2-5` from level-0 `2`
+//!   to `5` before a rollback took `2` to `4`): that file's bytes came from it.
 //! - A compaction reads each input once, in chunks larger than any file the
 //!   simulator writes; a boot reads back the newest file of each level and
 //!   the replica's newest level-0 file, a header first then the file. So
@@ -72,10 +74,7 @@ pub fn check(
     }
     let mut bytes = [0_u64; 10];
     let mut files = [0_u64; 10];
-    for (key, size) in last
-        .iter()
-        .filter(|(key, _)| !lost.contains(&key.range().max()))
-    {
+    for (key, size) in last.iter().filter(|(key, _)| counted(key, &last, lost)) {
         let level = usize::from(key.level().get());
         if let (Some(b), Some(f)) = (bytes.get_mut(level), files.get_mut(level)) {
             *b = b.saturating_add(*size);
@@ -104,6 +103,24 @@ pub fn check(
         .saturating_add(spent.fault_hits)
         .saturating_add(spent.boots);
     within(Bound::CommitCalls, counts.commits, commits)
+}
+
+/// Whether `key` counts toward its level's bytes: it ends at a transaction no
+/// rollback took, or a counted file one level up was merged from it (its
+/// range lies inside that file's), so the bytes that file holds are charged
+/// to the inputs it read.
+fn counted(key: &FileKey, last: &BTreeMap<FileKey, u64>, lost: &BTreeSet<Txid>) -> bool {
+    if !lost.contains(&key.range().max()) {
+        return true;
+    }
+    let above = key.level().get().saturating_add(1);
+    (1..=8).contains(&above)
+        && last.keys().any(|output| {
+            output.level().get() == above
+                && output.range().min() <= key.range().min()
+                && key.range().max() <= output.range().max()
+                && counted(output, last, lost)
+        })
 }
 
 /// For every key put at levels 1 to 8, the keys one level down that lie
