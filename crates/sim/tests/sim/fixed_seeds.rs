@@ -527,6 +527,40 @@ mod unlinked {
             panic!("{}", failure.violation);
         }
     }
+
+    /// A staging backup holds a file read from the first frame of the WAL.
+    /// The WAL is then rewritten under the same salts, and the engine
+    /// snapshots it as transaction 1 and uploads it. The backup is put back
+    /// and its file for transaction 2, a shorter range of the same WAL, was
+    /// uploaded after 1: transaction 2 held an earlier commit than 1 (seed
+    /// 0x1919f, shrunk).
+    #[test]
+    fn a_staged_file_from_an_earlier_state_of_the_wal_is_not_chained_seed_0x1919f() {
+        use lsr_sim::generate::WalOp;
+        let ops = [
+            Op::WalDamage {
+                op: WalOp::TruncateAtFrame(4),
+                ticks: 2,
+            },
+            Op::Tick,
+            Op::Meta(MetaOp::DeleteAll),
+            Op::CommitInTick { pages: 1 },
+            Op::Meta(MetaOp::Save),
+            Op::Tick,
+            Op::WalDamage {
+                op: WalOp::RegrowSameSalts(9_383_215_839_333_341_487),
+                ticks: 6,
+            },
+            Op::StagingDamage(MetaOp::Restore),
+        ];
+        let opts = Opts {
+            drawn: true,
+            ..Opts::default()
+        };
+        if let Err(failure) = run_ops(Seed::new(0x1919f), &ops, &opts) {
+            panic!("{}", failure.violation);
+        }
+    }
 }
 
 #[cfg(test)]
