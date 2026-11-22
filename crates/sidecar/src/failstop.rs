@@ -41,10 +41,6 @@ pub(crate) const fn gate_name(gate: Gate) -> &'static str {
     }
 }
 
-/// The metric for a held application: `lsr_app_held{db,cause}` 1 while held.
-/// PROVISIONAL(#115).
-pub(crate) const APP_HELD_METRIC: &str = "lsr_app_held";
-
 /// The log line when a held gate keeps the `-exec` child from starting. PROVISIONAL(#115).
 pub(crate) const START_REFUSED: &str = "start refused";
 

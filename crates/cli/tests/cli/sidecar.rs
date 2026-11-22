@@ -795,11 +795,6 @@ fn an_unsafe_stop_at_boot_holds_the_child() {
     let health: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(health["dbs"][0]["fail_stop"], "page_size_changed");
     assert_eq!(health["dbs"][0]["app"], "held");
-    let (_, text) = fetch(addr, "/metrics");
-    let (_, samples) = parse_metrics(&text);
-    let db = setup.db.display().to_string();
-    let labels = [("db", db.as_str()), ("cause", "page_size_changed")];
-    assert!((one(&samples, "lsr_app_held", &labels).value - 1.0).abs() < f64::EPSILON);
     daemon.signal("TERM");
     let (status, out) = daemon.finish();
     assert_eq!(status.code(), Some(4), "{out:#?}");

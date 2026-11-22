@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll, Waker};
 use std::thread::JoinHandle;
@@ -502,7 +502,7 @@ impl Replicator {
     /// ([`crate::Health::fail_stop`], `Config::if_replication_stops`): SQLite rolls the
     /// transaction back and the application's COMMIT fails with
     /// `SQLITE_CONSTRAINT_COMMITHOOK`. Reads go on. Connections not set up here are not
-    /// covered.
+    /// covered; an application on another binding reads the gate from [`Self::health`].
     #[cfg(feature = "rusqlite")]
     pub fn app_connection(
         &self,
@@ -511,14 +511,6 @@ impl Replicator {
         lsr_sqlite::app_connection_for(conn, &self.shared.database)?;
         lsr_sqlite::refuse_commits_while(conn, &self.shared.writes_refused);
         Ok(())
-    }
-
-    /// Whether fail-stop refuses the application's commits now: what the hook
-    /// [`Self::app_connection`] installs answers. For an application on another SQLite binding,
-    /// to refuse its own writes the same way.
-    #[must_use]
-    pub fn writes_refused(&self) -> bool {
-        self.shared.writes_refused.load(Ordering::Acquire)
     }
 }
 

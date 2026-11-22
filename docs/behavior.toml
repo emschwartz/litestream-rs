@@ -1862,11 +1862,12 @@ recovery = "None"
 detected_by = "sim::`stall_liveness::a_stall_ends_with_the_fault_that_caused_it_seed_0xa2`; oracle::`StuckRetrying`, plant::`success-keeps-a-stall`"
 notes = "Before, any stall ended a liveness judgment and excused an undrained shutdown, so an engine still retrying a fault nothing caused any more, or reporting degraded for nothing, passed. The run's end now also heals the SQLite source failures still queued"
 
+[[row]]
 table = "Fail-stop"
 id = "FS-1"
 circumstance = "The engine stops for any cause but the end of a drain (`failstop.rs`, `actor/lag.rs`): with the default responses only another writer; any cause set to `stop`"
 response = "trip `Stopped(cause)` at once, with no bound; under `hold-start` an application not yet released is held, under `stop-app` a running one is stopped, under `report` nothing is held"
-signal = "`/healthz` 503 with `fail_stop` the stop's cause name, `lsr_app_held{db,cause}`, log `start refused` or `app stopped`"
+signal = "`/healthz` 503 with `fail_stop` the stop's cause name and `app` = `held`, log `start refused` or `app stopped`"
 at_risk = "What the stop itself leaves off the replica"
 recovery = "Operator: fix the cause (or `lsr take-over`), restart"
 detected_by = "core::`an_unsafe_stop_trips_and_a_drain_does_not`, core::`a_stop_trips_and_wins`, core::`the_gate_follows_the_table`, core::`the_release_latches`, replica::`an_unsafe_stop_while_running_refuses_commits_only_under_stop_app`, cli::`an_unsafe_stop_at_boot_holds_the_child`, cli::`an_unsafe_stop_while_running_stops_the_child_under_stop_app`, plant::`failstop-starts-over-a-stop`, plant::`failstop-exec-ignores-the-gate`, plant::`failstop-stop-app-never-stops`"

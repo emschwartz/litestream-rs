@@ -47,7 +47,6 @@ fn a_refusal_at_boot_refuses_commits_until_the_first_listing() {
         held.fail_stop.trip,
         Some(Trip::NotYetReachable(Denied::Credentials))
     );
-    assert!(replicator.writes_refused());
     let before = rows(&site);
     let err = insert(&site).unwrap_err();
     assert!(refused(&err), "{err}");
@@ -56,7 +55,6 @@ fn a_refusal_at_boot_refuses_commits_until_the_first_listing() {
     faulty.refuse.store(false, Ordering::SeqCst);
     clock.advance(POLL);
     wait(&replicator, |h| h.fail_stop.gate == Gate::Open);
-    assert!(!replicator.writes_refused());
     insert(&site).unwrap();
     assert_eq!(rows(&site), before + 1);
 }
@@ -110,7 +108,8 @@ fn an_unsafe_stop_while_running_refuses_commits_only_under_stop_app() {
             stopped.fail_stop.trip,
             Some(Trip::Stopped(StopCause::StoreDenied(Denied::Credentials)))
         );
-        assert_eq!(replicator.writes_refused(), refuses, "{mode:?}");
+        let held = matches!(replicator.health().fail_stop.gate, Gate::Held(_));
+        assert_eq!(held, refuses, "{mode:?}");
         let result = insert(&site);
         assert_eq!(
             result.as_ref().is_err_and(refused),
