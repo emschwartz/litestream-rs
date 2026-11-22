@@ -865,3 +865,16 @@ package = "lsr-core"
 tests = [
     "recover::tests::rule_6_a_pinned_position_with_no_frames_follows_a_new_header_with_any_salts",
 ]
+
+# A sequence bump ran on the writer connection whatever state it was in: under a lock it ran
+# inside the lock's transaction, and after a release whose ROLLBACK failed it ran inside the
+# leftover one, so the next lock's release rolled it back unseen. Found by the differential of
+# the simulator's SQLite model against this crate (crates/sqlite/tests/sqlite/sim_model.rs).
+[[bug]]
+name = "bump-inside-leftover-writer-transaction"
+fix = "claude/sqlite-writer-reset"
+package = "lsr-sqlite"
+tests = [
+    "checkpoint::tests::a_bump_after_a_release_that_failed_is_committed",
+    "checkpoint::tests::a_bump_under_a_lock_is_refused",
+]

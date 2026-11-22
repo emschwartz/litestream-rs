@@ -379,11 +379,12 @@ impl Inner {
         self.begin_read().map_err(|_lost| SourceError::ReadTxLost)
     }
 
-    /// `BEGIN` then the lock-table insert (Go `db.go:2660`, `2759`), which is rolled back.
-    /// One holder at a time: refused while a lock is outstanding. A transaction still open
-    /// with none outstanding (its ROLLBACK failed after the lock was handed back) is rolled
-    /// back first, since a `BEGIN` inside it would fail on every later call.
-    pub(crate) fn begin_writer(&mut self) -> Result<u64, SourceError> {
+    /// The writer connection, free for a statement of its own: refused while a lock is
+    /// outstanding (whatever ran now would run inside the lock's transaction, and its release
+    /// would roll it back). A transaction still open with none outstanding (its ROLLBACK failed
+    /// after the lock was handed back) is rolled back first: a `BEGIN` inside it would fail on
+    /// every later call, and a write inside it would be undone by the next lock's release.
+    pub(crate) fn free_writer(&mut self) -> Result<&Connection, SourceError> {
         if self.issued != self.returned {
             return Err(SourceError::Io(io::ErrorKind::InvalidInput));
         }
@@ -392,6 +393,13 @@ impl Inner {
                 .execute_batch("ROLLBACK")
                 .map_err(|e| crate::error::source_error(&e))?;
         }
+        Ok(&self.writer)
+    }
+
+    /// `BEGIN` then the lock-table insert (Go `db.go:2660`, `2759`), which is rolled back.
+    /// One holder at a time ([`Inner::free_writer`]).
+    pub(crate) fn begin_writer(&mut self) -> Result<u64, SourceError> {
+        self.free_writer()?;
         self.writer
             .execute_batch("BEGIN")
             .map_err(|e| crate::error::source_error(&e))?;

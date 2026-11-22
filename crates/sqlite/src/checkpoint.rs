@@ -97,7 +97,7 @@ impl Checkpointer for Sqlite {
 
     fn bump_seq(&mut self) -> Result<(), SourceError> {
         self.lock()
-            .writer
+            .free_writer()?
             .execute(
                 "INSERT INTO _litestream_seq (id, seq) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET seq = seq + 1",
                 [],
@@ -117,7 +117,82 @@ impl Checkpointer for Sqlite {
 
 #[cfg(test)]
 mod tests {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
+
     use super::*;
+
+    /// A database in WAL mode under a temporary directory, and our handle on it.
+    fn open() -> (tempfile::TempDir, std::path::PathBuf, Sqlite) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let app = Connection::open(&path).unwrap();
+        app.execute_batch("PRAGMA journal_mode = WAL; CREATE TABLE t (v);")
+            .unwrap();
+        let sqlite = Sqlite::open(&path).unwrap();
+        (dir, path, sqlite)
+    }
+
+    fn deny_rollback(ctx: AuthContext<'_>) -> Authorization {
+        let rollback = AuthAction::Transaction {
+            operation: TransactionOperation::Rollback,
+        };
+        if ctx.action == rollback {
+            Authorization::Deny
+        } else {
+            Authorization::Allow
+        }
+    }
+
+    /// The sequence number another connection reads.
+    fn seq(path: &std::path::Path) -> Option<i64> {
+        Connection::open(path)
+            .unwrap()
+            .query_row("SELECT seq FROM _litestream_seq WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .ok()
+    }
+
+    /// A release whose ROLLBACK fails leaves the writer's transaction open. The next bump must
+    /// not run inside it, where the next lock's ROLLBACK would undo it unseen.
+    #[test]
+    fn a_bump_after_a_release_that_failed_is_committed() {
+        let (_dir, path, mut sqlite) = open();
+        let barrier = sqlite.begin_barrier().unwrap();
+        sqlite
+            .lock()
+            .writer
+            .authorizer(Some(deny_rollback))
+            .unwrap();
+        assert!(
+            sqlite.end_barrier(barrier).is_err(),
+            "the ROLLBACK was refused"
+        );
+        sqlite
+            .lock()
+            .writer
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+            .unwrap();
+        sqlite.bump_seq().unwrap();
+        assert_eq!(seq(&path), Some(1), "another connection sees the bump");
+        let lock = sqlite.begin_write_lock().unwrap();
+        sqlite.end_write_lock(lock).unwrap();
+        assert_eq!(seq(&path), Some(1), "the next lock's release kept it");
+    }
+
+    /// A bump while a lock is outstanding would run inside the lock's transaction: refused.
+    #[test]
+    fn a_bump_under_a_lock_is_refused() {
+        let (_dir, path, mut sqlite) = open();
+        let barrier = sqlite.begin_barrier().unwrap();
+        assert_eq!(
+            sqlite.bump_seq(),
+            Err(SourceError::Io(io::ErrorKind::InvalidInput))
+        );
+        sqlite.end_barrier(barrier).unwrap();
+        sqlite.bump_seq().unwrap();
+        assert_eq!(seq(&path), Some(1));
+    }
 
     #[test]
     fn checkpoint_results_sort_by_code_and_counts() {

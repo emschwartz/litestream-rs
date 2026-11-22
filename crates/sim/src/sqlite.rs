@@ -2036,10 +2036,9 @@ impl Checkpointer for SimCheckpointer {
         let first = PageNo::new(1, state.page_size).ok_or(SourceError::Busy)?;
         let data = state.image_page(1);
         let size = state.index.db_size.max(1);
-        // Under a lock the real bump runs inside the lock's transaction, which the release
-        // rolls back; the model refuses it instead (pinned in lsr-sqlite's `sim_model`).
+        // The writer connection is in the lock's transaction: the real checkpointer refuses.
         if state.barrier.is_some() || state.write_lock.is_some() {
-            return Err(SourceError::Busy);
+            return Err(SourceError::Io(io::ErrorKind::InvalidInput));
         }
         if state.write(Conn::Writer, &[(first, data)], Some(size)) {
             Ok(())
