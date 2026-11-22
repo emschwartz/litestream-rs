@@ -17,3 +17,5 @@ replace \| with \^ in .*FileKey.*from_str
 replace > with >= in extend
 # core plan.rs Sweep::next: `sweep_order` includes the key, unique per file, so `<` vs `<=` never meets a tie.
 replace < with <= in <impl Iterator for Sweep<'a>>::next
+# core witness.rs decode: every file the boot pass decodes already passed sweep_staged or the listing's read-back, both of which require the header to name the key.
+replace match guard verified.header\(\).txids\(\) == key.range\(\) with true in decode

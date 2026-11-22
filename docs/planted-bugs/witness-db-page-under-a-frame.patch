@@ -1,8 +1,8 @@
 diff --git a/crates/core/src/witness.rs b/crates/core/src/witness.rs
-index d7850f9..dbe8dbc 100644
+index 0d277f3..769eb42 100644
 --- a/crates/core/src/witness.rs
 +++ b/crates/core/src/witness.rs
-@@ -517,7 +517,7 @@ fn holds_exactly<R: Read + Seek, P: PageSource>(
+@@ -543,7 +543,7 @@ fn holds_exactly<R: Read + Seek, P: PageSource>(
          };
          // A frame anywhere may have reached the database file since: the
          // file's copy cannot be told from the database's, so no witness.
