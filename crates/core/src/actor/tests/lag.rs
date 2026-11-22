@@ -573,16 +573,31 @@ fn a_doubt_snapshot_at_boot_over_a_replicated_wal_is_not_lag() {
 }
 
 /// The same doubt with a commit after the boot: that commit is lag, dated from when it was
-/// first seen, and trips once the replica has refused it past the bound.
+/// first seen, and trips once it has stayed off the replica past the bound. Staging refuses
+/// the snapshot, so only the baseline can tell the commit from the frames before it.
 #[test]
 fn a_commit_after_a_doubt_at_boot_is_lag() {
     let (mut rig, mut actor) = caught_up();
     commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
-    tear(&rig, 2, flipped);
+    commit_and_settle(&mut rig, &mut actor, 3, T0 + 1);
+    tear(&rig, 3, flipped);
     let mut actor = Actor::new(go_like());
     let again = first_bad_read(&mut rig, &mut actor, T0 + 2);
     remote_down(&rig, 10_000);
-    rig.tick(&mut actor, again);
+    staging_down(&rig);
+    let boot = rig.tick(&mut actor, again);
+    assert_eq!(
+        event(&boot),
+        Some(&Event::Booted {
+            cause: Some(SnapshotCause::NewestStagedFileUnreadable)
+        })
+    );
+    rig.tick(&mut actor, again + 1);
+    assert_eq!(
+        actor.unreplicated_since(),
+        None,
+        "the doubt alone is no lag"
+    );
     rig.commit(9);
     let seen = drive(&mut rig, &mut actor, again + 1, again + 2 * BOUND);
     assert!(actor.unreplicated_since().is_some());
@@ -636,4 +651,22 @@ fn a_commit_behind_an_operator_snapshot_that_never_stages_trips() {
     staging_down(&rig);
     let seen = drive(&mut rig, &mut actor, T0 + 10, T0 + 10 + BOUND + 60_000);
     assert!(first_trip(&seen).is_some(), "{seen:?}");
+}
+
+/// A file that changes nothing staged on top of a pending commit does not hide it: the clock
+/// keeps the commit's date.
+#[test]
+fn a_file_that_changes_nothing_on_top_of_a_commit_keeps_the_commit_dated() {
+    let (mut rig, mut actor) = caught_up();
+    remote_down(&rig, 10_000);
+    rig.commit(7);
+    rig.tick(&mut actor, T0 + 10);
+    let since = actor
+        .unreplicated_since()
+        .expect("the commit is off the replica");
+    // The same page again: a file that changes nothing.
+    rig.commit(7);
+    rig.tick(&mut actor, T0 + 20);
+    assert!(actor.staged() > actor.replicated());
+    assert_eq!(actor.unreplicated_since(), Some(since));
 }
