@@ -72,7 +72,7 @@
 //! let stopped = replicator.stop(Duration::from_secs(30)).wait();
 //! assert!(matches!(stopped, Stopped::Drained { txid: Some(_) }));
 //!
-//! // A restore is a free function. It builds a new file and never touches an existing one.
+//! // A restore is a free function. It builds a new file and refuses an existing target.
 //! let restored = dir.path().join("restored.db");
 //! restore(&*store, RestoreTarget::Latest, &restored)?;
 //! # let copy = rusqlite::Connection::open(&restored)?;
