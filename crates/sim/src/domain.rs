@@ -33,8 +33,8 @@ use std::io::ErrorKind;
 use std::time::Duration;
 
 use lsr_core::{
-    CorruptCause, Denied, Entropy, PersistentCause, SeededEntropy, SourceError, SourceOp,
-    StopCause, StoreError, StoreOp,
+    CorruptCause, Denied, Entropy, SeededEntropy, SourceError, SourceOp, StopCause, StoreError,
+    StoreOp,
 };
 use lsr_ltx::{PageNo, PageSize};
 
@@ -63,18 +63,11 @@ pub enum KnownWrong {
     /// A failed sync of the WAL is remembered in memory only: a restart before the TRUNCATE
     /// that pays for it stages frames the failed sync covered (BEHAVIOR's D2).
     WalSyncForgottenAtRestart,
-    /// Level-1 compaction reads level 0 from the local staging store but classifies that
-    /// store's errors as the replica's: a staging permission error becomes a persistent
-    /// `StoreDenied(Permission)`, which sends an operator to the bucket.
-    CompactionClassifiesLocalAsReplica,
 }
 
 impl KnownWrong {
     /// Every known defect.
-    pub const ALL: [Self; 2] = [
-        Self::WalSyncForgottenAtRestart,
-        Self::CompactionClassifiesLocalAsReplica,
-    ];
+    pub const ALL: [Self; 1] = [Self::WalSyncForgottenAtRestart];
 
     /// Where the defect is tracked and who fixes it.
     #[must_use]
@@ -83,10 +76,6 @@ impl KnownWrong {
             Self::WalSyncForgottenAtRestart => {
                 "#99 (D2); fixed by the journal session, persisting the unproven-WAL fact before \
                  the TRUNCATE"
-            }
-            Self::CompactionClassifiesLocalAsReplica => {
-                "#99; fixed by the health session, routing compaction's local reads through \
-                 Fault::from_staging (seeds 0x348, 0xb3c, 0xb9e)"
             }
         }
     }
@@ -98,12 +87,6 @@ impl KnownWrong {
             Self::WalSyncForgottenAtRestart => {
                 matches!(violation, Violation::StagedNotDurable { .. })
             }
-            Self::CompactionClassifiesLocalAsReplica => matches!(
-                violation,
-                Violation::UnexpectedDegraded {
-                    cause: PersistentCause::StoreDenied(Denied::Permission)
-                }
-            ),
         }
     }
 
@@ -207,13 +190,6 @@ const NOT_A_PAGE: &str = "only a database page read can end inside a page";
 const NOT_THE_WAL_PATH: &str = "only the calls that look at the WAL path can see it replaced";
 const UNLINK_UNMODELLED: &str = "an unlinked WAL is drawn as EnvFault::UnlinkWal, which the \
                                  model cannot yet follow through a later power loss";
-// lsr-sqlite ends and retakes the read transaction around every checkpoint, failed or not, and
-// a lost retake leaves it lapsed after the checkpoint ran. The simulated checkpointer returns an
-// injected error before either, so it cannot give this error its effect; modelling the new hold
-// on failure made seeds 0x240, 0x90c, 0x36b and 0x4f fail in ways still being triaged.
-const CHECKPOINT_HOLD: &str = "the simulated checkpointer returns an injected error before it ends \
-                               and retakes the read transaction, so a lost retake has no lapse to \
-                               model";
 const RETAKE_ONLY: &str = "only a retake after a failed one reports it, and the checkpoint cell \
                            draws the first failure; this call takes no read transaction of its own \
                            otherwise";
@@ -306,7 +282,7 @@ const fn short_cell(op: SourceOp) -> Cell {
 
 const fn read_tx_lost_cell(op: SourceOp) -> Cell {
     match op {
-        SourceOp::Checkpoint => Cell::Unmodelled(CHECKPOINT_HOLD),
+        SourceOp::Checkpoint => Cell::Drawn,
         SourceOp::Committed | SourceOp::Sync | SourceOp::PageCount | SourceOp::ReadPage => {
             Cell::Impossible(RETAKE_ONLY)
         }
@@ -538,7 +514,7 @@ pub const fn store_cell(target: Target, op: StoreOp, class: StoreClass) -> Cell 
             Target::Remote => Cell::Drawn,
             Target::Staging => Cell::Impossible("a filesystem never asks to slow down"),
         },
-        StoreClass::Denied(why) => denied_cell(target, op, why),
+        StoreClass::Denied(why) => denied_cell(target, why),
         StoreClass::NotFound => match op {
             StoreOp::Read => Cell::Impossible(NOT_FOUND_IS_STALE),
             StoreOp::List | StoreOp::Upload | StoreOp::Delete => Cell::Impossible(NOT_FOUND_NEVER),
@@ -560,13 +536,11 @@ pub const fn store_cell(target: Target, op: StoreOp, class: StoreClass) -> Cell 
     }
 }
 
-const fn denied_cell(target: Target, op: StoreOp, why: Denied) -> Cell {
+const fn denied_cell(target: Target, why: Denied) -> Cell {
     match (target, why) {
-        (Target::Staging, Denied::Permission) => match op {
-            StoreOp::Read => Cell::KnownWrong(KnownWrong::CompactionClassifiesLocalAsReplica),
-            StoreOp::List | StoreOp::Upload | StoreOp::Delete => Cell::Drawn,
-        },
-        (Target::Remote, _) => Cell::Drawn,
+        // A staging read refused during level-1 compaction was classified as the replica's
+        // until #145 (compaction routes its local reads through `Fault::from_staging`).
+        (Target::Staging, Denied::Permission) | (Target::Remote, _) => Cell::Drawn,
         (
             Target::Staging,
             Denied::Credentials | Denied::ClockSkew | Denied::BucketMissing | Denied::Tls,

@@ -7,6 +7,7 @@
 mod common;
 #[cfg(test)]
 mod deploy;
+mod failstop;
 #[cfg(test)]
 mod gates;
 #[cfg(test)]

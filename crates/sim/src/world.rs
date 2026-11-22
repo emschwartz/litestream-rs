@@ -298,7 +298,7 @@ pub struct World {
 }
 
 /// The first instant of a run's clock.
-const EPOCH_MILLIS: i64 = 1_700_000_000_000;
+pub const EPOCH_MILLIS: i64 = 1_700_000_000_000;
 
 impl World {
     /// A world with a database of `db_pages` pages, empty stores and no faults.
@@ -739,6 +739,18 @@ impl World {
             .flat_map(|listing| listing.files)
             .map(|file| file.key.range().max().get())
             .max()
+    }
+
+    /// Whether a file on the replica, at any level, ends at `txid`: a
+    /// restore to `txid` has a file to end on.
+    #[must_use]
+    pub fn remote_ends_at(&self, txid: u64) -> bool {
+        use lsr_core::{Level, ObjectStore, PageLimit};
+        Level::ALL
+            .into_iter()
+            .filter_map(|level| block_on(self.remote_raw.list(level, None, PageLimit::MAX)).ok())
+            .flat_map(|listing| listing.files)
+            .any(|file| file.key.range().max().get() == txid)
     }
 
     /// Every level-0 file on the replica, oldest first, read around the

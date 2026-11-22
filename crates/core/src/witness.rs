@@ -49,7 +49,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Seek};
 use std::num::NonZeroU32;
 
-use lsr_ltx::{Decoder, Event, FileChecksum, Header, PageChecksum, PageNo, Txid, TxidRange};
+use lsr_ltx::{
+    Decoder, Event, FileChecksum, Header, PageChecksum, PageNo, Timestamp, Txid, TxidRange,
+};
 use lsr_wal::{Salts, ScanLimit, TxOutcome, WalError, WalOffset};
 
 use crate::fault::{BugSite, Fault};
@@ -110,17 +112,32 @@ pub struct Witnessed {
     key: FileKey,
     bytes: ByteTally,
     checksum: FileChecksum,
+    /// The file's header timestamp: when it was staged, the clock fail-stop counts the oldest
+    /// pending commit from (`crate::failstop`).
+    stamp: Timestamp,
 }
 
 impl Witnessed {
     /// A token for a file this process just wrote: `bytes` tallied as it
     /// wrote them, `checksum` the encoder's trailer checksum.
-    pub(crate) const fn made_here(key: FileKey, bytes: ByteTally, checksum: FileChecksum) -> Self {
+    pub(crate) const fn made_here(
+        key: FileKey,
+        bytes: ByteTally,
+        checksum: FileChecksum,
+        stamp: Timestamp,
+    ) -> Self {
         Self {
             key,
             bytes,
             checksum,
+            stamp,
         }
+    }
+
+    /// The file's header timestamp.
+    #[must_use]
+    pub const fn stamp(&self) -> Timestamp {
+        self.stamp
     }
 
     /// The staged file it vouches for.
@@ -152,6 +169,7 @@ impl Witnessed {
             key,
             bytes: tally,
             checksum: verified.trailer().file_checksum(),
+            stamp: verified.header().fields().timestamp,
         })
     }
 }
@@ -207,6 +225,15 @@ impl Witnesses {
     /// Lets go of every token from `from` on: those files were deleted.
     pub(crate) fn drop_from(&mut self, from: Txid) {
         self.by_txid.retain(|txid, _| *txid < from);
+    }
+
+    /// The stamp of the oldest pending staged file not in `but`, if any is held.
+    #[must_use]
+    pub fn oldest_stamp_but(&self, but: &std::collections::BTreeSet<Txid>) -> Option<Timestamp> {
+        self.by_txid
+            .iter()
+            .find(|(txid, _)| !but.contains(*txid))
+            .map(|(_, token)| token.stamp())
     }
 
     /// How many tokens are held.
@@ -515,6 +542,7 @@ async fn witness_one<L: ObjectStore, R: Read + Seek, P: PageSource>(
         key: info.key,
         bytes: decoded.bytes,
         checksum: decoded.checksum,
+        stamp: decoded.header.fields().timestamp,
     };
     let next = Prev {
         txid,
