@@ -174,8 +174,11 @@ fn every_scenario_is_tested_here() {
     }
 }
 
+/// Under the default responses only: see `fault_reason(FaultKind::WalSyncFailed)`.
 #[test]
 fn wal_fsync_fails() {
+    let scenario = scenario::wal_fsync_fails();
+    assert!(scenario.keeps_trying());
     run(scenario::wal_fsync_fails);
 }
 

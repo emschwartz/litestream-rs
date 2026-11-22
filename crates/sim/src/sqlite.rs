@@ -274,6 +274,10 @@ struct State {
     // generation. The kernel called the pages the failure covered clean, so no later sync
     // writes them (Linux's "fsyncgate"): until the generation ends they stay as they were.
     lost_writeback: Option<LostWriteback>,
+    // Every WAL byte range a failed sync of ours lost, by generation, for the life of the
+    // simulated machine: a level-0 file staged from one was never durable, whatever the WAL
+    // holds by the time anyone looks.
+    lost_ranges: Vec<(Salts, u64, u64)>,
     present: bool,
     unlinked: bool,
     index: Index,
@@ -348,6 +352,10 @@ pub struct InTickCommit {
 
 fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
     state.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn as_u64(pos: usize) -> u64 {
+    u64::try_from(pos).unwrap_or(u64::MAX)
 }
 
 fn byte_pos(offset: u64) -> usize {
@@ -1096,6 +1104,7 @@ impl SimSqlite {
             app_autocheckpoint: None,
             our_sync_lies: false,
             lost_writeback: None,
+            lost_ranges: Vec::new(),
             app_auto: AutoTally::default(),
             in_tick: None,
             in_tick_done: None,
@@ -1607,7 +1616,17 @@ impl SimSqlite {
     #[must_use]
     pub fn wal_range_durable(&self, salts: Salts, start: u64, end: u64) -> bool {
         self.with(|state| {
-            if state.our_sync_lies || state.index.salts != salts {
+            if state.our_sync_lies {
+                return true;
+            }
+            let lost = state
+                .lost_ranges
+                .iter()
+                .any(|(s, from, to)| *s == salts && start < *to && *from < end);
+            if lost {
+                return false;
+            }
+            if state.index.salts != salts {
                 return true;
             }
             let range = byte_pos(start)..byte_pos(end);
@@ -1737,7 +1756,22 @@ impl WalSource for SimSource {
     fn sync(&mut self) -> Result<(), SourceError> {
         let mut state = lock(&self.state);
         if let Err(err) = state.faults.take(SourceOp::Sync) {
-            if err == SourceError::FsyncFailed && state.lost_writeback.is_none() {
+            let salts = state.index.salts;
+            if err == SourceError::FsyncFailed
+                && state
+                    .lost_writeback
+                    .as_ref()
+                    .is_none_or(|lost| lost.salts != salts)
+            {
+                let first = state
+                    .wal
+                    .iter()
+                    .zip(state.durable.iter().chain(std::iter::repeat(&0)))
+                    .position(|(now, was)| now != was);
+                if let Some(first) = first {
+                    let range = (state.index.salts, as_u64(first), as_u64(state.wal.len()));
+                    state.lost_ranges.push(range);
+                }
                 state.lost_writeback = Some(LostWriteback {
                     salts: state.index.salts,
                     durable: state.durable.clone(),
