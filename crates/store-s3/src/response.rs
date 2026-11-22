@@ -198,13 +198,24 @@ pub fn parse_complete(r: &HttpResponse) -> Result<String, ResponseError> {
 /// # Errors
 /// [`ResponseError::Malformed`].
 pub fn parse_delete_failures(r: &HttpResponse) -> Result<usize, ResponseError> {
+    parse_delete_failure_codes(r).map(|codes| codes.len())
+}
+
+/// The code of each entry of a DeleteObjects result that failed for a reason
+/// other than the key being gone already, in the order the result lists them.
+/// At most one per key the request named, so the batch cap bounds it.
+///
+/// # Errors
+/// [`ResponseError::Malformed`].
+pub fn parse_delete_failure_codes(r: &HttpResponse) -> Result<Vec<S3Code>, ResponseError> {
     let text = std::str::from_utf8(r.body()).map_err(|_bytes| ResponseError::Malformed)?;
     let parsed = DeleteObjectsResponse::parse(text).map_err(|_xml| ResponseError::Malformed)?;
     Ok(parsed
         .errors
         .iter()
-        .filter(|entry| S3Code::from_name(&entry.code) != S3Code::NoSuchKey)
-        .count())
+        .map(|entry| S3Code::from_name(&entry.code))
+        .filter(|code| *code != S3Code::NoSuchKey)
+        .collect())
 }
 
 /// How a response's ETag compares with the MD5 that was sent.

@@ -19,11 +19,12 @@ use lsr_ltx::{PageSize, Timestamp, Txid};
 use lsr_wal::CommittedEnd;
 
 use super::ActorConfig;
+use super::clock::EngineClock;
 use super::state::{Gate, Live, Maintain, Phase, Tasks};
 use super::unproven::Unproven;
 use crate::app::AppCheckpointObserver;
 use crate::checkpoint::CheckpointState;
-use crate::fault::{SnapshotCause, StopCause};
+use crate::fault::{SnapshotCause, SnapshotCounts, StopCause};
 use crate::layout::FileKey;
 use crate::pages::PageChecksumTable;
 use crate::position::Position;
@@ -96,9 +97,9 @@ pub(super) struct Kept {
     pub(super) stop: Stop,
     /// Each task's wait and degraded state: reports, not engine state.
     pub(super) tasks: Tasks,
-    /// The clock's last reading.
-    pub(super) last: Option<Timestamp>,
-    pub(super) clamp_reported: bool,
+    /// Engine time and the wall readings it follows (`clock`); `None` before
+    /// the first tick.
+    pub(super) clock: Option<EngineClock>,
     pub(super) task_restore_point: TaskRestorePoint,
     /// The restore point a scheduled verify asked retention to keep.
     pub(super) verify_restore_point: Option<Txid>,
@@ -113,6 +114,8 @@ pub(super) struct Kept {
     /// are deleted only when a read on a later tick fails too. Kept across
     /// boots, since boot's sweep is one of the readers.
     pub(super) suspect_staged: Option<FileKey>,
+    /// Snapshots staged since the actor began, per cause: a report.
+    pub(super) snapshots: SnapshotCounts,
     /// How far the engine is past a failed sync of the WAL (`unproven`). Kept across boots:
     /// a frame that sync covered is no truer after a rebuild.
     pub(super) unproven: Unproven,
@@ -124,14 +127,14 @@ impl Kept {
             cfg,
             stop: Stop::No,
             tasks: Tasks::default(),
-            last: None,
-            clamp_reported: false,
+            clock: None,
             task_restore_point: TaskRestorePoint::Free,
             verify_restore_point: None,
             live: Live::Idle,
             snapshot_asked: false,
             app: AppCheckpointObserver::default(),
             suspect_staged: None,
+            snapshots: SnapshotCounts::default(),
             unproven: Unproven::No,
         }
     }
@@ -145,28 +148,28 @@ impl Kept {
             cfg,
             stop,
             tasks,
-            last,
-            clamp_reported,
+            clock,
             task_restore_point,
             verify_restore_point,
             live,
             snapshot_asked,
             app: _,
             suspect_staged,
+            snapshots,
             unproven,
         } = self;
         Self {
             cfg: cfg.clone(),
             stop: *stop,
             tasks: *tasks,
-            last: *last,
-            clamp_reported: *clamp_reported,
+            clock: *clock,
             task_restore_point: *task_restore_point,
             verify_restore_point: *verify_restore_point,
             live: live.rebuilt(),
             snapshot_asked: *snapshot_asked,
             app: observer,
             suspect_staged: *suspect_staged,
+            snapshots: *snapshots,
             unproven: *unproven,
         }
     }

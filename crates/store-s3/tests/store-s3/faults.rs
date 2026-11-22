@@ -115,7 +115,7 @@ mod cases {
     }
 
     #[test]
-    fn connection_reset_is_transient_and_tls_failure_is_auth() {
+    fn connection_reset_is_transient_and_tls_failure_is_named_tls() {
         let t = faulty();
         let k = key(0, 1, 1);
         for (err, want) in [
@@ -126,7 +126,13 @@ mod cases {
                     kind: io::ErrorKind::ConnectionReset,
                 },
             ),
-            (TransportError::Tls, StoreError::Auth { op: StoreOp::Read }),
+            (
+                TransportError::Tls,
+                StoreError::Denied {
+                    op: StoreOp::Read,
+                    why: lsr_core::Denied::Tls,
+                },
+            ),
         ] {
             t.push(Fault::Transport {
                 on: Shape::Get,

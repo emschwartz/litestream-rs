@@ -16,8 +16,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use lsr_replica::{
-    AppNotice, DegradedCause, Gone, Health, Phase, Replicator, SnapshotCause, Stall, StopCause,
-    Task, Timestamp,
+    AppNotice, DegradedCause, Denied, Gone, Health, Phase, Replicator, SnapshotCause,
+    SnapshotCauseKind, Stall, StopCause, Task, Timestamp,
 };
 
 use crate::json::string as json_string;
@@ -163,7 +163,7 @@ pub(crate) const fn task_name(task: Task) -> &'static str {
 #[must_use]
 pub(crate) const fn cause_name(cause: DegradedCause) -> &'static str {
     match cause {
-        DegradedCause::Credentials => "credentials",
+        DegradedCause::StoreDenied(why) => denied_name(why),
         DegradedCause::StoreRefused => "store_refused",
         DegradedCause::RemoteCorrupt => "remote_corrupt",
         DegradedCause::OtherWriter => "other_writer",
@@ -202,6 +202,18 @@ pub(crate) const fn stall_name(stall: Stall) -> &'static str {
     }
 }
 
+/// An access refusal's name: what an operator must fix.
+#[must_use]
+pub(crate) const fn denied_name(why: Denied) -> &'static str {
+    match why {
+        Denied::Credentials => "credentials",
+        Denied::Permission => "permission_denied",
+        Denied::ClockSkew => "clock_skew",
+        Denied::BucketMissing => "bucket_missing",
+        Denied::Tls => "tls",
+    }
+}
+
 /// A stop cause's name: the degraded cause it stopped on, or `shutdown` for a drain's end.
 #[must_use]
 pub(crate) const fn stop_name(cause: StopCause) -> &'static str {
@@ -213,20 +225,26 @@ pub(crate) const fn stop_name(cause: StopCause) -> &'static str {
 
 /// A snapshot cause's name.
 #[must_use]
-pub(crate) const fn snapshot_name(cause: SnapshotCause) -> &'static str {
-    match cause {
-        SnapshotCause::FirstSync => "first_sync",
-        SnapshotCause::BehindRemote { .. } => "behind_remote",
-        SnapshotCause::NewestStagedFileUnreadable => "newest_staged_file_unreadable",
-        SnapshotCause::WalMissing => "wal_missing",
-        SnapshotCause::GenerationChanged => "generation_changed",
-        SnapshotCause::PrevFrameMismatch => "prev_frame_mismatch",
-        SnapshotCause::LastPageMismatch => "last_page_mismatch",
-        SnapshotCause::LocalRewound { .. } => "local_rewound",
-        SnapshotCause::CheckpointBoundary => "checkpoint_boundary",
-        SnapshotCause::OperatorRequested => "operator_requested",
-        SnapshotCause::StagedUnverified { .. } => "staged_unverified",
-        SnapshotCause::WalSyncFailed => "wal_sync_failed",
+pub(crate) fn snapshot_name(cause: SnapshotCause) -> &'static str {
+    snapshot_kind_name(SnapshotCauseKind::from(&cause))
+}
+
+/// A snapshot cause's name, without its payload.
+#[must_use]
+pub(crate) const fn snapshot_kind_name(kind: SnapshotCauseKind) -> &'static str {
+    match kind {
+        SnapshotCauseKind::FirstSync => "first_sync",
+        SnapshotCauseKind::BehindRemote => "behind_remote",
+        SnapshotCauseKind::NewestStagedFileUnreadable => "newest_staged_file_unreadable",
+        SnapshotCauseKind::WalMissing => "wal_missing",
+        SnapshotCauseKind::GenerationChanged => "generation_changed",
+        SnapshotCauseKind::PrevFrameMismatch => "prev_frame_mismatch",
+        SnapshotCauseKind::LastPageMismatch => "last_page_mismatch",
+        SnapshotCauseKind::LocalRewound => "local_rewound",
+        SnapshotCauseKind::CheckpointBoundary => "checkpoint_boundary",
+        SnapshotCauseKind::OperatorRequested => "operator_requested",
+        SnapshotCauseKind::StagedUnverified => "staged_unverified",
+        SnapshotCauseKind::WalSyncFailed => "wal_sync_failed",
     }
 }
 
@@ -357,4 +375,28 @@ pub(crate) fn healthz(views: &[DbView], now: Timestamp) -> (bool, String) {
     o.raw("down", &format!("[{}]", down.join(",")));
     o.raw("dbs", &format!("[{}]", dbs.join(",")));
     (up, o.end())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every kind of access refusal reports under a name of its own: one name for
+    /// all of them sent operators to rotate keys for a wrong clock or a missing bucket.
+    #[test]
+    fn each_access_refusal_has_its_own_name() {
+        let all = [
+            Denied::Credentials,
+            Denied::Permission,
+            Denied::ClockSkew,
+            Denied::BucketMissing,
+            Denied::Tls,
+        ];
+        let names: std::collections::BTreeSet<&str> = all
+            .into_iter()
+            .map(|why| cause_name(DegradedCause::StoreDenied(why)))
+            .collect();
+        assert_eq!(names.len(), all.len(), "{names:?}");
+        assert!(names.contains("credentials"));
+    }
 }

@@ -20,8 +20,8 @@ use std::io::ErrorKind;
 
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    CreatedAt, Entropy, FileInfo, FileKey, Inventory, Level, Listing, MemStore, ObjectStore,
-    PageLimit, ReadLen, RestoreError, RestoreTarget, StopCause, StoreError, StoreOp,
+    CreatedAt, Denied, Entropy, FileInfo, FileKey, Inventory, Level, Listing, MemStore,
+    ObjectStore, PageLimit, ReadLen, RestoreError, RestoreTarget, StopCause, StoreError, StoreOp,
 };
 use lsr_ltx::{Timestamp, Txid, TxidRange};
 
@@ -80,7 +80,10 @@ impl View {
 /// The error a held store fault returns for `op`.
 fn held_error(op: StoreOp, auth: bool) -> StoreError {
     if auth {
-        StoreError::Auth { op }
+        StoreError::Denied {
+            op,
+            why: Denied::Credentials,
+        }
     } else {
         StoreError::Transient {
             op,
@@ -317,7 +320,7 @@ impl Runner {
                 self.w.remote_faults.hold(op, held_error(op, false)),
             ])),
             Hold::CredentialsRevoked => {
-                self.expect(StopCause::Credentials);
+                self.expect(StopCause::StoreDenied(Denied::Credentials));
                 let ops = [
                     StoreOp::List,
                     StoreOp::Read,

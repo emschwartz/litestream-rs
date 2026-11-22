@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor/clock.rs b/crates/core/src/actor/clock.rs
+index b9ee96c..6f25b66 100644
+--- a/crates/core/src/actor/clock.rs
++++ b/crates/core/src/actor/clock.rs
+@@ -79,7 +79,7 @@ impl EngineClock {
+             };
+             return (stepped, true);
+         }
+-        let engine = self.engine_at(wall).max(self.engine);
++        let engine = wall.max(self.engine);
+         debug_assert!(engine >= wall, "engine time is never behind the wall clock");
+         let read = Self {
+             wall,
