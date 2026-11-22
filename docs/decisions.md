@@ -51,6 +51,8 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D130 | How does the simulator run the real directory store, and who judges it? | A filesystem trait in store-fs, an in-memory filesystem under the crash law in the sim, half the swarm on it, a staging-contract judge | Claude (sim-real-store-fs), **delegated** | 2026-11-22 | open to owner review |
 | D70 | How do simulated runs draw a fault that reaches an open engine defect? | As a known-wrong cell: out of the per-push seeds, drawn by the nightly and campaigns with its failures counted as known, with a pinned seed that fails once the fix lands | parent session; mechanism by Claude (error-domain), **delegated** | 2026-11-22 | decided |
 | D71 | Which errors may a simulated history inject? | Those a shipped implementation returns from that call with the world unchanged; a world fact is drawn as the world change; a cell the model cannot follow is listed as unmodelled, never drawn | Claude (error-domain), **delegated** | 2026-11-22 | open to owner review |
+| D150 | An S3 replica with an empty prefix (`s3://bucket`, or `bucket` with no `path`): copy Go? | No: refuse, as before | Claude (dropin-dir), **delegated** | 2026-11-22 | open to owner review |
+| D151 | `watch: true` on a `dir` entry, refused since the phase-4 plan: keep refusing under D33? | Keep refusing until built; the owner chooses | Claude (dropin-dir), **delegated** | 2026-11-22 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -406,6 +408,25 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** the judge checks the store's contract, not the engine's behaviour, so it finds a store defect the engine would survive (the delete plant). Per-entry independence can split a rename (both names, or neither), which ext4 would not; it is the rule the WAL's fault VFS and `Volatile` already use, so the disk stays one law (#121). A fault the fault layer injects after publishing (`ErrorAfterPublish`) does not unsync anything on `MemFs`: the store did sync, so in this profile such a file always survives.
 - **Revisit if:** the shared directory-entry rule changes; or `MemFs` and the host disagree in `differential::the_doubles_answer_as_the_real_store_does`.
 - **Links:** #127 item I.
+## D150. An S3 replica with an empty prefix (delegated)
+
+- **Question:** Go accepts an S3 replica with no prefix and writes keys with a leading slash (`/0000/...`, `rc.go` at 041a8c3). litestream-rs refuses it at load (ruling F10, `docs/plans/phase-1-reading.md`). D33 asks for Go's behaviour wherever Go is not wrong.
+- **Options:** copy Go (keys with a leading slash, in the S3 store); keep refusing.
+- **Choice:** keep refusing, for now.
+- **Cost accepted:** a Go config with a bare bucket does not start under litestream-rs, and a replica Go wrote that way cannot be read without a store change. The refusal names the key, so nothing replicates less than asked.
+- **Why:** copying Go is a change to the S3 store's key layout (an engine crate), not to the config, and a leading-slash key is a layout few S3 tools handle well. The `dir` differential (`compat::go_and_rust_scan_the_same_databases`) found it with a `dir` naming a database file, where the relative path is `.` and adds nothing to an empty `path`.
+- **Revisit if:** the owner wants exact parity here; then the store learns the leading-slash layout and a compat test writes and reads it both ways.
+- **Links:** `docs/BEHAVIOR.md` CFG-18, `crates/store-s3/src/config.rs` (`ConfigError::EmptyPrefix`).
+
+## D151. `watch: true` on a `dir` entry (delegated)
+
+- **Question:** Go's `watch` adds and removes databases at run time as files appear under a `dir` (`directory_watcher.go`). litestream-rs refuses the key at load (the phase-4 plan's ruling O5, option B). D33 makes litestream-rs a full drop-in, which reopens it.
+- **Options:** build it (start and stop replicators at run time, a rescan that never opens a file a replicator holds, an inotify equivalent); keep refusing.
+- **Choice:** keep refusing until the owner chooses to build it. The `dir` work on `claude/dropin-dir` brought the static scan to Go's behaviour and left `watch` alone.
+- **Cost accepted:** a Go config with `watch: true` does not start; a database added under a `dir` is replicated only after a restart (CFG-17).
+- **Why:** it is a feature of its own, with run-time actor lifecycles the simulator does not drive, not a correction. A refusal replicates nothing silently less than asked.
+- **Revisit if:** the owner wants it; it then needs its own plan and behaviour rows (a file created, renamed, removed and recreated under a watched directory, each against Go).
+- **Links:** `docs/BEHAVIOR.md` CFG-15, CFG-17; `docs/plans/phase-4-sidecar.md` O5.
 
 ## D80. Where the fail-stop clock cannot survive a restart (delegated)
 

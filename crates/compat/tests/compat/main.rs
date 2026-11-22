@@ -12,6 +12,7 @@ mod behavior;
 #[cfg(test)]
 mod compaction;
 #[cfg(test)]
+mod dropin_dir;
 #[cfg(test)]
 mod fixtures;
 #[cfg(test)]

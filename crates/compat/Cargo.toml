@@ -11,6 +11,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+lsr-config.workspace = true
 lsr-core = { workspace = true, features = ["testing"] }
 lsr-local.workspace = true
 lsr-ltx.workspace = true

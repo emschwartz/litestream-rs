@@ -1411,6 +1411,103 @@ recovery = "n/a"
 detected_by = "cli::`exec_lines_go_would_misread_are_refused`"
 
 [[row]]
+table = "Config and startup"
+id = "CFG-10"
+circumstance = "A `dir` entry: which files under it replicate (`config/src/map/dir.rs`). Go's `filepath.Walk` step for step: names in byte order, every path looked at with `lstat`, subdirectories entered only with `recursive`, links never followed as directories, a link to a database kept; a name kept when Go's `filepath.Match` accepts it (`map/pattern.rs`) and one `read` of its first 16 bytes is SQLite's header, bytes past a short read counting as zero. Each database's replica path or URL gains its relative path, escaped as Go's `url.URL` escapes it, and its meta directory is Go's"
+response = "continue with the databases Go would replicate, in Go's order, with Go's meta directories and replicas"
+signal = "none"
+at_risk = "None"
+recovery = "n/a"
+detected_by = "compat::`go_and_rust_scan_the_same_databases`, config::`a_recursive_dir_keeps_relative_paths_under_a_file_replica`, config::`a_flat_dir_skips_subdirectories_and_files_that_are_not_databases`, config::`a_short_header_read_counts_the_missing_bytes_as_zero`, config::`odd_names_reach_a_url_replica_unchanged`; plant::`dir-header-read-exact`, plant::`dir-url-path-unescaped`"
+notes = "The compat test is a differential against Go's own `NewDBsFromDirectoryConfig` (the dumper built from the pinned commit, `crates/compat/src/dump.rs`) over 512 generated trees per run: names a pattern may or may not reach, headers whole, exact, one byte short and absent, nesting, links to databases, to directories and dangling, and `dir` spelled absolute, with a trailing slash, relative, as a link, as a file and missing. It found five differences, all fixed toward Go (CFG-11 to CFG-13, the short header, and names with `\\` or `%`). FIFOs and unreadable files are not generated: both sides block on a FIFO's open (CFG-16), and the tests run as root"
+
+[[row]]
+table = "Config and startup"
+id = "CFG-11"
+circumstance = "A `dir` that is a symbolic link to a directory. Go's walk `lstat`s its root, so the link is matched as a file and its header read fails"
+response = "refuse: no databases found, as Go"
+signal = "exit 2"
+at_risk = "Nothing starts"
+recovery = "Operator: name the directory itself"
+detected_by = "config::`a_dir_that_is_a_symbolic_link_finds_nothing_as_go`, compat::`go_and_rust_scan_the_same_databases`; plant::`dir-root-link-followed`"
+notes = "Before, litestream-rs followed the link and replicated what Go refuses to start on"
+
+[[row]]
+table = "Config and startup"
+id = "CFG-12"
+circumstance = "A `dir` that names a database file"
+response = "continue with that one database, relative path `.`: the replica path or URL as written, meta directory Go's default beside it (or `<meta-dir>/.-litestream`, or `meta-path` itself), as Go"
+signal = "none"
+at_risk = "None"
+recovery = "n/a"
+detected_by = "config::`a_dir_that_is_a_database_file_is_that_one_database`, compat::`go_and_rust_scan_the_same_databases`; plant::`dir-root-file-refused`"
+notes = "Before, litestream-rs refused it as not a directory"
+
+[[row]]
+table = "Config and startup"
+id = "CFG-13"
+circumstance = "A `pattern` Go's `filepath.Match` calls malformed (`[-a]`, `a[`, a trailing backslash). Go reports it only for a name whose match reaches the malformed part, and its walk fails at that file"
+response = "refuse at the first such file, naming it; a directory where no name reaches the bad part scans normally, as Go"
+signal = "exit 2"
+at_risk = "Nothing starts"
+recovery = "Fix the pattern"
+detected_by = "config::`a_malformed_pattern_fails_the_scan_only_when_a_name_reaches_it`, config::`patterns_are_go_s_glob`, compat::`go_and_rust_scan_the_same_databases`; plant::`dir-bad-pattern-ignored`"
+notes = "Before, litestream-rs checked the pattern on its own with a matcher of its own, which accepted `[-a]` and refused `a*[` over a directory Go scans. The matcher is now a port of Go 1.24's, checked against Go's table (`pattern.rs`)"
+
+[[row]]
+table = "Config and startup"
+id = "CFG-14"
+circumstance = "A subdirectory under `dir` cannot be read, with or without `recursive`. Go's walk reads a directory's names before its callback can skip it"
+response = "refuse, as Go"
+signal = "exit 2"
+at_risk = "Nothing starts"
+recovery = "Operator: fix the permissions or move the directory"
+no_test = "code only"
+notes = "Not reachable in the test environment, which runs as root"
+
+[[row]]
+table = "Config and startup"
+id = "CFG-15"
+circumstance = "`watch: true` on a `dir` entry. Go adds and removes databases at run time as files appear and disappear"
+response = "refuse at load. A departure from Go (`docs/plans/phase-4-sidecar.md` O5, option B; D151)"
+signal = "exit 2"
+at_risk = "Nothing starts"
+recovery = "Operator: list the databases, or drop `watch` and restart to pick up new ones"
+detected_by = "config::`watching_a_dir_is_refused_at_load`"
+notes = "The only `dir` behaviour that is not Go's. It refuses rather than replicating less than asked. The owner's full drop-in decision reopens it"
+
+[[row]]
+table = "Config and startup"
+id = "CFG-16"
+circumstance = "A file under `dir` whose name matches is a FIFO, or a device that blocks on open"
+response = "Start blocks at the header read until something opens the other end, as Go (both open the file to read 16 bytes)"
+signal = "none"
+at_risk = "Nothing starts while blocked"
+recovery = "Operator"
+no_test = "code only"
+
+[[row]]
+table = "Config and startup"
+id = "CFG-17"
+circumstance = "A database file appears under, or disappears from, a `dir` after start"
+response = "continue with the set found at start: a new file is not replicated until a restart; a removed one waits for its file (CFG-6), as Go without `watch`"
+signal = "`lsr_db_state` `waiting` for a removed file"
+at_risk = "A new database is not replicated until a restart"
+recovery = "Operator: restart"
+no_test = "code only"
+
+[[row]]
+table = "Config and startup"
+id = "CFG-18"
+circumstance = "An S3 replica with an empty prefix: `s3://bucket`, `s3://bucket/`, or `bucket` with no `path` (also a `dir` naming a database file under such a replica)"
+response = "refuse at load. A departure from Go, which writes keys with a leading slash (D150)"
+signal = "exit 2"
+at_risk = "Nothing starts"
+recovery = "Operator: give the replica a prefix"
+detected_by = "config::`each_bad_shape_is_refused`"
+notes = "Found again by the `dir` differential, with a `dir` naming a file (relative path `.`) under a replica with no `path`"
+
+[[row]]
 table = "Circumstances the code does not distinguish"
 id = "WORLD-1"
 circumstance = "Two processes replicate one database through one staging directory (an overlapping rolling deploy; `lsr replicate` run by hand beside the daemon)"
