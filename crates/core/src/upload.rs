@@ -30,9 +30,11 @@
 //! committed only after the decoder verified the whole file and its header names
 //! exactly the key. Otherwise the upload is aborted and the staged file is
 //! reported lost (`Fault::StagedLost`): a bad staged file never becomes
-//! visible. The actor then deletes it and everything staged after it
-//! ([`drop_staged_from`]) and snapshots in its place; at boot,
-//! [`sweep_staged`] does the same before anything is uploaded.
+//! visible. One failed read is evidence about the read, not the file, so the
+//! actor retries; when a read on a later tick fails too, it deletes the file
+//! and everything staged after it ([`drop_staged_from`]) and snapshots in its
+//! place. At boot, [`sweep_staged`] applies the same rule before anything is
+//! uploaded.
 //!
 //! A failure before the commit leaves the state alone (nothing could have been
 //! published). A failure of the commit itself gives [`UploadState::ListFirst`],
@@ -295,12 +297,20 @@ async fn follows_replica<L: ObjectStore, S: ObjectStore>(
     let Some(theirs) = theirs else {
         return Ok(true);
     };
-    let ours = read_header(staging, &ours.key, Fault::from_staging).await?;
-    let theirs = read_header(remote, &theirs.key, Fault::from_remote).await?;
-    Ok(match (theirs, ours) {
-        (Some(theirs), Some(ours)) => continues(&theirs, &ours),
-        _ => true,
-    })
+    // A no drops staged files, so it takes two reads that agree.
+    for _ in 0..2 {
+        let ours = read_header(staging, &ours.key, Fault::from_staging).await?;
+        let theirs = read_header(remote, &theirs.key, Fault::from_remote).await?;
+        if let (Some(theirs), Some(ours)) = (theirs, ours)
+            && continues(&theirs, &ours)
+        {
+            return Ok(true);
+        }
+        if theirs.is_none() || ours.is_none() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Whether a file with header `ours` can come right after one with `theirs`.
@@ -362,10 +372,16 @@ async fn judge_tail<L: ObjectStore, S: ObjectStore>(
                 return Ok(TailVerdict::Sound);
             }
             if staged_verifies(staging, &key).await? {
-                return Ok(if remote_verifies(remote, &key).await? {
-                    TailVerdict::Diverged
+                if !remote_verifies(remote, &key).await? {
+                    return Ok(TailVerdict::Replace);
+                }
+                // Both copies verify on their own reads, so the first compare
+                // read something wrong or they differ: a second compare
+                // decides, as one read never condemns a file.
+                return Ok(if same_bytes(staging, remote, &key).await? {
+                    TailVerdict::Sound
                 } else {
-                    TailVerdict::Replace
+                    TailVerdict::Diverged
                 });
             }
             // A torn staged copy says nothing about the replica's object.
@@ -482,26 +498,44 @@ pub(crate) async fn drop_staged_from<L: ObjectStore>(staging: &L, from: Txid) ->
     Ok(())
 }
 
+/// What a sweep of the staged files found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Swept {
+    /// Every staged file the replica may still need verifies.
+    Clean,
+    /// This file failed verification on its first failed read: nothing was
+    /// deleted, since one read says nothing about the stored bytes.
+    Suspect(FileKey),
+    /// The suspect failed again: it and every staged file after it were
+    /// deleted, from this transaction on.
+    Dropped(Txid),
+}
+
 /// Verifies every staged level-0 file the replica may still need: from
 /// `confirmed`, the replica's newest transaction, on (everything when the
-/// replica is empty). The first that does not verify, and every one after it,
-/// is deleted ([`drop_staged_from`]). Returns the first transaction deleted,
-/// when anything was.
+/// replica is empty). The first that does not verify is deleted, with every
+/// one after it ([`drop_staged_from`]), only when it is `suspect`, the file an
+/// earlier tick's read already failed on; otherwise it is reported as the new
+/// suspect and nothing is deleted.
 ///
 /// # Errors
 /// The staging store's fault when it cannot list, read or delete.
 pub(crate) async fn sweep_staged<L: ObjectStore>(
     staging: &L,
     confirmed: Option<Txid>,
-) -> Result<Option<Txid>, Fault> {
+    suspect: Option<FileKey>,
+) -> Result<Swept, Fault> {
     for info in staged_from(staging, confirmed).await? {
         if !staged_verifies(staging, &info.key).await? {
+            if suspect != Some(info.key) {
+                return Ok(Swept::Suspect(info.key));
+            }
             let from = info.key.range().min();
             drop_staged_from(staging, from).await?;
-            return Ok(Some(from));
+            return Ok(Swept::Dropped(from));
         }
     }
-    Ok(None)
+    Ok(Swept::Clean)
 }
 
 /// Why a copy did not commit, and so what the state becomes.

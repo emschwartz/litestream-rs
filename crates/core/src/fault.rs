@@ -80,11 +80,12 @@ pub enum Fault {
     /// The replica's newest transaction went backwards mid-run.
     RemoteRegressed,
     /// A staged level-0 file is missing or fails verification. Staged files
-    /// are derived state: the engine deletes that file and every staged file
-    /// after it, and the next file is a snapshot taking the first transaction
-    /// the replica lacks, so the chain has no hole (`upload::sweep_staged` at
-    /// boot, the upload task mid-run; elsewhere the task retries and the next
-    /// boot sweeps).
+    /// are derived state: when a read on a later tick fails on the same file
+    /// too (one failed read says nothing about the stored bytes), the engine
+    /// deletes that file and every staged file after it, and the next file is
+    /// a snapshot taking the first transaction the replica lacks, so the chain
+    /// has no hole (`upload::sweep_staged` at boot, the upload task mid-run;
+    /// elsewhere the task retries and the next boot sweeps).
     ///
     /// A file that tears this way was never acknowledged as staged: its
     /// commit had not returned. The filesystem store syncs a file before its

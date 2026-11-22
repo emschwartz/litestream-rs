@@ -12,6 +12,7 @@ use lsr_ltx::{Timestamp, Txid};
 
 use super::Actor;
 use crate::fault::{Next, PersistentCause, StopCause};
+use crate::layout::FileKey;
 use crate::maintain::{MaintainState, RetentionMode};
 use crate::verify::LivePages;
 
@@ -352,6 +353,10 @@ pub(super) struct Maintain {
     /// The read-back of the newest file per level is still owed: set at
     /// every boot, cleared by the first listing that finds them all sound.
     pub(super) read_back_owed: bool,
+    /// A newest file whose last read-back failed verification. One failed
+    /// read says nothing about the stored bytes, so the read-back acts on the
+    /// file only when a read on a later maintenance tick fails too.
+    pub(super) suspect: Option<FileKey>,
 }
 
 impl Default for Maintain {
@@ -362,6 +367,7 @@ impl Default for Maintain {
             until: None,
             level_one: None,
             read_back_owed: true,
+            suspect: None,
         }
     }
 }

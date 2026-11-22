@@ -160,7 +160,8 @@ fn a_pending_snapshot_asks_for_the_next_tick_at_once() {
         Some(Event::Synced { .. })
     ));
     tear(&rig, 2, truncated);
-    let lost = rig.tick(&mut actor, T0 + 1);
+    let again = first_bad_read(&mut rig, &mut actor, T0 + 1);
+    let lost = rig.tick(&mut actor, again);
     assert_eq!(
         event(&lost),
         Some(&Event::Resnapshot(

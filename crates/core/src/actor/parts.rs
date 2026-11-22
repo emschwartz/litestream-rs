@@ -23,6 +23,7 @@ use super::state::{Gate, Live, Maintain, Phase, Tasks};
 use crate::app::AppCheckpointObserver;
 use crate::checkpoint::CheckpointState;
 use crate::fault::{SnapshotCause, StopCause};
+use crate::layout::FileKey;
 use crate::pages::PageChecksumTable;
 use crate::position::Position;
 use crate::upload::UploadState;
@@ -105,6 +106,11 @@ pub(super) struct Kept {
     pub(super) snapshot_asked: bool,
     /// What the application's checkpoints did between reads.
     pub(super) app: AppCheckpointObserver,
+    /// A staged file whose last read failed verification. One failed read
+    /// says nothing about the stored bytes, so the file and those after it
+    /// are deleted only when a read on a later tick fails too. Kept across
+    /// boots, since boot's sweep is one of the readers.
+    pub(super) suspect_staged: Option<FileKey>,
 }
 
 impl Kept {
@@ -120,6 +126,7 @@ impl Kept {
             live: Live::Idle,
             snapshot_asked: false,
             app: AppCheckpointObserver::default(),
+            suspect_staged: None,
         }
     }
 
@@ -139,6 +146,7 @@ impl Kept {
             live,
             snapshot_asked,
             app: _,
+            suspect_staged,
         } = self;
         Self {
             cfg: cfg.clone(),
@@ -151,6 +159,7 @@ impl Kept {
             live: live.rebuilt(),
             snapshot_asked: *snapshot_asked,
             app: observer,
+            suspect_staged: *suspect_staged,
         }
     }
 
