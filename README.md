@@ -226,6 +226,6 @@ just check                              # the gate: format, lints, every test th
 cargo nextest run -p lsr-core <name>    # one crate or one test while iterating
 ```
 
-[AGENTS.md](AGENTS.md) has the rules for working here and every other command, by what it needs (Docker, Go, a real bucket). [docs/PLAN.md](docs/PLAN.md) records the design decisions; `docs/plans/` holds the per-phase plans.
+[AGENTS.md](AGENTS.md) has the rules for working here. [docs/TESTING.md](docs/TESTING.md) has every other command, by what it needs (Docker, Go, a real bucket). [docs/PLAN.md](docs/PLAN.md) records the design decisions; `docs/plans/` holds the per-phase plans.
 
 Licensed under Apache-2.0.
