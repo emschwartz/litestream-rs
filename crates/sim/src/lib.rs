@@ -31,6 +31,7 @@ pub mod generate;
 pub mod history;
 pub mod journal;
 pub mod liveness;
+pub mod marks;
 pub mod memfs;
 pub mod model;
 pub mod oracle;

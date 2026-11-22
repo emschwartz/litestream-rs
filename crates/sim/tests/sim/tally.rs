@@ -38,6 +38,10 @@ fn tally() {
     }
     println!("{seeds} seeds from {base}, {} failed", failed.len());
     println!("required states at zero: {:?}", sum.missing());
+    let gate = lsr_sim::marks::gate(&sum);
+    println!("gate zeros: {:?}", gate.zeros);
+    println!("gate stale exemptions: {:?}", gate.stale);
+    println!("gate undrawn classes drawn: {:?}", gate.drawn_undrawn);
     assert!(failed.is_empty(), "failing seeds:\n{}", failed.join("\n"));
 }
 

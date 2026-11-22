@@ -1619,6 +1619,11 @@ impl SimSqlite {
         self.with(|state| state.faults.injections.push((op, err)));
     }
 
+    /// Injected failures no call has taken yet.
+    pub fn queued_injections(&self) -> usize {
+        self.with(|state| state.faults.injections.len())
+    }
+
     /// From now on a power loss keeps a prefix of the unsynced WAL writes,
     /// drawn from `seed`, instead of none.
     pub fn tear_on_power_loss(&self, seed: u64) {

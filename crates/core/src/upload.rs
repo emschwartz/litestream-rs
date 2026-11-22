@@ -215,6 +215,7 @@ pub(crate) fn inventory_fault(err: &InventoryError) -> Fault {
     match err {
         InventoryError::Store(err) => Fault::from_remote(err),
         InventoryError::ConflictingDuplicate { .. } | InventoryError::ListingStalled(_) => {
+            mark!(Boot17);
             Fault::RemoteCorrupt
         }
     }
@@ -232,9 +233,11 @@ async fn list_step<L: ObjectStore, S: ObjectStore>(
     let newest = inventory.newest();
     let confirmed = state.confirmed();
     if newest > newest_staged {
+        mark!(Up10);
         return Err(fail(state, Fault::RemoteAheadOfLocal));
     }
     if newest < confirmed {
+        mark!(Up11);
         return Err(fail(state, Fault::RemoteRegressed));
     }
     let known = match newest {
@@ -309,6 +312,7 @@ async fn judge_tail<L: ObjectStore, S: ObjectStore>(
             }
             if staged_verifies(staging, &key).await? {
                 if !remote_verifies(remote, &key).await? {
+                    mark!(Boot16);
                     return Ok(TailVerdict::Replace);
                 }
                 // Both copies verify on their own reads, so the first compare
@@ -365,6 +369,7 @@ async fn remote_decodes<S: ObjectStore>(remote: &S, key: &FileKey) -> Result<(),
     if remote_verifies(remote, key).await? {
         Ok(())
     } else {
+        mark!(Boot14);
         Err(Fault::RemoteCorrupt)
     }
 }
@@ -519,8 +524,10 @@ pub(crate) async fn sweep_staged<L: ObjectStore>(
         for info in page {
             if !staged_verifies(staging, &info.key).await? {
                 if suspect != Some(info.key) {
+                    mark!(Boot5);
                     return Ok(Swept::Suspect(info.key));
                 }
+                mark!(Boot5);
                 let from = info.key.range().min();
                 drop_staged_from(staging, from).await?;
                 return Ok(Swept::Dropped(from));
@@ -557,6 +564,7 @@ async fn put_step<L: ObjectStore, S: ObjectStore>(
         Err(PutError::Rejected(fault)) => {
             // Best effort: the retry replaces the key either way, and a boot
             // listing reads it back, so a failed delete costs only visibility.
+            mark!(Up8);
             drop(remote.delete(&[key]).await);
             Err(fail(state, fault))
         }
@@ -597,6 +605,7 @@ fn commit_failed(fault: Fault) -> PutError {
     if fault == Fault::UploadChecksumMismatch {
         PutError::Rejected(fault)
     } else {
+        mark!(Up6);
         PutError::Commit(fault)
     }
 }

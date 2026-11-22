@@ -24,6 +24,8 @@ mod known_wrong;
 #[cfg(test)]
 mod liveness;
 #[cfg(test)]
+mod marks;
+#[cfg(test)]
 mod replay;
 #[cfg(test)]
 mod restored_staging;

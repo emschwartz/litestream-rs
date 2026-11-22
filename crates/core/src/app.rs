@@ -257,6 +257,7 @@ impl AppCheckpointObserver {
         let (watch, seen) = observe(self.watch, now, self.autocheckpoint);
         self.watch = Some(watch);
         if let Some(seen) = seen {
+            mark!(Run22);
             self.counts.count(seen);
         }
         seen
