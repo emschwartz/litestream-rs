@@ -744,8 +744,7 @@ impl Actor {
         let cause = lost
             .map(|_| SnapshotCause::NewestStagedFileUnreadable)
             .or(from.err());
-        // An operator's request made before the boot comes first.
-        let pending = self.kept.asked().or(cause);
+        let pending = pending_at_boot(self.kept.asked(), cause);
         let course = match (from, pending) {
             (Ok(position), snapshot) => Course::At {
                 position,
@@ -1870,6 +1869,21 @@ async fn replica_page_size<R: ObjectStore>(remote: &R) -> Result<Option<PageSize
 }
 
 /// A recovery verdict as the step to run, or as what ends the tick.
+/// The snapshot a boot leaves pending. An operator's request made before
+/// the boot comes first, unless the boot needs a snapshot of its own whose
+/// cause says the table of page checksums cannot describe the database,
+/// which a request alone would trust: that snapshot answers the request.
+const fn pending_at_boot(
+    asked: Option<SnapshotCause>,
+    cause: Option<SnapshotCause>,
+) -> Option<SnapshotCause> {
+    match (cause, asked) {
+        (Some(found), _) if snapshot_clears(&found) => Some(found),
+        (_, Some(asked)) => Some(asked),
+        (cause, None) => cause,
+    }
+}
+
 const fn step_of(recovered: Recovered) -> Result<Step, Stepped> {
     match recovered {
         Recovered::Continue(position) => Ok(Step::Incremental(position)),

@@ -282,3 +282,48 @@ mod requested {
         }
     }
 }
+
+#[cfg(test)]
+mod asked_before_boot {
+    use lsr_core::{StoreError, StoreOp};
+    use lsr_sim::generate::Target;
+    use lsr_sim::run::run_ops;
+    use lsr_sim::{FaultShape, Op, Opts, OtherProcessMode, Seed};
+
+    /// The operator asks for a snapshot before the first boot, and the boot's
+    /// own snapshot fails to stage. The request had replaced the boot's
+    /// cause, so the retried snapshot kept the table of page checksums; the
+    /// app then rewrote every page, the read lock lapsed and another
+    /// process truncated the WAL into the database, and the snapshot read a
+    /// page unlike the table and degraded the sync task on
+    /// DatabasePageMismatch for ever.
+    #[test]
+    fn a_request_before_boot_keeps_the_boots_own_snapshot_cause() {
+        let transient = StoreError::Transient {
+            op: StoreOp::Upload,
+            kind: std::io::ErrorKind::ConnectionReset,
+        };
+        let mut ops = vec![
+            Op::StoreFault {
+                target: Target::Staging,
+                op: StoreOp::Upload,
+                ahead: 2,
+                shape: FaultShape::Error(transient),
+            },
+            Op::RequestSnapshot,
+            Op::Tick,
+            Op::Tick,
+            Op::Vacuum { page_size: None },
+            Op::OurReader { begin: false },
+            Op::OtherProcessCheckpoint(OtherProcessMode::Truncate),
+            Op::Commit {
+                pages: 1,
+                grow: false,
+            },
+        ];
+        ops.extend(std::iter::repeat_n(Op::Tick, 30));
+        if let Err(failure) = run_ops(Seed::new(0x24), &ops, &Opts::default()) {
+            panic!("{}", failure.violation);
+        }
+    }
+}
