@@ -1503,7 +1503,7 @@ at_risk = "Retries and the timed checkpoint take up to twice as long in that win
 recovery = "Automatic"
 detected_by = "sim::`clock_steps_back_an_hour_mid_retry`"
 recovered_by = "sim::`clock_steps_back_an_hour_mid_retry`"
-notes = "The scenario steps back an hour during a one-second retry and asserts the upload runs within a minute of wall clock, then restores. The thread's park keeps its remaining wait across a step back (replica `a_park_keeps_its_remaining_wait_when_the_clock_steps_back`, plant `park-waits-out-a-step-back`); before, it slept the whole thread for the step. Not covered: the replica thread's rebuild wait after a panic and the scheduled verify's due time are wall-clock deadlines that a step back still lengthens by the step"
+notes = "The scenario steps back an hour during a one-second retry and asserts the upload runs within a minute of wall clock, then restores. The thread's park keeps its remaining wait across a step back (replica `a_park_keeps_its_remaining_wait_when_the_clock_steps_back`, plant `park-waits-out-a-step-back`); before, it slept the whole thread for the step. The replica thread's own waits (the rebuild after a panic, the next poll, the next scheduled verify) move back with a step, so each keeps what was left of it (replica `a_clock_step_back_does_not_lengthen_the_wait_before_a_rebuild`, `a_clock_step_back_does_not_put_off_the_scheduled_verify`; plants `rebuild-wait-stretched-by-a-step-back`, `verify-due-stretched-by-a-step-back`). A stop's deadline is the caller's instant and is not moved"
 
 [[row]]
 table = "Circumstances the code does not distinguish"
