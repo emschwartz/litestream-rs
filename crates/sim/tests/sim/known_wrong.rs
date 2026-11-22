@@ -25,6 +25,8 @@ fn still_fails(seed: u64, ops_digest: u64, defect: KnownWrong) {
     let seed = Seed::new(seed);
     let mut weights = Weights::mixed(seed);
     weights.known_wrong = true;
+    // The run as it was found: the scheduled verify, drawn last, came after it.
+    weights.verify = 0;
     let ops = history(seed, STEPS, &weights);
     assert_eq!(
         digest(&format!("{ops:?}")),
@@ -64,6 +66,8 @@ fn compaction_takes_a_staging_denial_as_staging_seed_0xb9e() {
     let seed = Seed::new(0xb9e);
     let mut weights = Weights::mixed(seed);
     weights.known_wrong = true;
+    // The run as it was found: the scheduled verify, drawn last, came after it.
+    weights.verify = 0;
     let ops = history(seed, STEPS, &weights);
     assert_eq!(
         digest(&format!("{ops:?}")),
