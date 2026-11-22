@@ -330,3 +330,41 @@ mod asked_before_boot {
         }
     }
 }
+
+#[cfg(test)]
+mod restored_backup {
+    use lsr_sim::generate::MetaOp;
+    use lsr_sim::run::run_ops;
+    use lsr_sim::{Op, Opts, Seed};
+
+    /// A staging backup is taken holding a snapshot as transaction 1; that
+    /// file loses its WAL origin and is deleted, so the engine stages a later
+    /// commit as 1; then the backup is put back and uploaded. The replica held
+    /// the backup's file, a real state of the database, but the oracle mapped a
+    /// file with no WAL origin to the newest note for its id. The engine was
+    /// right: a restored backup now notes its files again (seed 0x66c).
+    #[test]
+    fn a_restored_backup_holds_the_commits_it_copied_seed_0x66c() {
+        let ops = [
+            Op::Tick,
+            Op::Tick,
+            Op::StagingDamage(MetaOp::StripNewestOrigin),
+            Op::Meta(MetaOp::Save),
+            Op::Commit {
+                pages: 3,
+                grow: false,
+            },
+            Op::StagingDamage(MetaOp::DeleteNewest),
+            Op::Tick,
+            Op::CommitInTick { pages: 1 },
+            Op::StagingDamage(MetaOp::Restore),
+        ];
+        let opts = Opts {
+            drawn: true,
+            ..Opts::default()
+        };
+        if let Err(failure) = run_ops(Seed::new(0x66c), &ops, &opts) {
+            panic!("{}", failure.violation);
+        }
+    }
+}

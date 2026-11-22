@@ -131,6 +131,18 @@ fn read_all(store: &MemStore, key: &FileKey) -> Result<Vec<u8>, StoreError> {
 #[derive(Clone, Debug, Default)]
 pub struct StagedCopy(Vec<(FileInfo, Vec<u8>)>);
 
+impl StagedCopy {
+    /// Each copied file's key and the WAL range its header names (generation
+    /// and end), if it names one.
+    #[must_use]
+    pub fn origins(&self) -> Vec<(FileKey, Option<crate::model::WalEnd>)> {
+        self.0
+            .iter()
+            .map(|(info, bytes)| (info.key, crate::store::wal_end(bytes)))
+            .collect()
+    }
+}
+
 /// Where a tick is cut short, and how.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CrashPlan {

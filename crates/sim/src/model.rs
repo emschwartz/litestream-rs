@@ -159,6 +159,9 @@ pub struct CommitRec {
     pub at: usize,
 }
 
+/// Where a staged file's WAL range ends: its generation and the byte offset.
+pub type WalEnd = (Salts, u64);
+
 /// A snapshot file's cover, noted from the actor's events.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SnapshotNote {
@@ -382,6 +385,49 @@ impl Model {
             .find(|n| n.txid == txid && n.at <= at)
             .map(|n| (n.seq, n.commit));
         stage.max(snapshot).map(|(_, commit)| commit)
+    }
+
+    /// The commit a staged file for `txid` holds now, as the oracle would map
+    /// it: by its WAL range (`origin`, generation and end) when it names one,
+    /// otherwise the newest note for `txid`. Taken when a backup copies the file.
+    #[must_use]
+    pub fn staged_commit(&self, txid: Txid, origin: Option<WalEnd>) -> Option<CommitId> {
+        match origin {
+            Some((salts, end)) => self
+                .staged_from(txid, salts, end, usize::MAX)
+                .or_else(|| self.find(salts, end, usize::MAX)),
+            None => self.staged_as(txid, usize::MAX),
+        }
+    }
+
+    /// Notes again that the staged file for `txid` holds `commit`: a backup put
+    /// it back over whatever was staged for that id since, so the newest note
+    /// for the id is this one again.
+    pub fn note_restored(
+        &mut self,
+        txid: Txid,
+        origin: Option<WalEnd>,
+        commit: CommitId,
+        at: usize,
+    ) {
+        self.seq = self.seq.saturating_add(1);
+        match origin {
+            Some((salts, end)) => self.stages.push(StageNote {
+                seq: self.seq,
+                txid,
+                salts,
+                end,
+                commit,
+                at,
+            }),
+            None => self.notes.push(SnapshotNote {
+                seq: self.seq,
+                txid,
+                commit,
+                rewound: false,
+                at,
+            }),
+        }
     }
 
     /// Notes that a snapshot ending at `txid` was built from `commit`.

@@ -967,6 +967,20 @@ pub struct TapUpload<S: ObjectStore> {
     log: RecorderLog,
 }
 
+/// The WAL generation and end offset an LTX file's header names, when it
+/// names a range with frames: what the oracle maps a file to a commit by.
+pub(crate) fn wal_end(bytes: &[u8]) -> Option<crate::model::WalEnd> {
+    let origin = parse_header(bytes.get(..HEADER_LEN)?)?.fields().wal?;
+    if origin.size() == 0 {
+        return None;
+    }
+    let (salt1, salt2) = origin.salts();
+    Some((
+        lsr_wal::Salts { salt1, salt2 },
+        origin.offset().saturating_add(origin.size()),
+    ))
+}
+
 fn parse_header(head: &[u8]) -> Option<Header> {
     let bytes: &[u8; HEADER_LEN] = head.try_into().ok()?;
     Header::decode(bytes).ok()
