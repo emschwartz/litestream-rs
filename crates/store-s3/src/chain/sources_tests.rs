@@ -537,3 +537,29 @@ fn only_outages_and_server_errors_are_transient() {
         .transient()
     );
 }
+
+#[test]
+fn environment_keys_come_before_web_identity_and_web_identity_before_the_host() {
+    let dir = TempDir::new().unwrap();
+    let file = token_file(&dir);
+    let http = scripted(|request| match request.url().path() {
+        "/" => ok(STS_OK),
+        _ => ok(DOC),
+    });
+    let web = [
+        ("AWS_WEB_IDENTITY_TOKEN_FILE", file),
+        ("AWS_ROLE_ARN", "arn:aws:iam::0:role/r"),
+        ("AWS_ENDPOINT_URL_STS", "http://127.0.0.1:9"),
+        ("AWS_CONTAINER_CREDENTIALS_FULL_URI", "http://127.0.0.1:9/c"),
+    ];
+    let mut vars = imds_vars();
+    vars.extend_from_slice(&web);
+    let resolved = chain_over(&vars, Arc::clone(&http)).resolve().unwrap();
+    assert_eq!(key_id(&resolved), "sts-id");
+    vars.push(("AWS_ACCESS_KEY_ID", "env-id"));
+    vars.push(("AWS_SECRET_ACCESS_KEY", "env-secret"));
+    let resolved = chain_over(&vars, Arc::clone(&http)).resolve().unwrap();
+    assert_eq!(key_id(&resolved), "env-id");
+    assert_eq!(resolved.source(), &Source::Environment);
+    assert!(resolved.refresh().is_none());
+}
