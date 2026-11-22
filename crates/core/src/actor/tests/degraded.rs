@@ -14,8 +14,9 @@ fn degraded(tick: &Tick) -> Option<(Task, PersistentCause, Timestamp)> {
 }
 
 fn auth() -> StoreError {
-    StoreError::Auth {
+    StoreError::Denied {
         op: StoreOp::Upload,
+        why: crate::store::Denied::Credentials,
     }
 }
 
@@ -53,7 +54,13 @@ fn revoked_credentials_degrade_the_upload_task_until_an_upload_succeeds() {
     let Some((task, cause, until)) = degraded(&failed) else {
         panic!("{failed:?}");
     };
-    assert_eq!((task, cause), (Task::Upload, PersistentCause::Credentials));
+    assert_eq!(
+        (task, cause),
+        (
+            Task::Upload,
+            PersistentCause::StoreDenied(crate::store::Denied::Credentials)
+        )
+    );
     assert_eq!(until, ts(T0 + 1_010));
     assert_eq!(actor.phase(), Phase::Running);
     let state = actor.degraded(Task::Upload).unwrap();

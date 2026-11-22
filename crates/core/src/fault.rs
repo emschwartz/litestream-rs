@@ -10,8 +10,8 @@
 //! state machine hands it a [`Next`].
 //!
 //! A [`Policy::Persistent`] fault is one that waiting alone is not expected to
-//! fix: credentials refused, a corrupt object, a damaged WAL, a failed WAL
-//! sync, another writer.
+//! fix: the store refusing access, a corrupt object, a damaged WAL, a failed
+//! WAL sync, another writer.
 //! What happens then is configuration, one field of [`Responses`] per
 //! [`PersistentCause`] (`docs/PLAN.md`, the degraded-state section). [`Response::KeepTrying`]
 //! puts the task that failed in a degraded state: it retries with the doubling
@@ -52,7 +52,7 @@ use crate::compact::CompactError;
 use crate::created_at::ResolveError;
 use crate::maintain::MaintainError;
 use crate::source::SourceError;
-use crate::store::{CorruptCause, ListingStalled, StoreError};
+use crate::store::{CorruptCause, Denied, ListingStalled, StoreError};
 
 /// The longest a retry waits (Go `DefaultSyncBackoffMax`).
 pub const MAX_BACKOFF: Duration = Duration::from_secs(5 * 60);
@@ -68,8 +68,8 @@ pub enum Fault {
         /// The wait the store named.
         retry_after: Option<Duration>,
     },
-    /// The store refuses our credentials.
-    StoreAuth,
+    /// The store refuses access, or could not be reached securely.
+    StoreDenied(Denied),
     /// An object we listed or staged is gone from the replica.
     RemoteObjectMissing,
     /// An upload's commit failed after the object may have become visible.
@@ -303,9 +303,10 @@ pub enum SnapshotCause {
 /// whose configured response is to stop, or a drain whose deadline passed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StopCause {
-    /// Credentials or permissions refuse the store.
-    Credentials,
-    /// The store refuses a request outright (not credentials).
+    /// The store refuses access, or could not be reached securely; the kind
+    /// says what a person must fix.
+    StoreDenied(Denied),
+    /// The store refuses a request outright (not an access refusal).
     StoreRefused,
     /// A replica object is corrupt.
     RemoteCorrupt,
@@ -347,9 +348,10 @@ pub enum StopCause {
 /// [`Responses`] say whether the engine keeps trying or stops.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PersistentCause {
-    /// Credentials or permissions refuse the store.
-    Credentials,
-    /// The store refuses a request outright (not credentials).
+    /// The store refuses access, or could not be reached securely; the kind
+    /// says what a person must fix.
+    StoreDenied(Denied),
+    /// The store refuses a request outright (not an access refusal).
     StoreRefused,
     /// A replica object is corrupt.
     RemoteCorrupt,
@@ -452,7 +454,7 @@ impl Stall {
             Fault::WalChangedUnderRead => Some(Self::WalChangedUnderRead),
             Fault::NothingToSnapshot => Some(Self::NothingToSnapshot),
             Fault::ReadTxLost => Some(Self::ReadTxLost),
-            Fault::StoreAuth
+            Fault::StoreDenied(_)
             | Fault::StoreRefused
             | Fault::RemoteCorrupt
             | Fault::RemoteAheadOfLocal
@@ -475,7 +477,7 @@ impl PersistentCause {
     #[must_use]
     pub const fn of(cause: StopCause) -> Option<Self> {
         match cause {
-            StopCause::Credentials => Some(Self::Credentials),
+            StopCause::StoreDenied(why) => Some(Self::StoreDenied(why)),
             StopCause::StoreRefused => Some(Self::StoreRefused),
             StopCause::RemoteCorrupt => Some(Self::RemoteCorrupt),
             StopCause::OtherWriter => Some(Self::OtherWriter),
@@ -498,7 +500,7 @@ impl PersistentCause {
     #[must_use]
     pub const fn stop(self) -> Option<StopCause> {
         Some(match self {
-            Self::Credentials => StopCause::Credentials,
+            Self::StoreDenied(why) => StopCause::StoreDenied(why),
             Self::StoreRefused => StopCause::StoreRefused,
             Self::RemoteCorrupt => StopCause::RemoteCorrupt,
             Self::OtherWriter => StopCause::OtherWriter,
@@ -542,8 +544,16 @@ pub enum OtherWriter {
 /// map, so a new cause does not build until every preset names its response.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Responses {
-    /// The store refuses the credentials.
+    /// The store does not accept the credentials.
     pub credentials: Response,
+    /// A policy refuses a request the credentials are accepted for.
+    pub permission_denied: Response,
+    /// The host clock is too far from the store's.
+    pub clock_skew: Response,
+    /// The bucket does not exist.
+    pub bucket_missing: Response,
+    /// The TLS handshake or certificate check failed.
+    pub tls: Response,
     /// The store refuses a request outright.
     pub store_refused: Response,
     /// A replica object is corrupt.
@@ -584,6 +594,10 @@ impl Responses {
     /// other writer.
     pub const GO_LIKE: Self = Self {
         credentials: Response::KeepTrying,
+        permission_denied: Response::KeepTrying,
+        clock_skew: Response::KeepTrying,
+        bucket_missing: Response::KeepTrying,
+        tls: Response::KeepTrying,
         store_refused: Response::KeepTrying,
         remote_corrupt: Response::KeepTrying,
         remote_regressed: Response::KeepTrying,
@@ -600,6 +614,10 @@ impl Responses {
     /// Stop on every cause.
     pub const STRICT: Self = Self {
         credentials: Response::Stop,
+        permission_denied: Response::Stop,
+        clock_skew: Response::Stop,
+        bucket_missing: Response::Stop,
+        tls: Response::Stop,
         store_refused: Response::Stop,
         remote_corrupt: Response::Stop,
         remote_regressed: Response::Stop,
@@ -622,10 +640,21 @@ impl Responses {
         }
     }
 
+    /// The response to one kind of access refusal.
+    const fn denied(&self, why: Denied) -> Response {
+        match why {
+            Denied::Credentials => self.credentials,
+            Denied::Permission => self.permission_denied,
+            Denied::ClockSkew => self.clock_skew,
+            Denied::BucketMissing => self.bucket_missing,
+            Denied::Tls => self.tls,
+        }
+    }
+
     /// What the actor does about `cause`.
     pub(crate) const fn action(&self, cause: PersistentCause) -> Action {
         let response = match cause {
-            PersistentCause::Credentials => self.credentials,
+            PersistentCause::StoreDenied(why) => self.denied(why),
             PersistentCause::StoreRefused => self.store_refused,
             PersistentCause::RemoteCorrupt => self.remote_corrupt,
             PersistentCause::WalCorrupt => self.wal_corrupt,
@@ -733,7 +762,7 @@ pub const fn policy(fault: &Fault) -> Policy {
                 now: *now,
             })
         }
-        Fault::StoreAuth => Policy::Persistent(PersistentCause::Credentials),
+        Fault::StoreDenied(why) => Policy::Persistent(PersistentCause::StoreDenied(*why)),
         Fault::StoreRefused => Policy::Persistent(PersistentCause::StoreRefused),
         Fault::RemoteCorrupt => Policy::Persistent(PersistentCause::RemoteCorrupt),
         Fault::RemoteAheadOfLocal => Policy::Persistent(PersistentCause::OtherWriter),
@@ -785,7 +814,7 @@ impl Fault {
             StoreError::Throttled { retry_after, .. } => Self::StoreThrottled {
                 retry_after: retry_after.filter(|wait| !wait.is_zero()),
             },
-            StoreError::Auth { .. } => Self::StoreAuth,
+            StoreError::Denied { why, .. } => Self::StoreDenied(*why),
             StoreError::Refused { .. } => Self::StoreRefused,
             StoreError::NotFound { .. } => Self::RemoteObjectMissing,
             StoreError::ScratchExhausted { .. } => Self::LocalDiskFull,
@@ -810,7 +839,7 @@ impl Fault {
         match err {
             StoreError::Transient { .. }
             | StoreError::Throttled { .. }
-            | StoreError::Auth { .. }
+            | StoreError::Denied { .. }
             | StoreError::Refused { .. } => Self::LocalIo,
             StoreError::NotFound { .. } => Self::StagedLost,
             StoreError::ScratchExhausted { .. } => Self::LocalDiskFull,
@@ -931,7 +960,7 @@ impl Fault {
             Self::UploadAmbiguous | Self::UploadChecksumMismatch => true,
             Self::StoreTransient
             | Self::StoreThrottled { .. }
-            | Self::StoreAuth
+            | Self::StoreDenied(_)
             | Self::RemoteObjectMissing
             | Self::StoreRefused
             | Self::RemoteCorrupt

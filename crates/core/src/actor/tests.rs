@@ -514,26 +514,30 @@ fn stop_is_terminal() {
     let (mut rig, mut actor) = caught_up();
     rig.remote.inner.inject_failure(
         StoreOp::Upload,
-        StoreError::Auth {
+        StoreError::Denied {
             op: StoreOp::Upload,
+            why: crate::store::Denied::Credentials,
         },
     );
     rig.commit(2);
     rig.tick(&mut actor, T0 + 10);
     assert_eq!(
         rig.tick(&mut actor, T0 + 10),
-        Tick::Stopped(StopCause::Credentials)
+        Tick::Stopped(StopCause::StoreDenied(crate::store::Denied::Credentials))
     );
     let io = rig.io();
     rig.commit(3);
     for at in [T0 + 10, T0 + 100_000] {
         assert_eq!(
             rig.tick(&mut actor, at),
-            Tick::Stopped(StopCause::Credentials)
+            Tick::Stopped(StopCause::StoreDenied(crate::store::Denied::Credentials))
         );
     }
     assert_eq!(rig.io(), io, "a stopped actor does no I/O");
-    assert_eq!(actor.phase(), Phase::Stopped(StopCause::Credentials));
+    assert_eq!(
+        actor.phase(),
+        Phase::Stopped(StopCause::StoreDenied(crate::store::Denied::Credentials))
+    );
 }
 
 fn big() -> PageSize {
@@ -964,7 +968,10 @@ fn store_errors(op: StoreOp) -> Vec<StoreError> {
             op,
             retry_after: None,
         },
-        StoreError::Auth { op },
+        StoreError::Denied {
+            op,
+            why: crate::store::Denied::Credentials,
+        },
         StoreError::Refused { op, status: 500 },
     ]
 }

@@ -178,11 +178,11 @@ fn a_refused_boot_is_degraded_and_recovers() {
     let replicator = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
     assert_eq!(
         booted(&replicator),
-        Booted::Degraded(DegradedCause::Credentials)
+        Booted::Degraded(DegradedCause::StoreDenied(lsr_core::Denied::Credentials))
     );
     assert_eq!(
         replicator.health().task(Task::Sync).map(|d| d.cause),
-        Some(DegradedCause::Credentials)
+        Some(DegradedCause::StoreDenied(lsr_core::Denied::Credentials))
     );
     faulty.refuse.store(false, Ordering::SeqCst);
     clock.advance(POLL);
@@ -330,14 +330,17 @@ fn a_stopped_replicator_reports_its_cause() {
         ..config()
     };
     let replicator = Replicator::start_with(&site.db, store, strict, runtime).unwrap();
-    assert_eq!(booted(&replicator), Booted::Stopped(StopCause::Credentials));
+    assert_eq!(
+        booted(&replicator),
+        Booted::Stopped(StopCause::StoreDenied(lsr_core::Denied::Credentials))
+    );
     assert_eq!(
         replicator.health().phase,
-        Phase::Stopped(StopCause::Credentials)
+        Phase::Stopped(StopCause::StoreDenied(lsr_core::Denied::Credentials))
     );
     assert_eq!(
         stopped(&replicator),
-        Stopped::Stopped(StopCause::Credentials)
+        Stopped::Stopped(StopCause::StoreDenied(lsr_core::Denied::Credentials))
     );
 }
 

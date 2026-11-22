@@ -118,7 +118,11 @@ fn under_go_like_every_persistent_scenario_degrades_and_the_oracle_holds() {
         }
     }
     for kind in [
-        FaultKind::StoreAuth,
+        FaultKind::StoreCredentials,
+        FaultKind::StorePermission,
+        FaultKind::StoreClockSkew,
+        FaultKind::StoreBucketMissing,
+        FaultKind::StoreTls,
         FaultKind::StoreRefused,
         FaultKind::RemoteCorrupt,
         FaultKind::RemoteRegressed,
@@ -208,6 +212,26 @@ fn store_429_retry_after() {
 #[test]
 fn creds_revoked_mid_run() {
     run(scenario::creds_revoked_mid_run);
+}
+
+#[test]
+fn permission_revoked_mid_run() {
+    run(scenario::permission_revoked_mid_run);
+}
+
+#[test]
+fn clock_skewed_against_the_store_mid_run() {
+    run(scenario::clock_skewed_against_the_store_mid_run);
+}
+
+#[test]
+fn bucket_deleted_mid_run() {
+    run(scenario::bucket_deleted_mid_run);
+}
+
+#[test]
+fn tls_fails_mid_run() {
+    run(scenario::tls_fails_mid_run);
 }
 
 #[test]

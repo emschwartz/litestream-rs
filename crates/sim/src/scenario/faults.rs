@@ -9,8 +9,8 @@
 use std::time::Duration;
 
 use lsr_core::{
-    Event, Fault, FileKey, Level, MaintainedEvent, PersistentCause, SnapshotCause, SourceError,
-    SourceOp, StopCause, StoreError, StoreOp,
+    Denied, Event, Fault, FileKey, Level, MaintainedEvent, PersistentCause, SnapshotCause,
+    SourceError, SourceOp, StopCause, StoreError, StoreOp,
 };
 use lsr_ltx::PageSize;
 
@@ -32,8 +32,16 @@ pub enum FaultKind {
     StoreTransient,
     /// [`Fault::StoreThrottled`].
     StoreThrottled,
-    /// [`Fault::StoreAuth`].
-    StoreAuth,
+    /// [`Fault::StoreDenied`] for [`Denied::Credentials`].
+    StoreCredentials,
+    /// [`Fault::StoreDenied`] for [`Denied::Permission`].
+    StorePermission,
+    /// [`Fault::StoreDenied`] for [`Denied::ClockSkew`].
+    StoreClockSkew,
+    /// [`Fault::StoreDenied`] for [`Denied::BucketMissing`].
+    StoreBucketMissing,
+    /// [`Fault::StoreDenied`] for [`Denied::Tls`].
+    StoreTls,
     /// [`Fault::RemoteObjectMissing`].
     RemoteObjectMissing,
     /// [`Fault::UploadAmbiguous`].
@@ -90,10 +98,14 @@ pub enum FaultKind {
 
 impl FaultKind {
     /// Every fault, in the order of [`Fault`].
-    pub const ALL: [Self; 29] = [
+    pub const ALL: [Self; 33] = [
         Self::StoreTransient,
         Self::StoreThrottled,
-        Self::StoreAuth,
+        Self::StoreCredentials,
+        Self::StorePermission,
+        Self::StoreClockSkew,
+        Self::StoreBucketMissing,
+        Self::StoreTls,
         Self::RemoteObjectMissing,
         Self::UploadAmbiguous,
         Self::UploadChecksumMismatch,
@@ -123,12 +135,26 @@ impl FaultKind {
     ];
 }
 
+impl FaultKind {
+    /// The kind for one access refusal.
+    #[must_use]
+    pub const fn denied(why: Denied) -> Self {
+        match why {
+            Denied::Credentials => Self::StoreCredentials,
+            Denied::Permission => Self::StorePermission,
+            Denied::ClockSkew => Self::StoreClockSkew,
+            Denied::BucketMissing => Self::StoreBucketMissing,
+            Denied::Tls => Self::StoreTls,
+        }
+    }
+}
+
 impl From<&Fault> for FaultKind {
     fn from(fault: &Fault) -> Self {
         match fault {
             Fault::StoreTransient => Self::StoreTransient,
             Fault::StoreThrottled { .. } => Self::StoreThrottled,
-            Fault::StoreAuth => Self::StoreAuth,
+            Fault::StoreDenied(why) => Self::denied(*why),
             Fault::RemoteObjectMissing => Self::RemoteObjectMissing,
             Fault::UploadAmbiguous => Self::UploadAmbiguous,
             Fault::UploadChecksumMismatch => Self::UploadChecksumMismatch,
@@ -170,7 +196,11 @@ pub fn persistent_of(kind: FaultKind) -> Option<PersistentCause> {
 pub fn stop_of(kind: FaultKind) -> Option<StopCause> {
     let page = PageSize::MIN;
     match kind {
-        FaultKind::StoreAuth => Some(StopCause::Credentials),
+        FaultKind::StoreCredentials => Some(StopCause::StoreDenied(Denied::Credentials)),
+        FaultKind::StorePermission => Some(StopCause::StoreDenied(Denied::Permission)),
+        FaultKind::StoreClockSkew => Some(StopCause::StoreDenied(Denied::ClockSkew)),
+        FaultKind::StoreBucketMissing => Some(StopCause::StoreDenied(Denied::BucketMissing)),
+        FaultKind::StoreTls => Some(StopCause::StoreDenied(Denied::Tls)),
         FaultKind::StoreRefused => Some(StopCause::StoreRefused),
         FaultKind::RemoteCorrupt => Some(StopCause::RemoteCorrupt),
         FaultKind::RemoteAheadOfLocal => Some(StopCause::OtherWriter),
@@ -221,6 +251,7 @@ pub fn names_fault(scenario: &Scenario, kind: FaultKind) -> bool {
             (Expect::Event(EventMatch::Resnapshot(CauseKind::NewestStagedFileUnreadable)), _) => {
                 kind == FaultKind::StagedLost
             }
+            (Expect::Stopped(got @ StopCause::StoreDenied(_)), Some(stop)) => *got == stop,
             (Expect::Stopped(got), Some(stop)) => {
                 std::mem::discriminant(got) == std::mem::discriminant(&stop)
             }
@@ -234,7 +265,11 @@ pub fn fault_scenarios(kind: FaultKind) -> &'static [fn() -> Scenario] {
     match kind {
         FaultKind::StoreTransient => &[store_flaky_5pct, commit_fails_after_publish],
         FaultKind::StoreThrottled => &[store_429_retry_after],
-        FaultKind::StoreAuth => &[creds_revoked_mid_run],
+        FaultKind::StoreCredentials => &[creds_revoked_mid_run],
+        FaultKind::StorePermission => &[permission_revoked_mid_run],
+        FaultKind::StoreClockSkew => &[clock_skewed_against_the_store_mid_run],
+        FaultKind::StoreBucketMissing => &[bucket_deleted_mid_run],
+        FaultKind::StoreTls => &[tls_fails_mid_run],
         FaultKind::RemoteObjectMissing => &[remote_file_deleted_externally],
         FaultKind::UploadAmbiguous => &[size_mismatch_on_commit],
         FaultKind::UploadChecksumMismatch => &[etag_mismatch_on_put],
@@ -559,23 +594,56 @@ fn quiet_after_stop(report: &RunReport) -> Result<(), String> {
     }
 }
 
-/// The credentials stop working in the middle of the run: a stop, and no
-/// further calls.
-#[must_use]
-pub fn creds_revoked_mid_run() -> Scenario {
+/// The store refuses an upload for `why` in the middle of the run: a stop
+/// under that kind of refusal and no other, and no further calls.
+fn store_denies_upload(name: &'static str, why: Denied) -> Scenario {
     let mut s = injected(
-        "creds_revoked_mid_run",
+        name,
         vec![remote_fault(
             StoreOp::Upload,
             0,
-            FaultShape::Error(StoreError::Auth {
+            FaultShape::Error(StoreError::Denied {
                 op: StoreOp::Upload,
+                why,
             }),
         )],
-        vec![Expect::Stopped(StopCause::Credentials), Expect::Recovered],
+        vec![
+            Expect::Stopped(StopCause::StoreDenied(why)),
+            Expect::Recovered,
+        ],
     );
     s.check = Some(quiet_after_stop);
     s
+}
+
+/// The credentials stop working in the middle of the run.
+#[must_use]
+pub fn creds_revoked_mid_run() -> Scenario {
+    store_denies_upload("creds_revoked_mid_run", Denied::Credentials)
+}
+
+/// A policy starts refusing uploads in the middle of the run.
+#[must_use]
+pub fn permission_revoked_mid_run() -> Scenario {
+    store_denies_upload("permission_revoked_mid_run", Denied::Permission)
+}
+
+/// The host clock drifts too far from the store's in the middle of the run.
+#[must_use]
+pub fn clock_skewed_against_the_store_mid_run() -> Scenario {
+    store_denies_upload("clock_skewed_against_the_store_mid_run", Denied::ClockSkew)
+}
+
+/// The bucket is deleted in the middle of the run.
+#[must_use]
+pub fn bucket_deleted_mid_run() -> Scenario {
+    store_denies_upload("bucket_deleted_mid_run", Denied::BucketMissing)
+}
+
+/// The store's certificate stops verifying in the middle of the run.
+#[must_use]
+pub fn tls_fails_mid_run() -> Scenario {
+    store_denies_upload("tls_fails_mid_run", Denied::Tls)
 }
 
 /// The backend refuses an upload for a reason a retry does not change.
