@@ -268,6 +268,25 @@ tests = [
     "a_staged_file_whose_bytes_differ_but_still_verify_is_refused",
 ]
 
+# The witness's page count compared with at least, not exactly: a pending file carrying one page
+# its range never wrote is proven and uploaded. Found by a blind recall pilot, which no layer caught.
+[[bug]]
+name = "witness-extra-page"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "a_pending_file_with_one_page_too_many_is_refused",
+]
+
+# Any frame that verifies taken for a commit: a rolled-back spill after a cursor would count as a
+# commit that outlived a restart. The `wal` fuzz target's commit_follows check, over its corpus.
+[[bug]]
+name = "commit-follows-any-frame"
+fix = "plant"
+package = "lsr-fuzzing"
+test_bin = "fuzzing"
+tests = ["corpus::wal_corpus_replays"]
+
 # Every read path (restore, verify, compaction, upload, boot recovery) decodes through
 # lsr_ltx::Decoder, so skipping the trailer's file checksum there would let any changed header,
 # index or page byte through.

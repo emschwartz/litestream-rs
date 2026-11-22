@@ -1,0 +1,13 @@
+diff --git a/crates/wal/src/scan.rs b/crates/wal/src/scan.rs
+index cf1ee2cd..f07a29f3 100644
+--- a/crates/wal/src/scan.rs
++++ b/crates/wal/src/scan.rs
+@@ -273,7 +273,7 @@ impl<R: Read + Seek> WalReader<R> {
+             ) else {
+                 return Ok(false);
+             };
+-            if frame.commit != 0 {
++            if frame.commit != 0 || frame.commit == 0 {
+                 return Ok(true);
+             }
+             let Some(next) = at.next_frame() else {
