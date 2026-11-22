@@ -2,7 +2,9 @@
 //!
 //! [`sqlite`] is SQLite in WAL mode as rules: the source, page source and
 //! checkpointer the sync engine runs against in the simulator, checked against
-//! real SQLite by `tests/sim/sqlite_rules.rs`. The harness around it: [`store`]
+//! real SQLite by `tests/sim/sqlite_rules.rs`; its power losses follow
+//! [`crash_law`], the disk law it shares with the real-SQLite fault VFS, and
+//! real SQLite recovers what they leave. The harness around it: [`store`]
 //! wraps a store with faults, crash points, a ground-truth recorder and power-loss
 //! bookkeeping; [`exec`] crashes a future; [`model`] and [`oracle`] hold what
 //! the database really was and judge the replica against it; [`world`] builds
@@ -16,6 +18,7 @@
 
 pub mod budget;
 pub mod contract;
+pub mod crash_law;
 pub mod exec;
 pub mod generate;
 pub mod model;

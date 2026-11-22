@@ -20,6 +20,7 @@ use lsr_core::{
 use lsr_ltx::{PageNo, PageSize, Timestamp, Txid};
 use lsr_wal::{Salts, WalOffset};
 
+use crate::crash_law::CrashLaw;
 use crate::generate::{EnvFault, MetaOp, Op, RemoteOp, Target, WalOp, Weights, history};
 use crate::oracle::{Bound, Violation, Windows, bug_fault, within};
 use crate::reach::{Reach, variant};
@@ -190,6 +191,9 @@ pub struct Opts {
     /// is skipped, and the model is checked against SQLite's rules before
     /// every step. [`run_with`] sets it.
     pub drawn: bool,
+    /// With `drawn`, a power loss keeps the block law's draw instead of a
+    /// drawn prefix ([`Weights::block_crash_law`]). [`run_with`] sets it.
+    pub block_crash_law: bool,
 }
 
 /// The configuration every run gives the actor.
@@ -1442,6 +1446,26 @@ impl Runner {
         }
     }
 
+    /// What a drawn run's power losses keep of the unsynced WAL writes: a
+    /// drawn prefix, or the block law's draw.
+    fn draw_power_law(&self, seed: Seed, blocks: bool) {
+        self.w.sqlite.tear_on_power_loss(seed.stream(14));
+        if blocks {
+            self.w.sqlite.crash_by_law(CrashLaw::drawn(seed.stream(17)));
+        }
+    }
+
+    /// Every power loss so far was recovered alike by SQLite and by the
+    /// engine's WAL parser, and the rules' image matched SQLite's.
+    fn recovery_agrees(&self) -> Result<(), Violation> {
+        match self.w.sqlite.recovery_disagreements().first() {
+            Some(first) => Err(bug_fault(format!(
+                "SQLite's recovery disagrees with the simulator: {first}"
+            ))),
+            None => Ok(()),
+        }
+    }
+
     /// The end of a history: drain, judge the replica, check the resources.
     fn finish(&mut self) -> Result<(), Violation> {
         if self.lenient && !self.w.model_matches_sqlite() {
@@ -1511,6 +1535,9 @@ impl Runner {
         let (kept, cut) = self.w.sqlite.torn_losses();
         reach.add("power.kept_unsynced_wal", u64::from(kept));
         reach.add("power.kept_cut_frame", u64::from(cut));
+        let (kept, holes) = self.w.sqlite.block_losses();
+        reach.add("power.block_kept_unsynced", u64::from(kept));
+        reach.add("power.block_hole", u64::from(holes));
         reach.add(
             "batch.remote_calls",
             u64::from(self.w.remote_faults.batched()),
@@ -1599,6 +1626,7 @@ pub fn run_with(
 ) -> Result<RunReport, Failure> {
     let opts = Opts {
         drawn: true,
+        block_crash_law: weights.block_crash_law,
         ..opts.clone()
     };
     run_ops(seed, &history(seed, steps, weights), &opts)
@@ -1617,7 +1645,7 @@ pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure
     let mut runner = Runner::new(seed);
     runner.lenient = opts.drawn;
     if opts.drawn {
-        runner.w.sqlite.tear_on_power_loss(seed.stream(14));
+        runner.draw_power_law(seed, opts.block_crash_law);
         runner.draw_batch_widths(seed);
     }
     runner.trace = opts.trace;
@@ -1655,7 +1683,7 @@ pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure
                 ..fail(bug_fault("the model no longer matches SQLite's rules"))
             });
         }
-        if let Err(violation) = runner.apply(op) {
+        if let Err(violation) = runner.apply(op).and_then(|()| runner.recovery_agrees()) {
             return Err(Failure {
                 trace: runner.report.trace,
                 ..fail(violation)

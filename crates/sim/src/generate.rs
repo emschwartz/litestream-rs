@@ -294,6 +294,12 @@ pub struct Weights {
     /// retrying in a degraded state, on `PageSizeChanged`, and the states
     /// acknowledged before it still restore; the runner expects either.
     pub vacuum_resizes: bool,
+    /// Whether a power loss keeps the block law's draw over the WAL writes
+    /// since the last fsync (any subset of the dirty blocks, at 512 or 4096
+    /// bytes, and a length of its own; [`crate::crash_law`]) instead of a
+    /// drawn prefix of them. Not an operation: it changes what every power
+    /// loss of the run leaves, so the history's draws are the same either way.
+    pub block_crash_law: bool,
 }
 
 impl Default for Weights {
@@ -326,6 +332,7 @@ impl Default for Weights {
             staging_damage: 1,
             heal: 1,
             vacuum_resizes: true,
+            block_crash_law: false,
         }
     }
 }
@@ -445,10 +452,13 @@ impl Weights {
             staging_damage: weight(false),
             heal: weight(false),
             vacuum_resizes: below(&entropy, 2) == 0,
+            block_crash_law: false,
         };
         // Drawn last, so every other kind keeps the weight it had before
         // second writers were drawn.
         mix.second_writer = weight(false);
+        // Drawn after that, for the same reason.
+        mix.block_crash_law = below(&entropy, 2) == 0;
         mix
     }
 
