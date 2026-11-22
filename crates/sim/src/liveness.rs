@@ -687,6 +687,10 @@ impl<W: TickWorld> TickWorld for WithEngine<'_, W> {
     fn replica_newest(&self) -> Option<u64> {
         self.world.replica_newest()
     }
+
+    fn replica_ends_at(&self, txid: u64) -> bool {
+        self.world.replica_ends_at(txid)
+    }
 }
 
 /// What one tick staged at level 0.
@@ -717,6 +721,9 @@ mod tests {
         }
         fn replica_newest(&self) -> Option<u64> {
             Some(25)
+        }
+        fn replica_ends_at(&self, _: u64) -> bool {
+            false
         }
     }
 
