@@ -200,6 +200,11 @@ pub enum Op {
         /// Ticks the engine runs under it.
         ticks: u8,
     },
+    /// The scheduled verify runs once: the engine reads the live pages in a
+    /// sync tick, the replica is checked at names depth and the live
+    /// transaction restored and compared with them, and the verdict is judged
+    /// against what the database really was.
+    Verify,
 }
 
 /// A fault that lasts across ticks, for [`Op::Hold`]. A restore judged while
@@ -444,6 +449,8 @@ pub struct Weights {
     pub overlap: bool,
     /// [`Op::AppInTick`].
     pub app_in_tick: u32,
+    /// [`Op::Verify`].
+    pub verify: u32,
 }
 
 /// What the application does when it comes back after a restart, before the
@@ -533,6 +540,9 @@ impl Default for Weights {
             // Off in the default mix so its recorded histories keep their
             // shape; swarm mixes draw it.
             app_in_tick: 0,
+            // Off in the default mix so its recorded histories keep their
+            // shape; swarm mixes draw it.
+            verify: 0,
         }
     }
 }
@@ -563,10 +573,11 @@ enum Kind {
     Heal,
     StagingReplaceRunning,
     AppInTick,
+    Verify,
 }
 
 impl Weights {
-    fn table(&self) -> [(Kind, u32); 24] {
+    fn table(&self) -> [(Kind, u32); 25] {
         [
             (Kind::Tick, self.tick),
             (Kind::Commit, self.commit),
@@ -592,6 +603,7 @@ impl Weights {
             (Kind::Heal, self.heal),
             (Kind::StagingReplaceRunning, self.staging_replace_running),
             (Kind::AppInTick, self.app_in_tick),
+            (Kind::Verify, self.verify),
         ]
     }
 
@@ -667,6 +679,7 @@ impl Weights {
             known_wrong: false,
             overlap: false,
             app_in_tick: 0,
+            verify: 0,
         };
         // Drawn last, so every other kind keeps the weight it had before
         // second writers were drawn.
@@ -710,6 +723,8 @@ impl Weights {
         mix.overlap = below(&entropy, 2) == 0;
         // And after that, for the same reason.
         mix.app_in_tick = weight(false);
+        // Drawn after that, for the same reason.
+        mix.verify = weight(false);
         mix
     }
 
@@ -1008,6 +1023,7 @@ fn draw(weights: &Weights, entropy: &SeededEntropy) -> Op {
         Kind::Heal => Op::Heal,
         Kind::StagingReplaceRunning => staging_replace_running(entropy),
         Kind::AppInTick => app_in_tick(entropy),
+        Kind::Verify => Op::Verify,
     }
 }
 

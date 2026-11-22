@@ -314,7 +314,8 @@ pub const fn of_op(op: &Op) -> &'static [Justifier] {
         | Op::OurReader { begin: true }
         | Op::AppAutocheckpoint(_)
         | Op::Shrink { .. }
-        | Op::Heal => &[],
+        | Op::Heal
+        | Op::Verify => &[],
     }
 }
 

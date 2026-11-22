@@ -157,10 +157,13 @@ pub async fn verify_against<S: ObjectStore>(
             mark!(Verify4);
             Compared::Merged { txid: live.txid }
         }
-        Err(error) => Compared::RestoreFails {
-            txid: live.txid,
-            error,
-        },
+        Err(error) => {
+            mark!(Verify3);
+            Compared::RestoreFails {
+                txid: live.txid,
+                error,
+            }
+        }
     };
     let report = report(&inventory, findings, latest, (files_read, bytes_read));
     Ok(Verified { report, compared })
@@ -199,12 +202,15 @@ fn compare(live: &LivePages, restored: &BTreeMap<u32, PageChecksum>, commit: u32
             txid: live.txid,
             pages: u32::try_from(live.pages.len()).unwrap_or(u32::MAX),
         },
-        first => Compared::Differs {
-            txid: live.txid,
-            first: first.copied().unwrap_or(commit.min(live.commit.get())),
-            pages,
-            live_commit: live.commit.get(),
-            restored_commit: commit,
-        },
+        first => {
+            mark!(Verify3);
+            Compared::Differs {
+                txid: live.txid,
+                first: first.copied().unwrap_or(commit.min(live.commit.get())),
+                pages,
+                live_commit: live.commit.get(),
+                restored_commit: commit,
+            }
+        }
     }
 }

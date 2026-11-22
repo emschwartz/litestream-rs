@@ -771,6 +771,7 @@ impl Runner {
         };
         per_tick(&stats, self.limits())?;
         self.report.max_wal_frames = self.report.max_wal_frames.max(self.w.sqlite.mx_frame());
+        self.verify_ready()?;
         Ok((step, stats))
     }
 
@@ -1943,6 +1944,7 @@ impl Runner {
             }
             Op::WalDamage { op, ticks } => self.wal_damage_healed(*op, *ticks)?,
             Op::Hold { hold, ticks } => self.hold(*hold, *ticks)?,
+            Op::Verify => self.verify()?,
             Op::Heal => {
                 self.rate_active = false;
                 self.w.remote_faults.heal();
@@ -2382,6 +2384,7 @@ mod fail_stop;
 mod hold;
 mod in_tick;
 mod marks;
+mod verify;
 
 /// Whether a snapshot with this cause is the engine saying the history it had replicated may
 /// not continue: the database, its WAL or the staging directory went back or cannot be

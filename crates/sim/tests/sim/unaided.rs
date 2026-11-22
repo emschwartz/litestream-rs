@@ -180,14 +180,40 @@ fn seeds_to_first_failure() {
 /// Found unaided by the swarm, with nothing written for it: under the planted bug "the boot
 /// anchor accepts any tail in the live generation" (`docs/planted-bugs/anchor-any-tail.patch`),
 /// seed 44's drawn mix, 8 steps in, restores a transaction to pages no commit had. (Found on
-/// the merged head with the boot witness; seed 15 found it before the witness landed.)
+/// the merged head with the boot witness; seed 15 found it before the witness landed.) Kept as
+/// the operations and settings that mix drew then: replayed by seed, the history moved when
+/// the generator gained the scheduled verify.
 #[test]
 fn swarm_seed_44_restores_only_committed_states() {
-    let seed = Seed::new(44);
-    let mut weights = Weights::mixed(seed);
-    // Drawn after this seed was found, so the run stays the one the plant fails on.
-    weights.app_in_tick = 0;
-    if let Err(failure) = run_with(seed, 8, &weights, &Opts::default()) {
+    use lsr_sim::generate::{MetaOp, WalOp};
+    use lsr_sim::{ClockLaw, Op};
+    let ops = [
+        Op::Meta(MetaOp::ForgeNewest),
+        Op::Tick,
+        Op::Spill,
+        Op::WalDamage {
+            op: WalOp::RegrowWithoutCommitMarks(8_063_039_911_997_408_971),
+            ticks: 2,
+        },
+        Op::Shutdown,
+        Op::Commit {
+            pages: 4,
+            grow: false,
+        },
+        Op::WalDamage {
+            op: WalOp::RegrowSameSalts(13_577_244_702_264_426_995),
+            ticks: 7,
+        },
+        Op::Restore,
+    ];
+    let opts = Opts {
+        drawn: true,
+        lying_wal_sync: true,
+        after_restart: AfterRestart::Busy,
+        clock_law: ClockLaw::EachRead,
+        ..Opts::default()
+    };
+    if let Err(failure) = lsr_sim::run::run_ops(Seed::new(44), &ops, &opts) {
         panic!("{failure}");
     }
 }
@@ -200,8 +226,14 @@ fn swarm_seed_44_restores_only_committed_states() {
 /// operations, kills the plant on none of seeds 1000001 to 1002000.
 #[test]
 fn swarm_seed_0xf488c_takes_no_commit_before_a_truncate_for_damage() {
+    // BATCH-3: main's overlap draw, which precedes the in-tick draw, moved this seed's mix, so
+    // under plant boundary-snapshot-keeps-page-table the run now passes. Record the history
+    // drawn at fe9badf2 as an op list, or find a new seed.
     let seed = Seed::new(0xf488c);
-    if let Err(failure) = run_with(seed, 299, &Weights::mixed(seed), &Opts::default()) {
+    let mut weights = Weights::mixed(seed);
+    // The run as it was found: the scheduled verify, drawn last, came after it.
+    weights.verify = 0;
+    if let Err(failure) = run_with(seed, 299, &weights, &Opts::default()) {
         panic!("{failure}");
     }
 }

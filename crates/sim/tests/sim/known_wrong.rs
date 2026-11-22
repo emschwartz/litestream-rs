@@ -27,6 +27,7 @@ fn still_fails(seed: u64, ops_digest: u64, defect: KnownWrong) {
     weights.known_wrong = true;
     // Drawn after these seeds were found, so each run stays the one that reaches its defect.
     weights.app_in_tick = 0;
+    weights.verify = 0;
     let ops = history(seed, STEPS, &weights);
     assert_eq!(
         digest(&format!("{ops:?}")),
@@ -65,6 +66,7 @@ fn a_restart_after_a_failed_wal_sync_owes_the_truncate_seed_0xf() {
     weights.known_wrong = true;
     // Drawn after this seed was found, so the run stays the one that reaches the defect.
     weights.app_in_tick = 0;
+    weights.verify = 0;
     let ops = history(seed, STEPS, &weights);
     assert_eq!(
         digest(&format!("{ops:?}")),
@@ -85,6 +87,10 @@ fn compaction_takes_a_staging_denial_as_staging_seed_0xb9e() {
     let seed = Seed::new(0xb9e);
     let mut weights = Weights::mixed(seed);
     weights.known_wrong = true;
+    // The run as it was found: the in-tick app operations and the scheduled verify, drawn
+    // last, came after it.
+    weights.app_in_tick = 0;
+    weights.verify = 0;
     let ops = history(seed, STEPS, &weights);
     assert_eq!(
         digest(&format!("{ops:?}")),

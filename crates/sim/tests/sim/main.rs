@@ -47,3 +47,5 @@ mod survival;
 mod tally;
 #[cfg(test)]
 mod unaided;
+#[cfg(test)]
+mod verify;

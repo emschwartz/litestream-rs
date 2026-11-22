@@ -106,6 +106,7 @@ rows! {
     Rest4 = "REST-4",
     Rest5 = "REST-5",
     Verify1 = "VERIFY-1",
+    Verify3 = "VERIFY-3",
     Verify4 = "VERIFY-4",
     World4 = "WORLD-4",
     World13 = "WORLD-13",
