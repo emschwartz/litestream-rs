@@ -86,3 +86,11 @@ fn a_halt_across_restarts_still_goes_unreported_seed_0xe9() {
         KnownWrong::HaltForgottenAtRestart,
     );
 }
+
+/// A failed WAL sync, the app's own checkpoints backfilling pages the kernel had marked clean,
+/// then a power loss: the database file holds pages no commit made together, and the engine
+/// replicates it as a commit (decision D73; detection is D103). Seed 0x725 of the mixed set.
+#[test]
+fn a_mixed_database_after_a_lost_writeback_is_still_replicated_silently_seed_0x725() {
+    still_fails(0x725, 0x1e93_cb8d_a716_6b00, KnownWrong::DatabaseAheadOfWal);
+}

@@ -417,6 +417,15 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Revisit if:** D9 is fixed (then restarts inside holds are drawn everywhere), or holds longer than 200 ticks find more.
 - **Links:** issue #127 item E; BEHAVIOR CHK-9.
 
+## D73. A database file no commit made, after a lost writeback (delegated, open to owner review)
+
+- **Options:** adopt the recovered database as the new truth (any restore of it passes); adopt it as damage, as a flipped WAL bit is (no restore may give it); skip power losses while a failed sync's writeback is lost.
+- **Choice:** damage. After a power loss while a failed WAL sync's writeback is lost, the world adopts SQLite's recovered database as corrupt state when it matches no commit (`World::crash`). The engine cannot tell such a file from the database file alone (every page is valid), so a run that replicates it fails as `CorruptionRestored`, a known-wrong defect (`DatabaseAheadOfWal`, D70) reached by D2's failed-sync cell with a power loss; seed 0x725 is pinned to keep failing until detection lands.
+- **Why:** the state is real. A failed fsync leaves the kernel's pages clean but unwritten; the app's own checkpoint later backfills the real pages from the page cache into the database file and syncs it; a power loss then cuts the WAL at the first frame the kernel lost. The file holds newer pages from the backfill and older ones from the recovered WAL, a state no commit made (0x725: an app PASSIVE checkpoint, then a busy TRUNCATE, while the engine's own TRUNCATE cure stayed busy behind readers). Adopting it as truth would let the replica be silently wrong; skipping it would hide it.
+- **Cost accepted:** until detection lands the known-wrong runs count this failure as known. Decision D103 (the journal session's) sets the response: a boot after a recorded failed sync compares the pages the WAL does not cover and replicates a mixed file loudly (`database_ahead_of_wal`), keeping the last good restore point for a while; the judge will then allow the restore only under that notice.
+- **Revisit if:** D103 lands (flip to the narrow allowance), or the owner prefers adopting the mixed file as truth.
+- **Links:** issue #127 item E; D2, D103.
+
 ## D80. Where the fail-stop clock cannot survive a restart (delegated)
 
 - **Question:** the clock of the oldest unreplicated commit must not restart with the process (#115), or a crash loop runs the application forever in slices shorter than the bound. What does it rest on?

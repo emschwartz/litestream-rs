@@ -67,13 +67,20 @@ pub enum KnownWrong {
     /// is never reported degraded (BEHAVIOR's D9). Reached by a restart inside an overlapping
     /// hold ([`crate::Weights::overlap`]), not by a cell of the tables.
     HaltForgottenAtRestart,
+    /// A power loss while a failed sync of the WAL is unpaid, after the app's own checkpoint
+    /// backfilled pages the kernel had marked clean, leaves a database file no commit made:
+    /// newer pages from the backfill, older ones from the recovered WAL. The engine replicates
+    /// it as a commit and says nothing (decision D73). Reached by the cell of D2, the failed
+    /// sync, together with a power loss.
+    DatabaseAheadOfWal,
 }
 
 impl KnownWrong {
     /// Every known defect.
-    pub const ALL: [Self; 2] = [
+    pub const ALL: [Self; 3] = [
         Self::WalSyncForgottenAtRestart,
         Self::HaltForgottenAtRestart,
+        Self::DatabaseAheadOfWal,
     ];
 
     /// Where the defect is tracked and who fixes it.
@@ -87,6 +94,11 @@ impl KnownWrong {
             Self::HaltForgottenAtRestart => {
                 "#99 (D9); open: retry counts, waits and degraded states must survive a restart"
             }
+            Self::DatabaseAheadOfWal => {
+                "D103; the journal session: a boot after a recorded failed WAL sync compares the \
+                 pages the WAL does not cover and replicates a mixed file loudly, \
+                 `database_ahead_of_wal`"
+            }
         }
     }
 
@@ -98,6 +110,9 @@ impl KnownWrong {
                 matches!(violation, Violation::StagedNotDurable { .. })
             }
             Self::HaltForgottenAtRestart => matches!(violation, Violation::HealthBlind { .. }),
+            Self::DatabaseAheadOfWal => {
+                matches!(violation, Violation::CorruptionRestored { .. })
+            }
         }
     }
 
@@ -682,6 +697,17 @@ pub fn known_in(ops: &[crate::generate::Op], weights: &crate::Weights) -> Vec<Kn
             .any(|op| matches!(op, crate::generate::Op::Hold { .. }));
     if restarts_in_holds {
         known.push(KnownWrong::HaltForgottenAtRestart);
+    }
+    // The mixed database needs D2's cell and a power loss after it, which an overlapping
+    // hold may also draw.
+    let power_lost = ops.iter().any(|op| {
+        matches!(
+            op,
+            Op::Crash(crate::sqlite::CrashKind::Power) | Op::PowerLoss
+        ) || (weights.overlap && matches!(op, Op::Hold { .. }))
+    });
+    if power_lost && known.contains(&KnownWrong::WalSyncForgottenAtRestart) {
+        known.push(KnownWrong::DatabaseAheadOfWal);
     }
     known.sort_unstable();
     known.dedup();
