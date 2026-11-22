@@ -265,9 +265,17 @@ tests = ["unaided::swarm_seed_44_restores_only_committed_states"]
 
 [[bug]]
 name = "skip-boot-scratch-cleanup"
-fix = "284d1fb"
+fix = "e411fc0"
 package = "lsr-cli"
 test_bin = "cli"
 tests = [
     "a_crash_loop_of_short_boots_with_no_change_leaves_nothing_growing",
+]
+
+[[bug]]
+name = "maintenance-only-after-uptime"
+fix = "66563c2"
+package = "lsr-core"
+tests = [
+    "maintenance_gets_its_share_while_a_backlog_uploads",
 ]
