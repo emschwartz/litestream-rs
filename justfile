@@ -2,7 +2,7 @@
 default: check
 
 # The land gate: format, lints, tests. A branch lands only when this is green.
-check: fmt-check clippy test doctest features upstream-test-map-fresh evidence-fresh
+check: fmt-check clippy test doctest features upstream-test-map-fresh evidence-fresh planted-bugs-apply
 
 fmt-check:
     cargo fmt --all -- --check
@@ -126,6 +126,28 @@ shuttle iterations="200":
 # default suite's, at each block size, on the atomic and the tearing device. Minutes; not part of check.
 journal-model:
     cargo nextest run -p lsr-spec -E 'test(/^journal::deep$/)' --run-ignored only --no-capture --locked
+
+# Every planted-bug patch still applies to the tree, so a change that makes one stale fails its
+# own gate instead of the nightly run. Seconds; whether the planted defect is caught is
+# `planted-bugs`'s question.
+planted-bugs-apply:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    stale=()
+    found=0
+    for patch in docs/planted-bugs/*.patch; do
+        found=$((found + 1))
+        git apply --check "$patch" 2>/dev/null || stale+=("$patch")
+    done
+    if [ "$found" -eq 0 ]; then
+        echo "planted-bugs-apply: no patches found under docs/planted-bugs" >&2
+        exit 1
+    fi
+    if [ "${#stale[@]}" -gt 0 ]; then
+        printf 'planted-bugs-apply: no longer applies (re-express it, see docs/planted-bugs.md): %s\n' "${stale[@]}" >&2
+        exit 1
+    fi
+    echo "planted-bugs-apply: all $found patches apply"
 
 # Every fixed defect is re-planted in a scratch tree and its named tests must fail
 # (docs/planted-bugs.md). A survivor is a defect in the tests; a stale patch needs re-expressing.
