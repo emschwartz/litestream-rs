@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/journal.rs b/crates/core/src/journal.rs
+index c6da180..960e225 100644
+--- a/crates/core/src/journal.rs
++++ b/crates/core/src/journal.rs
+@@ -154,7 +154,7 @@ impl<F: JournalFile> JournalWriter<F> {
+             | Verdict::Missing
+             | Verdict::Unreadable(_) => Base::Establish,
+         };
+-        let created = matches!(base, Base::Winner { seq, .. } if seq.proves_created());
++        let created = matches!(base, Base::Winner { seq, .. } if seq.get() >= 1);
+         let last = match parsed.verdict {
+             Verdict::Read { journal, .. } => Some(journal),
+             Verdict::Newer { .. } | Verdict::Missing | Verdict::Unreadable(_) => None,

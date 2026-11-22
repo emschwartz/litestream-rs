@@ -22,7 +22,7 @@
 //! The witness ladder has one more rung that v1 cannot use: a checksum chain
 //! (each file's pre-apply checksum equal to the previous file's post-apply
 //! one) would vouch for files the WAL no longer holds. Every file v1 and Go
-//! write is untracked (`docs/PLAN.md`, decision D2), so there is nothing to
+//! write is untracked (`docs/decisions.md`, D2), so there is nothing to
 //! compare; [`Refused::NotInLiveWal`] marks the seam where that rung goes.
 //! Below it, the file is dropped.
 //!

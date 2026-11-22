@@ -1,0 +1,13 @@
+diff --git a/crates/journal/src/read.rs b/crates/journal/src/read.rs
+index cbe9288..76bc580 100644
+--- a/crates/journal/src/read.rs
++++ b/crates/journal/src/read.rs
+@@ -182,7 +182,7 @@ pub fn parse(opened: Opened<'_>) -> Parsed {
+     };
+     let winner = match (s0, s1) {
+         (Ok(a), Ok(b)) if seq(&a) == seq(&b) => None,
+-        (Ok(a), Ok(b)) if seq(&b) > seq(&a) => Some((Slot::S1, b)),
++        (Ok(a), Ok(b)) if seq(&b) < seq(&a) => Some((Slot::S1, b)),
+         (Ok(a), Ok(_) | Err(_)) => Some((Slot::S0, a)),
+         (Err(_), Ok(b)) => Some((Slot::S1, b)),
+         (Err(_), Err(_)) => {

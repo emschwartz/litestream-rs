@@ -211,7 +211,7 @@ impl State {
         let mut out = vec![(Outcome::Ok, self.fs.synced(), false)];
         if self.left.failures > 0 {
             for (fs, reaches) in self.fs.sync_failures(config.block, config.device) {
-                out.push((Outcome::SyncFailed(reaches), fs, true));
+                out.push((Outcome::SyncFailed(reaches, fs.len_durable()), fs, true));
             }
         }
         out

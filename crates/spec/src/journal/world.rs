@@ -261,8 +261,8 @@ pub enum Outcome {
     Failed(Partial),
     /// The disk is full.
     Enospc,
-    /// An fsync failed, leaving each dirty slot so.
-    SyncFailed(Reaches),
+    /// An fsync failed, leaving each dirty slot so and the length on disk so.
+    SyncFailed(Reaches, Len),
     /// A directory fsync failed; whether the entry is on disk.
     DirFailed(bool),
 }
@@ -369,6 +369,27 @@ enum Base {
     Winner,
 }
 
+/// What the running writer knows, for a differential test to compare an implementation's with.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct WriterView {
+    /// Whether the next write establishes the file.
+    pub establish: bool,
+    /// The sequence number of the newest record it knows.
+    pub seq: u8,
+    /// The slot holding that record.
+    pub winner: Slot,
+    /// The slot the next record goes to.
+    pub next: Slot,
+    /// Whether creation is known finished.
+    pub created: bool,
+    /// Whether this lifetime has synced.
+    pub synced: bool,
+    /// The record a write in flight is writing.
+    pub writing: Option<Rec>,
+    /// The facts the engine holds.
+    pub facts: Facts,
+}
+
 /// The engine process and its writer.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 struct Proc {
@@ -443,6 +464,28 @@ impl State {
         self.log.get(usize::from(rid.0))
     }
 
+    /// What the running writer knows, or `None` between lifetimes.
+    #[must_use]
+    pub fn writer(&self) -> Option<WriterView> {
+        let proc = self.proc?;
+        Some(WriterView {
+            establish: matches!(proc.base, Base::Establish),
+            seq: proc.seq,
+            winner: proc.winner,
+            next: proc.next,
+            created: proc.created,
+            synced: proc.synced,
+            writing: proc.job.and_then(|(rid, _)| self.rec(rid)).copied(),
+            facts: proc.facts,
+        })
+    }
+
+    /// Whether the disk is full.
+    #[must_use]
+    pub const fn full(&self) -> bool {
+        self.full
+    }
+
     /// The record `slot` reads now, if it reads one.
     #[must_use]
     pub fn reads(&self, slot: Slot) -> Option<Rec> {
@@ -500,7 +543,7 @@ impl State {
     }
 
     /// Events no process causes.
-    fn environment(&self, _config: &Config) -> Vec<Step> {
+    fn environment(&self, config: &Config) -> Vec<Step> {
         let mut out = Vec::new();
         if let Some(left) = self.left.evictions.checked_sub(1)
             && let Some(fs) = self.fs.evicted()
@@ -528,7 +571,7 @@ impl State {
             out.push((Label::Fill, Ok(next)));
         }
         if self.proc.is_none()
-            && let Some(next) = self.newer_write()
+            && let Some(next) = self.newer_write(config.block)
         {
             out.push((Label::NewerWrite, Ok(next)));
         }
@@ -537,7 +580,7 @@ impl State {
 
     /// A newer binary boots, reads the journal correctly, and writes one record to the slot
     /// that does not hold the winner, synced.
-    fn newer_write(&self) -> Option<Self> {
+    fn newer_write(&self, block: Block) -> Option<Self> {
         let left = self.left.newer.checked_sub(1)?;
         let (slot, seq) = self.winner_on_disk()?;
         // A newer binary keeps the rule that `seq >= 2` proves creation returned: it finishes
@@ -555,7 +598,7 @@ impl State {
         })?;
         next.fs = self
             .fs
-            .write(slot.other(), Content::Rec(rid), Block::B4096, None)
+            .write(slot.other(), Content::Rec(rid), block, None)
             .synced();
         next.ghost.floor = Some(rid);
         next.ghost.reset = false;

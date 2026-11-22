@@ -166,6 +166,30 @@ impl Sector {
         self.bad
     }
 
+    /// The cache image, where it differs from the disk or the page is dirty.
+    #[must_use]
+    pub const fn cache(&self) -> Option<Content> {
+        self.cache
+    }
+
+    /// The disk image.
+    #[must_use]
+    pub const fn disk(&self) -> Content {
+        self.disk
+    }
+
+    /// Whether the block is dirty.
+    #[must_use]
+    pub const fn dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// Whether the slot is a hole.
+    #[must_use]
+    pub const fn hole(&self) -> bool {
+        self.hole
+    }
+
     const EMPTY: Self = Self {
         cache: None,
         disk: Content::Zero,
