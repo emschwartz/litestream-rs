@@ -609,6 +609,33 @@ impl TickWorld for crate::World {
     }
 }
 
+/// The stores as the engine sees them: its newest staged transaction may be
+/// one an outside edit removed from staging (a backup put back), and an
+/// upload has caught up only when it reaches that one too (seed 0xf43fb: the
+/// replica took the restored files, the engine then missed its own newest
+/// and dropped from it, with the staging edit forgotten).
+#[derive(Debug)]
+pub struct WithEngine<'a, W> {
+    /// The stores.
+    pub world: &'a W,
+    /// The engine's newest staged transaction.
+    pub staged: Option<u64>,
+}
+
+impl<W: TickWorld> TickWorld for WithEngine<'_, W> {
+    fn full_image(&self, key: &FileKey) -> bool {
+        self.world.full_image(key)
+    }
+
+    fn newest_staged(&self) -> Option<u64> {
+        self.world.newest_staged().max(self.staged)
+    }
+
+    fn replica_newest(&self) -> Option<u64> {
+        self.world.replica_newest()
+    }
+}
+
 /// What one tick staged at level 0.
 #[derive(Clone, Copy, Debug, Default)]
 struct Staged {
@@ -623,6 +650,78 @@ struct Staged {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The stores after a staging backup was put back: staging's newest is
+    /// 25, the engine's own newest, 26, is gone from it.
+    struct Restored;
+
+    impl TickWorld for Restored {
+        fn full_image(&self, _: &FileKey) -> bool {
+            false
+        }
+        fn newest_staged(&self) -> Option<u64> {
+            Some(25)
+        }
+        fn replica_newest(&self) -> Option<u64> {
+            Some(25)
+        }
+    }
+
+    fn remote_put(txid: u64) -> RecorderEvent {
+        let zero = lsr_ltx::Timestamp::from_unix_millis(0);
+        RecorderEvent::Put {
+            key: FileKey::new(
+                lsr_core::Level::ZERO,
+                lsr_ltx::TxidRange::single(lsr_ltx::Txid::new(txid).unwrap()),
+            ),
+            header: None,
+            origin: None,
+            created_at: zero,
+            size: 0,
+            digest: 0,
+            at: zero,
+            high: zero,
+        }
+    }
+
+    /// An upload that reaches staging's newest file has not caught up while
+    /// the engine's own newest staged file is past it: the staging edit that
+    /// removed that file stays in the window (seed 0xf43fb).
+    #[test]
+    fn an_upload_short_of_the_engines_newest_staged_file_keeps_a_staging_edit() {
+        let mut live = Liveness::new();
+        let mut reach = Reach::default();
+        live.window.clear();
+        live.note(Justifier::StagingEdited);
+        let remote = [remote_put(24), remote_put(25)];
+        let engine = WithEngine {
+            world: &Restored,
+            staged: Some(26),
+        };
+        live.after_tick(
+            (&[], &remote),
+            &engine,
+            SnapshotCounts::default(),
+            false,
+            &mut reach,
+        )
+        .unwrap();
+        assert!(live.window.contains(&Justifier::StagingEdited));
+        live.remote_seen = 0;
+        let caught_up = WithEngine {
+            world: &Restored,
+            staged: Some(25),
+        };
+        live.after_tick(
+            (&[], &remote),
+            &caught_up,
+            SnapshotCounts::default(),
+            false,
+            &mut reach,
+        )
+        .unwrap();
+        assert!(!live.window.contains(&Justifier::StagingEdited));
+    }
 
     #[test]
     fn every_judged_cause_has_a_justifier() {
