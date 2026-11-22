@@ -102,7 +102,7 @@ use crate::source::{CheckpointMode, Checkpointer, CommittedRead, PageSource, Wal
 use crate::store::{ObjectStore, PageLimit};
 use crate::sync::{Step, StepEnd, SyncConfig, Synced, sync_step};
 use crate::upload::{
-    Did, UploadConfig, UploadPlan, UploadState, Uploaded, drop_staged_from, inventory_fault,
+    Did, Swept, UploadConfig, UploadPlan, UploadState, Uploaded, drop_staged_from, inventory_fault,
     plan_upload, sweep_staged, upload_next,
 };
 use crate::verify::LivePages;
@@ -714,7 +714,8 @@ impl Actor {
         if !self.kept.tasks.ready(Task::Sync, now) {
             return self.ran(Event::Idle, now);
         }
-        let (upload, lost) = match boot_listing(env.staging, env.remote).await {
+        let suspect = &mut self.kept.suspect_staged;
+        let (upload, lost) = match boot_listing(env.staging, env.remote, suspect).await {
             Ok(listed) => listed,
             Err(fault) => return self.fault(Task::Sync, fault, now),
         };
@@ -1316,11 +1317,19 @@ impl Actor {
                 }
                 Err(failed) => {
                     self.engine.upload = failed.state;
-                    if let (Fault::StagedLost, UploadPlan::Upload(key)) = (failed.fault, plan) {
+                    // One failed read says nothing about the staged bytes: the
+                    // file is dropped only when a read on a later tick fails too.
+                    if let (Fault::StagedLost, UploadPlan::Upload(key)) = (failed.fault, plan)
+                        && self.kept.suspect_staged.replace(key) == Some(key)
+                    {
+                        self.kept.suspect_staged = None;
                         return Some(self.lose_staged(env, key.range().min(), now).await);
                     }
                     return Some(self.fault(Task::Upload, failed.fault, now));
                 }
+            }
+            if matches!(last, Did::Put(_)) {
+                self.kept.suspect_staged = None;
             }
             match last {
                 Did::Nothing | Did::Diverged { .. } => break,
@@ -1514,17 +1523,32 @@ impl Actor {
         inventory: &Inventory,
         now: Timestamp,
     ) -> Option<Tick> {
-        let key = match read_back(remote, inventory).await {
+        let (key, covered) = match read_back(remote, inventory).await {
             Ok(ReadBack::Sound) => {
                 self.engine.maintain.read_back_owed = false;
+                self.engine.maintain.suspect = None;
                 return None;
             }
-            Ok(ReadBack::Rotten { key, covered: true }) => key,
-            Ok(ReadBack::Rotten { covered: false, .. }) => {
-                return Some(self.fault(Task::Maintenance, Fault::RemoteCorrupt, now));
-            }
+            Ok(ReadBack::Rotten { key, covered }) => (key, covered),
             Err(fault) => return Some(self.fault(Task::Maintenance, fault, now)),
         };
+        // One failed read says nothing about the bytes: act only when a read on
+        // a later tick fails too.
+        if self.engine.maintain.suspect.replace(key) != Some(key) {
+            let again = now.saturating_add(self.kept.cfg.retry_interval);
+            self.engine.maintain.stale = false;
+            self.engine.maintain.until = Some(again);
+            self.maintained(now);
+            let event = Event::Maintained {
+                event: MaintainedEvent::Waiting { held: None },
+                created_at_read: 0,
+            };
+            return Some(self.ran(event, now));
+        }
+        self.engine.maintain.suspect = None;
+        if !covered {
+            return Some(self.fault(Task::Maintenance, Fault::RemoteCorrupt, now));
+        }
         if let Err(err) = remote.delete(&[key]).await {
             return Some(self.fault(Task::Maintenance, Fault::from_remote(&err), now));
         }
@@ -1803,9 +1827,15 @@ struct Booted {
 /// anything is staged.
 /// Boot's listing and staging sweep: the upload state to start from, and the
 /// first staged transaction deleted, if any was.
+///
+/// A staged file that fails verification is deleted, with all after it, only
+/// when it is `suspect`, the file a read on an earlier tick failed on;
+/// otherwise it becomes the suspect and the boot fails with `StagedLost`, to
+/// read it again on the next try.
 async fn boot_listing<L: ObjectStore, R: ObjectStore>(
     staging: &L,
     remote: &R,
+    suspect: &mut Option<FileKey>,
 ) -> Result<(UploadState, Option<Txid>), Fault> {
     // At boot a replica ahead of the local newest staged file is `recover`'s to judge (a
     // snapshot after it), not the uploader's (a stop), so the listing names no newest staged file.
@@ -1823,7 +1853,15 @@ async fn boot_listing<L: ObjectStore, R: ObjectStore>(
     if let Some(from) = diverged {
         drop_staged_from(staging, from).await?;
     }
-    let lost = sweep_staged(staging, upload.confirmed()).await?;
+    let lost = match sweep_staged(staging, upload.confirmed(), *suspect).await? {
+        Swept::Clean => None,
+        Swept::Suspect(key) => {
+            *suspect = Some(key);
+            return Err(Fault::StagedLost);
+        }
+        Swept::Dropped(from) => Some(from),
+    };
+    *suspect = None;
     Ok((upload, lost.or(diverged)))
 }
 

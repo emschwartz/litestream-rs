@@ -438,7 +438,8 @@ fn a_rebuild_keeps_a_snapshot_request_made_behind_another_cause() {
     rig.commit(2);
     rig.tick(&mut actor, T0 + 1);
     tear(&rig, 2, truncated);
-    let lost = rig.tick(&mut actor, T0 + 1);
+    let again = first_bad_read(&mut rig, &mut actor, T0 + 1);
+    let lost = rig.tick(&mut actor, again);
     let was = actor.pending_snapshot();
     assert_eq!(
         was,

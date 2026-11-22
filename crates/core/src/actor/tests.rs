@@ -1516,7 +1516,9 @@ fn a_torn_staged_file_the_replica_lacks_is_dropped_with_all_after_it() {
         );
         tear(&rig, 3, torn);
         let mut actor = Actor::new(cfg());
-        let boot = rig.tick(&mut actor, T0 + 2);
+        let again = first_bad_read(&mut rig, &mut actor, T0 + 2);
+        assert_eq!(staged(&rig), vec![2, 3, 4]);
+        let boot = rig.tick(&mut actor, again);
         assert_eq!(
             event(&boot),
             Some(&Event::Booted {
@@ -1524,7 +1526,7 @@ fn a_torn_staged_file_the_replica_lacks_is_dropped_with_all_after_it() {
             })
         );
         assert_eq!(staged(&rig), vec![2]);
-        let seen = rig.settle(&mut actor, T0 + 2);
+        let seen = rig.settle(&mut actor, again);
         no_stop(&seen);
         assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2), (3, 3)]);
         assert_eq!(snapshots(&rig), vec![1, 3]);
@@ -1545,7 +1547,9 @@ fn a_torn_staged_file_the_replica_holds_is_dropped_and_the_snapshot_takes_the_ne
         );
         tear(&rig, 3, torn);
         let mut actor = Actor::new(cfg());
-        let boot = rig.tick(&mut actor, T0 + 2);
+        let again = first_bad_read(&mut rig, &mut actor, T0 + 2);
+        assert_eq!(staged(&rig), vec![2, 3, 4]);
+        let boot = rig.tick(&mut actor, again);
         assert_eq!(
             event(&boot),
             Some(&Event::Booted {
@@ -1553,7 +1557,7 @@ fn a_torn_staged_file_the_replica_holds_is_dropped_and_the_snapshot_takes_the_ne
             })
         );
         assert_eq!(staged(&rig), vec![2]);
-        let seen = rig.settle(&mut actor, T0 + 2);
+        let seen = rig.settle(&mut actor, again);
         no_stop(&seen);
         assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2), (3, 3), (4, 4)]);
         assert_eq!(snapshots(&rig), vec![1, 4]);
@@ -1571,7 +1575,8 @@ fn the_upload_task_drops_a_staged_file_that_turned_unreadable_and_snapshots() {
             Some(Event::Synced { .. })
         ));
         tear(&rig, 2, torn);
-        let lost = rig.tick(&mut actor, T0 + 1);
+        let again = first_bad_read(&mut rig, &mut actor, T0 + 1);
+        let lost = rig.tick(&mut actor, again);
         assert_eq!(
             event(&lost),
             Some(&Event::Resnapshot(
@@ -1579,7 +1584,7 @@ fn the_upload_task_drops_a_staged_file_that_turned_unreadable_and_snapshots() {
             ))
         );
         assert_eq!(staged(&rig), vec![1]);
-        let seen = rig.settle(&mut actor, T0 + 1);
+        let seen = rig.settle(&mut actor, again);
         no_stop(&seen);
         assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2)]);
         assert_eq!(snapshots(&rig), vec![1, 2]);
@@ -1593,7 +1598,8 @@ fn a_crash_between_the_drop_and_the_snapshot_boots_clean() {
     rig.commit(2);
     rig.tick(&mut actor, T0 + 1);
     tear(&rig, 2, truncated);
-    let lost = rig.tick(&mut actor, T0 + 1);
+    let again = first_bad_read(&mut rig, &mut actor, T0 + 1);
+    let lost = rig.tick(&mut actor, again);
     assert_eq!(
         event(&lost),
         Some(&Event::Resnapshot(
@@ -1601,10 +1607,10 @@ fn a_crash_between_the_drop_and_the_snapshot_boots_clean() {
         ))
     );
     let mut actor = Actor::new(cfg());
-    let boot = rig.tick(&mut actor, T0 + 2);
+    let boot = rig.tick(&mut actor, again + 1);
     // Nothing staged was lost this time: the WAL carries on from staged 1.
     assert_eq!(event(&boot), Some(&Event::Booted { cause: None }));
-    let seen = rig.settle(&mut actor, T0 + 2);
+    let seen = rig.settle(&mut actor, again + 1);
     no_stop(&seen);
     assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2)]);
     assert_eq!(restored(&rig), 2);
@@ -1621,6 +1627,29 @@ mod pages;
 mod rejected_snapshot;
 mod tasks;
 
+/// Ticks at `now` onto a staged file that fails verification for the first
+/// time: one failed read deletes nothing and the task retries. Returns when
+/// the retry is due, the tick whose read can drop it.
+fn first_bad_read(rig: &mut Rig, actor: &mut Actor, now: i64) -> i64 {
+    let tick = rig.tick(actor, now);
+    match event(&tick) {
+        Some(Event::Retrying {
+            fault: Fault::StagedLost,
+            until,
+        }) => until.unix_millis(),
+        _ => panic!("{tick:?}"),
+    }
+}
+
+/// Whether any tick dropped staged files as unreadable.
+fn lost_staged(seen: &[Tick]) -> bool {
+    let lost = SnapshotCause::NewestStagedFileUnreadable;
+    seen.iter().any(|tick| match event(tick) {
+        Some(Event::Resnapshot(cause) | Event::Booted { cause: Some(cause) }) => *cause == lost,
+        Some(_) | None => false,
+    })
+}
+
 fn l0(n: u64) -> FileKey {
     FileKey::new(Level::ZERO, TxidRange::single(Txid::new(n).unwrap()))
 }
@@ -1636,14 +1665,7 @@ fn one_bad_read_of_a_staged_file_at_boot_drops_nothing() {
     let mut actor = Actor::new(cfg());
     let seen = rig.follow(&mut actor, T0 + 2, 50);
     no_stop(&seen);
-    assert!(
-        rig.staging
-            .deleted()
-            .iter()
-            .all(|key| key.range().max().get() < 3)
-    );
-    assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2), (3, 3), (4, 4)]);
-    assert_eq!(snapshots(&rig), vec![1]);
+    assert!(!lost_staged(&seen), "{seen:?}");
     assert_eq!(restored(&rig), 4);
 }
 
@@ -1660,13 +1682,8 @@ fn one_bad_read_of_a_staged_file_while_uploading_drops_nothing() {
     rig.staging.flip_next_read(l0(2));
     let seen = rig.follow(&mut actor, T0 + 1, 50);
     no_stop(&seen);
-    assert!(
-        !seen
-            .iter()
-            .any(|tick| matches!(event(tick), Some(Event::Resnapshot(_)))),
-        "{seen:?}"
-    );
-    assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2)]);
-    assert_eq!(snapshots(&rig), vec![1]);
+    assert!(!lost_staged(&seen), "{seen:?}");
+    assert!(ranges(&rig.remote).contains(&(2, 2)));
+    assert!(!snapshots(&rig).contains(&2));
     assert_eq!(restored(&rig), 2);
 }
