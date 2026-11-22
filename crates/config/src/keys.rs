@@ -323,6 +323,10 @@ const RUST: &[Key] = &[
 #[cfg(test)]
 pub(crate) const RESPONSE_KEYS: &[&str] = &[
     "credentials",
+    "permission-denied",
+    "clock-skew",
+    "bucket-missing",
+    "tls",
     "store-refused",
     "remote-corrupt",
     "remote-regressed",
@@ -337,6 +341,10 @@ pub(crate) const RESPONSE_KEYS: &[&str] = &[
 
 const RESPONSES: &[Key] = &[
     key("credentials", Str, Implemented),
+    key("permission-denied", Str, Implemented),
+    key("clock-skew", Str, Implemented),
+    key("bucket-missing", Str, Implemented),
+    key("tls", Str, Implemented),
     key("store-refused", Str, Implemented),
     key("remote-corrupt", Str, Implemented),
     key("remote-regressed", Str, Implemented),

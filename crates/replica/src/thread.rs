@@ -137,6 +137,14 @@ impl Progress {
         };
         self.left = left;
     }
+
+    /// No booted engine vouches for the replica: nothing proves it holds every commit, so the
+    /// lag counts from the earliest reading that could not tell. Before the first boot that is
+    /// the start, and a database that was caught up keeps no claim of zero lag while a rebuilt
+    /// engine waits to boot.
+    fn unproven(&mut self, now: Timestamp) {
+        self.unreplicated_since = self.unreplicated_since.or(Some(now));
+    }
 }
 
 /// What the health snapshot remembers between ticks.
@@ -585,7 +593,10 @@ impl Worker {
                 self.progress.advance(engine, left, now);
                 left
             }
-            (Some(_) | None, _) => self.counted_high(),
+            (Some(_) | None, _) => {
+                self.progress.unproven(now);
+                self.counted_high()
+            }
         };
         let (wal_bytes, db_bytes) = self.sizes();
         let snapshot = SnapshotParts {

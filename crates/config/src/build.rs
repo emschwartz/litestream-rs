@@ -582,6 +582,10 @@ fn responses(fields: &Fields, walk: &mut Walk) -> ResponseSettings {
     };
     let mut settings = ResponseSettings {
         credentials: one("credentials"),
+        permission_denied: one("permission-denied"),
+        clock_skew: one("clock-skew"),
+        bucket_missing: one("bucket-missing"),
+        tls: one("tls"),
         store_refused: one("store-refused"),
         remote_corrupt: one("remote-corrupt"),
         remote_regressed: one("remote-regressed"),
