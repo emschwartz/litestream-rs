@@ -102,8 +102,8 @@ use crate::source::{CheckpointMode, Checkpointer, CommittedRead, PageSource, Wal
 use crate::store::{ObjectStore, PageLimit};
 use crate::sync::{Step, StepEnd, SyncConfig, Synced, sync_step};
 use crate::upload::{
-    Did, UploadConfig, UploadPlan, UploadState, drop_staged_from, inventory_fault, plan_upload,
-    sweep_staged, upload_next,
+    Did, UploadConfig, UploadPlan, UploadState, Uploaded, drop_staged_from, inventory_fault,
+    plan_upload, sweep_staged, upload_next,
 };
 use crate::verify::LivePages;
 
@@ -714,15 +714,8 @@ impl Actor {
         if !self.kept.tasks.ready(Task::Sync, now) {
             return self.ran(Event::Idle, now);
         }
-        // At boot a replica ahead of the local newest staged file is `recover`'s to judge (a
-        // snapshot after it), not the uploader's (a stop), so the listing names no newest staged file.
-        let start = UploadState::ListFirst { confirmed: None };
-        let upload = match upload_next(start, env.staging, env.remote, Some(Txid::MAX)).await {
-            Ok(listed) => listed.state,
-            Err(failed) => return self.fault(Task::Sync, failed.fault, now),
-        };
-        let lost = match sweep_staged(env.staging, upload.confirmed()).await {
-            Ok(lost) => lost,
+        let (upload, lost) = match boot_listing(env.staging, env.remote).await {
+            Ok(listed) => listed,
             Err(fault) => return self.fault(Task::Sync, fault, now),
         };
         let booted = boot_recover(env.wal, env.staging, env.remote, upload.confirmed()).await;
@@ -1316,6 +1309,9 @@ impl Actor {
             match upload_next(self.engine.upload, env.staging, env.remote, self.staged()).await {
                 Ok(uploaded) => {
                     self.engine.upload = uploaded.state;
+                    if let Did::Diverged { at } = uploaded.did {
+                        return Some(self.lose_staged(env, at, now).await);
+                    }
                     last = uploaded.did;
                 }
                 Err(failed) => {
@@ -1327,7 +1323,7 @@ impl Actor {
                 }
             }
             match last {
-                Did::Nothing => break,
+                Did::Nothing | Did::Diverged { .. } => break,
                 Did::Listed { .. } => self.engine.maintain.stale = true,
                 Did::Put(_) => {
                     let at = listing_after_upload(now, &self.kept.cfg.maintenance);
@@ -1342,10 +1338,13 @@ impl Actor {
         Some(self.ran(Event::Uploaded(last), now))
     }
 
-    /// The staged file `from` is missing or does not verify. It and every
-    /// staged file after it are deleted, and the next sync is a snapshot at
-    /// `from`: the replica holds everything before it (the upload task only
-    /// uploads the confirmed transaction plus one), so the chain has no hole.
+    /// The staged file `from` is missing, does not verify, or differs from the
+    /// replica's verifying object under the same key. It and every staged file
+    /// after it are deleted, and the next sync is a snapshot after the newer of
+    /// `from - 1` and the confirmed transaction: the replica holds everything
+    /// before `from` (the upload task only uploads the confirmed transaction
+    /// plus one), so the chain has no hole, and when it holds `from` itself
+    /// (a divergence confirms it) the snapshot goes above it.
     async fn lose_staged<
         W: WalSource,
         P: PageSource,
@@ -1802,6 +1801,32 @@ struct Booted {
 /// level-0 file), the replica's page size, and what recovery makes of them.
 /// A WAL whose page size is not the replica's stops here, before
 /// anything is staged.
+/// Boot's listing and staging sweep: the upload state to start from, and the
+/// first staged transaction deleted, if any was.
+async fn boot_listing<L: ObjectStore, R: ObjectStore>(
+    staging: &L,
+    remote: &R,
+) -> Result<(UploadState, Option<Txid>), Fault> {
+    // At boot a replica ahead of the local newest staged file is `recover`'s to judge (a
+    // snapshot after it), not the uploader's (a stop), so the listing names no newest staged file.
+    let start = UploadState::ListFirst { confirmed: None };
+    let (upload, diverged) = match upload_next(start, staging, remote, Some(Txid::MAX)).await {
+        Ok(Uploaded {
+            state,
+            did: Did::Diverged { at },
+        }) => (state, Some(at)),
+        Ok(listed) => (listed.state, None),
+        Err(failed) => return Err(failed.fault),
+    };
+    // The replica's object at `at` stands: the staged files from it on are
+    // another history, and the replica is then ahead of staging.
+    if let Some(at) = diverged {
+        drop_staged_from(staging, at).await?;
+    }
+    let lost = sweep_staged(staging, upload.confirmed()).await?;
+    Ok((upload, lost.or(diverged)))
+}
+
 async fn boot_recover<W: WalSource, L: ObjectStore, R: ObjectStore>(
     wal: &mut W,
     staging: &L,

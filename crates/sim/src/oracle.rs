@@ -275,6 +275,7 @@ impl Acked {
     pub fn on_did(&mut self, did: &Did) {
         match did {
             Did::Put(info) => self.record(info.key.range().max()),
+            Did::Diverged { at } => self.record(*at),
             Did::Listed {
                 newest: Some(newest),
             } => self.record(*newest),
