@@ -150,9 +150,12 @@ fn a_rolled_back_bucket_never_gets_a_transaction_id_reused_across_a_restart_seed
 fn an_id_the_replica_holds_is_not_taken_again_after_a_lying_read_seed_0xb6b() {
     use lsr_sim::{Seed, Weights, history, run as run_drawn};
     let seed = Seed::new(0xb6b);
-    // The mix as drawn when the campaign found it, before the lagging-listings law.
+    // The mix as drawn when the campaign found it, before the lagging-listings law, the
+    // directory staging store and the error domain.
     let weights = Weights {
         lagging_listings: 0,
+        staging_fs: false,
+        error_domain: false,
         ..Weights::mixed(seed)
     };
     let ops = history(seed, 300, &weights);
@@ -162,7 +165,7 @@ fn an_id_the_replica_holds_is_not_taken_again_after_a_lying_read_seed_0xb6b() {
             (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
         });
     assert_eq!(
-        digest, 0x3940_d9b0_1d42_c88a,
+        digest, 0x3c92_6a6f_6a06_0c46,
         "the live generator changed seed 0xb6b's run"
     );
     if let Err(failure) = run_drawn(seed, 300, &weights) {
