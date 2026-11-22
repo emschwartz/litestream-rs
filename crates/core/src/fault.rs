@@ -93,8 +93,10 @@ pub enum Fault {
     /// too (one failed read says nothing about the stored bytes), the engine
     /// deletes that file and every staged file after it, and the next file is
     /// a snapshot taking the first transaction the replica lacks, so the chain
-    /// has no hole (`upload::sweep_staged` at boot, the upload task mid-run;
-    /// elsewhere the task retries and the next boot sweeps).
+    /// has no hole (the upload task mid-run; elsewhere the task retries and
+    /// the next boot sweeps). At boot (`upload::sweep_staged`) recovery then
+    /// judges the newest file left, and when the WAL continues from it the
+    /// deleted range is staged again from the WAL instead.
     ///
     /// A file that tears this way was never acknowledged as staged: its
     /// commit had not returned. The filesystem store syncs a file before its

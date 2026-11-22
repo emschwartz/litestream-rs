@@ -1653,8 +1653,11 @@ fn stage_held(rig: &mut Rig, actor: &mut Actor, commits: &[u8], now: i64) {
     }
 }
 
+/// A torn staged file the replica lacks goes with every staged file after
+/// it. The WAL still follows the newest file left, so it holds the frames of
+/// the dropped ones: they are staged again from it, with no snapshot.
 #[test]
-fn a_torn_staged_file_the_replica_lacks_is_dropped_with_all_after_it() {
+fn a_torn_staged_file_the_replica_lacks_is_dropped_and_staged_again_from_the_wal() {
     for torn in [truncated, flipped] {
         let (mut rig, mut actor) = caught_up();
         stage_held(&mut rig, &mut actor, &[2, 3, 4], T0 + 1);
@@ -1667,19 +1670,37 @@ fn a_torn_staged_file_the_replica_lacks_is_dropped_with_all_after_it() {
         let again = first_bad_read(&mut rig, &mut actor, T0 + 2);
         assert_eq!(staged(&rig), vec![2, 3, 4]);
         let boot = rig.tick(&mut actor, again);
-        assert_eq!(
-            event(&boot),
-            Some(&Event::Booted {
-                cause: Some(SnapshotCause::NewestStagedFileUnreadable)
-            })
-        );
+        assert_eq!(event(&boot), Some(&Event::Booted { cause: None }));
         assert_eq!(staged(&rig), vec![2]);
         let seen = rig.settle(&mut actor, again);
         no_stop(&seen);
         assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2), (3, 3)]);
-        assert_eq!(snapshots(&rig), vec![1, 3]);
+        assert_eq!(snapshots(&rig), vec![1]);
         assert_eq!(restored(&rig), 4);
     }
+}
+
+/// The same drop when the WAL has since restarted: nothing live holds the
+/// dropped frames, so the next file is a snapshot, named for the lost file.
+#[test]
+fn a_torn_staged_file_whose_frames_the_wal_lost_costs_a_snapshot() {
+    let (mut rig, mut actor) = caught_up();
+    stage_held(&mut rig, &mut actor, &[2, 3, 4], T0 + 1);
+    tear(&rig, 3, truncated);
+    rig.wal.force_restart();
+    rig.commit(5);
+    let mut actor = Actor::new(cfg());
+    let again = first_bad_read(&mut rig, &mut actor, T0 + 2);
+    let boot = rig.tick(&mut actor, again);
+    assert_eq!(
+        event(&boot),
+        Some(&Event::Booted {
+            cause: Some(SnapshotCause::NewestStagedFileUnreadable)
+        })
+    );
+    let seen = rig.settle(&mut actor, again);
+    no_stop(&seen);
+    assert_eq!(restored(&rig), 5);
 }
 
 #[test]

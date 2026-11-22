@@ -853,7 +853,7 @@ impl Actor {
             return self.ran(Event::Idle, now);
         }
         let suspect = &mut self.kept.suspect_staged;
-        let (upload, lost) = match boot_listing(env.staging, env.remote, suspect).await {
+        let (upload, dropped) = match boot_listing(env.staging, env.remote, suspect).await {
             Ok(listed) => listed,
             Err(fault) => return self.fault(Task::Sync, fault, now),
         };
@@ -875,7 +875,7 @@ impl Actor {
             Recovered::Snapshot { cause, .. } => Err(cause),
             Recovered::Stop(cause) => return self.verdict(Task::Sync, cause, now),
         };
-        let cause = boot_cause(lost, refused, from.err());
+        let cause = boot_cause(dropped, refused, from.err());
         let pending = pending_at_boot(self.kept.asked(), cause);
         let course = match (from, pending) {
             (Ok(position), snapshot) => Course::At {
@@ -2027,8 +2027,20 @@ struct Booted {
 /// level-0 file), the replica's page size, and what recovery makes of them.
 /// A WAL whose page size is not the replica's stops here, before
 /// anything is staged.
-/// Boot's listing and staging sweep: the upload state to start from, and the
-/// first staged transaction deleted, if any was.
+/// What boot's listing and sweep deleted from staging, from which transaction on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Dropped {
+    /// Nothing.
+    Nothing,
+    /// A staged file that failed verification twice, and every one after it.
+    Unreadable(Txid),
+    /// The staged files from the replica's newest level-0 transaction on:
+    /// the replica holds another verifying file under that key.
+    Diverged(Txid),
+}
+
+/// Boot's listing and staging sweep: the upload state to start from, and
+/// what was deleted.
 ///
 /// A staged file that fails verification is deleted, with all after it, only
 /// when it is `suspect`, the file a read on an earlier tick failed on;
@@ -2038,7 +2050,7 @@ async fn boot_listing<L: ObjectStore, R: ObjectStore>(
     staging: &L,
     remote: &R,
     suspect: &mut Option<FileKey>,
-) -> Result<(UploadState, Option<Txid>), Fault> {
+) -> Result<(UploadState, Dropped), Fault> {
     // At boot a replica ahead of the local newest staged file is `recover`'s to judge (a
     // snapshot after it), not the uploader's (a stop), so the listing names no newest staged file.
     let start = UploadState::ListFirst { confirmed: None };
@@ -2066,7 +2078,12 @@ async fn boot_listing<L: ObjectStore, R: ObjectStore>(
         Swept::Dropped(from) => Some(from),
     };
     *suspect = None;
-    Ok((upload, lost.or(diverged)))
+    let dropped = match (diverged, lost) {
+        (Some(from), _) => Dropped::Diverged(from),
+        (None, Some(from)) => Dropped::Unreadable(from),
+        (None, None) => Dropped::Nothing,
+    };
+    Ok((upload, dropped))
 }
 
 /// Boot's witness pass over the pending staged files (`crate::witness`).
@@ -2238,20 +2255,29 @@ async fn replica_page_size<R: ObjectStore>(remote: &R) -> Result<Option<PageSize
     Ok(header.map(|header| header.page_size()))
 }
 
-/// Why a boot's first sync is a snapshot. A staged file that did not verify
-/// was deleted with all after it: the next file is a snapshot even when the
-/// WAL could continue. One the WAL did not vouch for (`refused`) was
-/// regenerated from the WAL when the position continues, and otherwise is
-/// named as what the snapshot replaces.
+/// Why a boot's first sync is a snapshot.
+///
+/// Staged files that diverged from the replica's newest file are a snapshot
+/// whatever the WAL says: the replica holds other content under that
+/// transaction, and the next file must go above it. A staged file deleted as
+/// unreadable, or one the WAL did not vouch for (`refused`), is staged again
+/// from the WAL when recovery continues: recovery judged the newest file left
+/// against the live WAL, so the WAL holds every frame after it. A deleted
+/// file the replica already holds leaves staging behind the replica, which
+/// recovery answers with a snapshot (`BehindRemote`), so continuing never
+/// stages new content under a transaction the replica shows. When recovery
+/// cannot continue, the snapshot is named for what it replaces.
 const fn boot_cause(
-    lost: Option<Txid>,
+    dropped: Dropped,
     refused: Option<Txid>,
     recovered: Option<SnapshotCause>,
 ) -> Option<SnapshotCause> {
-    match (lost, refused, recovered) {
-        (Some(_), _, _) => Some(SnapshotCause::NewestStagedFileUnreadable),
-        (None, Some(from), Some(_)) => Some(SnapshotCause::StagedUnverified { from }),
-        (None, _, recovered) => recovered,
+    match (dropped, refused, recovered) {
+        (Dropped::Diverged(_), _, _) | (Dropped::Unreadable(_), _, Some(_)) => {
+            Some(SnapshotCause::NewestStagedFileUnreadable)
+        }
+        (Dropped::Nothing, Some(from), Some(_)) => Some(SnapshotCause::StagedUnverified { from }),
+        (Dropped::Unreadable(_) | Dropped::Nothing, _, recovered) => recovered,
     }
 }
 
