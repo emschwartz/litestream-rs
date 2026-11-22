@@ -10,7 +10,8 @@
 //! state machine hands it a [`Next`].
 //!
 //! A [`Policy::Persistent`] fault is one that waiting alone is not expected to
-//! fix: credentials refused, a corrupt object, a damaged WAL, another writer.
+//! fix: credentials refused, a corrupt object, a damaged WAL, a failed WAL
+//! sync, another writer.
 //! What happens then is configuration, one field of [`Responses`] per
 //! [`PersistentCause`] (`docs/PLAN.md`, the degraded-state section). [`Response::KeepTrying`]
 //! puts the task that failed in a degraded state: it retries with the doubling
@@ -98,10 +99,14 @@ pub enum Fault {
     LocalDiskFull,
     /// A local read or write failed.
     LocalIo,
-    /// An fsync failed. Of a staged file: encode and write it again. Of the
-    /// WAL, before staging (`WalSource::sync`): nothing is staged, and the
-    /// source keeps refusing, so the retries end degraded.
+    /// The fsync of a staged file failed: encode and write it again.
     LocalFsyncFailed,
+    /// The engine's fsync of the WAL before staging (`WalSource::sync`) failed.
+    /// Nothing is staged, and no later sync of the same WAL generation is
+    /// trusted: the kernel calls the pages clean after reporting the failure
+    /// once, so the frames it covered may never reach the disk however many
+    /// later syncs succeed (`actor::unproven` has the way out).
+    WalSyncFailed,
     /// SQLite is busy, or the wal-index is mid-update.
     SqliteBusy,
     /// A TRUNCATE checkpoint was refused before SQLite was asked: the application
@@ -272,6 +277,10 @@ pub enum SnapshotCause {
     CheckpointBoundary,
     /// An operator asked.
     OperatorRequested,
+    /// The engine's fsync of the WAL failed, so the frames it covered were
+    /// never staged; a TRUNCATE checkpoint then wrote them into the database
+    /// file, and the snapshot takes them from there (`actor::unproven`).
+    WalSyncFailed,
     /// At boot, staged files the replica did not have yet were not vouched
     /// for by the live WAL (a staging backup put back, a file replaced, or a
     /// chain from a WAL generation that is gone), and the WAL could not
@@ -303,6 +312,8 @@ pub enum StopCause {
     WalTruncated,
     /// The WAL file is gone.
     WalUnlinked,
+    /// The engine's fsync of the WAL failed.
+    WalSyncFailed,
     /// The database's page size is not the one its replica holds. A replica
     /// prefix holds one page size, as Go's does (it reads the size once,
     /// `db.go:1191`, and its compactor refuses mixed sizes,
@@ -345,6 +356,8 @@ pub enum PersistentCause {
     WalTruncated,
     /// The WAL file is gone.
     WalUnlinked,
+    /// The engine's fsync of the WAL failed: what it covered is unproven.
+    WalSyncFailed,
     /// The database's page size is not the one its replica holds.
     PageSizeChanged {
         /// The replica's page size.
@@ -375,6 +388,7 @@ impl PersistentCause {
             StopCause::WalCorrupt => Some(Self::WalCorrupt),
             StopCause::WalTruncated => Some(Self::WalTruncated),
             StopCause::WalUnlinked => Some(Self::WalUnlinked),
+            StopCause::WalSyncFailed => Some(Self::WalSyncFailed),
             StopCause::PageSizeChanged { was, now } => Some(Self::PageSizeChanged { was, now }),
             StopCause::DatabasePageMismatch { pgno } => Some(Self::DatabasePageMismatch { pgno }),
             StopCause::Bug => Some(Self::Bug),
@@ -394,6 +408,7 @@ impl From<PersistentCause> for StopCause {
             PersistentCause::WalCorrupt => Self::WalCorrupt,
             PersistentCause::WalTruncated => Self::WalTruncated,
             PersistentCause::WalUnlinked => Self::WalUnlinked,
+            PersistentCause::WalSyncFailed => Self::WalSyncFailed,
             PersistentCause::PageSizeChanged { was, now } => Self::PageSizeChanged { was, now },
             PersistentCause::DatabasePageMismatch { pgno } => Self::DatabasePageMismatch { pgno },
             PersistentCause::Bug => Self::Bug,
@@ -444,6 +459,11 @@ pub struct Responses {
     pub wal_truncated: Response,
     /// The WAL file was deleted.
     pub wal_unlinked: Response,
+    /// The engine's fsync of the WAL failed. Keeping trying never stages a
+    /// frame the failed sync covered: it checkpoints the WAL with TRUNCATE,
+    /// so SQLite writes those pages into the database file again and syncs
+    /// it, and then snapshots from the database file (`actor::unproven`).
+    pub wal_sync_failed: Response,
     /// The database's page size is not the replica's. Keeping trying never
     /// writes the new size: the way out is a restart onto a new prefix.
     pub page_size_changed: Response,
@@ -471,6 +491,7 @@ impl Responses {
         wal_corrupt: Response::KeepTrying,
         wal_truncated: Response::KeepTrying,
         wal_unlinked: Response::KeepTrying,
+        wal_sync_failed: Response::KeepTrying,
         page_size_changed: Response::KeepTrying,
         database_page_mismatch: Response::KeepTrying,
         bug: Response::KeepTrying,
@@ -486,6 +507,7 @@ impl Responses {
         wal_corrupt: Response::Stop,
         wal_truncated: Response::Stop,
         wal_unlinked: Response::Stop,
+        wal_sync_failed: Response::Stop,
         page_size_changed: Response::Stop,
         database_page_mismatch: Response::Stop,
         bug: Response::Stop,
@@ -510,6 +532,7 @@ impl Responses {
             PersistentCause::WalCorrupt => self.wal_corrupt,
             PersistentCause::WalTruncated => self.wal_truncated,
             PersistentCause::WalUnlinked => self.wal_unlinked,
+            PersistentCause::WalSyncFailed => self.wal_sync_failed,
             PersistentCause::PageSizeChanged { .. } => self.page_size_changed,
             PersistentCause::DatabasePageMismatch { .. } => self.database_page_mismatch,
             PersistentCause::RemoteRegressed => {
@@ -618,6 +641,7 @@ pub const fn policy(fault: &Fault) -> Policy {
         Fault::WalCorruptBelowCommitted => Policy::Persistent(PersistentCause::WalCorrupt),
         Fault::WalTruncatedBelowCommitted => Policy::Persistent(PersistentCause::WalTruncated),
         Fault::WalUnlinked => Policy::Persistent(PersistentCause::WalUnlinked),
+        Fault::WalSyncFailed => Policy::Persistent(PersistentCause::WalSyncFailed),
         Fault::DatabasePageMismatch { pgno } => {
             Policy::Persistent(PersistentCause::DatabasePageMismatch { pgno: *pgno })
         }
@@ -778,7 +802,7 @@ impl Fault {
         match err {
             SourceError::Io(_) | SourceError::Short { .. } => Self::LocalIo,
             SourceError::DiskFull => Self::LocalDiskFull,
-            SourceError::FsyncFailed => Self::LocalFsyncFailed,
+            SourceError::FsyncFailed => Self::WalSyncFailed,
             SourceError::Busy => Self::SqliteBusy,
             SourceError::ReadersHeld => Self::ReadersHeld,
             SourceError::Unlinked => Self::WalUnlinked,
@@ -817,6 +841,7 @@ impl Fault {
             | Self::LocalDiskFull
             | Self::LocalIo
             | Self::LocalFsyncFailed
+            | Self::WalSyncFailed
             | Self::SqliteBusy
             | Self::ReadersHeld
             | Self::WalMoved

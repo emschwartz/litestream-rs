@@ -87,6 +87,7 @@ const fn is_page_mismatch(cause: PersistentCause) -> bool {
         | PersistentCause::WalCorrupt
         | PersistentCause::WalTruncated
         | PersistentCause::WalUnlinked
+        | PersistentCause::WalSyncFailed
         | PersistentCause::PageSizeChanged { .. }
         | PersistentCause::Bug => false,
     }

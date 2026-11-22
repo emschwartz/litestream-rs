@@ -171,6 +171,7 @@ pub(crate) const fn cause_name(cause: DegradedCause) -> &'static str {
         DegradedCause::WalCorrupt => "wal_corrupt",
         DegradedCause::WalTruncated => "wal_truncated",
         DegradedCause::WalUnlinked => "wal_unlinked",
+        DegradedCause::WalSyncFailed => "wal_sync_failed",
         DegradedCause::PageSizeChanged { .. } => "page_size_changed",
         DegradedCause::DatabasePageMismatch { .. } => "database_page_mismatch",
         DegradedCause::Bug => "bug",
@@ -201,6 +202,7 @@ pub(crate) const fn snapshot_name(cause: SnapshotCause) -> &'static str {
         SnapshotCause::CheckpointBoundary => "checkpoint_boundary",
         SnapshotCause::OperatorRequested => "operator_requested",
         SnapshotCause::StagedUnverified { .. } => "staged_unverified",
+        SnapshotCause::WalSyncFailed => "wal_sync_failed",
     }
 }
 

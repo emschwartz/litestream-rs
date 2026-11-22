@@ -155,6 +155,11 @@ policy_is!(
     persistent(PersistentCause::WalUnlinked)
 );
 policy_is!(
+    wal_sync_failed_is_persistent,
+    Fault::WalSyncFailed,
+    persistent(PersistentCause::WalSyncFailed)
+);
+policy_is!(
     shutdown_deadline_stops,
     Fault::ShutdownDeadline,
     Policy::Shutdown
@@ -199,6 +204,7 @@ fn every_fault_has_a_named_policy_test() {
         | Fault::WalCorruptBelowCommitted
         | Fault::WalTruncatedBelowCommitted
         | Fault::WalUnlinked
+        | Fault::WalSyncFailed
         | Fault::DatabasePageMismatch { .. }
         | Fault::ShutdownDeadline
         | Fault::Bug(_) => true,
@@ -210,7 +216,7 @@ fn page_two() -> PageNo {
     PageNo::new(2, PageSize::MIN).unwrap()
 }
 
-fn every_persistent_cause() -> [PersistentCause; 11] {
+fn every_persistent_cause() -> [PersistentCause; 12] {
     [
         PersistentCause::Credentials,
         PersistentCause::StoreRefused,
@@ -220,6 +226,7 @@ fn every_persistent_cause() -> [PersistentCause; 11] {
         PersistentCause::WalCorrupt,
         PersistentCause::WalTruncated,
         PersistentCause::WalUnlinked,
+        PersistentCause::WalSyncFailed,
         PersistentCause::PageSizeChanged {
             was: PageSize::MIN,
             now: ps(),
@@ -241,6 +248,7 @@ fn every_persistent_cause_is_listed() {
         | PersistentCause::WalCorrupt
         | PersistentCause::WalTruncated
         | PersistentCause::WalUnlinked
+        | PersistentCause::WalSyncFailed
         | PersistentCause::PageSizeChanged { .. }
         | PersistentCause::DatabasePageMismatch { .. }
         | PersistentCause::Bug => true,
@@ -286,6 +294,7 @@ fn keeping_trying_rebuilds_where_the_state_cannot_be_trusted() {
             | PersistentCause::WalCorrupt
             | PersistentCause::WalTruncated
             | PersistentCause::WalUnlinked
+            | PersistentCause::WalSyncFailed
             | PersistentCause::PageSizeChanged { .. }
             | PersistentCause::DatabasePageMismatch { .. } => Action::Retry,
         };
@@ -309,6 +318,7 @@ fn each_field_names_one_cause() {
             PersistentCause::WalCorrupt => one.wal_corrupt = Response::Stop,
             PersistentCause::WalTruncated => one.wal_truncated = Response::Stop,
             PersistentCause::WalUnlinked => one.wal_unlinked = Response::Stop,
+            PersistentCause::WalSyncFailed => one.wal_sync_failed = Response::Stop,
             PersistentCause::PageSizeChanged { .. } => one.page_size_changed = Response::Stop,
             PersistentCause::DatabasePageMismatch { .. } => {
                 one.database_page_mismatch = Response::Stop;
@@ -700,7 +710,7 @@ fn from_source_maps_every_variant() {
     let cases = [
         (SourceError::Io(ErrorKind::BrokenPipe), Fault::LocalIo),
         (SourceError::DiskFull, Fault::LocalDiskFull),
-        (SourceError::FsyncFailed, Fault::LocalFsyncFailed),
+        (SourceError::FsyncFailed, Fault::WalSyncFailed),
         (SourceError::Busy, Fault::SqliteBusy),
         (SourceError::ReadersHeld, Fault::ReadersHeld),
         (SourceError::Short { pgno: page() }, Fault::LocalIo),

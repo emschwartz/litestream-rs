@@ -78,6 +78,8 @@ pub enum FaultKind {
     WalTruncatedBelowCommitted,
     /// [`Fault::WalUnlinked`].
     WalUnlinked,
+    /// [`Fault::WalSyncFailed`].
+    WalSyncFailed,
     /// [`Fault::DatabasePageMismatch`].
     DatabasePageMismatch,
     /// [`Fault::ShutdownDeadline`].
@@ -88,7 +90,7 @@ pub enum FaultKind {
 
 impl FaultKind {
     /// Every fault, in the order of [`Fault`].
-    pub const ALL: [Self; 28] = [
+    pub const ALL: [Self; 29] = [
         Self::StoreTransient,
         Self::StoreThrottled,
         Self::StoreAuth,
@@ -114,6 +116,7 @@ impl FaultKind {
         Self::WalCorruptBelowCommitted,
         Self::WalTruncatedBelowCommitted,
         Self::WalUnlinked,
+        Self::WalSyncFailed,
         Self::DatabasePageMismatch,
         Self::ShutdownDeadline,
         Self::Bug,
@@ -148,6 +151,7 @@ impl From<&Fault> for FaultKind {
             Fault::WalCorruptBelowCommitted => Self::WalCorruptBelowCommitted,
             Fault::WalTruncatedBelowCommitted => Self::WalTruncatedBelowCommitted,
             Fault::WalUnlinked => Self::WalUnlinked,
+            Fault::WalSyncFailed => Self::WalSyncFailed,
             Fault::DatabasePageMismatch { .. } => Self::DatabasePageMismatch,
             Fault::ShutdownDeadline => Self::ShutdownDeadline,
             Fault::Bug(_) => Self::Bug,
@@ -178,6 +182,7 @@ pub fn stop_of(kind: FaultKind) -> Option<StopCause> {
         FaultKind::WalCorruptBelowCommitted => Some(StopCause::WalCorrupt),
         FaultKind::WalTruncatedBelowCommitted => Some(StopCause::WalTruncated),
         FaultKind::WalUnlinked => Some(StopCause::WalUnlinked),
+        FaultKind::WalSyncFailed => Some(StopCause::WalSyncFailed),
         FaultKind::DatabasePageMismatch => {
             lsr_ltx::PageNo::new(1, page).map(|pgno| StopCause::DatabasePageMismatch { pgno })
         }
@@ -255,6 +260,7 @@ pub fn fault_scenarios(kind: FaultKind) -> &'static [fn() -> Scenario] {
         ],
         FaultKind::WalTruncatedBelowCommitted => &[wal_truncated_externally_under_lock],
         FaultKind::WalUnlinked => &[wal_unlinked_mid_run],
+        FaultKind::WalSyncFailed => &[wal_fsync_fails],
         FaultKind::DatabasePageMismatch => &[db_page_flipped_under_sync],
         FaultKind::ShutdownDeadline => &[sigterm_during_upload],
         FaultKind::Bug => &[],
@@ -1184,6 +1190,70 @@ pub fn wal_unlinked_mid_run() -> Scenario {
     );
     s.check = Some(quiet_after_stop);
     s
+}
+
+/// The engine's sync of the WAL fails once, and the kernel keeps the pages it covered off the
+/// disk for good (the simulator's lost writeback): nothing from that generation is staged, the
+/// next try checkpoints with TRUNCATE, and a snapshot from the database file follows.
+#[must_use]
+pub fn wal_fsync_fails() -> Scenario {
+    injected(
+        "wal_fsync_fails",
+        vec![
+            Op::EnvFault(EnvFault::Source(SourceOp::Sync, SourceError::FsyncFailed)),
+            commit(2, false),
+        ],
+        vec![Expect::Stopped(StopCause::WalSyncFailed), Expect::Recovered],
+    )
+}
+
+/// [`wal_fsync_fails`] under the default responses, then a power loss: the snapshot after the
+/// TRUNCATE holds what the failed sync covered, and the database file held it durably.
+#[must_use]
+pub fn wal_fsync_fails_then_snapshot() -> Scenario {
+    build(
+        "wal_fsync_fails_then_snapshot",
+        vec![
+            live(),
+            vec![
+                Op::EnvFault(EnvFault::Source(SourceOp::Sync, SourceError::FsyncFailed)),
+                commit(2, false),
+            ],
+            ticks(SETTLE),
+            vec![commit(2, false)],
+            ticks(SETTLE),
+            vec![Op::PowerLoss],
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        vec![
+            Expect::Stopped(StopCause::WalSyncFailed),
+            Expect::Event(EventMatch::Resnapshot(CauseKind::WalSyncFailed)),
+            Expect::Oracle,
+        ],
+    )
+}
+
+/// The engine's sync of the WAL fails, and the process restarts before its retry. The new
+/// process must not stage the frames the failed sync covered. It does today: the debt is held
+/// in memory only, and a durable record waits on the engine journal decision.
+#[must_use]
+pub fn wal_fsync_fails_then_restart() -> Scenario {
+    build(
+        "wal_fsync_fails_then_restart",
+        vec![
+            live(),
+            vec![
+                Op::EnvFault(EnvFault::Source(SourceOp::Sync, SourceError::FsyncFailed)),
+                commit(2, false),
+                Op::Tick,
+                Op::Restart,
+            ],
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        vec![Expect::Stopped(StopCause::WalSyncFailed), Expect::Oracle],
+    )
 }
 
 /// The database page a stray write flips in [`db_page_flipped_under_sync`]:
