@@ -306,6 +306,39 @@ pub const fn of_op(op: &Op) -> &'static [Justifier] {
     }
 }
 
+/// What a drawn run's own settings make true from its first step, as [`of_op`] says for an
+/// operation. Every field is named, with no rest pattern, so a new setting does not compile
+/// until it says here whether it is a fault the engine may have to answer (a disk lying from
+/// the start once went unnoted and failed runs).
+#[must_use]
+pub const fn of_opts(opts: &crate::run::Opts) -> &'static [Justifier] {
+    let crate::run::Opts {
+        // What the harness records, raises, judges or expects: no change to the world.
+        plant: _,
+        trace: _,
+        record: _,
+        allow_stop: _,
+        judges: _,
+        drawn: _,
+        // The engine's own configuration.
+        responses: _,
+        retention: _,
+        switch_retention: _,
+        // A law for what a power loss keeps acts only at a power loss, which notes
+        // `PowerLoss`, and `StagedLost` for staged files it takes or brings back.
+        block_crash_law: _,
+        // The app's behaviour after a restart, and how the clock reads inside a tick.
+        after_restart: _,
+        clock_law: _,
+        lying_wal_sync,
+    } = opts;
+    if *lying_wal_sync {
+        &[Justifier::LyingDisk]
+    } else {
+        &[]
+    }
+}
+
 /// The oracle's state over one run.
 #[derive(Clone, Debug)]
 pub struct Liveness {
@@ -738,6 +771,21 @@ mod tests {
         )
         .unwrap();
         assert!(!live.window.contains(&Justifier::StagingEdited));
+    }
+
+    #[test]
+    fn a_disk_lying_from_the_start_is_noted_and_nothing_else_is() {
+        let lying = crate::run::Opts {
+            lying_wal_sync: true,
+            ..crate::run::Opts::default()
+        };
+        assert_eq!(of_opts(&lying), [Justifier::LyingDisk]);
+        let laws = crate::run::Opts {
+            drawn: true,
+            block_crash_law: true,
+            ..crate::run::Opts::default()
+        };
+        assert!(of_opts(&laws).is_empty());
     }
 
     #[test]
