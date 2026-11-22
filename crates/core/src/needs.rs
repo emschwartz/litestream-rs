@@ -299,6 +299,33 @@ mod tests {
         }
     }
 
+    /// The failure tells the runner how to get the resource: for Toxiproxy, the recipe that
+    /// starts it.
+    #[test]
+    fn a_missing_toxiproxy_names_the_recipe_that_starts_it() {
+        let how = Resource::Toxiproxy.how();
+        assert!(how.contains("`just test-s3`"), "{how:?}");
+        assert!(how.contains("Toxiproxy"), "{how:?}");
+    }
+
+    /// `LSR_SKIP=toxiproxy` opts out of Toxiproxy and nothing else.
+    #[test]
+    fn toxiproxy_is_skipped_by_its_own_word_only() {
+        assert_eq!(Resource::Toxiproxy.name(), "toxiproxy");
+        assert_eq!(
+            opted_out(Some("toxiproxy"), false, Resource::Toxiproxy),
+            Ok(true)
+        );
+        assert_eq!(
+            opted_out(Some("toxiproxy"), false, Resource::Minio),
+            Ok(false)
+        );
+        assert_eq!(
+            opted_out(Some("minio"), false, Resource::Toxiproxy),
+            Ok(false)
+        );
+    }
+
     #[test]
     fn the_toxiproxy_probe_fails_closed() {
         fails_closed(Resource::Toxiproxy, "LSR_TOXIPROXY_API", toxiproxy);
