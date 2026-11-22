@@ -17,7 +17,15 @@ use std::fmt;
 use std::io;
 use std::num::NonZeroUsize;
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::{Mutex, PoisonError};
+use std::sync::PoisonError;
+
+// Under `--cfg shuttle` (`just shuttle`) the batch runs on shuttle's scheduler, which explores
+// thread interleavings; every other build uses std.
+#[cfg(shuttle)]
+use shuttle::{sync::Mutex, thread};
+#[cfg(not(shuttle))]
+use std::sync::Mutex;
+#[cfg(not(shuttle))]
 use std::thread;
 
 use thiserror::Error;
@@ -174,10 +182,34 @@ pub trait Transport: Send + Sync {
 /// The stack of a batch worker thread: an HTTPS request through ureq and
 /// rustls needs 48 KiB (see `lsr-replica`'s `stack` module for how that was
 /// measured), and this is about five times that.
+// Shuttle's threads have no stack size to set.
+#[cfg(not(shuttle))]
 pub(crate) const BATCH_STACK: usize = 256 * 1024;
 
 /// One result slot per request of a batch.
 type Slots = Vec<Option<Result<HttpResponse, TransportError>>>;
+
+/// Starts one batch helper in `scope`; `None` when the OS refuses the thread.
+#[cfg(not(shuttle))]
+fn spawn_helper<'scope, F: FnOnce() + Send + 'scope>(
+    scope: &'scope thread::Scope<'scope, '_>,
+    work: F,
+) -> Option<thread::ScopedJoinHandle<'scope, ()>> {
+    thread::Builder::new()
+        .name("s3-batch".to_owned())
+        .stack_size(BATCH_STACK)
+        .spawn_scoped(scope, work)
+        .ok()
+}
+
+/// Shuttle's scoped threads have no builder, and its threads never fail to start.
+#[cfg(shuttle)]
+fn spawn_helper<'scope, F: FnOnce() + Send + 'scope>(
+    scope: &'scope thread::Scope<'scope, '_>,
+    work: F,
+) -> Option<thread::ScopedJoinHandle<'scope, ()>> {
+    Some(scope.spawn(work))
+}
 
 /// [`Transport::send_many`] for a blocking transport: the calling thread and
 /// up to `limit - 1` scoped threads (named `s3-batch`, `BATCH_STACK` each)
@@ -218,13 +250,7 @@ pub fn send_on_threads<T: Transport + ?Sized>(
     };
     thread::scope(|scope| {
         let handles: Vec<_> = (0..helpers)
-            .filter_map(|_| {
-                thread::Builder::new()
-                    .name("s3-batch".to_owned())
-                    .stack_size(BATCH_STACK)
-                    .spawn_scoped(scope, work)
-                    .ok()
-            })
+            .filter_map(|_| spawn_helper(scope, work))
             .collect();
         work();
         for handle in handles {
@@ -271,7 +297,9 @@ mod tests {
     }
 }
 
+// Not under shuttle: its gauge blocks on std's condition variable, which shuttle cannot schedule.
 #[cfg(test)]
+#[cfg(not(shuttle))]
 #[expect(
     clippy::arithmetic_side_effects,
     reason = "the gauge counts a few dozen requests"
@@ -402,5 +430,144 @@ mod batch_tests {
         let got = gauge.send_many(batch(&["/x", "/y", "/z"]), NonZeroUsize::new(8).unwrap());
         assert_eq!(gauge.peak(), 1);
         assert_eq!(bodies(&got).len(), 3);
+    }
+}
+
+/// Schedule exploration of [`send_on_threads`] (`just shuttle`): shuttle runs the batch under
+/// many random interleavings of its threads, which the real-thread tests above sample only by
+/// luck. Each run checks the invariants the doc comment promises.
+#[cfg(test)]
+#[cfg(shuttle)]
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "the probe counts a few requests"
+)]
+mod shuttle_tests {
+    use shuttle::sync::atomic::{AtomicUsize, Ordering};
+    use url::Url;
+
+    use super::*;
+    use crate::request::Method;
+
+    /// How many random schedules each test explores.
+    fn iterations() -> usize {
+        std::env::var("SHUTTLE_ITERATIONS")
+            .ok()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(200)
+    }
+
+    /// A transport that yields inside every send, so the scheduler may switch threads there.
+    /// It counts sends per request, the peak in flight, and finished sends.
+    struct Probe {
+        sent: Vec<AtomicUsize>,
+        in_flight: AtomicUsize,
+        peak: AtomicUsize,
+        finished: AtomicUsize,
+    }
+
+    impl Probe {
+        fn new(count: usize) -> Self {
+            Self {
+                sent: (0..count).map(|_| AtomicUsize::new(0)).collect(),
+                in_flight: AtomicUsize::new(0),
+                peak: AtomicUsize::new(0),
+                finished: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl Transport for Probe {
+        fn send(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
+            let path = request.url().path().to_owned();
+            let at: usize = path
+                .trim_start_matches("/fail")
+                .trim_start_matches("/panic")
+                .trim_start_matches('/')
+                .parse()
+                .unwrap_or(usize::MAX);
+            if let Some(count) = self.sent.get(at) {
+                count.fetch_add(1, Ordering::SeqCst);
+            }
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            thread::yield_now();
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            self.finished.fetch_add(1, Ordering::SeqCst);
+            if path.starts_with("/fail") {
+                return Err(TransportError::ConnectionReset);
+            }
+            Ok(HttpResponse::new(200, Vec::new(), path.into_bytes(), true))
+        }
+    }
+
+    fn request(path: &str) -> HttpRequest {
+        let url = Url::parse(&format!("http://127.0.0.1{path}")).unwrap();
+        HttpRequest::for_test(Method::Get, url, Vec::new())
+    }
+
+    /// Request `n` is `/n` or `/fail/n`: its index rides in the path. (No panicking request here:
+    /// shuttle's panic hook fails the schedule on any panic, even one `send_on_threads` catches.
+    /// The std test `a_failed_request_is_reported_in_its_own_slot` covers that path.)
+    fn path(n: usize) -> String {
+        match n % 5 {
+            1 | 3 => format!("/fail/{n}"),
+            _ => format!("/{n}"),
+        }
+    }
+
+    fn check(count: usize, limit: usize) {
+        let probe = Probe::new(count);
+        let requests = (0..count).map(|n| request(&path(n))).collect();
+        let got = send_on_threads(&probe, requests, NonZeroUsize::new(limit).unwrap());
+        assert_eq!(got.len(), count, "one result per request");
+        for (n, result) in got.iter().enumerate() {
+            let want = path(n);
+            match result {
+                Ok(response) => {
+                    assert_eq!(
+                        response.body(),
+                        want.as_bytes(),
+                        "slot {n} holds its own answer"
+                    );
+                }
+                Err(err) => {
+                    assert!(want.starts_with("/fail"), "slot {n} failed without cause");
+                    assert_eq!(
+                        *err,
+                        TransportError::ConnectionReset,
+                        "slot {n}'s error is its own"
+                    );
+                }
+            }
+        }
+        for (n, sent) in probe.sent.iter().enumerate() {
+            assert_eq!(
+                sent.load(Ordering::SeqCst),
+                1,
+                "request {n} was sent exactly once"
+            );
+        }
+        assert!(
+            probe.peak.load(Ordering::SeqCst) <= limit,
+            "never more than `limit` in flight"
+        );
+        assert_eq!(
+            probe.in_flight.load(Ordering::SeqCst),
+            0,
+            "nothing in flight after return"
+        );
+        assert_eq!(
+            probe.finished.load(Ordering::SeqCst),
+            count,
+            "every send ended before return"
+        );
+    }
+
+    #[test]
+    fn a_batch_loses_nothing_and_passes_no_limit_under_any_schedule() {
+        for (count, limit) in [(5, 2), (6, 3), (4, 8), (7, 1)] {
+            shuttle::check_random(move || check(count, limit), iterations());
+        }
     }
 }
