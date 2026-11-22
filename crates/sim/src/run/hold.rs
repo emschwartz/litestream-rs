@@ -34,6 +34,14 @@ use crate::store::HeldFault;
 
 use super::{Runner, small};
 
+/// Every store operation, for the faults that take the whole store.
+const ALL_OPS: [StoreOp; 4] = [
+    StoreOp::List,
+    StoreOp::Read,
+    StoreOp::Upload,
+    StoreOp::Delete,
+];
+
 /// Transaction ids a judgment restores through the fault besides `Latest`, at most.
 const SAMPLED_TXIDS: u64 = 4;
 
@@ -170,14 +178,16 @@ fn name(hold: Hold) -> String {
         | Hold::LaggingListing
         | Hold::LyingReads
         | Hold::ReadersHeld
-        | Hold::LyingDisk => variant(&hold),
+        | Hold::LyingDisk
+        | Hold::StoreDownAll
+        | Hold::SecondWriter => variant(&hold),
     }
 }
 
 /// Whether `err`, from a restore made through `hold`, is an error that fault explains.
 fn explained(hold: Hold, err: &RestoreError) -> bool {
     match hold {
-        Hold::StoreDown(_) | Hold::CredentialsRevoked => {
+        Hold::StoreDown(_) | Hold::StoreDownAll | Hold::CredentialsRevoked => {
             matches!(err, RestoreError::Inventory(_) | RestoreError::Store(_))
         }
         // A lagging listing hides files: a gap, or files that vanish under it.
@@ -188,7 +198,11 @@ fn explained(hold: Hold, err: &RestoreError) -> bool {
                 | RestoreError::ListingBehind { .. }
         ),
         Hold::LyingReads => matches!(err, RestoreError::File { .. }),
-        Hold::DiskFull | Hold::ReadersHeld | Hold::Wal(_) | Hold::LyingDisk => false,
+        Hold::DiskFull
+        | Hold::ReadersHeld
+        | Hold::Wal(_)
+        | Hold::LyingDisk
+        | Hold::SecondWriter => false,
     }
 }
 
@@ -258,15 +272,20 @@ impl Runner {
         if let Hold::Wal(op) = hold {
             return self.wal_damage_held(op, ticks);
         }
+        if hold == Hold::SecondWriter {
+            return self.second_writer_judged(ticks);
+        }
         let view = self.view(hold)?;
         let flipped = self.w.remote_faults.flipped().len();
         let before = Progress::of(self);
         let placed = self.place(hold);
         let middle = ticks / 2;
         for at in 0..ticks {
-            // A commit before every tick keeps the sync unit busy each tick and no upload ever
-            // runs, so the engine would never meet a fault on the upload path.
-            if at % 2 == 0 {
+            if self.overlap.is_some() {
+                self.overlapping_step(hold)?;
+            } else if at % 2 == 0 {
+                // A commit before every tick keeps the sync unit busy each tick and no upload
+                // ever runs, so the engine would never meet a fault on the upload path.
                 let pages = u8::try_from(small(&self.rng, 3).saturating_add(1)).unwrap_or(1);
                 self.commit(pages, false);
             }
@@ -298,13 +317,12 @@ impl Runner {
                 auth: false,
             },
             Hold::CredentialsRevoked => Lens::Down {
-                ops: vec![
-                    StoreOp::List,
-                    StoreOp::Read,
-                    StoreOp::Upload,
-                    StoreOp::Delete,
-                ],
+                ops: ALL_OPS.to_vec(),
                 auth: true,
+            },
+            Hold::StoreDownAll => Lens::Down {
+                ops: ALL_OPS.to_vec(),
+                auth: false,
             },
             Hold::LaggingListing => {
                 let inventory = block_on(Inventory::load(&self.w.remote_raw))
@@ -312,7 +330,11 @@ impl Runner {
                 Lens::Lagging(inventory.files().iter().map(|f| f.key).collect())
             }
             Hold::LyingReads => Lens::Lying,
-            Hold::DiskFull | Hold::ReadersHeld | Hold::Wal(_) | Hold::LyingDisk => {
+            Hold::DiskFull
+            | Hold::ReadersHeld
+            | Hold::Wal(_)
+            | Hold::LyingDisk
+            | Hold::SecondWriter => {
                 return Ok(None);
             }
         };
@@ -328,6 +350,12 @@ impl Runner {
             Hold::StoreDown(op) => Some(Placed::Remote(vec![
                 self.w.remote_faults.hold(op, held_error(op, false)),
             ])),
+            Hold::StoreDownAll => Some(Placed::Remote(
+                ALL_OPS
+                    .into_iter()
+                    .map(|op| self.w.remote_faults.hold(op, held_error(op, false)))
+                    .collect(),
+            )),
             Hold::CredentialsRevoked => {
                 self.expect(StopCause::StoreDenied(Denied::Credentials));
                 let ops = [
@@ -379,8 +407,9 @@ impl Runner {
                         .collect(),
                 ))
             }
-            // The engine never lists through a restore's lens.
-            Hold::LaggingListing | Hold::Wal(_) => None,
+            // The engine never lists through a restore's lens; a second writer's file is the
+            // fault itself, placed by its own step.
+            Hold::LaggingListing | Hold::Wal(_) | Hold::SecondWriter => None,
         }
     }
 
@@ -519,5 +548,83 @@ impl Runner {
     /// WAL damage held for `ticks` ticks, judged in the middle and at the end, then healed.
     fn wal_damage_held(&mut self, op: WalOp, ticks: u8) -> Result<(), Violation> {
         self.wal_damage_judged(op, ticks, true)
+    }
+
+    /// One drawn step of an overlapping hold, before its tick: the app commits, or the
+    /// process crashes, the power fails, the engine is shut down and started again, or a store
+    /// call fails once, all with the hold's fault still in place.
+    fn overlapping_step(&mut self, hold: Hold) -> Result<(), Violation> {
+        let Some(draw) = self.overlap.as_ref().map(|rng| rng.below(100)) else {
+            return Ok(());
+        };
+        // A restart inside a hold reaches the open defect D9 (retry counts and degraded states
+        // reset at a restart, so a halt that outlasts restarts is never reported): drawn only
+        // where known defects are counted ([`crate::domain::KnownWrong`]). Elsewhere the step
+        // commits instead.
+        let draw = if !self.known_wrong && (70..=87).contains(&draw) {
+            0
+        } else {
+            draw
+        };
+        match draw {
+            0..=59 => {
+                let pages = u8::try_from(small(&self.rng, 3).saturating_add(1)).unwrap_or(1);
+                self.commit(pages, false);
+            }
+            60..=69 => {}
+            70..=77 => {
+                self.restart(CrashKind::Process);
+                self.report.reach.bump("hold.overlap.process_crash");
+            }
+            // The lying disk has a power loss of its own in the middle.
+            78..=82 if hold != Hold::LyingDisk => {
+                self.restart(CrashKind::Power);
+                self.report.reach.bump("hold.overlap.power_loss");
+            }
+            83..=87 => {
+                // The hold's fault may keep the drain from finishing: it may end at its
+                // deadline, as under a store fault that fails calls at a rate.
+                let rate_active = self.rate_active;
+                self.rate_active = true;
+                let drained = self.drain();
+                self.rate_active = rate_active;
+                drained?;
+                self.reboot();
+                self.app.restarted(self.op_began_at);
+                self.report.reach.bump("hold.overlap.shutdown");
+            }
+            _ => {
+                self.overlapping_store_fault();
+                self.report.reach.bump("hold.overlap.store_fault");
+            }
+        }
+        Ok(())
+    }
+
+    /// A store call fails once inside an overlapping hold, with an error from the whole domain
+    /// when the run draws it.
+    fn overlapping_store_fault(&mut self) {
+        let Some(rng) = self.overlap.as_ref() else {
+            return;
+        };
+        let target = if rng.below(2) == 0 {
+            crate::generate::Target::Staging
+        } else {
+            crate::generate::Target::Remote
+        };
+        let op = ALL_OPS
+            .get(usize::try_from(rng.below(4)).unwrap_or(0))
+            .copied()
+            .unwrap_or(StoreOp::Upload);
+        let error = if self.error_domain {
+            crate::domain::draw_store(rng, target, op, false)
+        } else {
+            StoreError::Transient {
+                op,
+                kind: ErrorKind::ConnectionReset,
+            }
+        };
+        let ahead = u8::try_from(rng.below(3)).unwrap_or(0);
+        self.store_fault(target, op, ahead, crate::store::FaultShape::Error(error));
     }
 }
