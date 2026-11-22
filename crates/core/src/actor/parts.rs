@@ -24,7 +24,7 @@ use super::state::{Gate, Live, Maintain, Phase, Tasks};
 use super::unproven::Unproven;
 use crate::app::AppCheckpointObserver;
 use crate::checkpoint::CheckpointState;
-use crate::fault::{SnapshotCause, StopCause};
+use crate::fault::{SnapshotCause, SnapshotCounts, StopCause};
 use crate::journal::JournalSignal;
 use crate::layout::FileKey;
 use crate::pages::PageChecksumTable;
@@ -115,6 +115,8 @@ pub(super) struct Kept {
     /// are deleted only when a read on a later tick fails too. Kept across
     /// boots, since boot's sweep is one of the readers.
     pub(super) suspect_staged: Option<FileKey>,
+    /// Snapshots staged since the actor began, per cause: a report.
+    pub(super) snapshots: SnapshotCounts,
     /// How far the engine is past a failed sync of the WAL (`unproven`). Kept across boots:
     /// a frame that sync covered is no truer after a rebuild.
     pub(super) unproven: Unproven,
@@ -136,6 +138,7 @@ impl Kept {
             snapshot_asked: false,
             app: AppCheckpointObserver::default(),
             suspect_staged: None,
+            snapshots: SnapshotCounts::default(),
             unproven: Unproven::No,
             journal: None,
         }
@@ -157,6 +160,7 @@ impl Kept {
             snapshot_asked,
             app: _,
             suspect_staged,
+            snapshots,
             unproven,
             journal,
         } = self;
@@ -171,6 +175,7 @@ impl Kept {
             snapshot_asked: *snapshot_asked,
             app: observer,
             suspect_staged: *suspect_staged,
+            snapshots: *snapshots,
             unproven: *unproven,
             journal: *journal,
         }
