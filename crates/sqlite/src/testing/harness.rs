@@ -242,6 +242,8 @@ const DEFAULT_SEED: NonZeroI32 = match NonZeroI32::new(0x5eed) {
 };
 /// Ticks a settle may take.
 const SETTLE_TICKS: u32 = 2_000;
+/// Retries in a row, with nothing done between them, after which a settle gives up.
+const SETTLE_RETRIES: u32 = 50;
 /// What a tick that asks to run again at once costs the fake clock.
 const SPIN_STEP: Duration = Duration::from_millis(50);
 const WAL_HEADER: usize = 32;
@@ -791,7 +793,17 @@ impl<B: Backend> Rig<B> {
     /// # Errors
     /// [`RigError::Stopped`], [`RigError::Unsettled`], or the rig's own.
     pub fn settle(&mut self) -> Result<(), RigError> {
-        for _ in 0..SETTLE_TICKS {
+        // Retries since the last tick that did anything else: a fault that every retry meets
+        // again never settles, and waiting out the whole budget only costs time.
+        let mut retries = 0;
+        for ticks in 0..SETTLE_TICKS {
+            // A machine whose power failed never settles; its ticks only retry.
+            if !self.vfs.powered() {
+                return Err(RigError::State("run without power"));
+            }
+            if retries >= SETTLE_RETRIES {
+                return Err(RigError::Unsettled(ticks));
+            }
             match self.tick()? {
                 Tick::Stopped(cause) => return Err(RigError::Stopped(cause)),
                 Tick::Drained { .. } => return Ok(()),
@@ -802,7 +814,15 @@ impl<B: Backend> Rig<B> {
                 } if !matches!(next, Next::Now) && self.acked.highest() >= self.staged_max => {
                     return Ok(());
                 }
-                Tick::Ran { .. } => {}
+                Tick::Ran {
+                    event: Event::Retrying { .. },
+                    ..
+                } => retries = retries.saturating_add(1),
+                Tick::Ran {
+                    event: Event::Maintained { .. } | Event::Idle,
+                    ..
+                } => {}
+                Tick::Ran { .. } => retries = 0,
             }
         }
         Err(RigError::Unsettled(SETTLE_TICKS))
@@ -1024,11 +1044,25 @@ impl<B: Backend> Rig<B> {
             (Some(salt1), Some(salt2)) => Some(Salts { salt1, salt2 }),
             (Some(_) | None, _) => None,
         };
+        // A tick that synced the WAL before the power failed in it kept what it wrote up to
+        // that sync, though the model never saw it: the rig looks only while the power is on.
+        let at = self.remote_log.len();
+        let kept = self.mirror.drain(frames)?;
         if let Some(model) = self.model.as_mut() {
+            for tx in kept {
+                let app = AppCommit {
+                    salts: tx.salts,
+                    end: tx.end,
+                };
+                model.commit(&tx.pages, tx.db_size, app, at);
+            }
             model.on_power_loss(salts.unwrap_or(Salts { salt1: 0, salt2: 0 }), frames);
         }
         self.mirror.seen = salts.map(|salts| (salts, frames));
+        // The acknowledgements start again, and so does what settling waits for: a boot that
+        // continues (the WAL kept everything staged) has nothing new to upload.
         self.acked.note_rewound();
+        self.staged_max = None;
         self.wal_syncs = self.vfs.syncs(FileKind::Wal);
         self.restart()
     }

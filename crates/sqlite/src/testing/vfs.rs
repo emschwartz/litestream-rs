@@ -458,6 +458,13 @@ impl FaultVfs {
         state.undo.clear();
     }
 
+    /// The power fails now, between calls, as [`Effect::PowerLoss`] makes it fail at a sync:
+    /// every write since each file's last sync is undone and every later call fails until
+    /// [`Self::restore_power`].
+    pub fn cut_power(&self) {
+        self.shared.cut();
+    }
+
     /// Whether the power is on.
     #[must_use]
     pub fn powered(&self) -> bool {
