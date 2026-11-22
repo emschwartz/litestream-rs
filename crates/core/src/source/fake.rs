@@ -366,6 +366,38 @@ impl FakeWal {
         lock(&self.state).bytes.truncate(len);
     }
 
+    /// Keeps only the first `frames` frames of the generation and rebuilds the
+    /// wal-index from what is left, as a power loss under `synchronous=NORMAL`
+    /// does when the disk kept less than SQLite wrote. `frames` must end on a
+    /// commit; nothing is backfilled and no reader is held after it.
+    pub fn lose_frames_after(&self, frames: u32) {
+        let mut state = lock(&self.state);
+        let end = WalOffset::from_frame_index(frames, state.page_size);
+        state.bytes.truncate(byte_pos(end));
+        state.running = match frames.checked_sub(1) {
+            Some(last) => {
+                let at = byte_pos(WalOffset::from_frame_index(last, state.page_size));
+                let word = |from: usize| {
+                    state
+                        .bytes
+                        .get(from..from.saturating_add(4))
+                        .and_then(|bytes| bytes.try_into().ok())
+                        .map_or(0, u32::from_be_bytes)
+                };
+                WalChecksum::new(word(at.saturating_add(16)), word(at.saturating_add(20)))
+            }
+            None => state
+                .bytes
+                .get(..24)
+                .and_then(|covered| WalChecksum::ZERO.extend(ORDER, covered))
+                .unwrap_or(WalChecksum::ZERO),
+        };
+        state.written = frames;
+        state.mx_frame = frames;
+        state.backfilled = 0;
+        state.read_mark = None;
+    }
+
     /// Flips every bit of the byte at `at`.
     pub fn corrupt_byte(&self, at: usize) {
         if let Some(byte) = lock(&self.state).bytes.get_mut(at) {
