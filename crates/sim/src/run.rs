@@ -1363,6 +1363,9 @@ impl Runner {
     /// level, deletes, and every scheduled fault that hit a call.
     fn tally_stores(&mut self) {
         let reach = &mut self.report.reach;
+        let (kept, cut) = self.w.sqlite.torn_losses();
+        reach.add("power.kept_unsynced_wal", u64::from(kept));
+        reach.add("power.kept_cut_frame", u64::from(cut));
         for event in self.w.remote_recorder.events() {
             match event {
                 crate::RecorderEvent::Put { key, .. } => {
@@ -1460,6 +1463,9 @@ pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure
     let steps = u32::try_from(ops.len()).unwrap_or(u32::MAX);
     let mut runner = Runner::new(seed);
     runner.lenient = opts.drawn;
+    if opts.drawn {
+        runner.w.sqlite.tear_on_power_loss(seed.stream(14));
+    }
     runner.trace = opts.trace;
     runner.record = opts.record;
     runner.allow_stop = opts.allow_stop;
