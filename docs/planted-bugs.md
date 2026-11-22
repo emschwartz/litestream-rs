@@ -27,12 +27,11 @@ Mutation testing covers the lines a pull request changes: `just mutants-diff` (C
 runs `cargo mutants --in-diff` over `lsr-core` and `lsr-ltx`. A missed mutant fails the job unless
 `docs/mutants-escapes.txt` lists it with its reason in `docs/mutants.md`.
 
-## Evidence rows
+## Plants cited by behaviour rows
 
-`docs/evidence.toml` holds behaviour rows as data: what each row claims a named test shows
-(detected, survived or recovered), and, for a tested row, the ledger entry whose plant that test
-kills. `crates/compat/tests/compat/evidence.rs` checks the file in `just check` (every kill names
-an entry here whose package and test filters match the cited test) and, through `just
-evidence-fresh`, against `cargo nextest list` (every cited test exists, ignored ones name the
-recipe that runs them, no killing test is ignored). The nightly run of this ledger then makes
-each kill true. A tested row with no plant says why in `unkilled`, and the check prints it.
+A behaviour row (`docs/behavior.toml`, rendered into `docs/BEHAVIOR.md`) that cites `plant::<name>`
+claims its tests kill that entry's bug class, so it must also cite a test the entry runs: the
+entry's package and a test filter that matches (`crates/compat/tests/compat/behavior.rs`, in `just
+check`). Through `just evidence-fresh`, against `cargo nextest list`, every cited test must exist
+and each cited plant must be backed by one that is not ignored, since this ledger's run starts no
+ignored test. The nightly run of the ledger then makes each such citation true.

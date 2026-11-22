@@ -298,9 +298,9 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 ## D29. The behaviour table as data
 
 - **Options:** keep `docs/BEHAVIOR.md` hand-written; rows in TOML, the document rendered.
-- **Choice:** rows in `docs/behavior.toml` (each cell verbatim), prose in `docs/behavior/template.md`, `just behavior-doc` renders, `just check` fails on drift and on citations that resolve to nothing.
+- **Choice:** rows in `docs/behavior.toml` (each cell verbatim), prose in `docs/behavior/template.md`, `just behavior-doc` renders, `just check` fails on drift and on citations that resolve to nothing. One file and one checker: the separate evidence-rows file this branch first added (`docs/evidence.toml`, with its own schema) was folded in before any other branch had to port rows into both. Its kill rule survives as a backing rule on `plant::` citations: the row must also cite a test the ledger entry runs, and one such test must not be ignored.
 - **Why:** hand-typed citations had rotted (five resolved to nothing when checked).
-- **Cost accepted:** every branch that edits section 3 edits the TOML, and open branches written against the old file need their rows moved.
+- **Cost accepted:** every branch that edits section 3 edits the TOML, and open branches written against the old file need their rows moved. The fold lost the typed `[[row.kill]]` pairing (which test kills which plant): the backing rule matches by the ledger's package and filters instead, which is looser when a row cites several tests of one package.
 - **Revisit if:** the marks become derived from rig records (BEHAVIOR section 7.3, item 2).
 - **Links:** #111.
 

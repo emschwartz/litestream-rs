@@ -67,8 +67,8 @@ Each guarantee is stated as something an outside observer can check, the conditi
 |---|---|---|
 | G0 a restore of the latest state succeeds and is not older than what health reported | Yes | UP-11 (unseen case), MAINT-11, D2 |
 | G1 a successful restore is a committed state | Hazards, none with a test that fails on main in the gate | BOOT-19 (expected-fail test, ignored), BOOT-18 (shown on #96's tree only), RUN-12 under the default response |
-| G2 latest does not go backwards unreported | None shown on main | The exceptions' signals can be missing (D17, C3) |
-| G3 as-of returns nothing begun after the instant | None since #98 | Not checkable by the simulator (C7) |
+| G2 latest does not go backwards unreported | None shown on main | The exceptions' signals can be missing after a bucket rollback (D17, CHK-4) |
+| G3 as-of returns nothing begun after the instant | None since #98 | Checked by the simulator's per-read clock since C7 was fixed (RUN-25, RUN-26) |
 | G4 lag | No tested bound | N1 |
 | G7 health is not clean while replication is halted | Yes | N1, D2 |
 
@@ -118,7 +118,7 @@ Version 0.0.0: these are what the code is built to deliver.
 | Real SQLite crash cycles: sqlite `crash_cycles_under_the_block_law_restore_committed_states` | **3 frozen seeds** | The gate. `crash_cycle_campaign` is **`#[ignore]`**, run by hand |
 | Real binary on LazyFS: `scripts/lazyfs.py` | 300 cycles nightly; latest state only. The README on `claude/readme` reports 1000 cycles with 0 anomalies (at most about 0.3% per cycle at 95%, that fault mix only). Not re-run here | Nightly |
 
-**Blind spots in that evidence.** Oracle `TxidReused` and the increasing-cover check are switched off for a whole run once any rewind, bucket rollback or lost file has occurred (`covers` in `sim/src/oracle.rs`, the `rewound` flag). Those are the runs in which id reuse happens. See section 6, C1.
+**Blind spots in that evidence.** Oracle `TxidReused` and the increasing-cover check used to be switched off for a whole run once any rewind, bucket rollback or lost file had occurred. They are now scoped (CHK-1): an id may cover a second commit only if the replica lost the first from outside, or a power loss cut the first before the second was put. Section 6, C1.
 
 ### G2. The latest state does not go backwards, except after a reported loss
 
@@ -139,8 +139,8 @@ After a rewind the replica still holds the lost branch. Its transactions stay re
 **Engine-level evidence.** The same runs as G1, judged by judge `WentBackwards` (through oracle `History`) and oracle `LatestLostAck`.
 
 **What that evidence does not show.**
-- That the exceptions were reported. The judge excuses a regression when the *driver* recorded a power loss or called `excuse_regression`. No test requires that the engine emitted `local_rewound`, `behind_remote` or `remote_regressed` for each excused step. "Reported" is **untested** end to end.
-- `LatestLostAck` forgets every acknowledgement on every power loss, honest disk or not (`note_rewound` in `sim/src/world.rs`), and on every rollback. So it cannot fail on a regression that follows any power loss. See C2.
+- That every exception was reported. The simulator's history judge now requires the engine's own loss report before a recorded rewind explains a regression (CHK-3). A regression the driver excused (a bucket rollback) is a debt the engine must pay with a report later; about one in four is never paid, which is D17 (only an uploader listing raises `remote_regressed`). That is counted, not fatal (CHK-4). The real-engine history rig does not require the signal.
+- `LatestLostAck` keeps acknowledgements across power loss now (CHK-2); a rollback voids those from the lowest id it uncovered.
 - v1 cited history `a_recorded_rewind_explains_going_back_and_the_lost_branch_is_ahead` and `a_rewind_explains_nothing_below_its_target` here. Those feed a hand-built log to the judge. They show the checker can say no. They are not evidence about the engine.
 
 ### G3. A restore as of an instant contains no commit that began after the instant
@@ -156,7 +156,7 @@ After a rewind the replica still holds the lost branch. Its transactions stay re
 
 **Engine-level evidence.** oracle `AsOfTooNew`, `NotLatest`, `WrongCreatedAt` on the simulator runs listed under G1; sim `as_of_never_takes_an_upload_time_for_a_commit_time`; plants `time-provenance`, `time-provenance-sim`. The history rig restores at two instants per judged moment and applies judge `AsOfTooNew`.
 
-**What that evidence does not show.** The simulator has one clock, read once per tick, so it could not have produced the violation #98 fixed, and cannot guard against its return (C7); the core tests above do. v1 cited history `as_of_is_never_newer_than_the_instant` and `as_of_within_a_bound_is_the_node_live_then`; those test the judge on a hand-built log, not the engine.
+**What that evidence does not show.** Under its per-read clock law the simulator reaches the window #98 fixed and kills the re-planted defect unaided (RUN-25, RUN-26; C7). v1 cited history `as_of_is_never_newer_than_the_instant` and `as_of_within_a_bound_is_the_node_live_then`; those test the judge on a hand-built log, not the engine.
 
 ### G4. Lag
 
@@ -180,7 +180,7 @@ After a rewind the replica still holds the lost branch. Its transactions stay re
 - UP-11, unseen case, and MAINT-11: after files are removed from the replica while the engine runs, a restore of the latest state refuses with `Gap` until the next scheduled snapshot, up to 24 hours, behind `/healthz` 200. No expected-fail test.
 - D2: after a failed WAL fsync and a restart before the engine's TRUNCATE, frames that never reached disk can be uploaded, so `replicated_txid` can name commits the database then loses. Expected-fail tests (ignored): sim `wal_fsync_fails_then_restart`, sqlite `a_restart_after_a_failed_wal_sync_ships_no_unproven_frame`. Within one process the failure is handled (RUN-3).
 
-**Evidence.** Oracle `LatestLostAck` (the latest restore is not older than the newest transaction the engine acknowledged) and oracle `RestoreRefused` on the simulator runs listed under G1. Blind spot C2: `LatestLostAck` forgets every acknowledgement at every power loss.
+**Evidence.** Oracle `LatestLostAck` (the latest restore is not older than the newest transaction the engine acknowledged) and oracle `RestoreRefused` on the simulator runs listed under G1. Acknowledgements survive power loss (CHK-2, which fixed C2).
 
 ### G7. Health is not clean while replication is halted
 
@@ -441,15 +441,11 @@ These have no enum variant. WORLD-1 to WORLD-31 came from the first review and W
 
 <!-- rows: Circumstances the code does not distinguish -->
 
-| WORLD-32 | Two different databases are configured onto one replica prefix | Each sees the other as another writer once a listing shows the replica ahead (UP-10); before that, unconditional PUTs overwrite (UP-14). `AlreadyReplicated` does not apply: the files differ | `other_writer`, late | As WORLD-5 | Operator |  |  |  | untested |  | #96 |
-| WORLD-33 | `lsr` is upgraded or downgraded over its own staging directory and replica | Nothing versions the staging directory or the files beyond the LTX format. An older build reads what a newer one wrote only if the format and the witness rules did not change | none | **unknown** | **unknown** |  |  |  | unknown | The Go handover rows cover Go. Nothing tests this port against its own earlier commits |  |
-| WORLD-34 | A slow store: no errors, uploads slower than the write rate, or bodies that trickle inside the 60 s deadline | Staging grows to the witness cap, then holds; the WAL grows instead (RUN-18) | none | Lag without bound. No restore point is given up | Automatic once the store keeps up |  |  |  | untested |  |  |
-| WORLD-35 | The store returns the old bytes for a GET after an overwrite | BOOT-16 and UP-8 overwrite a key and later read it back. A stale read would compare the staged file with the old object. Guess: the tail is judged torn or diverged again | **unknown** | **unknown** | **unknown** |  |  |  | unknown | A5 does not cover staleness |  |
-| WORLD-36 | The restore target is on a filesystem with no hard links | Publish fails at the link step with nothing at the target (`NotVisible`) | exit 3 | None. The restore cannot complete there | Restore elsewhere | local::`each_failed_step_says_whether_the_target_is_visible` |  |  |  | The test injects the failing step; no linkless filesystem is used |  |
-| WORLD-37 | An application write transaction stays open for minutes | The engine cannot take its write barrier: checkpoints report busy (CKPT-2), the WAL grows. Sync and upload of committed frames go on | `lsr_checkpoints_busy_total` | None to the replica. WAL growth | The transaction ends | sim::`busy_on_barrier` |  | sim::`busy_on_barrier` |  | One injected busy, then recovery. A writer held for minutes is untested |  |
-| WORLD-38 | SQLite variants: SQLCipher, a non-default VFS, WAL2 | The engine reads WAL frames and database pages as bytes and checks SQLite's WAL checksums. A VFS without shared memory is refused at start (CFG-4). Encrypted pages would replicate as ciphertext. WAL2 has two WAL files and is not supported | start refusal, or none | **unknown** | n/a |  |  |  | unknown |  |  |
-| WORLD-39 | A multi-object delete succeeds for some keys and fails for others | The job fails; the next plan is made from a new listing. Any subset of a job is as safe as the whole (G5) | by fault | None | Automatic |  |  |  | code only | The partial-result path in the S3 store was not read |  |
-| WORLD-40 | The store's quota is exhausted; a cross-region replica is failed over | Quota: uploads are refused, as UP-5 or UP-4 by status code. Failover: an older or lagging copy of the bucket, as BOOT-18 or BOOT-19 | `store_refused`, or `permission_denied` for a 403; none for failover | As those rows | Operator |  |  |  | unknown |  |  |
+### The checkers themselves
+
+A checker that cannot see a class of bug reads as green. These rows are the checkers' own blind spots that were closed, each backed by a planted bug that its test kills, and the one that stays open. The response is what the checker does.
+
+<!-- rows: The checkers themselves -->
 ---
 
 ## 4. Snapshot causes
@@ -563,14 +559,14 @@ These are defects in the evidence, not in the engine. Each weakens a guarantee's
 
 | # | Blind spot | Effect | Tracking |
 |---|---|---|---|
-| C1 | Oracle `TxidReused` and the increasing-cover check are disabled for the whole run once any rewind, bucket rollback or lost file has occurred (`covers` in `sim/src/oracle.rs`: `rewound` is true if any snapshot note is rewound, the model rewound, or any file was lost) | The runs where id reuse happens (BOOT-18, BOOT-19) are the runs where the check is off. G1's simulator evidence does not cover id reuse after a rewind | Issue #99. Fix: scope the exemption to the affected ids |
-| C2 | Oracle `LatestLostAck` forgets every acknowledgement on every power loss, honest disk or not (`note_rewound`, called from the power-loss path in `sim/src/world.rs`), and on every rollback | G2's simulator evidence cannot fail on a regression after any power loss. The history judge still applies, by content | Issue #99. Fix: forget only on a lying-disk loss |
-| C3 | The judge excuses a regression on the driver's record (`history.power_loss`, `excuse_regression`), never on the engine's signal | "Reported" in G2 is unverified. Fix: an excused step with no engine signal is an anomaly | None |
+| C1 | Oracle `TxidReused` and the increasing-cover check are disabled for the whole run once any rewind, bucket rollback or lost file has occurred (`covers` in `sim/src/oracle.rs`: `rewound` is true if any snapshot note is rewound, the model rewound, or any file was lost) | The runs where id reuse happens (BOOT-18, BOOT-19) are the runs where the check is off. G1's simulator evidence does not cover id reuse after a rewind | Fixed: scoped to the commits a power loss cut or the replica lost (CHK-1) |
+| C2 | Oracle `LatestLostAck` forgets every acknowledgement on every power loss, honest disk or not (`note_rewound`, called from the power-loss path in `sim/src/world.rs`), and on every rollback | G2's simulator evidence cannot fail on a regression after any power loss. The history judge still applies, by content | Fixed: acknowledgements survive power loss (CHK-2) |
+| C3 | The judge excuses a regression on the driver's record (`history.power_loss`, `excuse_regression`), never on the engine's signal | "Reported" in G2 was unverified | Fixed in the simulator: judge `Unsignaled` (CHK-3); driver excuses counted when unpaid (CHK-4) |
 | C4 | No fault shape holds until a later step; scenarios inject one error and judge after recovery | No row for a lasting store or disk condition earns S | None. Fix: `FaultShape::Until(step)` and restores during the fault |
 | C5 | The simulator's oracle restores over an unfaulted store handle | Restore-side faults (WORLD-4) are never judged | None |
 | C6 | The real-engine history runs in the gate are one seed with no faults, and one seed of four power-loss cycles; the larger runs are `#[ignore]` | G1's outside-the-engine evidence is thin except nightly LazyFS | None |
-| C8 | After WAL or page damage the simulator's model adopts whatever SQLite now reads (`adopt_local_state` in `sim/src/world.rs`) | The oracle cannot fail on shipped damage. RUN-12's restore is judged against the corrupted page | None |
-| C7 | The simulator has one clock read once per tick | It cannot produce the stamp-order defect #98 fixed. Core tests guard it instead | Issue #99 |
+| C8 | After WAL or page damage the simulator's model adopts whatever SQLite now reads (`adopt_local_state` in `sim/src/world.rs`) | The oracle could not fail on shipped damage | Fixed: oracle `CorruptionRestored` refuses the adopted state (CHK-6) |
+| C7 | The simulator has one clock read once per tick | It could not produce the stamp-order defect #98 fixed | Fixed: a per-read clock law, drawn last in the mix (RUN-25, RUN-26) |
 
 ### Unknowns
 
@@ -608,14 +604,14 @@ These are defects in the evidence, not in the engine. Each weakens a guarantee's
 
 ## 7. How this document stays true
 
-Part of the rows-as-data scheme is built. The tables of section 3 are rendered from `docs/behavior.toml`, one `[[row]]` per row with every cell verbatim, into this file's template (`docs/behavior/template.md`, `just behavior-doc`), and `just check` fails when this file differs from what they render (`crates/compat/tests/compat/behavior.rs`). It also checks every evidence cell: each citation has the form `kind::`\`name\``, each `plant::` names a ledger entry, each `oracle::` and `judge::` a variant that exists, each test citation a test that `cargo nextest list` knows (or a simulator scenario), a row with no test carries a no-test mark, and an In review cell starts with a PR number, a branch tag or `None`. Turning it on corrected five citations (three helper functions cited as tests, one simulator test cited by the core test's name, one module path), two rows whose notes sat in the In review column, and BOOT-17, which cited a plant and no test. The marks themselves are still typed by a person reading tests: the rule they follow is below, and `docs/evidence.toml` is where a row's marks become machine-checked (each tested row names a planted bug its cited test kills, demonstrated nightly by `just planted-bugs`). Rows move there one at a time.
+Part of the rows-as-data scheme is built. The tables of section 3 are rendered from `docs/behavior.toml`, one `[[row]]` per row with every cell verbatim, into this file's template (`docs/behavior/template.md`, `just behavior-doc`), and `just check` fails when this file differs from what they render (`crates/compat/tests/compat/behavior.rs`). It also checks every evidence cell: each citation has the form `kind::`\`name\``, each `plant::` names a ledger entry, each `oracle::` and `judge::` a variant that exists, each test citation a test that `cargo nextest list` knows (or a simulator scenario), a row with no test carries a no-test mark, and an In review cell starts with a PR number, a branch tag or `None`. Turning it on corrected five citations (three helper functions cited as tests, one simulator test cited by the core test's name, one module path), two rows whose notes sat in the In review column, and BOOT-17, which cited a plant and no test. A `plant::` citation must be backed: the row also cites a test the ledger entry runs (same package, a test filter that matches), and `just evidence-fresh` requires one such test not to be ignored, since the nightly ledger run (`just planted-bugs`) runs no ignored test. That is what makes a cited plant mean "this row's test kills a bug of this class". The marks themselves are still typed by a person reading tests: the rule they follow is below.
 
 ### 7.1 The rule used for the marks in this version
 
 - **Detected by** lists every cited test. A row has D only if at least one is listed.
 - **Recovered by** lists only cited tests from the simulator, the Go compat harness, the history rig or the real-SQLite crash tests, because only those judge a restore on content. A core, cli, local, replica, config or store unit test never earns R. Where the test's circumstance is narrower than the row's (one injected error for "credentials revoked"), R is earned for the narrow case and the Notes say what is not shown.
 - **Survived by** lists a test only when its fault is still in place at the judged restore, by reading its operation list. Five rows. In four the engine has stopped staging, so S means "what was uploaded before still restores". In one (UP-2) a 5% rate fault is active. No row has S under a store that is down, revoked credentials, a full disk, a second writer's files, or an object that stays rotten.
-- A restore judged against a model that adopted the damage earns neither S nor R (RUN-12, C8).
+- A restore judged against a model that adopted the damage earns neither S nor R (RUN-12). Since C8 was fixed, such a restore fails the run (CHK-6).
 - **No-test mark** is filled when none of the three is, or for the half of a row that has no test.
 
 ### 7.2 How the tables map to the data file

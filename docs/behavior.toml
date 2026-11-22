@@ -44,7 +44,7 @@ response = "continue: each gets a token and is uploaded"
 signal = "none"
 at_risk = "None"
 recovery = "Automatic"
-detected_by = "sim::`a_staged_file_forged_while_down_is_refused_at_boot`; oracle::`UnwitnessedPut`, plant::`witness-wal-residue`, plant::`witness-byte-digest`, plant::`witness-trailer-compare`"
+detected_by = "sim::`a_staged_file_forged_while_down_is_refused_at_boot`, core::`frames_past_the_committed_end_prove_no_staged_file`, core::`a_staged_file_whose_bytes_differ_but_still_verify_is_refused`, core::`a_staged_file_replaced_under_a_running_engine_is_never_uploaded`; oracle::`UnwitnessedPut`, plant::`witness-wal-residue`, plant::`witness-byte-digest`, plant::`witness-trailer-compare`"
 recovered_by = "sim::`a_staged_file_forged_while_down_is_refused_at_boot`"
 
 [[row]]
@@ -100,7 +100,7 @@ response = "snapshot, `LocalRewound`"
 signal = "`local_rewound`; `RecoverEvent::LocalRewound`"
 at_risk = "The replica holds commits the database lost. They stay restorable by id until retention removes them. The latest state becomes the rewound database (G2). If the regrown WAL is byte-identical in the staged range, nothing is detected and nothing differs"
 recovery = "Automatic"
-detected_by = "core::`a_committed_end_before_the_newest_staged_file_is_a_rewind`, core::`a_range_regrown_with_another_commit_size_is_a_rewind`, core::`a_shorter_chain_regrown_in_front_of_residue_is_a_rewind_without_the_wal_index`, sim::`power_loss_wal_rewind`, sim::`a_redo_replays_past_the_commits_a_power_loss_took`; plant::`anchor-any-tail`"
+detected_by = "core::`a_committed_end_before_the_newest_staged_file_is_a_rewind`, core::`a_range_regrown_with_another_commit_size_is_a_rewind`, core::`a_shorter_chain_regrown_in_front_of_residue_is_a_rewind_without_the_wal_index`, sim::`power_loss_wal_rewind`, sim::`a_redo_replays_past_the_commits_a_power_loss_took`, sim::`unaided::swarm_seed_44_restores_only_committed_states`; plant::`anchor-any-tail`"
 recovered_by = "sim::`power_loss_wal_rewind`, sim::`a_redo_replays_past_the_commits_a_power_loss_took`, sim::`a_power_loss_on_a_lying_disk_leaves_the_replica_restorable_while_it_lies`"
 in_review = "#89 keeps the staged snapshot if the process dies before uploading it. On main the next boot deletes it and takes a second one"
 
@@ -123,7 +123,7 @@ response = "The file and all after it are deleted unpublished. If the position s
 signal = "none, or `staged_unverified`"
 at_risk = "When a snapshot follows: the restore points of the deleted files. No committed data"
 recovery = "Automatic"
-detected_by = "sim::`a_restored_staging_backup_is_not_uploaded_seed_0x1919f`, sim::`a_staged_file_from_another_history_is_not_chained_seed_0x72a`, sim::`pending_from_a_gone_generation`, compat::`go_and_rust_alternate_on_one_prefix`; plant::`witness-db-page-under-a-frame`, plant::`witness-snapshot-short`"
+detected_by = "sim::`a_restored_staging_backup_is_not_uploaded_seed_0x1919f`, sim::`a_staged_file_from_another_history_is_not_chained_seed_0x72a`, sim::`pending_from_a_gone_generation`, compat::`go_and_rust_alternate_on_one_prefix`, core::`a_pending_snapshot_the_wal_cannot_prove_is_taken_again`, core::`a_pending_snapshot_short_of_the_replicas_newest_is_refused`; plant::`witness-db-page-under-a-frame`, plant::`witness-snapshot-short`"
 recovered_by = "sim::`a_restored_staging_backup_is_not_uploaded_seed_0x1919f`, sim::`a_staged_file_from_another_history_is_not_chained_seed_0x72a`, sim::`pending_from_a_gone_generation`, compat::`go_and_rust_alternate_on_one_prefix`"
 notes = "Witness tokens live in memory only, so this fires for the engine's own files after a plain crash whenever the WAL moved on (section 4)"
 
@@ -193,8 +193,8 @@ response = "degraded, `RemoteCorrupt`"
 signal = "`remote_corrupt`"
 at_risk = "As BOOT-14"
 recovery = "Operator"
-detected_by = "plant::`listing-cursor`"
-no_test = "code only"
+detected_by = "core::`pages::tests::a_staging_listing_whose_cursor_never_advances_is_a_fault_not_a_loop`; plant::`listing-cursor`"
+no_test = "conflicting duplicates: code only"
 notes = "The plant covers the stalled cursor only, through the core tests that kill it. The conflicting-duplicate half is **code only**"
 
 [[row]]
@@ -265,6 +265,17 @@ at_risk = "Lag grows until the boot succeeds. `wait_booted` reports `Degraded` o
 recovery = "Automatic when the fault clears"
 detected_by = "core::`a_failed_boot_waits_without_spinning`"
 notes = "The test fails one local staging listing for one tick and asserts the retry time. A store unreachable through a whole boot is **untested**"
+
+[[row]]
+table = "Boot"
+id = "BOOT-24"
+circumstance = "A staged file the store unlinked comes back after a power loss, because the unlink was not followed by a directory sync (the directory store has synced after each unlink since #116; a store without that sync can still do it)"
+response = "Boot treats it as any staged file: the witness proves it or it is deleted, and nothing it holds is uploaded twice or out of order"
+signal = "None"
+at_risk = "None"
+recovery = "Automatic"
+detected_by = "sim::`store::tests::an_unsynced_unlink_comes_back_or_stays_done_under_the_block_law`, sim::`store::tests::a_commit_after_an_unlink_makes_it_durable`; plant::`unlink-durable-at-once`"
+notes = "Under the block crash law the simulator undoes each unsynced unlink by coin on power loss, as `crash_law.rs` does for directory entries. With the store's sync after each delete on (the default), the swarm resurrects none; with it off, it brings such files back and judges every restore after them (unaided campaign, `crates/sim/tests/sim/unaided.rs`); no seed is pinned as a named test"
 
 [[row]]
 table = "Running"
@@ -345,7 +356,7 @@ response = "continue in the new generation"
 signal = "none"
 at_risk = "None"
 recovery = "Automatic"
-detected_by = "core::`a_pinned_position_follows_a_restart_it_can_prove`, core::`two_restarts_are_not_one`, core::`a_read_lock_from_another_epoch_proves_nothing`; plant::`sim-read-lock-retake`"
+detected_by = "core::`a_pinned_position_follows_a_restart_it_can_prove`, core::`two_restarts_are_not_one`, core::`a_read_lock_from_another_epoch_proves_nothing`, sim::`a_restart_after_a_lapsed_read_lock_loses_no_commit`; plant::`sim-read-lock-retake`"
 in_review = "#89"
 
 [[row]]
@@ -401,7 +412,7 @@ response = "degraded, `DatabasePageMismatch { pgno }`. On the retry the page is 
 signal = "`database_page_mismatch`, with the page number in `/healthz`"
 at_risk = "The replica now holds bytes no commit wrote (G1 qualifier). The last good restore point is kept"
 recovery = "Automatic when a WAL frame rewrites the page. Else the operator inspects and calls `accept_database_pages`"
-detected_by = "sim::`db_page_flipped_under_sync`; plant::`recover-before-trusting-snapshot`"
+detected_by = "sim::`db_page_flipped_under_sync`, sim::`a_requested_snapshot_after_the_wal_moved_trusts_no_stale_page`; plant::`recover-before-trusting-snapshot`"
 notes = "Not S and not R: the scenario makes the simulator's model adopt the flipped page (`adopt_local_state` in `sim/src/world.rs`), so the judged restore is compared with the damage itself (C8)"
 
 [[row]]
@@ -528,7 +539,7 @@ response = "snapshot, `OperatorRequested`. If the boot already needs one whose c
 signal = "`operator_requested`"
 at_risk = "None"
 recovery = "n/a"
-detected_by = "core::`a_requested_snapshot_is_staged_on_a_quiet_wal`, sim::`cli_snapshot`; plant::`boot-snapshot-cause`"
+detected_by = "core::`a_requested_snapshot_is_staged_on_a_quiet_wal`, sim::`cli_snapshot`, sim::`a_request_before_boot_keeps_the_boots_own_snapshot_cause`; plant::`boot-snapshot-cause`"
 recovered_by = "sim::`cli_snapshot`"
 
 [[row]]
@@ -540,6 +551,28 @@ signal = "`Stopped::Drained` or `Stopped::DeadlineReached`; exit code"
 at_risk = "With `DeadlineReached`: `unsynced_wal_bytes` and `staged_not_uploaded`, counted high. They are replicated by the next start"
 recovery = "Next start"
 detected_by = "core::`drain_finishes_uploads`, core::`drain_deadline_stops`, core::`a_drain_retries_a_transient_upload_and_drains`, cli::`two_databases_from_one_config_drain_on_sigterm_and_restore`, cli::`a_second_signal_cuts_the_drain`"
+
+[[row]]
+table = "Running"
+id = "RUN-25"
+circumstance = "The application commits inside a tick, after the tick read its clock and before the sync reads the committed end"
+response = "continue. The commit is stamped no earlier than it landed: the stamp is read after the committed end"
+signal = "None"
+at_risk = "None"
+recovery = "None needed"
+detected_by = "core::`a_commit_after_the_tick_began_is_not_stamped_before_it_landed`, sim::`a_commit_after_the_tick_read_its_clock_is_not_stamped_before_it_seed_0x681`; plant::`stamp-before-committed-read`, plant::`stamp-before-committed-read-sim`"
+notes = "The simulator reaches this only under its per-read clock law, where each clock read is later than the one before; under the per-tick law a tick has one instant and the window does not exist. A stamp earlier than the commit lets a restore as of an instant before the commit contain it (G3)"
+
+[[row]]
+table = "Running"
+id = "RUN-26"
+circumstance = "The application commits inside a tick, right before a checkpoint's write barrier"
+response = "continue. The seal is stamped after the barrier is held, so the commit it carries is not dated before it landed"
+signal = "None"
+at_risk = "None"
+recovery = "None needed"
+detected_by = "core::`a_commit_before_the_checkpoint_barrier_is_not_stamped_before_it_landed`, sim::`a_commit_before_the_barrier_is_not_stamped_before_it_seed_0x552`; plant::`seal-stamped-at-checkpoint-start`, plant::`seal-stamped-at-checkpoint-start-sim`"
+notes = "As RUN-25, under the per-read clock law"
 
 [[row]]
 table = "Checkpoint"
@@ -614,7 +647,7 @@ response = "retry, `ReadTxLost`. The position is unpinned until a sync proves it
 signal = "\"retrying\""
 at_risk = "None. A WAL restart while unpinned costs a snapshot (RUN-8)"
 recovery = "Automatic"
-detected_by = "sim::`reacquire_fails_after_checkpoint`; plant::`sim-read-lock-retake`"
+detected_by = "sim::`reacquire_fails_after_checkpoint`, sim::`a_restart_after_a_lapsed_read_lock_loses_no_commit`; plant::`sim-read-lock-retake`"
 recovered_by = "sim::`reacquire_fails_after_checkpoint`"
 
 [[row]]
@@ -648,8 +681,9 @@ signal = "\"retrying\"; `lsr_replica_operation_errors_total`"
 at_risk = "Lag"
 recovery = "Automatic"
 detected_by = "sim::`store_flaky_5pct`, core::`a_drain_retries_a_transient_upload_and_drains`"
-survived_by = "sim::`store_flaky_5pct`, sim::`a_store_down_for_each_operation_leaves_restorable_files_and_restores_fail_cleanly`"
-notes = "S: the 5% rate fault on uploads and listings is still active at the judged restore. A store fully down for one operation (list, read, upload or delete) for 2 to 11 ticks while the app commits: both judges restore the raw replica in the middle of the outage and at its end, and restores made through the down store fail with a store or listing error, never with another database (oracle `HeldRestore`). Campaign in `sim/tests/sim/survival.rs`: 2000 seeds of the default mix with holds, 0 failures"
+survived_by = "sim::`store_flaky_5pct`, sim::`a_store_down_for_each_operation_leaves_restorable_files_and_restores_fail_cleanly`, history::`network::resets_mid_body_leave_only_committed_states`, history::`network::a_timeout_after_the_request_was_sent_leaves_only_committed_states`, history::`network::sliced_bodies_leave_only_committed_states`, history::`network::a_slow_link_leaves_only_committed_states`"
+recovered_by = "history::`network::resets_mid_body_leave_only_committed_states`, history::`network::a_timeout_after_the_request_was_sent_leaves_only_committed_states`"
+notes = "S: the 5% rate fault on uploads and listings is still active at the judged restore. A store fully down for one operation (list, read, upload or delete) for 2 to 11 ticks while the app commits: both judges restore the raw replica in the middle of the outage and at its end, and restores made through the down store fail with a store or listing error, never with another database (oracle `HeldRestore`). Campaign in `sim/tests/sim/survival.rs`: 2000 seeds of the default mix with holds, 0 failures. Network: the `network::` tests run the real replicator through Toxiproxy to MinIO (`just test-s3`) with a reset part way through a request or response body, a response that never arrives after the store acted, bodies sliced into small writes, and a slow link with latency; the history judge judges restores read straight from MinIO while the fault holds and after it clears. No planted bug is killed by them yet: the nightly ledger run starts no services"
 
 [[row]]
 table = "Upload"
@@ -729,7 +763,7 @@ response = "The uploader is made to list first, from below the divergence, so no
 signal = "\"retrying\""
 at_risk = "None"
 recovery = "Automatic"
-detected_by = "sim::`a_failed_drop_after_a_divergence_uploads_nothing_built_on_it_seed_0xd79`; plant::`relist-after-failed-drop`"
+detected_by = "sim::`a_failed_drop_after_a_divergence_uploads_nothing_built_on_it_seed_0xd79`, core::`a_failed_drop_after_a_divergence_uploads_nothing_built_on_it`; plant::`relist-after-failed-drop`"
 recovered_by = "sim::`a_failed_drop_after_a_divergence_uploads_nothing_built_on_it_seed_0xd79`"
 
 [[row]]
@@ -740,7 +774,7 @@ response = "**stop**, `OtherWriter` (default). No upload, compaction or delete f
 signal = "`other_writer`; `/healthz` 503"
 at_risk = "Everything committed after the stop is unreplicated until an operator acts. The steady state makes no listing, so the other writer is seen only at the next maintenance listing or after an ambiguous commit. A maintenance listing follows this engine's own upload by at most one compaction window (30 s by default) once uploads are idle; an engine with nothing to upload lists only when its next scheduled job is due. No bound on detection is asserted: **code only**"
 recovery = "An operator removes the other writer, then restarts"
-detected_by = "core::`rule_2_running_behind_the_remote_stops`, sim::`second_writer_mid_run`, sim::`under_go_like_a_second_writer_stops_uploads_and_maintenance`; oracle::`OtherWriterMissed`, plant::`maintenance-another-writer`"
+detected_by = "core::`rule_2_running_behind_the_remote_stops`, sim::`second_writer_mid_run`, sim::`under_go_like_a_second_writer_stops_uploads_and_maintenance`, sim::`maintenance_stops_on_another_writer_seed_0x50c`; oracle::`OtherWriterMissed`, plant::`maintenance-another-writer`"
 recovered_by = "sim::`second_writer_mid_run`, sim::`under_go_like_a_second_writer_stops_uploads_and_maintenance`"
 notes = "R only after the other writer's files were removed. No restore is judged with two writers' files in the bucket"
 in_review = "#96"
@@ -858,7 +892,7 @@ response = "Event `Repaired`, or degraded `RemoteCorrupt`"
 signal = "`remote_corrupt`"
 at_risk = "None when repaired: the level is built again from the same inputs"
 recovery = "Automatic, or operator"
-detected_by = "sim::`corrupt_l1_publish_then_power_loss`, sim::`corrupt_l2_publish_then_power_loss`, sim::`corrupt_l9_publish_then_power_loss`, sim::`one_flipped_read_deletes_no_sound_snapshot`; oracle::`DeletedOnOneRead`, plant::`delete-on-one-failed-read-readback`"
+detected_by = "sim::`corrupt_l1_publish_then_power_loss`, sim::`corrupt_l2_publish_then_power_loss`, sim::`corrupt_l9_publish_then_power_loss`, sim::`one_flipped_read_deletes_no_sound_snapshot`, core::`one_bad_read_of_a_sound_snapshot_deletes_nothing`; oracle::`DeletedOnOneRead`, plant::`delete-on-one-failed-read-readback`"
 recovered_by = "sim::`corrupt_l1_publish_then_power_loss`, sim::`corrupt_l2_publish_then_power_loss`, sim::`corrupt_l9_publish_then_power_loss`, sim::`one_flipped_read_deletes_no_sound_snapshot`"
 
 [[row]]
@@ -987,7 +1021,7 @@ response = "refuse, naming the reason and the transaction or file. `AsOfInsideFi
 signal = "exit 2"
 at_risk = "None. No shorter history is ever returned silently"
 recovery = "Depends on the reason"
-detected_by = "cli::`a_gap_target_exits_2_names_the_hole_and_leaves_no_file`; plant::`asof-straddle`, plant::`inside-file-sole-base`"
+detected_by = "cli::`a_gap_target_exits_2_names_the_hole_and_leaves_no_file`, core::`plan::tests::a_later_snapshot_ending_right_after_the_chain_does_not_date_that_transaction`, core::`a_target_inside_the_only_transaction_one_file_names_it`; plant::`asof-straddle`, plant::`inside-file-sole-base`"
 notes = "fuzz targets on the planner against the spec"
 
 [[row]]
@@ -1655,3 +1689,164 @@ at_risk = "What it reports as left"
 recovery = "Next start"
 detected_by = "replica::`a_panic_during_a_drain_still_stops_at_the_deadline`, replica::`a_database_removed_after_a_panic_still_stops_at_the_deadline`"
 notes = "A drain under a degraded upload is **untested** as a named case"
+
+[[row]]
+table = "Circumstances the code does not distinguish"
+id = "WORLD-32"
+circumstance = "Two different databases are configured onto one replica prefix"
+response = "Each sees the other as another writer once a listing shows the replica ahead (UP-10); before that, unconditional PUTs overwrite (UP-14). `AlreadyReplicated` does not apply: the files differ"
+signal = "`other_writer`, late"
+at_risk = "As WORLD-5"
+recovery = "Operator"
+no_test = "untested"
+in_review = "#96"
+
+[[row]]
+table = "Circumstances the code does not distinguish"
+id = "WORLD-33"
+circumstance = "`lsr` is upgraded or downgraded over its own staging directory and replica"
+response = "Nothing versions the staging directory or the files beyond the LTX format. An older build reads what a newer one wrote only if the format and the witness rules did not change"
+signal = "none"
+at_risk = "**unknown**"
+recovery = "**unknown**"
+no_test = "unknown"
+notes = "The Go handover rows cover Go. Nothing tests this port against its own earlier commits"
+
+[[row]]
+table = "Circumstances the code does not distinguish"
+id = "WORLD-34"
+circumstance = "A slow store: no errors, uploads slower than the write rate, or bodies that trickle inside the 60 s deadline"
+response = "Staging grows to the witness cap, then holds; the WAL grows instead (RUN-18)"
+signal = "none"
+at_risk = "Lag without bound. No restore point is given up"
+recovery = "Automatic once the store keeps up"
+no_test = "untested"
+
+[[row]]
+table = "Circumstances the code does not distinguish"
+id = "WORLD-35"
+circumstance = "The store returns the old bytes for a GET after an overwrite"
+response = "BOOT-16 and UP-8 overwrite a key and later read it back. A stale read would compare the staged file with the old object. Guess: the tail is judged torn or diverged again"
+signal = "**unknown**"
+at_risk = "**unknown**"
+recovery = "**unknown**"
+no_test = "unknown"
+notes = "A5 does not cover staleness"
+
+[[row]]
+table = "Circumstances the code does not distinguish"
+id = "WORLD-36"
+circumstance = "The restore target is on a filesystem with no hard links"
+response = "Publish fails at the link step with nothing at the target (`NotVisible`)"
+signal = "exit 3"
+at_risk = "None. The restore cannot complete there"
+recovery = "Restore elsewhere"
+detected_by = "local::`each_failed_step_says_whether_the_target_is_visible`"
+notes = "The test injects the failing step; no linkless filesystem is used"
+
+[[row]]
+table = "Circumstances the code does not distinguish"
+id = "WORLD-37"
+circumstance = "An application write transaction stays open for minutes"
+response = "The engine cannot take its write barrier: checkpoints report busy (CKPT-2), the WAL grows. Sync and upload of committed frames go on"
+signal = "`lsr_checkpoints_busy_total`"
+at_risk = "None to the replica. WAL growth"
+recovery = "The transaction ends"
+detected_by = "sim::`busy_on_barrier`"
+recovered_by = "sim::`busy_on_barrier`"
+notes = "One injected busy, then recovery. A writer held for minutes is untested"
+
+[[row]]
+table = "Circumstances the code does not distinguish"
+id = "WORLD-38"
+circumstance = "SQLite variants: SQLCipher, a non-default VFS, WAL2"
+response = "The engine reads WAL frames and database pages as bytes and checks SQLite's WAL checksums. A VFS without shared memory is refused at start (CFG-4). Encrypted pages would replicate as ciphertext. WAL2 has two WAL files and is not supported"
+signal = "start refusal, or none"
+at_risk = "**unknown**"
+recovery = "n/a"
+no_test = "unknown"
+
+[[row]]
+table = "Circumstances the code does not distinguish"
+id = "WORLD-39"
+circumstance = "A multi-object delete succeeds for some keys and fails for others"
+response = "The job fails; the next plan is made from a new listing. Any subset of a job is as safe as the whole (G5)"
+signal = "by fault"
+at_risk = "None"
+recovery = "Automatic"
+no_test = "code only"
+notes = "The partial-result path in the S3 store was not read"
+
+[[row]]
+table = "Circumstances the code does not distinguish"
+id = "WORLD-40"
+circumstance = "The store's quota is exhausted; a cross-region replica is failed over"
+response = "Quota: uploads are refused, as UP-5 or UP-4 by status code. Failover: an older or lagging copy of the bucket, as BOOT-18 or BOOT-19"
+signal = "`store_refused`, or `permission_denied` for a 403; none for failover"
+at_risk = "As those rows"
+recovery = "Operator"
+no_test = "unknown"
+
+[[row]]
+table = "The checkers themselves"
+id = "CHK-1"
+circumstance = "A transaction id covers a second commit after a power loss that cut neither commit"
+response = "The oracle fails the run: an id may cover a second commit only if the replica lost the first from outside, or a power loss cut the first before the second was put"
+signal = "oracle `TxidReused`"
+at_risk = "None (a checker)"
+recovery = "None"
+detected_by = "sim::`oracle::tests::a_power_loss_that_cut_nothing_covered_does_not_excuse_a_reused_id`; plant::`oracle-reuse-after-any-power-loss`"
+notes = "Before, any power loss or rollback in a run turned the reuse check off for the rest of it"
+
+[[row]]
+table = "The checkers themselves"
+id = "CHK-2"
+circumstance = "Latest falls below an acknowledged transaction after a power loss, which never touches the replica"
+response = "The oracle fails the run: acknowledgements survive power loss; a bucket rollback voids those from the lowest id it uncovered"
+signal = "oracle `LatestLostAck`"
+at_risk = "None (a checker)"
+recovery = "None"
+detected_by = "sim::`world::tests::a_power_loss_keeps_the_acknowledgements`; plant::`acks-forgotten-on-power-loss`"
+
+[[row]]
+table = "The checkers themselves"
+id = "CHK-3"
+circumstance = "Latest goes back over a recorded rewind the engine never reported"
+response = "The history judge fails the run: a rewind explains a regression only after the engine reported a loss (a loss-reporting snapshot cause, a first sync over files, or a stop or degraded state that names one)"
+signal = "judge `Unsignaled`"
+at_risk = "None (a checker)"
+recovery = "None"
+detected_by = "history::`judge::a_rewind_the_engine_did_not_report_does_not_excuse_going_back`, history::`judge::a_report_before_the_rewind_does_not_cover_it`, history::`judge::a_report_after_any_explaining_rewind_covers_the_step`, sim::`run::tests::a_first_sync_over_files_reports_a_loss`; plant::`rewind-excused-without-report`, plant::`rewind-report-only-after-the-latest`, plant::`first-sync-never-a-report`"
+
+[[row]]
+table = "The checkers themselves"
+id = "CHK-4"
+circumstance = "A regression the driver excused (a bucket rollback) is never reported by the engine"
+response = "Counted (`history.excused.unreported`), not fatal: only an uploader listing raises `RemoteRegressed` (D17)"
+signal = "None"
+at_risk = "Latest goes back with no signal"
+recovery = "None"
+no_test = "known wrong"
+notes = "About one excused rollback in four in the unaided campaign"
+
+[[row]]
+table = "The checkers themselves"
+id = "CHK-5"
+circumstance = "A replica key is put again with other bytes while every transaction id keeps its commit"
+response = "The oracle fails the run, even after a delete, unless a scoped exemption of CHK-1 applies"
+signal = "oracle `KeyRewritten`"
+at_risk = "None (a checker)"
+recovery = "None"
+detected_by = "sim::`oracle::tests::a_key_put_again_with_other_bytes_is_a_rewrite`; plant::`keys-not-write-once`"
+notes = "Catches a compacted key rewritten under the same commit, which `TxidReused` cannot see"
+
+[[row]]
+table = "The checkers themselves"
+id = "CHK-6"
+circumstance = "A restore gives the database as a flipped bit in the WAL left it, a state the world adopted and no commit made"
+response = "The history judge fails the run"
+signal = "oracle `CorruptionRestored`"
+at_risk = "None (a checker)"
+recovery = "None"
+detected_by = "sim::`history::tests::a_restore_of_a_state_adopted_from_damage_fails`; plant::`damage-adopted-as-commit`"
+notes = "Before, the adopted state counted as a commit, so a replica holding it passed"

@@ -11,10 +11,14 @@
 //!   parses as citations `<kind>::`\``<name>`\``, or a backticked path in the tree with an
 //!   optional parenthetical scope, with nothing else in between; every path exists, every `plant::`
 //!   names a ledger entry, every `oracle::` a `Violation` variant, every `judge::` an `Anomaly`
-//!   variant; and an In review cell starts with a PR number, a branch tag or `None`;
+//!   variant; every `plant::` is backed: the row also cites a test the entry's run would fail
+//!   (the entry's package, and a test filter that matches); and an In review cell starts with a
+//!   PR number, a branch tag or `None`;
 //! - with the Rust test listing (`every_behavior_citation_resolves`, run by `just
 //!   evidence-fresh`): every test citation names a test of its crate's package (by its name, or a
-//!   path ending in it, as the document cites it) or, for `sim::`, a simulator scenario.
+//!   path ending in it, as the document cites it) or, for `sim::`, a simulator scenario; and every
+//!   cited plant is backed by at least one test that is not ignored, since the nightly ledger run
+//!   that demonstrates kills (`just planted-bugs`) runs no ignored test.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -210,17 +214,64 @@ fn variants(path: &str) -> BTreeSet<String> {
         .collect()
 }
 
-fn ledger() -> BTreeSet<String> {
+/// The ledger's fields these checks read; the rest belong to the runner.
+#[derive(Debug, Deserialize)]
+struct Bug {
+    name: String,
+    package: String,
+    tests: Vec<String>,
+}
+
+fn ledger() -> BTreeMap<String, Bug> {
     #[derive(Deserialize)]
     struct Ledger {
         bug: Vec<Bug>,
     }
-    #[derive(Deserialize)]
-    struct Bug {
-        name: String,
-    }
-    let ledger: Ledger = toml::from_str(&read(&docs().join("planted-bugs.toml"))).unwrap();
-    ledger.bug.into_iter().map(|b| b.name).collect()
+    let path = docs().join("planted-bugs.toml");
+    let ledger: Ledger =
+        toml::from_str(&read(&path)).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
+    ledger
+        .bug
+        .into_iter()
+        .map(|b| (b.name.clone(), b))
+        .collect()
+}
+
+/// Whether the test a row cites as `kind::name` is one the ledger entry's run would fail: the
+/// entry plants against that crate's package and one of its test filters (nextest name
+/// substrings) matches the citation, which names a test or a path ending in one.
+fn backs(bug: &Bug, kind: &str, name: &str) -> bool {
+    bug.package == format!("lsr-{kind}")
+        && bug
+            .tests
+            .iter()
+            .any(|f| name.contains(f.as_str()) || f.contains(name))
+}
+
+/// The test citations of a row.
+fn tests_of(row: &Row) -> Vec<Citation> {
+    row.evidence()
+        .iter()
+        .filter_map(|c| citations(c).ok())
+        .flatten()
+        .filter(|(k, _)| !CHECKS.contains(&k.as_str()) && k != PATH)
+        .collect()
+}
+
+/// A row's `plant::` citations that no test of the same row backs: a plant is cited as the
+/// evidence that a row's test kills a bug of its class, so the row must cite that test too.
+fn unbacked(row: &Row, ledger: &BTreeMap<String, Bug>) -> Vec<String> {
+    let tests = tests_of(row);
+    row.evidence()
+        .iter()
+        .filter_map(|c| citations(c).ok())
+        .flatten()
+        .filter(|(k, _)| k == "plant")
+        .filter_map(|(_, plant)| {
+            let bug = ledger.get(&plant)?;
+            (!tests.iter().any(|(k, n)| backs(bug, k, n))).then_some(plant)
+        })
+        .collect()
 }
 
 /// An In review cell names what is in review first: a PR number (`#96`), a branch tag of two to
@@ -262,7 +313,7 @@ fn problems(doc: &Doc) -> Vec<String> {
                     for (kind, name) in cited {
                         let head = name.split('(').next().unwrap_or_default().to_owned();
                         let known = match kind.as_str() {
-                            "plant" => plants.contains(&name),
+                            "plant" => plants.contains_key(&name),
                             "oracle" => oracle.contains(&head),
                             "judge" => judge.contains(&head),
                             PATH => workspace_root().join(&name).exists(),
@@ -274,6 +325,11 @@ fn problems(doc: &Doc) -> Vec<String> {
                     }
                 }
             }
+        }
+        for plant in unbacked(row, &plants) {
+            out.push(format!(
+                "{id}: plant::{plant} is cited, but none of the row's tests is one its ledger entry runs"
+            ));
         }
         let mark = row.no_test.rsplit(':').next().unwrap_or_default().trim();
         if !row.no_test.is_empty() && !MARKS.iter().any(|m| mark.starts_with(m)) {
@@ -339,13 +395,11 @@ fn scenarios() -> BTreeSet<String> {
     .collect()
 }
 
-#[test]
-#[ignore = "needs the Rust test listing; `just evidence-fresh` writes it and runs this"]
-fn every_behavior_citation_resolves() {
-    let path = std::env::var_os("LSR_EVIDENCE_ALL_TESTS")
+/// A listing (`cargo nextest list --message-format oneline`) as package to every test path in it.
+fn listing(var: &str) -> BTreeMap<String, BTreeSet<String>> {
+    let path = std::env::var_os(var)
         .map(PathBuf::from)
-        .unwrap_or_else(|| panic!("LSR_EVIDENCE_ALL_TESTS is unset; run `just evidence-fresh`"));
-    // Package to every test path in it.
+        .unwrap_or_else(|| panic!("{var} is unset; run `just evidence-fresh`"));
     let mut names: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for line in read(&path).lines() {
         let Some((binary, test)) = line.split_once(' ') else {
@@ -354,34 +408,95 @@ fn every_behavior_citation_resolves() {
         let package = binary.split("::").next().unwrap_or_default().to_owned();
         names.entry(package).or_default().insert(test.to_owned());
     }
+    names
+}
+
+/// Whether `listing` holds the test the document cites as `kind::name`: by its name, or by a
+/// path ending in it.
+fn lists(listing: &BTreeMap<String, BTreeSet<String>>, kind: &str, name: &str) -> bool {
+    let suffix = format!("::{name}");
+    listing
+        .get(&format!("lsr-{kind}"))
+        .is_some_and(|n| n.iter().any(|t| t == name || t.ends_with(&suffix)))
+}
+
+#[test]
+#[ignore = "needs the Rust test listing; `just evidence-fresh` writes it and runs this"]
+fn every_behavior_citation_resolves() {
+    let names = listing("LSR_EVIDENCE_ALL_TESTS");
+    let ignored = listing("LSR_EVIDENCE_IGNORED_TESTS");
     assert!(names.len() > 5, "{} packages listed", names.len());
-    let scenarios = scenarios();
+    assert!(!ignored.is_empty(), "no ignored test listed");
+    let (scenarios, ledger) = (scenarios(), ledger());
     let mut missing = Vec::new();
     for row in rows().row {
-        for (kind, name) in row
+        for (kind, name) in tests_of(&row) {
+            if !lists(&names, &kind, &name) && !(kind == "sim" && scenarios.contains(&name)) {
+                missing.push(format!("{}: {kind}::{name} names no test", row.id));
+            }
+        }
+        // The nightly ledger run runs no ignored test, so a plant backed only by ignored tests
+        // is never shown to be killed.
+        for (_, plant) in row
             .evidence()
             .iter()
             .filter_map(|c| citations(c).ok())
             .flatten()
+            .filter(|(k, _)| k == "plant")
         {
-            if CHECKS.contains(&kind.as_str()) || kind == PATH {
+            let Some(bug) = ledger.get(&plant) else {
                 continue;
-            }
-            // The document cites a test by its name, or by a path ending in it.
-            let suffix = format!("::{name}");
-            let listed = names
-                .get(&format!("lsr-{kind}"))
-                .is_some_and(|n| n.iter().any(|t| *t == name || t.ends_with(&suffix)));
-            if !listed && !(kind == "sim" && scenarios.contains(&name)) {
-                missing.push(format!("{}: {kind}::{name}", row.id));
+            };
+            let run = tests_of(&row)
+                .into_iter()
+                .any(|(k, n)| backs(bug, &k, &n) && !lists(&ignored, &k, &n));
+            if !run {
+                missing.push(format!(
+                    "{}: plant::{plant} is backed only by ignored tests",
+                    row.id
+                ));
             }
         }
     }
-    assert!(
-        missing.is_empty(),
-        "citations that name no test:\n{}",
-        missing.join("\n")
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn a_plant_cited_without_a_test_its_entry_runs_is_unbacked() {
+    let ledger = BTreeMap::from([(
+        "p".to_owned(),
+        Bug {
+            name: "p".into(),
+            package: "lsr-x".into(),
+            tests: vec!["mod::kills_it".into()],
+        },
+    )]);
+    let row = |detected: &str| Row {
+        table: "T".into(),
+        id: "T-1".into(),
+        circumstance: String::new(),
+        response: String::new(),
+        signal: String::new(),
+        at_risk: String::new(),
+        recovery: String::new(),
+        detected_by: detected.into(),
+        survived_by: String::new(),
+        recovered_by: String::new(),
+        no_test: String::new(),
+        notes: String::new(),
+        in_review: String::new(),
+    };
+    assert_eq!(
+        unbacked(&row("x::`kills_it`; plant::`p`"), &ledger),
+        Vec::<String>::new()
     );
+    assert_eq!(
+        unbacked(&row("x::`mod::kills_it`; plant::`p`"), &ledger),
+        Vec::<String>::new()
+    );
+    assert_eq!(unbacked(&row("x::`other`; plant::`p`"), &ledger), ["p"]);
+    assert_eq!(unbacked(&row("y::`kills_it`; plant::`p`"), &ledger), ["p"]);
+    assert_eq!(unbacked(&row("plant::`p`"), &ledger), ["p"]);
 }
 
 #[test]
