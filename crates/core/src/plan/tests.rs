@@ -611,18 +611,88 @@ fn a_file_that_pins_the_next_transaction_removes_the_doubt() {
 fn a_later_snapshot_ending_right_after_the_chain_does_not_date_that_transaction() {
     // L9 1-2 ends one past the chain, but a snapshot is recorded as created when it is
     // written, long after transaction 2 committed, so it says nothing about
-    // when 2 committed. L1 2-5 still straddles the instant: the answer is
-    // the one the listing gives without the snapshot, never a plan.
+    // when 2 committed. The instant stays inside a file, never a plan: the
+    // nearest-ending straddler is the snapshot itself.
     let files = [file(0, 1, 1, 100), file(9, 1, 2, 1000), file(1, 2, 5, 500)];
     let target = RestoreTarget::AsOf(Timestamp::from_unix_millis(300));
-    let without = plan_reference(&inv(&[files[0], files[2]]), target);
     let outcome = plan_reference(&inv(&files), target);
-    assert_eq!(outcome, without);
     let PlanOutcome::AsOfInsideFile { chain, file } = outcome else {
         panic!("expected AsOfInsideFile, got {outcome:?}");
     };
     assert_eq!(chain.reaches(), txid(1));
+    assert_eq!(file, key(9, 1, 2));
+    let without = plan_reference(&inv(&[files[0], files[2]]), target);
+    let PlanOutcome::AsOfInsideFile { file, .. } = without else {
+        panic!("expected AsOfInsideFile, got {without:?}");
+    };
     assert_eq!(file, key(1, 2, 5));
+}
+
+/// A file whose store lost its created-at time, so the listing carries the
+/// object's last-modified time ([`CreatedAt::fallback`]): its upload, not
+/// its newest commit.
+fn fallback(level: u8, min: u64, max: u64, uploaded: i64) -> FileInfo {
+    FileInfo {
+        listed: ListedTime::Created(CreatedAt::fallback(Timestamp::from_unix_millis(uploaded))),
+        ..file(level, min, max, 0)
+    }
+}
+
+#[test]
+fn a_fallback_created_at_does_not_date_the_next_transaction() {
+    // Transaction 3 reached level 0 at 300; the level-1 file that holds it was
+    // uploaded at 900 by a writer that stored no created-at time. 900 is when
+    // the object was written, not when 3 committed, so the instant 350 may
+    // fall after 3: a plan to 2 would silently drop it.
+    let files = [
+        file(9, 1, 1, 100),
+        file(0, 2, 2, 200),
+        fallback(1, 2, 3, 900),
+    ];
+    let outcome = plan_reference(
+        &inv(&files),
+        RestoreTarget::AsOf(Timestamp::from_unix_millis(350)),
+    );
+    let PlanOutcome::AsOfInsideFile { chain, file } = outcome else {
+        panic!("expected AsOfInsideFile, got {outcome:?}");
+    };
+    assert_eq!(chain.reaches(), txid(2));
+    assert_eq!(file, key(1, 2, 3));
+    // The same file with its created-at time stored dates transaction 3.
+    let stored = [files[0], files[1], at(1, 2, 3)];
+    let outcome = plan_reference(
+        &inv(&stored),
+        RestoreTarget::AsOf(Timestamp::from_unix_millis(250)),
+    );
+    assert_eq!(keys(&outcome), vec![key(9, 1, 1), key(0, 2, 2)]);
+}
+
+#[test]
+fn a_fallback_created_at_before_the_instant_still_admits_the_file() {
+    // An upload time before the instant bounds the commit before it too.
+    let files = [file(9, 1, 1, 100), fallback(1, 2, 3, 300)];
+    let outcome = plan_reference(
+        &inv(&files),
+        RestoreTarget::AsOf(Timestamp::from_unix_millis(350)),
+    );
+    assert_eq!(keys(&outcome), vec![key(9, 1, 1), key(1, 2, 3)]);
+}
+
+#[test]
+fn a_snapshot_ending_right_after_the_chain_is_the_straddler_alone() {
+    // L9 1-2 is written at 1000; transaction 2 may have committed before the
+    // instant 300 or after it. Nothing else dates 2, so the chain at 1 is
+    // not certified.
+    let files = [file(0, 1, 1, 100), file(9, 1, 2, 1000)];
+    let outcome = plan_reference(
+        &inv(&files),
+        RestoreTarget::AsOf(Timestamp::from_unix_millis(300)),
+    );
+    let PlanOutcome::AsOfInsideFile { chain, file } = outcome else {
+        panic!("expected AsOfInsideFile, got {outcome:?}");
+    };
+    assert_eq!(chain.reaches(), txid(1));
+    assert_eq!(file, key(9, 1, 2));
 }
 
 #[test]
@@ -758,9 +828,10 @@ fn model_hole(files: &[Spec], goal: Goal, end: u64) -> bool {
 }
 
 /// Whether an instant cuts through a file: some usable file later than the
-/// instant links to the end and holds two or more transactions past it, no
-/// level 0-8 file ends right after the end (which would date that
-/// transaction; a snapshot is recorded as created when written, so it dates nothing).
+/// instant links to the end and passes it, and no level 0-8 file ends right
+/// after the end (which would date that transaction; a snapshot is recorded
+/// as created when written, so it dates nothing, and one that ends right
+/// after the end straddles). Every time here is a stored one.
 fn model_straddlers(files: &[Spec], goal: Goal, end: u64) -> Vec<Spec> {
     let Goal::AsOf(_) = goal else {
         return Vec::new();
@@ -774,7 +845,7 @@ fn model_straddlers(files: &[Spec], goal: Goal, end: u64) -> Vec<Spec> {
     files
         .iter()
         .filter(|s| {
-            !goal.admits(s) && (s.level < 9 || s.min == 1) && s.min <= one_past && s.max > one_past
+            !goal.admits(s) && (s.level < 9 || s.min == 1) && s.min <= one_past && s.max > end
         })
         .copied()
         .collect()

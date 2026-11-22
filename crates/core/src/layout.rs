@@ -351,7 +351,11 @@ impl CreatedAt {
         }
     }
 
-    /// The instant.
+    /// The instant as recorded. What it says about the database's history
+    /// depends on the file's level and on [`Self::origin`]: it may be the
+    /// newest commit, a snapshot's write or an object's upload. A decision
+    /// about when a transaction committed reads [`Stamp::of`] instead (a
+    /// source guard holds the callers of this to an allowlist).
     #[must_use]
     pub const fn at(self) -> Timestamp {
         self.at
@@ -405,6 +409,84 @@ pub enum CreatedAtSource {
     Mtime,
     /// The last-modified time, because no metadata was stored.
     Fallback,
+}
+
+/// What a file's created-at time says about when its newest transaction first
+/// reached level 0 (its commit, below). The answer depends on two facts the
+/// time alone does not carry, the file's level and where the time was read,
+/// so only [`Stamp::of`] makes one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Dating {
+    /// Equal to the commit: a level 0-8 file with its stored created-at time.
+    /// A level-0 file is stamped at its own sync, and compaction gives its
+    /// output its newest input's time (here and in Go), which recurses down to
+    /// the level-0 file that first carried that transaction.
+    Commit,
+    /// At or after the commit, by an unknown margin: a snapshot (stamped when
+    /// written), or any file whose store lost the created-at time and reports
+    /// the object's last-modified time instead ([`CreatedAtSource::Fallback`]:
+    /// a writer before Go v0.5.1, or a bucket copy that dropped metadata).
+    NotBeforeCommit,
+    /// The writer recorded no time (zero or before the epoch).
+    Unset,
+}
+
+/// A created-at time together with what it dates. Planner decisions read
+/// times only through this, so a write time or an upload time cannot answer
+/// a question about when a transaction committed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Stamp {
+    at: Timestamp,
+    dating: Dating,
+}
+
+impl Stamp {
+    /// The provenance table: what `created_at`, stored for a file at `level`,
+    /// dates. A file store's modification time counts as stored, because it
+    /// is how such a store keeps the created-at time (Go sets it the same
+    /// way); a copy that did not preserve it cannot be told apart.
+    #[must_use]
+    pub const fn of(level: Level, created_at: CreatedAt) -> Self {
+        let dating = if created_at.at.unix_millis() <= 0 {
+            Dating::Unset
+        } else if level.is_snapshot() {
+            Dating::NotBeforeCommit
+        } else {
+            match created_at.origin {
+                CreatedAtSource::Metadata | CreatedAtSource::Mtime => Dating::Commit,
+                CreatedAtSource::Fallback => Dating::NotBeforeCommit,
+            }
+        };
+        Self {
+            at: created_at.at,
+            dating,
+        }
+    }
+
+    /// What the time dates.
+    #[must_use]
+    pub const fn dating(self) -> Dating {
+        self.dating
+    }
+
+    /// Whether the file was recorded as created strictly before `instant`:
+    /// `AsOf` eligibility, the comparison Go makes. Sound for every dating,
+    /// since no time precedes the commit it bounds; an unset time counts as
+    /// before every later instant, as Go's zero time does.
+    #[must_use]
+    pub const fn before(self, instant: Timestamp) -> bool {
+        self.at.unix_millis() < instant.unix_millis()
+    }
+
+    /// Whether the file's newest transaction committed at or after `instant`,
+    /// when the time can tell: only a [`Dating::Commit`] answers.
+    #[must_use]
+    pub const fn commit_at_or_after(self, instant: Timestamp) -> Option<bool> {
+        match self.dating {
+            Dating::Commit => Some(self.at.unix_millis() >= instant.unix_millis()),
+            Dating::NotBeforeCommit | Dating::Unset => None,
+        }
+    }
 }
 
 #[cfg(test)]

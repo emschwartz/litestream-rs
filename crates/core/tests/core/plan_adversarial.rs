@@ -17,14 +17,22 @@ mod review {
         min: u64,
         max: u64,
         created: i64,
+        /// The store lost the created-at time and reports the upload time.
+        uploaded: bool,
     }
 
     fn info(f: F) -> FileInfo {
         let r = TxidRange::new(Txid::new(f.min).unwrap(), Txid::new(f.max).unwrap()).unwrap();
+        let at = Timestamp::from_unix_millis(f.created);
+        let created_at = if f.uploaded {
+            CreatedAt::fallback(at)
+        } else {
+            CreatedAt::mtime(at)
+        };
         FileInfo {
             key: FileKey::new(Level::new(f.level).unwrap(), r),
             size: 1,
-            listed: ListedTime::Created(CreatedAt::mtime(Timestamp::from_unix_millis(f.created))),
+            listed: ListedTime::Created(created_at),
         }
     }
 
@@ -73,26 +81,24 @@ mod review {
     }
 
     /// Files later than the instant that cut through the state at `end`: usable,
-    /// linking, two or more transactions past it, and with no file dating the
-    /// transaction right after `end`. Only a level 0-8 file ending there dates
-    /// it: a snapshot is recorded as created when written, any time after its newest
-    /// transaction. Written from the reachability argument, not from the
-    /// planner.
+    /// linking, past it, and with no file dating the transaction right after
+    /// `end`. Only a level 0-8 file ending there with its stored, non-zero
+    /// created-at time dates it: a snapshot is recorded as created when
+    /// written, and an upload time any time after the newest transaction.
+    /// Written from the reachability argument, not from the planner.
     fn straddlers(files: &[F], g: G, end: u64) -> Vec<F> {
         let Some(one_past) = end.checked_add(1) else {
             return Vec::new();
         };
-        if files.iter().any(|f| f.level < 9 && f.max == one_past) {
+        let dates = |f: &F| f.level < 9 && !f.uploaded && f.created > 0 && f.max == one_past;
+        if files.iter().filter(|f| !admits(g, f)).any(dates) {
             return Vec::new();
         }
         files
             .iter()
             .copied()
             .filter(|f| {
-                !admits(g, f)
-                    && (f.level < 9 || f.min == 1)
-                    && f.min <= one_past
-                    && f.max > one_past
+                !admits(g, f) && (f.level < 9 || f.min == 1) && f.min <= one_past && f.max > end
             })
             .collect()
     }
@@ -104,8 +110,9 @@ mod review {
             0u64..12,
             0i64..12,
             prop::bool::weighted(0.6),
+            prop::bool::weighted(0.2),
         )
-            .prop_map(move |(level, a, b, created, start_at_one)| {
+            .prop_map(move |(level, a, b, created, start_at_one, uploaded)| {
                 let (lo, hi) = (a.min(b), a.max(b));
                 let min = if level == 9 && start_at_one {
                     1
@@ -118,6 +125,7 @@ mod review {
                     min,
                     max,
                     created,
+                    uploaded,
                 }
             })
     }
@@ -233,6 +241,7 @@ mod review {
             min,
             max,
             created,
+            uploaded: false,
         })
     }
 

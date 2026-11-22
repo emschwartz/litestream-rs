@@ -152,8 +152,10 @@ fn furthest_reach(files: impl Iterator<Item = FileKey>) -> Option<Txid> {
 }
 
 /// An `AsOfInsideFile` carries a valid chain, and a listed file that links to
-/// it, reaches at least two transactions past it and was created at or after
-/// the instant.
+/// it, passes it and was created at or after the instant. A file holding only
+/// the one transaction past the chain qualifies when its time does not date
+/// that commit: a snapshot (stamped when written) or an unset time. Every
+/// time here is stored, so a level 0-8 file with a non-zero one dates it.
 fn check_inside_file(
     inventory: &Inventory,
     target: RestoreTarget,
@@ -171,9 +173,12 @@ fn check_inside_file(
     let links = reach
         .next()
         .is_none_or(|one_past| file.range().min() <= one_past);
-    let past = reach
-        .next()
-        .is_some_and(|one_past| file.range().max() > one_past);
+    let dated = info
+        .created_at()
+        .is_some_and(|created_at| !file.level().is_snapshot() && created_at.at().unix_millis() > 0);
+    let past = reach.next().is_some_and(|one_past| {
+        file.range().max() > one_past || (file.range().max() == one_past && !dated)
+    });
     if info
         .created_at()
         .is_none_or(|created_at| created_at.at() < instant)
