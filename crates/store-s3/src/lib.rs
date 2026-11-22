@@ -32,6 +32,8 @@ mod reqwest_transport;
 mod response;
 #[cfg(test)]
 mod secrets;
+mod signer;
+mod source;
 mod store;
 mod transport;
 #[cfg(any(feature = "ureq", feature = "reqwest"))]
@@ -40,7 +42,9 @@ mod upload;
 #[cfg(feature = "ureq")]
 mod ureq_transport;
 
-pub use chain::{CredentialChain, CredentialError, EnvGap, FileOutcome, Resolved, Source, Tried};
+pub use chain::{
+    CredentialChain, CredentialError, EnvGap, FileOutcome, Resolved, Source, SourceError, Tried,
+};
 pub use classify::{
     S3Code, classify, classify_delete_failures, classify_transport, is_range_past_end,
 };
@@ -66,6 +70,7 @@ pub use response::{
     parse_create, parse_delete_failure_codes, parse_delete_failures, parse_head, parse_list,
     quoted_md5,
 };
+pub use source::{CredentialSource, Expiring, REFRESH_BEFORE};
 pub use store::{ListStats, S3Store, SystemClock};
 pub use transport::{HttpResponse, Transport, TransportError, send_on_threads};
 pub use upload::S3Upload;
