@@ -34,6 +34,8 @@ mod big;
 #[cfg(test)]
 mod common;
 #[cfg(test)]
+mod crash_cycles;
+#[cfg(test)]
 mod descriptors;
 #[cfg(test)]
 mod errors;

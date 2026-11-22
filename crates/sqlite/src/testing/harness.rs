@@ -49,7 +49,7 @@ use lsr_store_fs::FsStore;
 use lsr_wal::{Salts, WalOffset};
 use rusqlite::{Connection, OpenFlags};
 
-use crate::testing::vfs::{FaultVfs, FileKind, Op, VfsError, seed_prng};
+use crate::testing::vfs::{CrashLaw, FaultVfs, FileKind, Op, VfsError, seed_prng};
 use crate::{DEFAULT_JOURNAL_SIZE_LIMIT, OpenError, Sqlite, SqliteConfig};
 
 mod app;
@@ -169,6 +169,8 @@ pub struct RigConfig {
     pub oracle: bool,
     /// Record what writes replace, so a power loss can undo them.
     pub power: bool,
+    /// What a power loss keeps of the writes since each file's last sync.
+    pub crash_law: CrashLaw,
     /// Where the application runs.
     pub placement: Placement,
     /// The backend's WAL size limit ([`SqliteConfig::journal_size_limit`]).
@@ -184,6 +186,7 @@ impl Default for RigConfig {
             seed: DEFAULT_SEED,
             oracle: true,
             power: false,
+            crash_law: CrashLaw::AllOrNothing,
             placement: Placement::InProcess,
             journal_size_limit: Some(DEFAULT_JOURNAL_SIZE_LIMIT),
         }
@@ -436,6 +439,7 @@ impl<B: Backend> Rig<B> {
         let model = cfg
             .oracle
             .then(|| Model::new(PageImage::from_bytes(page_size, &bytes)));
+        vfs.set_crash_law(cfg.crash_law);
         if cfg.power {
             vfs.track_durability();
         }
@@ -791,7 +795,8 @@ impl<B: Backend> Rig<B> {
     /// Ticks until the actor is idle with everything staged on the replica.
     ///
     /// # Errors
-    /// [`RigError::Stopped`], [`RigError::Unsettled`], or the rig's own.
+    /// [`RigError::Stopped`], [`RigError::Unsettled`], [`RigError::State`] once the power is out
+    /// (nothing the dead machine does lands), or the rig's own.
     pub fn settle(&mut self) -> Result<(), RigError> {
         // Retries since the last tick that did anything else: a fault that every retry meets
         // again never settles, and waiting out the whole budget only costs time.
