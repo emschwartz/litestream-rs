@@ -196,7 +196,11 @@ fn barrier_and_write_lock_hold_the_writer() {
         "one lock at a time on the writer connection"
     );
     assert_eq!(db.commit(&tx(&[2], 1), 4), None);
-    assert_eq!(ck.bump_seq(), Err(SourceError::Busy));
+    assert_eq!(
+        ck.bump_seq(),
+        Err(SourceError::Io(std::io::ErrorKind::InvalidInput)),
+        "the writer connection is in the barrier's transaction"
+    );
     let run = ck.checkpoint(CheckpointMode::Truncate).unwrap();
     assert!(
         run.busy,

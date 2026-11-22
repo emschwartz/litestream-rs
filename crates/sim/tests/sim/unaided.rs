@@ -8,7 +8,9 @@
 //! every seed's disk lies about the engine's WAL fsync instead of what its mix drew; with
 //! `LSR_SIM_SWARM` set, every seed runs its swarm mix (`Weights::swarm`) instead, and with
 //! `LSR_SIM_DEFAULT` set the default mix; with `LSR_SIM_HOLD` set to a rate in a thousand, holds
-//! are drawn at least that often (`tests/sim/survival.rs`).
+//! are drawn at least that often (`tests/sim/survival.rs`); with `LSR_SIM_KNOWN_WRONG` set, the
+//! error domain's known-wrong cells are drawn too and a failure matching a drawn defect's
+//! signature is printed as known and not counted as failed (`lsr_sim::domain::KnownWrong`).
 //! Prints every failing seed and the number of seeds run to
 //! the first. The generator, weights and step count are the soak's, fixed here so a count of
 //! seeds to first failure compares across trees.
@@ -41,8 +43,11 @@
 //! (126, under the history configuration) had the boot witness accept a pending file on the
 //! anchor alone; a staging fault four steps later forced a snapshot over it.
 
+use lsr_sim::domain::{KnownWrong, known_in};
 use lsr_sim::run::run_ops;
-use lsr_sim::{AfterRestart, ClockLaw, Judges, Opts, Seed, Weights, replay_line, run_with};
+use lsr_sim::{
+    AfterRestart, ClockLaw, Judges, Opts, Seed, Weights, history, replay_line, run_with,
+};
 
 const STEPS: u32 = 300;
 
@@ -87,6 +92,7 @@ pub fn weights(seed: Seed) -> Weights {
             .max(hold.parse().expect("LSR_SIM_HOLD is a rate in 1000"));
     }
     weights.block_crash_law |= std::env::var("LSR_SIM_BLOCK_LAW").is_ok();
+    weights.known_wrong |= std::env::var("LSR_SIM_KNOWN_WRONG").is_ok();
     weights.lying_wal_sync |= std::env::var("LSR_SIM_LYING_SYNC").is_ok();
     if std::env::var("LSR_SIM_NO_WAL_DAMAGE").is_ok() {
         weights.wal_damage = 0;
@@ -124,6 +130,7 @@ fn seeds_to_first_failure() {
         ..Opts::default()
     };
     let mut failed = Vec::new();
+    let mut known = std::collections::BTreeMap::<String, Vec<u64>>::new();
     let mut reached = [0_u64; REACHED.len()];
     let mut losses = 0_u64;
     for n in base..base.saturating_add(seeds) {
@@ -137,6 +144,12 @@ fn seeds_to_first_failure() {
             losses += u64::from(report.power_losses);
         }
         if let Err(failure) = ran {
+            let drawn = known_in(&history(seed, STEPS, &weights));
+            if let Some(defect) = KnownWrong::of(&failure.violation, &drawn) {
+                println!("KNOWN {defect:?}: {failure}");
+                known.entry(format!("{defect:?}")).or_default().push(n);
+                continue;
+            }
             println!(
                 "FAILED after {} seeds: {failure}",
                 n.saturating_sub(base).saturating_add(1)
@@ -150,6 +163,13 @@ fn seeds_to_first_failure() {
     }
     let reached: Vec<_> = REACHED.iter().zip(reached).collect();
     println!("passing runs: {losses} power losses; {reached:?}");
+    for (defect, seeds) in &known {
+        println!(
+            "known {defect}: {} seeds, first {:?}",
+            seeds.len(),
+            seeds.first()
+        );
+    }
     println!(
         "{judges:?}: {} failed of seeds from {base}: {failed:?}",
         failed.len()
@@ -174,5 +194,27 @@ fn swarm_seed_44_restores_only_committed_states() {
     };
     if let Err(failure) = run_ops(Seed::new(44), crate::histories::seed_0x2c::OPS, &opts) {
         panic!("{failure}");
+    }
+}
+
+/// Seed 0x753's swarm mix under the block crash law on a disk that lies about the engine's WAL
+/// sync, with the app redoing its commits after a restart: staging is wiped, a power loss takes
+/// WAL frames the replica already holds, the redo regrows them byte for byte, and the next boot
+/// rightly continues on the replica's newest file. The history judge called the next `Latest`
+/// an unreported step back, because it remembered the previous restore as the nodes that held
+/// its content then, not the node the redo rebuilt with the same content later.
+#[test]
+fn swarm_seed_0x753_a_redo_that_rebuilds_the_restored_state_is_not_a_loss() {
+    let opts = Opts {
+        drawn: true,
+        block_crash_law: true,
+        lying_wal_sync: true,
+        after_restart: AfterRestart::Redo,
+        clock_law: ClockLaw::EachRead,
+        staging_fs: false,
+        ..Opts::default()
+    };
+    if let Err(failure) = run_ops(Seed::new(0x753), crate::histories::seed_0x753::OPS, &opts) {
+        panic!("{}", failure.message(failure.steps));
     }
 }

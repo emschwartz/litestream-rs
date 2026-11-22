@@ -14,11 +14,15 @@ mod differential;
 #[cfg(test)]
 mod dropped_created_at;
 #[cfg(test)]
+mod failstop;
+#[cfg(test)]
 mod faults;
 #[cfg(test)]
 mod fixed_seeds;
 #[cfg(test)]
 mod histories;
+#[cfg(test)]
+mod known_wrong;
 #[cfg(test)]
 mod liveness;
 #[cfg(test)]

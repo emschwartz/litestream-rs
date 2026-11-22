@@ -187,6 +187,14 @@ pub enum Violation {
         /// The other writer's file.
         key: String,
     },
+    /// Fail-stop tripped where nothing the simulator knows explains it (`crate::failstop`).
+    #[error("fail-stop tripped with no cause: {trip}: {detail}")]
+    FalseTrip {
+        /// The trip.
+        trip: String,
+        /// What the simulator found instead.
+        detail: String,
+    },
     /// A restore the replica should answer was refused.
     #[error("restoring {target:?} was refused: {outcome:?}")]
     RestoreRefused {
@@ -337,6 +345,13 @@ pub enum Violation {
         stall: String,
         /// Failures in a row.
         retries: u32,
+    },
+    /// A task is degraded by a persistent cause no fault of the run explains (or by the
+    /// engine's own bug, which nothing explains).
+    #[error("bug fault: a task is degraded: {cause:?}")]
+    UnexpectedDegraded {
+        /// The cause the engine reported.
+        cause: lsr_core::PersistentCause,
     },
     /// The engine reported its own bug, or the oracle could not decide.
     #[error("bug fault: {context}")]

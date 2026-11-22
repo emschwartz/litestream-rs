@@ -13,7 +13,7 @@
 use std::io::ErrorKind;
 use std::time::Duration;
 
-use lsr_core::{SourceError, SourceOp, StoreError, StoreOp};
+use lsr_core::{Denied, SourceError, SourceOp, StoreError, StoreOp};
 use lsr_ltx::PageSize;
 
 use crate::generate::{EnvFault, Hold, MetaOp, Op, RemoteOp, Target, WalOp};
@@ -65,7 +65,7 @@ const IMPORTS: &[(&str, &[&str])] = &[
     ("std::time", &["Duration"]),
     (
         "lsr_core",
-        &["SourceError", "SourceOp", "StoreError", "StoreOp"],
+        &["Denied", "SourceError", "SourceOp", "StoreError", "StoreOp"],
     ),
     ("lsr_ltx", &["PageSize"]),
     (
@@ -199,11 +199,28 @@ fn store_error(err: &StoreError) -> Result<String, Unprintable> {
             store_op(*op),
             retry_after.map_or_else(|| Ok("None".to_owned()), duration)?
         )),
-        StoreError::Denied { .. }
-        | StoreError::NotFound { .. }
+        StoreError::Denied { op, why } => Ok(format!(
+            "StoreError::Denied {{ op: {}, why: {} }}",
+            store_op(*op),
+            denied(*why)
+        )),
+        StoreError::Refused { op, status } => Ok(format!(
+            "StoreError::Refused {{ op: {}, status: {status} }}",
+            store_op(*op)
+        )),
+        StoreError::NotFound { .. }
         | StoreError::ScratchExhausted { .. }
-        | StoreError::Corrupt { .. }
-        | StoreError::Refused { .. } => Err(Unprintable(format!("{err:?}"))),
+        | StoreError::Corrupt { .. } => Err(Unprintable(format!("{err:?}"))),
+    }
+}
+
+const fn denied(why: Denied) -> &'static str {
+    match why {
+        Denied::Credentials => "Denied::Credentials",
+        Denied::Permission => "Denied::Permission",
+        Denied::ClockSkew => "Denied::ClockSkew",
+        Denied::BucketMissing => "Denied::BucketMissing",
+        Denied::Tls => "Denied::Tls",
     }
 }
 
@@ -227,6 +244,10 @@ fn io_kind(kind: ErrorKind) -> Result<String, Unprintable> {
         ErrorKind::TimedOut => "TimedOut",
         ErrorKind::InvalidData => "InvalidData",
         ErrorKind::PermissionDenied => "PermissionDenied",
+        ErrorKind::BrokenPipe => "BrokenPipe",
+        ErrorKind::StorageFull => "StorageFull",
+        ErrorKind::QuotaExceeded => "QuotaExceeded",
+        ErrorKind::UnexpectedEof => "UnexpectedEof",
         other => return Err(Unprintable(format!("io::ErrorKind::{other:?}"))),
     };
     Ok(format!("ErrorKind::{name}"))

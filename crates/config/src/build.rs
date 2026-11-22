@@ -17,6 +17,8 @@
 
 use std::num::NonZeroU32;
 
+use lsr_replica::{IfReplicationStops, MaxUnreplicatedAge};
+
 use crate::config::{
     AppReaders, DbConfig, DbSource, DirSource, GoConfig, LogFormat, LogLevel, Logging,
     OtherWriterSetting, ReplicaConfig, ReplicaKind, ResponseSetting, ResponseSettings,
@@ -533,7 +535,43 @@ fn rust_settings(fields: Option<&Fields>, walk: &mut Walk) -> RustSettings {
         app_readers,
         app_autocheckpoint: app_autocheckpoint(fields, walk),
         responses,
+        if_replication_stops: if_replication_stops(fields, walk),
+        max_unreplicated_age: max_unreplicated_age(fields, walk),
     }
+}
+
+/// `if-replication-stops` (decisions D13, D14): `hold-start` when absent.
+fn if_replication_stops(fields: Option<&Fields>, walk: &mut Walk) -> IfReplicationStops {
+    let name = "if-replication-stops";
+    match fields.and_then(|f| f.string(name)).as_deref() {
+        None | Some("hold-start") => IfReplicationStops::HoldStart,
+        Some("report") => IfReplicationStops::Report,
+        Some("stop-app") => IfReplicationStops::StopApp,
+        Some(other) => {
+            let path = KeyPath::root().key("litestream-rs").key(name);
+            let line = fields.and_then(|f| f.line(name));
+            let (value, allowed) = (other.to_owned(), "report, hold-start, stop-app");
+            walk.problem(path, line, ProblemKind::UnsupportedValue { value, allowed });
+            IfReplicationStops::HoldStart
+        }
+    }
+}
+
+/// `max-unreplicated-age` (decision D22): 10 minutes when absent; below 5 minutes is refused,
+/// so one retry at the backoff cap always fits inside it.
+fn max_unreplicated_age(fields: Option<&Fields>, walk: &mut Walk) -> MaxUnreplicatedAge {
+    let name = "max-unreplicated-age";
+    let Some(value) = fields.and_then(|f| f.duration(name)) else {
+        return MaxUnreplicatedAge::DEFAULT;
+    };
+    if let Some(bound) = value.to_std().and_then(MaxUnreplicatedAge::new) {
+        return bound;
+    }
+    let path = KeyPath::root().key("litestream-rs").key(name);
+    let line = fields.and_then(|f| f.line(name));
+    let (value, allowed) = (value.to_string(), "a duration of at least 5m");
+    walk.problem(path, line, ProblemKind::UnsupportedValue { value, allowed });
+    MaxUnreplicatedAge::DEFAULT
 }
 
 /// `app-autocheckpoint`: frames, or `0` and `off` for none; SQLite's 1000 when absent.

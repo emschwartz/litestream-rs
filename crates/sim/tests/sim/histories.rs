@@ -21,8 +21,12 @@ pub mod seed_0x25;
 pub mod seed_0x2c;
 pub mod seed_0x2d;
 pub mod seed_0x46;
+pub mod seed_0x753;
+pub mod seed_0x9f9;
 pub mod seed_0xa2;
 pub mod seed_0xb6b;
+pub mod seed_0xb9e;
+pub mod seed_0xf;
 
 /// What guards a recorded history against passing for nothing.
 #[derive(Clone, Copy, Debug)]
@@ -123,6 +127,32 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
         "an_id_the_replica_holds_is_not_taken_again_after_a_lying_read_seed_0xb6b",
         Guard::Unguarded(
             "it is known wrong and ignored until conditional level-0 writes (#96) land: it fails \
+             on main, so no plant can be judged by it",
+        ),
+    ),
+    (
+        "seed_0x753",
+        "swarm_seed_0x753_a_redo_that_rebuilds_the_restored_state_is_not_a_loss",
+        Guard::Own("latest-judged-against-old-nodes-sim"),
+    ),
+    (
+        "seed_0xf",
+        "a_restart_after_a_failed_wal_sync_still_stages_frames_it_covered_seed_0xf",
+        Guard::Unguarded(
+            "it pins an open defect (KnownWrong::WalSyncForgottenAtRestart) and passes only while \
+             main fails with it, so no plant can be judged by it",
+        ),
+    ),
+    (
+        "seed_0xb9e",
+        "compaction_takes_a_staging_denial_as_staging_seed_0xb9e",
+        Guard::Own("compact-local-read-as-remote-sim"),
+    ),
+    (
+        "seed_0x9f9",
+        "known_false_trip_seed_0x9f9",
+        Guard::Unguarded(
+            "it is a known false trip, ignored until resolved (docs/decisions.md D27): it fails \
              on main, so no plant can be judged by it",
         ),
     ),

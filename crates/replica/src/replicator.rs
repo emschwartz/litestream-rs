@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll, Waker};
 use std::thread::JoinHandle;
@@ -78,6 +78,9 @@ pub(crate) struct Shared {
     pub(crate) grace: Duration,
     pub(crate) readers: Arc<AtomicUsize>,
     pub(crate) meters: Arc<Meters>,
+    /// Fail-stop's gate is held: the commit hook `app_connection` installs refuses the
+    /// application's commits while this is set.
+    pub(crate) writes_refused: Arc<AtomicBool>,
     pid: u32,
     state: Mutex<State>,
     changed: Condvar,
@@ -107,6 +110,7 @@ impl Shared {
             grace: config.shutdown_grace,
             readers: Arc::new(AtomicUsize::new(0)),
             meters: Arc::new(Meters::default()),
+            writes_refused: Arc::new(AtomicBool::new(false)),
             pid: std::process::id(),
             state: Mutex::new(State {
                 health: Health::new(now),
@@ -492,12 +496,21 @@ impl Replicator {
     /// # Errors
     /// [`lsr_sqlite::SetupError`]: the connection has no file or opens another one, or a
     /// setting failed.
+    ///
+    /// It also installs a commit hook (`sqlite3_commit_hook`, replacing any the application set)
+    /// that refuses every commit while fail-stop holds the application
+    /// ([`crate::Health::held_by`], `Config::if_replication_stops`): SQLite rolls the
+    /// transaction back and the application's COMMIT fails with
+    /// `SQLITE_CONSTRAINT_COMMITHOOK`. Reads go on. Connections not set up here are not
+    /// covered; an application on another binding reads the gate from [`Self::health`].
     #[cfg(feature = "rusqlite")]
     pub fn app_connection(
         &self,
         conn: &rusqlite::Connection,
     ) -> Result<(), lsr_sqlite::SetupError> {
-        lsr_sqlite::app_connection_for(conn, &self.shared.database)
+        lsr_sqlite::app_connection_for(conn, &self.shared.database)?;
+        lsr_sqlite::refuse_commits_while(conn, &self.shared.writes_refused);
+        Ok(())
     }
 }
 

@@ -13,13 +13,23 @@
 //!
 //! **Once shutdown has begun**, a further signal cuts every drain to nothing and kills the
 //! child, as Go's "shutdown interrupted" does.
+//!
+//! **Fail-stop** (`crate::failstop`): the child starts only once every database's gate is
+//! open; until then the daemon waits, still taking signals. Under `stop-app`, a gate held
+//! while the child runs stops it with SIGTERM, the shutdown grace and SIGKILL, and the run
+//! drains and ends with the CLI's own exit code.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use lsr_replica::{Gate, Trip};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::daemon::{Daemon, Finished, Started};
 use crate::exec::{Child, ChildEnd, ExecCommand, Wake};
+use crate::failstop;
 use crate::logging::Value;
 use crate::signals;
 
@@ -97,6 +107,10 @@ fn spawn(daemon: &Daemon, control: &Control, command: &ExecCommand) -> ChildProc
     }
 }
 
+/// How often the gates are read while the `-exec` child waits to start or runs under
+/// `stop-app` (`crate::failstop`).
+const GATE_POLL: Duration = Duration::from_secs(1);
+
 /// Runs until a signal or the child's exit, then drains every database.
 #[must_use]
 pub(crate) fn supervise(
@@ -106,7 +120,11 @@ pub(crate) fn supervise(
     wake: &Receiver<Wake>,
 ) -> Finished {
     let waiter = daemon.wait_for_files();
-    let early = wake.try_recv().ok();
+    let mut early = wake.try_recv().ok();
+    let mut held = None;
+    if let (Some(_), None) = (exec, early) {
+        (early, held) = hold_start(daemon, wake);
+    }
     let child_process = match (exec, early) {
         (Some(command), None) => spawn(daemon, control, command),
         (Some(_) | None, _) => ChildProcess::None,
@@ -114,7 +132,15 @@ pub(crate) fn supervise(
     let first = match (&child_process, early) {
         (_, Some(wake)) => Some(wake),
         (ChildProcess::DidNotStart, None) => Some(Wake::ChildExited),
-        (ChildProcess::None | ChildProcess::Running(_), None) => wake.recv().ok(),
+        (ChildProcess::Running(child), None) => match watch(daemon, wake) {
+            Watched::Wake(wake) => wake,
+            Watched::Held(path, trip) => {
+                stop_held(daemon, control, child, wake, &path, trip);
+                held = Some(trip);
+                None
+            }
+        },
+        (ChildProcess::None, None) => wake.recv().ok(),
     };
     let begun = daemon.now();
     match first {
@@ -145,7 +171,96 @@ pub(crate) fn supervise(
     }
     let mut finished = daemon.stop(waiter, begun);
     finished.child = end;
+    finished.app_held = held;
     finished
+}
+
+/// The first held gate, with its database.
+fn first_held(daemon: &Daemon) -> Option<(PathBuf, Trip)> {
+    daemon
+        .gates()
+        .into_iter()
+        .find_map(|(path, gate)| match gate {
+            Gate::Held(trip) => Some((path, trip)),
+            Gate::Pending | Gate::Allowed => None,
+        })
+}
+
+/// Waits until every database's gate is open before the `-exec` child starts: a pending gate
+/// (the boot not judged yet) waits, a held one keeps the child from starting while the daemon
+/// stays up answering 503. Returns the signal that ended the wait, if one did, and the trip
+/// that held the start then.
+fn hold_start(daemon: &Daemon, wake: &Receiver<Wake>) -> (Option<Wake>, Option<Trip>) {
+    let mut said = None;
+    loop {
+        let held = first_held(daemon);
+        let pending = daemon
+            .gates()
+            .iter()
+            .any(|(_, gate)| *gate == Gate::Pending);
+        if held.is_none() && !pending {
+            return (None, None);
+        }
+        if let Some((path, trip)) = &held
+            && said != Some(*trip)
+        {
+            let fields = [
+                ("db", path.display().to_string().into()),
+                ("why", failstop::trip_name(*trip).into()),
+            ];
+            daemon.log().warn(failstop::START_REFUSED, &fields);
+            said = Some(*trip);
+        }
+        match wake.recv_timeout(GATE_POLL) {
+            Ok(signal @ Wake::Signal(_)) => return (Some(signal), held.map(|(_, trip)| trip)),
+            Ok(Wake::ChildExited) | Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return (None, None),
+        }
+    }
+}
+
+/// What ended the watch over a running child.
+enum Watched {
+    /// A signal, the child's exit, or (`None`) nothing left to wake the daemon.
+    Wake(Option<Wake>),
+    /// Under `stop-app`, this database's gate is held.
+    Held(PathBuf, Trip),
+}
+
+/// Waits for a signal or the child's exit; under `stop-app`, also for a held gate.
+fn watch(daemon: &Daemon, wake: &Receiver<Wake>) -> Watched {
+    loop {
+        match wake.recv_timeout(GATE_POLL) {
+            Ok(wake) => return Watched::Wake(Some(wake)),
+            Err(RecvTimeoutError::Disconnected) => return Watched::Wake(None),
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+        if daemon.stop_app()
+            && let Some((path, trip)) = first_held(daemon)
+        {
+            return Watched::Held(path, trip);
+        }
+    }
+}
+
+/// Stops the running child for a held gate: SIGTERM, the shutdown grace, SIGKILL. The drain
+/// that follows is the run's own (decision D19).
+fn stop_held(
+    daemon: &Daemon,
+    control: &Control,
+    child: &Child,
+    wake: &Receiver<Wake>,
+    path: &std::path::Path,
+    trip: Trip,
+) {
+    let fields = [
+        ("db", path.display().to_string().into()),
+        ("why", failstop::trip_name(trip).into()),
+    ];
+    daemon.log().error(failstop::APP_STOPPED, &fields);
+    control.begin();
+    child.forward(signal_hook::consts::SIGTERM);
+    wait_for_child(daemon, child, wake, daemon.now());
 }
 
 /// Waits for the child to exit within the deadline begun at `begun`, then kills it.

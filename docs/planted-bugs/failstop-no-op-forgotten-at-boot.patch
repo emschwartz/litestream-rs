@@ -1,0 +1,14 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index ecaefb59..d7c53106 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -933,7 +933,8 @@ impl Actor {
+             Ok(seeded) => seeded,
+             Err(fault) => return self.fault(Task::Sync, fault, now),
+         };
+-        self.quiet_at_boot(quiet);
++        let _ = quiet;
++        self.quiet_at_boot(BTreeSet::new());
+         // Every step succeeded: the engine is assigned whole.
+         self.engine = Engine {
+             course,

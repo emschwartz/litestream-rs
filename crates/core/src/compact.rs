@@ -237,6 +237,11 @@ pub enum CompactError {
     /// Reading an input failed in some other way.
     #[error("reading an input: {0}")]
     Source(#[source] StoreError),
+    /// Reading an input's local staged copy failed (level 1 reads level 0 from staging when
+    /// its copies are the replica's). A staging error, never the replica's: a refused local
+    /// read is the directory's permissions, a full local disk is a full disk.
+    #[error("reading an input's local copy: {0}")]
+    Local(#[source] StoreError),
     /// The inputs and the output level do not go together.
     #[error("{0}")]
     Inputs(#[from] InputsError),
