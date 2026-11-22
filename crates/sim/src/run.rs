@@ -263,6 +263,9 @@ struct Runner {
     /// measured from it, since an earlier reading is clamped.
     latest: Option<Timestamp>,
     saved: Option<StagedCopy>,
+    /// The commit each file in `saved` held when it was copied, noted again
+    /// when the copy is put back.
+    saved_notes: Vec<(Txid, Option<crate::model::WalEnd>, crate::CommitId)>,
     /// The app's automatic checkpoint threshold each engine is told.
     app_autocheckpoint: Option<NonZeroU32>,
     /// What engines replaced so far saw of the app's checkpoints.
@@ -316,6 +319,7 @@ impl Runner {
             degraded: [false; 5],
             latest: None,
             saved: None,
+            saved_notes: Vec::new(),
             app_autocheckpoint: Some(lsr_core::SQLITE_AUTOCHECKPOINT),
             app_before: AppCheckpoints::NONE,
             expected: Vec::new(),
@@ -1100,21 +1104,32 @@ impl Runner {
             MetaOp::Save => w
                 .copy_staging()
                 .map(|copy| {
+                    self.saved_notes = copy
+                        .origins()
+                        .into_iter()
+                        .filter_map(|(key, origin)| {
+                            let txid = key.range().max();
+                            let commit = w.model.staged_commit(txid, origin)?;
+                            Some((txid, origin, commit))
+                        })
+                        .collect();
                     self.saved = Some(copy);
                     true
                 })
                 .map_err(StagedEditError::from),
-            MetaOp::Restore if self.lenient && self.saved.is_some() => {
-                self.restored_staging = true;
-                match &self.saved {
+            MetaOp::Restore => {
+                if self.lenient && self.saved.is_some() {
+                    self.restored_staging = true;
+                }
+                let done = match &self.saved {
                     Some(copy) => w.replace_staging(copy).map(|()| true),
                     None => Ok(false),
+                };
+                if matches!(done, Ok(true)) {
+                    self.renote_saved();
                 }
+                done
             }
-            MetaOp::Restore => match &self.saved {
-                Some(copy) => w.replace_staging(copy).map(|()| true),
-                None => Ok(false),
-            },
             MetaOp::DeleteNewest => w.delete_newest_staged().map_err(StagedEditError::from),
             MetaOp::FlipNewestByte => w.edit_newest_staged(|bytes| {
                 let middle = bytes.len() / 2;
@@ -1133,6 +1148,15 @@ impl Runner {
             }),
         };
         self.step_done(&format!("{op:?}"), done)
+    }
+
+    /// A restored backup holds the files it copied: the oracle maps each
+    /// id to the commit its copy held, not to whatever was staged since.
+    fn renote_saved(&mut self) {
+        let at = self.w.remote_recorder.len();
+        for (txid, origin, commit) in &self.saved_notes {
+            self.w.model.note_restored(*txid, *origin, *commit, at);
+        }
     }
 
     fn wal_damage(&mut self, op: WalOp) -> Result<(), Violation> {
