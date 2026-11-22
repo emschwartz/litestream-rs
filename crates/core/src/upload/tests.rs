@@ -1543,3 +1543,34 @@ fn a_refusal_naming_another_key_is_an_ambiguous_commit() {
     assert_eq!(failed.fault, Fault::UploadAmbiguous);
     assert_eq!(failed.state, UploadState::ListFirst { confirmed: None });
 }
+
+/// A store may answer a commit with an error while the write is still in
+/// flight, and a read after it may say the key is absent before the write
+/// lands (Cloudflare R2 documents both). The relist after the failed commit
+/// finds nothing, the write then lands, and the next put of the same key asks
+/// the bucket to refuse a taken key: the refusal and a read-back confirm the
+/// late write as this engine's own, and nothing is written over it.
+#[test]
+fn a_put_that_lands_after_the_relist_found_nothing_is_confirmed_not_written_twice() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    let bytes = stage(&staging, 1);
+    remote.log().commit_before.push_back(transient());
+    let failed = failure(next(UploadState::At(None), &staging, &remote, 1));
+    assert_eq!(failed.state, UploadState::ListFirst { confirmed: None });
+    let listed = next(failed.state, &staging, &remote, 1).unwrap();
+    assert_eq!(
+        listed.state,
+        UploadState::At(None),
+        "the write has not landed"
+    );
+    // The write that was in flight lands now.
+    put_bytes(&remote.inner, key(1), &bytes);
+    let step = next(listed.state, &staging, &remote, 1).unwrap();
+    assert_eq!(step.did, Did::AlreadyPut(key(1)));
+    assert_eq!(read_all(&remote.inner, &key(1)), bytes);
+    assert_eq!(
+        remote.log().modes,
+        [WriteMode::New, WriteMode::New],
+        "every put asks the bucket to refuse a taken key"
+    );
+}
