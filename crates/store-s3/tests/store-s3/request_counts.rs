@@ -36,7 +36,6 @@ pub(crate) mod cases {
         FakeS3, FaultTransport, HttpRequest, HttpResponse, S3Store, Shape, Transport,
         TransportError,
     };
-    use lsr_wal::WalReader;
 
     pub(crate) const EPOCH_MS: i64 = 1_700_000_000_000;
     pub(crate) const TXNS: u64 = 9000;
@@ -417,7 +416,7 @@ pub(crate) mod cases {
         let (newest_staged, counts) = rig.counted(|| {
             block_on(NewestStagedFile::load(
                 &store,
-                None::<&mut WalReader<Cursor<Vec<u8>>>>,
+                None::<lsr_core::BootWal<'_, Cursor<Vec<u8>>>>,
             ))
         });
         assert!(newest_staged.unwrap().is_some());

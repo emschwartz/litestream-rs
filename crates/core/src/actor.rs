@@ -94,8 +94,8 @@ use crate::maintain::{
 use crate::pages::{PageChecksumTable, seeded, snapshot_clears};
 use crate::position::{Position, SyncedThrough, WalFileLen};
 use crate::recover::{
-    FrameCheck, Miss, NewestStagedFile, PositionSource, Probes, Recovered, WalView, read_header,
-    recover,
+    BootWal, FrameCheck, Miss, NewestStagedFile, PositionSource, Probes, Recovered, WalView,
+    read_header, recover,
 };
 use crate::snapshot::{SnapshotFailed, read_live, write_snapshot};
 use crate::source::{CheckpointMode, Checkpointer, CommittedRead, PageSource, WalSource};
@@ -727,17 +727,16 @@ impl Actor {
             Ok(listed) => listed,
             Err(fault) => return self.fault(Task::Sync, fault, now),
         };
-        let witnessed = boot_witness(env, upload).await;
-        let (Pending { tokens, refused }, upload) = match witnessed {
-            Ok(found) => found,
-            Err(fault) => return self.fault(Task::Sync, fault, now),
-        };
-        let booted = boot_recover(env.wal, env.staging, env.remote, upload.confirmed()).await;
-        let Booted {
-            newest_staged,
-            recovered,
-            page_size,
-        } = match booted {
+        let Judged {
+            pending: Pending { tokens, refused },
+            upload,
+            booted:
+                Booted {
+                    newest_staged,
+                    recovered,
+                    page_size,
+                },
+        } = match boot_judge(env, upload).await {
             Ok(found) => found,
             Err(fault) => return self.fault(Task::Sync, fault, now),
         };
@@ -1938,14 +1937,17 @@ async fn boot_listing<L: ObjectStore, R: ObjectStore>(
 /// transaction a listing showed, so the snapshot goes above it.
 async fn boot_witness<W: WalSource, P: PageSource, C, L: ObjectStore, R: ObjectStore>(
     env: &mut Env<'_, W, P, C, L, R>,
+    mut reader: Option<&mut WalReader<W::Wal>>,
+    committed: CommittedRead,
     upload: UploadState,
 ) -> Result<(Pending, UploadState), Fault> {
     let confirmed = upload.confirmed();
-    let first = witness_once(env, confirmed).await?;
+    let first = witness_once(env, reader.as_deref_mut(), committed, confirmed).await?;
     let Some(from) = first.refused else {
         return Ok((first, upload));
     };
-    if witness_once(env, confirmed).await?.refused != Some(from) {
+    let second = witness_once(env, reader, committed, confirmed).await?;
+    if second.refused != Some(from) {
         return Err(Fault::LocalIo);
     }
     drop_staged_from(env.staging, from).await?;
@@ -1968,35 +1970,73 @@ async fn boot_witness<W: WalSource, P: PageSource, C, L: ObjectStore, R: ObjectS
 
 async fn witness_once<W: WalSource, P: PageSource, C, L: ObjectStore, R: ObjectStore>(
     env: &mut Env<'_, W, P, C, L, R>,
+    reader: Option<&mut WalReader<W::Wal>>,
+    committed: CommittedRead,
     confirmed: Option<Txid>,
 ) -> Result<Pending, Fault> {
-    let mut reader = open_reader(env.wal)?;
-    let live = reader.as_mut().map(|wal| LiveDb {
-        wal,
+    let live = reader.map(|reader| LiveDb {
+        wal: BootWal {
+            reader,
+            committed: committed.end(),
+        },
         db: &mut *env.db,
     });
     witness_pending(env.staging, env.remote, live, confirmed).await
 }
 
-async fn boot_recover<W: WalSource, L: ObjectStore, R: ObjectStore>(
-    wal: &mut W,
-    staging: &L,
-    remote: &R,
+/// The boot's reader bounded by its committed end.
+fn boot_wal_of<R>(
+    reader: Option<&mut WalReader<R>>,
+    committed: CommittedEnd,
+) -> Option<BootWal<'_, R>> {
+    reader.map(|reader| BootWal { reader, committed })
+}
+
+/// What the boot's judges found: the witness pass, the upload state it leaves, and
+/// recovery.
+struct Judged {
+    pending: Pending,
+    upload: UploadState,
+    booted: Booted,
+}
+
+/// The witness pass and recovery, on one wal-index read and one reader opened after it:
+/// both judge the same WAL, and no range past that committed end.
+async fn boot_judge<W: WalSource, P: PageSource, C, L: ObjectStore, R: ObjectStore>(
+    env: &mut Env<'_, W, P, C, L, R>,
+    upload: UploadState,
+) -> Result<Judged, Fault> {
+    let committed = env.wal.committed().map_err(Fault::from_source)?;
+    let mut reader = open_reader(env.wal)?;
+    let (pending, upload) = boot_witness(env, reader.as_mut(), committed, upload).await?;
+    let booted = boot_recover(env, reader.as_mut(), committed, upload.confirmed()).await?;
+    Ok(Judged {
+        pending,
+        upload,
+        booted,
+    })
+}
+
+async fn boot_recover<W: WalSource, P, C, L: ObjectStore, R: ObjectStore>(
+    env: &mut Env<'_, W, P, C, L, R>,
+    mut reader: Option<&mut WalReader<W::Wal>>,
+    committed: CommittedRead,
     confirmed: Option<Txid>,
 ) -> Result<Booted, Fault> {
-    let committed = wal.committed().map_err(Fault::from_source)?;
-    let mut reader = open_reader(wal)?;
+    let (staging, remote) = (env.staging, env.remote);
+    let end = committed.end();
     let newest_staged = match (
-        NewestStagedFile::load(staging, reader.as_mut()).await?,
+        NewestStagedFile::load(staging, boot_wal_of(reader.as_deref_mut(), end)).await?,
         confirmed,
     ) {
         // Nothing staged: the replica's newest level-0 file is the newest staged file.
         (None, Some(newest)) => {
-            NewestStagedFile::load_remote(remote, reader.as_mut(), newest).await?
+            NewestStagedFile::load_remote(remote, boot_wal_of(reader.as_deref_mut(), end), newest)
+                .await?
         }
         (staged, _) => staged,
     };
-    let view = wal_view(wal, reader.as_ref(), committed)?;
+    let view = wal_view(env.wal, reader.as_deref(), committed)?;
     let page_size = prefix_page_size(newest_staged.as_ref(), confirmed, remote).await?;
     let now = view.header.map(|header| header.page_size());
     let recovered = match page_size.zip(now).filter(|(was, now)| was != now) {

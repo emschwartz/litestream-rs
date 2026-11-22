@@ -323,3 +323,179 @@ fn relabelled(bytes: &[u8], n: u64) -> Vec<u8> {
     }
     encoder.finish(None).unwrap().0
 }
+
+/// A power loss under `synchronous=NORMAL` dropped the frames of a staged,
+/// unpublished transaction: SQLite's committed end is back before them,
+/// although they still sit in the file and verify. The boot proves nothing
+/// past the committed end its one wal-index read gave, so the staged file is
+/// never uploaded as the WAL's.
+#[test]
+fn frames_past_the_committed_end_prove_no_staged_file() {
+    let (mut rig, mut actor) = caught_up();
+    let before = rig.wal.committed_end();
+    stage_held(&mut rig, &mut actor, &[2], T0 + 1);
+    let pending = staged_bytes(&rig);
+    let two = pending.iter().find(|(n, _)| *n == 2).unwrap().1.clone();
+    // The wal-index after recovery: the commit of transaction 2 is gone.
+    let read = CommittedRead::new(before, 0, rig.wal.epoch()).unwrap();
+    rig.wal.script_committed(Some(read));
+    let mut actor = Actor::new(cfg());
+    rig.tick(&mut actor, T0 + 2);
+    rig.settle(&mut actor, T0 + 2);
+    assert!(!replica_holds(&rig, 2, &two));
+}
+
+/// Writes `bytes` under level-0 key `n` in `store`, replacing what is there.
+fn put_l0(store: &MemStore, n: u64, bytes: &[u8]) {
+    let key = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(n).unwrap()));
+    block_on(async {
+        let mut up = store.begin_upload(&key, ts(T0)).await.unwrap();
+        up.write(bytes).await.unwrap();
+        up.commit().await.unwrap();
+    });
+}
+
+/// The replica's newest file anchors the pending run only when the live WAL
+/// holds its pages: one whose page differs from the WAL's (the replica's and
+/// the staged copy alike) anchors nothing, though its commit size agrees,
+/// and the pending file after it is not uploaded on it.
+#[test]
+fn a_tail_whose_pages_the_wal_does_not_hold_anchors_nothing() {
+    let (mut rig, mut actor) = caught_up();
+    commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
+    commit_and_settle(&mut rig, &mut actor, 3, T0 + 1);
+    stage_held(&mut rig, &mut actor, &[4], T0 + 1);
+    let forged = forge(&rig, 3, 0xEE);
+    put_l0(&rig.remote.inner, 3, &forged);
+    let mut actor = Actor::new(cfg());
+    let boot = rig.tick(&mut actor, T0 + 2);
+    assert_eq!(
+        event(&boot),
+        Some(&Event::Booted {
+            cause: Some(SnapshotCause::StagedUnverified {
+                from: Txid::new(4).unwrap()
+            })
+        })
+    );
+}
+
+/// A pending file must start where the file before it ended. One that
+/// names the next transaction but whose range starts further on (here the
+/// file for transaction 4, put back under transaction 3) skips a commit,
+/// though the WAL holds every page of its own range: it is refused, and the
+/// WAL stages the skipped commit again.
+#[test]
+fn a_pending_file_that_skips_a_range_is_refused() {
+    let (mut rig, mut actor) = caught_up();
+    commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
+    stage_held(&mut rig, &mut actor, &[3, 4], T0 + 1);
+    let all = ReadLen::new(ReadLen::MAX_RAW).unwrap();
+    let four = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(4).unwrap()));
+    let bytes = block_on(rig.staging.inner.read(&four, 0, all)).unwrap();
+    block_on(rig.staging.inner.delete(&[four])).unwrap();
+    let skipping = relabelled(&bytes, 3);
+    put_l0(&rig.staging.inner, 3, &skipping);
+    let mut actor = Actor::new(cfg());
+    let boot = rig.tick(&mut actor, T0 + 2);
+    assert_eq!(event(&boot), Some(&Event::Booted { cause: None }));
+    let seen = rig.settle(&mut actor, T0 + 2);
+    no_stop(&seen);
+    assert!(!replica_holds(&rig, 3, &skipping));
+    assert_eq!(restored(&rig), 4);
+}
+
+/// A pending snapshot that reaches exactly as far as the replica's newest
+/// file (an operator's snapshot with nothing committed since) is the same
+/// state, not an earlier one: it is proven and uploaded as staged.
+#[test]
+fn a_pending_snapshot_as_far_as_the_replicas_newest_is_uploaded() {
+    let (mut rig, mut actor) = caught_up();
+    rig.remote
+        .inner
+        .inject_failure(StoreOp::Upload, transient(StoreOp::Upload));
+    actor.request_snapshot();
+    rig.settle(&mut actor, T0 + 1);
+    let pending = staged_bytes(&rig);
+    let (n, snapshot) = pending.last().unwrap().clone();
+    assert_eq!(n, 2);
+    let mut actor = Actor::new(cfg());
+    let boot = rig.tick(&mut actor, T0 + 2);
+    assert_eq!(event(&boot), Some(&Event::Booted { cause: None }));
+    let seen = rig.settle(&mut actor, T0 + 2);
+    no_stop(&seen);
+    assert!(replica_holds(&rig, 2, &snapshot));
+}
+
+/// `bytes` re-encoded with `edit` applied to every page and then `fields`.
+fn reencoded(
+    bytes: &[u8],
+    mut fields_edit: impl FnMut(&mut lsr_ltx::HeaderFields),
+    extra: &[(PageNo, Vec<u8>)],
+) -> Vec<u8> {
+    let mut decoder = ReadDecoder::new(bytes);
+    let mut pages = Vec::new();
+    while let Some(event) = decoder.next_event().unwrap() {
+        if let lsr_ltx::Event::Page(page) = event {
+            pages.push((page.pgno(), page.data().to_vec()));
+        }
+    }
+    pages.extend_from_slice(extra);
+    pages.sort_by_key(|(pgno, _)| *pgno);
+    let mut fields = decoder.finish().unwrap().header().fields();
+    fields_edit(&mut fields);
+    let mut encoder = Encoder::new(Vec::new(), lsr_ltx::Header::new(fields).unwrap()).unwrap();
+    for (pgno, data) in &pages {
+        encoder.write_page(*pgno, data).unwrap();
+    }
+    encoder.finish(None).unwrap().0
+}
+
+/// A pending file must end at the commit size the WAL's last transaction in
+/// its range gives: one that claims a smaller database, its pages otherwise
+/// the WAL's, describes no state the database had and is refused.
+#[test]
+fn a_pending_file_with_another_commit_size_is_refused() {
+    let (mut rig, mut actor) = caught_up();
+    stage_held(&mut rig, &mut actor, &[2], T0 + 1);
+    let (_, bytes) = staged_bytes(&rig)
+        .into_iter()
+        .find(|(n, _)| *n == 2)
+        .unwrap();
+    let smaller = reencoded(&bytes, |fields| fields.commit = 2, &[]);
+    put_l0(&rig.staging.inner, 2, &smaller);
+    let mut actor = Actor::new(cfg());
+    rig.tick(&mut actor, T0 + 2);
+    let seen = rig.settle(&mut actor, T0 + 2);
+    no_stop(&seen);
+    assert!(!replica_holds(&rig, 2, &smaller));
+    assert_eq!(restored(&rig), 2);
+}
+
+/// A pending file that neither starts where the file before it ended nor
+/// at the live generation's first frame is refused, whatever it holds: here
+/// an incremental filled out to every page, each the database's.
+#[test]
+fn a_full_file_that_neither_follows_nor_starts_the_generation_is_refused() {
+    let (mut rig, mut actor) = caught_up();
+    commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
+    stage_held(&mut rig, &mut actor, &[3, 4], T0 + 1);
+    let all = ReadLen::new(ReadLen::MAX_RAW).unwrap();
+    let four = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(4).unwrap()));
+    let bytes = block_on(rig.staging.inner.read(&four, 0, all)).unwrap();
+    block_on(rig.staging.inner.delete(&[four])).unwrap();
+    let rest: Vec<(PageNo, Vec<u8>)> = (2..=3)
+        .map(|n| (pg(n), vec![u8::try_from(n).unwrap(); PS.bytes()]))
+        .collect();
+    let full = reencoded(
+        &bytes,
+        |fields| fields.txids = TxidRange::single(Txid::new(3).unwrap()),
+        &rest,
+    );
+    put_l0(&rig.staging.inner, 3, &full);
+    let mut actor = Actor::new(cfg());
+    rig.tick(&mut actor, T0 + 2);
+    let seen = rig.settle(&mut actor, T0 + 2);
+    no_stop(&seen);
+    assert!(!replica_holds(&rig, 3, &full));
+    assert_eq!(restored(&rig), 4);
+}

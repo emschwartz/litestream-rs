@@ -29,9 +29,8 @@
 use std::io::{Read, Seek};
 
 use lsr_ltx::{HEADER_LEN, Header, Txid, TxidRange};
-use lsr_wal::WalReader;
 
-use super::{NEWEST_STAGED_READ, NewestStagedFile, NewestStagedFileSource, Origin};
+use super::{BootWal, NEWEST_STAGED_READ, NewestStagedFile, NewestStagedFileSource, Origin};
 use crate::fault::Fault;
 use crate::layout::{FileKey, Level};
 use crate::store::{ObjectStore, StoreError};
@@ -48,7 +47,7 @@ impl NewestStagedFile {
     /// for any other store error; a failed WAL read.
     pub async fn load_remote<S: ObjectStore, R: Read + Seek>(
         remote: &S,
-        wal: Option<&mut WalReader<R>>,
+        wal: Option<BootWal<'_, R>>,
         newest: Txid,
     ) -> Result<Option<Self>, Fault> {
         let key = FileKey::new(Level::ZERO, TxidRange::single(newest));

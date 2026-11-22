@@ -45,9 +45,30 @@ fn token(n: u64, fill: u8) -> Witnessed {
 fn a_token_matches_only_the_bytes_it_was_minted_for() {
     let ours = token(1, 1);
     let theirs = token(1, 2);
-    assert!(ours.matches(theirs.size, ours.checksum));
-    assert!(!ours.matches(theirs.size, theirs.checksum));
-    assert!(!ours.matches(ours.size.saturating_add(1), ours.checksum));
+    assert!(ours.matches(ours.bytes, ours.checksum));
+    // Another file, or the same content in other bytes, is not the file.
+    assert!(!ours.matches(theirs.bytes, theirs.checksum));
+    assert!(!ours.matches(theirs.bytes, ours.checksum));
+    assert!(!ours.matches(ours.bytes, theirs.checksum));
+}
+
+/// The tally tells streams apart by length and by bytes, however they are
+/// cut into chunks.
+#[test]
+fn a_byte_tally_is_the_stream_not_its_chunks() {
+    let mut whole = ByteTally::new();
+    whole.add(b"abcdef");
+    let mut parts = ByteTally::new();
+    parts.add(b"ab");
+    parts.add(b"");
+    parts.add(b"cdef");
+    assert_eq!(whole, parts);
+    let mut flipped = ByteTally::new();
+    flipped.add(b"abcdeg");
+    assert_ne!(whole, flipped);
+    let mut longer = ByteTally::new();
+    longer.add(b"abcdef\0");
+    assert_ne!(whole, longer);
 }
 
 #[test]
@@ -72,6 +93,10 @@ fn confirmation_and_drops_let_tokens_go() {
     assert!(all.get(&key(3)).is_some() && all.get(&key(4)).is_some());
     all.confirmed(None);
     assert_eq!(all.len(), 2);
+    assert!(!all.is_empty());
+    all.drop_from(txid(1));
+    assert!(all.is_empty());
+    assert!(Witnesses::new().is_empty());
     // A file staged again under a key replaces its token.
     all.insert(token(4, 9));
     assert_eq!(all.get(&key(4)), Some(&token(4, 9)));

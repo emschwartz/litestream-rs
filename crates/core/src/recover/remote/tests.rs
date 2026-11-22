@@ -8,6 +8,7 @@ use super::*;
 use crate::fault::SnapshotCause;
 use crate::layout::{FileKey, Level};
 use crate::mem::MemStore;
+use crate::recover::BootWal;
 use crate::recover::{LastPageCheck, PositionSource, Recovered, recover};
 use crate::source::FakeWal;
 use crate::store::{ObjectStore, Upload};
@@ -20,14 +21,14 @@ const FRAME: u64 = 24 + 512;
 fn newest_replica_file(store: &MemStore, wal: &FakeWal) -> Result<Option<NewestStagedFile>, Fault> {
     crate::conformance::block_on(async {
         let mut r = reader(wal.file_bytes());
-        NewestStagedFile::load_remote(store, Some(&mut r), txid(2)).await
+        NewestStagedFile::load_remote(store, Some(BootWal::recovered(&mut r)), txid(2)).await
     })
 }
 
 fn newest_staged(store: &MemStore, wal: &FakeWal) -> NewestStagedFile {
     crate::conformance::block_on(async {
         let mut r = reader(wal.file_bytes());
-        NewestStagedFile::load(store, Some(&mut r))
+        NewestStagedFile::load(store, Some(BootWal::recovered(&mut r)))
             .await
             .unwrap()
             .unwrap()

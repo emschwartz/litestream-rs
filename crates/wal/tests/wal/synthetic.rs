@@ -471,6 +471,7 @@ fn too_many_frames() {
         .resume(
             WalOffset::from_frame_index(u32::MAX, size(PS)),
             salts(SALTS),
+            lsr_wal::testing::unbounded(salts(SALTS)),
         )
         .unwrap();
     let err = reader
@@ -486,7 +487,13 @@ fn resume_continues_where_a_scan_stopped() {
     let full = scan(&wal.bytes, ScanLimit::FirstInvalidFrame);
     let mut reader = open(&wal.bytes);
     let after_first = *full.txs[0].end();
-    let cursor = reader.resume(after_first.next(), salts(SALTS)).unwrap();
+    let cursor = reader
+        .resume(
+            after_first.next(),
+            salts(SALTS),
+            lsr_wal::testing::unbounded(salts(SALTS)),
+        )
+        .unwrap();
     assert_eq!(
         cursor, after_first,
         "stored checksum equals the verified one"
@@ -500,7 +507,11 @@ fn resume_at_the_start_is_the_start() {
     let mut reader = open(&two_txs().bytes);
     assert_eq!(
         reader
-            .resume(WalOffset::start(size(PS)), salts(SALTS))
+            .resume(
+                WalOffset::start(size(PS)),
+                salts(SALTS),
+                lsr_wal::testing::unbounded(salts(SALTS))
+            )
             .unwrap(),
         reader.cursor_at_start()
     );
@@ -512,7 +523,11 @@ fn resume_prev_frame_of_another_generation() {
     wal.frame_with(1, 1, (9, 9), &page(PS, 1));
     let mut reader = open(&wal.bytes);
     let err = reader
-        .resume(WalOffset::from_frame_index(5, size(PS)), salts(SALTS))
+        .resume(
+            WalOffset::from_frame_index(5, size(PS)),
+            salts(SALTS),
+            lsr_wal::testing::unbounded(salts(SALTS)),
+        )
         .unwrap_err();
     assert!(
         matches!(err, ResumeError::PrevFrame { fault: FrameFault::SaltMismatch { found }, .. }
@@ -525,7 +540,11 @@ fn resume_prev_frame_of_another_generation() {
 fn resume_truncated() {
     let mut reader = open(&two_txs().bytes);
     let err = reader
-        .resume(WalOffset::from_frame_index(9, size(PS)), salts(SALTS))
+        .resume(
+            WalOffset::from_frame_index(9, size(PS)),
+            salts(SALTS),
+            lsr_wal::testing::unbounded(salts(SALTS)),
+        )
         .unwrap_err();
     assert!(matches!(err, ResumeError::Truncated { .. }), "{err}");
 }
@@ -536,7 +555,13 @@ fn frame_before_is_the_commit_frame_the_scan_saw() {
     let full = scan(&wal.bytes, ScanLimit::FirstInvalidFrame);
     let mut reader = open(&wal.bytes);
     for tx in &full.txs {
-        let frame = reader.frame_before(tx.end().next(), salts(SALTS)).unwrap();
+        let frame = reader
+            .frame_before(
+                tx.end().next(),
+                salts(SALTS),
+                lsr_wal::testing::unbounded(salts(SALTS)),
+            )
+            .unwrap();
         let last = tx.frames().last().unwrap();
         assert_eq!(frame, *last);
         assert_eq!(frame.offset(), last.offset());
@@ -549,14 +574,36 @@ fn frame_before_refuses_what_resume_refuses() {
     wal.frame_with(1, 1, (9, 9), &page(PS, 1));
     let mut reader = open(&wal.bytes);
     let at = |index| WalOffset::from_frame_index(index, size(PS));
-    let err = reader.frame_before(at(5), salts(SALTS)).unwrap_err();
+    let err = reader
+        .frame_before(
+            at(5),
+            salts(SALTS),
+            lsr_wal::testing::unbounded(salts(SALTS)),
+        )
+        .unwrap_err();
     assert!(matches!(err, ResumeError::PrevFrame { .. }), "{err}");
-    let err = reader.frame_before(at(9), salts(SALTS)).unwrap_err();
+    let err = reader
+        .frame_before(
+            at(9),
+            salts(SALTS),
+            lsr_wal::testing::unbounded(salts(SALTS)),
+        )
+        .unwrap_err();
     assert!(matches!(err, ResumeError::Truncated { .. }), "{err}");
-    let err = reader.frame_before(at(1), salts((1, 2))).unwrap_err();
+    let err = reader
+        .frame_before(
+            at(1),
+            salts((1, 2)),
+            lsr_wal::testing::unbounded(salts((1, 2))),
+        )
+        .unwrap_err();
     assert!(matches!(err, ResumeError::Restarted { .. }), "{err}");
     let err = reader
-        .frame_before(WalOffset::from_frame_index(1, size(1024)), salts(SALTS))
+        .frame_before(
+            WalOffset::from_frame_index(1, size(1024)),
+            salts(SALTS),
+            lsr_wal::testing::unbounded(salts(SALTS)),
+        )
         .unwrap_err();
     assert!(matches!(err, ResumeError::PageSizeMismatch { .. }), "{err}");
 }
@@ -568,7 +615,9 @@ fn frame_before_the_start_or_inside_a_transaction_is_not_a_commit() {
         WalOffset::start(size(PS)),
         WalOffset::from_frame_index(1, size(PS)),
     ] {
-        let err = reader.frame_before(at, salts(SALTS)).unwrap_err();
+        let err = reader
+            .frame_before(at, salts(SALTS), lsr_wal::testing::unbounded(salts(SALTS)))
+            .unwrap_err();
         assert!(matches!(err, ResumeError::NotAtCommit { .. }), "{err}");
     }
 }
@@ -685,7 +734,11 @@ fn commit_follows_refuses_a_frame_that_does_not_chain() {
 fn resume_page_size_mismatch() {
     let mut reader = open(&two_txs().bytes);
     let err = reader
-        .resume(WalOffset::from_frame_index(1, size(1024)), salts(SALTS))
+        .resume(
+            WalOffset::from_frame_index(1, size(1024)),
+            salts(SALTS),
+            lsr_wal::testing::unbounded(salts(SALTS)),
+        )
         .unwrap_err();
     assert!(matches!(err, ResumeError::PageSizeMismatch { .. }), "{err}");
 }
@@ -698,7 +751,11 @@ fn resume_io() {
     };
     let mut reader = WalReader::open(failing).unwrap();
     let err = reader
-        .resume(WalOffset::from_frame_index(1, size(PS)), salts(SALTS))
+        .resume(
+            WalOffset::from_frame_index(1, size(PS)),
+            salts(SALTS),
+            lsr_wal::testing::unbounded(salts(SALTS)),
+        )
         .unwrap_err();
     assert!(matches!(err, ResumeError::Io(_)), "{err}");
 }
@@ -711,7 +768,11 @@ fn resume_refuses_a_wrong_stored_checksum_in_the_frame_before_or_before_that() {
         let flen = wal.frame_len();
         wal.bytes[32 + flen * flipped + 16] ^= 1;
         let err = open(&wal.bytes)
-            .resume(WalOffset::from_frame_index(at, size(PS)), salts(SALTS))
+            .resume(
+                WalOffset::from_frame_index(at, size(PS)),
+                salts(SALTS),
+                lsr_wal::testing::unbounded(salts(SALTS)),
+            )
             .unwrap_err();
         assert!(
             matches!(
@@ -734,7 +795,9 @@ fn resume_restarted_names_both_generations() {
         WalOffset::start(size(PS)),
         WalOffset::from_frame_index(2, size(PS)),
     ] {
-        let err = reader.resume(at, other).unwrap_err();
+        let err = reader
+            .resume(at, other, lsr_wal::testing::unbounded(other))
+            .unwrap_err();
         assert!(
             matches!(err, ResumeError::Restarted { expected, found }
                 if expected == other && found == salts(SALTS)),
@@ -747,7 +810,11 @@ fn resume_restarted_names_both_generations() {
 fn resume_not_at_commit() {
     let mut reader = open(&two_txs().bytes);
     let err = reader
-        .resume(WalOffset::from_frame_index(1, size(PS)), salts(SALTS))
+        .resume(
+            WalOffset::from_frame_index(1, size(PS)),
+            salts(SALTS),
+            lsr_wal::testing::unbounded(salts(SALTS)),
+        )
         .unwrap_err();
     assert!(matches!(err, ResumeError::NotAtCommit { .. }), "{err}");
 }

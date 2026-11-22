@@ -6,6 +6,7 @@ use lsr_wal::{FrameCursor, FrameRef, Salts, ScanLimit, TxOutcome, WalReader};
 use proptest::prelude::*;
 
 use super::*;
+use crate::recover::BootWal;
 use crate::source::{CommittedRead, FakeWal};
 
 const PS: PageSize = PageSize::MIN;
@@ -795,7 +796,7 @@ fn the_loader_reads_the_newest_file_and_matches_the_last_page() {
         put(&store, 1, &good).await;
         put(&store, 2, &good).await;
         let mut r = reader(wal.file_bytes());
-        let newest_staged = NewestStagedFile::load(&store, Some(&mut r))
+        let newest_staged = NewestStagedFile::load(&store, Some(BootWal::recovered(&mut r)))
             .await
             .unwrap()
             .unwrap();
@@ -820,7 +821,7 @@ fn the_loader_calls_a_page_with_other_bytes_a_mismatch_and_a_missing_one_not_in_
     crate::conformance::block_on(async {
         put(&store, 1, &other).await;
         let mut r = reader(wal.file_bytes());
-        let newest_staged = NewestStagedFile::load(&store, Some(&mut r))
+        let newest_staged = NewestStagedFile::load(&store, Some(BootWal::recovered(&mut r)))
             .await
             .unwrap()
             .unwrap();
@@ -833,7 +834,7 @@ fn the_loader_calls_a_page_with_other_bytes_a_mismatch_and_a_missing_one_not_in_
         ));
         put(&store, 2, &lacking).await;
         let mut r = reader(wal.file_bytes());
-        let newest_staged = NewestStagedFile::load(&store, Some(&mut r))
+        let newest_staged = NewestStagedFile::load(&store, Some(BootWal::recovered(&mut r)))
             .await
             .unwrap()
             .unwrap();
@@ -854,13 +855,17 @@ fn the_loader_calls_garbage_unreadable_and_an_empty_directory_none() {
     crate::conformance::block_on(async {
         let mut r = reader(wal.file_bytes());
         assert_eq!(
-            NewestStagedFile::load(&store, Some(&mut r)).await.unwrap(),
+            NewestStagedFile::load(&store, Some(BootWal::recovered(&mut r)))
+                .await
+                .unwrap(),
             None
         );
         put(&store, 3, b"not an ltx file").await;
         let mut r = reader(wal.file_bytes());
         assert_eq!(
-            NewestStagedFile::load(&store, Some(&mut r)).await.unwrap(),
+            NewestStagedFile::load(&store, Some(BootWal::recovered(&mut r)))
+                .await
+                .unwrap(),
             Some(NewestStagedFile::Unreadable { txid: txid(3) })
         );
     });
@@ -1194,7 +1199,7 @@ fn load_against(
     let newest_staged = crate::conformance::block_on(async {
         put(&store, 2, &bytes).await;
         let mut r = reader(now.file_bytes());
-        NewestStagedFile::load(&store, Some(&mut r))
+        NewestStagedFile::load(&store, Some(BootWal::recovered(&mut r)))
             .await
             .unwrap()
             .unwrap()
@@ -1287,7 +1292,7 @@ fn load_over_bytes(
     let newest_staged = crate::conformance::block_on(async {
         put(&store, 2, &newest_staged_file_bytes).await;
         let mut r = reader(bytes.clone());
-        NewestStagedFile::load(&store, Some(&mut r))
+        NewestStagedFile::load(&store, Some(BootWal::recovered(&mut r)))
             .await
             .unwrap()
             .unwrap()
@@ -1334,7 +1339,7 @@ fn a_newest_staged_file_ending_at_frame_zero_continues_over_a_wal_that_has_since
     let newest_staged = crate::conformance::block_on(async {
         put(&store, 2, &bytes).await;
         let mut r = reader(wal.file_bytes());
-        NewestStagedFile::load(&store, Some(&mut r))
+        NewestStagedFile::load(&store, Some(BootWal::recovered(&mut r)))
             .await
             .unwrap()
             .unwrap()
@@ -1362,7 +1367,7 @@ fn a_range_missing_from_this_wal_does_not_veto() {
     let newest_staged = crate::conformance::block_on(async {
         put(&store, 2, &bytes).await;
         let mut r = reader(other.file_bytes());
-        NewestStagedFile::load(&store, Some(&mut r))
+        NewestStagedFile::load(&store, Some(BootWal::recovered(&mut r)))
             .await
             .unwrap()
             .unwrap()
