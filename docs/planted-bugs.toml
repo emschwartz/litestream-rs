@@ -174,7 +174,7 @@ tests = [
 
 [[bug]]
 name = "witness-trailer-compare"
-fix = "2fb603f"
+fix = "39ac68b"
 package = "lsr-core"
 tests = [
     "a_staged_file_replaced_under_a_running_engine_is_never_uploaded",
@@ -183,7 +183,7 @@ tests = [
 
 [[bug]]
 name = "witness-db-page-under-a-frame"
-fix = "2b79769"
+fix = "beedd48"
 package = "lsr-core"
 tests = [
     "a_pending_snapshot_the_wal_cannot_prove_is_taken_again",
@@ -191,8 +191,24 @@ tests = [
 
 [[bug]]
 name = "witness-snapshot-short"
-fix = "2b79769"
+fix = "beedd48"
 package = "lsr-core"
 tests = [
     "a_pending_snapshot_short_of_the_replicas_newest_is_refused",
+]
+
+[[bug]]
+name = "witness-wal-residue"
+fix = "1b5ac06"
+package = "lsr-core"
+tests = [
+    "frames_past_the_committed_end_prove_no_staged_file",
+]
+
+[[bug]]
+name = "witness-byte-digest"
+fix = "1b5ac06"
+package = "lsr-core"
+tests = [
+    "a_staged_file_whose_bytes_differ_but_still_verify_is_refused",
 ]
