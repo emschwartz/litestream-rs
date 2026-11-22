@@ -33,7 +33,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D23 | A delete without a directory sync: fix or argue harmless? | Fix | project rule: found defects are fixed (#116) | 2026-11-22 | decided |
 | D24 | Names for store refusals and the error format | Four cause names, "{op} refused: {why}" | owner (#108) | 2026-11-22 | decided |
 | D60 | Find a merged file that a lagging listing hides, whose level-0 inputs are gone? | Read its level key from the starts the listing implies; the case with no start left stays known-wrong | Claude, **delegated** (route from the parent session) | 2026-11-22 | open to owner review |
-| D61 | A lagging listing hides everything above a wide hole: keep a marker object in the replica? | Yes, in the smallest form: `newest-snapshot`, written once per snapshot and believed only when a read finds the snapshot it names. No newest-transaction marker. Amends D6 and D8 | Fable, **delegated** | 2026-11-22 | open to owner review |
+| D61 | A lagging listing hides everything above a wide hole: keep a marker object in the replica? | Yes, in the smallest form: `newest-snapshot`, written once per snapshot and believed only when a read finds the snapshot it names. No newest-transaction marker. Amends D6 and D8 | Fable, **delegated** | 2026-11-22 | open question (owner), issue #169 |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -315,7 +315,8 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
   - Go starts listing or cleaning the prefix root, or ships a `newest-snapshot` of its own.
   - The Tigris soak shows overwritten reads stale for longer than listings.
   - The engine can still upload above a hole without a snapshot after its fix, or the owner wants a restore to refuse a replica that lost its newest files. Either reopens B1.
-- **Links:** `crates/core/src/probe.rs` and `crates/core/src/restore.rs` (`listed_past`) on `claude/merged-level-probe`; seed 0x7f8 on `claude/overlapping-faults`; D2, D6, D8, D33, D34; https://developers.cloudflare.com/r2/reference/consistency/; https://www.tigrisdata.com/docs/concepts/consistency/.
+- **Status:** the owner keeps this as an open question, tracked in issue #169. Nothing is built.
+- **Links:** issue #169; `crates/core/src/probe.rs` and `crates/core/src/restore.rs` (`listed_past`) on `claude/merged-level-probe`; seed 0x7f8 on `claude/overlapping-faults`; D2, D6, D8, D33, D34; https://developers.cloudflare.com/r2/reference/consistency/; https://www.tigrisdata.com/docs/concepts/consistency/.
 
 ## Unverified, not recorded
 
