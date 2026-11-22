@@ -32,6 +32,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D22 | The bound for "unreplicated too long"? | 10 minutes, minimum 5, no byte bound | Fable, **delegated** | 2026-11-22 | open to owner review |
 | D23 | A delete without a directory sync: fix or argue harmless? | Fix | project rule: found defects are fixed (#116) | 2026-11-22 | decided |
 | D24 | Names for store refusals and the error format | Four cause names, "{op} refused: {why}" | owner (#108) | 2026-11-22 | decided |
+| D31 | Must a PR re-merge main and re-run CI before it lands? | No while churn is high: merge on the PR's own green; main's CI integrates; fix forward | owner | 2026-11-22 | decided |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -252,6 +253,15 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** four more causes to keep classified correctly per store.
 - **Revisit if:** a store returns a refusal that fits none of them.
 - **Links:** #108 (merged).
+
+## D31. Merging while many branches are in flight
+
+- **Options:** every PR merges the latest main and re-runs CI before it lands; or a PR lands on its own green CI when it has no textual conflict, and main's CI checks the combination.
+- **Choice:** land on the PR's own green. Main's CI on each merge commit is the integration test. A red main stops new merges until it is fixed forward by the session that owns the breaking merge. A PR that renames shared APIs still re-tests against main first.
+- **Cost accepted:** main can be red for about one CI run after a bad combination, and not every commit on main passed CI as a whole.
+- **Why:** with six or more branches open, each merge cost every other branch a merge and a 20 minute CI run, for hours of serial waiting. The one real catch in that period (renamed causes) would have shown as a red main within one run.
+- **Revisit if:** before any release, or when main goes red more than once a day.
+- **Links:** the merge protocol in the session notes; AGENTS.md.
 
 ## Unverified, not recorded
 
