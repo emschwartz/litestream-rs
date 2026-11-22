@@ -83,8 +83,8 @@ use crate::checkpoint::{
 };
 use crate::created_at::{ResolvedCreatedAt, resolve};
 use crate::fault::{
-    Action, Backoff, Clamped, Fault, Next, PersistentCause, Policy, Responses, SnapshotCause,
-    StopCause, backoff_wait, policy,
+    Action, Backoff, Clamped, Fault, Next, PersistentCause, Policy, Responses, STALLED_AFTER,
+    SnapshotCause, Stall, StopCause, backoff_wait, policy,
 };
 use crate::inventory::Inventory;
 use crate::layout::{FileInfo, FileKey, Level};
@@ -591,12 +591,31 @@ impl Actor {
         self.sync_failed(fault);
         match policy(&fault) {
             Policy::Retry(backoff) => {
-                let until = self.wait(waiter.into(), backoff, now);
+                let waiter = waiter.into();
+                if let Some(stall) = self.stalled(waiter, &fault) {
+                    return self.persistent(waiter, PersistentCause::Stalled(stall), backoff, now);
+                }
+                let until = self.wait(waiter, backoff, now);
                 self.ran(Event::Retrying { fault, until }, now)
             }
-            Policy::Persistent(cause) => self.persistent(waiter.into(), cause, now),
+            Policy::Persistent(cause) => {
+                self.persistent(waiter.into(), cause, Backoff::Doubling, now)
+            }
             Policy::Shutdown => self.stop(StopCause::Shutdown),
         }
+    }
+
+    /// The stall a retried fault makes of its task on this failure: the
+    /// [`STALLED_AFTER`]th in a row, or any later one. A wait a maintenance level
+    /// keeps never stalls: maintenance blocks no write's way to the replica.
+    fn stalled(&self, waiter: Waiter, fault: &Fault) -> Option<Stall> {
+        let Waiter::Task(task) = waiter else {
+            return None;
+        };
+        let failures = self.kept.tasks.get(task).failures();
+        (failures >= STALLED_AFTER.get().saturating_sub(1))
+            .then(|| Stall::of(fault))
+            .flatten()
     }
 
     /// Counts a failure where its wait is kept; returns when the wait ends.
@@ -617,18 +636,24 @@ impl Actor {
     /// the configured response, the end of a drain stops.
     fn verdict(&mut self, task: Task, cause: StopCause, now: Timestamp) -> Tick {
         match PersistentCause::of(cause) {
-            Some(cause) => self.persistent(Waiter::Task(task), cause, now),
+            Some(cause) => self.persistent(Waiter::Task(task), cause, Backoff::Doubling, now),
             None => self.stop(cause),
         }
     }
 
     /// What the configured response makes of a persistent cause: a stop, or
-    /// a degraded task that waits the doubling backoff. The only place
-    /// `Responses` is read.
-    fn persistent(&mut self, waiter: Waiter, cause: PersistentCause, now: Timestamp) -> Tick {
+    /// a degraded task that waits `backoff` (the doubling one, or a stalled
+    /// fault's own). The only place `Responses` is read.
+    fn persistent(
+        &mut self,
+        waiter: Waiter,
+        cause: PersistentCause,
+        backoff: Backoff,
+        now: Timestamp,
+    ) -> Tick {
         let action = self.kept.cfg.responses.action(cause);
-        if action == Action::Stop {
-            return self.stop(StopCause::from(cause));
+        if let (Action::Stop, Some(stop)) = (action, cause.stop()) {
+            return self.stop(stop);
         }
         self.keep_restore_point();
         let waiter = match action {
@@ -654,7 +679,7 @@ impl Actor {
             Waiter::Task(task) => task,
             Waiter::Kept(_) => Task::Maintenance,
         };
-        let until = self.wait(waiter, Backoff::Doubling, now);
+        let until = self.wait(waiter, backoff, now);
         let since = self.kept.tasks.get_mut(task).degrade(cause, now);
         let event = Event::Degraded {
             task,
