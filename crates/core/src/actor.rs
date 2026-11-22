@@ -1363,13 +1363,13 @@ impl Actor {
                     return Some(self.fault(Task::Upload, failed.fault, now));
                 }
             }
-            if matches!(last, Did::Put(_)) {
+            if matches!(last, Did::Put(_) | Did::AlreadyPut(_)) {
                 self.kept.suspect_staged = None;
             }
             match last {
                 Did::Nothing | Did::Diverged { .. } => break,
                 Did::Listed { .. } => self.engine.maintain.stale = true,
-                Did::Put(_) => {
+                Did::Put(_) | Did::AlreadyPut(_) => {
                     let at = listing_after_upload(now, &self.kept.cfg.maintenance);
                     self.engine.maintain.list_by(at);
                 }

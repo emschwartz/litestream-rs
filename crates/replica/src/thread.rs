@@ -461,7 +461,7 @@ impl Worker {
                     bump(&mut counters.checkpoints_busy);
                 }
             }
-            EngineEvent::Uploaded(Did::Put(_)) => bump(&mut counters.uploads),
+            EngineEvent::Uploaded(Did::Put(_) | Did::AlreadyPut(_)) => bump(&mut counters.uploads),
             EngineEvent::Retrying { .. } | EngineEvent::Degraded { .. } => {
                 bump(&mut counters.retries);
             }

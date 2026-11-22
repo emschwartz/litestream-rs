@@ -11,6 +11,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use lsr_core::WriteMode;
 use lsr_core::conformance::block_on;
 use lsr_core::{
     BatchKind, CreatedAt, FileInfo, FileKey, Level, Listing, MemSink, MemStore, ObjectStore,
@@ -84,8 +85,9 @@ impl ObjectStore for Waves {
         &self,
         key: &FileKey,
         created_at: Timestamp,
+        mode: WriteMode,
     ) -> Result<Self::Upload, StoreError> {
-        self.inner.begin_upload(key, created_at).await
+        self.inner.begin_upload(key, created_at, mode).await
     }
 
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
@@ -142,7 +144,11 @@ fn snapshot_store() -> (MemStore, usize) {
     let store = MemStore::new();
     block_on(async {
         let mut up = store
-            .begin_upload(&key, Timestamp::from_unix_millis(1_700_000_000_000))
+            .begin_upload(
+                &key,
+                Timestamp::from_unix_millis(1_700_000_000_000),
+                WriteMode::Replace,
+            )
             .await
             .unwrap();
         up.write(&bytes).await.unwrap();

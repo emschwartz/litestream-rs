@@ -464,7 +464,11 @@ fn a_staged_file_that_does_not_verify_empties_the_seed_up_to_it() {
     let last = bytes.len() - 1;
     bytes[last] ^= 0xff;
     block_on(async {
-        let mut up = rig.store.begin_upload(&first, ts(1)).await.unwrap();
+        let mut up = rig
+            .store
+            .begin_upload(&first, ts(1), WriteMode::Replace)
+            .await
+            .unwrap();
         up.write(&bytes).await.unwrap();
         up.commit().await.unwrap();
     });

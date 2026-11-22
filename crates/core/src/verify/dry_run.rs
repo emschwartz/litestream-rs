@@ -13,7 +13,7 @@ use crate::layout::{CreatedAt, FileInfo};
 use crate::layout::{FileKey, Level};
 use crate::plan::RestoreTarget;
 use crate::restore::{DatabaseSink, RestoreError, RestoreOptions, Restored, restore_from};
-use crate::store::{Listing, ObjectStore, PageLimit, ReadLen, StoreError};
+use crate::store::{Listing, ObjectStore, PageLimit, ReadLen, StoreError, WriteMode};
 
 /// A [DatabaseSink] that keeps each page's checksum and nothing else: 8 bytes
 /// a page, no page bytes, and nothing is ever published.
@@ -112,8 +112,9 @@ impl<S: ObjectStore> ObjectStore for Counting<'_, S> {
         &self,
         key: &FileKey,
         created_at: Timestamp,
+        mode: WriteMode,
     ) -> Result<Self::Upload, StoreError> {
-        self.inner.begin_upload(key, created_at).await
+        self.inner.begin_upload(key, created_at, mode).await
     }
 
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {

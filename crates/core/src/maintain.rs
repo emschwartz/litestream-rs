@@ -784,6 +784,7 @@ const fn leaves_bad_output(err: &StoreError) -> bool {
         | StoreError::Throttled { .. }
         | StoreError::Auth { .. }
         | StoreError::NotFound { .. }
+        | StoreError::AlreadyExists { .. }
         | StoreError::ScratchExhausted { .. }
         | StoreError::Refused { .. } => false,
     }

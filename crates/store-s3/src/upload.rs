@@ -16,9 +16,18 @@
 //! one means the bytes stored are not the bytes sent. The object is already
 //! visible then, so it is deleted (best effort) before the error returns, as the
 //! file store does for a size mismatch; the uploader writes the same key again
-//! without listing. A completed multipart object with a wrong-shaped ETag is
-//! treated the same way; a wrong part ETag leaves nothing visible, so the upload
+//! without listing. A completed multipart object whose ETag names another
+//! part count is treated the same way; a wrong part ETag leaves nothing visible, so the upload
 //! id goes on the orphan list instead.
+//!
+//! A create-only upload ([`WriteMode::New`]) sends `If-None-Match: *` on its
+//! PUT, or on its complete (`multipart.rs`). A 412 is
+//! [`StoreError::AlreadyExists`]. A provider that answers the condition with
+//! `NotImplemented` has no conditional writes: the PUT fails `Transient` (its
+//! body is not kept, so the caller writes again), and from then on this store
+//! sends create-only writes without the condition, as Go's are, and counts
+//! them in [`crate::WriteStats`]. A provider that ignores the header
+//! silently cannot be told apart here.
 //!
 //! Dropping a multipart upload does no I/O: parts not yet sent are dropped
 //! and its id goes on the orphan list (`orphans.rs`). A batch has finished
@@ -29,12 +38,14 @@ use std::io;
 use std::sync::Arc;
 
 use lsr_core::{
-    CorruptCause, CreatedAt, FileInfo, FileKey, ListedTime, PartNumber, StoreError, StoreOp, Upload,
+    CorruptCause, CreatedAt, FileInfo, FileKey, ListedTime, PartNumber, StoreError, StoreOp,
+    Upload, WriteMode,
 };
 use lsr_ltx::Timestamp;
 
+use crate::classify::{classify, is_not_implemented};
 use crate::multipart::completed_etag_fits;
-use crate::request::UploadId;
+use crate::request::{Precondition, UploadId};
 use crate::response::{EtagCheck, check_etag};
 use crate::store::Inner;
 use crate::transport::Transport;
@@ -59,6 +70,7 @@ pub struct S3Upload<T> {
     inner: Arc<Inner<T>>,
     key: FileKey,
     created_at: Timestamp,
+    mode: WriteMode,
     written: u64,
     state: UploadState,
 }
@@ -79,11 +91,17 @@ impl<T> std::fmt::Debug for S3Upload<T> {
 }
 
 impl<T> S3Upload<T> {
-    pub(crate) fn new(inner: Arc<Inner<T>>, key: FileKey, created_at: Timestamp) -> Self {
+    pub(crate) fn new(
+        inner: Arc<Inner<T>>,
+        key: FileKey,
+        created_at: Timestamp,
+        mode: WriteMode,
+    ) -> Self {
         Self {
             inner,
             key,
             created_at,
+            mode,
             written: 0,
             state: UploadState::Buffering(Vec::new()),
         }
@@ -149,12 +167,27 @@ impl<T: Transport> Inner<T> {
         key: &FileKey,
         created_at: Timestamp,
         body: Vec<u8>,
+        mode: WriteMode,
     ) -> Result<FileInfo, StoreError> {
         let op = StoreOp::Upload;
         let wrote = u64::try_from(body.len()).unwrap_or(u64::MAX);
-        let request = self.request(op, |b, now| b.put_object(now, key, body, created_at))?;
+        let precondition = self.precondition(mode);
+        let request = self.request(op, |b, now| {
+            b.put_object_if(now, key, body, created_at, precondition)
+        })?;
         let sent = request.md5();
-        let response = self.exec(op, Some(key), request.into_request())?;
+        let response = self.send(op, request.into_request())?;
+        if precondition == Precondition::KeyIsFree && is_not_implemented(&response) {
+            self.conditional_unsupported();
+            return Err(StoreError::Transient {
+                op,
+                kind: io::ErrorKind::Unsupported,
+            });
+        }
+        if response.status() == 412 {
+            self.tally_taken();
+        }
+        classify(op, Some(key), None, &response)?;
         match check_etag(&response, sent) {
             EtagCheck::Matches | EtagCheck::NotMd5 => Ok(FileInfo {
                 key: *key,
@@ -291,7 +324,7 @@ impl<T: Transport> S3Upload<T> {
         let completed = self
             .inner
             .within_budget(StoreOp::Upload, start)
-            .and_then(|()| self.inner.complete_upload(&self.key, id, etags));
+            .and_then(|()| self.inner.complete_upload(&self.key, id, etags, self.mode));
         let parts = etags.len();
         let etag = match completed {
             Ok(etag) => etag,
@@ -322,7 +355,7 @@ impl<T: Transport> Upload for S3Upload<T> {
         if let UploadState::Buffering(buf) = &mut self.state {
             let body = std::mem::take(buf);
             self.state = UploadState::Done;
-            return self.inner.put(&self.key, self.created_at, body);
+            return self.inner.put(&self.key, self.created_at, body, self.mode);
         }
         self.finish_multipart()
     }

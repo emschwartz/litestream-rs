@@ -38,7 +38,10 @@ fn forge_page(rig: &Rig, n: u64, pgno: u32, fill: u8) -> Vec<u8> {
     let forged = encoder.finish(None).unwrap().0;
     assert_ne!(forged, bytes);
     block_on(async {
-        let mut up = store.begin_upload(&key, ts(T0)).await.unwrap();
+        let mut up = store
+            .begin_upload(&key, ts(T0), crate::store::WriteMode::Replace)
+            .await
+            .unwrap();
         up.write(&forged).await.unwrap();
         up.commit().await.unwrap();
     });
@@ -159,7 +162,12 @@ fn a_refused_copy_of_a_torn_tail_leaves_the_listed_key_to_the_replica() {
     let mut torn = block_on(rig.remote.inner.read(&key, 0, all)).unwrap();
     torn.truncate(torn.len() / 2);
     block_on(async {
-        let mut up = rig.remote.inner.begin_upload(&key, ts(T0)).await.unwrap();
+        let mut up = rig
+            .remote
+            .inner
+            .begin_upload(&key, ts(T0), crate::store::WriteMode::Replace)
+            .await
+            .unwrap();
         up.write(&torn).await.unwrap();
         up.commit().await.unwrap();
     });
@@ -290,7 +298,12 @@ fn a_pending_snapshot_short_of_the_replicas_newest_is_refused() {
     let stale = relabelled(&early, 4);
     let key = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(4).unwrap()));
     block_on(async {
-        let mut up = rig.staging.inner.begin_upload(&key, ts(T0)).await.unwrap();
+        let mut up = rig
+            .staging
+            .inner
+            .begin_upload(&key, ts(T0), crate::store::WriteMode::Replace)
+            .await
+            .unwrap();
         up.write(&stale).await.unwrap();
         up.commit().await.unwrap();
     });
@@ -349,7 +362,10 @@ fn frames_past_the_committed_end_prove_no_staged_file() {
 fn put_l0(store: &MemStore, n: u64, bytes: &[u8]) {
     let key = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(n).unwrap()));
     block_on(async {
-        let mut up = store.begin_upload(&key, ts(T0)).await.unwrap();
+        let mut up = store
+            .begin_upload(&key, ts(T0), crate::store::WriteMode::Replace)
+            .await
+            .unwrap();
         up.write(bytes).await.unwrap();
         up.commit().await.unwrap();
     });

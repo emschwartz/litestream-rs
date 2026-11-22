@@ -2,6 +2,7 @@
 //! replica's newest level-0 file when the WAL still matches it.
 
 use super::*;
+use crate::store::WriteMode;
 
 /// Caught up through transaction 2, then the staging directory is gone and a
 /// new actor starts.
@@ -83,7 +84,7 @@ fn with_staging_gone_a_replica_newest_staged_file_naming_another_transaction_sto
         let mut up = rig
             .remote
             .inner
-            .begin_upload(&newest_staged_file_key(), ts(T0))
+            .begin_upload(&newest_staged_file_key(), ts(T0), WriteMode::Replace)
             .await
             .unwrap();
         up.write(&bytes).await.unwrap();

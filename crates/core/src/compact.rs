@@ -55,7 +55,7 @@ use thiserror::Error;
 
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::ltx_read::{BrokenLink, LinkEnd, LtxRead, Next, ReadFault, check_link};
-use crate::store::{ObjectStore, ReadLen, StoreError, Upload};
+use crate::store::{ObjectStore, ReadLen, StoreError, Upload, WriteMode};
 
 #[cfg(test)]
 #[expect(
@@ -723,7 +723,9 @@ async fn compact_with<S: ObjectStore, D: ObjectStore>(
     let key = FileKey::new(level, inputs.range());
     let created_at = header.fields().timestamp;
     let mut upload = dest
-        .begin_upload(&key, created_at)
+        // A compacted file may be written again over itself (a retried
+        // compaction, Go's output for the same range), as Go's are.
+        .begin_upload(&key, created_at, WriteMode::Replace)
         .await
         .map_err(CompactError::Dest)?;
     let written = write_output(&mut merge, encoder, &header, &mut upload).await;

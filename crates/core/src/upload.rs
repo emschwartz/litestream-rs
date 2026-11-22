@@ -38,6 +38,19 @@
 //! snapshots in its place. At boot, [`sweep_staged`] applies the same rule
 //! before anything is uploaded.
 //!
+//! Every upload here is of a key the engine takes to be free (the confirmed
+//! transaction plus one), so it is a [`WriteMode::New`] write: the bucket, not
+//! a listing, refuses a key that is taken, which a stale listing or another
+//! writer cannot hide. A refused commit reads the object back. The same bytes
+//! are this engine's own earlier commit whose answer was lost: confirmed. An
+//! object that is not a whole LTX file naming the key is replaced, as a
+//! listing's read-back replaces one. A verifying object with other bytes is
+//! another writer's or an earlier run's: the replica is listed at once and
+//! judged by the listing's rules above ([`Did::Diverged`] or
+//! `Fault::RemoteAheadOfLocal`), and a listing too stale to show the object is
+//! overruled by the refusal, which is the divergence the listing would have
+//! reported.
+//!
 //! A failure before the commit leaves the state alone (nothing could have been
 //! published). A failure of the commit itself gives [`UploadState::ListFirst`],
 //! except a checksum mismatch: the store may hold wrong bytes under the key, so
@@ -53,7 +66,7 @@ use crate::fault::{BugSite, Fault};
 use crate::inventory::{Inventory, InventoryError};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::ltx_read::verifies;
-use crate::store::{ListAt, ObjectStore, PageLimit, ReadLen, Upload};
+use crate::store::{ListAt, ObjectStore, PageLimit, ReadLen, StoreError, Upload, WriteMode};
 use crate::witness::{ByteTally, Witnessed, Witnesses};
 
 /// How much of a staged file is read at once.
@@ -116,6 +129,10 @@ pub enum Did {
     },
     /// One file was committed.
     Put(FileInfo),
+    /// The bucket refused the upload of this key because it already held the
+    /// same bytes, read back: this engine's earlier commit, whose answer was
+    /// lost or whose listing was stale, is confirmed.
+    AlreadyPut(FileKey),
     /// The replica was listed and the staged files from `from` on cannot
     /// continue it, so they must go and new content takes a transaction above
     /// `confirmed`: the replica's newest level-0 object verifies and differs
@@ -198,7 +215,7 @@ pub async fn upload_next<L: ObjectStore, S: ObjectStore>(
         }),
         UploadPlan::List => list_step(state, staging, remote, newest_staged).await,
         UploadPlan::Upload(key) => match witnesses.get(&key) {
-            Some(token) => put_step(state, staging, remote, token).await,
+            Some(token) => put_step(state, staging, remote, token, newest_staged).await,
             // No witness: the file is refused unread, as a lost one is.
             None => Err(fail(state, Fault::StagedLost)),
         },
@@ -475,6 +492,9 @@ pub(crate) async fn sweep_staged<L: ObjectStore>(
 
 /// Why a copy did not commit, and so what the state becomes.
 enum PutError {
+    /// The bucket refused a [`WriteMode::New`] commit: the key holds an
+    /// object.
+    Taken,
     /// Nothing can have been published.
     Before(Fault),
     /// The commit failed or its answer cannot be believed.
@@ -489,13 +509,24 @@ async fn put_step<L: ObjectStore, S: ObjectStore>(
     staging: &L,
     remote: &S,
     token: &Witnessed,
+    newest_staged: Option<Txid>,
 ) -> Result<Uploaded, UploadFailed> {
     let key = token.key();
-    match put_staged(staging, remote, token).await {
-        Ok(info) => Ok(Uploaded {
-            state: UploadState::At(Some(key.range().max())),
-            did: Did::Put(info),
-        }),
+    match put_staged(staging, remote, token, WriteMode::New).await {
+        Err(PutError::Taken) => taken(state, staging, remote, token, newest_staged).await,
+        outcome => settle_put(state, remote, key, outcome).await,
+    }
+}
+
+/// The state and step a put's outcome gives (a refusal is [`taken`]'s).
+async fn settle_put<S: ObjectStore>(
+    state: UploadState,
+    remote: &S,
+    key: FileKey,
+    outcome: Result<FileInfo, PutError>,
+) -> Result<Uploaded, UploadFailed> {
+    match outcome {
+        Ok(info) => Ok(put_done(key, info)),
         Err(PutError::Before(fault)) => Err(fail(state, fault)),
         Err(PutError::Rejected(fault)) => {
             // Best effort: the retry replaces the key either way, and a boot
@@ -503,12 +534,52 @@ async fn put_step<L: ObjectStore, S: ObjectStore>(
             drop(remote.delete(&[key]).await);
             Err(fail(state, fault))
         }
-        Err(PutError::Commit(fault)) => Err(fail(
-            UploadState::ListFirst {
-                confirmed: state.confirmed(),
-            },
-            fault,
-        )),
+        Err(PutError::Commit(fault)) => Err(fail(list_first(state), fault)),
+        // Only a `New` write is refused; a refused `Replace` is a store that
+        // broke its contract, and a listing finds out what it holds.
+        Err(PutError::Taken) => Err(fail(list_first(state), Fault::UploadAmbiguous)),
+    }
+}
+
+fn put_done(key: FileKey, info: FileInfo) -> Uploaded {
+    Uploaded {
+        state: UploadState::At(Some(key.range().max())),
+        did: Did::Put(info),
+    }
+}
+
+fn list_first(state: UploadState) -> UploadState {
+    UploadState::ListFirst {
+        confirmed: state.confirmed(),
+    }
+}
+
+/// The bucket refused the upload of `key`: an object is already there. See
+/// the module docs for what each read-back finds.
+async fn taken<L: ObjectStore, S: ObjectStore>(
+    state: UploadState,
+    staging: &L,
+    remote: &S,
+    token: &Witnessed,
+    newest_staged: Option<Txid>,
+) -> Result<Uploaded, UploadFailed> {
+    let key = token.key();
+    let relist = |fault| fail(list_first(state), fault);
+    if same_bytes(staging, remote, &key).await.map_err(relist)? {
+        return Ok(Uploaded {
+            state: UploadState::At(Some(key.range().max())),
+            did: Did::AlreadyPut(key),
+        });
+    }
+    if !remote_verifies(remote, &key).await.map_err(relist)? {
+        let outcome = put_staged(staging, remote, token, WriteMode::Replace).await;
+        return settle_put(state, remote, key, outcome).await;
+    }
+    let listed = list_step(list_first(state), staging, remote, newest_staged).await?;
+    let txid = key.range().max();
+    match plan_upload(&listed.state, newest_staged) {
+        UploadPlan::Upload(next) if next.range().max() <= txid => Ok(diverged(txid, txid)),
+        UploadPlan::Upload(_) | UploadPlan::List | UploadPlan::Idle => Ok(listed),
     }
 }
 
@@ -516,10 +587,11 @@ async fn put_staged<L: ObjectStore, S: ObjectStore>(
     staging: &L,
     remote: &S,
     token: &Witnessed,
+    mode: WriteMode,
 ) -> Result<FileInfo, PutError> {
     let key = &token.key();
     let mut upload = None;
-    let wrote = match copy_verified(staging, remote, token, &mut upload).await {
+    let wrote = match copy_verified(staging, remote, token, mode, &mut upload).await {
         Ok(wrote) => wrote,
         Err(err) => {
             if let Some(open) = upload {
@@ -535,6 +607,11 @@ async fn put_staged<L: ObjectStore, S: ObjectStore>(
     match open.commit().await {
         Ok(info) if info.key == *key && info.size == wrote => Ok(info),
         Ok(_) => Err(PutError::Commit(Fault::UploadAmbiguous)),
+        Err(StoreError::AlreadyExists { key: taken })
+            if taken == *key && mode == WriteMode::New =>
+        {
+            Err(PutError::Taken)
+        }
         Err(err) => Err(commit_failed(Fault::from_remote(&err))),
     }
 }
@@ -577,6 +654,7 @@ async fn copy_verified<L: ObjectStore, S: ObjectStore>(
     staging: &L,
     remote: &S,
     token: &Witnessed,
+    mode: WriteMode,
     upload: &mut Option<S::Upload>,
 ) -> Result<u64, PutError> {
     let key = &token.key();
@@ -602,7 +680,7 @@ async fn copy_verified<L: ObjectStore, S: ObjectStore>(
             (None, Some(header)) => {
                 names_key(&header, key)?;
                 // Stored before the first write so a failed write still aborts it.
-                let open = upload.insert(begin(remote, key, &header).await?);
+                let open = upload.insert(begin(remote, key, &header, mode).await?);
                 held.extend_from_slice(&chunk);
                 write_chunk(open, &held).await?;
                 held = Vec::new();
@@ -627,9 +705,10 @@ async fn begin<S: ObjectStore>(
     remote: &S,
     key: &FileKey,
     header: &Header,
+    mode: WriteMode,
 ) -> Result<S::Upload, PutError> {
     remote
-        .begin_upload(key, header.fields().timestamp)
+        .begin_upload(key, header.fields().timestamp, mode)
         .await
         .map_err(|err| PutError::Before(Fault::from_remote(&err)))
 }

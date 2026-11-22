@@ -307,6 +307,7 @@ impl Acked {
     pub fn on_did(&mut self, did: &Did) {
         match did {
             Did::Put(info) => self.record(info.key.range().max()),
+            Did::AlreadyPut(key) => self.record(key.range().max()),
             Did::Diverged { confirmed, .. } => self.record(*confirmed),
             Did::Listed {
                 newest: Some(newest),

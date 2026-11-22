@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use lsr_core::WriteMode;
 use lsr_core::conformance::{Failure, Harness, block_on};
 use lsr_core::{
     Clock, CorruptCause, FileKey, Level, ObjectStore, PageLimit, ReadLen, StoreError, StoreOp,
@@ -362,7 +363,11 @@ impl RealHarness {
 
     pub fn put(&self, key: &FileKey, created_at: Timestamp, bytes: &[u8]) {
         block_on(async {
-            let mut upload = self.store.begin_upload(key, created_at).await.unwrap();
+            let mut upload = self
+                .store
+                .begin_upload(key, created_at, WriteMode::Replace)
+                .await
+                .unwrap();
             upload.write(bytes).await.unwrap();
             upload.commit().await.unwrap();
         });
@@ -375,7 +380,11 @@ impl RealHarness {
 
     pub fn write_all(&self, key: &FileKey, created_at: Timestamp, bytes: &[u8], chunk: usize) {
         block_on(async {
-            let mut upload = self.store.begin_upload(key, created_at).await.unwrap();
+            let mut upload = self
+                .store
+                .begin_upload(key, created_at, WriteMode::Replace)
+                .await
+                .unwrap();
             for piece in bytes.chunks(chunk) {
                 upload.write(piece).await.unwrap();
             }
@@ -560,6 +569,32 @@ pub fn multipart_round_trip(h: &RealHarness) {
     assert_eq!(h.store.pending_orphans(), 0);
 }
 
+/// A create-only multipart upload into a taken key: the server refuses the
+/// complete (`If-None-Match: *` is checked there), the object stays, and the
+/// refused upload is left open for the orphan list to abort.
+pub fn create_only_multipart_into_a_taken_key_is_refused(h: &RealHarness) {
+    let key = h.key(0, 1, 1);
+    h.write_all(&key, Timestamp::from_unix_millis(1), b"first", 64);
+    let len = part(h).saturating_mul(2);
+    let err = block_on(async {
+        let mut upload = h
+            .store
+            .begin_upload(&key, Timestamp::from_unix_millis(2), WriteMode::New)
+            .await
+            .unwrap();
+        for piece in body(len).chunks(part(h)) {
+            upload.write(piece).await.unwrap();
+        }
+        upload.commit().await.unwrap_err()
+    });
+    assert_eq!(err, StoreError::AlreadyExists { key });
+    assert_eq!(h.read_back(&key, 5), b"first");
+    assert_eq!(h.store.write_stats().refused_taken, 1);
+    assert!(!h.store.write_stats().conditional_unsupported);
+    assert_eq!(h.store.abort_orphans().unwrap(), 1);
+    assert_eq!(h.open_uploads(), 0);
+}
+
 pub fn part_size_boundary(h: &RealHarness) {
     for (n, len) in [
         (1, part(h)),
@@ -579,7 +614,11 @@ pub fn dropped_multipart_is_invisible_then_aborted(h: &RealHarness) {
     block_on(async {
         let mut upload = h
             .store
-            .begin_upload(&h.key(0, 1, 1), Timestamp::from_unix_millis(9))
+            .begin_upload(
+                &h.key(0, 1, 1),
+                Timestamp::from_unix_millis(9),
+                WriteMode::Replace,
+            )
             .await
             .unwrap();
         upload.write(&body(part(h))).await.unwrap();
@@ -595,7 +634,11 @@ pub fn abort_leaves_nothing(h: &RealHarness) {
     block_on(async {
         let mut upload = h
             .store
-            .begin_upload(&h.key(0, 1, 1), Timestamp::from_unix_millis(9))
+            .begin_upload(
+                &h.key(0, 1, 1),
+                Timestamp::from_unix_millis(9),
+                WriteMode::Replace,
+            )
             .await
             .unwrap();
         upload.write(&body(part(h))).await.unwrap();
@@ -678,6 +721,7 @@ macro_rules! shared_cases {
                 read_of_missing_key_is_not_found,
                 delete_is_idempotent,
                 two_uploads_to_one_key,
+                a_new_upload_never_replaces,
                 chunks_concatenate_and_created_at_survives,
                 created_at_returns_the_committed_created_at,
                 listed_created_at_is_exact_or_marked,
@@ -705,6 +749,7 @@ macro_rules! shared_cases {
                 unparseable_created_at_fails_the_reader_not_the_listing,
                 listing_makes_no_head_requests,
                 multipart_round_trip,
+                create_only_multipart_into_a_taken_key_is_refused,
                 part_size_boundary,
                 dropped_multipart_is_invisible_then_aborted,
                 abort_leaves_nothing,

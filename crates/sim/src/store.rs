@@ -25,6 +25,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
 
+use lsr_core::WriteMode;
 use lsr_core::{
     BatchKind, CorruptCause, Entropy, FileInfo, FileKey, Level, ListAt, Listing, MemStore,
     ObjectStore, PageLimit, ReadAt, ReadLen, SeededEntropy, StoreError, StoreOp, Upload,
@@ -475,11 +476,12 @@ impl<S: ObjectStore> ObjectStore for Faults<S> {
         &self,
         key: &FileKey,
         created_at: Timestamp,
+        mode: WriteMode,
     ) -> Result<Self::Upload, StoreError> {
         if let Verdict::Fail(err) = self.verdict(Call::Begin) {
             return Err(err);
         }
-        let inner = self.inner.begin_upload(key, created_at).await?;
+        let inner = self.inner.begin_upload(key, created_at, mode).await?;
         Ok(FaultsUpload {
             inner,
             key: *key,
@@ -573,7 +575,7 @@ async fn damage(raw: &MemStore, info: &FileInfo) -> Result<(), StoreError> {
     let at = info
         .created_at()
         .map_or(Timestamp::from_unix_millis(0), |created_at| created_at.at());
-    let mut up = raw.begin_upload(&info.key, at).await?;
+    let mut up = raw.begin_upload(&info.key, at, WriteMode::Replace).await?;
     up.write(&bytes).await?;
     up.commit().await?;
     Ok(())
@@ -705,9 +707,10 @@ impl<S: ObjectStore> ObjectStore for YieldEachCall<S> {
         &self,
         key: &FileKey,
         created_at: Timestamp,
+        mode: WriteMode,
     ) -> Result<Self::Upload, StoreError> {
         YieldNow(false).await;
-        let inner = self.inner.begin_upload(key, created_at).await?;
+        let inner = self.inner.begin_upload(key, created_at, mode).await?;
         Ok(YieldUpload { inner })
     }
 
@@ -949,10 +952,11 @@ impl<S: ObjectStore> ObjectStore for Recorder<S> {
         &self,
         key: &FileKey,
         created_at: Timestamp,
+        mode: WriteMode,
     ) -> Result<Self::Upload, StoreError> {
         self.log.with(|s| bump(&mut s.counts.begins));
 
-        let inner = self.inner.begin_upload(key, created_at).await?;
+        let inner = self.inner.begin_upload(key, created_at, mode).await?;
         Ok(TapUpload {
             inner,
             key: *key,
@@ -1159,7 +1163,11 @@ impl VolatileHandle {
                     .unwrap_or_default();
                 let created_at = lock(&self.state).resolved.get(&key).copied();
                 let mut up = raw
-                    .begin_upload(&key, created_at.unwrap_or(Timestamp::from_unix_millis(0)))
+                    .begin_upload(
+                        &key,
+                        created_at.unwrap_or(Timestamp::from_unix_millis(0)),
+                        WriteMode::Replace,
+                    )
                     .await?;
                 up.write(prefix).await?;
                 up.commit().await?;
@@ -1252,8 +1260,9 @@ impl<S: ObjectStore> ObjectStore for Volatile<S> {
         &self,
         key: &FileKey,
         created_at: Timestamp,
+        mode: WriteMode,
     ) -> Result<Self::Upload, StoreError> {
-        let inner = self.inner.begin_upload(key, created_at).await?;
+        let inner = self.inner.begin_upload(key, created_at, mode).await?;
         lock(&self.handle.state).resolved.insert(*key, created_at);
         Ok(StageUpload {
             inner,

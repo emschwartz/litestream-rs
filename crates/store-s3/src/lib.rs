@@ -41,7 +41,9 @@ mod upload;
 mod ureq_transport;
 
 pub use chain::{CredentialChain, CredentialError, EnvGap, FileOutcome, Resolved, Source, Tried};
-pub use classify::{S3Code, classify, classify_transport, is_range_past_end};
+pub use classify::{
+    S3Code, classify, classify_transport, error_in_ok_body, is_not_implemented, is_range_past_end,
+};
 pub use config::{
     BucketName, CREATION_TIME_CONCURRENCY, ConfigError, DEFAULT_REGION, Endpoint, PartSize, Prefix,
     Provider, READ_CONCURRENCY, Region, S3Config, UrlStyle,
@@ -52,8 +54,8 @@ pub use fake::FakeS3;
 #[cfg(feature = "testing")]
 pub use fault::{Fault, FaultTransport, RequestShape, Shape};
 pub use request::{
-    HttpRequest, Method, RequestBuilder, RequestError, UploadId, WriteRequest, level_prefix,
-    object_key,
+    HttpRequest, Method, Precondition, RequestBuilder, RequestError, UploadId, WriteRequest,
+    level_prefix, object_key,
 };
 #[cfg(feature = "testing")]
 pub use request::{OpenUpload, abandon_upload, abort_upload, open_uploads};
@@ -63,7 +65,7 @@ pub use response::{
     EtagCheck, Head, ListPage, ListedFile, ResponseError, check_etag, hex, parse_complete,
     parse_create, parse_delete_failures, parse_head, parse_list, quoted_md5,
 };
-pub use store::{ListStats, S3Store, SystemClock};
+pub use store::{ListStats, S3Store, SystemClock, WriteStats};
 pub use transport::{HttpResponse, Transport, TransportError, send_on_threads};
 pub use upload::S3Upload;
 #[cfg(feature = "ureq")]

@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
+use lsr_core::WriteMode;
 use lsr_core::{
     CreatedAt, FileInfo, FileKey, Level, Listing, ObjectStore, PageLimit, ReadLen, StoreError,
     StoreOp,
@@ -270,6 +271,7 @@ impl ObjectStore for Faulty {
         &self,
         key: &FileKey,
         created_at: Timestamp,
+        mode: WriteMode,
     ) -> Result<Self::Upload, StoreError> {
         self.gate(StoreOp::Upload)?;
         if self.fail_uploads.load(Ordering::SeqCst) {
@@ -278,7 +280,7 @@ impl ObjectStore for Faulty {
                 kind: std::io::ErrorKind::TimedOut,
             });
         }
-        self.inner.begin_upload(key, created_at).await
+        self.inner.begin_upload(key, created_at, mode).await
     }
 
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {

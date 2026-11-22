@@ -8,6 +8,7 @@ use lsr_ltx::{Timestamp, TxidRange};
 
 use super::MemStore;
 use crate::layout::{CreatedAt, FileInfo, FileKey, Level};
+use crate::store::WriteMode;
 use crate::store::{Listing, ObjectStore, PageLimit, ReadLen, StoreError};
 
 /// A store whose files can vanish at the moment they are read, lie about
@@ -92,8 +93,9 @@ impl ObjectStore for Wrapped {
         &self,
         key: &FileKey,
         created_at: Timestamp,
+        mode: WriteMode,
     ) -> Result<Self::Upload, StoreError> {
-        self.inner.begin_upload(key, created_at).await
+        self.inner.begin_upload(key, created_at, mode).await
     }
 
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {

@@ -9,6 +9,7 @@ use super::*;
 use crate::conformance::block_on;
 use crate::layout::Level;
 use crate::mem::MemStore;
+use crate::store::WriteMode;
 use crate::store::{ReadAt, StoreOp, Upload};
 
 const PS: PageSize = PageSize::MIN;
@@ -44,7 +45,7 @@ fn stored(bytes: &[u8]) -> MemStore {
     let store = MemStore::new();
     block_on(async {
         let mut upload = store
-            .begin_upload(&key(), Timestamp::from_unix_millis(1))
+            .begin_upload(&key(), Timestamp::from_unix_millis(1), WriteMode::Replace)
             .await
             .unwrap();
         upload.write(bytes).await.unwrap();
@@ -262,8 +263,9 @@ impl ObjectStore for Wide {
         &self,
         key: &FileKey,
         created_at: Timestamp,
+        mode: WriteMode,
     ) -> Result<Self::Upload, StoreError> {
-        self.inner.begin_upload(key, created_at).await
+        self.inner.begin_upload(key, created_at, mode).await
     }
 
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {

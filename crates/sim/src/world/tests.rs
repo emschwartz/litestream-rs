@@ -4,6 +4,7 @@ use lsr_ltx::PageNo;
 use super::*;
 use crate::store::FaultShape;
 use crate::testkit::{PAGE, pgno, ps};
+use lsr_core::WriteMode;
 
 fn world() -> World {
     World::new(Seed::new(0x5eed), ps(), 4)
@@ -112,7 +113,11 @@ fn run_tick_crashes_a_store_call_at_the_planned_pending() {
         async {
             use lsr_core::Upload;
             let mut up = remote
-                .begin_upload(&key, lsr_ltx::Timestamp::from_unix_millis(1))
+                .begin_upload(
+                    &key,
+                    lsr_ltx::Timestamp::from_unix_millis(1),
+                    WriteMode::Replace,
+                )
                 .await?;
             up.write(&bytes).await?;
             up.commit().await
@@ -156,7 +161,11 @@ fn a_power_loss_tick_drops_unsynced_staged_files() {
         async {
             use lsr_core::Upload;
             let mut up = staging
-                .begin_upload(&key, lsr_ltx::Timestamp::from_unix_millis(1))
+                .begin_upload(
+                    &key,
+                    lsr_ltx::Timestamp::from_unix_millis(1),
+                    WriteMode::Replace,
+                )
                 .await?;
             up.write(&bytes).await?;
             up.commit().await
