@@ -663,6 +663,72 @@ mod prefix_page_size {
 }
 
 #[cfg(test)]
+mod budget {
+    use lsr_sim::generate::{RemoteOp, WalOp};
+    use lsr_sim::run::run_ops;
+    use lsr_sim::{EnvFault, Op, Opts, Seed};
+
+    const fn commit(pages: u8, grow: bool) -> Op {
+        Op::Commit { pages, grow }
+    }
+
+    const fn wal(op: WalOp, ticks: u8) -> Op {
+        Op::WalDamage { op, ticks }
+    }
+
+    /// Level 1 merges level-0 files 2 to 5, and a later bucket rollback
+    /// takes 2 to 4. The budget left the taken files out of level 0 but kept
+    /// the level-1 file built from them, so it charged level 1 for bytes it
+    /// had read (seed 0x54e, shrunk).
+    #[test]
+    fn a_level_built_from_files_a_rollback_took_is_within_budget_seed_0x54e() {
+        let back = Op::Remote(RemoteOp::RollBack);
+        let ops = [
+            commit(2, true),
+            Op::CommitInTick { pages: 3 },
+            commit(4, true),
+            commit(4, true),
+            wal(
+                WalOp::RegrowWithoutCommitMarks(7_897_884_903_207_927_620),
+                4,
+            ),
+            wal(
+                WalOp::RegrowWithoutCommitMarks(12_632_097_625_952_158_396),
+                4,
+            ),
+            wal(WalOp::RegrowSameSalts(5_163_590_175_676_367_914), 5),
+            back.clone(),
+            Op::CommitInTick { pages: 4 },
+            back.clone(),
+            back.clone(),
+            Op::EnvFault(EnvFault::WipeStaging),
+            back.clone(),
+            Op::CommitInTick { pages: 2 },
+            Op::CommitInTick { pages: 1 },
+            wal(WalOp::TearHeader, 5),
+            Op::CommitInTick { pages: 3 },
+            commit(3, false),
+            Op::CommitInTick { pages: 4 },
+            commit(1, true),
+            wal(
+                WalOp::RegrowWithoutCommitMarks(2_609_243_433_445_728_187),
+                7,
+            ),
+            wal(WalOp::TruncateAtFrame(8), 3),
+            back,
+            commit(3, true),
+        ];
+        let opts = Opts {
+            drawn: true,
+            ..Opts::default()
+        };
+        if let Err(failure) = run_ops(Seed::new(0x54e), &ops, &opts) {
+            panic!("{}", failure.violation);
+        }
+    }
+}
+
+#[cfg(test)]
 mod one_bad_read {
     use lsr_core::StoreOp;
     use lsr_sim::generate::Target;
