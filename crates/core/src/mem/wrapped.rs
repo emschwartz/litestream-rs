@@ -26,6 +26,9 @@ pub(crate) struct Wrapped {
     /// Files a concurrent writer puts, one right after each listing of level 0 returns: the
     /// next listing shows it, and a read made in between already finds it.
     pub(crate) put_after_list: Mutex<VecDeque<(FileKey, Vec<u8>)>>,
+    /// A put in flight: it commits right after a read of its key has found nothing, as R2
+    /// allows (a 404 is not final with respect to an earlier put whose outcome is unknown).
+    pub(crate) put_after_miss: Mutex<Option<(FileKey, Vec<u8>)>>,
 }
 
 impl Wrapped {
@@ -46,6 +49,7 @@ impl Wrapped {
             reads: AtomicUsize::new(0),
             unlisted: BTreeSet::new(),
             put_after_list: Mutex::new(VecDeque::new()),
+            put_after_miss: Mutex::new(None),
         }
     }
 
@@ -92,7 +96,22 @@ impl ObjectStore for Wrapped {
 
     async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
         self.before_read(key).await?;
-        self.inner.read(key, offset, len).await
+        let read = self.inner.read(key, offset, len).await;
+        if matches!(read, Err(StoreError::NotFound { .. })) {
+            let landing = {
+                let mut slot = self.put_after_miss.lock().unwrap();
+                slot.take_if(|(pending, _)| pending == key)
+            };
+            if let Some((pending, bytes)) = landing {
+                let mut upload = self
+                    .inner
+                    .begin_upload(&pending, Timestamp::from_unix_millis(0))
+                    .await?;
+                upload.write(&bytes).await?;
+                upload.commit().await?;
+            }
+        }
+        read
     }
 
     async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
