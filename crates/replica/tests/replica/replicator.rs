@@ -14,7 +14,10 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use common::{PATIENCE, Site, assert_same, booted, config, fake, stopped, truncate_is_busy, wait};
+use common::{
+    PATIENCE, Site, assert_same, booted, config, fake, stopped, stopped_moving, truncate_is_busy,
+    wait,
+};
 use lsr_core::{CheckpointMode, Event as EngineEvent, Fault};
 use lsr_replica::{
     AppCheckpoint, AppCheckpoints, AppNotice, Booted, ChannelSink, CheckpointConfig, Config,
@@ -476,16 +479,19 @@ fn app_connection_sets_up_only_this_database() {
     site.assert_restores(&*site.store());
 }
 
-/// Restore and verify run over the same store the replicator used.
+/// Restore and verify run over the same store the replicator used. The drain may meet a
+/// busy database (the application's commits race the replicator's reads) and retry, so the
+/// clock moves while the stop is pending.
 #[test]
 fn verify_and_restore_if_missing_use_the_shared_store() {
     let site = Site::new();
     let store = site.store();
-    let (runtime, _clock) = fake();
+    let (runtime, clock) = fake();
     let replicator =
         Replicator::start_with(&site.db, Arc::clone(&store), config(), runtime).unwrap();
     site.commit(4);
-    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
+    let stopped = stopped_moving(&replicator, &clock, POLL);
+    assert!(matches!(stopped, Stopped::Drained { .. }), "{stopped:?}");
     let report = verify(&*store, Depth::Contents).unwrap();
     assert_eq!(report.worst(), None, "{report:?}");
     assert!(restore_if_missing(&*store, &site.db).unwrap().is_none());
@@ -728,5 +734,29 @@ fn a_thread_that_dies_is_reported_gone() {
     let (runtime, _clock) = fake();
     let next = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
     assert!(matches!(stopped(&next), Stopped::Drained { .. }));
+    site.assert_restores(&*site.store());
+}
+
+/// A drain that meets a retry waits out its backoff on the replicator's clock: on a fake
+/// clock it ends once the clock reaches the retry, not before. A test that stops a
+/// replicator whose drain may retry moves the clock while it waits ([`stopped_moving`]).
+#[test]
+fn a_drain_that_waits_out_a_retry_ends_once_the_clock_reaches_it() {
+    let site = Site::new();
+    let faulty = site.faulty();
+    faulty.fail_uploads.store(true, Ordering::SeqCst);
+    let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
+    let (runtime, clock) = fake();
+    let replicator = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
+    site.commit(4);
+    wait(&replicator, |h| {
+        h.synced.is_some() && h.counters.retries > 0
+    });
+    faulty.fail_uploads.store(false, Ordering::SeqCst);
+    let stopped = stopped_moving(&replicator, &clock, POLL);
+    assert!(
+        matches!(stopped, Stopped::Drained { txid: Some(_) }),
+        "{stopped:?}"
+    );
     site.assert_restores(&*site.store());
 }
