@@ -1929,8 +1929,9 @@ impl Runner {
 
     /// What a drawn run's power losses keep of the unsynced WAL writes: a
     /// drawn prefix, or the block law's draw; and whether the engine's own
-    /// sync of the WAL keeps anything.
-    fn draw_power_law(&self, seed: Seed, opts: &Opts) {
+    /// sync of the WAL keeps anything. A disk that lies from the start is a
+    /// justifier for the whole run, as the operation that makes one is.
+    fn draw_power_law(&mut self, seed: Seed, opts: &Opts) {
         self.w.sqlite.tear_on_power_loss(seed.stream(14));
         if opts.block_crash_law {
             self.w.sqlite.crash_by_law(CrashLaw::drawn(seed.stream(17)));
@@ -1939,6 +1940,7 @@ impl Runner {
         }
         if opts.lying_wal_sync {
             self.w.sqlite.lie_on_our_sync();
+            self.liveness.note(Justifier::LyingDisk);
         }
     }
 
