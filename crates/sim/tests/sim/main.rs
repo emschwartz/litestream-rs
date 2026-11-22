@@ -26,6 +26,8 @@ mod soak;
 #[cfg(test)]
 mod sqlite_rules;
 #[cfg(test)]
+mod survival;
+#[cfg(test)]
 mod tally;
 #[cfg(test)]
 mod unaided;

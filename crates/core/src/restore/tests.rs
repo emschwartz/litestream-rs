@@ -510,6 +510,90 @@ fn a_gap_is_an_error_never_the_pre_gap_state() {
     assert_eq!(sink.published(), None);
 }
 
+/// A snapshot at 1 and level-0 files 2 and 3, with `unlisted` left out of every listing.
+fn lagging(unlisted: &[FileKey]) -> Wrapped {
+    let store = MemStore::new();
+    put_spec(&store, 9, &Spec::plain(512, 1, 1, 1, &[(1, 1)]));
+    put_spec(&store, 0, &Spec::plain(512, 1, 2, 2, &[(1, 2)]));
+    put_spec(&store, 0, &Spec::plain(512, 1, 3, 3, &[(1, 3)]));
+    let mut wrapped = Wrapped::new(store);
+    wrapped.unlisted = unlisted.iter().copied().collect();
+    wrapped
+}
+
+#[test]
+fn a_newest_file_the_listing_hides_fails_the_restore_and_publishes_nothing() {
+    let store = lagging(&[key(0, 3, 3)]);
+    let (result, sink) = run(&store, RestoreTarget::Latest);
+    assert!(
+        matches!(
+            result,
+            Err(RestoreError::ListingBehind { attempts: 3, found }) if found == key(0, 3, 3)
+        ),
+        "{result:?}"
+    );
+    assert_eq!(sink.published(), None);
+}
+
+#[test]
+fn a_hidden_snapshot_past_the_listing_fails_an_as_of_restore() {
+    let store = MemStore::new();
+    put_spec(&store, 9, &Spec::plain(512, 1, 1, 1, &[(1, 1)]));
+    put_spec(&store, 0, &Spec::plain(512, 1, 1, 2, &[(1, 2)]));
+    let mut store = Wrapped::new(store);
+    store.unlisted.insert(key(0, 1, 2));
+    let (result, sink) = run(
+        &store,
+        RestoreTarget::AsOf(Timestamp::from_unix_millis(i64::MAX)),
+    );
+    assert!(
+        matches!(
+            result,
+            Err(RestoreError::ListingBehind { found, .. }) if found == key(0, 1, 2)
+        ),
+        "{result:?}"
+    );
+    assert_eq!(sink.published(), None);
+}
+
+#[test]
+fn a_listing_that_shows_nothing_over_a_first_file_is_not_an_empty_replica() {
+    for target in [RestoreTarget::Latest, RestoreTarget::Txid(txid(1))] {
+        let store = MemStore::new();
+        put_spec(&store, 0, &Spec::plain(512, 1, 1, 1, &[(1, 1)]));
+        let mut store = Wrapped::new(store);
+        store.unlisted.insert(key(0, 1, 1));
+        let (result, sink) = run(&store, target);
+        assert!(
+            matches!(
+                result,
+                Err(RestoreError::ListingBehind { found, .. }) if found == key(0, 1, 1)
+            ),
+            "{target:?}: {result:?}"
+        );
+        assert_eq!(sink.published(), None);
+    }
+}
+
+#[test]
+fn a_txid_restore_takes_no_read_past_the_listing() {
+    let store = lagging(&[key(0, 3, 3)]);
+    let (result, sink) = run(&store, RestoreTarget::Txid(txid(2)));
+    result.unwrap();
+    assert_eq!(seeds(&sink.published().unwrap()), [2]);
+    // The snapshot and file 2, nothing else.
+    assert_eq!(store.reads.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn a_whole_listing_costs_two_one_byte_reads_past_it() {
+    let store = lagging(&[]);
+    let (result, sink) = run(&store, RestoreTarget::Latest);
+    assert_eq!(result.unwrap().attempts(), 1);
+    assert_eq!(seeds(&sink.published().unwrap()), [3]);
+    assert_eq!(store.reads.load(Ordering::Relaxed), 5);
+}
+
 #[test]
 fn a_failed_listing_is_an_inventory_error() {
     let store = four_file_replica();
@@ -759,8 +843,9 @@ fn a_file_larger_than_one_chunk_is_read_in_several_reads() {
     let store = Wrapped::new(store);
     let (result, sink) = run(&store, RestoreTarget::Latest);
     let restored = result.unwrap();
-    // One full chunk, then the short rest: no empty read follows.
-    assert_eq!(store.reads.load(Ordering::Relaxed), 2);
+    // Two one-byte reads past the listing (nothing there), then one full chunk, then the
+    // short rest: no empty read follows.
+    assert_eq!(store.reads.load(Ordering::Relaxed), 4);
     assert_eq!(restored.bytes_read(), u64::try_from(bytes.len()).unwrap());
     let db = sink.published().unwrap();
     for (index, page) in want.iter().enumerate() {

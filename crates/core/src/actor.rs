@@ -2165,8 +2165,7 @@ async fn boot_recover<W: WalSource, P, C, L: ObjectStore, R: ObjectStore>(
 /// The page size the next file must have: the newest staged file's, unless
 /// the replica holds a later transaction than that file (staging is behind
 /// it, or a staging backup was put back) or the staged file names none; then
-/// the replica's newest file's, since the next file goes on its prefix. The
-/// staged file's answers when the replica's header does not decode. A newest
+/// the replica's newest file's, since the next file goes on its prefix. A newest
 /// staged file unusable as a position names nothing: it can never be
 /// uploaded (it gets no witness), so its page size constrains no file.
 async fn prefix_page_size<R: ObjectStore>(
@@ -2185,22 +2184,31 @@ async fn prefix_page_size<R: ObjectStore>(
     Ok(staged)
 }
 
-/// The page size in the header of the replica's newest file; `None` when the
-/// replica is empty or that header does not decode. Every file of a prefix
-/// has one page size, so one header answers for all of them.
+/// Headers a boot reads, newest file first, for the replica's page size before it calls the
+/// replica corrupt.
+const PAGE_SIZE_HEADERS: usize = 8;
+
+/// The page size in the header of the replica's newest file whose header decodes; `None`
+/// when the replica is empty. Every file of a prefix has one page size, so any header answers
+/// for all of them. A header that does not decode (a rotten object, or a read that returned
+/// other bytes) says nothing, so the next newest file is read; when none of the newest
+/// [`PAGE_SIZE_HEADERS`] decodes, the replica is corrupt as far as a boot can tell. Taking no
+/// answer for no constraint let a boot snapshot a new page size onto the prefix.
 async fn replica_page_size<R: ObjectStore>(remote: &R) -> Result<Option<PageSize>, Fault> {
     let inventory = Inventory::load(remote)
         .await
         .map_err(|err| inventory_fault(&err))?;
-    let newest = inventory
-        .files()
-        .iter()
-        .max_by_key(|file| file.key.range().max());
-    let Some(newest) = newest else {
+    let mut files: Vec<&FileInfo> = inventory.files().iter().collect();
+    if files.is_empty() {
         return Ok(None);
-    };
-    let header = read_header(remote, &newest.key, Fault::from_remote).await?;
-    Ok(header.map(|header| header.page_size()))
+    }
+    files.sort_by_key(|file| std::cmp::Reverse(file.key.range().max()));
+    for file in files.into_iter().take(PAGE_SIZE_HEADERS) {
+        if let Some(header) = read_header(remote, &file.key, Fault::from_remote).await? {
+            return Ok(Some(header.page_size()));
+        }
+    }
+    Err(Fault::RemoteCorrupt)
 }
 
 /// Why a boot's first sync is a snapshot. A staged file that did not verify

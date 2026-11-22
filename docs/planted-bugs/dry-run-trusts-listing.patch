@@ -1,0 +1,14 @@
+diff --git a/crates/cli/src/run.rs b/crates/cli/src/run.rs
+index 9f7fcc5..beec710 100644
+--- a/crates/cli/src/run.rs
++++ b/crates/cli/src/run.rs
+@@ -672,7 +672,8 @@ async fn plan_on<S: ObjectStore>(store: &S, output: &Path, how: How) -> Result<F
+     // empty one for any target; a plan printed from a lagging listing would name an older chain
+     // as the answer, or skip a replica that exists.
+     let empty = inventory.newest().is_none();
+-    if (empty || !matches!(how.target, RestoreTarget::Txid(_)))
++    if false
++        && (empty || !matches!(how.target, RestoreTarget::Txid(_)))
+         && let Some(found) = listed_past(store, &inventory)
+             .await
+             .map_err(CliError::Restore)?

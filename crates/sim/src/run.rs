@@ -1486,6 +1486,12 @@ impl Runner {
     /// it: a flipped bit back, then its connections let go, another process
     /// truncates, and it commits a page.
     fn wal_damage_healed(&mut self, op: WalOp, ticks: u8) -> Result<(), Violation> {
+        self.wal_damage_judged(op, ticks, false)
+    }
+
+    /// [`Self::wal_damage_healed`], and with `judged` the replica is judged while the damage
+    /// holds, in the middle of the ticks and after them ([`hold`]).
+    fn wal_damage_judged(&mut self, op: WalOp, ticks: u8, judged: bool) -> Result<(), Violation> {
         // A regrowth rewrites the generation from frame 1; frames a checkpoint
         // already copied would then differ from the database file, which
         // makes the database two things at once (SQLite's readers and its
@@ -1512,8 +1518,14 @@ impl Runner {
         };
         self.wal_damage(op)?;
         self.report.reach.bump(format!("wal.{}", variant(&op)));
-        for _ in 0..ticks {
+        for at in 0..ticks {
             self.tick()?;
+            if judged && at == ticks / 2 {
+                self.judge_held(crate::generate::Hold::Wal(op), None)?;
+            }
+        }
+        if judged {
+            self.judge_held(crate::generate::Hold::Wal(op), None)?;
         }
         if op == WalOp::FlipLastFrameBit {
             self.wal_damage(op)?;
@@ -1580,6 +1592,7 @@ impl Runner {
                 self.meta(*op)?;
             }
             Op::WalDamage { op, ticks } => self.wal_damage_healed(*op, *ticks)?,
+            Op::Hold { hold, ticks } => self.hold(*hold, *ticks)?,
             Op::Heal => {
                 self.rate_active = false;
                 self.w.remote_faults.heal();
@@ -1970,6 +1983,7 @@ pub fn shrink(seed: Seed, steps: u32, weights: &Weights, opts: &Opts) -> Option<
 }
 
 mod after_restart;
+mod hold;
 
 #[cfg(test)]
 mod tests;

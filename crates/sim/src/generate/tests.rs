@@ -142,12 +142,16 @@ fn the_scenario_only_steps_are_drawn_too() {
 #[test]
 fn the_second_frozen_generator_draws_what_the_live_one_drew() {
     let mut compared = 0;
-    // Over 300 seeds: the lag law leaves fewer seeds the second generator knew all of.
-    for n in 0..300 {
-        let weights = Weights::mixed(seed(n));
-        if weights.staging_replace_running != 0 || weights.lagging_listings != 0 {
+    for n in 0..200 {
+        let mut weights = Weights::mixed(seed(n));
+        if weights.staging_replace_running != 0 {
             continue;
         }
+        // Holds came after the second generator, from a stream of their own: with none drawn,
+        // every step is the step it was. Lagging listings came after it too, drawn last into
+        // the mix: at weight zero they draw nothing and move no other draw.
+        weights.hold = 0;
+        weights.lagging_listings = 0;
         let live = history(seed(n), 300, &weights);
         assert_eq!(
             frozen_history(seed(n), 300, Generator::V2),
@@ -182,4 +186,24 @@ fn lagging_listings_are_drawn_by_swarm_mixes_only() {
         })
         .count();
     assert!(drawn > 0);
+}
+
+#[test]
+fn holds_replace_drawn_steps_and_leave_every_other_step_as_it_was() {
+    let mut replaced = 0;
+    for n in 0..50 {
+        let mut weights = Weights::mixed(seed(n));
+        weights.hold = 50;
+        let with = history(seed(n), 300, &weights);
+        weights.hold = 0;
+        let without = history(seed(n), 300, &weights);
+        assert_eq!(with.len(), without.len());
+        for (a, b) in with.iter().zip(&without) {
+            if a != b {
+                assert!(matches!(a, Op::Hold { .. }), "seed {n}: {a:?} for {b:?}");
+                replaced += 1;
+            }
+        }
+    }
+    assert!(replaced > 0);
 }
