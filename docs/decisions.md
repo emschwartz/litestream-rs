@@ -38,6 +38,10 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D28 | How does the simulator's clock move inside a tick? | A frozen law per run, drawn last in the swarm mix; the default mix keeps one reading per tick | Claude (checker-holes), **delegated** | 2026-11-22 | open to owner review |
 | D29 | Where do the behaviour table's rows live? | `docs/behavior.toml`, rendered into `docs/BEHAVIOR.md` | parent session's request; layout by Claude (checker-holes) | 2026-11-22 | decided |
 | D30 | How is Toxiproxy provided to the tests? | Built from source with `go install` at a pinned version | Claude (checker-holes), **delegated** | 2026-11-22 | open to owner review |
+| D32 | Where can the fail-stop clock not survive a restart? | Pending staged files keep it; a boot that deletes them, unstaged WAL frames, and a process not yet booted do not | Claude (fail-stop), **delegated** | 2026-11-22 | open to owner review |
+| D33 | What counts as lag for fail-stop? | Commits of the application only; engine writes and doubt snapshots taken while caught up do not | Claude (fail-stop), **delegated** | 2026-11-22 | open to owner review |
+| D34 | When is the boot judged, and how does the library refuse writes? | After the first listing and the boot's snapshot; a commit hook set through the C API | Claude (fail-stop), **delegated** | 2026-11-22 | open to owner review |
+| D35 | What may trip early, and what the probe needs | A forward clock step with a failing store; a trip needs a failure at or after the bound | Claude (fail-stop), **delegated** | 2026-11-22 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -312,6 +316,39 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** a first run builds it (about a minute) and CI's `test-s3` job needs Go.
 - **Revisit if:** the build breaks on a Go release.
 - **Links:** #111.
+
+## D32. Where the fail-stop clock cannot survive a restart (delegated)
+
+- **Question:** the clock of the oldest unreplicated commit must not restart with the process (#115), or a crash loop runs the application forever in slices shorter than the bound. What does it rest on?
+- **Choice:** the stamp of the oldest pending staged file (the witness token keeps it), or the first time this process saw lag, the older. Three cases are not covered: (1) a boot that cannot vouch for its pending staged files deletes them and stages a snapshot stamped at that boot, so the clock moves once, there; (2) WAL frames no life managed to stage carry no time and count from the life that sees them; (3) before the first boot of a process nothing says which staged files the replica lacks, so the clock covers nothing and only a stop or a refusal can trip.
+- **Options considered:** a floor taken from the deleted files' created-at times, built and then removed: after a bucket rollback it dated a deleted file that changed nothing as old content, a false trip the simulator's judge found, and a new process cannot read a deleted file. WAL mtime (understates) and the replica's newest file time (overstates and trips falsely).
+- **Cost accepted:** a crash loop whose every boot deletes its pending files, or whose every life fails to stage, never trips for age.
+- **Revisit if:** the journal can carry a mark ("unreplicated since") that the engine writes when lag starts and clears at zero; that closes all three.
+- **Links:** #115, `crates/core/src/failstop.rs`, `crates/core/src/actor/lag.rs`, `sim::a_crash_loop_trips_for_age`.
+
+## D33. What counts as lag for fail-stop (delegated)
+
+- **Question:** the false-trip judge, run over random simulator histories, found the clock running with nothing of the application's off the replica. Which staged files are lag?
+- **Choice:** every staged file the replica lacks, except: a file that changes no page against the page checksum table at the same size (the driver's start and the frame after each checkpoint rewrite page 1 unchanged; a boot finds such files among the pending ones while it seeds the table); and a snapshot staged for a doubt alone (an operator's request, a WAL whose continuity cannot be proven) while nothing was off the replica. A snapshot owed for a doubt alone no longer keeps earlier lag running; one owed because commits went past staging (a TRUNCATE after a failed WAL sync, a checkpoint past the synced end) does.
+- **Cost accepted:** a commit made and checkpointed away by another process between two ticks while nothing was off the replica is missed until the next commit starts the clock: a late trip, never a false one.
+- **Revisit if:** the doubt causes change, or a fault appears that puts commits only in a doubt snapshot.
+- **Links:** #115, `actor/lag.rs` (`doubt_only`, `note_quiet_file`), `sync.rs` (`changes_pages`), `pages.rs` (`Seeded`).
+
+## D34. When the boot is judged, and how the library refuses writes (delegated)
+
+- **Question:** under `hold-start` the application is held only before it is released. When may it be released, and how does the library refuse a write?
+- **Choice:** the boot is judged once the replica was listed and the snapshot the boot asked for, if any, was staged or its step failed (a stop that snapshot finds is a stop at boot); or once a boot attempt failed for anything but a refusal (a store that times out does not hold the start). Until then the gate is `Pending`: an `-exec` child waits, library writes are not refused, nothing is released. The library refuses through a commit hook `app_connection` installs with the C API in `lsr-sqlite` (rusqlite's own needs a mutable connection, and `app_connection` takes a shared one); the hook's flag is one `Arc` count per connection, never freed. `Replicator::writes_refused` gives the same answer to another binding.
+- **Cost accepted:** the hook replaces any commit hook the application set. A library application that writes before the first boot is judged is not refused even if the boot then stops; `wait_booted` is there for one that must not.
+- **Revisit if:** applications need their own commit hook, or ask for writes refused while pending.
+- **Links:** #115, `crates/sqlite/src/gate.rs`, `crates/replica/src/thread.rs` (`fail_stop`).
+
+## D35. What may trip early, and what the probe needs (delegated)
+
+- **Question:** the design trips when the age passes the bound and the probe at the bound fails. Which failures count, and on what clock?
+- **Choice:** only a failure of the sync or upload task at or after the bound's instant trips; an earlier failure followed by a quiet backoff does not. Age is measured on the wall clock the engine reads, so a step forward is time passing: with a failing store it may trip early. With a healthy store the probe succeeds and nothing trips. The simulator's judge measures age on both clocks and takes the larger.
+- **Cost accepted:** a forward clock step during a store outage can trip `stop-app` before the bound has truly passed.
+- **Revisit if:** the environment gives the engine a monotonic clock that survives restarts.
+- **Links:** #115, `crates/sim/src/failstop.rs`.
 
 ## Unverified, not recorded
 

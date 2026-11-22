@@ -157,6 +157,19 @@ Planted bugs (each must be caught unaided):
 6. **`lsr take-over` does not need the daemon stopped.** The takeover record is its own file in the meta directory, written by rename, read at boot only, as #110's stop record is. The daemon must be restarted to act on it. It moves into the journal when the journal can take a second writer or the command goes through the daemon.
 7. **10 minutes stands; no byte bound in v1.**
 
+## As built (2026-11-22)
+
+What the implementation settled where this design left a choice, or departed from it; each is a decision entry open to review.
+
+- **The open question below is answered:** health's `unreplicated_since` did see WAL changes a sync fault hid (it reads the committed end on its own), but it restarted with the process, lived where the simulator could not judge it, and read zero while a snapshot was owed after a TRUNCATE. The clock now lives in the engine (`crates/core/src/actor/lag.rs`) and feeds health.
+- **Where the clock cannot survive a restart** (D32): a boot that deletes pending files, unstaged WAL frames, a process not yet booted. The row "Boot, staged files pending and the oldest is past the bound: held after one failed probe" is therefore only met once the boot has listed.
+- **What counts as lag** (D33): commits of the application; engine writes and doubt snapshots taken while caught up do not. Found by the false-trip judge.
+- **When the boot is judged** (D34): after the first listing and the boot's own snapshot; until then the gate is pending.
+- **Early trips and the probe** (D35): a trip needs a failure at or after the bound; a forward clock step with a failing store may trip early.
+- **The setting's place:** `if-replication-stops` and `max-unreplicated-age` sit under `litestream-rs:` with the other Rust-only keys (provisional).
+- **The `-exec` exit code:** 4 (provisional, #41).
+- **P2, P3 and P5** are judged in named simulator runs, not over every run: the judge's truth is an upper bound on age, exact enough to rule out a false trip and too lenient to demand a trip.
+
 ## Not verified
 
 - Whether `unreplicated_since` (`crates/replica/src/thread.rs:133`) is set when the WAL changed but a sync fault kept the engine from reading it. If not, WAL-read faults hide data at risk from trigger 2 and the clock needs a second source (WAL mtime or first failed sync).

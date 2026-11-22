@@ -130,7 +130,7 @@ fn a_store_down_past_the_bound_trips_in_time_and_clears_after() {
 /// the WAL on), deletes them and stages a snapshot of their end state, stamped at that boot.
 /// The clock keeps the deleted files' stamps for the life of that process; the next process
 /// can only read the snapshot's. So the clock's start moves once, to that boot, and never at
-/// a restart that deletes nothing (`docs/decisions.md` D25: a durable mark would close it).
+/// a restart that deletes nothing (`docs/decisions.md` D32: a durable mark would close it).
 #[test]
 fn a_crash_loop_trips_for_age() {
     let mut ops = vec![down(StoreOp::Upload, timeout(StoreOp::Upload)), commit()];
@@ -280,4 +280,18 @@ fn trip_times_are_engine_times() {
             .iter()
             .all(|(at, _)| *at >= Timestamp::from_unix_millis(EPOCH))
     );
+}
+
+/// Known: seed 0x9f9 trips for age with every commit on the replica. Two clock steps of a
+/// day, a staging backup put back and a staged file damaged meet a pending file the engine
+/// cannot tell holds no commit; not resolved in #115. Pinned so the judge stays strict
+/// (`docs/decisions.md` D27).
+#[test]
+#[ignore = "known false trip: seed 0x9f9, a restored staging backup under day-long clock steps"]
+fn known_false_trip_seed_0x9f9() {
+    let seed = Seed::new(0x9f9);
+    let weights = crate::unaided::weights(seed);
+    if let Err(failure) = lsr_sim::run_with(seed, 43, &weights, &Opts::default()) {
+        panic!("{}", failure.violation);
+    }
 }

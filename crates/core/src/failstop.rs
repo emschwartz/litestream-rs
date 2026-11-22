@@ -21,7 +21,7 @@
 //! run the application forever in slices shorter than the bound, as long as each life stages
 //! what it reads. WAL frames no life managed to stage carry no time of their own; they count
 //! from the first life that sees them, and a restart restarts that part of the clock
-//! (`docs/decisions.md` D25). A snapshot the engine owes after it wrote unstaged frames into
+//! (`docs/decisions.md` D32). A snapshot the engine owes after it wrote unstaged frames into
 //! the database file (a TRUNCATE after a failed WAL sync, a checkpoint past the synced end)
 //! keeps the lag that was there: those commits are in no staged file and in no WAL frame.
 //!

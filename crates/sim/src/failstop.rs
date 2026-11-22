@@ -44,11 +44,20 @@ pub struct FailStopJudge {
     failed: Option<(Timestamp, i64)>,
     /// A store refusal fired since the last start.
     refused: bool,
+    /// The last tick's age trip was one the judge accepted, and how many ticks have passed
+    /// since the replica was last seen whole: an accepted trip may take [`CLEAR_TICKS`] to
+    /// clear after the catch-up (the engine learns of it at its next sync).
+    cleared: Option<u32>,
+    accepted: bool,
     /// An upload's answer could not be believed and no clean upload has landed since: the
     /// replica may hold what the engine cannot know it holds, so a restore that finds
     /// everything there does not count as caught up.
     doubt: bool,
 }
+
+/// Ticks an accepted age trip may take to clear once the replica is whole again: the engine
+/// learns of the catch-up at its next upload or sync (P3, clearing, allows the same slack).
+pub const CLEAR_TICKS: u32 = 4;
 
 /// What one tick showed the judge.
 #[derive(Clone, Copy, Debug)]
@@ -110,6 +119,7 @@ impl FailStopJudge {
         if !self.doubt && alone {
             self.since = None;
             self.images.clear();
+            self.cleared = Some(0);
         }
     }
 
@@ -137,6 +147,7 @@ impl FailStopJudge {
 
     /// Takes in what a tick showed.
     pub fn saw(&mut self, tick: TickSeen) {
+        self.cleared = self.cleared.map(|ticks| ticks.saturating_add(1));
         if tick.fault_fired || tick.reported_failure {
             self.failed = Some((tick.at, tick.true_at));
         }
@@ -156,6 +167,26 @@ impl FailStopJudge {
     /// # Errors
     /// [`Violation::FalseTrip`] when nothing the simulator knows explains it.
     pub fn judge(
+        &mut self,
+        trip: Option<Trip>,
+        tick: TickSeen,
+        bound: Duration,
+        booted: bool,
+    ) -> Result<(), Violation> {
+        let lingering = self.accepted
+            && self.since.is_none()
+            && self.cleared.is_some_and(|ticks| ticks <= CLEAR_TICKS);
+        let age_trip = matches!(trip, Some(Trip::UnreplicatedTooLong { .. }));
+        let judged = if age_trip && lingering {
+            Ok(())
+        } else {
+            self.judge_now(trip, tick, bound, booted)
+        };
+        self.accepted = age_trip && judged.is_ok();
+        judged
+    }
+
+    fn judge_now(
         &self,
         trip: Option<Trip>,
         tick: TickSeen,

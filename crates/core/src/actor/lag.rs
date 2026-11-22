@@ -5,7 +5,7 @@
 //!
 //! Lag is judged only by a booted engine: before the first boot of the process nothing says
 //! which staged files the replica lacks, so the clock covers nothing yet, and fail-stop can
-//! only trip for a stop or a refusal at boot (`docs/decisions.md` D25). A rebuilt engine
+//! only trip for a stop or a refusal at boot (`docs/decisions.md` D32). A rebuilt engine
 //! keeps the clock it had.
 
 use std::collections::BTreeSet;
