@@ -2,7 +2,7 @@
 default: check
 
 # The land gate: format, lints, tests. A branch lands only when this is green.
-check: fmt-check clippy test doctest features shuttle upstream-test-map-fresh
+check: fmt-check clippy test doctest features upstream-test-map-fresh
 
 fmt-check:
     cargo fmt --all -- --check
@@ -11,11 +11,16 @@ fmt-check:
 deny:
     cargo deny --locked check
 
+# Every feature at once: the features are additive, so this lints a superset of the default build,
+# and it shares its build with `test`, `doctest` and `upstream-test-map-fresh`. The one code path
+# the superset hides, `cfg(not(feature = "ureq"))` in the S3 store, is linted by `features`.
 clippy:
-    cargo clippy --workspace --all-targets --locked -- -D warnings
+    cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
+# Every test that is not ignored, over every feature: ureq's and reqwest's transport tests
+# and the native-tls classification tests among them.
 test:
-    cargo nextest run --workspace --locked --no-tests=warn
+    cargo nextest run --workspace --all-features --locked --no-tests=warn
 
 # Commit subjects on this branch since `base` follow Conventional Commits (AGENTS.md).
 # The default base is local `main`, which `just spawn` branches from; without one, `origin/main`.
@@ -41,15 +46,12 @@ commit-check base="":
         exit 1
     fi
 
-# The S3 store's HTTP clients (docs/plans/phase-1-reading.md, ruling F2 as amended):
-# each builds alone, all build together, and reqwest's own tests run (ureq's run in `test`),
-# then the test of an application's native-tls client, which needs the `native-tls` feature.
+# The S3 store's HTTP clients (docs/plans/phase-1-reading.md, ruling F2 as amended): each builds
+# alone, which `clippy` over all features cannot show. Their tests run in `test`, which has ureq,
+# reqwest and native-tls on at once.
 features:
     cargo clippy -p lsr-store-s3 --no-default-features --lib --locked -- -D warnings
     cargo clippy -p lsr-store-s3 --no-default-features --features reqwest --lib --locked -- -D warnings
-    cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-    cargo nextest run -p lsr-store-s3 --features reqwest --lib --locked
-    cargo nextest run -p lsr-store-s3 --features native-tls --lib --locked native_tls
 
 # nextest does not run doctests, and the compile-fail proofs (a proof token is not Clone) live there.
 doctest:
@@ -110,7 +112,8 @@ miri:
 
 # Schedule exploration with shuttle: the replica thread's command handshake and the S3 batch's
 # scoped threads, under many random interleavings. Shuttle is a dev-dependency behind
-# `--cfg shuttle`, so no other build sees it. Short by default (SHUTTLE_ITERATIONS), a long run nightly.
+# `--cfg shuttle`, so no other build sees it, and it needs its own target dir and a full rebuild, so it is
+# not part of check: CI runs it on pull requests that touch store-s3 or replica, and nightly for 500000 schedules.
 shuttle iterations="200":
     RUSTFLAGS="--cfg shuttle" CARGO_TARGET_DIR=target/shuttle \
         cargo clippy -p lsr-store-s3 -p lsr-replica --all-targets --locked -- -D warnings
