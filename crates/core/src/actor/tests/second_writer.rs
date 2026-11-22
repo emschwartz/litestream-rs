@@ -37,6 +37,18 @@ fn put_foreign(rig: &Rig, n: u64) -> FileKey {
     key
 }
 
+fn read_whole(store: &MemStore, key: &FileKey) -> Vec<u8> {
+    block_on(store.read(key, 0, ReadLen::CHUNK)).unwrap()
+}
+
+fn put_whole(store: &MemStore, key: &FileKey, bytes: &[u8]) {
+    block_on(async {
+        let mut up = store.begin_upload(key, ts(T0)).await.unwrap();
+        up.write(bytes).await.unwrap();
+        up.commit().await.unwrap()
+    });
+}
+
 fn newest_l0(rig: &Rig) -> Option<u64> {
     Rig::files(&rig.remote, Level::ZERO)
         .iter()
@@ -223,4 +235,156 @@ fn a_lagging_listing_is_not_a_regression() {
     let seen = rig.follow(&mut actor, T0 + 20, 100);
     assert!(!regressed(&seen), "{seen:?}");
     assert!(actor.engine.maintain.watch.is_some());
+}
+
+/// Failover with the old host still running: this engine's upload of the
+/// next id lost its answer, and before its relist the new host's file took
+/// the same id with other bytes. The relist finds the replica's object
+/// verifying and other than the staged file, which is still the bytes this
+/// process witnessed: another writer. The defect: the divergence dropped the
+/// staged file and snapshotted above the other writer's file, interleaving
+/// the two histories. Now it stops, and its record leaves the contested id
+/// out, so a restart stops again.
+#[test]
+fn a_running_engine_stops_when_another_writer_took_its_next_id() {
+    let mut rig = Rig::new();
+    let mut actor = go_like_actor();
+    rig.settle(&mut actor, T0);
+    rig.commit(2);
+    assert_eq!(
+        event(&rig.tick(&mut actor, T0 + 10)),
+        Some(&Event::Synced { files: 1 })
+    );
+    let next = actor.staged().unwrap();
+    rig.remote
+        .inner
+        .inject_failure_after_publish(StoreError::Transient {
+            op: StoreOp::Upload,
+            kind: ErrorKind::TimedOut,
+        });
+    let failed = rig.tick(&mut actor, T0 + 10);
+    assert!(
+        matches!(event(&failed), Some(Event::Retrying { .. })),
+        "{failed:?}"
+    );
+    put_foreign(&rig, next.get());
+    let seen = rig.follow(&mut actor, T0 + 10, 50);
+    assert_eq!(
+        seen.last(),
+        Some(&Tick::Stopped(StopCause::OtherWriter)),
+        "{seen:?}"
+    );
+    assert!(
+        !seen
+            .iter()
+            .any(|t| matches!(event(t), Some(Event::Resnapshot(_)))),
+        "{seen:?}"
+    );
+    assert_eq!(newest_l0(&rig), Some(next.get()));
+    assert_eq!(
+        actor.stop_record(),
+        Some(StopRecord::other_writer(next.prev()))
+    );
+    let mut restarted = go_like_actor();
+    restarted.remember_stop(actor.stop_record().unwrap());
+    let again = rig.follow(&mut restarted, T0 + 20, 20);
+    assert_eq!(
+        again.last(),
+        Some(&Tick::Stopped(StopCause::OtherWriter)),
+        "{again:?}"
+    );
+}
+
+/// The same divergence after the staged file changed under the engine (a
+/// staging backup put back while it ran) says nothing about writers: the
+/// staged file goes and a snapshot follows, as before.
+#[test]
+fn a_divergence_from_a_replaced_staged_file_is_not_another_writer() {
+    let mut rig = Rig::new();
+    let mut actor = go_like_actor();
+    rig.settle(&mut actor, T0);
+    rig.commit(2);
+    rig.tick(&mut actor, T0 + 10);
+    let next = actor.staged().unwrap();
+    rig.remote
+        .inner
+        .inject_failure_after_publish(StoreError::Transient {
+            op: StoreOp::Upload,
+            kind: ErrorKind::TimedOut,
+        });
+    rig.tick(&mut actor, T0 + 10);
+    // The staged copy is replaced by another file of the same id that
+    // verifies; the replica keeps this engine's own object.
+    let key = FileKey::new(Level::ZERO, TxidRange::single(next));
+    let own = read_whole(&rig.remote.inner, &key);
+    put_foreign(&rig, next.get());
+    let other = read_whole(&rig.remote.inner, &key);
+    put_whole(&rig.staging.inner, &key, &other);
+    put_whole(&rig.remote.inner, &key, &own);
+    let seen = rig.follow(&mut actor, T0 + 10, 50);
+    assert!(
+        !seen.contains(&Tick::Stopped(StopCause::OtherWriter)),
+        "{seen:?}"
+    );
+    assert_eq!(actor.stop_record(), None);
+}
+
+/// What a host published, by its `Uploaded(Put)` events.
+fn puts(seen: &[Tick]) -> Vec<FileKey> {
+    seen.iter()
+        .filter_map(|tick| match event(tick) {
+            Some(Event::Uploaded(Did::Put(info))) => Some(info.key),
+            Some(_) | None => None,
+        })
+        .collect()
+}
+
+/// Failover with the old host still alive: host B starts on the replica host
+/// A writes to (a database of its own, its own WAL and staging) while A goes
+/// on committing. The bucket must refuse a level-0 key that is taken, so
+/// whichever host comes second to an id is refused rather than replacing the
+/// other's file, and the stop rules then stop it rather than build on the
+/// other's file. No id is published by both hosts, and one host stops for
+/// another writer.
+///
+/// The bucket's refusal (`If-None-Match` on level-0 keys) is PR #96, not yet
+/// on main: here both hosts publish the same id, the second replacing the
+/// first, which is the interleaving this test exists to forbid.
+#[test]
+#[ignore = "needs the conditional level-0 writes of PR #96 (branch claude/listing-trust)"]
+fn failover_with_the_old_host_alive_never_publishes_one_id_twice() {
+    let mut a = Rig::new();
+    let mut host_a = go_like_actor();
+    a.settle(&mut host_a, T0);
+    a.commit(2);
+    let mut seen_a = a.follow(&mut host_a, T0 + 10, 50);
+    let mut b = Rig::new();
+    b.remote = a.remote.clone();
+    b.wal = FakeWal::new(
+        PS,
+        Salts {
+            salt1: 77,
+            salt2: 88,
+        },
+    );
+    b.ck = FakeCheckpointer::new(b.wal.clone());
+    b.commit(5);
+    let mut host_b = go_like_actor();
+    let mut seen_b = Vec::new();
+    let mut now = T0 + 20;
+    for round in 0..20_u8 {
+        b.commit(round.wrapping_add(100));
+        seen_b.extend(b.follow(&mut host_b, now, 20));
+        a.commit(round.wrapping_add(50));
+        seen_a.extend(a.follow(&mut host_a, now, 20));
+        now += 60_000;
+    }
+    let (puts_a, puts_b) = (puts(&seen_a), puts(&seen_b));
+    let both: Vec<&FileKey> = puts_a.iter().filter(|key| puts_b.contains(key)).collect();
+    assert!(both.is_empty(), "published by both hosts: {both:?}");
+    let stopped = |actor: &Actor| actor.phase() == Phase::Stopped(StopCause::OtherWriter);
+    assert!(
+        stopped(&host_a) || stopped(&host_b),
+        "{seen_a:?}\n{seen_b:?}"
+    );
 }

@@ -112,7 +112,7 @@ use crate::upload::{
 };
 use crate::verify::LivePages;
 use crate::watch::Watch;
-use crate::witness::{LiveDb, Pending, Witnesses, witness_pending};
+use crate::witness::{LiveDb, Pending, Witnesses, still_holds, witness_pending};
 
 /// What one tick may touch, lent for that tick only.
 pub struct Env<'a, W, P, C, L, R> {
@@ -1447,10 +1447,10 @@ impl Actor {
             .await;
             match uploaded {
                 Ok(uploaded) => {
-                    self.set_upload(uploaded.state);
                     if let Did::Diverged { from, .. } = uploaded.did {
-                        return Some(self.lose_staged(env, from, now).await);
+                        return Some(self.diverged(env, uploaded.state, from, now).await);
                     }
+                    self.set_upload(uploaded.state);
                     last = uploaded.did;
                 }
                 Err(failed) => {
@@ -1485,6 +1485,54 @@ impl Actor {
         }
         self.kept.tasks.get_mut(Task::Upload).succeed();
         Some(self.ran(Event::Uploaded(last), now))
+    }
+
+    /// A listing while running found the replica's object at `from` verifying
+    /// and other than the staged file. If the staged file is still the bytes
+    /// this process witnessed, the object is another writer's: this process
+    /// uploads a key only from its witnessed copy and never takes an
+    /// acknowledged id again, so nothing it wrote can differ from that copy.
+    /// That is the stop for another writer, never a snapshot above its file,
+    /// which would interleave the two histories; the stop's record leaves the
+    /// contested id out, so a restart stops again while the object stands.
+    /// A staged file that changed under the engine (a backup put back) says
+    /// nothing about writers, and the divergence goes as before
+    /// ([`Self::lose_staged`]). A boot's divergence is recovery's: it cannot
+    /// tell an earlier run's upload from another writer's.
+    async fn diverged<
+        W: WalSource,
+        P: PageSource,
+        C: Checkpointer,
+        L: ObjectStore,
+        R: ObjectStore,
+    >(
+        &mut self,
+        env: &mut Env<'_, W, P, C, L, R>,
+        state: UploadState,
+        from: Txid,
+        now: Timestamp,
+    ) -> Tick {
+        let key = FileKey::new(Level::ZERO, TxidRange::single(from));
+        let token = self.engine.witnesses.get(&key).copied();
+        let ours = match token {
+            Some(token) => still_holds(env.staging, &token).await,
+            None => Ok(false),
+        };
+        match ours {
+            Ok(true) => {
+                let stops = self.kept.cfg.responses.other_writer == OtherWriter::Stop;
+                if stops && self.kept.stop_record.is_none() {
+                    let below = from.prev().max(self.engine.upload.confirmed());
+                    self.kept.stop_record = Some(StopRecord::other_writer(below));
+                }
+                self.fault(Task::Upload, Fault::RemoteAheadOfLocal, now)
+            }
+            Ok(false) => {
+                self.set_upload(state);
+                self.lose_staged(env, from, now).await
+            }
+            Err(fault) => self.fault(Task::Upload, fault, now),
+        }
     }
 
     /// The staged file `from` is missing, does not verify, or differs from the

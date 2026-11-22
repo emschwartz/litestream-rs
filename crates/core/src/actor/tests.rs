@@ -648,19 +648,24 @@ fn a_replica_ahead_of_staging_names_the_page_size() {
     assert_eq!(everything(&rig).1, before.1, "nothing reaches the replica");
 }
 
-/// An upload's commit is ambiguous, and before the listing that follows,
-/// another writer's verifying object replaces transaction 2 on the replica.
-/// The listing finds it unlike the staged file: the staged files from 2 on
-/// must go and the next file is a snapshot above 2. When that delete failed,
-/// the uploader had already taken 2 as confirmed and uploaded the staged 3,
-/// built on the staged 2, onto the other object (seed 0xd79).
+/// An upload's commit is ambiguous, and before the listing that follows a
+/// verifying object replaces transaction 2 on the replica, while the staged 2
+/// is replaced too (a staging backup put back), so the divergence is no proof
+/// of another writer. The listing finds the replica's object unlike the
+/// staged file: the staged files from 2 on must go and the next file is a
+/// snapshot above 2. When that delete failed, the uploader had already taken
+/// 2 as confirmed and uploaded the staged 3, built on the staged 2, onto the
+/// other object (seed 0xd79).
 #[test]
 fn a_failed_drop_after_a_divergence_uploads_nothing_built_on_it() {
-    let (mut other, mut writer) = caught_up();
-    other.commit(9);
-    other.follow(&mut writer, T0 + 10, 20);
     let two = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(2).unwrap()));
-    let theirs = block_on(other.remote.inner.read(&two, 0, ReadLen::CHUNK)).unwrap();
+    let other_two = |n: u8| {
+        let (mut other, mut writer) = caught_up();
+        other.commit(n);
+        other.follow(&mut writer, T0 + 10, 20);
+        block_on(other.remote.inner.read(&two, 0, ReadLen::CHUNK)).unwrap()
+    };
+    let (theirs, restored) = (other_two(9), other_two(7));
     let (mut rig, mut actor) = caught_up();
     rig.remote
         .inner
@@ -674,11 +679,16 @@ fn a_failed_drop_after_a_divergence_uploads_nothing_built_on_it() {
             break;
         }
     }
-    block_on(async {
-        let mut up = rig.remote.inner.begin_upload(&two, ts(T0)).await.unwrap();
-        up.write(&theirs).await.unwrap();
-        up.commit().await.unwrap();
-    });
+    for (store, bytes) in [
+        (&rig.remote.inner, &theirs),
+        (&rig.staging.inner, &restored),
+    ] {
+        block_on(async {
+            let mut up = store.begin_upload(&two, ts(T0)).await.unwrap();
+            up.write(bytes).await.unwrap();
+            up.commit().await.unwrap();
+        });
+    }
     rig.staging
         .inner
         .inject_failure(StoreOp::Delete, transient(StoreOp::Delete));
