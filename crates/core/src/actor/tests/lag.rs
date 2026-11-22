@@ -289,15 +289,19 @@ fn a_maintenance_fault_never_trips() {
     for _ in 0..1_000 {
         rig.remote
             .inner
-            .inject_failure(StoreOp::Delete, transient(StoreOp::Delete));
+            .inject_failure(StoreOp::List, transient(StoreOp::List));
     }
     let mut now = T0;
+    let mut degraded = false;
     for n in 2..40 {
         now += 60_000;
         rig.commit(n);
         drive(&mut rig, &mut actor, now, now + 50_000);
+        degraded |= actor.degraded(Task::Maintenance).is_some();
+        assert_eq!(actor.degraded(Task::Upload), None, "uploads land");
         assert_eq!(actor.trip(), None, "at {now}");
     }
+    assert!(degraded, "maintenance kept failing");
 }
 
 /// The bound below five minutes is refused.

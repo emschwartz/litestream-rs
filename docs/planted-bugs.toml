@@ -585,3 +585,106 @@ name = "delete-without-dir-sync"
 fix = "93d0510"
 package = "lsr-store-fs"
 tests = ["a_crash_after_a_delete_never_brings_the_file_back"]
+
+# Fail-stop (if-replication-stops, docs/proposals/fail-stop.md section 2): each entry is one of the
+# design's planted bugs, re-planted against the feature as it landed.
+
+[[bug]]
+name = "failstop-trip-on-first-failure"
+fix = "d14e6e4"
+package = "lsr-core"
+tests = [
+    "lag::a_failure_before_the_bound_never_trips",
+    "failstop::tests::the_clock_never_trips_early",
+]
+
+[[bug]]
+name = "failstop-never-trips"
+fix = "d14e6e4"
+package = "lsr-core"
+tests = [
+    "lag::a_store_down_past_the_bound_trips_at_the_probe",
+]
+
+[[bug]]
+name = "failstop-clock-from-process-start"
+fix = "d14e6e4"
+package = "lsr-core"
+tests = [
+    "lag::a_crash_loop_does_not_reset_the_clock",
+]
+
+[[bug]]
+name = "failstop-clock-from-last-failure"
+fix = "d14e6e4"
+package = "lsr-core"
+tests = [
+    "lag::a_store_down_past_the_bound_trips_at_the_probe",
+]
+
+[[bug]]
+name = "failstop-no-probe"
+fix = "d14e6e4"
+package = "lsr-core"
+tests = [
+    "lag::a_store_down_past_the_bound_trips_at_the_probe",
+]
+
+[[bug]]
+name = "failstop-no-clear"
+fix = "d14e6e4"
+package = "lsr-core"
+tests = [
+    "lag::a_trip_for_age_clears_once_caught_up",
+    "failstop::tests::a_failure_after_the_bound_trips_until_caught_up",
+    "failstop::tests::the_clock_never_trips_early",
+]
+
+[[bug]]
+name = "failstop-trip-on-degraded"
+fix = "d14e6e4"
+package = "lsr-core"
+tests = [
+    "lag::a_maintenance_fault_never_trips",
+]
+
+[[bug]]
+name = "failstop-boot-timeout-holds"
+fix = "d14e6e4"
+package = "lsr-core"
+tests = [
+    "lag::a_timeout_at_boot_is_no_refusal",
+]
+
+[[bug]]
+name = "failstop-holds-after-listing"
+fix = "d14e6e4"
+package = "lsr-core"
+tests = [
+    "lag::a_refusal_at_boot_trips_until_the_first_listing",
+]
+
+[[bug]]
+name = "failstop-forgets-owed-snapshot"
+fix = "d14e6e4"
+package = "lsr-core"
+tests = [
+    "lag::a_snapshot_owed_after_a_truncate_keeps_the_lag",
+]
+
+[[bug]]
+name = "failstop-no-hold-on-boot-refusal"
+fix = "d14e6e4"
+package = "lsr-core"
+tests = [
+    "failstop::tests::the_gate_follows_the_table",
+]
+
+[[bug]]
+name = "failstop-starts-over-a-stop"
+fix = "d14e6e4"
+package = "lsr-core"
+tests = [
+    "failstop::tests::the_gate_follows_the_table",
+    "failstop::tests::the_release_latches",
+]

@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor/lag.rs b/crates/core/src/actor/lag.rs
+index bac2e63..9f904dc 100644
+--- a/crates/core/src/actor/lag.rs
++++ b/crates/core/src/actor/lag.rs
+@@ -81,7 +81,7 @@ impl Actor {
+     fn behind(&self, end: Option<CommittedEnd>, was_behind: bool) -> bool {
+         let wal_ahead = end.map_or(was_behind, |end| self.wal_ahead(end));
+         let unconfirmed = self.staged() > self.replicated();
+-        let owed = was_behind && self.pending().is_some();
++        let owed = false;
+         wal_ahead || unconfirmed || owed
+     }
+ 
