@@ -571,6 +571,58 @@ fn a_listing_that_shows_nothing_over_a_first_file_is_not_an_empty_replica() {
     }
 }
 
+/// A replicator keeps uploading while the restore runs: after each listing the next
+/// transaction's file lands, so each read past the listing finds a file the listing could not
+/// have shown. Every next listing shows the file found before it, so none of them lags; the
+/// restore follows the writer and publishes the newest state once it stops. It used to count
+/// each new file as a lagging listing and fail with `ListingBehind` after three (seen on MinIO
+/// with the replicator running, history `every_restore_of_a_minio_replica_is_a_node_of_the_history`).
+#[test]
+fn a_restore_racing_a_writer_follows_it_and_never_calls_the_listing_behind() {
+    let store = MemStore::new();
+    put_spec(&store, 9, &Spec::plain(512, 1, 1, 1, &[(1, 1)]));
+    let store = Wrapped::new(store);
+    for n in 2..=7_u64 {
+        let spec = Spec::plain(512, 1, n, n, &[(1, u8::try_from(n).unwrap())]);
+        store
+            .put_after_list
+            .lock()
+            .unwrap()
+            .push_back((key(0, n, n), spec.encode()));
+    }
+    let (result, sink) = run(&store, RestoreTarget::Latest);
+    let restored = result.unwrap();
+    assert!(restored.reached().get() >= 2, "{restored:?}");
+    let reached = u8::try_from(restored.reached().get()).unwrap();
+    assert_eq!(seeds(&sink.published().unwrap()), [reached]);
+}
+
+/// A writer that never pauses: the restore follows it for a bounded number of listings, then
+/// fails with `ListingBehind` rather than chase it for ever.
+#[test]
+fn a_restore_follows_a_writer_that_never_pauses_for_a_bounded_number_of_listings() {
+    let store = MemStore::new();
+    put_spec(&store, 9, &Spec::plain(512, 1, 1, 1, &[(1, 1)]));
+    let store = Wrapped::new(store);
+    for n in 2..=200_u64 {
+        let spec = Spec::plain(512, 1, n, n, &[(1, 1)]);
+        store
+            .put_after_list
+            .lock()
+            .unwrap()
+            .push_back((key(0, n, n), spec.encode()));
+    }
+    let (result, sink) = run(&store, RestoreTarget::Latest);
+    assert!(
+        matches!(
+            result,
+            Err(RestoreError::ListingBehind { attempts: 64, .. })
+        ),
+        "{result:?}"
+    );
+    assert_eq!(sink.published(), None);
+}
+
 #[test]
 fn a_txid_restore_takes_no_read_past_the_listing() {
     let store = lagging(&[key(0, 3, 3)]);

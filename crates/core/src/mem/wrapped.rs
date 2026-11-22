@@ -1,6 +1,6 @@
 //! The wrapped test store shared by the restore and verify tests.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -8,7 +8,7 @@ use lsr_ltx::{Timestamp, TxidRange};
 
 use super::MemStore;
 use crate::layout::{CreatedAt, FileInfo, FileKey, Level};
-use crate::store::{Listing, ObjectStore, PageLimit, ReadLen, StoreError};
+use crate::store::{Listing, ObjectStore, PageLimit, ReadLen, StoreError, Upload};
 
 /// A store whose files can vanish at the moment they are read, lie about
 /// their size, and whose reads are counted.
@@ -23,6 +23,9 @@ pub(crate) struct Wrapped {
     /// Files every listing leaves out, as a store whose listings lag its writes does; reads
     /// still find them.
     pub(crate) unlisted: BTreeSet<FileKey>,
+    /// Files a concurrent writer puts, one right after each listing of level 0 returns: the
+    /// next listing shows it, and a read made in between already finds it.
+    pub(crate) put_after_list: Mutex<VecDeque<(FileKey, Vec<u8>)>>,
 }
 
 impl Wrapped {
@@ -42,6 +45,7 @@ impl Wrapped {
             zero_sizes: false,
             reads: AtomicUsize::new(0),
             unlisted: BTreeSet::new(),
+            put_after_list: Mutex::new(VecDeque::new()),
         }
     }
 
@@ -69,6 +73,19 @@ impl ObjectStore for Wrapped {
             for file in &mut listing.files {
                 file.size = 0;
             }
+        }
+        let next = if level == Level::ZERO {
+            self.put_after_list.lock().unwrap().pop_front()
+        } else {
+            None
+        };
+        if let Some((key, bytes)) = next {
+            let mut upload = self
+                .inner
+                .begin_upload(&key, Timestamp::from_unix_millis(0))
+                .await?;
+            upload.write(&bytes).await?;
+            upload.commit().await?;
         }
         Ok(listing)
     }

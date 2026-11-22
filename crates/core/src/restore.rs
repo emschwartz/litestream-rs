@@ -23,7 +23,11 @@
 //! transaction's own file, and a snapshot ending at it (after planning, so an `AsOf` target's
 //! created-at reads come first). A store whose listings lag its writes
 //! would otherwise give an older state as the newest, with success. A key found that way is
-//! listed for again, as a vanished file is, and after [MAX_ATTEMPTS] the restore fails with
+//! listed for again. A file found that way is either hidden by a lagging listing or put by a
+//! replicator after the listing, and one read cannot tell; the next listing can. A listing
+//! that shows the file found before it has caught up, and that round is the writer's progress:
+//! the restore follows it, up to [MAX_CHASE] listings. A listing that still ends below a file
+//! found before it began lags, and after [MAX_ATTEMPTS] such listings the restore fails with
 //! [RestoreError::ListingBehind]. A `Txid` target needs no such read: its answer is fixed by
 //! the files that end at or below it, and a hole the lag leaves is a gap the planner refuses.
 //! An empty listing is read past for every target, at the first transaction's key: a replica
@@ -273,11 +277,12 @@ pub enum RestoreError {
         /// The file missing on the last attempt.
         missing: FileKey,
     },
-    /// Every listing ended below a level-0 file a read found past it: the
-    /// store's listings lag its writes, so the newest state it lists is not
-    /// the newest it holds.
+    /// Listings kept ending below level-0 files that reads found past them: three that
+    /// did not show a file found before they began (the store's listings lag its writes,
+    /// so the newest state it lists is not the newest it holds), or a writer that put a new
+    /// file after each of 64 listings.
     #[error(
-        "{found} exists past the listed newest on each of {attempts} listings; the listing lags"
+        "{found} exists past the listed newest after {attempts} listings; the listing lags or a writer outpaces it"
     )]
     ListingBehind {
         /// Listings tried.
@@ -415,7 +420,12 @@ enum Abort {
     /// A planned file was gone: plan again.
     Vanished(FileKey),
     /// A file exists past the listing's newest: list again.
-    Behind(FileKey),
+    Behind {
+        /// The file a read found.
+        found: FileKey,
+        /// The newest transaction the listing showed.
+        listed: Option<Txid>,
+    },
     Fatal(RestoreError),
 }
 
@@ -476,6 +486,7 @@ pub(crate) async fn restore_from<S: ObjectStore, K: DatabaseSink>(
     let mut bytes_read = 0_u64;
     let mut created_at_read = 0_u64;
     let probe = listed.is_none();
+    let mut retries = Retries::default();
     loop {
         let source = listed.take().map_or(Source::List { probe }, Source::Given);
         let applied = attempt_once(
@@ -508,21 +519,65 @@ pub(crate) async fn restore_from<S: ObjectStore, K: DatabaseSink>(
                 });
             }
             Err(Abort::Fatal(err)) => return Err(err),
-            Err(Abort::Vanished(missing)) if attempt >= MAX_ATTEMPTS => {
-                return Err(RestoreError::Unstable {
-                    attempts: attempt,
-                    missing,
-                });
-            }
-            Err(Abort::Behind(found)) if attempt >= MAX_ATTEMPTS => {
-                return Err(RestoreError::ListingBehind {
-                    attempts: attempt,
-                    found,
-                });
-            }
-            Err(Abort::Vanished(_) | Abort::Behind(_)) => {
+            Err(abort) => {
+                retries.after(abort, attempt)?;
                 sink.reset().map_err(sink_fault(SinkOp::Reset))?;
                 attempt = attempt.saturating_add(1);
+            }
+        }
+    }
+}
+
+/// Listings a restore makes while it follows a replicator that keeps uploading, at most.
+const MAX_CHASE: u8 = 64;
+
+/// Why a restore listed again, counted toward the limits on each reason.
+#[derive(Default)]
+struct Retries {
+    /// Attempts that found a planned file gone.
+    vanished: u8,
+    /// Attempts whose listing did not show a file a read had found after an earlier
+    /// listing: the store's listing lags.
+    lagged: u8,
+    /// The file the last read past a listing found.
+    chased: Option<FileKey>,
+}
+
+impl Retries {
+    /// Counts `abort`, made by attempt `attempt`, or fails when its reason is exhausted.
+    ///
+    /// A file found past a listing is a lagging listing or a writer that put it after the
+    /// listing; one read cannot tell. The next listing can: one that shows the file found
+    /// before it is not behind it, so that round is the writer's progress and is not counted
+    /// as a lag. Only a listing that still ends below a file found before it began counts.
+    fn after(&mut self, abort: Abort, attempt: u8) -> Result<(), RestoreError> {
+        match abort {
+            Abort::Fatal(err) => Err(err),
+            Abort::Vanished(missing) => {
+                self.vanished = self.vanished.saturating_add(1);
+                if self.vanished >= MAX_ATTEMPTS {
+                    return Err(RestoreError::Unstable {
+                        attempts: attempt,
+                        missing,
+                    });
+                }
+                Ok(())
+            }
+            Abort::Behind { found, listed } => {
+                let caught_up = self
+                    .chased
+                    .is_some_and(|before| listed >= Some(before.range().max()));
+                if !caught_up {
+                    self.lagged = self.lagged.saturating_add(1);
+                }
+                self.chased = Some(found);
+                if self.lagged >= MAX_ATTEMPTS || attempt >= MAX_CHASE {
+                    return Err(RestoreError::ListingBehind {
+                        attempts: attempt,
+                        found,
+                    });
+                }
+                Ok(())
             }
         }
     }
@@ -563,7 +618,10 @@ async fn attempt_once<S: ObjectStore, K: DatabaseSink>(
         && empty
         && let Some(found) = listed_past(store, inventory).await?
     {
-        return Err(Abort::Behind(found));
+        return Err(Abort::Behind {
+            found,
+            listed: inventory.newest(),
+        });
     }
     let (chain, inside_file) = match plan_target(store, inventory, target, created_at_read).await? {
         PlanOutcome::Plan(chain) => (chain, None),
@@ -587,7 +645,10 @@ async fn attempt_once<S: ObjectStore, K: DatabaseSink>(
         && !matches!(target, RestoreTarget::Txid(_))
         && let Some(found) = listed_past(store, inventory).await?
     {
-        return Err(Abort::Behind(found));
+        return Err(Abort::Behind {
+            found,
+            listed: inventory.newest(),
+        });
     }
     let last = apply_chain(store, &chain, sink, bytes_read).await?;
     Ok((chain, last, inside_file))
