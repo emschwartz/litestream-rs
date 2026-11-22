@@ -314,3 +314,72 @@ package = "lsr-core"
 tests = [
     "a_commit_before_the_checkpoint_barrier_is_not_stamped_before_it_landed",
 ]
+
+[[bug]]
+name = "denial-classes"
+fix = "9224a25"
+package = "lsr-store-s3"
+tests = [
+    "classify::tests::classify_denials_by_what_to_fix",
+    "classify::tests::a_missing_bucket_is_named_on_an_unkeyed_request_too",
+    "classify::tests::transport_errors_map_by_kind",
+    "connection_reset_is_transient_and_tls_failure_is_named_tls",
+]
+
+[[bug]]
+name = "delete-denial-transient"
+fix = "9224a25"
+package = "lsr-store-s3"
+test_bin = "store-s3"
+tests = ["a_delete_refused_for_one_key_is_a_permission_denial"]
+
+[[bug]]
+name = "lag-zero-before-boot"
+fix = "0947223"
+package = "lsr-replica"
+test_bin = "replica"
+tests = ["the_lag_counts_from_the_start_while_the_first_boot_fails"]
+
+[[bug]]
+name = "clock-step-back-freezes-timers"
+fix = "48aee1d"
+package = "lsr-core"
+tests = [
+    "a_backward_clock_step_does_not_freeze_a_retry_wait",
+    "actor::clock::tests::a_step_back_holds_then_slews_at_half_speed_until_it_rejoins",
+]
+
+[[bug]]
+name = "clock-step-back-freezes-timers-sim"
+fix = "48aee1d"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["clock_steps_back_an_hour_mid_retry"]
+
+[[bug]]
+name = "witness-cap-stages-past"
+fix = "2024ca8"
+package = "lsr-core"
+tests = [
+    "a_replica_outage_past_the_witness_cap_holds_the_position_and_costs_no_snapshot",
+]
+
+[[bug]]
+name = "witness-cap-boot"
+fix = "2024ca8"
+package = "lsr-core"
+tests = ["pending_files_past_the_cap_at_boot_are_regenerated_from_the_wal"]
+
+[[bug]]
+name = "boot-snapshot-after-unreadable"
+fix = "2c2bd90"
+package = "lsr-core"
+tests = [
+    "a_torn_staged_file_the_replica_lacks_is_dropped_and_staged_again_from_the_wal",
+]
+
+[[bug]]
+name = "park-waits-out-a-step-back"
+fix = "df6f81d"
+package = "lsr-replica"
+tests = ["a_park_keeps_its_remaining_wait_when_the_clock_steps_back"]
