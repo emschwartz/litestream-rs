@@ -1,13 +1,13 @@
 diff --git a/crates/core/src/upload.rs b/crates/core/src/upload.rs
-index 5c326fa..eb1590a 100644
+index 6f06908f..180d6f98 100644
 --- a/crates/core/src/upload.rs
 +++ b/crates/core/src/upload.rs
-@@ -448,7 +448,7 @@ pub(crate) async fn probe_past<S: ObjectStore>(
+@@ -428,7 +428,7 @@ pub(crate) async fn probe_past<S: ObjectStore>(
+         (listed, Some(confirmed)) if listed < Some(confirmed) => Some(confirmed),
+         (listed, _) => listed.map_or(Some(Txid::MIN), Txid::next),
      };
-     let mut found = Vec::new();
-     let (mut at, mut missed) = (first, 0_u32);
--    for _ in 0..PROBE_CAP {
-+    for _ in 0..0 {
-         let Some(txid) = at.filter(|txid| missed <= PROBE_GAP || Some(*txid) <= through) else {
-             break;
-         };
+-    probe::walk(remote, first, through, starts, false)
++    probe::walk(remote, None, None, starts, false)
+         .await
+         .map_err(|err| Fault::from_remote(&err))
+ }

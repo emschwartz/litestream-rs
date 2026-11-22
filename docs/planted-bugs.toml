@@ -1776,3 +1776,28 @@ fix = "plant"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["verify_reports_a_live_transaction_that_no_longer_restores_seed_0x14"]
+
+[[bug]]
+name = "probe-skips-higher-levels"
+fix = "fd5f8e1"
+package = "lsr-core"
+tests = ["a_hidden_level_one_file_past_the_listing_is_found_by_its_level_key"]
+
+[[bug]]
+name = "probe-skips-higher-levels-sim"
+fix = "fd5f8e1"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "a_lagging_listing_that_hides_a_merged_file_sends_no_upload_into_its_key_seed_0x517",
+    "a_merged_file_hidden_from_a_lagging_listing_is_found_by_its_level_key_seed_0x4dc",
+]
+
+[[bug]]
+name = "restore-reads-one-transaction-past"
+fix = "f0fe6f6"
+package = "lsr-core"
+tests = [
+    "a_hole_right_after_a_lagging_listing_does_not_hide_the_files_past_it",
+    "a_hidden_level_zero_file_of_several_transactions_is_found_from_where_level_zero_ends",
+]

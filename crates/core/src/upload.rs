@@ -40,11 +40,14 @@
 //! the local position is another writer's only when a read finds it, since a
 //! listing that lags a delete shows a file that is gone. The reads find the
 //! tail because nothing this engine runs deletes the replica's newest level-0 file
-//! (retention keeps each level's last file, see `maintain::retain`). What
-//! they cannot find is a level 1 to 8 file whose level-0 inputs were all
-//! deleted by someone else (an operator removing another writer's newest
-//! file after maintenance merged it): its start is not knowable without a
-//! listing, so a lagging listing that hides it is taken as the replica's end.
+//! (retention keeps each level's last file, see `maintain::retain`). A level 1
+//! to 8 file whose level-0 inputs were all deleted by someone else (an
+//! operator removing another writer's newest file after maintenance merged
+//! it) is found by its level key from a start the listing implies
+//! (`probe::Starts`). What they cannot find is such a file when the listing
+//! also hides that level's previous file: its start is then not knowable
+//! without a listing, and a lagging listing that hides it is taken as the
+//! replica's end (BOOT-31 in `docs/behavior.toml`).
 //!
 //! Each staged file is streamed through the LTX decoder while it is copied. The
 //! bytes are written to an upload that no listing can see, and the upload is
@@ -93,24 +96,14 @@ use crate::fault::{BugSite, Fault};
 use crate::inventory::{Inventory, InventoryError};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::ltx_read::verifies;
-use crate::probe;
+use crate::probe::{self, Starts};
 use crate::store::{ListAt, ObjectStore, PageLimit, ReadLen, StoreError, Upload, WriteMode};
 use crate::witness::{ByteTally, Witnessed, Witnesses};
 
 /// How much of a staged file is read at once.
 const CHUNK: ReadLen = ReadLen::or_chunk(256 * 1024);
 
-/// The most transactions past a listing's newest that one probe looks for
-/// ([`probe_past`]). A listing that hides more uploads than this is far
-/// outside what an S3-compatible store does; past it, the bucket's refusal of
-/// a taken key ([`taken`]) still stops a second upload under the same key.
-pub const PROBE_CAP: u32 = 64;
-
-/// The most missing transactions in a row a probe reads past before it
-/// stops. Keys past a replica's newest are never taken, but one below it can
-/// be free: another writer's file an operator removed leaves a gap under the
-/// files uploaded after it.
-pub const PROBE_GAP: u32 = 3;
+pub use crate::probe::{PROBE_CAP, PROBE_GAP};
 
 /// What this engine knows about the replica's newest transaction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -381,7 +374,8 @@ async fn look_past<L: ObjectStore, S: ObjectStore>(
     let cap = usize::try_from(PROBE_CAP).unwrap_or(usize::MAX);
     let staged = staged_from(staging, inventory.newest(), cap).await?;
     let through = staged.last().map(|info| info.key.range().max());
-    probe_past(remote, inventory.newest(), confirmed, through).await
+    let starts = Starts::of(inventory);
+    probe_past(remote, inventory.newest(), confirmed, through, &starts).await
 }
 
 /// Whether a read finds any of the listed files that reach past `known`,
@@ -419,14 +413,14 @@ pub(crate) async fn past_known<S: ObjectStore>(
 /// is later, so that a relist proves what was confirmed is still there
 /// before a regression is reported) is looked for under the keys a reader
 /// can name without a listing (`crate::probe`): its level-0 file, a level-0
-/// file from the first transaction, and the snapshot that ends at it. A
-/// higher-level file has a start no read can guess. The reads go on through
+/// file from the first transaction, a level 1 to 8 file from each of
+/// `starts`, and the snapshot that ends at it. The reads go on through
 /// `through` (the newest staged transaction: a gap below it does not end
 /// them, since this engine may have uploaded anything it staged), then stop
 /// once [`PROBE_GAP`] transactions in a row past the last one found are
 /// missing, and never look at more than [`PROBE_CAP`] transactions. A fresh
 /// listing with nothing staged past it costs [`fresh_probe_reads`] reads, of
-/// keys that are not there (three per transaction).
+/// keys that are not there (three per transaction, and one more for each start).
 ///
 /// # Errors
 /// The replica's fault when a read fails other than by a missing key.
@@ -435,48 +429,29 @@ pub(crate) async fn probe_past<S: ObjectStore>(
     listed: Option<Txid>,
     confirmed: Option<Txid>,
     through: Option<Txid>,
+    starts: &Starts,
 ) -> Result<Vec<FileKey>, Fault> {
     let first = match (listed, confirmed) {
         (listed, Some(confirmed)) if listed < Some(confirmed) => Some(confirmed),
         (listed, _) => listed.map_or(Some(Txid::MIN), Txid::next),
     };
-    let mut found = Vec::new();
-    let (mut at, mut missed) = (first, 0_u32);
-    for _ in 0..PROBE_CAP {
-        let Some(txid) = at.filter(|txid| missed <= PROBE_GAP || Some(*txid) <= through) else {
-            break;
-        };
-        match holder(remote, txid).await? {
-            Some(key) => {
-                found.push(key);
-                missed = 0;
-            }
-            None => missed = missed.saturating_add(1),
-        }
-        at = txid.next();
-    }
-    Ok(found)
+    probe::walk(remote, first, through, starts, false)
+        .await
+        .map_err(|err| Fault::from_remote(&err))
 }
 
 /// The reads a probe past a listing that ends at `listed` makes when it finds nothing: the
 /// keys named for each of the [`PROBE_GAP`] + 1 transactions after it (`crate::probe`).
 #[must_use]
-pub fn fresh_probe_reads(listed: Option<Txid>) -> u64 {
+pub fn fresh_probe_reads(listed: Option<Txid>, starts: &Starts) -> u64 {
     let mut reads = 0_u64;
     let mut at = listed.map_or(Some(Txid::MIN), Txid::next);
     for _ in 0..=PROBE_GAP {
         let Some(txid) = at else { break };
-        reads = reads.saturating_add(probe::reads_per_transaction(txid));
+        reads = reads.saturating_add(probe::reads_per_transaction(txid, starts));
         at = txid.next();
     }
     reads
-}
-
-/// The first key named for `txid` that a read finds (`crate::probe`).
-async fn holder<S: ObjectStore>(remote: &S, txid: Txid) -> Result<Option<FileKey>, Fault> {
-    probe::holder(remote, txid)
-        .await
-        .map_err(|err| Fault::from_remote(&err))
 }
 
 /// Whether the replica holds an object under `key`, by a read: a listing may

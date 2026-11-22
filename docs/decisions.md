@@ -65,6 +65,8 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D47 | Exit codes of `replicate`: one code for every error, as Go, or one per class? | One code, as Go: 1 for every failure; fail-stop keeps its own 4 | Claude (dropin-cli), from the parent session | 2026-11-22 | decided |
 | D48 | Go commands, `restore` arguments, `-once` options and `/metrics` series `lsr` lacks | A gap to build under D33, tracked in #177; refused by name until then | Claude (dropin-cli), from the parent session | 2026-11-22 | gap, open |
 | D50 | Boot finds the replica's newest file differing from the staged copy under the same key: snapshot or stop? Keep the stop record? | Stop unless a takeover covers it; delete the stop record | Claude, **delegated** | 2026-11-22 | open to owner review |
+| D60 | Find a merged file that a lagging listing hides, whose level-0 inputs are gone? | Read its level key from the starts the listing implies; the case with no start left stays known-wrong | Claude, **delegated** (route from the parent session) | 2026-11-22 | open to owner review |
+| D61 | A lagging listing hides everything above a wide hole: keep a marker object in the replica? | Yes, in the smallest form: `newest-snapshot`, written once per snapshot and believed only when a read finds the snapshot it names. No newest-transaction marker. Amends D6 and D8 | Fable, **delegated** | 2026-11-22 | open question (owner), issue #169 |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -630,6 +632,69 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** `hit` is exact only for store faults and injected SQLite failures; for every other class it means an engine tick ran with the fault in place or after it, which is not proof the damage was read. A row whose detection sits in a `const fn` mapping arm has no site yet ("not yet placed"). A rare class or row that a short night misses makes that night red until a floor or an exemption says otherwise.
 - **Revisit if:** a night goes red on a key that a longer soak reaches (add a floor per key), or the marks start deriving BEHAVIOR's D, S and R (section 7.3, item 2).
 - **Links:** #127.
+
+## D60. Reading higher-level keys past a lagging listing
+
+- **The case:** another writer's level-0 file is merged into a level-1 file, and an operator then removes the level-0 file. A listing that lags hides the level-1 file. Before this change, the read past the listing named only level-0 keys and snapshots, so it could not find the level-1 file. The engine took the replica as ending below it and uploaded its own next transaction into the freed key: one transaction, two contents (seeds 0x4dc and 0x517).
+- **Options:** (a) for each transaction the probe reads, also read the level 1 to 8 keys that end at it, from each start the listing implies; (b) change the simulator so that the operator removes every file holding the transaction, or call a partial cleanup outside the contract; (c) accept it as known-wrong.
+- **Choice:** (a). The starts for level `k` are the transaction after level `k`'s newest listed file and the start of the first level `k - 1` file above it. A compaction into level `k` begins at one of them, ours and Go's alike. (b) was ruled out by the parent session: a partial cleanup is a plausible operator mistake, and the simulator must not get kinder.
+- **Cost accepted:** one more one-byte read per start for each probed transaction. A fresh boot listing with level 1 and 2 in use goes from 12 to 20 reads, at most 76 with every level in use. Steady state is unchanged: the probe runs only after a listing.
+- **Residue:** a lag that also hides level `k`'s previous file hides the start too, and the file stays unnamed (BOOT-31 in `docs/behavior.toml`, known wrong). It needs two compactions of one level inside the lag window and level-0 inputs removed by someone other than this engine.
+- **Revisit if:** a real store shows lag windows long enough for two compactions of one level, or a writer identity on the replica makes the second writer's files distinguishable.
+- **Links:** issue #99 (the item from #96), #96, `crates/core/src/probe.rs`.
+
+## D61. A marker object for what a listing cannot name (amends D6, D8)
+
+- **Question:** a restore of `Latest` tells a lagging listing from a whole one by reading keys it can name past the listing's newest transaction. After a bucket rollback the replica's next file is a snapshot `1-N` far above the hole, which no reader can name, so a listing that lags returns the old state with success (sim seed 0x7f8 on `claude/overlapping-faults`: listing ends at 0x21, snapshot `1-8c`, newest 0x9b).
+- **Options:**
+  - A. The bounded walk from t+1 alone, with the wide hole recorded as known wrong.
+  - B1. A fixed-name object holding the newest transaction, overwritten per upload or per maintenance pass; a listing that ends below it fails.
+  - B2. A fixed-name object holding the newest snapshot's key, overwritten once per snapshot; the reader reads the snapshot it names.
+  - C. A signal already in the format.
+  - D. Only the engine fix (stop uploading above a hole).
+- **Choice:** B2, on top of A and D.
+  - **Name:** the object is `<prefix>/newest-snapshot` (file store: beside `ltx/`), called the "snapshot pointer" in prose. Its body is one line, the snapshot's file name (`0000000000000001-000000000000008c.ltx`), parsed by the strict file-name parser. Anything else reads as no pointer.
+  - **Writer:** before uploading any snapshot, the engine puts the pointer naming it and waits for that put to be confirmed. An idle database writes none. A pointer whose snapshot never arrives (a crash) is harmless, see the reader.
+  - **Reader:** `probe.rs` adds one key to what it names. When the pointer names a snapshot ending above the listing's newest, the reader reads one byte of that snapshot. Found means "list again", counted as today (three lagging listings fail with `ListingBehind`). Not found, no pointer, or an unreadable pointer means nothing, and the walk proceeds as without it. The restore reports which of these it saw. The uploader's boot and maintenance get the same key through `probe.rs`.
+  - **Rule kept:** only a read that finds an LTX file is evidence. The pointer makes a key nameable and decides nothing by itself, so a stale, missing, orphaned or corrupt pointer gives a weaker check and never a wrong state or a refusal.
+  - **Rejected, B1:** it lets an object nothing verifies refuse a restore. It refuses forever when it sits above the replica (a Go writer restarted on a prefix whose level directories were removed). It needs level-0 retention tied to it to be complete. Per upload it doubles the PUT count (86,400 a day at Go's 1 s sync interval).
+  - **Nothing relies on the pointer until the Go differential below is in the gate.** Until then WORLD-4's wide-hole case stays "known wrong".
+- **Closes:** a lag that hides a snapshot and everything after it, however wide the hole below, when this engine wrote the snapshot and the pointer read is current. That is seed 0x7f8 once the engine fix lands: the pointer names `1-8c`, the read finds it, the restore fails `ListingBehind`.
+- **Does not close:**
+  - files above a hole with no snapshot above them (the engine before its fix, an operator's delete, anything Go wrote);
+  - a level 1 to 8 file whose inputs are gone and whose start the listing hides (the residue row on `claude/merged-level-probe`);
+  - a replica that lost its newest files and lists whole (BOOT-19: needs a newest-transaction record, B1's job, not decided here);
+  - a stale pointer read;
+  - a failed-over copy that is older as a whole (WORLD-40).
+- **Cost accepted:**
+  - D6 and D8 said no object reaches the replica that Go does not speak. This is one. D8's "revisit if a fact must reach the replica" is met, since a restore runs where no journal exists. The owner decided D6, so this amendment needs the owner's word before code lands.
+  - One PUT per snapshot (R2 Class A is $4.50 per million; default cadence is daily) and one GET per restore attempt and per boot.
+  - A snapshot waits on the pointer's put. A credential scoped to the level directories only would stall snapshots, reported as a typed degraded state (D7).
+  - Under a Go writer the pointer goes stale and the check falls back to the walk.
+- **Why:**
+  - **No cheaper signal exists (read in `ltx` v0.5.3 and litestream 041a8c3).** The LTX header's only cross-file field is `PreApplyChecksum`, which points backward and is zero under D2. `Timestamp` is a write time. The trailer holds two checksums. Go's one metadata key is the file's own timestamp. A lagging listing paginates as a whole older view. A HEAD needs a name, and `1-N` has none, because snapshots follow the clock and losses, not a count.
+  - **Go tolerates the object (read in code, not run).** Go lists only `<path>/%04x/` per level and `<path>/generations/` (`s3/replica_client.go:1588`, `:1371`). Level iterators skip names failing `^[0-9a-f]{16}-[0-9a-f]{16}\.ltx$` (`ltx.go:501`; `s3/replica_client.go:1730`; `file/replica_client.go:115`). Retention deletes only `FileInfo`s those iterators returned (`compactor.go:238-400`, `db.go:3169`, `:3292`). `DeleteAll` lists the whole prefix but is called only from `internal/testingutil`. Go already puts a fixed-name object at the same place, `<path>/lock.json` (`s3/leaser.go:23`, not wired to a command at this commit). The root is chosen over a level directory because there Go would HEAD the object on every metadata listing. Go's NATS client errors on a name it cannot parse (`nats/replica_client.go:274`); this port has no NATS store.
+  - **Consistency.** Cloudflare R2 documents read-after-write, overwrite and listing as strongly consistent, so neither the lag nor a stale pointer arises there (custom domains with caching excepted). Tigris documents strong consistency for same-region requests and for Multi-region and Single-region buckets, and eventual consistency for cross-region reads of Global and Dual-region buckets ("a cached or on-demand copy", lag "typically sub-second"). There the listing and an overwritten pointer can both be stale at once, so the pointer is at best the weaker check. Because it is overwritten about daily and confirmed by reading a never-overwritten key, a stale read names the previous snapshot and falls through to the walk.
+  - **Not verified:** the AWS consistency section (the page was reached, the section was not returned; the December 2020 statement is from memory); AWS and Tigris request prices; whether Tigris has a per-request strong-read option; whether a Tigris cross-region read of a never-read key is exact, which every probe here already assumes.
+- **The Go differential that must exist first** (lsr-compat; S3 and file stores; Go v0.5.16 and the newest pinned; pages compared), with `newest-snapshot` at the prefix root:
+  1. Go `restore` gives the same pages and exit code as without it, for latest, `-txid` and `-timestamp`.
+  2. Go `replicate` adopts the prefix, uploads, compacts every level, takes a snapshot and runs snapshot and level-0 retention through a full cycle with no error, and the object is still there, byte for byte.
+  3. Go's `ltx` listing is unchanged.
+  4. With the pointer stale (Go snapshotted after it) and with it naming a snapshot Go's retention removed, Rust restore equals Go's.
+  5. The alternation test passes with the pointer present, SIGKILL between the pointer's put and the snapshot's included.
+  - Simulator: a law where the pointer's read is stale or absent while listings lag, judged with no allowance (the answer is the replica's or an error); a plant that drops the pointer check.
+- **`docs/BEHAVIOR.md` once it lands:**
+  - WORLD-4 (the restore read-past row): the reads gain the pointer and the snapshot it names; its "lag that hides files past a real hole" limit narrows to the list under "Does not close".
+  - BOOT-18 and MAINT-12: the same key joins the read-past list.
+  - A6 and the environment row "Listings that lag the bucket": gain "an overwritten object read stale: modelled, weaker check".
+  - BOOT-19 and the level 1 to 8 residue row: unchanged.
+  - New rows: no pointer (a Go-written replica); pointer unreadable; pointer names a snapshot no read finds; the pointer's put refused.
+- **Revisit if:**
+  - Go starts listing or cleaning the prefix root, or ships a `newest-snapshot` of its own.
+  - The Tigris soak shows overwritten reads stale for longer than listings.
+  - The engine can still upload above a hole without a snapshot after its fix, or the owner wants a restore to refuse a replica that lost its newest files. Either reopens B1.
+- **Status:** the owner keeps this as an open question, tracked in issue #169. Nothing is built.
+- **Links:** issue #169; `crates/core/src/probe.rs` and `crates/core/src/restore.rs` (`listed_past`) on `claude/merged-level-probe`; seed 0x7f8 on `claude/overlapping-faults`; D2, D6, D8, D33, D34; https://developers.cloudflare.com/r2/reference/consistency/; https://www.tigrisdata.com/docs/concepts/consistency/.
 
 ## Unverified, not recorded
 

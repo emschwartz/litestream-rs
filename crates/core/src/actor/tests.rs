@@ -450,7 +450,11 @@ fn a_first_boot_lists_each_level_once() {
     let mut rig = Rig::new();
     let mut actor = Actor::new(cfg());
     rig.tick(&mut actor, T0);
-    let probe = u32::try_from(crate::upload::fresh_probe_reads(None)).unwrap();
+    let probe = u32::try_from(crate::upload::fresh_probe_reads(
+        None,
+        &crate::probe::Starts::default(),
+    ))
+    .unwrap();
     assert_eq!(
         rig.remote.calls(),
         u32::try_from(Level::ALL.len()).unwrap() + probe
