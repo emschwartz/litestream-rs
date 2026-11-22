@@ -6,7 +6,7 @@ use crate::bytes::{Reader, violation};
 
 /// One event, owned so runs can be compared after the decoder is gone.
 #[derive(Debug, PartialEq, Eq)]
-enum Seen {
+pub(crate) enum Seen {
     Header(Header),
     Page { pgno: PageNo, data: Vec<u8> },
 }
@@ -26,15 +26,15 @@ impl From<Event<'_>> for Seen {
 /// How a run ended. Errors are compared by their `Debug` text: `DecodeError`
 /// is not `PartialEq`, and its variants carry everything that distinguishes them.
 #[derive(Debug, PartialEq, Eq)]
-enum End {
+pub(crate) enum End {
     Verified(Verified),
     Failed(String),
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct Run {
-    events: Vec<Seen>,
-    end: End,
+pub(crate) struct Run {
+    pub(crate) events: Vec<Seen>,
+    pub(crate) end: End,
 }
 
 /// Feeds one chunk to the decoder, recording events. `Some` is the failure.
@@ -61,7 +61,7 @@ fn feed_chunk(decoder: &mut Decoder, chunk: &[u8], events: &mut Vec<Seen>) -> Op
     None
 }
 
-fn run(chunks: &[&[u8]]) -> Run {
+pub(crate) fn run(chunks: &[&[u8]]) -> Run {
     let mut decoder = Decoder::new();
     let mut events = Vec::new();
     for chunk in chunks {

@@ -184,7 +184,7 @@ compat-regen *args:
     ./scripts/build-go-litestream.sh
     cargo run --locked -p lsr-compat --bin compat-regen -- {{args}}
 
-# Run one fuzz target (decode, index, plan, plan_contract, plan_lazy, key, wal) for N seconds;
+# Run one fuzz target (decode, flip, index, plan, plan_contract, plan_lazy, key, wal) for N seconds;
 # new inputs join fuzz/corpus.
 fuzz target seconds:
     cargo +nightly fuzz run {{target}} --fuzz-dir fuzz -- -max_total_time={{seconds}} -max_len=32768 -rss_limit_mb=2048 -print_final_stats=1

@@ -213,6 +213,42 @@ tests = [
     "a_staged_file_whose_bytes_differ_but_still_verify_is_refused",
 ]
 
+# Every read path (restore, verify, compaction, upload, boot recovery) decodes through
+# lsr_ltx::Decoder, so skipping the trailer's file checksum there would let any changed header,
+# index or page byte through.
+[[bug]]
+name = "ltx-skip-file-checksum"
+fix = "claude/ltx-integrity"
+package = "lsr-ltx"
+test_bin = "ltx"
+tests = [
+    "errors::file_checksum",
+    "corruption::every_bit_flip_of_a_go_file_fails_or_aliases",
+    "corruption::every_byte_change_to_a_small_rust_file_fails_or_aliases",
+]
+
+[[bug]]
+name = "lz4-frame-checksums"
+fix = "claude/ltx-integrity"
+package = "lsr-ltx"
+test_bin = "ltx"
+tests = [
+    "errors::frame_header_checksum",
+    "errors::frame_block_checksum",
+    "errors::frame_content_checksum",
+    "corruption::every_bit_flip_of_a_go_file_fails_or_aliases",
+]
+
+[[bug]]
+name = "lz4-block-end"
+fix = "claude/ltx-integrity"
+package = "lsr-ltx"
+test_bin = "ltx"
+tests = [
+    "errors::frame_block_end",
+    "corruption::every_byte_change_to_a_small_rust_file_fails_or_aliases",
+]
+
 # Killed unaided: no test was written for this defect. The swarm's own history (seed 44's drawn
 # mix) fails under it. The same plant at the witness's own anchor (`held || true` in witness.rs)
 # survives 3000 seeds in each of three mixes: the witness's page-by-page check of each pending file
