@@ -13,3 +13,7 @@ replace \| with \^ in .*Txid.*from_str
 replace \| with \^ in put_uvarint
 # core layout.rs FileKey::from_str: same shift-and-digit argument as Txid.
 replace \| with \^ in .*FileKey.*from_str
+# core plan.rs extend: `preference` ends in the file's own range, so two distinct files never tie and `>` vs `>=` cannot pick differently.
+replace > with >= in extend
+# core plan.rs Sweep::next: `sweep_order` includes the key, unique per file, so `<` vs `<=` never meets a tie.
+replace < with <= in <impl Iterator for Sweep<'a>>::next

@@ -967,3 +967,18 @@ fn verify_recheck_rejects_a_chain_with_a_gap() {
     broken.reaches = txid(12);
     assert!(!broken.is_contiguous(&listing));
 }
+
+/// The re-check also refuses a chain that is contiguous but names a file the
+/// listing does not hold: each half of the check must be able to fail alone.
+#[test]
+fn verify_recheck_rejects_a_contiguous_chain_with_an_unlisted_file() {
+    let listing = inv(&[at(9, 1, 3), at(0, 4, 6)]);
+    let PlanOutcome::Plan(chain) = plan(&listing, KeyTarget::Latest) else {
+        panic!("expected a plan");
+    };
+    let mut extended = chain.clone();
+    extended.files.push(at(0, 7, 9));
+    extended.reaches = txid(9);
+    assert!(!extended.is_contiguous(&listing));
+    assert!(extended.is_contiguous(&inv(&[at(9, 1, 3), at(0, 4, 6), at(0, 7, 9)])));
+}
