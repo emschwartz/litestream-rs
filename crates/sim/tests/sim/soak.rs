@@ -66,7 +66,7 @@ fn rotating_seeds() {
         let mut weights = Weights::mixed(seed);
         weights.known_wrong = true;
         if let Err(failure) = run(seed, STEPS, &weights) {
-            let drawn = known_in(&history(seed, STEPS, &weights));
+            let drawn = known_in(&history(seed, STEPS, &weights), &weights);
             if let Some(defect) = KnownWrong::of(&failure.violation, &drawn) {
                 println!("KNOWN {defect:?} ({}): {failure}", defect.tracking());
                 *known.entry(format!("{defect:?}")).or_default() += 1;

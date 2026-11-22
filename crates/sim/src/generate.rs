@@ -222,6 +222,14 @@ pub enum Hold {
     /// The disk lies about the engine's fsync of the WAL, and the power fails
     /// while it lies, in the middle of the hold.
     LyingDisk,
+    /// Every operation on the replica fails as transient: the store is down
+    /// for all of them at once. Restores made meanwhile go through the same
+    /// fault. Drawn only with [`Weights::overlap`].
+    StoreDownAll,
+    /// Another writer's file stands on the replica past the engine's
+    /// position, and the replica is judged while it stands. Drawn only with
+    /// [`Weights::overlap`].
+    SecondWriter,
 }
 
 /// What a scenario does to the staging directory, the engine's own memory of
@@ -387,6 +395,13 @@ pub struct Weights {
     /// ([`crate::domain::KnownWrong`]). Never drawn by a mix: the nightly and the campaigns set
     /// it, and count the defect's failures as known; the per-push fixed seeds leave it unset.
     pub known_wrong: bool,
+    /// Faults overlap: a hold runs a drawn sub-history (commits and ticks, a process crash, a
+    /// power loss, a shutdown, one-shot store faults) instead of committing and ticking, so it
+    /// spans restarts and other faults; holds last up to 200 ticks; and the hold kinds that
+    /// need it are drawn too (every store operation down at once, a second writer judged while
+    /// it stands, the WAL regrowths). Not an operation, for the same reason as
+    /// `block_crash_law`; drawn last in the swarm mix.
+    pub overlap: bool,
 }
 
 /// What the application does when it comes back after a restart, before the
@@ -472,6 +487,7 @@ impl Default for Weights {
             staging_fs: false,
             error_domain: false,
             known_wrong: false,
+            overlap: false,
         }
     }
 }
@@ -602,6 +618,7 @@ impl Weights {
             staging_fs: false,
             error_domain: false,
             known_wrong: false,
+            overlap: false,
         };
         // Drawn last, so every other kind keeps the weight it had before
         // second writers were drawn.
@@ -641,6 +658,8 @@ impl Weights {
         mix.staging_fs = below(&entropy, 2) == 0;
         // Drawn after that, for the same reason: half each.
         mix.error_domain = below(&entropy, 2) == 0;
+        // Drawn after that, for the same reason: half each.
+        mix.overlap = below(&entropy, 2) == 0;
         mix
     }
 
@@ -781,8 +800,9 @@ fn staging_replace_running(entropy: &SeededEntropy) -> Op {
     }
 }
 
-/// A lasting fault, held for up to 11 ticks.
-fn hold(entropy: &SeededEntropy) -> Op {
+/// A lasting fault, held for up to 11 ticks, or up to 200 with `overlap`, when a third of the
+/// holds are of the kinds only overlapping faults draw.
+fn hold(entropy: &SeededEntropy, overlap: bool) -> Op {
     let hold = match below(entropy, 8) {
         0 => Hold::StoreDown(
             choose(
@@ -810,10 +830,25 @@ fn hold(entropy: &SeededEntropy) -> Op {
         },
         _ => Hold::LyingDisk,
     };
-    Op::Hold {
-        hold,
-        ticks: small(entropy, 10).saturating_add(2),
-    }
+    let hold = if overlap && below(entropy, 3) == 0 {
+        let seed = below(entropy, u64::MAX);
+        match below(entropy, 4) {
+            0 => Hold::StoreDownAll,
+            1 => Hold::SecondWriter,
+            2 => Hold::Wal(WalOp::RegrowSameSalts(seed)),
+            _ => Hold::Wal(WalOp::RegrowWithoutCommitMarks(seed)),
+        }
+    } else {
+        hold
+    };
+    // A lying disk loses power in the middle of its hold: a restart inside the hold, which
+    // overlapping holds draw only where known defects are counted (D9), so it keeps the short
+    // length; the draw is made either way, so the history keeps its shape.
+    let long = overlap
+        .then(|| u8::try_from(below(entropy, 199).saturating_add(2)).unwrap_or(u8::MAX))
+        .filter(|_| hold != Hold::LyingDisk);
+    let ticks = long.unwrap_or_else(|| small(entropy, 10).saturating_add(2));
+    Op::Hold { hold, ticks }
 }
 
 fn env_fault(entropy: &SeededEntropy, weights: &Weights) -> Op {
@@ -939,7 +974,7 @@ pub fn history(seed: Seed, steps: u32, weights: &Weights) -> Vec<Op> {
         .map(|_| {
             let drawn = draw(weights, &entropy);
             if weights.hold > 0 && below(&holds, 1000) < u64::from(weights.hold) {
-                hold(&holds)
+                hold(&holds, weights.overlap)
             } else {
                 drawn
             }

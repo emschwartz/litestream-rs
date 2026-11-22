@@ -1018,6 +1018,7 @@ version = "0.0.0"
 dependencies = [
  "lsr-config",
  "lsr-core",
+ "lsr-journal",
  "lsr-ltx",
  "lsr-replica",
  "lsr-store-fs",
@@ -1033,6 +1034,7 @@ version = "0.0.0"
 dependencies = [
  "lsr-core",
  "lsr-history",
+ "lsr-journal",
  "lsr-ltx",
  "lsr-store-fs",
  "lsr-wal",

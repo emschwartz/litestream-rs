@@ -48,6 +48,9 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D82 | When is the boot judged, and how does the library refuse writes? | After the first listing and the boot's snapshot; a commit hook set through the C API | Claude (fail-stop), **delegated** | 2026-11-22 | open to owner review |
 | D83 | What may trip early, and what the probe needs | A forward clock step with a failing store; a trip needs a failure at or after the bound | Claude (fail-stop), **delegated** | 2026-11-22 | open to owner review |
 | D84 | Fail-stop's user-visible names | As approved, with `refused_at_start`, `held_by` and `allowed` | owner, after a Fable review | 2026-11-22 | decided |
+| D100 | How does the journal hold the unproven-WAL debt, and when is it written? | Written at the end of the tick that changes it; a new failure may raise it at any step; `JournalUnwritable` while the journal lags | Claude (journal), **delegated** | 2026-11-22 | open to owner review |
+| D101 | Does a run with nothing to record still create the journal? | Yes: a process that neither read nor wrote a record writes one, so `JournalMissing` means the journal was lost | Claude (journal), **delegated** | 2026-11-22 | open to owner review |
+| D102 | Are the journal's signals a degraded state? | No: a notice in `/healthz` and `lsr_journal_signal`, unwritable included; `/healthz` stays 200 | parent session, names reviewed for the owner | 2026-11-22 | decided |
 | D130 | How does the simulator run the real directory store, and who judges it? | A filesystem trait in store-fs, an in-memory filesystem under the crash law in the sim, half the swarm on it, a staging-contract judge | Claude (sim-real-store-fs), **delegated** | 2026-11-22 | open to owner review |
 | D70 | How do simulated runs draw a fault that reaches an open engine defect? | As a known-wrong cell: out of the per-push seeds, drawn by the nightly and campaigns with its failures counted as known, with a pinned seed that fails once the fix lands | parent session; mechanism by Claude (error-domain), **delegated** | 2026-11-22 | decided |
 | D71 | Which errors may a simulated history inject? | Those a shipped implementation returns from that call with the world unchanged; a world fact is drawn as the world change; a cell the model cannot follow is listed as unmodelled, never drawn | Claude (error-domain), **delegated** | 2026-11-22 | open to owner review |
@@ -60,6 +63,8 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D46 | Two databases on one meta directory, replica or file, which Go starts: copy Go? | No: refuse, since Go loses data there | Claude (dropin-config), **delegated** | 2026-11-22 | open to owner review |
 | D47 | Exit codes of `replicate`: one code for every error, as Go, or one per class? | One code, as Go: 1 for every failure; fail-stop keeps its own 4 | Claude (dropin-cli), from the parent session | 2026-11-22 | decided |
 | D48 | Go commands, `restore` arguments, `-once` options and `/metrics` series `lsr` lacks | A gap to build under D33, tracked in #177; refused by name until then | Claude (dropin-cli), from the parent session | 2026-11-22 | gap, open |
+
+| D72 | How long may a simulated fault last, and what may happen inside it? | Up to 200 ticks, with a drawn sub-history; a restart inside it is drawn only where known defects are counted, since it reaches D9 | Claude (overlapping-faults), **delegated** | 2026-11-22 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -407,6 +412,33 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Revisit if:** the engine persists anything outside a store call, or a defect turns up between two calls into SQLite.
 - **Links:** #127 (item C).
 
+## D100. The unproven-WAL debt in the engine journal
+
+- **Question:** a failed WAL fsync must survive a restart (open defect D2). When is it written, what may follow what, and what is reported when it cannot be written?
+- **Choice:** the journal's debt is a function of the engine's state, written at the end of every tick in which it differs from the last record made durable (or read at boot); boot restores a recorded debt and never forgives one. The debt is paid only through its cure (TRUNCATE owed, then snapshot owed, then none), and a new failure may raise it to TRUNCATE owed at any step: the writer refuses, as a bug, a record that forgives it. A failed write is tried again every tick; `JournalUnwritable` (approved name) is reported while the journal lags the engine and clears once nothing is left to record.
+- **Options considered:** write the debt inside `Actor::fault` (it has no file lent); write it before the next sync step (one more place to remember); the design's strict order No, Truncate, Snapshot, No (refuses a second failure during the paying snapshot).
+- **Cost accepted:** the record lags the failure by the rest of one tick, so a kill in that window forgets it, as without a journal. One `fdatasync` (two on the first write, which creates the file) per change of the debt; none otherwise. (The journal is now created on every run, D101.)
+- **Revisit if:** the window inside the tick is shown to matter, or later facts need ordering against the debt within a tick.
+- **Links:** `crates/core/src/actor/unproven.rs`, `docs/journal.md`, `docs/BEHAVIOR.md` RUN-3 and D2.
+
+## D101. A run with nothing to record still creates the journal (delegated)
+
+- **Question:** under D100 the journal was written only when the debt changed, so a database that never failed a WAL fsync never had one, and every restart after its first sync reported `JournalMissing`. Should a run with nothing to record write anyway?
+- **Choice:** yes. At the end of a tick, a process that has neither read a record at boot nor made one durable writes the record of what it holds (no debt, today). After that, a boot reads the record and writes nothing until a fact changes. `JournalMissing` then means a journal that existed is gone (or an upgrade from a version without one), which is what an operator should be told; it is surfaced in health, `/healthz` and metrics.
+- **Options considered:** keep writing only on change and stop reporting `Missing` (loses the only sign of a deleted journal); create the journal at boot, before the first tick (a boot that fails later would have written for nothing, and the end-of-tick reconcile already retries).
+- **Cost accepted:** one creation per database (a write, two `fsync`s and a directory `fsync`) on the first tick of the first run, and again after a journal is lost or unreadable. A journal that cannot be created is reported as `JournalUnwritable` until a write succeeds, even while no debt is owed: the next failed WAL fsync could not be recorded either.
+- **Revisit if:** creating the file on a read-only or full meta directory is shown to be common enough that the report is noise.
+- **Links:** `crates/core/src/actor.rs` (`reconcile_journal`), `docs/journal.md`.
+
+## D102. The journal's signals are notices, not degraded states
+
+- **Question:** how does an operator see what the engine journal says, and does any of it count as degraded?
+- **Choice:** `Health.journal`, the `/healthz` fields `journal` (values `missing`, `unreadable`, `newer_version`, `slot_unreadable`, `unwritable`) and `journal_detail`, and the gauge `lsr_journal_signal{db,signal}`. Every signal is a notice: `Health::is_degraded` ignores it and `/healthz` stays 200, `unwritable` included, since the engine runs as it would with no journal. `newer_version` says a newer binary wrote the journal, which points at a downgrade.
+- **Options considered:** prefixed values (`journal_missing`; stutters after the field name); `unwritable` as a degraded task.
+- **Cost accepted:** while the journal is unwritable, a failed WAL sync met meanwhile is forgotten by a restart (and so will any fact a later step moves into the journal, a stop among them), and nothing marks the database degraded.
+- **Revisit if:** an unwritable journal proves common; then make it a degraded task that still answers 200.
+- **Links:** `crates/sidecar/src/health.rs`, `crates/sidecar/src/metrics.rs`, `docs/BEHAVIOR.md` BOOT-25 to BOOT-29 and RUN-27.
+
 ## D130. The real directory store in the simulator (delegated)
 
 - **Options:** keep `MemStore` with its power-loss bookkeeping as the only staging double; run `FsStore` on a temporary directory of the host (no crash law, no determinism); a filesystem trait in `lsr-store-fs` with an in-memory filesystem in `lsr-sim`.
@@ -434,6 +466,24 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Why:** it is a feature of its own, with run-time actor lifecycles the simulator does not drive, not a correction. A refusal replicates nothing silently less than asked.
 - **Revisit if:** the owner wants it; it then needs its own plan and behaviour rows (a file created, renamed, removed and recreated under a watched directory, each against Go).
 - **Links:** `docs/BEHAVIOR.md` CFG-15, CFG-17; `docs/plans/phase-4-sidecar.md` O5.
+
+## D72. Overlapping faults
+
+- **Options:** keep holds short and empty (at most 11 ticks of commits and ticks); let them last and run anything inside; let them last and run anything but what reaches an open defect.
+- **Choice:** under the overlap draw a hold lasts up to 200 ticks and runs a drawn sub-history (commits, ticks, one-shot store faults). A process crash, a power loss or a shutdown inside a hold is drawn only where known defects are counted (D70), because each reaches D9 (a halt across restarts goes unreported). A lying disk keeps its short length, since its own power loss is such a restart.
+- **Why:** the defects that live where faults overlap (D9, BOOT-21) were unreachable; reaching them without turning the per-push seeds red needs the known-wrong rule.
+- **Cost accepted:** the per-push seeds draw no restart inside a hold until D9 is fixed; a run is longer, so the read budget gains a term for a degraded task's retries and the retry-wait check gains the slew's slack after a clock step back.
+- **Revisit if:** D9 is fixed (then restarts inside holds are drawn everywhere), or holds longer than 200 ticks find more.
+- **Links:** issue #127 item E; BEHAVIOR CHK-9.
+
+## D73. A database file no commit made, after a lost writeback (delegated, open to owner review)
+
+- **Options:** adopt the recovered database as the new truth (any restore of it passes); adopt it as damage, as a flipped WAL bit is (no restore may give that exact state); keep the world's model as SQLite's rules say it should be, so the model check fails the run where the mix appears.
+- **Choice:** the model check, counted as the known-wrong defect `DatabaseAheadOfWal` (D70) on the failed-sync cell, pinned to seed 0x585. Adopting it as damage was tried first and dropped.
+- **Why:** the state is real. A failed fsync leaves the kernel's pages clean but unwritten; a later checkpoint by another connection backfills the real pages into the database file and syncs it; a power loss then cuts the WAL at the first frame the kernel lost, and the file holds newer pages from the backfill and older ones from the recovered WAL. Adopting it as truth would let a silently wrong replica pass. Adopting it as damage refuses only a restore of that exact state: later commits build on the mixed pages, the model follows them, and the engine's replication of them passes. With the engine journal merged no seed of 4000 failed that way, so the defect was hidden. The model check fails every run that reaches the mix.
+- **Cost accepted:** every such run fails, whatever the engine does next, so it stays known-wrong until the engine detects the mix (the journal work's D103: a boot after a recorded failed sync compares the pages the WAL does not cover and replicates a mixed file loudly, `database_ahead_of_wal`). The cell flips then, with the world adopting the state and a judge allowance that requires the notice before the file is staged.
+- **Revisit if:** D103 lands, or the owner prefers adopting the mixed file as truth.
+- **Links:** issue #127 item E; D2, D103.
 
 ## D80. Where the fail-stop clock cannot survive a restart (delegated)
 
@@ -557,6 +607,15 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost if wrong:** (1) one more fetch per credential lifetime than Go makes. (2) a credential endpoint that legitimately answers without keys (none is known) would start under Go and not under litestream-rs, though Go could not sign a request that a bucket accepts.
 - **Evidence:** `store-s3::signer::tests` (refresh margin, failed fetch, the two failure classes); `compat::go_and_rust_fetch_the_same_temporary_credentials` counts Go's empty key and Go's crash as refusals and requires litestream-rs to refuse.
 - **Links:** `docs/BEHAVIOR.md` CFG-37, CFG-38; `crates/store-s3/src/source.rs`, `signer.rs`.
+
+## D74. Every engine commit checks the size the store acknowledged (delegated)
+
+- **Options:** keep the check in the uploader alone (which retried but left the short object listed) and in `Retrying`, which the engine never wraps its stores in; check in each engine call site; one upload type every engine commit goes through.
+- **Choice:** one type, `Checked` (`crates/core/src/checked.rs`). The uploader, the compactor and the staging writer open uploads only through it. It counts the bytes written; a commit acknowledging another size deletes the object, then reports `CommitSizeMismatch { removed }`. `Retrying` settles its own commits with the same function, so the rule is written once.
+- **Why:** the compactor took a short acknowledgement as a published output and maintenance then deleted its inputs, so `restore Latest` failed to decode the replica (simulator seed 0x46, once the simulator's size-mismatch fault published a short object). The uploader saw the mismatch but left the object listed until its retry, so restores failed in between.
+- **Cost accepted:** a delete after every mismatched commit. A store that misreports sizes on objects it holds whole loses them to the delete and they are written again; the caller still holds the bytes until a verified listing. The type does not stop a future engine function from calling `begin_upload` directly; the planted bugs `compact-commit-unchecked` and `short-commit-object-kept` catch the two paths that exist.
+- **Revisit if:** a new engine path writes to a store.
+- **Links:** #127 (the blind-plant pilot's second gap), `docs/planted-bugs.toml`.
 
 ## Unverified, not recorded
 
