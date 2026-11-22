@@ -166,3 +166,19 @@ fn swarm_seed_44_restores_only_committed_states() {
         panic!("{failure}");
     }
 }
+
+/// Seed 0x753's swarm mix under the block crash law on a disk that lies about the engine's WAL
+/// sync, with the app redoing its commits after a restart: staging is wiped, a power loss takes
+/// WAL frames the replica already holds, the redo regrows them byte for byte, and the next boot
+/// rightly continues on the replica's newest file. The history judge called the next `Latest`
+/// an unreported step back, because it remembered the previous restore as the nodes that held
+/// its content then, not the node the redo rebuilt with the same content later.
+#[test]
+fn swarm_seed_0x753_a_redo_that_rebuilds_the_restored_state_is_not_a_loss() {
+    let seed = Seed::new(0x753);
+    let mut weights = Weights::swarm(seed);
+    weights.block_crash_law = true;
+    if let Err(failure) = run_with(seed, 42, &weights, &Opts::default()) {
+        panic!("{}", failure.message(failure.steps));
+    }
+}
