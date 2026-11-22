@@ -1,0 +1,13 @@
+diff --git a/crates/config/src/map/dir.rs b/crates/config/src/map/dir.rs
+index 209846b..57764c1 100644
+--- a/crates/config/src/map/dir.rs
++++ b/crates/config/src/map/dir.rs
+@@ -286,7 +286,7 @@ fn with_relative(
+             refuse(&at.key("replica").key("url"), found, DirProblem::ReplicaUrl);
+             return None;
+         };
+-        let rel = utf8_percent_encode(rel, GO_PATH_ESCAPES).to_string();
++        let rel = rel.to_owned();
+         let joined = if url.path().is_empty() {
+             rel
+         } else {

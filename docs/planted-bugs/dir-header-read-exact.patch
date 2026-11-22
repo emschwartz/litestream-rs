@@ -1,0 +1,13 @@
+diff --git a/crates/config/src/map/dir.rs b/crates/config/src/map/dir.rs
+index 209846b..be8f04d 100644
+--- a/crates/config/src/map/dir.rs
++++ b/crates/config/src/map/dir.rs
+@@ -215,7 +215,7 @@ fn is_sqlite(path: &Path) -> bool {
+         return false;
+     };
+     let mut header = [0_u8; 16];
+-    matches!(file.read(&mut header), Ok(n) if n > 0) && &header == HEADER
++    file.read_exact(&mut header).is_ok() && &header == HEADER
+ }
+ 
+ /// Go's `filepath.Rel(root, path)` for a path the walk found under `root`: `.` for the

@@ -938,3 +938,108 @@ fn patterns_are_go_s_glob() {
         "{problems:#?}"
     );
 }
+
+fn dir_problems(dir: &Path, pattern: &str) -> Vec<lsr_config::DirProblem> {
+    unmapped(&format!(
+        "dbs:\n  - dir: {}\n    pattern: '{pattern}'\n    replica:\n      path: /backup\n",
+        dir.display()
+    ))
+    .into_iter()
+    .map(|(_, kind)| {
+        let MapProblemKind::Dir(problem) = kind else {
+            panic!("not a dir problem: {kind:?}")
+        };
+        problem
+    })
+    .collect()
+}
+
+/// Go's `filepath.Walk` looks at its root with `lstat`: a `dir` that is a symbolic link to a
+/// directory is matched as a file, its header read fails, and Go finds nothing.
+#[test]
+fn a_dir_that_is_a_symbolic_link_finds_nothing_as_go() {
+    let tree = Tree::new(&["a.db"]);
+    let outer = TempDir::new().unwrap();
+    let link = outer.path().join("link");
+    std::os::unix::fs::symlink(tree.root(), &link).unwrap();
+    assert!(
+        matches!(
+            dir_problems(&link, "*").as_slice(),
+            [lsr_config::DirProblem::NoDatabases { .. }]
+        ),
+        "a linked dir must find nothing"
+    );
+}
+
+/// A `dir` naming a database file is that database at relative path `.`: the replica path
+/// is used as written and the meta directory is Go's default beside the file.
+#[test]
+fn a_dir_that_is_a_database_file_is_that_one_database() {
+    let tree = Tree::new(&["lone.db"]);
+    let file = tree.root().join("lone.db");
+    let plan = planned(&format!(
+        "dbs:\n  - dir: {}\n    pattern: '*.db'\n    replica:\n      path: /backup\n",
+        file.display()
+    ));
+    let [db] = plan.dbs() else {
+        panic!("{plan:#?}")
+    };
+    assert_eq!(db.path(), file);
+    assert_eq!(db.meta_dir(), tree.root().join(".lone.db-litestream"));
+    assert!(matches!(db.replica(), ReplicaPlan::File(path) if path == Path::new("/backup")));
+}
+
+/// Go's `IsSQLiteDatabase` makes one `read` into a zeroed buffer: a 15-byte file holding
+/// `SQLite format 3` matches (its 16th byte counts as the NUL), an empty one does not.
+#[test]
+fn a_short_header_read_counts_the_missing_bytes_as_zero() {
+    let tree = Tree::new(&[]);
+    std::fs::write(tree.root().join("short.db"), b"SQLite format 3").unwrap();
+    std::fs::write(tree.root().join("empty.db"), b"").unwrap();
+    std::fs::write(tree.root().join("fourteen.db"), b"SQLite format ").unwrap();
+    let plan = tree.plan("    pattern: '*.db'\n    replica:\n      path: /backup\n");
+    let names: Vec<_> = replicas(&plan, tree.root())
+        .into_iter()
+        .map(|(p, _)| p)
+        .collect();
+    assert_eq!(names, [PathBuf::from("short.db")]);
+}
+
+/// Go's `filepath.Match` reports a malformed pattern only for a name that reaches the bad
+/// part, and its walk fails at that file: `a*[` scans a directory of `b.db` normally (and
+/// finds nothing) but fails on `ab.db`; `[-a]*` is malformed for every name.
+#[test]
+fn a_malformed_pattern_fails_the_scan_only_when_a_name_reaches_it() {
+    let quiet = Tree::new(&["b.db"]);
+    assert!(
+        matches!(
+            dir_problems(quiet.root(), "a*[").as_slice(),
+            [lsr_config::DirProblem::NoDatabases { .. }]
+        ),
+        "no name reaches the bad part"
+    );
+    let loud = Tree::new(&["ab.db"]);
+    assert!(matches!(
+        dir_problems(loud.root(), "a*[").as_slice(),
+        [lsr_config::DirProblem::BadPattern { path, .. }] if path.ends_with("ab.db")
+    ));
+    let dash = Tree::new(&["-x.db"]);
+    assert!(matches!(
+        dir_problems(dash.root(), "[-a]*").as_slice(),
+        [lsr_config::DirProblem::BadPattern { .. }]
+    ));
+}
+
+/// A database's relative path reaches a URL replica as Go's `url.URL` carries it: a
+/// backslash stays a backslash (the `url` crate reads it as `/` in a `file` URL) and `%41`
+/// stays three characters.
+#[test]
+fn odd_names_reach_a_url_replica_unchanged() {
+    let tree = Tree::new(&["a\\b.db", "a%41.db"]);
+    let plan = tree.plan("    pattern: '*.db'\n    replica:\n      url: file:///backup\n");
+    let got: Vec<_> = replicas(&plan, tree.root())
+        .into_iter()
+        .map(|(_, replica)| replica)
+        .collect();
+    assert_eq!(got, ["/backup/a%41.db", "/backup/a\\b.db"]);
+}

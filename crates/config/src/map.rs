@@ -45,6 +45,7 @@
 //! a replica, which is another writer on one history.
 
 mod dir;
+mod pattern;
 mod replica;
 mod s3;
 

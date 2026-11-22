@@ -1158,3 +1158,41 @@ tests = [
     "checkpoint::tests::a_bump_after_a_release_that_failed_is_committed",
     "checkpoint::tests::a_bump_under_a_lock_is_refused",
 ]
+
+# `dir:` scanning made to agree with Go's walk (claude/dropin-dir): each was found by the Go
+# differential (compat `dropin_dir`), which needs the Go dumper and so is ignored; the config
+# tests below are its Go-free counterparts.
+[[bug]]
+name = "dir-root-link-followed"
+fix = "claude/dropin-dir"
+package = "lsr-config"
+test_bin = "config"
+tests = ["a_dir_that_is_a_symbolic_link_finds_nothing_as_go"]
+
+[[bug]]
+name = "dir-root-file-refused"
+fix = "claude/dropin-dir"
+package = "lsr-config"
+test_bin = "config"
+tests = ["a_dir_that_is_a_database_file_is_that_one_database"]
+
+[[bug]]
+name = "dir-header-read-exact"
+fix = "claude/dropin-dir"
+package = "lsr-config"
+test_bin = "config"
+tests = ["a_short_header_read_counts_the_missing_bytes_as_zero"]
+
+[[bug]]
+name = "dir-bad-pattern-ignored"
+fix = "claude/dropin-dir"
+package = "lsr-config"
+test_bin = "config"
+tests = ["a_malformed_pattern_fails_the_scan_only_when_a_name_reaches_it"]
+
+[[bug]]
+name = "dir-url-path-unescaped"
+fix = "claude/dropin-dir"
+package = "lsr-config"
+test_bin = "config"
+tests = ["odd_names_reach_a_url_replica_unchanged"]
