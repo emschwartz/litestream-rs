@@ -888,6 +888,39 @@ tests = [
     "failstop::an_unsafe_stop_while_running_refuses_commits_only_under_stop_app",
 ]
 
+[[bug]]
+name = "failstop-judged-before-the-boot-snapshot"
+fix = "c5881f5"
+package = "lsr-core"
+tests = ["lag::a_boot_is_judged_once_its_snapshot_is_tried"]
+
+[[bug]]
+name = "failstop-healthz-ignores-trips"
+fix = "c5881f5"
+package = "lsr-sidecar"
+tests = ["health::tests::a_trip_is_503_while_the_database_runs"]
+
+[[bug]]
+name = "failstop-exec-ignores-the-gate"
+fix = "c5881f5"
+package = "lsr-cli"
+test_bin = "cli"
+tests = ["sidecar::an_unsafe_stop_at_boot_holds_the_child"]
+
+[[bug]]
+name = "failstop-stop-app-never-stops"
+fix = "c5881f5"
+package = "lsr-cli"
+test_bin = "cli"
+tests = ["sidecar::an_unsafe_stop_while_running_stops_the_child_under_stop_app"]
+
+[[bug]]
+name = "failstop-stop-app-without-exec-allowed"
+fix = "c5881f5"
+package = "lsr-cli"
+test_bin = "cli"
+tests = ["sidecar::stop_app_without_exec_is_refused"]
+
 # The same plants against the simulator: the judge of every run catches the early trips unaided
 # (random histories), the named runs catch the late ones.
 
