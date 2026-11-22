@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/upload.rs b/crates/core/src/upload.rs
+index 5c326fa..f5f2fba 100644
+--- a/crates/core/src/upload.rs
++++ b/crates/core/src/upload.rs
+@@ -681,7 +681,7 @@ pub(crate) async fn remote_verifies<S: ObjectStore>(
+ /// came back wrong says nothing about the stored bytes, and a verifying
+ /// object with other bytes is never written over.
+ async fn remote_torn<S: ObjectStore>(remote: &S, key: &FileKey) -> Result<bool, Fault> {
+-    Ok(!remote_verifies(remote, key).await? && !remote_verifies(remote, key).await?)
++    Ok(!remote_verifies(remote, key).await?)
+ }
+ 
+ /// Whether the staged file `key` verifies whole and names exactly `key`.

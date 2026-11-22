@@ -877,6 +877,7 @@ name = "lsr-compat"
 version = "0.0.0"
 dependencies = [
  "libc",
+ "lsr-config",
  "lsr-core",
  "lsr-local",
  "lsr-ltx",
@@ -1017,6 +1018,7 @@ version = "0.0.0"
 dependencies = [
  "lsr-config",
  "lsr-core",
+ "lsr-journal",
  "lsr-ltx",
  "lsr-replica",
  "lsr-store-fs",
@@ -1032,11 +1034,13 @@ version = "0.0.0"
 dependencies = [
  "lsr-core",
  "lsr-history",
+ "lsr-journal",
  "lsr-ltx",
  "lsr-store-fs",
  "lsr-wal",
  "proptest",
  "rusqlite",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]

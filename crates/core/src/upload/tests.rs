@@ -64,7 +64,7 @@ async fn upload_tick<L: ObjectStore, S: ObjectStore>(
                 });
             }
             Did::Listed { .. } | Did::Diverged { .. } => {}
-            Did::Put(_) => put = put.saturating_add(1),
+            Did::Put(_) | Did::AlreadyPut(_) => put = put.saturating_add(1),
         }
     }
 }
@@ -123,7 +123,10 @@ fn encode_file(n: u64, seed: u8, page_size: PageSize, wal: Option<WalOrigin>) ->
 
 fn put_bytes(store: &MemStore, at: FileKey, bytes: &[u8]) -> FileInfo {
     block_on(async {
-        let mut up = store.begin_upload(&at, created_at(1)).await.unwrap();
+        let mut up = store
+            .begin_upload(&at, created_at(1), WriteMode::Replace)
+            .await
+            .unwrap();
         up.write(bytes).await.unwrap();
         up.commit().await.unwrap()
     })
@@ -169,6 +172,13 @@ struct Log {
     commit_after: VecDeque<StoreError>,
     write_fail: VecDeque<StoreError>,
     lie_about_size: bool,
+    /// Keys a listing leaves out, as a lagging listing does.
+    unlisted: Vec<FileKey>,
+    /// The modes uploads were begun with.
+    modes: Vec<WriteMode>,
+    /// A key whose whole reads from the start are let through this many
+    /// times, and then one comes back with a byte flipped.
+    flip_read: Option<(FileKey, u32)>,
 }
 
 /// A [MemStore] that counts calls and can fail a commit before it publishes
@@ -204,11 +214,17 @@ impl ObjectStore for Probe {
         after: Option<TxidRange>,
         limit: PageLimit,
     ) -> impl Future<Output = Result<Listing, StoreError>> + Send {
-        {
+        let unlisted = {
             let mut log = self.log();
             log.lists = log.lists.saturating_add(1);
+            log.unlisted.clone()
+        };
+        let listed = self.inner.list(level, after, limit);
+        async move {
+            let mut page = listed.await?;
+            page.files.retain(|info| !unlisted.contains(&info.key));
+            Ok(page)
         }
-        self.inner.list(level, after, limit)
     }
 
     fn read(
@@ -217,11 +233,30 @@ impl ObjectStore for Probe {
         offset: u64,
         len: ReadLen,
     ) -> impl Future<Output = Result<Vec<u8>, StoreError>> + Send {
-        {
+        let flip = {
             let mut log = self.log();
             log.reads = log.reads.saturating_add(1);
+            match log.flip_read {
+                Some((at, 0)) if at == *key && offset == 0 => {
+                    log.flip_read = None;
+                    true
+                }
+                Some((at, skip)) if at == *key && offset == 0 => {
+                    log.flip_read = Some((at, skip.saturating_sub(1)));
+                    false
+                }
+                Some(_) | None => false,
+            }
+        };
+        let read = self.inner.read(key, offset, len);
+        async move {
+            let mut bytes = read.await?;
+            let middle = bytes.len() / 2;
+            if flip && let Some(byte) = bytes.get_mut(middle) {
+                *byte ^= 0x40;
+            }
+            Ok(bytes)
         }
-        self.inner.read(key, offset, len)
     }
 
     fn created_at(
@@ -247,10 +282,12 @@ impl ObjectStore for Probe {
         &self,
         key: &FileKey,
         created_at: Timestamp,
+        mode: WriteMode,
     ) -> impl Future<Output = Result<ProbeUpload, StoreError>> + Send {
         self.log().begins.push(*key);
+        self.log().modes.push(mode);
         let log = Arc::clone(&self.log);
-        let begun = self.inner.begin_upload(key, created_at);
+        let begun = self.inner.begin_upload(key, created_at, mode);
         async move {
             Ok(ProbeUpload {
                 inner: begun.await?,
@@ -557,24 +594,21 @@ fn a_listing_never_moves_confirmed_backwards_through_a_size_check() {
 }
 
 /// A tail that equals what is already confirmed was confirmed by its own
-/// commit, so the listing does not read it back: a read that would fail
-/// changes nothing.
+/// commit, so the listing does not read it back: its one read is the probe's
+/// miss past the tail.
 #[test]
 fn a_listing_does_not_read_back_a_tail_already_confirmed() {
-    let (staging, remote) = (MemStore::new(), MemStore::new());
-    put_bytes(&remote, key(1), &encode(1));
-    remote.inject_failure(
-        StoreOp::Read,
-        StoreError::Transient {
-            op: StoreOp::Read,
-            kind: ErrorKind::TimedOut,
-        },
-    );
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    put_bytes(&remote.inner, key(1), b"never read back");
     let state = UploadState::ListFirst {
         confirmed: Some(txid(1)),
     };
     let listed = next(state, &staging, &remote, 1).unwrap();
     assert_eq!(listed.state, UploadState::At(Some(txid(1))));
+    assert_eq!(
+        u64::from(remote.log().reads),
+        fresh_probe_reads(Some(txid(1)))
+    );
 }
 
 #[test]
@@ -585,6 +619,19 @@ fn a_commit_that_answers_with_a_wrong_size_is_ambiguous_not_confirmed() {
     let failed = failure(next(UploadState::At(None), &staging, &remote, 1));
     assert_eq!(failed.fault, Fault::UploadAmbiguous);
     assert_eq!(failed.state, UploadState::ListFirst { confirmed: None });
+}
+
+/// The object such a commit left does not hold what was sent: it is deleted before the
+/// fault is reported, so no restore meets it while the retry waits.
+#[test]
+fn a_commit_that_answers_with_a_wrong_size_leaves_no_object() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    stage(&staging, 1);
+    remote.log().lie_about_size = true;
+    let failed = failure(next(UploadState::At(None), &staging, &remote, 1));
+    assert_eq!(failed.fault, Fault::UploadAmbiguous);
+    let listed = block_on(remote.inner.list(Level::ZERO, None, PageLimit::MAX)).unwrap();
+    assert!(listed.files.is_empty(), "{:?}", listed.files);
 }
 
 #[test]
@@ -1117,6 +1164,8 @@ fn steady_state_makes_no_read_call() {
     let mut state = next(UploadState::Unknown, &staging, &remote, 0)
         .unwrap()
         .state;
+    // The boot listing's own reads (the probe past its newest) are not steady state.
+    remote.log().reads = 0;
     for n in 1..=20 {
         stage(&staging, n);
         state = block_on(upload_tick(
@@ -1211,4 +1260,384 @@ fn a_staged_file_whose_bytes_differ_but_still_verify_is_refused() {
     assert!(files(&remote.inner).is_empty());
 }
 
+// ---------------------------------------------------------------- the bucket refuses
+
+/// Every upload the uploader makes is of a key it takes to be free, so it asks
+/// the bucket to refuse a taken one.
+#[test]
+fn every_upload_asks_the_bucket_to_refuse_a_taken_key() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    stage(&staging, 1);
+    stage(&staging, 2);
+    let mut state = UploadState::At(None);
+    for _ in 0..2 {
+        state = next(state, &staging, &remote, 2).unwrap().state;
+    }
+    assert_eq!(state, UploadState::At(Some(txid(2))));
+    assert_eq!(remote.log().modes, [WriteMode::New, WriteMode::New]);
+}
+
+/// The key already holds the staged bytes: an earlier commit of this engine
+/// whose answer was lost, or a listing too stale to show it. Read back, it is
+/// confirmed, and nothing is written over it.
+#[test]
+fn a_refused_upload_of_the_same_bytes_is_our_own_earlier_commit() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    let bytes = stage(&staging, 1);
+    put_bytes(&remote.inner, key(1), &bytes);
+    let step = next(UploadState::At(None), &staging, &remote, 1).unwrap();
+    assert_eq!(step.state, UploadState::At(Some(txid(1))));
+    assert_eq!(step.did, Did::AlreadyPut(key(1)));
+    assert_eq!(read_all(&remote.inner, &key(1)), bytes);
+    assert_eq!(
+        remote.log().lists,
+        0,
+        "a matching read-back needs no listing"
+    );
+}
+
+/// The key holds another verifying object (an earlier run's under the same
+/// id, or another writer's) and no listing shows the replica ahead: the
+/// bucket's refusal makes it the listing's divergence, so the object stands
+/// and the staged files from that id on must go.
+#[test]
+fn a_refused_upload_of_other_verifying_bytes_is_never_written_over() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    stage(&staging, 1);
+    stage(&staging, 2);
+    let theirs = encode_pages(2, 200);
+    put_bytes(&remote.inner, key(2), &theirs);
+    let state = next(UploadState::At(None), &staging, &remote, 2)
+        .unwrap()
+        .state;
+    let step = next(state, &staging, &remote, 2).unwrap();
+    assert_eq!(
+        step.did,
+        Did::Diverged {
+            confirmed: txid(2),
+            from: txid(2)
+        }
+    );
+    assert_eq!(step.state, UploadState::At(Some(txid(2))));
+    assert_eq!(read_all(&remote.inner, &key(2)), theirs);
+}
+
+/// The same, behind a listing that does not show the other object yet: the
+/// relist after the refusal reads the refused key, so the stale listing
+/// cannot send the uploader back to write the same key again.
+#[test]
+fn a_refusal_behind_a_listing_too_stale_to_show_the_key_is_judged_by_reads() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    stage(&staging, 1);
+    let theirs = encode_pages(1, 200);
+    put_bytes(&remote.inner, key(1), &theirs);
+    remote.log().unlisted.push(key(1));
+    let step = next(UploadState::At(None), &staging, &remote, 1).unwrap();
+    assert_eq!(
+        step.did,
+        Did::Diverged {
+            confirmed: txid(1),
+            from: txid(1)
+        }
+    );
+    assert_eq!(read_all(&remote.inner, &key(1)), theirs);
+}
+
+/// The other object stands past what this engine has staged: another writer.
+#[test]
+fn a_refused_upload_with_the_replica_ahead_is_another_writer() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    stage(&staging, 1);
+    put_bytes(&remote.inner, key(1), &encode_pages(1, 200));
+    put_bytes(&remote.inner, key(2), &encode_pages(2, 200));
+    let failed = next(UploadState::At(None), &staging, &remote, 1).unwrap_err();
+    assert_eq!(failed.fault, Fault::RemoteAheadOfLocal);
+    assert_eq!(read_all(&remote.inner, &key(1)), encode_pages(1, 200));
+}
+
+/// The key holds something that is not a whole LTX file naming it (a torn
+/// object a directory store left): nothing can have compacted it, so the
+/// staged file replaces it, as a listing's read-back would.
+#[test]
+fn a_refused_upload_over_an_object_that_does_not_verify_replaces_it() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    let bytes = stage(&staging, 1);
+    put_bytes(&remote.inner, key(1), b"torn");
+    let step = next(UploadState::At(None), &staging, &remote, 1).unwrap();
+    assert!(matches!(step.did, Did::Put(_)), "{:?}", step.did);
+    assert_eq!(read_all(&remote.inner, &key(1)), bytes);
+    assert_eq!(remote.log().modes, [WriteMode::New, WriteMode::Replace]);
+}
+
+/// A listing that lags behind the bucket leaves out the newest uploads, so
+/// its newest is not the replica's. Reads are exact: the level-0 keys past it
+/// are read until one is missing, and what they find is the replica's newest
+/// (on an empty listing too). Without the reads, a boot with nothing staged
+/// takes the replica as ending earlier and later stops on its own files as
+/// another writer's.
+#[test]
+fn a_listing_that_hides_the_newest_uploads_is_corrected_by_reads() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    for n in 1..=3 {
+        put_bytes(&remote.inner, key(n), &encode(n));
+    }
+    remote.log().unlisted.extend([key(2), key(3)]);
+    let listed = next(UploadState::Unknown, &staging, &remote, 3).unwrap();
+    assert_eq!(
+        listed.did,
+        Did::Listed {
+            newest: Some(txid(3))
+        }
+    );
+    remote.log().unlisted.push(key(1));
+    let listed = next(UploadState::Unknown, &staging, &remote, 3).unwrap();
+    assert_eq!(listed.state, UploadState::At(Some(txid(3))));
+}
+
+/// A relist after an ambiguous commit whose listing does not show the
+/// confirmed uploads yet is no regression: a read finds the confirmed key.
+#[test]
+fn a_relist_that_hides_confirmed_uploads_is_no_regression() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    for n in 1..=2 {
+        put_bytes(&remote.inner, key(n), &stage(&staging, n));
+    }
+    remote.log().unlisted.push(key(2));
+    let state = UploadState::ListFirst {
+        confirmed: Some(txid(2)),
+    };
+    let listed = next(state, &staging, &remote, 2).unwrap();
+    assert_eq!(listed.state, UploadState::At(Some(txid(2))));
+}
+
+/// The probe costs [`fresh_probe_reads`] past a fresh listing (the missing
+/// keys that end it), reads past a gap of up to [`PROBE_GAP`] free
+/// keys (another writer's file an operator removed), and reads at most
+/// [`PROBE_CAP`] keys however far the listing lags: past that the bucket's
+/// refusal of a taken key is what stops a second upload.
+#[test]
+fn the_probe_past_a_listing_reads_past_short_gaps_and_stops_at_its_cap() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    put_bytes(&remote.inner, key(1), &encode(1));
+    let _ = next(UploadState::Unknown, &staging, &remote, 1).unwrap();
+    // The listed tail's read-back (one chunk) and the probe's misses, two
+    // keys for each transaction.
+    assert_eq!(
+        u64::from(remote.log().reads),
+        1 + fresh_probe_reads(Some(txid(1)))
+    );
+    let past_gap = 2 + u64::from(PROBE_GAP);
+    put_bytes(&remote.inner, key(past_gap), &encode(past_gap));
+    remote.log().unlisted.push(key(past_gap));
+    let listed = next(UploadState::Unknown, &staging, &remote, past_gap).unwrap();
+    assert_eq!(listed.state, UploadState::At(Some(txid(past_gap))));
+    let too_far = past_gap + 2 + u64::from(PROBE_GAP);
+    put_bytes(&remote.inner, key(too_far), &encode(too_far));
+    remote.log().unlisted.push(key(too_far));
+    let listed = next(UploadState::Unknown, &staging, &remote, too_far).unwrap();
+    assert_eq!(listed.state, UploadState::At(Some(txid(past_gap))));
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    let far = u64::from(PROBE_CAP) + 5;
+    for n in 1..=far {
+        put_bytes(&remote.inner, key(n), &encode(n));
+        remote.log().unlisted.push(key(n));
+    }
+    let listed = next(UploadState::Unknown, &staging, &remote, far).unwrap();
+    assert_eq!(
+        listed.state,
+        UploadState::At(Some(txid(u64::from(PROBE_CAP))))
+    );
+}
+
+/// The replica's object verifies and differs from the staged file, and the
+/// first whole read of the staged copy comes back torn. One read never
+/// condemns a file: a second read decides, and the replica's object is not
+/// confirmed as this engine's (the listing reports the divergence).
+#[test]
+fn one_torn_read_of_the_staged_copy_confirms_no_differing_replica_object() {
+    let (staging, remote) = (Probe::default(), MemStore::new());
+    put_bytes(&staging.inner, key(1), &encode(1));
+    put_bytes(&remote, key(1), &encode_pages(1, 200));
+    let witnesses = Witnesses::trust_all(&staging);
+    // The size check passes and the first compare reads the staged copy
+    // whole; the read after it (its own verification) is the torn one.
+    staging.log().flip_read = Some((key(1), 1));
+    let listed = next_with(UploadState::Unknown, &staging, &remote, 1, &witnesses).unwrap();
+    assert_eq!(
+        listed.did,
+        Did::Diverged {
+            confirmed: txid(1),
+            from: txid(1)
+        }
+    );
+}
+
+/// A snapshot a lagging listing hides is found by a read too: its key is
+/// known from the transaction it ends at, since a snapshot starts at 1. The
+/// replica then ends there even when no level-0 file does (an operator
+/// removed another writer's newest file after a snapshot merged it), so the
+/// key past it is the next to upload, not the freed one.
+#[test]
+fn a_snapshot_a_listing_hides_is_found_by_a_read() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    put_bytes(&remote.inner, key(1), &encode(1));
+    let snapshot = FileKey::new(Level::SNAPSHOT, TxidRange::new(txid(1), txid(2)).unwrap());
+    put_bytes(&remote.inner, snapshot, b"a snapshot through 2");
+    remote.log().unlisted.push(snapshot);
+    let listed = next(UploadState::Unknown, &staging, &remote, 3).unwrap();
+    assert_eq!(listed.state, UploadState::At(Some(txid(2))));
+}
+
+/// A gap wider than [`PROBE_GAP`] below this engine's own upload (a bucket
+/// rollback took everything under it) does not end the probe while staged
+/// files reach past it: this engine may have uploaded any of them.
+#[test]
+fn the_probe_reads_through_the_newest_staged_transaction() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    let far = 3 + u64::from(PROBE_GAP);
+    for n in 1..=far {
+        stage(&staging, n);
+    }
+    put_bytes(&remote.inner, key(far), &encode(far));
+    remote.log().unlisted.push(key(far));
+    let listed = next(UploadState::Unknown, &staging, &remote, far).unwrap();
+    assert_eq!(listed.state, UploadState::At(Some(txid(far))));
+}
+
+/// The same with the replica's copy: its first verifying read comes back
+/// torn. A verifying object with other bytes is never written over, so one
+/// failed read does not make it a torn object to replace: a second read
+/// decides, and the listing reports the divergence.
+#[test]
+fn one_torn_read_of_the_replica_copy_does_not_write_over_it() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    stage(&staging, 1);
+    let theirs = encode_pages(1, 200);
+    put_bytes(&remote.inner, key(1), &theirs);
+    // The first compare reads the replica's copy whole; the read after it
+    // (its own verification) is the torn one.
+    remote.log().flip_read = Some((key(1), 1));
+    let listed = next(UploadState::Unknown, &staging, &remote, 1).unwrap();
+    assert_eq!(
+        listed.did,
+        Did::Diverged {
+            confirmed: txid(1),
+            from: txid(1)
+        }
+    );
+    assert_eq!(read_all(&remote.inner, &key(1)), theirs);
+}
+
+/// A listed tail whose size matches the staged file is confirmed by one
+/// compare of the two copies: the verify-each-copy path is for copies that
+/// differ, and a matching tail never pays for it (one read of the replica's
+/// copy, besides the probe's misses past it).
+#[test]
+fn a_listed_tail_equal_to_the_staged_file_is_confirmed_by_one_compare() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    let bytes = stage(&staging, 1);
+    put_bytes(&remote.inner, key(1), &bytes);
+    let listed = next(UploadState::Unknown, &staging, &remote, 1).unwrap();
+    assert_eq!(listed.state, UploadState::At(Some(txid(1))));
+    assert_eq!(
+        u64::from(remote.log().reads),
+        1 + fresh_probe_reads(Some(txid(1)))
+    );
+}
+
+/// A refusal is the bucket saying this key is taken only when it names this
+/// key. One that names another key is an answer that cannot be believed: the
+/// commit is ambiguous and a listing decides, rather than a read-back of a key
+/// nothing says is taken.
+#[test]
+fn a_refusal_naming_another_key_is_an_ambiguous_commit() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    stage(&staging, 1);
+    remote
+        .log()
+        .commit_before
+        .push_back(StoreError::AlreadyExists { key: key(2) });
+    let failed = failure(next(UploadState::At(None), &staging, &remote, 1));
+    assert_eq!(failed.fault, Fault::UploadAmbiguous);
+    assert_eq!(failed.state, UploadState::ListFirst { confirmed: None });
+}
+
+/// A store may answer a commit with an error while the write is still in
+/// flight, and a read after it may say the key is absent before the write
+/// lands (Cloudflare R2 documents both). The relist after the failed commit
+/// finds nothing, the write then lands, and the next put of the same key asks
+/// the bucket to refuse a taken key: the refusal and a read-back confirm the
+/// late write as this engine's own, and nothing is written over it.
+#[test]
+fn a_put_that_lands_after_the_relist_found_nothing_is_confirmed_not_written_twice() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    let bytes = stage(&staging, 1);
+    remote.log().commit_before.push_back(transient());
+    let failed = failure(next(UploadState::At(None), &staging, &remote, 1));
+    assert_eq!(failed.state, UploadState::ListFirst { confirmed: None });
+    let listed = next(failed.state, &staging, &remote, 1).unwrap();
+    assert_eq!(
+        listed.state,
+        UploadState::At(None),
+        "the write has not landed"
+    );
+    // The write that was in flight lands now.
+    put_bytes(&remote.inner, key(1), &bytes);
+    let step = next(listed.state, &staging, &remote, 1).unwrap();
+    assert_eq!(step.did, Did::AlreadyPut(key(1)));
+    assert_eq!(read_all(&remote.inner, &key(1)), bytes);
+    assert_eq!(
+        remote.log().modes,
+        [WriteMode::New, WriteMode::New],
+        "every put asks the bucket to refuse a taken key"
+    );
+}
+
 mod endless;
+
+/// A rejected write deletes only an object it created. A create-only put
+/// creates its key or is refused, so its rejected object is its own; a put that
+/// replaces an object (here a torn one the replica held) deletes nothing when
+/// the store rejects it, and the retry writes the key again.
+#[test]
+fn a_rejected_write_over_an_object_that_was_there_deletes_nothing() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    stage(&staging, 1);
+    put_bytes(&remote.inner, key(1), b"torn");
+    // The create-only put is refused (its queued answer goes unused, since the
+    // refusal comes first); the replace over the torn object is taken and then
+    // rejected.
+    remote.log().commit_after.push_back(transient());
+    remote.log().commit_after.push_back(StoreError::Corrupt {
+        key: Some(key(1)),
+        cause: CorruptCause::ChecksumMismatch { part: None },
+    });
+    let failed = failure(next(UploadState::At(None), &staging, &remote, 1));
+    assert_eq!(failed.fault, Fault::UploadChecksumMismatch);
+    assert_eq!(remote.log().modes, [WriteMode::New, WriteMode::Replace]);
+    assert!(
+        remote.log().deletes.is_empty(),
+        "{:?}",
+        remote.log().deletes
+    );
+}
+
+/// A relist whose listing ends well below what was confirmed (the files in
+/// between were merged and deleted, and the listing hides the confirmed one)
+/// reads the confirmed key first, not the keys after the listing's end: a gap
+/// wider than [`PROBE_GAP`] there would end the reads before they reached it
+/// and report the replica gone backwards.
+#[test]
+fn a_relist_reads_the_confirmed_key_first_past_a_wide_gap() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    let confirmed = 3 + u64::from(PROBE_GAP);
+    put_bytes(&remote.inner, key(1), &encode(1));
+    // Nothing staged past the listing: the reads are bounded by the gap alone.
+    put_bytes(&remote.inner, key(confirmed), &encode(confirmed));
+    remote.log().unlisted.push(key(confirmed));
+    let state = UploadState::ListFirst {
+        confirmed: Some(txid(confirmed)),
+    };
+    let listed = next(state, &staging, &remote, confirmed).unwrap();
+    assert_eq!(listed.state, UploadState::At(Some(txid(confirmed))));
+}

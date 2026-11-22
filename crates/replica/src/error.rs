@@ -30,6 +30,19 @@ pub enum StartError {
         /// What the file system said.
         kind: io::ErrorKind,
     },
+    /// Another engine holds the meta directory's lock (`lsr-lock`): a replicator in this or
+    /// another process on this host uses the same staging directory. Stop it, or give this
+    /// database a meta directory of its own.
+    #[error("another replicator holds the meta directory's lock")]
+    MetaLocked,
+    /// The meta directory's lock cannot be taken: its file cannot be opened, or the filesystem
+    /// refuses file locks (some network and FUSE filesystems). The replicator does not run
+    /// without it; put the meta directory on a local filesystem.
+    #[error("the meta directory's lock cannot be taken: {kind:?}")]
+    MetaLock {
+        /// What the file system said.
+        kind: io::ErrorKind,
+    },
     /// SQLite refused to open the database or to set it up.
     #[error("SQLite refused the database (result code {code})")]
     Sqlite {
@@ -80,4 +93,37 @@ pub enum RestoreError {
     /// The restore itself failed.
     #[error("{0}")]
     Restore(#[from] lsr_core::RestoreError),
+    /// The database was restored and published, and the takeover record that lets
+    /// replication build on the replica it came from (`lsr-takeover`) could not be written
+    /// in its meta directory. Replication will refuse to start over that replica until
+    /// `lsr take-over` writes one.
+    #[error("the database was restored but its takeover record could not be written: {kind:?}")]
+    TakeoverRecord {
+        /// What the file system said.
+        kind: io::ErrorKind,
+    },
+    /// The destination names no file (`/`, or a path ending in `..`), so it has no meta
+    /// directory to hold the takeover record. Refused before anything is written.
+    #[error("{} names no file, so it has no meta directory for the takeover record", .path.display())]
+    NoMetaDir {
+        /// The destination given.
+        path: std::path::PathBuf,
+    },
+}
+
+/// Why [`crate::take_over`] recorded nothing.
+#[derive(Debug, thiserror::Error)]
+pub enum TakeOverError {
+    /// The path names no file, so it has no meta directory.
+    #[error("the database path names no file")]
+    NoMetaDir,
+    /// The replica could not be listed.
+    #[error("the replica cannot be listed: {0}")]
+    List(#[from] lsr_core::InventoryError),
+    /// The record could not be written.
+    #[error("the takeover record cannot be written: {kind:?}")]
+    Write {
+        /// What the file system said.
+        kind: io::ErrorKind,
+    },
 }

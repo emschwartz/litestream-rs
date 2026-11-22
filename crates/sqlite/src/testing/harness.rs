@@ -45,12 +45,13 @@ use lsr_sim::{
     Acked, AppCommit, Checked, CommitId, Model, PageImage, Recorder, RecorderEvent, RecorderLog,
     Recovery, Violation, bug_fault,
 };
-use lsr_store_fs::FsStore;
+use lsr_store_fs::{FsJournalFile, FsStore};
 use lsr_wal::{Salts, WalOffset};
 use rusqlite::{Connection, OpenFlags};
 
 use crate::testing::vfs::{CrashLaw, FaultVfs, FileKind, Op, VfsError, seed_prng};
 use crate::{DEFAULT_JOURNAL_SIZE_LIMIT, OpenError, Sqlite, SqliteConfig};
+use lsr_core::WriteMode;
 
 mod app;
 mod stepper;
@@ -406,6 +407,9 @@ pub struct Rig<B: Backend> {
     actor: Actor,
     clock: FakeClock,
     staging: Recorder<FsStore>,
+    /// The engine journal beside staging, reopened by every restart as a new process would.
+    journal: FsJournalFile,
+    meta: PathBuf,
     remote: Recorder<FsStore>,
     staging_log: RecorderLog,
     remote_log: RecorderLog,
@@ -424,6 +428,9 @@ pub struct Rig<B: Backend> {
     faults: Vec<Fault>,
     degraded: Vec<PersistentCause>,
     everywhere: bool,
+    /// The takeover record a restore left, handed to every new actor as the replica's driver
+    /// does.
+    takeover: Option<lsr_core::TakeoverRecord>,
 }
 
 impl<B: Backend> Rig<B> {
@@ -451,7 +458,8 @@ impl<B: Backend> Rig<B> {
         app.open(APP)?;
         let backend = B::open_limited(&db, vfs.name(), cfg.journal_size_limit)
             .map_err(|err| RigError::Open(Box::new(err)))?;
-        let staging = Recorder::new(FsStore::new(root.join("meta")));
+        let meta = root.join("meta");
+        let staging = Recorder::new(FsStore::new(&meta));
         let remote_root = root.join("replica");
         let remote = Recorder::new(FsStore::new(&remote_root));
         let mut rig = Self {
@@ -461,6 +469,8 @@ impl<B: Backend> Rig<B> {
                 seen: None,
             },
             db,
+            journal: FsJournalFile::new(&meta),
+            meta,
             actor: Actor::new(cfg.actor.clone()),
             cfg,
             wal_syncs: vfs.syncs(FileKind::Wal),
@@ -482,6 +492,7 @@ impl<B: Backend> Rig<B> {
             faults: Vec::new(),
             degraded: Vec::new(),
             everywhere: false,
+            takeover: None,
         };
         rig.observe()?;
         Ok(rig)
@@ -724,7 +735,7 @@ impl<B: Backend> Rig<B> {
             staging: &self.staging,
             remote: &self.remote,
             clock: &self.clock,
-            journal: None,
+            journal: Some(&mut self.journal),
         };
         let tick = block_on(self.actor.tick(env, now));
         self.vfs.set_window(self.everywhere);
@@ -745,6 +756,16 @@ impl<B: Backend> Rig<B> {
             Event::Uploaded(did) => self.acked.on_did(did),
             Event::Retrying { fault, .. } => self.faults.push(*fault),
             Event::Degraded { cause, .. } => self.degraded.push(*cause),
+            // The rig is the driver: the record is durable when the actor is handed it, and
+            // every later actor gets it.
+            Event::TakeoverWanted(record) => {
+                self.takeover = Some(
+                    self.takeover
+                        .filter(|held| held.txid() > record.txid())
+                        .unwrap_or(*record),
+                );
+                self.actor.remember_takeover(*record);
+            }
             Event::Booted { .. }
             | Event::Synced { .. }
             | Event::Checkpointed { .. }
@@ -1033,6 +1054,10 @@ impl<B: Backend> Rig<B> {
                 .map_err(|e| RigError::Open(Box::new(e)))?,
         );
         self.actor = Actor::new(self.cfg.actor.clone());
+        self.journal = FsJournalFile::new(&self.meta);
+        if let Some(record) = self.takeover {
+            self.actor.remember_takeover(record);
+        }
         self.observe()
     }
 
@@ -1150,10 +1175,17 @@ impl<B: Backend> Rig<B> {
     /// replica into a fresh one: every connection closes, the database, its WAL and `-shm` and
     /// the staging directory are deleted, `bytes` become the database file, and the application and a
     /// new replicator open it. The model continues from its newest commit, which is what `bytes` must hold.
+    /// `restored` is the transaction the restore reached: like `lsr restore`, it leaves a takeover
+    /// record through it, so the new replicator builds on the replica it came from.
     ///
     /// # Errors
     /// [`RigError`].
-    pub fn replace_database(&mut self, bytes: &[u8], staging: &Path) -> Result<(), RigError> {
+    pub fn replace_database(
+        &mut self,
+        bytes: &[u8],
+        staging: &Path,
+        restored: Txid,
+    ) -> Result<(), RigError> {
         self.backend = None;
         self.app.discard_all()?;
         let io_at = |path: &Path| {
@@ -1173,6 +1205,7 @@ impl<B: Backend> Rig<B> {
             Err(err) => return Err(io_at(staging)(err)),
         }
         std::fs::write(&self.db, bytes).map_err(io_at(&self.db))?;
+        self.takeover = Some(lsr_core::TakeoverRecord::through(restored));
         self.mirror.seen = None;
         self.staging_seen = self.staging_log.len();
         self.app.open(APP)?;
@@ -1216,7 +1249,11 @@ async fn copy_file(
     chunk: ReadLen,
 ) -> Result<(), StoreError> {
     let mut upload = to
-        .begin_upload(&file.key, Timestamp::from_unix_millis(0))
+        .begin_upload(
+            &file.key,
+            Timestamp::from_unix_millis(0),
+            WriteMode::Replace,
+        )
         .await?;
     let mut offset = 0_u64;
     loop {

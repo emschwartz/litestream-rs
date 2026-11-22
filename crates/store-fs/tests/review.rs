@@ -6,6 +6,7 @@ mod review {
     use std::fs::{self, File};
     use std::time::{Duration, UNIX_EPOCH};
 
+    use lsr_core::WriteMode;
     use lsr_core::conformance::block_on;
     use lsr_core::{
         FileKey, Inventory, KeyTarget, Level, ObjectStore, PageLimit, PlanOutcome, ReadLen, Upload,
@@ -22,7 +23,7 @@ mod review {
     fn put(store: &FsStore, k: FileKey, bytes: &[u8]) {
         block_on(async {
             let mut up = store
-                .begin_upload(&k, Timestamp::from_unix_millis(1_000))
+                .begin_upload(&k, Timestamp::from_unix_millis(1_000), WriteMode::Replace)
                 .await
                 .unwrap();
             up.write(bytes).await.unwrap();
@@ -40,14 +41,18 @@ mod review {
         let before_crash = FsStore::new(dir.path());
         block_on(async {
             let mut up = before_crash
-                .begin_upload(&target, Timestamp::from_unix_millis(1))
+                .begin_upload(&target, Timestamp::from_unix_millis(1), WriteMode::Replace)
                 .await
                 .unwrap();
             up.write(b"partial").await.unwrap();
             drop(up);
         });
         let after_restart = FsStore::new(dir.path());
-        let got = block_on(after_restart.begin_upload(&target, Timestamp::from_unix_millis(2)));
+        let got = block_on(after_restart.begin_upload(
+            &target,
+            Timestamp::from_unix_millis(2),
+            WriteMode::Replace,
+        ));
         assert!(got.is_ok(), "begin_upload after restart: {:?}", got.err());
     }
 
@@ -60,7 +65,7 @@ mod review {
         let target = key(0, 1, 1);
         block_on(async {
             let mut up = store
-                .begin_upload(&target, Timestamp::from_unix_millis(1))
+                .begin_upload(&target, Timestamp::from_unix_millis(1), WriteMode::Replace)
                 .await
                 .unwrap();
             up.write(b"half").await.unwrap();

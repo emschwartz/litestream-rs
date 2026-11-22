@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/upload.rs b/crates/core/src/upload.rs
+index 3956549..727d230 100644
+--- a/crates/core/src/upload.rs
++++ b/crates/core/src/upload.rs
+@@ -783,7 +783,7 @@ async fn taken<L: ObjectStore, S: ObjectStore>(
+     // One read never condemns a file: the staged copy must verify on a read
+     // of its own before the replica's object is judged against it.
+     if !staged_verifies(staging, &key).await.map_err(relist)? {
+-        return Err(fail(state, Fault::StagedLost));
++        return Ok(already);
+     }
+     if remote_torn(remote, &key).await.map_err(relist)? {
+         let outcome = put_staged(staging, remote, token, WriteMode::Replace).await;

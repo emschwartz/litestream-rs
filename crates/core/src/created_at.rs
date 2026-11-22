@@ -93,12 +93,6 @@ impl Need {
     pub const fn first(&self) -> &FileInfo {
         &self.first
     }
-
-    /// The files the step expects to need next.
-    #[must_use]
-    pub fn ahead(&self) -> &[FileInfo] {
-        &self.ahead
-    }
 }
 
 impl From<FileInfo> for Need {
@@ -246,6 +240,7 @@ mod tests {
     use crate::conformance::block_on;
     use crate::layout::Level;
     use crate::mem::MemStore;
+    use crate::store::WriteMode;
     use crate::store::{PageLimit, Upload};
     use lsr_ltx::{Timestamp, Txid, TxidRange};
 
@@ -259,7 +254,10 @@ mod tests {
         block_on(async {
             for n in 1..=count {
                 let at = Timestamp::from_unix_millis(i64::try_from(n).unwrap().saturating_mul(100));
-                let mut up = store.begin_upload(&key(n), at).await.unwrap();
+                let mut up = store
+                    .begin_upload(&key(n), at, WriteMode::Replace)
+                    .await
+                    .unwrap();
                 up.write(b"x").await.unwrap();
                 up.commit().await.unwrap();
             }
@@ -344,6 +342,7 @@ mod tests {
         width: usize,
         fails: Option<FileKey>,
         batches: std::sync::Mutex<Vec<usize>>,
+        asked: std::sync::Mutex<Vec<u64>>,
     }
 
     impl ObjectStore for Wide {
@@ -373,6 +372,10 @@ mod tests {
         }
 
         async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
+            self.asked
+                .lock()
+                .unwrap()
+                .push(file.key.range().max().get());
             if self.fails == Some(file.key) {
                 return Err(StoreError::Transient {
                     op: crate::store::StoreOp::Read,
@@ -394,8 +397,9 @@ mod tests {
             &self,
             key: &FileKey,
             created_at: Timestamp,
+            mode: WriteMode,
         ) -> Result<Self::Upload, StoreError> {
-            self.inner.begin_upload(key, created_at).await
+            self.inner.begin_upload(key, created_at, mode).await
         }
 
         async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
@@ -425,6 +429,7 @@ mod tests {
             width,
             fails: fails.map(key),
             batches: std::sync::Mutex::new(Vec::new()),
+            asked: std::sync::Mutex::new(Vec::new()),
         };
         (store, files)
     }
@@ -449,15 +454,36 @@ mod tests {
         assert_eq!(store.inner.created_at_calls(), 10);
     }
 
+    /// A failed read ahead is dropped and asked again alone once needed; the
+    /// needed file's failure ends the resolve at once.
     #[test]
-    fn a_failed_read_ahead_is_dropped_and_asked_again_alone() {
-        let (store, files) = wide(4, 4, Some(3));
-        let got = block_on(resolve(&store, &mut all_of(&files)));
-        assert!(matches!(
-            got,
-            Err(ResolveError::Store(StoreError::Transient { .. }))
-        ));
-        assert_eq!(*store.batches.lock().unwrap(), vec![4], "then file 3 alone");
+    fn only_the_needed_files_failure_counts() {
+        for (fails, asked) in [(3, vec![1, 2, 3, 4, 3]), (1, vec![1, 2, 3, 4])] {
+            let (store, files) = wide(4, 4, Some(fails));
+            let got = block_on(resolve(&store, &mut all_of(&files)));
+            assert!(matches!(
+                got,
+                Err(ResolveError::Store(StoreError::Transient { .. }))
+            ));
+            assert_eq!(*store.batches.lock().unwrap(), vec![4], "{fails}");
+            assert_eq!(*store.asked.lock().unwrap(), asked, "{fails}");
+        }
+    }
+
+    /// A file named twice ahead, or already resolved, takes no slot in a batch.
+    #[test]
+    fn a_batch_holds_each_unresolved_file_once() {
+        let (store, files) = wide(4, 4, None);
+        let [one, two, three, four] = files[..] else {
+            panic!("{files:?}")
+        };
+        let mut step = |resolved: &ResolvedCreatedAt| match resolved.len() {
+            0 => Resolve::Need(Need::with_ahead(one, [two, two])),
+            2 => Resolve::Need(Need::with_ahead(three, [one, two, four])),
+            _ => Resolve::Done(()),
+        };
+        block_on(resolve(&store, &mut step)).unwrap();
+        assert_eq!(*store.batches.lock().unwrap(), vec![2, 2]);
     }
 
     #[test]

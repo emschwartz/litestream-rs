@@ -81,6 +81,18 @@ impl S3Credentials {
         self
     }
 
+    /// The key id, secret and session token in the clear, for the Go differential
+    /// (`lsr-compat`), which compares them with what the AWS SDK resolved from fake keys.
+    #[cfg(any(test, feature = "testing"))]
+    #[must_use]
+    pub fn exposed(&self) -> (&str, &str, Option<&str>) {
+        (
+            &self.access_key_id,
+            self.secret.expose(),
+            self.session_token.as_ref().map(SecretString::expose),
+        )
+    }
+
     /// The signer's form of these credentials.
     pub(crate) fn to_signer(&self) -> rusty_s3::Credentials {
         match &self.session_token {

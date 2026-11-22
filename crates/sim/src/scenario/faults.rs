@@ -275,8 +275,12 @@ pub fn fault_scenarios(kind: FaultKind) -> &'static [fn() -> Scenario] {
         FaultKind::UploadChecksumMismatch => &[etag_mismatch_on_put],
         FaultKind::StoreRefused => &[store_refuses_upload],
         FaultKind::RemoteCorrupt => &[remote_bitrot_on_list_read],
-        FaultKind::RemoteAheadOfLocal => &[second_writer_mid_run],
-        FaultKind::RemoteRegressed => &[bucket_rolled_back],
+        FaultKind::RemoteAheadOfLocal => &[
+            second_writer_mid_run,
+            second_writer_survives_restart,
+            super::foreign_file_while_down_stops,
+        ],
+        FaultKind::RemoteRegressed => &[bucket_rolled_back, bucket_rolled_back_unseen],
         FaultKind::StagedLost => &[staged_byte_flip_before_upload, meta_dir_deleted_mid_run],
         FaultKind::LocalDiskFull => &[disk_full_on_staging],
         FaultKind::LocalIo => &[eio_on_wal_read],
@@ -295,7 +299,7 @@ pub fn fault_scenarios(kind: FaultKind) -> &'static [fn() -> Scenario] {
         ],
         FaultKind::WalTruncatedBelowCommitted => &[wal_truncated_externally_under_lock],
         FaultKind::WalUnlinked => &[wal_unlinked_mid_run],
-        FaultKind::WalSyncFailed => &[],
+        FaultKind::WalSyncFailed => &[wal_fsync_fails, wal_fsync_fails_then_restart],
         FaultKind::DatabasePageMismatch => &[db_page_flipped_under_sync],
         FaultKind::ShutdownDeadline => &[sigterm_during_upload],
         FaultKind::Bug => &[],
@@ -304,18 +308,11 @@ pub fn fault_scenarios(kind: FaultKind) -> &'static [fn() -> Scenario] {
 
 /// Why a fault has no scenario that holds under every response set. [`FaultKind::Bug`]: the
 /// oracle's bug-fault violation fails every run that meets it, so every scenario and every
-/// random history asserts it never fires. [`FaultKind::WalSyncFailed`]: an open gap, named in
-/// the reason, with its scenario run under the default responses alone.
+/// random history asserts it never fires.
 #[must_use]
 pub const fn fault_reason(kind: FaultKind) -> Option<&'static str> {
     if matches!(kind, FaultKind::Bug) {
         Some("every run fails on it: the oracle's BugFault violation")
-    } else if matches!(kind, FaultKind::WalSyncFailed) {
-        Some(
-            "a stop's restart trusts the WAL again, so it fails every response set that stops \
-             (StagedNotDurable) until a durable record exists (the engine journal decision); \
-             wal_fsync_fails runs it under the default responses",
-        )
     } else {
         None
     }
@@ -361,6 +358,12 @@ pub fn window_scenarios() -> &'static [fn() -> Scenario] {
         corrupt_l9_publish_then_power_loss,
         corrupt_l0_publish_then_power_loss,
     ]
+}
+
+/// The reads a boot's probe past its listing makes on a replica it lists
+/// whole, as a fault's count of calls ahead.
+fn probe_reads() -> u8 {
+    u8::try_from(lsr_core::fresh_probe_reads(Some(lsr_ltx::Txid::MIN))).unwrap_or(u8::MAX)
 }
 
 fn remote_fault(op: StoreOp, ahead: u8, shape: FaultShape) -> Op {
@@ -568,7 +571,9 @@ fn quiet_after_stop(report: &RunReport) -> Result<(), String> {
     for (at, seen) in report.seen.iter().enumerate() {
         match seen {
             Seen::Stop(_) if stopped_by_fault(seen) => stopped = true,
-            Seen::Event(Event::Booted { .. }) => stopped = false,
+            // A stopped engine only reports its stop: a boot asking for a
+            // takeover record is a new process's, as a boot is.
+            Seen::Event(Event::Booted { .. } | Event::TakeoverWanted(_)) => stopped = false,
             // A restore's reboot lists the replica in its first tick, and the
             // oracle has just judged: that tick is not the stopped engine's.
             Seen::Tick { remote_calls, .. }
@@ -677,7 +682,7 @@ fn some_key() -> lsr_core::FileKey {
 }
 
 /// A file the listing named is gone when boot reads it back: another process
-/// deleted it. A compaction that loses an input replans instead, so boot is
+/// deleted it (the read after the probe past the listing, which finds nothing). A compaction that loses an input replans instead, so boot is
 /// where this fault reaches the engine.
 #[must_use]
 pub fn remote_file_deleted_externally() -> Scenario {
@@ -689,7 +694,7 @@ pub fn remote_file_deleted_externally() -> Scenario {
             vec![
                 remote_fault(
                     StoreOp::Read,
-                    0,
+                    probe_reads(),
                     FaultShape::Error(StoreError::NotFound { key: some_key() }),
                 ),
                 Op::Restart,
@@ -785,8 +790,9 @@ fn deleted_then_put_again(report: &RunReport) -> Result<(), String> {
     Ok(())
 }
 
-/// The staging directory is gone and the replica is read back at boot: one byte
-/// of the newest object has rotted, there is no staged copy to compare with, so
+/// The staging directory is gone and the replica is read back at boot (after
+/// the probe past the listing, which finds nothing): one byte of the newest
+/// object has rotted, there is no staged copy to compare with, so
 /// the object must decode, and it does not.
 #[must_use]
 pub fn remote_bitrot_on_list_read() -> Scenario {
@@ -795,7 +801,11 @@ pub fn remote_bitrot_on_list_read() -> Scenario {
         vec![
             live(),
             vec![
-                remote_fault(StoreOp::Read, 0, FaultShape::FlipByteOnRead { at: 100 }),
+                remote_fault(
+                    StoreOp::Read,
+                    probe_reads(),
+                    FaultShape::FlipByteOnRead { at: 100 },
+                ),
                 Op::EnvFault(EnvFault::WipeStaging),
             ],
             ticks(SETTLE),
@@ -837,6 +847,90 @@ pub fn second_writer_mid_run() -> Scenario {
     s
 }
 
+/// As [`second_writer_mid_run`], then a supervisor restarts the engine while
+/// the other writer's files still stand: the restart must stop again, not take
+/// them as history and snapshot above them. Once an operator removes them and
+/// restarts it once more, the engine replicates again.
+#[must_use]
+pub fn second_writer_survives_restart() -> Scenario {
+    let mut s = build(
+        "second_writer_survives_restart",
+        vec![
+            live(),
+            vec![
+                remote_fault(
+                    StoreOp::Upload,
+                    0,
+                    FaultShape::ErrorAfterPublish(transient(StoreOp::Upload)),
+                ),
+                commit(2, false),
+                Op::Remote(RemoteOp::PutUnrecognized),
+                Op::Remote(RemoteOp::PutUnrecognized),
+            ],
+            ticks(SETTLE),
+            vec![Op::Restart, commit(1, false)],
+            ticks(SETTLE),
+            vec![
+                Op::Remote(RemoteOp::RemoveUnrecognized),
+                Op::Remote(RemoteOp::RemoveUnrecognized),
+                Op::Restart,
+                commit(1, false),
+            ],
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        vec![Expect::Stopped(StopCause::OtherWriter), Expect::Oracle],
+    );
+    s.check = Some(stop_survives_restart);
+    s
+}
+
+/// The first stop for another writer is followed, at the restart's boot (the
+/// first tick after it that calls the replica), by another stop and nothing
+/// else: no boot, no snapshot above the other writer's files. Later a boot
+/// replicates and no stop follows it.
+fn stop_survives_restart(report: &RunReport) -> Result<(), String> {
+    let seen = &report.seen;
+    let other = |seen: &Seen| matches!(seen, Seen::Stop(StopCause::OtherWriter));
+    let first = seen
+        .iter()
+        .position(other)
+        .ok_or("the engine never stopped for another writer")?;
+    let calls = |seen: &Seen| matches!(seen, Seen::Tick { remote_calls, .. } if *remote_calls > 0);
+    let boot = seen
+        .iter()
+        .skip(first)
+        .position(calls)
+        .map(|at| at.saturating_add(first))
+        .ok_or("no tick after the stop called the replica")?;
+    let verdict = seen
+        .iter()
+        .skip(boot.saturating_add(1))
+        .find(|seen| !matches!(seen, Seen::Tick { .. }));
+    if !verdict.is_some_and(other) {
+        return Err(format!(
+            "the restart with the other writer's files still there did {verdict:?}, not stop"
+        ));
+    }
+    let booted = seen
+        .iter()
+        .rposition(|seen| matches!(seen, Seen::Event(Event::Booted { .. })))
+        .filter(|at| *at > boot)
+        .ok_or("the engine never booted once the other writer's files were gone")?;
+    let after = seen.get(booted..).unwrap_or_default();
+    if after.iter().any(other) {
+        return Err("the engine still stopped once the other writer's files were gone".to_owned());
+    }
+    let replicated = seen
+        .iter()
+        .skip(boot)
+        .any(|seen| matches!(seen, Seen::Event(Event::Uploaded(_))));
+    if !replicated {
+        return Err("the engine never replicated again after the operator's restart".to_owned());
+    }
+    Ok(())
+}
+
 /// The replica lost its newest files after the engine had confirmed them: the
 /// next listing is behind what was confirmed.
 #[must_use]
@@ -871,6 +965,33 @@ pub fn bucket_rolled_back() -> Scenario {
     );
     s.check = Some(quiet_after_stop);
     s
+}
+
+/// The replica loses its newest files while the engine runs, with no failed
+/// commit to make the uploader list: the engine goes on uploading above the
+/// hole until a maintenance listing, which must see the loss and report it.
+#[must_use]
+pub fn bucket_rolled_back_unseen() -> Scenario {
+    build(
+        "bucket_rolled_back_unseen",
+        vec![
+            live(),
+            vec![commit(2, false), Op::Tick, Op::Tick],
+            ticks(SETTLE),
+            vec![
+                Op::Remote(RemoteOp::RollBack),
+                Op::Remote(RemoteOp::RollBack),
+                commit(2, false),
+            ],
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        vec![
+            Expect::Stopped(StopCause::RemoteRegressed),
+            Expect::Recovered,
+            Expect::Oracle,
+        ],
+    )
 }
 
 /// One staged file does not verify at upload, and a later one is staged after

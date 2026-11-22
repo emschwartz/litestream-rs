@@ -66,3 +66,21 @@ fn a_restored_database_with_no_write_ticks_by_the_poll_and_snapshots_at_once() {
     restore(&*site.store(), RestoreTarget::Latest, &again).unwrap();
     assert_same(&app, &again);
 }
+
+/// A destination that names no file has no meta directory for the takeover record, so the
+/// restore is refused before anything is written: a restored database whose replicator would
+/// refuse its own replica is never published.
+#[test]
+fn a_restore_to_a_path_with_no_file_name_is_refused_before_writing() {
+    let site = Site::new();
+    let replica = restored(&site);
+    let dir = tempfile::tempdir().unwrap();
+    let to = dir.path().join("sub").join("..");
+    let refused = restore(&*site.store(), RestoreTarget::Latest, &to);
+    assert!(
+        matches!(&refused, Err(lsr_replica::RestoreError::NoMetaDir { path }) if *path == to),
+        "{refused:?}"
+    );
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    drop(replica);
+}

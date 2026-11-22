@@ -138,7 +138,8 @@ const fn lists_allowed(event: &Event) -> bool {
         | Event::Checkpointed { .. }
         | Event::Idle
         | Event::Resnapshot(_)
-        | Event::Clamped(_) => false,
+        | Event::Clamped(_)
+        | Event::TakeoverWanted(_) => false,
     }
 }
 

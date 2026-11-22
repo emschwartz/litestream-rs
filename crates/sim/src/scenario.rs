@@ -20,10 +20,10 @@ use lsr_core::{
 };
 use lsr_ltx::PageSize;
 
-use crate::generate::{EnvFault, MetaOp, Op, WalOp};
+use crate::generate::{EnvFault, MetaOp, Op, RemoteOp, WalOp};
 use crate::run::{Opts, RunReport, Seen, run_ops};
 use crate::seed::Seed;
-use crate::sqlite::OtherProcessMode;
+use crate::sqlite::{CrashKind, OtherProcessMode};
 
 /// A [`SnapshotCause`] without its payload; core's name for it is
 /// [`lsr_core::SnapshotCauseKind`].
@@ -83,9 +83,10 @@ impl Expect {
     fn matches(&self, seen: &Seen, responses: &Responses) -> bool {
         use lsr_core::Event;
         match (self, seen) {
-            (Self::Event(EventMatch::Booted(want)), Seen::Event(Event::Booted { cause })) => {
-                cause.as_ref().map(CauseKind::from) == *want
-            }
+            (
+                Self::Event(EventMatch::Booted(want)),
+                Seen::Event(lsr_core::Event::Booted { cause }),
+            ) => cause.as_ref().map(CauseKind::from) == *want,
             (Self::Event(EventMatch::Resnapshot(want)), Seen::Event(Event::Resnapshot(cause))) => {
                 CauseKind::from(cause) == *want
             }
@@ -205,7 +206,7 @@ pub fn run_scenario(scenario: &Scenario) -> Result<RunReport, String> {
 pub fn scenario_of(cause: SnapshotCause) -> &'static [fn() -> Scenario] {
     match cause {
         SnapshotCause::FirstSync => &[empty_meta_boot],
-        SnapshotCause::BehindRemote { .. } => &[newest_staged_file_lost, restored_old_meta],
+        SnapshotCause::BehindRemote { .. } => &[vm_restore_stops_until_a_take_over],
         SnapshotCause::NewestStagedFileUnreadable => &[
             newest_staged_file_byte_flip,
             newest_staged_file_truncated,
@@ -339,10 +340,10 @@ pub fn meta_wiped_remote_kept() -> Scenario {
 
 /// The boot after the wipe (the last before the oracle judged) took no
 /// snapshot and staged none before the oracle, and asked the replica for one
-/// listing per level (the upload task's), the upload task's read-back of the
-/// newest file, and one read of that file as the newest staged file.
+/// listing per level (the upload task's), the probe's reads past it, the
+/// upload task's read-back of the newest file, and one read of that file as
+/// the newest staged file.
 fn last_boot_continues(report: &RunReport) -> Result<(), String> {
-    use lsr_core::Event;
     let judged = report
         .seen
         .iter()
@@ -351,12 +352,12 @@ fn last_boot_continues(report: &RunReport) -> Result<(), String> {
     let seen = report.seen.get(..judged).unwrap_or_default();
     let boot = seen
         .iter()
-        .rposition(|seen| matches!(seen, Seen::Event(Event::Booted { .. })))
+        .rposition(|seen| matches!(seen, Seen::Event(lsr_core::Event::Booted { .. })))
         .ok_or("no boot")?;
     let (before, after) = seen.split_at(boot);
     if !matches!(
         after.first(),
-        Some(Seen::Event(Event::Booted { cause: None }))
+        Some(Seen::Event(lsr_core::Event::Booted { cause: None }))
     ) {
         return Err(format!("the boot after the wipe was {:?}", after.first()));
     }
@@ -369,7 +370,14 @@ fn last_boot_continues(report: &RunReport) -> Result<(), String> {
             remote_calls,
             remote_lists,
             ..
-        }) if *remote_lists == levels && remote_calls.checked_sub(levels) == Some(2) => Ok(()),
+        }) if *remote_lists == levels
+            && remote_calls.checked_sub(levels)
+                == Some(
+                    2_u64.saturating_add(lsr_core::fresh_probe_reads(Some(lsr_ltx::Txid::MIN))),
+                ) =>
+        {
+            Ok(())
+        }
         other => Err(format!("the boot's replica calls were {other:?}")),
     }
 }
@@ -411,14 +419,315 @@ pub fn meta_wiped_wal_regrown() -> Scenario {
 /// The newest staged file is gone but an older one remains: the replica is ahead.
 #[must_use]
 pub fn newest_staged_file_lost() -> Scenario {
-    let lost = vec![Op::Meta(MetaOp::DeleteNewest)];
-    after_restart("newest_staged_file_lost", lost, CauseKind::BehindRemote)
+    // The replica's newest file is above what staging holds now, and the live
+    // WAL still holds its range: it vouches for it, and the boot continues
+    // from it with no snapshot (it took a `BehindRemote` snapshot before the
+    // boot asked the WAL).
+    let mut s = build(
+        "newest_staged_file_lost",
+        vec![
+            synced(),
+            vec![Op::Meta(MetaOp::DeleteNewest), Op::Tick],
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        vec![Expect::Event(EventMatch::Booted(None)), Expect::Oracle],
+    );
+    s.check = Some(no_refusal);
+    s
 }
 
-/// A backup of the staging directory is put back after the replica moved on.
+/// One deploy on a host whose volume outlives the machine (fly.io replaces the
+/// VM on every deploy; the database and its meta directory stay): the app
+/// commits and the replicator ships it, then `stop` ends the process.
+fn deploy(stop: Vec<Op>) -> Vec<Op> {
+    let mut ops = vec![commit(2, false)];
+    ops.extend(ticks(3));
+    ops.extend([commit(1, false), commit(2, false)]);
+    ops.extend(stop);
+    ops
+}
+
+/// Three deploys that each end with SIGTERM: the final sync completes and the
+/// process exits. The app's connections are set up as replication asks
+/// (`PERSIST_WAL`), so SQLite's last close keeps the WAL. Each new process
+/// continues where the last stopped: no snapshot after the first, no stop.
+#[must_use]
+pub fn deploy_cycle_after_sigterm() -> Scenario {
+    let mut s = build(
+        "deploy_cycle_after_sigterm",
+        vec![
+            deploy(vec![Op::Shutdown]),
+            deploy(vec![Op::Shutdown]),
+            deploy(vec![Op::Shutdown]),
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        vec![Expect::Event(EventMatch::Booted(None)), Expect::Oracle],
+    );
+    s.check = Some(deploys_continue);
+    s
+}
+
+/// Three deploys that each end in SIGKILL during the final sync (fly.io's kill
+/// timeout is below the shutdown sync's): the process dies at a point of the
+/// sync or upload it was in. The next process continues: no snapshot, no stop.
+#[must_use]
+pub fn deploy_cycle_after_sigkill() -> Scenario {
+    let kill = || vec![Op::Crash(CrashKind::Process)];
+    let mut s = build(
+        "deploy_cycle_after_sigkill",
+        vec![
+            deploy(kill()),
+            deploy(kill()),
+            deploy(kill()),
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        vec![Expect::Event(EventMatch::Booted(None)), Expect::Oracle],
+    );
+    s.check = Some(deploys_continue);
+    s
+}
+
+/// SIGKILL just after the engine's own PASSIVE checkpoint let the WAL restart,
+/// before the new generation's first file was staged; a file staged in the
+/// old generation was still pending (its upload's answer lost). The proof that
+/// the restart followed the engine's own checkpoint lives in memory, so the
+/// next process cannot tell this WAL from one the app restarted after frames
+/// the engine never saw: it drops the pending file and snapshots
+/// (`StagedUnverified`, BOOT-11 in `docs/BEHAVIOR.md`). It never stops. Closing
+/// this needs that proof to outlive the process (the engine journal).
+#[must_use]
+pub fn deploy_cycle_sigkill_after_a_wal_restart_snapshots() -> Scenario {
+    let lost_answer = Op::StoreFault {
+        target: crate::generate::Target::Remote,
+        op: lsr_core::StoreOp::Upload,
+        ahead: 0,
+        shape: crate::store::FaultShape::ErrorAfterPublish(lsr_core::StoreError::Transient {
+            op: lsr_core::StoreOp::Upload,
+            kind: std::io::ErrorKind::ConnectionReset,
+        }),
+    };
+    let mut s = build(
+        "deploy_cycle_sigkill_after_a_wal_restart_snapshots",
+        vec![
+            deploy(vec![Op::Shutdown]),
+            vec![commit(2, false), Op::Tick, lost_answer, Op::Tick],
+            vec![Op::Crash(CrashKind::Process)],
+            ticks(SETTLE),
+            vec![commit(1, false)],
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        vec![
+            Expect::Event(EventMatch::Booted(Some(CauseKind::StagedUnverified))),
+            Expect::Oracle,
+        ],
+    );
+    s.check = Some(no_refusal);
+    s
+}
+
+/// A deploy whose app runs at SQLite's defaults (no `PERSIST_WAL`): its last
+/// close checkpoints the WAL into the database and deletes it. The next
+/// process finds no WAL and snapshots (`WalMissing`, BOOT-7 in
+/// `docs/BEHAVIOR.md`). It never stops: staging still holds the replica's
+/// newest file.
+#[must_use]
+pub fn deploy_cycle_with_the_wal_deleted_at_close() -> Scenario {
+    let closed = vec![
+        Op::Shutdown,
+        Op::OurReader { begin: false },
+        Op::OtherProcessCheckpoint(OtherProcessMode::Truncate),
+        Op::EnvFault(EnvFault::DeleteWal),
+    ];
+    let mut s = build(
+        "deploy_cycle_with_the_wal_deleted_at_close",
+        vec![
+            deploy(closed),
+            vec![Op::Tick, commit(1, false)],
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        vec![
+            Expect::Event(EventMatch::Booted(Some(CauseKind::WalMissing))),
+            Expect::Oracle,
+        ],
+    );
+    s.check = Some(no_refusal);
+    s
+}
+
+/// Every boot after the first continued, nothing resnapshotted, and nothing
+/// stopped but the drains the deploys asked for.
+fn deploys_continue(report: &RunReport) -> Result<(), String> {
+    let mut boots = 0_u32;
+    for seen in &report.seen {
+        match seen {
+            Seen::Event(lsr_core::Event::Booted { cause }) => {
+                boots = boots.saturating_add(1);
+                if boots > 1
+                    && let Some(cause) = cause
+                {
+                    return Err(format!("boot {boots} snapshotted: {cause:?}"));
+                }
+            }
+            Seen::Event(lsr_core::Event::Resnapshot(cause)) => {
+                return Err(format!("a running engine resnapshotted: {cause:?}"));
+            }
+            Seen::Stop(cause) if *cause != StopCause::Shutdown => {
+                return Err(format!("stopped: {cause:?}"));
+            }
+            Seen::Event(_)
+            | Seen::Stop(_)
+            | Seen::Recovered(_)
+            | Seen::Snapshot(_)
+            | Seen::Oracle
+            | Seen::Tick { .. } => {}
+        }
+    }
+    if boots < 2 {
+        return Err(format!("only {boots} boots"));
+    }
+    Ok(())
+}
+
+/// No boot refused replica files: every one continued or snapshotted.
+fn no_refusal(report: &RunReport) -> Result<(), String> {
+    if report
+        .seen
+        .iter()
+        .any(|seen| matches!(seen, Seen::Stop(StopCause::OtherWriter)))
+    {
+        return Err("a boot refused files the WAL vouches for".to_owned());
+    }
+    Ok(())
+}
+
+/// A VM restored to an older image while down: staging put back from a copy
+/// taken before the replica moved on, and the WAL no longer holding the
+/// replica's newest files. Nothing local tells them from another writer's:
+/// the boot stops, and once the operator takes over it snapshots above them.
+#[must_use]
+pub fn vm_restore_stops_until_a_take_over() -> Scenario {
+    let mut s = build(
+        "vm_restore_stops_until_a_take_over",
+        vec![
+            vec![commit(3, false), Op::Shutdown, Op::Meta(MetaOp::Save)],
+            vec![commit(2, false), commit(2, false), Op::Shutdown],
+            vec![
+                Op::Meta(MetaOp::Restore),
+                Op::OurReader { begin: false },
+                Op::OtherProcessCheckpoint(OtherProcessMode::Truncate),
+                commit(1, false),
+                Op::Restart,
+            ],
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        vec![
+            Expect::Stopped(StopCause::OtherWriter),
+            Expect::Event(EventMatch::Booted(Some(CauseKind::BehindRemote))),
+            Expect::Oracle,
+        ],
+    );
+    s.check = Some(stops_then_takes_over);
+    s
+}
+
+/// A stop for another writer, then a `BehindRemote` boot after the take-over.
+fn stops_then_takes_over(report: &RunReport) -> Result<(), String> {
+    let stop = report
+        .seen
+        .iter()
+        .position(|seen| matches!(seen, Seen::Stop(StopCause::OtherWriter)))
+        .ok_or("the boot never refused")?;
+    let snapshot = report.seen.iter().skip(stop).any(|seen| {
+        matches!(
+            seen,
+            Seen::Event(lsr_core::Event::Booted {
+                cause: Some(SnapshotCause::BehindRemote { .. })
+            })
+        )
+    });
+    if snapshot {
+        Ok(())
+    } else {
+        Err("no snapshot above the replica's files after the take-over".to_owned())
+    }
+}
+
+/// Another writer put a file on the replica while the engine was down. The
+/// boot stops, and stays stopped while the file stands; once the operator
+/// removes it and restarts, the engine replicates.
+#[must_use]
+pub fn foreign_file_while_down_stops() -> Scenario {
+    let mut s = build(
+        "foreign_file_while_down_stops",
+        vec![
+            synced(),
+            vec![
+                Op::Shutdown,
+                Op::Remote(RemoteOp::PutUnrecognized),
+                Op::Restart,
+            ],
+            ticks(SETTLE),
+            vec![
+                Op::Remote(RemoteOp::RemoveUnrecognized),
+                Op::Restart,
+                commit(1, false),
+            ],
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        vec![Expect::Stopped(StopCause::OtherWriter), Expect::Oracle],
+    );
+    s.check = Some(refused_until_removed);
+    s
+}
+
+/// The restart's boot stopped for another writer without building above the
+/// file (no snapshot between the last upload before the stop and the stop),
+/// and the engine replicated again once the file went.
+fn refused_until_removed(report: &RunReport) -> Result<(), String> {
+    let seen = &report.seen;
+    let stop = seen
+        .iter()
+        .position(|seen| matches!(seen, Seen::Stop(StopCause::OtherWriter)))
+        .ok_or("the boot never refused")?;
+    let before = seen.get(..stop).unwrap_or_default();
+    let last_upload = before
+        .iter()
+        .rposition(|seen| matches!(seen, Seen::Event(lsr_core::Event::Uploaded(_))))
+        .unwrap_or(0);
+    let booted_over = before.iter().skip(last_upload).any(|seen| {
+        matches!(
+            seen,
+            Seen::Snapshot(_) | Seen::Event(lsr_core::Event::Booted { cause: Some(_) })
+        )
+    });
+    if booted_over {
+        return Err("the engine booted over the other writer's file".to_owned());
+    }
+    let uploaded_after = seen
+        .iter()
+        .skip(stop)
+        .any(|seen| matches!(seen, Seen::Event(lsr_core::Event::Uploaded(_))));
+    if uploaded_after {
+        Ok(())
+    } else {
+        Err("the engine never replicated after the file went".to_owned())
+    }
+}
+
+/// A backup of the staging directory is put back after the replica moved on,
+/// while the live WAL still holds the replica's newest file: the WAL vouches
+/// for it, and the boot continues from it (it took a `BehindRemote` snapshot
+/// before the boot asked the WAL).
 #[must_use]
 pub fn restored_old_meta() -> Scenario {
-    build(
+    let mut s = build(
         "restored_old_meta",
         vec![
             vec![commit(3, false), Op::Shutdown, Op::Meta(MetaOp::Save)],
@@ -427,8 +736,10 @@ pub fn restored_old_meta() -> Scenario {
             ticks(SETTLE),
             vec![Op::Restore],
         ],
-        snapshot_after_boot(CauseKind::BehindRemote),
-    )
+        vec![Expect::Event(EventMatch::Booted(None)), Expect::Oracle],
+    );
+    s.check = Some(no_refusal);
+    s
 }
 
 /// One byte of the newest staged file changed on disk. The replica already holds the newest staged file, so
@@ -505,6 +816,9 @@ pub fn restored_with_no_wal() -> Scenario {
                 Op::OurReader { begin: false },
                 Op::OtherProcessCheckpoint(OtherProcessMode::Truncate),
                 Op::EnvFault(EnvFault::DriverWritesNothing),
+                // A restore leaves a takeover record through what it restored,
+                // before the process that replicates starts.
+                Op::TakeOver,
                 Op::EnvFault(EnvFault::WipeStaging),
             ],
             ticks(SETTLE),

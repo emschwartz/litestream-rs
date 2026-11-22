@@ -39,7 +39,7 @@ use lsr_core::{
 use lsr_ltx::{PageNo, PageSize};
 
 use crate::generate::{EnvFault, Target};
-use crate::oracle::Violation;
+use crate::oracle::{MODEL_DIVERGED, Violation};
 
 /// What a history may do with one (operation, error) pair.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,33 +60,46 @@ pub enum Cell {
 /// tracking item and the signature its failures have.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum KnownWrong {
-    /// A failed sync of the WAL is remembered in memory only: a restart before the TRUNCATE
-    /// that pays for it stages frames the failed sync covered (BEHAVIOR's D2).
-    WalSyncForgottenAtRestart,
+    /// After a failed sync of the WAL, a checkpoint (the application's, or the TRUNCATE that pays
+    /// the debt) copies frames the failed sync covered into the database file, and a power loss
+    /// then cuts the WAL short of them: SQLite recovers a database file no commit made. The
+    /// engine replicates it as a clean state until its boot check lands (`docs/decisions.md`
+    /// D103). The simulator does not adopt that state (decision D73): its model check fails
+    /// the run where it appears, which this defect counts as known.
+    DatabaseAheadOfWal,
+    /// Retry counts and degraded states reset at a restart, so a halt that outlasts restarts
+    /// is never reported degraded (BEHAVIOR's D9). Reached by a restart inside an overlapping
+    /// hold ([`crate::Weights::overlap`]), not by a cell of the tables.
+    HaltForgottenAtRestart,
 }
 
 impl KnownWrong {
     /// Every known defect.
-    pub const ALL: [Self; 1] = [Self::WalSyncForgottenAtRestart];
+    pub const ALL: [Self; 2] = [Self::DatabaseAheadOfWal, Self::HaltForgottenAtRestart];
 
     /// Where the defect is tracked and who fixes it.
     #[must_use]
     pub const fn tracking(self) -> &'static str {
         match self {
-            Self::WalSyncForgottenAtRestart => {
-                "#99 (D2); fixed by the journal session, persisting the unproven-WAL fact before \
-                 the TRUNCATE"
+            Self::DatabaseAheadOfWal => {
+                "#99 (D103, D104); fixed by the journal session's check at a boot that finds a \
+                 recorded WAL-sync debt"
+            }
+            Self::HaltForgottenAtRestart => {
+                "#99 (D9); open: retry counts, waits and degraded states must survive a restart"
             }
         }
     }
 
     /// Whether `violation` is this defect's failure.
     #[must_use]
-    pub const fn matches(self, violation: &Violation) -> bool {
+    pub fn matches(self, violation: &Violation) -> bool {
         match self {
-            Self::WalSyncForgottenAtRestart => {
-                matches!(violation, Violation::StagedNotDurable { .. })
+            Self::DatabaseAheadOfWal => {
+                matches!(violation, Violation::CorruptionRestored { .. })
+                    || matches!(violation, Violation::BugFault { context } if context == MODEL_DIVERGED)
             }
+            Self::HaltForgottenAtRestart => matches!(violation, Violation::HealthBlind { .. }),
         }
     }
 
@@ -248,7 +261,7 @@ const fn disk_full_cell(op: SourceOp) -> Cell {
 
 const fn fsync_cell(op: SourceOp) -> Cell {
     match op {
-        SourceOp::Sync => Cell::KnownWrong(KnownWrong::WalSyncForgottenAtRestart),
+        SourceOp::Sync => Cell::KnownWrong(KnownWrong::DatabaseAheadOfWal),
         SourceOp::Open
         | SourceOp::Len
         | SourceOp::Committed
@@ -431,6 +444,8 @@ pub enum StoreClass {
     Denied(Denied),
     /// [`StoreError::NotFound`].
     NotFound,
+    /// [`StoreError::AlreadyExists`].
+    AlreadyExists,
     /// [`StoreError::ScratchExhausted`].
     ScratchExhausted,
     /// [`StoreError::Corrupt`].
@@ -448,7 +463,7 @@ pub const STORE_OPS: [StoreOp; 4] = [
 ];
 
 /// Every store error class, every denial kind among them ([`store_class`] checks it).
-pub const STORE_CLASSES: [StoreClass; 11] = [
+pub const STORE_CLASSES: [StoreClass; 12] = [
     StoreClass::Transient,
     StoreClass::Throttled,
     StoreClass::Denied(Denied::Credentials),
@@ -457,6 +472,7 @@ pub const STORE_CLASSES: [StoreClass; 11] = [
     StoreClass::Denied(Denied::BucketMissing),
     StoreClass::Denied(Denied::Tls),
     StoreClass::NotFound,
+    StoreClass::AlreadyExists,
     StoreClass::ScratchExhausted,
     StoreClass::Corrupt,
     StoreClass::Refused,
@@ -490,6 +506,7 @@ pub const fn store_class(err: &StoreError) -> StoreClass {
             Denied::Tls => Denied::Tls,
         }),
         StoreError::NotFound { .. } => StoreClass::NotFound,
+        StoreError::AlreadyExists { .. } => StoreClass::AlreadyExists,
         StoreError::ScratchExhausted { .. } => StoreClass::ScratchExhausted,
         StoreError::Corrupt { .. } => StoreClass::Corrupt,
         StoreError::Refused { .. } => StoreClass::Refused,
@@ -502,6 +519,9 @@ const CORRUPT_IS_WORLD: &str = "an unusable stored object is a fact about the ob
 const NOT_FOUND_IS_STALE: &str = "a NotFound for an object the store holds is a stale or negative \
                                   read, the store-staleness draw (issue #127, item F); for one it \
                                   does not hold, the read follows a delete or a loss drawn elsewhere";
+const TAKEN_IS_WORLD: &str = "a taken key is a fact about the store: a create-only upload is \
+                              answered from what the key holds, an earlier ambiguous commit or \
+                              another writer, each drawn elsewhere";
 const NOT_FOUND_NEVER: &str = "neither store reports NotFound here: a listing of nothing is empty, a delete of nothing succeeds";
 
 /// The cell of `op` and `class` on `target`: the staging store against `store-fs`, the replica
@@ -518,6 +538,12 @@ pub const fn store_cell(target: Target, op: StoreOp, class: StoreClass) -> Cell 
         StoreClass::NotFound => match op {
             StoreOp::Read => Cell::Impossible(NOT_FOUND_IS_STALE),
             StoreOp::List | StoreOp::Upload | StoreOp::Delete => Cell::Impossible(NOT_FOUND_NEVER),
+        },
+        StoreClass::AlreadyExists => match op {
+            StoreOp::Upload => Cell::Impossible(TAKEN_IS_WORLD),
+            StoreOp::List | StoreOp::Read | StoreOp::Delete => {
+                Cell::Impossible("only a create-only upload asks whether a key is taken")
+            }
         },
         StoreClass::ScratchExhausted => match (target, op) {
             (Target::Staging, StoreOp::Upload) => Cell::Drawn,
@@ -588,8 +614,11 @@ fn store_error(
             op,
             status: pick(entropy, &[400, 405, 411, 501], 400),
         },
-        StoreClass::NotFound | StoreClass::ScratchExhausted | StoreClass::Corrupt => {
-            // NotFound and Corrupt are never drawn. A scratch exhaustion names a key the
+        StoreClass::NotFound
+        | StoreClass::AlreadyExists
+        | StoreClass::ScratchExhausted
+        | StoreClass::Corrupt => {
+            // NotFound, AlreadyExists and Corrupt are never drawn. A scratch exhaustion names a key the
             // engine only reports, never acts on.
             placeholder_error(op, class)
         }
@@ -614,6 +643,7 @@ fn placeholder_error(op: StoreOp, class: StoreClass) -> StoreError {
         | StoreClass::Throttled
         | StoreClass::Denied(_)
         | StoreClass::NotFound
+        | StoreClass::AlreadyExists
         | StoreClass::Refused => transient,
     }
 }
@@ -637,10 +667,10 @@ pub fn draw_store(
     store_error(entropy, target, op, class)
 }
 
-/// The known defects whose cells `ops` drew: a failure counts as known only in a run that could
-/// reach it.
+/// The known defects a run of `ops` under `weights` could reach: those whose cells `ops` drew,
+/// and D9 when an overlapping hold may restart. A failure counts as known only in such a run.
 #[must_use]
-pub fn known_in(ops: &[crate::generate::Op]) -> Vec<KnownWrong> {
+pub fn known_in(ops: &[crate::generate::Op], weights: &crate::Weights) -> Vec<KnownWrong> {
     use crate::generate::Op;
     let mut known: Vec<KnownWrong> = ops
         .iter()
@@ -664,6 +694,14 @@ pub fn known_in(ops: &[crate::generate::Op]) -> Vec<KnownWrong> {
             Cell::Drawn | Cell::World(_) | Cell::Impossible(_) | Cell::Unmodelled(_) => None,
         })
         .collect();
+    let restarts_in_holds = weights.overlap
+        && weights.known_wrong
+        && ops
+            .iter()
+            .any(|op| matches!(op, crate::generate::Op::Hold { .. }));
+    if restarts_in_holds {
+        known.push(KnownWrong::HaltForgottenAtRestart);
+    }
     known.sort_unstable();
     known.dedup();
     known
@@ -678,6 +716,7 @@ pub const fn refused_before_acting(err: &StoreError) -> bool {
         StoreClass::Transient
         | StoreClass::Throttled
         | StoreClass::NotFound
+        | StoreClass::AlreadyExists
         | StoreClass::Corrupt => false,
     }
 }
@@ -695,6 +734,7 @@ pub const fn store_stop(target: Target, err: &StoreError) -> Option<StopCause> {
             StoreClass::Transient
             | StoreClass::Throttled
             | StoreClass::NotFound
+            | StoreClass::AlreadyExists
             | StoreClass::ScratchExhausted,
         )
         | (Target::Staging, _) => None,

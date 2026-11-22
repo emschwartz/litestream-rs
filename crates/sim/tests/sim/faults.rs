@@ -178,7 +178,6 @@ fn every_scenario_is_tested_here() {
     }
 }
 
-/// Under the default responses only: see `fault_reason(FaultKind::WalSyncFailed)`.
 #[test]
 fn wal_fsync_fails() {
     let scenario = scenario::wal_fsync_fails();
@@ -186,10 +185,10 @@ fn wal_fsync_fails() {
     run(scenario::wal_fsync_fails);
 }
 
-/// A restart between a failed WAL sync and the TRUNCATE that pays for it forgets the debt:
-/// the new process stages frames the failed sync covered (`StagedNotDurable`).
+/// A restart between a failed WAL sync and the TRUNCATE that pays for it still owes the
+/// TRUNCATE: the engine journal holds the debt, so the new process stages no frame the failed
+/// sync covered (`StagedNotDurable` otherwise).
 #[test]
-#[ignore = "needs a durable engine-owned record of the failed WAL sync: waits on the engine journal decision"]
 fn wal_fsync_fails_then_restart() {
     run(scenario::wal_fsync_fails_then_restart);
 }
@@ -280,8 +279,58 @@ fn second_writer_mid_run() {
 }
 
 #[test]
+fn second_writer_survives_restart() {
+    run(scenario::second_writer_survives_restart);
+}
+
+#[test]
+fn foreign_file_while_down_stops() {
+    run(scenario::foreign_file_while_down_stops);
+}
+
+#[test]
+fn newest_staged_file_lost() {
+    run(scenario::newest_staged_file_lost);
+}
+
+#[test]
+fn restored_old_meta() {
+    run(scenario::restored_old_meta);
+}
+
+#[test]
+fn vm_restore_stops_until_a_take_over() {
+    run(scenario::vm_restore_stops_until_a_take_over);
+}
+
+#[test]
+fn deploy_cycle_after_sigterm() {
+    run(scenario::deploy_cycle_after_sigterm);
+}
+
+#[test]
+fn deploy_cycle_after_sigkill() {
+    run(scenario::deploy_cycle_after_sigkill);
+}
+
+#[test]
+fn deploy_cycle_sigkill_after_a_wal_restart_snapshots() {
+    run(scenario::deploy_cycle_sigkill_after_a_wal_restart_snapshots);
+}
+
+#[test]
+fn deploy_cycle_with_the_wal_deleted_at_close() {
+    run(scenario::deploy_cycle_with_the_wal_deleted_at_close);
+}
+
+#[test]
 fn bucket_rolled_back() {
     run(scenario::bucket_rolled_back);
+}
+
+#[test]
+fn bucket_rolled_back_unseen() {
+    run(scenario::bucket_rolled_back_unseen);
 }
 
 #[test]

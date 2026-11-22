@@ -128,7 +128,10 @@ impl Spec {
 
 fn put_bytes(store: &impl ObjectStore, at: FileKey, created: Timestamp, bytes: &[u8]) -> FileInfo {
     block_on(async {
-        let mut upload = store.begin_upload(&at, created).await.unwrap();
+        let mut upload = store
+            .begin_upload(&at, created, WriteMode::Replace)
+            .await
+            .unwrap();
         upload.write(bytes).await.unwrap();
         upload.commit().await.unwrap()
     })
@@ -318,11 +321,12 @@ impl ObjectStore for Spy {
         &self,
         at: &FileKey,
         created_at: Timestamp,
+        mode: WriteMode,
     ) -> impl Future<Output = Result<SpyUpload, StoreError>> + Send {
         let mut script = self.script();
         let result = match script.fail_begin.take() {
             Some(err) => Err(err),
-            None => block_on(self.inner.begin_upload(at, created_at)).map(|inner| {
+            None => block_on(self.inner.begin_upload(at, created_at, mode)).map(|inner| {
                 script.begins += 1;
                 SpyUpload {
                     inner,
@@ -1235,4 +1239,26 @@ fn a_small_output_is_written_to_the_upload_once() {
     let done = compact_infos(&source, &dest, &infos, 1).unwrap();
     assert!(done.pages() > 1, "{}", done.pages());
     assert_eq!(dest.script().writes, 1);
+}
+
+/// A store that acknowledges the output one byte short holds a truncated file: the compactor
+/// deletes it and reports the mismatch, so nothing listable is left that does not decode.
+#[test]
+fn an_output_acknowledged_short_is_deleted_and_reported() {
+    let spec = Spec::plain(512, 3, 5, 5, &[(2, 9), (3, 4)]);
+    let source = MemStore::new();
+    let infos = put_all(&source, 0, std::slice::from_ref(&spec));
+    let dest = crate::mem::short::SizeLiar(MemStore::new());
+    let err = error_of(compact_infos(&source, &dest, &infos, 1));
+    assert!(
+        matches!(
+            err,
+            CompactError::Dest(StoreError::Corrupt {
+                cause: crate::store::CorruptCause::CommitSizeMismatch { removed: true, .. },
+                ..
+            })
+        ),
+        "{err:?}"
+    );
+    assert!(nothing_published(&dest.0));
 }
