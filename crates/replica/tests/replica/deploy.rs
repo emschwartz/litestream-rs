@@ -184,6 +184,10 @@ fn deploy_child() {
         }
     };
     insert(3);
+    // Every deploy stages something before it is told to end: a kill that lands before the
+    // first deploy staged anything leaves nothing to continue from, and the next boot's first
+    // sync would be right.
+    common::wait(&replicator, |health| health.synced.is_some());
     println!("lsr-deploy: ready");
     std::io::stdout().flush().unwrap();
     let mut line = String::new();
