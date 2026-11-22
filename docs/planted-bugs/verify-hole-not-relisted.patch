@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/verify.rs b/crates/core/src/verify.rs
+index 76ecc81..5bed6c5 100644
+--- a/crates/core/src/verify.rs
++++ b/crates/core/src/verify.rs
+@@ -553,7 +553,7 @@ async fn listed_names<S: ObjectStore>(
+         let mut findings = Findings::default();
+         let latest = name_findings(&inventory, &mut findings);
+         let holed = findings.holes > 0 || matches!(latest, PlanOutcome::Gap { .. });
+-        if !holed || attempt >= MAX_ATTEMPTS {
++        if !holed || attempt >= 1 {
+             return Ok((inventory, findings, latest));
+         }
+         attempt = attempt.saturating_add(1);
