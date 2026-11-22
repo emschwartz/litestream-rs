@@ -496,6 +496,7 @@ fn wait_on(
         process.ensure_running()?;
         cond(fixture)
     })
+    .map_err(|err| process.explain(err))
 }
 
 /// [`wait_on`] without the poll's pause between looks, for a point the process passes within
@@ -518,7 +519,7 @@ fn spin_on(
             return Ok(());
         }
         if deadline.is_some_and(|d| Instant::now() >= d) {
-            return Err(CompatError::Timeout(what.to_owned()));
+            return Err(process.explain(CompatError::Timeout(what.to_owned())));
         }
         std::thread::yield_now();
     }
@@ -593,6 +594,7 @@ impl Run {
             process.ensure_running()?;
             Ok(!snapshots(&self.fixture.replica)?.is_empty())
         })
+        .map_err(|err| process.explain(err))
         .expect("a first snapshot");
         wait_uploaded(process, &self.fixture).expect("uploaded");
         self.l9 = Some(snapshots(&self.fixture.replica).expect("l9"));
