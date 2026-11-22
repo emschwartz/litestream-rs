@@ -7,6 +7,18 @@
 //! Prints every failing seed and the number of seeds run to
 //! the first. The generator, weights and step count are the soak's, fixed here so a count of
 //! seeds to first failure compares across trees.
+//!
+//! The redo-world campaign's budget, fixed after the app's after-restart behaviours were frozen
+//! (`Weights::after_restart`, `AfterRestart`) and before their first campaign: seeds 1..=3000
+//! of 300 steps for each simulator configuration, and on each tree the crash-cycle rig
+//! (`crash_cycles::crash_cycle_campaign`, seeds 0..100 of 12 cycles) and the history rig
+//! (`rig::real_power_loss_trials`, seeds 1..=50 of 6 cycles).
+//!
+//! | tree | simulator configurations |
+//! |---|---|
+//! | main | as drawn, both judges; redo on every seed and the block law, both judges; busy on every seed and the block law, both judges; every failure listed |
+//! | main + the planted bug "the boot anchor accepts any tail in the live generation" | redo and the block law, the history judge alone; the same, the oracle alone; as drawn, the history judge alone; to the first failure |
+//! | main without the WAL barrier (a scratch revert) | redo and the block law, the history judge alone; busy and the block law, the history judge alone; redo and the block law, the oracle alone; to the first failure |
 
 use lsr_sim::{AfterRestart, Judges, Opts, Seed, Weights, replay_line, run_with};
 
