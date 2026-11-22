@@ -1,10 +1,10 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index 4aa9f61..e9045c8 100644
+index 853fbc4..0aeabbe 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -881,7 +881,8 @@ impl Actor {
-             Recovered::Snapshot { cause, .. } => Err(cause),
-             Recovered::Stop(cause) => return self.verdict(Task::Sync, cause, now),
+@@ -1025,7 +1025,8 @@ impl Actor {
+                 return self.verdict(Task::Sync, cause, now);
+             }
          };
 -        let cause = boot_cause(dropped, refused, from.err());
 +        let cause =
