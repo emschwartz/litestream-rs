@@ -164,21 +164,20 @@ pub fn build_listing(
     let skipped = unrecognized
         .iter()
         .filter(|name| !is_scratch_name(name))
-        .filter(|name| {
-            let above = lower
-                .as_ref()
-                .is_none_or(|low| name.as_str() > low.as_str());
-            let within = upper
-                .as_ref()
-                .is_none_or(|high| name.as_str() <= high.as_str());
-            above && within
-        })
+        .filter(|name| on_page(name, lower.as_deref(), upper.as_deref()))
         .count();
     Listing {
         files,
         next,
         skipped,
     }
+}
+
+/// Whether an unrecognized name falls on the page after the cursor `lower` up to
+/// and including its last key `upper`. Such a name never equals a key name, so
+/// the bound at `lower` could as well be inclusive.
+fn on_page(name: &str, lower: Option<&str>, upper: Option<&str>) -> bool {
+    lower.is_none_or(|low| name > low) && upper.is_none_or(|high| name <= high)
 }
 
 /// The operation a [`StoreError`] interrupted.

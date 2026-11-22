@@ -917,7 +917,11 @@ impl Actor {
         // A report only, and one a boot that fails later reads again.
         self.kept.journal = journal_signal(journal, newest_staged.as_ref(), &upload);
         let cause = boot_cause(dropped, refused, from.err());
-        let pending = pending_at_boot(self.kept.asked(), cause);
+        // A snapshot the boot needs answers an operator's request made before
+        // it: every cause a boot finds clears the table of page checksums
+        // (`snapshot_clears`), which a requested snapshot alone would trust.
+        debug_assert!(cause.as_ref().is_none_or(snapshot_clears), "{cause:?}");
+        let pending = cause.or(self.kept.asked());
         let course = match (from, pending) {
             (Ok(position), snapshot) => Course::At {
                 position,
@@ -1262,7 +1266,7 @@ impl Actor {
         )
         .await
         .map_err(|failed| failed.fault)?;
-        Ok(self.absorb(synced, committed.end(), &*env.wal, now))
+        Ok(self.absorb(synced, committed.end(), &*env.wal))
     }
 
     fn plan_step<W: WalSource>(
@@ -1380,7 +1384,6 @@ impl Actor {
         synced: Synced,
         committed: CommittedEnd,
         wal: &W,
-        now: Timestamp,
     ) -> Stepped {
         let (files, txs, end) = match synced {
             Synced::Idle(through) => (0, 0, StepEnd::Through(through)),
@@ -1427,11 +1430,10 @@ impl Actor {
             StepEnd::Unproven(position) => (position, None, Tail::Reset(committed)),
         };
         self.engine.course.moved(position, tail, files == 1);
-        let observed = Observed::of(now, &position, !self.more_wal());
         self.engine.checkpoint = after_sync(
             self.engine.checkpoint,
             txs,
-            &observed,
+            position.synced().offset().frame_index(),
             &self.kept.cfg.checkpoint,
         );
         Stepped::Synced { files, proof }
@@ -1618,10 +1620,8 @@ impl Actor {
         // are gone with their staged copies: they are never taken again, so
         // the uploads resume with the snapshot above them.
         let acknowledged = self.engine.acknowledged.filter(|ack| *ack >= from);
-        if let (Some(ack), UploadState::At(confirmed)) = (acknowledged, self.engine.upload)
-            && confirmed < Some(ack)
-        {
-            self.engine.upload = UploadState::At(Some(ack));
+        if let (Some(ack), UploadState::At(confirmed)) = (acknowledged, self.engine.upload) {
+            self.engine.upload = UploadState::At(confirmed.max(Some(ack)));
         }
         // The position is past `from`; a snapshot after it would leave a hole.
         let cause = SnapshotCause::NewestStagedFileUnreadable;
@@ -2430,21 +2430,6 @@ const fn boot_cause(
 }
 
 /// A recovery verdict as the step to run, or as what ends the tick.
-/// The snapshot a boot leaves pending. An operator's request made before
-/// the boot comes first, unless the boot needs a snapshot of its own whose
-/// cause says the table of page checksums cannot describe the database,
-/// which a request alone would trust: that snapshot answers the request.
-const fn pending_at_boot(
-    asked: Option<SnapshotCause>,
-    cause: Option<SnapshotCause>,
-) -> Option<SnapshotCause> {
-    match (cause, asked) {
-        (Some(found), _) if snapshot_clears(&found) => Some(found),
-        (_, Some(asked)) => Some(asked),
-        (cause, None) => cause,
-    }
-}
-
 const fn step_of(recovered: Recovered) -> Result<Step, Stepped> {
     match recovered {
         Recovered::Continue(position) => Ok(Step::Incremental(position)),
