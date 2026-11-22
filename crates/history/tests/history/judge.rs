@@ -314,3 +314,34 @@ fn a_sweep_of_restore_points_must_climb_the_tree() {
         Err(Anomaly::NotInHistory { .. })
     ));
 }
+
+/// A power loss rewinds the database and the app redoes the lost commits, leaving the database
+/// in the state the previous `Latest` showed again, on a new branch: a restore that extends
+/// that new node went forward, and needs no report of a loss. One that leaves it for a state
+/// the redo never reached again still does.
+#[test]
+fn a_restore_past_a_state_the_redo_rebuilt_went_forward() {
+    let (mut log, [_, a, _, _]) = line();
+    let mut judge = Judge::new(AheadMode::Count).with_signals(Signals::Required);
+    judge.latest(&log, d(3)).unwrap();
+    log.recover(a, 40);
+    log.commit(d(2), 50);
+    log.commit(d(3), 60);
+    let onward = log.commit(d(4), 70);
+    assert_eq!(judge.latest(&log, d(4)), Ok(onward));
+    assert_eq!(judge.counts().rewound, 0);
+
+    let (mut log, [_, a, _, c]) = line();
+    let mut judge = Judge::new(AheadMode::Count).with_signals(Signals::Required);
+    judge.latest(&log, d(3)).unwrap();
+    log.recover(a, 40);
+    log.commit(d(2), 50);
+    let other = log.commit(d(5), 60);
+    assert_eq!(
+        judge.latest(&log, d(5)),
+        Err(Anomaly::Unsignaled {
+            from: c.get(),
+            to: other.get()
+        })
+    );
+}

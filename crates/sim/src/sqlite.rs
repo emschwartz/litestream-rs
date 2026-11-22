@@ -1739,12 +1739,14 @@ impl SimSqlite {
         })
     }
 
-    /// Whether our read transaction holds a read mark above zero, which keeps
-    /// any writer from restarting the WAL under it. Held on mark zero it lets
-    /// one restart through, and with none held nothing pins the WAL.
+    /// Whether our read transaction is held, on any read mark. A mark above
+    /// zero keeps any writer from restarting the WAL; mark zero lets one
+    /// generation change through and then blocks every backfill, so no commit
+    /// can go with a generation either way (`lsr_core::recover`, rule 6).
+    /// With none held nothing pins the WAL.
     #[must_use]
     pub fn our_reader_pins_wal(&self) -> bool {
-        self.with(|state| matches!(state.readers.get(&Conn::Ours), Some(Mark::Slot(_))))
+        self.with(|state| state.readers.contains_key(&Conn::Ours))
     }
 
     /// The wal-index salts.
@@ -1997,8 +1999,23 @@ impl Checkpointer for SimCheckpointer {
 
     fn checkpoint(&mut self, mode: CheckpointMode) -> Result<CheckpointRun, SourceError> {
         let mut state = lock(&self.state);
-        state.faults.take(SourceOp::Checkpoint)?;
+        // lsr-sqlite releases the read transaction before it asks SQLite and takes it again
+        // after, whatever SQLite answered: a failed checkpoint still starts a new hold. A lost
+        // retake ran the checkpoint and leaves the read transaction lapsed, for the next read
+        // to take again.
+        let injected = state.faults.take(SourceOp::Checkpoint);
         state.end(Conn::Ours);
+        match injected {
+            Err(SourceError::ReadTxLost) => {
+                state.checkpoint(Conn::Ours, mode.into());
+                return Err(SourceError::ReadTxLost);
+            }
+            Err(err) => {
+                state.begin(Conn::Ours);
+                return Err(err);
+            }
+            Ok(()) => {}
+        }
         let failing = state.faults.truncate_fails;
         let numbers = state.checkpoint(Conn::Ours, mode.into());
         state.begin(Conn::Ours);
@@ -2019,10 +2036,9 @@ impl Checkpointer for SimCheckpointer {
         let first = PageNo::new(1, state.page_size).ok_or(SourceError::Busy)?;
         let data = state.image_page(1);
         let size = state.index.db_size.max(1);
-        // Under a lock the real bump runs inside the lock's transaction, which the release
-        // rolls back; the model refuses it instead (pinned in lsr-sqlite's `sim_model`).
+        // The writer connection is in the lock's transaction: the real checkpointer refuses.
         if state.barrier.is_some() || state.write_lock.is_some() {
-            return Err(SourceError::Busy);
+            return Err(SourceError::Io(io::ErrorKind::InvalidInput));
         }
         if state.write(Conn::Writer, &[(first, data)], Some(size)) {
             Ok(())

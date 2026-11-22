@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/failstop.rs b/crates/core/src/failstop.rs
+index 7a32fca..4725c5d 100644
+--- a/crates/core/src/failstop.rs
++++ b/crates/core/src/failstop.rs
+@@ -231,7 +231,7 @@ impl Lag {
+         bound: MaxUnreplicatedAge,
+         now: Timestamp,
+     ) {
+-        if !behind {
++        if !behind && !self.tripped {
+             *self = Self::default();
+             return;
+         }
