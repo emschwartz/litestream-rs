@@ -411,7 +411,7 @@ impl Rig {
             &mut self.ck,
             &self.store,
             cfg,
-            ts(5000),
+            &crate::env::FakeClock::new(ts(5000)),
         ))
     }
 

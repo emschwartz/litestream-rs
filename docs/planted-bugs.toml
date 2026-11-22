@@ -213,6 +213,42 @@ tests = [
     "a_staged_file_whose_bytes_differ_but_still_verify_is_refused",
 ]
 
+# Every read path (restore, verify, compaction, upload, boot recovery) decodes through
+# lsr_ltx::Decoder, so skipping the trailer's file checksum there would let any changed header,
+# index or page byte through.
+[[bug]]
+name = "ltx-skip-file-checksum"
+fix = "claude/ltx-integrity"
+package = "lsr-ltx"
+test_bin = "ltx"
+tests = [
+    "errors::file_checksum",
+    "corruption::every_bit_flip_of_a_go_file_fails_or_aliases",
+    "corruption::every_byte_change_to_a_small_rust_file_fails_or_aliases",
+]
+
+[[bug]]
+name = "lz4-frame-checksums"
+fix = "claude/ltx-integrity"
+package = "lsr-ltx"
+test_bin = "ltx"
+tests = [
+    "errors::frame_header_checksum",
+    "errors::frame_block_checksum",
+    "errors::frame_content_checksum",
+    "corruption::every_bit_flip_of_a_go_file_fails_or_aliases",
+]
+
+[[bug]]
+name = "lz4-block-end"
+fix = "claude/ltx-integrity"
+package = "lsr-ltx"
+test_bin = "ltx"
+tests = [
+    "errors::frame_block_end",
+    "corruption::every_byte_change_to_a_small_rust_file_fails_or_aliases",
+]
+
 # Killed unaided: no test was written for this defect. The swarm's own history (seed 44's drawn
 # mix) fails under it. The same plant at the witness's own anchor is witness-anchor-held below. It
 # re-expresses on main the plant the history
@@ -239,4 +275,20 @@ package = "lsr-core"
 tests = [
     "a_tail_whose_pages_the_wal_does_not_hold_anchors_nothing",
     "a_pending_file_regrown_after_another_tail_is_not_uploaded_on_the_old_one",
+]
+
+[[bug]]
+name = "stamp-before-committed-read"
+fix = "847521a"
+package = "lsr-core"
+tests = [
+    "a_commit_after_the_tick_began_is_not_stamped_before_it_landed",
+]
+
+[[bug]]
+name = "seal-stamped-at-checkpoint-start"
+fix = "847521a"
+package = "lsr-core"
+tests = [
+    "a_commit_before_the_checkpoint_barrier_is_not_stamped_before_it_landed",
 ]

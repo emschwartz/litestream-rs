@@ -363,6 +363,7 @@ impl Worker {
             ck: &mut ck,
             staging: &self.staging,
             remote: &self.remote,
+            clock: self.runtime.clock.as_ref(),
         };
         Ok(block_on(self.actor.tick(env, now)))
     }

@@ -889,3 +889,107 @@ fn page_index_rejects_offset_past_i64_max() {
         );
     }
 }
+
+/// Decodes a one-page file whose single frame has byte `at` XORed with `mask`.
+fn flipped_frame_err(frame: &Frame, at: usize, mask: u8) -> FrameError {
+    let mut frame = frame.clone();
+    frame.bytes[at] ^= mask;
+    frame_err(&frame)
+}
+
+#[test]
+fn frame_header_checksum() {
+    let data = page(PS, 1);
+    let frame = Legacy::stored(&data).frame(1, &data);
+    // Page header (6), magic (4), FLG, BD, then the header checksum.
+    let stored = frame.bytes[12];
+    assert_eq!(
+        flipped_frame_err(&frame, 12, 0x01),
+        FrameError::HeaderChecksum {
+            stored: stored ^ 0x01,
+            computed: stored
+        }
+    );
+    // A changed descriptor bit that is still a valid descriptor (dependent
+    // blocks instead of independent ones) is caught by the same checksum.
+    assert!(matches!(
+        flipped_frame_err(&frame, 10, 0x20),
+        FrameError::HeaderChecksum { .. }
+    ));
+}
+
+#[test]
+fn frame_block_checksum() {
+    let data = page(PS, 1);
+    let frame = Legacy {
+        flg: 0x70,
+        ..Legacy::compressed(&data)
+    }
+    .frame(1, &data);
+    // Block checksum, then the four-byte end mark: no content checksum.
+    let at = frame.bytes.len() - 5;
+    assert!(matches!(
+        flipped_frame_err(&frame, at, 0x80),
+        FrameError::BlockChecksum { .. }
+    ));
+}
+
+#[test]
+fn frame_content_checksum() {
+    let data = page(PS, 1);
+    let frame = Legacy::stored(&data).frame(1, &data);
+    let at = frame.bytes.len() - 1;
+    assert!(matches!(
+        flipped_frame_err(&frame, at, 0x01),
+        FrameError::ContentChecksum { .. }
+    ));
+}
+
+/// A block of one page of literals: token, length continuation, the page.
+fn literal_block(data: &[u8], match_nibble: u8) -> Vec<u8> {
+    let mut block = vec![0xf0 | match_nibble];
+    let mut rest = data.len() - 15;
+    while rest >= 255 {
+        block.push(255);
+        rest -= 255;
+    }
+    block.push(u8::try_from(rest).unwrap());
+    block.extend_from_slice(data);
+    block
+}
+
+#[test]
+fn frame_block_end() {
+    let data = page(PS, 1);
+    let ok = literal_block(&data, 0);
+    assert_eq!(
+        decode(&assemble(
+            &RawHeader::untracked(PS, 1, 1),
+            &[block_frame_raw(1, &ok, &data)],
+            0
+        ))
+        .unwrap()
+        .pages,
+        [(1, data.clone())]
+    );
+    // The last token's match-length nibble, which no decoder reads.
+    let nibble = literal_block(&data, 1);
+    assert_eq!(
+        frame_err(&block_frame_raw(1, &nibble, &data)),
+        FrameError::BlockEnd
+    );
+    // The same in a legacy frame's compressed block.
+    let legacy = Legacy {
+        blocks: vec![(u32::try_from(nibble.len()).unwrap(), nibble)],
+        ..Legacy::stored(&data)
+    };
+    assert_eq!(frame_err(&legacy.frame(1, &data)), FrameError::BlockEnd);
+    // A block that ends in a match (one literal, then 511 bytes copied from
+    // it) never reaches that check: LZ4 itself refuses it.
+    let zeros = vec![0; usize::try_from(PS).unwrap()];
+    let ends_in_match = [0x1f, 0, 0x01, 0x00, 255, 237];
+    assert!(matches!(
+        frame_err(&block_frame_raw(1, &ends_in_match, &zeros)),
+        FrameError::Lz4 { .. }
+    ));
+}
