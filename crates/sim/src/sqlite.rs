@@ -969,9 +969,13 @@ impl State {
         self.faults.shm_forced = None;
         self.faults.overwrite = None;
         if self.unlinked {
+            // Every write since the unlink went to a file no path names: a power loss leaves
+            // nothing at the WAL path, neither those writes nor any older bytes.
             self.unlinked = false;
             self.present = false;
             self.durable.clear();
+            self.wal.clear();
+            self.ghost.clear();
         }
         self.wal = self.surviving_wal();
         self.recover();
@@ -1571,6 +1575,19 @@ impl SimSqlite {
         self.with(|state| state.faults.driver_writes_nothing = true);
     }
 
+    /// Whether a failed sync of the WAL lost a writeback that the model still carries, in this
+    /// generation or an earlier one, or one is queued for the engine's next sync.
+    pub fn writeback_lost(&self) -> bool {
+        self.with(|state| {
+            state.lost_writeback.is_some()
+                || state
+                    .faults
+                    .injections
+                    .iter()
+                    .any(|(op, err)| *op == SourceOp::Sync && *err == SourceError::FsyncFailed)
+        })
+    }
+
     /// The next call of `op` fails with `err`.
     pub fn inject(&self, op: SourceOp, err: SourceError) {
         self.with(|state| state.faults.injections.push((op, err)));
@@ -1859,6 +1876,7 @@ impl WalSource for SimSource {
             }
             return Err(err);
         }
+        state.begin(Conn::Ours);
         if state.unlinked {
             return Err(SourceError::Unlinked);
         }
@@ -1921,6 +1939,8 @@ impl PageSource for SimPages {
     fn page_count(&mut self) -> Result<DbPages, SourceError> {
         let mut state = lock(&self.state);
         state.faults.take(SourceOp::PageCount)?;
+        // As lsr-sqlite's `ensure_read_lock_held`: a lapsed read transaction is taken again.
+        state.begin(Conn::Ours);
         if std::mem::take(&mut state.faults.empty_db) {
             return Ok(DbPages::EMPTY);
         }
@@ -1930,6 +1950,7 @@ impl PageSource for SimPages {
     fn read_page(&mut self, pgno: PageNo, buf: &mut [u8]) -> Result<(), SourceError> {
         let mut state = lock(&self.state);
         state.faults.take(SourceOp::ReadPage)?;
+        state.begin(Conn::Ours);
         let at = state.page_at(pgno.get());
         let src = state
             .db
@@ -1963,12 +1984,15 @@ impl Checkpointer for SimCheckpointer {
 
     fn end_barrier(&mut self, barrier: Barrier) -> Result<(), SourceError> {
         let mut state = lock(&self.state);
-        state.faults.take(SourceOp::EndBarrier)?;
+        // A ROLLBACK that fails with an I/O error still ends the transaction (SQLite rolls back
+        // on the error), and lsr-sqlite spends the token either way: the barrier is gone and the
+        // caller is told the release failed.
+        let released = state.faults.take(SourceOp::EndBarrier);
         if state.barrier == Some(barrier.id()) {
             state.barrier = None;
             state.drop_writer(Conn::Writer);
         }
-        Ok(())
+        released
     }
 
     fn checkpoint(&mut self, mode: CheckpointMode) -> Result<CheckpointRun, SourceError> {
@@ -2016,11 +2040,12 @@ impl Checkpointer for SimCheckpointer {
 
     fn end_write_lock(&mut self, lock_held: WriteLock) -> Result<(), SourceError> {
         let mut state = lock(&self.state);
-        state.faults.take(SourceOp::EndWriteLock)?;
+        // As `end_barrier`: the lock is released and the token spent, whatever the error.
+        let released = state.faults.take(SourceOp::EndWriteLock);
         if state.write_lock == Some(lock_held.id()) {
             state.write_lock = None;
             state.drop_writer(Conn::Writer);
         }
-        Ok(())
+        released
     }
 }

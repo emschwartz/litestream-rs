@@ -391,6 +391,15 @@ tests = [
     "a_pending_file_regrown_after_another_tail_is_not_uploaded_on_the_old_one",
 ]
 
+# The boundary snapshot after a TRUNCATE checked the database file against the page table, so a
+# commit that landed between the last step and the TRUNCATE read as damage.
+[[bug]]
+name = "boundary-snapshot-keeps-page-table"
+fix = "claude/boundary-snapshot-pages"
+package = "lsr-sqlite"
+test_bin = "sqlite"
+tests = ["a_commit_between_the_proof_and_the_truncate_is_not_taken_for_damage"]
+
 [[bug]]
 name = "stamp-before-committed-read"
 fix = "847521a"
@@ -838,6 +847,12 @@ fix = "checker-holes (stall liveness)"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["a_stall_ends_with_the_fault_that_caused_it_seed_0xa2"]
+
+[[bug]]
+name = "compact-local-read-as-remote"
+fix = "e01a5d6"
+package = "lsr-core"
+tests = ["a_local_read_error_comparing_copies_is_a_staging_fault", "a_local_read_error_while_compacting_is_a_staging_fault"]
 
 # A sequence bump ran on the writer connection whatever state it was in: under a lock it ran
 # inside the lock's transaction, and after a release whose ROLLBACK failed it ran inside the

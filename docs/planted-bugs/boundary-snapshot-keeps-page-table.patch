@@ -1,0 +1,14 @@
+--- a/crates/core/src/pages.rs
++++ b/crates/core/src/pages.rs
+@@ -188,9 +188,8 @@
+ #[must_use]
+ pub(crate) const fn snapshot_clears(cause: &SnapshotCause) -> bool {
+     match cause {
+-        SnapshotCause::OperatorRequested => false,
+-        SnapshotCause::CheckpointBoundary
+-        | SnapshotCause::FirstSync
++        SnapshotCause::CheckpointBoundary | SnapshotCause::OperatorRequested => false,
++        SnapshotCause::FirstSync
+         | SnapshotCause::BehindRemote { .. }
+         | SnapshotCause::NewestStagedFileUnreadable
+         | SnapshotCause::WalMissing
