@@ -1,10 +1,10 @@
 diff --git a/crates/store-fs/src/lib.rs b/crates/store-fs/src/lib.rs
-index 12a8287..913992e 100644
+index 51fbcd1..ce0d9da 100644
 --- a/crates/store-fs/src/lib.rs
 +++ b/crates/store-fs/src/lib.rs
-@@ -471,7 +471,6 @@ impl FsUpload {
+@@ -510,7 +510,6 @@ impl FsUpload {
+                 return Ok(Err(None));
              }
-             rename(&self.scratch, &self.target)?;
              // The rename is not durable until its directory entry is.
 -            sync_dir(&self.dir)?;
              Ok(Ok(size))
