@@ -25,3 +25,5 @@ mod soak;
 mod sqlite_rules;
 #[cfg(test)]
 mod tally;
+#[cfg(test)]
+mod unaided;

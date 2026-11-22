@@ -195,6 +195,26 @@ pub struct Opts {
     /// With `drawn`, a power loss keeps the block law's draw instead of a
     /// drawn prefix ([`Weights::block_crash_law`]). [`run_with`] sets it.
     pub block_crash_law: bool,
+    /// Which judges run: the oracle, the history judge, or both (the default).
+    pub judges: Judges,
+}
+
+/// Which judges a run consults. Both by default; one alone measures what it catches unaided.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Judges {
+    /// The oracle ([`crate::oracle`]): restores judged through the engine's WAL origins.
+    pub oracle: bool,
+    /// The history judge ([`crate::history`]): restores judged by content alone.
+    pub history: bool,
+}
+
+impl Default for Judges {
+    fn default() -> Self {
+        Self {
+            oracle: true,
+            history: true,
+        }
+    }
 }
 
 /// The configuration every run gives the actor.
@@ -291,6 +311,7 @@ struct Runner {
     rate_active: bool,
     /// The snapshot liveness oracle.
     liveness: crate::liveness::Liveness,
+    judges: Judges,
 }
 
 fn below(rng: &SeededEntropy, upper: u64) -> u64 {
@@ -336,6 +357,7 @@ impl Runner {
             restored_staging: false,
             rate_active: false,
             liveness: crate::liveness::Liveness::new(),
+            judges: Judges::default(),
         }
     }
 
@@ -792,7 +814,10 @@ impl Runner {
         let mut degraded = false;
         for _ in 0..DRAIN_TICKS {
             match self.step(None)?.0 {
-                Step::Drained(txid) => return self.drained(txid),
+                Step::Drained(txid) => {
+                    self.drained(txid)?;
+                    return self.judge_drained();
+                }
                 Step::Stopped(StopCause::Shutdown) if degraded || self.rate_active => {
                     return Ok(());
                 }
@@ -1210,6 +1235,9 @@ impl Runner {
             RemoteOp::RollBack => self.w.remote_roll_back(),
             RemoteOp::DropCreatedAt => self.w.remote_drop_created_at(),
         };
+        if matches!(op, RemoteOp::RollBack | RemoteOp::RemoveUnrecognized) {
+            self.w.history.excuse_regression();
+        }
         if matches!(op, RemoteOp::RollBack) {
             self.w.acked.note_rewound();
             self.expect(StopCause::RemoteRegressed);
@@ -1255,15 +1283,70 @@ impl Runner {
         Ok(())
     }
 
-    fn clock_jump(&self, millis: i64) {
-        let to = self.now().unix_millis().saturating_add(millis);
-        self.w.clock.set(Timestamp::from_unix_millis(to));
+    fn clock_jump(&mut self, millis: i64) {
+        let to = Timestamp::from_unix_millis(self.now().unix_millis().saturating_add(millis));
+        self.w.clock.set(to);
+        self.w.history.note_time(to);
     }
 
+    /// Applies `op`, checks the model still follows SQLite's recovery, then judges the replica
+    /// by content at random (see [`crate::history`]).
+    fn apply_judged(&mut self, op: &Op) -> Result<(), Violation> {
+        self.apply(op)?;
+        self.recovery_agrees()?;
+        if self.judges.history && self.w.history.draw() {
+            return self.judge_history(crate::history::Ask::default());
+        }
+        Ok(())
+    }
+
+    /// The history judge over the raw replica now.
+    fn judge_history(&mut self, ask: crate::history::Ask) -> Result<(), Violation> {
+        if !self.judges.history {
+            return Ok(());
+        }
+        let damaged = self.w.remote_faults.damaged();
+        let now = self.now();
+        self.w.history.judge(&self.w.remote_raw, now, &damaged, ask)
+    }
+
+    /// After a drain that finished: `Latest` is the local head, unless a bucket rollback
+    /// took files the engine had already confirmed.
+    fn judge_drained(&mut self) -> Result<(), Violation> {
+        let drained = self.w.lost.is_empty();
+        self.judge_history(crate::history::Ask {
+            sweep: false,
+            drained,
+        })
+    }
+
+    /// Both judges over the whole replica; where one fails and the other passes, the
+    /// disagreement is counted in reach, keyed by the failing judge and its violation.
     fn restore_all(&mut self) -> Result<(), Violation> {
         self.report.checks = self.report.checks.saturating_add(1);
-        let checked = self.w.check(Some(windows(&actor_config().maintenance)))?;
-        checked.tally(&mut self.report.reach);
+        let oracle = self
+            .judges
+            .oracle
+            .then(|| self.w.check(Some(windows(&actor_config().maintenance))));
+        let history = self.judge_history(crate::history::Ask {
+            sweep: true,
+            drained: false,
+        });
+        match (&oracle, &history) {
+            (Some(Err(violation)), Ok(())) if self.judges.history => {
+                let key = format!("history.disagree.oracle_only.{}", variant(violation));
+                self.report.reach.bump(key);
+            }
+            (Some(Ok(_)), Err(violation)) => {
+                let key = format!("history.disagree.history_only.{}", variant(violation));
+                self.report.reach.bump(key);
+            }
+            (Some(_) | None, _) => {}
+        }
+        if let Some(checked) = oracle {
+            checked?.tally(&mut self.report.reach);
+        }
+        history?;
         self.replica_page_size()?;
         if self.record {
             self.report.seen.push(Seen::Oracle);
@@ -1779,6 +1862,7 @@ pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure
     runner.allow_stop = opts.allow_stop;
     runner.responses = opts.responses;
     runner.retention = opts.retention;
+    runner.judges = opts.judges;
     runner.reboot();
     for (index, op) in ops.iter().enumerate() {
         let step = u32::try_from(index).unwrap_or(u32::MAX);
@@ -1809,7 +1893,7 @@ pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure
                 ..fail(bug_fault("the model no longer matches SQLite's rules"))
             });
         }
-        if let Err(violation) = runner.apply(op).and_then(|()| runner.recovery_agrees()) {
+        if let Err(violation) = runner.apply_judged(op) {
             return Err(Failure {
                 trace: runner.report.trace,
                 ..fail(violation)
@@ -1825,6 +1909,7 @@ pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure
         trace: std::mem::take(&mut runner.report.trace),
     })?;
     runner.tally_stores();
+    runner.w.history.tally(&mut runner.report.reach);
     runner.report.app_checkpoints = runner.app_seen();
     runner.report.app_autocheckpoints = runner.w.sqlite.app_autocheckpoints();
     if opts.record {

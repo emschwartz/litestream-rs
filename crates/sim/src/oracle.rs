@@ -248,6 +248,10 @@ pub enum Violation {
         /// The latest time the engine had been told when it deleted it.
         latest: Timestamp,
     },
+    /// The history judge (`lsr-history`), which reads only restored content and the commit
+    /// log, does not accept a restore.
+    #[error("history judge: {0}")]
+    History(lsr_history::Anomaly),
     /// The engine reported its own bug, or the oracle could not decide.
     #[error("bug fault: {context}")]
     BugFault {
