@@ -363,10 +363,18 @@ fn a_publish_failure_says_whether_the_database_is_visible() {
 struct Unlisting<S> {
     inner: S,
     hidden: Vec<lsr_core::FileKey>,
+    /// Left out of the next listing of their level only, as a directory read that races a
+    /// writer's rename can miss a file.
+    hidden_once: std::sync::Mutex<Vec<lsr_core::FileKey>>,
 }
 
 impl<S: ObjectStore> ObjectStore for Unlisting<S> {
     type Upload = S::Upload;
+
+    /// Forwards to the store it wraps.
+    async fn remove_scratch(&self) -> Result<u64, lsr_core::StoreError> {
+        self.inner.remove_scratch().await
+    }
 
     async fn list(
         &self,
@@ -378,6 +386,12 @@ impl<S: ObjectStore> ObjectStore for Unlisting<S> {
         listing
             .files
             .retain(|file| !self.hidden.contains(&file.key));
+        let mut once = self.hidden_once.lock().unwrap();
+        listing.files.retain(|file| {
+            let hide = once.contains(&file.key);
+            once.retain(|key| *key != file.key);
+            !hide
+        });
         Ok(listing)
     }
 
@@ -418,6 +432,48 @@ impl<S: ObjectStore> ObjectStore for Unlisting<S> {
     }
 }
 
+/// A dry run whose listing missed one file in the middle (a directory read racing the
+/// engine's rename on a file replica) lists again and plans what the restore restores: one
+/// listing's gap is not the replica's.
+#[test]
+fn a_dry_run_whose_listing_missed_a_file_once_plans_the_restore() {
+    let mut planned = 0;
+    for staged in staged_fixtures() {
+        let dir = FsStore::new(staged.replica());
+        let inventory = block_on(Inventory::load(&dir)).unwrap();
+        let newest = inventory.newest();
+        if !matches!(plan(&inventory, KeyTarget::Latest), PlanOutcome::Plan(_)) {
+            continue;
+        }
+        // A level-0 file whose absence leaves a gap, and which is not the newest.
+        let Some(hole) = inventory.files().iter().map(|f| f.key).find(|key| {
+            key.level().get() == 0
+                && Some(key.range().max()) != newest
+                && Inventory::from_files(
+                    inventory.files().iter().copied().filter(|f| f.key != *key),
+                )
+                .is_ok_and(|without| {
+                    matches!(plan(&without, KeyTarget::Latest), PlanOutcome::Gap { .. })
+                })
+        }) else {
+            continue;
+        };
+        let store = Unlisting {
+            inner: dir,
+            hidden: Vec::new(),
+            hidden_once: std::sync::Mutex::new(vec![hole]),
+        };
+        let output = staged.output("dry.db");
+        let got = block_on(plan_on(&store, &output, how(RestoreTarget::Latest)));
+        assert!(matches!(got, Ok(Finished::Planned { .. })), "{got:?}");
+        planned += 1;
+    }
+    assert!(
+        planned > 0,
+        "no fixture has a level-0 file whose absence is a gap"
+    );
+}
+
 /// A dry run over a listing that hides the newest level-0 file plans nothing and fails as the
 /// restore would: printing the older chain as the plan for `Latest` would be another answer.
 #[test]
@@ -437,6 +493,7 @@ fn a_dry_run_over_a_lagging_listing_fails_like_the_restore() {
         let store = Unlisting {
             inner: dir,
             hidden: vec![hidden],
+            hidden_once: std::sync::Mutex::new(Vec::new()),
         };
         let output = staged.output("dry.db");
         let got = block_on(plan_on(&store, &output, how(RestoreTarget::Latest)));
@@ -476,6 +533,7 @@ fn if_replica_exists_over_a_listing_that_shows_nothing_skips_nothing() {
         let store = Unlisting {
             inner: dir,
             hidden: files.iter().map(|f| f.key).collect(),
+            hidden_once: std::sync::Mutex::new(Vec::new()),
         };
         let output = staged.output("lagging.db");
         let latest = How {
