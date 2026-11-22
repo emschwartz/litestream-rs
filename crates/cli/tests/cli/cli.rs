@@ -641,7 +641,14 @@ fn integrity_check_publishes_a_valid_database_in_every_mode() {
         if let Some(line) = line {
             assert!(run.stdout.contains(line), "{check}: {}", run.stdout);
         }
-        assert_eq!(fs::read_dir(dir.path()).expect("dir").count(), 1, "{check}");
+        // The database and its meta directory, which holds only the takeover record a
+        // restore leaves for the replicator started on it.
+        assert_eq!(fs::read_dir(dir.path()).expect("dir").count(), 2, "{check}");
+        let meta = dir.path().join(".out.db-litestream");
+        assert_eq!(fs::read_dir(&meta).expect("meta").count(), 1, "{check}");
+        let record = fs::read(meta.join("lsr-takeover")).expect("takeover record");
+        assert!(lsr_core::TakeoverRecord::decode(&record).is_ok(), "{check}");
+        assert!(run.stdout.contains("takeover recorded through"), "{check}");
     }
 }
 
@@ -1056,4 +1063,33 @@ fn restore_json_reports_go_s_fields() {
     assert_eq!(json["txid"], json!(chain.reaches().to_string()), "{json}");
     assert_eq!(json["files"], json!(chain.files().len()), "{json}");
     assert!(json["checksum_verified"].is_boolean(), "{json}");
+}
+
+/// `lsr take-over <db>` records a takeover through the replica's newest transaction in the
+/// database's meta directory, and clears a stop record there.
+#[test]
+fn take_over_records_the_replicas_newest_transaction_and_clears_a_stop() {
+    let db = sqlite_pages();
+    let work = tempfile::tempdir().expect("tempdir");
+    let replica = work.path().join("replica");
+    replica_of(&replica, &db);
+    let database = work.path().join("app.db");
+    let meta = work.path().join(".app.db-litestream");
+    fs::create_dir(&meta).expect("meta");
+    fs::write(meta.join("lsr-stop"), "lsr-stop 1 other-writer none\n").expect("stop");
+    let run = lsr(&[
+        "take-over",
+        path_str(&database),
+        "--replica",
+        path_str(&replica),
+    ]);
+    assert_eq!((run.code, run.stderr.as_str()), (0, ""), "{}", run.stdout);
+    assert!(
+        run.stdout.starts_with("takeover recorded through "),
+        "{}",
+        run.stdout
+    );
+    let record = fs::read(meta.join("lsr-takeover")).expect("takeover record");
+    lsr_core::TakeoverRecord::decode(&record).expect("a takeover record");
+    assert!(!meta.join("lsr-stop").exists(), "the stop record went");
 }

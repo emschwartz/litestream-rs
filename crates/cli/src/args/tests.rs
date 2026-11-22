@@ -214,6 +214,7 @@ fn missing_required_flag_for_every_required_flag() {
         (CommandName::Restore, "restore --replica r --output o"),
         (CommandName::Verify, "verify --replica r"),
         (CommandName::Files, "files --replica r"),
+        (CommandName::TakeOver, "take-over app.db --replica r"),
     ];
     let mut checked = 0;
     for (command, line) in valid {
@@ -615,6 +616,7 @@ fn every_flag_in_the_table_is_accepted_by_its_commands() {
                 CommandName::Restore => format!("restore --replica {replica} --output o"),
                 CommandName::Verify => format!("verify --replica {replica}"),
                 CommandName::Files => format!("files --replica {replica}"),
+                CommandName::TakeOver => format!("take-over app.db --replica {replica}"),
             };
             let value = match spec.name {
                 "--endpoint" => "http://h",
@@ -637,8 +639,13 @@ fn every_flag_in_the_table_is_accepted_by_its_commands() {
                 .filter(|c| !spec.commands.contains(c))
                 .collect();
             for command in other {
+                let db = if *command == CommandName::TakeOver {
+                    " app.db"
+                } else {
+                    ""
+                };
                 let line = format!(
-                    "{} --replica {replica} {}{extra}",
+                    "{}{db} --replica {replica} {}{extra}",
                     command.word(),
                     spec.name
                 );
@@ -671,4 +678,21 @@ fn help_documents_every_flag_command_and_exit_code() {
     for exit in crate::run::Exit::ALL {
         assert!(help.contains(&format!("{:<3}{}", exit.code(), exit.meaning())));
     }
+}
+
+#[test]
+fn take_over_takes_the_database_first_then_its_flags() {
+    assert_eq!(
+        parsed("take-over app.db --replica r --meta-dir m"),
+        Ok(Command::TakeOver(TakeOverArgs {
+            database: PathBuf::from("app.db"),
+            replica: Replica::Dir(PathBuf::from("r")),
+            meta_dir: Some(PathBuf::from("m")),
+        }))
+    );
+    assert_eq!(
+        parsed("take-over --replica r"),
+        Err(UsageError::MissingDatabase)
+    );
+    assert_eq!(parsed("take-over"), Err(UsageError::MissingDatabase));
 }
