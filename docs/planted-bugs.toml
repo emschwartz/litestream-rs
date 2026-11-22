@@ -383,3 +383,9 @@ name = "park-waits-out-a-step-back"
 fix = "df6f81d"
 package = "lsr-replica"
 tests = ["a_park_keeps_its_remaining_wait_when_the_clock_steps_back"]
+
+[[bug]]
+name = "staging-enospc-local-io"
+fix = "cf6ca7f"
+package = "lsr-core"
+tests = ["fault::tests::a_full_staging_disk_is_disk_full"]
