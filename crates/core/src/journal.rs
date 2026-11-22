@@ -71,9 +71,9 @@ pub trait JournalFile {
     fn sync_dir(&mut self) -> Result<(), ErrorKind>;
 }
 
-/// What boot's read of the journal reports (health names `JournalMissing`, `JournalUnreadable`,
-/// `JournalNewer`, `JournalSlotUnreadable`). Each is an event, never a cost: the engine runs as
-/// it would with no journal at all.
+/// What the journal reports (health names `JournalMissing`, `JournalUnreadable`, `JournalNewer`,
+/// `JournalSlotUnreadable`, `JournalUnwritable`). Each is an event, never a cost: the engine runs
+/// as it would with no journal at all.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JournalSignal {
     /// No journal, while staging or the replica holds files: an upgrade, a meta directory

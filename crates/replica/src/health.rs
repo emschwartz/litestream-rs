@@ -10,8 +10,8 @@
 use std::fmt;
 
 use lsr_core::{
-    AppCheckpoint, AppCheckpoints, Degraded, PersistentCause, Severity, SnapshotCause,
-    SnapshotCounts, StopCause, Task,
+    AppCheckpoint, AppCheckpoints, Degraded, JournalSignal, PersistentCause, Severity,
+    SnapshotCause, SnapshotCounts, StopCause, Task,
 };
 use lsr_ltx::{Timestamp, Txid};
 
@@ -174,6 +174,10 @@ pub struct Health {
     pub counters: Counters,
     /// What the scheduled verify found (`Config::verify_interval`); all empty while it is off.
     pub verification: Verification,
+    /// What the engine journal (`docs/journal.md`) says, when it says something an operator
+    /// should see: what boot read of it, or that the debt of a failed WAL sync is held only in
+    /// memory because the journal cannot be written. `None` while it is read and written.
+    pub journal: Option<JournalSignal>,
 }
 
 /// What the scheduled verify found: the replica's listing checked, and a restore of the
@@ -306,6 +310,7 @@ impl Health {
                     incomplete: 0,
                 },
             },
+            journal: None,
         }
     }
 

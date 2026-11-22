@@ -577,6 +577,82 @@ fn an_empty_host_binds_every_interface_and_the_log_says_which() {
     assert!(stderr.contains("must specify port"), "{stderr}");
 }
 
+/// Every file named `name` under `dir`.
+fn find(dir: &Path, name: &str) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            found.extend(find(&path, name));
+        } else if path.file_name().is_some_and(|n| n == name) {
+            found.push(path);
+        }
+    }
+    found
+}
+
+/// Starts the daemon on `setup`, waits for `ready` in `/healthz`, and stops it.
+fn run_until(setup: &Setup, ready: impl Fn(&serde_json::Value) -> bool) -> (String, String) {
+    let mut command = lsr();
+    command.args(["replicate", "-config"]).arg(&setup.config);
+    let mut daemon = Daemon::spawn(command);
+    let addr = bound(&mut daemon);
+    let (_, body) = until(addr, "/healthz", |_, body| {
+        serde_json::from_str(body).is_ok_and(|health| ready(&health))
+    });
+    let (_, text) = fetch(addr, "/metrics");
+    daemon.signal("TERM");
+    let (status, out) = daemon.finish();
+    assert_eq!(status.code(), Some(0), "{out:#?}");
+    (body, text)
+}
+
+/// The engine journal's signal in both outputs: none on a first run or a restart that reads
+/// the journal the last run left, `journal_missing` on the start after it was deleted.
+#[test]
+fn a_deleted_journal_is_reported_on_the_next_start() {
+    let setup = setup("addr: 127.0.0.1:0\n", "    monitor-interval: 20ms\n");
+    let app = database(&setup.db);
+    write(&app, 5);
+    drop(app);
+    let db = setup.db.display().to_string();
+    let replicated = |h: &serde_json::Value| h["dbs"][0]["replicated_txid"].is_string();
+    for _ in 0..2 {
+        let (body, text) = run_until(&setup, replicated);
+        let health: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            health["dbs"][0]["journal"],
+            serde_json::Value::Null,
+            "{body}"
+        );
+        let (types, samples) = parse_metrics(&text);
+        assert_eq!(
+            types.get("lsr_journal_signal").map(String::as_str),
+            Some("gauge")
+        );
+        assert!(
+            !samples.iter().any(|s| s.name == "lsr_journal_signal"),
+            "{text}"
+        );
+    }
+    let journals = find(setup.dir.path(), "lsr-journal");
+    assert_eq!(journals.len(), 1, "{journals:?}");
+    for journal in &journals {
+        std::fs::remove_file(journal).unwrap();
+    }
+    let (body, text) = run_until(&setup, |h| h["dbs"][0]["journal"].is_string());
+    let health: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        health["status"], "ok",
+        "a lost journal costs nothing: {body}"
+    );
+    assert_eq!(health["dbs"][0]["journal"], "journal_missing", "{body}");
+    assert_eq!(health["dbs"][0]["journal_detail"], "Missing", "{body}");
+    let (_, samples) = parse_metrics(&text);
+    let labels = [("db", db.as_str()), ("signal", "journal_missing")];
+    assert!((one(&samples, "lsr_journal_signal", &labels).value - 1.0).abs() < f64::EPSILON);
+}
+
 /// The WAL deleted under the daemon: a task degrades (200, in both outputs with its cause
 /// and task), or, with the response set to stop, the database stops (503, `lsr_stopped`).
 #[test]
