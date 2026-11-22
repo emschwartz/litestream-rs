@@ -48,6 +48,8 @@ mod power_loss;
 #[cfg(test)]
 mod sidecar_read_lock;
 #[cfg(test)]
+mod sim_model;
+#[cfg(test)]
 mod wal_index;
 #[cfg(test)]
 mod wal_size;

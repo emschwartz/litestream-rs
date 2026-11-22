@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 60c52e9e67dc438f4889764edcef3c5da1be8064faaf6c07630f6989783909ff # shrinks to seed = 0, ops = [BeginBarrier, BeginWriteLock]
+cc 70d7d8a9c59466641f9bd2df4d86fc79f7b9171d2ca7ca7eb964a1eb9c4fd51d # shrinks to seed = 0, ops = [Committed, Commit(1), Checkpoint(Truncate), BumpSeq, Committed]
+cc a340338138f6283dcef319b6cc2f18fc99946237047f1d9094adcd7e43ba421e # shrinks to seed = 0, ops = [Checkpoint(Truncate), Committed, BumpSeq, Committed]
