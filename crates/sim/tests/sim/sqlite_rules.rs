@@ -1,8 +1,8 @@
 //! `SimSqlite` against SQLite itself.
 //!
 //! The same history runs on real files in a tempdir, through one rusqlite
-//! connection per SQLite connection the model has (the app, our reader, our
-//! pool, three other processes; busy timeout 0, no autocheckpoint,
+//! connection per SQLite connection the model has (the app, our reader, which runs our
+//! checkpoints, our writer, which bumps the sequence, three other processes; busy timeout 0, no autocheckpoint,
 //! `synchronous=NORMAL`), and on the model. After every step the WAL file's
 //! length, its header's checkpoint sequence, how each salt moved since the
 //! side's previous header, and a checkpoint's three numbers must agree.
@@ -159,9 +159,10 @@ mod rules {
     struct Pair {
         _dir: TempDir,
         wal_path: PathBuf,
+        db_path: PathBuf,
         app: Connection,
         ours: Connection,
-        pool: Connection,
+        writer: Connection,
         other_processes: Vec<Connection>,
         real_in: [bool; OTHER_PROCESSES],
         real_ours: bool,
@@ -196,10 +197,11 @@ mod rules {
             let wal_path = dir.path().join("test.db-wal");
             let mut pair = Self {
                 ours: open(&path),
-                pool: open(&path),
+                writer: open(&path),
                 other_processes: (0..OTHER_PROCESSES).map(|_| open(&path)).collect(),
                 _dir: dir,
                 wal_path,
+                db_path: path.clone(),
                 app,
                 real_in: [false; OTHER_PROCESSES],
                 real_ours: false,
@@ -272,13 +274,13 @@ mod rules {
                 Op::AppCheckpoint(mode) => {
                     let sim = self.sim.other_process_checkpoint(mode).unwrap();
                     (
-                        Some(pragma(&self.app, mode)),
+                        Some(pragma(&open(&self.db_path), mode)),
                         Some((sim.busy, sim.log, sim.checkpointed)),
                     )
                 }
                 Op::OurCheckpoint(mode) => self.our_checkpoint(mode),
                 Op::BumpSeq => {
-                    self.pool
+                    self.writer
                         .execute_batch("UPDATE seq SET v = randomblob(8)")
                         .unwrap();
                     self.sim.checkpointer().bump_seq().unwrap();
@@ -304,7 +306,7 @@ mod rules {
             if self.real_ours {
                 self.ours.execute_batch("COMMIT").unwrap();
             }
-            let real = pragma(&self.pool, mode.into());
+            let real = pragma(&self.ours, mode.into());
             begin_read(&self.ours);
             self.real_ours = true;
             let run = self.sim.checkpointer().checkpoint(mode).unwrap();

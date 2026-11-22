@@ -18,9 +18,18 @@
 //! value, a bounded number of times, and gives up with
 //! [`StoreError::ScratchExhausted`]. A scratch file (this store's, or Go's
 //! `<name>.tmp`) is neither an object nor an unrecognized name: `list` neither
-//! returns nor counts it. Nothing removes one automatically, because a scratch
-//! file may belong to an upload still running in another process; an operator
-//! clears them.
+//! returns nor counts it.
+//!
+//! A process killed mid-upload leaves its scratch file behind, and a crash loop
+//! leaves one per boot, each as large as the file it was writing. The engine
+//! calls [`ObjectStore::remove_scratch`] when it boots: every scratch file of this
+//! store's own form in a level directory goes, at most [`MAX_SCRATCH_REMOVED`] per
+//! call. Go's `<name>.tmp` and every other name stay. Only the replicating engine
+//! uploads into a replica, and a second engine on one replica is already a stop
+//! condition; if one runs anyway and its scratch file goes from under it, its
+//! commit's rename finds nothing and fails, and the upload is retried. No age
+//! test is needed for safety, and one would keep a crash loop's leftovers for as
+//! long as the age.
 //!
 //! A delete removes its keys and then syncs each level directory it named, once per call, so
 //! a deleted file cannot come back after a power loss; a directory sync costs about 0.14 ms
@@ -43,20 +52,25 @@
 //! rename can land before a directory fsync fails): see the `ObjectStore`
 //! contract; list again.
 //!
+//! Every filesystem call goes through [`Fs`] ([`RealFs`] unless [`FsStore::with_fs`] names
+//! another), so the simulator can run this store, not a double of it, on an in-memory
+//! filesystem that models what a power loss keeps.
+//!
 //! Blocking: every future here does its file I/O inside `poll` and is ready at
 //! once. That suits tests, the compat harness and a restore into a local
 //! directory; a caller on an async executor should run it on a blocking thread.
 //! `list` reads a whole level directory into memory, as Go does, so its memory
 //! is proportional to the entries in one level, not to the page.
 
-use std::fs::{self, DirEntry, File, OpenOptions};
 use std::future::{Future, ready};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use journal::{Step, note};
+
+pub use filesystem::{DirEntryInfo, Fs, FsFile, Meta, RealFs};
 
 use lsr_core::{
     CorruptCause, CreatedAt, FileInfo, FileKey, Level, ListedTime, Listing, ObjectStore, PageLimit,
@@ -70,27 +84,46 @@ const LTX_DIR: &str = "ltx";
 /// How many scratch names an upload tries before giving up.
 const SCRATCH_TRIES: u32 = 64;
 
+/// The most scratch files one [`ObjectStore::remove_scratch`] call removes, so a boot after a
+/// long crash loop does bounded work; the rest go at the next boot.
+pub const MAX_SCRATCH_REMOVED: u64 = 1024;
+
+/// Whether `name` is a scratch file of this store's own form, `<key name>.<pid>-<serial>.tmp`.
+fn is_own_scratch(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".tmp") else {
+        return false;
+    };
+    let Some((key, unique)) = stem.split_once(".ltx.") else {
+        return false;
+    };
+    let digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+    let own = unique
+        .split_once('-')
+        .is_some_and(|(pid, serial)| digits(pid) && digits(serial));
+    own && parse_file_name(&format!("{key}.ltx")).is_ok()
+}
+
 /// Creates `dir` and any missing ancestors, top down, calling `sync` on the
 /// parent of each directory it made so the new entry is durable. A directory
 /// that turns out to exist (another creator won the race) gets the same sync.
 /// Syncs `file`'s bytes, and notes it in the test journal: one call, so the sync and the
 /// note cannot part.
-fn sync_file(file: &File, path: &Path) -> io::Result<()> {
+fn sync_file(file: &impl FsFile, path: &Path) -> io::Result<()> {
     file.sync_all()?;
     note(|| Step::SyncFile(path.to_owned()));
     Ok(())
 }
 
 /// Syncs the entries of directory `dir`, and notes it.
-fn sync_dir(dir: &Path) -> io::Result<()> {
-    File::open(dir)?.sync_all()?;
+fn sync_dir(fs: &impl Fs, dir: &Path) -> io::Result<()> {
+    fs.sync_dir(dir)?;
     note(|| Step::SyncDir(dir.to_owned()));
     Ok(())
 }
 
 /// Renames `from` over `to`, and notes it.
-fn rename(from: &Path, to: &Path) -> io::Result<()> {
-    fs::rename(from, to)?;
+fn rename(fs: &impl Fs, from: &Path, to: &Path) -> io::Result<()> {
+    fs.rename(from, to)?;
     note(|| Step::Rename {
         from: from.to_owned(),
         to: to.to_owned(),
@@ -99,12 +132,13 @@ fn rename(from: &Path, to: &Path) -> io::Result<()> {
 }
 
 fn create_dirs_durably(
+    fs: &impl Fs,
     dir: &Path,
     sync: &mut impl FnMut(&Path) -> io::Result<()>,
 ) -> io::Result<()> {
     let mut missing = Vec::new();
     let mut at = dir;
-    while !at.try_exists()? {
+    while !fs.try_exists(at)? {
         missing.push(at);
         match at.parent() {
             Some(parent) => at = parent,
@@ -112,7 +146,7 @@ fn create_dirs_durably(
         }
     }
     for path in missing.into_iter().rev() {
-        match fs::create_dir(path) {
+        match fs.create_dir(path) {
             Ok(()) => note(|| Step::CreateDir(path.to_owned())),
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
             Err(err) => return Err(err),
@@ -126,10 +160,12 @@ fn create_dirs_durably(
     Ok(())
 }
 
-/// A replica kept in a directory.
+/// A replica kept in a directory, on the host's filesystem unless [`FsStore::with_fs`] names
+/// another.
 #[derive(Debug)]
-pub struct FsStore {
+pub struct FsStore<F: Fs = RealFs> {
     root: PathBuf,
+    fs: F,
     scratch_counter: AtomicU64,
 }
 
@@ -137,10 +173,25 @@ impl FsStore {
     /// A store rooted at the replica path. Touches no disk until used.
     #[must_use]
     pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self::with_fs(root, RealFs)
+    }
+}
+
+impl<F: Fs> FsStore<F> {
+    /// A store rooted at `root` on the filesystem `fs`. Touches nothing until used.
+    #[must_use]
+    pub fn with_fs(root: impl Into<PathBuf>, fs: F) -> Self {
         Self {
             root: root.into(),
+            fs,
             scratch_counter: AtomicU64::new(0),
         }
+    }
+
+    /// The filesystem under the store.
+    #[must_use]
+    pub const fn fs(&self) -> &F {
+        &self.fs
     }
 
     /// The replica path.
@@ -167,17 +218,17 @@ impl FsStore {
         after: Option<TxidRange>,
         limit: PageLimit,
     ) -> Result<Listing, StoreError> {
-        let entries = match fs::read_dir(self.level_dir(level)) {
+        let entries = match self.fs.read_dir(&self.level_dir(level)) {
             Ok(entries) => entries,
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Listing::empty()),
             Err(err) => return Err(StoreError::from_io(StoreOp::List, None, &err)),
         };
         let mut files = Vec::new();
         let mut unrecognized = Vec::new();
+        let dir = self.level_dir(level);
         for entry in entries {
-            let entry = entry.map_err(|err| StoreError::from_io(StoreOp::List, None, &err))?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            match classify(level, &entry, &name)? {
+            let name = entry.name().to_string_lossy().into_owned();
+            match classify(&self.fs, level, &dir, &entry, &name)? {
                 Entry::File(info) => files.push(info),
                 Entry::Unrecognized => unrecognized.push(name),
                 Entry::Gone => {}
@@ -196,7 +247,7 @@ impl FsStore {
         key: &FileKey,
         offset: u64,
         len: ReadLen,
-    ) -> Result<(Vec<u8>, fs::Metadata), StoreError> {
+    ) -> Result<(Vec<u8>, Meta), StoreError> {
         let fail = |err: io::Error| StoreError::from_io(StoreOp::Read, Some(*key), &err);
         let not_a_file = || StoreError::Corrupt {
             key: Some(*key),
@@ -204,10 +255,10 @@ impl FsStore {
         };
         let path = self.file_path(key);
         // Before the open: opening a FIFO blocks until a writer appears.
-        if !fs::metadata(&path).map_err(fail)?.is_file() {
+        if !self.fs.metadata(&path).map_err(fail)?.is_file() {
             return Err(not_a_file());
         }
-        let mut file = File::open(&path).map_err(fail)?;
+        let mut file = self.fs.open(&path).map_err(fail)?;
         let meta = file.metadata().map_err(fail)?;
         if !meta.is_file() {
             return Err(not_a_file());
@@ -216,15 +267,15 @@ impl FsStore {
         if offset >= meta.len() {
             return Ok((Vec::new(), meta));
         }
-        file.seek(SeekFrom::Start(offset)).map_err(fail)?;
-        let mut bytes = Vec::new();
-        file.take(len.get()).read_to_end(&mut bytes).map_err(fail)?;
+        let bytes = file.read_at(offset, len.get()).map_err(fail)?;
         Ok((bytes, meta))
     }
 
     fn created_at_now(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
         let key = file.key;
-        let meta = fs::metadata(self.file_path(&key))
+        let meta = self
+            .fs
+            .metadata(&self.file_path(&key))
             .map_err(|err| StoreError::from_io(StoreOp::Read, Some(key), &err))?;
         if !meta.is_file() {
             return Err(StoreError::Corrupt {
@@ -238,7 +289,7 @@ impl FsStore {
                 kind: io::ErrorKind::InvalidData,
             });
         }
-        mtime_created_at(&meta, key, StoreOp::Read)
+        mtime_created_at(&meta, key)
     }
 
     fn read_with_created_at_now(
@@ -247,19 +298,21 @@ impl FsStore {
         len: ReadLen,
     ) -> Result<(Vec<u8>, CreatedAt), StoreError> {
         let (bytes, meta) = self.read_open(&file.key, 0, len)?;
-        Ok((bytes, mtime_created_at(&meta, file.key, StoreOp::Read)?))
+        Ok((bytes, mtime_created_at(&meta, file.key)?))
     }
 
-    fn begin_now(&self, key: &FileKey, created_at: Timestamp) -> Result<FsUpload, StoreError> {
+    fn begin_now(&self, key: &FileKey, created_at: Timestamp) -> Result<FsUpload<F>, StoreError> {
         let fail = |err: io::Error| StoreError::from_io(StoreOp::Upload, None, &err);
         let mtime = to_system_time(created_at).ok_or(StoreError::Corrupt {
             key: Some(*key),
             cause: CorruptCause::TimestampOutOfRange,
         })?;
         let dir = self.level_dir(key.level());
-        create_dirs_durably(&dir, &mut sync_dir).map_err(fail)?;
+        create_dirs_durably(&self.fs, &dir, &mut |parent| sync_dir(&self.fs, parent))
+            .map_err(fail)?;
         let (scratch, file) = self.open_scratch(&dir, key)?;
         Ok(FsUpload {
+            fs: self.fs.clone(),
             key: *key,
             dir,
             target: self.file_path(key),
@@ -272,7 +325,7 @@ impl FsStore {
     }
 
     /// Creates the key's scratch file under the first free name.
-    fn open_scratch(&self, dir: &Path, key: &FileKey) -> Result<(PathBuf, File), StoreError> {
+    fn open_scratch(&self, dir: &Path, key: &FileKey) -> Result<(PathBuf, F::File), StoreError> {
         for _ in 0..SCRATCH_TRIES {
             let serial = self.scratch_counter.fetch_add(1, Ordering::Relaxed);
             let scratch = dir.join(format!(
@@ -280,11 +333,7 @@ impl FsStore {
                 key.file_name(),
                 std::process::id()
             ));
-            match OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&scratch)
-            {
+            match self.fs.create_new(&scratch) {
                 Ok(file) => {
                     note(|| Step::Create(scratch.clone()));
                     return Ok((scratch, file));
@@ -294,6 +343,33 @@ impl FsStore {
             }
         }
         Err(StoreError::ScratchExhausted { key: *key })
+    }
+
+    fn remove_scratch_now(&self) -> Result<u64, StoreError> {
+        let fail = |err: &io::Error| StoreError::from_io(StoreOp::Delete, None, err);
+        let mut removed = 0;
+        for level in Level::ALL {
+            let dir = self.level_dir(level);
+            let entries = match self.fs.read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+                Err(err) => return Err(fail(&err)),
+            };
+            for entry in entries {
+                if removed >= MAX_SCRATCH_REMOVED {
+                    return Ok(removed);
+                }
+                if !is_own_scratch(&entry.name().to_string_lossy()) {
+                    continue;
+                }
+                match self.fs.remove_file(&dir.join(entry.name())) {
+                    Ok(()) => removed = removed.saturating_add(1),
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                    Err(err) => return Err(fail(&err)),
+                }
+            }
+        }
+        Ok(removed)
     }
 
     /// Removes each key, then syncs the level directory of every key, once per directory per
@@ -306,7 +382,7 @@ impl FsStore {
         let fail = |err: &io::Error| StoreError::from_io(StoreOp::Delete, None, err);
         let mut dirs: Vec<PathBuf> = Vec::new();
         for key in keys {
-            match fs::remove_file(self.file_path(key)) {
+            match self.fs.remove_file(&self.file_path(key)) {
                 Ok(()) => note(|| Step::Remove(self.file_path(key))),
                 Err(err) if err.kind() == io::ErrorKind::NotFound => {}
                 Err(err) => return Err(fail(&err)),
@@ -317,7 +393,7 @@ impl FsStore {
             }
         }
         for dir in &dirs {
-            match sync_dir(dir) {
+            match sync_dir(&self.fs, dir) {
                 Ok(()) => {}
                 Err(err) if err.kind() == io::ErrorKind::NotFound => {}
                 Err(err) => return Err(fail(&err)),
@@ -338,7 +414,13 @@ enum Entry {
     Gone,
 }
 
-fn classify(level: Level, entry: &DirEntry, name: &str) -> Result<Entry, StoreError> {
+fn classify(
+    fs: &impl Fs,
+    level: Level,
+    dir: &Path,
+    entry: &DirEntryInfo,
+    name: &str,
+) -> Result<Entry, StoreError> {
     let Ok(range) = parse_file_name(name) else {
         return Ok(Entry::Unrecognized);
     };
@@ -348,11 +430,10 @@ fn classify(level: Level, entry: &DirEntry, name: &str) -> Result<Entry, StoreEr
         cause: CorruptCause::NotARegularFile,
     };
     // Follows symlinks, as the open in `read` does.
-    let meta = match fs::metadata(entry.path()) {
+    let meta = match fs.metadata(&dir.join(entry.name())) {
         Ok(meta) => meta,
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            let dangling = entry.file_type().is_ok_and(|kind| kind.is_symlink());
-            return if dangling {
+            return if entry.is_symlink() {
                 Err(not_a_file)
             } else {
                 Ok(Entry::Gone)
@@ -363,7 +444,7 @@ fn classify(level: Level, entry: &DirEntry, name: &str) -> Result<Entry, StoreEr
     if !meta.is_file() {
         return Err(not_a_file);
     }
-    let created_at = mtime_created_at(&meta, key, StoreOp::List)?;
+    let created_at = mtime_created_at(&meta, key)?;
     Ok(Entry::File(FileInfo {
         key,
         size: meta.len(),
@@ -372,15 +453,8 @@ fn classify(level: Level, entry: &DirEntry, name: &str) -> Result<Entry, StoreEr
 }
 
 /// The file's mtime as its created-at time: this store keeps the writer's created-at time there.
-fn mtime_created_at(
-    meta: &fs::Metadata,
-    key: FileKey,
-    op: StoreOp,
-) -> Result<CreatedAt, StoreError> {
-    let modified = meta
-        .modified()
-        .map_err(|err| StoreError::from_io(op, Some(key), &err))?;
-    from_system_time(modified)
+fn mtime_created_at(meta: &Meta, key: FileKey) -> Result<CreatedAt, StoreError> {
+    from_system_time(meta.modified())
         .map(CreatedAt::mtime)
         .ok_or(StoreError::Corrupt {
             key: Some(key),
@@ -423,8 +497,8 @@ fn signed_millis(negative: bool, offset: Duration) -> Option<i64> {
     rounded_up.checked_neg()
 }
 
-impl ObjectStore for FsStore {
-    type Upload = FsUpload;
+impl<F: Fs> ObjectStore for FsStore<F> {
+    type Upload = FsUpload<F>;
 
     fn list(
         &self,
@@ -463,29 +537,34 @@ impl ObjectStore for FsStore {
         &self,
         key: &FileKey,
         created_at: Timestamp,
-    ) -> impl Future<Output = Result<FsUpload, StoreError>> + Send {
+    ) -> impl Future<Output = Result<FsUpload<F>, StoreError>> + Send {
         ready(self.begin_now(key, created_at))
     }
 
     fn delete(&self, keys: &[FileKey]) -> impl Future<Output = Result<(), StoreError>> + Send {
         ready(self.delete_now(keys))
     }
+
+    fn remove_scratch(&self) -> impl Future<Output = Result<u64, StoreError>> + Send {
+        ready(self.remove_scratch_now())
+    }
 }
 
 /// An [`FsStore`] upload: an open scratch file beside the target.
 #[derive(Debug)]
-pub struct FsUpload {
+pub struct FsUpload<F: Fs = RealFs> {
+    fs: F,
     key: FileKey,
     dir: PathBuf,
     target: PathBuf,
     scratch: PathBuf,
-    file: File,
+    file: F::File,
     mtime: SystemTime,
     created_at: Timestamp,
     written: u64,
 }
 
-impl FsUpload {
+impl<F: Fs> FsUpload<F> {
     fn commit_now(self) -> Result<FileInfo, StoreError> {
         let fail = |err: io::Error| StoreError::from_io(StoreOp::Upload, None, &err);
         let result = (|| {
@@ -495,15 +574,15 @@ impl FsUpload {
             if size != self.written {
                 return Ok(Err(size));
             }
-            rename(&self.scratch, &self.target)?;
+            rename(&self.fs, &self.scratch, &self.target)?;
             // The rename is not durable until its directory entry is.
-            sync_dir(&self.dir)?;
+            sync_dir(&self.fs, &self.dir)?;
             Ok(Ok(size))
         })();
         match result {
             // Caught before the rename, so nothing wrong was ever published.
             Ok(Err(stored)) => {
-                let removed = fs::remove_file(&self.scratch).is_ok();
+                let removed = self.fs.remove_file(&self.scratch).is_ok();
                 Err(StoreError::Corrupt {
                     key: Some(self.key),
                     cause: CorruptCause::CommitSizeMismatch {
@@ -523,14 +602,14 @@ impl FsUpload {
             }
             Err(err) => {
                 // Best effort: a scratch file that survives is invisible anyway.
-                let _removed = fs::remove_file(&self.scratch);
+                let _removed = self.fs.remove_file(&self.scratch);
                 Err(fail(err))
             }
         }
     }
 }
 
-impl Upload for FsUpload {
+impl<F: Fs> Upload for FsUpload<F> {
     fn write(&mut self, chunk: &[u8]) -> impl Future<Output = Result<(), StoreError>> + Send {
         ready(match self.file.write_all(chunk) {
             Ok(()) => {
@@ -549,7 +628,7 @@ impl Upload for FsUpload {
     }
 
     fn abort(self) -> impl Future<Output = Result<(), StoreError>> + Send {
-        ready(match fs::remove_file(&self.scratch) {
+        ready(match self.fs.remove_file(&self.scratch) {
             Ok(()) => Ok(()),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(err) => Err(StoreError::from_io(StoreOp::Upload, None, &err)),
@@ -559,6 +638,7 @@ impl Upload for FsUpload {
 
 #[cfg(unix)]
 mod engine_journal;
+mod filesystem;
 mod journal;
 
 #[cfg(unix)]

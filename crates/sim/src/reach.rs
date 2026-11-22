@@ -84,6 +84,9 @@ pub const REQUIRED: &[&str] = &[
     "degraded.PageSizeChanged",
     "commit.shrinks", // a database that loses pages: the restore truncates
     "event.Clamped",  // a clock that went back (ledger: time-provenance)
+    // Staging on the real directory store over the in-memory filesystem, and a power loss there.
+    "staging_fs.runs",
+    "staging_fs.power_loss",
 ];
 
 /// States printed even at zero but not asserted: reached rarely or never by
@@ -99,6 +102,10 @@ pub const WATCHED: &[&str] = &[
     // A torn newest staged file at boot (ledger: boot-page-size-stale-staged, killed by its named
     // test). Since main's block crash law, seeds 1..64 never tear one: 3 of seeds 1..400 do.
     "staged.Torn",
+    // On the directory store: a power loss that undid a directory entry no sync covered (a
+    // crashed upload's scratch file), and one that changed a file's bytes or mtime.
+    "staging_fs.undone_entries",
+    "staging_fs.changed_files",
 ];
 
 /// Counts of the states one run, or many summed, reached.

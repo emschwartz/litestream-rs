@@ -1082,3 +1082,37 @@ mod against {
         );
     }
 }
+
+/// A listing that misses a file a writer was renaming into place (a scheduled verify beside
+/// a live upload on a file replica) shows a hole the replica does not have: the restore
+/// gap the LazyFS rig hit, from verify's side. A hole is reported only when every listing
+/// shows one.
+#[test]
+fn a_hole_one_listing_showed_is_listed_again_and_not_reported() {
+    let inner = MemStore::new();
+    snapshot(&inner, 1);
+    l0(&inner, 2);
+    l0(&inner, 3);
+    let store = Wrapped::new(inner);
+    store.hide_once.lock().unwrap().insert(key(0, 2, 2));
+    let report = names(&store);
+    assert!(report.findings().is_empty(), "{:?}", report.findings());
+    assert!(matches!(report.latest(), PlanOutcome::Plan(_)));
+}
+
+/// A hole every listing shows is the replica's, and is reported.
+#[test]
+fn a_hole_every_listing_shows_is_reported() {
+    let inner = MemStore::new();
+    snapshot(&inner, 1);
+    l0(&inner, 3);
+    let store = Wrapped::new(inner);
+    let report = names(&store);
+    assert!(matches!(
+        only(&report),
+        Finding::Gap {
+            at_newest: true,
+            ..
+        }
+    ));
+}

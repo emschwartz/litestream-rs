@@ -951,6 +951,7 @@ version = "0.0.0"
 dependencies = [
  "lsr-core",
  "lsr-history",
+ "lsr-ltx",
  "lsr-replica",
  "lsr-sqlite",
  "lsr-store-fs",
@@ -1033,6 +1034,7 @@ dependencies = [
  "lsr-history",
  "lsr-journal",
  "lsr-ltx",
+ "lsr-store-fs",
  "lsr-wal",
  "proptest",
  "rusqlite",
@@ -1056,6 +1058,7 @@ dependencies = [
  "lsr-sqlite",
  "lsr-store-fs",
  "lsr-wal",
+ "proptest",
  "rusqlite",
  "tempfile",
  "thiserror",
