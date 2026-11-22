@@ -184,7 +184,56 @@ fn explained(hold: Hold, err: &RestoreError) -> bool {
     }
 }
 
+/// What a hold starts from, to tell whether replication moved under it.
+struct Progress {
+    replicated: Option<Txid>,
+    commits: usize,
+    retries: u64,
+}
+
+impl Progress {
+    fn of(runner: &Runner) -> Self {
+        Self {
+            replicated: runner.actor.replicated(),
+            commits: runner.w.model.commits().len(),
+            // A task that stalled reports each later failure as `Degraded`, not `Retrying`.
+            retries: runner
+                .report
+                .reach
+                .get("event.Retrying")
+                .saturating_add(runner.report.reach.get("event.Degraded")),
+        }
+    }
+}
+
 impl Runner {
+    /// Health tells the truth about a halt: when the hold kept the replica from moving while the
+    /// app committed, through at least twice the engine's stall threshold of retries, some task
+    /// must report a degraded state ([`lsr_core::STALLED_AFTER`] failures in a row of one task
+    /// degrade it; twice that many covers retries spread over two tasks).
+    fn health_tells(&mut self, hold: Hold, before: &Progress) -> Result<(), Violation> {
+        let now = Progress::of(self);
+        let retries = now.retries.saturating_sub(before.retries);
+        let threshold = u64::from(lsr_core::STALLED_AFTER.get()).saturating_mul(2);
+        let halted = now.replicated == before.replicated && now.commits > before.commits;
+        if !halted || retries < threshold || !self.actor.booted() {
+            return Ok(());
+        }
+        self.report
+            .reach
+            .bump(format!("hold.{}.halted", name(hold)));
+        if lsr_core::Task::ALL
+            .iter()
+            .any(|task| self.actor.degraded(*task).is_some())
+        {
+            return Ok(());
+        }
+        Err(Violation::HealthBlind {
+            hold: name(hold),
+            retries,
+        })
+    }
+
     /// Runs `ticks` ticks under `hold`, judging restores in the middle and at the end while it
     /// holds, then lifts it.
     pub(super) fn hold(&mut self, hold: Hold, ticks: u8) -> Result<(), Violation> {
@@ -194,6 +243,7 @@ impl Runner {
         }
         let view = self.view(hold)?;
         let flipped = self.w.remote_faults.flipped().len();
+        let before = Progress::of(self);
         let placed = self.place(hold);
         let middle = ticks / 2;
         for at in 0..ticks {
@@ -213,6 +263,7 @@ impl Runner {
             }
         }
         self.judge_held(hold, view.as_ref())?;
+        self.health_tells(hold, &before)?;
         self.lift(placed);
         let lied = self.w.remote_faults.flipped().len().saturating_sub(flipped);
         self.report.reach.add(
