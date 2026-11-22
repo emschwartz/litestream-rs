@@ -85,6 +85,8 @@ also caught by a core test) and missed `actor.rs:573:13`. The second run execute
 | Where | Mutation | Why |
 | --- | --- | --- |
 | `layout.rs` `FileKey::from_str` | `(raw << 4) \| digit` becomes `^` | The shift leaves the low nibble zero and `digit` is below 16, so the operands never overlap. |
+| `plan.rs` `extend` | `>` becomes `>=` in the preference and reach comparisons | `preference` ends in the file's own range, so two distinct files never tie; a file ending at the reach can win only when nothing passes it, and `push` then refuses it as the original's `None` does. |
+| `plan.rs` `Sweep::next` | `<` becomes `<=` | `sweep_order` ends in the key, unique per file, so two heads never compare equal. |
 
 ### In the store conformance harness (caught since)
 
