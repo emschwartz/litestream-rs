@@ -38,7 +38,7 @@ use lsr_core::{
 };
 use lsr_local::{
     ClearError, CreateError, Existing, FileSink, IntegrityCheck, IntegrityFailure, PublishError,
-    clear_journal_files, preflight, preflight_over,
+    clear_journal_files, preflight,
 };
 use lsr_store_fs::FsStore;
 use lsr_store_s3::{ConfigError, CredentialError, S3Credentials};
@@ -358,6 +358,13 @@ pub enum CliError {
         /// The path, expanded.
         path: PathBuf,
     },
+    /// A replica URL with a timestamp and a replica that holds nothing (Go's
+    /// `CalcRestoreTarget`, which `-if-replica-exists` does not excuse).
+    #[error("no backups found")]
+    NoBackupsFound,
+    /// The output's parent directory could not be created.
+    #[error("create parent directory: {0}")]
+    Parent(#[source] io::Error),
     /// The daemon did not start: its command line, its config, or its signal handlers.
     #[error("replicate: {0}")]
     Daemon(#[from] lsr_sidecar::SidecarError),
@@ -474,6 +481,8 @@ pub fn exit_for_error(error: &CliError) -> Exit {
         | CliError::NoDatabase
         | CliError::DatabasePath(_)
         | CliError::NotInConfig { .. } => Exit::Refused,
+        CliError::Parent(_) => Exit::Environment,
+        CliError::NoBackupsFound => Exit::Refused,
         CliError::Restore(err) => match err {
             RestoreError::NoPlan(_)
             | RestoreError::File { .. }
@@ -549,7 +558,10 @@ async fn restore_command(args: Box<RestoreArgs>) -> Result<Done, CliError> {
         json,
         force,
         parallelism,
+        txid_and_timestamp,
+        timestamp_given,
     } = *args;
+    let url_timestamp = timestamp_given && matches!(from, RestoreFrom::Url(_));
     let how = How {
         target,
         as_of_inside,
@@ -561,6 +573,8 @@ async fn restore_command(args: Box<RestoreArgs>) -> Result<Done, CliError> {
         } else {
             Existing::Empty
         },
+        txid_and_timestamp,
+        url_timestamp,
     };
     let (opening, output) = match resolve_from(from, output, no_expand_env, if_db_not_exists)? {
         Resolution::Open(opening, output) => (opening, output),
@@ -736,6 +750,8 @@ fn no_ltx_folder(error: CliError, path: PathBuf) -> CliError {
             source: Box::new(no_ltx_folder(*source, path)),
         },
         other @ (CliError::NoPlan(_)
+        | CliError::Parent(_)
+        | CliError::NoBackupsFound
         | CliError::Config(_)
         | CliError::Plan(_)
         | CliError::NoDatabase
@@ -780,6 +796,10 @@ struct How {
     integrity_check: IntegrityCheck,
     if_replica_exists: bool,
     existing: Existing,
+    txid_and_timestamp: bool,
+    /// A `-timestamp` with a replica URL: Go's `loadFromURL` then refuses an empty replica
+    /// first (`CalcRestoreTarget`, "no backups found"), whatever `-if-replica-exists` says.
+    url_timestamp: bool,
 }
 
 #[expect(
@@ -802,20 +822,30 @@ async fn restore_on<S: ObjectStore>(
         integrity_check,
         if_replica_exists,
         existing,
+        txid_and_timestamp,
+        url_timestamp,
     } = how;
+    refuse_empty_for_timestamp(store, url_timestamp).await?;
     let start = started();
     let cleared = if clear_journal_files_first {
         clear_journal_files(output)?
     } else {
         Vec::new()
     };
+    let created = create_parents(output).map_err(CliError::Parent)?;
     let attempt = async {
         let sink = FileSink::create_over(output, existing)?.with_integrity_check(integrity_check);
+        if txid_and_timestamp {
+            return Err(UsageError::GoTxidAndTimestamp.into());
+        }
         let options = RestoreOptions { as_of_inside };
         let restored = restore_with(store, target, options, sink).await?;
         Ok::<_, CliError>(restored)
     }
     .await;
+    if attempt.is_err() {
+        remove_created(&created);
+    }
     match attempt {
         Ok(restored) => Ok(Finished::Restored {
             restored,
@@ -837,17 +867,65 @@ async fn restore_on<S: ObjectStore>(
     }
 }
 
+/// Go's refusal of an empty replica when a URL restore names a timestamp.
+async fn refuse_empty_for_timestamp<S: ObjectStore>(
+    store: &S,
+    asked: bool,
+) -> Result<(), CliError> {
+    if asked && Inventory::load(store).await?.newest().is_none() {
+        return Err(CliError::NoBackupsFound);
+    }
+    Ok(())
+}
+
+/// Creates the output's missing parent directories, as Go's restore does (mode 0700,
+/// `replica.go:728`), and fsyncs the directory that holds each new one, so the output's own
+/// directory sync later makes a durable path. Returns what it created, outermost first.
+fn create_parents(output: &Path) -> io::Result<Vec<PathBuf>> {
+    use std::os::unix::fs::DirBuilderExt as _;
+    let mut missing = Vec::new();
+    let mut at = output.parent();
+    while let Some(dir) = at.filter(|d| !d.as_os_str().is_empty()) {
+        if dir.symlink_metadata().is_ok() {
+            break;
+        }
+        missing.push(dir.to_path_buf());
+        at = dir.parent();
+    }
+    missing.reverse();
+    let mut created = Vec::new();
+    for dir in missing {
+        std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
+        created.push(dir.clone());
+        if let Some(parent) = dir.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::File::open(parent)?.sync_all()?;
+        }
+    }
+    Ok(created)
+}
+
+/// Removes the directories [`create_parents`] made for a restore that failed, innermost
+/// first; a directory something else has written into since stays.
+fn remove_created(created: &[PathBuf]) {
+    for dir in created.iter().rev() {
+        if std::fs::remove_dir(dir).is_err() {
+            break;
+        }
+    }
+}
+
 /// The restore's checks and plan, without its writes: the output is checked
 /// as [`FileSink::create`] would, journal files are listed instead of removed, and
 /// the replica is listed and planned as [`restore`] plans its first attempt.
 async fn plan_on<S: ObjectStore>(store: &S, output: &Path, how: How) -> Result<Finished, CliError> {
-    let journal_files_to_remove = preflight_over(output, how.existing)?;
-    if let Some(path) = journal_files_to_remove
-        .first()
-        .filter(|_| !how.clear_journal_files_first)
-    {
-        return Err(CliError::JournalFile { path: path.clone() });
+    // Go's dry run plans and prints without looking at the output (`restore.go:119-136`):
+    // an output a restore would refuse is not a reason to refuse the plan. The journal files
+    // are listed for --clear-journal-files, when they can be.
+    refuse_empty_for_timestamp(store, how.url_timestamp).await?;
+    if how.txid_and_timestamp {
+        return Err(UsageError::GoTxidAndTimestamp.into());
     }
+    let journal_files_to_remove = preflight(output).unwrap_or_default();
     // As the restore does: a listing that shows a gap may have raced a writer's rename (a
     // directory read can miss the new file and see a later one), so the plan is made again
     // on a fresh listing, and a gap every listing shows is the answer.

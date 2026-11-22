@@ -61,6 +61,11 @@ pub struct RestoreArgs {
     pub force: bool,
     /// `-parallelism` was given; Go warns that it has no effect.
     pub parallelism: bool,
+    /// A non-zero `-txid` and a `-timestamp` both: Go refuses them only when it plans or
+    /// restores, after the config, the skip and the output checks, so the run does too.
+    pub txid_and_timestamp: bool,
+    /// `-timestamp` was given, with or without a `-txid`.
+    pub timestamp_given: bool,
 }
 
 /// Go's `-txid` (`txidVar.Set`): sixteen hex digits, any case, zero included.
@@ -163,6 +168,8 @@ pub fn parse(args: &[String]) -> Result<Restore, UsageError> {
         }
     };
     let target = target(&set)?;
+    let txid_and_timestamp = matches!(target, RestoreTarget::Txid(_))
+        && set.value("timestamp").is_some_and(|t| !t.is_empty());
     let as_of_inside = match (boolean("allow-earlier")?, target) {
         (false, _) => AsOfInside::Refuse,
         (true, RestoreTarget::AsOf(_)) => AsOfInside::TakeEarlier,
@@ -189,6 +196,8 @@ pub fn parse(args: &[String]) -> Result<Restore, UsageError> {
         json: boolean("json")?,
         force: boolean("force")?,
         parallelism: set.visited("parallelism"),
+        txid_and_timestamp,
+        timestamp_given: set.value("timestamp").is_some_and(|t| !t.is_empty()),
     })))
 }
 
@@ -221,7 +230,8 @@ fn from(set: &Set) -> Result<RestoreFrom, UsageError> {
     }
 }
 
-/// `-txid` and `-timestamp`. Go's zero txid means the latest.
+/// `-txid` and `-timestamp`. Go's zero txid means the latest; with both, the txid is kept
+/// and [`RestoreArgs::txid_and_timestamp`] says the run must refuse.
 fn target(set: &Set) -> Result<RestoreTarget, UsageError> {
     let timestamp = match set.value("timestamp").filter(|t| !t.is_empty()) {
         Some(text) => {
@@ -234,8 +244,7 @@ fn target(set: &Set) -> Result<RestoreTarget, UsageError> {
         .and_then(|text| u64::from_str_radix(&text, 16).ok())
         .and_then(Txid::new);
     match (txid, timestamp) {
-        (Some(_), Some(_)) => Err(UsageError::GoTxidAndTimestamp),
-        (Some(txid), None) => Ok(RestoreTarget::Txid(txid)),
+        (Some(txid), _) => Ok(RestoreTarget::Txid(txid)),
         (None, Some(at)) => Ok(RestoreTarget::AsOf(at)),
         (None, None) => Ok(RestoreTarget::Latest),
     }

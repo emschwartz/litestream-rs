@@ -39,6 +39,8 @@ fn restore_latest_is_the_default_target() {
             json: false,
             force: false,
             parallelism: false,
+            txid_and_timestamp: false,
+            timestamp_given: false,
         })))
     );
 }
@@ -252,14 +254,20 @@ fn missing_required_flag_for_every_required_flag() {
     );
 }
 
+/// Go refuses a txid and a timestamp together only when it plans or restores, so the parse
+/// keeps both and marks the line; a zero txid is no txid.
 #[test]
 fn two_targets_at_once() {
-    assert_eq!(
-        usage(
-            "restore --replica r --output o --txid 0000000000000001 --timestamp 2026-01-01T00:00:00Z"
-        ),
-        UsageError::GoTxidAndTimestamp
-    );
+    let marked = |line: &str| match parsed(line) {
+        Ok(Command::Restore(args)) => args.txid_and_timestamp,
+        other => panic!("{line}: {other:?}"),
+    };
+    assert!(marked(
+        "restore --replica r --output o --txid 0000000000000001 --timestamp 2026-01-01T00:00:00Z"
+    ));
+    assert!(!marked(
+        "restore --replica r --output o --txid 0000000000000000 --timestamp 2026-01-01T00:00:00Z"
+    ));
 }
 
 #[test]

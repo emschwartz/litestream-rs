@@ -205,6 +205,8 @@ fn how(target: RestoreTarget) -> How {
         integrity_check: IntegrityCheck::Off,
         if_replica_exists: false,
         existing: lsr_local::Existing::Empty,
+        txid_and_timestamp: false,
+        url_timestamp: false,
     }
 }
 
