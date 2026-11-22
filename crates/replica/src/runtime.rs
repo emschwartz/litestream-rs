@@ -237,12 +237,21 @@ mod fake {
     }
 
     impl Park for FakeTime {
+        /// As the system park: a clock that steps back mid-wait moves the wake back with it.
         fn park(&self, until: Option<Timestamp>) {
             let mut state = lock(&self.state);
+            let mut until = until;
+            let mut seen = self.clock.now();
             loop {
                 if std::mem::take(&mut state.woken) {
                     return;
                 }
+                let now = self.clock.now();
+                until = until.map(|at| {
+                    at.checked_sub(seen.saturating_duration_since(now))
+                        .unwrap_or(now)
+                });
+                seen = now;
                 if let Some(until) = until {
                     if self.clock.now() >= until {
                         return;
@@ -285,6 +294,14 @@ mod fake {
         pub fn advance(&self, by: Duration) {
             let _state = lock(&self.time.state);
             self.time.clock.advance(by);
+            self.time.signal.notify_all();
+        }
+
+        /// Moves the clock back, as a wall clock that NTP corrects steps back, and wakes a park.
+        pub fn step_back(&self, by: Duration) {
+            let _state = lock(&self.time.state);
+            let now = self.time.clock.now();
+            self.time.clock.set(now.checked_sub(by).unwrap_or(now));
             self.time.signal.notify_all();
         }
 
