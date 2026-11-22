@@ -1610,6 +1610,7 @@ impl Runner {
             self.w.remote_recorder.counts(),
             spent,
             &self.w.lost,
+            &self.w.foreign_sizes,
         )?;
         self.idle()?;
         self.replica_page_size().map(drop)
