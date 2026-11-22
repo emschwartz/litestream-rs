@@ -1997,8 +1997,23 @@ impl Checkpointer for SimCheckpointer {
 
     fn checkpoint(&mut self, mode: CheckpointMode) -> Result<CheckpointRun, SourceError> {
         let mut state = lock(&self.state);
-        state.faults.take(SourceOp::Checkpoint)?;
+        // lsr-sqlite releases the read transaction before it asks SQLite and takes it again
+        // after, whatever SQLite answered: a failed checkpoint still starts a new hold. A lost
+        // retake ran the checkpoint and leaves the read transaction lapsed, for the next read
+        // to take again.
+        let injected = state.faults.take(SourceOp::Checkpoint);
         state.end(Conn::Ours);
+        match injected {
+            Err(SourceError::ReadTxLost) => {
+                state.checkpoint(Conn::Ours, mode.into());
+                return Err(SourceError::ReadTxLost);
+            }
+            Err(err) => {
+                state.begin(Conn::Ours);
+                return Err(err);
+            }
+            Ok(()) => {}
+        }
         let failing = state.faults.truncate_fails;
         let numbers = state.checkpoint(Conn::Ours, mode.into());
         state.begin(Conn::Ours);

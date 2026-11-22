@@ -90,7 +90,7 @@ fn store_cells() -> impl Iterator<Item = (String, Cell)> {
 fn every_cell_is_drawn_or_says_why_not() {
     // Drawn, known wrong, unmodelled. A move in these numbers is a change to the domain: say
     // it in the pull request.
-    assert_eq!(tally(source_cells()), [21, 1, 4], "source cells");
+    assert_eq!(tally(source_cells()), [22, 1, 3], "source cells");
     assert_eq!(tally(store_cells()), [40, 1, 0], "store cells");
     // Each SQLite call fails at least one way where known failures are counted.
     for op in SOURCE_OPS {
