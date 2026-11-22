@@ -1,13 +1,13 @@
 diff --git a/crates/core/src/actor/lag.rs b/crates/core/src/actor/lag.rs
-index 683c7c1..a5e5abc 100644
+index 51f819d..c0dff37 100644
 --- a/crates/core/src/actor/lag.rs
 +++ b/crates/core/src/actor/lag.rs
-@@ -206,7 +206,7 @@ impl Actor {
-     /// that times out at boot does not hold the application).
-     #[must_use]
-     pub const fn boot_judged(&self) -> bool {
--        self.kept.listed || (self.kept.boot_failed && self.kept.refused_at_boot.is_none())
-+        self.kept.listed
+@@ -212,7 +212,7 @@ impl Actor {
+     pub fn boot_judged(&self) -> bool {
+         let settled = self.pending().is_none() || self.kept.sync_failed_after_listing;
+         (self.kept.listed && settled)
+-            || (self.kept.boot_failed && self.kept.refused_at_boot.is_none())
++            || false
      }
  
      /// Whether an engine of this process has listed the replica.
