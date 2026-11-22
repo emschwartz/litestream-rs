@@ -310,6 +310,7 @@ fn cfg() -> ActorConfig {
         shutdown_grace: Duration::from_secs(10),
         // The tests written before the configurable responses expect a stop.
         responses: Responses::STRICT,
+        max_unreplicated_age: crate::failstop::MaxUnreplicatedAge::DEFAULT,
     }
 }
 
@@ -2021,6 +2022,7 @@ fn a_crash_between_the_drop_and_the_snapshot_boots_clean() {
 mod checkpoint_failed;
 mod degraded;
 mod index_reset;
+mod lag;
 mod listing;
 mod live;
 mod newest_replica_file;

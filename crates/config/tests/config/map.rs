@@ -13,7 +13,7 @@ use lsr_config::{
 use lsr_core::{
     Interval, L0Retention, Maintenance, OtherWriter, Response, Responses, RetentionMode,
 };
-use lsr_replica::{NonZeroDuration, ReaderTracking};
+use lsr_replica::{IfReplicationStops, MaxUnreplicatedAge, NonZeroDuration, ReaderTracking};
 use lsr_store_s3::{Provider, UrlStyle};
 use tempfile::TempDir;
 
@@ -361,6 +361,45 @@ fn app_autocheckpoint_defaults_to_sqlite_s_and_can_be_off() {
             .any(|p| p.path.to_string() == "litestream-rs.app-autocheckpoint"),
         "{problems:#?}"
     );
+}
+
+/// The fail-stop setting (`docs/proposals/fail-stop.md`): `hold-start` and 10 minutes unless
+/// stated; an unknown value, or a bound below five minutes, is refused.
+#[test]
+fn if_replication_stops_defaults_to_hold_start_and_the_bound_to_ten_minutes() {
+    let config = |head: &str| one(&format!("{head}{}", db_with(""))).config().clone();
+    let default = config("");
+    assert_eq!(default.if_replication_stops, IfReplicationStops::HoldStart);
+    assert_eq!(default.max_unreplicated_age, MaxUnreplicatedAge::DEFAULT);
+    for (value, want) in [
+        ("report", IfReplicationStops::Report),
+        ("hold-start", IfReplicationStops::HoldStart),
+        ("stop-app", IfReplicationStops::StopApp),
+    ] {
+        let got = config(&format!(
+            "litestream-rs:\n  if-replication-stops: {value}\n"
+        ));
+        assert_eq!(got.if_replication_stops, want, "{value}");
+    }
+    let bound = config("litestream-rs:\n  max-unreplicated-age: 1h\n").max_unreplicated_age;
+    assert_eq!(bound.get(), std::time::Duration::from_secs(3600));
+    for (head, key) in [
+        (
+            "litestream-rs:\n  if-replication-stops: always\n",
+            "if-replication-stops",
+        ),
+        (
+            "litestream-rs:\n  max-unreplicated-age: 4m59s\n",
+            "max-unreplicated-age",
+        ),
+    ] {
+        let problems = refused(&format!("{head}{}", db_with("")));
+        let path = format!("litestream-rs.{key}");
+        assert!(
+            problems.iter().any(|p| p.path.to_string() == path),
+            "{head}: {problems:#?}"
+        );
+    }
 }
 
 /// Go's `TestNewDBFromConfig_MetaPathExpansion`.

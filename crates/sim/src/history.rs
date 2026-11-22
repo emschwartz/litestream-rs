@@ -43,7 +43,7 @@ pub const INSTANTS: u32 = 3;
 pub const BOUNDARIES: usize = 8;
 
 /// The digest of a model image.
-fn image_digest(image: &PageImage) -> Digest {
+pub(crate) fn image_digest(image: &PageImage) -> Digest {
     let pages: Vec<_> = (1..=image.db_size())
         .filter_map(|pgno| image.page(pgno))
         .collect();

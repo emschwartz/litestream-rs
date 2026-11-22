@@ -317,6 +317,8 @@ const RUST: &[Key] = &[
     key("app-readers", Str, Implemented),
     key("app-autocheckpoint", Str, Implemented),
     key("responses", Map(Section::Responses), Implemented),
+    key("if-replication-stops", Str, Implemented),
+    key("max-unreplicated-age", Duration, Implemented),
 ];
 
 /// One per field of the replicator's responses.

@@ -60,8 +60,8 @@ pub use error::{RestoreError, StartError};
 pub use events::{ChannelSink, Event, EventReceiver, EventSink};
 pub use exec::block_on;
 pub use health::{
-    AppNotice, Booted, Counters, Gone, Health, Mismatch, OpCounters, Phase, Stopped, StoreCounters,
-    Verification, VerifyFailure, VerifyOutcome, VerifyRuns,
+    AppNotice, Booted, Counters, FailStop, Gone, Health, Mismatch, OpCounters, Phase, Stopped,
+    StoreCounters, Verification, VerifyFailure, VerifyOutcome, VerifyRuns,
 };
 pub use readers::ReaderGuard;
 pub use replicator::{FinalSync, Replicator};
@@ -73,9 +73,10 @@ pub use store::{BoxFuture, DynStore, DynUpload};
 
 pub use lsr_core::{
     AppCheckpoint, AppCheckpoints, AsOfInside, CheckpointConfig, Clock, Degraded, Denied, Depth,
-    Entropy, L0Retention, Maintenance, OtherWriter, PersistentCause as DegradedCause, Report,
-    Response, Responses, RestoreOptions, RestoreTarget, Restored, Severity, SnapshotCause,
-    SnapshotCauseKind, SnapshotCounts, Stall, StopCause, Task,
+    Entropy, Gate, IfReplicationStops, L0Retention, Maintenance, MaxUnreplicatedAge, OtherWriter,
+    PersistentCause as DegradedCause, Report, Response, Responses, RestoreOptions, RestoreTarget,
+    Restored, Severity, SnapshotCause, SnapshotCauseKind, SnapshotCounts, Stall, StopCause, Task,
+    Trip,
 };
 pub use lsr_ltx::{Timestamp, Txid};
 pub use lsr_sqlite::{DatabaseFile, SetupError, app_connection_raw, ffi};
