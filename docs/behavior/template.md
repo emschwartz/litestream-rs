@@ -6,7 +6,7 @@ Version 3. What changed from version 2 is listed at the end of section 7.
 
 **Scope, stated plainly.** Sections 3 to 5 account for every circumstance the code distinguishes: every variant of its closed enums has a row. That is not every circumstance the world produces. Circumstances the code does not distinguish (a paused process, two processes on one staging directory, a volume snapshot put back) are in section 2 and in the `WORLD` rows of section 3, most of them marked untested or unknown. The list of circumstances is open and will stay open; section 7 says what would shrink it.
 
-**Read at** `origin/main` 50fb763. Paths are under `crates/` unless they start with `docs/` or `scripts/`. Nothing was built or run to write it: every statement is a reading of the code, of a named test, or of a named report. Code is cited by file and symbol, never by line. Everything cited is a path in the repository, a test name, a commit, or a pull request or issue number on emschwartz/litestream-rs. Two measurements from earlier drafts were cut because their reports are not in the repository.
+**Read at** `origin/main` 50fb763; the rows #104 changed were read again at dd1d89b. Paths are under `crates/` unless they start with `docs/` or `scripts/`. Nothing was built or run to write it: every statement is a reading of the code, of a named test, or of a named report. Code is cited by file and symbol, never by line. Everything cited is a path in the repository, a test name, a commit, or a pull request or issue number on emschwartz/litestream-rs. Two measurements from earlier drafts were cut because their reports are not in the repository.
 
 **Evidence marks.** A row's Mark column says what a test has shown, not what the row claims. Three marks can be earned, and they are separate:
 
@@ -35,8 +35,8 @@ Evidence is cited as: a test name with its crate ("sim" is `sim/tests/sim`, "cor
 
 | Mark | Rows |
 |---|---|
-| D R | 52 |
-| D | 52 |
+| D R | 53 |
+| D | 51 |
 | D S | 4 |
 | D S R | 1 |
 | untested | 22 |
@@ -53,7 +53,6 @@ Evidence is cited as: a test name with its crate ("sim" is `sim/tests/sim`, "cor
 | #86 | `claude/checker-hygiene` | A per-cause snapshot counter in health and `/metrics`; a simulator oracle that fails a snapshot no injected fault justifies; canaries for the planted-bug runner |
 | #89 | `claude/rewound-snapshot` | A staged snapshot of a rewound database survives a restart; a pinned position follows a new WAL header over a generation with no frames |
 | #97 | `claude/crash-loop-cost` | Boot removes a killed process's scratch files and aborts its multipart uploads; prune and maintenance get a share of ticks while uploads are backlogged |
-| WSF | `claude/wal-sync-failed` (local, not pushed; tracked in issue #99) | A failed WAL fsync is recorded on disk and reported as a degraded state that survives a restart |
 
 A planned engine journal is not described here. It is a design, not behaviour.
 
@@ -70,7 +69,7 @@ Each guarantee is stated as something an outside observer can check, the conditi
 | G2 latest does not go backwards unreported | None shown on main | The exceptions' signals can be missing (D17, C3) |
 | G3 as-of returns nothing begun after the instant | None since #98 | Not checkable by the simulator (C7) |
 | G4 lag | No tested bound | N1 |
-| G7 health is not clean while replication is halted | Yes | D12, N1, D2 |
+| G7 health is not clean while replication is halted | Yes | N1, D2 |
 
 Version 0.0.0: these are what the code is built to deliver.
 
@@ -178,7 +177,7 @@ After a rewind the replica still holds the lost branch. Its transactions stay re
 
 **Counted against G0.**
 - UP-11, unseen case, and MAINT-11: after files are removed from the replica while the engine runs, a restore of the latest state refuses with `Gap` until the next scheduled snapshot, up to 24 hours, behind `/healthz` 200. No expected-fail test.
-- D2: after a failed WAL fsync and a restart, frames that never reached disk can be uploaded, so `replicated_txid` can name commits the database then loses. No expected-fail test.
+- D2: after a failed WAL fsync and a restart before the engine's TRUNCATE, frames that never reached disk can be uploaded, so `replicated_txid` can name commits the database then loses. Expected-fail tests (ignored): sim `wal_fsync_fails_then_restart`, sqlite `a_restart_after_a_failed_wal_sync_ships_no_unproven_frame`. Within one process the failure is handled (RUN-3).
 
 **Evidence.** Oracle `LatestLostAck` (the latest restore is not older than the newest transaction the engine acknowledged) and oracle `RestoreRefused` on the simulator runs listed under G1. Blind spot C2: `LatestLostAck` forgets every acknowledgement at every power loss.
 
@@ -187,11 +186,12 @@ After a rewind the replica still holds the lost branch. Its transactions stay re
 **Statement.** If the application has committed and no commit has reached the replica for longer than the retry cap (5 minutes) plus one poll interval, then at least one of these holds: `/healthz` is not 200; `Health.degraded` is not empty; `lsr_unreplicated_age_seconds` exceeds that time.
 
 **Counted against G7.**
-- D12: a fault whose policy is a plain retry never becomes degraded. A full disk, a failed WAL fsync or permanently held readers halt replication with `/healthz` 200 and no degraded cause.
-- N1: the age gauge reads 0 until a process's first boot completes, and restarts from "now" at every restart. Together with D12, a process that starts with the store unreachable shows all three signals clean.
-- D2: the fsync failure itself is forgotten by a restart.
+- N1: the age gauge reads 0 until a process's first boot completes, and restarts from "now" at every restart. A process that starts with the store unreachable shows a clean age gauge; since #104 its boot task (the sync task) is degraded as a stall from its 8th failed boot.
+- D2: the WAL fsync failure itself is forgotten by a restart before the TRUNCATE.
 
-**Evidence.** None. No test asserts any signal over a halted engine for longer than one retry. **untested.** Tracked in issue #99.
+D12 is closed by #104: every fault whose policy is to retry degrades its task as `Stalled(<fault>)` at the 8th failure in a row (`STALLED_AFTER` in `core/src/fault.rs`). From a 1 s interval the waits before the 8th failure sum to 127 s, inside the statement's 5 minutes. A failed WAL fsync is degraded at once (`wal_sync_failed`). A wait a maintenance level keeps never stalls; maintenance blocks no commit's way to the replica.
+
+**Evidence.** core `every_retried_fault_stalls_and_no_stall_stops` (every `Fault` either is persistent, stalls, or is the end of a drain), core `a_retried_fault_that_persists_ends_degraded_as_a_stall` (eight injected `LocalDiskFull` on one task, then the degraded event and `Actor::degraded`). Both act on the policy and the actor; no test runs a halted engine for 5 minutes and reads `/healthz`. Mark: **D** for the routing, **untested** end to end. Tracked in issue #99.
 
 ### Two further properties
 
@@ -215,7 +215,7 @@ The simulator can inject exactly these: `Op` (commit, spill, vacuum, shrink, oth
 | Power loss, honest disk. Each block written since the last fsync of its file keeps its old or new bytes independently; the file length is drawn separately | In | Rows BOOT-3 to BOOT-11 | Block crash law at 512 and 4096 bytes: `sqlite/src/testing/vfs.rs`, sim `block_law_campaign`, sqlite `crash_cycle_campaign` | The law is taken from the ALICE model (Pillai et al., OSDI 2014). **assumed**: it has not been observed on real disks |
 | Power loss on the real binary | In | Same | LazyFS (`scripts/lazyfs.py`): clear-cache after kill, torn-seq and torn-op on the WAL | LazyFS passes metadata operations straight to the backing filesystem. A missing directory fsync cannot be seen |
 | A lost directory entry: a rename or unlink not followed by a directory fsync | Partly | Commit of a staged file fsyncs the file, renames, fsyncs the directory (`store-fs/src/lib.rs`). Deletes are not followed by a directory fsync (`store-fs/src/lib.rs`) | None. The simulator treats a delete as durable at once | A deleted staged file returning after power loss is **unknown** (section 6, D11) |
-| fsync of the WAL fails | In, within one process | RUN-3 | sqlite `a_failed_wal_sync_stages_nothing_of_its_generation_and_snapshots_after_a_truncate` | Forgotten by a restart. **known wrong** (D2) |
+| fsync of the WAL fails | In, within one process | RUN-3 | sqlite `a_failed_wal_sync_stages_nothing_of_its_generation_and_snapshots_after_a_truncate`; sim `wal_fsync_fails` with the simulator's lost writeback | Forgotten by a restart before the TRUNCATE. **known wrong** (D2), expected-fail tests ignored |
 | fsync of a staged file fails | In | RUN-15 | sim `fsync_fails_once` | |
 | fsync of the database file fails inside a checkpoint | Unclear | Retried as local I/O (CKPT-8) | None | **unknown** whether SQLite's next checkpoint copies the pages again (D8) |
 | Disk full | In | RUN-14 | sim `disk_full_on_staging` | Never escalates past "retrying" |
@@ -311,9 +311,9 @@ Five tasks keep separate retry waits and degraded states: sync, checkpoint, uplo
 
 | Signal | Where | Meaning |
 |---|---|---|
-| `Health.degraded[task]`, `/healthz` `degraded[]`, `lsr_degraded{task,cause}` | `replica/src/health.rs`, `sidecar/src/health.rs` | A persistent cause the task keeps retrying. Cause names: `credentials`, `store_refused`, `remote_corrupt`, `other_writer`, `remote_regressed`, `wal_corrupt`, `wal_truncated`, `wal_unlinked`, `page_size_changed`, `database_page_mismatch`, `bug` |
+| `Health.degraded[task]`, `/healthz` `degraded[]`, `lsr_degraded{task,cause}` | `replica/src/health.rs`, `sidecar/src/health.rs` | A persistent cause the task keeps retrying. Cause names: `credentials`, `store_refused`, `remote_corrupt`, `other_writer`, `remote_regressed`, `wal_corrupt`, `wal_truncated`, `wal_unlinked`, `wal_sync_failed`, `page_size_changed`, `database_page_mismatch`, `bug`; and for a stall (a retried fault that failed 8 times in a row), the fault's name: `store_transient`, `store_throttled`, `remote_object_missing`, `upload_ambiguous`, `upload_checksum_mismatch`, `staged_lost`, `local_disk_full`, `local_io`, `local_fsync_failed`, `sqlite_busy`, `readers_held`, `wal_moved`, `wal_index_inconsistent`, `wal_changed_under_read`, `nothing_to_snapshot`, `read_tx_lost` (`cause_name`, `stall_name` in `sidecar/src/health.rs`) |
 | `Health.phase`, `lsr_db_state`, `lsr_stopped`, `/healthz` status | `sidecar/src/health.rs` | 200 while booting, running, draining, degraded or waiting for a file. 503 once any database stopped, failed to start, or lost its thread |
-| `lsr_retries_total`, log line "retrying" | `sidecar/src/logging.rs` | A fault whose policy is a plain retry. It raises no degraded state and no stop, however long it lasts (D12). Its only other trace is lag, and the lag gauge is unreliable before the first boot (N1) |
+| `lsr_retries_total`, log line "retrying" | `sidecar/src/logging.rs` | A fault whose policy is to retry, for its first 7 failures in a row on one task. From the 8th the task is degraded as a stall (row above) and stays so until it succeeds. No retried fault stops the engine |
 | `lsr_resnapshot_pending{cause}`, log "snapshot required", boot log `cause=` | `sidecar/src/health.rs` | The next file is a snapshot, and why |
 | `lsr_unreplicated_age_seconds`, `lsr_replicated_txid`, `lsr_wal_bytes` | `Health` in `replica/src/health.rs` | Lag and local growth. The age gauge prints 0 for "unknown" as well as for "caught up" (N1) |
 | `lsr_verify_failing`, `lsr_verify_failing_txid`, `lsr_verify_failing_page` | `replica/src/health.rs` | The scheduled verify found the replica restores something the live database never held |
@@ -326,7 +326,9 @@ There is no per-cause count of snapshots taken on main. It is on #86 (`lsr_snaps
 
 <!-- enum: Fault -->
 
-Every `Fault` variant (`core/src/fault.rs`), its policy (`policy`, `fault.rs`, one exhaustive match), and the rows that describe it. sim `every_fault_has_a_scenario_or_a_reason` asserts each variant has a scenario or a stated reason for none. One variant is covered by a reason only: `Bug`, on the ground that oracle `BugFault` fails every run that meets it. Having a scenario means D at most; see the marks.
+Every `Fault` variant (`core/src/fault.rs`), its policy (`policy`, `fault.rs`, one exhaustive match), and the rows that describe it. sim `every_fault_has_a_scenario_or_a_reason` asserts each variant has a scenario or a stated reason for none. Two variants are covered by a reason only: `Bug`, on the ground that oracle `BugFault` fails every run that meets it, and `WalSyncFailed`, whose scenario (sim `wal_fsync_fails`) holds under the default responses only, since under responses that stop the run's final restart meets D2 (`fault_reason` in `sim/src/scenario/faults.rs`). Having a scenario means D at most; see the marks.
+
+Every policy written "retry" below also stalls: from the 8th failure in a row on one task the task is degraded `Stalled(<fault>)`, keeps the fault's own wait, and never stops (`Actor::stalled` in `core/src/actor.rs`). core `every_retried_fault_stalls_and_no_stall_stops` checks every variant.
 
 | `Fault` | Policy | Rows |
 |---|---|---|
@@ -343,7 +345,8 @@ Every `Fault` variant (`core/src/fault.rs`), its policy (`policy`, `fault.rs`, o
 | `StagedLost` | retry, then a snapshot on the second failed read | BOOT-5, RUN-16, RUN-17, RUN-18 |
 | `LocalDiskFull` | retry | RUN-14, UP-15 |
 | `LocalIo` | retry | RUN-13, BOOT-12, CKPT-8 |
-| `LocalFsyncFailed` | retry | RUN-3, RUN-15 |
+| `LocalFsyncFailed` | retry | RUN-15 |
+| `WalSyncFailed` | persistent: `WalSyncFailed` | RUN-3 |
 | `SqliteBusy` | retry | RUN-13, CKPT-2 |
 | `ReadersHeld` | retry | CKPT-3 |
 | `WalMoved` | retry | RUN-13, RUN-8 |
@@ -363,7 +366,7 @@ Every `Fault` variant (`core/src/fault.rs`), its policy (`policy`, `fault.rs`, o
 
 <!-- enum: PersistentCause -->
 
-`Responses` (`core/src/fault.rs`) has one field per cause. `GO_LIKE` is the default: keep trying on every cause, stop on another writer. `STRICT` stops on every cause. Evidence that each preset routes every cause as it says: sim `under_strict_every_persistent_scenario_stops_with_its_cause`, `under_go_like_every_persistent_scenario_degrades_and_the_oracle_holds`. Most of those scenarios inject one error; they show routing (D), not behaviour under a lasting cause.
+`Responses` (`core/src/fault.rs`) has one field per cause but `Stalled`, which is not configurable. `GO_LIKE` is the default: keep trying on every cause, stop on another writer. `STRICT` stops on every cause. Evidence that each preset routes every cause as it says: sim `under_strict_every_persistent_scenario_stops_with_its_cause`, `under_go_like_every_persistent_scenario_degrades_and_the_oracle_holds`. Most of those scenarios inject one error; they show routing (D), not behaviour under a lasting cause.
 
 | `PersistentCause` | Default | What "keep trying" does (`action`, `fault.rs`) | Clears when |
 |---|---|---|---|
@@ -375,9 +378,11 @@ Every `Fault` variant (`core/src/fault.rs`), its policy (`policy`, `fault.rs`, o
 | `WalCorrupt` | keep trying | Rescans. Nothing is staged past the bad frame | The frame verifies, or the WAL starts a new generation |
 | `WalTruncated` | keep trying | Rescans | The WAL covers its committed end again, or a new generation |
 | `WalUnlinked` | keep trying | Retries | Never by itself: the file is gone. An operator restarts the application and the replicator |
+| `WalSyncFailed` | keep trying (`litestream-rs.responses.wal-sync-failed`) | Stages nothing more from the WAL generation the failed sync covered. The retry runs a TRUNCATE checkpoint in place of a sync, then snapshots (`actor/unproven.rs`). A busy or refused TRUNCATE is the same fault again | The TRUNCATE completes; the snapshot that follows clears the degraded task |
 | `PageSizeChanged` | keep trying | Retries. Never writes the new page size | The page size returns, or a restart onto a new prefix |
 | `DatabasePageMismatch` | keep trying | Ships the page as the file holds it; stays degraded | A verified WAL frame rewrites the page, the page table is emptied by a snapshot, or an operator calls `accept_database_pages` |
 | `Bug` | keep trying | Drops all engine state and boots again after the wait | The fresh boot succeeds |
+| `Stalled(<fault>)` | keep trying, not configurable, never a stop | Retries on the fault's own wait. Raised at the 8th failure in a row of a retried fault on one task | The task's next success |
 
 While any task is degraded, retention pins the newest transaction the replica held when the first degradation began, and keeps its whole restore chain (`core/src/actor.rs`, `maintain/retain.rs`).
 
@@ -464,6 +469,7 @@ Every `SnapshotCause` variant (`core/src/fault.rs`). A snapshot reads every page
 | `LocalRewound` | Same generation; the committed end or the file is shorter than the staged end, or the range was rewritten | The replica is ahead of the database, or holds other content. The snapshot puts the replica's latest state back in step | Yes | Page-digest compare ships only the reverted pages | BOOT-9, GO-4 |
 | `CheckpointBoundary` | The engine's own TRUNCATE changed the WAL | A commit may have slipped between the last sync and the checkpoint | Usually not: nothing slipped in | Seal first, checkpoint with RESTART, and read SQLite's reported frame count to prove nothing was committed in between. Needs a spike on real SQLite | CKPT-4 |
 | `OperatorRequested` | An operator asked | By definition | Yes | None | RUN-23 |
+| `WalSyncFailed` | The TRUNCATE that follows a failed WAL fsync completed (RUN-3) | Commits the failed sync covered were never staged; the TRUNCATE wrote them into the database file, which the snapshot reads | Yes: those commits are in no WAL any more | None while the WAL is the only other copy | RUN-3 |
 | `StagedUnverified` | At boot, pending staged files the live WAL does not vouch for, and recovery cannot continue | The files cannot be proven, so they are not published; the snapshot holds their end state | Not for files this process's predecessor wrote from a proven position: only the proof was lost with the process | Persist each staged file's token, chained to its predecessor. Needs a journal | BOOT-11, GO-3 |
 
 **Cost today.** A snapshot costs one full read of the database, one full-size upload, its staged copy, and its share of each later merge. No rate limit, budget or backoff bounds how often any cause may fire. On main there is no per-cause counter, so the rate cannot be alerted on (#86 adds one).
@@ -476,7 +482,7 @@ Every `SnapshotCause` variant (`core/src/fault.rs`). A snapshot reads every page
 
 Every `StopCause` variant (`core/src/fault.rs`). A stopped engine does no I/O; every later tick returns the same cause (core `stop_is_terminal`). `/healthz` answers 503 and `lsr_stopped` is set. Nothing but a restart of the replicator clears a stop, and a restart forgets the stop (BOOT-21).
 
-Under the default responses only two causes stop the engine: `OtherWriter` and `Shutdown`. The other ten stop only when configured to (`Responses::STRICT`, or one field set to `Stop`).
+Under the default responses only two causes stop the engine: `OtherWriter` and `Shutdown`. The other eleven stop only when configured to (`Responses::STRICT`, or one field set to `Stop`).
 
 | `StopCause` | Stops by default? | Why continuing is unsafe | What the operator does |
 |---|---|---|---|
@@ -489,6 +495,7 @@ Under the default responses only two causes stop the engine: `OtherWriter` and `
 | `WalCorrupt` | No | Nothing past the bad frame can be trusted | Run `PRAGMA integrity_check`; checkpoint from the application so the WAL restarts; restart. A snapshot follows |
 | `WalTruncated` | No | Same | Same |
 | `WalUnlinked` | No | The file the engine reads is no longer the database's WAL | Restart the application's connections and the replicator |
+| `WalSyncFailed` | No | The frames the failed sync covered may never reach the disk | Run `PRAGMA wal_checkpoint(TRUNCATE)` from the application before restarting: a restart alone trusts the WAL again (D2) |
 | `PageSizeChanged` | No | A replica prefix holds one page size, in this port and in Go | Point the replicator at a new prefix. The old prefix keeps every state up to the change |
 | `DatabasePageMismatch` | No | The database file holds bytes no WAL frame wrote. Shipping them replicates possible corruption | Inspect the page named in `/healthz`. Then either repair the database, or accept it (`accept_database_pages`) |
 | `Bug` | No | The engine's own state contradicted itself | Report it with the `BugSite` from the log. A restart boots from disk and bucket |
@@ -499,7 +506,7 @@ Three other ways replication ends that are not a `StopCause`:
 |---|---|---|
 | The replicator thread is gone, or this process is a fork | `Phase::Gone(ThreadDied | Forked)`, `/healthz` 503 | RUN-21 |
 | The database never started | `lsr_db_state` `failed`, `/healthz` 503 | CFG-4 |
-| A retry that never succeeds (disk full, a WAL fsync failure, long readers) | "retrying" in the log and `lsr_retries_total`. **No stop, no degraded state, `/healthz` 200** | RUN-3, RUN-14, CKPT-3; section 6, D12 |
+| A retry that never succeeds (disk full, long readers) | "retrying", then from the 8th failure in a row a degraded stall naming the fault. No stop; `/healthz` 200 | RUN-13, RUN-14, CKPT-3 |
 
 ---
 
@@ -510,7 +517,7 @@ Three other ways replication ends that are not a `StopCause`:
 | # | Defect | Rows | Tracking |
 |---|---|---|---|
 | D1 | A crash loop takes one full snapshot per boot with no ceiling; maintenance and retention never run while processes die young; scratch files and open multipart uploads accumulate | BOOT-20, UP-15, MAINT-13 | #97 fixes scratch files and maintenance starvation. The snapshot per boot has no branch |
-| D2 | A failed WAL fsync is forgotten by a restart, and the WAL is trusted again | RUN-3, BOOT-21 | WSF |
+| D2 | A failed WAL fsync is forgotten by a restart before the engine's TRUNCATE, and the WAL is trusted again. Within one process it is handled since #104. Expected-fail tests (ignored): sim `wal_fsync_fails_then_restart`, sqlite `a_restart_after_a_failed_wal_sync_ships_no_unproven_frame` | RUN-3, BOOT-21 | Waits on the engine journal decision. Issue #99 |
 | D3 | A bucket rolled back while the engine is down is taken as the bucket; freed transaction ids are reused. Expected-fail test: sim `a_rolled_back_bucket_never_gets_a_transaction_id_reused_across_a_restart_seed_0x484` (ignored) | BOOT-19, G1 | None open. Issue #99 |
 | D4 | **Closed by #98.** A restore as of an instant could return a state committed up to one tick's read after the instant | G3 | Merged |
 | D5 | A boot or relist listing that lags the bucket is trusted | BOOT-18, MAINT-12 | #96 |
@@ -518,7 +525,7 @@ Three other ways replication ends that are not a `StopCause`:
 | D7 | A retried multipart Complete that already succeeded is reported as `store_refused` | UP-13 | #96 |
 | D9 | **Confirmed by review.** Retry counts, waits, degraded states and stops reset on restart. The one stop the engine makes by default, `OtherWriter`, is undone by the default supervisor action: `boot_listing` names no newest staged file, so `recover_traced` returns `BehindRemote` for a boot and `Stop(OtherWriter)` only for a running position. The stop must be durable, or the boot must refuse | BOOT-21, BOOT-22 | Recorded as G3 in `docs/proposals/beyond-go.md`; issue #99. No branch |
 | D10 | A commit is dated by when it was staged. After an outage, a restore as of an instant inside the outage leaves out commits made before that instant. The contract "what the replica held at t" is not stated anywhere a user reads | G3 | None. None |
-| D12 | **Confirmed by review; the most serious of the four.** A fault whose policy is a plain retry never becomes a degraded state, however long it lasts. A full disk, a failed WAL fsync or permanently held readers halt replication behind `/healthz` 200. The doc comment on `Fault::LocalFsyncFailed` (`core/src/fault.rs`) says the retries "end degraded"; `policy` (`fault.rs`) and `Retry::fail` (`actor/state.rs`) do not do that | RUN-3, RUN-14, CKPT-3 | None. WSF covers the fsync case only |
+| D12 | **Closed by #104.** A fault whose policy is a plain retry never became a degraded state. Now each degrades its task as `Stalled(<fault>)` at the 8th failure in a row, and a failed WAL fsync is its own persistent cause, `WalSyncFailed` | RUN-3, RUN-13, RUN-14, CKPT-3 | Merged |
 | D13 | Past 4096 pending files a staged file gets no token and is certain to be refused, which costs a snapshot and every restore point from there on | RUN-18 | None. Issue #99 |
 | D14 | A boot that drops an unreadable staged file snapshots even when the WAL could regenerate it | BOOT-5 | None. Issue #99 |
 | D15 | A staged snapshot of a rewound database is deleted by the next boot if the process died before uploading it, and taken again | BOOT-9 | #89 |
@@ -624,7 +631,7 @@ The index tables for `Fault`, `PersistentCause`, `SnapshotCause` and `StopCause`
 4. **Staleness.** The file records `read_at`. The gate fails unless `read_at` is `origin/main`, or no commit since touches a cited symbol or test.
 5. **Derived columns equal the code.** `response` equals `policy` and the default `Responses`; `signal` equals `cause_name`, `snapshot_name`, `stop_name`.
 6. **Marks have owners.** A no-test mark needs an issue number. An `in_review` tag whose PR merged fails until the row is updated. This version would have failed that check on the tag for #98.
-7. **Known wrong is an expected failure.** A known-wrong row names a test that fails on main, or carries "(no failing test)", which the gate counts and prints. Today one row has such a test (BOOT-19) and seven rows or half-rows do not.
+7. **Known wrong is an expected failure.** A known-wrong row names a test that fails on main, or carries "(no failing test)", which the gate counts and prints. Today two rows have such a test (BOOT-19, and RUN-3's restart half) and six rows or half-rows do not.
 8. **Every citation can fail (nightly).** Each cited test is linked to a planted bug that it kills. The plant must change the function the row's detection names, or the response path; a patch elsewhere that happens to fail the test does not count.
 9. **The cited test reaches the detecting branch (nightly).** Region coverage of the branch, not the function: every test reaches `policy` and `Actor::tick`.
 10. **Sections 1 and 6 are generated.** The table at the top of section 1 and the tally below come from the data, so a sentence like "three of four have an open violation" cannot go stale by itself.
@@ -641,3 +648,8 @@ It does not find the circumstance nobody wrote down. The way to close the world 
 - Evidence split into one column per mark, by the rule in 7.1. Corrected: RUN-12 (S removed), RUN-7, UP-1, CKPT-1, RUN-11 (R or S removed), UP-2 (S, not R), RUN-4 (R from the healed scenario only), MAINT-3, CFG-7, CFG-4; UP-4, UP-5, RUN-14, RUN-15, UP-12, UP-10 and BOOT-14 gain R for the narrow case their test shows, so the same test shape earns the same mark everywhere.
 - G0 (a restore succeeds and is not older than health reported) and G7 (health is not clean while replication is halted) added, with UP-11, MAINT-11, D2, D12 and N1 counted against them. G1 no longer treats a lagging listing or a rolled-back bucket as an assumption.
 - C8 added. U4 restated. WORLD-32 to WORLD-40 added. Line numbers removed.
+
+### Changes for #104
+
+- RUN-3 rewritten: a failed WAL fsync is the persistent cause `WalSyncFailed`, degraded by default, and the engine pays for it with a TRUNCATE and a snapshot; D R. Its restart half stays known wrong (D2), now with two ignored expected-fail tests. BOOT-21's in-review tag removed.
+- D12 closed: every retried fault stalls at the 8th failure in a row. RUN-13, RUN-14, CKPT-3, WORLD-16, the health-signal table, the fault index and the persistent-cause, snapshot-cause and stop-cause tables updated. G7 no longer counts D12.
