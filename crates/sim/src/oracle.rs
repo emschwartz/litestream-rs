@@ -372,6 +372,11 @@ pub fn within(what: Bound, seen: u64, limit: u64) -> Result<(), Violation> {
     Ok(())
 }
 
+/// The context of the `BugFault` raised when the model's newest image is no longer the database
+/// SQLite's rules hold: a check of the harness against itself, which a failed WAL sync followed
+/// by a power loss can trip before the world adopts the result as damage.
+pub const MODEL_DIVERGED: &str = "the model no longer matches SQLite's rules";
+
 /// A `BugFault` naming `context`.
 #[must_use]
 pub fn bug_fault(context: impl Into<String>) -> Violation {
@@ -577,9 +582,14 @@ fn covers(
         }
     }
     // Another writer's file holds the pages of the file it copied, so its
-    // transaction is that file's commit wherever it was compacted into.
+    // transaction is that file's commit wherever it was compacted into. While
+    // it still stands (no removal, no level-0 put of the engine's own since),
+    // it is the file a restore of its id reads, whatever an earlier put of
+    // that id (rolled back since) held.
     for (theirs, copied) in ground.foreign {
-        if let Some(commit) = cover.get(copied).copied() {
+        if let Some(standing) = foreign_cover(ground, &cover, &replaced, *theirs, usize::MAX) {
+            cover.insert(*theirs, standing);
+        } else if let Some(commit) = cover.get(copied).copied() {
             cover.entry(*theirs).or_insert(commit);
         }
     }

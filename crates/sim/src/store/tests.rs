@@ -133,14 +133,9 @@ fn recorder_records_err_after_publish() {
     assert_eq!(*got, wal);
 }
 
-#[test]
-fn a_size_mismatch_publishes_and_overstates_the_size() {
-    let raw = MemStore::new();
-    let faults = Faults::new(
-        raw.clone(),
-        vec![(StoreOp::Upload, 0, FaultShape::SizeMismatch)],
-        1,
-    );
+/// One size-mismatch upload through `faults`: the bytes sent and what the
+/// commit acknowledged.
+fn short_write(faults: &Faults<MemStore>) -> (Vec<u8>, FileInfo) {
     let bytes = ltx(1, 1, 1, 1, None);
     let info = block_on(async {
         let mut up = faults
@@ -150,11 +145,61 @@ fn a_size_mismatch_publishes_and_overstates_the_size() {
         up.commit().await
     })
     .unwrap();
-    assert_eq!(
-        info.size,
-        u64::try_from(bytes.len()).unwrap().saturating_add(1)
+    (bytes, info)
+}
+
+#[test]
+fn a_size_mismatch_publishes_a_byte_short_and_acknowledges_what_it_holds() {
+    let raw = MemStore::new();
+    let faults = Faults::new(
+        raw.clone(),
+        vec![(StoreOp::Upload, 0, FaultShape::SizeMismatch)],
+        1,
+    )
+    .corrupting_through(raw.clone());
+    let (bytes, info) = short_write(&faults);
+    let held = block_on(read_all(&raw, &info.key)).unwrap();
+    assert_eq!(held.as_slice(), bytes.split_last().unwrap().1);
+    assert_eq!(info.size, u64::try_from(held.len()).unwrap());
+    assert!(faults.handle().damaged().is_empty());
+}
+
+/// A short object the engine could not delete is damage the store keeps; one never deleted
+/// is not, so a restore that meets it stays judged.
+#[test]
+fn a_short_object_whose_delete_fails_is_damage_the_store_keeps() {
+    let raw = MemStore::new();
+    let refused = StoreError::Refused {
+        op: StoreOp::Delete,
+        status: 405,
+    };
+    let faults = Faults::new(
+        raw.clone(),
+        vec![
+            (StoreOp::Upload, 0, FaultShape::SizeMismatch),
+            (StoreOp::Delete, 0, FaultShape::Error(refused)),
+        ],
+        1,
+    )
+    .corrupting_through(raw.clone());
+    let (_, info) = short_write(&faults);
+    assert!(faults.handle().damaged().is_empty());
+    assert!(block_on(faults.delete(&[info.key])).is_err());
+    assert_eq!(faults.handle().damaged(), vec![info.key]);
+}
+
+#[test]
+fn a_size_mismatch_without_the_raw_store_only_understates_the_size() {
+    let raw = MemStore::new();
+    let faults = Faults::new(
+        raw.clone(),
+        vec![(StoreOp::Upload, 0, FaultShape::SizeMismatch)],
+        1,
     );
-    assert_eq!(listed(&raw), 1);
+    let (bytes, info) = short_write(&faults);
+    assert_eq!(block_on(read_all(&raw, &info.key)).unwrap(), bytes);
+    assert_eq!(info.size, u64::try_from(bytes.len()).unwrap() - 1);
+    assert!(faults.handle().damaged().is_empty());
 }
 
 #[test]

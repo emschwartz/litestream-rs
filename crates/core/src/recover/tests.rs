@@ -348,6 +348,29 @@ fn the_abandoned_frames_check_catches_frames_abandoned_after_the_read_lock() {
     );
 }
 
+/// The same abandoned commit, with the restarted generation grown to exactly
+/// the synced end: the abandoned frame starts right where the position ends.
+#[test]
+fn an_abandoned_commit_at_the_synced_end_of_a_restart_is_caught() {
+    let wal = fresh();
+    let pos = position(&wal, 2, Continuity::Held(wal.epoch()));
+    commit(&wal, &[1], 3);
+    wal.force_restart();
+    commit(&wal, &[1, 2], 2);
+    commit(&wal, &[2, 3], 3);
+    let verdict = run_running(&wal, &pos, None);
+    assert_eq!(
+        verdict.recovered,
+        snapshot(Some(2), SnapshotCause::GenerationChanged)
+    );
+    assert_eq!(
+        verdict.event,
+        Some(RecoverEvent::ReadLockViolated {
+            synced: pos.synced().offset()
+        })
+    );
+}
+
 #[test]
 fn a_restart_that_has_grown_past_the_old_end_is_followed() {
     let wal = fresh();

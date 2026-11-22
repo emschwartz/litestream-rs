@@ -178,7 +178,6 @@ fn every_scenario_is_tested_here() {
     }
 }
 
-/// Under the default responses only: see `fault_reason(FaultKind::WalSyncFailed)`.
 #[test]
 fn wal_fsync_fails() {
     let scenario = scenario::wal_fsync_fails();
@@ -186,10 +185,10 @@ fn wal_fsync_fails() {
     run(scenario::wal_fsync_fails);
 }
 
-/// A restart between a failed WAL sync and the TRUNCATE that pays for it forgets the debt:
-/// the new process stages frames the failed sync covered (`StagedNotDurable`).
+/// A restart between a failed WAL sync and the TRUNCATE that pays for it still owes the
+/// TRUNCATE: the engine journal holds the debt, so the new process stages no frame the failed
+/// sync covered (`StagedNotDurable` otherwise).
 #[test]
-#[ignore = "needs a durable engine-owned record of the failed WAL sync: waits on the engine journal decision"]
 fn wal_fsync_fails_then_restart() {
     run(scenario::wal_fsync_fails_then_restart);
 }
