@@ -253,7 +253,7 @@ SWARM = {"package": "lsr-sim", "test_bin": "sim"}
 
 
 # Seeds per nextest invocation: each run stays well inside the ledger's 90 s per-test limit.
-SWARM_CHUNK = 200
+SWARM_CHUNK = 100
 
 
 def swarm(seeds: int, base: int) -> str:
