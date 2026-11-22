@@ -209,8 +209,9 @@ pub enum Hold {
     /// The replica's listings, as a restore sees them, show the bucket as it
     /// was when the hold began: objects put since are hidden.
     LaggingListing,
-    /// Every read of the replica a restore makes returns one byte flipped (a
-    /// middlebox, or a store that returns bytes it never stored).
+    /// Every read of the replica returns one byte flipped (a middlebox, or a
+    /// store that returns bytes it never stored): a restore's, in the middle of
+    /// what it read, and the engine's next reads, in the LTX header.
     LyingReads,
     /// Other processes hold read transactions on the WAL, so no checkpoint
     /// can pass them.

@@ -298,19 +298,21 @@ impl FaultHandle {
     /// Makes every call of `op` from the next one on fail with `err`, until
     /// [`Self::release`] is given the returned id: a fault that lasts.
     pub fn hold(&self, op: StoreOp, err: StoreError) -> HeldFault {
-        let mut state = lock(&self.state);
-        let nth = *state.count(op);
-        state.schedule.push(Entry {
+        self.held(
             op,
-            nth,
-            shape: FaultShape::Rate {
+            0,
+            FaultShape::Rate {
                 per_mille: 1000,
                 err,
             },
-            fired: false,
-            hits: 0,
-        });
-        HeldFault(state.schedule.len().saturating_sub(1))
+        )
+    }
+
+    /// Schedules `shape` `ahead` calls of `op` from now, as [`Self::push_in`] does, and returns
+    /// an id [`Self::release`] takes it back with if it has not fired by then.
+    pub fn held(&self, op: StoreOp, ahead: u32, shape: FaultShape) -> HeldFault {
+        self.push_in(op, ahead, shape);
+        HeldFault(lock(&self.state).schedule.len().saturating_sub(1))
     }
 
     /// Ends a fault [`Self::hold`] began.

@@ -37,6 +37,10 @@ use super::{Runner, small};
 /// Transaction ids a judgment restores through the fault besides `Latest`, at most.
 const SAMPLED_TXIDS: u64 = 4;
 
+/// Reads of the replica the engine makes under [`Hold::LyingReads`] that return a flipped
+/// byte, at most: one flip scheduled for each of the next this many reads.
+const LYING_ENGINE_READS: u32 = 64;
+
 /// What a restore through the fault meets.
 #[derive(Clone, Debug)]
 enum Lens {
@@ -189,6 +193,7 @@ impl Runner {
             return self.wal_damage_held(op, ticks);
         }
         let view = self.view(hold)?;
+        let flipped = self.w.remote_faults.flipped().len();
         let placed = self.place(hold);
         let middle = ticks / 2;
         for at in 0..ticks {
@@ -209,6 +214,11 @@ impl Runner {
         }
         self.judge_held(hold, view.as_ref())?;
         self.lift(placed);
+        let lied = self.w.remote_faults.flipped().len().saturating_sub(flipped);
+        self.report.reach.add(
+            format!("hold.{}.engine_reads_flipped", name(hold)),
+            u64::try_from(lied).unwrap_or(u64::MAX),
+        );
         Ok(())
     }
 
@@ -284,8 +294,25 @@ impl Runner {
                 self.w.sqlite.lie_on_our_sync();
                 Some(Placed::LyingDisk)
             }
+            Hold::LyingReads => {
+                // The engine's reads lie too: a read that covers the header gets one byte of it
+                // flipped, so it fails decode, as a proxy's wrong body does. Two such reads of
+                // one sound object are what the engine takes as rot.
+                self.expect(StopCause::RemoteCorrupt);
+                Some(Placed::Remote(
+                    (0..LYING_ENGINE_READS)
+                        .map(|ahead| {
+                            self.w.remote_faults.held(
+                                StoreOp::Read,
+                                ahead,
+                                crate::store::FaultShape::FlipByteOnRead { at: 8 },
+                            )
+                        })
+                        .collect(),
+                ))
+            }
             // The engine never lists through a restore's lens.
-            Hold::LaggingListing | Hold::LyingReads | Hold::Wal(_) => None,
+            Hold::LaggingListing | Hold::Wal(_) => None,
         }
     }
 
@@ -357,6 +384,23 @@ impl Runner {
             (Ok((got, reached)), Err(err)) => {
                 if hold == Hold::LaggingListing && self.behind_a_hole(&err, got, reached)? {
                     self.report.reach.bump("hold.LaggingListing.past_hole");
+                    return Ok(());
+                }
+                // The raw replica stops on an object the store damaged as it published it, so
+                // it has no answer to hold this one to; the most a restore can promise then is
+                // a state the application committed.
+                if let RestoreError::File { key, .. } = &err
+                    && self.w.remote_faults.damaged().contains(key)
+                {
+                    if self.w.history.log().find(&got).is_empty() {
+                        return Err(wrong(format!(
+                            "a database no commit made, where the raw replica stops on {key}, \
+                             which the store damaged"
+                        )));
+                    }
+                    self.report
+                        .reach
+                        .bump(format!("hold.{}.raw_damaged", name(hold)));
                     return Ok(());
                 }
                 Err(wrong(format!(

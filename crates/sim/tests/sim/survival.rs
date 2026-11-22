@@ -14,6 +14,8 @@
 //!
 //! Each failure is triaged as an engine defect, a checker defect, or the fault's own doing, and
 //! the counts are reported with the change. The budget does not grow after a result is seen.
+//! A failure prints its replay line; replay it under the campaign's mix with `LSR_SIM_DEFAULT=1
+//! LSR_SIM_HOLD=40` (the default mix) or `LSR_SIM_SWARM=1 LSR_SIM_HOLD=20` (the swarm) set.
 
 #![expect(
     clippy::arithmetic_side_effects,
@@ -123,6 +125,23 @@ fn a_restore_whose_reads_return_other_bytes_fails_and_never_publishes() {
 }
 
 #[test]
+fn an_engine_booting_through_lying_reads_leaves_the_replica_restorable() {
+    let mut ops = under(Hold::LyingReads);
+    let at = ops
+        .iter()
+        .position(|op| matches!(op, Op::Hold { .. }))
+        .unwrap();
+    ops.insert(at, Op::Restart);
+    let report = match run_ops(Seed::new(7), &ops, &Opts::default()) {
+        Ok(report) => report,
+        Err(failure) => panic!("{failure}"),
+    };
+    assert_eq!(report.reach.get("hold.LyingReads.judged"), 2);
+    // The boot's own reads of the replica met the fault.
+    assert!(report.reach.get("hold.LyingReads.engine_reads_flipped") > 0);
+}
+
+#[test]
 fn readers_holding_the_wal_leave_the_replica_restorable_while_they_hold() {
     let report = held(Hold::ReadersHeld);
     assert_eq!(report.reach.get("hold.ReadersHeld.judged"), 2);
@@ -177,21 +196,21 @@ fn drawn_holds_are_judged_while_they_hold() {
     assert!(judged.len() >= 6, "too few holds drawn: {judged:?}");
 }
 
-/// Runs `seeds` from `base` under `mix`, printing each failure; the number of failures.
+/// Runs `seeds` from `base` under `mix`, printing each failure and what each hold reached;
+/// the number of failures.
 fn campaign(base: u64, seeds: u64, mix: impl Fn(Seed) -> Weights) -> usize {
     let mut failed = 0;
-    let mut judged = 0_u64;
+    let mut reached = std::collections::BTreeMap::<String, u64>::new();
     for n in base..base + seeds {
         let seed = Seed::new(n);
         let weights = mix(seed);
         match run(seed, STEPS, &weights) {
             Ok(report) => {
-                judged += report
-                    .reach
-                    .iter()
-                    .filter(|(name, _)| name.starts_with("hold.") && name.ends_with(".judged"))
-                    .map(|(_, count)| count)
-                    .sum::<u64>();
+                for (name, count) in report.reach.iter() {
+                    if name.starts_with("hold.") {
+                        *reached.entry(name.to_owned()).or_insert(0) += count;
+                    }
+                }
             }
             Err(failure) => {
                 failed += 1;
@@ -202,7 +221,15 @@ fn campaign(base: u64, seeds: u64, mix: impl Fn(Seed) -> Weights) -> usize {
             }
         }
     }
+    let judged: u64 = reached
+        .iter()
+        .filter(|(name, _)| name.ends_with(".judged"))
+        .map(|(_, count)| count)
+        .sum();
     println!("survival: {seeds} seeds from {base}, {failed} failed, {judged} held judgments");
+    for (name, count) in &reached {
+        println!("survival reach {name} {count}");
+    }
     failed
 }
 
