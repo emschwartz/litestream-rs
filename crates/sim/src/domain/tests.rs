@@ -1,7 +1,6 @@
 use std::collections::BTreeSet;
 
 use super::*;
-use lsr_core::PersistentCause;
 
 fn entropy(seed: u64) -> SeededEntropy {
     SeededEntropy::new(seed)
@@ -91,7 +90,7 @@ fn store_cells() -> impl Iterator<Item = (String, Cell)> {
 fn every_cell_is_drawn_or_says_why_not() {
     // Drawn, known wrong, unmodelled. A move in these numbers is a change to the domain: say
     // it in the pull request.
-    assert_eq!(tally(source_cells()), [21, 1, 4], "source cells");
+    assert_eq!(tally(source_cells()), [22, 1, 3], "source cells");
     assert_eq!(tally(store_cells()), [41, 0, 0], "store cells");
     // Each SQLite call fails at least one way where known failures are counted.
     for op in SOURCE_OPS {
@@ -164,7 +163,7 @@ fn a_known_defect_matches_only_its_own_failure() {
         key: "0000/1-1.ltx".to_owned(),
     };
     let other = Violation::UnexpectedDegraded {
-        cause: PersistentCause::StoreDenied(Denied::Credentials),
+        cause: lsr_core::PersistentCause::StoreDenied(Denied::Permission),
     };
     assert_eq!(
         KnownWrong::of(&staged, &KnownWrong::ALL),

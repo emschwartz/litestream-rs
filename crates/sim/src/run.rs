@@ -22,6 +22,7 @@ use lsr_wal::{Salts, WalOffset};
 
 use crate::clock::ClockLaw;
 use crate::crash_law::CrashLaw;
+use crate::failstop::{FailStopJudge, fired};
 use crate::generate::{
     AfterRestart, EnvFault, MetaOp, Op, RemoteOp, Target, WalOp, Weights, history,
 };
@@ -168,6 +169,9 @@ pub struct RunReport {
     pub app_autocheckpoints: AutoTally,
     /// What the run reached, by name; see [`crate::reach`].
     pub reach: Reach,
+    /// Each change of the engine's fail-stop trip, with the time of the tick that made it
+    /// (`crate::failstop`).
+    pub trips: Vec<(Timestamp, Option<lsr_core::Trip>)>,
 }
 
 /// What a run may be told besides its seed.
@@ -250,6 +254,7 @@ pub fn actor_config() -> ActorConfig {
         retry_interval: Duration::from_secs(1),
         shutdown_grace: Duration::from_secs(10),
         responses: Responses::GO_LIKE,
+        max_unreplicated_age: lsr_core::MaxUnreplicatedAge::DEFAULT,
     }
 }
 
@@ -324,6 +329,19 @@ struct Runner {
     /// The engine incarnation running now: what its level-0 puts are judged
     /// against ([`judge_put`]).
     life: Incarnation,
+    /// The fail-stop judge (`crate::failstop`).
+    fail_stop: FailStopJudge,
+    /// The sum of every clock step so far: the simulator's time with them taken out is the
+    /// clock's reading less this.
+    jumped: i64,
+    /// The replica recorder's length when the fail-stop judge last restored `Latest`.
+    fail_stop_seen: usize,
+    /// The digest of the model's newest image as the fail-stop judge last took it.
+    fail_stop_image: lsr_history::Digest,
+    /// How many commits the model held when the fail-stop judge last looked.
+    fail_stop_commits: usize,
+    /// The clock when the operation being applied began: what the judge dates its commits by.
+    op_began: Timestamp,
     /// Replica recorder events already judged by [`judge_put`].
     puts_judged: usize,
     /// The staging recorder's length when a staging backup was last put
@@ -393,6 +411,9 @@ impl Runner {
         let page_size = PageSize::new(FIRST_PAGE_SIZE).unwrap_or(PageSize::MIN);
         let mut w = World::new(seed, page_size, FIRST_DB_PAGES);
         w.start_driver();
+        let start = w.clock.now();
+        let image = crate::history::image_digest(&w.model.newest_image());
+        let commits = w.model.commits().len();
         Self {
             w,
             actor: Actor::new(actor_config()),
@@ -422,6 +443,13 @@ impl Runner {
             lenient: false,
             expected_sizes: Vec::new(),
             life: Incarnation::default(),
+            // The database's first content is on no replica yet.
+            fail_stop: FailStopJudge::starting(start, image),
+            fail_stop_image: image,
+            fail_stop_commits: commits,
+            op_began: start,
+            jumped: 0,
+            fail_stop_seen: 0,
             puts_judged: 0,
             put_back: 0,
             rate_active: false,
@@ -440,6 +468,7 @@ impl Runner {
     }
 
     fn reboot(&mut self) {
+        self.fail_stop.started();
         self.life = Incarnation {
             staged_from: self.w.staging_recorder.len(),
             ..Incarnation::default()
@@ -449,6 +478,7 @@ impl Runner {
         self.app_before = self.app_seen();
         self.actor = Actor::new(ActorConfig {
             responses: self.responses,
+            max_unreplicated_age: lsr_core::MaxUnreplicatedAge::DEFAULT,
             maintenance: base.maintenance.clone().with_retention(self.retention),
             ..base
         });
@@ -683,6 +713,7 @@ impl Runner {
         self.liveness_before_tick(booting);
         let salts = self.w.sqlite.salts();
         let commits = self.w.model.commits().len();
+        let fired0 = (fired(&self.w.remote_faults), fired(&self.w.staging_faults));
         let ended = self.run_one(plan);
         self.note_boot(booting, remote0.lists, salts, commits);
         self.judge_stores()?;
@@ -691,6 +722,7 @@ impl Runner {
         self.report.ticks = self.report.ticks.saturating_add(1);
         let in_tick = self.took_commit_in_tick();
         self.note_snapshots(newest_commit, in_tick, at);
+        self.judge_fail_stop(began, fired0, &ended)?;
         self.note_tick(began, remote0);
         if self.trace {
             self.report.trace.push(format!("    tick: {ended:?}"));
@@ -842,7 +874,13 @@ impl Runner {
             | Event::Clamped(_) => return Ok(()),
         };
         self.liveness
-            .judge(CauseKind::from(cause), at_boot, &mut self.report.reach)
+            .judge(CauseKind::from(cause), at_boot, &mut self.report.reach)?;
+        if matches!(cause, lsr_core::SnapshotCause::BehindRemote { .. }) && at_boot {
+            let staged = self.w.staged_level_zero();
+            self.liveness
+                .passed_by_replica(&staged, &self.w, &mut self.report.reach)?;
+        }
+        Ok(())
     }
 
     /// Counts what an event shows: its kind, and the fault, cause or
@@ -1551,6 +1589,7 @@ impl Runner {
     }
 
     fn clock_jump(&mut self, millis: i64) {
+        self.jumped = self.jumped.saturating_add(millis);
         let to = Timestamp::from_unix_millis(self.now().unix_millis().saturating_add(millis));
         self.w.clock.set(to);
         self.w.history.note_time(to);
@@ -1560,7 +1599,9 @@ impl Runner {
     /// by content at random (see [`crate::history`]).
     fn apply_judged(&mut self, op: &Op) -> Result<(), Violation> {
         self.op_began_at = self.w.sqlite.mx_frame();
+        self.op_began = self.now();
         self.apply(op)?;
+        self.fail_stop_commits();
         self.after_restart();
         self.recovery_agrees()?;
         if self.judges.history && self.w.history.draw() {
@@ -1811,6 +1852,7 @@ impl Runner {
     /// Applies `op`, telling the liveness oracle what it did by itself and
     /// how it left the WAL's header.
     fn apply(&mut self, op: &Op) -> Result<(), Violation> {
+        self.fail_stop_outside(op);
         self.liveness.note_op(op);
         self.liveness.see_wal(
             self.w.sqlite.wal_header_salts(),
@@ -2317,6 +2359,7 @@ pub fn shrink(seed: Seed, steps: u32, weights: &Weights, opts: &Opts) -> Option<
 }
 
 mod after_restart;
+mod fail_stop;
 mod hold;
 
 /// Whether a snapshot with this cause is the engine saying the history it had replicated may

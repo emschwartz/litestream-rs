@@ -236,6 +236,7 @@ pub fn rig_actor_config() -> ActorConfig {
         retry_interval: Duration::from_secs(1),
         shutdown_grace: secs(30),
         responses: Responses::STRICT,
+        max_unreplicated_age: lsr_core::MaxUnreplicatedAge::DEFAULT,
     }
 }
 

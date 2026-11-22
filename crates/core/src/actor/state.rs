@@ -127,6 +127,12 @@ impl Retry {
         self.until = self.until.filter(|until| *until > now);
     }
 
+    /// Lets the wait go at once, keeping the count for the doubling: fail-stop's probe at
+    /// the bound (`crate::failstop`).
+    pub(super) const fn probe(&mut self) {
+        self.until = None;
+    }
+
     /// Counts one more failure (saturating: a retried fault never gives up)
     /// and waits until what `wait` makes of the count; returns that instant.
     pub(super) fn fail(&mut self, wait: impl FnOnce(NonZeroU32) -> Timestamp) -> Timestamp {

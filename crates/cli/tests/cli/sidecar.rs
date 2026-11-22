@@ -725,3 +725,116 @@ fn an_oversized_request_and_too_many_connections_are_refused() {
     daemon.signal("TERM");
     assert_eq!(daemon.finish().0.code(), Some(0));
 }
+
+// fail-stop ----------------------------------------------------------------------------
+
+/// `stop-app` with no `-exec` and no `exec` key could not stop anything: `config check`
+/// refuses it, and so does the daemon, before any database is touched (decision D20).
+#[test]
+fn stop_app_without_exec_is_refused() {
+    let alone = setup("litestream-rs:\n  if-replication-stops: stop-app\n", "");
+    let out = lsr()
+        .args(["config", "check"])
+        .arg(&alone.config)
+        .output()
+        .unwrap();
+    let text =
+        String::from_utf8_lossy(&out.stderr).into_owned() + &String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(2), "{text}");
+    assert!(
+        text.contains(
+            "if-replication-stops: stop-app refused: stopping the application needs -exec (or the exec key); use hold-start or report"
+        ),
+        "{text}"
+    );
+    let with_exec = setup(
+        "litestream-rs:\n  if-replication-stops: stop-app\nexec: /bin/true\n",
+        "",
+    );
+    let out = lsr()
+        .args(["config", "check"])
+        .arg(&with_exec.config)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+}
+
+/// Replicates `setup`'s database at 4096-byte pages, then rewrites the database at 8192: the
+/// next boot finds the replica's page size is not the database's.
+fn change_the_page_size(setup: &Setup) {
+    let app = database(&setup.db);
+    write(&app, 5);
+    drop(app);
+    let mut command = lsr();
+    command.args(["replicate", "-config"]).arg(&setup.config);
+    let mut daemon = Daemon::spawn(command);
+    daemon.wait_for(&["msg=\"initialized db\""]);
+    daemon.signal("TERM");
+    let (status, out) = daemon.finish();
+    assert_eq!(status.code(), Some(0), "{out:#?}");
+    let app = rusqlite::Connection::open(&setup.db).unwrap();
+    app.execute_batch(
+        "PRAGMA journal_mode = DELETE; PRAGMA page_size = 8192; VACUUM; PRAGMA journal_mode = WAL;",
+    )
+    .unwrap();
+    drop(app);
+    // A WAL at the new size, kept when the connection closes, which boot reads.
+    let app = database(&setup.db);
+    write(&app, 1);
+}
+
+/// Under `hold-start` (the default), an unsafe stop at boot keeps the `-exec` child from
+/// starting: the daemon stays up answering 503, says why, and a signal ends it with the
+/// code of its own.
+#[test]
+fn an_unsafe_stop_at_boot_holds_the_child() {
+    let extra = "addr: 127.0.0.1:0\nshutdown-sync-timeout: 100ms\n\
+                 litestream-rs:\n  responses:\n    page-size-changed: stop\n";
+    let setup = setup(extra, "    monitor-interval: 20ms\n");
+    change_the_page_size(&setup);
+    let mut daemon = Daemon::spawn(with_child(&setup, "exit", 0));
+    let addr = bound(&mut daemon);
+    daemon.wait_for(&["msg=\"start refused\"", "why=page_size_changed"]);
+    let (status, body) = until(addr, "/healthz", |status, _| status == 503);
+    assert_eq!(status, 503, "{body}");
+    let health: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(health["dbs"][0]["held_by"], "page_size_changed");
+    assert_eq!(health["dbs"][0]["app"], "held");
+    daemon.signal("TERM");
+    let (status, out) = daemon.finish();
+    assert_eq!(status.code(), Some(4), "{out:#?}");
+    assert!(!out.iter().any(|l| l.starts_with("child:")), "{out:#?}");
+}
+
+/// Under `stop-app`, an unsafe stop while the child runs stops it: SIGTERM, then the drain,
+/// then the code of its own. Under `hold-start` the same stop only reports.
+#[test]
+fn an_unsafe_stop_while_running_stops_the_child_under_stop_app() {
+    for (mode, stops) in [("stop-app", true), ("hold-start", false)] {
+        let extra = format!(
+            "addr: 127.0.0.1:0\nshutdown-sync-timeout: 1s\nlitestream-rs:\n  \
+             if-replication-stops: {mode}\n  responses:\n    wal-unlinked: stop\n"
+        );
+        let setup = setup(&extra, "    monitor-interval: 20ms\n");
+        let app = database(&setup.db);
+        write(&app, 5);
+        drop(app);
+        let mut daemon = Daemon::spawn(with_child(&setup, "signal", 0));
+        let addr = bound(&mut daemon);
+        daemon.wait_for(&["child: ready"]);
+        std::fs::remove_file(format!("{}-wal", setup.db.display())).unwrap();
+        daemon.wait_for(&["msg=\"replication stopped\"", "WalUnlinked"]);
+        until(addr, "/healthz", |status, _| status == 503);
+        if stops {
+            daemon.wait_for(&["msg=\"app stopped\"", "why=wal_unlinked"]);
+            daemon.wait_for(&["child: got 15"]);
+            let (status, out) = daemon.finish();
+            assert_eq!(status.code(), Some(4), "{out:#?}");
+        } else {
+            daemon.signal("TERM");
+            let (status, out) = daemon.finish();
+            assert!(!out.iter().any(|l| l.contains("app stopped")), "{out:#?}");
+            assert_ne!(status.code(), Some(4), "{out:#?}");
+        }
+    }
+}

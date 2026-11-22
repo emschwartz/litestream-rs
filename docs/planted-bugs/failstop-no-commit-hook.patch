@@ -1,0 +1,13 @@
+diff --git a/crates/replica/src/replicator.rs b/crates/replica/src/replicator.rs
+index f47702a..07028c2 100644
+--- a/crates/replica/src/replicator.rs
++++ b/crates/replica/src/replicator.rs
+@@ -509,7 +509,7 @@ impl Replicator {
+         conn: &rusqlite::Connection,
+     ) -> Result<(), lsr_sqlite::SetupError> {
+         lsr_sqlite::app_connection_for(conn, &self.shared.database)?;
+-        lsr_sqlite::refuse_commits_while(conn, &self.shared.writes_refused);
++
+         Ok(())
+     }
+ }

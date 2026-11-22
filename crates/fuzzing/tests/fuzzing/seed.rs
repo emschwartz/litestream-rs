@@ -230,7 +230,9 @@ fn put_wal(name: &str, file: &[u8]) {
 }
 
 /// Hand-built WALs: several transactions, a shrink, an uncommitted tail, a
-/// restarted generation with the old one's frames behind it, both byte orders.
+/// restarted generation with the old one's frames behind it, both byte orders,
+/// and tails after a commit that no commit can follow (a frame naming page
+/// zero, a commit frame cut short).
 #[cfg(test)]
 fn built_wals() -> Vec<(&'static str, Vec<u8>)> {
     use lsr_ltx::{PageNo, PageSize};
@@ -275,6 +277,19 @@ fn built_wals() -> Vec<(&'static str, Vec<u8>)> {
     let mut restarted = fresh.into_bytes();
     restarted.extend(&stale.into_bytes()[32 + frame_len..]);
     out.push(("built-restarted", restarted));
+    // Tails that end the chain after a commit, so no commit follows the last boundary: a
+    // checksummed commit frame naming page zero, and a commit frame cut short by the file's end.
+    let mut zero = WalBuilder::new(ps, false, salts);
+    zero.tx(&pgnos(&[1, 2], ps), 2, 6);
+    zero.frame(PageNo::new(3, ps).unwrap(), 0, 7);
+    zero.frame_raw(0, 3, salts, &vec![0x5a; ps.bytes()]);
+    out.push(("built-tail-page-zero", zero.into_bytes()));
+    let mut cut = WalBuilder::new(ps, false, salts);
+    cut.tx(&pgnos(&[1, 2], ps), 2, 8);
+    cut.tx(&pgnos(&[3], ps), 3, 9);
+    let mut cut = cut.into_bytes();
+    cut.truncate(cut.len().saturating_sub(7));
+    out.push(("built-tail-cut-commit", cut));
     out
 }
 

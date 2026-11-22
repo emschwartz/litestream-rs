@@ -190,13 +190,6 @@ const NOT_A_PAGE: &str = "only a database page read can end inside a page";
 const NOT_THE_WAL_PATH: &str = "only the calls that look at the WAL path can see it replaced";
 const UNLINK_UNMODELLED: &str = "an unlinked WAL is drawn as EnvFault::UnlinkWal, which the \
                                  model cannot yet follow through a later power loss";
-// lsr-sqlite ends and retakes the read transaction around every checkpoint, failed or not, and
-// a lost retake leaves it lapsed after the checkpoint ran. The simulated checkpointer returns an
-// injected error before either, so it cannot give this error its effect; modelling the new hold
-// on failure made seeds 0x240, 0x90c, 0x36b and 0x4f fail in ways still being triaged.
-const CHECKPOINT_HOLD: &str = "the simulated checkpointer returns an injected error before it ends \
-                               and retakes the read transaction, so a lost retake has no lapse to \
-                               model";
 const RETAKE_ONLY: &str = "only a retake after a failed one reports it, and the checkpoint cell \
                            draws the first failure; this call takes no read transaction of its own \
                            otherwise";
@@ -289,7 +282,7 @@ const fn short_cell(op: SourceOp) -> Cell {
 
 const fn read_tx_lost_cell(op: SourceOp) -> Cell {
     match op {
-        SourceOp::Checkpoint => Cell::Unmodelled(CHECKPOINT_HOLD),
+        SourceOp::Checkpoint => Cell::Drawn,
         SourceOp::Committed | SourceOp::Sync | SourceOp::PageCount | SourceOp::ReadPage => {
             Cell::Impossible(RETAKE_ONLY)
         }
@@ -558,6 +551,8 @@ pub const fn store_cell(target: Target, op: StoreOp, class: StoreClass) -> Cell 
 
 const fn denied_cell(target: Target, why: Denied) -> Cell {
     match (target, why) {
+        // A staging read refused during level-1 compaction was classified as the replica's
+        // until #145 (compaction routes its local reads through `Fault::from_staging`).
         (Target::Staging, Denied::Permission) | (Target::Remote, _) => Cell::Drawn,
         (
             Target::Staging,
