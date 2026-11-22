@@ -1414,10 +1414,11 @@ fn one_torn_read_of_the_staged_copy_confirms_no_differing_replica_object() {
     let (staging, remote) = (Probe::default(), MemStore::new());
     put_bytes(&staging.inner, key(1), &encode(1));
     put_bytes(&remote, key(1), &encode_pages(1, 200));
+    let witnesses = Witnesses::trust_all(&staging);
     // The size check passes and the first compare reads the staged copy
     // whole; the read after it (its own verification) is the torn one.
     staging.log().flip_read = Some((key(1), 1));
-    let listed = next(UploadState::Unknown, &staging, &remote, 1).unwrap();
+    let listed = next_with(UploadState::Unknown, &staging, &remote, 1, &witnesses).unwrap();
     assert_eq!(
         listed.did,
         Did::Diverged {
