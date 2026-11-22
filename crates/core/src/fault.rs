@@ -10,7 +10,8 @@
 //! state machine hands it a [`Next`].
 //!
 //! A [`Policy::Persistent`] fault is one that waiting alone is not expected to
-//! fix: credentials refused, a corrupt object, a damaged WAL, another writer.
+//! fix: the store refusing access, a corrupt object, a damaged WAL, a failed
+//! WAL sync, another writer.
 //! What happens then is configuration, one field of [`Responses`] per
 //! [`PersistentCause`] (`docs/PLAN.md`, the degraded-state section). [`Response::KeepTrying`]
 //! puts the task that failed in a degraded state: it retries with the doubling
@@ -29,11 +30,20 @@
 //! state they left: a bug rebuilds the engine and boots again, and a replica
 //! that went backwards is listed again and taken as it now is.
 //!
+//! A [`Policy::Retry`] fault that keeps failing one task is a degraded state too: at the
+//! [`STALLED_AFTER`]th failure in a row the task is degraded as [`PersistentCause::Stalled`],
+//! naming the fault, and it keeps retrying on the same wait. A stall is not configurable and
+//! never stops the engine; it exists so that health never says healthy while a full disk,
+//! a refusing store or the application's readers keep replication from moving. A wait that
+//! a maintenance level keeps does not stall: maintenance blocks no write's way to the replica.
+//!
 //! Two things are deliberately not faults. A clock that steps backwards is
-//! clamped and reported as [`Clamped`]. A power-loss WAL rewind is a snapshot
+//! reported as [`Clamped`]; engine time never goes back and keeps moving
+//! (`actor::clock`). A power-loss WAL rewind is a snapshot
 //! with cause [`SnapshotCause::LocalRewound`]: it is expected under
 //! `synchronous=NORMAL`, and stopping would leave every later write unreplicated.
 
+use std::io;
 use std::num::NonZeroU32;
 use std::time::Duration;
 
@@ -44,7 +54,7 @@ use crate::compact::CompactError;
 use crate::created_at::ResolveError;
 use crate::maintain::MaintainError;
 use crate::source::SourceError;
-use crate::store::{CorruptCause, ListingStalled, StoreError};
+use crate::store::{CorruptCause, Denied, ListingStalled, StoreError};
 
 /// The longest a retry waits (Go `DefaultSyncBackoffMax`).
 pub const MAX_BACKOFF: Duration = Duration::from_secs(5 * 60);
@@ -60,8 +70,8 @@ pub enum Fault {
         /// The wait the store named.
         retry_after: Option<Duration>,
     },
-    /// The store refuses our credentials.
-    StoreAuth,
+    /// The store refuses access, or could not be reached securely.
+    StoreDenied(Denied),
     /// An object we listed or staged is gone from the replica.
     RemoteObjectMissing,
     /// An upload's commit failed after the object may have become visible.
@@ -84,8 +94,10 @@ pub enum Fault {
     /// too (one failed read says nothing about the stored bytes), the engine
     /// deletes that file and every staged file after it, and the next file is
     /// a snapshot taking the first transaction the replica lacks, so the chain
-    /// has no hole (`upload::sweep_staged` at boot, the upload task mid-run;
-    /// elsewhere the task retries and the next boot sweeps).
+    /// has no hole (the upload task mid-run; elsewhere the task retries and
+    /// the next boot sweeps). At boot (`upload::sweep_staged`) recovery then
+    /// judges the newest file left, and when the WAL continues from it the
+    /// deleted range is staged again from the WAL instead.
     ///
     /// A file that tears this way was never acknowledged as staged: its
     /// commit had not returned. The filesystem store syncs a file before its
@@ -98,10 +110,14 @@ pub enum Fault {
     LocalDiskFull,
     /// A local read or write failed.
     LocalIo,
-    /// An fsync failed. Of a staged file: encode and write it again. Of the
-    /// WAL, before staging (`WalSource::sync`): nothing is staged, and the
-    /// source keeps refusing, so the retries end degraded.
+    /// The fsync of a staged file failed: encode and write it again.
     LocalFsyncFailed,
+    /// The engine's fsync of the WAL before staging (`WalSource::sync`) failed.
+    /// Nothing is staged, and no later sync of the same WAL generation is
+    /// trusted: the kernel calls the pages clean after reporting the failure
+    /// once, so the frames it covered may never reach the disk however many
+    /// later syncs succeed (`actor::unproven` has the way out).
+    WalSyncFailed,
     /// SQLite is busy, or the wal-index is mid-update.
     SqliteBusy,
     /// A TRUNCATE checkpoint was refused before SQLite was asked: the application
@@ -173,6 +189,11 @@ pub enum BugSite {
     WalPageRead,
     /// The page map was fed out of the order one scan produces.
     PageMap,
+    /// The engine asked the journal for a record that is not monotonic over the one before it:
+    /// a floor that falls or is dropped for the same destination, or a debt that moves backward.
+    JournalNotMonotonic,
+    /// The journal's writer reached a record write with no sequence number to follow.
+    JournalSequence,
 }
 
 impl BugSite {
@@ -272,6 +293,10 @@ pub enum SnapshotCause {
     CheckpointBoundary,
     /// An operator asked.
     OperatorRequested,
+    /// The engine's fsync of the WAL failed, so the frames it covered were
+    /// never staged; a TRUNCATE checkpoint then wrote them into the database
+    /// file, and the snapshot takes them from there (`actor::unproven`).
+    WalSyncFailed,
     /// At boot, staged files the replica did not have yet were not vouched
     /// for by the live WAL (a staging backup put back, a file replaced, or a
     /// chain from a WAL generation that is gone), and the WAL could not
@@ -308,11 +333,13 @@ pub enum SnapshotCauseKind {
     OperatorRequested,
     /// [`SnapshotCause::StagedUnverified`].
     StagedUnverified,
+    /// [`SnapshotCause::WalSyncFailed`].
+    WalSyncFailed,
 }
 
 impl SnapshotCauseKind {
     /// Every kind, in declaration order.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::FirstSync,
         Self::BehindRemote,
         Self::NewestStagedFileUnreadable,
@@ -324,6 +351,7 @@ impl SnapshotCauseKind {
         Self::CheckpointBoundary,
         Self::OperatorRequested,
         Self::StagedUnverified,
+        Self::WalSyncFailed,
     ];
 }
 
@@ -341,6 +369,7 @@ impl From<&SnapshotCause> for SnapshotCauseKind {
             SnapshotCause::CheckpointBoundary => Self::CheckpointBoundary,
             SnapshotCause::OperatorRequested => Self::OperatorRequested,
             SnapshotCause::StagedUnverified { .. } => Self::StagedUnverified,
+            SnapshotCause::WalSyncFailed => Self::WalSyncFailed,
         }
     }
 }
@@ -396,9 +425,10 @@ impl SnapshotCounts {
 /// whose configured response is to stop, or a drain whose deadline passed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StopCause {
-    /// Credentials or permissions refuse the store.
-    Credentials,
-    /// The store refuses a request outright (not credentials).
+    /// The store refuses access, or could not be reached securely; the kind
+    /// says what a person must fix.
+    StoreDenied(Denied),
+    /// The store refuses a request outright (not an access refusal).
     StoreRefused,
     /// A replica object is corrupt.
     RemoteCorrupt,
@@ -412,6 +442,8 @@ pub enum StopCause {
     WalTruncated,
     /// The WAL file is gone.
     WalUnlinked,
+    /// The engine's fsync of the WAL failed.
+    WalSyncFailed,
     /// The database's page size is not the one its replica holds. A replica
     /// prefix holds one page size, as Go's does (it reads the size once,
     /// `db.go:1191`, and its compactor refuses mixed sizes,
@@ -438,9 +470,10 @@ pub enum StopCause {
 /// [`Responses`] say whether the engine keeps trying or stops.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PersistentCause {
-    /// Credentials or permissions refuse the store.
-    Credentials,
-    /// The store refuses a request outright (not credentials).
+    /// The store refuses access, or could not be reached securely; the kind
+    /// says what a person must fix.
+    StoreDenied(Denied),
+    /// The store refuses a request outright (not an access refusal).
     StoreRefused,
     /// A replica object is corrupt.
     RemoteCorrupt,
@@ -454,6 +487,8 @@ pub enum PersistentCause {
     WalTruncated,
     /// The WAL file is gone.
     WalUnlinked,
+    /// The engine's fsync of the WAL failed: what it covered is unproven.
+    WalSyncFailed,
     /// The database's page size is not the one its replica holds.
     PageSizeChanged {
         /// The replica's page size.
@@ -468,6 +503,94 @@ pub enum PersistentCause {
     },
     /// A bug in this program.
     Bug,
+    /// A fault whose policy is to retry failed [`STALLED_AFTER`] times in a row on one task:
+    /// waiting was expected to fix it and has not. Never configurable and never a stop (the
+    /// fault is the kind that passes); the task keeps retrying, and health says why.
+    Stalled(Stall),
+}
+
+/// How many failures in a row of a retried fault, on one task, make the task degraded
+/// ([`PersistentCause::Stalled`]). With the doubling wait from Go's one-second interval the
+/// eighth failure comes about two minutes after the first.
+pub const STALLED_AFTER: NonZeroU32 = match NonZeroU32::new(8) {
+    Some(n) => n,
+    None => NonZeroU32::MIN,
+};
+
+/// A fault whose policy is to retry, as the cause of a stalled task: one variant per such
+/// [`Fault`], so a new retried fault does not build until it is named here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stall {
+    /// [`Fault::StoreTransient`].
+    StoreTransient,
+    /// [`Fault::StoreThrottled`].
+    StoreThrottled,
+    /// [`Fault::RemoteObjectMissing`].
+    RemoteObjectMissing,
+    /// [`Fault::UploadAmbiguous`].
+    UploadAmbiguous,
+    /// [`Fault::UploadChecksumMismatch`].
+    UploadChecksumMismatch,
+    /// [`Fault::StagedLost`].
+    StagedLost,
+    /// [`Fault::LocalDiskFull`].
+    LocalDiskFull,
+    /// [`Fault::LocalIo`].
+    LocalIo,
+    /// [`Fault::LocalFsyncFailed`].
+    LocalFsyncFailed,
+    /// [`Fault::SqliteBusy`].
+    SqliteBusy,
+    /// [`Fault::ReadersHeld`].
+    ReadersHeld,
+    /// [`Fault::WalMoved`].
+    WalMoved,
+    /// [`Fault::WalIndexInconsistent`].
+    WalIndexInconsistent,
+    /// [`Fault::WalChangedUnderRead`].
+    WalChangedUnderRead,
+    /// [`Fault::NothingToSnapshot`].
+    NothingToSnapshot,
+    /// [`Fault::ReadTxLost`].
+    ReadTxLost,
+}
+
+impl Stall {
+    /// The stall a retried fault becomes; `None` for a fault whose policy is not to retry.
+    #[must_use]
+    pub const fn of(fault: &Fault) -> Option<Self> {
+        match fault {
+            Fault::StoreTransient => Some(Self::StoreTransient),
+            Fault::StoreThrottled { .. } => Some(Self::StoreThrottled),
+            Fault::RemoteObjectMissing => Some(Self::RemoteObjectMissing),
+            Fault::UploadAmbiguous => Some(Self::UploadAmbiguous),
+            Fault::UploadChecksumMismatch => Some(Self::UploadChecksumMismatch),
+            Fault::StagedLost => Some(Self::StagedLost),
+            Fault::LocalDiskFull => Some(Self::LocalDiskFull),
+            Fault::LocalIo => Some(Self::LocalIo),
+            Fault::LocalFsyncFailed => Some(Self::LocalFsyncFailed),
+            Fault::SqliteBusy => Some(Self::SqliteBusy),
+            Fault::ReadersHeld => Some(Self::ReadersHeld),
+            Fault::WalMoved => Some(Self::WalMoved),
+            Fault::WalIndexInconsistent => Some(Self::WalIndexInconsistent),
+            Fault::WalChangedUnderRead => Some(Self::WalChangedUnderRead),
+            Fault::NothingToSnapshot => Some(Self::NothingToSnapshot),
+            Fault::ReadTxLost => Some(Self::ReadTxLost),
+            Fault::StoreDenied(_)
+            | Fault::StoreRefused
+            | Fault::RemoteCorrupt
+            | Fault::RemoteAheadOfLocal
+            | Fault::RemoteRegressed
+            | Fault::PageSizeChanged { .. }
+            | Fault::WalCorruptBelowCommitted
+            | Fault::WalTruncatedBelowCommitted
+            | Fault::WalUnlinked
+            | Fault::WalSyncFailed
+            | Fault::DatabasePageMismatch { .. }
+            | Fault::ShutdownDeadline
+            | Fault::Bug(_) => None,
+        }
+    }
 }
 
 impl PersistentCause {
@@ -476,7 +599,7 @@ impl PersistentCause {
     #[must_use]
     pub const fn of(cause: StopCause) -> Option<Self> {
         match cause {
-            StopCause::Credentials => Some(Self::Credentials),
+            StopCause::StoreDenied(why) => Some(Self::StoreDenied(why)),
             StopCause::StoreRefused => Some(Self::StoreRefused),
             StopCause::RemoteCorrupt => Some(Self::RemoteCorrupt),
             StopCause::OtherWriter => Some(Self::OtherWriter),
@@ -484,6 +607,7 @@ impl PersistentCause {
             StopCause::WalCorrupt => Some(Self::WalCorrupt),
             StopCause::WalTruncated => Some(Self::WalTruncated),
             StopCause::WalUnlinked => Some(Self::WalUnlinked),
+            StopCause::WalSyncFailed => Some(Self::WalSyncFailed),
             StopCause::PageSizeChanged { was, now } => Some(Self::PageSizeChanged { was, now }),
             StopCause::DatabasePageMismatch { pgno } => Some(Self::DatabasePageMismatch { pgno }),
             StopCause::Bug => Some(Self::Bug),
@@ -492,21 +616,26 @@ impl PersistentCause {
     }
 }
 
-impl From<PersistentCause> for StopCause {
-    fn from(cause: PersistentCause) -> Self {
-        match cause {
-            PersistentCause::Credentials => Self::Credentials,
-            PersistentCause::StoreRefused => Self::StoreRefused,
-            PersistentCause::RemoteCorrupt => Self::RemoteCorrupt,
-            PersistentCause::OtherWriter => Self::OtherWriter,
-            PersistentCause::RemoteRegressed => Self::RemoteRegressed,
-            PersistentCause::WalCorrupt => Self::WalCorrupt,
-            PersistentCause::WalTruncated => Self::WalTruncated,
-            PersistentCause::WalUnlinked => Self::WalUnlinked,
-            PersistentCause::PageSizeChanged { was, now } => Self::PageSizeChanged { was, now },
-            PersistentCause::DatabasePageMismatch { pgno } => Self::DatabasePageMismatch { pgno },
-            PersistentCause::Bug => Self::Bug,
-        }
+impl PersistentCause {
+    /// The stop this cause makes when its response is to stop; `None` for a stall, which
+    /// never stops the engine.
+    #[must_use]
+    pub const fn stop(self) -> Option<StopCause> {
+        Some(match self {
+            Self::StoreDenied(why) => StopCause::StoreDenied(why),
+            Self::StoreRefused => StopCause::StoreRefused,
+            Self::RemoteCorrupt => StopCause::RemoteCorrupt,
+            Self::OtherWriter => StopCause::OtherWriter,
+            Self::RemoteRegressed => StopCause::RemoteRegressed,
+            Self::WalCorrupt => StopCause::WalCorrupt,
+            Self::WalTruncated => StopCause::WalTruncated,
+            Self::WalUnlinked => StopCause::WalUnlinked,
+            Self::WalSyncFailed => StopCause::WalSyncFailed,
+            Self::PageSizeChanged { was, now } => StopCause::PageSizeChanged { was, now },
+            Self::DatabasePageMismatch { pgno } => StopCause::DatabasePageMismatch { pgno },
+            Self::Bug => StopCause::Bug,
+            Self::Stalled(_) => return None,
+        })
     }
 }
 
@@ -537,8 +666,16 @@ pub enum OtherWriter {
 /// map, so a new cause does not build until every preset names its response.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Responses {
-    /// The store refuses the credentials.
+    /// The store does not accept the credentials.
     pub credentials: Response,
+    /// A policy refuses a request the credentials are accepted for.
+    pub permission_denied: Response,
+    /// The host clock is too far from the store's.
+    pub clock_skew: Response,
+    /// The bucket does not exist.
+    pub bucket_missing: Response,
+    /// The TLS handshake or certificate check failed.
+    pub tls: Response,
     /// The store refuses a request outright.
     pub store_refused: Response,
     /// A replica object is corrupt.
@@ -553,6 +690,11 @@ pub struct Responses {
     pub wal_truncated: Response,
     /// The WAL file was deleted.
     pub wal_unlinked: Response,
+    /// The engine's fsync of the WAL failed. Keeping trying never stages a
+    /// frame the failed sync covered: it checkpoints the WAL with TRUNCATE,
+    /// so SQLite writes those pages into the database file again and syncs
+    /// it, and then snapshots from the database file (`actor::unproven`).
+    pub wal_sync_failed: Response,
     /// The database's page size is not the replica's. Keeping trying never
     /// writes the new size: the way out is a restart onto a new prefix.
     pub page_size_changed: Response,
@@ -574,12 +716,17 @@ impl Responses {
     /// other writer.
     pub const GO_LIKE: Self = Self {
         credentials: Response::KeepTrying,
+        permission_denied: Response::KeepTrying,
+        clock_skew: Response::KeepTrying,
+        bucket_missing: Response::KeepTrying,
+        tls: Response::KeepTrying,
         store_refused: Response::KeepTrying,
         remote_corrupt: Response::KeepTrying,
         remote_regressed: Response::KeepTrying,
         wal_corrupt: Response::KeepTrying,
         wal_truncated: Response::KeepTrying,
         wal_unlinked: Response::KeepTrying,
+        wal_sync_failed: Response::KeepTrying,
         page_size_changed: Response::KeepTrying,
         database_page_mismatch: Response::KeepTrying,
         bug: Response::KeepTrying,
@@ -589,19 +736,24 @@ impl Responses {
     /// Stop on every cause.
     pub const STRICT: Self = Self {
         credentials: Response::Stop,
+        permission_denied: Response::Stop,
+        clock_skew: Response::Stop,
+        bucket_missing: Response::Stop,
+        tls: Response::Stop,
         store_refused: Response::Stop,
         remote_corrupt: Response::Stop,
         remote_regressed: Response::Stop,
         wal_corrupt: Response::Stop,
         wal_truncated: Response::Stop,
         wal_unlinked: Response::Stop,
+        wal_sync_failed: Response::Stop,
         page_size_changed: Response::Stop,
         database_page_mismatch: Response::Stop,
         bug: Response::Stop,
         other_writer: OtherWriter::Stop,
     };
 
-    /// Whether `cause` stops the engine.
+    /// Whether `cause` stops the engine. A stall never does.
     #[must_use]
     pub const fn stops(&self, cause: PersistentCause) -> bool {
         match self.action(cause) {
@@ -610,17 +762,30 @@ impl Responses {
         }
     }
 
+    /// The response to one kind of access refusal.
+    const fn denied(&self, why: Denied) -> Response {
+        match why {
+            Denied::Credentials => self.credentials,
+            Denied::Permission => self.permission_denied,
+            Denied::ClockSkew => self.clock_skew,
+            Denied::BucketMissing => self.bucket_missing,
+            Denied::Tls => self.tls,
+        }
+    }
+
     /// What the actor does about `cause`.
     pub(crate) const fn action(&self, cause: PersistentCause) -> Action {
         let response = match cause {
-            PersistentCause::Credentials => self.credentials,
+            PersistentCause::StoreDenied(why) => self.denied(why),
             PersistentCause::StoreRefused => self.store_refused,
             PersistentCause::RemoteCorrupt => self.remote_corrupt,
             PersistentCause::WalCorrupt => self.wal_corrupt,
             PersistentCause::WalTruncated => self.wal_truncated,
             PersistentCause::WalUnlinked => self.wal_unlinked,
+            PersistentCause::WalSyncFailed => self.wal_sync_failed,
             PersistentCause::PageSizeChanged { .. } => self.page_size_changed,
             PersistentCause::DatabasePageMismatch { .. } => self.database_page_mismatch,
+            PersistentCause::Stalled(_) => return Action::Retry,
             PersistentCause::RemoteRegressed => {
                 return match self.remote_regressed {
                     Response::KeepTrying => Action::Relist,
@@ -719,7 +884,7 @@ pub const fn policy(fault: &Fault) -> Policy {
                 now: *now,
             })
         }
-        Fault::StoreAuth => Policy::Persistent(PersistentCause::Credentials),
+        Fault::StoreDenied(why) => Policy::Persistent(PersistentCause::StoreDenied(*why)),
         Fault::StoreRefused => Policy::Persistent(PersistentCause::StoreRefused),
         Fault::RemoteCorrupt => Policy::Persistent(PersistentCause::RemoteCorrupt),
         Fault::RemoteAheadOfLocal => Policy::Persistent(PersistentCause::OtherWriter),
@@ -727,6 +892,7 @@ pub const fn policy(fault: &Fault) -> Policy {
         Fault::WalCorruptBelowCommitted => Policy::Persistent(PersistentCause::WalCorrupt),
         Fault::WalTruncatedBelowCommitted => Policy::Persistent(PersistentCause::WalTruncated),
         Fault::WalUnlinked => Policy::Persistent(PersistentCause::WalUnlinked),
+        Fault::WalSyncFailed => Policy::Persistent(PersistentCause::WalSyncFailed),
         Fault::DatabasePageMismatch { pgno } => {
             Policy::Persistent(PersistentCause::DatabasePageMismatch { pgno: *pgno })
         }
@@ -770,7 +936,7 @@ impl Fault {
             StoreError::Throttled { retry_after, .. } => Self::StoreThrottled {
                 retry_after: retry_after.filter(|wait| !wait.is_zero()),
             },
-            StoreError::Auth { .. } => Self::StoreAuth,
+            StoreError::Denied { why, .. } => Self::StoreDenied(*why),
             StoreError::Refused { .. } => Self::StoreRefused,
             StoreError::NotFound { .. } => Self::RemoteObjectMissing,
             StoreError::ScratchExhausted { .. } => Self::LocalDiskFull,
@@ -789,13 +955,18 @@ impl Fault {
     /// The same error means something else here. A missing or unusable staged
     /// file is lost, not a relist. A write whose stored size differs is the
     /// torn write to encode again. A permission error retries, so an operator
-    /// can fix the directory without a restart.
+    /// can fix the directory without a restart. A write the disk or a quota
+    /// has no room for is a full disk, whatever the store calls it.
     #[must_use]
     pub const fn from_staging(err: &StoreError) -> Self {
         match err {
+            StoreError::Transient {
+                kind: io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded,
+                ..
+            } => Self::LocalDiskFull,
             StoreError::Transient { .. }
             | StoreError::Throttled { .. }
-            | StoreError::Auth { .. }
+            | StoreError::Denied { .. }
             | StoreError::Refused { .. } => Self::LocalIo,
             StoreError::NotFound { .. } => Self::StagedLost,
             StoreError::ScratchExhausted { .. } => Self::LocalDiskFull,
@@ -887,7 +1058,7 @@ impl Fault {
         match err {
             SourceError::Io(_) | SourceError::Short { .. } => Self::LocalIo,
             SourceError::DiskFull => Self::LocalDiskFull,
-            SourceError::FsyncFailed => Self::LocalFsyncFailed,
+            SourceError::FsyncFailed => Self::WalSyncFailed,
             SourceError::Busy => Self::SqliteBusy,
             SourceError::ReadersHeld => Self::ReadersHeld,
             SourceError::Unlinked => Self::WalUnlinked,
@@ -916,7 +1087,7 @@ impl Fault {
             Self::UploadAmbiguous | Self::UploadChecksumMismatch => true,
             Self::StoreTransient
             | Self::StoreThrottled { .. }
-            | Self::StoreAuth
+            | Self::StoreDenied(_)
             | Self::RemoteObjectMissing
             | Self::StoreRefused
             | Self::RemoteCorrupt
@@ -926,6 +1097,7 @@ impl Fault {
             | Self::LocalDiskFull
             | Self::LocalIo
             | Self::LocalFsyncFailed
+            | Self::WalSyncFailed
             | Self::SqliteBusy
             | Self::ReadersHeld
             | Self::WalMoved
@@ -975,11 +1147,13 @@ pub enum Next {
     OnWalChange,
 }
 
-/// The clock read earlier than the last timestamp used; the later one is used
-/// instead and this is reported. An event, not a fault: nothing is retried.
+/// The clock read earlier than its last reading. Engine time keeps its value
+/// and advances at half the wall clock's rate until the wall clock catches up,
+/// so no timer stops; each step back is reported once. An event, not a fault:
+/// nothing is retried.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Clamped {
-    /// The last timestamp used.
+    /// Engine time at the step, which it keeps.
     pub prev: Timestamp,
     /// The earlier time the clock read.
     pub now: Timestamp,

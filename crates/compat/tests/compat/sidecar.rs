@@ -26,7 +26,8 @@
 
 use crate::alternate;
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -174,7 +175,22 @@ fn assert_continued(name: &str, kind: Kind, boots: &[Option<Summary>], prev: &[T
 struct Left {
     positions: Vec<Txid>,
     pages: Vec<Vec<String>>,
-    l9: Vec<BTreeSet<String>>,
+    l9: Vec<Snapshots>,
+}
+
+/// A replica's level-9 files by key, with their bytes, so a file rewritten under the same
+/// key differs as surely as a new key.
+type Snapshots = BTreeMap<String, Vec<u8>>;
+
+fn snapshot_bytes(fixture: &AppFixture) -> Snapshots {
+    snapshots(&fixture.replica)
+        .expect("l9")
+        .into_iter()
+        .map(|rel| {
+            let bytes = fs::read(fixture.replica.join(&rel)).expect("read a snapshot");
+            (rel, bytes)
+        })
+        .collect()
 }
 
 fn left(fixtures: &[AppFixture]) -> Left {
@@ -187,34 +203,45 @@ fn left(fixtures: &[AppFixture]) -> Left {
             .iter()
             .map(|s| s.hash_now().expect("hash"))
             .collect(),
-        l9: fixtures
-            .iter()
-            .map(|s| snapshots(&s.replica).expect("l9"))
-            .collect(),
+        l9: fixtures.iter().map(snapshot_bytes).collect(),
     }
 }
 
 fn assert_no_new_snapshot(name: &str, fixtures: &[AppFixture], before: &Left) {
     for (k, fixture) in fixtures.iter().enumerate() {
-        assert_eq!(
-            snapshots(&fixture.replica).expect("l9"),
-            before.l9[k],
-            "{name}: database {k}: a new snapshot"
+        let now = snapshot_bytes(fixture);
+        assert!(
+            now == before.l9[k],
+            "{name}: database {k}: snapshots {:?} after {:?}, or one rewritten",
+            now.keys(),
+            before.l9[k].keys()
         );
     }
 }
 
-/// Go left no snapshot, so lsr may write its scheduled first one, as Go from v0.5.4 does at
+/// A Go build before v0.5.4 may or may not have written its first snapshot in a run this
+/// short: whether its try at start came after the database's first sync is Go's own timing.
+/// Where Go left none, lsr may write its scheduled first one, as Go from v0.5.4 does at
 /// start; that is not a snapshot forced by a lost position, which `assert_continued` and the
-/// absence of a logged cause already rule out. Anything more than that one file fails.
+/// absence of a logged cause already rule out. Where Go left one, lsr writes none. Either
+/// way every snapshot Go left stays as Go wrote it.
 fn assert_at_most_a_first_snapshot(name: &str, fixtures: &[AppFixture], before: &Left) {
     for (k, fixture) in fixtures.iter().enumerate() {
-        let now = snapshots(&fixture.replica).expect("l9");
-        let new: Vec<_> = now.difference(&before.l9[k]).collect();
+        let now = snapshot_bytes(fixture);
+        let kept = before.l9[k]
+            .iter()
+            .all(|(key, bytes)| now.get(key) == Some(bytes));
+        let new = now
+            .keys()
+            .filter(|key| !before.l9[k].contains_key(*key))
+            .count();
+        let allowed = usize::from(before.l9[k].is_empty());
         assert!(
-            before.l9[k].is_empty() && new.len() <= 1,
-            "{name}: database {k}: snapshots {now:?} after Go's {:?}",
-            before.l9[k]
+            kept && new <= allowed,
+            "{name}: database {k}: snapshots {:?} after Go's {:?}: {new} new, at most {allowed}, \
+             Go's kept as written: {kept}",
+            now.keys(),
+            before.l9[k].keys()
         );
     }
 }

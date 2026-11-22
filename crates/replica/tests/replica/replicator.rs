@@ -14,7 +14,10 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use common::{PATIENCE, Site, assert_same, booted, config, fake, stopped, truncate_is_busy, wait};
+use common::{
+    PATIENCE, Site, assert_same, booted, config, fake, stopped, stopped_moving, truncate_is_busy,
+    wait,
+};
 use lsr_core::{CheckpointMode, Event as EngineEvent, Fault};
 use lsr_replica::{
     AppCheckpoint, AppCheckpoints, AppNotice, Booted, ChannelSink, CheckpointConfig, Config,
@@ -178,11 +181,11 @@ fn a_refused_boot_is_degraded_and_recovers() {
     let replicator = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
     assert_eq!(
         booted(&replicator),
-        Booted::Degraded(DegradedCause::Credentials)
+        Booted::Degraded(DegradedCause::StoreDenied(lsr_core::Denied::Credentials))
     );
     assert_eq!(
         replicator.health().task(Task::Sync).map(|d| d.cause),
-        Some(DegradedCause::Credentials)
+        Some(DegradedCause::StoreDenied(lsr_core::Denied::Credentials))
     );
     faulty.refuse.store(false, Ordering::SeqCst);
     clock.advance(POLL);
@@ -193,6 +196,26 @@ fn a_refused_boot_is_degraded_and_recovers() {
     wait(&replicator, caught_up);
     assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
     site.assert_restores(&*site.store());
+}
+
+/// A replicator whose first boot the store refuses has replicated nothing: its lag counts
+/// from the start, never zero, so an alert on the lag fires while the store is unreachable.
+#[test]
+fn the_lag_counts_from_the_start_while_the_first_boot_fails() {
+    let site = Site::new();
+    let faulty = site.faulty();
+    faulty.refuse.store(true, Ordering::SeqCst);
+    let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
+    let (runtime, clock) = fake();
+    let started = clock.now();
+    let replicator = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
+    let refused = wait(&replicator, |h| h.task(Task::Sync).is_some());
+    assert_eq!(refused.phase, Phase::Booting, "{refused:?}");
+    assert_eq!(refused.unreplicated_since, Some(started), "{refused:?}");
+    faulty.refuse.store(false, Ordering::SeqCst);
+    clock.advance(POLL);
+    wait(&replicator, caught_up);
+    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
 }
 
 /// Go's `SyncStatus`: what is staged locally and what the replica holds, before the replica
@@ -330,14 +353,17 @@ fn a_stopped_replicator_reports_its_cause() {
         ..config()
     };
     let replicator = Replicator::start_with(&site.db, store, strict, runtime).unwrap();
-    assert_eq!(booted(&replicator), Booted::Stopped(StopCause::Credentials));
+    assert_eq!(
+        booted(&replicator),
+        Booted::Stopped(StopCause::StoreDenied(lsr_core::Denied::Credentials))
+    );
     assert_eq!(
         replicator.health().phase,
-        Phase::Stopped(StopCause::Credentials)
+        Phase::Stopped(StopCause::StoreDenied(lsr_core::Denied::Credentials))
     );
     assert_eq!(
         stopped(&replicator),
-        Stopped::Stopped(StopCause::Credentials)
+        Stopped::Stopped(StopCause::StoreDenied(lsr_core::Denied::Credentials))
     );
 }
 
@@ -453,16 +479,19 @@ fn app_connection_sets_up_only_this_database() {
     site.assert_restores(&*site.store());
 }
 
-/// Restore and verify run over the same store the replicator used.
+/// Restore and verify run over the same store the replicator used. The drain may meet a
+/// busy database (the application's commits race the replicator's reads) and retry, so the
+/// clock moves while the stop is pending.
 #[test]
 fn verify_and_restore_if_missing_use_the_shared_store() {
     let site = Site::new();
     let store = site.store();
-    let (runtime, _clock) = fake();
+    let (runtime, clock) = fake();
     let replicator =
         Replicator::start_with(&site.db, Arc::clone(&store), config(), runtime).unwrap();
     site.commit(4);
-    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
+    let stopped = stopped_moving(&replicator, &clock, POLL);
+    assert!(matches!(stopped, Stopped::Drained { .. }), "{stopped:?}");
     let report = verify(&*store, Depth::Contents).unwrap();
     assert_eq!(report.worst(), None, "{report:?}");
     assert!(restore_if_missing(&*store, &site.db).unwrap().is_none());
@@ -705,5 +734,29 @@ fn a_thread_that_dies_is_reported_gone() {
     let (runtime, _clock) = fake();
     let next = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
     assert!(matches!(stopped(&next), Stopped::Drained { .. }));
+    site.assert_restores(&*site.store());
+}
+
+/// A drain that meets a retry waits out its backoff on the replicator's clock: on a fake
+/// clock it ends once the clock reaches the retry, not before. A test that stops a
+/// replicator whose drain may retry moves the clock while it waits ([`stopped_moving`]).
+#[test]
+fn a_drain_that_waits_out_a_retry_ends_once_the_clock_reaches_it() {
+    let site = Site::new();
+    let faulty = site.faulty();
+    faulty.fail_uploads.store(true, Ordering::SeqCst);
+    let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
+    let (runtime, clock) = fake();
+    let replicator = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
+    site.commit(4);
+    wait(&replicator, |h| {
+        h.synced.is_some() && h.counters.retries > 0
+    });
+    faulty.fail_uploads.store(false, Ordering::SeqCst);
+    let stopped = stopped_moving(&replicator, &clock, POLL);
+    assert!(
+        matches!(stopped, Stopped::Drained { txid: Some(_) }),
+        "{stopped:?}"
+    );
     site.assert_restores(&*site.store());
 }

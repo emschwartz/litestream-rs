@@ -9,8 +9,8 @@
 use std::time::Duration;
 
 use lsr_core::{
-    Event, Fault, FileKey, Level, MaintainedEvent, PersistentCause, SnapshotCause, SourceError,
-    SourceOp, StopCause, StoreError, StoreOp,
+    Denied, Did, Event, Fault, FileKey, Level, MaintainedEvent, PersistentCause, SnapshotCause,
+    SourceError, SourceOp, StopCause, StoreError, StoreOp,
 };
 use lsr_ltx::PageSize;
 
@@ -32,8 +32,16 @@ pub enum FaultKind {
     StoreTransient,
     /// [`Fault::StoreThrottled`].
     StoreThrottled,
-    /// [`Fault::StoreAuth`].
-    StoreAuth,
+    /// [`Fault::StoreDenied`] for [`Denied::Credentials`].
+    StoreCredentials,
+    /// [`Fault::StoreDenied`] for [`Denied::Permission`].
+    StorePermission,
+    /// [`Fault::StoreDenied`] for [`Denied::ClockSkew`].
+    StoreClockSkew,
+    /// [`Fault::StoreDenied`] for [`Denied::BucketMissing`].
+    StoreBucketMissing,
+    /// [`Fault::StoreDenied`] for [`Denied::Tls`].
+    StoreTls,
     /// [`Fault::RemoteObjectMissing`].
     RemoteObjectMissing,
     /// [`Fault::UploadAmbiguous`].
@@ -78,6 +86,8 @@ pub enum FaultKind {
     WalTruncatedBelowCommitted,
     /// [`Fault::WalUnlinked`].
     WalUnlinked,
+    /// [`Fault::WalSyncFailed`].
+    WalSyncFailed,
     /// [`Fault::DatabasePageMismatch`].
     DatabasePageMismatch,
     /// [`Fault::ShutdownDeadline`].
@@ -88,10 +98,14 @@ pub enum FaultKind {
 
 impl FaultKind {
     /// Every fault, in the order of [`Fault`].
-    pub const ALL: [Self; 28] = [
+    pub const ALL: [Self; 33] = [
         Self::StoreTransient,
         Self::StoreThrottled,
-        Self::StoreAuth,
+        Self::StoreCredentials,
+        Self::StorePermission,
+        Self::StoreClockSkew,
+        Self::StoreBucketMissing,
+        Self::StoreTls,
         Self::RemoteObjectMissing,
         Self::UploadAmbiguous,
         Self::UploadChecksumMismatch,
@@ -114,10 +128,25 @@ impl FaultKind {
         Self::WalCorruptBelowCommitted,
         Self::WalTruncatedBelowCommitted,
         Self::WalUnlinked,
+        Self::WalSyncFailed,
         Self::DatabasePageMismatch,
         Self::ShutdownDeadline,
         Self::Bug,
     ];
+}
+
+impl FaultKind {
+    /// The kind for one access refusal.
+    #[must_use]
+    pub const fn denied(why: Denied) -> Self {
+        match why {
+            Denied::Credentials => Self::StoreCredentials,
+            Denied::Permission => Self::StorePermission,
+            Denied::ClockSkew => Self::StoreClockSkew,
+            Denied::BucketMissing => Self::StoreBucketMissing,
+            Denied::Tls => Self::StoreTls,
+        }
+    }
 }
 
 impl From<&Fault> for FaultKind {
@@ -125,7 +154,7 @@ impl From<&Fault> for FaultKind {
         match fault {
             Fault::StoreTransient => Self::StoreTransient,
             Fault::StoreThrottled { .. } => Self::StoreThrottled,
-            Fault::StoreAuth => Self::StoreAuth,
+            Fault::StoreDenied(why) => Self::denied(*why),
             Fault::RemoteObjectMissing => Self::RemoteObjectMissing,
             Fault::UploadAmbiguous => Self::UploadAmbiguous,
             Fault::UploadChecksumMismatch => Self::UploadChecksumMismatch,
@@ -148,6 +177,7 @@ impl From<&Fault> for FaultKind {
             Fault::WalCorruptBelowCommitted => Self::WalCorruptBelowCommitted,
             Fault::WalTruncatedBelowCommitted => Self::WalTruncatedBelowCommitted,
             Fault::WalUnlinked => Self::WalUnlinked,
+            Fault::WalSyncFailed => Self::WalSyncFailed,
             Fault::DatabasePageMismatch { .. } => Self::DatabasePageMismatch,
             Fault::ShutdownDeadline => Self::ShutdownDeadline,
             Fault::Bug(_) => Self::Bug,
@@ -166,7 +196,11 @@ pub fn persistent_of(kind: FaultKind) -> Option<PersistentCause> {
 pub fn stop_of(kind: FaultKind) -> Option<StopCause> {
     let page = PageSize::MIN;
     match kind {
-        FaultKind::StoreAuth => Some(StopCause::Credentials),
+        FaultKind::StoreCredentials => Some(StopCause::StoreDenied(Denied::Credentials)),
+        FaultKind::StorePermission => Some(StopCause::StoreDenied(Denied::Permission)),
+        FaultKind::StoreClockSkew => Some(StopCause::StoreDenied(Denied::ClockSkew)),
+        FaultKind::StoreBucketMissing => Some(StopCause::StoreDenied(Denied::BucketMissing)),
+        FaultKind::StoreTls => Some(StopCause::StoreDenied(Denied::Tls)),
         FaultKind::StoreRefused => Some(StopCause::StoreRefused),
         FaultKind::RemoteCorrupt => Some(StopCause::RemoteCorrupt),
         FaultKind::RemoteAheadOfLocal => Some(StopCause::OtherWriter),
@@ -178,6 +212,7 @@ pub fn stop_of(kind: FaultKind) -> Option<StopCause> {
         FaultKind::WalCorruptBelowCommitted => Some(StopCause::WalCorrupt),
         FaultKind::WalTruncatedBelowCommitted => Some(StopCause::WalTruncated),
         FaultKind::WalUnlinked => Some(StopCause::WalUnlinked),
+        FaultKind::WalSyncFailed => Some(StopCause::WalSyncFailed),
         FaultKind::DatabasePageMismatch => {
             lsr_ltx::PageNo::new(1, page).map(|pgno| StopCause::DatabasePageMismatch { pgno })
         }
@@ -216,6 +251,7 @@ pub fn names_fault(scenario: &Scenario, kind: FaultKind) -> bool {
             (Expect::Event(EventMatch::Resnapshot(CauseKind::NewestStagedFileUnreadable)), _) => {
                 kind == FaultKind::StagedLost
             }
+            (Expect::Stopped(got @ StopCause::StoreDenied(_)), Some(stop)) => *got == stop,
             (Expect::Stopped(got), Some(stop)) => {
                 std::mem::discriminant(got) == std::mem::discriminant(&stop)
             }
@@ -229,7 +265,11 @@ pub fn fault_scenarios(kind: FaultKind) -> &'static [fn() -> Scenario] {
     match kind {
         FaultKind::StoreTransient => &[store_flaky_5pct, commit_fails_after_publish],
         FaultKind::StoreThrottled => &[store_429_retry_after],
-        FaultKind::StoreAuth => &[creds_revoked_mid_run],
+        FaultKind::StoreCredentials => &[creds_revoked_mid_run],
+        FaultKind::StorePermission => &[permission_revoked_mid_run],
+        FaultKind::StoreClockSkew => &[clock_skewed_against_the_store_mid_run],
+        FaultKind::StoreBucketMissing => &[bucket_deleted_mid_run],
+        FaultKind::StoreTls => &[tls_fails_mid_run],
         FaultKind::RemoteObjectMissing => &[remote_file_deleted_externally],
         FaultKind::UploadAmbiguous => &[size_mismatch_on_commit],
         FaultKind::UploadChecksumMismatch => &[etag_mismatch_on_put],
@@ -255,19 +295,27 @@ pub fn fault_scenarios(kind: FaultKind) -> &'static [fn() -> Scenario] {
         ],
         FaultKind::WalTruncatedBelowCommitted => &[wal_truncated_externally_under_lock],
         FaultKind::WalUnlinked => &[wal_unlinked_mid_run],
+        FaultKind::WalSyncFailed => &[],
         FaultKind::DatabasePageMismatch => &[db_page_flipped_under_sync],
         FaultKind::ShutdownDeadline => &[sigterm_during_upload],
         FaultKind::Bug => &[],
     }
 }
 
-/// Why a fault has no scenario of its own. [`FaultKind::Bug`] is the only one:
-/// the oracle's bug-fault violation fails every run that meets it, so every
-/// scenario and every random history asserts it never fires.
+/// Why a fault has no scenario that holds under every response set. [`FaultKind::Bug`]: the
+/// oracle's bug-fault violation fails every run that meets it, so every scenario and every
+/// random history asserts it never fires. [`FaultKind::WalSyncFailed`]: an open gap, named in
+/// the reason, with its scenario run under the default responses alone.
 #[must_use]
 pub const fn fault_reason(kind: FaultKind) -> Option<&'static str> {
     if matches!(kind, FaultKind::Bug) {
         Some("every run fails on it: the oracle's BugFault violation")
+    } else if matches!(kind, FaultKind::WalSyncFailed) {
+        Some(
+            "a stop's restart trusts the WAL again, so it fails every response set that stops \
+             (StagedNotDurable) until a durable record exists (the engine journal decision); \
+             wal_fsync_fails runs it under the default responses",
+        )
     } else {
         None
     }
@@ -276,7 +324,11 @@ pub const fn fault_reason(kind: FaultKind) -> Option<&'static str> {
 /// Scenarios that are not tied to one fault: the clock steps back.
 #[must_use]
 pub fn clock_scenarios() -> &'static [fn() -> Scenario] {
-    &[clock_steps_back_10s]
+    &[
+        clock_steps_back_10s,
+        clock_steps_back_an_hour_mid_retry,
+        clock_jumps_forward_an_hour,
+    ]
 }
 
 /// Scenarios that are not tied to one fault: the application checkpoints on its own.
@@ -546,23 +598,56 @@ fn quiet_after_stop(report: &RunReport) -> Result<(), String> {
     }
 }
 
-/// The credentials stop working in the middle of the run: a stop, and no
-/// further calls.
-#[must_use]
-pub fn creds_revoked_mid_run() -> Scenario {
+/// The store refuses an upload for `why` in the middle of the run: a stop
+/// under that kind of refusal and no other, and no further calls.
+fn store_denies_upload(name: &'static str, why: Denied) -> Scenario {
     let mut s = injected(
-        "creds_revoked_mid_run",
+        name,
         vec![remote_fault(
             StoreOp::Upload,
             0,
-            FaultShape::Error(StoreError::Auth {
+            FaultShape::Error(StoreError::Denied {
                 op: StoreOp::Upload,
+                why,
             }),
         )],
-        vec![Expect::Stopped(StopCause::Credentials), Expect::Recovered],
+        vec![
+            Expect::Stopped(StopCause::StoreDenied(why)),
+            Expect::Recovered,
+        ],
     );
     s.check = Some(quiet_after_stop);
     s
+}
+
+/// The credentials stop working in the middle of the run.
+#[must_use]
+pub fn creds_revoked_mid_run() -> Scenario {
+    store_denies_upload("creds_revoked_mid_run", Denied::Credentials)
+}
+
+/// A policy starts refusing uploads in the middle of the run.
+#[must_use]
+pub fn permission_revoked_mid_run() -> Scenario {
+    store_denies_upload("permission_revoked_mid_run", Denied::Permission)
+}
+
+/// The host clock drifts too far from the store's in the middle of the run.
+#[must_use]
+pub fn clock_skewed_against_the_store_mid_run() -> Scenario {
+    store_denies_upload("clock_skewed_against_the_store_mid_run", Denied::ClockSkew)
+}
+
+/// The bucket is deleted in the middle of the run.
+#[must_use]
+pub fn bucket_deleted_mid_run() -> Scenario {
+    store_denies_upload("bucket_deleted_mid_run", Denied::BucketMissing)
+}
+
+/// The store's certificate stops verifying in the middle of the run.
+#[must_use]
+pub fn tls_fails_mid_run() -> Scenario {
+    store_denies_upload("tls_fails_mid_run", Denied::Tls)
 }
 
 /// The backend refuses an upload for a reason a retry does not change.
@@ -1186,6 +1271,78 @@ pub fn wal_unlinked_mid_run() -> Scenario {
     s
 }
 
+/// The engine's sync of the WAL fails once, and the kernel keeps the pages it covered off the
+/// disk for good (the simulator's lost writeback): nothing from that generation is staged, the
+/// next try checkpoints with TRUNCATE, and a snapshot from the database file follows. Where the
+/// responses stop instead, the run ends there: a person's restart would trust the WAL again,
+/// which waits on a durable record ([`wal_fsync_fails_then_restart`]); the oracle judges the
+/// default responses in [`wal_fsync_fails_then_snapshot`].
+#[must_use]
+pub fn wal_fsync_fails() -> Scenario {
+    build(
+        "wal_fsync_fails",
+        vec![
+            live(),
+            vec![
+                Op::EnvFault(EnvFault::Source(SourceOp::Sync, SourceError::FsyncFailed)),
+                commit(2, false),
+                commit(2, false),
+            ],
+            ticks(SETTLE),
+        ],
+        vec![Expect::Stopped(StopCause::WalSyncFailed), Expect::Recovered],
+    )
+}
+
+/// [`wal_fsync_fails`] under the default responses, then a power loss: the snapshot after the
+/// TRUNCATE holds what the failed sync covered, and the database file held it durably.
+#[must_use]
+pub fn wal_fsync_fails_then_snapshot() -> Scenario {
+    build(
+        "wal_fsync_fails_then_snapshot",
+        vec![
+            live(),
+            vec![
+                Op::EnvFault(EnvFault::Source(SourceOp::Sync, SourceError::FsyncFailed)),
+                commit(2, false),
+            ],
+            ticks(SETTLE),
+            vec![commit(2, false)],
+            ticks(SETTLE),
+            vec![Op::PowerLoss],
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        vec![
+            Expect::Stopped(StopCause::WalSyncFailed),
+            Expect::Event(EventMatch::Resnapshot(CauseKind::WalSyncFailed)),
+            Expect::Oracle,
+        ],
+    )
+}
+
+/// The engine's sync of the WAL fails, and the process restarts before its retry. The new
+/// process must not stage the frames the failed sync covered. It does today: the debt is held
+/// in memory only, and a durable record waits on the engine journal decision.
+#[must_use]
+pub fn wal_fsync_fails_then_restart() -> Scenario {
+    build(
+        "wal_fsync_fails_then_restart",
+        vec![
+            live(),
+            vec![
+                Op::EnvFault(EnvFault::Source(SourceOp::Sync, SourceError::FsyncFailed)),
+                commit(2, false),
+                Op::Tick,
+                Op::Restart,
+            ],
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        vec![Expect::Stopped(StopCause::WalSyncFailed), Expect::Oracle],
+    )
+}
+
 /// The database page a stray write flips in [`db_page_flipped_under_sync`]:
 /// one the database file alone holds after the scenario's first commit.
 const FLIPPED: u32 = 3;
@@ -1254,6 +1411,99 @@ pub fn clock_steps_back_10s() -> Scenario {
     );
     s.check = Some(one_clamp_no_fault);
     s
+}
+
+/// The clock steps back an hour while an upload waits out its one-second
+/// retry: the retry still runs within seconds of wall clock, never an hour.
+#[must_use]
+pub fn clock_steps_back_an_hour_mid_retry() -> Scenario {
+    let transient = StoreError::Transient {
+        op: StoreOp::Upload,
+        kind: std::io::ErrorKind::TimedOut,
+    };
+    let mut s = build(
+        "clock_steps_back_an_hour_mid_retry",
+        vec![
+            live(),
+            vec![
+                remote_fault(StoreOp::Upload, 0, FaultShape::Error(transient)),
+                commit(2, false),
+                Op::Tick,
+                Op::Tick,
+                Op::ClockJump(-3_600_000),
+            ],
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        vec![
+            Expect::Event(EventMatch::Retrying(FaultKind::StoreTransient)),
+            Expect::Event(EventMatch::Clamped),
+            Expect::Oracle,
+        ],
+    );
+    s.check = Some(uploads_soon_after_the_clamp);
+    s
+}
+
+/// The upload after the clamp ran within a minute of wall clock of it.
+fn uploads_soon_after_the_clamp(report: &RunReport) -> Result<(), String> {
+    let mut at = None;
+    let mut clamped_at = None;
+    for seen in &report.seen {
+        match seen {
+            Seen::Tick { at: began, .. } => at = Some(*began),
+            Seen::Event(Event::Clamped(_)) => clamped_at = at,
+            Seen::Event(Event::Uploaded(Did::Put(_))) => {
+                if let (Some(clamped), Some(now)) = (clamped_at, at) {
+                    let waited = now.saturating_duration_since(clamped);
+                    return if waited < Duration::from_secs(60) {
+                        Ok(())
+                    } else {
+                        Err(format!("the upload waited {waited:?} of wall clock"))
+                    };
+                }
+            }
+            Seen::Event(_)
+            | Seen::Stop(_)
+            | Seen::Recovered(_)
+            | Seen::Snapshot(_)
+            | Seen::Oracle => {}
+        }
+    }
+    Err("no upload after the clamp".to_owned())
+}
+
+/// The clock jumps an hour forward: timers that pass early run, nothing
+/// faults, and every acknowledged commit restores.
+#[must_use]
+pub fn clock_jumps_forward_an_hour() -> Scenario {
+    let mut s = build(
+        "clock_jumps_forward_an_hour",
+        vec![
+            live(),
+            vec![commit(2, false), Op::ClockJump(3_600_000), Op::Tick],
+            vec![commit(3, false)],
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        vec![Expect::Oracle],
+    );
+    s.check = Some(no_fault);
+    s
+}
+
+fn no_fault(report: &RunReport) -> Result<(), String> {
+    let faulted = report.seen.iter().any(|seen| {
+        matches!(
+            seen,
+            Seen::Event(Event::Retrying { .. } | Event::Degraded { .. } | Event::Clamped(_))
+                | Seen::Stop(_)
+        )
+    });
+    if faulted {
+        return Err("a fault, a stop or a clamp followed a forward jump".to_owned());
+    }
+    Ok(())
 }
 
 fn one_clamp_no_fault(report: &RunReport) -> Result<(), String> {

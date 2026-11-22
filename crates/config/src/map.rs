@@ -615,12 +615,17 @@ fn responses(settings: ResponseSettings) -> Responses {
     };
     Responses {
         credentials: one(settings.credentials, base.credentials),
+        permission_denied: one(settings.permission_denied, base.permission_denied),
+        clock_skew: one(settings.clock_skew, base.clock_skew),
+        bucket_missing: one(settings.bucket_missing, base.bucket_missing),
+        tls: one(settings.tls, base.tls),
         store_refused: one(settings.store_refused, base.store_refused),
         remote_corrupt: one(settings.remote_corrupt, base.remote_corrupt),
         remote_regressed: one(settings.remote_regressed, base.remote_regressed),
         wal_corrupt: one(settings.wal_corrupt, base.wal_corrupt),
         wal_truncated: one(settings.wal_truncated, base.wal_truncated),
         wal_unlinked: one(settings.wal_unlinked, base.wal_unlinked),
+        wal_sync_failed: one(settings.wal_sync_failed, base.wal_sync_failed),
         page_size_changed: one(settings.page_size_changed, base.page_size_changed),
         database_page_mismatch: base.database_page_mismatch,
         bug: one(settings.bug, base.bug),

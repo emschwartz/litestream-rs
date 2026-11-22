@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index ecef32e..44d854d 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -2240,7 +2240,7 @@ const fn boot_cause(
+     recovered: Option<SnapshotCause>,
+ ) -> Option<SnapshotCause> {
+     match (dropped, refused, recovered) {
+-        (Dropped::Diverged(_), _, _) | (Dropped::Unreadable(_), _, Some(_)) => {
++        (Dropped::Diverged(_) | Dropped::Unreadable(_), _, _) => {
+             Some(SnapshotCause::NewestStagedFileUnreadable)
+         }
+         (Dropped::Nothing, Some(from), Some(_)) => Some(SnapshotCause::StagedUnverified { from }),

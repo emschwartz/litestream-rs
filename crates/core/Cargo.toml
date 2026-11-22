@@ -16,6 +16,7 @@ testing = ["verify", "dep:lsr-spec"]
 verify = []
 
 [dependencies]
+lsr-journal.workspace = true
 lsr-ltx.workspace = true
 lsr-wal.workspace = true
 thiserror.workspace = true
@@ -32,6 +33,8 @@ lsr-ltx = { workspace = true, features = ["testing"] }
 lsr-core = { workspace = true, features = ["testing"] }
 # The planner tests name the spec's judgement; the adapter is `lsr_core::spec_view`.
 lsr-spec.workspace = true
+# The journal differential test writes a newer version's record by hand.
+crc.workspace = true
 # The memory gates (tests/core/mem.rs) count heap through this allocator.
 lsr-heap.workspace = true
 

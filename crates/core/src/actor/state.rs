@@ -79,7 +79,7 @@ pub struct Degraded {
 const fn is_page_mismatch(cause: PersistentCause) -> bool {
     match cause {
         PersistentCause::DatabasePageMismatch { .. } => true,
-        PersistentCause::Credentials
+        PersistentCause::StoreDenied(_)
         | PersistentCause::StoreRefused
         | PersistentCause::RemoteCorrupt
         | PersistentCause::OtherWriter
@@ -87,8 +87,10 @@ const fn is_page_mismatch(cause: PersistentCause) -> bool {
         | PersistentCause::WalCorrupt
         | PersistentCause::WalTruncated
         | PersistentCause::WalUnlinked
+        | PersistentCause::WalSyncFailed
         | PersistentCause::PageSizeChanged { .. }
-        | PersistentCause::Bug => false,
+        | PersistentCause::Bug
+        | PersistentCause::Stalled(_) => false,
     }
 }
 
@@ -104,6 +106,11 @@ pub(super) struct Retry {
 }
 
 impl Retry {
+    /// Failures in a row so far.
+    pub(super) fn failures(&self) -> u32 {
+        self.attempts.map_or(0, NonZeroU32::get)
+    }
+
     /// Whether the task may run at `now`.
     pub(super) fn ready(&self, now: Timestamp) -> bool {
         self.until.is_none_or(|until| now >= until)

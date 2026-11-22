@@ -915,8 +915,10 @@ dependencies = [
 name = "lsr-core"
 version = "0.0.0"
 dependencies = [
+ "crc",
  "lsr-core",
  "lsr-heap",
+ "lsr-journal",
  "lsr-ltx",
  "lsr-spec",
  "lsr-wal",
@@ -956,6 +958,16 @@ dependencies = [
  "rusqlite",
  "sha2",
  "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "lsr-journal"
+version = "0.0.0"
+dependencies = [
+ "crc",
+ "lsr-ltx",
+ "proptest",
  "thiserror",
 ]
 
@@ -1053,6 +1065,7 @@ name = "lsr-store-fs"
 version = "0.0.0"
 dependencies = [
  "lsr-core",
+ "lsr-journal",
  "lsr-ltx",
  "tempfile",
 ]

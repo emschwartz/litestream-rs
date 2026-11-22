@@ -1,32 +1,56 @@
-//! The fixed seed set: 64 histories of 300 operations, the whole thing inside
-//! ten seconds, half under the default mix and half under a swarm mix of
+//! The fixed seed set: 64 histories of 300 operations, each batch of eight inside a budget of
+//! engine ticks (a count, never the clock: a loaded machine changes how long a seed takes, not how
+//! many ticks it needs), half under the default mix and half under a swarm mix of
 //! their own (`Weights::mixed`). A failure prints its replay line (`just
 //! sim-replay`).
 
 #[cfg(test)]
 mod fixed {
-    use std::time::{Duration, Instant};
-
     use lsr_sim::run::run_ops;
     use lsr_sim::{Generator, Op, Opts, Seed, Weights, frozen_history, run};
 
     const STEPS: u32 = 300;
-    const BUDGET: Duration = Duration::from_secs(10);
+    /// Engine ticks a batch of eight seeds may run. The batches of seeds 1 to 64 take 1,500 to
+    /// 2,000 (no seed alone takes more than 410), so a seed that starts looping, a retry that
+    /// never backs off or a drain that spins, trips it long before nextest's hang limit.
+    const BATCH_TICKS: u32 = 4_000;
 
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "reports how long a batch of seeds takes; the runs themselves use simulated time"
-    )]
+    /// The ticks a run took: `RunReport::ticks`, which counts every tick the actor ran.
+    fn spent(runs: impl IntoIterator<Item = u32>) -> u32 {
+        runs.into_iter().fold(0, u32::saturating_add)
+    }
+
+    fn within_budget(ticks: u32) {
+        assert!(
+            ticks <= BATCH_TICKS,
+            "simulator tick budget exceeded: {ticks} ticks, budget {BATCH_TICKS}"
+        );
+    }
+
     fn batch(first: u64) {
-        let started = Instant::now();
+        let mut ticks = Vec::new();
         for n in (first..).take(8) {
             let seed = Seed::new(n);
-            let outcome = run(seed, STEPS, &Weights::mixed(seed));
-            if let Err(failure) = outcome {
-                panic!("{failure}");
+            match run(seed, STEPS, &Weights::mixed(seed)) {
+                Ok(report) => ticks.push(report.ticks),
+                Err(failure) => panic!("{failure}"),
             }
         }
-        assert!(started.elapsed() < BUDGET, "simulator budget exceeded");
+        within_budget(spent(ticks));
+    }
+
+    /// The budget fails a history that ticks past it: 5,000 idle ticks, the shape of a seed
+    /// whose engine loops, run through the same measure and the same assertion.
+    #[test]
+    #[should_panic(expected = "simulator tick budget exceeded")]
+    fn a_history_that_loops_past_the_tick_budget_fails_it() {
+        let ops = vec![Op::Tick; 5_000];
+        let report = run_ops(Seed::new(1), &ops, &Opts::default()).expect("idle ticks pass");
+        assert!(
+            report.ticks > BATCH_TICKS,
+            "the plant must exceed the budget"
+        );
+        within_budget(spent([report.ticks]));
     }
 
     #[test]

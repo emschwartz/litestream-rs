@@ -31,6 +31,7 @@ mod created_at;
 mod env;
 mod fault;
 mod inventory;
+mod journal;
 mod layout;
 mod ltx_read;
 mod maintain;
@@ -81,10 +82,11 @@ pub use env::{FakeClock, RecordingSleeper, SeededEntropy};
 pub use fault::reporting_bugs;
 pub use fault::{
     Backoff, BugSite, Clamped, Fault, MAX_BACKOFF, Next, OtherWriter, PersistentCause, Policy,
-    Response, Responses, SnapshotCause, SnapshotCauseKind, SnapshotCounts, StopCause, VERIFY,
-    backoff_wait, policy, retry_wait,
+    Response, Responses, STALLED_AFTER, SnapshotCause, SnapshotCauseKind, SnapshotCounts, Stall,
+    StopCause, VERIFY, backoff_wait, policy, retry_wait,
 };
 pub use inventory::{Inventory, InventoryError, is_snapshot_start};
+pub use journal::{JournalFile, JournalWriteError, JournalWriter};
 pub use layout::{
     CreatedAt, CreatedAtSource, Dating, FileInfo, FileKey, Level, ListedTime, NonZeroCreatedAt,
     ParseKeyError, RangeSide, Stamp, cmp_range, file_name, is_scratch_name, parse_file_name,
@@ -111,7 +113,7 @@ pub use recover::{
 };
 pub use restore::{
     AsOfInside, DatabaseSink, FileFault, MAX_ATTEMPTS, NoPlan, PublishFailure, PublishLeft,
-    RestoreError, RestoreOptions, Restored, SinkOp, restore, restore_with,
+    RestoreError, RestoreOptions, Restored, SinkOp, listed_past, restore, restore_with,
 };
 #[cfg(any(test, feature = "testing"))]
 pub use restore::{Database, MemPublishError, MemSink};
@@ -126,8 +128,8 @@ pub use source::{
     CheckpointCall, CheckpointEffect, CheckpointScript, FakeCheckpointer, FakeDb, FakeWal, SourceOp,
 };
 pub use store::{
-    BatchKind, CorruptCause, ListAt, Listing, ListingStalled, ObjectStore, PageLimit, PartNumber,
-    ReadAt, ReadLen, StoreError, StoreOp, Upload, build_listing,
+    BatchKind, CorruptCause, Denied, ListAt, Listing, ListingStalled, ObjectStore, PageLimit,
+    PartNumber, ReadAt, ReadLen, StoreError, StoreOp, Upload, build_listing,
 };
 pub use sync::{PageFrom, Step, StepEnd, StepFailed, SyncConfig, Synced, clamp, sync_step};
 pub use upload::{Did, UploadConfig, UploadFailed, UploadPlan, UploadState, Uploaded, upload_next};

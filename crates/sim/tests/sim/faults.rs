@@ -118,7 +118,11 @@ fn under_go_like_every_persistent_scenario_degrades_and_the_oracle_holds() {
         }
     }
     for kind in [
-        FaultKind::StoreAuth,
+        FaultKind::StoreCredentials,
+        FaultKind::StorePermission,
+        FaultKind::StoreClockSkew,
+        FaultKind::StoreBucketMissing,
+        FaultKind::StoreTls,
         FaultKind::StoreRefused,
         FaultKind::RemoteCorrupt,
         FaultKind::RemoteRegressed,
@@ -174,6 +178,22 @@ fn every_scenario_is_tested_here() {
     }
 }
 
+/// Under the default responses only: see `fault_reason(FaultKind::WalSyncFailed)`.
+#[test]
+fn wal_fsync_fails() {
+    let scenario = scenario::wal_fsync_fails();
+    assert!(scenario.keeps_trying());
+    run(scenario::wal_fsync_fails);
+}
+
+/// A restart between a failed WAL sync and the TRUNCATE that pays for it forgets the debt:
+/// the new process stages frames the failed sync covered (`StagedNotDurable`).
+#[test]
+#[ignore = "needs a durable engine-owned record of the failed WAL sync: waits on the engine journal decision"]
+fn wal_fsync_fails_then_restart() {
+    run(scenario::wal_fsync_fails_then_restart);
+}
+
 #[test]
 fn vacuum_page_size_change() {
     run(scenario::vacuum_page_size_change);
@@ -190,8 +210,38 @@ fn store_429_retry_after() {
 }
 
 #[test]
+fn clock_steps_back_an_hour_mid_retry() {
+    run(scenario::clock_steps_back_an_hour_mid_retry);
+}
+
+#[test]
+fn clock_jumps_forward_an_hour() {
+    run(scenario::clock_jumps_forward_an_hour);
+}
+
+#[test]
 fn creds_revoked_mid_run() {
     run(scenario::creds_revoked_mid_run);
+}
+
+#[test]
+fn permission_revoked_mid_run() {
+    run(scenario::permission_revoked_mid_run);
+}
+
+#[test]
+fn clock_skewed_against_the_store_mid_run() {
+    run(scenario::clock_skewed_against_the_store_mid_run);
+}
+
+#[test]
+fn bucket_deleted_mid_run() {
+    run(scenario::bucket_deleted_mid_run);
+}
+
+#[test]
+fn tls_fails_mid_run() {
+    run(scenario::tls_fails_mid_run);
 }
 
 #[test]

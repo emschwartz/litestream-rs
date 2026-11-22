@@ -499,3 +499,143 @@ fn a_full_file_that_neither_follows_nor_starts_the_generation_is_refused() {
     assert!(!replica_holds(&rig, 3, &full));
     assert_eq!(restored(&rig), 4);
 }
+
+/// The first byte of page `pgno` in the replica's newest state.
+fn restored_page(rig: &Rig, pgno: u32) -> u8 {
+    let sink = MemSink::new();
+    block_on(restore(
+        &rig.remote.inner,
+        RestoreTarget::Latest,
+        sink.clone(),
+    ))
+    .unwrap();
+    sink.published().unwrap().page(pgno).unwrap()[0]
+}
+
+/// A power loss on a disk that lies about the engine's WAL barrier drops the
+/// frames of the replica's newest file and of the pending file after it. The
+/// application comes back and retries both jobs: the first is not idempotent
+/// (it stamps the time) and writes its page with other bytes into the same
+/// frames, the second writes its page again verbatim. The live WAL now holds
+/// the pending file's range page for page, at the offset and commit size it
+/// names, after a range that is not the replica's newest file. Only the
+/// anchor sees it (an honest barrier keeps those frames, so nothing else
+/// needs to): the pending file is never uploaded on that file, and the
+/// replica restores what the database holds.
+#[test]
+fn a_pending_file_regrown_after_another_tail_is_not_uploaded_on_the_old_one() {
+    let (mut rig, mut actor) = caught_up();
+    let kept = rig.wal.committed_end().frame_count();
+    rig.wal.append_tx(&[(pg(2), vec![0xA0; PS.bytes()])], nz(3));
+    rig.settle(&mut actor, T0 + 1);
+    assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2)]);
+    let job = [(pg(1), vec![0xC0; PS.bytes()])];
+    rig.remote
+        .inner
+        .inject_failure(StoreOp::Upload, transient(StoreOp::Upload));
+    rig.wal.append_tx(&job, nz(3));
+    rig.settle(&mut actor, T0 + 1);
+    assert_eq!(staged(&rig).last(), Some(&3));
+    assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2)]);
+    rig.wal.lose_frames_from(kept);
+    rig.wal.append_tx(&[(pg(2), vec![0xB0; PS.bytes()])], nz(3));
+    rig.wal.append_tx(&job, nz(3));
+    let mut actor = Actor::new(cfg());
+    let boot = rig.tick(&mut actor, T0 + 2);
+    assert_eq!(
+        event(&boot),
+        Some(&Event::Booted {
+            cause: Some(SnapshotCause::StagedUnverified {
+                from: Txid::new(3).unwrap()
+            })
+        })
+    );
+    let seen = rig.settle(&mut actor, T0 + 2);
+    no_stop(&seen);
+    assert_eq!(
+        (restored_page(&rig, 1), restored_page(&rig, 2)),
+        (0xC0, 0xB0)
+    );
+}
+
+/// A replica outage longer than the witness cap: the engine stops staging at
+/// the cap and holds its position (the WAL keeps the frames) instead of
+/// staging a file no token vouches for, which the uploader would refuse and a
+/// snapshot would replace. When the replica returns, the pending files drain,
+/// staging resumes from the held position, and nothing is snapshotted.
+#[test]
+fn a_replica_outage_past_the_witness_cap_holds_the_position_and_costs_no_snapshot() {
+    let (mut rig, mut actor) = caught_up();
+    let cap = crate::witness::MAX_WITNESSED;
+    // The last commit's byte appears nowhere else, so restoring it means it
+    // reached the replica.
+    let mut commits: Vec<u8> = (0..cap.saturating_add(5))
+        .map(|n| u8::try_from(n % 200).unwrap().saturating_add(2))
+        .collect();
+    commits.push(255);
+    stage_held(&mut rig, &mut actor, &commits, T0 + 1);
+    assert!(staged(&rig).len() <= cap, "{} staged", staged(&rig).len());
+    assert!(actor.engine.witnesses.len() <= cap);
+    let last = *commits.last().unwrap();
+    let mut seen = Vec::new();
+    let mut now = T0 + 10_000;
+    while restored(&rig) != last {
+        let more = rig.follow(&mut actor, now, 20_000);
+        assert!(!more.is_empty());
+        seen.extend(more);
+        now = now.saturating_add(10_000);
+        assert!(now < T0 + 10_000_000, "never drained: {:?}", seen.last());
+    }
+    no_stop(&seen);
+    assert_eq!(restored(&rig), last);
+    assert!(
+        !seen.iter().any(|tick| matches!(
+            event(tick),
+            Some(Event::Resnapshot(_) | Event::Booted { .. })
+        )),
+        "{:?}",
+        seen.iter()
+            .filter(|tick| matches!(event(tick), Some(Event::Resnapshot(_))))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// A staging directory holding more pending files than the witness cap (left
+/// by Go, which has no cap, or by an older build): boot witnesses up to the
+/// cap and deletes the rest as it deletes a file the WAL does not vouch for.
+/// The WAL still holds their frames, so they are staged again once uploads
+/// make room, and nothing is snapshotted.
+#[test]
+fn pending_files_past_the_cap_at_boot_are_regenerated_from_the_wal() {
+    let (mut rig, mut actor) = caught_up();
+    let cap = crate::witness::MAX_WITNESSED;
+    let fill = |n: usize| u8::try_from(n % 200).unwrap().saturating_add(2);
+    let first: Vec<u8> = (0..cap).map(fill).collect();
+    stage_held(&mut rig, &mut actor, &first, T0 + 1);
+    // Forget the tokens, so this engine stages past the cap as one without
+    // one would.
+    actor.engine.witnesses = Witnesses::new();
+    let more: Vec<u8> = (0..10).map(fill).chain([255]).collect();
+    stage_held(&mut rig, &mut actor, &more, T0 + 1);
+    let pending = staged(&rig).len().saturating_sub(1);
+    assert!(pending > cap, "{pending} pending");
+    let mut actor = Actor::new(cfg());
+    let boot = rig.tick(&mut actor, T0 + 2);
+    assert_eq!(event(&boot), Some(&Event::Booted { cause: None }));
+    assert!(actor.engine.witnesses.len() <= cap);
+    assert!(staged(&rig).len() <= cap.saturating_add(1));
+    let mut seen = Vec::new();
+    let mut now = T0 + 10_000;
+    while restored(&rig) != 255 {
+        seen.extend(rig.follow(&mut actor, now, 20_000));
+        now = now.saturating_add(10_000);
+        assert!(now < T0 + 10_000_000, "never drained: {:?}", seen.last());
+    }
+    no_stop(&seen);
+    assert!(
+        !seen
+            .iter()
+            .any(|tick| matches!(event(tick), Some(Event::Resnapshot(_)))),
+        "a snapshot was taken"
+    );
+}

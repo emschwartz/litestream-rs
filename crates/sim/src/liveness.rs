@@ -162,6 +162,22 @@ const GIVE_UP: &[Justifier] = &[
     Justifier::WalDamaged,
 ];
 
+/// What can make the boot's witness delete staged files the live WAL cannot
+/// vouch for (`StagedUnverified`): staging edited or torn, the WAL they came
+/// from changed or lost what they hold, or the replica was rolled back so files
+/// it had taken are pending again against a WAL that has moved on (0x83).
+const STAGED_UNVERIFIED: &[Justifier] = &[
+    Justifier::RemoteEdited,
+    Justifier::StagingEdited,
+    Justifier::StagedLost,
+    Justifier::StagingFault,
+    Justifier::PowerLoss,
+    Justifier::LyingDisk,
+    Justifier::WalDamaged,
+    Justifier::WalRestarted,
+    Justifier::WalEmptied,
+];
+
 /// What can make a snapshot for `cause` necessary, announced at a boot
 /// (`at_boot`) or by a running engine; `None` for a cause that is the engine's
 /// own design rather than a response to the world (a TRUNCATE checkpoint
@@ -240,21 +256,11 @@ pub const fn justifies(cause: SnapshotCauseKind, at_boot: bool) -> Option<&'stat
         // power loss cannot take what was staged: only a disk that lies about
         // that sync, damage, or a staging backup put back can.
         SnapshotCauseKind::LocalRewound => &[LyingDisk, WalDamaged, StagingEdited],
-        // Staged files the live WAL could not vouch for were deleted at
-        // boot: staging edited or torn, the WAL they came from changed or
-        // lost what they hold, or the replica was rolled back so files it had
-        // taken are pending again against a WAL that has moved on (0x83).
-        SnapshotCauseKind::StagedUnverified => &[
-            RemoteEdited,
-            StagingEdited,
-            StagedLost,
-            StagingFault,
-            PowerLoss,
-            LyingDisk,
-            WalDamaged,
-            WalRestarted,
-            WalEmptied,
-        ],
+        SnapshotCauseKind::StagedUnverified => STAGED_UNVERIFIED,
+        // The engine's fsync of the WAL failed (a fault failed the step), and
+        // a TRUNCATE checkpoint then moved the unstaged frames into the
+        // database file.
+        SnapshotCauseKind::WalSyncFailed => &[PositionUnproven, WalDamaged, LyingDisk],
         SnapshotCauseKind::CheckpointBoundary => return None,
         SnapshotCauseKind::OperatorRequested => &[SnapshotRequested],
     })
@@ -270,6 +276,17 @@ pub const fn of_op(op: &Op) -> &'static [Justifier] {
         }
         Op::EnvFault(_) | Op::Wal(_) | Op::WalDamage { .. } => &[Justifier::WalDamaged],
         Op::Remote(_) | Op::SecondWriter { .. } => &[Justifier::RemoteEdited],
+        // A lasting fault, noted as it begins and again as it is lifted.
+        Op::Hold { hold, .. } => match hold {
+            crate::generate::Hold::StoreDown(_)
+            | crate::generate::Hold::CredentialsRevoked
+            | crate::generate::Hold::LaggingListing
+            | crate::generate::Hold::LyingReads => &[Justifier::RemoteFault],
+            crate::generate::Hold::DiskFull => &[Justifier::StagingFault],
+            crate::generate::Hold::Wal(_) => &[Justifier::WalDamaged],
+            crate::generate::Hold::LyingDisk => &[Justifier::LyingDisk],
+            crate::generate::Hold::ReadersHeld => &[],
+        },
         Op::OurReader { begin: false } => &[Justifier::ReadLockLapsed],
         Op::RequestSnapshot => &[Justifier::SnapshotRequested],
         Op::LyingWalSync => &[Justifier::LyingDisk],

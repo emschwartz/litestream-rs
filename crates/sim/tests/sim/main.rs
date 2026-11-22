@@ -18,6 +18,8 @@ mod liveness;
 #[cfg(test)]
 mod replay;
 #[cfg(test)]
+mod restored_staging;
+#[cfg(test)]
 mod retention;
 #[cfg(test)]
 mod snapshot_causes;
@@ -25,6 +27,8 @@ mod snapshot_causes;
 mod soak;
 #[cfg(test)]
 mod sqlite_rules;
+#[cfg(test)]
+mod survival;
 #[cfg(test)]
 mod tally;
 #[cfg(test)]

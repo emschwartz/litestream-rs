@@ -8,7 +8,7 @@ use proptest::prelude::*;
 
 use super::*;
 use crate::layout::{FileKey, Level};
-use crate::store::StoreOp;
+use crate::store::{Denied, StoreOp};
 use lsr_ltx::{Txid, TxidRange};
 
 fn ps() -> PageSize {
@@ -65,11 +65,38 @@ policy_is!(
     Fault::StoreThrottled { retry_after: None },
     doubling()
 );
-policy_is!(
-    store_auth_is_persistent_on_credentials,
-    Fault::StoreAuth,
-    persistent(PersistentCause::Credentials)
-);
+/// Every kind of access refusal is persistent under its own cause: they need
+/// different fixes, so one is never reported as another.
+#[test]
+fn store_denied_is_persistent_under_its_own_kind() {
+    for why in DENIED {
+        assert_eq!(
+            policy(&Fault::StoreDenied(why)),
+            persistent(PersistentCause::StoreDenied(why))
+        );
+    }
+}
+
+const DENIED: [Denied; 5] = [
+    Denied::Credentials,
+    Denied::Permission,
+    Denied::ClockSkew,
+    Denied::BucketMissing,
+    Denied::Tls,
+];
+
+/// Ties [`DENIED`] to the enum: a new kind breaks this match first.
+#[test]
+fn every_denied_kind_is_listed() {
+    let listed = |why: Denied| match why {
+        Denied::Credentials
+        | Denied::Permission
+        | Denied::ClockSkew
+        | Denied::BucketMissing
+        | Denied::Tls => true,
+    };
+    assert!(DENIED.into_iter().all(listed));
+}
 policy_is!(
     remote_object_missing_retries,
     Fault::RemoteObjectMissing,
@@ -155,6 +182,11 @@ policy_is!(
     persistent(PersistentCause::WalUnlinked)
 );
 policy_is!(
+    wal_sync_failed_is_persistent,
+    Fault::WalSyncFailed,
+    persistent(PersistentCause::WalSyncFailed)
+);
+policy_is!(
     shutdown_deadline_stops,
     Fault::ShutdownDeadline,
     Policy::Shutdown
@@ -176,7 +208,7 @@ fn every_fault_has_a_named_policy_test() {
     let tested = |fault: &Fault| match fault {
         Fault::StoreTransient
         | Fault::StoreThrottled { .. }
-        | Fault::StoreAuth
+        | Fault::StoreDenied(_)
         | Fault::RemoteObjectMissing
         | Fault::UploadAmbiguous
         | Fault::UploadChecksumMismatch
@@ -199,6 +231,7 @@ fn every_fault_has_a_named_policy_test() {
         | Fault::WalCorruptBelowCommitted
         | Fault::WalTruncatedBelowCommitted
         | Fault::WalUnlinked
+        | Fault::WalSyncFailed
         | Fault::DatabasePageMismatch { .. }
         | Fault::ShutdownDeadline
         | Fault::Bug(_) => true,
@@ -210,9 +243,13 @@ fn page_two() -> PageNo {
     PageNo::new(2, PageSize::MIN).unwrap()
 }
 
-fn every_persistent_cause() -> [PersistentCause; 11] {
+fn every_persistent_cause() -> [PersistentCause; 16] {
     [
-        PersistentCause::Credentials,
+        PersistentCause::StoreDenied(Denied::Credentials),
+        PersistentCause::StoreDenied(Denied::Permission),
+        PersistentCause::StoreDenied(Denied::ClockSkew),
+        PersistentCause::StoreDenied(Denied::BucketMissing),
+        PersistentCause::StoreDenied(Denied::Tls),
         PersistentCause::StoreRefused,
         PersistentCause::RemoteCorrupt,
         PersistentCause::OtherWriter,
@@ -220,6 +257,7 @@ fn every_persistent_cause() -> [PersistentCause; 11] {
         PersistentCause::WalCorrupt,
         PersistentCause::WalTruncated,
         PersistentCause::WalUnlinked,
+        PersistentCause::WalSyncFailed,
         PersistentCause::PageSizeChanged {
             was: PageSize::MIN,
             now: ps(),
@@ -233,7 +271,13 @@ fn every_persistent_cause() -> [PersistentCause; 11] {
 #[test]
 fn every_persistent_cause_is_listed() {
     let listed = |cause: PersistentCause| match cause {
-        PersistentCause::Credentials
+        PersistentCause::StoreDenied(
+            Denied::Credentials
+            | Denied::Permission
+            | Denied::ClockSkew
+            | Denied::BucketMissing
+            | Denied::Tls,
+        )
         | PersistentCause::StoreRefused
         | PersistentCause::RemoteCorrupt
         | PersistentCause::OtherWriter
@@ -241,9 +285,12 @@ fn every_persistent_cause_is_listed() {
         | PersistentCause::WalCorrupt
         | PersistentCause::WalTruncated
         | PersistentCause::WalUnlinked
+        | PersistentCause::WalSyncFailed
         | PersistentCause::PageSizeChanged { .. }
         | PersistentCause::DatabasePageMismatch { .. }
         | PersistentCause::Bug => true,
+        // Not configurable: `every_retried_fault_stalls_and_no_stall_stops` covers it.
+        PersistentCause::Stalled(_) => false,
     };
     assert!(every_persistent_cause().into_iter().all(listed));
 }
@@ -280,14 +327,16 @@ fn keeping_trying_rebuilds_where_the_state_cannot_be_trusted() {
         let want = match cause {
             PersistentCause::Bug | PersistentCause::OtherWriter => Action::Rebuild,
             PersistentCause::RemoteRegressed => Action::Relist,
-            PersistentCause::Credentials
+            PersistentCause::StoreDenied(_)
             | PersistentCause::StoreRefused
             | PersistentCause::RemoteCorrupt
             | PersistentCause::WalCorrupt
             | PersistentCause::WalTruncated
             | PersistentCause::WalUnlinked
+            | PersistentCause::WalSyncFailed
             | PersistentCause::PageSizeChanged { .. }
-            | PersistentCause::DatabasePageMismatch { .. } => Action::Retry,
+            | PersistentCause::DatabasePageMismatch { .. }
+            | PersistentCause::Stalled(_) => Action::Retry,
         };
         assert_eq!(all.action(cause), want, "{cause:?}");
     }
@@ -299,7 +348,13 @@ fn each_field_names_one_cause() {
     for cause in every_persistent_cause() {
         let mut one = Responses::GO_LIKE;
         match cause {
-            PersistentCause::Credentials => one.credentials = Response::Stop,
+            PersistentCause::StoreDenied(why) => match why {
+                Denied::Credentials => one.credentials = Response::Stop,
+                Denied::Permission => one.permission_denied = Response::Stop,
+                Denied::ClockSkew => one.clock_skew = Response::Stop,
+                Denied::BucketMissing => one.bucket_missing = Response::Stop,
+                Denied::Tls => one.tls = Response::Stop,
+            },
             PersistentCause::StoreRefused => one.store_refused = Response::Stop,
             PersistentCause::RemoteCorrupt => one.remote_corrupt = Response::Stop,
             PersistentCause::OtherWriter => {
@@ -309,11 +364,13 @@ fn each_field_names_one_cause() {
             PersistentCause::WalCorrupt => one.wal_corrupt = Response::Stop,
             PersistentCause::WalTruncated => one.wal_truncated = Response::Stop,
             PersistentCause::WalUnlinked => one.wal_unlinked = Response::Stop,
+            PersistentCause::WalSyncFailed => one.wal_sync_failed = Response::Stop,
             PersistentCause::PageSizeChanged { .. } => one.page_size_changed = Response::Stop,
             PersistentCause::DatabasePageMismatch { .. } => {
                 one.database_page_mismatch = Response::Stop;
             }
             PersistentCause::Bug => one.bug = Response::Stop,
+            PersistentCause::Stalled(_) => {}
         }
         for other in every_persistent_cause() {
             let flipped = Responses::GO_LIKE.stops(other) != one.stops(other);
@@ -325,9 +382,74 @@ fn each_field_names_one_cause() {
 #[test]
 fn a_persistent_cause_and_its_stop_cause_round_trip() {
     for cause in every_persistent_cause() {
-        assert_eq!(PersistentCause::of(StopCause::from(cause)), Some(cause));
+        assert_eq!(cause.stop().and_then(PersistentCause::of), Some(cause));
     }
     assert_eq!(PersistentCause::of(StopCause::Shutdown), None);
+}
+
+/// Every fault, pinned by the match in [`every_fault_has_a_named_policy_test`]'s spirit: the
+/// array's length breaks when a variant is added.
+fn every_fault() -> [Fault; 33] {
+    [
+        Fault::StoreTransient,
+        Fault::StoreThrottled { retry_after: None },
+        Fault::StoreDenied(Denied::Credentials),
+        Fault::StoreDenied(Denied::Permission),
+        Fault::StoreDenied(Denied::ClockSkew),
+        Fault::StoreDenied(Denied::BucketMissing),
+        Fault::StoreDenied(Denied::Tls),
+        Fault::RemoteObjectMissing,
+        Fault::UploadAmbiguous,
+        Fault::UploadChecksumMismatch,
+        Fault::StoreRefused,
+        Fault::RemoteCorrupt,
+        Fault::RemoteAheadOfLocal,
+        Fault::RemoteRegressed,
+        Fault::StagedLost,
+        Fault::LocalDiskFull,
+        Fault::LocalIo,
+        Fault::LocalFsyncFailed,
+        Fault::WalSyncFailed,
+        Fault::SqliteBusy,
+        Fault::ReadersHeld,
+        Fault::WalMoved,
+        Fault::WalIndexInconsistent,
+        Fault::WalChangedUnderRead,
+        Fault::NothingToSnapshot,
+        Fault::ReadTxLost,
+        Fault::PageSizeChanged {
+            was: PageSize::MIN,
+            now: ps(),
+        },
+        Fault::WalCorruptBelowCommitted,
+        Fault::WalTruncatedBelowCommitted,
+        Fault::WalUnlinked,
+        Fault::DatabasePageMismatch { pgno: page_two() },
+        Fault::ShutdownDeadline,
+        Fault::Bug(BugSite::PageMap),
+    ]
+}
+
+/// The class rule: a fault that can keep a task from progress ends in a typed degraded
+/// state that health reports. A persistent fault is one at once; a retried fault becomes
+/// a stall after [`STALLED_AFTER`] failures in a row; only the end of a drain stops instead.
+/// No retried fault is exempt: each can recur for as long as its cause lasts.
+#[test]
+fn every_retried_fault_stalls_and_no_stall_stops() {
+    for fault in every_fault() {
+        let ends_degraded = match policy(&fault) {
+            Policy::Retry(_) => Stall::of(&fault).is_some(),
+            Policy::Persistent(_) => Stall::of(&fault).is_none(),
+            Policy::Shutdown => fault == Fault::ShutdownDeadline,
+        };
+        assert!(ends_degraded, "{fault:?}");
+        if let Some(stall) = Stall::of(&fault) {
+            let cause = PersistentCause::Stalled(stall);
+            assert!(!Responses::STRICT.stops(cause), "{fault:?}");
+            assert_eq!(Responses::STRICT.action(cause), Action::Retry);
+            assert_eq!(cause.stop(), None);
+        }
+    }
 }
 
 fn store_fault(err: &StoreError) -> Fault {
@@ -372,13 +494,14 @@ fn from_remote_throttled_without_or_with_a_zero_wait_names_none() {
 }
 
 #[test]
-fn from_remote_auth() {
-    assert_eq!(
-        store_fault(&StoreError::Auth {
-            op: StoreOp::Upload
-        }),
-        Fault::StoreAuth
-    );
+fn from_remote_keeps_the_kind_of_denial() {
+    for why in DENIED {
+        let err = StoreError::Denied {
+            op: StoreOp::Upload,
+            why,
+        };
+        assert_eq!(store_fault(&err), Fault::StoreDenied(why));
+    }
 }
 
 #[test]
@@ -413,7 +536,13 @@ fn from_staging_names_the_local_fault_for_every_store_error() {
             },
             Fault::LocalIo,
         ),
-        (StoreError::Auth { op: StoreOp::Read }, Fault::LocalIo),
+        (
+            StoreError::Denied {
+                op: StoreOp::Read,
+                why: Denied::Credentials,
+            },
+            Fault::LocalIo,
+        ),
         (StoreError::NotFound { key: key() }, Fault::StagedLost),
         (
             StoreError::ScratchExhausted { key: key() },
@@ -432,11 +561,24 @@ fn from_staging_names_the_local_fault_for_every_store_error() {
     }
 }
 
+/// ENOSPC (and EDQUOT) on the staging directory is a full disk, not an
+/// unnamed local I/O error: the operator's fix is to free space.
+#[test]
+fn a_full_staging_disk_is_disk_full() {
+    for kind in [ErrorKind::StorageFull, ErrorKind::QuotaExceeded] {
+        let err = StoreError::Transient {
+            op: StoreOp::Upload,
+            kind,
+        };
+        assert_eq!(Fault::from_staging(&err), Fault::LocalDiskFull, "{kind:?}");
+    }
+}
+
 #[test]
 fn no_staging_error_is_blamed_on_the_replica() {
     let remote_only = [
         Fault::StoreTransient,
-        Fault::StoreAuth,
+        Fault::StoreDenied(Denied::Credentials),
         Fault::RemoteObjectMissing,
         Fault::UploadAmbiguous,
         Fault::UploadChecksumMismatch,
@@ -444,7 +586,10 @@ fn no_staging_error_is_blamed_on_the_replica() {
         Fault::RemoteCorrupt,
     ];
     let errs = [
-        StoreError::Auth { op: StoreOp::Read },
+        StoreError::Denied {
+            op: StoreOp::Read,
+            why: Denied::Credentials,
+        },
         StoreError::Refused {
             op: StoreOp::Read,
             status: 501,
@@ -700,7 +845,7 @@ fn from_source_maps_every_variant() {
     let cases = [
         (SourceError::Io(ErrorKind::BrokenPipe), Fault::LocalIo),
         (SourceError::DiskFull, Fault::LocalDiskFull),
-        (SourceError::FsyncFailed, Fault::LocalFsyncFailed),
+        (SourceError::FsyncFailed, Fault::WalSyncFailed),
         (SourceError::Busy, Fault::SqliteBusy),
         (SourceError::ReadersHeld, Fault::ReadersHeld),
         (SourceError::Short { pgno: page() }, Fault::LocalIo),

@@ -18,7 +18,7 @@ fn a_staged_snapshot_of_a_rewound_database_is_uploaded_after_a_restart() {
         rig.settle(&mut actor, T0 + 1);
     }
     assert_eq!(remote_newest(&rig), Some(3));
-    rig.wal.lose_frames_after(1);
+    rig.wal.lose_frames_from(1);
 
     let mut rewound = Actor::new(cfg());
     let boot = rig.tick(&mut rewound, T0 + 2);

@@ -1,0 +1,18 @@
+diff --git a/crates/ltx/src/decoder.rs b/crates/ltx/src/decoder.rs
+index 7cc30fe..ceed11d 100644
+--- a/crates/ltx/src/decoder.rs
++++ b/crates/ltx/src/decoder.rs
+@@ -416,12 +416,7 @@ impl Body {
+         self.file.update(bytes.get(..8).unwrap_or_default());
+         let computed = mem::replace(&mut self.file, Crc64::new()).finish_file();
+         let trailer = Trailer::decode(bytes, &self.header)?;
+-        if trailer.file_checksum() != computed {
+-            return Err(DecodeError::FileChecksum {
+-                computed,
+-                stored: trailer.file_checksum(),
+-            });
+-        }
++        let _skipped = computed;
+         if let Some(computed) = self.db
+             && trailer.post_apply() != Some(computed)
+         {

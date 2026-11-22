@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crc::{CRC_64_GO_ISO, Crc};
+use lsr_ltx::testing::xxh32;
 use lsr_ltx::{DecodeError, Decoder, Event, Header, Verified};
 
 /// What a decode produced: the header, every page in order, the verdict.
@@ -219,21 +220,22 @@ impl Legacy {
         let mut hashed = bytes.clone();
         hashed.extend_from_slice(page);
         bytes.extend_from_slice(&self.magic);
-        bytes.extend_from_slice(&[self.flg, self.bd]);
+        let mut descriptor = vec![self.flg, self.bd];
         if let Some(size) = self.content_size {
-            bytes.extend_from_slice(&size.to_le_bytes());
+            descriptor.extend_from_slice(&size.to_le_bytes());
         }
-        bytes.push(0); // header checksum, not checked
+        bytes.extend_from_slice(&descriptor);
+        bytes.push(xxh32(&descriptor).to_le_bytes()[1]);
         for (size, data) in &self.blocks {
             bytes.extend_from_slice(&size.to_le_bytes());
             bytes.extend_from_slice(data);
             if self.flg & 0x10 != 0 {
-                bytes.extend_from_slice(&[0; 4]);
+                bytes.extend_from_slice(&xxh32(data).to_le_bytes());
             }
         }
         bytes.extend_from_slice(&[0; 4]);
         if self.flg & 0x04 != 0 {
-            bytes.extend_from_slice(&[0; 4]);
+            bytes.extend_from_slice(&xxh32(page).to_le_bytes());
         }
         Frame {
             pgno,

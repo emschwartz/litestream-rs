@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/sync.rs b/crates/core/src/sync.rs
+index ac52fec..f307bcc 100644
+--- a/crates/core/src/sync.rs
++++ b/crates/core/src/sync.rs
+@@ -550,7 +550,7 @@ pub(crate) async fn stage<R: Read + Seek, P: PageSource, L: ObjectStore>(
+ /// [`Fault::WalSyncFailed`] when the sync failed; the step stages nothing, and no later sync
+ /// of that WAL generation is trusted (`actor::unproven`).
+ pub(crate) fn wal_barrier<W: WalSource>(wal: &mut W, _after: &CommittedRead) -> Result<(), Fault> {
+-    wal.sync().map_err(Fault::from_source)
++    wal.sync().or(Ok(()))
+ }
+ 
+ /// Scans the WAL from `step`'s start and stages one file, or none when nothing is new.

@@ -16,9 +16,25 @@
 //!   independent block per page; this parser also takes several, and dependent
 //!   ones, within the length budget below.
 //!
-//! The frame's xxHash32 header and content checksums are not compared. Go's
-//! lz4 reader rejects a mismatch; this reader, the tolerant side, accepts it.
-//! The LTX file checksum covers every decompressed page.
+//! The LTX file checksum covers each page's header, its block length and its
+//! decompressed bytes, never the LZ4 bytes (Go's encoder hashes the same, so
+//! the format cannot change). What else catches a change to LZ4 bytes:
+//!
+//! - A legacy frame's xxHash32 checksums, as Go's lz4 reader compares them:
+//!   the header checksum over the descriptor, and when the descriptor asks for
+//!   them, each block's checksum and the content checksum. Every Go writer
+//!   wrote correct ones, so a mismatch is corruption.
+//! - Every LZ4 block, compressed in either encoding, must end in a token that
+//!   holds only literals and whose match-length nibble is zero
+//!   ([`FrameError::BlockEnd`]). No decoder reads that nibble, but every
+//!   compressor this crate reads (Go's `pierrec/lz4`, `lz4_flex`) writes zero,
+//!   so a nonzero nibble is corruption the page bytes would never show.
+//!
+//! What remains is aliasing: an LZ4 block is one of many encodings of its page,
+//! and a changed offset or match length can copy equal bytes from elsewhere
+//! (most often in runs of zeros). Such a change decodes to the same page, so
+//! nothing that checks pages can see it, and restore is unaffected; the bytes
+//! still differ, so whoever needs the very bytes it wrote compares raw bytes.
 //!
 //! Every length is bounded before a byte of it is buffered: a block cannot
 //! exceed the LZ4 bound of a page, a stored block the bytes the page still
@@ -32,6 +48,7 @@ use thiserror::Error;
 
 use crate::PageSize;
 use crate::conv::{Cursor, u64_from, usize_from};
+use crate::xxh32::xxh32;
 
 /// Bytes in a page header.
 pub(crate) const PAGE_HEADER_LEN: usize = 6;
@@ -128,6 +145,34 @@ pub enum FrameError {
         /// LZ4's description of the fault.
         reason: String,
     },
+    /// A legacy frame's header checksum does not match its descriptor.
+    #[error("LZ4 frame header checksum {stored:#04x}, computed {computed:#04x}")]
+    HeaderChecksum {
+        /// The checksum byte in the frame.
+        stored: u8,
+        /// The checksum over the descriptor.
+        computed: u8,
+    },
+    /// A legacy frame's block checksum does not match the block's bytes.
+    #[error("LZ4 block checksum {stored:#010x}, computed {computed:#010x}")]
+    BlockChecksum {
+        /// The checksum in the frame.
+        stored: u32,
+        /// The checksum over the block as stored.
+        computed: u32,
+    },
+    /// A legacy frame's content checksum does not match the page.
+    #[error("LZ4 content checksum {stored:#010x}, computed {computed:#010x}")]
+    ContentChecksum {
+        /// The checksum in the frame.
+        stored: u32,
+        /// The checksum over the decompressed page.
+        computed: u32,
+    },
+    /// An LZ4 block does not end in a literals-only token with a zero
+    /// match-length nibble, as every compressor writes it.
+    #[error("LZ4 block does not end in a literals-only token")]
+    BlockEnd,
     /// The frame decompressed to something other than one page.
     #[error("page decompressed to {found} bytes, expected {expected}")]
     PageLen {
@@ -172,6 +217,7 @@ pub(crate) struct FrameParser {
     bound: usize,
     pgno: NonZeroU32,
     flg: u8,
+    bd: u8,
 }
 
 impl FrameParser {
@@ -185,6 +231,7 @@ impl FrameParser {
             bound: block_bound(page_size),
             pgno: NonZeroU32::MIN,
             flg: 0,
+            bd: 0,
         }
     }
 
@@ -236,7 +283,7 @@ impl FrameParser {
             State::DescriptorTail { .. } => self.descriptor_tail(unit)?,
             State::LegacyBlockSize => self.legacy_block_size(unit)?,
             State::LegacyBlock { len, stored } => self.legacy_block(unit, len, stored)?,
-            State::ContentChecksum => self.complete()?,
+            State::ContentChecksum => self.content_checksum(unit)?,
         };
         if self.state != State::PageHeader && self.len.saturating_add(self.need()) > self.max_len {
             return Err(FrameError::FrameTooLong { max: self.max_len });
@@ -295,7 +342,18 @@ impl FrameParser {
 
     fn block(&mut self, unit: &[u8]) -> Result<Progress, FrameError> {
         self.filled = decompress_into(unit, &mut self.page).map_err(lz4)?;
+        check_block_end(unit)?;
         self.complete()
+    }
+
+    fn content_checksum(&mut self, unit: &[u8]) -> Result<Progress, FrameError> {
+        let progress = self.complete()?;
+        let stored = Cursor::new(unit).u32_le();
+        let computed = xxh32(&self.page);
+        if stored != computed {
+            return Err(FrameError::ContentChecksum { stored, computed });
+        }
+        Ok(progress)
     }
 
     fn complete(&mut self) -> Result<Progress, FrameError> {
@@ -324,17 +382,38 @@ impl FrameParser {
             return Err(FrameError::FrameDescriptor { flg, bd });
         }
         self.flg = flg;
+        self.bd = bd;
         let len = if flg & FLG_CONTENT_SIZE == 0 { 1 } else { 9 };
         self.state = State::DescriptorTail { len };
         Ok(Progress::More)
     }
 
     fn descriptor_tail(&mut self, unit: &[u8]) -> Result<Progress, FrameError> {
+        let (size, stored) = unit.split_last_chunk::<1>().unwrap_or((&[], &[0]));
         if self.flg & FLG_CONTENT_SIZE != 0 {
-            let found = Cursor::new(unit).u64_le();
+            let found = Cursor::new(size).u64_le();
             if found != u64_from(self.page.len()) {
                 return Err(FrameError::ContentSize { found });
             }
+        }
+        // The header checksum is the second byte of the xxHash32 of FLG, BD and
+        // the content size when present.
+        let mut descriptor = [self.flg, self.bd, 0, 0, 0, 0, 0, 0, 0, 0];
+        let hashed = descriptor
+            .get_mut(2..2_usize.saturating_add(size.len()))
+            .map_or(0, |slot| {
+                slot.copy_from_slice(size);
+                size.len()
+            });
+        let [_, computed, _, _] = xxh32(
+            descriptor
+                .get(..2_usize.saturating_add(hashed))
+                .unwrap_or_default(),
+        )
+        .to_le_bytes();
+        let [stored] = *stored;
+        if stored != computed {
+            return Err(FrameError::HeaderChecksum { stored, computed });
         }
         self.state = State::LegacyBlockSize;
         Ok(Progress::More)
@@ -366,21 +445,73 @@ impl FrameParser {
         len: usize,
         stored: bool,
     ) -> Result<Progress, FrameError> {
-        let data = unit.get(..len).unwrap_or_default();
+        let (data, checksum) = unit.split_at_checked(len).unwrap_or_default();
+        if self.flg & FLG_BLOCK_CHECKSUM != 0 {
+            let stored = Cursor::new(checksum).u32_le();
+            let computed = xxh32(data);
+            if stored != computed {
+                return Err(FrameError::BlockChecksum { stored, computed });
+            }
+        }
         let (before, after) = self.page.split_at_mut(self.filled);
         let produced = if stored {
             after.get_mut(..data.len()).map_or(0, |out| {
                 out.copy_from_slice(data);
                 data.len()
             })
-        } else if self.flg & FLG_INDEPENDENT == 0 {
-            decompress_into_with_dict(data, after, before).map_err(lz4)?
         } else {
-            decompress_into(data, after).map_err(lz4)?
+            let produced = if self.flg & FLG_INDEPENDENT == 0 {
+                decompress_into_with_dict(data, after, before).map_err(lz4)?
+            } else {
+                decompress_into(data, after).map_err(lz4)?
+            };
+            check_block_end(data)?;
+            produced
         };
         self.filled = self.filled.saturating_add(produced);
         self.state = State::LegacyBlockSize;
         Ok(Progress::More)
+    }
+}
+
+/// Reads a length continued in 255-valued bytes after a nibble of 15, from
+/// `pos`; returns the length and the position after it, or `None` when the
+/// block ends first.
+fn extended_len(block: &[u8], nibble: u8, mut pos: usize) -> Option<(usize, usize)> {
+    let mut len = usize::from(nibble);
+    if nibble == 15 {
+        loop {
+            let byte = *block.get(pos)?;
+            pos = pos.saturating_add(1);
+            len = len.saturating_add(usize::from(byte));
+            if byte != 255 {
+                break;
+            }
+        }
+    }
+    Some((len, pos))
+}
+
+/// Walks the sequences of a block LZ4 already decompressed and checks that it
+/// ends in a token holding only literals, with a zero match-length nibble.
+fn check_block_end(block: &[u8]) -> Result<(), FrameError> {
+    let mut pos = 0_usize;
+    loop {
+        let token = *block.get(pos).ok_or(FrameError::BlockEnd)?;
+        let (literals, after) =
+            extended_len(block, token >> 4, pos.saturating_add(1)).ok_or(FrameError::BlockEnd)?;
+        pos = after.saturating_add(literals);
+        if pos >= block.len() {
+            return if pos == block.len() && token & 0x0f == 0 {
+                Ok(())
+            } else {
+                Err(FrameError::BlockEnd)
+            };
+        }
+        // Two offset bytes, then the match length's continuation.
+        let (_, after) =
+            extended_len(block, token & 0x0f, pos.saturating_add(2)).ok_or(FrameError::BlockEnd)?;
+        pos = after;
     }
 }
 
@@ -420,7 +551,8 @@ mod tests {
         let mut descriptor = LZ4_MAGIC.to_vec();
         descriptor.extend_from_slice(&[0x64, 0x40]);
         feed(&mut parser, &descriptor).unwrap();
-        feed(&mut parser, &[0]).unwrap();
+        let [_, header_checksum, _, _] = xxh32(&[0x64, 0x40]).to_le_bytes();
+        feed(&mut parser, &[header_checksum]).unwrap();
         assert_eq!(parser.frame_len(), 13);
 
         // Forty blocks that bring the frame to max - 4 bytes: the next

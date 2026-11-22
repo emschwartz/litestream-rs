@@ -582,12 +582,17 @@ fn responses(fields: &Fields, walk: &mut Walk) -> ResponseSettings {
     };
     let mut settings = ResponseSettings {
         credentials: one("credentials"),
+        permission_denied: one("permission-denied"),
+        clock_skew: one("clock-skew"),
+        bucket_missing: one("bucket-missing"),
+        tls: one("tls"),
         store_refused: one("store-refused"),
         remote_corrupt: one("remote-corrupt"),
         remote_regressed: one("remote-regressed"),
         wal_corrupt: one("wal-corrupt"),
         wal_truncated: one("wal-truncated"),
         wal_unlinked: one("wal-unlinked"),
+        wal_sync_failed: one("wal-sync-failed"),
         page_size_changed: one("page-size-changed"),
         bug: one("bug"),
         other_writer: None,

@@ -63,3 +63,10 @@ path = "fuzz_targets/plan_lazy.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "flip"
+path = "fuzz_targets/flip.rs"
+test = false
+doc = false
+bench = false

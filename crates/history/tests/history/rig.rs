@@ -138,9 +138,10 @@ impl Run {
         if upsert {
             sql = sql.replacen("INSERT INTO", "INSERT OR REPLACE INTO", 1);
         }
+        let begun = self.now();
         match self.rig.exec(&sql) {
             Ok(()) => {
-                self.log.commit(next.digest(), self.now());
+                self.log.commit_between(next.digest(), begun, self.now());
                 self.tip = next;
             }
             Err(_) => {
