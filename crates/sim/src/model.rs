@@ -234,6 +234,9 @@ pub struct Model {
     notes: Vec<SnapshotNote>,
     stages: Vec<StageNote>,
     seq: u64,
+    // Commits a power loss cut from the local branch, with the replica
+    // recorder's length at that loss.
+    cut: BTreeMap<CommitId, usize>,
 }
 
 impl Model {
@@ -260,6 +263,7 @@ impl Model {
             notes: Vec::new(),
             stages: Vec::new(),
             seq: 0,
+            cut: BTreeMap::new(),
         }
     }
 
@@ -323,9 +327,12 @@ impl Model {
 
     /// A power loss. Commits of the current generation (`current`) past
     /// `kept_frames` that no checkpoint made durable are gone from the local
-    /// branch; a new branch starts at what is left.
-    pub fn on_power_loss(&mut self, current: Salts, kept_frames: u32) {
+    /// branch; a new branch starts at what is left. `at` is the replica
+    /// recorder's length now: a file put from then on may reuse the id of a
+    /// file that held a commit cut here ([`Model::cut_by`]).
+    pub fn on_power_loss(&mut self, current: Salts, kept_frames: u32, at: usize) {
         let commits = &mut self.commits;
+        let cut = &mut self.cut;
         self.lineage.retain(|id| {
             let Some(rec) = commits.get_mut(id.index()) else {
                 return false;
@@ -333,9 +340,20 @@ impl Model {
             let survives =
                 rec.durable || (rec.salts == current && rec.end.frame_index() <= kept_frames);
             rec.durable = survives;
+            if !survives {
+                cut.entry(*id).or_insert(at);
+            }
             survives
         });
         self.branch = self.branch.saturating_add(1);
+    }
+
+    /// Whether a power loss had cut `commit` from the local branch by replica
+    /// recorder length `at`: the database no longer holds it, so the engine
+    /// may legitimately cover its transaction id with another commit.
+    #[must_use]
+    pub fn cut_by(&self, commit: CommitId, at: usize) -> bool {
+        self.cut.get(&commit).is_some_and(|when| *when <= at)
     }
 
     /// After [`Model::on_power_loss`]: SQLite recovered the database `image`

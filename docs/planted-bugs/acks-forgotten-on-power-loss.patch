@@ -1,0 +1,12 @@
+diff --git a/crates/sim/src/world.rs b/crates/sim/src/world.rs
+index 894a855..0e335c2 100644
+--- a/crates/sim/src/world.rs
++++ b/crates/sim/src/world.rs
+@@ -580,6 +580,7 @@ impl World {
+                 self.adopt_recovered();
+                 let now = lsr_core::Clock::now(self.clock.as_ref());
+                 self.history.power_loss(&self.model, now);
++                self.acked = Acked::new();
+                 lost
+             }
+         }
