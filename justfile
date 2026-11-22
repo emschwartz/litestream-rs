@@ -195,15 +195,24 @@ compat-regen *args:
     ./scripts/build-go-litestream.sh
     cargo run --locked -p lsr-compat --bin compat-regen -- {{args}}
 
+# The triple cargo-fuzz builds for: the nightly toolchain's own host. Left to itself cargo-fuzz
+# picks the triple it was compiled for, so a musl build of it (what cargo-binstall fetches) asks
+# for x86_64-unknown-linux-musl, where the address sanitizer cannot link and nightly has no std.
+fuzz_triple := "$(rustc +nightly -vV | sed -n 's/^host: //p')"
+
 # Run one fuzz target (decode, flip, index, plan, plan_contract, plan_lazy, key, wal) for N seconds;
 # new inputs join fuzz/corpus.
 fuzz target seconds:
-    cargo +nightly fuzz run {{target}} --fuzz-dir fuzz -- -max_total_time={{seconds}} -max_len=32768 -rss_limit_mb=2048 -print_final_stats=1
+    cargo +nightly fuzz run {{target}} --fuzz-dir fuzz --target "{{fuzz_triple}}" -- -max_total_time={{seconds}} -max_len=32768 -rss_limit_mb=2048 -print_final_stats=1
+
+# Replay one input (a finding under fuzz/artifacts, or a corpus file) against its target.
+fuzz-replay target file:
+    cargo +nightly fuzz run {{target}} --fuzz-dir fuzz --target "{{fuzz_triple}}" "{{file}}"
 
 # Minimise one target's corpus (keeps what reaches distinct coverage); extra
 # arguments go to libFuzzer: just fuzz-cmin wal -max_len=16384.
 fuzz-cmin target *args:
-    cargo +nightly fuzz cmin {{target}} --fuzz-dir fuzz -- {{args}}
+    cargo +nightly fuzz cmin {{target}} --fuzz-dir fuzz --target "{{fuzz_triple}}" -- {{args}}
 
 # Rebuild the seed corpus from the Go-written fixtures, and the wal seeds from built and SQLite WALs.
 fuzz-seed:

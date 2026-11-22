@@ -30,7 +30,7 @@ jobs:
   # From the committed corpus (docs/fuzzing.md): about ten minutes per LTX and WAL decoder
   # target, five per restore-planner target judged by the contract spec; the 24-hour run stays a
   # manual one. A crash, leak, timeout or out-of-memory input is uploaded; replay it with
-  # `cargo +nightly fuzz run <target> --fuzz-dir fuzz <file>`.
+  # `just fuzz-replay <target> <file>`.
   fuzz:
     runs-on: ubuntu-latest
     timeout-minutes: 30
