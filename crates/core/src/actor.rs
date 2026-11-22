@@ -1915,19 +1915,7 @@ async fn boot_recover<W: WalSource, L: ObjectStore, R: ObjectStore>(
         (staged, _) => staged,
     };
     let view = wal_view(wal, reader.as_ref(), committed)?;
-    let page_size = match newest_staged {
-        Some(
-            NewestStagedFile::Readable { page_size, .. }
-            | NewestStagedFile::Unreadable {
-                page_size: Some(page_size),
-                ..
-            },
-        ) => Some(page_size),
-        Some(NewestStagedFile::Unreadable { .. }) | None if confirmed.is_some() => {
-            replica_page_size(remote).await?
-        }
-        Some(NewestStagedFile::Unreadable { .. }) | None => None,
-    };
+    let page_size = prefix_page_size(newest_staged.as_ref(), confirmed, remote).await?;
     let now = view.header.map(|header| header.page_size());
     let recovered = match page_size.zip(now).filter(|(was, now)| was != now) {
         Some((was, now)) => Recovered::Stop(StopCause::PageSizeChanged { was, now }),
@@ -1942,6 +1930,33 @@ async fn boot_recover<W: WalSource, L: ObjectStore, R: ObjectStore>(
         recovered,
         page_size,
     })
+}
+
+/// The page size the next file must have: the newest staged file's, unless
+/// the replica holds a later transaction than that file (staging is behind
+/// it, or a staging backup was put back) or the staged file names none; then
+/// the replica's newest file's, since the next file goes on its prefix. The
+/// staged file's answers when the replica's header does not decode.
+async fn prefix_page_size<R: ObjectStore>(
+    newest_staged: Option<&NewestStagedFile>,
+    confirmed: Option<Txid>,
+    remote: &R,
+) -> Result<Option<PageSize>, Fault> {
+    let staged = match newest_staged {
+        Some(
+            NewestStagedFile::Readable { page_size, .. }
+            | NewestStagedFile::Unreadable {
+                page_size: Some(page_size),
+                ..
+            },
+        ) => Some(*page_size),
+        Some(NewestStagedFile::Unreadable { .. }) | None => None,
+    };
+    let behind = confirmed > newest_staged.map(NewestStagedFile::txid);
+    if confirmed.is_some() && (behind || staged.is_none()) {
+        return Ok(replica_page_size(remote).await?.or(staged));
+    }
+    Ok(staged)
 }
 
 /// The page size in the header of the replica's newest file; `None` when the
