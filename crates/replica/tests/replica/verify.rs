@@ -202,6 +202,13 @@ fn a_clock_step_back_does_not_put_off_the_scheduled_verify() {
 /// The first run is one interval after the start and the next one interval after it; each
 /// compares the restore of the transaction the replica holds with the live database, and a
 /// clean replica passes.
+///
+/// The transaction a run verifies is bounded, not pinned: at least the one the replica held
+/// when the test saw the engine caught up, at most the one it holds once the run is seen. The
+/// replicator's thread runs on its own, and a checkpoint stages a file of its own (a new
+/// transaction with no commit of the test's), which can land on either side of the run's read
+/// of the live database. Pinning the run to the earlier id failed under load (expected 3, saw
+/// 4); pinning it to the later one fails the other way.
 #[test]
 fn the_scheduled_verify_runs_on_its_interval_and_a_clean_replica_passes() {
     let site = Site::new();
@@ -217,14 +224,20 @@ fn the_scheduled_verify_runs_on_its_interval_and_a_clean_replica_passes() {
     let first = wait(&replicator, |h| runs(h) == 1);
     let check = first.verification;
     assert_eq!(check.runs.passed, 1, "{check:?}");
-    assert_eq!(check.last_good.map(|(txid, _)| txid), replicated(&health));
+    let verified = check.last_good.map(|(txid, _)| txid);
+    assert!(
+        replicated(&health) <= verified && verified <= replicated(&first),
+        "{verified:?} outside {:?}..={:?}",
+        replicated(&health),
+        replicated(&first)
+    );
     assert_eq!(check.failing, None);
     assert_eq!(check.kept_restore_point, None);
     assert_eq!(check.worst_finding, None);
     assert!(!first.is_degraded());
     let seen = next_verified(&replicator, &events);
     assert!(
-        matches!(seen, (txid, VerifyOutcome::Passed { pages }) if Some(txid) == replicated(&health) && pages > 0),
+        matches!(seen, (txid, VerifyOutcome::Passed { pages }) if Some(txid) == verified && pages > 0),
         "{seen:?}"
     );
     site.commit(2);
@@ -239,9 +252,16 @@ fn the_scheduled_verify_runs_on_its_interval_and_a_clean_replica_passes() {
     clock.advance(POLL);
     let second = wait(&replicator, |h| runs(h) == 2);
     assert_eq!(second.verification.runs.passed, 2);
-    assert_eq!(
-        second.verification.last_good.map(|(txid, _)| txid),
-        replicated(&newer)
+    let verified_again = second.verification.last_good.map(|(txid, _)| txid);
+    assert!(
+        replicated(&newer) <= verified_again && verified_again <= replicated(&second),
+        "{verified_again:?} outside {:?}..={:?}",
+        replicated(&newer),
+        replicated(&second)
+    );
+    assert!(
+        verified_again > verified,
+        "the second run verified the second batch"
     );
     site.assert_restores(&*site.store());
 }
