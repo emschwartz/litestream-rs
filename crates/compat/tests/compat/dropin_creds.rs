@@ -406,7 +406,7 @@ fn answers(go: &Path, case: &Case) -> (Dump, Dump, String) {
 
 /// Whether the config names only one of the key id and secret, after Go copies each global
 /// key into a replica that leaves it empty. Go ignores a lone key and signs with whatever the
-/// default chain finds; litestream-rs refuses the file (D152).
+/// default chain finds; litestream-rs refuses the file (D42).
 fn half_keys_in_config(case: &Case) -> bool {
     let given = |replica: &ConfigKey, global: &ConfigKey| {
         matches!(replica, ConfigKey::Set) || matches!(global, ConfigKey::Set)
@@ -415,7 +415,7 @@ fn half_keys_in_config(case: &Case) -> bool {
 }
 
 /// Whether a file both sides read holds a line that is not INI, which Go skips and
-/// litestream-rs refuses (D153).
+/// litestream-rs refuses (D43).
 fn not_ini_in_a_read_file(case: &Case) -> bool {
     [
         (&case.credentials, &case.credentials_var),
@@ -452,14 +452,14 @@ fn compare(go: &Path, case: &Case) -> Result<(), TestCaseError> {
     if not_ini_in_a_read_file(case) {
         prop_assert!(
             credentials_refused(&rust_out),
-            "a line that is not INI must be refused (D153)\n{report}\nRust: {rust_out:?}"
+            "a line that is not INI must be refused (D43)\n{report}\nRust: {rust_out:?}"
         );
         return Ok(());
     }
     if half_keys_in_config(case) {
         prop_assert!(
             matches!(rust_out, Dump::Refused(_)),
-            "a lone config key must be refused (D152)\n{report}\nRust: {rust_out:?}"
+            "a lone config key must be refused (D42)\n{report}\nRust: {rust_out:?}"
         );
         return Ok(());
     }

@@ -20,7 +20,7 @@
 //! - properties before the first header, or under `[]`, are dropped.
 //!
 //! Unlike Go, a line that is none of those is refused rather than skipped
-//! (`docs/decisions.md` D153). Go skips it, so a header missing its `]` silently
+//! (`docs/decisions.md` D43). Go skips it, so a header missing its `]` silently
 //! files the keys below it under the profile above; the AWS CLI's parser refuses
 //! such a file too.
 //!
