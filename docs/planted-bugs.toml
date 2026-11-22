@@ -296,3 +296,11 @@ test_bin = "store-s3"
 tests = [
     "a_killed_process_s_multipart_upload_is_aborted_at_the_next_boot",
 ]
+
+[[bug]]
+name = "restore-gap-not-relisted"
+fix = "2e340a8"
+package = "lsr-core"
+tests = [
+    "a_gap_from_a_listing_that_raced_a_writer_is_listed_again",
+]
