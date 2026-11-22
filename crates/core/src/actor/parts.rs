@@ -131,6 +131,9 @@ pub(super) struct Kept {
     pub(super) listed: bool,
     /// The last boot failure before the first listing was the store refusing access.
     pub(super) refused_at_boot: Option<Denied>,
+    /// A boot attempt of this process has failed: with no refusal behind it, the boot is
+    /// judged and the application may start (`crate::failstop`).
+    pub(super) boot_failed: bool,
     /// Pending staged files that hold no commit of the application's: a file that changes no
     /// page, or a snapshot for a doubt alone staged while nothing was off the replica. They are
     /// not lag (`actor::lag`). At most one per pending file, so bounded by the witness tokens.
@@ -155,6 +158,7 @@ impl Kept {
             lag: Lag::default(),
             listed: false,
             refused_at_boot: None,
+            boot_failed: false,
             quiet: BTreeSet::new(),
         }
     }
@@ -180,6 +184,7 @@ impl Kept {
             lag,
             listed,
             refused_at_boot,
+            boot_failed,
             quiet: _,
         } = self;
         Self {
@@ -198,6 +203,7 @@ impl Kept {
             lag: *lag,
             listed: *listed,
             refused_at_boot: *refused_at_boot,
+            boot_failed: *boot_failed,
             // Beliefs about staged files: the rebuilt engine's boot judges them again.
             quiet: BTreeSet::new(),
         }

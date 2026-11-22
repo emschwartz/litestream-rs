@@ -10,8 +10,8 @@
 use std::fmt;
 
 use lsr_core::{
-    AppCheckpoint, AppCheckpoints, Degraded, PersistentCause, Severity, SnapshotCause,
-    SnapshotCounts, StopCause, Task,
+    AppCheckpoint, AppCheckpoints, Degraded, Gate, PersistentCause, Severity, SnapshotCause,
+    SnapshotCounts, StopCause, Task, Trip,
 };
 use lsr_ltx::{Timestamp, Txid};
 
@@ -174,6 +174,20 @@ pub struct Health {
     pub counters: Counters,
     /// What the scheduled verify found (`Config::verify_interval`); all empty while it is off.
     pub verification: Verification,
+    /// Fail-stop (`Config::if_replication_stops`): whether replication has tripped, and what
+    /// that does to the application.
+    pub fail_stop: FailStop,
+}
+
+/// Fail-stop's state (`lsr_core::failstop`, `docs/proposals/fail-stop.md`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FailStop {
+    /// Why replication tripped, if it has: an unsafe stop, a commit off the replica past
+    /// `Config::max_unreplicated_age`, or a refusal by the store before the first listing.
+    pub trip: Option<Trip>,
+    /// What the trip does to the application under `Config::if_replication_stops`. While it is
+    /// [`Gate::Held`], the commit hook refuses the application's commits.
+    pub gate: Gate,
 }
 
 /// What the scheduled verify found: the replica's listing checked, and a restore of the
@@ -292,6 +306,10 @@ impl Health {
                     bytes_uploaded: 0,
                 },
                 snapshots: SnapshotCounts::ZERO,
+            },
+            fail_stop: FailStop {
+                trip: None,
+                gate: Gate::Pending,
             },
             verification: Verification {
                 last_run: None,

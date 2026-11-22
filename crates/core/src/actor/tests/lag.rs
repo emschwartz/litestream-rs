@@ -190,9 +190,15 @@ fn a_refusal_at_boot_trips_until_the_first_listing() {
             why: Denied::ClockSkew,
         },
     );
+    assert!(
+        !actor.boot_judged(),
+        "nothing is judged before the first boot attempt"
+    );
     rig.tick(&mut actor, T0);
     assert_eq!(actor.trip(), Some(Trip::NotYetReachable(Denied::ClockSkew)));
+    assert!(!actor.boot_judged(), "a refusal is no judgment");
     rig.settle(&mut actor, T0 + 600_000);
+    assert!(actor.boot_judged());
     assert!(actor.listed());
     assert_eq!(actor.trip(), None, "the first listing releases it");
 }
@@ -207,6 +213,10 @@ fn a_timeout_at_boot_is_no_refusal() {
     rig.tick(&mut actor, T0);
     assert!(!actor.listed());
     assert_eq!(actor.trip(), None);
+    assert!(
+        actor.boot_judged(),
+        "a store that times out does not hold the start"
+    );
 }
 
 /// After the first listing a refusal is an ordinary degraded state: no refusal trip, only the

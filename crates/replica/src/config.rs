@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use lsr_core::{
-    ActorConfig, CheckpointConfig, Maintenance, Responses, SQLITE_AUTOCHECKPOINT, SyncConfig,
-    UploadConfig,
+    ActorConfig, CheckpointConfig, IfReplicationStops, Maintenance, MaxUnreplicatedAge, Responses,
+    SQLITE_AUTOCHECKPOINT, SyncConfig, UploadConfig,
 };
 
 /// A duration that is never zero.
@@ -114,6 +114,14 @@ pub struct Config {
     /// that transaction on a thread of its own, one run at a time, and compares the two. A
     /// mismatch is a degraded state in [`crate::Health::verification`], never a stop.
     pub verify_interval: Option<NonZeroDuration>,
+    /// What a fail-stop trip does to the application (`if-replication-stops`, decisions D13
+    /// and D14): `HoldStart` by default. For the library, a held gate refuses the application's
+    /// commits through the hook [`crate::Replicator::app_connection`] installs; see
+    /// [`crate::Health::fail_stop`].
+    pub if_replication_stops: IfReplicationStops,
+    /// How long a commit may stay off the replica before fail-stop trips for it (decision
+    /// D22): 10 minutes by default, at least 5.
+    pub max_unreplicated_age: MaxUnreplicatedAge,
 }
 
 impl Default for Config {
@@ -130,6 +138,8 @@ impl Default for Config {
             shutdown_grace: Duration::from_secs(30),
             app_autocheckpoint: Some(SQLITE_AUTOCHECKPOINT),
             verify_interval: None,
+            if_replication_stops: IfReplicationStops::HoldStart,
+            max_unreplicated_age: MaxUnreplicatedAge::DEFAULT,
         }
     }
 }
@@ -167,7 +177,7 @@ impl Config {
             retry_interval: self.retry_interval.get(),
             shutdown_grace: self.shutdown_grace,
             responses: self.responses,
-            max_unreplicated_age: lsr_core::MaxUnreplicatedAge::DEFAULT,
+            max_unreplicated_age: self.max_unreplicated_age,
         }
     }
 }

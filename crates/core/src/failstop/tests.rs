@@ -79,15 +79,27 @@ fn the_release_latches() {
     let stop = Some(Trip::Stopped(StopCause::RemoteCorrupt));
     let mut app = AppGate::default();
     assert_eq!(
-        app.judge(IfReplicationStops::HoldStart, stop),
+        app.judge(IfReplicationStops::HoldStart, None, false),
+        Gate::Pending,
+        "nothing is released before the boot is judged"
+    );
+    assert!(!app.released());
+    assert_eq!(
+        app.judge(IfReplicationStops::HoldStart, stop, false),
         Gate::Held(Trip::Stopped(StopCause::RemoteCorrupt))
     );
     assert!(!app.released());
-    assert_eq!(app.judge(IfReplicationStops::HoldStart, None), Gate::Open);
+    assert_eq!(
+        app.judge(IfReplicationStops::HoldStart, None, true),
+        Gate::Open
+    );
     assert!(app.released());
-    assert_eq!(app.judge(IfReplicationStops::HoldStart, stop), Gate::Open);
+    assert_eq!(
+        app.judge(IfReplicationStops::HoldStart, stop, true),
+        Gate::Open
+    );
     assert!(matches!(
-        app.judge(IfReplicationStops::StopApp, stop),
+        app.judge(IfReplicationStops::StopApp, stop, true),
         Gate::Held(_)
     ));
 }

@@ -122,6 +122,10 @@ impl Trip {
 /// Whether the application may run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Gate {
+    /// The boot has not been judged yet (no listing, and no boot attempt that failed for
+    /// anything but a refusal): an application not yet started waits, writes are not refused,
+    /// and nothing is released.
+    Pending,
     /// It may: started, writes accepted.
     Open,
     /// It is held: not started, writes refused, or stopped.
@@ -189,13 +193,18 @@ pub struct AppGate {
 }
 
 impl AppGate {
-    /// The gate now, latching the release when it is open.
-    pub fn judge(&mut self, mode: IfReplicationStops, trip: Option<Trip>) -> Gate {
+    /// The gate now, for a boot that has (`judged`) or has not been judged yet, latching the
+    /// release when it is open. A trip is judgment enough: a stop or a refusal holds at once.
+    pub fn judge(&mut self, mode: IfReplicationStops, trip: Option<Trip>, judged: bool) -> Gate {
         let gate = gate(mode, self.released, trip);
-        if gate == Gate::Open {
-            self.released = true;
+        match gate {
+            Gate::Open if !judged && !self.released => Gate::Pending,
+            Gate::Open => {
+                self.released = true;
+                gate
+            }
+            Gate::Pending | Gate::Held(_) => gate,
         }
-        gate
     }
 
     /// Whether the application was ever let run.
