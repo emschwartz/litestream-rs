@@ -538,3 +538,36 @@ mod one_bad_read {
         }
     }
 }
+
+#[cfg(test)]
+mod second_writer {
+    use lsr_sim::run::run_ops;
+    use lsr_sim::{Op, Opts, Seed};
+
+    /// Another writer puts a level-0 file one transaction past the engine's
+    /// newest while it runs. Maintenance listed the replica every window and
+    /// compacted the other writer's file into level 1 instead of stopping;
+    /// the engine's own upload of that transaction then replaced the
+    /// level-0 key, so the replica held two histories for one transaction
+    /// (seed 0x50c, shrunk).
+    #[test]
+    fn maintenance_stops_on_another_writer_seed_0x50c() {
+        let mut ops = vec![
+            Op::CommitInTick { pages: 2 },
+            Op::Commit {
+                pages: 1,
+                grow: false,
+            },
+        ];
+        ops.extend(std::iter::repeat_n(Op::Tick, 6));
+        ops.push(Op::SecondWriter { ticks: 5 });
+        ops.push(Op::Restore);
+        let opts = Opts {
+            drawn: true,
+            ..Opts::default()
+        };
+        if let Err(failure) = run_ops(Seed::new(0x50c), &ops, &opts) {
+            panic!("{}", failure.violation);
+        }
+    }
+}

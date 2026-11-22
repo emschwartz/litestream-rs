@@ -140,6 +140,13 @@ pub enum Violation {
         /// The object.
         key: String,
     },
+    /// A running engine listed the replica while another writer's file stood
+    /// past its own position, and did not stop.
+    #[error("the engine listed {key}, another writer's file past its position, and kept going")]
+    OtherWriterMissed {
+        /// The other writer's file.
+        key: String,
+    },
     /// A restore the replica should answer was refused.
     #[error("restoring {target:?} was refused: {outcome:?}")]
     RestoreRefused {
