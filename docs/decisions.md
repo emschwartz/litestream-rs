@@ -44,6 +44,8 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D34 | A restore of the latest state that a writer keeps outpacing: fail or answer? | Answer the last listing, flagged | parent session (#126) | 2026-11-22 | open to owner review |
 | D35 | When may the simulator accept a task still stalled at the end of a run? | Only while the world still imposes the stall's fault; the excuse table is empty today | Claude (stall-liveness), **delegated** | 2026-11-22 | open to owner review |
 | D130 | How does the simulator run the real directory store, and who judges it? | A filesystem trait in store-fs, an in-memory filesystem under the crash law in the sim, half the swarm on it, a staging-contract judge | Claude (sim-real-store-fs), **delegated** | 2026-11-22 | open to owner review |
+| D70 | How do simulated runs draw a fault that reaches an open engine defect? | As a known-wrong cell: out of the per-push seeds, drawn by the nightly and campaigns with its failures counted as known, with a pinned seed that fails once the fix lands | parent session; mechanism by Claude (error-domain), **delegated** | 2026-11-22 | decided |
+| D71 | Which errors may a simulated history inject? | Those a shipped implementation returns from that call with the world unchanged; a world fact is drawn as the world change; a cell the model cannot follow is listed as unmodelled, never drawn | Claude (error-domain), **delegated** | 2026-11-22 | open to owner review |
 | D50 | Boot finds the replica's newest file differing from the staged copy under the same key: snapshot or stop? Keep the stop record? | Stop unless a takeover covers it; delete the stop record | Claude, **delegated** | 2026-11-22 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
@@ -364,6 +366,43 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** a fault the world keeps imposing after the heal (none today) needs a table entry, or its runs fail.
 - **Revisit if:** a fault is added that the end of the run cannot heal.
 - **Links:** the stall-liveness PR; #104.
+## D70. Known-wrong cells
+
+- **Options:** let the per-push seeds go red until each defect is fixed; leave the fault out of every draw; draw it where failures are classified.
+- **Choice:** a cell of the simulator's error domain that reaches an open engine defect is `Cell::KnownWrong`. The per-push fixed seeds leave it out. The nightly soak and the campaigns draw it and count a failure matching the defect's signature as known (printed, not failing the run), so every other failure in those seeds stays visible. Each defect names its tracking item and has a pinned seed in `tests/sim/known_wrong.rs` that must still fail: when the fix lands that test fails, and the cell becomes drawn.
+- **Why:** the defect stays exercised every night and cannot stay known-wrong after its fix, while a push stays green.
+- **Cost accepted:** a second failure with the same signature in a run that drew the cell is counted as known too; the per-push seeds do not reach the defect's code paths through these cells.
+- **Revisit if:** a known-wrong cell stays open for long, or a signature turns out to match an unrelated failure.
+- **Links:** issue #127 item D; `crates/sim/src/domain.rs`.
+
+## D71. What the error domain may inject
+
+- **Options:** inject any error into any call; inject only what an implementation returns.
+- **Choice:** a cell is drawn only when lsr-sqlite (SQLite seam), store-fs (staging) or store-s3 (replica) returns that error from that call with the world unchanged. An error that reports a world fact (the WAL file replaced) is drawn as that change, and the call then reports it. A cell the simulator's model cannot follow yet is unmodelled: listed and counted, never drawn. Every other cell is impossible, with the reason in the table.
+- **Why:** an injected lie (a NotFound for an object the store holds, a corrupt read of a sound object) tests a world that cannot happen, and its failures would be the simulator's, not the engine's.
+- **Cost accepted:** the unmodelled cells (an unlinked WAL, a lost checkpoint retake) stay untested by the swarm until the model follows them.
+- **Revisit if:** another implementation of a seam ships; its errors join the table.
+- **Links:** issue #127 item D; BEHAVIOR CHK-8 and C9.
+
+## D121. The checkpoint-boundary snapshot trusts the database file (delegated)
+
+- **Options:** keep checking the boundary snapshot's database pages against the page table; check only pages whose newest frame is at or below the proof; take the write lock before the TRUNCATE; stop checking at the boundary.
+- **Choice:** stop checking at the boundary. The snapshot empties the page table first, as every snapshot that follows a changed WAL does, and the table then holds what the snapshot read.
+- **Why:** the TRUNCATE ends the engine's read transaction, so a commit that lands after the last step is backfilled and truncated with the rest, and the boundary snapshot read its pages as damage (`DatabasePageMismatch`), a false corruption alarm under ordinary writes that stops the engine under strict responses. The per-page check needs the frames past the proof, and the completed TRUNCATE has removed them; SQLite reports a completed TRUNCATE with a log of 0. Holding the write lock across the TRUNCATE makes the TRUNCATE itself busy.
+- **Cost accepted:** a page damaged between its last check and a checkpoint boundary is shipped in that snapshot, and recorded as found. Checkpoint boundaries come every 121,359 synced frames by default (CKPT-3).
+- **Revisit if:** SQLite or the backend can report which frames a TRUNCATE backfilled.
+- **Links:** found by the simulator's app operations inside a tick (#127 item H, seed 0xf49a2); sqlite `a_commit_between_the_proof_and_the_truncate_is_not_taken_for_damage`; plant `boundary-snapshot-keeps-page-table`.
+
+## D120. No crash points inside the SQLite seam (delegated)
+
+- **Options:** crash the engine between two of its calls into SQLite too (the simulator audit's item C, #127): before its committed read, WAL sync, barrier, checkpoint, sequence bump or write lock, and as a power loss inside its checkpoint with the database file torn by the block crash law; keep crash points at store calls only.
+- **Choice:** store calls only. The seam crash points were built and measured, then dropped.
+- **Measured:** 1000 swarm seeds per plant (seeds 1000001 to 1001000, the mixed weights), with and without them. A plant counted as found when a seed failed with it and not on the clean tree. `sim-read-lock-retake` was found (seed 6) either way; `wal-barrier` at seed 1 either way, by the direct check that a staged file's WAL frames are durable, with no crash needed. Neither tree found the issue's two plants, the sequence bumped before the TRUNCATE and the barrier released before the seal, nor `stamp-before-committed-read`.
+- **Why:** the engine persists only at store calls. Every SQLite state a crash between two seam calls leaves (the barrier dropped, a checkpoint done and the bump not, a truncated WAL with no header) is one another process can also produce while the engine is down, and the simulator already draws those. A torn database file inside a checkpoint is masked by the WAL, which SQLite synced before it copied.
+- **Cost accepted:** a defect that only a crash between two seam calls exposes would go unseen. None is known.
+- **What it found:** a gap in the liveness oracle: a bucket rolled back past its only transaction justifies a first sync (sim `a_rollback_that_empties_the_replica_justifies_a_first_sync`).
+- **Revisit if:** the engine persists anything outside a store call, or a defect turns up between two calls into SQLite.
+- **Links:** #127 (item C).
 
 ## D130. The real directory store in the simulator (delegated)
 

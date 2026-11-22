@@ -381,6 +381,16 @@ pub struct Weights {
     /// store's own syncs and renames. Not an operation, for the same reason as
     /// `block_crash_law`.
     pub staging_fs: bool,
+    /// Store and SQLite-side faults draw their error from the whole error domain
+    /// ([`crate::domain`]): every operation, every error an implementation can return from
+    /// it. When unset they draw from the older subset (two store errors, two SQLite errors on
+    /// nine operations), so recorded histories keep their draws. Not an operation, for the
+    /// same reason as `block_crash_law`.
+    pub error_domain: bool,
+    /// With `error_domain`, the cells that reach an open engine defect are drawn too
+    /// ([`crate::domain::KnownWrong`]). Never drawn by a mix: the nightly and the campaigns set
+    /// it, and count the defect's failures as known; the per-push fixed seeds leave it unset.
+    pub known_wrong: bool,
 }
 
 /// What the application does when it comes back after a restart, before the
@@ -464,6 +474,8 @@ impl Default for Weights {
             // keep their shape; swarm mixes draw the law.
             clock_law: ClockLaw::PerTick,
             staging_fs: false,
+            error_domain: false,
+            known_wrong: false,
         }
     }
 }
@@ -592,6 +604,8 @@ impl Weights {
             after_restart: AfterRestart::Nothing,
             clock_law: ClockLaw::PerTick,
             staging_fs: false,
+            error_domain: false,
+            known_wrong: false,
         };
         // Drawn last, so every other kind keeps the weight it had before
         // second writers were drawn.
@@ -629,6 +643,8 @@ impl Weights {
         // And after that, for the same reason: staging on the real directory store in half the
         // swarm.
         mix.staging_fs = below(&entropy, 2) == 0;
+        // Drawn after that, for the same reason: half each.
+        mix.error_domain = below(&entropy, 2) == 0;
         mix
     }
 
@@ -671,7 +687,7 @@ fn store_error(entropy: &SeededEntropy, op: StoreOp) -> StoreError {
     }
 }
 
-fn store_fault(entropy: &SeededEntropy) -> Op {
+fn store_fault(entropy: &SeededEntropy, weights: &Weights) -> Op {
     let target = if below(entropy, 2) == 0 {
         Target::Staging
     } else {
@@ -688,7 +704,11 @@ fn store_fault(entropy: &SeededEntropy) -> Op {
         ],
     )
     .unwrap_or(StoreOp::Upload);
-    let error = store_error(entropy, op);
+    let error = if weights.error_domain {
+        crate::domain::draw_store(entropy, target, op, weights.known_wrong)
+    } else {
+        store_error(entropy, op)
+    };
     Op::StoreFault {
         target,
         op,
@@ -706,7 +726,9 @@ fn shape(entropy: &SeededEntropy, op: StoreOp, error: StoreError) -> FaultShape 
         err,
     };
     match (op, below(entropy, 8)) {
-        (StoreOp::Upload, 0) => FaultShape::ErrorAfterPublish(error),
+        (StoreOp::Upload, 0) if !crate::domain::refused_before_acting(&error) => {
+            FaultShape::ErrorAfterPublish(error)
+        }
         (StoreOp::Upload, 1) => FaultShape::SizeMismatch,
         (StoreOp::Upload, 2) => FaultShape::ChecksumMismatch,
         (StoreOp::Upload, 3) => FaultShape::CorruptPublish,
@@ -798,10 +820,15 @@ fn hold(entropy: &SeededEntropy) -> Op {
     }
 }
 
-fn env_fault(entropy: &SeededEntropy) -> Op {
+fn env_fault(entropy: &SeededEntropy, weights: &Weights) -> Op {
     let fault = match below(entropy, 4) {
         0 => EnvFault::DeleteWal,
         1 => EnvFault::WipeStaging,
+        _ if weights.error_domain => match crate::domain::draw_source(entropy, weights.known_wrong)
+        {
+            crate::domain::SourceDraw::Inject(op, err) => EnvFault::Source(op, err),
+            crate::domain::SourceDraw::World(fault) => fault,
+        },
         _ => {
             let op = choose(
                 entropy,
@@ -881,8 +908,8 @@ fn draw(weights: &Weights, entropy: &SeededEntropy) -> Op {
         } else {
             CrashKind::Process
         }),
-        Kind::StoreFault => store_fault(entropy),
-        Kind::EnvFault => env_fault(entropy),
+        Kind::StoreFault => store_fault(entropy, weights),
+        Kind::EnvFault => env_fault(entropy, weights),
         Kind::ClockJump => clock_jump(entropy),
         Kind::Shutdown => Op::Shutdown,
         Kind::RequestSnapshot => Op::RequestSnapshot,

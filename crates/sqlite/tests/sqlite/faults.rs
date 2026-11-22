@@ -379,6 +379,30 @@ fn no_synced_frame_is_overwritten<B: Backend>(placement: Placement) {
     }
 }
 
+/// A commit after the engine's last sync and before its TRUNCATE is backfilled and truncated with
+/// the rest, since the checkpoint ends the engine's read transaction first. The boundary snapshot
+/// then reads that commit's pages from the database file: they are the application's writes, not
+/// damage, so the snapshot is taken and no `DatabasePageMismatch` is raised. Found by the
+/// simulator's application operations inside a tick (seed 0xf49a2).
+#[test]
+fn a_commit_between_the_proof_and_the_truncate_is_not_taken_for_damage() {
+    both(commit_between_proof_and_truncate::<Sqlite>);
+}
+
+fn commit_between_proof_and_truncate<B: Backend>(placement: Placement) {
+    let dir = TempDir::new().unwrap();
+    let mut s = stepper::<B>(&dir, placement);
+    assert!(wrote(&s.sync().unwrap()), "the snapshot");
+    s.write(700).unwrap();
+    assert!(wrote(&s.sync().unwrap()), "the proof");
+    s.write(300).unwrap();
+    let outcome = s.checkpoint(CheckpointMode::Truncate);
+    assert!(
+        matches!(outcome, Ok(lsr_core::CheckpointOutcome::Truncated)),
+        "{placement:?}: {outcome:?}"
+    );
+}
+
 /// SQLite belief: TRUNCATE needs every reader gone; against the read lock it reports busy and leaves
 /// the WAL whole.
 #[test]
