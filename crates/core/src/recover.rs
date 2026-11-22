@@ -209,11 +209,9 @@ impl NewestStagedFile {
         let salts = Salts { salt1, salt2 };
         let frame = match wal {
             Some(mut wal) => {
-                let check = if end.frame_index() > 0 {
-                    FrameCheck::of(wal.reader.frame_before(end, salts, wal.committed))?
-                } else {
-                    FrameCheck::Miss(Miss::NotACommit)
-                };
+                // At the WAL's start there is no frame before: `frame_before` answers a miss
+                // without reading, and `frame_state` takes any miss there as fresh.
+                let check = FrameCheck::of(wal.reader.frame_before(end, salts, wal.committed))?;
                 let range = wal_range(&mut wal, origin.offset(), end, salts)?;
                 Some((wal, check, range))
             }
@@ -458,7 +456,10 @@ fn match_last_page<R: Read + Seek>(
             Some(digest) if digest != frame.digest() => return Ok(LastPageCheck::Mismatch),
             Some(_) => LastPage::of_frame(&frame),
         },
-        (FrameCheck::Miss(Miss::NotACommit), Some(last)) if end.frame_index() == 0 => last,
+        // At the WAL's start there is no frame before: the newest staged file's last page
+        // stands, and `resume` accepts the start. Elsewhere `resume` fails as `frame_before`
+        // did (both read `verified_before`), so the miss is kept.
+        (FrameCheck::Miss(Miss::NotACommit), Some(last)) => last,
         (FrameCheck::Miss(miss), _) => return Ok(LastPageCheck::NoFrame(miss)),
     };
     match boot.reader.resume(end, salts, boot.committed) {
@@ -470,18 +471,33 @@ fn match_last_page<R: Read + Seek>(
     }
 }
 
-async fn newest_level_zero<L: ObjectStore>(staging: &L) -> Result<Option<FileInfo>, Fault> {
+pub(crate) async fn newest_level_zero<L: ObjectStore>(
+    staging: &L,
+) -> Result<Option<FileInfo>, Fault> {
+    newest_listed(staging, Fault::from_staging, Fault::from_staging_listing).await
+}
+
+/// The replica's newest level-0 file as listed, whatever its bytes: a tail a
+/// listing judged torn is still on the replica.
+pub(crate) async fn newest_replica_level_zero<R: ObjectStore>(
+    remote: &R,
+) -> Result<Option<FileInfo>, Fault> {
+    newest_listed(remote, Fault::from_remote, |_stalled| Fault::RemoteCorrupt).await
+}
+
+async fn newest_listed<S: ObjectStore>(
+    store: &S,
+    fault: fn(&crate::StoreError) -> Fault,
+    stalled: fn(crate::ListingStalled) -> Fault,
+) -> Result<Option<FileInfo>, Fault> {
     let (mut at, mut newest) = (ListAt::first(Level::ZERO), None);
     loop {
-        let page = staging
+        let page = store
             .list(at.level, at.after, PageLimit::MAX)
             .await
-            .map_err(|err| Fault::from_staging(&err))?;
+            .map_err(|err| fault(&err))?;
         newest = page.files.last().copied().or(newest);
-        match at
-            .following(page.next)
-            .map_err(Fault::from_staging_listing)?
-        {
+        match at.following(page.next).map_err(stalled)? {
             Some(next) => at = next,
             None => return Ok(newest),
         }
@@ -616,11 +632,9 @@ impl Probes {
             cursor.salts(),
             cursor.next().page_size(),
         );
-        let prev = if cursor.next().frame_index() == 0 {
-            FrameCheck::Miss(Miss::NotACommit)
-        } else {
-            FrameCheck::of(wal.frame_before(cursor.next(), cursor.salts(), proven))?
-        };
+        // At the WAL's start there is no frame before: `frame_before` answers a miss without
+        // reading, and `frame_state` takes a running position there as fresh.
+        let prev = FrameCheck::of(wal.frame_before(cursor.next(), cursor.salts(), proven))?;
         let stale_next = (reset || wal.header().salts() != cursor.salts())
             && wal.commit_follows(&cursor).map_err(|_err| Fault::LocalIo)?;
         Ok(Self { prev, stale_next })
@@ -701,6 +715,7 @@ pub fn recover_traced(
     remote: Option<Txid>,
 ) -> Verdict {
     let Some(source) = source else {
+        mark!(Boot1);
         return plain(Recovered::Snapshot {
             after: remote,
             cause: SnapshotCause::FirstSync,
@@ -709,10 +724,13 @@ pub fn recover_traced(
     let txid = source_txid(&source);
     if let Some(ahead) = remote.filter(|remote| *remote > txid) {
         return plain(match source {
-            PositionSource::Boot(_) => Recovered::Snapshot {
-                after: Some(ahead),
-                cause: SnapshotCause::BehindRemote { local: txid },
-            },
+            PositionSource::Boot(_) => {
+                mark!(Boot6);
+                Recovered::Snapshot {
+                    after: Some(ahead),
+                    cause: SnapshotCause::BehindRemote { local: txid },
+                }
+            }
             PositionSource::Running(..) => Recovered::Stop(StopCause::OtherWriter),
         });
     }
@@ -722,7 +740,10 @@ pub fn recover_traced(
         return snapshot(match (&source, wal.header) {
             (PositionSource::Boot(NewestStagedFile::Unreadable { .. }), _)
             | (PositionSource::Boot(_), Some(_)) => SnapshotCause::NewestStagedFileUnreadable,
-            (PositionSource::Boot(_) | PositionSource::Running(..), _) => SnapshotCause::WalMissing,
+            (PositionSource::Boot(_) | PositionSource::Running(..), _) => {
+                mark!(Boot7);
+                SnapshotCause::WalMissing
+            }
         });
     };
     if seen.page_size != header.page_size() {
@@ -788,6 +809,23 @@ impl Seen {
 }
 
 /// Rule 6: the generation changed.
+///
+/// A running position pinned in this read-lock hold follows the new
+/// generation from its first frame when no commit can have gone with the old
+/// one. While the hold lasts SQLite changes generation in two ways only. A
+/// restart (`walRestartLog`) needs every frame backfilled: a read mark above 0
+/// blocks it, and read mark 0 blocks every backfill (a checkpoint needs that
+/// mark exclusively), so under either it happens at most once, from the
+/// generation the position was pinned in, and gives `salt1 + 1`. The first
+/// frame written to a generation with no frames writes a new header
+/// (`sqlite3WalFrames`), with fresh random salts when the checkpoint sequence
+/// is 0 (a WAL that never restarted, as after a crash): nothing committed is
+/// lost when the pinned generation held no frame, and the new generation is
+/// then itself either empty (another such header can follow, losing nothing)
+/// or holds frames no backfill can reach (no restart can follow). So a
+/// position at the first frame of its generation follows whatever salts the
+/// new header names. Anything else (a `salt1` that skips, a hold that
+/// lapsed) is a snapshot.
 fn restarted(
     source: &PositionSource<'_>,
     seen: &Seen,
@@ -800,23 +838,28 @@ fn restarted(
         cause: SnapshotCause::GenerationChanged,
     };
     let PositionSource::Running(position, probes) = source else {
+        mark!(Boot8);
         return plain(changed);
     };
     let pinned = match position.continuity() {
         Continuity::Held(epoch) => epoch == wal.epoch,
         Continuity::Broken => false,
     };
-    let proven = pinned && header.salts().salt1 == seen.salts.salt1.wrapping_add(1);
+    let empty = seen.end == WalOffset::start(seen.page_size);
+    let proven = pinned && (empty || header.salts().salt1 == seen.salts.salt1.wrapping_add(1));
     if !proven {
+        mark!(Run8);
         return plain(changed);
     }
-    let new_end = committed_offset(header, wal).unwrap_or(WalOffset::start(seen.page_size));
-    if new_end.get() < seen.end.get() && probes.stale_next {
+    // No end check: frames the restart wrote at the synced end carry new salts and never chain.
+    if probes.stale_next {
+        mark!(Run8);
         return Verdict {
             recovered: changed,
             event: Some(RecoverEvent::ReadLockViolated { synced: seen.end }),
         };
     }
+    mark!(Run7);
     plain(Recovered::WalRestarted(Position::new(
         position.txid(),
         FrameCursor::at_start(header),
@@ -864,6 +907,7 @@ fn same_generation(
         | FrameState::Miss(Miss::NotACommit | Miss::Moved) => false,
     };
     if committed.is_some_and(|end| end.get() < seen.end.get()) || short_file || frame_gone {
+        mark!(Boot9);
         let committed = committed.unwrap_or(WalOffset::start(seen.page_size));
         return Err(Refusal {
             cause: SnapshotCause::LocalRewound {
@@ -877,9 +921,15 @@ fn same_generation(
         });
     }
     match frame {
-        FrameState::Miss(Miss::NotACommit) => Err(refuse(SnapshotCause::PrevFrameMismatch)),
+        FrameState::Miss(Miss::NotACommit) => {
+            mark!(Boot10);
+            Err(refuse(SnapshotCause::PrevFrameMismatch))
+        }
         FrameState::Miss(Miss::Moved) => Err(refuse(SnapshotCause::GenerationChanged)),
-        FrameState::Mismatch => Err(refuse(SnapshotCause::LastPageMismatch)),
+        FrameState::Mismatch => {
+            mark!(Boot10);
+            Err(refuse(SnapshotCause::LastPageMismatch))
+        }
         FrameState::Miss(Miss::Truncated) | FrameState::Rewritten | FrameState::Fresh => {
             if let Some(refusal) = reset_past(source, seen, header, wal) {
                 return Err(refusal);
@@ -908,6 +958,7 @@ fn reset_past(
     if !reset || !probes.stale_next {
         return None;
     }
+    mark!(Run10);
     let pinned = position.continuity() == Continuity::Held(wal.epoch);
     Some(Refusal {
         cause: SnapshotCause::GenerationChanged,

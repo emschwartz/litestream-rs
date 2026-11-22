@@ -6,12 +6,13 @@
 //! hands each tick's future to [`World::run_tick`], the one seam between this
 //! harness and the actor.
 //!
-//! Staging is `Faults<YieldEachCall<Recorder<Volatile<MemStore>>>>` and the replica is
+//! Staging is `Faults<YieldEachCall<Recorder<Volatile<StagingRaw>>>>` (`MemStore`, or the real
+//! directory store on the in-memory filesystem: [`crate::staging`]) and the replica is
 //! `Faults<YieldEachCall<Recorder<MemStore>>>`. Both keep a raw `MemStore` handle for the
 //! oracle and for power loss, so neither a fault nor a yield touches a check.
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use lsr_core::conformance::block_on;
 use lsr_core::{
@@ -20,12 +21,14 @@ use lsr_core::{
 use lsr_ltx::{PageNo, PageSize, Timestamp, Txid};
 use lsr_wal::{Salts, WalOffset};
 
+use crate::clock::{ClockLaw, SimClock};
 use crate::exec::{Polls, RunEnd, run_until};
 use crate::history::History;
 use crate::model::{CommitId, Model, PageImage, Recovery};
 use crate::oracle::{Acked, Checked, Ground, Violation, Windows, check_with};
 use crate::seed::Seed;
-use crate::sqlite::{AppCommit, CrashKind, OtherProcessMode, SimSqlite};
+use crate::sqlite::{AppCommit, CrashKind, InTickSite, OtherProcessMode, SimSqlite};
+use crate::staging::StagingRaw;
 use crate::store::{
     FaultHandle, Faults, HighWater, Lost, Recorder, RecorderLog, Volatile, VolatileHandle,
     YieldEachCall,
@@ -33,7 +36,7 @@ use crate::store::{
 use lsr_core::WriteMode;
 
 /// The staging store the actor sees.
-pub type StagingStore = Faults<YieldEachCall<Recorder<Volatile<MemStore>>>>;
+pub type StagingStore = Faults<YieldEachCall<Recorder<Volatile<StagingRaw>>>>;
 /// The replica store the actor sees.
 pub type RemoteStore = Faults<YieldEachCall<Recorder<MemStore>>>;
 
@@ -139,8 +142,8 @@ fn reencoded(
 }
 
 /// Every byte of `key`.
-fn read_all(store: &MemStore, key: &FileKey) -> Result<Vec<u8>, StoreError> {
-    use lsr_core::{ObjectStore, ReadLen};
+fn read_all(store: &impl lsr_core::ObjectStore, key: &FileKey) -> Result<Vec<u8>, StoreError> {
+    use lsr_core::ReadLen;
     let Some(chunk) = ReadLen::new(1 << 20) else {
         return Ok(Vec::new());
     };
@@ -232,8 +235,11 @@ pub struct World {
     pub seed: Seed,
     /// SQLite's rules.
     pub sqlite: SimSqlite,
-    /// The clock the actor reads; the recorders read it too.
+    /// The driver's clock: it moves between ticks, and the recorders read it.
     pub clock: Arc<FakeClock>,
+    /// The clock the actor and the app read inside a tick, over [`Self::clock`]
+    /// under the run's [`ClockLaw`].
+    pub sim_clock: Arc<SimClock>,
     /// The latest time the actor has been told: the run loop notes each
     /// tick's, and the recorders read it.
     pub high: HighWater,
@@ -245,8 +251,9 @@ pub struct World {
     pub staging: StagingStore,
     /// The replica store, with faults and crash points.
     pub remote: RemoteStore,
-    /// The staging store with nothing in front of it.
-    pub staging_raw: MemStore,
+    /// The staging store with nothing in front of it: `MemStore`, or the directory store on the
+    /// in-memory filesystem ([`World::use_fs_staging`]).
+    pub staging_raw: StagingRaw,
     /// The replica with nothing in front of it: what the oracle restores from.
     pub remote_raw: MemStore,
     /// What the staging store really did.
@@ -259,6 +266,8 @@ pub struct World {
     pub remote_faults: FaultHandle,
     /// Staging's power-loss bookkeeping.
     pub volatile: VolatileHandle,
+    /// The engine journal, on the same disk as staging.
+    pub journal: crate::journal::SimJournal,
     /// What the database really was.
     pub model: Model,
     /// What the engine has acknowledged.
@@ -287,10 +296,12 @@ pub struct World {
     pub repaired: Vec<FileKey>,
     crash_entropy: SeededEntropy,
     in_tick: Option<CommittedInTick>,
+    // When the app's armed in-tick commit landed, by the app's own clock read.
+    in_tick_time: Arc<Mutex<Option<Timestamp>>>,
 }
 
 /// The first instant of a run's clock.
-const EPOCH_MILLIS: i64 = 1_700_000_000_000;
+pub const EPOCH_MILLIS: i64 = 1_700_000_000_000;
 
 impl World {
     /// A world with a database of `db_pages` pages, empty stores and no faults.
@@ -299,7 +310,7 @@ impl World {
         let sqlite = SimSqlite::new(page_size, db_pages, seed.stream(1));
         let clock = Arc::new(FakeClock::new(Timestamp::from_unix_millis(EPOCH_MILLIS)));
         let high = HighWater::default();
-        let staging_raw = MemStore::new();
+        let staging_raw = StagingRaw::Mem(MemStore::new());
         let remote_raw = MemStore::new();
         let volatile = Volatile::new(staging_raw.clone());
         let volatile_handle = volatile.handle();
@@ -328,10 +339,17 @@ impl World {
             seed.stream(40),
             lsr_history::AheadMode::Count,
         );
+        let sim_clock = Arc::new(SimClock::new(
+            Arc::clone(&clock),
+            high.clone(),
+            ClockLaw::PerTick,
+            seed.stream(16),
+        ));
         Self {
             seed,
             sqlite,
             clock,
+            sim_clock,
             high,
             sleeper: RecordingSleeper::new(),
             entropy: SeededEntropy::new(seed.stream(4)),
@@ -344,6 +362,7 @@ impl World {
             staging_recorder: staging_recorder_log,
             remote_recorder: remote_recorder_log,
             volatile: volatile_handle,
+            journal: crate::journal::SimJournal::default(),
             model,
             acked: Acked::new(),
             history,
@@ -356,6 +375,7 @@ impl World {
             repaired: Vec::new(),
             crash_entropy: SeededEntropy::new(seed.stream(5)),
             in_tick: None,
+            in_tick_time: Arc::default(),
         }
     }
 
@@ -386,14 +406,35 @@ impl World {
         self.history.log_commits(&self.model, now);
     }
 
+    /// From now on the actor and the app read the clock under `law`.
+    pub fn set_clock_law(&mut self, law: ClockLaw) {
+        self.sim_clock = Arc::new(SimClock::new(
+            Arc::clone(&self.clock),
+            self.high.clone(),
+            law,
+            self.seed.stream(16),
+        ));
+    }
+
     /// Arms a commit of `pages`, leaving `db_size` pages, that the app makes
-    /// inside the next tick, right before a checkpoint takes its barrier. It
-    /// must not grow the database: the pages a growth re-adds are read from the
-    /// rules after the tick, when the engine may have changed them.
-    pub fn arm_commit_in_tick(&self, pages: Vec<(PageNo, Vec<u8>)>, db_size: u32) {
+    /// inside the next tick at `site`. A commit that grows the database must
+    /// carry every page it adds. The app reads its clock as it commits, and
+    /// the history logs the commit at that time.
+    pub fn arm_commit_in_tick(
+        &self,
+        pages: Vec<(PageNo, Vec<u8>)>,
+        db_size: u32,
+        site: InTickSite,
+    ) {
         let (remote, staging) = (self.remote_recorder.clone(), self.staging_recorder.clone());
-        let created_at = Box::new(move || (remote.len(), staging.len()));
-        self.sqlite.arm_commit_in_tick(pages, db_size, created_at);
+        let (clock, time) = (Arc::clone(&self.sim_clock), Arc::clone(&self.in_tick_time));
+        let created_at = Box::new(move || {
+            let now = lsr_core::Clock::now(clock.as_ref());
+            *time.lock().unwrap_or_else(PoisonError::into_inner) = Some(now);
+            (remote.len(), staging.len())
+        });
+        self.sqlite
+            .arm_commit_in_tick(pages, db_size, site, created_at);
     }
 
     /// The app's commit inside the last tick, once: see [`World::arm_commit_in_tick`].
@@ -410,7 +451,15 @@ impl World {
         let id = self
             .model
             .commit(&done.pages, done.db_size, done.app, remote_at);
-        self.log_history();
+        let landed = self
+            .in_tick_time
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        match landed {
+            Some(at) => self.history.log_commits(&self.model, at),
+            None => self.log_history(),
+        }
         Some(CommittedInTick {
             id,
             staged_from,
@@ -544,9 +593,11 @@ impl World {
     pub fn run_tick<F: Future>(&mut self, fut: F, plan: Option<CrashPlan>) -> TickEnd<F::Output> {
         let budget = plan.map_or(Polls::UNBOUNDED, |p| p.at_poll);
         let at = self.remote_recorder.len();
+        self.sqlite.app_tick_begins();
         let ran = run_until(fut, budget);
         // The app's commit inside the tick came before the engine's own frames
         // that followed it, so the model takes it up first.
+        self.record_app_in_tick();
         self.in_tick = self.record_commit_in_tick();
         // Before the crash takes anything: a power loss decides which of the
         // engine's own commits survive, so the model must know them first.
@@ -567,18 +618,21 @@ impl World {
         match kind {
             CrashKind::Process => Vec::new(),
             CrashKind::Power => {
+                self.journal.power_loss();
                 let lost = block_on(
-                    self.volatile
-                        .power_loss(&self.staging_raw, &self.crash_entropy),
+                    self.staging_raw
+                        .power_loss(&self.volatile, &self.crash_entropy),
                 )
                 .unwrap_or_default();
                 self.log_history();
-                self.model
-                    .on_power_loss(self.sqlite.salts(), self.sqlite.mx_frame());
+                self.model.on_power_loss(
+                    self.sqlite.salts(),
+                    self.sqlite.mx_frame(),
+                    self.remote_recorder.len(),
+                );
                 self.adopt_recovered();
                 let now = lsr_core::Clock::now(self.clock.as_ref());
                 self.history.power_loss(&self.model, now);
-                self.acked.note_rewound();
                 lost
             }
         }
@@ -636,10 +690,20 @@ impl World {
         Ok(listing.files.last().copied())
     }
 
+    /// The level-0 files in staging; none when it cannot be listed.
+    #[must_use]
+    pub fn staged_level_zero(&self) -> Vec<FileKey> {
+        use lsr_core::{Level, ObjectStore, PageLimit};
+        block_on(self.staging_raw.list(Level::ZERO, None, PageLimit::MAX))
+            .map(|listing| listing.files.iter().map(|file| file.key).collect())
+            .unwrap_or_default()
+    }
+
     /// What the boot's witness cannot prove among the staged level-0 files
     /// the replica does not hold yet: a snapshot (a file with every page) or a
     /// hop (a file read from a WAL generation's first frame without every
-    /// page). `None` when there is neither.
+    /// page). `None` when there is neither. A file the replica holds other
+    /// bytes under (a short write the store acknowledged) is not held.
     #[must_use]
     pub fn pending_unprovable(&self) -> Option<Unprovable> {
         use lsr_core::{Level, ObjectStore, PageLimit};
@@ -649,7 +713,10 @@ impl World {
         listing
             .files
             .iter()
-            .filter(|file| newest.is_none_or(|newest| file.key.range().max().get() > newest))
+            .filter(|file| {
+                newest.is_none_or(|newest| file.key.range().max().get() > newest)
+                    || self.replica_differs(&file.key)
+            })
             .find_map(|file| {
                 // Only a file read from a generation's first frame (or from no
                 // WAL range) can be either: the header says so, the pages
@@ -671,6 +738,15 @@ impl World {
             })
     }
 
+    /// Whether the replica holds other bytes than staging under `key`; false
+    /// when either does not hold it or cannot be read.
+    fn replica_differs(&self, key: &FileKey) -> bool {
+        match (read_all(&self.remote_raw, key), self.read_staged(key)) {
+            (Ok(theirs), Ok(ours)) => theirs != ours,
+            (Ok(_) | Err(_), Ok(_) | Err(_)) => false,
+        }
+    }
+
     /// The newest transaction any replica file holds, at any level, read
     /// around the wrappers; `None` when the replica is empty or cannot list.
     #[must_use]
@@ -682,6 +758,18 @@ impl World {
             .flat_map(|listing| listing.files)
             .map(|file| file.key.range().max().get())
             .max()
+    }
+
+    /// Whether a file on the replica, at any level, ends at `txid`: a
+    /// restore to `txid` has a file to end on.
+    #[must_use]
+    pub fn remote_ends_at(&self, txid: u64) -> bool {
+        use lsr_core::{Level, ObjectStore, PageLimit};
+        Level::ALL
+            .into_iter()
+            .filter_map(|level| block_on(self.remote_raw.list(level, None, PageLimit::MAX)).ok())
+            .flat_map(|listing| listing.files)
+            .any(|file| file.key.range().max().get() == txid)
     }
 
     /// Every level-0 file on the replica, oldest first, read around the
@@ -696,24 +784,26 @@ impl World {
     }
 
     /// Deletes every replica file, at every level, that ends at the newest
-    /// transaction; false when the replica is empty.
+    /// transaction; `None` when the replica is empty, otherwise the lowest
+    /// transaction no kept file covers any more.
     ///
     /// # Errors
     /// The store's error when it cannot list or delete.
-    pub fn remote_roll_back(&mut self) -> Result<bool, StoreError> {
+    pub fn remote_roll_back(&mut self) -> Result<Option<Txid>, StoreError> {
         use lsr_core::{Level, ObjectStore, PageLimit};
         let mut files = Vec::new();
         for level in Level::ALL {
             files.extend(block_on(self.remote_raw.list(level, None, PageLimit::MAX))?.files);
         }
         let Some(newest) = files.iter().map(|f| f.key.range().max()).max() else {
-            return Ok(false);
+            return Ok(None);
         };
         let (gone, kept): (Vec<FileInfo>, Vec<FileInfo>) =
             files.iter().partition(|f| f.key.range().max() == newest);
         let keys: Vec<FileKey> = gone.iter().map(|f| f.key).collect();
         self.remote_delete(&keys)?;
         // What no kept file covers is gone from the replica for good.
+        let mut lowest = newest;
         for key in &keys {
             let range = key.range();
             for raw in range.min().get()..=range.max().get() {
@@ -723,10 +813,11 @@ impl World {
                 });
                 if let (false, Some(txid)) = (covered, Txid::new(raw)) {
                     self.lost.insert(txid);
+                    lowest = lowest.min(txid);
                 }
             }
         }
-        Ok(true)
+        Ok(Some(lowest))
     }
 
     /// Makes the store forget the stored created-at time of the newest-ending
@@ -793,9 +884,11 @@ impl World {
         };
         let key = FileKey::new(Level::ZERO, TxidRange::single(next));
         // Another writer's file is a sound one: the same pages under the next
-        // transaction.
+        // transaction, from a WAL that is not this database's, so it names no
+        // origin in it and the live WAL cannot vouch for it.
         let Some(bytes) = rewritten(&read_all(&self.remote_raw, &newest)?, |fields| {
             fields.txids = TxidRange::single(next);
+            fields.wal = None;
         }) else {
             return Ok(None);
         };
@@ -820,6 +913,25 @@ impl World {
             Err(StoreError::NotFound { .. }) => Ok(false),
             Err(other) => Err(other),
         }
+    }
+
+    /// Whether staging and the replica both hold `key` with different bytes:
+    /// a staged copy edited or forged under a key the replica took.
+    ///
+    /// # Errors
+    /// Either store's error other than a missing key.
+    pub fn staged_differs_from_remote(&self, key: FileKey) -> Result<bool, StoreError> {
+        let found = |read: Result<Vec<u8>, StoreError>| match read {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(StoreError::NotFound { .. }) => Ok(None),
+            Err(other) => Err(other),
+        };
+        let staged = found(read_all(&self.staging_raw, &key))?;
+        let remote = found(read_all(&self.remote_raw, &key))?;
+        Ok(match (staged, remote) {
+            (Some(staged), Some(remote)) => staged != remote,
+            (Some(_) | None, None) | (None, Some(_)) => false,
+        })
     }
 
     /// Deletes replica `key` if it still holds exactly `bytes`; whether it did.
@@ -939,6 +1051,22 @@ impl World {
         Ok(None)
     }
 
+    /// Whether staging holds `key` under bytes the engine never put there: a
+    /// copy an operation forged or put back, which stays the operator's for as
+    /// long as it is staged, whatever the replica holds now.
+    ///
+    /// # Errors
+    /// The store's error other than a missing key.
+    pub fn staged_not_the_engines(&self, key: FileKey) -> Result<bool, StoreError> {
+        match read_all(&self.staging_raw, &key) {
+            Ok(bytes) => Ok(!self
+                .engine_puts(0)
+                .contains(&(key, crate::store::content_digest(&bytes)))),
+            Err(StoreError::NotFound { .. }) => Ok(false),
+            Err(other) => Err(other),
+        }
+    }
+
     /// Every (key, digest) the staging recorder took a put of since event `since`.
     fn engine_puts(&self, since: usize) -> BTreeSet<(FileKey, u64)> {
         self.staging_recorder
@@ -964,10 +1092,17 @@ impl World {
         use lsr_core::Inventory;
         let staged_puts = self.engine_puts(since);
         let mut out = Vec::new();
-        for (store, all) in [(&self.staging_raw, false), (&self.remote_raw, true)] {
-            let inventory = block_on(Inventory::load(store)).map_err(|err| err.to_string())?;
+        let staging =
+            block_on(Inventory::load(&self.staging_raw)).map_err(|err| err.to_string())?;
+        let remote = block_on(Inventory::load(&self.remote_raw)).map_err(|err| err.to_string())?;
+        for (inventory, all) in [(staging, false), (remote, true)] {
             for info in inventory.files() {
-                let bytes = read_all(store, &info.key).map_err(|err| err.to_string())?;
+                let bytes = if all {
+                    read_all(&self.remote_raw, &info.key)
+                } else {
+                    read_all(&self.staging_raw, &info.key)
+                }
+                .map_err(|err| err.to_string())?;
                 let engines =
                     all || staged_puts.contains(&(info.key, crate::store::content_digest(&bytes)));
                 let header = bytes
@@ -995,6 +1130,17 @@ impl World {
         block_on(up.write(bytes))?;
         block_on(up.commit())?;
         Ok(())
+    }
+
+    /// [`World::adopt_local_state`] for damage that corrupted the database
+    /// (a flipped bit): the model follows it, and the history judge refuses
+    /// any restore that gives it.
+    pub fn adopt_corrupt_state(&mut self) {
+        if self.model_matches_sqlite() {
+            return;
+        }
+        self.adopt_local_state();
+        self.history.adopted_corruption(&self.model);
     }
 
     /// Takes the database as the rules now read it as the model's newest
@@ -1085,6 +1231,7 @@ impl World {
     }
 }
 
+mod in_tick;
 #[cfg(test)]
 mod tests;
 

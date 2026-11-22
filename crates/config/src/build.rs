@@ -17,6 +17,8 @@
 
 use std::num::NonZeroU32;
 
+use lsr_replica::{IfReplicationStops, MaxUnreplicatedAge};
+
 use crate::config::{
     AppReaders, DbConfig, DbSource, DirSource, GoConfig, LogFormat, LogLevel, Logging,
     OtherWriterSetting, ReplicaConfig, ReplicaKind, ResponseSetting, ResponseSettings,
@@ -450,47 +452,39 @@ fn logging(fields: Option<&Fields>, env: &dyn Env, walk: &mut Walk) -> Logging {
     let path = KeyPath::root().key("logging");
     let from_env = env.var("LOG_LEVEL").filter(|v| !v.is_empty());
     let written = fields.and_then(|f| f.string("level"));
-    let level = match (&from_env, &written) {
-        (Some(value), _) => parse_level(value).unwrap_or_else(|| {
-            walk.problem(
-                path.key("level"),
-                None,
-                ProblemKind::LogLevelFromEnv {
-                    value: value.clone(),
-                },
-            );
-            LogLevel::Info
-        }),
-        (None, Some(value)) => parse_level(value).unwrap_or_else(|| {
+    // Go's `InitLog` switches on the upper-cased level and keeps INFO for anything else,
+    // and builds a text handler for any type but json and pretty (internal/log.go).
+    let level = match from_env.as_ref().or(written.as_ref()) {
+        None => LogLevel::Info,
+        Some(value) => parse_level(value).unwrap_or_else(|| {
             let line = fields.and_then(|f| f.line("level"));
-            walk.problem(
-                path.key("level"),
-                line,
-                ProblemKind::UnsupportedValue {
-                    value: value.clone(),
-                    allowed: "trace, debug, info, warn, error",
-                },
-            );
+            let value = value.clone();
+            let kind = WarningKind::UnknownLogSetting {
+                value,
+                what: "level",
+                used: "info",
+            };
+            walk.warn(path.key("level"), line, kind);
             LogLevel::Info
         }),
-        (None, None) => LogLevel::Info,
     };
     let line = fields.and_then(|f| f.line("type"));
     let format = match fields.and_then(|f| f.string("type")).as_deref() {
         None | Some("text") => LogFormat::Text,
         Some("json") => LogFormat::Json,
         Some("pretty") => {
-            let feature = "the pretty log format";
-            walk.problem(path.key("type"), line, ProblemKind::NotInV1 { feature });
+            let why = "the pretty log format; logs are plain text";
+            walk.warn(path.key("type"), line, WarningKind::NoEffect { why });
             LogFormat::Text
         }
         Some(other) => {
-            let (value, allowed) = (other.to_owned(), "text, json");
-            walk.problem(
-                path.key("type"),
-                line,
-                ProblemKind::UnsupportedValue { value, allowed },
-            );
+            let value = other.to_owned();
+            let kind = WarningKind::UnknownLogSetting {
+                value,
+                what: "format",
+                used: "text",
+            };
+            walk.warn(path.key("type"), line, kind);
             LogFormat::Text
         }
     };
@@ -533,7 +527,43 @@ fn rust_settings(fields: Option<&Fields>, walk: &mut Walk) -> RustSettings {
         app_readers,
         app_autocheckpoint: app_autocheckpoint(fields, walk),
         responses,
+        if_replication_stops: if_replication_stops(fields, walk),
+        max_unreplicated_age: max_unreplicated_age(fields, walk),
     }
+}
+
+/// `if-replication-stops` (decisions D13, D14): `hold-start` when absent.
+fn if_replication_stops(fields: Option<&Fields>, walk: &mut Walk) -> IfReplicationStops {
+    let name = "if-replication-stops";
+    match fields.and_then(|f| f.string(name)).as_deref() {
+        None | Some("hold-start") => IfReplicationStops::HoldStart,
+        Some("report") => IfReplicationStops::Report,
+        Some("stop-app") => IfReplicationStops::StopApp,
+        Some(other) => {
+            let path = KeyPath::root().key("litestream-rs").key(name);
+            let line = fields.and_then(|f| f.line(name));
+            let (value, allowed) = (other.to_owned(), "report, hold-start, stop-app");
+            walk.problem(path, line, ProblemKind::UnsupportedValue { value, allowed });
+            IfReplicationStops::HoldStart
+        }
+    }
+}
+
+/// `max-unreplicated-age` (decision D22): 10 minutes when absent; below 5 minutes is refused,
+/// so one retry at the backoff cap always fits inside it.
+fn max_unreplicated_age(fields: Option<&Fields>, walk: &mut Walk) -> MaxUnreplicatedAge {
+    let name = "max-unreplicated-age";
+    let Some(value) = fields.and_then(|f| f.duration(name)) else {
+        return MaxUnreplicatedAge::DEFAULT;
+    };
+    if let Some(bound) = value.to_std().and_then(MaxUnreplicatedAge::new) {
+        return bound;
+    }
+    let path = KeyPath::root().key("litestream-rs").key(name);
+    let line = fields.and_then(|f| f.line(name));
+    let (value, allowed) = (value.to_string(), "a duration of at least 5m");
+    walk.problem(path, line, ProblemKind::UnsupportedValue { value, allowed });
+    MaxUnreplicatedAge::DEFAULT
 }
 
 /// `app-autocheckpoint`: frames, or `0` and `off` for none; SQLite's 1000 when absent.

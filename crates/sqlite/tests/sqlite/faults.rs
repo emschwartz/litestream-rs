@@ -379,6 +379,30 @@ fn no_synced_frame_is_overwritten<B: Backend>(placement: Placement) {
     }
 }
 
+/// A commit after the engine's last sync and before its TRUNCATE is backfilled and truncated with
+/// the rest, since the checkpoint ends the engine's read transaction first. The boundary snapshot
+/// then reads that commit's pages from the database file: they are the application's writes, not
+/// damage, so the snapshot is taken and no `DatabasePageMismatch` is raised. Found by the
+/// simulator's application operations inside a tick (seed 0xf49a2).
+#[test]
+fn a_commit_between_the_proof_and_the_truncate_is_not_taken_for_damage() {
+    both(commit_between_proof_and_truncate::<Sqlite>);
+}
+
+fn commit_between_proof_and_truncate<B: Backend>(placement: Placement) {
+    let dir = TempDir::new().unwrap();
+    let mut s = stepper::<B>(&dir, placement);
+    assert!(wrote(&s.sync().unwrap()), "the snapshot");
+    s.write(700).unwrap();
+    assert!(wrote(&s.sync().unwrap()), "the proof");
+    s.write(300).unwrap();
+    let outcome = s.checkpoint(CheckpointMode::Truncate);
+    assert!(
+        matches!(outcome, Ok(lsr_core::CheckpointOutcome::Truncated)),
+        "{placement:?}: {outcome:?}"
+    );
+}
+
 /// SQLite belief: TRUNCATE needs every reader gone; against the read lock it reports busy and leaves
 /// the WAL whole.
 #[test]
@@ -1023,18 +1047,19 @@ fn a_restore_after_data_loss_replicates_into_the_same_replica() {
     both(restore_then_replicate::<Sqlite>);
 }
 
-fn restored_bytes(replica: &Path) -> Vec<u8> {
+fn restored_bytes(replica: &Path) -> (Vec<u8>, lsr_ltx::Txid) {
     let sink = lsr_core::MemSink::new();
-    lsr_core::conformance::block_on(lsr_core::restore(
+    let restored = lsr_core::conformance::block_on(lsr_core::restore(
         &lsr_store_fs::FsStore::new(replica),
         lsr_core::RestoreTarget::Latest,
         sink.clone(),
     ))
     .unwrap();
     let db = sink.published().unwrap();
-    (1..=db.page_count())
+    let bytes = (1..=db.page_count())
         .flat_map(|pgno| db.page(pgno).unwrap())
-        .collect()
+        .collect();
+    (bytes, restored.reached())
 }
 
 fn restore_then_replicate<B: Backend>(placement: Placement) {
@@ -1045,8 +1070,8 @@ fn restore_then_replicate<B: Backend>(placement: Placement) {
         rig.settle().unwrap();
     }
     let before = rig.check().unwrap();
-    let bytes = restored_bytes(rig.replica_root());
-    rig.replace_database(&bytes, &dir.path().join("meta"))
+    let (bytes, reached) = restored_bytes(rig.replica_root());
+    rig.replace_database(&bytes, &dir.path().join("meta"), reached)
         .unwrap();
     for _ in 0..10 {
         rig.insert(1200).unwrap();
@@ -1059,7 +1084,7 @@ fn restore_then_replicate<B: Backend>(placement: Placement) {
         "the old history stays restorable"
     );
     let copy = dir.path().join("second.db");
-    std::fs::write(&copy, restored_bytes(rig.replica_root())).unwrap();
+    std::fs::write(&copy, restored_bytes(rig.replica_root()).0).unwrap();
     let rows: i64 = rusqlite::Connection::open(&copy)
         .unwrap()
         .query_row("SELECT count(*) FROM t", [], |row| row.get(0))

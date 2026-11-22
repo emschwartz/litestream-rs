@@ -171,21 +171,20 @@ pub fn build_listing(
     let skipped = unrecognized
         .iter()
         .filter(|name| !is_scratch_name(name))
-        .filter(|name| {
-            let above = lower
-                .as_ref()
-                .is_none_or(|low| name.as_str() > low.as_str());
-            let within = upper
-                .as_ref()
-                .is_none_or(|high| name.as_str() <= high.as_str());
-            above && within
-        })
+        .filter(|name| on_page(name, lower.as_deref(), upper.as_deref()))
         .count();
     Listing {
         files,
         next,
         skipped,
     }
+}
+
+/// Whether an unrecognized name falls on the page after the cursor `lower` up to
+/// and including its last key `upper`. Such a name never equals a key name, so
+/// the bound at `lower` could as well be inclusive.
+fn on_page(name: &str, lower: Option<&str>, upper: Option<&str>) -> bool {
+    lower.is_none_or(|low| name > low) && upper.is_none_or(|high| name <= high)
 }
 
 /// Whether an upload may replace an object already under its key.
@@ -239,7 +238,8 @@ pub enum CorruptCause {
         wrote: u64,
         /// Bytes the store reports holding.
         stored: u64,
-        /// Whether the wrapper deleted the object it had just committed.
+        /// Whether the object just committed was deleted (every engine
+        /// commit deletes it, `checked.rs`, as [`crate::Retrying`] does).
         /// `false` only when that delete itself failed; the caller must then
         /// not trust a listing of this key.
         removed: bool,
@@ -369,8 +369,9 @@ pub enum Denied {
     #[error("credentials not accepted")]
     Credentials,
     /// The credentials are accepted and a policy refuses this request: a
-    /// bucket or IAM policy, a KMS key policy, object lock refusing a delete,
-    /// a local directory's permissions. Other requests may still succeed.
+    /// bucket or IAM policy, a KMS key policy or a KMS key that is disabled,
+    /// missing or of the wrong kind, object lock refusing a delete, a local
+    /// directory's permissions. Other requests may still succeed.
     #[error("permission denied")]
     Permission,
     /// The request's signing time is too far from the store's clock
@@ -533,6 +534,14 @@ pub trait ObjectStore: Send + Sync {
     /// Removes the keys. A key that is already gone is not an error, so a
     /// retried delete converges.
     fn delete(&self, keys: &[FileKey]) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// Removes the scratch files of uploads a killed process left in this store, and says
+    /// how many it removed. The engine calls it when it boots, before it reads anything:
+    /// a crash loop otherwise leaves one per boot, each as large as the file it was writing.
+    /// A store removes only names of its own scratch form and bounds the work of one call; one
+    /// that leaves nothing behind (memory) answers 0. A wrapper forwards it. There is no
+    /// default, so a new store or wrapper cannot drop it by saying nothing.
+    fn remove_scratch(&self) -> impl Future<Output = Result<u64, StoreError>> + Send;
 
     /// How many items of a batch of `kind` this store runs at once. A caller
     /// asks for at most this many at a time, so its memory is this many

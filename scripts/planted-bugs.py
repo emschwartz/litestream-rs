@@ -218,7 +218,7 @@ def run_ledger(bugs: list[dict], head: str, rows: list[tuple[str, str, str, str]
             rows.append((name, fix, "BROKEN", clean_bad[name]))
             continue
         reset_tree(head)
-        patch = PATCHES / f"{name}.patch"
+        patch = PATCHES / f"{bug.get('patch', name)}.patch"
         applied = git("apply", "--whitespace=nowarn", str(patch), cwd=TREE, check=False)
         if applied.returncode != 0:
             rows.append((name, fix, "STALE", f"{patch.name} no longer applies; re-express it against the "
@@ -293,7 +293,7 @@ def unaided(bugs: list[dict], seeds: int, base: int) -> int:
         rows = []
         for bug in bugs:
             reset_tree(head)
-            patch = PATCHES / f"{bug['name']}.patch"
+            patch = PATCHES / f"{bug.get('patch', bug['name'])}.patch"
             applied = git("apply", "--whitespace=nowarn", str(patch), cwd=TREE, check=False)
             assert_tree_at(head)
             started = time.monotonic()

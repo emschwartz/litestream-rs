@@ -1,0 +1,14 @@
+diff --git a/crates/config/src/map/dir.rs b/crates/config/src/map/dir.rs
+index 209846b..74f0c4f 100644
+--- a/crates/config/src/map/dir.rs
++++ b/crates/config/src/map/dir.rs
+@@ -172,6 +172,9 @@ fn walk(
+     };
+     let meta = std::fs::symlink_metadata(path).map_err(scan(path))?;
+     if !meta.is_dir() {
++        if root {
++            return Err(DirProblem::Scan { path: path.to_owned(), kind: io::ErrorKind::NotADirectory });
++        }
+         return candidate(path, pattern, out);
+     }
+     // Go reads the names before its callback can skip the directory.

@@ -32,10 +32,16 @@
 //! `Arc<dyn DynStore>`, never methods on the replicator: restoring over a live database must
 //! not look easy.
 //!
-//! What a second Go process on the same meta directory or bucket prefix does is not refused
-//! at start (Go leaves no reliable local sign, and `start` makes no store call); it is caught
-//! when the replica shows files above the local newest staged file, which stops the replicator by default
-//! (`Responses::GO_LIKE`, `other_writer: Stop`).
+//! One engine per meta directory: `start` takes an exclusive lock on `<meta>/lsr-lock` and
+//! refuses with [`StartError::MetaLocked`] while another replicator, in this process or another
+//! on the same host, holds it (the `meta` module says on which filesystems the lock excludes).
+//! Go takes no lock, so a Go process on the same meta directory is not refused; nor is a
+//! second writer on the bucket prefix (`start` makes no store call). Either is caught when the
+//! replica shows files above everything this engine staged, which stops the replicator by
+//! default (`Responses::GO_LIKE`, `other_writer: Stop`). A restart stops again while the
+//! other writer's files are on the replica, since the boot refuses replica files nothing local
+//! vouches for, and replicates once an operator has removed them or run `lsr take-over`
+//! ([`lsr_core::TakeoverRecord`]).
 
 #![forbid(unsafe_code)]
 
@@ -44,6 +50,7 @@ mod error;
 mod events;
 mod exec;
 mod health;
+mod meta;
 mod readers;
 mod replicator;
 mod restore;
@@ -52,18 +59,20 @@ mod scheduled;
 pub mod stack;
 mod store;
 mod thread;
+#[cfg(feature = "testing")]
+pub mod waiting;
 
 pub use config::{Config, NonZeroDuration, ReaderTracking, SyncLimits};
-pub use error::{RestoreError, StartError};
-pub use events::{ChannelSink, Event, EventReceiver, EventSink};
+pub use error::{RestoreError, StartError, TakeOverError};
+pub use events::{ChannelSink, Event, EventReceiver, EventSink, TakeoverUnusable};
 pub use exec::block_on;
 pub use health::{
-    AppNotice, Booted, Counters, Gone, Health, Mismatch, OpCounters, Phase, Stopped, StoreCounters,
-    Verification, VerifyFailure, VerifyOutcome, VerifyRuns,
+    AppNotice, Booted, Counters, FailStop, Gone, Health, Mismatch, OpCounters, Phase, Stopped,
+    StoreCounters, Verification, VerifyFailure, VerifyOutcome, VerifyRuns,
 };
 pub use readers::ReaderGuard;
 pub use replicator::{FinalSync, Replicator};
-pub use restore::{restore, restore_if_missing, restore_with, verify};
+pub use restore::{record_takeover, restore, restore_if_missing, restore_with, take_over, verify};
 #[cfg(feature = "testing")]
 pub use runtime::FakeClockHandle;
 pub use runtime::{CALLER_SLICE, OsEntropy, Park, Runtime};
@@ -71,9 +80,10 @@ pub use store::{BoxFuture, DynStore, DynUpload};
 
 pub use lsr_core::{
     AppCheckpoint, AppCheckpoints, AsOfInside, CheckpointConfig, Clock, Degraded, Denied, Depth,
-    Entropy, L0Retention, Maintenance, OtherWriter, PersistentCause as DegradedCause, Report,
-    Response, Responses, RestoreOptions, RestoreTarget, Restored, Severity, SnapshotCause,
-    SnapshotCauseKind, SnapshotCounts, Stall, StopCause, Task,
+    Entropy, Gate, IfReplicationStops, JournalSignal, L0Retention, Maintenance, MaxUnreplicatedAge,
+    OtherWriter, PersistentCause as DegradedCause, Report, Response, Responses, RestoreOptions,
+    RestoreTarget, Restored, Severity, SnapshotCause, SnapshotCauseKind, SnapshotCounts, Stall,
+    StopCause, TakeoverRecord, Task, Trip,
 };
 pub use lsr_ltx::{Timestamp, Txid};
 pub use lsr_sqlite::{DatabaseFile, SetupError, app_connection_raw, ffi};

@@ -362,6 +362,7 @@ fn config() -> Result<ActorConfig, CompatError> {
         shutdown_grace: secs(10),
         // A fixture run must fail loudly on any persistent fault, not degrade.
         responses: Responses::STRICT,
+        max_unreplicated_age: lsr_core::MaxUnreplicatedAge::DEFAULT,
     })
 }
 
@@ -420,6 +421,7 @@ impl Chain {
                 staging: &self.staging,
                 remote: &self.remote,
                 clock: &clock,
+                journal: None,
             };
             match block_on(self.actor.tick(env, now)) {
                 Tick::Ran {
@@ -433,6 +435,12 @@ impl Chain {
                         "the actor is retrying {fault:?} until {until:?}"
                     )));
                 }
+                // One process writes the whole chain: the record it asks for before dropping
+                // staged files needs no file to outlive it.
+                Tick::Ran {
+                    event: Event::TakeoverWanted(record),
+                    ..
+                } => self.actor.remember_takeover(record),
                 Tick::Ran { event, .. } => self.events.push(event),
                 Tick::Stopped(cause) => {
                     return Err(CompatError::Fixture(format!(
@@ -615,6 +623,7 @@ impl Chain {
                 staging: &self.staging,
                 remote: &self.remote,
                 clock: &clock,
+                journal: None,
             };
             match block_on(self.actor.tick(env, now)) {
                 Tick::Drained { .. } => {
@@ -633,6 +642,12 @@ impl Chain {
                         archive,
                     });
                 }
+                // One process writes the whole chain: the record it asks for before dropping
+                // staged files needs no file to outlive it.
+                Tick::Ran {
+                    event: Event::TakeoverWanted(record),
+                    ..
+                } => self.actor.remember_takeover(record),
                 Tick::Ran { event, .. } => self.events.push(event),
                 Tick::Stopped(cause) => {
                     return Err(CompatError::Fixture(format!(

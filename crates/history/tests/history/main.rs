@@ -8,9 +8,13 @@
 #[cfg(test)]
 mod command;
 #[cfg(test)]
+mod flaky;
+#[cfg(test)]
 mod judge;
 #[cfg(test)]
 mod manifest;
+#[cfg(test)]
+mod network;
 #[cfg(test)]
 mod real;
 #[cfg(test)]

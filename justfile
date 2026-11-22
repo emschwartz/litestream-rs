@@ -2,7 +2,7 @@
 default: check
 
 # The land gate: format, lints, tests. A branch lands only when this is green.
-check: fmt-check clippy test doctest features upstream-test-map-fresh
+check: fmt-check clippy test doctest features upstream-test-map-fresh evidence-fresh planted-bugs-apply
 
 fmt-check:
     cargo fmt --all -- --check
@@ -72,9 +72,10 @@ sim-soak seconds base=`date +%s`:
 # The nightly rotating seed set: seeds follow from the UTC date (YYYYMMDD), a million per night,
 # so no two nights share one and a night is rerun with `just sim-nightly <seconds> <YYYYMMDD>`.
 # A failing seed is printed last as its replay line. The arguments reach the test as environment
-# variables only, never as shell text.
+# variables only, never as shell text. The summed reach goes to target/sim-reach.json, and a
+# row or fault class no seed reached fails the run (crates/sim/src/marks.rs).
 sim-nightly $LSR_SIM_SECONDS="900" $LSR_SIM_DAY=`date -u +%Y%m%d`:
-    env -u LSR_SIM_BASE_SEED cargo nextest run -p lsr-sim --test sim -E 'test(/^soak::/)' --run-ignored only --no-capture --locked
+    env -u LSR_SIM_BASE_SEED LSR_SIM_COMMIT="$(git rev-parse HEAD)" LSR_SIM_REACH_OUT="${LSR_SIM_REACH_OUT:-$PWD/target/sim-reach.json}" cargo nextest run -p lsr-sim --test sim -E 'test(/^soak::/)' --run-ignored only --no-capture --locked
 
 # The nightly toolchain for the sanitizer, Miri and fuzz recipes; override with LSR_NIGHTLY=nightly-YYYY-MM-DD.
 nightly := env("LSR_NIGHTLY", "nightly")
@@ -127,6 +128,28 @@ shuttle iterations="200":
 journal-model:
     cargo nextest run -p lsr-spec -E 'test(/^journal::deep$/)' --run-ignored only --no-capture --locked
 
+# Every planted-bug patch still applies to the tree, so a change that makes one stale fails its
+# own gate instead of the nightly run. Seconds; whether the planted defect is caught is
+# `planted-bugs`'s question.
+planted-bugs-apply:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    stale=()
+    found=0
+    for patch in docs/planted-bugs/*.patch; do
+        found=$((found + 1))
+        git apply --check "$patch" 2>/dev/null || stale+=("$patch")
+    done
+    if [ "$found" -eq 0 ]; then
+        echo "planted-bugs-apply: no patches found under docs/planted-bugs" >&2
+        exit 1
+    fi
+    if [ "${#stale[@]}" -gt 0 ]; then
+        printf 'planted-bugs-apply: no longer applies (re-express it, see docs/planted-bugs.md): %s\n' "${stale[@]}" >&2
+        exit 1
+    fi
+    echo "planted-bugs-apply: all $found patches apply"
+
 # Every fixed defect is re-planted in a scratch tree and its named tests must fail
 # (docs/planted-bugs.md). A survivor is a defect in the tests; a stale patch needs re-expressing.
 # Nightly in CI; about 20 minutes cold. `just planted-bugs --only listing-cursor` runs one entry.
@@ -166,11 +189,12 @@ sqlite-big:
 # The VFS test's C application needs a SQLite with sqlite3_load_extension. It takes SQLITE3_CFLAGS and
 # SQLITE3_LIBS when set, then on macOS Homebrew's (`brew install sqlite`; the system one lacks
 # the function), then `pkg-config sqlite3`, then plain -lsqlite3 (crates/compat/src/vfs.rs).
-# The test map's counterpart check is ignored too, but it needs the listing upstream-test-map-fresh writes.
+# The test map's counterpart check and the behaviour citation check are ignored too, but they need
+# the listings upstream-test-map-fresh and evidence-fresh write, and run there (both in check).
 # The s3:: tests need MinIO, so they belong to compat-s3, which starts it; here they would fail closed.
 compat:
     ./scripts/build-go-litestream.sh
-    cargo nextest run -p lsr-compat --run-ignored all --locked -E 'not test(=upstream_test_map::every_counterpart_exists) and not test(/^s3::/)'
+    cargo nextest run -p lsr-compat --run-ignored all --locked -E 'not test(=upstream_test_map::every_counterpart_exists) and not test(=behavior::every_behavior_citation_resolves) and not test(/^s3::/)'
 
 # Build the named Go versions (tags, commits, `releases` for every v0.5.N tag, `main` for
 # upstream's newest staged file) and run the live tests over exactly those: just compat-live v0.5.3 main.
@@ -194,15 +218,24 @@ compat-regen *args:
     ./scripts/build-go-litestream.sh
     cargo run --locked -p lsr-compat --bin compat-regen -- {{args}}
 
+# The triple cargo-fuzz builds for: the nightly toolchain's own host. Left to itself cargo-fuzz
+# picks the triple it was compiled for, so a musl build of it (what cargo-binstall fetches) asks
+# for x86_64-unknown-linux-musl, where the address sanitizer cannot link and nightly has no std.
+fuzz_triple := "$(rustc +nightly -vV | sed -n 's/^host: //p')"
+
 # Run one fuzz target (decode, flip, index, plan, plan_contract, plan_lazy, key, wal) for N seconds;
 # new inputs join fuzz/corpus.
 fuzz target seconds:
-    cargo +nightly fuzz run {{target}} --fuzz-dir fuzz -- -max_total_time={{seconds}} -max_len=32768 -rss_limit_mb=2048 -print_final_stats=1
+    cargo +nightly fuzz run {{target}} --fuzz-dir fuzz --target "{{fuzz_triple}}" -- -max_total_time={{seconds}} -max_len=32768 -rss_limit_mb=2048 -print_final_stats=1
+
+# Replay one input (a finding under fuzz/artifacts, or a corpus file) against its target.
+fuzz-replay target file:
+    cargo +nightly fuzz run {{target}} --fuzz-dir fuzz --target "{{fuzz_triple}}" "{{file}}"
 
 # Minimise one target's corpus (keeps what reaches distinct coverage); extra
 # arguments go to libFuzzer: just fuzz-cmin wal -max_len=16384.
 fuzz-cmin target *args:
-    cargo +nightly fuzz cmin {{target}} --fuzz-dir fuzz -- {{args}}
+    cargo +nightly fuzz cmin {{target}} --fuzz-dir fuzz --target "{{fuzz_triple}}" -- {{args}}
 
 # Rebuild the seed corpus from the Go-written fixtures, and the wal seeds from built and SQLite WALs.
 fuzz-seed:
@@ -216,11 +249,20 @@ minio-up:
 minio-down:
     ./scripts/minio.sh down
 
+# Toxiproxy on loopback, between the engine and MinIO in the network-fault tests.
+toxiproxy-up:
+    ./scripts/toxiproxy.sh up
+
+toxiproxy-down:
+    ./scripts/toxiproxy.sh down
+
 # The S3 store against a real server; not part of check, which never needs Docker (these tests are
 # #[ignore]d there). Without MinIO the tests fail, so a green run means they ran against it. The
 # one opt-out is LSR_SKIP=minio (`LSR_SKIP=minio just test-s3` runs nothing and says so); under
-# CI, which GitHub marks with the CI variable, any LSR_SKIP is itself a failure.
-test-s3: minio-up
+# CI, which GitHub marks with the CI variable, any LSR_SKIP is itself a failure. The history
+# judge's network tests also need Toxiproxy in front of MinIO (scripts/toxiproxy.sh builds the
+# pinned server with Go once and starts it on loopback); LSR_SKIP=toxiproxy opts out of those.
+test-s3: minio-up toxiproxy-up
     #!/usr/bin/env bash
     set -euo pipefail
     case ",${LSR_SKIP:-}," in
@@ -238,7 +280,8 @@ test-s3: minio-up
     LSR_S3_TRANSPORT=reqwest \
         cargo nextest run -p lsr-store-s3 --features reqwest --test store-s3 -E 'test(/^minio::/)' --run-ignored all --locked --no-fail-fast
     cargo nextest run -p lsr-cli --test cli -E 'test(/^s3::/)' --run-ignored all --locked --no-fail-fast
-    cargo nextest run -p lsr-history --test history -E 'test(/^replicator::/)' --run-ignored all --locked --no-fail-fast
+    eval "$(./scripts/toxiproxy.sh env)"
+    cargo nextest run -p lsr-history --test history -E 'test(/^replicator::/) | test(/^network::/)' --run-ignored all --locked --no-fail-fast
 
 # Each restores what the other wrote at Latest, a txid and an instant, and they hand one prefix
 # over both ways, over the pinned builds (crates/compat/tests/compat/s3.rs). Needs Docker; fails, never
@@ -323,6 +366,25 @@ upstream-test-map-fresh:
     list="$(cd "${CARGO_TARGET_DIR:-target}/upstream-test-map" && pwd)/rust-tests.txt"
     cargo nextest list --workspace --all-features --locked --run-ignored all --message-format oneline --color never > "$list"
     LSR_UPSTREAM_TEST_MAP_RUST_TESTS="$list" cargo nextest run -p lsr-compat --test compat --locked --run-ignored only -E 'test(=upstream_test_map::every_counterpart_exists)'
+
+# Renders docs/BEHAVIOR.md from docs/behavior.toml (the behaviour table's rows) and
+# docs/behavior/template.md (the prose); `check` fails when the committed file differs.
+behavior-doc:
+    LSR_BEHAVIOR_WRITE=1 cargo nextest run -p lsr-compat --test compat --locked -E 'test(=behavior::the_behavior_doc_is_rendered_from_its_rows)'
+
+# Every test docs/behavior.toml cites is a test or a simulator scenario, and every planted bug a
+# row cites is backed by a cited test that is not ignored, since `planted-bugs` runs no ignored
+# test (crates/compat/tests/compat/behavior.rs).
+# The listings are generated into target/ and never committed, as for the upstream test map.
+evidence-fresh:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "${CARGO_TARGET_DIR:-target}/evidence"
+    dir="$(cd "${CARGO_TARGET_DIR:-target}/evidence" && pwd)"
+    cargo nextest list --workspace --all-features --locked --run-ignored all --message-format oneline --color never > "$dir/all.txt"
+    cargo nextest list --workspace --all-features --locked --run-ignored only --message-format oneline --color never > "$dir/ignored.txt"
+    LSR_EVIDENCE_ALL_TESTS="$dir/all.txt" LSR_EVIDENCE_IGNORED_TESTS="$dir/ignored.txt" \
+        cargo nextest run -p lsr-compat --test compat --locked --run-ignored only -E 'test(=behavior::every_behavior_citation_resolves)'
 
 # Regenerate the upstream test names in docs/upstream-test-map/upstream-tests.txt from the pinned clones
 # (`just upstream` first). The test map test in `check` reads this file, never the clone.

@@ -22,7 +22,18 @@ that caught it must fail.
   failure, or `none`); a plant no seed finds is a listed generator gap, not a failure.
 - A new fix adds an entry and a patch in the same commit as the fix. A `STALE` patch is re-expressed
   against the current tree, or the entry is retired with a reason in the ledger's header.
+- `just planted-bugs-apply`, part of `just check`, runs `git apply --check` on every patch, so a change
+  that makes a patch stale fails its own gate in seconds instead of the nightly run.
 
 Mutation testing covers the lines a pull request changes: `just mutants-diff` (CI job `mutants-diff`)
 runs `cargo mutants --in-diff` over `lsr-core` and `lsr-ltx`. A missed mutant fails the job unless
 `docs/mutants-escapes.txt` lists it with its reason in `docs/mutants.md`.
+
+## Plants cited by behaviour rows
+
+A behaviour row (`docs/behavior.toml`, rendered into `docs/BEHAVIOR.md`) that cites `plant::<name>`
+claims its tests kill that entry's bug class, so it must also cite a test the entry runs: the
+entry's package and a test filter that matches (`crates/compat/tests/compat/behavior.rs`, in `just
+check`). Through `just evidence-fresh`, against `cargo nextest list`, every cited test must exist
+and each cited plant must be backed by one that is not ignored, since this ledger's run starts no
+ignored test. The nightly run of the ledger then makes each such citation true.

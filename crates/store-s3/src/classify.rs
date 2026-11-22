@@ -13,7 +13,7 @@
 //! | Seen | Class |
 //! |---|---|
 //! | `InvalidAccessKeyId`, `SignatureDoesNotMatch`, `ExpiredToken`, `InvalidToken`, `TokenRefreshRequired`, any 401 | `Denied::Credentials` |
-//! | `AccessDenied`, `AllAccessDisabled`, a 403 with no code or another code | `Denied::Permission` |
+//! | `AccessDenied`, `AllAccessDisabled`, a 403 with no code or another code; `KMS.DisabledException`, `KMS.InvalidKeyUsageException`, `KMS.KMSInvalidStateException`, `KMS.NotFoundException` (400) | `Denied::Permission` |
 //! | `RequestTimeTooSkewed` | `Denied::ClockSkew` |
 //! | `NoSuchBucket`, any status, keyed or not | `Denied::BucketMissing` |
 //! | a TLS handshake or certificate failure | `Denied::Tls` |
@@ -62,6 +62,10 @@ pub enum S3Code {
     AllAccessDisabled,
     /// `RequestTimeTooSkewed`.
     RequestTimeTooSkewed,
+    /// The KMS key the request needs cannot be used: `KMS.DisabledException`,
+    /// `KMS.InvalidKeyUsageException`, `KMS.KMSInvalidStateException` or
+    /// `KMS.NotFoundException`, each 400 in S3's published error list.
+    KmsKeyUnusable,
     /// `InvalidObjectState`: the object is in an archive tier and must be
     /// restored before it can be read.
     InvalidObjectState,
@@ -101,6 +105,10 @@ impl S3Code {
             "TokenRefreshRequired" => Self::TokenRefreshRequired,
             "AllAccessDisabled" => Self::AllAccessDisabled,
             "RequestTimeTooSkewed" => Self::RequestTimeTooSkewed,
+            "KMS.DisabledException"
+            | "KMS.InvalidKeyUsageException"
+            | "KMS.KMSInvalidStateException"
+            | "KMS.NotFoundException" => Self::KmsKeyUnusable,
             "InvalidObjectState" => Self::InvalidObjectState,
             "BadDigest" => Self::BadDigest,
             "InvalidDigest" => Self::InvalidDigest,
@@ -131,7 +139,9 @@ impl S3Code {
             | Self::ExpiredToken
             | Self::InvalidToken
             | Self::TokenRefreshRequired => Some(Denied::Credentials),
-            Self::AccessDenied | Self::AllAccessDisabled => Some(Denied::Permission),
+            Self::AccessDenied | Self::AllAccessDisabled | Self::KmsKeyUnusable => {
+                Some(Denied::Permission)
+            }
             Self::RequestTimeTooSkewed => Some(Denied::ClockSkew),
             Self::NoSuchBucket => Some(Denied::BucketMissing),
             Self::NoSuchKey
@@ -277,6 +287,7 @@ pub fn error_in_ok_body(op: StoreOp, key: &FileKey, r: &HttpResponse) -> Option<
         | S3Code::AllAccessDisabled
         | S3Code::RequestTimeTooSkewed
         | S3Code::InvalidObjectState
+        | S3Code::KmsKeyUnusable
         | S3Code::BadDigest
         | S3Code::InvalidDigest
         | S3Code::InvalidRange
@@ -497,6 +508,26 @@ mod tests {
             ),
             // An archived object is one object out of reach, not an access refusal.
             (resp(403, Some("InvalidObjectState"), None), refused(403)),
+            // The KMS key an object or bucket needs is disabled, missing, in the wrong state
+            // or of the wrong kind: S3 sends these as 400 (its published error list).
+            (
+                resp(400, Some("KMS.DisabledException"), None),
+                denied(Denied::Permission),
+            ),
+            (
+                resp(400, Some("KMS.InvalidKeyUsageException"), None),
+                denied(Denied::Permission),
+            ),
+            (
+                resp(400, Some("KMS.KMSInvalidStateException"), None),
+                denied(Denied::Permission),
+            ),
+            (
+                resp(400, Some("KMS.NotFoundException"), None),
+                denied(Denied::Permission),
+            ),
+            // A KMS code not on that list goes by its status.
+            (resp(400, Some("KMS.SomethingElse"), None), refused(400)),
         ]);
     }
 

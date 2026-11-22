@@ -655,3 +655,35 @@ fn pending_files_past_the_cap_at_boot_are_regenerated_from_the_wal() {
         "a snapshot was taken"
     );
 }
+
+/// A pending file must hold exactly the pages its range stages: one that
+/// also carries a page the range never wrote describes no file this engine
+/// staged and is refused. The upper edge of the page count, beside the files
+/// that differ from the WAL in a page above.
+#[test]
+fn a_pending_file_with_one_page_too_many_is_refused() {
+    let (mut rig, mut actor) = caught_up();
+    stage_held(&mut rig, &mut actor, &[2], T0 + 1);
+    let (_, bytes) = staged_bytes(&rig)
+        .into_iter()
+        .find(|(n, _)| *n == 2)
+        .unwrap();
+    let mut decoder = ReadDecoder::new(&bytes[..]);
+    let mut held = Vec::new();
+    while let Some(event) = decoder.next_event().unwrap() {
+        if let lsr_ltx::Event::Page(page) = event {
+            held.push(page.pgno().get());
+        }
+    }
+    let fields = decoder.finish().unwrap().header().fields();
+    let spare = (1..=fields.commit).find(|raw| !held.contains(raw)).unwrap();
+    let page = vec![0xa5; fields.page_size.bytes()];
+    let more = reencoded(&bytes, |_| {}, &[(pg(spare), page)]);
+    put_l0(&rig.staging.inner, 2, &more);
+    let mut actor = Actor::new(cfg());
+    rig.tick(&mut actor, T0 + 2);
+    let seen = rig.settle(&mut actor, T0 + 2);
+    no_stop(&seen);
+    assert!(!replica_holds(&rig, 2, &more));
+    assert_eq!(restored(&rig), 2);
+}

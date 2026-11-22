@@ -60,7 +60,8 @@ test, not a survivor, but it is reported separately and slower than a catch.
 cores). The second run, over both test packages, finished, and every one of its survivors is killed by a
 test, equivalent or explained (see the two "Second run" sections and "Kept test helpers" below). The exit
 bar, zero unexplained survivors, is met for `core`. Which test doubles are mutated is settled in "Scope"
-above; the survivors of the excluded files are no longer listed.
+above; the survivors of the excluded files are no longer listed. The third run, a whole-crate sweep, is the
+current record: see "Third run: the whole crate" below, whose tables supersede the earlier ones where they differ.
 
 The recipe needed one change before it could run at all: `core` has a guard test that lists the tracked files
 with git, cargo-mutants copies the tree without `.git` by default, and so the unmutated baseline failed and no
@@ -267,6 +268,93 @@ a test asks of the engine, not what the engine does, and the fakes are checked a
 | `verify.rs:757:20` | replace < with > in Walk::read | The walk's read loop never ends on a short chunk and reads empty chunks forever (every `Depth::Contents` test). |
 | `maintain/retain.rs:362:15` | replace <= with > in Found::wake_at | Retention only names wake instants past the newest created-at time, which the anchor never reaches, so `retention_failure`'s tick loop (actor tests) follows `Next::At` forever. Also fails `a_covered_level_zero_file_wakes_when_it_is_old_enough`. |
 
+### Third run: the whole crate
+
+`cargo mutants -p lsr-core --test-package lsr-core --test-package lsr-sim --jobs 4 --minimum-test-timeout 60`
+at commit `aa572a1`, every mutant (no `--iterate`): 2003 mutants in three hours, 1204 caught, 55 missed,
+692 unviable, 52 timeouts. Line numbers in this section are those of `aa572a1`. No survivor revealed a bug.
+
+| Resolution | Missed |
+| --- | --- |
+| Caught by a new or widened test | 30 |
+| Gone: the code was simplified so the mutant no longer exists or is now caught | 15 |
+| Equivalent, listed below and in `docs/mutants-escapes.txt` | 10 |
+
+The survivors fell into a few classes, each fixed as a class:
+
+- **Text nothing read.** Debug and Display output and failure messages (`Env`'s Debug, `ReadLockHold`'s Debug,
+  `SinkOp` and `PublishLeft` in restore errors, the fix hint of a missing test resource). Where the text is a
+  contract (an operator's message, a trace that must print the same from run to run) a test now reads it;
+  a test now reads `Env`'s Debug, which must not print the journal it lends.
+- **Guards a caller or a contract already implies.** Checks that a caller's own filter, the planner's
+  contract or an earlier gate makes always true: `extend`'s reach check before `push`, `inside_file`'s end
+  check, `pending_at_boot`'s preference, the frame-index-0 special cases in boot recovery, `match_last_page`'s
+  start-only guard, retention's missing-tail hole, `after_sync`'s unread `through` flag, `fetch_ahead`'s
+  short-chunk stop. These were removed, with a debug assertion where the fact is worth stating. A guard
+  that protects a type's invariant or acts as a safety net stays and is listed as equivalent below.
+- **Checkers never fed bad input.** The planner's verify-only contiguity re-check, retention's self-check and
+  the fail-closed rule for test resources (`need`, `minio`) passed under weakened mutants because no test
+  handed them what they exist to refuse. Each now has the bad input as a table row.
+- **Rules stated twice.** Retention's "keys alone delete this level-0 file" and maintenance's "a level is
+  backing off" each had a copy whose boundary no test reached; each copy now calls the one the tests pin
+  (`by_keys`, `backing_off_until`), and `ContiguousChain::push` orders its checks so each one decides.
+- **Behaviour no test asked for.** A sync stopped at its byte cap asks to run again at once; unsynced bytes
+  after a WAL restart; an acknowledged id learned at boot survives a relist; a quiet tick behind an upload
+  does not open the WAL; a matching replica tail is read once at boot; switching retention on deletes at
+  once; a maintenance success clears its degraded state; the per-task retry memory (now unit-tested).
+
+Earlier rows that no longer hold: the second run's equivalents `plan.rs:110:13`, `111:13` and `111:28`
+(`ContiguousChain::push`, now caught after its checks were reordered), `plan.rs:432:45` (`explain_shortfall`,
+the comparison is gone), `actor.rs:767:53` (`absorb`, the flag is gone), `maintain/retain.rs:287:12` (`hole`,
+the check is gone) and `maintain/retain.rs:537:37` (`self_check`, now caught).
+
+#### Re-run of the timeouts
+
+The 52 timeouts came from the machine, not from loops: the run shared it with other builds. A second pass,
+`cargo mutants -p lsr-core --test-package lsr-core --test-package lsr-sim --timeout 240 --iterate` at
+`7feee08` (after the fixes above, so it also tried every mutant of the changed code) and with nothing else
+running, tested 647 mutants: 431 caught, 19 missed, 197 unviable, no timeouts. Line numbers in this
+subsection are those of `7feee08`.
+
+| Resolution | Missed |
+| --- | --- |
+| Caught by a new or widened test | 14 |
+| Gone: the code was simplified | 3 |
+| Equivalent, listed below | 1 |
+| A bug, fixed in its own pull request | 1 |
+
+The classes are the same:
+
+- **Behaviour no test asked for.** A snapshot job whose step the witness cap holds stays due
+  (`snapshot_job`'s reset guard); the created-at batch takes each unresolved file once and only the needed
+  file's failure ends a resolve (`resolve_counted`, `read_batch`); a staged file longer than one read is
+  decoded whole (`witness.rs` `decode`); `env_text` reads a variable that is set.
+- **Text nothing read.** `created_at_many_agrees_with_created_at` put distinct created-at times but compared
+  the store only with itself; it now also checks each slot holds its own file's time.
+- **Rules stated twice.** `level_zero_need` searched the level again for the file the scan was on; the scan
+  now hands it the files after that one. `lose_staged` compared before taking a maximum it could take
+  directly. `Need::ahead` had no caller.
+- **A bug.** `recover.rs:813:22` (`restarted`): a restarted WAL whose new end lands exactly on the synced end,
+  with a committed transaction of the old generation still chaining from it, was followed as a plain restart
+  instead of reported as a broken read lock and snapshotted, so that transaction never reached the replica.
+  The fix, its test and a planted-bug entry are on branch `claude/fix-restart-at-synced-end`.
+
+#### Equivalent (11)
+
+| Where | Mutation | Why |
+| --- | --- | --- |
+| `layout.rs:273:30` | `FileKey::from_str`: `\|` becomes `^` | As before: the shifted value has a clear low nibble. |
+| `plan.rs:562:65` | `extend`: `preference(info) > preference(&held)` becomes `>=` | As before: the preference ends in the file's own range, so two files never tie. |
+| `store.rs:170:49` | `build_listing`: the lower bound for unrecognized names becomes `>=` (now `on_page`) | As before: an unrecognized name never equals a key name. |
+| `store.rs:512:9` | the default `ObjectStore::batch_width` becomes `1.try_into().unwrap()` | The default is `NonZeroUsize::MIN`, which is one. |
+| `maintain/retain.rs:313:82` | `hole`'s filter, `max() > snapshot`, becomes `>=` (now `past_snapshot`) | A file ending at the snapshot's end opens no hole and leaves the reach where it is; the filter only bounds the walk to the few files past the snapshot. |
+| `maintain/retain.rs:336:37` | `latest_unplannable`: guard `chain.reaches() == newest` becomes `true` | The planner returns a `Latest` plan only when it reaches the newest eligible transaction, the listing's newest. Kept as a runtime check, as the design rules prefer to an assertion. |
+| `maintain/retain.rs:647:37` | `pinned_chain`: guard `chain.reaches() == restore_point` becomes `true` | A `Txid` plan exists only when it reaches the target (`plan_unchecked`). Kept as a runtime check. |
+| `verify/against.rs:202:17` | `compare`: guard `commit == live.commit.get()` becomes `true` | Both sides hold every page up to their own commit (`read_live` reads the whole plan, the restore sink holds what the chain wrote), so pages that all agree mean the commits agree. Kept as a runtime check. |
+| `verify/dry_run.rs:37:9` | `DigestSink::reset` becomes `Ok(())` | As before: the chain applied after a reset rewrites or truncates every page an earlier attempt wrote. |
+| `verify/dry_run.rs:120:9` | the dry run's `Counting::delete` becomes `Ok(())` | As before: a restore never deletes. |
+| `actor.rs:1591:54` | `prune_unit`: `more`'s `&&` becomes `\|\|` | The newest staged file is listed and is above the bound, so a whole page taken implies a next page. The two differ only on a listing past one page (1000 files) whose bound stops mid-page, and then only by one extra listing on the next tick. |
+
 ### Kept test helpers: `mem.rs` and `conformance.rs`
 
 The suite's self-tests in `crates/core/src/conformance/tests.rs` run its cases against a wrapped `MemStore`
@@ -300,3 +388,10 @@ created-at time or a listing with `Default::default()`, which those types do not
 The four-job run filled the disk after 70 mutants and reported four of them unviable from the failed build
 (`conformance.rs:65:9`, `71:5`, `504:12`, `mem.rs:103:9` with 0). They were run again at one job, with the
 three it had not reached, and the tally above counts the second result.
+
+### Fail-stop (#115): equivalent survivors of `just mutants-diff`
+
+| Where | Mutation | Why |
+| --- | --- | --- |
+| `pages.rs` `seeded` | `min() > from` becomes `>=` | The extra file it calls pending is the confirmed one; a quiet mark at or below the confirmed transaction is trimmed in `Actor::observe_lag` before any read. |
+| `actor/lag.rs` `Actor::observe_lag` | `retain(txid > replicated)` becomes `>=` | `only_quiet_pending` reads the marks from the transaction after the replicated one, so a kept mark equal to it is never read. |

@@ -63,6 +63,11 @@ impl Flawed {
 impl ObjectStore for Flawed {
     type Upload = crate::MemUpload;
 
+    /// Forwards to the store it wraps.
+    async fn remove_scratch(&self) -> Result<u64, StoreError> {
+        self.inner.remove_scratch().await
+    }
+
     async fn list(
         &self,
         level: Level,

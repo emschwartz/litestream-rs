@@ -25,7 +25,13 @@
 //! Restore points given up: staged level-0 files the engine deleted that the
 //! replica never took, or that lie past the newest transaction it holds now
 //! (it rolled back), so no restore can reach them. A prune of files the
-//! replica took, and since compacted or let go by retention, is not one.
+//! replica took, and since compacted or let go by retention, is not one. Nor
+//! is the delete of a file at or below the replica's newest transaction when
+//! a replica file ends at that transaction (another writer's file there was
+//! compacted, so a restore reaches it), or when the same key was counted
+//! before (a staging backup put back a file already given up: deleting it
+//! again loses nothing new). Seeds 0xf4a87, 0xf47e6, 0xf4bab and 0xf44c6
+//! failed on the double count and the other writer's transaction.
 //! Each is counted (`liveness.given_up`) and judged like a snapshot: one with
 //! no fault in the window that could force it fails the run with
 //! [`Violation::UnjustifiedGiveUp`]. A give-up is then a
@@ -76,11 +82,11 @@ pub enum Justifier {
     WalRestarted,
     /// The WAL file is gone or holds no whole header.
     WalEmptied,
-    /// The WAL restarted while our read transaction did not pin it (it was
-    /// not held, or sat on read mark zero, which lets one restart through).
-    /// Whether the engine should follow the one restart a mark-zero hold
-    /// allows is an open question; until it is settled, such a restart
-    /// justifies the snapshot.
+    /// The WAL changed generation while our read transaction was not held.
+    /// A change under a hold on read mark zero is no reason: the hold blocks
+    /// every backfill, so no commit can go with the old generation and the
+    /// engine follows it (`lsr_core::recover`, rule 6; seeds 0xe and
+    /// 0xf4846 snapshotted there before).
     ReadLockLapsed,
     /// The process stopped with a staged file the replica does not hold
     /// that the boot's witness cannot prove from the live WAL: a snapshot
@@ -184,13 +190,16 @@ pub const fn justifies(cause: SnapshotCauseKind, at_boot: bool) -> Option<&'stat
         WalDamaged, WalEmptied, WalRestarted,
     };
     Some(match cause {
-        // Nothing staged and nothing on the replica to continue from.
+        // Nothing staged and nothing on the replica to continue from. Staging may hold nothing
+        // while the replica holds its newest file, so a bucket rolled back past its only
+        // transaction leaves nothing on either side.
         SnapshotCauseKind::FirstSync => &[
             RunStart,
             StagingEdited,
             StagedLost,
             StagingFault,
             StagedDropped,
+            RemoteEdited,
         ],
         // The replica holds more than staging: staging lost files, or the
         // replica took files staging never had.
@@ -273,6 +282,7 @@ pub const fn of_op(op: &Op) -> &'static [Justifier] {
         // A lasting fault, noted as it begins and again as it is lifted.
         Op::Hold { hold, .. } => match hold {
             crate::generate::Hold::StoreDown(_)
+            | crate::generate::Hold::StoreDownAll
             | crate::generate::Hold::CredentialsRevoked
             | crate::generate::Hold::LaggingListing
             | crate::generate::Hold::LyingReads => &[Justifier::RemoteFault],
@@ -280,6 +290,7 @@ pub const fn of_op(op: &Op) -> &'static [Justifier] {
             crate::generate::Hold::Wal(_) => &[Justifier::WalDamaged],
             crate::generate::Hold::LyingDisk => &[Justifier::LyingDisk],
             crate::generate::Hold::ReadersHeld => &[],
+            crate::generate::Hold::SecondWriter => &[Justifier::RemoteEdited],
         },
         Op::OurReader { begin: false } => &[Justifier::ReadLockLapsed],
         Op::RequestSnapshot => &[Justifier::SnapshotRequested],
@@ -288,6 +299,7 @@ pub const fn of_op(op: &Op) -> &'static [Justifier] {
         Op::LaggingListings { .. }
         | Op::Commit { .. }
         | Op::CommitInTick { .. }
+        | Op::AppInTick { .. }
         | Op::Spill
         | Op::Rollback
         | Op::Vacuum { .. }
@@ -304,7 +316,52 @@ pub const fn of_op(op: &Op) -> &'static [Justifier] {
         | Op::OurReader { begin: true }
         | Op::AppAutocheckpoint(_)
         | Op::Shrink { .. }
-        | Op::Heal => &[],
+        | Op::Heal
+        | Op::Verify
+        // The operator's word lets a boot build above the replica; the
+        // snapshot that follows is justified by what disturbed staging.
+        | Op::TakeOver => &[],
+    }
+}
+
+/// What a drawn run's own settings make true from its first step, as [`of_op`] says for an
+/// operation. Every field is named, with no rest pattern, so a new setting does not compile
+/// until it says here whether it is a fault the engine may have to answer (a disk lying from
+/// the start once went unnoted and failed runs).
+#[must_use]
+pub const fn of_opts(opts: &crate::run::Opts) -> &'static [Justifier] {
+    let crate::run::Opts {
+        // What the harness records, raises, judges or expects: no change to the world.
+        plant: _,
+        trace: _,
+        record: _,
+        allow_stop: _,
+        judges: _,
+        drawn: _,
+        // The engine's own configuration.
+        responses: _,
+        retention: _,
+        switch_retention: _,
+        // A law for what a power loss keeps acts only at a power loss, which notes
+        // `PowerLoss`, and `StagedLost` for staged files it takes or brings back.
+        block_crash_law: _,
+        // The app's behaviour after a restart, and how the clock reads inside a tick.
+        after_restart: _,
+        clock_law: _,
+        // An overlapping hold's crashes, power losses and store faults are noted as they
+        // happen, as the same operations are outside a hold.
+        overlap: _,
+        error_domain: _,
+        known_wrong: _,
+        // Staging on the directory store: what its power losses take is noted with
+        // `StagedLost`, as on `MemStore`; a file it took that it reported durable fails the run.
+        staging_fs: _,
+        lying_wal_sync,
+    } = opts;
+    if *lying_wal_sync {
+        &[Justifier::LyingDisk]
+    } else {
+        &[]
     }
 }
 
@@ -318,6 +375,8 @@ pub struct Liveness {
     counted: SnapshotCounts,
     /// Level-0 keys the replica took.
     uploaded: BTreeSet<FileKey>,
+    /// Level-0 keys already counted as given up.
+    lost: BTreeSet<FileKey>,
     staging_seen: usize,
     remote_seen: usize,
     /// The WAL header's salts when last looked at.
@@ -344,6 +403,7 @@ impl Liveness {
             in_tick: BTreeSet::new(),
             counted: SnapshotCounts::default(),
             uploaded: BTreeSet::new(),
+            lost: BTreeSet::new(),
             staging_seen: 0,
             remote_seen: 0,
             wal: None,
@@ -465,12 +525,19 @@ impl Liveness {
     ) -> Result<(), Violation> {
         let (staging, remote) = stores;
         let newest_staged = world.newest_staged();
-        let caught_up = self
-            .take_remote(remote)
-            .is_some_and(|took| newest_staged.is_none_or(|newest| took >= newest));
+        let took = self.take_remote(remote);
         // A key the bucket refused because it already held it (a commit whose answer was
         // lost, confirmed by a read-back) leaves no put in the recorder: the replica holds it.
         self.uploaded.extend(world.replica_level_zero());
+        // The replica holds everything staging does only once no staged file is one it never
+        // took: a file left behind it (a backup put back, a forged file) is still to be dropped,
+        // and the fault that left it must be in the window when it is (seed 0xf42e9).
+        let left_behind = world
+            .staged_level_zero()
+            .iter()
+            .any(|key| !self.uploaded.contains(key));
+        let caught_up = !left_behind
+            && took.is_some_and(|took| newest_staged.is_none_or(|newest| took >= newest));
         let staged = self.take_staging(staging, world, reach)?;
         let grew = self.take_counts(counts, reach)?;
         // A file with no WAL range is a snapshot for certain; one with a range
@@ -567,20 +634,58 @@ impl Liveness {
                 RecorderEvent::Put { .. } => {}
                 RecorderEvent::Delete { keys, .. } => {
                     let newest = world.replica_newest();
-                    let lost = keys
+                    let lost: Vec<FileKey> = keys
                         .iter()
                         .filter(|key| {
                             key.level().get() == 0
-                                && (!self.uploaded.contains(key)
-                                    || newest.is_none_or(|newest| key.range().max().get() > newest))
+                                && (newest.is_none_or(|newest| key.range().max().get() > newest)
+                                    || (!self.uploaded.contains(key)
+                                        && !self.lost.contains(key)
+                                        && !world.replica_ends_at(key.range().max().get())))
                         })
-                        .count();
+                        .copied()
+                        .collect();
+                    self.lost.extend(lost.iter().copied());
+                    let lost = lost.len();
                     self.given_up(u64::try_from(lost).unwrap_or(u64::MAX), reach)?;
                 }
             }
         }
         self.staging_seen = staging.len();
         Ok(staged)
+    }
+
+    /// A boot found the replica past the newest staged file and snapshots
+    /// above it (`BehindRemote`): every staged file at or below the replica's
+    /// newest transaction that it never took, and that no replica file ends
+    /// at, can never be uploaded, so its restore point is given up now, with
+    /// the window that justified the snapshot, not later when a prune deletes
+    /// it (seed 0xf4cf9).
+    ///
+    /// # Errors
+    /// [`Violation::UnjustifiedGiveUp`] when nothing in the window forces it.
+    pub fn passed_by_replica(
+        &mut self,
+        staged: &[FileKey],
+        world: &dyn TickWorld,
+        reach: &mut Reach,
+    ) -> Result<(), Violation> {
+        let Some(newest) = world.replica_newest() else {
+            return Ok(());
+        };
+        let lost: Vec<FileKey> = staged
+            .iter()
+            .filter(|key| {
+                key.level().get() == 0
+                    && key.range().max().get() <= newest
+                    && !self.uploaded.contains(key)
+                    && !self.lost.contains(key)
+                    && !world.replica_ends_at(key.range().max().get())
+            })
+            .copied()
+            .collect();
+        self.lost.extend(lost.iter().copied());
+        self.given_up(u64::try_from(lost.len()).unwrap_or(u64::MAX), reach)
     }
 
     /// Counts `lost` restore points given up; fails unless a fault in the
@@ -616,6 +721,10 @@ pub trait TickWorld {
     fn replica_level_zero(&self) -> Vec<FileKey> {
         Vec::new()
     }
+    /// Whether a file on the replica, at any level, ends at `txid`.
+    fn replica_ends_at(&self, txid: u64) -> bool;
+    /// The level-0 files in staging.
+    fn staged_level_zero(&self) -> Vec<FileKey>;
 }
 
 impl TickWorld for crate::World {
@@ -638,6 +747,14 @@ impl TickWorld for crate::World {
         self.remote_level_zero()
             .map(|files| files.into_iter().map(|info| info.key).collect())
             .unwrap_or_default()
+    }
+
+    fn replica_ends_at(&self, txid: u64) -> bool {
+        self.remote_ends_at(txid)
+    }
+
+    fn staged_level_zero(&self) -> Vec<FileKey> {
+        crate::World::staged_level_zero(self)
     }
 }
 
@@ -670,6 +787,14 @@ impl<W: TickWorld> TickWorld for WithEngine<'_, W> {
     fn replica_level_zero(&self) -> Vec<FileKey> {
         self.world.replica_level_zero()
     }
+
+    fn replica_ends_at(&self, txid: u64) -> bool {
+        self.world.replica_ends_at(txid)
+    }
+
+    fn staged_level_zero(&self) -> Vec<FileKey> {
+        self.world.staged_level_zero()
+    }
 }
 
 /// What one tick staged at level 0.
@@ -700,6 +825,13 @@ mod tests {
         }
         fn replica_newest(&self) -> Option<u64> {
             Some(25)
+        }
+        fn replica_ends_at(&self, _: u64) -> bool {
+            false
+        }
+
+        fn staged_level_zero(&self) -> Vec<FileKey> {
+            Vec::new()
         }
     }
 
@@ -759,6 +891,82 @@ mod tests {
         assert!(!live.window.contains(&Justifier::StagingEdited));
     }
 
+    fn key(txid: u64) -> FileKey {
+        FileKey::new(
+            lsr_core::Level::ZERO,
+            lsr_ltx::TxidRange::single(lsr_ltx::Txid::new(txid).unwrap()),
+        )
+    }
+
+    /// Staging after an edit left an older file behind the replica: 37, which the replica
+    /// never took, beside 43, the newest, which it did.
+    struct LeftBehind {
+        staged: Vec<FileKey>,
+    }
+
+    impl TickWorld for LeftBehind {
+        fn full_image(&self, _: &FileKey) -> bool {
+            false
+        }
+        fn newest_staged(&self) -> Option<u64> {
+            Some(43)
+        }
+        fn replica_newest(&self) -> Option<u64> {
+            Some(43)
+        }
+        fn replica_ends_at(&self, _: u64) -> bool {
+            false
+        }
+        fn staged_level_zero(&self) -> Vec<FileKey> {
+            self.staged.clone()
+        }
+    }
+
+    /// An upload that reaches the newest staged file has not caught up while staging still
+    /// holds a file the replica never took: the edit that left it there stays in the window,
+    /// so the prune that later drops it is justified (seed 0xf42e9).
+    #[test]
+    fn an_upload_past_a_file_left_behind_keeps_the_staging_edit() {
+        let mut live = Liveness::new();
+        let mut reach = Reach::default();
+        live.window.clear();
+        live.note(Justifier::StagingEdited);
+        let world = LeftBehind {
+            staged: vec![key(37), key(43)],
+        };
+        let none = SnapshotCounts::default();
+        live.after_tick((&[], &[remote_put(43)]), &world, none, false, &mut reach)
+            .unwrap();
+        assert!(live.window.contains(&Justifier::StagingEdited));
+        let zero = lsr_ltx::Timestamp::from_unix_millis(0);
+        let prune = [RecorderEvent::Delete {
+            keys: vec![key(37)],
+            at: zero,
+            high: zero,
+        }];
+        let world = LeftBehind {
+            staged: vec![key(43)],
+        };
+        live.after_tick((&prune, &[remote_put(43)]), &world, none, false, &mut reach)
+            .unwrap();
+        assert_eq!(reach.get("liveness.given_up"), 1);
+    }
+
+    #[test]
+    fn a_disk_lying_from_the_start_is_noted_and_nothing_else_is() {
+        let lying = crate::run::Opts {
+            lying_wal_sync: true,
+            ..crate::run::Opts::default()
+        };
+        assert_eq!(of_opts(&lying), [Justifier::LyingDisk]);
+        let laws = crate::run::Opts {
+            drawn: true,
+            block_crash_law: true,
+            ..crate::run::Opts::default()
+        };
+        assert!(of_opts(&laws).is_empty());
+    }
+
     #[test]
     fn every_judged_cause_has_a_justifier() {
         for kind in SnapshotCauseKind::ALL {
@@ -768,6 +976,90 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A replica holding up to `newest`, with files ending at `ends`.
+    struct Replica {
+        newest: u64,
+        ends: &'static [u64],
+    }
+
+    impl TickWorld for Replica {
+        fn full_image(&self, _: &FileKey) -> bool {
+            false
+        }
+        fn newest_staged(&self) -> Option<u64> {
+            None
+        }
+        fn replica_newest(&self) -> Option<u64> {
+            Some(self.newest)
+        }
+        fn replica_ends_at(&self, txid: u64) -> bool {
+            self.ends.contains(&txid)
+        }
+        fn staged_level_zero(&self) -> Vec<FileKey> {
+            Vec::new()
+        }
+    }
+
+    fn staged_key(txid: u64) -> FileKey {
+        let txid = lsr_ltx::Txid::new(txid).unwrap();
+        FileKey::new(lsr_core::Level::ZERO, lsr_ltx::TxidRange::single(txid))
+    }
+
+    fn deleted(txid: u64) -> RecorderEvent {
+        RecorderEvent::Delete {
+            keys: vec![staged_key(txid)],
+            at: lsr_ltx::Timestamp::from_unix_millis(0),
+            high: lsr_ltx::Timestamp::from_unix_millis(0),
+        }
+    }
+
+    /// Deleting a staged file the replica never took counts once, and not
+    /// at all when a replica file ends at its transaction.
+    #[test]
+    fn a_restore_point_is_given_up_once_and_only_when_no_restore_reaches_it() {
+        let mut live = Liveness::new();
+        let mut reach = Reach::default();
+        let world = Replica {
+            newest: 9,
+            ends: &[4, 9],
+        };
+        live.window.clear();
+        live.note(Justifier::StagingEdited);
+        let events = [deleted(5)];
+        live.take_staging(&events, &world, &mut reach).unwrap();
+        assert_eq!(reach.get("liveness.given_up"), 1);
+        live.window.clear();
+        live.staging_seen = 0;
+        let events = [deleted(5), deleted(5), deleted(4)];
+        live.take_staging(&events, &world, &mut reach).unwrap();
+        assert_eq!(reach.get("liveness.given_up"), 1);
+        live.staging_seen = 0;
+        live.take_staging(&[deleted(10)], &world, &mut reach)
+            .unwrap_err();
+    }
+
+    /// A boot that snapshots above a replica that passed staging gives up
+    /// the staged files the replica never took then, once, with its window;
+    /// the prune that deletes them later loses nothing new (seed 0xf4cf9).
+    #[test]
+    fn a_replica_that_passed_staging_gives_up_its_files_at_the_boot() {
+        let mut live = Liveness::new();
+        let mut reach = Reach::default();
+        let world = Replica {
+            newest: 8,
+            ends: &[4, 8],
+        };
+        live.window.clear();
+        live.note(Justifier::RemoteEdited);
+        let staged = [staged_key(4), staged_key(5), staged_key(6), staged_key(9)];
+        live.passed_by_replica(&staged, &world, &mut reach).unwrap();
+        assert_eq!(reach.get("liveness.given_up"), 2);
+        live.window.clear();
+        let events = [deleted(5), deleted(6)];
+        live.take_staging(&events, &world, &mut reach).unwrap();
+        assert_eq!(reach.get("liveness.given_up"), 2);
     }
 
     #[test]

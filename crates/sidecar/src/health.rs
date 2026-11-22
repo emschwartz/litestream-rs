@@ -9,15 +9,15 @@
 //! **Status.** 200 while every database is booting, running, draining, degraded or waiting
 //! for its file to appear: a degraded task keeps retrying and recovers on its own, and an
 //! orchestrator that restarted on it would only repeat the boot. 503 once any database has
-//! stopped (a stop cause, or the drain's end), its thread is gone, or it failed to start;
-//! the body's `down` lists which.
+//! stopped (a stop cause, or the drain's end), its thread is gone, it failed to start, or
+//! fail-stop tripped for it (`crate::failstop`); the body's `down` lists which.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use lsr_replica::{
-    AppNotice, DegradedCause, Denied, Gone, Health, Phase, Replicator, SnapshotCause,
-    SnapshotCauseKind, Stall, StopCause, Task, Timestamp,
+    AppNotice, DegradedCause, Denied, Gone, Health, JournalSignal, Phase, Replicator,
+    SnapshotCause, SnapshotCauseKind, Stall, StopCause, Task, Timestamp,
 };
 
 use crate::json::string as json_string;
@@ -127,7 +127,8 @@ impl DbView {
             DbState::Waiting => false,
             DbState::Failed => true,
             DbState::Running(health) => match health.phase {
-                Phase::Booting | Phase::Running | Phase::Draining => false,
+                // A fail-stop trip is 503 under every mode (`crate::failstop`).
+                Phase::Booting | Phase::Running | Phase::Draining => health.held_by.trip.is_some(),
                 Phase::Stopped(_) | Phase::Gone(_) => true,
             },
         }
@@ -227,6 +228,18 @@ pub(crate) const fn stop_name(cause: StopCause) -> &'static str {
 #[must_use]
 pub(crate) fn snapshot_name(cause: SnapshotCause) -> &'static str {
     snapshot_kind_name(SnapshotCauseKind::from(&cause))
+}
+
+/// A journal signal's name in `/healthz` and metrics, without its payload.
+#[must_use]
+pub(crate) const fn journal_name(signal: JournalSignal) -> &'static str {
+    match signal {
+        JournalSignal::Missing => "missing",
+        JournalSignal::Unreadable(_) => "unreadable",
+        JournalSignal::Newer { .. } => "newer_version",
+        JournalSignal::SlotUnreadable => "slot_unreadable",
+        JournalSignal::Unwritable(_) => "unwritable",
+    }
 }
 
 /// A snapshot cause's name, without its payload.
@@ -344,6 +357,19 @@ fn running_json(o: &mut Object, health: &Health) {
         health.resnapshot.map(|c| snapshot_name(c).to_owned()),
     );
     o.maybe("app_notice", health.app_notice().map(|n| n.to_string()));
+    o.maybe(
+        "journal",
+        health.journal.map(|s| journal_name(s).to_owned()),
+    );
+    o.maybe("journal_detail", health.journal.map(|s| format!("{s:?}")));
+    o.maybe(
+        "held_by",
+        health
+            .held_by
+            .trip
+            .map(|trip| crate::failstop::trip_name(trip).to_owned()),
+    );
+    o.text("app", crate::failstop::gate_name(health.held_by.gate));
     o.text("reported_at", &health.reported_at.to_string());
 }
 
@@ -381,6 +407,31 @@ pub(crate) fn healthz(views: &[DbView], now: Timestamp) -> (bool, String) {
 mod tests {
     use super::*;
 
+    /// A fail-stop trip is 503 whatever the phase and the mode: a database still running, its
+    /// commit off the replica too long, is down; the same database untripped is up.
+    #[test]
+    fn a_trip_is_503_while_the_database_runs() {
+        let at = Timestamp::from_unix_millis(1_700_000_000_000);
+        let mut health = Health::new(at);
+        health.phase = Phase::Running;
+        let view = |health: &Health| DbView {
+            path: PathBuf::from("/app.db"),
+            replica_type: "file",
+            state: DbState::Running(Box::new(health.clone())),
+        };
+        assert!(!view(&health).down());
+        health.held_by.trip = Some(lsr_replica::Trip::UnreplicatedTooLong { since: at });
+        health.held_by.gate = lsr_replica::Gate::Allowed;
+        assert!(view(&health).down(), "report and hold-start still say 503");
+        let (up, body) = healthz(&[view(&health)], at);
+        assert!(!up);
+        assert!(
+            body.contains("\"held_by\":\"unreplicated_too_long\""),
+            "{body}"
+        );
+        assert!(body.contains("\"app\":\"allowed\""), "{body}");
+    }
+
     /// Every kind of access refusal reports under a name of its own: one name for
     /// all of them sent operators to rotate keys for a wrong clock or a missing bucket.
     #[test]
@@ -398,5 +449,27 @@ mod tests {
             .collect();
         assert_eq!(names.len(), all.len(), "{names:?}");
         assert!(names.contains("credentials"));
+    }
+
+    /// Each journal signal has the owner-approved name, one per variant: an operator acts
+    /// differently on a lost journal and on one that cannot be written.
+    #[test]
+    fn each_journal_signal_has_its_approved_name() {
+        let named = [
+            (JournalSignal::Missing, "missing"),
+            (
+                JournalSignal::Unreadable(lsr_journal::Why::Tie),
+                "unreadable",
+            ),
+            (JournalSignal::Newer { version: 2 }, "newer_version"),
+            (JournalSignal::SlotUnreadable, "slot_unreadable"),
+            (
+                JournalSignal::Unwritable(std::io::ErrorKind::StorageFull),
+                "unwritable",
+            ),
+        ];
+        for (signal, name) in named {
+            assert_eq!(journal_name(signal), name, "{signal:?}");
+        }
     }
 }

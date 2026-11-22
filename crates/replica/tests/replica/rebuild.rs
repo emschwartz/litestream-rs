@@ -12,7 +12,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
-use common::{Site, config, fake, stopped, wait};
+use common::{Site, config, fake, moved_until, stopped, wait};
 use lsr_replica::{
     Config, DegradedCause, DynStore, FinalSync, Health, NonZeroDuration, Phase, Replicator,
     Response, Responses, SnapshotCause, StopCause, Stopped, Task,
@@ -165,9 +165,34 @@ fn an_operator_snapshot_request_survives_a_panic_before_the_boot() {
     wait(&replicator, |h| h.phase == Phase::Running);
     site.commit(1);
     clock.advance(POLL);
-    wait(&replicator, |h| caught_up(h) && h.resnapshot.is_none());
+    moved_until(&replicator, &clock, (POLL, 240), |h| {
+        caught_up(h) && h.resnapshot.is_none()
+    });
     assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
     site.assert_restores(&*site.store());
+}
+
+/// A wall clock that steps back while the fresh engine waits to boot does not add the step to
+/// the wait: the engine boots within minutes of clock, never the hour of the step. (The
+/// engine's own retry wait runs at half speed until the clock catches up, so it takes up to
+/// twice its length.)
+#[test]
+fn a_clock_step_back_does_not_lengthen_the_wait_before_a_rebuild() {
+    let site = Site::new();
+    let faulty = site.faulty();
+    faulty.panics.store(1, Ordering::SeqCst);
+    let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
+    let (runtime, clock) = fake();
+    let retry = Duration::from_secs(60);
+    let replicator =
+        Replicator::start_with(&site.db, store, retrying_every(retry), runtime).unwrap();
+    wait(&replicator, |h| h.counters.panics == 1);
+    clock.step_back(Duration::from_secs(3600));
+    let ten = Duration::from_secs(10);
+    moved_until(&replicator, &clock, (ten, 60), |h| {
+        h.phase == Phase::Running
+    });
+    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
 }
 
 /// A task the dropped engine reported degraded is still reported while the fresh engine waits
@@ -179,7 +204,7 @@ fn a_degraded_task_is_still_reported_while_the_engine_is_rebuilt() {
     let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
     let (runtime, clock) = fake();
     let replicator = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
-    wait(&replicator, caught_up);
+    moved_until(&replicator, &clock, (POLL, 240), caught_up);
     faulty.refuse.store(true, Ordering::SeqCst);
     site.commit(1);
     clock.advance(POLL);
@@ -205,7 +230,9 @@ fn a_degraded_task_is_still_reported_while_the_engine_is_rebuilt() {
     faulty.panic_always.store(false, Ordering::SeqCst);
     faulty.refuse.store(false, Ordering::SeqCst);
     clock.release();
-    wait(&replicator, |h| caught_up(h) && !h.is_degraded());
+    moved_until(&replicator, &clock, (POLL, 240), |h| {
+        caught_up(h) && !h.is_degraded()
+    });
     assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
 }
 

@@ -20,7 +20,7 @@
 use std::io::ErrorKind;
 
 use lsr_journal::{
-    FILE, Journal, Opened, Parsed, SLOT, Seq, Slot, SlotRead, Verdict, encode, parse,
+    FILE, Journal, Opened, Parsed, SLOT, Seq, Slot, SlotRead, Verdict, Why, encode, parse,
 };
 
 use crate::fault::{BugSite, Fault};
@@ -71,6 +71,43 @@ pub trait JournalFile {
     fn sync_dir(&mut self) -> Result<(), ErrorKind>;
 }
 
+/// What the journal reports (health names `JournalMissing`, `JournalUnreadable`, `JournalNewer`,
+/// `JournalSlotUnreadable`, `JournalUnwritable`). Each is an event, never a cost: the engine runs
+/// as it would with no journal at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JournalSignal {
+    /// No journal, while staging or the replica holds files: an upgrade, a meta directory
+    /// inherited from Go or not kept, or a deleted journal. No observation separates them.
+    Missing,
+    /// A journal that holds no record this binary can read.
+    Unreadable(Why),
+    /// The newest record is from a newer version.
+    Newer {
+        /// Its version.
+        version: u16,
+    },
+    /// A slot failed to read: the record read may be older than the newest one written.
+    SlotUnreadable,
+    /// The journal lags what the engine holds: its last write failed with this error. It is
+    /// tried again every tick until it succeeds or nothing is left to record, and the engine
+    /// proceeds meanwhile as with no journal.
+    Unwritable(ErrorKind),
+}
+
+/// Boot's judgement of the journal it read: `fresh` when staging and the replica are both
+/// empty, so a missing journal is a first run and reports nothing.
+#[must_use]
+pub fn judge(parsed: &Parsed, fresh: bool) -> Option<JournalSignal> {
+    match parsed.verdict {
+        Verdict::Missing if fresh => None,
+        Verdict::Missing => Some(JournalSignal::Missing),
+        Verdict::Unreadable(why) => Some(JournalSignal::Unreadable(why)),
+        Verdict::Newer { version, .. } => Some(JournalSignal::Newer { version }),
+        Verdict::Read { .. } if parsed.slot_failed => Some(JournalSignal::SlotUnreadable),
+        Verdict::Read { .. } => None,
+    }
+}
+
 /// Why a record was not made durable.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum JournalWriteError {
@@ -90,10 +127,10 @@ enum Base {
     Winner { slot: Slot, seq: Seq },
 }
 
-/// The writer, and the file it owns.
+/// The writer: what it knows of the file, which is lent to each call (as the engine lends
+/// every file per tick), never owned.
 #[derive(Clone, Debug)]
-pub struct JournalWriter<F> {
-    file: F,
+pub struct JournalWriter {
     base: Base,
     exists: bool,
     created: bool,
@@ -121,9 +158,9 @@ fn following(seq: Seq) -> Result<Seq, Fault> {
     Ok(next.unwrap_or(seq))
 }
 
-impl<F: JournalFile> JournalWriter<F> {
+impl JournalWriter {
     /// Opens the journal at boot: reads each slot with its own call and judges.
-    pub fn open(mut file: F) -> (Self, Parsed) {
+    pub fn open<F: JournalFile + ?Sized>(file: &mut F) -> (Self, Parsed) {
         let opened = file.open();
         let s0 = opened.is_ok().then(|| file.read_slot(Slot::S0));
         let s1 = opened.is_ok().then(|| file.read_slot(Slot::S1));
@@ -160,7 +197,6 @@ impl<F: JournalFile> JournalWriter<F> {
             Verdict::Newer { .. } | Verdict::Missing | Verdict::Unreadable(_) => None,
         };
         let writer = Self {
-            file,
             base,
             exists: !matches!(parsed.verdict, Verdict::Missing),
             created,
@@ -178,52 +214,58 @@ impl<F: JournalFile> JournalWriter<F> {
     ///
     /// [`JournalWriteError::Bug`] when `journal` is not monotonic over the last record this
     /// writer read or was asked for; [`JournalWriteError::Unwritable`] when a call failed.
-    pub fn write(&mut self, journal: &Journal) -> Result<(), JournalWriteError> {
+    pub fn write<F: JournalFile + ?Sized>(
+        &mut self,
+        file: &mut F,
+        journal: &Journal,
+    ) -> Result<(), JournalWriteError> {
         monotonic(self.last.as_ref(), journal).map_err(JournalWriteError::Bug)?;
         self.last = Some(*journal);
         let Base::Winner { slot, seq } = self.base else {
-            return self.establish(journal);
+            return self.establish(file, journal);
         };
         if !self.created {
-            self.file
-                .write_at(slot.other().offset(), &[0; SLOT])
+            file.write_at(slot.other().offset(), &[0; SLOT])
                 .map_err(io)?;
-            self.file.sync().map_err(io)?;
-            self.file.sync_dir().map_err(io)?;
+            file.sync().map_err(io)?;
+            file.sync_dir().map_err(io)?;
             self.created = true;
             self.synced = true;
         }
         if !self.synced {
-            self.file.sync().map_err(io)?;
+            file.sync().map_err(io)?;
             self.synced = true;
         }
         let next = slot.other();
         let seq = following(seq).map_err(JournalWriteError::Bug)?;
-        self.file
-            .write_at(next.offset(), &encode(journal, seq))
+        file.write_at(next.offset(), &encode(journal, seq))
             .map_err(io)?;
-        self.file.sync().map_err(io)?;
+        file.sync().map_err(io)?;
         self.base = Base::Winner { slot: next, seq };
         self.durable = Some(*journal);
         Ok(())
     }
 
     /// Writes the file whole with `journal` as its first record.
-    fn establish(&mut self, journal: &Journal) -> Result<(), JournalWriteError> {
+    fn establish<F: JournalFile + ?Sized>(
+        &mut self,
+        file: &mut F,
+        journal: &Journal,
+    ) -> Result<(), JournalWriteError> {
         if self.exists {
-            self.file.write_at(0, &[0; FILE]).map_err(io)?;
-            self.file.sync().map_err(io)?;
+            file.write_at(0, &[0; FILE]).map_err(io)?;
+            file.sync().map_err(io)?;
         } else {
-            self.file.create().map_err(io)?;
+            file.create().map_err(io)?;
             self.exists = true;
         }
         let mut whole = [0; FILE];
         for (to, from) in whole.iter_mut().zip(encode(journal, Seq::FIRST)) {
             *to = from;
         }
-        self.file.write_at(0, &whole).map_err(io)?;
-        self.file.sync().map_err(io)?;
-        self.file.sync_dir().map_err(io)?;
+        file.write_at(0, &whole).map_err(io)?;
+        file.sync().map_err(io)?;
+        file.sync_dir().map_err(io)?;
         self.base = Base::Winner {
             slot: Slot::S0,
             seq: Seq::FIRST,
@@ -240,16 +282,6 @@ impl<F: JournalFile> JournalWriter<F> {
         self.durable.as_ref()
     }
 
-    /// The file.
-    pub const fn file(&mut self) -> &mut F {
-        &mut self.file
-    }
-
-    /// The file, the writer gone (a process that dies).
-    pub fn into_file(self) -> F {
-        self.file
-    }
-
     /// For a differential test: whether the next write establishes, the newest record's slot
     /// and number, and whether creation is finished and this lifetime has synced.
     #[must_use]
@@ -264,5 +296,69 @@ impl<F: JournalFile> JournalWriter<F> {
             self.created,
             self.synced,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::ErrorKind;
+
+    use lsr_journal::{Journal, SLOT, Slot};
+
+    use super::{JournalFile, JournalWriter};
+
+    /// A file that records each call and answers as an empty, writable one would.
+    #[derive(Debug, Default)]
+    struct Recording {
+        calls: Vec<&'static str>,
+    }
+
+    impl JournalFile for Recording {
+        fn open(&mut self) -> Result<(), ErrorKind> {
+            self.calls.push("open");
+            Err(ErrorKind::NotFound)
+        }
+
+        fn read_slot(&mut self, _: Slot) -> Result<Option<[u8; SLOT]>, ErrorKind> {
+            self.calls.push("read_slot");
+            Ok(None)
+        }
+
+        fn create(&mut self) -> Result<(), ErrorKind> {
+            self.calls.push("create");
+            Ok(())
+        }
+
+        fn write_at(&mut self, _: u64, _: &[u8]) -> Result<(), ErrorKind> {
+            self.calls.push("write_at");
+            Ok(())
+        }
+
+        fn sync(&mut self) -> Result<(), ErrorKind> {
+            self.calls.push("sync");
+            Ok(())
+        }
+
+        fn sync_dir(&mut self) -> Result<(), ErrorKind> {
+            self.calls.push("sync_dir");
+            Ok(())
+        }
+    }
+
+    /// The engine lends the file as `&mut dyn JournalFile`; every call the writer makes must
+    /// reach it through the borrow, or a sync the writer counts on would be dropped silently.
+    #[test]
+    fn a_lent_file_receives_every_call() {
+        let mut file = Recording::default();
+        let lent: &mut (dyn JournalFile + Send) = &mut file;
+        let (mut writer, _) = JournalWriter::open(lent);
+        writer.write(lent, &Journal::ABSENT).unwrap();
+        writer.write(lent, &Journal::ABSENT).unwrap();
+        assert_eq!(
+            file.calls,
+            [
+                "open", "create", "write_at", "sync", "sync_dir", "write_at", "sync"
+            ]
+        );
     }
 }

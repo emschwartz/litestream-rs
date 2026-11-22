@@ -1,0 +1,13 @@
+diff --git a/crates/sidecar/src/supervise.rs b/crates/sidecar/src/supervise.rs
+index bad4a77..dab8fdd 100644
+--- a/crates/sidecar/src/supervise.rs
++++ b/crates/sidecar/src/supervise.rs
+@@ -198,7 +198,7 @@ fn hold_start(daemon: &Daemon, wake: &Receiver<Wake>) -> (Option<Wake>, Option<T
+             .gates()
+             .iter()
+             .any(|(_, gate)| *gate == Gate::Pending);
+-        if held.is_none() && !pending {
++        if true || (held.is_none() && !pending) {
+             return (None, None);
+         }
+         if let Some((path, trip)) = &held

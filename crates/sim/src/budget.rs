@@ -29,8 +29,11 @@
 //!   ([`PROBE_READS`]). So replica reads are at most two per compaction
 //!   input, plus [`READS_PER_BOOT`] per boot, plus one per fault that failed
 //!   a call (each such failure is retried) and [`PROBE_READS`] more for the
-//!   listing that may follow it. A key a lag hid and a probe found is a
-//!   listing the lag changed, counted as a fault hit.
+//!   listing that may follow it, plus [`READS_PER_DEGRADED_RETRY`] per retry
+//!   of a degraded task (a retry of a persistent cause such as a page size
+//!   change compares the replica's newest file again; the doubling wait
+//!   bounds how often). A key a lag hid and a probe found is a listing the
+//!   lag changed, counted as a fault hit.
 //! - Each file needs one commit; a failed or ambiguous commit is retried. So
 //!   replica commits are at most two per distinct key put plus one per
 //!   fault hit and crash. A listing a lag changed counts as a fault hit: what
@@ -61,6 +64,10 @@ pub const READS_PER_BOOT: u64 = 24 + PROBE_READS;
 )]
 pub const PROBE_READS: u64 = 3 * (lsr_core::PROBE_GAP as u64 + 1);
 
+/// Reads one retry of a degraded task may make of the replica: a header and
+/// the newest file it names.
+pub const READS_PER_DEGRADED_RETRY: u64 = 2;
+
 /// What a run did besides its recorder's events.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Spent {
@@ -71,6 +78,8 @@ pub struct Spent {
     pub boots: u64,
     /// Calls a scheduled fault failed or changed, and listings a lag changed.
     pub fault_hits: u64,
+    /// Ticks that reported a task degraded: each is one retry.
+    pub degraded_retries: u64,
 }
 
 /// Judges the run's replica costs.
@@ -105,7 +114,12 @@ pub fn check(
     let reads = inputs
         .saturating_mul(2)
         .saturating_add(spent.boots.saturating_add(1).saturating_mul(READS_PER_BOOT))
-        .saturating_add(spent.fault_hits.saturating_mul(1 + PROBE_READS));
+        .saturating_add(spent.fault_hits.saturating_mul(1 + PROBE_READS))
+        .saturating_add(
+            spent
+                .degraded_retries
+                .saturating_mul(READS_PER_DEGRADED_RETRY),
+        );
     within(Bound::ReadCalls, counts.reads, reads)?;
     let keys = u64::try_from(last.len()).unwrap_or(u64::MAX);
     let commits = keys

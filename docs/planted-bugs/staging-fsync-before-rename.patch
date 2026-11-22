@@ -1,8 +1,8 @@
 diff --git a/crates/store-fs/src/lib.rs b/crates/store-fs/src/lib.rs
-index 51fbcd1..b1f60e6 100644
+index 8c8d9395..7f71c774 100644
 --- a/crates/store-fs/src/lib.rs
 +++ b/crates/store-fs/src/lib.rs
-@@ -501,7 +501,6 @@ impl FsUpload {
+@@ -606,7 +606,6 @@ impl<F: Fs> FsUpload<F> {
          let fail = |err: io::Error| StoreError::from_io(StoreOp::Upload, None, &err);
          let result = (|| {
              self.file.set_modified(self.mtime)?;

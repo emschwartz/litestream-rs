@@ -45,6 +45,9 @@ pub(crate) enum Section {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Read {
     Str,
+    /// Go's `*string`: an empty value is kept (null alone is unset), as yaml.v2 sets a
+    /// pointer to `""`.
+    StrPtr,
     /// A string that is never shown in a message.
     Secret,
     Bool,
@@ -108,7 +111,7 @@ const fn key(name: &'static str, read: Read, rule: Rule) -> Key {
     Key { name, read, rule }
 }
 
-use Read::{Any, Bool, Bytes, Duration, Int, List, Map, Maps, Secret, Str, Uint32};
+use Read::{Any, Bool, Bytes, Duration, Int, List, Map, Maps, Secret, Str, StrPtr, Uint32};
 use Rule::{Implemented, NoEffect};
 
 const fn off_only(name: &'static str, read: Read, at: OffValue, feature: &'static str) -> Key {
@@ -277,8 +280,8 @@ const DB: &[Key] = &[
         "watching a directory for new databases",
     ),
     key("snapshot", Map(Section::Snapshot), Implemented),
-    key("meta-path", Str, Implemented),
-    key("meta-dir", Str, Implemented),
+    key("meta-path", StrPtr, Implemented),
+    key("meta-dir", StrPtr, Implemented),
     key("monitor-interval", Duration, Implemented),
     key("checkpoint-interval", Duration, Implemented),
     key(
@@ -317,6 +320,8 @@ const RUST: &[Key] = &[
     key("app-readers", Str, Implemented),
     key("app-autocheckpoint", Str, Implemented),
     key("responses", Map(Section::Responses), Implemented),
+    key("if-replication-stops", Str, Implemented),
+    key("max-unreplicated-age", Duration, Implemented),
 ];
 
 /// One per field of the replicator's responses.

@@ -1,0 +1,13 @@
+diff --git a/crates/store-s3/src/chain/ini.rs b/crates/store-s3/src/chain/ini.rs
+index 6259256..2f54222 100644
+--- a/crates/store-s3/src/chain/ini.rs
++++ b/crates/store-s3/src/chain/ini.rs
+@@ -183,7 +183,7 @@ impl Parser {
+             && !value.text.is_empty()
+             && !value.map
+         {
+-            let joined = format!("{}\n{text}", value.text.as_str());
++            let joined = format!("{}", value.text.as_str());
+             value.text = Zeroizing::new(joined);
+         }
+     }

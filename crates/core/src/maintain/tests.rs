@@ -11,6 +11,7 @@ use proptest::prelude::*;
 use super::*;
 use crate::conformance::block_on;
 use crate::created_at::{Resolve, ResolvedCreatedAt};
+use crate::fault::Fault;
 use crate::layout::{CreatedAt, ListedTime};
 use crate::mem::MemStore;
 use crate::plan::{KeyTarget, PlanOutcome, plan};
@@ -770,13 +771,6 @@ impl Checker {
                 Some(pair[1].key.range().min())
             );
         }
-        // A listing taken before the job, and lagging its output, still lets a read name it.
-        let starts = crate::probe::Starts::of(before);
-        assert!(
-            crate::probe::names(&starts, &c.output_key()),
-            "{:?} not named from {starts:?}",
-            c.output_key()
-        );
         let dst = before.level(c.level());
         if let Some(last) = dst.last() {
             assert!(
@@ -1338,7 +1332,7 @@ fn a_commit_that_fails_after_publish_is_failed_and_the_next_plan_skips_the_level
 }
 
 #[test]
-fn a_source_read_error_is_failed_and_publishes_nothing() {
+fn a_local_source_read_error_is_failed_and_publishes_nothing() {
     let (local, replica) = (MemStore::new(), MemStore::new());
     three_l0(&local, &replica);
     let job = l1_job(&replica);
@@ -1351,7 +1345,7 @@ fn a_source_read_error_is_failed_and_publishes_nothing() {
     assert!(
         matches!(
             &out,
-            Outcome::Failed(MaintainError::Compact(CompactError::Source(_)))
+            Outcome::Failed(MaintainError::Compact(CompactError::Local(_)))
         ),
         "{out:?}"
     );
@@ -1363,11 +1357,41 @@ fn running_a_job_twice_leaves_one_file_at_the_key() {
     let (local, replica) = (MemStore::new(), MemStore::new());
     three_l0(&local, &replica);
     let job = l1_job(&replica);
-    for _ in 0..2 {
-        let out = block_on(run_compact(&job, &local, &replica));
-        assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
-    }
+    let out = block_on(run_compact(&job, &local, &replica));
+    assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
+    let first = block_on(replica.read(&job.output_key(), 0, ReadLen::CHUNK)).unwrap();
+    // The second run finds the output there and writes nothing over it.
+    let again = block_on(run_compact(&job, &local, &replica));
+    assert!(
+        matches!(again, Outcome::Replan { key } if key == job.output_key()),
+        "{again:?}"
+    );
     assert_eq!(listed(&replica, 1), vec![job.output_key()]);
+    let after = block_on(replica.read(&job.output_key(), 0, ReadLen::CHUNK)).unwrap();
+    assert_eq!(first, after);
+}
+
+/// A compaction whose output key already holds an object (an earlier run's
+/// output a listing did not show) writes nothing over it, so a rejected commit
+/// can never delete it: the delete after a failed write takes only what that
+/// write created.
+#[test]
+fn a_rejected_compaction_never_deletes_an_output_that_was_already_there() {
+    let (local, replica, _, job) = rejected_setup();
+    let first = block_on(run_compact(&job, &local, &replica));
+    assert!(matches!(first, Outcome::Compacted { .. }), "{first:?}");
+    let held = block_on(replica.read(&job.output_key(), 0, ReadLen::CHUNK)).unwrap();
+    replica.inject_failure_after_publish(StoreError::Corrupt {
+        key: None,
+        cause: crate::store::CorruptCause::ChecksumMismatch { part: None },
+    });
+    let again = block_on(run_compact(&job, &local, &replica));
+    assert!(
+        matches!(again, Outcome::Replan { key } if key == job.output_key()),
+        "{again:?}"
+    );
+    let after = block_on(replica.read(&job.output_key(), 0, ReadLen::CHUNK)).unwrap();
+    assert_eq!(after, held, "the output that was there is untouched");
 }
 
 #[test]
@@ -1783,4 +1807,149 @@ fn a_corrupt_local_input_falls_back_to_the_replica_copy() {
     let job = CompactJob::new(inputs, level(1)).unwrap();
     let ran = block_on(run_compact(&job, &local, &replica));
     assert!(matches!(ran, Outcome::Compacted { .. }), "{ran:?}");
+}
+
+/// Local errors a level-1 compaction can meet on the staged copies, and the fault each is:
+/// what the staging store's errors mean everywhere else, never a replica's fault.
+fn local_read_errors() -> [(StoreError, Fault); 3] {
+    let key = key(0, 1, 1);
+    [
+        (
+            StoreError::Denied {
+                op: StoreOp::Read,
+                why: crate::store::Denied::Permission,
+            },
+            Fault::LocalIo,
+        ),
+        (
+            StoreError::Transient {
+                op: StoreOp::Read,
+                kind: std::io::ErrorKind::StorageFull,
+            },
+            Fault::LocalDiskFull,
+        ),
+        (
+            StoreError::Corrupt {
+                key: Some(key),
+                cause: crate::store::CorruptCause::NotARegularFile,
+            },
+            Fault::StagedLost,
+        ),
+    ]
+}
+
+fn failed_fault(out: &Outcome) -> Fault {
+    match out {
+        Outcome::Failed(err) => Fault::from_maintain(err),
+        Outcome::Compacted { .. } | Outcome::Deleted { .. } | Outcome::Replan { .. } => {
+            panic!("not failed: {out:?}")
+        }
+    }
+}
+
+/// Comparing the local copies with the replica's: a local read error is a staging fault.
+#[test]
+fn a_local_read_error_comparing_copies_is_a_staging_fault() {
+    for (err, want) in local_read_errors() {
+        let (local, replica) = (MemStore::new(), MemStore::new());
+        three_l0(&local, &replica);
+        let job = l1_job(&replica);
+        local.inject_failure(StoreOp::Read, err.clone());
+        let out = block_on(run_compact(&job, &local, &replica));
+        assert_eq!(failed_fault(&out), want, "{err}");
+        assert!(listed(&replica, 1).is_empty());
+    }
+}
+
+/// A store whose whole-file reads (from offset 0) fail with `err`; tail reads succeed.
+struct FailsWholeReads {
+    inner: MemStore,
+    err: StoreError,
+}
+
+impl ObjectStore for FailsWholeReads {
+    type Upload = <MemStore as ObjectStore>::Upload;
+
+    async fn remove_scratch(&self) -> Result<u64, StoreError> {
+        self.inner.remove_scratch().await
+    }
+
+    fn list(
+        &self,
+        level: Level,
+        after: Option<TxidRange>,
+        limit: PageLimit,
+    ) -> impl std::future::Future<Output = Result<crate::store::Listing, StoreError>> + Send {
+        self.inner.list(level, after, limit)
+    }
+
+    fn read(
+        &self,
+        key: &FileKey,
+        offset: u64,
+        len: crate::store::ReadLen,
+    ) -> impl std::future::Future<Output = Result<Vec<u8>, StoreError>> + Send {
+        let read = self.inner.read(key, offset, len);
+        let err = (offset == 0).then(|| self.err.clone());
+        async move {
+            match err {
+                Some(err) => Err(err),
+                None => read.await,
+            }
+        }
+    }
+
+    fn created_at(
+        &self,
+        file: &FileInfo,
+    ) -> impl std::future::Future<Output = Result<CreatedAt, StoreError>> + Send {
+        self.inner.created_at(file)
+    }
+
+    fn read_with_created_at(
+        &self,
+        file: &FileInfo,
+        len: crate::store::ReadLen,
+    ) -> impl std::future::Future<Output = Result<(Vec<u8>, CreatedAt), StoreError>> + Send {
+        let read = self.inner.read_with_created_at(file, len);
+        let err = self.err.clone();
+        async move {
+            drop(read.await);
+            Err(err)
+        }
+    }
+
+    fn begin_upload(
+        &self,
+        key: &FileKey,
+        created_at: Timestamp,
+        mode: WriteMode,
+    ) -> impl std::future::Future<Output = Result<Self::Upload, StoreError>> + Send {
+        self.inner.begin_upload(key, created_at, mode)
+    }
+
+    fn delete(
+        &self,
+        keys: &[FileKey],
+    ) -> impl std::future::Future<Output = Result<(), StoreError>> + Send {
+        self.inner.delete(keys)
+    }
+}
+
+/// Reading the local copies once they matched the replica's: a local read error is a staging
+/// fault.
+#[test]
+fn a_local_read_error_while_compacting_is_a_staging_fault() {
+    for (err, want) in local_read_errors() {
+        let (inner, replica) = (MemStore::new(), MemStore::new());
+        three_l0(&inner, &replica);
+        let job = l1_job(&replica);
+        let local = FailsWholeReads {
+            inner,
+            err: err.clone(),
+        };
+        let out = block_on(run_compact(&job, &local, &replica));
+        assert_eq!(failed_fault(&out), want, "{err}");
+        assert!(listed(&replica, 1).is_empty());
+    }
 }

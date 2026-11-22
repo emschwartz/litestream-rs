@@ -1,8 +1,8 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index 32a4b91..39a9c27 100644
+index 238fb5f..e55efbf 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -1835,7 +1835,7 @@ impl Actor {
+@@ -1656,7 +1656,7 @@ impl Actor {
          now: Timestamp,
      ) -> Option<Tick> {
          let published = self.engine.upload.confirmed();
@@ -10,4 +10,4 @@ index 32a4b91..39a9c27 100644
 +        if true || inventory.newest() >= published || self.engine.maintain.gone == published {
              return None;
          }
-         match probe_past(
+         match probe_past(remote, inventory.newest(), published, None).await {

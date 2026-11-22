@@ -10,8 +10,8 @@
 use std::fmt;
 
 use lsr_core::{
-    AppCheckpoint, AppCheckpoints, Degraded, PersistentCause, Severity, SnapshotCause,
-    SnapshotCounts, StopCause, Task,
+    AppCheckpoint, AppCheckpoints, Degraded, Gate, JournalSignal, PersistentCause, Severity,
+    SnapshotCause, SnapshotCounts, StopCause, Task, Trip,
 };
 use lsr_ltx::{Timestamp, Txid};
 
@@ -174,6 +174,24 @@ pub struct Health {
     pub counters: Counters,
     /// What the scheduled verify found (`Config::verify_interval`); all empty while it is off.
     pub verification: Verification,
+    /// What the engine journal (`docs/journal.md`) says, when it says something an operator
+    /// should see: what boot read of it, or that the debt of a failed WAL sync is held only in
+    /// memory because the journal cannot be written. `None` while it is read and written.
+    pub journal: Option<JournalSignal>,
+    /// Fail-stop (`Config::if_replication_stops`): whether replication has tripped, and what
+    /// that does to the application.
+    pub held_by: FailStop,
+}
+
+/// Fail-stop's state (`lsr_core::failstop`, `docs/proposals/fail-stop.md`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FailStop {
+    /// Why replication tripped, if it has: an unsafe stop, a commit off the replica past
+    /// `Config::max_unreplicated_age`, or a refusal by the store before the first listing.
+    pub trip: Option<Trip>,
+    /// What the trip does to the application under `Config::if_replication_stops`. While it is
+    /// [`Gate::Held`], the commit hook refuses the application's commits.
+    pub gate: Gate,
 }
 
 /// What the scheduled verify found: the replica's listing checked, and a restore of the
@@ -257,8 +275,10 @@ pub enum VerifyOutcome {
 }
 
 impl Health {
-    /// The state before the thread has written anything.
-    pub(crate) const fn new(at: Timestamp) -> Self {
+    /// The state before the thread has written anything, reported at `at`: what a replicator
+    /// says before its first tick, and what a test outside this crate builds a health from.
+    #[must_use]
+    pub const fn new(at: Timestamp) -> Self {
         Self {
             reported_at: at,
             phase: Phase::Booting,
@@ -293,6 +313,10 @@ impl Health {
                 },
                 snapshots: SnapshotCounts::ZERO,
             },
+            held_by: FailStop {
+                trip: None,
+                gate: Gate::Pending,
+            },
             verification: Verification {
                 last_run: None,
                 last_good: None,
@@ -306,6 +330,7 @@ impl Health {
                     incomplete: 0,
                 },
             },
+            journal: None,
         }
     }
 

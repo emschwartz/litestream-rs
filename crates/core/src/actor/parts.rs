@@ -15,6 +15,8 @@
 //! so "no position and no snapshot pending" cannot be written down. A boot
 //! builds a whole `Engine` and assigns it only when every step succeeded.
 
+use std::collections::BTreeSet;
+
 use lsr_ltx::{PageSize, Timestamp, Txid};
 use lsr_wal::CommittedEnd;
 
@@ -24,12 +26,18 @@ use super::state::{Gate, Live, Maintain, Phase, Tasks};
 use super::unproven::Unproven;
 use crate::app::AppCheckpointObserver;
 use crate::checkpoint::CheckpointState;
+use crate::failstop::Lag;
 use crate::fault::{SnapshotCause, SnapshotCounts, StopCause};
+use crate::journal::{JournalSignal, JournalWriter};
 use crate::layout::FileKey;
 use crate::pages::PageChecksumTable;
 use crate::position::Position;
+use crate::store::Denied;
+use crate::takeover::TakeoverRecord;
 use crate::upload::UploadState;
 use crate::witness::Witnesses;
+use lsr_journal::Journal;
+use std::io::ErrorKind;
 
 /// Whether the actor was asked to stop, which no rebuild forgets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,6 +127,42 @@ pub(super) struct Kept {
     /// How far the engine is past a failed sync of the WAL (`unproven`). Kept across boots:
     /// a frame that sync covered is no truer after a rebuild.
     pub(super) unproven: Unproven,
+    /// The takeover the driver handed in (`crate::takeover`): an operator's,
+    /// a restore's, or one this engine asked for before dropping its own
+    /// staged files.
+    pub(super) takeover: Option<TakeoverRecord>,
+    /// A takeover the engine needs durable before it deletes staged files the
+    /// replica holds: the driver writes it and hands it back.
+    pub(super) wanted_takeover: Option<TakeoverRecord>,
+    /// The replica's newest transaction when a boot refused to build on files
+    /// nothing vouched for: what the stop reports.
+    pub(super) refused_through: Option<Txid>,
+    /// The fail-stop clock (`crate::failstop`): reports, kept across boots so a rebuild does not
+    /// restart it.
+    pub(super) lag: Lag,
+    /// Whether any engine of this process has booted, so listed the replica once. A rebuild
+    /// keeps it: fail-stop's refusal at boot is about this process, not this engine.
+    pub(super) listed: bool,
+    /// The last boot failure before the first listing was the store refusing access.
+    pub(super) refused_at_boot: Option<Denied>,
+    /// A boot attempt of this process has failed: with no refusal behind it, the boot is
+    /// judged and the application may start (`crate::failstop`).
+    pub(super) boot_failed: bool,
+    /// A sync step failed after the first listing: a snapshot the boot asked for was tried.
+    pub(super) sync_failed_after_listing: bool,
+    /// Pending staged files that hold no commit of the application's: a file that changes no
+    /// page, or a snapshot for a doubt alone staged while nothing was off the replica. They are
+    /// not lag (`actor::lag`). At most one per pending file, so bounded by the witness tokens.
+    pub(super) quiet: BTreeSet<Txid>,
+    /// What the last boot's read of the journal reported. A report, not engine state: nothing
+    /// decides on it.
+    pub(super) journal: Option<JournalSignal>,
+    /// The journal's writer, from the last boot that was lent a journal.
+    pub(super) writer: Option<JournalWriter>,
+    /// The record that boot read, if any: what is durable until this lifetime writes.
+    pub(super) journal_read: Option<Journal>,
+    /// How the last journal write ended: an error is `JournalUnwritable` until one succeeds.
+    pub(super) journal_write: Result<(), ErrorKind>,
 }
 
 impl Kept {
@@ -136,6 +180,19 @@ impl Kept {
             suspect_staged: None,
             snapshots: SnapshotCounts::default(),
             unproven: Unproven::No,
+            takeover: None,
+            wanted_takeover: None,
+            refused_through: None,
+            lag: Lag::default(),
+            listed: false,
+            refused_at_boot: None,
+            boot_failed: false,
+            sync_failed_after_listing: false,
+            quiet: BTreeSet::new(),
+            journal: None,
+            writer: None,
+            journal_read: None,
+            journal_write: Ok(()),
         }
     }
 
@@ -157,6 +214,19 @@ impl Kept {
             suspect_staged,
             snapshots,
             unproven,
+            takeover,
+            wanted_takeover: _,
+            refused_through,
+            lag,
+            listed,
+            refused_at_boot,
+            boot_failed,
+            sync_failed_after_listing,
+            quiet: _,
+            journal,
+            writer,
+            journal_read,
+            journal_write,
         } = self;
         Self {
             cfg: cfg.clone(),
@@ -171,6 +241,21 @@ impl Kept {
             suspect_staged: *suspect_staged,
             snapshots: *snapshots,
             unproven: *unproven,
+            takeover: *takeover,
+            // A rebuilt engine boots again and asks again for what it needs.
+            wanted_takeover: None,
+            refused_through: *refused_through,
+            lag: *lag,
+            listed: *listed,
+            refused_at_boot: *refused_at_boot,
+            boot_failed: *boot_failed,
+            sync_failed_after_listing: *sync_failed_after_listing,
+            // Beliefs about staged files: the rebuilt engine's boot judges them again.
+            quiet: BTreeSet::new(),
+            journal: *journal,
+            writer: writer.clone(),
+            journal_read: *journal_read,
+            journal_write: *journal_write,
         }
     }
 

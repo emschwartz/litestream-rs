@@ -49,7 +49,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Seek};
 use std::num::NonZeroU32;
 
-use lsr_ltx::{Decoder, Event, FileChecksum, Header, PageChecksum, PageNo, Txid, TxidRange};
+use lsr_ltx::{
+    Decoder, Event, FileChecksum, Header, PageChecksum, PageNo, Timestamp, Txid, TxidRange,
+};
 use lsr_wal::{Salts, ScanLimit, TxOutcome, WalError, WalOffset};
 
 use crate::fault::{BugSite, Fault};
@@ -110,17 +112,32 @@ pub struct Witnessed {
     key: FileKey,
     bytes: ByteTally,
     checksum: FileChecksum,
+    /// The file's header timestamp: when it was staged, the clock fail-stop counts the oldest
+    /// pending commit from (`crate::failstop`).
+    stamp: Timestamp,
 }
 
 impl Witnessed {
     /// A token for a file this process just wrote: `bytes` tallied as it
     /// wrote them, `checksum` the encoder's trailer checksum.
-    pub(crate) const fn made_here(key: FileKey, bytes: ByteTally, checksum: FileChecksum) -> Self {
+    pub(crate) const fn made_here(
+        key: FileKey,
+        bytes: ByteTally,
+        checksum: FileChecksum,
+        stamp: Timestamp,
+    ) -> Self {
         Self {
             key,
             bytes,
             checksum,
+            stamp,
         }
+    }
+
+    /// The file's header timestamp.
+    #[must_use]
+    pub const fn stamp(&self) -> Timestamp {
+        self.stamp
     }
 
     /// The staged file it vouches for.
@@ -152,6 +169,7 @@ impl Witnessed {
             key,
             bytes: tally,
             checksum: verified.trailer().file_checksum(),
+            stamp: verified.header().fields().timestamp,
         })
     }
 }
@@ -209,6 +227,15 @@ impl Witnesses {
         self.by_txid.retain(|txid, _| *txid < from);
     }
 
+    /// The stamp of the oldest pending staged file not in `but`, if any is held.
+    #[must_use]
+    pub fn oldest_stamp_but(&self, but: &std::collections::BTreeSet<Txid>) -> Option<Timestamp> {
+        self.by_txid
+            .iter()
+            .find(|(txid, _)| !but.contains(*txid))
+            .map(|(_, token)| token.stamp())
+    }
+
     /// How many tokens are held.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -226,7 +253,8 @@ impl Witnesses {
     #[cfg(test)]
     pub(crate) fn trust_all<S: ObjectStore>(staging: &S) -> Self {
         let mut all = Self::new();
-        let files = crate::conformance::block_on(staged_from(staging, None)).unwrap_or_default();
+        let files = crate::conformance::block_on(staged_from(staging, None, usize::MAX))
+            .unwrap_or_default();
         for info in files {
             let bytes = crate::conformance::block_on(staging.read(
                 &info.key,
@@ -341,7 +369,8 @@ where
 {
     let from = confirmed.map_or(Some(Txid::MIN), Txid::next);
     let pending: Vec<FileInfo> = match from {
-        Some(from) => staged_from(staging, Some(from)).await?,
+        // One past the cap: the first file no token could be minted for.
+        Some(from) => staged_from(staging, Some(from), MAX_WITNESSED.saturating_add(1)).await?,
         None => Vec::new(),
     };
     let Some(first) = pending.first() else {
@@ -374,6 +403,7 @@ where
         }
         match witness_one(staging, &mut live, info, prev, &mut framed).await? {
             Ok((token, next)) => {
+                mark!(Boot4);
                 tokens.push(token);
                 prev = Before {
                     txid: Some(next.txid),
@@ -513,6 +543,7 @@ async fn witness_one<L: ObjectStore, R: Read + Seek, P: PageSource>(
         key: info.key,
         bytes: decoded.bytes,
         checksum: decoded.checksum,
+        stamp: decoded.header.fields().timestamp,
     };
     let next = Prev {
         txid,
@@ -599,6 +630,20 @@ fn framed_pages<R: Read + Seek>(
             ) => return Ok(None),
         }
     }
+}
+
+/// Whether the staging store still holds, under the token's key, exactly the
+/// bytes the token was minted for: read whole, verified, same length, digest
+/// and trailer checksum.
+///
+/// # Errors
+/// The staging store's fault when a read fails.
+pub(crate) async fn still_holds<L: ObjectStore>(
+    staging: &L,
+    token: &Witnessed,
+) -> Result<bool, Fault> {
+    let decoded = decode(staging, token.key(), Fault::from_staging).await?;
+    Ok(decoded.is_some_and(|file| token.matches(file.bytes, file.checksum)))
 }
 
 /// Reads `key` whole through the decoder, tallying its raw bytes; `None` when

@@ -1,0 +1,16 @@
+diff --git a/crates/store-s3/src/chain.rs b/crates/store-s3/src/chain.rs
+index e57c26e..36d9c86 100644
+--- a/crates/store-s3/src/chain.rs
++++ b/crates/store-s3/src/chain.rs
+@@ -343,10 +343,7 @@ fn read_bounded(path: &Path) -> Result<Result<Zeroizing<String>, FileOutcome>, C
+         ))),
+         // Go skips a file it cannot open, but a read that fails after the open
+         // (a directory) fails its load.
+-        Err(err) => Err(CredentialError::ReadFailed {
+-            path: path.to_owned(),
+-            kind: err.kind(),
+-        }),
++        Err(err) => Ok(Err(FileOutcome::Unreadable(err.kind()))),
+     }
+ }
+ 

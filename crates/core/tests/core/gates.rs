@@ -54,6 +54,11 @@ impl Waves {
 impl ObjectStore for Waves {
     type Upload = <MemStore as ObjectStore>::Upload;
 
+    /// Forwards to the store it wraps.
+    async fn remove_scratch(&self) -> Result<u64, StoreError> {
+        self.inner.remove_scratch().await
+    }
+
     async fn list(
         &self,
         level: Level,
@@ -171,19 +176,14 @@ fn restore_through_the_retry_layer_reads_side_by_side() {
     let restored = block_on(restore(&store, RestoreTarget::Latest, MemSink::new())).unwrap();
     assert_eq!(restored.files(), 1);
     let chunks = size.div_ceil(RESTORE_CHUNK);
-    // One-byte reads of the keys named past the listing for each transaction the walk
-    // looks at (the retry layer reads them one at a time), then one read per chunk.
-    let past = usize::try_from(lsr_core::fresh_probe_reads(
-        Txid::new(1),
-        &lsr_core::Starts::default(),
-    ))
-    .unwrap();
+    // One-byte reads of the three keys named past the listing (the retry layer reads them
+    // one at a time), then one read per chunk.
     assert_eq!(
         reads.load(Ordering::SeqCst),
-        chunks + past,
+        chunks + 3,
         "one read per chunk"
     );
-    let bound = chunks.div_ceil(WIDTH) + past;
+    let bound = chunks.div_ceil(WIDTH) + 3;
     let seen = rounds.load(Ordering::SeqCst);
     assert!(
         seen <= bound,

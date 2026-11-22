@@ -288,7 +288,7 @@ fn exec_lines_go_would_misread_are_refused() {
             .args(["-exec", line])
             .output()
             .unwrap();
-        assert_eq!(out.status.code(), Some(2), "{line:?}");
+        assert_eq!(out.status.code(), Some(1), "{line:?}");
         let stderr = String::from_utf8(out.stderr).unwrap();
         assert!(stderr.contains("exec command"), "{line:?}: {stderr}");
     }
@@ -301,7 +301,7 @@ fn exec_lines_go_would_misread_are_refused() {
         .arg(&with_key)
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(64));
+    assert_eq!(out.status.code(), Some(1));
 
     let mut command = lsr();
     command
@@ -572,9 +572,85 @@ fn an_empty_host_binds_every_interface_and_the_log_says_which() {
         .arg(&bad)
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(out.status.code(), Some(1));
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("must specify port"), "{stderr}");
+}
+
+/// Every file named `name` under `dir`.
+fn find(dir: &Path, name: &str) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            found.extend(find(&path, name));
+        } else if path.file_name().is_some_and(|n| n == name) {
+            found.push(path);
+        }
+    }
+    found
+}
+
+/// Starts the daemon on `setup`, waits for `ready` in `/healthz`, and stops it.
+fn run_until(setup: &Setup, ready: impl Fn(&serde_json::Value) -> bool) -> (String, String) {
+    let mut command = lsr();
+    command.args(["replicate", "-config"]).arg(&setup.config);
+    let mut daemon = Daemon::spawn(command);
+    let addr = bound(&mut daemon);
+    let (_, body) = until(addr, "/healthz", |_, body| {
+        serde_json::from_str(body).is_ok_and(|health| ready(&health))
+    });
+    let (_, text) = fetch(addr, "/metrics");
+    daemon.signal("TERM");
+    let (status, out) = daemon.finish();
+    assert_eq!(status.code(), Some(0), "{out:#?}");
+    (body, text)
+}
+
+/// The engine journal's signal in both outputs: none on a first run or a restart that reads
+/// the journal the last run left, `missing` on the start after it was deleted.
+#[test]
+fn a_deleted_journal_is_reported_on_the_next_start() {
+    let setup = setup("addr: 127.0.0.1:0\n", "    monitor-interval: 20ms\n");
+    let app = database(&setup.db);
+    write(&app, 5);
+    drop(app);
+    let db = setup.db.display().to_string();
+    let replicated = |h: &serde_json::Value| h["dbs"][0]["replicated_txid"].is_string();
+    for _ in 0..2 {
+        let (body, text) = run_until(&setup, replicated);
+        let health: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            health["dbs"][0]["journal"],
+            serde_json::Value::Null,
+            "{body}"
+        );
+        let (types, samples) = parse_metrics(&text);
+        assert_eq!(
+            types.get("lsr_journal_signal").map(String::as_str),
+            Some("gauge")
+        );
+        assert!(
+            !samples.iter().any(|s| s.name == "lsr_journal_signal"),
+            "{text}"
+        );
+    }
+    let journals = find(setup.dir.path(), "lsr-journal");
+    assert_eq!(journals.len(), 1, "{journals:?}");
+    for journal in &journals {
+        std::fs::remove_file(journal).unwrap();
+    }
+    let (body, text) = run_until(&setup, |h| h["dbs"][0]["journal"].is_string());
+    let health: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        health["status"], "ok",
+        "a lost journal costs nothing: {body}"
+    );
+    assert_eq!(health["dbs"][0]["journal"], "missing", "{body}");
+    assert_eq!(health["dbs"][0]["journal_detail"], "Missing", "{body}");
+    let (_, samples) = parse_metrics(&text);
+    let labels = [("db", db.as_str()), ("signal", "missing")];
+    assert!((one(&samples, "lsr_journal_signal", &labels).value - 1.0).abs() < f64::EPSILON);
 }
 
 /// The WAL deleted under the daemon: a task degrades (200, in both outputs with its cause
@@ -635,6 +711,63 @@ fn health_is_200_while_degraded_and_503_once_stopped() {
     }
 }
 
+/// A connection past the bound is answered 503 while every place is held. The server takes
+/// places in the order it accepts connections, which is not always the order they were
+/// made, and a connection whose thread could not start (a loaded host) is closed and gives
+/// its place back. So a probe may be served (200): then every held connection the server
+/// closed is replaced, and the probe repeated, a bounded number of times.
+fn assert_refused_while_every_place_is_held(addr: SocketAddr) {
+    // Two more than the bound: the two connections before may still hold their places
+    // for a moment after their answers arrived.
+    let mut held: Vec<TcpStream> = (0..lsr_sidecar::MAX_CONNECTIONS + 2)
+        .map(|_| TcpStream::connect(addr).unwrap())
+        .collect();
+    let mut answers = Vec::new();
+    for _ in 0..1_000 {
+        match try_get(addr, "GET /healthz HTTP/1.1\r\nHost: test\r\n\r\n") {
+            Some((503, body)) => {
+                assert!(body.contains("too many connections"), "{body}");
+                drop(held);
+                return;
+            }
+            other => answers.push(other.map(|(status, _)| status)),
+        }
+        for stream in &mut held {
+            if closed_by_peer(stream) {
+                *stream = TcpStream::connect(addr).unwrap();
+            }
+        }
+        std::thread::yield_now();
+    }
+    panic!("never refused with every place held: {answers:?}");
+}
+
+/// Whether the peer has closed `stream`: a read that returns end of file or an error at once.
+fn closed_by_peer(stream: &TcpStream) -> bool {
+    stream.set_nonblocking(true).unwrap();
+    let mut byte = [0_u8; 1];
+    let closed = match (&*stream).read(&mut byte) {
+        Ok(0) => true,
+        Ok(_) => false,
+        Err(err) => err.kind() != std::io::ErrorKind::WouldBlock,
+    };
+    stream.set_nonblocking(false).unwrap();
+    closed
+}
+
+/// [`get`], or `None` when the server closed the connection unanswered (a reset): past
+/// both of its bounds it closes without an answer, and places come back only as the
+/// threads that held them notice their peer is gone.
+fn try_get(addr: SocketAddr, request: &str) -> Option<(u16, String)> {
+    let mut stream = TcpStream::connect(addr).ok()?;
+    stream.write_all(request.as_bytes()).ok()?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response).ok()?;
+    let (head, body) = response.split_once("\r\n\r\n")?;
+    let status = head.split(' ').nth(1)?.parse().ok()?;
+    Some((status, body.to_owned()))
+}
+
 /// A request head past the bound is answered 431 from a fixed buffer, and a connection
 /// past the bound is answered 503; the server keeps serving afterwards.
 #[test]
@@ -652,16 +785,132 @@ fn an_oversized_request_and_too_many_connections_are_refused() {
     assert_eq!(get(addr, &long).0, 431);
     assert_eq!(fetch(addr, "/healthz").0, 200);
 
-    // Two more than the bound: the two connections above may still hold their places
-    // for a moment after their answers arrived.
-    let held: Vec<TcpStream> = (0..lsr_sidecar::MAX_CONNECTIONS + 2)
-        .map(|_| TcpStream::connect(addr).unwrap())
-        .collect();
-    let (status, body) = fetch(addr, "/healthz");
-    assert_eq!(status, 503, "{body}");
-    assert!(body.contains("too many connections"), "{body}");
-    drop(held);
-    until(addr, "/healthz", |status, _| status == 200);
+    assert_refused_while_every_place_is_held(addr);
+    // The held places come back as their threads see the peers gone; until then a probe
+    // may be refused or closed unanswered.
+    let served = (0..100_000).any(|_| {
+        matches!(
+            try_get(addr, "GET /healthz HTTP/1.1\r\nHost: test\r\n\r\n"),
+            Some((200, _))
+        )
+    });
+    assert!(
+        served,
+        "never served again after the held connections closed"
+    );
     daemon.signal("TERM");
     assert_eq!(daemon.finish().0.code(), Some(0));
+}
+
+// fail-stop ----------------------------------------------------------------------------
+
+/// `stop-app` with no `-exec` and no `exec` key could not stop anything: `config check`
+/// refuses it, and so does the daemon, before any database is touched (decision D20).
+#[test]
+fn stop_app_without_exec_is_refused() {
+    let alone = setup("litestream-rs:\n  if-replication-stops: stop-app\n", "");
+    let out = lsr()
+        .args(["config", "check"])
+        .arg(&alone.config)
+        .output()
+        .unwrap();
+    let text =
+        String::from_utf8_lossy(&out.stderr).into_owned() + &String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(2), "{text}");
+    assert!(
+        text.contains(
+            "if-replication-stops: stop-app refused: stopping the application needs -exec (or the exec key); use hold-start or report"
+        ),
+        "{text}"
+    );
+    let with_exec = setup(
+        "litestream-rs:\n  if-replication-stops: stop-app\nexec: /bin/true\n",
+        "",
+    );
+    let out = lsr()
+        .args(["config", "check"])
+        .arg(&with_exec.config)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+}
+
+/// Replicates `setup`'s database at 4096-byte pages, then rewrites the database at 8192: the
+/// next boot finds the replica's page size is not the database's.
+fn change_the_page_size(setup: &Setup) {
+    let app = database(&setup.db);
+    write(&app, 5);
+    drop(app);
+    let mut command = lsr();
+    command.args(["replicate", "-config"]).arg(&setup.config);
+    let mut daemon = Daemon::spawn(command);
+    daemon.wait_for(&["msg=\"initialized db\""]);
+    daemon.signal("TERM");
+    let (status, out) = daemon.finish();
+    assert_eq!(status.code(), Some(0), "{out:#?}");
+    let app = rusqlite::Connection::open(&setup.db).unwrap();
+    app.execute_batch(
+        "PRAGMA journal_mode = DELETE; PRAGMA page_size = 8192; VACUUM; PRAGMA journal_mode = WAL;",
+    )
+    .unwrap();
+    drop(app);
+    // A WAL at the new size, kept when the connection closes, which boot reads.
+    let app = database(&setup.db);
+    write(&app, 1);
+}
+
+/// Under `hold-start` (the default), an unsafe stop at boot keeps the `-exec` child from
+/// starting: the daemon stays up answering 503, says why, and a signal ends it with the
+/// code of its own.
+#[test]
+fn an_unsafe_stop_at_boot_holds_the_child() {
+    let extra = "addr: 127.0.0.1:0\nshutdown-sync-timeout: 100ms\n\
+                 litestream-rs:\n  responses:\n    page-size-changed: stop\n";
+    let setup = setup(extra, "    monitor-interval: 20ms\n");
+    change_the_page_size(&setup);
+    let mut daemon = Daemon::spawn(with_child(&setup, "exit", 0));
+    let addr = bound(&mut daemon);
+    daemon.wait_for(&["msg=\"start refused\"", "why=page_size_changed"]);
+    let (status, body) = until(addr, "/healthz", |status, _| status == 503);
+    assert_eq!(status, 503, "{body}");
+    let health: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(health["dbs"][0]["held_by"], "page_size_changed");
+    assert_eq!(health["dbs"][0]["app"], "held");
+    daemon.signal("TERM");
+    let (status, out) = daemon.finish();
+    assert_eq!(status.code(), Some(4), "{out:#?}");
+    assert!(!out.iter().any(|l| l.starts_with("child:")), "{out:#?}");
+}
+
+/// Under `stop-app`, an unsafe stop while the child runs stops it: SIGTERM, then the drain,
+/// then the code of its own. Under `hold-start` the same stop only reports.
+#[test]
+fn an_unsafe_stop_while_running_stops_the_child_under_stop_app() {
+    for (mode, stops) in [("stop-app", true), ("hold-start", false)] {
+        let extra = format!(
+            "addr: 127.0.0.1:0\nshutdown-sync-timeout: 1s\nlitestream-rs:\n  \
+             if-replication-stops: {mode}\n  responses:\n    wal-unlinked: stop\n"
+        );
+        let setup = setup(&extra, "    monitor-interval: 20ms\n");
+        let app = database(&setup.db);
+        write(&app, 5);
+        drop(app);
+        let mut daemon = Daemon::spawn(with_child(&setup, "signal", 0));
+        let addr = bound(&mut daemon);
+        daemon.wait_for(&["child: ready"]);
+        std::fs::remove_file(format!("{}-wal", setup.db.display())).unwrap();
+        daemon.wait_for(&["msg=\"replication stopped\"", "WalUnlinked"]);
+        until(addr, "/healthz", |status, _| status == 503);
+        if stops {
+            daemon.wait_for(&["msg=\"app stopped\"", "why=wal_unlinked"]);
+            daemon.wait_for(&["child: got 15"]);
+            let (status, out) = daemon.finish();
+            assert_eq!(status.code(), Some(4), "{out:#?}");
+        } else {
+            daemon.signal("TERM");
+            let (status, out) = daemon.finish();
+            assert!(!out.iter().any(|l| l.contains("app stopped")), "{out:#?}");
+            assert_ne!(status.code(), Some(4), "{out:#?}");
+        }
+    }
 }

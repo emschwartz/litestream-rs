@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index 5991223..91eb5d0 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -2228,7 +2228,7 @@ impl BootGate {
+             return Ok(());
+         };
+         let listed = newest_replica_level_zero(remote).await?;
+-        let replica = tip.max(listed.map(|info| info.key.range().max()));
++        let replica = tip.max(listed.map(|info| info.key.range().max()).filter(|_| false));
+         match replica.map(|replica| replica.min(local)) {
+             Some(through) if !covers(through) => {
+                 Err(BootStep::Vouch(TakeoverRecord::through(through)))

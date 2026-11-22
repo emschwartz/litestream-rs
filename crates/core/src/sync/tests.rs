@@ -334,6 +334,27 @@ fn a_new_generation_step_scans_from_the_start_and_keeps_the_txid() {
     assert_eq!(fills(pages), [(2, 2)]);
 }
 
+/// A new generation with nothing committed yet is idle at its own start: the
+/// position takes the new generation's cursor, so the next step reads on from
+/// there instead of from the old generation.
+#[test]
+fn an_idle_new_generation_step_ends_at_the_new_generation() {
+    let mut rig = Rig::new();
+    commit(&rig.wal, &[1, 2], 2);
+    let first = position_of(rig.snapshot(1000));
+    rig.wal.force_restart();
+    let synced = rig
+        .step(Step::NewGeneration(first), &SyncConfig::default(), 2000)
+        .unwrap();
+    let Synced::Idle(reached) = synced else {
+        panic!("{synced:?}");
+    };
+    let cursor = reached.position().cursor();
+    assert_eq!(cursor.salts(), rig.wal.salts());
+    assert_ne!(cursor.salts(), first.cursor().salts());
+    assert_eq!(reached.position().txid(), first.txid());
+}
+
 // The page checksum table.
 fn operator_snapshot(after: &Position) -> Step {
     Step::Snapshot {
@@ -419,8 +440,10 @@ fn a_local_rewind_empties_the_table_and_raises_no_mismatch() {
     );
 }
 
+/// The TRUNCATE before the boundary snapshot may have backfilled a commit no step staged: its
+/// pages are the database's, not damage, and the table takes them from the snapshot.
 #[test]
-fn the_checkpoint_boundary_keeps_the_table() {
+fn the_checkpoint_boundary_takes_the_database_file_as_it_is() {
     let (mut rig, position) = recorded();
     rig.db.write_page(pg(3), &[0x33; 512]);
     let boundary = Step::Snapshot {
@@ -428,8 +451,11 @@ fn the_checkpoint_boundary_keeps_the_table() {
         prev_timestamp: Some(position.timestamp()),
         cause: SnapshotCause::CheckpointBoundary,
     };
-    let failed = rig.step_at(boundary).unwrap_err();
-    assert_eq!(failed.fault, Fault::DatabasePageMismatch { pgno: pg(3) });
+    rig.step_at(boundary).unwrap();
+    assert_eq!(
+        rig.pages.get(pg(3)),
+        Some(PageChecksum::of(pg(3), &[0x33; 512]))
+    );
 }
 
 #[test]
@@ -449,7 +475,9 @@ fn a_boot_seed_from_the_staged_files_is_the_table_the_steps_built() {
     let (mut rig, position) = recorded();
     commit(&rig.wal, &[1, 3], 3);
     let next = position_of(rig.step_at(Step::Incremental(position)).unwrap());
-    let seeded = block_on(crate::pages::seeded(&rig.store, None, next.commit())).unwrap();
+    let seeded = block_on(crate::pages::seeded(&rig.store, None, next.commit()))
+        .unwrap()
+        .table;
     assert_eq!(seeded, rig.pages);
 }
 
@@ -472,7 +500,9 @@ fn a_staged_file_that_does_not_verify_empties_the_seed_up_to_it() {
         up.write(&bytes).await.unwrap();
         up.commit().await.unwrap();
     });
-    let seeded = block_on(crate::pages::seeded(&rig.store, None, next.commit())).unwrap();
+    let seeded = block_on(crate::pages::seeded(&rig.store, None, next.commit()))
+        .unwrap()
+        .table;
     assert_eq!(seeded.len(), 1);
     assert_eq!(seeded.get(pg(1)), rig.pages.get(pg(1)));
 }

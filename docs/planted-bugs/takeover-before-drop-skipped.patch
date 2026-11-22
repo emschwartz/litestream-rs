@@ -1,0 +1,23 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index 5991223..7506cc2 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -888,7 +888,7 @@ impl Actor {
+     /// of them may be on the replica unconfirmed (an upload whose answer was
+     /// lost), so only a key the replica is known to end at caps it.
+     fn vouch_before_drop(&mut self, task: Task, cap: Option<Txid>, now: Timestamp) -> Option<Tick> {
+-        if self.kept.cfg.responses.other_writer == OtherWriter::ContinueAndInterleaveHistories {
++        if self.kept.cfg.responses.other_writer != OtherWriter::Stop || task == task {
+             return None;
+         }
+         let staged = self.staged()?;
+@@ -2223,6 +2223,9 @@ impl BootGate {
+         let Takeover::Vouch(record) = self.takeover else {
+             return Ok(());
+         };
++        if record.is_none() || record.is_some() {
++            return Ok(());
++        }
+         let covers = |txid: Txid| record.is_some_and(|record| record.covers(txid));
+         let Some(local) = self.local.filter(|local| !covers(*local)) else {
+             return Ok(());

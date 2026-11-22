@@ -7,8 +7,16 @@
 //!    commit made is [`Anomaly::NotInHistory`], always fatal.
 //! 2. **Never backwards on a branch.** Each `Latest` restore extends the previous one, unless a
 //!    rewind the log recorded after the previous node cut it off, and the new node descends from
-//!    that rewind's target ([`Anomaly::WentBackwards`]). A driver that took files from the
-//!    replica itself says so with [`Judge::excuse_regression`].
+//!    that rewind's target ([`Anomaly::WentBackwards`]). The previous restore is its content, not
+//!    the nodes that had it then: commits made since (an app redoing what a power loss took)
+//!    can leave the database in that state again on a new branch, and a restore that extends
+//!    such a node went forward from what the previous one showed. A driver that took files from the
+//!    replica itself says so with [`Judge::excuse_regression`]. Under
+//!    [`Signals::Required`] neither excuse is the driver's alone: a rewind explains a step only
+//!    when the engine itself reported a loss ([`Judge::signal`]) after it, or the step is
+//!    [`Anomaly::Unsignaled`]; the driver's excuse is a debt the engine pays by reporting a
+//!    loss later (it cannot have seen a replica changed under it before it looks again), and
+//!    [`Judge::unreported`] counts the excused steps no report followed.
 //!    The replica's restore points, in its own order, obey the same rule ([`Judge::sweep`]).
 //! 3. **As of an instant.** An `AsOf(t)` restore is a node committed before `t`
 //!    ([`Anomaly::AsOfTooNew`]) and, given a staleness bound, one that was the local head at some
@@ -42,6 +50,16 @@ pub enum AheadMode {
     Count,
     /// [`Anomaly::Ahead`].
     Fatal,
+}
+
+/// Whether an excused regression needs the engine's own report of a loss.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Signals {
+    /// The driver's record alone excuses a regression.
+    #[default]
+    Ignored,
+    /// A regression is excused only when [`Judge::signal`] came after what excuses it.
+    Required,
 }
 
 /// A restore the history does not explain.
@@ -103,6 +121,15 @@ pub enum Anomaly {
         /// The local head.
         head: u32,
     },
+    /// `Latest` went back over a rewind or an excuse the driver recorded, and the engine
+    /// reported no loss after it ([`Signals::Required`] only).
+    #[error("latest went back from node {from} to node {to}, and the engine reported no loss")]
+    Unsignaled {
+        /// A node the previous `Latest` restored.
+        from: u32,
+        /// A node this one restored.
+        to: u32,
+    },
     /// The replica holds commits the database lost ([`AheadMode::Fatal`] only).
     #[error("restoring {target:?} gave node {node}, which a rewind cut from the database")]
     Ahead {
@@ -141,8 +168,9 @@ enum Step {
     /// Onto a descendant (or the same node), or there was nothing before.
     Forward,
     /// Off a branch that a rewind recorded after the earlier node cut off, onto the rewind's
-    /// side.
-    Rewound,
+    /// side: the place in the log's rewinds of the earliest one that explains it, so a report
+    /// after any explaining rewind covers the step.
+    Rewound(usize),
     /// Off a branch with nothing to explain it.
     Back { from: u32, to: u32 },
 }
@@ -156,13 +184,16 @@ fn step(log: &Log, previous: &[NodeId], nodes: &[NodeId]) -> Step {
     if previous.is_empty() || pairs().any(|(p, z)| log.is_ancestor(p, z)) {
         return Step::Forward;
     }
-    let explained = pairs().any(|(p, z)| {
-        log.rewinds()
-            .iter()
-            .any(|r| p.get() < r.seq && !log.is_ancestor(p, r.to) && log.is_ancestor(r.to, z))
-    });
-    if explained {
-        return Step::Rewound;
+    let explained = pairs()
+        .flat_map(|(p, z)| {
+            log.rewinds().iter().enumerate().filter(move |(_, r)| {
+                p.get() < r.seq && !log.is_ancestor(p, r.to) && log.is_ancestor(r.to, z)
+            })
+        })
+        .map(|(index, _)| index)
+        .min();
+    if let Some(index) = explained {
+        return Step::Rewound(index);
     }
     let first = |list: &[NodeId]| list.first().map_or(0, |n| n.get());
     Step::Back {
@@ -175,8 +206,16 @@ fn step(log: &Log, previous: &[NodeId], nodes: &[NodeId]) -> Step {
 #[derive(Clone, Debug, Default)]
 pub struct Judge {
     mode: AheadMode,
-    previous: Vec<NodeId>,
+    signals: Signals,
+    // The previous `Latest` restore's content, looked up in the log anew at every judgment.
+    previous: Option<Digest>,
     excused: bool,
+    // The engine's loss reports, each by how many rewinds the log had recorded when it came.
+    reported: Vec<usize>,
+    // How many reports had come when the driver last excused a regression.
+    excused_after: usize,
+    // For each step the driver's excuse let through: how many reports had come by then.
+    owed: Vec<usize>,
     counts: Counts,
 }
 
@@ -190,6 +229,20 @@ impl Judge {
         }
     }
 
+    /// The same judge, with `signals` deciding whether an excuse needs the engine's report.
+    #[must_use]
+    pub const fn with_signals(mut self, signals: Signals) -> Self {
+        self.signals = signals;
+        self
+    }
+
+    /// The engine reported a loss of history now (a snapshot that says the database or the
+    /// replica went back, a stop on a regressed replica). `log` dates the report: it covers
+    /// every rewind recorded before it.
+    pub fn signal(&mut self, log: &Log) {
+        self.reported.push(log.rewinds().len());
+    }
+
     /// What it judged and counted so far.
     #[must_use]
     pub const fn counts(&self) -> Counts {
@@ -198,8 +251,33 @@ impl Judge {
 
     /// The driver took files from the replica itself (a bucket rolled back, an operator deleted
     /// the newest file, another writer put one): the next `Latest` may go back.
-    pub const fn excuse_regression(&mut self) {
+    pub fn excuse_regression(&mut self) {
         self.excused = true;
+        self.excused_after = self.reported.len();
+    }
+
+    /// Whether the rewind at `index` in the log's rewinds may explain a step: signals are not
+    /// required, or the engine reported a loss after the log recorded it.
+    fn reported_since(&self, index: usize) -> bool {
+        match self.signals {
+            Signals::Ignored => true,
+            Signals::Required => self.reported.iter().any(|seen| *seen > index),
+        }
+    }
+
+    /// Under [`Signals::Required`], the steps the driver's excuse let through that no report of
+    /// the engine's has followed since the excuse: a regression the engine never noticed.
+    #[must_use]
+    pub fn unreported(&self) -> u32 {
+        let count = self
+            .owed
+            .iter()
+            .filter(|after| self.reported.len() <= **after)
+            .count();
+        match self.signals {
+            Signals::Ignored => 0,
+            Signals::Required => u32::try_from(count).unwrap_or(u32::MAX),
+        }
     }
 
     fn found(log: &Log, target: Target, digest: Digest) -> Result<Vec<NodeId>, Anomaly> {
@@ -247,24 +325,37 @@ impl Judge {
         if on_branch.is_empty() {
             self.ahead(Target::Latest, chosen)?;
         }
-        self.onward(log, &nodes)?;
-        self.previous = nodes;
+        let previous = self
+            .previous
+            .map_or_else(Vec::new, |seen| log.find(&seen).to_vec());
+        self.onward(log, &previous, &nodes)?;
+        self.previous = Some(digest);
         self.excused = false;
         Ok(chosen)
     }
 
     /// Whether moving from the previous `Latest` to `nodes` stays on a branch, or is explained.
-    fn onward(&mut self, log: &Log, nodes: &[NodeId]) -> Result<(), Anomaly> {
-        match step(log, &self.previous, nodes) {
+    fn onward(&mut self, log: &Log, previous: &[NodeId], nodes: &[NodeId]) -> Result<(), Anomaly> {
+        let first = |list: &[NodeId]| list.first().map_or(0, |n| n.get());
+        let unsignaled = || Anomaly::Unsignaled {
+            from: first(previous),
+            to: first(nodes),
+        };
+        match step(log, previous, nodes) {
             Step::Forward => Ok(()),
-            Step::Rewound => {
+            Step::Rewound(index) if self.reported_since(index) => {
                 self.counts.rewound = self.counts.rewound.saturating_add(1);
                 Ok(())
             }
-            Step::Back { .. } if self.excused => {
+            // A rewind the engine has not reported yet, with the driver's excuse standing too
+            // (a rollback and a power loss between two looks): the excuse lets it through and
+            // is owed a report, as it would be alone.
+            Step::Rewound(_) | Step::Back { .. } if self.excused => {
                 self.counts.excused = self.counts.excused.saturating_add(1);
+                self.owed.push(self.excused_after);
                 Ok(())
             }
+            Step::Rewound(_) => Err(unsignaled()),
             Step::Back { from, to } => Err(Anomaly::WentBackwards { from, to }),
         }
     }
@@ -286,7 +377,7 @@ impl Judge {
             }
             match step(log, &previous, &nodes) {
                 Step::Forward => {}
-                Step::Rewound => self.counts.rewound = self.counts.rewound.saturating_add(1),
+                Step::Rewound(_) => self.counts.rewound = self.counts.rewound.saturating_add(1),
                 Step::Back { from, to } => return Err(Anomaly::WentBackwards { from, to }),
             }
             previous = nodes;

@@ -30,8 +30,9 @@ use std::time::{Duration, Instant};
 use lsr_config::ReplicaKind;
 use lsr_core::{
     AsOfInside, AsOfPlanner, ContiguousChain, Depth, Inventory, InventoryError, KeyTarget,
-    ObjectStore, PlanOutcome, Report, ResolveError, RestoreError, RestoreOptions, RestoreTarget,
-    Restored, Severity, VerifyError, listed_past, plan, resolve, restore_with, verify,
+    MAX_ATTEMPTS, ObjectStore, PlanOutcome, Report, ResolveError, RestoreError, RestoreOptions,
+    RestoreTarget, Restored, Severity, VerifyError, listed_past, plan, resolve, restore_with,
+    verify,
 };
 use lsr_local::{
     ClearError, CreateError, FileSink, IntegrityCheck, IntegrityFailure, PublishError,
@@ -41,7 +42,7 @@ use lsr_store_fs::FsStore;
 use lsr_store_s3::{ConfigError, CredentialError};
 use thiserror::Error;
 
-use crate::args::{Command, FilesArgs, Replica, RestoreArgs, UsageError, VerifyArgs};
+use crate::args::{Command, FilesArgs, Replica, RestoreArgs, TakeOverArgs, UsageError, VerifyArgs};
 use crate::render;
 use crate::replica::{self, Remote};
 
@@ -63,16 +64,22 @@ pub enum Exit {
     /// not start, or a database did not start or drain). Go's `main` exits 1 on every error
     /// (`main.go:97-103`), so the child's own code is not passed on; it is in the log.
     ExecFailed,
+    /// `replicate -exec`: fail-stop held the application (`if-replication-stops`, decision
+    /// D19): the child was stopped for safety, or never started. A code of its own, so a
+    /// supervisor can tell a stop for safety from a crash. The code and its line were approved by
+    /// the owner (decision D84).
+    AppStopped,
 }
 
 impl Exit {
     /// Every code, for the help text.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Success,
         Self::Degraded,
         Self::ExecFailed,
         Self::Refused,
         Self::Environment,
+        Self::AppStopped,
         Self::Usage,
     ];
 
@@ -84,6 +91,7 @@ impl Exit {
             Self::Degraded | Self::ExecFailed => 1,
             Self::Refused => 2,
             Self::Environment => 3,
+            Self::AppStopped => 4,
             Self::Usage => 64,
         }
     }
@@ -101,6 +109,9 @@ impl Exit {
                 "store, destination or I/O failure; for replicate without -exec, a database that did not start or drain"
             }
             Self::Usage => "usage error",
+            Self::AppStopped => {
+                "replicate -exec: replication stopped, so the application was stopped or never started (if-replication-stops)"
+            }
             Self::ExecFailed => {
                 "replicate -exec: the run failed, as Go exits 1 (the child exited non-zero, died by a signal outside a shutdown, was killed or did not start, or a database did not start or drain); the child's own code is in the log"
             }
@@ -229,6 +240,14 @@ pub enum Done {
         /// Whether to print JSON.
         json: bool,
     },
+    /// A takeover was recorded, through this transaction (`None`: the replica is empty and
+    /// nothing was recorded), in this meta directory.
+    TakenOver {
+        /// The replica's newest transaction.
+        through: Option<lsr_ltx::Txid>,
+        /// Where the record went.
+        meta: PathBuf,
+    },
     /// The daemon ran and stopped; it logged everything as it went.
     Daemon(lsr_sidecar::Finished),
     /// The daemon's own usage text.
@@ -287,6 +306,21 @@ pub enum CliError {
     /// The verify walk stopped.
     #[error("{0}")]
     Verify(#[from] VerifyError),
+    /// The takeover record could not be written: by `lsr take-over`, or after a restore that
+    /// was published (a replicator started on it then refuses until `lsr take-over` runs).
+    #[error("the takeover record cannot be written in {}: {kind:?}", .meta.display())]
+    Takeover {
+        /// The meta directory.
+        meta: PathBuf,
+        /// What the file system said.
+        kind: std::io::ErrorKind,
+    },
+    /// The database path names no file, so it has no meta directory.
+    #[error("{} names no file, so it has no meta directory for the takeover record (lsr take-over accepts --meta-dir)", .path.display())]
+    NoMetaDir {
+        /// The path given.
+        path: PathBuf,
+    },
     /// A stale SQLite journal file sits beside the output.
     #[error("{} exists beside the output and SQLite would replay it over the restored database; remove it or pass --clear-journal-files", .path.display())]
     JournalFile {
@@ -360,6 +394,7 @@ pub fn exit_for_done(done: &Done) -> Exit {
             Some(Severity::Degraded) => Exit::Degraded,
             Some(Severity::Unrestorable) => Exit::Refused,
         },
+        Done::Daemon(finished) if finished.app_held.is_some() => Exit::AppStopped,
         Done::Daemon(finished) => match (finished.clean(), finished.ran_exec()) {
             (true, _) => Exit::Success,
             (false, true) => Exit::ExecFailed,
@@ -367,6 +402,7 @@ pub fn exit_for_done(done: &Done) -> Exit {
         },
         Done::ConfigChecked(checked) => config_exit(checked),
         Done::Restore(_)
+        | Done::TakenOver { .. }
         | Done::Files { .. }
         | Done::DaemonHelp(_)
         | Done::Help
@@ -406,6 +442,7 @@ fn daemon_exit(error: &lsr_sidecar::SidecarError) -> Exit {
         | SidecarError::Map(_)
         | SidecarError::NotBuilt { .. }
         | SidecarError::Exec(_)
+        | SidecarError::StopAppWithoutExec
         | SidecarError::Addr(_) => Exit::Refused,
         SidecarError::Stdin(_) | SidecarError::Signals(_) => Exit::Environment,
     }
@@ -442,6 +479,8 @@ pub fn exit_for_error(error: &CliError) -> Exit {
         | CliError::Create(_)
         | CliError::Clear(_)
         | CliError::Publish(_)
+        | CliError::Takeover { .. }
+        | CliError::NoMetaDir { .. }
         | CliError::Output(_) => Exit::Environment,
     }
 }
@@ -455,6 +494,7 @@ pub async fn run(command: Command) -> Result<Done, CliError> {
         Command::Restore(args) => restore_command(args).await,
         Command::Verify(args) => verify_command(args).await,
         Command::Files(args) => files_command(args).await,
+        Command::TakeOver(args) => take_over_command(args).await,
         Command::Daemon(args) => match lsr_sidecar::run(&args)? {
             lsr_sidecar::Outcome::Help(text) => Ok(Done::DaemonHelp(text)),
             lsr_sidecar::Outcome::Ran(finished) => Ok(Done::Daemon(finished)),
@@ -578,6 +618,8 @@ fn no_ltx_folder(error: CliError, path: PathBuf) -> CliError {
         | CliError::Create(_)
         | CliError::Clear(_)
         | CliError::Output(_)
+        | CliError::Takeover { .. }
+        | CliError::NoMetaDir { .. }
         | CliError::Daemon(_)) => other,
     }
 }
@@ -628,9 +670,19 @@ async fn restore_on<S: ObjectStore>(
         Vec::new()
     };
     let attempt = async {
+        // A replicator started on the restored database builds on the replica it came from,
+        // through the takeover record: an output with no meta directory is refused before
+        // anything is written, never restored without one.
+        let meta = meta_dir_of(output)?;
         let sink = FileSink::create(output)?.with_integrity_check(integrity_check);
         let options = RestoreOptions { as_of_inside };
         let restored = restore_with(store, target, options, sink).await?;
+        lsr_replica::record_takeover(&meta, restored.reached()).map_err(|err| {
+            CliError::Takeover {
+                meta,
+                kind: err.kind(),
+            }
+        })?;
         Ok::<_, CliError>(restored)
     }
     .await;
@@ -666,8 +718,18 @@ async fn plan_on<S: ObjectStore>(store: &S, output: &Path, how: How) -> Result<F
     {
         return Err(CliError::JournalFile { path: path.clone() });
     }
-    let inventory = Inventory::load(store).await?;
-    let (outcome, created_at_read) = plan_target(store, &inventory, how.target).await?;
+    // As the restore does: a listing that shows a gap may have raced a writer's rename (a
+    // directory read can miss the new file and see a later one), so the plan is made again
+    // on a fresh listing, and a gap every listing shows is the answer.
+    let mut attempt = 1_u8;
+    let (inventory, outcome, created_at_read) = loop {
+        let inventory = Inventory::load(store).await?;
+        let (outcome, created_at_read) = plan_target(store, &inventory, how.target).await?;
+        if !matches!(outcome, PlanOutcome::Gap { .. }) || attempt >= MAX_ATTEMPTS {
+            break (inventory, outcome, created_at_read);
+        }
+        attempt = attempt.saturating_add(1);
+    };
     // The real restore reads past the listing before it trusts it for the newest state, or an
     // empty one for any target; a plan printed from a lagging listing would name an older chain
     // as the answer, or skip a replica that exists.
@@ -739,6 +801,38 @@ async fn verify_command(args: VerifyArgs) -> Result<Done, CliError> {
         report: Box::new(report),
         json: args.json,
     })
+}
+
+/// `lsr take-over`: a takeover record through the replica's newest transaction in the
+/// database's meta directory (`lsr_core::TakeoverRecord`).
+async fn take_over_command(args: TakeOverArgs) -> Result<Done, CliError> {
+    let meta = match args.meta_dir {
+        Some(meta) => meta,
+        None => meta_dir_of(&args.database)?,
+    };
+    let newest = match open(&args.replica)? {
+        Opened::Dir(store) => Inventory::load(&store).await?.newest(),
+        Opened::S3(store) => Inventory::load(&store).await?.newest(),
+    };
+    if let Some(through) = newest {
+        lsr_replica::record_takeover(&meta, through).map_err(|err| CliError::Takeover {
+            meta: meta.clone(),
+            kind: err.kind(),
+        })?;
+    }
+    Ok(Done::TakenOver {
+        through: newest,
+        meta,
+    })
+}
+
+/// A database's default meta directory, Go's `.<name>-litestream` beside it.
+fn meta_dir_of(database: &Path) -> Result<PathBuf, CliError> {
+    lsr_replica::Config::default()
+        .meta_dir_for(database)
+        .ok_or_else(|| CliError::NoMetaDir {
+            path: database.to_owned(),
+        })
 }
 
 async fn files_command(args: FilesArgs) -> Result<Done, CliError> {

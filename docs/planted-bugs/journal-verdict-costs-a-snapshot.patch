@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -1054,7 +1054,8 @@
+         };
+         // A boot that fails later reads the journal again.
+         self.adopt_journal(journal, newest_staged.as_ref(), &upload);
+-        let cause = boot_cause(dropped, refused, from.err());
++        let cause = boot_cause(dropped, refused, from.err())
++            .or(self.kept.journal.map(|_| SnapshotCause::FirstSync));
+         let staged = newest_staged.map(|newest_staged| newest_staged.txid());
+         let course = boot_course(from, cause, self.kept.asked(), staged);
+         let (pages, quiet) = match boot_seed(env.staging, &course, upload.confirmed()).await {

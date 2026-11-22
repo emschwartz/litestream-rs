@@ -38,20 +38,22 @@ use std::num::NonZeroU32;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use lsr_core::{
-    Actor, AppCheckpoints, Degraded, Did, Env, Event as EngineEvent, Level, ObjectStore, PageLimit,
-    PersistentCause, Phase as EnginePhase, Response, StopCause, Task, Tick, Unfinished, WalSource,
-    retry_wait,
+    Actor, AppCheckpoints, AppGate, Degraded, Did, Env, Event as EngineEvent, Gate, Level,
+    ObjectStore, PageLimit, PersistentCause, Phase as EnginePhase, Response, StopCause,
+    TakeoverRecord, Task, Tick, Unfinished, WalSource, retry_wait,
 };
 use lsr_ltx::{Timestamp, Txid};
 use lsr_sqlite::{DatabaseFile, Sqlite};
-use lsr_store_fs::FsStore;
+use lsr_store_fs::{FsJournalFile, FsStore};
 
 use crate::config::Config;
-use crate::events::{Event, EventSink};
+use crate::events::{Event, EventSink, TakeoverUnusable};
 use crate::exec::block_on;
-use crate::health::{Counters, Gone, Phase, Stopped};
+use crate::health::{Counters, FailStop, Gone, Phase, Stopped};
+use crate::meta::{MetaLock, write_takeover};
 use crate::readers::Guarded;
 use crate::replicator::Shared;
 use crate::runtime::{Runtime, later};
@@ -161,6 +163,8 @@ pub(crate) struct Worker {
     sqlite: Option<Sqlite>,
     database: PathBuf,
     staging: FsStore,
+    /// The engine journal beside staging (`<meta>/lsr-journal`, docs/journal.md).
+    journal: FsJournalFile,
     remote: Metered,
     actor: Actor,
     config: Config,
@@ -177,6 +181,14 @@ pub(crate) struct Worker {
     seen: Seen,
     /// The scheduled verify, when `Config::verify_interval` is set.
     scheduled: Option<Scheduled>,
+    /// The meta directory, where the takeover record is kept (`crate::meta`).
+    meta: PathBuf,
+    /// The meta directory's lock, held for the thread's life.
+    _meta_lock: Option<MetaLock>,
+    /// Whether fail-stop has let the application run yet (`lsr_core::AppGate`).
+    app_gate: AppGate,
+    /// The clock's last reading, to notice it stepping back.
+    last_reading: Option<Timestamp>,
 }
 
 /// Owns the worker for the thread's life, so that however the thread ends, the worker and
@@ -226,6 +238,7 @@ impl Worker {
             sqlite: Some(sqlite),
             database: database.to_owned(),
             staging: FsStore::new(meta),
+            journal: FsJournalFile::new(meta),
             remote,
             actor,
             next_poll: later(now, config.poll_interval.get()),
@@ -238,6 +251,40 @@ impl Worker {
             progress: Progress::default(),
             seen: Seen::default(),
             scheduled,
+            meta: meta.to_owned(),
+            _meta_lock: None,
+            last_reading: None,
+            app_gate: AppGate::default(),
+        }
+    }
+
+    /// The meta directory's lock to hold, and the takeover record an earlier run, a
+    /// take-over or a restore left there, which the engine judges at its boot. One that
+    /// cannot be used is reported and ignored, as if there were none.
+    pub(crate) fn with_meta(
+        mut self,
+        lock: MetaLock,
+        takeover: Result<Option<TakeoverRecord>, TakeoverUnusable>,
+    ) -> Self {
+        self._meta_lock = Some(lock);
+        match takeover {
+            Ok(Some(takeover)) => self.actor.remember_takeover(takeover),
+            Ok(None) => {}
+            Err(unusable) => self.emit(&Event::TakeoverRecordUnusable(unusable)),
+        }
+        self
+    }
+
+    /// Writes the takeover the engine asked for before it deletes staged files, and hands
+    /// it back, so its next tick may delete them. A write that fails hands nothing back: the
+    /// engine's next tick fails `LocalIo` and waits, and deletes nothing unrecorded.
+    fn keep_takeover(&mut self) {
+        let Some(record) = self.actor.takeover_wanted() else {
+            return;
+        };
+        match write_takeover(&self.meta, record) {
+            Ok(()) => self.actor.remember_takeover(record),
+            Err(err) => self.emit(&Event::TakeoverNotRecorded { kind: err.kind() }),
         }
     }
 
@@ -270,7 +317,7 @@ impl Worker {
             let now = self.runtime.clock.now();
             match self.turn(now) {
                 Turn::Again => {}
-                Turn::Wait(until) => self.runtime.park.park(self.verify_wake(until)),
+                Turn::Wait(until) => self.runtime.park.park_from(self.verify_wake(until), now),
                 Turn::Done(outcome) => return outcome,
             }
         }
@@ -303,7 +350,30 @@ impl Worker {
         })
     }
 
+    /// Moves this thread's own wall-clock waits (the rebuild's, the next poll, the next
+    /// scheduled verify) back by a step the clock took back, so each keeps what was left of it
+    /// instead of adding the step; the engine's timers follow the clock themselves
+    /// (`lsr_core`'s actor clock). A stop's deadline is the caller's instant and stays.
+    fn follow_clock(&mut self, now: Timestamp) {
+        if let Some(step) = self
+            .last_reading
+            .map(|last| last.saturating_duration_since(now))
+            .filter(|step| !step.is_zero())
+        {
+            let back = |at: Timestamp| at.checked_sub(step).unwrap_or(now);
+            if let Some(rebuilt) = self.rebuilt.as_mut() {
+                rebuilt.until = back(rebuilt.until);
+            }
+            self.next_poll = back(self.next_poll);
+            if let Some(scheduled) = self.scheduled.as_mut() {
+                scheduled.step_back(back);
+            }
+        }
+        self.last_reading = Some(now);
+    }
+
     fn turn(&mut self, now: Timestamp) -> Turn {
+        self.follow_clock(now);
         if let Some(cause) = self.stopped {
             return self.stopped(cause);
         }
@@ -372,6 +442,7 @@ impl Worker {
             staging: &self.staging,
             remote: &self.remote,
             clock: self.runtime.clock.as_ref(),
+            journal: Some(&mut self.journal),
         };
         Ok(block_on(self.actor.tick(env, now)))
     }
@@ -394,6 +465,7 @@ impl Worker {
             .as_ref()
             .and_then(Scheduled::kept_restore_point);
         self.actor.keep_restore_point_for_verify(verify);
+        self.keep_takeover();
         // The snapshot is written before the event goes out, so a sink that reads health on an
         // event sees the state after it.
         self.observe(now);
@@ -423,7 +495,8 @@ impl Worker {
             EngineEvent::Booted { .. }
             | EngineEvent::Synced { .. }
             | EngineEvent::Uploaded(_)
-            | EngineEvent::Resnapshot(_) => true,
+            | EngineEvent::Resnapshot(_)
+            | EngineEvent::TakeoverWanted(_) => true,
             EngineEvent::Checkpointed { .. }
             | EngineEvent::Maintained { .. }
             | EngineEvent::Idle
@@ -450,6 +523,9 @@ impl Worker {
     /// A stopped engine waits for the stop, which then reports its cause.
     fn stopped(&mut self, cause: StopCause) -> Turn {
         if !std::mem::replace(&mut self.seen.stopped_reported, true) {
+            if let Some(through) = self.actor.refused_through() {
+                self.emit(&Event::Refused { through });
+            }
             self.emit(&Event::Stopped(cause));
         }
         if self.stop.is_some() {
@@ -480,7 +556,8 @@ impl Worker {
             | EngineEvent::Maintained { .. }
             | EngineEvent::Idle
             | EngineEvent::Resnapshot(_)
-            | EngineEvent::Clamped(_) => {}
+            | EngineEvent::Clamped(_)
+            | EngineEvent::TakeoverWanted(_) => {}
         }
     }
 
@@ -601,6 +678,7 @@ impl Worker {
         let snapshot = SnapshotParts {
             now,
             phase: self.phase(),
+            fail_stop: self.fail_stop(),
             degraded: self.degraded(),
             wal_bytes,
             db_bytes,
@@ -611,6 +689,7 @@ impl Worker {
 
     fn publish(&self, parts: &SnapshotParts) {
         let resnapshot = self.actor.pending_snapshot();
+        let journal = self.actor.journal();
         let snapshots = self.actor.snapshots();
         let ran = self.app_ran_total();
         let app = self.app_total();
@@ -620,6 +699,7 @@ impl Worker {
             .map(Scheduled::health)
             .unwrap_or_default();
         let (seen, progress) = (&self.seen, &self.progress);
+        let unreplicated = self.actor.unreplicated_since();
         self.shared.update(|state| {
             let health = &mut state.health;
             health.reported_at = parts.now;
@@ -627,7 +707,13 @@ impl Worker {
             health.degraded = parts.degraded;
             health.synced = progress.synced;
             health.replicated = progress.replicated;
-            health.unreplicated_since = progress.unreplicated_since;
+            // The engine's clock survives a restart (it dates from the oldest pending staged
+            // file); this thread's own reading covers what no booted engine has judged yet.
+            health.unreplicated_since = match (progress.unreplicated_since, unreplicated) {
+                (Some(seen), Some(engine)) => Some(seen.min(engine)),
+                (seen, engine) => seen.or(engine),
+            };
+            health.held_by = parts.fail_stop;
             health.wal_bytes = parts.wal_bytes;
             health.db_bytes = parts.db_bytes;
             health.resnapshot = resnapshot;
@@ -638,8 +724,29 @@ impl Worker {
                 ..seen.counters
             };
             health.verification = verification;
+            health.journal = journal;
             state.left = parts.left;
         });
+    }
+
+    /// Fail-stop's trip and gate now (`lsr_core::failstop`), and the flag the commit hook reads.
+    /// A stop this thread made itself (a panic or a replaced database under a stop response)
+    /// trips as an engine stop does.
+    fn fail_stop(&mut self) -> FailStop {
+        let trip = match self.stopped {
+            Some(cause) => lsr_core::trip(Some(cause), None, None),
+            None => self.actor.trip(),
+        };
+        let judged = self.actor.boot_judged() || trip.is_some();
+        let gate = self
+            .app_gate
+            .judge(self.config.if_replication_stops, trip, judged);
+        let held = match gate {
+            Gate::Held(_) => true,
+            Gate::Pending | Gate::Allowed => false,
+        };
+        self.shared.writes_refused.store(held, Ordering::Release);
+        FailStop { trip, gate }
     }
 
     /// What is not on the replica now, as the engine measures it; `None` when it cannot: no
@@ -738,6 +845,7 @@ impl Worker {
 struct SnapshotParts {
     now: Timestamp,
     phase: Phase,
+    fail_stop: FailStop,
     degraded: [Option<Degraded>; 5],
     wal_bytes: u64,
     db_bytes: u64,

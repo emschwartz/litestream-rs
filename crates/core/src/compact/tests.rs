@@ -212,6 +212,7 @@ fn input_fault(err: CompactError) -> (FileKey, InputFault) {
         CompactError::Input { key, fault } => (key, fault),
         CompactError::InputVanished { .. }
         | CompactError::Source(_)
+        | CompactError::Local(_)
         | CompactError::Dest(_)
         | CompactError::Encode(_)
         | CompactError::SnapshotLevel { .. }
@@ -267,6 +268,11 @@ impl SpyUpload {
 
 impl ObjectStore for Spy {
     type Upload = SpyUpload;
+
+    /// Forwards to the store it wraps.
+    async fn remove_scratch(&self) -> Result<u64, StoreError> {
+        self.inner.remove_scratch().await
+    }
 
     fn list(
         &self,
@@ -1233,4 +1239,26 @@ fn a_small_output_is_written_to_the_upload_once() {
     let done = compact_infos(&source, &dest, &infos, 1).unwrap();
     assert!(done.pages() > 1, "{}", done.pages());
     assert_eq!(dest.script().writes, 1);
+}
+
+/// A store that acknowledges the output one byte short holds a truncated file: the compactor
+/// deletes it and reports the mismatch, so nothing listable is left that does not decode.
+#[test]
+fn an_output_acknowledged_short_is_deleted_and_reported() {
+    let spec = Spec::plain(512, 3, 5, 5, &[(2, 9), (3, 4)]);
+    let source = MemStore::new();
+    let infos = put_all(&source, 0, std::slice::from_ref(&spec));
+    let dest = crate::mem::short::SizeLiar(MemStore::new());
+    let err = error_of(compact_infos(&source, &dest, &infos, 1));
+    assert!(
+        matches!(
+            err,
+            CompactError::Dest(StoreError::Corrupt {
+                cause: crate::store::CorruptCause::CommitSizeMismatch { removed: true, .. },
+                ..
+            })
+        ),
+        "{err:?}"
+    );
+    assert!(nothing_published(&dest.0));
 }

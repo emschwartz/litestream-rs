@@ -120,6 +120,10 @@ impl<S: ObjectStore> ObjectStore for Counting<'_, S> {
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
         self.inner.delete(keys).await
     }
+
+    async fn remove_scratch(&self) -> Result<u64, StoreError> {
+        self.inner.remove_scratch().await
+    }
 }
 
 /// What the dry run did.
@@ -195,5 +199,26 @@ fn named_file(error: &RestoreError, last: FileKey) -> Option<FileKey> {
         | RestoreError::ListingBehind { .. }
         | RestoreError::Sink { .. }
         | RestoreError::Publish { .. } => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::conformance::block_on;
+    use crate::mem::MemStore;
+
+    /// The dry run's counting wrapper forwards the boot's scratch removal and its count.
+    #[test]
+    fn remove_scratch_is_forwarded() {
+        let mem = MemStore::new();
+        mem.plant_scratch(7);
+        let counting = Counting {
+            inner: &mem,
+            files: AtomicUsize::new(0),
+            bytes: AtomicU64::new(0),
+        };
+        assert_eq!(block_on(counting.remove_scratch()), Ok(7));
+        assert_eq!(mem.scratch(), 0);
     }
 }

@@ -57,8 +57,11 @@ pub enum FaultShape {
     /// or the directory sync failed after the rename. Counted over commits, and
     /// meaningful for `StoreOp::Upload` only.
     ErrorAfterPublish(StoreError),
-    /// The commit publishes the object and reports a size one byte too large.
-    /// Counted over commits, `StoreOp::Upload` only.
+    /// The commit publishes the object one byte short, its last byte lost,
+    /// and acknowledges it with the size it holds: a short write the store
+    /// took as whole. Without [`Faults::corrupting_through`] the object stays
+    /// whole and only the reported size is short. Counted over commits,
+    /// `StoreOp::Upload` only.
     SizeMismatch,
     /// The commit publishes the object and then reports that the store holds
     /// other bytes than were sent (an ETag that does not match). The object
@@ -140,6 +143,8 @@ struct FaultState {
     rng: SeededEntropy,
     damaged: Vec<FileKey>,
     rejected: Vec<FileKey>,
+    // Objects a size mismatch left one byte short, while they are.
+    short: Vec<FileKey>,
     // Objects a flipped byte reached on a read, once per such read.
     flipped: Vec<FileKey>,
     // Reads, listings and created-at times one batch may hold.
@@ -315,8 +320,10 @@ impl FaultHandle {
         *lock(&self.state).count(op)
     }
 
-    /// The objects a [`FaultShape::CorruptPublish`] changed, in order: where
-    /// the damage really landed, whatever the scenario meant to hit.
+    /// The objects a [`FaultShape::CorruptPublish`] changed, and those a
+    /// [`FaultShape::SizeMismatch`] left short that a delete then failed to
+    /// remove, in order: where the damage really landed, whatever the
+    /// scenario meant to hit.
     #[must_use]
     pub fn damaged(&self) -> Vec<FileKey> {
         lock(&self.state).damaged.clone()
@@ -471,6 +478,7 @@ impl<S> Faults<S> {
             schedule,
             rng: SeededEntropy::new(seed),
             damaged: Vec::new(),
+            short: Vec::new(),
             flipped: Vec::new(),
             rejected: Vec::new(),
             widths: [NonZeroUsize::MIN; 3],
@@ -629,8 +637,17 @@ impl<S: ObjectStore> ObjectStore for Faults<S> {
         })
     }
 
+    /// A failed delete of an object a size mismatch left short makes it
+    /// damage the store keeps: the engine tried to remove it and could not.
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
         if let Verdict::Fail(err) = self.verdict(Call::Delete) {
+            let mut state = lock(&self.state);
+            let kept: Vec<FileKey> = keys
+                .iter()
+                .filter(|key| state.short.contains(key))
+                .copied()
+                .collect();
+            state.damaged.extend(kept);
             return Err(err);
         }
         let mut before = Vec::new();
@@ -641,12 +658,19 @@ impl<S: ObjectStore> ObjectStore for Faults<S> {
         }
         self.inner.delete(keys).await?;
         let mut state = lock(&self.state);
+        state.short.retain(|key| !keys.contains(key));
         for (key, info) in before {
             if info.is_some() {
                 state.lag_write(key, info);
             }
         }
         Ok(())
+    }
+
+    /// Forwarded without a verdict or a yield: the simulator's stores leave no scratch, and a
+    /// draw here would move every frozen schedule.
+    async fn remove_scratch(&self) -> Result<u64, StoreError> {
+        self.inner.remove_scratch().await
     }
 
     fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {
@@ -758,11 +782,32 @@ async fn stale_listing(
 /// Changes one byte in the middle of the published object, keeping its size
 /// and its created-at time.
 async fn damage(raw: &MemStore, info: &FileInfo) -> Result<(), StoreError> {
+    rewrite(raw, info, |bytes| {
+        let middle = bytes.len() / 2;
+        if let Some(byte) = bytes.get_mut(middle) {
+            *byte ^= 0xff;
+        }
+    })
+    .await
+}
+
+/// Drops the published object's last byte, keeping its created-at time.
+async fn truncate(raw: &MemStore, info: &FileInfo) -> Result<(), StoreError> {
+    rewrite(raw, info, |bytes| {
+        bytes.pop();
+    })
+    .await
+}
+
+/// Puts the published object back through `edit`, keeping its created-at
+/// time.
+async fn rewrite(
+    raw: &MemStore,
+    info: &FileInfo,
+    edit: impl FnOnce(&mut Vec<u8>),
+) -> Result<(), StoreError> {
     let mut bytes = read_all(raw, &info.key).await?;
-    let middle = bytes.len() / 2;
-    if let Some(byte) = bytes.get_mut(middle) {
-        *byte ^= 0xff;
-    }
+    edit(&mut bytes);
     let at = info
         .created_at()
         .map_or(Timestamp::from_unix_millis(0), |created_at| created_at.at());
@@ -829,7 +874,14 @@ impl<U: Upload> FaultsUpload<U> {
             }
             Verdict::SizeMismatch => {
                 let mut info = self.inner.commit().await?;
-                info.size = info.size.saturating_add(1);
+                // Not damage the store hid: it said the size, so the engine
+                // is told and must delete the object. A restore that meets it
+                // stays judged, unless the engine's delete of it failed.
+                if let Some(raw) = &self.raw {
+                    truncate(raw, &info).await?;
+                    lock(&self.state).short.push(info.key);
+                }
+                info.size = info.size.saturating_sub(1);
                 Ok(info)
             }
             Verdict::Checksum => {
@@ -927,6 +979,11 @@ impl<S: ObjectStore> ObjectStore for YieldEachCall<S> {
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
         YieldNow(false).await;
         self.inner.delete(keys).await
+    }
+
+    /// Forwarded without a yield, so the await points a schedule counts are unchanged.
+    async fn remove_scratch(&self) -> Result<u64, StoreError> {
+        self.inner.remove_scratch().await
     }
 }
 
@@ -1192,6 +1249,10 @@ impl<S: ObjectStore> ObjectStore for Recorder<S> {
         });
         Ok(())
     }
+
+    async fn remove_scratch(&self) -> Result<u64, StoreError> {
+        self.inner.remove_scratch().await
+    }
 }
 
 /// An upload through [`Recorder`].
@@ -1304,7 +1365,14 @@ impl<S: ObjectStore> Upload for TapUpload<S> {
 struct StageState {
     volatile: BTreeSet<FileKey>,
     resolved: BTreeMap<FileKey, Timestamp>,
+    // Unlinks since the directory's last sync, with what each entry durably held then.
+    unlinked: BTreeMap<FileKey, Durable>,
+    // Whether a power loss may put an unsynced entry back: the block law's directory rule.
+    entries_revert: bool,
 }
+
+/// What a directory entry durably held: a file's bytes and created-at time, or no file.
+type Durable = Option<(Vec<u8>, Timestamp)>;
 
 /// What a power loss did to one volatile staged file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1316,6 +1384,9 @@ pub enum Lost {
         /// The bytes that survive, fewer than the file had.
         kept: u64,
     },
+    /// The file was unlinked and the directory never synced after: the unlink is undone and
+    /// the file is back as it durably was.
+    Restored,
 }
 
 /// The side of a [`Volatile`] the simulator keeps: which keys are volatile, and the
@@ -1334,9 +1405,25 @@ impl VolatileHandle {
         lock(&self.state).volatile.insert(key);
     }
 
-    /// A directory sync: every earlier rename is now durable.
+    /// A directory sync: every earlier rename and unlink is now durable.
     pub fn fsync_all(&self) {
-        lock(&self.state).volatile.clear();
+        let mut state = lock(&self.state);
+        state.volatile.clear();
+        state.unlinked.clear();
+    }
+
+    /// From now on a power loss undoes each unlink the directory has not synced since, or
+    /// keeps it, on a coin: the directory-entry rule of [`crate::crash_law::CrashLaw::Blocks`],
+    /// as the real-SQLite fault VFS applies it. Without this, unlinks stay done, as under
+    /// [`crate::crash_law::CrashLaw::AllOrNothing`].
+    pub fn revert_unsynced_entries(&self) {
+        lock(&self.state).entries_revert = true;
+    }
+
+    /// Unlinks since the directory's last sync.
+    #[must_use]
+    pub fn unsynced_unlinks(&self) -> Vec<FileKey> {
+        lock(&self.state).unlinked.keys().copied().collect()
     }
 
     /// The keys a power loss would hit now.
@@ -1387,9 +1474,50 @@ impl VolatileHandle {
                 lost.push((key, Lost::Dropped));
             }
         }
+        lost.extend(self.undo_unlinks(raw, entropy).await?);
         self.fsync_all();
         Ok(lost)
     }
+
+    /// Under the block law, each unsynced unlink is undone or kept on a coin; drawn after
+    /// every volatile key, so a run without unlinks draws as before.
+    async fn undo_unlinks<S: ObjectStore>(
+        &self,
+        raw: &S,
+        entropy: &dyn Entropy,
+    ) -> Result<Vec<(FileKey, Lost)>, StoreError> {
+        let (revert, unlinked) = {
+            let mut state = lock(&self.state);
+            (state.entries_revert, std::mem::take(&mut state.unlinked))
+        };
+        let mut lost = Vec::new();
+        for (key, durable) in unlinked.into_iter().filter(|_| revert) {
+            if entropy.below(2) == 0 {
+                continue;
+            }
+            let Some((bytes, created_at)) = durable else {
+                continue;
+            };
+            let mut up = raw
+                .begin_upload(&key, created_at, WriteMode::Replace)
+                .await?;
+            up.write(&bytes).await?;
+            up.commit().await?;
+            lost.push((key, Lost::Restored));
+        }
+        Ok(lost)
+    }
+}
+
+/// What `key`'s directory entry holds in `store` now, read before an unlink: its bytes and
+/// created-at time, or nothing when there is no such file.
+async fn entry_of<S: ObjectStore>(store: &S, key: &FileKey) -> Result<Durable, StoreError> {
+    let listing = store.list(key.level(), None, PageLimit::MAX).await?;
+    let Some(info) = listing.files.iter().find(|f| f.key == *key) else {
+        return Ok(None);
+    };
+    let created_at = store.created_at(info).await?.at();
+    Ok(Some((read_all(store, key).await?, created_at)))
 }
 
 async fn read_all<S: ObjectStore>(store: &S, key: &FileKey) -> Result<Vec<u8>, StoreError> {
@@ -1414,11 +1542,15 @@ async fn read_all<S: ObjectStore>(store: &S, key: &FileKey) -> Result<Vec<u8>, S
 /// failed": the key is visible and volatile. [`Faults`] reports such a commit
 /// through [`Faults::volatile_on_late_error`], because the wrapper that fails a
 /// commit sits above this one and this one saw it succeed. A later successful
-/// commit is a directory sync and makes every earlier rename durable.
+/// commit is a directory sync and makes every earlier rename durable. So is a
+/// successful delete, as the directory store syncs each directory it deleted
+/// from; [`Volatile::unsynced_deletes`] models a store that does not, whose
+/// unlinks a power loss may undo.
 #[derive(Clone, Debug)]
 pub struct Volatile<S> {
     inner: S,
     handle: VolatileHandle,
+    sync_after_delete: bool,
 }
 
 impl<S> Volatile<S> {
@@ -1428,7 +1560,16 @@ impl<S> Volatile<S> {
         Self {
             inner,
             handle: VolatileHandle::default(),
+            sync_after_delete: true,
         }
+    }
+
+    /// The same store, deleting without syncing the directory after: an unlink
+    /// stays undoable until a later commit syncs it.
+    #[must_use]
+    pub const fn unsynced_deletes(mut self) -> Self {
+        self.sync_after_delete = false;
+        self
     }
 
     /// The handle; clones share state.
@@ -1480,14 +1621,46 @@ impl<S: ObjectStore> ObjectStore for Volatile<S> {
         })
     }
 
+    /// An unlink, then a directory sync, as the directory store does; with
+    /// [`Volatile::unsynced_deletes`], no sync: until the next commit syncs the directory, a
+    /// power loss may undo the unlink ([`VolatileHandle::revert_unsynced_entries`]). A key
+    /// whose own rename was never synced durably held nothing.
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
+        let mut before = Vec::new();
+        for key in keys.iter().filter(|_| !self.sync_after_delete) {
+            let (seen, volatile) = {
+                let state = lock(&self.handle.state);
+                (
+                    state.unlinked.contains_key(key),
+                    state.volatile.contains(key),
+                )
+            };
+            if !seen {
+                let durable = if volatile {
+                    None
+                } else {
+                    entry_of(&self.inner, key).await?
+                };
+                before.push((*key, durable));
+            }
+        }
         self.inner.delete(keys).await?;
-        let mut state = lock(&self.handle.state);
-        for key in keys {
-            state.volatile.remove(key);
-            state.resolved.remove(key);
+        {
+            let mut state = lock(&self.handle.state);
+            state.unlinked.extend(before);
+            for key in keys {
+                state.volatile.remove(key);
+                state.resolved.remove(key);
+            }
+        }
+        if self.sync_after_delete {
+            self.handle.fsync_all();
         }
         Ok(())
+    }
+
+    async fn remove_scratch(&self) -> Result<u64, StoreError> {
+        self.inner.remove_scratch().await
     }
 }
 

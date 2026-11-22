@@ -203,6 +203,11 @@ struct ProbeUpload {
 impl ObjectStore for Probe {
     type Upload = ProbeUpload;
 
+    /// Forwards to the store it wraps.
+    async fn remove_scratch(&self) -> Result<u64, StoreError> {
+        self.inner.remove_scratch().await
+    }
+
     fn list(
         &self,
         level: Level,
@@ -602,7 +607,7 @@ fn a_listing_does_not_read_back_a_tail_already_confirmed() {
     assert_eq!(listed.state, UploadState::At(Some(txid(1))));
     assert_eq!(
         u64::from(remote.log().reads),
-        fresh_probe_reads(Some(txid(1)), &starts_of(&remote.inner))
+        fresh_probe_reads(Some(txid(1)))
     );
 }
 
@@ -614,6 +619,19 @@ fn a_commit_that_answers_with_a_wrong_size_is_ambiguous_not_confirmed() {
     let failed = failure(next(UploadState::At(None), &staging, &remote, 1));
     assert_eq!(failed.fault, Fault::UploadAmbiguous);
     assert_eq!(failed.state, UploadState::ListFirst { confirmed: None });
+}
+
+/// The object such a commit left does not hold what was sent: it is deleted before the
+/// fault is reported, so no restore meets it while the retry waits.
+#[test]
+fn a_commit_that_answers_with_a_wrong_size_leaves_no_object() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    stage(&staging, 1);
+    remote.log().lie_about_size = true;
+    let failed = failure(next(UploadState::At(None), &staging, &remote, 1));
+    assert_eq!(failed.fault, Fault::UploadAmbiguous);
+    let listed = block_on(remote.inner.list(Level::ZERO, None, PageLimit::MAX)).unwrap();
+    assert!(listed.files.is_empty(), "{:?}", listed.files);
 }
 
 #[test]
@@ -1376,64 +1394,6 @@ fn a_listing_that_hides_the_newest_uploads_is_corrected_by_reads() {
     assert_eq!(listed.state, UploadState::At(Some(txid(3))));
 }
 
-/// A level-1 file the listing hides, whose level-0 inputs are gone (retained away, or one
-/// removed by an operator after it was merged), is found by its level key: the listing's
-/// level-1 file ends at 2, so the next one starts at 3. Without that read, the replica looks
-/// as if it ends at 2 and the engine would upload its own 3 and 4 into keys the hidden file
-/// already holds with other pages.
-#[test]
-fn a_hidden_level_one_file_past_the_listing_is_found_by_its_level_key() {
-    let (staging, remote) = (MemStore::new(), Probe::default());
-    for n in 1..=2 {
-        put_bytes(&remote.inner, key(n), &encode(n));
-    }
-    let level_one = |min, max| {
-        FileKey::new(
-            Level::new(1).unwrap(),
-            TxidRange::new(txid(min), txid(max)).unwrap(),
-        )
-    };
-    put_bytes(&remote.inner, level_one(1, 2), &encode(2));
-    put_bytes(&remote.inner, level_one(3, 4), &encode(4));
-    remote.log().unlisted.push(level_one(3, 4));
-    let listed = next(UploadState::Unknown, &staging, &remote, 4).unwrap();
-    assert_eq!(
-        listed.did,
-        Did::Listed {
-            newest: Some(txid(4))
-        }
-    );
-}
-
-/// The residue (BOOT-25 in docs/BEHAVIOR.md): a listing that hides level 1's previous file as well hides where
-/// the next one starts, so a level-1 file with no level-0 input left stays unnamed and the
-/// replica looks as if it ends earlier. Pinned so a change that finds it says so.
-#[test]
-fn a_listing_that_hides_two_level_one_files_hides_the_newer_ones_start() {
-    let (staging, remote) = (MemStore::new(), Probe::default());
-    put_bytes(&remote.inner, key(1), &encode(1));
-    let level_one = |min, max| {
-        FileKey::new(
-            Level::new(1).unwrap(),
-            TxidRange::new(txid(min), txid(max)).unwrap(),
-        )
-    };
-    put_bytes(&remote.inner, level_one(1, 1), &encode(1));
-    put_bytes(&remote.inner, level_one(2, 3), &encode(3));
-    put_bytes(&remote.inner, level_one(4, 5), &encode(5));
-    remote
-        .log()
-        .unlisted
-        .extend([level_one(2, 3), level_one(4, 5)]);
-    let listed = next(UploadState::Unknown, &staging, &remote, 5).unwrap();
-    assert_eq!(
-        listed.did,
-        Did::Listed {
-            newest: Some(txid(3))
-        }
-    );
-}
-
 /// A relist after an ambiguous commit whose listing does not show the
 /// confirmed uploads yet is no regression: a read finds the confirmed key.
 #[test]
@@ -1464,7 +1424,7 @@ fn the_probe_past_a_listing_reads_past_short_gaps_and_stops_at_its_cap() {
     // keys for each transaction.
     assert_eq!(
         u64::from(remote.log().reads),
-        1 + fresh_probe_reads(Some(txid(1)), &starts_of(&remote.inner))
+        1 + fresh_probe_reads(Some(txid(1)))
     );
     let past_gap = 2 + u64::from(PROBE_GAP);
     put_bytes(&remote.inner, key(past_gap), &encode(past_gap));
@@ -1581,7 +1541,7 @@ fn a_listed_tail_equal_to_the_staged_file_is_confirmed_by_one_compare() {
     assert_eq!(listed.state, UploadState::At(Some(txid(1))));
     assert_eq!(
         u64::from(remote.log().reads),
-        1 + fresh_probe_reads(Some(txid(1)), &starts_of(&remote.inner))
+        1 + fresh_probe_reads(Some(txid(1)))
     );
 }
 
@@ -1633,7 +1593,51 @@ fn a_put_that_lands_after_the_relist_found_nothing_is_confirmed_not_written_twic
     );
 }
 
-/// The higher-level starts a listing of `store` implies, as the probe names them.
-fn starts_of(store: &MemStore) -> Starts {
-    Starts::of(&block_on(Inventory::load(store)).unwrap())
+mod endless;
+
+/// A rejected write deletes only an object it created. A create-only put
+/// creates its key or is refused, so its rejected object is its own; a put that
+/// replaces an object (here a torn one the replica held) deletes nothing when
+/// the store rejects it, and the retry writes the key again.
+#[test]
+fn a_rejected_write_over_an_object_that_was_there_deletes_nothing() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    stage(&staging, 1);
+    put_bytes(&remote.inner, key(1), b"torn");
+    // The create-only put is refused (its queued answer goes unused, since the
+    // refusal comes first); the replace over the torn object is taken and then
+    // rejected.
+    remote.log().commit_after.push_back(transient());
+    remote.log().commit_after.push_back(StoreError::Corrupt {
+        key: Some(key(1)),
+        cause: CorruptCause::ChecksumMismatch { part: None },
+    });
+    let failed = failure(next(UploadState::At(None), &staging, &remote, 1));
+    assert_eq!(failed.fault, Fault::UploadChecksumMismatch);
+    assert_eq!(remote.log().modes, [WriteMode::New, WriteMode::Replace]);
+    assert!(
+        remote.log().deletes.is_empty(),
+        "{:?}",
+        remote.log().deletes
+    );
+}
+
+/// A relist whose listing ends well below what was confirmed (the files in
+/// between were merged and deleted, and the listing hides the confirmed one)
+/// reads the confirmed key first, not the keys after the listing's end: a gap
+/// wider than [`PROBE_GAP`] there would end the reads before they reached it
+/// and report the replica gone backwards.
+#[test]
+fn a_relist_reads_the_confirmed_key_first_past_a_wide_gap() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    let confirmed = 3 + u64::from(PROBE_GAP);
+    put_bytes(&remote.inner, key(1), &encode(1));
+    // Nothing staged past the listing: the reads are bounded by the gap alone.
+    put_bytes(&remote.inner, key(confirmed), &encode(confirmed));
+    remote.log().unlisted.push(key(confirmed));
+    let state = UploadState::ListFirst {
+        confirmed: Some(txid(confirmed)),
+    };
+    let listed = next(state, &staging, &remote, confirmed).unwrap();
+    assert_eq!(listed.state, UploadState::At(Some(txid(confirmed))));
 }

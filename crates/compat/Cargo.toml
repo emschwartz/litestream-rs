@@ -11,12 +11,13 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+lsr-config.workspace = true
 lsr-core = { workspace = true, features = ["testing"] }
 lsr-local.workspace = true
 lsr-ltx.workspace = true
 lsr-sqlite.workspace = true
 lsr-store-fs.workspace = true
-lsr-store-s3.workspace = true
+lsr-store-s3 = { workspace = true, features = ["testing"] }
 lsr-wal.workspace = true
 rusqlite.workspace = true
 serde.workspace = true

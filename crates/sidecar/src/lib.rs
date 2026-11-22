@@ -33,6 +33,7 @@ mod check;
 mod daemon;
 mod error;
 mod exec;
+mod failstop;
 mod flags;
 mod health;
 mod http;
@@ -48,7 +49,7 @@ use std::sync::Arc;
 use std::sync::mpsc;
 
 use lsr_config::{Expand, GoConfig, Loaded, LogLevel, Plan, ProcessEnv, expand_path};
-use lsr_replica::Runtime;
+use lsr_replica::{IfReplicationStops, Runtime};
 
 pub use check::{Checked, check};
 pub use daemon::{End, Finished};
@@ -91,6 +92,7 @@ pub fn run(args: &[String]) -> Result<Outcome, SidecarError> {
     let _watch = signals::Watch::install(move |signal| on_signal.on_signal(signal))
         .map_err(SidecarError::Signals)?;
     let loaded = load(&flags)?;
+    flags::check(&flags)?;
     let config = &loaded.config;
     let level = flags.log_level.unwrap_or(config.logging().level());
     let log = Arc::new(Logger::new(
@@ -183,7 +185,13 @@ struct Refused {
 /// the two cannot disagree on what starts. Each check runs even when an earlier one
 /// refuses, so a check can list them all.
 fn prepare(exec_flag: Option<&str>, once: bool, config: &GoConfig) -> Result<Prepared, Refused> {
-    let command = exec_command(exec_flag, once, config);
+    let command = exec_command(exec_flag, once, config).and_then(|command| {
+        let stop_app = config.rust().if_replication_stops() == IfReplicationStops::StopApp;
+        if stop_app && command.is_none() {
+            return Err(SidecarError::StopAppWithoutExec);
+        }
+        Ok(command)
+    });
     let addr = config
         .addr()
         .map(http::target)

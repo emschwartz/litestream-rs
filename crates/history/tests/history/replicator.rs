@@ -8,53 +8,100 @@
 //! the local head (lag bound 0); at random moments `Latest`, two `AsOf` instants and every
 //! restore point are judged.
 
+use std::cell::Cell;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use lsr_core::ObjectStore;
 use lsr_history::{AheadMode, Counts, Judge, Log, chain};
-use lsr_replica::{Config, DynStore, Health, Phase, Replicator, Runtime, Stopped, Timestamp};
+use lsr_replica::{
+    Config, DynStore, FakeClockHandle, Health, Phase, Replicator, Runtime, Stopped, Timestamp,
+};
 use rusqlite::Connection;
 use tempfile::TempDir;
 
 use crate::real::{Rng, Scratch, judge};
 
-const START: Timestamp = Timestamp::from_unix_millis(1_700_000_000_000);
-const PATIENCE: Duration = Duration::from_secs(600);
-const POLL: Duration = Duration::from_secs(1);
+pub const START: Timestamp = Timestamp::from_unix_millis(1_700_000_000_000);
+pub const PATIENCE: Duration = Duration::from_secs(600);
+pub const POLL: Duration = Duration::from_secs(1);
 /// Health looks before a wait gives up: the replicator wakes a waiter on every change and at
 /// least every `CALLER_SLICE`, so this is about a minute of nothing changing.
 const LOOKS: u32 = 1_200;
 
-fn wait(replicator: &Replicator, done: impl Fn(&Health) -> bool) -> Health {
-    let looks = std::cell::Cell::new(0_u32);
+/// Polls a driver may move the clock while it waits: past the longest retry wait
+/// (`lsr_core::MAX_BACKOFF`, five minutes), so a backoff is always waited out.
+const MAX_POLLS: u32 = 400;
+
+/// Waits until `done` holds, moving the clock a poll at a time, each time only once the
+/// replica thread's park has read the clock as it reads now: the thread is waiting on that
+/// clock, not working. Whatever the engine has timed on the clock (a retry's backoff after a
+/// failed upload, the next poll) is waited out; moving the clock once and watching stalled
+/// whenever a backoff outlasted the one move.
+pub fn moved_until(
+    replicator: &Replicator,
+    clock: &FakeClockHandle,
+    done: impl Fn(&Health) -> bool,
+) -> Health {
+    for _ in 0..MAX_POLLS {
+        if let Some(health) = seen_or(replicator, clock, &done) {
+            return health;
+        }
+        clock.advance(POLL);
+    }
+    seen_or(replicator, clock, &done).unwrap_or_else(|| panic_with(&replicator.health()))
+}
+
+/// Waits until `done` holds, returning that health, or until the thread's park has read the
+/// clock as it reads now, returning `None`; fails the test after [`LOOKS`] looks.
+fn seen_or(
+    replicator: &Replicator,
+    clock: &FakeClockHandle,
+    done: &impl Fn(&Health) -> bool,
+) -> Option<Health> {
+    let now = clock.now();
+    let (looks, met) = (Cell::new(0_u32), Cell::new(false));
     let seen = replicator.wait_until(PATIENCE, |health| {
         looks.set(looks.get().saturating_add(1));
-        done(health) || looks.get() >= LOOKS
+        met.set(done(health));
+        met.get() || clock.seen_by_park() == Some(now) || looks.get() >= LOOKS
     });
     match seen {
-        Some(health) if done(&health) => health,
-        other => panic!("the replicator never got there: {other:?}"),
+        Some(health) if met.get() => Some(health),
+        Some(_) if clock.seen_by_park() == Some(now) => None,
+        Some(health) => panic_with(&health),
+        None => panic_with(&replicator.health()),
     }
 }
 
-struct Run<'a, S> {
+fn panic_with(health: &Health) -> ! {
+    panic!("the replicator never got there: {health:?}")
+}
+
+/// One driven run: the engine writes through `store`, restores read `restore` (the same store,
+/// or the one behind a faulty network, so restores are judged while the fault holds).
+pub struct Run<'a, S, R = S> {
     store: &'a Arc<S>,
+    restore: &'a R,
     db: &'a Path,
     app: Connection,
     runtime: Runtime,
-    clock: lsr_replica::FakeClockHandle,
+    pub clock: FakeClockHandle,
     replicator: Option<Replicator>,
     log: Log,
-    judge: Judge,
+    pub judge: Judge,
     tip: chain::Chain,
-    rng: Rng,
+    pub rng: Rng,
     scratch: Scratch,
 }
 
-impl<'a, S: ObjectStore<Upload: 'static> + Send + Sync + 'static> Run<'a, S> {
-    fn new(store: &'a Arc<S>, dir: &Path, db: &'a Path, seed: u64) -> Self {
+impl<'a, S, R> Run<'a, S, R>
+where
+    S: ObjectStore<Upload: 'static> + Send + Sync + 'static,
+    R: ObjectStore<Upload: 'static>,
+{
+    pub fn new(store: &'a Arc<S>, restore: &'a R, dir: &Path, db: &'a Path, seed: u64) -> Self {
         let app = Connection::open(db).unwrap();
         app.busy_timeout(Duration::from_secs(5)).unwrap();
         app.query_row("PRAGMA journal_mode = wal", [], |_row| Ok(()))
@@ -65,6 +112,7 @@ impl<'a, S: ObjectStore<Upload: 'static> + Send + Sync + 'static> Run<'a, S> {
         let tip = chain::Chain::new();
         Self {
             store,
+            restore,
             db,
             app,
             runtime,
@@ -78,7 +126,7 @@ impl<'a, S: ObjectStore<Upload: 'static> + Send + Sync + 'static> Run<'a, S> {
         }
     }
 
-    fn start(&mut self) {
+    pub fn start(&mut self) {
         let store: Arc<dyn DynStore> = Arc::<S>::clone(self.store);
         let replicator =
             Replicator::start_with(self.db, store, Config::default(), self.runtime.clone())
@@ -87,11 +135,11 @@ impl<'a, S: ObjectStore<Upload: 'static> + Send + Sync + 'static> Run<'a, S> {
         self.replicator = Some(replicator);
     }
 
-    fn replicator(&self) -> &Replicator {
+    pub fn replicator(&self) -> &Replicator {
         self.replicator.as_ref().unwrap()
     }
 
-    fn commit(&mut self) {
+    pub fn commit(&mut self) {
         let payload = self.rng.payload();
         let next = self.tip.next(&payload);
         let begun = self.clock.now().unix_millis();
@@ -101,21 +149,26 @@ impl<'a, S: ObjectStore<Upload: 'static> + Send + Sync + 'static> Run<'a, S> {
         self.tip = next;
     }
 
-    /// The clock moves one poll and the replicator is left to catch up: whatever it has synced
-    /// is on the replica. The drained stops are where lag is judged, so this asks no more.
-    fn poll(&mut self) {
+    /// The clock moves a poll, and then as far as the replicator needs to catch up: whatever it
+    /// has synced is on the replica. The drained stops are where lag is judged, so this asks no
+    /// more. Caught up counts only once the thread has parked on the clock as it reads now:
+    /// before that, the health is from before the move and says caught up about commits the
+    /// engine has not seen yet.
+    pub fn poll(&mut self) {
         self.clock.advance(POLL);
-        wait(self.replicator(), |h| {
+        let clock = &self.clock;
+        moved_until(self.replicator(), clock, |h| {
             h.synced.map(|(txid, _)| txid) == h.replicated.map(|(txid, _)| txid)
                 && h.unreplicated_since.is_none()
+                && clock.seen_by_park() == Some(clock.now())
         });
     }
 
     /// Stops with a drain; everything committed reached the replica, so `Latest` is the head.
-    fn stop(&mut self) {
+    pub fn stop(&mut self) {
         let replicator = self.replicator.take().unwrap();
         let stop = replicator.stop(PATIENCE);
-        wait(&replicator, |h| {
+        moved_until(&replicator, &self.clock, |h| {
             matches!(h.phase, Phase::Stopped(_) | Phase::Gone(_))
         });
         let stopped = stop.wait();
@@ -123,12 +176,11 @@ impl<'a, S: ObjectStore<Upload: 'static> + Send + Sync + 'static> Run<'a, S> {
         self.judged(true, Some(0));
     }
 
-    fn judged(&mut self, sweep: bool, lag: Option<i64>) {
+    pub fn judged(&mut self, sweep: bool, lag: Option<i64>) {
         let now = self.clock.now();
         let instants = self.rng.instants(2, START.unix_millis(), now);
-        let store: &S = self.store;
         judge(
-            store,
+            self.restore,
             &self.scratch,
             &self.log,
             &mut self.judge,
@@ -163,7 +215,7 @@ fn run<S: ObjectStore<Upload: 'static> + Send + Sync + 'static>(
 ) -> Counts {
     let dir = TempDir::new().unwrap();
     let db = dir.path().join("app.db");
-    let mut run = Run::new(store, dir.path(), &db, seed);
+    let mut run = Run::new(store, store.as_ref(), dir.path(), &db, seed);
     run.start();
     run.steps(steps);
     run.commit();

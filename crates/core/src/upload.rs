@@ -40,14 +40,11 @@
 //! the local position is another writer's only when a read finds it, since a
 //! listing that lags a delete shows a file that is gone. The reads find the
 //! tail because nothing this engine runs deletes the replica's newest level-0 file
-//! (retention keeps each level's last file, see `maintain::retain`). A level 1
-//! to 8 file whose level-0 inputs were all deleted by someone else (an
-//! operator removing another writer's newest file after maintenance merged
-//! it) is found by its level key from a start the listing implies
-//! (`probe::Starts`). What they cannot find is such a file when the listing
-//! also hides that level's previous file: its start is then not knowable
-//! without a listing, and a lagging listing that hides it is taken as the
-//! replica's end (BOOT-25 in `docs/BEHAVIOR.md`).
+//! (retention keeps each level's last file, see `maintain::retain`). What
+//! they cannot find is a level 1 to 8 file whose level-0 inputs were all
+//! deleted by someone else (an operator removing another writer's newest
+//! file after maintenance merged it): its start is not knowable without a
+//! listing, so a lagging listing that hides it is taken as the replica's end.
 //!
 //! Each staged file is streamed through the LTX decoder while it is copied. The
 //! bytes are written to an upload that no listing can see, and the upload is
@@ -91,18 +88,29 @@ use std::num::NonZeroU32;
 
 use lsr_ltx::{Decoder, Header, Txid, TxidRange};
 
+use crate::checked::Checked;
 use crate::fault::{BugSite, Fault};
 use crate::inventory::{Inventory, InventoryError};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::ltx_read::verifies;
-use crate::probe::{self, Starts};
+use crate::probe;
 use crate::store::{ListAt, ObjectStore, PageLimit, ReadLen, StoreError, Upload, WriteMode};
 use crate::witness::{ByteTally, Witnessed, Witnesses};
 
 /// How much of a staged file is read at once.
 const CHUNK: ReadLen = ReadLen::or_chunk(256 * 1024);
 
-pub use crate::probe::{PROBE_CAP, PROBE_GAP};
+/// The most transactions past a listing's newest that one probe looks for
+/// ([`probe_past`]). A listing that hides more uploads than this is far
+/// outside what an S3-compatible store does; past it, the bucket's refusal of
+/// a taken key ([`taken`]) still stops a second upload under the same key.
+pub const PROBE_CAP: u32 = 64;
+
+/// The most missing transactions in a row a probe reads past before it
+/// stops. Keys past a replica's newest are never taken, but one below it can
+/// be free: another writer's file an operator removed leaves a gap under the
+/// files uploaded after it.
+pub const PROBE_GAP: u32 = 3;
 
 /// What this engine knows about the replica's newest transaction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -263,6 +271,7 @@ pub(crate) fn inventory_fault(err: &InventoryError) -> Fault {
     match err {
         InventoryError::Store(err) => Fault::from_remote(err),
         InventoryError::ConflictingDuplicate { .. } | InventoryError::ListingStalled(_) => {
+            mark!(Boot17);
             Fault::RemoteCorrupt
         }
     }
@@ -287,9 +296,11 @@ async fn list_step<L: ObjectStore, S: ObjectStore>(
     };
     let newest = seen.newest();
     if newest > newest_staged {
+        mark!(Up10);
         return Err(fail(state, Fault::RemoteAheadOfLocal));
     }
     if newest < confirmed {
+        mark!(Up11);
         return Err(fail(state, Fault::RemoteRegressed));
     }
     let known = match newest {
@@ -365,10 +376,12 @@ async fn look_past<L: ObjectStore, S: ObjectStore>(
             Fault::RemoteObjectMissing
         });
     }
-    let staged = staged_from(staging, inventory.newest()).await?;
+    // The probe looks at no more than PROBE_CAP transactions, so no more staged files than
+    // that bound it.
+    let cap = usize::try_from(PROBE_CAP).unwrap_or(usize::MAX);
+    let staged = staged_from(staging, inventory.newest(), cap).await?;
     let through = staged.last().map(|info| info.key.range().max());
-    let starts = Starts::of(inventory);
-    probe_past(remote, inventory.newest(), confirmed, through, &starts).await
+    probe_past(remote, inventory.newest(), confirmed, through).await
 }
 
 /// Whether a read finds any of the listed files that reach past `known`,
@@ -406,14 +419,14 @@ pub(crate) async fn past_known<S: ObjectStore>(
 /// is later, so that a relist proves what was confirmed is still there
 /// before a regression is reported) is looked for under the keys a reader
 /// can name without a listing (`crate::probe`): its level-0 file, a level-0
-/// file from the first transaction, a level 1 to 8 file from each of
-/// `starts`, and the snapshot that ends at it. The reads go on through
+/// file from the first transaction, and the snapshot that ends at it. A
+/// higher-level file has a start no read can guess. The reads go on through
 /// `through` (the newest staged transaction: a gap below it does not end
 /// them, since this engine may have uploaded anything it staged), then stop
 /// once [`PROBE_GAP`] transactions in a row past the last one found are
 /// missing, and never look at more than [`PROBE_CAP`] transactions. A fresh
 /// listing with nothing staged past it costs [`fresh_probe_reads`] reads, of
-/// keys that are not there (three per transaction, and one more for each start).
+/// keys that are not there (three per transaction).
 ///
 /// # Errors
 /// The replica's fault when a read fails other than by a missing key.
@@ -422,29 +435,48 @@ pub(crate) async fn probe_past<S: ObjectStore>(
     listed: Option<Txid>,
     confirmed: Option<Txid>,
     through: Option<Txid>,
-    starts: &Starts,
 ) -> Result<Vec<FileKey>, Fault> {
     let first = match (listed, confirmed) {
         (listed, Some(confirmed)) if listed < Some(confirmed) => Some(confirmed),
         (listed, _) => listed.map_or(Some(Txid::MIN), Txid::next),
     };
-    probe::walk(remote, first, through, starts, false)
-        .await
-        .map_err(|err| Fault::from_remote(&err))
+    let mut found = Vec::new();
+    let (mut at, mut missed) = (first, 0_u32);
+    for _ in 0..PROBE_CAP {
+        let Some(txid) = at.filter(|txid| missed <= PROBE_GAP || Some(*txid) <= through) else {
+            break;
+        };
+        match holder(remote, txid).await? {
+            Some(key) => {
+                found.push(key);
+                missed = 0;
+            }
+            None => missed = missed.saturating_add(1),
+        }
+        at = txid.next();
+    }
+    Ok(found)
 }
 
 /// The reads a probe past a listing that ends at `listed` makes when it finds nothing: the
 /// keys named for each of the [`PROBE_GAP`] + 1 transactions after it (`crate::probe`).
 #[must_use]
-pub fn fresh_probe_reads(listed: Option<Txid>, starts: &Starts) -> u64 {
+pub fn fresh_probe_reads(listed: Option<Txid>) -> u64 {
     let mut reads = 0_u64;
     let mut at = listed.map_or(Some(Txid::MIN), Txid::next);
     for _ in 0..=PROBE_GAP {
         let Some(txid) = at else { break };
-        reads = reads.saturating_add(probe::reads_per_transaction(txid, starts));
+        reads = reads.saturating_add(probe::reads_per_transaction(txid));
         at = txid.next();
     }
     reads
+}
+
+/// The first key named for `txid` that a read finds (`crate::probe`).
+async fn holder<S: ObjectStore>(remote: &S, txid: Txid) -> Result<Option<FileKey>, Fault> {
+    probe::holder(remote, txid)
+        .await
+        .map_err(|err| Fault::from_remote(&err))
 }
 
 /// Whether the replica holds an object under `key`, by a read: a listing may
@@ -513,6 +545,7 @@ async fn judge_tail<L: ObjectStore, S: ObjectStore>(
             .map(|()| TailVerdict::Sound);
     }
     if remote_torn(remote, &key).await? {
+        mark!(Boot16);
         return Ok(TailVerdict::Replace);
     }
     // Both copies verify on their own reads, so the first compare read
@@ -559,6 +592,7 @@ async fn remote_decodes<S: ObjectStore>(remote: &S, key: &FileKey) -> Result<(),
     if remote_verifies(remote, key).await? {
         Ok(())
     } else {
+        mark!(Boot14);
         Err(Fault::RemoteCorrupt)
     }
 }
@@ -592,48 +626,101 @@ async fn staged_verifies<L: ObjectStore>(staging: &L, key: &FileKey) -> Result<b
     }
 }
 
-/// The staged level-0 files whose last transaction is at least `from`
-/// (every one when `None`), oldest first.
-pub(crate) async fn staged_from<L: ObjectStore>(
-    staging: &L,
+/// The staged level-0 files whose last transaction is at least `from` (every one when
+/// `None`), oldest first and a listing page at a time. A staging directory can hold any
+/// number of files (Go's has no cap, and a long outage grows it), so no pass holds more of
+/// it than one page.
+pub(crate) struct StagedPages {
+    at: Option<ListAt>,
     from: Option<Txid>,
-) -> Result<Vec<FileInfo>, Fault> {
-    let mut files = Vec::new();
-    let mut at = ListAt::first(Level::ZERO);
-    loop {
+}
+
+impl StagedPages {
+    /// From the first page.
+    pub(crate) const fn from(from: Option<Txid>) -> Self {
+        Self {
+            at: Some(ListAt::first(Level::ZERO)),
+            from,
+        }
+    }
+
+    /// The next page's files at or after `from` (possibly none), or `None` past the last page.
+    ///
+    /// # Errors
+    /// The staging store's fault when it cannot list, or lists with a cursor that stalls.
+    pub(crate) async fn next<L: ObjectStore>(
+        &mut self,
+        staging: &L,
+    ) -> Result<Option<Vec<FileInfo>>, Fault> {
+        let Some(at) = self.at else {
+            return Ok(None);
+        };
         let page = staging
             .list(at.level, at.after, PageLimit::MAX)
             .await
             .map_err(|err| Fault::from_staging(&err))?;
-        files.extend(
-            page.files
-                .iter()
-                .filter(|info| from.is_none_or(|from| info.key.range().max() >= from)),
-        );
-        match at
+        self.at = at
             .following(page.next)
-            .map_err(Fault::from_staging_listing)?
-        {
-            Some(next) => at = next,
-            None => return Ok(files),
-        }
+            .map_err(Fault::from_staging_listing)?;
+        let from = self.from;
+        Ok(Some(
+            page.files
+                .into_iter()
+                .filter(|info| from.is_none_or(|from| info.key.range().max() >= from))
+                .collect(),
+        ))
     }
+}
+
+/// The first `most` staged level-0 files whose last transaction is at least `from`, oldest
+/// first; the listing is read no further than they need.
+///
+/// # Errors
+/// As [`StagedPages::next`].
+pub(crate) async fn staged_from<L: ObjectStore>(
+    staging: &L,
+    from: Option<Txid>,
+    most: usize,
+) -> Result<Vec<FileInfo>, Fault> {
+    let mut files = Vec::new();
+    let mut pages = StagedPages::from(from);
+    while files.len() < most
+        && let Some(page) = pages.next(staging).await?
+    {
+        let room = most.saturating_sub(files.len());
+        files.extend(page.into_iter().take(room));
+    }
+    Ok(files)
 }
 
 /// Deletes every staged level-0 file whose last transaction is at least
 /// `from`, newest first and one at a time, so a crash part way leaves the
-/// oldest of them in place and the next boot finds it again.
+/// oldest of them in place and the next boot finds it again. It holds one
+/// listing page at a time: each round lists to the last page and deletes it
+/// from its end, so a directory of n files costs about n squared over the
+/// page size in listing calls, and never n keys in memory.
 ///
 /// # Errors
 /// The staging store's fault when it cannot list or delete.
 pub(crate) async fn drop_staged_from<L: ObjectStore>(staging: &L, from: Txid) -> Result<(), Fault> {
-    for info in staged_from(staging, Some(from)).await?.iter().rev() {
-        staging
-            .delete(&[info.key])
-            .await
-            .map_err(|err| Fault::from_staging(&err))?;
+    loop {
+        let mut last = Vec::new();
+        let mut pages = StagedPages::from(Some(from));
+        while let Some(page) = pages.next(staging).await? {
+            if !page.is_empty() {
+                last = page;
+            }
+        }
+        if last.is_empty() {
+            return Ok(());
+        }
+        for info in last.iter().rev() {
+            staging
+                .delete(&[info.key])
+                .await
+                .map_err(|err| Fault::from_staging(&err))?;
+        }
     }
-    Ok(())
 }
 
 /// What a sweep of the staged files found.
@@ -644,17 +731,18 @@ pub(crate) enum Swept {
     /// This file failed verification on its first failed read: nothing was
     /// deleted, since one read says nothing about the stored bytes.
     Suspect(FileKey),
-    /// The suspect failed again: it and every staged file after it were
-    /// deleted, from this transaction on.
-    Dropped(Txid),
+    /// The suspect failed again: it and every staged file after it must go,
+    /// from this transaction on ([`drop_staged_from`]). The caller deletes
+    /// them, once what they vouched for is recorded.
+    Condemned(Txid),
 }
 
 /// Verifies every staged level-0 file the replica may still need: from
 /// `confirmed`, the replica's newest transaction, on (everything when the
-/// replica is empty). The first that does not verify is deleted, with every
-/// one after it ([`drop_staged_from`]), only when it is `suspect`, the file an
-/// earlier tick's read already failed on; otherwise it is reported as the new
-/// suspect and nothing is deleted.
+/// replica is empty). The first that does not verify is condemned, with every
+/// one after it, only when it is `suspect`, the file an earlier tick's read
+/// already failed on; otherwise it is reported as the new suspect. The sweep
+/// deletes nothing itself.
 ///
 /// # Errors
 /// The staging store's fault when it cannot list, read or delete.
@@ -663,14 +751,17 @@ pub(crate) async fn sweep_staged<L: ObjectStore>(
     confirmed: Option<Txid>,
     suspect: Option<FileKey>,
 ) -> Result<Swept, Fault> {
-    for info in staged_from(staging, confirmed).await? {
-        if !staged_verifies(staging, &info.key).await? {
-            if suspect != Some(info.key) {
-                return Ok(Swept::Suspect(info.key));
+    let mut pages = StagedPages::from(confirmed);
+    while let Some(page) = pages.next(staging).await? {
+        for info in page {
+            if !staged_verifies(staging, &info.key).await? {
+                if suspect != Some(info.key) {
+                    mark!(Boot5);
+                    return Ok(Swept::Suspect(info.key));
+                }
+                mark!(Boot5);
+                return Ok(Swept::Condemned(info.key.range().min()));
             }
-            let from = info.key.range().min();
-            drop_staged_from(staging, from).await?;
-            return Ok(Swept::Dropped(from));
         }
     }
     Ok(Swept::Clean)
@@ -700,24 +791,34 @@ async fn put_step<L: ObjectStore, S: ObjectStore>(
     let key = token.key();
     match put_staged(staging, remote, token, WriteMode::New).await {
         Err(PutError::Taken) => taken(state, staging, remote, token, newest_staged).await,
-        outcome => settle_put(state, remote, key, outcome).await,
+        outcome => settle_put(state, remote, key, outcome, WriteMode::New).await,
     }
 }
 
-/// The state and step a put's outcome gives (a refusal is [`taken`]'s).
+/// The state and step a put's outcome gives (a refusal is [`taken`]'s);
+/// `mode` is the mode the put was written with.
 async fn settle_put<S: ObjectStore>(
     state: UploadState,
     remote: &S,
     key: FileKey,
     outcome: Result<FileInfo, PutError>,
+    mode: WriteMode,
 ) -> Result<Uploaded, UploadFailed> {
     match outcome {
         Ok(info) => Ok(put_done(key, info)),
         Err(PutError::Before(fault)) => Err(fail(state, fault)),
         Err(PutError::Rejected(fault)) => {
-            // Best effort: the retry replaces the key either way, and a boot
-            // listing reads it back, so a failed delete costs only visibility.
-            drop(remote.delete(&[key]).await);
+            mark!(Up8);
+            // A rejected create-only write created the object it rejects (the
+            // bucket refuses a taken key before it takes any bytes), so the
+            // object is this attempt's and it goes. Best effort: the retry
+            // replaces the key either way, and a boot listing reads it back,
+            // so a failed delete costs only visibility. A write that may
+            // have replaced an object deletes nothing: a delete after a
+            // failed write never takes a key that held something before it.
+            if mode == WriteMode::New {
+                drop(remote.delete(&[key]).await);
+            }
             Err(fail(state, fault))
         }
         Err(PutError::Commit(fault)) => Err(fail(list_first(state), fault)),
@@ -765,7 +866,7 @@ async fn taken<L: ObjectStore, S: ObjectStore>(
     }
     if remote_torn(remote, &key).await.map_err(relist)? {
         let outcome = put_staged(staging, remote, token, WriteMode::Replace).await;
-        return settle_put(state, remote, key, outcome).await;
+        return settle_put(state, remote, key, outcome, WriteMode::Replace).await;
     }
     // Both verify: a second compare decides, as the listing's read-back does.
     if same_bytes(staging, remote, &key).await.map_err(relist)? {
@@ -784,21 +885,18 @@ async fn put_staged<L: ObjectStore, S: ObjectStore>(
 ) -> Result<FileInfo, PutError> {
     let key = &token.key();
     let mut upload = None;
-    let wrote = match copy_verified(staging, remote, token, mode, &mut upload).await {
-        Ok(wrote) => wrote,
-        Err(err) => {
-            if let Some(open) = upload {
-                // Abort only releases scratch; a failure leaves nothing visible either way.
-                drop(open.abort().await);
-            }
-            return Err(err);
+    if let Err(err) = copy_verified(staging, remote, token, mode, &mut upload).await {
+        if let Some(open) = upload {
+            // Abort only releases scratch; a failure leaves nothing visible either way.
+            drop(open.abort().await);
         }
-    };
+        return Err(err);
+    }
     let Some(open) = upload else {
         return Err(PutError::Before(BugSite::UploadNeverOpened.hit()));
     };
     match open.commit().await {
-        Ok(info) if info.key == *key && info.size == wrote => Ok(info),
+        Ok(info) if info.key == *key => Ok(info),
         Ok(_) => Err(PutError::Commit(Fault::UploadAmbiguous)),
         Err(StoreError::AlreadyExists { key: taken })
             if taken == *key && mode == WriteMode::New =>
@@ -813,6 +911,7 @@ fn commit_failed(fault: Fault) -> PutError {
     if fault == Fault::UploadChecksumMismatch {
         PutError::Rejected(fault)
     } else {
+        mark!(Up6);
         PutError::Commit(fault)
     }
 }
@@ -839,17 +938,18 @@ fn names_key(header: &Header, key: &FileKey) -> Result<(), PutError> {
 }
 
 /// Reads the staged file in chunks, decodes each, and forwards it to an upload
-/// begun as soon as the header is known. Returns the bytes written once the
-/// decoder has verified the whole file and its length and trailer checksum,
-/// on this read, are the ones `token` was minted for: a file replaced after
-/// it was witnessed is refused before the commit.
-async fn copy_verified<L: ObjectStore, S: ObjectStore>(
+/// begun as soon as the header is known. Returns once the decoder has
+/// verified the whole file and its length and trailer checksum, on this read,
+/// are the ones `token` was minted for: a file replaced after it was
+/// witnessed is refused before the commit. The upload counts the bytes it
+/// writes; its commit checks the store holds them ([`Checked`]).
+async fn copy_verified<'s, L: ObjectStore, S: ObjectStore>(
     staging: &L,
-    remote: &S,
+    remote: &'s S,
     token: &Witnessed,
     mode: WriteMode,
-    upload: &mut Option<S::Upload>,
-) -> Result<u64, PutError> {
+    upload: &mut Option<Checked<'s, S>>,
+) -> Result<(), PutError> {
     let key = &token.key();
     let len = CHUNK;
     let mut decoder = Decoder::new();
@@ -891,17 +991,16 @@ async fn copy_verified<L: ObjectStore, S: ObjectStore>(
     if !token.matches(bytes, verified.trailer().file_checksum()) {
         return Err(PutError::Before(Fault::StagedLost));
     }
-    Ok(offset)
+    Ok(())
 }
 
-async fn begin<S: ObjectStore>(
-    remote: &S,
+async fn begin<'s, S: ObjectStore>(
+    remote: &'s S,
     key: &FileKey,
     header: &Header,
     mode: WriteMode,
-) -> Result<S::Upload, PutError> {
-    remote
-        .begin_upload(key, header.fields().timestamp, mode)
+) -> Result<Checked<'s, S>, PutError> {
+    Checked::begin(remote, key, header.fields().timestamp, mode)
         .await
         .map_err(|err| PutError::Before(Fault::from_remote(&err)))
 }

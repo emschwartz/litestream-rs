@@ -21,14 +21,19 @@
 
 #![forbid(unsafe_code)]
 
+// First, so `mark!` is in scope in every module after it.
+#[macro_use]
+pub mod marks;
 mod actor;
 mod app;
+mod checked;
 mod checkpoint;
 mod compact;
 #[cfg(any(test, feature = "testing"))]
 pub mod conformance;
 mod created_at;
 mod env;
+mod failstop;
 mod fault;
 mod inventory;
 mod journal;
@@ -44,6 +49,7 @@ mod plan;
 mod position;
 mod probe;
 mod recover;
+mod regression_watch;
 mod restore;
 mod retry;
 mod snapshot;
@@ -54,6 +60,7 @@ mod store;
 #[cfg(test)]
 mod stuck;
 mod sync;
+mod takeover;
 mod upload;
 mod verify;
 mod witness;
@@ -78,6 +85,7 @@ pub use created_at::{
 pub use env::{Clock, Entropy, Sleeper};
 #[cfg(any(test, feature = "testing"))]
 pub use env::{FakeClock, RecordingSleeper, SeededEntropy};
+pub use failstop::{AppGate, Gate, IfReplicationStops, Lag, MaxUnreplicatedAge, Trip, gate, trip};
 #[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
 pub use fault::reporting_bugs;
@@ -87,7 +95,7 @@ pub use fault::{
     StopCause, VERIFY, backoff_wait, policy, retry_wait,
 };
 pub use inventory::{Inventory, InventoryError, is_snapshot_start};
-pub use journal::{JournalFile, JournalWriteError, JournalWriter};
+pub use journal::{JournalFile, JournalSignal, JournalWriteError, JournalWriter, judge};
 pub use layout::{
     CreatedAt, CreatedAtSource, Dating, FileInfo, FileKey, Level, ListedTime, NonZeroCreatedAt,
     ParseKeyError, RangeSide, Stamp, cmp_range, file_name, is_scratch_name, parse_file_name,
@@ -108,7 +116,6 @@ pub use position::{
     Continuity, LastPage, Position, ReachedEnd, ReadLockHold, SyncedOffset, SyncedThrough,
     WalFileLen,
 };
-pub use probe::Starts;
 pub use recover::{
     BootWal, FrameCheck, LastPageCheck, Miss, NewestStagedFile, PositionSource, Probes,
     RecoverEvent, Recovered, Verdict, WalView, recover, recover_traced,
@@ -134,6 +141,7 @@ pub use store::{
     PartNumber, ReadAt, ReadLen, StoreError, StoreOp, Upload, WriteMode, build_listing,
 };
 pub use sync::{PageFrom, Step, StepEnd, StepFailed, SyncConfig, Synced, clamp, sync_step};
+pub use takeover::{TakeoverRecord, TakeoverRecordError};
 pub use upload::{
     Did, PROBE_CAP, PROBE_GAP, UploadConfig, UploadFailed, UploadPlan, UploadState, Uploaded,
     fresh_probe_reads, upload_next,

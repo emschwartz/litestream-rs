@@ -15,8 +15,8 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use common::{
-    PATIENCE, Site, assert_same, booted, config, fake, stopped, stopped_moving, truncate_is_busy,
-    wait,
+    PATIENCE, Site, assert_same, booted, config, fake, moved_until, stopped, stopped_moving,
+    truncate_is_busy, wait,
 };
 use lsr_core::{CheckpointMode, Event as EngineEvent, Fault};
 use lsr_replica::{
@@ -193,7 +193,7 @@ fn a_refused_boot_is_degraded_and_recovers() {
         h.phase == Phase::Running && !h.is_degraded()
     });
     assert_eq!(booted(&replicator), Booted::Booted);
-    wait(&replicator, caught_up);
+    moved_until(&replicator, &clock, (POLL, 240), caught_up);
     assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
     site.assert_restores(&*site.store());
 }
@@ -214,7 +214,7 @@ fn the_lag_counts_from_the_start_while_the_first_boot_fails() {
     assert_eq!(refused.unreplicated_since, Some(started), "{refused:?}");
     faulty.refuse.store(false, Ordering::SeqCst);
     clock.advance(POLL);
-    wait(&replicator, caught_up);
+    moved_until(&replicator, &clock, (POLL, 240), caught_up);
     assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
 }
 
@@ -238,12 +238,12 @@ fn health_compares_the_local_and_replica_positions() {
     // The upload goes through at the retry.
     faulty.fail_uploads.store(false, Ordering::SeqCst);
     clock.advance(POLL);
-    let full = wait(&replicator, caught_up);
+    let full = moved_until(&replicator, &clock, (POLL, 240), caught_up);
     assert!(full.wal_bytes > 0 && full.db_bytes > 0, "{full:?}");
     // New writes: seen at the next poll, then replicated.
     site.commit(3);
     clock.advance(POLL);
-    let after = wait(&replicator, |h| {
+    let after = moved_until(&replicator, &clock, (POLL, 240), |h| {
         caught_up(h) && h.synced.map(|(txid, _)| txid) > full.synced.map(|(txid, _)| txid)
     });
     assert!(after.counters.uploads > full.counters.uploads);
@@ -421,7 +421,7 @@ fn a_reader_guard_holds_off_truncate() {
     let replicator = Replicator::start_with(&site.db, site.store(), tracked, runtime).unwrap();
     let (sink, events) = ChannelSink::new(NonZeroUsize::new(1024).unwrap());
     replicator.set_events(Box::new(sink));
-    wait(&replicator, caught_up);
+    moved_until(&replicator, &clock, (POLL, 240), caught_up);
     // An application reader on an old snapshot keeps PASSIVE from emptying the WAL, so the policy
     // goes on to TRUNCATE.
     let reader = Connection::open(&site.db).unwrap();
@@ -522,7 +522,7 @@ fn a_panic_rebuilds_the_engine_and_replication_continues() {
     assert_eq!(booted(&replicator), Booted::Booted);
     site.commit(2);
     clock.advance(POLL);
-    let health = wait(&replicator, caught_up);
+    let health = moved_until(&replicator, &clock, (POLL, 240), caught_up);
     assert!(!health.is_degraded(), "{health:?}");
     assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
     site.assert_restores(&*site.store());
@@ -552,13 +552,15 @@ fn an_app_checkpoint_is_counted_and_reported() {
     let replicator = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
     let (sink, events) = ChannelSink::new(NonZeroUsize::new(256).unwrap());
     replicator.set_events(Box::new(sink));
-    wait(&replicator, caught_up);
+    moved_until(&replicator, &clock, (POLL, 240), caught_up);
     site.app
         .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_row| Ok(()))
         .unwrap();
     site.commit(1);
     clock.advance(POLL);
-    let health = wait(&replicator, |h| h.app_checkpoints_ran == 1 && caught_up(h));
+    let health = moved_until(&replicator, &clock, (POLL, 240), |h| {
+        h.app_checkpoints_ran == 1 && caught_up(h)
+    });
     assert_eq!(health.app_checkpoints_ran, 1);
     assert_eq!(health.app_checkpoints.backfilled, 1);
     assert_eq!(
@@ -665,7 +667,7 @@ fn an_idle_replicator_keeps_its_health_current() {
     let site = Site::new();
     let (runtime, clock) = fake();
     let replicator = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
-    let settled = wait(&replicator, caught_up);
+    let settled = moved_until(&replicator, &clock, (POLL, 240), caught_up);
     for _ in 0..5 {
         clock.advance(POLL);
         let now = clock.now();
@@ -735,10 +737,12 @@ fn a_panicking_sink_is_counted_and_replication_goes_on() {
     let (runtime, clock) = fake();
     let replicator = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
     replicator.set_events(Box::new(Panicking));
-    wait(&replicator, caught_up);
+    moved_until(&replicator, &clock, (POLL, 240), caught_up);
     site.commit(2);
     clock.advance(POLL);
-    let health = wait(&replicator, |h| caught_up(h) && h.counters.sink_panics > 0);
+    let health = moved_until(&replicator, &clock, (POLL, 240), |h| {
+        caught_up(h) && h.counters.sink_panics > 0
+    });
     assert_eq!(health.phase, Phase::Running);
     assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
     site.assert_restores(&*site.store());
@@ -767,7 +771,7 @@ fn a_thread_that_dies_is_reported_gone() {
     let site = Site::new();
     let (runtime, clock) = fake();
     let replicator = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
-    wait(&replicator, caught_up);
+    moved_until(&replicator, &clock, (POLL, 240), caught_up);
     replicator.set_events(Box::new(Throws));
     site.commit(1);
     clock.advance(POLL);
@@ -794,8 +798,11 @@ fn a_drain_that_waits_out_a_retry_ends_once_the_clock_reaches_it() {
     let (runtime, clock) = fake();
     let replicator = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
     site.commit(4);
-    wait(&replicator, |h| {
-        h.synced.is_some() && h.counters.retries > 0
+    // The first sync can meet a busy database (a commit mid-way through the wal-index header)
+    // and wait out a backoff before it stages, so the clock moves while the test waits for the
+    // failed upload.
+    moved_until(&replicator, &clock, (POLL, 240), |h| {
+        h.synced.is_some() && h.counters.store.begin_upload.errors > 0
     });
     faulty.fail_uploads.store(false, Ordering::SeqCst);
     let stopped = stopped_moving(&replicator, &clock, POLL);
@@ -804,4 +811,40 @@ fn a_drain_that_waits_out_a_retry_ends_once_the_clock_reaches_it() {
         "{stopped:?}"
     );
     site.assert_restores(&*site.store());
+}
+
+/// A failed upload leaves the engine waiting out a retry's backoff on the fake clock. A test
+/// that only watches health after it never sees the commit replicated; `moved_until` moves the
+/// clock while the thread waits on it and does. The condition names the commit's transaction:
+/// "caught up" alone holds on the health from before the commit.
+#[test]
+fn a_retry_s_backoff_is_waited_out_by_moving_the_clock() {
+    let site = Site::new();
+    let faulty = site.faulty();
+    let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
+    let (runtime, clock) = fake();
+    let replicator = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
+    let start = moved_until(&replicator, &clock, (POLL, 240), caught_up);
+    let before = start.replicated.map(|(txid, _)| txid);
+    faulty.fail_uploads.store(true, Ordering::SeqCst);
+    site.commit(1);
+    clock.advance(POLL);
+    // Two failures: the first retry may already be due when the fault clears, the next one
+    // (two seconds of backoff) is not.
+    let failing = moved_until(&replicator, &clock, (POLL, 240), |h| {
+        h.counters.retries >= start.counters.retries + 2 && h.synced.map(|(txid, _)| txid) > before
+    });
+    assert!(
+        failing.replicated.map(|(txid, _)| txid) == before,
+        "{failing:?}"
+    );
+    faulty.fail_uploads.store(false, Ordering::SeqCst);
+    let health = moved_until(&replicator, &clock, (POLL, 240), |h| {
+        caught_up(h) && h.replicated.map(|(txid, _)| txid) > before
+    });
+    assert!(
+        health.counters.uploads > start.counters.uploads,
+        "{health:?}"
+    );
+    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
 }

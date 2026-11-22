@@ -27,11 +27,12 @@
 //! checked before the upload begins. On any error the upload is aborted; a
 //! failed abort never replaces the original error. A commit that fails after
 //! the object became visible is reported as [CompactError::Dest]: the caller
-//! lists before it trusts the destination. Exception: a `Dest` error holding
-//! `Corrupt { cause: CommitSizeMismatch { removed: true, .. } }` from a
-//! [crate::Retrying] destination means the object was deleted, so the
-//! destination holds nothing new; with `removed: false` the caller must not
-//! trust a listing of the output key.
+//! lists before it trusts the destination. Exception: the output's commit is
+//! checked against the bytes written (`checked`), so a `Dest` error holding
+//! `Corrupt { cause: CommitSizeMismatch { removed: true, .. } }` means the
+//! store acknowledged a short object and it was deleted: the destination holds
+//! nothing new. With `removed: false` the caller must not trust a listing of
+//! the output key.
 //!
 //! A page whose newest copy sits in an input that a later input shrank below
 //! was not written by SQLite, which writes every page it grows into. Go's
@@ -53,6 +54,7 @@ use lsr_ltx::{
 };
 use thiserror::Error;
 
+use crate::checked::Checked;
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::ltx_read::{BrokenLink, LinkEnd, LtxRead, Next, ReadFault, check_link};
 use crate::store::{ObjectStore, ReadLen, StoreError, Upload, WriteMode};
@@ -237,6 +239,11 @@ pub enum CompactError {
     /// Reading an input failed in some other way.
     #[error("reading an input: {0}")]
     Source(#[source] StoreError),
+    /// Reading an input's local staged copy failed (level 1 reads level 0 from staging when
+    /// its copies are the replica's). A staging error, never the replica's: a refused local
+    /// read is the directory's permissions, a full local disk is a full disk.
+    #[error("reading an input's local copy: {0}")]
+    Local(#[source] StoreError),
     /// The inputs and the output level do not go together.
     #[error("{0}")]
     Inputs(#[from] InputsError),
@@ -388,6 +395,7 @@ impl Reader {
             Ok(Next::Event(step)) => Ok(step),
             Ok(Next::End(verified)) => Ok(Step::End(verified)),
             Err(ReadFault::Store(StoreError::NotFound { key })) => {
+                mark!(Maint2);
                 Err(CompactError::InputVanished { key })
             }
             Err(ReadFault::Store(err)) => Err(CompactError::Source(err)),
@@ -722,10 +730,9 @@ async fn compact_with<S: ObjectStore, D: ObjectStore>(
     let encoder = Encoder::new(Vec::new(), header).map_err(CompactError::Encode)?;
     let key = FileKey::new(level, inputs.range());
     let created_at = header.fields().timestamp;
-    let mut upload = dest
-        // A compacted file may be written again over itself (a retried
-        // compaction, Go's output for the same range), as Go's are.
-        .begin_upload(&key, created_at, WriteMode::Replace)
+    // A compacted file may be written again over itself (a retried
+    // compaction, Go's output for the same range), as Go's are.
+    let mut upload = Checked::begin(dest, &key, created_at, WriteMode::Replace)
         .await
         .map_err(CompactError::Dest)?;
     let written = write_output(&mut merge, encoder, &header, &mut upload).await;

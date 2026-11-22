@@ -1,13 +1,12 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index 238fb5f..5201cc2 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -1506,7 +1506,7 @@ impl Actor {
-         // must find one before the engine stops; a listing a read
-         // contradicts plans nothing either, and is taken again later.
+@@ -2116,7 +2116,7 @@
+         now: Timestamp,
+     ) -> Option<Tick> {
          let known = self.snapshot_after();
 -        if inventory.newest() > known {
 +        if false && inventory.newest() > known {
-             return Some(match past_known(env.remote, &inventory, known).await {
-                 Ok(true) => self.fault(Task::Maintenance, Fault::RemoteAheadOfLocal, now),
-                 Ok(false) => self.list_again_later(now),
+             return Some(match past_known(remote, inventory, known).await {
+                 Ok(true) => {
+                     mark!(Up10);

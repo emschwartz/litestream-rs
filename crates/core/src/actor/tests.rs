@@ -11,6 +11,7 @@ use crate::conformance::block_on;
 use crate::env::FakeClock;
 use crate::layout::CreatedAt;
 use crate::layout::{FileKey, Level};
+use crate::maintain::RetentionMode;
 use crate::mem::MemStore;
 use crate::plan::RestoreTarget;
 use crate::restore::{MemSink, restore};
@@ -19,6 +20,12 @@ use crate::store::WriteMode;
 use crate::store::{Listing, PageLimit, ReadLen, StoreError, StoreOp, Upload};
 
 mod audit;
+#[expect(
+    clippy::unwrap_in_result,
+    clippy::arithmetic_side_effects,
+    reason = "an in-memory journal file: offsets and lengths within one 8192-byte file"
+)]
+mod journal;
 
 const PS: PageSize = PageSize::MIN;
 const T0: i64 = 1_000_000;
@@ -36,7 +43,7 @@ fn ts(n: i64) -> Timestamp {
 }
 
 /// A store that counts every call it is asked to make.
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 struct Counting {
     inner: MemStore,
     calls: Arc<AtomicU32>,
@@ -57,6 +64,9 @@ struct Counting {
     /// Keys whose next read returns its bytes with the middle one flipped,
     /// the stored bytes untouched: one bad read.
     flip_next_read: Arc<std::sync::Mutex<Vec<FileKey>>>,
+    /// Keys every listing leaves out while reads still find them: a listing
+    /// that lags the bucket.
+    unlisted: Arc<std::sync::Mutex<Vec<FileKey>>>,
     /// Files every listing shows that the store does not hold, as a listing
     /// that lags a delete does.
     ghosts: Arc<std::sync::Mutex<Vec<FileInfo>>>,
@@ -98,6 +108,11 @@ impl Counting {
 impl ObjectStore for Counting {
     type Upload = <MemStore as ObjectStore>::Upload;
 
+    /// Forwards to the store it wraps.
+    async fn remove_scratch(&self) -> Result<u64, StoreError> {
+        self.inner.remove_scratch().await
+    }
+
     fn list(
         &self,
         level: Level,
@@ -123,10 +138,12 @@ impl ObjectStore for Counting {
             .copied()
             .collect();
         let hidden = self.hidden.lock().unwrap().clone();
+        let unlisted = self.unlisted.lock().unwrap().clone();
         let listed = self.inner.list(level, after, limit);
         async move {
             let mut page = listed.await?;
-            page.files.retain(|info| !hidden.contains(&info.key));
+            page.files
+                .retain(|info| !hidden.contains(&info.key) && !unlisted.contains(&info.key));
             if page.next.is_none() {
                 page.files.extend(ghosts);
                 page.files.sort_by_key(|info| info.key);
@@ -208,6 +225,9 @@ struct Rig {
     ck: FakeCheckpointer,
     staging: Counting,
     remote: Counting,
+    /// The takeover record a driver would keep in the meta directory: what an
+    /// actor asked for ([`Actor::takeover_wanted`]), handed back at once.
+    takeover: Option<crate::TakeoverRecord>,
 }
 
 impl Rig {
@@ -231,6 +251,7 @@ impl Rig {
             ck,
             staging: Counting::default(),
             remote: Counting::default(),
+            takeover: None,
         };
         rig.commit(1);
         rig
@@ -248,8 +269,23 @@ impl Rig {
             staging: &self.staging,
             remote: &self.remote,
             clock: &FakeClock::new(ts(now)),
+            journal: None,
         };
-        block_on(actor.tick(env, ts(now)))
+        let tick = block_on(actor.tick(env, ts(now)));
+        // The rig is the driver: it keeps the takeover the actor asked for
+        // and ticks on, as the replicator thread does, so a test sees the
+        // tick that did the work.
+        if let Tick::Ran {
+            event: Event::TakeoverWanted(wanted),
+            ..
+        } = tick
+        {
+            let held = self.takeover.filter(|held| held.txid() > wanted.txid());
+            self.takeover = Some(held.unwrap_or(wanted));
+            actor.remember_takeover(wanted);
+            return self.tick(actor, now);
+        }
+        tick
     }
 
     /// Ticks at `now` while the actor says it has work.
@@ -324,6 +360,7 @@ fn cfg() -> ActorConfig {
         shutdown_grace: Duration::from_secs(10),
         // The tests written before the configurable responses expect a stop.
         responses: Responses::STRICT,
+        max_unreplicated_age: crate::failstop::MaxUnreplicatedAge::DEFAULT,
     }
 }
 
@@ -364,6 +401,21 @@ fn caught_up() -> (Rig, Actor) {
     (rig, actor)
 }
 
+/// A restart whose staged copy of the replica's newest file matches it reads
+/// the replica's copy once: equal sizes go straight to the byte compare, with
+/// no separate verification read.
+#[test]
+fn a_restart_reads_a_matching_tail_once_from_each_side() {
+    let (mut rig, mut actor) = caught_up();
+    commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
+    let tail = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(2).unwrap()));
+    let before = rig.remote.reads_of(&tail);
+    let mut restarted = Actor::new(cfg());
+    let boot = rig.tick(&mut restarted, T0 + 2);
+    assert_eq!(event(&boot), Some(&Event::Booted { cause: None }));
+    assert_eq!(rig.remote.reads_of(&tail) - before, 1);
+}
+
 #[test]
 fn boot_lists_then_recovers_then_uploads() {
     let mut rig = Rig::new();
@@ -398,11 +450,7 @@ fn a_first_boot_lists_each_level_once() {
     let mut rig = Rig::new();
     let mut actor = Actor::new(cfg());
     rig.tick(&mut actor, T0);
-    let probe = u32::try_from(crate::upload::fresh_probe_reads(
-        None,
-        &crate::probe::Starts::default(),
-    ))
-    .unwrap();
+    let probe = u32::try_from(crate::upload::fresh_probe_reads(None)).unwrap();
     assert_eq!(
         rig.remote.calls(),
         u32::try_from(Level::ALL.len()).unwrap() + probe
@@ -472,6 +520,133 @@ fn maintenance_waits_for_idle_uploads() {
         .position(|t| matches!(event(t), Some(Event::Maintained { .. })))
         .unwrap();
     assert!(last_upload < first_maintain, "{seen:?}");
+}
+
+/// Files 2 to 5 uploaded above a level 1 that covers 1, then 6 to `last` staged at `at` and
+/// not uploaded, and the process gone.
+fn backlog(last: u8, at: i64) -> Rig {
+    let (mut rig, mut actor) = caught_up();
+    for n in 2..=5 {
+        commit_and_settle(&mut rig, &mut actor, n, T0 + 1);
+    }
+    assert_eq!(level_one_max(&rig), Some(1));
+    // Each commit is staged by the tick after it, which then syncs again before any upload.
+    for n in 6..=last {
+        rig.commit(n);
+        rig.tick(&mut actor, at);
+    }
+    let backlog = staged(&rig).len();
+    assert!(
+        backlog > usize::from(last).saturating_sub(10),
+        "{backlog} staged"
+    );
+    drop(actor);
+    rig
+}
+
+/// [`backlog`]'s next process, one file per upload, ticked 14 times at `now`.
+fn boot_on_backlog(rig: &mut Rig, now: i64) -> (Actor, Vec<Tick>) {
+    let mut config = cfg();
+    config.upload.files_per_tick = Some(nz(1));
+    let mut actor = Actor::new(config);
+    let seen = (0..14).map(|_| rig.tick(&mut actor, now)).collect();
+    (actor, seen)
+}
+
+/// A boot with a backlog of staged files, as a process killed every few seconds leaves: its
+/// uploads never go idle within its life, and maintenance must still get its share. Before,
+/// it waited for every upload, so a crash loop never compacted, pruned or deleted.
+#[test]
+fn maintenance_gets_its_share_while_a_backlog_uploads() {
+    let mut rig = backlog(30, T0 + 2);
+    // A new level-1 window.
+    let (actor, seen) = boot_on_backlog(&mut rig, T0 + 60_000);
+    let compacted = seen.iter().position(|t| {
+        matches!(
+            event(t),
+            Some(Event::Maintained {
+                event: MaintainedEvent::Compacted(_),
+                ..
+            })
+        )
+    });
+    assert!(
+        compacted.is_some(),
+        "no compaction in the first ticks: {seen:?}"
+    );
+    assert!(level_one_max(&rig) > Some(5), "{seen:?}");
+    let uploads = seen
+        .iter()
+        .filter(|t| matches!(event(t), Some(Event::Uploaded(_))))
+        .count();
+    assert!(uploads >= 8, "uploads starved: {seen:?}");
+    // Uploads still had work when maintenance ran.
+    assert!(actor.replicated() < Some(Txid::new(30).unwrap()));
+}
+
+/// A snapshot due while the backlog uploads waits for idle uploads, so its last
+/// transaction is at most what was published; the compactions take the turns meanwhile.
+#[test]
+fn a_snapshot_due_during_a_backlog_waits_for_idle_uploads() {
+    // Staged a day later, so once the levels have compacted them nothing is due before
+    // the snapshot.
+    let now = T0 + 25 * 3_600_000;
+    let mut rig = backlog(80, now);
+    let level9 = |rig: &Rig| -> Vec<u64> {
+        Rig::files(&rig.remote, Level::SNAPSHOT)
+            .iter()
+            .map(|f| f.key.range().max().get())
+            .collect()
+    };
+    let before = level9(&rig);
+    let mut config = cfg();
+    config.upload.files_per_tick = Some(nz(1));
+    let mut actor = Actor::new(config);
+    let now = now + 1;
+    let mut seen = Vec::new();
+    while actor.replicated() < Some(Txid::new(80).unwrap()) {
+        assert!(seen.len() < 400, "never caught up: {seen:?}");
+        seen.push(rig.tick(&mut actor, now));
+        assert_eq!(
+            level9(&rig),
+            before,
+            "a snapshot while uploads were busy: {seen:?}"
+        );
+    }
+    let compactions = seen
+        .iter()
+        .filter(|t| {
+            matches!(
+                event(t),
+                Some(Event::Maintained {
+                    event: MaintainedEvent::Compacted(_),
+                    ..
+                })
+            )
+        })
+        .count();
+    assert!(compactions > 0, "{seen:?}");
+    // Once the snapshot waits, maintenance does not list again until uploads go idle: one
+    // deferral, not one per fair turn.
+    let waits = seen
+        .iter()
+        .filter(|t| {
+            matches!(
+                event(t),
+                Some(Event::Maintained {
+                    event: MaintainedEvent::Waiting { held: None },
+                    ..
+                })
+            )
+        })
+        .count();
+    assert_eq!(waits, 1, "{seen:?}");
+    let after = rig.settle(&mut actor, now);
+    let newest = level9(&rig).last().copied();
+    assert!(
+        newest > before.last().copied(),
+        "never taken once idle: {after:?}"
+    );
 }
 
 #[test]
@@ -726,19 +901,24 @@ fn a_replica_ahead_of_staging_names_the_page_size() {
     assert_eq!(everything(&rig).1, before.1, "nothing reaches the replica");
 }
 
-/// An upload's commit is ambiguous, and before the listing that follows,
-/// another writer's verifying object replaces transaction 2 on the replica.
-/// The listing finds it unlike the staged file: the staged files from 2 on
-/// must go and the next file is a snapshot above 2. When that delete failed,
-/// the uploader had already taken 2 as confirmed and uploaded the staged 3,
-/// built on the staged 2, onto the other object (seed 0xd79).
+/// An upload's commit is ambiguous, and before the listing that follows a
+/// verifying object replaces transaction 2 on the replica, while the staged 2
+/// is replaced too (a staging backup put back), so the divergence is no proof
+/// of another writer. The listing finds the replica's object unlike the
+/// staged file: the staged files from 2 on must go and the next file is a
+/// snapshot above 2. When that delete failed, the uploader had already taken
+/// 2 as confirmed and uploaded the staged 3, built on the staged 2, onto the
+/// other object (seed 0xd79).
 #[test]
 fn a_failed_drop_after_a_divergence_uploads_nothing_built_on_it() {
-    let (mut other, mut writer) = caught_up();
-    other.commit(9);
-    other.follow(&mut writer, T0 + 10, 20);
     let two = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(2).unwrap()));
-    let theirs = block_on(other.remote.inner.read(&two, 0, ReadLen::CHUNK)).unwrap();
+    let other_two = |n: u8| {
+        let (mut other, mut writer) = caught_up();
+        other.commit(n);
+        other.follow(&mut writer, T0 + 10, 20);
+        block_on(other.remote.inner.read(&two, 0, ReadLen::CHUNK)).unwrap()
+    };
+    let (theirs, restored) = (other_two(9), other_two(7));
     let (mut rig, mut actor) = caught_up();
     rig.remote
         .inner
@@ -752,16 +932,19 @@ fn a_failed_drop_after_a_divergence_uploads_nothing_built_on_it() {
             break;
         }
     }
-    block_on(async {
-        let mut up = rig
-            .remote
-            .inner
-            .begin_upload(&two, ts(T0), WriteMode::Replace)
-            .await
-            .unwrap();
-        up.write(&theirs).await.unwrap();
-        up.commit().await.unwrap();
-    });
+    for (store, bytes) in [
+        (&rig.remote.inner, &theirs),
+        (&rig.staging.inner, &restored),
+    ] {
+        block_on(async {
+            let mut up = store
+                .begin_upload(&two, ts(T0), WriteMode::Replace)
+                .await
+                .unwrap();
+            up.write(bytes).await.unwrap();
+            up.commit().await.unwrap();
+        });
+    }
     rig.staging
         .inner
         .inject_failure(StoreOp::Delete, transient(StoreOp::Delete));
@@ -779,14 +962,13 @@ fn a_failed_drop_after_a_divergence_uploads_nothing_built_on_it() {
     assert!(resnapshot < put_three, "{ticks:?}");
 }
 
-/// Expected to fail until the engine keeps a durable record (BOOT-21, BOOT-22; D9 in
-/// `docs/BEHAVIOR.md`). A running engine whose ambiguous commit makes it list the replica finds
-/// another writer's file above its own newest staged file and stops on `OtherWriter`, the one
-/// stop the default responses make. A restart forgets the stop: the new boot takes the other
-/// writer's file as history it is behind (`behind_remote`), snapshots after it and uploads, so
-/// the replica's one history interleaves two databases. The restart must stop again, or refuse.
+/// BOOT-21 and BOOT-22 (D9 in `docs/BEHAVIOR.md`). A running engine whose ambiguous commit makes
+/// it list the replica finds another writer's file above its own newest staged file and stops on
+/// `OtherWriter`, the one stop the default responses make. The restart used to forget the stop:
+/// the new boot took the other writer's file as history it is behind (`behind_remote`),
+/// snapshotted after it and uploaded, interleaving two databases in one history. The new boot now
+/// refuses replica files nothing vouches for (`crate::takeover`), so the restart stops again.
 #[test]
-#[ignore = "known wrong, BOOT-21 and BOOT-22: an OtherWriter stop is forgotten by a restart; needs a durable engine-owned record"]
 fn a_restart_after_an_other_writer_stop_stops_again() {
     let (mut other, mut writer) = caught_up();
     other.commit(9);
@@ -1019,6 +1201,28 @@ fn a_zero_deadline_reports_unsynced_bytes_and_does_no_work() {
         })
     );
     assert_eq!(rig.remote.calls(), calls);
+}
+
+/// The same after the WAL restarted under the actor: every committed byte of
+/// the new generation is unsynced, however far the old one was synced.
+#[test]
+fn a_zero_deadline_after_a_restart_counts_the_whole_new_generation() {
+    let (mut rig, mut actor) = caught_up();
+    for n in 2..=3 {
+        commit_and_settle(&mut rig, &mut actor, n, T0 + 1);
+    }
+    rig.wal.force_restart();
+    rig.commit(4);
+    let committed = rig.wal.committed_end().offset().get();
+    actor.begin_shutdown(ts(T0 + 10));
+    let tick = rig.tick(&mut actor, T0 + 10);
+    assert_eq!(
+        tick,
+        Tick::DeadlineReached(Unfinished {
+            unsynced_wal_bytes: committed,
+            staged_not_uploaded: 0,
+        })
+    );
 }
 
 /// A second shutdown can shorten a drain and never lengthen it.
@@ -1604,6 +1808,34 @@ fn a_throttled_retention_delete_waits_the_later_of_both() {
     assert_eq!(second, Some(ts(until.unix_millis() + 2_000)));
 }
 
+/// Retention switched on in a running actor deletes at once: the run with it
+/// off reached the day's snapshot and deleted nothing, and the switch lists
+/// the replica again on the next tick at the same instant.
+#[test]
+fn switching_retention_on_deletes_at_the_same_instant() {
+    let mut config = cfg();
+    config.maintenance = config.maintenance.with_retention(RetentionMode::Off);
+    let mut rig = Rig::new();
+    let mut actor = Actor::new(config);
+    rig.settle(&mut actor, T0);
+    for n in 2..=4 {
+        commit_and_settle(&mut rig, &mut actor, n, T0 + 1);
+    }
+    let mut now = T0 + 60_000;
+    for _ in 0..200 {
+        match next_of(&rig.tick(&mut actor, now)) {
+            Some(Next::Now) => {}
+            Some(Next::At(at)) if at.unix_millis() < T0 + 86_400_000 => now = at.unix_millis(),
+            Some(Next::At(_) | Next::OnWalChange) | None => break,
+        }
+    }
+    assert_eq!(rig.remote.deleted(), [], "retention is off");
+    actor.set_retention(RetentionMode::Enforce);
+    assert_eq!(actor.retention(), RetentionMode::Enforce);
+    rig.settle(&mut actor, now);
+    assert!(!rig.remote.deleted().is_empty(), "nothing deleted at {now}");
+}
+
 impl Rig {
     /// A rig whose replica lists last-modified times, so every created-at time a
     /// decision needs is a request.
@@ -1931,14 +2163,18 @@ fn a_crash_between_the_drop_and_the_snapshot_boots_clean() {
 mod checkpoint_failed;
 mod degraded;
 mod index_reset;
+mod lag;
 mod listing;
 mod live;
 mod newest_replica_file;
 mod no_wal_yet;
 mod pages;
 mod rejected_snapshot;
+mod rewound;
+mod second_writer;
 mod stamp;
 mod tasks;
+mod vouch;
 mod wal_barrier;
 mod witness;
 
@@ -1971,13 +2207,24 @@ fn l0(n: u64) -> FileKey {
 
 /// One read of a sound staged file returns a flipped byte during boot's
 /// sweep. A read that fails verification is evidence about the read: boot
-/// deletes nothing on it, and the file is uploaded as it is.
+/// deletes nothing on it, and the file is uploaded as it is. With and
+/// without a takeover record already covering staging: asking for one is
+/// itself a second read, so only a held record shows a first read deleting.
 #[test]
 fn one_bad_read_of_a_staged_file_at_boot_drops_nothing() {
+    for held in [false, true] {
+        one_bad_read_at_boot(held);
+    }
+}
+
+fn one_bad_read_at_boot(held: bool) {
     let (mut rig, mut actor) = caught_up();
     stage_held(&mut rig, &mut actor, &[2, 3, 4], T0 + 1);
     rig.staging.flip_next_read(l0(3));
     let mut actor = Actor::new(cfg());
+    if held {
+        actor.remember_takeover(crate::TakeoverRecord::through(Txid::new(4).unwrap()));
+    }
     let first = rig.tick(&mut actor, T0 + 2);
     // The bad read deletes nothing: when the WAL could stage the files again,
     // a deletion would not show as a snapshot, only as files gone.
@@ -1989,10 +2236,20 @@ fn one_bad_read_of_a_staged_file_at_boot_drops_nothing() {
 }
 
 /// One read of a sound staged file returns a flipped byte while the upload
-/// task copies it: nothing is dropped, and a later tick uploads it.
+/// task copies it: nothing is dropped, and a later tick uploads it. With and
+/// without a takeover record already covering staging, as at boot.
 #[test]
 fn one_bad_read_of_a_staged_file_while_uploading_drops_nothing() {
+    for held in [false, true] {
+        one_bad_read_while_uploading(held);
+    }
+}
+
+fn one_bad_read_while_uploading(held: bool) {
     let (mut rig, mut actor) = caught_up();
+    if held {
+        actor.remember_takeover(crate::TakeoverRecord::through(Txid::new(2).unwrap()));
+    }
     rig.commit(2);
     assert!(matches!(
         event(&rig.tick(&mut actor, T0 + 1)),
@@ -2089,6 +2346,27 @@ fn maintenance_plans_nothing_from_a_listing_that_hides_a_confirmed_upload() {
     assert!(planned(&seen), "{seen:?}");
 }
 
+/// A boot removes what killed uploads left, in staging and in the replica, before it reads
+/// anything else; the stores' wrappers forward the call.
+#[test]
+fn a_boot_removes_the_scratch_killed_uploads_left() {
+    let mut rig = Rig::new();
+    rig.staging.inner.plant_scratch(2);
+    rig.remote.inner.plant_scratch(3);
+    assert_eq!(
+        (rig.staging.inner.scratch(), rig.remote.inner.scratch()),
+        (2, 3)
+    );
+    let mut actor = Actor::new(cfg());
+    let boot = rig.tick(&mut actor, T0);
+    assert!(
+        matches!(event(&boot), Some(Event::Booted { .. })),
+        "{boot:?}"
+    );
+    assert_eq!(rig.staging.inner.scratch(), 0);
+    assert_eq!(rig.remote.inner.scratch(), 0);
+}
+
 /// A PASSIVE checkpoint stages no boundary snapshot, so the counter for one stays at
 /// zero; only a TRUNCATE that changed the WAL counts one.
 #[test]
@@ -2111,4 +2389,31 @@ fn a_passive_checkpoint_counts_no_boundary_snapshot() {
             .get(crate::fault::SnapshotCauseKind::CheckpointBoundary),
         0
     );
+}
+
+/// An engine's Env prints its sources and stores, and whether a journal is lent, not the journal.
+#[test]
+fn an_env_prints_its_parts_and_whether_it_has_a_journal() {
+    let mut rig = Rig::new();
+    let clock = FakeClock::new(ts(T0));
+    let env = Env {
+        wal: &mut rig.wal,
+        db: &mut rig.db,
+        ck: &mut rig.ck,
+        staging: &rig.staging,
+        remote: &rig.remote,
+        clock: &clock,
+        journal: None,
+    };
+    let text = format!("{env:?}");
+    assert!(text.starts_with("Env { wal: "), "{text}");
+    for part in [
+        "db: ",
+        "ck: ",
+        "staging: ",
+        "remote: ",
+        "journal: false, .. }",
+    ] {
+        assert!(text.contains(part), "{part} in {text}");
+    }
 }

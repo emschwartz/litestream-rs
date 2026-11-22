@@ -112,6 +112,23 @@ pub enum Violation {
         /// The commit it covered later.
         second: CommitId,
     },
+    /// A restore gave the database as damage to the WAL left it: a state the
+    /// world adopted as the database's truth so the run can go on, which no
+    /// commit of the application made.
+    #[error("restoring {target:?} gave the state WAL damage left, which no commit made")]
+    CorruptionRestored {
+        /// What was restored.
+        target: RestoreTarget,
+    },
+    /// A replica key was put again with other bytes: an object is written
+    /// once (retention may delete it), unless the replica lost it from
+    /// outside, the store reported its first put failed, or a power loss cut
+    /// the commit it first held.
+    #[error("{key} was put again with other bytes")]
+    KeyRewritten {
+        /// The object.
+        key: String,
+    },
     /// A later transaction id covers an earlier commit. The same commit is
     /// allowed: a snapshot on request is a new id with nothing new in the WAL.
     #[error("transaction {lower} covers {low_commit} but {higher} covers {high_commit}")]
@@ -169,6 +186,14 @@ pub enum Violation {
     OtherWriterMissed {
         /// The other writer's file.
         key: String,
+    },
+    /// Fail-stop tripped where nothing the simulator knows explains it (`crate::failstop`).
+    #[error("fail-stop tripped with no cause: {trip}: {detail}")]
+    FalseTrip {
+        /// The trip.
+        trip: String,
+        /// What the simulator found instead.
+        detail: String,
     },
     /// A restore the replica should answer was refused.
     #[error("restoring {target:?} was refused: {outcome:?}")]
@@ -297,6 +322,37 @@ pub enum Violation {
         /// The file.
         key: String,
     },
+    /// A staged file the staging store reported durable (its commit or its delete returned
+    /// success) changed across a power loss. Judged when staging is the directory store on the
+    /// in-memory filesystem (`crate::staging`).
+    #[error("staged {key}: {how} across a power loss")]
+    StagedReverted {
+        /// The file.
+        key: String,
+        /// What happened to it.
+        how: String,
+    },
+    /// After every injected fault healed and the app let go, a task was
+    /// still stalled on a retried fault the world no longer imposes: the
+    /// engine is stuck retrying, and health says degraded for nothing.
+    #[error(
+        "the {task} task is still stalled on {stall} after {retries} failures with nothing causing it"
+    )]
+    StuckRetrying {
+        /// The task.
+        task: String,
+        /// The stall's fault.
+        stall: String,
+        /// Failures in a row.
+        retries: u32,
+    },
+    /// A task is degraded by a persistent cause no fault of the run explains (or by the
+    /// engine's own bug, which nothing explains).
+    #[error("bug fault: a task is degraded: {cause:?}")]
+    UnexpectedDegraded {
+        /// The cause the engine reported.
+        cause: lsr_core::PersistentCause,
+    },
     /// The engine reported its own bug, or the oracle could not decide.
     #[error("bug fault: {context}")]
     BugFault {
@@ -315,6 +371,11 @@ pub fn within(what: Bound, seen: u64, limit: u64) -> Result<(), Violation> {
     }
     Ok(())
 }
+
+/// The context of the `BugFault` raised when the model's newest image is no longer the database
+/// SQLite's rules hold: a check of the harness against itself, which a failed WAL sync followed
+/// by a power loss can trip before the world adopts the result as damage.
+pub const MODEL_DIVERGED: &str = "the model no longer matches SQLite's rules";
 
 /// A `BugFault` naming `context`.
 #[must_use]
@@ -343,15 +404,33 @@ impl Acked {
         self.highest
     }
 
+    /// What the acknowledgements still promise of `Latest`: the newest
+    /// acknowledged transaction, or below it the newest one the replica has
+    /// not lost from outside (`lost`), since an acknowledgement covers every
+    /// transaction up to it and the bucket may have taken some since.
+    #[must_use]
+    pub fn binding(&self, lost: &BTreeSet<Txid>) -> Option<Txid> {
+        let mut at = self.highest?;
+        while lost.contains(&at) {
+            at = Txid::new(at.get().saturating_sub(1))?;
+        }
+        Some(at)
+    }
+
     /// Notes an acknowledgement.
     pub fn record(&mut self, txid: Txid) {
         self.highest = self.highest.max(Some(txid));
     }
 
-    /// The local database was rewound: what was acknowledged before may
-    /// legitimately be gone from `Latest`.
-    pub fn note_rewound(&mut self) {
-        self.highest = None;
+    /// The replica lost every transaction from `txid` on from outside the
+    /// engine (a bucket rollback, an operator's delete): acknowledgements of
+    /// those are void, and every one below still binds `Latest`. A local power
+    /// loss voids nothing: it does not touch the replica, so a `Latest` older
+    /// than an acknowledgement after one is the engine's doing.
+    pub fn forget_from(&mut self, txid: Txid) {
+        if self.highest >= Some(txid) {
+            self.highest = Txid::new(txid.get().saturating_sub(1));
+        }
     }
 
     /// Reads an acknowledgement off one step's result: a commit or a listing
@@ -428,15 +507,11 @@ fn range_str(range: TxidRange) -> String {
 }
 
 /// Which commit each transaction id covers, from the recorder and the model.
-fn covers(
+pub(crate) fn covers(
     model: &Model,
     recorder: &RecorderLog,
     ground: Ground<'_>,
 ) -> Result<BTreeMap<Txid, CommitId>, Violation> {
-    // A rewind, or a bucket rollback, lets the engine take an id again.
-    let rewound = model.snapshot_notes().iter().any(|n| n.rewound)
-        || model.rewound()
-        || !ground.lost.is_empty();
     let mut cover: BTreeMap<Txid, CommitId> = BTreeMap::new();
     // The last level-0 put of each id, by recorder position.
     let mut replaced: BTreeMap<Txid, usize> = BTreeMap::new();
@@ -491,7 +566,11 @@ fn covers(
         match cover.get(&max) {
             // A put the store reported failed or wrong may be put again from
             // another commit under the same id.
-            Some(first) if *first != commit && !rewound && !ground.exempt.contains(key) => {
+            Some(first)
+                if *first != commit
+                    && !reusable(model, ground, max, *first, at)
+                    && !ground.exempt.contains(key) =>
+            {
                 return Err(Violation::TxidReused {
                     txid: max.get(),
                     first: *first,
@@ -504,16 +583,78 @@ fn covers(
         }
     }
     // Another writer's file holds the pages of the file it copied, so its
-    // transaction is that file's commit wherever it was compacted into.
+    // transaction is that file's commit wherever it was compacted into. While
+    // it still stands (no removal, no level-0 put of the engine's own since),
+    // it is the file a restore of its id reads, whatever an earlier put of
+    // that id (rolled back since) held.
     for (theirs, copied) in ground.foreign {
-        if let Some(commit) = cover.get(copied).copied() {
+        if let Some(standing) = foreign_cover(ground, &cover, &replaced, *theirs, usize::MAX) {
+            cover.insert(*theirs, standing);
+        } else if let Some(commit) = cover.get(copied).copied() {
             cover.entry(*theirs).or_insert(commit);
         }
     }
-    if !rewound {
-        increasing(&cover)?;
-    }
+    // A commit a power loss cut, or an id the replica lost, no longer orders
+    // against the branch the database went on with; every other pair must.
+    increasing(&cover, |txid, commit| {
+        ground.lost.contains(&txid) || model.cut_by(commit, usize::MAX)
+    })?;
     Ok(cover)
+}
+
+/// Every replica key holds one byte string for good (TigerBeetle's grid
+/// checker): a put of a key that was put before, deleted or not, must carry
+/// the same bytes. The exceptions are the ones [`reusable`] grants an id, at
+/// the level of the object: a key the store reported failed or wrong, a key
+/// whose last transaction the replica lost from outside, and a level-0 key
+/// whose first put held a commit a power loss cut before the second put.
+fn write_once(model: &Model, recorder: &RecorderLog, ground: Ground<'_>) -> Result<(), Violation> {
+    let mut first: BTreeMap<FileKey, (u64, Option<CommitId>)> = BTreeMap::new();
+    for (at, event) in recorder.events().iter().enumerate() {
+        let RecorderEvent::Put {
+            key,
+            digest,
+            origin,
+            ..
+        } = event
+        else {
+            continue;
+        };
+        let max = key.range().max();
+        let commit = origin.filter(|o| o.size() > 0).and_then(|o| {
+            let (salt1, salt2) = o.salts();
+            let end = o.offset().saturating_add(o.size());
+            let salts = Salts { salt1, salt2 };
+            model
+                .staged_from(max, salts, end, at)
+                .or_else(|| model.find(salts, end, at))
+        });
+        match first.get(key) {
+            Some((was, held))
+                if was != digest
+                    && !ground.exempt.contains(key)
+                    && !ground.lost.contains(&max)
+                    && !held.is_some_and(|held| model.cut_by(held, at)) =>
+            {
+                return Err(Violation::KeyRewritten {
+                    key: format!("{} {}", key.level().get(), range_str(key.range())),
+                });
+            }
+            Some(_) => {}
+            None => {
+                first.insert(*key, (*digest, commit));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether `txid` may cover a commit other than `first` from recorder position `at`: only when
+/// the replica lost it from outside (a bucket rollback, a removed file) or the database lost
+/// `first` to a power loss before then, so nothing still holds what the id first named. Any
+/// other reuse is the engine's.
+fn reusable(model: &Model, ground: Ground<'_>, txid: Txid, first: CommitId, at: usize) -> bool {
+    ground.lost.contains(&txid) || model.cut_by(first, at)
 }
 
 /// The commit a file compacted through `txid` at recorder position `at`
@@ -547,10 +688,14 @@ fn foreign_cover(
     cover.get(copied).copied()
 }
 
-/// A later transaction id never covers an earlier commit.
-fn increasing(cover: &BTreeMap<Txid, CommitId>) -> Result<(), Violation> {
+/// A later transaction id never covers an earlier commit, among the ids
+/// `off_branch` does not set aside.
+fn increasing(
+    cover: &BTreeMap<Txid, CommitId>,
+    off_branch: impl Fn(Txid, CommitId) -> bool,
+) -> Result<(), Violation> {
     let mut previous: Option<(Txid, CommitId)> = None;
-    for (txid, commit) in cover {
+    for (txid, commit) in cover.iter().filter(|(t, c)| !off_branch(**t, **c)) {
         if let Some((lower, low_commit)) = previous.filter(|(_, c)| c > commit) {
             return Err(Violation::CoversNotIncreasing {
                 lower: lower.get(),
@@ -565,7 +710,7 @@ fn increasing(cover: &BTreeMap<Txid, CommitId>) -> Result<(), Violation> {
 }
 
 /// The first page where the restored database differs from `image`.
-fn first_diff(image: &PageImage, got: &lsr_core::Database) -> Option<u32> {
+pub(crate) fn first_diff(image: &PageImage, got: &lsr_core::Database) -> Option<u32> {
     let want = image.db_size();
     let have = got.page_count();
     if want != have {
@@ -656,6 +801,7 @@ pub fn check_with(
     ground: Ground<'_>,
 ) -> Result<Checked, Violation> {
     let cover = covers(model, recorder, ground)?;
+    write_once(model, recorder, ground)?;
     let inventory = block_on(Inventory::load(remote))
         .map_err(|err| bug_fault(format!("listing the replica: {err}")))?;
     let files = inventory.files();
@@ -681,7 +827,7 @@ pub fn check_with(
         judge.txid(txid, &reach, oldest, &mut out)?;
     }
     if files.is_empty() {
-        return match acked.highest() {
+        return match acked.binding(ground.lost) {
             Some(acked) => Err(Violation::LatestLostAck {
                 acked: acked.get(),
                 latest: None,
@@ -692,7 +838,7 @@ pub fn check_with(
     let Some(latest) = judge.latest(&reach, inventory.newest(), &mut out)? else {
         return Ok(out);
     };
-    if let Some(acked) = acked.highest().filter(|a| *a > latest) {
+    if let Some(acked) = acked.binding(ground.lost).filter(|a| *a > latest) {
         return Err(Violation::LatestLostAck {
             acked: acked.get(),
             latest: Some(latest.get()),

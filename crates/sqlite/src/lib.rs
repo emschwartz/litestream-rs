@@ -49,6 +49,7 @@
 mod checkpoint;
 mod conn;
 mod error;
+mod gate;
 mod identity;
 mod pages;
 mod shm;
@@ -60,5 +61,6 @@ pub use conn::{
     app_connection_for, app_connection_raw, check_app_connection,
 };
 pub use error::{OpenError, Refusal, SetupError, SplitOpen};
+pub use gate::refuse_commits_while;
 /// SQLite's C interface, for the raw handle [`app_connection_raw`] takes.
 pub use rusqlite::ffi;

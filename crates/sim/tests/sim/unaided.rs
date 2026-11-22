@@ -6,9 +6,12 @@
 //! `busy` or `nothing`), every seed's app does that after a restart instead of what its mix drew;
 //! with `LSR_SIM_NO_WAL_DAMAGE` set, no seed draws WAL damage; with `LSR_SIM_LYING_SYNC` set,
 //! every seed's disk lies about the engine's WAL fsync instead of what its mix drew; with
+//! `LSR_SIM_APP_IN_TICK` set to a weight, every seed draws app operations inside a tick at it; with
 //! `LSR_SIM_SWARM` set, every seed runs its swarm mix (`Weights::swarm`) instead, and with
 //! `LSR_SIM_DEFAULT` set the default mix; with `LSR_SIM_HOLD` set to a rate in a thousand, holds
-//! are drawn at least that often (`tests/sim/survival.rs`).
+//! are drawn at least that often (`tests/sim/survival.rs`); with `LSR_SIM_KNOWN_WRONG` set, the
+//! error domain's known-wrong cells are drawn too and a failure matching a drawn defect's
+//! signature is printed as known and not counted as failed (`lsr_sim::domain::KnownWrong`).
 //! Prints every failing seed and the number of seeds run to
 //! the first. The generator, weights and step count are the soak's, fixed here so a count of
 //! seeds to first failure compares across trees.
@@ -41,12 +44,19 @@
 //! (126, under the history configuration) had the boot witness accept a pending file on the
 //! anchor alone; a staging fault four steps later forced a snapshot over it.
 
-use lsr_sim::{AfterRestart, Judges, Opts, Seed, Weights, replay_line, run_with};
+use lsr_sim::domain::{KnownWrong, known_in};
+use lsr_sim::run::run_ops;
+use lsr_sim::{
+    AfterRestart, ClockLaw, Judges, Opts, Seed, Weights, history, replay_line, run_with,
+};
 
 const STEPS: u32 = 300;
 
-/// What the app's after-restart behaviours reached, summed over the passing runs.
-const REACHED: [&str; 7] = [
+/// What the app's after-restart behaviours reached, and how often the history judge let a
+/// regression through (by a rewind the engine reported, by the driver's excuse, and excused
+/// steps the engine never reported), and how many staged files an undone unlink brought back,
+/// summed over the passing runs.
+const REACHED: [&str; 11] = [
     "app.redo",
     "app.redo_after_loss",
     "app.redo_past_lost_end",
@@ -54,6 +64,10 @@ const REACHED: [&str; 7] = [
     "app.retry_restamped",
     "app.busy",
     "app.busy_past_end",
+    "history.rewound",
+    "history.excused",
+    "history.excused.unreported",
+    "staged.Restored",
 ];
 
 fn env(name: &str, default: u64) -> u64 {
@@ -79,7 +93,11 @@ pub fn weights(seed: Seed) -> Weights {
             .max(hold.parse().expect("LSR_SIM_HOLD is a rate in 1000"));
     }
     weights.block_crash_law |= std::env::var("LSR_SIM_BLOCK_LAW").is_ok();
+    weights.known_wrong |= std::env::var("LSR_SIM_KNOWN_WRONG").is_ok();
     weights.lying_wal_sync |= std::env::var("LSR_SIM_LYING_SYNC").is_ok();
+    if let Ok(weight) = std::env::var("LSR_SIM_APP_IN_TICK") {
+        weights.app_in_tick = weight.parse().expect("LSR_SIM_APP_IN_TICK is a weight");
+    }
     if std::env::var("LSR_SIM_NO_WAL_DAMAGE").is_ok() {
         weights.wal_damage = 0;
     }
@@ -116,6 +134,7 @@ fn seeds_to_first_failure() {
         ..Opts::default()
     };
     let mut failed = Vec::new();
+    let mut known = std::collections::BTreeMap::<String, Vec<u64>>::new();
     let mut reached = [0_u64; REACHED.len()];
     let mut losses = 0_u64;
     for n in base..base.saturating_add(seeds) {
@@ -129,6 +148,12 @@ fn seeds_to_first_failure() {
             losses += u64::from(report.power_losses);
         }
         if let Err(failure) = ran {
+            let drawn = known_in(&history(seed, STEPS, &weights), &weights);
+            if let Some(defect) = KnownWrong::of(&failure.violation, &drawn) {
+                println!("KNOWN {defect:?}: {failure}");
+                known.entry(format!("{defect:?}")).or_default().push(n);
+                continue;
+            }
             println!(
                 "FAILED after {} seeds: {failure}",
                 n.saturating_sub(base).saturating_add(1)
@@ -142,6 +167,13 @@ fn seeds_to_first_failure() {
     }
     let reached: Vec<_> = REACHED.iter().zip(reached).collect();
     println!("passing runs: {losses} power losses; {reached:?}");
+    for (defect, seeds) in &known {
+        println!(
+            "known {defect}: {} seeds, first {:?}",
+            seeds.len(),
+            seeds.first()
+        );
+    }
     println!(
         "{judges:?}: {} failed of seeds from {base}: {failed:?}",
         failed.len()
@@ -151,17 +183,69 @@ fn seeds_to_first_failure() {
 /// Found unaided by the swarm, with nothing written for it: under the planted bug "the boot
 /// anchor accepts any tail in the live generation" (`docs/planted-bugs/anchor-any-tail.patch`),
 /// seed 44's drawn mix, 8 steps in, restores a transaction to pages no commit had. (Found on
-/// the merged head with the boot witness; seed 15 found it before the witness landed.)
+/// the merged head with the boot witness; seed 15 found it before the witness landed.) The
+/// history is recorded and the settings its mix drew are written out, so no change to the
+/// generator or the mix gives it another run.
 #[test]
 fn swarm_seed_44_restores_only_committed_states() {
-    let seed = Seed::new(44);
-    // The mix as it was drawn when the swarm found it: the lagging-listings law came later
-    // and, drawn for this seed, would change which operations the history holds.
-    let weights = Weights {
-        lagging_listings: 0,
-        ..Weights::mixed(seed)
+    let opts = Opts {
+        drawn: true,
+        block_crash_law: false,
+        lying_wal_sync: true,
+        after_restart: AfterRestart::Busy,
+        clock_law: ClockLaw::EachRead,
+        ..Opts::default()
     };
-    if let Err(failure) = run_with(seed, 8, &weights, &Opts::default()) {
+    if let Err(failure) = run_ops(Seed::new(44), crate::histories::seed_0x2c::OPS, &opts) {
         panic!("{failure}");
+    }
+}
+
+/// Found unaided once the app could act inside a tick (`Op::AppInTick`): seed 0xf488c's drawn
+/// mix commits between the engine's last sync step and its TRUNCATE, and the boundary snapshot
+/// took that commit's pages for damage (`DatabasePageMismatch`) until it stopped checking them
+/// (docs/decisions.md D121, plant `boundary-snapshot-keeps-page-table`). Seed 0xf49a2 found it
+/// first, before main's later swarm draws reshuffled the mixes. Main's swarm, without these
+/// operations, kills the plant on none of seeds 1000001 to 1002000. The history is recorded as
+/// that mix drew it, since main's overlapping-fault draw has since moved the seed's mix.
+#[test]
+fn swarm_seed_0xf488c_takes_no_commit_before_a_truncate_for_damage() {
+    let opts = Opts {
+        drawn: true,
+        block_crash_law: false,
+        lying_wal_sync: false,
+        after_restart: AfterRestart::Retry,
+        clock_law: ClockLaw::PerTick,
+        staging_fs: true,
+        ..Opts::default()
+    };
+    if let Err(failure) = run_ops(
+        Seed::new(0xf488c),
+        crate::histories::seed_0xf488c::OPS,
+        &opts,
+    ) {
+        panic!("{failure}");
+    }
+}
+
+/// Seed 0x753's swarm mix under the block crash law on a disk that lies about the engine's WAL
+/// sync, with the app redoing its commits after a restart: staging is wiped, a power loss takes
+/// WAL frames the replica already holds, the redo regrows them byte for byte, and the next boot
+/// rightly continues on the replica's newest file. The history judge called the next `Latest`
+/// an unreported step back, because it remembered the previous restore as the nodes that held
+/// its content then, not the node the redo rebuilt with the same content later.
+#[test]
+fn swarm_seed_0x753_a_redo_that_rebuilds_the_restored_state_is_not_a_loss() {
+    let opts = Opts {
+        drawn: true,
+        block_crash_law: true,
+        lying_wal_sync: true,
+        after_restart: AfterRestart::Redo,
+        clock_law: ClockLaw::EachRead,
+        staging_fs: false,
+        ..Opts::default()
+    };
+    if let Err(failure) = run_ops(Seed::new(0x753), crate::histories::seed_0x753::OPS, &opts) {
+        panic!("{}", failure.message(failure.steps));
     }
 }

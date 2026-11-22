@@ -188,24 +188,17 @@ fn restore_reads_chunks_side_by_side() {
     assert_eq!(restored.files(), 3);
     println!("restore {tally:?} chunks {chunks:?}");
     let total: usize = chunks.iter().sum();
-    // One-byte GETs of the keys named past the listing, side by side for each transaction
-    // the walk looks at (the probe names them from the listing's starts: level 0 after 3,
-    // level 1 from 2), then one GET per chunk.
-    let listed = block_on(lsr_core::Inventory::load(&store)).unwrap();
-    let starts = lsr_core::Starts::of(&listed);
-    let past = lsr_core::fresh_probe_reads(listed.newest(), &starts);
-    let past = usize::try_from(past).unwrap();
-    let walked = usize::try_from(lsr_core::PROBE_GAP).unwrap() + 1;
-    assert_eq!(tally.get, total + past, "one GET per chunk");
+    // One-byte GETs of the three keys named past the listing, side by side, then one GET per
+    // chunk.
+    assert_eq!(tally.get, total + 3, "one GET per chunk");
     assert_eq!(tally.head, 0, "Latest reads no created-at time");
     let width = READ_WIDTH;
     let reads: usize = chunks.iter().map(|n| waves(*n, width)).sum();
     let listing = waves(LEVELS, width);
-    let depth = listing + walked + reads;
+    let depth = listing + 1 + reads;
     assert!(
         tally.rounds <= depth,
-        "{} round trips, bound {depth} = {listing} listing + {walked} past it + {reads} reads \
-         ({tally:?})",
+        "{} round trips, bound {depth} = {listing} listing + 1 past it + {reads} reads ({tally:?})",
         tally.rounds
     );
     assert!(tally.widest <= width, "{} in flight", tally.widest);

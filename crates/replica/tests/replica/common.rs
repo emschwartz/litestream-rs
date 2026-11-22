@@ -21,7 +21,7 @@ use lsr_core::{
 use lsr_ltx::TxidRange;
 use lsr_replica::{
     Booted, Config, DynStore, FakeClockHandle, Health, Phase, Replicator, RestoreTarget, Runtime,
-    Stopped, Task, Timestamp, restore,
+    Stopped, Task, Timestamp, restore, waiting,
 };
 use lsr_store_fs::FsStore;
 use rusqlite::Connection;
@@ -30,10 +30,9 @@ use tempfile::TempDir;
 /// The fake clock's start: 2023-11-14, any fixed instant would do.
 pub const START: Timestamp = Timestamp::from_unix_millis(1_700_000_000_000);
 
-/// Long enough that a test never sees it run out unless it is stuck. On the fake clock it
-/// never runs out at all, since the clock moves only when a test moves it: [`LOOKS`] is what
-/// ends a stuck wait there.
-pub const PATIENCE: Duration = Duration::from_secs(600);
+/// Long enough that a test never sees it run out unless it is stuck; on the fake clock
+/// [`LOOKS`] is what ends a stuck wait ([`lsr_replica::waiting`]).
+pub use lsr_replica::waiting::{LOOKS, PATIENCE};
 
 /// A database in a directory of its own, with the application's connection and a replica beside it.
 pub struct Site {
@@ -130,11 +129,6 @@ pub fn config() -> Config {
     Config::default()
 }
 
-/// How many times a wait looks at the health before it gives up. The replicator wakes a
-/// waiter on every change and at least every [`lsr_replica::CALLER_SLICE`], so a wait that sees nothing
-/// change fails after about a minute, where a deadline on the fake clock would never pass.
-pub const LOOKS: u32 = 1_200;
-
 /// Waits until `done` holds, failing the test if it never does: within [`PATIENCE`] on
 /// the replicator's clock, and within [`LOOKS`] looks whatever the clock does.
 pub fn wait(replicator: &Replicator, done: impl Fn(&Health) -> bool) -> Health {
@@ -173,22 +167,38 @@ pub fn stopped(replicator: &Replicator) -> Stopped {
 /// [`stopped`] for a replicator on a fake clock: the clock moves `step` at a time while the
 /// stop is pending, so a drain that waits out a retry's backoff (a busy database or a failed
 /// call during the drain) ends instead of waiting on a clock nobody moves. Fails the test
-/// after [`LOOKS`] steps.
+/// after [`LOOKS`] steps. Each move waits for the thread's park to have looked at the clock
+/// it set.
 pub fn stopped_moving(replicator: &Replicator, clock: &FakeClockHandle, step: Duration) -> Stopped {
     let stop = replicator.stop(PATIENCE);
     let gone = |health: &Health| matches!(health.phase, Phase::Stopped(_) | Phase::Gone(_));
     for _ in 0..LOOKS {
-        let looks = Cell::new(0_u32);
-        let seen = replicator.wait_until(PATIENCE, |health| {
-            looks.set(looks.get().saturating_add(1));
-            gone(health) || looks.get() >= 2
-        });
-        if seen.as_ref().is_some_and(gone) {
+        if seen_or(replicator, clock, &gone).is_some() {
             return stop.wait();
         }
         clock.advance(step);
     }
     panic_with(&replicator.health())
+}
+
+/// Moves the fake clock `step` at a time, at most `steps` times, until `done` holds; fails the
+/// test if it never does ([`lsr_replica::waiting::moved_until`]).
+pub fn moved_until(
+    replicator: &Replicator,
+    clock: &FakeClockHandle,
+    (step, steps): (Duration, u32),
+    done: impl Fn(&Health) -> bool,
+) -> Health {
+    waiting::moved_until(replicator, clock, (step, steps), done)
+        .unwrap_or_else(|stuck| panic_with(&stuck.0))
+}
+
+fn seen_or(
+    replicator: &Replicator,
+    clock: &FakeClockHandle,
+    done: &impl Fn(&Health) -> bool,
+) -> Option<Health> {
+    waiting::seen_or(replicator, clock, done).unwrap_or_else(|stuck| panic_with(&stuck.0))
 }
 
 fn panic_with(health: &Health) -> ! {
@@ -260,6 +270,11 @@ impl Faulty {
 
 impl ObjectStore for Faulty {
     type Upload = <FsStore as ObjectStore>::Upload;
+
+    /// Forwards to the store it wraps.
+    async fn remove_scratch(&self) -> Result<u64, StoreError> {
+        self.inner.remove_scratch().await
+    }
 
     async fn list(
         &self,

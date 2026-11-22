@@ -66,11 +66,21 @@ pub fn done(done: &Done) -> String {
             created_at_fallbacks,
             json: true,
         } => files_json(inventory, *created_at_fallbacks),
+        Done::TakenOver { through, meta } => taken_over_text(*through, meta),
         Done::Daemon(_) => String::new(),
         Done::DaemonHelp(text) => (*text).to_owned(),
         Done::ConfigChecked(checked) => checked.to_string(),
         Done::Help => help(),
         Done::Version => format!("lsr {}\n", env!("CARGO_PKG_VERSION")),
+    }
+}
+
+/// `lsr take-over`'s line.
+fn taken_over_text(through: Option<Txid>, meta: &Path) -> String {
+    match through {
+        Some(txid) => format!("takeover recorded through {txid} in {}\n", meta.display()),
+        None => "the replica is empty: there is nothing to take over and nothing was recorded\n"
+            .to_owned(),
     }
 }
 
@@ -88,6 +98,9 @@ pub fn help() -> String {
     let mut out = String::from("lsr: restore, verify and list a Litestream file replica\n");
     for command in CommandName::ALL {
         let mut usage = format!("\nlsr {}", command.word());
+        if let Some(positional) = command.positional() {
+            put!(usage, " {positional}");
+        }
         for spec in FLAGS.iter().filter(|s| s.commands.contains(&command)) {
             let value = spec.value.map_or(String::new(), |v| format!(" {v}"));
             let flag = format!("{}{value}", spec.name);
@@ -114,6 +127,7 @@ pub fn help() -> String {
     for exit in Exit::ALL {
         putln!(out, "  {:<3}{}", exit.code(), exit.meaning());
     }
+    out.push_str("  replicate exits 1 on any failure but 4, as Go Litestream does\n");
     out
 }
 
@@ -263,12 +277,23 @@ pub fn warnings(done: &Done) -> String {
     };
     match &done.finished {
         Finished::Restored { restored, .. } => {
-            restored.inside_file().map_or_else(String::new, |file| {
+            let mut out = restored.inside_file().map_or_else(String::new, |file| {
                 inside_warning(&file, restored.reached())
-            })
+            });
+            if restored.writer_outpaced() {
+                out.push_str(&outpaced_warning(restored.reached()));
+            }
+            out
         }
         Finished::Planned { .. } | Finished::Skipped { .. } => String::new(),
     }
+}
+
+fn outpaced_warning(reached: Txid) -> String {
+    format!(
+        "warning: a writer kept adding files while the replica was listed; restored the state at \
+         transaction {reached}, which is committed but may be behind the writer by now\n"
+    )
 }
 
 fn inside_warning(file: &FileKey, reached: Txid) -> String {
@@ -330,6 +355,9 @@ fn restored_json(
     ];
     if let Some(file) = restored.inside_file() {
         fields.push(("inside_file", quote(&key_path(&file))));
+    }
+    if restored.writer_outpaced() {
+        fields.push(("writer_outpaced", "true".to_owned()));
     }
     let mut out = object(&fields);
     out.push('\n');
@@ -508,6 +536,7 @@ fn restored_text(
         restored.files(),
         restored.bytes_read(),
     );
+    putln!(out, "takeover recorded through {}", restored.reached());
     // Only an as-of restore over a lazily listed store reads created-at times; the line
     // for every other restore stays as it was.
     if restored.created_at_read() > 0 {

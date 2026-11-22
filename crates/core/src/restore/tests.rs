@@ -298,6 +298,11 @@ fn a_sink_failing_its_checksum_read_never_publishes() {
             ..
         })
     ));
+    let message = result.unwrap_err().to_string();
+    assert!(
+        message.starts_with("sink failed to checksum: "),
+        "{message}"
+    );
     assert_eq!(sink.published(), None);
 }
 
@@ -535,67 +540,6 @@ fn a_newest_file_the_listing_hides_fails_the_restore_and_publishes_nothing() {
     assert_eq!(sink.published(), None);
 }
 
-/// A bucket rolled back under a writer that went on above it leaves a hole right after
-/// what a lagging listing shows (simulator seed 0x12e on the overlapping-faults branch). The
-/// read past the listing used to look at the next transaction only, found the hole, and
-/// published the listing's older state as the newest. It now walks on as the engine's own
-/// probe does and finds the file past the hole.
-#[test]
-fn a_hole_right_after_a_lagging_listing_does_not_hide_the_files_past_it() {
-    let store = MemStore::new();
-    put_spec(&store, 9, &Spec::plain(512, 1, 1, 1, &[(1, 1)]));
-    put_spec(&store, 9, &Spec::plain(512, 1, 1, 3, &[(1, 3)]));
-    put_spec(&store, 0, &Spec::plain(512, 1, 3, 3, &[(1, 3)]));
-    let mut store = Wrapped::new(store);
-    store.unlisted.extend([key(9, 1, 3), key(0, 3, 3)]);
-    let (result, sink) = run(&store, RestoreTarget::Latest);
-    assert!(
-        matches!(
-            result,
-            Err(RestoreError::ListingBehind { attempts: 3, found }) if found == key(0, 3, 3)
-        ),
-        "{result:?}"
-    );
-    assert_eq!(sink.published(), None);
-}
-
-/// A level-0 file that spans several transactions (Go may write one) starts after the
-/// listed level-0 files, so the walk names it from there and a listing that hides it is
-/// told from a whole one.
-#[test]
-fn a_hidden_level_zero_file_of_several_transactions_is_found_from_where_level_zero_ends() {
-    let store = MemStore::new();
-    put_spec(&store, 9, &Spec::plain(512, 1, 1, 1, &[(1, 1)]));
-    put_spec(&store, 0, &Spec::plain(512, 1, 1, 1, &[(1, 1)]));
-    put_spec(&store, 0, &Spec::plain(512, 1, 2, 4, &[(1, 4)]));
-    let mut store = Wrapped::new(store);
-    store.unlisted.insert(key(0, 2, 4));
-    let (result, sink) = run(&store, RestoreTarget::Latest);
-    assert!(
-        matches!(
-            result,
-            Err(RestoreError::ListingBehind { attempts: 3, found }) if found == key(0, 2, 4)
-        ),
-        "{result:?}"
-    );
-    assert_eq!(sink.published(), None);
-}
-
-/// The residue, pinned so a change that closes it says so (known wrong in
-/// `docs/BEHAVIOR.md`): a hole wider than the walk's gap right after a lagging listing's end
-/// hides every newer file, and the restore publishes the listing's older state as the newest.
-#[test]
-fn a_hole_wider_than_the_walk_past_a_lagging_listing_still_hides_the_newest() {
-    let store = MemStore::new();
-    put_spec(&store, 9, &Spec::plain(512, 1, 1, 1, &[(1, 1)]));
-    let past_hole = 2 + u64::from(crate::probe::PROBE_GAP) + 1;
-    put_spec(&store, 9, &Spec::plain(512, 1, 1, past_hole, &[(1, 7)]));
-    let mut store = Wrapped::new(store);
-    store.unlisted.insert(key(9, 1, past_hole));
-    let (result, _) = run(&store, RestoreTarget::Latest);
-    assert_eq!(result.unwrap().reached(), txid(1));
-}
-
 #[test]
 fn a_hidden_snapshot_past_the_listing_fails_an_as_of_restore() {
     let store = MemStore::new();
@@ -636,6 +580,83 @@ fn a_listing_that_shows_nothing_over_a_first_file_is_not_an_empty_replica() {
     }
 }
 
+/// A replicator keeps uploading while the restore runs: after each listing the next
+/// transaction's file lands, so each read past the listing finds a file the listing could not
+/// have shown. Every next listing shows the file found before it, so none of them lags; the
+/// restore follows the writer and publishes the newest state once it stops. It used to count
+/// each new file as a lagging listing and fail with `ListingBehind` after three (seen on MinIO
+/// with the replicator running, history `every_restore_of_a_minio_replica_is_a_node_of_the_history`).
+#[test]
+fn a_restore_racing_a_writer_follows_it_and_never_calls_the_listing_behind() {
+    let store = MemStore::new();
+    put_spec(&store, 9, &Spec::plain(512, 1, 1, 1, &[(1, 1)]));
+    let store = Wrapped::new(store);
+    for n in 2..=7_u64 {
+        let spec = Spec::plain(512, 1, n, n, &[(1, u8::try_from(n).unwrap())]);
+        store
+            .put_after_list
+            .lock()
+            .unwrap()
+            .push_back((key(0, n, n), spec.encode()));
+    }
+    let (result, sink) = run(&store, RestoreTarget::Latest);
+    let restored = result.unwrap();
+    assert!(restored.reached().get() >= 2, "{restored:?}");
+    assert!(!restored.writer_outpaced(), "{restored:?}");
+    let reached = u8::try_from(restored.reached().get()).unwrap();
+    assert_eq!(seeds(&sink.published().unwrap()), [reached]);
+}
+
+/// A put in flight when the restore reads past its listing: the read finds nothing, and the
+/// put commits right after, as R2 allows. The listing was whole when it was read, so the
+/// newest state it lists is the newest the replica held then; the put lands during the
+/// restore, after the probe, which makes it a write concurrent with the restore and not one
+/// the restore owes. The restore publishes the listed newest and makes no error of it.
+#[test]
+fn a_put_that_lands_after_the_read_past_the_listing_is_concurrent_and_not_owed() {
+    let store = MemStore::new();
+    put_spec(&store, 9, &Spec::plain(512, 1, 1, 1, &[(1, 1)]));
+    put_spec(&store, 0, &Spec::plain(512, 1, 2, 2, &[(1, 2)]));
+    let store = Wrapped::new(store);
+    let late = Spec::plain(512, 1, 3, 3, &[(1, 3)]);
+    *store.put_after_miss.lock().unwrap() = Some((key(0, 3, 3), late.encode()));
+    let (result, sink) = run(&store, RestoreTarget::Latest);
+    assert_eq!(result.unwrap().reached(), txid(2));
+    assert_eq!(seeds(&sink.published().unwrap()), [2]);
+    assert!(
+        store.put_after_miss.lock().unwrap().is_none(),
+        "the put landed during the restore"
+    );
+}
+
+/// A writer that never pauses: the restore follows it for a bounded number of listings, all of
+/// which caught up, then takes the next listing as it stands and publishes its newest state,
+/// saying so, rather than chase for ever or fail: no restore could finish against a busy
+/// writer otherwise.
+#[test]
+fn a_restore_outpaced_by_a_writer_publishes_the_last_listing_and_says_so() {
+    let store = MemStore::new();
+    put_spec(&store, 9, &Spec::plain(512, 1, 1, 1, &[(1, 1)]));
+    let store = Wrapped::new(store);
+    for n in 2..=200_u64 {
+        let spec = Spec::plain(512, 1, n, n, &[(1, u8::try_from(n % 251).unwrap())]);
+        store
+            .put_after_list
+            .lock()
+            .unwrap()
+            .push_back((key(0, n, n), spec.encode()));
+    }
+    let (result, sink) = run(&store, RestoreTarget::Latest);
+    let restored = result.unwrap();
+    assert!(restored.writer_outpaced(), "{restored:?}");
+    assert!(
+        restored.reached().get() > u64::from(MAX_CHASE),
+        "{restored:?}"
+    );
+    let reached = u8::try_from(restored.reached().get() % 251).unwrap();
+    assert_eq!(seeds(&sink.published().unwrap()), [reached]);
+}
+
 #[test]
 fn a_txid_restore_takes_no_read_past_the_listing() {
     let store = lagging(&[key(0, 3, 3)]);
@@ -652,13 +673,12 @@ fn a_whole_listing_costs_one_read_per_named_key_past_it() {
     let (result, sink) = run(&store, RestoreTarget::Latest);
     assert_eq!(result.unwrap().attempts(), 1);
     assert_eq!(seeds(&sink.published().unwrap()), [3]);
-    let reads = u64::try_from(store.reads.load(Ordering::Relaxed)).unwrap();
-    // The three files of the chain, and the keys named for each transaction the walk past
-    // the listing looks at.
-    let listed = block_on(Inventory::load(&store)).unwrap();
-    let starts = crate::probe::Starts::of(&listed);
-    let past = crate::upload::fresh_probe_reads(listed.newest(), &starts);
-    assert_eq!(reads, 3 + past);
+    // The three files of the chain, and the keys named for transaction 4.
+    let past = crate::probe::reads_per_transaction(txid(4));
+    assert_eq!(
+        u64::try_from(store.reads.load(Ordering::Relaxed)).unwrap(),
+        3 + past
+    );
 }
 
 #[test]
@@ -688,6 +708,35 @@ fn a_store_error_other_than_not_found_ends_the_restore_without_retry() {
     let result = block_on(restore(&store, RestoreTarget::Latest, sink.clone()));
     assert!(matches!(result, Err(RestoreError::Store(err)) if err == fault));
     assert_eq!(sink.calls(SinkOp::Reset), 0);
+    assert_eq!(sink.published(), None);
+}
+
+/// A listing that misses a file a writer was putting in place (a directory read racing a
+/// rename on a file replica) shows a gap the replica does not have. Seen on the LazyFS rig:
+/// "gap: the history reaches 0bf8 and resumes at 0bfa" while 0bf9 was being uploaded; the
+/// same restore run again a moment later succeeded. A gap plans again on a fresh listing.
+#[test]
+fn a_gap_from_a_listing_that_raced_a_writer_is_listed_again() {
+    let store = Wrapped::new(four_file_replica());
+    store.hide_once.lock().unwrap().insert(key(0, 3, 3));
+    let (result, sink) = run(&store, RestoreTarget::Latest);
+    let restored = result.unwrap();
+    assert_eq!(restored.attempts(), 2);
+    assert_eq!(restored.reached(), txid(4));
+    assert!(sink.published().is_some());
+}
+
+/// A gap that every listing shows is the replica's: the restore refuses it as before.
+#[test]
+fn a_gap_every_listing_shows_is_refused() {
+    let inner = four_file_replica();
+    block_on(inner.delete(&[key(0, 3, 3)])).unwrap();
+    let store = Wrapped::new(inner);
+    let (result, sink) = run(&store, RestoreTarget::Latest);
+    assert!(
+        matches!(&result, Err(RestoreError::NoPlan(plan)) if matches!(plan.outcome(), PlanOutcome::Gap { .. })),
+        "{result:?}"
+    );
     assert_eq!(sink.published(), None);
 }
 
@@ -912,7 +961,7 @@ fn a_file_larger_than_one_chunk_is_read_in_several_reads() {
     let restored = result.unwrap();
     // One-byte reads of the keys named past the listing (nothing there), then one full
     // chunk, then the short rest: no empty read follows.
-    let past = crate::upload::fresh_probe_reads(Some(txid(1)), &crate::probe::Starts::default());
+    let past = crate::probe::reads_per_transaction(txid(2));
     assert_eq!(
         u64::try_from(store.reads.load(Ordering::Relaxed)).unwrap(),
         past + 2
@@ -955,11 +1004,25 @@ fn a_sink_failing_at_each_operation_never_publishes() {
 /// but not durable, and the restore error carries that answer.
 #[test]
 fn a_failed_publish_says_what_it_left_at_the_target() {
-    for left in [PublishLeft::Nothing, PublishLeft::VisibleNotDurable] {
+    let outcomes = [
+        (PublishLeft::Nothing, "nothing was published"),
+        (
+            PublishLeft::VisibleNotDurable,
+            "the database is visible but may not survive a crash",
+        ),
+    ];
+    for (left, says) in outcomes {
         let store = four_file_replica();
         let sink = MemSink::new();
         sink.fail_publish(left);
         let result = block_on(restore(&store, RestoreTarget::Latest, sink.clone()));
+        let message = result.as_ref().err().map(ToString::to_string);
+        assert!(
+            message
+                .as_deref()
+                .is_some_and(|m| m.starts_with(&format!("publish failed, {says}: "))),
+            "{message:?}"
+        );
         let Err(RestoreError::Publish { left: got, source }) = result else {
             panic!("{left:?}: {result:?}");
         };

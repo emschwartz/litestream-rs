@@ -32,8 +32,8 @@ use crate::env::{Entropy, Sleeper};
 use crate::layout::CreatedAt;
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::store::{
-    BatchKind, CorruptCause, ListAt, Listing, ObjectStore, PageLimit, ReadAt, ReadLen, StoreError,
-    Upload, WriteMode,
+    BatchKind, ListAt, Listing, ObjectStore, PageLimit, ReadAt, ReadLen, StoreError, Upload,
+    WriteMode,
 };
 
 /// How a [`StoreError`] should be handled.
@@ -317,6 +317,11 @@ impl<S: ObjectStore, P: Sleeper, E: Entropy> ObjectStore for Retrying<S, P, E> {
         core.run(|| core.inner.delete(keys)).await
     }
 
+    async fn remove_scratch(&self) -> Result<u64, StoreError> {
+        let core = &*self.core;
+        core.run(|| core.inner.remove_scratch()).await
+    }
+
     fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {
         self.core.inner.batch_width(kind)
     }
@@ -376,7 +381,7 @@ impl<S: ObjectStore, P: Sleeper, E: Entropy> ObjectStore for Retrying<S, P, E> {
 ///
 /// A commit whose stored size differs deletes the object before it reports
 /// the error, so a mismatch never leaves a listable file; see
-/// [`CorruptCause::CommitSizeMismatch`] for what the caller may conclude.
+/// [`crate::store::CorruptCause::CommitSizeMismatch`] for what the caller may conclude.
 #[derive(Debug)]
 pub struct RetryingUpload<S: ObjectStore, P, E> {
     inner: S::Upload,
@@ -397,22 +402,12 @@ impl<S: ObjectStore, P: Sleeper, E: Entropy> Upload for RetryingUpload<S, P, E> 
     async fn commit(self) -> Result<FileInfo, StoreError> {
         Counters::bump(&self.core.counters.calls);
         let info = self.inner.commit().await?;
-        if info.size == self.written {
-            return Ok(info);
-        }
-        // Safe to delete: the caller still holds what it uploaded until a
-        // later verified listing, so the cost of a wrong delete is a re-upload.
         let core = &*self.core;
         let keys = [self.key];
-        let removed = core.run(|| core.inner.delete(&keys)).await.is_ok();
-        Err(StoreError::Corrupt {
-            key: Some(self.key),
-            cause: CorruptCause::CommitSizeMismatch {
-                wrote: self.written,
-                stored: info.size,
-                removed,
-            },
+        crate::checked::settle(info, self.key, self.written, || {
+            core.run(|| core.inner.delete(&keys))
         })
+        .await
     }
 
     async fn abort(self) -> Result<(), StoreError> {

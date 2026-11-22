@@ -81,7 +81,9 @@ jobs:
       - run: just commit-check origin/${{ github.base_ref }}
 
   # The S3 store against a real server: MinIO in Docker, with the throwaway local credentials
-  # already in scripts/minio.sh. Nothing else is configured or reachable.
+  # already in scripts/minio.sh, and Toxiproxy in front of it for the network-fault tests (built
+  # from source at a pinned version by scripts/toxiproxy.sh, hence Go). Nothing else is
+  # configured or reachable.
   test-s3:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -91,6 +93,9 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest,just
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
       - run: just test-s3
 
   # The pinned Go versions: committed fixtures plus the live tests. The other releases and
@@ -110,6 +115,14 @@ jobs:
       - run: just compat
         env:
           LSR_ALTERNATION_SEED: "1"
+      # A failed alternation keeps its fixture (database, staging, replica and both processes'
+      # logs) under the temp directory; uploaded, the failure can be classified afterwards.
+      - uses: actions/upload-artifact@v5
+        if: failure()
+        with:
+          name: compat-fixtures-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/lsr-alternation-*
+          if-no-files-found: ignore
 
   # Go and Rust on one S3 bucket: MinIO in Docker, as test-s3, with the throwaway credentials in
   # scripts/minio.sh. The recipe unsets every AWS_* and LITESTREAM_* variable and the tests

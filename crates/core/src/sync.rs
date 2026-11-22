@@ -33,6 +33,7 @@ use lsr_wal::{
 };
 use std::io::{Read, Seek};
 
+use crate::checked::Checked;
 use crate::fault::{BugSite, Clamped, Fault, SnapshotCause, StopCause};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::pages::{PageChecksumTable, snapshot_clears};
@@ -141,6 +142,11 @@ pub enum Synced {
         /// database the WAL holds nothing of): what the checkpoint policy's
         /// "was that only our own bump frame" question needs.
         txs: u32,
+        /// Whether the file may change the database: false only when every page it holds
+        /// came from the WAL with the digest the page checksum table already held, at the same
+        /// size. The driver's and the checkpoint's own writes rewrite page 1 unchanged; such a
+        /// file holds no commit of the application's (`crate::failstop`).
+        changes: bool,
     },
 }
 
@@ -342,9 +348,11 @@ fn below_committed<R: Read + Seek>(wal: &mut WalReader<R>, stop: Fault) -> Fault
 fn scan_fault<R: Read + Seek>(wal: &mut WalReader<R>, err: WalError) -> Fault {
     match err {
         WalError::CorruptBelowCommitted { .. } => {
+            mark!(Run4);
             below_committed(wal, Fault::WalCorruptBelowCommitted)
         }
         WalError::TruncatedBelowCommitted { .. } => {
+            mark!(Run5);
             below_committed(wal, Fault::WalTruncatedBelowCommitted)
         }
         WalError::Io(_)
@@ -519,14 +527,18 @@ pub(crate) async fn stage<R: Read + Seek, P: PageSource, L: ObjectStore>(
 ) -> Result<(FileInfo, Option<LastPage>, Witnessed), Fault> {
     // A staged file replaces a torn one under its key, and a snapshot (level 9)
     // shares its key with Go's snapshot of the same transaction: both replace.
-    let mut upload = store
-        .begin_upload(key, header.fields().timestamp, WriteMode::Replace)
+    let mut upload = Checked::begin(store, key, header.fields().timestamp, WriteMode::Replace)
         .await
         .map_err(|err| map_store(&err))?;
     match fill(&mut upload, header, plan, wal, db, pages, map_store).await {
         Ok(filled) => {
             let file = upload.commit().await.map_err(|err| map_store(&err))?;
-            let token = Witnessed::made_here(*key, filled.bytes, filled.checksum);
+            let token = Witnessed::made_here(
+                *key,
+                filled.bytes,
+                filled.checksum,
+                header.fields().timestamp,
+            );
             Ok((file, filled.last, token))
         }
         Err(fault) => {
@@ -620,6 +632,7 @@ async fn run<R: Read + Seek, P: PageSource, L: ObjectStore>(
         return Ok(Synced::IndexReset);
     }
     if nothing && let Some(held) = start.held {
+        mark!(Run2);
         return Ok(Synced::Idle(ReachedEnd::new(
             held.with_cursor(scanned.cursor),
             epoch,
@@ -630,7 +643,7 @@ async fn run<R: Read + Seek, P: PageSource, L: ObjectStore>(
     let plan = plan_pages(&scanned.map, start.prev_commit, commit, page_size);
     let header = created_at(&start, &scanned, wal, commit, cfg.node_id, now)?;
     let key = FileKey::new(Level::ZERO, TxidRange::single(start.txid));
-    let (file, last_written, witness) = stage(
+    let (file, last_written, witness, changes) = stage_recorded(
         staging,
         &key,
         header,
@@ -638,10 +651,9 @@ async fn run<R: Read + Seek, P: PageSource, L: ObjectStore>(
         wal,
         db,
         pages,
-        Fault::from_staging,
+        start.prev_commit,
     )
     .await?;
-    record(pages, &plan, commit);
     let last_page = match (scanned.last_frame, last_written) {
         (Some(frame), _) => LastPage::of_frame(&frame),
         (None, Some(page)) => page,
@@ -663,6 +675,7 @@ async fn run<R: Read + Seek, P: PageSource, L: ObjectStore>(
         witness,
         end,
         txs: scanned.txs,
+        changes,
     })
 }
 
@@ -693,6 +706,55 @@ fn forget(pages: &mut PageChecksumTable, step: &Step, page_size: PageSize) {
     {
         pages.clear();
     }
+}
+
+/// [`stage`] from the staging store, then [`record`]: also whether the file may change the
+/// database, judged against the table before it records the file's pages.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "stage's arguments, and the size the file commits"
+)]
+async fn stage_recorded<R: Read + Seek, P: PageSource, L: ObjectStore>(
+    staging: &L,
+    key: &FileKey,
+    header: Header,
+    plan: &[PageFrom],
+    wal: &mut WalReader<R>,
+    db: &mut P,
+    pages: &mut PageChecksumTable,
+    prev_commit: Option<u32>,
+) -> Result<(FileInfo, Option<LastPage>, Witnessed, bool), Fault> {
+    let commit = NonZeroU32::new(header.fields().commit).ok_or_else(|| BugSite::Encode.hit())?;
+    let changes = changes_pages(pages, plan, prev_commit, commit);
+    let (file, last, witness) = stage(
+        staging,
+        key,
+        header,
+        plan,
+        wal,
+        db,
+        pages,
+        Fault::from_staging,
+    )
+    .await?;
+    record(pages, plan, commit);
+    Ok((file, last, witness, changes))
+}
+
+/// Whether a file of `plan` may change the database whose page checksum table is `pages`: a
+/// page the table does not hold, holds with another digest, or read from the database file,
+/// or a size other than `prev_commit`, all may.
+fn changes_pages(
+    pages: &PageChecksumTable,
+    plan: &[PageFrom],
+    prev_commit: Option<u32>,
+    commit: NonZeroU32,
+) -> bool {
+    prev_commit != Some(commit.get())
+        || plan.iter().any(|page| match page {
+            PageFrom::Wal(frame) => pages.get(frame.pgno()) != Some(frame.digest()),
+            PageFrom::Db(_) => true,
+        })
 }
 
 /// Records the staged WAL pages, the newest copy of each, and forgets pages the

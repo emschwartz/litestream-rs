@@ -10,19 +10,25 @@
 //! - at every oracle check and at random moments (one step in [`ONE_IN`], from a seed stream
 //!   nothing else draws from, so a seed's history is unchanged): `Latest`, and `AsOf` at
 //!   [`INSTANTS`] random instants;
-//! - at every oracle check, every restore point from 1 to the newest, in order (the sweep);
+//! - at every oracle check, every restore point from 1 to the newest, in order (the sweep), and
+//!   `AsOf` one millisecond after each of the [`BOUNDARIES`] newest created-at times the replica
+//!   holds: the instant at which a file stamped before a commit it carries restores that commit
+//!   too early, which a random instant almost never lands on;
 //! - after a drain that finished, `Latest` is the local head (lag bound 0).
 //!
 //! What it may not judge: a restore that stops on an object the store damaged, or that the
 //! planner refuses, is counted and left to the oracle. A bucket rollback or an operator's
-//! delete of the newest file is a regression the run caused itself, so it is excused once.
+//! delete of the newest file is a regression the run caused itself, so it is excused once, and
+//! a power loss records a rewind; either excuse holds only if the engine reported a loss after
+//! it ([`History::signal`], under [`Signals::Required`]): the driver's record alone never
+//! explains a `Latest` that went back.
 
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    AsOfInside, Database, Entropy, FileKey, Inventory, MemSink, MemStore, RestoreError,
-    RestoreOptions, RestoreTarget, SeededEntropy, restore_with,
+    AsOfInside, CreatedAtSource, Database, Entropy, FileKey, Inventory, MemSink, MemStore,
+    RestoreError, RestoreOptions, RestoreTarget, SeededEntropy, restore_with,
 };
-use lsr_history::{AheadMode, Counts, Digest, Judge, Log, NodeId};
+use lsr_history::{AheadMode, Counts, Digest, Judge, Log, NodeId, Signals};
 use lsr_ltx::{Timestamp, Txid};
 
 use crate::model::{Model, PageImage};
@@ -33,9 +39,11 @@ use crate::reach::Reach;
 pub const ONE_IN: u64 = 8;
 /// `AsOf` instants per judgment.
 pub const INSTANTS: u32 = 3;
+/// Created-at times, newest first, whose next millisecond is judged at every oracle check.
+pub const BOUNDARIES: usize = 8;
 
 /// The digest of a model image.
-fn image_digest(image: &PageImage) -> Digest {
+pub(crate) fn image_digest(image: &PageImage) -> Digest {
     let pages: Vec<_> = (1..=image.db_size())
         .filter_map(|pgno| image.page(pgno))
         .collect();
@@ -124,6 +132,8 @@ pub struct History {
     rng: SeededEntropy,
     first: i64,
     unjudged: u32,
+    // States the world adopted from damage, not from a commit: no restore may give one.
+    corrupt: std::collections::BTreeSet<Digest>,
 }
 
 impl History {
@@ -136,11 +146,12 @@ impl History {
             .map_or_else(Digest::genesis, |rec| image_digest(&rec.image));
         Self {
             log: Log::new(root, now.unix_millis()),
-            judge: Judge::new(mode),
+            judge: Judge::new(mode).with_signals(Signals::Required),
             nodes: vec![NodeId::ROOT],
             rng: SeededEntropy::new(seed),
             first: now.unix_millis(),
             unjudged: 0,
+            corrupt: std::collections::BTreeSet::new(),
         }
     }
 
@@ -167,8 +178,21 @@ impl History {
         self.log.note_time(now.unix_millis());
     }
 
+    /// The model's newest image is a state the world adopted from damage (a flipped bit in a
+    /// committed frame), not a commit: the model must follow the database to go on, but a
+    /// restore that gives this state is a failure, not a node of the history.
+    pub fn adopted_corruption(&mut self, model: &Model) {
+        self.corrupt.insert(image_digest(&model.newest_image()));
+    }
+
+    /// The engine reported a loss of history: a snapshot cause that says so, or a stop on a
+    /// regressed replica.
+    pub fn signal(&mut self) {
+        self.judge.signal(&self.log);
+    }
+
     /// The run took files from the replica itself.
-    pub const fn excuse_regression(&mut self) {
+    pub fn excuse_regression(&mut self) {
         self.judge.excuse_regression();
     }
 
@@ -196,14 +220,14 @@ impl History {
         ask: Ask,
     ) -> Result<(), Violation> {
         self.log.note_time(now.unix_millis());
-        let newest = block_on(Inventory::load(remote))
-            .map_err(|err| bug_fault(format!("listing the replica: {err}")))?
-            .newest();
-        let Some(newest) = newest else {
+        let inventory = block_on(Inventory::load(remote))
+            .map_err(|err| bug_fault(format!("listing the replica: {err}")))?;
+        let Some(newest) = inventory.newest() else {
             return Ok(());
         };
         if ask.sweep {
             self.sweep(remote, newest, damaged)?;
+            self.boundaries(remote, inventory.files(), damaged)?;
         }
         if let Restored::Content(digest) = self.restored(remote, RestoreTarget::Latest, damaged)? {
             self.judge
@@ -230,6 +254,33 @@ impl History {
         Ok(())
     }
 
+    /// `AsOf` one millisecond after each of the newest created-at times the store recorded.
+    fn boundaries(
+        &mut self,
+        remote: &MemStore,
+        files: &[lsr_core::FileInfo],
+        damaged: &[FileKey],
+    ) -> Result<(), Violation> {
+        let mut stamps: Vec<i64> = files
+            .iter()
+            .filter_map(lsr_core::FileInfo::created_at)
+            .filter(|c| c.origin() != CreatedAtSource::Fallback)
+            .map(|c| c.at().unix_millis())
+            .collect();
+        stamps.sort_unstable_by(|a, b| b.cmp(a));
+        stamps.dedup();
+        for instant in stamps.into_iter().take(BOUNDARIES) {
+            let instant = instant.saturating_add(1);
+            let target = RestoreTarget::AsOf(Timestamp::from_unix_millis(instant));
+            if let Restored::Content(digest) = self.restored(remote, target, damaged)? {
+                self.judge
+                    .as_of(&self.log, instant, digest, None)
+                    .map_err(Violation::History)?;
+            }
+        }
+        Ok(())
+    }
+
     fn restored(
         &mut self,
         remote: &MemStore,
@@ -237,6 +288,11 @@ impl History {
         damaged: &[FileKey],
     ) -> Result<Restored, Violation> {
         let restored = restore(remote, target, damaged)?;
+        if let Restored::Content(digest) = restored
+            && self.corrupt.contains(&digest)
+        {
+            return Err(Violation::CorruptionRestored { target });
+        }
         if matches!(restored, Restored::Unjudged) {
             self.unjudged = self.unjudged.saturating_add(1);
         }
@@ -280,6 +336,10 @@ impl History {
         reach.add("history.ahead.asof", u64::from(counts.ahead_as_of));
         reach.add("history.rewound", u64::from(counts.rewound));
         reach.add("history.excused", u64::from(counts.excused));
+        reach.add(
+            "history.excused.unreported",
+            u64::from(self.judge.unreported()),
+        );
         reach.add("history.unjudged", u64::from(self.unjudged));
         reach.add(
             "history.rewinds",
@@ -287,3 +347,6 @@ impl History {
         );
     }
 }
+
+#[cfg(test)]
+mod tests;
