@@ -20,6 +20,9 @@ pub(crate) struct Wrapped {
     pub(crate) zero_sizes: bool,
     /// Reads begun, counted before any vanishing.
     pub(crate) reads: AtomicUsize,
+    /// Files the next listing of their level leaves out, as a directory read that races
+    /// a writer's rename can (POSIX leaves a file added during a `readdir` unspecified).
+    pub(crate) hide_once: Mutex<BTreeSet<FileKey>>,
 }
 
 impl Wrapped {
@@ -38,6 +41,7 @@ impl Wrapped {
             vanish: Mutex::new(BTreeSet::new()),
             zero_sizes: false,
             reads: AtomicUsize::new(0),
+            hide_once: Mutex::new(BTreeSet::new()),
         }
     }
 
@@ -63,6 +67,10 @@ impl ObjectStore for Wrapped {
         limit: PageLimit,
     ) -> Result<Listing, StoreError> {
         let mut listing = self.inner.list(level, after, limit).await?;
+        {
+            let mut hidden = self.hide_once.lock().unwrap();
+            listing.files.retain(|file| !hidden.remove(&file.key));
+        }
         if self.zero_sizes {
             for file in &mut listing.files {
                 file.size = 0;
