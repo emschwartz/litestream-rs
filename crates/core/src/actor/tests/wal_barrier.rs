@@ -145,3 +145,92 @@ fn a_failed_wal_sync_stops_under_strict_responses() {
     );
     assert_eq!(ranges(&rig), before);
 }
+
+/// Once the TRUNCATE completed and its snapshot is staged, the debt is paid: the next commit
+/// is staged from the new generation's frames by an ordinary step, with no second TRUNCATE.
+#[test]
+fn after_a_completed_truncate_staging_resumes_from_the_new_generation() {
+    let (mut rig, mut actor, failed) = failed_sync();
+    let Some(Event::Degraded { until, .. }) = event(&failed) else {
+        panic!("{failed:?}");
+    };
+    rig.settle(&mut actor, until.unix_millis());
+    assert_eq!(truncates(&rig), 1);
+    let before = ranges(&rig);
+    rig.commit(4);
+    let seen = rig.settle(&mut actor, until.unix_millis() + 1);
+    assert_eq!(truncates(&rig), 1, "no second TRUNCATE: {seen:?}");
+    let new: Vec<_> = ranges(&rig)
+        .into_iter()
+        .filter(|r| !before.contains(r))
+        .collect();
+    assert!(
+        !new.is_empty()
+            && new
+                .iter()
+                .all(|(_, from)| from.is_some_and(|s| s != FAILED)),
+        "the commit is staged from the new generation's frames: {before:?} then {new:?}"
+    );
+    assert_eq!(actor.degraded(Task::Sync), None);
+}
+
+/// A TRUNCATE that did not complete pays nothing: the next retry truncates again, and nothing
+/// is staged until one completes.
+#[test]
+fn after_a_busy_truncate_the_next_retry_truncates_again() {
+    let (mut rig, mut actor, failed) = failed_sync();
+    let Some(Event::Degraded { until, .. }) = event(&failed) else {
+        panic!("{failed:?}");
+    };
+    let before = ranges(&rig);
+    rig.ck.script(CheckpointScript {
+        busy: true,
+        effect: CheckpointEffect::Nothing,
+    });
+    let retried = rig.tick(&mut actor, until.unix_millis());
+    let Some(Event::Degraded { until, .. }) = event(&retried) else {
+        panic!("{retried:?}");
+    };
+    assert_eq!(ranges(&rig), before);
+    let seen = rig.settle(&mut actor, until.unix_millis());
+    assert_eq!(truncates(&rig), 2, "{seen:?}");
+    assert!(
+        ranges(&rig)
+            .iter()
+            .filter(|r| !before.contains(r))
+            .all(|(_, from)| *from != Some(FAILED)),
+        "{:?}",
+        ranges(&rig)
+    );
+}
+
+/// A second failed sync, in the generation the first TRUNCATE started, is a new debt: another
+/// TRUNCATE, and nothing from that generation is staged past it.
+#[test]
+fn a_second_failed_sync_in_a_later_generation_truncates_again() {
+    let (mut rig, mut actor, failed) = failed_sync();
+    let Some(Event::Degraded { until, .. }) = event(&failed) else {
+        panic!("{failed:?}");
+    };
+    rig.settle(&mut actor, until.unix_millis());
+    assert_eq!(truncates(&rig), 1);
+    let generation = rig.wal.committed().unwrap().end().salts();
+    let generation = (generation.salt1, generation.salt2);
+    let before = ranges(&rig);
+    rig.wal.inject(SourceOp::Sync, SourceError::FsyncFailed);
+    rig.commit(5);
+    let failed = rig.tick(&mut actor, until.unix_millis() + 1);
+    let Some(Event::Degraded { until, .. }) = event(&failed) else {
+        panic!("{failed:?}");
+    };
+    rig.settle(&mut actor, until.unix_millis());
+    assert_eq!(truncates(&rig), 2);
+    assert!(
+        ranges(&rig)
+            .iter()
+            .filter(|r| !before.contains(r))
+            .all(|(_, from)| *from != Some(generation)),
+        "{before:?} then {:?}",
+        ranges(&rig)
+    );
+}

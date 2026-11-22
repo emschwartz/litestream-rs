@@ -21,7 +21,8 @@
 //!    wherever it was met (a sync step or a checkpoint's seal).
 //! 2. The retry runs the TRUNCATE instead of a sync step. Busy, or refused because the
 //!    application's readers hold the WAL, is the same fault again.
-//! 3. The snapshot. Once one is staged, the debt is paid.
+//! 3. The snapshot. The debt is paid once the TRUNCATE completes: the WAL it emptied holds
+//!    nothing the failed sync covered, and the snapshot is an ordinary pending one.
 //!
 //! The debt lives in this process only (in `Kept`, so a rebuild keeps it). A restart between
 //! steps 1 and 2 forgets it, and the next process trusts the WAL again: that needs a durable
@@ -53,12 +54,10 @@ use crate::store::ObjectStore;
 /// How far the engine is past a failed sync of the WAL.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Unproven {
-    /// No sync failed since the last snapshot that followed one.
+    /// No sync failed since the last TRUNCATE that completed.
     No,
     /// A sync failed: the next sync step is a TRUNCATE checkpoint.
     Truncate,
-    /// The TRUNCATE completed; the next snapshot staged pays the debt.
-    Snapshot,
 }
 
 impl Actor {
@@ -91,15 +90,8 @@ impl Actor {
             }
             Err(err) => return Err(Fault::from_source(err)),
         }
-        self.kept.unproven = Unproven::Snapshot;
+        self.kept.unproven = Unproven::No;
         Ok(Stepped::Resnapshot(SnapshotCause::WalSyncFailed))
-    }
-
-    /// Step 3's end: once no snapshot is pending after the TRUNCATE, one was staged.
-    pub(super) fn proven(&mut self) {
-        if self.kept.unproven == Unproven::Snapshot && self.pending().is_none() {
-            self.kept.unproven = Unproven::No;
-        }
     }
 
     /// Whether the engine owes a TRUNCATE before it may read the WAL for staging.
