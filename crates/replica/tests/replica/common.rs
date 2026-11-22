@@ -172,17 +172,13 @@ pub fn stopped(replicator: &Replicator) -> Stopped {
 /// [`stopped`] for a replicator on a fake clock: the clock moves `step` at a time while the
 /// stop is pending, so a drain that waits out a retry's backoff (a busy database or a failed
 /// call during the drain) ends instead of waiting on a clock nobody moves. Fails the test
-/// after [`LOOKS`] steps.
+/// after [`LOOKS`] steps. Each move waits for the thread's park to have looked at the clock
+/// it set.
 pub fn stopped_moving(replicator: &Replicator, clock: &FakeClockHandle, step: Duration) -> Stopped {
     let stop = replicator.stop(PATIENCE);
     let gone = |health: &Health| matches!(health.phase, Phase::Stopped(_) | Phase::Gone(_));
     for _ in 0..LOOKS {
-        let looks = Cell::new(0_u32);
-        let seen = replicator.wait_until(PATIENCE, |health| {
-            looks.set(looks.get().saturating_add(1));
-            gone(health) || looks.get() >= 2
-        });
-        if seen.as_ref().is_some_and(gone) {
+        if seen_or(replicator, clock, &gone).is_some() {
             return stop.wait();
         }
         clock.advance(step);
@@ -192,6 +188,8 @@ pub fn stopped_moving(replicator: &Replicator, clock: &FakeClockHandle, step: Du
 
 /// Moves the fake clock `step` at a time, at most `steps` times, until `done` holds; fails the
 /// test if it never does. Bounds how much clock a wait may take, where [`wait`] bounds looks.
+/// Each move waits for the thread's park to have looked at the clock it set, or for `done`, so
+/// a slow thread is never outrun by the clock.
 pub fn moved_until(
     replicator: &Replicator,
     clock: &FakeClockHandle,
@@ -199,17 +197,35 @@ pub fn moved_until(
     done: impl Fn(&Health) -> bool,
 ) -> Health {
     for _ in 0..steps {
-        let looks = Cell::new(0_u32);
-        let seen = replicator.wait_until(PATIENCE, |health| {
-            looks.set(looks.get().saturating_add(1));
-            done(health) || looks.get() >= 2
-        });
-        if let Some(health) = seen.filter(|health| done(health)) {
+        if let Some(health) = seen_or(replicator, clock, &done) {
             return health;
         }
         clock.advance(step);
     }
-    panic_with(&replicator.health())
+    seen_or(replicator, clock, &done).unwrap_or_else(|| panic_with(&replicator.health()))
+}
+
+/// Waits until `done` holds, returning that health, or until the thread's park has read the
+/// clock as it reads now, returning `None`; fails the test after [`LOOKS`] looks. Equal, not at
+/// least: after a step back the park's last reading is later than the clock.
+fn seen_or(
+    replicator: &Replicator,
+    clock: &FakeClockHandle,
+    done: &impl Fn(&Health) -> bool,
+) -> Option<Health> {
+    let now = clock.now();
+    let (looks, met) = (Cell::new(0_u32), Cell::new(false));
+    let seen = replicator.wait_until(PATIENCE, |health| {
+        looks.set(looks.get().saturating_add(1));
+        met.set(done(health));
+        met.get() || clock.seen_by_park() == Some(now) || looks.get() >= LOOKS
+    });
+    match seen {
+        Some(health) if met.get() => Some(health),
+        Some(_) if clock.seen_by_park() == Some(now) => None,
+        Some(health) => panic_with(&health),
+        None => panic_with(&replicator.health()),
+    }
 }
 
 fn panic_with(health: &Health) -> ! {
