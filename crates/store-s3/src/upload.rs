@@ -44,7 +44,7 @@ use lsr_core::{
 use lsr_ltx::Timestamp;
 
 use crate::classify::{classify, is_not_implemented};
-use crate::multipart::completed_etag_fits;
+use crate::multipart::{Sent, completed_etag_fits};
 use crate::request::{Precondition, UploadId};
 use crate::response::{EtagCheck, check_etag};
 use crate::store::Inner;
@@ -321,11 +321,19 @@ impl<T: Transport> S3Upload<T> {
         let UploadState::Multipart { id, etags, .. } = &self.state else {
             return Err(ended());
         };
+        let parts = etags.len();
+        let sent = Sent {
+            written: self.written,
+            created_at: self.created_at,
+            parts,
+        };
         let completed = self
             .inner
             .within_budget(StoreOp::Upload, start)
-            .and_then(|()| self.inner.complete_upload(&self.key, id, etags, self.mode));
-        let parts = etags.len();
+            .and_then(|()| {
+                self.inner
+                    .complete_upload(&self.key, id, etags, self.mode, sent)
+            });
         let etag = match completed {
             Ok(etag) => etag,
             Err(err) => {

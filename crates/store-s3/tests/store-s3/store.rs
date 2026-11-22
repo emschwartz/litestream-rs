@@ -813,4 +813,61 @@ mod cases {
         assert!(h.store.write_stats().conditional_unsupported);
         assert_eq!(h.wire.inner().open_uploads(), 0);
     }
+
+    /// A complete whose answer was lost, sent again by a client or proxy,
+    /// finds its id spent. The object a HEAD finds is this upload's: success,
+    /// not a refusal that leaves the engine degraded.
+    #[test]
+    fn a_retried_complete_finding_its_upload_spent_is_settled_by_a_head() {
+        let h = FakeHarness::new();
+        h.wire.push(Fault::SpentAfterPublish {
+            on: Shape::Complete,
+        });
+        let k = key(0, 1, 1);
+        let bytes = body(PART * 2);
+        write_new(&h.store, &k, &bytes, PART).unwrap();
+        assert!(read_back(&h.store, &k, PART * 2) == bytes);
+        assert_eq!(count(&h.wire, Shape::Head), 1);
+    }
+
+    /// The id is spent and the object under the key is not this upload's:
+    /// neither a success nor a refusal, so the caller lists and reads back.
+    #[test]
+    fn a_spent_upload_with_another_object_under_the_key_is_ambiguous() {
+        let h = FakeHarness::new();
+        h.wire.push(Fault::Status {
+            on: Shape::Complete,
+            status: 404,
+            code: Some("NoSuchUpload"),
+            retry_after: None,
+        });
+        let k = key(0, 1, 1);
+        let err = write_new(&h.store, &k, &body(PART * 2), PART).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                StoreError::Transient {
+                    op: StoreOp::Upload,
+                    kind: io::ErrorKind::InvalidData
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// A completed object's ETag is no MD5 of it, and its `<hex>-<parts>`
+    /// form is a convention, not a promise: an ETag in another form is not
+    /// taken for damage (the parts were each verified), so the object stays.
+    #[test]
+    fn a_completed_etag_in_another_form_is_not_taken_for_damage() {
+        let h = FakeHarness::new();
+        h.wire.push(Fault::WrongEtag {
+            on: Shape::Complete,
+        });
+        let k = key(0, 1, 1);
+        let bytes = body(PART * 2);
+        write_all(&h.store, &k, &bytes, PART).unwrap();
+        assert!(read_back(&h.store, &k, PART * 2) == bytes);
+        assert_eq!(count(&h.wire, Shape::DeleteObjects), 0);
+    }
 }
