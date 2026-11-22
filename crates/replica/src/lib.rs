@@ -73,10 +73,10 @@ pub use store::{BoxFuture, DynStore, DynUpload};
 
 pub use lsr_core::{
     AppCheckpoint, AppCheckpoints, AsOfInside, CheckpointConfig, Clock, Degraded, Denied, Depth,
-    Entropy, Gate, IfReplicationStops, L0Retention, Maintenance, MaxUnreplicatedAge, OtherWriter,
-    PersistentCause as DegradedCause, Report, Response, Responses, RestoreOptions, RestoreTarget,
-    Restored, Severity, SnapshotCause, SnapshotCauseKind, SnapshotCounts, Stall, StopCause, Task,
-    Trip,
+    Entropy, Gate, IfReplicationStops, JournalSignal, L0Retention, Maintenance, MaxUnreplicatedAge,
+    OtherWriter, PersistentCause as DegradedCause, Report, Response, Responses, RestoreOptions,
+    RestoreTarget, Restored, Severity, SnapshotCause, SnapshotCauseKind, SnapshotCounts, Stall,
+    StopCause, Task, Trip,
 };
 pub use lsr_ltx::{Timestamp, Txid};
 pub use lsr_sqlite::{DatabaseFile, SetupError, app_connection_raw, ffi};

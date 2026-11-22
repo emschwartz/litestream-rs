@@ -295,7 +295,7 @@ pub fn fault_scenarios(kind: FaultKind) -> &'static [fn() -> Scenario] {
         ],
         FaultKind::WalTruncatedBelowCommitted => &[wal_truncated_externally_under_lock],
         FaultKind::WalUnlinked => &[wal_unlinked_mid_run],
-        FaultKind::WalSyncFailed => &[],
+        FaultKind::WalSyncFailed => &[wal_fsync_fails, wal_fsync_fails_then_restart],
         FaultKind::DatabasePageMismatch => &[db_page_flipped_under_sync],
         FaultKind::ShutdownDeadline => &[sigterm_during_upload],
         FaultKind::Bug => &[],
@@ -304,18 +304,11 @@ pub fn fault_scenarios(kind: FaultKind) -> &'static [fn() -> Scenario] {
 
 /// Why a fault has no scenario that holds under every response set. [`FaultKind::Bug`]: the
 /// oracle's bug-fault violation fails every run that meets it, so every scenario and every
-/// random history asserts it never fires. [`FaultKind::WalSyncFailed`]: an open gap, named in
-/// the reason, with its scenario run under the default responses alone.
+/// random history asserts it never fires.
 #[must_use]
 pub const fn fault_reason(kind: FaultKind) -> Option<&'static str> {
     if matches!(kind, FaultKind::Bug) {
         Some("every run fails on it: the oracle's BugFault violation")
-    } else if matches!(kind, FaultKind::WalSyncFailed) {
-        Some(
-            "a stop's restart trusts the WAL again, so it fails every response set that stops \
-             (StagedNotDurable) until a durable record exists (the engine journal decision); \
-             wal_fsync_fails runs it under the default responses",
-        )
     } else {
         None
     }

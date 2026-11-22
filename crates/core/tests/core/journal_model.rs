@@ -466,7 +466,7 @@ fn compare_disk(state: &State, disk: &Disk, at: &[Label]) {
     }
 }
 
-fn compare_writer(state: &State, writer: &JournalWriter<Fake>, at: &[Label]) {
+fn compare_writer(state: &State, writer: &JournalWriter, at: &[Label]) {
     let view = state.writer().expect("a running process");
     let (establish, winner, created, synced) = writer.position();
     assert_eq!(view.establish, establish, "{at:#?}");
@@ -501,9 +501,12 @@ fn same_verdict(state: &State, model: model::Verdict, real: Verdict) -> bool {
 
 // ---- The walk. ----
 
+/// A running writer and the file lent to it.
+type Lent = (JournalWriter, Fake);
+
 #[derive(Clone, Debug)]
 struct Inflight {
-    start: JournalWriter<Fake>,
+    start: Lent,
     facts: Journal,
     steps: Vec<Expect>,
 }
@@ -511,26 +514,26 @@ struct Inflight {
 #[derive(Clone, Debug)]
 enum Real {
     Between(Fake),
-    Running(JournalWriter<Fake>, Option<Inflight>),
+    Running(Lent, Option<Inflight>),
 }
 
 /// Replays an in-flight write from its start, with `steps` and then `end` scripted.
-fn replay(flight: &Inflight, end: Option<Expect>) -> (JournalWriter<Fake>, bool) {
-    let mut writer = flight.start.clone();
-    writer.file().script = flight.steps.iter().cloned().chain(end).collect();
-    let ok = writer.write(&flight.facts).is_ok();
-    let left = &writer.file().script;
+fn replay(flight: &Inflight, end: Option<Expect>) -> (Lent, bool) {
+    let (mut writer, mut fake) = flight.start.clone();
+    fake.script = flight.steps.iter().cloned().chain(end).collect();
+    let ok = writer.write(&mut fake, &flight.facts).is_ok();
+    let left = &fake.script;
     assert!(
         left.is_empty(),
         "the model made calls the writer did not: {left:?}"
     );
-    (writer, ok)
+    ((writer, fake), ok)
 }
 
 fn disk_of(real: &mut Real) -> &mut Disk {
     match real {
         Real::Between(fake) => &mut fake.disk,
-        Real::Running(writer, _) => &mut writer.file().disk,
+        Real::Running((_, fake), _) => &mut fake.disk,
     }
 }
 
@@ -539,47 +542,45 @@ fn step(real: Real, label: &Label, before: &State, after: &State) -> Real {
     match (real, label) {
         (Real::Between(mut fake), Label::Boot(fault, verdict)) => {
             fake.read_fault = *fault;
-            let (mut writer, parsed) = JournalWriter::open(fake);
-            writer.file().read_fault = None;
+            let (writer, parsed) = JournalWriter::open(&mut fake);
+            fake.read_fault = None;
             assert!(
                 same_verdict(before, *verdict, parsed.verdict),
                 "{verdict:?} against {:?}",
                 parsed.verdict
             );
-            Real::Running(writer, None)
+            Real::Running((writer, fake), None)
         }
-        (Real::Running(writer, None), Label::Engine(_)) => {
+        (Real::Running(lent, None), Label::Engine(_)) => {
             let rec = after
                 .writer()
                 .and_then(|view| view.writing)
                 .expect("a write in flight");
             let flight = Inflight {
-                start: writer.clone(),
+                start: lent.clone(),
                 facts: journal_of(&rec.facts),
                 steps: Vec::new(),
             };
-            Real::Running(writer, Some(flight))
+            Real::Running(lent, Some(flight))
         }
-        (Real::Running(writer, Some(mut flight)), Label::Sys(call, outcome)) => {
+        (Real::Running(lent, Some(mut flight)), Label::Sys(call, outcome)) => {
             flight.steps.push(Expect::Sys(*call, *outcome));
             if after.writer().and_then(|view| view.writing).is_some() {
-                return Real::Running(writer, Some(flight));
+                return Real::Running(lent, Some(flight));
             }
-            let (writer, ok) = replay(&flight, None);
+            let (lent, ok) = replay(&flight, None);
             assert_eq!(ok, *outcome == Outcome::Ok, "the write's result differs");
-            Real::Running(writer, None)
+            Real::Running(lent, None)
         }
         (Real::Running(_, Some(flight)), Label::Kill | Label::Power { .. }) => {
-            let (writer, ok) = replay(&flight, Some(Expect::Crash));
+            let ((_, fake), ok) = replay(&flight, Some(Expect::Crash));
             assert!(!ok, "a write the model crashed completed");
-            crash(writer.into_file(), label)
+            crash(fake, label)
         }
-        (Real::Running(writer, None), Label::Kill | Label::Power { .. }) => {
-            crash(writer.into_file(), label)
-        }
-        (Real::Running(writer, Some(mut flight)), env) => {
+        (Real::Running((_, fake), None), Label::Kill | Label::Power { .. }) => crash(fake, label),
+        (Real::Running(lent, Some(mut flight)), env) => {
             flight.steps.push(Expect::Env(*env));
-            Real::Running(writer, Some(flight))
+            Real::Running(lent, Some(flight))
         }
         (mut real, env @ (Label::Evict | Label::Latent(_) | Label::Fill | Label::NewerWrite)) => {
             apply_env(disk_of(&mut real), env);
@@ -619,9 +620,9 @@ impl Walk<'_> {
             let mut real = step(real.clone(), &label, state, &next);
             match &mut real {
                 Real::Between(fake) => compare_disk(&next, &fake.disk, &self.path),
-                Real::Running(writer, None) => {
+                Real::Running((writer, fake), None) => {
                     compare_writer(&next, writer, &self.path);
-                    compare_disk(&next, &writer.file().disk, &self.path);
+                    compare_disk(&next, &fake.disk, &self.path);
                 }
                 Real::Running(_, Some(_)) => {}
             }
@@ -710,7 +711,8 @@ fn a_non_monotonic_record_is_refused_as_a_bug() {
         script: VecDeque::new(),
         read_fault: None,
     };
-    let (mut writer, _) = JournalWriter::open(fake);
+    let mut fake = fake;
+    let (mut writer, _) = JournalWriter::open(&mut fake);
     let high = model::Facts {
         floor: Some(model::Floor {
             replica: 0,
@@ -731,9 +733,9 @@ fn a_non_monotonic_record_is_refused_as_a_bug() {
         Expect::Sys(Call::Fsync, Outcome::Ok),
         Expect::Sys(Call::DirFsync, Outcome::Ok),
     ];
-    writer.file().script = script.into_iter().collect();
-    writer.write(&journal_of(&high)).unwrap();
-    let refused = lsr_core::reporting_bugs(|| writer.write(&journal_of(&low)));
+    fake.script = script.into_iter().collect();
+    writer.write(&mut fake, &journal_of(&high)).unwrap();
+    let refused = lsr_core::reporting_bugs(|| writer.write(&mut fake, &journal_of(&low)));
     assert!(
         matches!(refused, Err(lsr_core::JournalWriteError::Bug(_))),
         "{refused:?}"

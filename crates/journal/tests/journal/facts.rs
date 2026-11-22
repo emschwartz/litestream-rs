@@ -49,7 +49,7 @@ fn a_floor_is_never_dropped() {
 }
 
 #[test]
-fn the_debt_moves_only_forward_through_its_cure() {
+fn the_debt_is_never_forgiven() {
     use Unproven::{No, Snapshot, Truncate};
     for (from, to, ok) in [
         (No, No, true),
@@ -60,7 +60,8 @@ fn the_debt_moves_only_forward_through_its_cure() {
         (Truncate, No, false),
         (Snapshot, Snapshot, true),
         (Snapshot, No, true),
-        (Snapshot, Truncate, false),
+        // A new WAL fsync failure while the paying snapshot is still owed.
+        (Snapshot, Truncate, true),
     ] {
         let got = with(None, from).monotonic(&with(None, to));
         assert_eq!(got.is_ok(), ok, "{from:?} -> {to:?}");

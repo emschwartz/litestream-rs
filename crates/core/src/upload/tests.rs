@@ -587,6 +587,19 @@ fn a_commit_that_answers_with_a_wrong_size_is_ambiguous_not_confirmed() {
     assert_eq!(failed.state, UploadState::ListFirst { confirmed: None });
 }
 
+/// The object such a commit left does not hold what was sent: it is deleted before the
+/// fault is reported, so no restore meets it while the retry waits.
+#[test]
+fn a_commit_that_answers_with_a_wrong_size_leaves_no_object() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    stage(&staging, 1);
+    remote.log().lie_about_size = true;
+    let failed = failure(next(UploadState::At(None), &staging, &remote, 1));
+    assert_eq!(failed.fault, Fault::UploadAmbiguous);
+    let listed = block_on(remote.inner.list(Level::ZERO, None, PageLimit::MAX)).unwrap();
+    assert!(listed.files.is_empty(), "{:?}", listed.files);
+}
+
 #[test]
 fn errors_before_the_commit_leave_the_state_and_cost_no_listing() {
     let (staging, remote) = (MemStore::new(), Probe::default());

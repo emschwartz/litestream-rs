@@ -278,6 +278,11 @@ struct State {
     // generation. The kernel called the pages the failure covered clean, so no later sync
     // writes them (Linux's "fsyncgate"): until the generation ends they stay as they were.
     lost_writeback: Option<LostWriteback>,
+    // The app's own connection has not yet fsynced the WAL since our sync failed. Linux reports
+    // a writeback error to every file description open when it happened (errseq, since 4.13), so
+    // the app's first WAL sync after ours fails too, and that checkpoint backfills nothing. A
+    // process that opens the WAL after our sync saw the error (the CLI) is told nothing.
+    app_unsynced_error: bool,
     // Every WAL byte range a failed sync of ours lost, by generation, for the life of the
     // simulated machine: a level-0 file staged from one was never durable, whatever the WAL
     // holds by the time anyone looks.
@@ -720,6 +725,15 @@ impl State {
 
     /// `sqlite3WalCheckpoint` on connection `by`, which holds no read transaction.
     fn checkpoint(&mut self, by: Conn, mode: OtherProcessMode) -> CheckpointNumbers {
+        // `walCheckpoint` syncs the WAL before it backfills; the error ends the checkpoint
+        // there, and SQLite's autocheckpoint drops it.
+        if by == Conn::App && mem::take(&mut self.app_unsynced_error) {
+            return CheckpointNumbers {
+                busy: true,
+                log: self.index.mx_frame,
+                checkpointed: self.index.backfilled,
+            };
+        }
         let degraded = mode != OtherProcessMode::Passive && self.writer.is_some_and(|w| w != by);
         let mut busy = degraded;
         self.backfill();
@@ -792,6 +806,8 @@ impl State {
     /// recovered database is checked against the database SQLite recovered;
     /// any disagreement is kept ([`SimSqlite::recovery_disagreements`]).
     fn recover(&mut self) {
+        // A connection opened now samples the error our sync already saw: it is told nothing.
+        self.app_unsynced_error = false;
         let (parsed, seq) = self.parse_recovery();
         let wal = self.present.then_some(self.wal.as_slice());
         let index = match recovery::recover(self.page_size, &self.db, wal, recovery::Header::Fake) {
@@ -1137,6 +1153,7 @@ impl SimSqlite {
             app_autocheckpoint: None,
             our_sync_lies: false,
             lost_writeback: None,
+            app_unsynced_error: false,
             lost_ranges: Vec::new(),
             app_auto: AutoTally::default(),
             in_tick: None,
@@ -1854,6 +1871,9 @@ impl WalSource for SimSource {
     fn sync(&mut self) -> Result<(), SourceError> {
         let mut state = lock(&self.state);
         if let Err(err) = state.faults.take(SourceOp::Sync) {
+            if err == SourceError::FsyncFailed {
+                state.app_unsynced_error = true;
+            }
             let salts = state.index.salts;
             if err == SourceError::FsyncFailed
                 && state
