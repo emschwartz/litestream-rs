@@ -6,7 +6,7 @@ use std::future::Future;
 use std::io::ErrorKind;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use lsr_ltx::{Encoder, Header, HeaderFields, PageNo, PageSize, Timestamp};
+use lsr_ltx::{Encoder, Header, HeaderFields, PageNo, PageSize, Timestamp, WalOrigin};
 use proptest::prelude::*;
 
 use super::*;
@@ -91,21 +91,30 @@ fn encode(n: u64) -> Vec<u8> {
 
 /// A level-0 file for transaction `n` whose pages are filled with `seed`.
 fn encode_pages(n: u64, seed: u8) -> Vec<u8> {
+    encode_file(n, seed, ps(), None)
+}
+
+/// A level-0 file for transaction `n` of `page_size` pages filled with
+/// `seed`, read from `wal` when it names a WAL range.
+fn encode_file(n: u64, seed: u8, page_size: PageSize, wal: Option<WalOrigin>) -> Vec<u8> {
     let header = Header::new(HeaderFields {
         tracked: false,
-        page_size: ps(),
+        page_size,
         commit: 2,
         txids: TxidRange::single(txid(n)),
         timestamp: created_at(n),
         pre_apply: None,
-        wal: None,
+        wal,
         node_id: 0,
     })
     .unwrap();
     let mut encoder = Encoder::new(Vec::new(), header).unwrap();
     for pgno in 1..=2_u32 {
         encoder
-            .write_page(PageNo::new(pgno, ps()).unwrap(), &vec![seed; ps().bytes()])
+            .write_page(
+                PageNo::new(pgno, page_size).unwrap(),
+                &vec![seed; page_size.bytes()],
+            )
             .unwrap();
     }
     encoder.finish(None).unwrap().0
@@ -987,6 +996,67 @@ fn a_verifying_listed_key_unlike_the_staged_file_is_never_written_over() {
     next(listed.state, &staging, &remote, 2).unwrap();
     assert!(remote.log().begins.is_empty());
     assert_eq!(read_all(&remote.inner, &key(2)), theirs);
+}
+
+/// The staged file after the replica's newest cannot follow it: another
+/// page size, or a WAL range that starts neither where the replica's newest
+/// file ends nor at the start of a WAL generation (a staging backup put back,
+/// a WAL rewound by a power loss). Uploading it would chain two histories.
+#[test]
+fn a_staged_file_that_cannot_follow_the_replica_is_not_uploaded() {
+    let small = PageSize::new(1024).unwrap();
+    let origin = |offset, size, salt| WalOrigin::new(offset, size, salt, 7);
+    let cases = [
+        (
+            encode_file(1, 1, ps(), None),
+            encode_file(2, 2, small, None),
+        ),
+        (
+            encode_file(1, 1, ps(), origin(32, 100, 5)),
+            encode_file(2, 2, ps(), origin(200, 100, 5)),
+        ),
+        (
+            encode_file(1, 1, ps(), origin(32, 100, 5)),
+            encode_file(2, 2, ps(), origin(132, 100, 6)),
+        ),
+    ];
+    for (theirs, ours) in cases {
+        let (staging, remote) = (MemStore::new(), Probe::default());
+        put_bytes(&remote.inner, key(1), &theirs);
+        put_bytes(&staging, key(2), &ours);
+        let listed = next(UploadState::Unknown, &staging, &remote, 2).unwrap();
+        assert_eq!(listed.state, UploadState::At(Some(txid(1))));
+        next(listed.state, &staging, &remote, 2).unwrap();
+        assert!(remote.log().begins.is_empty());
+    }
+}
+
+/// The staged file follows the replica's newest: the same WAL generation
+/// from where it ended, another generation from its first frame, or no WAL
+/// range named on either side.
+#[test]
+fn a_staged_file_that_follows_the_replica_is_uploaded() {
+    let origin = |offset, size, salt| WalOrigin::new(offset, size, salt, 7);
+    let cases = [
+        (encode_file(1, 1, ps(), None), encode_file(2, 2, ps(), None)),
+        (
+            encode_file(1, 1, ps(), origin(32, 100, 5)),
+            encode_file(2, 2, ps(), origin(132, 100, 5)),
+        ),
+        (
+            encode_file(1, 1, ps(), origin(32, 100, 5)),
+            encode_file(2, 2, ps(), origin(32, 100, 6)),
+        ),
+    ];
+    for (theirs, ours) in cases {
+        let (staging, remote) = (MemStore::new(), Probe::default());
+        put_bytes(&remote.inner, key(1), &theirs);
+        put_bytes(&staging, key(2), &ours);
+        let listed = next(UploadState::Unknown, &staging, &remote, 2).unwrap();
+        assert_eq!(listed.state, UploadState::At(Some(txid(1))));
+        next(listed.state, &staging, &remote, 2).unwrap();
+        assert_eq!(remote.log().begins, vec![key(2)]);
+    }
 }
 
 #[test]
