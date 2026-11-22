@@ -729,6 +729,85 @@ mod budget {
 }
 
 #[cfg(test)]
+mod failed_drop {
+    use lsr_core::{StoreError, StoreOp};
+    use lsr_sim::generate::WalOp;
+    use lsr_sim::run::run_ops;
+    use lsr_sim::{FaultShape, Op, Opts, Seed, Target};
+
+    fn reset(op: StoreOp) -> FaultShape {
+        FaultShape::Error(StoreError::Transient {
+            op,
+            kind: std::io::ErrorKind::ConnectionReset,
+        })
+    }
+
+    /// The other writer's file stands over the engine's staged transaction 7,
+    /// and the listing that finds them unlike drops the staged files from 7
+    /// on; that delete fails. The uploader had already taken 7 as confirmed
+    /// and uploaded the staged 8, built on the staged 7, onto the other
+    /// writer's file: level 1 could then not be merged from the replica and
+    /// maintenance degraded on `RemoteCorrupt` (seed 0xd79, shrunk).
+    #[test]
+    fn a_failed_drop_after_a_divergence_uploads_nothing_built_on_it_seed_0xd79() {
+        let ops = [
+            Op::Tick,
+            Op::Tick,
+            Op::StoreFault {
+                target: Target::Staging,
+                op: StoreOp::Delete,
+                ahead: 1,
+                shape: reset(StoreOp::Delete),
+            },
+            Op::WalDamage {
+                op: WalOp::TearHeader,
+                ticks: 4,
+            },
+            Op::SecondWriter { ticks: 4 },
+            Op::Tick,
+            Op::RequestSnapshot,
+            Op::Tick,
+            Op::ClockJump(98_967),
+            Op::Commit {
+                pages: 1,
+                grow: false,
+            },
+            Op::Tick,
+            Op::Commit {
+                pages: 1,
+                grow: true,
+            },
+            Op::StoreFault {
+                target: Target::Remote,
+                op: StoreOp::Upload,
+                ahead: 3,
+                shape: FaultShape::ErrorAfterPublish(StoreError::Transient {
+                    op: StoreOp::Upload,
+                    kind: std::io::ErrorKind::ConnectionReset,
+                }),
+            },
+            Op::WalDamage {
+                op: WalOp::TruncateAtFrame(7),
+                ticks: 3,
+            },
+            Op::Commit {
+                pages: 4,
+                grow: true,
+            },
+            Op::ClockJump(59_427),
+            Op::SecondWriter { ticks: 7 },
+        ];
+        let opts = Opts {
+            drawn: true,
+            ..Opts::default()
+        };
+        if let Err(failure) = run_ops(Seed::new(0xd79), &ops, &opts) {
+            panic!("{}", failure.violation);
+        }
+    }
+}
+
+#[cfg(test)]
 mod one_bad_read {
     use lsr_core::StoreOp;
     use lsr_sim::generate::Target;
