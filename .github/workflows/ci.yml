@@ -22,6 +22,38 @@ jobs:
           tool: cargo-nextest,just
       - run: just check
 
+  # Schedule exploration (`just shuttle`) needs its own build (RUSTFLAGS --cfg shuttle), so it is
+  # not in `just check`. It runs here only when what it explores changed: the replica thread's
+  # command handshake and the S3 batch's scoped threads. Nightly runs 500000 schedules.
+  # Not a path-filtered workflow, which would leave a required check pending; the job
+  # decides inside, so it always reports.
+  shuttle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - id: changed
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != pull_request ]; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          elif git diff --quiet "origin/$BASE_REF...HEAD" -- crates/store-s3 crates/replica Cargo.lock justfile rust-toolchain.toml; then
+            echo "relevant=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          BASE_REF: ${{ github.base_ref }}
+      - if: steps.changed.outputs.relevant == 'true'
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - if: steps.changed.outputs.relevant == 'true'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - if: steps.changed.outputs.relevant == 'true'
+        run: just shuttle
+
   # Advisories, bans, licenses and sources (deny.toml), over all features.
   deny:
     runs-on: ubuntu-latest
