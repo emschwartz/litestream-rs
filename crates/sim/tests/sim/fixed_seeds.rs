@@ -1048,22 +1048,19 @@ mod replaced_staging {
 
 #[cfg(test)]
 mod lagging_listings {
-    use lsr_core::StopCause;
+    use lsr_core::{StopCause, StoreError, StoreOp};
     use lsr_sim::generate::WalOp;
     use lsr_sim::run::run_ops;
-    use lsr_sim::{EnvFault, Op, Opts, Seed, Weights};
+    use lsr_sim::{EnvFault, FaultShape, Op, Opts, Seed, Target, Weights};
 
-    /// Known defect, kept failing on purpose. The replica's listings lag; the
-    /// engine uploads transactions 4 and 5, its staging directory is wiped
-    /// and it boots again. The boot listing does not show 5 yet, so the engine
-    /// takes the replica as ending at 4; the next maintenance listing shows 5
-    /// past everything the engine knows, and it stops as if another writer
-    /// had put it, though its own previous process did (seed 0x39, shrunk
-    /// from 183 operations). Nothing is lost, but replication stops until a
-    /// person restarts it. The runner allows this stop after a lag so the
-    /// swarm judges everything else.
+    /// The replica's listings lag; the engine uploads transactions 4 and 5,
+    /// its staging directory is wiped and it boots again. The boot listing
+    /// does not show 5 yet, so the engine took the replica as ending at 4; the
+    /// next maintenance listing showed 5 past everything the engine knew, and
+    /// it stopped as if another writer had put it, though its own previous
+    /// process did (seed 0x39, shrunk from 183 operations). The boot now reads
+    /// the keys past its listing and finds 5.
     #[test]
-    #[ignore = "known defect: a stale boot listing stops the engine on its own uploads"]
     fn a_stale_boot_listing_does_not_stop_the_engine_on_its_own_files() {
         let seed = Seed::new(0x39);
         let ops = [
@@ -1115,6 +1112,86 @@ mod lagging_listings {
             report.trace.iter().all(|line| !line.contains(&stop)),
             "the engine stopped on its own files"
         );
+    }
+
+    /// The replica's listings lag and a commit fails after it published, so
+    /// the engine lists before its next upload. The listing does not show the
+    /// transaction the engine had confirmed, and the engine reported the
+    /// replica as gone backwards, a degraded task until a person looks (seed
+    /// 0x440 under its swarm mix, shrunk from 170 operations). The relist now
+    /// reads the confirmed key before it reports a regression.
+    #[test]
+    fn a_lagging_relist_does_not_report_the_replica_gone_backwards_seed_0x440() {
+        let seed = Seed::new(0x440);
+        let ops = [
+            Op::WalDamage {
+                op: WalOp::FlipLastFrameBit,
+                ticks: 7,
+            },
+            Op::LaggingListings {
+                writes: 6,
+                window: 25,
+            },
+            Op::StoreFault {
+                target: Target::Remote,
+                op: StoreOp::Upload,
+                ahead: 1,
+                shape: FaultShape::ErrorAfterPublish(StoreError::Transient {
+                    op: StoreOp::Upload,
+                    kind: std::io::ErrorKind::ConnectionReset,
+                }),
+            },
+            Op::Commit {
+                pages: 3,
+                grow: false,
+            },
+            Op::Commit {
+                pages: 3,
+                grow: false,
+            },
+            Op::WalDamage {
+                op: WalOp::RegrowWithoutCommitMarks(5_374_048_325_351_388_651),
+                ticks: 4,
+            },
+        ];
+        swarm(seed, &ops);
+    }
+
+    /// The replica's listings lag. Another writer's file at transaction 2 is
+    /// merged into a level-1 file, the operator removes it, and the engine
+    /// boots behind a listing that shows neither that level-1 file nor the
+    /// engine's own transaction 3. It took the replica as ending at 1 and
+    /// uploaded its next transaction into the freed key 2, which the level-1
+    /// file still holds with other pages: one transaction, two contents
+    /// (seed 0x4c5 under its swarm mix). The boot now reads past the free key
+    /// and finds 3.
+    #[test]
+    fn a_lagging_boot_listing_does_not_send_an_upload_into_a_freed_key_seed_0x4c5() {
+        let seed = Seed::new(0x4c5);
+        let ops = [
+            Op::LaggingListings {
+                writes: 5,
+                window: 35,
+            },
+            Op::Shutdown,
+            Op::Vacuum { page_size: None },
+            Op::Tick,
+            Op::SecondWriter { ticks: 5 },
+            Op::Shutdown,
+        ];
+        swarm(seed, &ops);
+    }
+
+    /// Runs `ops` under `seed`'s swarm mix; any violation fails the test.
+    fn swarm(seed: Seed, ops: &[Op]) {
+        let opts = Opts {
+            drawn: true,
+            block_crash_law: Weights::swarm(seed).block_crash_law,
+            ..Opts::default()
+        };
+        if let Err(failure) = run_ops(seed, ops, &opts) {
+            panic!("{failure}");
+        }
     }
 }
 

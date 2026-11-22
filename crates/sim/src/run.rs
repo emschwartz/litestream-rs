@@ -966,23 +966,17 @@ impl Runner {
                 .any(|want| std::mem::discriminant(want) == std::mem::discriminant(&cause))
     }
 
-    /// Makes `cause` legitimate for the rest of the run.
     /// The replica's listings start to lag ([`Op::LaggingListings`]).
     fn lag_listings(&mut self, writes: u8, window: u8) {
         self.report.reach.bump("remote.lagging_listings");
-        // Known defect: a boot listing that misses this engine's own newest
-        // uploads takes the replica as ending earlier, and the next listing
-        // that shows them stops the engine as another writer's
-        // (`tests/sim/fixed_seeds.rs`,
-        // a_stale_boot_listing_does_not_stop_the_engine_on_its_own_files).
-        // The stop loses no data; it is allowed here so the swarm keeps
-        // judging everything else.
-        self.expect(StopCause::OtherWriter);
+        // Nothing is expected: a lag alone is no reason to stop, to report a
+        // regression or to write a transaction twice.
         self.w
             .remote_faults
             .lag_listings(u32::from(writes), u32::from(window));
     }
 
+    /// Makes `cause` legitimate for the rest of the run.
     fn expect(&mut self, cause: StopCause) {
         if !self.expected.contains(&cause) {
             self.expected.push(cause);
