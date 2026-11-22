@@ -382,6 +382,17 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Revisit if:** SQLite or the backend can report which frames a TRUNCATE backfilled.
 - **Links:** found by the simulator's app operations inside a tick (#127 item H, seed 0xf49a2); sqlite `a_commit_between_the_proof_and_the_truncate_is_not_taken_for_damage`; plant `boundary-snapshot-keeps-page-table`.
 
+## D120. No crash points inside the SQLite seam (delegated)
+
+- **Options:** crash the engine between two of its calls into SQLite too (the simulator audit's item C, #127): before its committed read, WAL sync, barrier, checkpoint, sequence bump or write lock, and as a power loss inside its checkpoint with the database file torn by the block crash law; keep crash points at store calls only.
+- **Choice:** store calls only. The seam crash points were built and measured, then dropped.
+- **Measured:** 1000 swarm seeds per plant (seeds 1000001 to 1001000, the mixed weights), with and without them. A plant counted as found when a seed failed with it and not on the clean tree. `sim-read-lock-retake` was found (seed 6) either way; `wal-barrier` at seed 1 either way, by the direct check that a staged file's WAL frames are durable, with no crash needed. Neither tree found the issue's two plants, the sequence bumped before the TRUNCATE and the barrier released before the seal, nor `stamp-before-committed-read`.
+- **Why:** the engine persists only at store calls. Every SQLite state a crash between two seam calls leaves (the barrier dropped, a checkpoint done and the bump not, a truncated WAL with no header) is one another process can also produce while the engine is down, and the simulator already draws those. A torn database file inside a checkpoint is masked by the WAL, which SQLite synced before it copied.
+- **Cost accepted:** a defect that only a crash between two seam calls exposes would go unseen. None is known.
+- **What it found:** a gap in the liveness oracle: a bucket rolled back past its only transaction justifies a first sync (sim `a_rollback_that_empties_the_replica_justifies_a_first_sync`).
+- **Revisit if:** the engine persists anything outside a store call, or a defect turns up between two calls into SQLite.
+- **Links:** #127 (item C).
+
 ## D130. The real directory store in the simulator (delegated)
 
 - **Options:** keep `MemStore` with its power-loss bookkeeping as the only staging double; run `FsStore` on a temporary directory of the host (no crash law, no determinism); a filesystem trait in `lsr-store-fs` with an in-memory filesystem in `lsr-sim`.
