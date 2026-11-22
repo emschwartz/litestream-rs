@@ -740,3 +740,9 @@ name = "park-ignores-callers-reading"
 fix = "af15d43"
 package = "lsr-replica"
 tests = ["a_park_returns_for_a_step_back_between_the_callers_reading_and_the_park"]
+
+[[bug]]
+name = "compact-local-read-as-remote"
+fix = "e01a5d6"
+package = "lsr-core"
+tests = ["a_local_read_error_comparing_copies_is_a_staging_fault", "a_local_read_error_while_compacting_is_a_staging_fault"]
