@@ -305,6 +305,7 @@ impl History {
             lsr_history::Anomaly::NotInHistory { .. } => Anomaly::RestoredUnknown,
             other @ (lsr_history::Anomaly::Broken { .. }
             | lsr_history::Anomaly::WentBackwards { .. }
+            | lsr_history::Anomaly::Unsignaled { .. }
             | lsr_history::Anomaly::AsOfTooNew { .. }
             | lsr_history::Anomaly::AsOfTooOld { .. }
             | lsr_history::Anomaly::Lagging { .. }
