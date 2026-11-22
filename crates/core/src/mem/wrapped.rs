@@ -20,6 +20,9 @@ pub(crate) struct Wrapped {
     pub(crate) zero_sizes: bool,
     /// Reads begun, counted before any vanishing.
     pub(crate) reads: AtomicUsize,
+    /// Files every listing leaves out, as a store whose listings lag its writes does; reads
+    /// still find them.
+    pub(crate) unlisted: BTreeSet<FileKey>,
 }
 
 impl Wrapped {
@@ -38,6 +41,7 @@ impl Wrapped {
             vanish: Mutex::new(BTreeSet::new()),
             zero_sizes: false,
             reads: AtomicUsize::new(0),
+            unlisted: BTreeSet::new(),
         }
     }
 
@@ -58,6 +62,9 @@ impl ObjectStore for Wrapped {
         limit: PageLimit,
     ) -> Result<Listing, StoreError> {
         let mut listing = self.inner.list(level, after, limit).await?;
+        listing
+            .files
+            .retain(|file| !self.unlisted.contains(&file.key));
         if self.zero_sizes {
             for file in &mut listing.files {
                 file.size = 0;

@@ -1227,6 +1227,11 @@ impl SimSqlite {
         self.with(|state| state.our_sync_lies = true);
     }
 
+    /// Our sync of the WAL makes its bytes durable again: the lying disk replaced.
+    pub fn honest_on_our_sync(&self) {
+        self.with(|state| state.our_sync_lies = false);
+    }
+
     /// The app's `wal_autocheckpoint` in frames; `None`, the model's default, is 0.
     pub fn set_app_autocheckpoint(&self, frames: Option<u32>) {
         self.with(|state| state.app_autocheckpoint = frames.filter(|n| *n > 0));

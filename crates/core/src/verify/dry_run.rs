@@ -191,6 +191,7 @@ fn named_file(error: &RestoreError, last: FileKey) -> Option<FileKey> {
         RestoreError::Inventory(_)
         | RestoreError::NoPlan(_)
         | RestoreError::Store(_)
+        | RestoreError::ListingBehind { .. }
         | RestoreError::Sink { .. }
         | RestoreError::Publish { .. } => None,
     }

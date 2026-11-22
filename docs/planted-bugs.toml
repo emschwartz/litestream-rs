@@ -8,6 +8,8 @@
 #   package  the cargo package whose tests are run
 #   tests    nextest name substrings (`test(~x)`); each must fail when planted, one run apiece
 #   test_bin optional: restrict the run to one integration-test binary (cargo `--test`)
+#   bin      optional: run the unit tests of one binary target (cargo `--bin`), for a package
+#            with no library, such as lsr-cli
 #
 # Not here, with the reason: a6e3e38 (level-0 retention oracle: it fixed the test, retention code is
 # unchanged, so there is nothing to plant), the verify hang fix (test-only: no production code to plant)
@@ -314,6 +316,59 @@ package = "lsr-core"
 tests = [
     "a_commit_before_the_checkpoint_barrier_is_not_stamped_before_it_landed",
 ]
+
+[[bug]]
+name = "restore-trusts-listing"
+fix = "32572b5"
+package = "lsr-core"
+tests = [
+    "restore::tests::a_newest_file_the_listing_hides_fails_the_restore_and_publishes_nothing",
+    "restore::tests::a_hidden_snapshot_past_the_listing_fails_an_as_of_restore",
+]
+
+# The same plant, judged by the simulator: a restore made through a lagging listing while the
+# hold lasts must be the raw replica's answer or an error.
+[[bug]]
+name = "restore-trusts-listing-sim"
+fix = "32572b5"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_restore_through_a_lagging_listing_is_the_replica_s_answer_or_an_error"]
+
+[[bug]]
+name = "dry-run-trusts-listing"
+fix = "32572b5"
+package = "lsr-cli"
+bin = "lsr"
+tests = ["a_dry_run_over_a_lagging_listing_fails_like_the_restore"]
+
+[[bug]]
+name = "empty-listing-is-empty-replica"
+fix = "a5c7d57"
+package = "lsr-core"
+tests = ["restore::tests::a_listing_that_shows_nothing_over_a_first_file_is_not_an_empty_replica"]
+
+# The same plant, judged where it does harm: `--if-replica-exists` skips the restore with success.
+[[bug]]
+name = "empty-listing-is-empty-replica-cli"
+fix = "a5c7d57"
+package = "lsr-cli"
+bin = "lsr"
+tests = ["if_replica_exists_over_a_listing_that_shows_nothing_skips_nothing"]
+
+[[bug]]
+name = "replica-page-size-unread"
+fix = "7bf9707"
+package = "lsr-core"
+tests = ["a_newest_replica_header_that_does_not_decode_still_names_the_page_size"]
+
+# The same plant, judged by the simulator's lying-reads hold where it was found.
+[[bug]]
+name = "replica-page-size-unread-sim"
+fix = "7bf9707"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_boot_whose_replica_reads_lie_never_writes_a_new_page_size_seed_0x13"]
 
 # The engine journal's rules (docs/journal.md): each is a rule of the writer, the codec or the
 # model, not a fix of a shipped defect; `fix` is the commit that introduced it.
