@@ -366,5 +366,15 @@ fn an_unusable_takeover_record_is_reported_and_costs_no_stop() {
         );
     }
     assert!(warned, "the unusable record is reported");
-    assert!(matches!(stopped(&second), Stopped::Drained { .. }));
+    let Stopped::Drained { txid: Some(ours) } = stopped(&second) else {
+        panic!("the second replicator drains");
+    };
+    // Never taken as given either: another writer's file above everything is refused, as with
+    // no record at all.
+    let foreign = put_foreign(&site, ours.next().unwrap());
+    let (runtime, _clock) = fake();
+    let third = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
+    wait(&third, stopped_for_other_writer);
+    assert_eq!(newest_l0(&site), Some(foreign.range().max()));
+    assert_eq!(stopped(&third), Stopped::Stopped(StopCause::OtherWriter));
 }
