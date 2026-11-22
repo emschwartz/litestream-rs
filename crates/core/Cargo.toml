@@ -32,6 +32,8 @@ lsr-ltx = { workspace = true, features = ["testing"] }
 lsr-core = { workspace = true, features = ["testing"] }
 # The planner tests name the spec's judgement; the adapter is `lsr_core::spec_view`.
 lsr-spec.workspace = true
+# The memory gates (tests/core/mem.rs) count heap through this allocator.
+lsr-heap.workspace = true
 
 [lints]
 workspace = true

@@ -916,6 +916,7 @@ name = "lsr-core"
 version = "0.0.0"
 dependencies = [
  "lsr-core",
+ "lsr-heap",
  "lsr-ltx",
  "lsr-spec",
  "lsr-wal",
@@ -937,6 +938,10 @@ dependencies = [
  "rusqlite",
  "tempfile",
 ]
+
+[[package]]
+name = "lsr-heap"
+version = "0.0.0"
 
 [[package]]
 name = "lsr-local"

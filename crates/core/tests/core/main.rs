@@ -8,6 +8,14 @@ mod created_at_sources;
 #[cfg(test)]
 mod gates;
 #[cfg(test)]
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "the fixtures size databases and inventories from small bounded counts"
+)]
+mod mem;
+#[cfg(test)]
+mod mem_big;
+#[cfg(test)]
 mod plan_adversarial;
 #[cfg(test)]
 mod plan_exhaustive;

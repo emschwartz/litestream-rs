@@ -19,7 +19,7 @@
 ## Rust style
 - The lint set is in `Cargo.toml`; gates run with `-D warnings`. No `unwrap`, `expect`, `panic`, `as`, indexing or unchecked arithmetic in non-test code. An exception is `#[expect(lint, reason = "the invariant")]` on the smallest item, never `allow`.
 - Functions are at most 70 lines.
-- `unsafe` is denied workspace-wide; only the SQLite crate may opt in, one reasoned `#[expect(unsafe_code)]` per site.
+- `unsafe` is denied workspace-wide; only the SQLite crate may opt in, one reasoned `#[expect(unsafe_code)]` per site. The one other exception is `lsr-heap`, the counting allocator the memory gates install (`GlobalAlloc` is an unsafe trait); it is a dev-dependency and never linked into a shipped binary.
 - Errors are typed (`thiserror`), one enum per crate boundary, each variant carrying what a caller needs to act. No stringly errors, no `anyhow` in library crates.
 - Every public item has a doc comment. Comments say why, never what. Mechanism goes in the module's `//!` doc.
 - No mid-sentence em dashes in docs or comments.

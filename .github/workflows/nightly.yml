@@ -61,6 +61,20 @@ jobs:
           path: fuzz/artifacts/${{ matrix.target }}
           if-no-files-found: ignore
 
+  # The memory gates at scale (`just mem-big`): restore peak heap flat from a 1 GiB to a 4 GiB
+  # database, the snapshot's bytes a page, planning and retention over a million files. Needs
+  # 5 GiB of temporary disk, which a hosted runner has.
+  mem-big:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,just
+      - run: just mem-big
+
   # AddressSanitizer and ThreadSanitizer over the crate with `unsafe` FFI (sqlite) and the replica
   # thread tests (`just asan`, `just tsan`). Nightly only: -Zsanitizer and -Zbuild-std, which
   # needs rust-src. Any report is a defect to fix, with a regression test.
