@@ -992,7 +992,13 @@ fn a_verifying_listed_key_unlike_the_staged_file_is_never_written_over() {
     put_bytes(&remote.inner, key(2), &theirs);
     let listed = next(UploadState::Unknown, &staging, &remote, 2).unwrap();
     assert_eq!(listed.state, UploadState::At(Some(txid(2))));
-    assert_eq!(listed.did, Did::Diverged { at: txid(2) });
+    assert_eq!(
+        listed.did,
+        Did::Diverged {
+            confirmed: txid(2),
+            from: txid(2)
+        }
+    );
     next(listed.state, &staging, &remote, 2).unwrap();
     assert!(remote.log().begins.is_empty());
     assert_eq!(read_all(&remote.inner, &key(2)), theirs);
@@ -1026,7 +1032,13 @@ fn a_staged_file_that_cannot_follow_the_replica_is_not_uploaded() {
         put_bytes(&staging, key(2), &ours);
         let listed = next(UploadState::Unknown, &staging, &remote, 2).unwrap();
         assert_eq!(listed.state, UploadState::At(Some(txid(1))));
-        next(listed.state, &staging, &remote, 2).unwrap();
+        assert_eq!(
+            listed.did,
+            Did::Diverged {
+                confirmed: txid(1),
+                from: txid(2)
+            }
+        );
         assert!(remote.log().begins.is_empty());
     }
 }

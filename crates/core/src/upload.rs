@@ -49,6 +49,7 @@ use crate::fault::{BugSite, Fault};
 use crate::inventory::{Inventory, InventoryError};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::ltx_read::verifies;
+use crate::recover::read_header;
 use crate::store::{ListAt, ObjectStore, PageLimit, ReadLen, Upload};
 
 /// How much of a staged file is read at once.
@@ -111,15 +112,21 @@ pub enum Did {
     },
     /// One file was committed.
     Put(FileInfo),
-    /// The replica was listed, and its newest level-0 object verifies and
-    /// differs from the staged file under the same key. It stands, and is now
-    /// confirmed: it may already be compacted into higher levels, so writing
-    /// over it would give one transaction two contents. The staged files from
-    /// `at` on describe another history and must go, and new content takes a
-    /// transaction above `at`.
+    /// The replica was listed and the staged files from `from` on cannot
+    /// continue it, so they must go and new content takes a transaction above
+    /// `confirmed`. Either the replica's newest level-0 object verifies and
+    /// differs from the staged file under the same key (`from` is that key's
+    /// transaction): it stands and is confirmed, since it may already be
+    /// compacted into higher levels and writing over it would give one
+    /// transaction two contents. Or the staged file after the replica's newest
+    /// does not follow it (another page size, or a WAL range that neither
+    /// continues the replica's nor starts a generation): uploading it would
+    /// chain two histories.
     Diverged {
-        /// The transaction both copies name.
-        at: Txid,
+        /// The newest transaction the replica holds, now confirmed.
+        confirmed: Txid,
+        /// The first staged transaction that cannot follow it.
+        from: Txid,
     },
 }
 
@@ -228,19 +235,88 @@ async fn list_step<L: ObjectStore, S: ObjectStore>(
                 TailVerdict::Sound => newest,
                 TailVerdict::Replace => tail.prev().max(confirmed),
                 TailVerdict::Diverged => {
-                    return Ok(Uploaded {
-                        state: UploadState::At(newest),
-                        did: Did::Diverged { at: tail },
-                    });
+                    return Ok(diverged(tail, tail));
                 }
             }
         }
         _ => newest,
     };
+    if let Some(confirmed) = known
+        && let Some(from) = confirmed.next().filter(|next| Some(*next) <= newest_staged)
+        && !follows_replica(&inventory, staging, remote, confirmed)
+            .await
+            .map_err(|fault| fail(state, fault))?
+    {
+        return Ok(diverged(confirmed, from));
+    }
     Ok(Uploaded {
         state: UploadState::At(known),
         did: Did::Listed { newest: known },
     })
+}
+
+fn diverged(confirmed: Txid, from: Txid) -> Uploaded {
+    Uploaded {
+        state: UploadState::At(Some(confirmed)),
+        did: Did::Diverged { confirmed, from },
+    }
+}
+
+/// Whether the staged file after `confirmed`, when there is one, can follow
+/// the replica's file that ends at `confirmed`: the same page size, and when
+/// both name a WAL range, the staged one starts where the replica's ends or at
+/// the first frame of a generation. A header that does not decode is not
+/// judged here: the upload's own verification, or the replica's read-back,
+/// owns that. Two header reads per listing, and listings run at boot and
+/// after an ambiguous commit only.
+async fn follows_replica<L: ObjectStore, S: ObjectStore>(
+    inventory: &Inventory,
+    staging: &L,
+    remote: &S,
+    confirmed: Txid,
+) -> Result<bool, Fault> {
+    let next = confirmed.next().map(staged_key);
+    let page = staging
+        .list(
+            Level::ZERO,
+            Some(TxidRange::single(confirmed)),
+            PageLimit::ONE,
+        )
+        .await
+        .map_err(|err| Fault::from_staging(&err))?;
+    let Some(ours) = page.files.first().filter(|info| Some(info.key) == next) else {
+        return Ok(true);
+    };
+    let theirs = inventory
+        .files()
+        .iter()
+        .filter(|info| info.key.range().max() == confirmed)
+        .min_by_key(|info| info.key.level());
+    let Some(theirs) = theirs else {
+        return Ok(true);
+    };
+    let ours = read_header(staging, &ours.key, Fault::from_staging).await?;
+    let theirs = read_header(remote, &theirs.key, Fault::from_remote).await?;
+    Ok(match (theirs, ours) {
+        (Some(theirs), Some(ours)) => continues(&theirs, &ours),
+        _ => true,
+    })
+}
+
+/// Whether a file with header `ours` can come right after one with `theirs`.
+fn continues(theirs: &Header, ours: &Header) -> bool {
+    if theirs.page_size() != ours.page_size() {
+        return false;
+    }
+    match (theirs.fields().wal, ours.fields().wal) {
+        (Some(theirs), Some(ours)) => {
+            let first_frame = u64::try_from(lsr_wal::HEADER_LEN).unwrap_or(u64::MAX);
+            ours.offset() == first_frame
+                || (ours.salts() == theirs.salts()
+                    && Some(ours.offset()) == theirs.offset().checked_add(theirs.size()))
+        }
+        _ => true,
+    }
 }
 
 /// What a listing's read-back found at the replica's newest level-0 key.

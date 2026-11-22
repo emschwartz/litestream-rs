@@ -1309,8 +1309,8 @@ impl Actor {
             match upload_next(self.engine.upload, env.staging, env.remote, self.staged()).await {
                 Ok(uploaded) => {
                     self.engine.upload = uploaded.state;
-                    if let Did::Diverged { at } = uploaded.did {
-                        return Some(self.lose_staged(env, at, now).await);
+                    if let Did::Diverged { from, .. } = uploaded.did {
+                        return Some(self.lose_staged(env, from, now).await);
                     }
                     last = uploaded.did;
                 }
@@ -1813,15 +1813,15 @@ async fn boot_listing<L: ObjectStore, R: ObjectStore>(
     let (upload, diverged) = match upload_next(start, staging, remote, Some(Txid::MAX)).await {
         Ok(Uploaded {
             state,
-            did: Did::Diverged { at },
-        }) => (state, Some(at)),
+            did: Did::Diverged { from, .. },
+        }) => (state, Some(from)),
         Ok(listed) => (listed.state, None),
         Err(failed) => return Err(failed.fault),
     };
-    // The replica's object at `at` stands: the staged files from it on are
-    // another history, and the replica is then ahead of staging.
-    if let Some(at) = diverged {
-        drop_staged_from(staging, at).await?;
+    // The staged files from `from` on cannot continue the replica: they go,
+    // and recovery snapshots above what the replica holds.
+    if let Some(from) = diverged {
+        drop_staged_from(staging, from).await?;
     }
     let lost = sweep_staged(staging, upload.confirmed()).await?;
     Ok((upload, lost.or(diverged)))
