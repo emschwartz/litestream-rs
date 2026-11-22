@@ -3,11 +3,35 @@
 //! Pure functions over [`HttpResponse`]. Nothing here keeps a URL, a header
 //! value or a body: the result holds a status, a [`FileKey`] or a closed
 //! [`S3Code`].
+//!
+//! A code that names an access refusal decides before the status, since S3
+//! sends unrelated refusals under one status (403) and one refusal under
+//! several (`ExpiredToken` is 400 or 403 by provider). Each refusal is a
+//! [`Denied`] kind of its own, because each sends a person to fix a different
+//! thing:
+//!
+//! | Seen | Class |
+//! |---|---|
+//! | `InvalidAccessKeyId`, `SignatureDoesNotMatch`, `ExpiredToken`, `InvalidToken`, `TokenRefreshRequired`, any 401 | `Denied::Credentials` |
+//! | `AccessDenied`, `AllAccessDisabled`, a 403 with no code or another code | `Denied::Permission` |
+//! | `RequestTimeTooSkewed` | `Denied::ClockSkew` |
+//! | `NoSuchBucket`, any status, keyed or not | `Denied::BucketMissing` |
+//! | a TLS handshake or certificate failure | `Denied::Tls` |
+//! | `InvalidObjectState` (403, an archived object) | `Refused` |
+//! | 429 or `SlowDown` | `Throttled` |
+//! | 404 on a keyed request with `NoSuchKey` or no code | `NotFound` |
+//! | other 404, 501, 3xx, other 4xx, `InvalidDigest`, `InvalidRange`, `NoSuchUpload` | `Refused` |
+//! | 400 `BadDigest` | `Corrupt` |
+//! | 408, 5xx, a short 2xx body, a timeout, reset, refused connection or other I/O | `Transient` |
+//!
+//! A DeleteObjects result lists a code per key it could not delete; those
+//! follow the same rule ([`classify_delete_failures`]), so object lock
+//! refusing one delete is a permission, never a transient failure.
 
 use std::io;
 use std::time::Duration;
 
-use lsr_core::{CorruptCause, FileKey, PartNumber, StoreError, StoreOp};
+use lsr_core::{CorruptCause, Denied, FileKey, PartNumber, StoreError, StoreOp};
 
 use crate::transport::{HttpResponse, TransportError};
 
@@ -30,8 +54,17 @@ pub enum S3Code {
     SignatureDoesNotMatch,
     /// `ExpiredToken`.
     ExpiredToken,
+    /// `InvalidToken`: the session token is malformed.
+    InvalidToken,
+    /// `TokenRefreshRequired`: the session token must be refreshed.
+    TokenRefreshRequired,
+    /// `AllAccessDisabled`: every access to the bucket is disabled.
+    AllAccessDisabled,
     /// `RequestTimeTooSkewed`.
     RequestTimeTooSkewed,
+    /// `InvalidObjectState`: the object is in an archive tier and must be
+    /// restored before it can be read.
+    InvalidObjectState,
     /// `BadDigest`: the body does not match its Content-MD5.
     BadDigest,
     /// `InvalidDigest`: the Content-MD5 itself is malformed.
@@ -64,7 +97,11 @@ impl S3Code {
             "InvalidAccessKeyId" => Self::InvalidAccessKeyId,
             "SignatureDoesNotMatch" => Self::SignatureDoesNotMatch,
             "ExpiredToken" => Self::ExpiredToken,
+            "InvalidToken" => Self::InvalidToken,
+            "TokenRefreshRequired" => Self::TokenRefreshRequired,
+            "AllAccessDisabled" => Self::AllAccessDisabled,
             "RequestTimeTooSkewed" => Self::RequestTimeTooSkewed,
+            "InvalidObjectState" => Self::InvalidObjectState,
             "BadDigest" => Self::BadDigest,
             "InvalidDigest" => Self::InvalidDigest,
             "InvalidRange" => Self::InvalidRange,
@@ -85,15 +122,30 @@ impl S3Code {
         Some(Self::from_name(name.trim()))
     }
 
-    fn is_auth(self) -> bool {
-        matches!(
-            self,
-            Self::AccessDenied
-                | Self::InvalidAccessKeyId
-                | Self::SignatureDoesNotMatch
-                | Self::ExpiredToken
-                | Self::RequestTimeTooSkewed
-        )
+    /// The access refusal a code names, whatever status it came with: S3
+    /// sends `ExpiredToken` as 400 or 403 depending on the provider.
+    const fn denied(self) -> Option<Denied> {
+        match self {
+            Self::InvalidAccessKeyId
+            | Self::SignatureDoesNotMatch
+            | Self::ExpiredToken
+            | Self::InvalidToken
+            | Self::TokenRefreshRequired => Some(Denied::Credentials),
+            Self::AccessDenied | Self::AllAccessDisabled => Some(Denied::Permission),
+            Self::RequestTimeTooSkewed => Some(Denied::ClockSkew),
+            Self::NoSuchBucket => Some(Denied::BucketMissing),
+            Self::NoSuchKey
+            | Self::NoSuchUpload
+            | Self::SlowDown
+            | Self::InvalidObjectState
+            | Self::BadDigest
+            | Self::InvalidDigest
+            | Self::InvalidRange
+            | Self::PreconditionFailed
+            | Self::ConditionalRequestConflict
+            | Self::NotImplemented
+            | Self::Other => None,
+        }
     }
 }
 
@@ -139,9 +191,22 @@ pub fn classify(
             retry_after: retry_after(r),
         });
     }
+    if let Some(why) = code.and_then(S3Code::denied) {
+        return Err(StoreError::Denied { op, why });
+    }
     match status {
-        401 | 403 => Err(StoreError::Auth { op }),
-        _ if code.is_some_and(S3Code::is_auth) => Err(StoreError::Auth { op }),
+        401 => Err(StoreError::Denied {
+            op,
+            why: Denied::Credentials,
+        }),
+        403 if code == Some(S3Code::InvalidObjectState) => Err(StoreError::Refused { op, status }),
+        // A 403 with no code (a HEAD has no body) or one not listed: the
+        // store says forbidden without saying why; a credentials failure
+        // shows its own code on the next request that carries a body.
+        403 => Err(StoreError::Denied {
+            op,
+            why: Denied::Permission,
+        }),
         404 => Err(not_found(op, key, code, status)),
         412 => Err(match key {
             Some(key) => StoreError::AlreadyExists { key: *key },
@@ -170,7 +235,6 @@ pub fn classify(
 
 fn not_found(op: StoreOp, key: Option<&FileKey>, code: Option<S3Code>, status: u16) -> StoreError {
     match (key, code) {
-        (_, Some(S3Code::NoSuchBucket)) => StoreError::Auth { op },
         (Some(key), None | Some(S3Code::NoSuchKey)) => StoreError::NotFound { key: *key },
         _ => StoreError::Refused { op, status },
     }
@@ -208,7 +272,11 @@ pub fn error_in_ok_body(op: StoreOp, key: &FileKey, r: &HttpResponse) -> Option<
         | S3Code::InvalidAccessKeyId
         | S3Code::SignatureDoesNotMatch
         | S3Code::ExpiredToken
+        | S3Code::InvalidToken
+        | S3Code::TokenRefreshRequired
+        | S3Code::AllAccessDisabled
         | S3Code::RequestTimeTooSkewed
+        | S3Code::InvalidObjectState
         | S3Code::BadDigest
         | S3Code::InvalidDigest
         | S3Code::InvalidRange
@@ -220,6 +288,35 @@ pub fn error_in_ok_body(op: StoreOp, key: &FileKey, r: &HttpResponse) -> Option<
         },
     };
     Some(err)
+}
+
+/// Judges the per-key failures of a DeleteObjects result that otherwise
+/// succeeded (`codes`, from `parse_delete_failure_codes`). A key the store
+/// refuses access to names that refusal, as the same code on a whole response
+/// would: object lock refusing a delete is a permission, not a transient
+/// failure. Any other failed entry may pass on retry.
+///
+/// # Errors
+/// [`StoreError::Denied`] when an entry names an access refusal, else
+/// [`StoreError::Throttled`] for a `SlowDown` entry, else
+/// [`StoreError::Transient`] when any entry failed.
+pub fn classify_delete_failures(op: StoreOp, codes: &[S3Code]) -> Result<(), StoreError> {
+    if let Some(why) = codes.iter().find_map(|code| code.denied()) {
+        return Err(StoreError::Denied { op, why });
+    }
+    if codes.contains(&S3Code::SlowDown) {
+        return Err(StoreError::Throttled {
+            op,
+            retry_after: None,
+        });
+    }
+    if codes.is_empty() {
+        return Ok(());
+    }
+    Err(StoreError::Transient {
+        op,
+        kind: io::ErrorKind::Other,
+    })
 }
 
 /// Maps a failure to get any response.
@@ -238,7 +335,10 @@ pub fn classify_transport(op: StoreOp, err: &TransportError) -> StoreError {
             op,
             kind: io::ErrorKind::ConnectionRefused,
         },
-        TransportError::Tls => StoreError::Auth { op },
+        TransportError::Tls => StoreError::Denied {
+            op,
+            why: Denied::Tls,
+        },
         TransportError::Io(kind) => StoreError::Transient { op, kind },
     }
 }
@@ -335,31 +435,85 @@ mod tests {
         ]);
     }
 
+    fn denied(why: Denied) -> Result<(), StoreError> {
+        Err(StoreError::Denied { op: OP, why })
+    }
+
+    fn refused(status: u16) -> Result<(), StoreError> {
+        Err(StoreError::Refused { op: OP, status })
+    }
+
+    /// Each refusal names what to fix. A code, when the body has one, decides
+    /// before the status: S3 sends several unrelated refusals as 403.
     #[test]
-    fn classify_auth() {
+    fn classify_denials_by_what_to_fix() {
         check(vec![
-            (resp(401, None, None), Err(StoreError::Auth { op: OP })),
-            (
-                resp(403, Some("AccessDenied"), None),
-                Err(StoreError::Auth { op: OP }),
-            ),
+            (resp(401, None, None), denied(Denied::Credentials)),
             (
                 resp(403, Some("InvalidAccessKeyId"), None),
-                Err(StoreError::Auth { op: OP }),
+                denied(Denied::Credentials),
             ),
             (
                 resp(403, Some("SignatureDoesNotMatch"), None),
-                Err(StoreError::Auth { op: OP }),
+                denied(Denied::Credentials),
             ),
             (
                 resp(403, Some("ExpiredToken"), None),
-                Err(StoreError::Auth { op: OP }),
+                denied(Denied::Credentials),
+            ),
+            (
+                resp(400, Some("ExpiredToken"), None),
+                denied(Denied::Credentials),
+            ),
+            (
+                resp(400, Some("InvalidToken"), None),
+                denied(Denied::Credentials),
+            ),
+            (
+                resp(400, Some("TokenRefreshRequired"), None),
+                denied(Denied::Credentials),
+            ),
+            (
+                resp(403, Some("AccessDenied"), None),
+                denied(Denied::Permission),
+            ),
+            (
+                resp(403, Some("AllAccessDisabled"), None),
+                denied(Denied::Permission),
+            ),
+            // A HEAD's 403 has no body to say why; the store said forbidden.
+            (resp(403, None, None), denied(Denied::Permission)),
+            (
+                resp(403, Some("AccountProblem"), None),
+                denied(Denied::Permission),
             ),
             (
                 resp(403, Some("RequestTimeTooSkewed"), None),
-                Err(StoreError::Auth { op: OP }),
+                denied(Denied::ClockSkew),
             ),
+            (
+                resp(404, Some("NoSuchBucket"), None),
+                denied(Denied::BucketMissing),
+            ),
+            // An archived object is one object out of reach, not an access refusal.
+            (resp(403, Some("InvalidObjectState"), None), refused(403)),
         ]);
+    }
+
+    #[test]
+    fn a_missing_bucket_is_named_on_an_unkeyed_request_too() {
+        assert_eq!(
+            classify(
+                StoreOp::List,
+                None,
+                None,
+                &resp(404, Some("NoSuchBucket"), None)
+            ),
+            Err(StoreError::Denied {
+                op: StoreOp::List,
+                why: Denied::BucketMissing
+            })
+        );
     }
 
     #[test]
@@ -372,10 +526,6 @@ mod tests {
                 Err(StoreError::NotFound { key: k }),
             ),
             (resp(404, None, None), Err(StoreError::NotFound { key: k })),
-            (
-                resp(404, Some("NoSuchBucket"), None),
-                Err(StoreError::Auth { op: OP }),
-            ),
             (
                 resp(404, Some("NoSuchUpload"), None),
                 Err(StoreError::Refused {
@@ -521,6 +671,45 @@ mod tests {
     }
 
     #[test]
+    fn delete_failures_name_a_denial_before_anything_else() {
+        let op = StoreOp::Delete;
+        let cases = [
+            (vec![], Ok(())),
+            (
+                vec![S3Code::Other],
+                Err(StoreError::Transient {
+                    op,
+                    kind: io::ErrorKind::Other,
+                }),
+            ),
+            (
+                vec![S3Code::Other, S3Code::SlowDown],
+                Err(StoreError::Throttled {
+                    op,
+                    retry_after: None,
+                }),
+            ),
+            (
+                vec![S3Code::SlowDown, S3Code::AccessDenied],
+                Err(StoreError::Denied {
+                    op,
+                    why: Denied::Permission,
+                }),
+            ),
+            (
+                vec![S3Code::InvalidAccessKeyId],
+                Err(StoreError::Denied {
+                    op,
+                    why: Denied::Credentials,
+                }),
+            ),
+        ];
+        for (codes, want) in cases {
+            assert_eq!(classify_delete_failures(op, &codes), want, "{codes:?}");
+        }
+    }
+
+    #[test]
     fn range_past_end_is_only_416() {
         assert!(is_range_past_end(&resp(416, Some("InvalidRange"), None)));
         assert!(!is_range_past_end(&resp(206, None, None)));
@@ -551,7 +740,13 @@ mod tests {
                     kind: io::ErrorKind::ConnectionRefused,
                 },
             ),
-            (TransportError::Tls, StoreError::Auth { op }),
+            (
+                TransportError::Tls,
+                StoreError::Denied {
+                    op,
+                    why: Denied::Tls,
+                },
+            ),
             (
                 TransportError::Io(io::ErrorKind::BrokenPipe),
                 StoreError::Transient {

@@ -306,11 +306,15 @@ pub enum StoreError {
         /// How long the backend asked us to wait, when it said.
         retry_after: Option<Duration>,
     },
-    /// Credentials or permissions refuse the operation; retrying cannot help.
-    #[error("{op} refused: not authorized")]
-    Auth {
+    /// The store refuses access to the replica, or could not be reached
+    /// securely: waiting alone does not fix it, a person does, and `why` says
+    /// which person and what to fix.
+    #[error("{op} refused: {why}")]
+    Denied {
         /// What was being done.
         op: StoreOp,
+        /// Which kind of refusal.
+        why: Denied,
     },
     /// The object does not exist.
     #[error("object {key} not found")]
@@ -354,6 +358,36 @@ pub enum StoreError {
     },
 }
 
+/// Why a store refuses access. Each kind asks a different person to fix a
+/// different thing, so they are told apart all the way to the health report:
+/// the classes were one (`credentials`) until clock skew, a missing bucket and
+/// a failed certificate check each sent operators to rotate keys that were fine.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Error)]
+pub enum Denied {
+    /// The store does not accept the credentials: an unknown access key, a
+    /// signature that does not match, an expired or malformed session token.
+    #[error("credentials not accepted")]
+    Credentials,
+    /// The credentials are accepted and a policy refuses this request: a
+    /// bucket or IAM policy, a KMS key policy, object lock refusing a delete,
+    /// a local directory's permissions. Other requests may still succeed.
+    #[error("permission denied")]
+    Permission,
+    /// The request's signing time is too far from the store's clock
+    /// (`RequestTimeTooSkewed`): this host's clock is wrong, not its keys.
+    #[error("host clock too far from the store's")]
+    ClockSkew,
+    /// The bucket does not exist (`NoSuchBucket`): a wrong name or region in
+    /// the configuration, or a deleted bucket.
+    #[error("bucket does not exist")]
+    BucketMissing,
+    /// The TLS handshake or certificate check failed, so no request reached
+    /// the store: an expired or untrusted certificate, a missing trust store,
+    /// or an endpoint that is not the store.
+    #[error("tls handshake or certificate check failed")]
+    Tls,
+}
+
 impl StoreError {
     /// Classifies a local I/O error. A missing file is `NotFound` only when
     /// the caller names the key it was reading.
@@ -361,7 +395,10 @@ impl StoreError {
     pub fn from_io(op: StoreOp, key: Option<FileKey>, err: &io::Error) -> Self {
         match (err.kind(), key) {
             (io::ErrorKind::NotFound, Some(key)) => Self::NotFound { key },
-            (io::ErrorKind::PermissionDenied, _) => Self::Auth { op },
+            (io::ErrorKind::PermissionDenied, _) => Self::Denied {
+                op,
+                why: Denied::Permission,
+            },
             (kind, _) => Self::Transient { op, kind },
         }
     }
@@ -658,7 +695,10 @@ mod tests {
                 None,
                 &io::Error::from(io::ErrorKind::PermissionDenied)
             ),
-            StoreError::Auth { op: StoreOp::List }
+            StoreError::Denied {
+                op: StoreOp::List,
+                why: Denied::Permission
+            }
         );
         assert_eq!(
             StoreError::from_io(

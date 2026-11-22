@@ -60,7 +60,7 @@ pub fn classify(err: &StoreError) -> Class {
             Some(_) | None => Class::Retry,
         },
         StoreError::NotFound { .. } => Class::Missing,
-        StoreError::Auth { .. }
+        StoreError::Denied { .. }
         | StoreError::AlreadyExists { .. }
         | StoreError::ScratchExhausted { .. }
         | StoreError::Corrupt { .. }

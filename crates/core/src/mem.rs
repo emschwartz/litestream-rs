@@ -406,13 +406,25 @@ mod tests {
             retry_after: Some(Duration::from_secs(1)),
         };
         store.inject_failure(StoreOp::List, throttled.clone());
-        store.inject_failure(StoreOp::Read, StoreError::Auth { op: StoreOp::Read });
+        store.inject_failure(
+            StoreOp::Read,
+            StoreError::Denied {
+                op: StoreOp::Read,
+                why: crate::store::Denied::Credentials,
+            },
+        );
         let first = conformance::block_on(store.list(Level::ZERO, None, limit));
         assert_eq!(first, Err(throttled));
         let second = conformance::block_on(store.list(Level::ZERO, None, limit));
         assert_eq!(second.map(|l| l.files.len()), Ok(0));
         let read = conformance::block_on(store.read(&key(), 0, ReadLen::new(1).unwrap()));
-        assert_eq!(read, Err(StoreError::Auth { op: StoreOp::Read }));
+        assert_eq!(
+            read,
+            Err(StoreError::Denied {
+                op: StoreOp::Read,
+                why: crate::store::Denied::Credentials
+            })
+        );
     }
 
     #[test]

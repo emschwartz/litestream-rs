@@ -29,14 +29,14 @@ use lsr_core::{
 };
 use lsr_ltx::{Timestamp, TxidRange};
 
-use crate::classify::{classify, classify_transport, is_range_past_end};
+use crate::classify::{classify, classify_delete_failures, classify_transport, is_range_past_end};
 use crate::config::{
     CREATION_TIME_CONCURRENCY, ConfigError, PartSize, Prefix, READ_CONCURRENCY, S3Config,
 };
 use crate::credentials::S3Credentials;
 use crate::orphans::Orphans;
 use crate::request::{HttpRequest, MAX_DELETE_KEYS, Precondition, RequestBuilder, RequestError};
-use crate::response::{Head, parse_created_at_header, parse_delete_failures, parse_head};
+use crate::response::{Head, parse_created_at_header, parse_delete_failure_codes, parse_head};
 use crate::transport::{HttpResponse, Transport};
 use crate::upload::S3Upload;
 #[cfg(feature = "ureq")]
@@ -641,15 +641,10 @@ impl<T: Transport> Inner<T> {
             self.within_budget(op, start)?;
             let request = self.request(op, |b, now| b.delete_objects(now, batch))?;
             let response = self.exec(op, None, request)?;
+            // A key that is already gone is not a failure; anything else is.
             let failed =
-                parse_delete_failures(&response).map_err(|err| err.into_store(op, None))?;
-            if failed > 0 {
-                // A key that is already gone is not a failure; anything else is.
-                return Err(StoreError::Transient {
-                    op,
-                    kind: io::ErrorKind::Other,
-                });
-            }
+                parse_delete_failure_codes(&response).map_err(|err| err.into_store(op, None))?;
+            classify_delete_failures(op, &failed)?;
         }
         Ok(())
     }

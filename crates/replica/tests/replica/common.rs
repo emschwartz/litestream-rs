@@ -233,7 +233,10 @@ impl Faulty {
     fn gate(&self, op: StoreOp) -> Result<(), StoreError> {
         self.panic_if_always();
         if self.refuse.load(Ordering::SeqCst) {
-            return Err(StoreError::Auth { op });
+            return Err(StoreError::Denied {
+                op,
+                why: lsr_core::Denied::Credentials,
+            });
         }
         Ok(())
     }

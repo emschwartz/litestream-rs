@@ -186,7 +186,7 @@ fn a_degraded_task_is_still_reported_while_the_engine_is_rebuilt() {
     let degraded = wait(&replicator, |h| h.task(Task::Upload).is_some());
     assert_eq!(
         degraded.task(Task::Upload).map(|d| d.cause),
-        Some(DegradedCause::Credentials)
+        Some(DegradedCause::StoreDenied(lsr_core::Denied::Credentials))
     );
     // The upload's retry panics.
     faulty.panic_always.store(true, Ordering::SeqCst);

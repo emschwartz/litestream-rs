@@ -1335,7 +1335,10 @@ fn a_source_read_error_is_failed_and_publishes_nothing() {
     let (local, replica) = (MemStore::new(), MemStore::new());
     three_l0(&local, &replica);
     let job = l1_job(&replica);
-    let fault = StoreError::Auth { op: StoreOp::Read };
+    let fault = StoreError::Denied {
+        op: StoreOp::Read,
+        why: crate::store::Denied::Credentials,
+    };
     local.inject_failure(StoreOp::Read, fault);
     let out = block_on(run_compact(&job, &local, &replica));
     assert!(
@@ -1374,15 +1377,16 @@ fn run_delete_counts_tolerates_gone_keys_and_maps_a_store_error() {
     assert!(matches!(again, Outcome::Deleted { count: 3 }));
     replica.inject_failure(
         StoreOp::Delete,
-        StoreError::Auth {
+        StoreError::Denied {
             op: StoreOp::Delete,
+            why: crate::store::Denied::Credentials,
         },
     );
     let failed = block_on(run_delete(&job, &replica));
     assert!(
         matches!(
             &failed,
-            Outcome::Failed(MaintainError::Delete(StoreError::Auth { .. }))
+            Outcome::Failed(MaintainError::Delete(StoreError::Denied { .. }))
         ),
         "{failed:?}"
     );

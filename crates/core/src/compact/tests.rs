@@ -872,8 +872,9 @@ fn a_failed_upload_write_aborts_and_an_abort_failure_does_not_replace_the_error(
     let infos = four(&source);
     let dest = Spy::default();
     dest.script().fail_write = Some((0, transient(StoreOp::Upload)));
-    dest.script().abort_error = Some(StoreError::Auth {
+    dest.script().abort_error = Some(StoreError::Denied {
         op: StoreOp::Upload,
+        why: crate::store::Denied::Credentials,
     });
     let err = error_of(compact_infos(&source, &dest, &infos, 1));
     assert!(matches!(
