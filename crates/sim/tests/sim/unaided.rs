@@ -3,7 +3,8 @@
 //! under its seed's mix (`Weights::mixed`), with only the judges `LSR_SIM_JUDGES` names
 //! (`history`, `oracle` or `both`); with `LSR_SIM_BLOCK_LAW` set, every seed's power losses
 //! follow the block crash law instead of half of them; with `LSR_SIM_AFTER_RESTART` set (`redo`,
-//! `busy` or `nothing`), every seed's app does that after a restart instead of what its mix drew.
+//! `busy` or `nothing`), every seed's app does that after a restart instead of what its mix drew;
+//! with `LSR_SIM_NO_WAL_DAMAGE` set, no seed draws WAL damage.
 //! Prints every failing seed and the number of seeds run to
 //! the first. The generator, weights and step count are the soak's, fixed here so a count of
 //! seeds to first failure compares across trees.
@@ -39,10 +40,15 @@ fn env(name: &str, default: u64) -> u64 {
         .map_or(default, |v| v.parse().expect("a number"))
 }
 
-/// `seed`'s mix, with the overrides `LSR_SIM_BLOCK_LAW` and `LSR_SIM_AFTER_RESTART` name.
+/// `seed`'s mix, with the overrides `LSR_SIM_BLOCK_LAW` and `LSR_SIM_AFTER_RESTART` name, and
+/// with no WAL damage drawn when `LSR_SIM_NO_WAL_DAMAGE` is set: damage regrows the WAL with
+/// other bytes by fiat, so leaving it out shows what the application's own behaviour reaches.
 pub fn weights(seed: Seed) -> Weights {
     let mut weights = Weights::mixed(seed);
     weights.block_crash_law |= std::env::var("LSR_SIM_BLOCK_LAW").is_ok();
+    if std::env::var("LSR_SIM_NO_WAL_DAMAGE").is_ok() {
+        weights.wal_damage = 0;
+    }
     match std::env::var("LSR_SIM_AFTER_RESTART").as_deref() {
         Err(_) => {}
         Ok("redo") => weights.after_restart = AfterRestart::Redo,
@@ -105,4 +111,17 @@ fn seeds_to_first_failure() {
         "{judges:?}: {} failed of seeds from {base}: {failed:?}",
         failed.len()
     );
+}
+
+/// Found unaided by the swarm, with nothing written for it: under the planted bug "the boot
+/// anchor accepts any tail in the live generation" (`docs/planted-bugs/anchor-any-tail.patch`),
+/// seed 15's drawn mix, 27 steps in, restores a `Latest` no commit made. Its app commits past
+/// its pre-crash end after each restart, then WAL damage regrows the generation with other bytes
+/// and the engine boots on it.
+#[test]
+fn swarm_seed_15_restores_only_committed_states() {
+    let seed = Seed::new(15);
+    if let Err(failure) = run_with(seed, 27, &Weights::mixed(seed), &Opts::default()) {
+        panic!("{failure}");
+    }
 }

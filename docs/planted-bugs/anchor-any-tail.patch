@@ -1,0 +1,24 @@
+diff --git a/crates/core/src/recover.rs b/crates/core/src/recover.rs
+index f833e36..2066fba 100644
+--- a/crates/core/src/recover.rs
++++ b/crates/core/src/recover.rs
+@@ -249,7 +249,7 @@ impl NewestStagedFile {
+                     | LastPageCheck::NoFrame(_)
+                     | LastPageCheck::Rewritten => false,
+                 };
+-                if matched && !range.agrees(&pages, commit) {
++                if matched && !range.agrees(&pages, commit) && !matched {
+                     LastPageCheck::Rewritten
+                 } else {
+                     checked
+@@ -426,9 +426,7 @@ fn match_last_page<R: Read + Seek>(
+ ) -> Result<LastPageCheck, Fault> {
+     let last_page = match (check, pages.last) {
+         (FrameCheck::Frame(frame), _) => match pages.wanted {
+-            None => return Ok(LastPageCheck::NotInNewestStagedFile),
+-            Some(digest) if digest != frame.digest() => return Ok(LastPageCheck::Mismatch),
+-            Some(_) => LastPage::of_frame(&frame),
++            None | Some(_) => LastPage::of_frame(&frame),
+         },
+         (FrameCheck::Miss(Miss::NotACommit), Some(last)) if end.frame_index() == 0 => last,
+         (FrameCheck::Miss(miss), _) => return Ok(LastPageCheck::NoFrame(miss)),
