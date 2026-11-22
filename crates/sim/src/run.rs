@@ -788,9 +788,13 @@ impl Runner {
         }
         let staging = self.w.staging_recorder.events();
         let remote = self.w.remote_recorder.events();
+        let world = crate::liveness::WithEngine {
+            world: &self.w,
+            staged: self.actor.staged().map(lsr_ltx::Txid::get),
+        };
         self.liveness.after_tick(
             (&staging, &remote),
-            &self.w,
+            &world,
             snapshots,
             ended,
             &mut self.report.reach,
