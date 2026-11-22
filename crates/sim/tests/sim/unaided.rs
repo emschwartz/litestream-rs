@@ -141,7 +141,13 @@ fn seeds_to_first_failure() {
 #[test]
 fn swarm_seed_44_restores_only_committed_states() {
     let seed = Seed::new(44);
-    if let Err(failure) = run_with(seed, 8, &Weights::mixed(seed), &Opts::default()) {
+    // The mix as it was drawn when the swarm found it: the lagging-listings law came later
+    // and, drawn for this seed, would change which operations the history holds.
+    let weights = Weights {
+        lagging_listings: 0,
+        ..Weights::mixed(seed)
+    };
+    if let Err(failure) = run_with(seed, 8, &weights, &Opts::default()) {
         panic!("{failure}");
     }
 }
