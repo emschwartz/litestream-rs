@@ -289,6 +289,14 @@ tests = [
     "a_header_written_again_with_the_same_salts_replicates_what_follows",
 ]
 
+[[bug]]
+name = "start-seed-from-old-header-sim"
+patch = "start-seed-from-old-header"
+fix = "1c818f58"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["faults::a_header_written_again_by_another_connection_is_followed"]
+
 # A running position past the start whose frames were regrown from a header written again
 # (same salts, another seed) continues on the old running checksum; the next scan meets the
 # regrown chain as damage below the committed end.

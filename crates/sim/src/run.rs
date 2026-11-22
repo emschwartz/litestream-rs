@@ -1394,6 +1394,16 @@ impl Runner {
         Ok(())
     }
 
+    /// Another application connection commits: its own pages, never growing the database, and
+    /// not in the app's log (the app does not redo another process's writes).
+    fn other_connection_commit(&mut self, count: u8) {
+        let size = self.w.sqlite.db_size();
+        let pages = self.pick_pages(u32::from(count), size);
+        if self.w.other_writer_commit(&pages, size).is_some() {
+            self.report.reach.bump("commit.other_connection");
+        }
+    }
+
     fn spill(&mut self) {
         let size = self.w.sqlite.db_size();
         let pages = self.pick_pages(small(&self.rng, 3).saturating_add(1), size);
@@ -1822,6 +1832,7 @@ impl Runner {
             Op::Commit { pages, grow } => self.commit(*pages, *grow),
             Op::CommitInTick { pages } => self.commit_in_tick(*pages)?,
             Op::Spill => self.spill(),
+            Op::OtherConnectionCommit { pages } => self.other_connection_commit(*pages),
             Op::Rollback => {
                 if self.w.sqlite.rollback() {
                     self.spilled.clear();

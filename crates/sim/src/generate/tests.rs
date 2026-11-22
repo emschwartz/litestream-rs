@@ -152,6 +152,9 @@ fn the_second_frozen_generator_draws_what_the_live_one_drew() {
         // only which error a fault draws.
         weights.hold = 0;
         weights.error_domain = false;
+        // Another connection's commits are drawn last in the swarm, so with none drawn the
+        // table is the one the second generator knew.
+        weights.other_connection_commit = 0;
         let live = history(seed(n), 300, &weights);
         assert_eq!(
             frozen_history(seed(n), 300, Generator::V2),
