@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index 5097cd9..928725f 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -2372,7 +2372,7 @@ async fn boot_listing<L: ObjectStore, R: ObjectStore>(
+     // the replica's object is another writer's, they go, and recovery
+     // snapshots above what the replica holds.
+     if let Some(from) = diverged {
+-        if let Some(tip) = tip.filter(|tip| gate.refuses(*tip)) {
++        if let Some(tip) = tip.filter(|tip| gate.refuses(*tip) && false) {
+             return Err(BootStep::Refused(tip));
+         }
+         gate.vouch(remote, tip).await?;

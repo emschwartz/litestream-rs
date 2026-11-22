@@ -33,6 +33,10 @@
 # replica-page-size-unread-sim (7bf9707): seed 0x13's run no longer reaches the boot it pinned
 # once the engine asks for a takeover record before deleting staged files (one more tick changes
 # the interleaving); the test stays as a regression run, and the core entry plants the defect.
+# other-writer-stop-forgotten (a9da6c6) and stop-record-not-kept (a939338): the stop record they
+# planted into is gone (68d2d90). A restart after a stop for another writer now stops by the
+# boot's refusal: of files above staging (boot-gate-refuses-nothing) or of a divergence under the
+# engine's next id (boot-divergence-snapshots-above-another-writer).
 
 [[bug]]
 name = "canary-no-op"
@@ -376,24 +380,6 @@ tests = [
     "a_commit_before_the_checkpoint_barrier_is_not_stamped_before_it_landed",
 ]
 
-# A restart after a stop for another writer took the other writer's files as history.
-[[bug]]
-name = "other-writer-stop-forgotten"
-fix = "a9da6c6"
-package = "lsr-core"
-tests = [
-    "a_restart_keeps_the_stop_for_another_writer",
-    "a_running_engine_stops_when_another_writer_took_its_next_id",
-]
-
-[[bug]]
-name = "stop-record-not-kept"
-fix = "a939338"
-package = "lsr-replica"
-test_bin = "replica"
-tests = ["second_writer::a_stop_for_another_writer_survives_a_restart"]
-
-# Two engines started on one meta directory.
 [[bug]]
 name = "meta-dir-unlocked"
 fix = "a939338"
@@ -665,10 +651,7 @@ tests = ["newest_staged_file_lost", "restored_old_meta"]
 name = "boot-gate-takeover-ignored"
 fix = "aa1165d"
 package = "lsr-core"
-tests = [
-    "vouch::a_vm_restore_stops_until_a_takeover_covers_the_replica",
-    "vouch::a_takeover_covering_the_replica_clears_a_stop_record",
-]
+tests = ["vouch::a_vm_restore_stops_until_a_takeover_covers_the_replica"]
 
 [[bug]]
 name = "boot-gate-takeover-ignored-sim"
@@ -907,3 +890,19 @@ name = "park-ignores-callers-reading"
 fix = "af15d43"
 package = "lsr-replica"
 tests = ["a_park_returns_for_a_step_back_between_the_callers_reading_and_the_park"]
+
+# A boot divergence (the replica's newest file verifies and differs from the staged copy under
+# the same key) dropped the staged copy and snapshotted above another writer's file.
+[[bug]]
+name = "boot-divergence-snapshots-above-another-writer"
+fix = "68d2d90"
+package = "lsr-core"
+tests = ["a_running_engine_stops_when_another_writer_took_its_next_id"]
+
+# An unusable takeover record taken as covering everything instead of as absent.
+[[bug]]
+name = "unusable-takeover-taken-as-given"
+fix = "68d2d90"
+package = "lsr-replica"
+test_bin = "replica"
+tests = ["second_writer::an_unusable_takeover_record_is_reported_and_costs_no_stop"]
