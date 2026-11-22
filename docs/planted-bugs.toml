@@ -71,7 +71,10 @@ name = "recover-before-trusting-snapshot"
 fix = "b1b9b1e"
 package = "lsr-sim"
 test_bin = "sim"
-tests = ["a_requested_snapshot_after_the_wal_moved_trusts_no_stale_page"]
+tests = [
+    "a_requested_snapshot_after_the_wal_moved_trusts_no_stale_page",
+    "a_put_back_staged_file_never_sends_latest_back_seed_0x126d68fac4b6",
+]
 
 [[bug]]
 name = "boot-snapshot-cause"
@@ -152,6 +155,10 @@ package = "lsr-sim"
 test_bin = "sim"
 tests = [
     "maintenance_stops_on_another_writer_seed_0x50c",
+    "a_put_back_staged_file_never_sends_latest_back_seed_0x126d68fac789",
+    "a_put_back_staged_file_never_sends_latest_back_seed_0x126d68facf21",
+    "a_put_back_staged_file_never_sends_latest_back_seed_0x126d68fad061",
+    "another_writer_s_files_fit_the_level_bytes_budget_seed_0x126d68facf74",
 ]
 
 [[bug]]
@@ -205,7 +212,14 @@ name = "always-snapshot-at-boot"
 fix = "plant"
 package = "lsr-sim"
 test_bin = "sim"
-tests = ["liveness::restarts_with_nothing_damaged_never_snapshot"]
+tests = [
+    "liveness::restarts_with_nothing_damaged_never_snapshot",
+    "a_torn_staged_file_is_dropped_seed_0x25",
+    "a_torn_staged_file_is_dropped_seed_0x2d",
+    "a_torn_staged_file_is_dropped_seed_0x46",
+    "page_size_vacuum_and_staging_wipe_seed_0x126d68ef545f",
+    "a_put_back_staged_file_never_sends_latest_back_seed_0x126d68fae16b",
+]
 # A failed sync of the WAL taken as a success: the frames it covered are staged, though the
 # kernel may never write them. The simulator's lost writeback and its staged-durability check
 # see it too (`wal_fsync_fails`), as does the actor's unit test.
@@ -806,3 +820,22 @@ fix = "checker-holes (stall liveness)"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["a_stall_ends_with_the_fault_that_caused_it_seed_0xa2"]
+
+# The recorded regression histories (crates/sim/tests/sim/histories.rs) whose own defect has no
+# plant: each is run against a plant on the path its history takes, so a history that stops
+# running that path goes red. The same defects as the entries they reuse, against the simulator.
+[[bug]]
+name = "wal-barrier-sim"
+fix = "plant"
+patch = "wal-barrier"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["page_size_vacuum_and_staging_wipe_seed_0x126d68ef1c07"]
+
+[[bug]]
+name = "inside-file-sole-base-sim"
+fix = "plant"
+patch = "inside-file-sole-base"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_restored_staging_backup_is_not_uploaded_seed_0x1919f"]
