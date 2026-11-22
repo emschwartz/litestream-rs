@@ -1579,11 +1579,15 @@ impl Runner {
     }
 
     /// What a drawn run's power losses keep of the unsynced WAL writes: a
-    /// drawn prefix, or the block law's draw.
-    fn draw_power_law(&self, seed: Seed, blocks: bool) {
+    /// drawn prefix, or the block law's draw; and whether the engine's own
+    /// sync of the WAL keeps anything.
+    fn draw_power_law(&self, seed: Seed, opts: &Opts) {
         self.w.sqlite.tear_on_power_loss(seed.stream(14));
-        if blocks {
+        if opts.block_crash_law {
             self.w.sqlite.crash_by_law(CrashLaw::drawn(seed.stream(17)));
+        }
+        if opts.lying_wal_sync {
+            self.w.sqlite.lie_on_our_sync();
         }
     }
 
@@ -1781,11 +1785,8 @@ pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure
     let mut runner = Runner::new(seed);
     runner.lenient = opts.drawn;
     if opts.drawn {
-        runner.draw_power_law(seed, opts.block_crash_law);
+        runner.draw_power_law(seed, opts);
         runner.draw_batch_widths(seed);
-        if opts.lying_wal_sync {
-            runner.w.sqlite.lie_on_our_sync();
-        }
     }
     runner.trace = opts.trace;
     runner.record = opts.record;
