@@ -665,7 +665,7 @@ impl Worker {
                 (Some(seen), Some(engine)) => Some(seen.min(engine)),
                 (seen, engine) => seen.or(engine),
             };
-            health.fail_stop = parts.fail_stop;
+            health.held_by = parts.fail_stop;
             health.wal_bytes = parts.wal_bytes;
             health.db_bytes = parts.db_bytes;
             health.resnapshot = resnapshot;
@@ -694,7 +694,7 @@ impl Worker {
             .judge(self.config.if_replication_stops, trip, judged);
         let held = match gate {
             Gate::Held(_) => true,
-            Gate::Pending | Gate::Open => false,
+            Gate::Pending | Gate::Allowed => false,
         };
         self.shared.writes_refused.store(held, Ordering::Release);
         FailStop { trip, gate }

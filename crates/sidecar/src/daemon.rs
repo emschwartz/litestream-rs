@@ -455,7 +455,7 @@ impl Daemon {
             .views()
             .into_iter()
             .filter_map(|view| match view.state {
-                DbState::Running(health) => Some((view.path, health.fail_stop.gate)),
+                DbState::Running(health) => Some((view.path, health.held_by.gate)),
                 DbState::Waiting | DbState::Failed => None,
             })
             .collect()

@@ -222,7 +222,7 @@ fn a_refusal_at_boot_holds_until_it_heals() {
     let report = run_refused(&ops);
     assert_eq!(
         first_trip(&report).map(|(_, trip)| trip),
-        Some(Trip::NotYetReachable(Denied::ClockSkew)),
+        Some(Trip::RefusedAtStart(Denied::ClockSkew)),
         "{:?}",
         report.trips
     );

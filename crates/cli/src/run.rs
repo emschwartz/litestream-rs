@@ -66,8 +66,8 @@ pub enum Exit {
     ExecFailed,
     /// `replicate -exec`: fail-stop held the application (`if-replication-stops`, decision
     /// D19): the child was stopped for safety, or never started. A code of its own, so a
-    /// supervisor can tell a stop for safety from a crash. PROVISIONAL(#115): the code and its
-    /// line in the table await the owner (#41).
+    /// supervisor can tell a stop for safety from a crash. The code and its line were approved by
+    /// the owner (decision D84).
     AppStopped,
 }
 
@@ -110,7 +110,7 @@ impl Exit {
             }
             Self::Usage => "usage error",
             Self::AppStopped => {
-                "replicate -exec: replication stopped and if-replication-stops held the application: it was stopped, or never started"
+                "replicate -exec: replication stopped, so the application was stopped or never started (if-replication-stops)"
             }
             Self::ExecFailed => {
                 "replicate -exec: the run failed, as Go exits 1 (the child exited non-zero, died by a signal outside a shutdown, was killed or did not start, or a database did not start or drain); the child's own code is in the log"

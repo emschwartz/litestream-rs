@@ -176,7 +176,7 @@ pub struct Health {
     pub verification: Verification,
     /// Fail-stop (`Config::if_replication_stops`): whether replication has tripped, and what
     /// that does to the application.
-    pub fail_stop: FailStop,
+    pub held_by: FailStop,
 }
 
 /// Fail-stop's state (`lsr_core::failstop`, `docs/proposals/fail-stop.md`).
@@ -309,7 +309,7 @@ impl Health {
                 },
                 snapshots: SnapshotCounts::ZERO,
             },
-            fail_stop: FailStop {
+            held_by: FailStop {
                 trip: None,
                 gate: Gate::Pending,
             },

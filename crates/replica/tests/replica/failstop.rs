@@ -42,10 +42,10 @@ fn a_refusal_at_boot_refuses_commits_until_the_first_listing() {
     let (runtime, clock) = fake();
     let replicator = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
     replicator.app_connection(&site.app).unwrap();
-    let held = wait(&replicator, |h| matches!(h.fail_stop.gate, Gate::Held(_)));
+    let held = wait(&replicator, |h| matches!(h.held_by.gate, Gate::Held(_)));
     assert_eq!(
-        held.fail_stop.trip,
-        Some(Trip::NotYetReachable(Denied::Credentials))
+        held.held_by.trip,
+        Some(Trip::RefusedAtStart(Denied::Credentials))
     );
     let before = rows(&site);
     let err = insert(&site).unwrap_err();
@@ -54,7 +54,7 @@ fn a_refusal_at_boot_refuses_commits_until_the_first_listing() {
 
     faulty.refuse.store(false, Ordering::SeqCst);
     clock.advance(POLL);
-    wait(&replicator, |h| h.fail_stop.gate == Gate::Open);
+    wait(&replicator, |h| h.held_by.gate == Gate::Allowed);
     insert(&site).unwrap();
     assert_eq!(rows(&site), before + 1);
 }
@@ -73,8 +73,8 @@ fn report_never_refuses_a_commit() {
     };
     let replicator = Replicator::start_with(&site.db, store, report, runtime).unwrap();
     replicator.app_connection(&site.app).unwrap();
-    let tripped = wait(&replicator, |h| h.fail_stop.trip.is_some());
-    assert_eq!(tripped.fail_stop.gate, Gate::Open);
+    let tripped = wait(&replicator, |h| h.held_by.trip.is_some());
+    assert_eq!(tripped.held_by.gate, Gate::Allowed);
     insert(&site).unwrap();
 }
 
@@ -97,7 +97,7 @@ fn an_unsafe_stop_while_running_refuses_commits_only_under_stop_app() {
         };
         let replicator = Replicator::start_with(&site.db, store, strict, runtime).unwrap();
         replicator.app_connection(&site.app).unwrap();
-        wait(&replicator, |h| h.fail_stop.gate == Gate::Open);
+        wait(&replicator, |h| h.held_by.gate == Gate::Allowed);
         // A commit to upload, made before the store refuses: once it does, a stop can hold
         // the gate at any moment.
         insert(&site).unwrap();
@@ -105,10 +105,10 @@ fn an_unsafe_stop_while_running_refuses_commits_only_under_stop_app() {
         clock.advance(POLL);
         let stopped = wait(&replicator, |h| matches!(h.phase, Phase::Stopped(_)));
         assert_eq!(
-            stopped.fail_stop.trip,
+            stopped.held_by.trip,
             Some(Trip::Stopped(StopCause::StoreDenied(Denied::Credentials)))
         );
-        let held = matches!(replicator.health().fail_stop.gate, Gate::Held(_));
+        let held = matches!(replicator.health().held_by.gate, Gate::Held(_));
         assert_eq!(held, refuses, "{mode:?}");
         let result = insert(&site);
         assert_eq!(

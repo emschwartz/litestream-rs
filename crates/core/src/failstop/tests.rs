@@ -24,7 +24,7 @@ fn trips() -> [Trip; 3] {
     [
         Trip::Stopped(StopCause::OtherWriter),
         Trip::UnreplicatedTooLong { since: ts(1) },
-        Trip::NotYetReachable(Denied::Credentials),
+        Trip::RefusedAtStart(Denied::Credentials),
     ]
 }
 
@@ -33,26 +33,26 @@ fn trips() -> [Trip; 3] {
 fn the_gate_follows_the_table() {
     let stop = Trip::Stopped(StopCause::OtherWriter);
     let age = Trip::UnreplicatedTooLong { since: ts(1) };
-    let refused = Trip::NotYetReachable(Denied::Permission);
+    let refused = Trip::RefusedAtStart(Denied::Permission);
     let held = |trip| Gate::Held(trip);
     let cases = [
         // (mode, released, trip, gate)
-        (IfReplicationStops::Report, false, stop, Gate::Open),
-        (IfReplicationStops::Report, true, stop, Gate::Open),
-        (IfReplicationStops::Report, false, age, Gate::Open),
-        (IfReplicationStops::Report, false, refused, Gate::Open),
+        (IfReplicationStops::Report, false, stop, Gate::Allowed),
+        (IfReplicationStops::Report, true, stop, Gate::Allowed),
+        (IfReplicationStops::Report, false, age, Gate::Allowed),
+        (IfReplicationStops::Report, false, refused, Gate::Allowed),
         (IfReplicationStops::HoldStart, false, stop, held(stop)),
-        (IfReplicationStops::HoldStart, true, stop, Gate::Open),
-        (IfReplicationStops::HoldStart, false, age, Gate::Open),
-        (IfReplicationStops::HoldStart, true, age, Gate::Open),
+        (IfReplicationStops::HoldStart, true, stop, Gate::Allowed),
+        (IfReplicationStops::HoldStart, false, age, Gate::Allowed),
+        (IfReplicationStops::HoldStart, true, age, Gate::Allowed),
         (IfReplicationStops::HoldStart, false, refused, held(refused)),
-        (IfReplicationStops::HoldStart, true, refused, Gate::Open),
+        (IfReplicationStops::HoldStart, true, refused, Gate::Allowed),
         (IfReplicationStops::StopApp, false, stop, held(stop)),
         (IfReplicationStops::StopApp, true, stop, held(stop)),
         (IfReplicationStops::StopApp, false, age, held(age)),
         (IfReplicationStops::StopApp, true, age, held(age)),
         (IfReplicationStops::StopApp, false, refused, held(refused)),
-        (IfReplicationStops::StopApp, true, refused, Gate::Open),
+        (IfReplicationStops::StopApp, true, refused, Gate::Allowed),
     ];
     for (mode, released, trip, want) in cases {
         assert_eq!(
@@ -62,8 +62,8 @@ fn the_gate_follows_the_table() {
         );
     }
     for mode in MODES {
-        assert_eq!(gate(mode, false, None), Gate::Open);
-        assert_eq!(gate(mode, true, None), Gate::Open);
+        assert_eq!(gate(mode, false, None), Gate::Allowed);
+        assert_eq!(gate(mode, true, None), Gate::Allowed);
     }
 }
 
@@ -91,12 +91,12 @@ fn the_release_latches() {
     assert!(!app.released());
     assert_eq!(
         app.judge(IfReplicationStops::HoldStart, None, true),
-        Gate::Open
+        Gate::Allowed
     );
     assert!(app.released());
     assert_eq!(
         app.judge(IfReplicationStops::HoldStart, stop, true),
-        Gate::Open
+        Gate::Allowed
     );
     assert!(matches!(
         app.judge(IfReplicationStops::StopApp, stop, true),
@@ -129,14 +129,14 @@ fn a_stop_trips_and_wins() {
     assert_eq!(trip(Some(StopCause::Shutdown), None, None), None);
     assert_eq!(
         trip(Some(StopCause::Shutdown), Some(Denied::Tls), Some(ts(1))),
-        Some(Trip::NotYetReachable(Denied::Tls))
+        Some(Trip::RefusedAtStart(Denied::Tls))
     );
     assert_eq!(
         trip(None, None, Some(ts(5))),
         Some(Trip::UnreplicatedTooLong { since: ts(5) })
     );
     assert!(Trip::UnreplicatedTooLong { since: ts(5) }.clears_by_itself());
-    assert!(Trip::NotYetReachable(Denied::Tls).clears_by_itself());
+    assert!(Trip::RefusedAtStart(Denied::Tls).clears_by_itself());
 }
 
 #[test]
@@ -261,7 +261,7 @@ proptest! {
     fn report_never_holds(released in any::<bool>(), which in 0_usize..3) {
         prop_assert_eq!(
             gate(IfReplicationStops::Report, released, trips().get(which).copied()),
-            Gate::Open
+            Gate::Allowed
         );
     }
 }

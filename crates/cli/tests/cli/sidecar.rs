@@ -741,7 +741,12 @@ fn stop_app_without_exec_is_refused() {
     let text =
         String::from_utf8_lossy(&out.stderr).into_owned() + &String::from_utf8_lossy(&out.stdout);
     assert_eq!(out.status.code(), Some(2), "{text}");
-    assert!(text.contains("if-replication-stops: stop-app"), "{text}");
+    assert!(
+        text.contains(
+            "if-replication-stops: stop-app refused: stopping the application needs -exec (or the exec key); use hold-start or report"
+        ),
+        "{text}"
+    );
     let with_exec = setup(
         "litestream-rs:\n  if-replication-stops: stop-app\nexec: /bin/true\n",
         "",
@@ -793,7 +798,7 @@ fn an_unsafe_stop_at_boot_holds_the_child() {
     let (status, body) = until(addr, "/healthz", |status, _| status == 503);
     assert_eq!(status, 503, "{body}");
     let health: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(health["dbs"][0]["fail_stop"], "page_size_changed");
+    assert_eq!(health["dbs"][0]["held_by"], "page_size_changed");
     assert_eq!(health["dbs"][0]["app"], "held");
     daemon.signal("TERM");
     let (status, out) = daemon.finish();

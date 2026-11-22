@@ -46,6 +46,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D81 | What counts as lag for fail-stop? | Commits of the application only; engine writes and doubt snapshots taken while caught up do not | Claude (fail-stop), **delegated** | 2026-11-22 | open to owner review |
 | D82 | When is the boot judged, and how does the library refuse writes? | After the first listing and the boot's snapshot; a commit hook set through the C API | Claude (fail-stop), **delegated** | 2026-11-22 | open to owner review |
 | D83 | What may trip early, and what the probe needs | A forward clock step with a failing store; a trip needs a failure at or after the bound | Claude (fail-stop), **delegated** | 2026-11-22 | open to owner review |
+| D84 | Fail-stop's user-visible names | As approved, with `refused_at_start`, `held_by` and `allowed` | owner, after a Fable review | 2026-11-22 | decided |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -379,7 +380,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Choice:** the boot is judged once the replica was listed and the snapshot the boot asked for, if any, was staged or its step failed (a stop that snapshot finds is a stop at boot); or once a boot attempt failed for anything but a refusal (a store that times out does not hold the start). Until then the gate is `Pending`: an `-exec` child waits, library writes are not refused, nothing is released. The library refuses through a commit hook `app_connection` installs with the C API in `lsr-sqlite` (rusqlite's own needs a mutable connection, and `app_connection` takes a shared one); the hook's flag is one `Arc` count per connection, never freed. An application on another binding reads the gate from health.
 - **Cost accepted:** the hook replaces any commit hook the application set. A library application that writes before the first boot is judged is not refused even if the boot then stops; `wait_booted` is there for one that must not.
 - **Revisit if:** applications need their own commit hook, or ask for writes refused while pending.
-- **Links:** #115, `crates/sqlite/src/gate.rs`, `crates/replica/src/thread.rs` (`fail_stop`).
+- **Links:** #115, `crates/sqlite/src/gate.rs`, `crates/replica/src/thread.rs` (`Worker::fail_stop`).
 
 ## D83. What may trip early, and what the probe needs (delegated)
 
@@ -388,6 +389,20 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** a forward clock step during a store outage can trip `stop-app` before the bound has truly passed.
 - **Revisit if:** the environment gives the engine a monotonic clock that survives restarts.
 - **Links:** #115, `crates/sim/src/failstop.rs`.
+
+## D84. Fail-stop's user-visible names
+
+- **Choice (owner, after a Fable review of the proposals in `docs/proposals/fail-stop.md` section 4):**
+  - config: `if-replication-stops` (`report`, `hold-start`, `stop-app`) and `max-unreplicated-age` (10m, at least 5m), under `litestream-rs:`;
+  - cause names: `unreplicated_too_long` and `refused_at_start` (proposed `not_yet_reachable`);
+  - `/healthz`: the field `held_by` (proposed `fail_stop`) names the cause, and `app` is `pending`, `allowed` or `held` (proposed `open` for `allowed`);
+  - log lines: "start refused" and "app stopped", each with the cause name as `why`;
+  - `-exec` exit code 4, help line "replicate -exec: replication stopped, so the application was stopped or never started (if-replication-stops)";
+  - config-check refusal: "if-replication-stops: stop-app refused: stopping the application needs -exec (or the exec key); use hold-start or report";
+  - library: `Health::held_by`, `Gate::{Pending, Allowed, Held}`, `Trip::{Stopped, UnreplicatedTooLong, RefusedAtStart}`.
+- **Dropped before review:** `Replicator::writes_refused` and the `lsr_app_held` metric; health and `/healthz` carry the same state.
+- **Revisit if:** operators misread any of them in practice.
+- **Links:** #115, #149, `crates/sidecar/src/failstop.rs`, `crates/cli/src/run.rs` (the exit table).
 
 ## Unverified, not recorded
 

@@ -182,7 +182,7 @@ fn first_held(daemon: &Daemon) -> Option<(PathBuf, Trip)> {
         .into_iter()
         .find_map(|(path, gate)| match gate {
             Gate::Held(trip) => Some((path, trip)),
-            Gate::Pending | Gate::Open => None,
+            Gate::Pending | Gate::Allowed => None,
         })
 }
 

@@ -104,7 +104,7 @@ pub enum Trip {
         since: Timestamp,
     },
     /// The store refused this process before it listed the replica once.
-    NotYetReachable(Denied),
+    RefusedAtStart(Denied),
 }
 
 impl Trip {
@@ -114,7 +114,7 @@ impl Trip {
     pub const fn clears_by_itself(self) -> bool {
         match self {
             Self::Stopped(_) => false,
-            Self::UnreplicatedTooLong { .. } | Self::NotYetReachable(_) => true,
+            Self::UnreplicatedTooLong { .. } | Self::RefusedAtStart(_) => true,
         }
     }
 }
@@ -127,7 +127,7 @@ pub enum Gate {
     /// and nothing is released.
     Pending,
     /// It may: started, writes accepted.
-    Open,
+    Allowed,
     /// It is held: not started, writes refused, or stopped.
     Held(Trip),
 }
@@ -141,7 +141,7 @@ pub const fn trip(
 ) -> Option<Trip> {
     match (stopped, refused_at_boot, unreplicated) {
         (Some(StopCause::Shutdown) | None, None, None) => None,
-        (Some(StopCause::Shutdown) | None, Some(why), _) => Some(Trip::NotYetReachable(why)),
+        (Some(StopCause::Shutdown) | None, Some(why), _) => Some(Trip::RefusedAtStart(why)),
         (Some(StopCause::Shutdown) | None, None, Some(since)) => {
             Some(Trip::UnreplicatedTooLong { since })
         }
@@ -171,18 +171,22 @@ pub const fn trip(
 #[must_use]
 pub const fn gate(mode: IfReplicationStops, released: bool, trip: Option<Trip>) -> Gate {
     let Some(trip) = trip else {
-        return Gate::Open;
+        return Gate::Allowed;
     };
     let holds = match (mode, trip) {
         (IfReplicationStops::Report, _) => false,
-        (IfReplicationStops::HoldStart, Trip::Stopped(_) | Trip::NotYetReachable(_)) => !released,
+        (IfReplicationStops::HoldStart, Trip::Stopped(_) | Trip::RefusedAtStart(_)) => !released,
         (IfReplicationStops::HoldStart, Trip::UnreplicatedTooLong { .. }) => false,
         // A refusal at boot is about starting; once released, the store's refusal grows the
         // age like any other fault and trips for that.
-        (IfReplicationStops::StopApp, Trip::NotYetReachable(_)) => !released,
+        (IfReplicationStops::StopApp, Trip::RefusedAtStart(_)) => !released,
         (IfReplicationStops::StopApp, Trip::Stopped(_) | Trip::UnreplicatedTooLong { .. }) => true,
     };
-    if holds { Gate::Held(trip) } else { Gate::Open }
+    if holds {
+        Gate::Held(trip)
+    } else {
+        Gate::Allowed
+    }
 }
 
 /// Whether the application has been let run, which only the first open gate decides: under
@@ -198,8 +202,8 @@ impl AppGate {
     pub fn judge(&mut self, mode: IfReplicationStops, trip: Option<Trip>, judged: bool) -> Gate {
         let gate = gate(mode, self.released, trip);
         match gate {
-            Gate::Open if !judged && !self.released => Gate::Pending,
-            Gate::Open => {
+            Gate::Allowed if !judged && !self.released => Gate::Pending,
+            Gate::Allowed => {
                 self.released = true;
                 gate
             }

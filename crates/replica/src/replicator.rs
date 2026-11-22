@@ -499,7 +499,7 @@ impl Replicator {
     ///
     /// It also installs a commit hook (`sqlite3_commit_hook`, replacing any the application set)
     /// that refuses every commit while fail-stop holds the application
-    /// ([`crate::Health::fail_stop`], `Config::if_replication_stops`): SQLite rolls the
+    /// ([`crate::Health::held_by`], `Config::if_replication_stops`): SQLite rolls the
     /// transaction back and the application's COMMIT fails with
     /// `SQLITE_CONSTRAINT_COMMITHOOK`. Reads go on. Connections not set up here are not
     /// covered; an application on another binding reads the gate from [`Self::health`].

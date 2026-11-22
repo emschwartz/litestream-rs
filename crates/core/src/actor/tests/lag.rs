@@ -195,7 +195,7 @@ fn a_refusal_at_boot_trips_until_the_first_listing() {
         "nothing is judged before the first boot attempt"
     );
     rig.tick(&mut actor, T0);
-    assert_eq!(actor.trip(), Some(Trip::NotYetReachable(Denied::ClockSkew)));
+    assert_eq!(actor.trip(), Some(Trip::RefusedAtStart(Denied::ClockSkew)));
     assert!(!actor.boot_judged(), "a refusal is no judgment");
     rig.settle(&mut actor, T0 + 600_000);
     assert!(actor.boot_judged());

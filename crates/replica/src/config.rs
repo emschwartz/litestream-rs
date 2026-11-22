@@ -117,7 +117,7 @@ pub struct Config {
     /// What a fail-stop trip does to the application (`if-replication-stops`, decisions D13
     /// and D14): `HoldStart` by default. For the library, a held gate refuses the application's
     /// commits through the hook [`crate::Replicator::app_connection`] installs; see
-    /// [`crate::Health::fail_stop`].
+    /// [`crate::Health::held_by`].
     pub if_replication_stops: IfReplicationStops,
     /// How long a commit may stay off the replica before fail-stop trips for it (decision
     /// D22): 10 minutes by default, at least 5.

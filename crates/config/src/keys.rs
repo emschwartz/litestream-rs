@@ -317,7 +317,6 @@ const RUST: &[Key] = &[
     key("app-readers", Str, Implemented),
     key("app-autocheckpoint", Str, Implemented),
     key("responses", Map(Section::Responses), Implemented),
-    // PROVISIONAL(#115): the fail-stop setting's place and the bound's name await the owner.
     key("if-replication-stops", Str, Implemented),
     key("max-unreplicated-age", Duration, Implemented),
 ];

@@ -166,8 +166,7 @@ What the implementation settled where this design left a choice, or departed fro
 - **What counts as lag** (D81): commits of the application; engine writes and doubt snapshots taken while caught up do not. Found by the false-trip judge.
 - **When the boot is judged** (D82): after the first listing and the boot's own snapshot; until then the gate is pending.
 - **Early trips and the probe** (D83): a trip needs a failure at or after the bound; a forward clock step with a failing store may trip early.
-- **The setting's place:** `if-replication-stops` and `max-unreplicated-age` sit under `litestream-rs:` with the other Rust-only keys (provisional).
-- **The `-exec` exit code:** 4 (provisional, #41).
+- **The names** in section 4 were approved by the owner with changes (D84): `refused_at_start` for trigger 3, the `/healthz` field `held_by` with `app` values `pending`, `allowed`, `held`, exit code 4; `lsr_app_held` and a library accessor were dropped.
 - **P2, P3 and P5** are judged in named simulator runs, not over every run: the judge's truth is an upper bound on age, exact enough to rule out a false trip and too lenient to demand a trip.
 
 ## Not verified

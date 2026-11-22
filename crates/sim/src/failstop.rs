@@ -201,13 +201,13 @@ impl FailStopJudge {
         };
         match trip {
             None | Some(Trip::Stopped(_)) => Ok(()),
-            Some(Trip::NotYetReachable(_)) if booted => {
+            Some(Trip::RefusedAtStart(_)) if booted => {
                 wrong("this life already listed the replica".to_owned())
             }
-            Some(Trip::NotYetReachable(_)) if !self.refused => {
+            Some(Trip::RefusedAtStart(_)) if !self.refused => {
                 wrong("no store refusal fired in this life".to_owned())
             }
-            Some(Trip::NotYetReachable(_)) => Ok(()),
+            Some(Trip::RefusedAtStart(_)) => Ok(()),
             Some(Trip::UnreplicatedTooLong { .. }) => {
                 let Some(age) = self.age(tick) else {
                     return wrong("the replica holds every commit".to_owned());

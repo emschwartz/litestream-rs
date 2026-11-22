@@ -128,9 +128,7 @@ impl DbView {
             DbState::Failed => true,
             DbState::Running(health) => match health.phase {
                 // A fail-stop trip is 503 under every mode (`crate::failstop`).
-                Phase::Booting | Phase::Running | Phase::Draining => {
-                    health.fail_stop.trip.is_some()
-                }
+                Phase::Booting | Phase::Running | Phase::Draining => health.held_by.trip.is_some(),
                 Phase::Stopped(_) | Phase::Gone(_) => true,
             },
         }
@@ -348,13 +346,13 @@ fn running_json(o: &mut Object, health: &Health) {
     );
     o.maybe("app_notice", health.app_notice().map(|n| n.to_string()));
     o.maybe(
-        "fail_stop",
+        "held_by",
         health
-            .fail_stop
+            .held_by
             .trip
             .map(|trip| crate::failstop::trip_name(trip).to_owned()),
     );
-    o.text("app", crate::failstop::gate_name(health.fail_stop.gate));
+    o.text("app", crate::failstop::gate_name(health.held_by.gate));
     o.text("reported_at", &health.reported_at.to_string());
 }
 
@@ -405,16 +403,16 @@ mod tests {
             state: DbState::Running(Box::new(health.clone())),
         };
         assert!(!view(&health).down());
-        health.fail_stop.trip = Some(lsr_replica::Trip::UnreplicatedTooLong { since: at });
-        health.fail_stop.gate = lsr_replica::Gate::Open;
+        health.held_by.trip = Some(lsr_replica::Trip::UnreplicatedTooLong { since: at });
+        health.held_by.gate = lsr_replica::Gate::Allowed;
         assert!(view(&health).down(), "report and hold-start still say 503");
         let (up, body) = healthz(&[view(&health)], at);
         assert!(!up);
         assert!(
-            body.contains("\"fail_stop\":\"unreplicated_too_long\""),
+            body.contains("\"held_by\":\"unreplicated_too_long\""),
             "{body}"
         );
-        assert!(body.contains("\"app\":\"open\""), "{body}");
+        assert!(body.contains("\"app\":\"allowed\""), "{body}");
     }
 
     /// Every kind of access refusal reports under a name of its own: one name for

@@ -1,9 +1,8 @@
 //! Fail-stop in the daemon (`if-replication-stops`, `docs/proposals/fail-stop.md` section 3):
 //! what `/healthz`, `/metrics` and the log say of a trip, in one place.
 //!
-//! PROVISIONAL(#115): every name and line here is a proposal from the design's section 4,
-//! awaiting the owner's approval one by one. They are kept together so the approval, or a
-//! change, touches this module and nothing else. The exit code `-exec` ends with is the CLI's
+//! Every name and line here was approved by the owner (`docs/decisions.md` D84); they are kept
+//! together so a change touches this module and nothing else. The exit code `-exec` ends with is the CLI's
 //! (`Exit::AppStopped` in `lsr-cli`).
 //!
 //! **Plain sidecar.** The daemon cannot reach the application: a trip makes `/healthz` 503 and
@@ -24,10 +23,8 @@ use crate::health::stop_name;
 pub(crate) const fn trip_name(trip: Trip) -> &'static str {
     match trip {
         Trip::Stopped(cause) => stop_name(cause),
-        // PROVISIONAL(#115): `unreplicated_too_long`.
         Trip::UnreplicatedTooLong { .. } => "unreplicated_too_long",
-        // PROVISIONAL(#115): `not_yet_reachable`.
-        Trip::NotYetReachable(_) => "not_yet_reachable",
+        Trip::RefusedAtStart(_) => "refused_at_start",
     }
 }
 
@@ -36,20 +33,20 @@ pub(crate) const fn trip_name(trip: Trip) -> &'static str {
 pub(crate) const fn gate_name(gate: Gate) -> &'static str {
     match gate {
         Gate::Pending => "pending",
-        Gate::Open => "open",
+        Gate::Allowed => "allowed",
         Gate::Held(_) => "held",
     }
 }
 
-/// The log line when a held gate keeps the `-exec` child from starting. PROVISIONAL(#115).
+/// The log line when a held gate keeps the `-exec` child from starting.
 pub(crate) const START_REFUSED: &str = "start refused";
 
-/// The log line when a held gate stops the running `-exec` child. PROVISIONAL(#115).
+/// The log line when a held gate stops the running `-exec` child.
 pub(crate) const APP_STOPPED: &str = "app stopped";
 
-/// The config-check refusal of `stop-app` without `-exec`. PROVISIONAL(#115).
-pub(crate) const STOP_APP_NEEDS_EXEC: &str = "if-replication-stops: stop-app";
+/// The config-check refusal of `stop-app` without `-exec`.
+pub(crate) const STOP_APP_NEEDS_EXEC: &str = "if-replication-stops: stop-app refused";
 
-/// What to do instead, for [`STOP_APP_NEEDS_EXEC`]. PROVISIONAL(#115).
+/// What to do instead, for [`STOP_APP_NEEDS_EXEC`].
 pub(crate) const STOP_APP_INSTEAD: &str =
-    "it stops the application only under -exec (or the exec key); use hold-start or report";
+    "stopping the application needs -exec (or the exec key); use hold-start or report";
