@@ -1824,6 +1824,10 @@ struct FailsWholeReads {
 impl ObjectStore for FailsWholeReads {
     type Upload = <MemStore as ObjectStore>::Upload;
 
+    async fn remove_scratch(&self) -> Result<u64, StoreError> {
+        self.inner.remove_scratch().await
+    }
+
     fn list(
         &self,
         level: Level,
