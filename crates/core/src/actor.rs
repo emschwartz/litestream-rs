@@ -62,6 +62,7 @@
 //! checkpoints it did not run and infers the application's automatic checkpoints that
 //! cannot run ([`Actor::app_checkpoints`]). The count changes no decision.
 
+mod clock;
 mod parts;
 mod state;
 mod unproven;
@@ -72,6 +73,7 @@ use std::time::Duration;
 use lsr_ltx::{PageSize, Timestamp, Txid, TxidRange};
 use lsr_wal::{CommittedEnd, OpenError, WalReader};
 
+use clock::EngineClock;
 use parts::{Course, Engine, Kept, Stop, Tail, TaskRestorePoint};
 pub use state::{Degraded, Phase, Task};
 use state::{Gate, Live};
@@ -195,7 +197,8 @@ pub enum MaintainedEvent {
     },
 }
 
-/// What a tick did.
+/// What a tick did. Times in an event are engine time, which runs ahead of
+/// the wall clock for a while after it steps back (`clock`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     /// The replica was listed and the local position recovered; `cause` is
@@ -250,7 +253,7 @@ pub enum Event {
     },
     /// The next sync is a snapshot.
     Resnapshot(SnapshotCause),
-    /// The clock read earlier than the last time used; nothing else ran.
+    /// The clock read earlier than its last reading; nothing else ran.
     Clamped(Clamped),
 }
 
@@ -261,7 +264,8 @@ pub enum Tick {
     Ran {
         /// What happened.
         event: Event,
-        /// When to tick again. An earlier tick is always safe.
+        /// When to tick again, on the wall clock the caller reads. An earlier
+        /// tick is always safe.
         next: Next,
     },
     /// Stopped; every later tick returns this.
@@ -573,44 +577,101 @@ impl Actor {
                 };
             }
         };
+        let tick = self.tick_at(&mut env, now).await;
+        self.wake_on_wall(tick)
+    }
+
+    /// One unit of work at engine time `now` (`clock`).
+    async fn tick_at<W, P, C, L, R>(
+        &mut self,
+        env: &mut Env<'_, W, P, C, L, R>,
+        now: Timestamp,
+    ) -> Tick
+    where
+        W: WalSource,
+        P: PageSource,
+        C: Checkpointer,
+        L: ObjectStore,
+        R: ObjectStore,
+    {
         self.expire(now);
         if self.engine.pages.mismatch().is_none() {
             self.kept.tasks.page_matches_again();
         }
         self.release_restore_point();
         // A boot that keeps failing must not outlast a drain's deadline.
-        if let (false, Stop::Draining { deadline }) = (self.booted(), self.kept.stop)
+        if let (false, Some(deadline)) = (self.booted(), self.drain_deadline())
             && now >= deadline
         {
-            return self.missed(&mut env, now).await;
+            return self.missed(env, now).await;
         }
         if !self.booted() {
-            return self.boot(&mut env, now).await;
+            return self.boot(env, now).await;
         }
         match self.kept.stop {
-            Stop::No => self.run(&mut env, now).await,
-            Stop::Draining { deadline } => self.drain(&mut env, now, deadline).await,
+            Stop::No => self.run(env, now).await,
+            Stop::Draining { deadline } => {
+                let deadline = self.on_engine_clock(deadline);
+                self.drain(env, now, deadline).await
+            }
             Stop::Stopped(cause) => Tick::Stopped(cause),
         }
     }
 
-    /// The time to use: never earlier than the last. The first earlier read
-    /// of a run of them is reported and ends the tick.
+    /// Engine time for the wall reading `now` (`clock`): never earlier than
+    /// the last, never stopped. A reading earlier than the last is reported
+    /// and ends the tick.
     fn clock(&mut self, now: Timestamp) -> Result<Timestamp, Clamped> {
-        match self.kept.last {
-            Some(prev) if now < prev => {
-                if self.kept.clamp_reported {
-                    Ok(prev)
-                } else {
-                    self.kept.clamp_reported = true;
-                    Err(Clamped { prev, now })
-                }
-            }
-            Some(_) | None => {
-                self.kept.clamp_reported = false;
-                self.kept.last = Some(now);
-                Ok(now)
-            }
+        let (clock, stepped) = self
+            .kept
+            .clock
+            .map_or((EngineClock::start(now), false), |clock| clock.read(now));
+        self.kept.clock = Some(clock);
+        if stepped {
+            return Err(Clamped {
+                prev: clock.now(),
+                now,
+            });
+        }
+        Ok(clock.now())
+    }
+
+    /// The drain's deadline in engine time.
+    fn drain_deadline(&self) -> Option<Timestamp> {
+        match self.kept.stop {
+            Stop::Draining { deadline } => Some(self.on_engine_clock(deadline)),
+            Stop::No | Stop::Stopped(_) => None,
+        }
+    }
+
+    /// A time the caller named on the wall clock (a drain's deadline), in
+    /// engine time.
+    fn on_engine_clock(&self, wall: Timestamp) -> Timestamp {
+        self.kept
+            .clock
+            .map_or(wall, |clock| clock.engine_when(wall))
+    }
+
+    /// The earliest stamp for a file made in a tick at engine time `now`: the
+    /// highest wall reading, never engine time (`clock`).
+    fn stamp_floor(&self, now: Timestamp) -> Timestamp {
+        self.kept.clock.map_or(now, EngineClock::stamp_floor)
+    }
+
+    /// The tick with its wake moved to the wall clock the host sleeps on.
+    fn wake_on_wall(&self, tick: Tick) -> Tick {
+        match (tick, self.kept.clock) {
+            (
+                Tick::Ran {
+                    event,
+                    next: Next::At(at),
+                },
+                Some(clock),
+            ) => Tick::Ran {
+                event,
+                next: Next::At(clock.wall_at(at)),
+            },
+            (tick, _) => tick,
         }
     }
 
@@ -1118,7 +1179,7 @@ impl Actor {
             Err(verdict) => return Ok(verdict),
         };
         // After the committed read: see `Env::clock`.
-        let stamp = env.clock.now().max(now);
+        let stamp = env.clock.now().max(self.stamp_floor(now));
         let size = reader.header().page_size();
         if let Some(was) = self.engine.page_size.filter(|was| *was != size) {
             return Err(Fault::PageSizeChanged { was, now: size });
@@ -1812,7 +1873,7 @@ impl Actor {
             &mut *env.db,
             &mut self.engine.pages,
             env.remote,
-            now,
+            self.kept.clock.map_or(now, EngineClock::stamp_floor),
         )
         .await;
         self.engine
@@ -1899,10 +1960,7 @@ impl Actor {
     fn deadlines(&self) -> impl Iterator<Item = Timestamp> {
         let running = self.running();
         let task = |task: Task| self.kept.tasks.get(task).until();
-        let deadline = match self.kept.stop {
-            Stop::Draining { deadline } => Some(deadline),
-            Stop::No | Stop::Stopped(_) => None,
-        };
+        let deadline = self.drain_deadline();
         let only_running = [
             task(Task::Checkpoint),
             task(Task::Prune),

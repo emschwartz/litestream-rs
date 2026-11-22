@@ -718,6 +718,8 @@ fn a_wal_that_returns_at_another_page_size_stops_before_staging() {
     assert_eq!(everything(&rig), before);
 }
 
+/// Each step back of the clock is reported once, by the reading that made it;
+/// readings that only fail to move are not steps.
 #[test]
 fn clock_back_clamped_once() {
     let (mut rig, mut actor) = caught_up();
@@ -726,15 +728,81 @@ fn clock_back_clamped_once() {
         now: ts(T0 - 500),
     });
     assert_eq!(event(&rig.tick(&mut actor, T0 - 500)), Some(&clamped));
-    for at in [T0 - 500, T0 - 600] {
-        let tick = rig.tick(&mut actor, at);
-        assert!(!matches!(event(&tick), Some(Event::Clamped(_))), "{tick:?}");
-    }
+    let tick = rig.tick(&mut actor, T0 - 500);
+    assert!(!matches!(event(&tick), Some(Event::Clamped(_))), "{tick:?}");
+    let again = Event::Clamped(Clamped {
+        prev: ts(T0),
+        now: ts(T0 - 600),
+    });
+    assert_eq!(event(&rig.tick(&mut actor, T0 - 600)), Some(&again));
     rig.tick(&mut actor, T0 + 10);
     let again = rig.tick(&mut actor, T0 + 5);
     assert!(
         matches!(event(&again), Some(Event::Clamped(_))),
         "a new step back is reported"
+    );
+}
+
+/// A clock stepped back by an hour does not freeze a one-second retry for
+/// that hour: engine time keeps moving with the wall clock (at half speed
+/// until the wall clock catches up), the wake it asks for is seconds of wall
+/// clock away, and the upload goes through.
+#[test]
+fn a_backward_clock_step_does_not_freeze_a_retry_wait() {
+    let (mut rig, mut actor) = caught_up();
+    rig.remote
+        .inner
+        .inject_failure(StoreOp::Upload, transient(StoreOp::Upload));
+    rig.commit(2);
+    let at = T0 + 1_000;
+    assert_eq!(
+        event(&rig.tick(&mut actor, at)),
+        Some(&Event::Synced { files: 1 })
+    );
+    let failed = rig.tick(&mut actor, at);
+    assert!(
+        matches!(event(&failed), Some(Event::Retrying { until, .. }) if *until == ts(at + 1_000)),
+        "{failed:?}"
+    );
+    let back = at - 3_600_000;
+    assert!(matches!(
+        event(&rig.tick(&mut actor, back)),
+        Some(Event::Clamped(_))
+    ));
+    let waiting = rig.settle(&mut actor, back);
+    assert_eq!(
+        waiting.last().and_then(next_of),
+        Some(Next::At(ts(back + 2_000))),
+        "{waiting:?}"
+    );
+    let seen = rig.settle(&mut actor, back + 2_000);
+    assert!(
+        seen.iter()
+            .any(|tick| matches!(event(tick), Some(Event::Uploaded(Did::Put(_))))),
+        "{seen:?}"
+    );
+    assert_eq!(restored(&rig), 2);
+}
+
+/// After a step back the engine's time slews back onto the wall clock:
+/// once the wall clock has run twice the step, the two agree again, and a
+/// retry wait takes its own length of wall clock.
+#[test]
+fn engine_time_rejoins_the_wall_clock_after_a_step_back() {
+    let (mut rig, mut actor) = caught_up();
+    let back = T0 - 10_000;
+    rig.tick(&mut actor, back);
+    rig.settle(&mut actor, back + 20_000);
+    rig.remote
+        .inner
+        .inject_failure(StoreOp::Upload, transient(StoreOp::Upload));
+    rig.commit(2);
+    let at = back + 20_000;
+    rig.tick(&mut actor, at);
+    let failed = rig.tick(&mut actor, at);
+    assert!(
+        matches!(event(&failed), Some(Event::Retrying { until, .. }) if *until == ts(at + 1_000)),
+        "{failed:?}"
     );
 }
 

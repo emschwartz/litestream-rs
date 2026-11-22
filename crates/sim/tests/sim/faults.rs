@@ -210,6 +210,16 @@ fn store_429_retry_after() {
 }
 
 #[test]
+fn clock_steps_back_an_hour_mid_retry() {
+    run(scenario::clock_steps_back_an_hour_mid_retry);
+}
+
+#[test]
+fn clock_jumps_forward_an_hour() {
+    run(scenario::clock_jumps_forward_an_hour);
+}
+
+#[test]
 fn creds_revoked_mid_run() {
     run(scenario::creds_revoked_mid_run);
 }

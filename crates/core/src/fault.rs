@@ -38,7 +38,8 @@
 //! a maintenance level keeps does not stall: maintenance blocks no write's way to the replica.
 //!
 //! Two things are deliberately not faults. A clock that steps backwards is
-//! clamped and reported as [`Clamped`]. A power-loss WAL rewind is a snapshot
+//! reported as [`Clamped`]; engine time never goes back and keeps moving
+//! (`actor::clock`). A power-loss WAL rewind is a snapshot
 //! with cause [`SnapshotCause::LocalRewound`]: it is expected under
 //! `synchronous=NORMAL`, and stopping would leave every later write unreplicated.
 
@@ -1020,11 +1021,13 @@ pub enum Next {
     OnWalChange,
 }
 
-/// The clock read earlier than the last timestamp used; the later one is used
-/// instead and this is reported. An event, not a fault: nothing is retried.
+/// The clock read earlier than its last reading. Engine time keeps its value
+/// and advances at half the wall clock's rate until the wall clock catches up,
+/// so no timer stops; each step back is reported once. An event, not a fault:
+/// nothing is retried.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Clamped {
-    /// The last timestamp used.
+    /// Engine time at the step, which it keeps.
     pub prev: Timestamp,
     /// The earlier time the clock read.
     pub now: Timestamp,

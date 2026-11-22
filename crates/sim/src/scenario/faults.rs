@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use lsr_core::{
-    Denied, Event, Fault, FileKey, Level, MaintainedEvent, PersistentCause, SnapshotCause,
+    Denied, Did, Event, Fault, FileKey, Level, MaintainedEvent, PersistentCause, SnapshotCause,
     SourceError, SourceOp, StopCause, StoreError, StoreOp,
 };
 use lsr_ltx::PageSize;
@@ -324,7 +324,11 @@ pub const fn fault_reason(kind: FaultKind) -> Option<&'static str> {
 /// Scenarios that are not tied to one fault: the clock steps back.
 #[must_use]
 pub fn clock_scenarios() -> &'static [fn() -> Scenario] {
-    &[clock_steps_back_10s]
+    &[
+        clock_steps_back_10s,
+        clock_steps_back_an_hour_mid_retry,
+        clock_jumps_forward_an_hour,
+    ]
 }
 
 /// Scenarios that are not tied to one fault: the application checkpoints on its own.
@@ -1407,6 +1411,99 @@ pub fn clock_steps_back_10s() -> Scenario {
     );
     s.check = Some(one_clamp_no_fault);
     s
+}
+
+/// The clock steps back an hour while an upload waits out its one-second
+/// retry: the retry still runs within seconds of wall clock, never an hour.
+#[must_use]
+pub fn clock_steps_back_an_hour_mid_retry() -> Scenario {
+    let transient = StoreError::Transient {
+        op: StoreOp::Upload,
+        kind: std::io::ErrorKind::TimedOut,
+    };
+    let mut s = build(
+        "clock_steps_back_an_hour_mid_retry",
+        vec![
+            live(),
+            vec![
+                remote_fault(StoreOp::Upload, 0, FaultShape::Error(transient)),
+                commit(2, false),
+                Op::Tick,
+                Op::Tick,
+                Op::ClockJump(-3_600_000),
+            ],
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        vec![
+            Expect::Event(EventMatch::Retrying(FaultKind::StoreTransient)),
+            Expect::Event(EventMatch::Clamped),
+            Expect::Oracle,
+        ],
+    );
+    s.check = Some(uploads_soon_after_the_clamp);
+    s
+}
+
+/// The upload after the clamp ran within a minute of wall clock of it.
+fn uploads_soon_after_the_clamp(report: &RunReport) -> Result<(), String> {
+    let mut at = None;
+    let mut clamped_at = None;
+    for seen in &report.seen {
+        match seen {
+            Seen::Tick { at: began, .. } => at = Some(*began),
+            Seen::Event(Event::Clamped(_)) => clamped_at = at,
+            Seen::Event(Event::Uploaded(Did::Put(_))) => {
+                if let (Some(clamped), Some(now)) = (clamped_at, at) {
+                    let waited = now.saturating_duration_since(clamped);
+                    return if waited < Duration::from_secs(60) {
+                        Ok(())
+                    } else {
+                        Err(format!("the upload waited {waited:?} of wall clock"))
+                    };
+                }
+            }
+            Seen::Event(_)
+            | Seen::Stop(_)
+            | Seen::Recovered(_)
+            | Seen::Snapshot(_)
+            | Seen::Oracle => {}
+        }
+    }
+    Err("no upload after the clamp".to_owned())
+}
+
+/// The clock jumps an hour forward: timers that pass early run, nothing
+/// faults, and every acknowledged commit restores.
+#[must_use]
+pub fn clock_jumps_forward_an_hour() -> Scenario {
+    let mut s = build(
+        "clock_jumps_forward_an_hour",
+        vec![
+            live(),
+            vec![commit(2, false), Op::ClockJump(3_600_000), Op::Tick],
+            vec![commit(3, false)],
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        vec![Expect::Oracle],
+    );
+    s.check = Some(no_fault);
+    s
+}
+
+fn no_fault(report: &RunReport) -> Result<(), String> {
+    let faulted = report.seen.iter().any(|seen| {
+        matches!(
+            seen,
+            Seen::Event(Event::Retrying { .. } | Event::Degraded { .. } | Event::Clamped(_))
+                | Seen::Stop(_)
+        )
+    });
+    if faulted {
+        return Err("a fault, a stop or a clamp followed a forward jump".to_owned());
+    }
+    Ok(())
 }
 
 fn one_clamp_no_fault(report: &RunReport) -> Result<(), String> {
