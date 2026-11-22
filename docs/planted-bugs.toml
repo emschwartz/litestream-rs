@@ -724,4 +724,4 @@ name = "success-keeps-a-stall"
 fix = "checker-holes (stall liveness)"
 package = "lsr-sim"
 test_bin = "sim"
-tests = ["a_stall_ends_with_the_fault_that_caused_it_seed_0x5c"]
+tests = ["a_stall_ends_with_the_fault_that_caused_it_seed_0xa2"]
