@@ -143,11 +143,13 @@ fn the_scenario_only_steps_are_drawn_too() {
 fn the_second_frozen_generator_draws_what_the_live_one_drew() {
     let mut compared = 0;
     for n in 0..200 {
-        let weights = Weights::mixed(seed(n));
-        // Holds came after the second generator; a mix that draws none draws what it did.
-        if weights.staging_replace_running != 0 || weights.hold != 0 {
+        let mut weights = Weights::mixed(seed(n));
+        if weights.staging_replace_running != 0 {
             continue;
         }
+        // Holds came after the second generator, from a stream of their own: with none drawn,
+        // every step is the step it was.
+        weights.hold = 0;
         let live = history(seed(n), 300, &weights);
         assert_eq!(
             frozen_history(seed(n), 300, Generator::V2),
@@ -157,4 +159,24 @@ fn the_second_frozen_generator_draws_what_the_live_one_drew() {
         compared += 1;
     }
     assert!(compared > 100, "{compared}");
+}
+
+#[test]
+fn holds_replace_drawn_steps_and_leave_every_other_step_as_it_was() {
+    let mut replaced = 0;
+    for n in 0..50 {
+        let mut weights = Weights::mixed(seed(n));
+        weights.hold = 50;
+        let with = history(seed(n), 300, &weights);
+        weights.hold = 0;
+        let without = history(seed(n), 300, &weights);
+        assert_eq!(with.len(), without.len());
+        for (a, b) in with.iter().zip(&without) {
+            if a != b {
+                assert!(matches!(a, Op::Hold { .. }), "seed {n}: {a:?} for {b:?}");
+                replaced += 1;
+            }
+        }
+    }
+    assert!(replaced > 0);
 }
