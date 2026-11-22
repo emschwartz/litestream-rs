@@ -415,8 +415,14 @@ impl Run {
 
     /// The cycle's judgment, after the reboot's settle.
     fn judge(&mut self) -> Result<(), Anomaly> {
-        self.settle()
-            .map_err(|err| Anomaly::Engine(format!("settle: {err}")))?;
+        if let Err(err) = self.settle() {
+            let faults = self.rig.faults();
+            let tail = &faults[faults.len().saturating_sub(3)..];
+            let tick = self.rig.ticks().last();
+            return Err(Anomaly::Engine(format!(
+                "settle: {err}; last faults {tail:?}; last tick {tick:?}"
+            )));
+        }
         let restored = self.restore("restored.db")?;
         if !self.history.knows(&restored) {
             return Err(Anomaly::RestoredUnknown);
