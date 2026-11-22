@@ -12,6 +12,8 @@ mod behavior;
 #[cfg(test)]
 mod compaction;
 #[cfg(test)]
+mod dropin_config;
+#[cfg(test)]
 mod dropin_creds;
 #[cfg(test)]
 mod dropin_dir;

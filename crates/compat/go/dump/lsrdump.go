@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -49,6 +50,59 @@ type lsrDumpDB struct {
 type lsrDumpOut struct {
 	Error string      `json:"error,omitempty"`
 	DBs   []lsrDumpDB `json:"dbs"`
+	// The parsed configuration, only when LSR_DUMP_CONFIG is set: Go's Config after
+	// ReadConfig (defaults applied, global replica settings copied down), before any
+	// database is built, so it is printed even when building one fails.
+	Config *lsrDumpConfig `json:"config,omitempty"`
+}
+
+// lsrDumpConfig is the part of Go's Config that litestream-rs keeps. Durations are
+// nanoseconds; a nil pointer is null.
+type lsrDumpConfig struct {
+	Addr                string            `json:"addr"`
+	Exec                string            `json:"exec"`
+	Levels              []int64           `json:"levels"`
+	SnapshotInterval    *int64            `json:"snapshot_interval"`
+	SnapshotRetention   *int64            `json:"snapshot_retention"`
+	L0Retention         *int64            `json:"l0_retention"`
+	L0RetentionCheck    *int64            `json:"l0_retention_check_interval"`
+	RetentionEnabled    *bool             `json:"retention_enabled"`
+	ShutdownSyncTimeout *int64            `json:"shutdown_sync_timeout"`
+	DBs                 []lsrDumpDBConfig `json:"dbs"`
+}
+
+type lsrDumpDBConfig struct {
+	Path                 string                `json:"path"`
+	Dir                  string                `json:"dir"`
+	Pattern              string                `json:"pattern"`
+	Recursive            bool                  `json:"recursive"`
+	MetaPath             *string               `json:"meta_path"`
+	MetaDir              *string               `json:"meta_dir"`
+	MonitorInterval      *int64                `json:"monitor_interval"`
+	CheckpointInterval   *int64                `json:"checkpoint_interval"`
+	MinCheckpointPageN   *int64                `json:"min_checkpoint_page_count"`
+	TruncatePageN        *int64                `json:"truncate_page_n"`
+	MaxSyncWALBytes      *int64                `json:"max_sync_wal_bytes"`
+	RestoreIfDBNotExists bool                  `json:"restore_if_db_not_exists"`
+	SnapshotInterval     *int64                `json:"snapshot_interval"`
+	SnapshotRetention    *int64                `json:"snapshot_retention"`
+	Replica              *lsrDumpReplicaConfig `json:"replica"`
+}
+
+type lsrDumpReplicaConfig struct {
+	Type            string `json:"type"`
+	URL             string `json:"url"`
+	Path            string `json:"path"`
+	SyncInterval    *int64 `json:"sync_interval"`
+	MaxSyncLTXFiles *int64 `json:"max_sync_ltx_files"`
+	AccessKeyID     string `json:"access_key_id"`
+	SecretAccessKey string `json:"secret_access_key"`
+	Region          string `json:"region"`
+	Bucket          string `json:"bucket"`
+	Endpoint        string `json:"endpoint"`
+	ForcePathStyle  *bool  `json:"force_path_style"`
+	PartSize        *int64 `json:"part_size"`
+	Concurrency     *int64 `json:"concurrency"`
 }
 
 func init() {
@@ -73,9 +127,12 @@ func init() {
 
 func lsrDump(path string) lsrDumpOut {
 	out := lsrDumpOut{DBs: []lsrDumpDB{}}
-	config, err := ReadConfig(path, true)
+	config, err := ReadConfig(path, os.Getenv("LSR_DUMP_NO_EXPAND") == "")
 	if err != nil {
 		return lsrDumpOut{Error: err.Error(), DBs: []lsrDumpDB{}}
+	}
+	if os.Getenv("LSR_DUMP_CONFIG") != "" {
+		out.Config = lsrDumpConfigOf(&config)
 	}
 	for _, dbc := range config.DBs {
 		var dbs []*litestream.DB
@@ -87,9 +144,14 @@ func lsrDump(path string) lsrDumpOut {
 			dbs = []*litestream.DB{db}
 		}
 		if err != nil {
-			return lsrDumpOut{Error: err.Error(), DBs: []lsrDumpDB{}}
+			return lsrDumpOut{Error: err.Error(), DBs: []lsrDumpDB{}, Config: out.Config}
 		}
 		for _, db := range dbs {
+			// The one field check DB.Open makes before it touches a file (db.go:872 at
+			// 041a8c3); replicate's start fails on it.
+			if db.MinCheckpointPageN <= 0 {
+				return lsrDumpOut{Error: "minimum checkpoint page count required", DBs: []lsrDumpDB{}, Config: out.Config}
+			}
 			out.DBs = append(out.DBs, lsrDumpDB{
 				Path:    db.Path(),
 				Meta:    db.MetaPath(),
@@ -142,4 +204,83 @@ func lsrDumpResolve(c *s3.ReplicaClient) *lsrDumpCredentials {
 		SecretAccessKey: v.SecretAccessKey,
 		SessionToken:    v.SessionToken,
 	}
+}
+
+func lsrDur(d *time.Duration) *int64 {
+	if d == nil {
+		return nil
+	}
+	v := int64(*d)
+	return &v
+}
+
+func lsrInt(i *int) *int64 {
+	if i == nil {
+		return nil
+	}
+	v := int64(*i)
+	return &v
+}
+
+func lsrDumpConfigOf(c *Config) *lsrDumpConfig {
+	out := &lsrDumpConfig{
+		Addr:                c.Addr,
+		Exec:                c.Exec,
+		Levels:              []int64{},
+		SnapshotInterval:    lsrDur(c.Snapshot.Interval),
+		SnapshotRetention:   lsrDur(c.Snapshot.Retention),
+		L0Retention:         lsrDur(c.L0Retention),
+		L0RetentionCheck:    lsrDur(c.L0RetentionCheckInterval),
+		RetentionEnabled:    c.Retention.Enabled,
+		ShutdownSyncTimeout: lsrDur(c.ShutdownSyncTimeout),
+		DBs:                 []lsrDumpDBConfig{},
+	}
+	for _, level := range c.Levels {
+		out.Levels = append(out.Levels, int64(level.Interval))
+	}
+	for _, db := range c.DBs {
+		d := lsrDumpDBConfig{
+			Path:                 db.Path,
+			Dir:                  db.Dir,
+			Pattern:              db.Pattern,
+			Recursive:            db.Recursive,
+			MetaPath:             db.MetaPath,
+			MetaDir:              db.MetaDir,
+			MonitorInterval:      lsrDur(db.MonitorInterval),
+			CheckpointInterval:   lsrDur(db.CheckpointInterval),
+			MinCheckpointPageN:   lsrInt(db.MinCheckpointPageN),
+			TruncatePageN:        lsrInt(db.TruncatePageN),
+			MaxSyncWALBytes:      db.MaxSyncWALBytes,
+			RestoreIfDBNotExists: db.RestoreIfDBNotExists,
+			SnapshotInterval:     lsrDur(db.Snapshot.Interval),
+			SnapshotRetention:    lsrDur(db.Snapshot.Retention),
+		}
+		r := db.Replica
+		if r == nil && len(db.Replicas) == 1 {
+			r = db.Replicas[0]
+		}
+		if r != nil {
+			rc := &lsrDumpReplicaConfig{
+				Type:            r.ReplicaType(),
+				URL:             r.URL,
+				Path:            r.Path,
+				SyncInterval:    lsrDur(r.SyncInterval),
+				MaxSyncLTXFiles: lsrInt(r.MaxSyncLTXFiles),
+				AccessKeyID:     r.AccessKeyID,
+				SecretAccessKey: r.SecretAccessKey,
+				Region:          r.Region,
+				Bucket:          r.Bucket,
+				Endpoint:        r.Endpoint,
+				ForcePathStyle:  r.ForcePathStyle,
+				Concurrency:     lsrInt(r.Concurrency),
+			}
+			if r.PartSize != nil {
+				v := int64(*r.PartSize)
+				rc.PartSize = &v
+			}
+			d.Replica = rc
+		}
+		out.DBs = append(out.DBs, d)
+	}
+	return out
 }

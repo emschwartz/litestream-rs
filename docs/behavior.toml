@@ -1324,7 +1324,8 @@ response = "refuse to start, naming the key and a suggestion. Go warns and start
 signal = "exit 2"
 at_risk = "Nothing starts"
 recovery = "Fix the file. `lsr config check` reports the same refusals without starting"
-detected_by = "cli::`a_missing_or_refused_config_does_not_start`, cli::`config_check_refuses_what_the_daemon_refuses`"
+detected_by = "cli::`a_missing_or_refused_config_does_not_start`, cli::`config_check_refuses_what_the_daemon_refuses`, compat::`go_and_rust_parse_the_same_config`"
+notes = "A departure from Go (D155). The compat differential writes a misspelled key into some files and asserts the refusal"
 
 [[row]]
 table = "Config and startup"
@@ -1548,6 +1549,81 @@ signal = "`/healthz` 503, `lsr_db_state` `failed`"
 at_risk = "That database is not replicated"
 recovery = "Operator: fix the file"
 detected_by = "store-s3::`a_malformed_line_is_refused_by_number_never_by_text`, compat::`go_and_rust_resolve_the_same_credentials`"
+
+[[row]]
+table = "Config and startup"
+id = "CFG-23"
+circumstance = "What a `litestream.yml` says (`config/src/{yaml,walk,value,build}.rs`): every key litestream-rs implements, read as yaml.v2 reads it into Go's type, after environment expansion, with Go's defaults, global replica settings copied down, database snapshot settings promoted, and Go's validation"
+response = "continue with the values Go would run with, or refuse what Go refuses"
+signal = "none, or exit 2"
+at_risk = "None"
+recovery = "n/a"
+detected_by = "compat::`go_and_rust_parse_the_same_config`"
+notes = "A differential against Go's own `ReadConfig` and `NewDBFromConfig` (the dumper), 2,048 generated files per run; 10,000 passed once, 6,221 of them compared value by value, the rest refused by both, by a recorded departure, or at different stages by both. The generator writes durations bare, fractional, compound, negative and malformed; YAML 1.1 booleans; octal, hex, underscored and signed integers; SI and IEC sizes; quoted and unquoted strings; `~` and empty values; `$VAR` and `${VAR}` set and unset; anchors with merge keys; flow mappings; document markers; the deprecated `replicas` list; the `litestream-rs` section. The run fails if fewer than half its cases compared values. Values Go reads as the same as another are compared as one: a zero `truncate-page-n`, `concurrency` or `part-size` is Go's default; a null pointer setting keeps the store's default. Not generated: more than one document, explicit tags, scalar aliases"
+
+[[row]]
+table = "Config and startup"
+id = "CFG-24"
+circumstance = "`min-checkpoint-page-count`, `truncate-page-n` or `max-sync-ltx-files` above 4,294,967,295. Go holds each in an `int`"
+response = "continue with 4,294,967,295, which bounds the same counts (WAL frames, pages, files are all 32-bit), as Go"
+signal = "none"
+at_risk = "None"
+recovery = "n/a"
+detected_by = "config::`min_checkpoint_page_count_must_be_above_zero`, compat::`go_and_rust_parse_the_same_config`; plant::`config-large-count-refused`"
+notes = "Before, litestream-rs refused these as too large"
+
+[[row]]
+table = "Config and startup"
+id = "CFG-25"
+circumstance = "`meta-path: \"\"` (or `meta-dir`), often an unset variable. Go's key is a `*string`, so the empty value is kept and made absolute: the current directory"
+response = "continue, staging in the current directory, as Go, so a handover finds Go's meta directory"
+signal = "none"
+at_risk = "None"
+recovery = "n/a"
+detected_by = "config::`an_empty_meta_path_is_the_current_directory_as_go`, compat::`go_and_rust_parse_the_same_config`; plant::`config-empty-meta-path-dropped`"
+notes = "Before, litestream-rs read the empty value as unset and staged beside the database, where it would not find a meta directory Go wrote"
+
+[[row]]
+table = "Config and startup"
+id = "CFG-26"
+circumstance = "A value no start could use, which Go accepts and then fails on at run time: a signing region with whitespace, `/` or a control character (Go's requests all fail); a `part-size` under 5 MiB (Go's uploader refuses every upload); `monitor-interval` zero or less (Go never polls); a duration below a millisecond or negative where the engine counts whole milliseconds (often a bare `10`, which yaml.v2 reads as 10 ns)"
+response = "refuse at start, naming the key. A departure from Go (D155)"
+signal = "exit 2"
+at_risk = "Nothing starts"
+recovery = "Fix the value"
+detected_by = "store-s3::`a_region_is_refused_only_when_no_request_could_be_signed_with_it`, compat::`go_and_rust_parse_the_same_config`; plant::`region-letters-digits-dashes-only`"
+notes = "Before, the region was limited to letters, digits and dashes, refusing names Go signs with (`fr_par`, `eu.west`); that part was fixed toward Go"
+
+[[row]]
+table = "Config and startup"
+id = "CFG-27"
+circumstance = "A compaction and snapshot schedule core does not run: levels not increasing, a snapshot interval not above the top level, a snapshot retention below the snapshot interval, or `truncate-page-n` without `litestream-rs: {app-readers: none}`"
+response = "refuse at start, naming the setting. A departure from Go (D155)"
+signal = "exit 2"
+at_risk = "Nothing starts"
+recovery = "Fix the schedule, or state the claim"
+detected_by = "compat::`go_and_rust_parse_the_same_config`"
+no_test = "each shape's refusal message: code only"
+
+[[row]]
+table = "Config and startup"
+id = "CFG-28"
+circumstance = "A key set twice in one mapping. Go keeps the last value and warns"
+response = "refuse at load, naming both lines. A departure from Go (D155)"
+signal = "exit 2"
+at_risk = "Nothing starts"
+recovery = "Remove one"
+detected_by = "compat::`go_and_rust_parse_the_same_config`"
+
+[[row]]
+table = "Config and startup"
+id = "CFG-29"
+circumstance = "Two databases on one meta directory, one replica location or one file (two `path` entries, or a `path` and a `dir` entry). Go checks this only within one `dir` entry"
+response = "refuse at start. A departure from Go, whose two replicators would overwrite each other's staged files or interleave two histories on one prefix (D156)"
+signal = "exit 2"
+at_risk = "Nothing starts"
+recovery = "Give each database its own meta directory and replica"
+detected_by = "config::`one_database_one_replica_one_meta_directory`, config::`a_database_named_by_a_path_and_a_dir_is_refused`, compat::`go_and_rust_parse_the_same_config`"
 
 [[row]]
 table = "Circumstances the code does not distinguish"

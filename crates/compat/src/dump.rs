@@ -25,9 +25,12 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use lsr_config::{Credentials, Env, Expand, GoConfig, ReplicaPlan};
+use lsr_config::{
+    Credentials, DbConfig, DbSource, Env, Expand, GoConfig, GoDuration, ReplicaConfig, ReplicaKind,
+    ReplicaPlan,
+};
 use lsr_store_s3::{CredentialChain, S3Credentials};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::CompatError;
 
@@ -145,6 +148,96 @@ struct GoOut {
     #[serde(default)]
     error: String,
     dbs: Vec<DumpDb>,
+    #[serde(default)]
+    config: Option<DumpConfig>,
+}
+
+/// The parsed configuration both sides keep, before any database is built
+/// ([`DumpEnv::config`]). Durations are nanoseconds.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DumpConfig {
+    /// `addr`.
+    pub addr: String,
+    /// `exec`.
+    pub exec: String,
+    /// The compaction level intervals.
+    pub levels: Vec<i64>,
+    /// `snapshot.interval`.
+    pub snapshot_interval: Option<i64>,
+    /// `snapshot.retention`.
+    pub snapshot_retention: Option<i64>,
+    /// `l0-retention`.
+    pub l0_retention: Option<i64>,
+    /// `l0-retention-check-interval`.
+    pub l0_retention_check_interval: Option<i64>,
+    /// `retention.enabled`; Go's unset is enabled, and is read as `Some(true)`.
+    pub retention_enabled: Option<bool>,
+    /// `shutdown-sync-timeout`.
+    pub shutdown_sync_timeout: Option<i64>,
+    /// The `dbs` entries.
+    pub dbs: Vec<DumpDbConfig>,
+}
+
+/// One `dbs` entry as parsed.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[expect(missing_docs, reason = "each field is the Go key of the same name")]
+pub struct DumpDbConfig {
+    pub path: String,
+    pub dir: String,
+    pub pattern: String,
+    pub recursive: bool,
+    pub meta_path: Option<String>,
+    pub meta_dir: Option<String>,
+    pub monitor_interval: Option<i64>,
+    pub checkpoint_interval: Option<i64>,
+    pub min_checkpoint_page_count: Option<i64>,
+    pub truncate_page_n: Option<i64>,
+    pub max_sync_wal_bytes: Option<i64>,
+    pub restore_if_db_not_exists: bool,
+    pub snapshot_interval: Option<i64>,
+    pub snapshot_retention: Option<i64>,
+    pub replica: Option<DumpReplicaConfig>,
+}
+
+/// One replica entry as parsed, global settings copied down.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[expect(missing_docs, reason = "each field is the Go key of the same name")]
+pub struct DumpReplicaConfig {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub url: String,
+    pub path: String,
+    pub sync_interval: Option<i64>,
+    pub max_sync_ltx_files: Option<i64>,
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub region: String,
+    pub bucket: String,
+    pub endpoint: String,
+    pub force_path_style: Option<bool>,
+    pub part_size: Option<i64>,
+    pub concurrency: Option<i64>,
+}
+
+/// What the parse of a config gives each side: the parsed config or a refusal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Parsed {
+    /// The parsed configuration.
+    Config(Box<DumpConfig>),
+    /// The file is refused at load; that side's first error.
+    Refused(String),
+}
+
+/// The dumper's JSON: the last line of its output, since Go logs config warnings to standard
+/// output before it.
+fn last_json_line(stdout: &[u8]) -> Result<GoOut, String> {
+    let text = String::from_utf8_lossy(stdout);
+    let line = text
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("");
+    serde_json::from_str(line).map_err(|e| format!("{e}: {text}"))
 }
 
 /// The environment both sides see: variables, home and current directory.
@@ -158,6 +251,122 @@ pub struct DumpEnv {
     pub cwd: PathBuf,
     /// Whether S3 replicas carry their resolved credentials.
     pub credentials: bool,
+}
+
+/// Go's parse of `config` (environment expansion on): the parsed config, or Go's refusal.
+///
+/// # Errors
+/// The dumper could not run or printed something that is not its JSON.
+pub fn go_parse(binary: &Path, config: &Path, env: &DumpEnv) -> Result<Parsed, CompatError> {
+    let output = Command::new(binary)
+        .arg(config)
+        .env_clear()
+        .envs(&env.vars)
+        .env("HOME", &env.home)
+        .env("LSR_DUMP", "1")
+        .env("LSR_DUMP_CONFIG", "1")
+        .current_dir(&env.cwd)
+        .output()
+        .map_err(CompatError::io(binary))?;
+    let process = |detail: String| CompatError::Process {
+        command: format!("{} {}", binary.display(), config.display()),
+        detail,
+    };
+    if !output.status.success() {
+        return Err(process(
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ));
+    }
+    let out: GoOut = last_json_line(&output.stdout).map_err(process)?;
+    Ok(match out.config {
+        Some(mut config) => {
+            config.retention_enabled = Some(config.retention_enabled.unwrap_or(true));
+            Parsed::Config(Box::new(config))
+        }
+        None => Parsed::Refused(out.error),
+    })
+}
+
+/// litestream-rs's load of `config`, environment expansion on.
+#[must_use]
+pub fn rust_parse(config: &Path, env: &DumpEnv) -> Parsed {
+    match GoConfig::load(config, Expand::Env, env) {
+        Ok(loaded) => Parsed::Config(Box::new(dump_config(&loaded.config))),
+        Err(error) => Parsed::Refused(error.to_string()),
+    }
+}
+
+fn nanos(duration: GoDuration) -> i64 {
+    duration.nanos()
+}
+
+fn dump_config(config: &GoConfig) -> DumpConfig {
+    DumpConfig {
+        addr: config.addr().unwrap_or_default().to_owned(),
+        exec: config.exec().unwrap_or_default().to_owned(),
+        levels: config.levels().iter().copied().map(nanos).collect(),
+        snapshot_interval: Some(nanos(config.snapshot().interval())),
+        snapshot_retention: Some(nanos(config.snapshot().retention())),
+        l0_retention: Some(nanos(config.l0_retention())),
+        l0_retention_check_interval: Some(nanos(config.l0_retention_check_interval())),
+        retention_enabled: Some(config.retention_enabled()),
+        shutdown_sync_timeout: Some(nanos(config.shutdown_sync_timeout())),
+        dbs: config.dbs().iter().map(dump_db_config).collect(),
+    }
+}
+
+fn dump_db_config(db: &DbConfig) -> DumpDbConfig {
+    let (path, dir, pattern, recursive, meta_dir) = match db.source() {
+        DbSource::Path(path) => (path.display().to_string(), "", "", false, None),
+        DbSource::Dir(source) => (
+            String::new(),
+            source.dir(),
+            source.pattern(),
+            source.recursive(),
+            source.meta_dir().map(str::to_owned),
+        ),
+    };
+    DumpDbConfig {
+        path,
+        dir: dir.to_owned(),
+        pattern: pattern.to_owned(),
+        recursive,
+        meta_path: db.meta_path().map(str::to_owned),
+        meta_dir,
+        monitor_interval: db.monitor_interval().map(nanos),
+        checkpoint_interval: db.checkpoint_interval().map(nanos),
+        min_checkpoint_page_count: db.min_checkpoint_page_count(),
+        truncate_page_n: db.truncate_page_n(),
+        max_sync_wal_bytes: db.max_sync_wal_bytes(),
+        restore_if_db_not_exists: db.restore_if_db_not_exists(),
+        snapshot_interval: db.snapshot().interval().map(nanos),
+        snapshot_retention: db.snapshot().retention().map(nanos),
+        replica: db.replica().map(dump_replica_config),
+    }
+}
+
+fn dump_replica_config(replica: &ReplicaConfig) -> DumpReplicaConfig {
+    let s3 = replica.s3();
+    let text = |value: Option<&str>| value.unwrap_or_default().to_owned();
+    DumpReplicaConfig {
+        kind: match replica.kind() {
+            ReplicaKind::File => "file",
+            ReplicaKind::S3 => "s3",
+        }
+        .to_owned(),
+        url: text(replica.url()),
+        path: text(replica.path()),
+        sync_interval: replica.sync_interval().map(nanos),
+        max_sync_ltx_files: replica.max_sync_ltx_files(),
+        access_key_id: text(s3.access_key_id().map(|s| s.expose())),
+        secret_access_key: text(s3.secret_access_key().map(|s| s.expose())),
+        region: text(s3.region()),
+        bucket: text(s3.bucket()),
+        endpoint: text(s3.endpoint()),
+        force_path_style: s3.force_path_style(),
+        part_size: s3.part_size().and_then(|n| i64::try_from(n).ok()),
+        concurrency: s3.concurrency().and_then(|n| i64::try_from(n).ok()),
+    }
 }
 
 /// What both sides get for the metadata service: off, so Go's chain ends where Rust's does.
@@ -218,8 +427,7 @@ pub fn go_dump(binary: &Path, config: &Path, env: &DumpEnv) -> Result<Dump, Comp
             String::from_utf8_lossy(&output.stderr).into_owned(),
         ));
     }
-    let out: GoOut = serde_json::from_slice(&output.stdout)
-        .map_err(|e| process(format!("{e}: {}", String::from_utf8_lossy(&output.stdout))))?;
+    let out: GoOut = last_json_line(&output.stdout).map_err(process)?;
     Ok(if out.error.is_empty() {
         Dump::Runs(out.dbs)
     } else {

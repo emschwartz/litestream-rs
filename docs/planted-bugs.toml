@@ -1229,3 +1229,26 @@ name = "creds-unreadable-file-skipped"
 fix = "claude/dropin-creds"
 package = "lsr-store-s3"
 tests = ["chain::tests::a_file_that_opens_but_cannot_be_read_stops_the_chain_as_in_go"]
+
+# Config parsing made to agree with Go's (claude/dropin-config): found by the Go differential
+# (compat `dropin_config`), which needs the Go dumper and so is ignored; the tests below are
+# its Go-free counterparts.
+[[bug]]
+name = "config-large-count-refused"
+fix = "claude/dropin-config"
+package = "lsr-config"
+test_bin = "config"
+tests = ["min_checkpoint_page_count_must_be_above_zero"]
+
+[[bug]]
+name = "config-empty-meta-path-dropped"
+fix = "claude/dropin-config"
+package = "lsr-config"
+test_bin = "config"
+tests = ["an_empty_meta_path_is_the_current_directory_as_go"]
+
+[[bug]]
+name = "region-letters-digits-dashes-only"
+fix = "claude/dropin-config"
+package = "lsr-store-s3"
+tests = ["config::tests::a_region_is_refused_only_when_no_request_could_be_signed_with_it"]

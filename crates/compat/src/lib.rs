@@ -67,7 +67,10 @@ pub use chain::{
     AppFixture, Chain, Outside, Point, STEP_MS, Shape, Written, clock_ending_now, real_now_ms,
 };
 pub use checks::{fresh, go_restore, pages_of, rust_restore};
-pub use dump::{Dump, DumpCredentials, DumpDb, DumpEnv, DumpReplica, go_dump, rust_dump};
+pub use dump::{
+    Dump, DumpConfig, DumpCredentials, DumpDb, DumpDbConfig, DumpEnv, DumpReplica,
+    DumpReplicaConfig, Parsed, go_dump, go_parse, rust_dump, rust_parse,
+};
 pub use error::CompatError;
 pub use generate::generate;
 pub use golive::{

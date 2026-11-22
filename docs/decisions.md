@@ -56,6 +56,8 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D152 | The config file names only one of `access-key-id` and `secret-access-key`: ignore it as Go does? | No: refuse | Claude (dropin-creds), **delegated** | 2026-11-22 | open to owner review |
 | D153 | A shared AWS file holds a line that is not INI: skip it as Go does? | No: refuse | Claude (dropin-creds), **delegated** | 2026-11-22 | open to owner review |
 | D154 | Credential sources that need a network call or a subprocess (instance roles, web identity, SSO, `credential_process`, assumed roles): build them under D33? | Not in this pass; the owner chooses | Claude (dropin-creds), **delegated** | 2026-11-22 | open to owner review |
+| D155 | Config Go accepts and litestream-rs refuses at load or start (unknown and duplicate keys, values no start could use, schedules core does not run): copy Go under D33? | No: keep refusing, naming the key | Claude (dropin-config), **delegated** | 2026-11-22 | open to owner review |
+| D156 | Two databases on one meta directory, replica or file, which Go starts: copy Go? | No: refuse, since Go loses data there | Claude (dropin-config), **delegated** | 2026-11-22 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -506,6 +508,30 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Why:** each source is a network client or a subprocess with its own failure modes, refresh and expiry, so each is a feature with its own plan, rows and fault rigs, not a correction to an existing path.
 - **Revisit if:** the owner wants role-based deployments supported; the instance role and web identity cover most of them.
 - **Links:** `docs/BEHAVIOR.md` CFG-7; `crates/store-s3/src/chain.rs`.
+
+## D155. Config refusals stricter than Go (delegated)
+
+- **Question:** the config differential (`compat::go_and_rust_parse_the_same_config`) lists every file Go starts and litestream-rs refuses. D33 asks for Go's behaviour unless Go is wrong. Which refusals stay?
+- **Options:** copy Go for each; keep each refusal.
+- **Choice:** keep these, each named in the test so a new one fails it:
+  - an unknown key (CFG-1) and a key set twice (CFG-28): Go ignores the first and keeps the last value of the second, so a typo in `retention` or a pasted second block silently changes what is replicated;
+  - values no start could use (CFG-26): a signing region with whitespace, `/` or a control character, a `part-size` under 5 MiB, `monitor-interval` zero or less, a duration under a millisecond or negative where the engine counts milliseconds. Go starts and then fails every request, every upload or every poll, or (for a bare `10`, read as 10 ns) spins;
+  - schedules core does not run (CFG-27): levels not increasing, a snapshot interval not above the top level, a retention below the interval, and TRUNCATE without the `app-readers: none` claim (`docs/plans/phase-4-sidecar.md`).
+- **Cost accepted:** a file Go starts may not start litestream-rs until it is fixed. Each refusal names the key and line.
+- **Why:** AGENTS.md's contract: never silently wrong. None of Go's behaviours here replicates what the file says; each either ignores part of it or fails later and quietly.
+- **Also accepted:** on R2 and Tigris, an explicit `concurrency: 0` or `part-size: 0` gives Go the SDK's generic default rather than the provider's; litestream-rs uses the provider's. Upload parallelism only.
+- **Revisit if:** the owner wants a file that starts Go to start litestream-rs whatever it holds.
+- **Links:** `docs/BEHAVIOR.md` CFG-1, CFG-26 to CFG-28; `crates/compat/tests/compat/dropin_config.rs` (`DEPARTURES`).
+
+## D156. Two databases on one meta directory, replica or file (delegated)
+
+- **Question:** Go refuses a shared meta directory only between databases of one `dir` entry, and a repeated `path` only when spelled identically. Two `path` entries with one `meta-path`, two databases on one replica prefix, or a database named by a `path` and found by a `dir` all start under Go.
+- **Options:** copy Go; refuse.
+- **Choice:** refuse, as before.
+- **Cost accepted:** none known: no working setup has two replicators sharing staging or a prefix.
+- **Why:** this is a case where Go's behaviour loses data. Two replicators on one meta directory overwrite each other's staged files (Go's own comment on its `dir` check calls it "replication state corruption"); two on one prefix interleave two histories, and retention then deletes one's files.
+- **Revisit if:** never, unless the layout changes.
+- **Links:** `docs/BEHAVIOR.md` CFG-29; `crates/config/src/map.rs` (`distinct`).
 
 ## Unverified, not recorded
 
