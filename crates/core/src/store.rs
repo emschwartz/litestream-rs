@@ -343,8 +343,9 @@ pub enum Denied {
     #[error("credentials not accepted")]
     Credentials,
     /// The credentials are accepted and a policy refuses this request: a
-    /// bucket or IAM policy, a KMS key policy, object lock refusing a delete,
-    /// a local directory's permissions. Other requests may still succeed.
+    /// bucket or IAM policy, a KMS key policy or a KMS key that is disabled,
+    /// missing or of the wrong kind, object lock refusing a delete, a local
+    /// directory's permissions. Other requests may still succeed.
     #[error("permission denied")]
     Permission,
     /// The request's signing time is too far from the store's clock
