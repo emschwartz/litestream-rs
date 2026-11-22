@@ -11,6 +11,7 @@ publish = false
 lsr-core = { workspace = true, features = ["testing"] }
 lsr-history.workspace = true
 lsr-ltx.workspace = true
+lsr-store-fs.workspace = true
 lsr-wal = { workspace = true, features = ["testing"] }
 rusqlite.workspace = true
 tempfile.workspace = true

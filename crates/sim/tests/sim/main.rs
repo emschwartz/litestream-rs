@@ -10,6 +10,8 @@ mod clock_reads;
 #[cfg(test)]
 mod crash_law;
 #[cfg(test)]
+mod differential;
+#[cfg(test)]
 mod dropped_created_at;
 #[cfg(test)]
 mod faults;
@@ -29,6 +31,8 @@ mod snapshot_causes;
 mod soak;
 #[cfg(test)]
 mod sqlite_rules;
+#[cfg(test)]
+mod stall_liveness;
 #[cfg(test)]
 mod survival;
 #[cfg(test)]

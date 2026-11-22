@@ -25,6 +25,7 @@ use super::unproven::Unproven;
 use crate::app::AppCheckpointObserver;
 use crate::checkpoint::CheckpointState;
 use crate::fault::{SnapshotCause, SnapshotCounts, StopCause};
+use crate::journal::JournalSignal;
 use crate::layout::FileKey;
 use crate::pages::PageChecksumTable;
 use crate::position::Position;
@@ -130,6 +131,9 @@ pub(super) struct Kept {
     /// The replica's newest transaction when a boot refused to build on files
     /// nothing vouched for: what the stop reports.
     pub(super) refused_through: Option<Txid>,
+    /// What the last boot's read of the journal reported. A report, not engine state: nothing
+    /// decides on it.
+    pub(super) journal: Option<JournalSignal>,
 }
 
 impl Kept {
@@ -150,6 +154,7 @@ impl Kept {
             takeover: None,
             wanted_takeover: None,
             refused_through: None,
+            journal: None,
         }
     }
 
@@ -174,6 +179,7 @@ impl Kept {
             takeover,
             wanted_takeover: _,
             refused_through,
+            journal,
         } = self;
         Self {
             cfg: cfg.clone(),
@@ -192,6 +198,7 @@ impl Kept {
             // A rebuilt engine boots again and asks again for what it needs.
             wanted_takeover: None,
             refused_through: *refused_through,
+            journal: *journal,
         }
     }
 

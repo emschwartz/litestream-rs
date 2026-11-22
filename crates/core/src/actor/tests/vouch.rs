@@ -242,6 +242,7 @@ fn a_takeover_the_driver_cannot_write_keeps_the_staged_files_and_waits() {
             staging: &rig.staging,
             remote: &rig.remote,
             clock: &FakeClock::new(ts(now)),
+            journal: None,
         };
         // No driver: nothing is handed back.
         let tick = block_on(actor.tick(env, ts(now)));

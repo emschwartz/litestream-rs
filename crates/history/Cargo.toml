@@ -29,6 +29,7 @@ thiserror.workspace = true
 [dev-dependencies]
 lsr-core = { workspace = true, features = ["testing"] }
 lsr-history = { workspace = true, features = ["sqlite"] }
+lsr-ltx.workspace = true
 lsr-replica = { workspace = true, features = ["rusqlite", "testing"] }
 lsr-sqlite = { workspace = true, features = ["testing"] }
 lsr-store-fs.workspace = true

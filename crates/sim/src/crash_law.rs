@@ -67,6 +67,18 @@ impl CrashLaw {
     }
 }
 
+/// Whether a power loss keeps one directory entry's change since its directory's last sync:
+/// under [`CrashLaw::Blocks`] each such entry independently, on a coin; under
+/// [`CrashLaw::AllOrNothing`] a deletion stays done and any other change (a create, a rename's
+/// new name) is undone. A change not kept puts back what the entry durably held. The one
+/// directory-entry rule of the simulated disk, whichever double applies it.
+pub fn entry_kept(law: CrashLaw, deleted: bool, rng: &mut Rng) -> bool {
+    match law {
+        CrashLaw::AllOrNothing => deleted,
+        CrashLaw::Blocks { .. } => rng.coin(),
+    }
+}
+
 /// splitmix64: the law's draws, a pure function of its seed.
 #[derive(Clone, Copy, Debug)]
 pub struct Rng(pub u64);
@@ -250,6 +262,24 @@ mod tests {
             .collect();
         assert!(outs.contains(&vec![]));
         assert!(outs.contains(&vec![4; 1024]));
+    }
+
+    /// All-or-nothing keeps only deletions; the block law keeps either on a coin.
+    #[test]
+    fn an_entry_change_is_kept_by_its_law() {
+        let mut rng = Rng(5);
+        assert!(entry_kept(CrashLaw::AllOrNothing, true, &mut rng));
+        assert!(!entry_kept(CrashLaw::AllOrNothing, false, &mut rng));
+        let law = CrashLaw::drawn(9);
+        let draws: BTreeSet<(bool, bool)> = (0..32)
+            .map(|_| {
+                (
+                    entry_kept(law, true, &mut rng),
+                    entry_kept(law, false, &mut rng),
+                )
+            })
+            .collect();
+        assert_eq!(draws.len(), 4);
     }
 
     #[test]

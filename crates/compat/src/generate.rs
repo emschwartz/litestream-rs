@@ -86,15 +86,22 @@ impl Run {
     }
 
     /// Writes and waits until the replica shows more than level-0 files: snapshots at two
-    /// distinct TXIDs, levels 1 and 2, and enough distinct file ends to pick targets from.
-    fn tail(&mut self) -> Result<(), CompatError> {
+    /// distinct TXIDs, levels 1 and 2, and, when the fixture records restorable targets
+    /// (`targets`), enough distinct file ends and file times to pick them from.
+    fn tail(&mut self, targets: bool) -> Result<(), CompatError> {
         for _ in 0..MAX_TAIL {
-            if shape_ok(&self.higher_keys()?) {
+            let files = replica::list(&self.replica)?.files;
+            if shape_ok(&files, targets) {
                 return Ok(());
             }
             let before = self.higher_keys()?;
             self.wl.touch()?;
             self.settle_replica()?;
+            // Once the levels are there, each touch's own file moves the head and adds a
+            // candidate: there is no compaction to wait for.
+            if shape_ok(&files, false) {
+                continue;
+            }
             let Self { rep, .. } = self;
             wait_until("a compaction or snapshot", SHAPE_CHANGE, || {
                 rep.ensure_running()?;
@@ -102,7 +109,7 @@ impl Run {
             })?;
         }
         Err(CompatError::Timeout(
-            "the replica to hold two snapshots and levels 1 and 2".to_owned(),
+            "the replica to hold two snapshots, levels 1 and 2 and enough targets".to_owned(),
         ))
     }
 }
@@ -178,28 +185,71 @@ fn without(files: &[ReplicaFile], txid: u64) -> Vec<ReplicaFile> {
 }
 
 fn with_log(err: CompatError, rep: &Replicator) -> CompatError {
-    match err {
-        CompatError::Timeout(what) => {
-            CompatError::Timeout(format!("{what} (go log: {})", rep.log_tail()))
-        }
-        other @ (CompatError::Io { .. }
-        | CompatError::Sqlite(_)
-        | CompatError::Open(_)
-        | CompatError::Json { .. }
-        | CompatError::BadKey(_)
-        | CompatError::MissingBinary { .. }
-        | CompatError::Process { .. }
-        | CompatError::Fixture(_)
-        | CompatError::Integrity { .. }
-        | CompatError::NotPages { .. }) => other,
+    rep.explain(err)
+}
+
+/// Two snapshots at distinct TXIDs, files on levels 1 and 2, and with `targets` the
+/// candidates [`restorable_targets`] needs. Which transactions those are depends on where Go
+/// took its snapshots, which is its own timing: a replica whose oldest snapshot ends within
+/// two transactions of the head offers only two txid targets.
+fn shape_ok(files: &[ReplicaFile], targets: bool) -> bool {
+    let higher: Vec<FileKey> = files
+        .iter()
+        .map(|f| f.key)
+        .filter(|k| k.level() > Level::ZERO)
+        .collect();
+    let snapshots = higher.iter().filter(|k| k.level().is_snapshot()).count();
+    let at = |level: u8| higher.iter().any(|k| k.level().get() == level);
+    let shaped = snapshots >= 2 && at(1) && at(2);
+    shaped && (!targets || candidates(files).is_some_and(|c| c.enough()))
+}
+
+/// How many txid targets a restorable fixture records, and how many as-of targets.
+const TXID_TARGETS: usize = 3;
+const AS_OF_TARGETS: usize = 2;
+
+/// What a replica offers a fixture's targets.
+#[derive(Debug, PartialEq, Eq)]
+struct Candidates {
+    /// The transactions where a file ends, from the oldest snapshot's end to before the head.
+    txids: Vec<u64>,
+    /// Midpoints between distinct file times from the oldest snapshot's on, at least 2 ms apart.
+    mids: Vec<i64>,
+}
+
+impl Candidates {
+    fn enough(&self) -> bool {
+        self.txids.len() >= TXID_TARGETS && self.mids.len() >= AS_OF_TARGETS
     }
 }
 
-/// Two snapshots at distinct TXIDs, files on levels 1 and 2.
-fn shape_ok(higher: &[FileKey]) -> bool {
-    let snapshots = higher.iter().filter(|k| k.level().is_snapshot()).count();
-    let at = |level: u8| higher.iter().any(|k| k.level().get() == level);
-    snapshots >= 2 && at(1) && at(2)
+/// The candidates `files` offers; `None` with no snapshot.
+fn candidates(files: &[ReplicaFile]) -> Option<Candidates> {
+    let oldest = files
+        .iter()
+        .filter(|f| f.key.level().is_snapshot())
+        .min_by_key(|f| last_txid(&f.key))?;
+    let head = files.iter().map(|f| last_txid(&f.key)).max().unwrap_or(0);
+    let mut txids: Vec<u64> = files
+        .iter()
+        .map(|f| last_txid(&f.key))
+        .filter(|&m| m >= last_txid(&oldest.key) && m < head)
+        .collect();
+    txids.sort_unstable();
+    txids.dedup();
+    let mut times: Vec<i64> = files.iter().map(|f| f.mtime_ms).collect();
+    times.sort_unstable();
+    times.dedup();
+    let mids = times
+        .windows(2)
+        .filter_map(|w| match w {
+            [a, b] if b.saturating_sub(*a) >= 2 && *a >= oldest.mtime_ms => {
+                Some(a.saturating_add(b.saturating_sub(*a).saturating_div(2)))
+            }
+            _ => None,
+        })
+        .collect();
+    Some(Candidates { txids, mids })
 }
 
 /// Generates the fixture of `scenario` for `version` under `fixtures` (replacing it) and
@@ -252,7 +302,7 @@ fn attempt(
         peak = peak.max(run.wl.page_count()?);
         run.settle_replica()?;
     }
-    run.tail()?;
+    run.tail(!scenario.has_gap())?;
     if scenario.has_gap() {
         wait_for_new_snapshot(&mut run)?;
         for _ in 0..GAP_TOUCHES {
@@ -437,45 +487,21 @@ fn restorable_targets(
     files: &[ReplicaFile],
     label: &str,
 ) -> Result<Vec<TargetEntry>, CompatError> {
-    let oldest_snapshot = files
-        .iter()
-        .filter(|f| f.key.level().is_snapshot())
-        .min_by_key(|f| last_txid(&f.key));
-    let Some(oldest) = oldest_snapshot else {
+    let Some(Candidates { txids, mids }) = candidates(files) else {
         return Err(CompatError::Fixture(format!("{label}: no snapshot")));
     };
-    let head = files.iter().map(|f| last_txid(&f.key)).max().unwrap_or(0);
-    let mut txids: Vec<u64> = files
-        .iter()
-        .map(|f| last_txid(&f.key))
-        .filter(|&m| m >= last_txid(&oldest.key) && m < head)
-        .collect();
-    txids.sort_unstable();
-    txids.dedup();
-    let mut times: Vec<i64> = files.iter().map(|f| f.mtime_ms).collect();
-    times.sort_unstable();
-    times.dedup();
-    let mids: Vec<i64> = times
-        .windows(2)
-        .filter_map(|w| match w {
-            [a, b] if b.saturating_sub(*a) >= 2 && *a >= oldest.mtime_ms => {
-                Some(a.saturating_add(b.saturating_sub(*a).saturating_div(2)))
-            }
-            _ => None,
-        })
-        .collect();
     let mut out = Vec::new();
     collect(ctx, Target::Latest, &mut out, 1)?;
     let txid_targets = spread_order(txids.len())
         .into_iter()
         .filter_map(|i| txids.get(i))
         .map(|&txid| Target::Txid { txid });
-    collect_first(ctx, txid_targets, &mut out, 3, label, "txid")?;
+    collect_first(ctx, txid_targets, &mut out, TXID_TARGETS, label, "txid")?;
     let time_targets = spread_order(mids.len())
         .into_iter()
         .filter_map(|i| mids.get(i))
         .map(|&unix_ms| Target::AsOf { unix_ms });
-    collect_first(ctx, time_targets, &mut out, 2, label, "as-of")?;
+    collect_first(ctx, time_targets, &mut out, AS_OF_TARGETS, label, "as-of")?;
     Ok(out)
 }
 
@@ -576,4 +602,55 @@ fn gap_targets(
         });
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(rel: &str, mtime_ms: i64) -> ReplicaFile {
+        let key = replica::parse_rel(rel).expect("a key");
+        ReplicaFile {
+            rel: rel.to_owned(),
+            key,
+            size: 1,
+            mtime_ms,
+        }
+    }
+
+    /// Levels 1 and 2 and two snapshots, the newer one at 16, the oldest at 15: the head is
+    /// 17, so only 15 and 16 end between the oldest snapshot and the head. Go's timing
+    /// produced such a replica (#128's CI) and the fixture then recorded only 2 of its 3
+    /// txid targets; the tail now keeps writing past it.
+    #[test]
+    fn a_replica_whose_oldest_snapshot_is_near_the_head_is_not_done() {
+        let files = [
+            file("ltx/0/0000000000000010-0000000000000010.ltx", 100),
+            file("ltx/0/0000000000000011-0000000000000011.ltx", 110),
+            file("ltx/1/0000000000000001-000000000000000f.ltx", 120),
+            file("ltx/2/0000000000000001-000000000000000f.ltx", 130),
+            file("ltx/9/0000000000000001-000000000000000f.ltx", 140),
+            file("ltx/9/0000000000000001-0000000000000010.ltx", 150),
+        ];
+        assert!(shape_ok(&files, false));
+        assert!(!shape_ok(&files, true));
+        let offered = candidates(&files).expect("a snapshot");
+        assert_eq!(offered.txids, [15, 16]);
+    }
+
+    /// The same levels with the oldest snapshot further back offer every target.
+    #[test]
+    fn a_replica_with_three_file_ends_past_its_oldest_snapshot_is_done() {
+        let files = [
+            file("ltx/0/000000000000000e-000000000000000e.ltx", 100),
+            file("ltx/0/000000000000000f-000000000000000f.ltx", 105),
+            file("ltx/0/0000000000000010-0000000000000010.ltx", 110),
+            file("ltx/0/0000000000000011-0000000000000011.ltx", 115),
+            file("ltx/1/0000000000000001-000000000000000d.ltx", 120),
+            file("ltx/2/0000000000000001-000000000000000d.ltx", 130),
+            file("ltx/9/0000000000000001-000000000000000d.ltx", 90),
+            file("ltx/9/0000000000000001-0000000000000010.ltx", 150),
+        ];
+        assert!(shape_ok(&files, true));
+    }
 }

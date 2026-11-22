@@ -30,8 +30,9 @@ use std::time::{Duration, Instant};
 use lsr_config::ReplicaKind;
 use lsr_core::{
     AsOfInside, AsOfPlanner, ContiguousChain, Depth, Inventory, InventoryError, KeyTarget,
-    ObjectStore, PlanOutcome, Report, ResolveError, RestoreError, RestoreOptions, RestoreTarget,
-    Restored, Severity, VerifyError, listed_past, plan, resolve, restore_with, verify,
+    MAX_ATTEMPTS, ObjectStore, PlanOutcome, Report, ResolveError, RestoreError, RestoreOptions,
+    RestoreTarget, Restored, Severity, VerifyError, listed_past, plan, resolve, restore_with,
+    verify,
 };
 use lsr_local::{
     ClearError, CreateError, FileSink, IntegrityCheck, IntegrityFailure, PublishError,
@@ -705,8 +706,18 @@ async fn plan_on<S: ObjectStore>(store: &S, output: &Path, how: How) -> Result<F
     {
         return Err(CliError::JournalFile { path: path.clone() });
     }
-    let inventory = Inventory::load(store).await?;
-    let (outcome, created_at_read) = plan_target(store, &inventory, how.target).await?;
+    // As the restore does: a listing that shows a gap may have raced a writer's rename (a
+    // directory read can miss the new file and see a later one), so the plan is made again
+    // on a fresh listing, and a gap every listing shows is the answer.
+    let mut attempt = 1_u8;
+    let (inventory, outcome, created_at_read) = loop {
+        let inventory = Inventory::load(store).await?;
+        let (outcome, created_at_read) = plan_target(store, &inventory, how.target).await?;
+        if !matches!(outcome, PlanOutcome::Gap { .. }) || attempt >= MAX_ATTEMPTS {
+            break (inventory, outcome, created_at_read);
+        }
+        attempt = attempt.saturating_add(1);
+    };
     // The real restore reads past the listing before it trusts it for the newest state, or an
     // empty one for any target; a plan printed from a lagging listing would name an older chain
     // as the answer, or skip a replica that exists.

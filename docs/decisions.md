@@ -41,6 +41,9 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D31 | Must a PR re-merge main and re-run CI before it lands? | No while churn is high: merge on the PR's own green; main's CI integrates; fix forward | owner | 2026-11-22 | decided |
 | D32 | How is an unusable KMS key reported? | As a permission refusal, `permission_denied` | Claude, **delegated** | 2026-11-22 | open to owner review |
 | D33 | Narrow the Go drop-in surface to shrink unverified code? | No: full drop-in; bring config, CLI and sidecar under behaviour rows and Go differentials | owner | 2026-11-22 | decided |
+| D34 | A restore of the latest state that a writer keeps outpacing: fail or answer? | Answer the last listing, flagged | parent session (#126) | 2026-11-22 | open to owner review |
+| D35 | When may the simulator accept a task still stalled at the end of a run? | Only while the world still imposes the stall's fault; the excuse table is empty today | Claude (stall-liveness), **delegated** | 2026-11-22 | open to owner review |
+| D130 | How does the simulator run the real directory store, and who judges it? | A filesystem trait in store-fs, an in-memory filesystem under the crash law in the sim, half the swarm on it, a staging-contract judge | Claude (sim-real-store-fs), **delegated** | 2026-11-22 | open to owner review |
 | D50 | Boot finds the replica's newest file differing from the staged copy under the same key: snapshot or stop? Keep the stop record? | Stop unless a takeover covers it; delete the stop record | Claude, **delegated** | 2026-11-22 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
@@ -147,7 +150,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Question:** at boot the replica holds files above this database's position. They may be ours (staging wiped, a VM put back, a Go run) or another writer's. With no local record, which?
 - **Options:** (a) stop unless the WAL vouches; (c) snapshot on top, as Go does; a new generation or prefix.
 - **Choice (owner):** (a). Every replica id above the local position must be vouched for by the WAL (continue, no snapshot) or by a record (snapshot above). Otherwise the engine stops with `OtherWriter`. `lsr take-over <db>` writes the record. `lsr restore` writes it too, so a restore followed by a start never stops.
-- **Cost accepted:** a false stop when the proof is gone: the meta directory deleted after a WAL restart, a VM or volume put back from an older copy, a Go run with another meta directory followed by a WAL restart. All are operator actions, and the fix is one command. The engine's own deletes of staged files the replica holds cannot cause one: before any such delete it has the driver keep a takeover record through what those files vouched for (BOOT-25), so a crash before the replacing snapshot boots clean. The deploy cycle of a host that keeps its volume (SIGTERM or SIGKILL each deploy, WORLD-41) never stops. Go never stops here, so this departs from Go; `ContinueAndInterleaveHistories` keeps Go's behaviour.
+- **Cost accepted:** a false stop when the proof is gone: the meta directory deleted after a WAL restart, a VM or volume put back from an older copy, a Go run with another meta directory followed by a WAL restart. All are operator actions, and the fix is one command. The engine's own deletes of staged files the replica holds cannot cause one: before any such delete it has the driver keep a takeover record through what those files vouched for (BOOT-30), so a crash before the replacing snapshot boots clean. The deploy cycle of a host that keeps its volume (SIGTERM or SIGKILL each deploy, WORLD-41) never stops. Go never stops here, so this departs from Go; `ContinueAndInterleaveHistories` keeps Go's behaviour.
 - **Why:** in normal operation the replica is never ahead, so only damage, an operator or another writer reaches this case. Snapshotting on top lets an empty or foreign database become "latest", and retention then removes the real one.
 - **Revisit if:** false stops show up in unattended flows, or conditional writes (#96) plus a durable stop make "last to boot wins" safe enough.
 - **Links:** `docs/BEHAVIOR.md` BOOT-6, BOOT-22, WORLD-3; #110; `crates/core/src/actor.rs` (`boot_recover`), `recover.rs` (`recover_traced`).
@@ -348,13 +351,40 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Question:** at boot the replica's newest level-0 file verifies and differs from the staged copy under the same key (BOOT-13). It used to stand while the staged files went and a snapshot followed above it. With rule (a) (D12), is that still right, and is the stop record (`lsr-stop`) still needed?
 - **Choice:** refuse it with `OtherWriter` unless a takeover record covers the replica's newest key, and delete the stop record, its codec and its file. An unusable takeover record is ignored as absent and reported, never refusing the start.
 - **Options considered:** keep BOOT-13's snapshot and the stop record, which alone stopped a restart after another writer took this engine's next id; refuse the start on an unusable record.
-- **Why:** this engine uploads only from witnessed, synced staged copies and keeps a takeover record before deleting its own (BOOT-25), so without an operator's hand a boot divergence is another writer at this engine's next id. Refusing it covers that restart without a record, and rule (a) covers the other writer's files above staging, so the stop record kept nothing the boot does not now see. One fewer meta-directory file and crash-consistency surface. An unusable takeover record then costs only what no record costs.
+- **Why:** this engine uploads only from witnessed, synced staged copies and keeps a takeover record before deleting its own (BOOT-30), so without an operator's hand a boot divergence is another writer at this engine's next id. Refusing it covers that restart without a record, and rule (a) covers the other writer's files above staging, so the stop record kept nothing the boot does not now see. One fewer meta-directory file and crash-consistency surface. An unusable takeover record then costs only what no record costs.
 - **Cost accepted:** an operator who puts back a staging backup holding another copy of the replica's newest key stops instead of snapshotting; `lsr take-over` clears it, as for D12's other operator actions.
 - **Revisit if:** a world without an operator's hand produces a boot divergence.
 - **Links:** `docs/BEHAVIOR.md` BOOT-13, BOOT-21, BOOT-22, CFG-14, CFG-15; `crates/core/src/actor.rs` (`boot_listing`); #110.
+
+## D35. A stall at the end of a run
+
+- **Options:** accept any stall as a degraded state (before); fail any stall once every injected fault has healed; fail it unless the world still imposes its fault.
+- **Choice:** at the end of the final drain and after idle's settle window, a task still stalled fails the run (oracle `StuckRetrying`) unless an exhaustive table says the world still imposes that stall's fault. The table has no entry today. The run's end also heals the SQLite source failures still queued.
+- **Why:** an engine stuck retrying a fault nothing causes any more, or reporting degraded for nothing, passed before.
+- **Cost accepted:** a fault the world keeps imposing after the heal (none today) needs a table entry, or its runs fail.
+- **Revisit if:** a fault is added that the end of the run cannot heal.
+- **Links:** the stall-liveness PR; #104.
+
+## D130. The real directory store in the simulator (delegated)
+
+- **Options:** keep `MemStore` with its power-loss bookkeeping as the only staging double; run `FsStore` on a temporary directory of the host (no crash law, no determinism); a filesystem trait in `lsr-store-fs` with an in-memory filesystem in `lsr-sim`.
+- **Choice:** the trait (`Fs`, `FsFile`, `RealFs`; `FsStore<F: Fs = RealFs>`, so every existing user is unchanged) and `MemFs`. A file keeps its synced and current images under the block law the WAL uses; a directory entry changed since its directory's last sync follows the one directory-entry rule of `crash_law.rs` (`entry_kept`): under the block law each such entry keeps its change or goes back to what it durably held, on its own coin; under all-or-nothing a deletion stays done and any other change is undone. Half of the swarm mixes (drawn last, off in the default mix) put staging on `FsStore<MemFs>`. A judge in the runner fails a run when a staged file whose commit or delete returned success changed across a power loss (`Violation::StagedReverted`).
+- **Why:** `MemStore`'s power loss assumes the store syncs what it should; the three durability plants in `store-fs` could only be killed by their named crash-replay tests. With the store itself under the crash law the swarm finds all three unaided.
+- **Cost accepted:** the judge checks the store's contract, not the engine's behaviour, so it finds a store defect the engine would survive (the delete plant). Per-entry independence can split a rename (both names, or neither), which ext4 would not; it is the rule the WAL's fault VFS and `Volatile` already use, so the disk stays one law (#121). A fault the fault layer injects after publishing (`ErrorAfterPublish`) does not unsync anything on `MemFs`: the store did sync, so in this profile such a file always survives.
+- **Revisit if:** the shared directory-entry rule changes; or `MemFs` and the host disagree in `differential::the_doubles_answer_as_the_real_store_does`.
+- **Links:** #127 item I.
 
 ## Unverified, not recorded
 
 - Who decided D1 to D5 and when: `docs/PLAN.md` says "Decided" with no name or date. Listed as owner, by 2026-11-20.
 - D8's exact wording: the owner approved adding the journal; the wording of the D6 amendment is Fable's.
 - `snapshot-necessity` owner decisions D1 to D5 there (the price of an adopted journal, the catch-up file's failure class, download-and-diff, whether a handover heals, new cause names) and savings S2, S3, S5, S6, S7: no decision found.
+
+## D34. A restore that a writer keeps outpacing
+
+- **Options:** fail with `ListingBehind` after 64 listings; take the next listing as it stands and publish its newest state.
+- **Choice:** publish it, flagged as `Restored::writer_outpaced`, with a warning line on stderr and `writer_outpaced` in the command line's JSON.
+- **Why:** after each of the 64 listings a read found the next file, and the listing after it showed that file, so none of them lagged; what kept the restore going is a writer. Restoring the latest state while a writer runs may answer any committed state, and this one is at least as new as every file a read found during the restore. Failing would mean no restore ever finishes against a busy writer. Lagging listings are still counted on their own, and three of them still fail.
+- **Cost accepted:** the answer can be behind the writer by the time it is published, which is true of every restore of a live replica. A listing whose lag grows by exactly one file per listing for 64 listings would also end here; no store is known to do that.
+- **Revisit if:** a store shows listings that lag but always show the previously read file.
+- **Links:** #126, `crates/core/src/restore.rs` (`Retries`).
