@@ -2,7 +2,8 @@
 //!
 //! Dropping an upload does no I/O (the store contract), so a dropped or failed
 //! multipart upload's id lands here and is aborted later: at the start of the
-//! next `begin_upload`, or by `S3Store::abort_orphans`. The list holds
+//! next `begin_upload`, or by `S3Store::abort_orphans`; a killed process's are found at the next
+//! boot by listing the bucket's open uploads (`remove_scratch`). The list holds
 //! at most 64 ids; a 65th pushes the oldest off, and the bucket's
 //! `AbortIncompleteMultipartUpload` rule is the backstop for what falls off
 //! (drop does no I/O, so a failed upload's id waits here). An id whose abort fails goes back, so an outage costs one
@@ -15,11 +16,15 @@ use lsr_core::{FileKey, StoreError, StoreOp};
 
 use crate::classify::{S3Code, classify};
 use crate::request::UploadId;
+use crate::response::parse_uploads;
 use crate::store::Inner;
 use crate::transport::Transport;
 
 /// The most ids kept; the oldest is forgotten past this.
 pub(crate) const MAX_ORPHANS: usize = 64;
+
+/// The most ListMultipartUploads pages (1000 uploads each) one boot's sweep reads.
+pub(crate) const SWEEP_PAGES: usize = 4;
 
 /// Uploads to abort, oldest first.
 #[derive(Default)]
@@ -70,6 +75,43 @@ impl<T: Transport> Inner<T> {
             return Ok(());
         }
         classify(op, Some(key), None, &response)
+    }
+
+    /// Aborts the multipart uploads of this store's own keys that a killed process left open,
+    /// and the ones this process dropped; how many. The ids a process keeps die with it, so
+    /// at boot the bucket's own listing is the only record: every upload open under the prefix
+    /// whose key is one of this store's object keys is ours. Only the replicating engine
+    /// uploads there, and a second engine on one replica is already a stop condition; if one
+    /// runs anyway, its upload's Complete finds no upload and fails, and is retried. At most
+    /// [`SWEEP_PAGES`] listing pages per call, so a boot's work is bounded; the rest go at
+    /// the next.
+    pub(crate) fn remove_scratch(&self) -> Result<u64, StoreError> {
+        let op = StoreOp::Upload;
+        let start = self.now();
+        let dropped = self.abort_orphans()?;
+        let mut removed = u64::try_from(dropped).unwrap_or(u64::MAX);
+        let mut markers: Option<(String, String)> = None;
+        for _ in 0..SWEEP_PAGES {
+            self.within_budget(op, start)?;
+            let at = markers
+                .as_ref()
+                .map(|(key, id)| (key.as_str(), id.as_str()));
+            let request = self.request(op, |b, now| b.list_uploads(now, at))?;
+            let response = self.send(op, request)?;
+            classify(op, None, None, &response)?;
+            let page =
+                parse_uploads(&response, self.prefix()).map_err(|err| err.into_store(op, None))?;
+            for (key, id) in &page.ours {
+                self.within_budget(op, start)?;
+                self.abort_upload(key, id)?;
+                removed = removed.saturating_add(1);
+            }
+            match page.next {
+                Some(next) if Some(&next) != markers.as_ref() => markers = Some(next),
+                Some(_) | None => break,
+            }
+        }
+        Ok(removed)
     }
 
     /// Aborts every listed upload, oldest first, and returns how many are settled.

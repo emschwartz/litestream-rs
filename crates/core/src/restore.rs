@@ -11,10 +11,12 @@
 //! leaves zeros, never an older file's pages. The sink is published only after
 //! every file verified; any error leaves the target absent.
 //!
-//! The one retry here is the planner's own race: a file the plan named may be
-//! gone because compaction or retention ran in between ([StoreError::NotFound]).
-//! The sink is reset, the inventory reloaded and the target planned again, at
-//! most [MAX_ATTEMPTS] times. Every other store error ends the restore; retry
+//! The retries here are the planner's own races: a file the plan named may be
+//! gone because compaction or retention ran in between ([StoreError::NotFound]),
+//! or the listing planned a gap because it raced a writer (a directory read may
+//! miss a file renamed into place and see a later one). The sink is reset, the
+//! inventory reloaded and the target planned again, at most [MAX_ATTEMPTS] times;
+//! a gap every attempt planned is refused as [RestoreError::NoPlan]. Every other store error ends the restore; retry
 //! with backoff belongs to a store wrapper, and core holds no timer.
 //!
 //! A listing is not trusted to be whole for the newest state. Before a `Latest` or `AsOf`
@@ -430,6 +432,10 @@ impl Restored {
 enum Abort {
     /// A planned file was gone: plan again.
     Vanished(FileKey),
+    /// The listing planned a gap. A listing is not a snapshot of the store: a directory
+    /// read that races a writer's rename may miss a file and see a later one. Plan again
+    /// on a fresh listing; a gap every attempt shows is the replica's.
+    Gap(PlanOutcome),
     /// A file exists past the listing's newest: list again.
     Behind {
         /// The file a read found.
@@ -537,6 +543,11 @@ pub(crate) async fn restore_from<S: ObjectStore, K: DatabaseSink>(
                 sink.reset().map_err(sink_fault(SinkOp::Reset))?;
                 attempt = attempt.saturating_add(1);
             }
+            Err(Abort::Gap(outcome)) if attempt >= MAX_ATTEMPTS => {
+                return Err(RestoreError::NoPlan(NoPlan(outcome)));
+            }
+            // Nothing was applied: the plan stopped before the first file.
+            Err(Abort::Gap(_)) => attempt = attempt.saturating_add(1),
         }
     }
 }
@@ -653,11 +664,11 @@ async fn attempt_once<S: ObjectStore, K: DatabaseSink>(
         {
             (chain, Some(file))
         }
+        gap @ PlanOutcome::Gap { .. } => return Err(Abort::Gap(gap)),
         other @ (PlanOutcome::EmptyReplica
         | PlanOutcome::NoSnapshot { .. }
         | PlanOutcome::BeyondNewest { .. }
         | PlanOutcome::AsOfInsideFile { .. }
-        | PlanOutcome::Gap { .. }
         | PlanOutcome::InsideFile { .. }
         | PlanOutcome::MalformedSnapshot { .. }) => {
             return Err(RestoreError::NoPlan(NoPlan(other)).into());

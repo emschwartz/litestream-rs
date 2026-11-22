@@ -97,3 +97,41 @@ fn a_wiped_meta_continues_from_the_replicas_newest_staged_file() {
 fn a_restored_database_with_no_wal_snapshots_with_no_retry() {
     run(restored_with_no_wal);
 }
+
+/// A disk that lies about the engine's WAL fsync from the start of a run, as a quarter of
+/// swarm runs draw, lets a power loss take frames the engine staged, so the next boot
+/// snapshots for `LocalRewound`. That lie justifies the snapshot as surely as one an
+/// operation starts mid-run. The liveness oracle was told only of the second kind and
+/// failed runs with the first (seeds 0x110 and 0x1e850a among them).
+#[test]
+fn a_disk_lying_from_the_start_justifies_a_local_rewind() {
+    use lsr_sim::run::run_ops;
+    use lsr_sim::{CrashKind, Op, Opts, Seed};
+    let commit = Op::Commit {
+        pages: 2,
+        grow: false,
+    };
+    let ops = [
+        commit.clone(),
+        Op::Tick,
+        Op::Tick,
+        commit.clone(),
+        commit,
+        Op::Shutdown,
+        Op::Crash(CrashKind::Power),
+        Op::Tick,
+        Op::Tick,
+    ];
+    let opts = Opts {
+        drawn: true,
+        lying_wal_sync: true,
+        ..Opts::default()
+    };
+    let mut rewound = 0;
+    for n in 1..=16 {
+        let report =
+            run_ops(Seed::new(n), &ops, &opts).unwrap_or_else(|failure| panic!("{failure}"));
+        rewound += report.reach.get("snapshot.LocalRewound");
+    }
+    assert!(rewound > 0, "no run reached a local rewind");
+}

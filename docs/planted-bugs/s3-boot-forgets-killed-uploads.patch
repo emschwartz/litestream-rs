@@ -1,0 +1,13 @@
+diff --git a/crates/store-s3/src/store.rs b/crates/store-s3/src/store.rs
+index 1fe2154..5a2d1f4 100644
+--- a/crates/store-s3/src/store.rs
++++ b/crates/store-s3/src/store.rs
+@@ -233,7 +233,7 @@ impl<T: Transport> ObjectStore for S3Store<T> {
+     }
+ 
+     async fn remove_scratch(&self) -> Result<u64, StoreError> {
+-        self.inner.remove_scratch()
++        Ok(self.inner.abort_orphans()? as u64)
+     }
+ 
+     fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {
