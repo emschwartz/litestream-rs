@@ -746,9 +746,11 @@ pub fn pinned_on_zero_single_restart() -> Scenario {
 
 /// An outside TRUNCATE resets the wal-index and then fails to truncate the
 /// file, which keeps its old header (#26). With nothing committed past the
-/// position the idle engine settles, a drain finishes and the next boot
-/// continues; the commit that writes a new header is a restart the lapsed read
-/// transaction cannot prove, so a snapshot.
+/// position the idle engine settles and a drain finishes. The next boot reads
+/// the WAL no further than the wal-index commits, which names no frame of the
+/// header's generation, so it can prove nothing there and snapshots; the
+/// commit that writes a new header is a restart the lapsed read transaction
+/// cannot prove, so another snapshot.
 #[must_use]
 pub fn truncate_failed_after_the_index_reset() -> Scenario {
     let mut s = build(
@@ -770,7 +772,7 @@ pub fn truncate_failed_after_the_index_reset() -> Scenario {
             vec![Op::Restore],
         ],
         vec![
-            Expect::Event(EventMatch::Booted(None)),
+            Expect::Event(EventMatch::Booted(Some(CauseKind::GenerationChanged))),
             Expect::Event(EventMatch::Resnapshot(CauseKind::GenerationChanged)),
             Expect::Oracle,
         ],

@@ -40,13 +40,15 @@ pub enum ResumeError {
         /// The offset's page size.
         found: PageSize,
     },
-    /// The WAL ends before the frame preceding the offset: it was truncated behind the caller.
+    /// The WAL, or its committed end, ends before the frame preceding the offset: it was
+    /// truncated behind the caller, or the offset lies past what the wal-index committed.
     #[error("WAL ends before the frame preceding {at}")]
     Truncated {
         /// The offset asked for.
         at: WalOffset,
     },
-    /// The WAL header's generation is not the one the caller remembered: the WAL was restarted behind it.
+    /// The WAL header's generation, or the committed end's, is not the one the caller
+    /// remembered: the WAL was restarted behind it.
     #[error("WAL is in generation {found:?}, the caller remembered {expected:?}")]
     Restarted {
         /// The salts the caller remembered.

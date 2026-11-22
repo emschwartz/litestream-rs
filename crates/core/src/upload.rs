@@ -54,7 +54,7 @@ use crate::inventory::{Inventory, InventoryError};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::ltx_read::verifies;
 use crate::store::{ListAt, ObjectStore, PageLimit, ReadLen, Upload};
-use crate::witness::{Witnessed, Witnesses};
+use crate::witness::{ByteTally, Witnessed, Witnesses};
 
 /// How much of a staged file is read at once.
 const CHUNK: ReadLen = ReadLen::or_chunk(256 * 1024);
@@ -584,11 +584,13 @@ async fn copy_verified<L: ObjectStore, S: ObjectStore>(
     let mut decoder = Decoder::new();
     let mut held = Vec::new();
     let mut offset = 0_u64;
+    let mut bytes = ByteTally::new();
     loop {
         let chunk = staging
             .read(key, offset, len)
             .await
             .map_err(|err| PutError::Before(Fault::from_staging(&err)))?;
+        bytes.add(&chunk);
         if !feed_all(&mut decoder, &chunk).map_err(PutError::Before)? {
             return Err(PutError::Before(Fault::StagedLost));
         }
@@ -615,7 +617,7 @@ async fn copy_verified<L: ObjectStore, S: ObjectStore>(
         .finish()
         .map_err(|_undecodable| PutError::Before(Fault::StagedLost))?;
     names_key(verified.header(), key)?;
-    if !token.matches(offset, verified.trailer().file_checksum()) {
+    if !token.matches(bytes, verified.trailer().file_checksum()) {
         return Err(PutError::Before(Fault::StagedLost));
     }
     Ok(offset)

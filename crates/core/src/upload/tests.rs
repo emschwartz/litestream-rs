@@ -1161,3 +1161,27 @@ fn a_staging_listing_whose_cursor_never_advances_is_a_fault_not_a_loop() {
     let got = block_on(drop_staged_from(&staging, txid(1)));
     assert_eq!(got, Err(Fault::LocalIo));
 }
+
+/// The file checksum covers an LTX file's decompressed content, not its LZ4
+/// framing, so some single-byte changes still verify with the same checksum
+/// (a frame descriptor's own checksum byte, for one). A staged file read with
+/// such a change (a bad read, or bytes replaced) is not the file this engine
+/// staged: the upload refuses it rather than publish other bytes.
+#[test]
+fn a_staged_file_whose_bytes_differ_but_still_verify_is_refused() {
+    let bytes = encode_pages(1, 7);
+    let silent = (0..bytes.len()).find_map(|at| {
+        let mut changed = bytes.clone();
+        changed[at] ^= 1;
+        Witnessed::of_bytes(key(1), &changed).map(|_| changed)
+    });
+    let changed = silent.expect("a byte change the decoder does not see");
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    put_bytes(&staging, key(1), &bytes);
+    let witnesses = Witnesses::trust_all(&staging);
+    put_bytes(&staging, key(1), &changed);
+    let state = UploadState::At(None);
+    let failed = failure(next_with(state, &staging, &remote, 1, &witnesses));
+    assert_eq!(failed.fault, Fault::StagedLost);
+    assert!(files(&remote.inner).is_empty());
+}

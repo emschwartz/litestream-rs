@@ -46,17 +46,15 @@
 //! the read lock across it.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::convert::Infallible;
 use std::io::{Read, Seek};
 use std::num::NonZeroU32;
 
-use lsr_ltx::{Event, FileChecksum, Header, PageChecksum, PageNo, Txid, TxidRange};
-use lsr_wal::{Salts, ScanLimit, TxOutcome, WalError, WalOffset, WalReader};
+use lsr_ltx::{Decoder, Event, FileChecksum, Header, PageChecksum, PageNo, Txid, TxidRange};
+use lsr_wal::{Salts, ScanLimit, TxOutcome, WalError, WalOffset};
 
-use crate::fault::Fault;
+use crate::fault::{BugSite, Fault};
 use crate::layout::{FileInfo, FileKey, Level};
-use crate::ltx_read::{LtxRead, ReadFault};
-use crate::recover::{Range, wal_range};
+use crate::recover::{BootWal, Range, wal_range};
 use crate::source::PageSource;
 use crate::store::{ObjectStore, PageLimit, ReadLen, StoreError};
 use crate::upload::staged_from;
@@ -69,25 +67,56 @@ pub(crate) const MAX_WITNESSED: usize = 4096;
 /// How much of a file one store read asks for during the boot pass.
 const READ: ReadLen = ReadLen::CHUNK;
 
+/// The length of a byte stream and a digest of its raw bytes (FNV-1a 64), kept
+/// as the stream passes. The file checksum covers an LTX file's decompressed
+/// content, not its LZ4 framing, so two files can verify to the same checksum
+/// and still differ in bytes; this tells them apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ByteTally {
+    size: u64,
+    digest: u64,
+}
+
+impl ByteTally {
+    /// No bytes yet.
+    pub(crate) const fn new() -> Self {
+        Self {
+            size: 0,
+            digest: 0xcbf2_9ce4_8422_2325,
+        }
+    }
+
+    /// Takes in the next bytes of the stream.
+    pub(crate) fn add(&mut self, bytes: &[u8]) {
+        self.size = self
+            .size
+            .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+        self.digest = bytes.iter().fold(self.digest, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+        });
+    }
+}
+
 /// Proof that a staged file's bytes were made by this process or matched the
-/// live WAL at boot: its key, its length and its trailer's file checksum.
+/// live WAL at boot: its key, its bytes (length and a digest of them) and its
+/// trailer's file checksum.
 ///
 /// The fields are private and the constructor is this crate's, so a value
 /// exists only where a witness was taken.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Witnessed {
     key: FileKey,
-    size: u64,
+    bytes: ByteTally,
     checksum: FileChecksum,
 }
 
 impl Witnessed {
-    /// A token for a file this process just wrote. `size` is the bytes it
-    /// wrote and `checksum` the encoder's trailer checksum.
-    pub(crate) const fn made_here(key: FileKey, size: u64, checksum: FileChecksum) -> Self {
+    /// A token for a file this process just wrote: `bytes` tallied as it
+    /// wrote them, `checksum` the encoder's trailer checksum.
+    pub(crate) const fn made_here(key: FileKey, bytes: ByteTally, checksum: FileChecksum) -> Self {
         Self {
             key,
-            size,
+            bytes,
             checksum,
         }
     }
@@ -98,10 +127,10 @@ impl Witnessed {
         self.key
     }
 
-    /// Whether a read of the file that verified whole, `size` bytes long and
+    /// Whether a read of the file that verified whole, tallied as `bytes` and
     /// ending in `checksum`, read the bytes this token was minted for.
-    pub(crate) fn matches(&self, size: u64, checksum: FileChecksum) -> bool {
-        self.size == size && self.checksum == checksum
+    pub(crate) fn matches(&self, bytes: ByteTally, checksum: FileChecksum) -> bool {
+        self.bytes == bytes && self.checksum == checksum
     }
 
     /// A token for the staged file `bytes`, decoded here. Tests only: it
@@ -115,9 +144,11 @@ impl Witnessed {
             rest = rest.get(used..)?;
         }
         let verified = decoder.finish().ok()?;
+        let mut tally = ByteTally::new();
+        tally.add(bytes);
         Some(Self {
             key,
-            size: u64::try_from(bytes.len()).ok()?,
+            bytes: tally,
             checksum: verified.trailer().file_checksum(),
         })
     }
@@ -263,14 +294,15 @@ struct Prev {
 struct Decoded {
     header: Header,
     pages: BTreeMap<PageNo, PageChecksum>,
-    size: u64,
+    bytes: ByteTally,
     checksum: FileChecksum,
 }
 
 /// The WAL and the database file the boot pass compares with.
 pub(crate) struct LiveDb<'a, R, P> {
-    /// The WAL, as boot opened it.
-    pub(crate) wal: &'a mut WalReader<R>,
+    /// The WAL as boot opened it, with the committed end of the boot's one wal-index
+    /// read: no range past it is proven.
+    pub(crate) wal: BootWal<'a, R>,
     /// The database file.
     pub(crate) db: &'a mut P,
 }
@@ -367,10 +399,10 @@ async fn anchor<L: ObjectStore, S: ObjectStore, R: Read + Seek, P>(
     let Some(decoded) = decoded else {
         return Ok(None);
     };
-    let Some((salts, start, end, commit)) = span(&decoded.header, live) else {
+    let Some((salts, start, end, commit)) = span(&decoded.header) else {
         return Ok(None);
     };
-    let held = match wal_range(live.wal, start, end, salts)? {
+    let held = match wal_range(&mut live.wal, start, end, salts)? {
         Range::Pages { pages, commit: got } => {
             got.is_none_or(|got| got == commit)
                 && pages
@@ -388,21 +420,14 @@ async fn anchor<L: ObjectStore, S: ObjectStore, R: Read + Seek, P>(
     }))
 }
 
-/// The live generation's salts, the file's WAL range and its commit size,
-/// when its header names a range in the live WAL's generation and page size
-/// that ends on a frame boundary.
-fn span<R: Read + Seek, P>(
-    header: &Header,
-    live: &LiveDb<'_, R, P>,
-) -> Option<(Salts, u64, WalOffset, NonZeroU32)> {
+/// The file's generation, WAL range and commit size, when its header names a
+/// range that ends on a frame boundary. Whether that range is in the live
+/// WAL is [`wal_range`]'s to say: it refuses another generation or page size.
+fn span(header: &Header) -> Option<(Salts, u64, WalOffset, NonZeroU32)> {
     let fields = header.fields();
     let origin = fields.wal?;
-    let wal = live.wal.header();
     let (salt1, salt2) = origin.salts();
     let salts = Salts { salt1, salt2 };
-    if salts != wal.salts() || fields.page_size != wal.page_size() {
-        return None;
-    }
     let end = WalOffset::new(
         origin.offset().checked_add(origin.size())?,
         fields.page_size,
@@ -431,13 +456,13 @@ async fn witness_one<L: ObjectStore, R: Read + Seek, P: PageSource>(
 ) -> Result<Result<(Witnessed, Prev), Refused>, Fault> {
     let txid = info.key.range().max();
     let next = prev.txid.map_or(Some(Txid::MIN), Txid::next);
-    if info.key.range().min() != txid || next != Some(txid) {
+    if Some(info.key) != next.map(|next| FileKey::new(Level::ZERO, TxidRange::single(next))) {
         return Ok(Err(Refused::Unusable));
     }
     let Some(decoded) = decode(staging, info.key, Fault::from_staging).await? else {
         return Ok(Err(Refused::Unusable));
     };
-    let Some((salts, start, end, commit)) = span(&decoded.header, live) else {
+    let Some((salts, start, end, commit)) = span(&decoded.header) else {
         return Ok(Err(Refused::NotInLiveWal));
     };
     let follows = prev
@@ -447,14 +472,15 @@ async fn witness_one<L: ObjectStore, R: Read + Seek, P: PageSource>(
     let prev_commit = match (follows, prev.link) {
         (Some(link), _) => link.commit.get(),
         // A snapshot that stops short of a file before it in its generation
-        // describes an earlier state of that WAL.
-        (None, Some(link)) if link.salts == salts && end.get() < link.end => {
+        // describes an earlier state of that WAL. (The link is always in the
+        // live generation; a file in another is refused by `wal_range`.)
+        (None, Some(link)) if end.get() < link.end => {
             return Ok(Err(Refused::Contradicted));
         }
         (None, _) if start == first_frame => 0,
         (None, _) => return Ok(Err(Refused::NotInLiveWal)),
     };
-    let wal_pages = match wal_range(live.wal, start, end, salts)? {
+    let wal_pages = match wal_range(&mut live.wal, start, end, salts)? {
         Range::Pages {
             pages,
             commit: Some(got),
@@ -467,7 +493,7 @@ async fn witness_one<L: ObjectStore, R: Read + Seek, P: PageSource>(
     }
     let token = Witnessed {
         key: info.key,
-        size: decoded.size,
+        bytes: decoded.bytes,
         checksum: decoded.checksum,
     };
     let next = Prev {
@@ -513,7 +539,7 @@ fn holds_exactly<R: Read + Seek, P: PageSource>(
         };
         let pages = match framed {
             Some(pages) => pages,
-            None => framed.insert(framed_pages(live.wal)?),
+            None => framed.insert(framed_pages(&mut live.wal)?),
         };
         // A frame anywhere may have reached the database file since: the
         // file's copy cannot be told from the database's, so no witness.
@@ -528,13 +554,16 @@ fn holds_exactly<R: Read + Seek, P: PageSource>(
     Ok(decoded.pages.len() == expected)
 }
 
-/// Every page any committed transaction of the live WAL writes; `None` when
-/// the WAL cannot be read to the end of its valid frames.
-fn framed_pages<R: Read + Seek>(wal: &mut WalReader<R>) -> Result<Option<BTreeSet<PageNo>>, Fault> {
+/// Every page any committed transaction of the live WAL writes, up to the boot's
+/// committed end; `None` when the WAL cannot be read that far.
+fn framed_pages<R: Read + Seek>(
+    boot: &mut BootWal<'_, R>,
+) -> Result<Option<BTreeSet<PageNo>>, Fault> {
+    let wal = &mut *boot.reader;
     let mut cursor = wal.cursor_at_start();
     let mut pages = BTreeSet::new();
     loop {
-        match wal.next_tx(&cursor, ScanLimit::FirstInvalidFrame) {
+        match wal.next_tx(&cursor, ScanLimit::Committed(boot.committed)) {
             Ok(TxOutcome::Tx(tx)) => {
                 pages.extend(tx.frames().iter().map(lsr_wal::FrameRef::pgno));
                 cursor = *tx.end();
@@ -554,35 +583,49 @@ fn framed_pages<R: Read + Seek>(wal: &mut WalReader<R>) -> Result<Option<BTreeSe
     }
 }
 
-/// Reads `key` whole through the decoder; `None` when it is missing or does
-/// not verify and name exactly `key`.
+/// Reads `key` whole through the decoder, tallying its raw bytes; `None` when
+/// it is missing or does not verify and name exactly `key`.
 async fn decode<S: ObjectStore>(
     store: &S,
     key: FileKey,
     fault: fn(&StoreError) -> Fault,
 ) -> Result<Option<Decoded>, Fault> {
     let mut pages = BTreeMap::new();
-    let mut read = LtxRead::new(key, READ);
-    let verified: Result<_, ReadFault<Infallible>> = read
-        .read_verified(store, |event| {
-            if let Event::Page(page) = event {
+    let mut decoder = Decoder::new();
+    let mut bytes = ByteTally::new();
+    let mut offset = 0_u64;
+    loop {
+        let chunk = match store.read(&key, offset, READ).await {
+            Ok(chunk) => chunk,
+            Err(StoreError::NotFound { .. }) => return Ok(None),
+            Err(err) => return Err(fault(&err)),
+        };
+        bytes.add(&chunk);
+        let mut rest = chunk.as_slice();
+        while !rest.is_empty() {
+            let Ok((used, event)) = decoder.feed(rest) else {
+                return Ok(None);
+            };
+            if let Some(Event::Page(page)) = event {
                 pages.insert(page.pgno(), page.checksum());
             }
-            Ok(())
-        })
-        .await;
-    match verified {
+            crate::invariant!(used != 0, BugSite::DecoderStalled);
+            rest = rest.get(used..).unwrap_or_default();
+        }
+        let read = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
+        offset = offset.saturating_add(read);
+        if read < READ.get() {
+            break;
+        }
+    }
+    match decoder.finish() {
         Ok(verified) if verified.header().txids() == key.range() => Ok(Some(Decoded {
             header: *verified.header(),
             pages,
-            size: read.bytes_read(),
+            bytes,
             checksum: verified.trailer().file_checksum(),
         })),
-        Ok(_) | Err(ReadFault::Decode(_) | ReadFault::Store(StoreError::NotFound { .. })) => {
-            Ok(None)
-        }
-        Err(ReadFault::Store(err)) => Err(fault(&err)),
-        Err(ReadFault::Rejected(never)) => match never {},
+        Ok(_) | Err(_) => Ok(None),
     }
 }
 

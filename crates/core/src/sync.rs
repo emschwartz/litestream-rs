@@ -40,7 +40,7 @@ use crate::position::{Continuity, LastPage, Position, ReachedEnd, ReadLockHold};
 use crate::recover::Recovered;
 use crate::source::{CommittedRead, PageSource, WalSource};
 use crate::store::{ObjectStore, StoreError, Upload};
-use crate::witness::Witnessed;
+use crate::witness::{ByteTally, Witnessed};
 
 /// Go's default cap on the WAL bytes one file covers (`db.go:33-40`).
 const DEFAULT_CAP: u64 = 64 << 20;
@@ -440,7 +440,7 @@ fn unscanned<R: Read + Seek>(wal: &mut WalReader<R>, start: &Start) -> Result<Sc
 /// What [`fill`] wrote: the last page, the bytes and the trailer's checksum.
 struct Filled {
     last: Option<LastPage>,
-    size: u64,
+    bytes: ByteTally,
     checksum: FileChecksum,
 }
 
@@ -457,7 +457,7 @@ async fn fill<R: Read + Seek, P: PageSource, U: Upload>(
     let mut encoder = Encoder::new(Vec::new(), header).map_err(|_err| BugSite::Encode.hit())?;
     let mut buf = vec![0_u8; header.page_size().bytes()];
     let mut last = None;
-    let mut size = 0_u64;
+    let mut bytes = ByteTally::new();
     for (index, page) in plan.iter().enumerate() {
         match page {
             PageFrom::Wal(frame) => wal
@@ -484,15 +484,15 @@ async fn fill<R: Read + Seek, P: PageSource, U: Upload>(
         if encoder.writer_mut().len() >= FLUSH_AT {
             let chunk = std::mem::take(encoder.writer_mut());
             upload.write(&chunk).await.map_err(|err| map_store(&err))?;
-            size = size.saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+            bytes.add(&chunk);
         }
     }
     let (rest, trailer) = encoder.finish(None).map_err(|_err| BugSite::Encode.hit())?;
     upload.write(&rest).await.map_err(|err| map_store(&err))?;
-    size = size.saturating_add(u64::try_from(rest.len()).unwrap_or(u64::MAX));
+    bytes.add(&rest);
     Ok(Filled {
         last,
-        size,
+        bytes,
         checksum: trailer.file_checksum(),
     })
 }
@@ -524,7 +524,7 @@ pub(crate) async fn stage<R: Read + Seek, P: PageSource, L: ObjectStore>(
     match fill(&mut upload, header, plan, wal, db, pages, map_store).await {
         Ok(filled) => {
             let file = upload.commit().await.map_err(|err| map_store(&err))?;
-            let token = Witnessed::made_here(*key, filled.size, filled.checksum);
+            let token = Witnessed::made_here(*key, filled.bytes, filled.checksum);
             Ok((file, filled.last, token))
         }
         Err(fault) => {

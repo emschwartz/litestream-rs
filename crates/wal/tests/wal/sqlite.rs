@@ -307,7 +307,9 @@ fn a_restarted_wal_ends_at_the_first_stale_frame() {
         WalOffset::from_frame_index(40, size(512)),
         WalOffset::start(size(512)),
     ] {
-        let err = reader.resume(at, old_salts).unwrap_err();
+        let err = reader
+            .resume(at, old_salts, lsr_wal::testing::unbounded(old_salts))
+            .unwrap_err();
         assert!(
             matches!(err, lsr_wal::ResumeError::Restarted { expected, found }
                 if expected == old_salts && found == reader.header().salts()),
