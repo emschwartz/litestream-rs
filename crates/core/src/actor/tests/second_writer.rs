@@ -158,3 +158,69 @@ fn a_failed_listing_keeps_the_stop_record() {
         "{seen:?}"
     );
 }
+
+/// Deletes every replica file whose range ends at the newest transaction, as
+/// a bucket put back to an older version does; returns the newest it removed.
+fn roll_back(rig: &Rig) -> u64 {
+    let all = block_on(Inventory::load(&rig.remote.inner)).unwrap();
+    let newest = all.newest().unwrap();
+    let gone: Vec<FileKey> = all
+        .files()
+        .iter()
+        .map(|info| info.key)
+        .filter(|key| key.range().max() == newest)
+        .collect();
+    block_on(rig.remote.inner.delete(&gone)).unwrap();
+    newest.get()
+}
+
+fn regressed(seen: &[Tick]) -> bool {
+    seen.iter().any(|t| {
+        matches!(
+            event(t),
+            Some(Event::Degraded {
+                cause: PersistentCause::RemoteRegressed,
+                ..
+            })
+        )
+    })
+}
+
+/// The defect: a replica that lost files while the engine ran went unseen
+/// unless a commit failed and the uploader listed, so the engine uploaded
+/// above the hole. Maintenance's next listing now misses a file this process
+/// watched, a read finds it gone, and the regression is reported.
+#[test]
+fn a_rollback_while_running_is_seen_by_the_next_maintenance_listing() {
+    let mut rig = Rig::new();
+    let mut actor = go_like_actor();
+    rig.settle(&mut actor, T0);
+    rig.commit(2);
+    rig.follow(&mut actor, T0 + 10, 50);
+    let lost = roll_back(&rig);
+    rig.commit(3);
+    let seen = rig.follow(&mut actor, T0 + 20, 100);
+    assert!(regressed(&seen), "{seen:?}");
+    assert!(
+        newest_l0(&rig) > Some(lost),
+        "the upload above the hole came first: {seen:?}"
+    );
+}
+
+/// A listing that lags the bucket also leaves watched files out, but a read
+/// finds them: nothing is reported, and the watch stands.
+#[test]
+fn a_lagging_listing_is_not_a_regression() {
+    let mut rig = Rig::new();
+    let mut actor = go_like_actor();
+    rig.settle(&mut actor, T0);
+    rig.commit(2);
+    rig.follow(&mut actor, T0 + 10, 50);
+    let newest = newest_l0(&rig).unwrap();
+    let hidden = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(newest).unwrap()));
+    rig.remote.unlisted.lock().unwrap().push(hidden);
+    rig.commit(3);
+    let seen = rig.follow(&mut actor, T0 + 20, 100);
+    assert!(!regressed(&seen), "{seen:?}");
+    assert!(actor.engine.maintain.watch.is_some());
+}

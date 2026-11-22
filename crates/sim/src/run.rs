@@ -1106,6 +1106,11 @@ impl Runner {
             let lists = self.w.remote_recorder.counts().lists;
             let step = self.step(None)?.0;
             let stopped = step == Step::Stopped(StopCause::OtherWriter);
+            // A tick that found files this engine confirmed gone forgot what it
+            // believed of the replica and relists before anything else, which
+            // judges the other writer's file then: it planned nothing from this
+            // listing.
+            let relisting = step == Step::Degraded(PersistentCause::RemoteRegressed);
             match step {
                 Step::Stopped(cause) if self.stop_expected(cause) => {}
                 Step::Stopped(cause) => {
@@ -1134,7 +1139,7 @@ impl Runner {
             // file of the same id) and snapshotting above it is not behind.
             let ours = self.actor.staged().max(self.actor.replicated());
             let behind = ours < Some(key.range().max());
-            if watching && listed && theirs && behind {
+            if watching && listed && theirs && behind && !relisting {
                 return Err(Violation::OtherWriterMissed {
                     key: key.to_string(),
                 });

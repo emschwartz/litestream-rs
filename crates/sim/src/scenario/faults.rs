@@ -241,7 +241,7 @@ pub fn fault_scenarios(kind: FaultKind) -> &'static [fn() -> Scenario] {
         FaultKind::StoreRefused => &[store_refuses_upload],
         FaultKind::RemoteCorrupt => &[remote_bitrot_on_list_read],
         FaultKind::RemoteAheadOfLocal => &[second_writer_mid_run, second_writer_survives_restart],
-        FaultKind::RemoteRegressed => &[bucket_rolled_back],
+        FaultKind::RemoteRegressed => &[bucket_rolled_back, bucket_rolled_back_unseen],
         FaultKind::StagedLost => &[staged_byte_flip_before_upload, meta_dir_deleted_mid_run],
         FaultKind::LocalDiskFull => &[disk_full_on_staging],
         FaultKind::LocalIo => &[eio_on_wal_read],
@@ -883,6 +883,33 @@ pub fn bucket_rolled_back() -> Scenario {
     );
     s.check = Some(quiet_after_stop);
     s
+}
+
+/// The replica loses its newest files while the engine runs, with no failed
+/// commit to make the uploader list: the engine goes on uploading above the
+/// hole until a maintenance listing, which must see the loss and report it.
+#[must_use]
+pub fn bucket_rolled_back_unseen() -> Scenario {
+    build(
+        "bucket_rolled_back_unseen",
+        vec![
+            live(),
+            vec![commit(2, false), Op::Tick, Op::Tick],
+            ticks(SETTLE),
+            vec![
+                Op::Remote(RemoteOp::RollBack),
+                Op::Remote(RemoteOp::RollBack),
+                commit(2, false),
+            ],
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        vec![
+            Expect::Stopped(StopCause::RemoteRegressed),
+            Expect::Recovered,
+            Expect::Oracle,
+        ],
+    )
 }
 
 /// One staged file does not verify at upload, and a later one is staged after

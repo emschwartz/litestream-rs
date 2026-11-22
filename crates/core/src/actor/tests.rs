@@ -56,6 +56,9 @@ struct Counting {
     /// Keys whose next read returns its bytes with the middle one flipped,
     /// the stored bytes untouched: one bad read.
     flip_next_read: Arc<std::sync::Mutex<Vec<FileKey>>>,
+    /// Keys every listing leaves out while reads still find them: a listing
+    /// that lags the bucket.
+    unlisted: Arc<std::sync::Mutex<Vec<FileKey>>>,
 }
 
 impl Counting {
@@ -105,7 +108,13 @@ impl ObjectStore for Counting {
             .and_then(PageLimit::new)
             .filter(|cap| cap.get() < limit.get())
             .unwrap_or(limit);
-        self.inner.list(level, after, limit)
+        let unlisted = self.unlisted.lock().unwrap().clone();
+        let listed = self.inner.list(level, after, limit);
+        async move {
+            let mut listing = listed.await?;
+            listing.files.retain(|info| !unlisted.contains(&info.key));
+            Ok(listing)
+        }
     }
 
     fn read(

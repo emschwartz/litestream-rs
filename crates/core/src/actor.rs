@@ -19,6 +19,8 @@
 //! 4. Maintenance, only once uploads are idle, so a snapshot's last
 //!    transaction is at most what was published. Its first listing after a
 //!    boot is read back first: the newest file of each level must verify.
+//!    Every listing must also show what this process watched since the last
+//!    one (`crate::watch`); a watched file a read finds gone is a regression.
 //!    An upload does not make a listing due at once: the next one waits for
 //!    the next compaction window or the level-0 retention check interval,
 //!    whichever comes first ([`crate::listing_after_upload`]), as Go's
@@ -102,13 +104,14 @@ use crate::recover::{
 use crate::snapshot::{SnapshotFailed, read_live, write_snapshot};
 use crate::source::{CheckpointMode, Checkpointer, CommittedRead, PageSource, WalSource};
 use crate::stop_record::StopRecord;
-use crate::store::{ObjectStore, PageLimit};
+use crate::store::{ObjectStore, PageLimit, ReadLen, StoreError};
 use crate::sync::{Step, StepEnd, SyncConfig, Synced, sync_step, wal_barrier};
 use crate::upload::{
     Did, Swept, UploadConfig, UploadPlan, UploadState, Uploaded, drop_staged_from, inventory_fault,
     plan_upload, sweep_staged, upload_next,
 };
 use crate::verify::LivePages;
+use crate::watch::Watch;
 use crate::witness::{LiveDb, Pending, Witnesses, witness_pending};
 
 /// What one tick may touch, lent for that tick only.
@@ -713,6 +716,7 @@ impl Actor {
                 self.engine.upload = UploadState::ListFirst { confirmed: None };
                 self.engine.maintain.level_one = None;
                 self.engine.maintain.stale = true;
+                self.engine.maintain.watch = None;
                 waiter
             }
             Action::Rebuild => {
@@ -1468,9 +1472,11 @@ impl Actor {
             match last {
                 Did::Nothing | Did::Diverged { .. } => break,
                 Did::Listed { .. } => self.engine.maintain.stale = true,
-                Did::Put(_) => {
+                Did::Put(info) => {
                     let at = listing_after_upload(now, &self.kept.cfg.maintenance);
                     self.engine.maintain.list_by(at);
+                    let watch = self.engine.maintain.watch;
+                    self.engine.maintain.watch = Watch::put(watch, info.key);
                 }
             }
             if self.uploads_idle() {
@@ -1624,6 +1630,9 @@ impl Actor {
         if inventory.newest() > self.snapshot_after() {
             return Some(self.fault(Task::Maintenance, Fault::RemoteAheadOfLocal, now));
         }
+        if let Some(tick) = self.watch_unit(env.remote, &inventory, now).await {
+            return Some(tick);
+        }
         if self.engine.maintain.read_back_owed
             && let Some(tick) = self.read_back_unit(env.remote, &inventory, now).await
         {
@@ -1673,6 +1682,33 @@ impl Actor {
         }
     }
 
+    /// Everything this engine watched since its last maintenance listing must
+    /// be listed (`crate::watch`). One that is not is read: gone, the replica
+    /// lost files this process confirmed, and the uploader lists again (or
+    /// the engine stops, as configured); found, the listing lags and nothing
+    /// is decided, so the watch stands for the next listing. With nothing
+    /// missing the watch moves to this listing.
+    async fn watch_unit<R: ObjectStore>(
+        &mut self,
+        remote: &R,
+        inventory: &Inventory,
+        now: Timestamp,
+    ) -> Option<Tick> {
+        let watch = self.engine.maintain.watch;
+        let Some(key) = watch.and_then(|watch| watch.missing(inventory)) else {
+            let published = self.engine.upload.confirmed();
+            self.engine.maintain.watch = Watch::after_listing(inventory, published);
+            return None;
+        };
+        match remote.read(&key, 0, ReadLen::or_chunk(1)).await {
+            Ok(_) => None,
+            Err(StoreError::NotFound { .. }) => {
+                Some(self.fault(Task::Upload, Fault::RemoteRegressed, now))
+            }
+            Err(err) => Some(self.fault(Task::Maintenance, Fault::from_remote(&err), now)),
+        }
+    }
+
     /// The read-back a boot owes (see `maintain::audit`). `None` when every
     /// newest file is sound: the same listing then plans the next job.
     async fn read_back_unit<R: ObjectStore>(
@@ -1707,6 +1743,8 @@ impl Actor {
         if !covered {
             return Some(self.fault(Task::Maintenance, Fault::RemoteCorrupt, now));
         }
+        // Watched no more, whether the delete goes through or not.
+        self.engine.maintain.watch = Watch::forget(self.engine.maintain.watch, key);
         if let Err(err) = remote.delete(&[key]).await {
             return Some(self.fault(Task::Maintenance, Fault::from_remote(&err), now));
         }

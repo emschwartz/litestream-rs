@@ -256,6 +256,11 @@ fn bucket_rolled_back() {
 }
 
 #[test]
+fn bucket_rolled_back_unseen() {
+    run(scenario::bucket_rolled_back_unseen);
+}
+
+#[test]
 fn staged_byte_flip_before_upload() {
     run(scenario::staged_byte_flip_before_upload);
 }

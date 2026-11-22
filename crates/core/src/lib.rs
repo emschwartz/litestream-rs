@@ -55,6 +55,7 @@ mod stuck;
 mod sync;
 mod upload;
 mod verify;
+mod watch;
 mod witness;
 
 pub use actor::{
