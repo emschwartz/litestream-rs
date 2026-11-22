@@ -108,6 +108,13 @@ pub enum Fault {
         /// The S3 error code in the body.
         code: &'static str,
     },
+    /// Forward, then answer what the same request sent again would get once
+    /// the first landed: 404 `NoSuchUpload` for a complete (the id is spent).
+    /// A client or proxy that retries a complete whose answer it lost sees this.
+    SpentAfterPublish {
+        /// The request shape it applies to.
+        on: Shape,
+    },
     /// Forward untouched. Consumes one request of the shape, so a script can
     /// aim the next fault at the second request of that shape.
     Pass {
@@ -133,6 +140,7 @@ impl Fault {
             | Self::TruncateBody { on, .. }
             | Self::WrongEtag { on }
             | Self::ErrorInOkBody { on, .. }
+            | Self::SpentAfterPublish { on }
             | Self::Pass { on }
             | Self::Transport { on, .. } => *on,
         }
@@ -232,6 +240,10 @@ impl<T: Transport> Transport for FaultTransport<T> {
             Fault::Transport { err, .. } => Err(err),
             Fault::Pass { .. } => self.inner.send(request),
             Fault::ErrorInOkBody { code, .. } => Ok(error_response(200, Some(code), None)),
+            Fault::SpentAfterPublish { .. } => {
+                self.inner.send(request)?;
+                Ok(error_response(404, Some("NoSuchUpload"), None))
+            }
             Fault::AfterPublish { status, .. } => {
                 self.inner.send(request)?;
                 Ok(error_response(status, None, None))
