@@ -18,6 +18,7 @@ use std::time::Duration;
 use lsr_core::{Entropy, SeededEntropy, SourceError, SourceOp, StoreError, StoreOp};
 use lsr_ltx::PageSize;
 
+use crate::clock::ClockLaw;
 use crate::seed::Seed;
 use crate::sqlite::{CrashKind, OtherProcessMode};
 use crate::store::FaultShape;
@@ -369,6 +370,12 @@ pub struct Weights {
     /// stop), before the new engine's first tick. Not an operation, for the
     /// same reason as `block_crash_law`.
     pub after_restart: AfterRestart,
+    /// How the clock moves between reads inside a tick ([`ClockLaw`]): under
+    /// [`ClockLaw::EachRead`] every read is later than the one before, and an
+    /// app's commit inside a tick lands either right before the sync reads
+    /// the committed end or right before a checkpoint's barrier. Not an
+    /// operation, for the same reason as `block_crash_law`.
+    pub clock_law: ClockLaw,
 }
 
 /// What the application does when it comes back after a restart, before the
@@ -448,6 +455,9 @@ impl Default for Weights {
             block_crash_law: false,
             lying_wal_sync: false,
             after_restart: AfterRestart::Nothing,
+            // One reading per tick in the default mix, so its recorded runs
+            // keep their shape; swarm mixes draw the law.
+            clock_law: ClockLaw::PerTick,
         }
     }
 }
@@ -574,6 +584,7 @@ impl Weights {
             block_crash_law: false,
             lying_wal_sync: false,
             after_restart: AfterRestart::Nothing,
+            clock_law: ClockLaw::PerTick,
         };
         // Drawn last, so every other kind keeps the weight it had before
         // second writers were drawn.
@@ -601,6 +612,12 @@ impl Weights {
             0
         } else {
             u32::try_from(below(&entropy, 30).saturating_add(1)).unwrap_or(1)
+        };
+        // Drawn after that, for the same reason: half each.
+        mix.clock_law = if below(&entropy, 2) == 0 {
+            ClockLaw::PerTick
+        } else {
+            ClockLaw::EachRead
         };
         mix
     }

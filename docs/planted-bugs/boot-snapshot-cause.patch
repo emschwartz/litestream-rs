@@ -1,11 +1,11 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index 5991223..42cb9f8 100644
+index 853fbc4..93db48a 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -941,7 +941,7 @@ impl Actor {
+@@ -1026,7 +1026,7 @@ impl Actor {
              }
          };
-         let cause = boot_cause(lost, refused, from.err());
+         let cause = boot_cause(dropped, refused, from.err());
 -        let pending = pending_at_boot(self.kept.asked(), cause);
 +        let pending = self.kept.asked().or(cause);
          let course = match (from, pending) {

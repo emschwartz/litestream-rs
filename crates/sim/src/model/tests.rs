@@ -52,7 +52,7 @@ fn a_power_loss_keeps_durable_commits_and_the_synced_prefix() {
     let c1 = model.commit(&[(pgno(1), page(2))], 1, app(2), 0);
     let c2 = model.commit(&[(pgno(1), page(3))], 1, app(3), 0);
     assert!(!model.rewound());
-    model.on_power_loss(SALTS, 2);
+    model.on_power_loss(SALTS, 2, 0);
     assert!(model.rewound());
     assert_eq!(model.newest_commit(), Some(c1));
     assert_eq!(byte(&model.newest_image(), 1), Some(2));
@@ -69,7 +69,7 @@ fn a_power_loss_drops_commits_of_an_older_generation_that_were_never_synced() {
         salt1: SALTS.salt1.wrapping_add(1),
         salt2: 3,
     };
-    model.on_power_loss(other, 10);
+    model.on_power_loss(other, 10, 0);
     assert_eq!(model.newest_commit(), Some(CommitId(0)));
     assert!(model.rec(c0).is_some());
 }
@@ -85,7 +85,7 @@ fn the_database_before_any_commit_is_commit_zero() {
 fn find_picks_the_newest_commit_made_by_the_created_at() {
     let mut model = Model::new(PageImage::from_bytes(ps(), &[]));
     let early = model.commit(&[(pgno(1), page(1))], 1, app(1), 2);
-    model.on_power_loss(SALTS, 0);
+    model.on_power_loss(SALTS, 0, 0);
     let late = model.commit(&[(pgno(1), page(9))], 1, app(1), 7);
     let end = wal_end(1).get();
     assert_eq!(model.find(SALTS, end, 1), None);
@@ -103,9 +103,9 @@ fn a_recovered_database_an_earlier_loss_took_is_adopted() {
     let mut model = Model::new(PageImage::from_bytes(ps(), &[]));
     model.commit(&[(pgno(1), page(1))], 1, app(1), 0);
     let lost = model.commit(&[(pgno(1), page(2))], 1, app(2), 0);
-    model.on_power_loss(SALTS, 1);
+    model.on_power_loss(SALTS, 1, 0);
     model.commit(&[(pgno(1), page(3))], 1, app(2), 0);
-    model.on_power_loss(SALTS, 2);
+    model.on_power_loss(SALTS, 2, 0);
     assert_eq!(byte(&model.newest_image(), 1), Some(3));
     let got = model.adopt_recovered(&page(2), false, app(2), 5);
     let Recovery::Resurrected(copy) = got else {

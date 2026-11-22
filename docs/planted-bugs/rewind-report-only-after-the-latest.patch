@@ -1,0 +1,13 @@
+diff --git a/crates/history/src/judge.rs b/crates/history/src/judge.rs
+index ed35ab3..bb117be 100644
+--- a/crates/history/src/judge.rs
++++ b/crates/history/src/judge.rs
+@@ -188,7 +188,7 @@ fn step(log: &Log, previous: &[NodeId], nodes: &[NodeId]) -> Step {
+             })
+         })
+         .map(|(index, _)| index)
+-        .min();
++        .max();
+     if let Some(index) = explained {
+         return Step::Rewound(index);
+     }

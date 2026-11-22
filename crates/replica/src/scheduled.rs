@@ -130,6 +130,13 @@ impl Scheduled {
         }
     }
 
+    /// Moves the next run's time by `back`, after the clock stepped back.
+    pub(crate) fn step_back(&mut self, back: impl FnOnce(Timestamp) -> Timestamp) {
+        if let Stage::Due(at) = self.stage {
+            self.stage = Stage::Due(back(at));
+        }
+    }
+
     /// When the replicator's thread must wake for the next run.
     pub(crate) const fn wake(&self) -> Option<Timestamp> {
         match self.stage {
@@ -279,7 +286,10 @@ mod tests {
     #[test]
     fn a_run_that_could_not_finish_is_incomplete_not_failed() {
         assert_eq!(classify(None), (VerifyOutcome::Incomplete, None));
-        let failed = VerifyError::Store(StoreError::Auth { op: StoreOp::List });
+        let failed = VerifyError::Store(StoreError::Denied {
+            op: StoreOp::List,
+            why: lsr_core::Denied::Credentials,
+        });
         assert_eq!(
             classify(Some(Err(failed))),
             (VerifyOutcome::Incomplete, None)

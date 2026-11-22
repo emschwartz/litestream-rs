@@ -80,7 +80,7 @@ pub struct Degraded {
 const fn is_page_mismatch(cause: PersistentCause) -> bool {
     match cause {
         PersistentCause::DatabasePageMismatch { .. } => true,
-        PersistentCause::Credentials
+        PersistentCause::StoreDenied(_)
         | PersistentCause::StoreRefused
         | PersistentCause::RemoteCorrupt
         | PersistentCause::OtherWriter

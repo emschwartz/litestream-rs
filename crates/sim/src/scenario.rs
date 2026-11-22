@@ -25,53 +25,9 @@ use crate::run::{Opts, RunReport, Seen, run_ops};
 use crate::seed::Seed;
 use crate::sqlite::{CrashKind, OtherProcessMode};
 
-/// A [`SnapshotCause`] without its payload.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CauseKind {
-    /// [`SnapshotCause::FirstSync`].
-    FirstSync,
-    /// [`SnapshotCause::BehindRemote`].
-    BehindRemote,
-    /// [`SnapshotCause::NewestStagedFileUnreadable`].
-    NewestStagedFileUnreadable,
-    /// [`SnapshotCause::WalMissing`].
-    WalMissing,
-    /// [`SnapshotCause::GenerationChanged`].
-    GenerationChanged,
-    /// [`SnapshotCause::PrevFrameMismatch`].
-    PrevFrameMismatch,
-    /// [`SnapshotCause::LastPageMismatch`].
-    LastPageMismatch,
-    /// [`SnapshotCause::LocalRewound`].
-    LocalRewound,
-    /// [`SnapshotCause::CheckpointBoundary`].
-    CheckpointBoundary,
-    /// [`SnapshotCause::OperatorRequested`].
-    OperatorRequested,
-    /// [`SnapshotCause::StagedUnverified`].
-    StagedUnverified,
-    /// [`SnapshotCause::WalSyncFailed`].
-    WalSyncFailed,
-}
-
-impl From<&SnapshotCause> for CauseKind {
-    fn from(cause: &SnapshotCause) -> Self {
-        match cause {
-            SnapshotCause::FirstSync => Self::FirstSync,
-            SnapshotCause::BehindRemote { .. } => Self::BehindRemote,
-            SnapshotCause::NewestStagedFileUnreadable => Self::NewestStagedFileUnreadable,
-            SnapshotCause::WalMissing => Self::WalMissing,
-            SnapshotCause::GenerationChanged => Self::GenerationChanged,
-            SnapshotCause::PrevFrameMismatch => Self::PrevFrameMismatch,
-            SnapshotCause::LastPageMismatch => Self::LastPageMismatch,
-            SnapshotCause::LocalRewound { .. } => Self::LocalRewound,
-            SnapshotCause::CheckpointBoundary => Self::CheckpointBoundary,
-            SnapshotCause::OperatorRequested => Self::OperatorRequested,
-            SnapshotCause::StagedUnverified { .. } => Self::StagedUnverified,
-            SnapshotCause::WalSyncFailed => Self::WalSyncFailed,
-        }
-    }
-}
+/// A [`SnapshotCause`] without its payload; core's name for it is
+/// [`lsr_core::SnapshotCauseKind`].
+pub use lsr_core::SnapshotCauseKind as CauseKind;
 
 /// An engine event a scenario expects.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

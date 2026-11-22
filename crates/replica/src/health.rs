@@ -10,8 +10,8 @@
 use std::fmt;
 
 use lsr_core::{
-    AppCheckpoint, AppCheckpoints, Degraded, PersistentCause, Severity, SnapshotCause, StopCause,
-    Task,
+    AppCheckpoint, AppCheckpoints, Degraded, PersistentCause, Severity, SnapshotCause,
+    SnapshotCounts, StopCause, Task,
 };
 use lsr_ltx::{Timestamp, Txid};
 
@@ -134,6 +134,9 @@ pub struct Counters {
     pub sink_panics: u64,
     /// The replica's store, operation by operation.
     pub store: StoreCounters,
+    /// Snapshots staged, per cause: each one uploads the whole database, so
+    /// a cause that keeps counting up is a cost to look into.
+    pub snapshots: SnapshotCounts,
 }
 
 /// One copy of the replicator's state, written by its thread after every tick.
@@ -153,6 +156,8 @@ pub struct Health {
     pub replicated: Option<(Txid, Timestamp)>,
     /// When the oldest commit not yet on the replica was first seen; `None` when caught up.
     /// This is the lag to alert on: the age of `replicated` grows on an idle database too.
+    /// Only a booted engine can say the replica is caught up: before the first boot, and while
+    /// a rebuilt engine waits to boot again, this holds when that wait began, never `None`.
     pub unreplicated_since: Option<Timestamp>,
     /// The WAL file's size: a WAL the read lock holds while uploads are degraded fills the disk.
     pub wal_bytes: u64,
@@ -286,6 +291,7 @@ impl Health {
                     delete: OpCounters::ZERO,
                     bytes_uploaded: 0,
                 },
+                snapshots: SnapshotCounts::ZERO,
             },
             verification: Verification {
                 last_run: None,

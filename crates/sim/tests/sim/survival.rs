@@ -101,7 +101,7 @@ fn revoked_credentials_degrade_and_restores_meanwhile_are_refused_or_exact() {
     let hold = Hold::CredentialsRevoked;
     let report = held(hold);
     assert_eq!(report.reach.get(&format!("{}.judged", key(hold))), 2);
-    assert!(report.reach.get("degraded.Credentials") > 0);
+    assert!(report.reach.get("degraded.StoreDenied") > 0);
     assert!(report.reach.get(&format!("{}.refused", key(hold))) > 0);
 }
 
@@ -109,7 +109,9 @@ fn revoked_credentials_degrade_and_restores_meanwhile_are_refused_or_exact() {
 fn a_full_staging_disk_leaves_the_replica_restorable_while_it_lasts() {
     let report = held(Hold::DiskFull);
     assert_eq!(report.reach.get("hold.DiskFull.judged"), 2);
-    assert!(report.reach.get("retrying.LocalIo") > 0);
+    // ENOSPC on staging is a full disk, not unnamed local I/O.
+    assert!(report.reach.get("retrying.LocalDiskFull") > 0);
+    assert_eq!(report.reach.get("retrying.LocalIo"), 0);
 }
 
 #[test]

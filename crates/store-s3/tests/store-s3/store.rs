@@ -16,7 +16,7 @@ mod cases {
     use super::rig::*;
     use lsr_core::conformance::{Harness, block_on};
     use lsr_core::{
-        CorruptCause, CreatedAtSource, FileKey, Level, ListedTime, ObjectStore, PartNumber,
+        CorruptCause, CreatedAtSource, Denied, FileKey, Level, ListedTime, ObjectStore, PartNumber,
         ReadLen, RecordingSleeper, RetryPolicy, Retrying, SeededEntropy, StoreError, StoreOp,
         Upload,
     };
@@ -160,6 +160,30 @@ mod cases {
             Err(StoreError::NotFound { key: k })
         );
         assert_eq!(h.store.created_at_stats().vanished, 1);
+    }
+
+    /// A batch delete the store refuses for one key (object lock, a deny on
+    /// delete) is that key's access refusal, persistent and named, not a
+    /// transient failure retried with no signal.
+    #[test]
+    fn a_delete_refused_for_one_key_is_a_permission_denial() {
+        let h = FakeHarness::new();
+        let (kept, gone) = (key(0, 1, 1), key(0, 2, 2));
+        for k in [&kept, &gone] {
+            h.wire
+                .inner()
+                .put_raw(&object_key(config().prefix(), k), b"abc".to_vec(), &[]);
+        }
+        h.wire
+            .inner()
+            .deny_delete(&object_key(config().prefix(), &kept));
+        assert_eq!(
+            block_on(h.store.delete(&[kept, gone])),
+            Err(StoreError::Denied {
+                op: StoreOp::Delete,
+                why: Denied::Permission
+            })
+        );
     }
 
     #[test]

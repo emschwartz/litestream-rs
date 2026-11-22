@@ -12,7 +12,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
-use common::{Site, config, fake, stopped, wait};
+use common::{Site, config, fake, moved_until, stopped, wait};
 use lsr_replica::{
     Config, DegradedCause, DynStore, FinalSync, Health, NonZeroDuration, Phase, Replicator,
     Response, Responses, SnapshotCause, StopCause, Stopped, Task,
@@ -170,6 +170,29 @@ fn an_operator_snapshot_request_survives_a_panic_before_the_boot() {
     site.assert_restores(&*site.store());
 }
 
+/// A wall clock that steps back while the fresh engine waits to boot does not add the step to
+/// the wait: the engine boots within minutes of clock, never the hour of the step. (The
+/// engine's own retry wait runs at half speed until the clock catches up, so it takes up to
+/// twice its length.)
+#[test]
+fn a_clock_step_back_does_not_lengthen_the_wait_before_a_rebuild() {
+    let site = Site::new();
+    let faulty = site.faulty();
+    faulty.panics.store(1, Ordering::SeqCst);
+    let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
+    let (runtime, clock) = fake();
+    let retry = Duration::from_secs(60);
+    let replicator =
+        Replicator::start_with(&site.db, store, retrying_every(retry), runtime).unwrap();
+    wait(&replicator, |h| h.counters.panics == 1);
+    clock.step_back(Duration::from_secs(3600));
+    let ten = Duration::from_secs(10);
+    moved_until(&replicator, &clock, (ten, 60), |h| {
+        h.phase == Phase::Running
+    });
+    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
+}
+
 /// A task the dropped engine reported degraded is still reported while the fresh engine waits
 /// to boot.
 #[test]
@@ -186,7 +209,7 @@ fn a_degraded_task_is_still_reported_while_the_engine_is_rebuilt() {
     let degraded = wait(&replicator, |h| h.task(Task::Upload).is_some());
     assert_eq!(
         degraded.task(Task::Upload).map(|d| d.cause),
-        Some(DegradedCause::Credentials)
+        Some(DegradedCause::StoreDenied(lsr_core::Denied::Credentials))
     );
     // The upload's retry panics.
     faulty.panic_always.store(true, Ordering::SeqCst);

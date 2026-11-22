@@ -59,9 +59,11 @@ use crate::source::PageSource;
 use crate::store::{ObjectStore, PageLimit, ReadLen, StoreError};
 use crate::upload::staged_from;
 
-/// The most tokens held for pending staged files. A file staged beyond it
-/// gets none and is refused when its turn comes, which costs one snapshot; at
-/// about 40 bytes a token the cap bounds the memory.
+/// The most tokens held for pending staged files; at about 40 bytes a token
+/// the cap bounds the memory. A file staged without a token would be refused
+/// at upload and replaced by a snapshot, so nothing is staged past it: the
+/// engine holds its position while [`Witnesses::has_room`] says no (the WAL
+/// keeps the frames), and the boot pass witnesses no more than this many.
 pub(crate) const MAX_WITNESSED: usize = 4096;
 
 /// How much of a file one store read asks for during the boot pass.
@@ -171,13 +173,21 @@ impl Witnesses {
         }
     }
 
-    /// Keeps `token`, replacing one for the same file. Past the cap it is
-    /// not kept: the file is refused at upload and replaced by a snapshot.
+    /// Keeps `token`, replacing one for the same file. Every token is kept:
+    /// the stagers ask [`Self::has_room`] first, so the count stays within
+    /// [`MAX_WITNESSED`].
     pub(crate) fn insert(&mut self, token: Witnessed) {
-        let txid = token.key.range().max();
-        if self.by_txid.len() < MAX_WITNESSED || self.by_txid.contains_key(&txid) {
-            self.by_txid.insert(txid, token);
-        }
+        self.by_txid.insert(token.key.range().max(), token);
+        debug_assert!(
+            self.by_txid.len() <= MAX_WITNESSED,
+            "a file was staged with no room for its token"
+        );
+    }
+
+    /// Whether `files` more staged files can each get a token.
+    #[must_use]
+    pub fn has_room(&self, files: usize) -> bool {
+        self.by_txid.len().saturating_add(files) <= MAX_WITNESSED
     }
 
     /// The token for `key`, if one was taken for exactly that key.
@@ -216,7 +226,8 @@ impl Witnesses {
     #[cfg(test)]
     pub(crate) fn trust_all<S: ObjectStore>(staging: &S) -> Self {
         let mut all = Self::new();
-        let files = crate::conformance::block_on(staged_from(staging, None)).unwrap_or_default();
+        let files = crate::conformance::block_on(staged_from(staging, None, usize::MAX))
+            .unwrap_or_default();
         for info in files {
             let bytes = crate::conformance::block_on(staging.read(
                 &info.key,
@@ -331,7 +342,8 @@ where
 {
     let from = confirmed.map_or(Some(Txid::MIN), Txid::next);
     let pending: Vec<FileInfo> = match from {
-        Some(from) => staged_from(staging, Some(from)).await?,
+        // One past the cap: the first file no token could be minted for.
+        Some(from) => staged_from(staging, Some(from), MAX_WITNESSED.saturating_add(1)).await?,
         None => Vec::new(),
     };
     let Some(first) = pending.first() else {
@@ -354,6 +366,14 @@ where
     let mut framed = None;
     let mut tokens = Vec::new();
     for info in &pending {
+        // Past the cap a file could get no token: it goes as refused files do,
+        // and the WAL stages it again once uploads make room.
+        if tokens.len() >= MAX_WITNESSED {
+            return Ok(Pending {
+                tokens,
+                refused: Some(info.key.range().min()),
+            });
+        }
         match witness_one(staging, &mut live, info, prev, &mut framed).await? {
             Ok((token, next)) => {
                 tokens.push(token);

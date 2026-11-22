@@ -32,6 +32,12 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D22 | The bound for "unreplicated too long"? | 10 minutes, minimum 5, no byte bound | Fable, **delegated** | 2026-11-22 | open to owner review |
 | D23 | A delete without a directory sync: fix or argue harmless? | Fix | project rule: found defects are fixed (#116) | 2026-11-22 | decided |
 | D24 | Names for store refusals and the error format | Four cause names, "{op} refused: {why}" | owner (#108) | 2026-11-22 | decided |
+| D25 | A regression the driver excused (a rollback) that the engine never reports: fail the run? | No; count it (`history.excused.unreported`) | Claude (checker-holes), **delegated** | 2026-11-22 | open to owner review |
+| D26 | Which engine events count as reporting a loss of history? | Loss-naming snapshot causes, a first sync over a replica holding files, and the stops and degraded states of a regressed replica or WAL | Claude (checker-holes), **delegated** | 2026-11-22 | open to owner review |
+| D27 | Keep a stricter oracle check when it finds a known engine defect? | Yes; pin the seed as an ignored expected-fail test | Claude (checker-holes), **delegated** | 2026-11-22 | open to owner review |
+| D28 | How does the simulator's clock move inside a tick? | A frozen law per run, drawn last in the swarm mix; the default mix keeps one reading per tick | Claude (checker-holes), **delegated** | 2026-11-22 | open to owner review |
+| D29 | Where do the behaviour table's rows live? | `docs/behavior.toml`, rendered into `docs/BEHAVIOR.md` | parent session's request; layout by Claude (checker-holes) | 2026-11-22 | decided |
+| D30 | How is Toxiproxy provided to the tests? | Built from source with `go install` at a pinned version | Claude (checker-holes), **delegated** | 2026-11-22 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -130,14 +136,14 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
   - After boot drops an unreadable staged file, the engine stages again from the WAL when the WAL still holds the range (#108).
 - **Cost accepted:** one extra GET at boot in the first case.
 - **Revisit if:** the liveness oracle still shows snapshots with no real doubt behind them.
-- **Links:** #108 (open), D12.
+- **Links:** #108 (merged), D12.
 
 ## D12. Boot finds replica files it cannot vouch for
 
 - **Question:** at boot the replica holds files above this database's position. They may be ours (staging wiped, a VM put back, a Go run) or another writer's. With no local record, which?
 - **Options:** (a) stop unless the WAL vouches; (c) snapshot on top, as Go does; a new generation or prefix.
 - **Choice (owner):** (a). Every replica id above the local position must be vouched for by the WAL (continue, no snapshot) or by a record (snapshot above). Otherwise the engine stops with `OtherWriter`. `lsr take-over <db>` writes the record. `lsr restore` writes it too, so a restore followed by a start never stops.
-- **Cost accepted:** a false stop when the proof is gone: the meta directory deleted after a WAL restart, a VM or volume put back from an older copy, a Go run with another meta directory followed by a WAL restart. All are operator actions, and the fix is one command. The engine's own deletes of staged files the replica holds cannot cause one: before any such delete it has the driver keep a takeover record through what those files vouched for (BOOT-24), so a crash before the replacing snapshot boots clean. The deploy cycle of a host that keeps its volume (SIGTERM or SIGKILL each deploy, WORLD-41) never stops. Go never stops here, so this departs from Go; `ContinueAndInterleaveHistories` keeps Go's behaviour.
+- **Cost accepted:** a false stop when the proof is gone: the meta directory deleted after a WAL restart, a VM or volume put back from an older copy, a Go run with another meta directory followed by a WAL restart. All are operator actions, and the fix is one command. The engine's own deletes of staged files the replica holds cannot cause one: before any such delete it has the driver keep a takeover record through what those files vouched for (BOOT-25), so a crash before the replacing snapshot boots clean. The deploy cycle of a host that keeps its volume (SIGTERM or SIGKILL each deploy, WORLD-41) never stops. Go never stops here, so this departs from Go; `ContinueAndInterleaveHistories` keeps Go's behaviour.
 - **Why:** in normal operation the replica is never ahead, so only damage, an operator or another writer reaches this case. Snapshotting on top lets an empty or foreign database become "latest", and retention then removes the real one.
 - **Revisit if:** false stops show up in unattended flows, or conditional writes (#96) plus a durable stop make "last to boot wins" safe enough.
 - **Links:** `docs/BEHAVIOR.md` BOOT-6, BOOT-22, WORLD-3; #110; `crates/core/src/actor.rs` (`boot_recover`), `recover.rs` (`recover_traced`).
@@ -251,7 +257,61 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Why:** clock skew, a missing bucket and a failed certificate check each sent operators to rotate keys that were fine.
 - **Cost accepted:** four more causes to keep classified correctly per store.
 - **Revisit if:** a store returns a refusal that fits none of them.
-- **Links:** #108 (open).
+- **Links:** #108 (merged).
+
+## D25. An excused regression the engine never reports
+
+- **Options:** fail the run when the driver's excuse for a `Latest` that went back (a bucket rollback, an operator's delete) is never followed by the engine's own report of a loss; count it.
+- **Choice:** count it in `history.excused.unreported` and report it, not fail. A rewind the engine did not report does fail (`Anomaly::Unsignaled`).
+- **Why:** the engine raises `RemoteRegressed` only on an uploader listing (BEHAVIOR D17), so about 860 of 3000 seeds' rollbacks go unreported; failing would make every simulator run red on a known open defect.
+- **Cost accepted:** an engine that never notices a rolled-back bucket shows only in a count.
+- **Revisit if:** D17 is fixed: then make the count fatal.
+- **Links:** #111, `crates/history/src/judge.rs`.
+
+## D26. What counts as the engine reporting a loss
+
+- **Options:** any snapshot; only `LocalRewound`; the causes that say the history went back or cannot be followed.
+- **Choice:** `BehindRemote`, `NewestStagedFileUnreadable`, `WalMissing`, `GenerationChanged`, `PrevFrameMismatch`, `LastPageMismatch`, `LocalRewound`, `StagedUnverified`, `WalSyncFailed`; `FirstSync` only over a replica that already holds files; stops and degraded states `RemoteRegressed`, `OtherWriter`, `WalCorrupt`, `WalTruncated`, `WalUnlinked`, `WalSyncFailed`. Not a stall.
+- **Why:** each of these tells an operator the replicated history may not continue; `FirstSync` over files is the engine starting over with nothing to prove continuity (seed 0x6cd).
+- **Cost accepted:** a cause on the list excuses any rewind after it, including one it did not cause.
+- **Revisit if:** a run shows a cause on the list excusing a regression it could not explain.
+- **Links:** #111, `snapshot_reports_loss` in `crates/sim/src/run.rs`.
+
+## D27. A stricter check that finds a known defect
+
+- **Options:** keep the old run-wide exemption until the engine is fixed; scope the exemption and keep the check strict, pinning the failing seed.
+- **Choice:** strict, with seed 0xb6b as an ignored expected-fail test beside BOOT-19's.
+- **Why:** an exemption that hides a real id reuse is the checker hole this work closes.
+- **Cost accepted:** the nightly simulator can fail about once per 3000 seeds on that defect until conditional level-0 writes land.
+- **Revisit if:** #96 lands: turn the test on.
+- **Links:** #111, #96.
+
+## D28. The simulator's clock inside a tick
+
+- **Options:** one reading per tick (as before); every read later than the last, always; a law drawn per run.
+- **Choice:** a frozen `ClockLaw` per run, drawn last in the swarm mix (half each); the default mix and every recorded history keep one reading per tick.
+- **Why:** recorded seeds and planted-bug kills must keep reproducing; new behaviour is reached by the swarm.
+- **Cost accepted:** only half the swarm seeds exercise clock-ordering bugs.
+- **Revisit if:** a clock-ordering defect escapes the swarm.
+- **Links:** #111, `crates/sim/src/clock.rs`.
+
+## D29. The behaviour table as data
+
+- **Options:** keep `docs/BEHAVIOR.md` hand-written; rows in TOML, the document rendered.
+- **Choice:** rows in `docs/behavior.toml` (each cell verbatim), prose in `docs/behavior/template.md`, `just behavior-doc` renders, `just check` fails on drift and on citations that resolve to nothing. One file and one checker: the separate evidence-rows file this branch first added (`docs/evidence.toml`, with its own schema) was folded in before any other branch had to port rows into both. Its kill rule survives as a backing rule on `plant::` citations: the row must also cite a test the ledger entry runs, and one such test must not be ignored.
+- **Why:** hand-typed citations had rotted (five resolved to nothing when checked).
+- **Cost accepted:** every branch that edits section 3 edits the TOML, and open branches written against the old file need their rows moved. The fold lost the typed `[[row.kill]]` pairing (which test kills which plant): the backing rule matches by the ledger's package and filters instead, which is looser when a row cites several tests of one package.
+- **Revisit if:** the marks become derived from rig records (BEHAVIOR section 7.3, item 2).
+- **Links:** #111.
+
+## D30. How Toxiproxy reaches the tests
+
+- **Options:** its container image; a release binary download; `go install` at a pinned version.
+- **Choice:** `go install github.com/Shopify/toxiproxy/v2/cmd/server@v2.12.0` into a cache (`scripts/toxiproxy.sh`). MIT licence; a test tool, never a cargo dependency.
+- **Why:** the image's blob host is not reachable from every sandbox, and the repository already builds pinned Go tools.
+- **Cost accepted:** a first run builds it (about a minute) and CI's `test-s3` job needs Go.
+- **Revisit if:** the build breaks on a Go release.
+- **Links:** #111.
 
 ## Unverified, not recorded
 

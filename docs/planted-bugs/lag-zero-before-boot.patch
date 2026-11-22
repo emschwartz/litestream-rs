@@ -1,0 +1,12 @@
+diff --git a/crates/replica/src/thread.rs b/crates/replica/src/thread.rs
+index c3f4491..cf38646 100644
+--- a/crates/replica/src/thread.rs
++++ b/crates/replica/src/thread.rs
+@@ -594,7 +594,6 @@ impl Worker {
+                 left
+             }
+             (Some(_) | None, _) => {
+-                self.progress.unproven(now);
+                 self.counted_high()
+             }
+         };

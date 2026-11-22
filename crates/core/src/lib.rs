@@ -85,8 +85,8 @@ pub use env::{FakeClock, RecordingSleeper, SeededEntropy};
 pub use fault::reporting_bugs;
 pub use fault::{
     Backoff, BugSite, Clamped, Fault, MAX_BACKOFF, Next, OtherWriter, PersistentCause, Policy,
-    Response, Responses, STALLED_AFTER, SnapshotCause, Stall, StopCause, VERIFY, backoff_wait,
-    policy, retry_wait,
+    Response, Responses, STALLED_AFTER, SnapshotCause, SnapshotCauseKind, SnapshotCounts, Stall,
+    StopCause, VERIFY, backoff_wait, policy, retry_wait,
 };
 pub use inventory::{Inventory, InventoryError, is_snapshot_start};
 pub use journal::{JournalFile, JournalWriteError, JournalWriter};
@@ -132,8 +132,8 @@ pub use source::{
 };
 pub use stop_record::{StopRecord, StopRecordError};
 pub use store::{
-    BatchKind, CorruptCause, ListAt, Listing, ListingStalled, ObjectStore, PageLimit, PartNumber,
-    ReadAt, ReadLen, StoreError, StoreOp, Upload, build_listing,
+    BatchKind, CorruptCause, Denied, ListAt, Listing, ListingStalled, ObjectStore, PageLimit,
+    PartNumber, ReadAt, ReadLen, StoreError, StoreOp, Upload, build_listing,
 };
 pub use sync::{PageFrom, Step, StepEnd, StepFailed, SyncConfig, Synced, clamp, sync_step};
 pub use takeover::{TakeoverRecord, TakeoverRecordError};

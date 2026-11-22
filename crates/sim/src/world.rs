@@ -11,7 +11,7 @@
 //! oracle and for power loss, so neither a fault nor a yield touches a check.
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use lsr_core::conformance::block_on;
 use lsr_core::{
@@ -20,12 +20,13 @@ use lsr_core::{
 use lsr_ltx::{PageNo, PageSize, Timestamp, Txid};
 use lsr_wal::{Salts, WalOffset};
 
+use crate::clock::{ClockLaw, SimClock};
 use crate::exec::{Polls, RunEnd, run_until};
 use crate::history::History;
 use crate::model::{CommitId, Model, PageImage, Recovery};
 use crate::oracle::{Acked, Checked, Ground, Violation, Windows, check_with};
 use crate::seed::Seed;
-use crate::sqlite::{AppCommit, CrashKind, OtherProcessMode, SimSqlite};
+use crate::sqlite::{AppCommit, CrashKind, InTickSite, OtherProcessMode, SimSqlite};
 use crate::store::{
     FaultHandle, Faults, HighWater, Lost, Recorder, RecorderLog, Volatile, VolatileHandle,
     YieldEachCall,
@@ -231,8 +232,11 @@ pub struct World {
     pub seed: Seed,
     /// SQLite's rules.
     pub sqlite: SimSqlite,
-    /// The clock the actor reads; the recorders read it too.
+    /// The driver's clock: it moves between ticks, and the recorders read it.
     pub clock: Arc<FakeClock>,
+    /// The clock the actor and the app read inside a tick, over [`Self::clock`]
+    /// under the run's [`ClockLaw`].
+    pub sim_clock: Arc<SimClock>,
     /// The latest time the actor has been told: the run loop notes each
     /// tick's, and the recorders read it.
     pub high: HighWater,
@@ -286,6 +290,8 @@ pub struct World {
     pub repaired: Vec<FileKey>,
     crash_entropy: SeededEntropy,
     in_tick: Option<CommittedInTick>,
+    // When the app's armed in-tick commit landed, by the app's own clock read.
+    in_tick_time: Arc<Mutex<Option<Timestamp>>>,
 }
 
 /// The first instant of a run's clock.
@@ -327,10 +333,17 @@ impl World {
             seed.stream(40),
             lsr_history::AheadMode::Count,
         );
+        let sim_clock = Arc::new(SimClock::new(
+            Arc::clone(&clock),
+            high.clone(),
+            ClockLaw::PerTick,
+            seed.stream(16),
+        ));
         Self {
             seed,
             sqlite,
             clock,
+            sim_clock,
             high,
             sleeper: RecordingSleeper::new(),
             entropy: SeededEntropy::new(seed.stream(4)),
@@ -355,6 +368,7 @@ impl World {
             repaired: Vec::new(),
             crash_entropy: SeededEntropy::new(seed.stream(5)),
             in_tick: None,
+            in_tick_time: Arc::default(),
         }
     }
 
@@ -385,14 +399,36 @@ impl World {
         self.history.log_commits(&self.model, now);
     }
 
+    /// From now on the actor and the app read the clock under `law`.
+    pub fn set_clock_law(&mut self, law: ClockLaw) {
+        self.sim_clock = Arc::new(SimClock::new(
+            Arc::clone(&self.clock),
+            self.high.clone(),
+            law,
+            self.seed.stream(16),
+        ));
+    }
+
     /// Arms a commit of `pages`, leaving `db_size` pages, that the app makes
-    /// inside the next tick, right before a checkpoint takes its barrier. It
-    /// must not grow the database: the pages a growth re-adds are read from the
-    /// rules after the tick, when the engine may have changed them.
-    pub fn arm_commit_in_tick(&self, pages: Vec<(PageNo, Vec<u8>)>, db_size: u32) {
+    /// inside the next tick at `site`. It must not grow the database: the
+    /// pages a growth re-adds are read from the rules after the tick, when
+    /// the engine may have changed them. The app reads its clock as it
+    /// commits, and the history logs the commit at that time.
+    pub fn arm_commit_in_tick(
+        &self,
+        pages: Vec<(PageNo, Vec<u8>)>,
+        db_size: u32,
+        site: InTickSite,
+    ) {
         let (remote, staging) = (self.remote_recorder.clone(), self.staging_recorder.clone());
-        let created_at = Box::new(move || (remote.len(), staging.len()));
-        self.sqlite.arm_commit_in_tick(pages, db_size, created_at);
+        let (clock, time) = (Arc::clone(&self.sim_clock), Arc::clone(&self.in_tick_time));
+        let created_at = Box::new(move || {
+            let now = lsr_core::Clock::now(clock.as_ref());
+            *time.lock().unwrap_or_else(PoisonError::into_inner) = Some(now);
+            (remote.len(), staging.len())
+        });
+        self.sqlite
+            .arm_commit_in_tick(pages, db_size, site, created_at);
     }
 
     /// The app's commit inside the last tick, once: see [`World::arm_commit_in_tick`].
@@ -409,7 +445,15 @@ impl World {
         let id = self
             .model
             .commit(&done.pages, done.db_size, done.app, remote_at);
-        self.log_history();
+        let landed = self
+            .in_tick_time
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        match landed {
+            Some(at) => self.history.log_commits(&self.model, at),
+            None => self.log_history(),
+        }
         Some(CommittedInTick {
             id,
             staged_from,
@@ -572,12 +616,14 @@ impl World {
                 )
                 .unwrap_or_default();
                 self.log_history();
-                self.model
-                    .on_power_loss(self.sqlite.salts(), self.sqlite.mx_frame());
+                self.model.on_power_loss(
+                    self.sqlite.salts(),
+                    self.sqlite.mx_frame(),
+                    self.remote_recorder.len(),
+                );
                 self.adopt_recovered();
                 let now = lsr_core::Clock::now(self.clock.as_ref());
                 self.history.power_loss(&self.model, now);
-                self.acked.note_rewound();
                 lost
             }
         }
@@ -635,6 +681,54 @@ impl World {
         Ok(listing.files.last().copied())
     }
 
+    /// What the boot's witness cannot prove among the staged level-0 files
+    /// the replica does not hold yet: a snapshot (a file with every page) or a
+    /// hop (a file read from a WAL generation's first frame without every
+    /// page). `None` when there is neither.
+    #[must_use]
+    pub fn pending_unprovable(&self) -> Option<Unprovable> {
+        use lsr_core::{Level, ObjectStore, PageLimit};
+        let newest = self.remote_newest();
+        let listing = block_on(self.staging_raw.list(Level::ZERO, None, PageLimit::MAX)).ok()?;
+        let first_frame = u64::try_from(lsr_wal::HEADER_LEN).unwrap_or(u64::MAX);
+        listing
+            .files
+            .iter()
+            .filter(|file| newest.is_none_or(|newest| file.key.range().max().get() > newest))
+            .find_map(|file| {
+                // Only a file read from a generation's first frame (or from no
+                // WAL range) can be either: the header says so, the pages
+                // whether it is whole.
+                let len =
+                    lsr_core::ReadLen::new(u32::try_from(lsr_ltx::HEADER_LEN).unwrap_or(u32::MAX))?;
+                let head = block_on(self.staging_raw.read(&file.key, 0, len)).ok()?;
+                let raw = head.first_chunk::<{ lsr_ltx::HEADER_LEN }>()?;
+                let origin = lsr_ltx::Header::decode(raw).ok()?.fields().wal;
+                if origin.is_some_and(|origin| origin.offset() != first_frame) {
+                    return None;
+                }
+                let bytes = self.read_staged(&file.key).ok()?;
+                Some(if is_full_image(&bytes) {
+                    Unprovable::Snapshot
+                } else {
+                    Unprovable::Hop
+                })
+            })
+    }
+
+    /// The newest transaction any replica file holds, at any level, read
+    /// around the wrappers; `None` when the replica is empty or cannot list.
+    #[must_use]
+    pub fn remote_newest(&self) -> Option<u64> {
+        use lsr_core::{Level, ObjectStore, PageLimit};
+        Level::ALL
+            .into_iter()
+            .filter_map(|level| block_on(self.remote_raw.list(level, None, PageLimit::MAX)).ok())
+            .flat_map(|listing| listing.files)
+            .map(|file| file.key.range().max().get())
+            .max()
+    }
+
     /// Every level-0 file on the replica, oldest first, read around the
     /// wrappers.
     ///
@@ -647,24 +741,26 @@ impl World {
     }
 
     /// Deletes every replica file, at every level, that ends at the newest
-    /// transaction; false when the replica is empty.
+    /// transaction; `None` when the replica is empty, otherwise the lowest
+    /// transaction no kept file covers any more.
     ///
     /// # Errors
     /// The store's error when it cannot list or delete.
-    pub fn remote_roll_back(&mut self) -> Result<bool, StoreError> {
+    pub fn remote_roll_back(&mut self) -> Result<Option<Txid>, StoreError> {
         use lsr_core::{Level, ObjectStore, PageLimit};
         let mut files = Vec::new();
         for level in Level::ALL {
             files.extend(block_on(self.remote_raw.list(level, None, PageLimit::MAX))?.files);
         }
         let Some(newest) = files.iter().map(|f| f.key.range().max()).max() else {
-            return Ok(false);
+            return Ok(None);
         };
         let (gone, kept): (Vec<FileInfo>, Vec<FileInfo>) =
             files.iter().partition(|f| f.key.range().max() == newest);
         let keys: Vec<FileKey> = gone.iter().map(|f| f.key).collect();
         self.remote_delete(&keys)?;
         // What no kept file covers is gone from the replica for good.
+        let mut lowest = newest;
         for key in &keys {
             let range = key.range();
             for raw in range.min().get()..=range.max().get() {
@@ -674,10 +770,11 @@ impl World {
                 });
                 if let (false, Some(txid)) = (covered, Txid::new(raw)) {
                     self.lost.insert(txid);
+                    lowest = lowest.min(txid);
                 }
             }
         }
-        Ok(true)
+        Ok(Some(lowest))
     }
 
     /// Makes the store forget the stored created-at time of the newest-ending
@@ -946,6 +1043,17 @@ impl World {
         Ok(())
     }
 
+    /// [`World::adopt_local_state`] for damage that corrupted the database
+    /// (a flipped bit): the model follows it, and the history judge refuses
+    /// any restore that gives it.
+    pub fn adopt_corrupt_state(&mut self) {
+        if self.model_matches_sqlite() {
+            return;
+        }
+        self.adopt_local_state();
+        self.history.adopted_corruption(&self.model);
+    }
+
     /// Takes the database as the rules now read it as the model's newest
     /// commit, when damage to the WAL changed it: the damage is the database's
     /// new truth, and the replica is judged against that.
@@ -1036,3 +1144,12 @@ impl World {
 
 #[cfg(test)]
 mod tests;
+
+/// A pending staged file the boot's witness cannot prove from the live WAL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unprovable {
+    /// A file with every page.
+    Snapshot,
+    /// A file that starts a WAL generation without every page.
+    Hop,
+}

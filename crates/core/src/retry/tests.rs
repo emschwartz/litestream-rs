@@ -117,7 +117,10 @@ fn not_found_is_missing() {
 #[test]
 fn auth_is_permanent() {
     assert_eq!(
-        classify(&StoreError::Auth { op: StoreOp::Read }),
+        classify(&StoreError::Denied {
+            op: StoreOp::Read,
+            why: crate::store::Denied::Credentials
+        }),
         Class::Permanent
     );
 }
@@ -246,15 +249,17 @@ fn auth_makes_no_wait_and_one_call() {
     let (mem, sleeper, store) = rig(SeededEntropy::new(1), policy(5));
     mem.inject_failure(
         StoreOp::Delete,
-        StoreError::Auth {
+        StoreError::Denied {
             op: StoreOp::Delete,
+            why: crate::store::Denied::Credentials,
         },
     );
     let got = conformance::block_on(store.delete(&[key()]));
     assert_eq!(
         got,
-        Err(StoreError::Auth {
-            op: StoreOp::Delete
+        Err(StoreError::Denied {
+            op: StoreOp::Delete,
+            why: crate::store::Denied::Credentials
         })
     );
     assert!(sleeper.waits().is_empty());
@@ -470,7 +475,10 @@ fn any_error() -> impl Strategy<Value = StoreError> {
         Just(transient(ErrorKind::TimedOut)),
         Just(throttled(None)),
         (1_u64..9_000).prop_map(|n| throttled(Some(ms(n)))),
-        Just(StoreError::Auth { op: StoreOp::List }),
+        Just(StoreError::Denied {
+            op: StoreOp::List,
+            why: crate::store::Denied::Credentials
+        }),
         Just(StoreError::NotFound { key: key() }),
     ]
 }
@@ -613,8 +621,9 @@ impl ObjectStore for DeleteRefuser {
     }
 
     async fn delete(&self, _keys: &[FileKey]) -> Result<(), StoreError> {
-        Err(StoreError::Auth {
+        Err(StoreError::Denied {
             op: StoreOp::Delete,
+            why: crate::store::Denied::Credentials,
         })
     }
 }
