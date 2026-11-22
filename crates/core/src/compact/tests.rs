@@ -209,6 +209,7 @@ fn input_fault(err: CompactError) -> (FileKey, InputFault) {
         CompactError::Input { key, fault } => (key, fault),
         CompactError::InputVanished { .. }
         | CompactError::Source(_)
+        | CompactError::Local(_)
         | CompactError::Dest(_)
         | CompactError::Encode(_)
         | CompactError::SnapshotLevel { .. }

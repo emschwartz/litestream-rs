@@ -1072,6 +1072,7 @@ impl Fault {
         match err {
             CompactError::InputVanished { .. } => Self::RemoteObjectMissing,
             CompactError::Source(err) | CompactError::Dest(err) => Self::from_remote(err),
+            CompactError::Local(err) => Self::from_staging(err),
             CompactError::Input { .. } | CompactError::Encode(_) => Self::RemoteCorrupt,
             CompactError::Inputs(_) | CompactError::SnapshotLevel { .. } => {
                 Self::Bug(BugSite::CompactionInputs)
