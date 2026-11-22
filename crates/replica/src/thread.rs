@@ -52,7 +52,7 @@ use crate::config::Config;
 use crate::events::{Event, EventSink};
 use crate::exec::block_on;
 use crate::health::{Counters, Gone, Phase, Stopped};
-use crate::meta::{MetaLock, write_stop};
+use crate::meta::{MetaLock, write_own_takeover, write_stop};
 use crate::readers::Guarded;
 use crate::replicator::Shared;
 use crate::runtime::{Runtime, later};
@@ -265,6 +265,19 @@ impl Worker {
     /// Writes the engine's stop record to the meta directory, or removes it, when it changed.
     /// A failed write is reported once per change: the stop holds in this process, and a
     /// restart may not keep it.
+    /// Writes the takeover the engine asked for before it deletes staged files, and hands
+    /// it back, so its next tick may delete them. A write that fails hands nothing back: the
+    /// engine's next tick fails `LocalIo` and waits, and deletes nothing unrecorded.
+    fn keep_takeover(&mut self) {
+        let Some(record) = self.actor.takeover_wanted() else {
+            return;
+        };
+        match write_own_takeover(&self.meta, record) {
+            Ok(()) => self.actor.remember_takeover(record),
+            Err(err) => self.emit(&Event::TakeoverNotRecorded { kind: err.kind() }),
+        }
+    }
+
     fn keep_stop_record(&mut self) {
         let record = self.actor.stop_record();
         if record == self.recorded {
@@ -430,6 +443,7 @@ impl Worker {
             .and_then(Scheduled::kept_restore_point);
         self.actor.keep_restore_point_for_verify(verify);
         self.keep_stop_record();
+        self.keep_takeover();
         // The snapshot is written before the event goes out, so a sink that reads health on an
         // event sees the state after it.
         self.observe(now);
@@ -459,7 +473,8 @@ impl Worker {
             EngineEvent::Booted { .. }
             | EngineEvent::Synced { .. }
             | EngineEvent::Uploaded(_)
-            | EngineEvent::Resnapshot(_) => true,
+            | EngineEvent::Resnapshot(_)
+            | EngineEvent::TakeoverWanted(_) => true,
             EngineEvent::Checkpointed { .. }
             | EngineEvent::Maintained { .. }
             | EngineEvent::Idle
@@ -519,7 +534,8 @@ impl Worker {
             | EngineEvent::Maintained { .. }
             | EngineEvent::Idle
             | EngineEvent::Resnapshot(_)
-            | EngineEvent::Clamped(_) => {}
+            | EngineEvent::Clamped(_)
+            | EngineEvent::TakeoverWanted(_) => {}
         }
     }
 

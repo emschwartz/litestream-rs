@@ -189,6 +189,9 @@ struct Rig {
     ck: FakeCheckpointer,
     staging: Counting,
     remote: Counting,
+    /// The takeover record a driver would keep in the meta directory: what an
+    /// actor asked for ([`Actor::takeover_wanted`]), handed back at once.
+    takeover: Option<crate::TakeoverRecord>,
 }
 
 impl Rig {
@@ -212,6 +215,7 @@ impl Rig {
             ck,
             staging: Counting::default(),
             remote: Counting::default(),
+            takeover: None,
         };
         rig.commit(1);
         rig
@@ -230,7 +234,21 @@ impl Rig {
             remote: &self.remote,
             clock: &FakeClock::new(ts(now)),
         };
-        block_on(actor.tick(env, ts(now)))
+        let tick = block_on(actor.tick(env, ts(now)));
+        // The rig is the driver: it keeps the takeover the actor asked for
+        // and ticks on, as the replicator thread does, so a test sees the
+        // tick that did the work.
+        if let Tick::Ran {
+            event: Event::TakeoverWanted(wanted),
+            ..
+        } = tick
+        {
+            let held = self.takeover.filter(|held| held.txid() > wanted.txid());
+            self.takeover = Some(held.unwrap_or(wanted));
+            actor.remember_takeover(wanted);
+            return self.tick(actor, now);
+        }
+        tick
     }
 
     /// Ticks at `now` while the actor says it has work.

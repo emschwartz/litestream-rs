@@ -411,3 +411,17 @@ fn latest_never_goes_back_after_two_second_writers_seed_0xb9() {
         panic!("{failure}");
     }
 }
+
+/// Seed 0xd of the fixed set's mix, 236 operations. A staged file whose upload published but
+/// whose answer was lost turns unreadable in staging; the engine drops it while it runs, and
+/// later boots find the replica one transaction past staging with a WAL that no longer holds
+/// it. The engine now keeps a takeover through its own staged position before that drop, so
+/// no boot refuses its own file. With the record capped at the confirmed transaction (the
+/// first cut) the judge failed it: a refusal with staging intact and no other writer.
+#[test]
+fn an_unconfirmed_upload_dropped_from_staging_is_never_refused_seed_0xd() {
+    let seed = lsr_sim::Seed::new(0xd);
+    if let Err(failure) = lsr_sim::run(seed, 236, &lsr_sim::Weights::mixed(seed)) {
+        panic!("{failure}");
+    }
+}

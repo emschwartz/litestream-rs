@@ -533,7 +533,9 @@ fn quiet_after_stop(report: &RunReport) -> Result<(), String> {
     for (at, seen) in report.seen.iter().enumerate() {
         match seen {
             Seen::Stop(_) if stopped_by_fault(seen) => stopped = true,
-            Seen::Event(Event::Booted { .. }) => stopped = false,
+            // A stopped engine only reports its stop: a boot asking for a
+            // takeover record is a new process's, as a boot is.
+            Seen::Event(Event::Booted { .. } | Event::TakeoverWanted(_)) => stopped = false,
             // A restore's reboot lists the replica in its first tick, and the
             // oracle has just judged: that tick is not the stopped engine's.
             Seen::Tick { remote_calls, .. }

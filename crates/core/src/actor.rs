@@ -99,7 +99,7 @@ use crate::pages::{PageChecksumTable, seeded, snapshot_clears};
 use crate::position::{Position, SyncedThrough, WalFileLen};
 use crate::recover::{
     BootWal, FrameCheck, Miss, NewestStagedFile, PositionSource, Probes, Recovered, WalView,
-    newest_level_zero, read_header, recover,
+    newest_level_zero, newest_replica_level_zero, read_header, recover,
 };
 use crate::snapshot::{SnapshotFailed, read_live, write_snapshot};
 use crate::source::{CheckpointMode, Checkpointer, CommittedRead, PageSource, WalSource};
@@ -257,6 +257,11 @@ pub enum Event {
     Resnapshot(SnapshotCause),
     /// The clock read earlier than the last time used; nothing else ran.
     Clamped(Clamped),
+    /// The engine is about to delete staged files the replica holds, and
+    /// needs this takeover record durable first (`crate::takeover`): the
+    /// driver writes it, hands it back with [`Actor::remember_takeover`], and
+    /// ticks again. Nothing else ran.
+    TakeoverWanted(TakeoverRecord),
 }
 
 /// How a tick ended.
@@ -402,10 +407,36 @@ impl Actor {
     }
 
     /// Hands the actor the takeover record an operator or a restore left
-    /// (`crate::takeover`), before its first tick: a boot may then build on
-    /// replica files the WAL does not vouch for, through its transaction.
+    /// (`crate::takeover`), before its first tick, or the one it asked for
+    /// ([`Self::takeover_wanted`]) once it is durable: a boot may then build
+    /// on replica files the WAL does not vouch for, through its transaction.
+    /// The newer of this and the one held stands.
     pub fn remember_takeover(&mut self, record: TakeoverRecord) {
-        self.kept.takeover = Some(record);
+        let held = self
+            .kept
+            .takeover
+            .filter(|held| held.txid() > record.txid());
+        self.kept.takeover = Some(held.unwrap_or(record));
+        if self
+            .kept
+            .wanted_takeover
+            .is_some_and(|wanted| record.covers(wanted.txid()))
+        {
+            self.kept.wanted_takeover = None;
+        }
+    }
+
+    /// The takeover record the engine needs durable before its next tick
+    /// deletes staged files the replica holds ([`Event::TakeoverWanted`]).
+    ///
+    /// Without it a crash between that delete and the snapshot replacing
+    /// them leaves staging below the replica, and the next boot could not
+    /// tell this engine's own files from another writer's. The record names
+    /// only what staging vouched for before the delete: the newest staged
+    /// transaction, or the replica's newest if that is lower.
+    #[must_use]
+    pub const fn takeover_wanted(&self) -> Option<TakeoverRecord> {
+        self.kept.wanted_takeover
     }
 
     /// The replica's newest transaction when the last boot refused to build
@@ -825,6 +856,49 @@ impl Actor {
         }
     }
 
+    /// A boot that could not finish: a fault, or a takeover it needs durable
+    /// before it drops staged files.
+    fn boot_step(&mut self, step: BootStep, now: Timestamp) -> Tick {
+        match step {
+            BootStep::Fault(fault) => self.fault(Task::Sync, fault, now),
+            BootStep::Vouch(record) => self.want_takeover(Task::Sync, record, now),
+        }
+    }
+
+    /// Asks the driver for `record` before `task` deletes staged files. Asked
+    /// already and still not handed back, the driver could not write it: the
+    /// task fails `LocalIo` and waits its backoff, then asks again, so a
+    /// meta directory that refuses writes never spins and never loses files
+    /// unrecorded.
+    fn want_takeover(&mut self, task: Task, record: TakeoverRecord, now: Timestamp) -> Tick {
+        if self.kept.wanted_takeover.take() == Some(record) {
+            return self.fault(task, Fault::LocalIo, now);
+        }
+        self.kept.wanted_takeover = Some(record);
+        Tick::Ran {
+            event: Event::TakeoverWanted(record),
+            next: Next::Now,
+        }
+    }
+
+    /// The takeover a running task needs before it deletes staged files the
+    /// replica may hold: through the staged position, or `cap` if that is
+    /// lower, unless one held already covers it or the configuration checks
+    /// nothing at boot. A running engine's staged files are its own, and any
+    /// of them may be on the replica unconfirmed (an upload whose answer was
+    /// lost), so only a key the replica is known to end at caps it.
+    fn vouch_before_drop(&mut self, task: Task, cap: Option<Txid>, now: Timestamp) -> Option<Tick> {
+        if self.kept.cfg.responses.other_writer == OtherWriter::ContinueAndInterleaveHistories {
+            return None;
+        }
+        let staged = self.staged()?;
+        let through = cap.map_or(staged, |cap| staged.min(cap));
+        if self.kept.takeover.is_some_and(|held| held.covers(through)) {
+            return None;
+        }
+        Some(self.want_takeover(task, TakeoverRecord::through(through), now))
+    }
+
     /// Lists the replica, witnesses the pending staged files against the
     /// live WAL (`crate::witness`), reads the newest staged file left and
     /// recovers (in that order). A failure anywhere boots again from the start.
@@ -842,7 +916,7 @@ impl Actor {
         let Listed { upload, lost, gate } = match listed {
             Ok(Some(listed)) => listed,
             Ok(None) => return self.verdict(Task::Sync, StopCause::OtherWriter, now),
-            Err(fault) => return self.fault(Task::Sync, fault, now),
+            Err(step) => return self.boot_step(step, now),
         };
         let Judged {
             pending: Pending { tokens, refused },
@@ -856,7 +930,7 @@ impl Actor {
                 },
         } = match boot_judge(env, upload, gate).await {
             Ok(found) => found,
-            Err(fault) => return self.fault(Task::Sync, fault, now),
+            Err(step) => return self.boot_step(step, now),
         };
         let from = match recovered {
             Recovered::Continue(position) | Recovered::WalRestarted(position) => Ok(position),
@@ -1473,6 +1547,9 @@ impl Actor {
                     if let (Fault::StagedLost, UploadPlan::Upload(key)) = (failed.fault, plan)
                         && self.kept.suspect_staged.replace(key) == Some(key)
                     {
+                        if let Some(tick) = self.vouch_before_drop(Task::Upload, None, now) {
+                            return Some(tick);
+                        }
                         self.kept.suspect_staged = None;
                         return Some(self.lose_staged(env, key.range().min(), now).await);
                     }
@@ -1541,6 +1618,9 @@ impl Actor {
                 self.fault(Task::Upload, Fault::RemoteAheadOfLocal, now)
             }
             Ok(false) => {
+                if let Some(tick) = self.vouch_before_drop(Task::Upload, Some(from), now) {
+                    return tick;
+                }
                 self.set_upload(state);
                 self.lose_staged(env, from, now).await
             }
@@ -2081,6 +2161,22 @@ struct Booted {
     refused_through: Option<Txid>,
 }
 
+/// Why a boot step did not finish.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BootStep {
+    /// A fault; the boot runs again by its policy.
+    Fault(Fault),
+    /// The boot would drop staged files the replica holds, and needs this
+    /// takeover durable first.
+    Vouch(TakeoverRecord),
+}
+
+impl From<Fault> for BootStep {
+    fn from(fault: Fault) -> Self {
+        Self::Fault(fault)
+    }
+}
+
 /// Whether a boot needs replica files above the local position vouched for
 /// (`crate::takeover`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2117,6 +2213,30 @@ impl BootGate {
         self.local < Some(tip)
     }
 
+    /// Before the boot drops staged files: the takeover that keeps what
+    /// staging vouched for once they are gone, unless the held record covers
+    /// it already. That is `local`, capped at the replica's newest key: the
+    /// confirmed `tip`, or a newer level-0 key the listing judged torn (it may
+    /// be this engine's own upload, read wrong). Pending files above every
+    /// replica key vouch for nothing there, so a forged one never raises it.
+    async fn vouch<R: ObjectStore>(self, remote: &R, tip: Option<Txid>) -> Result<(), BootStep> {
+        let Takeover::Vouch(record) = self.takeover else {
+            return Ok(());
+        };
+        let covers = |txid: Txid| record.is_some_and(|record| record.covers(txid));
+        let Some(local) = self.local.filter(|local| !covers(*local)) else {
+            return Ok(());
+        };
+        let listed = newest_replica_level_zero(remote).await?;
+        let replica = tip.max(listed.map(|info| info.key.range().max()));
+        match replica.map(|replica| replica.min(local)) {
+            Some(through) if !covers(through) => {
+                Err(BootStep::Vouch(TakeoverRecord::through(through)))
+            }
+            Some(_) | None => Ok(()),
+        }
+    }
+
     /// Whether replica files through `tip` that the WAL did not vouch for
     /// stop the boot.
     fn refuses(self, tip: Txid) -> bool {
@@ -2150,7 +2270,7 @@ async fn boot_listing<L: ObjectStore, R: ObjectStore>(
     suspect: &mut Option<FileKey>,
     record: &mut Option<StopRecord>,
     takeover: Takeover,
-) -> Result<Option<Listed>, Fault> {
+) -> Result<Option<Listed>, BootStep> {
     // Where staging stood before this boot dropped anything of its own: the
     // position replica files must be vouched for above.
     let local = newest_level_zero(staging)
@@ -2167,9 +2287,10 @@ async fn boot_listing<L: ObjectStore, R: ObjectStore>(
             did: Did::Diverged { from, .. },
         }) => (state, Some(from)),
         Ok(listed) => (listed.state, None),
-        Err(failed) => return Err(failed.fault),
+        Err(failed) => return Err(failed.fault.into()),
     };
     let tip = upload.confirmed();
+    let gate = BootGate { takeover, local };
     let taken_over = tip
         .zip(takeover.record())
         .is_some_and(|(tip, record)| record.covers(tip));
@@ -2180,19 +2301,23 @@ async fn boot_listing<L: ObjectStore, R: ObjectStore>(
     // The staged files from `from` on cannot continue the replica: they go,
     // and recovery snapshots above what the replica holds.
     if let Some(from) = diverged {
+        gate.vouch(remote, tip).await?;
         drop_staged_from(staging, from).await?;
     }
-    let lost = match sweep_staged(staging, upload.confirmed(), *suspect).await? {
+    let lost = match sweep_staged(staging, tip, *suspect).await? {
         Swept::Clean => None,
         Swept::Suspect(key) => {
             *suspect = Some(key);
-            return Err(Fault::StagedLost);
+            return Err(Fault::StagedLost.into());
         }
-        Swept::Dropped(from) => Some(from),
+        Swept::Condemned(from) => {
+            gate.vouch(remote, tip).await?;
+            drop_staged_from(staging, from).await?;
+            Some(from)
+        }
     };
     *suspect = None;
     let lost = lost.or(diverged);
-    let gate = BootGate { takeover, local };
     Ok(Some(Listed { upload, lost, gate }))
 }
 
@@ -2220,7 +2345,8 @@ async fn boot_witness<W: WalSource, P: PageSource, C, L: ObjectStore, R: ObjectS
     mut reader: Option<&mut WalReader<W::Wal>>,
     committed: CommittedRead,
     upload: UploadState,
-) -> Result<(Pending, UploadState), Fault> {
+    gate: BootGate,
+) -> Result<(Pending, UploadState), BootStep> {
     let confirmed = upload.confirmed();
     let first = witness_once(env, reader.as_deref_mut(), committed, confirmed).await?;
     let Some(from) = first.refused else {
@@ -2228,8 +2354,9 @@ async fn boot_witness<W: WalSource, P: PageSource, C, L: ObjectStore, R: ObjectS
     };
     let second = witness_once(env, reader, committed, confirmed).await?;
     if second.refused != Some(from) {
-        return Err(Fault::LocalIo);
+        return Err(Fault::LocalIo.into());
     }
+    gate.vouch(env.remote, confirmed).await?;
     drop_staged_from(env.staging, from).await?;
     let next = confirmed.map_or(Some(Txid::MIN), Txid::next);
     let key = FileKey::new(Level::ZERO, TxidRange::single(from));
@@ -2286,10 +2413,10 @@ async fn boot_judge<W: WalSource, P: PageSource, C, L: ObjectStore, R: ObjectSto
     env: &mut Env<'_, W, P, C, L, R>,
     upload: UploadState,
     gate: BootGate,
-) -> Result<Judged, Fault> {
+) -> Result<Judged, BootStep> {
     let committed = env.wal.committed().map_err(Fault::from_source)?;
     let mut reader = open_reader(env.wal)?;
-    let (pending, upload) = boot_witness(env, reader.as_mut(), committed, upload).await?;
+    let (pending, upload) = boot_witness(env, reader.as_mut(), committed, upload, gate).await?;
     let booted = boot_recover(env, reader.as_mut(), committed, upload.confirmed(), gate).await?;
     Ok(Judged {
         pending,

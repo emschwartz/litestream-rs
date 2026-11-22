@@ -473,17 +473,30 @@ fn match_last_page<R: Read + Seek>(
 pub(crate) async fn newest_level_zero<L: ObjectStore>(
     staging: &L,
 ) -> Result<Option<FileInfo>, Fault> {
+    newest_listed(staging, Fault::from_staging, Fault::from_staging_listing).await
+}
+
+/// The replica's newest level-0 file as listed, whatever its bytes: a tail a
+/// listing judged torn is still on the replica.
+pub(crate) async fn newest_replica_level_zero<R: ObjectStore>(
+    remote: &R,
+) -> Result<Option<FileInfo>, Fault> {
+    newest_listed(remote, Fault::from_remote, |_stalled| Fault::RemoteCorrupt).await
+}
+
+async fn newest_listed<S: ObjectStore>(
+    store: &S,
+    fault: fn(&crate::StoreError) -> Fault,
+    stalled: fn(crate::ListingStalled) -> Fault,
+) -> Result<Option<FileInfo>, Fault> {
     let (mut at, mut newest) = (ListAt::first(Level::ZERO), None);
     loop {
-        let page = staging
+        let page = store
             .list(at.level, at.after, PageLimit::MAX)
             .await
-            .map_err(|err| Fault::from_staging(&err))?;
+            .map_err(|err| fault(&err))?;
         newest = page.files.last().copied().or(newest);
-        match at
-            .following(page.next)
-            .map_err(Fault::from_staging_listing)?
-        {
+        match at.following(page.next).map_err(stalled)? {
             Some(next) => at = next,
             None => return Ok(newest),
         }

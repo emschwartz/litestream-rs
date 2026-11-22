@@ -747,6 +747,16 @@ impl<B: Backend> Rig<B> {
             Event::Uploaded(did) => self.acked.on_did(did),
             Event::Retrying { fault, .. } => self.faults.push(*fault),
             Event::Degraded { cause, .. } => self.degraded.push(*cause),
+            // The rig is the driver: the record is durable when the actor is handed it, and
+            // every later actor gets it.
+            Event::TakeoverWanted(record) => {
+                self.takeover = Some(
+                    self.takeover
+                        .filter(|held| held.txid() > record.txid())
+                        .unwrap_or(*record),
+                );
+                self.actor.remember_takeover(*record);
+            }
             Event::Booted { .. }
             | Event::Synced { .. }
             | Event::Checkpointed { .. }

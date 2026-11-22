@@ -15,7 +15,9 @@
 //!   what the replica holds, through one transaction
 //!   ([`lsr_core::TakeoverRecord`]). Read at start; written by
 //!   [`crate::take_over`] (`lsr take-over`) and by every restore, through the
-//!   restored transaction; `lsr-takeover.new` is its scratch name.
+//!   restored transaction, and by the replicator thread when the engine asks
+//!   for one before deleting staged files the replica holds, through what
+//!   they vouched for; `lsr-takeover.new` is its scratch name.
 //!
 //! The lock is an open file description lock (`flock(2)`, which is what
 //! `std::fs::File::try_lock` takes on Linux and macOS), on a file of its own.
@@ -142,6 +144,16 @@ pub(crate) fn write_takeover(meta: &Path, record: TakeoverRecord) -> io::Result<
     fs::create_dir_all(meta)?;
     replace(meta, TAKEOVER_FILE, TAKEOVER_SCRATCH, &record.encode())?;
     remove(meta, STOP_FILE)
+}
+
+/// Makes the takeover the engine asked for before deleting staged files
+/// durable (`lsr_core::Actor::takeover_wanted`). Unlike [`write_takeover`] it
+/// leaves a stop record alone: the engine judges that itself.
+///
+/// # Errors
+/// The first failed file operation.
+pub(crate) fn write_own_takeover(meta: &Path, record: TakeoverRecord) -> io::Result<()> {
+    replace(meta, TAKEOVER_FILE, TAKEOVER_SCRATCH, &record.encode())
 }
 
 /// Writes `text` to `meta/name` through `scratch`: synced, renamed, and the

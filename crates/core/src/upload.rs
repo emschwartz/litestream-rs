@@ -441,17 +441,18 @@ pub(crate) enum Swept {
     /// This file failed verification on its first failed read: nothing was
     /// deleted, since one read says nothing about the stored bytes.
     Suspect(FileKey),
-    /// The suspect failed again: it and every staged file after it were
-    /// deleted, from this transaction on.
-    Dropped(Txid),
+    /// The suspect failed again: it and every staged file after it must go,
+    /// from this transaction on ([`drop_staged_from`]). The caller deletes
+    /// them, once what they vouched for is recorded.
+    Condemned(Txid),
 }
 
 /// Verifies every staged level-0 file the replica may still need: from
 /// `confirmed`, the replica's newest transaction, on (everything when the
-/// replica is empty). The first that does not verify is deleted, with every
-/// one after it ([`drop_staged_from`]), only when it is `suspect`, the file an
-/// earlier tick's read already failed on; otherwise it is reported as the new
-/// suspect and nothing is deleted.
+/// replica is empty). The first that does not verify is condemned, with every
+/// one after it, only when it is `suspect`, the file an earlier tick's read
+/// already failed on; otherwise it is reported as the new suspect. The sweep
+/// deletes nothing itself.
 ///
 /// # Errors
 /// The staging store's fault when it cannot list, read or delete.
@@ -465,9 +466,7 @@ pub(crate) async fn sweep_staged<L: ObjectStore>(
             if suspect != Some(info.key) {
                 return Ok(Swept::Suspect(info.key));
             }
-            let from = info.key.range().min();
-            drop_staged_from(staging, from).await?;
-            return Ok(Swept::Dropped(from));
+            return Ok(Swept::Condemned(info.key.range().min()));
         }
     }
     Ok(Swept::Clean)

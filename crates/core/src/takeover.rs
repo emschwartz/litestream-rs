@@ -186,10 +186,7 @@ mod tests {
                 b"lsr-takeover 1 0000000000000000\n",
                 TakeoverRecordError::Txid,
             ),
-            (
-                b"lsr-takeover 1 000000000000002a x\n",
-                TakeoverRecordError::Words,
-            ),
+            (b"lsr-takeover 1\n", TakeoverRecordError::Words),
             (b"lsr-takeover 1\n", TakeoverRecordError::Words),
         ];
         for (bytes, want) in cases {

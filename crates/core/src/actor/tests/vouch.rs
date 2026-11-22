@@ -195,3 +195,95 @@ fn a_takeover_covering_the_replica_clears_a_stop_record() {
     );
     assert_eq!(actor.stop_record(), None);
 }
+
+/// The engine drops its own staged files the replica holds (the newest
+/// turned unreadable), and the process dies before the snapshot that
+/// replaces them is staged; meanwhile the WAL restarts, so it no longer
+/// holds the replica's newest range. Before deleting anything the engine had
+/// the driver keep a takeover through what staging vouched for, so the next
+/// boot takes the snapshot instead of refusing its own files.
+#[test]
+fn a_crash_between_the_engines_own_drop_and_its_snapshot_is_not_a_refusal() {
+    let mut rig = three();
+    super::tear(&rig, 3, super::flipped);
+    let mut actor = go_like_actor();
+    // Tick until the boot that drops them, and no further: the process dies
+    // there, before the snapshot that replaces them is staged.
+    let mut now = T0 + 2;
+    let mut seen = Vec::new();
+    for _ in 0..20 {
+        let tick = rig.tick(&mut actor, now);
+        if let Some(Event::Retrying { until, .. }) = event(&tick) {
+            now = now.max(until.unix_millis());
+        }
+        let dropped = matches!(
+            booted(&tick),
+            Some(Some(SnapshotCause::NewestStagedFileUnreadable))
+        );
+        seen.push(tick);
+        if dropped {
+            break;
+        }
+    }
+    assert!(
+        matches!(
+            seen.last().and_then(booted),
+            Some(Some(SnapshotCause::NewestStagedFileUnreadable))
+        ),
+        "{seen:?}"
+    );
+    // The rig, as the driver, kept the takeover the engine asked for before
+    // the drop.
+    assert_eq!(rig.takeover.map(TakeoverRecord::txid), Some(tx(3)));
+    assert!(staged(&rig).iter().all(|n| *n < 3), "{:?}", staged(&rig));
+    rig.wal.force_restart();
+    rig.commit(7);
+    let mut next = go_like_actor();
+    next.remember_takeover(rig.takeover.unwrap());
+    let seen = rig.follow(&mut next, T0 + 3, 50);
+    assert!(
+        !seen.iter().any(|tick| matches!(tick, Tick::Stopped(_))),
+        "{seen:?}"
+    );
+    assert_eq!(next.refused_through(), None);
+}
+
+/// A meta directory that refuses the record: the engine deletes nothing, and
+/// the task waits its backoff between asks instead of spinning.
+#[test]
+fn a_takeover_the_driver_cannot_write_keeps_the_staged_files_and_waits() {
+    let mut rig = three();
+    super::tear(&rig, 3, super::flipped);
+    let before = staged(&rig);
+    let mut actor = go_like_actor();
+    let mut now = T0 + 2;
+    let mut asked = 0;
+    let mut waited = false;
+    for _ in 0..20 {
+        let env = Env {
+            wal: &mut rig.wal,
+            db: &mut rig.db,
+            ck: &mut rig.ck,
+            staging: &rig.staging,
+            remote: &rig.remote,
+            clock: &FakeClock::new(ts(now)),
+        };
+        // No driver: nothing is handed back.
+        let tick = block_on(actor.tick(env, ts(now)));
+        match event(&tick) {
+            Some(Event::TakeoverWanted(_)) => asked += 1,
+            Some(Event::Retrying {
+                fault: Fault::LocalIo,
+                until,
+            }) => {
+                waited = true;
+                now = now.max(until.unix_millis());
+            }
+            Some(Event::Retrying { until, .. }) => now = now.max(until.unix_millis()),
+            Some(_) | None => {}
+        }
+    }
+    assert!(asked >= 2, "it asks again after the wait");
+    assert!(waited, "an unanswered ask waits its backoff");
+    assert_eq!(staged(&rig), before, "nothing is deleted unrecorded");
+}

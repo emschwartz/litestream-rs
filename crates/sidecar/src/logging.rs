@@ -311,6 +311,11 @@ impl EventSink for DbEvents {
                 "the stop for another writer could not be recorded; a restart may not keep it",
                 vec![("kind", debug(kind))],
             ),
+            Event::TakeoverNotRecorded { kind } => (
+                LogLevel::Error,
+                "the takeover record could not be written; staged files are kept until it is",
+                vec![("kind", debug(kind))],
+            ),
             Event::Verified { txid, outcome } => verified_line(*txid, *outcome),
         };
         let mut all = vec![db];
@@ -408,6 +413,11 @@ fn engine_line(event: &EngineEvent) -> Option<Line> {
             LogLevel::Warn,
             "clock went backwards",
             vec![("clamped", debug(clamped))],
+        ),
+        EngineEvent::TakeoverWanted(record) => (
+            LogLevel::Info,
+            "takeover record kept before dropping staged files",
+            vec![("through", record.txid().get().into())],
         ),
     })
 }

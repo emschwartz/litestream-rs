@@ -433,6 +433,12 @@ impl Chain {
                         "the actor is retrying {fault:?} until {until:?}"
                     )));
                 }
+                // One process writes the whole chain: the record it asks for before dropping
+                // staged files needs no file to outlive it.
+                Tick::Ran {
+                    event: Event::TakeoverWanted(record),
+                    ..
+                } => self.actor.remember_takeover(record),
                 Tick::Ran { event, .. } => self.events.push(event),
                 Tick::Stopped(cause) => {
                     return Err(CompatError::Fixture(format!(
@@ -633,6 +639,12 @@ impl Chain {
                         archive,
                     });
                 }
+                // One process writes the whole chain: the record it asks for before dropping
+                // staged files needs no file to outlive it.
+                Tick::Ran {
+                    event: Event::TakeoverWanted(record),
+                    ..
+                } => self.actor.remember_takeover(record),
                 Tick::Ran { event, .. } => self.events.push(event),
                 Tick::Stopped(cause) => {
                     return Err(CompatError::Fixture(format!(

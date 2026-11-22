@@ -642,11 +642,20 @@ impl Runner {
         let salts = self.w.sqlite.salts();
         let commits = self.w.model.commits().len();
         let record0 = self.actor.stop_record();
+        self.staging_moved()?;
         let ended = self.run_one(plan);
         // The driver stores the record, or removes it, when a tick that ended
         // changed it; a tick a crash cut short stored nothing.
         if matches!(ended, TickEnd::Done(_)) && self.actor.stop_record() != record0 {
             self.stop_record = self.actor.stop_record();
+        }
+        // A takeover the engine asked for is made durable before the next
+        // tick, as the real driver writes it, and handed back.
+        if let (TickEnd::Done(_), Some(wanted)) = (&ended, self.actor.takeover_wanted()) {
+            self.report.reach.bump("takeover.wanted");
+            let held = self.takeover.filter(|held| held.txid() > wanted.txid());
+            self.takeover = Some(held.unwrap_or(wanted));
+            self.actor.remember_takeover(wanted);
         }
         self.watch_staging()?;
         if booting && self.actor.booted() {
@@ -698,10 +707,11 @@ impl Runner {
         Ok((step, stats))
     }
 
-    /// Keeps [`Runner::staging_disturbed`]: set when the newest staged file
-    /// went, cleared once the staging directory holds again at least what the
-    /// engine confirmed.
-    fn watch_staging(&mut self) -> Result<(), Violation> {
+    /// Marks staging disturbed when something between two ticks (an
+    /// operation: a crash, a power loss, a fault) took its newest file. The
+    /// engine's own deletes inside a tick are not a disturbance: it records a
+    /// takeover through what they vouched for first.
+    fn staging_moved(&mut self) -> Result<(), Violation> {
         let staged = self
             .w
             .newest_staged()
@@ -710,6 +720,18 @@ impl Runner {
         if staged < self.staged_high {
             self.staging_disturbed = true;
         }
+        Ok(())
+    }
+
+    /// Keeps [`Runner::staging_disturbed`] up to date after a tick: it notes
+    /// where staging's newest file stands, and clears the mark once the
+    /// staging directory holds again at least what the engine confirmed.
+    fn watch_staging(&mut self) -> Result<(), Violation> {
+        let staged = self
+            .w
+            .newest_staged()
+            .map_err(|err| bug_fault(format!("listing staging failed: {err}")))?
+            .map(|info| info.key.range().max());
         self.staged_high = staged;
         if self.staging_disturbed
             && self.actor.booted()
@@ -813,7 +835,8 @@ impl Runner {
             | Event::Idle
             | Event::Retrying { .. }
             | Event::Resnapshot(_)
-            | Event::Clamped(_) => Ok(Step::Ran),
+            | Event::Clamped(_)
+            | Event::TakeoverWanted(_) => Ok(Step::Ran),
         }
     }
 
@@ -829,15 +852,6 @@ impl Runner {
             Event::Degraded { cause, .. } => reach.bump(format!("degraded.{}", variant(cause))),
             Event::Booted { cause: Some(cause) } | Event::Resnapshot(cause) => {
                 reach.bump(format!("snapshot.{}", variant(&CauseKind::from(cause))));
-                // The engine deleted staged files of its own: until staging
-                // catches up, it may stand below what the replica holds.
-                if matches!(
-                    cause,
-                    lsr_core::SnapshotCause::NewestStagedFileUnreadable
-                        | lsr_core::SnapshotCause::StagedUnverified { .. }
-                ) {
-                    self.staging_disturbed = true;
-                }
             }
             Event::Maintained {
                 event: lsr_core::MaintainedEvent::Repaired(key),
@@ -849,7 +863,8 @@ impl Runner {
             | Event::Uploaded(_)
             | Event::Maintained { .. }
             | Event::Idle
-            | Event::Clamped(_) => {}
+            | Event::Clamped(_)
+            | Event::TakeoverWanted(_) => {}
         }
     }
 
@@ -1982,7 +1997,8 @@ fn capped(event: &Event, began: Timestamp) -> Result<(), Violation> {
         | Event::Maintained { .. }
         | Event::Idle
         | Event::Resnapshot(_)
-        | Event::Clamped(_) => return Ok(()),
+        | Event::Clamped(_)
+        | Event::TakeoverWanted(_) => return Ok(()),
     };
     let cap = named.map_or(MAX_BACKOFF, |named| named.max(MAX_BACKOFF));
     let millis = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);

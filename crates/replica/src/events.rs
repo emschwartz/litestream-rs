@@ -50,6 +50,13 @@ pub enum Event {
         /// What the file system said.
         kind: std::io::ErrorKind,
     },
+    /// The engine asked for a takeover record before deleting staged files the replica holds
+    /// (`lsr_core::Event::TakeoverWanted`), and it could not be written in the meta directory.
+    /// The engine deletes nothing and retries after its backoff.
+    TakeoverNotRecorded {
+        /// What the file system said.
+        kind: std::io::ErrorKind,
+    },
     /// A scheduled verify ended: the restore of `txid` compared with the live database at
     /// `txid`. A failure is a degraded state (`Health::verification`) that names what differed.
     Verified {

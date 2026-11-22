@@ -123,8 +123,13 @@ pub(super) struct Kept {
     /// from the last process; a boot clears it once the replica no longer
     /// holds a transaction past the record's.
     pub(super) stop_record: Option<StopRecord>,
-    /// An operator's takeover the driver handed in (`crate::takeover`).
+    /// The takeover the driver handed in (`crate::takeover`): an operator's,
+    /// a restore's, or one this engine asked for before dropping its own
+    /// staged files.
     pub(super) takeover: Option<TakeoverRecord>,
+    /// A takeover the engine needs durable before it deletes staged files the
+    /// replica holds: the driver writes it and hands it back.
+    pub(super) wanted_takeover: Option<TakeoverRecord>,
     /// The replica's newest transaction when a boot refused to build on files
     /// nothing vouched for: what the stop reports.
     pub(super) refused_through: Option<Txid>,
@@ -147,6 +152,7 @@ impl Kept {
             unproven: Unproven::No,
             stop_record: None,
             takeover: None,
+            wanted_takeover: None,
             refused_through: None,
         }
     }
@@ -171,6 +177,7 @@ impl Kept {
             unproven,
             stop_record,
             takeover,
+            wanted_takeover: _,
             refused_through,
         } = self;
         Self {
@@ -188,6 +195,8 @@ impl Kept {
             unproven: *unproven,
             stop_record: *stop_record,
             takeover: *takeover,
+            // A rebuilt engine boots again and asks again for what it needs.
+            wanted_takeover: None,
             refused_through: *refused_through,
         }
     }
