@@ -81,6 +81,7 @@ use crate::checkpoint::{
     Staged, after_checkpoint, after_sync, checkpoint, decide, next_wake,
 };
 use crate::created_at::{ResolvedCreatedAt, resolve};
+use crate::env::Clock;
 use crate::fault::{
     Action, Backoff, Clamped, Fault, Next, PersistentCause, Policy, Responses, SnapshotCause,
     StopCause, backoff_wait, policy,
@@ -109,7 +110,6 @@ use crate::verify::LivePages;
 use crate::witness::{LiveDb, Pending, Witnesses, witness_pending};
 
 /// What one tick may touch, lent for that tick only.
-#[derive(Debug)]
 pub struct Env<'a, W, P, C, L, R> {
     /// The WAL.
     pub wal: &'a mut W,
@@ -121,6 +121,34 @@ pub struct Env<'a, W, P, C, L, R> {
     pub staging: &'a L,
     /// The replica.
     pub remote: &'a R,
+    /// The clock a staged file's created-at time is read from. The tick's own
+    /// `now` is read before the tick looks at the WAL, so the application can
+    /// commit after it and before the committed end that commit lands under is
+    /// read. A file stamped with that `now` would be recorded as created
+    /// before a transaction it carries, and an `AsOf` restore for an instant
+    /// between the two would apply a transaction committed after the instant.
+    /// So a stamp is read here, after the committed read that bounds the
+    /// file: every transaction the file carries committed before it.
+    pub clock: &'a dyn Clock,
+}
+
+impl<
+    W: std::fmt::Debug,
+    P: std::fmt::Debug,
+    C: std::fmt::Debug,
+    L: std::fmt::Debug,
+    R: std::fmt::Debug,
+> std::fmt::Debug for Env<'_, W, P, C, L, R>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Env")
+            .field("wal", &self.wal)
+            .field("db", &self.db)
+            .field("ck", &self.ck)
+            .field("staging", &self.staging)
+            .field("remote", &self.remote)
+            .finish_non_exhaustive()
+    }
 }
 
 /// How the actor runs.
@@ -1056,6 +1084,8 @@ impl Actor {
             Ok(opened) => opened,
             Err(verdict) => return Ok(verdict),
         };
+        // After the committed read: see `Env::clock`.
+        let stamp = env.clock.now().max(now);
         let size = reader.header().page_size();
         if let Some(was) = self.engine.page_size.filter(|was| *was != size) {
             return Err(Fault::PageSizeChanged { was, now: size });
@@ -1074,7 +1104,7 @@ impl Actor {
             &mut self.engine.pages,
             env.staging,
             &self.kept.cfg.sync,
-            now,
+            stamp,
         )
         .await
         .map_err(|failed| failed.fault)?;
@@ -1265,7 +1295,7 @@ impl Actor {
             &mut *env.ck,
             env.staging,
             &self.kept.cfg.sync,
-            now,
+            env.clock,
         )
         .await;
         let run = match &done {
