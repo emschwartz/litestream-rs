@@ -1,10 +1,10 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index 7bb712f..0198f93 100644
+index ecaefb59..d7c53106 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -914,7 +914,8 @@ impl Actor {
-             | Course::Snapshot { .. }
-             | Course::Unbooted => (PageChecksumTable::new(), BTreeSet::new()),
+@@ -933,7 +933,8 @@ impl Actor {
+             Ok(seeded) => seeded,
+             Err(fault) => return self.fault(Task::Sync, fault, now),
          };
 -        self.quiet_at_boot(quiet);
 +        let _ = quiet;
