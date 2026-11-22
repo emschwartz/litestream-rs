@@ -865,6 +865,29 @@ tests = [
     "lag::a_store_down_past_the_bound_trips_at_the_probe",
 ]
 
+[[bug]]
+name = "failstop-holds-on-an-unreachable-store"
+fix = "c8b9c90"
+package = "lsr-core"
+tests = ["lag::a_timeout_at_boot_is_no_refusal"]
+
+[[bug]]
+name = "failstop-health-lag-restarts"
+fix = "c8b9c90"
+package = "lsr-replica"
+test_bin = "replica"
+tests = ["failstop::a_restart_keeps_the_age_of_a_commit_off_the_replica"]
+
+[[bug]]
+name = "failstop-no-commit-hook"
+fix = "c8b9c90"
+package = "lsr-replica"
+test_bin = "replica"
+tests = [
+    "failstop::a_refusal_at_boot_refuses_commits_until_the_first_listing",
+    "failstop::an_unsafe_stop_while_running_refuses_commits_only_under_stop_app",
+]
+
 # The same plants against the simulator: the judge of every run catches the early trips unaided
 # (random histories), the named runs catch the late ones.
 
