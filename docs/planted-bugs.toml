@@ -355,7 +355,9 @@ tests = [
     "the_probe_reads_through_the_newest_staged_transaction",
 ]
 
-# The same plant, judged by the simulator's lagging listings.
+# The same plant, judged by the simulator's lagging listings. The freed-key history (seed 0x4c5)
+# left the list once boot learned to stop on another writer: the engine now stops before it merges
+# that writer's file, so no level-1 file holds the freed key and the planted tree passes it.
 [[bug]]
 name = "boot-trusts-a-stale-listing"
 fix = "8c7d8ce"
@@ -364,7 +366,6 @@ test_bin = "sim"
 tests = [
     "a_stale_boot_listing_does_not_stop_the_engine_on_its_own_files",
     "a_lagging_relist_does_not_report_the_replica_gone_backwards_seed_0x440",
-    "a_lagging_boot_listing_does_not_send_an_upload_into_a_freed_key_seed_0x4c5",
 ]
 
 # A file a listing shows past the engine's position stops it with no read to find the file.
@@ -1769,13 +1770,13 @@ tests = ["swarm_seed_0xf488c_takes_no_commit_before_a_truncate_for_damage"]
 
 # The scheduled verify calls every transaction without an exact plan "merged by compaction,
 # nothing to compare", so a replica that lost the live transaction passes. The simulator's
-# verify judge (crates/sim/src/run/verify.rs) catches it unaided at its 20th swarm seed.
+# verify judge (crates/sim/src/run/verify.rs) catches it unaided at its 13th swarm seed.
 [[bug]]
 name = "verify-no-plan-called-merged"
 fix = "plant"
 package = "lsr-sim"
 test_bin = "sim"
-tests = ["verify_reports_a_live_transaction_that_no_longer_restores_seed_0x14"]
+tests = ["verify_reports_a_live_transaction_a_rollback_took_seed_0xd"]
 
 # The snapshot maintenance wrote is not watched: a lagging listing that hides it plans it again,
 # and the same level-9 key is written twice with other bytes.
