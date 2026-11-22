@@ -10,6 +10,9 @@ on:
 permissions:
   contents: read
 
+env:
+  NEXTEST_PROFILE: ci
+
 jobs:
   # Development runs on macOS too (AGENTS.md); `just check` skips upstream-test-map-fresh there, since the
   # test map names Linux-only tests.

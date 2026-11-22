@@ -7,9 +7,13 @@ on:
 permissions:
   contents: read
 
+env:
+  NEXTEST_PROFILE: ci
+
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -21,6 +25,7 @@ jobs:
   # Advisories, bans, licenses and sources (deny.toml), over all features.
   deny:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
       - uses: taiki-e/install-action@v2
@@ -33,6 +38,7 @@ jobs:
   commit-check:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
         with:
@@ -46,6 +52,7 @@ jobs:
   # already in scripts/minio.sh. Nothing else is configured or reachable.
   test-s3:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -58,6 +65,7 @@ jobs:
   # upstream main run nightly in compat-releases.yml, never here.
   compat:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
       - uses: actions-rust-lang/setup-rust-toolchain@v1
