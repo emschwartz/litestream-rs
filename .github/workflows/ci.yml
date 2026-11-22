@@ -130,8 +130,8 @@ jobs:
         env:
           LSR_DUMP_LIMIT: "14000000"
 
-  # TEMPORARY, dropped before landing: reruns the alternation that stalled on WalCorrupt
-  # (v0.5.18, seed 1) under CPU load until it fails, so the dump above captures the WAL.
+  # TEMPORARY, dropped before landing: reruns the compat suite, in which the alternation
+  # stalled on WalCorrupt (v0.5.18, seed 1), until it fails, so the dump captures the WAL.
   alternation-repro:
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -146,14 +146,13 @@ jobs:
         with:
           tool: cargo-nextest,just
       - uses: ./.github/actions/go-compat
-      - run: ./scripts/build-go-litestream.sh v0.5.18 main
+      # The stall reproduced only inside the whole compat suite (disk and CPU contention from
+      # the other live tests), never with the alternation alone under busy loops.
       - run: |
-          for _ in 1 2; do (while :; do :; done) & done
-          for attempt in $(seq 1 10); do
+          for attempt in $(seq 1 5); do
             echo "attempt $attempt"
-            LSR_ALTERNATION_SEED=1 LSR_COMPAT_VERSIONS="v0.5.18 main" cargo nextest run -p lsr-compat \
-              --run-ignored all --locked --no-capture \
-              -E 'test(=alternation::live::go_and_rust_alternate_on_one_prefix)' || exit 1
+            rm -rf /tmp/lsr-alternation-*
+            LSR_ALTERNATION_SEED=1 just compat || exit 1
           done
       - if: failure()
         run: ./scripts/print-kept-fixtures.sh
