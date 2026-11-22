@@ -613,8 +613,7 @@ impl Runner {
             self.life.boot_salts = Some(salts);
             self.life.boot_commits = commits;
         }
-        self.judge_puts()?;
-        self.judge_staged_durable()?;
+        self.judge_stores()?;
         let crashed = matches!(ended, TickEnd::Crashed { .. });
         self.liveness_mid_tick(hits0, crashed)?;
         self.report.ticks = self.report.ticks.saturating_add(1);
@@ -667,6 +666,12 @@ impl Runner {
         per_tick(&stats, self.limits())?;
         self.report.max_wal_frames = self.report.max_wal_frames.max(self.w.sqlite.mx_frame());
         Ok((step, stats))
+    }
+
+    /// Judges what the tick put on the replica and left staged.
+    fn judge_stores(&mut self) -> Result<(), Violation> {
+        self.judge_puts()?;
+        self.judge_staged_durable()
     }
 
     /// Shows the liveness oracle the WAL before a tick, and, before a boot,
