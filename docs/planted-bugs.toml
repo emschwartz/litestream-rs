@@ -624,7 +624,9 @@ tests = ["a_halt_long_enough_to_stall_is_reported_degraded"]
 # The two store-fs durability steps the LazyFS rig planted (`just lazyfs-plant <name>`) and never
 # saw fail, killed in process by the crash checker that replays a commit's steps and crashes at
 # every one of them (crates/store-fs/src/journal/tests.rs). The steps date from the store itself, so
-# `fix` names the commit that brought it.
+# `fix` names the commit that brought it. The swarm finds these and `delete-without-dir-sync` unaided
+# too, where staging is this store on the simulator's in-memory filesystem (crates/sim/src/staging.rs);
+# the patches are written against the store's filesystem trait.
 [[bug]]
 name = "staging-fsync-before-rename"
 fix = "2bf9f99"
@@ -761,6 +763,12 @@ package = "lsr-store-fs"
 tests = ["a_crash_after_a_delete_never_brings_the_file_back"]
 
 [[bug]]
+name = "restore-counts-a-writer-as-lag"
+fix = "c497e9e"
+package = "lsr-core"
+tests = ["restore::tests::a_restore_racing_a_writer_follows_it_and_never_calls_the_listing_behind"]
+
+[[bug]]
 name = "kms-codes-by-status"
 fix = "f2cec2f"
 package = "lsr-store-s3"
@@ -797,6 +805,30 @@ name = "park-ignores-callers-reading"
 fix = "af15d43"
 package = "lsr-replica"
 tests = ["a_park_returns_for_a_step_back_between_the_callers_reading_and_the_park"]
+
+[[bug]]
+name = "journal-first-run-reported"
+fix = "27ef518"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::a_missing_journal_on_a_first_run_reports_nothing",
+]
+
+[[bug]]
+name = "journal-verdict-costs-a-snapshot"
+fix = "27ef518"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::no_journal_a_boot_can_find_changes_what_the_engine_does",
+]
+
+[[bug]]
+name = "journal-slot-error-unreported"
+fix = "27ef518"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::boot_reports_what_it_read_of_the_journal",
+]
 
 # The defect the end-of-run stall check exists for, killed by the swarm with nothing written for
 # it: a task's success leaves its stall in place, so health says degraded for nothing.

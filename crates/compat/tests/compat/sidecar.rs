@@ -144,6 +144,7 @@ fn turn(
             process.ensure_running()?;
             Ok(!snapshots(&fixture.replica)?.is_empty())
         })
+        .map_err(|err| process.explain(err))
         .expect("a snapshot exists");
     }
     boots
