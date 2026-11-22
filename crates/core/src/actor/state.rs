@@ -364,7 +364,20 @@ pub(super) struct Maintain {
     /// read says nothing about the stored bytes, so the read-back acts on the
     /// file only when a read on a later maintenance tick fails too.
     pub(super) suspect: Option<FileKey>,
+    /// Uploads run since prune or a maintenance listing last did work; at [`FAIR_SHARE`]
+    /// they take the next unit ahead of uploads. Counted per process, so a boot with a
+    /// backlog gets its first turn after that many uploads.
+    pub(super) passed_over: u32,
+    /// The last listing planned a snapshot while uploads were busy: the next listing waits
+    /// for them to go idle, so the snapshot's last transaction is at most what was published.
+    pub(super) snapshot_waits: bool,
 }
+
+/// How many uploads in a row run before prune or maintenance, when either has work, takes
+/// a unit ahead of them. Uploads otherwise come first, so an engine whose uploads never go
+/// idle (a backlog, a slow disk, a process killed every few seconds) would never compact,
+/// prune staging or delete what retention lets go.
+pub(super) const FAIR_SHARE: u32 = 8;
 
 impl Default for Maintain {
     fn default() -> Self {
@@ -375,6 +388,8 @@ impl Default for Maintain {
             level_one: None,
             read_back_owed: true,
             suspect: None,
+            passed_over: 0,
+            snapshot_waits: false,
         }
     }
 }

@@ -17,8 +17,7 @@ use std::num::NonZeroU32;
 use lsr_ltx::{PageChecksum, PageNo, PageSize, Txid};
 
 use super::dry_run::digest_restore;
-use super::{Findings, Report, VerifyError, name_findings, report};
-use crate::inventory::Inventory;
+use super::{Report, VerifyError, listed_names, report};
 use crate::plan::{PlanOutcome, RestoreTarget};
 use crate::restore::RestoreError;
 use crate::store::ObjectStore;
@@ -145,11 +144,7 @@ pub async fn verify_against<S: ObjectStore>(
     store: &S,
     live: &LivePages,
 ) -> Result<Verified, VerifyError> {
-    let inventory = Inventory::load(store)
-        .await
-        .map_err(VerifyError::Inventory)?;
-    let mut findings = Findings::default();
-    let latest = name_findings(&inventory, &mut findings);
+    let (inventory, findings, latest) = listed_names(store).await?;
     let mut restored = BTreeMap::new();
     let target = RestoreTarget::Txid(live.txid);
     let (result, files_read, bytes_read) =

@@ -1,13 +1,11 @@
-diff --git a/crates/store-fs/src/lib.rs b/crates/store-fs/src/lib.rs
-index 40e6e2b..5839e5e 100644
 --- a/crates/store-fs/src/lib.rs
 +++ b/crates/store-fs/src/lib.rs
-@@ -316,7 +316,7 @@ impl FsStore {
+@@ -333,7 +333,7 @@
                  dirs.push(dir);
              }
          }
 -        for dir in &dirs {
 +        for dir in dirs.iter().take(0) {
-             match sync_dir(dir) {
+             match sync_dir(&self.fs, dir) {
                  Ok(()) => {}
                  Err(err) if err.kind() == io::ErrorKind::NotFound => {}

@@ -256,6 +256,21 @@ impl RealHarness {
         }
     }
 
+    /// A store over the same bucket and prefix that remembers nothing: the next process.
+    pub fn next_process(&self) -> S3Store<Counting> {
+        let transport = Counting::new(
+            store_transport(self.config.deadline()),
+            Arc::new(Counts::default()),
+        );
+        S3Store::with_transport(
+            self.config.clone(),
+            self_credentials(&self.server),
+            transport,
+            WallClock,
+        )
+        .unwrap()
+    }
+
     pub fn builder(&self) -> RequestBuilder {
         RequestBuilder::new(&self.config, &self_credentials(&self.server)).unwrap()
     }
@@ -591,6 +606,25 @@ pub fn dropped_multipart_is_invisible_then_aborted(h: &RealHarness) {
     assert_eq!(h.open_uploads(), 0);
 }
 
+/// A process killed mid-upload takes its ids with it; the next process's boot finds the
+/// upload in the bucket's listing and aborts it.
+pub fn a_killed_process_s_upload_is_aborted_at_the_next_boot(h: &RealHarness) {
+    block_on(async {
+        let mut upload = h
+            .store
+            .begin_upload(&h.key(0, 1, 1), Timestamp::from_unix_millis(9))
+            .await
+            .unwrap();
+        upload.write(&body(part(h))).await.unwrap();
+        // Dropped: its id lands in this process's memory only, which a kill loses.
+        drop(upload);
+    });
+    assert_eq!(h.open_uploads(), 1);
+    let next = h.next_process();
+    assert_eq!(block_on(next.remove_scratch()), Ok(1));
+    assert_eq!(h.open_uploads(), 0);
+}
+
 pub fn abort_leaves_nothing(h: &RealHarness) {
     block_on(async {
         let mut upload = h
@@ -707,6 +741,7 @@ macro_rules! shared_cases {
                 multipart_round_trip,
                 part_size_boundary,
                 dropped_multipart_is_invisible_then_aborted,
+                a_killed_process_s_upload_is_aborted_at_the_next_boot,
                 abort_leaves_nothing,
                 abort_of_an_unknown_upload_is_not_a_failure,
             );

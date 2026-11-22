@@ -258,6 +258,18 @@ fn md5_of(body: &[u8]) -> [u8; 16] {
 
 type Headers = Vec<(&'static str, String)>;
 
+impl Method {
+    const fn to_signer(self) -> rusty_s3::Method {
+        match self {
+            Self::Get => rusty_s3::Method::Get,
+            Self::Head => rusty_s3::Method::Head,
+            Self::Put => rusty_s3::Method::Put,
+            Self::Post => rusty_s3::Method::Post,
+            Self::Delete => rusty_s3::Method::Delete,
+        }
+    }
+}
+
 /// Builds the signed requests of one replica.
 pub struct RequestBuilder {
     bucket: Bucket,
@@ -355,6 +367,73 @@ impl RequestBuilder {
 
     fn object(&self, key: &FileKey) -> String {
         object_key(&self.prefix, key)
+    }
+
+    /// Signs a request rusty-s3 has no action for: any method and query, `headers` after the
+    /// store's own, each one signed. `object` is a full key; `None` addresses the bucket.
+    pub(crate) fn sign_raw(
+        &self,
+        now: Timestamp,
+        method: Method,
+        object: Option<&str>,
+        query: &[(&str, &str)],
+        headers: Headers,
+        body: Vec<u8>,
+    ) -> Result<HttpRequest, RequestError> {
+        let at = jiff::Timestamp::from_millisecond(now.unix_millis())
+            .map_err(|_range| RequestError::ClockOutOfRange)?;
+        let base = match object {
+            Some(key) => self.bucket.object_url(key),
+            None => self.bucket.base_url().clone(),
+        };
+        let mut all = self.base_headers();
+        all.extend(headers);
+        // The signer merges the query with its own sorted `X-Amz-*` pairs and assumes both
+        // are sorted; an unsorted one signs a canonical request the server does not rebuild.
+        let mut query = query.to_vec();
+        query.sort_unstable();
+        let url = rusty_s3::signing::sign(
+            &at,
+            method.to_signer(),
+            base,
+            self.credentials.key(),
+            self.credentials.secret(),
+            self.credentials.token(),
+            self.bucket.region(),
+            EXPIRES_IN.as_secs(),
+            query.iter().copied(),
+            all.iter().map(|(name, value)| (*name, value.as_str())),
+        );
+        Ok(HttpRequest {
+            method,
+            url,
+            headers: all,
+            body,
+        })
+    }
+
+    /// ListMultipartUploads under this store's prefix (`<prefix>/`), after `markers`
+    /// (`key-marker`, `upload-id-marker`) when given. rusty-s3 has no action for it. MinIO
+    /// answers a prefix that is not a whole object key with no uploads, so it is asked for
+    /// the bucket's uploads and the caller keeps its own.
+    ///
+    /// # Errors
+    /// [`RequestError::ClockOutOfRange`].
+    pub fn list_uploads(
+        &self,
+        now: Timestamp,
+        markers: Option<(&str, &str)>,
+    ) -> Result<HttpRequest, RequestError> {
+        let prefix = format!("{}/", self.prefix.as_str());
+        let mut query = vec![("uploads", "")];
+        if self.provider != Provider::Minio {
+            query.push(("prefix", prefix.as_str()));
+        }
+        if let Some((key, id)) = markers {
+            query.push(("key-marker", key));
+            query.push(("upload-id-marker", id));
+        }
+        self.sign_raw(now, Method::Get, None, &query, Vec::new(), Vec::new())
     }
 
     /// ListObjectsV2 of one level, `max_keys` entries, after `after` when given.

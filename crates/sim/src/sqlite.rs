@@ -39,10 +39,12 @@
 //!   SQLite reports none of them to the app, so the model counts them
 //!   ([`SimSqlite::app_autocheckpoints`]).
 //!
-//! The connections are the app (commits, spills, another process's checkpoints), our
-//! read connection, our pool connection (checkpoints and `bump_seq`), the
-//! barrier and write-lock transactions, and other-process readers. Only the app and the
-//! pool write frames or checkpoint, so only they carry a checkpoint count.
+//! The connections are lsr-sqlite's: the app (commits, spills, another process's
+//! checkpoints), our read connection (which also runs our checkpoints, between ending and
+//! retaking its read transaction), our writer connection (the barrier, the write lock and
+//! `bump_seq`, one at a time), and other-process readers. The app, our reader and our writer
+//! each carry a checkpoint count, so the first frame after our own TRUNCATE, written by our
+//! writer whose count is 0, gets random salts, as in SQLite.
 //!
 //! Durability follows `synchronous=NORMAL`: a commit is not fsynced; the WAL is
 //! fsynced when a header is written (frame 1 of a generation) and before a
@@ -146,7 +148,7 @@ pub struct AppCommit {
 /// Which crash.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CrashKind {
-    /// Our process dies: our read transaction, barrier, write lock and pool
+    /// Our process dies: our read transaction, barrier, write lock and writer
     /// connection vanish; the files, the wal-index and the app stay.
     Process,
     /// The machine loses power: every connection vanishes, the WAL is what was
@@ -158,10 +160,12 @@ pub enum CrashKind {
 enum Conn {
     App,
     Ours,
-    Pool,
-    Barrier,
-    Lock,
+    Writer,
     OtherProcess(ReaderId),
+    /// Another process's connection that runs one checkpoint and closes (the sqlite3 CLI, a
+    /// cron job). Its checkpoint count dies with it, so the app's next header is written
+    /// under the app's own count.
+    Cli,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -284,7 +288,8 @@ struct State {
     readers: BTreeMap<Conn, Mark>,
     writer: Option<Conn>,
     app_checkpoints: u32,
-    pool_checkpoints: u32,
+    ours_checkpoints: u32,
+    writer_checkpoints: u32,
     rng: u64,
     // When set, the values SQLite would draw at random are these instead.
     forced: Option<Salts>,
@@ -492,8 +497,9 @@ impl State {
     fn checkpoints(&mut self, conn: Conn) -> Option<&mut u32> {
         match conn {
             Conn::App => Some(&mut self.app_checkpoints),
-            Conn::Pool => Some(&mut self.pool_checkpoints),
-            Conn::Ours | Conn::Barrier | Conn::Lock | Conn::OtherProcess(_) => None,
+            Conn::Ours => Some(&mut self.ours_checkpoints),
+            Conn::Writer => Some(&mut self.writer_checkpoints),
+            Conn::OtherProcess(_) | Conn::Cli => None,
         }
     }
 
@@ -808,7 +814,8 @@ impl State {
 
     fn adopt_seq(&mut self, seq: u32) {
         self.app_checkpoints = seq;
-        self.pool_checkpoints = 0;
+        self.ours_checkpoints = 0;
+        self.writer_checkpoints = 0;
     }
 
     /// The engine's parser's reading of the file: the index it would recover
@@ -914,7 +921,8 @@ impl State {
         self.forget_wal();
         self.index = Index::empty(self.index.salts, self.index.db_size);
         self.app_checkpoints = 0;
-        self.pool_checkpoints = 0;
+        self.ours_checkpoints = 0;
+        self.writer_checkpoints = 0;
         true
     }
 
@@ -924,6 +932,11 @@ impl State {
     }
 
     fn take_writer(&mut self, conn: Conn) -> Result<u64, SourceError> {
+        // One lock at a time on the one writer connection, as the real checkpointer refuses
+        // a second while a token is outstanding.
+        if self.barrier.is_some() || self.write_lock.is_some() {
+            return Err(SourceError::Io(io::ErrorKind::InvalidInput));
+        }
         if self.writer.is_some() || self.readers.contains_key(&conn) {
             return Err(SourceError::Busy);
         }
@@ -941,12 +954,11 @@ impl State {
 
     fn process_crash(&mut self) {
         self.end(Conn::Ours);
-        for conn in [Conn::Barrier, Conn::Lock, Conn::Pool] {
-            self.drop_writer(conn);
-        }
+        self.drop_writer(Conn::Writer);
         self.barrier = None;
         self.write_lock = None;
-        self.pool_checkpoints = 0;
+        self.ours_checkpoints = 0;
+        self.writer_checkpoints = 0;
     }
 
     fn power_crash(&mut self) {
@@ -1108,7 +1120,8 @@ impl SimSqlite {
             readers: BTreeMap::new(),
             writer: None,
             app_checkpoints: 0,
-            pool_checkpoints: 0,
+            ours_checkpoints: 0,
+            writer_checkpoints: 0,
             rng: seed,
             forced: None,
             epoch: ReadLockHold::first(),
@@ -1185,7 +1198,7 @@ impl SimSqlite {
             {
                 let data = state.image_page(1);
                 let size = state.index.db_size.max(1);
-                state.write(Conn::Pool, &[(first, data)], Some(size));
+                state.write(Conn::Writer, &[(first, data)], Some(size));
             }
             state.begin(Conn::Ours);
         });
@@ -1314,13 +1327,12 @@ impl SimSqlite {
         self.with(|state| state.end(Conn::OtherProcess(id)))
     }
 
-    /// `PRAGMA wal_checkpoint(mode)` on the app's connection; `None` while the
-    /// app is in a transaction (SQLite says LOCKED).
+    /// `PRAGMA wal_checkpoint(mode)` on another process's connection, which then closes. The
+    /// app's open transaction does not stop it: its write lock degrades a RESTART or TRUNCATE
+    /// to a busy PASSIVE, and its read mark holds the backfill back, as any connection's do.
+    /// Always `Some`.
     pub fn other_process_checkpoint(&self, mode: OtherProcessMode) -> Option<CheckpointNumbers> {
-        self.with(|state| {
-            let in_tx = state.writer == Some(Conn::App) || state.readers.contains_key(&Conn::App);
-            (!in_tx).then(|| state.checkpoint(Conn::App, mode))
-        })
+        self.with(|state| Some(state.checkpoint(Conn::Cli, mode)))
     }
 
     /// The last connection closes: a full checkpoint, then the WAL is deleted
@@ -1535,6 +1547,12 @@ impl SimSqlite {
                 None => false,
             }
         })
+    }
+
+    /// Drops every source failure injected and not yet met, as the store
+    /// faults' heal does for theirs: from here the world imposes none.
+    pub fn heal_injections(&self) {
+        self.with(|state| state.faults.injections.clear());
     }
 
     /// The next TRUNCATE checkpoint that finishes, ours or another process's, resets
@@ -1926,9 +1944,8 @@ impl PageSource for SimPages {
     }
 }
 
-/// Our checkpoint connections: [`Checkpointer`] over the shared state. The
-/// barrier and the write lock are transactions of their own; checkpoints and
-/// `bump_seq` run on the pool connection.
+/// Our checkpoint connections: [`Checkpointer`] over the shared state. Checkpoints run on our
+/// read connection; the barrier, the write lock and `bump_seq` on our writer connection.
 #[derive(Clone, Debug)]
 pub struct SimCheckpointer {
     state: Arc<Mutex<State>>,
@@ -1941,7 +1958,7 @@ impl Checkpointer for SimCheckpointer {
         // barrier keeps writers out: the commit the checkpoint's seal must stage.
         state.commit_in_tick(InTickSite::BeforeBarrier);
         state.faults.take(SourceOp::BeginBarrier)?;
-        let id = state.take_writer(Conn::Barrier)?;
+        let id = state.take_writer(Conn::Writer)?;
         state.barrier = Some(id);
         Ok(Barrier::new(id))
     }
@@ -1951,7 +1968,7 @@ impl Checkpointer for SimCheckpointer {
         state.faults.take(SourceOp::EndBarrier)?;
         if state.barrier == Some(barrier.id()) {
             state.barrier = None;
-            state.drop_writer(Conn::Barrier);
+            state.drop_writer(Conn::Writer);
         }
         Ok(())
     }
@@ -1961,7 +1978,7 @@ impl Checkpointer for SimCheckpointer {
         state.faults.take(SourceOp::Checkpoint)?;
         state.end(Conn::Ours);
         let failing = state.faults.truncate_fails;
-        let numbers = state.checkpoint(Conn::Pool, mode.into());
+        let numbers = state.checkpoint(Conn::Ours, mode.into());
         state.begin(Conn::Ours);
         if failing && !state.faults.truncate_fails {
             return Err(SourceError::Io(io::ErrorKind::Other));
@@ -1980,7 +1997,12 @@ impl Checkpointer for SimCheckpointer {
         let first = PageNo::new(1, state.page_size).ok_or(SourceError::Busy)?;
         let data = state.image_page(1);
         let size = state.index.db_size.max(1);
-        if state.write(Conn::Pool, &[(first, data)], Some(size)) {
+        // Under a lock the real bump runs inside the lock's transaction, which the release
+        // rolls back; the model refuses it instead (pinned in lsr-sqlite's `sim_model`).
+        if state.barrier.is_some() || state.write_lock.is_some() {
+            return Err(SourceError::Busy);
+        }
+        if state.write(Conn::Writer, &[(first, data)], Some(size)) {
             Ok(())
         } else {
             Err(SourceError::Busy)
@@ -1990,7 +2012,7 @@ impl Checkpointer for SimCheckpointer {
     fn begin_write_lock(&mut self) -> Result<WriteLock, SourceError> {
         let mut state = lock(&self.state);
         state.faults.take(SourceOp::BeginWriteLock)?;
-        let id = state.take_writer(Conn::Lock)?;
+        let id = state.take_writer(Conn::Writer)?;
         state.write_lock = Some(id);
         Ok(WriteLock::new(id))
     }
@@ -2000,7 +2022,7 @@ impl Checkpointer for SimCheckpointer {
         state.faults.take(SourceOp::EndWriteLock)?;
         if state.write_lock == Some(lock_held.id()) {
             state.write_lock = None;
-            state.drop_writer(Conn::Lock);
+            state.drop_writer(Conn::Writer);
         }
         Ok(())
     }

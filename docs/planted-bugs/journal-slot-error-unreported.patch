@@ -1,0 +1,12 @@
+diff --git a/crates/core/src/journal.rs b/crates/core/src/journal.rs
+index ce2f23f..1214c79 100644
+--- a/crates/core/src/journal.rs
++++ b/crates/core/src/journal.rs
+@@ -125,7 +125,6 @@ pub fn judge(parsed: &Parsed, fresh: bool) -> Option<JournalSignal> {
+         Verdict::Missing => Some(JournalSignal::Missing),
+         Verdict::Unreadable(why) => Some(JournalSignal::Unreadable(why)),
+         Verdict::Newer { version, .. } => Some(JournalSignal::Newer { version }),
+-        Verdict::Read { .. } if parsed.slot_failed => Some(JournalSignal::SlotUnreadable),
+         Verdict::Read { .. } => None,
+     }
+ }

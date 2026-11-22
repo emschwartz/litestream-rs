@@ -18,7 +18,7 @@ use crate::request::{HttpRequest, Method};
 use crate::response::quoted_md5;
 use crate::transport::{HttpResponse, Transport, TransportError};
 
-/// The nine request shapes [`RequestBuilder`](crate::RequestBuilder) builds.
+/// The ten request shapes [`RequestBuilder`](crate::RequestBuilder) builds.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Shape {
     /// ListObjectsV2.
@@ -39,6 +39,8 @@ pub enum Shape {
     Abort,
     /// DeleteObjects.
     DeleteObjects,
+    /// ListMultipartUploads.
+    ListUploads,
 }
 
 impl Shape {
@@ -48,6 +50,7 @@ impl Shape {
         let has = |name: &str| request.url().query_pairs().any(|(have, _)| have == name);
         match request.method() {
             Method::Get if has("list-type") => Some(Self::List),
+            Method::Get if has("uploads") => Some(Self::ListUploads),
             Method::Get => Some(Self::Get),
             Method::Head => Some(Self::Head),
             Method::Put if has("partNumber") => Some(Self::UploadPart),
