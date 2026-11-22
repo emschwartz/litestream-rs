@@ -228,8 +228,8 @@ response = "**Read past.** After the listing the engine reads the keys a reader 
 signal = "none"
 at_risk = "None for the engine's own hidden files. Open: a level 1 to 8 file whose level-0 inputs someone else deleted (an operator removing another writer's merged file) has a start no read can name; a lag that hides it lets the next upload reuse the freed id. Violates G1 in that case (#99)"
 recovery = "None needed; the open case: none"
-detected_by = "core::`a_listing_that_hides_the_newest_uploads_is_corrected_by_reads`, core::`a_snapshot_a_listing_hides_is_found_by_a_read`, sim::`a_stale_boot_listing_does_not_stop_the_engine_on_its_own_files`, sim::`a_lagging_boot_listing_does_not_send_an_upload_into_a_freed_key_seed_0x4c5`; plant::`listing-trusted-without-probe`, plant::`boot-trusts-a-stale-listing`"
-survived_by = "sim::`a_lagging_boot_listing_does_not_send_an_upload_into_a_freed_key_seed_0x4c5`"
+detected_by = "core::`a_listing_that_hides_the_newest_uploads_is_corrected_by_reads`, core::`a_snapshot_a_listing_hides_is_found_by_a_read`, sim::`a_stale_boot_listing_does_not_stop_the_engine_on_its_own_files`; plant::`listing-trusted-without-probe`, plant::`boot-trusts-a-stale-listing`"
+survived_by = "sim::`a_stale_boot_listing_does_not_stop_the_engine_on_its_own_files`"
 no_test = "open case: known wrong"
 notes = "The operator case fails in the swarm's lag seeds (0x4dc and 0x517 on the merged tree) and has no pinned test (#99). A probe gap wider than 3 below a hidden upload, with staging wiped, ends in a false `OtherWriter` stop"
 
@@ -1379,7 +1379,7 @@ response = "Replication goes on. The last good restore point is kept from retent
 signal = "`Health.verification.failing`, `lsr_verify_failing`, with the first differing page and the transaction"
 at_risk = "The replica is wrong from some point after the last good run"
 recovery = "The next passing run clears it. An operator requests a snapshot"
-detected_by = "replica::`a_wrong_page_in_the_replica_is_degraded_with_the_page_and_txid_and_pins_the_last_good_point`, replica::`the_scheduled_verify_runs_on_its_interval_and_a_clean_replica_passes`, sim::`verify_reports_a_live_transaction_that_no_longer_restores_seed_0x14`; plant::`verify-no-plan-called-merged`"
+detected_by = "replica::`a_wrong_page_in_the_replica_is_degraded_with_the_page_and_txid_and_pins_the_last_good_point`, replica::`the_scheduled_verify_runs_on_its_interval_and_a_clean_replica_passes`, sim::`verify_reports_a_live_transaction_a_rollback_took_seed_0xd`; plant::`verify-no-plan-called-merged`"
 
 [[row]]
 table = "Verify"
