@@ -1,0 +1,16 @@
+diff --git a/crates/core/src/sync.rs b/crates/core/src/sync.rs
+index 2ce1095..4a74fdb 100644
+--- a/crates/core/src/sync.rs
++++ b/crates/core/src/sync.rs
+@@ -745,8 +745,9 @@ fn changes_pages(
+     prev_commit: Option<u32>,
+     commit: NonZeroU32,
+ ) -> bool {
+-    prev_commit != Some(commit.get())
+-        || plan.iter().any(|page| match page {
++    let _ = (prev_commit, commit, plan);
++    false
++        && plan.iter().any(|page| match page {
+             PageFrom::Wal(frame) => pages.get(frame.pgno()) != Some(frame.digest()),
+             PageFrom::Db(_) => true,
+         })

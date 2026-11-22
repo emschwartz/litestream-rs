@@ -1,0 +1,15 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index 7bb712f..4b5e2bf 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -1372,9 +1372,7 @@ impl Actor {
+                 let key = witness.key();
+                 self.engine.witnesses.insert(witness);
+                 // With a cause pending, the step that wrote was the snapshot.
+-                if !changes {
+-                    self.note_quiet_file(key);
+-                }
++                let _ = changes;
+                 if let Some(cause) = self.pending() {
+                     if changes {
+                         self.note_quiet_snapshot(cause, key);

@@ -689,6 +689,39 @@ tests = [
     "failstop::tests::the_release_latches",
 ]
 
+[[bug]]
+name = "failstop-no-op-file-is-lag"
+fix = "c96e94d"
+package = "lsr-core"
+tests = [
+    "lag::a_file_that_changes_nothing_is_not_lag",
+]
+
+[[bug]]
+name = "failstop-no-op-forgotten-at-boot"
+fix = "c96e94d"
+package = "lsr-core"
+tests = [
+    "lag::a_file_that_changes_nothing_is_not_lag_after_a_restart",
+]
+
+[[bug]]
+name = "failstop-operator-snapshot-is-lag"
+fix = "c96e94d"
+package = "lsr-core"
+tests = [
+    "lag::an_operator_snapshot_while_caught_up_is_not_lag",
+]
+
+[[bug]]
+name = "failstop-quiet-hides-commits"
+fix = "c96e94d"
+package = "lsr-core"
+tests = [
+    "lag::a_commit_after_a_file_that_changes_nothing_is_lag",
+    "lag::a_store_down_past_the_bound_trips_at_the_probe",
+]
+
 # The same plants against the simulator: the judge of every run catches the early trips unaided
 # (random histories), the named runs catch the late ones.
 
