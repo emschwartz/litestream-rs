@@ -390,7 +390,16 @@ fn scan<R: Read + Seek>(
     loop {
         match wal
             .next_tx(&cursor, ScanLimit::Committed(committed.end()))
-            .map_err(|err| scan_fault(wal, err))?
+            .map_err(|err| {
+                let header = *wal.header();
+                let shown = format!("{err:?}");
+                let fault = scan_fault(wal, err);
+                std::eprintln!(
+                    "LSR-DEBUG scan failed: {shown}; fault {fault:?}; committed {committed:?}; start {:?}; at {cursor:?}; snapshot {}; header {header:?}",
+                    start.cursor, start.snapshot
+                );
+                fault
+            })?
         {
             TxOutcome::End { .. } => break,
             TxOutcome::Tx(tx) => {

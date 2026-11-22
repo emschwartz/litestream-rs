@@ -127,6 +127,8 @@ jobs:
       # kept database, WAL and wal-index go into the log too, small enough to rebuild from it.
       - if: failure()
         run: ./scripts/print-kept-fixtures.sh
+        env:
+          LSR_DUMP_LIMIT: "14000000"
 
   # TEMPORARY, dropped before landing: reruns the alternation that stalled on WalCorrupt
   # (v0.5.18, seed 1) under CPU load until it fails, so the dump above captures the WAL.
