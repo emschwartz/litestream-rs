@@ -22,16 +22,17 @@
 //! a gap when usable files lie past `r` (refused ones only: a malformed
 //! snapshot), else a plan. Something usable passing `r` means the replica
 //! continues, so `t` falls inside it, unless a level 0 to 8 file ends at
-//! `r + 1`: its created-at time is that transaction's, so the transaction came
-//! at or after `t` and `r` is exact. A straddling file must hold two
-//! transactions past `r`; when only snapshots (or a file holding one more
-//! transaction) straddle, the contract leaves the answer open and both are
-//! accepted.
+//! `r + 1` with its stored created-at time: that time is the transaction's,
+//! so the transaction came at or after `t` and `r` is exact. A snapshot's
+//! time is its write and a time the store fell back to (no stored metadata)
+//! is the object's upload, both any time after the commit, so neither dates
+//! anything: then any file passing `r` straddles, even one holding a single
+//! transaction past it.
 
 use std::collections::BTreeSet;
 use std::fmt;
 
-use lsr_core::{FileInfo, FileKey, PlanOutcome, is_snapshot_start};
+use lsr_core::{CreatedAtSource, FileInfo, FileKey, PlanOutcome, is_snapshot_start};
 use lsr_ltx::{Timestamp, Txid};
 
 /// What the planner must answer for one target.
@@ -40,12 +41,10 @@ pub enum Expected {
     /// A chain that reaches exactly this transaction.
     Plan(Txid),
     /// `AsOf` only: the chain reaching this transaction, with a file that
-    /// straddles the instant; or, when `plan_too`, a plain plan to it.
+    /// straddles the instant.
     AsOfInside {
         /// Where the chain ends.
         reach: Txid,
-        /// Whether a plain plan to `reach` is also within the contract.
-        plan_too: bool,
     },
     /// No file at all begins at transaction 1 (or, for `AsOf`, none
     /// eligible does).
@@ -196,28 +195,28 @@ pub fn as_of(files: &[FileInfo], instant: Timestamp) -> Expected {
         return past(files, Some(r)).unwrap_or(Expected::Plan(r));
     }
     let next = r.next();
-    let dates_next = files
-        .iter()
-        .any(|f| !f.key.level().is_snapshot() && Some(f.key.range().max()) == next);
+    let dates_next = passing.iter().any(|f| {
+        Some(f.key.range().max()) == next && dates_its_commit(f) && !created_before(f, instant)
+    });
     if dates_next {
         return Expected::Plan(r);
     }
-    let fine_straddler = passing
-        .iter()
-        .any(|f| !f.key.level().is_snapshot() && is_straddler(f, r));
-    Expected::AsOfInside {
-        reach: r,
-        plan_too: !fine_straddler,
-    }
+    Expected::AsOfInside { reach: r }
+}
+
+/// Whether a file's created-at time is its newest transaction's: levels 0 to
+/// 8, stored by the writer (not a store's fallback), and set.
+fn dates_its_commit(file: &FileInfo) -> bool {
+    !file.key.level().is_snapshot()
+        && file
+            .created_at()
+            .is_some_and(|c| c.origin() != CreatedAtSource::Fallback && c.at().unix_millis() > 0)
 }
 
 /// Whether `file` can be the file an instant falls inside, past a chain
-/// that ends at `reach`: usable, linking, and holding two transactions past it.
+/// that ends at `reach`: usable, linking, and passing it.
 fn is_straddler(file: &FileInfo, reach: Txid) -> bool {
-    let two_past = reach.next().and_then(Txid::next);
-    usable(file)
-        && links(file.key.range().min(), Some(reach))
-        && two_past.is_some_and(|two| file.key.range().max() >= two)
+    usable(file) && links(file.key.range().min(), Some(reach)) && file.key.range().max() > reach
 }
 
 /// Whether the planner's answer is one the contract allows.
@@ -228,7 +227,7 @@ pub fn allows(expected: &Expected, files: &[FileInfo], got: &Answer) -> bool {
         (_, Answer::Unreadable(_)) => true,
         (Expected::Plan(want), Answer::Reached { txid, inside: None }) => want == txid,
         (
-            Expected::AsOfInside { reach, .. },
+            Expected::AsOfInside { reach },
             Answer::Reached {
                 txid,
                 inside: Some(key),
@@ -238,9 +237,6 @@ pub fn allows(expected: &Expected, files: &[FileInfo], got: &Answer) -> bool {
                 && files
                     .iter()
                     .any(|f| f.key == *key && is_straddler(f, *reach))
-        }
-        (Expected::AsOfInside { reach, plan_too }, Answer::Reached { txid, inside: None }) => {
-            *plan_too && reach == txid
         }
         (
             Expected::InsideFile { reach, target },

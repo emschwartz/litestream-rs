@@ -94,10 +94,7 @@ fn as_of_plans_to_the_last_file_created_before_the_instant() {
 #[test]
 fn an_instant_inside_a_compacted_file_with_its_finer_files_gone_straddles() {
     let files = [file(0, 1, 1, 10), file(1, 2, 4, 40)];
-    let want = Expected::AsOfInside {
-        reach: tx(1),
-        plan_too: false,
-    };
+    let want = Expected::AsOfInside { reach: tx(1) };
     assert_eq!(as_of(&files, at(25)), want);
     let inside = Answer::Reached {
         txid: tx(1),
@@ -118,18 +115,38 @@ fn a_level_zero_file_ending_right_after_the_chain_dates_it() {
 }
 
 #[test]
-fn a_snapshot_alone_past_the_chain_leaves_the_answer_open() {
+fn a_snapshot_alone_past_the_chain_straddles() {
     let files = [file(0, 1, 1, 10), file(9, 1, 4, 40)];
-    let want = Expected::AsOfInside {
-        reach: tx(1),
-        plan_too: true,
-    };
+    let want = Expected::AsOfInside { reach: tx(1) };
     assert_eq!(as_of(&files, at(25)), want);
     let plain = Answer::Reached {
         txid: tx(1),
         inside: None,
     };
-    assert!(allows(&want, &files, &plain));
+    assert!(!allows(&want, &files, &plain));
+}
+
+#[test]
+fn a_snapshot_ending_right_after_the_chain_straddles() {
+    let files = [file(0, 1, 1, 10), file(9, 1, 2, 40)];
+    let want = Expected::AsOfInside { reach: tx(1) };
+    assert_eq!(as_of(&files, at(25)), want);
+    let inside = Answer::Reached {
+        txid: tx(1),
+        inside: Some(files[1].key),
+    };
+    assert!(allows(&want, &files, &inside));
+}
+
+#[test]
+fn a_fallback_created_at_does_not_date_the_next_transaction() {
+    let mut fell_back = file(1, 2, 2, 40);
+    fell_back.listed = ListedTime::Created(CreatedAt::fallback(at(40)));
+    let files = [file(0, 1, 1, 10), fell_back];
+    assert_eq!(as_of(&files, at(25)), Expected::AsOfInside { reach: tx(1) });
+    // Stored, the same time dates transaction 2.
+    let files = [file(0, 1, 1, 10), file(1, 2, 2, 40)];
+    assert_eq!(as_of(&files, at(25)), Expected::Plan(tx(1)));
 }
 
 #[test]

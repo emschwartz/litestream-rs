@@ -213,6 +213,11 @@ pub enum RemoteOp {
     /// that ends at the newest transaction is gone, and the replica
     /// legitimately loses what the engine had acknowledged.
     RollBack,
+    /// A bucket copy that keeps no metadata (or a writer before Go v0.5.1)
+    /// leaves the newest-ending level 0-8 file without its stored created-at
+    /// time: the store now reports the object's last-modified time, the
+    /// moment of the copy, which is after the transaction committed.
+    DropCreatedAt,
 }
 
 /// Damage to the WAL. Each one leaves the database as SQLite's rules now read
@@ -272,6 +277,8 @@ pub struct Weights {
     pub second_writer: u32,
     /// [`Op::Remote`] with [`RemoteOp::RollBack`].
     pub roll_back: u32,
+    /// [`Op::Remote`] with [`RemoteOp::DropCreatedAt`].
+    pub drop_created_at: u32,
     /// [`Op::WalDamage`].
     pub wal_damage: u32,
     /// [`Op::StagingDamage`], and [`Op::Meta`] with the steps that need no
@@ -313,6 +320,9 @@ impl Default for Weights {
             // holds two histories for one transaction.
             second_writer: 0,
             roll_back: 1,
+            // Off in the shared mixes so their recorded histories keep their
+            // shape; `tests/sim/dropped_created_at.rs` turns it on.
+            drop_created_at: 0,
             wal_damage: 1,
             staging_damage: 1,
             heal: 1,
@@ -341,13 +351,14 @@ enum Kind {
     Shrink,
     SecondWriter,
     RollBack,
+    DropCreatedAt,
     WalDamage,
     StagingDamage,
     Heal,
 }
 
 impl Weights {
-    fn table(&self) -> [(Kind, u32); 21] {
+    fn table(&self) -> [(Kind, u32); 22] {
         [
             (Kind::Tick, self.tick),
             (Kind::Commit, self.commit),
@@ -367,6 +378,7 @@ impl Weights {
             (Kind::Shrink, self.shrink),
             (Kind::SecondWriter, self.second_writer),
             (Kind::RollBack, self.roll_back),
+            (Kind::DropCreatedAt, self.drop_created_at),
             (Kind::WalDamage, self.wal_damage),
             (Kind::StagingDamage, self.staging_damage),
             (Kind::Heal, self.heal),
@@ -429,6 +441,7 @@ impl Weights {
             shrink: weight(false),
             second_writer: 0,
             roll_back: weight(false),
+            drop_created_at: 0,
             wal_damage: weight(false),
             staging_damage: weight(false),
             heal: weight(false),
@@ -652,6 +665,7 @@ fn draw(weights: &Weights, entropy: &SeededEntropy) -> Op {
             ticks: small(entropy, 8),
         },
         Kind::RollBack => Op::Remote(RemoteOp::RollBack),
+        Kind::DropCreatedAt => Op::Remote(RemoteOp::DropCreatedAt),
         Kind::WalDamage => wal_damage(entropy),
         Kind::StagingDamage => staging_damage(entropy),
         Kind::Heal => Op::Heal,
