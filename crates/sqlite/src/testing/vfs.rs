@@ -13,15 +13,30 @@
 //! ([`FaultVfs::set_window`]): the suite opens it around the engine's ticks, so an application
 //! write between them never moves a count.
 //!
-//! Power loss ([`Effect::PowerLoss`]). While [`FaultVfs::track_durability`] is on, every write
-//! and truncate of the database or its WAL first records the bytes it is about to replace, per
-//! path (connections share a file's durability, as they share its inode), and a sync forgets
-//! them. Journals and temporary files are not tracked, and neither are deletions. The loss undoes the
-//! records newest first and cuts each file back to its length at its last sync, then fails every
-//! later read, write, sync, truncate and delete until [`FaultVfs::restore_power`]: the
-//! connections still open are the dead machine's, and nothing they do may land. Lock calls still
-//! go through, so those connections close cleanly. Files that were never written since tracking
-//! began are left as they are, which is what a sync at the start would have made of them.
+//! Power loss ([`Effect::PowerLoss`], [`FaultVfs::cut_power`]). While
+//! [`FaultVfs::track_durability`] is on, every write and truncate of the database or its WAL
+//! first records the bytes it is about to replace and the range it touches, per path
+//! (connections share a file's durability, as they share its inode), and a sync forgets them.
+//! Journals and temporary files are not tracked. The loss applies the [`CrashLaw`]
+//! (module `law`): under [`CrashLaw::AllOrNothing`], the default, it undoes the records newest
+//! first and cuts each file back to its length at its last sync, and deletions stay done; under
+//! [`CrashLaw::Blocks`] each dirty block, the length and each unsynced directory entry survive
+//! or not independently. It then fails every later read, write, sync, truncate and delete until
+//! [`FaultVfs::restore_power`]: the connections still open are the dead machine's, and nothing
+//! they do may land. Lock calls still go through, so those connections close cleanly. Files that
+//! were never written since tracking began are left as they are, which is what a sync at the
+//! start would have made of them.
+//!
+//! Directory entries, under [`CrashLaw::Blocks`] only. A delete SQLite asks for without a
+//! directory sync (`sqlite3WalClose` deletes the WAL with `syncDir` 0) and a database or WAL file
+//! created since tracking began change the directory without syncing it; until the next sync of
+//! the directory the change may be lost, and the loss then puts back what the entry durably held:
+//! the deleted file as the law leaves it, or no file. The `unix` VFS syncs the directory on the
+//! first sync of a WAL it created (`UNIXFILE_DIRSYNC`), so a WAL's sync makes its entry durable.
+//! A directory sync on behalf of another file in the same directory is not seen, so the law may
+//! put back an entry a real disk would have kept; the database's directory holds only the
+//! database, its WAL and `-shm`, so nothing else syncs it. The `-shm` file is not tracked: the
+//! first connection after the loss resets it and SQLite recovers the wal-index from the WAL.
 //!
 //! The suite's `SQLITE_TESTCTRL_PRNG_SEED` ([`seed_prng`]) pins SQLite's random numbers, so WAL
 //! salts and `randomblob` repeat from run to run and a failing schedule replays.
@@ -29,7 +44,7 @@
 //! Test support only (the crate's `testing` feature). `unsafe` here is the C ABI: every callback
 //! is one reasoned site, and the suite reaches each of them.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{CString, c_char, c_int, c_void};
 use std::io;
 use std::num::{NonZeroI32, NonZeroU32};
@@ -40,6 +55,11 @@ use std::ptr::{self, NonNull};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use rusqlite::ffi;
+
+mod law;
+
+pub use law::{BlockSize, CrashLaw};
+use law::{Rng, Undo, crash_image, write_at};
 
 /// What a [`Effect::Hang`] prints on stdout before it blocks, for the parent process to wait on.
 pub const HANG_LINE: &str = "lsr-fault-vfs: hung";
@@ -98,7 +118,8 @@ pub enum Effect {
     /// `SQLITE_FULL`, which is how the `unix` VFS answers a short `write(2)`. Elsewhere, the
     /// call's plain error.
     ShortWrite,
-    /// On a sync: the power fails instead (module doc). Elsewhere, the call's plain error.
+    /// On a sync, write or truncate: the power fails instead, before the call lands (module
+    /// doc). Elsewhere, the call's plain error.
     PowerLoss,
     /// On a sync: the sync runs, then the calling thread prints [`HANG_LINE`] and blocks for
     /// ever, so a parent process can SIGKILL it at exactly that point. Elsewhere, the call's
@@ -151,13 +172,6 @@ struct Pending {
     seen: u32,
 }
 
-/// One path's writes since its last sync.
-#[derive(Debug, Default)]
-struct Undo {
-    synced_len: u64,
-    replaced: Vec<(u64, Vec<u8>)>,
-}
-
 #[derive(Debug)]
 struct State {
     pending: Vec<Pending>,
@@ -168,6 +182,21 @@ struct State {
     paths: Vec<PathBuf>,
     tracking: bool,
     undo: BTreeMap<usize, Undo>,
+    /// Paths of the database and WAL kinds, the ones durability tracks.
+    tracked: BTreeSet<usize>,
+    /// The WAL paths among them.
+    wals: BTreeSet<usize>,
+    /// Losses under the block law that kept some unsynced WAL block, and those that kept one
+    /// after a block they lost.
+    wal_losses: (u32, u32),
+    law: CrashLaw,
+    rng: Rng,
+    /// Per path, the bytes it last held at each offset before an overwrite, truncate or delete:
+    /// what a block the law keeps past the data written may show.
+    ghost: BTreeMap<usize, Vec<u8>>,
+    /// Paths whose directory entry changed since the directory's last sync, and what the entry
+    /// durably holds: a file with these bytes, or none.
+    entries: BTreeMap<usize, Option<Vec<u8>>>,
     powered: bool,
     undo_failed: Option<io::ErrorKind>,
 }
@@ -191,13 +220,26 @@ impl Shared {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn intern(&self, path: PathBuf) -> usize {
+    fn intern(&self, path: PathBuf, kind: FileKind) -> usize {
         let mut state = self.lock();
-        if let Some(at) = state.paths.iter().position(|p| *p == path) {
-            return at;
+        let at = match state.paths.iter().position(|p| *p == path) {
+            Some(at) => at,
+            None => {
+                state.paths.push(path);
+                state.paths.len().saturating_sub(1)
+            }
+        };
+        if kind != FileKind::Other {
+            state.tracked.insert(at);
         }
-        state.paths.push(path);
-        state.paths.len().saturating_sub(1)
+        if kind == FileKind::Wal {
+            state.wals.insert(at);
+        }
+        at
+    }
+
+    fn known(&self, path: &std::path::Path) -> Option<usize> {
+        self.lock().paths.iter().position(|p| p == path)
     }
 
     fn decide(&self, kind: FileKind, op: Op, path: Option<usize>) -> Decision {
@@ -232,13 +274,18 @@ impl Shared {
         path.filter(|_| self.lock().tracking)
     }
 
-    /// Records the bytes a write or truncate replaces; `len_before` is the file's length then.
-    fn record(&self, path: usize, len_before: u64, offset: u64, old: Vec<u8>) {
+    /// Records the bytes a write or truncate over `[offset, end)` replaces; `len_before` is the
+    /// file's length then.
+    fn record(&self, path: usize, len_before: u64, offset: u64, end: u64, old: Vec<u8>) {
         let mut state = self.lock();
+        if !old.is_empty() {
+            write_at(state.ghost.entry(path).or_default(), offset, &old);
+        }
         let undo = state.undo.entry(path).or_insert_with(|| Undo {
             synced_len: len_before,
-            replaced: Vec::new(),
+            ..Undo::default()
         });
+        undo.dirty.push((offset, end));
         if !old.is_empty() {
             undo.replaced.push((offset, old));
         }
@@ -250,29 +297,90 @@ impl Shared {
         *count = count.saturating_add(1);
         if let (Some(path), Some(len)) = (path, len) {
             state.undo.remove(&path);
+            // The unix VFS syncs the directory on the first sync of a WAL it created.
+            if kind == FileKind::Wal {
+                state.entries.remove(&path);
+            }
             if state.tracking {
                 state.undo.insert(
                     path,
                     Undo {
                         synced_len: len,
-                        replaced: Vec::new(),
+                        ..Undo::default()
                     },
                 );
             }
         }
     }
 
-    /// The power fails: every write since each file's last sync is undone (module doc).
+    /// Whether the block law's directory entries are tracked for `path`.
+    fn tracks_entries(state: &State, path: usize) -> bool {
+        state.tracking
+            && state.tracked.contains(&path)
+            && matches!(state.law, CrashLaw::Blocks { .. })
+    }
+
+    /// `path` was created by an open: until a sync of the directory, it may vanish.
+    fn created(&self, path: usize) {
+        let mut state = self.lock();
+        if Self::tracks_entries(&state, path) {
+            state.entries.entry(path).or_insert(None);
+            state.undo.insert(path, Undo::default());
+        }
+    }
+
+    /// `path` is about to be deleted, with the directory synced after or not.
+    fn deleting(&self, path: usize, sync_dir: bool) {
+        let mut state = self.lock();
+        if !Self::tracks_entries(&state, path) {
+            return;
+        }
+        let undo = state.undo.remove(&path).unwrap_or_default();
+        let Some(file) = state.paths.get(path).cloned() else {
+            return;
+        };
+        let now = match read_whole(&file) {
+            Ok(now) => now,
+            Err(err) => {
+                state.undo_failed.get_or_insert(err.kind());
+                return;
+            }
+        };
+        if let Some(now) = &now {
+            write_at(state.ghost.entry(path).or_default(), 0, now);
+        }
+        if sync_dir {
+            state.entries.remove(&path);
+        } else if !state.entries.contains_key(&path) {
+            let left = now.map(|now| state.leave(path, &now, &undo));
+            state.entries.insert(path, left);
+        }
+    }
+
+    /// The power fails: the law decides what each file keeps (module doc).
     fn cut(&self) {
         let mut state = self.lock();
+        if !state.powered {
+            return;
+        }
         state.powered = false;
         let undo = std::mem::take(&mut state.undo);
-        for (path, undo) in undo {
-            let Some(path) = state.paths.get(path).cloned() else {
+        let entries = std::mem::take(&mut state.entries);
+        let all_or_nothing = state.law == CrashLaw::AllOrNothing;
+        let paths: BTreeSet<usize> = undo.keys().chain(entries.keys()).copied().collect();
+        let mut undo = undo;
+        for id in paths {
+            let Some(path) = state.paths.get(id).cloned() else {
                 continue;
             };
-            match apply(&path, undo) {
-                // Deleted since: a deletion is not something a loss undoes here.
+            let done = if all_or_nothing {
+                undo.remove(&id).map_or(Ok(()), |undo| apply(&path, &undo))
+            } else {
+                let file_undo = undo.remove(&id).unwrap_or_default();
+                state.cut_blocks(id, &path, &file_undo, entries.get(&id))
+            };
+            match done {
+                // Deleted since: a deletion is not something the all-or-nothing law undoes.
                 Err(err) if err.kind() != io::ErrorKind::NotFound => {
                     state.undo_failed.get_or_insert(err.kind());
                 }
@@ -282,7 +390,73 @@ impl Shared {
     }
 }
 
-fn apply(path: &std::path::Path, undo: Undo) -> io::Result<()> {
+impl State {
+    /// What the block law leaves of a file that holds `now`.
+    fn leave(&mut self, path: usize, now: &[u8], undo: &Undo) -> Vec<u8> {
+        let CrashLaw::Blocks { block, .. } = self.law else {
+            return law::synced_image(now, undo);
+        };
+        let ghost = self.ghost.get(&path).cloned().unwrap_or_default();
+        crash_image(now, undo, &ghost, block, &mut self.rng)
+    }
+
+    /// The block law on one path: its entry (when unsynced) and then its blocks.
+    fn cut_blocks(
+        &mut self,
+        id: usize,
+        path: &std::path::Path,
+        undo: &Undo,
+        entry: Option<&Option<Vec<u8>>>,
+    ) -> io::Result<()> {
+        if let Some(durable) = entry
+            && self.rng.coin()
+        {
+            return put(path, durable.as_deref());
+        }
+        match read_whole(path)? {
+            Some(now) => {
+                let left = self.leave(id, &now, undo);
+                if let CrashLaw::Blocks { block, .. } = self.law
+                    && self.wals.contains(&id)
+                {
+                    let old = law::synced_image(&now, undo);
+                    let (kept, hole) = lsr_sim::crash_law::kept_and_holes(&old, &now, &left, block);
+                    self.wal_losses.0 = self.wal_losses.0.saturating_add(u32::from(kept));
+                    self.wal_losses.1 = self.wal_losses.1.saturating_add(u32::from(hole));
+                }
+                put(path, Some(&left))
+            }
+            None => Ok(()),
+        }
+    }
+}
+
+/// The whole file, or `None` when there is none.
+fn read_whole(path: &std::path::Path) -> io::Result<Option<Vec<u8>>> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "only at a power loss or a delete: every connection on the file is dead, or the file is the WAL, which carries no POSIX lock"
+    )]
+    let read = std::fs::read(path);
+    match read {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+/// Makes `path` hold `bytes`, or removes it.
+fn put(path: &std::path::Path, bytes: Option<&[u8]>) -> io::Result<()> {
+    match bytes {
+        Some(bytes) => std::fs::write(path, bytes),
+        None => match std::fs::remove_file(path) {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+            done => done,
+        },
+    }
+}
+
+fn apply(path: &std::path::Path, undo: &Undo) -> io::Result<()> {
     #[expect(
         clippy::disallowed_methods,
         reason = "power loss: every connection on this file is dead and about to be dropped, so the locks this close drops are already gone"
@@ -348,6 +522,13 @@ impl FaultVfs {
                 paths: Vec::new(),
                 tracking: false,
                 undo: BTreeMap::new(),
+                tracked: BTreeSet::new(),
+                wals: BTreeSet::new(),
+                wal_losses: (0, 0),
+                law: CrashLaw::AllOrNothing,
+                rng: Rng(0),
+                ghost: BTreeMap::new(),
+                entries: BTreeMap::new(),
                 powered: true,
                 undo_failed: None,
             }),
@@ -456,6 +637,30 @@ impl FaultVfs {
         let mut state = self.shared.lock();
         state.tracking = true;
         state.undo.clear();
+        state.entries.clear();
+    }
+
+    /// Sets what a power loss keeps ([`CrashLaw`]); [`CrashLaw::AllOrNothing`] until then.
+    pub fn set_crash_law(&self, law: CrashLaw) {
+        let mut state = self.shared.lock();
+        state.law = law;
+        state.rng = Rng(match law {
+            CrashLaw::AllOrNothing => 0,
+            CrashLaw::Blocks { seed, .. } => seed,
+        });
+    }
+
+    /// The power fails now, between calls (module doc): what an [`Effect::PowerLoss`] does
+    /// when its call comes.
+    pub fn cut_power(&self) {
+        self.shared.cut();
+    }
+
+    /// Power losses under the block law that kept some unsynced WAL block, and those among
+    /// them that kept one after a block they lost.
+    #[must_use]
+    pub fn wal_block_losses(&self) -> (u32, u32) {
+        self.shared.lock().wal_losses
     }
 
     /// Whether the power is on.
@@ -473,6 +678,7 @@ impl FaultVfs {
         let mut state = self.shared.lock();
         state.powered = true;
         state.undo.clear();
+        state.entries.clear();
         state
             .undo_failed
             .take()
@@ -545,6 +751,10 @@ fn header(file: *mut ffi::sqlite3_file) -> (&'static Shared, FileKind, Option<us
     (shared, head.kind, head.path)
 }
 
+fn head_path(file: *mut ffi::sqlite3_file) -> Option<usize> {
+    header(file).2
+}
+
 #[expect(unsafe_code, reason = "the inner unix file's method table is C memory")]
 fn methods(file: *mut ffi::sqlite3_file) -> Option<&'static ffi::sqlite3_io_methods> {
     let real = real_of(file);
@@ -598,7 +808,8 @@ fn real_size(file: *mut ffi::sqlite3_file) -> Option<u64> {
     u64::try_from(out).ok()
 }
 
-/// Records what a write or truncate over `[from, to)` replaces, while durability is tracked.
+/// Records what a write or truncate over `[from, to)` replaces, while durability is tracked; a
+/// truncate passes `u64::MAX` as `to`.
 fn remember(file: *mut ffi::sqlite3_file, from: u64, to: u64) {
     let (shared, kind, path) = header(file);
     let Some(path) = shared.tracking(path).filter(|_| kind != FileKind::Other) else {
@@ -612,7 +823,9 @@ fn remember(file: *mut ffi::sqlite3_file, from: u64, to: u64) {
     if !old.is_empty() && real_read(file, &mut old, from) != ffi::SQLITE_OK {
         old.clear();
     }
-    shared.record(path, len, from, old);
+    // A truncate (`to` unbounded) touches what it cuts; a write, what it covers.
+    let touched = if to == u64::MAX { len } else { to };
+    shared.record(path, len, from, touched, old);
 }
 
 fn hang() -> ! {
@@ -640,13 +853,18 @@ extern "C" fn x_open(
         let bytes = unsafe { std::ffi::CStr::from_ptr(name) }.to_bytes();
         PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
     });
+    let kind = kind_of(flags);
+    let creates = flags & ffi::SQLITE_OPEN_CREATE != 0
+        && path
+            .as_deref()
+            .is_some_and(|path| std::fs::symlink_metadata(path).is_err());
     let head = FaultFile {
         base: ffi::sqlite3_file {
             pMethods: ptr::null(),
         },
         shared: ptr::from_ref(shared),
-        kind: kind_of(flags),
-        path: path.map(|path| shared.intern(path)),
+        kind,
+        path: path.map(|path| shared.intern(path, kind)),
     };
     // SAFETY: SQLite hands `szOsFile` writable bytes, which `build` sized for the header.
     unsafe { file.cast::<FaultFile>().write(head) };
@@ -659,6 +877,9 @@ extern "C" fn x_open(
     if rc == ffi::SQLITE_OK {
         // SAFETY: the header was written above; SQLite calls xClose once this is set.
         unsafe { (*file).pMethods = &raw const METHODS };
+        if creates && let Some(id) = head_path(file) {
+            shared.created(id);
+        }
     }
     rc
 }
@@ -672,6 +893,14 @@ extern "C" fn x_delete(vfs: *mut ffi::sqlite3_vfs, name: *const c_char, sync_dir
     let Some(delete) = unix_vfs(shared).xDelete else {
         return ffi::SQLITE_IOERR_DELETE;
     };
+    if !name.is_null() {
+        // SAFETY: a non-null name SQLite passes is NUL-terminated.
+        let bytes = unsafe { std::ffi::CStr::from_ptr(name) }.to_bytes();
+        let path = std::path::Path::new(std::ffi::OsStr::from_bytes(bytes));
+        if let Some(id) = shared.known(path) {
+            shared.deleting(id, sync_dir != 0);
+        }
+    }
     // SAFETY: SQLite's own arguments, passed on to the VFS it would have called.
     unsafe { delete(shared.unix.as_ptr(), name, sync_dir) }
 }
@@ -810,6 +1039,10 @@ extern "C" fn x_write(
                 rc
             }
         }
+        Decision::Act(Effect::PowerLoss) => {
+            shared.cut();
+            ffi::SQLITE_IOERR_WRITE
+        }
         Decision::Act(effect) => plain(effect, Op::Write),
         Decision::Proceed => {
             remember(file, at, end);
@@ -821,8 +1054,13 @@ extern "C" fn x_write(
 #[expect(unsafe_code, reason = "the io method xTruncate")]
 extern "C" fn x_truncate(file: *mut ffi::sqlite3_file, size: i64) -> c_int {
     let (shared, kind, path) = header(file);
-    if let Decision::Act(effect) = shared.decide(kind, Op::Truncate, path) {
-        return plain(effect, Op::Truncate);
+    match shared.decide(kind, Op::Truncate, path) {
+        Decision::Act(Effect::PowerLoss) => {
+            shared.cut();
+            return ffi::SQLITE_IOERR_TRUNCATE;
+        }
+        Decision::Act(effect) => return plain(effect, Op::Truncate),
+        Decision::Proceed => {}
     }
     let Some(truncate) = methods(file).and_then(|m| m.xTruncate) else {
         return ffi::SQLITE_IOERR_TRUNCATE;

@@ -4,6 +4,10 @@
 // `cfg(test)` is always set here; it marks the helpers as test code, so clippy.toml's
 // allow-*-in-tests cover them as they cover #[test] fns.
 #[cfg(test)]
+mod after_restart;
+#[cfg(test)]
+mod crash_law;
+#[cfg(test)]
 mod dropped_created_at;
 #[cfg(test)]
 mod faults;
@@ -21,3 +25,5 @@ mod soak;
 mod sqlite_rules;
 #[cfg(test)]
 mod tally;
+#[cfg(test)]
+mod unaided;

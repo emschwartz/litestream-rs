@@ -72,7 +72,7 @@ proptest! {
         let Ok(mut reader) = WalReader::open(Cursor::new(bytes)) else { return Ok(()) };
         let page_size = reader.header().page_size();
         let expected = if use_header_salts { reader.header().salts() } else { salts(remembered) };
-        black_box(reader.resume(WalOffset::from_frame_index(resume_at, page_size), expected).is_ok());
+        black_box(reader.resume(WalOffset::from_frame_index(resume_at, page_size), expected, lsr_wal::testing::unbounded(expected)).is_ok());
         let ends = [
             ScanLimit::FirstInvalidFrame,
             ScanLimit::Committed(CommittedEnd::new(mx, reader.header().salts(), page_size)),
@@ -111,7 +111,7 @@ proptest! {
         let full = scan_from(&mut open(&wal_a.bytes), None, ScanLimit::FirstInvalidFrame).unwrap().txs;
         for index in 0..=frames {
             let at = WalOffset::from_frame_index(index, size(512));
-            let resumed = open(&wal_a.bytes).resume(at, salts(salts_a));
+            let resumed = open(&wal_a.bytes).resume(at, salts(salts_a), lsr_wal::testing::unbounded(salts(salts_a)));
             match bounds.iter().position(|b| *b == index) {
                 Some(done) => {
                     let cursor = resumed.unwrap();
@@ -125,7 +125,7 @@ proptest! {
         // After a restart and regrowth of any length, no position of generation A resumes.
         for index in bounds {
             let at = WalOffset::from_frame_index(index, size(512));
-            let resumed = open(&wal_b.bytes).resume(at, salts(salts_a));
+            let resumed = open(&wal_b.bytes).resume(at, salts(salts_a), lsr_wal::testing::unbounded(salts(salts_a)));
             prop_assert!(matches!(resumed, Err(ResumeError::Restarted { .. })), "frame {}: {:?}", index, resumed);
         }
     }

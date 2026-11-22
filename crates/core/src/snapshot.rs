@@ -152,7 +152,7 @@ async fn run<W: WalSource, P: PageSource, S: ObjectStore>(
         node_id: 0,
     })
     .map_err(|_err| BugSite::Encode.hit())?;
-    let (file, _last) = stage(
+    let (file, _last, _made_here) = stage(
         remote,
         key,
         header,

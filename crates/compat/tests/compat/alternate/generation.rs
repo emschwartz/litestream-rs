@@ -96,8 +96,11 @@ impl Expect {
         match self {
             Self::First => &["FirstSync"],
             Self::Continue => &[],
-            Self::Restarted => &["GenerationChanged"],
-            Self::Truncated => &["WalMissing", "GenerationChanged"],
+            // StagedUnverified: the staged files the previous process left unpublished are
+            // in the old generation, so the live WAL cannot vouch for them; they are deleted and
+            // the snapshot takes their first transaction (`crates/core/src/witness.rs`).
+            Self::Restarted => &["GenerationChanged", "StagedUnverified"],
+            Self::Truncated => &["WalMissing", "GenerationChanged", "StagedUnverified"],
         }
     }
 
@@ -117,6 +120,52 @@ impl Expect {
             ],
         }
     }
+}
+
+/// The first staged level-0 file the replica does not hold, when the run of unpublished
+/// files from the replica's newest level-0 file on crosses a WAL generation, or ends outside
+/// the WAL's: a previous process followed the WAL across a restart (staging the first frames
+/// of the new generation, or files on both sides of it) and died before uploading. No boot
+/// can prove nothing was lost before that restart, so Rust deletes those files unpublished
+/// and snapshots from the first of them (`SnapshotCause::StagedUnverified`,
+/// `crates/core/src/witness.rs`); Go uploads them by name.
+pub fn unpublished_across_restart(fixture: &AppFixture) -> Option<Txid> {
+    let salts_of = |dir: &Path, rel: &str| -> Option<Option<(u32, u32)>> {
+        let bytes = fs::read(dir.join(rel)).ok()?;
+        let head: &[u8; lsr_ltx::HEADER_LEN] = bytes.get(..lsr_ltx::HEADER_LEN)?.try_into().ok()?;
+        Some(
+            Header::decode(head)
+                .ok()?
+                .fields()
+                .wal
+                .map(WalOrigin::salts),
+        )
+    };
+    let replica = list(&fixture.replica).ok()?;
+    let published = replica.files.iter().map(|f| f.key.range().max()).max();
+    let tail = replica
+        .files
+        .iter()
+        .filter(|f| f.key.level() == Level::ZERO && Some(f.key.range().max()) == published)
+        .find_map(|f| salts_of(&fixture.replica, &f.rel));
+    let staged = list(&fixture.meta).ok()?;
+    let mut pending: Vec<_> = staged
+        .files
+        .iter()
+        .filter(|f| f.key.level() == Level::ZERO && Some(f.key.range().max()) > published)
+        .collect();
+    pending.sort_by_key(|f| f.key.range().max());
+    let first = pending.first()?.key.range().max();
+    let live = wal_salts(fixture);
+    let mut generations: Vec<Option<(u32, u32)>> = tail.into_iter().collect();
+    for f in &pending {
+        generations.push(salts_of(&fixture.meta, &f.rel)?);
+    }
+    let crosses = generations
+        .windows(2)
+        .any(|pair| pair.first() != pair.get(1));
+    let outside = generations.last().is_some_and(|last| *last != live);
+    (crosses || outside).then_some(first)
 }
 
 /// What the next boot must do, from the newest staged file and the WAL as they are now.

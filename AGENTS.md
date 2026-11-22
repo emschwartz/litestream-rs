@@ -26,7 +26,7 @@
 - No mid-sentence em dashes in docs or comments.
 
 ## Layout
-- Crates are `crates/<name>`, package `lsr-<name>`; `docs/PLAN.md` section 3 says what each owns. `replica` is the library API and `cli` the `lsr` binary. `sim`, `spec`, `compat`, `fuzzing` and `heap` are test-only. `fuzz/` (cargo-fuzz) is outside the workspace.
+- Crates are `crates/<name>`, package `lsr-<name>`; `docs/PLAN.md` section 3 says what each owns. `replica` is the library API and `cli` the `lsr` binary. `sim`, `spec`, `history`, `compat`, `fuzzing` and `heap` are test-only. `fuzz/` (cargo-fuzz) is outside the workspace.
 - Crate rules beyond the workspace's:
   - `sqlite`, `sidecar`: no descriptor on a database file or its `-shm` is ever opened and closed (closing one drops every POSIX lock the process holds on the file). Each has its own `clippy.toml`, which repeats the root file (clippy reads only the nearest).
   - `spec`: no dependencies, never `lsr-core`. It is the oracle the restore planner is judged by; change it only when the contract in the `crates/core/src/plan.rs` module doc changes.
@@ -49,7 +49,7 @@
 - A session working on a branch commits there and does not push, open pull requests or comment on GitHub unless asked; landing and pushing are the parent session's.
 - Commit messages follow Conventional Commits: a subject `type(scope): summary`, imperative, lower-case after the colon, at most 72 characters, no trailing period; a blank line; a body that says why; optional footers.
   - Types: `feat` (new behaviour), `fix` (a bug), `perf`, `refactor` (no behaviour change), `test`, `docs`, `build` (dependencies, Cargo, the justfile), `ci`, `chore`, `revert`.
-  - Scope: the crate without its `lsr-` prefix (`ltx`, `wal`, `core`, `store-s3`, `store-fs`, `local`, `sqlite`, `replica`, `config`, `sidecar`, `sim`, `spec`, `compat`, `cli`, `fuzzing`, `heap`), or `plan` for `docs/PLAN.md` and `docs/plans/`, or `deps`, `ci`, `lint`. Omit it only when a change spans the whole workspace.
+  - Scope: the crate without its `lsr-` prefix (`ltx`, `wal`, `core`, `store-s3`, `store-fs`, `local`, `sqlite`, `replica`, `config`, `sidecar`, `sim`, `spec`, `history`, `compat`, `cli`, `fuzzing`, `heap`), or `plan` for `docs/PLAN.md` and `docs/plans/`, or `deps`, `ci`, `lint`. Omit it only when a change spans the whole workspace.
   - A change that breaks a public API or the replica format takes `!` after the scope and a `BREAKING CHANGE:` footer saying what breaks.
   - Decisions made mid-task are `Call: <what> (why; cost if wrong)` footers.
   - `just commit-check [base]` checks the branch's subjects since `main`.

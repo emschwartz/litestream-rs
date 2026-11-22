@@ -161,6 +161,19 @@ pub trait WalSource {
     /// Which hold of the read transaction the answers above belong to now;
     /// [`CommittedRead::epoch`] is the one a given read was taken under.
     fn epoch(&self) -> ReadLockHold;
+
+    /// Makes every byte written to the WAL so far durable: an fsync of the
+    /// file (`F_FULLFSYNC` on macOS). The engine calls it after a committed
+    /// read and before it stages a frame that read counts, so nothing staged
+    /// is a frame a power loss can take back; under `synchronous = NORMAL`
+    /// SQLite itself syncs the WAL only before a checkpoint.
+    ///
+    /// # Errors
+    /// [`SourceError::FsyncFailed`] when the sync failed. The kernel reports a
+    /// failed writeback once and then calls the pages clean, so a later sync
+    /// that succeeds proves nothing about them: an implementation answers
+    /// every later call with the same error.
+    fn sync(&mut self) -> Result<(), SourceError>;
 }
 
 /// The database file, read for snapshots.

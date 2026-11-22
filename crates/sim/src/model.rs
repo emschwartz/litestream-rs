@@ -106,6 +106,23 @@ impl PageImage {
         )
     }
 
+    /// Whether `bytes`, a database file, holds exactly this image. `skip_header`
+    /// leaves page 1's first 100 bytes out (a probe's own header there).
+    #[must_use]
+    pub fn same_as(&self, bytes: &[u8], skip_header: bool) -> bool {
+        let size = self.page_size.bytes();
+        let pages = usize::try_from(self.db_size).unwrap_or(usize::MAX);
+        bytes.len() == size.saturating_mul(pages)
+            && bytes.chunks_exact(size).enumerate().all(|(i, got)| {
+                let skip = if i == 0 && skip_header { 100 } else { 0 };
+                u32::try_from(i)
+                    .ok()
+                    .and_then(|i| i.checked_add(1))
+                    .and_then(|pgno| self.page(pgno))
+                    .is_some_and(|want| want.get(skip..) == got.get(skip..))
+            })
+    }
+
     /// The image after the pages in `writes` are written and the database is
     /// `db_size` pages long. Pages past the new length are dropped, and a
     /// shrink flattens, so growing again never brings an old page back.
@@ -194,6 +211,17 @@ pub struct StageNote {
     pub at: usize,
     /// Its place among every snapshot and stage note.
     pub seq: u64,
+}
+
+/// What SQLite's recovery after a power loss was to the model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Recovery {
+    /// The local branch's newest commit.
+    Expected,
+    /// An earlier commit, now copied as the branch's newest.
+    Resurrected(CommitId),
+    /// No commit the model knows.
+    Unknown,
 }
 
 /// Every commit, the local branch they sit on, and the snapshot notes.
@@ -308,6 +336,35 @@ impl Model {
             survives
         });
         self.branch = self.branch.saturating_add(1);
+    }
+
+    /// After [`Model::on_power_loss`]: SQLite recovered the database `image`
+    /// (`skip_header` as in [`PageImage::same_as`]). When the local branch's
+    /// newest commit holds it, nothing changes. When an earlier commit does, a
+    /// commit SQLite brought back (a later write of the same bytes completed a
+    /// frame a loss had torn, and the frames after it chain again), the branch
+    /// continues from a durable copy of it at `app`'s place in the WAL, so the
+    /// copy is the one found there. Otherwise the model does not change.
+    pub fn adopt_recovered(
+        &mut self,
+        image: &[u8],
+        skip_header: bool,
+        app: AppCommit,
+        at: usize,
+    ) -> Recovery {
+        if self.newest_image().same_as(image, skip_header) {
+            return Recovery::Expected;
+        }
+        let found = self
+            .commits
+            .iter()
+            .rev()
+            .find(|rec| rec.image.same_as(image, skip_header))
+            .map(|rec| Rc::clone(&rec.image));
+        match found {
+            Some(image) => Recovery::Resurrected(self.push(image, app, at, true)),
+            None => Recovery::Unknown,
+        }
     }
 
     /// Whether a power loss has rewound the local branch.

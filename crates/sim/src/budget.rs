@@ -61,11 +61,16 @@ pub struct Spent {
 ///
 /// # Errors
 /// The first [`Violation::ResourceBound`].
+///
+/// `foreign` is every file another writer put straight into the replica, with
+/// its size: no recorder saw it, but the engine may compact it, so it counts
+/// toward the bytes of its level.
 pub fn check(
     events: &[RecorderEvent],
     counts: RecorderCounts,
     spent: Spent,
     lost: &BTreeSet<Txid>,
+    foreign: &[(FileKey, u64)],
 ) -> Result<(), Violation> {
     let mut last: BTreeMap<FileKey, u64> = BTreeMap::new();
     for event in events {
@@ -74,9 +79,32 @@ pub fn check(
             *slot = (*slot).max(*size);
         }
     }
+    let mut sized = last.clone();
+    for (key, size) in foreign {
+        let slot = sized.entry(*key).or_insert(0);
+        *slot = (*slot).max(*size);
+    }
+    level_bytes(&sized, lost)?;
+    let inputs = compaction_inputs(&sized);
+    let reads = inputs
+        .saturating_mul(2)
+        .saturating_add(spent.boots.saturating_add(1).saturating_mul(READS_PER_BOOT))
+        .saturating_add(spent.fault_hits);
+    within(Bound::ReadCalls, counts.reads, reads)?;
+    let keys = u64::try_from(last.len()).unwrap_or(u64::MAX);
+    let commits = keys
+        .saturating_mul(2)
+        .saturating_add(spent.fault_hits)
+        .saturating_add(spent.boots);
+    within(Bound::CommitCalls, counts.commits, commits)
+}
+
+/// Each compaction level holds at most the bytes of the level below plus one
+/// header and trailer per output ([`PER_FILE`]), over the files in `sized`.
+fn level_bytes(sized: &BTreeMap<FileKey, u64>, lost: &BTreeSet<Txid>) -> Result<(), Violation> {
     let mut bytes = [0_u64; 10];
     let mut files = [0_u64; 10];
-    for (key, size) in last.iter().filter(|(key, _)| counted(key, &last, lost)) {
+    for (key, size) in sized.iter().filter(|(key, _)| counted(key, sized, lost)) {
         let level = usize::from(key.level().get());
         if let (Some(b), Some(f)) = (bytes.get_mut(level), files.get_mut(level)) {
             *b = b.saturating_add(*size);
@@ -93,18 +121,7 @@ pub fn check(
             limit,
         )?;
     }
-    let inputs = compaction_inputs(&last);
-    let reads = inputs
-        .saturating_mul(2)
-        .saturating_add(spent.boots.saturating_add(1).saturating_mul(READS_PER_BOOT))
-        .saturating_add(spent.fault_hits);
-    within(Bound::ReadCalls, counts.reads, reads)?;
-    let keys = u64::try_from(last.len()).unwrap_or(u64::MAX);
-    let commits = keys
-        .saturating_mul(2)
-        .saturating_add(spent.fault_hits)
-        .saturating_add(spent.boots);
-    within(Bound::CommitCalls, counts.commits, commits)
+    Ok(())
 }
 
 /// Whether `key` counts toward its level's bytes: it ends at a transaction no
@@ -140,4 +157,45 @@ fn compaction_inputs(last: &BTreeMap<FileKey, u64>) -> u64 {
         inputs = inputs.saturating_add(u64::try_from(within_range).unwrap_or(u64::MAX));
     }
     inputs
+}
+
+#[cfg(test)]
+mod tests {
+    use lsr_core::Level;
+    use lsr_ltx::{Timestamp, TxidRange};
+
+    use super::*;
+
+    fn key(level: u8, min: u64, max: u64) -> FileKey {
+        let range = TxidRange::new(Txid::new(min).unwrap(), Txid::new(max).unwrap()).unwrap();
+        FileKey::new(Level::new(level).unwrap(), range)
+    }
+
+    fn put(key: FileKey, size: u64) -> RecorderEvent {
+        RecorderEvent::Put {
+            key,
+            header: None,
+            origin: None,
+            created_at: Timestamp::from_unix_millis(0),
+            size,
+            digest: 0,
+            at: Timestamp::from_unix_millis(0),
+            high: Timestamp::from_unix_millis(0),
+        }
+    }
+
+    /// Another writer's file reaches level 0 without passing a recorder; a
+    /// level 1 compacted from it is as large as it, not a level grown from
+    /// nothing.
+    #[test]
+    fn another_writers_file_counts_toward_its_level() {
+        let big = PER_FILE * 8;
+        let events = [put(key(0, 1, 1), 100), put(key(1, 1, 2), big)];
+        let lost = BTreeSet::new();
+        let spent = Spent::default();
+        let counts = RecorderCounts::default();
+        assert!(check(&events, counts, spent, &lost, &[]).is_err());
+        let foreign = [(key(0, 2, 2), big)];
+        assert_eq!(check(&events, counts, spent, &lost, &foreign), Ok(()));
+    }
 }

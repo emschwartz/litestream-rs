@@ -98,7 +98,9 @@ pub enum Fault {
     LocalDiskFull,
     /// A local read or write failed.
     LocalIo,
-    /// An fsync of a staged file failed; encode and write it again.
+    /// An fsync failed. Of a staged file: encode and write it again. Of the
+    /// WAL, before staging (`WalSource::sync`): nothing is staged, and the
+    /// source keeps refusing, so the retries end degraded.
     LocalFsyncFailed,
     /// SQLite is busy, or the wal-index is mid-update.
     SqliteBusy,
@@ -270,6 +272,15 @@ pub enum SnapshotCause {
     CheckpointBoundary,
     /// An operator asked.
     OperatorRequested,
+    /// At boot, staged files the replica did not have yet were not vouched
+    /// for by the live WAL (a staging backup put back, a file replaced, or a
+    /// chain from a WAL generation that is gone), and the WAL could not
+    /// regenerate them: they were deleted unpublished, and the snapshot
+    /// holds their end state. Their restore points are given up.
+    StagedUnverified {
+        /// The first transaction deleted.
+        from: Txid,
+    },
 }
 
 /// Why the engine stopped and waits for a person: a [`PersistentCause`]

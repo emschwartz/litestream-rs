@@ -14,7 +14,7 @@ use lsr_wal::{CommittedEnd, Salts};
 use rusqlite::{Connection, FileControl, OpenFlags};
 
 use crate::error::{OpenError, SetupError, SplitOpen};
-use crate::pages::{FileHandle, file_pointer};
+use crate::pages::{FileHandle, WalSync, file_pointer};
 use crate::shm::{self, Region};
 
 /// [`SqliteConfig::journal_size_limit`]'s default: 64 MiB.
@@ -106,6 +106,10 @@ pub(crate) struct Inner {
     /// transaction SQLite ended itself on an error, cannot leave a flag saying otherwise.
     issued: u64,
     returned: u64,
+    /// A sync of the WAL failed. The kernel reports a failed writeback once and then calls the
+    /// pages clean, so every later sync answers the same: nothing the WAL held then is known
+    /// to be on disk.
+    wal_sync_failed: bool,
 }
 
 /// Which file a path named: device and inode.
@@ -250,6 +254,7 @@ impl Sqlite {
             epoch: ReadLockHold::first(),
             issued: 0,
             returned: 0,
+            wal_sync_failed: false,
         };
         Ok(Self {
             inner: Arc::new(Mutex::new(inner)),
@@ -474,6 +479,22 @@ impl WalSource for Sqlite {
 
     fn epoch(&self) -> ReadLockHold {
         self.lock().epoch
+    }
+
+    fn sync(&mut self) -> Result<(), SourceError> {
+        let mut inner = self.lock();
+        if inner.wal_sync_failed {
+            return Err(SourceError::FsyncFailed);
+        }
+        inner.ensure_read_lock_held()?;
+        match crate::pages::sync_wal(&inner.reader) {
+            Ok(()) => Ok(()),
+            Err(WalSync::NoWal) => Err(SourceError::Io(io::ErrorKind::NotFound)),
+            Err(WalSync::Failed(_rc)) => {
+                inner.wal_sync_failed = true;
+                Err(SourceError::FsyncFailed)
+            }
+        }
     }
 }
 

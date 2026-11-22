@@ -65,6 +65,8 @@ pub enum SourceOp {
     BeginWriteLock,
     /// `Checkpointer::end_write_lock`.
     EndWriteLock,
+    /// `WalSource::sync`.
+    Sync,
 }
 
 /// One-shot errors, consumed oldest first by the next call of their operation.
@@ -481,6 +483,10 @@ impl WalSource for FakeWal {
 
     fn epoch(&self) -> ReadLockHold {
         lock(&self.state).epoch
+    }
+
+    fn sync(&mut self) -> Result<(), SourceError> {
+        lock(&self.state).injections.take(SourceOp::Sync)
     }
 }
 

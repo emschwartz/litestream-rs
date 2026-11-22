@@ -30,7 +30,9 @@ fn resume_refuses_a_wal_restarted_and_regrown_mid_transaction() {
         .next();
     let mut new = Wal::new(PS, false, RESTARTED);
     new.tx(&[1, 3, 4], 4, 50);
-    let err = open(&new.bytes).resume(at, salts(SALTS)).unwrap_err();
+    let err = open(&new.bytes)
+        .resume(at, salts(SALTS), lsr_wal::testing::unbounded(salts(SALTS)))
+        .unwrap_err();
     assert!(matches!(err, ResumeError::Restarted { .. }), "{err}");
 }
 
@@ -43,7 +45,9 @@ fn resume_refuses_a_wal_restarted_and_regrown_past_the_offset() {
     new.tx(&[3], 3, 60);
     for index in [0, 2] {
         let at = WalOffset::from_frame_index(index, size(PS));
-        let err = open(&new.bytes).resume(at, salts(SALTS)).unwrap_err();
+        let err = open(&new.bytes)
+            .resume(at, salts(SALTS), lsr_wal::testing::unbounded(salts(SALTS)))
+            .unwrap_err();
         assert!(
             matches!(err, ResumeError::Restarted { .. }),
             "frame {index}: {err}"
@@ -57,7 +61,9 @@ fn resume_refuses_an_offset_inside_a_transaction() {
     let mut wal = Wal::new(PS, false, SALTS);
     wal.tx(&[1, 2], 2, 10);
     let at = WalOffset::from_frame_index(1, size(PS));
-    let err = open(&wal.bytes).resume(at, salts(SALTS)).unwrap_err();
+    let err = open(&wal.bytes)
+        .resume(at, salts(SALTS), lsr_wal::testing::unbounded(salts(SALTS)))
+        .unwrap_err();
     assert!(matches!(err, ResumeError::NotAtCommit { .. }), "{err}");
 }
 

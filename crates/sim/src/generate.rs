@@ -132,6 +132,9 @@ pub enum Op {
     Restart,
     /// The machine loses power between ticks. Scenarios only.
     PowerLoss,
+    /// From now on the disk lies about the engine's own fsync of the WAL: it
+    /// succeeds and keeps nothing. Scenarios only.
+    LyingWalSync,
     /// A step on the staging directory, with the engine as it is: scenarios
     /// stop it first where they mean it down.
     Meta(MetaOp),
@@ -198,6 +201,10 @@ pub enum MetaOp {
     /// Deletes every staged file while the engine runs: the staging directory
     /// removed under it, with no restart.
     DeleteAll,
+    /// Rewrites the newest level-0 file as another whole, valid file under
+    /// the same key and header, with page bytes changed: a file replaced by
+    /// one that verifies, which only a witness bound to its bytes refuses.
+    ForgeNewest,
 }
 
 /// A step on the replica from outside the engine. Scenarios only.
@@ -286,12 +293,57 @@ pub struct Weights {
     pub staging_damage: u32,
     /// [`Op::Heal`].
     pub heal: u32,
+    /// [`Op::Meta`] with the steps that replace staged files under a running
+    /// engine ([`MetaOp::Save`], [`MetaOp::Restore`],
+    /// [`MetaOp::ForgeNewest`]), and [`Op::StagingDamage`] with
+    /// [`MetaOp::ForgeNewest`].
+    pub staging_replace_running: u32,
     /// Whether a vacuum may change the page size. A replica prefix holds one
     /// page size, so after a resize the engine's next boot stops, or keeps
     /// retrying in a degraded state, on `PageSizeChanged`, and the states
     /// acknowledged before it still restore; the runner expects either.
     pub vacuum_resizes: bool,
+    /// Whether a power loss keeps the block law's draw over the WAL writes
+    /// since the last fsync (any subset of the dirty blocks, at 512 or 4096
+    /// bytes, and a length of its own; [`crate::crash_law`]) instead of a
+    /// drawn prefix of them. Not an operation: it changes what every power
+    /// loss of the run leaves, so the history's draws are the same either way.
+    pub block_crash_law: bool,
+    /// What the app does right after every restart (a crash, a power loss, a
+    /// stop), before the new engine's first tick. Not an operation, for the
+    /// same reason as `block_crash_law`.
+    pub after_restart: AfterRestart,
 }
+
+/// What the application does when it comes back after a restart, before the
+/// engine has looked at the WAL. Real applications do not sit still: a job
+/// runner replays the work it cannot prove finished, an idempotent migration
+/// runs again, a busy service goes straight back to committing. Replayed
+/// work writes the same page images again, which is the one way a rewound
+/// WAL can regrow frames identical to the ones it lost (see the anchor
+/// scenario in the correctness review of the boot proof).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AfterRestart {
+    /// It waits for its next drawn operation.
+    #[default]
+    Nothing,
+    /// It replays its last `K` commits, verbatim (the same pages with the
+    /// same bytes, at the database size each left), oldest first. `K` is
+    /// drawn per restart from 1 to [`REDO_MAX`], so it often reaches back
+    /// past the commits the restart lost.
+    Redo,
+    /// It commits new work until the WAL's committed end passes the end it
+    /// had before the restart, so the regrown WAL climbs over every frame
+    /// the restart left behind (at most [`BUSY_MAX`] commits).
+    Busy,
+}
+
+/// The most commits a [`AfterRestart::Redo`] replays, and the length of the
+/// app's own log of commits.
+pub const REDO_MAX: u64 = 16;
+
+/// The most commits a [`AfterRestart::Busy`] makes after one restart.
+pub const BUSY_MAX: u32 = 64;
 
 impl Default for Weights {
     /// Ticks and commits dominate and faults are rare, so a history makes
@@ -322,7 +374,12 @@ impl Default for Weights {
             wal_damage: 1,
             staging_damage: 1,
             heal: 1,
+            // Off in the default mix so its recorded histories keep their
+            // shape; swarm mixes draw it.
+            staging_replace_running: 0,
             vacuum_resizes: true,
+            block_crash_law: false,
+            after_restart: AfterRestart::Nothing,
         }
     }
 }
@@ -351,10 +408,11 @@ enum Kind {
     WalDamage,
     StagingDamage,
     Heal,
+    StagingReplaceRunning,
 }
 
 impl Weights {
-    fn table(&self) -> [(Kind, u32); 22] {
+    fn table(&self) -> [(Kind, u32); 23] {
         [
             (Kind::Tick, self.tick),
             (Kind::Commit, self.commit),
@@ -378,6 +436,7 @@ impl Weights {
             (Kind::WalDamage, self.wal_damage),
             (Kind::StagingDamage, self.staging_damage),
             (Kind::Heal, self.heal),
+            (Kind::StagingReplaceRunning, self.staging_replace_running),
         ]
     }
 
@@ -441,11 +500,24 @@ impl Weights {
             wal_damage: weight(false),
             staging_damage: weight(false),
             heal: weight(false),
+            staging_replace_running: 0,
             vacuum_resizes: below(&entropy, 2) == 0,
+            block_crash_law: false,
+            after_restart: AfterRestart::Nothing,
         };
         // Drawn last, so every other kind keeps the weight it had before
         // second writers were drawn.
         mix.second_writer = weight(false);
+        // Drawn after that, for the same reason.
+        mix.block_crash_law = below(&entropy, 2) == 0;
+        // And after that, for the same reason.
+        mix.staging_replace_running = weight(false);
+        // Drawn after that, for the same reason: a third each.
+        mix.after_restart = match below(&entropy, 3) {
+            0 => AfterRestart::Nothing,
+            1 => AfterRestart::Redo,
+            _ => AfterRestart::Busy,
+        };
         mix
     }
 
@@ -569,6 +641,17 @@ fn staging_damage(entropy: &SeededEntropy) -> Op {
     }
 }
 
+/// A staged file replaced under a running engine, by a backup put back or by
+/// another valid file, and now and then the same while it is down.
+fn staging_replace_running(entropy: &SeededEntropy) -> Op {
+    match below(entropy, 5) {
+        0 => Op::Meta(MetaOp::Save),
+        1 => Op::Meta(MetaOp::Restore),
+        2 | 3 => Op::Meta(MetaOp::ForgeNewest),
+        _ => Op::StagingDamage(MetaOp::ForgeNewest),
+    }
+}
+
 fn env_fault(entropy: &SeededEntropy) -> Op {
     let fault = match below(entropy, 4) {
         0 => EnvFault::DeleteWal,
@@ -669,6 +752,7 @@ fn draw(weights: &Weights, entropy: &SeededEntropy) -> Op {
         Kind::WalDamage => wal_damage(entropy),
         Kind::StagingDamage => staging_damage(entropy),
         Kind::Heal => Op::Heal,
+        Kind::StagingReplaceRunning => staging_replace_running(entropy),
     }
 }
 
@@ -685,6 +769,9 @@ pub enum Generator {
     /// The generator before shrinking commits, delete faults and the other
     /// scenario-only operations were drawn, with the weights of that time.
     V1,
+    /// The generator before staging replaced under a running engine was
+    /// drawn, with the seed's own mix of that time ([`Weights::mixed`]).
+    V2,
 }
 
 /// The history of `steps` operations that `seed` named under `generator`.
@@ -693,10 +780,12 @@ pub enum Generator {
 pub fn frozen_history(seed: Seed, steps: u32, generator: Generator) -> Vec<Op> {
     match generator {
         Generator::V1 => v1::history(seed, steps),
+        Generator::V2 => v2::history(seed, steps),
     }
 }
 
 mod v1;
+mod v2;
 
 #[cfg(test)]
 mod tests;

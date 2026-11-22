@@ -13,13 +13,14 @@ How to run the tests, and the rules for writing them. [AGENTS.md](../AGENTS.md) 
 | Nothing, minutes | `just sim-soak <secs>`, `just sim-nightly`, `just plan-exhaustive`, `just sqlite-big`, `just mem-big`, `just fuzz-seed` | Rotating simulator seeds, planner sweeps, multi-GB SQLite cases, memory gates at scale, the fuzz seed corpus |
 | Nothing, long | `just mutants <crate>`, `just mutants-diff`, `just planted-bugs [--only NAME]` | Mutation testing; the planted-bug ledger (about 20 minutes cold, needs `uv`) |
 | Nightly Rust | `just fuzz <target> <secs>`, `just fuzz-cmin <target>`, `just asan`, `just tsan`, `just miri` | cargo-fuzz, sanitizers, Miri |
-| Docker | `just test-s3`, `just compat-s3` | The S3 store and `lsr`, then Go and Rust together, against a throwaway MinIO |
+| Docker | `just test-s3`, `just compat-s3` | The S3 store, `lsr` and the history judge's real-engine run, then Go and Rust together, against a throwaway MinIO |
+| Linux with FUSE | `just lazyfs [cycles]`, `just lazyfs-plant <name> [cycles]` | Power-loss cycles of the real `lsr replicate` on LazyFS, judged by restores; the same against a planted defect. Builds LazyFS once (cmake, g++, libfuse3-dev) |
 | Go | `just upstream`, then `just compat`, `just compat-live <names>`, `just compat-releases`, `just compat-alternation <seed>`, `just compat-regen` | Pinned Go builds from `.upstream/`: each restores the other's files, handovers, alternation, the Go VFS (also needs a C compiler and SQLite headers) |
 | Tigris credentials | `just test-tigris`, `just tigris-restore`, `just soak-tigris <hours>` | The real bucket. Never in CI |
 
 `just sim-replay <seed> [steps]` replays one simulator run, printing every operation; a failing run prints its replay line. sccache is optional and helps across worktrees (`RUSTC_WRAPPER=sccache`, one shared `SCCACHE_DIR`).
 
-In CI (`ci.yml`): the gate, `deny`, `test-s3`, `compat` and `compat-s3` run on pull requests and on pushes to `main`; `commit-check` and `mutants-diff` on pull requests only. Fuzzing, the sanitizers, Miri, 500,000 shuttle schedules, `mem-big`, the planted-bug ledger and the gate on macOS run nightly (`nightly.yml`), as do rotating simulator seeds (`sim-nightly.yml`) and every Go release, upstream `main` and the alternation run (`compat-releases.yml`).
+In CI (`ci.yml`): the gate, `deny`, `test-s3`, `compat` and `compat-s3` run on pull requests and on pushes to `main`; `commit-check` and `mutants-diff` on pull requests only. Fuzzing, the sanitizers, Miri, 500,000 shuttle schedules, `mem-big`, the planted-bug ledger, 300 LazyFS cycles and the gate on macOS run nightly (`nightly.yml`), as do rotating simulator seeds (`sim-nightly.yml`) and every Go release, upstream `main` and the alternation run (`compat-releases.yml`).
 
 ## Rules
 

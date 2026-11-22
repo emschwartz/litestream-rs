@@ -228,6 +228,7 @@ test-s3: minio-up
     LSR_S3_TRANSPORT=reqwest \
         cargo nextest run -p lsr-store-s3 --features reqwest --test store-s3 -E 'test(/^minio::/)' --run-ignored all --locked --no-fail-fast
     cargo nextest run -p lsr-cli --test cli -E 'test(/^s3::/)' --run-ignored all --locked --no-fail-fast
+    cargo nextest run -p lsr-history --test history -E 'test(/^replicator::/)' --run-ignored all --locked --no-fail-fast
 
 # Each restores what the other wrote at Latest, a txid and an instant, and they hand one prefix
 # over both ways, over the pinned builds (crates/compat/tests/compat/s3.rs). Needs Docker; fails, never
@@ -321,3 +322,32 @@ plan-exhaustive:
 # `check` (crates/core/tests/core/mem.rs). Needs 5 GiB of temporary disk, one database at a time.
 mem-big:
     cargo nextest run --release -p lsr-core --test core -E 'test(/^mem_big::/)' --run-ignored only --no-capture --locked
+
+# Linux with /dev/fuse, fusermount3 and FUSE allowed (root, or user_allow_other); builds LazyFS once
+# into ~/.cache/lsr-lazyfs (cmake, g++, git, libfuse3-dev). Not in `check`: a cycle takes about 3 s.
+# Exit 1 on any anomaly; the last line printed is a JSON summary.
+# Power-loss cycles of the real `lsr replicate` on LazyFS, judged by restores (scripts/lazyfs.py).
+lazyfs cycles="50" *args:
+    cargo build --release --locked -p lsr-cli
+    cargo build --release --locked -p lsr-history --features sqlite
+    test -x "${LSR_LAZYFS_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/lsr-lazyfs}/lazyfs/lazyfs/build/lazyfs" || uv run scripts/lazyfs.py build
+    uv run scripts/lazyfs.py run --cycles {{cycles}} {{args}}
+
+# A plant is scripts/lazyfs-plants/<name>.patch or docs/planted-bugs/<name>.patch, applied to a
+# scratch worktree of HEAD and built into target/lazyfs-plants/<name>.
+# The LazyFS rig against a planted defect, until its first anomaly: just lazyfs-plant wal-barrier 200
+lazyfs-plant name cycles="200" *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    patch="scripts/lazyfs-plants/{{name}}.patch"
+    [ -f "$patch" ] || patch="docs/planted-bugs/{{name}}.patch"
+    [ -f "$patch" ] || { echo "lazyfs-plant: no plant named {{name}}" >&2; exit 2; }
+    tree=".worktrees/lazyfs-plant-{{name}}"
+    git worktree add --detach "$tree" HEAD >/dev/null
+    trap 'git worktree remove --force "$tree"' EXIT
+    git -C "$tree" apply "$PWD/$patch"
+    # The judge comes from this tree, never the planted one.
+    cargo build --release --locked -p lsr-history --features sqlite
+    CARGO_TARGET_DIR="$PWD/target/lazyfs-plants/{{name}}" cargo build --release --locked -p lsr-cli --manifest-path "$tree/Cargo.toml"
+    test -x "${LSR_LAZYFS_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/lsr-lazyfs}/lazyfs/lazyfs/build/lazyfs" || uv run scripts/lazyfs.py build
+    uv run scripts/lazyfs.py run --cycles {{cycles}} --stop-on-anomaly --lsr "target/lazyfs-plants/{{name}}/release/lsr" --work "target/lazyfs-plant-{{name}}" {{args}}

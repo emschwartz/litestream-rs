@@ -944,6 +944,22 @@ name = "lsr-heap"
 version = "0.0.0"
 
 [[package]]
+name = "lsr-history"
+version = "0.0.0"
+dependencies = [
+ "lsr-core",
+ "lsr-history",
+ "lsr-replica",
+ "lsr-sqlite",
+ "lsr-store-fs",
+ "lsr-store-s3",
+ "rusqlite",
+ "sha2",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "lsr-local"
 version = "0.0.0"
 dependencies = [
@@ -1002,6 +1018,7 @@ name = "lsr-sim"
 version = "0.0.0"
 dependencies = [
  "lsr-core",
+ "lsr-history",
  "lsr-ltx",
  "lsr-wal",
  "proptest",
@@ -1019,6 +1036,7 @@ name = "lsr-sqlite"
 version = "0.0.0"
 dependencies = [
  "lsr-core",
+ "lsr-history",
  "lsr-local",
  "lsr-ltx",
  "lsr-sim",

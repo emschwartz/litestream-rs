@@ -43,11 +43,14 @@ def prepare_tree() -> None:
     """A detached worktree of HEAD, reset to a clean state."""
     SCRATCH.mkdir(parents=True, exist_ok=True)
     git("worktree", "prune")
+    # HEAD of this checkout, resolved here: inside the scratch tree `HEAD` names the commit the
+    # tree was left at by an earlier run, so a reused tree would test a stale commit.
+    head = git("rev-parse", "HEAD").stdout.strip()
     if not (TREE / ".git").exists():
         shutil.rmtree(TREE, ignore_errors=True)
-        git("worktree", "add", "--detach", str(TREE), "HEAD")
+        git("worktree", "add", "--detach", str(TREE), head)
     else:
-        git("checkout", "--force", "--detach", "HEAD", cwd=TREE)
+        git("checkout", "--force", "--detach", head, cwd=TREE)
     git("clean", "-fdxq", "-e", "target", cwd=TREE)
 
 

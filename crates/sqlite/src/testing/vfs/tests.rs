@@ -190,6 +190,82 @@ fn a_power_loss_keeps_only_what_was_synced() {
     assert_eq!(rows, [1], "only the checkpointed commit survived");
 }
 
+/// Under the block law a loss keeps any mix of the unsynced WAL blocks, and SQLite's own
+/// recovery makes a consistent database of each: over seeds it keeps none or some of the
+/// unsynced commits, and every image passes `integrity_check`.
+#[test]
+fn under_the_block_law_sqlite_recovers_every_image() {
+    let vfs = vfs("block-law");
+    let mut kept = std::collections::BTreeSet::new();
+    for seed in 0..40_u64 {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("a.db");
+        vfs.set_crash_law(CrashLaw::drawn(seed));
+        let conn = open(&db, &vfs);
+        // A new database file's directory entry is never synced by SQLite: create it first.
+        conn.execute_batch("CREATE TABLE t(v)").unwrap();
+        vfs.track_durability();
+        conn.execute_batch(
+            "PRAGMA synchronous = NORMAL; INSERT INTO t VALUES (randomblob(5000));
+             PRAGMA wal_checkpoint(PASSIVE);",
+        )
+        .unwrap();
+        for _ in 0..6 {
+            conn.execute_batch("INSERT INTO t VALUES (randomblob(3000))")
+                .unwrap();
+        }
+        vfs.cut_power();
+        drop(conn);
+        vfs.restore_power().unwrap();
+        let conn = open(&db, &vfs);
+        let check: String = conn
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(check, "ok", "seed {seed}");
+        let rows: i64 = conn
+            .query_row("SELECT count(*) FROM t", [], |row| row.get(0))
+            .unwrap();
+        kept.insert(rows);
+    }
+    assert!(
+        kept.contains(&1) && kept.iter().any(|rows| *rows > 1),
+        "{kept:?}"
+    );
+}
+
+/// Under the block law the WAL that the last close deleted (`sqlite3WalClose` asks for no
+/// directory sync) may be back after a loss, and SQLite opens the database either way.
+#[test]
+fn under_the_block_law_an_unsynced_delete_may_come_back() {
+    let vfs = vfs("block-unlink");
+    let mut back = std::collections::BTreeSet::new();
+    for seed in 0..16_u64 {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("a.db");
+        vfs.set_crash_law(CrashLaw::drawn(seed));
+        let conn = open(&db, &vfs);
+        conn.execute_batch("CREATE TABLE t(v)").unwrap();
+        vfs.track_durability();
+        conn.execute_batch("INSERT INTO t VALUES (randomblob(3000))")
+            .unwrap();
+        drop(conn);
+        let wal = dir.path().join("a.db-wal");
+        assert!(!wal.exists(), "the last close deleted the WAL");
+        vfs.cut_power();
+        vfs.restore_power().unwrap();
+        back.insert(wal.exists());
+        let conn = open(&db, &vfs);
+        let rows: i64 = conn
+            .query_row("SELECT count(*) FROM t", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            rows, 1,
+            "seed {seed}: the checkpoint was synced before the delete"
+        );
+    }
+    assert_eq!(back.len(), 2, "{back:?}");
+}
+
 /// A wal-index lock request held elsewhere is retried by SQLite itself; an unlock never fails.
 #[test]
 fn a_refused_wal_index_lock_is_retried_by_sqlite() {

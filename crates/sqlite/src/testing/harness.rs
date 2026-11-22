@@ -43,13 +43,13 @@ use lsr_core::{
 use lsr_ltx::{PageNo, PageSize, Timestamp, Txid};
 use lsr_sim::{
     Acked, AppCommit, Checked, CommitId, Model, PageImage, Recorder, RecorderEvent, RecorderLog,
-    Violation,
+    Recovery, Violation, bug_fault,
 };
 use lsr_store_fs::FsStore;
 use lsr_wal::{Salts, WalOffset};
 use rusqlite::{Connection, OpenFlags};
 
-use crate::testing::vfs::{FaultVfs, FileKind, Op, VfsError, seed_prng};
+use crate::testing::vfs::{CrashLaw, FaultVfs, FileKind, Op, VfsError, seed_prng};
 use crate::{DEFAULT_JOURNAL_SIZE_LIMIT, OpenError, Sqlite, SqliteConfig};
 
 mod app;
@@ -169,6 +169,8 @@ pub struct RigConfig {
     pub oracle: bool,
     /// Record what writes replace, so a power loss can undo them.
     pub power: bool,
+    /// What a power loss keeps of the writes since each file's last sync.
+    pub crash_law: CrashLaw,
     /// Where the application runs.
     pub placement: Placement,
     /// The backend's WAL size limit ([`SqliteConfig::journal_size_limit`]).
@@ -184,6 +186,7 @@ impl Default for RigConfig {
             seed: DEFAULT_SEED,
             oracle: true,
             power: false,
+            crash_law: CrashLaw::AllOrNothing,
             placement: Placement::InProcess,
             journal_size_limit: Some(DEFAULT_JOURNAL_SIZE_LIMIT),
         }
@@ -242,6 +245,8 @@ const DEFAULT_SEED: NonZeroI32 = match NonZeroI32::new(0x5eed) {
 };
 /// Ticks a settle may take.
 const SETTLE_TICKS: u32 = 2_000;
+/// Retries in a row, with nothing done between them, after which a settle gives up.
+const SETTLE_RETRIES: u32 = 50;
 /// What a tick that asks to run again at once costs the fake clock.
 const SPIN_STEP: Duration = Duration::from_millis(50);
 const WAL_HEADER: usize = 32;
@@ -409,7 +414,9 @@ pub struct Rig<B: Backend> {
     acked: Acked,
     wal_syncs: u64,
     staging_seen: usize,
-    staged_max: Option<Txid>,
+    /// The level-0 files in staging now, by the transaction each ends at: a settle waits for
+    /// the replica to acknowledge the newest.
+    staged: std::collections::BTreeSet<Txid>,
     ticks: Vec<Tick>,
     /// Each tick's window calls, per kind of file and call, counted after it.
     calls: Vec<BTreeMap<(FileKind, Op), u32>>,
@@ -434,6 +441,7 @@ impl<B: Backend> Rig<B> {
         let model = cfg
             .oracle
             .then(|| Model::new(PageImage::from_bytes(page_size, &bytes)));
+        vfs.set_crash_law(cfg.crash_law);
         if cfg.power {
             vfs.track_durability();
         }
@@ -466,7 +474,7 @@ impl<B: Backend> Rig<B> {
             model,
             acked: Acked::new(),
             staging_seen: 0,
-            staged_max: None,
+            staged: std::collections::BTreeSet::new(),
             ticks: Vec::new(),
             calls: Vec::new(),
             faults: Vec::new(),
@@ -752,6 +760,11 @@ impl<B: Backend> Rig<B> {
     fn note_staged(&mut self, newest_commit: Option<CommitId>, at: usize) {
         let events = self.staging_log.events();
         for event in events.iter().skip(self.staging_seen) {
+            if let RecorderEvent::Delete { keys, .. } = event {
+                for key in keys.iter().filter(|key| key.level().get() == 0) {
+                    self.staged.remove(&key.range().max());
+                }
+            }
             let RecorderEvent::Put {
                 key,
                 header: Some(_),
@@ -765,7 +778,7 @@ impl<B: Backend> Rig<B> {
                 continue;
             }
             let max = key.range().max();
-            self.staged_max = self.staged_max.max(Some(max));
+            self.staged.insert(max);
             let Some(model) = self.model.as_mut() else {
                 continue;
             };
@@ -789,9 +802,20 @@ impl<B: Backend> Rig<B> {
     /// Ticks until the actor is idle with everything staged on the replica.
     ///
     /// # Errors
-    /// [`RigError::Stopped`], [`RigError::Unsettled`], or the rig's own.
+    /// [`RigError::Stopped`], [`RigError::Unsettled`], [`RigError::State`] once the power is out
+    /// (nothing the dead machine does lands), or the rig's own.
     pub fn settle(&mut self) -> Result<(), RigError> {
-        for _ in 0..SETTLE_TICKS {
+        // Retries since the last tick that did anything else: a fault that every retry meets
+        // again never settles, and waiting out the whole budget only costs time.
+        let mut retries = 0;
+        for ticks in 0..SETTLE_TICKS {
+            // A machine whose power failed never settles; its ticks only retry.
+            if !self.vfs.powered() {
+                return Err(RigError::State("run without power"));
+            }
+            if retries >= SETTLE_RETRIES {
+                return Err(RigError::Unsettled(ticks));
+            }
             match self.tick()? {
                 Tick::Stopped(cause) => return Err(RigError::Stopped(cause)),
                 Tick::Drained { .. } => return Ok(()),
@@ -799,10 +823,20 @@ impl<B: Backend> Rig<B> {
                 Tick::Ran {
                     event: Event::Idle,
                     next,
-                } if !matches!(next, Next::Now) && self.acked.highest() >= self.staged_max => {
+                } if !matches!(next, Next::Now)
+                    && self.acked.highest() >= self.staged.last().copied() =>
+                {
                     return Ok(());
                 }
-                Tick::Ran { .. } => {}
+                Tick::Ran {
+                    event: Event::Retrying { .. },
+                    ..
+                } => retries = retries.saturating_add(1),
+                Tick::Ran {
+                    event: Event::Maintained { .. } | Event::Idle,
+                    ..
+                } => {}
+                Tick::Ran { .. } => retries = 0,
             }
         }
         Err(RigError::Unsettled(SETTLE_TICKS))
@@ -1017,6 +1051,8 @@ impl<B: Backend> Rig<B> {
         self.backend = None;
         self.app.discard_all()?;
         self.vfs.restore_power()?;
+        // Every connection is closed: what the loss left, for SQLite to recover on its own.
+        let left = (read_file(&self.db)?, read_file(&self.wal())?);
         self.app.open(APP)?;
         let frames = wal_frames(&mut self.app)?;
         let bytes = read_file(&self.wal())?;
@@ -1024,13 +1060,61 @@ impl<B: Backend> Rig<B> {
             (Some(salt1), Some(salt2)) => Some(Salts { salt1, salt2 }),
             (Some(_) | None, _) => None,
         };
+        // A tick that synced the WAL before the power failed in it kept what it wrote up to
+        // that sync, though the model never saw it: the rig looks only while the power is on.
+        let at = self.remote_log.len();
+        let kept = self.mirror.drain(frames)?;
         if let Some(model) = self.model.as_mut() {
+            for tx in kept {
+                let app = AppCommit {
+                    salts: tx.salts,
+                    end: tx.end,
+                };
+                model.commit(&tx.pages, tx.db_size, app, at);
+            }
             model.on_power_loss(salts.unwrap_or(Salts { salt1: 0, salt2: 0 }), frames);
         }
+        self.adopt_recovered(&left.0, &left.1, salts, frames)?;
         self.mirror.seen = salts.map(|salts| (salts, frames));
+        // The acknowledgements start again, and so does what settling waits for: a boot that
+        // continues (the WAL kept everything staged) has nothing new to upload.
         self.acked.note_rewound();
+        self.staged.clear();
         self.wal_syncs = self.vfs.syncs(FileKind::Wal);
         self.restart()
+    }
+
+    /// The model after a loss follows what SQLite's own recovery of the bytes the loss left
+    /// made of them (`lsr_sim::recovery`), which may be a commit an earlier loss took
+    /// ([`Model::adopt_recovered`]).
+    ///
+    /// # Errors
+    /// [`RigError::Oracle`] when SQLite recovered a state no commit made, or the probe failed.
+    fn adopt_recovered(
+        &mut self,
+        db: &[u8],
+        wal: &[u8],
+        salts: Option<Salts>,
+        frames: u32,
+    ) -> Result<(), RigError> {
+        let Some(model) = self.model.as_mut() else {
+            return Ok(());
+        };
+        let page_size = self.mirror.page_size;
+        let wal = (!wal.is_empty()).then_some(wal);
+        let truth = lsr_sim::recovery::recover(page_size, db, wal, lsr_sim::recovery::Header::Real)
+            .map_err(|err| bug_fault(format!("SQLite's recovery probe: {err}")))?;
+        let app = AppCommit {
+            salts: salts.unwrap_or(Salts { salt1: 0, salt2: 0 }),
+            end: WalOffset::from_frame_index(frames, page_size),
+        };
+        let at = self.remote_log.len();
+        match model.adopt_recovered(&truth.image, false, app, at) {
+            Recovery::Expected | Recovery::Resurrected(_) => Ok(()),
+            Recovery::Unknown => Err(RigError::Oracle(bug_fault(
+                "SQLite recovered a database no commit made",
+            ))),
+        }
     }
 
     /// Replaces the local database with `bytes`, as an application that lost its disk and restored the
