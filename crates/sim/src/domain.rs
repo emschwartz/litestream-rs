@@ -33,8 +33,8 @@ use std::io::ErrorKind;
 use std::time::Duration;
 
 use lsr_core::{
-    CorruptCause, Denied, Entropy, PersistentCause, SeededEntropy, SourceError, SourceOp,
-    StopCause, StoreError, StoreOp,
+    CorruptCause, Denied, Entropy, SeededEntropy, SourceError, SourceOp, StopCause, StoreError,
+    StoreOp,
 };
 use lsr_ltx::{PageNo, PageSize};
 
@@ -63,18 +63,11 @@ pub enum KnownWrong {
     /// A failed sync of the WAL is remembered in memory only: a restart before the TRUNCATE
     /// that pays for it stages frames the failed sync covered (BEHAVIOR's D2).
     WalSyncForgottenAtRestart,
-    /// Level-1 compaction reads level 0 from the local staging store but classifies that
-    /// store's errors as the replica's: a staging permission error becomes a persistent
-    /// `StoreDenied(Permission)`, which sends an operator to the bucket.
-    CompactionClassifiesLocalAsReplica,
 }
 
 impl KnownWrong {
     /// Every known defect.
-    pub const ALL: [Self; 2] = [
-        Self::WalSyncForgottenAtRestart,
-        Self::CompactionClassifiesLocalAsReplica,
-    ];
+    pub const ALL: [Self; 1] = [Self::WalSyncForgottenAtRestart];
 
     /// Where the defect is tracked and who fixes it.
     #[must_use]
@@ -83,10 +76,6 @@ impl KnownWrong {
             Self::WalSyncForgottenAtRestart => {
                 "#99 (D2); fixed by the journal session, persisting the unproven-WAL fact before \
                  the TRUNCATE"
-            }
-            Self::CompactionClassifiesLocalAsReplica => {
-                "#99; fixed by the health session, routing compaction's local reads through \
-                 Fault::from_staging (seeds 0x348, 0xb3c, 0xb9e)"
             }
         }
     }
@@ -98,12 +87,6 @@ impl KnownWrong {
             Self::WalSyncForgottenAtRestart => {
                 matches!(violation, Violation::StagedNotDurable { .. })
             }
-            Self::CompactionClassifiesLocalAsReplica => matches!(
-                violation,
-                Violation::UnexpectedDegraded {
-                    cause: PersistentCause::StoreDenied(Denied::Permission)
-                }
-            ),
         }
     }
 
@@ -538,7 +521,7 @@ pub const fn store_cell(target: Target, op: StoreOp, class: StoreClass) -> Cell 
             Target::Remote => Cell::Drawn,
             Target::Staging => Cell::Impossible("a filesystem never asks to slow down"),
         },
-        StoreClass::Denied(why) => denied_cell(target, op, why),
+        StoreClass::Denied(why) => denied_cell(target, why),
         StoreClass::NotFound => match op {
             StoreOp::Read => Cell::Impossible(NOT_FOUND_IS_STALE),
             StoreOp::List | StoreOp::Upload | StoreOp::Delete => Cell::Impossible(NOT_FOUND_NEVER),
@@ -560,13 +543,11 @@ pub const fn store_cell(target: Target, op: StoreOp, class: StoreClass) -> Cell 
     }
 }
 
-const fn denied_cell(target: Target, op: StoreOp, why: Denied) -> Cell {
+const fn denied_cell(target: Target, why: Denied) -> Cell {
     match (target, why) {
-        (Target::Staging, Denied::Permission) => match op {
-            StoreOp::Read => Cell::KnownWrong(KnownWrong::CompactionClassifiesLocalAsReplica),
-            StoreOp::List | StoreOp::Upload | StoreOp::Delete => Cell::Drawn,
-        },
-        (Target::Remote, _) => Cell::Drawn,
+        // A staging read refused during level-1 compaction was classified as the replica's
+        // until #145 (compaction routes its local reads through `Fault::from_staging`).
+        (Target::Staging, Denied::Permission) | (Target::Remote, _) => Cell::Drawn,
         (
             Target::Staging,
             Denied::Credentials | Denied::ClockSkew | Denied::BucketMissing | Denied::Tls,
