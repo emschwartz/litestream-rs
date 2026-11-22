@@ -267,7 +267,7 @@ fn diverged(confirmed: Txid, from: Txid) -> Uploaded {
 /// Whether the staged file after `confirmed`, when there is one, can follow
 /// the replica's file that ends at `confirmed`: the same page size, and when
 /// both name a WAL range, the staged one starts where the replica's ends or at
-/// the first frame of a generation. A header that does not decode is not
+/// the first frame of a generation ([`continues`]). A header that does not decode is not
 /// judged here: the upload's own verification, or the replica's read-back,
 /// owns that. Two header reads per listing, and listings run at boot and
 /// after an ambiguous commit only.
@@ -314,6 +314,10 @@ async fn follows_replica<L: ObjectStore, S: ObjectStore>(
 }
 
 /// Whether a file with header `ours` can come right after one with `theirs`.
+/// In the same generation it starts where `theirs` ended, or it is read from
+/// the first frame (a snapshot) and reaches at least as far: one that stops
+/// short describes an earlier state of that WAL, such as a staged file from a
+/// backup put back after the WAL was rewritten under the same salts.
 fn continues(theirs: &Header, ours: &Header) -> bool {
     if theirs.page_size() != ours.page_size() {
         return false;
@@ -321,9 +325,14 @@ fn continues(theirs: &Header, ours: &Header) -> bool {
     match (theirs.fields().wal, ours.fields().wal) {
         (Some(theirs), Some(ours)) => {
             let first_frame = u64::try_from(lsr_wal::HEADER_LEN).unwrap_or(u64::MAX);
-            ours.offset() == first_frame
-                || (ours.salts() == theirs.salts()
-                    && Some(ours.offset()) == theirs.offset().checked_add(theirs.size()))
+            let theirs_end = theirs.offset().checked_add(theirs.size());
+            if ours.salts() != theirs.salts() {
+                return ours.offset() == first_frame;
+            }
+            Some(ours.offset()) == theirs_end
+                || (ours.offset() == first_frame
+                    && theirs_end
+                        .is_some_and(|end| ours.offset().checked_add(ours.size()) >= Some(end)))
         }
         _ => true,
     }
