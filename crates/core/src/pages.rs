@@ -54,7 +54,7 @@
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 
-use lsr_ltx::{Event, PageChecksum, PageNo, PageSize};
+use lsr_ltx::{Event, PageChecksum, PageNo, PageSize, Txid};
 
 use crate::fault::{Fault, SnapshotCause};
 use crate::layout::{FileKey, Level};
@@ -198,12 +198,21 @@ pub(crate) const fn snapshot_clears(cause: &SnapshotCause) -> bool {
 }
 
 /// The table a boot that continues starts from: every page of every staged
-/// level-0 file, oldest first, then truncated to `commit`, the newest staged file's size.
+/// level-0 file from `from` on, oldest first, then truncated to `commit`, the
+/// newest staged file's size.
+///
+/// `from` is the replica's newest transaction: boot vouched for its staged
+/// copy (compared with the replica's object) and for every pending file
+/// after it (witnessed against the live WAL, `crate::witness`). An older
+/// staged file nothing vouched for may have been put back or replaced, and
+/// seeding from it would report the database file damaged at a page it
+/// never wrote; its pages are left to be learnt again.
 ///
 /// # Errors
 /// The staging store's fault when a list or read fails.
 pub(crate) async fn seeded<L: ObjectStore>(
     staging: &L,
+    from: Option<Txid>,
     commit: NonZeroU32,
 ) -> Result<PageChecksumTable, Fault> {
     let mut table = PageChecksumTable::new();
@@ -213,7 +222,11 @@ pub(crate) async fn seeded<L: ObjectStore>(
             .list(at.level, at.after, PageLimit::MAX)
             .await
             .map_err(|err| Fault::from_staging(&err))?;
-        for info in &page.files {
+        let vouched = page
+            .files
+            .iter()
+            .filter(|info| from.is_none_or(|from| info.key.range().max() >= from));
+        for info in vouched {
             seed_file(staging, &info.key, &mut table).await?;
         }
         match at

@@ -68,7 +68,7 @@ mod state;
 use std::num::NonZeroU32;
 use std::time::Duration;
 
-use lsr_ltx::{PageSize, Timestamp, Txid};
+use lsr_ltx::{PageSize, Timestamp, Txid, TxidRange};
 use lsr_wal::{CommittedEnd, OpenError, WalReader};
 
 use parts::{Course, Engine, Kept, Stop, Tail, TaskRestorePoint};
@@ -727,8 +727,8 @@ impl Actor {
             Ok(listed) => listed,
             Err(fault) => return self.fault(Task::Sync, fault, now),
         };
-        let witnessed = boot_witness(env, upload.confirmed()).await;
-        let Pending { tokens, refused } = match witnessed {
+        let witnessed = boot_witness(env, upload).await;
+        let (Pending { tokens, refused }, upload) = match witnessed {
             Ok(found) => found,
             Err(fault) => return self.fault(Task::Sync, fault, now),
         };
@@ -766,7 +766,7 @@ impl Actor {
                 position,
                 snapshot: None,
                 ..
-            } => match seeded(env.staging, position.commit()).await {
+            } => match seeded(env.staging, upload.confirmed(), position.commit()).await {
                 Ok(pages) => pages,
                 Err(fault) => return self.fault(Task::Sync, fault, now),
             },
@@ -1931,19 +1931,39 @@ async fn boot_listing<L: ObjectStore, R: ObjectStore>(
 /// The first file the WAL does not vouch for is deleted with every one
 /// after it, once a second pass agrees: one read never condemns a file. Two
 /// passes that disagree retry the boot.
+///
+/// The listing leaves a torn newest key unconfirmed, for its staged copy to
+/// be uploaded over it. When that copy is the file refused, the key stays
+/// as the replica lists it and is confirmed: new content never takes a
+/// transaction a listing showed, so the snapshot goes above it.
 async fn boot_witness<W: WalSource, P: PageSource, C, L: ObjectStore, R: ObjectStore>(
     env: &mut Env<'_, W, P, C, L, R>,
-    confirmed: Option<Txid>,
-) -> Result<Pending, Fault> {
+    upload: UploadState,
+) -> Result<(Pending, UploadState), Fault> {
+    let confirmed = upload.confirmed();
     let first = witness_once(env, confirmed).await?;
     let Some(from) = first.refused else {
-        return Ok(first);
+        return Ok((first, upload));
     };
     if witness_once(env, confirmed).await?.refused != Some(from) {
         return Err(Fault::LocalIo);
     }
     drop_staged_from(env.staging, from).await?;
-    Ok(first)
+    let next = confirmed.map_or(Some(Txid::MIN), Txid::next);
+    let key = FileKey::new(Level::ZERO, TxidRange::single(from));
+    let listed = env
+        .remote
+        .list(
+            Level::ZERO,
+            from.prev().map(TxidRange::single),
+            PageLimit::ONE,
+        )
+        .await
+        .map_err(|err| Fault::from_remote(&err))?;
+    if next == Some(from) && listed.files.first().is_some_and(|info| info.key == key) {
+        return Ok((first, UploadState::At(Some(from))));
+    }
+    Ok((first, upload))
 }
 
 async fn witness_once<W: WalSource, P: PageSource, C, L: ObjectStore, R: ObjectStore>(
