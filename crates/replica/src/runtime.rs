@@ -136,8 +136,13 @@ impl SystemPark {
 }
 
 impl Park for SystemPark {
+    /// A clock that steps back mid-wait moves the wake back with it, so the wait keeps what
+    /// was left of it instead of adding the step (the engine's own timers do the same,
+    /// `lsr_core`'s actor clock); a step forward ends the wait early.
     fn park(&self, until: Option<Timestamp>) {
         let mut woken = lock(&self.woken);
+        let mut until = until;
+        let mut seen = self.clock.now();
         loop {
             if std::mem::take(&mut *woken) {
                 return;
@@ -147,8 +152,13 @@ impl Park for SystemPark {
                     .signal
                     .wait(woken)
                     .unwrap_or_else(PoisonError::into_inner),
-                Some(until) => {
-                    let left = millis_until(self.clock.now(), until);
+                Some(at) => {
+                    let now = self.clock.now();
+                    let at = at
+                        .checked_sub(seen.saturating_duration_since(now))
+                        .unwrap_or(now);
+                    (until, seen) = (Some(at), now);
+                    let left = millis_until(now, at);
                     if left == 0 {
                         return;
                     }
@@ -227,12 +237,21 @@ mod fake {
     }
 
     impl Park for FakeTime {
+        /// As the system park: a clock that steps back mid-wait moves the wake back with it.
         fn park(&self, until: Option<Timestamp>) {
             let mut state = lock(&self.state);
+            let mut until = until;
+            let mut seen = self.clock.now();
             loop {
                 if std::mem::take(&mut state.woken) {
                     return;
                 }
+                let now = self.clock.now();
+                until = until.map(|at| {
+                    at.checked_sub(seen.saturating_duration_since(now))
+                        .unwrap_or(now)
+                });
+                seen = now;
                 if let Some(until) = until {
                     if self.clock.now() >= until {
                         return;
@@ -278,6 +297,14 @@ mod fake {
             self.time.signal.notify_all();
         }
 
+        /// Moves the clock back, as a wall clock that NTP corrects steps back, and wakes a park.
+        pub fn step_back(&self, by: Duration) {
+            let _state = lock(&self.time.state);
+            let now = self.time.clock.now();
+            self.time.clock.set(now.checked_sub(by).unwrap_or(now));
+            self.time.signal.notify_all();
+        }
+
         /// From now on a park moves the clock to its own wake time.
         pub fn release(&self) {
             lock(&self.time.state).free = true;
@@ -300,6 +327,43 @@ mod tests {
         let runtime = Runtime::system();
         runtime.park.unpark();
         runtime.park.park(None);
+    }
+
+    /// A clock that reads `start` once, then an hour earlier, moving 10 ms a read.
+    struct SteppedBack {
+        start: i64,
+        reads: std::sync::atomic::AtomicI64,
+    }
+
+    impl Clock for SteppedBack {
+        fn now(&self) -> Timestamp {
+            let n = self.reads.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                return Timestamp::from_unix_millis(self.start);
+            }
+            let back = self.start.saturating_sub(3_600_000);
+            Timestamp::from_unix_millis(back.saturating_add(n.saturating_mul(10)))
+        }
+    }
+
+    /// A clock that steps back while a park waits does not make the park wait the
+    /// step on top: the wait keeps what was left of it.
+    #[test]
+    fn a_park_keeps_its_remaining_wait_when_the_clock_steps_back() {
+        let clock = Arc::new(SteppedBack {
+            start: 1_000_000,
+            reads: std::sync::atomic::AtomicI64::new(0),
+        });
+        let park = Arc::new(SystemPark::new(clock));
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            park.park(Some(Timestamp::from_unix_millis(1_000_030)));
+            tx.send(()).unwrap();
+        });
+        assert!(
+            rx.recv_timeout(Duration::from_secs(10)).is_ok(),
+            "the park waited out the step"
+        );
     }
 
     #[test]

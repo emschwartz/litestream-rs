@@ -514,26 +514,30 @@ fn stop_is_terminal() {
     let (mut rig, mut actor) = caught_up();
     rig.remote.inner.inject_failure(
         StoreOp::Upload,
-        StoreError::Auth {
+        StoreError::Denied {
             op: StoreOp::Upload,
+            why: crate::store::Denied::Credentials,
         },
     );
     rig.commit(2);
     rig.tick(&mut actor, T0 + 10);
     assert_eq!(
         rig.tick(&mut actor, T0 + 10),
-        Tick::Stopped(StopCause::Credentials)
+        Tick::Stopped(StopCause::StoreDenied(crate::store::Denied::Credentials))
     );
     let io = rig.io();
     rig.commit(3);
     for at in [T0 + 10, T0 + 100_000] {
         assert_eq!(
             rig.tick(&mut actor, at),
-            Tick::Stopped(StopCause::Credentials)
+            Tick::Stopped(StopCause::StoreDenied(crate::store::Denied::Credentials))
         );
     }
     assert_eq!(rig.io(), io, "a stopped actor does no I/O");
-    assert_eq!(actor.phase(), Phase::Stopped(StopCause::Credentials));
+    assert_eq!(
+        actor.phase(),
+        Phase::Stopped(StopCause::StoreDenied(crate::store::Denied::Credentials))
+    );
 }
 
 fn big() -> PageSize {
@@ -616,6 +620,51 @@ fn with_staging_gone_the_replica_names_the_page_size() {
     assert_eq!(everything(&rig), before);
 }
 
+/// With staging gone and the replica's newest transaction held only above level 0, the boot
+/// reads the page size from the replica's newest file. When that header did not decode (a
+/// rotten object, or one read a proxy changed), the boot took no page size at all and
+/// snapshotted the new size onto the prefix, where every restore past it then stops. Found by
+/// a simulator hold whose reads lie (seed 0x13): any other file's header names the prefix's
+/// page size, and with none readable the boot must not guess.
+#[test]
+fn a_newest_replica_header_that_does_not_decode_still_names_the_page_size() {
+    let (mut rig, mut actor) = caught_up();
+    rig.commit(2);
+    rig.follow(&mut actor, T0 + 10, 50);
+    // Every file ending at the newest transaction is junk, and its level-0 file is gone.
+    let (_, files) = everything(&rig);
+    let newest = files.iter().map(|f| f.key.range().max()).max().unwrap();
+    block_on(async {
+        for file in files.iter().filter(|f| f.key.range().max() == newest) {
+            rig.remote.inner.delete(&[file.key]).await.unwrap();
+            if file.key.level() == Level::ZERO {
+                continue;
+            }
+            let mut up = rig
+                .remote
+                .inner
+                .begin_upload(&file.key, ts(T0))
+                .await
+                .unwrap();
+            up.write(&[0x5a; 200]).await.unwrap();
+            up.commit().await.unwrap();
+        }
+    });
+    rig.staging = Counting::default();
+    let before = everything(&rig);
+    resize(&mut rig, big());
+    let mut actor = Actor::new(cfg());
+    let ticks = rig.follow(&mut actor, T0 + 20, 50);
+    assert!(
+        ticks
+            .iter()
+            .all(|tick| !matches!(event(tick), Some(Event::Uploaded(_)))),
+        "{ticks:?}"
+    );
+    assert_eq!(ticks.last(), Some(&page_size_changed()), "{ticks:?}");
+    assert_eq!(everything(&rig).1, before.1, "nothing reaches the replica");
+}
+
 /// Staging holds an older file at the new page size (a staging backup put
 /// back) while the replica's newest transaction is later and at the old one.
 /// The boot judged the page size by the staged file alone and snapshotted the
@@ -687,6 +736,53 @@ fn a_failed_drop_after_a_divergence_uploads_nothing_built_on_it() {
     assert!(resnapshot < put_three, "{ticks:?}");
 }
 
+/// Expected to fail until the engine keeps a durable record (BOOT-21, BOOT-22; D9 in
+/// `docs/BEHAVIOR.md`). A running engine whose ambiguous commit makes it list the replica finds
+/// another writer's file above its own newest staged file and stops on `OtherWriter`, the one
+/// stop the default responses make. A restart forgets the stop: the new boot takes the other
+/// writer's file as history it is behind (`behind_remote`), snapshots after it and uploads, so
+/// the replica's one history interleaves two databases. The restart must stop again, or refuse.
+#[test]
+#[ignore = "known wrong, BOOT-21 and BOOT-22: an OtherWriter stop is forgotten by a restart; needs a durable engine-owned record"]
+fn a_restart_after_an_other_writer_stop_stops_again() {
+    let (mut other, mut writer) = caught_up();
+    other.commit(9);
+    other.follow(&mut writer, T0 + 10, 20);
+    other.commit(10);
+    other.follow(&mut writer, T0 + 20, 20);
+    let three = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(3).unwrap()));
+    let theirs = block_on(other.remote.inner.read(&three, 0, ReadLen::CHUNK)).unwrap();
+    let (mut rig, mut actor) = caught_up();
+    block_on(async {
+        let mut up = rig.remote.inner.begin_upload(&three, ts(T0)).await.unwrap();
+        up.write(&theirs).await.unwrap();
+        up.commit().await.unwrap();
+    });
+    rig.remote
+        .inner
+        .inject_failure_after_publish(transient(StoreOp::Upload));
+    rig.commit(2);
+    let ticks = rig.follow(&mut actor, T0 + 30, 60);
+    assert_eq!(
+        ticks.last(),
+        Some(&Tick::Stopped(StopCause::OtherWriter)),
+        "the running engine stops first: {ticks:?}"
+    );
+    let before = everything(&rig).1;
+    let mut restarted = Actor::new(cfg());
+    let ticks = rig.follow(&mut restarted, T0 + 40, 60);
+    assert_eq!(
+        ticks.last(),
+        Some(&Tick::Stopped(StopCause::OtherWriter)),
+        "{ticks:?}"
+    );
+    assert_eq!(
+        everything(&rig).1,
+        before,
+        "nothing is put over the other writer"
+    );
+}
+
 #[test]
 fn an_empty_replica_takes_any_page_size() {
     let mut rig = Rig::new();
@@ -714,6 +810,8 @@ fn a_wal_that_returns_at_another_page_size_stops_before_staging() {
     assert_eq!(everything(&rig), before);
 }
 
+/// Each step back of the clock is reported once, by the reading that made it;
+/// readings that only fail to move are not steps.
 #[test]
 fn clock_back_clamped_once() {
     let (mut rig, mut actor) = caught_up();
@@ -722,15 +820,81 @@ fn clock_back_clamped_once() {
         now: ts(T0 - 500),
     });
     assert_eq!(event(&rig.tick(&mut actor, T0 - 500)), Some(&clamped));
-    for at in [T0 - 500, T0 - 600] {
-        let tick = rig.tick(&mut actor, at);
-        assert!(!matches!(event(&tick), Some(Event::Clamped(_))), "{tick:?}");
-    }
+    let tick = rig.tick(&mut actor, T0 - 500);
+    assert!(!matches!(event(&tick), Some(Event::Clamped(_))), "{tick:?}");
+    let again = Event::Clamped(Clamped {
+        prev: ts(T0),
+        now: ts(T0 - 600),
+    });
+    assert_eq!(event(&rig.tick(&mut actor, T0 - 600)), Some(&again));
     rig.tick(&mut actor, T0 + 10);
     let again = rig.tick(&mut actor, T0 + 5);
     assert!(
         matches!(event(&again), Some(Event::Clamped(_))),
         "a new step back is reported"
+    );
+}
+
+/// A clock stepped back by an hour does not freeze a one-second retry for
+/// that hour: engine time keeps moving with the wall clock (at half speed
+/// until the wall clock catches up), the wake it asks for is seconds of wall
+/// clock away, and the upload goes through.
+#[test]
+fn a_backward_clock_step_does_not_freeze_a_retry_wait() {
+    let (mut rig, mut actor) = caught_up();
+    rig.remote
+        .inner
+        .inject_failure(StoreOp::Upload, transient(StoreOp::Upload));
+    rig.commit(2);
+    let at = T0 + 1_000;
+    assert_eq!(
+        event(&rig.tick(&mut actor, at)),
+        Some(&Event::Synced { files: 1 })
+    );
+    let failed = rig.tick(&mut actor, at);
+    assert!(
+        matches!(event(&failed), Some(Event::Retrying { until, .. }) if *until == ts(at + 1_000)),
+        "{failed:?}"
+    );
+    let back = at - 3_600_000;
+    assert!(matches!(
+        event(&rig.tick(&mut actor, back)),
+        Some(Event::Clamped(_))
+    ));
+    let waiting = rig.settle(&mut actor, back);
+    assert_eq!(
+        waiting.last().and_then(next_of),
+        Some(Next::At(ts(back + 2_000))),
+        "{waiting:?}"
+    );
+    let seen = rig.settle(&mut actor, back + 2_000);
+    assert!(
+        seen.iter()
+            .any(|tick| matches!(event(tick), Some(Event::Uploaded(Did::Put(_))))),
+        "{seen:?}"
+    );
+    assert_eq!(restored(&rig), 2);
+}
+
+/// After a step back the engine's time slews back onto the wall clock:
+/// once the wall clock has run twice the step, the two agree again, and a
+/// retry wait takes its own length of wall clock.
+#[test]
+fn engine_time_rejoins_the_wall_clock_after_a_step_back() {
+    let (mut rig, mut actor) = caught_up();
+    let back = T0 - 10_000;
+    rig.tick(&mut actor, back);
+    rig.settle(&mut actor, back + 20_000);
+    rig.remote
+        .inner
+        .inject_failure(StoreOp::Upload, transient(StoreOp::Upload));
+    rig.commit(2);
+    let at = back + 20_000;
+    rig.tick(&mut actor, at);
+    let failed = rig.tick(&mut actor, at);
+    assert!(
+        matches!(event(&failed), Some(Event::Retrying { until, .. }) if *until == ts(at + 1_000)),
+        "{failed:?}"
     );
 }
 
@@ -964,7 +1128,10 @@ fn store_errors(op: StoreOp) -> Vec<StoreError> {
             op,
             retry_after: None,
         },
-        StoreError::Auth { op },
+        StoreError::Denied {
+            op,
+            why: crate::store::Denied::Credentials,
+        },
         StoreError::Refused { op, status: 500 },
     ]
 }
@@ -1578,8 +1745,11 @@ fn stage_held(rig: &mut Rig, actor: &mut Actor, commits: &[u8], now: i64) {
     }
 }
 
+/// A torn staged file the replica lacks goes with every staged file after
+/// it. The WAL still follows the newest file left, so it holds the frames of
+/// the dropped ones: they are staged again from it, with no snapshot.
 #[test]
-fn a_torn_staged_file_the_replica_lacks_is_dropped_with_all_after_it() {
+fn a_torn_staged_file_the_replica_lacks_is_dropped_and_staged_again_from_the_wal() {
     for torn in [truncated, flipped] {
         let (mut rig, mut actor) = caught_up();
         stage_held(&mut rig, &mut actor, &[2, 3, 4], T0 + 1);
@@ -1592,19 +1762,37 @@ fn a_torn_staged_file_the_replica_lacks_is_dropped_with_all_after_it() {
         let again = first_bad_read(&mut rig, &mut actor, T0 + 2);
         assert_eq!(staged(&rig), vec![2, 3, 4]);
         let boot = rig.tick(&mut actor, again);
-        assert_eq!(
-            event(&boot),
-            Some(&Event::Booted {
-                cause: Some(SnapshotCause::NewestStagedFileUnreadable)
-            })
-        );
+        assert_eq!(event(&boot), Some(&Event::Booted { cause: None }));
         assert_eq!(staged(&rig), vec![2]);
         let seen = rig.settle(&mut actor, again);
         no_stop(&seen);
         assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2), (3, 3)]);
-        assert_eq!(snapshots(&rig), vec![1, 3]);
+        assert_eq!(snapshots(&rig), vec![1]);
         assert_eq!(restored(&rig), 4);
     }
+}
+
+/// The same drop when the WAL has since restarted: nothing live holds the
+/// dropped frames, so the next file is a snapshot, named for the lost file.
+#[test]
+fn a_torn_staged_file_whose_frames_the_wal_lost_costs_a_snapshot() {
+    let (mut rig, mut actor) = caught_up();
+    stage_held(&mut rig, &mut actor, &[2, 3, 4], T0 + 1);
+    tear(&rig, 3, truncated);
+    rig.wal.force_restart();
+    rig.commit(5);
+    let mut actor = Actor::new(cfg());
+    let again = first_bad_read(&mut rig, &mut actor, T0 + 2);
+    let boot = rig.tick(&mut actor, again);
+    assert_eq!(
+        event(&boot),
+        Some(&Event::Booted {
+            cause: Some(SnapshotCause::NewestStagedFileUnreadable)
+        })
+    );
+    let seen = rig.settle(&mut actor, again);
+    no_stop(&seen);
+    assert_eq!(restored(&rig), 5);
 }
 
 #[test]
@@ -1739,6 +1927,10 @@ fn one_bad_read_of_a_staged_file_at_boot_drops_nothing() {
     stage_held(&mut rig, &mut actor, &[2, 3, 4], T0 + 1);
     rig.staging.flip_next_read(l0(3));
     let mut actor = Actor::new(cfg());
+    let first = rig.tick(&mut actor, T0 + 2);
+    // The bad read deletes nothing: when the WAL could stage the files again,
+    // a deletion would not show as a snapshot, only as files gone.
+    assert_eq!(staged(&rig), vec![2, 3, 4], "{first:?}");
     let seen = rig.follow(&mut actor, T0 + 2, 50);
     no_stop(&seen);
     assert!(!lost_staged(&seen), "{seen:?}");
@@ -1762,4 +1954,28 @@ fn one_bad_read_of_a_staged_file_while_uploading_drops_nothing() {
     assert!(ranges(&rig.remote).contains(&(2, 2)));
     assert!(!snapshots(&rig).contains(&2));
     assert_eq!(restored(&rig), 2);
+}
+
+/// A PASSIVE checkpoint stages no boundary snapshot, so the counter for one stays at
+/// zero; only a TRUNCATE that changed the WAL counts one.
+#[test]
+fn a_passive_checkpoint_counts_no_boundary_snapshot() {
+    let mut rig = Rig::new();
+    let mut config = cfg();
+    config.checkpoint.min_pages = Some(nz(1));
+    let mut actor = Actor::new(config);
+    rig.settle(&mut actor, T0);
+    assert!(
+        rig.ck
+            .calls()
+            .iter()
+            .any(|c| matches!(c, CheckpointCall::Checkpoint(CheckpointMode::Passive))),
+        "the rig ran no PASSIVE checkpoint"
+    );
+    assert_eq!(
+        actor
+            .snapshots()
+            .get(crate::fault::SnapshotCauseKind::CheckpointBoundary),
+        0
+    );
 }

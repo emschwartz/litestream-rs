@@ -60,6 +60,30 @@ fn database_digest(db: &Database) -> Digest {
     Digest::of_pages(size, pages.iter().map(Vec::as_slice))
 }
 
+/// Restores `target` from `store` and digests what it built, as the judge digests it, with the
+/// transaction the restore reached.
+///
+/// # Errors
+/// The restore's own error, untouched: the caller decides what the fault it put in place
+/// explains.
+pub(crate) fn restored_digest<S: lsr_core::ObjectStore>(
+    store: &S,
+    target: RestoreTarget,
+) -> Result<Result<(Digest, Txid), RestoreError>, Violation> {
+    let sink = MemSink::new();
+    let options = RestoreOptions {
+        as_of_inside: AsOfInside::TakeEarlier,
+    };
+    let restored = match block_on(restore_with(store, target, options, sink.clone())) {
+        Ok(restored) => restored,
+        Err(err) => return Ok(Err(err)),
+    };
+    let db = sink
+        .published()
+        .ok_or_else(|| bug_fault("restore returned without publishing"))?;
+    Ok(Ok((database_digest(&db), restored.reached())))
+}
+
 /// What a restore came to, by content.
 enum Restored {
     Content(Digest),

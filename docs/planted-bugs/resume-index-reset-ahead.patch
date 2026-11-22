@@ -1,0 +1,13 @@
+diff --git a/crates/wal/src/scan.rs b/crates/wal/src/scan.rs
+index cf1ee2c..cb587cc 100644
+--- a/crates/wal/src/scan.rs
++++ b/crates/wal/src/scan.rs
+@@ -319,7 +319,7 @@ impl<R: Read + Seek> WalReader<R> {
+         // generation, so the header's first frame is within it: that resume
+         // claims no frame. Any other position needs the index's generation.
+         let reset_ahead = within.frame_count() == 0 && at.frame_index() == 0;
+-        if within.salts() != expected && !reset_ahead {
++        if within.salts() != expected && !(false && reset_ahead) {
+             return Err(ResumeError::Restarted {
+                 expected,
+                 found: within.salts(),

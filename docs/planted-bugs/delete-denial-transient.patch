@@ -1,0 +1,18 @@
+diff --git a/crates/store-s3/src/store.rs b/crates/store-s3/src/store.rs
+index 9079294..cba3be6 100644
+--- a/crates/store-s3/src/store.rs
++++ b/crates/store-s3/src/store.rs
+@@ -579,7 +579,12 @@ impl<T: Transport> Inner<T> {
+             // A key that is already gone is not a failure; anything else is.
+             let failed =
+                 parse_delete_failure_codes(&response).map_err(|err| err.into_store(op, None))?;
+-            classify_delete_failures(op, &failed)?;
++            if !failed.is_empty() {
++                return Err(StoreError::Transient {
++                    op,
++                    kind: io::ErrorKind::Other,
++                });
++            }
+         }
+         Ok(())
+     }

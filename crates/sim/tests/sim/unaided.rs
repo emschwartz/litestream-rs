@@ -5,7 +5,10 @@
 //! follow the block crash law instead of half of them; with `LSR_SIM_AFTER_RESTART` set (`redo`,
 //! `busy` or `nothing`), every seed's app does that after a restart instead of what its mix drew;
 //! with `LSR_SIM_NO_WAL_DAMAGE` set, no seed draws WAL damage; with `LSR_SIM_LYING_SYNC` set,
-//! every seed's disk lies about the engine's WAL fsync instead of what its mix drew.
+//! every seed's disk lies about the engine's WAL fsync instead of what its mix drew; with
+//! `LSR_SIM_SWARM` set, every seed runs its swarm mix (`Weights::swarm`) instead, and with
+//! `LSR_SIM_DEFAULT` set the default mix; with `LSR_SIM_HOLD` set to a rate in a thousand, holds
+//! are drawn at least that often (`tests/sim/survival.rs`).
 //! Prints every failing seed and the number of seeds run to
 //! the first. The generator, weights and step count are the soak's, fixed here so a count of
 //! seeds to first failure compares across trees.
@@ -70,7 +73,18 @@ fn env(name: &str, default: u64) -> u64 {
 /// with no WAL damage drawn when `LSR_SIM_NO_WAL_DAMAGE` is set: damage regrows the WAL with
 /// other bytes by fiat, so leaving it out shows what the application's own behaviour reaches.
 pub fn weights(seed: Seed) -> Weights {
-    let mut weights = Weights::mixed(seed);
+    let mut weights = if std::env::var("LSR_SIM_SWARM").is_ok() {
+        Weights::swarm(seed)
+    } else if std::env::var("LSR_SIM_DEFAULT").is_ok() {
+        Weights::default()
+    } else {
+        Weights::mixed(seed)
+    };
+    if let Ok(hold) = std::env::var("LSR_SIM_HOLD") {
+        weights.hold = weights
+            .hold
+            .max(hold.parse().expect("LSR_SIM_HOLD is a rate in 1000"));
+    }
     weights.block_crash_law |= std::env::var("LSR_SIM_BLOCK_LAW").is_ok();
     weights.lying_wal_sync |= std::env::var("LSR_SIM_LYING_SYNC").is_ok();
     if std::env::var("LSR_SIM_NO_WAL_DAMAGE").is_ok() {

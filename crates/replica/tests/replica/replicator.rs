@@ -181,11 +181,11 @@ fn a_refused_boot_is_degraded_and_recovers() {
     let replicator = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
     assert_eq!(
         booted(&replicator),
-        Booted::Degraded(DegradedCause::Credentials)
+        Booted::Degraded(DegradedCause::StoreDenied(lsr_core::Denied::Credentials))
     );
     assert_eq!(
         replicator.health().task(Task::Sync).map(|d| d.cause),
-        Some(DegradedCause::Credentials)
+        Some(DegradedCause::StoreDenied(lsr_core::Denied::Credentials))
     );
     faulty.refuse.store(false, Ordering::SeqCst);
     clock.advance(POLL);
@@ -196,6 +196,26 @@ fn a_refused_boot_is_degraded_and_recovers() {
     wait(&replicator, caught_up);
     assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
     site.assert_restores(&*site.store());
+}
+
+/// A replicator whose first boot the store refuses has replicated nothing: its lag counts
+/// from the start, never zero, so an alert on the lag fires while the store is unreachable.
+#[test]
+fn the_lag_counts_from_the_start_while_the_first_boot_fails() {
+    let site = Site::new();
+    let faulty = site.faulty();
+    faulty.refuse.store(true, Ordering::SeqCst);
+    let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
+    let (runtime, clock) = fake();
+    let started = clock.now();
+    let replicator = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
+    let refused = wait(&replicator, |h| h.task(Task::Sync).is_some());
+    assert_eq!(refused.phase, Phase::Booting, "{refused:?}");
+    assert_eq!(refused.unreplicated_since, Some(started), "{refused:?}");
+    faulty.refuse.store(false, Ordering::SeqCst);
+    clock.advance(POLL);
+    wait(&replicator, caught_up);
+    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
 }
 
 /// Go's `SyncStatus`: what is staged locally and what the replica holds, before the replica
@@ -333,14 +353,17 @@ fn a_stopped_replicator_reports_its_cause() {
         ..config()
     };
     let replicator = Replicator::start_with(&site.db, store, strict, runtime).unwrap();
-    assert_eq!(booted(&replicator), Booted::Stopped(StopCause::Credentials));
+    assert_eq!(
+        booted(&replicator),
+        Booted::Stopped(StopCause::StoreDenied(lsr_core::Denied::Credentials))
+    );
     assert_eq!(
         replicator.health().phase,
-        Phase::Stopped(StopCause::Credentials)
+        Phase::Stopped(StopCause::StoreDenied(lsr_core::Denied::Credentials))
     );
     assert_eq!(
         stopped(&replicator),
-        Stopped::Stopped(StopCause::Credentials)
+        Stopped::Stopped(StopCause::StoreDenied(lsr_core::Denied::Credentials))
     );
 }
 
@@ -558,17 +581,28 @@ fn an_app_checkpoint_is_counted_and_reported() {
     site.assert_restores(&*site.store());
 }
 
-/// The application's connections keep `wal_autocheckpoint = 0` (`app_connection` sets it), and the
-/// WAL grows past SQLite's automatic checkpoint threshold until the replicator's own
-/// checkpoints run: no application checkpoint is seen, none is inferred, and no notice is raised.
-#[test]
-fn an_app_at_wal_autocheckpoint_0_raises_no_notice() {
+/// A history in which the WAL grows past SQLite's automatic-checkpoint threshold while the read
+/// lock stands where no checkpoint can copy anything: one checkpoint of ours (by the interval)
+/// restarts the log, and the frame-count trigger is out of reach, so six 200-row commits take
+/// the new generation past 1000 frames with no checkpoint of ours between two reads. That is
+/// what an application at the default threshold leaves when its attempts fail, and what one at
+/// `wal_autocheckpoint = 0` leaves too; only the threshold the replicator is told tells them
+/// apart (`lsr_core::app`). The health after the commits.
+fn grown_on_read_mark_zero(
+    app_autocheckpoint: Option<NonZeroU32>,
+) -> (lsr_replica::Health, Vec<Event>) {
     let site = Site::new();
     let (runtime, clock) = fake();
-    let replicator = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
+    let mut config = config();
+    config.app_autocheckpoint = app_autocheckpoint;
+    config.checkpoint.min_pages = NonZeroU32::new(5000);
+    let replicator = Replicator::start_with(&site.db, site.store(), config, runtime).unwrap();
     let (sink, events) = ChannelSink::new(NonZeroUsize::new(256).unwrap());
     replicator.set_events(Box::new(sink));
-    let mut health = wait(&replicator, caught_up);
+    wait(&replicator, caught_up);
+    site.commit(1);
+    clock.advance(Duration::from_secs(61));
+    let mut health = wait(&replicator, |h| caught_up(h) && h.counters.checkpoints >= 1);
     for _ in 0..6 {
         let before = health.synced.map(|(txid, _)| txid);
         site.commit(200);
@@ -577,17 +611,51 @@ fn an_app_at_wal_autocheckpoint_0_raises_no_notice() {
             caught_up(h) && h.synced.map(|(txid, _)| txid) > before
         });
     }
+    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
+    (health, events.drain())
+}
+
+/// The application's connections keep `wal_autocheckpoint = 0` (`app_connection` sets it), and the
+/// replicator is told so (`app_autocheckpoint: None`): however far the WAL grows past SQLite's
+/// threshold before the replicator's own checkpoint, no application checkpoint is seen, none is
+/// inferred, and no notice is raised.
+///
+/// This test used to state nothing, so the replicator assumed SQLite's default of 1000 frames,
+/// and it flaked (CI job 137273518319: `stalled: 1, last: Some(Stalled { frames: 1205 })`).
+/// After one checkpoint of ours restarted the log, the test could see the health of the sync
+/// that took the WAL past 1000 frames and commit again before the checkpoint that sync
+/// triggered ran; the next read then saw growth past the threshold with nothing copied, which
+/// for an application at 1000 is a stalled attempt. The history above makes that order certain.
+#[test]
+fn an_app_at_wal_autocheckpoint_0_raises_no_notice() {
+    let (health, seen) = grown_on_read_mark_zero(None);
     assert!(health.counters.checkpoints >= 1, "{health:?}");
     assert_eq!(health.app_checkpoints, AppCheckpoints::NONE);
     assert_eq!(health.app_notice(), None);
-    let seen = events.drain();
     assert!(
         !seen
             .iter()
             .any(|event| matches!(event, Event::AppCheckpoint { .. })),
         "{seen:?}"
     );
-    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
+}
+
+/// The same history with the replicator told the application runs SQLite's default threshold:
+/// the growth is the stalled attempt it would be, and it is reported, once. The inference
+/// the test above relies on being told off is reached.
+#[test]
+fn an_app_at_the_default_threshold_whose_wal_grows_on_read_mark_zero_is_reported_stalled() {
+    let (health, _) = grown_on_read_mark_zero(Some(lsr_core::SQLITE_AUTOCHECKPOINT));
+    assert_eq!(health.app_checkpoints.stalled, 1, "{health:?}");
+    assert!(
+        matches!(
+            health.app_checkpoints.last,
+            Some(lsr_core::AppCheckpoint::Stalled { .. })
+        ),
+        "{health:?}"
+    );
+    // Health, not the event stream: the event sink is bounded and drops events it is not
+    // drained of, and how many sync events a run makes depends on its timing.
 }
 
 /// Go's idle replica monitor: with nothing to do, every poll still writes the health

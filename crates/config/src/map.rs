@@ -615,6 +615,10 @@ fn responses(settings: ResponseSettings) -> Responses {
     };
     Responses {
         credentials: one(settings.credentials, base.credentials),
+        permission_denied: one(settings.permission_denied, base.permission_denied),
+        clock_skew: one(settings.clock_skew, base.clock_skew),
+        bucket_missing: one(settings.bucket_missing, base.bucket_missing),
+        tls: one(settings.tls, base.tls),
         store_refused: one(settings.store_refused, base.store_refused),
         remote_corrupt: one(settings.remote_corrupt, base.remote_corrupt),
         remote_regressed: one(settings.remote_regressed, base.remote_regressed),

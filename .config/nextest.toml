@@ -29,10 +29,12 @@ slow-timeout = { period = "120s", terminate-after = 10, grace-period = "10s" }
 
 # Recipe-only cases that run for minutes by design: `just sqlite-big`, `just plan-exhaustive`,
 # `just sim-soak`, `just sim-nightly` (900 s by default, 45-minute job), `just mem-big`, `just test-tigris`,
-# `just tigris-restore`, and the history judge's long runs (`unaided::` in lsr-sim, the real
-# power-loss trials in lsr-history). 300 s * 6 = 30 minutes.
+# `just tigris-restore`, `just journal-model`, and the history judge's long runs (`unaided::` in
+# lsr-sim, the real power-loss trials in lsr-history), and the campaigns run by hand
+# (`survival::survival_campaign_*` in lsr-sim, `crash_cycles::crash_cycle_campaign` in lsr-sqlite).
+# 300 s * 6 = 30 minutes.
 [[profile.default.overrides]]
-filter = "test(/^(big|soak|tigris)::/) | test(/^plan_exhaustive::exhaustive::every_larger/) | test(/^plan_lazy::/) | test(/^tally::/) | test(/^mem_big::/) | test(/^unaided::/) | test(/^rig::real_power_loss_trials$/)"
+filter = "test(/^(big|soak|tigris)::/) | test(/^journal::deep$/) | test(/^plan_exhaustive::exhaustive::every_larger/) | test(/^plan_lazy::/) | test(/^tally::/) | test(/^mem_big::/) | test(/^unaided::/) | test(/^rig::real_power_loss_trials$/) | test(/^survival::survival_campaign_/) | test(/^crash_cycles::crash_cycle_campaign$/)"
 slow-timeout = { period = "300s", terminate-after = 6, grace-period = "10s" }
 
 # `just soak-tigris <hours>`: hours by design, a manual run, never in CI. 1 h * 48.

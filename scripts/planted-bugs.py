@@ -11,6 +11,14 @@ HEAD, then must each fail once the entry's patch is applied. Exits 1 when a plan
 current tree, or retire the entry with a reason), a test does not run, or a build breaks.
 
     uv run scripts/planted-bugs.py [--only NAME]... [--keep]
+
+`--unaided` asks another question: would the simulator's swarm find each planted bug with no
+test written for it? The named tests are not run. Each patch is applied and the swarm runs
+`--seeds` seeds from `--base` (disjoint from the fixed seed set); the table gives the seeds run up
+to the first failure, or `none`. A bug no seed finds is a listed generator gap, not a failure:
+this mode reports and exits 0 unless the clean tree fails or a plant does not apply or build.
+
+    uv run scripts/planted-bugs.py --unaided [--seeds N] [--base B] [--only NAME]...
 """
 
 import argparse
@@ -39,19 +47,40 @@ def git(*args: str, cwd: Path = ROOT, check: bool = True, **kw) -> subprocess.Co
     return subprocess.run(["git", *args], cwd=cwd, check=check, text=True, capture_output=True, **kw)
 
 
-def prepare_tree() -> None:
-    """A detached worktree of HEAD, reset to a clean state."""
+def checkout_head() -> str:
+    """The commit this checkout's HEAD names, which every verdict must be about."""
+    return git("rev-parse", "HEAD").stdout.strip()
+
+
+class StaleTree(Exception):
+    """The scratch tree is not at this checkout's HEAD: any verdict would be about other code."""
+
+
+def assert_tree_at(head: str) -> None:
+    """Raises StaleTree unless the scratch tree's commit is `head`. Called before every verdict,
+    so a regression in how the tree is reset cannot pass as a result."""
+    at = git("rev-parse", "HEAD", cwd=TREE).stdout.strip()
+    if at != head:
+        raise StaleTree(f"the scratch tree {TREE} is at {at[:12]}, this checkout at {head[:12]}")
+
+
+def reset_tree(head: str) -> None:
+    """The scratch tree at `head`, with no change and no untracked file but the target dir.
+    `head` is resolved in this checkout: inside the scratch tree `HEAD` names the commit an
+    earlier run left it at."""
+    git("checkout", "--force", "--detach", head, cwd=TREE)
+    git("clean", "-fdxq", "-e", "target", cwd=TREE)
+    assert_tree_at(head)
+
+
+def prepare_tree(head: str) -> None:
+    """A detached worktree of `head`, reset to a clean state."""
     SCRATCH.mkdir(parents=True, exist_ok=True)
     git("worktree", "prune")
-    # HEAD of this checkout, resolved here: inside the scratch tree `HEAD` names the commit the
-    # tree was left at by an earlier run, so a reused tree would test a stale commit.
-    head = git("rev-parse", "HEAD").stdout.strip()
     if not (TREE / ".git").exists():
         shutil.rmtree(TREE, ignore_errors=True)
         git("worktree", "add", "--detach", str(TREE), head)
-    else:
-        git("checkout", "--force", "--detach", head, cwd=TREE)
-    git("clean", "-fdxq", "-e", "target", cwd=TREE)
+    reset_tree(head)
 
 
 def env() -> dict[str, str]:
@@ -68,7 +97,9 @@ def env() -> dict[str, str]:
 def nextest_args(bug: dict) -> list[str]:
     args = ["cargo", "nextest", "run", "--locked", "--no-tests=fail", "-p", bug["package"],
             "--config-file", str(PATCHES / "nextest.toml")]
-    if "test_bin" in bug:
+    if "bin" in bug:
+        args += ["--bin", bug["bin"]]
+    elif "test_bin" in bug:
         args += ["--test", bug["test_bin"]]
     else:
         args += ["--lib", "--tests"]
@@ -102,10 +133,35 @@ def run_test(bug: dict, test: str) -> tuple[str, str]:
     return "error", out
 
 
+# A canary entry's verdict is known in advance: `no-op` must survive (its patch changes nothing a
+# test sees), `fatal` must be killed (its patch breaks a test for certain). Either one reporting
+# otherwise means the runner, not the code, is wrong: a patch not applied, a filter that runs
+# no test, an exit code misread.
+CANARIES = {"survived": "SURVIVED", "killed": "killed"}
+
+
+def canary_verdict(bug: dict, word: str) -> str:
+    """The row's verdict: `word` for a real entry, `canary ok` or `CANARY` for a canary."""
+    if "canary" not in bug:
+        return word
+    expected = CANARIES[bug["canary"]]
+    if word == expected:
+        return f"canary ok ({word})"
+    return f"CANARY: expected {expected}, got {word}"
+
+
+def passed(verdict: str) -> bool:
+    return verdict.startswith("killed") or verdict.startswith("canary ok")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", action="append", default=[], help="run just this entry (repeatable)")
     ap.add_argument("--keep", action="store_true", help="leave the scratch worktree and target dir")
+    ap.add_argument("--unaided", action="store_true",
+                    help="seeds the swarm needs to find each plant, with no named test run")
+    ap.add_argument("--seeds", type=int, default=1000, help="--unaided: swarm seeds per plant")
+    ap.add_argument("--base", type=int, default=1_000_001, help="--unaided: first swarm seed")
     opts = ap.parse_args()
     bugs = tomllib.loads(LEDGER.read_text())["bug"]
     names = [b["name"] for b in bugs]
@@ -116,14 +172,34 @@ def main() -> int:
     if unknown:
         print(f"planted-bugs: no such entry: {unknown}", file=sys.stderr)
         return 1
-    bugs = [b for b in bugs if not opts.only or b["name"] in opts.only]
+    kinds = sorted(b["canary"] for b in bugs if "canary" in b)
+    if kinds != sorted(CANARIES):
+        print(f"planted-bugs: the ledger needs exactly one canary of each kind {sorted(CANARIES)}, "
+              f"found {kinds}", file=sys.stderr)
+        return 1
+    # The canaries always run: they are what says the verdicts below mean anything.
+    bugs = [b for b in bugs if not opts.only or b["name"] in opts.only or "canary" in b]
+
+    if opts.unaided:
+        return unaided([b for b in bugs if "canary" not in b], opts.seeds, opts.base)
 
     rows: list[tuple[str, str, str, str]] = []  # name, fix, verdict, detail
-    prepare_tree()
+    head = checkout_head()
+    try:
+        prepare_tree(head)
+        run_ledger(bugs, head, rows)
+    except StaleTree as stale:
+        print(f"planted-bugs: {stale}; no verdict is about this checkout", file=sys.stderr)
+        return 1
+    return report(rows, opts.keep)
+
+
+def run_ledger(bugs: list[dict], head: str, rows: list[tuple[str, str, str, str]]) -> None:
 
     # Phase 1: the named tests pass on the clean tree, so a later failure comes from the patch.
     clean_bad: dict[str, str] = {}
     for bug in bugs:
+        assert_tree_at(head)
         err = build(bug)
         if err:
             clean_bad[bug["name"]] = "clean tree does not build:\n" + err
@@ -141,14 +217,14 @@ def main() -> int:
         if name in clean_bad:
             rows.append((name, fix, "BROKEN", clean_bad[name]))
             continue
-        git("checkout", "--force", "--detach", "HEAD", cwd=TREE)
-        git("clean", "-fdxq", "-e", "target", cwd=TREE)
+        reset_tree(head)
         patch = PATCHES / f"{bug.get('patch', name)}.patch"
         applied = git("apply", "--whitespace=nowarn", str(patch), cwd=TREE, check=False)
         if applied.returncode != 0:
             rows.append((name, fix, "STALE", f"{patch.name} no longer applies; re-express it against the "
                          f"current tree or retire the entry:\n{applied.stderr.strip()}"))
             continue
+        assert_tree_at(head)
         err = build(bug)
         if err:
             rows.append((name, fix, "BUILD", "the planted tree does not build (a plant that breaks the "
@@ -169,20 +245,101 @@ def main() -> int:
             word = "SURVIVED"
         else:
             word = "ERROR"
-        rows.append((name, fix, word, "; ".join(details) + f" [{time.monotonic() - started:.0f}s]"))
+        rows.append((name, fix, canary_verdict(bug, word),
+                     "; ".join(details) + f" [{time.monotonic() - started:.0f}s]"))
 
+
+SWARM = {"package": "lsr-sim", "test_bin": "sim"}
+
+
+# Seeds per nextest invocation: each run stays well inside the ledger's 90 s per-test limit.
+SWARM_CHUNK = 200
+
+
+def swarm(seeds: int, base: int) -> str:
+    """The swarm's first-failure line on the tree as it is, or what went wrong instead."""
+    err = build(SWARM)
+    if err:
+        return "BUILD\n" + err
+    args = nextest_args(SWARM) + ["--run-ignored", "only", "--no-capture", "-E", "test(=tally::first_failure)"]
+    cmd = f"ulimit -v {MEM_CAP_KIB}; exec \"$@\""
+    for start in range(0, seeds, SWARM_CHUNK):
+        count = min(SWARM_CHUNK, seeds - start)
+        e = env()
+        e["LSR_SIM_TALLY_SEEDS"], e["LSR_SIM_BASE_SEED"] = str(count), str(base + start)
+        try:
+            p = subprocess.run(["bash", "-c", cmd, "bash", *args], cwd=TREE, env=e, text=True,
+                               capture_output=True, timeout=RUN_BOUND)
+        except subprocess.TimeoutExpired:
+            return f"timeout in seeds {base + start}..{base + start + count - 1}"
+        lines = (p.stdout + p.stderr).splitlines()
+        found = [i for i, line in enumerate(lines) if line.startswith("first-failure: ")]
+        if not found:
+            return "ERROR\n" + "\n".join(lines[-15:])
+        first = lines[found[0]].removeprefix("first-failure: ")
+        if not first.startswith("none"):
+            k, _, seed = first.partition(" ")
+            why = lines[found[0] + 1].strip() if found[0] + 1 < len(lines) else ""
+            return f"{int(k) + start} {seed}\t{why[:160]}"
+    return f"none {seeds}\t"
+
+
+def unaided(bugs: list[dict], seeds: int, base: int) -> int:
+    """Seeds to the first swarm failure per plant; see the module docs."""
+    head = checkout_head()
+    try:
+        prepare_tree(head)
+        clean = swarm(seeds, base)
+        rows = []
+        for bug in bugs:
+            reset_tree(head)
+            patch = PATCHES / f"{bug['name']}.patch"
+            applied = git("apply", "--whitespace=nowarn", str(patch), cwd=TREE, check=False)
+            assert_tree_at(head)
+            started = time.monotonic()
+            got = swarm(seeds, base) if applied.returncode == 0 else "STALE"
+            rows.append((bug["name"], got, time.monotonic() - started))
+            print(f"{bug['name']}: {got.splitlines()[0]} [{rows[-1][2]:.0f}s]", flush=True)
+    except StaleTree as stale:
+        print(f"planted-bugs: {stale}; no verdict is about this checkout", file=sys.stderr)
+        return 1
+    finally:
+        git("checkout", "--force", "--detach", "HEAD", cwd=TREE, check=False)
+    print(f"\nswarm seeds {base}..{base + seeds - 1} at {head[:12]}; clean tree: {clean.splitlines()[0]}")
+    print("| entry | seeds to first failure | first seed | failure |\n|---|---|---|---|")
+    for name, got, _ in rows:
+        first, _, why = got.partition("\t")
+        k, _, seed = first.partition(" ")
+        if k == "none":
+            k, seed = f"none in {seed}", ""
+        print(f"| {name} | {k} | {seed} | {why.splitlines()[0] if why else ''} |")
+    # A plant whose first failure is the clean tree's own (same seed, same message) shows nothing
+    # about the plant: the clean tree's defect hid it. It is reported as masked, not found.
+    masked = {name for name, got, _ in rows if got[:1].isdigit() and got.split(" ", 1)[1:] == clean.split(" ", 1)[1:]}
+    for name in sorted(masked):
+        print(f"masked by the clean tree's own failure: {name}")
+    found = sum(1 for name, got, _ in rows if got[:1].isdigit() and name not in masked)
+    print(f"\nunaided: the swarm found {found} of {len(rows)} plants within {seeds} seeds")
+    broken = [n for n, got, _ in rows if not (got[:1].isdigit() or got.startswith("none"))]
+    if broken or not clean.startswith("none"):
+        print(f"planted-bugs: clean tree {clean.splitlines()[0]!r}; no answer for {broken}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def report(rows: list[tuple[str, str, str, str]], keep: bool) -> int:
     width = max(len(r[0]) for r in rows)
     print(f"\n{'entry':<{width}}  {'fix':<8}  verdict")
     for name, fix, verdict, detail in rows:
         print(f"{name:<{width}}  {fix:<8}  {verdict}")
     for name, fix, verdict, detail in rows:
-        if not verdict.startswith("killed"):
+        if not passed(verdict):
             print(f"\n--- {name} ({fix}): {verdict}\n{detail}")
         else:
             print(f"    {name}: {detail}")
-    if not opts.keep:
+    if not keep:
         git("checkout", "--force", "--detach", "HEAD", cwd=TREE, check=False)
-    bad = [r for r in rows if not r[2].startswith("killed")]
+    bad = [r for r in rows if not passed(r[2])]
     if bad:
         print(f"\nplanted-bugs: {len(bad)} of {len(rows)} entries failed: "
               + ", ".join(f"{r[0]} ({r[2]})" for r in bad), file=sys.stderr)

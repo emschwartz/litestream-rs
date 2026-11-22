@@ -328,6 +328,22 @@ struct Run {
     start: i64,
     /// What the application does after a reboot, from a stream of its own.
     app: App,
+    /// When restores are judged while the fault holds, from a stream of its own.
+    survive: Rng,
+    /// Restores judged while the fault held: in the segment, with the power off, and after the
+    /// reboot before the settle.
+    held: [u64; 3],
+}
+
+/// Where a restore judged while the fault holds is made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Held {
+    /// During the segment: faults fire everywhere and the loss is armed.
+    Segment,
+    /// The power is off and SQLite has not recovered.
+    PowerOff,
+    /// SQLite recovered and the application went on; the engine has not settled.
+    Rebooted,
 }
 
 /// The value of row `id` at `version`: the workload's own bytes.
@@ -369,6 +385,8 @@ impl Run {
         Self {
             app: App::new(seed),
             instants: Rng(seed ^ 0x4a5f_0d1e_c0de_0001),
+            survive: Rng(seed ^ 0x5375_7276_6976_6501),
+            held: [0; 3],
             start,
             rig,
             rng,
@@ -553,12 +571,48 @@ impl Run {
             }
             let step = self.rng.pick(&WEIGHTS);
             self.step(step)?;
+            if self.rig.vfs().powered() && self.survive.below(6) == 0 {
+                self.judge_held(Held::Segment)?;
+            }
         }
         self.rig.faults_everywhere(false);
         self.rig.vfs().disarm();
         if self.rig.vfs().powered() {
             self.rig.vfs().cut_power();
         }
+        if self.survive.below(2) == 0 {
+            self.judge_held(Held::PowerOff)?;
+        }
+        Ok(())
+    }
+
+    /// `Latest` and one `AsOf` instant, restored while the fault holds and held to the tree.
+    /// A replica with no file yet has nothing to restore; any other refusal of `Latest` is an
+    /// anomaly, as after a settle.
+    fn judge_held(&mut self, held: Held) -> Result<(), Anomaly> {
+        let store = lsr_store_fs::FsStore::new(self.rig.replica_root());
+        let empty = block_on(lsr_core::Inventory::load(&store))
+            .map_err(|err| Anomaly::RestoredCorrupt(format!("list: {err}")))?
+            .newest()
+            .is_none();
+        if empty {
+            return Ok(());
+        }
+        let restored = self.restore("restored-held.db", RestoreTarget::Latest)?;
+        self.history.judge(Target::Latest, &restored)?;
+        let now = self.rig.clock().now().unix_millis();
+        let span = u64::try_from(now - self.start).unwrap_or(0);
+        let instant = self.start + i64::try_from(self.survive.below(span + 2)).unwrap_or(0);
+        let target = RestoreTarget::AsOf(lsr_ltx::Timestamp::from_unix_millis(instant));
+        if let Some(rows) = self.restore_or_refused("restored-held-as-of.db", target)? {
+            self.history.judge(Target::AsOf(instant), &rows)?;
+        }
+        let slot = match held {
+            Held::Segment => 0,
+            Held::PowerOff => 1,
+            Held::Rebooted => 2,
+        };
+        self.held[slot] += 1;
         Ok(())
     }
 
@@ -761,6 +815,9 @@ impl Run {
     fn cycle(&mut self) -> Result<(), Anomaly> {
         self.segment()?;
         self.reboot()?;
+        if self.survive.below(2) == 0 {
+            self.judge_held(Held::Rebooted)?;
+        }
         self.judge()
     }
 }
@@ -771,6 +828,7 @@ pub type RunEnd = (
     (u32, u32),
     (lsr_history::Counts, usize),
     AppEnd,
+    [u64; 3],
 );
 
 /// What the application did after its reboots: its behaviour, the writes it replayed, the
@@ -792,7 +850,13 @@ pub fn run(seed: u64, cycles: u32) -> RunEnd {
         AfterReboot::Busy => "busy",
     };
     let app = (behaviour, app.redone, app.past_lost, app.busy_writes);
-    (found, run.rig.vfs().wal_block_losses(), judged, app)
+    (
+        found,
+        run.rig.vfs().wal_block_losses(),
+        judged,
+        app,
+        run.held,
+    )
 }
 
 impl Run {
@@ -812,14 +876,21 @@ impl Run {
     }
 }
 
-/// A few frozen seeds in the gate.
+/// A few frozen seeds in the gate; between them they judge restores at each place a fault
+/// can still hold.
 #[test]
 fn crash_cycles_under_the_block_law_restore_committed_states() {
+    let mut held = [0; 3];
     for seed in 0..3 {
-        if let (Some((cycle, anomaly)), _, _, _) = run(seed, CYCLES) {
+        let (found, _, _, _, during) = run(seed, CYCLES);
+        if let Some((cycle, anomaly)) = found {
             panic!("seed {seed} cycle {cycle}: {anomaly:?}");
         }
+        for (sum, one) in held.iter_mut().zip(during) {
+            *sum += one;
+        }
     }
+    assert!(held.iter().all(|n| *n > 0), "{held:?}");
 }
 
 /// Found by the first campaign (seed 113, the sixth cycle): a WAL frame a power loss tore is
@@ -829,7 +900,7 @@ fn crash_cycles_under_the_block_law_restore_committed_states() {
 /// first at page 21"). The model now follows SQLite's own recovery of the bytes the loss left.
 #[test]
 fn a_recovery_that_brings_back_a_lost_commit_is_followed_seed_113() {
-    if let (Some((cycle, anomaly)), _, _, _) = run(113, 6) {
+    if let (Some((cycle, anomaly)), _, _, _, _) = run(113, 6) {
         panic!("cycle {cycle}: {anomaly:?}");
     }
 }
@@ -852,8 +923,13 @@ fn crash_cycle_campaign() {
     let (mut kept, mut holes) = (0, 0);
     let (mut rewinds, mut ahead, mut latest, mut as_of, mut points) = (0, 0, 0, 0, 0);
     let mut app = (0, 0, 0);
+    let mut held = [0; 3];
     for seed in base..base + seeds {
-        let (got, losses, (counts, forks), (behaviour, redone, past, busy)) = run(seed, cycles);
+        let (got, losses, (counts, forks), (behaviour, redone, past, busy), during) =
+            run(seed, cycles);
+        for (sum, one) in held.iter_mut().zip(during) {
+            *sum += one;
+        }
         app.0 += redone;
         app.1 += past;
         app.2 += busy;
@@ -881,6 +957,11 @@ fn crash_cycle_campaign() {
         "crash-cycle after reboot: {} writes replayed, {} redos reached back past the loss, {} \
          busy writes",
         app.0, app.1, app.2
+    );
+    println!(
+        "crash-cycle while the fault held: {} restores during a segment, {} with the power off, \
+         {} after the reboot before the settle",
+        held[0], held[1], held[2]
     );
     assert!(found.is_empty(), "{found:#?}");
 }

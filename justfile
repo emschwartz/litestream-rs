@@ -122,11 +122,21 @@ shuttle iterations="200":
     SHUTTLE_ITERATIONS={{iterations}} RUSTFLAGS="--cfg shuttle" CARGO_TARGET_DIR=target/shuttle \
         cargo test --locked -p lsr-replica --test replica shuttle::
 
+# The journal model's deep walk (docs/journal.md): every state within larger budgets than the
+# default suite's, at each block size, on the atomic and the tearing device. Minutes; not part of check.
+journal-model:
+    cargo nextest run -p lsr-spec -E 'test(/^journal::deep$/)' --run-ignored only --no-capture --locked
+
 # Every fixed defect is re-planted in a scratch tree and its named tests must fail
 # (docs/planted-bugs.md). A survivor is a defect in the tests; a stale patch needs re-expressing.
 # Nightly in CI; about 20 minutes cold. `just planted-bugs --only listing-cursor` runs one entry.
 planted-bugs *args:
     uv run scripts/planted-bugs.py {{args}}
+
+# The swarm alone against each planted bug, no named test run: seeds to the first failure per
+# entry (`docs/planted-bugs.md`). Reports; a plant no seed finds is a listed generator gap.
+planted-bugs-unaided seeds="1000" *args:
+    uv run scripts/planted-bugs.py --unaided --seeds {{seeds}} {{args}}
 
 # Mutation-tests the lines this branch changed in core and ltx against `base`; fails on a missed
 # mutant not in docs/mutants-escapes.txt. Runs on pull requests in CI.
@@ -156,11 +166,12 @@ sqlite-big:
 # The VFS test's C application needs a SQLite with sqlite3_load_extension. It takes SQLITE3_CFLAGS and
 # SQLITE3_LIBS when set, then on macOS Homebrew's (`brew install sqlite`; the system one lacks
 # the function), then `pkg-config sqlite3`, then plain -lsqlite3 (crates/compat/src/vfs.rs).
-# The test map's counterpart check is ignored too, but it needs the listing upstream-test-map-fresh writes.
+# The test map's counterpart check and the behaviour citation check are ignored too, but they need
+# the listings upstream-test-map-fresh and evidence-fresh write, and run there (both in check).
 # The s3:: tests need MinIO, so they belong to compat-s3, which starts it; here they would fail closed.
 compat:
     ./scripts/build-go-litestream.sh
-    cargo nextest run -p lsr-compat --run-ignored all --locked -E 'not test(=upstream_test_map::every_counterpart_exists) and not test(/^s3::/)'
+    cargo nextest run -p lsr-compat --run-ignored all --locked -E 'not test(=upstream_test_map::every_counterpart_exists) and not test(=behavior::every_behavior_citation_resolves) and not test(/^s3::/)'
 
 # Build the named Go versions (tags, commits, `releases` for every v0.5.N tag, `main` for
 # upstream's newest staged file) and run the live tests over exactly those: just compat-live v0.5.3 main.
@@ -322,9 +333,9 @@ upstream-test-map-fresh:
 behavior-doc:
     LSR_BEHAVIOR_WRITE=1 cargo nextest run -p lsr-compat --test compat --locked -E 'test(=behavior::the_behavior_doc_is_rendered_from_its_rows)'
 
-# Every test docs/evidence.toml cites exists, a row citing an ignored test names the recipe that
-# runs it, and no planted bug's killing test is ignored (crates/compat/tests/compat/evidence.rs);
-# every test docs/behavior.toml cites is a test or a simulator scenario (behavior.rs).
+# Every test docs/behavior.toml cites is a test or a simulator scenario, and every planted bug a
+# row cites is backed by a cited test that is not ignored, since `planted-bugs` runs no ignored
+# test (crates/compat/tests/compat/behavior.rs).
 # The listings are generated into target/ and never committed, as for the upstream test map.
 evidence-fresh:
     #!/usr/bin/env bash
@@ -334,7 +345,7 @@ evidence-fresh:
     cargo nextest list --workspace --all-features --locked --run-ignored all --message-format oneline --color never > "$dir/all.txt"
     cargo nextest list --workspace --all-features --locked --run-ignored only --message-format oneline --color never > "$dir/ignored.txt"
     LSR_EVIDENCE_ALL_TESTS="$dir/all.txt" LSR_EVIDENCE_IGNORED_TESTS="$dir/ignored.txt" \
-        cargo nextest run -p lsr-compat --test compat --locked --run-ignored only -E 'test(=evidence::every_cited_test_exists_and_runs_where_it_says) | test(=behavior::every_behavior_citation_resolves)'
+        cargo nextest run -p lsr-compat --test compat --locked --run-ignored only -E 'test(=behavior::every_behavior_citation_resolves)'
 
 # Regenerate the upstream test names in docs/upstream-test-map/upstream-tests.txt from the pinned clones
 # (`just upstream` first). The test map test in `check` reads this file, never the clone.
@@ -352,6 +363,14 @@ plan-exhaustive:
 # `check` (crates/core/tests/core/mem.rs). Needs 5 GiB of temporary disk, one database at a time.
 mem-big:
     cargo nextest run --release -p lsr-core --test core -E 'test(/^mem_big::/)' --run-ignored only --no-capture --locked
+
+# The real-SQLite power-loss campaigns, each judged by restores against the workload's own record
+# (`lsr-history`): the history rig's 50 seeds of 6 cycles (`rig::real_power_loss_trials`) and the
+# crash-cycle rig's 100 seeds of 12 cycles (`crash_cycles::crash_cycle_campaign`), which also
+# restores while the loss still holds. About two minutes on 4 cores. Nightly in CI.
+power-loss-trials:
+    LSR_HISTORY_SEEDS=50 cargo nextest run -p lsr-history --all-features --locked --run-ignored only -E 'test(/^rig::real_power_loss_trials$/)' --no-capture
+    LSR_CRASH_SEEDS=100 cargo nextest run -p lsr-sqlite --all-features --locked --run-ignored only -E 'test(/^crash_cycles::crash_cycle_campaign$/)' --no-capture
 
 # Linux with /dev/fuse, fusermount3 and FUSE allowed (root, or user_allow_other); builds LazyFS once
 # into ~/.cache/lsr-lazyfs (cmake, g++, git, libfuse3-dev). Not in `check`: a cycle takes about 3 s.

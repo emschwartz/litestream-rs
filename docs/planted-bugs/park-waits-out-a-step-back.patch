@@ -1,0 +1,15 @@
+diff --git a/crates/replica/src/runtime.rs b/crates/replica/src/runtime.rs
+index 027d57f..ff28a35 100644
+--- a/crates/replica/src/runtime.rs
++++ b/crates/replica/src/runtime.rs
+@@ -154,9 +154,7 @@ impl Park for SystemPark {
+                     .unwrap_or_else(PoisonError::into_inner),
+                 Some(at) => {
+                     let now = self.clock.now();
+-                    let at = at
+-                        .checked_sub(seen.saturating_duration_since(now))
+-                        .unwrap_or(now);
++
+                     (until, seen) = (Some(at), now);
+                     let left = millis_until(now, at);
+                     if left == 0 {

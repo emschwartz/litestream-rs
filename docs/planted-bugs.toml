@@ -10,6 +10,13 @@
 #   test_bin optional: restrict the run to one integration-test binary (cargo `--test`)
 #   patch    optional: the patch's name when it is not `name`, so one defect can be planted
 #            against the tests of a second package
+#   (an entry whose `fix` is "plant" is no fixed defect: it proves a checker catches a bug class
+#   it was built for, with the checker's own test named)
+#   canary   optional, on the two canary entries only: the verdict the runner must report,
+#            `survived` (the no-op patch) or `killed` (the patch that breaks a test for certain).
+#            Any other verdict on a canary fails the run: the runner itself is broken.
+#   bin      optional: run the unit tests of one binary target (cargo `--bin`), for a package
+#            with no library, such as lsr-cli
 #
 # Not here, with the reason: a6e3e38 (level-0 retention oracle: it fixed the test, retention code is
 # unchanged, so there is nothing to plant), the verify hang fix (test-only: no production code to plant)
@@ -19,6 +26,20 @@
 # rules they guarded are planted below as the witness-* entries. page-size-after-vacuum (b352aba): its
 # arm (an unusable newest staged file still names its page size) decides only with an empty replica,
 # where every staged file is pending and the boot witness now deletes an unusable one first.
+
+[[bug]]
+name = "canary-no-op"
+fix = "none"
+package = "lsr-ltx"
+canary = "survived"
+tests = ["checksum::tests::the_crc_is_go_iso_on_its_check_string"]
+
+[[bug]]
+name = "canary-fatal"
+fix = "none"
+package = "lsr-ltx"
+canary = "killed"
+tests = ["checksum::tests::the_crc_is_go_iso_on_its_check_string"]
 
 [[bug]]
 name = "asof-straddle"
@@ -175,6 +196,16 @@ tests = [
     "a_failed_wal_sync_stages_nothing_of_its_generation_and_snapshots_after_a_truncate",
 ]
 
+# The snapshot liveness oracle (crates/sim/src/liveness.rs): every boot snapshots. Every restore
+# still matches, so only an oracle that asks why a snapshot was taken can see it. lsr-core's
+# actor::tests::nothing_is_pruned_before_the_first_listing and
+# actor::tests::pages::a_boot_that_continues_checks_pages_the_last_run_recorded fail on it too.
+[[bug]]
+name = "always-snapshot-at-boot"
+fix = "plant"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["liveness::restarts_with_nothing_damaged_never_snapshot"]
 # A failed sync of the WAL taken as a success: the frames it covered are staged, though the
 # kernel may never write them. The simulator's lost writeback and its staged-durability check
 # see it too (`wal_fsync_fails`), as does the actor's unit test.
@@ -286,6 +317,15 @@ package = "lsr-sim"
 test_bin = "sim"
 tests = ["unaided::swarm_seed_44_restores_only_committed_states"]
 
+# The bounded WAL resume (witness, 18cf304) took a wal-index reset ahead of the header as a
+# restart even at the header's first frame: every boot from a file with an empty WAL range
+# snapshotted again. Found by the liveness oracle (seed 0xf85 among others).
+[[bug]]
+name = "resume-index-reset-ahead"
+fix = "claude/checker-hygiene"
+package = "lsr-wal"
+test_bin = "wal"
+tests = ["synthetic::resume_at_the_first_frame_under_an_index_reset_ahead_starts_there"]
 # The boot witness's anchor held for any tail it decodes. The page proof of each pending file does
 # not cover for it: only the anchor sees a tail range regrown with other bytes before a pending range
 # regrown verbatim. The engine's WAL barrier keeps a staged range from regrowing at all, so the
@@ -394,6 +434,288 @@ name = "first-sync-never-a-report"
 fix = "checker-holes (rewind reports)"
 package = "lsr-sim"
 tests = ["run::tests::a_first_sync_over_files_reports_a_loss"]
+[[bug]]
+name = "denial-classes"
+fix = "9224a25"
+package = "lsr-store-s3"
+tests = [
+    "classify::tests::classify_denials_by_what_to_fix",
+    "classify::tests::a_missing_bucket_is_named_on_an_unkeyed_request_too",
+    "classify::tests::transport_errors_map_by_kind",
+    "connection_reset_is_transient_and_tls_failure_is_named_tls",
+]
+
+[[bug]]
+name = "delete-denial-transient"
+fix = "9224a25"
+package = "lsr-store-s3"
+test_bin = "store-s3"
+tests = ["a_delete_refused_for_one_key_is_a_permission_denial"]
+
+[[bug]]
+name = "lag-zero-before-boot"
+fix = "0947223"
+package = "lsr-replica"
+test_bin = "replica"
+tests = ["the_lag_counts_from_the_start_while_the_first_boot_fails"]
+
+[[bug]]
+name = "clock-step-back-freezes-timers"
+fix = "48aee1d"
+package = "lsr-core"
+tests = [
+    "a_backward_clock_step_does_not_freeze_a_retry_wait",
+    "actor::clock::tests::a_step_back_holds_then_slews_at_half_speed_until_it_rejoins",
+]
+
+[[bug]]
+name = "clock-step-back-freezes-timers-sim"
+fix = "48aee1d"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["clock_steps_back_an_hour_mid_retry"]
+
+[[bug]]
+name = "witness-cap-stages-past"
+fix = "2024ca8"
+package = "lsr-core"
+tests = [
+    "a_replica_outage_past_the_witness_cap_holds_the_position_and_costs_no_snapshot",
+]
+
+[[bug]]
+name = "witness-cap-boot"
+fix = "2024ca8"
+package = "lsr-core"
+tests = ["pending_files_past_the_cap_at_boot_are_regenerated_from_the_wal"]
+
+[[bug]]
+name = "boot-snapshot-after-unreadable"
+fix = "2c2bd90"
+package = "lsr-core"
+tests = [
+    "a_torn_staged_file_the_replica_lacks_is_dropped_and_staged_again_from_the_wal",
+]
+
+[[bug]]
+name = "park-waits-out-a-step-back"
+fix = "df6f81d"
+package = "lsr-replica"
+tests = ["a_park_keeps_its_remaining_wait_when_the_clock_steps_back"]
+
+[[bug]]
+name = "staging-enospc-local-io"
+fix = "cf6ca7f"
+package = "lsr-core"
+tests = ["fault::tests::a_full_staging_disk_is_disk_full"]
+
+[[bug]]
+name = "restore-trusts-listing"
+fix = "32572b5"
+package = "lsr-core"
+tests = [
+    "restore::tests::a_newest_file_the_listing_hides_fails_the_restore_and_publishes_nothing",
+    "restore::tests::a_hidden_snapshot_past_the_listing_fails_an_as_of_restore",
+]
+
+# The same plant, judged by the simulator: a restore made through a lagging listing while the
+# hold lasts must be the raw replica's answer or an error.
+[[bug]]
+name = "restore-trusts-listing-sim"
+fix = "32572b5"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_restore_through_a_lagging_listing_is_the_replica_s_answer_or_an_error"]
+
+[[bug]]
+name = "dry-run-trusts-listing"
+fix = "32572b5"
+package = "lsr-cli"
+bin = "lsr"
+tests = ["a_dry_run_over_a_lagging_listing_fails_like_the_restore"]
+
+[[bug]]
+name = "empty-listing-is-empty-replica"
+fix = "a5c7d57"
+package = "lsr-core"
+tests = ["restore::tests::a_listing_that_shows_nothing_over_a_first_file_is_not_an_empty_replica"]
+
+# The same plant, judged where it does harm: `--if-replica-exists` skips the restore with success.
+[[bug]]
+name = "empty-listing-is-empty-replica-cli"
+fix = "a5c7d57"
+package = "lsr-cli"
+bin = "lsr"
+tests = ["if_replica_exists_over_a_listing_that_shows_nothing_skips_nothing"]
+
+[[bug]]
+name = "replica-page-size-unread"
+fix = "7bf9707"
+package = "lsr-core"
+tests = ["a_newest_replica_header_that_does_not_decode_still_names_the_page_size"]
+
+# The same plant, judged by the simulator's lying-reads hold where it was found.
+[[bug]]
+name = "replica-page-size-unread-sim"
+fix = "7bf9707"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_boot_whose_replica_reads_lie_never_writes_a_new_page_size_seed_0x13"]
+
+# A stall threshold no outage reaches: a plain-retry fault never degrades, the defect 538bd84
+# fixed, judged by the simulator's health-truth check under a long outage hold.
+[[bug]]
+name = "stall-never-reported-sim"
+fix = "538bd84"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_halt_long_enough_to_stall_is_reported_degraded"]
+
+# The two store-fs durability steps the LazyFS rig planted (`just lazyfs-plant <name>`) and never
+# saw fail, killed in process by the crash checker that replays a commit's steps and crashes at
+# every one of them (crates/store-fs/src/journal/tests.rs). The steps date from the store itself, so
+# `fix` names the commit that brought it.
+[[bug]]
+name = "staging-fsync-before-rename"
+fix = "2bf9f99"
+package = "lsr-store-fs"
+tests = ["a_crash_at_any_step_of_a_commit_loses_nothing_committed_and_shows_nothing_torn"]
+
+[[bug]]
+name = "staging-dir-fsync"
+fix = "2bf9f99"
+package = "lsr-store-fs"
+tests = ["a_crash_at_any_step_of_a_commit_loses_nothing_committed_and_shows_nothing_torn"]
+
+# The engine journal's rules (docs/journal.md): each is a rule of the writer, the codec or the
+# model, not a fix of a shipped defect; `fix` is the commit that introduced it.
+
+[[bug]]
+name = "journal-no-dir-fsync"
+fix = "a64cc50"
+package = "lsr-core"
+tests = [
+    "journal_model::the_writer_matches_the_model_under_the_block_law",
+]
+
+[[bug]]
+name = "journal-wrong-slot"
+fix = "a64cc50"
+package = "lsr-core"
+tests = [
+    "journal_model::the_writer_matches_the_model_under_the_block_law",
+    "journal_model::the_writer_matches_the_model_on_a_tearing_device",
+]
+
+[[bug]]
+name = "journal-eio-missing"
+fix = "a64cc50"
+package = "lsr-core"
+tests = [
+    "journal_model::the_writer_matches_the_model_with_unreadable_sectors",
+]
+
+[[bug]]
+name = "journal-one-read"
+fix = "a64cc50"
+package = "lsr-core"
+tests = [
+    "journal_model::the_writer_matches_the_model_with_unreadable_sectors",
+]
+
+[[bug]]
+name = "journal-seq-1-created"
+fix = "a64cc50"
+package = "lsr-core"
+tests = [
+    "journal_model::the_writer_matches_the_model_under_the_block_law",
+]
+
+[[bug]]
+name = "journal-recreate-without-zeroing"
+fix = "a64cc50"
+package = "lsr-core"
+tests = [
+    "journal_model::the_writer_matches_the_model_with_unreadable_sectors",
+]
+
+[[bug]]
+name = "journal-no-boot-sync"
+fix = "a64cc50"
+package = "lsr-core"
+tests = [
+    "journal_model::the_writer_matches_the_model_under_the_block_law",
+    "journal_model::the_writer_matches_the_model_on_a_tearing_device",
+]
+
+[[bug]]
+name = "journal-advance-on-failed-sync"
+fix = "a64cc50"
+package = "lsr-core"
+tests = [
+    "journal_model::the_writer_matches_the_model_under_the_block_law",
+]
+
+[[bug]]
+name = "journal-no-monotonic-check"
+fix = "a64cc50"
+package = "lsr-core"
+tests = [
+    "journal_model::a_non_monotonic_record_is_refused_as_a_bug",
+]
+
+[[bug]]
+name = "journal-continue-after-slot-error"
+fix = "a64cc50"
+package = "lsr-core"
+tests = [
+    "journal_model::the_writer_matches_the_model_with_unreadable_sectors",
+]
+
+[[bug]]
+name = "journal-lower-seq-wins"
+fix = "c9d9d4a"
+package = "lsr-journal"
+tests = [
+    "the_higher_sequence_number_wins",
+]
+
+[[bug]]
+name = "journal-checksum-ignored"
+fix = "c9d9d4a"
+package = "lsr-journal"
+tests = [
+    "a_wrong_checksum_is_refused",
+    "a_changed_byte_in_the_record_invalidates_it",
+]
+
+[[bug]]
+name = "journal-model-newer-block"
+fix = "270f55e"
+package = "lsr-core"
+tests = [
+    "journal_model::the_writer_matches_the_model_under_the_block_law",
+]
+
+[[bug]]
+name = "delete-without-dir-sync"
+fix = "93d0510"
+package = "lsr-store-fs"
+tests = ["a_crash_after_a_delete_never_brings_the_file_back"]
+
+[[bug]]
+name = "rebuild-wait-stretched-by-a-step-back"
+fix = "50b9040"
+package = "lsr-replica"
+test_bin = "replica"
+tests = ["a_clock_step_back_does_not_lengthen_the_wait_before_a_rebuild"]
+
+[[bug]]
+name = "verify-due-stretched-by-a-step-back"
+fix = "50b9040"
+package = "lsr-replica"
+test_bin = "replica"
+tests = ["a_clock_step_back_does_not_put_off_the_scheduled_verify"]
 
 # The defect the end-of-run stall check exists for, killed by the swarm with nothing written for
 # it: a task's success leaves its stall in place, so health says degraded for nothing.

@@ -1244,6 +1244,11 @@ impl SimSqlite {
         self.with(|state| state.our_sync_lies = true);
     }
 
+    /// Our sync of the WAL makes its bytes durable again: the lying disk replaced.
+    pub fn honest_on_our_sync(&self) {
+        self.with(|state| state.our_sync_lies = false);
+    }
+
     /// The app's `wal_autocheckpoint` in frames; `None`, the model's default, is 0.
     pub fn set_app_autocheckpoint(&self, frames: Option<u32>) {
         self.with(|state| state.app_autocheckpoint = frames.filter(|n| *n > 0));
@@ -1675,6 +1680,42 @@ impl SimSqlite {
     #[must_use]
     pub fn backfilled(&self) -> u32 {
         self.with(|state| state.index.backfilled)
+    }
+
+    /// The WAL file's header as a reader would find it: its salts, or `None`
+    /// when there is no file or no whole header with a page size. Cheap: it
+    /// reads the 32 header bytes, not the file.
+    #[must_use]
+    pub fn wal_header_salts(&self) -> Option<(u32, u32)> {
+        self.with(|state| {
+            let wal = state.present.then_some(&state.wal)?;
+            let word = |at: usize| {
+                let bytes: [u8; 4] = wal.get(at..at.checked_add(4)?)?.try_into().ok()?;
+                Some(u32::from_be_bytes(bytes))
+            };
+            let page_size = word(8)?;
+            let salts = (word(16)?, word(20)?);
+            (page_size != 0 && wal.len() >= 32).then_some(salts)
+        })
+    }
+
+    /// Whether the wal-index counts no frame and names salts the WAL file's
+    /// header does not: SQLite reset it and the next commit writes the header.
+    #[must_use]
+    pub fn index_reset_ahead(&self) -> bool {
+        let header = self.wal_header_salts();
+        self.with(|state| {
+            let index = (state.index.salts.salt1, state.index.salts.salt2);
+            state.index.mx_frame == 0 && header != Some(index)
+        })
+    }
+
+    /// Whether our read transaction holds a read mark above zero, which keeps
+    /// any writer from restarting the WAL under it. Held on mark zero it lets
+    /// one restart through, and with none held nothing pins the WAL.
+    #[must_use]
+    pub fn our_reader_pins_wal(&self) -> bool {
+        self.with(|state| matches!(state.readers.get(&Conn::Ours), Some(Mark::Slot(_))))
     }
 
     /// The wal-index salts.
