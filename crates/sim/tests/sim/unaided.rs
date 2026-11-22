@@ -6,6 +6,7 @@
 //! `busy` or `nothing`), every seed's app does that after a restart instead of what its mix drew;
 //! with `LSR_SIM_NO_WAL_DAMAGE` set, no seed draws WAL damage; with `LSR_SIM_LYING_SYNC` set,
 //! every seed's disk lies about the engine's WAL fsync instead of what its mix drew; with
+//! `LSR_SIM_APP_IN_TICK` set to a weight, every seed draws app operations inside a tick at it; with
 //! `LSR_SIM_SWARM` set, every seed runs its swarm mix (`Weights::swarm`) instead, and with
 //! `LSR_SIM_DEFAULT` set the default mix; with `LSR_SIM_HOLD` set to a rate in a thousand, holds
 //! are drawn at least that often (`tests/sim/survival.rs`); with `LSR_SIM_KNOWN_WRONG` set, the
@@ -91,6 +92,9 @@ pub fn weights(seed: Seed) -> Weights {
     weights.block_crash_law |= std::env::var("LSR_SIM_BLOCK_LAW").is_ok();
     weights.known_wrong |= std::env::var("LSR_SIM_KNOWN_WRONG").is_ok();
     weights.lying_wal_sync |= std::env::var("LSR_SIM_LYING_SYNC").is_ok();
+    if let Ok(weight) = std::env::var("LSR_SIM_APP_IN_TICK") {
+        weights.app_in_tick = weight.parse().expect("LSR_SIM_APP_IN_TICK is a weight");
+    }
     if std::env::var("LSR_SIM_NO_WAL_DAMAGE").is_ok() {
         weights.wal_damage = 0;
     }
@@ -180,7 +184,24 @@ fn seeds_to_first_failure() {
 #[test]
 fn swarm_seed_44_restores_only_committed_states() {
     let seed = Seed::new(44);
-    if let Err(failure) = run_with(seed, 8, &Weights::mixed(seed), &Opts::default()) {
+    let mut weights = Weights::mixed(seed);
+    // Drawn after this seed was found, so the run stays the one the plant fails on.
+    weights.app_in_tick = 0;
+    if let Err(failure) = run_with(seed, 8, &weights, &Opts::default()) {
+        panic!("{failure}");
+    }
+}
+
+/// Found unaided once the app could act inside a tick (`Op::AppInTick`): seed 0xf488c's drawn
+/// mix commits between the engine's last sync step and its TRUNCATE, and the boundary snapshot
+/// took that commit's pages for damage (`DatabasePageMismatch`) until it stopped checking them
+/// (docs/decisions.md D121, plant `boundary-snapshot-keeps-page-table`). Seed 0xf49a2 found it
+/// first, before main's later swarm draws reshuffled the mixes. Main's swarm, without these
+/// operations, kills the plant on none of seeds 1000001 to 1002000.
+#[test]
+fn swarm_seed_0xf488c_takes_no_commit_before_a_truncate_for_damage() {
+    let seed = Seed::new(0xf488c);
+    if let Err(failure) = run_with(seed, 299, &Weights::mixed(seed), &Opts::default()) {
         panic!("{failure}");
     }
 }

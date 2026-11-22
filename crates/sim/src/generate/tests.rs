@@ -142,9 +142,14 @@ fn the_scenario_only_steps_are_drawn_too() {
 #[test]
 fn the_second_frozen_generator_draws_what_the_live_one_drew() {
     let mut compared = 0;
+    let mut defaults = 0;
     for n in 0..200 {
         let mut weights = Weights::mixed(seed(n));
-        if weights.staging_replace_running != 0 {
+        if weights == Weights::default() {
+            defaults += 1;
+        }
+        // Both drawn after the second generator, so a mix that draws either draws more.
+        if weights.staging_replace_running != 0 || weights.app_in_tick != 0 {
             continue;
         }
         // Holds came after the second generator, from a stream of their own: with none drawn,
@@ -160,7 +165,10 @@ fn the_second_frozen_generator_draws_what_the_live_one_drew() {
         );
         compared += 1;
     }
-    assert!(compared > 100, "{compared}");
+    assert!(
+        compared >= defaults && defaults > 80,
+        "{compared} of {defaults}"
+    );
 }
 
 #[test]
