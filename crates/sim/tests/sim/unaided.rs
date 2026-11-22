@@ -20,16 +20,27 @@
 //! | main | as drawn, both judges; redo on every seed and the block law, both judges; busy on every seed and the block law, both judges; every failure listed |
 //! | main + the planted bug "the boot anchor accepts any tail in the live generation" | redo and the block law, the history judge alone; the same, the oracle alone; as drawn, the history judge alone; to the first failure |
 //! | main without the WAL barrier (a scratch revert) | redo and the block law, the history judge alone; busy and the block law, the history judge alone; redo and the block law, the oracle alone; to the first failure |
+//!
+//! The retry campaign's budget, fixed after `AfterRestart::Retry` was frozen (one draw apiece
+//! per replayed commit, verbatim or restamped, from its own stream; drawn last in the swarm as
+//! half of the redoing apps) and before its first run: seeds 1..=3000 of 300 steps.
+//!
+//! | tree | simulator configurations |
+//! |---|---|
+//! | main | retry on every seed and the block law, both judges; every failure listed |
+//! | main + the planted bug "the boot witness anchors on any tail it decodes" (`docs/planted-bugs/witness-anchor-held.patch`) | retry and the block law, the history judge alone; the same, the oracle alone; as drawn, both judges; to the first failure |
 
 use lsr_sim::{AfterRestart, Judges, Opts, Seed, Weights, replay_line, run_with};
 
 const STEPS: u32 = 300;
 
 /// What the app's after-restart behaviours reached, summed over the passing runs.
-const REACHED: [&str; 5] = [
+const REACHED: [&str; 7] = [
     "app.redo",
     "app.redo_after_loss",
     "app.redo_past_lost_end",
+    "app.retry",
+    "app.retry_restamped",
     "app.busy",
     "app.busy_past_end",
 ];
@@ -52,9 +63,10 @@ pub fn weights(seed: Seed) -> Weights {
     match std::env::var("LSR_SIM_AFTER_RESTART").as_deref() {
         Err(_) => {}
         Ok("redo") => weights.after_restart = AfterRestart::Redo,
+        Ok("retry") => weights.after_restart = AfterRestart::Retry,
         Ok("busy") => weights.after_restart = AfterRestart::Busy,
         Ok("nothing") => weights.after_restart = AfterRestart::Nothing,
-        Ok(other) => panic!("LSR_SIM_AFTER_RESTART is redo, busy or nothing, not {other}"),
+        Ok(other) => panic!("LSR_SIM_AFTER_RESTART is redo, retry, busy or nothing, not {other}"),
     }
     weights
 }

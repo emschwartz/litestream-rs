@@ -336,6 +336,13 @@ pub enum AfterRestart {
     /// had before the restart, so the regrown WAL climbs over every frame
     /// the restart left behind (at most [`BUSY_MAX`] commits).
     Busy,
+    /// It replays its last `K` commits as [`AfterRestart::Redo`] does, but
+    /// only some of its jobs are idempotent: each replayed commit, drawn
+    /// apiece, writes the same pages at the same database size either
+    /// verbatim or with a fresh stamp in every page (a job that records when
+    /// it ran). The one law here that regrows a lost commit's frames with
+    /// other bytes and the next lost commit's frames byte for byte.
+    Retry,
 }
 
 /// The most commits a [`AfterRestart::Redo`] replays, and the length of the
@@ -518,6 +525,11 @@ impl Weights {
             1 => AfterRestart::Redo,
             _ => AfterRestart::Busy,
         };
+        // Drawn after that, for the same reason: half the redoing apps retry
+        // jobs that are not all idempotent.
+        if mix.after_restart == AfterRestart::Redo && below(&entropy, 2) == 0 {
+            mix.after_restart = AfterRestart::Retry;
+        }
         mix
     }
 

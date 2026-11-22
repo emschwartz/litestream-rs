@@ -1,5 +1,5 @@
 //! The app's behaviours after a restart reach what they are for: a redo that replays more
-//! commits than a power loss took, and a busy app whose WAL climbs past its pre-crash end. The
+//! commits than a power loss took, a retry that restamps some of them, and a busy app whose WAL climbs past its pre-crash end. The
 //! swarm draws each of them.
 
 use lsr_sim::{AfterRestart, Seed, Weights, run};
@@ -23,6 +23,11 @@ fn a_redo_replays_past_the_commits_a_power_loss_took() {
 }
 
 #[test]
+fn a_retry_restamps_some_of_what_it_replays() {
+    assert!(first_reaching(AfterRestart::Retry, "app.retry_restamped").is_some());
+}
+
+#[test]
 fn a_busy_app_commits_past_its_pre_crash_end() {
     assert!(first_reaching(AfterRestart::Busy, "app.busy_past_end").is_some());
 }
@@ -35,6 +40,7 @@ fn the_swarm_draws_every_behaviour_after_a_restart() {
     for behaviour in [
         AfterRestart::Nothing,
         AfterRestart::Redo,
+        AfterRestart::Retry,
         AfterRestart::Busy,
     ] {
         assert!(drawn.contains(&behaviour), "{behaviour:?}");
