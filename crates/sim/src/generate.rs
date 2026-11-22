@@ -180,6 +180,46 @@ pub enum Op {
         /// Ticks the engine runs with the damage in place.
         ticks: u8,
     },
+    /// A fault that lasts: it is put in place, the app commits and the engine
+    /// runs this many ticks under it, the replica is restored and judged in the
+    /// middle of them and at their end while the fault still holds, and then
+    /// the fault is lifted.
+    Hold {
+        /// The fault.
+        hold: Hold,
+        /// Ticks the engine runs under it.
+        ticks: u8,
+    },
+}
+
+/// A fault that lasts across ticks, for [`Op::Hold`]. A restore judged while
+/// one holds is the evidence that the replica survives it, not merely
+/// recovers from it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hold {
+    /// Every call of the operation on the replica fails as transient: the
+    /// store is down for it. Restores made meanwhile go through the same fault.
+    StoreDown(StoreOp),
+    /// Every call on the replica is refused as unauthorized: credentials
+    /// revoked. Restores made meanwhile are refused too.
+    CredentialsRevoked,
+    /// Every staging upload fails as the disk is full (`ENOSPC`, which the
+    /// directory store reports as a transient `StorageFull`).
+    DiskFull,
+    /// The replica's listings, as a restore sees them, show the bucket as it
+    /// was when the hold began: objects put since are hidden.
+    LaggingListing,
+    /// Every read of the replica a restore makes returns one byte flipped (a
+    /// middlebox, or a store that returns bytes it never stored).
+    LyingReads,
+    /// Other processes hold read transactions on the WAL, so no checkpoint
+    /// can pass them.
+    ReadersHeld,
+    /// The WAL is damaged.
+    Wal(WalOp),
+    /// The disk lies about the engine's fsync of the WAL, and the power fails
+    /// while it lies, in the middle of the hold.
+    LyingDisk,
 }
 
 /// What a scenario does to the staging directory, the engine's own memory of
@@ -298,6 +338,11 @@ pub struct Weights {
     /// [`MetaOp::ForgeNewest`]), and [`Op::StagingDamage`] with
     /// [`MetaOp::ForgeNewest`].
     pub staging_replace_running: u32,
+    /// The chance in a thousand that a step is an [`Op::Hold`] instead of
+    /// what the history drew there. Not a weight: holds come from a stream of
+    /// their own and replace the drawn step, so a run that draws no hold is
+    /// the run it was, and every other step of one that does is unchanged.
+    pub hold: u32,
     /// Whether a vacuum may change the page size. A replica prefix holds one
     /// page size, so after a resize the engine's next boot stops, or keeps
     /// retrying in a degraded state, on `PageSizeChanged`, and the states
@@ -377,6 +422,10 @@ impl Default for Weights {
             // Off in the default mix so its recorded histories keep their
             // shape; swarm mixes draw it.
             staging_replace_running: 0,
+            // Off in the default mix so its recorded histories keep their
+            // shape; swarm mixes draw it, and `tests/sim/survival.rs` turns
+            // it on.
+            hold: 0,
             vacuum_resizes: true,
             block_crash_law: false,
             after_restart: AfterRestart::Nothing,
@@ -501,6 +550,7 @@ impl Weights {
             staging_damage: weight(false),
             heal: weight(false),
             staging_replace_running: 0,
+            hold: 0,
             vacuum_resizes: below(&entropy, 2) == 0,
             block_crash_law: false,
             after_restart: AfterRestart::Nothing,
@@ -517,6 +567,13 @@ impl Weights {
             0 => AfterRestart::Nothing,
             1 => AfterRestart::Redo,
             _ => AfterRestart::Busy,
+        };
+        // And after that, for the same reason: a rate of 1 to 30 in a
+        // thousand steps, left out a third of the time.
+        mix.hold = if below(&entropy, 3) == 0 {
+            0
+        } else {
+            u32::try_from(below(&entropy, 30).saturating_add(1)).unwrap_or(1)
         };
         mix
     }
@@ -652,6 +709,41 @@ fn staging_replace_running(entropy: &SeededEntropy) -> Op {
     }
 }
 
+/// A lasting fault, held for up to 11 ticks.
+fn hold(entropy: &SeededEntropy) -> Op {
+    let hold = match below(entropy, 8) {
+        0 => Hold::StoreDown(
+            choose(
+                entropy,
+                &[
+                    StoreOp::List,
+                    StoreOp::Read,
+                    StoreOp::Upload,
+                    StoreOp::Delete,
+                ],
+            )
+            .unwrap_or(StoreOp::Upload),
+        ),
+        1 => Hold::CredentialsRevoked,
+        2 => Hold::DiskFull,
+        3 => Hold::LaggingListing,
+        4 => Hold::LyingReads,
+        5 => Hold::ReadersHeld,
+        6 => match below(entropy, 3) {
+            0 => Hold::Wal(WalOp::TearHeader),
+            1 => Hold::Wal(WalOp::TruncateAtFrame(
+                u32::try_from(below(entropy, 4)).unwrap_or(0),
+            )),
+            _ => Hold::Wal(WalOp::FlipLastFrameBit),
+        },
+        _ => Hold::LyingDisk,
+    };
+    Op::Hold {
+        hold,
+        ticks: small(entropy, 10).saturating_add(2),
+    }
+}
+
 fn env_fault(entropy: &SeededEntropy) -> Op {
     let fault = match below(entropy, 4) {
         0 => EnvFault::DeleteWal,
@@ -757,10 +849,25 @@ fn draw(weights: &Weights, entropy: &SeededEntropy) -> Op {
 }
 
 /// The history of `steps` operations that `seed` names.
+///
+/// Each step draws its operation from the history's stream, and then, from a
+/// stream of its own, whether a hold replaces it ([`Weights::hold`]). Both
+/// draws happen at every step, so the steps a hold does not replace are the
+/// steps a mix with no holds draws.
 #[must_use]
 pub fn history(seed: Seed, steps: u32, weights: &Weights) -> Vec<Op> {
     let entropy = SeededEntropy::new(seed.stream(10));
-    (0..steps).map(|_| draw(weights, &entropy)).collect()
+    let holds = SeededEntropy::new(seed.stream(41));
+    (0..steps)
+        .map(|_| {
+            let drawn = draw(weights, &entropy);
+            if weights.hold > 0 && below(&holds, 1000) < u64::from(weights.hold) {
+                hold(&holds)
+            } else {
+                drawn
+            }
+        })
+        .collect()
 }
 
 /// A frozen version of the generator, which regressions are recorded against.

@@ -245,6 +245,19 @@ pub enum Violation {
         /// The first rule of the boot WAL's range it broke.
         why: String,
     },
+    /// A restore made while a lasting fault held, through the fault as a restore
+    /// would meet it, published another database than the replica holds for that
+    /// target, or failed in a way the fault does not explain. The contract under a
+    /// fault is the exact answer or an error, never another answer.
+    #[error("restoring {target:?} while {hold} held: {got}")]
+    HeldRestore {
+        /// What was asked.
+        target: RestoreTarget,
+        /// The fault that held.
+        hold: String,
+        /// What the restore did instead.
+        got: String,
+    },
     /// The engine reported its own bug, or the oracle could not decide.
     #[error("bug fault: {context}")]
     BugFault {

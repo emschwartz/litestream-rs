@@ -295,6 +295,31 @@ impl FaultHandle {
         lock(&self.state).batched
     }
 
+    /// Makes every call of `op` from the next one on fail with `err`, until
+    /// [`Self::release`] is given the returned id: a fault that lasts.
+    pub fn hold(&self, op: StoreOp, err: StoreError) -> HeldFault {
+        let mut state = lock(&self.state);
+        let nth = *state.count(op);
+        state.schedule.push(Entry {
+            op,
+            nth,
+            shape: FaultShape::Rate {
+                per_mille: 1000,
+                err,
+            },
+            fired: false,
+            hits: 0,
+        });
+        HeldFault(state.schedule.len().saturating_sub(1))
+    }
+
+    /// Ends a fault [`Self::hold`] began.
+    pub fn release(&self, held: HeldFault) {
+        if let Some(entry) = lock(&self.state).schedule.get_mut(held.0) {
+            entry.fired = true;
+        }
+    }
+
     /// Stops every fault that fails at a rate.
     pub fn heal(&self) {
         for entry in &mut lock(&self.state).schedule {
@@ -314,6 +339,10 @@ impl FaultHandle {
             .count()
     }
 }
+
+/// A fault [`FaultHandle::hold`] began, for [`FaultHandle::release`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HeldFault(usize);
 
 /// A store that fails on a seeded schedule.
 #[derive(Clone, Debug)]

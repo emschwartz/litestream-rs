@@ -144,7 +144,8 @@ fn the_second_frozen_generator_draws_what_the_live_one_drew() {
     let mut compared = 0;
     for n in 0..200 {
         let weights = Weights::mixed(seed(n));
-        if weights.staging_replace_running != 0 {
+        // Holds came after the second generator; a mix that draws none draws what it did.
+        if weights.staging_replace_running != 0 || weights.hold != 0 {
             continue;
         }
         let live = history(seed(n), 300, &weights);
