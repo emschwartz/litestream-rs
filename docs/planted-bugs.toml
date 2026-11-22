@@ -574,7 +574,9 @@ tests = ["a_halt_long_enough_to_stall_is_reported_degraded"]
 # The two store-fs durability steps the LazyFS rig planted (`just lazyfs-plant <name>`) and never
 # saw fail, killed in process by the crash checker that replays a commit's steps and crashes at
 # every one of them (crates/store-fs/src/journal/tests.rs). The steps date from the store itself, so
-# `fix` names the commit that brought it.
+# `fix` names the commit that brought it. The swarm finds these and `delete-without-dir-sync` unaided
+# too, where staging is this store on the simulator's in-memory filesystem (crates/sim/src/staging.rs);
+# the patches are written against the store's filesystem trait.
 [[bug]]
 name = "staging-fsync-before-rename"
 fix = "2bf9f99"

@@ -6,7 +6,8 @@
 //! hands each tick's future to [`World::run_tick`], the one seam between this
 //! harness and the actor.
 //!
-//! Staging is `Faults<YieldEachCall<Recorder<Volatile<MemStore>>>>` and the replica is
+//! Staging is `Faults<YieldEachCall<Recorder<Volatile<StagingRaw>>>>` (`MemStore`, or the real
+//! directory store on the in-memory filesystem: [`crate::staging`]) and the replica is
 //! `Faults<YieldEachCall<Recorder<MemStore>>>`. Both keep a raw `MemStore` handle for the
 //! oracle and for power loss, so neither a fault nor a yield touches a check.
 
@@ -27,13 +28,14 @@ use crate::model::{CommitId, Model, PageImage, Recovery};
 use crate::oracle::{Acked, Checked, Ground, Violation, Windows, check_with};
 use crate::seed::Seed;
 use crate::sqlite::{AppCommit, CrashKind, InTickSite, OtherProcessMode, SimSqlite};
+use crate::staging::StagingRaw;
 use crate::store::{
     FaultHandle, Faults, HighWater, Lost, Recorder, RecorderLog, Volatile, VolatileHandle,
     YieldEachCall,
 };
 
 /// The staging store the actor sees.
-pub type StagingStore = Faults<YieldEachCall<Recorder<Volatile<MemStore>>>>;
+pub type StagingStore = Faults<YieldEachCall<Recorder<Volatile<StagingRaw>>>>;
 /// The replica store the actor sees.
 pub type RemoteStore = Faults<YieldEachCall<Recorder<MemStore>>>;
 
@@ -139,8 +141,8 @@ fn reencoded(
 }
 
 /// Every byte of `key`.
-fn read_all(store: &MemStore, key: &FileKey) -> Result<Vec<u8>, StoreError> {
-    use lsr_core::{ObjectStore, ReadLen};
+fn read_all(store: &impl lsr_core::ObjectStore, key: &FileKey) -> Result<Vec<u8>, StoreError> {
+    use lsr_core::ReadLen;
     let Some(chunk) = ReadLen::new(1 << 20) else {
         return Ok(Vec::new());
     };
@@ -248,8 +250,9 @@ pub struct World {
     pub staging: StagingStore,
     /// The replica store, with faults and crash points.
     pub remote: RemoteStore,
-    /// The staging store with nothing in front of it.
-    pub staging_raw: MemStore,
+    /// The staging store with nothing in front of it: `MemStore`, or the directory store on the
+    /// in-memory filesystem ([`World::use_fs_staging`]).
+    pub staging_raw: StagingRaw,
     /// The replica with nothing in front of it: what the oracle restores from.
     pub remote_raw: MemStore,
     /// What the staging store really did.
@@ -304,7 +307,7 @@ impl World {
         let sqlite = SimSqlite::new(page_size, db_pages, seed.stream(1));
         let clock = Arc::new(FakeClock::new(Timestamp::from_unix_millis(EPOCH_MILLIS)));
         let high = HighWater::default();
-        let staging_raw = MemStore::new();
+        let staging_raw = StagingRaw::Mem(MemStore::new());
         let remote_raw = MemStore::new();
         let volatile = Volatile::new(staging_raw.clone());
         let volatile_handle = volatile.handle();
@@ -611,8 +614,8 @@ impl World {
             CrashKind::Process => Vec::new(),
             CrashKind::Power => {
                 let lost = block_on(
-                    self.volatile
-                        .power_loss(&self.staging_raw, &self.crash_entropy),
+                    self.staging_raw
+                        .power_loss(&self.volatile, &self.crash_entropy),
                 )
                 .unwrap_or_default();
                 self.log_history();
@@ -1012,10 +1015,17 @@ impl World {
         use lsr_core::Inventory;
         let staged_puts = self.engine_puts(since);
         let mut out = Vec::new();
-        for (store, all) in [(&self.staging_raw, false), (&self.remote_raw, true)] {
-            let inventory = block_on(Inventory::load(store)).map_err(|err| err.to_string())?;
+        let staging =
+            block_on(Inventory::load(&self.staging_raw)).map_err(|err| err.to_string())?;
+        let remote = block_on(Inventory::load(&self.remote_raw)).map_err(|err| err.to_string())?;
+        for (inventory, all) in [(staging, false), (remote, true)] {
             for info in inventory.files() {
-                let bytes = read_all(store, &info.key).map_err(|err| err.to_string())?;
+                let bytes = if all {
+                    read_all(&self.remote_raw, &info.key)
+                } else {
+                    read_all(&self.staging_raw, &info.key)
+                }
+                .map_err(|err| err.to_string())?;
                 let engines =
                     all || staged_puts.contains(&(info.key, crate::store::content_digest(&bytes)));
                 let header = bytes

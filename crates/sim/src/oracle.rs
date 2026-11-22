@@ -314,6 +314,16 @@ pub enum Violation {
         /// The file.
         key: String,
     },
+    /// A staged file the staging store reported durable (its commit or its delete returned
+    /// success) changed across a power loss. Judged when staging is the directory store on the
+    /// in-memory filesystem (`crate::staging`).
+    #[error("staged {key}: {how} across a power loss")]
+    StagedReverted {
+        /// The file.
+        key: String,
+        /// What happened to it.
+        how: String,
+    },
     /// The engine reported its own bug, or the oracle could not decide.
     #[error("bug fault: {context}")]
     BugFault {

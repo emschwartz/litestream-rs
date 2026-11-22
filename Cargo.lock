@@ -1032,6 +1032,7 @@ dependencies = [
  "lsr-core",
  "lsr-history",
  "lsr-ltx",
+ "lsr-store-fs",
  "lsr-wal",
  "proptest",
  "rusqlite",
