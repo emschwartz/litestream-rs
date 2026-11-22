@@ -78,6 +78,14 @@ test = "lsr-sim::history::tests::a_restore_of_a_state_adopted_from_damage_fails"
 plant = "damage-adopted-as-commit"
 
 [[row]]
+id = "CHK-7"
+circumstance = "A task stays stalled on a retried fault after every injected fault has healed"
+recovered = ["lsr-sim::sim::stall_liveness::a_stall_ends_with_the_fault_that_caused_it_seed_0x5c"]
+[[row.kill]]
+test = "lsr-sim::sim::stall_liveness::a_stall_ends_with_the_fault_that_caused_it_seed_0x5c"
+plant = "success-keeps-a-stall"
+
+[[row]]
 id = "CHK-4"
 circumstance = "A regression the driver excused (a bucket rollback) is never reported by the engine"
 none = "known wrong"
