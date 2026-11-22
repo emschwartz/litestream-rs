@@ -1,5 +1,5 @@
 diff --git a/crates/replica/src/replicator.rs b/crates/replica/src/replicator.rs
-index 9bebb44..48bb45c 100644
+index f47702a..07028c2 100644
 --- a/crates/replica/src/replicator.rs
 +++ b/crates/replica/src/replicator.rs
 @@ -509,7 +509,7 @@ impl Replicator {
@@ -10,4 +10,4 @@ index 9bebb44..48bb45c 100644
 +
          Ok(())
      }
- 
+ }
