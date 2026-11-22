@@ -1,13 +1,14 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index a36a38e..0e17fe9 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -749,7 +749,8 @@
-         // the next file is a snapshot even when the WAL could continue.
-         let cause = lost
-             .map(|_| SnapshotCause::NewestStagedFileUnreadable)
--            .or(from.err());
-+            .or(from.err())
-+            .or(Some(SnapshotCause::LastPageMismatch));
+@@ -751,7 +751,8 @@ impl Actor {
+             Recovered::Snapshot { cause, .. } => Err(cause),
+             Recovered::Stop(cause) => return self.verdict(Task::Sync, cause, now),
+         };
+-        let cause = boot_cause(lost, refused, from.err());
++        let cause =
++            boot_cause(lost, refused, from.err()).or(Some(SnapshotCause::LastPageMismatch));
          let pending = pending_at_boot(self.kept.asked(), cause);
          let course = match (from, pending) {
              (Ok(position), snapshot) => Course::At {

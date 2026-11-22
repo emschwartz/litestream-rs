@@ -650,13 +650,23 @@ impl World {
             .iter()
             .filter(|file| newest.is_none_or(|newest| file.key.range().max().get() > newest))
             .find_map(|file| {
-                let bytes = self.read_staged(&file.key).ok()?;
-                if is_full_image(&bytes) {
-                    return Some(Unprovable::Snapshot);
+                // Only a file read from a generation's first frame (or from no
+                // WAL range) can be either: the header says so, the pages
+                // whether it is whole.
+                let len =
+                    lsr_core::ReadLen::new(u32::try_from(lsr_ltx::HEADER_LEN).unwrap_or(u32::MAX))?;
+                let head = block_on(self.staging_raw.read(&file.key, 0, len)).ok()?;
+                let raw = head.first_chunk::<{ lsr_ltx::HEADER_LEN }>()?;
+                let origin = lsr_ltx::Header::decode(raw).ok()?.fields().wal;
+                if origin.is_some_and(|origin| origin.offset() != first_frame) {
+                    return None;
                 }
-                let raw = bytes.first_chunk::<{ lsr_ltx::HEADER_LEN }>()?;
-                let origin = lsr_ltx::Header::decode(raw).ok()?.fields().wal?;
-                (origin.offset() == first_frame).then_some(Unprovable::Hop)
+                let bytes = self.read_staged(&file.key).ok()?;
+                Some(if is_full_image(&bytes) {
+                    Unprovable::Snapshot
+                } else {
+                    Unprovable::Hop
+                })
             })
     }
 
