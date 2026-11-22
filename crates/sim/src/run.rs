@@ -1680,6 +1680,8 @@ impl Runner {
         self.w.sqlite.tear_on_power_loss(seed.stream(14));
         if opts.block_crash_law {
             self.w.sqlite.crash_by_law(CrashLaw::drawn(seed.stream(17)));
+            // The same disk holds the staging directory: its unsynced unlinks may come back.
+            self.w.volatile.revert_unsynced_entries();
         }
         if opts.lying_wal_sync {
             self.w.sqlite.lie_on_our_sync();

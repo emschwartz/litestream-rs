@@ -363,3 +363,9 @@ tests = [
     "judge::a_rewind_the_engine_did_not_report_does_not_excuse_going_back",
     "judge::a_report_before_the_rewind_does_not_cover_it",
 ]
+
+[[bug]]
+name = "unlink-durable-at-once"
+fix = "checker-holes (staged unlinks)"
+package = "lsr-sim"
+tests = ["store::tests::an_unsynced_unlink_comes_back_or_stays_done_under_the_block_law"]
