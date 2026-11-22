@@ -564,6 +564,59 @@ mod unlinked {
 }
 
 #[cfg(test)]
+mod staged_input {
+    use lsr_core::{StoreError, StoreOp};
+    use lsr_sim::generate::{MetaOp, WalOp};
+    use lsr_sim::run::run_ops;
+    use lsr_sim::{FaultShape, Op, Opts, Seed, Target};
+
+    /// A staging backup holding the first snapshot as transaction 1 is put
+    /// back after the engine took 1 again from a later commit and uploaded
+    /// it. Level 1 was built from the staged copy of level 0 while restores
+    /// read the replica's, so transaction 1 had two contents (seed 0xcf8,
+    /// shrunk).
+    #[test]
+    fn level_one_is_not_built_from_a_staged_file_unlike_the_replica_seed_0xcf8() {
+        let ops = [
+            Op::WalDamage {
+                op: WalOp::TearHeader,
+                ticks: 1,
+            },
+            Op::Tick,
+            Op::Meta(MetaOp::Save),
+            Op::Commit {
+                pages: 4,
+                grow: false,
+            },
+            Op::Meta(MetaOp::DeleteAll),
+            Op::StoreFault {
+                target: Target::Remote,
+                op: StoreOp::Upload,
+                ahead: 1,
+                shape: FaultShape::ErrorAfterPublish(StoreError::Transient {
+                    op: StoreOp::Upload,
+                    kind: std::io::ErrorKind::ConnectionReset,
+                }),
+            },
+            Op::Shutdown,
+            Op::SecondWriter { ticks: 5 },
+            Op::StagingDamage(MetaOp::Restore),
+            Op::WalDamage {
+                op: WalOp::RegrowWithoutCommitMarks(2_324_847_808_936_637_740),
+                ticks: 6,
+            },
+        ];
+        let opts = Opts {
+            drawn: true,
+            ..Opts::default()
+        };
+        if let Err(failure) = run_ops(Seed::new(0xcf8), &ops, &opts) {
+            panic!("{}", failure.violation);
+        }
+    }
+}
+
+#[cfg(test)]
 mod one_bad_read {
     use lsr_core::StoreOp;
     use lsr_sim::generate::Target;
