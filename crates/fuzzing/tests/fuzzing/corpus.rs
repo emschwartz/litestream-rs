@@ -41,6 +41,12 @@ fn decode_corpus_replays() {
 
 #[test]
 #[cfg(test)]
+fn flip_corpus_replays() {
+    replay("flip", lsr_fuzzing::flip);
+}
+
+#[test]
+#[cfg(test)]
 fn index_corpus_replays() {
     replay("index", lsr_fuzzing::index);
 }

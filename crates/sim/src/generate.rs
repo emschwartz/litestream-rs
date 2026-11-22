@@ -322,7 +322,41 @@ pub struct Weights {
     /// drawn prefix of them. Not an operation: it changes what every power
     /// loss of the run leaves, so the history's draws are the same either way.
     pub block_crash_law: bool,
+    /// What the app does right after every restart (a crash, a power loss, a
+    /// stop), before the new engine's first tick. Not an operation, for the
+    /// same reason as `block_crash_law`.
+    pub after_restart: AfterRestart,
 }
+
+/// What the application does when it comes back after a restart, before the
+/// engine has looked at the WAL. Real applications do not sit still: a job
+/// runner replays the work it cannot prove finished, an idempotent migration
+/// runs again, a busy service goes straight back to committing. Replayed
+/// work writes the same page images again, which is the one way a rewound
+/// WAL can regrow frames identical to the ones it lost (see the anchor
+/// scenario in the correctness review of the boot proof).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AfterRestart {
+    /// It waits for its next drawn operation.
+    #[default]
+    Nothing,
+    /// It replays its last `K` commits, verbatim (the same pages with the
+    /// same bytes, at the database size each left), oldest first. `K` is
+    /// drawn per restart from 1 to [`REDO_MAX`], so it often reaches back
+    /// past the commits the restart lost.
+    Redo,
+    /// It commits new work until the WAL's committed end passes the end it
+    /// had before the restart, so the regrown WAL climbs over every frame
+    /// the restart left behind (at most [`BUSY_MAX`] commits).
+    Busy,
+}
+
+/// The most commits a [`AfterRestart::Redo`] replays, and the length of the
+/// app's own log of commits.
+pub const REDO_MAX: u64 = 16;
+
+/// The most commits a [`AfterRestart::Busy`] makes after one restart.
+pub const BUSY_MAX: u32 = 64;
 
 impl Default for Weights {
     /// Ticks and commits dominate and faults are rare, so a history makes
@@ -359,6 +393,7 @@ impl Default for Weights {
             lagging_listings: 0,
             vacuum_resizes: true,
             block_crash_law: false,
+            after_restart: AfterRestart::Nothing,
         }
     }
 }
@@ -485,6 +520,7 @@ impl Weights {
             lagging_listings: 0,
             vacuum_resizes: below(&entropy, 2) == 0,
             block_crash_law: false,
+            after_restart: AfterRestart::Nothing,
         };
         // Drawn last, so every other kind keeps the weight it had before
         // second writers were drawn.
@@ -493,6 +529,12 @@ impl Weights {
         mix.block_crash_law = below(&entropy, 2) == 0;
         // And after that, for the same reason.
         mix.staging_replace_running = weight(false);
+        // Drawn after that, for the same reason: a third each.
+        mix.after_restart = match below(&entropy, 3) {
+            0 => AfterRestart::Nothing,
+            1 => AfterRestart::Redo,
+            _ => AfterRestart::Busy,
+        };
         // And lagging listings after that.
         mix.lagging_listings = weight(false);
         mix

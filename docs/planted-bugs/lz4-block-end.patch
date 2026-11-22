@@ -1,0 +1,13 @@
+diff --git a/crates/ltx/src/frame.rs b/crates/ltx/src/frame.rs
+index c88d89c..0cd985b 100644
+--- a/crates/ltx/src/frame.rs
++++ b/crates/ltx/src/frame.rs
+@@ -502,7 +502,7 @@ fn check_block_end(block: &[u8]) -> Result<(), FrameError> {
+             extended_len(block, token >> 4, pos.saturating_add(1)).ok_or(FrameError::BlockEnd)?;
+         pos = after.saturating_add(literals);
+         if pos >= block.len() {
+-            return if pos == block.len() && token & 0x0f == 0 {
++            return if pos == block.len() {
+                 Ok(())
+             } else {
+                 Err(FrameError::BlockEnd)

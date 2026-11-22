@@ -21,7 +21,9 @@ use lsr_ltx::{PageNo, PageSize, Timestamp, Txid};
 use lsr_wal::{Salts, WalOffset};
 
 use crate::crash_law::CrashLaw;
-use crate::generate::{EnvFault, MetaOp, Op, RemoteOp, Target, WalOp, Weights, history};
+use crate::generate::{
+    AfterRestart, EnvFault, MetaOp, Op, RemoteOp, Target, WalOp, Weights, history,
+};
 use crate::oracle::{Bound, Incarnation, Violation, Windows, bug_fault, judge_put, within};
 use crate::reach::{Reach, variant};
 use crate::resources::{
@@ -194,6 +196,9 @@ pub struct Opts {
     /// With `drawn`, a power loss keeps the block law's draw instead of a
     /// drawn prefix ([`Weights::block_crash_law`]). [`run_with`] sets it.
     pub block_crash_law: bool,
+    /// What the app does after each restart ([`Weights::after_restart`]).
+    /// [`run_with`] sets it.
+    pub after_restart: AfterRestart,
     /// Which judges run: the oracle, the history judge, or both (the default).
     pub judges: Judges,
 }
@@ -322,6 +327,10 @@ struct Runner {
     /// a relist once it learns of the loss.
     regressions: u32,
     judges: Judges,
+    /// What the app does after a restart, and its own log of commits.
+    app: after_restart::App,
+    /// The WAL's committed end, in frames, as the current operation began.
+    op_began_at: u32,
 }
 
 fn below(rng: &SeededEntropy, upper: u64) -> u64 {
@@ -371,6 +380,8 @@ impl Runner {
             failed_boots: 0,
             regressions: 0,
             judges: Judges::default(),
+            app: after_restart::App::new(seed),
+            op_began_at: 0,
         }
     }
 
@@ -509,6 +520,7 @@ impl Runner {
 
     fn crashed(&mut self, kind: CrashKind) {
         self.reboot();
+        self.app.restarted(self.op_began_at);
         self.report.reach.bump(format!("crash.{}", variant(&kind)));
         self.report.crashes = self.report.crashes.saturating_add(1);
         if kind == CrashKind::Power {
@@ -883,7 +895,9 @@ impl Runner {
         let mut all = std::mem::take(&mut self.spilled);
         all.append(&mut pages);
         let before = self.w.sqlite.db_size();
-        if self.w.app_commit(&all, db_size).is_some() {
+        if let Some(id) = self.w.app_commit(&all, db_size) {
+            self.app
+                .logged(id, &all, db_size, self.w.sqlite.page_size());
             if db_size < before {
                 self.report.reach.bump("commit.shrinks");
             }
@@ -1264,7 +1278,9 @@ impl Runner {
     /// Applies `op`, checks the model still follows SQLite's recovery, then judges the replica
     /// by content at random (see [`crate::history`]).
     fn apply_judged(&mut self, op: &Op) -> Result<(), Violation> {
+        self.op_began_at = self.w.sqlite.mx_frame();
         self.apply(op)?;
+        self.after_restart();
         self.recovery_agrees()?;
         if self.judges.history && self.w.history.draw() {
             return self.judge_history(crate::history::Ask::default());
@@ -1501,6 +1517,7 @@ impl Runner {
                 self.report.shutdowns = self.report.shutdowns.saturating_add(1);
                 self.drain()?;
                 self.reboot();
+                self.app.restarted(self.op_began_at);
             }
             Op::RequestSnapshot => self.actor.request_snapshot(),
             Op::Restore => self.restore_all()?,
@@ -1800,6 +1817,7 @@ pub fn run_with(
     let opts = Opts {
         drawn: true,
         block_crash_law: weights.block_crash_law,
+        after_restart: weights.after_restart,
         ..opts.clone()
     };
     run_ops(seed, &history(seed, steps, weights), &opts)
@@ -1827,6 +1845,7 @@ pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure
     runner.responses = opts.responses;
     runner.retention = opts.retention;
     runner.judges = opts.judges;
+    runner.app.set(opts.after_restart);
     runner.reboot();
     for (index, op) in ops.iter().enumerate() {
         let step = u32::try_from(index).unwrap_or(u32::MAX);
@@ -1904,6 +1923,8 @@ pub fn shrink(seed: Seed, steps: u32, weights: &Weights, opts: &Opts) -> Option<
     }
     Some(high)
 }
+
+mod after_restart;
 
 #[cfg(test)]
 mod tests;
