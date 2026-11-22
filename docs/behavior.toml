@@ -632,11 +632,11 @@ notes = "As RUN-25, under the per-read clock law"
 table = "Running"
 id = "RUN-27"
 circumstance = "The WAL header of a generation with no frame is written again with the same salts and another checkpoint sequence, so another chain seed. SQLite's next writer does this whenever the wal-index holds no frame: the connection that restarted the WAL rolled back, or died, before its commit, and the header carries the writing connection's own checkpoint count"
-response = "continue. A position at the start of the generation takes its chain seed from the header as it is now (`sync.rs`), as a resume at the start does; nothing of the generation was staged from the old seed"
+response = "continue. A position at the start of the generation takes its chain seed from the header as it is now (`sync.rs`), as a resume at the start does; nothing of the generation was staged from the old seed. A position past the start meets this only after the wal-index lost every frame it covers: the frame before its end carries another running checksum than the position scanned to, and recovery answers with a snapshot, `LocalRewound` (`recover.rs`). A rewrite while a step reads the WAL is the WAL moving, retried (`WalReader::generation_unchanged` compares the whole header)"
 signal = "None"
 at_risk = "None"
 recovery = "None needed"
-detected_by = "core::`a_step_from_the_start_follows_a_header_written_again_with_the_same_salts`, sqlite::`a_header_written_again_with_the_same_salts_replicates_what_follows`; plant::`start-seed-from-old-header`, plant::`start-seed-from-old-header-sqlite`"
+detected_by = "core::`a_step_from_the_start_follows_a_header_written_again_with_the_same_salts`, sqlite::`a_header_written_again_with_the_same_salts_replicates_what_follows`, core::`frames_regrown_from_a_header_written_again_are_a_rewind`, wal::`generation_unchanged_reads_the_header_again`; plant::`start-seed-from-old-header`, plant::`start-seed-from-old-header-sqlite`, plant::`rechained-before-end-ignored`"
 notes = "Before the fix the old seed failed the first frame's checksum under unchanged salts, which read as `WalCorrupt` for good (Go v0.5.18 killed at its WAL restart, then the application's next commit)"
 
 [[row]]
