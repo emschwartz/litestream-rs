@@ -1,14 +1,12 @@
 diff --git a/crates/sidecar/src/health.rs b/crates/sidecar/src/health.rs
-index 9acac22..5c3c2e7 100644
+index 56fec6b6..748aa217 100644
 --- a/crates/sidecar/src/health.rs
 +++ b/crates/sidecar/src/health.rs
-@@ -128,9 +128,7 @@ impl DbView {
+@@ -128,7 +128,7 @@ impl DbView {
              DbState::Failed => true,
              DbState::Running(health) => match health.phase {
                  // A fail-stop trip is 503 under every mode (`crate::failstop`).
--                Phase::Booting | Phase::Running | Phase::Draining => {
--                    health.fail_stop.trip.is_some()
--                }
+-                Phase::Booting | Phase::Running | Phase::Draining => health.held_by.trip.is_some(),
 +                Phase::Booting | Phase::Running | Phase::Draining => false,
                  Phase::Stopped(_) | Phase::Gone(_) => true,
              },

@@ -1,14 +1,14 @@
 diff --git a/crates/core/src/failstop.rs b/crates/core/src/failstop.rs
-index 7a32fca..23bb0b7 100644
+index 60c37b5d..4befee59 100644
 --- a/crates/core/src/failstop.rs
 +++ b/crates/core/src/failstop.rs
-@@ -171,7 +171,8 @@ pub const fn gate(mode: IfReplicationStops, released: bool, trip: Option<Trip>)
+@@ -175,7 +175,8 @@ pub const fn gate(mode: IfReplicationStops, released: bool, trip: Option<Trip>)
      };
      let holds = match (mode, trip) {
          (IfReplicationStops::Report, _) => false,
--        (IfReplicationStops::HoldStart, Trip::Stopped(_) | Trip::NotYetReachable(_)) => !released,
+-        (IfReplicationStops::HoldStart, Trip::Stopped(_) | Trip::RefusedAtStart(_)) => !released,
 +        (IfReplicationStops::HoldStart, Trip::Stopped(_)) => !released,
-+        (IfReplicationStops::HoldStart, Trip::NotYetReachable(_)) => false,
++        (IfReplicationStops::HoldStart, Trip::RefusedAtStart(_)) => false,
          (IfReplicationStops::HoldStart, Trip::UnreplicatedTooLong { .. }) => false,
          // A refusal at boot is about starting; once released, the store's refusal grows the
          // age like any other fault and trips for that.

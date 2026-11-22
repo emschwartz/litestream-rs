@@ -1,5 +1,5 @@
 diff --git a/crates/replica/src/thread.rs b/crates/replica/src/thread.rs
-index 4311392..b84ad62 100644
+index af00d580..6c76711d 100644
 --- a/crates/replica/src/thread.rs
 +++ b/crates/replica/src/thread.rs
 @@ -662,8 +662,7 @@ impl Worker {
@@ -10,5 +10,5 @@ index 4311392..b84ad62 100644
 -                (seen, engine) => seen.or(engine),
 +                (seen, _engine) => seen,
              };
-             health.fail_stop = parts.fail_stop;
+             health.held_by = parts.fail_stop;
              health.wal_bytes = parts.wal_bytes;
