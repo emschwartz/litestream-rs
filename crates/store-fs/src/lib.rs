@@ -18,9 +18,18 @@
 //! value, a bounded number of times, and gives up with
 //! [`StoreError::ScratchExhausted`]. A scratch file (this store's, or Go's
 //! `<name>.tmp`) is neither an object nor an unrecognized name: `list` neither
-//! returns nor counts it. Nothing removes one automatically, because a scratch
-//! file may belong to an upload still running in another process; an operator
-//! clears them.
+//! returns nor counts it.
+//!
+//! A process killed mid-upload leaves its scratch file behind, and a crash loop
+//! leaves one per boot, each as large as the file it was writing. The engine
+//! calls [`ObjectStore::remove_scratch`] when it boots: every scratch file of this
+//! store's own form in a level directory goes, at most [`MAX_SCRATCH_REMOVED`] per
+//! call. Go's `<name>.tmp` and every other name stay. Only the replicating engine
+//! uploads into a replica, and a second engine on one replica is already a stop
+//! condition; if one runs anyway and its scratch file goes from under it, its
+//! commit's rename finds nothing and fails, and the upload is retried. No age
+//! test is needed for safety, and one would keep a crash loop's leftovers for as
+//! long as the age.
 //!
 //! Directories are made durable too: a level directory the store creates, and
 //! each directory above it that it creates, has its parent fsynced before the
@@ -62,6 +71,25 @@ const LTX_DIR: &str = "ltx";
 
 /// How many scratch names an upload tries before giving up.
 const SCRATCH_TRIES: u32 = 64;
+
+/// The most scratch files one [`ObjectStore::remove_scratch`] call removes, so a boot after a
+/// long crash loop does bounded work; the rest go at the next boot.
+pub const MAX_SCRATCH_REMOVED: u64 = 1024;
+
+/// Whether `name` is a scratch file of this store's own form, `<key name>.<pid>-<serial>.tmp`.
+fn is_own_scratch(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".tmp") else {
+        return false;
+    };
+    let Some((key, unique)) = stem.split_once(".ltx.") else {
+        return false;
+    };
+    let digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+    let own = unique
+        .split_once('-')
+        .is_some_and(|(pid, serial)| digits(pid) && digits(serial));
+    own && parse_file_name(&format!("{key}.ltx")).is_ok()
+}
 
 /// Creates `dir` and any missing ancestors, top down, calling `sync` on the
 /// parent of each directory it made so the new entry is durable. A directory
@@ -261,6 +289,33 @@ impl FsStore {
         Err(StoreError::ScratchExhausted { key: *key })
     }
 
+    fn remove_scratch_now(&self) -> Result<u64, StoreError> {
+        let fail = |err: &io::Error| StoreError::from_io(StoreOp::Delete, None, err);
+        let mut removed = 0;
+        for level in Level::ALL {
+            let entries = match fs::read_dir(self.level_dir(level)) {
+                Ok(entries) => entries,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+                Err(err) => return Err(fail(&err)),
+            };
+            for entry in entries {
+                if removed >= MAX_SCRATCH_REMOVED {
+                    return Ok(removed);
+                }
+                let entry = entry.map_err(|err| fail(&err))?;
+                if !is_own_scratch(&entry.file_name().to_string_lossy()) {
+                    continue;
+                }
+                match fs::remove_file(entry.path()) {
+                    Ok(()) => removed = removed.saturating_add(1),
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                    Err(err) => return Err(fail(&err)),
+                }
+            }
+        }
+        Ok(removed)
+    }
+
     fn delete_now(&self, keys: &[FileKey]) -> Result<(), StoreError> {
         for key in keys {
             match fs::remove_file(self.file_path(key)) {
@@ -412,6 +467,10 @@ impl ObjectStore for FsStore {
 
     fn delete(&self, keys: &[FileKey]) -> impl Future<Output = Result<(), StoreError>> + Send {
         ready(self.delete_now(keys))
+    }
+
+    fn remove_scratch(&self) -> impl Future<Output = Result<u64, StoreError>> + Send {
+        ready(self.remove_scratch_now())
     }
 }
 

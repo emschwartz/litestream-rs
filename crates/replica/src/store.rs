@@ -70,6 +70,9 @@ pub trait DynStore: Send + Sync {
     /// [`ObjectStore::delete`].
     fn delete_boxed<'a>(&'a self, keys: &'a [FileKey]) -> BoxFuture<'a, Result<(), StoreError>>;
 
+    /// [`ObjectStore::remove_scratch`].
+    fn remove_scratch_boxed(&self) -> BoxFuture<'_, Result<u64, StoreError>>;
+
     /// [`ObjectStore::batch_width`].
     fn batch_width_dyn(&self, kind: BatchKind) -> NonZeroUsize;
 
@@ -171,6 +174,10 @@ where
         Box::pin(self.delete(keys))
     }
 
+    fn remove_scratch_boxed(&self) -> BoxFuture<'_, Result<u64, StoreError>> {
+        Box::pin(self.remove_scratch())
+    }
+
     fn batch_width_dyn(&self, kind: BatchKind) -> NonZeroUsize {
         self.batch_width(kind)
     }
@@ -261,6 +268,10 @@ impl<'a, P: Deref<Target = dyn DynStore + 'a> + Send + Sync> ObjectStore for Era
 
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
         self.0.delete_boxed(keys).await
+    }
+
+    async fn remove_scratch(&self) -> Result<u64, StoreError> {
+        self.0.remove_scratch_boxed().await
     }
 
     fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {
@@ -474,6 +485,10 @@ impl ObjectStore for Metered {
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
         let call = self.store.delete_boxed(keys);
         metered(&*self.clock, &self.meters.delete, call).await
+    }
+
+    async fn remove_scratch(&self) -> Result<u64, StoreError> {
+        self.store.remove_scratch_boxed().await
     }
 
     fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {

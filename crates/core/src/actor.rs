@@ -1884,7 +1884,26 @@ struct Booted {
 /// level-0 file), the replica's page size, and what recovery makes of them.
 /// A WAL whose page size is not the replica's stops here, before
 /// anything is staged.
-/// Boot's listing and staging sweep: the upload state to start from, and the
+/// Removes the scratch files a killed process's uploads left, in staging and in the replica.
+/// A crash loop otherwise leaves one per boot, each as large as the file it was writing; at
+/// boot nothing of this engine is uploading yet. A failure is the directory's, which every
+/// upload and prune needs too.
+async fn remove_scratch<L: ObjectStore, R: ObjectStore>(
+    staging: &L,
+    remote: &R,
+) -> Result<(), Fault> {
+    staging
+        .remove_scratch()
+        .await
+        .map_err(|err| Fault::from_staging(&err))?;
+    remote
+        .remove_scratch()
+        .await
+        .map_err(|err| Fault::from_remote(&err))?;
+    Ok(())
+}
+
+/// Boot's scratch removal, listing and staging sweep: the upload state to start from, and the
 /// first staged transaction deleted, if any was.
 ///
 /// A staged file that fails verification is deleted, with all after it, only
@@ -1896,6 +1915,7 @@ async fn boot_listing<L: ObjectStore, R: ObjectStore>(
     remote: &R,
     suspect: &mut Option<FileKey>,
 ) -> Result<(UploadState, Option<Txid>), Fault> {
+    remove_scratch(staging, remote).await?;
     // At boot a replica ahead of the local newest staged file is `recover`'s to judge (a
     // snapshot after it), not the uploader's (a stop), so the listing names no newest staged file.
     let start = UploadState::ListFirst { confirmed: None };

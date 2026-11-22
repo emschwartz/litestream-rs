@@ -119,6 +119,10 @@ impl<S: ObjectStore> ObjectStore for Counting<'_, S> {
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
         self.inner.delete(keys).await
     }
+
+    async fn remove_scratch(&self) -> Result<u64, StoreError> {
+        self.inner.remove_scratch().await
+    }
 }
 
 /// What the dry run did.
