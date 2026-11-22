@@ -184,13 +184,16 @@ pub const fn justifies(cause: SnapshotCauseKind, at_boot: bool) -> Option<&'stat
         WalDamaged, WalEmptied, WalRestarted,
     };
     Some(match cause {
-        // Nothing staged and nothing on the replica to continue from.
+        // Nothing staged and nothing on the replica to continue from. Staging may hold nothing
+        // while the replica holds its newest file, so a bucket rolled back past its only
+        // transaction leaves nothing on either side.
         SnapshotCauseKind::FirstSync => &[
             RunStart,
             StagingEdited,
             StagedLost,
             StagingFault,
             StagedDropped,
+            RemoteEdited,
         ],
         // The replica holds more than staging: staging lost files, or the
         // replica took files staging never had.
@@ -332,6 +335,9 @@ pub const fn of_opts(opts: &crate::run::Opts) -> &'static [Justifier] {
         // The app's behaviour after a restart, and how the clock reads inside a tick.
         after_restart: _,
         clock_law: _,
+        // Staging on the directory store: what its power losses take is noted with
+        // `StagedLost`, as on `MemStore`; a file it took that it reported durable fails the run.
+        staging_fs: _,
         lying_wal_sync,
     } = opts;
     if *lying_wal_sync {

@@ -148,9 +148,11 @@ fn the_second_frozen_generator_draws_what_the_live_one_drew() {
             continue;
         }
         // Holds came after the second generator, from a stream of their own: with none drawn,
-        // every step is the step it was. Lagging listings came after it too, drawn last into
-        // the mix: at weight zero they draw nothing and move no other draw.
+        // every step is the step it was. The whole error domain came after too, and changes
+        // only which error a fault draws. Lagging listings came last: at weight zero they draw
+        // nothing and move no other draw.
         weights.hold = 0;
+        weights.error_domain = false;
         weights.lagging_listings = 0;
         let live = history(seed(n), 300, &weights);
         assert_eq!(

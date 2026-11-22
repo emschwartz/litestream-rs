@@ -575,6 +575,83 @@ fn a_listing_that_shows_nothing_over_a_first_file_is_not_an_empty_replica() {
     }
 }
 
+/// A replicator keeps uploading while the restore runs: after each listing the next
+/// transaction's file lands, so each read past the listing finds a file the listing could not
+/// have shown. Every next listing shows the file found before it, so none of them lags; the
+/// restore follows the writer and publishes the newest state once it stops. It used to count
+/// each new file as a lagging listing and fail with `ListingBehind` after three (seen on MinIO
+/// with the replicator running, history `every_restore_of_a_minio_replica_is_a_node_of_the_history`).
+#[test]
+fn a_restore_racing_a_writer_follows_it_and_never_calls_the_listing_behind() {
+    let store = MemStore::new();
+    put_spec(&store, 9, &Spec::plain(512, 1, 1, 1, &[(1, 1)]));
+    let store = Wrapped::new(store);
+    for n in 2..=7_u64 {
+        let spec = Spec::plain(512, 1, n, n, &[(1, u8::try_from(n).unwrap())]);
+        store
+            .put_after_list
+            .lock()
+            .unwrap()
+            .push_back((key(0, n, n), spec.encode()));
+    }
+    let (result, sink) = run(&store, RestoreTarget::Latest);
+    let restored = result.unwrap();
+    assert!(restored.reached().get() >= 2, "{restored:?}");
+    assert!(!restored.writer_outpaced(), "{restored:?}");
+    let reached = u8::try_from(restored.reached().get()).unwrap();
+    assert_eq!(seeds(&sink.published().unwrap()), [reached]);
+}
+
+/// A put in flight when the restore reads past its listing: the read finds nothing, and the
+/// put commits right after, as R2 allows. The listing was whole when it was read, so the
+/// newest state it lists is the newest the replica held then; the put lands during the
+/// restore, after the probe, which makes it a write concurrent with the restore and not one
+/// the restore owes. The restore publishes the listed newest and makes no error of it.
+#[test]
+fn a_put_that_lands_after_the_read_past_the_listing_is_concurrent_and_not_owed() {
+    let store = MemStore::new();
+    put_spec(&store, 9, &Spec::plain(512, 1, 1, 1, &[(1, 1)]));
+    put_spec(&store, 0, &Spec::plain(512, 1, 2, 2, &[(1, 2)]));
+    let store = Wrapped::new(store);
+    let late = Spec::plain(512, 1, 3, 3, &[(1, 3)]);
+    *store.put_after_miss.lock().unwrap() = Some((key(0, 3, 3), late.encode()));
+    let (result, sink) = run(&store, RestoreTarget::Latest);
+    assert_eq!(result.unwrap().reached(), txid(2));
+    assert_eq!(seeds(&sink.published().unwrap()), [2]);
+    assert!(
+        store.put_after_miss.lock().unwrap().is_none(),
+        "the put landed during the restore"
+    );
+}
+
+/// A writer that never pauses: the restore follows it for a bounded number of listings, all of
+/// which caught up, then takes the next listing as it stands and publishes its newest state,
+/// saying so, rather than chase for ever or fail: no restore could finish against a busy
+/// writer otherwise.
+#[test]
+fn a_restore_outpaced_by_a_writer_publishes_the_last_listing_and_says_so() {
+    let store = MemStore::new();
+    put_spec(&store, 9, &Spec::plain(512, 1, 1, 1, &[(1, 1)]));
+    let store = Wrapped::new(store);
+    for n in 2..=200_u64 {
+        let spec = Spec::plain(512, 1, n, n, &[(1, u8::try_from(n % 251).unwrap())]);
+        store
+            .put_after_list
+            .lock()
+            .unwrap()
+            .push_back((key(0, n, n), spec.encode()));
+    }
+    let (result, sink) = run(&store, RestoreTarget::Latest);
+    let restored = result.unwrap();
+    assert!(restored.writer_outpaced(), "{restored:?}");
+    assert!(
+        restored.reached().get() > u64::from(MAX_CHASE),
+        "{restored:?}"
+    );
+    let reached = u8::try_from(restored.reached().get() % 251).unwrap();
+    assert_eq!(seeds(&sink.published().unwrap()), [reached]);
+}
+
 #[test]
 fn a_txid_restore_takes_no_read_past_the_listing() {
     let store = lagging(&[key(0, 3, 3)]);

@@ -3,6 +3,8 @@ use lsr_core::WriteMode;
 use lsr_core::conformance::{Failure, Harness, block_on};
 use lsr_core::file_name;
 use lsr_ltx::Txid;
+use std::fs::{self, File};
+use std::io::Write;
 use tempfile::TempDir;
 
 struct FsHarness {
@@ -315,7 +317,7 @@ fn missing_directories_are_synced_into_their_parents_top_down() {
     let dir = tempfile::tempdir().unwrap();
     let leaf = dir.path().join("a").join("b").join("c");
     let mut synced = Vec::new();
-    create_dirs_durably(&leaf, &mut |path| {
+    create_dirs_durably(&RealFs, &leaf, &mut |path| {
         synced.push(path.to_path_buf());
         Ok(())
     })
@@ -328,7 +330,7 @@ fn missing_directories_are_synced_into_their_parents_top_down() {
     ];
     assert_eq!(synced, expected);
     synced.clear();
-    create_dirs_durably(&leaf, &mut |path| {
+    create_dirs_durably(&RealFs, &leaf, &mut |path| {
         synced.push(path.to_path_buf());
         Ok(())
     })
@@ -339,7 +341,7 @@ fn missing_directories_are_synced_into_their_parents_top_down() {
 #[test]
 fn a_failed_directory_sync_fails_the_upload_before_it_can_commit() {
     let dir = tempfile::tempdir().unwrap();
-    let err = create_dirs_durably(&dir.path().join("x"), &mut |_| {
+    let err = create_dirs_durably(&RealFs, &dir.path().join("x"), &mut |_| {
         Err(io::Error::other("disk"))
     });
     assert!(err.is_err());

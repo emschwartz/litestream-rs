@@ -21,7 +21,7 @@ use lsr_core::{
 use lsr_ltx::TxidRange;
 use lsr_replica::{
     Booted, Config, DynStore, FakeClockHandle, Health, Phase, Replicator, RestoreTarget, Runtime,
-    Stopped, Task, Timestamp, restore,
+    Stopped, Task, Timestamp, restore, waiting,
 };
 use lsr_store_fs::FsStore;
 use rusqlite::Connection;
@@ -30,10 +30,9 @@ use tempfile::TempDir;
 /// The fake clock's start: 2023-11-14, any fixed instant would do.
 pub const START: Timestamp = Timestamp::from_unix_millis(1_700_000_000_000);
 
-/// Long enough that a test never sees it run out unless it is stuck. On the fake clock it
-/// never runs out at all, since the clock moves only when a test moves it: [`LOOKS`] is what
-/// ends a stuck wait there.
-pub const PATIENCE: Duration = Duration::from_secs(600);
+/// Long enough that a test never sees it run out unless it is stuck; on the fake clock
+/// [`LOOKS`] is what ends a stuck wait ([`lsr_replica::waiting`]).
+pub use lsr_replica::waiting::{LOOKS, PATIENCE};
 
 /// A database in a directory of its own, with the application's connection and a replica beside it.
 pub struct Site {
@@ -130,11 +129,6 @@ pub fn config() -> Config {
     Config::default()
 }
 
-/// How many times a wait looks at the health before it gives up. The replicator wakes a
-/// waiter on every change and at least every [`lsr_replica::CALLER_SLICE`], so a wait that sees nothing
-/// change fails after about a minute, where a deadline on the fake clock would never pass.
-pub const LOOKS: u32 = 1_200;
-
 /// Waits until `done` holds, failing the test if it never does: within [`PATIENCE`] on
 /// the replicator's clock, and within [`LOOKS`] looks whatever the clock does.
 pub fn wait(replicator: &Replicator, done: impl Fn(&Health) -> bool) -> Health {
@@ -188,45 +182,23 @@ pub fn stopped_moving(replicator: &Replicator, clock: &FakeClockHandle, step: Du
 }
 
 /// Moves the fake clock `step` at a time, at most `steps` times, until `done` holds; fails the
-/// test if it never does. Bounds how much clock a wait may take, where [`wait`] bounds looks.
-/// Each move waits for the thread's park to have looked at the clock it set, or for `done`, so
-/// a slow thread is never outrun by the clock.
+/// test if it never does ([`lsr_replica::waiting::moved_until`]).
 pub fn moved_until(
     replicator: &Replicator,
     clock: &FakeClockHandle,
     (step, steps): (Duration, u32),
     done: impl Fn(&Health) -> bool,
 ) -> Health {
-    for _ in 0..steps {
-        if let Some(health) = seen_or(replicator, clock, &done) {
-            return health;
-        }
-        clock.advance(step);
-    }
-    seen_or(replicator, clock, &done).unwrap_or_else(|| panic_with(&replicator.health()))
+    waiting::moved_until(replicator, clock, (step, steps), done)
+        .unwrap_or_else(|stuck| panic_with(&stuck.0))
 }
 
-/// Waits until `done` holds, returning that health, or until the thread's park has read the
-/// clock as it reads now, returning `None`; fails the test after [`LOOKS`] looks. Equal, not at
-/// least: after a step back the park's last reading is later than the clock.
 fn seen_or(
     replicator: &Replicator,
     clock: &FakeClockHandle,
     done: &impl Fn(&Health) -> bool,
 ) -> Option<Health> {
-    let now = clock.now();
-    let (looks, met) = (Cell::new(0_u32), Cell::new(false));
-    let seen = replicator.wait_until(PATIENCE, |health| {
-        looks.set(looks.get().saturating_add(1));
-        met.set(done(health));
-        met.get() || clock.seen_by_park() == Some(now) || looks.get() >= LOOKS
-    });
-    match seen {
-        Some(health) if met.get() => Some(health),
-        Some(_) if clock.seen_by_park() == Some(now) => None,
-        Some(health) => panic_with(&health),
-        None => panic_with(&replicator.health()),
-    }
+    waiting::seen_or(replicator, clock, done).unwrap_or_else(|stuck| panic_with(&stuck.0))
 }
 
 fn panic_with(health: &Health) -> ! {

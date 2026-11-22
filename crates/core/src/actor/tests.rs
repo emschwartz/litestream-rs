@@ -19,6 +19,14 @@ use crate::store::WriteMode;
 use crate::store::{Listing, PageLimit, ReadLen, StoreError, StoreOp, Upload};
 
 mod audit;
+#[expect(
+    clippy::unwrap_in_result,
+    clippy::panic_in_result_fn,
+    clippy::arithmetic_side_effects,
+    reason = "an in-memory journal file: slot offsets of at most 4096, and a write that panics \
+              because step 2 boot must never write"
+)]
+mod journal;
 
 const PS: PageSize = PageSize::MIN;
 const T0: i64 = 1_000_000;
@@ -253,6 +261,7 @@ impl Rig {
             staging: &self.staging,
             remote: &self.remote,
             clock: &FakeClock::new(ts(now)),
+            journal: None,
         };
         block_on(actor.tick(env, ts(now)))
     }

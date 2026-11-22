@@ -543,6 +543,7 @@ mod live {
                         && since.elapsed() >= Duration::from_millis(700))
                 },
             )
+            .map_err(|err| go.explain(err))
         }
 
         fn restore_go(
@@ -903,6 +904,7 @@ mod live {
                 process.ensure_running()?;
                 Ok(!snapshots(&fixture.replica)?.is_empty())
             })
+            .map_err(|err| process.explain(err))
             .expect("a snapshot exists");
             let stopped = process.stop();
             assert!(

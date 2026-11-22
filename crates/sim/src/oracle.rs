@@ -314,6 +314,16 @@ pub enum Violation {
         /// The file.
         key: String,
     },
+    /// A staged file the staging store reported durable (its commit or its delete returned
+    /// success) changed across a power loss. Judged when staging is the directory store on the
+    /// in-memory filesystem (`crate::staging`).
+    #[error("staged {key}: {how} across a power loss")]
+    StagedReverted {
+        /// The file.
+        key: String,
+        /// What happened to it.
+        how: String,
+    },
     /// After every injected fault healed and the app let go, a task was
     /// still stalled on a retried fault the world no longer imposes: the
     /// engine is stuck retrying, and health says degraded for nothing.
@@ -327,6 +337,13 @@ pub enum Violation {
         stall: String,
         /// Failures in a row.
         retries: u32,
+    },
+    /// A task is degraded by a persistent cause no fault of the run explains (or by the
+    /// engine's own bug, which nothing explains).
+    #[error("bug fault: a task is degraded: {cause:?}")]
+    UnexpectedDegraded {
+        /// The cause the engine reported.
+        cause: lsr_core::PersistentCause,
     },
     /// The engine reported its own bug, or the oracle could not decide.
     #[error("bug fault: {context}")]

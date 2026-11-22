@@ -14,7 +14,7 @@ use lsr_sim::{Seed, Weights, history, run};
 
 const SEED: u64 = 0x31c;
 const STEPS: u32 = 300;
-const DIGEST: u64 = 0x286a_d08e_f7e1_671a;
+const DIGEST: u64 = 0xaad4_ff0a_e81c_bd96;
 
 fn digest(text: &str) -> u64 {
     text.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
@@ -25,10 +25,12 @@ fn digest(text: &str) -> u64 {
 #[test]
 fn a_stall_ends_with_the_fault_that_caused_it_seed_0x31c() {
     let seed = Seed::new(SEED);
-    // The mix as drawn before the lagging-listings law: drawn for this seed, it would change
-    // which operations the history holds.
+    // The mix as drawn before the lagging-listings law, the directory staging store and the
+    // error domain: drawn for this seed, they would change the run the plant fails.
     let weights = Weights {
         lagging_listings: 0,
+        staging_fs: false,
+        error_domain: false,
         ..Weights::mixed(seed)
     };
     let ops = history(seed, STEPS, &weights);

@@ -107,6 +107,7 @@ fn write_rounds(mut process: Replicator, fixture: &mut AppFixture) -> Vec<Mark> 
         process.ensure_running()?;
         Ok(uploaded(fixture)?.is_some())
     })
+    .map_err(|err| process.explain(err))
     .expect("a first upload");
     let mut at = position(fixture).expect("position");
     let mut marks = Vec::new();
@@ -295,6 +296,7 @@ fn turn(
         process.ensure_running()?;
         Ok(!fixture.remote().snapshots()?.is_empty())
     })
+    .map_err(|err| process.explain(err))
     .expect("a snapshot exists");
     let stopped = process.stop();
     assert!(stopped.is_ok(), "{kind:?} does not stop: {stopped:?}");

@@ -100,6 +100,7 @@ use crate::fault::{
     SnapshotCause, SnapshotCounts, Stall, StopCause, backoff_wait, policy,
 };
 use crate::inventory::Inventory;
+use crate::journal::{JournalFile, JournalSignal, JournalWriter, judge};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::maintain::{
     Due, Job, MAX_DELETE, Maintenance, Outcome, ReadBack, RetentionHold, due, listing_after_upload,
@@ -143,6 +144,10 @@ pub struct Env<'a, W, P, C, L, R> {
     /// So a stamp is read here, after the committed read that bounds the
     /// file: every transaction the file carries committed before it.
     pub clock: &'a dyn Clock,
+    /// The engine journal (`docs/journal.md`), or `None` to run without one. Boot reads it and
+    /// reports what it found ([`Actor::journal`]); every verdict, the worst included, leaves the
+    /// engine doing exactly what it does with `None`.
+    pub journal: Option<&'a mut (dyn JournalFile + Send)>,
 }
 
 impl<
@@ -160,6 +165,7 @@ impl<
             .field("ck", &self.ck)
             .field("staging", &self.staging)
             .field("remote", &self.remote)
+            .field("journal", &self.journal.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -422,6 +428,13 @@ impl Actor {
     #[must_use]
     pub const fn phase(&self) -> Phase {
         self.kept.stop.phase(self.booted())
+    }
+
+    /// What the last boot's read of the journal reported, if anything: `None` with no journal,
+    /// a readable one, or none on a first run.
+    #[must_use]
+    pub const fn journal(&self) -> Option<JournalSignal> {
+        self.kept.journal
     }
 
     /// The task's degraded state, if a persistent failure left it in one.
@@ -868,6 +881,7 @@ impl Actor {
         if !self.kept.tasks.ready(Task::Sync, now) {
             return self.ran(Event::Idle, now);
         }
+        let journal = read_journal(env.journal.as_deref_mut());
         let suspect = &mut self.kept.suspect_staged;
         let (upload, dropped) = match boot_listing(env.staging, env.remote, suspect).await {
             Ok(listed) => listed,
@@ -891,6 +905,8 @@ impl Actor {
             Recovered::Snapshot { cause, .. } => Err(cause),
             Recovered::Stop(cause) => return self.verdict(Task::Sync, cause, now),
         };
+        // A report only, and one a boot that fails later reads again.
+        self.kept.journal = journal_signal(journal, newest_staged.as_ref(), &upload);
         let cause = boot_cause(dropped, refused, from.err());
         let pending = pending_at_boot(self.kept.asked(), cause);
         let course = match (from, pending) {
@@ -2173,6 +2189,22 @@ enum Dropped {
 /// when it is `suspect`, the file a read on an earlier tick failed on;
 /// otherwise it becomes the suspect and the boot fails with `StagedLost`, to
 /// read it again on the next try.
+/// The journal as boot reads it, or `None` with no journal lent.
+fn read_journal(file: Option<&mut (dyn JournalFile + Send + '_)>) -> Option<lsr_journal::Parsed> {
+    file.map(|file| JournalWriter::open(file).1)
+}
+
+/// What boot reports of the journal it read: a missing one is a first run, and reports
+/// nothing, only while staging and the replica are both empty.
+fn journal_signal(
+    journal: Option<lsr_journal::Parsed>,
+    newest_staged: Option<&NewestStagedFile>,
+    upload: &UploadState,
+) -> Option<JournalSignal> {
+    let fresh = newest_staged.is_none() && upload.confirmed().is_none();
+    journal.and_then(|parsed| judge(&parsed, fresh))
+}
+
 async fn boot_listing<L: ObjectStore, R: ObjectStore>(
     staging: &L,
     remote: &R,

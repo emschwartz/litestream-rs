@@ -176,7 +176,7 @@ fn the_scheduled_verify_is_off_by_default() {
     let events = events(&replicator);
     site.commit(3);
     advance(&replicator, &clock, POLL);
-    wait(&replicator, caught_up);
+    moved_until(&replicator, &clock, (POLL, 240), caught_up);
     for _ in 0..3 {
         advance(&replicator, &clock, EVERY);
     }
@@ -194,7 +194,7 @@ fn a_clock_step_back_does_not_put_off_the_scheduled_verify() {
     let replicator = Replicator::start_with(&site.db, site.store(), verifying(), runtime).unwrap();
     site.commit(3);
     advance(&replicator, &clock, POLL);
-    wait(&replicator, caught_up);
+    moved_until(&replicator, &clock, (POLL, 240), caught_up);
     clock.step_back(Duration::from_secs(3600));
     let health = moved_until(&replicator, &clock, (POLL, 240), |h| runs(h) >= 1);
     assert_eq!(health.verification.runs.passed, 1, "{health:?}");
@@ -211,7 +211,7 @@ fn the_scheduled_verify_runs_on_its_interval_and_a_clean_replica_passes() {
     let events = events(&replicator);
     site.commit(3);
     advance(&replicator, &clock, POLL);
-    let health = wait(&replicator, caught_up);
+    let health = moved_until(&replicator, &clock, (POLL, 240), caught_up);
     advance(&replicator, &clock, ALMOST);
     assert_eq!(runs(&replicator.health()), 0, "not due yet");
     clock.advance(POLL);
@@ -230,7 +230,7 @@ fn the_scheduled_verify_runs_on_its_interval_and_a_clean_replica_passes() {
     );
     site.commit(2);
     advance(&replicator, &clock, POLL);
-    let newer = wait(&replicator, caught_up);
+    let newer = moved_until(&replicator, &clock, (POLL, 240), caught_up);
     advance(&replicator, &clock, ALMOST);
     assert_eq!(
         runs(&replicator.health()),
@@ -261,14 +261,16 @@ fn a_wrong_page_in_the_replica_is_degraded_with_the_page_and_txid_and_pins_the_l
     let events = events(&replicator);
     site.commit(3);
     advance(&replicator, &clock, POLL);
-    let good = replicated(&wait(&replicator, caught_up)).unwrap();
+    let good = replicated(&moved_until(&replicator, &clock, (POLL, 240), caught_up)).unwrap();
     // Before the transaction it corrupts: a snapshot ending there would hide the page.
     settle_maintenance(&replicator, &clock, &site);
     clock.advance(EVERY);
     wait(&replicator, |h| h.verification.runs.passed == 1);
     site.commit(2);
     advance(&replicator, &clock, POLL);
-    let health = wait(&replicator, |h| caught_up(h) && replicated(h) > Some(good));
+    let health = moved_until(&replicator, &clock, (POLL, 240), |h| {
+        caught_up(h) && replicated(h) > Some(good)
+    });
     let (txid, page) = rewrite_newest_page(&site);
     assert_eq!(Some(txid), replicated(&health));
     assert!(matches!(
@@ -294,12 +296,16 @@ fn a_wrong_page_in_the_replica_is_degraded_with_the_page_and_txid_and_pins_the_l
     // Replication goes on.
     site.commit(1);
     advance(&replicator, &clock, POLL);
-    wait(&replicator, |h| caught_up(h) && replicated(h) > Some(txid));
+    moved_until(&replicator, &clock, (POLL, 240), |h| {
+        caught_up(h) && replicated(h) > Some(txid)
+    });
     // A snapshot rewrites every page; the next run passes and lets the read lock go.
     replicator.request_snapshot();
     site.commit(1);
     advance(&replicator, &clock, POLL);
-    let fixed = wait(&replicator, |h| caught_up(h) && h.resnapshot.is_none());
+    let fixed = moved_until(&replicator, &clock, (POLL, 240), |h| {
+        caught_up(h) && h.resnapshot.is_none()
+    });
     clock.advance(EVERY);
     let passed = wait(&replicator, |h| h.verification.runs.passed == 2);
     assert_eq!(passed.verification.failing, None);
@@ -418,14 +424,16 @@ fn a_verify_stuck_in_the_store_does_not_delay_syncs() {
     let replicator = Replicator::start_with(&site.db, store, verifying(), runtime).unwrap();
     site.commit(3);
     advance(&replicator, &clock, POLL);
-    let verified_at = replicated(&wait(&replicator, caught_up));
+    let verified_at = replicated(&moved_until(&replicator, &clock, (POLL, 240), caught_up));
     clock.advance(EVERY);
     gated.wait_entered();
     let mut last = verified_at;
     for _ in 0..3 {
         site.commit(2);
         advance(&replicator, &clock, POLL);
-        let health = wait(&replicator, |h| caught_up(h) && replicated(h) > last);
+        let health = moved_until(&replicator, &clock, (POLL, 240), |h| {
+            caught_up(h) && replicated(h) > last
+        });
         assert_eq!(runs(&health), 0, "the run is still in the store");
         last = replicated(&health);
     }
