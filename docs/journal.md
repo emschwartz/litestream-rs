@@ -228,5 +228,8 @@ costs that record (logged).
 
 ## Working names
 
-User-visible strings need the owner's approval. Working names so far: the verdicts `Missing`,
-`Unreadable`, `Newer`; the event for a slot that failed to read (`JournalSlotUnreadable`).
+User-visible strings need the owner's approval. Approved: `JournalMissing`, `JournalUnreadable`,
+`JournalNewer`, `JournalSlotUnreadable`, `JournalUnwritable`. Provisional, awaiting approval: the
+`/healthz` fields `journal` and `journal_detail`, the gauge `lsr_journal_signal{db,signal}`, and
+the values `journal_missing`, `journal_unreadable`, `journal_newer`, `journal_slot_unreadable`,
+`journal_unwritable`.

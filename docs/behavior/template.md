@@ -320,6 +320,7 @@ Five tasks keep separate retry waits and degraded states: sync, checkpoint, uplo
 | `lsr_unreplicated_age_seconds`, `lsr_replicated_txid`, `lsr_wal_bytes` | `Health` in `replica/src/health.rs` | Lag and local growth. The age gauge is 0 only when a booted engine shows the replica caught up; before that it counts from the process's start (N1) |
 | `lsr_verify_failing`, `lsr_verify_failing_txid`, `lsr_verify_failing_page` | `replica/src/health.rs` | The scheduled verify found the replica restores something the live database never held |
 | `lsr_app_notice`, `lsr_app_checkpoints_total` | `replica/src/health.rs` | The application ran checkpoints of its own. A notice, not a failure |
+| `Health.journal`, `/healthz` `journal` and `journal_detail`, `lsr_journal_signal{signal}` | `replica/src/health.rs`, `sidecar/src/health.rs` | What the engine journal says: `journal_missing`, `journal_unreadable`, `journal_newer`, `journal_slot_unreadable` (boot read it so, until the next boot; BOOT-25 to BOOT-29) or `journal_unwritable` (it lags what the engine holds; RUN-27). A notice, not a failure: `/healthz` stays 200 |
 | `lsr_panics_total` | `replica/src/health.rs` | Panics caught at the thread boundary |
 
 There is no per-cause count of snapshots taken on main. It is on #86 (`lsr_snapshots_total{db,cause}`).

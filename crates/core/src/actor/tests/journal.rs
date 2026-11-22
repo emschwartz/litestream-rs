@@ -348,8 +348,16 @@ fn a_failed_wal_sync_is_recorded_in_the_tick_that_met_it() {
     settle(&mut rig, &mut Actor::new(go_like()), T0, Some(&mut journal));
     assert_eq!(recorded(&mut journal), Some(lsr_journal::Unproven::No));
     let created = journal.writes;
-    settle(&mut rig, &mut Actor::new(go_like()), T0 + 10, Some(&mut journal));
-    assert_eq!(journal.writes, created, "a boot that read the record writes nothing");
+    settle(
+        &mut rig,
+        &mut Actor::new(go_like()),
+        T0 + 10,
+        Some(&mut journal),
+    );
+    assert_eq!(
+        journal.writes, created,
+        "a boot that read the record writes nothing"
+    );
     let (_, _, _) = failed_sync(&mut journal);
     assert_eq!(
         recorded(&mut journal),
