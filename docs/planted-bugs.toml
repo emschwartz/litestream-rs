@@ -867,6 +867,65 @@ package = "lsr-sim"
 test_bin = "sim"
 tests = ["a_stall_ends_with_the_fault_that_caused_it_seed_0xa2"]
 
+[[bug]]
+name = "journal-debt-not-recorded"
+fix = "8ef5a8f"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::a_failed_wal_sync_is_recorded_in_the_tick_that_met_it",
+    "actor::tests::journal::a_restart_after_a_failed_wal_sync_still_owes_the_truncate",
+]
+
+[[bug]]
+name = "journal-debt-not-recorded-sim"
+fix = "8ef5a8f"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "faults::wal_fsync_fails_then_restart",
+]
+
+[[bug]]
+name = "journal-debt-not-recorded-sqlite"
+fix = "8ef5a8f"
+package = "lsr-sqlite"
+test_bin = "sqlite"
+tests = [
+    "power_loss::a_restart_after_a_failed_wal_sync_ships_no_unproven_frame",
+]
+
+[[bug]]
+name = "journal-debt-not-restored"
+fix = "8ef5a8f"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::a_restart_after_a_failed_wal_sync_still_owes_the_truncate",
+]
+
+[[bug]]
+name = "journal-debt-forgiven-at-truncate"
+fix = "8ef5a8f"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::a_restart_after_a_failed_wal_sync_still_owes_the_truncate",
+]
+
+[[bug]]
+name = "journal-debt-kept-after-snapshot"
+fix = "8ef5a8f"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::a_recorded_truncate_already_run_is_not_run_again",
+]
+
+[[bug]]
+name = "journal-unwritable-sticky"
+fix = "8ef5a8f"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::an_unwritable_journal_is_reported_and_the_debt_is_paid_from_memory",
+]
+
 # Fail-stop (if-replication-stops, docs/proposals/fail-stop.md section 2): each entry is one of the
 # design's planted bugs, re-planted against the feature as it landed.
 
@@ -1158,3 +1217,9 @@ tests = [
     "checkpoint::tests::a_bump_after_a_release_that_failed_is_committed",
     "checkpoint::tests::a_bump_under_a_lock_is_refused",
 ]
+
+[[bug]]
+name = "restart-abandoned-at-synced-end"
+fix = "9b4a029"
+package = "lsr-core"
+tests = ["recover::tests::an_abandoned_commit_at_the_synced_end_of_a_restart_is_caught"]

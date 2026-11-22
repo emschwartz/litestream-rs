@@ -1,13 +1,13 @@
 diff --git a/crates/core/src/journal.rs b/crates/core/src/journal.rs
-index c6da180..a1887c9 100644
+index e782efe..8b16c0d 100644
 --- a/crates/core/src/journal.rs
 +++ b/crates/core/src/journal.rs
-@@ -211,8 +211,6 @@ impl<F: JournalFile> JournalWriter<F> {
-     /// Writes the file whole with `journal` as its first record.
-     fn establish(&mut self, journal: &Journal) -> Result<(), JournalWriteError> {
+@@ -253,8 +253,6 @@ impl JournalWriter {
+         journal: &Journal,
+     ) -> Result<(), JournalWriteError> {
          if self.exists {
--            self.file.write_at(0, &[0; FILE]).map_err(io)?;
--            self.file.sync().map_err(io)?;
+-            file.write_at(0, &[0; FILE]).map_err(io)?;
+-            file.sync().map_err(io)?;
          } else {
-             self.file.create().map_err(io)?;
+             file.create().map_err(io)?;
              self.exists = true;

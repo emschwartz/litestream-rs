@@ -1,13 +1,13 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index ae68e93..68ee62e 100644
+index 7555b2f..8466758 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -1982,7 +1982,7 @@ fn journal_signal(
-     newest_staged: Option<&NewestStagedFile>,
-     upload: &UploadState,
- ) -> Option<JournalSignal> {
--    let fresh = newest_staged.is_none() && upload.confirmed().is_none();
-+    let fresh = newest_staged.is_none() && upload.confirmed().is_none() && false;
-     journal.and_then(|parsed| judge(&parsed, fresh))
- }
- 
+@@ -2100,7 +2100,7 @@ impl Actor {
+         newest_staged: Option<&NewestStagedFile>,
+         upload: &UploadState,
+     ) {
+-        let fresh = newest_staged.is_none() && upload.confirmed().is_none();
++        let fresh = newest_staged.is_none() && upload.confirmed().is_none() && false;
+         let Some((writer, parsed)) = journal else {
+             self.kept.journal = None;
+             self.kept.writer = None;

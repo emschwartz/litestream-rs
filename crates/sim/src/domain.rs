@@ -39,7 +39,7 @@ use lsr_core::{
 use lsr_ltx::{PageNo, PageSize};
 
 use crate::generate::{EnvFault, Target};
-use crate::oracle::Violation;
+use crate::oracle::{MODEL_DIVERGED, Violation};
 
 /// What a history may do with one (operation, error) pair.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,59 +60,46 @@ pub enum Cell {
 /// tracking item and the signature its failures have.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum KnownWrong {
-    /// A failed sync of the WAL is remembered in memory only: a restart before the TRUNCATE
-    /// that pays for it stages frames the failed sync covered (BEHAVIOR's D2).
-    WalSyncForgottenAtRestart,
+    /// After a failed sync of the WAL, a checkpoint (the application's, or the TRUNCATE that pays
+    /// the debt) copies frames the failed sync covered into the database file, and a power loss
+    /// then cuts the WAL short of them: SQLite recovers a database file no commit made. The
+    /// engine replicates it as a clean state until its boot check lands (`docs/decisions.md`
+    /// D103). The simulator adopts that state as damage (decision D73), so a run that replicates
+    /// it fails as `CorruptionRestored`.
+    DatabaseAheadOfWal,
     /// Retry counts and degraded states reset at a restart, so a halt that outlasts restarts
     /// is never reported degraded (BEHAVIOR's D9). Reached by a restart inside an overlapping
     /// hold ([`crate::Weights::overlap`]), not by a cell of the tables.
     HaltForgottenAtRestart,
-    /// A power loss while a failed sync of the WAL is unpaid, after the app's own checkpoint
-    /// backfilled pages the kernel had marked clean, leaves a database file no commit made:
-    /// newer pages from the backfill, older ones from the recovered WAL. The engine replicates
-    /// it as a commit and says nothing (decision D73). Reached by the cell of D2, the failed
-    /// sync, together with a power loss.
-    DatabaseAheadOfWal,
 }
 
 impl KnownWrong {
     /// Every known defect.
-    pub const ALL: [Self; 3] = [
-        Self::WalSyncForgottenAtRestart,
-        Self::HaltForgottenAtRestart,
-        Self::DatabaseAheadOfWal,
-    ];
+    pub const ALL: [Self; 2] = [Self::DatabaseAheadOfWal, Self::HaltForgottenAtRestart];
 
     /// Where the defect is tracked and who fixes it.
     #[must_use]
     pub const fn tracking(self) -> &'static str {
         match self {
-            Self::WalSyncForgottenAtRestart => {
-                "#99 (D2); fixed by the journal session, persisting the unproven-WAL fact before \
-                 the TRUNCATE"
+            Self::DatabaseAheadOfWal => {
+                "#99 (D103, D104); fixed by the journal session's check at a boot that finds a \
+                 recorded WAL-sync debt"
             }
             Self::HaltForgottenAtRestart => {
                 "#99 (D9); open: retry counts, waits and degraded states must survive a restart"
-            }
-            Self::DatabaseAheadOfWal => {
-                "D103; the journal session: a boot after a recorded failed WAL sync compares the \
-                 pages the WAL does not cover and replicates a mixed file loudly, \
-                 `database_ahead_of_wal`"
             }
         }
     }
 
     /// Whether `violation` is this defect's failure.
     #[must_use]
-    pub const fn matches(self, violation: &Violation) -> bool {
+    pub fn matches(self, violation: &Violation) -> bool {
         match self {
-            Self::WalSyncForgottenAtRestart => {
-                matches!(violation, Violation::StagedNotDurable { .. })
-            }
-            Self::HaltForgottenAtRestart => matches!(violation, Violation::HealthBlind { .. }),
             Self::DatabaseAheadOfWal => {
                 matches!(violation, Violation::CorruptionRestored { .. })
+                    || matches!(violation, Violation::BugFault { context } if context == MODEL_DIVERGED)
             }
+            Self::HaltForgottenAtRestart => matches!(violation, Violation::HealthBlind { .. }),
         }
     }
 
@@ -274,7 +261,7 @@ const fn disk_full_cell(op: SourceOp) -> Cell {
 
 const fn fsync_cell(op: SourceOp) -> Cell {
     match op {
-        SourceOp::Sync => Cell::KnownWrong(KnownWrong::WalSyncForgottenAtRestart),
+        SourceOp::Sync => Cell::KnownWrong(KnownWrong::DatabaseAheadOfWal),
         SourceOp::Open
         | SourceOp::Len
         | SourceOp::Committed
@@ -697,17 +684,6 @@ pub fn known_in(ops: &[crate::generate::Op], weights: &crate::Weights) -> Vec<Kn
             .any(|op| matches!(op, crate::generate::Op::Hold { .. }));
     if restarts_in_holds {
         known.push(KnownWrong::HaltForgottenAtRestart);
-    }
-    // The mixed database needs D2's cell and a power loss after it, which an overlapping
-    // hold may also draw.
-    let power_lost = ops.iter().any(|op| {
-        matches!(
-            op,
-            Op::Crash(crate::sqlite::CrashKind::Power) | Op::PowerLoss
-        ) || (weights.overlap && matches!(op, Op::Hold { .. }))
-    });
-    if power_lost && known.contains(&KnownWrong::WalSyncForgottenAtRestart) {
-        known.push(KnownWrong::DatabaseAheadOfWal);
     }
     known.sort_unstable();
     known.dedup();

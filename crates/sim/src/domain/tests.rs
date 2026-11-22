@@ -166,19 +166,32 @@ fn the_store_draw_reaches_every_drawable_class_and_no_other() {
 
 #[test]
 fn a_known_defect_matches_only_its_own_failure() {
+    let diverged = crate::oracle::bug_fault(crate::oracle::MODEL_DIVERGED);
+    let restored = Violation::CorruptionRestored {
+        target: lsr_core::RestoreTarget::Latest,
+    };
     let staged = Violation::StagedNotDurable {
         key: "0000/1-1.ltx".to_owned(),
     };
     let other = Violation::UnexpectedDegraded {
         cause: lsr_core::PersistentCause::StoreDenied(Denied::Permission),
     };
+    for known in [&diverged, &restored] {
+        assert_eq!(
+            KnownWrong::of(known, &KnownWrong::ALL),
+            Some(KnownWrong::DatabaseAheadOfWal)
+        );
+    }
+    let another_bug = crate::oracle::bug_fault("something else");
+    for unknown in [&staged, &other, &another_bug] {
+        assert_eq!(
+            KnownWrong::of(unknown, &KnownWrong::ALL),
+            None,
+            "{unknown:?}"
+        );
+    }
     assert_eq!(
-        KnownWrong::of(&staged, &KnownWrong::ALL),
-        Some(KnownWrong::WalSyncForgottenAtRestart)
-    );
-    assert_eq!(KnownWrong::of(&other, &KnownWrong::ALL), None);
-    assert_eq!(
-        KnownWrong::of(&staged, &[]),
+        KnownWrong::of(&diverged, &[]),
         None,
         "only defects the run drew"
     );
