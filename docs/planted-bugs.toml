@@ -444,3 +444,113 @@ name = "staging-dir-fsync"
 fix = "2bf9f99"
 package = "lsr-store-fs"
 tests = ["a_crash_at_any_step_of_a_commit_loses_nothing_committed_and_shows_nothing_torn"]
+
+# The engine journal's rules (docs/journal.md): each is a rule of the writer, the codec or the
+# model, not a fix of a shipped defect; `fix` is the commit that introduced it.
+
+[[bug]]
+name = "journal-no-dir-fsync"
+fix = "a64cc50"
+package = "lsr-core"
+tests = [
+    "journal_model::the_writer_matches_the_model_under_the_block_law",
+]
+
+[[bug]]
+name = "journal-wrong-slot"
+fix = "a64cc50"
+package = "lsr-core"
+tests = [
+    "journal_model::the_writer_matches_the_model_under_the_block_law",
+    "journal_model::the_writer_matches_the_model_on_a_tearing_device",
+]
+
+[[bug]]
+name = "journal-eio-missing"
+fix = "a64cc50"
+package = "lsr-core"
+tests = [
+    "journal_model::the_writer_matches_the_model_with_unreadable_sectors",
+]
+
+[[bug]]
+name = "journal-one-read"
+fix = "a64cc50"
+package = "lsr-core"
+tests = [
+    "journal_model::the_writer_matches_the_model_with_unreadable_sectors",
+]
+
+[[bug]]
+name = "journal-seq-1-created"
+fix = "a64cc50"
+package = "lsr-core"
+tests = [
+    "journal_model::the_writer_matches_the_model_under_the_block_law",
+]
+
+[[bug]]
+name = "journal-recreate-without-zeroing"
+fix = "a64cc50"
+package = "lsr-core"
+tests = [
+    "journal_model::the_writer_matches_the_model_with_unreadable_sectors",
+]
+
+[[bug]]
+name = "journal-no-boot-sync"
+fix = "a64cc50"
+package = "lsr-core"
+tests = [
+    "journal_model::the_writer_matches_the_model_under_the_block_law",
+    "journal_model::the_writer_matches_the_model_on_a_tearing_device",
+]
+
+[[bug]]
+name = "journal-advance-on-failed-sync"
+fix = "a64cc50"
+package = "lsr-core"
+tests = [
+    "journal_model::the_writer_matches_the_model_under_the_block_law",
+]
+
+[[bug]]
+name = "journal-no-monotonic-check"
+fix = "a64cc50"
+package = "lsr-core"
+tests = [
+    "journal_model::a_non_monotonic_record_is_refused_as_a_bug",
+]
+
+[[bug]]
+name = "journal-continue-after-slot-error"
+fix = "a64cc50"
+package = "lsr-core"
+tests = [
+    "journal_model::the_writer_matches_the_model_with_unreadable_sectors",
+]
+
+[[bug]]
+name = "journal-lower-seq-wins"
+fix = "c9d9d4a"
+package = "lsr-journal"
+tests = [
+    "the_higher_sequence_number_wins",
+]
+
+[[bug]]
+name = "journal-checksum-ignored"
+fix = "c9d9d4a"
+package = "lsr-journal"
+tests = [
+    "a_wrong_checksum_is_refused",
+    "a_changed_byte_in_the_record_invalidates_it",
+]
+
+[[bug]]
+name = "journal-model-newer-block"
+fix = "270f55e"
+package = "lsr-core"
+tests = [
+    "journal_model::the_writer_matches_the_model_under_the_block_law",
+]
