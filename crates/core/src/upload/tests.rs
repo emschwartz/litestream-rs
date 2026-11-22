@@ -1210,3 +1210,5 @@ fn a_staged_file_whose_bytes_differ_but_still_verify_is_refused() {
     assert_eq!(failed.fault, Fault::StagedLost);
     assert!(files(&remote.inner).is_empty());
 }
+
+mod endless;

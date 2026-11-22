@@ -389,48 +389,101 @@ async fn staged_verifies<L: ObjectStore>(staging: &L, key: &FileKey) -> Result<b
     }
 }
 
-/// The staged level-0 files whose last transaction is at least `from`
-/// (every one when `None`), oldest first.
-pub(crate) async fn staged_from<L: ObjectStore>(
-    staging: &L,
+/// The staged level-0 files whose last transaction is at least `from` (every one when
+/// `None`), oldest first and a listing page at a time. A staging directory can hold any
+/// number of files (Go's has no cap, and a long outage grows it), so no pass holds more of
+/// it than one page.
+pub(crate) struct StagedPages {
+    at: Option<ListAt>,
     from: Option<Txid>,
-) -> Result<Vec<FileInfo>, Fault> {
-    let mut files = Vec::new();
-    let mut at = ListAt::first(Level::ZERO);
-    loop {
+}
+
+impl StagedPages {
+    /// From the first page.
+    pub(crate) const fn from(from: Option<Txid>) -> Self {
+        Self {
+            at: Some(ListAt::first(Level::ZERO)),
+            from,
+        }
+    }
+
+    /// The next page's files at or after `from` (possibly none), or `None` past the last page.
+    ///
+    /// # Errors
+    /// The staging store's fault when it cannot list, or lists with a cursor that stalls.
+    pub(crate) async fn next<L: ObjectStore>(
+        &mut self,
+        staging: &L,
+    ) -> Result<Option<Vec<FileInfo>>, Fault> {
+        let Some(at) = self.at else {
+            return Ok(None);
+        };
         let page = staging
             .list(at.level, at.after, PageLimit::MAX)
             .await
             .map_err(|err| Fault::from_staging(&err))?;
-        files.extend(
-            page.files
-                .iter()
-                .filter(|info| from.is_none_or(|from| info.key.range().max() >= from)),
-        );
-        match at
+        self.at = at
             .following(page.next)
-            .map_err(Fault::from_staging_listing)?
-        {
-            Some(next) => at = next,
-            None => return Ok(files),
-        }
+            .map_err(Fault::from_staging_listing)?;
+        let from = self.from;
+        Ok(Some(
+            page.files
+                .into_iter()
+                .filter(|info| from.is_none_or(|from| info.key.range().max() >= from))
+                .collect(),
+        ))
     }
+}
+
+/// The first `most` staged level-0 files whose last transaction is at least `from`, oldest
+/// first; the listing is read no further than they need.
+///
+/// # Errors
+/// As [`StagedPages::next`].
+pub(crate) async fn staged_from<L: ObjectStore>(
+    staging: &L,
+    from: Option<Txid>,
+    most: usize,
+) -> Result<Vec<FileInfo>, Fault> {
+    let mut files = Vec::new();
+    let mut pages = StagedPages::from(from);
+    while files.len() < most
+        && let Some(page) = pages.next(staging).await?
+    {
+        let room = most.saturating_sub(files.len());
+        files.extend(page.into_iter().take(room));
+    }
+    Ok(files)
 }
 
 /// Deletes every staged level-0 file whose last transaction is at least
 /// `from`, newest first and one at a time, so a crash part way leaves the
-/// oldest of them in place and the next boot finds it again.
+/// oldest of them in place and the next boot finds it again. It holds one
+/// listing page at a time: each round lists to the last page and deletes it
+/// from its end, so a directory of n files costs about n squared over the
+/// page size in listing calls, and never n keys in memory.
 ///
 /// # Errors
 /// The staging store's fault when it cannot list or delete.
 pub(crate) async fn drop_staged_from<L: ObjectStore>(staging: &L, from: Txid) -> Result<(), Fault> {
-    for info in staged_from(staging, Some(from)).await?.iter().rev() {
-        staging
-            .delete(&[info.key])
-            .await
-            .map_err(|err| Fault::from_staging(&err))?;
+    loop {
+        let mut last = Vec::new();
+        let mut pages = StagedPages::from(Some(from));
+        while let Some(page) = pages.next(staging).await? {
+            if !page.is_empty() {
+                last = page;
+            }
+        }
+        if last.is_empty() {
+            return Ok(());
+        }
+        for info in last.iter().rev() {
+            staging
+                .delete(&[info.key])
+                .await
+                .map_err(|err| Fault::from_staging(&err))?;
+        }
     }
-    Ok(())
 }
 
 /// What a sweep of the staged files found.
@@ -460,14 +513,17 @@ pub(crate) async fn sweep_staged<L: ObjectStore>(
     confirmed: Option<Txid>,
     suspect: Option<FileKey>,
 ) -> Result<Swept, Fault> {
-    for info in staged_from(staging, confirmed).await? {
-        if !staged_verifies(staging, &info.key).await? {
-            if suspect != Some(info.key) {
-                return Ok(Swept::Suspect(info.key));
+    let mut pages = StagedPages::from(confirmed);
+    while let Some(page) = pages.next(staging).await? {
+        for info in page {
+            if !staged_verifies(staging, &info.key).await? {
+                if suspect != Some(info.key) {
+                    return Ok(Swept::Suspect(info.key));
+                }
+                let from = info.key.range().min();
+                drop_staged_from(staging, from).await?;
+                return Ok(Swept::Dropped(from));
             }
-            let from = info.key.range().min();
-            drop_staged_from(staging, from).await?;
-            return Ok(Swept::Dropped(from));
         }
     }
     Ok(Swept::Clean)
