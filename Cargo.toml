@@ -26,6 +26,9 @@ lsr-sqlite = { path = "crates/sqlite" }
 lsr-store-fs = { path = "crates/store-fs" }
 lsr-store-s3 = { path = "crates/store-s3" }
 lsr-wal = { path = "crates/wal" }
+# Structure-aware fuzz input (MIT OR Apache-2.0): `lsr-fuzzing` only, builds typed listings
+# from libFuzzer's bytes. No derive feature, so no proc-macro build.
+arbitrary = { version = "1.4", default-features = false }
 base64 = { version = "0.23", default-features = false, features = ["alloc"] }
 crc = "3.4.0"
 jiff = { version = "1.0", default-features = false, features = ["std"] }

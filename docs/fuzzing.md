@@ -15,6 +15,8 @@ with `lsr_wal::testing::WalBuilder` and a few written by SQLite.
 | `decode` | LTX bytes split at fuzz-chosen points into `Decoder::feed`: no panic, the same events for any split, and a `Verified` file re-encodes and decodes to the same pages |
 | `index` | `PageIndex::decode` and `decode_frame` on fuzz bytes: no panic, no allocation beyond one page and one frame (both exist only with `lsr-ltx`'s `testing` feature: no checksum covers a page read out of order) |
 | `plan` | an inventory and a target from fuzz bytes: a plan starts at TXID 1, is contiguous and ends exactly at the target; the lazy planner agrees |
+| `plan_contract` | a listing and a `Latest` or `Txid` target built with `arbitrary` (ids near 1 and near `u64::MAX`, refused level-9 files, ties): the planner's whole outcome, chain and payloads included, is one the restore-plan spec (`crates/spec`) allows |
+| `plan_lazy` | the same listings in a store that lists last-modified times, some files exact and some with their created-at time lost, and an instant that ties with the times: the lazy `AsOf` planner resolves times on demand, asks only for files listed without one, each once, and its outcome equals the exact planner's and is one the spec allows over the true times |
 | `key` | `FileKey` and `Txid` parsing: accepted input prints back byte for byte |
 | `wal` | the SQLite WAL reader (`lsr-wal`) on any bytes, at a page size and byte order the input may pick, with frame checksums optionally re-chained so mutated fields get past them: `WalHeader::decode` and `WalReader::open` agree; no panic, no scan step without progress, no byte read twice by one scan; a truncated copy under `FirstInvalidFrame` gives exactly the whole scan's transactions that end before the cut; a committed end gives exactly those before it, reads nothing at or past it, ends clean at a boundary and fails anywhere else; an end or a resume of another generation is `Restarted`; `resume` at every boundary returns the scan's own cursor and scans on to the same rest; `PageMap` equals a plain model and never holds a page above the last commit; every scanned page reads back to its digest, and after one page byte flips that page is `ChangedSinceScan`, a new scan stops right before its transaction and a committed end past it is `CorruptBelowCommitted` at its frame |
 
@@ -35,8 +37,9 @@ lockfile should be committed.
 ## The nightly run
 
 `.github/workflows/nightly.yml` runs `just fuzz <target> 600` for `decode`, `index` and `wal` (the
-LTX and WAL decoders) every night and on demand, one job per target, from the committed corpus,
-on nightly Rust. A target that finds a crash, leak, timeout or out-of-memory input fails its job
+LTX and WAL decoders) and `just fuzz <target> 300` for `plan_contract` and `plan_lazy` (the restore
+planner against its contract) every night and on demand, one job per target, from the committed
+corpus, on nightly Rust. A target that finds a crash, leak, timeout or out-of-memory input fails its job
 and uploads `fuzz/artifacts/<target>/` as the artifact `fuzz-<target>-<run id>`. The new inputs it
 writes stay on the runner; the corpus only grows by the minimised commits below.
 
@@ -61,6 +64,9 @@ target's commit, run count and `stat::new_units_added` in the pull request that 
 - The run writes new inputs into `fuzz/corpus/<target>/`. Minimise each target with
   `just fuzz-cmin <target>` before committing any of them; minimise `wal` with
   `just fuzz-cmin wal -max_len=16384`, which keeps every coverage edge at about half the bytes (its
-  inputs are whole WALs). The committed corpus is about 1.3 MiB today (0.5 MiB of it `wal`) and
-  stays under 2 MiB in total (phase 1 task 7); drop the new inputs rather than go over.
+  inputs are whole WALs). Minimise `plan_contract` and `plan_lazy` by edges first, then add short
+  inputs for their counters: `-merge=1 -use_counters=0 -use_cmp=0 -use_value_profile=0` into an
+  empty directory, then `-merge=1 -max_len=128` into the same one (about 30 and 45 KiB). The
+  committed corpus is about 1.4 MiB today (0.5 MiB of it `wal`) and stays under 2 MiB in total
+  (phase 1 task 7); drop the new inputs rather than go over.
 - Run `just check` afterwards: the corpus replay test reads every committed input.

@@ -62,3 +62,15 @@ fn key_corpus_replays() {
 fn wal_corpus_replays() {
     replay("wal", lsr_fuzzing::wal);
 }
+
+#[test]
+#[cfg(test)]
+fn plan_contract_corpus_replays() {
+    replay("plan_contract", lsr_fuzzing::plan_contract);
+}
+
+#[test]
+#[cfg(test)]
+fn plan_lazy_corpus_replays() {
+    replay("plan_lazy", lsr_fuzzing::plan_lazy);
+}
