@@ -29,6 +29,7 @@ mod compact;
 pub mod conformance;
 mod created_at;
 mod env;
+mod failstop;
 mod fault;
 mod inventory;
 mod journal;
@@ -77,6 +78,7 @@ pub use created_at::{
 pub use env::{Clock, Entropy, Sleeper};
 #[cfg(any(test, feature = "testing"))]
 pub use env::{FakeClock, RecordingSleeper, SeededEntropy};
+pub use failstop::{AppGate, Gate, IfReplicationStops, Lag, MaxUnreplicatedAge, Trip, gate, trip};
 #[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
 pub use fault::reporting_bugs;

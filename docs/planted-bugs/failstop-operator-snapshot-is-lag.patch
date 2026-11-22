@@ -1,0 +1,22 @@
+diff --git a/crates/core/src/actor/lag.rs b/crates/core/src/actor/lag.rs
+index c45b213..234fb01 100644
+--- a/crates/core/src/actor/lag.rs
++++ b/crates/core/src/actor/lag.rs
+@@ -23,8 +23,7 @@ use crate::source::WalSource;
+ /// staged files lack.
+ const fn doubt_only(cause: SnapshotCause) -> bool {
+     match cause {
+-        SnapshotCause::OperatorRequested
+-        | SnapshotCause::GenerationChanged
++        SnapshotCause::GenerationChanged
+         | SnapshotCause::WalMissing
+         | SnapshotCause::PrevFrameMismatch
+         | SnapshotCause::LastPageMismatch
+@@ -32,6 +31,7 @@ const fn doubt_only(cause: SnapshotCause) -> bool {
+         // The database's first copy, a replica ahead of us, frames a checkpoint or a failed
+         // sync moved past staging, a rewind, staged files deleted: commits may be in the file.
+         SnapshotCause::FirstSync
++        | SnapshotCause::OperatorRequested
+         | SnapshotCause::BehindRemote { .. }
+         | SnapshotCause::LocalRewound { .. }
+         | SnapshotCause::CheckpointBoundary

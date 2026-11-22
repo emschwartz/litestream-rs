@@ -457,6 +457,8 @@ fn settings(
         shutdown_grace,
         app_autocheckpoint: config.rust().app_autocheckpoint(),
         verify_interval: config.validation_interval().and_then(positive),
+        if_replication_stops: config.rust().if_replication_stops(),
+        max_unreplicated_age: config.rust().max_unreplicated_age(),
     })
 }
 

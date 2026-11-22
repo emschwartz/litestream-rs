@@ -15,6 +15,8 @@
 //! so "no position and no snapshot pending" cannot be written down. A boot
 //! builds a whole `Engine` and assigns it only when every step succeeded.
 
+use std::collections::BTreeSet;
+
 use lsr_ltx::{PageSize, Timestamp, Txid};
 use lsr_wal::CommittedEnd;
 
@@ -24,11 +26,13 @@ use super::state::{Gate, Live, Maintain, Phase, Tasks};
 use super::unproven::Unproven;
 use crate::app::AppCheckpointObserver;
 use crate::checkpoint::CheckpointState;
+use crate::failstop::Lag;
 use crate::fault::{SnapshotCause, SnapshotCounts, StopCause};
 use crate::journal::{JournalSignal, JournalWriter};
 use crate::layout::FileKey;
 use crate::pages::PageChecksumTable;
 use crate::position::Position;
+use crate::store::Denied;
 use crate::upload::UploadState;
 use crate::witness::Witnesses;
 use lsr_journal::Journal;
@@ -122,6 +126,23 @@ pub(super) struct Kept {
     /// How far the engine is past a failed sync of the WAL (`unproven`). Kept across boots:
     /// a frame that sync covered is no truer after a rebuild.
     pub(super) unproven: Unproven,
+    /// The fail-stop clock (`crate::failstop`): reports, kept across boots so a rebuild does not
+    /// restart it.
+    pub(super) lag: Lag,
+    /// Whether any engine of this process has booted, so listed the replica once. A rebuild
+    /// keeps it: fail-stop's refusal at boot is about this process, not this engine.
+    pub(super) listed: bool,
+    /// The last boot failure before the first listing was the store refusing access.
+    pub(super) refused_at_boot: Option<Denied>,
+    /// A boot attempt of this process has failed: with no refusal behind it, the boot is
+    /// judged and the application may start (`crate::failstop`).
+    pub(super) boot_failed: bool,
+    /// A sync step failed after the first listing: a snapshot the boot asked for was tried.
+    pub(super) sync_failed_after_listing: bool,
+    /// Pending staged files that hold no commit of the application's: a file that changes no
+    /// page, or a snapshot for a doubt alone staged while nothing was off the replica. They are
+    /// not lag (`actor::lag`). At most one per pending file, so bounded by the witness tokens.
+    pub(super) quiet: BTreeSet<Txid>,
     /// What the last boot's read of the journal reported. A report, not engine state: nothing
     /// decides on it.
     pub(super) journal: Option<JournalSignal>,
@@ -148,6 +169,12 @@ impl Kept {
             suspect_staged: None,
             snapshots: SnapshotCounts::default(),
             unproven: Unproven::No,
+            lag: Lag::default(),
+            listed: false,
+            refused_at_boot: None,
+            boot_failed: false,
+            sync_failed_after_listing: false,
+            quiet: BTreeSet::new(),
             journal: None,
             writer: None,
             journal_read: None,
@@ -173,6 +200,12 @@ impl Kept {
             suspect_staged,
             snapshots,
             unproven,
+            lag,
+            listed,
+            refused_at_boot,
+            boot_failed,
+            sync_failed_after_listing,
+            quiet: _,
             journal,
             writer,
             journal_read,
@@ -191,6 +224,13 @@ impl Kept {
             suspect_staged: *suspect_staged,
             snapshots: *snapshots,
             unproven: *unproven,
+            lag: *lag,
+            listed: *listed,
+            refused_at_boot: *refused_at_boot,
+            boot_failed: *boot_failed,
+            sync_failed_after_listing: *sync_failed_after_listing,
+            // Beliefs about staged files: the rebuilt engine's boot judges them again.
+            quiet: BTreeSet::new(),
             journal: *journal,
             writer: writer.clone(),
             journal_read: *journal_read,

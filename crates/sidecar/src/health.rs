@@ -9,8 +9,8 @@
 //! **Status.** 200 while every database is booting, running, draining, degraded or waiting
 //! for its file to appear: a degraded task keeps retrying and recovers on its own, and an
 //! orchestrator that restarted on it would only repeat the boot. 503 once any database has
-//! stopped (a stop cause, or the drain's end), its thread is gone, or it failed to start;
-//! the body's `down` lists which.
+//! stopped (a stop cause, or the drain's end), its thread is gone, it failed to start, or
+//! fail-stop tripped for it (`crate::failstop`); the body's `down` lists which.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -127,7 +127,8 @@ impl DbView {
             DbState::Waiting => false,
             DbState::Failed => true,
             DbState::Running(health) => match health.phase {
-                Phase::Booting | Phase::Running | Phase::Draining => false,
+                // A fail-stop trip is 503 under every mode (`crate::failstop`).
+                Phase::Booting | Phase::Running | Phase::Draining => health.held_by.trip.is_some(),
                 Phase::Stopped(_) | Phase::Gone(_) => true,
             },
         }
@@ -361,6 +362,14 @@ fn running_json(o: &mut Object, health: &Health) {
         health.journal.map(|s| journal_name(s).to_owned()),
     );
     o.maybe("journal_detail", health.journal.map(|s| format!("{s:?}")));
+    o.maybe(
+        "held_by",
+        health
+            .held_by
+            .trip
+            .map(|trip| crate::failstop::trip_name(trip).to_owned()),
+    );
+    o.text("app", crate::failstop::gate_name(health.held_by.gate));
     o.text("reported_at", &health.reported_at.to_string());
 }
 
@@ -397,6 +406,31 @@ pub(crate) fn healthz(views: &[DbView], now: Timestamp) -> (bool, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fail-stop trip is 503 whatever the phase and the mode: a database still running, its
+    /// commit off the replica too long, is down; the same database untripped is up.
+    #[test]
+    fn a_trip_is_503_while_the_database_runs() {
+        let at = Timestamp::from_unix_millis(1_700_000_000_000);
+        let mut health = Health::new(at);
+        health.phase = Phase::Running;
+        let view = |health: &Health| DbView {
+            path: PathBuf::from("/app.db"),
+            replica_type: "file",
+            state: DbState::Running(Box::new(health.clone())),
+        };
+        assert!(!view(&health).down());
+        health.held_by.trip = Some(lsr_replica::Trip::UnreplicatedTooLong { since: at });
+        health.held_by.gate = lsr_replica::Gate::Allowed;
+        assert!(view(&health).down(), "report and hold-start still say 503");
+        let (up, body) = healthz(&[view(&health)], at);
+        assert!(!up);
+        assert!(
+            body.contains("\"held_by\":\"unreplicated_too_long\""),
+            "{body}"
+        );
+        assert!(body.contains("\"app\":\"allowed\""), "{body}");
+    }
 
     /// Every kind of access refusal reports under a name of its own: one name for
     /// all of them sent operators to rotate keys for a wrong clock or a missing bucket.

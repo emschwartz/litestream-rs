@@ -348,6 +348,29 @@ fn the_abandoned_frames_check_catches_frames_abandoned_after_the_read_lock() {
     );
 }
 
+/// The same abandoned commit, with the restarted generation grown to exactly
+/// the synced end: the abandoned frame starts right where the position ends.
+#[test]
+fn an_abandoned_commit_at_the_synced_end_of_a_restart_is_caught() {
+    let wal = fresh();
+    let pos = position(&wal, 2, Continuity::Held(wal.epoch()));
+    commit(&wal, &[1], 3);
+    wal.force_restart();
+    commit(&wal, &[1, 2], 2);
+    commit(&wal, &[2, 3], 3);
+    let verdict = run_running(&wal, &pos, None);
+    assert_eq!(
+        verdict.recovered,
+        snapshot(Some(2), SnapshotCause::GenerationChanged)
+    );
+    assert_eq!(
+        verdict.event,
+        Some(RecoverEvent::ReadLockViolated {
+            synced: pos.synced().offset()
+        })
+    );
+}
+
 #[test]
 fn a_restart_that_has_grown_past_the_old_end_is_followed() {
     let wal = fresh();
@@ -1184,6 +1207,64 @@ fn rule_6_a_restart_with_an_unrelated_checkpoint_seq_is_still_one_restart() {
         recover(Some(PositionSource::Running(&pos, probes)), &view, None),
         Recovered::WalRestarted(_)
     ));
+}
+
+/// A running position at the first frame of its generation, pinned in this
+/// hold (read mark 0 on a WAL with no frames, as after a crash and an empty-WAL
+/// snapshot). The first commit writes a new header with fresh salts: SQLite
+/// draws them at random when the checkpoint sequence is 0, so `salt1 + 1`
+/// cannot prove it, but the generation it pinned held no commit to lose. The
+/// running engine follows; it snapshotted again (seed 0xf4846). A position past
+/// the first frame still needs `salt1 + 1`.
+#[test]
+fn rule_6_a_pinned_position_with_no_frames_follows_a_new_header_with_any_salts() {
+    let old = fresh();
+    let head = *reader(old.file_bytes()).header();
+    let (_, frame, size) = end_of(old.file_bytes()).unwrap();
+    let new = FakeWal::new(PS, salts(99));
+    commit(&new, &[1], 3);
+    let held = Continuity::Held(new.epoch());
+    let empty = Position::new(
+        txid(2),
+        FrameCursor::at_start(&head),
+        nz(size),
+        LastPage::of_frame(&frame),
+        ts(1000),
+        held,
+    );
+    let probes = Probes {
+        prev: FrameCheck::Miss(Miss::NotACommit),
+        stale_next: false,
+    };
+    let verdict = recover_traced(
+        Some(PositionSource::Running(&empty, probes)),
+        &view(&new),
+        None,
+    );
+    let Recovered::WalRestarted(next) = verdict.recovered else {
+        panic!("{verdict:?}");
+    };
+    assert_eq!(verdict.event, None);
+    assert_eq!(next.cursor().salts(), new.salts());
+    assert_eq!(next.txid(), txid(2));
+    let unpinned = empty.with_continuity(Continuity::Broken);
+    assert_eq!(
+        recover(
+            Some(PositionSource::Running(&unpinned, probes)),
+            &view(&new),
+            None
+        ),
+        snapshot(Some(2), SnapshotCause::GenerationChanged)
+    );
+    let past_start = position(&old, 2, held);
+    assert_eq!(
+        recover(
+            Some(PositionSource::Running(&past_start, probes)),
+            &view(&new),
+            None
+        ),
+        snapshot(Some(2), SnapshotCause::GenerationChanged)
+    );
 }
 
 // Boot compares the whole newest staged file with the WAL range it covers, not only its last page.

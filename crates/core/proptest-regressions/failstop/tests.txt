@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 58bcc1444942e3cbf45b050b62d1064be12197e997c8414a1320ee679675ad74 # shrinks to steps = [(0, Observe { behind: true, stamp: None }), (15546, Observe { behind: true, stamp: None }), (154954, Fail), (8686, Fail), (28385, Fail), (197951, Fail), (165421, Observe { behind: true, stamp: None }), (29057, Fail), (0, Observe { behind: true, stamp: None }), (0, Observe { behind: false, stamp: None })]

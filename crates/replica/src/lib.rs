@@ -52,14 +52,16 @@ mod scheduled;
 pub mod stack;
 mod store;
 mod thread;
+#[cfg(feature = "testing")]
+pub mod waiting;
 
 pub use config::{Config, NonZeroDuration, ReaderTracking, SyncLimits};
 pub use error::{RestoreError, StartError};
 pub use events::{ChannelSink, Event, EventReceiver, EventSink};
 pub use exec::block_on;
 pub use health::{
-    AppNotice, Booted, Counters, Gone, Health, Mismatch, OpCounters, Phase, Stopped, StoreCounters,
-    Verification, VerifyFailure, VerifyOutcome, VerifyRuns,
+    AppNotice, Booted, Counters, FailStop, Gone, Health, Mismatch, OpCounters, Phase, Stopped,
+    StoreCounters, Verification, VerifyFailure, VerifyOutcome, VerifyRuns,
 };
 pub use readers::ReaderGuard;
 pub use replicator::{FinalSync, Replicator};
@@ -71,9 +73,10 @@ pub use store::{BoxFuture, DynStore, DynUpload};
 
 pub use lsr_core::{
     AppCheckpoint, AppCheckpoints, AsOfInside, CheckpointConfig, Clock, Degraded, Denied, Depth,
-    Entropy, JournalSignal, L0Retention, Maintenance, OtherWriter,
-    PersistentCause as DegradedCause, Report, Response, Responses, RestoreOptions, RestoreTarget,
-    Restored, Severity, SnapshotCause, SnapshotCauseKind, SnapshotCounts, Stall, StopCause, Task,
+    Entropy, Gate, IfReplicationStops, JournalSignal, L0Retention, Maintenance, MaxUnreplicatedAge,
+    OtherWriter, PersistentCause as DegradedCause, Report, Response, Responses, RestoreOptions,
+    RestoreTarget, Restored, Severity, SnapshotCause, SnapshotCauseKind, SnapshotCounts, Stall,
+    StopCause, Task, Trip,
 };
 pub use lsr_ltx::{Timestamp, Txid};
 pub use lsr_sqlite::{DatabaseFile, SetupError, app_connection_raw, ffi};
