@@ -53,6 +53,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use journal::{Step, note};
+
 use lsr_core::WriteMode;
 use lsr_core::{
     CorruptCause, CreatedAt, FileInfo, FileKey, Level, ListedTime, Listing, ObjectStore, PageLimit,
@@ -69,6 +71,31 @@ const SCRATCH_TRIES: u32 = 64;
 /// Creates `dir` and any missing ancestors, top down, calling `sync` on the
 /// parent of each directory it made so the new entry is durable. A directory
 /// that turns out to exist (another creator won the race) gets the same sync.
+/// Syncs `file`'s bytes, and notes it in the test journal: one call, so the sync and the
+/// note cannot part.
+fn sync_file(file: &File, path: &Path) -> io::Result<()> {
+    file.sync_all()?;
+    note(|| Step::SyncFile(path.to_owned()));
+    Ok(())
+}
+
+/// Syncs the entries of directory `dir`, and notes it.
+fn sync_dir(dir: &Path) -> io::Result<()> {
+    File::open(dir)?.sync_all()?;
+    note(|| Step::SyncDir(dir.to_owned()));
+    Ok(())
+}
+
+/// Renames `from` over `to`, and notes it.
+fn rename(from: &Path, to: &Path) -> io::Result<()> {
+    fs::rename(from, to)?;
+    note(|| Step::Rename {
+        from: from.to_owned(),
+        to: to.to_owned(),
+    });
+    Ok(())
+}
+
 fn create_dirs_durably(
     dir: &Path,
     sync: &mut impl FnMut(&Path) -> io::Result<()>,
@@ -84,7 +111,7 @@ fn create_dirs_durably(
     }
     for path in missing.into_iter().rev() {
         match fs::create_dir(path) {
-            Ok(()) => {}
+            Ok(()) => note(|| Step::CreateDir(path.to_owned())),
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
             Err(err) => return Err(err),
         }
@@ -233,7 +260,7 @@ impl FsStore {
             cause: CorruptCause::TimestampOutOfRange,
         })?;
         let dir = self.level_dir(key.level());
-        create_dirs_durably(&dir, &mut |path| File::open(path)?.sync_all()).map_err(fail)?;
+        create_dirs_durably(&dir, &mut sync_dir).map_err(fail)?;
         let (scratch, file) = self.open_scratch(&dir, key)?;
         Ok(FsUpload {
             key: *key,
@@ -262,7 +289,10 @@ impl FsStore {
                 .create_new(true)
                 .open(&scratch)
             {
-                Ok(file) => return Ok((scratch, file)),
+                Ok(file) => {
+                    note(|| Step::Create(scratch.clone()));
+                    return Ok((scratch, file));
+                }
                 Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(err) => return Err(StoreError::from_io(StoreOp::Upload, None, &err)),
             }
@@ -273,10 +303,11 @@ impl FsStore {
     fn delete_now(&self, keys: &[FileKey]) -> Result<(), StoreError> {
         for key in keys {
             match fs::remove_file(self.file_path(key)) {
-                Ok(()) => {}
+                Ok(()) => note(|| Step::Remove(self.file_path(key))),
                 Err(err) if err.kind() == io::ErrorKind::NotFound => {}
                 Err(err) => return Err(StoreError::from_io(StoreOp::Delete, None, &err)),
             }
+            note(|| Step::Deleted(self.file_path(key)));
         }
         Ok(())
     }
@@ -449,7 +480,12 @@ impl FsUpload {
         if self.mode == WriteMode::New {
             match fs::hard_link(&self.scratch, &self.target) {
                 Ok(()) => {
+                    note(|| Step::Link {
+                        from: self.scratch.clone(),
+                        to: self.target.clone(),
+                    });
                     fs::remove_file(&self.scratch)?;
+                    note(|| Step::Remove(self.scratch.clone()));
                     return Ok(true);
                 }
                 Err(err) if err.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
@@ -457,7 +493,7 @@ impl FsUpload {
                 Err(err) => return Err(err),
             }
         }
-        fs::rename(&self.scratch, &self.target)?;
+        rename(&self.scratch, &self.target)?;
         Ok(true)
     }
 
@@ -465,7 +501,7 @@ impl FsUpload {
         let fail = |err: io::Error| StoreError::from_io(StoreOp::Upload, None, &err);
         let result = (|| {
             self.file.set_modified(self.mtime)?;
-            self.file.sync_all()?;
+            sync_file(&self.file, &self.scratch)?;
             let size = self.file.metadata()?.len();
             if size != self.written {
                 return Ok(Err(Some(size)));
@@ -474,7 +510,7 @@ impl FsUpload {
                 return Ok(Err(None));
             }
             // The rename is not durable until its directory entry is.
-            File::open(&self.dir)?.sync_all()?;
+            sync_dir(&self.dir)?;
             Ok(Ok(size))
         })();
         match result {
@@ -495,11 +531,14 @@ impl FsUpload {
                     },
                 })
             }
-            Ok(Ok(size)) => Ok(FileInfo {
-                key: self.key,
-                size,
-                listed: ListedTime::Created(CreatedAt::mtime(self.created_at)),
-            }),
+            Ok(Ok(size)) => {
+                note(|| Step::Committed(self.target.clone()));
+                Ok(FileInfo {
+                    key: self.key,
+                    size,
+                    listed: ListedTime::Created(CreatedAt::mtime(self.created_at)),
+                })
+            }
             Err(err) => {
                 // Best effort: a scratch file that survives is invisible anyway.
                 let _removed = fs::remove_file(&self.scratch);
@@ -513,6 +552,7 @@ impl Upload for FsUpload {
     fn write(&mut self, chunk: &[u8]) -> impl Future<Output = Result<(), StoreError>> + Send {
         ready(match self.file.write_all(chunk) {
             Ok(()) => {
+                note(|| Step::Write(self.scratch.clone()));
                 self.written = self
                     .written
                     .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
@@ -534,6 +574,8 @@ impl Upload for FsUpload {
         })
     }
 }
+
+mod journal;
 
 #[cfg(test)]
 mod tests;

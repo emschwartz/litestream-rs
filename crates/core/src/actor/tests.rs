@@ -771,6 +771,53 @@ fn a_failed_drop_after_a_divergence_uploads_nothing_built_on_it() {
     assert!(resnapshot < put_three, "{ticks:?}");
 }
 
+/// Expected to fail until the engine keeps a durable record (BOOT-21, BOOT-22; D9 in
+/// `docs/BEHAVIOR.md`). A running engine whose ambiguous commit makes it list the replica finds
+/// another writer's file above its own newest staged file and stops on `OtherWriter`, the one
+/// stop the default responses make. A restart forgets the stop: the new boot takes the other
+/// writer's file as history it is behind (`behind_remote`), snapshots after it and uploads, so
+/// the replica's one history interleaves two databases. The restart must stop again, or refuse.
+#[test]
+#[ignore = "known wrong, BOOT-21 and BOOT-22: an OtherWriter stop is forgotten by a restart; needs a durable engine-owned record"]
+fn a_restart_after_an_other_writer_stop_stops_again() {
+    let (mut other, mut writer) = caught_up();
+    other.commit(9);
+    other.follow(&mut writer, T0 + 10, 20);
+    other.commit(10);
+    other.follow(&mut writer, T0 + 20, 20);
+    let three = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(3).unwrap()));
+    let theirs = block_on(other.remote.inner.read(&three, 0, ReadLen::CHUNK)).unwrap();
+    let (mut rig, mut actor) = caught_up();
+    block_on(async {
+        let mut up = rig.remote.inner.begin_upload(&three, ts(T0), WriteMode::Replace).await.unwrap();
+        up.write(&theirs).await.unwrap();
+        up.commit().await.unwrap();
+    });
+    rig.remote
+        .inner
+        .inject_failure_after_publish(transient(StoreOp::Upload));
+    rig.commit(2);
+    let ticks = rig.follow(&mut actor, T0 + 30, 60);
+    assert_eq!(
+        ticks.last(),
+        Some(&Tick::Stopped(StopCause::OtherWriter)),
+        "the running engine stops first: {ticks:?}"
+    );
+    let before = everything(&rig).1;
+    let mut restarted = Actor::new(cfg());
+    let ticks = rig.follow(&mut restarted, T0 + 40, 60);
+    assert_eq!(
+        ticks.last(),
+        Some(&Tick::Stopped(StopCause::OtherWriter)),
+        "{ticks:?}"
+    );
+    assert_eq!(
+        everything(&rig).1,
+        before,
+        "nothing is put over the other writer"
+    );
+}
+
 #[test]
 fn an_empty_replica_takes_any_page_size() {
     let mut rig = Rig::new();

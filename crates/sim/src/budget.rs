@@ -148,6 +148,18 @@ fn counted(key: &FileKey, last: &BTreeMap<FileKey, u64>, lost: &BTreeSet<Txid>) 
     if !lost.contains(&key.range().max()) {
         return true;
     }
+    // A wider key at the same level from the same start replaced it: the history rebuilt past
+    // the loss merged its range again (level-1 `1-2` over a rolled-back `1-1`), and an output
+    // one level up that holds its range was merged from the replacement, not from it.
+    let superseded = last.keys().any(|other| {
+        other != key
+            && other.level() == key.level()
+            && other.range().min() == key.range().min()
+            && other.range().max() > key.range().max()
+    });
+    if superseded {
+        return false;
+    }
     let above = key.level().get().saturating_add(1);
     (1..=8).contains(&above)
         && last.keys().any(|output| {
@@ -213,5 +225,23 @@ mod tests {
         assert!(check(&events, counts, spent, &lost, &[]).is_err());
         let foreign = [(key(0, 2, 2), big)];
         assert_eq!(check(&events, counts, spent, &lost, &foreign), Ok(()));
+    }
+
+    /// Swarm seed 0x70f: a rollback took transaction 1, the level-1 `1-1` merged before it was
+    /// replaced by `1-2` after it, and level 2 holds `1-2`. The rolled-back `1-1` was counted at
+    /// level 1 beside its replacement, as if `1-2` at level 2 had been merged from it, and level
+    /// 1 came out over level 0's bytes.
+    #[test]
+    fn a_rolled_back_output_replaced_at_its_level_counts_once() {
+        let events = [
+            put(key(0, 1, 1), 4370),
+            put(key(0, 2, 2), 660),
+            put(key(1, 1, 1), 4370),
+            put(key(1, 1, 2), 3874),
+            put(key(2, 1, 2), 3874),
+        ];
+        let lost = BTreeSet::from([Txid::new(1).unwrap()]);
+        let counts = RecorderCounts::default();
+        assert_eq!(check(&events, counts, Spent::default(), &lost, &[]), Ok(()));
     }
 }

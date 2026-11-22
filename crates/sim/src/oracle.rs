@@ -258,6 +258,17 @@ pub enum Violation {
         /// What the restore did instead.
         got: String,
     },
+    /// A lasting fault kept anything from reaching the replica for long enough that the
+    /// engine retried at least twice its stall threshold while the app committed, and at the
+    /// end no task reported a degraded state: health said all was well while replication was
+    /// halted.
+    #[error("{hold} halted replication through {retries} retries and health reported nothing")]
+    HealthBlind {
+        /// The fault that held.
+        hold: String,
+        /// The retries the engine made under it.
+        retries: u64,
+    },
     /// A level-0 file was staged from WAL frames a power loss would take back: the engine's
     /// sync of the WAL before staging failed, was skipped, or covered frames an earlier failed
     /// sync lost.
