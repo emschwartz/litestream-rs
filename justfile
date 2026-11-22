@@ -143,9 +143,10 @@ sqlite-big:
 # SQLITE3_LIBS when set, then on macOS Homebrew's (`brew install sqlite`; the system one lacks
 # the function), then `pkg-config sqlite3`, then plain -lsqlite3 (crates/compat/src/vfs.rs).
 # The test map's counterpart check is ignored too, but it needs the listing upstream-test-map-fresh writes.
+# The s3:: tests need MinIO, so they belong to compat-s3, which starts it; here they would fail closed.
 compat:
     ./scripts/build-go-litestream.sh
-    cargo nextest run -p lsr-compat --run-ignored all --locked -E 'not test(=upstream_test_map::every_counterpart_exists)'
+    cargo nextest run -p lsr-compat --run-ignored all --locked -E 'not test(=upstream_test_map::every_counterpart_exists) and not test(/^s3::/)'
 
 # Build the named Go versions (tags, commits, `releases` for every v0.5.N tag, `main` for
 # upstream's newest staged file) and run the live tests over exactly those: just compat-live v0.5.3 main.
