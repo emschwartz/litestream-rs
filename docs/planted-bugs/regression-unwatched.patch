@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index f48892f..fb470c1 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -1710,7 +1710,7 @@ impl Actor {
+         now: Timestamp,
+     ) -> Option<Tick> {
+         let watch = self.engine.maintain.watch;
+-        let Some(key) = watch.and_then(|watch| watch.missing(inventory)) else {
++        let Some(key) = watch.and_then(|_watch| None::<FileKey>) else {
+             let published = self.engine.upload.confirmed();
+             self.engine.maintain.watch = Watch::after_listing(inventory, published);
+             return None;

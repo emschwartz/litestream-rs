@@ -1,0 +1,13 @@
+diff --git a/crates/replica/src/thread.rs b/crates/replica/src/thread.rs
+index ae2bfd4..e41090f 100644
+--- a/crates/replica/src/thread.rs
++++ b/crates/replica/src/thread.rs
+@@ -259,7 +259,7 @@ impl Worker {
+     /// restart may not keep it.
+     fn keep_stop_record(&mut self) {
+         let record = self.actor.stop_record();
+-        if record == self.recorded {
++        if record.is_some() || record == self.recorded {
+             return;
+         }
+         self.recorded = record;
