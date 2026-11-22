@@ -14,6 +14,15 @@ use thiserror::Error;
 use crate::layout::{FileInfo, FileKey, Level, ListedStamp, cmp_range};
 use crate::store::{ObjectStore, PageLimit, StoreError};
 
+/// The page size a full scan asks for. A backend that proves "more follows"
+/// with one key past the page (S3 caps a request at [`PageLimit::MAX`] keys)
+/// needs a second request for a page of exactly that size, and the next page
+/// then fetches the same keys again. One short of the cap fills a request.
+const SCAN_PAGE: PageLimit = match PageLimit::new(PageLimit::MAX_RAW - 1) {
+    Some(limit) => limit,
+    None => PageLimit::MAX,
+};
+
 /// Why an inventory could not be built.
 #[derive(Clone, PartialEq, Eq, Debug, Error)]
 pub enum InventoryError {
@@ -71,7 +80,7 @@ impl Inventory {
         for level in Level::ALL {
             let mut after: Option<TxidRange> = None;
             loop {
-                let page = store.list(level, after, PageLimit::MAX).await?;
+                let page = store.list(level, after, SCAN_PAGE).await?;
                 let seen: &mut usize = skipped.entry(level).or_default();
                 *seen = seen.saturating_add(page.skipped);
                 files.extend(page.files);

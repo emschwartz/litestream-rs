@@ -701,4 +701,17 @@ mod cases {
         rows.extend(files_rows(&rig));
         print_table(&rows);
     }
+
+    /// A full scan sends one LIST per page of keys: 9000 level-1 files are ten
+    /// requests, not the nineteen a page of exactly 1000 costs (one more key
+    /// proves the page is not the last, and the next page fetches it again).
+    #[test]
+    fn a_full_scan_sends_one_list_per_page() {
+        let rig = Rig::build();
+        let store = rig.store();
+        let (loaded, counts) = rig.counted(|| block_on(Inventory::load(&store)));
+        assert_eq!(loaded.unwrap().files().len(), FILES);
+        // Levels 0, 2, 3, 9 and the five empty ones take one request each.
+        assert_eq!(counts.list, 9 + 10);
+    }
 }
