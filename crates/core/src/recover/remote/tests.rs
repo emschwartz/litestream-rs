@@ -11,6 +11,7 @@ use crate::mem::MemStore;
 use crate::recover::BootWal;
 use crate::recover::{LastPageCheck, PositionSource, Recovered, recover};
 use crate::source::FakeWal;
+use crate::store::WriteMode;
 use crate::store::{ObjectStore, Upload};
 
 const PS: PageSize = PageSize::MIN;
@@ -155,7 +156,10 @@ fn no_level_zero_file_at_the_newest_transaction_is_no_newest_staged_file() {
         lsr_ltx::TxidRange::new(txid(1), txid(2)).unwrap(),
     );
     crate::conformance::block_on(async {
-        let mut up = remote.begin_upload(&key, ts(7)).await.unwrap();
+        let mut up = remote
+            .begin_upload(&key, ts(7), WriteMode::Replace)
+            .await
+            .unwrap();
         up.write(&bytes).await.unwrap();
         up.commit().await.unwrap();
     });

@@ -280,6 +280,7 @@ mod tests {
     use crate::layout::CreatedAt;
     use crate::layout::ListedTime;
     use crate::mem::{MemStore, MemUpload};
+    use crate::store::WriteMode;
     use crate::store::{Listing, ReadLen, StoreOp, Upload};
     use lsr_ltx::{Timestamp, TxidRange};
     use std::future::{Future, ready};
@@ -299,7 +300,10 @@ mod tests {
 
     async fn put(store: &MemStore, k: FileKey) {
         let at = Timestamp::from_unix_millis(7);
-        let mut up = store.begin_upload(&k, at).await.unwrap();
+        let mut up = store
+            .begin_upload(&k, at, WriteMode::Replace)
+            .await
+            .unwrap();
         up.write(b"x").await.unwrap();
         up.commit().await.unwrap();
     }
@@ -496,6 +500,7 @@ mod tests {
             &self,
             key: &FileKey,
             _created_at: Timestamp,
+            _mode: WriteMode,
         ) -> impl Future<Output = Result<MemUpload, StoreError>> + Send {
             ready(Err(StoreError::NotFound { key: *key }))
         }

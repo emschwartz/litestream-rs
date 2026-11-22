@@ -18,6 +18,7 @@ use crate::maintain::tests::{
 use crate::maintain::{Due, Job};
 use crate::mem::MemStore;
 use crate::plan::RestoreTarget;
+use crate::store::WriteMode;
 use crate::store::{ObjectStore, Upload};
 
 /// `retention` from a fresh state.
@@ -628,6 +629,26 @@ fn a_rule_that_breaks_the_newest_restore_is_caught_by_the_self_check() {
             })
         ),
         "{got:?}"
+    );
+}
+
+/// A job that deletes the newest file leaves a replica that still plans, but
+/// not to the newest transaction: the self-check holds it rather than take the
+/// shorter plan for a whole one.
+#[test]
+fn the_self_check_holds_a_job_that_takes_the_newest_file() {
+    let mut files = vec![file(9, 1, 10, created_at_of(10))];
+    files.extend((11..=14).map(|n| file(0, n, n, created_at_of(n))));
+    let inventory = inv(files);
+    let job = DeleteJob::new(vec![key(0, 14, 14)]).unwrap();
+    assert_eq!(
+        self_check(&inventory, &job, None),
+        Some(RetentionHold::SelfCheck {
+            outcome: PlanOutcome::BeyondNewest {
+                requested: txid(14),
+                newest: txid(13),
+            },
+        })
     );
 }
 
@@ -1697,7 +1718,10 @@ impl Lazy {
         crate::conformance::block_on(async {
             for f in files {
                 let created_at = f.created_at().unwrap().at();
-                let mut up = store.begin_upload(&f.key, created_at).await.unwrap();
+                let mut up = store
+                    .begin_upload(&f.key, created_at, WriteMode::Replace)
+                    .await
+                    .unwrap();
                 up.write(b"x").await.unwrap();
                 up.commit().await.unwrap();
             }

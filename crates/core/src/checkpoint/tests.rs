@@ -214,7 +214,7 @@ fn the_failed_state_relaxes_below_the_threshold() {
     let state = after_sync(
         CheckpointState::PassiveFailedAtTruncate { last: ts(3) },
         2,
-        &obs(5, 4, true),
+        4,
         &c,
     );
     assert_eq!(state, CheckpointState::Pending { last: ts(3) });
@@ -224,8 +224,8 @@ fn the_failed_state_relaxes_below_the_threshold() {
 fn the_failed_state_stays_at_the_threshold() {
     let c = cfg(Some(10), 0, 100);
     let failed = CheckpointState::PassiveFailedAtTruncate { last: ts(3) };
-    assert_eq!(after_sync(failed, 2, &obs(5, 100, true), &c), failed);
-    assert_eq!(after_sync(failed, 2, &obs(5, 250, true), &c), failed);
+    assert_eq!(after_sync(failed, 2, 100, &c), failed);
+    assert_eq!(after_sync(failed, 2, 250, &c), failed);
 }
 
 #[test]
@@ -235,7 +235,7 @@ fn our_own_bump_frame_does_not_arm_the_time_trigger() {
         last: ts(0),
         expect_bump: true,
     };
-    let once = after_sync(idle, 1, &obs(1, 1, true), &c);
+    let once = after_sync(idle, 1, 1, &c);
     assert_eq!(
         once,
         CheckpointState::Idle {
@@ -243,9 +243,9 @@ fn our_own_bump_frame_does_not_arm_the_time_trigger() {
             expect_bump: false
         }
     );
-    let again = after_sync(once, 1, &obs(2, 2, true), &c);
+    let again = after_sync(once, 1, 2, &c);
     assert_eq!(again, CheckpointState::Pending { last: ts(0) });
-    let two = after_sync(idle, 2, &obs(2, 2, true), &c);
+    let two = after_sync(idle, 2, 2, &c);
     assert_eq!(two, CheckpointState::Pending { last: ts(0) });
 }
 
@@ -272,7 +272,7 @@ fn tick_passives(
     c: &CheckpointConfig,
 ) -> bool {
     let o = obs(now, frames, true);
-    *state = after_sync(*state, wrote, &o, c);
+    *state = after_sync(*state, wrote, frames, c);
     let decision = decide(state, &o, c);
     if let Decision::Passive(_) = decision {
         let outcome = CheckpointOutcome::NotRestarted;
@@ -543,7 +543,8 @@ fn a_passive_that_restarts_the_wal_starts_a_new_generation_file() {
     assert_eq!(done.outcome, CheckpointOutcome::Restarted);
     assert_ne!(rig.wal.salts(), before);
     assert_eq!(done.staged.files().len(), 2);
-    let position = done.staged.proof().unwrap().position();
+    let through = done.staged.into_proof().unwrap();
+    let position = through.position();
     assert_eq!(position.continuity(), Continuity::Held(rig.wal.epoch()));
     assert_eq!(position.txid().get(), 3);
 }

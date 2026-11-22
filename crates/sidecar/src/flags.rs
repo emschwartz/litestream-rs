@@ -31,12 +31,6 @@ pub enum UsageError {
         /// What was given.
         value: String,
     },
-    /// `-log-level` that is not a level.
-    #[error("invalid -log-level {value:?}: expected trace, debug, info, warn or error")]
-    BadLogLevel {
-        /// What was given.
-        value: String,
-    },
     /// A database and no replica.
     #[error("must specify at least one replica URL for {database}")]
     OnlyDatabase {
@@ -55,6 +49,11 @@ pub enum UsageError {
         /// The flag.
         flag: String,
     },
+    /// `-help=<value>` or `--h`: Go's `flag` package prints the help, and Go's `main`
+    /// exits non-zero because no argument is literally `-h`, `-help` or `--help`
+    /// (`cmd/litestream/main.go:89-96`).
+    #[error("help requested")]
+    HelpNotLiteral,
     /// `-once` with `-exec`.
     #[error("cannot specify -once flag with -exec")]
     OnceWithExec,
@@ -175,17 +174,22 @@ fn scan(args: &[String]) -> Result<Option<Scanned>, UsageError> {
                 name: name.to_owned(),
             });
         };
+        if name == "help" {
+            return Ok(None);
+        }
         let value = match (takes_value, inline) {
-            (_, Some(value)) => value,
+            // Go's `flag` sets a boolean as it reads it, so a bad value stops the scan here.
+            (false, Some(value)) => {
+                parse_bool(name, &value)?;
+                value
+            }
+            (true, Some(value)) => value,
             (true, None) => rest
                 .next()
                 .cloned()
                 .ok_or(UsageError::MissingValue { name })?,
             (false, None) => "true".to_owned(),
         };
-        if name == "help" {
-            return Ok(None);
-        }
         set.push((name, value));
     }
     Ok(Some((set, Vec::new())))
@@ -197,7 +201,15 @@ fn scan(args: &[String]) -> Result<Option<Scanned>, UsageError> {
 /// [`UsageError`], the first Go would report.
 pub(crate) fn parse(args: &[String]) -> Result<Parsed, UsageError> {
     let Some((set, positional)) = scan(args)? else {
-        return Ok(Parsed::Help);
+        // Go's `main` exits 0 for help only when an argument is literally one of these.
+        let literal = args
+            .iter()
+            .any(|a| matches!(a.as_str(), "-h" | "-help" | "--help"));
+        return if literal {
+            Ok(Parsed::Help)
+        } else {
+            Err(UsageError::HelpNotLiteral)
+        };
     };
     let value = |name: &str| {
         set.iter()
@@ -231,10 +243,10 @@ pub(crate) fn parse(args: &[String]) -> Result<Parsed, UsageError> {
             }
         }
     };
-    let log_level = match value("log-level").filter(|l| !l.is_empty()) {
-        None => None,
-        Some(text) => Some(parse_level(&text).ok_or(UsageError::BadLogLevel { value: text })?),
-    };
+    // Go's logger keeps INFO for a level it does not know (internal/log.go).
+    let log_level = value("log-level")
+        .filter(|l| !l.is_empty())
+        .map(|text| parse_level(&text).unwrap_or(LogLevel::Info));
     let flags = Flags {
         source,
         no_expand_env: boolean("no-expand-env")?,
@@ -245,13 +257,13 @@ pub(crate) fn parse(args: &[String]) -> Result<Parsed, UsageError> {
         force_snapshot: boolean("force-snapshot")?,
         enforce_retention: boolean("enforce-retention")?,
     };
-    check(&flags)?;
     Ok(Parsed::Run(flags))
 }
 
-/// Go's flag combinations (`replicate.go:248-257`); `exec` here is only the flag's,
-/// the config file's is checked once it is read.
-fn check(flags: &Flags) -> Result<(), UsageError> {
+/// Go's flag combinations (`replicate.go:248-267`), which Go checks after it has read the
+/// config, so a config that cannot be read is reported first. `exec` here is only the
+/// flag's; the config file's is checked with the plan.
+pub(crate) fn check(flags: &Flags) -> Result<(), UsageError> {
     if flags.once && flags.exec.is_some() {
         return Err(UsageError::OnceWithExec);
     }

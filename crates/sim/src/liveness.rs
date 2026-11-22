@@ -282,6 +282,7 @@ pub const fn of_op(op: &Op) -> &'static [Justifier] {
         // A lasting fault, noted as it begins and again as it is lifted.
         Op::Hold { hold, .. } => match hold {
             crate::generate::Hold::StoreDown(_)
+            | crate::generate::Hold::StoreDownAll
             | crate::generate::Hold::CredentialsRevoked
             | crate::generate::Hold::LaggingListing
             | crate::generate::Hold::LyingReads => &[Justifier::RemoteFault],
@@ -289,12 +290,16 @@ pub const fn of_op(op: &Op) -> &'static [Justifier] {
             crate::generate::Hold::Wal(_) => &[Justifier::WalDamaged],
             crate::generate::Hold::LyingDisk => &[Justifier::LyingDisk],
             crate::generate::Hold::ReadersHeld => &[],
+            crate::generate::Hold::SecondWriter => &[Justifier::RemoteEdited],
         },
         Op::OurReader { begin: false } => &[Justifier::ReadLockLapsed],
         Op::RequestSnapshot => &[Justifier::SnapshotRequested],
         Op::LyingWalSync => &[Justifier::LyingDisk],
-        Op::Commit { .. }
+        // The engine reads past a lagging listing, so a lag alone justifies no snapshot.
+        Op::LaggingListings { .. }
+        | Op::Commit { .. }
         | Op::CommitInTick { .. }
+        | Op::AppInTick { .. }
         | Op::Spill
         | Op::Rollback
         | Op::Vacuum { .. }
@@ -311,7 +316,11 @@ pub const fn of_op(op: &Op) -> &'static [Justifier] {
         | Op::OurReader { begin: true }
         | Op::AppAutocheckpoint(_)
         | Op::Shrink { .. }
-        | Op::Heal => &[],
+        | Op::Heal
+        | Op::Verify
+        // The operator's word lets a boot build above the replica; the
+        // snapshot that follows is justified by what disturbed staging.
+        | Op::TakeOver => &[],
     }
 }
 
@@ -339,6 +348,11 @@ pub const fn of_opts(opts: &crate::run::Opts) -> &'static [Justifier] {
         // The app's behaviour after a restart, and how the clock reads inside a tick.
         after_restart: _,
         clock_law: _,
+        // An overlapping hold's crashes, power losses and store faults are noted as they
+        // happen, as the same operations are outside a hold.
+        overlap: _,
+        error_domain: _,
+        known_wrong: _,
         // Staging on the directory store: what its power losses take is noted with
         // `StagedLost`, as on `MemStore`; a file it took that it reported durable fails the run.
         staging_fs: _,
@@ -512,6 +526,9 @@ impl Liveness {
         let (staging, remote) = stores;
         let newest_staged = world.newest_staged();
         let took = self.take_remote(remote);
+        // A key the bucket refused because it already held it (a commit whose answer was
+        // lost, confirmed by a read-back) leaves no put in the recorder: the replica holds it.
+        self.uploaded.extend(world.replica_level_zero());
         // The replica holds everything staging does only once no staged file is one it never
         // took: a file left behind it (a backup put back, a forged file) is still to be dropped,
         // and the fault that left it must be in the window when it is (seed 0xf42e9).
@@ -700,6 +717,10 @@ pub trait TickWorld {
     fn newest_staged(&self) -> Option<u64>;
     /// The newest transaction the replica holds, at any level.
     fn replica_newest(&self) -> Option<u64>;
+    /// The level-0 keys the replica holds now.
+    fn replica_level_zero(&self) -> Vec<FileKey> {
+        Vec::new()
+    }
     /// Whether a file on the replica, at any level, ends at `txid`.
     fn replica_ends_at(&self, txid: u64) -> bool;
     /// The level-0 files in staging.
@@ -720,6 +741,12 @@ impl TickWorld for crate::World {
 
     fn replica_newest(&self) -> Option<u64> {
         self.remote_newest()
+    }
+
+    fn replica_level_zero(&self) -> Vec<FileKey> {
+        self.remote_level_zero()
+            .map(|files| files.into_iter().map(|info| info.key).collect())
+            .unwrap_or_default()
     }
 
     fn replica_ends_at(&self, txid: u64) -> bool {
@@ -755,6 +782,10 @@ impl<W: TickWorld> TickWorld for WithEngine<'_, W> {
 
     fn replica_newest(&self) -> Option<u64> {
         self.world.replica_newest()
+    }
+
+    fn replica_level_zero(&self) -> Vec<FileKey> {
+        self.world.replica_level_zero()
     }
 
     fn replica_ends_at(&self, txid: u64) -> bool {

@@ -8,7 +8,8 @@ use crate::conformance::{self, Harness};
 use crate::env::{RecordingSleeper, SeededEntropy};
 use crate::layout::CreatedAt;
 use crate::mem::MemStore;
-use crate::store::{PartNumber, StoreOp};
+use crate::mem::short::{LyingUpload, SizeLiar};
+use crate::store::{CorruptCause, PartNumber, StoreOp};
 
 fn key() -> FileKey {
     let id = Txid::new(1).unwrap();
@@ -293,7 +294,10 @@ fn read_delete_and_begin_upload_are_retried_too() {
         mem.inject_failure(StoreOp::Delete, transient(ErrorKind::TimedOut));
         store.delete(&[key()]).await.unwrap();
         mem.inject_failure(StoreOp::Upload, transient(ErrorKind::TimedOut));
-        let mut up = store.begin_upload(&key(), created_at()).await.unwrap();
+        let mut up = store
+            .begin_upload(&key(), created_at(), WriteMode::Replace)
+            .await
+            .unwrap();
         up.write(b"abc").await.unwrap();
         up.commit().await.unwrap();
         mem.inject_failure(StoreOp::Read, transient(ErrorKind::TimedOut));
@@ -310,7 +314,10 @@ fn read_delete_and_begin_upload_are_retried_too() {
 fn upload_write_failure_passes_through_with_one_call() {
     let (mem, sleeper, store) = rig(SeededEntropy::new(1), policy(5));
     conformance::block_on(async {
-        let mut up = store.begin_upload(&key(), created_at()).await.unwrap();
+        let mut up = store
+            .begin_upload(&key(), created_at(), WriteMode::Replace)
+            .await
+            .unwrap();
         mem.inject_failure(StoreOp::Upload, transient(ErrorKind::TimedOut));
         let got = up.write(b"x").await;
         assert_eq!(got, Err(transient(ErrorKind::TimedOut)));
@@ -323,7 +330,10 @@ fn upload_write_failure_passes_through_with_one_call() {
 fn upload_commit_failure_passes_through_with_one_call() {
     let (mem, sleeper, store) = rig(SeededEntropy::new(1), policy(5));
     conformance::block_on(async {
-        let mut up = store.begin_upload(&key(), created_at()).await.unwrap();
+        let mut up = store
+            .begin_upload(&key(), created_at(), WriteMode::Replace)
+            .await
+            .unwrap();
         up.write(b"x").await.unwrap();
         mem.inject_failure(StoreOp::Upload, transient(ErrorKind::TimedOut));
         let got = up.commit().await;
@@ -338,81 +348,16 @@ fn a_commit_that_failed_after_publishing_is_not_repeated() {
     let (mem, sleeper, store) = rig(SeededEntropy::new(1), policy(5));
     mem.inject_failure_after_publish(transient(ErrorKind::TimedOut));
     conformance::block_on(async {
-        let mut up = store.begin_upload(&key(), created_at()).await.unwrap();
+        let mut up = store
+            .begin_upload(&key(), created_at(), WriteMode::Replace)
+            .await
+            .unwrap();
         up.write(b"x").await.unwrap();
         up.commit().await.unwrap_err();
         let listing = store.list(Level::ZERO, None, limit()).await.unwrap();
         assert_eq!(listing.files.len(), 1);
     });
     assert!(sleeper.waits().is_empty());
-}
-
-/// A store whose commits report a size other than the one written.
-#[derive(Debug)]
-struct SizeLiar(MemStore);
-
-struct LyingUpload(<MemStore as ObjectStore>::Upload);
-
-impl ObjectStore for SizeLiar {
-    type Upload = LyingUpload;
-
-    /// Leaves no scratch.
-    async fn remove_scratch(&self) -> Result<u64, StoreError> {
-        Ok(0)
-    }
-
-    async fn list(
-        &self,
-        level: Level,
-        after: Option<TxidRange>,
-        limit: PageLimit,
-    ) -> Result<Listing, StoreError> {
-        self.0.list(level, after, limit).await
-    }
-
-    async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
-        self.0.read(key, offset, len).await
-    }
-
-    async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
-        self.0.created_at(file).await
-    }
-
-    async fn read_with_created_at(
-        &self,
-        file: &FileInfo,
-        len: ReadLen,
-    ) -> Result<(Vec<u8>, CreatedAt), StoreError> {
-        self.0.read_with_created_at(file, len).await
-    }
-
-    async fn begin_upload(
-        &self,
-        key: &FileKey,
-        created_at: Timestamp,
-    ) -> Result<LyingUpload, StoreError> {
-        Ok(LyingUpload(self.0.begin_upload(key, created_at).await?))
-    }
-
-    async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
-        self.0.delete(keys).await
-    }
-}
-
-impl Upload for LyingUpload {
-    async fn write(&mut self, chunk: &[u8]) -> Result<(), StoreError> {
-        self.0.write(chunk).await
-    }
-
-    async fn commit(self) -> Result<FileInfo, StoreError> {
-        let mut info = self.0.commit().await?;
-        info.size = info.size.saturating_sub(1);
-        Ok(info)
-    }
-
-    async fn abort(self) -> Result<(), StoreError> {
-        self.0.abort().await
-    }
 }
 
 #[test]
@@ -424,7 +369,10 @@ fn a_commit_reporting_another_size_is_corrupt() {
         RetryPolicy::DEFAULT,
     );
     let got = conformance::block_on(async {
-        let mut up = store.begin_upload(&key(), created_at()).await.unwrap();
+        let mut up = store
+            .begin_upload(&key(), created_at(), WriteMode::Replace)
+            .await
+            .unwrap();
         up.write(b"ab").await.unwrap();
         up.write(b"cd").await.unwrap();
         up.commit().await
@@ -446,7 +394,10 @@ fn a_commit_reporting_another_size_is_corrupt() {
 fn a_matching_commit_size_is_passed_through() {
     let (_mem, _sleeper, store) = rig(SeededEntropy::new(1), policy(5));
     let info = conformance::block_on(async {
-        let mut up = store.begin_upload(&key(), created_at()).await.unwrap();
+        let mut up = store
+            .begin_upload(&key(), created_at(), WriteMode::Replace)
+            .await
+            .unwrap();
         up.write(b"abcd").await.unwrap();
         up.commit().await.unwrap()
     });
@@ -457,7 +408,10 @@ fn a_matching_commit_size_is_passed_through() {
 fn abort_passes_through() {
     let (_mem, _sleeper, store) = rig(SeededEntropy::new(1), policy(5));
     conformance::block_on(async {
-        let mut up = store.begin_upload(&key(), created_at()).await.unwrap();
+        let mut up = store
+            .begin_upload(&key(), created_at(), WriteMode::Replace)
+            .await
+            .unwrap();
         up.write(b"abcd").await.unwrap();
         up.abort().await.unwrap();
         // Begin, write and abort are one call each, like a commit.
@@ -571,7 +525,10 @@ fn a_commit_size_mismatch_leaves_no_object_visible() {
         RetryPolicy::DEFAULT,
     );
     let got = conformance::block_on(async {
-        let mut up = store.begin_upload(&key(), created_at()).await.unwrap();
+        let mut up = store
+            .begin_upload(&key(), created_at(), WriteMode::Replace)
+            .await
+            .unwrap();
         up.write(b"abcd").await.unwrap();
         up.commit().await
     });
@@ -626,8 +583,9 @@ impl ObjectStore for DeleteRefuser {
         &self,
         key: &FileKey,
         created_at: Timestamp,
+        mode: WriteMode,
     ) -> Result<LyingUpload, StoreError> {
-        self.0.begin_upload(key, created_at).await
+        self.0.begin_upload(key, created_at, mode).await
     }
 
     async fn delete(&self, _keys: &[FileKey]) -> Result<(), StoreError> {
@@ -647,7 +605,10 @@ fn a_mismatch_whose_delete_fails_says_the_object_was_not_removed() {
         RetryPolicy::DEFAULT,
     );
     let got = conformance::block_on(async {
-        let mut up = store.begin_upload(&key(), created_at()).await.unwrap();
+        let mut up = store
+            .begin_upload(&key(), created_at(), WriteMode::Replace)
+            .await
+            .unwrap();
         up.write(b"abcd").await.unwrap();
         up.commit().await
     });
@@ -676,7 +637,10 @@ fn a_mismatch_on_an_object_already_gone_counts_as_removed() {
         RetryPolicy::DEFAULT,
     );
     let got = conformance::block_on(async {
-        let mut up = store.begin_upload(&key(), created_at()).await.unwrap();
+        let mut up = store
+            .begin_upload(&key(), created_at(), WriteMode::Replace)
+            .await
+            .unwrap();
         up.write(b"abcd").await.unwrap();
         conformance::block_on(mem.delete(&[key()])).unwrap();
         up.commit().await

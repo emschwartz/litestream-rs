@@ -217,6 +217,23 @@ impl State {
         }
         self.change(from_dir, vec![(from_name, None), (to_name, Some(node))])
     }
+
+    /// A second name for a file, in the same directory, as `rename` allows; a taken name fails.
+    fn hard_link(&mut self, from: &Path, to: &Path) -> io::Result<()> {
+        let (from_dir, _) = split(from)?;
+        let (to_dir, to_name) = split(to)?;
+        let node = self.lookup(from)?;
+        let Node::File(_) = node else {
+            return Err(err(io::ErrorKind::Unsupported));
+        };
+        if from_dir != to_dir {
+            return Err(err(io::ErrorKind::Unsupported));
+        }
+        if self.dir(to_dir)?.entries.contains_key(&to_name) {
+            return Err(err(io::ErrorKind::AlreadyExists));
+        }
+        self.change(to_dir, vec![(to_name, Some(node))])
+    }
 }
 
 impl MemFs {
@@ -400,6 +417,10 @@ impl Fs for MemFs {
 
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         self.lock().rename(from, to)
+    }
+
+    fn hard_link(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.lock().hard_link(from, to)
     }
 
     fn remove_file(&self, path: &Path) -> io::Result<()> {

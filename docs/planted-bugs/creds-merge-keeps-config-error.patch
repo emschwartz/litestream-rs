@@ -1,0 +1,13 @@
+diff --git a/crates/store-s3/src/chain/shared.rs b/crates/store-s3/src/chain/shared.rs
+index a9ae56b..31496b6 100644
+--- a/crates/store-s3/src/chain/shared.rs
++++ b/crates/store-s3/src/chain/shared.rs
+@@ -67,7 +67,7 @@ pub(super) fn merge(mut config: Sections, credentials: Sections) -> Sections {
+             config.insert(name, src);
+             continue;
+         };
+-        dst.partial = src.partial.clone();
++        dst.partial = dst.partial.take().or(src.partial.clone());
+         if src.has(ACCESS_KEY_ID) && src.has(SECRET_ACCESS_KEY) {
+             dst.set(ACCESS_KEY_ID, src.string(ACCESS_KEY_ID));
+             dst.set(SECRET_ACCESS_KEY, src.string(SECRET_ACCESS_KEY));

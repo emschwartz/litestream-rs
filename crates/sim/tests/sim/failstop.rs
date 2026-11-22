@@ -286,30 +286,86 @@ fn trip_times_are_engine_times() {
     );
 }
 
-/// Seeds whose mixed histories tripped for age with every commit on the replica, each now
-/// run to the end clean: a run of lag dated from its start though its commits landed (0x330,
-/// 0x9f9, 0x56a), a checkpoint's file that changes no page counted as a commit (0x8ef), a
-/// trip that held after its commits landed because a newer frame kept the age above zero
-/// (0xa4d), and WAL frames the replica held counted while a doubt snapshot was owed (0x14b).
-/// The generator may move on and stop reaching these states; the named tests in
-/// `lsr-core`'s `actor::tests::lag` pin each mechanism without it.
+/// Runs a recorded history under the options its seed's mix gave it, failing on any violation:
+/// these tripped for age with every commit on the replica.
+fn runs_clean(seed: u64, ops: &[Op], opts: &Opts) {
+    if let Err(failure) = run_ops(Seed::new(seed), ops, opts) {
+        panic!("step {}: {}", failure.step, failure.violation);
+    }
+}
+
+/// A run of lag dated from its start though its commits landed, under a day-long clock step.
 #[test]
-fn the_reported_false_trip_seeds_run_clean() {
-    for (seed, known_wrong) in [
-        (0x330, true),
-        (0x9f9, false),
-        (0x9f9, true),
-        (0x56a, true),
-        (0xa4d, true),
-        (0x8ef, true),
-        (0x14b, false),
-    ] {
-        let seed = Seed::new(seed);
-        let mut weights = lsr_sim::Weights::mixed(seed);
-        weights.known_wrong = known_wrong;
-        if let Err(failure) = lsr_sim::run_with(seed, 300, &weights, &Opts::default()) {
-            panic!("{}", failure.message(failure.steps));
-        }
+fn seed_0x330_does_not_trip() {
+    let opts = Opts {
+        drawn: true,
+        after_restart: lsr_sim::AfterRestart::Busy,
+        clock_law: lsr_sim::ClockLaw::PerTick,
+        staging_fs: true,
+        known_wrong: true,
+        ..Opts::default()
+    };
+    runs_clean(0x330, crate::histories::seed_0x330::OPS, &opts);
+}
+
+/// A checkpoint's file that changes no page counted as a commit, after a day-long step.
+#[test]
+fn seed_0x8ef_does_not_trip() {
+    let opts = Opts {
+        drawn: true,
+        after_restart: lsr_sim::AfterRestart::Nothing,
+        clock_law: lsr_sim::ClockLaw::EachRead,
+        known_wrong: true,
+        ..Opts::default()
+    };
+    runs_clean(0x8ef, crate::histories::seed_0x8ef::OPS, &opts);
+}
+
+/// A trip that held after its commits landed, because one later frame kept the age above zero.
+#[test]
+fn seed_0xa4d_does_not_trip() {
+    let opts = Opts {
+        drawn: true,
+        lying_wal_sync: true,
+        after_restart: lsr_sim::AfterRestart::Busy,
+        clock_law: lsr_sim::ClockLaw::EachRead,
+        staging_fs: true,
+        known_wrong: true,
+        ..Opts::default()
+    };
+    runs_clean(0xa4d, crate::histories::seed_0xa4d::OPS, &opts);
+}
+
+/// WAL frames the replica held counted while a snapshot was owed for a doubt alone.
+#[test]
+fn seed_0x14b_does_not_trip() {
+    let opts = Opts {
+        drawn: true,
+        after_restart: lsr_sim::AfterRestart::Nothing,
+        clock_law: lsr_sim::ClockLaw::PerTick,
+        staging_fs: true,
+        error_domain: true,
+        ..Opts::default()
+    };
+    runs_clean(0x14b, crate::histories::seed_0x14b::OPS, &opts);
+}
+
+/// Seed 0x9f9's history as found, pinned so the generator cannot move it away: a run of lag
+/// dated from its start, under two day-long clock steps and a staging backup put back, once
+/// tripped with every commit on the replica.
+#[test]
+fn seed_0x9f9_does_not_trip() {
+    let opts = Opts {
+        drawn: true,
+        block_crash_law: true,
+        lying_wal_sync: true,
+        after_restart: lsr_sim::AfterRestart::Retry,
+        clock_law: lsr_sim::ClockLaw::EachRead,
+        staging_fs: true,
+        ..Opts::default()
+    };
+    if let Err(failure) = run_ops(Seed::new(0x9f9), crate::histories::seed_0x9f9::OPS, &opts) {
+        panic!("{}", failure.violation);
     }
 }
 

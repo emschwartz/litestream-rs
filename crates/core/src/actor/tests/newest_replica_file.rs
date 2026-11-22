@@ -2,6 +2,7 @@
 //! replica's newest level-0 file when the WAL still matches it.
 
 use super::*;
+use crate::store::WriteMode;
 
 /// Caught up through transaction 2, then the staging directory is gone and a
 /// new actor starts.
@@ -24,13 +25,19 @@ fn with_staging_gone_boot_continues_from_the_replicas_newest_staged_file() {
     let size = Rig::files(&rig.remote, Level::ZERO)[1].size;
     assert!(size < 1 << 20, "{size}");
     let before = rig.remote.calls();
+    let reads_before = rig.remote.reads_of(&newest_staged_file_key());
     let boot = rig.tick(&mut actor, T0 + 2);
     assert_eq!(event(&boot), Some(&Event::Booted { cause: None }));
-    // The upload task's listing (one page per level) and its read-back of the
-    // newest file, then one read of that file as the newest staged file, from byte 0.
+    // The upload task's listing (one page per level), the probe's reads past
+    // it and its read-back of the newest file, then one
+    // read of that file as the newest staged file, from byte 0.
     let levels = u32::try_from(Level::ALL.len()).unwrap();
-    assert_eq!(rig.remote.calls() - before, levels + 2);
-    assert_eq!(rig.remote.reads_of(&newest_staged_file_key()), 2);
+    let probe = u32::try_from(crate::upload::fresh_probe_reads(Txid::new(2))).unwrap();
+    assert_eq!(rig.remote.calls() - before, levels + probe + 2);
+    assert_eq!(
+        rig.remote.reads_of(&newest_staged_file_key()) - reads_before,
+        2
+    );
     rig.commit(3);
     let seen = rig.settle(&mut actor, T0 + 2);
     no_stop(&seen);
@@ -47,8 +54,18 @@ fn with_staging_gone_and_level_zero_retained_away_boot_is_a_first_sync() {
     let newest_staged = FileKey::new(Level::ZERO, TxidRange::single(Txid::MIN));
     block_on(rig.remote.inner.delete(&[newest_staged])).unwrap();
     rig.staging = Counting::default();
+    // No level-0 file for the WAL to vouch for: nothing local tells these
+    // files from another writer's, so the boot stops.
     let mut actor = Actor::new(cfg());
-    let boot = rig.tick(&mut actor, T0 + 2);
+    assert_eq!(
+        rig.tick(&mut actor, T0 + 2),
+        Tick::Stopped(StopCause::OtherWriter)
+    );
+    assert_eq!(actor.refused_through(), Some(Txid::MIN));
+    // An operator's takeover through the replica's newest lets it snapshot.
+    let mut actor = Actor::new(cfg());
+    actor.remember_takeover(crate::TakeoverRecord::through(Txid::MIN));
+    let boot = rig.tick(&mut actor, T0 + 3);
     assert_eq!(
         event(&boot),
         Some(&Event::Booted {
@@ -62,7 +79,15 @@ fn with_staging_gone_a_wal_that_restarted_snapshots_as_a_staged_newest_staged_fi
     let (mut rig, mut actor) = wiped();
     rig.wal.force_restart();
     rig.commit(3);
-    let boot = rig.tick(&mut actor, T0 + 2);
+    // The WAL no longer holds the replica's newest file, so it cannot vouch
+    // for it: a stop, until a takeover covers it.
+    assert_eq!(
+        rig.tick(&mut actor, T0 + 2),
+        Tick::Stopped(StopCause::OtherWriter)
+    );
+    let mut actor = Actor::new(cfg());
+    actor.remember_takeover(crate::TakeoverRecord::through(Txid::new(2).unwrap()));
+    let boot = rig.tick(&mut actor, T0 + 3);
     assert_eq!(
         event(&boot),
         Some(&Event::Booted {
@@ -83,7 +108,7 @@ fn with_staging_gone_a_replica_newest_staged_file_naming_another_transaction_sto
         let mut up = rig
             .remote
             .inner
-            .begin_upload(&newest_staged_file_key(), ts(T0))
+            .begin_upload(&newest_staged_file_key(), ts(T0), WriteMode::Replace)
             .await
             .unwrap();
         up.write(&bytes).await.unwrap();

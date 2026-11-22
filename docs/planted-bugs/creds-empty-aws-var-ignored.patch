@@ -1,0 +1,12 @@
+diff --git a/crates/store-s3/src/chain.rs b/crates/store-s3/src/chain.rs
+index e57c26e..f1f2867 100644
+--- a/crates/store-s3/src/chain.rs
++++ b/crates/store-s3/src/chain.rs
+@@ -195,6 +195,7 @@ impl CredentialChain {
+     /// copies `LITESTREAM_*` into it only when it is unset (an empty `AWS_*` stays).
+     fn aws_var(&self, aws: &str, litestream: &str) -> Option<String> {
+         (self.env)(aws)
++            .filter(|value| !value.is_empty())
+             .or_else(|| (self.env)(litestream))
+             .filter(|value| !value.is_empty())
+     }

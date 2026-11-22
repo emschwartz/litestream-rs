@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use lsr_core::WriteMode;
 use lsr_core::conformance::{Failure, Harness, block_on};
 use lsr_core::{
     Clock, CorruptCause, FileKey, Level, ObjectStore, PageLimit, ReadLen, StoreError, StoreOp,
@@ -377,7 +378,11 @@ impl RealHarness {
 
     pub fn put(&self, key: &FileKey, created_at: Timestamp, bytes: &[u8]) {
         block_on(async {
-            let mut upload = self.store.begin_upload(key, created_at).await.unwrap();
+            let mut upload = self
+                .store
+                .begin_upload(key, created_at, WriteMode::Replace)
+                .await
+                .unwrap();
             upload.write(bytes).await.unwrap();
             upload.commit().await.unwrap();
         });
@@ -390,7 +395,11 @@ impl RealHarness {
 
     pub fn write_all(&self, key: &FileKey, created_at: Timestamp, bytes: &[u8], chunk: usize) {
         block_on(async {
-            let mut upload = self.store.begin_upload(key, created_at).await.unwrap();
+            let mut upload = self
+                .store
+                .begin_upload(key, created_at, WriteMode::Replace)
+                .await
+                .unwrap();
             for piece in bytes.chunks(chunk) {
                 upload.write(piece).await.unwrap();
             }
@@ -575,6 +584,103 @@ pub fn multipart_round_trip(h: &RealHarness) {
     assert_eq!(h.store.pending_orphans(), 0);
 }
 
+/// Rounds of the consistency probe: `LSR_PROBE_ROUNDS`, else 20 (a nightly
+/// run sets more; each round is about six requests).
+fn probe_rounds() -> u64 {
+    std::env::var("LSR_PROBE_ROUNDS")
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(20)
+}
+
+/// How a second client saw one write or delete right after it returned.
+#[derive(Default, Debug)]
+struct Seen {
+    rounds: u64,
+    listed_late: u64,
+    read_late: u64,
+    delete_listed_late: u64,
+    delete_read_late: u64,
+}
+
+/// The consistency probe: one client writes a key and then deletes it, and
+/// a second client (its own connections) lists and reads right after each.
+/// Every stale answer is counted and printed as an `OBS consistency` table;
+/// nothing is asserted about the provider beyond the rounds running, since
+/// the table is the measurement (kk-review section 4e). A provider that
+/// keeps a listing stale shows here before the engine's boot meets it.
+pub fn consistency_probe(h: &RealHarness) {
+    let reader = h.next_process();
+    let one = ReadLen::new(1).unwrap();
+    let mut seen = Seen::default();
+    for n in 1..=probe_rounds() {
+        let key = h.key(0, n, n);
+        h.write_all(&key, Timestamp::from_unix_millis(1), b"x", 64);
+        let after = n.checked_sub(1).and_then(Txid::new).map(TxidRange::single);
+        let listed = |store: &S3Store<Counting>| {
+            block_on(store.list(Level::ZERO, after, PageLimit::ONE))
+                .unwrap()
+                .files
+                .iter()
+                .any(|f| f.key == key)
+        };
+        let readable = |store: &S3Store<Counting>| match block_on(store.read(&key, 0, one)) {
+            Ok(_) => true,
+            Err(StoreError::NotFound { .. }) => false,
+            Err(err) => panic!("probe read: {err}"),
+        };
+        seen.listed_late = seen.listed_late.saturating_add(u64::from(!listed(&reader)));
+        seen.read_late = seen.read_late.saturating_add(u64::from(!readable(&reader)));
+        block_on(h.store.delete(&[key])).unwrap();
+        seen.delete_listed_late = seen
+            .delete_listed_late
+            .saturating_add(u64::from(listed(&reader)));
+        seen.delete_read_late = seen
+            .delete_read_late
+            .saturating_add(u64::from(readable(&reader)));
+        seen.rounds = n;
+    }
+    eprintln!(
+        "OBS consistency | provider | rounds | write not listed | write not read | delete still listed | delete still read |"
+    );
+    eprintln!(
+        "OBS consistency | {} | {} | {} | {} | {} | {} |",
+        h.server.name,
+        seen.rounds,
+        seen.listed_late,
+        seen.read_late,
+        seen.delete_listed_late,
+        seen.delete_read_late
+    );
+    assert_eq!(seen.rounds, probe_rounds(), "every round ran");
+}
+
+/// A create-only multipart upload into a taken key: the server refuses the
+/// complete (`If-None-Match: *` is checked there), the object stays, and the
+/// refused upload is left open for the orphan list to abort.
+pub fn create_only_multipart_into_a_taken_key_is_refused(h: &RealHarness) {
+    let key = h.key(0, 1, 1);
+    h.write_all(&key, Timestamp::from_unix_millis(1), b"first", 64);
+    let len = part(h).saturating_mul(2);
+    let err = block_on(async {
+        let mut upload = h
+            .store
+            .begin_upload(&key, Timestamp::from_unix_millis(2), WriteMode::New)
+            .await
+            .unwrap();
+        for piece in body(len).chunks(part(h)) {
+            upload.write(piece).await.unwrap();
+        }
+        upload.commit().await.unwrap_err()
+    });
+    assert_eq!(err, StoreError::AlreadyExists { key });
+    assert_eq!(h.read_back(&key, 5), b"first");
+    assert_eq!(h.store.write_stats().refused_taken, 1);
+    assert!(!h.store.write_stats().conditional_unsupported);
+    assert_eq!(h.store.abort_orphans().unwrap(), 1);
+    assert_eq!(h.open_uploads(), 0);
+}
+
 pub fn part_size_boundary(h: &RealHarness) {
     for (n, len) in [
         (1, part(h)),
@@ -594,7 +700,11 @@ pub fn dropped_multipart_is_invisible_then_aborted(h: &RealHarness) {
     block_on(async {
         let mut upload = h
             .store
-            .begin_upload(&h.key(0, 1, 1), Timestamp::from_unix_millis(9))
+            .begin_upload(
+                &h.key(0, 1, 1),
+                Timestamp::from_unix_millis(9),
+                WriteMode::Replace,
+            )
             .await
             .unwrap();
         upload.write(&body(part(h))).await.unwrap();
@@ -612,7 +722,11 @@ pub fn a_killed_process_s_upload_is_aborted_at_the_next_boot(h: &RealHarness) {
     block_on(async {
         let mut upload = h
             .store
-            .begin_upload(&h.key(0, 1, 1), Timestamp::from_unix_millis(9))
+            .begin_upload(
+                &h.key(0, 1, 1),
+                Timestamp::from_unix_millis(9),
+                lsr_core::WriteMode::Replace,
+            )
             .await
             .unwrap();
         upload.write(&body(part(h))).await.unwrap();
@@ -629,7 +743,11 @@ pub fn abort_leaves_nothing(h: &RealHarness) {
     block_on(async {
         let mut upload = h
             .store
-            .begin_upload(&h.key(0, 1, 1), Timestamp::from_unix_millis(9))
+            .begin_upload(
+                &h.key(0, 1, 1),
+                Timestamp::from_unix_millis(9),
+                WriteMode::Replace,
+            )
             .await
             .unwrap();
         upload.write(&body(part(h))).await.unwrap();
@@ -712,6 +830,7 @@ macro_rules! shared_cases {
                 read_of_missing_key_is_not_found,
                 delete_is_idempotent,
                 two_uploads_to_one_key,
+                a_new_upload_never_replaces,
                 chunks_concatenate_and_created_at_survives,
                 created_at_returns_the_committed_created_at,
                 listed_created_at_is_exact_or_marked,
@@ -739,6 +858,8 @@ macro_rules! shared_cases {
                 unparseable_created_at_fails_the_reader_not_the_listing,
                 listing_makes_no_head_requests,
                 multipart_round_trip,
+                create_only_multipart_into_a_taken_key_is_refused,
+                consistency_probe,
                 part_size_boundary,
                 dropped_multipart_is_invisible_then_aborted,
                 a_killed_process_s_upload_is_aborted_at_the_next_boot,

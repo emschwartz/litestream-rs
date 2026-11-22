@@ -36,6 +36,8 @@ for v in $requested; do
     *) versions="$versions $v" ;;
     esac
 done
+# The pinned upstream commit: the one fixture directory that is not a release tag.
+pinned_head=$(ls "$repo/crates/compat/fixtures" | grep -v '^v')
 mkdir -p "$out"
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
@@ -65,6 +67,20 @@ build() {
         echo "$v: FAILED $(grep -v '^$' "$scratch/$v.log" | tail -n 1)"
         failed=1
     fi
+}
+# The effective-config dumper (crates/compat/go/dump/lsrdump.go, see crates/compat/src/dump.rs):
+# the same export plus that one file in cmd/litestream, which acts only when LSR_DUMP is set.
+build_dump() {
+    v=$1 rev=$2 bin=$3
+    export_rev "$v" "$rev"
+    cp "$repo/crates/compat/go/dump/lsrdump.go" "$dir/cmd/litestream/lsrdump.go"
+    if (cd "$dir" && CGO_ENABLED=1 GOFLAGS=-mod=mod go build -trimpath -o "$bin" ./cmd/litestream) >"$scratch/$v.dump.log" 2>&1; then
+        echo "$v: dump built $(git -C "$src" rev-parse --short "$rev")"
+    else
+        echo "$v: dump FAILED $(grep -v '^$' "$scratch/$v.dump.log" | tail -n 1)"
+        failed=1
+    fi
+    rm -f "$dir/cmd/litestream/lsrdump.go"
 }
 build_vfs() {
     v=$1 rev=$2 so=$3
@@ -106,6 +122,15 @@ for v in $versions; do
         echo "$v: present"
     else
         build "$v" "$rev" "$bin"
+    fi
+    # Only the pinned commit the port reads has a dumper: the config differential is against it.
+    if [ "$v" = "$pinned_head" ]; then
+        dump="$out/litestream-dump-$v"
+        if [ -x "$dump" ] && [ "$dump" -nt "$repo/crates/compat/go/dump/lsrdump.go" ]; then
+            echo "$v: dump present"
+        else
+            build_dump "$v" "$rev" "$dump"
+        fi
     fi
     so="$out/litestream-vfs-$v.so"
     if [ -f "$so" ]; then
