@@ -184,7 +184,10 @@ fn seeds_to_first_failure() {
 #[test]
 fn swarm_seed_44_restores_only_committed_states() {
     let seed = Seed::new(44);
-    if let Err(failure) = run_with(seed, 8, &Weights::mixed(seed), &Opts::default()) {
+    let mut weights = Weights::mixed(seed);
+    // Drawn after this seed was found, so the run stays the one the plant fails on.
+    weights.app_in_tick = 0;
+    if let Err(failure) = run_with(seed, 8, &weights, &Opts::default()) {
         panic!("{failure}");
     }
 }
