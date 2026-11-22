@@ -39,6 +39,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D29 | Where do the behaviour table's rows live? | `docs/behavior.toml`, rendered into `docs/BEHAVIOR.md` | parent session's request; layout by Claude (checker-holes) | 2026-11-22 | decided |
 | D30 | How is Toxiproxy provided to the tests? | Built from source with `go install` at a pinned version | Claude (checker-holes), **delegated** | 2026-11-22 | open to owner review |
 | D32 | How is an unusable KMS key reported? | As a permission refusal, `permission_denied` | Claude, **delegated** | 2026-11-22 | open to owner review |
+| D33 | Boot finds the replica's newest file differing from the staged copy under the same key: snapshot or stop? Keep the stop record? | Stop unless a takeover covers it; delete the stop record | Claude, **delegated** | 2026-11-22 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -232,7 +233,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** one more small file until the journal can hold it; a restart to apply.
 - **Why:** a held `-exec` daemon is the case where the operator needs the command most, and stopping it first may end the container.
 - **Revisit if:** the journal gains a safe second writer, or the command moves into the daemon.
-- **Links:** #110 (stop record, meta-directory lock), `docs/journal.md`.
+- **Links:** #110 (meta-directory lock, takeover record), `docs/journal.md`.
 
 ## D22. The bound: 10 minutes, no byte bound (delegated)
 
@@ -323,6 +324,16 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** the health name does not say "KMS"; the log's error text and the store's message do.
 - **Revisit if:** operators need to tell a KMS key from a bucket policy at a glance.
 - **Links:** `S3Code::KmsKeyUnusable` in `crates/store-s3/src/classify.rs`.
+
+## D33. A boot divergence is a refusal, and the stop record goes (delegated)
+
+- **Question:** at boot the replica's newest level-0 file verifies and differs from the staged copy under the same key (BOOT-13). It used to stand while the staged files went and a snapshot followed above it. With rule (a) (D12), is that still right, and is the stop record (`lsr-stop`) still needed?
+- **Choice:** refuse it with `OtherWriter` unless a takeover record covers the replica's newest key, and delete the stop record, its codec and its file. An unusable takeover record is ignored as absent and reported, never refusing the start.
+- **Options considered:** keep BOOT-13's snapshot and the stop record, which alone stopped a restart after another writer took this engine's next id; refuse the start on an unusable record.
+- **Why:** this engine uploads only from witnessed, synced staged copies and keeps a takeover record before deleting its own (BOOT-25), so without an operator's hand a boot divergence is another writer at this engine's next id. Refusing it covers that restart without a record, and rule (a) covers the other writer's files above staging, so the stop record kept nothing the boot does not now see. One fewer meta-directory file and crash-consistency surface. An unusable takeover record then costs only what no record costs.
+- **Cost accepted:** an operator who puts back a staging backup holding another copy of the replica's newest key stops instead of snapshotting; `lsr take-over` clears it, as for D12's other operator actions.
+- **Revisit if:** a world without an operator's hand produces a boot divergence.
+- **Links:** `docs/BEHAVIOR.md` BOOT-13, BOOT-21, BOOT-22, CFG-14, CFG-15; `crates/core/src/actor.rs` (`boot_listing`); #110.
 
 ## Unverified, not recorded
 

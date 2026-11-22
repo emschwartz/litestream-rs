@@ -31,12 +31,12 @@ Rows that earn none of the three carry one of these instead:
 
 Evidence is cited as: a test name with its crate ("sim" is `sim/tests/sim`, "core" is a unit test in `core/src`, "compat", "sqlite", "history", "cli", "replica", "local", "config" likewise); oracle `X`, a violation the simulator's judge raises on any seed (`Violation` in `sim/src/oracle.rs`); judge `X`, an anomaly of the history judge, which reads only restored content and a commit log (`Anomaly` in `history/src/judge.rs`); plant `X`, a defect kept as a patch in `docs/planted-bugs.toml` and re-planted nightly.
 
-**Tally of the 178 rows in section 3** (counted by script from the tables; a row with a tested half and an untested half is counted by its tested half).
+**Tally of the 176 rows in section 3** (counted by script from the tables; a row with a tested half and an untested half is counted by its tested half).
 
 | Mark | Rows |
 |---|---|
 | D R | 56 |
-| D | 70 |
+| D | 68 |
 | D S | 6 |
 | D S R | 5 |
 | S | 1 |
@@ -522,7 +522,7 @@ Three other ways replication ends that are not a `StopCause`:
 | D5 | A boot or relist listing that lags the bucket is trusted | BOOT-18, MAINT-12 | #96 |
 | D6 | No conditional writes: a second writer or a reused id replaces an object instead of being refused. Two writers in step replace each other indefinitely and neither stops (expected-fail test core::`failover_with_the_old_host_alive_never_publishes_one_id_twice` (`#[ignore]` until #96)) | UP-14, GO-9, WORLD-5 | #96, with UP-17 on `claude/second-writer` |
 | D7 | A retried multipart Complete that already succeeded is reported as `store_refused` | UP-13 | #96 |
-| D9 | **Partly closed.** Retry counts, waits and degraded states still reset on restart. The one stop the engine makes by default, `OtherWriter`, is now kept across a restart by its stop record (BOOT-21, BOOT-22), and an engine that was down when the other writer appeared refuses its files at boot (BOOT-22) | BOOT-21, BOOT-22 | `claude/second-writer` for the stop; G3 in `docs/proposals/beyond-go.md` and issue #99 for the rest |
+| D9 | **Partly closed.** Retry counts, waits and degraded states still reset on restart. The one stop the engine makes by default, `OtherWriter`, holds across a restart because every boot refuses the other writer's files again (BOOT-13, BOOT-22), whether it saw them before or was down when they appeared | BOOT-21, BOOT-22 | `claude/second-writer` for the stop; G3 in `docs/proposals/beyond-go.md` and issue #99 for the rest |
 | D10 | A commit is dated by when it was staged. After an outage, a restore as of an instant inside the outage leaves out commits made before that instant. The contract "what the replica held at t" is not stated anywhere a user reads | G3 | None. None |
 | D12 | **Closed by #104.** A fault whose policy is a plain retry never became a degraded state. Now each degrades its task as `Stalled(<fault>)` at the 8th failure in a row, and a failed WAL fsync is its own persistent cause, `WalSyncFailed` | RUN-3, RUN-13, RUN-14, CKPT-3 | Merged |
 | D13 | **Closed.** Past 4096 pending files a staged file got no token and was certain to be refused, which cost a snapshot and every restore point from there on. The engine now holds its position at the cap, and boot witnesses no more than the cap and stages the rest again from the WAL | RUN-18 | Closed |
