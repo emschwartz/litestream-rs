@@ -171,14 +171,14 @@ fn restore_through_the_retry_layer_reads_side_by_side() {
     let restored = block_on(restore(&store, RestoreTarget::Latest, MemSink::new())).unwrap();
     assert_eq!(restored.files(), 1);
     let chunks = size.div_ceil(RESTORE_CHUNK);
-    // Two one-byte reads past the listing (the retry layer reads them one at a time), then
-    // one read per chunk.
+    // One-byte reads of the three keys named past the listing (the retry layer reads them
+    // one at a time), then one read per chunk.
     assert_eq!(
         reads.load(Ordering::SeqCst),
-        chunks + 2,
+        chunks + 3,
         "one read per chunk"
     );
-    let bound = chunks.div_ceil(WIDTH) + 2;
+    let bound = chunks.div_ceil(WIDTH) + 3;
     let seen = rounds.load(Ordering::SeqCst);
     assert!(
         seen <= bound,

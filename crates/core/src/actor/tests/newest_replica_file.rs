@@ -29,10 +29,10 @@ fn with_staging_gone_boot_continues_from_the_replicas_newest_staged_file() {
     let boot = rig.tick(&mut actor, T0 + 2);
     assert_eq!(event(&boot), Some(&Event::Booted { cause: None }));
     // The upload task's listing (one page per level), the probe's reads past
-    // it (two per transaction) and its read-back of the newest file, then one
+    // it and its read-back of the newest file, then one
     // read of that file as the newest staged file, from byte 0.
     let levels = u32::try_from(Level::ALL.len()).unwrap();
-    let probe = 2 * (crate::upload::PROBE_GAP + 1);
+    let probe = u32::try_from(crate::upload::fresh_probe_reads(Txid::new(2))).unwrap();
     assert_eq!(rig.remote.calls() - before, levels + probe + 2);
     assert_eq!(
         rig.remote.reads_of(&newest_staged_file_key()) - reads_before,

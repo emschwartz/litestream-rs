@@ -392,13 +392,13 @@ fn boot_lists_then_recovers_then_uploads() {
 
 /// An empty replica names no page size, so boot asks it nothing more: one
 /// listing per level, no second pass, and the probe's reads of the keys a
-/// lagging listing could have left out (two per transaction).
+/// lagging listing could have left out.
 #[test]
 fn a_first_boot_lists_each_level_once() {
     let mut rig = Rig::new();
     let mut actor = Actor::new(cfg());
     rig.tick(&mut actor, T0);
-    let probe = 2 * (crate::upload::PROBE_GAP + 1);
+    let probe = u32::try_from(crate::upload::fresh_probe_reads(None)).unwrap();
     assert_eq!(
         rig.remote.calls(),
         u32::try_from(Level::ALL.len()).unwrap() + probe

@@ -416,7 +416,9 @@ fn last_boot_continues(report: &RunReport) -> Result<(), String> {
             ..
         }) if *remote_lists == levels
             && remote_calls.checked_sub(levels)
-                == Some(2_u64.saturating_add(crate::budget::PROBE_READS)) =>
+                == Some(
+                    2_u64.saturating_add(lsr_core::fresh_probe_reads(Some(lsr_ltx::Txid::MIN))),
+                ) =>
         {
             Ok(())
         }

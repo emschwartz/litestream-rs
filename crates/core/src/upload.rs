@@ -29,11 +29,11 @@
 //! its writes (a cache in front of a listing, an eventually consistent
 //! index) while its reads are exact, so a key a listing leaves out may still
 //! be there. Every listing here is followed by reads of the keys past its
-//! newest that a reader can name without a listing, each transaction's
-//! level-0 file and else the snapshot ending at it, in order until
-//! [`PROBE_GAP`] transactions in a row are missing ([`probe_past`], at most
-//! [`PROBE_CAP`] transactions, `2 * (PROBE_GAP + 1)` reads on a fresh
-//! listing; through the newest staged transaction at least): what they find
+//! newest that a reader can name without a listing (`crate::probe`, the same
+//! reads a restore of the newest state makes), in order until [`PROBE_GAP`]
+//! transactions in a row are missing ([`probe_past`], at most [`PROBE_CAP`]
+//! transactions, [`fresh_probe_reads`] on a fresh listing; through the newest
+//! staged transaction at least): what they find
 //! is the replica's newest. When a confirmed transaction is past the listing,
 //! the reads start at its key, so a regression is reported only when a read,
 //! not a listing, finds the confirmed key gone. A file a listing shows past
@@ -92,6 +92,7 @@ use crate::fault::{BugSite, Fault};
 use crate::inventory::{Inventory, InventoryError};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::ltx_read::verifies;
+use crate::probe;
 use crate::store::{ListAt, ObjectStore, PageLimit, ReadLen, StoreError, Upload, WriteMode};
 use crate::witness::{ByteTally, Witnessed, Witnesses};
 
@@ -109,9 +110,6 @@ pub const PROBE_CAP: u32 = 64;
 /// be free: another writer's file an operator removed leaves a gap under the
 /// files uploaded after it.
 pub const PROBE_GAP: u32 = 3;
-
-/// A probe asks only whether an object exists, so it reads one byte.
-const PROBE_LEN: ReadLen = ReadLen::or_chunk(1);
 
 /// What this engine knows about the replica's newest transaction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -412,16 +410,16 @@ pub(crate) async fn past_known<S: ObjectStore>(
 ///
 /// Each transaction from the one after `listed` (from `confirmed`, when that
 /// is later, so that a relist proves what was confirmed is still there
-/// before a regression is reported) is looked for under the two keys a
-/// reader can name without a listing: its level-0 file, and else a snapshot
-/// that ends at it (a snapshot always starts at transaction 1). A
+/// before a regression is reported) is looked for under the keys a reader
+/// can name without a listing (`crate::probe`): its level-0 file, a level-0
+/// file from the first transaction, and the snapshot that ends at it. A
 /// higher-level file has a start no read can guess. The reads go on through
 /// `through` (the newest staged transaction: a gap below it does not end
 /// them, since this engine may have uploaded anything it staged), then stop
 /// once [`PROBE_GAP`] transactions in a row past the last one found are
 /// missing, and never look at more than [`PROBE_CAP`] transactions. A fresh
-/// listing with nothing staged past it costs `2 * (PROBE_GAP + 1)` reads, of
-/// keys that are not there.
+/// listing with nothing staged past it costs [`fresh_probe_reads`] reads, of
+/// keys that are not there (three per transaction).
 ///
 /// # Errors
 /// The replica's fault when a read fails other than by a missing key.
@@ -453,18 +451,25 @@ pub(crate) async fn probe_past<S: ObjectStore>(
     Ok(found)
 }
 
-/// The level-0 file of `txid`, or else the snapshot that ends at it, when a
-/// read finds one.
-async fn holder<S: ObjectStore>(remote: &S, txid: Txid) -> Result<Option<FileKey>, Fault> {
-    let level_zero = staged_key(txid);
-    if exists(remote, &level_zero).await? {
-        return Ok(Some(level_zero));
+/// The reads a probe past a listing that ends at `listed` makes when it finds nothing: the
+/// keys named for each of the [`PROBE_GAP`] + 1 transactions after it (`crate::probe`).
+#[must_use]
+pub fn fresh_probe_reads(listed: Option<Txid>) -> u64 {
+    let mut reads = 0_u64;
+    let mut at = listed.map_or(Some(Txid::MIN), Txid::next);
+    for _ in 0..=PROBE_GAP {
+        let Some(txid) = at else { break };
+        reads = reads.saturating_add(probe::reads_per_transaction(txid));
+        at = txid.next();
     }
-    let Some(range) = TxidRange::new(Txid::MIN, txid) else {
-        return Ok(None);
-    };
-    let snapshot = FileKey::new(Level::SNAPSHOT, range);
-    Ok(exists(remote, &snapshot).await?.then_some(snapshot))
+    reads
+}
+
+/// The first key named for `txid` that a read finds (`crate::probe`).
+async fn holder<S: ObjectStore>(remote: &S, txid: Txid) -> Result<Option<FileKey>, Fault> {
+    probe::holder(remote, txid)
+        .await
+        .map_err(|err| Fault::from_remote(&err))
 }
 
 /// Whether the replica holds an object under `key`, by a read: a listing may
@@ -473,11 +478,9 @@ async fn holder<S: ObjectStore>(remote: &S, txid: Txid) -> Result<Option<FileKey
 /// # Errors
 /// The replica's fault when the read fails other than by a missing key.
 pub(crate) async fn exists<S: ObjectStore>(remote: &S, key: &FileKey) -> Result<bool, Fault> {
-    match remote.read(key, 0, PROBE_LEN).await {
-        Ok(_) => Ok(true),
-        Err(StoreError::NotFound { .. }) => Ok(false),
-        Err(err) => Err(Fault::from_remote(&err)),
-    }
+    probe::exists(remote, key)
+        .await
+        .map_err(|err| Fault::from_remote(&err))
 }
 
 fn diverged(confirmed: Txid, from: Txid) -> Uploaded {

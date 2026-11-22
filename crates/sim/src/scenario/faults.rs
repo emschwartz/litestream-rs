@@ -327,7 +327,7 @@ pub fn window_scenarios() -> &'static [fn() -> Scenario] {
 /// The reads a boot's probe past its listing makes on a replica it lists
 /// whole, as a fault's count of calls ahead.
 fn probe_reads() -> u8 {
-    u8::try_from(crate::budget::PROBE_READS).unwrap_or(u8::MAX)
+    u8::try_from(lsr_core::fresh_probe_reads(Some(lsr_ltx::Txid::MIN))).unwrap_or(u8::MAX)
 }
 
 fn remote_fault(op: StoreOp, ahead: u8, shape: FaultShape) -> Op {

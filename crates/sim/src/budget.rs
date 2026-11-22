@@ -52,13 +52,14 @@ pub const PER_FILE: u64 = 1024;
 /// newest file of each of the ten levels, and the upload lane's read-back.
 pub const READS_PER_BOOT: u64 = 24 + PROBE_READS;
 
-/// The reads that end a probe past a listing: two keys (the level-0 file and
-/// the snapshot) for each missing transaction it reads past before it stops.
+/// The most reads that end a probe past a listing: the keys named for each
+/// missing transaction it reads past before it stops, three per transaction
+/// (`lsr_core::fresh_probe_reads` is the exact count).
 #[expect(
     clippy::as_conversions,
     reason = "a u32 widens to a u64 losslessly; `From` is not const"
 )]
-pub const PROBE_READS: u64 = 2 * (lsr_core::PROBE_GAP as u64 + 1);
+pub const PROBE_READS: u64 = 3 * (lsr_core::PROBE_GAP as u64 + 1);
 
 /// What a run did besides its recorder's events.
 #[derive(Clone, Copy, Debug, Default)]

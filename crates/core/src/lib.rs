@@ -41,6 +41,7 @@ pub mod needs;
 mod pages;
 mod plan;
 mod position;
+mod probe;
 mod recover;
 mod restore;
 mod retry;
@@ -132,7 +133,7 @@ pub use store::{
 pub use sync::{PageFrom, Step, StepEnd, StepFailed, SyncConfig, Synced, clamp, sync_step};
 pub use upload::{
     Did, PROBE_CAP, PROBE_GAP, UploadConfig, UploadFailed, UploadPlan, UploadState, Uploaded,
-    upload_next,
+    fresh_probe_reads, upload_next,
 };
 pub use verify::{
     Compared, Depth, Finding, LevelSummary, LivePages, MAX_FINDINGS, Report, Severity, Verified,

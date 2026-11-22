@@ -600,7 +600,10 @@ fn a_listing_does_not_read_back_a_tail_already_confirmed() {
     };
     let listed = next(state, &staging, &remote, 1).unwrap();
     assert_eq!(listed.state, UploadState::At(Some(txid(1))));
-    assert_eq!(remote.log().reads, 2 * (1 + PROBE_GAP));
+    assert_eq!(
+        u64::from(remote.log().reads),
+        fresh_probe_reads(Some(txid(1)))
+    );
 }
 
 #[test]
@@ -1389,8 +1392,8 @@ fn a_relist_that_hides_confirmed_uploads_is_no_regression() {
     assert_eq!(listed.state, UploadState::At(Some(txid(2))));
 }
 
-/// The probe costs 2 * ([`PROBE_GAP`] + 1) reads past a fresh listing (the
-/// missing keys that end it), reads past a gap of up to [`PROBE_GAP`] free
+/// The probe costs [`fresh_probe_reads`] past a fresh listing (the missing
+/// keys that end it), reads past a gap of up to [`PROBE_GAP`] free
 /// keys (another writer's file an operator removed), and reads at most
 /// [`PROBE_CAP`] keys however far the listing lags: past that the bucket's
 /// refusal of a taken key is what stops a second upload.
@@ -1401,7 +1404,10 @@ fn the_probe_past_a_listing_reads_past_short_gaps_and_stops_at_its_cap() {
     let _ = next(UploadState::Unknown, &staging, &remote, 1).unwrap();
     // The listed tail's read-back (one chunk) and the probe's misses, two
     // keys for each transaction.
-    assert_eq!(remote.log().reads, 1 + 2 * (1 + PROBE_GAP));
+    assert_eq!(
+        u64::from(remote.log().reads),
+        1 + fresh_probe_reads(Some(txid(1)))
+    );
     let past_gap = 2 + u64::from(PROBE_GAP);
     put_bytes(&remote.inner, key(past_gap), &encode(past_gap));
     remote.log().unlisted.push(key(past_gap));
@@ -1515,7 +1521,10 @@ fn a_listed_tail_equal_to_the_staged_file_is_confirmed_by_one_compare() {
     put_bytes(&remote.inner, key(1), &bytes);
     let listed = next(UploadState::Unknown, &staging, &remote, 1).unwrap();
     assert_eq!(listed.state, UploadState::At(Some(txid(1))));
-    assert_eq!(remote.log().reads, 1 + 2 * (1 + PROBE_GAP));
+    assert_eq!(
+        u64::from(remote.log().reads),
+        1 + fresh_probe_reads(Some(txid(1)))
+    );
 }
 
 /// A refusal is the bucket saying this key is taken only when it names this
