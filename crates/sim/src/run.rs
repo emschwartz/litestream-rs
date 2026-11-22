@@ -1929,8 +1929,8 @@ impl Runner {
 
     /// What a drawn run's power losses keep of the unsynced WAL writes: a
     /// drawn prefix, or the block law's draw; and whether the engine's own
-    /// sync of the WAL keeps anything. A disk that lies from the start is a
-    /// justifier for the whole run, as the operation that makes one is.
+    /// sync of the WAL keeps anything. What those settings make true for the
+    /// liveness oracle is [`crate::liveness::of_opts`]'s to say.
     fn draw_power_law(&mut self, seed: Seed, opts: &Opts) {
         self.w.sqlite.tear_on_power_loss(seed.stream(14));
         if opts.block_crash_law {
@@ -1940,7 +1940,9 @@ impl Runner {
         }
         if opts.lying_wal_sync {
             self.w.sqlite.lie_on_our_sync();
-            self.liveness.note(Justifier::LyingDisk);
+        }
+        for why in crate::liveness::of_opts(opts) {
+            self.liveness.note(*why);
         }
     }
 
