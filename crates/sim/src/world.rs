@@ -297,8 +297,6 @@ pub struct World {
     in_tick: Option<CommittedInTick>,
     // When the app's armed in-tick commit landed, by the app's own clock read.
     in_tick_time: Arc<Mutex<Option<Timestamp>>>,
-    /// What the app's operation inside the last tick did (`in_tick`).
-    app_done: Option<crate::sqlite::InTickRan>,
 }
 
 /// The first instant of a run's clock.
@@ -377,7 +375,6 @@ impl World {
             crash_entropy: SeededEntropy::new(seed.stream(5)),
             in_tick: None,
             in_tick_time: Arc::default(),
-            app_done: None,
         }
     }
 
@@ -599,7 +596,7 @@ impl World {
         let ran = run_until(fut, budget);
         // The app's commit inside the tick came before the engine's own frames
         // that followed it, so the model takes it up first.
-        self.app_done = self.record_app_in_tick();
+        self.record_app_in_tick();
         self.in_tick = self.record_commit_in_tick();
         // Before the crash takes anything: a power loss decides which of the
         // engine's own commits survive, so the model must know them first.

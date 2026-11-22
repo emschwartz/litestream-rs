@@ -63,6 +63,8 @@ fn a_restart_after_a_failed_wal_sync_owes_the_truncate_seed_0xf() {
     let seed = Seed::new(0xf);
     let mut weights = Weights::mixed(seed);
     weights.known_wrong = true;
+    // Drawn after this seed was found, so the run stays the one that reaches the defect.
+    weights.app_in_tick = 0;
     let ops = history(seed, STEPS, &weights);
     assert_eq!(
         digest(&format!("{ops:?}")),

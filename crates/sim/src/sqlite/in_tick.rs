@@ -237,7 +237,19 @@ impl SimSqlite {
 
     /// A tick begins: its calls are counted from 0.
     pub fn app_tick_begins(&self) {
-        self.with(|state| state.app.calls = 0);
+        self.with(|state| {
+            state.app.calls = 0;
+            state.app.ran = None;
+        });
+    }
+
+    /// The tick ended: an operation that did not run is disarmed, and what one did stays for
+    /// [`SimSqlite::take_app_in_tick`] until the next tick begins.
+    pub fn app_tick_ends(&self) -> Option<InTickRan> {
+        self.with(|state| {
+            state.app.armed = None;
+            state.app.ran
+        })
     }
 
     /// The calls into SQLite the tick so far made: after a tick, all of them.

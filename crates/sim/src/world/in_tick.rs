@@ -17,10 +17,12 @@ use lsr_ltx::PageNo;
 use crate::sqlite::{AppCommit, InTickDone, InTickRan, InTickSite};
 
 impl World {
-    /// Takes what the armed operation did in the tick that just ran, tells the model, and
-    /// keeps it for [`World::take_app_in_tick`].
-    pub(super) fn record_app_in_tick(&mut self) -> Option<InTickRan> {
-        let ran = self.sqlite.take_app_in_tick()?;
+    /// Tells the model what the armed operation did in the tick that just ran, which the
+    /// SQLite model keeps for [`World::take_app_in_tick`].
+    pub(super) fn record_app_in_tick(&mut self) {
+        let Some(ran) = self.sqlite.app_tick_ends() else {
+            return;
+        };
         let (salts, end, db_size) = ran.before;
         self.model_learns_end(salts, end, db_size);
         match ran.done {
@@ -35,7 +37,6 @@ impl World {
             | InTickDone::ReaderBegan(_)
             | InTickDone::ReaderEnded { .. } => {}
         }
-        Some(ran)
     }
 
     /// The model takes up a commit ending at `end` in generation `salts` unless its newest
@@ -69,12 +70,12 @@ impl World {
 
     /// What the app's operation inside the last tick did, once; `None` when none ran.
     pub fn take_app_in_tick(&mut self) -> Option<InTickRan> {
-        self.app_done.take()
+        self.sqlite.take_app_in_tick()
     }
 
     /// What the app's operation inside the last tick did, kept for [`World::take_app_in_tick`].
     #[must_use]
-    pub const fn app_in_tick(&self) -> Option<InTickRan> {
-        self.app_done
+    pub fn app_in_tick(&self) -> Option<InTickRan> {
+        self.sqlite.app_tick_ends()
     }
 }
