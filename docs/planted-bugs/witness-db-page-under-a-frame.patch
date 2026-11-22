@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/witness.rs b/crates/core/src/witness.rs
+index d7850f9..dbe8dbc 100644
+--- a/crates/core/src/witness.rs
++++ b/crates/core/src/witness.rs
+@@ -517,7 +517,7 @@ fn holds_exactly<R: Read + Seek, P: PageSource>(
+         };
+         // A frame anywhere may have reached the database file since: the
+         // file's copy cannot be told from the database's, so no witness.
+-        if pages.as_ref().is_none_or(|pages| pages.contains(&pgno)) {
++        if pages.is_none() {
+             return Ok(false);
+         }
+         if live.db.read_page(pgno, &mut buf).is_err() || PageChecksum::of(pgno, &buf) != *digest {

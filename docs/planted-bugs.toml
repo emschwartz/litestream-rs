@@ -11,7 +11,10 @@
 #
 # Not here, with the reason: a6e3e38 (level-0 retention oracle: it fixed the test, retention code is
 # unchanged, so there is nothing to plant), the verify hang fix (test-only: no production code to plant)
-# ab0021d (a feature: reverting it does not compile).
+# ab0021d (a feature: reverting it does not compile). Retired with the code they planted into:
+# staged-file-cannot-follow (bf78f6d) and staged-snapshot-of-earlier-wal (be104a7), the listing's header
+# link between a staged file and the replica's newest, which the boot witness replaced (2fb603f); the
+# rules they guarded are planted below as the witness-* entries.
 
 [[bug]]
 name = "asof-straddle"
@@ -100,23 +103,6 @@ tests = [
 ]
 
 [[bug]]
-name = "staged-file-cannot-follow"
-fix = "bf78f6d"
-package = "lsr-core"
-tests = [
-    "upload::tests::a_staged_file_that_cannot_follow_the_replica_is_not_uploaded",
-]
-
-[[bug]]
-name = "staged-snapshot-of-earlier-wal"
-fix = "be104a7"
-package = "lsr-sim"
-test_bin = "sim"
-tests = [
-    "a_staged_file_from_an_earlier_state_of_the_wal_is_not_chained_seed_0x1919f",
-]
-
-[[bug]]
 name = "delete-on-one-failed-read-upload"
 fix = "8d820b4"
 package = "lsr-core"
@@ -189,4 +175,29 @@ test_bin = "sqlite"
 tests = [
     "a_power_cut_after_a_settle_leaves_the_database_at_least_as_far_as_the_replica",
     "a_failed_wal_sync_stages_nothing_and_a_later_sync_does_not_clear_it",
+]
+
+[[bug]]
+name = "witness-trailer-compare"
+fix = "2fb603f"
+package = "lsr-core"
+tests = [
+    "a_staged_file_replaced_under_a_running_engine_is_never_uploaded",
+    "a_staged_file_replaced_after_its_witness_is_refused_and_leaves_nothing_visible",
+]
+
+[[bug]]
+name = "witness-db-page-under-a-frame"
+fix = "2b79769"
+package = "lsr-core"
+tests = [
+    "a_pending_snapshot_the_wal_cannot_prove_is_taken_again",
+]
+
+[[bug]]
+name = "witness-snapshot-short"
+fix = "2b79769"
+package = "lsr-core"
+tests = [
+    "a_pending_snapshot_short_of_the_replicas_newest_is_refused",
 ]

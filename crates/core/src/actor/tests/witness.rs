@@ -271,3 +271,55 @@ fn a_replaced_pending_snapshot_is_taken_again() {
     assert!(!replica_holds(&rig, 1, &forged));
     assert_eq!(snapshots(&rig), vec![1]);
 }
+
+/// A pending snapshot that matches the live WAL page for page but stops
+/// short of the replica's newest file in the same generation describes an
+/// earlier state: it is refused, never uploaded after a later one, and the
+/// WAL carries on from the replica's newest with nothing to replace it.
+#[test]
+fn a_pending_snapshot_short_of_the_replicas_newest_is_refused() {
+    let (mut rig, mut actor) = caught_up();
+    let all = ReadLen::new(ReadLen::MAX_RAW).unwrap();
+    let one = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(1).unwrap()));
+    let early = block_on(rig.remote.inner.read(&one, 0, all)).unwrap();
+    commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
+    commit_and_settle(&mut rig, &mut actor, 3, T0 + 1);
+    assert_eq!(staged(&rig), vec![2, 3]);
+    // The first snapshot, put back under the next transaction: whole and
+    // valid, every page what the WAL held at its end.
+    let stale = relabelled(&early, 4);
+    let key = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(4).unwrap()));
+    block_on(async {
+        let mut up = rig.staging.inner.begin_upload(&key, ts(T0)).await.unwrap();
+        up.write(&stale).await.unwrap();
+        up.commit().await.unwrap();
+    });
+    let mut actor = Actor::new(cfg());
+    let boot = rig.tick(&mut actor, T0 + 2);
+    assert_eq!(event(&boot), Some(&Event::Booted { cause: None }));
+    assert_eq!(staged(&rig), vec![2, 3]);
+    rig.commit(4);
+    let seen = rig.settle(&mut actor, T0 + 2);
+    no_stop(&seen);
+    assert!(!replica_holds(&rig, 4, &stale));
+    assert_eq!(restored(&rig), 4);
+}
+
+/// `bytes` re-encoded as the file for transaction `n`, pages and the rest of
+/// the header unchanged.
+fn relabelled(bytes: &[u8], n: u64) -> Vec<u8> {
+    let mut decoder = ReadDecoder::new(bytes);
+    let mut pages = Vec::new();
+    while let Some(event) = decoder.next_event().unwrap() {
+        if let lsr_ltx::Event::Page(page) = event {
+            pages.push((page.pgno(), page.data().to_vec()));
+        }
+    }
+    let mut fields = decoder.finish().unwrap().header().fields();
+    fields.txids = TxidRange::single(Txid::new(n).unwrap());
+    let mut encoder = Encoder::new(Vec::new(), lsr_ltx::Header::new(fields).unwrap()).unwrap();
+    for (pgno, data) in &pages {
+        encoder.write_page(*pgno, data).unwrap();
+    }
+    encoder.finish(None).unwrap().0
+}
