@@ -604,3 +604,36 @@ fn an_unreadable_wal_index_keeps_the_date_of_unstaged_frames() {
     rig.tick(&mut actor, T0 + 20);
     assert_eq!(actor.unreplicated_since(), Some(since));
 }
+
+/// Staging refuses every write: no snapshot can stand in for the frames.
+fn staging_down(rig: &Rig) {
+    for _ in 0..10_000 {
+        rig.staging
+            .inner
+            .inject_failure(StoreOp::Upload, transient(StoreOp::Upload));
+    }
+}
+
+/// The doubt baseline is for a doubt alone: a first boot owes the database's first copy, its
+/// frames are lag from the boot, and a staging disk that never takes the snapshot trips.
+#[test]
+fn a_first_copy_that_never_stages_trips() {
+    let mut rig = Rig::new();
+    rig.commit(2);
+    staging_down(&rig);
+    let mut actor = Actor::new(go_like());
+    let seen = drive(&mut rig, &mut actor, T0, T0 + BOUND + 60_000);
+    assert!(first_trip(&seen).is_some(), "{seen:?}");
+}
+
+/// Nor is it for an engine with a synced position: a commit behind an operator's snapshot
+/// request is lag, and trips when nothing can be staged.
+#[test]
+fn a_commit_behind_an_operator_snapshot_that_never_stages_trips() {
+    let (mut rig, mut actor) = caught_up();
+    actor.request_snapshot();
+    rig.commit(9);
+    staging_down(&rig);
+    let seen = drive(&mut rig, &mut actor, T0 + 10, T0 + 10 + BOUND + 60_000);
+    assert!(first_trip(&seen).is_some(), "{seen:?}");
+}
