@@ -165,7 +165,7 @@ fn j3_a_large_block_loses_the_durable_record_to_a_device_that_destroys_unchanged
     let destroys = Device::Tears {
         unchanged_safe: false,
     };
-    let failed = "Sys(Fsync, SyncFailed(Pair { s0: Some(Old), s1: Some(Torn) }))";
+    let failed = "Sys(Fsync, SyncFailed(Pair { s0: Some(Old), s1: Some(Torn) }";
     let tail = [
         "Engine(Advance)",
         "Sys(WriteSlot(S0), Ok)",
@@ -207,7 +207,7 @@ fn j5_a_failed_fdatasync_and_a_kill_leave_the_slots_more_than_one_apart() {
     let drift = [
         "Engine(Advance)",
         "Sys(WriteSlot(S1), Ok)",
-        "Sys(Fsync, SyncFailed(Pair { s0: None, s1: Some(Old) }))",
+        "Sys(Fsync, SyncFailed(Pair { s0: None, s1: Some(Old) }",
         "Kill",
         "Boot(None, Read",
         "Engine(Advance)",
@@ -237,7 +237,7 @@ fn model_a_recreate_zeroes_the_file_first() {
     let zero = ["Sys(WriteZeros, Ok)", "Sys(Fsync, Ok)"];
     let create = [
         "Sys(WriteWhole, Ok)",
-        "Sys(Fsync, SyncFailed(Pair { s0: Some(Old), s1: Some(Old) }))",
+        "Sys(Fsync, SyncFailed(Pair { s0: Some(Old), s1: Some(Old) }",
         "Kill",
         "Boot(None, Read",
         "Engine(Advance)",
@@ -276,7 +276,7 @@ fn model_a_lifetime_syncs_before_its_first_write_on_a_tearing_device() {
         "Boot(None, Read",
         "Engine(Advance)",
     ];
-    let torn = "Sys(Fsync, SyncFailed(Pair { s0: None, s1: Some(Torn) }))";
+    let torn = "Sys(Fsync, SyncFailed(Pair { s0: None, s1: Some(Torn) }";
     let synced = [
         "Sys(Fsync, Ok)",
         "Sys(WriteSlot(S1), Ok)",
@@ -288,7 +288,7 @@ fn model_a_lifetime_syncs_before_its_first_write_on_a_tearing_device() {
     assert_eq!(seq(&script, Slot::S0), Some(3));
     let unsynced = [
         "Sys(WriteSlot(S1), Ok)",
-        "Sys(Fsync, SyncFailed(Pair { s0: Some(Old), s1: Some(Torn) }))",
+        "Sys(Fsync, SyncFailed(Pair { s0: Some(Old), s1: Some(Torn) }",
         "Power",
         "Boot",
     ];
@@ -306,7 +306,7 @@ fn model_a_lifetime_claims_nothing_durable_before_it_writes() {
     let failed = [
         "Engine(Advance)",
         "Sys(WriteSlot(S0), Ok)",
-        "Sys(Fsync, SyncFailed(Pair { s0: Some(Old), s1: None }))",
+        "Sys(Fsync, SyncFailed(Pair { s0: Some(Old), s1: None }",
         "Kill",
         "Boot(None, Read",
         "Kill",
@@ -331,7 +331,7 @@ fn model_a_torn_page_cache_write_would_lose_the_acknowledged_record() {
     let history = [
         "Engine(Advance)",
         "Sys(WriteSlot(S0), Ok)",
-        "Sys(Fsync, SyncFailed(Pair { s0: Some(Old), s1: None }))",
+        "Sys(Fsync, SyncFailed(Pair { s0: Some(Old), s1: None }",
         "Kill",
         "Boot(None, Read",
         "Engine(Advance)",
@@ -370,7 +370,7 @@ fn rev1_a_record_whose_fdatasync_failed_is_read_by_the_next_process() {
     let failed = [
         "Engine(Advance)",
         "Sys(WriteSlot(S0), Ok)",
-        "Sys(Fsync, SyncFailed(Pair { s0: Some(Old), s1: None }))",
+        "Sys(Fsync, SyncFailed(Pair { s0: Some(Old), s1: None }",
         "Kill",
         "Boot(None, Read",
     ];
@@ -385,7 +385,7 @@ fn rev3_an_evicted_unsynced_record_falls_back_to_the_acknowledged_one() {
     let failed = [
         "Engine(Advance)",
         "Sys(WriteSlot(S0), Ok)",
-        "Sys(Fsync, SyncFailed(Pair { s0: Some(Old), s1: None }))",
+        "Sys(Fsync, SyncFailed(Pair { s0: Some(Old), s1: None }",
         "Kill",
         "Evict",
         "Boot(None, Read",

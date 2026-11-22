@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/journal.rs b/crates/core/src/journal.rs
+index c6da180..af0dc55 100644
+--- a/crates/core/src/journal.rs
++++ b/crates/core/src/journal.rs
+@@ -193,7 +193,7 @@ impl<F: JournalFile> JournalWriter<F> {
+             self.created = true;
+             self.synced = true;
+         }
+-        if !self.synced {
++        if false && !self.synced {
+             self.file.sync().map_err(io)?;
+             self.synced = true;
+         }

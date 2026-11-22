@@ -1,12 +1,14 @@
 # The engine journal: storage contract
 
-Status: the storage protocol is specified and machine-checked; nothing in the engine reads or
-writes the journal yet. This document is the contract the implementation is built against. Its
-source is the fifth revision of the design and its five reviews (on the `claude/analysis-notes`
-branch, `docs/notes/2026-11-22/journal/`), amended where the exhaustive model found the prose
-wrong. It covers how four facts are stored and read back. What the engine does with them (the
-floor at boot, the pending proof's bindings, the snapshot budget) is the design's business and,
-for the budget, the scheduling note's; neither is restated here.
+Status: the storage protocol is specified, machine-checked, and implemented, and nothing in the
+engine uses it yet. The record and its codec are `lsr-journal`; the writer is
+`lsr_core::JournalWriter`, run step for step against the model by
+`crates/core/tests/core/journal_model.rs`. This document is the contract both are built against.
+Its source is the fifth revision of the design and its five reviews (on the
+`claude/analysis-notes` branch, `docs/notes/2026-11-22/journal/`), amended where the exhaustive
+model found the prose wrong. It covers how four facts are stored and read back. What the engine
+does with them (the floor at boot, the pending proof's bindings, the snapshot budget) is the
+design's business and, for the budget, the scheduling note's; neither is restated here.
 
 The model is `lsr_spec::journal` (`crates/spec/src/journal/`). It shares no code with the
 implementation. Its tests are `crates/spec/tests/spec/journal.rs` (exhaustive walks and plants)
@@ -123,6 +125,16 @@ four engine writes, two crashes, two failures, an eviction, a destination change
 binary's record and a full disk (100 000 to 400 000 states each, under a second). The deep walk
 (`just journal-model`) adds a write, a crash and media faults to every configuration: 7.5 to 12.2
 million states each, about five minutes in all.
+
+## The implementation against the model
+
+The differential test walks every state of the model within a budget (the block law at each
+block size, the tearing device, unreadable sectors) and keeps the real writer beside it, over a
+byte-level file that applies the model's outcome for every system call in bytes. Each write is
+replayed with the model's outcomes scripted; the writer must make the same calls in the same
+order, and the file (read as records), the writer's position and every boot's verdict must equal
+the model's. Thirteen planted bugs in `docs/planted-bugs.toml` (`journal-*`) put back each rule of
+the writer, the codec and the model, and the named tests must fail.
 
 ## Plants
 

@@ -1,0 +1,14 @@
+diff --git a/crates/core/src/journal.rs b/crates/core/src/journal.rs
+index c6da180..25ae3a7 100644
+--- a/crates/core/src/journal.rs
++++ b/crates/core/src/journal.rs
+@@ -131,7 +131,8 @@ impl<F: JournalFile> JournalWriter<F> {
+             read.as_ref()
+                 .and_then(|r| r.as_ref().ok().copied().flatten())
+         };
+-        let (b0, b1) = (view(&s0), view(&s1));
++        let failed = matches!(s0, Some(Err(_))) || matches!(s1, Some(Err(_)));
++        let (b0, b1) = if failed { (None, None) } else { (view(&s0), view(&s1)) };
+         let slot = |read: &Option<Result<Option<[u8; SLOT]>, ErrorKind>>, bytes| match (read, bytes)
+         {
+             (_, Some(bytes)) => SlotRead::Bytes(bytes),
