@@ -1,0 +1,15 @@
+diff --git a/crates/core/src/upload.rs b/crates/core/src/upload.rs
+index 6770efa..8760a5c 100644
+--- a/crates/core/src/upload.rs
++++ b/crates/core/src/upload.rs
+@@ -513,8 +513,8 @@ pub(crate) async fn sweep_staged<L: ObjectStore>(
+     confirmed: Option<Txid>,
+     suspect: Option<FileKey>,
+ ) -> Result<Swept, Fault> {
+-    let mut pages = StagedPages::from(confirmed);
+-    while let Some(page) = pages.next(staging).await? {
++    let all = staged_from(staging, confirmed, usize::MAX).await?;
++    for page in [all] {
+         for info in page {
+             if !staged_verifies(staging, &info.key).await? {
+                 if suspect != Some(info.key) {
