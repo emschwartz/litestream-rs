@@ -85,6 +85,9 @@ fn the_guard_catches_planted_examples() {
     assert!(!flagged("let tid = 7; // a transaction id"));
 }
 
+/// Fewer tracked files than this means the listing is not the repository.
+const MIN_SCANNED: usize = 1000;
+
 #[test]
 fn no_tracked_file_holds_a_credential() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -95,6 +98,7 @@ fn no_tracked_file_holds_a_credential() {
         .unwrap();
     assert!(listing.status.success(), "git ls-files failed");
     let mut offenders = Vec::new();
+    let mut scanned = 0;
     for name in String::from_utf8_lossy(&listing.stdout).split('\0') {
         if name.is_empty() {
             continue;
@@ -103,10 +107,16 @@ fn no_tracked_file_holds_a_credential() {
         let Ok(bytes) = fs::read(root.join(name)) else {
             continue;
         };
+        scanned += 1;
         if flagged(&String::from_utf8_lossy(&bytes)) {
             offenders.push(name.to_owned());
         }
     }
+    // 2,400 today: a listing that came back empty or a root that moved scans nothing.
+    assert!(
+        scanned >= MIN_SCANNED,
+        "scanned only {scanned} tracked files"
+    );
     assert!(
         offenders.is_empty(),
         "credential-shaped text in: {offenders:?}"

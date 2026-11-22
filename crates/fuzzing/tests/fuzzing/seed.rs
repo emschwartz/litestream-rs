@@ -46,6 +46,10 @@ fn ltx_files() -> Vec<PathBuf> {
         path.extension().is_some_and(|ext| ext == "ltx")
             && fs::metadata(path).is_ok_and(|meta| meta.len() <= MAX_SEED)
     });
+    assert!(
+        !all.is_empty(),
+        "no LTX fixture files to seed the corpus from"
+    );
     all
 }
 
