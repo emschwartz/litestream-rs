@@ -132,6 +132,14 @@ pub enum Violation {
         /// The first page that differs, or one past the shorter database.
         first_diff: u32,
     },
+    /// The engine deleted a replica object as rotten whose stored bytes are
+    /// sound, after fewer than two reads that returned other bytes: one bad
+    /// read is evidence about the read, not the object.
+    #[error("{key} was deleted as rotten on one bad read of sound bytes")]
+    DeletedOnOneRead {
+        /// The object.
+        key: String,
+    },
     /// A restore the replica should answer was refused.
     #[error("restoring {target:?} was refused: {outcome:?}")]
     RestoreRefused {

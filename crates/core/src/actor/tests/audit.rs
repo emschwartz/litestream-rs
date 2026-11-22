@@ -167,6 +167,23 @@ fn a_rotten_newest_file_nothing_else_covers_stops_and_stays() {
     );
 }
 
+/// One read of a sound snapshot returns a flipped byte. A read that fails
+/// verification is evidence about the read, not the object: nothing is
+/// deleted, and the next maintenance tick reads it again and finds it sound.
+#[test]
+fn one_bad_read_of_a_sound_snapshot_deletes_nothing() {
+    let mut rig = replica();
+    let before = upper(&rig);
+    let snapshot = *Rig::files(&rig.remote, Level::SNAPSHOT).last().unwrap();
+    rig.remote.flip_next_read(snapshot.key);
+    let mut actor = Actor::new(cfg());
+    let seen = rig.follow(&mut actor, T0 + 60_000, 50);
+    no_stop(&seen);
+    assert!(repaired(&seen).is_empty(), "{seen:?}");
+    assert!(!rig.remote.deleted().contains(&snapshot.key));
+    assert!(upper(&rig).contains(&snapshot), "{before:?}");
+}
+
 #[test]
 fn a_failed_read_back_retries_and_deletes_nothing() {
     let mut rig = replica();

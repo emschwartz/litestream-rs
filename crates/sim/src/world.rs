@@ -849,8 +849,17 @@ impl World {
     /// The first [`Violation`].
     pub fn check(&self, retention: Option<Windows>) -> Result<Checked, Violation> {
         let mut exempt = self.remote_faults.rejected();
-        exempt.extend(&self.repaired);
         let damaged = self.remote_faults.damaged();
+        let flipped = self.remote_faults.flipped();
+        for key in &self.repaired {
+            let bad_reads = flipped.iter().filter(|seen| *seen == key).count();
+            if !damaged.contains(key) && bad_reads < 2 {
+                return Err(Violation::DeletedOnOneRead {
+                    key: key.to_string(),
+                });
+            }
+        }
+        exempt.extend(&self.repaired);
         let ground = Ground {
             staging: Some(&self.staging_recorder),
             retention,
