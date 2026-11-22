@@ -245,6 +245,14 @@ pub enum Violation {
         /// The first rule of the boot WAL's range it broke.
         why: String,
     },
+    /// A level-0 file was staged from WAL frames a power loss would take back: the engine's
+    /// sync of the WAL before staging failed, was skipped, or covered frames an earlier failed
+    /// sync lost.
+    #[error("{key} was staged from WAL frames that are not durable")]
+    StagedNotDurable {
+        /// The file.
+        key: String,
+    },
     /// The engine reported its own bug, or the oracle could not decide.
     #[error("bug fault: {context}")]
     BugFault {

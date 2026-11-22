@@ -534,6 +534,37 @@ impl Runner {
         Ok(())
     }
 
+    /// Every level-0 file this tick staged from the WAL holds frames that are durable: the
+    /// engine's sync before staging, which a disk only fails to honour when it lies (that
+    /// scenario says so) or after an earlier failed sync of the same generation.
+    fn judge_staged_durable(&self) -> Result<(), Violation> {
+        let events = self.w.staging_recorder.events();
+        for event in events.iter().skip(self.staging_seen) {
+            if let crate::RecorderEvent::Put {
+                key,
+                header: Some(_),
+                origin: Some(origin),
+                ..
+            } = event
+                && origin.size() > 0
+                && key.level().get() == 0
+            {
+                let (salt1, salt2) = origin.salts();
+                let end = origin.offset().saturating_add(origin.size());
+                if !self
+                    .w
+                    .sqlite
+                    .wal_range_durable(Salts { salt1, salt2 }, origin.offset(), end)
+                {
+                    return Err(Violation::StagedNotDurable {
+                        key: key.to_string(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn note_tick(&mut self, began: Timestamp, remote0: crate::store::RecorderCounts) {
         if !self.record {
             return;
@@ -568,6 +599,7 @@ impl Runner {
             self.life.boot_commits = commits;
         }
         self.judge_puts()?;
+        self.judge_staged_durable()?;
         self.report.ticks = self.report.ticks.saturating_add(1);
         let in_tick = self.took_commit_in_tick();
         self.note_snapshots(newest_commit, in_tick, at);

@@ -237,6 +237,30 @@ impl Faults {
     }
 }
 
+/// What a failed sync of the WAL left unwritable ([`State::lost_writeback`]).
+#[derive(Debug)]
+struct LostWriteback {
+    salts: Salts,
+    durable: Vec<u8>,
+    wal: Vec<u8>,
+}
+
+impl LostWriteback {
+    /// Puts back, in `durable`, every byte the failed sync covered and did not write.
+    fn keep_lost(&self, durable: &mut [u8]) {
+        let dirty = self
+            .wal
+            .iter()
+            .enumerate()
+            .filter(|(at, byte)| self.durable.get(*at) != Some(*byte));
+        for (at, _) in dirty {
+            if let Some(byte) = durable.get_mut(at) {
+                *byte = self.durable.get(at).copied().unwrap_or(0);
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 struct State {
     page_size: PageSize,
@@ -246,6 +270,10 @@ struct State {
     durable: Vec<u8>,
     // Our sync of the WAL returns success and makes nothing durable: a disk that lies.
     our_sync_lies: bool,
+    // Our sync of the WAL failed: the durable bytes and the WAL as they were then, in that
+    // generation. The kernel called the pages the failure covered clean, so no later sync
+    // writes them (Linux's "fsyncgate"): until the generation ends they stay as they were.
+    lost_writeback: Option<LostWriteback>,
     present: bool,
     unlinked: bool,
     index: Index,
@@ -601,9 +629,22 @@ impl State {
         newest
     }
 
+    /// A sync of the WAL that succeeds: every byte durable, but those a failed sync of this
+    /// generation lost.
+    fn sync_wal(&mut self) {
+        self.durable.clone_from(&self.wal);
+        if let Some(lost) = self
+            .lost_writeback
+            .as_ref()
+            .filter(|lost| lost.salts == self.index.salts)
+        {
+            lost.keep_lost(&mut self.durable);
+        }
+    }
+
     /// Copies into the database file the pages whose newest frame is in `(backfilled, upto]`.
     fn copy_frames(&mut self, upto: u32) {
-        self.durable.clone_from(&self.wal);
+        self.sync_wal();
         // SQLite walks every page's newest frame in the whole WAL and skips the ones past the
         // safe frame, so a page rewritten above it is not copied at all (its older version stays
         // out of the database file).
@@ -1054,6 +1095,7 @@ impl SimSqlite {
             faults: Faults::default(),
             app_autocheckpoint: None,
             our_sync_lies: false,
+            lost_writeback: None,
             app_auto: AutoTally::default(),
             in_tick: None,
             in_tick_done: None,
@@ -1559,6 +1601,21 @@ impl SimSqlite {
         self.with(|state| state.page_size)
     }
 
+    /// Whether the WAL bytes `[start, end)` of generation `salts` would survive a power loss
+    /// now: true too when the WAL is in another generation (those frames are no longer
+    /// SQLite's), or when the disk lies about our sync (that lie is the scenario's point).
+    #[must_use]
+    pub fn wal_range_durable(&self, salts: Salts, start: u64, end: u64) -> bool {
+        self.with(|state| {
+            if state.our_sync_lies || state.index.salts != salts {
+                return true;
+            }
+            let range = byte_pos(start)..byte_pos(end);
+            state.wal.get(range.clone()).is_some()
+                && state.wal.get(range.clone()) == state.durable.get(range)
+        })
+    }
+
     /// Whether a power loss now would keep the whole WAL: the last fsync came
     /// after the last frame. A checkpoint that copied nothing does not fsync.
     #[must_use]
@@ -1679,13 +1736,21 @@ impl WalSource for SimSource {
 
     fn sync(&mut self) -> Result<(), SourceError> {
         let mut state = lock(&self.state);
-        state.faults.take(SourceOp::Sync)?;
+        if let Err(err) = state.faults.take(SourceOp::Sync) {
+            if err == SourceError::FsyncFailed && state.lost_writeback.is_none() {
+                state.lost_writeback = Some(LostWriteback {
+                    salts: state.index.salts,
+                    durable: state.durable.clone(),
+                    wal: state.wal.clone(),
+                });
+            }
+            return Err(err);
+        }
         if state.unlinked {
             return Err(SourceError::Unlinked);
         }
-        let state = &mut *state;
         if !state.our_sync_lies {
-            state.durable.clone_from(&state.wal);
+            state.sync_wal();
         }
         Ok(())
     }

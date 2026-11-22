@@ -64,6 +64,7 @@
 
 mod parts;
 mod state;
+mod unproven;
 
 use std::num::NonZeroU32;
 use std::time::Duration;
@@ -587,6 +588,7 @@ impl Actor {
 
     /// Routes a fault by its policy. The only place `policy` is called.
     fn fault(&mut self, waiter: impl Into<Waiter>, fault: Fault, now: Timestamp) -> Tick {
+        self.sync_failed(fault);
         match policy(&fault) {
             Policy::Retry(backoff) => {
                 let until = self.wait(waiter.into(), backoff, now);
@@ -983,6 +985,9 @@ impl Actor {
         if quiet && !wants_proof {
             return None;
         }
+        if self.owes_truncate() && !may_checkpoint {
+            return Some(self.owed_in_drain(now));
+        }
         let stepped = self.step(env, now).await;
         let (files, proof) = match self.stepped(stepped, now) {
             Ok(synced) => synced,
@@ -1052,6 +1057,9 @@ impl Actor {
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
     ) -> Result<Stepped, Fault> {
+        if self.owes_truncate() {
+            return self.unprove(env);
+        }
         let (mut reader, committed) = match self.open_wal(env)? {
             Ok(opened) => opened,
             Err(verdict) => return Ok(verdict),
@@ -1078,7 +1086,9 @@ impl Actor {
         )
         .await
         .map_err(|failed| failed.fault)?;
-        Ok(self.absorb(synced, committed.end(), &*env.wal, now))
+        let stepped = self.absorb(synced, committed.end(), &*env.wal, now);
+        self.proven();
+        Ok(stepped)
     }
 
     fn plan_step<W: WalSource>(

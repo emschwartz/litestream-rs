@@ -547,7 +547,8 @@ pub(crate) async fn stage<R: Read + Seek, P: PageSource, L: ObjectStore>(
 /// counts. The read is an argument so the order is the caller's to show.
 ///
 /// # Errors
-/// [`Fault::LocalFsyncFailed`] when the sync failed; the step stages nothing.
+/// [`Fault::WalSyncFailed`] when the sync failed; the step stages nothing, and no later sync
+/// of that WAL generation is trusted (`actor::unproven`).
 pub(crate) fn wal_barrier<W: WalSource>(wal: &mut W, _after: &CommittedRead) -> Result<(), Fault> {
     wal.sync().map_err(Fault::from_source)
 }

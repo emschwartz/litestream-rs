@@ -175,6 +175,19 @@ fn every_scenario_is_tested_here() {
 }
 
 #[test]
+fn wal_fsync_fails() {
+    run(scenario::wal_fsync_fails);
+}
+
+/// A restart between a failed WAL sync and the TRUNCATE that pays for it forgets the debt:
+/// the new process stages frames the failed sync covered (`StagedNotDurable`).
+#[test]
+#[ignore = "needs a durable engine-owned record of the failed WAL sync: waits on the engine journal decision"]
+fn wal_fsync_fails_then_restart() {
+    run(scenario::wal_fsync_fails_then_restart);
+}
+
+#[test]
 fn vacuum_page_size_change() {
     run(scenario::vacuum_page_size_change);
 }

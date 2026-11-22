@@ -621,6 +621,7 @@ fn responses(settings: ResponseSettings) -> Responses {
         wal_corrupt: one(settings.wal_corrupt, base.wal_corrupt),
         wal_truncated: one(settings.wal_truncated, base.wal_truncated),
         wal_unlinked: one(settings.wal_unlinked, base.wal_unlinked),
+        wal_sync_failed: one(settings.wal_sync_failed, base.wal_sync_failed),
         page_size_changed: one(settings.page_size_changed, base.page_size_changed),
         database_page_mismatch: base.database_page_mismatch,
         bug: one(settings.bug, base.bug),
