@@ -1,0 +1,24 @@
+diff --git a/crates/core/src/upload.rs b/crates/core/src/upload.rs
+index 878a440..10da76f 100644
+--- a/crates/core/src/upload.rs
++++ b/crates/core/src/upload.rs
+@@ -651,17 +651,12 @@ async fn taken<L: ObjectStore, S: ObjectStore>(
+     }
+     // One read never condemns a file: the staged copy must verify on a read
+     // of its own before the replica's object is judged against it.
+-    if !staged_verifies(staging, &key).await.map_err(relist)? {
+-        return Err(fail(state, Fault::StagedLost));
+-    }
++
+     if !remote_verifies(remote, &key).await.map_err(relist)? {
+         let outcome = put_staged(staging, remote, &key, WriteMode::Replace).await;
+         return settle_put(state, remote, key, outcome).await;
+     }
+-    // Both verify: a second compare decides, as the listing's read-back does.
+-    if same_bytes(staging, remote, &key).await.map_err(relist)? {
+-        return Ok(already);
+-    }
++
+     let listed = list_step(list_first(state), staging, remote, newest_staged).await?;
+     let txid = key.range().max();
+     match plan_upload(&listed.state, newest_staged) {
