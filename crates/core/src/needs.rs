@@ -21,6 +21,8 @@ pub const SKIP_VAR: &str = "LSR_SKIP";
 pub enum Resource {
     /// A MinIO server (`just minio-up`).
     Minio,
+    /// A Toxiproxy server in front of MinIO (`scripts/toxiproxy.sh`).
+    Toxiproxy,
     /// The pinned Go builds (`scripts/build-go-litestream.sh`).
     GoBuilds,
     /// The Tigris bucket and its credentials (`scripts/tigris.sh`).
@@ -33,8 +35,9 @@ pub enum Resource {
 
 impl Resource {
     /// Every resource, for the parser of [`SKIP_VAR`].
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Minio,
+        Self::Toxiproxy,
         Self::GoBuilds,
         Self::Tigris,
         Self::CCompiler,
@@ -46,6 +49,7 @@ impl Resource {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Minio => "minio",
+            Self::Toxiproxy => "toxiproxy",
             Self::GoBuilds => "go",
             Self::Tigris => "tigris",
             Self::CCompiler => "cc",
@@ -57,6 +61,7 @@ impl Resource {
     const fn how(self) -> &'static str {
         match self {
             Self::Minio => "start MinIO and run through `just test-s3` or `just compat-s3`",
+            Self::Toxiproxy => "run through `just test-s3`, which starts Toxiproxy before MinIO",
             Self::GoBuilds => "build the Go binaries with `just compat`",
             Self::Tigris => {
                 "run through `just test-tigris` or `just tigris-restore` with credentials"
@@ -178,6 +183,23 @@ pub fn minio() -> Option<Minio> {
             secret: env_text("LSR_MINIO_SECRET_KEY")
                 .unwrap_or_else(|| "lsrtest-throwaway-0000".into()),
         })
+    })
+}
+
+/// A Toxiproxy server's HTTP API (`scripts/toxiproxy.sh`).
+#[derive(Clone, Debug)]
+pub struct Toxiproxy {
+    /// `http://127.0.0.1:8474`.
+    pub api: String,
+}
+
+/// The Toxiproxy whose API `LSR_TOXIPROXY_API` names, once it accepts a connection; see
+/// [`need`].
+pub fn toxiproxy() -> Option<Toxiproxy> {
+    need(Resource::Toxiproxy, || {
+        let api = env_text("LSR_TOXIPROXY_API").ok_or("LSR_TOXIPROXY_API is unset")?;
+        reachable(&api)?;
+        Ok(Toxiproxy { api })
     })
 }
 

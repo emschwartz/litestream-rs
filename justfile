@@ -206,11 +206,20 @@ minio-up:
 minio-down:
     ./scripts/minio.sh down
 
+# Toxiproxy on loopback, between the engine and MinIO in the network-fault tests.
+toxiproxy-up:
+    ./scripts/toxiproxy.sh up
+
+toxiproxy-down:
+    ./scripts/toxiproxy.sh down
+
 # The S3 store against a real server; not part of check, which never needs Docker (these tests are
 # #[ignore]d there). Without MinIO the tests fail, so a green run means they ran against it. The
 # one opt-out is LSR_SKIP=minio (`LSR_SKIP=minio just test-s3` runs nothing and says so); under
-# CI, which GitHub marks with the CI variable, any LSR_SKIP is itself a failure.
-test-s3: minio-up
+# CI, which GitHub marks with the CI variable, any LSR_SKIP is itself a failure. The history
+# judge's network tests also need Toxiproxy in front of MinIO (scripts/toxiproxy.sh builds the
+# pinned server with Go once and starts it on loopback); LSR_SKIP=toxiproxy opts out of those.
+test-s3: minio-up toxiproxy-up
     #!/usr/bin/env bash
     set -euo pipefail
     case ",${LSR_SKIP:-}," in
@@ -228,7 +237,8 @@ test-s3: minio-up
     LSR_S3_TRANSPORT=reqwest \
         cargo nextest run -p lsr-store-s3 --features reqwest --test store-s3 -E 'test(/^minio::/)' --run-ignored all --locked --no-fail-fast
     cargo nextest run -p lsr-cli --test cli -E 'test(/^s3::/)' --run-ignored all --locked --no-fail-fast
-    cargo nextest run -p lsr-history --test history -E 'test(/^replicator::/)' --run-ignored all --locked --no-fail-fast
+    eval "$(./scripts/toxiproxy.sh env)"
+    cargo nextest run -p lsr-history --test history -E 'test(/^replicator::/) | test(/^network::/)' --run-ignored all --locked --no-fail-fast
 
 # Each restores what the other wrote at Latest, a txid and an instant, and they hand one prefix
 # over both ways, over the pinned builds (crates/compat/tests/compat/s3.rs). Needs Docker; fails, never
