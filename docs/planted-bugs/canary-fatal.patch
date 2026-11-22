@@ -1,0 +1,13 @@
+diff --git a/crates/ltx/src/checksum.rs b/crates/ltx/src/checksum.rs
+index 3341aef..339d065 100644
+--- a/crates/ltx/src/checksum.rs
++++ b/crates/ltx/src/checksum.rs
+@@ -41,7 +41,7 @@
+ 
+ use std::fmt;
+ 
+-use crc::{CRC_64_GO_ISO, Crc, Digest, Table};
++use crc::{CRC_64_ECMA_182 as CRC_64_GO_ISO, Crc, Digest, Table};
+ 
+ use crate::PageNo;
+ 

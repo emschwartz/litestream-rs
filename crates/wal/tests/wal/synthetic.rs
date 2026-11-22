@@ -984,3 +984,26 @@ fn builder_transactions_scan_as_committed() {
     let frame_start = 32 + 24;
     assert_eq!(&bytes[frame_start..frame_start + PSU], page(7, pg(1), ps));
 }
+
+/// A wal-index reset ahead of the header (SQLite reset it and the next commit
+/// writes the header; a recovery of a header-only WAL leaves its salts at 0)
+/// counts no frame, in any generation. Resuming at the header's first frame
+/// claims no frame either, so it is not a restart: the cursor starts there.
+/// Refusing it made every boot from a file with an empty WAL range snapshot
+/// again as LastPageMismatch (`a_snapshot_id_taken_again_after_a_lost_staged_snapshot`).
+#[test]
+fn resume_at_the_first_frame_under_an_index_reset_ahead_starts_there() {
+    let mut reader = open(&two_txs().bytes);
+    let reset = CommittedEnd::new(0, salts((0, 0)), size(PS));
+    let start = WalOffset::start(size(PS));
+    let cursor = reader.resume(start, salts(SALTS), reset).unwrap();
+    assert_eq!(cursor.next(), start);
+    let err = reader
+        .resume(
+            WalOffset::from_frame_index(1, size(PS)),
+            salts(SALTS),
+            reset,
+        )
+        .unwrap_err();
+    assert!(matches!(err, ResumeError::Restarted { .. }), "{err}");
+}

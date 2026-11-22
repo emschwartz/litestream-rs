@@ -1,0 +1,13 @@
+diff --git a/crates/history/src/judge.rs b/crates/history/src/judge.rs
+index eff0fa5..8f97cbb 100644
+--- a/crates/history/src/judge.rs
++++ b/crates/history/src/judge.rs
+@@ -256,7 +256,7 @@ impl Judge {
+     fn reported_since(&self, index: usize) -> bool {
+         match self.signals {
+             Signals::Ignored => true,
+-            Signals::Required => self.reported.iter().any(|seen| *seen > index),
++            Signals::Required => true,
+         }
+     }
+ 

@@ -137,3 +137,32 @@ fn a_rolled_back_bucket_never_gets_a_transaction_id_reused_across_a_restart_seed
         put.push((key, size));
     }
 }
+
+/// Seed 0xb6b of the unaided campaign, found once the oracle stopped switching its id check off
+/// after a power loss: transaction 18 is uploaded and drained (164 bytes), then, with the store's
+/// reads lying (`Hold::LyingReads`) and an old staging backup put back, the engine snapshots the
+/// database as transaction 18 again and puts the same level-0 key with other bytes (266) holding
+/// another commit. The replica's object is overwritten: the class of BOOT-18 and BOOT-19
+/// (docs/BEHAVIOR.md), which conditional level-0 writes (#96) are meant to close. Run under the
+/// seed's own mix; the digest guards its operations.
+#[test]
+#[ignore = "known wrong: an id the replica holds is taken again (BOOT-18/19); pending conditional \
+            level-0 writes (#96)"]
+fn an_id_the_replica_holds_is_not_taken_again_after_a_lying_read_seed_0xb6b() {
+    use lsr_sim::{Seed, Weights, history, run as run_drawn};
+    let seed = Seed::new(0xb6b);
+    let weights = Weights::mixed(seed);
+    let ops = history(seed, 300, &weights);
+    let digest = format!("{ops:?} {weights:?}")
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+        });
+    assert_eq!(
+        digest, 0xbfbf_4dc3_341e_2a95,
+        "the live generator changed seed 0xb6b's run"
+    );
+    if let Err(failure) = run_drawn(seed, 300, &weights) {
+        panic!("{failure}");
+    }
+}

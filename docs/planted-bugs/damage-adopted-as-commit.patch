@@ -1,0 +1,13 @@
+diff --git a/crates/sim/src/history.rs b/crates/sim/src/history.rs
+index 8a8dc04..fe4b2e1 100644
+--- a/crates/sim/src/history.rs
++++ b/crates/sim/src/history.rs
+@@ -158,7 +158,7 @@ impl History {
+     /// committed frame), not a commit: the model must follow the database to go on, but a
+     /// restore that gives this state is a failure, not a node of the history.
+     pub fn adopted_corruption(&mut self, model: &Model) {
+-        self.corrupt.insert(image_digest(&model.newest_image()));
++        let _ = model;
+     }
+ 
+     /// The engine reported a loss of history: a snapshot cause that says so, or a stop on a

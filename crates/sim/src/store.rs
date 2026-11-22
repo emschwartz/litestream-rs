@@ -1121,7 +1121,14 @@ impl<S: ObjectStore> Upload for TapUpload<S> {
 struct StageState {
     volatile: BTreeSet<FileKey>,
     resolved: BTreeMap<FileKey, Timestamp>,
+    // Unlinks since the directory's last sync, with what each entry durably held then.
+    unlinked: BTreeMap<FileKey, Durable>,
+    // Whether a power loss may put an unsynced entry back: the block law's directory rule.
+    entries_revert: bool,
 }
+
+/// What a directory entry durably held: a file's bytes and created-at time, or no file.
+type Durable = Option<(Vec<u8>, Timestamp)>;
 
 /// What a power loss did to one volatile staged file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1133,6 +1140,9 @@ pub enum Lost {
         /// The bytes that survive, fewer than the file had.
         kept: u64,
     },
+    /// The file was unlinked and the directory never synced after: the unlink is undone and
+    /// the file is back as it durably was.
+    Restored,
 }
 
 /// The side of a [`Volatile`] the simulator keeps: which keys are volatile, and the
@@ -1151,9 +1161,25 @@ impl VolatileHandle {
         lock(&self.state).volatile.insert(key);
     }
 
-    /// A directory sync: every earlier rename is now durable.
+    /// A directory sync: every earlier rename and unlink is now durable.
     pub fn fsync_all(&self) {
-        lock(&self.state).volatile.clear();
+        let mut state = lock(&self.state);
+        state.volatile.clear();
+        state.unlinked.clear();
+    }
+
+    /// From now on a power loss undoes each unlink the directory has not synced since, or
+    /// keeps it, on a coin: the directory-entry rule of [`crate::crash_law::CrashLaw::Blocks`],
+    /// as the real-SQLite fault VFS applies it. Without this, unlinks stay done, as under
+    /// [`crate::crash_law::CrashLaw::AllOrNothing`].
+    pub fn revert_unsynced_entries(&self) {
+        lock(&self.state).entries_revert = true;
+    }
+
+    /// Unlinks since the directory's last sync.
+    #[must_use]
+    pub fn unsynced_unlinks(&self) -> Vec<FileKey> {
+        lock(&self.state).unlinked.keys().copied().collect()
     }
 
     /// The keys a power loss would hit now.
@@ -1200,9 +1226,48 @@ impl VolatileHandle {
                 lost.push((key, Lost::Dropped));
             }
         }
+        lost.extend(self.undo_unlinks(raw, entropy).await?);
         self.fsync_all();
         Ok(lost)
     }
+
+    /// Under the block law, each unsynced unlink is undone or kept on a coin; drawn after
+    /// every volatile key, so a run without unlinks draws as before.
+    async fn undo_unlinks<S: ObjectStore>(
+        &self,
+        raw: &S,
+        entropy: &dyn Entropy,
+    ) -> Result<Vec<(FileKey, Lost)>, StoreError> {
+        let (revert, unlinked) = {
+            let mut state = lock(&self.state);
+            (state.entries_revert, std::mem::take(&mut state.unlinked))
+        };
+        let mut lost = Vec::new();
+        for (key, durable) in unlinked.into_iter().filter(|_| revert) {
+            if entropy.below(2) == 0 {
+                continue;
+            }
+            let Some((bytes, created_at)) = durable else {
+                continue;
+            };
+            let mut up = raw.begin_upload(&key, created_at).await?;
+            up.write(&bytes).await?;
+            up.commit().await?;
+            lost.push((key, Lost::Restored));
+        }
+        Ok(lost)
+    }
+}
+
+/// What `key`'s directory entry holds in `store` now, read before an unlink: its bytes and
+/// created-at time, or nothing when there is no such file.
+async fn entry_of<S: ObjectStore>(store: &S, key: &FileKey) -> Result<Durable, StoreError> {
+    let listing = store.list(key.level(), None, PageLimit::MAX).await?;
+    let Some(info) = listing.files.iter().find(|f| f.key == *key) else {
+        return Ok(None);
+    };
+    let created_at = store.created_at(info).await?.at();
+    Ok(Some((read_all(store, key).await?, created_at)))
 }
 
 async fn read_all<S: ObjectStore>(store: &S, key: &FileKey) -> Result<Vec<u8>, StoreError> {
@@ -1227,11 +1292,15 @@ async fn read_all<S: ObjectStore>(store: &S, key: &FileKey) -> Result<Vec<u8>, S
 /// failed": the key is visible and volatile. [`Faults`] reports such a commit
 /// through [`Faults::volatile_on_late_error`], because the wrapper that fails a
 /// commit sits above this one and this one saw it succeed. A later successful
-/// commit is a directory sync and makes every earlier rename durable.
+/// commit is a directory sync and makes every earlier rename durable. So is a
+/// successful delete, as the directory store syncs each directory it deleted
+/// from; [`Volatile::unsynced_deletes`] models a store that does not, whose
+/// unlinks a power loss may undo.
 #[derive(Clone, Debug)]
 pub struct Volatile<S> {
     inner: S,
     handle: VolatileHandle,
+    sync_after_delete: bool,
 }
 
 impl<S> Volatile<S> {
@@ -1241,7 +1310,16 @@ impl<S> Volatile<S> {
         Self {
             inner,
             handle: VolatileHandle::default(),
+            sync_after_delete: true,
         }
+    }
+
+    /// The same store, deleting without syncing the directory after: an unlink
+    /// stays undoable until a later commit syncs it.
+    #[must_use]
+    pub const fn unsynced_deletes(mut self) -> Self {
+        self.sync_after_delete = false;
+        self
     }
 
     /// The handle; clones share state.
@@ -1292,12 +1370,40 @@ impl<S: ObjectStore> ObjectStore for Volatile<S> {
         })
     }
 
+    /// An unlink, then a directory sync, as the directory store does; with
+    /// [`Volatile::unsynced_deletes`], no sync: until the next commit syncs the directory, a
+    /// power loss may undo the unlink ([`VolatileHandle::revert_unsynced_entries`]). A key
+    /// whose own rename was never synced durably held nothing.
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
+        let mut before = Vec::new();
+        for key in keys.iter().filter(|_| !self.sync_after_delete) {
+            let (seen, volatile) = {
+                let state = lock(&self.handle.state);
+                (
+                    state.unlinked.contains_key(key),
+                    state.volatile.contains(key),
+                )
+            };
+            if !seen {
+                let durable = if volatile {
+                    None
+                } else {
+                    entry_of(&self.inner, key).await?
+                };
+                before.push((*key, durable));
+            }
+        }
         self.inner.delete(keys).await?;
-        let mut state = lock(&self.handle.state);
-        for key in keys {
-            state.volatile.remove(key);
-            state.resolved.remove(key);
+        {
+            let mut state = lock(&self.handle.state);
+            state.unlinked.extend(before);
+            for key in keys {
+                state.volatile.remove(key);
+                state.resolved.remove(key);
+            }
+        }
+        if self.sync_after_delete {
+            self.handle.fsync_all();
         }
         Ok(())
     }
