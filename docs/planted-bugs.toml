@@ -761,6 +761,12 @@ package = "lsr-store-fs"
 tests = ["a_crash_after_a_delete_never_brings_the_file_back"]
 
 [[bug]]
+name = "restore-counts-a-writer-as-lag"
+fix = "c497e9e"
+package = "lsr-core"
+tests = ["restore::tests::a_restore_racing_a_writer_follows_it_and_never_calls_the_listing_behind"]
+
+[[bug]]
 name = "kms-codes-by-status"
 fix = "f2cec2f"
 package = "lsr-store-s3"

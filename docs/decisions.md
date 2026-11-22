@@ -41,6 +41,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D31 | Must a PR re-merge main and re-run CI before it lands? | No while churn is high: merge on the PR's own green; main's CI integrates; fix forward | owner | 2026-11-22 | decided |
 | D32 | How is an unusable KMS key reported? | As a permission refusal, `permission_denied` | Claude, **delegated** | 2026-11-22 | open to owner review |
 | D33 | Narrow the Go drop-in surface to shrink unverified code? | No: full drop-in; bring config, CLI and sidecar under behaviour rows and Go differentials | owner | 2026-11-22 | decided |
+| D34 | A restore of the latest state that a writer keeps outpacing: fail or answer? | Answer the last listing, flagged | parent session (#126) | 2026-11-22 | open to owner review |
 | D35 | When may the simulator accept a task still stalled at the end of a run? | Only while the world still imposes the stall's fault; the excuse table is empty today | Claude (stall-liveness), **delegated** | 2026-11-22 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
@@ -357,3 +358,12 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - Who decided D1 to D5 and when: `docs/PLAN.md` says "Decided" with no name or date. Listed as owner, by 2026-11-20.
 - D8's exact wording: the owner approved adding the journal; the wording of the D6 amendment is Fable's.
 - `snapshot-necessity` owner decisions D1 to D5 there (the price of an adopted journal, the catch-up file's failure class, download-and-diff, whether a handover heals, new cause names) and savings S2, S3, S5, S6, S7: no decision found.
+
+## D34. A restore that a writer keeps outpacing
+
+- **Options:** fail with `ListingBehind` after 64 listings; take the next listing as it stands and publish its newest state.
+- **Choice:** publish it, flagged as `Restored::writer_outpaced`, with a warning line on stderr and `writer_outpaced` in the command line's JSON.
+- **Why:** after each of the 64 listings a read found the next file, and the listing after it showed that file, so none of them lagged; what kept the restore going is a writer. Restoring the latest state while a writer runs may answer any committed state, and this one is at least as new as every file a read found during the restore. Failing would mean no restore ever finishes against a busy writer. Lagging listings are still counted on their own, and three of them still fail.
+- **Cost accepted:** the answer can be behind the writer by the time it is published, which is true of every restore of a live replica. A listing whose lag grows by exactly one file per listing for 64 listings would also end here; no store is known to do that.
+- **Revisit if:** a store shows listings that lag but always show the previously read file.
+- **Links:** #126, `crates/core/src/restore.rs` (`Retries`).
