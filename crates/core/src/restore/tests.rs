@@ -553,6 +553,25 @@ fn a_hidden_snapshot_past_the_listing_fails_an_as_of_restore() {
 }
 
 #[test]
+fn a_listing_that_shows_nothing_over_a_first_file_is_not_an_empty_replica() {
+    for target in [RestoreTarget::Latest, RestoreTarget::Txid(txid(1))] {
+        let store = MemStore::new();
+        put_spec(&store, 0, &Spec::plain(512, 1, 1, 1, &[(1, 1)]));
+        let mut store = Wrapped::new(store);
+        store.unlisted.insert(key(0, 1, 1));
+        let (result, sink) = run(&store, target);
+        assert!(
+            matches!(
+                result,
+                Err(RestoreError::ListingBehind { found, .. }) if found == key(0, 1, 1)
+            ),
+            "{target:?}: {result:?}"
+        );
+        assert_eq!(sink.published(), None);
+    }
+}
+
+#[test]
 fn a_txid_restore_takes_no_read_past_the_listing() {
     let store = lagging(&[key(0, 3, 3)]);
     let (result, sink) = run(&store, RestoreTarget::Txid(txid(2)));

@@ -668,9 +668,11 @@ async fn plan_on<S: ObjectStore>(store: &S, output: &Path, how: How) -> Result<F
     }
     let inventory = Inventory::load(store).await?;
     let (outcome, created_at_read) = plan_target(store, &inventory, how.target).await?;
-    // The real restore reads past the listing before it trusts it for the newest state; a
-    // plan printed from a lagging listing would name an older chain as the answer.
-    if !matches!(how.target, RestoreTarget::Txid(_))
+    // The real restore reads past the listing before it trusts it for the newest state, or an
+    // empty one for any target; a plan printed from a lagging listing would name an older chain
+    // as the answer, or skip a replica that exists.
+    let empty = inventory.newest().is_none();
+    if (empty || !matches!(how.target, RestoreTarget::Txid(_)))
         && let Some(found) = listed_past(store, &inventory)
             .await
             .map_err(CliError::Restore)?
