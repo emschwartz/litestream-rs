@@ -45,7 +45,8 @@ pub enum ConfigError {
     /// The bucket name is not made of letters, digits, dots, dashes and underscores.
     #[error("bucket name has characters a bucket cannot have")]
     BadBucket,
-    /// The region is empty or has characters other than letters, digits and dashes.
+    /// The region is empty, or holds whitespace, a `/` or a control character, which a
+    /// SigV4 credential scope cannot carry.
     #[error("bad region")]
     BadRegion,
 }
@@ -208,10 +209,12 @@ pub struct Region(String);
 
 impl Region {
     /// # Errors
-    /// [`ConfigError::BadRegion`] for an empty name or one with characters
-    /// other than ASCII letters, digits and dashes.
+    /// [`ConfigError::BadRegion`] for an empty name, or one holding whitespace, a `/`
+    /// or a control character. Go accepts any string and signs with it; those are the
+    /// ones no request signed with them can succeed with (`docs/decisions.md` D155), so
+    /// providers' own names (`fr-par`, `auto`, `us_east`) all pass.
     pub fn new(name: &str) -> Result<Self, ConfigError> {
-        name_is_clean(name, |c| c.is_ascii_alphanumeric() || c == '-')
+        name_is_clean(name, |c| !c.is_whitespace() && !c.is_control() && c != '/')
             .then(|| Self(name.to_owned()))
             .ok_or(ConfigError::BadRegion)
     }
@@ -499,6 +502,18 @@ impl S3Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Go signs with any region string; only what a SigV4 credential scope cannot carry
+    /// is refused, so providers' own names pass.
+    #[test]
+    fn a_region_is_refused_only_when_no_request_could_be_signed_with_it() {
+        for name in ["us-east-1", "auto", "fr_par", "eu.west", "Region9"] {
+            assert!(Region::new(name).is_ok(), "{name}");
+        }
+        for name in ["", "a b", "a/b", "tab\there", "nl\n"] {
+            assert_eq!(Region::new(name), Err(ConfigError::BadRegion), "{name:?}");
+        }
+    }
 
     #[test]
     fn prefix_refuses_empty_and_slashes() {
