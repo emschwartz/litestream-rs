@@ -115,13 +115,12 @@ fn seeds_to_first_failure() {
 
 /// Found unaided by the swarm, with nothing written for it: under the planted bug "the boot
 /// anchor accepts any tail in the live generation" (`docs/planted-bugs/anchor-any-tail.patch`),
-/// seed 15's drawn mix, 27 steps in, restores a `Latest` no commit made. Its app commits past
-/// its pre-crash end after each restart, then WAL damage regrows the generation with other bytes
-/// and the engine boots on it.
+/// seed 44's drawn mix, 8 steps in, restores a transaction to pages no commit had. (Found on
+/// the merged head with the boot witness; seed 15 found it before the witness landed.)
 #[test]
-fn swarm_seed_15_restores_only_committed_states() {
-    let seed = Seed::new(15);
-    if let Err(failure) = run_with(seed, 27, &Weights::mixed(seed), &Opts::default()) {
+fn swarm_seed_44_restores_only_committed_states() {
+    let seed = Seed::new(44);
+    if let Err(failure) = run_with(seed, 8, &Weights::mixed(seed), &Opts::default()) {
         panic!("{failure}");
     }
 }
