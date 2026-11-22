@@ -255,6 +255,12 @@ struct State {
     // The app's commit armed for the next barrier, and the one it made there.
     in_tick: Option<InTick>,
     in_tick_done: Option<InTickCommit>,
+    // With a seed, a power loss keeps a drawn prefix of the unsynced WAL
+    // writes instead of none.
+    torn: Option<u64>,
+    // Power losses that kept unsynced WAL bytes, and those that kept a frame
+    // cut inside.
+    torn_kept: (u32, u32),
 }
 
 /// Where the harness's logs stood: its own created-at times, opaque to the rules.
@@ -775,8 +781,55 @@ impl State {
             self.present = false;
             self.durable.clear();
         }
-        self.wal.clone_from(&self.durable);
+        self.wal = self.surviving_wal();
         self.recover();
+    }
+
+    /// What of the WAL a power loss leaves: the bytes of the last fsync, or,
+    /// with a torn seed, those with a drawn prefix of the later writes on
+    /// top. Writes past the last fsync reach the disk in order, any number
+    /// of them, and the last may be cut inside a frame; SQLite's recovery
+    /// then keeps the frames whose checksum chain still holds
+    /// (`synchronous=NORMAL`).
+    fn surviving_wal(&mut self) -> Vec<u8> {
+        let Some(seed) = self.torn.as_mut() else {
+            return self.durable.clone();
+        };
+        let same = self
+            .wal
+            .iter()
+            .zip(&self.durable)
+            .take_while(|(a, b)| a == b)
+            .count();
+        let unsynced = self.wal.len().saturating_sub(same);
+        let frame = FRAME_HEADER_LEN.saturating_add(self.page_size.bytes());
+        let frames = unsynced.checked_div(frame).unwrap_or(0);
+        let draw = |seed: &mut u64, upper: usize| {
+            usize::try_from(splitmix(seed))
+                .unwrap_or(0)
+                .checked_rem(upper.saturating_add(1))
+                .unwrap_or(0)
+        };
+        let whole = draw(seed, frames).saturating_mul(frame);
+        let torn = if draw(seed, 3) == 0 {
+            draw(seed, frame)
+        } else {
+            0
+        };
+        let kept = same
+            .saturating_add(whole)
+            .saturating_add(torn)
+            .min(self.wal.len());
+        if kept > same {
+            self.torn_kept.0 = self.torn_kept.0.saturating_add(1);
+        }
+        if torn > 0 {
+            self.torn_kept.1 = self.torn_kept.1.saturating_add(1);
+        }
+        let mut out = self.wal.get(..kept).unwrap_or_default().to_vec();
+        out.extend_from_slice(self.durable.get(kept..).unwrap_or_default());
+        self.durable.clone_from(&out);
+        out
     }
 
     /// The fault of `overwrite_frame_between_scan_and_read`: on the second read
@@ -853,6 +906,8 @@ impl SimSqlite {
             app_auto: AutoTally::default(),
             in_tick: None,
             in_tick_done: None,
+            torn: None,
+            torn_kept: (0, 0),
         };
         Self {
             state: Arc::new(Mutex::new(state)),
@@ -1267,6 +1322,19 @@ impl SimSqlite {
     /// The next call of `op` fails with `err`.
     pub fn inject(&self, op: SourceOp, err: SourceError) {
         self.with(|state| state.faults.injections.push((op, err)));
+    }
+
+    /// From now on a power loss keeps a prefix of the unsynced WAL writes,
+    /// drawn from `seed`, instead of none.
+    pub fn tear_on_power_loss(&self, seed: u64) {
+        self.with(|state| state.torn = Some(seed));
+    }
+
+    /// Power losses that kept some unsynced WAL bytes, and those among them
+    /// that kept a frame cut inside.
+    #[must_use]
+    pub fn torn_losses(&self) -> (u32, u32) {
+        self.with(|state| state.torn_kept)
     }
 
     /// A crash.
