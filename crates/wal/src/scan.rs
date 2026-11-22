@@ -315,7 +315,11 @@ impl<R: Read + Seek> WalReader<R> {
         expected: Salts,
         within: CommittedEnd,
     ) -> Result<Option<(WalOffset, VerifiedFrame)>, ResumeError> {
-        if within.salts() != expected {
+        // A wal-index reset ahead of the header counts no frame in any
+        // generation, so the header's first frame is within it: that resume
+        // claims no frame. Any other position needs the index's generation.
+        let reset_ahead = within.frame_count() == 0 && at.frame_index() == 0;
+        if within.salts() != expected && !reset_ahead {
             return Err(ResumeError::Restarted {
                 expected,
                 found: within.salts(),

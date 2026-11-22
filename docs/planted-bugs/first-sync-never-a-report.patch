@@ -1,0 +1,13 @@
+diff --git a/crates/sim/src/run.rs b/crates/sim/src/run.rs
+index ed0e6b7..4a3a729 100644
+--- a/crates/sim/src/run.rs
++++ b/crates/sim/src/run.rs
+@@ -1997,7 +1997,7 @@ mod after_restart;
+ const fn snapshot_reports_loss(cause: &lsr_core::SnapshotCause, over_files: bool) -> bool {
+     use lsr_core::SnapshotCause as C;
+     match cause {
+-        C::FirstSync => over_files,
++        C::FirstSync => over_files && false,
+         C::BehindRemote { .. }
+         | C::NewestStagedFileUnreadable
+         | C::WalMissing

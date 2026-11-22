@@ -12,6 +12,8 @@ mod judge;
 #[cfg(test)]
 mod manifest;
 #[cfg(test)]
+mod network;
+#[cfg(test)]
 mod real;
 #[cfg(test)]
 mod replicator;
