@@ -41,15 +41,20 @@
 //! Every upload here is of a key the engine takes to be free (the confirmed
 //! transaction plus one), so it is a [`WriteMode::New`] write: the bucket, not
 //! a listing, refuses a key that is taken, which a stale listing or another
-//! writer cannot hide. A refused commit reads the object back. The same bytes
-//! are this engine's own earlier commit whose answer was lost: confirmed. An
-//! object that is not a whole LTX file naming the key is replaced, as a
-//! listing's read-back replaces one. A verifying object with other bytes is
-//! another writer's or an earlier run's: the replica is listed at once and
-//! judged by the listing's rules above ([`Did::Diverged`] or
-//! `Fault::RemoteAheadOfLocal`), and a listing too stale to show the object is
-//! overruled by the refusal, which is the divergence the listing would have
-//! reported.
+//! writer cannot hide. A refused commit reads the object back:
+//! - the same bytes are this engine's own earlier commit whose answer was
+//!   lost, or that a stale listing hid: confirmed, as [`Did::AlreadyPut`];
+//! - a staged copy that does not verify on a read of its own is
+//!   `Fault::StagedLost`, and nothing is judged from it (one read never
+//!   condemns a file; the next tick puts it again);
+//! - an object that is not a whole LTX file naming the key is replaced, as a
+//!   listing's read-back replaces one;
+//! - a verifying object with other bytes, on a second compare too, is another
+//!   writer's or an earlier run's: the replica is listed at once and judged by
+//!   the listing's rules above ([`Did::Diverged`], or
+//!   `Fault::RemoteAheadOfLocal` when the replica is ahead), and a listing too
+//!   stale to show the object is overruled by the refusal, which is the
+//!   divergence the listing would have reported.
 //!
 //! A failure before the commit leaves the state alone (nothing could have been
 //! published). A failure of the commit itself gives [`UploadState::ListFirst`],
@@ -565,15 +570,25 @@ async fn taken<L: ObjectStore, S: ObjectStore>(
 ) -> Result<Uploaded, UploadFailed> {
     let key = token.key();
     let relist = |fault| fail(list_first(state), fault);
+    let already = Uploaded {
+        state: UploadState::At(Some(key.range().max())),
+        did: Did::AlreadyPut(key),
+    };
     if same_bytes(staging, remote, &key).await.map_err(relist)? {
-        return Ok(Uploaded {
-            state: UploadState::At(Some(key.range().max())),
-            did: Did::AlreadyPut(key),
-        });
+        return Ok(already);
+    }
+    // One read never condemns a file: the staged copy must verify on a read
+    // of its own before the replica's object is judged against it.
+    if !staged_verifies(staging, &key).await.map_err(relist)? {
+        return Err(fail(state, Fault::StagedLost));
     }
     if !remote_verifies(remote, &key).await.map_err(relist)? {
         let outcome = put_staged(staging, remote, token, WriteMode::Replace).await;
         return settle_put(state, remote, key, outcome).await;
+    }
+    // Both verify: a second compare decides, as the listing's read-back does.
+    if same_bytes(staging, remote, &key).await.map_err(relist)? {
+        return Ok(already);
     }
     let listed = list_step(list_first(state), staging, remote, newest_staged).await?;
     let txid = key.range().max();
